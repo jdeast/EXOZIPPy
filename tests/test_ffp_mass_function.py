@@ -15,7 +15,7 @@ import pytensor
 import pytensor.tensor as pt
 import pytest
 
-from conftest import _DummyConfigManager, _DummySystem
+from conftest import _DummyConfigManager, _DummySystem, _MockParam
 from exozippy.components.galacticmodel.galacticmodel import (
     GalacticModel,
     _lognormal_log_norm,
@@ -42,16 +42,6 @@ _CHABRIER_LOG_MC = np.log10(0.22)
 _CHABRIER_SIGMA = 0.57
 
 _HBL_DEX = np.log10(0.075)  # hydrogen-burning limit, dex(solMass)
-
-
-class _MockParam:
-    """Minimal Parameter stand-in: initval, a PyTensor value, hard bounds."""
-
-    def __init__(self, initval, lower=None, upper=None):
-        self.initval = np.atleast_1d(np.asarray(initval, dtype=np.float64))
-        self.value = pt.as_tensor_variable(self.initval)
-        self.lower = lower
-        self.upper = upper
 
 
 class _MockStar:

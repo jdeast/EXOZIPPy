@@ -29,6 +29,7 @@ IDL_PATH (regenerate only if the scenario changes):
 import json
 import os
 import subprocess
+import sys
 import tempfile
 
 import numpy as np
@@ -37,6 +38,14 @@ import pytensor
 from exozippy.system import System
 
 FIXTURE = os.path.join("tests", "fixtures", "exofast_tran_parity.json")
+
+# Which EXOFASTv2 checkout produced the reference numbers. Recorded in the
+# fixture's "provenance" string, which is the only thing that says WHICH
+# EXOFASTv2 the parity test is a parity test against -- so a failure to read
+# it is loud (see _exofastv2_commit) rather than a quiet "unknown".
+EXOFASTV2_DIR = os.environ.get(
+    "EXOFASTV2_DIR", os.path.expanduser("~/old_home/scratch/EXOFASTv2")
+)
 
 # ---------------------------------------------------------------------------
 # Scenario: the config/params the test will rebuild. File paths are filled
@@ -240,6 +249,31 @@ def run_idl(workdir, inputs, t2, t30):
     return f2, f30
 
 
+def _exofastv2_commit():
+    """Short commit of the EXOFASTv2 checkout, or '' with a loud warning.
+
+    The path is machine-specific, so this used to fail silently and stamp
+    the fixture "EXOFASTv2 unknown" -- which is the one field a parity
+    fixture exists to carry.  Point EXOFASTV2_DIR at the checkout.
+    """
+    result = subprocess.run(
+        ["git", "-C", EXOFASTV2_DIR, "rev-parse", "--short", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(
+            f"WARNING: could not read the EXOFASTv2 commit from "
+            f"{EXOFASTV2_DIR} (rc={result.returncode}): "
+            f"{result.stderr.strip()}\n"
+            f"         The fixture's provenance will say 'unknown'. Set "
+            f"EXOFASTV2_DIR to the checkout that IDL is running from.",
+            file=sys.stderr,
+        )
+        return ""
+    return result.stdout.strip()
+
+
 def main():
     # Approximate T14 (window construction only; exactness is irrelevant
     # to parity -- both codes get the same final grids).
@@ -276,18 +310,7 @@ def main():
             f"smeared {diff30:.3e}"
         )
 
-    git_hash = subprocess.run(
-        [
-            "git",
-            "-C",
-            os.path.expanduser("~/old_home/scratch/EXOFASTv2"),
-            "rev-parse",
-            "--short",
-            "HEAD",
-        ],
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    git_hash = _exofastv2_commit()
 
     fixture = {
         "provenance": (

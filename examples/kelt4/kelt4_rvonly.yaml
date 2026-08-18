@@ -43,7 +43,7 @@ parameter_file: "kelt4.params.yaml"
 #parameter_file: "kelt4.params.2.yaml" # automatically generated from a previous run and starts at the MAP
 
 sampler:
-  method: numpyro #numpyro         # numpyro, nutpie, nuts, blackjax, ptde
+  method: numpyro   # nuts, numpyro, blackjax, nutpie, ptde, ptde_async, demc, demcz
   tune: 2000
   draws: 4000
   chains: 4

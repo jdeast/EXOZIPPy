@@ -165,7 +165,23 @@ def ladder_health_report(temperatures, n_swap_accept, n_swap_propose):
     prop = np.asarray(n_swap_propose, dtype=float)
     if n_temps < 2 or prop.sum() <= 0:
         return None
-    rej = 1.0 - np.asarray(n_swap_accept, dtype=float) / np.maximum(prop, 1.0)
+    # A pair that was never PROPOSED is unmeasured, not 100%-rejecting.  The
+    # guard above is on the TOTAL, so `np.maximum(prop, 1.0)` turned every
+    # zero-proposal pair into r_k = 1, the largest barrier a link can have --
+    # inflating Lambda and firing the "communication-limited, raise n_temps"
+    # warning on a healthy ladder.  Zero proposals are routine (DEO
+    # alternates parities; the counters reset every adaptation window).
+    # Interpolate over the measured pairs, exactly as _update_ladder_barrier
+    # already does for the same reason.
+    acc = np.asarray(n_swap_accept, dtype=float)
+    measured = prop > 0
+    rej = np.zeros(prop.shape, dtype=float)
+    rej[measured] = np.clip(1.0 - acc[measured] / prop[measured], 0.0, 1.0)
+    if not measured.all():
+        pair_idx = np.arange(prop.size)
+        rej[~measured] = np.interp(
+            pair_idx[~measured], pair_idx[measured], rej[measured]
+        )
     lam = float(np.sum(np.clip(rej, 0.0, 1.0)))
     logger.info(
         f"PT ladder health: communication barrier Lambda={lam:.2f} with "

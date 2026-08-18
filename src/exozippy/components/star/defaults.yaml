@@ -51,6 +51,32 @@ star:
       default:
         func_name: "calc_logg_from_logmass"
         deps: ["logmass", "radius"]
+  loggsed:
+    # The SED's own surface gravity: the SECOND axis of the bolometric-
+    # correction grid, reconstructed from logmass and radiussed (NOT
+    # radius) exactly as SED._predicted_appmag_node feeds the
+    # interpolator.  It exists as a Parameter -- rather than as an inline
+    # expression inside the SED, which is what it was until 2026-08 --
+    # so that SED._inject_grid_bounds can put the grid's logg extent on
+    # it through the same override channel it uses for teffsed/feh/av.
+    # Bounding logmass and radiussed separately does NOT bound their
+    # combination, and the interpolator EXTRAPOLATES linearly off its
+    # edge cell rather than returning NaN, so without this a fit could
+    # wander off the BC grid and be scored with no restoring force.
+    # No lower/upper here on purpose: the support belongs to whichever
+    # BC grid the .sed file selects, and a fit with no sed: block has no
+    # grid and so no constraint.  Being derived, the bound acts as a
+    # soft barrier whose steepness is measured at startup
+    # (whitening.measure_barrier_scales); pin it with bound_scale.
+    unit: "dex(cm/s2)"
+    internal_unit: "dex(cm/s2)"
+    latex: "\\log{g_*}"
+    description: "Surface Gravity"
+    table_note: "This value ignores the systematic error and is for reference only"
+    expressions:
+      default:
+        func_name: "calc_logg_from_logmass"
+        deps: ["logmass", "radiussed"]
 
   distance:
     lower: 0.001
@@ -118,6 +144,38 @@ star:
     internal_unit: "Gyr"
     latex: "{\\rm Age}"
     description: "Stellar Age"
+  # The two coordinates an evolutionary track is indexed by.  Declared only
+  # by the in_system("evolutionarymodel") branch of Star.register_parameters,
+  # so with no such component in the topology neither is ever materialized.
+  initfeh:
+    lower: -4.0
+    upper: 0.5
+    initval: 0.0
+    init_scale: 0.1
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "[{\\rm Fe/H}]_{0}"
+    description: "Initial metallicity"
+  # "Equivalent Evolutionary POINT", per MIST's own README_tables.pdf, which
+  # spells it that way both in its overview and in its EEP column
+  # description.  MIST is inconsistent about this -- Dotter (2016) says
+  # "phase", and so does models/MIST/generate_interpolated_missing_tracks.py
+  # -- but "point" is the spelling that does not collide: the MIST track
+  # format already has a separate `phase` column (the FSPS phase type:
+  # -1 PMS, 0 MS, 2 RGB, 3 CHeB, 4 EAGB, 5 TPAGB, 6 postAGB, 9 WR), and an
+  # evolutionarymodel component may well surface it.
+  # The bounds are MIST's own: 1710 is Table II's terminal primary EEP (the
+  # end of the white dwarf cooling sequence), and the 354.1661 start sits
+  # just past the intermediate-age main sequence (IAMS, EEP 353).
+  eep:
+    lower: 0.0
+    upper: 1710.0
+    initval: 354.1661
+    init_scale: 10.0
+    unit: ""
+    internal_unit: ""
+    latex: "{\\rm EEP}"
+    description: "Equivalent Evolutionary Point"
 
   # --- Derived Parameters ---
   density:

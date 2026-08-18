@@ -23,7 +23,7 @@ These tests pin the three load outcomes and the save-side stamping:
     and a mismatch quotes them plus the git lines that get back to that
     code -- while a version/commit difference on its own NEVER raises, since
     only the structural hash decides staleness;
-  * mkprior refuses a structurally stale trace (its output seeds the next
+  * mkparam refuses a structurally stale trace (its output seeds the next
     fit) but proceeds on an unstamped one.
 
 They follow AAA with Given/When/Then docstrings.
@@ -393,19 +393,19 @@ def test_provenance_report_flags_a_dirty_source_tree():
 
 
 # ---------------------------------------------------------------------------
-# mkprior: its output seeds the NEXT fit, so a stale trace there corrupts a
+# mkparam: its output seeds the NEXT fit, so a stale trace there corrupts a
 # run that has not happened yet.
 # ---------------------------------------------------------------------------
 
-_MKPRIOR_CONFIG = {
+_MKPARAM_CONFIG = {
     "prefix": "fitresults/model",
     "parameter_file": None,
     "star": [{"name": "Host"}],
 }
 
 
-def _mkprior_trace(tmp_path, stamp_source=None):
-    """A one-draw trace mkprior can consume, optionally stamped."""
+def _mkparam_trace(tmp_path, stamp_source=None):
+    """A one-draw trace mkparam can consume, optionally stamped."""
     import xarray as xr
 
     posterior = xr.Dataset(
@@ -429,22 +429,22 @@ def _mkprior_trace(tmp_path, stamp_source=None):
     return path
 
 
-def test_mkprior_refuses_a_structurally_stale_trace(tmp_path):
+def test_mkparam_refuses_a_structurally_stale_trace(tmp_path):
     """
     Given a trace stamped under a different config,
-    When mkprior is asked to seed a restart file from it,
+    When mkparam is asked to seed a restart file from it,
     Then it raises StaleTraceError instead of writing start values drawn
     from a foreign posterior.
     """
-    from exozippy.mkparam import mkprior
+    from exozippy.mkparam import write_param_file
 
-    other = dict(_MKPRIOR_CONFIG)
+    other = dict(_MKPARAM_CONFIG)
     other["star"] = [{"name": "Host"}, {"name": "Companion"}]
-    trace = _mkprior_trace(tmp_path, stamp_source=_FakeSystem(other, {}))
+    trace = _mkparam_trace(tmp_path, stamp_source=_FakeSystem(other, {}))
 
     with pytest.raises(StaleTraceError):
-        mkprior(
-            dict(_MKPRIOR_CONFIG),
+        write_param_file(
+            dict(_MKPARAM_CONFIG),
             base_dir=tmp_path,
             trace_path=trace,
             output_path=tmp_path / "out.yaml",
@@ -453,20 +453,20 @@ def test_mkprior_refuses_a_structurally_stale_trace(tmp_path):
     assert not (tmp_path / "out.yaml").exists()
 
 
-def test_mkprior_accepts_a_matching_fingerprint(tmp_path):
+def test_mkparam_accepts_a_matching_fingerprint(tmp_path):
     """
-    Given a trace stamped with the fingerprint mkprior computes for itself,
-    When mkprior runs,
+    Given a trace stamped with the fingerprint mkparam computes for itself,
+    When mkparam runs,
     Then it writes the restart file as before.
     """
-    from exozippy.mkparam import mkprior
+    from exozippy.mkparam import write_param_file
 
-    trace = _mkprior_trace(
-        tmp_path, stamp_source=_FakeSystem(_MKPRIOR_CONFIG, {})
+    trace = _mkparam_trace(
+        tmp_path, stamp_source=_FakeSystem(_MKPARAM_CONFIG, {})
     )
 
-    out = mkprior(
-        dict(_MKPRIOR_CONFIG),
+    out = write_param_file(
+        dict(_MKPARAM_CONFIG),
         base_dir=tmp_path,
         trace_path=trace,
         output_path=tmp_path / "out.yaml",
@@ -475,19 +475,19 @@ def test_mkprior_accepts_a_matching_fingerprint(tmp_path):
     assert out.exists()
 
 
-def test_mkprior_proceeds_on_an_unstamped_trace(tmp_path, caplog):
+def test_mkparam_proceeds_on_an_unstamped_trace(tmp_path, caplog):
     """
     Given a trace written before this metadata existed,
-    When mkprior runs,
+    When mkparam runs,
     Then it warns that the trace is unverifiable and still writes the file.
     """
-    from exozippy.mkparam import mkprior
+    from exozippy.mkparam import write_param_file
 
-    trace = _mkprior_trace(tmp_path)
+    trace = _mkparam_trace(tmp_path)
 
     with caplog.at_level(logging.WARNING, logger="exozippy.trace_meta"):
-        out = mkprior(
-            dict(_MKPRIOR_CONFIG),
+        out = write_param_file(
+            dict(_MKPARAM_CONFIG),
             base_dir=tmp_path,
             trace_path=trace,
             output_path=tmp_path / "out.yaml",
@@ -513,7 +513,7 @@ def test_fingerprint_survives_component_config_normalization():
     Given a config whose components rewrite their own blocks while the
       System is being constructed (Mann/Torres derive `name:` from `star:`),
     When the fingerprint is recomputed from that config dict afterwards, the
-      way mkprior does,
+      way mkparam does,
     Then it reproduces the System's snapshot exactly.
 
     Measured regression, not a hypothetical: the snapshot was originally
@@ -660,3 +660,194 @@ def test_modes_cli_refuses_a_stale_trace(tmp_path):
     assert result.exit_code != 0
     assert isinstance(result.exception, StaleTraceError)
     assert "orbit.test_orbit.logP" in str(result.exception)
+
+
+# ---------------------------------------------------------------------------
+# The whitening file beside the trace: run.py's reuse branch must restore it,
+# never re-measure it, and never write to it.
+# ---------------------------------------------------------------------------
+
+
+def _write_whitening_file(prefix, config, params):
+    """Measure and persist a whitening state for (config, params)."""
+    from exozippy import whitening
+
+    system = System(copy.deepcopy(config), user_params=copy.deepcopy(params))
+    system.prepare()
+    model = system.build_model()
+    report = whitening.measure_and_whiten(
+        system, model, system.get_raw_start(model)
+    )
+    path = str(prefix) + "_whitening.json"
+    whitening.save_whitening(system, path, map_lp=report["map_lp"])
+    return path
+
+
+@pytest.mark.slow
+def test_run_fit_reuse_path_never_overwrites_the_whitening_file(tmp_path):
+    """
+    Given a saved trace being reused (`recompute_trace: false`) and a
+      whitening file beside it that no longer applies to the build,
+    When run_fit reaches its whitening step,
+    Then it raises StaleWhiteningError and the whitening file on disk is
+      byte-for-byte unchanged.
+
+    Pre-fix, run.py's whitening step made no distinction between "about to
+    sample" and "about to decode existing draws": it re-probed and re-saved
+    on both.  On the reuse path that silently re-coordinated the very trace
+    being reused, and overwrote the only record of the coordinates those
+    draws were actually taken in.  The file-bytes assertion below is the
+    behavioural pin (it fails on pre-fix code whatever run_fit goes on to
+    do); the exception check pins the diagnosis on top of it.
+    """
+    import json
+    import os
+
+    import yaml
+
+    from exozippy.run import run_fit
+
+    # Arrange -- a trace + a whitening file that describe this model...
+    rng = np.random.default_rng(11)
+    config_path, prefix, config, params = _write_fit_inputs(tmp_path)
+    _write_stamped_trace(prefix, config, params, rng)
+    whitening_path = _write_whitening_file(prefix, config, params)
+    # ...then break the whitening file the way a truncated write or an edited
+    # model does: drop one entry.  The trace's structural fingerprint is
+    # untouched, so this is a whitening mismatch and nothing else.
+    data = json.loads(open(whitening_path).read())
+    dropped = sorted(data["params"])[0]
+    del data["params"][dropped]
+    with open(whitening_path, "w") as f:
+        json.dump(data, f)
+    before_bytes = open(whitening_path, "rb").read()
+
+    run_config = copy.deepcopy(config)
+    run_config["sampler"] = {"recompute_trace": False}
+    with open(config_path, "w") as f:
+        yaml.safe_dump(run_config, f)
+
+    # Act -- deliberately NOT pytest.raises: the point is what the file on
+    # disk looks like afterwards, which must be asserted whether run_fit
+    # raised, returned, or blew up somewhere else entirely.
+    cwd = os.getcwd()
+    error = None
+    os.chdir(tmp_path)
+    try:
+        run_fit(run_config, user_params=copy.deepcopy(params))
+    except BaseException as exc:  # noqa: BLE001 - re-asserted below
+        error = exc
+    finally:
+        os.chdir(cwd)
+
+    # Assert
+    assert open(whitening_path, "rb").read() == before_bytes, (
+        "the reuse path rewrote the whitening state a saved trace was "
+        "sampled under; its raw draws no longer decode to the values the "
+        "sampler visited"
+    )
+    assert type(error).__name__ == "StaleWhiteningError", error
+    assert dropped in str(error)
+    assert "recompute_trace: true" in str(error)
+
+
+# --------------------------------------------------------------------------
+# Model-selecting per-instance keys must reach the hash. These flip WHICH
+# likelihood is built while leaving the component set, the file list and
+# every parameter's structure untouched, so before 2026-08-15 they were
+# invisible: a trace sampled with one setting reloaded silently under the
+# other. `light_travel_time` is the sharpest case because it defaults to ON.
+# --------------------------------------------------------------------------
+
+_LTT_BASE = {
+    "transit": [{"name": "T1", "file": "a.dat", "band": "B"}],
+    "star": [{"name": "A"}],
+}
+
+
+def _with_transit_key(**kw):
+    cfg = copy.deepcopy(_LTT_BASE)
+    cfg["transit"][0].update(kw)
+    return cfg
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("light_travel_time", False),
+        ("gp", "rotation"),
+        ("likelihood", "hogg"),
+        ("mask", [3, 4]),
+    ],
+    ids=["light_travel_time", "gp", "likelihood", "mask"],
+)
+def test_model_selecting_file_keys_change_the_structural_hash(key, value):
+    """
+    Given a config that sets a per-file key selecting a different model,
+    When its structural hash is compared with the config that omits it,
+    Then the two differ, so a trace sampled under one setting cannot be
+    silently reloaded under the other.
+    """
+    assert structural_hash(
+        _with_transit_key(**{key: value})
+    ) != structural_hash(_LTT_BASE)
+
+
+def test_a_cosmetic_file_key_does_not_change_the_hash():
+    """
+    Given a purely cosmetic per-file key (plot styling),
+    When the hash is compared against the config without it,
+    Then it is unchanged -- the denylist in
+    _NON_STRUCTURAL_INSTANCE_KEYS is the ONLY thing dropped.
+    """
+    assert structural_hash(
+        _with_transit_key(plot={"color": "#123456"})
+    ) == structural_hash(_LTT_BASE)
+
+
+def test_a_model_affecting_numeric_key_now_changes_the_hash():
+    """
+    Given exptime, which sets the exposure-smearing window and so changes
+    the model,
+    When the hash is compared against the config without it,
+    Then it differs.
+
+    Under the old allowlist this was invisible, along with every other key
+    nobody had thought to enumerate. The denylist inverts the failure
+    mode: a forgotten cosmetic key costs an honest re-run, where a
+    forgotten model key cost silently-reused foreign draws.
+    """
+    assert structural_hash(_with_transit_key(exptime=30.0)) != structural_hash(
+        _LTT_BASE
+    )
+
+
+def test_instance_config_reaches_the_payload_so_a_mismatch_can_name_it():
+    """
+    Given two configs differing only in light_travel_time,
+    When their structural payloads are compared,
+    Then the difference is visible in the payload (not just in the hash),
+    so trace_meta can tell the user WHAT changed.
+    """
+    on = structural_payload(_LTT_BASE)["components"]["transit"]
+    off = structural_payload(_with_transit_key(light_travel_time=False))[
+        "components"
+    ]["transit"]
+
+    assert on[0]["cfg"].get("light_travel_time") is None
+    assert off[0]["cfg"]["light_travel_time"] is False
+    assert on[0]["name"] == off[0]["name"] == "T1"
+
+
+def test_file_paths_are_not_double_hashed_in_the_instance_config():
+    """
+    Given an instance whose data file is named by `file`,
+    When its skeleton entry is inspected,
+    Then `file` is absent from the per-instance config -- it is already
+    hashed under the payload's own "files" key, and hashing it twice would
+    be redundant rather than wrong.
+    """
+    entry = structural_payload(_LTT_BASE)["components"]["transit"][0]
+
+    assert "file" not in entry["cfg"]
+    assert "a.dat" in structural_payload(_LTT_BASE)["files"]

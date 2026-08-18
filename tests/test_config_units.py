@@ -15,6 +15,7 @@ parameter, and both silently corrupt the starting point rather than raising:
 
 import astropy.units as u
 import numpy as np
+import pytest
 
 from exozippy.config import ConfigManager
 
@@ -135,3 +136,160 @@ def test_default_armor_unchanged_without_a_unit_override():
     assert np.isclose(
         cm._last_resolved["star.0.ra"], np.radians(271.0), rtol=1e-9
     )
+
+
+# ---------------------------------------------------------------------------
+# Review item 3.12: an invalid `unit:` string must RAISE, not be swallowed.
+#
+# Before the fix both conversion sites (resolve's base->user scaling and
+# get_conversion_factor's user->internal factor) wrapped the astropy call in
+# `except Exception: return 1.0`.  A factor of 1.0 does not mean "no
+# conversion was needed" -- it means the user's number is reinterpreted in
+# whatever the internal unit happens to be.  `unit: earthMasses` (one typo)
+# turned 1.0 Earth mass into 1.0 SOLAR mass, a factor of 333000, and nothing
+# anywhere said so.
+# ---------------------------------------------------------------------------
+
+
+def test_unparseable_unit_raises_naming_the_string_and_parameter():
+    """
+    Given a user `unit:` string astropy cannot parse ("earthMasses"),
+    When ConfigManager resolves the parameter,
+    Then it raises, naming both the offending string and the parameter.
+
+    Pre-fix: no error at all, and the internal (solMass) start value came
+    out as 1.0 -- the user's 1 Earth mass read as 1 solar mass.
+    """
+    # ARRANGE
+    cm = ConfigManager(
+        {
+            "planet.b.mass": {"initval": 1.0, "unit": "earthMasses"},
+            "star.A.mass": {"initval": 1.0},
+        },
+        system_config=PLANET_SYSTEM,
+    )
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match=r"earthMasses"):
+        cm.finalize_user_params()
+
+    with pytest.raises(ValueError, match=r"planet\.0\.mass"):
+        cm.finalize_user_params()
+
+
+def test_incompatible_unit_raises_naming_both_units():
+    """
+    Given a user `unit:` that parses but is dimensionally wrong for the
+    parameter (a time unit on a mass),
+    When ConfigManager resolves the parameter,
+    Then it raises, naming both units.
+
+    Pre-fix: the UnitConversionError was swallowed to factor 1.0, so
+    `planet.b.mass: {initval: 1.0, unit: day}` started the chain at 1.0
+    solMass.
+    """
+    # ARRANGE
+    cm = ConfigManager(
+        {
+            "planet.b.mass": {"initval": 1.0, "unit": "day"},
+            "star.A.mass": {"initval": 1.0},
+        },
+        system_config=PLANET_SYSTEM,
+    )
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match=r"solMass"):
+        cm.finalize_user_params()
+
+
+def test_unit_on_a_dimensionless_parameter_raises():
+    """
+    Given a `unit:` on a parameter that declares no internal_unit
+    (planet.e is dimensionless),
+    When ConfigManager resolves it,
+    Then it raises rather than silently ignoring the key.
+
+    A unit that cannot be honored is not a default -- the user asked for a
+    conversion that never happened.
+    """
+    # ARRANGE
+    cm = ConfigManager(
+        {"planet.b.e": {"initval": 0.1, "unit": "deg"}},
+        system_config=PLANET_SYSTEM,
+    )
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match=r"planet\.0\.e"):
+        cm.finalize_user_params()
+
+
+def test_unit_override_applies_only_to_the_element_that_declared_it():
+    """
+    Given a two-planet system where only planet b declares
+      `unit: earthMass` (planet c means the default, jupiterMass),
+    When resolve() builds the vector,
+    Then planet c keeps the default unit AND the defaults.yaml bounds in
+    that unit.
+
+    Pre-fix, resolve() scanned every element's keys and stopped at the first
+    `unit:` it found, then applied that unit -- and its scaling -- to the
+    WHOLE vector.  planet c was relabeled earthMass while
+    get_conversion_factor (which is per element) still told the relaxation
+    engine jupiterMass, and planet c's hard bounds, which ARE its uniform
+    prior range, came out 318x too wide.
+    """
+    # ARRANGE
+    two_planets = {
+        "star": [{"name": "A"}],
+        "planet": [
+            {"name": "b", "star_ndx": 0, "orbit_ndx": 0},
+            {"name": "c", "star_ndx": 0, "orbit_ndx": 1},
+        ],
+        "orbit": [{"name": "b"}, {"name": "c"}],
+    }
+    cm = ConfigManager(
+        {
+            "planet.b.mass": {"initval": 5.0, "unit": "earthMass"},
+            "planet.c.mass": {"initval": 2.0},
+        },
+        system_config=two_planets,
+    )
+
+    # ACT
+    res = cm.resolve("planet", "mass", shape=(2,), names=["b", "c"])
+
+    # ASSERT
+    assert list(res["unit"]) == ["earthMass", "jupiterMass"]
+    # planet c's bounds must still be the defaults.yaml numbers, unscaled
+    assert np.isclose(res["lower"][1], -1000.0)
+    assert np.isclose(res["upper"][1], 260000.0)
+    # and planet b's are the same numbers converted into ITS unit
+    factor = float(u.jupiterMass.to(u.earthMass))
+    assert np.isclose(res["lower"][0], -1000.0 * factor)
+    # the per-element factor the engine uses must agree with the label
+    assert np.isclose(
+        cm.get_conversion_factor("planet", "mass", "planet.1.mass"),
+        float(u.jupiterMass.to(u.solMass)),
+    )
+
+
+def test_get_conversion_factor_raises_on_an_unparseable_user_unit():
+    """
+    Given a bad `unit:` string,
+    When get_conversion_factor is asked for the multiplier directly,
+    Then it raises instead of returning 1.0.
+
+    get_conversion_factor is called from mkparam, the ledger and the GUI's
+    solve path as well as from the engine, so the silent 1.0 leaked wrong
+    numbers into places that never build a Parameter (whose own unit
+    parsing is already strict).
+    """
+    # ARRANGE
+    cm = ConfigManager(
+        {"planet.b.mass": {"initval": 1.0, "unit": "earthMasses"}},
+        system_config=PLANET_SYSTEM,
+    )
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match=r"earthMasses"):
+        cm.get_conversion_factor("planet", "mass", "planet.0.mass")

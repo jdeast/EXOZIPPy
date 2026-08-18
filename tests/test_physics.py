@@ -23,10 +23,10 @@ def test_rv_semi_amplitude_matches_jupiter_sun_benchmark():
     period = 365.25
     ecc = 0.0
     sini = 1.0
-    arsun = KEPLER_CONST * (m_total ** (1 / 3)) * (period ** (2 / 3))
+    a = KEPLER_CONST * (m_total ** (1 / 3)) * (period ** (2 / 3))
 
     # ACT
-    k_internal = calc_K(m_planet, m_total, ecc, arsun, sini, period).eval()
+    k_internal = calc_K(m_planet, m_total, ecc, a, sini, period).eval()
     k_ms = (k_internal * u.R_sun / u.day).to(u.m / u.s).value
 
     # ASSERT

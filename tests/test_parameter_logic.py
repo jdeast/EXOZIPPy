@@ -1254,3 +1254,226 @@ def test_derived_star_mass_builds_no_barrier_potentials():
     assert star.mass.lower is None and star.mass.upper is None
     assert np.allclose(np.atleast_1d(star.logmass.lower), -9.0)
     assert np.allclose(np.atleast_1d(star.logmass.upper), 2.5)
+
+
+# ---------------------------------------------------------------------------
+# Review 2.10.2 / 2.10.3 / 2.10.5
+# ---------------------------------------------------------------------------
+
+
+def _mixed_bounded_unbounded_model(sigma_on_unbounded):
+    """A single vector Parameter whose element 0 is logit-bounded and whose
+    element 1 has infinite bounds (the only construction that reaches
+    build_pymc's pt.where over the two branches)."""
+    p = Parameter(
+        label="mix",
+        initval=[0.5, 1.0],
+        init_scale=[0.1, 1.0],
+        sigma=[np.nan, sigma_on_unbounded],
+        lower=[0.0, -np.inf],
+        upper=[1.0, np.inf],
+        shape=(2,),
+        unit="",
+        internal_unit="",
+    )
+    with pm.Model() as model:
+        p.build_pymc()
+        pm.Potential("like", pt.sum(p.value**2))
+    return model, p
+
+
+@pytest.mark.parametrize("sigma_on_unbounded", [2.0, np.nan])
+def test_mixed_bounded_unbounded_vector_gradient_is_finite(sigma_on_unbounded):
+    """
+    Given a vector parameter mixing a logit-bounded element with an element
+    whose bounds are +/-inf (CLAUDE.md: "+/-inf is a real bound and is
+    applied"),
+    When the logp gradient is compiled on the C backend, the JAX backend and
+    with graph rewrites DISABLED,
+    Then it is finite on all three.
+
+    Regression: the infinite bounds were fed straight into the *unselected*
+    logit branch of the pt.where, where -inf + inf*sigmoid = NaN.  The switch
+    VJP then multiplies that by zero and 0*inf = NaN poisons the gradient of
+    the whole vector.  FAST_RUN and JAX happened to survive because a
+    canonicalization rewrite sinks the zero into the switch -- a rewriter is
+    not a correctness guarantee, so the unoptimized mode is the one that
+    pins the fix.
+    """
+    from pytensor.compile.mode import Mode
+
+    # Arrange
+    model, _ = _mixed_bounded_unbounded_model(sigma_on_unbounded)
+    raw = model.value_vars[0]
+    grad = pt.grad(model.logp(), raw)
+    point = np.array([0.3, 0.7])
+
+    # Act / Assert
+    for mode in ["FAST_RUN", Mode(linker="py", optimizer="None"), "JAX"]:
+        fn = pytensor.function(
+            [raw], grad, mode=mode, on_unused_input="ignore"
+        )
+        got = np.asarray(fn(point))
+        assert np.all(np.isfinite(got)), f"mode={mode}: dlogp = {got}"
+
+
+def test_unselected_logit_branch_carries_no_nan_or_inf():
+    """
+    Given the same mixed vector,
+    When the raw (unrewritten) physical value of BOTH branches is evaluated,
+    Then neither branch holds a NaN or an inf -- the where-trap is removed at
+    the source rather than papered over downstream.
+    """
+    from pytensor.compile.mode import Mode
+
+    # Arrange
+    model, p = _mixed_bounded_unbounded_model(2.0)
+    raw = model.value_vars[0]
+    node = model.replace_rvs_by_values([p.value])[0]
+
+    # Act
+    fn = pytensor.function(
+        [raw],
+        node,
+        mode=Mode(linker="py", optimizer="None"),
+        on_unused_input="ignore",
+    )
+    # Every intermediate elemwise result feeding the value must be finite.
+    from pytensor.graph.traversal import ancestors
+
+    inner = [
+        v
+        for v in ancestors([node])
+        if v.owner is not None and v.dtype.startswith("float")
+    ]
+    probe = pytensor.function(
+        [raw],
+        inner,
+        mode=Mode(linker="py", optimizer="None"),
+        on_unused_input="ignore",
+    )
+
+    # Assert
+    assert np.all(np.isfinite(np.asarray(fn(np.array([0.3, 0.7])))))
+    for var, val in zip(inner, probe(np.array([0.3, 0.7]))):
+        assert np.all(np.isfinite(np.asarray(val))), (
+            f"non-finite intermediate {var}: {val}"
+        )
+
+
+def test_tiny_init_scale_does_not_fix_a_parameter():
+    """
+    Given a sampled parameter whose preliminary init_scale is far below the
+    old 1e-12 threshold,
+    When the PyMC model is built,
+    Then it is still SAMPLED (a raw RV exists and its scale is positive).
+
+    Review 2.10.3: `scales <= 1e-12` was a second, undocumented spelling of
+    `sigma: 0`, and it contradicted the premise that init_scale -- a
+    preliminary whitening scale the startup probe supersedes -- never
+    affects the posterior.
+    """
+    # Arrange / Act
+    with pm.Model() as model:
+        p = Parameter(
+            label="tiny", initval=0.5, init_scale=1e-18, lower=0.0, upper=1.0
+        )
+        p.build_pymc()
+
+    # Assert
+    assert [rv.name for rv in model.free_RVs] == ["tiny_raw"]
+    assert p.is_sampled.tolist() == [True]
+    assert p._whiten_state is not None
+
+
+def test_zero_init_scale_falls_back_instead_of_freezing():
+    """
+    Given a sampled parameter handed a non-positive init_scale,
+    When the model is built,
+    Then it takes the same span-fraction fallback a missing scale takes --
+    a zero whitening scale is a degenerate raw direction, not a pin.
+    """
+    # Arrange / Act
+    with pm.Model():
+        p = Parameter(
+            label="zeroscale",
+            initval=0.5,
+            init_scale=0.0,
+            lower=0.0,
+            upper=1.0,
+        )
+        p.build_pymc()
+
+    # Assert
+    assert p.is_sampled.tolist() == [True]
+    assert float(p._whiten_state["sv_scale_logits"].get_value()[0]) > 0.0
+
+
+def test_to_latex_prior_def_is_per_element_for_a_mixed_vector():
+    """
+    Given a vector parameter whose element 0 is pinned (sigma=0) and whose
+    element 1 is sampled with a uniform prior -- exactly what the manifest's
+    per-element "overrides" channel builds for GP / robust-likelihood
+    hyperparameters,
+    When the prior \\providecommand defs and the table rows are generated,
+    Then each element gets its OWN prior macro and the sampled element is
+    NOT reported as "Fixed".
+    """
+    # Arrange
+    p = Parameter(
+        label="gp.amp",
+        initval=[1.0, 2.0],
+        sigma=[0.0, np.nan],
+        lower=[0.0, 0.0],
+        upper=[10.0, 10.0],
+        shape=(2,),
+        names=["fileA", "fileB"],
+        unit="",
+        internal_unit="",
+    )
+    p.latex = "A"
+    p.latex_prefix = "ez"
+    p.description = "GP amplitude"
+    v = p.latex_varname
+
+    # Act
+    defs = p.to_latex_prior_def()
+    rows = p.to_table_line().splitlines()
+
+    # Assert -- two distinct macros, the sampled one uniform, not "Fixed"
+    assert rf"\providecommand{{\{v}zeroprior}}{{Fixed}}" in defs
+    assert rf"\providecommand{{\{v}oneprior}}" in defs
+    one_body = defs.split(rf"\{v}oneprior}}", 1)[1]
+    assert "Fixed" not in one_body
+    assert r"\mathcal{U}" in one_body
+    # ...and each table row cites its own element's macro
+    assert f"\\{v}zeroprior" in rows[0]
+    assert f"\\{v}oneprior" in rows[1]
+    assert f"\\{v}oneprior" not in rows[0]
+
+
+def test_to_latex_prior_def_stays_unsuffixed_for_a_scalar():
+    """
+    Given a scalar parameter,
+    When the prior def and table row are generated,
+    Then the macro is still the unsuffixed \\<varname>prior -- the
+    per-element naming only kicks in for vectors, mirroring to_latex_def.
+    """
+    # Arrange
+    p = Parameter(
+        label="star.teff",
+        initval=5778.0,
+        mu=5778.0,
+        sigma=100.0,
+        unit="K",
+        internal_unit="K",
+    )
+    p.latex = r"T_{\rm eff}"
+    p.latex_prefix = "ez"
+    p.description = "Effective temperature"
+
+    # Act / Assert
+    assert rf"\providecommand{{\{p.latex_varname}prior}}" in (
+        p.to_latex_prior_def()
+    )
+    assert f"\\{p.latex_varname}prior" in p.to_table_line()

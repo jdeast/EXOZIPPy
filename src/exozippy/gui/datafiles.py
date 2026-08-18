@@ -1,7 +1,8 @@
 """Component-agnostic data-file association helpers for the GUI (G9).
 
-The Data tab lets a user browse project files, associate them with component
-instances, and preview their raw contents. Which instances a given file may be
+These back the project file browser and the schema-driven association menu
+(the Config form's Browse button; the Tools tab's "associate produced file"
+affordance is still unwired -- see gui.md). Which instances a given file may be
 associated with is decided SOLELY by the declarative schema
 (:func:`exozippy.introspect.full_schema`): every component config key with
 ``kind == "datafile"`` carries a glob pattern in its ``accepts`` field, and a
@@ -38,11 +39,15 @@ def _datafile_keys(comp_schema):
             yield entry.get("key"), glob, entry.get("doc", "")
 
 
-def _instances_of(config, comp_type):
+def named_instances(config, comp_type):
     """Return [(name, instance_dict), ...] for a component block in a config.
 
     Supports both the list form (``rvinstrument: [{name: HIRES, ...}]``) and
     the single-dict form (``sed: {file: ...}``, which has no name -> index 0).
+
+    This is the ONE answer to "what are this component's instances" in the GUI:
+    :mod:`exozippy.gui.document` builds its own (name-less) view on top of it
+    rather than carrying a second copy that can drift.
     """
     block = config.get(comp_type)
     out = []
@@ -78,7 +83,7 @@ def eligible_associations(filename, config, schema):
         keys = list(_datafile_keys(comp_schema))
         if not keys:
             continue
-        instances = _instances_of(config or {}, comp_type)
+        instances = named_instances(config or {}, comp_type)
         if not instances:
             continue
         for name, _inst in instances:
@@ -110,7 +115,7 @@ def current_associations(config, schema):
         keys = [k for (k, _g, _d) in _datafile_keys(comp_schema)]
         if not keys:
             continue
-        for name, inst in _instances_of(config or {}, comp_type):
+        for name, inst in named_instances(config or {}, comp_type):
             for key in keys:
                 val = inst.get(key)
                 if not isinstance(val, str) or not val:
@@ -127,26 +132,55 @@ def current_associations(config, schema):
     return out
 
 
+def _sortable_children(d):
+    """``sorted(d.iterdir())`` with directories first, tolerant of I/O errors.
+
+    Both halves can raise: ``iterdir`` on a directory the server may not read,
+    and ``is_dir`` inside the sort key on any child (a dangling symlink, a
+    vanished entry, an unreadable mount point). Neither is a programming error
+    -- a file browser walks whatever the filesystem hands it -- so an
+    unreadable directory raises the same ``ValueError`` every other bad path
+    here raises, and an unstattable child is simply dropped.
+    """
+    try:
+        children = list(d.iterdir())
+    except OSError as exc:
+        raise ValueError(f"Cannot list directory: {d} ({exc.strerror})")
+
+    def sort_key(p):
+        try:
+            is_dir = p.is_dir()
+        except OSError:
+            is_dir = False
+        return (not is_dir, p.name.lower())
+
+    return sorted(children, key=sort_key)
+
+
 def list_directory(dirpath, root=None):
     """List a directory for the file browser, rooted at the project dir.
 
     Returns ``{dir, parent, entries}`` where each entry is
     ``{name, path, size, is_dir}``. Hidden entries (dotfiles) are skipped.
-    ``parent`` is None when ``dirpath`` is at or above ``root`` so the browser
-    cannot escape the project tree.
+
+    ``root``, when given, is a real CONFINEMENT and not just a hint about the
+    parent link: a ``dirpath`` outside it is refused outright. It used to gate
+    only whether ``parent`` was reported, so ``GET /api/files?dir=/etc``
+    happily listed ``/etc`` and the documented "sandboxed to the open project"
+    invariant was cosmetic. ``parent`` is still None at the root so the
+    browser cannot walk out of the tree one level at a time either.
     """
     d = Path(dirpath).expanduser().resolve()
+    root_resolved = Path(root).expanduser().resolve() if root else None
+    if root_resolved is not None and not is_within(d, root_resolved):
+        raise ValueError(f"Path is outside the project directory: {d}")
     if not d.exists():
         raise ValueError(f"No such path: {d}")
     if not d.is_dir():
         raise ValueError(f"Not a directory: {d}")
 
-    root_resolved = Path(root).expanduser().resolve() if root else None
-
     entries = []
-    for child in sorted(
-        d.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())
-    ):
+    for child in _sortable_children(d):
         if child.name.startswith("."):
             continue
         try:
@@ -165,16 +199,24 @@ def list_directory(dirpath, root=None):
 
     parent = None
     if d.parent != d:
-        if root_resolved is None or _is_within(d.parent, root_resolved):
+        if root_resolved is None or is_within(d.parent, root_resolved):
             parent = str(d.parent)
 
     return {"dir": str(d), "parent": parent, "entries": entries}
 
 
-def _is_within(path, root):
-    """True if ``path`` is ``root`` or nested inside it."""
+def is_within(path, root):
+    """True if ``path`` is ``root`` or nested inside it (both fully resolved).
+
+    The ONE path-containment predicate in the GUI. There used to be two --
+    this one and an ``app._is_inside`` built on ``realpath`` + ``commonpath``
+    -- which answered the same security question with different symlink
+    behavior depending on which endpoint you asked.
+    """
+    if path is None or root is None:
+        return False
     try:
         Path(path).resolve().relative_to(Path(root).resolve())
         return True
-    except ValueError:
+    except (ValueError, OSError):
         return False

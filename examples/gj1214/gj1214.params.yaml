@@ -73,3 +73,31 @@ band.MIRILRS.q2:
 mann.A.ks_offset:
   initval: -0.14583661367844059
 
+# GJ 1214 is an M dwarf: this mass and radius give logg = 5.022, just past
+# the 5.0 ceiling of the NextGen bolometric-correction grid's logg axis.
+# (The grid's other three axes -- teff, [Fe/H], Av -- are all comfortably
+# inside.)  So its bolometric corrections are EXTRAPOLATED off the grid's
+# edge cell, not interpolated within it.  No BC grid reaching M-dwarf
+# surface gravities ships with EXOZIPPy today, so the choice is between a
+# modestly extrapolated correction and not fitting this star at all, and
+# the extrapolation wins -- as long as it is explicit.  It is: the SED
+# component warns about it, by name and value, on every run.
+#
+# This widens the soft bound the SED puts on loggsed from its measured
+# width (~2e-4 dex, which clamps the fit to the grid edge and would cost
+# this start 434 nats) to half a NextGen logg cell:
+#   bound_scale 25 dex -> transition width 0.25 dex, slope 17.6 nats/dex
+#   penalty 0.91 nats at the 5.022 start, 4.41 at logg 5.25 (half a cell
+#   past the edge), 8.80 at logg 5.5 (a full cell)
+# so the start is admitted cheaply and a real excursion is still resisted.
+# What would remove the need is a BC grid covering logg > 5; until then
+# treat teffsed/radiussed/fbolsed and anything downstream accordingly.
+#
+# mkparam does not carry this entry into its restart file (loggsed is
+# derived, so it is not emitted at all) -- re-add it by hand if you switch
+# parameter_file: to a generated one.  The off-grid warning keys on the
+# VALUE, not on the barrier, so it still fires either way and its text
+# says which barrier is actually in force.
+star.A.loggsed:
+  bound_scale: 25.0
+

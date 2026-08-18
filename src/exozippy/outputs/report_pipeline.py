@@ -3,7 +3,7 @@ posterior distribution -> LaTeX/CSV table generation.
 
 This is the block that used to live inline in run.run_fit() right after
 sampling finished. It is now a single function so that run.py (the live
-fitting path) and the exozippy-modes CLI (outputs/cli_modes.py, which
+fitting path) and the exozippy-modes CLI (exozippy/cli_modes.py, which
 reprocesses a previously saved trace file without re-sampling) can never
 drift apart: both call sites import build_mode_reports from this module.
 """
@@ -12,7 +12,16 @@ import logging
 from pathlib import Path
 
 from .latex import build_csv_output, build_latex_output
-from .modes import DEFAULT_MAX_INVALID_FRAC, check_invalid_frac, identify_modes
+from .modes import (
+    DEFAULT_MAX_INVALID_FRAC,
+    MODE_FAILED,
+    MODE_NO_VALID_DRAWS,
+    MODE_OK,
+    NoValidDrawsError,
+    check_invalid_frac,
+    identify_modes,
+    mode_status_to_text,
+)
 from .texutils import latex_escape
 
 logger = logging.getLogger(__name__)
@@ -34,16 +43,20 @@ def build_mode_reports(
     evidence_weights=False,
     seed_ledger=None,
     hot_status=None,
+    mode_status=None,
 ):
     """Identify posterior modes, distribute the posterior, write tables.
 
     Writes ``<prefix>_modes.txt``, ``<prefix>_definitions.tex``,
-    ``<prefix>_template.tex``, and ``<prefix>_results.csv``.
+    ``<prefix>_table.tex``, and ``<prefix>_results.csv``.
 
     Mode identification is wrapped in a broad try/except: a broken mode
     pass must never take down the rest of a fit's outputs, so a failure
     here is logged as a warning and the tables fall back to describing the
-    combined (unimodal) posterior.
+    combined (unimodal) posterior.  The one carve-out is
+    ``NoValidDrawsError`` -- every draw rejected by the numerical-validity
+    filter -- which is not a broken mode pass but a broken trace, and is
+    routed to ``check_invalid_frac`` instead of being absorbed.
 
     Parameters
     ----------
@@ -96,11 +109,22 @@ def build_mode_reports(
         ``seed_ledger``: "never searched" and "search failed" are exactly
         the states in which no ledger records exist, and they are precisely
         the states the report must not render as silence.
+    mode_status : dict, optional
+        In/out: filled in with the machine-readable outcome of the mode
+        pass -- a ``state`` from the outputs.modes MODE_* vocabulary plus
+        the invalid-draw bookkeeping -- following the status-dict pattern
+        of outputs/ledger.py's hot-chain search and outputs/evidence.py's
+        per-mode results.  It is what lets a caller tell a returned None
+        that means "the draws are unusable" (MODE_NO_VALID_DRAWS) from one
+        that means "the mode pass could not tell you anything"
+        (MODE_FAILED); the validity gate below reads exactly that
+        distinction.  A fresh dict is used when none is passed.
 
     Returns
     -------
     outputs.modes.ModeReport, or None if mode identification failed or
-    found no valid draws (see the warning logged in that case).
+    found no valid draws (see the warning logged in that case, and
+    ``mode_status`` for which of the two it was).
     """
     prefix = Path(prefix)
     mode_kwargs = {}
@@ -120,8 +144,17 @@ def build_mode_reports(
     # broad catch.
     mode_report = None
     modes_path = None
+    if mode_status is None:
+        mode_status = {}
     try:
         mode_report = identify_modes(idata, **mode_kwargs)
+        mode_status.update(
+            state=MODE_OK,
+            n_draws=int(mode_report.labels.size),
+            n_invalid=int(mode_report.n_invalid),
+            invalid_frac=float(mode_report.invalid_frac),
+            reasons=dict(mode_report.invalid_reason_counts or {}),
+        )
         modes_path = Path(str(prefix) + "_modes.txt")
         modes_path.write_text(mode_report.to_text(), encoding="utf-8")
         if mode_report.n_modes > 1:
@@ -131,7 +164,48 @@ def build_mode_reports(
                 f"({'weights validated' if mode_report.weights_reliable else 'weights UNRELIABLE'}); "
                 f"see {modes_path}"
             )
-    except Exception:
+    except NoValidDrawsError as exc:
+        # EVERY draw failed the numerical-validity filter.  This is the one
+        # mode-pass failure that IS a statement about the draws, so it gets
+        # its own state and is handed to the gate below -- catching it in
+        # the broad clause is what let a 100%-invalid trace emit a clean
+        # -looking table while a 1.1%-invalid one refused (review 3.17).
+        mode_status.update(
+            state=MODE_NO_VALID_DRAWS,
+            n_draws=exc.n_draws,
+            n_invalid=exc.n_invalid,
+            invalid_frac=exc.invalid_frac,
+            reasons=exc.reason_counts,
+            per_chain_invalid=exc.per_chain_invalid,
+            detail=str(exc),
+        )
+        logger.warning(
+            "Mode identification found NO VALID DRAWS: %s. Nothing computed "
+            "from this trace describes a posterior.",
+            exc,
+        )
+        # Leave the forensic record in the file the user is pointed at.
+        # Written before the gate raises (the raise is the point, but the
+        # evidence has to survive it) and before the hot-status/ledger
+        # sections append -- otherwise, on the non-raising paths, the only
+        # <prefix>_modes.txt a user gets is one whose visible content reads
+        # entirely normal.
+        try:
+            modes_path = Path(str(prefix) + "_modes.txt")
+            modes_path.write_text(
+                mode_status_to_text(mode_status), encoding="utf-8"
+            )
+        except Exception:
+            modes_path = None
+            logger.warning(
+                "Could not write the no-valid-draws mode report; the "
+                "failure is reported here and by the check below",
+                exc_info=True,
+            )
+    except Exception as exc:
+        # Any other mode-pass failure says nothing about whether the draws
+        # are usable, so it stays a warning and the gate below stays quiet.
+        mode_status.update(state=MODE_FAILED, detail=repr(exc))
         logger.warning(
             "Mode identification failed; reporting the combined "
             "posterior only",
@@ -142,13 +216,16 @@ def build_mode_reports(
         # The trace and mode report are already written at this point, so
         # evidence survives this raise; override via config
         # `modes: {max_invalid_frac: ..., force: true}` for forensic
-        # re-processing of old/known-bad traces.
+        # re-processing of old/known-bad traces.  mode_status is what makes
+        # the all-invalid case (no report at all) reach this gate instead
+        # of slipping through the None check.
         check_invalid_frac(
             mode_report,
             max_invalid_frac=max_invalid_frac,
             force=force,
             trace_path=trace_path,
             modes_path=modes_path,
+            status=mode_status,
         )
 
     # Optional per-mode evidence weighting (fallback / cross-check path).
@@ -257,6 +334,25 @@ def build_mode_reports(
 
         ledger_rows = bool(rejected_records(seed_ledger))
 
+    # latex.py already appends an invalid-draw note to \tablecomments, but
+    # it reads it off the mode report -- which does not exist when EVERY
+    # draw was invalid, so the one table that is entirely untrustworthy was
+    # the one table carrying no note at all (the same inversion as the gate
+    # itself).  Supply it from the status instead.  Only reachable on the
+    # non-raising paths (exozippy-modes, or `modes: {force: true}`): a live
+    # fit has already refused above.  The percentage MUST carry \%, or the
+    # bare % comments out the rest of the \tablecomments{} line.
+    table_comments = None
+    if mode_status.get("state") == MODE_NO_VALID_DRAWS:
+        table_comments = (
+            rf"ALL {mode_status.get('n_invalid', 0)} draws "
+            rf"({100 * mode_status.get('invalid_frac', 0.0):.2f}\%) in this "
+            "trace were rejected as numerically invalid, so no posterior "
+            "mode could be identified: every value in this table summarizes "
+            "REJECTED draws and none of it is meaningful. This indicates a "
+            "model or sampler bug."
+        )
+
     # Generate latex table and machine-readable CSV.  prefix.stem is a user
     # string on its way into \tablecaption{}: 'DC2018_128' and
     # 'KMT-2019-BLG-1806_nt8long' are both real prefixes here, and a raw
@@ -264,9 +360,10 @@ def build_mode_reports(
     build_latex_output(
         system,
         var_filename=str(prefix) + "_definitions.tex",
-        template_filename=str(prefix) + "_template.tex",
+        table_filename=str(prefix) + "_table.tex",
         caption=r"Median and 68\% Confidence intervals for "
         + latex_escape(prefix.stem),
+        tablecomments=table_comments,
         mode_report=mode_report,
     )
     build_csv_output(

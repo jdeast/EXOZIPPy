@@ -1,5 +1,7 @@
+import contextlib
 import gc
 import importlib
+import itertools
 import logging
 import multiprocessing as mp
 import os
@@ -12,42 +14,10 @@ import arviz as az
 import matplotlib.pyplot as plt
 import numpy as np
 import pymc as pm
-import yaml
-from matplotlib.backends.backend_pdf import PdfPages
-from pymc.initial_point import make_initial_point_fn
-
-# import pytensor
-# pytensor.config.optimizer_excluding = "local_elemwise_fusion"
-# pytensor.config.allow_gc = True
-# pytensor.config.linker = "py"
-
-
-# PyMC 5.25.1 bug fix: stats_dtypes_shapes declares scaling/lambda as scalar []
-# but np.atleast_1d always produces a 1-D array, crashing the NDArray backend.
-# Not currently used (PTDE replaced DEMetropolis), kept for future experiments.
-def _fix_de_stats(astep_fn):
-    def wrapper(self, q0):
-        result, stats = astep_fn(self, q0)
-        for s in stats:
-            for key in ("scaling", "lambda"):
-                if key in s and np.ndim(s[key]) > 0:
-                    s[key] = float(np.ravel(s[key])[0])
-        return result, stats
-
-    return wrapper
-
-
-class DEMetropolisZ(pm.DEMetropolisZ):
-    astep = _fix_de_stats(pm.DEMetropolisZ.astep)
-
-
-class DEMetropolis(pm.DEMetropolis):
-    astep = _fix_de_stats(pm.DEMetropolis.astep)
-
-
 import pytensor
+from matplotlib.backends.backend_pdf import PdfPages
 
-from exozippy.samplers import convergence
+from exozippy.samplers import convergence, de_metropolis
 from exozippy.samplers.ptde import ptde_sample
 from exozippy.samplers.ptde_async import ptde_async_sample
 from exozippy.system import System
@@ -55,16 +25,20 @@ from exozippy.system import System
 from .corner_utils import collect_corner_samples, save_corner_plot
 from .diagnostics import ModelAuditor
 from .logger import setup_logging
-from .mkparam import mkprior
+from .mkparam import write_param_file
+from .outputs.modeling import build_modeling_output, compile_modeling_pdf
 from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix
 from .outputs.report_pipeline import build_mode_reports
 from .polish import polish_raw_starts, resolve_polish_steps
 from .trace_meta import check_trace_freshness, stamp_structural_metadata
-from .whitening import load_whitening, measure_and_whiten, save_whitening
+from .whitening import prepare_whitening
 
 logger = logging.getLogger(__name__)
 
-# debugging imports
+# debugging knobs
+# pytensor.config.optimizer_excluding = "local_elemwise_fusion"
+# pytensor.config.allow_gc = True
+# pytensor.config.linker = "py"
 # import ipdb
 
 # Every key `_run_fit` reads off the `sampler:` block. Anything else is
@@ -104,6 +78,24 @@ KNOWN_SAMPLER_KEYS = {
     "seed_polish",
     "store_hot_chains",
 }
+
+
+@contextlib.contextmanager
+def sigterm_as_interrupt():
+    """Map SIGTERM to Python's default SIGINT handler while sampling.
+
+    A batch scheduler (`qsig -s SIGTERM <job_id>` / `kill -TERM <pid>`) can
+    then interrupt sampling the same way a terminal Ctrl+C already does,
+    instead of Python's default SIGTERM action (immediate termination with no
+    partial trace saved). ``pm.sample`` already handles a KeyboardInterrupt
+    raised mid-sampling gracefully -- that's exactly how the maxtime cutoffs
+    work. Used by every branch that calls ``pm.sample`` directly.
+    """
+    old_sigterm = signal.signal(signal.SIGTERM, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, old_sigterm)
 
 
 def warn_unknown_sampler_keys(sampler_cfg):
@@ -265,10 +257,15 @@ def _run_fit(config, gui, user_params=None):
         if "reason" in reqs:
             _reasons.append(reqs["reason"])
 
+    # sorted(), not next(iter(...)): _recommended is a set, so with two
+    # components recommending different samplers the choice would be a
+    # PYTHONHASHSEED coin flip -- i.e. a different sampler per run.  Only one
+    # component recommends anything today (mulensing's Lens), so this is
+    # inert; it stops being inert silently.
     if method is None:
-        method = next(iter(_recommended)) if _recommended else "nuts"
+        method = sorted(_recommended)[0] if _recommended else "nuts"
     elif method.lower() in _incompatible:
-        rec_str = next(iter(_recommended)) if _recommended else "ptde_async"
+        rec_str = sorted(_recommended)[0] if _recommended else "ptde_async"
         reason_str = (
             "; ".join(_reasons) if _reasons else "incompatible with this model"
         )
@@ -277,6 +274,20 @@ def _run_fit(config, gui, user_params=None):
             f"Set 'method: {rec_str}' in the sampler block."
         )
     method = method.lower()
+
+    # First modeling-draft checkpoint: the components declared their prose
+    # during stages 1-6 and the sampler is now resolved, so the citation
+    # scaffold (<prefix>_paper.tex) can be written BEFORE sampling --
+    # the user keeps it even if the fit dies hours in.  Regenerated (not
+    # appended) at wrap-up with the results/convergence/figures/table
+    # sections. Never fatal: the draft is a bonus deliverable.
+    _add_sampler_prose(system, method, swap_schedule=swap_schedule)
+    try:
+        build_modeling_output(system, prefix)
+    except Exception:
+        logger.warning(
+            "modeling-draft generation failed (non-fatal)", exc_info=True
+        )
 
     # 4. Sample
     # We use adapt_diag to start exactly at our estimated means
@@ -298,7 +309,10 @@ def _run_fit(config, gui, user_params=None):
         # (recompute_trace: false with an existing trace) restores the exact
         # scales the trace was sampled with instead of re-probing -- raw
         # draws only decode correctly under the whitening they were sampled
-        # under.  Any model mismatch falls back to a fresh measurement.
+        # under.  On a FRESH run a model mismatch falls back to a fresh
+        # measurement (nothing is sampled yet, so the coordinates are still
+        # a free choice); on the reuse path they are not, and a mismatch
+        # raises instead -- see whitening.restore_whitening_for_trace.
         trace_path = str(prefix) + "_trace.nc"
         whitening_path = str(prefix) + "_whitening.json"
         reusing_trace = os.path.exists(trace_path) and not recompute_trace
@@ -345,16 +359,22 @@ def _run_fit(config, gui, user_params=None):
 
         whiten_report = None
         if measure_scales:
-            loaded = (
-                reusing_trace
-                and os.path.exists(whitening_path)
-                and load_whitening(system, whitening_path)
+            # Fresh run -> measure + persist.  Reuse -> restore only: the
+            # whitening is a property of the draws being decoded, so it is
+            # never re-measured and never rewritten there (a mismatch
+            # raises StaleWhiteningError, a missing file warns and keeps
+            # the preliminary scales).  The old code fell back to
+            # measure + save on BOTH, silently re-coordinating the trace it
+            # was reusing and overwriting the only record of how to read it.
+            whiten_report = prepare_whitening(
+                system,
+                model,
+                raw_start,
+                whitening_path,
+                trace_path,
+                reusing_trace=reusing_trace,
             )
-            if not loaded:
-                whiten_report = measure_and_whiten(system, model, raw_start)
-                save_whitening(
-                    system, whitening_path, map_lp=whiten_report["map_lp"]
-                )
+            if whiten_report is not None:
                 # The rescale re-expressed a polished (nonzero) start in
                 # the new raw coordinates; re-read it for every consumer
                 # below (a no-op for an unpolished all-zeros start).
@@ -362,15 +382,11 @@ def _run_fit(config, gui, user_params=None):
 
         # 1. Get your starting dictionaries (after the rescale, so the
         # diagnostic table reports the measured scales)
-        nuts_scales, phys_scales, phys_inits, transformed_inits = (
-            system.get_mcmc_init(model)
-        )
+        transformed_inits = system.get_mcmc_init(model)
         inspect_start(
             model,
             system,
             transformed_inits,
-            phys_inits,
-            phys_scales,
             whiten_report=whiten_report,
         )
 
@@ -560,6 +576,34 @@ def _run_fit(config, gui, user_params=None):
                     cores=cores,
                     return_inferencedata=True,
                 )
+            elif method in de_metropolis.STEP_CLASSES:
+                # Gradient-free differential-evolution MCMC (ter Braak 2006 /
+                # ter Braak & Vrugt 2008) on PyMC's own step methods, started
+                # from the same over-dispersed population PTDE's T=1 rung
+                # uses -- see samplers/de_metropolis.py.  `chains` is read
+                # off the raw config rather than the resolved default so an
+                # unset key can mean "size the DE population from the
+                # parameter count" (2 x n_params) instead of silently
+                # accepting the generic 4.
+                with sigterm_as_interrupt():
+                    idata = de_metropolis.de_metropolis_sample(
+                        model,
+                        system,
+                        draws,
+                        tune,
+                        variant=method,
+                        chains=sampler_cfg.get("chains", None),
+                        cores=cores,
+                        raw_starts=raw_starts,
+                        seed_indices=seed_indices,
+                        raw_scales=(
+                            whiten_report["raw_scales"]
+                            if whiten_report
+                            else None
+                        ),
+                        maxtime=maxtime,
+                        plot_prefix=str(prefix),
+                    )
             else:
                 nuts_callback = None
                 if maxtime is not None:
@@ -573,17 +617,7 @@ def _run_fit(config, gui, user_params=None):
                             raise KeyboardInterrupt
 
                 step = pm.NUTS(target_accept=target_accept)
-                # Map SIGTERM to Python's default SIGINT handler so a batch
-                # scheduler (`qsig -s SIGTERM <job_id>` / `kill -TERM <pid>`)
-                # can interrupt sampling the same way a terminal Ctrl+C
-                # already does, instead of Python's default SIGTERM action
-                # (immediate termination with no partial trace saved). pm.sample
-                # already handles a KeyboardInterrupt raised mid-sampling
-                # gracefully -- that's exactly how the maxtime cutoff above works.
-                old_sigterm = signal.signal(
-                    signal.SIGTERM, signal.default_int_handler
-                )
-                try:
+                with sigterm_as_interrupt():
                     idata = pm.sample(
                         draws=draws,
                         tune=tune,
@@ -594,8 +628,6 @@ def _run_fit(config, gui, user_params=None):
                         return_inferencedata=True,
                         callback=nuts_callback,
                     )
-                finally:
-                    signal.signal(signal.SIGTERM, old_sigterm)
             if nthin > 1:
                 idata = idata.sel(draw=slice(None, None, nthin))
             # Record the storage thinning on the trace.  Consecutive stored
@@ -760,23 +792,48 @@ def _run_fit(config, gui, user_params=None):
                 exc_info=True,
             )
 
+    # Final modeling-draft checkpoint: the table fragments and posterior
+    # plots now exist on disk and the convergence/mode facts are known, so
+    # regenerate <prefix>_paper.tex with its Results sections and
+    # (config `modeling: {compile: false}` to opt out) compile the draft
+    # PDF.  Compile failure or missing TeX never fails the fit.
+    modeling_cfg = config.get("modeling", {}) or {}
+    for _key in modeling_cfg:
+        if _key != "compile":
+            logger.warning(
+                f"Unrecognized key '{_key}' in the modeling block will be "
+                f"ignored (known: compile)."
+            )
     try:
-        # mkprior re-derives the structural fingerprint from this config and
-        # the parameter_file itself; measured to reproduce the System
-        # snapshot exactly (see the note at mkparam.mkprior's check).
-        mkprior(config, trace_path=trace_path)
+        _add_wrapup_prose(system, burn_diag, mode_report)
+        # One posterior draw unlocks the model-bearing plot specs (phased
+        # panels), whose figures otherwise never enter the draft.
+        tex_path = build_modeling_output(
+            system, prefix, point=draws[0] if draws else None
+        )
+        if modeling_cfg.get("compile", True):
+            compile_modeling_pdf(tex_path)
     except Exception:
-        logger.exception("mkprior failed (non-fatal)")
+        logger.warning(
+            "modeling-draft generation failed (non-fatal)", exc_info=True
+        )
 
-
-def _element_conversion_factor(par, index):
-    """Internal -> user conversion factor for element ``index`` of ``par``."""
-    f = par._get_conversion_factors()
-    if np.size(f) > 1:
-        return float(np.ravel(f)[index])
-    if np.size(f) == 1:
-        return float(np.ravel(f)[0])
-    return float(f)
+    try:
+        # mkparam re-derives the structural fingerprint from this config and
+        # the params, not from the live System; measured to reproduce the
+        # System snapshot exactly (see the note at the check inside
+        # mkparam.write_param_file).  The params half has to be handed over
+        # when run_fit was called with an in-memory dict: the file at
+        # config['parameter_file'] is then not what was fitted (it may be
+        # stale, or absent), and write_param_file would merge ITS priors and
+        # bounds into the restart file.  Left None for a file-driven run, so
+        # that path still reads the file itself and its error messages still
+        # name it.
+        write_param_file(
+            config, trace_path=trace_path, user_params=user_params
+        )
+    except Exception:
+        logger.exception("mkparam failed (non-fatal)")
 
 
 def _user_initval(config_manager, par, index):
@@ -820,7 +877,7 @@ def _user_initval(config_manager, par, index):
     if val is None:
         return None
     try:
-        return float(val) / _element_conversion_factor(par, index)
+        return float(par.to_internal(float(val), index=index))
     except (TypeError, ValueError, ZeroDivisionError):
         return None
 
@@ -839,10 +896,11 @@ def inspect_start(
     model,
     system,
     transformed_inits,
-    phys_inits,
-    phys_scales,
     whiten_report=None,
 ):
+    # No physical inits/scales arguments: this reads p.initval / p.init_scale
+    # off the Parameters below, so the two dicts get_mcmc_init used to build
+    # and hand over were never read.
     auditor = ModelAuditor(model, system, transformed_inits)
     param_logps, other_nodes = auditor.get_aggregated_logps()
     unused_yaml = auditor.check_unused_yaml()
@@ -977,6 +1035,13 @@ def inspect_start(
         user_flag = "*" if getattr(p, "user_prior_modified", False) else ""
 
         for i in range(len(v_phys)):
+            # An INACTIVE element is not a parameter of its instance's
+            # parameterization (a non-MIST star's EEP, a linear-law band's u2):
+            # it is held at a bookkeeping value nothing reads, so a row for it
+            # would report a start value the fit does not have.
+            if not p.element_is_active(i):
+                continue
+
             row_label = p.get_display_label(i)
 
             # Parameter.initval is the AUTHORITATIVE start: it is what
@@ -1005,27 +1070,14 @@ def inspect_start(
                 except (TypeError, ValueError):
                     return np.nan
 
-            raw_val = safe_float(v_phys[i])
-            # Pass through component conversion
-            internal_res = p.from_internal(raw_val)
-            # FORCE extraction to a standard Python float
-            val_out = (
-                float(internal_res.item())
-                if hasattr(internal_res, "item")
-                else float(internal_res)
-            )
-
-            # Do the same for scale
-            raw_scale = safe_float(s_phys[i])
-            internal_scale = p.from_internal(raw_scale)
-            scale_out = (
-                float(internal_scale.item())
-                if hasattr(internal_scale, "item")
-                else float(internal_scale)
-            )
-
-            # val_out = float(p.from_internal(safe_float(v_phys[i])))
-            # scale_out = float(p.from_internal(safe_float(s_phys[i])))
+            # Internal -> user for THIS element.  index=i matters as soon as
+            # a parameter carries per-element units (a `unit:` override on
+            # one instance of a vector): the whole-vector call returned an
+            # n-element array for a scalar input, and the .item() below then
+            # raised "can only convert an array of size 1", killing the fit
+            # in its startup table.
+            val_out = float(p.from_internal(safe_float(v_phys[i]), index=i))
+            scale_out = float(p.from_internal(safe_float(s_phys[i]), index=i))
 
             # Float/Scientific formatting logic ---
             def smart_format(val, width):
@@ -1169,6 +1221,146 @@ def inspect_start(
             f"The following parameters in the parameter.yaml file did not match any model parameter "
             f"and were not applied: {unused_yaml}\n"
             "This can be safely ignored if intentional, but check for typos."
+        )
+
+
+def _add_sampler_prose(system, method, swap_schedule="deo"):
+    """Declare the run-level modeling prose (intro + sampler paragraph).
+
+    Config facts only, per the prose contract (outputs/prose.py): the
+    sampler's identity and citations.  The actual draw/burn-in counts are
+    measured facts and belong to ``_add_wrapup_prose``.
+    """
+    prose = system.prose
+    prose.add(
+        r"This analysis used the EXOZIPPy modeling suite (Eastman et al., "
+        r"in preparation), a successor to EXOFAST \citep{Eastman:2013} and "
+        r"EXOFASTv2 \citep{Eastman:2019} built on PyMC "
+        r"\citep{AbrilPla:2023}.",
+        section="intro",
+        key="run.exozippy",
+        rank=5,
+    )
+    if method in ("ptde", "ptde_async"):
+        swap_cite = (
+            r" and the non-reversible deterministic even--odd (DEO) swap "
+            r"schedule \citep{Syed:2022}"
+            if str(swap_schedule).lower() == "deo"
+            else ""
+        )
+        prose.add(
+            r"We sampled the posterior with a parallel-tempered "
+            r"differential-evolution MCMC "
+            r"\citep{terBraak:2006, terBraak:2008} with adaptive "
+            r"temperature-ladder placement \citep{Vousden:2016}"
+            + swap_cite
+            + ", as implemented in EXOZIPPy.",
+            section="sampling",
+            key="run.sampler",
+            rank=10,
+        )
+    elif method == "demc":
+        prose.add(
+            r"We sampled the posterior with differential-evolution MCMC "
+            r"\citep{terBraak:2006} as implemented in PyMC "
+            r"\citep{AbrilPla:2023}.",
+            section="sampling",
+            key="run.sampler",
+            rank=10,
+        )
+    elif method == "demcz":
+        prose.add(
+            r"We sampled the posterior with the DE-MC$_Z$ variant of "
+            r"differential-evolution MCMC, which draws its proposal vectors "
+            r"from each chain's own past states \citep{terBraak:2008}, as "
+            r"implemented in PyMC \citep{AbrilPla:2023}.",
+            section="sampling",
+            key="run.sampler",
+            rank=10,
+        )
+    else:
+        # nuts / numpyro / blackjax are all NUTS implementations.
+        prose.add(
+            r"We sampled the posterior with the No-U-Turn Sampler "
+            r"\citep{Hoffman:2014} as implemented in PyMC "
+            r"\citep{AbrilPla:2023}.",
+            section="sampling",
+            key="run.sampler",
+            rank=10,
+        )
+
+
+def _add_wrapup_prose(system, diag, mode_report):
+    """Declare the post-fit prose: burn-in, convergence criteria, modes.
+
+    These are diagnostics of the run (the convergence criteria the user
+    asked the draft to record), not fitted values -- posterior numbers stay
+    in the table, whose macros are the mechanism for citing them in prose.
+    """
+    prose = system.prose
+    prose.add(
+        r"The median values and 68\% confidence intervals of the "
+        r"posterior are listed in Table~\ref{tab:"
+        + str(getattr(system, "name", "system"))
+        + r"}.",
+        section="results",
+        key="run.table_ref",
+        rank=10,
+    )
+    if diag:
+        prose.add(
+            f"We discarded the first {diag.get('burnin', 0)} draws "
+            f"({100 * diag.get('burnin_frac', 0.0):.0f}\\% of "
+            f"{diag.get('n_draws', 0)}) of each chain as burn-in, keeping "
+            f"{diag.get('n_chains_used')} chains.",
+            section="convergence",
+            key="run.burnin",
+            rank=10,
+        )
+        criteria = []
+        if diag.get("max_rhat_threshold") is not None:
+            criteria.append(rf"$\hat{{R}} \le {diag['max_rhat_threshold']}$")
+        if diag.get("min_ess_threshold") is not None:
+            criteria.append(rf"ESS $\ge {diag['min_ess_threshold']}$")
+        verdict = "met" if diag.get("converged", False) else "NOT met"
+        measured = []
+        if diag.get("max_rhat") is not None:
+            measured.append(rf"maximum $\hat{{R}} = {diag['max_rhat']:.3f}$")
+        if diag.get("min_ess") is not None:
+            measured.append(f"minimum ESS $= {diag['min_ess']:.0f}$")
+        prose.add(
+            r"Convergence was assessed with the rank-normalized "
+            r"Gelman--Rubin statistic and the effective sample size "
+            r"\citep{Gelman:1992, Vehtari:2021} as implemented in ArviZ "
+            r"\citep{Kumar:2019}"
+            + (
+                ", requiring "
+                + " and ".join(criteria)
+                + " for every sampled parameter"
+                if criteria
+                else ""
+            )
+            + f"; these criteria were {verdict}"
+            + (" (" + ", ".join(measured) + ")." if measured else "."),
+            section="convergence",
+            key="run.convergence",
+            rank=20,
+        )
+    if mode_report is not None and getattr(mode_report, "n_modes", 1) > 1:
+        # The provenance is plain text (N_eff, >=): escape it for LaTeX
+        # text mode, exactly as latex.py does for \tablecomments.
+        from .outputs.texutils import latex_escape_prose
+
+        provenance = latex_escape_prose(
+            getattr(mode_report, "provenance", "see the table notes")
+        )
+        prose.add(
+            f"The posterior is multimodal: {mode_report.n_modes} distinct "
+            "modes were identified and are reported separately in the "
+            f"parameter table. Mode weights: {provenance}.",
+            section="modes",
+            key="run.modes",
+            rank=10,
         )
 
 
@@ -1323,29 +1515,244 @@ def _compute_lp_from_model(model, idata):
         return None
 
 
-def _n_trace_rows(idata, var_names, group="posterior"):
-    """Total rows az.plot_trace needs: 1 row per element (shape product) per var."""
-    rows = 0
-    dataset = idata[group]
-    for v in var_names:
-        shape = dataset[v].shape[2:]  # drop (chain, draw) dims
-        rows += int(np.prod(shape)) if shape else 1
-    return rows
+def _chunk_by_rows(specs, rows_per_page):
+    """Yield (chunk, n_rows) pairs sized so each page needs <= rows_per_page rows.
 
-
-def _chunk_by_rows(idata, var_names, rows_per_page):
-    """Yield (chunk, n_rows) pairs sized so each page needs <= rows_per_page rows."""
+    ``specs`` is a list of (var_name, coords, n_rows) triples as produced by
+    _split_degenerate_vars.  A spec carrying a non-None ``coords`` element
+    selection gets a page to itself: ArviZ takes ONE coords mapping for the
+    whole call, so two variables sharing a dimension name but needing
+    different element subsets would silently cross-contaminate.
+    """
     chunk, chunk_rows = [], 0
-    for v in var_names:
-        r = _n_trace_rows(idata, [v])
-        if chunk_rows + r > rows_per_page and chunk:
+    for name, coords, r in specs:
+        solo = coords is not None
+        if chunk and (solo or chunk_rows + r > rows_per_page):
             yield chunk, chunk_rows
-            chunk, chunk_rows = [v], r
-        else:
-            chunk.append(v)
-            chunk_rows += r
+            chunk, chunk_rows = [], 0
+        chunk.append((name, coords))
+        chunk_rows += r
+        if solo:
+            yield chunk, chunk_rows
+            chunk, chunk_rows = [], 0
     if chunk:
         yield chunk, chunk_rows
+
+
+# arviz_stats builds its KDE on a fixed 512-interval grid spanning exactly
+# [min, max] of the finite draws (bound_correction=True, so the grid is NOT
+# widened by a bandwidth).  np.histogram then raises
+#   ValueError: Too many bins for data range. Cannot create 512 finite-sized bins.
+# whenever np.linspace(min, max, 513) cannot produce 513 strictly increasing
+# float64 edges -- i.e. whenever the entire range spans fewer than ~512 ULPs.
+# That kills the whole page, and with it the rest of the PDF and all of
+# wrap-up, for one variable that did not move.
+_KDE_GRID_LEN = 512
+
+
+def _dist_degeneracy(values):
+    """Why no density can be drawn for ``values``, or None if one can.
+
+    Returns a short human-readable reason string.  Three shapes qualify, and
+    all three are things a real fit produces:
+
+    * no finite draws at all (a Deterministic whose physics went NaN);
+    * exactly constant (an element pinned with ``sigma: 0`` inside an
+      otherwise-sampled vector -- GP and robust-likelihood hyperparameters
+      are full-length vectors with the non-opted-in files pinned, and such a
+      vector IS tracked as a Deterministic, so its pinned elements reach the
+      plot as constants);
+    * finite but spanning fewer than _KDE_GRID_LEN float64 steps -- a chain
+      that never moved except in the last few bits, which is what a
+      gracefully stopped, unmixed run produces and what actually crashed CI.
+
+    The third test is the exact condition numpy itself raises on, so it
+    tracks the failure rather than approximating it.
+    """
+    x = np.asarray(values, dtype=float).ravel()
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return "no finite draws"
+    lo, hi = float(x.min()), float(x.max())
+    if lo == hi:
+        return f"constant at {lo:.10g}"
+    if np.any(np.diff(np.linspace(lo, hi, _KDE_GRID_LEN + 1)) <= 0):
+        return (
+            f"range {hi - lo:.3g} around {lo:.10g} spans fewer than "
+            f"{_KDE_GRID_LEN} float64 steps"
+        )
+    return None
+
+
+class _DegenerateRow:
+    """One (variable, element) row whose density cannot be drawn."""
+
+    __slots__ = ("label", "reason", "values")
+
+    def __init__(self, label, reason, values):
+        self.label = label
+        self.reason = reason
+        self.values = values
+
+
+def _element_rows(dataset, var):
+    """Yield (selection, label, values) for every plotted row of ``var``.
+
+    One row per element, matching _render_trace_page's compact=False layout
+    (the row count that used to come from a separate _n_trace_rows helper is
+    just len(list(_element_rows(...))) now).  ``selection`` is the label
+    mapping that isolates the element -- ``{}`` for a scalar variable, and
+    None when a dimension carries no coordinates and so cannot be
+    label-selected at all; ``values`` is the element's (chain, draw) array.
+    """
+    da = dataset[var]
+    extra = [d for d in da.dims if d not in ("chain", "draw")]
+    if not extra:
+        yield {}, var, np.asarray(da.values)
+        return
+    labelled = all(d in da.coords for d in extra)
+    for combo in itertools.product(*(range(da.sizes[d]) for d in extra)):
+        pos = dict(zip(extra, combo))
+        # .isel, not .sel: a dimension without coordinates cannot be
+        # label-selected, and only a label-selectable one can be handed back
+        # to ArviZ as a ``coords`` mapping (see _split_degenerate_vars).
+        vals = np.asarray(da.isel(pos).values)
+        if labelled:
+            sel = {
+                d: np.asarray(da.coords[d].values)[i] for d, i in pos.items()
+            }
+        else:
+            sel = None
+        shown = sel if sel is not None else pos
+        label = f"{var}[{', '.join(str(shown[d]) for d in extra)}]"
+        yield sel, label, vals
+
+
+def _split_degenerate_vars(idata, var_names, group="posterior"):
+    """Split plot rows into ArviZ-renderable ones and density-less ones.
+
+    Returns ``(specs, degenerate)``:
+
+    * ``specs`` -- list of (var_name, coords, n_rows) for _chunk_by_rows.
+      ``coords`` is None when the whole variable renders normally (so a fit
+      with no degenerate element takes byte-identical code to before), and a
+      {dim: [kept values]} mapping when only some elements of a vector do.
+    * ``degenerate`` -- list of _DegenerateRow, rendered on their own pages.
+
+    Each degenerate row is logged as a warning naming the variable element
+    and the reason: a missing density is reported, never swallowed.
+    """
+    dataset = idata[group]
+    specs, degenerate = [], []
+    for v in var_names:
+        if v not in dataset.data_vars:
+            # Unknown name: pass it straight through so ArviZ raises the same
+            # error it always did rather than having it silently disappear.
+            specs.append((v, None, 1))
+            continue
+        rows = list(_element_rows(dataset, v))
+        bad = [
+            i
+            for i, (_, _, vals) in enumerate(rows)
+            if _dist_degeneracy(vals) is not None
+        ]
+        if not bad:
+            specs.append((v, None, len(rows)))
+            continue
+        for i in bad:
+            _, label, vals = rows[i]
+            reason = _dist_degeneracy(vals)
+            logger.warning(
+                f"trace plot: no density for {label} ({reason}); its trace "
+                "panel is still drawn"
+            )
+            degenerate.append(_DegenerateRow(label, reason, vals))
+        good = [i for i in range(len(rows)) if i not in set(bad)]
+        if not good:
+            continue
+        extra = [d for d in dataset[v].dims if d not in ("chain", "draw")]
+        if len(extra) == 1 and rows[good[0]][0] is not None:
+            dim = extra[0]
+            kept = [rows[i][0][dim] for i in good]
+            specs.append((v, {dim: kept}, len(kept)))
+        else:
+            # >= 2 element dimensions (a coords mapping would select the
+            # CROSS PRODUCT of the per-dimension survivors, which can readmit
+            # a degenerate element) or an unlabelled dimension ArviZ cannot be
+            # given a coords mapping for.  No EXOZIPPy Parameter is shaped
+            # either way (Parameter vectors are 1-D and ArviZ always names
+            # their dimension), so rather than risk a re-crash the surviving
+            # elements go on the annotated pages too, saying so.
+            for i in good:
+                _, label, vals = rows[i]
+                degenerate.append(
+                    _DegenerateRow(
+                        label,
+                        f"density omitted: other elements of {v} are "
+                        "degenerate and this variable's element layout "
+                        "cannot be split",
+                        vals,
+                    )
+                )
+    return specs, degenerate
+
+
+def _render_degenerate_page(idata, rows, title, group="posterior"):
+    """One page of rows whose density cannot be drawn.
+
+    Same two-column geometry as _render_trace_page (dist column then trace
+    column, one row per element), so the page reads continuously with the
+    ArviZ ones and _shade_trace_axes_by_mode's even/odd axis convention still
+    holds.  The trace panel is drawn for real -- a flat chain is exactly what
+    the reader needs to see -- and the dist panel carries the reason and the
+    value instead of a density.
+
+    Annotating beats the alternatives: a skipped panel looks like a plotting
+    bug, and a single-bin histogram looks like a real (if uninformative)
+    density while conveying neither the value nor why it is the only bin.
+    """
+    dataset = idata[group]
+    draw_coord = np.asarray(dataset["draw"].values)
+    n = len(rows)
+    fig, axes = plt.subplots(n, 2, figsize=(12, 3 * n), squeeze=False)
+    for r, row in enumerate(rows):
+        ax_dist, ax_trace = axes[r]
+        ax_dist.set_title(row.label)
+        ax_dist.text(
+            0.5,
+            0.5,
+            f"no density\n{row.reason}",
+            ha="center",
+            va="center",
+            transform=ax_dist.transAxes,
+            fontsize=9,
+            color="0.25",
+        )
+        ax_dist.set_xticks([])
+        ax_dist.set_yticks([])
+
+        vals = np.atleast_2d(np.asarray(row.values, dtype=float))
+        finite = np.isfinite(vals)
+        if finite.any():
+            for c in range(vals.shape[0]):
+                ax_trace.plot(draw_coord, vals[c], lw=0.8)
+        else:
+            ax_trace.text(
+                0.5,
+                0.5,
+                "no finite draws",
+                ha="center",
+                va="center",
+                transform=ax_trace.transAxes,
+                fontsize=9,
+                color="0.25",
+            )
+        ax_trace.set_xlabel("Draw")
+        ax_trace.set_ylabel(row.label)
+    fig.suptitle(title, fontsize=14)
+    _shade_trace_axes_by_mode(fig, idata)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    return fig
 
 
 def save_multipage_trace(
@@ -1418,29 +1825,67 @@ def save_multipage_trace(
         # into its own floating figure, leaving our fig blank.  Let ArviZ
         # own the figure and retrieve it from the returned axes instead.
         if lp_var and lp_idata is not None:
-            fig_lp = _render_trace_page(
+            for fig in _trace_page_figures(
                 lp_idata,
                 [lp_var],
-                n_rows=1,
-                title="Trace Plots: log-posterior (lp)",
+                rows_per_page=1,
                 group="sample_stats",
-            )
-            pdf.savefig(fig_lp)
-            plt.close(fig_lp)
-            gc.collect()
+                title_fn=lambda _i: "Trace Plots: log-posterior (lp)",
+            ):
+                pdf.savefig(fig)
+                plt.close(fig)
+                gc.collect()
 
-        for page_num, (chunk, n_rows) in enumerate(
-            _chunk_by_rows(idata, var_names, rows_per_page), start=1
+        for fig in _trace_page_figures(
+            idata,
+            var_names,
+            rows_per_page=rows_per_page,
+            group="posterior",
+            title_fn=lambda i: f"Trace Plots: Page {i}",
         ):
-            fig = _render_trace_page(
-                idata, chunk, n_rows, title=f"Trace Plots: Page {page_num}"
-            )
             pdf.savefig(fig)
             plt.close(fig)
             gc.collect()
 
 
-def _render_trace_page(idata, var_names, n_rows, title, group="posterior"):
+def _trace_page_figures(idata, var_names, rows_per_page, group, title_fn):
+    """Yield one figure per page, ArviZ pages first then annotated ones.
+
+    Variables (or single vector elements) whose draws admit no density are
+    routed to _render_degenerate_page instead of being handed to ArviZ, whose
+    KDE grid is what raises on them.  With no such element the split is the
+    identity and the ArviZ call is exactly the one made before this existed.
+    """
+    specs, degenerate = _split_degenerate_vars(idata, var_names, group=group)
+
+    page_num = 0
+    for chunk, n_rows in _chunk_by_rows(specs, rows_per_page):
+        page_num += 1
+        names = [name for name, _ in chunk]
+        coords = next((c for _, c in chunk if c is not None), None)
+        yield _render_trace_page(
+            idata,
+            names,
+            n_rows,
+            title=title_fn(page_num),
+            group=group,
+            coords=coords,
+        )
+
+    for start in range(0, len(degenerate), max(1, rows_per_page)):
+        page_num += 1
+        rows = degenerate[start : start + max(1, rows_per_page)]
+        yield _render_degenerate_page(
+            idata,
+            rows,
+            title=f"{title_fn(page_num)} (no density)",
+            group=group,
+        )
+
+
+def _render_trace_page(
+    idata, var_names, n_rows, title, group="posterior", coords=None
+):
     """One trace-plot page: dist column + trace column, one row per element.
 
     plot_trace_dist (not plot_trace) is the ArviZ 1.0 equivalent of the old
@@ -1453,11 +1898,16 @@ def _render_trace_page(idata, var_names, n_rows, title, group="posterior"):
     whenever a chain carries fewer than 100 draws -- the dist column then plots
     a cumulative curve that plateaus at 1.0, which reads as a posterior clipped
     at its maximum.  A density is always what this column is meant to show.
+
+    ``coords`` restricts which elements of a vector variable are drawn; it is
+    set only when some of that vector's elements have no density (see
+    _split_degenerate_vars) and is None for every ordinary page.
     """
     pc = az.plot_trace_dist(
         idata,
         var_names=var_names,
         group=group,
+        coords=coords,
         compact=False,
         kind="kde",
         figure_kwargs={"figsize": (12, 3 * n_rows)},
@@ -1545,6 +1995,14 @@ def _convert_posterior_to_user_units(idata, param_lookup):
     unit conversion is multiplied by the internal→user factor.  This is called
     once after sampling so that the saved trace, trace plots, ArviZ summary,
     and mkparam output are all in user-facing units (e.g. jupiterMass, m/s).
+
+    This and ``get_draws`` below are the deliberate exceptions to "convert
+    through Parameter.to_internal / from_internal": the operand is a
+    (chain, draw, element) DataArray, so the factor has to broadcast against
+    the TRAILING axis and the owner's element-count check -- which sees the
+    total size -- would reject it.  The direction is the only thing that
+    matters here, and it is stated: internal -> user multiplies, and
+    get_draws (user trace -> internal for the physics) divides.
     """
     for var_name in list(idata.posterior.data_vars):
         if var_name.endswith("_raw") or var_name not in param_lookup:

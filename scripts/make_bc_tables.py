@@ -34,7 +34,7 @@ def main():
         help="Spectral model whose grid to integrate (default: NextGen)",
     )
     parser.add_argument(
-        "--bc-root",
+        "--model-root",
         default=None,
         help="Root of the models tree (default: the installed package's)",
     )
@@ -43,8 +43,8 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     kwargs = {"model": args.model}
-    if args.bc_root:
-        kwargs["bc_root"] = args.bc_root
+    if args.model_root:
+        kwargs["model_root"] = args.model_root
     written = make_bc_tables(args.filters, **kwargs)
     print(f"Wrote {len(written)} file(s):")
     for p in written:

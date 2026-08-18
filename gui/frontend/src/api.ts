@@ -36,7 +36,15 @@ export interface DocState {
   redo_depth: number;
   undo_label: string | null;
   redo_label: string | null;
-  recovery?: Array<{ file: string; autosave: string }>;
+  // Autosave sidecars newer than their real file, reported by /api/doc/open.
+  // ConfigTab renders these as the recovery banner; the `restore_autosave`
+  // document command loads them back (undoably).
+  recovery?: Array<{
+    file: string;
+    autosave: string;
+    real_mtime?: number;
+    autosave_mtime?: number;
+  }>;
 }
 
 export interface Diagnostic {
@@ -81,19 +89,31 @@ export interface SnapshotMeta {
 export interface RunStatus {
   active: boolean;
   phase: string;
+  // The run is over -- finished, stopped, or crashed. The server sets it from
+  // the handle's liveness-checked phase, so a crashed run never renders as the
+  // previous run's "done".
+  terminal?: boolean;
   state?: RunState;
   alive?: boolean;
   pid?: number;
+  run_id?: string | null;
+  stale_status?: boolean;
   returncode?: number | null;
   error?: string | null;
   prefix?: string;
   config_path?: string;
   cwd?: string;
   log_path?: string;
+  // Captured stdout+stderr of the fit subprocess: where a crash that never
+  // reached the fit's own logger leaves its traceback.
+  console_path?: string | null;
   results_dir?: string;
   snapshot?: SnapshotMeta | null;
 }
 
+// Start/progress plot images written next to the run's trace. UNWIRED: the
+// gallery that rendered these was part of the removed Run tab -- see the
+// "known unwired seams" note in gui.md.
 export interface RunPlots {
   start: string[];
   progress: string[];
@@ -160,12 +180,6 @@ export interface AssociationRef {
 // Map of file basename -> the instances that reference it.
 export type AssociationMap = Record<string, AssociationRef[]>;
 
-// The preview endpoint returns PlotSpec JSON, or a readable error message.
-export interface PreviewResult {
-  specs?: import("./plotspec").PlotSpec[];
-  error?: string;
-}
-
 // --- Tune tab: solve + live evaluator (G10) ---------------------------------
 
 export interface Provenance {
@@ -227,9 +241,28 @@ export interface TuneHash {
   stale: boolean;
 }
 
+/**
+ * A failed API call, carrying the HTTP status alongside the server's message.
+ *
+ * The status is load-bearing for at least one caller: the Tune tab has to tell
+ * a 409 ("the evaluator is gone -- Solve again") from a transient network
+ * blip, and a bare `Error` left it unable to, so a timed-out eval ended in a
+ * silent catch and the sliders kept looking live.
+ */
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`${url}: ${resp.status} ${resp.statusText}`);
+  if (!resp.ok) {
+    throw new ApiError(`${url}: ${resp.status} ${resp.statusText}`, resp.status);
+  }
   return (await resp.json()) as T;
 }
 
@@ -239,8 +272,10 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  const data = await resp.json();
-  if (!resp.ok) throw new Error((data && data.error) || resp.statusText);
+  const data = await resp.json().catch(() => null);
+  if (!resp.ok) {
+    throw new ApiError((data && data.error) || resp.statusText, resp.status);
+  }
   return data as T;
 }
 
@@ -270,6 +305,7 @@ export const api = {
     postJson<RunStatus>("/api/run", { config, project_dir, params: params ?? null }),
   runStatus: () => getJson<RunStatus>("/api/run/status"),
   stopRun: (force: boolean) => postJson<RunStatus>("/api/run/stop", { force }),
+  // UNWIRED seam (with runImageUrl below): the run-plot gallery. See gui.md.
   runPlots: () => getJson<RunPlots>("/api/run/plots"),
   runUtility: (name: string, args: Record<string, unknown>, cwd: string) =>
     postJson<UtilityResult>("/api/utilities/run", { name, args, cwd }),
@@ -281,15 +317,15 @@ export const api = {
   // freely, unlike files() which is sandboxed to the open project).
   browse: (dir?: string | null) =>
     getJson<DirListing>(`/api/browse${dir ? `?dir=${encodeURIComponent(dir)}` : ""}`),
+  // UNWIRED seam (both): the schema-driven association menu and its chips.
+  // The Tools tab's disabled "Associate" button is what wires them up. See
+  // gui.md's "known unwired seams".
   filesEligible: (filename: string) =>
     postJson<{ eligible: EligiblePair[] }>("/api/files/eligible", { filename }),
   filesAssociations: () =>
     getJson<{ associations: AssociationMap }>("/api/files/associations"),
-  preview: (comp_type: string, name?: string | null) =>
-    postJson<PreviewResult>("/api/preview", { comp_type, name: name ?? null }),
 
   // --- Tune tab (G10) ---
-  tunePrewarm: () => postJson<{ ok: boolean }>("/api/tune/prewarm", {}),
   tuneSolve: () => postJson<TuneStatus>("/api/tune/solve", {}),
   tuneStatus: () => getJson<TuneStatus>("/api/tune/status"),
   tuneResult: () => getJson<TuneResult>("/api/tune/result"),
@@ -300,7 +336,11 @@ export const api = {
   tuneHash: () => getJson<TuneHash>("/api/tune/hash"),
 };
 
-/** URL that serves a plot image from the active run's output directory. */
+/**
+ * URL that serves a plot image from the active run's output directory.
+ *
+ * UNWIRED seam, with `api.runPlots`: see gui.md's "known unwired seams".
+ */
 export function runImageUrl(path: string): string {
   return `/api/run/image?path=${encodeURIComponent(path)}`;
 }

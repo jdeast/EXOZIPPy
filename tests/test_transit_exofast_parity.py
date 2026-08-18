@@ -62,9 +62,7 @@ def _initial_point_fn(model, tensors):
     )
 
 
-@pytest.fixture(scope="module")
-def parity(tmp_path_factory):
-    """The fixture dict plus the rebuilt (system, model, model_flux)."""
+def _build_parity(tmp_path_factory, light_travel_time=None):
     with open(_FIXTURE_PATH) as f:
         fix = json.load(f)
 
@@ -76,6 +74,9 @@ def parity(tmp_path_factory):
     config["transit"][1]["file"] = _write_lc(
         d / "lc30min.dat", np.array(fix["smeared"]["time"])
     )
+    if light_travel_time is not None:
+        for entry in config["transit"]:
+            entry["light_travel_time"] = light_travel_time
 
     system = System(config, user_params=fix["user_params"])
     system.prepare()
@@ -84,6 +85,36 @@ def parity(tmp_path_factory):
         _initial_point_fn(model, system.transit._model_flux_node)()
     )
     return fix, system, model, model_flux
+
+
+@pytest.fixture(scope="module")
+def parity(tmp_path_factory):
+    """The fixture dict plus the rebuilt (system, model, model_flux)."""
+    return _build_parity(tmp_path_factory)
+
+
+@pytest.fixture(scope="module")
+def parity_no_ltt(tmp_path_factory):
+    """Same as `parity`, but with light-travel-time correction disabled.
+
+    The exofast_tran.pro IDL fixture is pre-LTT by construction -- EXOFASTv2
+    has no light-travel-time correction in this code path -- so comparing it
+    against an LTT-on EXOZIPPy model is not apples to apples: LTT on has
+    legitimately moved the model by ~a/c (~20s for this fixture's system),
+    which shows up as an ingress/egress-weighted few-1e-4 relative
+    discrepancy that is real physics, not a bug (confirmed: the shift
+    matches this system's own a/c, and vanishes here). Disabling LTT here
+    (light_travel_time: False set on both transit entries -- the real,
+    per-file config key, not a monkeypatched flag) restores the
+    apples-to-apples EXOFASTv2-parity check on the SHARED transit physics
+    (Kepler solve, limb darkening, geometry) that this fixture exists to
+    pin. LTT's own correctness (the 499s/AU amplitude, the 2a/c secondary
+    offset, the wired accessors/units) is covered separately and on purpose
+    by tests/test_ltt.py and tests/test_transit_ltt.py -- this fixture was
+    never meant to validate LTT, only the physics EXOFASTv2 and EXOZIPPy
+    both implement.
+    """
+    return _build_parity(tmp_path_factory, light_travel_time=False)
 
 
 def test_derived_inputs_match_reference(parity):
@@ -132,23 +163,28 @@ def test_derived_inputs_match_reference(parity):
         assert value == pytest.approx(ref[key], rel=1e-10, abs=1e-12), key
 
 
-def test_unsmeared_matches_exofast_tran(parity):
+def test_unsmeared_matches_exofast_tran(parity_no_ltt):
     """
     Given the 2-minute-cadence instrument with no exptime/ninterp keys
-    (the default, instantaneous model),
+    (the default, instantaneous model), and light-travel-time correction
+    DISABLED (see parity_no_ltt: the IDL fixture is pre-LTT by
+    construction, so this test compares EXOZIPPy and exofast_tran on the
+    shared, LTT-independent transit physics only -- LTT itself is pinned
+    separately by tests/test_ltt.py and tests/test_transit_ltt.py),
     When the per-observation model flux is evaluated at the initial point,
     Then it matches exofast_tran's light curve at every epoch.
     """
-    fix, system, model, model_flux = parity
+    fix, system, model, model_flux = parity_no_ltt
     rows = system.transit.inst_map == 0
     np.testing.assert_allclose(
         model_flux[rows], fix["unsmeared"]["flux"], atol=ATOL, rtol=0
     )
 
 
-def test_smeared_matches_exofast_tran(parity):
+def test_smeared_matches_exofast_tran(parity_no_ltt):
     """
     Given the 30-minute-cadence instrument with exptime=30 / ninterp=10,
+    and light-travel-time correction DISABLED (see parity_no_ltt),
     When the per-observation model flux is evaluated at the initial point,
     Then it matches EXOFASTv2's exposure-smeared light curve
     (exofast_chi2v2.pro's midpoint sub-exposure grid averaged with
@@ -156,7 +192,7 @@ def test_smeared_matches_exofast_tran(parity):
     sub-exposure offsets and the averaging against the reference
     implementation, not just against this module's own conventions.
     """
-    fix, system, model, model_flux = parity
+    fix, system, model, model_flux = parity_no_ltt
     rows = system.transit.inst_map == 1
     np.testing.assert_allclose(
         model_flux[rows], fix["smeared"]["flux"], atol=ATOL, rtol=0

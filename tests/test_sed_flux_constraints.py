@@ -1,10 +1,20 @@
 """
 Tests for the SED-based flux constraints (issue #18):
-  - mulensinstrument: per-lightcurve zeropoint Deterministic + Gaussian
-    potential tying f_source to the SED-predicted source magnitude
-    (KMT-2019-BLG-1806 example as the end-to-end case)
+  - mulensinstrument: per-lightcurve zeropoint tying f_source to the
+    SED-predicted source magnitude (KMT-2019-BLG-1806 example as the
+    end-to-end case)
   - astrometryinstrument: SED-derived photocenter flux fraction
     (fluxfrac_sed) replacing the sampled fluxfrac
+
+The zeropoint is a DERIVED Parameter, so its Deterministic is the single
+vector ``mulensinstrument.zeropoint`` (one element per light curve, in
+``system.mulensinstrument.names`` order) and its Gaussian prior is the one
+``gaussian_prior.mulensinstrument.zeropoint`` potential Parameter.build_pymc
+emits for a derived-with-sigma parameter.  It used to be a hand-built
+per-instrument ``mulensinstrument.<name>.zeropoint`` Deterministic plus a
+matching ``.zeropoint_prior`` potential; the per-light-curve content is
+identical, only the node layout changed.  See
+tests/test_data_derived_provenance.py for why it became a Parameter.
 """
 
 from pathlib import Path
@@ -53,59 +63,96 @@ def kmt_system(monkeypatch_module_cwd=None):
 
 
 def _eval(model, node, point):
+    """Evaluate a model node at ``point``.
+
+    ``replace_rvs_by_values`` is not optional.  A Deterministic's graph is
+    written over the RandomVariables, so compiling it against value_vars
+    leaves the RVs in place and the function DRAWS FROM THE PRIOR instead of
+    reading the point.  Within one process that is invisible -- pytensor.function
+    does not advance the shared rng, so every call returns the same draw and
+    two nodes compared against each other still agree -- but the value has
+    nothing to do with ``point``, and two different models draw differently.
+    """
+    (node,) = model.replace_rvs_by_values([node])
     f = pytensor.function(model.value_vars, node, on_unused_input="ignore")
     return f(*[point[v.name] for v in model.value_vars])
+
+
+def _zp_index(system, inst):
+    """Vector element of ``mulensinstrument.zeropoint`` for one light curve."""
+    return list(system.mulensinstrument.names).index(inst)
 
 
 def test_zeropoint_deterministic_and_prior_per_lightcurve(kmt_system):
     """
     Given three mulensing instruments with an I band and a sed block,
     When the model is built,
-    Then each instrument gets its own zeropoint Deterministic and a
-    Gaussian zeropoint_prior potential.
+    Then the zeropoint Deterministic carries one element per instrument,
+    each with its own value, and a Gaussian prior potential is applied to
+    it.
     """
-    system, model, _ = kmt_system
-    names = list(model.named_vars)
-    pot_names = [p.name for p in model.potentials]
-    for inst in ("KMTC04", "KMTS04", "KMTA04"):
-        assert f"mulensinstrument.{inst}.zeropoint" in names
-        assert f"mulensinstrument.{inst}.zeropoint_prior" in pot_names
+    system, model, point = kmt_system
+    assert "mulensinstrument.zeropoint" in model.named_vars
+    assert "gaussian_prior.mulensinstrument.zeropoint" in [
+        p.name for p in model.potentials
+    ]
+
+    zp = np.atleast_1d(
+        _eval(model, model["mulensinstrument.zeropoint"], point)
+    )
+    assert zp.shape == (3,)
+    assert np.all(np.isfinite(zp))
+    # "its own zeropoint": three different light curves, three values.
+    per_inst = {
+        inst: float(zp[_zp_index(system, inst)])
+        for inst in ("KMTC04", "KMTS04", "KMTA04")
+    }
+    assert len(set(per_inst.values())) == 3, per_inst
 
 
 def test_zeropoint_value_matches_manual_computation(kmt_system):
     """
     Given the built KMT model,
-    When the KMTC04 zeropoint Deterministic is evaluated at the initial
-    point,
+    When the KMTC04 zeropoint element is evaluated at the initial point,
     Then it equals m_SED(source, Cousins I) + 2.5*log10(f_source[0]),
     computed independently from the SED prediction node.
     """
     system, model, point = kmt_system
     source_idx = int(system.lens.source_map[0])
+    i = _zp_index(system, "KMTC04")
 
     m_pred = system.sed.predict_star_appmag(source_idx, "Cousins_I", system)
-    fs = system.mulensinstrument.f_source.value[0]
+    fs = system.mulensinstrument.f_source.value[i]
     expected = _eval(model, m_pred + 2.5 * pytensor.tensor.log10(fs), point)
 
-    zp = _eval(model, model["mulensinstrument.KMTC04.zeropoint"], point)
-    assert zp == pytest.approx(float(expected), rel=1e-10)
+    zp = np.atleast_1d(
+        _eval(model, model["mulensinstrument.zeropoint"], point)
+    )
+    assert float(zp[i]) == pytest.approx(float(expected), rel=1e-10)
 
 
 def test_zeropoint_prior_penalty_scales_with_sigma(kmt_system):
     """
     Given the default 0 +/- 0.2 mag zeropoint prior,
-    When the zeropoint_prior potential is evaluated at the initial point,
-    Then it equals -0.5*(zp/0.2)^2 for that instrument's zeropoint.
+    When the zeropoint prior potential is evaluated at the initial point,
+    Then it equals the sum over light curves of -0.5*(zp_i/0.2)^2 -- the
+    same per-light-curve penalty the three separate potentials carried.
     """
     system, model, point = kmt_system
-    zp = _eval(model, model["mulensinstrument.KMTC04.zeropoint"], point)
+    zp = np.atleast_1d(
+        _eval(model, model["mulensinstrument.zeropoint"], point)
+    )
     pot = [
         p
         for p in model.potentials
-        if p.name == "mulensinstrument.KMTC04.zeropoint_prior"
+        if p.name == "gaussian_prior.mulensinstrument.zeropoint"
     ][0]
     val = _eval(model, pot, point)
-    assert val == pytest.approx(-0.5 * (float(zp) / 0.2) ** 2, rel=1e-8)
+    expected = float(np.sum(-0.5 * (zp / 0.2) ** 2))
+    assert float(val) == pytest.approx(expected, rel=1e-8)
+    # every light curve contributes -- not just the first
+    for inst in ("KMTC04", "KMTS04", "KMTA04"):
+        assert zp[_zp_index(system, inst)] != 0.0
 
 
 def test_kmt_model_logp_is_finite(kmt_system):
@@ -117,6 +164,74 @@ def test_kmt_model_logp_is_finite(kmt_system):
     _, model, point = kmt_system
     logp = model.compile_logp()(point)
     assert np.isfinite(logp)
+
+
+def test_zeropoint_is_unchanged_by_a_flux_format_light_curve(
+    kmt_system, tmp_path
+):
+    """
+    Given the same event with every light curve rewritten in flux format
+    (F = 10**(-0.4 m), sigma_F = F*sigma_m*ln(10)/2.5),
+    When the model is built,
+    Then every zeropoint element, and the whole logp, match the
+    magnitude-format build to round-off.
+
+    The microlensing likelihood is Gaussian in flux, and f_source lives in the
+    data file's own flux system -- which for a magnitude file is the system in
+    which F = 10**(-0.4 m).  The zeropoint is exactly what absorbs that
+    arbitrary offset, so the SED tie must not notice which format the file was
+    written in.  If it ever does, the zp prior (0 +/- 0.2 mag) is silently
+    constraining a different quantity than it claims to.
+    """
+    import os
+    import shutil
+
+    if not _KMT_DIR.is_dir():
+        pytest.skip("KMT-2019-BLG-1806 example not present")
+
+    mag_system, mag_model, mag_point = kmt_system
+
+    work = tmp_path / "flux_twin"
+    shutil.copytree(_KMT_DIR, work)
+
+    cwd = os.getcwd()
+    os.chdir(work)
+    try:
+        with open("KMT-2019-BLG-1806.yaml") as f:
+            config = yaml.safe_load(f)
+        with open(config["parameter_file"]) as f:
+            user_params = yaml.safe_load(f)
+        for k in ("run", "prefix", "parameter_file", "sampler"):
+            config.pop(k, None)
+
+        for entry in config["mulensinstrument"]:
+            rows = np.loadtxt(entry["file"])
+            flux = 10.0 ** (-0.4 * rows[:, 1])
+            err = flux * rows[:, 2] * np.log(10.0) / 2.5
+            np.savetxt(entry["file"], np.column_stack([rows[:, 0], flux, err]))
+            entry["data_format"] = "flux"
+
+        flux_system = System(config, user_params=user_params)
+        flux_system.prepare()
+        flux_model = flux_system.build_model()
+        flux_point = flux_model.initial_point()
+    finally:
+        os.chdir(cwd)
+
+    name = "mulensinstrument.zeropoint"
+    zp_mag = np.atleast_1d(_eval(mag_model, mag_model[name], mag_point))
+    zp_flux = np.atleast_1d(_eval(flux_model, flux_model[name], flux_point))
+    for inst in ("KMTC04", "KMTS04", "KMTA04"):
+        i = _zp_index(mag_system, inst)
+        assert _zp_index(flux_system, inst) == i, inst
+        assert float(zp_flux[i]) == pytest.approx(
+            float(zp_mag[i]), rel=1e-9
+        ), inst
+
+    lp_mag = float(np.asarray(mag_model.compile_logp()(mag_point)))
+    lp_flux = float(np.asarray(flux_model.compile_logp()(flux_point)))
+    assert np.isfinite(lp_mag)
+    assert lp_flux == pytest.approx(lp_mag, rel=1e-9)
 
 
 def test_zeropoint_sigma_zero_raises():

@@ -1,29 +1,31 @@
-import inspect
-
 import numpy as np
 import sympy as sp
 
-from ...constants import KEPLER_CONST, LOGG_CONST, G
+from ...constants import KEPLER_CONST, G
 
 # ---------------------------------------------------------
 # 1. Define Symbols
 # ---------------------------------------------------------
 
+# Only symbols that appear in RELATIONS below are declared: ConfigManager
+# binds a relation's free_symbols to the paths get_symbol_map names, by
+# symbol NAME, so a declared-but-unused symbol is inert.  (The map itself is
+# wider than this list on purpose -- every mapped path becomes a leaf symbol
+# in the relaxation engine whether or not a relation mentions it.)
+
 # All parameters are strictly real.
 # Positivity bounds (mass > 0, radius > 0) are enforced downstream by defaults.yaml
 star_radius, star_mass = sp.symbols("star_radius star_mass", real=True)
 mass, radius = sp.symbols("mass radius", real=True)
-p, ar = sp.symbols("p ar", real=True)
+p = sp.symbols("p", real=True)
 density = sp.symbols("density", real=True)
 
 # Log parameters
-logg = sp.symbols("logg", real=True)
 log_q = sp.symbols("log_q", real=True)
 ecc = sp.symbols("ecc", real=True)
 
-K, arsun, sini, period, m_total = sp.symbols(
-    "K arsun sini period m_total", real=True
-)
+K, sini, period = sp.symbols("K sini period", real=True)
+a, ar, m_total = sp.symbols("a ar m_total", real=True)
 
 # ---------------------------------------------------------
 # 2. Symbol Map
@@ -47,7 +49,7 @@ def get_symbol_map(config):
         "p": "p",
         "ar": "ar",
         "K": "K",
-        "arsun": "arsun",
+        "a": "a",
         "m_total": "m_total",
         # Cross-Component Bridges:
         "sini": f"orbit.{orbit_idx}.sini",
@@ -75,18 +77,11 @@ RELATIONS = [
     sp.Eq(mass, (10**log_q) * star_mass),
     # Bulk Density (rho \propto M / R^3)
     sp.Eq(density, mass / (radius**THREE)),
-    # Surface Gravity in cgs (g = G * M / R^2)
-    # sp.Eq(logg, LOGG_CONST + sp.log(mass, 10) - 2.0 * sp.log(radius, 10)),
-    sp.Eq(
-        p, radius / star_radius
-    ),  # You'll need to define star_radius as a symbol!
-    # RV semi-amplitude
-    # sp.Eq(m_total, star_mass + mass),
-    # sp.Eq(arsun, KEPLER_CONST * (m_total ** (1.0/3.0)) * (period ** (2.0/3.0))),
-    # sp.Eq(K, (2.0 * sp.pi * sini * arsun * mass) /
-    #             (period * m_total * sp.sqrt(1.0 - ecc ** 2))),
-    # sp.Eq(K,((2.0*sp.pi*G)/(period*(star_mass + mass)**2))**(1.0/3.0)*mass*sini/(sp.sqrt(1.0-ecc**2)))
-    # sp.Eq(mass, sp.Symbol('mass_check_sentinel')) # this triggers our custom solver for K->mass
+    # Radius ratio
+    sp.Eq(p, radius / star_radius),
+    # RV semi-amplitude.  planet.logg has no relation here on purpose:
+    # star/symbolic_physics.py owns the logg bridge, and the runtime value
+    # comes from planet/physics.py's calc_logg_from_mass.
     sp.Eq(
         K,
         (
@@ -97,6 +92,38 @@ RELATIONS = [
         * sini
         / sp.sqrt(ONE - ecc**TWO),
     ),
+    # ---- The scaled semi-major axis, and what it unlocks -------------------
+    # These three say what planet/physics.py's calc_m_total, calc_arsun and
+    # calc_arstar compute, and they exist because NOTHING resolved a/R* before
+    # them.  That gap was worked around twice: Planet._initial_semimajor_axes
+    # recomputed the start by hand for the crossing barrier, and the transit
+    # chord (below) could not be bridged at all, since its inversion needs
+    # a/R*.  One definition in the engine replaces both workarounds.
+    #
+    # `a`, `ar` and `m_total` carry rank 5 in defaults.yaml so Condition B
+    # always rewrites THEM rather than the mass, radius or period they are
+    # derived from.  That is not a preference, it is the only correct
+    # direction: all three are derived Parameters whose runtime value is their
+    # expression, so a seed on one cannot survive into the model anyway -- and
+    # letting a stale `planet.ar` entry silently move a period would be the
+    # exact inversion the ranking system exists to prevent.
+    #
+    # They also make the engine FASTER, which is not the reason for them but is
+    # worth knowing: resolving a/R* and (through it) esinw early takes an
+    # iteration out of the relaxation loop.  Measured on examples/kelt17,
+    # prepare() went from 2.8 s to 2.0 s.
+    #
+    # The transit chord is deliberately NOT bridged by a relation here.  It
+    # would be the natural next line -- chord^2 + b^2 = (1 + p)^2, now that
+    # a/R* resolves -- and it costs 7.6 s of sympy per System (2.0 s -> 9.6 s
+    # on the same example), because the equation is quadratic in the chord and
+    # transcendental in omega, and the engine attempts every unresolved symbol
+    # in it.  orbit/symbolic_physics.py registers a ten-line solver instead,
+    # for the same reason planet.log_q has one: "so the inversion never reaches
+    # sp.solve".
+    sp.Eq(m_total, mass + star_mass),
+    sp.Eq(a**THREE, (KEPLER_CONST**THREE) * m_total * (period**TWO)),
+    sp.Eq(ar, a / star_radius),
 ]
 
 
@@ -184,10 +211,3 @@ def solve_companion_mass(K, ecc, sini, period, primary_mass):
     )
 
     return companion_mass  # Return in Msun
-
-
-def get_solver_paths():
-    """
-    Returns the equations defining the physical state of a Planet.
-    """
-    return RELATIONS

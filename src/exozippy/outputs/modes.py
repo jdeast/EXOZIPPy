@@ -18,6 +18,12 @@ Pipeline (see identify_modes):
      connecting each pair of cluster centers: if the empirical density does
      not dip between the two centers, they are one mode (this un-splits
      curved/banana-shaped posteriors that k-means fragments).
+  4b. Merge clusters connected by a populated, lp-flat path (the
+     lp-barrier ridge test, ``_lp_ridge_merge``): a flat likelihood ridge
+     -- an unconstrained degeneracy direction, e.g. m--cos i in an
+     RV-only fit -- separates in density without separating in
+     likelihood, and only an lp BARRIER makes two clusters two modes.
+     Skipped when the trace has no lp.
   5. Drop modes below ``min_weight``; order the survivors by weight.
   6. Compute per-chain occupancies and inter-mode transition counts, and
      derive a *provenance* label for the reported weights: draw-count
@@ -38,6 +44,14 @@ from typing import Any, List, Optional
 import numpy as np
 
 from .autocorr import iact
+
+# Re-exported, not defined here: mode_suffix names both the per-mode LaTeX
+# macros (emitted in components/parameter.py, referenced in outputs/latex.py)
+# and the per-mode plot files (run.py), so it has to be spelled in a module
+# components/ can import -- see the "Macro name pieces" note in texutils.py.
+# Kept importable from here because `mode_suffix` reads as a modes concept
+# at every call site.
+from .texutils import mode_suffix  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -81,20 +95,77 @@ _INVALID_REASONS = ("nonfinite-raw", "nonfinite-lp", "lp-ceiling", "raw-z")
 DEFAULT_MIN_WEIGHT_ESS = 30.0
 
 
-def _idx_to_words(n):
-    words = {
-        "0": "zero",
-        "1": "one",
-        "2": "two",
-        "3": "three",
-        "4": "four",
-        "5": "five",
-        "6": "six",
-        "7": "seven",
-        "8": "eight",
-        "9": "nine",
-    }
-    return "".join(words[char] for char in str(n))
+# Outcome vocabulary for one mode-identification attempt, following the
+# status-dict pattern of outputs/ledger.py's hot-chain search (HOT_*) and
+# outputs/evidence.py's per-mode bridge estimates (EV_*).
+#
+# The distinction that matters is between the last two.  Both end with
+# ``mode_report = None`` at the call site, and until 2026-08-12 that was the
+# ONLY thing the caller could see -- so the numerical-validity gate below,
+# which returns immediately on a None report, was bypassed in exactly the
+# worst case: EVERY draw rejected.  A trace with 1.1% invalid draws refused
+# to emit tables while a trace with 100% invalid draws emitted a full set
+# that read as clean (review item 3.17).  MODE_NO_VALID_DRAWS is the signal
+# that separates "the draws are unusable" from "we could not tell you
+# anything, for some other reason"; it can only be set from
+# NoValidDrawsError, which identify_modes raises from one place.
+MODE_OK = "ok"
+MODE_NO_VALID_DRAWS = "no-valid-draws"
+MODE_FAILED = "failed"
+
+
+class NoValidDrawsError(ValueError):
+    """Every draw in the trace failed identify_modes' validity filter.
+
+    A ValueError subclass, so any pre-existing ``except ValueError`` around
+    identify_modes keeps behaving as before.
+
+    It carries the counts because it is the only channel through which the
+    all-invalid case can reach ``check_invalid_frac``: there is nothing to
+    cluster, so no ModeReport exists to read ``n_invalid``/``invalid_frac``
+    off, and a bare exception would leave the gate with nothing to gate on.
+    """
+
+    def __init__(self, n_invalid, n_draws, reason_counts=None, per_chain=None):
+        self.n_invalid = int(n_invalid)
+        self.n_draws = int(n_draws)
+        self.invalid_frac = (
+            self.n_invalid / self.n_draws if self.n_draws else 0.0
+        )
+        self.reason_counts = dict(reason_counts or {})
+        self.per_chain_invalid = (
+            list(per_chain) if per_chain is not None else []
+        )
+        # The leading clause is load-bearing: callers and tests match on
+        # "no valid draws".
+        super().__init__(
+            f"identify_modes: no valid draws in trace -- all "
+            f"{self.n_invalid} draws ({self.invalid_frac:.2%}) failed the "
+            f"numerical-validity filter (reasons={self.reason_counts}, "
+            f"per-chain invalid counts={self.per_chain_invalid})"
+        )
+
+
+def _invalid_reason_hint(reason_counts):
+    """One actionable sentence about the dominant rejection reason."""
+    if not reason_counts:
+        return ""
+    dominant = max(reason_counts, key=lambda r: reason_counts[r])
+    if dominant == "nonfinite-raw":
+        return (
+            " The sampled parameter values themselves are non-finite, so "
+            "the sampler never produced a usable point: check the model's "
+            "logp at the start point and the sampler's step-size adaptation."
+        )
+    if dominant in ("nonfinite-lp", "lp-ceiling"):
+        return (
+            " The stored log-posterior is non-finite (or beyond "
+            f"|lp| = {DEFAULT_LP_ABS_MAX:g}) for every draw. The parameter "
+            "values may still look perfectly reasonable in the tables, "
+            "which is exactly why this cannot be allowed to pass quietly: "
+            "check the model's logp for NaN/inf-producing terms."
+        )
+    return ""
 
 
 def check_invalid_frac(
@@ -103,31 +174,129 @@ def check_invalid_frac(
     force=False,
     trace_path=None,
     modes_path=None,
+    status=None,
 ):
-    """Raise if ``mode_report``'s invalid-draw fraction exceeds the threshold.
+    """Raise if the trace's invalid-draw fraction exceeds the threshold.
 
     A trace this numerically broken must not silently emit final tables.
     Call this only after the trace and mode report have already been
     written to disk, so the raise preserves that evidence for forensics.
     ``force=True`` (config ``modes: {force: true}``) or a higher
     ``max_invalid_frac`` re-enables processing of a known-bad trace.
+
+    ``mode_report`` may be None, which is ambiguous on its own and so is
+    disambiguated by ``status`` (the dict build_mode_reports fills in):
+
+    * ``state == MODE_NO_VALID_DRAWS`` -- identify_modes rejected EVERY
+      draw and could not build a report.  That is a 100% invalid fraction,
+      the most extreme form of exactly what this gate exists to catch, and
+      it is gated on the same comparison and honours the same overrides as
+      a partially-invalid report.  Passing it silently is review item 3.17.
+    * anything else (including no status at all) -- mode identification
+      produced no report for a reason that says nothing about the draws'
+      numerical validity (an unclustered trace, a crash in the mode pass).
+      There is nothing to gate on and this returns, unchanged.
     """
-    if force or mode_report is None or not mode_report.n_invalid:
+    if mode_report is not None:
+        n_invalid = int(mode_report.n_invalid)
+        frac = mode_report.invalid_frac
+        reason_counts = dict(mode_report.invalid_reason_counts or {})
+        per_chain = None
+        all_invalid = False
+    elif status and status.get("state") == MODE_NO_VALID_DRAWS:
+        n_invalid = int(status.get("n_invalid", 0))
+        frac = float(status.get("invalid_frac", 0.0))
+        reason_counts = dict(status.get("reasons") or {})
+        per_chain = status.get("per_chain_invalid")
+        all_invalid = True
+    else:
         return
-    if mode_report.invalid_frac <= max_invalid_frac:
+
+    if not n_invalid or frac <= max_invalid_frac:
         return
+    if force:
+        logger.warning(
+            "modes: %d draws (%.2f%%) are numerically invalid, above "
+            "max_invalid_frac=%.2f%%, but `modes: {force: true}` was set -- "
+            "emitting tables from a trace known to be broken. reasons=%s",
+            n_invalid,
+            100 * frac,
+            100 * max_invalid_frac,
+            reason_counts,
+        )
+        return
+
     where = ""
     if trace_path or modes_path:
         where = f" The trace ({trace_path}) and mode report ({modes_path}) have already been written."
+    override = (
+        " Override with config `modes: {force: true}` (or raise "
+        "`modes.max_invalid_frac`) to re-process forensically."
+    )
+    if all_invalid:
+        raise RuntimeError(
+            f"identify_modes: ALL {n_invalid} draws ({frac:.2%}) were "
+            "rejected as numerically invalid, so no posterior mode could be "
+            "identified and NO summary of this trace is meaningful -- the "
+            "tables would describe draws that were all rejected. "
+            f"reasons={reason_counts}, per-chain invalid counts={per_chain}."
+            + _invalid_reason_hint(reason_counts)
+            + where
+            + " Re-run `exozippy-modes <config>` to inspect the trace "
+            "without raising." + override
+        )
     raise RuntimeError(
-        f"identify_modes: {mode_report.n_invalid} draws "
-        f"({mode_report.invalid_frac:.2%}) rejected as numerically invalid, "
+        f"identify_modes: {n_invalid} draws "
+        f"({frac:.2%}) rejected as numerically invalid, "
         f"exceeding max_invalid_frac={max_invalid_frac:.2%}. This indicates "
         "a model or sampler bug -- investigate before trusting any output."
         + where
-        + " Override with config `modes: {force: true}` (or raise "
-        "`modes.max_invalid_frac`) to re-process forensically."
+        + override
     )
+
+
+def mode_status_to_text(status):
+    """Render a MODE_NO_VALID_DRAWS outcome for ``<prefix>_modes.txt``.
+
+    Mirrors ``ledger.hot_status_to_text``: returns "" for anything it has
+    nothing to say about, so callers can pass a status dict unconditionally.
+
+    Only the all-invalid state renders.  MODE_OK writes a real report (that
+    is ModeReport.to_text's job) and MODE_FAILED is deliberately left
+    byte-identical to its pre-3.17 behaviour -- a crash in the mode pass is
+    not evidence about the draws, and the file it would write here would be
+    the only place claiming otherwise.
+    """
+    if not status or status.get("state") != MODE_NO_VALID_DRAWS:
+        return ""
+    n_invalid = int(status.get("n_invalid", 0))
+    frac = float(status.get("invalid_frac", 0.0))
+    lines = [
+        "Posterior mode report",
+        "=====================",
+        "",
+        "*** NO VALID DRAWS ***",
+        "",
+        f"All {n_invalid} draws ({frac:.2%}) in this trace were rejected as",
+        "numerically invalid, so no mode could be identified and no mode",
+        "report exists. Any table or plot generated from this trace",
+        "describes draws that the validity filter rejected in full.",
+        "",
+        f"reasons: {status.get('reasons') or {}}",
+        f"per-chain invalid counts: {status.get('per_chain_invalid')}",
+    ]
+    hint = _invalid_reason_hint(status.get("reasons") or {})
+    if hint:
+        lines += ["", hint.strip()]
+    lines += [
+        "",
+        "This is a model or sampler bug, not a reporting problem. A live",
+        "fit refuses to write final tables in this state; this file was",
+        "written by a forensic re-processing run (exozippy-modes) or by a",
+        "run with `modes: {force: true}` set.",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def _fmt_pm(value, err, fmt="{:.4f}"):
@@ -136,11 +305,6 @@ def _fmt_pm(value, err, fmt="{:.4f}"):
     if err is not None and np.isfinite(err):
         text += " +/- " + fmt.format(err)
     return text
-
-
-def mode_suffix(k):
-    """LaTeX-macro-safe suffix for mode ``k`` (0-based): 'modeone', ..."""
-    return "mode" + _idx_to_words(k + 1)
 
 
 @dataclass
@@ -569,6 +733,108 @@ def _dip_merge(X, labels, centers, merge_ratio):
     return new_labels, new_centers, n_new != k
 
 
+def _lp_ridge_merge(X, lp, labels, centers, sigma_lp, k_sigma=3.0, n_bins=10):
+    """Merge cluster pairs connected by a populated, lp-flat path.
+
+    Complements ``_dip_merge``, which asks whether the OCCUPANCY density
+    dips between two centers.  Occupancy is the wrong witness for a flat
+    likelihood ridge whose far end is stretched out by the raw-space
+    transform: on an RV-only fit (kelt4), the m--cos i degeneracy tail at
+    cos i -> 1 sits ~1500 raw units from the bulk -- a huge density gap,
+    so the dip test keeps it as a separate "mode" -- while the draws'
+    max-lp is flat to ~6 nats along the whole path, i.e. there is NO
+    likelihood barrier and it is one connected basin.
+
+    Two genuinely distinct modes ARE separated by an lp barrier: the
+    region between them is either empty of draws (chains rarely cross)
+    or populated only by stragglers whose lp sits far below both peaks.
+    So, for each cluster pair, project every draw in ``_dip_merge``'s
+    cylinder onto the center-to-center segment and bin the interior:
+    merge iff EVERY interior bin is populated (an empty bin is absence
+    of evidence and never merges -- this is also what keeps a curved
+    banana whose true path bows away from the straight segment safely
+    unmerged) AND no bin's max-lp dips more than ``k_sigma * sigma_lp``
+    below the lower of the two clusters' own lp peaks.
+
+    ``sigma_lp`` is the draw-to-draw lp scatter (the caller measures it
+    within the dominant cluster, floored at sqrt(n_dims/2), the chi2
+    width that scatter approaches for a well-sampled Gaussian): max-lp
+    per bin fluctuates by that much even along a perfectly flat ridge,
+    so the threshold must scale with it.
+
+    Returns ``(labels, centers, merged_any, merge_notes)``.
+    """
+    k = centers.shape[0]
+    parent = list(range(k))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    finite = np.isfinite(lp)
+    merge_notes = []
+    for i in range(k):
+        for j in range(i + 1, k):
+            mi, mj = labels == i, labels == j
+            if not ((mi & finite).any() and (mj & finite).any()):
+                continue
+            u = centers[j] - centers[i]
+            sep = np.linalg.norm(u)
+            if sep == 0:
+                parent[find(j)] = find(i)
+                continue
+            u = u / sep
+
+            t_all = (X - centers[i]) @ u / sep  # 0 at c_i, 1 at c_j
+            # same cylinder as _dip_merge: perpendicular radius from the
+            # two clusters' own scatter about the segment
+            perp2 = ((X - centers[i]) ** 2).sum(axis=1) - (t_all * sep) ** 2
+            r2 = np.median(perp2[mi | mj])
+            in_cyl = (perp2 <= 4.0 * max(r2, 1e-12)) & finite
+
+            peak = min(lp[mi & finite].max(), lp[mj & finite].max())
+            allowed_dip = k_sigma * sigma_lp
+
+            edges = np.linspace(0.0, 1.0, n_bins + 1)
+            bin_idx = np.digitize(t_all[in_cyl], edges) - 1
+            lp_cyl = lp[in_cyl]
+            connected = True
+            worst = 0.0
+            for b in range(n_bins):
+                sel = bin_idx == b
+                if not sel.any():
+                    connected = False
+                    break
+                worst = max(worst, peak - lp_cyl[sel].max())
+            if connected and worst <= allowed_dip:
+                parent[find(j)] = find(i)
+                merge_notes.append(
+                    f"clusters merged as one basin: the path between "
+                    f"their centers is populated in every one of "
+                    f"{n_bins} bins with max-lp within {worst:.1f} nats "
+                    f"of the lower peak (threshold {allowed_dip:.1f} = "
+                    f"{k_sigma:g} x sigma_lp {sigma_lp:.1f}) -- a flat "
+                    f"likelihood ridge (e.g. an unconstrained "
+                    f"degeneracy direction), not a separate mode"
+                )
+
+    roots = {}
+    new_labels = np.empty_like(labels)
+    for old in range(k):
+        r = find(old)
+        if r not in roots:
+            roots[r] = len(roots)
+    for old in range(k):
+        new_labels[labels == old] = roots[find(old)]
+    n_new = len(roots)
+    new_centers = np.vstack(
+        [X[new_labels == c].mean(axis=0) for c in range(n_new)]
+    )
+    return new_labels, new_centers, n_new != k, merge_notes
+
+
 def _count_transitions(labels_2d):
     """Inter-mode label changes along each chain, skipping unassigned draws."""
     return int(transition_stats(labels_2d)[0])
@@ -788,11 +1054,10 @@ def identify_modes(
         # DEFAULT_LP_EXEMPT_MARGIN).  Skipped when lp is unavailable.
         if has_lp and (valid & z_ok).any():
             lp_bulk_med = np.median(lp[valid & z_ok])
-            exempt = (
-                valid
-                & ~z_ok
-                & np.nan_to_num(lp >= lp_bulk_med - lp_exempt_margin)
-            )
+            # No NaN guard on the comparison: `valid` already requires
+            # np.isfinite(lp), and a NaN lp compares False here anyway, so a
+            # nonfinite-lp draw cannot be exempted either way.
+            exempt = valid & ~z_ok & (lp >= lp_bulk_med - lp_exempt_margin)
             n_exempt = int(exempt.sum())
             if n_exempt:
                 notes.append(
@@ -833,7 +1098,15 @@ def identify_modes(
             invalid_per_chain.tolist(),
         )
     if not valid.any():
-        raise ValueError("identify_modes: no valid draws in trace")
+        # Carries the counts so the caller's validity gate has something to
+        # gate on: no ModeReport can exist here, and a bare exception is
+        # indistinguishable from any other mode-pass failure (review 3.17).
+        raise NoValidDrawsError(
+            n_invalid,
+            n_samples,
+            reason_counts=invalid_reason_counts,
+            per_chain=invalid_per_chain.tolist(),
+        )
 
     # ---- standardize + cluster ------------------------------------------
     Xv = X[valid]
@@ -856,6 +1129,38 @@ def identify_modes(
         fit_labels, centers, merged = _dip_merge(
             Xs[idx_fit], fit_labels, centers, merge_ratio
         )
+
+    # lp-barrier ridge merge: the dip test above keeps any cluster the
+    # occupancy density separates, but a flat likelihood ridge (an
+    # unconstrained degeneracy direction, stretched out by the raw-space
+    # transform) separates in DENSITY without separating in LIKELIHOOD.
+    # Where lp exists, merge cluster pairs whose connecting path is
+    # populated end to end with no lp barrier; alternate with the dip
+    # merge until stable, since each merge moves centers.
+    if has_lp and centers.shape[0] > 1:
+        lp_fit = lp[valid][idx_fit]
+        big = np.argmax(np.bincount(fit_labels, minlength=centers.shape[0]))
+        lp_big = lp_fit[(fit_labels == big) & np.isfinite(lp_fit)]
+        # lp scatter along a flat ridge: measured in the dominant cluster,
+        # floored at the chi2 width sqrt(n_dims/2) it approaches for a
+        # well-sampled Gaussian (degenerate fallback: the floor alone).
+        sigma_lp = max(
+            float(np.std(lp_big)) if lp_big.size > 1 else 0.0,
+            float(np.sqrt(Xs.shape[1] / 2.0)),
+        )
+        merged = True
+        while merged and centers.shape[0] > 1:
+            fit_labels, centers, merged, ridge_notes = _lp_ridge_merge(
+                Xs[idx_fit], lp_fit, fit_labels, centers, sigma_lp
+            )
+            notes.extend(ridge_notes)
+            # a ridge merge moves centers; re-run the dip merge to its
+            # own fixpoint before asking about ridges again
+            dip = merged
+            while dip and centers.shape[0] > 1:
+                fit_labels, centers, dip = _dip_merge(
+                    Xs[idx_fit], fit_labels, centers, merge_ratio
+                )
 
     # assign every valid draw to nearest surviving center
     d2 = ((Xs[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
@@ -885,7 +1190,6 @@ def identify_modes(
     n_modes = order.size
     w_assigned = np.bincount(labels_full[labels_full >= 0], minlength=n_modes)
     w_assigned = w_assigned / w_assigned.sum()
-    lp_2d = lp.reshape(n_chain, n_draw)
 
     lp_maxes = []
     modes = []
@@ -970,7 +1274,7 @@ def identify_modes(
         reliable = chains_visiting_all and enough_transitions
         mixing = (
             f"{n_transitions} mode changes in the stored draws, "
-            f"{n_round_trips} round trips, "
+            f"{n_round_trips} mode round trips, "
             f"{n_no_switch}/{int((transitions_per_chain >= 0).sum())} chains "
             f"never switched; N_eff for the weights >= {min_ess:.1f}"
         )

@@ -1,11 +1,14 @@
 import csv
-import pathlib
 
 import numpy as np
 
 from ..components import Parameter
-from ..components.parameter import _idx_to_words
-from .texutils import latex_escape
+from .texutils import (
+    latex_escape,
+    latex_escape_prose,
+    mode_suffix,
+    mode_word,
+)
 
 # The two column layouts of <prefix>_results.csv.  MODE_COLUMNS is used
 # whenever ANY row in the file needs a mode key -- a multimodal posterior,
@@ -75,7 +78,7 @@ def _mixing_sentence(mode_report):
         return ""
     text = (
         f"Mode changes in the stored draws: {mode_report.n_transitions} "
-        f"({mode_report.n_round_trips} round trips); "
+        f"({mode_report.n_round_trips} mode round trips); "
         f"{mode_report.n_chains_no_switch} of "
         f"{mode_report.n_chains_with_draws} chains never changed mode. "
     )
@@ -185,11 +188,17 @@ def build_csv_output(
                     else:
                         rows.append((name, val, "", ""))
 
+            # An INACTIVE element is not a parameter of its instance's
+            # parameterization (a non-MIST star's EEP), only a bookkeeping
+            # value in the vector -- so it gets no row here, in the LaTeX
+            # table, or in the startup table.
             if n_instances == 1:
-                emit(p.label, 0)
+                if p.element_is_active(0):
+                    emit(p.label, 0)
             else:
                 for i in range(n_instances):
-                    emit(p.get_display_label(i), i)
+                    if p.element_is_active(i):
+                        emit(p.get_display_label(i), i)
 
     columns = CSV_COLUMNS_MODE if mode_cols else CSV_COLUMNS_PLAIN
     with open(csv_filename, "w", newline="") as f:
@@ -212,23 +221,48 @@ def build_csv_output(
 def build_latex_output(
     system,
     var_filename="variables.tex",
-    template_filename="table_template.tex",
+    table_filename="table.tex",
     caption=None,
     tablecomments=None,
     mode_report=None,
 ):
-    """Write the LaTeX variable definitions and deluxetable template.
+    """Write the LaTeX variable definitions and the deluxetable FRAGMENT.
+
+    Both outputs are fragments, meant to be ``\\input`` by a wrapper
+    document: ``var_filename`` gets the ``\\providecommand`` set,
+    ``table_filename`` the ``deluxetable*`` body.  The one standalone
+    wrapper is ``<prefix>_paper.tex`` (``outputs/modeling.py``), which
+    supplies the ``aastex701`` preamble, inputs both files, and carries the
+    bibliography -- the table file itself used to be that wrapper, minus
+    the prose and with a ``\\bibliography{References}`` line pointing at a
+    file that never existed.
 
     With a multimodal ``mode_report`` (from outputs.modes.identify_modes,
     after system.distribute_posterior picked up the mode labels), the table
     gets one Value column per mode, a leading mode-weight row, and the weight
     provenance appended to the table comments.  Per-mode macro names carry a
     ``modeone``/``modetwo``/... suffix so every mode can be cited in the same
-    document; the unsuffixed macros keep their combined-posterior meaning.
+    document.
+
+    The unsuffixed value macro is then SUPPRESSED for every parameter that
+    has a posterior: a pooled-across-modes number is a summary of a
+    multimodal distribution and citing it in prose is almost always a
+    mistake, so the macro is not defined at all and a stale ``\\ezstarteff``
+    in a wrapper document fails loudly at compile time rather than printing
+    the mean of two separated peaks.  Two kinds of unsuffixed macro do
+    survive: a FIXED parameter's value (no per-mode variation, so its single
+    def applies to every mode -- and the table spans it with
+    ``\\multicolumn``), and every ``...prior`` macro, which describes the
+    model rather than the draws.  The mode weights get their own macros
+    (``\\ezmodeweightone``, ``\\ezmodeweighterrone``), which carry the bare
+    mode WORD rather than the ``mode``-prefixed suffix -- see the comment at
+    their emission site below.
     """
     multimodal = _multimodal(mode_report)
+    # THE cross-reference: these are the names Parameter.to_latex_mode_defs
+    # emits \providecommand for, so both sides call texutils.mode_suffix.
     mode_suffixes = (
-        [f"mode{_idx_to_words(k + 1)}" for k in range(mode_report.n_modes)]
+        [mode_suffix(k) for k in range(mode_report.n_modes)]
         if multimodal
         else None
     )
@@ -236,16 +270,22 @@ def build_latex_output(
     all_defs = []
     all_table_lines = []
 
-    # Distinct Parameter.table_note texts get sequential tablenotemark
-    # letters; the matching \tablenotetext lines are emitted after \enddata.
+    # Distinct note texts get sequential tablenotemark letters; the matching
+    # \tablenotetext lines are emitted after \enddata.  One registry serves
+    # both sources of notes -- Parameter.table_note annotations and
+    # component-declared prior contributions (prior_cell_and_notes), which
+    # used to be appended inline and set the Prior column's width.
     note_marks = {}
+
+    def _mark_for_text(text):
+        if text not in note_marks:
+            note_marks[text] = chr(ord("a") + len(note_marks))
+        return note_marks[text]
 
     def _mark_for(p):
         if not getattr(p, "table_note", None):
             return None
-        if p.table_note not in note_marks:
-            note_marks[p.table_note] = chr(ord("a") + len(note_marks))
-        return note_marks[p.table_note]
+        return _mark_for_text(p.table_note)
 
     all_defs.append(
         r"\providecommand{\bjdtdb}{\ensuremath{\rm {BJD_{TDB}}}}" + "\n"
@@ -300,7 +340,7 @@ def build_latex_output(
                 _ensure_mode_summaries(system, p, mode_report)
             if not multimodal or p.posterior is None:
                 all_defs.append(p.to_latex_def())
-            all_defs.append(p.to_latex_prior_def())
+            all_defs.append(p.to_latex_prior_def(mark_for=_mark_for_text))
             if multimodal:
                 all_defs.append(p.to_latex_mode_defs())
 
@@ -309,6 +349,8 @@ def build_latex_output(
         if n_instances == 1:
             all_table_lines.append(rf"\sidehead{{{comp_label}:}}" + "\n")
             for p in printable:
+                if not p.element_is_active(0):
+                    continue
                 all_table_lines.append(
                     p.to_table_line(
                         note_mark=_mark_for(p), mode_suffixes=mode_suffixes
@@ -321,12 +363,15 @@ def build_latex_output(
             for i in range(n_instances):
                 name = _instance_name(printable, i) or chr(ord("A") + i)
                 n_cols = 4 if not multimodal else 3 + mode_report.n_modes
-                all_table_lines.append(_instance_subhead(name, n_cols=n_cols))
 
+                instance_lines = []
                 for p in printable:
                     p_n = _instance_count(p)
+                    # Inactive elements carry no row (see build_csv_output).
+                    if not p.element_is_active(i if p_n > 1 else 0):
+                        continue
                     if p_n > 1:
-                        all_table_lines.append(
+                        instance_lines.append(
                             p.to_table_line_at(
                                 i,
                                 note_mark=_mark_for(p),
@@ -335,12 +380,22 @@ def build_latex_output(
                         )
                     elif i == 0:
                         # Scalar param shared across instances: show once
-                        all_table_lines.append(
+                        instance_lines.append(
                             p.to_table_line(
                                 note_mark=_mark_for(p),
                                 mode_suffixes=mode_suffixes,
                             )
                         )
+
+                # The sub-head only earns its line if the instance has rows:
+                # every parameter of an instance can now be inactive (a star
+                # with no evolutionary model in a system where another star has
+                # one), and a heading over nothing reads as a missing table.
+                if instance_lines:
+                    all_table_lines.append(
+                        _instance_subhead(name, n_cols=n_cols)
+                    )
+                    all_table_lines.extend(instance_lines)
 
     if multimodal:
         # Mode weights are citable macros too, and lead the table as a row.
@@ -348,8 +403,12 @@ def build_latex_output(
         # set by the number of independent mode transitions (NOT by the draw
         # count), and for evidence weighting it is the propagated lnZ error.
         # A weight printed bare invites reading 0.7 +/- 0.3 as 0.7 +/- 0.02.
+        # The weight macros carry the bare mode WORD (\ezmodeweightone), not
+        # the \...modeone suffix the value macros carry -- \ezmodeweight is
+        # already a mode-specific stem.  Same 0-based -> 1-based conversion
+        # either way, so both go through texutils.
         for k, m in enumerate(mode_report.modes):
-            suffix = _idx_to_words(k + 1)
+            suffix = mode_word(k)
             all_defs.append(
                 rf"\providecommand{{\ezmodeweight{suffix}}}"
                 rf"{{\ensuremath{{{m.weight:.3f}}}}}" + "\n"
@@ -363,12 +422,12 @@ def build_latex_output(
         # wrap the pair (nested \ensuremath is a no-op inside math mode).
         weight_cells = " & ".join(
             (
-                rf"\ensuremath{{\ezmodeweight{_idx_to_words(k + 1)} \pm "
-                rf"\ezmodeweighterr{_idx_to_words(k + 1)}}}\dotfill"
+                rf"\ensuremath{{\ezmodeweight{mode_word(k)} \pm "
+                rf"\ezmodeweighterr{mode_word(k)}}}\dotfill"
                 if np.isfinite(
                     getattr(mode_report.modes[k], "weight_err", np.nan)
                 )
-                else rf"\ezmodeweight{_idx_to_words(k + 1)}\dotfill"
+                else rf"\ezmodeweight{mode_word(k)}\dotfill"
             )
             for k in range(mode_report.n_modes)
         )
@@ -381,9 +440,13 @@ def build_latex_output(
         )
         all_table_lines.insert(0, weight_row)
 
+        # The provenance is composed as PLAIN TEXT (modes.txt is its first
+        # consumer) and really does carry N_eff and >= -- unescaped, the
+        # underscore is a hard "Missing $ inserted" in \tablecomments, found
+        # the first time the modeling draft auto-compiled a multimodal table.
         provenance_note = (
             "Mode weights: "
-            + mode_report.provenance
+            + latex_escape_prose(mode_report.provenance)
             + ". "
             + _mixing_sentence(mode_report)
             + "Combined "
@@ -427,13 +490,17 @@ def build_latex_output(
     else:
         value_heads = r"\colhead{Value}"
 
-    with open(template_filename, "w") as f:
-        f.write(r"\documentclass{aastex701}" + "\n")
-        f.write(r"\usepackage{apjfonts}" + "\n")
-        f.write(rf"\input{{{pathlib.Path(var_filename).stem}}}" + "\n")
-        f.write(r"\begin{document}" + "\n")
+    with open(table_filename, "w") as f:
+        # A pure fragment: no \documentclass, no \begin{document}, no
+        # bibliography lines -- outputs/modeling.py owns the one wrapper
+        # (and the historical \usepackage{apjfonts} trap is documented
+        # there, where the preamble now lives).
         f.write(r"\startlongtable" + "\n")
         f.write(rf"\begin{{deluxetable*}}{{{colspec}}}" + "\n")
+        # Four columns of prose-bearing cells; at the default size the
+        # widest description + value + prior rows overrun the page width
+        # (deluxetable does not wrap cells).
+        f.write(r"\tabletypesize{\scriptsize}" + "\n")
         if caption is not None:
             f.write(
                 rf"\tablecaption{{{caption} \label{{tab:{system.name}}}}}"
@@ -453,6 +520,3 @@ def build_latex_output(
         if tablecomments:
             f.write(rf"\tablecomments{{{tablecomments}}}" + "\n")
         f.write(r"\end{deluxetable*}" + "\n")
-        f.write(r"\bibliographystyle{aasjournalv7}" + "\n")
-        f.write(r"\bibliography{References}" + "\n")
-        f.write(r"\end{document}" + "\n")

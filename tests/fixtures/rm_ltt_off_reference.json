@@ -1,0 +1,8 @@
+{
+  "provenance": "Generated from exozippy git commit df96bd935f6c95cf002463b334507f758f054436 (current HEAD at generation time; rm.py had no committed light-travel-time wiring yet -- confirmed via grep to have no ltt/LIGHT_TRAVEL references -- by scripts/make_rm_ltt_off_reference.py. This is the pre-LTT compute_rm_rv output for the config/params in tests/test_rm_ltt.py's _rm_wiring_config/_rm_wiring_params, evaluated at the model's initial point. Used by test_rm_ltt_off_reproduces_pre_ltt_output so that test never needs to read git history, including after rm.py's own light-travel-time wiring is committed.",
+  "source_commit": "df96bd935f6c95cf002463b334507f758f054436",
+  "rm_rv": [
+    1.27140837283337e-13,
+    0.0
+  ]
+}

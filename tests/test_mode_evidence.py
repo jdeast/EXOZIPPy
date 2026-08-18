@@ -1,6 +1,7 @@
 """
-Tests for per-mode local evidence estimation via warp bridge sampling
-(outputs/evidence.py).
+Tests for per-mode local evidence estimation by bridge sampling
+(outputs/evidence.py) -- the plain Meng & Wong optimal bridge against a fitted
+Gaussian proposal; no warp is involved.
 
 The bridge estimator returns each mode's local log-evidence relative to a
 Gaussian proposal fit in raw (unconstrained) space; softmax of the lnZ values
@@ -49,6 +50,8 @@ import pytest
 from conftest import requires_fork
 from exozippy.outputs.autocorr import iact
 from exozippy.outputs.evidence import (
+    EV_RE2,
+    EV_UNSUPPORTED,
     EvidenceResult,
     _mode_draw_index,
     _segments,
@@ -285,17 +288,75 @@ def test_apply_evidence_weighting_falls_back_on_refusal():
 @requires_fork
 def test_evidence_refuses_heavy_tailed_mode():
     """
-    Given a single mode whose raw-space target is heavy-tailed (Cauchy) so a
-      Gaussian proposal cannot support the tails (the raw-space signature of a
-      bound pileup),
+    Given a single mode whose raw-space target is heavy-tailed (a 10-D
+      product of Cauchys) so a moment-matched Gaussian proposal cannot
+      support the tails,
     When estimate_mode_evidences runs,
-    Then it refuses the mode rather than reporting a number.
+    Then it refuses the mode ON THE RELATIVE-MSE DIAGNOSTIC rather than
+      reporting a number.
+
+    The dimension is load-bearing and so is the asserted state.  The OPTIMAL
+    bridge tolerates a Cauchy target against a Gaussian proposal easily in low
+    dimension (measured through this same path: re2 ~ 0.01 at d = 1, 0.05-0.08
+    at d = 5, and only past d ~ 8 does the mismatch compound into
+    re2 > re2_max) -- it is far more forgiving than plain importance sampling
+    -- so the 1-D version of this test asserted a refusal that the estimator
+    had no reason to make.  It passed anyway, because _ev_eval_block fed pymc
+    a 1-D array for a SCALAR free RV, every logp evaluation raised, and the
+    mode was refused for a reason the test never checked.  Asserting the
+    state is what keeps that from recurring.
     """
+    d = 10
     rng = np.random.default_rng(3)
-    x = rng.standard_cauchy(N)
     # keep values finite/representable but retain the fat tail
-    x = np.clip(x, -1e6, 1e6)
-    lp = -np.log1p(x**2)
+    x = np.clip(rng.standard_cauchy((N, d)), -1e4, 1e4)
+    lp = -np.log1p(x**2).sum(axis=-1)
+    idata = az.from_dict(
+        {
+            "posterior": {"x_raw": x.reshape(N_CHAIN, N_DRAW, d)},
+            "sample_stats": {"lp": lp.reshape(N_CHAIN, N_DRAW)},
+        }
+    )
+    report = _fake_one_mode_report(idata)
+
+    with pm.Model() as model:
+        xt = pm.Flat("x_raw", shape=d)
+        pm.Potential("cauchy", -pt.sum(pt.log1p(xt**2)))
+
+    results = estimate_mode_evidences(
+        model, idata, report, max_posterior_draws=800, n_proposal=800
+    )
+
+    assert len(results) == 1
+    assert results[0].refused
+    assert results[0].state == EV_RE2
+    assert results[0].status["n_prop_unsupported"] == 0  # not THIS failure
+    assert not apply_evidence_weighting(report, results)
+
+
+@requires_fork
+@pytest.mark.parametrize("rv_shape", [None, 1])
+def test_logp_point_shapes_come_from_the_value_variable(rv_shape):
+    """
+    Given a trace whose posterior stores a variable as 0-d, for a model in
+      which that variable is EITHER a genuinely scalar free RV (rv_shape
+      None) OR a length-1 vector (rv_shape 1, which is what every EXOZIPPy
+      Parameter with one element is -- lens.t_0_raw, star.logmass_raw,
+      planet.mass_raw are all shape (1,), stored squeezed in the trace),
+    When estimate_mode_evidences evaluates the model logp at those draws,
+    Then the evaluations succeed in both cases.
+
+    The trace shape cannot decide this: it is 0-d either way, while pymc's
+    compiled logp checks ndim exactly and _ev_eval_block's broad except turns
+    a mismatch into a nan.  Reading the shape off the trace nans out every
+    one-element parameter of every real fit; reading a 1-d array in
+    unconditionally nans out a genuinely scalar RV.  Both then surface as a
+    mode "refused" for a reason that is not the real one, which is why this
+    is pinned from both sides.
+    """
+    rng = np.random.default_rng(13)
+    x = rng.normal(0.0, 1.0, N)
+    lp = -0.5 * x**2
     idata = az.from_dict(
         {
             "posterior": {"x_raw": x.reshape(N_CHAIN, N_DRAW)},
@@ -305,16 +366,19 @@ def test_evidence_refuses_heavy_tailed_mode():
     report = _fake_one_mode_report(idata)
 
     with pm.Model() as model:
-        xt = pm.Flat("x_raw")
-        pm.Potential("cauchy", -pt.log1p(xt**2))
+        xt = pm.Flat("x_raw", shape=rv_shape) if rv_shape else pm.Flat("x_raw")
+        pm.Potential("gauss", -0.5 * pt.sum(xt**2))
 
     results = estimate_mode_evidences(
         model, idata, report, max_posterior_draws=800, n_proposal=800
     )
 
-    assert len(results) == 1
-    assert results[0].refused
-    assert not apply_evidence_weighting(report, results)
+    r = results[0]
+    assert r.status["n_post_invalid"] == 0
+    assert r.status["n_prop_unsupported"] == 0
+    assert not r.refused
+    # N(0,1) unnormalized by exp(-x^2/2) integrates to sqrt(2 pi)
+    assert r.lnZ == pytest.approx(0.5 * np.log(2 * np.pi), abs=5 * r.lnZ_err)
 
 
 # ----------------------------------------------------------------------
@@ -555,6 +619,263 @@ def test_bridge_error_bar_grows_with_posterior_autocorrelation():
 
 
 # ----------------------------------------------------------------------
+# proposal draws the target does not support
+#
+# The fitted Gaussian is unbounded, so some of its draws land where the
+# target density is zero (or where the logp evaluation fails).  Those draws
+# used to be silently dropped and the proposal-side average renormalized over
+# the survivors, which is the estimator for a proposal truncated to the
+# target's support -- not the proposal that was drawn from.  It biased lnZ up
+# by log(N2 / N2_kept) per mode AND defeated the re2 guard meant to catch it:
+# the dropped draws are exactly the ones with the smallest bridge function, so
+# removing them LOWERS re2 and reports the proposal as healthier than it is.
+# ----------------------------------------------------------------------
+
+
+def _truncated_support_inputs(logC, frac_outside, n, seed):
+    """Bridge inputs for a target that is the proposal restricted to a set S.
+
+    With p~(x) = C q(x) 1[x in S], the log-ratio is log C on S and -inf off
+    it, the posterior draws all sit in S, and the true evidence is
+    Z = C Q(S) -- i.e. lnZ = log C + log(1 - frac_outside), ANALYTICALLY.
+    Returns (l1, l2, lnZ_true, n_outside).
+    """
+    rng = np.random.default_rng(seed)
+    l1 = np.full(n, float(logC))
+    outside = rng.random(n) < frac_outside
+    l2 = np.where(outside, -np.inf, float(logC))
+    n_outside = int(outside.sum())
+    lnZ_true = logC + np.log1p(-n_outside / n)
+    return l1, l2, lnZ_true, n_outside
+
+
+@pytest.mark.parametrize("frac", [0.0, 0.05, 0.2, 0.5])
+def test_unsupported_proposal_draws_do_not_bias_lnZ(frac):
+    """
+    Given a target that is exactly the proposal restricted to a subset of its
+      support, so a known fraction of proposal draws have zero target density
+      and the true lnZ is analytic,
+    When bridge_lnZ runs,
+    Then it returns the true lnZ -- the unsupported draws enter the bridge
+      average at their correct value of zero -- whereas DROPPING them (the
+      behavior this replaced) inflates lnZ by exactly log(N2 / N2_kept).
+    """
+    logC = 1.7
+    n = 4000
+    l1, l2, lnZ_true, n_outside = _truncated_support_inputs(logC, frac, n, 5)
+
+    lnZ, _err, _re2, converged = bridge_lnZ(l1, l2)
+    lnZ_dropped, _e, _r, _c = bridge_lnZ(l1, l2[np.isfinite(l2)])
+
+    assert converged
+    assert lnZ == pytest.approx(lnZ_true, abs=1e-6)
+    # and the old behavior's bias is exactly the renormalization it performed
+    assert lnZ_dropped - lnZ == pytest.approx(
+        -np.log1p(-n_outside / n), abs=1e-6
+    )
+    if frac == 0.0:
+        # a clean mode is untouched: same number, to the last bit
+        assert lnZ_dropped == lnZ
+
+
+def test_bridge_status_counts_the_unsupported_draws():
+    """
+    Given proposal draws of which a known number have a non-finite log-ratio,
+    When bridge_lnZ runs with a status dict,
+    Then the status reports the proposal draws taken, how many were outside
+      the target support, and the fraction -- the provenance and the refusal
+      decision both read those counts, so they must describe what was used.
+    """
+    l1, l2, _z, n_outside = _truncated_support_inputs(1.7, 0.2, 4000, 5)
+    status = {}
+
+    bridge_lnZ(l1, l2, status=status)
+
+    assert status["n_prop"] == 4000  # NOT the post-filter survivor count
+    assert status["n_prop_unsupported"] == n_outside
+    assert status["frac_unsupported"] == pytest.approx(n_outside / 4000)
+    assert status["n_post"] == 4000
+    assert status["n_post_invalid"] == 0
+
+
+def test_diagnostic_sees_the_unsupported_draws():
+    """
+    Given the same bridge problem measured with the unsupported proposal draws
+      retained and with them dropped,
+    When the relative-MSE diagnostic is compared,
+    Then retaining them RAISES re2 -- the dropped draws are the smallest
+      values of the bridge function, so filtering them out flattered the very
+      diagnostic that is supposed to catch a proposal spilling outside the
+      target's support.
+    """
+    frac, n = 0.2, 4000
+    l1, l2, _z, n_outside = _truncated_support_inputs(1.7, frac, n, 5)
+
+    _lnZ, err_keep, re2_keep, _c = bridge_lnZ(l1, l2)
+    _lnZ, err_drop, re2_drop, _c = bridge_lnZ(l1, l2[np.isfinite(l2)])
+
+    assert re2_keep > re2_drop
+    assert err_keep > err_drop
+    # the zeros contribute f / ((1 - f) N2) of relative variance
+    k = 1.0 - n_outside / n
+    assert re2_keep - re2_drop == pytest.approx((1 - k) / k / n, rel=0.2)
+
+
+def test_posterior_side_non_finite_draws_are_counted_not_hidden():
+    """
+    Given posterior draws of which some re-evaluate to a non-finite logp (a
+      failed evaluation -- a draw the sampler produced cannot have zero target
+      density, so unlike the proposal side there is no correct value to
+      substitute),
+    When bridge_lnZ runs,
+    Then those draws are excluded from the estimate but REPORTED in the
+      status, so the caller can refuse rather than quietly average over a
+      shrunken sample.
+    """
+    l1, l2, _z, _n = _truncated_support_inputs(1.7, 0.0, 1000, 5)
+    l1 = l1.copy()
+    l1[:150] = np.nan
+    status = {}
+
+    bridge_lnZ(l1, l2, status=status)
+
+    assert status["n_post"] == 850
+    assert status["n_post_invalid"] == 150
+    assert status["frac_post_invalid"] == pytest.approx(0.15)
+
+
+@requires_fork
+def test_evidence_refuses_mode_with_unsupported_proposal_mass():
+    """
+    Given a mode whose raw-space target has a hard edge (an exponential
+      target, zero density for x <= 0) so the moment-matched Gaussian
+      proposal puts ~16% of its draws where the target has none,
+    When estimate_mode_evidences runs,
+    Then the mode is REFUSED, with the count and the fraction of unsupported
+      draws in the reason and the machine-readable state -- the estimator
+      never reports a number whose systematic it cannot bound, and the count
+      is refusal evidence rather than something to filter away.
+    """
+    rng = np.random.default_rng(5)
+    x = rng.exponential(1.0, N)
+    lp = -x
+    idata = az.from_dict(
+        {
+            "posterior": {"x_raw": x.reshape(N_CHAIN, N_DRAW)},
+            "sample_stats": {"lp": lp.reshape(N_CHAIN, N_DRAW)},
+        }
+    )
+    report = _fake_one_mode_report(idata)
+
+    with pm.Model() as model:
+        xt = pm.Flat("x_raw")
+        pm.Potential("exp_target", pt.switch(xt > 0, -xt, -np.inf))
+
+    results = estimate_mode_evidences(
+        model, idata, report, max_posterior_draws=800, n_proposal=800
+    )
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.refused
+    assert r.state == EV_UNSUPPORTED
+    assert r.status["n_prop_unsupported"] > 0.10 * r.status["n_prop"]
+    # the count and the fraction are IN the reason a user reads
+    assert str(r.status["n_prop_unsupported"]) in r.reason
+    assert f"{r.status['frac_unsupported']:.1%}" in r.reason
+    # and the count was never removed from the sample it describes
+    assert r.n_prop == 800
+
+    assert not apply_evidence_weighting(report, results)
+    assert "refused" in report.provenance
+    assert EV_UNSUPPORTED in report.provenance
+    assert str(r.status["n_prop_unsupported"]) in " ".join(report.notes)
+    # visible in the RENDERED report, not only in a log line
+    assert str(r.status["n_prop_unsupported"]) in report.to_text()
+
+
+@requires_fork
+def test_clean_mode_lnZ_is_unchanged_by_the_unsupported_handling():
+    """
+    Given a well-behaved mode whose Gaussian proposal is supported everywhere
+      (no draw has a non-finite logp),
+    When estimate_mode_evidences runs,
+    Then nothing about the unsupported-draw handling touches it: it is
+      accepted, its status reports zero unsupported draws, and its lnZ is the
+      analytic local evidence of the bump.
+    """
+    rng = np.random.default_rng(9)
+    mu0, mu1 = np.array([0.0, 0.0]), np.array([8.0, 0.0])
+    w0, w1 = 0.75, 0.25
+    x = rng.normal(mu0, 1.0, size=(N, 2))
+    lp = _mixture_lp(x, mu0, mu1, w0, w1)
+    idata = az.from_dict(
+        {
+            "posterior": {"x_raw": x.reshape(N_CHAIN, N_DRAW, 2)},
+            "sample_stats": {"lp": lp.reshape(N_CHAIN, N_DRAW)},
+        }
+    )
+    report = _fake_one_mode_report(idata)
+    model = _two_bump_mixture_model(mu0, mu1, w0, w1)
+
+    results = estimate_mode_evidences(
+        model, idata, report, max_posterior_draws=800, n_proposal=800
+    )
+
+    r = results[0]
+    assert not r.refused
+    assert r.status["n_prop_unsupported"] == 0
+    assert r.status["n_post_invalid"] == 0
+    assert r.n_post == 800 and r.n_prop == 800
+    assert abs(r.lnZ - np.log(w0)) <= max(0.05, 5 * r.lnZ_err)
+
+
+def test_provenance_counts_describe_the_draws_actually_used():
+    """
+    Given accepted bridge results that carry the post-filter draw bookkeeping,
+    When apply_evidence_weighting builds the weight provenance,
+    Then the quoted N_post / N_prop are the counts the estimate was computed
+      from and the unsupported draws are stated rather than hidden -- the
+      string used to quote pre-filter counts, so nothing downstream could tell
+      that any filtering had happened at all.
+    """
+    report = _fake_two_mode_report(w0_occ=0.5, w1_occ=0.5)
+    results = [
+        EvidenceResult(
+            0,
+            np.log(0.75),
+            0.03,
+            0.001,
+            790,
+            800,
+            False,
+            "",
+            {"n_post": 790, "n_post_invalid": 10, "n_prop_unsupported": 12},
+        ),
+        EvidenceResult(
+            1,
+            np.log(0.25),
+            0.05,
+            0.002,
+            800,
+            800,
+            False,
+            "",
+            {"n_post": 800, "n_post_invalid": 0, "n_prop_unsupported": 0},
+        ),
+    ]
+
+    assert apply_evidence_weighting(report, results)
+
+    prov = report.provenance
+    assert "N_post>=790 used" in prov
+    assert "10 discarded as non-finite" in prov
+    assert "12 outside the target support" in prov
+    assert "N_prop>=800 used" in prov
+    assert "12" in report.to_text()
+
+
+# ----------------------------------------------------------------------
 # output wiring smoke test
 # ----------------------------------------------------------------------
 
@@ -585,7 +906,7 @@ def test_evidence_provenance_replaces_occupancy_in_output(tmp_path):
     build_latex_output(
         _StubSystem(),
         var_filename=str(var_file),
-        template_filename=str(tmpl_file),
+        table_filename=str(tmpl_file),
         caption="toy",
         mode_report=report,
     )
@@ -621,7 +942,7 @@ def test_weight_err_reaches_text_latex_and_csv(tmp_path):
     build_latex_output(
         _StubSystem(),
         var_filename=str(var_file),
-        template_filename=str(tmpl_file),
+        table_filename=str(tmpl_file),
         mode_report=report,
     )
     build_csv_output(_StubSystem(), str(csv_file), mode_report=report)

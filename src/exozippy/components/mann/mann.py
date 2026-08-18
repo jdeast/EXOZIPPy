@@ -1,22 +1,24 @@
-import logging
-
 import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
+from exozippy.components.relations import (
+    StellarRelation,
+    as_float_vector,
+    constrain_schema_entry,
+    star_schema_entry,
+)
 
 from ..star.physics import calc_absmag
 from . import physics
-
-logger = logging.getLogger(__name__)
 
 # The bandpass the Mann relations are calibrated on.  EXOFASTv2 hardcodes
 # the same curve (sed/filtercurves/2MASS_2MASS.Ks.idl).
 KS_FILTER = "2MASS/2MASS.Ks"
 
 
-class Mann(Component):
+class Mann(StellarRelation, Component):
     """Constrain a star's mass and/or radius with the Mann+ relations.
 
     One instance per constrained star::
@@ -44,17 +46,15 @@ class Mann(Component):
     Either way the value handed to the relations is
     ``appks = ks_source + ks_err * ks_offset`` with ``ks_offset ~ N(0, 1)``,
     which is EXOFASTv2's 0.02 mag systematic floor written non-centered.
+
+    The wiring shared with ``components/torres`` (instance naming, star and
+    ``constrain:`` resolution, the masked penalty, the calibration-range
+    warning) comes from the ``StellarRelation`` mixin; the statistics -- the
+    linear predictions, the fractional scatter, and the kept ``-log(sigma)``
+    normalization that follows from it -- stay here.
     """
 
     yaml_key = "mann"
-
-    def __init__(self, component_config, config_manager):
-        # Name each instance after the star it constrains, so the base
-        # class's duplicate-name check also enforces one Mann per star.
-        for c in component_config:
-            if c.get("name") is None and c.get("star") is not None:
-                c["name"] = str(c["star"]).split(".")[-1]
-        super().__init__(component_config, config_manager)
 
     @property
     def prefix(self):
@@ -63,26 +63,8 @@ class Mann(Component):
     @classmethod
     def config_schema(cls):
         return [
-            {
-                "key": "star",
-                "kind": "ref",
-                "accepts": ["star"],
-                "required": True,
-                "doc": (
-                    "Name (or index) of the star this Mann relation "
-                    "constrains. One Mann instance per star."
-                ),
-            },
-            {
-                "key": "constrain",
-                "kind": "option",
-                "accepts": ["mass", "radius"],
-                "required": False,
-                "doc": (
-                    "Which stellar quantities to constrain from absolute Ks "
-                    "(a list; default both mass and radius)."
-                ),
-            },
+            star_schema_entry("Mann"),
+            constrain_schema_entry("absolute Ks"),
             {
                 "key": "ks",
                 "kind": "option",
@@ -105,9 +87,6 @@ class Mann(Component):
 
     def load_data(self, system):
         """Stage 1a: resolve the target stars and parse the per-instance config."""
-        star_names = list(system.star.names)
-        name_to_idx = {n: i for i, n in enumerate(star_names)}
-
         self.star_indices = []
         self.ks_synthetic = []
         self.ks_observed = []
@@ -119,22 +98,9 @@ class Mann(Component):
 
         for c, nm in zip(self.config, self.names):
             # --- target star ---
-            raw_star = c.get("star")
-            if raw_star is None:
-                raise ValueError(
-                    f"mann '{nm}': a 'star:' key is required naming the star "
-                    f"to constrain. Available stars: {star_names}."
-                )
-            key = str(raw_star).split(".")[-1]
-            if key in name_to_idx:
-                self.star_indices.append(name_to_idx[key])
-            elif key.isdigit() and int(key) < len(star_names):
-                self.star_indices.append(int(key))
-            else:
-                raise ValueError(
-                    f"mann '{nm}': unknown star '{raw_star}'. "
-                    f"Available stars: {star_names}."
-                )
+            self.star_indices.append(
+                self._resolve_star(system, nm, c.get("star"))
+            )
 
             # --- Ks pathway ---
             ks = c.get("ks", "synthetic")
@@ -163,22 +129,9 @@ class Mann(Component):
                 raise ValueError(f"mann '{nm}': 'ks_err:' must be > 0.")
 
             # --- which stellar parameters to constrain ---
-            con = c.get("constrain", ["mass", "radius"])
-            if isinstance(con, str):
-                con = [con]
-            con = set(con)
-            bad = con - {"mass", "radius"}
-            if bad:
-                raise ValueError(
-                    f"mann '{nm}': unknown 'constrain:' entries {sorted(bad)}; "
-                    f"valid entries are 'mass' and 'radius'."
-                )
-            if not con:
-                raise ValueError(
-                    f"mann '{nm}': 'constrain:' is empty, so this block would "
-                    f"do nothing. Remove it or list 'mass' and/or 'radius'."
-                )
-            self.constrain.append(con)
+            self.constrain.append(
+                self._parse_constrain(nm, c.get("constrain"))
+            )
 
             # --- relation form and scatter ---
             uf = bool(c.get("feh", True))
@@ -189,10 +142,6 @@ class Mann(Component):
             self.rstar_floor.append(
                 float(c.get("rstar_floor", physics.RSTAR_FLOOR[uf]))
             )
-
-    def build_maps(self):
-        """Stage 1b: index array linking each instance to its star."""
-        self.star_map = np.array(self.star_indices, dtype=int)
 
     def register_parameters(self, system):
         """Stage 2: declare the Ks latent and validate the requested pathways."""
@@ -216,48 +165,36 @@ class Mann(Component):
                     f"block referencing it)."
                 )
 
-    @staticmethod
-    def _initval(param, idx):
-        """One element of a built Parameter's initval, in internal units."""
-        v = getattr(param, "initval", None)
-        if v is None:
-            return None
-        arr = np.atleast_1d(np.asarray(v, dtype=float))
-        val = arr[0] if arr.size == 1 else arr[idx]
-        return None if np.isnan(val) else float(val)
-
     def _warn_outside_calibration(self, system):
         """Warn when a star starts outside the relations' calibration ranges.
 
         EXOFASTv2 checks these every likelihood call, rejecting outright on
         [Fe/H] in the observed-Ks pathway and warning otherwise. A hard
         rejection is a wall with no gradient, which NUTS cannot navigate, so
-        these are startup warnings only -- nothing here bounds the posterior.
+        these are startup warnings only -- nothing here bounds the posterior
+        (see ``StellarRelation._warn_outside_range``).
         """
-        for i, nm in enumerate(self.names):
-            si = self.star_indices[i]
-            star_name = system.star.names[si]
-
-            mass = self._initval(system.star.mass, si)
-            if mass is not None and not (
-                physics.MSTAR_RANGE[0] <= mass <= physics.MSTAR_RANGE[1]
-            ):
-                logger.warning(
-                    f"mann '{nm}': star '{star_name}' starts at "
-                    f"{mass:.3f} solMass, outside the Mann+2019 calibration "
-                    f"range {physics.MSTAR_RANGE} solMass. If it stays there, "
-                    f"prefer MIST/PARSEC/Torres or a direct mass prior."
-                )
-
-            feh = self._initval(system.star.feh, si)
-            if feh is not None and not (
-                physics.FEH_RANGE[0] <= feh <= physics.FEH_RANGE[1]
-            ):
-                logger.warning(
-                    f"mann '{nm}': star '{star_name}' starts at [Fe/H] = "
-                    f"{feh:.3f}, outside the Mann+ calibration range "
-                    f"{physics.FEH_RANGE} dex."
-                )
+        self._warn_outside_range(
+            system,
+            system.star.mass,
+            *physics.MSTAR_RANGE,
+            message=(
+                "star '{star}' starts at "
+                "{value:.3f} solMass, outside the Mann+2019 calibration "
+                f"range {physics.MSTAR_RANGE} solMass. If it stays there, "
+                "prefer MIST/PARSEC/Torres or a direct mass prior."
+            ),
+        )
+        self._warn_outside_range(
+            system,
+            system.star.feh,
+            *physics.FEH_RANGE,
+            message=(
+                "star '{star}' starts at [Fe/H] = "
+                "{value:.3f}, outside the Mann+ calibration range "
+                f"{physics.FEH_RANGE} dex."
+            ),
+        )
 
     def _ks_source(self, system):
         """Per-instance apparent Ks the relations key on, as an (n_elements,) node."""
@@ -291,7 +228,7 @@ class Mann(Component):
         feh = star.feh.value[smap]
 
         # 1. Apparent Ks, non-centered about its source (see defaults.yaml).
-        ks_err = pt.as_tensor_variable(np.asarray(self.ks_err, dtype=float))
+        ks_err = as_float_vector(self.ks_err)
         appks = self._ks_source(system) + ks_err * self.ks_offset.value
         pm.Deterministic(f"{self.prefix}.appks", appks)
 
@@ -312,42 +249,37 @@ class Mann(Component):
         pm.Deterministic(f"{self.prefix}.radius_pred", radius_pred)
 
         # 4. Gaussian potentials on the star's own mass/radius nodes. sigma is
-        # the relation's fractional scatter about its *prediction*, matching
-        # EXOFASTv2's sigma_mstar = mstar*mstar_floor.
+        # the relation's *fractional* scatter times its own prediction,
+        # matching EXOFASTv2's sigma_mstar = mstar*mstar_floor -- so sigma is a
+        # function of the sampled Ks, not a constant, and normalize=True keeps
+        # the -log(sigma) term it therefore owes. EXOFASTv2 accumulates chi2
+        # only and drops it; the term is worth a few tenths of a nat here, but
+        # omitting it would leave the posterior in Ks subtly improper.
+        # (components/torres passes normalize=False, and is right to: its
+        # scatter is a constant in dex.)
         self._add_penalty(
-            "mass", star.mass.value[smap], mass_pred, self.mstar_floor
+            "mass",
+            star.mass.value[smap],
+            mass_pred,
+            mass_pred * as_float_vector(self.mstar_floor),
+            normalize=True,
         )
         self._add_penalty(
-            "radius", star.radius.value[smap], radius_pred, self.rstar_floor
+            "radius",
+            star.radius.value[smap],
+            radius_pred,
+            radius_pred * as_float_vector(self.rstar_floor),
+            normalize=True,
         )
 
-    def _add_penalty(self, which, observed, predicted, floors):
-        """Gaussian potential tying a star parameter to a relation prediction.
-
-        Only instances that asked for this parameter in `constrain:` contribute.
-
-        sigma = predicted * floor depends on the sampled Ks, so unlike the
-        fixed-sigma priors elsewhere in the code the -log(sigma) normalization
-        is not a constant and is kept. EXOFASTv2 accumulates chi2 only and
-        drops it; the term is worth a few tenths of a nat here, but omitting
-        it would leave the posterior in Ks subtly improper.
-        """
-        mask = np.array([which in c for c in self.constrain], dtype=bool)
-        if not mask.any():
-            return
-        sigma = predicted * pt.as_tensor_variable(
-            np.asarray(floors, dtype=float)
+        # Modeling-draft prose, next to the penalties it describes.  The
+        # radius relation is Mann+2015 (as corrected by the 2016 erratum,
+        # Mann:2016 in references.bib), the mass relation Mann+2019.
+        self._add_relation_prose(
+            system,
+            cite_by_quantity={
+                "mass": r"\citet{Mann:2019}",
+                "radius": r"\citet{Mann:2015}",
+            },
+            input_desc=r"its absolute $K_s$ magnitude",
         )
-        logp = -0.5 * pt.sqr((observed - predicted) / sigma) - pt.log(
-            pt.abs(sigma)
-        )
-        pm.Potential(
-            f"{self.prefix}.{which}_prior",
-            pt.sum(pt.where(pt.as_tensor_variable(mask), logp, 0.0)),
-        )
-
-    def compile_plotters(self, model, system):
-        pass
-
-    def plot(self, system, points, filename_prefix="debug"):
-        pass

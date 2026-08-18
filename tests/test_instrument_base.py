@@ -151,6 +151,228 @@ def test_build_block_detrend_handles_no_detrend_columns():
 
 
 # ---------------------------------------------------------------------------
+# The shared concatenation template (ConcatenatedData)
+#
+# rvinstrument, transit and mulensinstrument all build their concatenated
+# arrays through this accumulator, so the per-file row-range/contiguity
+# invariant that _build_block_detrend and mulensing's observer_pos both depend
+# on is a contract of the base class, and is pinned here rather than being
+# re-derived (or assumed) per child.
+# ---------------------------------------------------------------------------
+_BLOCKS_CONFIG = [
+    {"name": "A", "file": "a.dat"},
+    {"name": "B", "file": "b.dat"},
+    {"name": "C", "file": "c.dat"},
+]
+_BLOCK_ROWS = (4, 3, 5)
+
+
+def _filled_blocks(inst, sides=False):
+    """Feed inst's accumulator three files of 4/3/5 rows and return it."""
+    blocks = inst._concat_blocks()
+    start = 0
+    for i, n in enumerate(_BLOCK_ROWS):
+        rows = np.arange(start, start + n, dtype=float)
+        extra = (
+            {"observer_pos": np.column_stack([rows, rows + 0.5, rows + 0.25])}
+            if sides
+            else {}
+        )
+        blocks.add(
+            i,
+            time=rows,
+            obs=rows * 10.0,
+            err=np.full(n, 0.5),
+            detrend=rows[:, None] + 100.0,
+            **extra,
+        )
+        start += n
+    return blocks
+
+
+def test_concatenated_row_ranges_are_contiguous_and_in_config_order():
+    """
+    Given three files of 4, 3 and 5 observations fed to the shared
+    accumulator,
+    When finalize publishes the concatenated arrays,
+    Then each element owns exactly one contiguous row range, the ranges are
+    in config order and tile the arrays with no gap or overlap, and inst_map
+    agrees with them row for row.
+    """
+    inst = _make(_BLOCKS_CONFIG)
+    _filled_blocks(inst).finalize("rv")
+
+    assert inst.row_ranges == [(0, 4), (4, 7), (7, 12)]
+    assert inst.n_total_obs == 12
+    assert inst.time.shape == (12,)
+    assert inst.rv.shape == (12,)
+    assert inst.err.shape == (12,)
+    # Contiguous, ordered, gapless, and exactly what inst_map says.
+    assert inst.row_ranges[0][0] == 0
+    assert inst.row_ranges[-1][1] == inst.n_total_obs
+    for i, (lo, hi) in enumerate(inst.row_ranges):
+        if i:
+            assert lo == inst.row_ranges[i - 1][1]
+        assert np.array_equal(
+            np.flatnonzero(inst.inst_map == i), np.arange(lo, hi)
+        )
+
+
+def test_concatenated_detrend_blocks_land_in_their_own_row_range():
+    """
+    Given per-file detrend columns,
+    When finalize builds the block-diagonal design matrix,
+    Then each file's block occupies exactly its own row range and its own
+    column range -- the property _build_block_detrend relies on the loop
+    order for, and which an out-of-order block would break silently.
+    """
+    inst = _make(_BLOCKS_CONFIG)
+    _filled_blocks(inst).finalize("rv")
+
+    assert inst.n_detrend_per_inst == [1, 1, 1]
+    assert inst.total_detrend_cols == 3
+    assert inst.detrend_matrix.shape == (12, 3)
+    for i, (lo, hi) in enumerate(inst.row_ranges):
+        block = inst.detrend_matrix[lo:hi, i]
+        assert np.array_equal(block, inst.time[lo:hi] + 100.0)
+        # Nothing of this file leaks into another file's rows/columns.
+        assert np.all(inst.detrend_matrix[:lo, i] == 0.0)
+        assert np.all(inst.detrend_matrix[hi:, i] == 0.0)
+
+
+def test_concatenated_side_arrays_stay_row_aligned():
+    """
+    Given a per-epoch side array (mulensing's observer_pos),
+    When finalize concatenates it,
+    Then it is published on the owner with one row per observation, aligned
+    with `time` inside every element's row range.
+    """
+    inst = _make(_BLOCKS_CONFIG)
+    _filled_blocks(inst, sides=True).finalize("flux")
+
+    assert inst.observer_pos.shape == (12, 3)
+    assert np.array_equal(inst.observer_pos[:, 0], inst.time)
+    for lo, hi in inst.row_ranges:
+        assert np.array_equal(
+            inst.observer_pos[lo:hi, 1], inst.time[lo:hi] + 0.5
+        )
+
+
+def test_concatenated_data_rejects_out_of_order_files():
+    """
+    Given a child that adds its files out of config order,
+    When add is called,
+    Then it raises -- the contiguous-block invariant cannot be restored
+    afterwards and would corrupt the detrend matrix and side arrays silently.
+    """
+    inst = _make(_BLOCKS_CONFIG)
+    blocks = inst._concat_blocks()
+    blocks.add(0, time=[1.0], obs=[1.0], err=[1.0])
+    with pytest.raises(ValueError, match="config order"):
+        blocks.add(2, time=[1.0], obs=[1.0], err=[1.0])
+
+
+@pytest.mark.parametrize("bad", ["obs", "err", "detrend", "side"])
+def test_concatenated_data_rejects_ragged_blocks(bad):
+    """
+    Given a per-file array whose length disagrees with that file's times,
+    When add is called,
+    Then it raises rather than concatenating a misaligned block.
+    """
+    inst = _make(_BLOCKS_CONFIG)
+    blocks = inst._concat_blocks()
+    kwargs = {
+        "time": np.zeros(3),
+        "obs": np.zeros(3),
+        "err": np.zeros(3),
+    }
+    if bad == "side":
+        kwargs["observer_pos"] = np.zeros((2, 3))
+    elif bad == "detrend":
+        kwargs["detrend"] = np.zeros((2, 1))
+    else:
+        kwargs[bad] = np.zeros(2)
+
+    with pytest.raises(ValueError, match="rows but time has"):
+        blocks.add(0, **kwargs)
+
+
+def test_concatenated_data_rejects_a_side_array_on_only_some_files():
+    """
+    Given a side array supplied for the first file but not the second,
+    When add is called,
+    Then it raises: a per-epoch array must cover every element or none, or
+    the concatenated array would silently stop being row-aligned.
+    """
+    inst = _make(_BLOCKS_CONFIG)
+    blocks = inst._concat_blocks()
+    blocks.add(
+        0,
+        time=np.zeros(3),
+        obs=np.zeros(3),
+        err=np.zeros(3),
+        observer_pos=np.zeros((3, 3)),
+    )
+    with pytest.raises(ValueError, match="missing per-epoch array"):
+        blocks.add(1, time=np.zeros(2), obs=np.zeros(2), err=np.zeros(2))
+
+
+def test_concatenated_data_requires_every_element_to_contribute():
+    """
+    Given only two of three elements fed to the accumulator,
+    When finalize runs,
+    Then it raises: inst_map must address every configured instrument.
+    """
+    inst = _make(_BLOCKS_CONFIG)
+    blocks = inst._concat_blocks()
+    for i in range(2):
+        blocks.add(i, time=np.zeros(3), obs=np.zeros(3), err=np.zeros(3))
+    with pytest.raises(ValueError, match="contributed data blocks"):
+        blocks.finalize("rv")
+
+
+def test_concatenated_data_takes_detrend_columns_past_the_roles():
+    """
+    Given a DataFrame with columns past the three canonical roles,
+    When add receives it as `df`,
+    Then those columns become this file's detrend block (and a DataFrame with
+    only the roles yields an empty one).
+    """
+    pd = pytest.importorskip("pandas")
+    inst = _make(_BLOCKS_CONFIG[:2])
+    blocks = inst._concat_blocks()
+    df = pd.DataFrame(
+        {
+            0: [1.0, 2.0],
+            1: [3.0, 4.0],
+            2: [0.1, 0.1],
+            3: [7.0, 8.0],
+            4: [9.0, 10.0],
+        }
+    )
+    blocks.add(
+        0,
+        time=df.iloc[:, 0].values,
+        obs=df.iloc[:, 1].values,
+        err=df.iloc[:, 2].values,
+        df=df,
+    )
+    blocks.add(
+        1,
+        time=np.zeros(2),
+        obs=np.zeros(2),
+        err=np.zeros(2),
+        df=df.iloc[:, :3],
+    )
+    blocks.finalize("rv")
+
+    assert inst.n_detrend_per_inst == [2, 0]
+    assert np.array_equal(
+        inst.detrend_matrix[:2, :2], np.array([[7.0, 9.0], [8.0, 10.0]])
+    )
+
+
+# ---------------------------------------------------------------------------
 # Noise registration into a manifest
 # ---------------------------------------------------------------------------
 def test_register_noise_additive_adds_jitter_variance_and_jitter():

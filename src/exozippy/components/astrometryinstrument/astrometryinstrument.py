@@ -87,8 +87,7 @@ import pytensor.tensor as pt
 from exozippy.components.instrument import Instrument
 from exozippy.components.orbit.bodies import component_instance_names
 from exozippy.ephemeris import get_observer_position
-
-from . import physics
+from exozippy.skyframe import parallax_factors
 
 RAD2MAS = (1.0 * u.rad).to(u.mas).value  # 2.06264806e8
 RSUN_AU = (1.0 * u.solRad).to(u.AU).value  # 4.6505e-3
@@ -97,7 +96,38 @@ DAYS_PER_YEAR = 365.25
 VALID_MODES = ("gaia", "abs", "rel")
 
 
+def wrap_ra_diff(delta_rad):
+    """Wrap an RA *difference* (radians) into [-pi, pi]. NumPy version.
+
+    An absolute RA lives in [0, 360) and stays there -- this is only ever for
+    the DIFFERENCE ``ra - ra_ref``, which is a signed offset on the sky and
+    must be able to go negative: a star 0.2 deg west of the reference reads
+    -0.2, not 359.8.  Without the wrap a target straddling RA = 0 gets an
+    offset of -359.8 deg (1.1e9 mas) instead of +0.2, which is catastrophic
+    twice over -- the offset is ~1e9 sigma from the model at the start, and a
+    dataset with epochs on both sides of the branch cut jumps 360 deg between
+    consecutive rows, so NO value of ``star.ra`` fits it.  The model side is
+    wrapped identically (``wrap_ra_diff_pt``), and it has to be: ``star.ra``
+    carries hard bounds [0, 360] from star/defaults.yaml, so with a reference
+    near 0 the unwrapped model term simply cannot produce a negative offset.
+    """
+    return (delta_rad + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def wrap_ra_diff_pt(delta_rad):
+    """``wrap_ra_diff`` for PyTensor, via arctan2 rather than a modulo.
+
+    Same wrap, but smooth: ``pt.mod``'s value jump at the branch cut would be
+    a logp discontinuity, while ``arctan2(sin, cos)`` has derivative 1
+    everywhere (the same trick the rel-mode PA residual already uses).  It
+    introduces no new sampling difficulty -- the sampler would have to move
+    the star half the sky to walk the offset across +/-180 deg.
+    """
+    return pt.arctan2(pt.sin(delta_rad), pt.cos(delta_rad))
+
+
 class AstrometryInstrument(Instrument):
+    prose_noun = "astrometry"
     # No per-file Gaussian process here.  Unlike the other instruments, an
     # astrometric dataset carries two observables per epoch -- (dE, dN) in
     # 'abs' mode, (sep, PA) in 'rel' mode -- with different units, so a single
@@ -305,12 +335,23 @@ class AstrometryInstrument(Instrument):
             "abs": ("time", "ra", "dec", "err_e", "err_n"),
             "rel": ("time", "sep", "err_sep", "pa", "err_pa"),
         }
+        # Roles a columns: spec may point at the SAME file column
+        # (everything else collides -- Instrument._check_no_duplicate_columns).
+        # One symmetric per-epoch uncertainty serving both sky axes is a
+        # common abs-mode catalog layout; rel's err_sep/err_pa are in
+        # different units (mas vs deg) and are deliberately NOT shareable.
+        mode_shared = {"abs": (("err_e", "err_n"),)}
         for i in range(self.n_elements):
             mode = self.modes[i]
             # Shared reader: columns:, mask:, time_* conversion, then sort
             # before the parallax factors are computed from t, so every
             # per-epoch quantity stays aligned regardless of mode.
-            df = self._read_data(i, roles=mode_roles[mode], detrend=False)
+            df = self._read_data(
+                i,
+                roles=mode_roles[mode],
+                detrend=False,
+                shared_roles=mode_shared.get(mode, ()),
+            )
             t = df.iloc[:, 0].values.astype(float)
 
             star_ndx = int(self.config[i].get("star_ndx", 0))
@@ -336,8 +377,13 @@ class AstrometryInstrument(Instrument):
             elif mode == "abs":
                 ra_obs = df.iloc[:, 1].values.astype(float) * np.pi / 180.0
                 dec_obs = df.iloc[:, 2].values.astype(float) * np.pi / 180.0
-                # Small-angle offsets from the reference position, in mas
-                d["dE_obs"] = (ra_obs - ra_ref) * np.cos(dec_ref) * RAD2MAS
+                # Small-angle offsets from the reference position, in mas.
+                # RA differences wrap (see wrap_ra_diff); Dec does not -- it
+                # is confined to [-90, 90], so dec_obs - dec_ref is already
+                # in [-180, 180] and has no branch cut to cross.
+                d["dE_obs"] = (
+                    wrap_ra_diff(ra_obs - ra_ref) * np.cos(dec_ref) * RAD2MAS
+                )
                 d["dN_obs"] = (dec_obs - dec_ref) * RAD2MAS
                 d["err_E"] = df.iloc[:, 3].values.astype(float)  # mas
                 d["err_N"] = df.iloc[:, 4].values.astype(float)  # mas
@@ -371,14 +417,8 @@ class AstrometryInstrument(Instrument):
                 xyz = get_observer_position(
                     t, observer_location=self.observers[i]
                 )
-                X, Y, Z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
                 # Apparent displacement of the source = parallax * (P_E, P_N)
-                d["P_E"] = X * np.sin(ra_ref) - Y * np.cos(ra_ref)
-                d["P_N"] = (
-                    X * np.cos(ra_ref) * np.sin(dec_ref)
-                    + Y * np.sin(ra_ref) * np.sin(dec_ref)
-                    - Z * np.cos(dec_ref)
-                )
+                d["P_E"], d["P_N"] = parallax_factors(xyz, ra_ref, dec_ref)
 
             self.jittervar_lower[i] = self._jitter_floor([min_err])
             self.n_total_obs += len(t)
@@ -391,7 +431,23 @@ class AstrometryInstrument(Instrument):
             c.get("epoch") for c in self.config if c.get("epoch") is not None
         ]
         if epochs:
-            self.epoch = float(epochs[0])
+            # `epoch:` is advertised per instrument but there is only ONE
+            # reference epoch, because there is only one star.ra/dec/pm to
+            # propagate from.  Taking epochs[0] and ignoring the rest gave
+            # every later dataset a proper-motion lever arm (t - epoch) short
+            # by the difference -- the Hipparcos (1991.25) + Gaia (2016.0)
+            # case, i.e. the whole reason two datasets are combined, was off
+            # by pm * 24.75 yr with no message.
+            distinct = sorted({float(e) for e in epochs})
+            if len(distinct) > 1:
+                raise ValueError(
+                    f"[{self.prefix}] conflicting `epoch:` values "
+                    f"{distinct}: ra/dec/pm_ra/pm_dec are one shared set of "
+                    f"parameters with one reference epoch, so every dataset "
+                    f"must name the same one (or none, and let the mean "
+                    f"observation time be used)."
+                )
+            self.epoch = distinct[0]
         else:
             t_all = [
                 d["time"]
@@ -423,9 +479,27 @@ class AstrometryInstrument(Instrument):
 
         # SED-derived fluxfrac: instruments with band + companion_star_ndx
         # in a system with a sed: block get their photocenter flux
-        # fraction from the SED (see _sed_beta_node). Fix the sampled
-        # fluxfrac element (it is unused) unless the user already
-        # configured it.
+        # fraction from the SED (see _sed_beta_node). Pin the sampled
+        # fluxfrac element for those files -- nothing reads it -- unless the
+        # user configured it themselves.
+        #
+        # This is a STRUCTURAL pin, not a start value, so it goes through the
+        # manifest "overrides" channel (exactly as Instrument._register_gp
+        # pins the files that did not opt into a GP term), NOT through
+        # config_manager.user_params.  A user_params write is indistinguishable
+        # from the user's own entry: it reported this component's own decision
+        # back to the user as something they had written, in the provenance
+        # ledger, export_solution, initval_source and the GUI alike.  The
+        # override sits below RANK_USER and is applied before the user's params
+        # in resolve(), so `sigma: 0` still yields to a user's own sigma --
+        # the setdefault semantics this replaces.
+        #
+        # Note the pin is belt-and-braces: defaults.yaml already gives fluxfrac
+        # `sigma: 0.0` (beta = 0 is the dark-companion default), so the old
+        # injection never changed a value at all -- its ONLY effect was to make
+        # the ledger say the user had pinned it.  Keeping the override states
+        # the intent where a future default change would otherwise silently
+        # free an element nothing reads.
         self._sed_fluxfrac = [False] * self.n_elements
         if "sed" in (self.config_manager.system_config or {}):
             for i, c in enumerate(self.config):
@@ -435,12 +509,12 @@ class AstrometryInstrument(Instrument):
                 ):
                     continue
                 self._sed_fluxfrac[i] = True
-                key = f"{self.prefix}.{i}.fluxfrac"
-                existing = self.config_manager.user_params.get(key)
-                if existing is None:
-                    self.config_manager.user_params[key] = {"sigma": 0}
-                elif isinstance(existing, dict):
-                    existing.setdefault("sigma", 0)
+
+        if any(self._sed_fluxfrac):
+            # NaN leaves the other elements alone (see resolve()).
+            pin = np.full(self.n_elements, np.nan)
+            pin[np.asarray(self._sed_fluxfrac, dtype=bool)] = 0.0
+            self.manifest["fluxfrac"] = {"overrides": {"sigma": pin.tolist()}}
 
     # ------------------------------------------------------------------
     # Model pieces (PyTensor)
@@ -503,17 +577,17 @@ class AstrometryInstrument(Instrument):
         prim = [o for o, role in members if role == "primary"]
         if not prim:
             return None, None
-        if not hasattr(orbits, "arsun"):
+        if not hasattr(orbits, "a"):
             raise ValueError(
                 f"[{self.prefix}] astrometry needs the orbit scale "
-                f"parameters (arsun/masses), but the orbit component's "
+                f"parameters (a/masses), but the orbit component's "
                 f"body groups did not resolve against the active system."
             )
         omap = np.asarray(prim, dtype=int)
         mass_frac = orbits.m_companion.value[omap] / orbits.m_total.value[omap]
         plx = system.star.parallax.value[star_idx]
         return (
-            orbits.arsun.value[omap] * RSUN_AU * (mass_frac - beta) * plx,
+            orbits.a.value[omap] * RSUN_AU * (mass_frac - beta) * plx,
             omap,
         )
 
@@ -591,15 +665,15 @@ class AstrometryInstrument(Instrument):
         """
         orbits = system.orbit
         o = self.rel_orbit[i]
-        if not hasattr(orbits, "arsun"):
+        if not hasattr(orbits, "a"):
             raise ValueError(
                 f"[{self.prefix}.{self.names[i]}] relative astrometry "
-                f"needs the orbit scale parameters (arsun/masses), but the "
+                f"needs the orbit scale parameters (a/masses), but the "
                 f"orbit component's body groups did not resolve against "
                 f"the active system."
             )
         plx = system.star.parallax.value[self.star_map[i]]
-        a_rel = orbits.arsun.value[o] * RSUN_AU * plx
+        a_rel = orbits.a.value[o] * RSUN_AU * plx
         dE_rel, dN_rel = orbits.get_sky_position(
             t_node, pt.stack([a_rel]), np.array([o]), relative=True
         )
@@ -618,13 +692,7 @@ class AstrometryInstrument(Instrument):
                 if beta is None:
                     continue
                 mfrac = orbits.m_companion.value[o2] / orbits.m_total.value[o2]
-                amp = (
-                    orbits.arsun.value[o2]
-                    * RSUN_AU
-                    * plx
-                    * (beta - mfrac)
-                    * sgn
-                )
+                amp = orbits.a.value[o2] * RSUN_AU * plx * (beta - mfrac) * sgn
                 dE2, dN2 = orbits.get_sky_position(
                     t_node, pt.stack([amp]), np.array([o2]), relative=True
                 )
@@ -639,7 +707,9 @@ class AstrometryInstrument(Instrument):
         dt_yr = (t - self.epoch) / DAYS_PER_YEAR
 
         dE = (
-            (star.ra.value[s] - d["ra_ref"]) * np.cos(d["dec_ref"]) * RAD2MAS
+            wrap_ra_diff_pt(star.ra.value[s] - d["ra_ref"])
+            * np.cos(d["dec_ref"])
+            * RAD2MAS
             + star.pm_ra.value[s] * dt_yr
             + star.parallax.value[s] * d["P_E"]
         )
@@ -667,6 +737,12 @@ class AstrometryInstrument(Instrument):
             raise ValueError(
                 f"[{self.prefix}] astrometry requires a star component."
             )
+        # Astrometry never calls the shared add_observation_likelihood
+        # dispatcher (two observables per epoch), so it declares the shared
+        # data/noise prose itself.  gp_terms/likelihood_kinds are absent
+        # here by construction (supports_gp = False), which the helper
+        # tolerates.
+        self._add_observation_prose(system)
         if any(m == "rel" for m in self.modes) and not hasattr(
             system, "orbit"
         ):
@@ -764,7 +840,7 @@ class AstrometryInstrument(Instrument):
         and plot_data() render the same charts either way; only the
         orbit-dependent pieces are skipped.
         """
-        has_orbit = hasattr(system, "orbit") and hasattr(system.orbit, "arsun")
+        has_orbit = hasattr(system, "orbit") and hasattr(system.orbit, "a")
 
         param_symbols = [p.value for p in system.plot_params]
         t_input = pt.vector("t_input")
@@ -903,7 +979,7 @@ class AstrometryInstrument(Instrument):
             plx = 1000.0 / get(star.distance)
 
         dE = (
-            (ra - d["ra_ref"]) * np.cos(d["dec_ref"]) * RAD2MAS
+            wrap_ra_diff(ra - d["ra_ref"]) * np.cos(d["dec_ref"]) * RAD2MAS
             + pm_ra * dt_yr
             + plx * d["P_E"]
         )
@@ -1229,12 +1305,7 @@ class AstrometryInstrument(Instrument):
         xyz = get_observer_position(
             t_dense, observer_location=self.observers[i]
         )
-        P_E = xyz[:, 0] * np.sin(d["ra_ref"]) - xyz[:, 1] * np.cos(d["ra_ref"])
-        P_N = (
-            xyz[:, 0] * np.cos(d["ra_ref"]) * np.sin(d["dec_ref"])
-            + xyz[:, 1] * np.sin(d["ra_ref"]) * np.sin(d["dec_ref"])
-            - xyz[:, 2] * np.cos(d["dec_ref"])
-        )
+        P_E, P_N = parallax_factors(xyz, d["ra_ref"], d["dec_ref"])
         d_dense = dict(d, P_E=P_E, P_N=P_N)
         dE_lin, dN_lin = self._linear_terms(d_dense, t_dense, point, system)
         dE_orb, dN_orb = self._eval_photo(i, t_dense, vals)

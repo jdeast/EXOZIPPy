@@ -2,8 +2,7 @@
 
 Covers the SCHEMA-DRIVEN association eligibility helper/endpoint (with a fake
 component to prove no component names are hardcoded), the current-association
-mapping, the directory-listing helper, and the preview endpoint returning
-PlotSpec JSON for a real kelt4 RV instance.
+mapping, and the directory-listing helper.
 
 Follows AAA with Given/When/Then docstrings.
 """
@@ -226,33 +225,106 @@ def test_files_and_associations_endpoints(client, rvonly_project):
     assert assoc["KELT-4b.HIRES.rv"][0]["name"] == "HIRES"
 
 
-@pytest.mark.slow
-def test_preview_endpoint_returns_plotspec_json(client, rvonly_project):
+# --- confinement (review 2.12.2 / 2.12.6 / 4.12.2) ---------------------------
+
+
+def test_list_directory_refuses_a_path_outside_the_root(tmp_path):
     """
-    Given the opened RV-only kelt4 project,
-    When POST /api/preview requests the rvinstrument data-only preview,
-    Then it returns >= 1 PlotSpec with observed RV data traces.
+    Given a root,
+    When a directory outside it is listed,
+    Then it raises instead of listing it.
+
+    ``root`` used to gate only whether ``parent`` was reported, so the
+    "sandboxed to the open project" claim was cosmetic: a caller who passed an
+    absolute path got whatever it named.
     """
-    config_path = str(rvonly_project / "kelt4_rvonly.yaml")
-    client.post("/api/doc/open", json={"config_path": config_path})
+    from exozippy.gui import datafiles
 
-    resp = client.post("/api/preview", json={"comp_type": "rvinstrument"})
+    root = tmp_path / "project"
+    root.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
 
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "specs" in body, body
-    specs = body["specs"]
-    assert len(specs) >= 1
-    # data-only: every trace is observational, no model curves
-    roles = {t["role"] for s in specs for t in s["traces"]}
-    assert roles == {"data"}
-    # and the payload is real JSON with numeric arrays
-    first = specs[0]
-    assert first["traces"][0]["x"] and first["traces"][0]["y"]
+    with pytest.raises(ValueError, match="outside"):
+        datafiles.list_directory(str(outside), root=str(root))
 
 
-def test_preview_endpoint_without_doc_is_400(client):
-    """Given no open document, When POST /api/preview, Then it returns 400."""
-    resp = client.post("/api/preview", json={"comp_type": "rvinstrument"})
-    assert resp.status_code == 400
-    assert "error" in resp.json()
+def test_list_directory_allows_a_subdirectory_of_the_root(tmp_path):
+    """Given a nested directory inside the root, When listed, Then it works
+    and reports its parent."""
+    from exozippy.gui import datafiles
+
+    nested = tmp_path / "data" / "night1"
+    nested.mkdir(parents=True)
+
+    listing = datafiles.list_directory(str(nested), root=str(tmp_path))
+
+    assert listing["parent"] == str(tmp_path / "data")
+
+
+def test_list_directory_reports_an_unreadable_directory_as_a_value_error(
+    tmp_path,
+):
+    """
+    Given a directory the process cannot read,
+    When it is listed,
+    Then a ValueError names it -- the endpoint turns that into a 400 rather
+    than letting a raw PermissionError escape as a 500.
+    """
+    import os
+
+    from exozippy.gui import datafiles
+
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o000)
+    try:
+        if os.access(locked, os.R_OK):  # running as root: nothing to test
+            pytest.skip("cannot make a directory unreadable as this user")
+        with pytest.raises(ValueError, match="Cannot list directory"):
+            datafiles.list_directory(str(locked))
+    finally:
+        locked.chmod(0o755)
+
+
+def test_list_directory_tolerates_an_unstattable_child(tmp_path):
+    """
+    Given a dangling symlink among the entries,
+    When the directory is listed,
+    Then the rest still lists (the sort key used to be able to raise).
+    """
+    from exozippy.gui import datafiles
+
+    (tmp_path / "real.rv").write_text("1 2 3\n")
+    (tmp_path / "dangling").symlink_to(tmp_path / "gone")
+
+    names = [
+        e["name"] for e in datafiles.list_directory(str(tmp_path))["entries"]
+    ]
+
+    assert "real.rv" in names
+
+
+def test_is_within_is_the_one_containment_predicate(tmp_path):
+    """
+    Given a path and a root,
+    When containment is asked,
+    Then the answer covers the same cases the two former copies did.
+
+    There used to be two implementations of this security question -- one on
+    realpath+commonpath in app.py, one on resolve+relative_to here -- with
+    different symlink behavior depending on which endpoint you asked.
+    """
+    from exozippy.gui import datafiles
+
+    inside = tmp_path / "a" / "b"
+    inside.mkdir(parents=True)
+
+    assert datafiles.is_within(inside, tmp_path)
+    assert datafiles.is_within(tmp_path, tmp_path)
+    assert not datafiles.is_within(tmp_path.parent, tmp_path)
+    assert not datafiles.is_within(None, tmp_path)
+    assert not datafiles.is_within(inside, None)
+    # A sibling whose NAME merely prefixes the root is not inside it.
+    sibling = tmp_path.parent / (tmp_path.name + "-other")
+    assert not datafiles.is_within(sibling, tmp_path)

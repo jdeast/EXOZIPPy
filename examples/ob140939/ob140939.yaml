@@ -77,5 +77,7 @@ sampler:
   recompute_trace: True
   # The seeds are literature solution estimates, not posterior draws,
   # so force the pre-whitening polish, which 'auto' skips for hint-less
-  # multi-seed sets.
-  seed_polish: on
+  # multi-seed sets.  Quoted: bare `on` is a boolean to PyYAML (YAML 1.1) and
+  # the string "on" to the GUI's ruamel loader (YAML 1.2); both resolve to the
+  # same default step cap here, but only the quoted form says so unambiguously.
+  seed_polish: "on"

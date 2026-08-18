@@ -20,15 +20,21 @@ from exozippy.components.parameter import Parameter
 from exozippy.outputs.latex import build_csv_output, build_latex_output
 from exozippy.outputs.modes import (
     DEFAULT_MAX_INVALID_FRAC,
+    MODE_FAILED,
+    MODE_NO_VALID_DRAWS,
+    MODE_OK,
     ModeInfo,
     ModeReport,
+    NoValidDrawsError,
     check_invalid_frac,
     identify_modes,
     markov_indicator_iact,
+    mode_status_to_text,
     mode_suffix,
     transition_stats,
     weight_ess,
 )
+from exozippy.outputs.report_pipeline import build_mode_reports
 
 N_CHAIN, N_DRAW = 8, 1500
 N = N_CHAIN * N_DRAW
@@ -508,7 +514,7 @@ def test_multimode_latex_suppresses_combined_defs(tmp_path):
     build_latex_output(
         sys_obj,
         var_filename=str(var_path),
-        template_filename=str(tmpl_path),
+        table_filename=str(tmpl_path),
         mode_report=mode_report,
     )
 
@@ -535,7 +541,7 @@ def test_single_mode_latex_output_unchanged(tmp_path):
 
     var1, tmpl1 = tmp_path / "v1.tex", tmp_path / "t1.tex"
     build_latex_output(
-        _sys_with_param(), var_filename=str(var1), template_filename=str(tmpl1)
+        _sys_with_param(), var_filename=str(var1), table_filename=str(tmpl1)
     )
 
     unimodal_report = ModeReport(
@@ -564,7 +570,7 @@ def test_single_mode_latex_output_unchanged(tmp_path):
     build_latex_output(
         _sys_with_param(),
         var_filename=str(var2),
-        template_filename=str(tmpl2),
+        table_filename=str(tmpl2),
         mode_report=unimodal_report,
     )
 
@@ -609,7 +615,7 @@ def test_latex_tablecomments_notes_invalid_draws(tmp_path):
     build_latex_output(
         sys_obj,
         var_filename=str(tmp_path / "v.tex"),
-        template_filename=str(tmpl_path),
+        table_filename=str(tmpl_path),
         mode_report=mode_report,
     )
 
@@ -640,18 +646,20 @@ def test_latex_tablecomments_notes_invalid_draws(tmp_path):
 
 def test_instance_names_and_descriptions_are_escaped(tmp_path):
     """
-    Given a vector parameter whose instance names and description contain
-      underscores (MEARTH_20090513; 'ratio (M_2 / M_1)'),
+    Given a vector parameter whose instance names contain underscores
+      (MEARTH_20090513) and whose description carries deliberate math,
     When build_latex_output writes the table,
-    Then the instance sub-header, the symbol subscript and the description
-      column all carry \\_ and no bare underscore survives outside math --
-      while the parameter's own latex symbol is passed through untouched.
+    Then the instance sub-header and component label are escaped (they are
+      DATA -- user-chosen names), while the description and the latex
+      symbol pass through untouched: descriptions are trusted LaTeX now
+      (same contract as table_note; the defaults.yaml audit in
+      tests/test_prose.py guards raw specials in shipped descriptions).
     """
     # ARRANGE
     p = Parameter(
         label="transit.depth",
         latex=r"\delta_{\rm t}",
-        description="Binary lens mass ratio (M_2 / M_1)",
+        description=r"mass ratio ($M_2/M_1$)",
         initval=np.array([0.01, 0.02]),
         lower=0.0,
         upper=1.0,
@@ -667,13 +675,13 @@ def test_instance_names_and_descriptions_are_escaped(tmp_path):
     build_latex_output(
         _fake_system(comp),
         var_filename=str(tmp_path / "v.tex"),
-        template_filename=str(tmpl_path),
+        table_filename=str(tmpl_path),
     )
 
     # ASSERT
     text = tmpl_path.read_text()
     assert r"\textit{MEARTH\_20090513:}" in text
-    assert r"Binary lens mass ratio (M\_2 / M\_1)" in text
+    assert r"mass ratio ($M_2/M_1$)" in text  # trusted LaTeX, unescaped
     assert r"\sidehead{Transit\_Parameters:}" in text
     assert r"\delta_{\rm t}" in text  # the symbol is markup: untouched
     body = [
@@ -930,7 +938,7 @@ def test_transition_diagnostics_reach_latex_and_csv(tmp_path):
     build_latex_output(
         _StubSystem(),
         var_filename=str(var_file),
-        template_filename=str(tmpl_file),
+        table_filename=str(tmpl_file),
         mode_report=rep,
     )
     build_csv_output(_StubSystem(), str(csv_file), mode_report=rep)
@@ -996,3 +1004,276 @@ def test_ladder_round_trips_quoted_separately_from_mode_changes():
     assert "temperature round trips" in text
     assert "NOT mode changes" in text
     assert "77" in text
+
+
+# ----------------------------------------------------------------------
+# Review 3.17: the validity gate must not be bypassed by an ALL-invalid
+# trace.  identify_modes cannot return a report when every draw is
+# rejected, so before the fix the failure arrived at build_mode_reports as
+# a bare exception, was absorbed by the broad catch, and
+# check_invalid_frac(None) returned immediately -- a 1.1%-invalid trace
+# refused to emit tables while a 100%-invalid one emitted a clean-looking
+# set.
+# ----------------------------------------------------------------------
+
+
+class _PipelineStubSystem(_StubSystem):
+    """_StubSystem plus the one extra hook build_mode_reports calls."""
+
+    def __init__(self):
+        self.distributed = 0
+
+    def distribute_posterior(self, idata):
+        self.distributed += 1
+
+
+def _all_lp_nan_idata(rng):
+    """Ordinary-looking draws whose stored lp is entirely non-finite.
+
+    The dangerous shape: the parameter values are finite and perfectly
+    plausible, so every table built from them reads as a healthy fit.
+    """
+    return _make_idata({"a_raw": rng.normal(0, 1, N)}, np.full(N, np.nan))
+
+
+def test_no_valid_draws_error_carries_the_counts():
+    """
+    Given a trace in which every draw fails the validity filter,
+    When identify_modes runs,
+    Then it raises NoValidDrawsError (a ValueError) carrying the invalid
+      count, fraction, per-reason breakdown and per-chain counts -- the
+      only channel through which the all-invalid case can reach the gate,
+      since no ModeReport can exist to read them off.
+    """
+    rng = np.random.default_rng(1)
+    idata = _all_lp_nan_idata(rng)
+
+    with pytest.raises(NoValidDrawsError) as excinfo:
+        identify_modes(idata)
+
+    exc = excinfo.value
+    assert isinstance(exc, ValueError)  # pre-existing callers still work
+    assert exc.n_invalid == N
+    assert exc.n_draws == N
+    assert exc.invalid_frac == 1.0
+    assert exc.reason_counts == {"nonfinite-lp": N}
+    assert len(exc.per_chain_invalid) == N_CHAIN
+
+
+def _all_invalid_status(n=1000, n_chain=4):
+    return {
+        "state": MODE_NO_VALID_DRAWS,
+        "n_draws": n,
+        "n_invalid": n,
+        "invalid_frac": 1.0,
+        "reasons": {"nonfinite-lp": n},
+        "per_chain_invalid": [n // n_chain] * n_chain,
+    }
+
+
+def test_check_invalid_frac_raises_when_every_draw_is_invalid():
+    """
+    Given no mode report because EVERY draw was rejected as invalid,
+    When check_invalid_frac runs,
+    Then it raises, says all the draws were rejected, and tells the user
+      what to do next.
+
+    Regression for review 3.17: the absent report used to return early,
+    so 100% invalid was the one fraction the gate let through.
+    """
+    with pytest.raises(RuntimeError) as excinfo:
+        check_invalid_frac(
+            None,
+            max_invalid_frac=DEFAULT_MAX_INVALID_FRAC,
+            trace_path="foo_trace.nc",
+            modes_path="foo_modes.txt",
+            status=_all_invalid_status(),
+        )
+
+    msg = str(excinfo.value)
+    assert "ALL 1000 draws (100.00%)" in msg
+    assert "nonfinite-lp" in msg
+    assert "foo_trace.nc" in msg
+    assert "exozippy-modes" in msg  # what to do next
+    assert "modes: {force: true}" in msg
+
+
+def test_check_invalid_frac_silent_when_report_absent_for_other_reasons():
+    """
+    Given no mode report for a reason that says nothing about the draws'
+      numerical validity (the mode pass crashed, or no status was kept),
+    When check_invalid_frac runs,
+    Then it does not raise -- the gate fires on "the draws are unusable",
+      never on "there was nothing to report".
+    """
+    check_invalid_frac(None, max_invalid_frac=DEFAULT_MAX_INVALID_FRAC)
+    check_invalid_frac(None, max_invalid_frac=0.0, status={})
+    check_invalid_frac(
+        None, max_invalid_frac=0.0, status={"state": MODE_FAILED}
+    )
+    check_invalid_frac(None, max_invalid_frac=0.0, status={"state": MODE_OK})
+
+
+def test_check_invalid_frac_all_invalid_honours_the_same_overrides():
+    """
+    Given no mode report because every draw was rejected,
+    When check_invalid_frac runs with force=True, or with a
+      max_invalid_frac of 1.0,
+    Then it does not raise: the all-invalid case is the extreme end of the
+      same continuum and obeys the same documented escape hatches, rather
+      than becoming a second, stricter gate at 100%.
+    """
+    status = _all_invalid_status()
+    check_invalid_frac(None, max_invalid_frac=0.01, force=True, status=status)
+    check_invalid_frac(None, max_invalid_frac=1.0, status=status)
+
+
+def test_mode_status_to_text_renders_only_the_all_invalid_state():
+    """
+    Given a mode-pass status dict,
+    When mode_status_to_text renders it,
+    Then the all-invalid state produces a report saying so, and every
+      other state (including no status at all) renders nothing -- the
+      innocent cases keep writing exactly the files they wrote before.
+    """
+    text = mode_status_to_text(_all_invalid_status())
+
+    assert "NO VALID DRAWS" in text
+    assert "1000 draws (100.00%)" in text
+    assert "nonfinite-lp" in text
+    assert mode_status_to_text(None) == ""
+    assert mode_status_to_text({}) == ""
+    assert mode_status_to_text({"state": MODE_FAILED}) == ""
+    assert mode_status_to_text({"state": MODE_OK}) == ""
+
+
+def test_pipeline_refuses_to_write_tables_when_every_draw_is_invalid(
+    tmp_path,
+):
+    """
+    Given a live fit whose draws were all rejected as numerically invalid,
+    When build_mode_reports runs the reporting pipeline,
+    Then it raises before writing the LaTeX/CSV tables, and the
+      <prefix>_modes.txt it leaves behind says the draws were all rejected.
+
+    Regression for review 3.17: this run used to complete, writing a full
+    set of tables carrying finite values and error bars, with nothing on
+    disk saying the trace had been rejected in its entirety.
+    """
+    rng = np.random.default_rng(2)
+    prefix = tmp_path / "broken"
+    status = {}
+
+    with pytest.raises(RuntimeError, match="ALL 12000 draws"):
+        build_mode_reports(
+            _PipelineStubSystem(),
+            _all_lp_nan_idata(rng),
+            str(prefix),
+            trace_path=str(prefix) + "_trace.nc",
+            raise_on_invalid=True,
+            mode_status=status,
+        )
+
+    assert status["state"] == MODE_NO_VALID_DRAWS
+    assert status["invalid_frac"] == 1.0
+    assert not (tmp_path / "broken_results.csv").exists()
+    assert not (tmp_path / "broken_definitions.tex").exists()
+    assert not (tmp_path / "broken_table.tex").exists()
+    assert "NO VALID DRAWS" in (tmp_path / "broken_modes.txt").read_text()
+
+
+def test_pipeline_reports_all_invalid_without_raising_for_forensics(
+    tmp_path,
+):
+    """
+    Given the same all-invalid trace and the forensic reprocessing path
+      (raise_on_invalid=False, what exozippy-modes uses),
+    When build_mode_reports runs,
+    Then it completes as that tool's contract requires, but records the
+      all-invalid state in the status dict and writes a <prefix>_modes.txt
+      that says so -- the tables it goes on to write are never the only
+      thing on disk describing this trace.
+    """
+    rng = np.random.default_rng(3)
+    prefix = tmp_path / "forensic"
+    status = {}
+
+    report = build_mode_reports(
+        _PipelineStubSystem(),
+        _all_lp_nan_idata(rng),
+        str(prefix),
+        raise_on_invalid=False,
+        mode_status=status,
+    )
+
+    assert report is None
+    assert status["state"] == MODE_NO_VALID_DRAWS
+    assert "NO VALID DRAWS" in (tmp_path / "forensic_modes.txt").read_text()
+    # latex.py's own invalid-draw note reads off the mode report, which does
+    # not exist here, so the pipeline supplies it: the table it does write
+    # must not read as a clean result.
+    template = (tmp_path / "forensic_table.tex").read_text()
+    assert "rejected as numerically invalid" in template
+    assert r"100.00\%" in template
+
+
+def test_pipeline_unchanged_when_the_mode_pass_fails_for_another_reason(
+    tmp_path, monkeypatch
+):
+    """
+    Given a mode pass that fails for a reason unrelated to draw validity,
+    When build_mode_reports runs with raise_on_invalid=True,
+    Then it warns, returns None, and writes the combined-posterior tables
+      exactly as before -- no raise, and no <prefix>_modes.txt invented
+      for a state that carries no evidence about the draws.
+    """
+    import exozippy.outputs.report_pipeline as rp
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("clustering exploded")
+
+    monkeypatch.setattr(rp, "identify_modes", _boom)
+
+    rng = np.random.default_rng(4)
+    idata = _make_idata({"a_raw": rng.normal(0, 1, N)}, rng.normal(0, 1, N))
+    prefix = tmp_path / "innocent"
+    status = {}
+
+    report = build_mode_reports(
+        _PipelineStubSystem(),
+        idata,
+        str(prefix),
+        trace_path=str(prefix) + "_trace.nc",
+        raise_on_invalid=True,
+        mode_status=status,
+    )
+
+    assert report is None
+    assert status["state"] == MODE_FAILED
+    assert not (tmp_path / "innocent_modes.txt").exists()
+    assert (tmp_path / "innocent_results.csv").exists()
+    assert (tmp_path / "innocent_definitions.tex").exists()
+
+
+def test_pipeline_status_records_a_healthy_mode_pass(tmp_path):
+    """
+    Given a healthy trace,
+    When build_mode_reports runs,
+    Then the status dict reports MODE_OK with zero invalid draws, so a
+      caller reading the status can tell success from either failure mode.
+    """
+    rng = np.random.default_rng(5)
+    idata = _make_idata({"a_raw": rng.normal(0, 1, N)}, rng.normal(0, 1, N))
+    status = {}
+
+    report = build_mode_reports(
+        _PipelineStubSystem(),
+        idata,
+        str(tmp_path / "healthy"),
+        raise_on_invalid=True,
+        mode_status=status,
+    )
+
+    assert report is not None
+    assert status["state"] == MODE_OK
+    assert status["n_invalid"] == 0

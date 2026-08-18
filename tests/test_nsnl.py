@@ -201,3 +201,74 @@ def test_single_source_backward_compat():
     np.testing.assert_array_equal(system.lens.source_map, [1])
     lp = model.compile_logp()(system.get_raw_start(model))
     assert np.isfinite(lp)
+
+
+# ---------------------------------------------------------------------------
+# The relaxation engine's answer must reach source slot 0.
+#
+# The engine solves the per-source chain at index-form paths (lens.0.theta_E,
+# lens.1.theta_E).  finalize_user_params used to file a NEW entry under the
+# CONFIG INSTANCE name instead -- and index 0 is the one index a lens instance
+# name collides with, so lens.0.theta_E became lens.Lens.theta_E.  resolve()
+# addresses element j of a per-source vector as lens.j.<param> or
+# lens.<SOURCE STAR NAME>.<param> ("SourceA"), never lens.Lens.<param>, so the
+# solved value for slot 0 was dropped: with no initval in
+# mulensing/defaults.yaml (theta_E is derived) apply_value allocated a
+# NaN-filled vector and wrote only element 1.
+# ---------------------------------------------------------------------------
+
+
+def test_derived_solutions_are_injected_under_the_index_key(system_2s2l):
+    """Given a lens event named 'Lens' whose per-source vectors are named for
+    the SOURCE stars, when the relaxation engine's solution is injected back,
+    then slot 0's entry uses the index form that resolve() can read, not the
+    lens instance's own name."""
+    system, _ = system_2s2l
+    up = system.config_manager.user_params
+
+    for param in ("theta_E", "pi_rel", "mu_rel_mag"):
+        assert f"lens.0.{param}" in up, f"lens.0.{param} was not injected"
+        assert f"lens.Lens.{param}" not in up, (
+            f"lens.Lens.{param} is unreadable: resolve() addresses source "
+            f"slot 0 as lens.0.{param} or lens.SourceA.{param}"
+        )
+
+
+def test_per_source_derived_initvals_are_finite(system_2s2l):
+    """Given a 2-source event, when the derived per-source chain is resolved,
+    then EVERY element carries the engine's value -- no NaN hole where a slot
+    got no readable entry."""
+    system, _ = system_2s2l
+    lens = system.lens
+
+    for param in ("theta_E", "pi_rel", "mu_rel_mag", "mu_ra_rel"):
+        initval = np.atleast_1d(getattr(lens, param).initval)
+        assert np.all(np.isfinite(initval)), (
+            f"lens.{param}.initval = {initval} has a non-finite element"
+        )
+
+    # Both sources share one lens, so the shared chain is the same for both.
+    np.testing.assert_allclose(
+        lens.theta_E.initval, [0.8392544170490658] * 2, rtol=1e-9
+    )
+    np.testing.assert_allclose(lens.pi_rel.initval, [0.125] * 2, rtol=1e-9)
+
+
+def test_no_parameter_has_a_non_finite_initval(system_2s2l):
+    """Given the built 2S2L system, when every Parameter is inspected, then
+    none carries a non-finite initval -- an initval is either a value or
+    absent (None), never NaN on some elements and a number on others."""
+    system, _ = system_2s2l
+
+    offenders = []
+    for par in system.get_all_parameters():
+        if par.initval is None:
+            continue
+        try:
+            arr = np.asarray(par.initval, dtype=float)
+        except (TypeError, ValueError):
+            continue  # symbolic (linked) start; not a numeric vector
+        if arr.size and not np.all(np.isfinite(arr)):
+            offenders.append(f"{par.label} = {arr}")
+
+    assert offenders == []

@@ -141,6 +141,38 @@ def test_bounds_excluding_initval_yields_diagnostic(kelt4_inputs):
     )
 
 
+def test_rv_gamma_is_reported_free_and_bounds_checked(kelt4_inputs, solved):
+    """
+    Given the RV offset gamma, which the manifest declared derived while
+      rvinstrument/defaults.yaml carried no expressions: block for it,
+    When solve() reports it and validate() checks an out-of-bounds start,
+    Then it is reported free (derived False) and the out-of-bounds start is
+      flagged.
+
+    _bounds_diagnostics skips derived parameters, so the mislabel silently
+    exempted every RV offset from the one check that catches a start no
+    sampler can begin from.
+    """
+    # Arrange
+    config, user_params, workdir = kelt4_inputs
+    gamma_paths = [p for p in solved.parameters if p.endswith(".gamma")]
+    bad_params = copy.deepcopy(user_params)
+    bad_params[gamma_paths[0]] = {"initval": 5.0e8}  # above the 3e8 m/s bound
+
+    # Act
+    diagnostics = validate(config, bad_params, workdir)
+
+    # Assert
+    assert gamma_paths, "the RV-only example must resolve a gamma"
+    assert all(
+        solved.parameters[p]["derived"] is False for p in gamma_paths
+    ), "gamma is sampled, not derived"
+    assert any(
+        d["severity"] == "error" and gamma_paths[0] in d["param_paths"]
+        for d in diagnostics
+    )
+
+
 def test_overconstrained_relation_yields_diagnostic(kelt4_inputs):
     """
     Given mass, radius, and density all set to mutually inconsistent values,

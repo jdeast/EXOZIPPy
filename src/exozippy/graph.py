@@ -1,9 +1,28 @@
 import graphlib
+import math
+
+from .manifest import interpret_manifest_entry
 
 """
 This builds a graph of the model and returns a topologically sorted list of parameters, ensuring that dependencies are built prior to things that depend on them.
 This must contain no component-specific logic.
 """
+
+
+def _entry_n_elements(entry, comp):
+    """How many elements the parameter this entry describes has.
+
+    One per component config instance, unless the manifest overrides the shape
+    (lens's per-source vectors).  Only per-element selectors need it, and a mask
+    sized from the wrong count is exactly review 1.1.1's hazard, so it is read
+    from the same option ``add_parameter`` reads it from.
+    """
+    shape = entry.shape
+    if not shape:
+        return comp.n_elements
+    if isinstance(shape, tuple):
+        return int(math.prod(shape)) if shape else 1
+    return int(shape)
 
 
 def determine_pymc_build_order(active_components, config_manager):
@@ -27,28 +46,48 @@ def determine_pymc_build_order(active_components, config_manager):
             cfg = config_manager.resolve(
                 comp.prefix, param_name, shape=(comp.n_elements,)
             )
-            raw = comp.manifest[param_name]
-            if isinstance(raw, str):
-                expr_key = raw  # e.g. "default"
-            elif isinstance(raw, dict):
-                expr_key = raw.get("expr_key")  # explicit key or None
-            else:
-                expr_key = None  # None → free parameter, no expression
-            # Fall back to "default" only when the manifest explicitly requested it
-            # via the "default" string shorthand.  A bare None means free parameter.
-            if expr_key is None:
-                expr_key = "default" if raw is not None else None
-            expressions_dict = cfg.get("expressions", {})
-
-            if expr_key is not None and expr_key in expressions_dict:
-                manifest_deps = (
-                    raw.get("deps") if isinstance(raw, dict) else None
-                )
-                dep_names = (
-                    manifest_deps
-                    if manifest_deps is not None
-                    else expressions_dict[expr_key].get("deps", [])
-                )
+            # manifest.py is the single interpreter of the manifest
+            # vocabulary -- the same one Component.add_parameter (stage 5)
+            # and System.derived_params read.  Do NOT re-derive the rules
+            # here: a dict WITHOUT "expr_key" is a free parameter carrying
+            # only options (an "overrides" pin, a shape, a table note), and
+            # graph.py used to fall back to the "default" expression for any
+            # dict.  That was inert while no pinned free parameter had an
+            # UNUSED `expressions:` block in its defaults.yaml, and a hard
+            # "Dependency Error" the moment one did: Band's linear-law u1,
+            # whose Kipping expression the manifest deliberately ignores,
+            # and planet.beam, whose {"overrides": ...}-shaped "off" entry
+            # was read as requesting calc_beam_from_K (deps: ["K"]), so any
+            # orbit-less config failed to build even with beaming off (see
+            # tests/test_transit_beer.py's
+            # test_beam_off_does_not_require_K_no_orbit_config).  The
+            # fallback could only ever add edges add_parameter does not use;
+            # it could never supply a needed one, since every parameter it
+            # applied to is free.
+            entry = interpret_manifest_entry(comp.manifest[param_name])
+            # A parameter whose instances chose different parameterizations
+            # takes its value from several expressions, one per group of
+            # elements; the build order needs the UNION of their dependencies,
+            # since add_parameter builds the whole vector at once and every
+            # expression must be wireable when it does.
+            #
+            # REPORTED selections (output_expr_key) contribute NO edge, and that
+            # is the point of the role: they are the reverse direction of a flip
+            # (report sqrt(e)cos(omega) for an orbit that sampled V_c/V_e), so
+            # their dep is a parameter that depends on this one on OTHER
+            # elements.  As an edge it would be a cycle here even though the
+            # value graph is perfectly acyclic per element; they are excluded
+            # because nothing consumes them, and the deferred build pass
+            # (add_parameter names it) is what materializes them.
+            selections = entry.expression_configs(
+                cfg.get("expressions", {}),
+                n_elements=_entry_n_elements(entry, comp),
+                where=f"{comp.prefix}.{param_name}",
+            )
+            for sel in selections:
+                if sel.output_only:
+                    continue
+                dep_names = entry.dep_names(sel.config)
                 # Deps a component declares in context_dep_names are
                 # satisfied by context-node injection in its add_parameter
                 # override (constants, not manifest parameters) -- they are
@@ -92,10 +131,29 @@ def determine_pymc_build_order(active_components, config_manager):
                 )
 
     # 4. Sort agnostically
-    sorter = graphlib.TopologicalSorter(forward_graph)
+    #
+    # Hand graphlib SORTED predecessor lists, not the raw sets.  The order
+    # returned here is the order the PyMC nodes -- and so the terms of the
+    # summed logp -- get created in, so a hash-ordered tie-break would move
+    # the last bits of every fit's logp from process to process.  Step 1
+    # above happens to make today's output independent of these sets (every
+    # node is already a key of forward_graph before the sorter sees it, so
+    # graphlib registers nodes in the dict's order, not the sets'), which is
+    # why sorting changes nothing right now -- but that is a property of
+    # step 1, not of graphlib, and it should not be the only thing standing
+    # between us and a PYTHONHASHSEED-dependent model.
+    sorter = graphlib.TopologicalSorter(
+        {node: sorted(deps) for node, deps in forward_graph.items()}
+    )
     try:
         return list(sorter.static_order())
     except graphlib.CycleError as e:
         raise ValueError(
             f"Circular reference detected in forward defaults.yaml graph: {e}"
+            f"\n\nIf the two parameters in the cycle are the two spellings of "
+            f"one parameterization (each derivable from the other, with "
+            f"different instances choosing different ones), the reverse "
+            f"direction is a REPORTED quantity, not a dependency: declare it "
+            f"with a manifest 'output_expr_key' instead of 'expr_key' so it "
+            f"contributes no build-order edge. Nothing may consume it."
         )

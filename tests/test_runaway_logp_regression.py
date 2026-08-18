@@ -81,8 +81,13 @@ EXAMPLE_DIR = os.path.join(
 # point -- this extreme raw value pins the logit at its upper bound, and old s
 # in [0.1, 10] and new log_s in [-1, 1] share the same physical endpoint
 # (10**1 = 10), so the physical separation is unchanged.
+# band.u1_raw is likewise gone: this example is `finite_source: False`, so
+# nothing reads the Z087 band's limb darkening, and Band now pins it (the same
+# "overrides" mechanism as star.py's source-star pins, one topology further
+# along).  Its historical value was -37530.31612758304; the parameter no longer
+# exists, so the coordinate cannot be supplied.  The whitening fixture lost its
+# band.u1 entry for the same reason -- every other entry is untouched.
 RUNAWAY_RAW = {
-    "band.u1_raw": [-37530.31612758304],
     "lens.log_s_raw": [12868418.484993141],
     "lens.t_0_raw": [597790902870.5624],
     "lens.u_0_raw": [-85147091.07538812],
@@ -115,8 +120,8 @@ RUNAWAY_RAW = {
 # "good draw" its name promised.  Evaluated WITHOUT the run's whitening this
 # draw gives logp -1.6e6 and chi2/N 3671, which is what makes the fixture below
 # restore it; with it, logp reproduces the trace's stored lp exactly.
+# (band.u1_raw was 0.2176204790834511 here; see the note on RUNAWAY_RAW.)
 GOOD_RAW = {
-    "band.u1_raw": [0.2176204790834511],
     "lens.log_s_raw": [-16.184426615189963],
     "lens.t_0_raw": [4.88478412864818],
     "lens.u_0_raw": [-42.52723267883055],
@@ -215,7 +220,26 @@ def _point(raw_dict):
 # a change moves the START VALUES instead, that is different: the raw point then
 # decodes somewhere else, and the honest fix is a fresh draw from a fresh run
 # rather than a new constant on a stale point.
-GOOD_EXPECTED_LP = 2979.9175
+#
+# 2979.9175 -> 3398.8805 when the microlensing likelihood moved from magnitudes
+# to flux.  That is a CHANGE OF MEASURE, not a change of fit: the density is now
+# over F rather than over m = -2.5*log10(F), and the two differ by the constant
+# Jacobian sum_i log|dm/dF|_i = N*log(2.5/ln10) - sum_i log(F_i) = +419.378 nats
+# over this file's 870 epochs.  The measured move is +418.963, so all but -0.415
+# nats of it is that constant; the -0.415 is the genuine second-order difference
+# between a Gaussian in flux and a Gaussian in magnitudes -- 0.05% of a chi2 of
+# ~870, i.e. the O(sigma_m) agreement the conversion promises.  The physical
+# state at GOOD_RAW is untouched (the flux bootstrap that sets the start values
+# always worked in flux internally and is bit-identical), which is why the
+# chi2/N check below still passes at the same point.
+#
+# 3398.8805 -> 3401.5937 when Band started pinning limb darkening no consumer
+# reads.  This example is `finite_source: False`, so band.u1 was a free RV that
+# no likelihood term touched; dropping it removes its prior contribution at
+# GOOD_RAW (+2.713 nats).  Another CHANGE OF MEASURE -- the model has one fewer
+# dimension -- and not a change of fit: nothing in the light-curve sector moved,
+# which is why the chi2/N check below is unchanged at the same point.
+GOOD_EXPECTED_LP = 3401.5937
 
 
 def test_good_draw_logp_matches_deterministic_build(dc2018_128_logp):

@@ -6,19 +6,37 @@ import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.config import RANK_DERIVED_DATA
-from exozippy.constants import KAPPA
 from exozippy.corner_utils import (
     collect_parameter_corner_samples,
     save_corner_plot,
 )
+from exozippy.outputs.prose import get_collector
 from exozippy.potentials import soft_lower_bound
+from exozippy.skyframe import observer_sky_offset, sky_basis
 
 from ..galacticmodel.physics import expected_proper_motion
 from . import mmexofast_support
 from .op import BinaryLensMagOp, MulensMagOp, VBMDirectMagOp
-from .physics import MU_REL_FLOOR, THETA_E_FLOOR
+from .physics import (
+    _MM_NAN_ADVICE,
+    _Q_NAN_ADVICE,
+    MU_REL_FLOOR,
+    Q_MAX,
+    Q_MIN,
+    T_E_FLOOR,
+    THETA_E_FLOOR,
+    THETA_E_LENSING_MIN,
+    U_0_FLOOR,
+    apply_u_0_floor,
+    clip_q,
+    floor_u_0_value,
+)
 
 logger = logging.getLogger(__name__)
+
+# alpha is stored in radians (lens.alpha's internal_unit) and consumed in
+# degrees by both magnification backends.
+_RAD_TO_DEG = 180.0 / np.pi
 
 
 def _parse_body_ref(ref):
@@ -397,10 +415,6 @@ class Lens(Component):
         """Return (comp_type, star_ndx) for the primary source of event i."""
         return self.source_bodies[event_idx][0]
 
-    def _body_mass(self, system, comp_type, ndx):
-        """Return the PyTensor mass node for a given body."""
-        return getattr(system, comp_type).mass.value[ndx]
-
     def _mass_initval(self, comp_type, ndx):
         """Best-effort mass initval (solMass) for a body at stage 2, from
         user_params mass or logmass entries; None when neither is given."""
@@ -606,6 +620,10 @@ class Lens(Component):
         if not isinstance(mmx_file, str) or mmx_file == "auto":
             return
 
+        # None means the file is ABSENT (warn and run unseeded, as before);
+        # a file that exists but cannot be parsed raises out of load_json.
+        # exozippy did not write a user-named file and so cannot regenerate
+        # it -- only run_or_load's own cache has that recovery.
         data = mmexofast_support.load_json(mmx_file)
         if data is None:
             logger.warning(f"No seeds loaded from '{mmx_file}'.")
@@ -661,6 +679,22 @@ class Lens(Component):
             "pi_E_N": per_source("default"),
             "pi_E_E": per_source("default"),
         }
+
+        # The geocentric-frame caveat lives in ONE shared table note (the
+        # note_marks dedup collapses identical texts to one letter) rather
+        # than in every description -- the 25-character description budget
+        # is what sets the table's column width.
+        geo_note = (
+            r"Geocentric quantities are evaluated at the fiducial time "
+            r"$t_{0,\rm par}$ \citep{Gould:2004, Skowron:2011}."
+        )
+        for name in (
+            "t_E",
+            "mu_ra_rel_geo",
+            "mu_dec_rel_geo",
+            "mu_rel_geo_mag",
+        ):
+            self.manifest[name]["table_note"] = geo_note
 
         # Companion geometry: one (s, alpha) pair per lens body beyond the
         # primary. The shape override sizes these by companion count rather
@@ -779,7 +813,7 @@ class Lens(Component):
         if isinstance(sa, (list, tuple)):
             sa = sa[0] if sa else None
         if ca is not None and sa is not None:
-            alpha_deg = float(np.arctan2(float(sa), float(ca)) * 180.0 / np.pi)
+            alpha_deg = float(np.arctan2(float(sa), float(ca)) * _RAD_TO_DEG)
             self.config_manager.add_hint(f"lens.0.alpha", alpha_deg, rank=20)
 
         # Expected proper motions from the galactic model, for the seeds below.
@@ -898,7 +932,9 @@ class Lens(Component):
         blockers = [
             k
             for k in up
-            if k.endswith((".pi_E_N", ".pi_E_E")) or ".pm_ra" in k or ".pm_dec" in k
+            if k.endswith((".pi_E_N", ".pi_E_E"))
+            or ".pm_ra" in k
+            or ".pm_dec" in k
         ]
         if blockers:
             logger.info(
@@ -1045,18 +1081,133 @@ class Lens(Component):
             return 0.0, 0.0
         v = np.asarray(vel, dtype=float) * 365.25  # AU/day -> AU/yr
         ra, dec = radec
-        e_hat = np.array([-np.sin(ra), np.cos(ra), 0.0])
-        n_hat = np.array(
-            [
-                -np.cos(ra) * np.sin(dec),
-                -np.sin(ra) * np.sin(dec),
-                np.cos(dec),
-            ]
-        )
+        # The basis itself, not observer_sky_offset: what is projected here
+        # is the Earth's VELOCITY, not its position.
+        e_hat, n_hat = sky_basis(ra, dec)
         return float(v @ e_hat), float(v @ n_hat)
+
+    def _validate_q_start(self):
+        """Stage 6: check the START value of the mass ratio, loudly and once.
+
+        The magnification path clips q into [Q_MIN, Q_MAX] (physics.clip_q) --
+        a statement about where the backends are defined, not a licence to
+        invent a mass ratio.  The clip used to be preceded by
+        ``pt.nan_to_num(q, nan=Q_MIN)``, which silently turned a failed
+        computation into a healthy-looking likelihood.  That scrub is gone; a
+        NaN now reaches logp and the proposal is rejected.  What the scrub also
+        hid, though, was the *start*, and a bad start is the case that is worth
+        a message rather than a rejection -- so it is checked here, once, on
+        the inputs, where a raise costs nothing and can say what to do.
+
+        NaN is fatal: the fit cannot start.  Out of range (the infinities
+        included -- they at least carry a sign, the same split clip_q_value
+        makes) is a warning: the fit will silently begin at the clipped q
+        rather than at the seeded one, which is exactly the sort of "the number
+        I typed is not the number being fitted" that goes unnoticed for months.
+        """
+        if self.n_companions < 1 or self.q.initval is None:
+            return
+        q0 = np.atleast_1d(np.asarray(self.q.initval, dtype=float)).ravel()
+        if np.any(np.isnan(q0)):
+            raise ValueError(
+                f"{self.prefix}.q starts at {q0.tolist()}, which is not a "
+                f"number.  {_Q_NAN_ADVICE}"
+            )
+        out = (q0 < Q_MIN) | (q0 > Q_MAX)
+        if np.any(out):
+            logger.warning(
+                f"{self.prefix}.q starts at {q0[out].tolist()}, outside the "
+                f"[{Q_MIN:g}, {Q_MAX:g}] range the binary-lens magnification "
+                "backends are defined on, so the fit will actually START at "
+                "the clipped value.  Move the start inside the range (set "
+                f"{self.prefix}.q, or the companion/primary masses it is "
+                "derived from) rather than relying on the clip."
+            )
+
+    def _start_values(self, name):
+        """Resolved start value of a lens parameter as a 1-D float array, or
+        None when it has none (unset, or not castable -- a multi-seed entry
+        that survived as a ragged object array)."""
+        par = getattr(self, name, None)
+        if par is None or par.initval is None:
+            return None
+        try:
+            return np.atleast_1d(np.asarray(par.initval, dtype=float)).ravel()
+        except (TypeError, ValueError):
+            return None
+
+    def _validate_pspl_start(self):
+        """Stage 6: check the START values of the SAMPLED trajectory
+        parameters, loudly and once.  The sibling of
+        :meth:`_validate_q_start`, and it makes the same split for the same
+        reason: NaN raises (the fit cannot start), out of range warns (the fit
+        begins at the floored value rather than at the seeded one -- the "the
+        number I typed is not the number being fitted" case that goes
+        unnoticed for months).  This is the half of the old scrub worth
+        keeping, moved to where a raise is free: a check on the inputs at
+        build time, not a mid-graph assert that would kill a run over a
+        proposal the sampler already rejects on its own.
+
+        **Only t_0 and u_0 are checked, and that is deliberate.**  They are
+        the two trajectory parameters that are sampled, so their ``initval``
+        IS the start: raw = 0 maps to it through the logit transform.  The
+        other four quantities `_get_safe_mm_params` handles -- t_E, theta_E,
+        pi_E_N and pi_E_E -- are DERIVED, and for a derived parameter
+        ``initval``
+        is the relaxation engine's own bookkeeping, not the value the model
+        starts at; the graph recomputes it from the sampled coordinates.  The
+        two genuinely differ, so checking them here would be a false positive
+        on working configs.  Measured on `examples/ob161003` (2S2L, two source
+        slots): the engine leaves ``lens.theta_E.initval = [nan, 0.8393]`` and
+        ``lens.pi_rel.initval = [nan, 0.125]`` -- it only ever needed to solve
+        the second slot, both sources sharing one lens -- while the model
+        starts at a perfectly good ``theta_E = [0.8393, 0.8393]`` and a finite
+        logp.  A NaN there says nothing about the fit.  (That the engine
+        writes a NaN into a resolved value at all is a separate, pre-existing
+        oddity; it is not this guard's business to report it.)
+
+        The one range check is on ``|u_0| < U_0_FLOOR``: the fit will not start
+        where the seed says, it will start at the floored value.  ``u_0: 0`` --
+        a plausible seed for a high-magnification event -- is included, and it
+        used to be the one case the floor MISSED (``sign(0) = 0`` made the old
+        ``sign(u_0) * maximum(|u_0|, U_0_FLOOR)`` return 0 and left the peak
+        magnification singular).  ``physics.apply_u_0_floor`` now sends it to
+        ``+U_0_FLOOR``; the warning names the value it will actually start at.
+        t_0 gets no range check -- it carries two finite hard bounds of its own.
+        """
+        sampled = {
+            "t_0": self._start_values("t_0"),
+            "u_0": self._start_values("u_0"),
+        }
+        nan_named = [
+            f"{self.prefix}.{n} = {v.tolist()}"
+            for n, v in sampled.items()
+            if v is not None and np.any(np.isnan(v))
+        ]
+        if nan_named:
+            raise ValueError(
+                "The lensing trajectory starts at a value that is not a "
+                f"number: {'; '.join(nan_named)}.  {_MM_NAN_ADVICE}"
+            )
+
+        u_0 = sampled["u_0"]
+        if u_0 is not None and np.any(np.abs(u_0) < U_0_FLOOR):
+            small = u_0[np.abs(u_0) < U_0_FLOOR]
+            floored = [floor_u_0_value(v) for v in small]
+            logger.warning(
+                f"{self.prefix}.u_0 starts at {small.tolist()}, inside the "
+                f"{U_0_FLOOR:g} floor on |u_0| (the magnification diverges "
+                f"at u = 0), so the fit will actually START at {floored} -- "
+                "and an exactly central trajectory has no side, so u_0 = 0 "
+                f"is floored to +{U_0_FLOOR:g} by convention.  Seed the "
+                "impact parameter you mean, with the sign you mean."
+            )
 
     def build_likelihood(self, model, system):
         """Stage 6: Observational penalties on the lensing geometry."""
+        self._validate_q_start()
+        self._validate_pspl_start()
+
         # GEOCENTRIC mu_rel: the event-rate selection is the sky-sweep rate
         # in the frame the event is observed in (rp.py used the geocentric
         # value at t0_par; Batista+2011's rate is in the frame of the
@@ -1077,6 +1228,14 @@ class Lens(Component):
                 pt.log(pt.maximum(mu_rel_geo, MU_REL_FLOOR))
                 + pt.log(pt.maximum(theta_E, THETA_E_FLOOR))
             ),
+        )
+        get_collector(system).add(
+            r"We weighted the lens prior by the microlensing event rate, "
+            r"$\Gamma \propto \mu_{\rm rel}\,\theta_{\rm E}$ "
+            r"\citep[e.g.][]{Batista:2011}.",
+            section="priors",
+            key=f"{self.prefix}.event_rate",
+            rank=30,
         )
 
         # Shared log-sigmoid barriers (see exozippy.potentials): smooth and
@@ -1105,35 +1264,98 @@ class Lens(Component):
     # Magnification
     # ------------------------------------------------------------------
 
+    def _alpha_deg(self, j=0):
+        """Trajectory angle of companion ``j`` in DEGREES -- the unit both
+        magnification backends take, while lens.alpha's internal unit is
+        radians.
+
+        Reads the alpha Parameter rather than re-deriving ``arctan2(yalpha,
+        xalpha)`` at each call site (it was open-coded twice; review item 4.5).
+        alpha's expression IS that arctan2 (physics.calc_alpha), so this is
+        bit-identical, and going through the Parameter means the angle handed
+        to the backend is by construction the same one the reports, priors and
+        plots see.
+        """
+        return self.alpha.value[j] * _RAD_TO_DEG
+
     def _get_safe_mm_params(self, index=0):
-        """Sanitized single-source params.  ``index`` is the SOURCE slot: the
-        per-source vector parameters (t_0, u_0, t_E, pi_E_*) hold one element
-        per source body of the single event."""
+        """Range-limited single-source trajectory params.  ``index`` is the
+        SOURCE slot: the per-source vector parameters (t_0, u_0, t_E, pi_E_*)
+        hold one element per source body of the single event.
+
+        Three RANGE decisions survive here -- the t_E floor, the |u_0| floor
+        and the no-lensing parallax gate, all defined and justified next to
+        their constants in physics.py.  What is deliberately GONE is the NaN
+        substitution that used to precede them:
+
+            t_E -> 100 d,  u_0 -> 1,  theta_E -> 0,  pi_E_N -> 0,  pi_E_E -> 0
+
+        i.e. a complete, fabricated PSPL model in place of a failed
+        computation.  It is the same defect ``clip_q``'s ``pt.nan_to_num``
+        was (review item 4.5), five more times and with a much larger blast
+        radius: a fully-NaN parameter vector produced a healthy-looking light
+        curve and a finite likelihood.
+
+        Removing it is safe *and* strictly better, for the same two reasons:
+
+        * It is unreachable.  Every one of the five is finite for every finite
+          raw vector.  t_0 and u_0 are sampled with two finite hard bounds, so
+          the logit transform can only produce a finite number.  theta_E is
+          ``sqrt(max(KAPPA*max(M,1e-12)*max(pi_rel,0), THETA_E_FLOOR**2))``,
+          strictly positive and finite for any finite mass and pi_rel, and
+          pi_rel is a difference of two 1000/distance terms whose distances
+          are logit-bounded away from zero.  t_E = theta_E/(mu_rel_geo/365.25)
+          and pi_E = (pi_rel/theta_E)*(mu_i/mu_rel_geo) are then ratios whose
+          denominators are floored at THETA_E_FLOOR and MU_REL_FLOOR -- those
+          two floors, added in c178305, are exactly what closed the 0/0 that
+          made this scrub live when it was written (May 2026), back when
+          calc_mu_rel_mag was a bare sqrt that could return exactly 0.
+          Measured on examples/ob08092 (PSPL), examples/ob140939 (parallax +
+          Spitzer) and examples/DC2018_128 (binary lens): all five stay finite
+          over the entire raw support out to raw = +/-1e12, one variable at a
+          time and all at once, plus 2000 random raw points per event.  Three
+          real 300-tune/300-draw ptde_async fits (28 worker processes each,
+          172k / 215k / 223k evaluations) instrumented at the scrub itself
+          never once entered the branch.
+        * Where it could fire it could only do harm.  These five are NaN only
+          when an input is already NaN, i.e. the raw vector itself carries a
+          NaN -- and that raw variable's own N(0, 1) prior term already makes
+          the total logp NaN, so the proposal is rejected whatever this
+          function returns (verified on all three events, for every sampled
+          coordinate).  Substituting a "safe" value could never rescue a
+          sample; it invented an entire event geometry -- with a zero
+          gradient, since nan_to_num is a switch -- in place of the one
+          quantity that would have named the failure.
+
+        The theta_E substitution was not even that: ``theta_E_scrubbed`` fed
+        nothing but the ``pt.gt(..., 1e-6)`` comparison, and a comparison
+        against NaN is already False, so dropping it is a no-op in every case,
+        NaN included.
+
+        A NaN now propagates to logp, which is the sampler's own reject
+        signal, so nothing here needs a mid-graph assert (which would kill a
+        whole run over a proposal that is already being rejected) or a -inf
+        potential (no gradient, and the JAX where-trap).  The two SAMPLED
+        start values are checked once, loudly, in _validate_pspl_start; the
+        numeric Op path names the parameter through physics.require_mm_number.
+        """
         tE_raw = self.t_E.value[index]
         u0_raw = self.u_0.value[index]
         theta_E_raw = self.theta_E.value[index]
-        pi_N_raw = self.pi_E_N.value[index]
-        pi_E_raw = self.pi_E_E.value[index]
 
-        tE_scrubbed = pt.nan_to_num(tE_raw, nan=100.0)
-        u0_scrubbed = pt.nan_to_num(u0_raw, nan=1.0)
-        theta_E_scrubbed = pt.nan_to_num(theta_E_raw, nan=0.0)
-        pi_N_scrubbed = pt.nan_to_num(pi_N_raw, nan=0.0)
-        pi_E_scrubbed = pt.nan_to_num(pi_E_raw, nan=0.0)
-
-        tE_safe = pt.maximum(tE_scrubbed, 1e-4)
-        u0_safe = pt.sign(u0_scrubbed) * pt.maximum(pt.abs(u0_scrubbed), 1e-6)
-        is_physical = pt.gt(theta_E_scrubbed, 1e-6)
+        tE_safe = pt.maximum(tE_raw, T_E_FLOOR)
+        u0_safe = apply_u_0_floor(u0_raw)
+        is_physical = pt.gt(theta_E_raw, THETA_E_LENSING_MIN)
 
         return {
             "t0": self.t_0.value[index],
             "u0": u0_safe,
             "tE": tE_safe,
-            "pi_N": pt.switch(is_physical, pi_N_scrubbed, 0.0),
-            "pi_E": pt.switch(is_physical, pi_E_scrubbed, 0.0),
+            "pi_N": pt.switch(is_physical, self.pi_E_N.value[index], 0.0),
+            "pi_E": pt.switch(is_physical, self.pi_E_E.value[index], 0.0),
         }
 
-    def _get_binary_mm_params(self, system, index=0):
+    def _get_binary_mm_params(self, index=0):
         """Params for a binary lens.  ``index`` is the SOURCE slot; the lens
         bodies are shared by all sources (single event ⇒ event index 0).
 
@@ -1141,26 +1363,21 @@ class Lens(Component):
         the TOTAL lens mass via mlens_total, so the safe single-source params
         pass straight through — only the companion geometry (s, q, alpha) is
         added here.
+
+        It no longer takes ``system``: q used to be recomputed here from the
+        two body mass nodes, which is what needed it.  It now reads the q
+        Parameter, which is that same ratio (physics.calc_q) and is what every
+        other consumer already uses.
         """
         s = self._get_safe_mm_params(index)
 
-        l2_type, l2_idx = self.lens_bodies[0][1]
-        m1 = self._body_mass(system, *self.lens_bodies[0][0])
-        m2 = self._body_mass(system, l2_type, l2_idx)
-        q = m2 / pt.maximum(m1, 1e-10)
-        q_safe = pt.clip(pt.nan_to_num(q, nan=1e-9), 1e-9, 100.0)
-
-        # s/xalpha/yalpha are indexed by companion (binary = companion 0),
-        # not by event or source.
-        alpha_deg = pt.arctan2(self.yalpha.value[0], self.xalpha.value[0]) * (
-            180.0 / np.pi
-        )
-
+        # s/q/alpha are indexed by companion (binary = companion 0), not by
+        # event or source.
         return {
             **s,
             "s": self.s.value[0],
-            "q": q_safe,
-            "alpha": alpha_deg,
+            "q": clip_q(self.q.value[0]),
+            "alpha": self._alpha_deg(0),
         }
 
     def get_magnification(self, times, obs_pos, system, index=0):
@@ -1171,20 +1388,22 @@ class Lens(Component):
         obs_pos : (N, 3) Skowron+2011 geocentric deviations in AU --
         the observer's offset from the linear Earth trajectory anchored at
         t0_par (MulensInstrument._abs_to_delta).  The MulensModel Op path
-        consumes the exact same array (fed as satellite_skycoord), so the
-        two paths are interchangeable.  Zero rows mean no parallax.
+        consumes the exact same array (fed as satellite_skycoord), so both
+        paths carry the same parallax, annual and satellite alike, and are
+        interchangeable on this input.  Zero rows mean no parallax.
+
+        The one input they do NOT share is the line of sight: this formula
+        reads the live star.ra/star.dec nodes, while the Op takes a coordinate
+        STRING frozen at the start value (_frozen_op_coords_deg, which warns
+        when they are sampled).  That only separates the two paths in a
+        topology that actually samples ra/dec, and by ~1e-5 per arcsec of
+        coordinate error -- see that method for why the freeze is free.
         """
         source_ndx = self.source_map[index]
         ra = system.star.ra.value[source_ndx]
         dec = system.star.dec.value[source_ndx]
 
-        x, y, z = obs_pos[:, 0], obs_pos[:, 1], obs_pos[:, 2]
-        delta_e = -x * pt.sin(ra) + y * pt.cos(ra)
-        delta_n = (
-            -x * pt.cos(ra) * pt.sin(dec)
-            - y * pt.sin(ra) * pt.sin(dec)
-            + z * pt.cos(dec)
-        )
+        delta_e, delta_n = observer_sky_offset(obs_pos, ra, dec, xp=pt)
 
         p = self._get_safe_mm_params(index)
         # MulensModel convention: delta_tau = -delta_N*pi_E_N - delta_E*pi_E_E
@@ -1240,6 +1459,59 @@ class Lens(Component):
             }
         return {}
 
+    def _frozen_op_coords_deg(self, system, source_ndx):
+        """(ra, dec) in degrees baked into the MulensModel / VBM Op, ONCE.
+
+        The Op takes the line of sight as a coordinate STRING, so it cannot
+        track a sampled ``star.ra``/``star.dec``: whatever is read here is
+        frozen for the whole fit.  That freeze is deliberate and numerically
+        free.  Microlensing parallax enters only through the PROJECTION of the
+        Earth's orbit onto the event's (N, E) axes, so a coordinate error of
+        eps radians perturbs the projection by ~eps relative: 1 arcsec is
+        5e-6, nothing against pi_E uncertainties of order 1%.  Making the
+        coordinates dynamic would rebuild the Op every likelihood call to buy
+        a correction six orders of magnitude below the measurement.
+
+        What is NOT free is doing it silently, so a topology that actually
+        samples the source's ra/dec (microlensing + gaia/abs astrometry) gets
+        one warning per source naming the frozen values.  Nothing is emitted
+        for the overwhelmingly common case where they are pinned -- a warning
+        on every microlensing fit is a warning nobody reads.
+
+        The value comes from ``initval``, not from ``.eval()`` of the value
+        node.  A sampled element's node IS a random variable, so ``.eval()``
+        draws from its prior: the old code did not freeze the start value, it
+        froze an arbitrary draw (measured 0.36 deg away on a mulens topology
+        with a sampled source position).
+        """
+        star = system.star
+        deg = 180.0 / np.pi
+        ra_deg = star.ra.element_start(source_ndx) * deg
+        dec_deg = star.dec.element_start(source_ndx) * deg
+
+        warned = getattr(self, "_frozen_coord_warned", None)
+        if warned is None:
+            warned = self._frozen_coord_warned = set()
+        moving = [
+            name
+            for name, param in (("ra", star.ra), ("dec", star.dec))
+            if param.element_is_sampled(source_ndx)
+        ]
+        if moving and source_ndx not in warned:
+            warned.add(source_ndx)
+            logger.warning(
+                f"[{self.prefix}] star.{'/'.join(moving)} of source body "
+                f"{source_ndx} is sampled, but the MulensModel/VBM "
+                f"magnification Op takes the line of sight as a fixed "
+                f"coordinate string: it is FROZEN at the start value "
+                f"(ra={ra_deg:.6f} deg, dec={dec_deg:.6f} deg) for the whole "
+                f"fit. This is safe -- the parallax projection is perturbed "
+                f"only ~1e-5 per arcsec of coordinate error, far below any "
+                f"pi_E uncertainty -- but the sampled ra/dec do NOT feed the "
+                f"microlensing model."
+            )
+        return ra_deg, dec_deg
+
     def get_magnification_op(
         self, times, obs_pos, system, index=0, u1=None, bandpass=None
     ):
@@ -1280,12 +1552,7 @@ class Lens(Component):
             return self.get_magnification(times, obs_pos, system, index)
 
         source_ndx = self.source_map[index]
-        ra_deg = float(system.star.ra.value[source_ndx].eval()) * (
-            180.0 / np.pi
-        )
-        dec_deg = float(system.star.dec.value[source_ndx].eval()) * (
-            180.0 / np.pi
-        )
+        ra_deg, dec_deg = self._frozen_op_coords_deg(system, source_ndx)
         coords = f"{ra_deg}d {dec_deg}d"
 
         use_rho = self.finite_source[0]
@@ -1303,13 +1570,13 @@ class Lens(Component):
             if use_rho:
                 param_list.append(self.rho.value[index])
             for j in range(self.n_companions):
-                q_j = pt.clip(
-                    pt.nan_to_num(self.q.value[j], nan=1e-9), 1e-9, 100.0
+                param_list.extend(
+                    [
+                        self.s.value[j],
+                        clip_q(self.q.value[j]),
+                        self._alpha_deg(j),
+                    ]
                 )
-                alpha_deg_j = pt.arctan2(
-                    self.yalpha.value[j], self.xalpha.value[j]
-                ) * (180.0 / np.pi)
-                param_list.extend([self.s.value[j], q_j, alpha_deg_j])
             if effective_bandpass is not None:
                 param_list.append(u1)
             mag_op = VBMDirectMagOp(
@@ -1319,7 +1586,7 @@ class Lens(Component):
                 bandpass=effective_bandpass,
             )
         elif n_lenses == 2:
-            bp = self._get_binary_mm_params(system, index)
+            bp = self._get_binary_mm_params(index)
             param_list = [bp["t0"], bp["u0"], bp["tE"], bp["pi_N"], bp["pi_E"]]
             if use_rho:
                 param_list.append(self.rho.value[index])

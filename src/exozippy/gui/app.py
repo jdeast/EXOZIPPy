@@ -21,9 +21,9 @@ Endpoints (Phase 2, G7):
 
 Data file manager (G9):
     GET  /api/files?dir=...       -- browse the project tree for data files
+    GET  /api/browse?dir=...      -- unconfined browse for the project picker
     POST /api/files/eligible      -- schema-driven association menu for a file
     GET  /api/files/associations  -- current file -> instance associations
-    POST /api/preview             -- data-only PlotSpecs (worker subprocess)
 
 Run controls (G11):
     POST /api/run             -- launch a fit as a subprocess (one per project)
@@ -54,9 +54,9 @@ import sys
 import threading
 import uuid
 import webbrowser
-from functools import lru_cache
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -68,9 +68,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 # YAML files that look like parameter-override files rather than system configs.
 _PARAMS_SUFFIXES = (".params.yaml", ".params.yml")
 
-# Data-file extensions worth surfacing in the project listing (preview/assoc.
-# in later prompts). Kept generic -- the datafile schema (G1) is the real
-# authority; this is only a listing convenience.
+# Data-file extensions worth surfacing in the project listing. Kept generic --
+# the datafile schema (G1) is the real authority; this is only a listing
+# convenience.
 _DATA_EXTS = (
     ".sed",
     ".rv",
@@ -101,7 +101,9 @@ def _require_fastapi():
 # --- project directory listing ------------------------------------------------
 
 
-@lru_cache(maxsize=1)
+_CONFIG_TOP_KEYS = None
+
+
 def _config_top_keys():
     """Top-level YAML keys that mark a file as a system config.
 
@@ -111,7 +113,15 @@ def _config_top_keys():
     no component name is hardcoded; discovery imports the component stack, so it
     is cached and done at most once per process. The literal fallbacks cover the
     case where introspection is unavailable in a lightweight context.
+
+    The cache is written only on SUCCESS, deliberately: an ``@lru_cache`` here
+    froze the four-key literal fallback for the whole process lifetime after
+    one transient import failure, and every config in the project then
+    classified as "other" with no way to recover short of a restart.
     """
+    global _CONFIG_TOP_KEYS
+    if _CONFIG_TOP_KEYS is not None:
+        return _CONFIG_TOP_KEYS
     keys = {"run", "prefix", "logger_level", "sampler", "parameter_file"}
     try:
         from ..introspect import _global_schema, list_components
@@ -119,11 +129,27 @@ def _config_top_keys():
         keys.update(list_components().keys())
         keys.update(_global_schema().keys())
     except Exception:  # pragma: no cover - defensive; fall back to literals
-        pass
+        return keys  # degraded answer: usable now, never remembered
+    _CONFIG_TOP_KEYS = keys
     return keys
 
 
-def _classify_yaml(path):
+# Above this size a .yaml file is not a config or a params file by any
+# plausible reading, and parsing it would stall the project listing (which
+# classifies every YAML in the directory). Fall back to the naming convention.
+_YAML_PARSE_MAX_BYTES = 4 * 1024 * 1024
+
+# (path, mtime_ns, size) -> classification. Project open re-reads every YAML in
+# the directory on every switch; the identity triple invalidates itself the
+# moment a file is edited, so a memo is safe and the repeat opens are free.
+_CLASSIFY_CACHE = {}
+_CLASSIFY_CACHE_MAX = 512
+
+# Ceiling on retained background-validation jobs (see doc_validate).
+_MAX_VALIDATE_JOBS = 32
+
+
+def _classify_yaml_uncached(path, size):
     """Classify a YAML file by its content: 'params', 'config', or 'other'.
 
     Filename conventions alone are unreliable (kelt4.params.3.yaml is a params
@@ -138,15 +164,24 @@ def _classify_yaml(path):
       * anything else (a component's own input file like kelt4.sed.yaml, or
         arbitrary YAML)  -> 'other'
 
-    Unreadable/invalid YAML falls back to the suffix convention so a broken file
-    still lands somewhere sensible.
+    A file with NO content to read falls back to the suffix convention:
+    unreadable/invalid YAML, one past the parse size cap, and -- the case that
+    used to be wrong -- an empty or comment-only file, which parses cleanly to
+    ``None`` and so had no keys to match. That landed a freshly created
+    template in "other", where the config picker cannot see it at all, which is
+    exactly when a user needs to select it.
     """
     name = path.name.lower()
+    by_suffix = "params" if name.endswith(_PARAMS_SUFFIXES) else "config"
+    if size is not None and size > _YAML_PARSE_MAX_BYTES:
+        return by_suffix
     try:
         with open(path, "r") as fh:
             data = yaml.safe_load(fh)
     except Exception:
-        return "params" if name.endswith(_PARAMS_SUFFIXES) else "config"
+        return by_suffix
+    if data is None:
+        return by_suffix
 
     keys = (
         [k for k in data if isinstance(k, str)]
@@ -160,6 +195,26 @@ def _classify_yaml(path):
     if _config_top_keys().intersection(keys):
         return "config"
     return "other"
+
+
+def _classify_yaml(path):
+    """``_classify_yaml_uncached`` memoized on (path, mtime, size)."""
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+        size = st.st_size
+    except OSError:
+        key, size = None, None
+    if key is not None:
+        cached = _CLASSIFY_CACHE.get(key)
+        if cached is not None:
+            return cached
+    kind = _classify_yaml_uncached(path, size)
+    if key is not None:
+        if len(_CLASSIFY_CACHE) >= _CLASSIFY_CACHE_MAX:
+            _CLASSIFY_CACHE.clear()
+        _CLASSIFY_CACHE[key] = kind
+    return kind
 
 
 def open_project(path):
@@ -196,9 +251,12 @@ def open_project(path):
         if suffix in (".yaml", ".yml"):
             kind = _classify_yaml(child)
             entry["kind"] = kind
-            {"params": params, "config": configs}.get(kind, other).append(
-                entry
-            )
+            if kind == "params":
+                params.append(entry)
+            elif kind == "config":
+                configs.append(entry)
+            else:
+                other.append(entry)
         elif suffix in _DATA_EXTS:
             entry["kind"] = "data"
             data_files.append(entry)
@@ -227,23 +285,65 @@ def _read_last_lines(path, n):
         return []
 
 
+def _origin_is_local(origin):
+    """Whether a WebSocket handshake ``Origin`` may open a log tail.
+
+    WebSocket handshakes are NOT subject to CORS, so without this any web page
+    the user happens to visit could open ``ws://127.0.0.1:<port>/api/logs`` and
+    read back whatever it streams. A missing Origin is allowed: browsers always
+    send one on a WS handshake, so an absent header means a non-browser client
+    (curl, the test client, a script), which was never the threat.
+    """
+    if not origin:
+        return True
+    try:
+        host = urlsplit(origin).hostname
+    except ValueError:
+        return False
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
 async def _tail_log(websocket, file_path, from_lines=200, poll_s=0.5):
     """Stream a growing log file over a WebSocket, following rotation.
 
     Sends the last ``from_lines`` lines on connect, then polls for appended
     content. If the file shrinks (truncation) or its inode changes (rotation),
-    reopens from the start. Runs until the client disconnects.
-    """
-    from fastapi import WebSocketDisconnect
+    reopens and streams the new file from its start. Runs until the client
+    disconnects.
 
+    **The client read is the sleep.** The poll interval is spent waiting on
+    ``websocket.receive()`` rather than on ``asyncio.sleep``, so a disconnect
+    ends the loop on the turn it arrives. Two failure modes hang on that
+    detail:
+
+    * Without reading at all, a disconnect is only discovered on the next
+      SEND, so a tail on a QUIET file -- a finished run's log, a file that
+      never appears -- looped stat+sleep forever holding an open file handle.
+      ``LogTerminal`` opens a fresh socket per file switch, so those
+      accumulate one immortal poller per switch for the life of the server.
+    * Watching for the disconnect in a SECOND task works too, but then the
+      handler needs several event-loop turns to wind down (cancel the sibling,
+      gather it, return). That is enough to lose a race against a test
+      harness's portal teardown -- observed only on the slower macOS runner.
+      One task, and the loop returns directly.
+
+    The receive future is created once and re-awaited across iterations rather
+    than being cancelled and remade each poll: cancelling a half-completed
+    receive is where a frame -- including the disconnect itself -- could go
+    missing.
+    """
     path = Path(file_path)
 
-    # Seed with the tail so the user sees recent history immediately.
+    # Seed with the tail so the user sees recent history immediately. Whether
+    # the file existed AT THAT MOMENT decides where the first open starts.
+    seeded = path.exists()
     for line in _read_last_lines(path, from_lines):
         await websocket.send_text(line.rstrip("\n"))
 
     fh = None
     inode = None
+    skip_seeded_tail = seeded
+    recv = asyncio.ensure_future(websocket.receive())
     try:
         while True:
             try:
@@ -257,9 +357,17 @@ async def _tail_log(websocket, file_path, from_lines=200, poll_s=0.5):
                         fh.close()
                     fh = open(path, "r", errors="replace")
                     inode = st.st_ino
-                    # On a fresh open after seeding, jump to the end so we do
-                    # not resend the tail we already sent.
-                    fh.seek(0, os.SEEK_END)
+                    if skip_seeded_tail:
+                        # The only open whose content we have already sent.
+                        fh.seek(0, os.SEEK_END)
+                        skip_seeded_tail = False
+                    # Every LATER (re)open is a rotation or a truncation: the
+                    # file under us is a different or restarted one, so its
+                    # content is new and streams from the start -- which is
+                    # what "follows rotation" has always claimed and what
+                    # an unconditional seek-to-end quietly did not do. Same
+                    # for a file that did not exist at connect time: its first
+                    # lines are content, not history we already sent.
                 line = fh.readline()
                 if line:
                     await websocket.send_text(line.rstrip("\n"))
@@ -268,11 +376,20 @@ async def _tail_log(websocket, file_path, from_lines=200, poll_s=0.5):
                 # File not created yet (or mid-rotation); wait and retry.
                 fh = None
                 inode = None
-            # No new data -- yield, and let a client disconnect surface.
-            await asyncio.sleep(poll_s)
-    except WebSocketDisconnect:
-        pass
+            # No new data: spend the poll interval waiting on the client.
+            done, _pending = await asyncio.wait({recv}, timeout=poll_s)
+            if not done:
+                continue
+            try:
+                message = recv.result()
+            except Exception:  # noqa: BLE001 - a dead socket ends the tail
+                return
+            if message.get("type") == "websocket.disconnect":
+                return
+            # Client chatter (this endpoint has no commands): keep listening.
+            recv = asyncio.ensure_future(websocket.receive())
     finally:
+        recv.cancel()
         if fh is not None:
             fh.close()
 
@@ -300,6 +417,16 @@ def _log_path(handle):
     return _prefix_path(handle) + ".log"
 
 
+def _console_path(handle):
+    """The captured stdout+stderr of the fit subprocess, when there is one.
+
+    This is where a crash that never reached the fit's own logger (an
+    unreadable config, an import error) leaves its traceback. Optional: a
+    hand-built handle (tests, a run adopted from elsewhere) has none.
+    """
+    return getattr(handle, "console_path", None)
+
+
 def _read_snapshot_meta(handle):
     """Latest partial.json snapshot metadata for the run, or None if absent."""
     path = os.path.join(handle.snapshot_dir, "partial.json")
@@ -317,20 +444,31 @@ def run_status_payload(handle):
     to auto-attach the terminal to, the results directory to link, and the
     latest downsampled-snapshot metadata (n_draws/max_rhat/min_ess/updated_at)
     for the progress strip and rhat sparkline.
+
+    `terminal` says the run is over (done/stopped/error, from RunHandle's own
+    liveness-checked phase) so the frontend can stop offering Stop and show
+    `error` -- a crashed run and a finished one must not look alike.
     """
+    from ..gui import TERMINAL_PHASES
+
     status = handle.status()
+    phase = status.get("phase")
     return {
         "active": True,
-        "phase": status.get("phase"),
+        "phase": phase,
+        "terminal": phase in TERMINAL_PHASES,
         "state": status.get("state", {}),
         "alive": status.get("alive"),
         "pid": status.get("pid"),
+        "run_id": status.get("run_id"),
+        "stale_status": bool(status.get("stale_status")),
         "returncode": status.get("returncode"),
         "error": status.get("error"),
         "prefix": handle.prefix,
         "config_path": handle.config_path,
         "cwd": handle.cwd,
         "log_path": _log_path(handle),
+        "console_path": _console_path(handle),
         "results_dir": _results_dir(handle),
         "snapshot": _read_snapshot_meta(handle),
     }
@@ -347,6 +485,35 @@ def _list_prefix_images(handle, pattern):
     return out
 
 
+def _params_file_of(config_path, cwd):
+    """Absolute path of the params file a run of ``config_path`` will read.
+
+    Read from the config on disk rather than taken from the caller: the fit
+    subprocess resolves ``config['parameter_file']`` relative to its own cwd
+    (System.__init__), so this is by construction the file the fit uses, and it
+    cannot drift from it the way a separately-passed path can. Returns None
+    when the config names no parameter_file or cannot be read -- the snapshot
+    is best-effort and never blocks a run.
+    """
+    path = (
+        config_path
+        if os.path.isabs(config_path)
+        else os.path.join(cwd, config_path)
+    )
+    try:
+        with open(path, "r") as fh:
+            config = yaml.safe_load(fh) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    params = config.get("parameter_file")
+    if not params:
+        return None
+    params = str(params)
+    return params if os.path.isabs(params) else os.path.join(cwd, params)
+
+
 def _snapshot_run_inputs(handle, params_path=None):
     """Copy the exact config/params used into the output dir for reproducibility.
 
@@ -354,6 +521,12 @@ def _snapshot_run_inputs(handle, params_path=None):
     carries a frozen copy of what produced it, even if the source yaml is later
     edited. Copying onto the source path is skipped. Best-effort: an I/O error
     never blocks the run. Returns the list of copies made.
+
+    ``params_path`` is an explicit override; with none given the config's own
+    ``parameter_file`` is followed. That default is the point: no caller ever
+    passed the argument, so the params half of the snapshot never happened, and
+    the params file is precisely where the start values, priors and fixed flags
+    that a rerun must reproduce are written.
     """
     results_dir = _results_dir(handle)
     try:
@@ -364,6 +537,9 @@ def _snapshot_run_inputs(handle, params_path=None):
     src_config = handle.config_path
     if not os.path.isabs(src_config):
         src_config = os.path.join(handle.cwd, src_config)
+
+    if params_path is None:
+        params_path = _params_file_of(src_config, handle.cwd)
 
     copied = []
     for src in (src_config, params_path):
@@ -415,17 +591,18 @@ def create_app(project_dir=None, initial_config=None):
     # The single document the GUI is editing. Held in server state so undo/redo
     # stacks survive across requests. A worker pool runs the (seconds-long)
     # relaxation-engine validation off the event loop.
-    state = {"doc": None}
+    #
+    # ``project_dir`` is the CURRENTLY open project, not the launch one:
+    # /api/files' sandbox root and the log tail's confinement both follow it,
+    # and a root frozen at ``initial_project`` meant the file browser could not
+    # navigate above the config dir of any project opened later.
+    state = {"doc": None, "project_dir": initial_project}
     validate_jobs = {}
     validate_pool = ThreadPoolExecutor(max_workers=1)
 
     # One active run per project (a queue lands in G14). The handle lives on the
     # app instance so each create_app() -- including per-test apps -- is isolated.
     run_state = {"handle": None}
-
-    # Data-tab preview cache, keyed by (comp_type, data-file mtimes) so a
-    # re-preview of an unchanged file is instant (G9).
-    preview_cache = {}
 
     # One Tune-tab solve/evaluator session per project (G10). Held on the app
     # instance so the dedicated worker process survives across requests.
@@ -464,10 +641,6 @@ def create_app(project_dir=None, initial_config=None):
 
     class EligibleRequest(BaseModel):
         filename: str
-
-    class PreviewRequest(BaseModel):
-        comp_type: str
-        name: Optional[str] = None
 
     class TuneSolveRequest(BaseModel):
         # All optional: when omitted, the currently-open document supplies the
@@ -509,12 +682,74 @@ def create_app(project_dir=None, initial_config=None):
             {name: spec.to_schema() for name, spec in specs.items()}
         )
 
+    def _reset_tune_session():
+        """Drop the Tune session (solved values + live evaluator worker).
+
+        Closing runs on a DETACHED thread, never inline: ``close()`` joins the
+        worker subprocess (up to ~2 s), and a solve may still be in flight
+        against it, so the request that triggered the reset must not wait. The
+        abandoned session object keeps the old worker alive only until that
+        thread finishes with it.
+        """
+        session = tune_state.get("session")
+        tune_state["session"] = None
+        if session is not None:
+            threading.Thread(target=session.close, daemon=True).start()
+
+    def _file_roots():
+        """Directories whose files this server may read back to the client.
+
+        The open project, the open document's directory (a config opened from
+        elsewhere), and the active run's working directory -- the three trees
+        every file the GUI legitimately shows comes from. Used by the log-tail
+        socket; ``/api/files`` uses the project root alone, since its job is to
+        browse the project.
+        """
+        roots = []
+        if state.get("project_dir"):
+            roots.append(state["project_dir"])
+        doc = state.get("doc")
+        if doc is not None and doc.config_path is not None:
+            roots.append(str(doc.config_path.parent))
+        handle = run_state.get("handle")
+        if handle is not None:
+            roots.append(handle.cwd)
+        return roots
+
     @app.post("/api/project/open")
     def project_open(req: OpenProjectRequest):
         try:
-            return JSONResponse(open_project(req.path))
+            listing = open_project(req.path)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
+
+        # Opening a project must not leave the PREVIOUS project's state behind.
+        # Every piece of per-project state below outlived the switch, so
+        # project B showed A's solved parameters and A's plots under B's name
+        # until a re-Solve -- and an edit made against those stale values was
+        # committed into B's params file (review 2.11.1).
+        _reset_tune_session()
+        state["project_dir"] = listing["dir"]
+
+        from . import datafiles
+
+        doc = state["doc"]
+        if doc is not None and not datafiles.is_within(
+            doc.config_path, listing["dir"]
+        ):
+            # A document from another project can no longer be what the GUI is
+            # editing: /api/doc, every doc command, and the Solve fallback all
+            # read this one slot, so keeping it would mean B's screen editing
+            # A's files. Unsaved edits are flushed to the autosave sidecar
+            # first, so re-opening A offers them back via `recovery`.
+            if doc.dirty:
+                try:
+                    doc.autosave()
+                except OSError:  # pragma: no cover - best effort
+                    pass
+            state["doc"] = None
+
+        return JSONResponse(listing)
 
     # --- config document editing (G8) ----------------------------------------
 
@@ -560,10 +795,25 @@ def create_app(project_dir=None, initial_config=None):
             doc = _require_doc()
             command = command_from_json({"op": req.op, "args": req.args})
             doc.execute(command)
-        except ValueError as exc:
+        except (ValueError, KeyError) as exc:
+            # These carry hand-written, user-facing prose; pass it through.
             return JSONResponse({"error": str(exc)}, status_code=400)
-        except KeyError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
+        # IndexError and TypeError are BAD INPUT here, not server faults: a
+        # path segment indexing a list the client's view is one delete stale
+        # about, or one traversing a scalar, reaches _set_nested and raises
+        # them. They 500'd, so the user saw a generic failure for an edit the
+        # command's snapshot restore had already cleanly rolled back. Their
+        # messages ("list index out of range") need the type for context.
+        except (IndexError, TypeError) as exc:
+            return JSONResponse(
+                {
+                    "error": (
+                        f"{req.op}: {type(exc).__name__}: {exc} -- the edit "
+                        f"was rejected and the document is unchanged."
+                    )
+                },
+                status_code=400,
+            )
         return JSONResponse(doc.to_json())
 
     @app.post("/api/doc/undo")
@@ -592,15 +842,6 @@ def create_app(project_dir=None, initial_config=None):
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         return JSONResponse(doc.to_json())
-
-    @app.post("/api/doc/autosave")
-    def doc_autosave():
-        try:
-            doc = _require_doc()
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=404)
-        written = doc.autosave()
-        return JSONResponse({"written": [str(p) for p in written]})
 
     def _run_validation(job_id, config, user_params, workdir):
         from ..solve_api import validate
@@ -643,6 +884,13 @@ def create_app(project_dir=None, initial_config=None):
         user_params = _jsonable(doc.params)
         workdir = str(doc.config_path.parent) if doc.config_path else None
         job_id = uuid.uuid4().hex
+        # Pop-on-terminal-read (below) retires every job the frontend follows
+        # to completion; this bounds the ABANDONED ones -- a validation whose
+        # tab unmounted, or whose poll loop hit its own deadline first -- which
+        # nothing else would ever remove. Oldest first: dicts keep insertion
+        # order, and the oldest running job is the one least likely to be read.
+        while len(validate_jobs) >= _MAX_VALIDATE_JOBS:
+            validate_jobs.pop(next(iter(validate_jobs)), None)
         validate_jobs[job_id] = {"status": "running", "diagnostics": []}
         validate_pool.submit(
             _run_validation, job_id, config, user_params, workdir
@@ -654,27 +902,43 @@ def create_app(project_dir=None, initial_config=None):
         job = validate_jobs.get(job_id)
         if job is None:
             return JSONResponse({"error": "no such job"}, status_code=404)
+        # A finished job is read exactly once -- ConfigTab polls until it stops
+        # saying "running" and then drops the id. Retiring it here is what
+        # keeps the dict from growing one entry per edit for the life of the
+        # server (the tab starts a fresh validation 1.2 s after every keystroke
+        # burst), and every entry holds a full diagnostics list.
+        if job.get("status") != "running":
+            validate_jobs.pop(job_id, None)
         return JSONResponse({"job_id": job_id, **job})
 
     # --- data file manager (G9) ---------------------------------------------
     #
-    # A schema-driven file browser + association + raw-data preview. Nothing
-    # here names a component: eligibility and associations flow entirely from
-    # the datafile globs declared in the config schema, and preview reuses each
-    # component's own plot_data(point=None).
+    # A schema-driven file browser + association menu. Nothing here names a
+    # component: eligibility and associations flow entirely from the datafile
+    # globs declared in the config schema.
 
     @app.get("/api/files")
     def files_list(dir: Optional[str] = None):
-        """List a directory for the Data tab file browser (rooted at project)."""
+        """List a directory for the file browser, sandboxed to the project.
+
+        The root follows the CURRENTLY open project (``state["project_dir"]``),
+        not the one the server was launched with -- and ``list_directory`` now
+        REFUSES a directory outside it rather than merely withholding the
+        parent link.
+        """
         from . import datafiles
 
-        root = initial_project
+        doc = state["doc"]
+        doc_dir = (
+            str(doc.config_path.parent)
+            if doc is not None and doc.config_path
+            else None
+        )
+        # With no project opened (a bare create_app(), i.e. only the tests),
+        # the open document's own directory is the tightest honest root.
+        root = state.get("project_dir") or doc_dir
         if dir is None:
-            dir = (
-                str(state["doc"].config_path.parent)
-                if state["doc"] is not None and state["doc"].config_path
-                else (root or os.getcwd())
-            )
+            dir = doc_dir or root or os.getcwd()
         try:
             return JSONResponse(datafiles.list_directory(dir, root=root))
         except ValueError as exc:
@@ -684,16 +948,17 @@ def create_app(project_dir=None, initial_config=None):
     def browse_dirs(dir: Optional[str] = None):
         """List a directory for the sidebar project picker (no root confine).
 
-        Unlike /api/files (which is sandboxed to the open project so the Data
-        tab cannot wander off), this powers the "Browse..." dialog whose whole
-        job is to reach a *different* project, so it navigates up freely. It
-        starts at the current project's parent, or the user's home.
+        Unlike /api/files (which is sandboxed to the open project so the file
+        browser cannot wander off), this powers the "Browse..." dialog whose
+        whole job is to reach a *different* project, so it navigates up freely.
+        It starts at the current project's parent, or the user's home.
         """
         from . import datafiles
 
         if dir is None:
-            if initial_project:
-                dir = str(Path(initial_project).expanduser().resolve().parent)
+            project = state.get("project_dir")
+            if project:
+                dir = str(Path(project).expanduser().resolve().parent)
             else:
                 dir = os.path.expanduser("~")
         try:
@@ -701,92 +966,38 @@ def create_app(project_dir=None, initial_config=None):
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
+    def _schema():
+        """The component schema, built at most once per process.
+
+        ``full_schema()`` imports and walks the entire component stack, and
+        these two endpoints called it fresh on every request. ``document``
+        already memoizes exactly this; share that one cache rather than adding
+        a second.
+        """
+        from .document import _default_schema
+
+        return _default_schema()
+
     @app.post("/api/files/eligible")
     def files_eligible(req: EligibleRequest):
         """Schema-driven association menu: instance/key pairs for a filename."""
-        from ..introspect import full_schema
         from . import datafiles
 
         config = state["doc"].config if state["doc"] is not None else {}
         eligible = datafiles.eligible_associations(
-            req.filename, config, full_schema()
+            req.filename, config, _schema()
         )
         return JSONResponse({"eligible": eligible})
 
     @app.get("/api/files/associations")
     def files_associations():
         """Current file -> instance associations (chips), from the open doc."""
-        from ..introspect import full_schema
         from . import datafiles
 
         if state["doc"] is None:
             return JSONResponse({"associations": {}})
-        assoc = datafiles.current_associations(
-            state["doc"].config, full_schema()
-        )
+        assoc = datafiles.current_associations(state["doc"].config, _schema())
         return JSONResponse({"associations": assoc})
-
-    def _preview_cache_key(doc, comp_type):
-        """Cache key = comp_type plus the mtimes of that component's data files.
-
-        Component-agnostic: it discovers the data-file values via the schema's
-        datafile keys, so the cache invalidates whenever any associated file on
-        the component changes on disk (spec: cache per file mtime + instance).
-        """
-        from ..introspect import full_schema
-        from . import datafiles
-
-        workdir = (
-            str(doc.config_path.parent) if doc.config_path else os.getcwd()
-        )
-        assoc = datafiles.current_associations(doc.config, full_schema())
-        mtimes = []
-        for _base, refs in assoc.items():
-            for ref in refs:
-                if ref["comp_type"] != comp_type:
-                    continue
-                path = ref["path"]
-                if not os.path.isabs(path):
-                    path = os.path.join(workdir, path)
-                try:
-                    mtimes.append((ref["path"], os.path.getmtime(path)))
-                except OSError:
-                    mtimes.append((ref["path"], None))
-        return (comp_type, tuple(sorted(mtimes)))
-
-    @app.post("/api/preview")
-    def preview(req: PreviewRequest):
-        """Build data-only PlotSpecs for a component in a worker subprocess.
-
-        Runs a lightweight prepare() off-process with a timeout, so a bad data
-        file surfaces as a readable error instead of hanging the server.
-        """
-        from .document import _jsonable
-        from .preview import run_preview
-
-        doc = state["doc"]
-        if doc is None:
-            return JSONResponse(
-                {"error": "no document is open; POST /api/doc/open first"},
-                status_code=400,
-            )
-
-        key = _preview_cache_key(doc, req.comp_type)
-        if key in preview_cache:
-            return JSONResponse(preview_cache[key])
-
-        config = _jsonable(doc.config)
-        params = _jsonable(doc.params)
-        workdir = (
-            str(doc.config_path.parent) if doc.config_path else os.getcwd()
-        )
-        result = run_preview(config, params, workdir, req.comp_type)
-
-        # Only cache successful builds; an error should be re-attempted after a
-        # fix, and errors are cheap to reproduce anyway.
-        if "specs" in result:
-            preview_cache[key] = result
-        return JSONResponse(result)
 
     # --- run controls (G11) -------------------------------------------------
     #
@@ -811,10 +1022,12 @@ def create_app(project_dir=None, initial_config=None):
         except Exception as exc:  # start_run failures surface as a 400
             return JSONResponse({"error": str(exc)}, status_code=400)
 
+        # None (the usual case) -> the snapshot follows the config's own
+        # parameter_file, which is what the fit subprocess reads.
         params_path = req.params
         if params_path and not os.path.isabs(params_path):
             params_path = os.path.join(cwd, params_path)
-        _snapshot_run_inputs(new_handle, params_path)
+        _snapshot_run_inputs(new_handle, params_path or None)
 
         run_state["handle"] = new_handle
         return JSONResponse(run_status_payload(new_handle))
@@ -848,16 +1061,15 @@ def create_app(project_dir=None, initial_config=None):
     def run_image(path: str):
         # Serve a plot image, but only from inside the run's own tree -- never an
         # arbitrary path the query string asks for.
+        from . import datafiles
+
         handle = run_state.get("handle")
         if handle is None:
             return JSONResponse({"error": "No active run."}, status_code=400)
         resolved = os.path.realpath(path)
-        root = os.path.realpath(handle.cwd)
-        try:
-            inside = os.path.commonpath([resolved, root]) == root
-        except ValueError:
-            inside = False
-        if not inside or not os.path.isfile(resolved):
+        if not datafiles.is_within(resolved, handle.cwd) or not os.path.isfile(
+            resolved
+        ):
             return JSONResponse({"error": "forbidden"}, status_code=403)
         return FileResponse(resolved)
 
@@ -927,17 +1139,6 @@ def create_app(project_dir=None, initial_config=None):
         tune_pool.submit(session.solve, config, params, workdir)
         return JSONResponse(session.status())
 
-    @app.post("/api/tune/prewarm")
-    def tune_prewarm():
-        """Start the evaluator worker (heavy imports) ahead of the first Solve.
-
-        Fire-and-forget: the Tune tab calls this on open so the ~10s import cost
-        is paid while the user reads the tab, not on the Solve click.
-        """
-        session = _tune_session()
-        tune_pool.submit(session.prewarm)
-        return JSONResponse({"ok": True})
-
     @app.get("/api/tune/status")
     def tune_status():
         session = tune_state.get("session")
@@ -1001,11 +1202,32 @@ def create_app(project_dir=None, initial_config=None):
 
     @app.websocket("/api/logs")
     async def logs(websocket: WebSocket):
+        # Refuse a cross-origin handshake BEFORE accepting it. WebSocket
+        # handshakes bypass CORS entirely, so without this check any page the
+        # user visits could open this socket against the loopback server and
+        # read whatever it streams (the OS-random port is the only other
+        # mitigation, and --port removes even that).
+        if not _origin_is_local(websocket.headers.get("origin")):
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
         file_path = websocket.query_params.get("file")
         if not file_path:
             await websocket.send_text("[error] no ?file= given")
             await websocket.close()
+            return
+        # gui.md invariant 5: file-serving endpoints stay confined to their
+        # intended tree. The path arrives verbatim in the query string, so
+        # without this the socket streamed ANY readable file on the machine.
+        from . import datafiles
+
+        roots = _file_roots()
+        if not any(datafiles.is_within(file_path, root) for root in roots):
+            await websocket.send_text(
+                "[error] refusing to tail a file outside the open project "
+                "or the active run's directory"
+            )
+            await websocket.close(code=1008)
             return
         await _tail_log(websocket, file_path)
 

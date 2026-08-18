@@ -97,6 +97,30 @@ def test_mask_indices_refer_to_raw_file_row_order(tmp_path):
     np.testing.assert_allclose(inst.time, [1.0, 3.0, 5.0, 7.0])
 
 
+def test_mask_file_word_literals_raise_a_clear_error(tmp_path):
+    """
+    Given a mask FILE written with true/false word literals rather than 1/0,
+    When the data file is loaded,
+    Then a ValueError naming the instrument, the mask file and the two
+    working spellings is raised -- not numpy's bare "could not convert
+    string 'true' to float64", which names none of them.
+
+    The flag file is deliberately numeric-only (``np.loadtxt(dtype=float)``);
+    the boolean spelling lives on the inline YAML list form, exercised by
+    test_boolean_list_mask_excludes_flagged_rows.
+    """
+    mask_file = tmp_path / "inst.mask"
+    mask_file.write_text("false\ntrue\nfalse\ntrue\nfalse\n")
+    with pytest.raises(ValueError) as excinfo:
+        _load(tmp_path, mask=str(mask_file))
+    msg = str(excinfo.value)
+    assert "Inst" in msg
+    assert str(mask_file) in msg
+    assert "numeric flag" in msg
+    assert "1/0" in msg
+    assert "booleans" in msg
+
+
 def test_mask_file_length_mismatch_raises(tmp_path):
     """
     Given a mask file whose flag count differs from the data row count,

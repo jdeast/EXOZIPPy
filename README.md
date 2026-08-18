@@ -50,6 +50,26 @@ Every push and pull request runs the full test suite on:
 | Linux (ubuntu-latest) | 3.12, 3.13, 3.14 |
 | macOS (arm64) | 3.12 |
 
+### Intel Macs: supported, with two gaps and an extra install step
+
+**macOS x86_64 works**, on Python **3.12 or 3.13**, and a separate CI job
+(`macos-15-intel`, nightly and on every pull request) keeps it that way. Two
+features are unavailable there, and the install needs one extra command
+before `poetry install`. Both gaps trace to a single upstream fact -- jaxlib's
+last macOS x86_64 wheel is 0.4.38 and jaxlib ships no sdist, so no newer jax
+can be installed on that hardware at all:
+
+* the `gp:` key (Gaussian-process noise) is unavailable, because celerite2's
+  PyMC backend imports jax at module scope;
+* the `numpyro` and `blackjax` samplers are unavailable. Use `nuts`, `ptde`
+  (the default) or `nutpie`, none of which touch jax.
+
+Everything else -- RV, transit, SED, astrometry, microlensing -- works
+normally. The runbook, the reasoning, and the upstream fixes that will remove
+the extra step are in
+[`MACOS_INTEL_INSTALL.md`](MACOS_INTEL_INSTALL.md). Apple Silicon Macs need
+none of this; check with `uname -m`.
+
 ### Windows: supported through WSL2
 
 **Windows is supported, via WSL2** (Windows Subsystem for Linux) -- not natively.
@@ -59,6 +79,31 @@ genuine Ubuntu userspace, so it *is* the Linux platform in the table above,
 1272 tests**. The step-by-step runbook, verified end to end on a real machine
 (Windows 11 -> Ubuntu 26.04 -> Python 3.14 -> Poetry), is
 [`WINDOWS_INSTALL.md`](WINDOWS_INSTALL.md).
+
+#### Minimum Windows version
+
+WSL2 requires **build 19041 or newer** (Windows 10 version 2004, the May 2020
+Update) or any Windows 11. Check with `winver`, or from PowerShell:
+
+```
+[System.Environment]::OSVersion.Version
+```
+
+Note: Microsoft numbers Windows 10 releases `YYMM`, so "version 2004" means
+April 2020, not the year 2004. Build numbers are less ambiguous and are what
+this document uses.
+
+Builds 18362 and 18363 (versions 1903 and 1909) can also run WSL2 on x64 if
+fully patched, but `wsl --install` does not exist there and the manual setup is
+not covered here.
+
+Below that there is no way to run EXOZIPPy on Windows: native Windows cannot
+run the samplers (below), and WSL1 is a syscall translation layer rather than a
+Linux kernel. Windows 7, 8, 8.1 and early Windows 10 are therefore unsupported,
+as is any Windows 10 after its October 2025 end of support. On hardware that
+cannot take a current Windows, install Linux directly -- it is the platform
+EXOZIPPy is developed and tested on, and it will outperform a VM on old
+machines.
 
 **Why not natively?** Two independent reasons:
 

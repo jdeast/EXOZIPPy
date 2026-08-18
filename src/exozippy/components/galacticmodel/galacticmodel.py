@@ -6,13 +6,17 @@ import pytensor.tensor as pt
 from scipy.special import erf, erfc
 
 from exozippy.components.component import Component
+
+# One owner for "read a Parameter's hard support" -- star.py's volume prior
+# normalizes over star.distance's bounds exactly the way the IMF branches
+# below normalize over star.logmass's.
+from exozippy.components.parameter import sampled_bounds as _sampled_bounds
 from exozippy.constants import (
     BULGE_BAR_ANGLE,
     BULGE_CENTRAL_NUMBER_DENSITY,
     BULGE_DENSITY_X_0,
     BULGE_DENSITY_Y_0,
     BULGE_DENSITY_Z_0,
-    BULGE_GAMMA,
     BULGE_RC,
     BULGE_RC_WIDTH,
     BULGE_ROTATION_ANGULAR_VELOCITY,
@@ -66,30 +70,11 @@ logger = logging.getLogger(__name__)
 # mulensing/lens.py use exactly the code this likelihood uses.
 from .physics import (  # noqa: E402
     GALACTOCENTRIC_FRAME,
-    galactic_xyz as _galactic_xyz_np,
     line_of_sight_basis,
 )
-
-
-def _sampled_bounds(param):
-    """(lower, upper) of a Parameter's hard support as float arrays.
-
-    Returns None when the bounds are missing, non-finite, or symbolic, which
-    the IMF normalizers treat as "leave this prior unnormalized" -- a
-    constant offset never changes the sampling, so a bound the component
-    cannot read is not worth failing a fit over.
-    """
-    try:
-        # atleast_1d: a scalar bound must still broadcast against the
-        # (n_star,) logmass vector, and np.select wants real arrays.
-        lower = np.atleast_1d(np.asarray(param.lower, dtype=float))
-        upper = np.atleast_1d(np.asarray(param.upper, dtype=float))
-    except (AttributeError, TypeError, ValueError):
-        return None
-
-    if not (np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))):
-        return None
-    return lower, upper
+from .physics import (  # noqa: E402
+    galactic_xyz as _galactic_xyz_np,
+)
 
 
 def _unnormalized_warning():
@@ -329,6 +314,184 @@ class GalacticModel(Component):
         """No parameters to sample! Just an empty manifest."""
         self.manifest = {}
 
+    # ------------------------------------------------------------------
+    # Reporting: tell the tables what these potentials are.
+    #
+    # Both potentials below act on parameters this component does not own
+    # and does not sample -- they are `pm.Potential`s over star.logmass and
+    # over (star.distance, pm_ra, pm_dec, rv).  `Parameter.get_prior_str`
+    # can only see a parameter's OWN fields, so without these declarations
+    # every one of them is reported as "Uniform" (a bounded element with no
+    # sigma), which is exactly the prior these terms replace.  See
+    # parameter.PriorContribution.
+    # ------------------------------------------------------------------
+
+    def _declare_mass_prior(self, stars, ffp_mask):
+        """Describe the imf_prior potential, per star.
+
+        Two descriptions, because the potential really is two densities: the
+        stellar IMF selected by ``IMF:``, and the FFP mass function on the
+        stars whose ``mass_function:`` opted out of it.  Both are normalized
+        over star.logmass's own support, so both supersede the uniform.
+        """
+        logmass = getattr(stars, "logmass", None)
+        if logmass is None:
+            return
+
+        if self.imf == "salpeter":
+            imf_latex = r"Salpeter (1955) IMF in $\log_{10} M$"
+            imf_text = "Salpeter (1955) IMF in log10 M"
+        else:
+            imf_latex = r"Chabrier (2003) IMF in $\log_{10} M$"
+            imf_text = "Chabrier (2003) IMF in log10 M"
+
+        imf_elements = np.nonzero(~ffp_mask)[0] if ffp_mask.size else None
+        if imf_elements is None or len(imf_elements):
+            logmass.add_prior_contribution(
+                latex=imf_latex,
+                text=imf_text,
+                elements=imf_elements,
+                supersedes_bounds=True,
+            )
+
+        # The FFP slope is per star, so a system with two differently-sloped
+        # FFPs gets two contributions, each naming its own elements.
+        alphas = np.atleast_1d(getattr(stars, "ffp_alpha", []))
+        for i in np.nonzero(ffp_mask)[0]:
+            alpha = float(alphas[i]) if i < alphas.size else float("nan")
+            logmass.add_prior_contribution(
+                latex=(
+                    r"Sumi et al. (2023) FFP mass function "
+                    rf"($\alpha = {alpha:g}$)"
+                ),
+                text=f"Sumi+2023 FFP mass function (alpha = {alpha:g})",
+                elements=[int(i)],
+                supersedes_bounds=True,
+            )
+
+    def _add_mass_prior_prose(self, system, stars, ffp_mask):
+        """Modeling-draft sentences for the imf_prior potential.
+
+        Mirrors ``_declare_mass_prior``'s per-star split: the stellar IMF
+        sentence names its stars only when some star opted onto the FFP
+        mass function, and each FFP star gets the Sumi slope actually
+        applied.  Declared next to the potential (declare-at-site rule).
+        """
+        from ...outputs.prose import get_collector, join_names
+        from ...outputs.texutils import latex_escape
+
+        prose = get_collector(system)
+
+        if getattr(stars, "logmass", None) is None:
+            return
+        # Read the star inventory defensively: unit tests drive this
+        # potential through minimal mock star components.
+        star_names = [str(nm) for nm in (getattr(stars, "names", None) or [])]
+        n = max(
+            int(getattr(stars, "n_elements", len(star_names))),
+            len(star_names),
+            int(ffp_mask.size),
+        )
+        if len(star_names) < n:
+            star_names += [str(i) for i in range(len(star_names), n)]
+        mask = ffp_mask if ffp_mask.size else np.zeros(n, dtype=bool)
+        imf_cite = (
+            r"\citet{Salpeter:1955} power-law"
+            if self.imf == "salpeter"
+            else r"\citet{Chabrier:2003} lognormal"
+        )
+        imf_names = [nm for nm, f in zip(star_names, mask) if not f]
+        if imf_names:
+            target = (
+                "each modeled star"
+                if len(imf_names) == n
+                else (
+                    ("star " if len(imf_names) == 1 else "stars ")
+                    + join_names(latex_escape(nm) for nm in imf_names)
+                )
+            )
+            prose.add(
+                f"We applied the {imf_cite} initial mass function as a "
+                f"prior on the mass of {target}.",
+                section="priors",
+                key=f"{self.prefix}.imf",
+                rank=10,
+            )
+        alphas = np.atleast_1d(getattr(stars, "ffp_alpha", []))
+        for i in np.nonzero(mask)[0]:
+            alpha = float(alphas[i]) if i < alphas.size else float("nan")
+            prose.add(
+                f"For {latex_escape(star_names[i])}, we instead adopted "
+                r"the free-floating-planet mass function of "
+                r"\citet{Sumi:2023}, "
+                r"$dN/d\log M \propto M^{-\alpha}$ with "
+                rf"$\alpha = {alpha:g}$.",
+                section="priors",
+                key=f"{self.prefix}.ffp.{i}",
+                rank=11,
+            )
+
+    def _declare_kinematic_prior(self, stars):
+        """Describe the kinematic_prior potential.
+
+        One joint density over distance and the velocity coordinates, so the
+        same term is declared against each of them; distance additionally
+        carries the ``2 log d`` volume element, which is why
+        ``Star.build_likelihood`` stands down where this component exists.
+        """
+        distance = getattr(stars, "distance", None)
+        if distance is not None:
+            distance.add_prior_contribution(
+                latex=(
+                    r"Galactic density $\times$ kinematics "
+                    r"(incl. $d^{2}$ volume element)"
+                ),
+                text="Galactic density x kinematics (incl. d^2 volume)",
+                supersedes_bounds=True,
+            )
+        for name in ("pm_ra", "pm_dec", "rv"):
+            param = getattr(stars, name, None)
+            if param is not None:
+                param.add_prior_contribution(
+                    latex="Galactic kinematic model",
+                    supersedes_bounds=True,
+                )
+
+    def _warn_if_anchor_coords_sampled(self, stars, ra_rad, dec_rad):
+        """Warn once if the anchor star's ra/dec are SAMPLED, since the
+        line-of-sight basis below is built from their start values and frozen.
+
+        Same policy as ``Lens._frozen_op_coords_deg``: keep the freeze, say so
+        -- but only when it could conceivably matter, i.e. when the sampler
+        actually moves the coordinates (galacticmodel + gaia/abs astrometry).
+
+        The freeze is safe here too, and separately measured rather than
+        assumed by analogy with the microlensing Op: shifting the sight line
+        by 1 arcsec moves the anchor's galactocentric velocity by 1.3e-3 km/s
+        (4e-5 of a 30 km/s thin-disk dispersion) and its galactic position by
+        5e-5 kpc, against kpc-scale density gradients.  It stays negligible
+        out to ~1 arcmin (0.08 km/s, 3 pc) and only reaches 0.16 sigma at a
+        full degree -- five orders of magnitude beyond the mas-scale posterior
+        width astrometry gives ra/dec.
+        """
+        moving = [
+            name
+            for name, param in (("ra", stars.ra), ("dec", stars.dec))
+            if param.element_is_sampled(self.anchor_idx)
+        ]
+        if not moving:
+            return
+        logger.warning(
+            f"[{self.prefix}] star.{'/'.join(moving)} of the anchor star "
+            f"{self.anchor_idx} is sampled, but the galactic model's line of "
+            f"sight is FROZEN at the start value (ra="
+            f"{np.degrees(ra_rad):.6f} deg, dec={np.degrees(dec_rad):.6f} "
+            f"deg) for the whole fit. This is safe -- 1 arcsec of coordinate "
+            f"error moves the galactocentric velocity by ~1e-3 km/s and the "
+            f"galactic position by ~0.05 pc -- but the sampled ra/dec do NOT "
+            f"feed the density or kinematic prior."
+        )
+
     def build_likelihood(self, model, system):
         stars = system.star
 
@@ -343,8 +506,9 @@ class GalacticModel(Component):
         # error whenever n_blocks and n_stars disagreed and neither was 1.
         # Keeping the matrix 2-D (and the direction cosines scalar) lets it
         # broadcast over any number of stars by construction.
-        ra_rad = float(np.atleast_1d(stars.ra.initval)[self.anchor_idx])
-        dec_rad = float(np.atleast_1d(stars.dec.initval)[self.anchor_idx])
+        ra_rad = stars.ra.element_start(self.anchor_idx)
+        dec_rad = stars.dec.element_start(self.anchor_idx)
+        self._warn_if_anchor_coords_sampled(stars, ra_rad, dec_rad)
 
         # Shared with the start-value hints (physics.line_of_sight_basis):
         # the affine (pm_ra_cosdec, pm_dec, rv) -> galactocentric velocity map,
@@ -462,6 +626,9 @@ class GalacticModel(Component):
             )
 
         pm.Potential(f"{self.prefix}.imf_prior", pt.sum(imf_logp))
+
+        self._declare_mass_prior(stars, ffp_mask)
+        self._add_mass_prior_prose(system, stars, ffp_mask)
         ######
 
         # even though non-physical values will be rejected
@@ -614,19 +781,18 @@ class GalacticModel(Component):
         )
         pm.Potential(f"{self.prefix}.kinematic_prior", kinematic_penalty)
 
-        # check parameters for debugging
-        # pm.Deterministic(f"{self.prefix}.gal_x", x)
-        # pm.Deterministic(f"{self.prefix}.gal_y", y)
-        # pm.Deterministic(f"{self.prefix}.gal_z", z)
-        # pm.Deterministic(f"{self.prefix}.gal_r", r)
-        # pm.Deterministic(f"{self.prefix}.v_x", v_x)
-        # pm.Deterministic(f"{self.prefix}.v_y", v_y)
-        # pm.Deterministic(f"{self.prefix}.v_z", v_z)
-        # pm.Deterministic(f"{self.prefix}.v_r", v_r)
-        # pm.Deterministic(f"{self.prefix}.v_phi", v_phi)
-        # pm.Deterministic(f"{self.prefix}.L_disk", log_dens_disk + log_vel_disk)
-        # pm.Deterministic(f"{self.prefix}.L_bulge", log_dens_bulge + log_vel_bulge)
-        # pm.Deterministic(f"{self.prefix}.log_imf_weight", log_m_weight)
+        self._declare_kinematic_prior(stars)
+        from ...outputs.prose import get_collector
+
+        get_collector(system).add(
+            r"We imposed Galactic density and kinematic priors on the "
+            r"distance, proper motion, and radial velocity of each modeled "
+            r"star, following a simplified version of the parametric "
+            r"Galactic model of \citet{Koshimoto:2021}.",
+            section="priors",
+            key=f"{self.prefix}.kinematic",
+            rank=20,
+        )
 
     def compile_plotters(self, model, system):
         pass

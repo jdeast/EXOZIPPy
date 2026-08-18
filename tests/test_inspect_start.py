@@ -59,8 +59,20 @@ def _build_star_mass(user_params, model_name, system_config=CONFIG):
         # defaults.yaml gives it no bounds -- logmass carries the hard
         # support.  This manifest entry deliberately makes it a FREE
         # parameter as a test vehicle, and a free parameter must declare
-        # its own lower/upper.
-        star.manifest = {"mass": {"lower": 0.1, "upper": 250.0}}
+        # its own lower/upper AND a start for EVERY element.  The
+        # "overrides" initval supplies the latter and layers UNDER the
+        # params file, so an element the caller seeded keeps its own value:
+        # star.mass carries no defaults.yaml initval, so the unseeded
+        # element used to build with a NaN start, which the transform turned
+        # into log(NaN/(1-NaN)) behind a "nudged" warning.  What these tests
+        # are about is the user_params key lookup, not the start value.
+        star.manifest = {
+            "mass": {
+                "lower": 0.1,
+                "upper": 250.0,
+                "overrides": {"initval": 1.0},
+            }
+        }
         star.add_parameter(model=model, param_name="mass", system=None)
     p = star.mass
     return model, _Sys(cm, [p]), p
@@ -101,7 +113,7 @@ def test_inspect_start_never_mutates_initval(mock_logp, system_config):
     before = p.initval.copy()
 
     # ACT
-    inspect_start(model, system, {}, {}, {})
+    inspect_start(model, system, {})
 
     # ASSERT
     assert p.initval.tobytes() == before.tobytes()
@@ -131,7 +143,7 @@ def test_inspect_start_reports_the_start_the_sampler_will_use(
 
     # ACT
     with caplog.at_level(logging.INFO, logger="exozippy.run"):
-        inspect_start(model, system, {}, {}, {})
+        inspect_start(model, system, {})
 
     # ASSERT
     row_a = _table_row(caplog, "star.A.mass")
@@ -189,7 +201,7 @@ def test_unset_element_falls_back_to_user_params_either_spelling(
 
     # ACT
     with caplog.at_level(logging.INFO, logger="exozippy.run"):
-        inspect_start(model, system, {}, {}, {})
+        inspect_start(model, system, {})
 
     # ASSERT
     row_b = _table_row(caplog, "star.B.mass")
@@ -232,7 +244,49 @@ def test_scalar_initval_is_also_left_alone():
         "exozippy.diagnostics.ModelAuditor.get_aggregated_logps",
         return_value=({}, {}),
     ):
-        inspect_start(model, system, {}, {}, {})
+        inspect_start(model, system, {})
 
     # ASSERT
     assert np.asarray(p.initval).tolist() == [2.0]
+
+
+# ---------------------------------------------------------------------------
+# (c) per-element units
+# ---------------------------------------------------------------------------
+
+
+@patch("exozippy.diagnostics.ModelAuditor.get_aggregated_logps")
+def test_per_element_units_are_reported_per_element(mock_logp, caplog):
+    """
+    Given a vector parameter whose elements carry DIFFERENT user units
+      (a `unit:` override on one named instance only),
+    When inspect_start renders the startup table,
+    Then each element's value is converted with its OWN factor.
+
+    Regression: the table converted with the whole-vector factor, which for
+    a scalar input returns an n-element array; the .item() that followed
+    then raised "can only convert an array of size 1" and killed the fit in
+    its own startup banner.  ``Parameter.from_internal(..., index=i)`` is the
+    per-element form, and ``element_factor`` is the one owner of the rule.
+    """
+    # ARRANGE: A in jupiterMass, B left at the defaults.yaml solMass.
+    mock_logp.return_value = ({}, {})
+    model, system, p = _build_star_mass(
+        {"star.A.mass": {"unit": "jupiterMass", "initval": 200.0}},
+        "model_per_element_units",
+    )
+    assert len(p.unit) == 2, "the override must survive as per-element units"
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.run"):
+        inspect_start(model, system, {})
+
+    # ASSERT: A reports the jupiterMass number the user typed, B the solMass
+    # one from the "overrides" default -- not either one in the other's unit.
+    row_a = _table_row(caplog, "star.A.mass")
+    row_b = _table_row(caplog, "star.B.mass")
+    assert row_a is not None and row_b is not None
+    assert "200.000000" in row_a
+    assert "jupiterMass" in row_a
+    assert "1.00000000" in row_b
+    assert "solMass" in row_b

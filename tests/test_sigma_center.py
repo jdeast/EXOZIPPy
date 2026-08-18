@@ -3,9 +3,9 @@
 A user 'sigma' > 0 asks for a Gaussian prior.  With neither 'mu' nor 'initval'
 given, Parameter.build_pymc centers that prior on whatever start value the
 system resolved -- frequently one derived FROM THE DATA (a component data hint,
-a relaxation-engine solution, an mkprior MAP).  Centering a prior on the data's
-own best fit double-counts the data, so the config is rejected outright rather
-than silently sampled.
+a relaxation-engine solution, a start value mkparam seeded from a previous
+fit's MAP).  Centering a prior on the data's own best fit double-counts the
+data, so the config is rejected outright rather than silently sampled.
 """
 
 import pytest
@@ -220,3 +220,27 @@ def test_source_file_is_named_when_given():
         validate_sigma_has_center(
             {"star.0.teff": {"sigma": 100.0}}, source="my.params.yaml"
         )
+
+
+def test_renamed_arsun_raises_with_the_fix():
+    """
+    Given a params file (or link expression) still spelling the semi-major
+      axis 'arsun' -- the pre-rename name from EXOFASTv2's fixed internal
+      units,
+    When the ConfigManager is constructed,
+    Then it raises naming the rename and the fix -- an unknown parameter
+      path is otherwise silently ignored, so an old file's arsun seed
+      would simply stop doing anything.
+    """
+    import pytest
+
+    from exozippy.config import ConfigManager
+
+    with pytest.raises(ValueError, match="renamed 'arsun' -> 'a'"):
+        ConfigManager({"orbit.b.arsun": {"initval": 0.043}}, None)
+    with pytest.raises(ValueError, match="renamed 'arsun' -> 'a'"):
+        ConfigManager(
+            {"orbit.b.period": {"initval": "orbit.c.arsun * 2"}}, None
+        )
+    # The new spelling passes through.
+    ConfigManager({"orbit.b.a": {"initval": 0.043}}, None)

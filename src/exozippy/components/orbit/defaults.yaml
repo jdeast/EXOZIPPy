@@ -68,7 +68,7 @@ orbit:
       default:
         func_name: "calc_m_total"
         deps: ["m_primary", "m_companion"]
-  arsun:
+  a:
     unit: "AU"
     internal_unit: "solRad"
     latex: "a"
@@ -81,13 +81,17 @@ orbit:
     unit: "m/s"
     internal_unit: "solRad/d"
     latex: "K"
-    description: "RV Semi-amplitude (primary reflex)"
+    description: "RV Semi-amplitude"
     expressions:
       default:
         func_name: "calc_K"
-        deps: ["m_companion", "m_total", "ecc", "arsun", "sini", "period"]
+        deps: ["m_companion", "m_total", "ecc", "a", "sini", "period"]
 
   # --- Conditionally Sampled or Derived (Geometry Swap) ---
+  # Sampled where the orbit uses the sqrt(e)cos/sin(omega) pair, and REPORTED
+  # (derived from ecc/omega, manifest role 3) where it uses V_c/V_e -- so a
+  # user's prior on either survives flipping the switch, and both
+  # parameterizations produce the same table rows.
   secosw:
     lower: -1.0
     upper: 1.0
@@ -96,6 +100,10 @@ orbit:
     unit: ""
     internal_unit: ""
     latex: "e^{1/2}\\cos{\\omega_*}"
+    expressions:
+      from_ecc:
+        func_name: "calc_secosw_from_ecc"
+        deps: ["ecc", "omega"]
   sesinw:
     lower: -1.0
     upper: 1.0
@@ -104,14 +112,100 @@ orbit:
     unit: ""
     internal_unit: ""
     latex: "e^{1/2}\\sin{\\omega_*}"
+    expressions:
+      from_ecc:
+        func_name: "calc_sesinw_from_ecc"
+        deps: ["ecc", "omega"]
+  # V_c/V_e (Eastman 2024, arXiv:2309.14410 eq 4): the ratio of the speed the
+  # planet would have on a circular orbit of the same period to its speed at
+  # transit.  Sampled where `fitvcve: true`, REPORTED from ecc/omega otherwise.
+  #
+  # Bounds: positive by construction (it is a ratio of speeds).  The upper
+  # bound is the IMAGE OF THE ECCENTRICITY CAP, not a preference:
+  # sqrt((1 + MAX_ECC)/(1 - MAX_ECC)) = 141.4 at MAX_ECC = 0.9999, which is
+  # eq 4 evaluated at omega = -90 deg (transit at apastron -- the slowest
+  # transit, so the largest V_c/V_e).  A rounder-looking 2.0 is NOT safe: it
+  # caps e at 0.6 for an orbit transiting near apastron, silently excluding
+  # exactly the eccentric transiting planets this parameterization exists to
+  # measure.  Nothing here restates the paper's collision limit
+  # 2*sqrt(a/R* + R_P/R* - 1): this component already enforces it per orbit as a
+  # SOFT bound on the eccentricity itself (Orbit._add_ecc_barrier, against
+  # min(MAX_ECC, planet.max_ecc)), and a hard bound on a different coordinate
+  # would be a second, disagreeing spelling of one limit.  Where the inversion
+  # has no real root at all (V_c/V_e > 1/|cos omega|) the soft
+  # `vcve_real_root` bound is what pushes back, with a gradient.
   vcve:
-    lower: -10.0  # Adjust based on expected Vc/Ve scaling
-    upper: 10.0
-    initval: 0.0
+    lower: 0.0
+    upper: 141.5
+    # 0.99, not 1.0.  V_c/V_e = 1 IS the circular orbit, and at omega = 0 that
+    # is exactly the degenerate point of the inversion (the discriminant
+    # 1 - (V_c/V_e)^2 cos^2 omega vanishes, the two roots merge, and
+    # d(e)/d(V_c/V_e) is infinite) -- a start there gives a non-finite gradient
+    # for the same reason secosw/sesinw start at 0.01 rather than 0.  With
+    # omega = 90 deg (the xomega/yomega start below) the discriminant is 1 and
+    # this gives e = 0.01: near-circular, and nowhere near a singularity.
+    initval: 0.99
     init_scale: 0.1
     unit: ""
     internal_unit: ""
     latex: "V_C/V_E"
+    description: "$V_c/V_e$"
+    # rank 5 is load-bearing, exactly as planet.log_q's is: the relaxation
+    # engine's Condition B rewrites the LOWEST-ranked symbol of a violated
+    # relation, so V_c/V_e always absorbs its bridge to (ecc, omega) rather than
+    # pushing back on them.  Without it, this parameter's mere DEFAULT competed
+    # with the sqrt(e)cos/sin defaults and the engine rewrote ecc/omega to
+    # satisfy it -- which moved the start of four shipped examples (hat3, the
+    # three kelt4s) and, through K, their planet masses.  It is the right
+    # direction in both modes: in V_c/V_e mode a user seeds this parameter and
+    # RANK_USER wins anyway, while a user who seeds ecc/omega instead wants
+    # exactly this back-solve.
+    rank: 5
+    expressions:
+      from_ecc:
+        func_name: "calc_vcve"
+        deps: ["ecc", "omega"]
+  # The omega direction vector, sampled only under `fitvcve: true`.  Same
+  # geometry trick as xbigomega/ybigomega and the microlensing xalpha/yalpha:
+  # the angle is arctan2(y, x) and the magnitude is a free positive scale the
+  # N(0, 1) priors absorb, giving a uniform marginal on omega with no
+  # wrap-around seam for the sampler to cross.  (The paper samples
+  # L*cos/L*sin inside the unit disk and marginalizes over L; with the
+  # eccentricity root marginalized instead of selected by |L|, the magnitude
+  # carries no information.)
+  # The start is omega = 90 deg (x = 0, y = 1), not 0 deg: cos(omega) = 0 puts
+  # the inversion's discriminant at exactly 1, its furthest point from the
+  # degenerate double root, so the start has a healthy gradient in both
+  # coordinates.  (omega = 90 deg is also where a transit-only fit has the
+  # least information, so it is not a sneaky prior either.)
+  xomega:
+    lower: -100.0
+    upper: 100.0
+    initval: 0.0
+    init_scale: 0.01
+    mu: 0.0
+    sigma: 1.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\omega_x"
+    description: "x of omega direction"
+    # rank 5, for the reason vcve's rank says: the direction vector must
+    # absorb its bridge to omega, never rewrite it.
+    rank: 5
+  yomega:
+    lower: -100.0
+    upper: 100.0
+    initval: 1.0
+    init_scale: 0.01
+    mu: 0.0
+    sigma: 1.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\omega_y"
+    description: "y of omega direction"
+    # rank 5, for the reason vcve's rank says: the direction vector must
+    # absorb its bridge to omega, never rewrite it.
+    rank: 5
 
   # --- Derived/Switchboard Targets ---
   ecc:
@@ -123,6 +217,10 @@ orbit:
       default:
         func_name: "calc_ecc"
         deps: ["secosw", "sesinw"]
+      # The UPPER root of the V_c/V_e quadratic -- the primary branch (for
+      # x < 1 the lower root is negative, so "prefer the lower eccentricity"
+      # would pin the forward model circular; see physics.calc_ecc_from_vcve).
+      # The lower root is built directly by Orbit for the branch mixture.
       from_vcve:
         func_name: "calc_ecc_from_vcve"
         deps: ["vcve", "omega"]
@@ -135,9 +233,14 @@ orbit:
       default:
         func_name: "calc_omega"
         deps: ["secosw", "sesinw"]
-      from_vcve:
-        func_name: "calc_omega_from_vcve"
-        deps: ["cosw", "sinw"]
+      # Under V_c/V_e, omega comes from its own direction vector rather than
+      # from the sqrt(e)cos/sin pair.  Deliberately NOT the cosw/sinw pair the
+      # WIP stub named: those are derived FROM omega on every orbit, so
+      # sampling them here would make omega and cosw each other's input and
+      # cost a deferred build phase for nothing.
+      from_xy:
+        func_name: "calc_omega_from_xy"
+        deps: ["xomega", "yomega"]
   xbigomega:
     lower: -100.0
     upper: 100.0
@@ -179,20 +282,52 @@ orbit:
     latex: "\\cos{i}"
     description: "Cosine of Inclination"
     expressions:
-      from_b:
-        func_name: "calc_cosi_from_b"
-        deps: ["b", "ar", "ecc", "omega"]
-  b:
-    initval: 0.5
+      # Selected per orbit by `fitchord: true` (Orbit.INC_MODE_TABLE).  `p`
+      # and `ar` belong to the orbit's transiting planet and `chord_sign` is
+      # the i180 convention; all three are injected as CONTEXT nodes by
+      # Orbit.add_parameter, the same channel the group masses use, because
+      # the orbit has no map naming its own planet's parameters.
+      from_chord:
+        func_name: "calc_cosi_from_chord"
+        deps: ["chord", "p", "ar", "ecc", "esinw", "chord_sign"]
+  # The transit chord, sqrt((1 + p)^2 - b^2) in units of R_*: the length of
+  # the planet's sky-projected path across the stellar disc, and with V_c/V_e
+  # the pair a transit DURATION actually constrains (Eastman 2024).  Sampled
+  # where `fitchord: true`, REPORTED from cos i otherwise, and INACTIVE on an
+  # orbit with no single transiting planet -- a chord needs a radius ratio, so
+  # a star-star orbit (or a body group holding two planets, where "the" radius
+  # ratio is ambiguous) has none.  See Orbit.INC_MODE_TABLE.
+  #
+  # Bounds: non-negative by construction, and the upper bound is the image of
+  # the radius-ratio cap the way vcve's is the image of MAX_ECC -- chord is at
+  # most 1 + p, and p > 1 is a companion larger than its star, which this
+  # component does not model as a planet.  Past 1 + p there is no transiting
+  # geometry at all, and the soft `chord_geometry` bound is what pushes back,
+  # with a gradient, rather than this hard bound.
+  #
+  # The 1.0 start is a central transit of a small planet.  It is a backstop:
+  # the relaxation engine derives the real one from a seeded cos i through the
+  # bridge in planet/symbolic_physics.py, which is what lets one params file
+  # drive either parameterization.
+  chord:
+    lower: 0.0
+    upper: 2.0
+    initval: 1.0
     init_scale: 0.1
     unit: ""
     internal_unit: ""
-    latex: "b"
-    description: "Impact Parameter"
+    latex: "\\rm chord"
+    description: "Transit Chord"
+    # rank 5, exactly as vcve and planet.log_q carry it: the relaxation
+    # engine's Condition B rewrites the LOWEST-ranked symbol of a violated
+    # relation, so the chord always absorbs its bridge to cos i rather than
+    # pushing back on cos i, a/R*, the radius ratio or the eccentricity.
+    # Without it this parameter's mere DEFAULT would compete with theirs.
+    rank: 5
     expressions:
-      default:
-        func_name: "calc_b"
-        deps: ["cosi", "ar", "ecc", "esinw"]
+      from_cosi:
+        func_name: "calc_chord_from_cosi"
+        deps: ["cosi", "p", "ar", "ecc", "esinw"]
   inc:
     unit: "deg"
     internal_unit: "rad"
@@ -234,6 +369,11 @@ orbit:
       default:
         func_name: "calc_esinw"
         deps: [ "ecc", "sesinw" ]
+      # A V_c/V_e orbit reports the sqrt(e) pair rather than sampling it, so it
+      # cannot consume sesinw here; same quantity from (e, omega).
+      from_ecc:
+        func_name: "calc_esinw_from_ecc"
+        deps: [ "ecc", "omega" ]
   ecosw:
     unit: ""
     internal_unit: ""
@@ -242,6 +382,11 @@ orbit:
       default:
         func_name: "calc_ecosw"
         deps: [ "ecc", "secosw" ]
+      # A V_c/V_e orbit reports the sqrt(e) pair rather than sampling it, so it
+      # cannot consume secosw here; same quantity from (e, omega).
+      from_ecc:
+        func_name: "calc_ecosw_from_ecc"
+        deps: [ "ecc", "omega" ]
   tp:
     unit: "d"
     internal_unit: "d"
@@ -251,6 +396,12 @@ orbit:
       default:
         func_name: "calc_tp"
         deps: [ "ecc", "sesinw", "secosw", "tc", "n" ]
+      # A V_c/V_e orbit does not sample secosw/sesinw -- it REPORTS them -- so
+      # it cannot consume them here.  Same quantity, written in (e, omega); see
+      # physics.calc_tp_from_ecc.
+      from_ecc:
+        func_name: "calc_tp_from_ecc"
+        deps: [ "ecc", "omega", "tc", "n" ]
   # ---- Rossiter-McLaughlin (spin-orbit) parameters ----------------------
   # Declared only when an rvinstrument enables `rm:` (see components/rm.py).
   # Mirrors EXOFASTv2/allesfast and this component's own secosw/sesinw ->

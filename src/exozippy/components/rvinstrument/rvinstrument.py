@@ -10,11 +10,13 @@ import pytensor
 import pytensor.tensor as pt
 
 from exozippy.components.instrument import Instrument
-
-from . import physics
+from exozippy.outputs.prose import get_collector
+from exozippy.outputs.texutils import latex_escape
 
 
 class RVInstrument(Instrument):
+    prose_noun = "radial velocity"
+
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Instrument Parameters"
@@ -41,6 +43,14 @@ class RVInstrument(Instrument):
                     f"[{self.prefix}] unknown rm_model {m!r}; expected one of "
                     f"{sorted(_valid_rm)}."
                 )
+        # Light-travel-time (Roemer delay) correction on the RM occultation
+        # geometry (see components/rm.py, components/ltt.py) -- on by
+        # default (Jason's decision: transit/rm/astrometry on, rv/mulens
+        # off; matches EXOFASTv2). Only meaningful on a file that also sets
+        # `rm:`; harmless (unread) otherwise, same as rm_band/rm_model.
+        self.light_travel_time = [
+            bool(c.get("light_travel_time", True)) for c in self.config
+        ]
         self.total_detrend_cols = 0
 
     @property
@@ -128,27 +138,16 @@ class RVInstrument(Instrument):
 
     def load_data(self, system):
         """Stage 1a: Load CSVs and generate data-driven bounds/inits."""
-        all_times, all_rvs, all_errs, inst_indices, all_detrend = (
-            [],
-            [],
-            [],
-            [],
-            [],
-        )
         self.gamma_init = [0.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
 
+        blocks = self._concat_blocks()
         for i in range(self.n_elements):
             # Shared reader: columns:, mask:, time_* conversion, then one
             # sort per file before anything is derived from it, keeping the
             # RVs, errors and detrend columns aligned by construction.
             df = self._read_data(i, roles=("time", "rv", "err"), detrend=True)
-            n_obs = len(df)
             factor = self.units[i].to(u.solRad / u.d)
-            all_times.append(df.iloc[:, 0].values)
-            all_rvs.append(df.iloc[:, 1].values * factor)
-            all_errs.append(df.iloc[:, 2].values * factor)
-            inst_indices.append(np.full(n_obs, i))
 
             m_s_factor = self.units[i].to(u.m / u.s)
             self.gamma_init[i] = np.mean(df.iloc[:, 1].values) * m_s_factor
@@ -156,43 +155,22 @@ class RVInstrument(Instrument):
                 df.iloc[:, 2].values, factor=m_s_factor
             )
 
-            if df.shape[1] > 3:
-                all_detrend.append(df.iloc[:, 3:].values.astype(float))
-            else:
-                all_detrend.append(np.empty((n_obs, 0)))
+            blocks.add(
+                i,
+                time=df.iloc[:, 0].values,
+                obs=df.iloc[:, 1].values * factor,
+                err=df.iloc[:, 2].values * factor,
+                df=df,
+            )
 
-        self.time = np.concatenate(all_times).astype(float)
-        self.rv = np.concatenate(all_rvs).astype(float)
-        self.err = np.concatenate(all_errs).astype(float)
+        # Shared accumulator: concatenation (time/rv/err), inst_map, the
+        # per-file row ranges, the block-diagonal detrend matrix, and the
+        # optional GP / robust-likelihood hooks.  self.err ends up in
+        # solRad/d while the GP amplitude and out_scale are declared in m/s,
+        # hence user_factor.
+        blocks.finalize("rv", user_factor=(u.solRad / u.d).to(u.m / u.s))
 
-        # By naming this `inst_map`, the base class auto-generates `inst_map_tensor`
-        self.inst_map = np.concatenate(inst_indices).astype(int)
-
-        self.n_total_obs = len(self.time)
         self.k_init = self._estimate_k_init()
-
-        # Block Diagonal Matrix (shared builder keeps coeffs per-instrument)
-        (
-            self.detrend_matrix,
-            self.n_detrend_per_inst,
-            self.total_detrend_cols,
-        ) = self._build_block_detrend(all_detrend, self.n_total_obs)
-
-        # Optional per-file Gaussian process (no-op unless a file sets `gp:`).
-        # self.err is in solRad/d; the amplitude parameter is declared in m/s.
-        self._prepare_gp(
-            self.time,
-            self.err,
-            self.inst_map,
-            user_factor=(u.solRad / u.d).to(u.m / u.s),
-        )
-        # Optional per-file robust likelihood (no-op unless `likelihood:` is
-        # set).  Same unit conversion: out_scale is declared in m/s.
-        self._prepare_robust(
-            self.err,
-            self.inst_map,
-            user_factor=(u.solRad / u.d).to(u.m / u.s),
-        )
 
     def _estimate_k_init(self):
         """Seed for the planetary RV semi-amplitude, in m/s.
@@ -251,7 +229,14 @@ class RVInstrument(Instrument):
             )
             self.config_manager.add_hint(f"{self.prefix}.{i}.gamma", val)
 
-        self.manifest = {"gamma": "default"}
+        # gamma is FREE: it is the sampled per-instrument RV offset, and
+        # rvinstrument/defaults.yaml has carried no expressions: block for it
+        # since cc26d77.  It said "default" until 2026-08 -- harmless only
+        # because there was no block to find, and only until someone added
+        # one, at which point every RV fit would have quietly derived its
+        # offset instead of sampling it.  manifest.expression_config now
+        # raises on that mismatch, so this has to say what it means.
+        self.manifest = {"gamma": None}
         self._register_noise(self.manifest, self.jittervar_lower)
         self._register_gp(self.manifest)
         self._register_robust(self.manifest)
@@ -322,6 +307,16 @@ class RVInstrument(Instrument):
         # set `rm: <orbit_name>` -> the RV model above is unchanged byte for
         # byte (mirrors the GP opt-in). compute_rm_rv returns m/s; convert to
         # the internal RV unit (solRad/d) and add only to that file's rows.
+        #
+        # INDEX, do not pt.switch. A switch over the branch VALUES would
+        # evaluate the Hirano kernel at every instrument's timestamps and then
+        # throw away the rows it does not apply to -- the JAX where-trap
+        # (CLAUDE.md): a `where` whose unselected branch can be invalid poisons
+        # the gradient of the selected one too. Slicing the RM instrument's own
+        # rows makes the unselected rows unreachable by construction instead of
+        # merely masked, and is cheaper by exactly the fraction of the data
+        # that is not the RM file (the H2011 kernel is a 201 x 64 quadrature
+        # PER ROW; on a 40-of-73-row example it was 83% wasted work).
         if any(self.rm_orbit):
             from ..rm import compute_rm_rv, resolve_rm_indices
 
@@ -329,15 +324,23 @@ class RVInstrument(Instrument):
             for i, oname in enumerate(self.rm_orbit):
                 if not oname:
                     continue
+                rows = np.flatnonzero(self.inst_map == i)
+                if rows.size == 0:
+                    continue
                 oidx, pidx, bidx = resolve_rm_indices(
                     system, oname, self.rm_band[i]
                 )
                 rm_ms = compute_rm_rv(
-                    system, time, oidx, pidx, bidx, model=self.rm_model[i]
-                )  # (N_obs,) m/s
-                rm_internal = rm_ms / rv_ms_per_internal
-                rv_model += pt.switch(
-                    pt.eq(self.inst_map_tensor, i), rm_internal, 0.0
+                    system,
+                    time[rows],
+                    oidx,
+                    pidx,
+                    bidx,
+                    model=self.rm_model[i],
+                    light_travel_time_active=self.light_travel_time[i],
+                )  # (len(rows),) m/s
+                rv_model = pt.inc_subtensor(
+                    rv_model[rows], rm_ms / rv_ms_per_internal
                 )
 
         # detrending
@@ -352,8 +355,25 @@ class RVInstrument(Instrument):
         sigma = self.total_sigma(err)
 
         self.add_observation_likelihood(
-            f"{self.prefix}.model", mu=rv_model, sigma=sigma, observed=rv
+            f"{self.prefix}.model",
+            mu=rv_model,
+            sigma=sigma,
+            observed=rv,
+            system=system,
         )
+
+        # Modeling-draft prose for the RV model itself (the shared
+        # data/noise sentences came from the dispatcher above).
+        get_collector(system).add(
+            "Radial velocities were modeled as a sum of Keplerian orbits "
+            "(every orbit containing the observed star), plus a "
+            "per-instrument velocity offset, using the Kepler solver in "
+            r"exoplanet-core \citep{ForemanMackey:2021}.",
+            section="orbits",
+            key=f"{self.prefix}.rv_model",
+            rank=20,
+        )
+        get_collector(system).add_software("exoplanet-core")
 
     def compile_plotters(self, model, system):
         """Compiles the fast PyTensor functions used by the plot_data specs."""
@@ -402,6 +422,7 @@ class RVInstrument(Instrument):
                             pidx,
                             bidx,
                             model=self.rm_model[i],
+                            light_travel_time_active=self.light_travel_time[i],
                         )
                         / rv_ms_per_internal
                     )
@@ -448,8 +469,8 @@ class RVInstrument(Instrument):
         data-only mode (point=None), before any Parameter exists.
         """
         gamma = getattr(self, "gamma", None)
-        if gamma is not None and hasattr(gamma, "_get_conversion_factors"):
-            return gamma._get_conversion_factors()[0]
+        if gamma is not None and hasattr(gamma, "element_factor"):
+            return gamma.element_factor(0)
         return (u.solRad / u.d).to(u.m / u.s)
 
     def _unphased_grid(self):
@@ -499,8 +520,24 @@ class RVInstrument(Instrument):
         return out
 
     def _instrument_gamma(self, point, i):
-        """The reference-point gamma for instrument i, in internal units."""
-        gamma_vals = np.atleast_1d(point.get(self.gamma.label, 0.0))
+        """The reference-point gamma for instrument i, in internal units.
+
+        The value comes from the point when it is there, else from the
+        gamma Parameter's own initval -- the same fallback
+        _point_to_plot_params uses for every other plotted parameter.
+
+        A ``point.get(label, 0.0)`` here silently substituted ZERO for any
+        parameter absent from the draws, and pinned (``sigma: 0``)
+        parameters are always absent (an all-fixed vector never becomes a
+        pm.Deterministic, so it is in neither model.deterministics nor the
+        posterior).  A fit with a pinned nonzero offset therefore plotted
+        every point of that instrument shifted by the whole gamma away
+        from the model curve the likelihood actually fit.
+        """
+        vals = point.get(self.gamma.label)
+        if vals is None:
+            vals = self.gamma.initval
+        gamma_vals = np.atleast_1d(vals)
         return gamma_vals[i] if i < len(gamma_vals) else gamma_vals[0]
 
     def _phased_arrays(self, system, point, col, o_idx):
@@ -638,6 +675,11 @@ class RVInstrument(Instrument):
                     "file_tag": "RV_unphased",
                     "figsize": (12, 6),
                     "dynamic_data": True,
+                    "caption": (
+                        "Radial velocities with the best-fit model "
+                        "(red); posterior draws are overplotted with "
+                        "low opacity."
+                    ),
                 },
             )
         )
@@ -707,6 +749,13 @@ class RVInstrument(Instrument):
                             "tc": tc_ref,
                             "file_tag": f"RV_phased_{oname}",
                             "figsize": (10, 6),
+                            "caption": (
+                                "Radial velocities phase-folded on "
+                                "orbit "
+                                + latex_escape(oname)
+                                + ", with the other orbits' "
+                                "contributions removed."
+                            ),
                             "hline_y": 0.0,
                             "dynamic_data": True,
                         },

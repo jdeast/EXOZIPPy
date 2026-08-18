@@ -23,9 +23,11 @@ reason, never dropped silently.
 import os
 from pathlib import Path
 
+import numpy as np
 import pytest
 import yaml
 
+from exozippy.components.instrument import Instrument
 from exozippy.system import System
 
 _EXAMPLES = Path(__file__).parent.parent / "examples"
@@ -110,6 +112,39 @@ def test_shipped_example_prepares(path, rel, monkeypatch, caplog):
     ]
     assert not ignored, f"{rel} has stale top-level YAML key(s): {ignored}"
 
+    # Every instrument that concatenates its files must hand each element ONE
+    # contiguous row range, in config order, in every concatenated array at
+    # once: Instrument._build_block_detrend lays the detrend blocks on the
+    # diagonal by walking the per-file counts in order, and mulensing's
+    # observer_pos is addressed row-for-row against `time`. Both break
+    # silently otherwise, so the shared accumulator's published row_ranges are
+    # checked against inst_map on every shipped config -- for free, since the
+    # systems are already prepared here.
+    for key, comp in system.active_components.items():
+        if not isinstance(comp, Instrument):
+            continue
+        if not getattr(comp, "row_ranges", None):
+            continue  # per-file datasets (astrometryinstrument), not rows
+        assert len(comp.row_ranges) == comp.n_elements
+        assert comp.row_ranges[0][0] == 0, f"{rel}: {key} row_ranges"
+        assert comp.row_ranges[-1][1] == comp.n_total_obs, (
+            f"{rel}: {key} row_ranges do not cover n_total_obs"
+        )
+        for i, (lo, hi) in enumerate(comp.row_ranges):
+            if i:
+                assert lo == comp.row_ranges[i - 1][1], (
+                    f"{rel}: {key} element {i} is not contiguous with {i - 1}"
+                )
+            assert np.array_equal(
+                np.flatnonzero(comp.inst_map == i), np.arange(lo, hi)
+            ), f"{rel}: {key} element {i} rows disagree with inst_map"
+        for name in ("time", "err", "observer_pos", "detrend_matrix"):
+            arr = getattr(comp, name, None)
+            if arr is not None:
+                assert len(arr) == comp.n_total_obs, (
+                    f"{rel}: {key}.{name} is not row-aligned with time"
+                )
+
 
 def test_every_example_directory_has_a_config():
     """Given the examples/ tree, when its directories are enumerated, then
@@ -126,6 +161,9 @@ def test_every_example_directory_has_a_config():
         # README only -- no data and no config committed yet.
         "KMT-2021-BLG-1122L",
         "ob161045",
+        # In-progress event: data and outputs only, no config committed
+        # yet (untracked local work as of 2026-08-13).
+        "kb180087_obj3",
     }
     covered = {rel.split("/")[0] for _, rel in _CONFIGS}
 

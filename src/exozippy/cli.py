@@ -1,7 +1,7 @@
 import click
-import yaml
 
 from .run import run_fit
+from .yamlio import load_yaml
 
 
 @click.command()
@@ -13,8 +13,9 @@ from .run import run_fit
     help="Logging level (overrides logger_level in config file).",
 )
 def main(config_file, logger_level):
-    with open(config_file, "r") as f:
-        config = yaml.safe_load(f)
+    # load_yaml, not yaml.safe_load: it refuses YAML-1.1-only boolean
+    # spellings, which the GUI's ruamel loader would read as strings.
+    config = load_yaml(config_file)
 
     if logger_level:
         config["logger_level"] = logger_level.upper()

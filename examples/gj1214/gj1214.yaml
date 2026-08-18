@@ -71,7 +71,10 @@ band:
     filter: "MIRILRS"
     fitthermal: true
   - name: "I"
-    filter: "I"
+    # MEarth's I band. Spelled out rather than left as a bare "I", which
+    # names two rows of the filter alias table (Bessell and Cousins); a
+    # bare "I"/"R" resolves to Cousins, but say it rather than rely on it.
+    filter: "Generic/Cousins.I"
   - name: "V"
     filter: "V"
 
@@ -81,7 +84,7 @@ parameter_file: "gj1214.params.yaml"
 # (maxsteps/nthin/ntemps are DE-MCMC knobs); this block follows EXOZIPPy's
 # HMC best practices instead.
 sampler:
-  method: numpyro      # nuts, numpyro, blackjax, nutpie, ptde, ptde_async
+  method: numpyro   # nuts, numpyro, blackjax, nutpie, ptde, ptde_async, demc, demcz
   tune: 2000
   draws: 4000
   init: adapt_diag

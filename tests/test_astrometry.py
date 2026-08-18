@@ -343,6 +343,140 @@ def test_parallax_factors_match_exact_geometry(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Unit tests: RA offsets must wrap across the 0/360 branch cut (review 3.8)
+# ---------------------------------------------------------------------------
+
+
+class _ConstParam:
+    """Minimal stand-in for a Parameter with a constant value vector."""
+
+    def __init__(self, values):
+        self.value = pt.as_tensor_variable(np.asarray(values, dtype=float))
+
+
+def _abs_dataset_across_ra_zero(tmp_path, ra_ref_deg, ra_obs_deg, dec_deg):
+    """An abs-mode instrument whose observed RA sits on the far side of the
+    0/360 branch cut from the reference RA.  Returns (component, dataset)."""
+    t = np.linspace(2457000.0, 2457365.0, 5)
+    data = np.column_stack(
+        [
+            t,
+            np.full_like(t, ra_obs_deg),
+            np.full_like(t, dec_deg),
+            np.ones_like(t),
+            np.ones_like(t),
+        ]
+    )
+    f = tmp_path / "abs_wrap.astrom"
+    np.savetxt(f, data)
+
+    cm = ConfigManager(
+        {
+            "star.0.ra": {"initval": ra_ref_deg},
+            "star.0.dec": {"initval": dec_deg},
+        }
+    )
+    comp = AstrometryInstrument(
+        [{"name": "T", "file": str(f), "mode": "abs"}], cm
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+    comp.load_data(system)
+    return comp, comp.datasets[0]
+
+
+def test_abs_mode_wraps_ra_offsets_across_zero(tmp_path):
+    """
+    Given: an abs-mode target at RA = 0.1 deg with the reference at 359.9 deg
+    When:  load_data turns the observed positions into (dE, dN) offsets
+    Then:  dE_obs is the short way round (+0.2 deg of RA times cos(dec)),
+           not the unwrapped -359.8 deg
+
+    The unwrapped difference is 1.1e9 mas, i.e. ~1e9 sigma from any model at
+    the start of the fit -- catastrophic for every target straddling RA = 0.
+    """
+    # Arrange / Act: dec = 0 so cos(dec) = 1 and the offset IS the RA
+    # difference, making the assertion read in degrees of RA.
+    _, d = _abs_dataset_across_ra_zero(tmp_path, 359.9, 0.1, 0.0)
+
+    # Assert
+    offset_deg = np.degrees(d["dE_obs"] / RAD2MAS)
+    np.testing.assert_allclose(offset_deg, 0.2, atol=1e-9)
+    assert np.all(np.abs(d["dE_obs"]) < 1e6), (
+        "RA offset was not wrapped across the 0/360 branch cut"
+    )
+    # Dec has no branch cut to cross and must be untouched.
+    np.testing.assert_allclose(d["dN_obs"], 0.0, atol=1e-9)
+
+
+def test_abs_mode_ra_offsets_are_continuous_across_zero(tmp_path):
+    """
+    Given: an abs-mode dataset with epochs on BOTH sides of RA = 0
+    When:  the observed offsets are computed
+    Then:  they span the true 0.15 deg of sky, not 360 deg
+
+    This is the half of the bug no single value of star.ra could ever absorb:
+    unwrapped, consecutive rows of ONE file differ by 360 deg.
+    """
+    # Arrange
+    t = np.linspace(2457000.0, 2457730.0, 8)
+    ra_obs = np.where(np.arange(len(t)) % 2 == 0, 359.95, 0.1)
+    data = np.column_stack(
+        [t, ra_obs, np.zeros_like(t), np.ones_like(t), np.ones_like(t)]
+    )
+    f = tmp_path / "abs_straddle.astrom"
+    np.savetxt(f, data)
+    cm = ConfigManager(
+        {"star.0.ra": {"initval": 0.0}, "star.0.dec": {"initval": 0.0}}
+    )
+    comp = AstrometryInstrument(
+        [{"name": "T", "file": str(f), "mode": "abs"}], cm
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+
+    # Act
+    comp.load_data(system)
+    span_deg = np.degrees(np.ptp(comp.datasets[0]["dE_obs"]) / RAD2MAS)
+
+    # Assert
+    np.testing.assert_allclose(span_deg, 0.15, atol=1e-9)
+
+
+def test_absolute_model_wraps_ra_offset_across_zero(tmp_path):
+    """
+    Given: an abs-mode reference at RA = 359.9 deg and star.ra at 0.1 deg
+    When:  the symbolic model term dE is evaluated
+    Then:  it reproduces the +0.2 deg offset the (wrapped) data carry
+
+    The model side has to wrap too: star.ra carries hard bounds [0, 360] in
+    star/defaults.yaml, so with the reference near 360 an unwrapped model term
+    cannot produce a negative RA offset at all -- the fit is unreachable, not
+    merely offset.
+    """
+    # Arrange
+    comp, d = _abs_dataset_across_ra_zero(tmp_path, 359.9, 0.1, 0.0)
+
+    star = _DummySystem()
+    star.ra = _ConstParam(np.radians([0.1]))
+    star.dec = _ConstParam(np.radians([0.0]))
+    star.pm_ra = _ConstParam([0.0])
+    star.pm_dec = _ConstParam([0.0])
+    star.parallax = _ConstParam([0.0])
+    system = _DummySystem()
+    system.star = star
+    comp.epoch = float(d["time"][0])
+
+    # Act
+    dE, _dN = comp._absolute_model(system, d, d["time"], None)
+    dE_val = np.asarray(dE.eval())
+
+    # Assert: the model matches the wrapped observed offset, to the mas
+    np.testing.assert_allclose(np.degrees(dE_val / RAD2MAS), 0.2, atol=1e-9)
+    np.testing.assert_allclose(dE_val, d["dE_obs"], atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
 # Unit test: orbit manifest gating
 # ---------------------------------------------------------------------------
 
@@ -1085,3 +1219,69 @@ def test_gaia_param_deps_include_the_linear_terms(pm_only_gaia_system):
     # every declared dep must be a label the Evaluator can actually send
     known = {p.label for p in system.plot_params}
     assert set(spec.param_deps) <= known
+
+
+def test_conflicting_per_dataset_epochs_raise(tmp_path):
+    """
+    Given: two astrometry datasets that each declare a different `epoch:`
+    When: load_data resolves the reference epoch for ra/dec/pm
+    Then: it raises naming both epochs
+
+    Regression (silent-bandaid audit): `epoch:` is advertised per instrument
+    in config_schema, but there is only ONE reference epoch because there is
+    only one star.ra/dec/pm to propagate from.  The code took epochs[0] and
+    dropped the rest, so the canonical Hipparcos (1991.25) + Gaia (2016.0)
+    combination silently propagated the second dataset from the first one's
+    epoch -- an offset of pm * 24.75 yr, absorbed by ra/dec/pm.
+    """
+    # Arrange
+    f1 = tmp_path / "a.astrom"
+    f2 = tmp_path / "b.astrom"
+    _write_interferometric_rel(f1)
+    _write_interferometric_rel(f2)
+    comp = AstrometryInstrument(
+        [
+            {
+                "name": "A",
+                "file": str(f1),
+                "mode": "rel",
+                "epoch": 2448349.0625,
+            },
+            {"name": "B", "file": str(f2), "mode": "rel", "epoch": 2457389.0},
+        ],
+        ConfigManager({}),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match=r"conflicting `epoch:` values"):
+        comp.load_data(system)
+
+
+def test_repeated_identical_epochs_are_accepted(tmp_path):
+    """
+    Given: two datasets that name the SAME epoch
+    When: load_data runs
+    Then: it is accepted and used -- the guard only rejects disagreement
+    """
+    # Arrange
+    f1 = tmp_path / "a.astrom"
+    f2 = tmp_path / "b.astrom"
+    _write_interferometric_rel(f1)
+    _write_interferometric_rel(f2)
+    comp = AstrometryInstrument(
+        [
+            {"name": "A", "file": str(f1), "mode": "rel", "epoch": 2457389.0},
+            {"name": "B", "file": str(f2), "mode": "rel", "epoch": 2457389.0},
+        ],
+        ConfigManager({}),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+
+    # Act
+    comp.load_data(system)
+
+    # Assert
+    assert comp.epoch == pytest.approx(2457389.0)

@@ -2,6 +2,22 @@ from typing import Dict
 
 import numpy as np
 
+from .config import USER_PARAM_KEYS
+
+# Sub-keys that resolve() does NOT read but that legitimately appear in a
+# params file, so warning about them would be a false positive:
+#
+#   derived -- ConfigManager.finalize_user_params injects it into its OWN
+#   deepcopy of the entries when it writes a solved initval back.  The
+#   auditor reads system.user_params, the file as written, so this normally
+#   never appears there; it is accepted for the case where a caller of
+#   run_fit(config, user_params=...) round-trips an exported dict.
+_INERT_SUBKEYS = ("derived",)
+
+# What check_unused_yaml accepts.  Derived from config.py's own vocabulary,
+# never restated -- the two used to drift (see USER_PARAM_KEYS' comment).
+VALID_SUBKEYS = frozenset(USER_PARAM_KEYS) | frozenset(_INERT_SUBKEYS)
+
 
 class ModelAuditor:
     def __init__(self, model, system, transformed_inits):
@@ -36,9 +52,16 @@ class ModelAuditor:
         param_logps = {}
         other_nodes = {}
 
-        # ONLY group logps for parameters that are actively being sampled
+        # ONLY group logps for parameters that are actively being sampled.
+        # Read per element (a vector whose instances chose different
+        # parameterizations is derived on some elements and sampled on others,
+        # and it does have a _raw node), from the build's own role masks rather
+        # than from `expression is None` -- a fully derived vector declared per
+        # element leaves that field None.
         sampled_labels = [
-            p.label for p in self.all_params if p.expression is None
+            p.label
+            for p in self.all_params
+            if not bool(np.all(np.atleast_1d(p.is_derived)))
         ]
 
         for node_name, lp in raw_logps.items():
@@ -83,23 +106,11 @@ class ModelAuditor:
                 unused_items.append(k)
 
         # 2. Ignored Sub-Keys (e.g., spelled 'intival' instead of 'initval')
-        # These are the exact and ONLY keys ConfigManager.resolve absorbs.
-        valid_subkeys = {
-            "initval",
-            "init_scale",
-            "lower",
-            "upper",
-            "mu",
-            "sigma",
-            "bound_scale",
-            "derived",
-            "unit",
-        }
-
+        # VALID_SUBKEYS is config.py's own vocabulary, not a second copy.
         for k, ov in self.user_params.items():
             if k in used_keys and isinstance(ov, dict):
                 for sub_k in ov.keys():
-                    if sub_k not in valid_subkeys:
+                    if sub_k not in VALID_SUBKEYS:
                         unused_items.append(f"{k} -> '{sub_k}'")
 
         return unused_items

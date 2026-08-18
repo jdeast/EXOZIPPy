@@ -15,13 +15,16 @@ rvinstrument:
     init_scale: 1.0
     unit: "m2/s2"
     internal_unit: "solRad2/d2"
-    latex: "\\sigma_J^2"
-    description: "Jitter Variance"
+    # Signed: it may go negative down to Instrument._jitter_floor, so neither
+    # the label nor the description may promise a square. See calc_jitter.
+    latex: "J|J|"
+    description: "RV jitter variance"
   jitter:
     unit: "m/s"
     internal_unit: "solRad/d"
-    latex: "\\sigma_J"
-    description: "Jitter"
+    # Not \sigma_J: this is signed, and a sigma promises positivity.
+    latex: "J"
+    description: "RV jitter"
     expressions:
       default:
         func_name: "calc_jitter"

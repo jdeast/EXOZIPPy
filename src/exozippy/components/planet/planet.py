@@ -5,18 +5,44 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
+from exozippy.components.parameterization import mode_manifest
 from exozippy.constants import KEPLER_CONST, MSUN_TO_MEARTH, RSUN_TO_REARTH
-from exozippy.potentials import soft_lower_bound, soft_upper_bound
+from exozippy.outputs.prose import get_collector, join_names
+from exozippy.outputs.texutils import latex_escape
+from exozippy.potentials import soft_lower_bound
 
+from ..orbit.orbit import amplitude_constrained_orbits
 from . import physics
 
 logger = logging.getLogger(__name__)
 
 
 class Planet(Component):
+    # The two mass coordinates, as a parameterization mode table (see
+    # components/parameterization.py).  `linear` samples planet.mass itself over
+    # a range including negatives -- RV and astrometric amplitudes flip phase
+    # through zero, so crossing zero is what avoids the Lucy-Sweeney bias on a
+    # marginal detection -- while `log_q` samples log10(m_p / m_host) and derives
+    # the mass from it.  Planets may differ: log_q is not a parameter of a linear
+    # planet at all, and vice versa.
+    MASS_MODE_TABLE = {
+        "linear": {"mass": None},
+        "log_q": {
+            "mass": {"expr_key": "default", "force_node": True},
+            "log_q": None,
+        },
+    }
+
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Planet Parameters"
+        # BEER (PR 1.b): Doppler beaming amplitude. Per-planet, not
+        # per-band (EXOFASTv2 declares it ss.planet[i].beam, unlike
+        # thermal/reflect/ellipsoidal which are ss.band[i].*).
+        self.beam_free = [bool(c.get("beam_free", False)) for c in self.config]
+        self.beam_constrains_mass = [
+            bool(c.get("beam_constrains_mass", False)) for c in self.config
+        ]
 
     @property
     def prefix(self):
@@ -25,6 +51,33 @@ class Planet(Component):
     @classmethod
     def config_schema(cls):
         return [
+            {
+                "key": "beam_free",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Fit a Doppler beaming amplitude (ppm) for this planet "
+                    "directly from the photometry, independent of the RV "
+                    "semi-amplitude K -- does not constrain planet mass. "
+                    "Default False, which pins beam at 0. If "
+                    "beam_constrains_mass is also set, beam_constrains_mass "
+                    "wins and beam is derived from K instead of fit freely."
+                ),
+            },
+            {
+                "key": "beam_constrains_mass",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Compute this planet's Doppler beaming amplitude from "
+                    "the RV semi-amplitude K (Faigler & Mazeh 2011 eq. 1, "
+                    "bolometric approximation) instead of fitting it "
+                    "freely -- ties the photometric beaming signal to the "
+                    "same mass/K driving the RV model. Default False."
+                ),
+            },
             {
                 "key": "chen",
                 "kind": "option",
@@ -82,33 +135,94 @@ class Planet(Component):
 
         self._resolve_mass_parameterization(system)
 
-        if self.mass_parameterization == "log_q":
-            mass_entry = {"expr_key": "default", "force_node": True}
-        else:
-            mass_entry = None
+        # The mass coordinate, per planet: a `log_q` planet derives its mass
+        # from log10(m_p/m_host) and a `linear` one samples the (signed) mass
+        # itself, and `log_q` is not a parameter of a linear planet at all.  A
+        # system where every planet agrees expands to exactly the manifest this
+        # used to write by hand.
+        mass_entries = mode_manifest(
+            self.mass_parameterizations,
+            self.MASS_MODE_TABLE,
+            n_elements=self.n_elements,
+            where=f"{self.prefix}.mass_parameterization",
+        )
 
+        # Insertion order is load-bearing, so it is preserved exactly: graph.py
+        # registers the build-order nodes in manifest order, and that order is
+        # the order the PyMC nodes -- and so the terms of the summed logp -- get
+        # created in.  `mass` first, `log_q` (when any planet uses it) after
+        # `m_total`, as the hand-written manifest had them.
         self.manifest = {
-            "mass": mass_entry,
+            "mass": mass_entries["mass"],
             "radius": None,
             "density": "default",
             "logg": "default",
             "m_total": "default",
         }
-
-        if self.mass_parameterization == "log_q":
-            self.manifest["log_q"] = None
+        if "log_q" in mass_entries:
+            self.manifest["log_q"] = mass_entries["log_q"]
 
         if has_orbit:
             self.manifest.update(
                 {
                     "p": "default",
-                    "arsun": "default",
+                    "a": "default",
                     "ar": "default",
                     "b": "default",
                     "K": "default",
                     "max_ecc": "default",
                 }
             )
+
+        # BEER (PR 1.b): beam is either (a) derived from K for every planet
+        # (beam_constrains_mass), (b) free-fit for every planet (beam_free),
+        # or (c) pinned at 0 everywhere (neither set -- transit model
+        # unchanged). The two flags are not mutually exclusive: per
+        # EXOFASTv2's step2pars.pro (~line 256), beam is computed whenever
+        # either is set, and beam_constrains_mass takes priority -- when
+        # both are set, beam is still derived from K, not fit freely.
+        # Unlike thermal/reflect/ellipsoidal's per-band opt-in, this is a
+        # single mode for the whole component: Component.add_parameter
+        # resolves one manifest entry as either a whole-component expression
+        # ("default") or a whole-component free/fixed tensor (via per-element
+        # sigma), never a mix of the two within one parameter -- so a
+        # per-planet mix of derived/free/off beam isn't supported yet.
+        any_beam_constrains_mass = any(self.beam_constrains_mass)
+        any_beam_free = any(self.beam_free)
+        if any_beam_constrains_mass and not has_orbit:
+            raise ValueError(
+                f"[{self.prefix}] beam_constrains_mass requires an orbit "
+                f"component (beam is derived from K, which requires the "
+                f"orbital elements)."
+            )
+        if (
+            len(set(self.beam_free)) > 1
+            or len(set(self.beam_constrains_mass)) > 1
+        ):
+            logger.warning(
+                f"[{self.prefix}] beam_free/beam_constrains_mass differ "
+                f"across planets (beam_free={self.beam_free}, "
+                f"beam_constrains_mass={self.beam_constrains_mass}); beam "
+                f"is a whole-component mode, not per-planet (see the "
+                f"comment above), so the resolved mode applies to every "
+                f"planet -- derived-from-K if any planet set "
+                f"beam_constrains_mass, else free-fit if any set "
+                f"beam_free, else pinned at 0."
+            )
+        if any_beam_constrains_mass:
+            self.manifest["beam"] = "default"
+        elif any_beam_free:
+            off = [i for i in range(self.n_elements) if not self.beam_free[i]]
+            entry = {}
+            if off:
+                pin = np.full(self.n_elements, np.nan)
+                pin[off] = 0.0
+                entry["overrides"] = {"sigma": pin.tolist()}
+            self.manifest["beam"] = entry
+        # Neither flag set anywhere: beam does not enter the manifest at
+        # all (no parameter, no table row), matching Band's opt-in gating
+        # for thermal/reflect/ellipsoidal.  Consumers guard on
+        # `"beam" in planets.manifest`.
 
         # Data-driven estimate: Initialize 'K' directly from the RV data variance
         rv_comps = [
@@ -179,40 +293,29 @@ class Planet(Component):
                 modes.append("log_q")
                 reasons.append("no signed observable constrains its mass")
 
-        # One mode per component: Parameter.build_pymc derives a whole vector
-        # or none of it (is_derived is set from `expression is not None`), so
-        # a mixed system cannot be built.  Explicit overrides that disagree
-        # are a user error; a mixed *default* silently falls back to linear,
-        # which is the historical behavior.
+        # Per planet, and mixing is fine: roles are per element (see the
+        # manifest vocabulary), so one planet can derive its mass from log_q
+        # while another samples a signed linear mass.  This used to be a hard
+        # error for an explicit disagreement and a silent fall back to
+        # all-linear for an implicit one, because Parameter.build_pymc derived a
+        # whole vector or none of it.
         detail = ", ".join(
             f"'{nm}' -> {m} ({r})"
             for nm, m, r in zip(self.names, modes, reasons)
         )
-        if len(set(modes)) > 1:
-            explicit = any(
-                c.get("mass_parameterization") is not None for c in self.config
-            )
-            if explicit:
-                raise ValueError(
-                    "All planets must share one 'mass_parameterization' "
-                    f"(got {detail}). Mixing linear and log_q planets in one "
-                    "system is not yet supported; set the same value on "
-                    "every planet."
-                )
+        if any(m == "log_q" for m in modes):
             logger.info(
-                f"planets disagree on the mass coordinate ({detail}); "
-                "falling back to 'linear' for all of them, since mixing is "
-                "not yet supported. Set 'mass_parameterization: log_q' on "
-                "every planet to sample the mass ratio instead."
-            )
-            modes = ["linear"] * len(modes)
-        elif modes and modes[0] == "log_q":
-            logger.info(
-                f"sampling log10(m_planet/m_host): {detail} "
-                "(override with 'mass_parameterization: linear')."
+                f"sampling log10(m_planet/m_host) where it applies: {detail} "
+                "(override per planet with 'mass_parameterization: linear')."
             )
 
-        self.mass_parameterization = modes[0] if modes else "linear"
+        self.mass_parameterizations = modes
+        # The whole-component answer, kept for the readers that only need to
+        # know whether ANY planet uses the ratio coordinate; per-planet callers
+        # read `mass_parameterizations`.
+        self.mass_parameterization = (
+            "log_q" if modes and all(m == "log_q" for m in modes) else "linear"
+        )
         self._reconcile_mass_user_params()
 
     def _reconcile_mass_user_params(self):
@@ -231,7 +334,9 @@ class Planet(Component):
         for i in range(self.n_elements):
             mass_key, log_q_key = f"planet.{i}.mass", f"planet.{i}.log_q"
 
-            if self.mass_parameterization == "linear":
+            # Per planet, because the coordinate is: a stale log_q entry is
+            # only stale for the planets that sample a linear mass.
+            if self.mass_parameterizations[i] == "linear":
                 if log_q_key in up:
                     raise ValueError(
                         f"'{log_q_key}' is set but planet '{self.names[i]}' "
@@ -239,7 +344,7 @@ class Planet(Component):
                         "file written by mkparam for a log_q fit is being "
                         "reused after the data topology changed. Remove the "
                         "entry, or set 'mass_parameterization: log_q' on "
-                        "every planet."
+                        "that planet."
                     )
                 continue
 
@@ -290,27 +395,15 @@ class Planet(Component):
         orbit = system.active_components.get("orbit")
 
         # Orbits whose motion is measured by RV or astrometric data.  A
-        # planet is mass-constrained if it is a body of one of them.
-        mass_orbits = set()
-        rv = system.active_components.get("rvinstrument")
-        if rv is not None and orbit is not None:
-            for s in set(rv.star_ndx):
-                mass_orbits.update(o for o, _ in orbit.star_membership(s))
-        ast = system.active_components.get("astrometryinstrument")
-        if ast is not None and orbit is not None:
-            for i, mode in enumerate(ast.modes):
-                if mode == "rel":
-                    if ast.rel_orbit[i] is not None:
-                        mass_orbits.add(ast.rel_orbit[i])
-                else:
-                    # gaia/abs photocenter wobble sums the orbits whose
-                    # primary group contains the target star.
-                    s = int(ast.config[i].get("star_ndx", 0))
-                    mass_orbits.update(
-                        o
-                        for o, role in orbit.star_membership(s)
-                        if role == "primary"
-                    )
+        # planet is mass-constrained if it is a body of one of them.  Asked of
+        # the ORBIT component, which owns the predicate: the same question
+        # decides whether an orbit is transit-only, and the two answers must
+        # not drift apart (Orbit.amplitude_constrained_orbits).
+        mass_orbits = (
+            amplitude_constrained_orbits(system, orbit)
+            if orbit is not None
+            else set()
+        )
 
         self._mass_side = [
             orbit is not None
@@ -396,51 +489,61 @@ class Planet(Component):
 
         self._add_chen_potential()
         self._annotate_chen_table_notes(system)
+        # Modeling-draft prose, declared next to the potential it describes
+        # (outputs/prose.py's declare-at-site rule).
+        enabled = [nm for nm, on in zip(self.names, self.chen) if on]
+        if enabled:
+            noun = "planet" if len(enabled) == 1 else "planets"
+            get_collector(system).add(
+                r"We imposed the \citet{Chen:2017} probabilistic "
+                rf"mass--radius relation on {noun} "
+                + join_names(latex_escape(n) for n in enabled)
+                + ", constraining whichever of the mass and radius the "
+                "data do not.",
+                section="planetary",
+                key=f"{self.prefix}.chen",
+            )
 
         if "orbit" not in system.active_components:
             return
 
         orbits = system.orbit
-        pm.Potential(
-            f"{self.prefix}.e_collision_bound",
-            soft_upper_bound(
-                orbits.ecc.value[self.orbit_map],
-                self.max_ecc.value,
-                scale=0.88,
-            ),
-        )
+        # The eccentricity barrier used to live here, on
+        # orbits.ecc.value[self.orbit_map] -- i.e. on the node calc_ecc
+        # clips at 0.9999, which gave it zero gradient over 21.5% of the
+        # sampled (secosw, sesinw) square, and gave a planet-free orbit no
+        # bound at all.  It now lives in Orbit._add_eccentricity_bound,
+        # which bounds the unclipped sum and folds self.max_ecc in as the
+        # per-orbit threshold.  Exactly one potential per orbit; do not add
+        # a second one here.
 
         if self.n_elements >= 2:
             self._add_crossing_potential(system, orbits)
 
-    def _initial_semimajor_axes(self, system, orbits):
-        """Per-planet starting semi-major axis, solRad.
+    def _initial_semimajor_axes(self):
+        """Per-planet starting semi-major axis, solRad, or NaN.
 
-        ``planet.arsun`` is a derived Parameter and carries no ``initval``
-        of its own, so the start is recomputed here from the same relation
-        (``physics.calc_arsun``) using the start values the relaxation
-        engine did resolve.  Returns NaN wherever an input is missing; the
-        caller falls back to the config order there.
+        The relaxation engine resolves `planet.a` (Kepler's third law and the
+        m_total sum are relations in planet/symbolic_physics.py), so this reads
+        the start it solved.  It used to RECOMPUTE it -- a hand copy of
+        `KEPLER_CONST m_total^(1/3) P^(2/3)` living in this file, assembled from
+        the period, the planet mass and the host mass -- because nothing
+        resolved `a` at all; that gap is what the relations closed, and closing
+        it deleted the copy.  A relation cannot drift from `physics.calc_arsun`
+        the way a second implementation can.
+
+        NaN where the engine could not solve it (an incomplete harness system);
+        the caller already sorts those last and refuses them as a barrier
+        scale.
         """
-
-        def vec(x, n):
-            try:
-                out = np.asarray(np.atleast_1d(x), dtype=float) * np.ones(n)
-            except (TypeError, ValueError):
-                return np.full(n, np.nan)
-            return out
-
         n = self.n_elements
-        period = vec(orbits.period.initval, orbits.n_elements)[self.orbit_map]
-        m_planet = vec(self.mass.initval, n)
-        star = system.active_components["star"]
-        m_star = vec(star.mass.initval, star.n_elements)[self.star_map]
-
-        m_total = np.maximum(m_star + m_planet, 1e-9)
-        with np.errstate(invalid="ignore"):
-            return (
-                KEPLER_CONST * m_total ** (1.0 / 3.0) * period ** (2.0 / 3.0)
-            )
+        try:
+            out = np.asarray(
+                np.atleast_1d(self.a.initval), dtype=float
+            ) * np.ones(n)
+        except (TypeError, ValueError):
+            return np.full(n, np.nan)
+        return out
 
     def _add_crossing_potential(self, system, orbits):
         """Soft non-crossing barrier between neighboring planets' orbits.
@@ -457,7 +560,7 @@ class Planet(Component):
           ``.orbit.a_val`` attributes, none of which have existed since the
           vectorized refactor -- so ANY system with two or more planets
           raised AttributeError here.  A planet's semi-major axis is
-          ``planet.arsun`` (solRad, derived from m_total and the orbit's
+          ``planet.a`` (internally solRad, derived from m_total and the orbit's
           period) and its eccentricity is its orbit's, via ``orbit_map``.
         - The wall is a soft bound, not ``pt.switch(..., 0, -inf)``.  A -inf
           gives NUTS no gradient to follow out of the forbidden region (and
@@ -477,10 +580,10 @@ class Planet(Component):
         first-order condition but not a stability criterion.
         """
         # Semi-major axis (solRad) and eccentricity, per planet.
-        a = self.arsun.value
+        a = self.a.value
         ecc = orbits.ecc.value[self.orbit_map]
 
-        a_init = self._initial_semimajor_axes(system, orbits)
+        a_init = self._initial_semimajor_axes()
         # A missing start sorts last but must not become the barrier scale.
         order = np.argsort(np.where(np.isfinite(a_init), a_init, np.inf))
 

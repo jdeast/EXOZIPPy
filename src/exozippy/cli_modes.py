@@ -7,7 +7,7 @@ parameter_file YAML used for the original fit (needed for Parameter units,
 expressions, and derived-parameter posteriors -- see CLAUDE.md's six-stage
 lifecycle), loads the saved trace, runs outputs.modes.identify_modes and
 System.distribute_posterior, and rewrites <prefix>_modes.txt,
-<prefix>_definitions.tex, <prefix>_template.tex, and <prefix>_results.csv.
+<prefix>_definitions.tex, <prefix>_table.tex, and <prefix>_results.csv.
 
 It shares the exact identify_modes -> distribute_posterior -> LaTeX/CSV
 pipeline with run.run_fit() via outputs.report_pipeline.build_mode_reports,
@@ -29,12 +29,13 @@ from pathlib import Path
 
 import arviz as az
 import click
-import yaml
 
 from .logger import setup_logging
+from .outputs.modes import MODE_NO_VALID_DRAWS
 from .outputs.report_pipeline import build_mode_reports
 from .system import System
 from .trace_meta import check_trace_freshness
+from .yamlio import load_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,7 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
 
     CONFIG_FILE is the same system YAML passed to `exozippy`; its `prefix:`
     key locates the previously saved trace (<prefix>_trace.nc). Rewrites
-    <prefix>_modes.txt, <prefix>_definitions.tex, <prefix>_template.tex,
+    <prefix>_modes.txt, <prefix>_definitions.tex, <prefix>_table.tex,
     <prefix>_results.csv, and the trace file itself (with
     idata.posterior['mode'] attached) -- without re-running the sampler.
 
@@ -107,8 +108,7 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
     since the whole point of this command is to be able to inspect an
     already-finished trace.
     """
-    with open(config_file, "r") as f:
-        config = yaml.safe_load(f)
+    config = load_yaml(config_file)
 
     if logger_level:
         config["logger_level"] = logger_level.upper()
@@ -146,6 +146,7 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
     # always complete: a high invalid-draw fraction is reported below as a
     # loud warning banner, not the raise build_mode_reports does for a live
     # fit (raise_on_invalid=True there).
+    mode_status = {}
     mode_report = build_mode_reports(
         system,
         idata,
@@ -155,9 +156,40 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
         feature_vars=feature_var_list,
         seed=seed,
         raise_on_invalid=False,
+        mode_status=mode_status,
     )
 
-    if mode_report is None:
+    # Regenerate the modeling-draft scaffold against the rewritten table
+    # fragments.  The components' prose exists (stages 1-6 ran above); the
+    # run-level convergence paragraph does not (no live diagnostics here),
+    # which the regenerated file simply omits.  Never fatal, like every
+    # other output this forensic tool writes.
+    try:
+        from .outputs.modeling import build_modeling_output
+
+        build_modeling_output(system, prefix)
+    except Exception:
+        logger.warning(
+            "modeling-draft regeneration failed (non-fatal)", exc_info=True
+        )
+
+    if mode_status.get("state") == MODE_NO_VALID_DRAWS:
+        # A live fit refuses outright here (check_invalid_frac); this tool
+        # completes by contract, so the banner has to carry what the raise
+        # would have said -- "the tables were written" is not the headline,
+        # "they describe draws that were all rejected" is.
+        logger.warning(
+            "!" * 60 + "\n"
+            f"NO VALID DRAWS: all {mode_status.get('n_invalid', 0)} draws "
+            f"({mode_status.get('invalid_frac', 0.0):.2%}) in this trace "
+            "were rejected as numerically invalid "
+            f"(reasons={mode_status.get('reasons')}). The tables written "
+            "below describe REJECTED draws and no summary of them is "
+            f"meaningful. See {prefix}_modes.txt. This is a model or "
+            "sampler bug: fix it and re-fit; there is nothing here to "
+            "reprocess.\n" + "!" * 60
+        )
+    elif mode_report is None:
         logger.warning(
             "!" * 60 + "\n"
             "MODE IDENTIFICATION FAILED: wrote combined-posterior tables "

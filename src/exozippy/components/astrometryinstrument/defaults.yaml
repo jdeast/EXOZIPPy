@@ -6,16 +6,19 @@ astrometryinstrument:
     init_scale: 0.01
     unit: "mas2"
     internal_unit: "mas2"
-    latex: "\\sigma_{A}^2"
-    description: "Astrometric Jitter Variance"
+    # Signed: it may go negative down to Instrument._jitter_floor, so neither
+    # the label nor the description may promise a square. See calc_jitter.
+    latex: "J|J|"
+    description: "Astrometric jitter variance"
   jitter:
     unit: "mas"
     internal_unit: "mas"
-    latex: "\\sigma_A"
-    description: "Astrometric Jitter"
+    # Not \sigma_A: this is signed, and a sigma promises positivity.
+    latex: "J"
+    description: "Astrometric jitter"
     expressions:
       default:
-        func_name: "calc_astrom_jitter"
+        func_name: "calc_jitter"
         deps: [ "jitter_variance" ]
   fluxfrac:
     # Fractional flux of the companion(s) in this instrument's band,

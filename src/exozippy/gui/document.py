@@ -27,14 +27,16 @@ from __future__ import annotations
 import copy
 import io
 import re
-import time
 from pathlib import Path
 from typing import Optional
 
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
+from ..config import _VALID_INSTANCE_NAME, canonical_param_key
 from ..linking import LINKABLE_FIELDS, is_link_expression
+from ..yamlio import check_yaml_booleans
+from .datafiles import named_instances
 
 # --- YAML round-trip machinery ------------------------------------------------
 
@@ -90,6 +92,22 @@ _YAML = make_yaml()
 
 def _load_yaml_text(text):
     return _YAML.load(text)
+
+
+def _load_user_yaml(path):
+    """Load a user file into a round-trip tree, refusing ambiguous booleans.
+
+    ruamel (YAML 1.2) reads ``finite_source: no`` as the truthy STRING "no"
+    while the fit's PyYAML (YAML 1.1) reads it as ``False`` -- so the editor
+    would show, and could save, the opposite of what the fit does. The shared
+    ``exozippy.yamlio`` guard refuses those spellings for both paths; it is
+    applied here, on the read from disk, and not in ``_load_yaml_text``, whose
+    other caller is the undo/redo round trip of text this module itself
+    dumped.
+    """
+    text = Path(path).read_text()
+    check_yaml_booleans(text, source=str(path))
+    return _load_yaml_text(text)
 
 
 def _dump_yaml_text(tree):
@@ -154,13 +172,25 @@ def _ref_keys_for(comp_type, schema):
 
 
 def _instances_of(config, comp_type):
-    """Return the list of instance dicts for a component block (or [])."""
+    """Return the list of instance dicts for a component block (or []).
+
+    One implementation of "what are this component's instances", shared with
+    the data-file helpers via :func:`datafiles.named_instances` -- the two used
+    to be separate copies that answered the same question with subtly
+    different semantics.
+    """
+    return [inst for _name, inst in named_instances(config, comp_type)]
+
+
+def _instances_of_raw(config, comp_type):
+    """The component's list block VERBATIM (or []).
+
+    Unlike ``_instances_of`` this filters nothing, so positions here are the
+    element indices ``comp.<i>.param`` means -- dropping a stray non-dict
+    entry would shift every index after it.
+    """
     block = config.get(comp_type)
-    if isinstance(block, list):
-        return [e for e in block if isinstance(e, dict)]
-    if isinstance(block, dict):
-        return [block]
-    return []
+    return block if isinstance(block, list) else []
 
 
 def _find_instance(config, comp_type, name):
@@ -194,29 +224,81 @@ def _set_nested(tree, path, value):
         node[last] = value
 
 
-def _get_nested(tree, path):
-    node = tree
-    for seg in path.split("."):
-        if isinstance(node, list):
-            node = node[int(seg)]
-        else:
-            node = node[seg]
-    return node
-
-
 def _rename_top_keys(cmap, rename_fn):
-    """Rebuild a CommentedMap with top-level keys renamed, comments preserved."""
+    """Rebuild a CommentedMap with top-level keys renamed, comments preserved.
+
+    ``rename_fn`` returns the new key, or ``None`` to DROP the entry -- so one
+    pass can rename and delete together, which is what retargeting a params
+    file across an instance deletion needs (some keys go, some are respelled,
+    most are left exactly as the user wrote them).
+    """
     new = CommentedMap()
+    dropped = set()
     for key in list(cmap.keys()):
         new_key = rename_fn(key)
+        if new_key is None:
+            dropped.add(key)
+            continue
         new[new_key] = cmap[key]
     # Carry over per-key and block comments where the key survived.
     old_ca = getattr(cmap, "ca", None)
     if old_ca is not None:
         new.ca.comment = old_ca.comment
         for key, comment in old_ca.items.items():
-            new.ca.items[rename_fn(key)] = comment
+            if key in dropped:
+                continue
+            new_key = rename_fn(key)
+            if new_key is not None:
+                new.ca.items[new_key] = comment
     return new
+
+
+def _validate_instance_name(comp_type, name):
+    """Refuse an instance name the fit -- or this module -- would misread.
+
+    The same rule ``config.validate_instance_names`` enforces on a config file,
+    applied at the point the GUI CREATES a name, because every name-form params
+    key and every ``_element_index`` lookup here assumes it. An ALL-DIGIT name
+    is the dangerous one: ``_instance_indices`` skips it (it cannot serve as the
+    name spelling), so renaming star "A" to "0" rewrote ``star.A.teff`` to
+    ``star.0.teff`` -- which every later command, and the fit itself, reads as
+    the INDEX form and may resolve to a different star entirely. A dotted name
+    breaks path splitting outright, and an empty one addresses nothing.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(
+            f"Invalid name {name!r} for a {comp_type} instance: names must be "
+            f"non-empty strings."
+        )
+    if not _VALID_INSTANCE_NAME.match(name):
+        raise ValueError(
+            f"Invalid name '{name}' for a {comp_type} instance: names may only "
+            f"contain letters, digits, underscores, and hyphens. Characters "
+            f"like '.' or spaces would break parameter-path parsing "
+            f"(e.g. '{comp_type}.{name}.param')."
+        )
+    if name.isdigit():
+        raise ValueError(
+            f"Invalid name '{name}' for a {comp_type} instance: purely numeric "
+            f"names collide with the internal index notation "
+            f"({comp_type}.0, {comp_type}.1, ...). Add a non-digit character "
+            f"(e.g. '{comp_type}_{name}')."
+        )
+    return name
+
+
+def _split_param_key(key, comp_type):
+    """``(instance, param)`` for a 3-part params key of ``comp_type``, else None.
+
+    The 2-part BROADCAST spelling (``star.teff``) deliberately returns None:
+    it is not specific to any instance, so no instance-level edit may touch
+    it -- it covers whatever elements remain, which is exactly what it said
+    before.
+    """
+    parts = str(key).split(".")
+    if len(parts) != 3 or parts[0] != comp_type:
+        return None
+    return parts[1], parts[2]
 
 
 # --- commands -----------------------------------------------------------------
@@ -234,7 +316,16 @@ class Command:
 
     def apply(self, doc):
         self._before = doc._snapshot()
-        self._do(doc)
+        try:
+            self._do(doc)
+        except Exception:
+            # A command that raises PART WAY THROUGH must leave nothing
+            # behind: it is not on the undo stack, so the user would have no
+            # way to take back (say) an appended clone whose params copy then
+            # refused. The snapshot restore we already own makes every
+            # command atomic for free.
+            doc._restore(self._before)
+            raise
         self._after = doc._snapshot()
 
     def revert(self, doc):
@@ -269,14 +360,17 @@ class SetParamField(Command):
         self.label = f"set {path}.{field}"
 
     def _do(self, doc):
-        entry = doc.params.get(self.path)
+        # Update the entry the file already has for this element, under
+        # whatever spelling the user chose -- never append a second one.
+        key = doc.param_key_for(self.path)
+        entry = doc.params.get(key)
         if not isinstance(entry, dict):
             entry = CommentedMap()
-            doc.params[self.path] = entry
+            doc.params[key] = entry
         if self.value is None:
             entry.pop(self.field, None)
             if len(entry) == 0:
-                doc.params.pop(self.path, None)
+                doc.params.pop(key, None)
         else:
             entry[self.field] = doc._wrap(self.value)
 
@@ -284,7 +378,7 @@ class SetParamField(Command):
 class AddComponentInstance(Command):
     def __init__(self, comp_type, name, fields=None):
         self.comp_type = comp_type
-        self.name = name
+        self.name = _validate_instance_name(comp_type, name)
         self.fields = fields or {}
         self.label = f"add {comp_type} '{name}'"
 
@@ -314,16 +408,20 @@ class DeleteInstance(Command):
         self.label = f"delete {comp_type} '{name}'"
 
     def _do(self, doc):
+        # Retarget the params file FIRST. Every decision there needs the
+        # PRE-deletion index of each entry's element, and the ``del`` below
+        # destroys exactly that: afterwards `star.A.teff` resolves to nothing
+        # and `star.0.teff` resolves to whichever star moved up.
+        doc._retarget_params_for_delete(self.comp_type, self.name)
         block, idx = _find_instance(doc.config, self.comp_type, self.name)
         del block[idx]
-        doc._drop_param_keys(self.comp_type, self.name)
 
 
 class RenameInstance(Command):
     def __init__(self, comp_type, old_name, new_name):
         self.comp_type = comp_type
         self.old_name = old_name
-        self.new_name = new_name
+        self.new_name = _validate_instance_name(comp_type, new_name)
         self.label = f"rename {comp_type} '{old_name}' -> '{new_name}'"
 
     def _do(self, doc):
@@ -351,7 +449,7 @@ class DuplicateInstance(Command):
     def __init__(self, comp_type, name, new_name):
         self.comp_type = comp_type
         self.name = name
-        self.new_name = new_name
+        self.new_name = _validate_instance_name(comp_type, new_name)
         self.label = f"duplicate {comp_type} '{name}' -> '{new_name}'"
 
     def _do(self, doc):
@@ -382,7 +480,46 @@ class AssociateDatafile(Command):
         block[idx][self.key] = self.path
 
 
-_PARAM_FIELDS = set(LINKABLE_FIELDS)
+class RestoreAutosave(Command):
+    """Load the autosave sidecars back over the in-memory trees.
+
+    The server has always REPORTED recoverable sidecars (``/api/doc/open``'s
+    ``recovery`` list, written whenever a project switch flushes a dirty
+    document), but nothing could act on them: the edits were reachable only by
+    finding hidden dotfiles by hand. This is the action half.
+
+    It is an ordinary undoable command rather than a bespoke endpoint, and
+    deliberately so: recovery overwrites a document the user may have
+    knowingly let go of, and the snapshot machinery every other command uses
+    makes taking it back free.
+    """
+
+    label = "restore autosaved edits"
+
+    def _do(self, doc):
+        restored = []
+        for attr in ("config", "params"):
+            path = getattr(doc, f"{attr}_path")
+            if path is None:
+                continue
+            sidecar = doc._autosave_path(path)
+            if not sidecar.exists():
+                continue
+            setattr(doc, attr, _load_user_yaml(sidecar))
+            restored.append(str(sidecar))
+        if not restored:
+            raise ValueError("no autosaved edits to restore")
+
+
+# Every per-parameter field a params.yaml entry may carry, i.e. everything the
+# GUI's parameter table is allowed to write. DELIBERATELY not the same set as
+# ``linking.LINKABLE_FIELDS``, which it used to be defined as: `bound_scale`
+# (the soft-bound barrier width -- the one user-facing scale knob left, see
+# CLAUDE.md's "Whitening") is a settable field that is deliberately NOT
+# linkable, so equating the two sets made ConfigTab's `bound_scale` column 400
+# on every blur. Keep them decoupled: adding a field here must not make it a
+# link target, and vice versa.
+_PARAM_FIELDS = set(LINKABLE_FIELDS) | {"bound_scale"}
 
 _COMMANDS = {
     "set_config_key": lambda a: SetConfigKey(a["path"], a["value"]),
@@ -402,6 +539,7 @@ _COMMANDS = {
     "associate_datafile": lambda a: AssociateDatafile(
         a["comp_type"], a["name"], a["key"], a["path"]
     ),
+    "restore_autosave": lambda a: RestoreAutosave(),
 }
 
 
@@ -446,14 +584,14 @@ class ProjectDocument:
         used, resolved relative to the config file's directory.
         """
         config_path = Path(config_path)
-        config = _load_yaml_text(config_path.read_text())
+        config = _load_user_yaml(config_path)
         if params_path is None:
             pf = config.get("parameter_file")
             if pf:
                 params_path = config_path.parent / str(pf)
         params = CommentedMap()
         if params_path is not None and Path(params_path).exists():
-            params = _load_yaml_text(Path(params_path).read_text())
+            params = _load_user_yaml(Path(params_path))
         return cls(
             config,
             params,
@@ -518,10 +656,222 @@ class ProjectDocument:
 
     # -- params key operations ------------------------------------------------
 
-    def _drop_param_keys(self, comp_type, name):
-        prefix = f"{comp_type}.{name}."
-        for key in [k for k in self.params if str(k).startswith(prefix)]:
-            del self.params[key]
+    def param_key_for(self, path):
+        """The spelling THIS params file already uses for ``path``'s element.
+
+        The GUI addresses parameters by the NAME form (`star.A.teff`) because
+        that is what `introspect` and `export_solution` display, while a
+        params file may equally well spell the same element in the INDEX form
+        (`star.0.teff`) -- `examples/kelt4/kelt4.params.yaml`, the GUI test
+        fixture, does exactly that.  A literal `params[path]` write then
+        APPENDS a twin instead of updating the entry, and the two spellings
+        are equally specific, so nothing downstream can adjudicate them:
+        `ConfigManager` now refuses such a file outright, and before it did
+        it silently kept whichever key came LAST -- the GUI's -- discarding
+        the user's entire original entry, `sigma` prior included.
+
+        So resolve to the existing key and edit in place.  Only the two
+        SPECIFIC spellings are matched: a 2-part broadcast entry is a
+        different, coarser statement, and refining one element of it with a
+        specific entry is the legitimate "most specific wins" idiom, not a
+        duplicate.  With no existing entry the caller's own spelling is used,
+        so a params file written by the GUI alone stays in the name form.
+        """
+        if path in self.params:
+            return path
+        if len(str(path).split(".")) != 3:
+            return path
+        canon = canonical_param_key(str(path), self.config)
+        for key in self.params:
+            if len(str(key).split(".")) != 3:
+                continue
+            if canonical_param_key(str(key), self.config) == canon:
+                return key
+        return path
+
+    def _instance_indices(self, comp_type):
+        """``(names_by_index, index_by_name)`` for a list component.
+
+        Only names that can actually be written back into a params key are
+        listed: a non-string or all-digit ``name:`` cannot serve as the NAME
+        spelling (``validate_instance_names`` bans both outright), and an
+        instance with no ``name:`` at all has only its index.
+        """
+        names_by_index = {}
+        index_by_name = {}
+        for i, entry in enumerate(_instances_of_raw(self.config, comp_type)):
+            if not isinstance(entry, dict):
+                continue
+            nm = entry.get("name")
+            if not isinstance(nm, str) or nm.isdigit():
+                continue
+            names_by_index[i] = nm
+            index_by_name.setdefault(nm, i)
+        return names_by_index, index_by_name
+
+    @staticmethod
+    def _element_index(instance, index_by_name, n_inst):
+        """Which instance INDEX an ``<instance>`` path segment addresses.
+
+        Returns ``(index, is_index_form)``, or ``(None, ...)`` when the
+        spelling names no instance this config defines (an orphan entry left
+        over from an earlier edit -- not ours to retarget).
+        """
+        if instance.isdigit():
+            idx = int(instance)
+            return (idx if idx < n_inst else None), True
+        return index_by_name.get(instance), False
+
+    def _retarget_params_for_delete(self, comp_type, name):
+        """Retarget the params file across the deletion of one instance.
+
+        MUST run while the instance is still in the config -- see the comment
+        at the ``DeleteInstance`` call site.
+
+        Three kinds of entry, three answers:
+
+        * **The deleted instance's own entries go, under BOTH specific
+          spellings.** ``star.A.teff`` and ``star.0.teff`` name the same
+          element; a name-prefix scan saw only the first, so every index-form
+          entry survived the delete and then silently applied to whichever
+          star moved up. That is a WRONG-ELEMENT bug, not litter.
+        * **A survivor's index-form entry whose index shifts is rewritten to
+          the NAME form** (``star.1.teff`` -> ``star.B.teff`` when B moves
+          from index 1 to 0). The name form means the same element before and
+          after any list mutation, so this converts a fragile spelling into a
+          stable one exactly where the fragility would otherwise bite.
+          Re-indexing would fix today's delete and leave the same trap set
+          for the next one; refusing the delete would gate an edit the GUI
+          can repair exactly. An UNNAMED instance has no name form, so its
+          keys are re-indexed instead -- the same guarantee by the only means
+          available.
+        * **Everything else is left byte-identical**: a survivor at an index
+          BELOW the deleted one still spells its own element correctly, the
+          name form was never index-dependent, and the 2-part BROADCAST form
+          (``star.teff``) was never specific to the deleted instance.
+
+        Link EXPRESSIONS inside the surviving entries get the same treatment
+        (they are parameter references too, and an index-form one retargets
+        just as silently), with one difference: a reference to the DELETED
+        instance is rewritten to its name form rather than removed, turning a
+        silent mis-address into the loud "no instance named 'A'" the name
+        form has always produced.
+        """
+        block, idx = _find_instance(self.config, comp_type, name)
+        n_inst = len(block)
+        names_by_index, index_by_name = self._instance_indices(comp_type)
+
+        def respelled(i, is_index_form):
+            """New instance segment, or None when the spelling still holds."""
+            if not is_index_form or i < idx:
+                return None
+            nm = names_by_index.get(i)
+            return nm if nm is not None else str(i - 1)
+
+        def rewrite_key(key):
+            split = _split_param_key(key, comp_type)
+            if split is None:
+                return key
+            instance, param = split
+            i, is_index_form = self._element_index(
+                instance, index_by_name, n_inst
+            )
+            if i is None:
+                return key
+            if i == idx:
+                return None  # the deleted instance, under either spelling
+            new_instance = respelled(i, is_index_form)
+            if new_instance is None:
+                return key
+            return f"{comp_type}.{new_instance}.{param}"
+
+        plan = {str(k): rewrite_key(k) for k in self.params}
+        self._reject_colliding_rewrites(plan)
+        self.params = _rename_top_keys(self.params, rewrite_key)
+
+        def rewrite_ref(instance, param):
+            i, is_index_form = self._element_index(
+                instance, index_by_name, n_inst
+            )
+            if i is None:
+                return None
+            if i == idx:
+                # Dangling either way now; spell it so it FAILS rather than
+                # quietly addressing the instance that took this index.
+                return str(name) if is_index_form else None
+            return respelled(i, is_index_form)
+
+        self._rewrite_param_link_paths(comp_type, rewrite_ref)
+
+    def _reject_colliding_rewrites(self, plan):
+        """Refuse a retarget that would leave one element spelled twice.
+
+        Only reachable from a params file that ALREADY names one element
+        under both specific spellings -- which ``ConfigManager`` refuses
+        outright (see CLAUDE.md's "Parameter naming convention"), so the
+        collision is a pre-existing fault this edit would otherwise bury.
+        """
+        landed = {}
+        for src, dst in plan.items():
+            if dst is None:
+                continue
+            prev = landed.get(dst)
+            if prev is not None:
+                raise ValueError(
+                    f"cannot retarget the params file: '{prev}' and '{src}' "
+                    f"would both become '{dst}', i.e. they are two spellings "
+                    f"of one parameter element. Keep exactly one of them "
+                    f"(merging any fields you need from both) and retry."
+                )
+            landed[dst] = src
+
+    def _copy_param_keys(self, comp_type, name, new_name):
+        """Copy one instance's param entries onto its freshly added duplicate.
+
+        The mirror image of the delete case, and it was wrong the same way:
+        a name-prefix scan reads only the NAME spelling, so duplicating an
+        instance whose entries the file spells by INDEX produced a clone with
+        none of its parameters -- silently, since a missing entry is a legal
+        params file.
+
+        Entries are read under both specific spellings and written under the
+        clone's NAME form. Never its index form: that is the fragile spelling
+        ``_retarget_params_for_delete`` exists to remove, correct only until
+        someone deletes an earlier instance. And exactly one spelling per
+        element -- naming one element twice is fatal in ``ConfigManager``.
+        """
+        block, idx = _find_instance(self.config, comp_type, name)
+        _, new_idx = _find_instance(self.config, comp_type, new_name)
+        n_inst = len(block)
+        _, index_by_name = self._instance_indices(comp_type)
+
+        source = {}
+        for key in list(self.params.keys()):
+            split = _split_param_key(key, comp_type)
+            if split is None:
+                continue
+            instance, param = split
+            i, _ = self._element_index(instance, index_by_name, n_inst)
+            if i == idx:
+                if param in source:
+                    raise ValueError(
+                        f"cannot duplicate '{name}': its '{param}' is named "
+                        f"twice in the params file ('{source[param][0]}' and "
+                        f"'{key}' are two spellings of one element). Keep "
+                        f"exactly one of them and retry."
+                    )
+                source[param] = (str(key), self.params[key])
+            elif i == new_idx:
+                raise ValueError(
+                    f"cannot duplicate '{name}' as '{new_name}': the params "
+                    f"file already has '{key}' for the new instance. Remove "
+                    f"or rename that entry and retry."
+                )
+
+        for param, (_, value) in source.items():
+            self.params[f"{comp_type}.{new_name}.{param}"] = copy.deepcopy(
+                value
+            )
 
     def _rename_param_keys(self, comp_type, old, new):
         prefix = f"{comp_type}.{old}."
@@ -535,30 +885,33 @@ class ProjectDocument:
 
         self.params = _rename_top_keys(self.params, rename)
 
-    def _copy_param_keys(self, comp_type, name, new_name):
-        prefix = f"{comp_type}.{name}."
-        new_prefix = f"{comp_type}.{new_name}."
-        additions = []
-        for key in list(self.params.keys()):
-            k = str(key)
-            if k.startswith(prefix):
-                additions.append(
-                    (new_prefix + k[len(prefix) :], self.params[key])
-                )
-        for new_key, value in additions:
-            self.params[new_key] = copy.deepcopy(value)
-
     def _rewrite_param_links(self, comp_type, old, new):
+        # An INDEX-form reference to the renamed instance still addresses it
+        # (a rename moves nothing), so only the name form is rewritten.
+        self._rewrite_param_link_paths(
+            comp_type,
+            lambda instance, param: str(new) if instance == str(old) else None,
+        )
+
+    def _rewrite_param_link_paths(self, comp_type, rewrite_ref):
+        """Rewrite ``comp.<instance>.<param>`` references inside link values.
+
+        ``rewrite_ref(instance, param)`` returns the new instance segment, or
+        None to leave that reference exactly as written. The character
+        classes are ``linking._PATH_3``'s, so this sees precisely the
+        references the link parser will -- index form included.
+        """
         pat = re.compile(
             r"(?<![\w.])"
             + re.escape(comp_type)
-            + r"\."
-            + re.escape(str(old))
-            + r"\.([A-Za-z_]\w*)"
+            + r"\.([A-Za-z0-9_][A-Za-z0-9_\-]*)\.([A-Za-z_]\w*)(?![\w.(])"
         )
 
         def repl(m):
-            return f"{comp_type}.{new}.{m.group(1)}"
+            new_instance = rewrite_ref(m.group(1), m.group(2))
+            if new_instance is None:
+                return m.group(0)
+            return f"{comp_type}.{new_instance}.{m.group(2)}"
 
         for entry in self.params.values():
             if not isinstance(entry, dict):
@@ -649,6 +1002,23 @@ class ProjectDocument:
         path = Path(path)
         return path.parent / f".{path.stem}.autosave.yaml"
 
+    def _should_write_params(self, ppath):
+        """Whether ``ppath`` must be (re)written for the current params tree.
+
+        A NON-EMPTY tree always is. An EMPTY one is written too whenever the
+        file already exists, and that is the whole point: the write used to be
+        gated on ``len(self.params) > 0``, so deleting the last override --
+        "Reset to solved" on the only tuned parameter, or blanking its fields
+        -- left the deleted entry, ``sigma`` prior included, sitting on disk
+        while the GUI reported the document clean. RunControl then saved and
+        launched, and the fit read the entry the user had just removed, with
+        no cue anywhere. Only a params file that never existed is skipped, so
+        an empty edit session still creates nothing.
+        """
+        if ppath is None:
+            return False
+        return len(self.params) > 0 or Path(ppath).exists()
+
     def save(self, config_path=None, params_path=None):
         """Write both files, preserving comments/order, and clear autosaves."""
         cpath = Path(config_path) if config_path else self.config_path
@@ -658,7 +1028,7 @@ class ProjectDocument:
         self.config_path = cpath
 
         ppath = Path(params_path) if params_path else self.params_path
-        if ppath is not None and len(self.params) > 0:
+        if self._should_write_params(ppath):
             ppath.write_text(self.params_text())
             self.params_path = ppath
 
@@ -678,7 +1048,7 @@ class ProjectDocument:
             sp = self._autosave_path(self.config_path)
             sp.write_text(self.config_text())
             written.append(sp)
-        if self.params_path is not None and len(self.params) > 0:
+        if self._should_write_params(self.params_path):
             sp = self._autosave_path(self.params_path)
             sp.write_text(self.params_text())
             written.append(sp)
@@ -691,13 +1061,6 @@ class ProjectDocument:
             sp = self._autosave_path(path)
             if sp.exists():
                 sp.unlink()
-
-    def autosave_paths(self):
-        out = []
-        for path in (self.config_path, self.params_path):
-            if path is not None:
-                out.append(self._autosave_path(path))
-        return out
 
     def autosave_recovery(self):
         """Report any autosave sidecar newer than its real file.
@@ -725,8 +1088,3 @@ class ProjectDocument:
                     }
                 )
         return recoverable
-
-
-def now():
-    """Wall-clock seconds (indirection makes autosave timing testable)."""
-    return time.time()
