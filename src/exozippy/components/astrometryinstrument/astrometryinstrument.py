@@ -200,6 +200,52 @@ class AstrometryInstrument(Instrument):
         return "astrometryinstrument"
 
     @classmethod
+    def get_utilities(cls):
+        """Declared, unavailable, and deliberately so.
+
+        Transit photometry gets a Box Least Squares search and radial
+        velocities a Lomb-Scargle one (``components/globalsearch.py``), and
+        the obvious next step would be the astrometric equivalent.  There is
+        no equivalent to reach for.  A periodogram works on ONE scalar time
+        series with a signal that is periodic in it; astrometry offers
+        neither uniformly:
+
+        - ``gaia`` mode is a one-dimensional along-scan abscissa whose
+          amplitude is modulated by the scan angle at every epoch, so the
+          orbital signal is not periodic in the observable -- the same
+          orbital phase produces different residuals at different scan
+          angles.  A period search would have to deconvolve the scan law
+          first, which is a different algorithm from a periodogram.
+        - ``abs``/``rel`` modes (ground-based, Roman) are TWO observables per
+          epoch, and the orbit is an ellipse traced in the plane rather than
+          a sinusoid in either coordinate; the natural global method there is
+          a Thiele-Innes / linear-in-the-elements grid over period, which is
+          again a different algorithm.
+
+        Both would also have to compete with the parallax and proper motion,
+        which dominate the signal and are not what the search is looking for.
+        A placeholder that named some method would be an invitation to
+        implement whichever one happened to be written down.  Leaving it
+        unavailable, with the reasoning here, is the honest state: pick the
+        method per mode when someone needs it.
+        """
+        from ...utilities.registry import UtilitySpec
+
+        return [
+            UtilitySpec(
+                name="astrometry_period_search",
+                label="Astrometric period search",
+                description=(
+                    "Global orbital-period search for astrometry (no method "
+                    "chosen; 1-D scan-angle and 2-D astrometry need "
+                    "different algorithms -- see get_utilities)."
+                ),
+                component_keys=["astrometryinstrument"],
+                available=False,
+            ),
+        ]
+
+    @classmethod
     def config_schema(cls):
         return [
             {
