@@ -508,9 +508,11 @@ while the fitted `alpha` (307.686) sat 0.3 degrees from the light curve's own op
   maps truth through a sign/offset search ... treat alpha pulls as indicative"), which
   `dc18_common.py` had already replaced with "no truth, no pull". Corrected in the same
   commit as this file.
-- **`dc18_common.py` cites `examples/DC2018/dc18_alpha_convention.py`** as the script that
-  made the C22 measurement; no such file exists in the repository, on any branch. The
-  numbers stand (they are recorded in the comment); the script does not ship.
+- **RESOLVED 2026-08-18.** This document originally reported that `dc18_common.py` cited
+  `examples/DC2018/dc18_alpha_convention.py` for the C22 measurement while no such file
+  existed on any branch. PR #190 shipped it, at `scripts/dc18_alpha_convention.py`. That
+  PR updated one of the two citations in `dc18_common.py` and left the other pointing at
+  the old path; both now name the shipped location.
 - **"Yee+2014"** in `MulensInstrument._abs_to_delta`'s docstring and in review item 3.6.1
   is Yee et al. **2015**, ApJ 802, 76 -- cited by the year of its 2014 arXiv posting
   (arXiv:1410.5429). The bib key added for this document is `Yee:2015`.
