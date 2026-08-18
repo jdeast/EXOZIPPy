@@ -265,6 +265,49 @@ def _reject_renamed_arsun(user_params):
                     )
 
 
+def _reject_list_valued_fields(user_params, source=None):
+    """Raise on a list in a numeric field that has no per-seed meaning.
+
+    A LIST means exactly one thing in a params file: per-seed start values for
+    the multi-seed sampler, which is an ``initval`` concept only -- seeds move
+    the START, never the bounds or the prior (``_build_seed_overrides`` reads
+    initval lists and nothing else).  Everywhere else a list is a
+    misunderstanding, most often "one value per element", which is spelled
+    with one KEY per element (``star.0.teff`` / ``star.A.teff``), not with a
+    list.
+
+    It used to crash instead of explaining: the numeric loop in ``resolve()``
+    tolerates lists by taking element 0 (the per-seed convention), so a
+    ``{sigma: [10, 20]}`` sailed past the sigma application and died several
+    frames later in ``apply_value``'s ``float(list)`` -- a bare TypeError
+    naming no parameter, no field and no file.  Checked on the raw params,
+    before standardization, so the message quotes the user's own spelling.
+
+    ``init_scale`` is deliberately exempt: it is stripped with a warning a few
+    lines later (it is no longer user-facing), and pre-2026-07 restart files
+    name it, so turning an inert entry into a fatal one would break files that
+    work today.
+    """
+    where = f" in {source}" if source else ""
+    for key, spec in (user_params or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        for fld in PHYSICS_KEYS:
+            val = spec.get(fld)
+            if isinstance(val, (list, tuple)):
+                parts = str(key).split(".")
+                per_element = f"{parts[0]}.<instance>.{parts[-1]}"
+                raise ValueError(
+                    f"\n!!! LIST IN A NON-SEED FIELD !!!\n"
+                    f"'{key}'{where} sets {fld}: {list(val)}.  A list is "
+                    f"per-SEED start values, which only 'initval' takes -- "
+                    f"seeds move the start, never the bounds or the prior.\n"
+                    f"For one value per element, write one entry per element "
+                    f"('{per_element}'); for one value everywhere, write the "
+                    f"number itself."
+                )
+
+
 def validate_sigma_has_center(user_params, links=None, source=None):
     """Fatal-error check: a Gaussian prior must have an explicit center.
 
@@ -599,6 +642,7 @@ class ConfigManager:
         self.standalone_solvers = set()
 
         _reject_renamed_arsun(user_params)
+        _reject_list_valued_fields(user_params)
 
         # Path of the params FILE these entries were read from, set by System
         # only when it actually read one -- it stays None when the caller

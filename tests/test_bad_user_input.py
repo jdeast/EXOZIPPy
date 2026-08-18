@@ -1341,3 +1341,71 @@ def test_out_of_bounds_through_the_solved_config_pipeline_says_user():
     msg = str(exc.value)
     assert "star.A.distance" in msg
     assert "start value from: user" in msg
+
+
+# ---------------------------------------------------------------------------
+# Malformed params entries are refused at construction  (2.1.1 / 2.1.2, 7.1.1b)
+# ---------------------------------------------------------------------------
+
+_LIST_FIELD_SYSTEM = {"star": [{"name": "A"}, {"name": "B"}]}
+
+
+@pytest.mark.parametrize("field", ["sigma", "mu", "lower", "upper"])
+def test_a_list_in_a_prior_field_is_refused(field):
+    """
+    Given a params entry putting a LIST in a non-initval numeric field,
+    When the ConfigManager is constructed,
+    Then it raises, naming the parameter and the field.
+
+    A list means per-SEED start values and nothing else -- seeds move the
+    start, never the bounds or the prior.  resolve()'s numeric loop tolerates
+    a list by taking element 0 (that same per-seed convention), so a
+    {sigma: [10, 20]} used to sail past the sigma application and die frames
+    later in apply_value's float(list): a bare TypeError naming no parameter,
+    no field and no file.
+    """
+    # ARRANGE
+    entry = {"initval": 5800.0, "mu": 5800.0}
+    entry[field] = [10.0, 20.0]
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match="LIST IN A NON-SEED FIELD"):
+        ConfigManager({"star.A.teff": entry}, system_config=_LIST_FIELD_SYSTEM)
+
+
+def test_a_list_initval_is_still_legal():
+    """
+    Given a params entry whose initval is a list,
+    When the ConfigManager is constructed,
+    Then it is accepted verbatim -- that is the multi-seed spelling.
+
+    The check has to draw the line in exactly one place, so the legal side
+    is pinned next to the illegal one.
+    """
+    # ARRANGE / ACT
+    cm = ConfigManager(
+        {"star.A.teff": {"initval": [5800.0, 5900.0]}},
+        system_config=_LIST_FIELD_SYSTEM,
+    )
+
+    # ASSERT
+    assert cm.user_params["star.0.teff"]["initval"] == [5800.0, 5900.0]
+
+
+def test_a_bad_entry_dies_at_construction_not_in_finalize():
+    """
+    Given the malformed spelling,
+    When a full finalize_user_params() solve is attempted,
+    Then the error has already been raised at construction.
+
+    The crash site was deep inside the engine (float(list) in apply_value),
+    which is why the message named nothing.  Pinning WHERE it is caught is
+    the point of the fix.
+    """
+    # ARRANGE / ACT / ASSERT
+    for bad in (
+        {"star.A.teff": {"mu": 5800.0, "sigma": [10.0, 20.0]}},
+    ):
+        with pytest.raises(ValueError):
+            cm = ConfigManager(bad, system_config=_LIST_FIELD_SYSTEM)
+            cm.finalize_user_params()
