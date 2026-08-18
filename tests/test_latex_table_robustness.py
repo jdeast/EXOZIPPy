@@ -13,6 +13,7 @@ import numpy as np
 
 from exozippy.components.parameter import Parameter
 from exozippy.outputs.latex import build_latex_output
+from exozippy.outputs.modes import ModeInfo, ModeReport
 
 
 class _FakeComp:
@@ -146,3 +147,113 @@ def test_equal_length_vectors_warn_about_nothing(tmp_path, caplog):
     assert not [r for r in caplog.records if "elements" in r.getMessage()]
     cited, defined = _macro_xref(var_path.read_text(), table_path.read_text())
     assert not (cited - defined)
+
+
+# ---------------------------------------------------------------------------
+# 2.11.3 -- stale mode_summaries surviving a re-run with a different mode count
+# ---------------------------------------------------------------------------
+
+
+def _mode_report(n_modes):
+    modes = [
+        ModeInfo(
+            index=k,
+            weight=1.0 / n_modes,
+            n_draws=200 // n_modes,
+            lp_med=0.0,
+            lp_max=0.0,
+            delta_lp_max=0.0,
+            per_chain_weight=np.array([1.0 / n_modes]),
+        )
+        for k in range(n_modes)
+    ]
+    return ModeReport(
+        labels=np.zeros((1, 200), dtype=int),
+        modes=modes,
+        n_valid=200,
+        n_invalid=0,
+        n_unassigned=0,
+        provenance="occupancy",
+        weights_reliable=True,
+        n_transitions=20,
+        feature_vars=["a_raw"],
+    )
+
+
+def _scalar_param(values, label="star.teff", latex="T"):
+    p = Parameter(
+        label=label,
+        latex=latex,
+        description="desc",
+        initval=5000.0,
+        lower=3000.0,
+        upper=7000.0,
+    )
+    p.posterior = np.asarray(values, dtype=float)
+    return p
+
+
+def _write_table(system, tmp_path, tag, mode_report):
+    var_path = tmp_path / f"v{tag}.tex"
+    table_path = tmp_path / f"t{tag}.tex"
+    build_latex_output(
+        system,
+        var_filename=str(var_path),
+        table_filename=str(table_path),
+        mode_report=mode_report,
+    )
+    return var_path.read_text(), table_path.read_text()
+
+
+def test_growing_mode_count_defines_every_cited_mode_macro(tmp_path):
+    """
+    Given a System whose parameters already carry two-mode summaries from an
+      earlier report, re-reported with a THREE-mode report (the GUI and
+      exozippy-modes both re-report a live System),
+    When the table is written,
+    Then the third mode's macro is defined -- _ensure_mode_summaries used to
+      early-return on a non-None mode_summaries without checking its length,
+      so the table cited \\ez...modethree against a two-entry list.
+    """
+    # ARRANGE
+    comp = _FakeComp()
+    comp.teff = _scalar_param(np.linspace(1.0, 3.0, 200))
+    system = _fake_system(comp)
+    system.mode_labels = np.repeat([0, 1], 100)
+    _write_table(system, tmp_path, "2", _mode_report(2))
+
+    # ACT
+    system.mode_labels = np.repeat([0, 1, 2], [67, 67, 66])
+    var_text, table_text = _write_table(system, tmp_path, "3", _mode_report(3))
+
+    # ASSERT
+    cited, defined = _macro_xref(var_text, table_text)
+    assert not (cited - defined)
+    assert "modethree" in var_text
+
+
+def test_shrinking_mode_count_reports_the_new_split(tmp_path):
+    """
+    Given a System re-reported with FEWER modes than last time,
+    When the table is written,
+    Then the per-mode values are recomputed against the new labels rather
+      than being the previous run's splits relabelled -- the silent half of
+      the same early return, and the dangerous one, since it reports numbers
+      that were never in this report at all.
+    """
+    # ARRANGE
+    comp = _FakeComp()
+    comp.teff = _scalar_param(np.repeat([0.0, 4.0, 8.0], [67, 67, 66]))
+    system = _fake_system(comp)
+    system.mode_labels = np.repeat([0, 1, 2], [67, 67, 66])
+    _write_table(system, tmp_path, "a", _mode_report(3))
+    stale = [s.median for s in comp.teff.mode_summaries]
+    assert stale == [0.0, 4.0, 8.0]
+
+    # ACT: the second report merges the first two peaks into one mode
+    system.mode_labels = np.repeat([0, 1], [134, 66])
+    var_text, _ = _write_table(system, tmp_path, "b", _mode_report(2))
+
+    # ASSERT
+    assert [s.median for s in comp.teff.mode_summaries] == [2.0, 8.0]
+    assert "modethree" not in var_text

@@ -133,8 +133,27 @@ def _mixing_sentence(mode_report):
 
 
 def _ensure_mode_summaries(system, p, mode_report):
-    """Compute per-mode summaries for a sampled parameter if missing."""
-    if p.posterior is None or p.mode_summaries is not None:
+    """Compute per-mode summaries for a sampled parameter if missing or stale.
+
+    ``mode_summaries`` is one entry per mode, and it is cached on the
+    Parameter -- which outlives the report.  Both the GUI and
+    ``exozippy-modes`` re-report a live System, and ``distribute_posterior``
+    overwrites ``posterior`` without clearing the summaries derived from it,
+    so a second report with a DIFFERENT mode count met a list sized for the
+    first one.  Too few entries and the table cites a per-mode macro
+    ``to_latex_mode_defs`` never defined; too many and it silently reports
+    the previous report's splits under the new run's labels, which is the
+    worse half because nothing anywhere says so.
+
+    Recomputing on a length mismatch is the whole guard: the count is the
+    one property of the cache that the new report can check.
+    """
+    if p.posterior is None:
+        return
+    if (
+        p.mode_summaries is not None
+        and len(p.mode_summaries) == mode_report.n_modes
+    ):
         return
     labels = getattr(system, "mode_labels", None)
     if labels is None:
