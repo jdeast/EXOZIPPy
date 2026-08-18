@@ -59,6 +59,12 @@ Sections A/A2 of `build_pymc` add an **unnormalized** Gaussian on top of the rep
 
 Tests: `tests/test_linked_params.py`.
 
+### Evaluating a derived parameter over the trace
+
+`generate_posterior` walks the expression's ancestors, finds the inputs present in the posterior, compiles a pytensor function and evaluates it draw by draw. The compile is **cached per Parameter**, keyed by the tuple of input names -- the signature that decides the positional call (review 6.2.1). It used to happen on every call, and `distribute_posterior` calls it once per derived parameter and runs again for every mode report and every GUI re-solve. Nothing about a cached function goes stale: the graph is rebuilt deterministically from the same captured nodes, and every scale the model can change at runtime lives in a `pytensor.shared` the function reads by reference.
+
+**The sample axis is still a Python loop, and that is now a measured choice, not an oversight.** The obvious batching is `pytensor.graph.replace.vectorize_graph` over one extra leading axis; it is bit-identical, and it is a ~200x pessimization. On a 4-element derived parameter over 20 000 draws the loop costs **0.078 s** (~4 us a draw -- pytensor's call overhead is not the bottleneck the item assumed) while compiling the vectorized Blockwise graph costs **16 s warm, 112 s cold**, once per parameter. The cheaper-looking `clone_replace` with wider inputs is rejected outright by pytensor's type check (a `(?, ?)` matrix cannot stand in for a `(4,)` vector), and would only be valid for a wholly elementwise graph in any case. Re-measure those two numbers before re-attempting it.
+
 ## Reporting component-added priors (`parameter.py`, `PriorContribution`)
 
 `get_prior_str` can only see a Parameter's **own** fields (`sigma`, `mu`, `lower`/`upper`), so a `pm.Potential` a *component* adds at stage 7 was invisible to it and the parameter was reported as whatever those fields implied -- "Uniform" for a bounded element with no sigma, which is exactly the prior such a potential replaces. `star.distance` (volume prior / galactic model), `star.logmass` (Chabrier or Salpeter IMF) and the FFP mass function were all misreported that way.

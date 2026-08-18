@@ -709,6 +709,11 @@ class Parameter:
     # to broadcast to.  None for every parameter without role-3 elements, which
     # is every parameter that does not flip a parameterization.
     _deferred_reported: Optional[dict] = field(default=None, init=False)
+    # generate_posterior's compiled evaluators, keyed by the tuple of input
+    # names it found in the posterior.  Compiling is the expensive half of
+    # evaluating a derived parameter over a trace, and distribute_posterior is
+    # called again for every mode report and on every GUI re-solve.
+    _posterior_fns: dict = field(default_factory=dict, init=False)
 
     user_params: Optional[Mapping[str, Mapping[str, Any]]] = None
     # The SINK for ConfigManager.resolve()'s "auto_estimated" key, not a field
@@ -2361,6 +2366,42 @@ class Parameter:
         self.value = pm.Deterministic(self.label, val_to_save)
         return self.value
 
+    def _posterior_evaluator(self, expr, inputs):
+        """The compiled per-sample evaluator for ``expr``, cached.
+
+        Compiling is the expensive half of evaluating a derived parameter over
+        a trace, and it used to happen on EVERY call -- once per derived
+        parameter per ``distribute_posterior``, which runs again for each mode
+        report and on every GUI re-solve (review 6.2.1).  The cache is keyed on
+        the tuple of input names, which is what decides the positional
+        signature; the graph is rebuilt deterministically from the same
+        captured nodes each time, and every scale the model can change at
+        runtime lives in a ``pytensor.shared`` the compiled function reads by
+        reference, so a cached function is never stale.
+
+        WHY THERE IS NO BATCHED EVALUATOR, having been asked for one: the
+        obvious implementation is ``pytensor.graph.replace.vectorize_graph``
+        over one extra leading axis, and it is CORRECT (bit-identical results)
+        but a large pessimization.  Measured here on a 4-element derived
+        parameter over 20 000 draws: the per-sample loop costs 0.078 s total
+        (~4 us a call -- pytensor's compiled-function call overhead is simply
+        not the bottleneck the item assumed), while compiling the vectorized
+        Blockwise graph costs 16 s with a warm compile cache and 112 s cold.
+        That is a ~200x loss per parameter, and it scales with the number of
+        derived parameters rather than with the number of draws.  The cheap
+        alternative, ``clone_replace`` with wider inputs, is rejected by
+        pytensor's type check (a (?, ?) matrix cannot stand in for a (4,)
+        vector) and would in any case only be valid for a wholly elementwise
+        graph, which nothing guarantees.  Do not re-attempt it without
+        re-measuring those two numbers.
+        """
+        key = tuple(n.name for n in inputs)
+        fn = self._posterior_fns.get(key)
+        if fn is None:
+            fn = pytensor.function(inputs, expr, on_unused_input="ignore")
+            self._posterior_fns[key] = fn
+        return fn
+
     def generate_posterior(self, posterior_bundle, param_lookup=None):
         """Evaluate this parameter's expression over the posterior.
 
@@ -2418,12 +2459,7 @@ class Parameter:
                 return val.reshape(-1, 1)
             return val.item()
 
-        # 1. Compile the function for a single evaluation
-        calc_func = pytensor.function(
-            inputs_in_posterior, expr, on_unused_input="ignore"
-        )
-
-        # 2. Extract the data arrays and align dimensions
+        # 1. Extract the data arrays and align dimensions
         input_data = []
         n_samples = None
 
@@ -2452,6 +2488,9 @@ class Parameter:
 
             input_data.append(val)
 
+        # 2. Compile, once per input signature (see _posterior_evaluator).
+        calc_func = self._posterior_evaluator(expr, inputs_in_posterior)
+
         # 3. Evaluate the first sample to dynamically determine the output dimension
         # Reshape each sample slice to match the PyTensor node's expected ndim.
         # A scalar variable lands as 0-D after arr[0], but build_pymc may have
@@ -2468,7 +2507,9 @@ class Parameter:
         ]
         first_result = np.asarray(calc_func(*first_args))
 
-        # 4. Loop through the remaining samples
+        # 4. Loop through the remaining samples.  Deliberately still a loop:
+        #    see _posterior_evaluator for the measurement that rejected
+        #    batching the sample axis.
         # Create an array of shape (n_samples, *shape)
         result = np.zeros((n_samples,) + first_result.shape)
         result[0] = first_result
