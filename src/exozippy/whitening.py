@@ -47,6 +47,8 @@ import os
 
 import numpy as np
 
+from exozippy.components.parameter import raised_raw_cancellation_clip
+
 logger = logging.getLogger(__name__)
 
 # target = 0.5 nats (dlogp=0.5 <-> dchi2=1, the EXOFASTv2 convention); for a
@@ -358,15 +360,42 @@ def probe_scales(
     return map_lp, scales
 
 
-# A first-round multiplier at/beyond these marks was CLIPPED by the probe's
-# dynamic range -- the true scale was not resolved.  Escalation applies the
-# clipped value (already a huge improvement) and re-probes just those
+# The probe's reach upward is NOT _WHITEN_MAX_STEP.  parameter.py's
+# _RAW_CANCELLATION_CLIP puts a near-vertical wall in logp at |raw| = the
+# clip (past it the +0.5*raw**2 correction stops tracking pm.Normal's
+# -0.5*raw**2, so the drop reaches 0.5 nats within 0.5/clip of the wall).
+# The probe cannot see any real contour beyond it, so at the sampler's clip
+# of 1e4 an element whose preliminary scale was too tight by more than ~4
+# orders measured exactly 1e4 -- inside the old escalation window, hence no
+# re-probe and no warning, and the model stayed silently under-whitened
+# (review 1.2.1: the ob140939 divergence family).  The wall is a sampler
+# safety device, not a property of the posterior, so the probe RAISES it for
+# its own duration.
+#
+# How far may it honestly be raised?  The clip exists because the two
+# -0.5*raw**2 terms cancel only to float64 precision of the larger one, a
+# residual of ~0.5*raw**2 * 2**-52 nats.  That reaches the probe's own 0.5-nat
+# target near |raw| = sqrt(2**53) ~ 7e7, which is the hard ceiling.  At 1e6
+# the residual is 0.5*1e12*2.2e-16 ~ 1.1e-4 nats against a 0.5-nat target
+# (2e-4 relative, well inside _PROBE_RTOL = 5%), and it buys 6 orders of
+# magnitude of reach per round.  Do not raise it toward 7e7 to buy the last
+# order: the noise there is the measurement.
+_PROBE_RAW_CLIP = 1.0e6
+
+# A measured multiplier at/beyond these marks was CLIPPED by one of the
+# probe's three limits -- the step floor, the max step, or the wall above --
+# so the true scale was only bounded, not resolved.  Each mark is half the
+# corresponding limit, i.e. one bracketing step inside it.  Escalation applies
+# the clipped value (already a huge improvement) and re-probes just those
 # elements in the new raw coordinates, where the residual error is within
-# range again.  Two rounds cover preliminary scales off by ~28 orders of
-# magnitude, far beyond any physical case.
+# range again; it repeats until nothing is clipped, so the reach is not a
+# hardcoded number of orders of magnitude on either side.  Per round that is
+# ~14 orders down (_WHITEN_MIN_STEP) and ~6 up (_PROBE_RAW_CLIP, the binding
+# limit -- _WHITEN_MAX_STEP is far beyond it); the cap below only stops a
+# pathological non-converging case, and reaching it warns.
 _CLIP_LO = 2.0 * _WHITEN_MIN_STEP
-_CLIP_HI = 0.5 * _WHITEN_MAX_STEP
-_ESCALATION_ROUNDS = 2
+_CLIP_HI = 0.5 * min(_WHITEN_MAX_STEP, _PROBE_RAW_CLIP)
+_MAX_ESCALATION_ROUNDS = 8
 
 
 def _param_for_raw(lookup, key):
@@ -387,6 +416,23 @@ def _refetch_raw_start(system, model, fallback):
     if getter is None:
         return fallback
     return getter(model)
+
+
+def _clipped_elements(latest, applied):
+    """The (raw_name, flat_index) pairs whose latest multiplier was clipped.
+
+    Only elements that were actually rescaled (`applied`) can be re-probed;
+    a non-finite multiplier is a flat direction, which is a different report
+    and not something another round can resolve.
+    """
+    return [
+        (key, i)
+        for key, mult in latest.items()
+        for i in range(mult.size)
+        if applied[key][i]
+        and np.isfinite(mult.flat[i])
+        and not (_CLIP_LO < abs(mult.flat[i]) < _CLIP_HI)
+    ]
 
 
 def _probe_selected(raw_start, logp_fn, elems):
@@ -423,13 +469,20 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
     bounds, whether its width came from a sigma or from init_scale -- are
     never rescaled.
 
-    Elements whose first-round multiplier hit the probe's dynamic-range
-    limits (a preliminary scale off by more than ~9-14 orders of magnitude,
-    e.g. a period constrained to nanoseconds against day-scale bounds) are
-    escalated: the clipped correction is applied, then just those elements
-    are re-probed in the new raw coordinates, where the residual error is
-    resolvable.  Anything still clipped after the escalation rounds gets a
-    warning naming the element (fix its defaults.yaml init_scale).
+    The whole measurement runs with parameter.py's raw-cancellation clip
+    raised to _PROBE_RAW_CLIP: at its sampling value that wall, not the
+    posterior, is what a badly-too-tight element's 0.5-nat contour would be
+    (see _PROBE_RAW_CLIP).  It is restored before this returns.
+
+    Elements whose measured multiplier hit the probe's dynamic-range limits
+    (a preliminary scale off by more than ~6 orders of magnitude too tight or
+    ~14 too loose, e.g. a period constrained to nanoseconds against day-scale
+    bounds) are escalated: the clipped correction is applied, then just those
+    elements are re-probed in the new raw coordinates, where the residual
+    error is resolvable.  That repeats until nothing is clipped, so the reach
+    is a product of rounds rather than a fixed number of orders of magnitude;
+    an element still clipped at _MAX_ESCALATION_ROUNDS gets a warning naming
+    it (fix its defaults.yaml init_scale).
 
     Returns a report dict:
       map_lp       -- logp at the start
@@ -448,6 +501,18 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
     if logp_fn is None:
         logp_fn = model.compile_logp()
 
+    # The clip is raised for the WHOLE pass, not just around each probe call:
+    # the escalation loop below alternates probing with set_whitening, and a
+    # measurement taken under a different wall than the one it is compared
+    # against is exactly the confusion this fixes.  Restored on exit, by the
+    # context manager, on the error path too -- sampling must never see the
+    # raised value.
+    with raised_raw_cancellation_clip(_PROBE_RAW_CLIP):
+        return _measure_and_apply(system, model, raw_start, logp_fn)
+
+
+def _measure_and_apply(system, model, raw_start, logp_fn):
+    """apply_measured_whitening's body, under the raised probe-time clip."""
     n_elements = sum(v.size for v in raw_start.values())
     logger.debug(
         f"Whitening: probing {n_elements} raw element(s) for their "
@@ -524,23 +589,27 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
     # around the same physical point.
     raw_start = _refetch_raw_start(system, model, raw_start)
 
-    # Escalation: re-probe elements whose multiplier was clipped by the
-    # probe's dynamic range.
-    for round_i in range(_ESCALATION_ROUNDS):
-        clipped = [
-            (key, i)
-            for key, mult in multipliers.items()
-            for i in range(mult.size)
-            if applied[key][i]
-            and np.isfinite(mult.flat[i])
-            and not (_CLIP_LO < abs(mult.flat[i]) < _CLIP_HI)
-        ]
-        if not clipped:
+    # Escalation: re-probe elements whose LATEST measured multiplier was
+    # clipped by one of the probe's limits, until none is -- or the round cap
+    # is reached.  Keyed on the latest measurement, never on the cumulative
+    # product: after a successful escalation the CUMULATIVE is outside the
+    # window by construction (that is what "the preliminary scale was off by
+    # 14 orders" means), so testing it re-probed resolved elements forever
+    # and then declared them "still unresolved" (review 1.2.2).
+    latest = {
+        key: np.asarray(m, dtype=float).copy()
+        for key, m in multipliers.items()
+    }
+    round_i = 0
+    while True:
+        clipped = _clipped_elements(latest, applied)
+        if not clipped or round_i >= _MAX_ESCALATION_ROUNDS:
             break
+        round_i += 1
         logger.warning(
             f"Whitening: {len(clipped)} element(s) hit the probe's dynamic "
-            f"range (preliminary scale off by >9 orders of magnitude); "
-            f"escalation round {round_i + 1}: "
+            f"range (preliminary scale off by >6 orders of magnitude too "
+            f"tight, or >14 too loose); escalation round {round_i}: "
             + "; ".join(f"{k}[{i}]" for k, i in clipped)
         )
         res = _probe_selected(raw_start, logp_fn, clipped)
@@ -552,6 +621,9 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
             n = multipliers[key].size
             mult2 = np.ones(n)
             for i, m in elems.items():
+                # A flat (NaN) re-probe leaves the cumulative alone and drops
+                # the element from the loop: nothing more can be measured.
+                latest[key].flat[i] = m
                 if np.isfinite(m) and m > 0:
                     mult2[i] = m
                     multipliers[key].flat[i] *= m
@@ -559,16 +631,14 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
         raw_start = _refetch_raw_start(system, model, raw_start)
 
     still = [
-        f"{key}[{i}]: cumulative={multipliers[key].flat[i]:.3g}"
-        for key, mult in multipliers.items()
-        for i in range(mult.size)
-        if applied[key][i]
-        and np.isfinite(mult.flat[i])
-        and not (_CLIP_LO < abs(mult.flat[i]) < _CLIP_HI)
+        f"{key}[{i}]: last measured={latest[key].flat[i]:.3g}, "
+        f"cumulative={multipliers[key].flat[i]:.3g}"
+        for key, i in _clipped_elements(latest, applied)
     ]
     if still:
         logger.warning(
-            "Whitening: scale still unresolved after escalation for: "
+            f"Whitening: scale still unresolved after {round_i} escalation "
+            f"round(s) for: "
             + "; ".join(still)
             + " -- set a closer init_scale in the component's defaults.yaml."
         )

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import (
     Any,
@@ -61,6 +62,58 @@ Number = Union[int, float, np.floating]
 # -0.5*raw**2 dominate beyond it -- an ordinary restoring force instead of a
 # numerical time bomb.
 _RAW_CANCELLATION_CLIP = 1.0e4
+
+# ...and it lives in a pytensor.shared, not in the graph as a literal,
+# because the clip is a SAMPLER safety device that also lands on a
+# MEASUREMENT path.  Past |raw| = clip the correction stops tracking
+# pm.Normal's -0.5*raw**2, so logp there acquires a genuine -- and
+# near-vertical: the drop reaches 0.5 nats within 0.5/clip of it -- quadratic
+# wall.  The startup whitening probe walks outward from the start looking for
+# the 0.5-nat contour, so for an element whose preliminary scale is too tight
+# by more than ~4 orders it finds THIS wall instead of the posterior's own
+# contour, reports a multiplier of exactly the clip, and leaves the model
+# under-whitened with nothing anomalous to report (review 1.2.1).
+# whitening.py therefore RAISES the clip for the duration of the probe (see
+# _PROBE_RAW_CLIP there for the float64 argument bounding how far it may
+# honestly be raised) and restores it before anything samples.  Do not fold
+# it back into a literal: the sampler-time value and the probe-time value
+# answer two different questions -- how far may a runaway chain wander, vs
+# how far may a measurement look -- and only a shared variable can hold both
+# without rebuilding the model.
+_raw_cancellation_clip_sv = pytensor.shared(
+    np.asarray(_RAW_CANCELLATION_CLIP, dtype="float64"),
+    name="raw_cancellation_clip",
+)
+
+
+def get_raw_cancellation_clip():
+    """The clip on |raw| currently in force in every built model's section C."""
+    return float(_raw_cancellation_clip_sv.get_value())
+
+
+def set_raw_cancellation_clip(value):
+    """Set that clip in place (shared variable: no rebuild, no recompile).
+
+    Returns the previous value so a caller can restore it.  The whitening
+    probe is the only caller; sampling always runs at
+    ``_RAW_CANCELLATION_CLIP``.
+    """
+    previous = get_raw_cancellation_clip()
+    _raw_cancellation_clip_sv.set_value(
+        np.asarray(float(value), dtype="float64")
+    )
+    return previous
+
+
+@contextmanager
+def raised_raw_cancellation_clip(value):
+    """Temporarily raise the raw-cancellation clip; restore it on exit."""
+    previous = set_raw_cancellation_clip(value)
+    try:
+        yield previous
+    finally:
+        set_raw_cancellation_clip(previous)
+
 
 # phys_logit clips the sigmoid's argument to +/-30: sigmoid(30) = 1 - 9.4e-14,
 # closer to 1.0 than float64 can distinguish for any practical downstream use.
@@ -2101,9 +2154,12 @@ class Parameter:
                 - pt.softplus(-lq_safe)
                 - pt.maximum(pt.abs(lq) - 700.0, 0.0)
             )
-            # raw_vector is clipped before squaring: see _RAW_CANCELLATION_CLIP.
+            # raw_vector is clipped before squaring: see _RAW_CANCELLATION_CLIP
+            # (a shared variable -- the whitening probe raises it in place).
             raw_cancel_safe = pt.clip(
-                raw_vector, -_RAW_CANCELLATION_CLIP, _RAW_CANCELLATION_CLIP
+                raw_vector,
+                -_raw_cancellation_clip_sv,
+                _raw_cancellation_clip_sv,
             )
             # Saturation guard: log_jac's restoring slope approaches a
             # constant (not a growing one) as |lq| -> infinity, so a
