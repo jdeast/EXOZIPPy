@@ -2,7 +2,7 @@
 Asynchronous (non-blocking) Parallel Tempering + Differential Evolution sampler.
 
 The production default for Op-based (non-differentiable) models (YAML:
-sampler.method: "ptde_async"; see hpc_optimization.txt PROMPT 13). Kept as a
+sampler.method: "ptde_async"). Kept as a
 separate sampler module so the synchronous PTDE in ptde.py -- the reference
 implementation with fully up-to-date DE partner states -- stays available for
 A/B validation. The non-sampling scaffolding both share lives in
@@ -14,9 +14,10 @@ because every chain's next DE proposal needs its rung-mates' CURRENT states,
 and "current" is only well-defined once the whole step resolves. Production
 runs on examples/DC2018_128 show this stalls the entire sampler behind a rare
 but expensive near-caustic evaluation concentrated in the hottest 1-2 rungs
-(see hpc_optimization.txt's 2026-07-07 status update: 0.4%/0.09% of rung 6/7
-calls exceed 0.1s, and with 320 proposals/step the odds NONE of them land in
-that tail across a whole run are essentially zero). This module removes that
+(the per-rung timing table at the top of notes/hpc_optimization.txt:
+0.09%/0.7% of rung 6/7 calls exceed 0.1 s, and with 320 proposals/step the
+odds NONE of them land in that tail across a whole run are essentially
+zero). This module removes that
 barrier: every (rung, chain) slot is its own continuous pipeline against a
 shared worker pool -- as soon as one slot's evaluation resolves, it is
 accepted/rejected and that SAME slot's next proposal is immediately
@@ -54,8 +55,9 @@ per-chain draw counters `per_chain_draws`). A chain that reaches its target
 for chains still catching up) but stops being recorded. The run stops once
 every chain has recorded `draws` samples, or maxtime/convergence/user-
 interrupt fires first; at that point output is truncated to
-min(per_chain_draws) across chains (the simplest correct option per
-hpc_optimization.txt PROMPT 13 item 4).
+min(per_chain_draws) across chains (the simplest correct option: every
+chain then contributes the same number of draws, and no chain contributes
+draws its peers have not caught up to).
 """
 
 import logging

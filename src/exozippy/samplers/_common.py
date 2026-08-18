@@ -79,8 +79,8 @@ from exozippy.whitening import probe_scales as _probe_scales  # noqa: E402
 # arrays) are the only IPC payload.
 _PTDE_LOGP_FN = None
 
-# Diagnostic flag (see collect_rung_timing in the samplers and
-# hpc_optimization.txt P13): set in the parent before forking, like
+# Diagnostic flag (see collect_rung_timing in ptde_sample, which carries
+# the rationale): set in the parent before forking, like
 # _PTDE_LOGP_FN, so workers inherit it via copy-on-write. When True,
 # _eval_logp times its own call and returns (lp, elapsed_seconds) instead of
 # a bare float, so the parent can attribute wall time to a rung.
@@ -681,7 +681,8 @@ def compile_conversions(model):
     likelihood), so it vectorizes cleanly and cuts what was a
     Python-level per-sample loop (dominant cost: interpreter + pytensor
     call overhead, not the underlying math) down to a handful of batched
-    calls. See hpc_optimization.txt PROMPT 7.
+    calls. (Measured under notes/hpc_optimization.txt's PROMPT 7, which
+    has since been pruned from that note.)
 
     Returns (raw_to_phys, raw_to_phys_batched, raw_var_names, out_var_names).
     """

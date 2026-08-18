@@ -655,7 +655,9 @@ def _active_rungs(step, n_temps, thin_start, thin_factor):
     rung that skipped its own DE move this step can still participate in
     a swap using its last-computed logp.
 
-    Rationale (hpc_optimization.txt P12): PTDE's per-step wall time is
+    Rationale (the slow-evaluation tail measured at the top of
+    notes/hpc_optimization.txt; its P12, cited here until 2026-08, has
+    since been pruned from that note): PTDE's per-step wall time is
     gated by the SLOWEST of all n_temps*n_chains proposals. Hot rungs
     (large T) explore a heavily flattened target and routinely draw
     parameter combinations that are individually expensive to evaluate but
@@ -822,16 +824,24 @@ def ptde_sample(
                proposes every step). Directly cuts the number of chances per
                step that a hot, heavily-flattened rung draws a parameter
                combination that is expensive to evaluate but scientifically
-               irrelevant (see hpc_optimization.txt P12). Swaps are
+               irrelevant (see _active_rungs for the measurement this
+               is argued from). Swaps are
                unaffected -- they exchange cached (population, logp) pairs
                and need no new evaluation.
     rung_thin_start : int | None  — first rung index subject to thinning;
                None -> n_temps // 2. Clamped to >= 1: the T=1 rung (index 0,
                the only one whose draws are kept) is never thinned.
-    collect_rung_timing : bool  — diagnostic (see hpc_optimization.txt P13):
-               record per-call wall time and attribute it to a rung, logging
-               a summary (count/median/mean/p90/max per rung) when sampling
-               finishes. Default False (zero overhead when off).
+    collect_rung_timing : bool  — diagnostic: record per-call wall time and
+               attribute it to a rung, logging a summary
+               (count/median/mean/p90/max per rung) when sampling finishes.
+               Default False (zero overhead when off). This is the
+               measurement the sampler's optimization work is argued from --
+               it is what localized the slow-evaluation tail to the top two
+               rungs of DC2018_128 (see the per-rung timing table at the top
+               of notes/hpc_optimization.txt, and the 6.4.x block of
+               notes/code_review_20260814.txt, which supersedes the P13 this
+               line used to cite; P13 itself has since been pruned from that
+               note).
     seed : int | None
     log_interval : int | None — steps between progress log lines (None → 5%)
     plot_prefix : str | None  — if set, generate ensemble-start plots at this path prefix
