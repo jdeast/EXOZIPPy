@@ -1427,14 +1427,56 @@ class Transit(Instrument):
         baseline = self._point_value(point, self.baseline, i)
         return t_pretty, baseline + y_decrement + y_gp
 
-    def _phased_lc_arrays(self, system, point, p_idx, i):
+    def _phased_lc_shared(self, system, point):
+        """The parts of a phased panel that do NOT depend on which planet.
+
+        ``_phased_lc_arrays`` is called once per (planet, instrument) and
+        recomputed the same things every time: the marshalled parameter
+        values, the per-observation GP and detrend corrections (both
+        point-only), and the smeared LC matrix at instrument ``i``'s
+        observed times -- which varies with the INSTRUMENT but not with the
+        planet, so it was rebuilt N_planets times per light curve per
+        posterior draw (review 6.5.1).
+
+        Returned as one dict per (component, point); the per-instrument
+        matrices fill in lazily as instruments are reached, so a run that
+        plots one light curve does not compile the others'.
+        """
+        param_values = self._point_to_plot_params(point, system)
+        return {
+            "param_values": param_values,
+            # Removed from the phased data along with the other planets':
+            # the correlated component would smear the fold, and the fitted
+            # trend is a per-observation term no pretty-grid curve carries.
+            # Both are zeros when the feature is off.
+            "extra_signals": self.gp_mean_at_data(system, point)
+            + self.detrend_at_data(point),
+            "data_lc_matrix": {},
+        }
+
+    def _phased_lc_data_matrix(self, shared, i):
+        """Instrument ``i``'s smeared LC matrix at its own observed times."""
+        cache = shared["data_lc_matrix"]
+        if i not in cache:
+            cache[i] = self._smeared_lc_matrix(
+                self.time[self.rows(i)], i, *shared["param_values"]
+            )
+        return cache[i]
+
+    def _phased_lc_arrays(self, system, point, p_idx, i, shared=None):
         """
         One-period phase grid, isolated model decrement for planet p_idx,
         and the baseline-subtracted, other-planet-cleaned flux at the
         observed times -- used by plot_data() (and via it plot()). Uses
         _smeared_lc_matrix (see _eval_unphased_lc) so the phased panel
         matches the exposure-smeared model as well.
+
+        ``shared`` is this point's ``_phased_lc_shared`` dict; omit it and
+        one is built, which is what a standalone caller wants and what the
+        per-planet loop must NOT do.
         """
+        if shared is None:
+            shared = self._phased_lc_shared(system, point)
         planets = system.planet
         P_ref = self._point_value(point, system.orbit.period, p_idx)
         tc_ref = self._point_value(point, system.orbit.tc, p_idx)
@@ -1446,34 +1488,25 @@ class Transit(Instrument):
         time_from_center_model = phase_model * P_ref
         sort_m = np.argsort(phase_model)
 
-        param_values = self._point_to_plot_params(point, system)
-        lc_matrix = self._smeared_lc_matrix(t_model, i, *param_values)
+        lc_matrix = self._smeared_lc_matrix(
+            t_model, i, *shared["param_values"]
+        )
         y_planet = lc_matrix[:, p_idx]
 
-        mask = self.inst_map == i
-        data_lc_matrix = self._smeared_lc_matrix(
-            self.time[mask], i, *param_values
-        )
+        rows = self.rows(i)
+        data_lc_matrix = self._phased_lc_data_matrix(shared, i)
         other_mask = np.ones(planets.n_elements, dtype=bool)
         other_mask[p_idx] = False
         other_decrements = np.sum(data_lc_matrix[:, other_mask], axis=1)
 
         baseline = self._point_value(point, self.baseline, i)
-        # Remove the correlated component along with the other planets', so
-        # the phased panel is not smeared by it. Zero without a gp: key.
-        gp_signal = self.gp_mean_at_data(system, point)[mask]
-        # ... and the fitted detrend model, which build_likelihood adds per
-        # observation and no pretty-grid curve can carry.  Zero without
-        # detrend columns.  See Instrument.detrend_at_data.
-        detrend_signal = self.detrend_at_data(point)[mask]
         cleaned_flux = (
-            self.flux[mask]
+            self.flux[rows]
             - baseline
             - other_decrements
-            - gp_signal
-            - detrend_signal
+            - shared["extra_signals"][rows]
         )
-        data_phases = ((self.time[mask] - tc_ref) / P_ref + 0.5) % 1.0 - 0.5
+        data_phases = ((self.time[rows] - tc_ref) / P_ref + 0.5) % 1.0 - 0.5
 
         return {
             "P_ref": P_ref,
@@ -1606,12 +1639,17 @@ class Transit(Instrument):
         # ---- Phased: one chart per planet/instrument (needs a model) --
         if point is not None:
             planets = system.planet
+            # Once per (component, point), not once per planet x instrument
+            # (6.5.1); the per-instrument matrices fill in lazily.
+            shared = self._phased_lc_shared(system, point)
             for p_idx in range(planets.n_elements):
                 for i in range(self.n_elements):
                     # A failed prep skips this panel, exactly as the old
                     # hand-drawn loop skipped its figure.
                     try:
-                        prep = self._phased_lc_arrays(system, point, p_idx, i)
+                        prep = self._phased_lc_arrays(
+                            system, point, p_idx, i, shared=shared
+                        )
                     except Exception as e:  # noqa: BLE001 - bad point/draw
                         logger.warning(f"LC phased model eval failed: {e}")
                         continue

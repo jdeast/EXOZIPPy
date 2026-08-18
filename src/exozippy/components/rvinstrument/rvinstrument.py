@@ -659,12 +659,52 @@ class RVInstrument(Instrument):
             out.append((i, t_i, (y_phys + y_gp) * factor))
         return out
 
-    def _phased_arrays(self, system, point, col, o_idx):
+    def _phased_shared(self, system, point):
+        """The parts of a phased panel that do NOT depend on which orbit.
+
+        ``_phased_arrays`` is called once per member orbit, and three of the
+        arrays it built were the same every time: the marshalled parameter
+        values, the RV matrix at the OBSERVED times (the model grid's matrix
+        does vary -- its time grid is that orbit's own period window), and
+        the per-observation GP + detrend corrections.  Recomputing them per
+        orbit meant N_orbits evaluations of a compiled function over the full
+        data set per posterior draw, and the spaghetti re-runs the whole
+        thing per draw (review 6.5.1).  Hoisted to once per (instrument,
+        point) and passed down.
+
+        Kept as a separate method rather than a cache keyed on the point:
+        ``point`` is a plain dict, so identity is the only key available and
+        it is not a safe one.
+        """
+        param_values = self._point_to_plot_params(point, system)
+        return {
+            "param_values": param_values,
+            "data_rv_matrix": self._compiled_rv_matrix(
+                self.time, *param_values
+            ),
+            # Phasing data that still contains the correlated (e.g. rotation)
+            # signal just smears the panel, so the GP conditional mean comes
+            # out of the data along with the other orbits' signal -- as does
+            # the fitted detrend model, which the likelihood adds per
+            # observation (build_likelihood's pt.dot) but no model curve on a
+            # pretty grid can carry.  Both are zeros when the feature is off,
+            # so this is a no-op then.
+            "extra_signals": self.gp_mean_at_data(system, point)
+            + self.detrend_at_data(point),
+        }
+
+    def _phased_arrays(self, system, point, col, o_idx, shared=None):
         """
         Phase grid, isolated model curve, and the per-observation
         background (all other member orbits' signal) for one member
         orbit -- used by plot_data() (and via it plot()).
+
+        ``shared`` is this (instrument, point)'s ``_phased_shared`` dict;
+        omit it and one is built, which is what a standalone caller wants
+        and what the per-orbit loop must NOT do.
         """
+        if shared is None:
+            shared = self._phased_shared(system, point)
         factor = self._rv_factor()
         P_ref = self._point_value(point, system.orbit.period, o_idx)
         tc_ref = self._point_value(point, system.orbit.tc, o_idx)
@@ -675,25 +715,12 @@ class RVInstrument(Instrument):
         phase_model = np.mod((t_model - tc_ref) / P_ref + 0.25, 1.0)
         sort_m = np.argsort(phase_model)
 
-        param_values = self._point_to_plot_params(point, system)
-        rv_matrix = self._compiled_rv_matrix(t_model, *param_values)
+        rv_matrix = self._compiled_rv_matrix(t_model, *shared["param_values"])
         y_orbit = rv_matrix[:, col]
 
-        data_rv_matrix = self._compiled_rv_matrix(self.time, *param_values)
         other_mask = np.ones(len(self._plot_orbit_map), dtype=bool)
         other_mask[col] = False
-        other_signals = np.sum(data_rv_matrix[:, other_mask], axis=1)
-
-        # Phasing data that still contains the correlated (e.g. rotation)
-        # signal just smears the panel, so the GP conditional mean is removed
-        # from the data here along with the other orbits' signal. Zeros for
-        # instruments without a GP, so this is a no-op then.
-        gp_signals = self.gp_mean_at_data(system, point)
-
-        # ... and likewise the fitted detrend model, which the likelihood
-        # adds per observation (build_likelihood's pt.dot) but no model
-        # curve on a pretty grid can carry.  See Instrument.detrend_at_data.
-        detrend_signals = self.detrend_at_data(point)
+        other_signals = np.sum(shared["data_rv_matrix"][:, other_mask], axis=1)
 
         return {
             "P_ref": P_ref,
@@ -701,7 +728,7 @@ class RVInstrument(Instrument):
             "factor": factor,
             "phase_model": phase_model[sort_m],
             "y_model": y_orbit[sort_m] * factor,
-            "other_signals": other_signals + gp_signals + detrend_signals,
+            "other_signals": other_signals + shared["extra_signals"],
         }
 
     def plot(self, system, points, filename_prefix="debug"):
@@ -832,8 +859,12 @@ class RVInstrument(Instrument):
             # dynamic_data below and the explicit deps the graph walk cannot
             # see.
             deps = deps + [lbl for lbl in numpy_deps if lbl not in deps]
+            # Once per (instrument, point), not once per orbit (6.5.1).
+            shared = self._phased_shared(system, point)
             for col, o_idx in enumerate(omap):
-                prep = self._phased_arrays(system, point, col, o_idx)
+                prep = self._phased_arrays(
+                    system, point, col, o_idx, shared=shared
+                )
                 P_ref, tc_ref = prep["P_ref"], prep["tc_ref"]
                 otraces = [
                     Trace(
