@@ -2449,6 +2449,15 @@ class ConfigManager:
         "_last_resolved",
         "_last_solved_by",
     )
+    # _symbolic_solve_cache is deliberately NOT here.  Everything above is a
+    # RESULT the probe must not leave behind -- a solved value, a rank, a
+    # blacklist entry earned under the probe's own inputs.  The solve cache is
+    # a memo of sp.solve, which is a pure function of (equation, target) and
+    # sees no values at all, so what the probe learns there is equally true
+    # afterwards; keeping it is the point (the probe runs at stage 1a and the
+    # real solve repeats the same inversions at stage 3).  Contrast the
+    # blacklist, which IS rolled back precisely because it is input-dependent:
+    # a 2 s timeout under the probe's inputs says nothing about stage 3's.
 
     def probe_derivable(self, paths, tolerance=1e-3):
         """Which of `paths` the relaxation engine can pin down from what is
