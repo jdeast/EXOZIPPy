@@ -500,6 +500,15 @@ class Transit(Instrument):
         tensor (Deterministic "transit.dilution" for diagnostics), or
         None if no instrument's band filter is in the SED's BC grid.
         Instruments whose band filter is unavailable get dilution 1.
+
+        The cache is per BUILD, not per component: ``build_likelihood``
+        clears it (see ``_reset_build_caches``).  Components persist on the
+        System and a second ``system.build_model()`` is supported (the GUI
+        does it), so a cache that outlived the model handed the second
+        build's likelihood a Deterministic belonging to the FIRST model --
+        either a crash at logp compile or, worse, a silently stale dilution.
+        Within one build the cache is still wanted: the node is asked for
+        twice (the group loop and the beam term) and must be one node.
         """
         if getattr(self, "_dilution_node", None) is not None:
             return self._dilution_node
@@ -532,6 +541,13 @@ class Transit(Instrument):
         return self._dilution_node
 
     def build_likelihood(self, model, system):
+        # Stage 7 is once per BUILD, and a second system.build_model() on one
+        # System is supported (the GUI does it), so every cached NODE has to
+        # be dropped here.  A dilution node that outlived its model was handed
+        # to the second build's likelihood -- a crash at logp compile, or a
+        # silently stale dilution.
+        self._dilution_node = None
+
         time = pm.Data("transit_time", self.time)
         flux = pm.Data("transit_data", self.flux)
         err = pm.Data("transit_err", self.err)

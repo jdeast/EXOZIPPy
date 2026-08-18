@@ -1792,6 +1792,13 @@ class Instrument(Component):
         if not self.has_robust_likelihood:
             return
 
+        # New build, new nodes: the lazily compiled outlier-probability
+        # evaluators below close over the PREVIOUS model's plot_params and
+        # logodds nodes.  Rebuilt below; dropped here so a build that adds
+        # fewer files cannot leave a stale entry either.
+        self._hogg_logodds = {}
+        self._hogg_prob_fns = None
+
         self._build_robust_deterministics()
         for i in sorted(self._robust_obs_index):
             idx = self._robust_obs_index[i]
