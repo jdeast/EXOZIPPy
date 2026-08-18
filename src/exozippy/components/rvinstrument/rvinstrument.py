@@ -647,27 +647,6 @@ class RVInstrument(Instrument):
             out.append((i, t_i, (y_phys + y_gp) * factor))
         return out
 
-    def _instrument_gamma(self, point, i):
-        """The reference-point gamma for instrument i, in internal units.
-
-        The value comes from the point when it is there, else from the
-        gamma Parameter's own initval -- the same fallback
-        _point_to_plot_params uses for every other plotted parameter.
-
-        A ``point.get(label, 0.0)`` here silently substituted ZERO for any
-        parameter absent from the draws, and pinned (``sigma: 0``)
-        parameters are always absent (an all-fixed vector never becomes a
-        pm.Deterministic, so it is in neither model.deterministics nor the
-        posterior).  A fit with a pinned nonzero offset therefore plotted
-        every point of that instrument shifted by the whole gamma away
-        from the model curve the likelihood actually fit.
-        """
-        vals = point.get(self.gamma.label)
-        if vals is None:
-            vals = self.gamma.initval
-        gamma_vals = np.atleast_1d(vals)
-        return gamma_vals[i] if i < len(gamma_vals) else gamma_vals[0]
-
     def _phased_arrays(self, system, point, col, o_idx):
         """
         Phase grid, isolated model curve, and the per-observation
@@ -675,10 +654,8 @@ class RVInstrument(Instrument):
         orbit -- used by plot_data() (and via it plot()).
         """
         factor = self._rv_factor()
-        P_ref = float(
-            np.atleast_1d(point.get(system.orbit.period.label))[o_idx]
-        )
-        tc_ref = float(np.atleast_1d(point.get(system.orbit.tc.label))[o_idx])
+        P_ref = self._point_value(point, system.orbit.period, o_idx)
+        tc_ref = self._point_value(point, system.orbit.tc, o_idx)
 
         t_model = np.linspace(
             tc_ref - 0.5 * P_ref, tc_ref + 0.5 * P_ref, 1000
@@ -701,13 +678,18 @@ class RVInstrument(Instrument):
         # instruments without a GP, so this is a no-op then.
         gp_signals = self.gp_mean_at_data(system, point)
 
+        # ... and likewise the fitted detrend model, which the likelihood
+        # adds per observation (build_likelihood's pt.dot) but no model
+        # curve on a pretty grid can carry.  See Instrument.detrend_at_data.
+        detrend_signals = self.detrend_at_data(point)
+
         return {
             "P_ref": P_ref,
             "tc_ref": tc_ref,
             "factor": factor,
             "phase_model": phase_model[sort_m],
             "y_model": y_orbit[sort_m] * factor,
-            "other_signals": other_signals + gp_signals,
+            "other_signals": other_signals + gp_signals + detrend_signals,
         }
 
     def plot(self, system, points, filename_prefix="debug"):
@@ -767,28 +749,42 @@ class RVInstrument(Instrument):
                         style={"series_index": int(i), "lw": 1.0},
                     )
                 )
+        # The fitted trend is per observation, so it comes off the DATA
+        # rather than going onto the model curve (Instrument.detrend_at_data);
+        # zeros without detrend columns.
+        detrend = self.detrend_at_data(point)
         for i in range(self.n_elements):
             mask = self.inst_map == i
             # gamma offset only when a point supplies it; raw data otherwise
-            g = self._instrument_gamma(point, i) if point is not None else 0.0
+            g = (
+                self._point_value(point, self.gamma, i)
+                if point is not None
+                else 0.0
+            )
             traces.append(
                 Trace(
                     name=self.names[i],
                     role="data",
                     kind="scatter",
                     x=self.time[mask],
-                    y=(self.rv[mask] - g) * factor,
+                    y=(self.rv[mask] - g - detrend[mask]) * factor,
                     yerr=self.err[mask] * factor,
                     style=self._data_trace_style(i),
                 )
             )
-        # The data traces are gamma-subtracted, so they move with the point
-        # too (dynamic_data) and the gamma slider must reach this component
-        # through param_deps -- gamma is applied in numpy, not through the
-        # symbolic model node, so the graph walk alone would miss it.
+        # The data traces are gamma- and detrend-subtracted, so they move with
+        # the point too (dynamic_data) and those sliders must reach this
+        # component through param_deps -- both are applied in numpy, not
+        # through the symbolic model node, so the graph walk alone would miss
+        # them.
         gamma_label = getattr(getattr(self, "gamma", None), "label", None)
-        if point is not None and gamma_label and gamma_label not in model_deps:
-            model_deps = model_deps + [gamma_label]
+        numpy_deps = ([gamma_label] if gamma_label else []) + (
+            self.detrend_dep_labels()
+        )
+        if point is not None:
+            model_deps = model_deps + [
+                lbl for lbl in numpy_deps if lbl not in model_deps
+            ]
         specs.append(
             PlotSpec(
                 id=f"{self.prefix}.unphased",
@@ -819,11 +815,11 @@ class RVInstrument(Instrument):
                 getattr(self, "_rv_matrix_node", None), system
             )
             # The phased DATA moves with the point too: the fold uses tc/P,
-            # and the cleaning subtracts gamma + the other orbits' signal
-            # (all applied in numpy) -- hence dynamic_data below and the
-            # explicit gamma dep the graph walk cannot see.
-            if gamma_label and gamma_label not in deps:
-                deps = deps + [gamma_label]
+            # and the cleaning subtracts gamma + the fitted detrend model +
+            # the other orbits' signal (all applied in numpy) -- hence
+            # dynamic_data below and the explicit deps the graph walk cannot
+            # see.
+            deps = deps + [lbl for lbl in numpy_deps if lbl not in deps]
             for col, o_idx in enumerate(omap):
                 prep = self._phased_arrays(system, point, col, o_idx)
                 P_ref, tc_ref = prep["P_ref"], prep["tc_ref"]
@@ -839,7 +835,7 @@ class RVInstrument(Instrument):
                 ]
                 for i in range(self.n_elements):
                     mask = self.inst_map == i
-                    g = self._instrument_gamma(point, i)
+                    g = self._point_value(point, self.gamma, i)
                     cleaned = (
                         self.rv[mask] - g - prep["other_signals"][mask]
                     ) * factor

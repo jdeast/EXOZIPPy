@@ -1874,6 +1874,84 @@ class Instrument(Component):
     # limb-darkening op JAX-differentiable).
 
     # ------------------------------------------------------------------
+    # Shared plotting helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _point_value(point, param, index=None):
+        """Value of ``param`` from ``point``, else from its own ``initval``.
+
+        The single "value from the point, else the Parameter's start" rule
+        every plot path needs, in internal units.  ``index`` picks one
+        element (falling back to element 0 when the vector is shorter, as a
+        broadcast scalar parameter is); ``index=None`` returns the whole
+        1-D array.  ``param`` may belong to ANY component -- the phased
+        panels read ``system.orbit.tc`` and ``system.orbit.period`` through
+        it.
+
+        A ``point.get(label, <literal>)`` is the bug this replaces, in two
+        flavours, both caused by the same mechanism: a parameter whose every
+        element is pinned (``sigma: 0``) never becomes a pm.Deterministic,
+        so it is in neither ``model.deterministics`` nor the posterior and
+        is simply ABSENT from the point.
+
+        * With a literal default the plot silently substituted a wrong
+          number -- ZERO for a pinned RV ``gamma`` (every point of that
+          instrument drawn a whole offset away from the model the
+          likelihood fit) or UNITY for a pinned transit ``baseline`` (whose
+          seed is the light curve's own median flux, so an un-normalized
+          light curve was drawn off by the entire flux scale).
+        * With NO default it crashed: ``float(np.atleast_1d(None)[i])``.
+          Pinning ``orbit.tc`` to a literature ephemeris -- an ordinary RV
+          config -- killed the fit inside run.py's start plots BEFORE
+          sampling; transit's try/except merely swallowed it and dropped
+          every phased panel.
+        """
+        vals = point.get(param.label)
+        if vals is None:
+            vals = param.initval
+        vals = np.atleast_1d(vals).astype(np.float64)
+        if index is None:
+            return vals
+        return float(vals[index] if index < vals.size else vals[0])
+
+    def detrend_at_data(self, point):
+        """Fitted detrend model at every observation, in internal units.
+
+        ``(n_total_obs,)``, all zeros when this instrument declared no
+        detrend columns or when there is no point.  The plotted DATA are
+        corrected by this (EXOFASTv2's convention): the trend is a
+        per-observation quantity built from the file's own extra columns,
+        so a pretty-grid model curve cannot carry it, and without the
+        correction every panel of a detrending fit showed a systematic
+        data-vs-model mismatch equal to the whole fitted trend, reading as
+        unmodeled residual structure.
+
+        The value is in the same additive space as the likelihood's own
+        ``pt.dot(detrend, detrend_coeffs)`` term, i.e. the WHITENED design
+        matrix times the sampled coefficients (see ``_build_block_detrend``)
+        -- so it is exactly the term the model added, with no un-whitening
+        needed here.
+        """
+        if point is None or getattr(self, "total_detrend_cols", 0) == 0:
+            return np.zeros(self.n_total_obs)
+        coeffs = self._point_value(point, self.detrend_coeffs)
+        return np.asarray(self.detrend_matrix @ coeffs, dtype=float)
+
+    def detrend_dep_labels(self):
+        """``param_deps`` entry for the detrend coefficients, or ``[]``.
+
+        ``detrend_at_data`` is applied to the plotted data in NUMPY, not
+        through a symbolic model node, so ``_model_trace_param_deps``'s
+        graph walk cannot see it and a GUI slider on the coefficients would
+        never refresh the charts.  Same reasoning as the explicit gamma /
+        baseline deps next to it.
+        """
+        if getattr(self, "total_detrend_cols", 0) == 0:
+            return []
+        label = getattr(getattr(self, "detrend_coeffs", None), "label", None)
+        return [label] if label else []
+
+    # ------------------------------------------------------------------
     # Shared noise machinery
     # ------------------------------------------------------------------
     @staticmethod

@@ -26,6 +26,40 @@ Time system: default is BJD_TDB in, untouched. `time_scale:` (utc/tai/tt/tdb/tcb
 
 Optional detrending against extra data columns (columns past the error column, one coefficient per column per instrument, block-diagonal so coefficients never mix) is supported by `rvinstrument`, `transit` and `mulensinstrument` (magnitude-space coefficients there, applied multiplicatively to the flux model as `10**(-0.4 * X.c)` -- the same model as the old additive magnitude detrending, and the right form for a throughput/extinction trend). `astrometryinstrument` has none — its 2-observable modes would need per-channel coefficients.
 
+## Plotting a fitted model: the point, and the per-observation terms
+
+`Instrument._point_value(point, param, index=None)` is the ONE "value from the point, else
+the Parameter's own `initval`" rule, in internal units, for any component's Parameter --
+the phased panels read `system.orbit.tc` and `system.orbit.period` through it. It replaced
+three hand-written copies (`_instrument_gamma`, `_baseline_for`, and astrometry's inner
+`get`). Everything it protects against has one cause: a parameter whose every element is
+pinned (`sigma: 0`) never becomes a `pm.Deterministic`, so it is in neither
+`model.deterministics` nor the posterior and is simply ABSENT from the point.
+
+- A `point.get(label, <literal>)` then silently substitutes a wrong number -- ZERO for a
+  pinned RV `gamma` (the whole instrument drawn one offset away from the model the
+  likelihood fit) or UNITY for a pinned transit `baseline`, whose seed is the light
+  curve's own median flux, so an un-normalized light curve was drawn off by the entire
+  flux scale.
+- A `point.get(label)` with NO default crashes on `float(np.atleast_1d(None)[i])`. Review
+  2.5.1 reported this for a pinned `orbit.tc`; **re-verified 2026-08-18, it does not
+  reproduce** -- `orbit.tc` and `orbit.period` are declared `force_node: True`, which makes
+  them Deterministics even when every element is pinned. The no-fallback read is gone
+  anyway, because the shared helper makes it free.
+
+**The fitted detrend model is subtracted from the plotted DATA, never added to the model
+curve** (`Instrument.detrend_at_data(point)` -> `(n_total_obs,)`, zeros without detrend
+columns). That is EXOFASTv2's convention and it is forced: the trend is built from the
+file's own extra columns per observation, and a model curve on a pretty time grid has no
+column values to evaluate it at. Until 2026-08 neither happened -- `rv_model`/`lc_model`
+included `pt.dot(X, c)` but every plotted node excluded it and the data were never
+corrected -- so any fit with active detrend columns showed a systematic data-vs-model
+mismatch equal to the whole fitted trend in every panel, reading as unmodeled residual
+structure. The correction is applied in NUMPY, so the graph walk that populates
+`PlotSpec.param_deps` cannot see it: `Instrument.detrend_dep_labels()` supplies the
+coefficient label explicitly, exactly as the `gamma` / `baseline` deps next to it do, and
+transit's unphased spec sets `dynamic_data` when (and only when) it has detrend columns.
+
 ## The signed jitter
 
 **The reported jitter is SIGNED and may be negative** (`components/instrument.py:calc_jitter`, the one implementation shared by rv/transit/astrometry through their `jitter:` `func_name`). `jitter = sign(v) * sqrt(|v|)`, so it stays in the data's units, is monotonic and invertible in the sampled `jitter_variance`, and has a finite gradient everywhere. `Instrument._jitter_floor` already lets `jitter_variance` go negative down to `-0.95 * min(err*factor)**2` -- a validity limit, past which `total_sigma`'s own `sqrt(err**2 + jitter_variance)` is what goes imaginary, not the report's. A negative jitter variance is a **result**: it says the quoted error bars are too large. Clamping the report to zero there (what a `pt.switch` did until 2026-08) cost a Lucy-Sweeney-style upward bias on a marginally detected jitter -- exactly what forcing `e >= 0` does to eccentricity -- and left a zero-gradient plateau across the whole negative half-axis for any user prior or link on `jitter` to push against.

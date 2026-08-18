@@ -1389,29 +1389,6 @@ class Transit(Instrument):
     # plot_data() path both go through these helpers, so the two paths
     # always draw the exact same arrays (see plotspec.PlotSpec).
     # ------------------------------------------------------------------
-    def _baseline_for(self, point, i):
-        """Baseline flux for instrument i, in internal units.
-
-        The value comes from the point when it is there, else from the
-        baseline Parameter's own initval -- the same fallback
-        _point_to_plot_params uses for every other plotted parameter.
-
-        A ``point.get(label, 1.0)`` here silently substituted UNITY for any
-        parameter absent from the draws, and pinned (``sigma: 0``)
-        parameters are always absent (an all-fixed vector never becomes a
-        pm.Deterministic, so it is in neither model.deterministics nor the
-        posterior).  Unity is not a neutral default: load_data seeds each
-        baseline with the light curve's own median flux, so on an
-        un-normalized light curve (raw counts) a pinned baseline plotted
-        the model curve and the phased panel's cleaned flux off by the
-        entire flux scale.
-        """
-        vals = point.get(self.baseline.label)
-        if vals is None:
-            vals = self.baseline.initval
-        base_vals = np.atleast_1d(vals)
-        return float(base_vals[i] if i < len(base_vals) else base_vals[0])
-
     def _eval_unphased_lc(self, system, point, i):
         """Full model light curve for instrument i: baseline + transit + GP.
 
@@ -1431,7 +1408,8 @@ class Transit(Instrument):
         param_values = self._point_to_plot_params(point, system)
         y_decrement = self._smeared_full_lc(t_pretty, i, *param_values)
         y_gp = self.gp_mean_on_grid(system, point, i, t_pretty)
-        return t_pretty, self._baseline_for(point, i) + y_decrement + y_gp
+        baseline = self._point_value(point, self.baseline, i)
+        return t_pretty, baseline + y_decrement + y_gp
 
     def _phased_lc_arrays(self, system, point, p_idx, i):
         """
@@ -1442,10 +1420,8 @@ class Transit(Instrument):
         matches the exposure-smeared model as well.
         """
         planets = system.planet
-        P_ref = float(
-            np.atleast_1d(point.get(system.orbit.period.label))[p_idx]
-        )
-        tc_ref = float(np.atleast_1d(point.get(system.orbit.tc.label))[p_idx])
+        P_ref = self._point_value(point, system.orbit.period, p_idx)
+        tc_ref = self._point_value(point, system.orbit.tc, p_idx)
 
         t_model = np.linspace(
             tc_ref - 0.5 * P_ref, tc_ref + 0.5 * P_ref, 1000
@@ -1466,12 +1442,20 @@ class Transit(Instrument):
         other_mask[p_idx] = False
         other_decrements = np.sum(data_lc_matrix[:, other_mask], axis=1)
 
-        baseline = self._baseline_for(point, i)
+        baseline = self._point_value(point, self.baseline, i)
         # Remove the correlated component along with the other planets', so
         # the phased panel is not smeared by it. Zero without a gp: key.
         gp_signal = self.gp_mean_at_data(system, point)[mask]
+        # ... and the fitted detrend model, which build_likelihood adds per
+        # observation and no pretty-grid curve can carry.  Zero without
+        # detrend columns.  See Instrument.detrend_at_data.
+        detrend_signal = self.detrend_at_data(point)[mask]
         cleaned_flux = (
-            self.flux[mask] - baseline - other_decrements - gp_signal
+            self.flux[mask]
+            - baseline
+            - other_decrements
+            - gp_signal
+            - detrend_signal
         )
         data_phases = ((self.time[mask] - tc_ref) / P_ref + 0.5) % 1.0 - 0.5
 
@@ -1511,20 +1495,29 @@ class Transit(Instrument):
             getattr(self, "_lc_matrix_node", None), system
         )
 
-        # The baseline enters both panels in numpy (_baseline_for), not
-        # through the symbolic nodes, so the graph walk cannot see it --
-        # without this dep a baseline slider would never refresh these
+        # The baseline and the fitted detrend model enter the panels in
+        # numpy (_point_value / detrend_at_data), not through the symbolic
+        # nodes, so the graph walk cannot see them -- without these deps a
+        # baseline or detrend-coefficient slider would never refresh these
         # charts in the GUI.
         baseline_label = getattr(
             getattr(self, "baseline", None), "label", None
         )
-        if baseline_label:
-            if baseline_label not in full_deps:
-                full_deps = full_deps + [baseline_label]
-            if baseline_label not in matrix_deps:
-                matrix_deps = matrix_deps + [baseline_label]
+        numpy_deps = ([baseline_label] if baseline_label else []) + (
+            self.detrend_dep_labels()
+        )
+        full_deps = full_deps + [
+            lbl for lbl in numpy_deps if lbl not in full_deps
+        ]
+        matrix_deps = matrix_deps + [
+            lbl for lbl in numpy_deps if lbl not in matrix_deps
+        ]
 
         # ---- Unphased: flux vs time, per instrument -------------------
+        # The fitted trend is per observation, so it comes off the DATA
+        # rather than going onto the model curve; zeros without detrend
+        # columns (Instrument.detrend_at_data).
+        detrend = self.detrend_at_data(point)
         for i in range(self.n_elements):
             mask = self.inst_map == i
             traces = []
@@ -1553,7 +1546,7 @@ class Transit(Instrument):
                     role="data",
                     kind="scatter",
                     x=self.time[mask],
-                    y=self.flux[mask],
+                    y=self.flux[mask] - detrend[mask],
                     yerr=self.err[mask],
                     # Black-dot default (the historical PDF look); a user
                     # plot: color/marker still wins via _data_trace_style.
@@ -1581,6 +1574,10 @@ class Transit(Instrument):
                         "instrument": self.names[i],
                         "file_tag": f"LC_unphased_{self.names[i]}",
                         "figsize": (12, 5),
+                        # The unphased DATA are detrend-subtracted, so they
+                        # move with the point whenever this instrument has
+                        # detrend columns (and only then).
+                        "dynamic_data": self.total_detrend_cols > 0,
                         "caption": (
                             "Transit photometry from "
                             + latex_escape(self.names[i])

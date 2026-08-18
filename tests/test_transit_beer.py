@@ -582,7 +582,7 @@ def test_ellipsoidal_survives_secondary_eclipse_thermal_and_reflect_dont(
     """
     system, model, point, (t_primary, t_secondary, t_far) = beer_system
     mu = _likelihood_mu(system, model, point)
-    baseline = system.transit._baseline_for(point, 0)
+    baseline = system.transit._point_value(point, system.transit.baseline, 0)
     times = system.transit.time
 
     mu_far = mu[_nearest_index(times, t_far)]
@@ -707,7 +707,7 @@ def test_beam_diluted_when_sed_dilution_active(tmp_path_factory):
     with model:
         point = system.get_internal_point(model, system.get_raw_start(model))
     mu = _likelihood_mu(system, model, point)
-    baseline = system.transit._baseline_for(point, 0)
+    baseline = system.transit._point_value(point, system.transit.baseline, 0)
     times = system.transit.time
     idx = _nearest_index(times, t_quad)
     t_actual = times[idx]
@@ -796,7 +796,7 @@ def test_ellipsoidal_diluted_when_sed_dilution_active(tmp_path_factory):
     with model:
         point = system.get_internal_point(model, system.get_raw_start(model))
     mu = _likelihood_mu(system, model, point)
-    baseline = system.transit._baseline_for(point, 0)
+    baseline = system.transit._point_value(point, system.transit.baseline, 0)
     times = system.transit.time
     idx = _nearest_index(times, t_conj)
     t_actual = times[idx]
