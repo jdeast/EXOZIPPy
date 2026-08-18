@@ -3092,14 +3092,19 @@ class ConfigManager:
 
         start_time = time.time()
 
-        def handler(signum, frame):
-            raise TimeoutError("Symbolic solver timed out!")
-
-        _arm_alarm(2, handler)  # 2-second hard limit (POSIX only)
-
         solutions = []
         used_nsolve = False
 
+        # _sympy_time_limit, not a hand-armed alarm: this block used to install
+        # its own SIGALRM handler and never restore the previous one, so after
+        # the first symbolic solve the process handler was permanently this
+        # local TimeoutError-raiser -- any later code arming SIGALRM (the
+        # nsolve guard below is the near neighbour, but nothing stops a
+        # component or a downstream library doing it) got "Symbolic solver
+        # timed out!" out of a completely unrelated frame.  The context manager
+        # restores the prior handler in its finally, and carries the
+        # re-arm-before-raise hardening the hand-rolled copy lacked (see its
+        # docstring for the JAX gc-callback case that motivated it).
         try:
             target_sym = next(
                 s for s in eq.free_symbols if str(s) == target_str
@@ -3112,26 +3117,23 @@ class ConfigManager:
             # the code already does its own root validation. simplify only
             # changes the expression's form (identical numeric value); check
             # only pre-filters roots the numeric bounds/scoring pass re-filters.
-            solutions = sp.solve(
-                eq, target_sym, dict=False, simplify=False, check=False
-            )
+            with _sympy_time_limit(2):  # 2-second hard limit (POSIX only)
+                solutions = sp.solve(
+                    eq, target_sym, dict=False, simplify=False, check=False
+                )
             elapsed = time.time() - start_time
             logger.debug(
                 f"sp.solve finished in {elapsed:.4f}s for {target_str}"
             )
-        except TimeoutError:
+        except SymbolicTimeout:
             logger.debug(
-                f"sp.solve timed out for {target_str} — blacklisting."
+                f"sp.solve timed out for {target_str} -- blacklisting."
             )
             self.symbolic_blacklist.add(target_str)
-            _disarm_alarm()
             return False
         except Exception as e:
             logger.debug(f"sp.solve exception for {target_str}: {e}")
-            _disarm_alarm()
             return False
-        finally:
-            _disarm_alarm()
 
         # 3. Fallback to nsolve if analytical failed
         if not solutions:

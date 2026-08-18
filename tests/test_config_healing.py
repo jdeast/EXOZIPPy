@@ -102,3 +102,45 @@ def test_symbolic_time_limit_still_arms_where_sigalrm_exists():
     with pytest.raises(cfg.SymbolicTimeout):
         with cfg._sympy_time_limit(1):
             time.sleep(5)
+
+
+def test_a_symbolic_solve_restores_the_previous_sigalrm_handler():
+    """
+    Given a process-wide SIGALRM handler installed by unrelated code,
+    When a relaxation solve runs (which arms its own 2-second symbolic
+      timeout),
+    Then the previous handler is back in place afterwards.
+
+    _execute_solve used to arm SIGALRM by hand and drop the handler
+    _arm_alarm returned, so from the first symbolic solve onwards the process
+    handler WAS its local TimeoutError-raiser -- and any later code arming
+    SIGALRM got "Symbolic solver timed out!" raised at it out of a frame that
+    has nothing to do with sympy.  It now uses the _sympy_time_limit context
+    manager, which restores in its finally.
+    """
+    # ARRANGE
+    import signal
+
+    if not hasattr(signal, "SIGALRM"):  # pragma: no cover - POSIX only
+        pytest.skip("no SIGALRM on this platform")
+
+    def sentinel(signum, frame):  # pragma: no cover - never fires
+        pass
+
+    config = {"star": [{"name": "A"}]}
+    user_params = {
+        "star.A.mass": {"initval": 1.0},
+        "star.A.radius": {"initval": 1.0},
+    }
+    previous = signal.signal(signal.SIGALRM, sentinel)
+
+    # ACT
+    try:
+        cm = ConfigManager(user_params, system_config=config)
+        cm.finalize_user_params()
+        after = signal.getsignal(signal.SIGALRM)
+    finally:
+        signal.signal(signal.SIGALRM, previous)
+
+    # ASSERT
+    assert after is sentinel
