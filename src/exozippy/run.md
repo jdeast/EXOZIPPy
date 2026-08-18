@@ -46,3 +46,20 @@ The function is `write_param_file`, not `mkparam` -- the module keeps the tool's
 
 The stamp also records the code that produced the draws -- `exozippy_version` plus, when running from a checkout, `exozippy_git_commit` / `exozippy_git_describe` / `exozippy_git_dirty` (dirty = uncommitted *tracked* changes; untracked example data and notes are ignored or every run would flag) -- and a `StaleTraceError` quotes them and prints the `git worktree add <commit>` + `poetry install` lines that recreate that code. This is **diagnostic only: nothing ever compares versions**. A version or commit difference never raises, so newer code with a structurally unchanged model still reuses its trace; only the structural hash decides staleness. Traces stamped from an installed wheel say the source cannot be checked out; traces predating the metadata say so plainly rather than printing a git command with a missing commit. Tests: `tests/test_trace_staleness.py`.
 
+## A sampler key only one method consumes must say so (review 2.4.2)
+
+`store_hot_chains` is forwarded only to `ptde_async`; `rung_thin_factor` and
+`rung_thin_start` only to `ptde`. All three are in `KNOWN_SAMPLER_KEYS`, so
+`warn_unknown_sampler_keys` stays silent, and the branch that would read them
+is simply never taken -- setting `store_hot_chains` under `method: ptde` meant
+hot-chain mode discovery never ran and nothing said so.
+
+`METHOD_ONLY_SAMPLER_KEYS` maps each such key to the methods that DO consume
+it, and `warn_method_only_sampler_keys` reports the mismatch. Two deliberate
+properties: it warns only for keys the user EXPLICITLY set (all three have
+defaults, and warning about a default nobody wrote would fire every run and
+teach people to ignore the log), and it is called AFTER `method` is resolved
+and lowercased -- not beside `warn_unknown_sampler_keys`, which runs early
+enough that `method` may still be None because auto-selection has not happened.
+Add a key to the table in the same commit that makes it method-specific.
+Tests: `tests/test_method_only_sampler_keys.py`.

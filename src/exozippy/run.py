@@ -172,6 +172,50 @@ def warn_maxtime_unsupported(method, maxtime):
     return True
 
 
+# Sampler keys that only ONE method consumes.  A key here is silently inert
+# under any other method: it is in KNOWN_SAMPLER_KEYS, so warn_unknown_sampler_keys
+# says nothing, and the branch that would read it is never taken.
+#
+# That is the whole defect (review 2.4.2).  store_hot_chains is forwarded only
+# to ptde_async, so under method: ptde the hot-chain mode discovery simply
+# never runs and the user is told nothing; rung_thin_factor / rung_thin_start
+# are the same thing mirrored -- ptde-only, silently ignored by ptde_async.
+#
+# Values are the methods that DO consume the key.
+METHOD_ONLY_SAMPLER_KEYS = {
+    "store_hot_chains": ("ptde_async",),
+    "rung_thin_factor": ("ptde",),
+    "rung_thin_start": ("ptde",),
+}
+
+
+def warn_method_only_sampler_keys(sampler_cfg, method):
+    """Warn about keys the CHOSEN method does not consume.
+
+    Only keys the user EXPLICITLY set are reported -- these all have defaults,
+    and warning about a default nobody wrote would fire on every run and teach
+    people to ignore the log.
+
+    Must be called AFTER `method` is resolved and lowercased.  It deliberately
+    does not live beside warn_unknown_sampler_keys, which runs early enough
+    that `method` may still be None (auto-selection has not happened yet).
+
+    Returns the sorted list of (key, method) pairs warned about, so the check
+    is exercisable without running a fit -- same shape as its two siblings.
+    """
+    warned = []
+    for key, consumers in sorted(METHOD_ONLY_SAMPLER_KEYS.items()):
+        if key not in sampler_cfg or method in consumers:
+            continue
+        warned.append((key, method))
+        logger.warning(
+            f"{method}: sampler key '{key}' is IGNORED -- only "
+            f"{' / '.join(consumers)} consume(s) it. Remove it, or switch "
+            f"method to one of: {', '.join(consumers)}."
+        )
+    return warned
+
+
 def warn_unknown_sampler_keys(sampler_cfg):
     """Warn about `sampler:` keys this module does not consume.
 
@@ -356,6 +400,7 @@ def _run_fit(config, gui, user_params=None):
             f"Set 'method: {rec_str}' in the sampler block."
         )
     method = method.lower()
+    warn_method_only_sampler_keys(sampler_cfg, method)
 
     # First modeling-draft checkpoint: the components declared their prose
     # during stages 1-7 and the sampler is now resolved, so the citation
@@ -588,7 +633,8 @@ def _run_fit(config, gui, user_params=None):
                     progress_callback=gui.progress_callback,
                 )
             elif method == "ptde_async":
-                # The non-blocking PTDE dispatch loop (hpc_optimization.txt
+                # The non-blocking PTDE dispatch loop (see samplers.md; the
+                # hpc_optimization.txt prompt it used to cite was pruned
                 # PROMPT 13) -- the recommended default for Op-based models;
                 # see exozippy/samplers/ptde_async.py's module docstring for
                 # the stale-DE-partner caveat and how swaps stay rigorous.
