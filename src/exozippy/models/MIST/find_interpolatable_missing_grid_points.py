@@ -20,12 +20,16 @@ values are -0.2, 0.0, 0.2, 0.4, 0.6).
 Usage:
     poetry run python src/exozippy/models/MIST/MISTv2.5/find_interpolatable_missing_grid_points.py
 """
-import bisect
-import pandas as pd
-from exozippy.models.MIST.generate_MIST_EEP_Tables import _generate_alpha_vvcrit_filename_parts
-import numpy as np
 
+import bisect
 from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from exozippy.models.MIST.generate_MIST_EEP_Tables import (
+    _generate_alpha_vvcrit_filename_parts,
+)
 
 try:
     current_dir = Path(__file__).parent
@@ -34,24 +38,38 @@ except NameError:
 
 # define where things are/should be saved by default
 
-EEP_PROCESSED_TRACKS_PATH_DEFAULT = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/processed_tracks/")
+EEP_PROCESSED_TRACKS_PATH_DEFAULT = Path(
+    "/Volumes/Data/EEP_Tracks/MISTv2.5/processed_tracks/"
+)
 EEP_GRID_PATH_DEFAULT = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/grids/")
-MISSING_GRID_POINTS_PATH_DEFAULT = current_dir / "MISTv2.5"/ "EEPs" / "MissingGridPoints" 
+MISSING_GRID_POINTS_PATH_DEFAULT = (
+    current_dir / "MISTv2.5" / "EEPs" / "MissingGridPoints"
+)
 
 
 # -------------------------------------------------------------------
 # Find Missing Grid Points and Generate CSV Containing Points
 # -------------------------------------------------------------------
 
-def _find_missing_grid_points(alpha, vvcrit=0.0,
-                              grid_path=EEP_GRID_PATH_DEFAULT,
-                              save=True,
-                              save_path=MISSING_GRID_POINTS_PATH_DEFAULT):
 
-    filename_alpha_part, filename_vvcrit_part = _generate_alpha_vvcrit_filename_parts(alpha, vvcrit)
+def _find_missing_grid_points(
+    alpha,
+    vvcrit=0.0,
+    grid_path=EEP_GRID_PATH_DEFAULT,
+    save=True,
+    save_path=MISSING_GRID_POINTS_PATH_DEFAULT,
+):
+
+    filename_alpha_part, filename_vvcrit_part = (
+        _generate_alpha_vvcrit_filename_parts(alpha, vvcrit)
+    )
     filename = f"{filename_alpha_part}_{filename_vvcrit_part}.grid.parquet"
 
-    alpha_vvcrit_df = pd.read_parquet(grid_path / filename, columns=["mass", "initfeh", "EEP"], engine="pyarrow")
+    alpha_vvcrit_df = pd.read_parquet(
+        grid_path / filename,
+        columns=["mass", "initfeh", "EEP"],
+        engine="pyarrow",
+    )
 
     mass_vals = np.sort(alpha_vvcrit_df["mass"].unique())
     feh_vals = np.sort(alpha_vvcrit_df["initfeh"].unique())
@@ -68,14 +86,18 @@ def _find_missing_grid_points(alpha, vvcrit=0.0,
 
     missing_index = expected_index.difference(present_index)
     missing_noEEP_df = missing_index.to_frame(index=False)
-    print(f"Alpha {alpha} Vvcrit {vvcrit}: Missing combinations: {len(missing_noEEP_df)}")
+    print(
+        f"Alpha {alpha} Vvcrit {vvcrit}: Missing combinations: {len(missing_noEEP_df)}"
+    )
 
     # sort by initfeh and then by mass
     missing_noEEP_df = missing_noEEP_df.sort_values(by=["initfeh", "mass"])
-    
+
     if save:
         missing_points_filename = f"missing_grid_points_{filename_alpha_part}_{filename_vvcrit_part}.csv"
-        missing_noEEP_df[["initfeh", "mass"]].to_csv(save_path / missing_points_filename, index=False)
+        missing_noEEP_df[["initfeh", "mass"]].to_csv(
+            save_path / missing_points_filename, index=False
+        )
 
     return missing_noEEP_df
 
@@ -85,22 +107,40 @@ def _find_missing_grid_points(alpha, vvcrit=0.0,
 # -------------------------------------------------------------------
 
 FEH_CODES = [
-    "m400", "m350", "m300", "m275", "m250", "m225", "m200", "m175",
-    "m150", "m125", "m100", "m075", "m050", "m025", "p000", "p025", "p050",
+    "m400",
+    "m350",
+    "m300",
+    "m275",
+    "m250",
+    "m225",
+    "m200",
+    "m175",
+    "m150",
+    "m125",
+    "m100",
+    "m075",
+    "m050",
+    "m025",
+    "p000",
+    "p025",
+    "p050",
 ]
-ALPHA_CODES = {"-0.2": "m2", 
-               "0.0": "p0", 
-               "0.2": "p2",
-               "0.4": "p4",
-               "0.6": "p6"}
+ALPHA_CODES = {
+    "-0.2": "m2",
+    "0.0": "p0",
+    "0.2": "p2",
+    "0.4": "p4",
+    "0.6": "p6",
+}
 
 ALPHA_VALS = [float(k) for k in ALPHA_CODES.keys()]
+
 
 # find ALPHA_CODES corresponding to ALPHA_VALS surrounding an alpha value
 def _get_adjacent_alpha_codes(alpha_val):
     # Find the indices of the two ALPHA_VALS surrounding the given alpha_val
     idx = bisect.bisect_left(ALPHA_VALS, alpha_val)
-    
+
     # Get the adjacent alpha codes
     low_code, low_key = None, None
     code, code_key = None, None
@@ -125,20 +165,27 @@ def _feh_code_to_value(code):
 FEH_VALUES = sorted(_feh_code_to_value(c) for c in FEH_CODES)
 
 
-def load_existing_points(alpha, vvcrit=0.0, processed_path=EEP_PROCESSED_TRACKS_PATH_DEFAULT):
+def load_existing_points(
+    alpha, vvcrit=0.0, processed_path=EEP_PROCESSED_TRACKS_PATH_DEFAULT
+):
     """Return {alpha_str: set of (initfeh, mass)} for alpha in adjacent ALPHA_CODES at
     a specific vvcrit value, and the global sorted list of unique mass values seen anywhere."""
 
     _, alpha_adj_keys = _get_adjacent_alpha_codes(alpha)
 
-    ALPHA_ADJ_CODES_DICT = {k: ALPHA_CODES[k] for k in alpha_adj_keys if k in ALPHA_CODES}
+    ALPHA_ADJ_CODES_DICT = {
+        k: ALPHA_CODES[k] for k in alpha_adj_keys if k in ALPHA_CODES
+    }
 
     points = {a: set() for a in ALPHA_ADJ_CODES_DICT}
     all_masses = set()
 
     for feh_code in FEH_CODES:
         for alpha_str, alpha_code in ALPHA_ADJ_CODES_DICT.items():
-            fname = processed_path / f"feh_{feh_code}_afe_{alpha_code}_vvcrit{vvcrit}.parquet"
+            fname = (
+                processed_path
+                / f"feh_{feh_code}_afe_{alpha_code}_vvcrit{vvcrit}.parquet"
+            )
             try:
                 df = pd.read_parquet(fname, columns=["initfeh", "mass"])
                 pairs = set(zip(df["initfeh"].round(6), df["mass"].round(6)))
@@ -169,13 +216,16 @@ def find_interpolatable_points(alpha, missing_df, points, mass_grid):
         initfeh, mass = round(row["initfeh"], 6), round(row["mass"], 6)
 
         result = {
-            "initfeh": initfeh, "mass": mass,
-            "interpolatable": False, "method": "none",
-            "neighbor_1": None, "neighbor_2": None,
+            "initfeh": initfeh,
+            "mass": mass,
+            "interpolatable": False,
+            "method": "none",
+            "neighbor_1": None,
+            "neighbor_2": None,
         }
 
         # --- 1. alpha neighbors: at same (initfeh, mass) ---
-        # first check if alpha_val is on the edge 
+        # first check if alpha_val is on the edge
         # because it cant be interpolated in alpha in that case
         alpha_adj_codes, alpha_adj_keys = _get_adjacent_alpha_codes(alpha)
 
@@ -190,8 +240,10 @@ def find_interpolatable_points(alpha, missing_df, points, mass_grid):
             hi_exists = (initfeh, mass) in points[alpha_high_key]
             if lo_exists and hi_exists:
                 result.update(
-                    interpolatable=True, method="alpha",
-                    neighbor_1=f"alpha={alpha_low_key}", neighbor_2=f"alpha={alpha_high_key}",
+                    interpolatable=True,
+                    method="alpha",
+                    neighbor_1=f"alpha={alpha_low_key}",
+                    neighbor_2=f"alpha={alpha_high_key}",
                 )
                 results.append(result)
                 continue
@@ -203,8 +255,10 @@ def find_interpolatable_points(alpha, missing_df, points, mass_grid):
             hi_exists = (feh_next, mass) in points[alpha_adj_keys[1]]
             if lo_exists and hi_exists:
                 result.update(
-                    interpolatable=True, method="initfeh",
-                    neighbor_1=f"initfeh={feh_prev}", neighbor_2=f"initfeh={feh_next}",
+                    interpolatable=True,
+                    method="initfeh",
+                    neighbor_1=f"initfeh={feh_prev}",
+                    neighbor_2=f"initfeh={feh_next}",
                 )
                 results.append(result)
                 continue
@@ -216,8 +270,10 @@ def find_interpolatable_points(alpha, missing_df, points, mass_grid):
             hi_exists = (initfeh, mass_next) in points[alpha_adj_keys[1]]
             if lo_exists and hi_exists:
                 result.update(
-                    interpolatable=True, method="mass",
-                    neighbor_1=f"mass={mass_prev}", neighbor_2=f"mass={mass_next}",
+                    interpolatable=True,
+                    method="mass",
+                    neighbor_1=f"mass={mass_prev}",
+                    neighbor_2=f"mass={mass_next}",
                 )
                 results.append(result)
                 continue
@@ -231,9 +287,13 @@ def find_interpolatable_points(alpha, missing_df, points, mass_grid):
 # Generate Files for Missing Grid Points
 # -------------------------------------------------------------------
 
-EEP_PROCESSED_TRACKS_PATH = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/processed_tracks/")
+EEP_PROCESSED_TRACKS_PATH = Path(
+    "/Volumes/Data/EEP_Tracks/MISTv2.5/processed_tracks/"
+)
 EEP_GRID_PATH = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/grids/")
-MISSING_GRID_POINTS_PATH = current_dir / "MISTv2.5" / "EEPs" / "MissingGridPoints" 
+MISSING_GRID_POINTS_PATH = (
+    current_dir / "MISTv2.5" / "EEPs" / "MissingGridPoints"
+)
 
 
 def main():
@@ -246,31 +306,47 @@ def main():
             print(f"Processing alpha {alpha} and vvcrit {vvcrit}")
 
             # first see if we have already generated the missing grid points
-            filename_alpha_part, filename_vvcrit_part = _generate_alpha_vvcrit_filename_parts(alpha, vvcrit)
+            filename_alpha_part, filename_vvcrit_part = (
+                _generate_alpha_vvcrit_filename_parts(alpha, vvcrit)
+            )
             missing_filename = f"missing_grid_points_{filename_alpha_part}_{filename_vvcrit_part}.csv"
 
             if (MISSING_GRID_POINTS_PATH / missing_filename).exists():
-                missing_df = pd.read_csv(MISSING_GRID_POINTS_PATH / missing_filename)
+                missing_df = pd.read_csv(
+                    MISSING_GRID_POINTS_PATH / missing_filename
+                )
             else:
-                missing_df = _find_missing_grid_points(alpha, vvcrit=vvcrit,
-                                                        grid_path=EEP_GRID_PATH,
-                                                        save_path=MISSING_GRID_POINTS_PATH)
+                missing_df = _find_missing_grid_points(
+                    alpha,
+                    vvcrit=vvcrit,
+                    grid_path=EEP_GRID_PATH,
+                    save_path=MISSING_GRID_POINTS_PATH,
+                )
 
             missing_interp_filename = f"missing_grid_points_{filename_alpha_part}_{filename_vvcrit_part}_interpolatable.csv"
 
             if (MISSING_GRID_POINTS_PATH / missing_interp_filename).exists():
-                out_df = pd.read_csv(MISSING_GRID_POINTS_PATH / missing_interp_filename)
+                out_df = pd.read_csv(
+                    MISSING_GRID_POINTS_PATH / missing_interp_filename
+                )
             else:
                 points, mass_grid = load_existing_points(alpha, vvcrit=vvcrit)
-                out_df = find_interpolatable_points(alpha, missing_df, points, mass_grid)
-                out_df.to_csv(MISSING_GRID_POINTS_PATH / missing_interp_filename, index=False)
+                out_df = find_interpolatable_points(
+                    alpha, missing_df, points, mass_grid
+                )
+                out_df.to_csv(
+                    MISSING_GRID_POINTS_PATH / missing_interp_filename,
+                    index=False,
+                )
 
                 n_total = len(out_df)
                 n_interp = out_df["interpolatable"].sum()
                 print(f"Total missing points: {n_total}")
                 print(f"Interpolatable: {n_interp}")
                 print(out_df["method"].value_counts())
-                print(f"\nWrote results to {MISSING_GRID_POINTS_PATH / missing_interp_filename}")
+                print(
+                    f"\nWrote results to {MISSING_GRID_POINTS_PATH / missing_interp_filename}"
+                )
 
 
 if __name__ == "__main__":

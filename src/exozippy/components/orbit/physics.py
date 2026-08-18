@@ -375,6 +375,129 @@ def calc_tp_from_ecc(ecc, omega, tc, n):
     return tc - M0 / n
 
 
+# ----------------------------------------------------------------------
+# The TRANSIT CHORD parameterization (Eastman 2024, arXiv:2309.14410).
+#
+# The other half of the pair whose eccentricity half is the V_c/V_e block
+# above, and it exists for the same reason: a transit measures a DURATION,
+#
+#     T ~ (P / pi) (1 / a_R) * chord * (V_c/V_e) / sin i,
+#
+# so the chord -- the sky-projected path of the planet across the stellar
+# disc, `sqrt((1 + p)^2 - b^2)` in units of R_* -- and V_c/V_e are the two
+# coordinates the data actually constrain.  Sampling cos i instead spends the
+# sampler's effort on a direction the duration only reaches through
+# `b = kappa cos i`, whose scale factor kappa is itself a fitted quantity.
+#
+# The inversion is a square root rather than a quadratic, so unlike the
+# eccentricity half there is no second branch and no mixture: chord >= 0 and
+# b >= 0 give exactly one geometry, and the sign of cos i is not a root choice
+# at all but the i <-> 180 - i convention the orbit already carries (i180).
+# What IS shared is the shield discipline -- the radicand is floored inside
+# the sqrt so a NaN is unbuildable, while the UNFLOORED radicand drives the
+# soft bound in Orbit._add_chord_terms, because the floored one is flat over
+# the whole non-transiting region and a flat penalty has no gradient.
+# ----------------------------------------------------------------------
+
+
+def chord_kappa(ar, ecc, esinw):
+    """``b / cos i`` -- the scale factor of Winn 2010 eq 7.
+
+    Written from the same three quantities `calc_b` uses, and deliberately
+    not from `calc_b` itself: this is needed where cos i is what we are
+    solving FOR, so it cannot be reached through a function that consumes it.
+    The denominator is floored: `1 + e sin(omega)` vanishes only at e = 1 with
+    omega = -90 deg, which MAX_ECC already excludes, but a NaN there would
+    poison the gradient of every orbit sharing the vector.
+    """
+    return ar * (1.0 - pt.sqr(ecc)) / pt.maximum(1.0 + esinw, 1e-12)
+
+
+def chord_radicand(chord, p):
+    """``(1 + p)^2 - chord^2``, UNFLOORED: negative where no geometry exists.
+
+    `b^2` in disguise.  Kept unfloored for the same reason
+    `vcve_discriminant` is: this is what the soft bound must see, since the
+    floored version is flat across the entire forbidden region.  A chord
+    longer than the stellar diameter plus the planet is not a grazing transit
+    or a miss -- it is no transit at all, and the barrier's job is to say so
+    with a gradient rather than with a wall.
+    """
+    return pt.sqr(1.0 + p) - pt.sqr(chord)
+
+
+@register_physics
+def calc_cosi_from_chord(chord, p, ar, ecc, esinw, chord_sign):
+    """cos i from the sampled chord (the shielded inverse of `calc_chord`).
+
+    `b = sqrt((1 + p)^2 - chord^2)` and `cos i = b / kappa`.  The radicand is
+    floored at zero -- the HARD shield -- so a chord past `1 + p` gives b = 0
+    (a central transit) rather than NaN, and the soft bound supplies the
+    restoring force.  Flooring the RADICAND and not the result is the house
+    rule (calc_theta_E, calc_jitter, _vcve_quadratic): `sqrt'(0)` is infinite,
+    and `pt.maximum`'s zero gradient on the clamped side would turn that into
+    `0 * inf = NaN`.
+
+    `chord_sign` is +1 or -1, injected per orbit by `Orbit.add_parameter`.
+    The chord is even in cos i -- a transit at i and at 180 - i are the same
+    transit -- so the parameterization cannot recover the sign, and it is not
+    trying to: the sign is the orbit's existing `i180:` convention, which is
+    what `cosi`'s own `lower` bound encodes when cos i is sampled.  Making it
+    a context node rather than a sampled quantity is the point; it is a
+    discrete label, and sampling it would be exactly the piecewise-constant
+    coordinate the V_c/V_e half went out of its way to avoid.
+    """
+    b = pt.sqrt(pt.maximum(chord_radicand(chord, p), 0.0))
+    return chord_sign * b / pt.maximum(chord_kappa(ar, ecc, esinw), 1e-12)
+
+
+@register_physics
+def calc_chord_from_cosi(cosi, p, ar, ecc, esinw):
+    """The chord of the transit an orbit sampling cos i implies.
+
+    The forward direction, used to REPORT the chord (manifest role 3) on an
+    orbit that does not sample it, so both parameterizations produce the same
+    table rows and a params file survives flipping `fitchord`.  `|cos i|`
+    because the chord is even in it, and the radicand is floored for the same
+    reason as above: a non-transiting geometry (b > 1 + p) reports chord = 0,
+    which is what a reader should see, rather than NaN.
+    """
+    b = chord_kappa(ar, ecc, esinw) * pt.abs(cosi)
+    return pt.sqrt(pt.maximum(pt.sqr(1.0 + p) - pt.sqr(b), 0.0))
+
+
+def chord_log_jacobian(chord, p, ar, ecc, esinw):
+    """``log|d(chord)/d(cos i)|`` at fixed everything else.  SUBTRACT this.
+
+    Same contract, and the same trap, as `vcve_log_jacobian`: the function
+    returns the honest derivative because that is what a finite difference can
+    check, and the PRIOR correction is its negative.  The chord is the sampled
+    coordinate and is uniform over its bounds, so the density it induces on
+    the derived cos i is `p(cos i) = |d(chord)/d(cos i)|`; flattening that back
+    to the isotropic uniform-in-cos-i prior -- which is what sampling cos i
+    directly gives, and what this parameterization must not silently change --
+    means ADDING `log|d(cos i)/d(chord)|`, i.e. subtracting this.
+
+    With `chord^2 = (1 + p)^2 - kappa^2 cos^2 i`,
+
+        d(chord)/d(cos i) = -kappa^2 |cos i| / chord = -kappa b / chord,
+
+    so the log of its magnitude is `log kappa + log b - log chord`.  It
+    diverges as chord -> 0 (a grazing transit, where a wide range of cos i maps
+    into a vanishing range of chord) and vanishes at b -> 0 (a central
+    transit).  Both are floored; the divergence is integrable, exactly as the
+    V_c/V_e fold is, so the floor caps a real feature rather than hiding a
+    wrong one.
+    """
+    kappa = chord_kappa(ar, ecc, esinw)
+    b = pt.sqrt(pt.maximum(chord_radicand(chord, p), 0.0))
+    return (
+        pt.log(pt.maximum(kappa, 1e-12))
+        + pt.log(pt.maximum(b, 1e-12))
+        - pt.log(pt.maximum(chord, 1e-12))
+    )
+
+
 # ---- Rossiter-McLaughlin sqrt(vsini)cos/sin(lambda) reparameterization ----
 # Mirror of calc_ecc / calc_omega for the secosw/sesinw pair.
 @register_physics

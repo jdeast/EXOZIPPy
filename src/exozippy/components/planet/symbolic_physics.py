@@ -1,7 +1,7 @@
 import numpy as np
 import sympy as sp
 
-from ...constants import G
+from ...constants import KEPLER_CONST, G
 
 # ---------------------------------------------------------
 # 1. Define Symbols
@@ -25,6 +25,7 @@ log_q = sp.symbols("log_q", real=True)
 ecc = sp.symbols("ecc", real=True)
 
 K, sini, period = sp.symbols("K sini period", real=True)
+a, ar, m_total = sp.symbols("a ar m_total", real=True)
 
 # ---------------------------------------------------------
 # 2. Symbol Map
@@ -91,6 +92,38 @@ RELATIONS = [
         * sini
         / sp.sqrt(ONE - ecc**TWO),
     ),
+    # ---- The scaled semi-major axis, and what it unlocks -------------------
+    # These three say what planet/physics.py's calc_m_total, calc_arsun and
+    # calc_arstar compute, and they exist because NOTHING resolved a/R* before
+    # them.  That gap was worked around twice: Planet._initial_semimajor_axes
+    # recomputed the start by hand for the crossing barrier, and the transit
+    # chord (below) could not be bridged at all, since its inversion needs
+    # a/R*.  One definition in the engine replaces both workarounds.
+    #
+    # `a`, `ar` and `m_total` carry rank 5 in defaults.yaml so Condition B
+    # always rewrites THEM rather than the mass, radius or period they are
+    # derived from.  That is not a preference, it is the only correct
+    # direction: all three are derived Parameters whose runtime value is their
+    # expression, so a seed on one cannot survive into the model anyway -- and
+    # letting a stale `planet.ar` entry silently move a period would be the
+    # exact inversion the ranking system exists to prevent.
+    #
+    # They also make the engine FASTER, which is not the reason for them but is
+    # worth knowing: resolving a/R* and (through it) esinw early takes an
+    # iteration out of the relaxation loop.  Measured on examples/kelt17,
+    # prepare() went from 2.8 s to 2.0 s.
+    #
+    # The transit chord is deliberately NOT bridged by a relation here.  It
+    # would be the natural next line -- chord^2 + b^2 = (1 + p)^2, now that
+    # a/R* resolves -- and it costs 7.6 s of sympy per System (2.0 s -> 9.6 s
+    # on the same example), because the equation is quadratic in the chord and
+    # transcendental in omega, and the engine attempts every unresolved symbol
+    # in it.  orbit/symbolic_physics.py registers a ten-line solver instead,
+    # for the same reason planet.log_q has one: "so the inversion never reaches
+    # sp.solve".
+    sp.Eq(m_total, mass + star_mass),
+    sp.Eq(a**THREE, (KEPLER_CONST**THREE) * m_total * (period**TWO)),
+    sp.Eq(ar, a / star_radius),
 ]
 
 

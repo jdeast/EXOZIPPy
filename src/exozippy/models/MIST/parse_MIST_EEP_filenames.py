@@ -1,5 +1,5 @@
-from fileinput import filename
 import re
+from fileinput import filename
 from typing import Literal
 
 # -------------------------------------------------------------------
@@ -26,36 +26,45 @@ _MIST_VERSIONS_PARAMS = {
     "1.2": {
         "download_url": MIST_BASE_URL + "/data/tarballs_v1.2/",
         "data_dir": "",
-        "folder_regex": _MIST_EEP_NAME_RE
+        "folder_regex": _MIST_EEP_NAME_RE,
     },
     "2.5": {
         "download_url": MIST_BASE_URL + "/data/tarballs_v2.5/eeps/",
         "data_dir": "eeps/",
-        "folder_regex": _MIST_EEP_NAME_RE
+        "folder_regex": _MIST_EEP_NAME_RE,
     },
 }
 
-_MP_TO_SIGN = {
-    "p":  1.0,
-    "m": -1.0
-}
+_MP_TO_SIGN = {"p": 1.0, "m": -1.0}
 
 
-def _generate_MIST_EEP_url(initfeh: float, alpha: float, vvcrit: float, 
-                            version: Literal["1.2", "2.5"] = "2.5") -> str:
-    
+def _generate_MIST_EEP_url(
+    initfeh: float,
+    alpha: float,
+    vvcrit: float,
+    version: Literal["1.2", "2.5"] = "2.5",
+) -> str:
+
     # initialize filename
-    filename = f"MIST_v{version}_" # example: "MIST_v2.5_"
+    filename = f"MIST_v{version}_"  # example: "MIST_v2.5_"
 
     # add initfeh
     folder = "feh_"
     folder += "m" if initfeh < 0 else "p"
-    folder += f"{abs(initfeh)*100:03.0f}_" if version == "2.5" else f"{abs(initfeh):0.2f}_"
+    folder += (
+        f"{abs(initfeh) * 100:03.0f}_"
+        if version == "2.5"
+        else f"{abs(initfeh):0.2f}_"
+    )
 
     # add alpha
     folder += "afe_"
     folder += "m" if alpha < 0 else "p"
-    folder += f"{abs(alpha)*10:.0f}_" if version == "2.5" else f"{abs(alpha):0.1f}_"
+    folder += (
+        f"{abs(alpha) * 10:.0f}_"
+        if version == "2.5"
+        else f"{abs(alpha):0.1f}_"
+    )
 
     # add vvcrit
     folder += "vvcrit"
@@ -68,10 +77,12 @@ def _generate_MIST_EEP_url(initfeh: float, alpha: float, vvcrit: float,
     # construct full url for downloading data
     url = _MIST_VERSIONS_PARAMS[version]["download_url"]
 
-    return folder, url+filename
+    return folder, url + filename
 
 
-def _parse_initfeh_alpha_vvcrit_from_name(name: str, version: Literal["1.2", "2.5"] = "2.5"):
+def _parse_initfeh_alpha_vvcrit_from_name(
+    name: str, version: Literal["1.2", "2.5"] = "2.5"
+):
 
     if version not in _MIST_VERSIONS_PARAMS:
         raise ValueError(f"Unsupported MIST version: {version}")
@@ -85,15 +96,15 @@ def _parse_initfeh_alpha_vvcrit_from_name(name: str, version: Literal["1.2", "2.
     sign_initfeh = _MP_TO_SIGN[m.group("initfeh")[0]]
     sign_alpha = _MP_TO_SIGN[m.group("alpha")[0]]
 
-    initfeh = sign_initfeh*float(m.group("initfeh")[1:])
-    alpha = sign_alpha*float(m.group("alpha")[1:])
+    initfeh = sign_initfeh * float(m.group("initfeh")[1:])
+    alpha = sign_alpha * float(m.group("alpha")[1:])
     vvcrit = float(m.group("vvcrit"))
 
     if version == "2.5":
         initfeh *= 0.01
         alpha *= 0.1
 
-    return(initfeh, alpha, vvcrit)
+    return (initfeh, alpha, vvcrit)
 
 
 def _parse_initmass_from_filename(filename: str) -> float:
@@ -101,7 +112,9 @@ def _parse_initmass_from_filename(filename: str) -> float:
     m = MIST_EEP_FILENAME_RE.match(filename)
 
     if not m:
-        raise ValueError(f"Cannot parse initial mass from filename: {filename}")
+        raise ValueError(
+            f"Cannot parse initial mass from filename: {filename}"
+        )
 
     initmass = float(m.group("initmass"))
     initmass *= 0.01

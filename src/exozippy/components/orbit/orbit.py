@@ -21,6 +21,68 @@ from . import physics
 from .bodies import parse_orbit_bodies
 
 
+def _topology(system):
+    """Which component kinds this system has, tolerating a partial one.
+
+    The same two-step the astrometry branch of register_parameters already
+    does: a real System exposes `active_components`, while the test harnesses
+    that stand in for one may carry only the raw `config`.  A topology-driven
+    DEFAULT must not crash on the latter -- it should simply see no transits.
+    """
+    components = getattr(system, "active_components", None)
+    if components:
+        return set(components)
+    config = getattr(system, "config", None)
+    if hasattr(config, "keys"):
+        return set(config.keys())
+    return set()
+
+
+def amplitude_constrained_orbits(system, orbit):
+    """Orbits whose motion an RV or astrometric dataset measures.
+
+    The SIGNED observables: an RV or astrometric amplitude flips phase through
+    zero, so these are the data that pin down a mass and an inclination sign,
+    as opposed to a transit, which measures a depth and a duration and is blind
+    to both.
+
+    Two callers want it for different reasons -- `Planet._mass_constrained`
+    asks which planets have a signed mass (the Chen mass-side predicate and the
+    `linear` vs `log_q` choice), and `Orbit._transit_only` asks which orbits a
+    transit measures ALONE, the topology Eastman (2024)'s parameterization is
+    for.  One implementation, because the two must never disagree about what
+    "measured by RVs" means.
+
+    A module function rather than a method, and taking the orbit as an
+    argument: it is a fact about the (system, orbit) PAIR, it needs nothing
+    from an Orbit but `star_membership`, and that keeps it usable by anything
+    holding a membership map -- including the test doubles that stand in for a
+    full Orbit.
+    """
+    components = getattr(system, "active_components", None) or {}
+    constrained = set()
+    rv = components.get("rvinstrument")
+    if rv is not None:
+        for s in set(rv.star_ndx):
+            constrained.update(o for o, _ in orbit.star_membership(s))
+    ast = components.get("astrometryinstrument")
+    if ast is not None:
+        for i, mode in enumerate(ast.modes):
+            if mode == "rel":
+                if ast.rel_orbit[i] is not None:
+                    constrained.add(ast.rel_orbit[i])
+            else:
+                # gaia/abs photocenter wobble sums the orbits whose primary
+                # group contains the target star.
+                s = int(ast.config[i].get("star_ndx", 0))
+                constrained.update(
+                    o
+                    for o, role in orbit.star_membership(s)
+                    if role == "primary"
+                )
+    return constrained
+
+
 class Orbit(Component):
     """
     Two-body Keplerian orbit between a primary and a companion body group
@@ -85,31 +147,272 @@ class Orbit(Component):
         },
     }
 
-    def _parse_ecc_parameterization(self):
+    # The two INCLINATION parameterizations, per orbit (see
+    # components/parameterization.py).  `cosi` samples the cosine of the
+    # inclination, which is what an isotropic prior is uniform in; `chord`
+    # samples the transit chord instead and derives cos i from it, which is
+    # what a transit DURATION constrains (Eastman 2024).  The third mode is
+    # not a parameterization at all: an orbit with no single transiting planet
+    # has no radius ratio, so it has no chord, and `nochord` leaves the
+    # parameter INACTIVE there -- pinned, no potential, no table row.
+    #
+    # Disjoint from ECC_MODE_TABLE by construction (that one owns the
+    # eccentricity coordinates, this one the geometric ones), so the two
+    # expansions merge into one manifest without either knowing about the
+    # other.  That is also what lets a user turn on either half alone.
+    INC_MODE_TABLE = {
+        "cosi": {
+            "cosi": None,
+            "chord": {"output_expr_key": "from_cosi"},
+        },
+        "chord": {
+            "chord": None,
+            "cosi": {"expr_key": "from_chord", "force_node": True},
+        },
+        "nochord": {
+            "cosi": None,
+        },
+    }
+
+    # Parameters whose being PINNED means the user has already decided the
+    # quantity a parameterization would reparameterize: {switch: params}.
+    _PIN_BLOCKS_DEFAULT = {
+        "fitvcve": ("secosw", "sesinw", "ecc"),
+        "fitchord": ("cosi", "inc"),
+    }
+
+    def _user_pinned(self, index, params):
+        """Which of `params` the user pinned (sigma = 0) on orbit `index`.
+
+        Reads the user's own entries, in the two spellings that survive
+        `standardize_param_names` (the indexed one, and the broadcast
+        `orbit.<param>` that covers every element).  Values, not resolved
+        config: a defaults.yaml sigma is not a decision anybody made.
+        """
+        user = getattr(self.config_manager, "user_params", None) or {}
+        pinned = []
+        for param in params:
+            for key in (
+                f"{self.prefix}.{index}.{param}",
+                f"{self.prefix}.{param}",
+            ):
+                entry = user.get(key)
+                if isinstance(entry, dict) and entry.get("sigma") == 0:
+                    pinned.append(param)
+                    break
+        return pinned
+
+    def _pin_blocks_default(self, index, switch):
+        """True if a pin means this orbit must keep the conventional
+        coordinates.
+
+        A parameterization that is ON BY DEFAULT must not throw away a
+        constraint the user wrote, and `sigma: 0` on an element that the flip
+        makes DERIVED is dropped (with a warning) rather than honored -- the
+        one lossy case in an otherwise constraint-preserving switch.  So a user
+        who pinned the very quantity being reparameterized keeps their
+        coordinates.
+
+        For V_c/V_e there is a second, sharper reason, and it is why this is
+        not merely polite: pinning `secosw`/`sesinw` at zero IS a circular
+        orbit, and a circular orbit is exactly where the V_c/V_e inversion is
+        SINGULAR (V_c/V_e = 1 at omega = 0 is the double root, where the two
+        branches merge and de/d(V_c/V_e) is infinite).  The parameterization
+        cannot express the fit that config asks for.
+
+        An explicit `fitvcve: true` still wins -- the user asked -- and
+        build_pymc warns per element about the dropped fields.
+        """
+        pinned = self._user_pinned(index, self._PIN_BLOCKS_DEFAULT[switch])
+        if not pinned:
+            return False
+        name = self.names[index] if index < len(self.names) else index
+        logger.info(
+            "[%s.%s] keeping the conventional coordinates: %s %s pinned "
+            "(sigma: 0), and the %s parameterization would make %s derived, "
+            "which drops the pin.  Set '%s: true' explicitly to override.",
+            self.prefix,
+            name,
+            ", ".join(pinned),
+            "is" if len(pinned) == 1 else "are",
+            "V_c/V_e" if switch == "fitvcve" else "transit-chord",
+            "it" if len(pinned) == 1 else "them",
+            switch,
+        )
+        return True
+
+    def _transit_only(self, system):
+        """Per orbit: is a transit the ONLY thing measuring this orbit?
+
+        The topology Eastman (2024) is about, and the condition under which
+        both halves of it default ON.  A transit measures a duration, which
+        `V_c/V_e` and the chord carry directly; where an RV or astrometric
+        amplitude also measures the orbit, the conventional coordinates are
+        well constrained and the paper's argument does not apply.
+
+        Every transit light curve models every planet (the same assumption
+        `Planet._resolve_chen` makes for the radius side), so "has transit
+        data" is a property of the SYSTEM, while "is otherwise constrained"
+        is per orbit.
+        """
+        if "transit" not in _topology(system):
+            return [False] * self.n_elements
+        constrained = amplitude_constrained_orbits(system, self)
+        return [i not in constrained for i in range(self.n_elements)]
+
+    def _chord_planet_indices(self):
+        """Per orbit: the index of its one transiting planet, or -1.
+
+        A chord is `sqrt((1 + p)^2 - b^2)`, so it needs a radius ratio -- one
+        radius ratio.  An orbit whose companion group holds no planet (a
+        stellar binary) has none, and one holding SEVERAL has no single answer:
+        two planets sharing an orbit have two different chords, and asking
+        which one `orbit.chord` means is a question with no correct answer.
+        Both are `nochord`, and `_parse_inc_parameterization` refuses an
+        explicit `fitchord: true` on them rather than picking a planet.
+        """
+        out = []
+        for i in range(self.n_elements):
+            planets = [
+                idx for (t, idx) in self.companion_bodies[i] if t == "planet"
+            ]
+            out.append(planets[0] if len(planets) == 1 else -1)
+        return out
+
+    def _log_parameterization_choices(self, system):
+        """Say which orbits the topology moved off the conventional
+        coordinates.
+
+        A default that changes the sampled coordinates is exactly the kind of
+        thing that should not be discovered by reading a table of unfamiliar
+        parameter names, so it is logged per orbit, with the reason and the
+        key that turns it off.
+        """
+        if system is None:
+            return
+        flipped = [
+            self.names[i] if i < len(self.names) else str(i)
+            for i in range(self.n_elements)
+            if self.fitvcve[i]
+            and not (self.config[i] or {}).get("fitvcve", False)
+        ]
+        if not flipped:
+            return
+        logger.info(
+            "[%s] %s measured by transits alone: sampling V_c/V_e and the "
+            "transit chord instead of sqrt(e)cos(omega)/sqrt(e)sin(omega) and "
+            "cos i (Eastman 2024), which is what a transit duration "
+            "constrains.  secosw/sesinw/cosi are still reported.  Set "
+            "'fitvcve: false' on the orbit to fit the conventional "
+            "coordinates.",
+            self.prefix,
+            ", ".join(flipped),
+        )
+
+    def _parse_inc_parameterization(self, system=None):
+        """Read `fitchord:` into per-orbit mode names.
+
+        Called from register_parameters (stage 2) rather than __init__,
+        because both questions it asks are about topology -- whether the orbit
+        has a single planet, and whether the system has any transit data --
+        and neither is answerable before the components exist.
+
+        `nochord` (the chord is INACTIVE: pinned, no potential, no table row)
+        covers two cases, and the second is the reason it takes `system`.  An
+        orbit with no single planet has no radius ratio and so no chord at
+        all.  An orbit in a system with NO TRANSIT DATA has one arithmetically
+        and it means nothing: `sqrt((1 + p)^2 - b^2)` for a companion that
+        never crosses the disc is zero, and reporting a column of zeros in
+        every RV-only fit is worse than not reporting it.  examples/GaiaBH1 is
+        the case that makes this concrete -- it models a BLACK HOLE as a
+        `planet` block, so "has a planet" is true and "could transit" is
+        emphatically not.
+
+        An explicit `fitchord: true` still samples the chord in a
+        transit-free system: that is a reparameterization, not a claim about
+        data, and gating it would be a gate where a warning belongs.
+        """
+        self._chord_planet = self._chord_planet_indices()
+        has_transit = system is not None and (
+            "transit" in getattr(system, "active_components", {})
+        )
+        self.inc_modes = []
+        for i, on in enumerate(self.fitchord):
+            name = self.names[i] if i < len(self.names) else i
+            if self._chord_planet[i] >= 0 and not (on or has_transit):
+                # A real planet, but nothing that could see a transit and no
+                # request to sample it: the chord is arithmetic, not a result.
+                self.inc_modes.append("nochord")
+                continue
+            if self._chord_planet[i] < 0:
+                if bool((self.config[i] or {}).get("fitchord", False)):
+                    n_planets = sum(
+                        1
+                        for (t, _) in self.companion_bodies[i]
+                        if t == "planet"
+                    )
+                    raise ValueError(
+                        f"[{self.prefix}.{name}] 'fitchord: true' needs "
+                        f"exactly one planet on the orbit -- the chord is "
+                        f"sqrt((1 + R_P/R_*)^2 - b^2), so it is defined by a "
+                        f"radius ratio -- and this orbit's companion group "
+                        f"holds {n_planets}.  Sample 'cosi' here (drop the "
+                        f"key), or split the bodies onto their own orbits."
+                    )
+                self.inc_modes.append("nochord")
+            else:
+                self.inc_modes.append("chord" if on else "cosi")
+
+    def _parse_ecc_parameterization(self, system=None):
         """Read `fitvcve:`/`fitchord:` into per-orbit mode lists.
 
-        Both default to false today.  The paper's method is the PAIR (V_c/V_e
-        for the eccentricity, the transit chord for the geometry), and its
-        transit-only default -- an orbit constrained by transits alone should
-        use both -- flips on when the chord half lands, so that the combination
-        the paper validated turns on together and the shipped transit-only
-        examples move exactly once.
+        BOTH DEFAULT ON FOR A TRANSIT-ONLY ORBIT (`_transit_only`), which is
+        the topology Eastman (2024) measured: over 330 simulated systems, a
+        transit-only fit in sqrt(e)cos/sin(omega) recovers eccentricities that
+        are measurably wrong, while `V_c/V_e` and the transit chord -- the two
+        coordinates a duration constrains -- recover them.  Anywhere an RV or
+        astrometric amplitude also measures the orbit, the conventional
+        coordinates stay: the paper's argument is about what transits alone
+        can and cannot see.  The two halves flip TOGETHER because that is the
+        pair the paper validated; turning on one alone is supported but is a
+        deliberate act.
 
         The coupling rule is the user's: `fitvcve: false` forces
-        `fitchord: false` unless fitchord was asked for explicitly.  It is
-        recorded here rather than acted on, because the chord half is not built
-        yet -- an explicit `fitchord: true` raises in
-        _reject_wip_parameterizations.
+        `fitchord: false` unless fitchord was asked for explicitly.  It falls
+        out of `fitchord` defaulting to whatever `fitvcve` resolved to, which
+        is also what makes `fitvcve: true` alone turn both on.
+
+        `system` is None from __init__, where the data topology is not known
+        yet; register_parameters re-parses with it, and that pass is the one
+        that decides.  Everything before it is a placeholder, and nothing
+        reads the modes in between.
         """
-        self.fitvcve = [bool(c.get("fitvcve", False)) for c in self.config]
+        default_on = (
+            self._transit_only(system)
+            if system is not None
+            else [False] * self.n_elements
+        )
+        self.fitvcve = []
+        for i, c in enumerate(self.config):
+            asked = c.get("fitvcve")
+            if asked is not None:
+                self.fitvcve.append(bool(asked))
+                continue
+            on = default_on[i] and not self._pin_blocks_default(i, "fitvcve")
+            self.fitvcve.append(on)
         self.fitchord = []
         for i, c in enumerate(self.config):
             asked = c.get("fitchord")
-            if asked is None:
-                # Follows fitvcve, which is what "unless separately set" means.
-                self.fitchord.append(self.fitvcve[i])
-            else:
+            if asked is not None:
                 self.fitchord.append(bool(asked))
+                continue
+            # Follows fitvcve, which is what "unless separately set" means --
+            # and is subject to its own pin check, since a fixed inclination is
+            # a decision the chord would drop just as surely.
+            on = self.fitvcve[i] and not self._pin_blocks_default(
+                i, "fitchord"
+            )
+            self.fitchord.append(on)
         self.ecc_modes = ["vcve" if on else "hk" for on in self.fitvcve]
 
     # ------------------------------------------------------------------
@@ -119,22 +422,24 @@ class Orbit(Component):
     # nothing defines -- neither orbit/physics.py nor anywhere else, so
     # PHYSICS_REGISTRY has no entry to look up and selecting one of these
     # expression keys cannot build a node at all.
-    WIP_PHYSICS = {
-        "cosi.from_b": "calc_cosi_from_b",
-    }
+    WIP_PHYSICS = {}
 
-    # Orbit parameters that exist in defaults.yaml and in nothing else, as
-    # {param: (the WIP_PHYSICS keys that consume it, why it is inert)}.
-    # `vcve` graduated: it is a real parameter now (see ECC_MODE_TABLE).
+    # Orbit parameter names a params file may reasonably reach for and which
+    # this component does not have, as {param: why}.  Not "work in progress"
+    # any more -- both parameterizations are built -- but an unknown parameter
+    # path is otherwise SILENTLY IGNORED, which is the failure mode
+    # `config._reject_renamed_arsun` exists to prevent, so the entry stays and
+    # names where the quantity really lives.
     WIP_PARAMS = {
         "b": (
-            ("cosi.from_b",),
-            "The orbit-level impact parameter is a dead duplicate of the "
-            "live planet.b: its defaults.yaml expression depends on "
-            "'orbit.ar', and the orbit has no 'ar' -- its semi-major axis "
-            "is 'a' (AU), while the SCALED semi-major axis a/R* lives on "
-            "the planet.  No orbit manifest declares it, so the entry would "
-            "be silently ignored.  Use 'planet.<name>.b'.",
+            (),
+            "The impact parameter lives on the PLANET, because it is defined "
+            "by one -- 'planet.<name>.b', derived from the orbit's cos i and "
+            "the planet's a/R*.  The orbit's own semi-major axis is 'a' (AU); "
+            "the scaled a/R* is 'planet.<name>.ar'.  If you meant to "
+            "constrain the transit geometry from this side, note that "
+            "'fitchord: true' samples 'orbit.<name>.chord', the transit "
+            "chord sqrt((1 + R_P/R_*)^2 - b^2), which fixes b exactly.",
         ),
     }
 
@@ -147,45 +452,18 @@ class Orbit(Component):
         )
 
     def _reject_wip_parameterizations(self):
-        """Raise on the CHORD half and on user params naming a WIP parameter.
+        """Refuse a params entry naming an orbit parameter that does not exist.
 
-        The V_c/V_e half is built (see `ECC_MODE_TABLE`); what is left is the
-        transit-chord half the paper pairs it with, and it is a stub in the same
-        two ways it always was: `cosi`'s `from_b` expression names
-        `calc_cosi_from_b`, which no module defines, so `PHYSICS_REGISTRY` has
-        no entry to look up; and the orbit-level `b` entry's deps name an
-        `orbit.ar` that does not exist -- the orbit's semi-major axis is `a` in
-        AU, while the SCALED a/R* lives on the planet, where `planet.b` is
-        already the live impact parameter.
-
-        Landing it needs its own `|d(chord)/d(cos i)|` Jacobian (the paper's
-        eq 6 is the joint determinant of both halves, applied here as two
-        independent factors), and it is what flips the transit-only DEFAULT on
-        for both halves together.
-
-        Two spellings reach it, and both raise rather than being dropped: an
-        explicit `fitchord: true` on the orbit block, or a params-file entry
-        naming `orbit.<name>.b` (an unknown parameter path is otherwise
-        silently ignored -- the failure mode `config._reject_renamed_arsun`
-        exists to prevent).  A `fitchord` that merely FOLLOWS `fitvcve` does not
-        raise: it was not asked for.
+        Both halves of Eastman (2024) are built now -- `fitvcve:` samples
+        V_c/V_e and `fitchord:` samples the transit chord -- so nothing here
+        rejects a parameterization any more.  What survives is the one job the
+        guard always did independently of that: a params-file key naming
+        `orbit.<name>.b` is otherwise SILENTLY IGNORED (the failure mode
+        `config._reject_renamed_arsun` exists to prevent), and the impact
+        parameter genuinely lives on the planet.  See WIP_PARAMS for the
+        message it raises.
         """
         wip = []
-
-        for i, c in enumerate(self.config):
-            if not bool(c.get("fitchord", False)):
-                continue
-            name = self.names[i] if i < len(self.names) else i
-            wip.append(
-                f"{self.prefix}.{name}: 'fitchord: true' is not implemented "
-                f"yet.  It would sample the transit chord and derive cos i "
-                f"from it, through the 'from_b' expression in "
-                f"orbit/defaults.yaml, whose physics function is undefined: "
-                f"{self._missing_physics(('cosi.from_b',))}.  The V_c/V_e half "
-                f"of the same method IS implemented -- use 'fitvcve: true' "
-                f"alone for now.  The chord half, and the transit-only default "
-                f"that turns both on together, are planned."
-            )
 
         user_params = getattr(self.config_manager, "user_params", None) or {}
         for key in user_params:
@@ -195,12 +473,16 @@ class Orbit(Component):
             param = parts[-1]
             if param in self.WIP_PARAMS:
                 expr_keys, why = self.WIP_PARAMS[param]
+                extra = (
+                    f"  The defaults.yaml expressions that would consume it "
+                    f"call undefined physics functions: "
+                    f"{self._missing_physics(expr_keys)}."
+                    if expr_keys
+                    else ""
+                )
                 wip.append(
-                    f"'{key}': orbit parameter '{param}' is not implemented.  "
-                    f"{why}  The defaults.yaml expressions that would consume "
-                    f"it call undefined physics functions: "
-                    f"{self._missing_physics(expr_keys)}.  Remove the entry; "
-                    f"support is planned."
+                    f"'{key}': the orbit has no parameter '{param}'.  {why}"
+                    f"{extra}"
                 )
 
         if wip:
@@ -385,12 +667,14 @@ class Orbit(Component):
             },
         }
 
-        # Re-read the switches: `fitvcve` is a plain attribute anyone could set
-        # between construction and stage 2, and the guard below is what stands
-        # between an unimplemented chord half and a silently mis-parameterized
-        # orbit.
-        self._parse_ecc_parameterization()
+        # Re-read the switches, NOW with the system: this is the pass that
+        # decides, because the transit-only default is a question about the
+        # data topology and __init__ cannot see it.  (It is also a re-read for
+        # the older reason: `fitvcve` is a plain attribute anyone could set
+        # between construction and stage 2.)
+        self._parse_ecc_parameterization(system)
         self._reject_wip_parameterizations()
+        self._log_parameterization_choices(system)
 
         # The eccentricity parameterization, per orbit (see ECC_MODE_TABLE).
         # An all-`hk` system -- every shipped example -- gets exactly the
@@ -409,10 +693,22 @@ class Orbit(Component):
         # (`cosi` between the sqrt(e) pair and `ecc`, where it has always been,
         # even though the i180 block below replaces its entry), and the new ones
         # are appended.
+        # The inclination parameterization, per orbit (see INC_MODE_TABLE).
+        # An all-`cosi` system -- every shipped example -- keeps the entry
+        # `cosi` has always had, plus the `chord` it now REPORTS wherever the
+        # orbit has a planet to define one.
+        self._parse_inc_parameterization(system)
+        inc_entries = mode_manifest(
+            self.inc_modes,
+            self.INC_MODE_TABLE,
+            n_elements=self.n_elements,
+            where=f"{self.prefix}.fitchord",
+        )
+
         for key in ("secosw", "sesinw"):
             if key in ecc_entries:
                 self.manifest[key] = ecc_entries[key]
-        self.manifest["cosi"] = None
+        self.manifest["cosi"] = inc_entries["cosi"]
         for key in ("ecc", "omega"):
             self.manifest[key] = ecc_entries[key]
         self.manifest.update(
@@ -428,6 +724,8 @@ class Orbit(Component):
         for key in ("vcve", "xomega", "yomega"):
             if key in ecc_entries:
                 self.manifest[key] = ecc_entries[key]
+        if "chord" in inc_entries:
+            self.manifest["chord"] = inc_entries["chord"]
 
         # Physical scale of every orbit, from the member bodies' masses
         # (see class docstring).  Group-mass deps name the mass vectors of
@@ -500,7 +798,42 @@ class Orbit(Component):
 
         i180_arr = np.atleast_1d(getattr(self, "i180", False)) | has_astrometry
         derived_lowers = np.where(i180_arr, -1.0, 0.0)
-        self.manifest["cosi"] = {"lower": derived_lowers}
+        # merge_options, not a fresh dict: on a `fitchord` orbit this entry
+        # carries an expr_key, and overwriting it would silently turn the
+        # derived cos i back into a sampled one (review 4.5.3).  The bound
+        # keeps its meaning either way -- hard support where cos i is sampled,
+        # a soft barrier where it is derived.
+        self.manifest["cosi"] = merge_options(
+            self.manifest.get("cosi"), lower=derived_lowers
+        )
+        # The sign the chord parameterization cannot see: a transit at i and
+        # at 180 - i are the same transit, so `calc_cosi_from_chord` is handed
+        # this as a context node rather than trying to recover it.  It follows
+        # `i180:` ALONE and not i180_arr above: astrometry widens cos i's bound
+        # to [-1, 1] because astrometry MEASURES the sign, which is the one
+        # thing a chord cannot express -- so where both are asked for, the
+        # chord orbit keeps the +1 branch and says so.
+        own_i180 = np.atleast_1d(getattr(self, "i180", False)).astype(bool)
+        if own_i180.size != self.n_elements:
+            own_i180 = np.zeros(self.n_elements, dtype=bool)
+        self._chord_sign = np.where(own_i180, -1.0, 1.0)
+        if has_astrometry:
+            chord_orbits = [
+                self.names[i] if i < len(self.names) else str(i)
+                for i, m in enumerate(getattr(self, "inc_modes", []))
+                if m == "chord"
+            ]
+            if chord_orbits:
+                logger.warning(
+                    "[%s] 'fitchord: true' on %s, but this system has "
+                    "astrometry, which measures the SIGN of cos i -- and the "
+                    "transit chord is even in it, so the fit is restricted to "
+                    "the %s branch (set 'i180: true' to select the other). "
+                    "Sample 'cosi' instead to let the astrometry choose.",
+                    self.prefix,
+                    ", ".join(chord_orbits),
+                    "i > 90 deg" if own_i180.any() else "i < 90 deg",
+                )
 
     def _restrict_bigomega_halfplane(self, shape):
         """Astrometry without RVs: restrict bigomega to [0, 180] deg.
@@ -673,6 +1006,91 @@ class Orbit(Component):
 
     _GROUP_MASS_SIDE = {"m_primary": "primary", "m_companion": "companion"}
 
+    # The chord expressions' deps that are NOT orbit parameters: the
+    # transiting planet's geometry and the i180 sign, injected as context
+    # nodes by _chord_context below.  Declaring them here is what keeps
+    # graph.py from looking for an `orbit.p` (the group masses avoid this by
+    # naming `planet.mass`, a real parameter of a real component; there is no
+    # such parameter for `chord_sign` at all, and `p`/`ar` are per PLANET, so
+    # the orbit could not consume them elementwise anyway).
+    context_dep_names = frozenset({"p", "ar", "chord_sign"})
+
+    # ...and all three are built per ORBIT, so Component._element_expression
+    # may slice them to a per-element mask.
+    aligned_context_deps = frozenset({"p", "ar", "chord_sign"})
+
+    # Parameters whose expressions consume the transiting planet's geometry.
+    _CHORD_PARAMS = ("cosi", "chord")
+
+    def _chord_context(self, model, system):
+        """`p`, `ar` and `chord_sign` for every orbit, as context nodes.
+
+        The chord is defined by the orbit's transiting PLANET, and the orbit
+        has no map naming another component's parameters -- so these travel
+        the same channel the group masses do (see add_parameter below): the
+        component builds them itself and hands them to the generic machinery
+        under the dep names the expression asks for.
+
+        Every vector is length n_elements, indexed by ORBIT, which is what
+        makes them safe to slice per element (`aligned_context_deps`).  An
+        orbit with no single planet reads planet 0 and contributes nothing:
+        `chord` is INACTIVE there and `cosi` is sampled, so no expression this
+        feeds is evaluated on those elements.  Filling them with a real
+        planet's numbers rather than NaN is deliberate -- a NaN would ride
+        through `pt.set_subtensor`'s unselected half into the gradient.
+        """
+        # `system` is None in standalone use -- a bare Orbit built by a test
+        # harness, which every geometry test does -- and `cosi` is exactly the
+        # parameter those build.  There is nothing to read and nothing that
+        # needs it (a standalone orbit is never in chord mode, so no expression
+        # these feed is selected), but the dep parser still wants the names.
+        planet = None
+        if system is not None:
+            planet = getattr(system, "active_components", {}).get("planet")
+        idx = np.asarray(getattr(self, "_chord_planet", []), dtype=int)
+        if idx.size != self.n_elements:
+            idx = np.full(self.n_elements, -1, dtype=int)
+        sign = np.asarray(
+            getattr(self, "_chord_sign", np.ones(self.n_elements)),
+            dtype=float,
+        )
+        if sign.size != self.n_elements:
+            sign = np.ones(self.n_elements)
+
+        ctx = {"chord_sign": pt.as_tensor_variable(sign)}
+        # Stashed for _add_chord_terms, which needs the same two vectors to
+        # build the Jacobian and the geometry bound at stage 6 and must not
+        # build a SECOND copy of them: the barrier has to restrain the very
+        # node the model was built from.
+        self._chord_geometry = ctx
+        if planet is None or planet.n_elements == 0:
+            # No planet component at all: only reachable with `chord` absent
+            # from the manifest (every orbit is `nochord`), so these are
+            # placeholders that keep the dep parser happy.
+            ctx["p"] = pt.zeros((self.n_elements,))
+            ctx["ar"] = pt.zeros((self.n_elements,))
+            return ctx
+
+        safe = np.where(idx < 0, 0, idx).astype("int32")
+        take = pt.as_tensor_variable(safe)
+        for name in ("p", "ar"):
+            if not isinstance(getattr(planet, name, None), Parameter):
+                planet.add_parameter(model, name, system)
+            ctx[name] = getattr(planet, name).value[take]
+        return ctx
+
+    def finalize_reported(self, model, system, context_nodes=None):
+        """Stage 6b, with the planet geometry the reported `chord` needs.
+
+        `System.build_model` calls this with no context nodes -- it cannot
+        know what a component's deferred expressions consume -- so the orbit
+        supplies its own, exactly as add_parameter does below.
+        """
+        ctx = dict(context_nodes or {})
+        if getattr(self, "_pending_reported", None):
+            ctx.update(self._chord_context(model, system))
+        return super().finalize_reported(model, system, ctx)
+
     def add_parameter(self, model, param_name, system, context_nodes=None):
         """
         The group masses are weighted sums over other components' mass
@@ -709,11 +1127,109 @@ class Orbit(Component):
                     d == dep for d in self.manifest[param_name]["deps"]
                 ):
                     context_nodes[dep] = pt.zeros((self.n_elements,))
+        if param_name in self._CHORD_PARAMS:
+            context_nodes = dict(context_nodes or {})
+            for dep, node in self._chord_context(model, system).items():
+                context_nodes.setdefault(dep, node)
         return super().add_parameter(model, param_name, system, context_nodes)
 
     def build_likelihood(self, model, system):
         self._add_eccentricity_bound(system)
         self._add_vcve_terms(system)
+        self._add_chord_terms(system)
+
+    def _chord_indices(self):
+        """Indices of the orbits sampling the chord (empty for every cos i
+        system)."""
+        modes = list(getattr(self, "inc_modes", []))
+        return [i for i, m in enumerate(modes) if m == "chord"]
+
+    def _add_chord_terms(self, system):
+        """The two terms a chord orbit owes: the Jacobian and the shield.
+
+        The geometric half of what `_add_vcve_terms` does for the
+        eccentricity, and deliberately a separate potential rather than a
+        joint one: the paper's eq 6 is the determinant of BOTH
+        reparameterizations at once, but applying them independently is what
+        lets a user turn on either half alone, and the product of the two
+        factors is that determinant.
+
+        THE JACOBIAN keeps the prior on the inclination isotropic.  Sampling
+        cos i uniformly is what `p(cos i) = const` means, and it is what this
+        component does by default; sampling the chord instead induces
+        `p(cos i) = |d(chord)/d(cos i)|`, which is NOT uniform -- it vanishes
+        at a central transit and diverges at a grazing one.  Flattening it
+        means adding `log|d(cos i)/d(chord)|`, i.e. SUBTRACTING what
+        `physics.chord_log_jacobian` returns.  The sign is the term, exactly
+        as it is for V_c/V_e; the direction is measured (the implied density
+        on cos i is checked for flatness) rather than argued, because a
+        finite-difference check of the derivative passes under either sign.
+
+        THE SHIELD is the soft half of the pair.  `chord_radicand` is floored
+        inside `calc_cosi_from_chord`'s sqrt so a NaN is unbuildable, which
+        leaves that whole region flat -- so the penalty here reads the
+        UNFLOORED radicand, where it has a gradient pointing back to a chord
+        that a transit could actually produce.  Same argument, and the same
+        helper, as the eccentricity bound and the V_c/V_e real-root bound.
+        """
+        idx = self._chord_indices()
+        if not idx:
+            return
+        if not (
+            isinstance(getattr(self, "chord", None), Parameter)
+            and isinstance(getattr(self, "ecc", None), Parameter)
+            and isinstance(getattr(self, "esinw", None), Parameter)
+        ):
+            return
+        geom = getattr(self, "_chord_geometry", None)
+        if geom is None:
+            return
+
+        take = np.asarray(idx, dtype="int32")
+        chord = self.chord.value[take]
+        ecc = self.ecc.value[take]
+        esinw = self.esinw.value[take]
+        p_ratio = geom["p"][take]
+        ar = geom["ar"][take]
+
+        # MINUS the derivative -- see the docstring, and vcve_log_jacobian's,
+        # for why the sign is the whole content of this term.
+        pm.Potential(
+            f"{self.prefix}.chord_jacobian",
+            -pt.sum(
+                physics.chord_log_jacobian(chord, p_ratio, ar, ecc, esinw)
+            ),
+        )
+        # scale = 1.0: the radicand is (1 + p)^2 - chord^2, an O(1) quantity
+        # in units of R_*, so the default 1% softness is a 0.01-wide
+        # transition -- the same order of steepness as the eccentricity
+        # bound's, and 4.4 nats one width past the last transiting geometry.
+        pm.Potential(
+            f"{self.prefix}.chord_geometry",
+            soft_lower_bound(
+                physics.chord_radicand(chord, p_ratio), 0.0, scale=1.0
+            ),
+        )
+
+        names = [self.names[i] if i < len(self.names) else str(i) for i in idx]
+        self.chord.add_prior_contribution(
+            latex=r"$\propto |\partial \cos{i} / \partial \rm chord|$",
+            text="uniform in cos i (Jacobian applied)",
+            elements=idx,
+            supersedes_bounds=True,
+            support_phrase="whose chord support is",
+        )
+        collector = get_collector(system)
+        if collector is not None:
+            collector.add(
+                "The transit geometry of "
+                f"{join_names(names)} was parametrized by the transit chord "
+                r"rather than $\cos{i}$ \citep{Eastman:2024}, multiplied by "
+                r"$|\partial \cos{i} / \partial \rm chord|$ so that the "
+                r"prior on the inclination remains isotropic.",
+                section="orbits",
+                key="orbit.chord",
+            )
 
     def _vcve_indices(self):
         """Indices of the orbits sampling V_c/V_e (empty for every hk system)."""

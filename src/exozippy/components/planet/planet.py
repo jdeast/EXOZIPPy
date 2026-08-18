@@ -11,6 +11,7 @@ from exozippy.outputs.prose import get_collector, join_names
 from exozippy.outputs.texutils import latex_escape
 from exozippy.potentials import soft_lower_bound
 
+from ..orbit.orbit import amplitude_constrained_orbits
 from . import physics
 
 logger = logging.getLogger(__name__)
@@ -394,27 +395,15 @@ class Planet(Component):
         orbit = system.active_components.get("orbit")
 
         # Orbits whose motion is measured by RV or astrometric data.  A
-        # planet is mass-constrained if it is a body of one of them.
-        mass_orbits = set()
-        rv = system.active_components.get("rvinstrument")
-        if rv is not None and orbit is not None:
-            for s in set(rv.star_ndx):
-                mass_orbits.update(o for o, _ in orbit.star_membership(s))
-        ast = system.active_components.get("astrometryinstrument")
-        if ast is not None and orbit is not None:
-            for i, mode in enumerate(ast.modes):
-                if mode == "rel":
-                    if ast.rel_orbit[i] is not None:
-                        mass_orbits.add(ast.rel_orbit[i])
-                else:
-                    # gaia/abs photocenter wobble sums the orbits whose
-                    # primary group contains the target star.
-                    s = int(ast.config[i].get("star_ndx", 0))
-                    mass_orbits.update(
-                        o
-                        for o, role in orbit.star_membership(s)
-                        if role == "primary"
-                    )
+        # planet is mass-constrained if it is a body of one of them.  Asked of
+        # the ORBIT component, which owns the predicate: the same question
+        # decides whether an orbit is transit-only, and the two answers must
+        # not drift apart (Orbit.amplitude_constrained_orbits).
+        mass_orbits = (
+            amplitude_constrained_orbits(system, orbit)
+            if orbit is not None
+            else set()
+        )
 
         self._mass_side = [
             orbit is not None
@@ -531,34 +520,30 @@ class Planet(Component):
         if self.n_elements >= 2:
             self._add_crossing_potential(system, orbits)
 
-    def _initial_semimajor_axes(self, system, orbits):
-        """Per-planet starting semi-major axis, solRad.
+    def _initial_semimajor_axes(self):
+        """Per-planet starting semi-major axis, solRad, or NaN.
 
-        ``planet.a`` is a derived Parameter and carries no ``initval``
-        of its own, so the start is recomputed here from the same relation
-        (``physics.calc_arsun``) using the start values the relaxation
-        engine did resolve.  Returns NaN wherever an input is missing; the
-        caller falls back to the config order there.
+        The relaxation engine resolves `planet.a` (Kepler's third law and the
+        m_total sum are relations in planet/symbolic_physics.py), so this reads
+        the start it solved.  It used to RECOMPUTE it -- a hand copy of
+        `KEPLER_CONST m_total^(1/3) P^(2/3)` living in this file, assembled from
+        the period, the planet mass and the host mass -- because nothing
+        resolved `a` at all; that gap is what the relations closed, and closing
+        it deleted the copy.  A relation cannot drift from `physics.calc_arsun`
+        the way a second implementation can.
+
+        NaN where the engine could not solve it (an incomplete harness system);
+        the caller already sorts those last and refuses them as a barrier
+        scale.
         """
-
-        def vec(x, n):
-            try:
-                out = np.asarray(np.atleast_1d(x), dtype=float) * np.ones(n)
-            except (TypeError, ValueError):
-                return np.full(n, np.nan)
-            return out
-
         n = self.n_elements
-        period = vec(orbits.period.initval, orbits.n_elements)[self.orbit_map]
-        m_planet = vec(self.mass.initval, n)
-        star = system.active_components["star"]
-        m_star = vec(star.mass.initval, star.n_elements)[self.star_map]
-
-        m_total = np.maximum(m_star + m_planet, 1e-9)
-        with np.errstate(invalid="ignore"):
-            return (
-                KEPLER_CONST * m_total ** (1.0 / 3.0) * period ** (2.0 / 3.0)
-            )
+        try:
+            out = np.asarray(
+                np.atleast_1d(self.a.initval), dtype=float
+            ) * np.ones(n)
+        except (TypeError, ValueError):
+            return np.full(n, np.nan)
+        return out
 
     def _add_crossing_potential(self, system, orbits):
         """Soft non-crossing barrier between neighboring planets' orbits.
@@ -598,7 +583,7 @@ class Planet(Component):
         a = self.a.value
         ecc = orbits.ecc.value[self.orbit_map]
 
-        a_init = self._initial_semimajor_axes(system, orbits)
+        a_init = self._initial_semimajor_axes()
         # A missing start sorts last but must not become the barrier scale.
         order = np.argsort(np.where(np.isfinite(a_init), a_init, np.inf))
 

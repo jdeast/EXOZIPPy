@@ -6,14 +6,17 @@ selected `defaults.yaml` expressions naming undefined physics functions, and
 the `vcve`/`b` parameter blocks were in no manifest at all (`b`'s deps even
 name a nonexistent `orbit.ar`).
 
-Half of it is implemented now.  `fitvcve` works (review 8.8.3: the V_c/V_e
-parameterization, with the likelihood marginalized over both roots of its
-quadratic inversion), so what these tests pin about it is the opposite of what
-they used to: that it does NOT raise and that a params entry naming `vcve` is
-honored.  The CHORD half -- `fitchord`, `cosi`'s `from_b`, the orbit-level `b`
--- is still unbuilt, and what the guard now covers is that a user who asks for
-THAT finds out immediately, from a message naming the key they set, while the
-ordinary configs which merely carry its defaults still build.
+BOTH halves are implemented now (review 8.8.3): `fitvcve` samples V_c/V_e with
+the likelihood marginalized over both roots of its quadratic inversion, and
+`fitchord` samples the transit chord and derives cos i from it.  So what these
+tests pin is the opposite of what they used to -- that neither key raises, and
+that a params entry naming `vcve` or `chord` is honored as a start value.
+
+What the guard still covers, and the reason this file did not simply go away,
+is the one job it always did independently of the parameterizations: an
+`orbit.<name>.b` in a params file is otherwise SILENTLY IGNORED.  The impact
+parameter lives on the planet, so the entry raises and says so; `tests/
+test_chord.py` covers what the chord half itself does.
 
 (The `star:` half of that review item -- `sedfile:`, `mist:`, `parsec:` --
 was reverted: `sedfile` is deleted outright and the evolutionary-model
@@ -57,40 +60,41 @@ def test_orbit_fitvcve_is_implemented_and_no_longer_guarded():
     assert orbit.ecc_modes == ["vcve"]
 
 
-def test_orbit_fitchord_raises_and_names_the_missing_physics():
+def test_orbit_fitchord_is_implemented_and_no_longer_guarded():
     """
     Given an orbit block asking for the transit-chord parameterization,
     When the Orbit component is constructed,
-    Then it raises NotImplementedError naming the undefined physics function,
-      and points at the V_c/V_e half that does work.
+    Then it does not raise, and the switch is recorded.
 
-    The paper pairs V_c/V_e with fitting the chord; only the eccentricity half
-    is implemented, and the guard is the feature until the other lands.
+    The half that used to be the guard's whole subject.  Its own behavior --
+    the inversion, the shields, the Jacobian's direction, the roles and the
+    transit-only default -- is tests/test_chord.py; what this pins is only
+    that asking for it is no longer an error.
     """
-    with pytest.raises(NotImplementedError) as exc:
-        _orbit([{"name": "b", "fitchord": True}])
+    orbit = _orbit([{"name": "b", "fitchord": True}])
 
-    msg = str(exc.value)
-    assert "fitchord" in msg
-    assert "orbit.b" in msg
-    assert "calc_cosi_from_b" in msg
-    assert "fitvcve" in msg
+    assert orbit.fitchord == [True]
 
 
-def test_fitchord_following_fitvcve_does_not_raise():
+def test_fitchord_follows_fitvcve():
     """
     Given `fitvcve: true` and no explicit `fitchord`,
     When the component is constructed,
-    Then it does not raise, and fitchord merely FOLLOWS fitvcve.
+    Then fitchord follows it.
 
     JDE's coupling rule: `fitvcve: false` forces `fitchord: false` unless
-    fitchord is set separately.  A followed value was not asked for, so it must
-    not trip the guard on the unimplemented half -- otherwise turning on the
-    eccentricity parameterization would be impossible until the chord lands.
+    fitchord is set separately, which falls out of fitchord defaulting to
+    whatever fitvcve resolved to.  It mattered more when the chord half raised
+    -- a followed value must not have tripped that guard -- and it still
+    matters, because it is what makes `fitvcve: true` turn on the PAIR the
+    paper validated rather than half of it.
     """
     orbit = _orbit([{"name": "b", "fitvcve": True}])
 
     assert orbit.fitchord == [True]
+
+    off = _orbit([{"name": "b", "fitvcve": False}])
+    assert off.fitchord == [False]
 
 
 def test_a_vcve_params_entry_is_honored_not_rejected():
@@ -118,10 +122,16 @@ def test_a_vcve_params_entry_is_honored_not_rejected():
 
 def test_orbit_b_user_param_raises_and_points_at_planet_b():
     """
-    Given a params-file entry on the dead orbit-level impact parameter,
+    Given a params-file entry on an orbit-level impact parameter,
     When the Orbit component is constructed,
-    Then it raises NotImplementedError explaining that the deps name an
-      `orbit.ar` that does not exist, and points at the live `planet.<n>.b`.
+    Then it raises, explaining where the impact parameter really lives.
+
+    The orbit has no `b`: it is defined by a planet's radius ratio, so it is
+    `planet.<n>.b`, and the orbit's own scaled semi-major axis is
+    `planet.<n>.ar`.  The entry would otherwise be silently ignored -- the
+    failure mode `config._reject_renamed_arsun` exists to prevent -- and the
+    message now also points at `fitchord`, which is what someone reaching for
+    this from the orbit side usually wants.
     """
     # Arrange
     blocks = [{"name": "b"}]
@@ -132,9 +142,11 @@ def test_orbit_b_user_param_raises_and_points_at_planet_b():
 
     # Assert
     msg = str(exc.value)
-    assert "orbit.ar" in msg
+    assert "planet.<name>.ar" in msg
     assert "planet.<name>.b" in msg
-    assert "calc_cosi_from_b" in msg
+    # ...and at the chord, which is what an orbit-side impact-parameter
+    # constraint usually means now that fitchord exists.
+    assert "fitchord" in msg
 
 
 @pytest.mark.parametrize(

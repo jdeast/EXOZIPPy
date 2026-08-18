@@ -13,6 +13,9 @@ about, because they are what a gradient sampler needs:
   discriminant is floored (the hard shield, so a NaN is unbuildable) and a soft
   bound supplies the restoring gradient.
 
+The paper's other half -- the transit chord, which pairs with this one and
+defaults on with it for a transit-only orbit -- is tests/test_chord.py.
+
 The algebra is checked three ways -- against the forward relation, against the
 quadratic itself, and against a finite difference -- because a factor of 2
 dropped from the discriminant produced eccentricities that looked entirely
@@ -738,23 +741,30 @@ def test_a_vcve_transit_fit_samples_under_numpyro(vcve_transit_fit):
         )
 
 
-def test_the_chord_half_still_raises(transit_lc):
+def test_either_half_can_be_turned_on_alone(transit_lc):
     """
-    Given an orbit asking for fitchord: true,
-    When the component is constructed,
-    Then it raises, naming the undefined physics and pointing at the V_c/V_e
-      half that does work.
+    Given an orbit asking for one half of the method and not the other,
+    When each is built,
+    Then each samples its own coordinate and leaves the other conventional.
 
-    The paper pairs V_c/V_e with the transit chord; only the eccentricity half
-    is implemented, and the guard is the feature until the other lands.
+    The two halves default ON TOGETHER for a transit-only orbit, because the
+    pair is what the paper validated -- but they are independent
+    reparameterizations with independent Jacobians, and this pins that either
+    can be chosen alone.  (The chord half used to raise here; it is
+    tests/test_chord.py's subject now.)
     """
-    with pytest.raises(NotImplementedError) as exc:
-        System(
-            _transit_config(transit_lc, None, {"fitchord": True}),
-            user_params=dict(_TRANSIT_PARAMS),
-        )
+    ecc_only = System(
+        _transit_config(transit_lc, True, {"fitchord": False}),
+        user_params=dict(_TRANSIT_PARAMS),
+    )
+    ecc_only.prepare()
+    assert ecc_only.orbit.ecc_modes == ["vcve"]
+    assert ecc_only.orbit.inc_modes == ["cosi"]
 
-    msg = str(exc.value)
-    assert "fitchord" in msg
-    assert "calc_cosi_from_b" in msg
-    assert "fitvcve" in msg
+    geom_only = System(
+        _transit_config(transit_lc, False, {"fitchord": True}),
+        user_params=dict(_TRANSIT_PARAMS),
+    )
+    geom_only.prepare()
+    assert geom_only.orbit.ecc_modes == ["hk"]
+    assert geom_only.orbit.inc_modes == ["chord"]

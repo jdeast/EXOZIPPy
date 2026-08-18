@@ -282,29 +282,52 @@ orbit:
     latex: "\\cos{i}"
     description: "Cosine of Inclination"
     expressions:
-      # WIP (review 5.11): calc_cosi_from_b is UNDEFINED, and the deps name
-      # an "ar" the orbit does not have (its semi-major axis is "a", in AU;
-      # the scaled a/R* is planet.ar).  No manifest selects this expr_key.
-      from_b:
-        func_name: "calc_cosi_from_b"
-        deps: ["b", "ar", "ecc", "omega"]
-  # WIP (review 5.11): a dead duplicate of the LIVE planet.b -- the deps
-  # name a nonexistent "orbit.ar" (see cosi.from_b above), and no orbit
-  # manifest declares b, so this block is inert.  A params-file entry naming
-  # orbit.<name>.b raises NotImplementedError in
-  # Orbit._reject_wip_parameterizations rather than being dropped; use
-  # planet.<name>.b.
-  b:
-    initval: 0.5
+      # Selected per orbit by `fitchord: true` (Orbit.INC_MODE_TABLE).  `p`
+      # and `ar` belong to the orbit's transiting planet and `chord_sign` is
+      # the i180 convention; all three are injected as CONTEXT nodes by
+      # Orbit.add_parameter, the same channel the group masses use, because
+      # the orbit has no map naming its own planet's parameters.
+      from_chord:
+        func_name: "calc_cosi_from_chord"
+        deps: ["chord", "p", "ar", "ecc", "esinw", "chord_sign"]
+  # The transit chord, sqrt((1 + p)^2 - b^2) in units of R_*: the length of
+  # the planet's sky-projected path across the stellar disc, and with V_c/V_e
+  # the pair a transit DURATION actually constrains (Eastman 2024).  Sampled
+  # where `fitchord: true`, REPORTED from cos i otherwise, and INACTIVE on an
+  # orbit with no single transiting planet -- a chord needs a radius ratio, so
+  # a star-star orbit (or a body group holding two planets, where "the" radius
+  # ratio is ambiguous) has none.  See Orbit.INC_MODE_TABLE.
+  #
+  # Bounds: non-negative by construction, and the upper bound is the image of
+  # the radius-ratio cap the way vcve's is the image of MAX_ECC -- chord is at
+  # most 1 + p, and p > 1 is a companion larger than its star, which this
+  # component does not model as a planet.  Past 1 + p there is no transiting
+  # geometry at all, and the soft `chord_geometry` bound is what pushes back,
+  # with a gradient, rather than this hard bound.
+  #
+  # The 1.0 start is a central transit of a small planet.  It is a backstop:
+  # the relaxation engine derives the real one from a seeded cos i through the
+  # bridge in planet/symbolic_physics.py, which is what lets one params file
+  # drive either parameterization.
+  chord:
+    lower: 0.0
+    upper: 2.0
+    initval: 1.0
     init_scale: 0.1
     unit: ""
     internal_unit: ""
-    latex: "b"
-    description: "Impact Parameter"
+    latex: "\\rm chord"
+    description: "Transit Chord"
+    # rank 5, exactly as vcve and planet.log_q carry it: the relaxation
+    # engine's Condition B rewrites the LOWEST-ranked symbol of a violated
+    # relation, so the chord always absorbs its bridge to cos i rather than
+    # pushing back on cos i, a/R*, the radius ratio or the eccentricity.
+    # Without it this parameter's mere DEFAULT would compete with theirs.
+    rank: 5
     expressions:
-      default:
-        func_name: "calc_b"
-        deps: ["cosi", "ar", "ecc", "esinw"]
+      from_cosi:
+        func_name: "calc_chord_from_cosi"
+        deps: ["cosi", "p", "ar", "ecc", "esinw"]
   inc:
     unit: "deg"
     internal_unit: "rad"
