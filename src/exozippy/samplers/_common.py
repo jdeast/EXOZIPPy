@@ -1223,6 +1223,43 @@ def assemble_inference_data(
     return idata
 
 
+# Draws allocated per growth step (see grow_draw_storage).  Large enough
+# that the reallocation is rare (one per 10k draws/chain), small enough that
+# a run stopped early has not reserved a trace it never wrote.
+DRAW_CHUNK = 10000
+
+
+def grow_draw_storage(stored_raw, stored_lp, needed, chunk=DRAW_CHUNK):
+    """Ensure the T=1 draw buffers hold `needed` draws per chain; grow if not.
+
+    The buffers used to be allocated at the FULL configured draw count up
+    front, which is wrong in both directions once `draws` is large.  A run
+    that stops on convergence, maxtime or a user interrupt has reserved --
+    and, being np.zeros, touched -- the whole thing regardless: at
+    draws=252600 on a 27-parameter model that is ~1.6 GB of resident memory
+    for draws the run will never take (review 6.4.5).
+
+    Grows by whole chunks with np.resize-free concatenation on the DRAW axis,
+    and mutates the dict in place, because the same dict object is handed to
+    the GUI progress callback and to _check_convergence by reference.  The
+    caller must therefore re-read `stored_lp` from the return value -- it is
+    a bare array, not a container.
+
+    Returns the (possibly new) stored_lp array.
+    """
+    have = stored_lp.shape[1]
+    if needed <= have:
+        return stored_lp
+    add = max(chunk, needed - have)
+    n_chains = stored_lp.shape[0]
+    for key, arr in stored_raw.items():
+        pad = np.zeros((n_chains, add) + arr.shape[2:], dtype=arr.dtype)
+        stored_raw[key] = np.concatenate([arr, pad], axis=1)
+    return np.concatenate(
+        [stored_lp, np.zeros((n_chains, add), dtype=stored_lp.dtype)], axis=1
+    )
+
+
 def stamp_and_log_run_summary(
     idata,
     label,

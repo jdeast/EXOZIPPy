@@ -4,6 +4,7 @@ import logging
 import multiprocessing as mp
 import threading
 import time
+import tracemalloc
 
 import arviz as az
 import numpy as np
@@ -644,6 +645,86 @@ def test_make_starts_falls_back_when_system_has_no_jitter():
     # ASSERT
     assert len(starts) == 6
     assert all(np.isfinite(float(logp_fn(s))) for s in starts)
+
+
+# ---------------------------------------------------------------------------
+# Chunked draw storage (review 6.4.5)
+# ---------------------------------------------------------------------------
+
+
+def test_draw_storage_grows_in_chunks_and_preserves_what_was_written():
+    """
+    Given draw buffers smaller than the draws about to be taken,
+    When they are grown,
+    Then the dict is mutated IN PLACE (the GUI callback and the convergence
+      check both hold it by reference), every value already written
+      survives, and the new capacity is a whole chunk.
+    """
+    # ARRANGE
+    from exozippy.samplers._common import grow_draw_storage
+
+    stored_raw = {"x": np.zeros((3, 4)), "y": np.zeros((3, 4, 2))}
+    stored_lp = np.zeros((3, 4))
+    same_dict = stored_raw
+    stored_raw["x"][:, :4] = 7.0
+    stored_lp[:, :4] = -1.5
+
+    # ACT
+    stored_lp = grow_draw_storage(stored_raw, stored_lp, needed=5, chunk=6)
+
+    # ASSERT
+    assert stored_raw is same_dict
+    assert stored_raw["x"].shape == (3, 10)
+    assert stored_raw["y"].shape == (3, 10, 2)
+    assert stored_lp.shape == (3, 10)
+    assert (stored_raw["x"][:, :4] == 7.0).all()
+    assert (stored_lp[:, :4] == -1.5).all()
+    # already big enough -> untouched, same object
+    before = stored_lp
+    assert grow_draw_storage(stored_raw, stored_lp, needed=10) is before
+
+
+def test_an_early_stop_does_not_allocate_the_draws_it_never_takes():
+    """
+    Given a huge configured draw count and a run that stops almost at once,
+    When sampling finishes,
+    Then the buffers hold one chunk, not the configured count.
+
+    At draws=252600 on a 27-parameter model the old full preallocation was
+    ~1.6 GB of resident memory for draws the run never took.  Here the same
+    shape is 4 chains x 1e6 draws x 2 variables = 96 MB, measured with
+    tracemalloc (which counts numpy's own allocations).
+    """
+    # ARRANGE / ACT
+    from exozippy.samplers._common import DRAW_CHUNK
+
+    tracemalloc.start()
+    try:
+        idata = ptde_sample(
+            _simple_model(),
+            _MinimalSystem(),
+            draws=10**6,
+            tune=2,
+            n_temps=2,
+            T_max=2.0,
+            n_chains=4,
+            cores=1,
+            seed=4,
+            log_interval=10**6,
+            maxtime=0.5,
+            min_ess=None,
+            max_rhat=None,
+        )
+        peak_mb = tracemalloc.get_traced_memory()[1] / 1e6
+    finally:
+        tracemalloc.stop()
+
+    # ASSERT
+    assert 1 <= idata.posterior.sizes["draw"] <= DRAW_CHUNK
+    assert peak_mb < 40.0, (
+        f"peak {peak_mb:.0f} MB -- the full 96 MB draw buffer was allocated "
+        f"for a run that took {idata.posterior.sizes['draw']} draws"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -1080,11 +1080,17 @@ def ptde_sample(
         )
 
         # storage: raw values from T=1 chains only
+        # Storage for the T=1 draws, grown in chunks rather than allocated
+        # at the full `draws` up front: an early stop (convergence, maxtime,
+        # a user interrupt) otherwise reserves -- and, being np.zeros,
+        # touches -- the entire trace it will never write.  See
+        # _common.grow_draw_storage.
+        _cap0 = min(int(draws), _common.DRAW_CHUNK)
         stored_raw = {
-            k: np.zeros((n_chains, draws) + raw_start[k].shape)
+            k: np.zeros((n_chains, _cap0) + raw_start[k].shape)
             for k in model_keys
         }
-        stored_lp = np.zeros((n_chains, draws))
+        stored_lp = np.zeros((n_chains, _cap0))
 
         n_accept = np.zeros(n_temps)
         n_propose = np.zeros(n_temps)
@@ -1248,8 +1254,13 @@ def ptde_sample(
                     f"T1_lp=[{min(logps[0]):.1f},{max(logps[0]):.1f}]"
                 )
 
-            # 5. store T=1 draws
+            # 5. store T=1 draws (buffers grow in chunks; see
+            #    _common.grow_draw_storage for why they are not preallocated
+            #    at the full configured draw count)
             if phase == "draw":
+                stored_lp = _common.grow_draw_storage(
+                    stored_raw, stored_lp, draw_idx + 1
+                )
                 for i in range(n_chains):
                     for key in model_keys:
                         stored_raw[key][i, draw_idx] = populations[0][i][key]
