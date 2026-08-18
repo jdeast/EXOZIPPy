@@ -576,10 +576,21 @@ RANK_DERIVED_USER = 80  # Solved using ONLY Rank 100s
 RANK_DERIVED_DATA = 60  # auto-estimated (e.g., K-band mass, RV offsets)
 RANK_DERIVED_MIXED = 40  # Solved using a mix of User and Defaults
 RANK_DEFAULT = 20  # From defaults.yaml
-# A WEAK data hint: above defaults.yaml, below every solver rank.  Its one
-# use today is the microlensing distance hint, which must beat the 10 pc
-# default while yielding to anything the engine can derive.
-RANK_DERIVED_DATA_WEAK = 30
+
+# The two ranks BETWEEN default and derived-mixed, both microlensing distance
+# seeds and both load-bearing at exactly these values.  They lived as bare 25
+# and 30 literals in lens.py, documented only in config.md, so nothing tied
+# the two sites that must stay ordered to the sentence explaining why.  Name
+# them; do NOT change them.
+#
+# A microlensing lens sits at a few kpc, not at the 10 pc defaults.yaml
+# backstop, so the seed must beat RANK_DEFAULT.  It must also LOSE to the
+# source-distance seed, because that is what breaks the d_L <-> parallax
+# cycle: pi_rel drives d_L to RANK_MULENS_SOURCE_DISTANCE through the engine's
+# Condition B, and the parallax is then corrected as the weaker symbol.  Both
+# yield to anything the user writes.
+RANK_MULENS_LENS_DISTANCE = 25  # ~4 kpc lens seed; beats the 10 pc default
+RANK_MULENS_SOURCE_DISTANCE = 30  # ~8 kpc bulge source; beats the lens seed
 
 # Which ranks mean "a component pushed this from the DATA", as opposed to
 # "the relaxation engine derived it".  A SET and not a numeric band, because
@@ -589,7 +600,10 @@ RANK_DERIVED_DATA_WEAK = 30
 # every engine-derived value as data-derived -- the mirror of the bug this
 # replaces, which hardcoded the two literals and so reported any NEW data
 # rank as "solved".  Add a rank here in the same commit that introduces it.
-DATA_RANKS = frozenset({RANK_DERIVED_DATA, RANK_DERIVED_DATA_WEAK})
+# RANK_MULENS_LENS_DISTANCE (25) is deliberately NOT here: that is the
+# historical behavior, and whether those seeds should report as data at all
+# is review item 3.14.6, which also has to weigh their PRECEDENCE.
+DATA_RANKS = frozenset({RANK_DERIVED_DATA, RANK_MULENS_SOURCE_DISTANCE})
 
 
 """ 

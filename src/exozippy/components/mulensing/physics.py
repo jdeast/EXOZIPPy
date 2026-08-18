@@ -431,9 +431,25 @@ def calc_zeropoint(m_source_pred, zp_center, sed_constrained, f_source):
 
 @register_physics
 def calc_rho(radius, distance, theta_E):
+    """Source radius in Einstein radii.
+
+    The divisor is floored at the SAME ``THETA_E_FLOOR`` ``calc_theta_E``
+    itself uses.  It used to carry a private ``1e-10`` and, in front of it, a
+    ``pt.nan_to_num(theta_E, nan=0.0)``; both are gone (review 2.6.2):
+
+    * two different floors meant rho was computed against a different theta_E
+      than t_E and pi_E for any value in [1e-12, 1e-10) -- three numbers
+      claiming to describe one lens while disagreeing about it;
+    * a floor must never be paired with a NaN substitution (the PR #142
+      policy, argued at length on ``clip_q_value``).  A substitution turns a
+      failed computation into a healthy-looking likelihood with a ZERO
+      gradient, which is the failure the floor exists to avoid, not a belt to
+      go with its braces.  It was unreachable anyway: ``calc_theta_E`` floors
+      its own radicand, so theta_E cannot be NaN unless its inputs are, and a
+      NaN input must reach logp and be rejected.
+    """
     theta_star_mas = (radius * RSUN_TO_AU / distance) * 1000.0
-    theta_E_safe = pt.maximum(pt.nan_to_num(theta_E, nan=0.0), 1e-10)
-    return theta_star_mas / theta_E_safe
+    return theta_star_mas / pt.maximum(theta_E, THETA_E_FLOOR)
 
 
 @register_physics

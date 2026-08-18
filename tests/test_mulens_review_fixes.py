@@ -5,6 +5,7 @@ import logging
 import warnings
 
 import numpy as np
+import pytensor.tensor as pt
 import pytest
 
 from conftest import _DummyComponent, _DummyConfigManager, _DummySystem
@@ -12,9 +13,12 @@ from exozippy.components.mulensing.lens import Lens
 from exozippy.components.mulensing.mulensinstrument import MulensInstrument
 from exozippy.components.mulensing.op import (
     BinaryLensMagOp,
+    MulensMagOp,
+    VBMDirectMagOp,
     _build_binary_model,
     _build_pspl_model,
     _dev_skycoord,
+    _MagGradOp,
 )
 from exozippy.run import KNOWN_SAMPLER_KEYS
 
@@ -44,6 +48,31 @@ def test_dev_skycoord_cache_distinguishes_same_length_arrays():
     )
     assert _dev_skycoord(ground, cache) is coord_ground
     assert _dev_skycoord(satellite, cache) is coord_sat
+
+
+def test_ephemeris_caches_key_on_bytes_not_on_a_hash():
+    """
+    Given the two observer-deviation caches in op.py,
+    When their keys are inspected,
+    Then the array's BYTES are in the key, not hash(bytes): a 64-bit siphash
+      can collide, and the whole point of these caches is telling apart two
+      same-shaped deviation arrays, so a collision would silently reuse the
+      wrong observer's parallax deltas (review 2.6.4).
+    """
+    # Arrange
+    cache = {}
+    dev = np.arange(15, dtype=float).reshape(5, 3)
+    op = VBMDirectMagOp(COORDS, n_companions=1)
+
+    # Act
+    _dev_skycoord(dev, cache)
+    op._deltas(dev)
+
+    # Assert
+    for store in (cache, op._delta_cache):
+        ((shape, blob),) = store.keys()
+        assert shape == (5, 3)
+        assert blob == dev.tobytes()
 
 
 def test_pspl_model_floors_nonpositive_rho():
@@ -171,6 +200,188 @@ def test_mag_op_warns_once_when_falling_back_to_nan():
     runtime = [w for w in caught if issubclass(w.category, RuntimeWarning)]
     assert len(runtime) == 1
     assert "VBBL" in str(runtime[0].message)
+
+
+class _RaisingVBM:
+    """A stand-in for the VBMicrolensing object that fails the way a broken
+    backend does: every magnification call raises.  Real causes are a
+    SetLensGeometry rejection, a SWIG ValueError, or API drift in a new
+    wheel."""
+
+    a1 = 0.0
+    Tol = 1e-3
+    RelTol = 0.0
+
+    def _boom(self, *args, **kwargs):
+        raise ValueError("SetLensGeometry: bad lens configuration")
+
+    BinaryMag0 = BinaryMag2 = MultiMag0 = MultiMag2 = _boom
+    SetLensGeometry = _boom
+
+
+def test_vbm_direct_op_warns_once_when_the_backend_raises():
+    """
+    Given a VBMDirectMagOp whose VBMicrolensing backend raises on every call
+      (a misconfigured/broken backend, not a bad proposal),
+    When perform() is called twice with a perfectly ordinary parameter vector,
+    Then both calls return NaN (so the proposal is rejected) AND a single
+      RuntimeWarning naming the underlying error is emitted -- silently
+      returning all-NaN forever is how a default-backend binary fit runs to a
+      garbage posterior with no message (review 2.6.1).
+    """
+    # Arrange
+    op = VBMDirectMagOp(COORDS, n_companions=1, use_rho=False)
+    op._vbm = _RaisingVBM()
+    times = np.linspace(2449980.0, 2450020.0, 11)
+    obs_pos = np.zeros((times.size, 3))
+    first, second = [[None]], [[None]]
+
+    # Act
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        op.perform(None, [_P_BINARY_PS, times, obs_pos], first)
+        op.perform(None, [_P_BINARY_PS, times, obs_pos], second)
+
+    # Assert
+    assert np.all(np.isnan(first[0][0]))
+    assert np.all(np.isnan(second[0][0]))
+    runtime = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert len(runtime) == 1
+    assert "SetLensGeometry" in str(runtime[0].message)
+    assert "VBMDirectMagOp" in str(runtime[0].message)
+
+
+def test_vbm_direct_op_nonfinite_warning_does_not_silence_the_backend_one():
+    """
+    Given a VBMDirectMagOp that first sees a non-finite parameter vector and
+      then hits a raising backend,
+    When perform() is called for each in turn,
+    Then BOTH are reported: the two failure modes have different fixes (fix
+      the model vs. fix the install), so one warn-once flag would let a burst
+      of NaN proposals permanently hide a broken backend.
+    """
+    # Arrange
+    op = VBMDirectMagOp(COORDS, n_companions=1, use_rho=False)
+    times = np.linspace(2449980.0, 2450020.0, 11)
+    obs_pos = np.zeros((times.size, 3))
+    nonfinite = _P_BINARY_PS.copy()
+    nonfinite[1] = np.nan
+    out = [[None]]
+
+    # Act
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        op.perform(None, [nonfinite, times, obs_pos], out)
+        op._vbm = _RaisingVBM()
+        op.perform(None, [_P_BINARY_PS, times, obs_pos], out)
+
+    # Assert
+    messages = [
+        str(w.message)
+        for w in caught
+        if issubclass(w.category, RuntimeWarning)
+    ]
+    assert len(messages) == 2
+    assert any("non-finite" in m for m in messages)
+    assert any("SetLensGeometry" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# Gradient honesty on the Op path (reviews 1.6.3, 2.6.5)
+# ---------------------------------------------------------------------------
+
+
+def _mag_op_output(op, n_times=7):
+    """Apply an Op to symbolic inputs and hand back (output, param vector)."""
+    p = pt.dvector("p")
+    times = pt.dvector("t")
+    obs = pt.dmatrix("obs")
+    return op(p, times, obs), p
+
+
+@pytest.mark.parametrize(
+    "op",
+    [
+        MulensMagOp(COORDS, mag_method="point_source"),
+        BinaryLensMagOp(COORDS, mag_method="auto_vbbl", use_rho=False),
+    ],
+    ids=["pspl", "binary"],
+)
+def test_mulensmodel_op_refuses_to_be_differentiated(op):
+    """
+    Given a MulensModel-backed magnification Op,
+    When a gradient is requested through it,
+    Then it raises rather than quietly wiring a forward-difference _MagGradOp
+      that burns N_params+1 full light curves per step for an O(eps) answer
+      (review 2.6.5) -- the same refusal VBMDirectMagOp.pullback already makes.
+    """
+    # Arrange
+    out, p = _mag_op_output(op)
+
+    # Act / Assert
+    with pytest.raises(NotImplementedError, match="no gradient"):
+        pt.grad(pt.sum(out), p)
+
+
+def test_vbm_direct_op_refuses_to_be_differentiated():
+    """
+    Given the default binary backend,
+    When a gradient is requested through it,
+    Then it raises -- pinned here beside the MulensModel Ops so the two
+      backends cannot drift apart on this again.
+    """
+    # Arrange
+    out, p = _mag_op_output(VBMDirectMagOp(COORDS, n_companions=1))
+
+    # Act / Assert
+    with pytest.raises(NotImplementedError, match="no gradient"):
+        pt.grad(pt.sum(out), p)
+
+
+def test_mag_grad_op_refuses_a_second_derivative():
+    """
+    Given _MagGradOp (the forward-difference gradient machinery, now reachable
+      only if someone revives it),
+    When a second derivative is requested,
+    Then it RAISES rather than returning DisconnectedType: the output IS
+      linear in the incoming cotangent, so "disconnected" would be a false
+      claim handing back an absent gradient, while a Hessian built on a
+      first-order finite difference is numerically meaningless anyway
+      (review 1.6.3).
+    """
+    # Arrange
+    grad_op = _MagGradOp(_build_pspl_model, COORDS, "point_source")
+    p = pt.dvector("p")
+    times = pt.dvector("t")
+    obs = pt.dmatrix("obs")
+    g = pt.dvector("g")
+    out = grad_op(p, times, obs, g)
+
+    # Act / Assert
+    with pytest.raises(NotImplementedError, match="second derivative"):
+        pt.grad(pt.sum(out), g)
+    with pytest.raises(NotImplementedError, match="second derivative"):
+        pt.grad(pt.sum(out), p)
+
+
+def test_mag_grad_op_still_declares_the_cotangent_connected():
+    """
+    Given _MagGradOp,
+    When its connection_pattern is read,
+    Then the incoming cotangent is CONNECTED -- the output really is linear in
+      it, and declaring it disconnected (the obvious way to "fix" the wrongly
+      shaped VJP it used to return) would let pytensor skip pullback and hand
+      back an absent gradient instead of the error above.
+    """
+    # Arrange
+    grad_op = _MagGradOp(_build_pspl_model, COORDS, "point_source")
+
+    # Act
+    pattern = grad_op.connection_pattern(None)
+
+    # Assert
+    assert pattern[0] == [True]  # parameters
+    assert pattern[3] == [True]  # incoming cotangent
 
 
 def test_lens_rejects_missing_body_component():
@@ -663,6 +874,146 @@ def test_flux_total_estimate_sharp_caustic_crossing():
         f"f_total should be within 2x of the true baseline {f_baseline:.3f}; "
         f"got {f_total:.3f}."
     )
+
+
+def _make_2s_inst(f_blend=0.4, f_src=(0.6, 0.2), n=400):
+    """A two-source instrument whose synthetic flux is exactly
+    f_src[0]*A_0 + f_src[1]*A_1 + f_blend, so the bootstrap has a right
+    answer to be measured against."""
+    t0a, t0b, u0, tE = 2458554.89, 2458560.0, 0.3, 18.17
+    inst = MulensInstrument.__new__(MulensInstrument)
+    inst._n_sources = 2
+    inst.config_manager = _DummyConfigManager()
+    inst.config_manager.user_params = {
+        "lens.0.t_0": {"initval": t0a},
+        "lens.0.u_0": {"initval": u0},
+        "lens.0.t_E": {"initval": tE},
+        "lens.1.t_0": {"initval": t0b},
+        "lens.1.u_0": {"initval": 0.15},
+        "lens.1.t_E": {"initval": tE},
+        "lens.0.pi_E_N": {"initval": 0.0},
+        "lens.0.pi_E_E": {"initval": 0.0},
+    }
+
+    t = np.linspace(t0a - 40, t0a + 40, n)
+
+    def pspl(t0_, u0_):
+        tau = (t - t0_) / tE
+        u = np.sqrt(u0_**2 + tau**2)
+        return (u**2 + 2.0) / (u * np.sqrt(u**2 + 4.0))
+
+    flux = f_src[0] * pspl(t0a, u0) + f_src[1] * pspl(t0b, 0.15) + f_blend
+    return inst, t, flux, np.zeros((n, 3))
+
+
+def test_multisource_bootstrap_honors_a_user_f_blend():
+    """
+    Given a two-source light curve and a params entry pinning f_blend,
+    When the flux bootstrap runs,
+    Then f_total - f_source equals that entry exactly: a user blend is a
+      statement, not a starting guess.  The multi-source branch used to leave
+      the constant column in the NNLS design and never read f_blend_user at
+      all, so log_f_total and q_source were seeded from an estimate that
+      contradicted the user (review 1.6.2).
+    """
+    # Arrange
+    f_blend, f_src = 0.4, (0.6, 0.2)
+    inst, t, flux, xyz = _make_2s_inst(f_blend=f_blend, f_src=f_src)
+    # Deliberately NOT the truth: a wrong-but-pinned blend is what exposes
+    # whether the estimate is being overridden or merely coincides.
+    pinned = 0.25
+    inst.config_manager.user_params["mulensinstrument.0.f_blend"] = {
+        "initval": pinned
+    }
+
+    # Act
+    f_total, q_source, _q_flux = inst._estimate_flux_components(
+        t, flux, xyz, 0.0, 0.0, inst_idx=0
+    )
+
+    # Assert
+    assert f_total * q_source == pytest.approx(f_total - pinned, rel=1e-9)
+    assert f_total - f_total * q_source == pytest.approx(pinned, rel=1e-9)
+
+
+def test_multisource_bootstrap_without_a_user_f_blend_is_unchanged():
+    """
+    Given the same two-source light curve and NO f_blend entry,
+    When the flux bootstrap runs,
+    Then it recovers the truth via the full NNLS -- the pre-existing path is
+      untouched by the fix above.
+    """
+    # Arrange
+    f_blend, f_src = 0.4, (0.6, 0.2)
+    inst, t, flux, xyz = _make_2s_inst(f_blend=f_blend, f_src=f_src)
+
+    # Act
+    f_total, q_source, _q_flux = inst._estimate_flux_components(
+        t, flux, xyz, 0.0, 0.0, inst_idx=0
+    )
+
+    # Assert
+    assert f_total == pytest.approx(sum(f_src) + f_blend, rel=1e-6)
+    assert f_total * q_source == pytest.approx(sum(f_src), rel=1e-6)
+
+
+def test_nonpositive_user_f_total_falls_back_with_a_warning(caplog):
+    """
+    Given f_source and f_blend entries whose SUM is not positive,
+    When the flux bootstrap runs,
+    Then it falls back to the data's own baseline and warns naming both
+      entries -- the both-user branch used to return the sum unchecked, so
+      log_f_total took log10 of a non-positive number (surfacing much later as
+      a missing-start error naming the wrong parameter) and
+      _scale_flux_amplitudes derived negative upper bounds from it
+      (review 2.6.3).
+    """
+    # Arrange -- a negative BLEND is legitimate (difference imaging); it is
+    # the negative TOTAL that is not.
+    inst, t, flux, xyz = _make_inst_with_q_source_data(f_baseline=0.62)
+    inst.config_manager.user_params["mulensinstrument.0.f_source"] = {
+        "initval": 0.5
+    }
+    inst.config_manager.user_params["mulensinstrument.0.f_blend"] = {
+        "initval": -0.5
+    }
+
+    # Act
+    with caplog.at_level("WARNING"):
+        f_total, q_source, _q_flux = inst._estimate_flux_components(
+            t, flux, xyz, 0.0, 0.0, inst_idx=0
+        )
+
+    # Assert
+    assert f_total > 0.0
+    assert 0.0 < q_source <= 1.0
+    assert "f_source" in caplog.text and "f_blend" in caplog.text
+
+
+def test_positive_user_f_total_is_still_taken_verbatim():
+    """
+    Given f_source and f_blend entries summing to a positive baseline,
+    When the flux bootstrap runs,
+    Then the user's numbers are used exactly -- the guard above must not
+      disturb the ordinary both-user path.
+    """
+    # Arrange
+    inst, t, flux, xyz = _make_inst_with_q_source_data()
+    inst.config_manager.user_params["mulensinstrument.0.f_source"] = {
+        "initval": 0.5
+    }
+    inst.config_manager.user_params["mulensinstrument.0.f_blend"] = {
+        "initval": 0.1
+    }
+
+    # Act
+    f_total, q_source, _q_flux = inst._estimate_flux_components(
+        t, flux, xyz, 0.0, 0.0, inst_idx=0
+    )
+
+    # Assert
+    assert f_total == pytest.approx(0.6)
+    assert q_source == pytest.approx(0.5 / 0.6)
 
 
 def test_log_f_total_bootstrap_yields_to_user_params():

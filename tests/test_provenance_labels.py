@@ -18,9 +18,9 @@ from exozippy.config import (
     DATA_RANKS,
     RANK_DEFAULT,
     RANK_DERIVED_DATA,
-    RANK_DERIVED_DATA_WEAK,
     RANK_DERIVED_MIXED,
     RANK_DERIVED_USER,
+    RANK_MULENS_SOURCE_DISTANCE,
     RANK_USER,
     ConfigManager,
 )
@@ -38,7 +38,7 @@ def label():
         (None, "default"),
         (RANK_DEFAULT, "default"),
         (RANK_DEFAULT - 1, "default"),
-        (RANK_DERIVED_DATA_WEAK, "data"),
+        (RANK_MULENS_SOURCE_DISTANCE, "data"),
         (RANK_DERIVED_DATA, "data"),
         (RANK_DERIVED_MIXED, "solved"),
         (RANK_DERIVED_USER, "solved"),
@@ -76,7 +76,7 @@ def test_a_solver_rank_between_the_data_ranks_is_not_called_data(label):
     band: that band would report every engine-derived value as data-derived,
     the mirror image of the bug it replaced.
     """
-    assert RANK_DERIVED_DATA_WEAK < RANK_DERIVED_MIXED < RANK_DERIVED_DATA
+    assert RANK_MULENS_SOURCE_DISTANCE < RANK_DERIVED_MIXED < RANK_DERIVED_DATA
     assert label(RANK_DERIVED_MIXED) == "solved"
 
 
@@ -86,5 +86,7 @@ def test_the_data_ranks_are_named_constants_not_literals():
     When its members are compared with the named rank constants,
     Then it is exactly those -- no bare literal survives in the predicate.
     """
-    assert DATA_RANKS == frozenset({RANK_DERIVED_DATA, RANK_DERIVED_DATA_WEAK})
-    assert RANK_DERIVED_DATA_WEAK == 30  # the microlensing distance hint
+    assert DATA_RANKS == frozenset(
+        {RANK_DERIVED_DATA, RANK_MULENS_SOURCE_DISTANCE}
+    )
+    assert RANK_MULENS_SOURCE_DISTANCE == 30  # the microlensing distance hint
