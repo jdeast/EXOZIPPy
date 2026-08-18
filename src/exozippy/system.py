@@ -1108,31 +1108,6 @@ class System(Component):
             var.name: val for var, val in zip(output_vars, physical_values)
         }
 
-    def get_physical_point(self, model, raw_point):
-        output_vars = model.free_RVs + model.deterministics
-
-        eval_fn = pytensor.function(
-            inputs=model.free_RVs,
-            outputs=output_vars,
-            on_unused_input="ignore",
-        )
-
-        # Pull the values in the exact order the function expects them
-        input_values = [raw_point[v.name] for v in model.free_RVs]
-
-        physical_values = eval_fn(*input_values)
-        param_lookup = self.get_parameter_lookup()
-
-        results = {}
-        for var, val in zip(output_vars, physical_values):
-            if var.name in param_lookup:
-                # Standardize: Always use from_internal to ensure we return User Units
-                results[var.name] = param_lookup[var.name].from_internal(val)
-            else:
-                results[var.name] = val
-
-        return results
-
     def distribute_posterior(self, idata):
         """Maps the traces from idata back to the individual Parameter objects."""
         posterior = az.extract(idata, keep_dataset=True)
