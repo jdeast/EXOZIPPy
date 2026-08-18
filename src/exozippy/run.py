@@ -35,12 +35,6 @@ from .whitening import prepare_whitening
 
 logger = logging.getLogger(__name__)
 
-# debugging knobs
-# pytensor.config.optimizer_excluding = "local_elemwise_fusion"
-# pytensor.config.allow_gc = True
-# pytensor.config.linker = "py"
-# import ipdb
-
 # Every key `_run_fit` reads off the `sampler:` block. Anything else is
 # warned about and ignored, so this set must stay a superset of the keys the
 # code actually consumes: a key missing here produces a warning saying it will
@@ -533,13 +527,9 @@ def _run_fit(config, gui, user_params=None):
                 filename_prefix=str(prefix) + "_start",
             )
 
-        #### profiling ####
         if profile:
             func = model.logp_dlogp_function(profile=True)
             func.profile.summary()
-            # ipdb.set_trace()
-        ###################
-        # ipdb.set_trace()
 
         if reusing_trace:
             # if we've already done the sampling and don't want to redo it, load it
@@ -764,9 +754,6 @@ def _run_fit(config, gui, user_params=None):
             # produced these draws, so any later reload can verify it.
             stamp_structural_metadata(idata, system)
             idata.to_netcdf(trace_path)
-
-        # compute the loglikelihoods (super slow? I can't believe this can't be stored/recalled...
-        # loglike = pm.compute_log_likelihood(idata)
 
     # Sampling is done; the rest is post-processing + report/plot output.
     gui.phase("writing")
