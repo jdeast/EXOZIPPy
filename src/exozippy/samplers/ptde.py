@@ -48,7 +48,6 @@ from exozippy.samplers._common import (  # noqa: F401
     _pick_two,
     _shutdown_pool,
     _worker_init,
-    de_proposal,
     next_gamma,
 )
 

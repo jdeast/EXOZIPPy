@@ -609,8 +609,15 @@ def de_proposal(rng, pop, i, gamma, keys, jitter=DE_JITTER):
     """One ter Braak DE-MC proposal for population member `i`:
     x_i + gamma * (x_j1 - x_j2) + jitter * N(0, 1), j1 != j2 != i.
 
-    THE single owner of the production proposal formula -- both samplers
-    call this so the move (and its epsilon term) cannot drift between them.
+    THE REFERENCE IMPLEMENTATION, and no longer the production path: both
+    samplers now hold their populations packed and call RawLayout.propose,
+    which is the same move on a flat vector and 5x cheaper (review 6.4.2).
+    This one is kept -- deliberately, do not delete it as unused -- because
+    it is what the packed move is PINNED AGAINST: a test builds the same
+    proposal both ways from the same seed and demands they agree bit for
+    bit.  Written in the obvious dict-at-a-time way, it is the readable
+    statement of the move, and the thing to change first if the move ever
+    changes.
     """
     j1, j2 = _pick_two(rng, len(pop), i)
     prop = {}
