@@ -2370,10 +2370,13 @@ class ConfigManager:
                 fallback=True,
                 absent=True,
             )
-            # A parameter is fixed when it has a hardcoded value or sigma == 0.
-            fixed = (cfg.get("value") is not None) or (
-                sigma is not None and sigma == 0
-            )
+            # A parameter is fixed when sigma == 0 -- the ONE documented pin
+            # (see Parameter.build_pymc).  This used to read
+            # `cfg.get("value") is not None or ...`, which described a channel
+            # that does not exist: resolve() never emits a "value" key, so the
+            # disjunct was dead and its only effect was to invite someone to
+            # "fix" a pin bug by populating it.
+            fixed = sigma is not None and sigma == 0
             # An INACTIVE element is held at a bookkeeping value whatever its
             # resolved sigma says (the pin is the role, not a `sigma: 0` in the
             # config), so it must not be reported as free: a consumer that draws
