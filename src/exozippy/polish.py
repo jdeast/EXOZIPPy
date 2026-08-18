@@ -68,6 +68,7 @@ destroying the restart's overdispersion.
 """
 
 import logging
+import multiprocessing as mp
 
 import numpy as np
 
@@ -243,6 +244,8 @@ def polish_raw_starts(
     rng=None,
     tol=_UNSET,
     tol_window=_UNSET,
+    cores=None,
+    adapt_gamma=_UNSET,
 ):
     """Polish each raw start toward its own basin's optimum.
 
@@ -304,6 +307,7 @@ def polish_raw_starts(
         return polished, dlps, "lbfgs"
 
     # Gradient-free fallback: the PR #56 polish, jittering at one raw unit.
+    from .samplers import _common
     from .samplers.ptde import polish_seed_starts
 
     if logp_fn is None:
@@ -318,7 +322,55 @@ def polish_raw_starts(
         de_kwargs["tol"] = tol
     if tol_window is not _UNSET:
         de_kwargs["tol_window"] = tol_window
-    polished, dlps = polish_seed_starts(
-        raw_starts, logp_fn, rng, scales, n_steps=n_steps, **de_kwargs
-    )
+    if adapt_gamma is not _UNSET:
+        de_kwargs["adapt_gamma"] = adapt_gamma
+
+    # The DE engine is a population method with nothing shared between
+    # members within a sweep, so it parallelizes exactly as the sampler
+    # does -- and until this was wired up it ran SERIAL while the job held
+    # every core the sampler was about to use.  Same worker contract as
+    # ptde_async: install the compiled logp in _common BEFORE forking so
+    # children inherit it copy-on-write, then hand the pool
+    # _common._eval_logp (module-level, so picklable by reference).
+    n_proc = _resolve_polish_cores(cores, len(raw_starts))
+    pool = None
+    if n_proc > 1:
+        _common.set_worker_globals(logp_fn)
+        pool = mp.Pool(processes=n_proc)
+        logger.info(
+            f"Seed polish: DE engine on {n_proc} worker process(es), "
+            f"proposals pooled across all {len(raw_starts)} seed(s)."
+        )
+    try:
+        polished, dlps = polish_seed_starts(
+            raw_starts,
+            _common._eval_logp if pool is not None else logp_fn,
+            rng,
+            scales,
+            n_steps=n_steps,
+            pool=pool,
+            **de_kwargs,
+        )
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
     return polished, dlps, "de"
+
+
+def _resolve_polish_cores(cores, n_seeds):
+    """Worker count for the DE polish.
+
+    Capped at the batch size (n_seeds * pop_size) upstream by there simply
+    being nothing more to hand out; here we only guard against asking for
+    more processes than the machine has, and against the degenerate 1.
+    """
+    if cores is None:
+        return 1
+    try:
+        n = int(cores)
+    except (TypeError, ValueError):
+        return 1
+    if n <= 1:
+        return 1
+    return max(1, min(n, mp.cpu_count()))

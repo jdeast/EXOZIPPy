@@ -9,6 +9,8 @@ set_whitening keeping a nonzero raw start pinned to the same physical point
 through a rescale.
 """
 
+import logging
+
 import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
@@ -523,3 +525,240 @@ def test_lbfgs_polish_stops_on_the_gradient_not_the_cap():
     # ASSERT
     assert dlp_1[0] < dlp_full[0]
     assert float(lp_fn(full[0])) == pytest.approx(0.0, abs=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Gamma adaptation and cross-seed pooling in the DE polish
+# ---------------------------------------------------------------------------
+
+
+def _polish_gamma_transition(caplog, **kwargs):
+    """Run the DE polish and read (gamma_initial, gamma_final) off its log.
+
+    Asserting on gamma directly, rather than on how good the answer was,
+    is deliberate: on any surface simple enough for a unit test both
+    settings reach the same optimum, so an outcome comparison measures
+    nothing (the first version of this test compared 0.4995 against
+    0.4999 and failed on noise).  The behaviour under test is that gamma
+    MOVES, and in which direction.
+    """
+    import re
+
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        polish_seed_starts(**kwargs)
+    m = re.search(r"gamma ([0-9.eE+-]+)->([0-9.eE+-]+)", caplog.text)
+    assert m, f"no gamma transition logged; got: {caplog.text!r}"
+    return float(m.group(1)), float(m.group(2))
+
+
+# A unit-variance well with the population born TIGHT inside it (jitter
+# 1e-3), so the only thing setting acceptance is gamma.  Getting this
+# arrangement right matters: an earlier version of these tests jittered the
+# population by a full unit into the tails of a narrow well, where the
+# members are so far out that almost any inward step is a huge lp gain --
+# acceptance is then HIGH and growing gamma is the correct response, which
+# is the opposite of the condition being tested.
+def _tight_well(x_scale=1.0):
+    def logp(p):
+        return float(-0.5 * np.sum((p["x"] / x_scale) ** 2))
+
+    return logp
+
+
+def test_de_polish_shrinks_gamma_when_the_step_is_too_big(caplog):
+    """
+    Given a population sitting inside its well but a gamma so large that
+      proposals land far outside it,
+    When the DE polish runs with adaptation on (the default),
+    Then gamma is driven DOWN, rather than the engine sitting at ~0
+      acceptance for the whole run.
+
+    This is the defect the adaptation exists for.  ptde_async starts from
+    the same 2.38/sqrt(2D) rule of thumb and tunes it; on DC2018 event 128
+    (D = 27) it settles at ~0.055 against the formula's 0.3239.  Run fixed
+    at 0.3239 the polish sustained 0.003-0.004 acceptance with 84-88% of
+    sweeps accepting nothing at all, so most of the population never moved
+    off its birth position and best-minus-median stayed ~800-1000 nats
+    where a converged population shows ~D/2.
+    """
+    # ARRANGE: steps of ~1e4 * 1e-3 = 10 sigma, essentially all rejected
+    # ACT
+    g0, g1 = _polish_gamma_transition(
+        caplog,
+        raw_starts=[{"x": np.array([0.0])}],
+        logp_fn=_tight_well(),
+        rng=np.random.default_rng(0),
+        scales={"x": np.full(1, 1e-3)},
+        n_steps=40,
+        pop_size=8,
+        gamma=1e4,
+        adapt_gamma=True,
+    )
+
+    # ASSERT
+    assert g1 < g0 / 5.0, f"gamma did not shrink: {g0} -> {g1}"
+
+
+def test_de_polish_grows_gamma_when_the_step_is_too_small(caplog):
+    """
+    Given a gamma so small that every proposal is a no-op and therefore
+      accepted,
+    When the DE polish adapts,
+    Then gamma is driven UP -- the rule is a controller, not a one-way
+      shrink, so both directions are pinned.
+    """
+    # ARRANGE: steps of ~1e-6 * 1e-3, lp change negligible -> accept ~1
+    # ACT
+    g0, g1 = _polish_gamma_transition(
+        caplog,
+        raw_starts=[{"x": np.array([0.0])}],
+        logp_fn=_tight_well(),
+        rng=np.random.default_rng(0),
+        scales={"x": np.full(1, 1e-3)},
+        n_steps=40,
+        pop_size=8,
+        gamma=1e-6,
+        adapt_gamma=True,
+    )
+
+    # ASSERT
+    assert g1 > g0 * 5.0, f"gamma did not grow: {g0} -> {g1}"
+
+
+def test_de_polish_leaves_gamma_alone_when_adaptation_is_off(caplog):
+    """Opting out must really opt out -- the pre-2026-08 behaviour."""
+    g0, g1 = _polish_gamma_transition(
+        caplog,
+        raw_starts=[{"x": np.array([0.0])}],
+        logp_fn=_tight_well(),
+        rng=np.random.default_rng(0),
+        scales={"x": np.full(1, 1e-3)},
+        n_steps=40,
+        pop_size=8,
+        gamma=1e4,
+        adapt_gamma=False,
+    )
+    assert g0 == g1
+
+
+def test_de_polish_gamma_shrinks_when_nothing_is_accepted():
+    """
+    Given a surface so sharp that a whole window accepts zero proposals,
+    When the DE polish adapts gamma,
+    Then gamma still shrinks rather than stalling -- the (ar/target)**0.5
+      rule has no signal at ar = 0, so that case is handled explicitly.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    seen = []
+
+    def logp(p):
+        # -inf everywhere except exactly the seed: nothing can be accepted
+        return 0.0 if np.all(p["x"] == 0.0) else -np.inf
+
+    # ACT
+    polished, dlps = polish_seed_starts(
+        [{"x": np.array([0.0])}],
+        logp,
+        np.random.default_rng(0),
+        {"x": np.ones(1)},
+        n_steps=20,
+        pop_size=8,
+        adapt_gamma=True,
+    )
+
+    # ASSERT: it survives, and returns the seed rather than a -inf point
+    np.testing.assert_allclose(polished[0]["x"], [0.0])
+    assert dlps[0] == 0.0
+
+
+def test_de_polish_pools_proposals_across_all_seeds():
+    """
+    Given several seeds and a pool,
+    When the DE polish runs,
+    Then every sweep hands the pool ONE batch containing all seeds'
+      proposals, so workers are shared dynamically rather than the seeds
+      being partitioned between them.
+
+    Two seeds on 64 cores must not become 32 + 32 with one half idling once
+    its seed finishes; the batch is n_seeds * pop_size items and workers
+    take the next available one.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    batch_sizes = []
+
+    class _RecordingPool:
+        def map(self, fn, items):
+            batch_sizes.append(len(items))
+            return [fn(x) for x in items]
+
+    def logp(p):
+        return float(-0.5 * np.sum((p["x"] - 3.0) ** 2))
+
+    n_seeds, pop = 3, 8
+    seeds = [{"x": np.array([float(i)])} for i in range(n_seeds)]
+
+    # ACT
+    polish_seed_starts(
+        seeds,
+        logp,
+        np.random.default_rng(0),
+        {"x": np.ones(1)},
+        n_steps=5,
+        pop_size=pop,
+        pool=_RecordingPool(),
+    )
+
+    # ASSERT: one seeding batch of all populations, then one batch per
+    # sweep, each carrying every seed's proposals
+    assert batch_sizes[0] == n_seeds * pop
+    assert batch_sizes[1:] == [n_seeds * pop] * 5
+
+
+def test_de_polish_serial_and_pooled_agree_on_the_same_stream():
+    """
+    Given the same seeds, rng stream and settings,
+    When the polish runs serially and through a pool,
+    Then both return the same polished point: the pool changes WHERE the
+      logp calls happen, not the chain.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    class _SerialPool:
+        def map(self, fn, items):
+            return [fn(x) for x in items]
+
+    def logp(p):
+        return float(-0.5 * np.sum((p["x"] - 3.0) ** 2))
+
+    kw = dict(n_steps=10, pop_size=8, adapt_gamma=True)
+    seeds = [{"x": np.array([0.0])}, {"x": np.array([6.0])}]
+
+    # ACT
+    a, dlp_a = polish_seed_starts(
+        [dict(s) for s in seeds],
+        logp,
+        np.random.default_rng(7),
+        {"x": np.ones(1)},
+        **kw,
+    )
+    b, dlp_b = polish_seed_starts(
+        [dict(s) for s in seeds],
+        logp,
+        np.random.default_rng(7),
+        {"x": np.ones(1)},
+        pool=_SerialPool(),
+        **kw,
+    )
+
+    # ASSERT
+    for pa, pb in zip(a, b):
+        np.testing.assert_allclose(pa["x"], pb["x"])
+    np.testing.assert_allclose(dlp_a, dlp_b)

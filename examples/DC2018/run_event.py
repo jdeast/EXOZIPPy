@@ -154,12 +154,37 @@ def build_config(name, files, prefix, mmx_json, args):
         ],
         "sampler": {
             "method": args.sampler,
+            # The DE polish is the only one available here (the binary-lens
+            # magnification Op has no gradient), and on DC18 cadence it
+            # routinely spends the whole default 150-sweep cap still
+            # climbing -- the log says "hit the 150-step cap" and the
+            # whitening probe then reports a gradient-dominated start.  A
+            # seed left short of its basin optimum is a seed the sampler
+            # abandons, so this is exposed per run rather than buried.
+            "seed_polish": args.seed_polish,
             "n_temps": (
                 args.n_temps
                 if str(args.n_temps).lower() == "auto"
                 else int(args.n_temps)
             ),
-            "T_max": 200,
+            # T_max sets what barrier the ladder can cross: the hottest rung
+            # sees a barrier of B/T_max nats, so crossing needs that down to
+            # a few.  Event 128's measured close/wide barrier is 42563 nats
+            # (notes/dc2018_event128_basin.txt), i.e. 213 nats even at the
+            # default T_max=200 -- unreachable -- while T_max=8500 brings it
+            # to 5.  With `n_temps: auto` the rung count follows
+            # sqrt(D/2)*ln(T_max), so that costs 34 rungs against 20, not a
+            # different algorithm.
+            "T_max": args.t_max,
+            # n_temps must satisfy the DEO criterion n_temps >= 2*Lambda+1
+            # (Lambda = the measured communication barrier), and `auto` --
+            # sqrt(D/2)*ln(T_max) -- does NOT know Lambda, so it
+            # under-provisions by ~20% on this model at every T_max.  When
+            # parallax became a real likelihood direction Lambda doubled
+            # (6.0 -> 11.5 at T_max=200) and round trips collapsed from 1427
+            # to 8 on an unchanged 20-rung ladder.  Set n_chains down when
+            # setting n_temps up to hold the slot count roughly fixed.
+            "n_chains": args.n_chains,
             "cores": args.cores,
             "tune": args.tune,
             "draws": args.draws,
@@ -249,6 +274,31 @@ def main(argv=None):
         "warning reports a communication-limited ladder)",
     )
     ap.add_argument(
+        "--n-chains",
+        type=int,
+        default=None,
+        help="Chains per temperature rung (default: the sampler's own "
+        "resolve_n_chains). Lower this when raising --n-temps so the total "
+        "slot count, and so the cost, stays comparable",
+    )
+    ap.add_argument(
+        "--t-max",
+        type=float,
+        default=200.0,
+        help="Hottest PT rung (default 200). The hottest rung sees a "
+        "basin barrier of B/T_max nats, so raise this when modes are "
+        "suspected to be separated by more than a few hundred nats; with "
+        "--n-temps auto the rung count follows sqrt(D/2)*ln(T_max)",
+    )
+    ap.add_argument(
+        "--seed-polish",
+        default="auto",
+        help="Pre-whitening seed polish: 'auto' (default), 'off', or a max "
+        "sweep count. The gradient-free DE polish stops on the cap, so a "
+        "seed that reports 'hit the N-step cap' was still improving; raise "
+        "this when the whitening probe warns of a gradient-dominated start",
+    )
+    ap.add_argument(
         "--recompute",
         action="store_true",
         default=True,
@@ -287,6 +337,9 @@ def main(argv=None):
         args.bands = "Z087"
         args.tune = min(args.tune, 500)
         args.draws = min(args.draws, 1000)
+
+    if str(args.seed_polish).lstrip("-").isdigit():
+        args.seed_polish = int(args.seed_polish)
 
     data_dir = dc.data_dir_or_raise(args.data_dir)
     bands = [b.strip() for b in args.bands.split(",") if b.strip()]

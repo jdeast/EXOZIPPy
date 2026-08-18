@@ -93,11 +93,46 @@ def resolve_n_temps(n_temps, n_params, T_max):
     a D-dimensional target: between rungs the mean logp shifts by
     ~(D/2)*ln(r) while fluctuating ~sqrt(D/2), so geometric spacing wants
     ln(r) ~ sqrt(2/D), i.e. n = ceil(sqrt(D/2) * ln(T_max)) rungs (floored
-    at the historical EXOFASTv2-parity 8). This is an a priori estimate;
-    the definitive, problem-specific check is the measured communication
-    barrier logged by ladder_health_report at the end of every run -- the
-    DEO schedule tolerates ladders leaner than this formula, and heavy
-    tails or multimodality can demand more than it.
+    at the historical EXOFASTv2-parity 8).
+
+    THIS IS SELF-CONSISTENT WITH THE DEO CRITERION AT ITS DESIGN POINT, and
+    it is worth seeing why before concluding the formula is wrong.  The
+    communication barrier is the sum of per-pair REJECTION rates,
+    Lambda = (n-1)*rho, so ladder_health_report's requirement
+    n >= 2*Lambda + 1 = 2*(n-1)*rho + 1 holds exactly when rho = 0.5 --
+    i.e. at the 0.5 adjacent-rung swap acceptance that the overlap argument
+    above is chosen to produce.  At its design point this formula IS
+    2*Lambda+1; it is not off by a factor of two.
+
+    WHAT ACTUALLY GOES WRONG is that the achieved acceptance is not 0.5.
+    Measured on examples/DC2018 event 128 (D = 27):
+
+      T_max   n_temps   Lambda   rho   accept   needs 2L+1   round trips
+        200      20     12.02   0.633   0.367       26            61
+        200      20     11.52   0.606   0.394       25             8
+       8500      34     19.77   0.599   0.401       41             0
+
+    ~0.40 where the derivation implies 0.50, so Lambda lands 20-30% high
+    and the ladder 20-30% short.  The gap is in the D/2 Gaussian assumption
+    about how Var(logp) varies with T, which is model-specific -- so the
+    shortfall is too, and no fixed coefficient here can absorb it.  (Do not
+    "fix" this by doubling: 2*33.24+1 = 68 rungs against a measured need of
+    41 is 63% waste.)
+
+    For contrast, the SAME 20-rung ladder on the pre-parallax model had
+    Lambda = 6.01, so 20 > 2*6.01+1 = 14 was comfortably provisioned, and
+    it delivered 1427 round trips.  Nothing about the ladder changed;
+    Lambda doubled when pi_E became a real likelihood direction, and round
+    trips fell to 8.  That is the whole story of why a ladder that used to
+    work stopped working.
+
+    So Lambda is a property of the MODEL, is measured every run, and is the
+    only problem-specific number in this decision.  Keep sqrt(D/2) --
+    the dimension dependence is derived; an empirical multiplier fitted to
+    one example would not be.  The honest upgrade is to MEASURE Lambda in a
+    short pilot ladder (it is an average of swap rejection rates and
+    converges in a few hundred swap rounds) and size the real ladder at
+    2*Lambda+1; see notes/polish_todo.txt.
     """
     if isinstance(n_temps, str):
         if n_temps.strip().lower() != "auto":
@@ -121,8 +156,10 @@ def ladder_health_report(temperatures, n_swap_accept, n_swap_propose):
     Under the non-reversible DEO schedule the T_max<->T=1 round-trip rate
     approaches 1/(2 + 2*Lambda) once n_temps is comfortably above Lambda;
     with n_temps - 1 < ~2*Lambda the ladder itself is the mixing
-    bottleneck, and the fix is more rungs (sampler config n_temps -- or
-    n_temps: auto), not more draws.
+    bottleneck, and the fix is more rungs -- an EXPLICIT sampler-config
+    n_temps at the recommended value, not `n_temps: auto`, which cannot
+    know the acceptance it will actually achieve (see resolve_n_temps).
+    More draws do not help at all.
     """
     n_temps = len(temperatures)
     prop = np.asarray(n_swap_propose, dtype=float)
@@ -156,8 +193,15 @@ def ladder_health_report(temperatures, n_swap_accept, n_swap_propose):
         logger.warning(
             f"PT ladder is communication-limited: n_temps={n_temps} is "
             f"below ~2*Lambda+1 = {recommended}. Round trips between T_max "
-            f"and T=1 -- not draws -- are the mixing bottleneck; raise "
-            f"n_temps to ~{recommended} (or set n_temps: auto) and rerun."
+            f"and T=1 -- not draws -- are the mixing bottleneck; set "
+            f"n_temps: {recommended} and rerun. 'n_temps: auto' will not "
+            f"get you there: its spacing is self-consistent with this "
+            f"criterion only at 0.50 adjacent-rung swap acceptance, and the "
+            f"acceptance actually achieved here is "
+            f"{1.0 - lam / max(n_temps - 1, 1):.2f}, which is what makes "
+            f"Lambda higher than the spacing assumed. Lambda is measured, "
+            f"so this recommendation is problem-specific; the formula "
+            f"cannot be."
         )
     return lam
 
@@ -198,6 +242,15 @@ POLISH_TOL_NATS = 0.05
 POLISH_TOL_WINDOW = 10
 
 
+# Acceptance the polish adapts gamma toward, and how many proposals it
+# measures over before each adjustment.  Same target and same
+# (ar/target)**0.5 rule ptde_async uses, deliberately: this engine IS the
+# sampler's T=1 move, so a second tuning story would be one more thing to
+# keep in sync.
+POLISH_TARGET_ACCEPT = 0.2
+POLISH_GAMMA_WINDOW = 4  # sweeps between gamma updates
+
+
 def polish_seed_starts(
     raw_starts,
     logp_fn,
@@ -208,8 +261,12 @@ def polish_seed_starts(
     gamma=None,
     tol=None,
     tol_window=POLISH_TOL_WINDOW,
+    pool=None,
+    adapt_gamma=False,
+    target_accept=POLISH_TARGET_ACCEPT,
+    gamma_window=POLISH_GAMMA_WINDOW,
 ):
-    """T=1 differential-evolution polish of each seed's raw start.
+    """Parallel T=1 differential-evolution polish of each seed's raw start.
 
     For each seed: spawn a small population jittered at ONE scale unit
     around the seed (staying inside its own basin -- this is a local
@@ -234,6 +291,59 @@ def polish_seed_starts(
     only takes the best point anyway, with _make_starts re-jittering
     chains around it as usual.
 
+    GAMMA ADAPTATION IS AVAILABLE BUT OFF BY DEFAULT, and the default is
+    measured, not cautious.  The rationale for wanting it was sound: the
+    fixed 2.38/sqrt(2D) step sustains a T=1 acceptance of 0.003-0.004 here
+    with 84-88% of sweeps accepting NOTHING, where ptde_async -- running
+    this same move on this same model -- adapts to ~0.055 and sustains
+    0.18-0.19.  But measured head to head on DC2018 event 128 at equal
+    wall clock, adapting gamma makes the polish WORSE:
+
+      sweeps   adaptive gamma        fixed gamma
+         150   127090 / 125321      127628 / 124880
+        1500   128553 / 126740      129294 / 128584   <- fixed wins by
+                                                         +741 / +1844 nats
+
+    The reason is that 0.2 target acceptance is a SAMPLING criterion and
+    this stage is OPTIMIZING.  The oversized fixed step lands few proposals
+    but the ones it lands are large, and those rare jumps are what climb
+    the basin -- exactly the staircase POLISH_TOL_NATS documents.  Tuning
+    to 0.2 trades a few big productive leaps for many small well-behaved
+    ones: better mixing, worse hill-climbing.  Leave this off unless you
+    have measured otherwise on YOUR model.
+
+    The historical note the flag exists for:  ptde_async starts from this same
+    2.38/sqrt(2D) rule of thumb and then tunes it; measured on DC2018 event
+    128 (D = 27) it settles at ~0.055 against the 0.3239 the formula gives.
+    Run fixed at 0.3239 the polish sustained a T=1 acceptance of 0.003-0.004
+    with 84-88% of sweeps accepting NOTHING, so most of the population never
+    moved off its (badly scaled, pre-whitening) birth position at all: the
+    best-lp gains came from a handful of lucky members while the rest sat
+    frozen, and best-minus-median stayed ~800-1000 nats instead of the ~D/2
+    a converged population shows.  Same rule as the sampler:
+    ``gamma *= (ar/target)**0.5``, clipped to a factor 10 per update.
+
+    PARALLELISM.  Proposals are pooled ACROSS SEEDS, not partitioned between
+    them.  Each sweep every seed generates all ``pop_size`` proposals from
+    its population as frozen at the start of that sweep; the whole batch --
+    ``n_seeds * pop_size`` of them -- goes to one shared pool, and workers
+    take the next available item.  Two seeds on 64 cores therefore do NOT
+    get 32 each, and nothing sits idle while the other seed finishes: the
+    only limit is that a batch has n_seeds*pop_size items to hand out.
+    Accept/reject is applied afterwards, in the same per-seed order the
+    serial engine used.
+
+    That frozen snapshot is the one behavioural change: the serial engine
+    updated member i in place, so member i+1 saw it within the same sweep.
+    Drawing every proposal in a sweep against the sweep's opening state is
+    standard parallel DE-MC (each member's difference vector still comes
+    from two OTHER members, and its accept/reject still uses only its own
+    lp), and this routine returns the best point VISITED, so what matters is
+    coverage rather than the exact chain.
+
+    ``pool`` is anything with a ``map``; ``None`` keeps the serial path,
+    which stays byte-for-byte the old behaviour when ``adapt_gamma=False``.
+
     Returns (polished_starts, dlp_per_seed).
     """
     if isinstance(raw_starts, dict):
@@ -245,8 +355,16 @@ def polish_seed_starts(
     if gamma is None:
         gamma = 2.38 / np.sqrt(2 * max(n_params, 1))
 
-    polished, dlps = [], []
-    for s, center in enumerate(raw_starts):
+    n_seeds = len(raw_starts)
+    _map = pool.map if pool is not None else lambda f, xs: [f(x) for x in xs]
+
+    def _lps(props):
+        """Evaluate a flat list of proposals, pooled across seeds."""
+        return [float(v) for v in _map(logp_fn, props)]
+
+    # --- build every seed's population, then score them all in one batch ---
+    pops, states = [], []
+    for center in raw_starts:
         pop = [{k: np.array(v, dtype=float) for k, v in center.items()}]
         for _ in range(pop_size - 1):
             pop.append(
@@ -256,58 +374,116 @@ def polish_seed_starts(
                     for k in keys
                 }
             )
-        lps = np.array([float(logp_fn(p)) for p in pop])
+        pops.append(pop)
+    flat = [p for pop in pops for p in pop]
+    flat_lps = _lps(flat)
+    for s, center in enumerate(raw_starts):
+        lps = np.array(flat_lps[s * pop_size : (s + 1) * pop_size])
         # Non-finite members re-center (a jitter may cross a hard bound).
         for i in np.nonzero(~np.isfinite(lps))[0]:
-            pop[i] = {k: np.array(v, dtype=float) for k, v in center.items()}
+            pops[s][i] = {
+                k: np.array(v, dtype=float) for k, v in center.items()
+            }
             lps[i] = lps[0]
         best_i = int(np.nanargmax(lps))
-        best = {k: v.copy() for k, v in pop[best_i].items()}
-        best_lp = float(lps[best_i])
-        lp0 = float(lps[0])  # the seed's own lp (member 0 = exact center)
+        states.append(
+            {
+                "lps": lps,
+                "best": {k: v.copy() for k, v in pops[s][best_i].items()},
+                "best_lp": float(lps[best_i]),
+                # member 0 is the exact center, so this is the seed's own lp
+                "lp0": float(lps[0]),
+                "gamma": float(gamma),
+                "n_acc": 0,
+                "n_prop": 0,
+                "history": [],
+                "done": False,
+                "steps": 0,
+                "stop": "cap",
+            }
+        )
 
-        # best_lp after each completed sweep; the tolerance test reads it
-        # tol_window sweeps back.
-        history = []
-        steps_taken, stop = 0, "cap"
-        for _ in range(int(n_steps)):
+    for _sweep in range(int(n_steps)):
+        live = [s for s in range(n_seeds) if not states[s]["done"]]
+        if not live:
+            break
+
+        # One batch of proposals from every live seed, against that seed's
+        # population as frozen at the start of this sweep.
+        batch, index = [], []
+        for s in live:
+            pop, g = pops[s], states[s]["gamma"]
             for i in range(pop_size):
                 j1, j2 = _pick_two(rng, pop_size, i)
-                prop = {
-                    k: pop[i][k]
-                    + gamma * (pop[j1][k] - pop[j2][k])
-                    + 1e-4
-                    * scales[k]
-                    * rng.standard_normal(np.shape(pop[i][k]))
-                    for k in keys
-                }
-                lp = float(logp_fn(prop))
-                if np.isfinite(lp) and np.log(rng.random()) < lp - lps[i]:
-                    pop[i], lps[i] = prop, lp
-                    if lp > best_lp:
-                        best_lp = lp
-                        best = {k: v.copy() for k, v in prop.items()}
-            steps_taken += 1
+                batch.append(
+                    {
+                        k: pop[i][k]
+                        + g * (pop[j1][k] - pop[j2][k])
+                        + 1e-4
+                        * scales[k]
+                        * rng.standard_normal(np.shape(pop[i][k]))
+                        for k in keys
+                    }
+                )
+                index.append((s, i))
+        lps_batch = _lps(batch)
+
+        for (s, i), prop, lp in zip(index, batch, lps_batch):
+            st = states[s]
+            st["n_prop"] += 1
+            if np.isfinite(lp) and np.log(rng.random()) < lp - st["lps"][i]:
+                pops[s][i], st["lps"][i] = prop, lp
+                st["n_acc"] += 1
+                if lp > st["best_lp"]:
+                    st["best_lp"] = lp
+                    st["best"] = {k: v.copy() for k, v in prop.items()}
+
+        for s in live:
+            st = states[s]
+            st["steps"] += 1
+
+            if adapt_gamma and st["steps"] % gamma_window == 0:
+                ar = st["n_acc"] / max(st["n_prop"], 1)
+                if ar > 0:
+                    g_new = float(
+                        np.clip(
+                            st["gamma"] * (ar / target_accept) ** 0.5,
+                            st["gamma"] * 0.1,
+                            st["gamma"] * 10.0,
+                        )
+                    )
+                else:
+                    # Nothing accepted at all: the step is far too big and
+                    # the (ar/target)**0.5 rule has no signal to use, so
+                    # shrink by the same clip factor rather than stall.
+                    g_new = st["gamma"] * 0.1
+                st["gamma"] = g_new
+                st["n_acc"] = st["n_prop"] = 0
+
             if tol is None or not tol_window:
                 continue
-            history.append(best_lp)
+            st["history"].append(st["best_lp"])
             if (
-                len(history) > tol_window
-                and history[-1] - history[-1 - tol_window] < tol
+                len(st["history"]) > tol_window
+                and st["history"][-1] - st["history"][-1 - tol_window] < tol
             ):
-                stop = "tol"
-                break
-        polished.append(best)
-        dlps.append(best_lp - lp0)
+                st["stop"] = "tol"
+                st["done"] = True
+
+    polished, dlps = [], []
+    for s, st in enumerate(states):
+        polished.append(st["best"])
+        dlps.append(st["best_lp"] - st["lp0"])
         reason = (
             f"converged: < {tol} nats over {tol_window} sweeps"
-            if stop == "tol"
+            if st["stop"] == "tol"
             else f"hit the {int(n_steps)}-step cap"
         )
         logger.info(
-            f"PTDE seed polish: seed {s} lp {lp0:.1f} -> {best_lp:.1f} "
-            f"(dlp=+{best_lp - lp0:.1f}, {steps_taken} steps x {pop_size} "
-            f"pop, {reason})"
+            f"PTDE seed polish: seed {s} lp {st['lp0']:.1f} -> "
+            f"{st['best_lp']:.1f} (dlp=+{st['best_lp'] - st['lp0']:.1f}, "
+            f"{st['steps']} steps x {pop_size} pop, gamma "
+            f"{gamma:.4f}->{st['gamma']:.4f}, {reason})"
         )
     return polished, dlps
 
