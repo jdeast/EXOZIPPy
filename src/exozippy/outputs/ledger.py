@@ -351,6 +351,22 @@ def append_ledger_csv(ledger, csv_filename):
     )
 
 
+def _delta_lp_cell(delta_lp):
+    """The Delta ln P cell for one rejected seed.
+
+    ``delta_lp`` is stored as best minus this seed, i.e. non-negative, and
+    the table shows how far BELOW the best this seed sits -- so the printed
+    value is its negation.  The best seed itself has delta_lp == 0, which
+    formatted as "$-0.0$": a signed zero reads as a real (if tiny)
+    difference.  Anything that rounds to zero at this precision is printed
+    as an unsigned zero instead.
+    """
+    text = f"{-float(delta_lp):.1f}"
+    if text == "-0.0":
+        text = "0.0"
+    return f"${text}$"
+
+
 def write_rejected_latex(ledger, filename, hot_status=None):
     """Standalone LaTeX table of the rejected solutions (Laplace).
 
@@ -385,8 +401,10 @@ def write_rejected_latex(ledger, filename, hot_status=None):
     lines.append(
         r"\caption{Solutions considered and rejected by the posterior. "
         r"Values are Laplace approximations at each seeded basin's "
-        r"optimum; $\Delta \ln \mathcal{L}$ is measured against the best "
-        r"seeded solution." + caveat + r"}"
+        r"optimum; $\Delta \ln \mathcal{P}$ is the log-POSTERIOR "
+        r"difference against the best seeded solution -- priors, "
+        r"potentials and reparameterization Jacobians included, not a "
+        r"likelihood ratio." + caveat + r"}"
     )
     cols = "l" + "c" * len(rej)
     lines.append(r"\begin{tabular}{" + cols + "}")
@@ -394,7 +412,9 @@ def write_rejected_latex(ledger, filename, hot_status=None):
     header = ["Parameter"] + [f"seed {r.seed_index}" for r in rej]
     lines.append(" & ".join(header) + r" \\")
     lines.append(r"\hline")
-    dl = [r"$\Delta \ln \mathcal{L}$"] + [f"$-{r.delta_lp:.1f}$" for r in rej]
+    dl = [r"$\Delta \ln \mathcal{P}$"] + [
+        _delta_lp_cell(r.delta_lp) for r in rej
+    ]
     lines.append(" & ".join(dl) + r" \\")
     names = sorted({n for r in rej for n in r.phys})
     for name in names:
