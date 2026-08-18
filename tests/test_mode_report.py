@@ -26,6 +26,7 @@ from exozippy.outputs.modes import (
     ModeInfo,
     ModeReport,
     NoValidDrawsError,
+    _assign_to_nearest_center,
     _make_union_find,
     _segment_cylinder,
     _union_relabel,
@@ -1392,3 +1393,37 @@ def test_segment_cylinder_reports_coincident_centers():
     # ASSERT
     assert sep == 0.0
     assert t is None and in_cyl is None
+
+
+def test_nearest_center_assignment_matches_the_full_broadcast():
+    """
+    Given draws and cluster centers, including exact ties and draws sitting
+      exactly on a center,
+    When identify_modes assigns each draw to its nearest surviving center,
+    Then the answer equals the (N, k, d) broadcast it replaced -- that
+      broadcast is multi-GB at 54 chains x 50k draws, so it was traded for a
+      loop over the handful of centers, and the trade must be exact.  The
+      strict comparison is what keeps the FIRST minimum on a tie, as
+      np.argmin does.
+    """
+    # ARRANGE
+    rng = np.random.default_rng(4)
+    for trial in range(50):
+        n = int(rng.integers(5, 200))
+        d = int(rng.integers(1, 12))
+        k = int(rng.integers(1, 7))
+        centers = rng.normal(size=(k, d)) * rng.choice([0.01, 1.0, 1e3])
+        draws = rng.normal(size=(n, d)) * rng.choice([0.01, 1.0, 1e3])
+        if k > 1:
+            centers[1] = centers[0]
+        draws[: min(n, k)] = centers[: min(n, k)]
+
+        # ACT
+        got = _assign_to_nearest_center(draws, centers)
+        want = np.argmin(
+            ((draws[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2),
+            axis=1,
+        )
+
+        # ASSERT
+        assert np.array_equal(got, want), trial
