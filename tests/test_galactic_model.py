@@ -22,7 +22,6 @@ _LOGMASS_LOWER = -9.0
 _LOGMASS_UPPER = 2.5
 
 
-
 class _MockStar:
     """Stand-in for the Star component with attributes GalacticModel.build_likelihood needs."""
 

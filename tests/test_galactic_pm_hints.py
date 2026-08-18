@@ -136,7 +136,9 @@ def test_measured_t_E_survives_and_theta_E_yields(params):
     seeded_t_E = float(mmx["fits"][0]["parameters"]["t_E"])
 
     # Act
-    t_E = float(np.atleast_1d(np.asarray(params["lens.t_E"].initval, float))[0])
+    t_E = float(
+        np.atleast_1d(np.asarray(params["lens.t_E"].initval, float))[0]
+    )
     theta_E = float(
         np.atleast_1d(np.asarray(params["lens.theta_E"].initval, float))[0]
     )
@@ -211,12 +213,18 @@ def test_seeds_are_skipped_for_a_multi_source_event():
     """
     # Arrange: add a second source body to the lens block.
     config, user_params = _inputs()
-    lens_block = config["lens"][0] if isinstance(config["lens"], list) else config["lens"]
+    lens_block = (
+        config["lens"][0]
+        if isinstance(config["lens"], list)
+        else config["lens"]
+    )
     sources = lens_block.get("sources")
     if not sources:
         pytest.skip("example does not use the explicit sources: list")
     star_entries = config["star"]
-    star_entries.append(copy.deepcopy(star_entries[int(sources[0].split(".")[1])]))
+    star_entries.append(
+        copy.deepcopy(star_entries[int(sources[0].split(".")[1])])
+    )
     star_entries[-1]["name"] = "SourceB"
     lens_block["sources"] = list(sources) + [f"star.{len(star_entries) - 1}"]
 

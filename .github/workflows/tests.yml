@@ -42,19 +42,30 @@ jobs:
   # These four combinations cost the SAME wall clock as the single 3.12 job
   # that preceded them, because matrix combinations run concurrently -- a
   # measured run had all four starting within 6 seconds of each other and
-  # finishing between 12 and 16 minutes. Adding Python versions here is
+  # finishing within a few minutes of each other. Adding Python versions here is
   # effectively free; do not trim them to "save time", there is none to save.
   #
-  # WINDOWS IS DELIBERATELY ABSENT. It was tried and removed: the suite takes
-  # over 90 minutes there against ~16 on Linux, and the job was cancelled at
-  # the cap on every attempt -- it never once produced a result, green or red.
-  # Adding it back means first making the suite finish, not raising the
-  # timeout again. The bugs it did find (mkl wheels, SIGALRM, the GUI's
-  # cross-process signal) are fixed and stay fixed. See notes/todo.txt.
+  # THE CAP IS 90 MINUTES, and the number is not arbitrary. That "12 to 16
+  # minutes" above was measured in July 2026 and the suite has roughly tripled
+  # since: on 2026-08-18 master ran ~34 minutes and PR #187 ran 41.7 (3.12),
+  # 44.9 (3.14) and 36.9 (macOS) -- with 3.13 CANCELLED at 45:16. Three of four
+  # jobs landing between 37 and 45 minutes against a 45-minute cap is not a
+  # margin, and the failure it produces is the worst kind: "cancelled", which
+  # reads as a broken PR rather than as a budget that ran out. 90 restores the
+  # ~2x headroom the 45 was chosen to give.
+  #
+  # WINDOWS IS DELIBERATELY ABSENT. It was tried and removed: the suite took
+  # over 90 minutes there against ~16 on Linux at the time, and the job was
+  # cancelled at the cap on every attempt -- it never once produced a result,
+  # green or red. Adding it back means first making the suite finish there, not
+  # raising the timeout until it fits: the cap above is sized to what Linux and
+  # macOS actually take, and a platform that needs several times that is a
+  # different problem. The bugs Windows did find (mkl wheels, SIGALRM, the
+  # GUI's cross-process signal) are fixed and stay fixed. See notes/todo.txt.
   pytest:
     name: pytest
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     strategy:
       # Do not cancel the other combinations when one fails. When a new Python
       # breaks something, "3.14 failed and everything else was cancelled" tells
@@ -187,7 +198,10 @@ jobs:
     name: pytest-latest-deps
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Same suite as the matrix above, so the same 90-minute budget; a nightly
+    # cancelled at the cap would open the tracking issue below for a reason
+    # that has nothing to do with dependencies.
+    timeout-minutes: 90
 
     # Scoped to this job, not the workflow. Only this job files issues; nothing
     # here needs write access to the repository contents.

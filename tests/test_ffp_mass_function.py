@@ -44,7 +44,6 @@ _CHABRIER_SIGMA = 0.57
 _HBL_DEX = np.log10(0.075)  # hydrogen-burning limit, dex(solMass)
 
 
-
 class _MockStar:
     """Stand-in for the Star component, with n stars and a mass-function mask."""
 

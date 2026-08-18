@@ -123,7 +123,9 @@ def test_no_root_level_default_key_has_two_owners():
 
     # Assert
     clashes = {k: v for k, v in owners.items() if len(v) > 1}
-    assert not clashes, f"root-level default keys with multiple owners: {clashes}"
+    assert not clashes, (
+        f"root-level default keys with multiple owners: {clashes}"
+    )
 
 
 def test_rank_upgrade_tie_break_is_alphabetical():

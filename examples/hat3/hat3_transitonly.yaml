@@ -1,0 +1,87 @@
+run:
+  name: "hat3_transitonly"
+
+# HAT-P-3b with the RVs REMOVED -- the same star, planet, transits and SED as
+# hat3.yaml, and the same params file.
+#
+# It exists to exercise the transit-only defaults, which are the point of
+# Eastman (2024, PASP; arXiv:2309.14410) and which no other shipped example
+# reaches: every other transit example here also has radial velocities, and
+# an orbit whose motion RVs measure keeps the conventional coordinates.
+#
+# What changes by DEFAULT when the RVs go away, all of it decided from the
+# data topology rather than set below:
+#
+#   orbit.b   fitvcve + fitchord -> V_c/V_e and the transit chord are sampled,
+#             instead of sqrt(e)cos(omega)/sqrt(e)sin(omega) and cos i.  A
+#             transit measures a DURATION, which those two coordinates carry
+#             directly, and the paper's measurement over 330 simulated systems
+#             is that the conventional pair recovers eccentricities that are
+#             measurably wrong from transits alone.  secosw/sesinw/cosi are
+#             still REPORTED, so the table rows are the same ones hat3.yaml
+#             produces and either file can be read against the other.
+#   planet.b  mass_parameterization -> log_q, since no signed observable
+#             (an RV or astrometric amplitude) constrains the mass here, and
+#             the Chen & Kipping (2017) mass-radius relation turns on to
+#             supply it.  Both are the pre-existing defaults for this
+#             topology; they are not part of the chord work.
+#
+# Everything else -- the torres constraint on the star, the SED, the four TESS
+# sectors -- is unchanged, so a run of this file against a run of hat3.yaml is
+# a clean measurement of what the radial velocities were contributing.
+
+prefix: "fitresults/HAT-P-3b_transitonly"
+
+star:
+  - name: "A"
+    mist: False
+
+planet:
+  - name: "b"
+
+orbit:
+  - name: "b"
+    primary: ["A"]
+    companion: ["b"]
+    # fitvcve / fitchord are deliberately NOT set: the whole point of this
+    # example is that the transit-only topology turns them on by itself.  Add
+    # `fitvcve: false` here to fit the conventional coordinates on the same
+    # data.
+
+parameter_file: "hat3.params.yaml"
+
+torres:
+  - star: "A"
+    constrain: [mass, radius]
+
+sed:
+  file: "hat3_sed.yaml"
+
+transit:
+  - name: "TESS-S16"
+    file: "n20190912.TESS.TESS.HAT-P-3.S16.0120.SPOC.dat"
+    band: "TESS"
+  - name: "TESS-S22"
+    file: "n20200220.TESS.TESS.HAT-P-3.S22.0120.SPOC.dat"
+    band: "TESS"
+  - name: "TESS-S49"
+    file: "n20220301.TESS.TESS.HAT-P-3.S49.0120.SPOC.dat"
+    band: "TESS"
+  - name: "TESS-S76"
+    file: "n20240227.TESS.TESS.HAT-P-3.S76.0120.SPOC.dat"
+    band: "TESS"
+
+band:
+  - name: "TESS"
+    filter: "TESS"
+
+sampler:
+  method: numpyro
+  tune: 500
+  draws: 1000
+  chains: 4
+  cores: 4
+  init: adapt_diag
+  target_accept: 0.95
+  recompute_trace: True
+  profile: False

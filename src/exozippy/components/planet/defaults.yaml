@@ -109,6 +109,11 @@ planet:
     internal_unit: "solRad"
     latex: "a"
     description: "Semi-major Axis"
+    # rank 5: the engine's Condition B rewrites the lowest-ranked
+    # symbol of a violated relation, and this one is DERIVED -- its
+    # runtime value is its expression -- so it must always be the
+    # side that absorbs, never the mass/radius/period it comes from.
+    rank: 5
     expressions:
       default:
         func_name: "calc_arsun"
@@ -117,6 +122,11 @@ planet:
     unit: ""
     internal_unit: ""
     latex: "a/R_*"
+    # rank 5: the engine's Condition B rewrites the lowest-ranked
+    # symbol of a violated relation, and this one is DERIVED -- its
+    # runtime value is its expression -- so it must always be the
+    # side that absorbs, never the mass/radius/period it comes from.
+    rank: 5
     expressions:
       default:
         func_name: "calc_arstar"
@@ -134,6 +144,11 @@ planet:
     unit: "solMass"
     latex: "M_{\\rm tot}"
     description: "Total System Mass"
+    # rank 5: the engine's Condition B rewrites the lowest-ranked
+    # symbol of a violated relation, and this one is DERIVED -- its
+    # runtime value is its expression -- so it must always be the
+    # side that absorbs, never the mass/radius/period it comes from.
+    rank: 5
     expressions:
       default:
         func_name: "calc_m_total"
