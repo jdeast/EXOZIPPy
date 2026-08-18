@@ -28,6 +28,11 @@ in file order) so the relaxation engine solves one mutually-consistent start
 point per entry inside a single prepare() call (see config.py's
 finalize_user_params / _build_seed_overrides). Bounds are NOT per-seed -- they
 resolve once, from the first (seed 0) solution.
+
+Epochs: newer MMEXOFAST reports a top-level ``jd_offset`` and adds it to every
+epoch parameter, so its ``t_0`` is a full JD.  This converter subtracts it back
+out, mirroring ``mmexofast_support.push_seed_hints`` -- the two paths share one
+contract because they seed the same parameter from the same file.
 """
 
 import argparse
@@ -75,6 +80,16 @@ def mmexofast_to_params(
 
     multi = len(chosen) > 1
 
+    # Newer MMEXOFAST adds the epochs' zero point as a top-level "jd_offset",
+    # so its t_0 is a full JD while the light curves it fitted may be in an
+    # offset system.  Subtract it back out, exactly as
+    # mmexofast_support.push_seed_hints does -- that is the ONE contract, and
+    # this converter writing the un-shifted number is worse than a wrong start
+    # value: the entry it emits is RANK_USER, so it outranks every hint AND
+    # makes user_hints_sufficient true, suppressing the auto-MMEXOFAST rerun
+    # that would otherwise have produced a correct seed.
+    jd_offset = float(data.get("jd_offset", 0.0) or 0.0)
+
     lines = [
         f"# Seeded from MMEXOFAST solution(s) {indices} (0-indexed)",
         f"# Source: {json_path}",
@@ -92,11 +107,18 @@ def mmexofast_to_params(
             f"# finalize_user_params). Bounds are NOT per-seed and always come",
             f"# from the first (seed 0) solution.",
         ]
+    if jd_offset:
+        lines += [
+            f"#",
+            f"# t_0 has had the JSON's jd_offset = {jd_offset:.1f} subtracted, so it",
+            f"# lands in the data's own time system (same contract as",
+            f"# mmexofast_support.push_seed_hints).",
+        ]
     lines.append("")
 
     lines += _param_block(
         f"lens.{lens_name}.t_0",
-        _fmt([fit["parameters"]["t_0"] for fit in chosen], ".8f"),
+        _fmt([fit["parameters"]["t_0"] - jd_offset for fit in chosen], ".8f"),
     )
     lines.append("")
     lines += _param_block(

@@ -108,3 +108,79 @@ def test_output_is_valid_yaml_without_sigmas(tmp_path, solution_index):
     parsed = yaml.safe_load(text)
     assert parsed
     assert all("initval" in entry for entry in parsed.values())
+
+
+# ---------------------------------------------------------------------------
+# jd_offset (review 1.6.6)
+# ---------------------------------------------------------------------------
+
+
+def _write_with_jd_offset(tmp_path, jd_offset):
+    """Copy the example file, stamping a top-level jd_offset on it."""
+    data = json.loads(MMX_PATH.read_text())
+    data["jd_offset"] = jd_offset
+    path = tmp_path / "mmexofast_jd_offset.json"
+    path.write_text(json.dumps(data))
+    return path
+
+
+@pytest.mark.parametrize("solution_index", [None, 0])
+def test_t_0_has_jd_offset_subtracted(tmp_path, solution_index):
+    """Given a newer JSON carrying jd_offset = 2450000, when it is converted,
+    then the emitted t_0 initvals are shifted back into the data's own time
+    system -- the same contract mmexofast_support.push_seed_hints keeps."""
+    jd_offset = 2450000.0
+    raw = json.loads(MMX_PATH.read_text())
+    shifted = _write_with_jd_offset(tmp_path, jd_offset)
+
+    parsed = yaml.safe_load(
+        mmexofast_to_params(
+            shifted,
+            solution_index=solution_index,
+            out_path=tmp_path / "out.yaml",
+        )
+    )
+
+    fits = (
+        raw["fits"]
+        if solution_index is None
+        else [raw["fits"][solution_index]]
+    )
+    expected = [fit["parameters"]["t_0"] - jd_offset for fit in fits]
+    got = parsed["lens.Lens.t_0"]["initval"]
+    got = got if isinstance(got, list) else [got]
+    assert got == pytest.approx(expected, abs=1e-7)
+
+
+def test_no_jd_offset_key_leaves_t_0_alone(tmp_path):
+    """Given a pre-jd_offset JSON, when it is converted, then t_0 is emitted
+    verbatim -- the shift must not appear out of nowhere for older files."""
+    raw = json.loads(MMX_PATH.read_text())
+    assert "jd_offset" not in raw
+
+    parsed = yaml.safe_load(
+        mmexofast_to_params(MMX_PATH, out_path=tmp_path / "o.yaml")
+    )
+
+    expected = [fit["parameters"]["t_0"] for fit in raw["fits"]]
+    assert parsed["lens.Lens.t_0"]["initval"] == pytest.approx(
+        expected, abs=1e-7
+    )
+
+
+def test_only_t_0_is_shifted(tmp_path):
+    """Given a JSON with jd_offset, when it is converted, then only the epoch
+    parameter moves -- t_E is a duration and u_0/s/q/rho/alpha are
+    dimensionless, so a shift there would be a units error."""
+    plain = yaml.safe_load(
+        mmexofast_to_params(MMX_PATH, out_path=tmp_path / "a.yaml")
+    )
+    shifted_path = _write_with_jd_offset(tmp_path, 2450000.0)
+    shifted = yaml.safe_load(
+        mmexofast_to_params(shifted_path, out_path=tmp_path / "b.yaml")
+    )
+
+    for path in PARAM_PATHS:
+        if path.endswith(".t_0"):
+            continue
+        assert shifted[path] == plain[path], path
