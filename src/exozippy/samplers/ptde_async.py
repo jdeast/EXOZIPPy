@@ -2,11 +2,10 @@
 Asynchronous (non-blocking) Parallel Tempering + Differential Evolution sampler.
 
 The production default for Op-based (non-differentiable) models (YAML:
-sampler.method: "ptde_async"). Kept as a
-separate sampler module so the synchronous PTDE in ptde.py -- the reference
-implementation with fully up-to-date DE partner states -- stays available for
-A/B validation. The non-sampling scaffolding both share lives in
-exozippy.samplers._common.
+sampler.method: "ptde_async"). Kept as a separate sampler module so the
+synchronous PTDE in ptde.py -- the reference implementation with fully
+up-to-date DE partner states -- stays available for A/B validation. The
+non-sampling scaffolding both share lives in exozippy.samplers._common.
 
 MOTIVATION: ptde.py's synchronous design must wait for the SLOWEST of all
 n_temps*n_chains proposals before ANY chain can advance to its next step,
@@ -16,8 +15,8 @@ runs on examples/DC2018_128 show this stalls the entire sampler behind a rare
 but expensive near-caustic evaluation concentrated in the hottest 1-2 rungs
 (the per-rung timing table at the top of notes/hpc_optimization.txt:
 0.09%/0.7% of rung 6/7 calls exceed 0.1 s, and with 320 proposals/step the
-odds NONE of them land in that tail across a whole run are essentially
-zero). This module removes that
+odds NONE of them land in that tail across a whole run are essentially zero).
+This module removes that
 barrier: every (rung, chain) slot is its own continuous pipeline against a
 shared worker pool -- as soon as one slot's evaluation resolves, it is
 accepted/rejected and that SAME slot's next proposal is immediately
@@ -73,6 +72,7 @@ from exozippy.samplers._common import (
     LpPlausibilityGuard,
     _eval_logp,
     de_proposal,
+    next_gamma,
 )
 from exozippy.samplers.ptde import (
     _check_convergence,
@@ -786,15 +786,11 @@ def ptde_async_sample(
                 and n_propose_T1_window[0] >= gamma_adapt_window
             ):
                 ar_T1 = n_accept_T1_window[0] / max(n_propose_T1_window[0], 1)
+                # Skipped rather than shrunk when the window accepted
+                # nothing, exactly as in ptde.py; _common.next_gamma owns
+                # the rule itself.
                 if ar_T1 > 0:
-                    scale = (ar_T1 / target_accept) ** 0.5
-                    gamma_new = float(
-                        np.clip(
-                            gamma_box[0] * scale,
-                            gamma_box[0] * 0.1,
-                            gamma_box[0] * 10.0,
-                        )
-                    )
+                    gamma_new = next_gamma(gamma_box[0], ar_T1, target_accept)
                     if abs(gamma_new - gamma_box[0]) / gamma_box[0] > 0.01:
                         logger.info(
                             f"PTDE-async gamma: {gamma_box[0]:.4f} -> {gamma_new:.4f} "
@@ -964,35 +960,28 @@ def ptde_async_sample(
             )
 
     # Ladder communication statistics, stamped on the trace so the mode
-    # report can quote them as context.  These are TEMPERATURE round trips of
-    # a replica (T=1 -> T=max -> T=1), NOT mode changes: outputs.modes counts
-    # the latter itself from the stored T=1 labels and labels the two
-    # separately, because "swap" is ambiguous between them.
-    idata.posterior.attrs["ptde_ladder_round_trips"] = int(round_trips[0])
-    idata.posterior.attrs["ptde_swap_rounds"] = int(n_swap_rounds[0])
-
-    ar_T1 = float(n_accept[0] / max(n_propose[0], 1))
-    sr_all = n_swap_accept / np.maximum(n_swap_propose, 1)
-    rt_rate = round_trips[0] / max(n_swap_rounds[0], 1)
-    logger.info(
-        f"PTDE-async done: {actual_draws}/{draws} draws  accept(T=1)={ar_T1:.3f}  "
-        + (
-            f"swap=[{', '.join(f'{r:.2f}' for r in sr_all)}]  "
-            f"round_trips={round_trips[0]} (rate={rt_rate:.3f}/swap, "
-            f"schedule={swap_schedule})"
-            if n_temps > 1
-            else ""
-        )
-        + (
-            f"  swap_discards={n_swap_discards[0]}"
-            if n_swap_discards[0]
-            else ""
-        )
-        + (
-            f"  eval_timeouts={n_eval_timeouts[0]}"
-            if n_eval_timeouts[0]
-            else ""
-        )
+    # report can quote them as context (see stamp_and_log_run_summary).
+    _extras = []
+    if n_swap_discards[0]:
+        _extras.append(f"  swap_discards={n_swap_discards[0]}")
+    if n_eval_timeouts[0]:
+        _extras.append(f"  eval_timeouts={n_eval_timeouts[0]}")
+    _common.stamp_and_log_run_summary(
+        idata,
+        "PTDE-async",
+        logger,
+        actual_draws=actual_draws,
+        draws=draws,
+        n_accept=n_accept,
+        n_propose=n_propose,
+        n_swap_accept=n_swap_accept,
+        n_swap_propose=n_swap_propose,
+        round_trips=round_trips[0],
+        n_swap_rounds=n_swap_rounds[0],
+        n_temps=n_temps,
+        swap_schedule=swap_schedule,
+        rate_unit="swap",
+        extras=_extras,
     )
     # Async never resets the swap counters, so these stats span tune+draw;
     # still the right order of magnitude for the barrier check.

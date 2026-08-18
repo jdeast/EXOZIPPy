@@ -49,6 +49,7 @@ from exozippy.samplers._common import (  # noqa: F401
     _shutdown_pool,
     _worker_init,
     de_proposal,
+    next_gamma,
 )
 
 # Re-exported for compatibility: these historically lived here and are
@@ -443,21 +444,10 @@ def polish_seed_starts(
             st["steps"] += 1
 
             if adapt_gamma and st["steps"] % gamma_window == 0:
+                # Nothing accepted at all is next_gamma's shrink branch:
+                # the (ar/target)**0.5 rule has no signal to use there.
                 ar = st["n_acc"] / max(st["n_prop"], 1)
-                if ar > 0:
-                    g_new = float(
-                        np.clip(
-                            st["gamma"] * (ar / target_accept) ** 0.5,
-                            st["gamma"] * 0.1,
-                            st["gamma"] * 10.0,
-                        )
-                    )
-                else:
-                    # Nothing accepted at all: the step is far too big and
-                    # the (ar/target)**0.5 rule has no signal to use, so
-                    # shrink by the same clip factor rather than stall.
-                    g_new = st["gamma"] * 0.1
-                st["gamma"] = g_new
+                st["gamma"] = next_gamma(st["gamma"], ar, target_accept)
                 st["n_acc"] = st["n_prop"] = 0
 
             if tol is None or not tol_window:
@@ -1271,15 +1261,15 @@ def ptde_sample(
                 sr = n_swap_accept / np.maximum(n_swap_propose, 1)
 
                 if phase == "tune" and adapt_gamma:
-                    # Scale gamma toward target_accept based on T=1 window rate.
-                    # Multiplicative update: gamma *= (ar_T1 / target_accept)^0.5
-                    # The sqrt dampens oscillation; clamp to [gamma/10, gamma*10].
+                    # Scale gamma toward target_accept on the T=1 window
+                    # rate (_common.next_gamma owns the rule).  A window
+                    # that accepted NOTHING is skipped rather than shrunk:
+                    # here that is one log interval of a tempered sampler,
+                    # where the T=1 rung can legitimately stall while the
+                    # ladder is still equilibrating.
                     ar_T1 = ar[0]
                     if ar_T1 > 0:
-                        scale = (ar_T1 / target_accept) ** 0.5
-                        gamma_new = float(
-                            np.clip(gamma * scale, gamma * 0.1, gamma * 10.0)
-                        )
+                        gamma_new = next_gamma(gamma, ar_T1, target_accept)
                         if abs(gamma_new - gamma) / gamma > 0.01:
                             logger.info(
                                 f"PTDE gamma: {gamma:.4f} → {gamma_new:.4f} "
@@ -1431,26 +1421,25 @@ def ptde_sample(
     )
 
     # Ladder communication statistics, stamped on the trace so the mode
-    # report can quote them as context.  These are TEMPERATURE round trips of
-    # a replica (T=1 -> T=max -> T=1), NOT mode changes: outputs.modes counts
-    # the latter itself from the stored T=1 labels and labels the two
-    # separately, because "swap" is ambiguous between them.
-    idata.posterior.attrs["ptde_ladder_round_trips"] = int(round_trips[0])
-    idata.posterior.attrs["ptde_swap_rounds"] = int(n_swap_rounds)
-
-    ar_T1 = float(n_accept[0] / max(n_propose[0], 1))
-    sr_all = n_swap_accept / np.maximum(n_swap_propose, 1)
-    rt_rate = round_trips[0] / max(n_swap_rounds, 1)
-    logger.info(
-        f"PTDE done: {actual_draws}/{draws} draws  accept(T=1)={ar_T1:.3f}  "
-        + (
-            f"swap=[{', '.join(f'{r:.2f}' for r in sr_all)}]  "
-            f"round_trips={round_trips[0]} (rate={rt_rate:.3f}/round, "
-            f"schedule={swap_schedule})"
-            if n_temps > 1
-            else ""
-        )
-        + (f"  eval_timeouts={n_eval_timeouts}" if n_eval_timeouts else "")
+    # report can quote them as context (see stamp_and_log_run_summary).
+    _common.stamp_and_log_run_summary(
+        idata,
+        "PTDE",
+        logger,
+        actual_draws=actual_draws,
+        draws=draws,
+        n_accept=n_accept,
+        n_propose=n_propose,
+        n_swap_accept=n_swap_accept,
+        n_swap_propose=n_swap_propose,
+        round_trips=round_trips[0],
+        n_swap_rounds=n_swap_rounds,
+        n_temps=n_temps,
+        swap_schedule=swap_schedule,
+        rate_unit="round",
+        extras=(
+            [f"  eval_timeouts={n_eval_timeouts}"] if n_eval_timeouts else []
+        ),
     )
     # Post-tune swap counters (they are zeroed at the tune -> draw boundary;
     # see the step loop), so this measures the FINAL ladder's communication

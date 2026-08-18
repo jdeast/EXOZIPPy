@@ -560,6 +560,39 @@ def de_proposal(rng, pop, i, gamma, keys, jitter=DE_JITTER):
     return prop
 
 
+# Largest factor by which one adaptation window may move gamma.  A window is
+# a few hundred proposals, so its acceptance estimate is noisy; the clip is
+# what keeps one unlucky window from moving the step size by orders of
+# magnitude.
+GAMMA_CLIP_FACTOR = 10.0
+
+
+def next_gamma(gamma, ar, target_accept, clip=GAMMA_CLIP_FACTOR):
+    """The DE step-size update, shared by everything that adapts gamma.
+
+    ``gamma *= (ar / target)**0.5``, clipped to a factor `clip` per update.
+    The square root dampens the oscillation a proportional rule would set
+    up: acceptance responds to gamma with a lag of one whole window, so a
+    full correction consistently overshoots.
+
+    ``ar <= 0`` -- nothing accepted at all -- has no signal for the ratio to
+    use, and shrinks by the clip factor instead of stalling at a step size
+    already proven too large.  ptde/ptde_async guard on `ar > 0` before
+    calling and so never take that branch; polish_seed_starts relies on it,
+    since a T=1 optimizer routinely sustains sub-1% acceptance.
+
+    THE single owner of the rule, for the same reason de_proposal is the
+    single owner of the move: the sampler's T=1 kernel and the polish's
+    engine are the same move, so a second tuning story would be one more
+    thing to keep in sync.
+    """
+    shrink = 1.0 / clip  # NOT gamma/clip below: the callers this replaced
+    # multiplied by 0.1, and 1.0/10.0 IS 0.1 in float64 while gamma/10.0
+    # need not equal gamma*0.1 in the last bit.
+    scale = (ar / target_accept) ** 0.5 if ar > 0 else shrink
+    return float(np.clip(gamma * scale, gamma * shrink, gamma * clip))
+
+
 # Ensemble spread, in probe-scale units, below which the start population is
 # reported as under-dispersed.  1.0 is not a tuning choice: the probe scale IS
 # an estimate of the posterior width (the 0.5-nat step), so a spread below it
@@ -1126,6 +1159,64 @@ def assemble_inference_data(
             f"{list(chain_seed_index)}"
         )
     return idata
+
+
+def stamp_and_log_run_summary(
+    idata,
+    label,
+    log,
+    *,
+    actual_draws,
+    draws,
+    n_accept,
+    n_propose,
+    n_swap_accept,
+    n_swap_propose,
+    round_trips,
+    n_swap_rounds,
+    n_temps,
+    swap_schedule,
+    rate_unit,
+    extras=(),
+):
+    """Stamp the ladder round-trip attrs and log the one-line run summary.
+
+    Shared by both samplers, which had ~20 near-identical lines each and had
+    already started to drift.  Deliberately stops SHORT of the ladder
+    diagnostics: ladder_health_report is called by each sampler afterwards,
+    because what its counters span differs between them (ptde zeroes at the
+    tune -> draw boundary, ptde_async never resets and says so), and because
+    that is the code the announced adaptive-rung-spacing work will reshape.
+
+    ``rate_unit`` is "round" (a synchronous DEO round) or "swap" (one async
+    swap event) -- the same denominator each sampler already used for its
+    round-trip rate.  ``extras`` are pre-formatted trailing fragments (the
+    async swap-discard count, either sampler's timeout count), appended in
+    order and each already carrying its leading separator.
+
+    THE ROUND TRIPS ARE TEMPERATURE round trips of a replica
+    (T=1 -> T_max -> T=1), NOT mode changes: outputs.modes counts the latter
+    itself from the stored T=1 labels and labels the two separately, because
+    "swap" is ambiguous between them.
+    """
+    idata.posterior.attrs["ptde_ladder_round_trips"] = int(round_trips)
+    idata.posterior.attrs["ptde_swap_rounds"] = int(n_swap_rounds)
+
+    ar_T1 = float(n_accept[0] / max(n_propose[0], 1))
+    sr_all = np.asarray(n_swap_accept) / np.maximum(n_swap_propose, 1)
+    rt_rate = round_trips / max(n_swap_rounds, 1)
+    log.info(
+        f"{label} done: {actual_draws}/{draws} draws  "
+        f"accept(T=1)={ar_T1:.3f}  "
+        + (
+            f"swap=[{', '.join(f'{r:.2f}' for r in sr_all)}]  "
+            f"round_trips={round_trips} (rate={rt_rate:.3f}/{rate_unit}, "
+            f"schedule={swap_schedule})"
+            if n_temps > 1
+            else ""
+        )
+        + "".join(extras)
+    )
 
 
 def log_rung_timing(rung_times, temperatures, label, log):
