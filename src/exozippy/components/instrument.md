@@ -24,7 +24,26 @@ Time system: default is BJD_TDB in, untouched. `time_scale:` (utc/tai/tt/tdb/tcb
 
 `Instrument._apply_mask(df, i)` (called by `_read_data` after column selection) drops excluded rows per an optional per-file `mask:` config key — a flag-file path (one 0/1 per data row, nonzero = exclude), a boolean list, or a list of 0-based row indices, all referring to the file's ON-DISK row order (mask before sort, so indices from external tools stay valid). All-points-masked and length/range mismatches raise. Tests: `tests/test_instrument_mask.py`.
 
-Optional detrending against extra data columns (columns past the error column, one coefficient per column per instrument, block-diagonal so coefficients never mix) is supported by `rvinstrument`, `transit` and `mulensinstrument` (magnitude-space coefficients there, applied multiplicatively to the flux model as `10**(-0.4 * X.c)` -- the same model as the old additive magnitude detrending, and the right form for a throughput/extinction trend). `astrometryinstrument` has none — its 2-observable modes would need per-channel coefficients.
+Optional detrending against extra data columns (columns past the error column, one coefficient per column per instrument, block-diagonal so coefficients never mix) is supported by `rvinstrument`, `transit` and `mulensinstrument` (magnitude-space coefficients there, applied multiplicatively to the flux model as `10**(-0.4 * X.c)` -- the same model as the old additive magnitude detrending, and the right form for a throughput/extinction trend). `astrometryinstrument` has none -- its 2-observable modes would need per-channel coefficients.
+
+### Detrend columns are WHITENED at ingestion, per (instrument, column)
+
+`_build_block_detrend` subtracts each column's mean and divides by its own standard deviation as it places the column on the block diagonal, and publishes the standard deviations as `detrend_scales`. Both halves earn their place, and the two are not the same argument:
+
+- **Mean subtraction removes an exact degeneracy.** Along its mean direction a nonzero-mean column is indistinguishable from the instrument's own offset (`gamma` / `baseline`), so the pair sits on a flat likelihood ridge. Whitening the SAMPLER cannot rescue that -- it fixes scale, not correlation. Measured on `examples/gj1214`, whose seven ground-based light curves each detrend against airmass: the cosine between the raw column and the constant (offset) direction ran **0.9986 to 0.9995** per instrument, i.e. a 2x2 condition number of ~1.5e3 to ~4.4e3 on the (offset, coefficient) block. After whitening it is **exactly 0**. EXOFASTv2 mean-subtracts for the same reason.
+- **Scale division conditions the coefficient**, so a column's arbitrary physical magnitude does not set the sampler's step size.
+
+Three decisions the implementation makes explicitly:
+
+- **Per (instrument, column), never global.** The design is block-diagonal precisely so coefficients cannot mix across instruments; a global moment would couple the blocks again.
+- **A CONSTANT column RAISES**, naming the instrument and the column. It is exactly degenerate with the offset and carries no information, so there is nothing to estimate. Mean-subtracting it alone would leave an all-zero basis vector whose coefficient the likelihood never sees -- a free dimension held up only by its bounds -- and dividing by an epsilon would invent an arbitrary one. Neither silent option is acceptable; the user should delete the column (or list only the varying ones with `columns: {detrend: [...]}`).
+- **Sample whitened, report un-whitened.** The sampler gets the conditioned coordinate; the user's `lower`/`upper`/`sigma` go in, and the table reads out, per RAW column unit -- so a stated prior keeps its meaning and the reported number stays physically interpretable. That is a per-element internal <-> user coordinate change, so it is declared as a `Parameter` conversion factor (`internal_to_user_scale`, see `src/exozippy/components/parameter.md`) and applied by `to_internal` / `from_internal`. **Do not hand-write the factor at a call site** -- the two factor functions in this codebase are reciprocals and confusing them is silent. `Instrument.add_parameter` injects it, in the BASE class rather than in each child's manifest, because all three detrending children write the same one-line manifest entry and a child that forgot the scale would silently report whitened coefficients.
+
+**This changes what the offset means**, and that is the point rather than a side effect: `gamma` / `baseline` is now the model value at the detrend columns' MEANS rather than at column zero. For an airmass-like basis that is the more interpretable of the two (column zero is not a physical observing condition), and it is what makes the pair identifiable.
+
+The start point does not move (`detrend_coeffs` starts at 0, so the trend term is zero either way): `examples/gj1214`'s start logp is bit-identical at `116050.274910399`. What moves is the posterior geometry, and the fitted coefficient/offset pair with it.
+
+One known wart, pre-existing and NOT introduced here: `rvinstrument`'s `detrend_coeffs` is declared `unit: ""` while the term it adds is in the internal solRad/d, so the coefficient is reported in solRad/d rather than m/s. Fixing it would change reported numbers and belongs in its own change.
 
 ## Plotting a fitted model: the point, and the per-observation terms
 

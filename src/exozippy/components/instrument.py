@@ -332,8 +332,9 @@ class ConcatenatedData:
 
         Sets ``time``, ``<observable>``, ``err``, ``inst_map``,
         ``n_total_obs``, ``row_ranges``, every side array, and the
-        ``detrend_matrix`` / ``n_detrend_per_inst`` / ``total_detrend_cols``
-        triple; then calls ``_prepare_gp`` and ``_prepare_robust``, which are
+        ``detrend_matrix`` / ``n_detrend_per_inst`` / ``total_detrend_cols`` /
+        ``detrend_scales`` quad; then calls ``_prepare_gp`` and
+        ``_prepare_robust``, which are
         no-ops unless a file set ``gp:`` / ``likelihood:``.
 
         ``user_factor`` converts the concatenated error from the internal unit
@@ -366,6 +367,7 @@ class ConcatenatedData:
             owner.detrend_matrix,
             owner.n_detrend_per_inst,
             owner.total_detrend_cols,
+            owner.detrend_scales,
         ) = owner._build_block_detrend(self.detrend, owner.n_total_obs)
 
         owner._prepare_gp(
@@ -411,6 +413,11 @@ class Instrument(Component):
         # running observation count.
         self.files = [c.get("file") for c in self.config]
         self.n_total_obs = 0
+        # One standard deviation per global detrend column, published by
+        # ConcatenatedData.finalize; None until then (and for a child that
+        # never detrends).  It is the internal <-> user coordinate change of
+        # detrend_coeffs -- see _build_block_detrend and add_parameter.
+        self.detrend_scales = None
         # Per-element (start, stop) row ranges into the concatenated arrays,
         # published by ConcatenatedData.finalize.  Empty for a child that does
         # not concatenate (astrometryinstrument keeps per-file datasets).
@@ -1873,6 +1880,36 @@ class Instrument(Component):
     # than fundamental, and is gone too (exoplanet-core >= 0.4.0 makes the
     # limb-darkening op JAX-differentiable).
 
+    def add_parameter(self, model, param_name, system, context_nodes=None):
+        """Stage 6, plus the detrend coefficients' whitening scale.
+
+        ``_build_block_detrend`` WHITENS every detrend column, so the SAMPLED
+        coefficient is per whitened column while the user's bounds and the
+        reported value must stay per RAW column unit.  That is a per-element
+        internal <-> user coordinate change, so it is declared the way every
+        other one is -- as a Parameter conversion factor, applied by
+        ``to_internal`` / ``from_internal`` -- and never hand-written at a
+        call site (the two factor functions in this codebase are reciprocals
+        and confusing them is silent; see CLAUDE.md).
+
+        It is injected HERE, in the base class, rather than in each child's
+        manifest, because all three detrending children (`rvinstrument`,
+        `transit`, `mulensinstrument`) write the same
+        ``self.manifest["detrend_coeffs"] = {"shape": ...}`` line and a child
+        that forgot the scale would silently report whitened coefficients.
+        ``setdefault`` keeps it overridable and idempotent across the repeat
+        ``build_model()`` the GUI does.
+        """
+        if param_name == "detrend_coeffs" and self.detrend_scales is not None:
+            entry = self.manifest.get(param_name)
+            if isinstance(entry, dict):
+                entry.setdefault(
+                    "internal_to_user_scale", 1.0 / self.detrend_scales
+                )
+        return super().add_parameter(
+            model, param_name, system, context_nodes=context_nodes
+        )
+
     # ------------------------------------------------------------------
     # Shared plotting helpers
     # ------------------------------------------------------------------
@@ -2024,24 +2061,67 @@ class Instrument(Component):
     # ------------------------------------------------------------------
     # Shared optional detrending against extra data columns
     # ------------------------------------------------------------------
-    @staticmethod
-    def _build_block_detrend(all_detrend, n_total_obs):
+    def _build_block_detrend(self, all_detrend, n_total_obs):
         """Block-diagonal detrend design matrix from per-instrument blocks.
 
         ``all_detrend`` is one ``(n_obs_i, n_cols_i)`` array per instrument
         (``n_cols_i == 0`` when that instrument has no detrend columns).
-        Returns ``(matrix, n_detrend_per_inst, total_detrend_cols)`` where the
-        matrix is ``(n_total_obs, total_detrend_cols)`` with each instrument's
-        columns placed on the block diagonal so coefficients never mix across
-        instruments.
+        Returns ``(matrix, n_detrend_per_inst, total_detrend_cols, scales)``
+        where the matrix is ``(n_total_obs, total_detrend_cols)`` with each
+        instrument's columns placed on the block diagonal so coefficients
+        never mix across instruments.
+
+        Every column is WHITENED as it is placed: mean subtracted, then
+        divided by its own standard deviation.  ``scales`` is one standard
+        deviation per global column, and is what turns the sampled
+        coefficient back into a coefficient per raw column unit.
+
+        Why both halves:
+
+        * The MEAN subtraction removes an exact degeneracy.  A column with a
+          nonzero mean is, along its mean direction, indistinguishable from
+          the instrument's own offset (``gamma`` / ``baseline``), so the pair
+          has a perfectly flat likelihood ridge that no amount of whitening
+          the SAMPLER does can rescue -- whitening fixes scale, not
+          correlation.  EXOFASTv2 mean-subtracts for the same reason.  It
+          does change what the offset MEANS: it is now the model value at
+          the detrend columns' means rather than at column zero, which for
+          an airmass-like basis is the more interpretable of the two.
+        * The SCALE division makes the coefficients comparably conditioned,
+          so the columns' arbitrary physical magnitudes do not set the
+          sampler's step sizes.
+
+        The moments are per (instrument, column) and never global: the
+        design is block diagonal precisely so coefficients cannot mix across
+        instruments, and a global moment would couple the blocks again.
+
+        A CONSTANT column (zero variance) RAISES.  It is exactly degenerate
+        with the offset and carries no information, so there is nothing to
+        estimate: mean-subtracting it alone would leave an all-zero basis
+        vector whose coefficient the likelihood never sees (a free dimension
+        held up only by its bounds), and dividing by an epsilon would invent
+        an arbitrary one.  Refusing names the column instead.
         """
         n_per = [d.shape[1] for d in all_detrend]
         total = sum(n_per)
         matrix = np.zeros((n_total_obs, total))
+        scales = np.ones(total)
         r, c = 0, 0
-        for block in all_detrend:
+        for i, block in enumerate(all_detrend):
             n_r, n_c = block.shape
-            if n_c > 0:
-                matrix[r : r + n_r, c : c + n_c] = block
+            for j in range(n_c):
+                col = np.asarray(block[:, j], dtype=float)
+                sd = float(np.std(col))
+                if not np.isfinite(sd) or sd == 0.0:
+                    raise ValueError(
+                        f"[{self.prefix}[{self.names[i]}]] detrend column "
+                        f"{j} is constant (value {col.flat[0]!r}), so it "
+                        f"carries no information and is exactly degenerate "
+                        f"with this instrument's offset.  Remove the column "
+                        f"(or list only the varying ones with `columns: "
+                        f"{{detrend: [...]}}`)."
+                    )
+                matrix[r : r + n_r, c + j] = (col - np.mean(col)) / sd
+                scales[c + j] = sd
             r, c = r + n_r, c + n_c
-        return matrix, n_per, total
+        return matrix, n_per, total, scales

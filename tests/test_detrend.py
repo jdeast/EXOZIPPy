@@ -82,6 +82,108 @@ def detrended_rv(tmp_path_factory):
 
 
 # ---------------------------------------------------------------------------
+# 6.5.2: the design matrix is whitened per (instrument, column)
+# ---------------------------------------------------------------------------
+
+
+def test_detrend_columns_are_whitened_at_ingestion(detrended_rv):
+    """
+    Given a detrend column with a large nonzero mean and a nonunit scale,
+    When the instrument's design matrix is built,
+    Then that column has mean 0 and standard deviation 1 -- the mean is
+    what was exactly degenerate with the instrument offset, and the scale
+    is what left the coefficient badly conditioned for the sampler.
+    """
+    system, _, _, _, x = detrended_rv
+    col = system.rvinstrument.detrend_matrix[:, 0]
+
+    assert np.mean(col) == pytest.approx(0.0, abs=1e-12)
+    assert np.std(col) == pytest.approx(1.0, rel=1e-12)
+    # ... and it is still the SAME basis vector, only rescaled
+    np.testing.assert_allclose(col, (x - np.mean(x)) / np.std(x), atol=1e-12)
+
+
+def test_whitening_is_per_instrument_block(detrended_rv):
+    """
+    Given two instruments whose single detrend columns have very different
+    moments,
+    When the block-diagonal matrix is built,
+    Then each block is whitened against its OWN moments -- a global moment
+    would couple blocks the design is block-diagonal precisely to keep
+    independent.
+    """
+    system, _, _, _, _ = detrended_rv
+    a = np.array([[1.0], [3.0]])  # mean 2, std 1
+    b = np.array([[100.0], [140.0]])  # mean 120, std 20
+
+    matrix, per_inst, total, scales = system.rvinstrument._build_block_detrend(
+        [a, b], 4
+    )
+
+    assert per_inst == [1, 1]
+    assert total == 2
+    np.testing.assert_allclose(matrix[:2, 0], [-1.0, 1.0])
+    np.testing.assert_allclose(matrix[2:, 1], [-1.0, 1.0])
+    np.testing.assert_allclose(scales, [1.0, 20.0])
+
+
+def test_a_constant_detrend_column_is_refused(detrended_rv):
+    """
+    Given a detrend column with zero variance,
+    When the block-diagonal matrix is built,
+    Then it RAISES naming the column.
+
+    A constant column carries no information and is exactly degenerate with
+    the instrument offset, so there is nothing to estimate; mean-subtracting
+    it instead would leave an all-zero basis vector whose coefficient the
+    likelihood never sees, and dividing by an epsilon would invent one.
+    """
+    system, _, _, _, _ = detrended_rv
+
+    with pytest.raises(ValueError, match="constant"):
+        system.rvinstrument._build_block_detrend([np.full((5, 1), 2.5)], 5)
+
+
+def test_detrend_coefficient_is_reported_in_raw_units(detrended_rv):
+    """
+    Given a whitened design matrix,
+    When the coefficient Parameter converts internal -> user,
+    Then the reported number is the coefficient per RAW column unit --
+    the sampled one divided by that column's standard deviation.
+
+    Sample whitened, report un-whitened: the conversion goes through
+    Parameter.from_internal like every other unit change, so nothing hand
+    writes the factor at a call site.
+    """
+    system, _, _, _, x = detrended_rv
+    coeffs = system.rvinstrument.detrend_coeffs
+
+    reported = coeffs.from_internal(np.array([1.0]))
+
+    assert float(np.atleast_1d(reported)[0]) == pytest.approx(
+        1.0 / np.std(x), rel=1e-12
+    )
+
+
+def test_user_bounds_are_pushed_through_the_same_map(detrended_rv):
+    """
+    Given the coefficient's raw-unit bounds from defaults.yaml,
+    When the Parameter stores them internally,
+    Then they are the raw bounds times the column's standard deviation --
+    a stated prior keeps its meaning under the change of coordinate.
+    """
+    system, _, _, _, x = detrended_rv
+    coeffs = system.rvinstrument.detrend_coeffs
+
+    assert float(np.atleast_1d(coeffs.lower)[0]) == pytest.approx(
+        -1.0e6 * np.std(x), rel=1e-12
+    )
+    assert float(np.atleast_1d(coeffs.upper)[0]) == pytest.approx(
+        1.0e6 * np.std(x), rel=1e-12
+    )
+
+
+# ---------------------------------------------------------------------------
 # 1.5.1: the fitted trend reaches the plots
 # ---------------------------------------------------------------------------
 
