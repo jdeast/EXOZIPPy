@@ -97,11 +97,6 @@ def set_worker_globals(logp_fn, collect_timing=False):
     _PTDE_COLLECT_TIMING = collect_timing
 
 
-def timing_enabled():
-    """Whether _eval_logp currently returns (lp, elapsed) tuples."""
-    return _PTDE_COLLECT_TIMING
-
-
 # Exception types _eval_logp has already reported, so a failing region does
 # not emit one log line per proposal.  Per worker process, by construction.
 _LOGP_EXC_SEEN = set()

@@ -69,9 +69,6 @@ logger = logging.getLogger(__name__)
 from exozippy.whitening import (
     _PROBE_FLAT_SCALE,
 )
-from exozippy.whitening import (  # noqa: E402
-    PROBE_TARGET_DELTA as _PROBE_TARGET_DELTA,
-)
 from exozippy.whitening import (
     probe_scales as _probe_scales,
 )
