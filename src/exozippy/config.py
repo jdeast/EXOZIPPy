@@ -620,6 +620,17 @@ class ConfigManager:
         # that on examples/ob161003, by design -- see the note there).
         self._raw_user_param_keys = {str(k) for k in (user_params or {})}
 
+        # The (component, parameter) pairs the user wrote in the 2-part
+        # BROADCAST form.  Pass 2 below expands them into indexed keys sized
+        # by the config list and the evidence is gone, so record it here and
+        # check it in resolve(), which is the first place the parameter's real
+        # element count exists.  See _check_broadcast_covers_vector.
+        self._broadcast_param_keys = {
+            tuple(str(k).split("."))
+            for k in self._raw_user_param_keys
+            if len(str(k).split(".")) == 2
+        }
+
         # If config is provided, validate names then standardize right away
         if system_config is not None:
             validate_instance_names(system_config)
@@ -1009,6 +1020,85 @@ class ConfigManager:
             else:
                 base[k] = v
 
+    def _check_broadcast_covers_vector(
+        self, component_type, param_name, shape, n_elements, names=None
+    ):
+        """Refuse a 2-part broadcast key that does not cover the whole vector.
+
+        ``standardize_param_names`` Pass 2 expands ``comp.param`` into one
+        indexed key per CONFIG ENTRY, because that is all it can see: it runs
+        at ConfigManager construction, long before any manifest exists.  But a
+        parameter's element count is a manifest option (``shape``) and need not
+        equal the config-list length, in EITHER direction:
+
+          * LONGER than the config list -- ``lens`` has one config entry while
+            its per-source vectors (``t_0``, ``u_0``, ``rho``, ...) carry one
+            element per SOURCE.  ``lens.t_0: 2450000`` expanded to
+            ``lens.0.t_0`` only, and element 1 silently fell back to the
+            defaults.yaml backstop.  Not a start-value-only defect: a
+            broadcast ``sigma:``/``mu:``/``lower:`` applied the PRIOR to
+            element 0 alone, i.e. a silent posterior change on a 2S2L fit.
+          * SHORTER than the config list -- ``detrend_coeffs`` has shape
+            (total detrend columns,), which for two files with one column
+            between them is 1 while the config list is 2.  Pass 2 then writes
+            indexed keys for elements that do not exist.
+
+        So raise, rather than teach Pass 2 to fill: the count is unknowable
+        where the expansion happens and known here, and there is no filling
+        rule that is right for both surfaces anyway (element j of a lens
+        vector is a SOURCE, element j of ``detrend_coeffs`` is a COLUMN --
+        neither is "instance j", which is the only thing a broadcast key can
+        possibly mean).  Costs users nothing: no shipped example writes a
+        2-part broadcast on any such parameter (``examples/ob161003`` spells
+        every per-source entry by the source star's name).
+
+        Only checked when the caller passed an explicit vector ``shape``.  The
+        single-element modes -- ``shape=()`` with or without ``element=`` --
+        legitimately resolve one element of a longer vector (the relaxation
+        engine and ``Instrument._time_coord`` both do), and comparing 1 against
+        the config-list length there would reject every ordinary broadcast.
+
+        Residual case, deliberately not covered: a mismatch the COUNTS agree
+        about (two instruments with two detrend columns between them).  A
+        length test cannot see that element i means something other than
+        instance i; naming the columns individually is the fix if it ever
+        bites.
+        """
+        if shape == () or not self._broadcast_param_keys:
+            return
+        if (component_type, param_name) not in self._broadcast_param_keys:
+            return
+
+        comp_list = self.system_config.get(component_type)
+        if not isinstance(comp_list, list) or len(comp_list) == n_elements:
+            return
+
+        bcast = f"{component_type}.{param_name}"
+        spellings = [
+            f"{component_type}.{i}.{param_name}" for i in range(n_elements)
+        ]
+        if names:
+            spellings = [
+                f"{component_type}.{names[i]}.{param_name}"
+                if i < len(names)
+                else spellings[i]
+                for i in range(n_elements)
+            ]
+        where = f" in {self.param_file}" if self.param_file else ""
+        raise ValueError(
+            f"\n!!! BROADCAST KEY DOES NOT COVER THE VECTOR !!!\n"
+            f"'{bcast}'{where} is the 2-part broadcast form, which addresses "
+            f"one element per '{component_type}' config entry "
+            f"({len(comp_list)} of them), but '{bcast}' has "
+            f"{n_elements} element(s): its length comes from the component's "
+            f"manifest, not from the config list.\n"
+            f"Broadcasting it would silently cover only part of the vector "
+            f"(or address elements that do not exist), taking the value, "
+            f"bounds and PRIOR with it.\n"
+            f"Write one entry per element instead:\n  "
+            + "\n  ".join(spellings)
+        )
+
     def resolve(
         self,
         component_type,
@@ -1126,6 +1216,11 @@ class ConfigManager:
                     _raise_duplicate_spelling(
                         keys[1], keys[2], keys[1], self.param_file
                     )
+
+        # A BROADCAST KEY MUST COVER THE WHOLE VECTOR OR NOT BE WRITTEN.
+        self._check_broadcast_covers_vector(
+            component_type, param_name, shape, n_elements, names
+        )
 
         base_unit_str = base.get("unit", "")
 
