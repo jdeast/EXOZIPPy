@@ -299,24 +299,36 @@ class Transit(Instrument):
 
         q = globalsearch.QUALITY_TRANSIT
         source = f"BLS on {self.n_elements} light curve(s)"
+        applied = []
         if mode == "force" or not satisfied["period"]:
-            globalsearch.seed_start(
-                cm, f"orbit.{orbit_ndx}.period", signal.period, q, source
+            applied.append(
+                globalsearch.seed_start(
+                    cm, f"orbit.{orbit_ndx}.period", signal.period, q, source
+                )
             )
         if mode == "force" or not satisfied["tc"]:
-            globalsearch.seed_start(
-                cm, f"orbit.{orbit_ndx}.tc", signal.epoch, q, source
+            applied.append(
+                globalsearch.seed_start(
+                    cm, f"orbit.{orbit_ndx}.tc", signal.epoch, q, source
+                )
             )
         if planet_ndx is not None and (
             mode == "force" or not satisfied.get("p", True)
         ):
-            globalsearch.seed_start(
-                cm,
-                f"planet.{planet_ndx}.p",
-                float(np.sqrt(signal.depth)),
-                q,
-                source,
+            applied.append(
+                globalsearch.seed_start(
+                    cm,
+                    f"planet.{planet_ndx}.p",
+                    float(np.sqrt(signal.depth)),
+                    q,
+                    source,
+                )
             )
+
+        if not any(applied):
+            # Nothing was actually taken (another search of equal or better
+            # quality got there first).  Prose describes what the fit did.
+            return
 
         get_collector(system).add(
             "Initial values for the orbital period and time of conjunction "

@@ -257,13 +257,18 @@ class RVInstrument(Instrument):
 
         q = globalsearch.QUALITY_RV
         source = f"Lomb-Scargle on {self.n_elements} RV data set(s)"
+        applied = []
         if mode == "force" or not satisfied["period"]:
-            globalsearch.seed_start(
-                cm, f"orbit.{orbit_ndx}.period", signal.period, q, source
+            applied.append(
+                globalsearch.seed_start(
+                    cm, f"orbit.{orbit_ndx}.period", signal.period, q, source
+                )
             )
         if mode == "force" or not satisfied["tc"]:
-            globalsearch.seed_start(
-                cm, f"orbit.{orbit_ndx}.tc", signal.epoch, q, source
+            applied.append(
+                globalsearch.seed_start(
+                    cm, f"orbit.{orbit_ndx}.tc", signal.epoch, q, source
+                )
             )
         if np.isfinite(signal.amplitude) and signal.amplitude > 0.0:
             logger.info(
@@ -275,6 +280,13 @@ class RVInstrument(Instrument):
                 signal.amplitude,
             )
             self.k_init = float(signal.amplitude)
+
+        if not any(applied):
+            # Every orbital seed was declined -- a transit search got there
+            # first (QUALITY_TRANSIT).  Saying the period came from the RVs
+            # would be false, and the transit component has already said
+            # where it really came from.
+            return
 
         get_collector(system).add(
             "Initial values for the orbital period and time of conjunction "
