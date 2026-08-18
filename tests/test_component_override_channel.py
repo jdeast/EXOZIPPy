@@ -392,3 +392,145 @@ def test_neither_injection_can_reach_probe_derivable(tmp_path):
         [f"star.0.{p}" for p in _GRID] + ["star.0.teff"]
     )
     assert all(not p.endswith(".av") for p in derivable)
+
+
+# ---------------------------------------------------------------------------
+# export_solution must SEE the "overrides" pins  (review 2.1.4)
+# ---------------------------------------------------------------------------
+
+
+def _write_rv(path, seed, n=40):
+    rng = np.random.default_rng(seed)
+    t = np.sort(rng.uniform(2455000.0, 2455400.0, n))
+    rv = 30.0 * np.sin(2 * np.pi * t / 17.0) + rng.normal(0, 3.0, n)
+    np.savetxt(path, np.column_stack([t, rv, np.full(n, 3.0)]))
+    return str(path)
+
+
+@pytest.fixture(scope="module")
+def half_robust_rv_system(tmp_path_factory):
+    """Two RV instruments, one of which asked for a robust likelihood.
+
+    ``Instrument._register_robust`` then pins the OTHER file's out_frac /
+    out_scale through the manifest ``"overrides"`` channel, which is the
+    cheapest live instance of a component-supplied ``sigma: 0`` (the GP
+    hyperparameters do the same thing but need celerite2).  Both elements
+    carry a user ``initval`` so both reach export_solution as symbols --
+    without one, an unmapped parameter is not exported at all and the defect
+    is invisible rather than wrong.
+    """
+    d = tmp_path_factory.mktemp("robust_export")
+    files = [_write_rv(d / "a.rv", 11), _write_rv(d / "b.rv", 12)]
+    config = {
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "b"}],
+        "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
+        "rvinstrument": [
+            {"name": "A_inst", "file": files[0], "likelihood": "hogg"},
+            {"name": "B_inst", "file": files[1]},
+        ],
+    }
+    params = {
+        "star.A.mass": {"initval": 1.0, "sigma": 0.05},
+        "star.A.radius": {"initval": 1.0, "sigma": 0.05},
+        "orbit.b.logP": {"initval": np.log10(17.0)},
+        "orbit.b.tc": {"initval": 2455010.0},
+        "rvinstrument.A_inst.out_frac": {"initval": 0.05},
+        "rvinstrument.B_inst.out_frac": {"initval": 0.05},
+    }
+    system = System(config, params)
+    system.prepare()
+    return system
+
+
+def test_export_solution_reports_an_override_pin_as_fixed(
+    half_robust_rv_system,
+):
+    """
+    Given a component that pinned one element through the manifest
+      "overrides" channel,
+    When export_solution is handed the manifest overrides,
+    Then that element exports fixed, and the opted-in one stays free.
+
+    export_solution called resolve() without the owning component's
+    internal_overrides, so a sigma: 0 autopin exported as free and the GUI's
+    Tune tab offered a slider for a knob the sampler never moves.  The build
+    was always right (add_parameter passes them); this is the reporting layer
+    catching up -- the same class PR #173 closed for expr_key.
+    """
+    # ARRANGE
+    system = half_robust_rv_system
+
+    # ACT
+    export = system.config_manager.export_solution(
+        derived_params=system.derived_elements(),
+        active_elements=system.active_elements(),
+        manifest_overrides=system.manifest_overrides(),
+    )
+
+    # ASSERT
+    assert export["parameters"]["rvinstrument.B_inst.out_frac"]["fixed"]
+    assert not export["parameters"]["rvinstrument.A_inst.out_frac"]["fixed"]
+
+
+def test_the_pin_lands_on_the_element_the_component_pinned(
+    half_robust_rv_system,
+):
+    """
+    Given the same per-element override list ([nan, 0.0]),
+    When export_solution resolves each element on its own (shape=(),
+      element=i),
+    Then element 1 carries the sigma and element 0 does not.
+
+    resolve()'s single-element mode runs its override loop once with a local
+    index of 0 while resolving element i, so it used to read val[0] for every
+    element -- element 0's pin applied to the whole vector, or none of it.
+    The whole-vector mode never saw that, which is why it survived until
+    export_solution started using this channel.
+    """
+    # ARRANGE
+    system = half_robust_rv_system
+
+    # ACT
+    export = system.config_manager.export_solution(
+        manifest_overrides=system.manifest_overrides()
+    )
+
+    # ASSERT
+    params = export["parameters"]
+    assert params["rvinstrument.B_inst.out_frac"]["sigma"] == 0.0
+    assert params["rvinstrument.A_inst.out_frac"]["sigma"] is None
+
+
+def test_a_user_sigma_still_beats_an_override_pin_in_the_export(
+    half_robust_rv_system,
+):
+    """
+    Given the export machinery reading the "overrides" channel,
+    When the user sets their own sigma on the pinned element,
+    Then the export reports the user's value.
+
+    "overrides" layers UNDER the params file, and the report has to say the
+    same thing the build does -- otherwise the fix would trade one
+    disagreement for another.
+    """
+    # ARRANGE
+    system = half_robust_rv_system
+    cm = system.config_manager
+    cm.user_params["rvinstrument.1.out_frac"] = {
+        "initval": 0.05,
+        "sigma": 0.01,
+    }
+
+    # ACT
+    try:
+        export = cm.export_solution(
+            manifest_overrides=system.manifest_overrides()
+        )
+    finally:
+        cm.user_params["rvinstrument.1.out_frac"] = {"initval": 0.05}
+
+    # ASSERT
+    entry = export["parameters"]["rvinstrument.B_inst.out_frac"]
+    assert entry["sigma"] == 0.01
+    assert not entry["fixed"]

@@ -1424,7 +1424,23 @@ class ConfigManager:
                     continue
                 val = od[key]
                 for i in indices:
-                    v = val[i] if isinstance(val, (list, np.ndarray)) else val
+                    # A per-element override list is indexed by the
+                    # PARAMETER's element, which is `_eff_idx(i)`, not by the
+                    # local loop index: in the single-element mode (shape=(),
+                    # element=j) the loop runs once with i = 0 while the
+                    # element being resolved is j, so reading val[0] there
+                    # applied element 0's pin to every element in turn.  The
+                    # whole-vector mode is unaffected (element is None, so
+                    # _eff_idx is the identity), which is why this went
+                    # unnoticed until export_solution began passing manifest
+                    # overrides through this path.
+                    src = _eff_idx(i)
+                    if isinstance(val, (list, np.ndarray)):
+                        if src >= len(val):
+                            continue
+                        v = val[src]
+                    else:
+                        v = val
                     if v is None:
                         continue
                     v = float(v)
@@ -2212,7 +2228,12 @@ class ConfigManager:
                 return "user"
         return "default"
 
-    def export_solution(self, derived_params=None, active_elements=None):
+    def export_solution(
+        self,
+        derived_params=None,
+        active_elements=None,
+        manifest_overrides=None,
+    ):
         """Export the resolved parameter solution as JSON-friendly dicts.
 
         `derived_params`, when given, says which parameters the built manifests
@@ -2236,6 +2257,19 @@ class ConfigManager:
         not parameters of their instance's parameterization at all; they export
         with `"active": False` so a reporting consumer can leave them out, as
         the tables do.
+
+        `manifest_overrides` (`System.manifest_overrides()`) is the third
+        after-prepare() table, and it is needed for the same reason as the
+        other two: what the BUILD does is decided by the manifest, and a
+        report that re-derives it from the config alone disagrees.  Component
+        `"overrides"` are the channel a component pins an element through
+        (`sigma: 0` for a GP hyperparameter of a file that did not ask for a
+        GP, a robust-likelihood parameter of a file with no `likelihood:`, an
+        unread limb-darkening coefficient), and `resolve()` only applies them
+        when it is handed them -- so without this table every such element
+        exported `fixed: False` and the GUI's Tune tab drew a slider for a
+        knob the sampler never moves.  Reporting-only: the build has always
+        been correct, since `Component.add_parameter` passes them.
 
         Returns a dict with:
           - "parameters": {user_path: {value, unit, internal_unit, lower,
@@ -2302,7 +2336,14 @@ class ConfigManager:
                 if len(parts) == 3 and parts[1].isdigit()
                 else None
             )
-            cfg = self.resolve(c_type, p_name, element=el)
+            cfg = self.resolve(
+                c_type,
+                p_name,
+                element=el,
+                internal_overrides=(manifest_overrides or {}).get(
+                    (c_type, p_name)
+                ),
+            )
 
             def _first(key):
                 arr = cfg.get(key)

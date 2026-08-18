@@ -190,6 +190,7 @@ def solve(config, user_params=None, workdir=None):
     export = system.config_manager.export_solution(
         derived_params=system.derived_elements(),
         active_elements=system.active_elements(),
+        manifest_overrides=system.manifest_overrides(),
     )
     elapsed = time.time() - start
 
@@ -229,6 +230,7 @@ def validate(config, user_params=None, workdir=None):
     export = system.config_manager.export_solution(
         derived_params=system.derived_elements(),
         active_elements=system.active_elements(),
+        manifest_overrides=system.manifest_overrides(),
     )
     diagnostics = list(system.config_manager.diagnostics)
     diagnostics.extend(_bounds_diagnostics(export.get("parameters", {})))

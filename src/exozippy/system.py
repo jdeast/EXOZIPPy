@@ -434,6 +434,33 @@ class System(Component):
                 )
         return out
 
+    def manifest_overrides(self):
+        """``(component_prefix, param_name) -> the manifest "overrides" dict``.
+
+        The third of the after-prepare() tables a reporting consumer needs
+        (with :meth:`derived_elements` and :meth:`active_elements`), and for
+        the same reason: what the BUILD does is decided by the manifest, and a
+        report that re-derives it from the config alone disagrees.
+        ``"overrides"`` is how a component supplies per-element defaults the
+        user may still beat -- including the ``sigma: 0`` pin on a GP
+        hyperparameter of a file that asked for no GP, a robust-likelihood
+        parameter of a file with no ``likelihood:``, or an unread
+        limb-darkening coefficient.  ``ConfigManager.resolve`` applies them
+        only when handed them (``Component.add_parameter`` does), so
+        ``export_solution`` reported every such element as free until it was
+        given this.  Only entries that carry overrides appear.  Valid after
+        stage 2.
+        """
+        out = {}
+        for comp in self.active_components.values():
+            for name, raw in getattr(comp, "manifest", {}).items():
+                overrides = interpret_manifest_entry(raw).options.get(
+                    "overrides"
+                )
+                if overrides:
+                    out[(comp.prefix, name)] = overrides
+        return out
+
     def build_likelihood(self, model, system):
         pass
 
