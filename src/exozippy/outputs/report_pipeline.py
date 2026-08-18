@@ -27,6 +27,73 @@ from .texutils import latex_escape
 logger = logging.getLogger(__name__)
 
 
+def _declare_evidence_prose(system):
+    """Declare the bridge-sampling method, at the site that opts into it.
+
+    Same rule as ``add_prior_contribution``: the feature's own code path
+    emits the feature's sentence, so the draft cannot claim a method the run
+    did not use, or omit one it did.  ``prose.add`` is idempotent by key, so
+    a second report on one System replaces rather than duplicates.
+
+    Config facts only, per the prose contract -- which method was used and
+    what it does.  The lnZ values and weights are fitted numbers and belong
+    to the mode table.
+    """
+    prose = getattr(system, "prose", None)
+    if prose is None:
+        return
+    prose.add(
+        "The relative weight of each posterior mode was estimated from its "
+        "local marginal likelihood by bridge sampling "
+        r"\citep{Meng:1996}, using the optimal bridge against a "
+        "multivariate Gaussian proposal fitted to that mode's own draws in "
+        "the unconstrained sampling space. Each estimate carries a "
+        "relative mean-squared-error diagnostic "
+        r"\citep{FruhwirthSchnatter:2004}, and a mode whose diagnostic "
+        "cannot support a confident answer is refused rather than reported.",
+        section="evidence",
+        key="report_pipeline.evidence.method",
+        rank=10,
+    )
+
+
+def _declare_evidence_outcome_prose(system, applied, failed=False):
+    """Say whether the evidence weights were actually adopted.
+
+    A run diagnostic, not a fitted value -- the same category as the
+    convergence and burn-in numbers the wrap-up prose already interpolates.
+    It has to be said: the method sentence above describes an estimator that
+    is allowed to refuse, and a draft that describes bridge sampling without
+    saying the run fell back to occupancy would misreport the weights in the
+    table next to it.
+    """
+    prose = getattr(system, "prose", None)
+    if prose is None:
+        return
+    if applied:
+        text = (
+            "The bridge-sampling estimates were accepted for every mode, and "
+            "the mode weights reported here are those evidence weights."
+        )
+    elif failed:
+        text = (
+            "The evidence estimation did not complete, so the mode weights "
+            "reported here are draw-count occupancies."
+        )
+    else:
+        text = (
+            "The bridge-sampling estimate was refused for at least one mode, "
+            "so the mode weights reported here are draw-count occupancies "
+            "rather than evidence weights."
+        )
+    prose.add(
+        text,
+        section="evidence",
+        key="report_pipeline.evidence.outcome",
+        rank=20,
+    )
+
+
 def build_mode_reports(
     system,
     idata,
@@ -237,6 +304,7 @@ def build_mode_reports(
         and mode_report is not None
         and mode_report.n_modes > 1
     ):
+        _declare_evidence_prose(system)
         try:
             from .evidence import (
                 apply_evidence_weighting,
@@ -258,11 +326,13 @@ def build_mode_reports(
                 [f"{w:.3f}" for w in mode_report.weights],
                 mode_report.provenance,
             )
+            _declare_evidence_outcome_prose(system, applied)
         except Exception:
             logger.warning(
                 "Evidence weighting failed; keeping occupancy weights",
                 exc_info=True,
             )
+            _declare_evidence_outcome_prose(system, False, failed=True)
 
     # Hot-chain suppressed-mode search outcome.  Written whether or not a
     # ledger exists: the states worth distinguishing most ("never searched",
