@@ -552,7 +552,9 @@ class Instrument(Component):
           boolean-list form below, which is the YAML spelling of the same
           thing.
         - a list of booleans, one per data row: True means EXCLUDE.
-        - a list of integers: 0-based row indices to EXCLUDE.
+        - a list of integers: 0-based row indices to EXCLUDE.  An all-0/1
+          integer list with one entry per row is REFUSED as ambiguous rather
+          than read as indices -- see the guard below.
 
         Absent or ``null`` keeps every point (the default: byte-for-byte the
         pre-feature behavior).
@@ -602,6 +604,27 @@ class Instrument(Component):
                 for v in spec
             ):
                 idx = np.asarray(spec, dtype=int)
+                # An all-0/1 integer list one entry per row is ambiguous, and
+                # the two readings are OPPOSITES: read as indices (what this
+                # branch does) `mask: [1, 0, 1, 0]` excludes rows 0 and 1;
+                # read as flags -- which is what the flag-FILE form of the
+                # same numbers means, and what anyone transcribing one into
+                # YAML would assume -- it excludes rows 0 and 2.  Refuse and
+                # name both explicit spellings rather than picking.
+                if idx.size == n and set(np.unique(idx)) <= {0, 1}:
+                    raise ValueError(
+                        f"[{label}] mask is {n} integers, all 0 or 1, one per "
+                        f"data row -- that is ambiguous.  As ROW INDICES it "
+                        f"would exclude rows "
+                        f"{sorted(set(int(v) for v in idx))}; as PER-ROW "
+                        f"FLAGS (what the mask-FILE form of these numbers "
+                        f"means) it would exclude rows "
+                        f"{[j for j, v in enumerate(idx) if v]}.  Say which: "
+                        f"write the flags as booleans "
+                        f"([true, false, ...]), or put the flags in a file "
+                        f"and give its path, or list only the row indices to "
+                        f"exclude."
+                    )
                 if idx.size and (idx.min() < 0 or idx.max() >= n):
                     raise ValueError(
                         f"[{label}] mask indices must be 0-based row indices "
@@ -648,7 +671,10 @@ class Instrument(Component):
                 "file's own row order before anything is derived from it: a "
                 "path to a file with one 0/1 flag per data row (nonzero = "
                 "exclude), a list of booleans (one per row, true = exclude), "
-                "or a list of 0-based row indices to exclude."
+                "or a list of 0-based row indices to exclude. An inline list "
+                "of integers that are all 0 or 1 with one entry per row is "
+                "refused as ambiguous (it could be either) -- write the "
+                "flags as booleans, or put them in a file."
             ),
         }
 
