@@ -2755,9 +2755,10 @@ class Parameter:
         keeping the bounds/scale fixed at seed 0.  Returns an array shaped like
         self.raw_initval (one entry per sampled element).
 
-        Raises SeedBoundViolation if a logit element's value falls outside its
-        [lower, upper] bound -- a clipped start would sit in no basin, so the
-        caller must skip that seed loudly rather than silently move it.
+        Raises SeedBoundViolation if a sampled element's value is non-finite,
+        or if a logit element's value falls outside its [lower, upper] bound
+        -- a clipped start would sit in no basin, so the caller must skip that
+        seed loudly rather than silently move it.
         """
         tf = getattr(self, "_raw_transform", None)
         if tf is None:
@@ -2771,6 +2772,18 @@ class Parameter:
         v = np.asarray(v, dtype=float).reshape(-1)
         raw = np.zeros(len(idx))
         for j, i in enumerate(idx):
+            # A non-finite seed value fails BOTH bound comparisons below (every
+            # comparison with NaN is False), so it used to sail through the
+            # logit branch and land a NaN raw coordinate in a chain start dict
+            # with nothing naming the element -- exactly the failure class the
+            # stage-6 start checks removed for seed 0 (review 2.2.1).  It is
+            # the same situation as an out-of-bounds seed and gets the same
+            # treatment: the multi-seed caller skips the whole seed loudly.
+            if not np.isfinite(v[i]):
+                raise SeedBoundViolation(
+                    f"{self.label}[{i}] seed initval is {v[i]} -- a seed must "
+                    f"say where it starts"
+                )
             if tf["use_logit"][i]:
                 lower, upper = tf["lowers"][i], tf["uppers"][i]
                 span = upper - lower

@@ -1341,3 +1341,43 @@ def test_out_of_bounds_through_the_solved_config_pipeline_says_user():
     msg = str(exc.value)
     assert "star.A.distance" in msg
     assert "start value from: user" in msg
+
+
+# ---------------------------------------------------------------------------
+# A MULTI-SEED START MUST SAY WHERE IT STARTS EITHER (raw_from_initval).
+#
+# The same rule as the two above, at the one other door into a chain start.
+# NaN fails every comparison, so a non-finite seed value passed the bound
+# check silently and produced a NaN raw coordinate that reached a start dict
+# with nothing naming the element (review 2.2.1).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"lower": 0.0, "upper": 10.0},  # logit branch
+        # gaussian branch: unbounded, so the raw N(0,1) IS the prior
+        {"mu": 1.0, "sigma": 2.0, "lower": -np.inf, "upper": np.inf},
+    ],
+    ids=["logit", "gaussian"],
+)
+def test_non_finite_seed_value_raises_seed_bound_violation(kwargs):
+    """
+    Given a built parameter and an alternate seed whose value is NaN,
+    When raw_from_initval maps that seed to a raw start,
+    Then SeedBoundViolation names the element, so the multi-seed caller skips
+    the seed loudly instead of starting a chain at a NaN coordinate.
+    """
+    # ARRANGE
+    from exozippy.components.parameter import SeedBoundViolation
+
+    p = Parameter(
+        label="star.teff", initval=5.0, unit="", internal_unit="", **kwargs
+    )
+    with pm.Model():
+        p.build_pymc()
+
+    # ACT & ASSERT
+    with pytest.raises(SeedBoundViolation, match="star.teff"):
+        p.raw_from_initval(np.array([np.nan]))
