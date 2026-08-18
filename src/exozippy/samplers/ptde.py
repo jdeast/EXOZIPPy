@@ -896,7 +896,11 @@ def ptde_sample(
 
     # compile logp ONCE; install in _common BEFORE forking workers so fork
     # children inherit it (copy-on-write; see _common.set_worker_globals)
-    logp_fn = model.compile_logp()
+    # PositionalLogp calls the compiled function by position instead of
+    # through pymc's dict wrapper -- same value, ~3.5x less call overhead on
+    # a 20-variable model, which at one call per proposal is the difference
+    # between 35 us and 10 us of pure plumbing per evaluation (6.4.3).
+    logp_fn = _common.PositionalLogp(model.compile_logp())
     _common.set_worker_globals(logp_fn, collect_rung_timing)
 
     # compile raw -> physical conversions ONCE (single-sample and batched;

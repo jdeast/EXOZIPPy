@@ -97,6 +97,73 @@ def set_worker_globals(logp_fn, collect_timing=False):
     _PTDE_COLLECT_TIMING = collect_timing
 
 
+class PositionalLogp:
+    """A dict-in logp that calls the compiled function BY POSITION.
+
+    ``model.compile_logp()`` returns a pymc ``PointFunc``, whose ``__call__``
+    is ``self.f(**point)``: pytensor then looks every name up, and -- with
+    ``trust_input`` off, its default -- runs each value through the input's
+    ``filter`` (a dtype/shape check and possible copy).  That is a per-INPUT
+    cost on a call whose useful work may be microseconds, and PTDE makes one
+    such call per proposal, n_temps x n_chains of them per step.  Measured
+    per call on a 27-element model, evaluated 20k times (review 6.4.3):
+
+        raw vars   PointFunc(dict)   this wrapper    saved
+             3          7.5 us          3.1 us       2.4x
+            10         18.8 us          6.2 us       3.0x
+            20         35.7 us         10.1 us       3.5x
+            27         45.9 us         13.0 us       3.5x
+
+    i.e. ~1.4 us per raw variable, against ~0.4 us here.  On the 20-variable,
+    432-proposal step that a DC2018-class fit runs, that is ~11 ms of worker
+    CPU per step.
+
+    THE COERCION IS NOT OPTIONAL, and dropping it is how this turns into a
+    crash or worse.  ``trust_input`` disables filtering entirely, and the
+    values PTDE hands over are NOT always what the filter would have made
+    them: ``de_proposal`` computes ``pop[i][k] + gamma*(...)``, and for a
+    0-d parameter numpy returns a np.float64 SCALAR rather than a 0-d array.
+    Passed straight through, that raises inside the numba backend
+    (reproduced: "Vectorized inputs must be arrays") -- and an unfiltered
+    wrong dtype is worse, since it is read as raw memory.  So each value goes
+    through ``np.asarray(v, dtype)`` here, which is exactly the conversion
+    the filter would have done and costs ~0.1 us.
+
+    Falls back to the wrapped callable unchanged if the function cannot be
+    introspected (a plain callable in a test, a future pymc that renames the
+    attributes) -- this is an optimization, and losing it must never mean
+    losing the fit.  The wrapped function is one the SAMPLER compiled, so
+    setting trust_input on it cannot surprise another holder.
+    """
+
+    def __init__(self, logp_fn):
+        self.logp_fn = logp_fn
+        self.spec = None
+        f = getattr(logp_fn, "f", None)
+        try:
+            inputs = [i for i in f.maker.inputs if not i.implicit]
+            spec = [(i.variable.name, i.variable.type.dtype) for i in inputs]
+            if any(name is None for name, _ in spec):
+                raise AttributeError("unnamed compiled-logp input")
+        except (AttributeError, TypeError):
+            logger.debug(
+                "PositionalLogp: cannot introspect %r; keeping the dict "
+                "call path",
+                type(logp_fn),
+            )
+            return
+        f.trust_input = True
+        self.f = f
+        self.spec = spec
+
+    def __call__(self, point):
+        if self.spec is None:
+            return self.logp_fn(point)
+        return self.f(
+            *[np.asarray(point[name], dtype=dt) for name, dt in self.spec]
+        )
+
+
 # Exception types _eval_logp has already reported, so a failing region does
 # not emit one log line per proposal.  Per worker process, by construction.
 _LOGP_EXC_SEEN = set()

@@ -647,6 +647,65 @@ def test_make_starts_falls_back_when_system_has_no_jitter():
 
 
 # ---------------------------------------------------------------------------
+# The positional logp call (review 6.4.3)
+# ---------------------------------------------------------------------------
+
+
+def test_positional_logp_matches_the_dict_wrapper_bit_for_bit():
+    """
+    Given a model with a scalar, a vector and a TRANSFORMED variable,
+    When the same points are evaluated through pymc's dict wrapper and
+      through the positional wrapper the samplers install,
+    Then the two agree exactly -- including for the numpy SCALARS a DE
+      proposal produces for a 0-d parameter.
+
+    Those scalars are the whole reason the wrapper coerces: trust_input
+    turns the input filter off, and a np.float64 where a 0-d array is
+    expected raises inside the numba backend rather than being converted.
+    """
+    # ARRANGE
+    from exozippy.samplers._common import PositionalLogp
+
+    with pm.Model() as model:
+        pm.Normal("x", mu=0.0, sigma=1.0)
+        pm.Normal("y", mu=3.0, sigma=0.5, shape=3)
+        pm.HalfNormal("s", sigma=2.0)  # sampled as s_log__
+        pm.Normal("obs", mu=0.0, sigma=1.0, observed=np.zeros(5))
+    dict_fn = model.compile_logp()
+    fast = PositionalLogp(model.compile_logp())
+    assert fast.spec is not None, "introspection failed; the test is inert"
+    rng = np.random.default_rng(0)
+    point = model.initial_point()
+
+    # ACT / ASSERT
+    for _ in range(20):
+        prop = {
+            k: np.asarray(v, dtype=float) + rng.standard_normal(np.shape(v))
+            for k, v in point.items()
+        }
+        # a 0-d entry comes out of that arithmetic as a numpy scalar
+        assert not isinstance(prop["x"], np.ndarray)
+        assert float(dict_fn(prop)) == float(fast(prop))
+
+
+def test_positional_logp_falls_back_for_a_plain_callable():
+    """
+    Given a logp that is not a pymc PointFunc (a stub, or a future pymc that
+      renames the attributes),
+    When it is wrapped,
+    Then the wrapper passes calls straight through.
+
+    This is an optimization; losing it must never mean losing the fit.
+    """
+    from exozippy.samplers._common import PositionalLogp
+
+    fast = PositionalLogp(lambda point: -0.5 * float(point["x"]) ** 2)
+
+    assert fast.spec is None
+    assert fast({"x": 2.0}) == pytest.approx(-2.0)
+
+
+# ---------------------------------------------------------------------------
 # Start over-dispersion diagnostic (review 2.4.5)
 # ---------------------------------------------------------------------------
 
