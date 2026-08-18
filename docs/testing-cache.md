@@ -134,17 +134,42 @@ and cost the same on a hot cache before this change. They are the next
 thing to look at if the suite needs to get faster; the cache is no longer
 the bottleneck.
 
-**The cold run's four failures are a separate bug the measurement turned
-up.** They are not the refresh-walk timeout; they are
+### A cold cache is still not a pleasant place, and that is worth knowing
+
+**The cold run's four failures were a separate bug the measurement turned
+up.** They were not the refresh-walk timeout; they were
 `filelock._error.Timeout` on PyTensor's compile lock. All compilation for a
 compiledir is serialized behind that one lock, and its default acquire
 timeout is 120 s (`compile__wait * 24`), which six workers queueing on an
-empty cache blow straight through. It hit
-`test_distance_volume_prior`, `test_nsnl`, `test_rossiter` and
-`test_multiplanet` -- whichever happened to queue behind a long compile,
-the same lottery as the refresh-walk timeout. The conftest now sets
-`compile__timeout=600`. This was always latent; giving the suite a private
-compiledir is what makes everyone pay one cold run and so meet it.
+empty cache blow straight through. It hit `test_distance_volume_prior`,
+`test_nsnl`, `test_rossiter` and `test_multiplanet` -- whichever happened
+to queue behind a long compile, the same lottery as the refresh-walk
+timeout. The conftest now sets `compile__timeout=600`, and a repeat cold
+run confirms it: **4 lock timeouts -> 0**, in 24:57.
+
+That repeat run still had **one** failure, and it is a third, independent
+effect that this change does not fix and does not claim to.
+`test_astrometry.py::test_finite_logp_and_gradient` hit pytest-timeout's
+300 s cap -- not because of the cache walk, which is now paid out of band,
+but because on an empty compiledir the gcc work that test triggers really
+does take that long. It is a 17 s test warm.
+
+The instructive part is the durations either side of it: on the cold run
+`test_band_autopin_ld` took 365 s, `test_vcve` 337 s, `test_rossiter` 328 s
+and `test_run_endpoints` 316 s, and all four **passed**. They overran the
+same cap; the difference is only where the interpreter happened to be when
+`SIGALRM` fired. pytest-timeout's signal method cannot interrupt a process
+blocked in a C extension (see the note on `timeout_method` in
+pyproject.toml), so a test waiting on a gcc subprocess simply ignores the
+alarm until it returns to Python. Whether a cold run goes red is therefore
+a coin flip, exactly as the original bug was, one level down.
+
+This is not worth weakening the 300 s cap for. It only bites on a
+genuinely empty compiledir, which is a state you now hit **once**, the
+first time you run the suite after this change. Just re-run -- the second
+run is warm and green -- or make the cold run deliberate with
+`--timeout=1800`. CI never sees it at `-n 2`, where the lock queue is two
+deep instead of six.
 
 One full cold run creates **1564 entries / 825 MB**. That is the number the
 budgets are sized against -- a budget below one run's working set would
