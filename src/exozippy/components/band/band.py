@@ -1,4 +1,5 @@
 import logging
+from collections import namedtuple
 
 import numpy as np
 import pymc as pm
@@ -18,6 +19,13 @@ from exozippy.components.sed.bc_grid import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# One (band, star) registration by one limb-darkening consumer.  `star` is
+# the star index whose atmosphere that consumer's limb darkening describes,
+# or None when the consumer cannot determine it on its own (see
+# Band.ld_consumers).  `label` names the consumer in error messages.
+LDConsumer = namedtuple("LDConsumer", "label band star")
 
 
 class Band(Component):
@@ -151,7 +159,14 @@ class Band(Component):
 
     def load_data(self, system):
         self.filter_names = [c.get("filter", "") for c in self.config]
-        self.star_indices = [c.get("star_ndx", 0) for c in self.config]
+        # What the USER declared, or None where the key is absent.  The
+        # resolved answer (declaration validated against, or derived from,
+        # the LD consumers) is written by _resolve_ld_stars at stage 3; this
+        # is the provisional value anything reading earlier would see.
+        self.star_ndx_declared = [c.get("star_ndx") for c in self.config]
+        self.star_indices = [
+            0 if d is None else int(d) for d in self.star_ndx_declared
+        ]
         self.ld_laws = self._parse_ld_laws()
         self.fitthermal = [
             bool(c.get("fitthermal", False)) for c in self.config
@@ -257,8 +272,29 @@ class Band(Component):
     # astrometryinstrument's optional `band:` is deliberately absent: it uses
     # the band only for its filter identity (the SED photocenter fluxfrac),
     # never its limb darkening.
-    def _ld_consumer_indices(self, system):
-        """Band indices whose limb darkening something in this topology reads.
+    def ld_consumers(self, system):
+        """Every LD consumer in this topology, as ``LDConsumer`` records.
+
+        THE single consumer predicate.  Two questions are asked of it and
+        they used to be answered separately: *which* bands are read (the
+        unread-LD autopin) and *whose* limb darkening each read is
+        (``_resolve_ld_stars``).  Answering them apart is how a new consumer
+        gets remembered in one place and forgotten in the other.
+
+        ``star`` is the star index that consumer's limb darkening describes,
+        or ``None`` where the consumer genuinely cannot say:
+
+        * **transit** -- the host stars of the planets it models
+          (``planet.star_ndx``).  A light curve models every planet, so with
+          planets around more than one star its limb darkening is
+          intrinsically ambiguous and it registers ``None`` (see
+          ``_resolve_ld_stars``, which warns rather than raising: a second
+          band with the same filter cannot fix that one, because the band is
+          per light curve and not per planet).
+        * **mulensinstrument** -- the SOURCE star, ``lens.source_map[0]``,
+          and only when the source is resolved (``finite_source``); a point
+          source takes no limb darkening at all.
+        * **rvinstrument** ``rm:`` -- the primary star of the RM orbit.
 
         Read from each consumer's raw ``config`` rather than from its parsed
         band map: ``MulensInstrument.band_map`` is built in *stage 3*
@@ -267,11 +303,11 @@ class Band(Component):
         and is always available here.
         """
         name_to_idx = {name: i for i, name in enumerate(self.names)}
-        consumers = set()
+        out = []
 
-        def _mark(idx):
+        def _mark(label, idx, star=None):
             if idx is not None and 0 <= idx < self.n_elements:
-                consumers.add(idx)
+                out.append(LDConsumer(label, int(idx), star))
 
         def _cfg(comp_name):
             comp = getattr(system, comp_name, None)
@@ -279,8 +315,15 @@ class Band(Component):
 
         # Transit: the occultation model cannot be computed without limb
         # darkening, so any transit referencing a band reads it.
-        for c in _cfg("transit"):
-            _mark(name_to_idx.get(c.get("band")))
+        hosts = {int(pcfg.get("star_ndx", 0) or 0) for pcfg in _cfg("planet")}
+        transit_host = hosts.pop() if len(hosts) == 1 else None
+        for i, c in enumerate(_cfg("transit")):
+            name = c.get("name", i)
+            _mark(
+                f"transit[{name}]",
+                name_to_idx.get(c.get("band")),
+                transit_host,
+            )
 
         # Microlensing: the magnification only takes u1 when the source is
         # resolved.  `any` over the lens elements, not `[0]`, because that is
@@ -290,22 +333,167 @@ class Band(Component):
             bool(c.get("finite_source", False)) for c in _cfg("lens")
         )
         if finite_source:
+            # The source whose surface is resolved.  build_likelihood passes
+            # lens.source_map[0] down, so that is the star the u1 it consumes
+            # belongs to.
+            smap = list(
+                getattr(getattr(system, "lens", None), "source_map", [])
+            )
+            src = int(smap[0]) if len(smap) else None
             # Every band a light curve references is marked, not just the
             # lowest-indexed one build_likelihood actually passes down (it
             # warns and uses the first).  Pinning on that tie-break would make
             # the pin an artifact of an acknowledged limitation.
-            for c in _cfg("mulensinstrument"):
-                _mark(name_to_idx.get(c.get("band")))
+            for i, c in enumerate(_cfg("mulensinstrument")):
+                name = c.get("name", i)
+                _mark(
+                    f"mulensinstrument[{name}]",
+                    name_to_idx.get(c.get("band")),
+                    src,
+                )
 
         # Rossiter-McLaughlin: rvinstrument `rm:` reads the `rm_band` band, or
         # band 0 when unset (see rm.resolve_rm_indices).
-        for c in _cfg("rvinstrument"):
+        for i, c in enumerate(_cfg("rvinstrument")):
             if not c.get("rm"):
                 continue
+            name = c.get("name", i)
             rm_band = c.get("rm_band")
-            _mark(0 if rm_band is None else name_to_idx.get(rm_band))
+            idx = 0 if rm_band is None else name_to_idx.get(rm_band)
+            _mark(
+                f"rvinstrument[{name}].rm",
+                idx,
+                self._rm_host_star(system, c.get("rm")),
+            )
 
-        return consumers
+        return out
+
+    @staticmethod
+    def _rm_host_star(system, orbit_name):
+        """Primary star of the RM orbit, or None if it cannot be resolved.
+
+        Never raises: an unknown ``rm:`` orbit is ``rm.resolve_rm_indices``'s
+        error to report (with its own message), not this predicate's, and a
+        star resolution is not worth failing a fit over.
+        """
+        orbit = getattr(system, "orbit", None)
+        groups = getattr(orbit, "primary_bodies", None)
+        if groups is None:
+            return None
+        names = list(getattr(orbit, "names", []))
+        if orbit_name not in names:
+            return None
+        for comp_type, idx in groups[names.index(orbit_name)]:
+            if comp_type == "star":
+                return int(idx)
+        return None
+
+    def _ld_consumer_indices(self, system):
+        """Band indices whose limb darkening something in this topology reads."""
+        return {c.band for c in self.ld_consumers(system)}
+
+    def _resolve_ld_stars(self, system):
+        """Settle, per band instance, WHOSE limb darkening it carries.
+
+        Limb darkening is physically a property of a (star, band) pair, but
+        the parameters live on the band instance alone, so two hosts sharing
+        one band instance silently share their limb darkening.  The LOCKED
+        design (notes/ld_atm_prior.txt) keeps the parameters per band
+        INSTANCE -- named blocks referencing a filter string are already
+        legal, ``band: {I_A: {filter: I}, I_B: {filter: I}}`` -- and makes
+        the pairing explicit instead: every consumer registers the star it
+        reads the limb darkening of, and a disagreement is refused.
+
+        ``star_ndx:`` on the band block stays the single source of truth (it
+        is what ``transit._build_dilution`` reads for the SED deblending
+        host).  What changes is that it is now VALIDATED against the
+        consumers when the user declares it, and DERIVED from them when the
+        user does not -- so the historical default of 0 no longer silently
+        stands in for a source star that is really star 1.
+
+        Two outcomes, and the difference is whether the user can act on it:
+
+        * A consumer needing a star the band does not carry, or two
+          consumers of one band needing different stars, RAISES -- naming
+          the consumers and pointing at a second band with the same filter.
+        * A single consumer that cannot name its own star (a transit light
+          curve covering planets of several hosts) WARNS.  One light curve
+          models every planet, so its limb darkening is ambiguous no matter
+          how many band blocks exist; refusing would gate a configuration
+          with no legal spelling.
+
+        This is the prerequisite for the limb-darkening atmosphere prior
+        (review 8.5.2), which needs to know which star's atmosphere a band's
+        coefficients are being predicted for.
+        """
+        consumers = self.ld_consumers(system)
+        star_names = list(getattr(getattr(system, "star", None), "names", []))
+
+        for i in range(self.n_elements):
+            mine = [c for c in consumers if c.band == i]
+            declared = self.star_ndx_declared[i]
+            wanted = sorted({c.star for c in mine if c.star is not None})
+
+            if len(wanted) > 1:
+                who = ", ".join(
+                    f"{c.label} -> star {self._star_label(star_names, c.star)}"
+                    for c in mine
+                    if c.star is not None
+                )
+                raise ValueError(
+                    f"[{self.prefix}] band '{self.names[i]}' carries the limb "
+                    f"darkening of more than one star: {who}.  Limb darkening "
+                    f"is a property of a (star, band) pair, so define one "
+                    f"band block per star with the same filter "
+                    f"(e.g. band: [{{name: {self.names[i]}_A, filter: "
+                    f"{self.filter_names[i]}}}, {{name: {self.names[i]}_B, "
+                    f"filter: {self.filter_names[i]}}}]) and point each "
+                    f"consumer at its own."
+                )
+
+            if declared is not None:
+                star = int(declared)
+                if wanted and wanted[0] != star:
+                    who = ", ".join(
+                        c.label for c in mine if c.star is not None
+                    )
+                    raise ValueError(
+                        f"[{self.prefix}] band '{self.names[i]}' declares "
+                        f"star_ndx: {declared} "
+                        f"({self._star_label(star_names, star)}), but {who} "
+                        f"reads its limb darkening for star "
+                        f"{self._star_label(star_names, wanted[0])}.  Either "
+                        f"correct star_ndx or give that consumer its own band "
+                        f"block with the same filter."
+                    )
+            elif wanted:
+                star = wanted[0]
+            else:
+                star = 0
+
+            if mine and not wanted:
+                logger.warning(
+                    f"[{self.prefix}] band '{self.names[i]}': no consumer "
+                    f"could name the star its limb darkening belongs to "
+                    f"({', '.join(c.label for c in mine)}); using star "
+                    f"{self._star_label(star_names, star)}.  A transit light "
+                    f"curve models every planet, so with planets around more "
+                    f"than one star ONE band cannot carry both hosts' limb "
+                    f"darkening -- set star_ndx: on the band to say which "
+                    f"host is meant."
+                )
+            self.star_indices[i] = int(star)
+
+        self.star_map = np.array(self.star_indices, dtype=int)
+
+    @staticmethod
+    def _star_label(star_names, idx):
+        """``"1 ('B')"`` when the names are known, ``"1"`` otherwise."""
+        if idx is None:
+            return "?"
+        if 0 <= idx < len(star_names):
+            return f"{idx} ('{star_names[idx]}')"
+        return str(idx)
 
     def _pin_unread_limb_darkening(self, system, consumers=None):
         """Pin the LD parameters of the bands nothing in the topology reads.
@@ -374,6 +562,12 @@ class Band(Component):
 
     def register_parameters(self, system):
         self.manifest = {}
+
+        # Settle whose limb darkening each band carries before anything reads
+        # star_indices (transit's SED deblending host) -- stage 3, because the
+        # consumers' own maps (lens.source_map, orbit.primary_bodies) are
+        # built in stage 2.
+        self._resolve_ld_stars(system)
 
         # Limb darkening enters the manifest ONLY when something in the
         # topology reads it (a transit, a finite-source microlensing light
