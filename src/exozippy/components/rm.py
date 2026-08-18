@@ -288,6 +288,12 @@ def resolve_rm_indices(system, orbit_name, band_name=None):
     ValueError if ``orbit_name`` names no orbit or no planet transits it, so a
     misconfigured `rm:`/`rm_band:` fails loudly instead of silently modelling
     the wrong body.
+
+    Every failure here is a CONFIG error and says so, because the raw
+    exceptions they used to raise named neither the key nor the component: a
+    typo'd ``rm_band`` came out of ``list.index`` as "'X' is not in list",
+    and a ``rm:`` with no ``band:`` block at all came out as an
+    AttributeError from deep inside ``compute_rm_rv``.
     """
     orbit_names = list(system.orbit.names)
     if orbit_name not in orbit_names:
@@ -303,8 +309,24 @@ def resolve_rm_indices(system, orbit_name, band_name=None):
             f"[rm] rm: {orbit_name!r} has no planet on it "
             f"(planet.orbit_map={omap}); RM needs a transiting planet."
         )
-    band_names = list(getattr(system.band, "names", []))
-    band_idx = band_names.index(band_name) if band_name is not None else 0
+    band = getattr(system, "band", None)
+    if band is None:
+        raise ValueError(
+            f"[rm] rm: {orbit_name!r} needs limb darkening, but this config "
+            f"has no `band:` block.  Add one naming the filter the RM "
+            f"velocities were measured in (e.g. band: [{{name: V, filter: "
+            f"V}}]) and point the rvinstrument at it with `rm_band:`."
+        )
+    band_names = list(getattr(band, "names", []))
+    if band_name is None:
+        band_idx = 0
+    elif band_name in band_names:
+        band_idx = band_names.index(band_name)
+    else:
+        raise ValueError(
+            f"[rm] rm_band: {band_name!r} does not name any band (have "
+            f"{band_names})."
+        )
     return orbit_idx, planet_idx, band_idx
 
 
