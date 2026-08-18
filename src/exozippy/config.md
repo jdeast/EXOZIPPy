@@ -22,7 +22,7 @@ trunk `CLAUDE.md`.
    - `RANK_DERIVED_DATA = 60` — from data (e.g., RV offset from median)
    - `RANK_DERIVED_MIXED = 40` — solved using a mix of user + defaults
    - `RANK_DEFAULT = 20` — from `defaults.yaml`
-   - rank 30 is used for microlensing distance hints (overrides 10 pc default, yields to user)
+   - `RANK_MULENS_LENS_DISTANCE = 25` and `RANK_MULENS_SOURCE_DISTANCE = 30` -- the microlensing distance seeds (~4 kpc lens, ~8 kpc bulge source). Both override the 10 pc `defaults.yaml` backstop and both yield to the user; the lens seed must also lose to the SOURCE seed, which is what breaks the d_L <-> parallax cycle (pi_rel drives d_L to the source rank through the engine's Condition B, and the parallax is then corrected as the weaker symbol). Named constants since review 4.6.2 -- the values are deliberate, do not change them.
 4. Runs a **relaxation engine** (`resolve_and_validate_parameters`): iteratively substitutes known values into the SymPy equations to derive unknowns and detect contradictions.
 5. Collects `init_scale` values from defaults, component hints, user sigmas, and the engine's own solved-value sync. These are **preliminary only** (see "Whitening", now `src/exozippy/whitening.md`): sampled parameters get their real scale from the startup probe, and soft-bound barrier steepness is measured numerically post-whitening (the old sympy forward/backward Jacobian scale passes are deleted). `init_scale` is **not user-facing**: entries in a params file are stripped with a warning at ConfigManager construction.
 

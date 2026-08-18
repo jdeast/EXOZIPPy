@@ -5,7 +5,13 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
-from exozippy.config import RANK_DERIVED_DATA
+from exozippy.config import (
+    RANK_DEFAULT,
+    RANK_DERIVED_DATA,
+    RANK_DERIVED_MIXED,
+    RANK_MULENS_LENS_DISTANCE,
+    RANK_MULENS_SOURCE_DISTANCE,
+)
 from exozippy.corner_utils import (
     collect_parameter_corner_samples,
     save_corner_plot,
@@ -743,11 +749,11 @@ class Lens(Component):
             # The symbolic relaxation engine only knows the binary mass-sum
             # and q relations (see symbolic_physics.get_symbol_map), so for
             # 3+ lens bodies the mlens_total and per-slot q initvals are
-            # seeded from the per-body mass initvals instead — body masses
+            # seeded from the per-body mass initvals instead -- body masses
             # (or logmass) must be supplied in the params file; a user q
-            # cannot back-propagate to a companion mass here.  Rank 40
-            # (derived-mixed): overrides defaults, yields to explicit user
-            # values.
+            # cannot back-propagate to a companion mass here.
+            # RANK_DERIVED_MIXED: overrides defaults, yields to explicit
+            # user values.
             body_masses = [
                 self._mass_initval(c_type, c_ndx)
                 for c_type, c_ndx in self.lens_bodies[0]
@@ -793,11 +799,15 @@ class Lens(Component):
                 )
             else:
                 self.config_manager.add_hint(
-                    "lens.0.mlens_total", float(sum(body_masses)), rank=40
+                    "lens.0.mlens_total",
+                    float(sum(body_masses)),
+                    rank=RANK_DERIVED_MIXED,
                 )
                 for j, m_c in enumerate(body_masses[1:]):
                     q_j = m_c / body_masses[0]
-                    self.config_manager.add_hint(f"lens.{j}.q", q_j, rank=40)
+                    self.config_manager.add_hint(
+                        f"lens.{j}.q", q_j, rank=RANK_DERIVED_MIXED
+                    )
                     self.config_manager.add_scale_hint(
                         f"lens.{j}.q", 0.1 * q_j
                     )
@@ -814,7 +824,9 @@ class Lens(Component):
                 if s_val is None or float(s_val) <= 0.0:
                     continue
                 self.config_manager.add_hint(
-                    f"lens.{j}.log_s", float(np.log10(float(s_val))), rank=40
+                    f"lens.{j}.log_s",
+                    float(np.log10(float(s_val))),
+                    rank=RANK_DERIVED_MIXED,
                 )
 
         if any(self.finite_source):
@@ -842,7 +854,9 @@ class Lens(Component):
             sa = sa[0] if sa else None
         if ca is not None and sa is not None:
             alpha_deg = float(np.arctan2(float(sa), float(ca)) * _RAD_TO_DEG)
-            self.config_manager.add_hint(f"lens.0.alpha", alpha_deg, rank=20)
+            self.config_manager.add_hint(
+                f"lens.0.alpha", alpha_deg, rank=RANK_DEFAULT
+            )
 
         # Expected proper motions from the galactic model, for the seeds below.
         # None when the line of sight is not known yet, in which case the pm
@@ -856,12 +870,17 @@ class Lens(Component):
         for i in range(self.n_elements):
             l_type, l_idx = self._primary_lens(i)
 
-            # Rank 25: overrides the 10 pc defaults.yaml default (rank 20) but yields
-            # to any value the relaxation engine derives from pi_rel+d_S (rank 30).
-            # This breaks the d_L↔parallax cycle: pi_rel drives d_L to rank 30 via
-            # Condition B, then parallax (rank 25) is corrected as the weaker symbol.
+            # RANK_MULENS_LENS_DISTANCE overrides the 10 pc defaults.yaml
+            # default (RANK_DEFAULT) but yields to any value the relaxation
+            # engine derives from pi_rel + d_S
+            # (RANK_MULENS_SOURCE_DISTANCE).  That ordering is what breaks
+            # the d_L <-> parallax cycle: pi_rel drives d_L to the source
+            # rank via Condition B, then the parallax is corrected as the
+            # weaker symbol.  See the constants' own comment in config.py.
             self.config_manager.add_hint(
-                f"star.{l_idx}.distance", 4000.0, rank=25
+                f"star.{l_idx}.distance",
+                4000.0,
+                rank=RANK_MULENS_LENS_DISTANCE,
             )
             self.config_manager.add_scale_hint(f"star.{l_idx}.distance", 5.0)
             self.config_manager.add_hint(f"star.{l_idx}.logmass", -0.5)
@@ -875,7 +894,9 @@ class Lens(Component):
             # has its own trajectory chain (distance, pm) to initialize.
             for s_type, s_idx in self.source_bodies[i]:
                 self.config_manager.add_hint(
-                    f"star.{s_idx}.distance", 8000.0, rank=30
+                    f"star.{s_idx}.distance",
+                    8000.0,
+                    rank=RANK_MULENS_SOURCE_DISTANCE,
                 )
                 self.config_manager.add_scale_hint(
                     f"star.{s_idx}.distance", 5.0
@@ -893,7 +914,9 @@ class Lens(Component):
             for l2_type, l2_idx in self.lens_bodies[i][1:]:
                 if l2_type == "star":
                     self.config_manager.add_hint(
-                        f"star.{l2_idx}.distance", 4000.0, rank=25
+                        f"star.{l2_idx}.distance",
+                        4000.0,
+                        rank=RANK_MULENS_LENS_DISTANCE,
                     )
                     self.config_manager.add_scale_hint(
                         f"star.{l2_idx}.distance", 5.0
@@ -1403,12 +1426,19 @@ class Lens(Component):
         u0_safe = apply_u_0_floor(u0_raw)
         is_physical = pt.gt(theta_E_raw, THETA_E_LENSING_MIN)
 
+        # Keys are the CANONICAL parameter names, matching op.py's
+        # _base_mm_params exactly.  They used to be a private dialect
+        # (t0/u0/tE/pi_N/pi_E) whose "pi_E" meant pi_E_E, so a grep for
+        # pi_E_E missed every consumer of this dict while a grep for pi_E hit
+        # the wrong one (review 4.6.1).  Names only -- no sign, no floor and
+        # no expression changed; the parallax convention is stated at the one
+        # place that applies it, get_magnification below.
         return {
-            "t0": self.t_0.value[index],
-            "u0": u0_safe,
-            "tE": tE_safe,
-            "pi_N": pt.switch(is_physical, self.pi_E_N.value[index], 0.0),
-            "pi_E": pt.switch(is_physical, self.pi_E_E.value[index], 0.0),
+            "t_0": self.t_0.value[index],
+            "u_0": u0_safe,
+            "t_E": tE_safe,
+            "pi_E_N": pt.switch(is_physical, self.pi_E_N.value[index], 0.0),
+            "pi_E_E": pt.switch(is_physical, self.pi_E_E.value[index], 0.0),
         }
 
     def _get_binary_mm_params(self, index=0):
@@ -1467,11 +1497,11 @@ class Lens(Component):
         # sign choice). MMEXOFAST calls MulensModel, so published pi_E values
         # are calibrated to this convention.
         tau_p = (
-            (times - p["t0"]) / p["tE"]
-            - delta_n * p["pi_N"]
-            - delta_e * p["pi_E"]
+            (times - p["t_0"]) / p["t_E"]
+            - delta_n * p["pi_E_N"]
+            - delta_e * p["pi_E_E"]
         )
-        u_p = p["u0"] + delta_n * p["pi_E"] - delta_e * p["pi_N"]
+        u_p = p["u_0"] + delta_n * p["pi_E_E"] - delta_e * p["pi_E_N"]
 
         u2 = pt.sqr(tau_p) + pt.sqr(u_p)
         return (u2 + 2.0) / pt.sqrt(u2 * (u2 + 4.0))
@@ -1622,7 +1652,13 @@ class Lens(Component):
 
         if n_lenses >= 2 and self.backend == "vbm_direct":
             sp = self._get_safe_mm_params(index)
-            param_list = [sp["t0"], sp["u0"], sp["tE"], sp["pi_N"], sp["pi_E"]]
+            param_list = [
+                sp["t_0"],
+                sp["u_0"],
+                sp["t_E"],
+                sp["pi_E_N"],
+                sp["pi_E_E"],
+            ]
             if use_rho:
                 param_list.append(self.rho.value[index])
             for j in range(self.n_companions):
@@ -1643,7 +1679,13 @@ class Lens(Component):
             )
         elif n_lenses == 2:
             bp = self._get_binary_mm_params(index)
-            param_list = [bp["t0"], bp["u0"], bp["tE"], bp["pi_N"], bp["pi_E"]]
+            param_list = [
+                bp["t_0"],
+                bp["u_0"],
+                bp["t_E"],
+                bp["pi_E_N"],
+                bp["pi_E_E"],
+            ]
             if use_rho:
                 param_list.append(self.rho.value[index])
             param_list.extend([bp["s"], bp["q"], bp["alpha"]])
@@ -1657,7 +1699,13 @@ class Lens(Component):
             )
         else:
             sp = self._get_safe_mm_params(index)
-            param_list = [sp["t0"], sp["u0"], sp["tE"], sp["pi_N"], sp["pi_E"]]
+            param_list = [
+                sp["t_0"],
+                sp["u_0"],
+                sp["t_E"],
+                sp["pi_E_N"],
+                sp["pi_E_E"],
+            ]
             if use_rho:
                 param_list.append(self.rho.value[index])
             if effective_bandpass is not None:
@@ -1674,27 +1722,6 @@ class Lens(Component):
     # ------------------------------------------------------------------
     # Auto method brackets
     # ------------------------------------------------------------------
-
-    def _get_initval(self, param, slot=0):
-        """Look up a resolved initval from config_manager, checking name and index forms.
-
-        ``slot`` is the element index within the parameter's own vector:
-        source slot for per-source params (t_0, u_0, rho, ...), companion slot
-        for per-companion params (s, alpha, q).
-        """
-        cm = self.config_manager
-        name = self.names[slot] if slot < len(self.names) else str(slot)
-        for key in [f"lens.{name}.{param}", f"lens.{slot}.{param}"]:
-            entry = cm.user_params.get(key)
-            if entry is not None:
-                val = (
-                    entry.get("initval") if isinstance(entry, dict) else entry
-                )
-                if isinstance(val, (list, tuple)):
-                    val = val[0] if val else None
-                if val is not None:
-                    return float(val)
-        return None
 
     def resolve_auto_vbbl(self, times_np, index=0):
         """Replace 'auto_vbbl' with a concrete method list for multi-body lenses.
