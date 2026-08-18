@@ -1,5 +1,6 @@
 """Tests for the PTDE (Parallel Tempering + Differential Evolution) sampler."""
 
+import logging
 import multiprocessing as mp
 import threading
 import time
@@ -13,7 +14,11 @@ from scipy.stats import kstest
 
 from conftest import requires_fork
 from exozippy.components.parameter import Parameter
-from exozippy.samplers._common import resolve_start_population
+from exozippy.samplers._common import (
+    resolve_start_population,
+    start_spread_ratios,
+    warn_if_starts_underdispersed,
+)
 from exozippy.samplers.ptde import (
     _PROBE_FLAT_SCALE,
     _active_rungs,
@@ -639,6 +644,96 @@ def test_make_starts_falls_back_when_system_has_no_jitter():
     # ASSERT
     assert len(starts) == 6
     assert all(np.isfinite(float(logp_fn(s))) for s in starts)
+
+
+# ---------------------------------------------------------------------------
+# Start over-dispersion diagnostic (review 2.4.5)
+# ---------------------------------------------------------------------------
+
+
+def test_underdispersed_starts_are_reported_and_wide_ones_are_not(caplog):
+    """
+    Given two start populations -- one scattered wide of the measured
+      posterior scale, one drawn from well inside it (what seeding from a
+      previous run's posterior draws produces),
+    When the dispersion of each is measured,
+    Then only the tight one warns, and the warning quotes the spread in
+      scale units.
+
+    Rhat's between-chain term is only evidence of non-convergence if the
+    chains started further apart than the posterior is wide, and both
+    convergence.good_chain_mask and the min_ess/max_rhat early stop inherit
+    that assumption.
+    """
+    # ARRANGE
+    rng = np.random.default_rng(0)
+    scales = {"x": np.array(1.0), "y": np.ones(3)}
+    wide = [
+        {
+            "x": np.array(3.0 * rng.standard_normal()),
+            "y": 3.0 * rng.standard_normal(3),
+        }
+        for _ in range(8)
+    ]
+    tight = [
+        {
+            "x": np.array(0.1 * rng.standard_normal()),
+            "y": 0.1 * rng.standard_normal(3),
+        }
+        for _ in range(8)
+    ]
+    log = logging.getLogger("exozippy.test.dispersion")
+
+    # ACT
+    with caplog.at_level(logging.WARNING, logger=log.name):
+        wide_ratio = warn_if_starts_underdispersed(wide, scales, "T", log)
+    assert "UNDER-DISPERSED" not in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=log.name):
+        tight_ratio = warn_if_starts_underdispersed(tight, scales, "T", log)
+
+    # ASSERT
+    assert wide_ratio > 2.0
+    assert tight_ratio < 0.2
+    assert "UNDER-DISPERSED" in caplog.text
+    assert "0.10x the measured posterior scale" in caplog.text
+    # a single start has no between-chain spread to measure, and a flat
+    # probe direction has no posterior width to be dispersed against
+    assert np.isnan(warn_if_starts_underdispersed(tight[:1], scales, "T", log))
+    flat = {"x": np.array(0.0), "y": np.array([np.inf, np.nan, 1.0])}
+    assert np.isfinite(warn_if_starts_underdispersed(wide, flat, "T", log))
+
+
+def test_the_default_jittered_start_population_is_over_dispersed():
+    """
+    Given the ordinary single-seed start population _make_starts builds,
+    When its spread is measured against the probe scales,
+    Then it is comfortably over-dispersed -- so the 2.4.5 diagnostic above
+      is silent on the normal path and only speaks about seeded restarts.
+    """
+    # ARRANGE
+    model = _simple_model()
+    logp_fn = model.compile_logp()
+    raw_start = model.initial_point()
+    scales = {
+        k: np.ones_like(np.asarray(v, dtype=float))
+        for k, v in raw_start.items()
+    }
+
+    # ACT
+    starts, _ = _make_starts(
+        8,
+        raw_start,
+        logp_fn,
+        np.random.default_rng(3),
+        system=None,
+        raw_scales=scales,
+    )
+    ratios = start_spread_ratios(starts, scales)
+
+    # ASSERT: scatter is min(sqrt(500/D), 3) = 3 scale units here
+    flat = np.concatenate([np.ravel(v) for v in ratios.values()])
+    assert np.median(flat) > 1.5
 
 
 # ---------------------------------------------------------------------------

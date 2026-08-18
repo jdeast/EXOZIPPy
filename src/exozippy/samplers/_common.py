@@ -560,6 +560,89 @@ def de_proposal(rng, pop, i, gamma, keys, jitter=DE_JITTER):
     return prop
 
 
+# Ensemble spread, in probe-scale units, below which the start population is
+# reported as under-dispersed.  1.0 is not a tuning choice: the probe scale IS
+# an estimate of the posterior width (the 0.5-nat step), so a spread below it
+# means the chains start INSIDE the posterior, which is the one assumption
+# Rhat cannot check for itself.
+UNDERDISPERSED_SPREAD = 1.0
+
+
+def start_spread_ratios(starts, scales):
+    """Between-chain spread of a start population, in units of `scales`.
+
+    Returns {key: ndarray} of ``std(starts, over chains) / scale``, i.e. one
+    ratio per raw ELEMENT.  Elements whose scale is not finite and positive
+    are dropped -- a flat probe direction (see _PROBE_FLAT_SCALE) has no
+    posterior width to be dispersed against.
+    """
+    if len(starts) < 2:
+        return {}
+    ratios = {}
+    for key in starts[0]:
+        stacked = np.stack(
+            [np.ravel(np.asarray(s[key], dtype=float)) for s in starts]
+        )
+        spread = stacked.std(axis=0, ddof=1)
+        scale = np.ravel(
+            np.broadcast_to(
+                np.asarray(scales[key], dtype=float), stacked.shape[1:]
+            )
+        )
+        ok = np.isfinite(scale) & (scale > 0)
+        if not np.any(ok):
+            continue
+        ratios[key] = spread[ok] / scale[ok]
+    return ratios
+
+
+def warn_if_starts_underdispersed(starts, scales, label, log):
+    """Warn when the chains start narrower than the posterior they sample.
+
+    Rhat compares between-chain to within-chain variance, so it can only
+    diagnose non-convergence if the chains START further apart than the
+    posterior is wide.  Starts drawn from INSIDE the target -- a restart
+    seeded from a previous run's posterior draws, or a hand-written
+    initvals list -- make the between-chain term small from the first
+    draw, and Rhat then reads ~1.00 while the chains have explored
+    nothing.  convergence.good_chain_mask and converged_on_tail both
+    inherit that assumption, and the early-stop check acts on it, so an
+    under-dispersed restart can stop a fit that never mixed (review 2.4.5).
+
+    Reported, never corrected: widening someone's deliberately tight start
+    would move the fit they asked for, and a legitimate high-dimensional
+    run is under-dispersed BY CONSTRUCTION -- _make_starts scatters at
+    min(sqrt(500/D), 3) scale units, which drops below 1 past D = 500.
+    The number is what matters, so the message quotes it.
+
+    Returns the median ratio (NaN when it could not be measured).
+    """
+    if len(starts) < 2:
+        return float("nan")
+    ratios = start_spread_ratios(starts, scales)
+    if not ratios:
+        return float("nan")
+    flat = np.concatenate([np.ravel(v) for v in ratios.values()])
+    flat = flat[np.isfinite(flat)]
+    if flat.size == 0:
+        return float("nan")
+    median = float(np.median(flat))
+    if median < UNDERDISPERSED_SPREAD:
+        worst = min(ratios, key=lambda k: float(np.min(np.ravel(ratios[k]))))
+        log.warning(
+            f"{label}: the {len(starts)} chain starts are UNDER-DISPERSED -- "
+            f"their between-chain spread is {median:.2f}x the measured "
+            f"posterior scale (tightest: {worst} at "
+            f"{float(np.min(np.ravel(ratios[worst]))):.2f}x). Rhat assumes "
+            f"chains start FURTHER apart than the posterior is wide; below "
+            f"that it reads ~1.00 whether or not the chains have mixed, and "
+            f"the min_ess/max_rhat early stop acts on it. Seeding from a "
+            f"previous run's posterior draws does exactly this. Widen the "
+            f"seed spread, or judge convergence on a longer run."
+        )
+    return median
+
+
 def warn_if_population_degenerate(n_chains, n_params, label, log):
     """Warn when the DE population cannot span parameter space.
 
@@ -794,6 +877,9 @@ def _make_starts(
                 f"Check initval/bounds in your params.yaml -- a parameter may be "
                 f"starting outside its prior bounds."
             )
+    # Over-dispersion is what makes Rhat mean anything; measure it once, on
+    # the population that will actually run (review 2.4.5).
+    warn_if_starts_underdispersed(starts, scales, "PTDE init", logger)
     return starts, chain_seed_index
 
 
