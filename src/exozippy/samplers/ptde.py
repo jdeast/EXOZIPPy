@@ -1356,8 +1356,18 @@ def ptde_sample(
     finally:
         _common.restore_stop_handlers(_sig_token)
         if pool is not None:
-            pool.close()
-            pool.join()
+            # _shutdown_pool, not close()+join(): close() waits for every
+            # in-flight evaluation to finish, and _worker_init has the
+            # workers IGNORE SIGTERM, so a worker wedged in a pathological
+            # logp (exactly the case eval_timeout exists for, and the
+            # default is eval_timeout=None) blocks join() forever -- on the
+            # ABORT path, after Ctrl+C or maxtime, with the draws already
+            # collected and nothing left to wait for.  _shutdown_pool
+            # terminates and escalates to SIGKILL past a grace period.
+            # Safe on the normal path too: every map has completed there,
+            # so there is nothing for close() to have waited on (review
+            # 2.4.1; ptde_async has done this since it was written).
+            _common._shutdown_pool(pool)
 
     # convert raw → physical for every stored draw
     if actual_draws == 0:
