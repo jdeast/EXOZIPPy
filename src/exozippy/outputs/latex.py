@@ -41,6 +41,28 @@ def _instance_name(params, index):
     return None
 
 
+def _note_mark(n):
+    """The n'th (0-based) tablenotemark label: a, b, ... z, aa, ab, ...
+
+    Distinct note texts scale with the number of parameters -- every
+    per-element support interval a component declares through
+    ``add_prior_contribution`` is its own text -- so a big table really can
+    run past 26.  The old ``chr(ord("a") + n)`` produced "{" at n = 26, which
+    closes ``\\tablenotemark{`` early and leaves the document brace-mismatched:
+    an unreadable TeX error at the end of a long fit, from a table that is
+    otherwise entirely correct.
+
+    Bijective base 26, so the first 26 labels are unchanged and no existing
+    table is renumbered.
+    """
+    label = ""
+    n += 1
+    while n:
+        n, rem = divmod(n - 1, 26)
+        label = chr(ord("a") + rem) + label
+    return label
+
+
 def _warn_mixed_lengths(comp_label, printable, n_instances):
     """Name the printable vectors that are shorter than the instance loop.
 
@@ -335,7 +357,7 @@ def build_latex_output(
 
     def _mark_for_text(text):
         if text not in note_marks:
-            note_marks[text] = chr(ord("a") + len(note_marks))
+            note_marks[text] = _note_mark(len(note_marks))
         return note_marks[text]
 
     def _mark_for(p):

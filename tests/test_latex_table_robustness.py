@@ -257,3 +257,77 @@ def test_shrinking_mode_count_reports_the_new_split(tmp_path):
     # ASSERT
     assert [s.median for s in comp.teff.mode_summaries] == [2.0, 8.0]
     assert "modethree" not in var_text
+
+
+# ---------------------------------------------------------------------------
+# 2.11.5 -- more than 26 distinct table notes
+# ---------------------------------------------------------------------------
+
+
+def test_more_than_26_notes_stay_alphabetic(tmp_path):
+    """
+    Given a component with more distinct table notes than there are letters
+      (distinct note texts scale with parameters -- every per-element support
+      interval declared by a prior contribution is its own text),
+    When the table is written,
+    Then every mark is alphabetic and the 27th spills to a doubled letter --
+      chr(ord("a") + 26) is "{", which turns \tablenotemark{{ into a brace
+      mismatch and takes the whole document down at compile time.
+    """
+    # ARRANGE
+    comp = _FakeComp()
+    n_notes = 30
+    for i in range(n_notes):
+        p = _scalar_param(
+            np.linspace(1.0, 2.0, 50), label=f"star.p{i}", latex=f"p_{{{i}}}"
+        )
+        p.table_note = f"note number {i}"
+        setattr(comp, f"p{i}", p)
+    table_path = tmp_path / "t.tex"
+
+    # ACT
+    build_latex_output(
+        _fake_system(comp),
+        var_filename=str(tmp_path / "v.tex"),
+        table_filename=str(table_path),
+    )
+
+    # ASSERT
+    table = table_path.read_text()
+    marks = re.findall(r"\\tablenotemark\{([^}]*)\}", table)
+    assert len(marks) == n_notes
+    assert all(m.isalpha() and m.islower() for m in marks), marks
+    assert marks[:3] == ["a", "b", "c"]
+    assert marks[25:28] == ["z", "aa", "ab"]
+    texts = re.findall(r"\\tablenotetext\{([^}]*)\}", table)
+    assert sorted(texts) == sorted(marks)
+
+
+def test_up_to_26_notes_keep_their_single_letters(tmp_path):
+    """
+    Given the ordinary case of a handful of distinct notes,
+    When the table is written,
+    Then the marks are still a, b, c ... -- the spill must not renumber the
+      marks every real table already uses.
+    """
+    # ARRANGE
+    comp = _FakeComp()
+    for i in range(3):
+        p = _scalar_param(
+            np.linspace(1.0, 2.0, 50), label=f"star.p{i}", latex=f"p_{{{i}}}"
+        )
+        p.table_note = f"note {i}"
+        setattr(comp, f"p{i}", p)
+    table_path = tmp_path / "t.tex"
+
+    # ACT
+    build_latex_output(
+        _fake_system(comp),
+        var_filename=str(tmp_path / "v.tex"),
+        table_filename=str(table_path),
+    )
+
+    # ASSERT
+    assert re.findall(
+        r"\\tablenotemark\{([^}]*)\}", table_path.read_text()
+    ) == ["a", "b", "c"]
