@@ -773,3 +773,85 @@ def test_in_memory_user_params_still_validated(tmp_path):
 
     assert "star.Host.teff" in str(exc.value)
     assert "in-memory" in str(exc.value)
+
+
+# --- 1.3.2: a linked sigma is legal and must not crash the writer -----------
+
+
+def test_a_linked_sigma_is_copied_across_without_crashing(tmp_path):
+    """
+    Given a params entry whose sigma is a LINK expression (legal --
+      linking.LINKABLE_FIELDS includes sigma),
+    When mkparam runs,
+    Then the entry is written with its sigma verbatim and no mu promotion.
+
+    float() on the link string used to raise ValueError, which under run_fit
+    silently skipped the restart file at the end of a multi-day fit and under
+    the standalone CLI died raw.  There is nothing here that could evaluate
+    the link to decide whether it is zero, so the promotion is skipped -- the
+    stated constraint itself still survives the round trip.
+    """
+    import yaml
+
+    existing_params = {
+        "star.Host.teff": {"initval": 6207.0, "sigma": "star.Host.teff_err"}
+    }
+    param_file = tmp_path / "star.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    trace = _make_idata({"star.teff": 6193.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": "star.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    out = write_param_file(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    entry = yaml.safe_load(open(out))["star.Host.teff"]
+    assert entry["sigma"] == "star.Host.teff_err"
+    assert entry["initval"] == pytest.approx(6193.0, abs=1e-6)
+    assert "mu" not in entry
+
+
+def test_a_linked_sigma_on_a_non_sampled_entry_is_passed_through(tmp_path):
+    """
+    Given the same linked sigma on a parameter the trace never sampled,
+    When mkparam runs,
+    Then the pass-through loop copies it instead of raising.
+
+    The second, independent float(sigma) call -- the one in the
+    passthrough loop -- had the same crash.
+    """
+    import yaml
+
+    existing_params = {
+        "star.Host.av": {"initval": 0.1, "sigma": "star.Other.av_err"}
+    }
+    param_file = tmp_path / "star.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    trace = _make_idata({"star.teff": 6193.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": "star.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    out = write_param_file(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    entry = yaml.safe_load(open(out))["star.Host.av"]
+    assert entry["sigma"] == "star.Other.av_err"
+    assert "mu" not in entry

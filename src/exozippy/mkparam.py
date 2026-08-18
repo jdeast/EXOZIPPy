@@ -18,6 +18,7 @@ bounds, and are named as such.
 import copy
 import json
 import logging
+import numbers
 import re
 from pathlib import Path
 
@@ -85,6 +86,30 @@ def _find_existing(existing_params, comp_key, idx, name, param):
     return None, None
 
 
+def _sigma_is_nonzero_number(sigma):
+    """True when ``sigma`` is a number other than zero -- i.e. a live prior.
+
+    The mu promotion below only makes sense for a NUMERIC sigma, and the
+    reason this is a predicate rather than ``float(sigma) != 0`` is that a
+    sigma need not be a number at all: ``linking.LINKABLE_FIELDS`` includes
+    it, so ``{sigma: "star.B.av_sigma"}`` is a legal params entry and
+    ``float()`` on it raises ValueError.  Under ``run_fit`` the broad catch
+    around the mkparam call turned that into a silently missing restart file
+    at the end of a multi-day fit; the standalone CLI died raw.
+
+    A linked sigma answers False and so skips the promotion, which is the
+    right answer and not merely the safe one: the link is resolved against a
+    live model, and there is nothing here that could evaluate it to decide
+    whether it is zero.  The entry itself is still copied across verbatim by
+    the constraint loop, exactly as any other stated constraint is.  ``None``
+    (no sigma) and a bool both answer False -- a bool is an int in Python,
+    but ``sigma: true`` is not a width.
+    """
+    if isinstance(sigma, bool) or not isinstance(sigma, numbers.Real):
+        return False
+    return float(sigma) != 0
+
+
 def _apply_existing_constraints(entry, existing_entry):
     """Layer an existing params entry's constraint fields onto a fresh entry.
 
@@ -119,10 +144,8 @@ def _apply_existing_constraints(entry, existing_entry):
     for constraint_key in ("mu", "sigma", "lower", "upper", "bound_scale"):
         if constraint_key in existing_entry:
             entry[constraint_key] = existing_entry[constraint_key]
-    existing_sigma = existing_entry.get("sigma")
     if (
-        existing_sigma is not None
-        and float(existing_sigma) != 0
+        _sigma_is_nonzero_number(existing_entry.get("sigma"))
         and "mu" not in existing_entry
         and "initval" in existing_entry
     ):
@@ -882,10 +905,8 @@ def write_param_file(
             # prior center is explicit and cannot accidentally drift if initval
             # is ever edited.  Same logic as for sampled parameters above.
             if isinstance(val, dict):
-                sigma = val.get("sigma")
                 if (
-                    sigma is not None
-                    and float(sigma) != 0
+                    _sigma_is_nonzero_number(val.get("sigma"))
                     and "mu" not in val
                     and "initval" in val
                 ):
