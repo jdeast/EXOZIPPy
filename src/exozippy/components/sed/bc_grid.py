@@ -37,6 +37,7 @@ import itertools
 import os
 import re
 import warnings
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Literal, Sequence, Tuple
 
@@ -87,10 +88,34 @@ AMBIGUOUS_FILTER_ALIASES = {
 
 
 def _load_alias_table(path: Path = DEFAULT_FILTER_ROOT) -> pd.DataFrame | None:
-    """Load the VOID<->MIST<->SVO name alias table, if present."""
+    """Load the VOID<->MIST<->SVO name alias table, if present.
+
+    Cached (review 6.9.2): six call sites re-read and re-stripped the same
+    small file, several of them inside per-filter loops, and Plot reads it
+    at class-definition time.
+
+    The cache key carries the file's mtime and size as well as its path, so
+    a test (or a user) that REWRITES a filternames.txt in place still sees
+    the new contents -- keying on the path alone is how a cache turns a
+    correct test into a stale one.
+
+    The returned frame is SHARED. Every caller in the tree only reads it
+    (resolve_filter_name does lookups); do not mutate it in place.
+    """
+    path = Path(path)
     _FILTERNAMES_TXT = path / _FILTERNAMES_
     if not _FILTERNAMES_TXT.exists():
         return None
+    stat = _FILTERNAMES_TXT.stat()
+    return _load_alias_table_cached(
+        _FILTERNAMES_TXT, stat.st_mtime_ns, stat.st_size
+    )
+
+
+@lru_cache(maxsize=8)
+def _load_alias_table_cached(
+    _FILTERNAMES_TXT: Path, _mtime_ns: int, _size: int
+) -> pd.DataFrame:
     df = pd.read_csv(
         _FILTERNAMES_TXT, sep="\t", comment="#", skipinitialspace=True
     )
