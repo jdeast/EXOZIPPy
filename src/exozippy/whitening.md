@@ -19,3 +19,34 @@ The whitening scale of every sampled element is **measured from the data at star
 - **Fresh run vs trace reuse are different situations and `whitening.prepare_whitening` is where they split** (run.py calls only that). About to *sample*: the whitening is a free choice of coordinates, so it is measured and persisted unconditionally, superseding whatever file was there (the draws it described are about to be superseded too) — that path is correct and must not regress into raising. (`load_whitening`, the warn-and-fall-back loader, is the standalone form of the same policy: it is what a tool restoring a state into a build it is about to sample or probe should call.) About to *decode draws that already exist*: it is a property of those draws, so `restore_whitening_for_trace` restores it and **never re-measures and never writes**. A file that fails validation raises `StaleWhiteningError` (naming the file, the validation reason, and `recompute_trace: true`), exactly as `trace_meta` raises `StaleTraceError` — "whitening can honestly be re-measured" is an argument about a run that is about to sample, not one decoding old draws. A **missing** file is the `trace_meta` unverifiable-fingerprint case, not the stale one: warn, keep the *preliminary* scales, probe nothing (a trace sampled with `measure_scales: false` has no file and the preliminary scales ARE its coordinates), and above all write nothing — a re-measured file would look genuine on the next reload and launder a detected mismatch into a silent one. Physical Deterministics in the idata are unaffected either way; what breaks is everything recomputed from the raw draws (mode labels, the seed ledger, a recomputed lp, model curves drawn at a stored draw). Reproduced on DC2018_128: one dropped barrier entry moved a pinned draw's logp by 575 nats and its lens mass by 1.4%. Tests: `tests/test_whitening.py`, `tests/test_trace_staleness.py`.
 - User-side `init_scale` (params.yaml) is stripped with a warning; `mkparam`/`mmexofast_to_params` no longer write it; it is not linkable.
 
+## What "flat" means, and why a wide uniform prior is not flat
+
+A common worry: if a parameter's `init_scale` is tiny against a wide uniform
+span, does the probe call it flat, keep that tiny preliminary scale, and leave
+the chain unable to cross its own prior? Measured 2026-08-18, on a
+likelihood-free logit element (the only logp is the prior plus its correction):
+
+| preliminary scale/span | measured multiplier | post-whiten scale/span |
+|---|---|---|
+| 1e-9  | 1e6 (clipped -> escalates) | 1e-3 after one round |
+| 1e-3  | 368  | 0.37 |
+| 0.1   | 3.75 | 0.38 |
+
+**A wide uniform direction is never flat.** The logit-uniform correction makes
+the raw-space density go as `q(1-q)`, which has real curvature, so the probe
+finds a genuine 0.5-nat contour even with NO likelihood at all -- and drives
+the logit scale to ~0.37 of the span from either direction. That fraction is
+not a heuristic anyone chose; it falls out of the prior's own geometry.
+
+`flat_scale=NaN` (so the element keeps its preliminary scale) is therefore
+reserved for a genuinely degenerate direction: an element saturated past
+`phys_logit`'s `|lq| > 30` clip, where the correction has plateaued, or a
+non-logit element with no sigma. It is not the wide-uniform case.
+
+The pathological end resolves by ESCALATION, in two rounds, and the rows above
+show it: 1e-9 gains six orders in round one and lands at 1e-3 of the span --
+exactly where row two starts -- and row two resolves in one more. The
+intermediate 1e6 is DETECTED (`_CLIP_HI = 0.5 * min(_WHITEN_MAX_STEP,
+_PROBE_RAW_CLIP) = 5e5`), which is what fires the next round. Before review
+1.2.1 the same case pinned at `_RAW_CANCELLATION_CLIP = 1e4` and stayed 4.6
+orders under-whitened with no warning.
