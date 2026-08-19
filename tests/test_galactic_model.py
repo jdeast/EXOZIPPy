@@ -5,11 +5,18 @@ import math
 
 import numpy as np
 import pymc as pm
+import pytensor
 import pytensor.tensor as pt
 import pytest
 
 from conftest import _DummyConfigManager, _DummySystem, _MockParam
-from exozippy.components.galacticmodel.galacticmodel import GalacticModel
+from exozippy.components.galacticmodel.galacticmodel import (
+    GalacticModel,
+    chabrier_logmass_logp,
+)
+from exozippy.components.galacticmodel.galacticmodel import (
+    _chabrier_log_norm as _component_chabrier_log_norm,
+)
 
 # RA/Dec for a typical Galactic-bulge microlensing field (Galactic center area).
 _RA_RAD = np.deg2rad(270.0)
@@ -196,15 +203,25 @@ def _salpeter_analytic(logmass):
     return k * ln10 * np.asarray(logmass) - log_z
 
 
-# Chabrier 2003 system-IMF parameters, as used by the component.
+# Chabrier 2003 SYSTEM IMF (PASP 115, 763, Table 1), written out here from
+# the paper rather than imported, so a silent edit to the component's
+# constants is a test failure.  It is PIECEWISE: lognormal below 1 Msun,
+# dN/dlog m ~ m^-1.3 above it.
 _LOG_MC = np.log10(0.22)
 _SIGMA_IMF = 0.57
+_HIGH_MASS_X = 1.3
+_MATCH = 0.0  # 1 Msun
+_BLEND_10_90_DEX = 0.2
 
 
-def _chabrier_log_norm():
-    """log Z for the Chabrier lognormal truncated to the logmass bounds --
-    derived here independently of the implementation (stdlib math.erf, not
-    the component's scipy/np.select branches).
+def _chabrier_lognormal_log_norm():
+    """log Z for the lognormal segment ALONE over the logmass bounds.
+
+    Not the model's normalizer any more -- the blend has no closed form --
+    but kept because it is the one piece of this prior that still HAS an
+    analytic answer, so it is what pins the low-mass segment (where the
+    lognormal is the whole density to 1e-3) without going through quadrature
+    at all.  stdlib math.erf, not the component's scipy/np.select branches.
 
     p(x) ~ exp(-0.5 ((x - mu)/sigma)^2), so with u = (x - mu)/sigma
         Z = int_lo^hi exp(-u^2/2) sigma du
@@ -222,11 +239,47 @@ def _chabrier_log_norm():
     )
 
 
+def _chabrier_unnormalized(logmass):
+    """The blended Chabrier density, unnormalized, written independently.
+
+    Same three statements the component makes -- lognormal, a tail whose
+    amplitude is fixed by continuity at the match, a logistic ramp between
+    them -- but composed as a plain WEIGHTED SUM of densities rather than
+    through logaddexp/softplus, which is exactly the algebra the component's
+    stable formulation claims to be equivalent to.  Fine here because these
+    test masses are near the peak, where nothing underflows.
+    """
+    x = np.asarray(logmass, dtype=float)
+    lognormal = np.exp(-0.5 * ((x - _LOG_MC) / _SIGMA_IMF) ** 2)
+    at_match = np.exp(-0.5 * ((_MATCH - _LOG_MC) / _SIGMA_IMF) ** 2)
+    tail = at_match * 10.0 ** (-_HIGH_MASS_X * (x - _MATCH))
+    s = _BLEND_10_90_DEX / (2.0 * np.log(9.0))
+    w = 1.0 / (1.0 + np.exp((x - _MATCH) / s))
+    return np.log(w * lognormal + (1.0 - w) * tail)
+
+
+def _chabrier_log_norm():
+    """log Z of the blended density, by ADAPTIVE quadrature.
+
+    scipy's Gauss-Kronrod, deliberately, against the component's uniform
+    trapezoid: agreeing to 1e-10 is then a statement about the integral and
+    not about two copies of one algorithm.  Split at the match point because
+    the integrand's curvature changes there.
+    """
+    from scipy.integrate import quad
+
+    def f(x):
+        return np.exp(_chabrier_unnormalized(x))
+
+    lo, _ = quad(f, _LOGMASS_LOWER, _MATCH, limit=400)
+    hi, _ = quad(f, _MATCH, _LOGMASS_UPPER, limit=400)
+    return math.log(lo + hi)
+
+
 def _chabrier_analytic(logmass):
-    """log p(log10 M) for the Chabrier lognormal, normalized over the
-    logmass bounds."""
-    x = np.asarray(logmass)
-    return -0.5 * ((x - _LOG_MC) / _SIGMA_IMF) ** 2 - _chabrier_log_norm()
+    """log p(log10 M) for the Chabrier IMF, normalized over the logmass
+    bounds."""
+    return _chabrier_unnormalized(logmass) - _chabrier_log_norm()
 
 
 _ANALYTIC = {"salpeter": _salpeter_analytic, "chabrier": _chabrier_analytic}
@@ -353,19 +406,29 @@ def test_salpeter_imf_gradient_is_finite():
 def test_chabrier_is_the_default_and_carries_the_truncation_normalizer():
     """
     Given a galacticmodel block with no IMF key,
-    When both potentials are evaluated for the standard mock star,
-    Then the IMF prior is the historical unnormalized value MINUS the
-      truncated-lognormal constant (0.3568 nats per star), and the
+    When both potentials are evaluated for the standard 0.5 Msun mock star,
+    Then the IMF prior is the blended density minus its normalizer, and the
       kinematic prior is untouched.
 
-    The shift is deliberate and is the only thing that moved: normalizing
-    chabrier is what makes its logp comparable with salpeter's.  Any other
-    delta here means something else changed and must be investigated
-    rather than re-pinned.
+    Two deliberate shifts have landed on this number and both are recorded
+    here so a third one has to be argued for rather than re-pinned:
+
+      -0.19563865   unnormalized lognormal, the original
+      -0.55245825   ... minus the truncated-lognormal constant, 0.35681960
+                    (normalizing chabrier, so its logp is comparable with
+                    salpeter's)
+      -0.54883196   ... the matched m^-1.3 tail (review 3.7.1), which moves
+                    the normalizer to 0.35391522 and this star by +0.0037
+
+    The tail barely reaches down here, which is the point: 0.5 Msun is 6.6
+    blend scales below the match, so the tail contributes 1.3e-3 of the
+    mixture and moves the density itself by 7.2e-4 nats.  The rest of the
+    +0.0037 is the normalizer.  A fix meant to change massive stars had
+    better not move a half-solar-mass one by more than that.
     """
     # Arrange
     gm = _make_gm()
-    unnormalized = -0.19563864866861083  # measured before normalization
+    lognormal_only = -0.19563864866861083  # unnormalized, the original
     log_z = _chabrier_log_norm()
 
     # Act
@@ -376,10 +439,11 @@ def test_chabrier_is_the_default_and_carries_the_truncation_normalizer():
 
     # Assert
     assert gm.imf == "chabrier"
-    # the delta IS the normalization constant, one star
-    assert log_z == pytest.approx(0.3568195998937742, rel=1e-12)
-    assert imf - unnormalized == pytest.approx(-log_z, rel=1e-12)
-    assert imf == pytest.approx(-0.5524582485623850, rel=1e-12)
+    # The blend barely reaches the density itself this far below the match...
+    assert imf + log_z == pytest.approx(lognormal_only, abs=1e-3)
+    # ... so most of the delta from the original is the normalizer.
+    assert log_z == pytest.approx(0.3539152164266602, rel=1e-9)
+    assert imf == pytest.approx(-0.5488319618, rel=1e-9)
     # untouched by the IMF change (baseline captured from master)
     assert kinematic == 10.09330069291524
 
@@ -981,3 +1045,230 @@ def test_salpeter_model_builds_with_finite_logp_and_gradient():
     assert np.allclose(np.atleast_1d(system.star.logmass.lower), _HBL_DEX)
     assert np.isfinite(logp)
     assert np.all(np.isfinite(dlogp))
+
+
+# ---------------------------------------------------------------------------
+# The Chabrier high-mass tail (review 3.7.1)
+#
+# The prior labeled "Chabrier (2003) IMF" was the lognormal SEGMENT alone,
+# applied over the whole [-9, 2.5] support, under a comment saying one "would
+# smoothly match it to a Salpeter tail" -- in the conditional, describing what
+# one could do.  Nobody had.  The real IMF is piecewise, and the lognormal
+# steepens without limit above its peak, so massive stars were over-penalized
+# by an error that GREW with mass.  Not only a massive-lens concern: the
+# imf_prior is one pt.sum over the whole star vector, sources included, and
+# bulge source stars sit near 1 Msun.
+# ---------------------------------------------------------------------------
+
+
+def _chabrier_slope(x, h=1e-5):
+    """d logp / dx in nats per dex, by central difference."""
+    lo = _imf_lp([10.0 ** (x - h)])
+    hi = _imf_lp([10.0 ** (x + h)])
+    return (hi - lo) / (2.0 * h)
+
+
+@pytest.mark.parametrize("mass", [3.0, 10.0, 100.0])
+def test_high_mass_slope_is_the_power_law_not_the_lognormal(mass):
+    """
+    Given a star well above the 1 Msun match point,
+    When the Chabrier prior's slope in log mass is measured,
+    Then it is the tail's constant -x*ln10 = -2.9934 nats/dex, NOT the
+      lognormal's -(x - log Mc)/sigma^2, which keeps steepening.
+
+    Slope rather than value, deliberately: it is normalization-independent,
+    so it isolates the functional form from the quadrature constant.  It is
+    also the quantity the defect was ABOUT -- the lognormal gives -2.02
+    nats/dex at 1 Msun and -5.10 at 10, so the two forms disagree more and
+    more the further up you go.
+    """
+    # Arrange
+    x = np.log10(mass)
+    expected = -_HIGH_MASS_X * np.log(10.0)
+    lognormal_slope = -(x - _LOG_MC) / _SIGMA_IMF**2
+
+    # Act
+    got = _chabrier_slope(x)
+
+    # Assert
+    assert got == pytest.approx(expected, rel=1e-4)
+    # ... and the lognormal would have been steeper, by more and more:
+    # 0.50 nats/dex at 3 Msun, 2.11 at 10, 4.34 at 100.
+    assert lognormal_slope < expected
+    assert (expected - lognormal_slope) > 0.4 * np.log10(mass)
+
+
+@pytest.mark.parametrize("mass", [0.05, 0.22, 0.5])
+def test_low_mass_slope_is_still_the_lognormal(mass):
+    """
+    Given a star well below the match point,
+    When the slope is measured,
+    Then it is the lognormal's -(x - log Mc)/sigma^2.
+
+    The tail must not leak downward: the lognormal segment IS Chabrier's
+    measurement over the mass range that dominates real microlensing lenses,
+    and it is the half that was already right.
+    """
+    # Arrange
+    x = np.log10(mass)
+    expected = -(x - _LOG_MC) / _SIGMA_IMF**2
+
+    # Act / Assert -- abs=0.02, not tighter: at 0.5 Msun (the closest of
+    # these to the match) the ramp has already admitted 1.3e-3 of tail, which
+    # tilts the slope by 0.012.  That is the blend doing its job, not a leak.
+    assert _chabrier_slope(x) == pytest.approx(expected, abs=0.02)
+
+
+def test_the_two_segments_meet_at_one_solar_mass():
+    """
+    Given the match point,
+    When the prior's slope is measured exactly there,
+    Then it is the MIDPOINT of the two segments' slopes.
+
+    The exact piecewise IMF is only C0 at 1 Msun -- its slope jumps from
+    -2.02 to -2.99 nats/dex, a logp KINK of the same class as the SHO
+    kernel's Q = 1/2 switch.  A symmetric blend puts the join's slope halfway
+    between, which is the signature that the ramp is centred on the match and
+    that its two halves carry equal weight there.
+    """
+    # Arrange
+    lognormal_slope = -(0.0 - _LOG_MC) / _SIGMA_IMF**2  # -2.0239
+    tail_slope = -_HIGH_MASS_X * np.log(10.0)  # -2.9934
+
+    # Act
+    got = _chabrier_slope(0.0)
+
+    # Assert
+    assert got == pytest.approx(0.5 * (lognormal_slope + tail_slope), abs=1e-3)
+
+
+def test_the_smoothing_costs_less_than_the_imfs_own_uncertainty():
+    """
+    Given the smoothed prior and the EXACT piecewise form,
+    When they are compared across the whole transition,
+    Then they differ by less than 0.02 nats anywhere.
+
+    This is the trade the smoothing was accepted on.  Blending across a
+    width D deviates by roughly D * 0.97 / 8, so 0.2 dex costs ~0.02 nats;
+    against that, Chabrier's high-mass exponent is itself uncertain at
+    x = 1.3 +/- 0.3, i.e. +/-0.69 nats/dex of slope, ~0.7 nats across a
+    decade.  The smoothing is ~30x smaller than the IMF's own uncertainty
+    and so cannot be the limiting error.  If someone widens the ramp, this
+    test is where they find out what it cost.
+    """
+    # Arrange -- the exact piecewise form, unnormalized.
+    x = np.linspace(-2.0, 2.0, 200001)
+    lognormal = -0.5 * ((x - _LOG_MC) / _SIGMA_IMF) ** 2
+    at_match = -0.5 * ((_MATCH - _LOG_MC) / _SIGMA_IMF) ** 2
+    tail = at_match - _HIGH_MASS_X * np.log(10.0) * (x - _MATCH)
+    piecewise = np.where(x <= _MATCH, lognormal, tail)
+
+    # Act
+    smoothed = _chabrier_unnormalized(x)
+
+    # Assert
+    deviation = np.abs(smoothed - piecewise)
+    assert deviation.max() < 0.02
+    # ... and it is LOCAL: a third of a dex away it is already negligible.
+    assert deviation[np.abs(x - _MATCH) > 0.3].max() < 1e-3
+
+
+def test_the_prior_and_its_gradient_are_finite_across_the_transition():
+    """
+    Given the Chabrier prior built symbolically,
+    When logp and dlogp are evaluated on a dense grid straddling 1 Msun,
+    Then both are finite everywhere and the gradient has no jump.
+
+    The whole reason for smoothing rather than implementing the exact
+    piecewise form is that the sampler has to cross this point.  A `pt.where`
+    over the two branch log-densities would also be finite here -- both
+    branches are -- which is exactly why the implementation uses a weighted
+    SUM instead: no branch selection at all, so the documented where-trap is
+    unreachable by construction rather than by argument.
+    """
+    # Arrange -- pt.dvector, never a bare python float array folded into the
+    # graph: the gradient is what is on trial, so the input has to be a real
+    # symbolic input.
+    grid = np.linspace(-0.6, 0.6, 4001)
+    param = _MockParam(0.0, lower=_LOGMASS_LOWER, upper=_LOGMASS_UPPER)
+    x = pt.dvector("x")
+
+    # Act
+    out = pt.sum(chabrier_logmass_logp(x, param))
+    fn = pytensor.function([x], [out, pytensor.grad(out, x)])
+    value, grad = fn(grid)
+
+    # Assert
+    assert np.isfinite(value)
+    assert np.all(np.isfinite(grad))
+    # No jump: the largest step between neighbouring gradients is what a
+    # kink would blow up.  The exact piecewise form jumps by 0.97 nats/dex
+    # in one step; the blend's largest step is ~4e-3 on this grid.
+    assert np.abs(np.diff(grad)).max() < 0.05
+
+
+def test_the_quadrature_normalizer_matches_the_analytic_one_below_the_match():
+    """
+    Given a logmass support lying entirely below the match point,
+    When the component's quadrature normalizer is compared with the ANALYTIC
+      truncated-lognormal constant,
+    Then they agree to 1e-8.
+
+    The blend has no closed-form integral, so the analytic constant had to
+    become quadrature -- and a numerical normalizer with nothing to check it
+    against is exactly the kind of thing that is quietly wrong by a factor.
+    On a support the tail cannot reach, the closed form is still exact, so it
+    validates the quadrature end to end.  The analytic form is written here
+    from erf, per-side, and NEVER as a difference of Phi CDFs: this support
+    sits far into one tail, where 1-eps minus 1-eps' discards nearly every
+    significant digit.
+    """
+    # Arrange -- 5.2 sigma below the match, so the tail's weight is ~1e-25.
+    lower, upper = -9.0, -1.0
+    param = _MockParam(0.0, lower=lower, upper=upper)
+    u_lo = (lower - _LOG_MC) / _SIGMA_IMF
+    u_hi = (upper - _LOG_MC) / _SIGMA_IMF
+    # Both bounds BELOW the mean, so use the mirrored erfc form.
+    mass = 0.5 * (
+        math.erfc(-u_hi / math.sqrt(2.0)) - math.erfc(-u_lo / math.sqrt(2.0))
+    )
+    analytic = (
+        math.log(_SIGMA_IMF) + 0.5 * math.log(2.0 * math.pi) + math.log(mass)
+    )
+
+    # Act
+    got = float(np.atleast_1d(_component_chabrier_log_norm(param))[0])
+
+    # Assert -- rel=1e-8 is the trapezoid's own dx^2 error on this support,
+    # not slack: the two answers differ by 1.7e-9 relative.
+    assert got == pytest.approx(analytic, rel=1e-8)
+
+
+def test_a_ten_solar_mass_star_is_no_longer_over_penalized():
+    """
+    Given a 10 Msun star and a 0.5 Msun star,
+    When the Chabrier prior is evaluated for each,
+    Then the massive star is charged 3.46 nats relative to the low-mass one,
+      where the lognormal-only form charged 4.03.
+
+    The measured statement of the defect, in the coordinate that matters (a
+    difference, so the normalizer cancels).  0.57 nats at 10 Msun, and the
+    gap keeps widening -- the two forms' SLOPES differ by 2.1 nats/dex there
+    and 4.3 at 100 Msun, so this is the mild end of it.
+    """
+    # Arrange / Act
+    heavy = _imf_lp([10.0])
+    light = _imf_lp([0.5])
+
+    # The lognormal-only form, unnormalized -- the constant cancels in the
+    # difference, so no normalizer is needed.
+    def lognormal_only(x):
+        return -0.5 * ((x - _LOG_MC) / _SIGMA_IMF) ** 2
+
+    old_gap = lognormal_only(1.0) - lognormal_only(np.log10(0.5))
+
+    # Assert
+    new_gap = heavy - light
+    assert new_gap == pytest.approx(-3.46, abs=0.05)
+    assert old_gap == pytest.approx(-4.03, abs=0.05)
+    assert new_gap > old_gap  # the tail is KINDER to massive stars

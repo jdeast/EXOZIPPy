@@ -89,19 +89,11 @@ star.Source.pm_dec:
 # Yee+2015 is pure PSPL (their Eq. 4) -- no finite source, no limb darkening
 # (u0 ~ 0.9 makes them negligible). The source radius only enters rho, which
 # is unused with finite_source: False; fix it at an arbitrary sane value.
+# No `sigma: 0` on the six below: this is a point-source fit with no SED, so
+# nothing reads the source or lens radius/teff/feh and they are not parameters
+# of this configuration (review 3.8.1).  The values stay as starts.
 star.Source.radius:
     initval: 0.519
-    sigma: 0.0
 
 # these shouldn't be fit for such models (on the to do list)
 # but as a temporary hack, we're just going to fix them at their arbitrary starting values
-star.Lens.radius:
-    sigma: 0.0
-star.Lens.teff:
-    sigma: 0.0
-star.Lens.feh:
-    sigma: 0.0
-star.Source.teff:
-    sigma: 0.0
-star.Source.feh:
-    sigma: 0.0

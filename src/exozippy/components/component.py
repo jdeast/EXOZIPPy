@@ -8,6 +8,67 @@ from ..physics_registry import PHYSICS_REGISTRY
 from .parameter import ElementExpression, Parameter
 
 
+def in_topology(system, name):
+    """Is component ``name`` part of this system?  Returns instance or config.
+
+    THE answer to "is component X in the topology?", which was re-derived
+    four ways -- three in ``star.py`` and two in ``orbit.py``, each with a
+    different holder chain (review 4.8.1).  They were not equivalent, and the
+    disagreements were exactly where a partial construction lives:
+
+    * ``Star.register_parameters``' local ``in_topology`` read ``system.config``
+      OR ``config_manager.system_config`` as an ``elif``, so a system carrying
+      both but whose ``config`` lacked the key never consulted the second.
+    * ``Orbit._topology`` and ``Orbit.register_parameters``' inline check
+      consulted ``config_manager.system_config`` not at all.
+    * Only ``Star._galactic_imf`` looked at ``active_components`` first, which
+      is the sole holder that carries the BUILT instance.
+
+    The chain here is the union, in the order of decreasing authority:
+
+    1. ``system.active_components[name]`` -- the built instance, populated in
+       ``System.__init__``, so it is available from stage 1 onward.
+    2. ``getattr(system, name)`` -- the same instance under its attribute,
+       which is what the mock systems in the test suite provide.
+    3. the raw config block, from ``system.config`` then
+       ``system.config_manager.system_config`` -- for a component whose
+       instance does not exist yet or at all (a premature
+       ``evolutionarymodel:`` block that no component backs still counts as
+       topology, deliberately: see ``Star.register_parameters``).
+
+    Returns the first hit, or ``None``.  Truthiness is the common use
+    (``if in_topology(system, "sed")``), and the value is there for the
+    caller that wants the instance (``Star._galactic_imf`` reads its
+    ``IMF:``).  **An empty config block is a real answer** -- ``sed: {}`` is
+    a system WITH an SED -- so this returns the block itself and callers must
+    test ``is not None``, not truthiness, when an empty block matters.  The
+    two shipped callers that care (``_galactic_imf``, ``structure_consumers``)
+    read a key off it or only need the boolean, so both are safe with either.
+
+    A module function rather than only a ``System`` method because every
+    caller is a component holding a ``system`` that may be a test double;
+    ``System.in_topology`` delegates here so there is still exactly one
+    implementation.
+    """
+    components = getattr(system, "active_components", None)
+    if isinstance(components, dict) and name in components:
+        return components[name]
+
+    inst = getattr(system, name, None)
+    if inst is not None:
+        return inst
+
+    for holder in (
+        getattr(system, "config", None),
+        getattr(
+            getattr(system, "config_manager", None), "system_config", None
+        ),
+    ):
+        if isinstance(holder, dict) and name in holder:
+            return holder[name]
+    return None
+
+
 def resolve_star_ref(ref, star_names, where):
     """Star INDEX from a name, a ``star.<name>``/``star.<i>`` path, or an index.
 

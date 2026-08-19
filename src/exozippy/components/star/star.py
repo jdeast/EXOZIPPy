@@ -1,12 +1,16 @@
 import logging
+from collections import namedtuple
 
 import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 
-from exozippy.components.component import Component
+from exozippy.components.component import Component, in_topology
 from exozippy.components.parameter import sampled_bounds
-from exozippy.components.parameterization import merge_overrides
+from exozippy.components.parameterization import (
+    merge_options,
+    merge_overrides,
+)
 from exozippy.constants import (
     FFP_MASS_FUNCTION_MIN_MEARTH,
     FFP_MASS_FUNCTION_SLOPE,
@@ -31,12 +35,21 @@ FFP_LOGMASS_CALIBRATION_MIN = float(
 def _microlensing_only_star_indices(system):
     """Star indices that are exclusively a microlensing source body.
 
-    Nothing in the mulensing physics reads a source star's mass/teff/feh/
-    radius (only the lens-side bodies' masses feed t_E; see
-    mulensing/symbolic_physics.py's dead `source_mass`/`source_radius`
-    symbol-map entries -- declared, never used in a RELATIONS equation), so
-    these are dynamically irrelevant whenever a star is a source and never
-    also a lens body.
+    The mulensing physics reads a source star's DISTANCE, proper motion and
+    sky position, and its MASS only through the IMF prior -- never its
+    teff or feh, and its radius only under ``finite_source`` (rho's deps
+    include ``star.radius[source_map]``; see mulensing/defaults.yaml).  A
+    source-only star's mass therefore has no likelihood term of its own,
+    which is what the pins below are for.
+
+    NOTE this is deliberately no longer the predicate for radius/teff/feh.
+    It used to claim mulensing "never reads a source star's mass/teff/feh/
+    radius", which is false under finite_source (review 3.8.1) -- and being
+    a microlensing fact it could only ever answer for microlensing
+    topologies, so it pinned the SOURCE star's radius while leaving the
+    LENS star's, equally unread, free.  Readership is a property of the
+    whole topology, so it is answered by ``Star.structure_consumers``, for
+    every star at once.
     """
     lens = getattr(system, "lens", None)
     if lens is None or not getattr(lens, "source_bodies", None):
@@ -55,6 +68,12 @@ def _microlensing_only_star_indices(system):
         if ctype == "star"
     }
     return source_idx - lens_idx
+
+
+# One reader of one star's structural parameter.  ``param`` is the star
+# parameter read, ``star`` the index of the star it belongs to, and ``label``
+# names the reader for the log line and the degeneracy warning.
+StarConsumer = namedtuple("StarConsumer", "label param star")
 
 
 class Star(Component):
@@ -319,38 +338,367 @@ class Star(Component):
                 f"cannot later be loosened back below the default."
             )
 
+    # ------------------------------------------------------------------
+    # Which stellar structure parameters this topology actually reads
+    # ------------------------------------------------------------------
+    #
+    # radius/teff/feh are declared for every star unconditionally, because
+    # they are inputs to the reporting chain every star carries (logg,
+    # density, luminosity, fbol).  Whether anything in the LIKELIHOOD reads
+    # them is a property of the topology, and in a point-source microlensing
+    # fit with no SED, no evolutionary model and no empirical relation the
+    # answer is nothing at all: they enter no potential and no observation,
+    # so free they refill their prior and pinned they change nothing.  Both
+    # shipped microlensing params files say so in a comment and pin all six
+    # by hand ("these don't impact the likelihood ... eventually, they won't
+    # even be sampled for such fits" -- examples/ob08092), which is exactly
+    # the state review 3.8.1 asked to end.
+    #
+    # So they are declared INACTIVE per star where nothing reads them (role 4
+    # -- no raw coordinate, no potential, no table row), and left FREE where
+    # something does.  The mask is computed from the CONFIG, so adding an
+    # `sed:` block flips them back on with no user action, and never pins a
+    # value in code for a parameter the model reads: an element is either not
+    # a parameter of this configuration at all, or it is free.
+    STRUCTURE_PARAMS = ("radius", "teff", "feh")
+
+    def structure_consumers(self, system):
+        """Every reader of a star's radius/teff/feh in this topology.
+
+        THE single readership predicate for those three, in the shape
+        ``Band.ld_consumers`` established: one function answering for every
+        (star, parameter) pair, so a new consumer is remembered in one place
+        rather than in a mask and a warning separately.
+
+        Read from each consumer's raw ``config`` and from attributes set in
+        ``__init__``/``build_maps`` (stage 2), never from anything built in
+        stage 3, since component order within stage 3 is not guaranteed.
+
+        What counts as a consumer is a term in the LIKELIHOOD, not an
+        expression that merely mentions the parameter.  ``star.luminosity``
+        reads radius and teff, and ``star.logg``/``star.density`` read
+        radius, for every star always -- but nothing reads THEM back, so
+        counting them would make the predicate trivially true everywhere and
+        answer the wrong question.  (Their table rows are the known residual:
+        an inactive star still reports a luminosity computed from its
+        bookkeeping pin.  A derived element cannot itself be made inactive --
+        ``manifest.py`` refuses that combination -- so suppressing those rows
+        is a separate change.)
+
+        The complete list, each entry naming the code that reads it:
+
+        * **sed** -- ``SED.build_likelihood``'s teffsed and fbolsed floor
+          potentials are ``pt.sum`` over the WHOLE star vector with no mask,
+          and fbol is ``calc_fbol(luminosity(radius, teff), distance)``, so
+          an SED reads every star's radius and teff.
+          ``_predicted_appmag_node`` reads the whole ``star.feh`` vector.
+          This is the "if the user supplies an SED they all become
+          constrained -- weakly, and then it is useful to find out how weak"
+          case.
+        * **evolutionarymodel** -- a track indexes (initfeh, eep) and returns
+          the present-day structure, so it reads all three of any star that
+          opted in via ``mist:``/``parsec:``.  No such component ships; the
+          branch fires on the config key, exactly as the age/initfeh/eep
+          declaration does, so a premature block does not silently deactivate
+          what it is about to want.
+        * **mulensinstrument/lens** -- ``rho``'s deps are
+          ``star.radius[source_map]``, and ONLY under ``finite_source``.
+          This is review 3.8.1's actual defect: the old blanket pin fixed
+          exactly this radius at an untouched 1.0 solRad default.
+        * **planet** -- ``planet.p`` (radius/star.radius) and ``planet.ar``
+          (a/star.radius) are declared only when an orbit exists
+          (``Planet.register_parameters``'s ``has_orbit``), and read the
+          hosts named by ``star_ndx``.  A transit or an RV orbit reaches
+          star.radius through them, not directly.
+        * **mann** -- the radius penalty reads ``star.radius`` and the
+          relations' [Fe/H] term reads ``star.feh``, for its target stars.
+        * **torres** -- reads teff, feh and radius (and logg, hence radius
+          again) of its target stars.
+        """
+        out = []
+
+        def _mark(label, param, stars):
+            # `stars` may be a numpy index map (planet.star_map).  Never
+            # `stars or []`: bool() of a 1-element array reads the ELEMENT,
+            # so a lone planet around star 0 -- array([0]) -- tests False and
+            # the whole consumer vanishes.  It did, for one commit: hd80606
+            # and kelt17 deactivated a star radius that planet.p reads.
+            for s in [] if stars is None else list(stars):
+                s = int(s)
+                if 0 <= s < self.n_elements:
+                    out.append(StarConsumer(label, param, s))
+
+        all_stars = range(self.n_elements)
+
+        def _in_topology(name):
+            return in_topology(system, name) is not None
+
+        if _in_topology("sed"):
+            for param in self.STRUCTURE_PARAMS:
+                _mark("sed", param, all_stars)
+
+        if _in_topology("evolutionarymodel"):
+            opted = [
+                i
+                for i, (m, p) in enumerate(zip(self.mist, self.parsec))
+                if m or p
+            ]
+            for param in self.STRUCTURE_PARAMS:
+                _mark("evolutionarymodel", param, opted)
+
+        lens = getattr(system, "lens", None)
+        if lens is not None and any(getattr(lens, "finite_source", [])):
+            # `any`, not `[0]`, and every source body rather than
+            # source_map[0]: the conservative direction, matching
+            # Band.ld_consumers' reasoning about the same flag.
+            sources = {
+                idx
+                for event in getattr(lens, "source_bodies", None) or []
+                for (ctype, idx) in event
+                if ctype == "star"
+            }
+            _mark("lens(finite_source)", "radius", sorted(sources))
+
+        planet = getattr(system, "planet", None)
+        if planet is not None and _in_topology("orbit"):
+            _mark("planet(p, ar)", "radius", getattr(planet, "star_map", None))
+
+        for name, params in (
+            ("mann", ("radius", "feh")),
+            ("torres", ("radius", "teff", "feh")),
+        ):
+            comp = getattr(system, name, None)
+            if comp is None:
+                continue
+            for param in params:
+                _mark(name, param, getattr(comp, "star_indices", None))
+
+        for param in self.STRUCTURE_PARAMS:
+            _mark("user prior", param, self._user_prior_stars(param))
+
+        return out
+
+    # The fields that state a posterior term or a support, exactly as
+    # Parameter._user_constraint_fields defines them -- and deliberately NOT
+    # `initval`, which is a start value and cannot move a posterior.  A star
+    # whose params file carries only an initval for its radius has said where
+    # the number is, not that anything should fit it.
+    USER_CONSTRAINT_FIELDS = ("mu", "sigma", "lower", "upper")
+
+    def _user_prior_stars(self, param):
+        """Stars whose ``param`` the USER constrained in the params file.
+
+        A ``mu``/``sigma`` is a term in the logp -- the user asserting a
+        spectroscopic measurement -- so it makes the parameter read by
+        definition, and the element has to stay free for it to apply to.
+        Five shipped examples do exactly this (kelt17's 7454 +/- 75 K and
+        [Fe/H] 0.21 +/- 0.08, hd80606, GaiaBH1, HIP1349, kelt4):
+        deactivating those would DROP a real constraint and stop reporting a
+        quantity the user measured, which is the opposite of the point.  It
+        is also why readership cannot be answered from the component topology
+        alone.
+
+        ``lower``/``upper`` count too, and that is a deliberate widening
+        rather than an oversight.  It is arguable that a bound on a quantity
+        nothing reads restrains nothing -- but the user has stated an opinion
+        about this parameter, and the cost of ignoring it is concrete:
+        ``solve_api._bounds_diagnostics`` skips inactive elements, so a bound
+        that excludes its own initval stopped being reported to the GUI at
+        all (caught by
+        ``test_solve_api.py::test_bounds_excluding_initval_yields_diagnostic``,
+        which sets exactly ``star.0.teff: {initval: 6207, lower: 7000}``).
+        Silently dropping a user's input is the failure mode this whole item
+        is about; do not narrow this back.
+
+        ``sigma: 0`` is the ONE exception, and it overrides the rest of the
+        entry.  That is a pin, and the inactive role subsumes it exactly --
+        the value is held, nothing is sampled, no prior applies -- so
+        honoring it here would make review 3.8.1's fix a no-op on the very
+        files it exists for (ob08092 and DC2018_128 pinned all six that way
+        by hand).  Those entries become redundant, and ``build_pymc`` says so
+        per element.
+
+        Read from ``user_params`` (standardized to the index spelling at
+        ConfigManager construction, i.e. before this runs) and never from the
+        resolved vectors -- every parameter has bounds and many have a sigma
+        from defaults.yaml, so a resolved value says nothing about who asked
+        for it.  Most specific spelling wins, as everywhere else: the index
+        and name forms are checked before the broadcast.  Any lookup fault
+        degrades to "the user wrote nothing", which is the conservative
+        direction here only in the sense that it matches the old behavior;
+        it cannot happen for a well-formed params file.
+        """
+
+        def is_constrained(entry):
+            sigma = entry.get("sigma")
+            if isinstance(sigma, (int, float)) and float(sigma) == 0.0:
+                return False  # an explicit pin, which inactive subsumes
+            return any(f in entry for f in self.USER_CONSTRAINT_FIELDS)
+
+        return self._user_entry_stars(param, is_constrained)
+
+    def _user_pinned_stars(self, param):
+        """Stars whose ``param`` the user pinned outright (``sigma: 0``)."""
+
+        def is_pin(entry):
+            sigma = entry.get("sigma")
+            return isinstance(sigma, (int, float)) and float(sigma) == 0.0
+
+        return self._user_entry_stars(param, is_pin)
+
+    def _user_entry_stars(self, param, predicate):
+        """Stars whose most specific params-file entry satisfies ``predicate``.
+
+        The one lookup behind ``_user_prior_stars`` and
+        ``_user_pinned_stars``, so the two cannot disagree about which entry
+        they are reading.  Most specific spelling wins, as everywhere else,
+        which is why this stops at the first hit rather than unioning the
+        three (contrast ``Parameter._user_constraint_fields``, whose union is
+        a warning heuristic and does not have to adjudicate).
+        """
+        params = getattr(self.config_manager, "user_params", None) or {}
+        if not params:
+            return []
+        out = []
+        for i in range(self.n_elements):
+            keys = [f"{self.prefix}.{i}.{param}"]
+            if i < len(self.names):
+                keys.append(f"{self.prefix}.{self.names[i]}.{param}")
+            keys.append(f"{self.prefix}.{param}")
+            for key in keys:
+                entry = params.get(key)
+                if not isinstance(entry, dict):
+                    continue
+                if predicate(entry):
+                    out.append(i)
+                break  # most specific spelling wins
+        return out
+
+    def _apply_structure_activity(self, system):
+        """Mark radius/teff/feh inactive on the stars nothing reads them for.
+
+        Called at the end of ``register_parameters``, when the manifest is
+        complete.  A parameter no star uses at all is still DECLARED (wholly
+        inactive) rather than dropped, unlike ``mode_manifest``'s rule:
+        ``star.logg``/``density``/``luminosity`` name radius and teff in their
+        own ``deps``, so dropping either would be a build-graph dependency
+        error rather than a saving.
+        """
+        consumers = self.structure_consumers(system)
+        read = {p: set() for p in self.STRUCTURE_PARAMS}
+        for c in consumers:
+            if c.param in read:
+                read[c.param].add(c.star)
+
+        deactivated = {}
+        for param in self.STRUCTURE_PARAMS:
+            if param not in self.manifest:
+                continue
+            active = [i in read[param] for i in range(self.n_elements)]
+            if all(active):
+                continue
+            self.manifest[param] = merge_options(
+                self.manifest[param], mask=active
+            )
+            deactivated[param] = [
+                self.names[i] for i, on in enumerate(active) if not on
+            ]
+
+        if deactivated:
+            detail = "; ".join(
+                f"{p} ({', '.join(names)})"
+                for p, names in sorted(deactivated.items())
+            )
+            logger.info(
+                f"[{self.prefix}] nothing in this topology reads {detail}, so "
+                f"those are not parameters of this fit: they are held at "
+                f"their resolved values, sample nothing and are not reported. "
+                f"Add an 'sed:' block (or mann/torres, or an evolutionary "
+                f"model) and they become free and constrained automatically."
+            )
+
+        self._warn_finite_source_radius(system, read["radius"])
+
+    def _warn_finite_source_radius(self, system, radius_readers):
+        """Rope, not gates: a finite-source source radius is free but
+        degenerate unless something else pins the angular source size.
+
+        ``rho = theta_star/theta_E`` with ``theta_star = R_S/d_S``, so the
+        light curve measures rho and NOT the radius: theta_E and d_S absorb
+        any rescaling of it.  That degeneracy is exactly why the blanket pin
+        existed, and it is the wrong answer -- pinning it at an untouched
+        1.0 solRad default is a modeling choice made silently by the code,
+        and a finite-source non-detection genuinely bounds rho, hence the
+        radius, from ABOVE.  So it is free, and the degeneracy is named.
+        """
+        lens = getattr(system, "lens", None)
+        if lens is None or not any(getattr(lens, "finite_source", [])):
+            return
+
+        # Only the stars whose radius is read SOLELY because of the finite
+        # source: an SED, mann or torres already supplies the missing
+        # constraint, and a user prior IS the constraint, so warning in
+        # either case would be noise.
+        others = {
+            c.star
+            for c in self.structure_consumers(system)
+            if c.param == "radius" and c.label != "lens(finite_source)"
+        }
+        # A user's `sigma: 0` is not a prior (so it left the element read
+        # only by the finite source) but it IS a decision -- they pinned the
+        # radius themselves.  Telling them it is degenerate and offering to
+        # let them constrain it is exactly the "warning people learn to
+        # ignore" this codebase avoids elsewhere.
+        others |= set(self._user_pinned_stars("radius"))
+        degenerate = sorted(radius_readers - others)
+        if not degenerate:
+            return
+
+        names = ", ".join(self.names[i] for i in degenerate)
+        logger.warning(
+            f"[{self.prefix}] finite_source is on, so the source radius of "
+            f"{names} IS read (rho = theta_star/theta_E) -- but it is not "
+            f"separately identifiable: theta_E and the source distance "
+            f"absorb any rescaling of it, so it is sampled with only the "
+            f"light curve's UPPER limit on rho constraining it.  It is left "
+            f"free deliberately (that upper limit is real information, and "
+            f"pinning it would be this code choosing a radius for you).  To "
+            f"break the degeneracy supply the angular source size another "
+            f"way: an 'sed:' block, a mann/torres relation on that star, or "
+            f"an explicit prior -- 'star.{self.names[degenerate[0]]}.radius: "
+            f"{{mu: ..., sigma: ...}}'."
+        )
+
     def _galactic_imf(self, system):
         """(galacticmodel present?, its IMF name) as (bool, str or None).
 
-        Prefers the instantiated component and falls back to the raw config,
-        so the answer does not depend on whether galacticmodel happens to
-        have been built before the stars -- a missed lookup here would
-        silently drop a mass-prior floor, which is the one failure mode the
-        floors exist to prevent.
+        ``in_topology`` prefers the instantiated component and falls back to
+        the raw config, so the answer does not depend on whether
+        galacticmodel happens to have been built before the stars -- a missed
+        lookup here would silently drop a mass-prior floor, which is the one
+        failure mode the floors exist to prevent.  What is left here is the
+        only part that is this caller's own: reading ``IMF:`` off whichever
+        of the two shapes came back.
         """
-        gm = None
-        if hasattr(system, "active_components"):
-            gm = system.active_components.get("galacticmodel")
-        if gm is None:
-            gm = getattr(system, "galacticmodel", None)
-        if gm is not None:
-            return True, str(getattr(gm, "imf", "chabrier")).lower()
-
-        cfgs = None
-        for holder in (
-            getattr(system, "config", None),
-            getattr(
-                getattr(system, "config_manager", None), "system_config", None
-            ),
-        ):
-            if isinstance(holder, dict) and holder.get("galacticmodel"):
-                cfgs = holder["galacticmodel"]
-                break
-        if not cfgs:
+        found = in_topology(system, "galacticmodel")
+        if found is None:
             return False, None
 
-        first = cfgs[0] if isinstance(cfgs, (list, tuple)) else cfgs
-        return True, str((first or {}).get("IMF", "chabrier")).lower()
+        imf = getattr(found, "imf", None)
+        if imf is None:
+            # A raw config block: a list of instances, or (defensively) one
+            # bare dict.  GalacticModel itself rejects more than one, so
+            # config[0] is the whole story.  An EMPTY list is treated as no
+            # galacticmodel, which is the historical answer here and the
+            # conservative one -- there is no instance to draw an IMF from.
+            # (Contrast the plain topology question, where an empty block is
+            # a real answer; a premature `evolutionarymodel: {}` is tested.)
+            if isinstance(found, (list, tuple)):
+                if not found:
+                    return False, None
+                found = found[0]
+            imf = (found or {}).get("IMF", "chabrier")
+        return True, str(imf).lower()
 
     def _salpeter_logmass_floor(self, imf):
         """Lower bound to impose on logmass under a power-law IMF, or None.
@@ -511,21 +859,13 @@ class Star(Component):
             }
         )
 
-        # Helper to check if a component is in the system topology,
-        # even if it hasn't been instantiated as an attribute yet.
-        topology_keys = []
-        if hasattr(system, "config"):
-            topology_keys = list(system.config.keys())
-        elif hasattr(system, "config_manager") and hasattr(
-            system.config_manager, "system_config"
-        ):
-            if system.config_manager.system_config:
-                topology_keys = list(
-                    system.config_manager.system_config.keys()
-                )
-
+        # Is a component in the system topology, even if it has not been
+        # instantiated as an attribute yet?  One implementation, in
+        # component.py -- this used to walk its own holder chain with an
+        # `elif` that skipped config_manager.system_config whenever
+        # system.config existed at all (review 4.8.1).
         def in_system(comp_name):
-            return hasattr(system, comp_name) or comp_name in topology_keys
+            return in_topology(system, comp_name) is not None
 
         # 3. Add system-dependent parameters
         if in_system("sed"):
@@ -601,14 +941,17 @@ class Star(Component):
         # position and proper motion; rel-mode data are differential and
         # need only the parallax scale (distance), so those instruments do
         # not add the ra/dec/pm parameters.
-        astrom_comp = getattr(system, "astrometryinstrument", None)
-        if astrom_comp is not None:
-            astrom_modes = astrom_comp.modes
-        else:
-            astrom_cfgs = (
-                getattr(self.config_manager, "system_config", None) or {}
-            ).get("astrometryinstrument") or []
-            astrom_modes = [(c or {}).get("mode", "gaia") for c in astrom_cfgs]
+        #
+        # A fourth holder chain used to be written out here too; it goes
+        # through in_topology now, and what is left is this caller's own
+        # question -- which MODES those instruments are in, off whichever of
+        # the two shapes came back.
+        astrom = in_topology(system, "astrometryinstrument")
+        astrom_modes = getattr(astrom, "modes", None)
+        if astrom_modes is None:
+            astrom_modes = [
+                (c or {}).get("mode", "gaia") for c in (astrom or [])
+            ]
         has_abs_astrom = any(m in ("gaia", "abs") for m in astrom_modes)
 
         if in_system("lens") or in_system("galacticmodel") or has_abs_astrom:
@@ -630,10 +973,21 @@ class Star(Component):
         if "distance" in self.manifest:
             self.manifest.update({"parallax": "default", "fbol": "default"})
 
-        # Pure microlensing-source stars: pin the parameters nothing in this
-        # topology consumes, instead of requiring every microlensing
-        # params.yaml to fix them by hand (see run_event.py's old
-        # build_user_params, which did exactly this per-event).
+        # Pure microlensing-source stars: pin the parameters this topology
+        # reads but supplies no likelihood term for, instead of requiring
+        # every microlensing params.yaml to fix them by hand (see
+        # run_event.py's old build_user_params, which did exactly this
+        # per-event).
+        #
+        # Only logmass, ra and dec remain here, and they are tier-2 pins ON
+        # PURPOSE: all three ARE read (logmass by galacticmodel's imf_prior,
+        # a pt.sum over the whole star vector; ra/dec by the lens trajectory
+        # geometry), so they go through the "overrides" channel, which layers
+        # UNDER the params file and lets a user free them again.  radius,
+        # teff and feh left this block in 2026-08 (review 3.8.1): those are
+        # not read at all in such a topology, which is a stronger statement
+        # and gets the structural treatment -- see _apply_structure_activity
+        # below and the tier reasoning on STRUCTURE_PARAMS.
         ml_source_idx = _microlensing_only_star_indices(system)
         if ml_source_idx:
             relation_idx = set()
@@ -641,12 +995,6 @@ class Star(Component):
                 comp = getattr(system, relation, None)
                 if comp is not None:
                     relation_idx |= set(comp.star_indices)
-
-            sed_idx = set()
-            sed = getattr(system, "sed", None)
-            blend_matrix = getattr(sed, "blend_matrix", None)
-            if blend_matrix is not None:
-                sed_idx = set(np.nonzero((blend_matrix != 0).any(axis=0))[0])
 
             abs_astrom_idx = set()
             astrom = getattr(system, "astrometryinstrument", None)
@@ -672,18 +1020,19 @@ class Star(Component):
                 # silently DROPS a bare-string expr_key, turning a derived
                 # parameter into a sampled one with no message (review
                 # 4.5.3, the same defect Band's autopin carried).  Latent
-                # here -- none of the six parameters below is a bare string
+                # here -- none of the three parameters below is a bare string
                 # today -- and unrepresentable now.
                 self.manifest[param_name] = merge_overrides(
                     self.manifest[param_name], {"sigma": pin.tolist()}
                 )
 
             _pin_sigma("logmass", relation_idx)
-            _pin_sigma("teff", relation_idx | sed_idx)
-            _pin_sigma("feh", relation_idx | sed_idx)
-            _pin_sigma("radius", relation_idx | sed_idx)
             _pin_sigma("ra", abs_astrom_idx)
             _pin_sigma("dec", abs_astrom_idx)
+
+        # Last: the manifest is complete, so readership can be answered for
+        # every parameter at once.
+        self._apply_structure_activity(system)
 
     # Floor inside the volume prior's log, in pc.  The same clip
     # galacticmodel applies before its own volume element
