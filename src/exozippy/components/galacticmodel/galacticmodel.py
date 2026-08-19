@@ -3,7 +3,6 @@ import logging
 import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
-from scipy.special import erf, erfc
 
 from exozippy.components.component import Component
 
@@ -23,6 +22,11 @@ from exozippy.constants import (
     BULGE_VELOCITY_SIGMA_1,
     BULGE_VELOCITY_SIGMA_2,
     BULGE_VELOCITY_SIGMA_3,
+    CHABRIER_BLEND_WIDTH_DEX,
+    CHABRIER_HIGH_MASS_SLOPE,
+    CHABRIER_LOG_MC,
+    CHABRIER_MATCH_LOGMASS,
+    CHABRIER_SIGMA,
     DISK_LOCAL_NUMBER_DENSITY,
     DISK_RDBREAK,
     DISK_ROTATION_VELOCITY,
@@ -122,52 +126,163 @@ def _power_law_log_norm(k, param):
     return np.where(is_flat, np.log(upper - lower), power_law)
 
 
-def _lognormal_log_norm(mu, sigma, param):
-    """log of the normalizer of p(x) ~ exp(-0.5((x-mu)/sigma)^2) over the
-    Parameter's hard support [lower, upper].
+# Logistic scale of the Chabrier blend.  A logistic w(t) = sigmoid(-t) with
+# t = (x - x_match)/s falls from 0.9 to 0.1 over 2 ln(9) s, so the declared
+# 10%-90% width fixes s.
+_CHABRIER_BLEND_SCALE = CHABRIER_BLEND_WIDTH_DEX / (2.0 * np.log(9.0))
 
-    With u = (x - mu)/sigma,
+# Quadrature points for the blended normalizer.  The blend has no closed-form
+# integral (see chabrier_logmass_logp), so the constant is a 1-D numerical
+# integral over the support -- computed ONCE, in numpy, at build time, which
+# is legitimate exactly because star.logmass's bounds are STATIC.  If a
+# dynamic (linked) bound is ever wanted on logmass this breaks and has to be
+# rethought, the same caveat parameter.py's static-bound normalizers carry.
+#
+# 1e5 intervals put dx ~ 1.2e-4 dex on the default 11.5 dex support, ~380x
+# finer than the 0.045 dex blend scale, and trapezoid error falls as dx^2:
+# measured against 4x the points the log-normalizer moves by < 1e-12 nats.
+_CHABRIER_QUAD_POINTS = 100001
 
-        Z = int_lo^hi exp(-u^2/2) sigma du
-          = sigma sqrt(2 pi) [Phi(u_hi) - Phi(u_lo)]
 
-    so log Z = log(sigma) + 0.5 log(2 pi) + log(Phi(u_hi) - Phi(u_lo)).
+def _softplus(t, xp):
+    """log(1 + exp(t)), stable at both extremes and smooth at t = 0.
 
-    The bracket is computed from erf/erfc rather than as a difference of
-    CDFs, choosing the branch whose two terms cannot cancel:
-      - both bounds above the mean -> erfc(z_lo) - erfc(z_hi), two small
-        positive numbers (a Phi difference would be 1-eps minus 1-eps',
-        which throws away every significant digit once the bounds are a few
-        sigma out; at 5 and 6 sigma only ~7 digits survive in float64);
-      - both below -> the mirrored erfc form;
-      - straddling -> erf(z_hi) - erf(z_lo), whose terms have opposite
-        signs, so subtracting them is exact.
-    All three are evaluated and selected elementwise; none can overflow
-    (erf is bounded, erfc saturates at 2 or underflows to 0).
+    Deliberately NOT hand-rolled as ``maximum(t, 0) + log1p(exp(-abs(t)))``:
+    that form is stable but its derivative at exactly t = 0 comes out of
+    ``maximum``'s tie-break rather than as the true 0.5, and t = 0 is exactly
+    where the Chabrier segments meet -- i.e. a gradient artifact planted at
+    the one point this whole change exists to smooth.  ``pt.softplus`` gives
+    0.5 there (verified), and ``np.logaddexp(0, t)`` is numpy's own stable
+    formulation of the same function.
+    """
+    if hasattr(xp, "softplus"):
+        return xp.softplus(t)
+    return xp.logaddexp(0.0, t)
+
+
+def chabrier_logmass_logp(logmass, param, xp=pt):
+    """Chabrier (2003) system IMF as a density in x = log10(M/Msun).
+
+    THE functional form, in one place, for both backends: ``xp=pt`` builds the
+    symbolic potential, ``xp=np`` is what the normalizer integrates.  Returns
+    the NORMALIZED log density; pass ``param=None`` for the unnormalized one.
+
+    Functional form
+    ---------------
+    Chabrier's system IMF is PIECEWISE (PASP 115, 763, Table 1): a lognormal
+    below 1 Msun and dN/dlog m ~ m^-1.3 above it.  Until 2026-08 only the
+    lognormal was implemented, applied over the whole support, under a comment
+    saying one "would smoothly match it to a Salpeter tail" -- in the
+    conditional, describing what one could do.  Review 3.7.1 is that nobody
+    had.  The lognormal's slope in log mass is -(x - log Mc)/sigma^2, which is
+    -2.02 nats/dex at 1 Msun and -5.10 at 10, against the tail's constant
+    -1.3*ln10 = -2.99, so massive stars were over-penalized and the error grew
+    with mass.
+
+    Change of variables
+    -------------------
+    None.  Both segments are quoted as dN/dlog m, and x = log10(M) is the
+    sampled coordinate, so they drop straight in.  Contrast the Salpeter
+    branch in ``build_likelihood``, quoted as dN/dM, which picks up
+    |dM/dx| = M ln10 and turns its exponent from -alpha into (1 - alpha).
+
+    The match, and why it is SMOOTHED
+    ---------------------------------
+    The tail's amplitude is fixed by continuity at the match point, so the
+    two segments agree in value there -- but the true IMF is only C0: the
+    slope jumps by 0.97 nats/dex, which is a logp KINK, the same class of
+    thing as the SHO kernel's Q = 1/2 switch.  It is blended out over
+    ``CHABRIER_BLEND_WIDTH_DEX``, whose comment carries the arithmetic: the
+    blend costs ~0.02 nats against ~0.7 nats/dex of published uncertainty in
+    the tail's own exponent, so it cannot be the limiting error.
+
+    The blend is a WEIGHTED SUM of the two DENSITIES,
+    ``w(x)*lognormal + (1-w(x))*powerlaw``, never a ``pt.where`` over the two
+    branch log-densities.  Both branches are finite everywhere here, so a
+    where would not actually produce the documented NaN -- but the weighted
+    sum has no branch selection at all, so it stays clear of that trap by
+    construction rather than by argument.  It is evaluated as
+    ``logaddexp(log w + L, log(1-w) + P)``, which is that sum exactly, in the
+    form that does not underflow: at the -9 dex floor the lognormal is
+    exp(-107) while the unweighted tail is ~1e11.
+
+    Normalization
+    -------------
+    The blended density has NO closed-form integral, so the analytic
+    truncated-lognormal constant becomes a numerical quadrature over the
+    parameter's own hard support.  That is the real implementation cost of
+    the tail, and it is cheap only because the bounds are static -- see
+    ``_CHABRIER_QUAD_POINTS``.  Normalizing over the same support the
+    Salpeter and FFP branches use is what keeps switching between them a
+    meaningful move in logp rather than an arbitrary offset.
+    """
+    x = logmass
+    lognormal = -0.5 * ((x - CHABRIER_LOG_MC) / CHABRIER_SIGMA) ** 2
+    # Continuity fixes the tail's amplitude: it equals the lognormal AT the
+    # match point.  (Chabrier quotes the two normalizations separately; using
+    # them would be equivalent up to the additive constant the normalizer
+    # removes anyway, and stating it as continuity makes the C0 property
+    # manifest instead of a coincidence of two rounded numbers.)
+    at_match = (
+        -0.5
+        * ((CHABRIER_MATCH_LOGMASS - CHABRIER_LOG_MC) / CHABRIER_SIGMA) ** 2
+    )
+    power_law = at_match - CHABRIER_HIGH_MASS_SLOPE * np.log(10.0) * (
+        x - CHABRIER_MATCH_LOGMASS
+    )
+
+    # w = sigmoid(-t) is 1 well below the match and 0 well above it, so
+    # log w = -softplus(t) and log(1 - w) = -softplus(-t).
+    t = (x - CHABRIER_MATCH_LOGMASS) / _CHABRIER_BLEND_SCALE
+    blended = xp.logaddexp(
+        lognormal - _softplus(t, xp), power_law - _softplus(-t, xp)
+    )
+    if param is None:
+        return blended
+    return blended - _chabrier_log_norm(param)
+
+
+def _chabrier_log_norm(param):
+    """log Z of the blended Chabrier density over the Parameter's support.
+
+    Trapezoid on a dense uniform grid, per element (each star carries its own
+    bounds), with the peak factored out so the exponentials stay in range --
+    the integrand spans exp(-107) at the -9 dex floor.  Deliberately the same
+    contract as ``_power_law_log_norm``: an unreadable or degenerate support
+    falls back to unnormalized with a warning rather than failing a fit,
+    because a constant offset never changes the sampling.
+
+    This REPLACED an analytic truncated-lognormal constant
+    (``_lognormal_log_norm``, deleted 2026-08 with the tail), whose hard-won
+    detail is worth keeping in mind here: it built the truncated mass from
+    erf/erfc with a per-side branch and NEVER as a difference of Phi CDFs,
+    because this support straddles the Chabrier mean at -14.6 and +5.5 sigma,
+    where ``1 - eps`` minus ``1 - eps'`` throws away nearly every significant
+    digit.  Quadrature has no such subtraction anywhere -- it sums positive
+    numbers -- so the cancellation cannot recur, but a future author tempted
+    to restore a closed form for speed needs that warning.  The analytic form
+    survives in ``tests/test_galactic_model.py`` as the independent check on
+    a below-the-match support, which is where it is still exact.
     """
     bounds = _sampled_bounds(param)
     if bounds is None:
         return _unnormalized_warning()
     lower, upper = bounds
 
-    # z = u / sqrt(2), so Phi(u) = 0.5 erfc(-z)
-    z_lo = (lower - mu) / (sigma * np.sqrt(2.0))
-    z_hi = (upper - mu) / (sigma * np.sqrt(2.0))
+    n = max(np.size(lower), np.size(upper))
+    lower = np.broadcast_to(np.atleast_1d(lower), (n,))
+    upper = np.broadcast_to(np.atleast_1d(upper), (n,))
 
-    mass = 0.5 * np.select(
-        [z_lo >= 0.0, z_hi <= 0.0],
-        [
-            erfc(z_lo) - erfc(z_hi),
-            erfc(-z_hi) - erfc(-z_lo),
-        ],
-        default=erf(z_hi) - erf(z_lo),
-    )
+    frac = np.linspace(0.0, 1.0, _CHABRIER_QUAD_POINTS)
+    grid = lower[:, None] + (upper - lower)[:, None] * frac[None, :]
+    f = chabrier_logmass_logp(grid, param=None, xp=np)
+    peak = np.max(f, axis=1, keepdims=True)
+    integral = np.trapezoid(np.exp(f - peak), grid, axis=1)
 
-    if not np.all(np.isfinite(mass)) or np.any(mass <= 0.0):
+    if not np.all(np.isfinite(integral)) or np.any(integral <= 0.0):
         # Support so far into a tail that its probability mass underflows.
         return _unnormalized_warning()
-
-    return np.log(sigma) + 0.5 * np.log(2.0 * np.pi) + np.log(mass)
+    return np.log(integral) + peak[:, 0]
 
 
 def ffp_logmass_logp(logmass, alpha, param):
@@ -342,8 +457,16 @@ class GalacticModel(Component):
             imf_latex = r"Salpeter (1955) IMF in $\log_{10} M$"
             imf_text = "Salpeter (1955) IMF in log10 M"
         else:
-            imf_latex = r"Chabrier (2003) IMF in $\log_{10} M$"
-            imf_text = "Chabrier (2003) IMF in log10 M"
+            # "lognormal + $m^{-1.3}$" rather than a bare "Chabrier (2003)
+            # IMF": the label used to name the paper while the code applied
+            # only its low-mass segment (review 3.7.1), so the table said
+            # nothing that would have caught it.  Naming both segments is
+            # what makes the claim checkable at a glance.
+            imf_latex = (
+                r"Chabrier (2003) IMF in $\log_{10} M$ "
+                r"(lognormal $+\ m^{-1.3}$ tail)"
+            )
+            imf_text = "Chabrier (2003) IMF in log10 M (lognormal + m^-1.3)"
 
         imf_elements = np.nonzero(~ffp_mask)[0] if ffp_mask.size else None
         if imf_elements is None or len(imf_elements):
@@ -395,10 +518,15 @@ class GalacticModel(Component):
         if len(star_names) < n:
             star_names += [str(i) for i in range(len(star_names), n)]
         mask = ffp_mask if ffp_mask.size else np.zeros(n, dtype=bool)
+        # Says "system" and names both segments: the sentence used to read
+        # "\citet{Chabrier:2003} lognormal", which was an accurate
+        # description of what the code did and an inaccurate description of
+        # the cited IMF (review 3.7.1).  A modeling draft has to be able to
+        # stand as written.
         imf_cite = (
             r"\citet{Salpeter:1955} power-law"
             if self.imf == "salpeter"
-            else r"\citet{Chabrier:2003} lognormal"
+            else r"\citet{Chabrier:2003} system"
         )
         imf_names = [nm for nm, f in zip(star_names, mask) if not f]
         if imf_names:
@@ -412,9 +540,29 @@ class GalacticModel(Component):
             )
             prose.add(
                 f"We applied the {imf_cite} initial mass function as a "
-                f"prior on the mass of {target}.",
+                f"prior on the mass of {target}, normalized over the "
+                f"sampled log-mass support.",
                 section="priors",
                 key=f"{self.prefix}.imf",
+                rank=10,
+            )
+        if imf_names and self.imf != "salpeter":
+            # A config fact, not a fitted value: the smoothing width is a
+            # constant of the implementation, so it is interpolatable and
+            # belongs in the draft rather than left for a reader to discover
+            # that the published piecewise form was not applied verbatim.
+            prose.add(
+                r"The \citet{Chabrier:2003} system IMF is piecewise -- a "
+                r"lognormal below $1\,M_\odot$ matched to "
+                r"$dN/d\log m \propto m^{-1.3}$ above it -- and is only "
+                r"$C^0$ at the join.  We blended the two segments over a "
+                rf"{CHABRIER_BLEND_WIDTH_DEX:g} dex ramp so the prior is "
+                r"differentiable there; the blend departs from the exact "
+                r"piecewise form by less than $0.02$ nats, far below the "
+                r"published uncertainty on the high-mass exponent "
+                r"($x = 1.3 \pm 0.3$).",
+                section="priors",
+                key=f"{self.prefix}.imf.blend",
                 rank=10,
             )
         alphas = np.atleast_1d(getattr(stars, "ffp_alpha", []))
@@ -573,27 +721,29 @@ class GalacticModel(Component):
                 _power_law_log_norm(k, stars.logmass)
             )
         else:
-            ### Chabrier 2003 System IMF parameters
-            log_Mc = np.log10(0.22)
-            sigma_imf = 0.57
-
-            # This provides beautiful, constant curvature (-1 / sigma^2) for
-            # NUTS.  For high mass ( > 1 M_sun), you smoothly match it to a
-            # Salpeter tail but the low-mass end is usually where the
-            # unconstrained NUTS particles fall into the abyss.
+            # Chabrier (2003) system IMF -- the PIECEWISE one: a lognormal
+            # below 1 Msun (beautiful constant curvature -1/sigma^2 for NUTS,
+            # and the low-mass end is where unconstrained particles fall into
+            # the abyss) matched to a dN/dlog m ~ m^-1.3 tail above it,
+            # smoothed across the slope discontinuity.  The form, the match,
+            # the smoothing and the numerical normalizer all live in
+            # chabrier_logmass_logp; only the lognormal segment shipped until
+            # 2026-08 (review 3.7.1).
             #
             # Normalized over the SAME star.logmass support the power law
             # uses, so both IMFs are proper densities and switching between
             # them moves logp by a meaningful amount rather than by an
-            # arbitrary offset.  The truncated-lognormal constant is
-            #   log(sigma) + 0.5 log(2 pi) + log(Phi(u_hi) - Phi(u_lo)),
-            # +0.3568 nats per star at the defaults.yaml bounds (so every
-            # archived logp for the default config shifts down by that much
-            # times the number of stars -- see the re-pinned baselines in
-            # tests/test_runaway_logp_regression.py).
-            imf_logp = -0.5 * pt.sqr(
-                (stars.logmass.value - log_Mc) / sigma_imf
-            ) - _lognormal_log_norm(log_Mc, sigma_imf, stars.logmass)
+            # arbitrary offset.  Two archived-baseline moves have come out
+            # of that constant: -0.3568 nats/star when the lognormal was
+            # first normalized, and +0.0029 nats/star when the tail landed
+            # (the tail adds a little mass above 1 Msun, so log Z drops from
+            # 0.3568196 to 0.3539152).  The second is small at the default
+            # start ONLY because these stars are near the Chabrier peak; the
+            # density itself moves by +0.57 nats at 10 Msun and more above.
+            # Both re-pinned in tests/test_runaway_logp_regression.py.
+            imf_logp = chabrier_logmass_logp(
+                stars.logmass.value, stars.logmass
+            )
 
         # Per-star opt-out of the stellar IMF.  A microlensing lens that is a
         # free-floating planet MUST be declared as a star (Lens._validate_

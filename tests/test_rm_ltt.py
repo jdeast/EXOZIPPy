@@ -215,8 +215,15 @@ def test_rm_ltt_off_reproduces_pre_ltt_output(tmp_path):
     _sys_off, model_off, point_off, calls_off = _build_with_spy(config, params)
     rv_off = _eval_at_point(calls_off[0][1], model_off, point_off)
 
-    # rtol=1e-12/atol=1e-20: tight enough to catch a real discrepancy, loose
-    # enough to absorb last-bit floating-point rounding between platforms
-    # (observed ~2.5e-29 absolute on CI vs. exact equality on macOS -- same
-    # 15-sig-fig agreement, different BLAS/libm rounding, not a code bug).
-    np.testing.assert_allclose(rv_off, rv_reference, rtol=1e-12, atol=1e-20)
+    # rtol=1e-12 is tight enough to catch a real discrepancy.  atol is what
+    # needs explaining: BOTH fixture values are numerically ZERO
+    # (1.27e-13 m/s and exactly 0.0 -- these two rows are out of transit, so
+    # there is no RM anomaly to record), and a relative tolerance on a zero
+    # pins floating-point noise and nothing else.  The original 1e-20 did
+    # exactly that, and review 6.8.1 -- indexing the RM orbit's (tp, n, ecc)
+    # BEFORE the Kepler solve instead of slicing the answer after it -- moved
+    # one of them by 4.1e-12 through pure graph reassociation.  1e-9 m/s is a
+    # nanometre per second, nine orders below the smallest RM amplitude any
+    # instrument could see, so it still fails on any real change to the OFF
+    # branch while not asserting that a zero has a particular rounding.
+    np.testing.assert_allclose(rv_off, rv_reference, rtol=1e-12, atol=1e-9)

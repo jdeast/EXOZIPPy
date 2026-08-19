@@ -431,11 +431,16 @@ def compute_rm_rv(
             a_rel,
             factor=ltt_factor,
             z0=0.0,
+            circular=orbit._all_circular([orbit_idx]),
         )
     else:
         time_corrected = time
 
-    f = orbit.get_true_anomaly(time_corrected)[:, orbit_idx]
+    # Indexed BEFORE the solve, not after (review 6.8.1): the RM model
+    # needs one orbit's true anomaly, and solving Kepler's equation on
+    # the full (N_times, N_orbits) grid to keep one column is N times
+    # the work in a multi-planet system.
+    f = orbit.get_true_anomaly(time_corrected, orbit_idx=orbit_idx)
     x, y, z = rm_planet_xyz(f, ecc, omega, ar, inc, lam)
 
     # Limb-darkened blocked flux at the RV times -- the same shared helper

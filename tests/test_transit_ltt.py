@@ -51,8 +51,19 @@ def _ltt_wiring_config(lc_file, light_travel_time=None):
     }
 
 
-def _ltt_wiring_params():
-    return {
+def _ltt_wiring_params(eccentric=False):
+    """The shared wiring params.
+
+    `eccentric=True` unpins the sqrt(e) pair off zero, and exists for exactly
+    one reason: review 6.8.2 lets a STRUCTURALLY circular orbit -- both
+    coordinates pinned at 0, which is what the default here is -- skip the
+    Kepler solve outright, since f = E = M there.  Any test that COUNTS
+    Kepler-solve Apply nodes as a proxy for "how many times the geometry was
+    evaluated" therefore has nothing to count on a circular orbit, and must
+    ask on an eccentric one instead.  The numeric tests keep the circular
+    default, which is what makes their a/c comparison exact.
+    """
+    params = {
         "star.0.radius": {
             "initval": 2.0,
             "sigma": 0.05,
@@ -72,6 +83,9 @@ def _ltt_wiring_params():
         # perturb the a/c comparison below.
         "planet.0.log_q": {"initval": -9.0, "sigma": 0.0},
     }
+    if eccentric:
+        params["orbit.0.secosw"] = {"initval": 0.1, "sigma": 0.0}
+    return params
 
 
 def _eval_at_point(node, model, point):
@@ -194,6 +208,11 @@ def test_ltt_off_matches_pre_ltt_structure(tmp_path):
     LTT ON (the default -- light_travel_time left unset) is confirmed to
     contain exactly TWO (the delay solve plus the corrected-time geometry
     solve), so this is a real structural difference, not a vacuous count.
+
+    Uses the ECCENTRIC params: review 6.8.2 gives a structurally circular
+    orbit a closed-form anomaly and no Kepler op at all, so on the circular
+    default both counts would be one lower and the proxy would say nothing
+    about LTT.
     """
     lc = _write_two_row_lc(tmp_path / "lc.dat")
 
@@ -202,7 +221,7 @@ def test_ltt_off_matches_pre_ltt_structure(tmp_path):
     ) as off_spy:
         system_off = System(
             _ltt_wiring_config(lc, light_travel_time=False),
-            user_params=_ltt_wiring_params(),
+            user_params=_ltt_wiring_params(eccentric=True),
         )
         system_off.prepare()
         system_off.build_model()
@@ -211,7 +230,7 @@ def test_ltt_off_matches_pre_ltt_structure(tmp_path):
     assert _count_kepler_solves(system_off.transit._model_flux_node) == 1
 
     system_on = System(
-        _ltt_wiring_config(lc), user_params=_ltt_wiring_params()
+        _ltt_wiring_config(lc), user_params=_ltt_wiring_params(eccentric=True)
     )
     system_on.prepare()
     system_on.build_model()
@@ -320,7 +339,11 @@ def test_mixed_group_ltt_gradient_is_finite(tmp_path):
     lc0 = _write_two_row_lc(tmp_path / "lc0.dat")
     lc1 = _write_two_row_lc(tmp_path / "lc1.dat")
     config = _mixed_group_config(lc0, lc1)
-    params = _ltt_wiring_params()
+    # Eccentric, for the same reason test_ltt_off_matches_pre_ltt_structure
+    # is: the Kepler-solve count below is the evidence that the mixed group
+    # took the pt.where branch, and review 6.8.2 leaves a structurally
+    # circular orbit with no Kepler op to count.
+    params = _ltt_wiring_params(eccentric=True)
 
     with mock.patch(
         "exozippy.components.transit.transit.ltt.retarded_time",

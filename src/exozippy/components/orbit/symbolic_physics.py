@@ -2,6 +2,8 @@ import numpy as np
 import sympy as sp
 
 from ...constants import KEPLER_CONST
+from ..planet import physics as planet_physics
+from . import physics
 from .bodies import parse_orbit_bodies
 
 # Define Symbols.  Only symbols that appear in RELATIONS below are declared:
@@ -44,6 +46,16 @@ def get_symbol_map(config):
         "inc": "inc",
         "sini": "sini",
         "tc": "tc",
+        # `tp` appears in no relation -- sympy hangs on the Kepler equation,
+        # which is exactly why the tc solver below is a one-way channel -- but
+        # it MUST be mapped anyway (review 8.1.1).  A mapped path becomes a
+        # leaf symbol of the relaxation engine, which is what lets a user's
+        # `orbit.<n>.tp` seed be READ at all; unmapped, it was registered as a
+        # bare 2-part leaf at RANK_USER that reached nothing, so a periastron
+        # time -- how the RV literature quotes an eccentric orbit -- was
+        # silently discarded.  Mapping it also gives each orbit its own symbol
+        # rather than one shared across all of them (the omega bug).
+        "tp": "tp",
         "bigomega": "bigomega",
         "xbigomega": "xbigomega",
         "ybigomega": "ybigomega",
@@ -108,9 +120,10 @@ RELATIONS = [
     #
     # There is deliberately no Kepler-equation chain here (t_p <-> tc, and the
     # secondary-eclipse time t_s): sympy hangs on the transcendental
-    # M = E - e*sin(E).  tc's start comes from the data instead
-    # (Orbit._seeded_period sets its window), and t_p is a runtime
-    # Deterministic.
+    # M = E - e*sin(E).  The direction that matters is one-way and cheap, so
+    # it is a standalone SOLVER instead -- `tc_solver` below (review 8.1.1),
+    # which is what lets a params file seed a time of periastron.  tc's start
+    # otherwise comes from the data, and t_p is a runtime Deterministic.
 ]
 
 
@@ -238,4 +251,263 @@ def register_solvers(config_manager):
 
     config_manager.register_custom_solver(
         "orbit.chord", chord_solver, standalone=True
+    )
+
+    def tc_solver(resolved, system_config, index):
+        """orbit.tc from a seeded time of PERIASTRON (review 8.1.1).
+
+        A ONE-WAY relation, and the reason it is a solver rather than an
+        entry in RELATIONS is stated at the bottom of that list: the tc <-> tp
+        chain runs through Kepler's equation `M = E - e sin E`, which sympy
+        hangs on.  The direction that matters is cheap and closed-form,
+        though -- conjunction is defined by a true anomaly, not by a time --
+        so `physics.tc_from_tp` is one line of algebra and needs no Newton
+        iteration.  This reads the engine's own resolved `ecc`, `omega` and
+        `period` and restates no physics: the Kepler algebra lives once, in
+        `physics.mean_anomaly_at_conjunction`, next to the pytensor form
+        `calc_tp_from_ecc` that the model itself evaluates.
+
+        Standalone (it has no equation, so it can never be the last unknown of
+        one) and RANK_DERIVED_MIXED, so a user's own `orbit.<n>.tc` always
+        wins and a `tp` seed only fills a tc nobody stated.  The reverse
+        direction is deliberately absent: `tp` is a runtime Deterministic, so
+        nothing ever needs a start value for it.
+
+        Units are the engine's INTERNAL ones -- omega in radians, tc/tp and
+        the period in days.
+        """
+
+        def need(path):
+            val = resolved.get(path)
+            if val is None:
+                raise KeyError(f"Missing {path} for orbit.{index}.tc")
+            return float(val)
+
+        tp = need(f"orbit.{index}.tp")
+        ecc = need(f"orbit.{index}.ecc")
+        omega = need(f"orbit.{index}.omega")
+        period = need(f"orbit.{index}.period")
+        return float(physics.tc_from_tp(tp, ecc, omega, period))
+
+    config_manager.register_custom_solver(
+        "orbit.tc", tc_solver, standalone=True
+    )
+
+    # ------------------------------------------------------------------
+    # Timing seeds: a stated eclipse time or duration ratio constrains
+    # (e, omega) -- review 8.8.7.
+    #
+    # The LIKELIHOOD half of that needs no code at all: `orbit.ts` and the
+    # `planet` durations are ordinary DERIVED Parameters, so a user's
+    # `mu`/`sigma` on one becomes a Gaussian on its value and the gradient
+    # flows back into the eccentricity vector through the expression.  What
+    # needs code is the START: a fit whose only eccentricity information is a
+    # duration ratio would otherwise begin at the defaults.yaml e ~ 2e-4 with
+    # an enormous penalty and no reason to believe the sampler finds its way.
+    #
+    # It is a ONE-WAY channel for the same reason `tc_solver` is: the forward
+    # model is a Kepler solve, which sympy hangs on, and the inverse has no
+    # closed form.  Two 1-D bisections rather than a 2-D solve, because the
+    # two observables measure two nearly orthogonal directions and the
+    # relaxation engine already iterates -- so the coupling costs nothing and
+    # each solve stays monotone and bracketed:
+    #
+    #   * the DURATION RATIO T_S/T measures e sin omega.  To first order it
+    #     is (1 + e sin w)/(1 - e sin w); this solves the EXACT ratio
+    #     instead, by calling `planet.physics.contact_duration` with xp=np --
+    #     the same function the likelihood evaluates.  On a b = 0.39,
+    #     a/R* = 8.8 geometry the first-order form is 4% off, which is a 4%
+    #     error in e sin omega, so exactness is worth the ten lines.
+    #   * the ECLIPSE PHASE measures e cos omega (Winn 2010 eq 33), through
+    #     `orbit.physics.ts_from_ecc_omega`, again the likelihood's own
+    #     function.
+    #
+    # Gated on what the USER WROTE, never on what resolved: `ts` and the
+    # durations are derived, so the engine computes values for them every
+    # iteration, and seeding (e, omega) from those would be a fixed point
+    # dressed up as an inference -- it would also stamp RANK_DERIVED_MIXED
+    # provenance on an eccentricity nobody constrained.
+    # ------------------------------------------------------------------
+
+    _MAX_SEED_ECC = 0.95
+
+    def _stated(path_index_pairs):
+        """The user's own value for the first spelling that has one.
+
+        `initval` or `mu`: a Gaussian centre is a statement about the value
+        just as much as a start is, and a user constraining a duration will
+        usually write the prior rather than the start.
+        """
+        user = getattr(config_manager, "user_params", None) or {}
+        for key in path_index_pairs:
+            entry = user.get(key)
+            if not isinstance(entry, dict):
+                continue
+            for field in ("initval", "mu"):
+                val = entry.get(field)
+                if val is not None and not isinstance(val, str):
+                    return float(val)
+        return None
+
+    def _bisect(fn, lo, hi, tol=1e-10, iters=200):
+        """Root of a monotone `fn` on [lo, hi], or None if it does not bracket.
+
+        None rather than an exception: an observable the current geometry
+        cannot reproduce at ANY eccentricity is a statement about the config,
+        not a failure of the engine, and the right response is to leave the
+        seed alone rather than to invent one.  `Orbit` warns about it once.
+        """
+        f_lo, f_hi = fn(lo), fn(hi)
+        if not (np.isfinite(f_lo) and np.isfinite(f_hi)) or f_lo * f_hi > 0.0:
+            return None
+        for _ in range(iters):
+            mid = 0.5 * (lo + hi)
+            f_mid = fn(mid)
+            if abs(hi - lo) < tol:
+                return mid
+            if f_lo * f_mid <= 0.0:
+                hi, f_hi = mid, f_mid
+            else:
+                lo, f_lo = mid, f_mid
+        return 0.5 * (lo + hi)
+
+    def _orbit_planet(system_config, index):
+        orbit_cfgs = (system_config or {}).get("orbit") or []
+        if not isinstance(orbit_cfgs, list):
+            orbit_cfgs = [orbit_cfgs]
+        _, companion = parse_orbit_bodies(orbit_cfgs, system_config)
+        planets = [
+            idx for (ctype, idx) in companion[index] if ctype == "planet"
+        ]
+        return planets[0] if len(planets) == 1 else None
+
+    def _timing_ecc_omega(resolved, system_config, index):
+        """(e, omega) implied by the timing observables the user stated.
+
+        Raises KeyError -- the engine's "not yet / nothing to do" signal --
+        when the user stated none, when an input has not resolved, or when
+        no eccentricity reproduces what was stated.
+        """
+        j = _orbit_planet(system_config, index)
+
+        ts_obs = _stated((f"orbit.{index}.ts", "orbit.ts"))
+        ratios = []
+        if j is not None:
+            for primary, secondary in (
+                ("tfwhm", "tfwhms"),
+                ("t14", "t14s"),
+            ):
+                t_p = _stated((f"planet.{j}.{primary}", f"planet.{primary}"))
+                t_s = _stated(
+                    (f"planet.{j}.{secondary}", f"planet.{secondary}")
+                )
+                if t_p and t_s and t_p > 0.0:
+                    ratios.append((primary == "tfwhm", t_s / t_p))
+        if ts_obs is None and not ratios:
+            raise KeyError(
+                f"orbit.{index}: no user-stated eclipse time or duration pair"
+            )
+
+        def need(path):
+            val = resolved.get(path)
+            if val is None:
+                raise KeyError(f"Missing {path} for orbit.{index} timing seed")
+            return float(val)
+
+        period = need(f"orbit.{index}.period")
+        x = float(resolved.get(f"orbit.{index}.ecosw") or 0.0)
+        y = float(resolved.get(f"orbit.{index}.esinw") or 0.0)
+
+        # e sin omega from the exact duration ratio.  FWHM first: it is the
+        # duration a light curve measures best, and t14's contact times are
+        # the ones an ingress/egress model has to resolve.
+        if ratios:
+            use_fwhm, ratio_obs = ratios[0]
+            ar = need(f"planet.{j}.ar")
+            p_ratio = need(f"planet.{j}.p")
+            cosi = need(f"orbit.{index}.cosi")
+            sini = need(f"orbit.{index}.sini")
+
+            def _log_ratio(y_try):
+                ecc = float(np.hypot(x, y_try))
+                args = (ar, cosi, sini, ecc, y_try, p_ratio, period)
+                out = []
+                for secondary in (False, True):
+                    t14, t23 = planet_physics.duration_pair(
+                        *args, secondary=secondary, xp=np
+                    )
+                    out.append(0.5 * (t14 + t23) if use_fwhm else t14)
+                if out[0] <= 0.0 or out[1] <= 0.0:
+                    return np.nan
+                return np.log(out[1] / out[0]) - np.log(ratio_obs)
+
+            span = float(np.sqrt(max(_MAX_SEED_ECC**2 - x * x, 0.0)))
+            root = _bisect(_log_ratio, -span, span)
+            if root is not None:
+                y = root
+
+        # e cos omega from the eclipse phase.
+        if ts_obs is not None:
+            tc = need(f"orbit.{index}.tc")
+            # The eclipse the user means is the one in the period following
+            # their tc, which is what `ts_from_ecc_omega` reports.
+            target = tc + (ts_obs - tc) % period
+
+            def _phase(x_try):
+                ecc = float(np.hypot(x_try, y))
+                omega = float(np.arctan2(y, x_try))
+                return (
+                    float(
+                        physics.ts_from_ecc_omega(
+                            ecc, omega, tc, period, xp=np
+                        )
+                    )
+                    - target
+                )
+
+            span = float(np.sqrt(max(_MAX_SEED_ECC**2 - y * y, 0.0)))
+            root = _bisect(_phase, -span, span)
+            if root is not None:
+                x = root
+
+        ecc = float(np.clip(np.hypot(x, y), 0.0, physics.MAX_ECC))
+        return ecc, float(np.arctan2(y, x))
+
+    def ecc_timing_solver(resolved, system_config, index):
+        """orbit.ecc from a stated eclipse time / duration ratio (8.8.7)."""
+        return _timing_ecc_omega(resolved, system_config, index)[0]
+
+    def omega_timing_solver(resolved, system_config, index):
+        """orbit.omega from a stated eclipse time / duration ratio (8.8.7).
+
+        The twin of `ecc_timing_solver`, and deliberately a second call of
+        the same function rather than a cache: standalone solvers are walked
+        in sorted order and each sees the other's writes, so recomputing is
+        both cheap and the only way the two cannot disagree about which
+        iteration's inputs they used.
+        """
+        return _timing_ecc_omega(resolved, system_config, index)[1]
+
+    def omega_solver_combined(resolved, system_config, index):
+        """orbit.omega: the timing seed first, the circular convention after.
+
+        ONE registration, because `custom_solvers` is a dict keyed by the
+        target path and a second `register_custom_solver("orbit.omega", ...)`
+        would silently REPLACE the circular-orbit convention rather than add
+        to it.  Order is the precedence: a stated eclipse time or duration
+        ratio is a measurement and wins; `omega_solver` is a convention that
+        only applies where the sqrt(e) pair is exactly zero, i.e. where there
+        is nothing to measure.
+        """
+        try:
+            return omega_timing_solver(resolved, system_config, index)
+        except KeyError:
+            pass
+        return omega_solver(resolved, system_config, index)
+
+    config_manager.register_custom_solver(
+        "orbit.ecc", ecc_timing_solver, standalone=True
+    )
+    config_manager.register_custom_solver(
+        "orbit.omega", omega_solver_combined, standalone=True
     )

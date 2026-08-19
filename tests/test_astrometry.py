@@ -512,37 +512,15 @@ def test_bigomega_only_registered_with_astrometry():
     assert np.all(np.atleast_1d(orbit_astro.manifest["cosi"]["lower"]) == -1.0)
 
 
-def test_bigomega_halfplane_without_rvs():
-    """
-    Given: an astrometry system with NO RV instrument
-    When: the orbit manifest is registered
-    Then: ybigomega gets a lower bound of 0 (bigomega in [0, 180]),
-          unseeded elements start at bigomega = 90 deg, and omega/bigomega
-          carry a table note documenting the artificial boundary
-    """
-    astro = _DummySystem()
-    astro.config = {"orbit": [{}], "astrometryinstrument": []}
-
-    orbit = Orbit([{"name": "b"}], ConfigManager({}))
-    orbit.register_parameters(system=astro)
-
-    y_entry = orbit.manifest["ybigomega"]
-    assert np.all(np.atleast_1d(y_entry["lower"]) == 0.0)
-    assert np.all(np.atleast_1d(y_entry["initval"]) == 1.0)
-    assert np.all(np.atleast_1d(orbit.manifest["xbigomega"]["initval"]) == 0.0)
-    assert "degenerate" in orbit.manifest["bigomega"]["table_note"]
-    assert "degenerate" in orbit.manifest["omega"]["table_note"]
-
-    # The degeneracy is a reflection through the sky plane, invisible to
-    # ALL astrometry including relative: the restriction applies to
-    # rel-mode-only systems too.
-    rel = _DummySystem()
-    rel.config = {"orbit": [{}], "astrometryinstrument": [{"mode": "rel"}]}
-    orbit_rel = Orbit([{"name": "b"}], ConfigManager({}))
-    orbit_rel.register_parameters(system=rel)
-    assert np.all(
-        np.atleast_1d(orbit_rel.manifest["ybigomega"]["lower"]) == 0.0
-    )
+# The half-plane TRUNCATION these two tests used to pin is gone (review
+# 1.8.3): `ybigomega >= 0` biased a posterior that hugged the boundary, and a
+# seed in (180, 360) was silently remapped onto its degenerate partner rather
+# than honoured.  Both are replaced by `tests/test_node_degeneracy.py`, which
+# asserts the new behaviour end to end (no bound, the seed kept, the labels
+# collapsed AFTER sampling by one fold) on a real System rather than on the
+# _DummySystem harness -- the predicate is per orbit now, so it reads the live
+# astrometry/RV instances and a stub with an empty instrument list correctly
+# reports nothing degenerate.
 
 
 def test_relative_track_invariant_under_node_flip(compiled_sky_functions):
@@ -592,59 +570,6 @@ def test_relative_track_invariant_under_node_flip(compiled_sky_functions):
     (rv1,) = rv_fn(*vals1, t, np.array([1.0]))
     (rv2,) = rv_fn(*vals2, t, np.array([1.0]))
     assert np.max(np.abs(rv1 - rv2)) > 0.5
-
-
-def test_bigomega_seed_above_180_remaps_to_degenerate_partner():
-    """
-    Given: a no-RV astrometry system whose bigomega initval is in (180, 360)
-    When: the orbit manifest is registered
-    Then: the seed is remapped to the exactly-degenerate solution:
-          (x, y) -> (-x, -y), (secosw, sesinw) -> (-secosw, -sesinw), and
-          tc shifted so the position-vs-time model is unchanged
-    """
-    ecc, w, bigom, P, tc = (
-        0.3,
-        np.radians(40.0),
-        np.radians(250.0),
-        100.0,
-        2455000.0,
-    )
-    user_params = {
-        "orbit.0.logP": {"initval": np.log10(P)},
-        "orbit.0.tc": {"initval": tc},
-        "orbit.0.secosw": {"initval": np.sqrt(ecc) * np.cos(w)},
-        "orbit.0.sesinw": {"initval": np.sqrt(ecc) * np.sin(w)},
-        "orbit.0.bigomega": {"initval": np.degrees(bigom)},
-    }
-    astro = _DummySystem()
-    astro.config = {"orbit": [{"name": "b"}], "astrometryinstrument": []}
-    cm = ConfigManager(user_params, system_config=astro.config)
-    cm.finalize_user_params()
-    orbit = Orbit([{"name": "b"}], cm)
-    orbit.register_parameters(system=astro)
-
-    x = float(np.atleast_1d(orbit.manifest["xbigomega"]["initval"])[0])
-    y = float(np.atleast_1d(orbit.manifest["ybigomega"]["initval"])[0])
-    assert y >= 0.0
-    bigom_new = np.arctan2(y, x)
-    assert np.isclose(
-        np.mod(bigom_new - (bigom - np.pi), 2 * np.pi), 0.0, atol=1e-4
-    ) or np.isclose(
-        np.mod(bigom_new - (bigom - np.pi), 2 * np.pi), 2 * np.pi, atol=1e-4
-    )
-
-    sc = float(np.atleast_1d(orbit.manifest["secosw"]["initval"])[0])
-    ss = float(np.atleast_1d(orbit.manifest["sesinw"]["initval"])[0])
-    assert np.isclose(sc, -np.sqrt(ecc) * np.cos(w), atol=1e-4)
-    assert np.isclose(ss, -np.sqrt(ecc) * np.sin(w), atol=1e-4)
-
-    # tc shift preserves the physical orbit: same time of periastron
-    tc_new = float(np.atleast_1d(orbit.manifest["tc"]["initval"])[0])
-    tp_old = _tp_from_tc(tc, P, ecc, w)
-    tp_new = _tp_from_tc(tc_new, P, ecc, w + np.pi)
-    assert np.isclose(
-        np.mod(tp_new - tp_old, P), 0.0, atol=1e-6
-    ) or np.isclose(np.mod(tp_new - tp_old, P), P, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
