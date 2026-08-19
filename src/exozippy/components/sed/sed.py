@@ -535,10 +535,25 @@ class SED(Component):
         """
         Gather filters referenced by Band blocks so cross-component flux
         predictions (mulensing f_source, transit deblending, astrometry
-        fluxfrac) share this SED's BC grid. Band filters whose BC tables
-        are not available are skipped with a warning (they can be
-        generated with the BC table machinery) rather than failing the
-        whole SED.
+        fluxfrac) share this SED's BC grid.
+
+        A band filter whose facility has no BC tables yet is NOT skipped:
+        it is passed to build_bc_grid, which auto-generates the tables from
+        the model spectra -- exactly as it already does for a filter listed
+        in the .sed file, and for a missing column within a facility that
+        does exist (review 2.9.6).  Skipping it instead silently dropped
+        the SED flux constraint that band exists to carry: the mulensing
+        zeropoint tie, the transit dilution, the astrometry fluxfrac.  The
+        cost decision that comes with letting it through is that a band
+        filter whose tables genuinely CANNOT be built now fails the fit
+        rather than quietly weakening it -- again as a .sed filter does.
+
+        The one case still skipped is a filter label with no SVO identity
+        at all -- neither in the alias table nor SVO-shaped
+        ("Facility/Instrument.Band"), e.g. gj1214's "MIRILRS".  There is
+        nothing for the generator to synthesize a bandpass FROM, so the
+        skip is not a deferral of work; the warning says so instead of
+        pointing at machinery that cannot help.
 
         Returns a list of filter names to append to the BC grid build,
         deduplicated against the .sed file's own filters.
@@ -565,12 +580,23 @@ class SED(Component):
                     self.model_root, self.sedmodel, facility
                 )
             except (FileNotFoundError, NotImplementedError) as e:
-                logger.warning(
-                    f"SED: no BC tables for band filter '{name}' "
-                    f"(facility '{facility}'): {e} Flux predictions in this "
-                    f"band will be unavailable."
+                if "/" not in svo:
+                    logger.warning(
+                        f"SED: no BC tables for band filter '{name}' "
+                        f"(facility '{facility}'): {e} That label resolves "
+                        f"to no SVO filter id, so there is no bandpass to "
+                        f"generate a BC table from -- give the band a "
+                        f"'Facility/Instrument.Band' filter to have one "
+                        f"built. Flux predictions in this band will be "
+                        f"unavailable."
+                    )
+                    continue
+                logger.info(
+                    f"SED: band filter '{name}' (facility '{facility}') has "
+                    f"no BC tables yet; they will be generated from the "
+                    f"{self.sedmodel} spectra, as for a filter listed in "
+                    f"the .sed file."
                 )
-                continue
             known_mist.add(mist)
             extra.append(name)
         return extra
