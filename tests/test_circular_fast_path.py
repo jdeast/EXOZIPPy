@@ -154,7 +154,7 @@ def test_the_fast_path_removes_the_kepler_op_from_the_graph():
     def op_names(outs):
         return {
             type(v.owner.op).__name__
-            for v in pytensor.graph.basic.ancestors(list(outs))
+            for v in pytensor.graph.traversal.ancestors(list(outs))
             if v.owner is not None
         }
 
