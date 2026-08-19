@@ -660,19 +660,94 @@ class Orbit(Component):
         logP = self._resolve_initval("logP", shape)
         return np.where(np.isnan(period_user), 10.0**logP, period_user)
 
+    def _user_seeded_initval(self, param):
+        """Per orbit: did the USER write an `initval` for `param`?
+
+        `_resolve_initval` cannot answer this -- it returns the defaults.yaml
+        value too, and for `tc` that backstop is always a number.  Reads the
+        user's own entries in the two spellings that survive
+        `standardize_param_names`, exactly as `_user_pinned` does.
+        """
+        user = getattr(self.config_manager, "user_params", None) or {}
+        seeded = np.zeros(self.n_elements, dtype=bool)
+        entry = user.get(f"{self.prefix}.{param}")
+        if isinstance(entry, dict) and entry.get("initval") is not None:
+            seeded[:] = True
+        for i in range(self.n_elements):
+            entry = user.get(f"{self.prefix}.{i}.{param}")
+            if isinstance(entry, dict) and entry.get("initval") is not None:
+                seeded[i] = True
+        return seeded
+
+    def _seeded_sqrte_pair(self, shape):
+        """(secosw, sesinw) per orbit implied by the stage-3 seeds.
+
+        Prefers an explicit `ecc` + `omega` pair -- the spelling the RV
+        literature uses -- and falls back to the sqrt(e) pair itself (user
+        entry or defaults.yaml).  Stage 3 again: the relaxation engine, which
+        normally reconciles the two spellings, has not run, so this is the
+        same job `_seeded_period` does for the period.
+        """
+        sc0 = self._resolve_initval("secosw", shape)
+        ss0 = self._resolve_initval("sesinw", shape)
+        factor_om = (
+            self.config_manager.get_conversion_factor(self.prefix, "omega")
+            or 1.0
+        )
+        om = self._resolve_initval("omega", shape) * factor_om
+        e_u = self._resolve_initval("ecc", shape)
+        have_ew = ~np.isnan(om) & ~np.isnan(e_u)
+        sc0 = np.where(have_ew, np.sqrt(np.abs(e_u)) * np.cos(om), sc0)
+        ss0 = np.where(have_ew, np.sqrt(np.abs(e_u)) * np.sin(om), ss0)
+        return sc0, ss0
+
+    def _seeded_ecc_omega(self, shape):
+        """(e, omega in radians) per orbit from `_seeded_sqrte_pair`.
+
+        Same ceiling `calc_ecc` applies, for the same reason: both callers
+        feed the result to a Kepler solve (a forward-model evaluation), not
+        to a bound.
+        """
+        sc0, ss0 = self._seeded_sqrte_pair(shape)
+        ecc0 = np.clip(sc0**2 + ss0**2, 0.0, physics.MAX_ECC)
+        return ecc0, np.arctan2(ss0, sc0)
+
+    def _seeded_tc(self, shape):
+        """Per-orbit time of conjunction in days implied by the stage-3 seeds.
+
+        `tc`'s hard window is `tc_init +/- P/2` and it is declared HERE, at
+        stage 3 -- before the relaxation engine can turn a user's time of
+        PERIASTRON into a time of conjunction (the one-way solver of review
+        8.1.1).  Reading tc's own resolved initval alone therefore returns the
+        defaults.yaml backstop 2460000 for a params file that seeds `tp:`
+        instead, and the tc the engine goes on to solve lands hundreds of
+        thousands of days outside its own window: a fatal out-of-bounds start,
+        naming a parameter the user never wrote.  Exactly the shape of the
+        `_seeded_period` bug `tests/test_orbit_tc_window.py` covers.
+
+        Only where the user did not seed `tc` themselves: an explicit `tc` is
+        RANK_USER, the solver stands down for it, and so must the window.
+        """
+        tc = self._resolve_initval("tc", shape)
+        tp = self._resolve_initval("tp", shape)
+        use_tp = ~np.isnan(tp) & ~self._user_seeded_initval("tc")
+        if not use_tp.any():
+            return tc
+        ecc0, w0 = self._seeded_ecc_omega(shape)
+        implied = physics.tc_from_tp(tp, ecc0, w0, self._seeded_period(shape))
+        return np.where(use_tp, implied, tc)
+
     def register_parameters(self, system):
         """Stage 3: Calculate window constraints and declare the manifest."""
         shape = (self.n_elements,)
 
         # 1. Peer into the config (Pre-flight windows)
-        tc_cfg = self.config_manager.resolve(
-            self.prefix, "tc", shape=shape, names=self.names
-        )
-
-        tc_init = np.atleast_1d(tc_cfg["initval"])
         # tc is periodic (tc and tc + P are the same solution), so one full
-        # period is the right hard window -- but it must be the period the
-        # user actually seeded, in either spelling.  See _seeded_period.
+        # period is the right hard window -- but it must be centred on the tc
+        # the user actually seeded and scaled by the period they actually
+        # seeded, in every legal spelling of each.  See _seeded_tc (which
+        # covers a `tp:` seed) and _seeded_period.
+        tc_init = self._seeded_tc(shape)
         half_period = self._seeded_period(shape) / 2.0
 
         self.manifest = {
@@ -906,16 +981,9 @@ class Orbit(Component):
 
             # Orientation in the user's own terms: prefer explicit ecc+omega
             # initvals; otherwise secosw/sesinw (user or defaults).
-            sc0 = rslv("secosw")
-            ss0 = rslv("sesinw")
-            factor_om = cm.get_conversion_factor(self.prefix, "omega") or 1.0
-            om = rslv("omega") * factor_om
-            e_u = rslv("ecc")
-            have_ew = ~np.isnan(om) & ~np.isnan(e_u)
-            sc0 = np.where(have_ew, np.sqrt(np.abs(e_u)) * np.cos(om), sc0)
-            ss0 = np.where(have_ew, np.sqrt(np.abs(e_u)) * np.sin(om), ss0)
+            sc0, ss0 = self._seeded_sqrte_pair(shape)
 
-            tc0 = rslv("tc")
+            tc0 = self._seeded_tc(shape)
             period = self._seeded_period(shape)
 
             def _M_c(ecc, w):
@@ -925,10 +993,7 @@ class Orbit(Component):
                 )
                 return E_c - ecc * np.sin(E_c)
 
-            # Same ceiling calc_ecc applies, for the same reason: this is a
-            # forward-model evaluation (a Kepler solve), not a bound.
-            ecc0 = np.clip(sc0**2 + ss0**2, 0.0, physics.MAX_ECC)
-            w0 = np.arctan2(ss0, sc0)
+            ecc0, w0 = self._seeded_ecc_omega(shape)
             n_mm = 2.0 * np.pi / period
             tp = tc0 - _M_c(ecc0, w0) / n_mm
             tc_new = tp + _M_c(ecc0, w0 + np.pi) / n_mm

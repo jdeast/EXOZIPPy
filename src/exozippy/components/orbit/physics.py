@@ -445,6 +445,52 @@ def calc_tp_from_ecc(ecc, omega, tc, n):
     return tc - M0 / n
 
 
+def mean_anomaly_at_conjunction(ecc, omega):
+    """``M`` at primary conjunction, in radians -- pure numpy.
+
+    The numpy twin of the Kepler algebra inside `calc_tp_from_ecc`: the true
+    anomaly at conjunction is `f = pi/2 - omega`, so
+
+        tan(E/2) = sqrt((1 - e)/(1 + e)) tan(f/2),   M = E - e sin E
+
+    and `tp = tc - M/n` is exactly that function.  Written in numpy because
+    its consumers are the RELAXATION ENGINE and the stage-3 tc window, neither
+    of which has a tensor graph -- and written as its own function, rather than
+    inline at either call site, so the two cannot drift apart from each other
+    or from the pytensor form.  `tests/test_tp_seed.py` pins all three against
+    one another.
+
+    Vectorized: every argument may be an array.
+    """
+    half_f = 0.5 * (0.5 * np.pi - np.asarray(omega, dtype=float))
+    ecc = np.asarray(ecc, dtype=float)
+    E0 = 2.0 * np.arctan2(
+        np.sqrt(np.maximum(1.0 - ecc, 0.0)) * np.sin(half_f),
+        np.sqrt(1.0 + ecc) * np.cos(half_f),
+    )
+    return E0 - ecc * np.sin(E0)
+
+
+def tc_from_tp(tp, ecc, omega, period):
+    """Time of conjunction implied by a time of PERIASTRON (review 8.1.1).
+
+    `calc_tp` and `calc_tp_from_ecc` both compute `tp = tc - M/n`; this is
+    that equation read the other way, `tc = tp + M P / 2 pi`.  The inversion
+    is CLOSED FORM and needs no Newton iteration, because the conjunction is
+    defined by a true anomaly (`f = pi/2 - omega`) rather than by a time: it
+    is the mapping `M -> E` that is transcendental, and this direction never
+    needs it.  That is also why this is a standalone SOLVER for the engine
+    rather than a sympy relation -- see orbit/symbolic_physics.py.
+
+    `omega` is in RADIANS and `tp`/`period` in days, i.e. the internal units
+    the engine's `resolved` dict holds.
+    """
+    m_c = mean_anomaly_at_conjunction(ecc, omega)
+    return np.asarray(tp, dtype=float) + m_c * np.asarray(
+        period, dtype=float
+    ) / (2.0 * np.pi)
+
+
 # ----------------------------------------------------------------------
 # The TRANSIT CHORD parameterization (Eastman 2024, arXiv:2309.14410).
 #

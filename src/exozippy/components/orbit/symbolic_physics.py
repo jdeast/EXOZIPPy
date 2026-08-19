@@ -2,6 +2,7 @@ import numpy as np
 import sympy as sp
 
 from ...constants import KEPLER_CONST
+from . import physics
 from .bodies import parse_orbit_bodies
 
 # Define Symbols.  Only symbols that appear in RELATIONS below are declared:
@@ -44,6 +45,16 @@ def get_symbol_map(config):
         "inc": "inc",
         "sini": "sini",
         "tc": "tc",
+        # `tp` appears in no relation -- sympy hangs on the Kepler equation,
+        # which is exactly why the tc solver below is a one-way channel -- but
+        # it MUST be mapped anyway (review 8.1.1).  A mapped path becomes a
+        # leaf symbol of the relaxation engine, which is what lets a user's
+        # `orbit.<n>.tp` seed be READ at all; unmapped, it was registered as a
+        # bare 2-part leaf at RANK_USER that reached nothing, so a periastron
+        # time -- how the RV literature quotes an eccentric orbit -- was
+        # silently discarded.  Mapping it also gives each orbit its own symbol
+        # rather than one shared across all of them (the omega bug).
+        "tp": "tp",
         "bigomega": "bigomega",
         "xbigomega": "xbigomega",
         "ybigomega": "ybigomega",
@@ -108,9 +119,10 @@ RELATIONS = [
     #
     # There is deliberately no Kepler-equation chain here (t_p <-> tc, and the
     # secondary-eclipse time t_s): sympy hangs on the transcendental
-    # M = E - e*sin(E).  tc's start comes from the data instead
-    # (Orbit._seeded_period sets its window), and t_p is a runtime
-    # Deterministic.
+    # M = E - e*sin(E).  The direction that matters is one-way and cheap, so
+    # it is a standalone SOLVER instead -- `tc_solver` below (review 8.1.1),
+    # which is what lets a params file seed a time of periastron.  tc's start
+    # otherwise comes from the data, and t_p is a runtime Deterministic.
 ]
 
 
@@ -238,4 +250,44 @@ def register_solvers(config_manager):
 
     config_manager.register_custom_solver(
         "orbit.chord", chord_solver, standalone=True
+    )
+
+    def tc_solver(resolved, system_config, index):
+        """orbit.tc from a seeded time of PERIASTRON (review 8.1.1).
+
+        A ONE-WAY relation, and the reason it is a solver rather than an
+        entry in RELATIONS is stated at the bottom of that list: the tc <-> tp
+        chain runs through Kepler's equation `M = E - e sin E`, which sympy
+        hangs on.  The direction that matters is cheap and closed-form,
+        though -- conjunction is defined by a true anomaly, not by a time --
+        so `physics.tc_from_tp` is one line of algebra and needs no Newton
+        iteration.  This reads the engine's own resolved `ecc`, `omega` and
+        `period` and restates no physics: the Kepler algebra lives once, in
+        `physics.mean_anomaly_at_conjunction`, next to the pytensor form
+        `calc_tp_from_ecc` that the model itself evaluates.
+
+        Standalone (it has no equation, so it can never be the last unknown of
+        one) and RANK_DERIVED_MIXED, so a user's own `orbit.<n>.tc` always
+        wins and a `tp` seed only fills a tc nobody stated.  The reverse
+        direction is deliberately absent: `tp` is a runtime Deterministic, so
+        nothing ever needs a start value for it.
+
+        Units are the engine's INTERNAL ones -- omega in radians, tc/tp and
+        the period in days.
+        """
+
+        def need(path):
+            val = resolved.get(path)
+            if val is None:
+                raise KeyError(f"Missing {path} for orbit.{index}.tc")
+            return float(val)
+
+        tp = need(f"orbit.{index}.tp")
+        ecc = need(f"orbit.{index}.ecc")
+        omega = need(f"orbit.{index}.omega")
+        period = need(f"orbit.{index}.period")
+        return float(physics.tc_from_tp(tp, ecc, omega, period))
+
+    config_manager.register_custom_solver(
+        "orbit.tc", tc_solver, standalone=True
     )
