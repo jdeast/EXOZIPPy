@@ -735,7 +735,32 @@ class Planet(Component):
           by construction; and it depends on the two masses only through
           their SUM, so a marginal secondary mass no longer moves the
           threshold on its own.  Everything it needs is a node that already
-          exists.  `M_*` is the INNER planet's host: for the ordinary case
+          exists.
+
+          How far this moves the boundary, since "the default strictness
+          does not change" is true only of the number `k`, not of the pad
+          it buys.  For an equal-mass pair the mutual pad at `k = 1` is
+          `2^(1/3)/2 = 0.630` of the summed per-planet pads at `e = 0`, so
+          the barrier admits 37% closer packing there.  But the old pads
+          carried a `(1 - e_i)` factor and the mutual radius carries none,
+          so the ratio is `k 2^(1/3) / [(1-e_i) + (1-e_j)]` and it passes
+          through 1 at `e = 1 - 2^(1/3)/2 = 0.370`: BELOW that the mutual
+          form is looser, ABOVE it stricter (26% stricter at `e = 0.5`).
+          No single `k` reproduces the old boundary, because the ratio
+          depends on both eccentricities and, through the cube root, on
+          the mass ratio.
+
+          And the shift is visible far inside the forbidden zone, not just
+          at the boundary, which the hard-rejection original never was.
+          `log sigmoid(x) -> x` for `x << 0`, so the penalty is LINEAR in
+          the deficit with no clip on that side (`_MAX_ARG` bounds only the
+          allowed side).  Changing the threshold therefore shifts logp by a
+          rigid `4.4 / (0.01 a_in) * Delta_pad`, the same offset whether the
+          pair is marginally crossing or completely interpenetrating --
+          about 23 nats for a Jupiter-mass pair, 32 for 3 M_J.  On the
+          allowed side both forms saturate to ~0 within `0.01 a_in` of
+          their own threshold, so a comfortably separated pair sees no
+          difference at all.  `M_*` is the INNER planet's host: for the ordinary case
           of two planets round one star that is simply the star, and where
           the hosts differ the criterion is not a stability criterion anyway
           (see the nested-orbit limitation below).
