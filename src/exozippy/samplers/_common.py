@@ -79,8 +79,8 @@ from exozippy.whitening import probe_scales as _probe_scales  # noqa: E402
 # arrays) are the only IPC payload.
 _PTDE_LOGP_FN = None
 
-# Diagnostic flag (see collect_rung_timing in the samplers and
-# hpc_optimization.txt P13): set in the parent before forking, like
+# Diagnostic flag (see collect_rung_timing in ptde_sample, which carries
+# the rationale): set in the parent before forking, like
 # _PTDE_LOGP_FN, so workers inherit it via copy-on-write. When True,
 # _eval_logp times its own call and returns (lp, elapsed_seconds) instead of
 # a bare float, so the parent can attribute wall time to a rung.
@@ -97,9 +97,71 @@ def set_worker_globals(logp_fn, collect_timing=False):
     _PTDE_COLLECT_TIMING = collect_timing
 
 
-def timing_enabled():
-    """Whether _eval_logp currently returns (lp, elapsed) tuples."""
-    return _PTDE_COLLECT_TIMING
+class PositionalLogp:
+    """A dict-in logp that calls the compiled function BY POSITION.
+
+    ``model.compile_logp()`` returns a pymc ``PointFunc``, whose ``__call__``
+    is ``self.f(**point)``: pytensor then looks every name up, and -- with
+    ``trust_input`` off, its default -- runs each value through the input's
+    ``filter`` (a dtype/shape check and possible copy).  That is a per-INPUT
+    cost on a call whose useful work may be microseconds, and PTDE makes one
+    such call per proposal, n_temps x n_chains of them per step.  Measured
+    per call on a 27-element model, evaluated 20k times (review 6.4.3):
+
+        raw vars   PointFunc(dict)   this wrapper    saved
+             3          7.5 us          3.1 us       2.4x
+            10         18.8 us          6.2 us       3.0x
+            20         35.7 us         10.1 us       3.5x
+            27         45.9 us         13.0 us       3.5x
+
+    i.e. ~1.4 us per raw variable, against ~0.4 us here.  On the 20-variable,
+    432-proposal step that a DC2018-class fit runs, that is ~11 ms of worker
+    CPU per step.
+
+    THE COERCION IS NOT OPTIONAL, and dropping it is how this turns into a
+    crash or worse.  ``trust_input`` disables filtering entirely, and the
+    values PTDE hands over are NOT always what the filter would have made
+    them: ``de_proposal`` computes ``pop[i][k] + gamma*(...)``, and for a
+    0-d parameter numpy returns a np.float64 SCALAR rather than a 0-d array.
+    Passed straight through, that raises inside the numba backend
+    (reproduced: "Vectorized inputs must be arrays") -- and an unfiltered
+    wrong dtype is worse, since it is read as raw memory.  So each value goes
+    through ``np.asarray(v, dtype)`` here, which is exactly the conversion
+    the filter would have done and costs ~0.1 us.
+
+    Falls back to the wrapped callable unchanged if the function cannot be
+    introspected (a plain callable in a test, a future pymc that renames the
+    attributes) -- this is an optimization, and losing it must never mean
+    losing the fit.  The wrapped function is one the SAMPLER compiled, so
+    setting trust_input on it cannot surprise another holder.
+    """
+
+    def __init__(self, logp_fn):
+        self.logp_fn = logp_fn
+        self.spec = None
+        f = getattr(logp_fn, "f", None)
+        try:
+            inputs = [i for i in f.maker.inputs if not i.implicit]
+            spec = [(i.variable.name, i.variable.type.dtype) for i in inputs]
+            if any(name is None for name, _ in spec):
+                raise AttributeError("unnamed compiled-logp input")
+        except (AttributeError, TypeError):
+            logger.debug(
+                "PositionalLogp: cannot introspect %r; keeping the dict "
+                "call path",
+                type(logp_fn),
+            )
+            return
+        f.trust_input = True
+        self.f = f
+        self.spec = spec
+
+    def __call__(self, point):
+        if self.spec is None:
+            return self.logp_fn(point)
+        return self.f(
+            *[np.asarray(point[name], dtype=dt) for name, dt in self.spec]
+        )
 
 
 # Exception types _eval_logp has already reported, so a failing region does
@@ -433,26 +495,25 @@ class SpanTracker:
     proposal -- negligible against a logp evaluation.
     """
 
-    def __init__(self, n_temps, raw_start):
-        self.lo = {
-            k: np.full((n_temps,) + np.shape(v), np.inf)
-            for k, v in raw_start.items()
-        }
-        self.hi = {
-            k: np.full((n_temps,) + np.shape(v), -np.inf)
-            for k, v in raw_start.items()
-        }
+    def __init__(self, n_temps, raw_start, layout=None):
+        # PACKED, matching what the samplers actually carry: since review
+        # 6.4.2 a proposal is a (total,) float64 vector from RawLayout, not a
+        # dict of per-parameter arrays.  This class was written against the
+        # dict form and called state.items() on it, which merged cleanly with
+        # the packing (different regions of the file) and then died at run
+        # time with "'numpy.ndarray' object has no attribute 'items'" across
+        # every ptde_async test.  Packing it here is also simply less work:
+        # two whole-vector minimum/maximum calls per update instead of a
+        # Python loop over the keys.
+        self.layout = layout if layout is not None else RawLayout(raw_start)
+        self.lo = np.full((n_temps, self.layout.total), np.inf)
+        self.hi = np.full((n_temps, self.layout.total), -np.inf)
         self.n_temps = n_temps
 
-    def update(self, k, state):
-        # Plain assignment, not `out=`: for a SCALAR parameter self.lo[key]
-        # has shape (n_temps,), so self.lo[key][k] is a numpy scalar rather
-        # than an array and `out=` raises "return arrays must be of
-        # ArrayType".  Every model has scalar parameters, so the out= form
-        # would have crashed on essentially any real run.
-        for key, v in state.items():
-            self.lo[key][k] = np.minimum(self.lo[key][k], v)
-            self.hi[key][k] = np.maximum(self.hi[key][k], v)
+    def update(self, k, vec):
+        """Fold one packed state into rung ``k``'s running extremes."""
+        np.minimum(self.lo[k], vec, out=self.lo[k])
+        np.maximum(self.hi[k], vec, out=self.hi[k])
 
     def report(self):
         """[(widest span in sigma, which parameter)] per rung.
@@ -463,14 +524,23 @@ class SpanTracker:
         """
         out = []
         for k in range(self.n_temps):
-            best, best_key = 0.0, "-"
-            for key in self.lo:
-                span = self.hi[key][k] - self.lo[key][k]
-                if not np.all(np.isfinite(span)):
-                    continue
-                m = float(np.max(span))
-                if m > best:
-                    best, best_key = m, key
+            span = self.hi[k] - self.lo[k]
+            finite = np.isfinite(span)
+            if not finite.any():
+                out.append((0.0, "-"))
+                continue
+            masked = np.where(finite, span, -np.inf)
+            j = int(np.argmax(masked))
+            best = float(masked[j])
+            if best <= 0.0:
+                out.append((0.0, "-"))
+                continue
+            # Map the winning element back to the parameter that owns it.
+            best_key = "-"
+            for key, (a, b, _) in zip(self.layout.keys, self.layout.slices):
+                if a <= j < b:
+                    best_key = key
+                    break
             out.append((best, best_key))
         return out
 
@@ -528,6 +598,16 @@ def resolve_store_hot_chains(
     ``1 == True`` collision cost `seed_polish` a whole value
     (notes/code_review_20260808.txt 2.9.1), so the guard is now explicit
     rather than incidental.
+
+    An int <= 0 is OFF, the same as ``false``, and not the ``max(1, ...)``
+    it used to take -- which resolved ``store_hot_chains: 0`` to thin=1,
+    i.e. MAXIMUM retention (every hot iteration of every hot rung), the
+    exact opposite of what the summary line above promises and of what
+    anyone writing a zero means (review 1.4.2).  A negative factor has no
+    other reading either, so it takes the same branch rather than raising:
+    the vocabulary already spells off three ways and a fourth spelling of
+    it costs nothing, while a raise would fail a fit at the sampler for a
+    key that changes only what is STORED.
     """
     auto = False
     if isinstance(spec, bool):
@@ -550,7 +630,7 @@ def resolve_store_hot_chains(
                 f"thinning factor."
             )
     else:
-        hot_thin = max(1, int(spec))
+        hot_thin = max(0, int(spec))
 
     named = sorted(
         name
@@ -607,8 +687,15 @@ def de_proposal(rng, pop, i, gamma, keys, jitter=DE_JITTER):
     """One ter Braak DE-MC proposal for population member `i`:
     x_i + gamma * (x_j1 - x_j2) + jitter * N(0, 1), j1 != j2 != i.
 
-    THE single owner of the production proposal formula -- both samplers
-    call this so the move (and its epsilon term) cannot drift between them.
+    THE REFERENCE IMPLEMENTATION, and no longer the production path: both
+    samplers now hold their populations packed and call RawLayout.propose,
+    which is the same move on a flat vector and 5x cheaper (review 6.4.2).
+    This one is kept -- deliberately, do not delete it as unused -- because
+    it is what the packed move is PINNED AGAINST: a test builds the same
+    proposal both ways from the same seed and demands they agree bit for
+    bit.  Written in the obvious dict-at-a-time way, it is the readable
+    statement of the move, and the thing to change first if the move ever
+    changes.
     """
     j1, j2 = _pick_two(rng, len(pop), i)
     prop = {}
@@ -618,6 +705,218 @@ def de_proposal(rng, pop, i, gamma, keys, jitter=DE_JITTER):
             step = step + jitter * rng.standard_normal(np.shape(pop[i][key]))
         prop[key] = pop[i][key] + step
     return prop
+
+
+# Largest factor by which one adaptation window may move gamma.  A window is
+# a few hundred proposals, so its acceptance estimate is noisy; the clip is
+# what keeps one unlucky window from moving the step size by orders of
+# magnitude.
+GAMMA_CLIP_FACTOR = 10.0
+
+
+def next_gamma(gamma, ar, target_accept, clip=GAMMA_CLIP_FACTOR):
+    """The DE step-size update, shared by everything that adapts gamma.
+
+    ``gamma *= (ar / target)**0.5``, clipped to a factor `clip` per update.
+    The square root dampens the oscillation a proportional rule would set
+    up: acceptance responds to gamma with a lag of one whole window, so a
+    full correction consistently overshoots.
+
+    ``ar <= 0`` -- nothing accepted at all -- has no signal for the ratio to
+    use, and shrinks by the clip factor instead of stalling at a step size
+    already proven too large.  ptde/ptde_async guard on `ar > 0` before
+    calling and so never take that branch; polish_seed_starts relies on it,
+    since a T=1 optimizer routinely sustains sub-1% acceptance.
+
+    THE single owner of the rule, for the same reason de_proposal is the
+    single owner of the move: the sampler's T=1 kernel and the polish's
+    engine are the same move, so a second tuning story would be one more
+    thing to keep in sync.
+    """
+    shrink = 1.0 / clip  # NOT gamma/clip below: the callers this replaced
+    # multiplied by 0.1, and 1.0/10.0 IS 0.1 in float64 while gamma/10.0
+    # need not equal gamma*0.1 in the last bit.
+    scale = (ar / target_accept) ** 0.5 if ar > 0 else shrink
+    return float(np.clip(gamma * scale, gamma * shrink, gamma * clip))
+
+
+# Ensemble spread, in probe-scale units, below which the start population is
+# reported as under-dispersed.  1.0 is not a tuning choice: the probe scale IS
+# an estimate of the posterior width (the 0.5-nat step), so a spread below it
+# means the chains start INSIDE the posterior, which is the one assumption
+# Rhat cannot check for itself.
+UNDERDISPERSED_SPREAD = 1.0
+
+
+def start_spread_ratios(starts, scales):
+    """Between-chain spread of a start population, in units of `scales`.
+
+    Returns {key: ndarray} of ``std(starts, over chains) / scale``, i.e. one
+    ratio per raw ELEMENT.  Elements whose scale is not finite and positive
+    are dropped -- a flat probe direction (see _PROBE_FLAT_SCALE) has no
+    posterior width to be dispersed against.
+    """
+    if len(starts) < 2:
+        return {}
+    ratios = {}
+    for key in starts[0]:
+        stacked = np.stack(
+            [np.ravel(np.asarray(s[key], dtype=float)) for s in starts]
+        )
+        spread = stacked.std(axis=0, ddof=1)
+        scale = np.ravel(
+            np.broadcast_to(
+                np.asarray(scales[key], dtype=float), stacked.shape[1:]
+            )
+        )
+        ok = np.isfinite(scale) & (scale > 0)
+        if not np.any(ok):
+            continue
+        ratios[key] = spread[ok] / scale[ok]
+    return ratios
+
+
+def warn_if_starts_underdispersed(starts, scales, label, log):
+    """Warn when the chains start narrower than the posterior they sample.
+
+    Rhat compares between-chain to within-chain variance, so it can only
+    diagnose non-convergence if the chains START further apart than the
+    posterior is wide.  Starts drawn from INSIDE the target -- a restart
+    seeded from a previous run's posterior draws, or a hand-written
+    initvals list -- make the between-chain term small from the first
+    draw, and Rhat then reads ~1.00 while the chains have explored
+    nothing.  convergence.good_chain_mask and converged_on_tail both
+    inherit that assumption, and the early-stop check acts on it, so an
+    under-dispersed restart can stop a fit that never mixed (review 2.4.5).
+
+    Reported, never corrected: widening someone's deliberately tight start
+    would move the fit they asked for, and a legitimate high-dimensional
+    run is under-dispersed BY CONSTRUCTION -- _make_starts scatters at
+    min(sqrt(500/D), 3) scale units, which drops below 1 past D = 500.
+    The number is what matters, so the message quotes it.
+
+    Returns the median ratio (NaN when it could not be measured).
+    """
+    if len(starts) < 2:
+        return float("nan")
+    ratios = start_spread_ratios(starts, scales)
+    if not ratios:
+        return float("nan")
+    flat = np.concatenate([np.ravel(v) for v in ratios.values()])
+    flat = flat[np.isfinite(flat)]
+    if flat.size == 0:
+        return float("nan")
+    median = float(np.median(flat))
+    if median < UNDERDISPERSED_SPREAD:
+        worst = min(ratios, key=lambda k: float(np.min(np.ravel(ratios[k]))))
+        log.warning(
+            f"{label}: the {len(starts)} chain starts are UNDER-DISPERSED -- "
+            f"their between-chain spread is {median:.2f}x the measured "
+            f"posterior scale (tightest: {worst} at "
+            f"{float(np.min(np.ravel(ratios[worst]))):.2f}x). Rhat assumes "
+            f"chains start FURTHER apart than the posterior is wide; below "
+            f"that it reads ~1.00 whether or not the chains have mixed, and "
+            f"the min_ess/max_rhat early stop acts on it. Seeding from a "
+            f"previous run's posterior draws does exactly this. Widen the "
+            f"seed spread, or judge convergence on a longer run."
+        )
+    return median
+
+
+class RawLayout:
+    """One flat float64 vector per state, instead of a dict of small arrays.
+
+    A raw-space state is a dict of ~20 little arrays, one per free RV, and
+    that shape is what made the DE move expensive: every proposal ran a
+    Python loop over the keys doing three array operations and a dict
+    insert, plus its own ``standard_normal`` draw per key.  Measured on a
+    DC2018-shaped model (27 elements over 20 raw variables, 20k proposals):
+
+        _pick_two (rng.choice)                8.8 us
+        20 per-key standard_normal draws     18.3 us   -> 0.9 us as one draw
+        20 per-key arithmetic + dict         29.2 us   -> 2.1 us packed
+        loop/np.shape/branch overhead       ~28 us     -> gone
+        ------------------------------------------------------------------
+        de_proposal total                    85.2 us   -> ~20 us
+
+    which on an 8 x 54 ladder is 36.8 ms of SERIAL parent time per step
+    against ~8 ms -- and the parent is the bottleneck the async sampler
+    exists to keep fed (review 6.4.2).
+
+    BIT-IDENTICAL, not merely equivalent in distribution, and both halves of
+    that are load-bearing:
+
+    * The partner draw stays per member, exactly the ``_pick_two`` the dict
+      path used.  A batched partner draw would consume the bit stream in a
+      different order and change every subsequent number.
+    * ONE ``standard_normal(total)`` per proposal is the same SEQUENCE as
+      one draw per key in key order -- numpy's generator fills sequentially
+      with no per-call buffering, verified over mixed shapes including 0-d
+      and 2-d, and verified again after an intervening ``rng.choice``.
+    * The arithmetic is elementwise, so concatenating the operands changes
+      no float operation and no rounding.
+
+    ``unpack`` returns views into ONE freshly copied buffer, so the dict a
+    worker is handed cannot be aliased by a later proposal, and shapes come
+    back exactly as the model declared them (a 0-d parameter comes back as
+    a 0-d ARRAY, where the dict path produced a numpy scalar -- strictly
+    closer to what the compiled logp wants; see PositionalLogp).
+    """
+
+    def __init__(self, raw_start, keys=None):
+        self.keys = list(raw_start.keys() if keys is None else keys)
+        self.shapes = [np.shape(raw_start[k]) for k in self.keys]
+        self.sizes = [int(np.prod(s)) if s else 1 for s in self.shapes]
+        offsets = np.concatenate([[0], np.cumsum(self.sizes)]).astype(int)
+        self.total = int(offsets[-1])
+        self.slices = [
+            (int(a), int(b), sh)
+            for a, b, sh in zip(offsets[:-1], offsets[1:], self.shapes)
+        ]
+
+    def pack(self, state):
+        """dict -> (total,) float64 vector."""
+        out = np.empty(self.total, dtype=float)
+        for key, (a, b, _) in zip(self.keys, self.slices):
+            out[a:b] = np.ravel(np.asarray(state[key], dtype=float))
+        return out
+
+    def pack_many(self, states):
+        """list of dicts -> (n, total) float64 array."""
+        out = np.empty((len(states), self.total), dtype=float)
+        for row, state in zip(out, states):
+            for key, (a, b, _) in zip(self.keys, self.slices):
+                row[a:b] = np.ravel(np.asarray(state[key], dtype=float))
+        return out
+
+    def unpack(self, vec):
+        """(total,) vector -> dict of arrays in the model's own shapes."""
+        buf = np.array(vec, dtype=float, copy=True)
+        return {
+            key: buf[a:b].reshape(sh)
+            for key, (a, b, sh) in zip(self.keys, self.slices)
+        }
+
+    def store_draw(self, stored_raw, vec, *index):
+        """Write one packed state into the per-variable draw buffers.
+
+        ``index`` is whatever leads the buffer's draw axis -- (chain, draw)
+        for the cold group, (rung, chain, draw) for the hot one.
+        """
+        for key, (a, b, sh) in zip(self.keys, self.slices):
+            stored_raw[key][index] = vec[a:b].reshape(sh)
+
+    def propose(self, rng, pop, i, gamma, jitter=DE_JITTER):
+        """The ter Braak DE-MC move of ``de_proposal``, on packed rows.
+
+        ``pop`` is an (n_chains, total) array; returns a new (total,)
+        vector.  Draws exactly what de_proposal draws, in the same order.
+        """
+        j1, j2 = _pick_two(rng, len(pop), i)
+        step = gamma * (pop[j1] - pop[j2])
+        if jitter:
+            step = step + jitter * rng.standard_normal(self.total)
+        return pop[i] + step
 
 
 def warn_if_population_degenerate(n_chains, n_params, label, log):
@@ -658,7 +957,8 @@ def compile_conversions(model):
     likelihood), so it vectorizes cleanly and cuts what was a
     Python-level per-sample loop (dominant cost: interpreter + pytensor
     call overhead, not the underlying math) down to a handful of batched
-    calls. See hpc_optimization.txt PROMPT 7.
+    calls. (Measured under notes/hpc_optimization.txt's PROMPT 7, which
+    has since been pruned from that note.)
 
     Returns (raw_to_phys, raw_to_phys_batched, raw_var_names, out_var_names).
     """
@@ -854,6 +1154,9 @@ def _make_starts(
                 f"Check initval/bounds in your params.yaml -- a parameter may be "
                 f"starting outside its prior bounds."
             )
+    # Over-dispersion is what makes Rhat mean anything; measure it once, on
+    # the population that will actually run (review 2.4.5).
+    warn_if_starts_underdispersed(starts, scales, "PTDE init", logger)
     return starts, chain_seed_index
 
 
@@ -876,10 +1179,23 @@ def resolve_start_population(
     to system.get_raw_starts, and further to a bare raw_start (single start)
     for minimal test/system stubs that don't implement get_raw_starts at all.
 
+    The explicit-``initvals`` bypass RAISES on a length mismatch rather than
+    asserting it: `python -O` compiles an assert out entirely, and the list
+    is consumed positionally (start j becomes chain j), so a wrong-length
+    list would silently pair chains with the wrong starts -- or, shorter
+    than n_chains, hand the sampler a population it then indexes past.
+
     Returns (t1_starts, chain_seed_index).
     """
     if initvals is not None:
-        assert len(initvals) == n_chains, "len(initvals) must equal n_chains"
+        if len(initvals) != n_chains:
+            raise ValueError(
+                f"initvals has {len(initvals)} start(s) but there are "
+                f"{n_chains} chains per rung; the list is consumed "
+                f"positionally, so it must have exactly one entry per "
+                f"chain. Pass n_chains={len(initvals)}, or omit initvals to "
+                f"start from the solved point."
+            )
         return initvals, [0] * n_chains
     if raw_starts is None:
         if hasattr(system, "get_raw_starts"):
@@ -1086,6 +1402,101 @@ def assemble_inference_data(
             f"{list(chain_seed_index)}"
         )
     return idata
+
+
+# Draws allocated per growth step (see grow_draw_storage).  Large enough
+# that the reallocation is rare (one per 10k draws/chain), small enough that
+# a run stopped early has not reserved a trace it never wrote.
+DRAW_CHUNK = 10000
+
+
+def grow_draw_storage(stored_raw, stored_lp, needed, chunk=DRAW_CHUNK):
+    """Ensure the T=1 draw buffers hold `needed` draws per chain; grow if not.
+
+    The buffers used to be allocated at the FULL configured draw count up
+    front, which is wrong in both directions once `draws` is large.  A run
+    that stops on convergence, maxtime or a user interrupt has reserved --
+    and, being np.zeros, touched -- the whole thing regardless: at
+    draws=252600 on a 27-parameter model that is ~1.6 GB of resident memory
+    for draws the run will never take (review 6.4.5).
+
+    Grows by whole chunks with np.resize-free concatenation on the DRAW axis,
+    and mutates the dict in place, because the same dict object is handed to
+    the GUI progress callback and to _check_convergence by reference.  The
+    caller must therefore re-read `stored_lp` from the return value -- it is
+    a bare array, not a container.
+
+    Returns the (possibly new) stored_lp array.
+    """
+    have = stored_lp.shape[1]
+    if needed <= have:
+        return stored_lp
+    add = max(chunk, needed - have)
+    n_chains = stored_lp.shape[0]
+    for key, arr in stored_raw.items():
+        pad = np.zeros((n_chains, add) + arr.shape[2:], dtype=arr.dtype)
+        stored_raw[key] = np.concatenate([arr, pad], axis=1)
+    return np.concatenate(
+        [stored_lp, np.zeros((n_chains, add), dtype=stored_lp.dtype)], axis=1
+    )
+
+
+def stamp_and_log_run_summary(
+    idata,
+    label,
+    log,
+    *,
+    actual_draws,
+    draws,
+    n_accept,
+    n_propose,
+    n_swap_accept,
+    n_swap_propose,
+    round_trips,
+    n_swap_rounds,
+    n_temps,
+    swap_schedule,
+    rate_unit,
+    extras=(),
+):
+    """Stamp the ladder round-trip attrs and log the one-line run summary.
+
+    Shared by both samplers, which had ~20 near-identical lines each and had
+    already started to drift.  Deliberately stops SHORT of the ladder
+    diagnostics: ladder_health_report is called by each sampler afterwards,
+    because what its counters span differs between them (ptde zeroes at the
+    tune -> draw boundary, ptde_async never resets and says so), and because
+    that is the code the announced adaptive-rung-spacing work will reshape.
+
+    ``rate_unit`` is "round" (a synchronous DEO round) or "swap" (one async
+    swap event) -- the same denominator each sampler already used for its
+    round-trip rate.  ``extras`` are pre-formatted trailing fragments (the
+    async swap-discard count, either sampler's timeout count), appended in
+    order and each already carrying its leading separator.
+
+    THE ROUND TRIPS ARE TEMPERATURE round trips of a replica
+    (T=1 -> T_max -> T=1), NOT mode changes: outputs.modes counts the latter
+    itself from the stored T=1 labels and labels the two separately, because
+    "swap" is ambiguous between them.
+    """
+    idata.posterior.attrs["ptde_ladder_round_trips"] = int(round_trips)
+    idata.posterior.attrs["ptde_swap_rounds"] = int(n_swap_rounds)
+
+    ar_T1 = float(n_accept[0] / max(n_propose[0], 1))
+    sr_all = np.asarray(n_swap_accept) / np.maximum(n_swap_propose, 1)
+    rt_rate = round_trips / max(n_swap_rounds, 1)
+    log.info(
+        f"{label} done: {actual_draws}/{draws} draws  "
+        f"accept(T=1)={ar_T1:.3f}  "
+        + (
+            f"swap=[{', '.join(f'{r:.2f}' for r in sr_all)}]  "
+            f"round_trips={round_trips} (rate={rt_rate:.3f}/{rate_unit}, "
+            f"schedule={swap_schedule})"
+            if n_temps > 1
+            else ""
+        )
+        + "".join(extras)
+    )
 
 
 def log_rung_timing(rung_times, temperatures, label, log):

@@ -5,7 +5,13 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
-from exozippy.config import RANK_DERIVED_DATA
+from exozippy.config import (
+    RANK_DEFAULT,
+    RANK_DERIVED_DATA,
+    RANK_DERIVED_MIXED,
+    RANK_MULENS_LENS_DISTANCE,
+    RANK_MULENS_SOURCE_DISTANCE,
+)
 from exozippy.corner_utils import (
     collect_parameter_corner_samples,
     save_corner_plot,
@@ -416,7 +422,7 @@ class Lens(Component):
         return self.source_bodies[event_idx][0]
 
     def _mass_initval(self, comp_type, ndx):
-        """Best-effort mass initval (solMass) for a body at stage 2, from
+        """Best-effort mass initval (solMass) for a body at stage 3, from
         user_params mass or logmass entries; None when neither is given."""
         up = self.config_manager.user_params
         entry = up.get(f"{comp_type}.{ndx}.mass")
@@ -546,7 +552,7 @@ class Lens(Component):
     # ------------------------------------------------------------------
 
     def build_maps(self):
-        """Stage 1b: Build integer index arrays for lens and source bodies.
+        """Stage 2: Build integer index arrays for lens and source bodies.
 
         source_map has one entry per SOURCE BODY (not per event): it drives the
         shapes of the per-source parameter chain (pi_rel, t_E, rho, ...) via the
@@ -614,7 +620,7 @@ class Lens(Component):
         """
         mmx_file = self.config[0].get("mmexofast") if self.config else None
         # Only an explicit file path is handled here. "auto" / absent-key
-        # auto-initialization is owned by MulensInstrument (stage 1a), which
+        # auto-initialization is owned by MulensInstrument (stage 1), which
         # pushes the seed hints itself before this method ever runs; False
         # opts out entirely.
         if not isinstance(mmx_file, str) or mmx_file == "auto":
@@ -638,7 +644,7 @@ class Lens(Component):
         )
 
     def register_parameters(self, system):
-        """Stage 2: Declare the manifest."""
+        """Stage 3: Declare the manifest."""
         self._validate_bodies(system)
 
         # s is derived from the sampled log_s; move any user s bounds onto log_s
@@ -743,33 +749,65 @@ class Lens(Component):
             # The symbolic relaxation engine only knows the binary mass-sum
             # and q relations (see symbolic_physics.get_symbol_map), so for
             # 3+ lens bodies the mlens_total and per-slot q initvals are
-            # seeded from the per-body mass initvals instead — body masses
+            # seeded from the per-body mass initvals instead -- body masses
             # (or logmass) must be supplied in the params file; a user q
-            # cannot back-propagate to a companion mass here.  Rank 40
-            # (derived-mixed): overrides defaults, yields to explicit user
-            # values.
+            # cannot back-propagate to a companion mass here.
+            # RANK_DERIVED_MIXED: overrides defaults, yields to explicit
+            # user values.
             body_masses = [
                 self._mass_initval(c_type, c_ndx)
                 for c_type, c_ndx in self.lens_bodies[0]
             ]
+            # Loud, once, at config time, because the alternative -- a start
+            # that quietly comes from nowhere -- is what review 1.6.5 traced
+            # (and what 2.6.6 asks be said out loud until the relations are
+            # generalized).  A WARNING and not an INFO: for a 2-body lens the
+            # engine derives all of this from ANY of the masses, q or the
+            # trajectory, so a user who has never had to supply body masses
+            # gets no other signal that a third body changes the rules.
+            user_q = [
+                f"lens.{j}.q"
+                for j in range(1, self.n_companions)
+                if self.config_manager.user_params.get(f"lens.{j}.q")
+                is not None
+            ]
+            if user_q:
+                logger.warning(
+                    f"{self.prefix}: {', '.join(user_q)} sets the START of a "
+                    "derived mass ratio but CANNOT set the companion mass it "
+                    "is computed from -- the relaxation engine's q relation "
+                    "covers companion slot 0 only (see "
+                    "mulensing/symbolic_physics.py).  The fit will run at the "
+                    "masses, not at the q you typed.  Supply "
+                    "<component>.<body>.mass (or logmass) for every lens body "
+                    "instead."
+                )
             if any(m is None for m in body_masses):
                 missing = [
                     f"{ct}.{cn}"
                     for (ct, cn), m in zip(self.lens_bodies[0], body_masses)
                     if m is None
                 ]
-                logger.info(
-                    f"No mass initval for lens body/bodies {missing}; cannot "
-                    "seed lens.0.mlens_total or per-companion q — supply body "
-                    "masses (or logmass) in the params file for 3+ body lenses."
+                logger.warning(
+                    f"{self.prefix}: no mass initval for lens body/bodies "
+                    f"{missing}, so lens.0.mlens_total and the per-companion "
+                    "q starts fall back to defaults.  A lens with 3+ bodies "
+                    "REQUIRES explicit body masses: the engine's mass-sum and "
+                    "q relations are binary-only, so nothing else can supply "
+                    "them (review 2.6.6).  Add mass (or logmass) initvals for "
+                    f"{missing} to the params file."
                 )
             else:
                 self.config_manager.add_hint(
-                    "lens.0.mlens_total", float(sum(body_masses)), rank=40
+                    "lens.0.mlens_total",
+                    float(sum(body_masses)),
+                    rank=RANK_DERIVED_MIXED,
                 )
                 for j, m_c in enumerate(body_masses[1:]):
                     q_j = m_c / body_masses[0]
-                    self.config_manager.add_hint(f"lens.{j}.q", q_j, rank=40)
+                    self.config_manager.add_hint(
+                        f"lens.{j}.q", q_j, rank=RANK_DERIVED_MIXED
+                    )
                     self.config_manager.add_scale_hint(
                         f"lens.{j}.q", 0.1 * q_j
                     )
@@ -786,7 +824,9 @@ class Lens(Component):
                 if s_val is None or float(s_val) <= 0.0:
                     continue
                 self.config_manager.add_hint(
-                    f"lens.{j}.log_s", float(np.log10(float(s_val))), rank=40
+                    f"lens.{j}.log_s",
+                    float(np.log10(float(s_val))),
+                    rank=RANK_DERIVED_MIXED,
                 )
 
         if any(self.finite_source):
@@ -814,7 +854,9 @@ class Lens(Component):
             sa = sa[0] if sa else None
         if ca is not None and sa is not None:
             alpha_deg = float(np.arctan2(float(sa), float(ca)) * _RAD_TO_DEG)
-            self.config_manager.add_hint(f"lens.0.alpha", alpha_deg, rank=20)
+            self.config_manager.add_hint(
+                f"lens.0.alpha", alpha_deg, rank=RANK_DEFAULT
+            )
 
         # Expected proper motions from the galactic model, for the seeds below.
         # None when the line of sight is not known yet, in which case the pm
@@ -828,12 +870,17 @@ class Lens(Component):
         for i in range(self.n_elements):
             l_type, l_idx = self._primary_lens(i)
 
-            # Rank 25: overrides the 10 pc defaults.yaml default (rank 20) but yields
-            # to any value the relaxation engine derives from pi_rel+d_S (rank 30).
-            # This breaks the d_L↔parallax cycle: pi_rel drives d_L to rank 30 via
-            # Condition B, then parallax (rank 25) is corrected as the weaker symbol.
+            # RANK_MULENS_LENS_DISTANCE overrides the 10 pc defaults.yaml
+            # default (RANK_DEFAULT) but yields to any value the relaxation
+            # engine derives from pi_rel + d_S
+            # (RANK_MULENS_SOURCE_DISTANCE).  That ordering is what breaks
+            # the d_L <-> parallax cycle: pi_rel drives d_L to the source
+            # rank via Condition B, then the parallax is corrected as the
+            # weaker symbol.  See the constants' own comment in config.py.
             self.config_manager.add_hint(
-                f"star.{l_idx}.distance", 4000.0, rank=25
+                f"star.{l_idx}.distance",
+                4000.0,
+                rank=RANK_MULENS_LENS_DISTANCE,
             )
             self.config_manager.add_scale_hint(f"star.{l_idx}.distance", 5.0)
             self.config_manager.add_hint(f"star.{l_idx}.logmass", -0.5)
@@ -847,7 +894,9 @@ class Lens(Component):
             # has its own trajectory chain (distance, pm) to initialize.
             for s_type, s_idx in self.source_bodies[i]:
                 self.config_manager.add_hint(
-                    f"star.{s_idx}.distance", 8000.0, rank=30
+                    f"star.{s_idx}.distance",
+                    8000.0,
+                    rank=RANK_MULENS_SOURCE_DISTANCE,
                 )
                 self.config_manager.add_scale_hint(
                     f"star.{s_idx}.distance", 5.0
@@ -865,7 +914,9 @@ class Lens(Component):
             for l2_type, l2_idx in self.lens_bodies[i][1:]:
                 if l2_type == "star":
                     self.config_manager.add_hint(
-                        f"star.{l2_idx}.distance", 4000.0, rank=25
+                        f"star.{l2_idx}.distance",
+                        4000.0,
+                        rank=RANK_MULENS_LENS_DISTANCE,
                     )
                     self.config_manager.add_scale_hint(
                         f"star.{l2_idx}.distance", 5.0
@@ -982,7 +1033,7 @@ class Lens(Component):
 
         # resolve() hands back the value in the parameter's USER unit, which for
         # ra/dec is degrees (Parameter.__post_init__ is what converts to the
-        # internal radians, and it has not run at stage 2).  The galactic-model
+        # internal radians, and it has not run at stage 3).  The galactic-model
         # helpers take radians.
         return (
             float(np.radians(np.atleast_1d(ra_all)[source_ndx])),
@@ -1003,7 +1054,8 @@ class Lens(Component):
         unknowns -- by choosing a point on a circle (issue #93).  Where that
         disagrees with the seeded ``t_E``, Condition B rewrites the lowest-rank
         symbol in ``t_E = theta_E / |mu_rel_geo|``, which is ``theta_E`` via the
-        lens mass (defaults.yaml, rank 20) and distance (rank 25).  So ``t_E``
+        lens mass (defaults.yaml, ``RANK_DEFAULT``) and distance
+        (``RANK_MULENS_LENS_DISTANCE``).  So ``t_E``
         keeps its measured value, the proper motion keeps the prior's, and the
         lens mass absorbs the difference -- which is the standard microlensing
         chain (a measured t_E plus an assumed mu_rel implies theta_E, hence a
@@ -1087,7 +1139,7 @@ class Lens(Component):
         return float(v @ e_hat), float(v @ n_hat)
 
     def _validate_q_start(self):
-        """Stage 6: check the START value of the mass ratio, loudly and once.
+        """Stage 7: check the START value of the mass ratio, loudly and once.
 
         The magnification path clips q into [Q_MIN, Q_MAX] (physics.clip_q) --
         a statement about where the backends are defined, not a licence to
@@ -1104,16 +1156,44 @@ class Lens(Component):
         makes) is a warning: the fit will silently begin at the clipped q
         rather than at the seeded one, which is exactly the sort of "the number
         I typed is not the number being fitted" that goes unnoticed for months.
+
+        **NaN is fatal only where it MEANS something**, which is companion
+        slot 0 (review 1.6.5).  The split is not about q being derived -- it
+        always is -- but about which elements the relaxation engine can
+        actually solve: ``symbolic_physics.get_symbol_map`` maps a SINGLE
+        companion, so for slot 0 a NaN really does say the solve failed, i.e.
+        one of the lens body masses is already non-finite, and the advice
+        below is the right advice.  Slots 1 and up are never solved by the
+        engine at all: `register_parameters` seeds them from USER body-mass
+        entries only, skips the hint when there are none (see 2.6.6), and
+        `resolve()` then leaves them NaN because q has no defaults.yaml
+        initval.  That NaN is bookkeeping, not a start -- the graph recomputes
+        q from the mass nodes, which carry finite defaults -- and raising on it
+        killed a 3+ body fit that would have run perfectly well.  Exactly the
+        false-positive class :meth:`_validate_pspl_start`'s docstring warns
+        about for the derived t_E/theta_E/pi_E (the ob161003 theta_E lesson).
+
+        A q that genuinely reaches the magnification backend as NaN is still
+        caught at runtime by ``clip_q_value``, which names the parameter.  The
+        derived-ness test is kept for the skipped slots so that a future
+        parameterization which SAMPLES one of them gets the raise back: for a
+        sampled element the initval IS the start.
         """
         if self.n_companions < 1 or self.q.initval is None:
             return
         q0 = np.atleast_1d(np.asarray(self.q.initval, dtype=float)).ravel()
-        if np.any(np.isnan(q0)):
+        nan = np.isnan(q0)
+        fatal = [
+            i
+            for i in np.flatnonzero(nan)
+            if i == 0 or not self.q.element_is_derived(int(i))
+        ]
+        if fatal:
             raise ValueError(
                 f"{self.prefix}.q starts at {q0.tolist()}, which is not a "
                 f"number.  {_Q_NAN_ADVICE}"
             )
-        out = (q0 < Q_MIN) | (q0 > Q_MAX)
+        out = ~nan & ((q0 < Q_MIN) | (q0 > Q_MAX))
         if np.any(out):
             logger.warning(
                 f"{self.prefix}.q starts at {q0[out].tolist()}, outside the "
@@ -1137,7 +1217,7 @@ class Lens(Component):
             return None
 
     def _validate_pspl_start(self):
-        """Stage 6: check the START values of the SAMPLED trajectory
+        """Stage 7: check the START values of the SAMPLED trajectory
         parameters, loudly and once.  The sibling of
         :meth:`_validate_q_start`, and it makes the same split for the same
         reason: NaN raises (the fit cannot start), out of range warns (the fit
@@ -1204,7 +1284,7 @@ class Lens(Component):
             )
 
     def build_likelihood(self, model, system):
-        """Stage 6: Observational penalties on the lensing geometry."""
+        """Stage 7: Observational penalties on the lensing geometry."""
         self._validate_q_start()
         self._validate_pspl_start()
 
@@ -1347,12 +1427,19 @@ class Lens(Component):
         u0_safe = apply_u_0_floor(u0_raw)
         is_physical = pt.gt(theta_E_raw, THETA_E_LENSING_MIN)
 
+        # Keys are the CANONICAL parameter names, matching op.py's
+        # _base_mm_params exactly.  They used to be a private dialect
+        # (t0/u0/tE/pi_N/pi_E) whose "pi_E" meant pi_E_E, so a grep for
+        # pi_E_E missed every consumer of this dict while a grep for pi_E hit
+        # the wrong one (review 4.6.1).  Names only -- no sign, no floor and
+        # no expression changed; the parallax convention is stated at the one
+        # place that applies it, get_magnification below.
         return {
-            "t0": self.t_0.value[index],
-            "u0": u0_safe,
-            "tE": tE_safe,
-            "pi_N": pt.switch(is_physical, self.pi_E_N.value[index], 0.0),
-            "pi_E": pt.switch(is_physical, self.pi_E_E.value[index], 0.0),
+            "t_0": self.t_0.value[index],
+            "u_0": u0_safe,
+            "t_E": tE_safe,
+            "pi_E_N": pt.switch(is_physical, self.pi_E_N.value[index], 0.0),
+            "pi_E_E": pt.switch(is_physical, self.pi_E_E.value[index], 0.0),
         }
 
     def _get_binary_mm_params(self, index=0):
@@ -1411,11 +1498,11 @@ class Lens(Component):
         # sign choice). MMEXOFAST calls MulensModel, so published pi_E values
         # are calibrated to this convention.
         tau_p = (
-            (times - p["t0"]) / p["tE"]
-            - delta_n * p["pi_N"]
-            - delta_e * p["pi_E"]
+            (times - p["t_0"]) / p["t_E"]
+            - delta_n * p["pi_E_N"]
+            - delta_e * p["pi_E_E"]
         )
-        u_p = p["u0"] + delta_n * p["pi_E"] - delta_e * p["pi_N"]
+        u_p = p["u_0"] + delta_n * p["pi_E_E"] - delta_e * p["pi_E_N"]
 
         u2 = pt.sqr(tau_p) + pt.sqr(u_p)
         return (u2 + 2.0) / pt.sqrt(u2 * (u2 + 4.0))
@@ -1566,7 +1653,13 @@ class Lens(Component):
 
         if n_lenses >= 2 and self.backend == "vbm_direct":
             sp = self._get_safe_mm_params(index)
-            param_list = [sp["t0"], sp["u0"], sp["tE"], sp["pi_N"], sp["pi_E"]]
+            param_list = [
+                sp["t_0"],
+                sp["u_0"],
+                sp["t_E"],
+                sp["pi_E_N"],
+                sp["pi_E_E"],
+            ]
             if use_rho:
                 param_list.append(self.rho.value[index])
             for j in range(self.n_companions):
@@ -1587,7 +1680,13 @@ class Lens(Component):
             )
         elif n_lenses == 2:
             bp = self._get_binary_mm_params(index)
-            param_list = [bp["t0"], bp["u0"], bp["tE"], bp["pi_N"], bp["pi_E"]]
+            param_list = [
+                bp["t_0"],
+                bp["u_0"],
+                bp["t_E"],
+                bp["pi_E_N"],
+                bp["pi_E_E"],
+            ]
             if use_rho:
                 param_list.append(self.rho.value[index])
             param_list.extend([bp["s"], bp["q"], bp["alpha"]])
@@ -1601,7 +1700,13 @@ class Lens(Component):
             )
         else:
             sp = self._get_safe_mm_params(index)
-            param_list = [sp["t0"], sp["u0"], sp["tE"], sp["pi_N"], sp["pi_E"]]
+            param_list = [
+                sp["t_0"],
+                sp["u_0"],
+                sp["t_E"],
+                sp["pi_E_N"],
+                sp["pi_E_E"],
+            ]
             if use_rho:
                 param_list.append(self.rho.value[index])
             if effective_bandpass is not None:
@@ -1618,27 +1723,6 @@ class Lens(Component):
     # ------------------------------------------------------------------
     # Auto method brackets
     # ------------------------------------------------------------------
-
-    def _get_initval(self, param, slot=0):
-        """Look up a resolved initval from config_manager, checking name and index forms.
-
-        ``slot`` is the element index within the parameter's own vector:
-        source slot for per-source params (t_0, u_0, rho, ...), companion slot
-        for per-companion params (s, alpha, q).
-        """
-        cm = self.config_manager
-        name = self.names[slot] if slot < len(self.names) else str(slot)
-        for key in [f"lens.{name}.{param}", f"lens.{slot}.{param}"]:
-            entry = cm.user_params.get(key)
-            if entry is not None:
-                val = (
-                    entry.get("initval") if isinstance(entry, dict) else entry
-                )
-                if isinstance(val, (list, tuple)):
-                    val = val[0] if val else None
-                if val is not None:
-                    return float(val)
-        return None
 
     def resolve_auto_vbbl(self, times_np, index=0):
         """Replace 'auto_vbbl' with a concrete method list for multi-body lenses.

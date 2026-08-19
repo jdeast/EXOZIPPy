@@ -54,8 +54,6 @@ class Mann(StellarRelation, Component):
     normalization that follows from it -- stay here.
     """
 
-    yaml_key = "mann"
-
     @property
     def prefix(self):
         return "mann"
@@ -86,7 +84,7 @@ class Mann(StellarRelation, Component):
         ]
 
     def load_data(self, system):
-        """Stage 1a: resolve the target stars and parse the per-instance config."""
+        """Stage 1: resolve the target stars and parse the per-instance config."""
         self.star_indices = []
         self.ks_synthetic = []
         self.ks_observed = []
@@ -144,7 +142,7 @@ class Mann(StellarRelation, Component):
             )
 
     def register_parameters(self, system):
-        """Stage 2: declare the Ks latent and validate the requested pathways."""
+        """Stage 3: declare the Ks latent and validate the requested pathways."""
         self.manifest = {"ks_offset": None}
 
         if any(self.ks_synthetic):
@@ -217,7 +215,7 @@ class Mann(StellarRelation, Component):
         star = system.star
         smap = self.star_map_tensor
 
-        # Deferred to stage 6: the relaxation engine (stage 3) has run by now,
+        # Deferred to stage 7: the relaxation engine (stage 4) has run by now,
         # so these initvals are the ones the sampler will actually start from.
         self._warn_outside_calibration(system)
 

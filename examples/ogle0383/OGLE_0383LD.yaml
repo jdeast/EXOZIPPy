@@ -1,0 +1,62 @@
+run:
+  name: "OGLE_0383"
+
+prefix: "fitresults/OGLE_0383_2LD"
+
+star:
+  - name: "Lens"
+  - name: "Source"
+
+planet:
+  - name: "Companion"
+
+lens:
+  - name: "Lens"
+    lenses:  ["star.0", "planet.0"]
+    sources: ["star.1"]
+    finite_source: True
+
+galacticmodel:
+  - name: "OGLE_0383"
+    anchor_idx: 1  # we anchor the galactic model to the source star, star.1
+
+band:
+  - name: "I"
+    filter: "Cousins.I"
+    ld_law: "linear"
+
+mulensinstrument:
+  - name: "KMTA02"
+    file: "n19010101.I.KMTA02.cleaned.mag"
+    band: "I"
+  - name: "KMTC02"
+    file: "n19111111.I.KMTC02.cleaned.mag"
+    band: "I"
+  - name: "KMTC42"
+    file: "n19990305.I.KMTC42.cleaned.mag"
+    band: "I"
+  - name: "KMTS02"
+    file: "n20260616.I.KMTS02.cleaned.mag"
+    band: "I"
+  - name: "KMTS42"
+    file: "n20290327.I.KMTS42.cleaned.mag"
+    band: "I"
+  - name: "KMTA42"
+    file: "n20591225.I.KMTA42.cleaned.mag"
+    band: "I"
+
+parameter_file: "OGLE_0383.paramsLD.yaml"
+#parameter_file: "OGLE_0383.params.2.yaml"
+
+sampler:
+  method: ptde_async
+  n_temps: 6
+  T_max: 150
+  # n_chains: defaults to 2*n_params
+  cores: 64
+  tune: 1000
+  draws: 10000
+  nthin: 1
+  check_curvatures: False
+  recompute_trace: True
+  eval_timeout: 10        # VBMicrolensing can hang for some (s, q); reject and move on

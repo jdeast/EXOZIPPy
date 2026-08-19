@@ -8,6 +8,57 @@ from ..physics_registry import PHYSICS_REGISTRY
 from .parameter import ElementExpression, Parameter
 
 
+def resolve_star_ref(ref, star_names, where):
+    """Star INDEX from a name, a ``star.<name>``/``star.<i>`` path, or an index.
+
+    The one translator behind every user-facing "index or name" star
+    reference: an instrument's or a band's ``star_ndx:``, an SED
+    ``photType`` entry, a relation component's ``star:`` key.  It existed
+    three times with three messages and, worse, was simply absent from the
+    two schemas that advertised it -- ``rvinstrument`` and ``band`` both
+    documented ``star_ndx`` as "Index or name" while every consumer called
+    ``int()`` on it, so a name crashed with a raw ValueError (review 3.5.1).
+
+    ``where`` names the offending config location in the error, since only
+    the caller knows it ("band 'I' star_ndx", "photType", "mann 'B'").
+    ``star_names`` may be empty, in which case only integers and digit
+    strings resolve -- a caller running before the star instances are known
+    still gets the historical behaviour rather than a spurious failure.
+    """
+    names = list(star_names or [])
+    n = len(names)
+
+    def _bad(reason):
+        known = f" Known stars: {names}." if names else ""
+        return ValueError(
+            f"{where}: {reason}.{known}"
+            + (f" Valid indices are 0..{n - 1}." if n else "")
+        )
+
+    # bool is an int in Python; `star_ndx: true` is a typo, not star 1.
+    if isinstance(ref, bool):
+        raise _bad(f"invalid star reference {ref!r}")
+    if isinstance(ref, (int, np.integer)):
+        idx = int(ref)
+    elif isinstance(ref, str):
+        # A path spelling ("star.B", "star.1") names the same element as the
+        # bare one; only the last segment selects.
+        key = ref.split(".")[-1]
+        if key in names:
+            idx = names.index(key)
+        else:
+            try:
+                idx = int(key)
+            except ValueError:
+                raise _bad(f"unknown star '{ref}'") from None
+    else:
+        raise _bad(f"invalid star reference {ref!r}")
+
+    if n and not 0 <= idx < n:
+        raise _bad(f"star index {idx} is out of range")
+    return idx
+
+
 class Component(ABC):
     """
     Base class for all physical and instrumental components in the system.
@@ -16,13 +67,13 @@ class Component(ABC):
     safely construct complex PyMC models without deadlocks. The orchestration
     happens in the following distinct lifecycle stages:
 
-    Stage 0: load_data()           - Ingests CSVs and calculates data-driven parameter estimates.
-    Stage 1: build_maps()          - Generates Numpy integer arrays linking children to parents.
-    Stage 2: register_parameters() - Declares the component's mathematical manifest.
-    Stage 3: [System-Level]        - The ConfigManager symbolically solves the universe.
-    Stage 4: build_tensor_maps()   - Auto-converts Numpy maps to PyTensor variables.
-    Stage 5: add_parameter()       - Materializes PyMC nodes safely, one at a time.
-    Stage 6: build_likelihood()    - Defines observational Likelihoods and Potentials.
+    Stage 1: load_data()           - Ingests CSVs and calculates data-driven parameter estimates.
+    Stage 2: build_maps()          - Generates Numpy integer arrays linking children to parents.
+    Stage 3: register_parameters() - Declares the component's mathematical manifest.
+    Stage 4: [System-Level]        - The ConfigManager symbolically solves the universe.
+    Stage 5: build_tensor_maps()   - Auto-converts Numpy maps to PyTensor variables.
+    Stage 6: add_parameter()       - Materializes PyMC nodes safely, one at a time.
+    Stage 7: build_likelihood()    - Defines observational Likelihoods and Potentials.
     """
 
     # Does this component's parameter space routinely carry posterior-
@@ -51,10 +102,21 @@ class Component(ABC):
     # not.
     aligned_context_deps = frozenset()
 
+    # Human-readable heading for this component's block of the results table
+    # (outputs/latex.py's \sidehead).  DECLARED here, rather than only being
+    # assigned in ten component __init__s, so a generic consumer can read
+    # `comp.label` without a getattr guard -- that guard was the tell that
+    # the attribute was not part of the contract (review 4.2.3).  A component
+    # that sets none gets its class name, filled in by __init__ below;
+    # setting it as a CLASS attribute also works and is not overwritten.
+    label = None
+
     def __init__(self, component_config, config_manager):
         """Standardized constructor for ALL components."""
         self.config = component_config
         self.config_manager = config_manager
+        if type(self).label is None:
+            self.label = type(self).__name__
 
         # Determine how many of this thing we are building
         self.n_elements = len(self.config)
@@ -136,7 +198,7 @@ class Component(ABC):
 
     def load_data(self, system):
         """
-        Stage 1a: Data Ingestion.
+        Stage 1: Data Ingestion.
         Override this to load CSV files and push data-driven parameter guesses (like RV offsets)
         to the ConfigManager.
         """
@@ -144,7 +206,7 @@ class Component(ABC):
 
     def build_maps(self):
         """
-        Stage 1b: Logical Mapping.
+        Stage 2: Logical Mapping.
         Override this to define Numpy integer arrays (ending in '_map') that establish
         vectorized relationships between this component and its parents.
         """
@@ -153,7 +215,7 @@ class Component(ABC):
     @abstractmethod
     def register_parameters(self, system):
         """
-        Stage 2: The Blueprint.
+        Stage 3: The Blueprint.
         Define `self.manifest` (a dictionary) mapping parameter names to their physics
         dependencies, and push those symbols to the ConfigManager.
         """
@@ -161,7 +223,7 @@ class Component(ABC):
 
     def build_tensor_maps(self):
         """
-        Stage 4: Automatic PyTensor Conversion.
+        Stage 5: Automatic PyTensor Conversion.
         Scans the component's attributes. Any numpy array ending in '_map'
         is automatically converted to a PyTensor variable ending in '_map_tensor'.
         """
@@ -180,7 +242,7 @@ class Component(ABC):
         """Wire and apply this component's REPORTED elements (manifest role 3).
 
         The second phase of the two-phase build, called by
-        ``System.build_model`` after stage 6 for every component, inside the
+        ``System.build_model`` after stage 7 for every component, inside the
         model context.  Every parameter exists by now, so the dependency of a
         reported expression resolves to an already-built node instead of
         recursing back into the parameter being built (see add_parameter).
@@ -210,6 +272,52 @@ class Component(ABC):
         self._pending_reported = {}
         return finalized
 
+    @staticmethod
+    def _has_built_parameter(comp, name):
+        """Has ``comp`` already materialized ``name`` as a Parameter?
+
+        The one predicate for "this node exists, do not build it again".  It
+        must test the TYPE, not merely the attribute's presence: a component
+        class attribute or method sharing a manifest parameter's name would
+        otherwise be mistaken for the built node and either crash on
+        ``.value`` or wire the wrong thing into the graph (review 2.2.2).
+        Three of the four call sites already tested the type; the
+        external-dependency one asked ``hasattr`` alone.  There are no
+        collisions in the tree today -- which is exactly why the odd one out
+        never showed.
+        """
+        return isinstance(getattr(comp, name, None), Parameter)
+
+    def declared_star_names(self):
+        """Star instance names from the raw system config, or ``[]``.
+
+        Read from ``config_manager.system_config`` rather than from
+        ``system.star``, so a NAME resolves at construction and at stage 1 --
+        before the Star component exists.  Empty when the config manager has
+        no system config (a test stub), which ``resolve_star_ref`` treats as
+        "indices only".
+        """
+        cfg = getattr(self.config_manager, "system_config", None) or {}
+        entries = cfg.get("star")
+        if not isinstance(entries, list):
+            return []
+        return [
+            str(e.get("name", i))
+            for i, e in enumerate(entries)
+            if isinstance(e, dict)
+        ]
+
+    def resolve_star_ndx(self, ref, where, default=0):
+        """This component's ``star_ndx``-style reference as a star index.
+
+        ``None`` (the key absent) takes ``default``; anything else goes
+        through :func:`resolve_star_ref`, so the name form the schemas
+        advertise actually works.
+        """
+        if ref is None:
+            return int(default)
+        return resolve_star_ref(ref, self.declared_star_names(), where)
+
     def add_parameter(self, model, param_name, system, context_nodes=None):
         context_nodes = context_nodes or {}
         # Reported (role 3) selections park here until finalize_reported; keyed
@@ -219,9 +327,7 @@ class Component(ABC):
             self._pending_reported = {}
 
         # 0. Prevent double-building nodes
-        if hasattr(self, param_name) and isinstance(
-            getattr(self, param_name), Parameter
-        ):
+        if self._has_built_parameter(self, param_name):
             return getattr(self, param_name).value
 
         if not hasattr(self, "manifest"):
@@ -234,7 +340,7 @@ class Component(ABC):
             )
 
         # manifest.py is the single interpreter of the manifest vocabulary --
-        # the same one graph.determine_pymc_build_order (stage 4) and
+        # the same one graph.determine_pymc_build_order (the build order) and
         # System.derived_params read, so the build order can never disagree
         # with what gets built.  `entry.options` is already a copy, so the
         # pops below cannot mutate the live manifest.
@@ -462,9 +568,7 @@ class Component(ABC):
 
         if "." not in d:
             # Local tracking recursive lookup
-            if not hasattr(self, d) or not isinstance(
-                getattr(self, d), Parameter
-            ):
+            if not self._has_built_parameter(self, d):
                 self.add_parameter(model, d, system, context_nodes)
             local = getattr(self, d)
             aligned = n_elements is not None and local._n_elements() == int(
@@ -489,7 +593,7 @@ class Component(ABC):
             )
 
         # Ensure the dependency node is built lazily on demand
-        if not hasattr(ext_comp, ext_param_name):
+        if not self._has_built_parameter(ext_comp, ext_param_name):
             ext_comp.add_parameter(
                 model, ext_param_name, system, context_nodes
             )
@@ -597,10 +701,7 @@ class Component(ABC):
                             f"[{self.prefix}.{param_name}] link '{plink.expr_str}' "
                             f"references component '{dcomp}', which is not active."
                         )
-                    if not (
-                        hasattr(comp, dparam)
-                        and isinstance(getattr(comp, dparam), Parameter)
-                    ):
+                    if not self._has_built_parameter(comp, dparam):
                         comp.add_parameter(model, dparam, system)
                     node = getattr(comp, dparam).value
                     if getattr(node, "ndim", 0) >= 1:
@@ -646,7 +747,7 @@ class Component(ABC):
     @abstractmethod
     def build_likelihood(self, model, system):
         """
-        Stage 6: The Objective Function.
+        Stage 7: The Objective Function.
         Construct the PyMC Likelihoods (`pm.Normal`, etc.) or custom `pm.Potential`
         penalties that constrain the model against data.
         """

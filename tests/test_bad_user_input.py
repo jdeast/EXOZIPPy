@@ -417,7 +417,7 @@ def test_manifest_overrides_pins_are_unaffected():
 #
 # The first group pins that it fires; the second pins that it does NOT fire
 # for any of the several channels a value legitimately arrives through, since
-# stage 5 is where they have all landed.
+# stage 6 is where they have all landed.
 # ---------------------------------------------------------------------------
 
 
@@ -738,7 +738,7 @@ def test_manifest_overrides_initval_satisfies_the_check():
     MulensInstrument._scale_flux_amplitudes and the GP amplitudes do),
     When the parameter is built,
     Then it builds -- the check has to see a channel applied inside its own
-    stage, which is why it lives at stage 5.
+    stage, which is why it lives at stage 6.
     """
     # ARRANGE
     config_manager = ConfigManager({}, system_config={"star": [{"name": "A"}]})
@@ -1341,3 +1341,161 @@ def test_out_of_bounds_through_the_solved_config_pipeline_says_user():
     msg = str(exc.value)
     assert "star.A.distance" in msg
     assert "start value from: user" in msg
+
+
+# ---------------------------------------------------------------------------
+# Malformed params entries are refused at construction  (2.1.1 / 2.1.2, 7.1.1b)
+# ---------------------------------------------------------------------------
+
+_LIST_FIELD_SYSTEM = {"star": [{"name": "A"}, {"name": "B"}]}
+
+
+@pytest.mark.parametrize("field", ["sigma", "mu", "lower", "upper"])
+def test_a_list_in_a_prior_field_is_refused(field):
+    """
+    Given a params entry putting a LIST in a non-initval numeric field,
+    When the ConfigManager is constructed,
+    Then it raises, naming the parameter and the field.
+
+    A list means per-SEED start values and nothing else -- seeds move the
+    start, never the bounds or the prior.  resolve()'s numeric loop tolerates
+    a list by taking element 0 (that same per-seed convention), so a
+    {sigma: [10, 20]} used to sail past the sigma application and die frames
+    later in apply_value's float(list): a bare TypeError naming no parameter,
+    no field and no file.
+    """
+    # ARRANGE
+    entry = {"initval": 5800.0, "mu": 5800.0}
+    entry[field] = [10.0, 20.0]
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match="LIST IN A NON-SEED FIELD"):
+        ConfigManager({"star.A.teff": entry}, system_config=_LIST_FIELD_SYSTEM)
+
+
+def test_a_list_initval_is_still_legal():
+    """
+    Given a params entry whose initval is a list,
+    When the ConfigManager is constructed,
+    Then it is accepted verbatim -- that is the multi-seed spelling.
+
+    The check has to draw the line in exactly one place, so the legal side
+    is pinned next to the illegal one.
+    """
+    # ARRANGE / ACT
+    cm = ConfigManager(
+        {"star.A.teff": {"initval": [5800.0, 5900.0]}},
+        system_config=_LIST_FIELD_SYSTEM,
+    )
+
+    # ASSERT
+    assert cm.user_params["star.0.teff"]["initval"] == [5800.0, 5900.0]
+
+
+def test_a_bare_link_string_is_refused_with_the_dict_spelling():
+    """
+    Given the bare-scalar link spelling `star.A.teff: star.B.teff`,
+    When the ConfigManager is constructed,
+    Then it raises and shows the dict spellings of the three link kinds.
+
+    extract_links inspects dict entries only, so the bare form was never
+    recognized as a link and reached finalize_user_params' float(val) as a
+    ValueError naming no parameter and no file.  It is refused rather than
+    rewritten: the bare form cannot say whether the user meant a hard link,
+    a soft one or a seed, and guessing would pick a model for them.
+    """
+    # ARRANGE / ACT
+    with pytest.raises(ValueError) as excinfo:
+        ConfigManager(
+            {"star.A.teff": "star.B.teff"}, system_config=_LIST_FIELD_SYSTEM
+        )
+
+    # ASSERT
+    msg = str(excinfo.value)
+    assert "NON-NUMERIC PARAMETER VALUE" in msg
+    assert "sigma: 0}" in msg
+
+
+def test_a_bare_non_numeric_string_is_refused():
+    """
+    Given a bare string that is not a link either,
+    When the ConfigManager is constructed,
+    Then it raises, naming the parameter and quoting the value.
+    """
+    # ARRANGE / ACT / ASSERT
+    with pytest.raises(ValueError, match="NON-NUMERIC PARAMETER VALUE"):
+        ConfigManager({"star.A.teff": "hot"}, system_config=_LIST_FIELD_SYSTEM)
+
+
+def test_a_quoted_number_is_not_a_string_error():
+    """
+    Given a bare value YAML happened to quote (`"5800"`),
+    When the ConfigManager is constructed,
+    Then it is accepted: it is a number, spelled inconveniently.
+    """
+    # ARRANGE / ACT
+    cm = ConfigManager(
+        {"star.A.teff": "5800"}, system_config=_LIST_FIELD_SYSTEM
+    )
+
+    # ASSERT
+    assert cm.user_params["star.0.teff"] == "5800"
+
+
+def test_a_bad_entry_dies_at_construction_not_in_finalize():
+    """
+    Given the two malformed spellings,
+    When a full finalize_user_params() solve is attempted,
+    Then the error has already been raised at construction.
+
+    Both crash sites were deep inside the engine (float(val) in the leaf
+    registration, float(list) in apply_value), which is why the messages
+    named nothing.  Pinning WHERE they are caught is the point of the fix.
+    """
+    # ARRANGE / ACT / ASSERT
+    for bad in (
+        {"star.A.teff": "star.B.teff"},
+        {"star.A.teff": {"mu": 5800.0, "sigma": [10.0, 20.0]}},
+    ):
+        with pytest.raises(ValueError):
+            cm = ConfigManager(bad, system_config=_LIST_FIELD_SYSTEM)
+            cm.finalize_user_params()
+
+
+# A MULTI-SEED START MUST SAY WHERE IT STARTS EITHER (raw_from_initval).
+#
+# The same rule as the two above, at the one other door into a chain start.
+# NaN fails every comparison, so a non-finite seed value passed the bound
+# check silently and produced a NaN raw coordinate that reached a start dict
+# with nothing naming the element (review 2.2.1).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"lower": 0.0, "upper": 10.0},  # logit branch
+        # gaussian branch: unbounded, so the raw N(0,1) IS the prior
+        {"mu": 1.0, "sigma": 2.0, "lower": -np.inf, "upper": np.inf},
+    ],
+    ids=["logit", "gaussian"],
+)
+def test_non_finite_seed_value_raises_seed_bound_violation(kwargs):
+    """
+    Given a built parameter and an alternate seed whose value is NaN,
+    When raw_from_initval maps that seed to a raw start,
+    Then SeedBoundViolation names the element, so the multi-seed caller skips
+    the seed loudly instead of starting a chain at a NaN coordinate.
+    """
+    # ARRANGE
+    from exozippy.components.parameter import SeedBoundViolation
+
+    p = Parameter(
+        label="star.teff", initval=5.0, unit="", internal_unit="", **kwargs
+    )
+    with pm.Model():
+        p.build_pymc()
+
+    # ACT & ASSERT
+    with pytest.raises(SeedBoundViolation, match="star.teff"):
+        p.raw_from_initval(np.array([np.nan]))

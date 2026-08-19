@@ -68,7 +68,15 @@ def _eval_both(system, model, obs_dev, t_vals):
             coords=_COORDS, mag_method="point_source", use_rho=False
         )
         A_op_node = mag_op(
-            pt.stack([sp["t0"], sp["u0"], sp["tE"], sp["pi_N"], sp["pi_E"]]),
+            pt.stack(
+                [
+                    sp["t_0"],
+                    sp["u_0"],
+                    sp["t_E"],
+                    sp["pi_E_N"],
+                    sp["pi_E_E"],
+                ]
+            ),
             pt.as_tensor_variable(t_vals),
             pt.as_tensor_variable(obs_dev),
         )

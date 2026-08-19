@@ -125,7 +125,12 @@ class _FakeLens:
         ]
 
 
-_KEYS = ("t0", "u0", "tE", "pi_N", "pi_E")
+# The canonical parameter names, which _get_safe_mm_params now speaks (review
+# 4.6.1).  _LEGACY_KEYS is the private dialect it used to, kept only because
+# the replica below reproduces the pre-fix body verbatim; both are zipped onto
+# _KEYS so every assertion reads in one language.
+_KEYS = ("t_0", "u_0", "t_E", "pi_E_N", "pi_E_E")
+_LEGACY_KEYS = ("t0", "u0", "tE", "pi_N", "pi_E")
 
 
 def _legacy_safe_mm_params(lens, index=0):
@@ -162,7 +167,7 @@ def _compiled_pair():
     old = _legacy_safe_mm_params(fake, 0)
     ins = fake.inputs()
     f_new = pytensor.function(ins, [new[k] for k in _KEYS])
-    f_old = pytensor.function(ins, [old[k] for k in _KEYS])
+    f_old = pytensor.function(ins, [old[k] for k in _LEGACY_KEYS])
     return f_new, f_old
 
 
@@ -192,10 +197,10 @@ def test_finite_inputs_are_byte_identical_to_the_old_expression(vals):
       nan_to_num first.  Removing the scrub is a change to the NaN case only;
       no working fit may move.
 
-    The ONE documented exception is ``u0`` inside the legacy 1e-6 floor: the
+    The ONE documented exception is ``u_0`` inside the legacy 1e-6 floor: the
     two floors have since been unified at 1e-9 (the Op path's), and exactly
     zero now floors to +U_0_FLOOR instead of being missed by ``sign(0) = 0``.
-    Outside that band -- which is everything a real event visits -- u0 too is
+    Outside that band -- which is everything a real event visits -- u_0 too is
     bit-identical, and it is asserted as such here rather than exempted.
     """
     f_new, f_old = _compiled_pair()
@@ -205,7 +210,7 @@ def test_finite_inputs_are_byte_identical_to_the_old_expression(vals):
 
     for k, a, b in zip(_KEYS, new, old):
         a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
-        if k == "u0" and abs(u_0) < _LEGACY_U_0_FLOOR:
+        if k == "u_0" and abs(u_0) < _LEGACY_U_0_FLOOR:
             # The floors used to disagree here; pin the new value outright.
             assert float(a) == floor_u_0_value(u_0)
             continue
@@ -253,8 +258,8 @@ def test_t_E_is_floored_and_u_0_keeps_its_sign():
             ),
         )
     )
-    assert float(out["tE"]) == T_E_FLOOR
-    assert float(out["u0"]) == -U_0_FLOOR
+    assert float(out["t_E"]) == T_E_FLOOR
+    assert float(out["u_0"]) == -U_0_FLOOR
 
 
 def test_the_parallax_gate_still_zeroes_pi_E_below_the_lensing_threshold():
@@ -280,8 +285,8 @@ def test_the_parallax_gate_still_zeroes_pi_E_below_the_lensing_threshold():
             ),
         )
     )
-    assert float(out["pi_N"]) == 0.0
-    assert float(out["pi_E"]) == 0.0
+    assert float(out["pi_E_N"]) == 0.0
+    assert float(out["pi_E_E"]) == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -292,10 +297,10 @@ def test_the_parallax_gate_still_zeroes_pi_E_below_the_lensing_threshold():
 @pytest.mark.parametrize(
     "which, fabricated, affected",
     [
-        ("t_E", 100.0, ["tE"]),
-        ("u_0", 1.0, ["u0"]),
-        ("pi_E_N", 0.0, ["pi_N"]),
-        ("pi_E_E", 0.0, ["pi_E"]),
+        ("t_E", 100.0, ["t_E"]),
+        ("u_0", 1.0, ["u_0"]),
+        ("pi_E_N", 0.0, ["pi_E_N"]),
+        ("pi_E_E", 0.0, ["pi_E_E"]),
     ],
 )
 def test_a_nan_input_propagates_instead_of_becoming_its_old_default(
@@ -357,10 +362,10 @@ def test_a_nan_theta_E_still_gates_the_parallax_off_and_nans_t_E():
     ]
     new = dict(zip(_KEYS, f_new(*args)))
     old = dict(zip(_KEYS, f_old(*args)))
-    assert float(new["pi_N"]) == 0.0 and float(new["pi_E"]) == 0.0
-    assert float(old["pi_N"]) == 0.0 and float(old["pi_E"]) == 0.0
-    assert np.isnan(float(new["tE"]))
-    assert float(old["tE"]) == 100.0
+    assert float(new["pi_E_N"]) == 0.0 and float(new["pi_E_E"]) == 0.0
+    assert float(old["pi_E_N"]) == 0.0 and float(old["pi_E_E"]) == 0.0
+    assert np.isnan(float(new["t_E"]))
+    assert float(old["t_E"]) == 100.0
 
 
 def test_no_scrub_survives_in_the_source():

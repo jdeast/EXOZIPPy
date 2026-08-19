@@ -1057,7 +1057,8 @@ def test_load_data_accepts_blend_alias_for_pos(tmp_path):
         ("photType:\n      pos: [A]\n      neg: [A]", "both pos and neg"),
         ("photType:\n      flux: [A]", "Unknown photType key"),
         ("photType:\n      pos: []", "non-empty"),
-        ("photType:\n      pos: [Nobody]", "Unknown star reference"),
+        # Wording from the shared component.resolve_star_ref.
+        ("photType:\n      pos: [Nobody]", "unknown star"),
         ("photType:\n      pos: [5]", "out of range"),
         ("photType:\n      blend: [A]\n      pos: [B]", "alias"),
     ],

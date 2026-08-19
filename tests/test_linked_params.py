@@ -17,10 +17,12 @@ import copy
 
 import numpy as np
 import pymc as pm
+import pytensor.tensor as pt
 import pytest
 
 from exozippy.components.star.star import Star
 from exozippy.config import ConfigManager
+from exozippy.linking import _SUPPORTED_FUNCS, parse_link_expression
 
 DEG2RAD = np.pi / 180.0
 
@@ -251,6 +253,117 @@ def test_dynamic_bound_link_leaves_the_bound_source_prior_unbiased():
         f"marginal p(av_B) varies with the span: "
         f"{dict(zip([100.0 * q for q in q_bs], p_avb))}"
     )
+
+
+def test_log_normal_mass_matches_scipy_on_both_tails():
+    """
+    Given standardized truncation bounds on the upper tail, the lower tail
+    and straddling zero,
+    When _log_normal_mass evaluates log(Phi(beta) - Phi(alpha)),
+    Then it matches scipy to full double precision -- including the tails,
+    where a plain difference of Phi CDFs cancels away every digit.
+    """
+    # ARRANGE
+    import pytensor
+    from scipy.stats import norm
+
+    from exozippy.components.parameter import _log_normal_mass
+
+    a_t, b_t = pt.dscalar("a"), pt.dscalar("b")
+    fn = pytensor.function([a_t, b_t], _log_normal_mass(a_t, b_t))
+
+    cases = [
+        (-1.0, 2.0),  # straddling
+        (0.5, 3.0),  # upper tail
+        (-3.0, -0.5),  # lower tail
+        (6.0, 9.0),  # deep upper tail: Phi difference is 1e-9 of ~1
+        (-9.0, -6.0),  # deep lower tail
+    ]
+
+    # ACT / ASSERT.  The reference itself has to pick its tail: sf on the
+    # upper side, cdf on the lower.  (norm.sf(-9) - norm.sf(-6) is the naive
+    # spelling and is wrong in its 9th digit, which is the whole point of the
+    # branch selection under test.)
+    for a, b in cases:
+        expected = (
+            np.log(norm.sf(a) - norm.sf(b))
+            if a >= 0.0
+            else np.log(norm.cdf(b) - norm.cdf(a))
+        )
+        assert fn(a, b) == pytest.approx(expected, rel=1e-12), (a, b)
+
+
+def test_dynamic_bound_plus_sigma_leaves_the_bound_source_unbiased():
+    """
+    Given star.A.av = {lower: star.B.av} AND a Gaussian prior on av_A, so the
+    conditional prior on av_A is a TRUNCATED normal whose mass depends on
+    av_B,
+    When av_A is marginalized out by quadrature,
+    Then the implied marginal density of av_B is still flat.
+
+    Review 1.2.4: sections A/A2 add an unnormalized Gaussian on top of the
+    reparameterization's exact U(lo, up), so without the A3 correction the
+    marginal picks up the truncated mass Z(av_B)/span(av_B) -- a factor of
+    ~2.7 across the av_B values probed here, all of it spurious.
+    """
+    # ARRANGE
+    from scipy.stats import norm
+
+    mu, sigma = 1.0, 1.0
+    user_params = {
+        "star.A.av": {
+            "initval": 1.0,
+            "lower": "star.B.av",
+            "mu": mu,
+            "sigma": sigma,
+        },
+        "star.B.av": {"initval": 0.05},
+    }
+    cm, star, model = _build_star_param(user_params, ["av"])
+    assert any(
+        p.name.startswith("trunc_norm.star.av") for p in model.potentials
+    )
+    logp_c = model.compile_logp()
+    point = model.initial_point()
+    tf = star.av._raw_transform
+    c_a, s_a = tf["logit_q_inits"][0], tf["init_scale_logits"][0]
+
+    # Integrate av_A out on a grid in av_A itself: the Gaussian is 1 mag wide
+    # inside a ~100 mag span, so a uniform grid in q would barely resolve it.
+    # The measure is draw_a = dav_a / (span * s_a * q * (1 - q)).
+    av_bs = (0.05, 0.5, 1.0, 1.5)
+    p_avb = []
+    zs_over_span = []
+    for av_b in av_bs:
+        q_b = av_b / 100.0
+        raw_b = _raw_from_q(star.av, 1, q_b)
+        span = 100.0 - av_b
+        av_a = np.linspace(av_b + 1e-9, mu + 10.0 * sigma, 4001)
+        q_a = (av_a - av_b) / span
+        raw_a = (np.log(q_a / (1.0 - q_a)) - c_a) / s_a
+
+        def _logp(ra):
+            point["star.av_raw"] = np.array([ra, raw_b])
+            return float(logp_c(point))
+
+        dens = np.exp(np.array([_logp(ra) for ra in raw_a]))
+        marginal = np.trapezoid(dens / (span * s_a * q_a * (1.0 - q_a)), av_a)
+        p_avb.append(marginal / (q_b * (1.0 - q_b)))
+        zs_over_span.append(
+            (norm.sf((av_b - mu) / sigma) - norm.sf((100.0 - mu) / sigma))
+            / span
+        )
+
+    # ASSERT: flat in av_B ...
+    p_avb = np.array(p_avb)
+    assert np.allclose(p_avb, p_avb[0], rtol=1e-4), (
+        f"marginal p(av_B) varies with the truncated mass: "
+        f"{dict(zip(av_bs, p_avb))}"
+    )
+    # ... and the bias it would have carried is far larger than that
+    # tolerance, so this test really does discriminate.
+    zs_over_span = np.array(zs_over_span)
+    assert zs_over_span.max() / zs_over_span.min() > 2.0
 
 
 # ----------------------------------------------------------------------
@@ -523,3 +636,103 @@ def test_solve_does_not_inject_results_into_callers_params_dict():
 
     # ASSERT
     assert user_params == before
+
+
+# ---------------------------------------------------------------------------
+# An unknown function is a PARSE error  (review 1.1.2 / 7.1.1c)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("call", ["sqr(star.B.age)", "log10(star.B.age)"])
+def test_an_unknown_function_raises_at_parse_time(call):
+    """
+    Given a link expression calling a function nothing can build -- a typo
+      (`sqr`) or a name sympy does not define (`log10`),
+    When the ConfigManager parses the params entry,
+    Then it raises, naming the function and the supported set.
+
+    sympify turns any unknown name into an AppliedUndef, and the parser used
+    to validate only free SYMBOLS, so these sailed through.  Hard and soft
+    links then failed loudly in sympy_to_pytensor -- but a seed-only initval
+    link and a mu link never build a graph: they are consumed by
+    _apply_directed_links, whose float(expr.evalf()) can never evaluate an
+    undefined function and whose failure is logged as "not evaluable yet" at
+    DEBUG.  The seed silently never applied.
+    """
+    # ARRANGE
+    config = {"star": [{"name": "A"}, {"name": "B"}]}
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match="not a function link expressions"):
+        ConfigManager({"star.A.age": {"initval": call}}, system_config=config)
+
+
+def test_a_seed_only_link_is_covered_too():
+    """
+    Given the seed-only spelling (an initval link with NO sigma) carrying an
+      unknown function,
+    When the ConfigManager parses it,
+    Then it raises.
+
+    This is the spelling the old behavior failed silently on -- it is the
+    reason the check moved to parse time rather than being left to the
+    graph builder, so it is pinned separately from the hard/soft links.
+    """
+    # ARRANGE
+    config = {"star": [{"name": "A"}, {"name": "B"}]}
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match="not a function link expressions"):
+        ConfigManager(
+            {"star.A.age": {"initval": "sqr(star.B.age)"}},
+            system_config=config,
+        )
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "sqrt(star.B.age)",
+        "log(star.B.age)/log(10)",
+        "exp(star.B.age) + max(star.A.age, star.B.age)",
+    ],
+)
+def test_supported_functions_still_parse(expr):
+    """
+    Given expressions using the supported vocabulary (including sqrt, which
+      is a Pow rather than a Function, and the log(x)/log(10) spelling the
+      error message recommends),
+    When parse_link_expression runs,
+    Then it returns an expression naming the referenced parameters.
+
+    The new check rejects by absence from one table, so the assertion that
+    matters is that the table is not too small.
+    """
+    # ARRANGE
+    config = {"star": [{"name": "A"}, {"name": "B"}]}
+
+    # ACT
+    parsed, deps = parse_link_expression(expr, config)
+
+    # ASSERT
+    assert parsed is not None
+    assert deps and all(d.startswith("star.") for d in deps)
+
+
+def test_every_supported_function_can_be_built():
+    """
+    Given the table the parser validates against,
+    When sympy_to_pytensor builds each head,
+    Then every one of them resolves to a pytensor op.
+
+    The two used to be independent literals, and the drift they permitted
+    only ever failed silently (a function the parser accepted and the
+    builder could not build).  The builder now derives its map from the
+    parser's table; this pins that every name in it is real.
+    """
+    # ARRANGE
+    import pytensor.tensor as pt
+
+    # ACT / ASSERT
+    for head, attr in _SUPPORTED_FUNCS.items():
+        assert hasattr(pt, attr), f"{head} -> pt.{attr}"

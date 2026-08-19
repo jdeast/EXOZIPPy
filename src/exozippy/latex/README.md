@@ -1,6 +1,7 @@
 # LaTeX package data shipped with EXOZIPPy
 
-Everything here is copied next to every generated `<prefix>_paper.tex`
+`aastex701.cls`, `aasjournalv7.bst` and `references.bib` are copied next to every
+generated `<prefix>_paper.tex`
 by `outputs/modeling.py`, making the output directory a self-contained
 LaTeX project: `pdflatex && bibtex && pdflatex && pdflatex` works on any
 machine with a bare TeX Live, whether or not AASTeX is installed.  This is
@@ -58,3 +59,23 @@ uncited entries are a gift to the user.  Add the entry for a new citation
 key in the same commit as the sentence that cites it --
 `tests/test_prose.py` cross-references every emitted key against this
 file.
+
+## `convention.tex`
+
+A drop-in `\section` for the EXOZIPPy microlensing paper, stating the sky
+frame, the origins, the parallax signs, the binary geometry (`s`, `q`,
+`alpha`) and the mappings onto the other common literature conventions.
+Not part of the generated output -- nothing copies it, and `modeling.py`
+does not know it exists -- but it lives here because it cites
+`references.bib` and compiles against the `aastex701.cls` in this same
+directory with no copying.  It needs one preamble line the generated paper
+does not (`\usepackage{tikz}`, for its one figure); its header comment says
+so.
+
+It is the paper-facing half of a pair.  The normative half is
+`src/exozippy/components/mulensing/conventions.md`, which carries the same
+numbered claims `C1`-`C23` and names, for each, the source file that
+implements it and the test that pins it.  A `C`-number must mean the same
+thing in both files; keep edits to them in one commit.  Note that
+`tests/test_prose.py`'s cite-key cross-reference scans `*.py` only, so the
+keys in this `.tex` are checked by compiling it, not by the suite.

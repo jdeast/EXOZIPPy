@@ -44,8 +44,11 @@ from exozippy.trace_meta import (
     DIRTY_ATTR,
     HASH_ATTR,
     PAYLOAD_ATTR,
+    POSTERIOR_UNITS,
+    UNITS_ATTR,
     VERSION_ATTR,
     StaleTraceError,
+    check_posterior_units,
     check_trace_freshness,
     code_provenance,
     describe_trace_provenance,
@@ -264,6 +267,119 @@ def test_trace_without_a_fingerprint_is_unverifiable_not_stale(caplog):
     assert "UNVERIFIABLE TRACE" in text
     assert "STALE TRACE" not in text
     assert "old_trace.nc" in text
+
+
+# ---------------------------------------------------------------------------
+# Posterior units (review 2.3.4): the save path converts to user units, so a
+# trace predating that conversion holds internal-unit draws that nothing
+# downstream could detect.  Stamp it; warn on absence; never convert.
+# ---------------------------------------------------------------------------
+
+
+def test_stamp_records_the_posterior_unit_system():
+    """
+    Given a trace about to be written,
+    When the structural metadata is stamped,
+    Then the posterior's unit system is recorded alongside the fingerprint.
+    """
+    idata = _idata()
+
+    stamp_structural_metadata(idata, _FakeSystem(_CONFIG, _PARAMS))
+
+    assert idata.attrs[UNITS_ATTR] == POSTERIOR_UNITS
+
+
+def test_a_stamped_trace_reloads_without_a_units_warning(caplog):
+    """
+    Given a trace this code stamped,
+    When it is reloaded,
+    Then nothing is said about units -- the check is inert on a good trace.
+    """
+    system = _FakeSystem(_CONFIG, _PARAMS)
+    idata = _idata()
+    stamp_structural_metadata(idata, system)
+
+    with caplog.at_level(logging.WARNING, logger="exozippy.trace_meta"):
+        assert check_trace_freshness(idata, system, "t.nc") == "match"
+
+    assert "POSTERIOR UNITS" not in caplog.text
+
+
+def test_a_trace_without_a_units_stamp_warns_and_still_loads(caplog):
+    """
+    Given a trace written before the stamp existed,
+    When its units are checked,
+    Then it warns that the draws may be in INTERNAL units and says how to
+      fix it -- and does not raise, and does not convert.
+
+    Warn rather than raise, because this is the trace_meta unverifiable
+    case rather than a detected mismatch: the posterior conversion is older
+    than the stamp, so only a genuinely pre-2026 trace is affected and
+    refusing them all would invalidate working traces to catch a shrinking
+    population.
+    """
+    with caplog.at_level(logging.WARNING, logger="exozippy.trace_meta"):
+        result = check_posterior_units({}, "old_trace.nc")
+
+    assert result == "unverifiable"
+    assert "UNVERIFIABLE POSTERIOR UNITS" in caplog.text
+    assert "old_trace.nc" in caplog.text
+    assert "recompute_trace: true" in caplog.text
+
+
+def test_an_unrecognized_units_stamp_warns_by_name(caplog):
+    """
+    Given a trace declaring a unit system this code does not know,
+    When its units are checked,
+    Then the warning names it and says every value may be off by a
+      conversion factor.
+    """
+    with caplog.at_level(logging.WARNING, logger="exozippy.trace_meta"):
+        result = check_posterior_units({UNITS_ATTR: "internal"}, "t.nc")
+
+    assert result == "unknown"
+    assert "UNKNOWN POSTERIOR UNITS" in caplog.text
+    assert "internal" in caplog.text
+
+
+def test_the_units_check_never_raises_and_never_touches_the_draws():
+    """
+    Given a trace with an unknown units stamp,
+    When it is reloaded against a matching model,
+    Then the reload still succeeds and the posterior is untouched.
+
+    Converting on a guess would corrupt every trace already in user units --
+    nearly all of them -- and the numbers give no way to tell the two apart
+    (radians against degrees, solar against jupiter masses are all
+    plausible), which is exactly why the stamp had to exist.
+    """
+    system = _FakeSystem(_CONFIG, _PARAMS)
+    idata = _idata()
+    stamp_structural_metadata(idata, system)
+    idata.attrs[UNITS_ATTR] = "something-else"
+    before = idata.posterior["star.mass_raw"].values.copy()
+
+    assert check_trace_freshness(idata, system, "t.nc") == "match"
+
+    np.testing.assert_array_equal(
+        idata.posterior["star.mass_raw"].values, before
+    )
+
+
+def test_the_units_stamp_survives_a_netcdf_round_trip(tmp_path):
+    """
+    Given a stamped trace written to disk,
+    When it is read back,
+    Then the units stamp is still there -- a root attr netCDF preserves.
+    """
+    idata = _idata()
+    stamp_structural_metadata(idata, _FakeSystem(_CONFIG, _PARAMS))
+    path = tmp_path / "trace.nc"
+    idata.to_netcdf(str(path))
+
+    reloaded = az.from_netcdf(str(path))
+
+    assert reloaded.attrs[UNITS_ATTR] == POSTERIOR_UNITS
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +638,7 @@ def test_fingerprint_survives_component_config_normalization():
     afterwards. Every kelt4-style fit would then have refused to write its
     own restart file. Verified against
     examples/kelt4/kelt4_rv+transit+sed.yaml, whose config is mutated in
-    exactly three places, all inside System.__init__ -- stages 1-6 mutate it
+    exactly three places, all inside System.__init__ -- stages 1-7 mutate it
     zero times.
     """
     config = copy.deepcopy(_RELATION_CONFIG)

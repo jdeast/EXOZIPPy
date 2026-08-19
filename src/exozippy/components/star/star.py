@@ -6,6 +6,7 @@ import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.components.parameter import sampled_bounds
+from exozippy.components.parameterization import merge_overrides
 from exozippy.constants import (
     FFP_MASS_FUNCTION_MIN_MEARTH,
     FFP_MASS_FUNCTION_SLOPE,
@@ -155,7 +156,7 @@ class Star(Component):
         """Read each star's ``mass_function:`` key into per-star arrays.
 
         Sets three parallel, ``n_elements``-long attributes that the
-        galacticmodel reads at stage 6:
+        galacticmodel reads at stage 7:
 
           ``mass_functions`` -- "imf" or "ffp", one per star
           ``ffp_mask``       -- the same thing as a boolean array
@@ -487,7 +488,7 @@ class Star(Component):
         return {"overrides": {"lower": floors.tolist()}}
 
     def register_parameters(self, system):
-        """Stage 2: Declare the manifest and push to ConfigManager."""
+        """Stage 3: Declare the manifest and push to ConfigManager."""
 
         # 1. Get the stellar parameters we always want.  logmass may carry a
         # power-law-IMF floor (None otherwise, i.e. a plain free parameter).
@@ -663,14 +664,19 @@ class Star(Component):
                 idx_list = sorted(ml_source_idx - skip_idx)
                 if not idx_list or param_name not in self.manifest:
                     return
-                entry = self.manifest[param_name]
-                entry = dict(entry) if isinstance(entry, dict) else {}
                 pin = np.full(self.n_elements, np.nan)
                 pin[idx_list] = 0.0
-                overrides = dict(entry.get("overrides", {}))
-                overrides["sigma"] = pin.tolist()
-                entry["overrides"] = overrides
-                self.manifest[param_name] = entry
+                # merge_overrides, not a hand-written
+                # `dict(entry) if isinstance(entry, dict) else {}`: that
+                # spelling reads the manifest vocabulary as a writer and
+                # silently DROPS a bare-string expr_key, turning a derived
+                # parameter into a sampled one with no message (review
+                # 4.5.3, the same defect Band's autopin carried).  Latent
+                # here -- none of the six parameters below is a bare string
+                # today -- and unrepresentable now.
+                self.manifest[param_name] = merge_overrides(
+                    self.manifest[param_name], {"sigma": pin.tolist()}
+                )
 
             _pin_sigma("logmass", relation_idx)
             _pin_sigma("teff", relation_idx | sed_idx)
@@ -762,7 +768,7 @@ class Star(Component):
         )
 
     def build_likelihood(self, model, system):
-        """Stage 6: the constant-space-density (volume) prior on distance.
+        """Stage 7: the constant-space-density (volume) prior on distance.
 
         A bounded element with no sigma is sampled UNIFORM in its own
         coordinate -- parameter.py's logit transform implies exactly

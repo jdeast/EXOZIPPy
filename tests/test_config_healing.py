@@ -1,4 +1,6 @@
 # tests/test_config_healing.py
+import logging
+
 import numpy as np
 import pytest
 
@@ -102,3 +104,122 @@ def test_symbolic_time_limit_still_arms_where_sigalrm_exists():
     with pytest.raises(cfg.SymbolicTimeout):
         with cfg._sympy_time_limit(1):
             time.sleep(5)
+
+
+def test_a_symbolic_solve_restores_the_previous_sigalrm_handler():
+    """
+    Given a process-wide SIGALRM handler installed by unrelated code,
+    When a relaxation solve runs (which arms its own 2-second symbolic
+      timeout),
+    Then the previous handler is back in place afterwards.
+
+    _execute_solve used to arm SIGALRM by hand and drop the handler
+    _arm_alarm returned, so from the first symbolic solve onwards the process
+    handler WAS its local TimeoutError-raiser -- and any later code arming
+    SIGALRM got "Symbolic solver timed out!" raised at it out of a frame that
+    has nothing to do with sympy.  It now uses the _sympy_time_limit context
+    manager, which restores in its finally.
+    """
+    # ARRANGE
+    import signal
+
+    if not hasattr(signal, "SIGALRM"):  # pragma: no cover - POSIX only
+        pytest.skip("no SIGALRM on this platform")
+
+    def sentinel(signum, frame):  # pragma: no cover - never fires
+        pass
+
+    config = {"star": [{"name": "A"}]}
+    user_params = {
+        "star.A.mass": {"initval": 1.0},
+        "star.A.radius": {"initval": 1.0},
+    }
+    previous = signal.signal(signal.SIGALRM, sentinel)
+
+    # ACT
+    try:
+        cm = ConfigManager(user_params, system_config=config)
+        cm.finalize_user_params()
+        after = signal.getsignal(signal.SIGALRM)
+    finally:
+        signal.signal(signal.SIGALRM, previous)
+
+    # ASSERT
+    assert after is sentinel
+
+
+def test_a_repeated_symbolic_inversion_is_memoized(monkeypatch):
+    """
+    Given a ConfigManager that has already solved a set of relations,
+    When the relaxation engine runs again on the same manager,
+    Then sp.solve is not called a second time for the same (equation, target).
+
+    sp.solve is a pure function of the equation and the target -- it never
+    sees the resolved values -- but the engine relaxes to a fixed point, once
+    per seed, and again inside every probe_derivable snapshot, so the same
+    inversion was recomputed many times per prepare().  The only reuse before
+    this was the timeout blacklist: we remembered the failures and forgot the
+    successes.
+    """
+    # ARRANGE
+    import exozippy.config as cfg
+
+    calls = []
+    real_solve = cfg.sp.solve
+
+    def counting(*args, **kwargs):
+        calls.append(args[:2])
+        return real_solve(*args, **kwargs)
+
+    monkeypatch.setattr(cfg.sp, "solve", counting)
+    cm = ConfigManager(
+        {
+            "star.A.mass": {"initval": 1.0},
+            "star.A.radius": {"initval": 1.0},
+        },
+        system_config={"star": [{"name": "A"}]},
+    )
+
+    # ACT
+    cm.finalize_user_params()
+    first_pass = len(calls)
+    cm.finalize_user_params()
+    second_pass = len(calls) - first_pass
+
+    # ASSERT
+    assert first_pass > 0, "expected the engine to invert something"
+    assert second_pass == 0
+    assert len(cm._symbolic_solve_cache) == first_pass
+
+
+def test_the_substituted_debug_line_is_not_built_below_debug(caplog):
+    """
+    Given a solve running at INFO,
+    When the engine reaches its "Substituted:" diagnostic,
+    Then the line is not emitted -- and at DEBUG it still is.
+
+    The block walks every free symbol and runs a re.sub per resolved one
+    before handing the result to logger.debug, which then discarded it at
+    every level anybody runs a fit at.  The assertion is on the record rather
+    than on the timing, since what the gate protects is the work behind it.
+    """
+    # ARRANGE
+    user_params = {
+        "star.A.mass": {"initval": 1.0},
+        "star.A.radius": {"initval": 1.0},
+    }
+    config = {"star": [{"name": "A"}]}
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.config"):
+        ConfigManager(dict(user_params), config).finalize_user_params()
+    at_info = [r for r in caplog.records if "Substituted:" in r.getMessage()]
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="exozippy.config"):
+        ConfigManager(dict(user_params), config).finalize_user_params()
+    at_debug = [r for r in caplog.records if "Substituted:" in r.getMessage()]
+
+    # ASSERT
+    assert at_info == []
+    assert at_debug

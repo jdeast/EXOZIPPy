@@ -166,3 +166,51 @@ def test_everything_flat_skips_with_a_warning(tmp_path, caplog):
     assert "nothing left to plot" in " ".join(
         r.getMessage() for r in caplog.records
     )
+
+
+def test_column_with_sub_bin_range_is_dropped_and_named(healthy, caplog):
+    """
+    Given a column that is not exactly constant but spans only a few float64
+      steps (a short or stopped run whose chain moved in the last bits only),
+    When the drop pass runs,
+    Then it is dropped and named just like an exactly constant one -- corner
+      builds its panels from a linspace bin grid over the column's raw
+      min/max, and over such a range that grid collapses onto repeated
+      edges, so the panel is either a raise or a full-width spike that reads
+      as a measured posterior.
+    """
+    # ARRANGE
+    samples, labels = healthy
+    base = 1.0
+    rng = np.random.default_rng(5)
+    samples[:, 1] = base + rng.integers(0, 6, size=200) * np.spacing(base)
+    assert samples[:, 1].min() != samples[:, 1].max()
+
+    # ACT
+    with caplog.at_level("WARNING", logger="exozippy.corner_utils"):
+        out, out_labels = _drop_undrawable(samples, labels, "f.png")
+
+    # ASSERT
+    assert out_labels == ["x", "z"]
+    assert out.shape == (200, 2)
+    assert "y" in " ".join(r.getMessage() for r in caplog.records)
+
+
+def test_a_genuinely_narrow_but_drawable_column_is_kept(healthy):
+    """
+    Given a column whose spread is tiny in absolute terms but still spans far
+      more than the bin grid's float64 steps,
+    When the drop pass runs,
+    Then it is kept -- the test is on representability, not on smallness, so
+      a well-measured parameter with a 1e-12 posterior width still plots.
+    """
+    # ARRANGE
+    samples, labels = healthy
+    samples[:, 1] = 1.0 + samples[:, 1] * 1e-12
+
+    # ACT
+    out, out_labels = _drop_undrawable(samples, labels, "f.png")
+
+    # ASSERT
+    assert out_labels == labels
+    assert out.shape == (200, 3)

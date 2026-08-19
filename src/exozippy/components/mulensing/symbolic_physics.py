@@ -148,7 +148,7 @@ RELATIONS = [
     # Einstein Time (mu in mas/yr -> t_E in days).  SEEDING APPROXIMATION:
     # the runtime graph derives t_E from mu_rel_GEO (= mu_rel_helio -
     # pi_rel * v_earth_perp(t0_par)/AU, Gould 2004), but t0_par and Earth's
-    # velocity are resolved at stage 1a -- after these relations are
+    # velocity are resolved at stage 1 -- after these relations are
     # constructed -- so the engine seeds through the heliocentric value.
     # Starts land a few percent off for large-pi_rel events; the samplers
     # absorb that.  (MMEXOFAST t_E seeds are geocentric, so the back-solved

@@ -403,7 +403,7 @@ def test_engine_injected_index_entry_is_not_a_second_spelling():
 
     The check reads the keys the USER wrote, not the live user_params dict.
     examples/ob161003 ends every prepare() in exactly this state, so reading
-    the dict would fail the fit at stage 5.
+    the dict would fail the fit at stage 6.
     """
     # ARRANGE
     cm = _canonical_cm({"star.A.distance": {"initval": 9.0}})
@@ -414,3 +414,139 @@ def test_engine_injected_index_entry_is_not_a_second_spelling():
 
     # ASSERT
     assert np.isclose(cfg["initval"][0], 9.0)
+
+
+# ---------------------------------------------------------------------------
+# A broadcast key must cover the WHOLE vector  (review 1.1.1 / 7.1.1a)
+# ---------------------------------------------------------------------------
+
+# One config entry, per-source parameter vectors -- the examples/ob161003
+# shape, reduced to what ConfigManager needs (it never builds components).
+TWO_SOURCE_SYSTEM = {
+    "star": [{"name": "Lens"}, {"name": "SourceA"}, {"name": "SourceB"}],
+    "lens": [
+        {
+            "name": "Lens",
+            "lenses": ["star.0"],
+            "sources": ["star.1", "star.2"],
+        }
+    ],
+}
+
+
+def test_broadcast_shorter_than_the_vector_raises():
+    """
+    Given a 2-part broadcast `lens.t_0` on a system whose lens has ONE config
+      entry but TWO sources, so the parameter has two elements,
+    When resolve() is asked for the full vector,
+    Then it raises, naming the per-element spellings that do work.
+
+    standardize_param_names expands a broadcast key by the CONFIG LIST length
+    -- all it can see, running before any manifest exists -- so `lens.t_0`
+    became `lens.0.t_0` alone and element 1 fell back to the defaults.yaml
+    backstop with no message.  Not a start-value-only defect: the same
+    expansion carries `sigma`/`mu`/`lower`, i.e. the PRIOR reached one source
+    and not the other, which is a silent posterior change on a 2S2L fit.
+    """
+    # ARRANGE
+    cm = ConfigManager(
+        {"lens.t_0": 2450000.0}, system_config=TWO_SOURCE_SYSTEM
+    )
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match="BROADCAST KEY DOES NOT COVER"):
+        cm.resolve("lens", "t_0", shape=(2,), names=["SourceA", "SourceB"])
+
+
+def test_the_error_names_the_per_element_spellings():
+    """
+    Given the same under-covering broadcast, resolved with per-element names,
+    When the error is raised,
+    Then it quotes the name-form spelling of every element.
+
+    The fix is a raise, so the message IS the feature: a user who wrote one
+    line has to be told which lines to write instead, in the spelling their
+    own config supports (ob161003 addresses these by the source star's name).
+    """
+    # ARRANGE
+    cm = ConfigManager(
+        {"lens.t_0": 2450000.0}, system_config=TWO_SOURCE_SYSTEM
+    )
+
+    # ACT
+    with pytest.raises(ValueError) as excinfo:
+        cm.resolve("lens", "t_0", shape=(2,), names=["SourceA", "SourceB"])
+
+    # ASSERT
+    assert "lens.SourceA.t_0" in str(excinfo.value)
+    assert "lens.SourceB.t_0" in str(excinfo.value)
+
+
+def test_broadcast_longer_than_the_vector_raises():
+    """
+    Given two RV instruments sharing ONE detrend column between them, so
+      `detrend_coeffs` has one element while the config list has two,
+    When resolve() is asked for the vector,
+    Then it raises.
+
+    The defect is bidirectional and this is the other side: Pass 2 writes
+    indexed keys for elements that do not exist.  `detrend_coeffs` is the
+    live surface (its shape is a column count, not an instrument count), and
+    it is a second reason the fix cannot be "fill the missing elements" --
+    there is nothing to fill.
+    """
+    # ARRANGE
+    cm = ConfigManager(
+        {"rvinstrument.detrend_coeffs": 0.1},
+        system_config={"rvinstrument": [{"name": "A"}, {"name": "B"}]},
+    )
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match="BROADCAST KEY DOES NOT COVER"):
+        cm.resolve("rvinstrument", "detrend_coeffs", shape=(1,))
+
+
+def test_a_matching_broadcast_is_untouched():
+    """
+    Given the ordinary case -- one config entry per element,
+    When resolve() runs,
+    Then the broadcast covers every element and nothing raises.
+
+    The check is a length comparison, so this is the assertion that it costs
+    the shipped configs nothing: every example that broadcasts (`star.teff`,
+    `rvinstrument.gamma`, ...) is this case.
+    """
+    # ARRANGE
+    cm = ConfigManager(
+        {"star.distance": {"initval": 100.0}}, system_config=SYSTEM
+    )
+
+    # ACT
+    cfg = cm.resolve("star", "distance", shape=(2,), names=["A", "B"])
+
+    # ASSERT
+    assert np.allclose(cfg["initval"], 100.0)
+
+
+def test_single_element_resolution_is_not_checked():
+    """
+    Given a broadcast key and a resolve() for ONE element of a longer vector,
+    When resolve() runs with shape=() and element=1,
+    Then it does not raise.
+
+    `shape=()` with `element=` is how the relaxation engine and
+    Instrument._time_coord read one element at a time; n_elements is 1 there
+    by construction, so comparing it against the config-list length would
+    reject every ordinary broadcast on a multi-instance component.  Only an
+    explicit vector shape states the parameter's real length.
+    """
+    # ARRANGE
+    cm = ConfigManager(
+        {"star.distance": {"initval": 100.0}}, system_config=SYSTEM
+    )
+
+    # ACT
+    cfg = cm.resolve("star", "distance", shape=(), element=1)
+
+    # ASSERT
+    assert np.isclose(cfg["initval"][0], 100.0)

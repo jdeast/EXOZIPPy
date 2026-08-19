@@ -3,7 +3,7 @@
 The Tune tab implements a hybrid interaction model:
 
   * The user presses "Solve".  A worker runs G3 ``solve()`` (the relaxation
-    engine, stages 1-3) then G5 ``compile_evaluator()`` (build the PyMC model
+    engine, stages 1-4) then G5 ``compile_evaluator()`` (build the PyMC model
     and compile the plot predictors).  This is a seconds-scale step.
   * The app then enters LIVE mode: dragging a parameter slider posts a value,
     the evaluator inverts it to a raw point and re-renders every affected
@@ -180,6 +180,7 @@ def _do_solve(state, msg, resp_q):
         export = system.config_manager.export_solution(
             derived_params=system.derived_elements(),
             active_elements=system.active_elements(),
+            manifest_overrides=system.manifest_overrides(),
         )
         # Relaxation done; the seconds-scale compile begins now. Ship the
         # data-only plots along so the GUI has something to draw meanwhile.

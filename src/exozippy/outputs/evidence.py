@@ -470,8 +470,18 @@ def _ev_eval_block(args):
 def _build_layout(model, idata):
     """Column layout of the concatenated free-RV raw vector.
 
-    Returns (layout, D) where layout is a list of
-    (rv_name, value_name, start, size, shape) and D is the total dimension.
+    Returns (layout, D, skipped) where layout is a list of
+    (rv_name, value_name, start, size, shape), D is the total dimension, and
+    ``skipped`` names the free RVs that could not be laid out at all.
+
+    A skipped RV is a LAYOUT/TRACE MISMATCH, and it has to be reported as
+    one.  The model's logp still needs a value for it, so every evaluation
+    of every draw comes back non-finite, and the mode is then refused as
+    EV_INVALID_POSTERIOR -- whose whole argument ("a draw the sampler
+    produced cannot have zero target density, so these are failed
+    evaluations") indicts the draws, when the draws are fine and the trace
+    simply does not carry one of the model's variables.  The caller names
+    them in the warning, in the refusal reason and in the status dict.
     rv_name indexes idata.posterior; value_name is the logp_fn input key.
 
     ``size`` comes from the trace (it is just an element count) but ``shape``
@@ -486,11 +496,13 @@ def _build_layout(model, idata):
     refused for a reason that is not the real one.
     """
     layout = []
+    skipped = []
     start = 0
     post = idata.posterior
     for rv in model.free_RVs:
         vv = model.rvs_to_values.get(rv)
         if vv is None or rv.name not in post.data_vars:
+            skipped.append(rv.name)
             continue
         trace_shape = tuple(post[rv.name].shape[2:])
         size = int(np.prod(trace_shape)) if trace_shape else 1
@@ -510,7 +522,7 @@ def _build_layout(model, idata):
             )
         layout.append((rv.name, vv.name, start, size, shape))
         start += size
-    return layout, start
+    return layout, start, skipped
 
 
 def _posterior_matrix(idata, layout, D):
@@ -667,7 +679,30 @@ def estimate_mode_evidences(
     rng = np.random.default_rng(seed)
     results = []
 
-    layout, D = _build_layout(model, idata)
+    layout, D, skipped_rvs = _build_layout(model, idata)
+    # Named here, once, before anything is evaluated: a free RV the trace
+    # does not carry makes EVERY logp evaluation non-finite, and the refusal
+    # that follows blames the draws.  See _build_layout.
+    if skipped_rvs:
+        logger.warning(
+            "evidence: %d of the model's free variables are absent from the "
+            "posterior and were left out of the bridge layout (%s). The "
+            "model logp still needs them, so every draw will re-evaluate to "
+            "a non-finite logp -- this is a layout/trace mismatch, not bad "
+            "draws.",
+            len(skipped_rvs),
+            ", ".join(skipped_rvs),
+        )
+    skipped_note = (
+        ""
+        if not skipped_rvs
+        else (
+            f"; NOTE {len(skipped_rvs)} free variable(s) absent from the "
+            f"posterior were omitted from the bridge layout "
+            f"({', '.join(skipped_rvs)}), which alone makes every "
+            f"evaluation non-finite"
+        )
+    )
     if D == 0:
         logger.warning(
             "estimate_mode_evidences: no free RVs match the "
@@ -683,8 +718,12 @@ def estimate_mode_evidences(
                     0,
                     0,
                     True,
-                    "no usable free RVs",
-                    {"state": EV_NO_FREE_RVS},
+                    "no usable free RVs" + skipped_note,
+                    {
+                        "state": EV_NO_FREE_RVS,
+                        "skipped_rvs": list(skipped_rvs),
+                        "n_skipped_rvs": len(skipped_rvs),
+                    },
                 )
             )
         return results
@@ -748,7 +787,10 @@ def estimate_mode_evidences(
         l1 = logp1 - logq1
         l2 = logp2 - logq2
 
-        status = {}
+        status = {
+            "skipped_rvs": list(skipped_rvs),
+            "n_skipped_rvs": len(skipped_rvs),
+        }
         lnZ, lnZ_err, re2, converged = bridge_lnZ(
             l1, l2, l1_chains=chain_lengths, status=status
         )
@@ -780,6 +822,7 @@ def estimate_mode_evidences(
                 f"above the {unsupported_max:.0%} limit; a draw the sampler "
                 f"produced cannot have zero target density, so these are "
                 f"failed evaluations and the mode's draws cannot be trusted"
+                + skipped_note
             )
         elif frac_unsup > unsupported_max:
             refused = True

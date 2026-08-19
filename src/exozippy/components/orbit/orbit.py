@@ -312,7 +312,7 @@ class Orbit(Component):
     def _parse_inc_parameterization(self, system=None):
         """Read `fitchord:` into per-orbit mode names.
 
-        Called from register_parameters (stage 2) rather than __init__,
+        Called from register_parameters (stage 3) rather than __init__,
         because both questions it asks are about topology -- whether the orbit
         has a single planet, and whether the system has any transit data --
         and neither is answerable before the components exist.
@@ -530,6 +530,25 @@ class Orbit(Component):
                 ),
             },
             {
+                # Read by Transit/RVInstrument through
+                # components/globalsearch.search_mode; it lives on the orbit
+                # block because that is the thing being seeded, exactly as
+                # 'mmexofast:' lives on the lens block.  The orbit component
+                # itself never reads it.
+                "key": "global_search",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Blind period search (BLS on transit photometry, "
+                    "Lomb-Scargle on radial velocities) to seed this orbit's "
+                    "period and conjunction time. Default: run it only when "
+                    "the relaxation engine cannot derive them from the params "
+                    "file. true forces it; false opts out. Single-orbit "
+                    "systems only -- a periodogram peak names no orbit."
+                ),
+            },
+            {
                 "key": "fitvcve",
                 "kind": "option",
                 "accepts": [False],
@@ -568,7 +587,7 @@ class Orbit(Component):
         return out
 
     def build_maps(self):
-        """Stage 1b: 0/1 weight matrices mapping body masses into groups.
+        """Stage 2: 0/1 weight matrices mapping body masses into groups.
 
         _group_w[side][comp_type] is an (n_orbits, n_<comp_type>) float
         matrix; the group mass is its product with the component's mass
@@ -609,7 +628,7 @@ class Orbit(Component):
     def _resolve_initval(self, name, shape):
         """This orbit's stage-2 initval for ``name``, NaN where unseeded.
 
-        Stage 2 runs BEFORE the relaxation engine, so this sees only what
+        Stage 3 runs BEFORE the relaxation engine, so this sees only what
         the user wrote (plus component hints and defaults.yaml) -- nothing
         the engine will later derive.  Values are in the parameter's own
         user unit; the caller converts.
@@ -626,7 +645,7 @@ class Orbit(Component):
         """The per-orbit period in days implied by the stage-2 seeds.
 
         BOTH spellings are legal in a params file, and the relaxation
-        engine (stage 3) is what normally reconciles them -- but it has not
+        engine (stage 4) is what normally reconciles them -- but it has not
         run yet, so a user-supplied ``period:`` has NOT been propagated
         into ``logP``.  Reading ``logP`` alone therefore returns its
         defaults.yaml initval (1.0 -> 10 d) for every fit that seeds
@@ -642,7 +661,7 @@ class Orbit(Component):
         return np.where(np.isnan(period_user), 10.0**logP, period_user)
 
     def register_parameters(self, system):
-        """Stage 2: Calculate window constraints and declare the manifest."""
+        """Stage 3: Calculate window constraints and declare the manifest."""
         shape = (self.n_elements,)
 
         # 1. Peer into the config (Pre-flight windows)
@@ -671,7 +690,7 @@ class Orbit(Component):
         # decides, because the transit-only default is a question about the
         # data topology and __init__ cannot see it.  (It is also a re-read for
         # the older reason: `fitvcve` is a plain attribute anyone could set
-        # between construction and stage 2.)
+        # between construction and stage 3.)
         self._parse_ecc_parameterization(system)
         self._reject_wip_parameterizations()
         self._log_parameterization_choices(system)
@@ -856,7 +875,7 @@ class Orbit(Component):
             r"$[0^\circ, 180^\circ]$ to select one mode."
         )
 
-        # NOTE: this runs at stage 2, BEFORE the relaxation engine, so only
+        # NOTE: this runs at stage 3, BEFORE the relaxation engine, so only
         # user-provided initvals (and defaults) are visible here.  The x/y
         # direction vector is therefore derived directly from the user's
         # bigomega initval; the manifest initvals set below override the
@@ -1059,7 +1078,7 @@ class Orbit(Component):
 
         ctx = {"chord_sign": pt.as_tensor_variable(sign)}
         # Stashed for _add_chord_terms, which needs the same two vectors to
-        # build the Jacobian and the geometry bound at stage 6 and must not
+        # build the Jacobian and the geometry bound at stage 7 and must not
         # build a SECOND copy of them: the barrier has to restrain the very
         # node the model was built from.
         self._chord_geometry = ctx
@@ -1080,7 +1099,7 @@ class Orbit(Component):
         return ctx
 
     def finalize_reported(self, model, system, context_nodes=None):
-        """Stage 6b, with the planet geometry the reported `chord` needs.
+        """The deferred pass after stage 7, with the planet geometry the reported `chord` needs.
 
         `System.build_model` calls this with no context nodes -- it cannot
         know what a component's deferred expressions consume -- so the orbit

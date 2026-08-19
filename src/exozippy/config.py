@@ -265,6 +265,98 @@ def _reject_renamed_arsun(user_params):
                     )
 
 
+def _reject_list_valued_fields(user_params, source=None):
+    """Raise on a list in a numeric field that has no per-seed meaning.
+
+    A LIST means exactly one thing in a params file: per-seed start values for
+    the multi-seed sampler, which is an ``initval`` concept only -- seeds move
+    the START, never the bounds or the prior (``_build_seed_overrides`` reads
+    initval lists and nothing else).  Everywhere else a list is a
+    misunderstanding, most often "one value per element", which is spelled
+    with one KEY per element (``star.0.teff`` / ``star.A.teff``), not with a
+    list.
+
+    It used to crash instead of explaining: the numeric loop in ``resolve()``
+    tolerates lists by taking element 0 (the per-seed convention), so a
+    ``{sigma: [10, 20]}`` sailed past the sigma application and died several
+    frames later in ``apply_value``'s ``float(list)`` -- a bare TypeError
+    naming no parameter, no field and no file.  Checked on the raw params,
+    before standardization, so the message quotes the user's own spelling.
+
+    ``init_scale`` is deliberately exempt: it is stripped with a warning a few
+    lines later (it is no longer user-facing), and pre-2026-07 restart files
+    name it, so turning an inert entry into a fatal one would break files that
+    work today.
+    """
+    where = f" in {source}" if source else ""
+    for key, spec in (user_params or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        for fld in PHYSICS_KEYS:
+            val = spec.get(fld)
+            if isinstance(val, (list, tuple)):
+                parts = str(key).split(".")
+                per_element = f"{parts[0]}.<instance>.{parts[-1]}"
+                raise ValueError(
+                    f"\n!!! LIST IN A NON-SEED FIELD !!!\n"
+                    f"'{key}'{where} sets {fld}: {list(val)}.  A list is "
+                    f"per-SEED start values, which only 'initval' takes -- "
+                    f"seeds move the start, never the bounds or the prior.\n"
+                    f"For one value per element, write one entry per element "
+                    f"('{per_element}'); for one value everywhere, write the "
+                    f"number itself."
+                )
+
+
+def _reject_bare_string_values(user_params, source=None):
+    """Raise on a bare (non-dict) parameter value that is not a number.
+
+    A params entry may be a dict of fields, a number, or a list of numbers
+    (per-seed starts).  A bare STRING is none of those, and the two ways to
+    write one both used to crash without saying where:
+
+        star.A.teff: star.B.teff      # a link in the bare spelling
+        star.A.teff: "hot"            # any other typo
+
+    ``extract_links`` inspects dict entries only, so neither is recognized as
+    a link and both reach ``finalize_user_params``' bare ``float(val)`` --
+    a ValueError naming no parameter and no file.
+
+    A bare link is REFUSED rather than rewritten to ``{initval: ...}``, per
+    the house rule: we do not add special cases to rescue arbitrary user
+    syntax.  The bare spelling is also genuinely ambiguous about the thing
+    that matters most about a link -- with ``sigma: 0`` it is a hard link,
+    with a sigma a soft one, with neither a seed -- so guessing would pick a
+    model for the user.  The error names the dict spelling instead.
+    """
+    where = f" in {source}" if source else ""
+    for key, val in (user_params or {}).items():
+        if "." not in str(key) or not isinstance(val, str):
+            continue
+        try:
+            float(val)
+        except ValueError:
+            pass
+        else:
+            continue  # "5800" is a number that happens to be quoted
+        link_like = bool(re.search(r"[A-Za-z_]\w*\.[A-Za-z_]", val))
+        advice = (
+            f"To LINK it, write the field explicitly, and say which kind of "
+            f"link you mean:\n"
+            f"  {key}: {{initval: {val}, sigma: 0}}   # hard link (derived)\n"
+            f"  {key}: {{initval: {val}, sigma: 0.5}} # soft link (penalty)\n"
+            f"  {key}: {{initval: {val}}}             # seed only"
+            if link_like
+            else "A parameter entry is a number, a list of per-seed numbers, "
+            "or a dict of fields (initval, mu, sigma, lower, upper, unit)."
+        )
+        raise ValueError(
+            f"\n!!! NON-NUMERIC PARAMETER VALUE !!!\n"
+            f"'{key}'{where} is set to the bare string '{val}', which is not "
+            f"a number.\n{advice}"
+        )
+
+
 def validate_sigma_has_center(user_params, links=None, source=None):
     """Fatal-error check: a Gaussian prior must have an explicit center.
 
@@ -485,18 +577,33 @@ RANK_DERIVED_DATA = 60  # auto-estimated (e.g., K-band mass, RV offsets)
 RANK_DERIVED_MIXED = 40  # Solved using a mix of User and Defaults
 RANK_DEFAULT = 20  # From defaults.yaml
 
+# The two ranks BETWEEN default and derived-mixed, both microlensing distance
+# seeds and both load-bearing at exactly these values.  They lived as bare 25
+# and 30 literals in lens.py, documented only in config.md, so nothing tied
+# the two sites that must stay ordered to the sentence explaining why.  Name
+# them; do NOT change them.
+#
+# A microlensing lens sits at a few kpc, not at the 10 pc defaults.yaml
+# backstop, so the seed must beat RANK_DEFAULT.  It must also LOSE to the
+# source-distance seed, because that is what breaks the d_L <-> parallax
+# cycle: pi_rel drives d_L to RANK_MULENS_SOURCE_DISTANCE through the engine's
+# Condition B, and the parallax is then corrected as the weaker symbol.  Both
+# yield to anything the user writes.
+RANK_MULENS_LENS_DISTANCE = 25  # ~4 kpc lens seed; beats the 10 pc default
+RANK_MULENS_SOURCE_DISTANCE = 30  # ~8 kpc bulge source; beats the lens seed
 
-class ProvenanceState:
-    def __init__(self):
-        self.values = {}
-        self.ranks = {}
-
-    def set(self, path, value, rank):
-        if rank > self.ranks.get(path, 0):
-            self.values[path] = value
-            self.ranks[path] = rank
-            return True
-        return False
+# Which ranks mean "a component pushed this from the DATA", as opposed to
+# "the relaxation engine derived it".  A SET and not a numeric band, because
+# the two data ranks do not bracket a contiguous range: RANK_DERIVED_MIXED
+# (40) sits between them and RANK_DERIVED_USER (80) sits above them, and both
+# are solver ranks.  So the obvious `>= 30 and < RANK_USER` test would report
+# every engine-derived value as data-derived -- the mirror of the bug this
+# replaces, which hardcoded the two literals and so reported any NEW data
+# rank as "solved".  Add a rank here in the same commit that introduces it.
+# RANK_MULENS_LENS_DISTANCE (25) is deliberately NOT here: that is the
+# historical behavior, and whether those seeds should report as data at all
+# is review item 3.14.6, which also has to weigh their PRECEDENCE.
+DATA_RANKS = frozenset({RANK_DERIVED_DATA, RANK_MULENS_SOURCE_DISTANCE})
 
 
 """ 
@@ -599,6 +706,8 @@ class ConfigManager:
         self.standalone_solvers = set()
 
         _reject_renamed_arsun(user_params)
+        _reject_list_valued_fields(user_params)
+        _reject_bare_string_values(user_params)
 
         # Path of the params FILE these entries were read from, set by System
         # only when it actually read one -- it stays None when the caller
@@ -619,6 +728,17 @@ class ConfigManager:
         # injected index-form entry for a second user spelling (it is exactly
         # that on examples/ob161003, by design -- see the note there).
         self._raw_user_param_keys = {str(k) for k in (user_params or {})}
+
+        # The (component, parameter) pairs the user wrote in the 2-part
+        # BROADCAST form.  Pass 2 below expands them into indexed keys sized
+        # by the config list and the evidence is gone, so record it here and
+        # check it in resolve(), which is the first place the parameter's real
+        # element count exists.  See _check_broadcast_covers_vector.
+        self._broadcast_param_keys = {
+            tuple(str(k).split("."))
+            for k in self._raw_user_param_keys
+            if len(str(k).split(".")) == 2
+        }
 
         # If config is provided, validate names then standardize right away
         if system_config is not None:
@@ -676,6 +796,9 @@ class ConfigManager:
         # backward scale passes are deleted; see the note there.)
         self.propagated_scales = {}
         self.symbolic_blacklist = set()
+        # (equation, target symbol) -> the solutions sp.solve returned.  See
+        # the memo in _execute_solve for why this exists and why it is safe.
+        self._symbolic_solve_cache = {}
 
         # Structured diagnostics collected by the relaxation engine (e.g.
         # over-constrained contradictions).  Each entry is a dict
@@ -1009,6 +1132,85 @@ class ConfigManager:
             else:
                 base[k] = v
 
+    def _check_broadcast_covers_vector(
+        self, component_type, param_name, shape, n_elements, names=None
+    ):
+        """Refuse a 2-part broadcast key that does not cover the whole vector.
+
+        ``standardize_param_names`` Pass 2 expands ``comp.param`` into one
+        indexed key per CONFIG ENTRY, because that is all it can see: it runs
+        at ConfigManager construction, long before any manifest exists.  But a
+        parameter's element count is a manifest option (``shape``) and need not
+        equal the config-list length, in EITHER direction:
+
+          * LONGER than the config list -- ``lens`` has one config entry while
+            its per-source vectors (``t_0``, ``u_0``, ``rho``, ...) carry one
+            element per SOURCE.  ``lens.t_0: 2450000`` expanded to
+            ``lens.0.t_0`` only, and element 1 silently fell back to the
+            defaults.yaml backstop.  Not a start-value-only defect: a
+            broadcast ``sigma:``/``mu:``/``lower:`` applied the PRIOR to
+            element 0 alone, i.e. a silent posterior change on a 2S2L fit.
+          * SHORTER than the config list -- ``detrend_coeffs`` has shape
+            (total detrend columns,), which for two files with one column
+            between them is 1 while the config list is 2.  Pass 2 then writes
+            indexed keys for elements that do not exist.
+
+        So raise, rather than teach Pass 2 to fill: the count is unknowable
+        where the expansion happens and known here, and there is no filling
+        rule that is right for both surfaces anyway (element j of a lens
+        vector is a SOURCE, element j of ``detrend_coeffs`` is a COLUMN --
+        neither is "instance j", which is the only thing a broadcast key can
+        possibly mean).  Costs users nothing: no shipped example writes a
+        2-part broadcast on any such parameter (``examples/ob161003`` spells
+        every per-source entry by the source star's name).
+
+        Only checked when the caller passed an explicit vector ``shape``.  The
+        single-element modes -- ``shape=()`` with or without ``element=`` --
+        legitimately resolve one element of a longer vector (the relaxation
+        engine and ``Instrument._time_coord`` both do), and comparing 1 against
+        the config-list length there would reject every ordinary broadcast.
+
+        Residual case, deliberately not covered: a mismatch the COUNTS agree
+        about (two instruments with two detrend columns between them).  A
+        length test cannot see that element i means something other than
+        instance i; naming the columns individually is the fix if it ever
+        bites.
+        """
+        if shape == () or not self._broadcast_param_keys:
+            return
+        if (component_type, param_name) not in self._broadcast_param_keys:
+            return
+
+        comp_list = self.system_config.get(component_type)
+        if not isinstance(comp_list, list) or len(comp_list) == n_elements:
+            return
+
+        bcast = f"{component_type}.{param_name}"
+        spellings = [
+            f"{component_type}.{i}.{param_name}" for i in range(n_elements)
+        ]
+        if names:
+            spellings = [
+                f"{component_type}.{names[i]}.{param_name}"
+                if i < len(names)
+                else spellings[i]
+                for i in range(n_elements)
+            ]
+        where = f" in {self.param_file}" if self.param_file else ""
+        raise ValueError(
+            f"\n!!! BROADCAST KEY DOES NOT COVER THE VECTOR !!!\n"
+            f"'{bcast}'{where} is the 2-part broadcast form, which addresses "
+            f"one element per '{component_type}' config entry "
+            f"({len(comp_list)} of them), but '{bcast}' has "
+            f"{n_elements} element(s): its length comes from the component's "
+            f"manifest, not from the config list.\n"
+            f"Broadcasting it would silently cover only part of the vector "
+            f"(or address elements that do not exist), taking the value, "
+            f"bounds and PRIOR with it.\n"
+            f"Write one entry per element instead:\n  "
+            + "\n  ".join(spellings)
+        )
+
     def resolve(
         self,
         component_type,
@@ -1115,7 +1317,7 @@ class ConfigManager:
         # engine's solved start values back under the index form, and on
         # ob161003 those legitimately sit alongside the user's own name-form
         # entries -- reading self.user_params here would fail every such fit
-        # at stage 5.
+        # at stage 6.
         if names:
             raw_keys = getattr(self, "_raw_user_param_keys", set())
             for i in range(n_elements):
@@ -1126,6 +1328,11 @@ class ConfigManager:
                     _raise_duplicate_spelling(
                         keys[1], keys[2], keys[1], self.param_file
                     )
+
+        # A BROADCAST KEY MUST COVER THE WHOLE VECTOR OR NOT BE WRITTEN.
+        self._check_broadcast_covers_vector(
+            component_type, param_name, shape, n_elements, names
+        )
 
         base_unit_str = base.get("unit", "")
 
@@ -1235,7 +1442,23 @@ class ConfigManager:
                     continue
                 val = od[key]
                 for i in indices:
-                    v = val[i] if isinstance(val, (list, np.ndarray)) else val
+                    # A per-element override list is indexed by the
+                    # PARAMETER's element, which is `_eff_idx(i)`, not by the
+                    # local loop index: in the single-element mode (shape=(),
+                    # element=j) the loop runs once with i = 0 while the
+                    # element being resolved is j, so reading val[0] there
+                    # applied element 0's pin to every element in turn.  The
+                    # whole-vector mode is unaffected (element is None, so
+                    # _eff_idx is the identity), which is why this went
+                    # unnoticed until export_solution began passing manifest
+                    # overrides through this path.
+                    src = _eff_idx(i)
+                    if isinstance(val, (list, np.ndarray)):
+                        if src >= len(val):
+                            continue
+                        v = val[src]
+                    else:
+                        v = val
                     if v is None:
                         continue
                     v = float(v)
@@ -1511,7 +1734,7 @@ class ConfigManager:
             #     of the lens's per-source vectors by the SOURCE STAR's name;
             #     the lens block itself has one entry, named "Lens".  The
             #     per-parameter `names` list is a manifest option and is not
-            #     known until stage 2, long after this runs.
+            #     known until stage 3, long after this runs.
             #   * `mann.B.ks_offset` names a mann block that has no `name:`
             #     yet: this ConfigManager is built BEFORE the component loop
             #     in System.__init__, and mann/torres derive their name from
@@ -1965,9 +2188,12 @@ class ConfigManager:
             return "default"
         if rank >= RANK_USER:
             return "user"
-        # Microlensing distance hint (rank 30) and data-derived estimates
-        # (RANK_DERIVED_DATA = 60) both come from the data channel.
-        if rank == RANK_DERIVED_DATA or rank == 30:
+        # Every rank a component pushes a hint at -- see DATA_RANKS for why
+        # membership and not a numeric band.  Hardcoding the two literals
+        # here meant any NEW intermediate data rank silently reported
+        # "solved", which is a wrong provenance in the startup table, in
+        # export_solution and in the GUI.
+        if rank in DATA_RANKS:
             return "data"
         if rank > RANK_DEFAULT:
             return "solved"
@@ -2023,7 +2249,12 @@ class ConfigManager:
                 return "user"
         return "default"
 
-    def export_solution(self, derived_params=None, active_elements=None):
+    def export_solution(
+        self,
+        derived_params=None,
+        active_elements=None,
+        manifest_overrides=None,
+    ):
         """Export the resolved parameter solution as JSON-friendly dicts.
 
         `derived_params`, when given, says which parameters the built manifests
@@ -2047,6 +2278,19 @@ class ConfigManager:
         not parameters of their instance's parameterization at all; they export
         with `"active": False` so a reporting consumer can leave them out, as
         the tables do.
+
+        `manifest_overrides` (`System.manifest_overrides()`) is the third
+        after-prepare() table, and it is needed for the same reason as the
+        other two: what the BUILD does is decided by the manifest, and a
+        report that re-derives it from the config alone disagrees.  Component
+        `"overrides"` are the channel a component pins an element through
+        (`sigma: 0` for a GP hyperparameter of a file that did not ask for a
+        GP, a robust-likelihood parameter of a file with no `likelihood:`, an
+        unread limb-darkening coefficient), and `resolve()` only applies them
+        when it is handed them -- so without this table every such element
+        exported `fixed: False` and the GUI's Tune tab drew a slider for a
+        knob the sampler never moves.  Reporting-only: the build has always
+        been correct, since `Component.add_parameter` passes them.
 
         Returns a dict with:
           - "parameters": {user_path: {value, unit, internal_unit, lower,
@@ -2113,7 +2357,14 @@ class ConfigManager:
                 if len(parts) == 3 and parts[1].isdigit()
                 else None
             )
-            cfg = self.resolve(c_type, p_name, element=el)
+            cfg = self.resolve(
+                c_type,
+                p_name,
+                element=el,
+                internal_overrides=(manifest_overrides or {}).get(
+                    (c_type, p_name)
+                ),
+            )
 
             def _first(key):
                 arr = cfg.get(key)
@@ -2153,10 +2404,13 @@ class ConfigManager:
                 fallback=True,
                 absent=True,
             )
-            # A parameter is fixed when it has a hardcoded value or sigma == 0.
-            fixed = (cfg.get("value") is not None) or (
-                sigma is not None and sigma == 0
-            )
+            # A parameter is fixed when sigma == 0 -- the ONE documented pin
+            # (see Parameter.build_pymc).  This used to read
+            # `cfg.get("value") is not None or ...`, which described a channel
+            # that does not exist: resolve() never emits a "value" key, so the
+            # disjunct was dead and its only effect was to invite someone to
+            # "fix" a pin bug by populating it.
+            fixed = sigma is not None and sigma == 0
             # An INACTIVE element is held at a bookkeeping value whatever its
             # resolved sigma says (the pin is the role, not a `sigma: 0` in the
             # config), so it must not be reported as free: a consumer that draws
@@ -2226,6 +2480,15 @@ class ConfigManager:
         "_last_resolved",
         "_last_solved_by",
     )
+    # _symbolic_solve_cache is deliberately NOT here.  Everything above is a
+    # RESULT the probe must not leave behind -- a solved value, a rank, a
+    # blacklist entry earned under the probe's own inputs.  The solve cache is
+    # a memo of sp.solve, which is a pure function of (equation, target) and
+    # sees no values at all, so what the probe learns there is equally true
+    # afterwards; keeping it is the point (the probe runs at stage 1a and the
+    # real solve repeats the same inversions at stage 3).  Contrast the
+    # blacklist, which IS rolled back precisely because it is input-dependent:
+    # a 2 s timeout under the probe's inputs says nothing about stage 3's.
 
     def probe_derivable(self, paths, tolerance=1e-3):
         """Which of `paths` the relaxation engine can pin down from what is
@@ -2233,7 +2496,7 @@ class ConfigManager:
 
         Runs the engine on a snapshot and rolls every mutation back, so this
         is a read-only question: `finalize_user_params` still does the real
-        solve later, from the same inputs plus whatever stages 1-2 add.
+        solve later, from the same inputs plus whatever stages 1-3 add.
 
         The test is on **provenance**, not on presence: the engine's "default
         armor" step seeds every mapped path from defaults.yaml, so almost
@@ -2242,7 +2505,7 @@ class ConfigManager:
         a default -- i.e. someone actually told us, directly or through a
         relation.
 
-        Called at stage 1a (before most hints exist), so a False here means
+        Called at stage 1 (before most hints exist), so a False here means
         "not derivable *yet*"; callers that must decide early -- notably the
         MMEXOFAST trigger -- get the conservative answer.
         """
@@ -2875,42 +3138,56 @@ class ConfigManager:
         logger.debug(f"Attempting to solve: {eq} for target: {target_str}")
 
         # Print the equation with substituted numerical values ---
-        try:
-            # Format as "lhs = rhs" instead of "Eq(lhs, rhs)"
-            eq_str = f"{eq.lhs} = {eq.rhs}"
+        #
+        # GATED, and the gate wraps the whole block deliberately: it walks
+        # every free symbol and runs a re.sub per resolved one, then handed
+        # the string to logger.debug, which discarded it at every level
+        # anybody runs a fit at.  KEEP THE SORT inside -- it is load-bearing
+        # for determinism (see its own comment), which is also why the gate
+        # goes here rather than being pushed down into the loop.
+        if logger.isEnabledFor(logging.DEBUG):
+            try:
+                # Format as "lhs = rhs" instead of "Eq(lhs, rhs)"
+                eq_str = f"{eq.lhs} = {eq.rhs}"
 
-            # Replace only the known symbols so the math structure is
-            # preserved.  Sorted for the same reason as _execute_solve's walk
-            # (free_symbols is a set of Symbols whose hashes include the
-            # string hash): successive re.sub calls are not commutative when
-            # one symbol's name is a substring of another's, so an unsorted
-            # walk could render this line differently in two processes.  It
-            # is only a debug string today -- but a diagnostic that varies
-            # run to run is the one thing a diagnostic must not do.
-            for s in sorted(eq.free_symbols, key=str):
-                s_str = str(s)
-                if s_str in resolved:
-                    # Format to 5 sig figs (handles scientific notation automatically)
-                    val_str = f"{float(resolved[s_str]):.5g}"
-                    # Use regex with word boundaries to replace exact variable names
-                    eq_str = re.sub(
-                        rf"\b{re.escape(s_str)}\b", val_str, eq_str
-                    )
+                # Replace only the known symbols so the math structure is
+                # preserved.  Sorted for the same reason as _execute_solve's
+                # walk (free_symbols is a set of Symbols whose hashes include
+                # the string hash): successive re.sub calls are not
+                # commutative when one symbol's name is a substring of
+                # another's, so an unsorted walk could render this line
+                # differently in two processes.  It is only a debug string
+                # today -- but a diagnostic that varies run to run is the one
+                # thing a diagnostic must not do.
+                for s in sorted(eq.free_symbols, key=str):
+                    s_str = str(s)
+                    if s_str in resolved:
+                        # Format to 5 sig figs (handles scientific notation)
+                        val_str = f"{float(resolved[s_str]):.5g}"
+                        # Word boundaries: replace exact variable names only
+                        eq_str = re.sub(
+                            rf"\b{re.escape(s_str)}\b", val_str, eq_str
+                        )
 
-            logger.debug(f"  Substituted: {eq_str}")
-        except Exception as e:
-            pass
+                logger.debug(f"  Substituted: {eq_str}")
+            except Exception:
+                pass
 
         start_time = time.time()
-
-        def handler(signum, frame):
-            raise TimeoutError("Symbolic solver timed out!")
-
-        _arm_alarm(2, handler)  # 2-second hard limit (POSIX only)
 
         solutions = []
         used_nsolve = False
 
+        # _sympy_time_limit, not a hand-armed alarm: this block used to install
+        # its own SIGALRM handler and never restore the previous one, so after
+        # the first symbolic solve the process handler was permanently this
+        # local TimeoutError-raiser -- any later code arming SIGALRM (the
+        # nsolve guard below is the near neighbour, but nothing stops a
+        # component or a downstream library doing it) got "Symbolic solver
+        # timed out!" out of a completely unrelated frame.  The context manager
+        # restores the prior handler in its finally, and carries the
+        # re-arm-before-raise hardening the hand-rolled copy lacked (see its
+        # docstring for the JAX gc-callback case that motivated it).
         try:
             target_sym = next(
                 s for s in eq.free_symbols if str(s) == target_str
@@ -2923,26 +3200,43 @@ class ConfigManager:
             # the code already does its own root validation. simplify only
             # changes the expression's form (identical numeric value); check
             # only pre-filters roots the numeric bounds/scoring pass re-filters.
-            solutions = sp.solve(
-                eq, target_sym, dict=False, simplify=False, check=False
-            )
-            elapsed = time.time() - start_time
+            # MEMOIZED.  sp.solve is a pure function of (equation, target)
+            # -- it knows nothing about the resolved values -- but the engine
+            # relaxes to a fixed point, and does so once per seed and again
+            # inside every probe_derivable snapshot, so the SAME inversion was
+            # recomputed dozens of times per prepare().  The only reuse before
+            # this was the timeout blacklist, i.e. we remembered the failures
+            # and forgot the successes.  Cached per ConfigManager (one per
+            # System), so nothing leaks between fits.  An empty result is
+            # cached too: "no closed form" is just as reproducible, and it is
+            # the case that costs the most to rediscover.
+            cache_key = (eq, target_sym)
+            if cache_key in self._symbolic_solve_cache:
+                solutions = list(self._symbolic_solve_cache[cache_key])
+                logger.debug(f"sp.solve cache hit for {target_str}")
+            else:
+                with _sympy_time_limit(2):  # 2-second limit (POSIX only)
+                    solutions = sp.solve(
+                        eq,
+                        target_sym,
+                        dict=False,
+                        simplify=False,
+                        check=False,
+                    )
+                self._symbolic_solve_cache[cache_key] = list(solutions)
+                elapsed = time.time() - start_time
+                logger.debug(
+                    f"sp.solve finished in {elapsed:.4f}s for {target_str}"
+                )
+        except SymbolicTimeout:
             logger.debug(
-                f"sp.solve finished in {elapsed:.4f}s for {target_str}"
-            )
-        except TimeoutError:
-            logger.debug(
-                f"sp.solve timed out for {target_str} — blacklisting."
+                f"sp.solve timed out for {target_str} -- blacklisting."
             )
             self.symbolic_blacklist.add(target_str)
-            _disarm_alarm()
             return False
         except Exception as e:
             logger.debug(f"sp.solve exception for {target_str}: {e}")
-            _disarm_alarm()
             return False
-        finally:
-            _disarm_alarm()
 
         # 3. Fallback to nsolve if analytical failed
         if not solutions:
@@ -3135,175 +3429,3 @@ class ConfigManager:
             return True
 
         return False
-
-    def _attempt_rank_upgrade(
-        self, eq, resolved, provenance, resolved_scales, scale_provenance
-    ):
-        # Sorted for the same reason as _execute_solve's walk: free_symbols is a
-        # set of Symbols whose hashes include the PYTHONHASHSEED-randomized name
-        # string, so bare iteration order varies per process.
-        symbols_in_eq = sorted(str(s) for s in eq.free_symbols)
-
-        def get_rank(s):
-            return provenance.get(s, RANK_DEFAULT)
-
-        # 1. We need ALL symbols to be known except at most one
-        # If any symbol is NOT in master_symbol_map, we can't solve this equation.
-        if not all(s in self.master_symbol_map for s in symbols_in_eq):
-            return False
-
-        # 2. Identify the target:
-        # Pick the symbol with the lowest provenance, breaking rank ties
-        # alphabetically -- a bare min() returns the first minimum it meets, so
-        # on tied ranks the winner would follow iteration order.
-        target = min(symbols_in_eq, key=lambda s: (get_rank(s), s))
-
-        # 3. Check dependencies: Are all inputs known?
-        inputs = [s for s in symbols_in_eq if s != target]
-        if not all(s in resolved for s in inputs):
-            return False
-
-        # 4. Calculate bottleneck rank
-        input_ranks = [get_rank(s) for s in inputs]
-        new_rank = min(input_ranks) if input_ranks else RANK_DEFAULT
-
-        # 5. Monotonic upgrade check
-        if new_rank > get_rank(target):
-            logger.debug(
-                f"Rank upgrade: {target} ({get_rank(target)} -> {new_rank}) via {eq}"
-            )
-            return self._solve_and_update(
-                eq,
-                target,
-                resolved,
-                provenance,
-                new_rank,
-                resolved_scales,
-                scale_provenance,
-            )
-
-        return False
-
-    def _solve_and_update(
-        self,
-        eq,
-        target_str,
-        resolved,
-        provenance_map,
-        new_rank,
-        resolved_scales,
-        scale_provenance,
-    ):
-        target_sym = next(s for s in eq.free_symbols if str(s) == target_str)
-
-        # 1. Setup bounds and solver lookups
-        parts = target_str.split(".")
-        el = int(parts[1]) if len(parts) == 3 and parts[1].isdigit() else None
-        cfg = self.resolve(parts[0], parts[-1], shape=(), element=el)
-        lower = cfg["lower"][0] if cfg.get("lower") is not None else -np.inf
-        upper = cfg["upper"][0] if cfg.get("upper") is not None else np.inf
-
-        # 2. Logic to isolate target and solve
-        solutions = []
-        valid_val = None
-        valid_sol = None
-
-        # Trivial Isolation
-        if eq.lhs == target_sym:
-            solutions = [eq.rhs]
-        elif eq.rhs == target_sym:
-            solutions = [eq.lhs]
-        else:
-            try:
-                solutions = sp.solve(eq, target_sym, dict=False)
-            except Exception:
-                pass
-
-        # Fallback to nsolve
-        if not solutions:
-            try:
-                guess = float(resolved.get(target_str, 1.0))
-                # Sorted: sympy applies an unordered subs mapping in its own
-                # canonical order, but the dict's own insertion order comes
-                # straight off a hash-randomized set -- do not rely on a
-                # third party to launder that for us.
-                sub_dict = {
-                    s: resolved[str(s)]
-                    for s in sorted(eq.free_symbols, key=str)
-                    if str(s) != target_str
-                }
-                expr = (eq.lhs - eq.rhs).subs(sub_dict).evalf()
-                solutions = [sp.nsolve(expr, target_sym, guess)]
-            except Exception:
-                return False
-
-        # 3. Validate Solution
-        for sol in solutions:
-            try:
-                val = float(sol.evalf(subs=resolved))
-                if lower <= val <= upper:
-                    valid_val = val
-                    valid_sol = sol
-                    break
-            except (TypeError, ValueError):
-                continue
-
-        # 4. Final Update Guard (The "Provenance Engine")
-        if valid_val is not None:
-            # Update Value
-            resolved[target_str] = valid_val
-            provenance_map[target_str] = new_rank
-
-            # Propagate Scale (Calculus-based)
-            if hasattr(valid_sol, "free_symbols"):
-                scale_variance = 0.0
-                # Sorted for the same reason as _execute_solve's walk (whose
-                # `inputs` list is already derived from a sorted
-                # symbols_in_eq): free_symbols is a set of Symbols whose
-                # hashes include the PYTHONHASHSEED-randomized name string.
-                # Here the order is doubly load-bearing -- it is the
-                # SUMMATION order of the float accumulation below, so an
-                # unsorted walk makes init_scale differ in its last bits
-                # between two processes running identical code.
-                for parent_sym in sorted(valid_sol.free_symbols, key=str):
-                    parent_str = str(parent_sym)
-                    # Fallback to a small epsilon if parent scale is missing
-                    parent_scale = resolved_scales.get(parent_str, 1e-9)
-
-                    derivative = sp.diff(valid_sol, parent_sym)
-                    sensitivity = float(derivative.evalf(subs=resolved))
-                    scale_variance += (sensitivity * parent_scale) ** 2
-
-                # Apply scale update only if rank allows
-                if new_rank >= scale_provenance.get(target_str, 0):
-                    resolved_scales[target_str] = float(
-                        np.sqrt(scale_variance)
-                    )
-                    scale_provenance[target_str] = new_rank
-
-                    # Sync scale back to user_params if necessary
-                    if target_str in self.user_params and isinstance(
-                        self.user_params[target_str], dict
-                    ):
-                        factor = self.get_conversion_factor(
-                            parts[0], parts[-1], full_path=target_str
-                        )
-                        self.user_params[target_str]["init_scale"] = (
-                            resolved_scales[target_str] / factor
-                        )
-
-            return True
-
-        return False
-
-    def print_contradiction_warning(self, eq, error):
-        logger.warning(
-            "!" * 60 + "\n"
-            "WARNING: PHYSICAL CONTRADICTION DETECTED\n"
-            f"Relation: {eq}\n"
-            f"Relative Error: {error:.2%}\n" + "-" * 60 + "\n"
-            "The parameters provided in your config do not satisfy this equation.\n"
-            "Verify your starting values; a bad initialization will destroy NUTS efficiency.\n"
-            + "!"
-            * 60
-        )

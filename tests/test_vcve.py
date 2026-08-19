@@ -702,7 +702,7 @@ def test_an_ecc_omega_seed_reaches_vcve(transit_lc):
     system.prepare()
 
     # Read the engine's resolved start directly: Parameters are materialized in
-    # stage 5 (build_model), and this is a statement about stage 3.
+    # stage 6 (build_model), and this is a statement about stage 4.
     resolved = system.config_manager.resolve("orbit", "vcve", shape=(1,))
     expected = vcve_forward(0.3, np.radians(40.0))
     assert float(np.atleast_1d(resolved["initval"])[0]) == pytest.approx(

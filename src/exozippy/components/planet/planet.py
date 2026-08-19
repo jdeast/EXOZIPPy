@@ -125,12 +125,12 @@ class Planet(Component):
         ]
 
     def build_maps(self):
-        """Stage 1b: Define logical Numpy arrays. (Base class auto-converts to Tensors)."""
+        """Stage 2: Define logical Numpy arrays. (Base class auto-converts to Tensors)."""
         self.star_map = np.array([p.get("star_ndx", 0) for p in self.config])
         self.orbit_map = np.array([p.get("orbit_ndx", 0) for p in self.config])
 
     def register_parameters(self, system):
-        """Stage 2: Auto-estimates and Manifest declaration."""
+        """Stage 3: Auto-estimates and Manifest declaration."""
         has_orbit = "orbit" in system.active_components
 
         self._resolve_mass_parameterization(system)
@@ -238,7 +238,7 @@ class Planet(Component):
         self._resolve_chen(system)
 
     def _resolve_mass_parameterization(self, system):
-        """Pick the sampled mass coordinate (stage 2, topology known).
+        """Pick the sampled mass coordinate (stage 3, topology known).
 
         'linear' samples planet.mass directly over a range that includes
         negative values: RV and astrometric amplitudes flip phase through
@@ -387,7 +387,7 @@ class Planet(Component):
         These are the signed observables -- an RV or astrometric amplitude
         flips phase through zero -- so this is both the Chen mass-side
         predicate and the set of planets for which a signed linear mass is
-        meaningful.  Cached: both callers run in stage 2.
+        meaningful.  Cached: both callers run in stage 3.
         """
         if getattr(self, "_mass_side", None) is not None:
             return self._mass_side
@@ -414,7 +414,7 @@ class Planet(Component):
 
     def _resolve_chen(self, system):
         """Decide, per planet, whether the Chen & Kipping (2017) mass-radius
-        relation applies (stage 2: every component's constructor and
+        relation applies (stage 3: every component's constructor and
         load_data have run, so the data topology is known).
 
         Default (EXOFASTv2 mkss.pro's ``chen = fittran xor fitrv``, extended
@@ -652,7 +652,7 @@ class Planet(Component):
         and everything computed from it belong to the relation.  Dependence
         is read off the built tensor graph: any Parameter whose value node
         has planet.mass/planet.radius among its ancestors gets the
-        "Derived from \\citet{Chen:2017}" table note (stage 6, so every
+        "Derived from \\citet{Chen:2017}" table note (stage 7, so every
         component's nodes exist).  Granularity is per parameter, not per
         element -- one chen-enabled planet marks the whole row.
         """

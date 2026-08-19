@@ -39,6 +39,8 @@ import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 
+from .component import resolve_star_ref
+
 logger = logging.getLogger(__name__)
 
 # The stellar quantities a relation may be asked to constrain.
@@ -119,7 +121,7 @@ class StellarRelation:
         super().__init__(component_config, config_manager)
 
     # ------------------------------------------------------------------
-    # Stage 1a helpers: config parsing
+    # Stage 1 helpers: config parsing
     # ------------------------------------------------------------------
 
     def _resolve_star(self, system, nm, raw_star):
@@ -127,7 +129,10 @@ class StellarRelation:
 
         Accepts a bare name (``"B"``), a path (``"star.B"``) and an index
         (``1`` or ``"star.1"``); raises a ValueError naming the available
-        stars otherwise.
+        stars otherwise.  The translation itself is the shared
+        ``component.resolve_star_ref``; only the "a 'star:' key is required"
+        case stays here, because only this component knows the key is
+        mandatory for it.
         """
         star_names = list(system.star.names)
         if raw_star is None:
@@ -135,15 +140,7 @@ class StellarRelation:
                 f"{self.prefix} '{nm}': a 'star:' key is required naming the "
                 f"star to constrain. Available stars: {star_names}."
             )
-        key = str(raw_star).split(".")[-1]
-        if key in star_names:
-            return star_names.index(key)
-        if key.isdigit() and int(key) < len(star_names):
-            return int(key)
-        raise ValueError(
-            f"{self.prefix} '{nm}': unknown star '{raw_star}'. "
-            f"Available stars: {star_names}."
-        )
+        return resolve_star_ref(raw_star, star_names, f"{self.prefix} '{nm}'")
 
     def _parse_constrain(self, nm, raw):
         """The set of quantities instance ``nm`` asked to constrain.
@@ -169,15 +166,15 @@ class StellarRelation:
         return con
 
     # ------------------------------------------------------------------
-    # Stage 1b
+    # Stage 2
     # ------------------------------------------------------------------
 
     def build_maps(self):
-        """Stage 1b: index array linking each instance to its star."""
+        """Stage 2: index array linking each instance to its star."""
         self.star_map = np.array(self.star_indices, dtype=int)
 
     # ------------------------------------------------------------------
-    # Stage 6 helpers
+    # Stage 7 helpers
     # ------------------------------------------------------------------
 
     def _warn_outside_range(self, system, param, low, high, message):
@@ -187,7 +184,7 @@ class StellarRelation:
         and hard-rejects out-of-range states.  A ``-inf`` wall has no gradient
         for NUTS to follow, so every range check in these components is a
         startup warning only -- nothing here bounds the posterior.  Called
-        from ``build_likelihood`` (stage 6) rather than earlier so the
+        from ``build_likelihood`` (stage 7) rather than earlier so the
         initvals read are the relaxed ones the sampler will actually start
         from.
 

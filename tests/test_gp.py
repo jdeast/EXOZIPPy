@@ -659,7 +659,7 @@ def test_mixed_files_split_into_one_normal_plus_one_gp_per_file():
     inst._prepare_gp(time, sigma, inst_map)
 
     with pm.Model() as model:
-        # Stand in for the Parameters stage 5 would have built, with an
+        # Stand in for the Parameters stage 6 would have built, with an
         # amplitude small enough that the GP reduces to white noise.
         inst.gp_sho_sigma = _FakeParam(np.array([0.0, 1e-8, 0.0]))
         inst.gp_sho_rho = _FakeParam(np.array([1.0, 5.0, 1.0]))

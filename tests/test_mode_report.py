@@ -26,6 +26,10 @@ from exozippy.outputs.modes import (
     ModeInfo,
     ModeReport,
     NoValidDrawsError,
+    _assign_to_nearest_center,
+    _make_union_find,
+    _segment_cylinder,
+    _union_relabel,
     check_invalid_frac,
     identify_modes,
     markov_indicator_iact,
@@ -1277,3 +1281,149 @@ def test_pipeline_status_records_a_healthy_mode_pass(tmp_path):
     assert report is not None
     assert status["state"] == MODE_OK
     assert status["n_invalid"] == 0
+
+
+# ----------------------------------------------------------------------
+# machinery shared by the two pairwise merge tests (review 4.11.1)
+# ----------------------------------------------------------------------
+
+
+def test_union_find_collapses_a_chain_of_merges():
+    """
+    Given three clusters merged pairwise (0-1, then 1-2),
+    When the union-find is queried,
+    Then all three share one root -- transitive merging is what makes the
+      pairwise loop produce basins rather than pairs, and it is the part
+      both merge tests used to write out by hand.
+    """
+    # ARRANGE
+    find, union = _make_union_find(4)
+
+    # ACT
+    union(0, 1)
+    union(1, 2)
+
+    # ASSERT
+    assert find(0) == find(1) == find(2)
+    assert find(3) != find(0)
+
+
+def test_union_relabel_leaves_an_unmerged_run_alone():
+    """
+    Given a labelling in which nothing merged,
+    When the relabel epilogue runs,
+    Then the labels are unchanged, the centers are the clusters' means, and
+      merged_any is False -- the no-op path both merge tests take on most
+      fits must be exactly a no-op.
+    """
+    # ARRANGE
+    X = np.array([[0.0], [0.2], [5.0], [5.2]])
+    labels = np.array([0, 0, 1, 1])
+    find, _ = _make_union_find(2)
+
+    # ACT
+    new_labels, new_centers, merged = _union_relabel(X, labels, find, 2)
+
+    # ASSERT
+    assert np.array_equal(new_labels, labels)
+    assert new_centers == pytest.approx(np.array([[0.1], [5.1]]))
+    assert merged is False
+
+
+def test_union_relabel_renumbers_merged_clusters_contiguously():
+    """
+    Given clusters 0 and 2 merged while 1 stands alone,
+    When the relabel epilogue runs,
+    Then the surviving labels are 0 and 1 with no gap, and the merged
+      cluster's center is the mean of ALL its draws, not of the two old
+      centers.
+    """
+    # ARRANGE
+    X = np.array([[0.0], [10.0], [2.0]])
+    labels = np.array([0, 1, 2])
+    find, union = _make_union_find(3)
+    union(0, 2)
+
+    # ACT
+    new_labels, new_centers, merged = _union_relabel(X, labels, find, 3)
+
+    # ASSERT
+    assert sorted(set(new_labels.tolist())) == [0, 1]
+    assert merged is True
+    assert new_centers[new_labels[0]] == pytest.approx([1.0])
+
+
+def test_segment_cylinder_projects_every_draw_not_just_the_members():
+    """
+    Given two clusters with a third cluster's draws lying between them,
+    When the segment projection runs,
+    Then the interloping draws are projected too and fall inside the
+      cylinder -- a members-only projection dips artificially in exactly the
+      fragmented-blob case the dip test exists to catch.
+    """
+    # ARRANGE
+    X = np.array([[0.0, 0.0], [1.0, 0.0], [0.5, 0.0], [0.5, 50.0]])
+    labels = np.array([0, 1, 2, 2])
+    centers = np.array([[0.0, 0.0], [1.0, 0.0], [0.5, 25.0]])
+
+    # ACT
+    sep, t, in_cyl = _segment_cylinder(X, labels, centers, 0, 1)
+
+    # ASSERT
+    assert sep == pytest.approx(1.0)
+    assert t == pytest.approx([0.0, 1.0, 0.5, 0.5])
+    assert in_cyl.tolist() == [True, True, True, False]
+
+
+def test_segment_cylinder_reports_coincident_centers():
+    """
+    Given two clusters whose centers coincide,
+    When the segment projection runs,
+    Then it reports a zero separation and no projection -- there is no
+      segment to test, and both callers merge such a pair outright.
+    """
+    # ARRANGE
+    X = np.array([[0.0], [0.0]])
+    labels = np.array([0, 1])
+    centers = np.array([[0.0], [0.0]])
+
+    # ACT
+    sep, t, in_cyl = _segment_cylinder(X, labels, centers, 0, 1)
+
+    # ASSERT
+    assert sep == 0.0
+    assert t is None and in_cyl is None
+
+
+def test_nearest_center_assignment_matches_the_full_broadcast():
+    """
+    Given draws and cluster centers, including exact ties and draws sitting
+      exactly on a center,
+    When identify_modes assigns each draw to its nearest surviving center,
+    Then the answer equals the (N, k, d) broadcast it replaced -- that
+      broadcast is multi-GB at 54 chains x 50k draws, so it was traded for a
+      loop over the handful of centers, and the trade must be exact.  The
+      strict comparison is what keeps the FIRST minimum on a tie, as
+      np.argmin does.
+    """
+    # ARRANGE
+    rng = np.random.default_rng(4)
+    for trial in range(50):
+        n = int(rng.integers(5, 200))
+        d = int(rng.integers(1, 12))
+        k = int(rng.integers(1, 7))
+        centers = rng.normal(size=(k, d)) * rng.choice([0.01, 1.0, 1e3])
+        draws = rng.normal(size=(n, d)) * rng.choice([0.01, 1.0, 1e3])
+        if k > 1:
+            centers[1] = centers[0]
+        draws[: min(n, k)] = centers[: min(n, k)]
+
+        # ACT
+        got = _assign_to_nearest_center(draws, centers)
+        want = np.argmin(
+            ((draws[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2),
+            axis=1,
+        )
+
+        # ASSERT
+        assert np.array_equal(got, want), trial

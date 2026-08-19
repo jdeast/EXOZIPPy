@@ -1,4 +1,3 @@
-# import ipdb
 import logging
 import os
 
@@ -92,20 +91,41 @@ class System(Component):
         else:
             user_params_file = self.config.get("parameter_file", None)
             if user_params_file is None:
-                raise ValueError(
-                    "No 'parameter_file' key found in your config YAML. "
-                    "Add a line like:\n"
-                    "  parameter_file: myfit.params.yaml\n"
-                    "and create that file (or copy an example from the examples/ directory)."
+                # An OMITTED key is legal, and says "I have no overrides".
+                # A params file may already be EMPTY -- defaults.yaml, the
+                # component hints and the relaxation engine between them can
+                # start a fit on their own, and since the global search
+                # (8.3.1) a blind fit seeds its own period and epoch from
+                # BLS/Lomb-Scargle -- so requiring the KEY while the FILE it
+                # names may be empty is a distinction with no content, and
+                # exactly the friction a blind fit should not have to pay.
+                # An INFO line, not a warning: this is a supported way to
+                # write a config, not a mistake to apologize for.  A key that
+                # IS present still has to name a file that exists, which is
+                # the real typo (below) and stays fatal.
+                logger.info(
+                    "No 'parameter_file' in the config; proceeding with no "
+                    "user parameter overrides. Start values come from each "
+                    "component's defaults.yaml, its data-derived hints and "
+                    "the relaxation engine. Add "
+                    "'parameter_file: myfit.params.yaml' to override any of "
+                    "them."
                 )
-            if not os.path.exists(user_params_file):
-                raise FileNotFoundError(
-                    f"parameter_file '{user_params_file}' not found. "
-                    f"This path is resolved relative to the directory from which you "
-                    f"run exozippy (currently: {os.getcwd()}). "
-                    f"Check that the file exists and the path in your config YAML is correct."
-                )
-            self.user_params = load_yaml(str(user_params_file))
+                self.user_params = {}
+            else:
+                if not os.path.exists(user_params_file):
+                    raise FileNotFoundError(
+                        f"parameter_file '{user_params_file}' not found. "
+                        f"This path is resolved relative to the directory from which you "
+                        f"run exozippy (currently: {os.getcwd()}). "
+                        f"Check that the file exists and the path in your config YAML is correct."
+                    )
+                # `or {}`: yaml.safe_load returns None for an EMPTY file, and
+                # an empty params file has to mean exactly what an omitted
+                # key does -- "no overrides" -- rather than a third state
+                # every consumer has to spell `user_params or {}` for.
+                # mkparam's own loader has always normalized it this way.
+                self.user_params = load_yaml(str(user_params_file)) or {}
 
         self.config_manager = ConfigManager(
             self.user_params, system_config=self.config
@@ -122,14 +142,16 @@ class System(Component):
         # per build_model, so a second build on one System cannot accumulate.
         self._element_slice_checks = []
         # Many-to-one parameterizations' alternative branches, declared during
-        # stage 6 and marginalized over at the end of it (see
+        # stage 7 and marginalized over at the end of it (see
         # register_branch_alternative / _add_branch_mixtures).  Rebuilt per
         # build_model for the same reason.
         self._branch_alternatives = []
         # Record the params file ONLY when one was really read: an in-memory
         # user_params dict must not be blamed on a parameter_file the config
-        # happens to name but System never opened.
-        if user_params is None:
+        # happens to name but System never opened -- and neither must a config
+        # that names none at all, whose (empty) overrides come from nowhere on
+        # disk and so have no file for an error message to point at.
+        if user_params is None and user_params_file is not None:
             self.config_manager.param_file = str(user_params_file)
         self.registry = discover_components()
         self.active_components = {}
@@ -174,7 +196,7 @@ class System(Component):
         # mkparam.write_param_file.  Taking it any earlier fingerprints a
         # config spelling that exists only for the first few lines of
         # __init__, so a fingerprint recomputed later would never match;
-        # taking it later would fold in whatever stages 1-6 might one day
+        # taking it later would fold in whatever stages 1-7 might one day
         # write.  The params half is safe at either point: ConfigManager
         # deepcopies before it standardizes keys, strips links and injects
         # solved initvals, so self.user_params stays exactly the file that
@@ -200,23 +222,23 @@ class System(Component):
         # ==========================================================
         # PRE-FLIGHT SEQUENCE
         # ==========================================================
-        # Stage 1: DATA & LOGICAL MAPS
+        # Stages 1-2: DATA & LOGICAL MAPS
         for comp in self.active_components.values():
             if hasattr(comp, "load_data"):
                 comp.load_data(self)
             if hasattr(comp, "build_maps"):
                 comp.build_maps()
 
-        # Stage 2: REGISTRATION (The Blueprint)
+        # Stage 3: REGISTRATION (The Blueprint)
         for comp in self.active_components.values():
             if hasattr(comp, "register_parameters"):
                 comp.register_parameters(self)
 
-        # Stage 2b: the REPORTED-element invariant, checked before anything is
+        # After stage 3: the REPORTED-element invariant, checked before anything is
         # built (see _validate_reported_not_consumed).
         self._validate_reported_not_consumed()
 
-        # Stage 3: RECONCILIATION (The Solver)
+        # Stage 4: RECONCILIATION (The Solver)
         self.config_manager.finalize_user_params()
 
     def _validate_reported_not_consumed(self):
@@ -334,10 +356,10 @@ class System(Component):
         derived in another (planet.mass is sampled linearly when RV or
         astrometry measures it, and derived from log_q otherwise). The rule
         is `manifest.interpret_manifest_entry`'s, shared with
-        `Component.add_parameter` (stage 5) and
-        `graph.determine_pymc_build_order` (stage 4) -- a manifest value that
+        `Component.add_parameter` (stage 6) and
+        `graph.determine_pymc_build_order` (the build order) -- a manifest value that
         is a string, or a dict carrying an "expr_key", names an expression; a
-        bare None is a free parameter.  Valid after stage 2.
+        bare None is a free parameter.  Valid after stage 3.
 
         The question is asked through `expression_config` against the
         resolved config, exactly as the two build-time consumers ask it, and
@@ -372,7 +394,7 @@ class System(Component):
         -- so a partially derived vector no longer counts as derived there.
         That is the conservative direction: its consumers treat "derived" as
         "exempt", and a mixed vector has sampled elements that must not be
-        exempt.  Valid after stage 2.
+        exempt.  Valid after stage 3.
         """
         out = {}
         for comp in self.active_components.values():
@@ -412,7 +434,7 @@ class System(Component):
         The complement is manifest role 4: elements that are not parameters of
         their instance's parameterization (a non-MIST star's EEP).  Only entries
         that actually mask something appear, so a caller can treat a missing key
-        as "every element active".  Valid after stage 2, and the reporting
+        as "every element active".  Valid after stage 3, and the reporting
         layer's authority for what to leave out of a table.
         """
         out = {}
@@ -432,6 +454,33 @@ class System(Component):
                 out[(comp.prefix, name)] = entry.activity_mask(
                     n_elements, where=f"{comp.prefix}.{name}"
                 )
+        return out
+
+    def manifest_overrides(self):
+        """``(component_prefix, param_name) -> the manifest "overrides" dict``.
+
+        The third of the after-prepare() tables a reporting consumer needs
+        (with :meth:`derived_elements` and :meth:`active_elements`), and for
+        the same reason: what the BUILD does is decided by the manifest, and a
+        report that re-derives it from the config alone disagrees.
+        ``"overrides"`` is how a component supplies per-element defaults the
+        user may still beat -- including the ``sigma: 0`` pin on a GP
+        hyperparameter of a file that asked for no GP, a robust-likelihood
+        parameter of a file with no ``likelihood:``, or an unread
+        limb-darkening coefficient.  ``ConfigManager.resolve`` applies them
+        only when handed them (``Component.add_parameter`` does), so
+        ``export_solution`` reported every such element as free until it was
+        given this.  Only entries that carry overrides appear.  Valid after
+        stage 2.
+        """
+        out = {}
+        for comp in self.active_components.values():
+            for name, raw in getattr(comp, "manifest", {}).items():
+                overrides = interpret_manifest_entry(raw).options.get(
+                    "overrides"
+                )
+                if overrides:
+                    out[(comp.prefix, name)] = overrides
         return out
 
     def build_likelihood(self, model, system):
@@ -692,18 +741,18 @@ class System(Component):
         self._element_slice_checks = []
         self._branch_alternatives = []
         with pm.Model() as model:
-            # Stage 4a: Automatic PyTensor Map Conversion
+            # Stage 5: Automatic PyTensor Map Conversion
             # Convert logical numpy arrays into PyTensor variables for the graph
             for comp in self.active_components.values():
                 comp.build_tensor_maps()
 
-            # Stage 4: Topological Sort for Parameter Building
+            # Build order for stage 6: topological sort
             # Fetch the dynamic, component-agnostic build order driven by the physics dependency graph
             pymc_build_order = determine_pymc_build_order(
                 self.active_components, self.config_manager
             )
 
-            # Stage 5: Linearly materialize the nodes node-by-node
+            # Stage 6: Linearly materialize the nodes node-by-node
             for param_path in pymc_build_order:
                 comp_name, param_name = param_path.split(".", 1)
                 if comp_name in self.active_components:
@@ -726,14 +775,14 @@ class System(Component):
                         f"configuration."
                     )
 
-            # Stage 6: LIKELIHOOD
+            # Stage 7: LIKELIHOOD
             for comp in self.active_components.values():
                 if hasattr(comp, "build_likelihood"):
                     comp.build_likelihood(model, system=self)
 
-            # Stage 6b: REPORTED elements (manifest role 3).  Deliberately
-            # after stage 6: a reported element is consumed by nothing, so
-            # every consumer in stages 5-6 has already read the phase-1 tensor
+            # After stage 7: REPORTED elements (manifest role 3).  Deliberately
+            # after stage 7: a reported element is consumed by nothing, so
+            # every consumer in stages 6-7 has already read the phase-1 tensor
             # -- which is what makes the per-parameter cycle these expressions
             # would otherwise create dissolve.  See
             # Component.finalize_reported and Parameter.finalize_deferred.
@@ -742,7 +791,7 @@ class System(Component):
                 if callable(finalize):
                     finalize(model, system=self)
 
-            # Stage 6c: BRANCH MIXTURES.  A component whose parameterization is
+            # After stage 7: BRANCH MIXTURES.  A component whose parameterization is
             # many-to-one (today: the V_c/V_e eccentricity, whose inversion is
             # quadratic) declares its alternative nodes and the likelihood is
             # marginalized over them here.  Must come last: it snapshots every
@@ -1058,31 +1107,6 @@ class System(Component):
         return {
             var.name: val for var, val in zip(output_vars, physical_values)
         }
-
-    def get_physical_point(self, model, raw_point):
-        output_vars = model.free_RVs + model.deterministics
-
-        eval_fn = pytensor.function(
-            inputs=model.free_RVs,
-            outputs=output_vars,
-            on_unused_input="ignore",
-        )
-
-        # Pull the values in the exact order the function expects them
-        input_values = [raw_point[v.name] for v in model.free_RVs]
-
-        physical_values = eval_fn(*input_values)
-        param_lookup = self.get_parameter_lookup()
-
-        results = {}
-        for var, val in zip(output_vars, physical_values):
-            if var.name in param_lookup:
-                # Standardize: Always use from_internal to ensure we return User Units
-                results[var.name] = param_lookup[var.name].from_internal(val)
-            else:
-                results[var.name] = val
-
-        return results
 
     def distribute_posterior(self, idata):
         """Maps the traces from idata back to the individual Parameter objects."""

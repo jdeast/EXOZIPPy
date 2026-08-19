@@ -273,7 +273,7 @@ def read_mmexofast_solutions(json_path):
 
 
 # The master file's alpha has NO GLOBAL MAPPING onto the fitted convention.
-# Measured, not assumed (examples/DC2018/dc18_alpha_convention.py): for each
+# Measured, not assumed (scripts/dc18_alpha_convention.py): for each
 # of the 44 events, alpha was scanned in MulensModel's convention at the
 # truth values of t_0, u_0, t_E, rho, s and q with the fluxes fit linearly,
 # giving the alpha the light curve itself prefers.  Against that reference

@@ -175,7 +175,7 @@ class ProseCollector:
     """Ordered, idempotent bag of :class:`ProseSentence`.
 
     Instantiated once per ``System`` (``system.prose``); components add
-    sentences during stages 1-6, run.py adds the sampling/results
+    sentences during stages 1-7, run.py adds the sampling/results
     sentences, and ``outputs/modeling.py`` renders the whole thing at
     each checkpoint.
     """

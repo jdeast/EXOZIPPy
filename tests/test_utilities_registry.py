@@ -110,11 +110,11 @@ def test_mmexofast_schema_exposes_json_and_options():
 # --- component-declared utilities ---------------------------------------------
 
 
-def test_transit_declares_getdata_and_a_disabled_bls():
+def test_transit_declares_getdata_and_bls():
     """
     Given the transit component,
     When its utilities are listed,
-    Then getdata is available and bls is a disabled placeholder.
+    Then both getdata and the BLS period search are available and runnable.
     """
     # Act
     utils = {u.name: u for u in Transit.get_utilities()}
@@ -122,8 +122,12 @@ def test_transit_declares_getdata_and_a_disabled_bls():
     # Assert
     assert utils["getdata"].available is True
     assert utils["getdata"].build_parser is not None
-    assert utils["bls"].available is False
-    assert utils["bls"].build_parser is None
+    assert utils["bls"].available is True
+    assert utils["bls"].build_parser is not None
+    assert {a["name"] for a in utils["bls"].argument_schema()} >= {
+        "files",
+        "--min-period",
+    }
 
 
 def test_base_component_get_utilities_is_empty():
