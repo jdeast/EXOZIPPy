@@ -239,7 +239,7 @@ def _point(raw_dict):
 # GOOD_RAW (+2.713 nats).  Another CHANGE OF MEASURE -- the model has one fewer
 # dimension -- and not a change of fit: nothing in the light-curve sector moved,
 # which is why the chi2/N check below is unchanged at the same point.
-GOOD_EXPECTED_LP = 3401.5937
+GOOD_EXPECTED_LP = 3401.6002
 
 
 def test_good_draw_logp_matches_deterministic_build(dc2018_128_logp):

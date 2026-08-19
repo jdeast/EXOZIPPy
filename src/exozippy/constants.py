@@ -119,6 +119,35 @@ THICK_DISK_VELOCITY_SIGMA_V = 51.0  # in km/s
 THICK_DISK_VELOCITY_SIGMA_W = 42.0  # in km/s
 KROUPA_IMF_SLOPE = -1.3  # Kroupa IMF (mass range typical for lenses)
 SALPETER_IMF_SLOPE = -2.35  # Salpeter IMF
+
+# Chabrier (2003) SYSTEM IMF, PASP 115, 763, Table 1.  It is PIECEWISE, and
+# all five numbers below are needed to state it:
+#
+#   dN/dlog m ~ exp(-(log m - log Mc)^2 / (2 sigma^2))     m <= 1 Msun
+#   dN/dlog m ~ m^-x                                       m >  1 Msun
+#
+# The lognormal segment alone shipped as "the Chabrier IMF" until 2026-08
+# (review 3.7.1), applied over the whole [-9, 2.5] dex support.  It steepens
+# without limit above the peak -- its slope in log mass is -(x - log Mc)/
+# sigma^2, i.e. -2.02 nats/dex at 1 Msun and -5.10 at 10 -- so every massive
+# star was over-penalized relative to the IMF the label named, and the error
+# GREW with mass.  Not only a massive-lens concern: the imf_prior is one
+# pt.sum over the whole star vector, sources included, and bulge source stars
+# sit near 1 Msun.
+CHABRIER_LOG_MC = math.log10(0.22)  # dex(solMass), lognormal centre
+CHABRIER_SIGMA = 0.57  # dex, lognormal width
+CHABRIER_HIGH_MASS_SLOPE = 1.3  # x in dN/dlog m ~ m^-x above the match
+CHABRIER_MATCH_LOGMASS = 0.0  # dex, where the two segments meet (1 Msun)
+# 10%-90% width of the smoothing ramp between the two segments, in dex.  The
+# true IMF is only C0 continuous at the match -- the slope JUMPS from -2.02 to
+# -1.3*ln10 = -2.99 nats/dex -- so a faithful piecewise form has a logp kink
+# there, the same class of thing as the SHO kernel's Q = 1/2 switch.  Blending
+# across a width D deviates from the exact piecewise form by roughly
+# D * 0.97 / 8, so 0.2 dex costs ~0.02 nats.  Against that, Chabrier's own
+# high-mass exponent is uncertain at x = 1.3 +/- 0.3, i.e. +/-0.69 nats/dex of
+# slope, ~0.7 nats across a decade -- 30x larger.  The smoothing is free at
+# the IMF's own accuracy and cannot be the limiting error.
+CHABRIER_BLEND_WIDTH_DEX = 0.2
 # Hydrogen-burning minimum mass at ~solar composition (Chabrier & Baraffe
 # 2000, ARA&A 38, 337).  Composition-dependent -- ~0.072 Msun at solar
 # metallicity, rising toward ~0.09 Msun in metal-poor material -- and 0.075 is

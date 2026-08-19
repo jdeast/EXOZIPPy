@@ -18,7 +18,6 @@ import pytest
 from conftest import _DummyConfigManager, _DummySystem, _MockParam
 from exozippy.components.galacticmodel.galacticmodel import (
     GalacticModel,
-    _lognormal_log_norm,
     ffp_logmass_logp,
 )
 from exozippy.components.star.star import (
@@ -37,9 +36,15 @@ _LOGMASS_UPPER = 2.5
 
 _LN10 = np.log(10.0)
 
-# Chabrier 2003 system IMF, as build_likelihood applies it.
+# Chabrier 2003 SYSTEM IMF, as build_likelihood applies it: PIECEWISE, a
+# lognormal below 1 Msun and dN/dlog m ~ m^-1.3 above it, blended across a
+# 0.2 dex ramp (review 3.7.1).  Written out from the paper rather than
+# imported, so a silent edit to the component's constants fails here.
 _CHABRIER_LOG_MC = np.log10(0.22)
 _CHABRIER_SIGMA = 0.57
+_CHABRIER_HIGH_MASS_X = 1.3
+_CHABRIER_MATCH = 0.0  # 1 Msun
+_CHABRIER_BLEND_10_90_DEX = 0.2
 
 _HBL_DEX = np.log10(0.075)  # hydrogen-burning limit, dex(solMass)
 
@@ -90,13 +95,42 @@ def _ffp_closed_form(x, alpha, lower=_LOGMASS_LOWER, upper=_LOGMASS_UPPER):
     return k * _LN10 * x - np.log(z)
 
 
+def _chabrier_unnormalized(x):
+    """The blended Chabrier density, unnormalized, written independently.
+
+    Composed as a plain WEIGHTED SUM of the two densities -- which is the
+    algebra the component's logaddexp/softplus formulation claims to be a
+    numerically stable rewrite of.  Safe here because the masses tested are
+    near the peak, where neither branch underflows.
+    """
+    x = np.asarray(x, dtype=float)
+    lognormal = np.exp(-0.5 * ((x - _CHABRIER_LOG_MC) / _CHABRIER_SIGMA) ** 2)
+    at_match = np.exp(
+        -0.5 * ((_CHABRIER_MATCH - _CHABRIER_LOG_MC) / _CHABRIER_SIGMA) ** 2
+    )
+    tail = at_match * 10.0 ** (-_CHABRIER_HIGH_MASS_X * (x - _CHABRIER_MATCH))
+    s = _CHABRIER_BLEND_10_90_DEX / (2.0 * np.log(9.0))
+    w = 1.0 / (1.0 + np.exp((x - _CHABRIER_MATCH) / s))
+    return np.log(w * lognormal + (1.0 - w) * tail)
+
+
 def _chabrier_closed_form(x, lower=_LOGMASS_LOWER, upper=_LOGMASS_UPPER):
-    param = _MockParam(
-        x, lower=np.atleast_1d(lower), upper=np.atleast_1d(upper)
-    )
-    return -0.5 * ((x - _CHABRIER_LOG_MC) / _CHABRIER_SIGMA) ** 2 - (
-        _lognormal_log_norm(_CHABRIER_LOG_MC, _CHABRIER_SIGMA, param)
-    )
+    """The normalized Chabrier log density.
+
+    "Closed form" is now a misnomer kept for continuity of the call sites:
+    the blend has no closed-form integral, so the normalizer is scipy's
+    ADAPTIVE quadrature here against the component's uniform trapezoid.  That
+    the two agree is a statement about the integral rather than about two
+    copies of one algorithm.
+    """
+    from scipy.integrate import quad
+
+    def f(t):
+        return np.exp(_chabrier_unnormalized(t))
+
+    lo, _ = quad(f, lower, _CHABRIER_MATCH, limit=400)
+    hi, _ = quad(f, _CHABRIER_MATCH, upper, limit=400)
+    return _chabrier_unnormalized(x) - np.log(lo + hi)
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +278,12 @@ def test_default_path_is_untouched_by_the_ffp_branch():
     # Assert
     expected = float(np.sum(_chabrier_closed_form(np.array(logmass))))
     assert legacy_val == modern_val
-    assert legacy_val == pytest.approx(expected, rel=1e-12)
+    # rel=1e-10, not 1e-12: the Chabrier normalizer is a numerical integral on
+    # both sides now (trapezoid in the component, adaptive Gauss-Kronrod
+    # here), and they agree to 1.4e-12 rather than to the last bit.  The
+    # legacy == modern equality above is still EXACT, which is what this test
+    # is really about.
+    assert legacy_val == pytest.approx(expected, rel=1e-10)
 
 
 def test_mixed_system_puts_the_right_prior_on_each_star():
@@ -273,7 +312,9 @@ def test_mixed_system_puts_the_right_prior_on_each_star():
             ffp_logmass_logp(lens_x, FFP_MASS_FUNCTION_SLOPE, star.logmass)
         )[0]
     ) + float(np.atleast_1d(_chabrier_closed_form(source_x))[0])
-    assert got == pytest.approx(expected, rel=1e-12)
+    # rel=1e-10: see test_default_path_is_untouched_by_the_ffp_branch -- the
+    # Chabrier half of this sum is normalized by quadrature on both sides.
+    assert got == pytest.approx(expected, rel=1e-10)
 
     # ... and it is genuinely different from charging both the stellar IMF
     both_stellar = _imf_potential(_MockStar([lens_x, source_x]))
