@@ -61,7 +61,8 @@ jobs:
   # raising the timeout until it fits: the cap above is sized to what Linux and
   # macOS actually take, and a platform that needs several times that is a
   # different problem. The bugs Windows did find (mkl wheels, SIGALRM, the
-  # GUI's cross-process signal) are fixed and stay fixed. See notes/todo.txt.
+  # GUI's cross-process signal) are fixed and stay fixed. The running list of
+  # what native Windows would still need is docs/windows-native.md.
   pytest:
     name: pytest
     runs-on: ${{ matrix.os }}

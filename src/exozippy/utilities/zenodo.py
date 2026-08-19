@@ -141,6 +141,15 @@ def shared_cache_root() -> Path | None:
     (``$XDG_CACHE_HOME/exozippy``, falling back to ``~/.cache/exozippy``).
     Nothing is created here -- this is a pure path computation, so callers
     and tests can ask the question without side effects.
+
+    XDG is a POSIX convention with no Windows equivalent: there is no
+    ``XDG_CACHE_HOME`` there and the fallback would put a Unix-shaped
+    ``~/.cache`` in a Windows home directory.  Native Windows wants
+    ``%LOCALAPPDATA%``, i.e. a ``sys.platform`` branch rather than another
+    fallback.  Not done, because native Windows does not work for larger
+    reasons (the samplers need ``fork``); logged with the rest of them in
+    ``docs/windows-native.md``, and ``EXOZIPPY_CACHE_DIR`` overrides all of
+    this in the meantime.
     """
     override = os.environ.get(_CACHE_ENV)
     if override is not None:
