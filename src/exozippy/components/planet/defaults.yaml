@@ -66,15 +66,6 @@ planet:
         func_name: "calc_logg_from_mass"
         deps: ["mass", "radius"]
 
-  distance:
-    lower: 0.001
-    upper: 100000.0
-    initval: 10.0
-    init_scale: 0.1
-    unit: "pc"
-    internal_unit: "pc"
-    latex: "D"
-    description: "Distance"
   radius:
     unit: "jupiterRad"
     lower: 0.000001
