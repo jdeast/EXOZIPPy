@@ -1121,6 +1121,89 @@ class System(Component):
             var.name: val for var, val in zip(output_vars, physical_values)
         }
 
+    def fold_degenerate_draws(self, idata, model):
+        """Collapse exact label degeneracies in a posterior, in place.
+
+        The one place a component gets to say "these two labels are the same
+        physical solution" (review 1.8.3, whose case is the ascending node:
+        with astrometry and no RVs, `(bigomega, omega, tc)` and
+        `(bigomega+180, omega+180, tc')` are exactly degenerate).  Called
+        ONCE, from `run.py`, at the seam between sampling and
+        post-processing, so the convergence check, the mode reporter, the
+        seed ledger, the tables and the plots all see the same folded draws
+        -- folding per consumer is how they come to disagree, and a
+        diagnostic computed on the unfolded coordinate lies in the direction
+        of reporting non-convergence for chains that agree exactly.
+
+        Component-agnostic, like every other hook here: a component opts in
+        by defining `fold_node_degeneracy(posterior)` (returning True when
+        anything moved) and nothing in `System` or `run.py` learns its name.
+
+        A component rewrites only the RAW sampled coordinates; every
+        Deterministic is regenerated from them here, in one pass.  That is
+        the point of the split -- the alternative, flipping each derived
+        variable by hand, needs a list of everything that moves, and such a
+        list goes stale silently the next time one is added.
+
+        Returns the NAMES it regenerated, which the caller needs because
+        they come back in INTERNAL units while the posterior around them is
+        already in the user's.  Empty when nothing moved.
+
+        `sample_stats["lp"]` is deliberately left alone.  The two labels have
+        the same PHYSICAL posterior density -- the observation term is
+        identical and every prior term is symmetric under the reflection, both
+        asserted in tests/test_node_degeneracy.py -- so a folded draw's stored
+        lp is still its lp.  Where a coordinate's raw excursion trips
+        `_RAW_CANCELLATION_CLIP` (tc's does, by ~1e5 raw units), the
+        difference that clip introduces is an artifact of the sampled
+        coordinate rather than a density, and re-deriving lp from the folded
+        raws would record the artifact instead of removing it.
+        """
+        posterior = getattr(idata, "posterior", None)
+        if posterior is None:
+            return set()
+        moved = False
+        for comp in self.active_components.values():
+            fold = getattr(comp, "fold_node_degeneracy", None)
+            if fold is None:
+                continue
+            try:
+                moved = bool(fold(posterior)) or moved
+            except Exception as exc:  # a fold must never kill a finished fit
+                logger.warning(
+                    "[%s] degeneracy fold failed (%s); the draws are left "
+                    "unfolded, so any diagnostic on the degenerate "
+                    "coordinate is computed on both labels at once.",
+                    getattr(comp, "prefix", comp),
+                    exc,
+                )
+        if not moved:
+            return set()
+        try:
+            regenerated = pm.compute_deterministics(
+                posterior,
+                model=model,
+                merge_dataset=False,
+                progressbar=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "could not regenerate the deterministics after the "
+                "degeneracy fold (%s); the raw draws are folded and the "
+                "derived ones are NOT, so they disagree -- treat this "
+                "trace's derived columns as unreliable.",
+                exc,
+            )
+            return set()
+        for name in regenerated.data_vars:
+            if name in posterior:
+                posterior[name].values[...] = regenerated[name].values
+        logger.info(
+            "degeneracy fold applied; %d deterministics regenerated.",
+            len(regenerated.data_vars),
+        )
+        return {n for n in regenerated.data_vars if n in posterior}
+
     def distribute_posterior(self, idata):
         """Maps the traces from idata back to the individual Parameter objects."""
         posterior = az.extract(idata, keep_dataset=True)

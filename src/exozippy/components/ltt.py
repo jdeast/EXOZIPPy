@@ -62,10 +62,11 @@ import pytensor.tensor as pt
 from exoplanet_core.pymc import ops
 
 from ..constants import C_LIGHT_RSUN_PER_DAY
+from .orbit import physics as orbit_physics
 
 
 def line_of_sight_kinematics(
-    t, tp, n, ecc, sinw, cosw, sin_i, a_rel, factor=1.0
+    t, tp, n, ecc, sinw, cosw, sin_i, a_rel, factor=1.0, circular=False
 ):
     """Line-of-sight position, velocity, and acceleration of an orbiting
     body at the given (uncorrected) time -- one Kepler solve, everything
@@ -153,7 +154,10 @@ def line_of_sight_kinematics(
         acceleration [R_sun/day^2], each scaled by `factor`.
     """
     M = (t - tp) * n
-    sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
+    # The one shared Kepler solve; `circular=True` (the caller's STRUCTURAL
+    # claim, from Orbit.circular_orbits) skips the Newton iteration -- see
+    # orbit.physics.solve_kepler, review 6.8.2.
+    sinf, cosf = orbit_physics.solve_kepler(M, ecc, circular=circular)
 
     ecc_factor = pt.sqrt(1.0 - pt.sqr(ecc))
     r_over_a = (1.0 - pt.sqr(ecc)) / (1.0 + ecc * cosf)  # r / a_rel
@@ -281,6 +285,7 @@ def retarded_time(
     factor=1.0,
     z0=0.0,
     c=C_LIGHT_RSUN_PER_DAY,
+    circular=False,
 ):
     """Observed time -> target-frame time, correcting for the light-travel
     time across the target system (one Kepler solve; the caller re-solves
@@ -289,8 +294,10 @@ def retarded_time(
     see the quad_limb_darkened_flux precedent in limbdark.py).
 
     Parameters are exactly line_of_sight_kinematics's plus z0/c, forwarded
-    to solve_delay. See those two functions' docstrings for units and the
-    sign-convention caveat.
+    to solve_delay, and `circular`, forwarded to the Kepler solve (review
+    6.8.2 -- a structural claim from `Orbit.circular_orbits`, never a runtime
+    test). See those functions' docstrings for units and the sign-convention
+    caveat.
 
     Returns
     -------
@@ -303,7 +310,7 @@ def retarded_time(
         diagnostics/testing.
     """
     z, vz, az = line_of_sight_kinematics(
-        t, tp, n, ecc, sinw, cosw, sin_i, a_rel, factor
+        t, tp, n, ecc, sinw, cosw, sin_i, a_rel, factor, circular=circular
     )
     delay = solve_delay(z, vz, az, z0, c)
     return t - delay, delay

@@ -1,8 +1,39 @@
 import numpy as np
 import pytensor.tensor as pt
+from exoplanet_core.pymc import ops
 
 from ...constants import TWOPI
 from ...physics_registry import register_physics
+
+
+def solve_kepler(M, ecc, circular=False):
+    """``(sin f, cos f)`` from the mean anomaly -- the ONE Kepler solve.
+
+    `circular=True` skips the Newton iteration entirely and returns
+    `(sin M, cos M)`, which for `e = 0` is not an approximation: the
+    eccentric and true anomalies both equal the mean anomaly there (review
+    6.8.2).  A circular fit is a common one -- `secosw`/`sesinw` pinned at 0,
+    as `examples/kelt17` writes it -- and it was paying an exoplanet-core
+    Newton solve per epoch, per orbit, for an answer available from one sine
+    and one cosine.
+
+    `circular` is a STRUCTURAL claim the caller makes, never a runtime test,
+    and both halves matter.  Structural, because the two branches must not
+    both be built: a `pt.switch` would evaluate the Newton solve anyway
+    (which is the whole cost) and hand `where`'s VJP a branch to multiply by
+    zero.  A claim about the PIN and not about the value, because an
+    eccentricity that merely starts at zero can move, and a fit whose e is
+    free would then be solved as if it were circular for the whole run --
+    silently, and with a wrong RV phase.  `Orbit.circular_orbits` is the one
+    place that judgement is made.
+
+    The `ecc + pt.zeros_like(M)` broadcast in the eccentric branch is
+    load-bearing and pre-existing: exoplanet-core's op wants the two arrays
+    the same shape.
+    """
+    if circular:
+        return pt.sin(M), pt.cos(M)
+    return ops.kepler(M, ecc + pt.zeros_like(M))
 
 
 @register_physics
@@ -33,6 +64,45 @@ def calc_n(period):
 MAX_ECC = 0.9999
 
 
+# Floor on the radicand of sqrt(e) (review 1.8.2).  An exactly circular
+# seed -- `secosw: 0, sesinw: 0` in a params file, which is how a user spells
+# "start circular" -- makes d(sqrt e)/de infinite, and `de/d(secosw) = 2 secosw`
+# is exactly zero there, so pytensor's chain rule multiplies inf by 0 and the
+# START GRADIENT is NaN with nothing naming the cause.  The floor goes on the
+# RADICAND and never on the result, the house rule (calc_theta_E, calc_jitter,
+# _vcve_quadratic): clamping after the root multiplies sqrt'(0) = inf by
+# pt.maximum's zero gradient on the clamped side, which is the same NaN again.
+# 1e-30 leaves sqrt(e) = 1e-15, a quantization far below any eccentricity a fit
+# can distinguish, and it is inert for every e above it -- pt.maximum returns
+# its argument bit-for-bit, so no non-circular fit moves.
+ECC_FLOOR = 1e-30
+
+
+def _sqrt_ecc(ecc):
+    """``sqrt(e)`` with the radicand floored -- see ECC_FLOOR."""
+    return pt.sqrt(pt.maximum(ecc, ECC_FLOOR))
+
+
+def _circular_bias(ecc_raw):
+    """``1.0`` where the sqrt(e) pair is EXACTLY zero, ``0.0`` elsewhere.
+
+    An ADDITIVE nudge, deliberately, rather than a `pt.switch` selecting
+    between an angle and a convention.  A switch is the where-trap's exact
+    shape: `arctan2(0, 0)` has a NaN gradient, the switch keeps it as the
+    UNSELECTED branch, and `where`'s VJP multiplies that branch by zero.
+    Measured, and worth stating precisely: on this PyTensor and the C
+    backend the two switch-guarded angles (`calc_omega`, `calc_lam_from_sv`)
+    do NOT in fact produce a NaN -- a rewrite gets there first -- so unlike
+    `calc_tp` and the linear e vector they were not a live bug.  They are
+    written this way anyway, because the guard must not depend on a rewrite
+    surviving a backend change, and because biasing the arctan2 ARGUMENTS
+    costs nothing: one branch, no unselected one to poison anything, exactly
+    inert away from the origin (`x + 0.0` is bit-identical) and at the origin
+    it reproduces the convention it replaces.
+    """
+    return pt.switch(pt.eq(ecc_raw, 0.0), 1.0, 0.0)
+
+
 def ecc_from_sqrte(secosw, sesinw):
     """Unclipped eccentricity, secosw^2 + sesinw^2.
 
@@ -52,11 +122,19 @@ def calc_ecc(secosw, sesinw):
 
 @register_physics
 def calc_omega(secosw, sesinw):
+    """Argument of periastron from the sqrt(e) pair.
+
+    At exactly zero the angle is undefined and the convention is omega = 90
+    deg, so the RV phase stays perfectly aligned.  The convention is applied
+    by biasing the arctan2 argument rather than by switching on the answer --
+    `arctan2(1, 0)` IS pi/2 -- so that `arctan2(0, 0)` never appears as an
+    unselected branch for `where`'s VJP to multiply by zero (see
+    _circular_bias, review 1.8.2, including the measurement that says this
+    one was hardening rather than a live bug).  Every non-circular value is
+    bit-identical: the bias is exactly 0.0 there.
+    """
     e_raw = pt.sqr(sesinw) + pt.sqr(secosw)
-    # If exactly 0, enforce the limit so the RV phase stays perfectly aligned
-    return pt.switch(
-        pt.eq(e_raw, 0.0), np.pi / 2.0, pt.arctan2(sesinw, secosw)
-    )
+    return pt.arctan2(sesinw + _circular_bias(e_raw), secosw)
 
 
 # ----------------------------------------------------------------------
@@ -301,12 +379,14 @@ def calc_cosw(omega):
 
 @register_physics
 def calc_esinw(ecc, sesinw):
-    return pt.sqrt(ecc) * sesinw
+    """e sin(omega) as sqrt(e) * sesinw.  Radicand floored -- see ECC_FLOOR."""
+    return _sqrt_ecc(ecc) * sesinw
 
 
 @register_physics
 def calc_ecosw(ecc, secosw):
-    return pt.sqrt(ecc) * secosw
+    """e cos(omega) as sqrt(e) * secosw.  Radicand floored -- see ECC_FLOOR."""
+    return _sqrt_ecc(ecc) * secosw
 
 
 @register_physics
@@ -326,14 +406,35 @@ def calc_b(ar, cosi, ecc, esinw):
     return ar * cosi * (1.0 - pt.sqr(ecc)) / (1.0 + esinw)
 
 
-# Stable Tc -> Tp logic
-# arctan(x/y) -> arctan2(x,y)
-# we multiply both x and y by sqrt(e) so we can use the step parameter directly and avoid the singularity at e=0
 @register_physics
 def calc_tp(ecc, sesinw, secosw, tc, n):
+    """Time of periastron from the sqrt(e) pair (the Tc -> Tp inversion).
+
+    `arctan(x/y) -> arctan2(x, y)`, with both arguments multiplied through by
+    sqrt(e) so the sampled pair appears directly and the 1/sqrt(e) singularity
+    of the naive form cancels.
+
+    Two shields, both for review 1.8.2's exactly-circular seed, and neither
+    changes any other start by a single bit:
+
+    * `sqrt(e)` takes the floored radicand (ECC_FLOOR), because
+      `d(sqrt e)/de = inf` times `de/d(secosw) = 0` is NaN.
+    * both arctan2 arguments vanish together at e = 0 -- the pair IS the two
+      arguments -- and `arctan2(0, 0)` has a NaN gradient.  `_circular_bias`
+      pushes the x argument to 1 there, giving `E0 = 2 arctan2(0, 1) = 0` and
+      so `tp = tc`.  That is the same orbit `calc_tp_from_ecc` describes at
+      (e = 0, omega = pi/2), i.e. it agrees with `calc_omega`'s convention for
+      the very configuration that made omega undefined.
+
+    `calc_tp_from_ecc` remains the better-behaved form on general grounds (it
+    cancels the sqrt(e) factor algebraically rather than flooring it) and is
+    what a V_c/V_e orbit uses; this one is kept because the sqrt(e)cos/sin
+    path's reported `tp` -- which differs from the other form by a whole
+    period on part of the domain -- must not move for every shipped fit.
+    """
     E0 = 2.0 * pt.arctan2(
-        pt.sqrt(1.0 - ecc) * (pt.sqrt(ecc) - sesinw),
-        pt.sqrt(1.0 + ecc) * secosw,
+        pt.sqrt(1.0 - ecc) * (_sqrt_ecc(ecc) - sesinw),
+        pt.sqrt(1.0 + ecc) * secosw + _circular_bias(ecc),
     )
     M0 = E0 - ecc * pt.sin(E0)
     return tc - M0 / n
@@ -373,6 +474,115 @@ def calc_tp_from_ecc(ecc, omega, tc, n):
     )
     M0 = E0 - ecc * pt.sin(E0)
     return tc - M0 / n
+
+
+@register_physics
+def calc_ts(ecc, omega, tc, period):
+    """Time of the SECONDARY eclipse (occultation), review 8.8.7.
+
+    The primary transit is at true anomaly `f_c = pi/2 - omega` and the
+    occultation at the opposite conjunction `f_s = -pi/2 - omega`, so the two
+    are separated by the difference of their mean anomalies::
+
+        t_s - t_c = (M_s - M_c) P / 2 pi
+
+    which is `P/2` exactly for a circular orbit and departs from it mainly
+    with `e cos omega` -- the classical statement that the eclipse PHASE
+    measures `e cos omega` (Winn 2010 eq 33; Charbonneau et al. 2005).  That
+    is what makes `ts` an INFERENCE path and not just a table row: a user's
+    Gaussian on this derived parameter constrains the eccentricity vector
+    through exactly this expression, with a gradient.
+
+    Written from the exact anomalies rather than the `(1 + 4 e cos omega/pi)
+    P/2` series, because the series is only first order in e and the exact
+    form costs the same two arctan2s.
+    """
+    return ts_from_ecc_omega(ecc, omega, tc, period, xp=pt)
+
+
+def mean_anomaly_at_true_anomaly(ecc, true_anomaly, xp=pt):
+    """Mean anomaly at a true anomaly, in radians.
+
+    `tan(E/2) = sqrt((1-e)/(1+e)) tan(f/2)` then `M = E - e sin E`, written
+    with arctan2 on the half-angle so nothing divides by a vanishing cosine.
+    The same algebra `calc_tp_from_ecc` uses at `f = pi/2 - omega`; a helper
+    because `calc_ts` needs it at two different anomalies.
+
+    Backend-agnostic through `xp=` for the reason
+    `planet.physics.contact_duration` is: review 8.8.7's seed solver must
+    evaluate the same eclipse-timing model the likelihood does, from inside
+    the relaxation engine, and a numpy transcription would be a second copy
+    free to drift from this one.
+    """
+    half_f = 0.5 * true_anomaly
+    e_anom = 2.0 * xp.arctan2(
+        xp.sqrt(xp.maximum(1.0 - ecc, 0.0)) * xp.sin(half_f),
+        xp.sqrt(1.0 + ecc) * xp.cos(half_f),
+    )
+    return e_anom - ecc * xp.sin(e_anom)
+
+
+def ts_from_ecc_omega(ecc, omega, tc, period, xp=pt):
+    """`calc_ts`'s body; see that docstring and mean_anomaly_at_true_anomaly.
+
+    Both anomalies come out in `(-pi, pi]`, so their difference puts
+    `t_s - t_c` in `(-P, P)`; the branch below reports the eclipse AFTER
+    `tc`, the convention a reader expects and the one EXOFASTv2 uses.  It is
+    a `where` whose two branches are `dt` and `dt + P`, both finite and both
+    differentiable, so it is not the where-trap (that is about a branch which
+    is itself NaN or infinite).  The step it carries is real and sits at
+    `t_s = t_c`, reachable only as `e -> 1` at grazing geometry.
+    """
+    m_c = mean_anomaly_at_true_anomaly(ecc, 0.5 * np.pi - omega, xp=xp)
+    m_s = mean_anomaly_at_true_anomaly(ecc, -0.5 * np.pi - omega, xp=xp)
+    dt = (m_s - m_c) * period / TWOPI
+    return tc + xp.where(dt < 0.0, dt + period, dt)
+
+
+def mean_anomaly_at_conjunction(ecc, omega):
+    """``M`` at primary conjunction, in radians -- pure numpy.
+
+    The numpy twin of the Kepler algebra inside `calc_tp_from_ecc`: the true
+    anomaly at conjunction is `f = pi/2 - omega`, so
+
+        tan(E/2) = sqrt((1 - e)/(1 + e)) tan(f/2),   M = E - e sin E
+
+    and `tp = tc - M/n` is exactly that function.  Written in numpy because
+    its consumers are the RELAXATION ENGINE and the stage-3 tc window, neither
+    of which has a tensor graph -- and written as its own function, rather than
+    inline at either call site, so the two cannot drift apart from each other
+    or from the pytensor form.  `tests/test_tp_seed.py` pins all three against
+    one another.
+
+    Vectorized: every argument may be an array.
+    """
+    half_f = 0.5 * (0.5 * np.pi - np.asarray(omega, dtype=float))
+    ecc = np.asarray(ecc, dtype=float)
+    E0 = 2.0 * np.arctan2(
+        np.sqrt(np.maximum(1.0 - ecc, 0.0)) * np.sin(half_f),
+        np.sqrt(1.0 + ecc) * np.cos(half_f),
+    )
+    return E0 - ecc * np.sin(E0)
+
+
+def tc_from_tp(tp, ecc, omega, period):
+    """Time of conjunction implied by a time of PERIASTRON (review 8.1.1).
+
+    `calc_tp` and `calc_tp_from_ecc` both compute `tp = tc - M/n`; this is
+    that equation read the other way, `tc = tp + M P / 2 pi`.  The inversion
+    is CLOSED FORM and needs no Newton iteration, because the conjunction is
+    defined by a true anomaly (`f = pi/2 - omega`) rather than by a time: it
+    is the mapping `M -> E` that is transcendental, and this direction never
+    needs it.  That is also why this is a standalone SOLVER for the engine
+    rather than a sympy relation -- see orbit/symbolic_physics.py.
+
+    `omega` is in RADIANS and `tp`/`period` in days, i.e. the internal units
+    the engine's `resolved` dict holds.
+    """
+    m_c = mean_anomaly_at_conjunction(ecc, omega)
+    return np.asarray(tp, dtype=float) + m_c * np.asarray(
+        period, dtype=float
+    ) / (2.0 * np.pi)
 
 
 # ----------------------------------------------------------------------
@@ -507,6 +717,15 @@ def calc_vsini_from_sv(svcoslam, svsinlam):
 
 @register_physics
 def calc_lam_from_sv(svcoslam, svsinlam):
+    """Spin-orbit angle from the sqrt(vsini) pair.
+
+    At exactly 0 the angle is undefined and the convention is 0 (aligned) --
+    and `svcoslam: 0, svsinlam: 0` is precisely how an aligned start is
+    spelled, so this is the same case `calc_omega` has, and it is hardened
+    the same way and for the same reason: biasing the x argument to
+    `arctan2(0, 1) = 0` keeps the convention with ONE branch, leaving no
+    unselected `arctan2(0, 0)` for `where`'s VJP to multiply by zero
+    (see _circular_bias, review 1.8.2).
+    """
     v_raw = pt.sqr(svcoslam) + pt.sqr(svsinlam)
-    # At exactly 0 the angle is undefined; pin to 0 (aligned) like calc_omega.
-    return pt.switch(pt.eq(v_raw, 0.0), 0.0, pt.arctan2(svsinlam, svcoslam))
+    return pt.arctan2(svsinlam, svcoslam + _circular_bias(v_raw))

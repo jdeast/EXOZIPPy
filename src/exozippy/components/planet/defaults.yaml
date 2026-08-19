@@ -66,15 +66,6 @@ planet:
         func_name: "calc_logg_from_mass"
         deps: ["mass", "radius"]
 
-  distance:
-    lower: 0.001
-    upper: 100000.0
-    initval: 10.0
-    init_scale: 0.1
-    unit: "pc"
-    internal_unit: "pc"
-    latex: "D"
-    description: "Distance"
   radius:
     unit: "jupiterRad"
     lower: 0.000001
@@ -139,6 +130,80 @@ planet:
       default:
         func_name: "calc_b"
         deps: ["ar", "orbit.cosi", "orbit.ecc", "orbit.esinw"]
+  # --- Transit and occultation geometry (review 8.8.7) --------------------
+  # Winn 2010 eqs 14-16 (see planet/physics.py for the algebra and for why
+  # EXOFASTv2's `tt` is deliberately absent).  These were bare Deterministics
+  # built inside transit.py; as Parameters they get a table row, a LaTeX
+  # macro, a unit -- and a user-settable Gaussian, which is the point:
+  # a published duration and eclipse time CONSTRAIN e and omega, since
+  # T_S/T_14 measures e sin omega and the eclipse phase measures e cos omega.
+  # Declared whenever an orbit exists, transit data or not: an RV-only fit
+  # has a perfectly well-defined transit duration, and refusing to state it
+  # is what made the constraint unreachable.
+  bs:
+    unit: ""
+    internal_unit: ""
+    latex: "b_S"
+    description: "Eclipse Impact Param."
+    expressions:
+      default:
+        func_name: "calc_impact_secondary"
+        deps: [ "ar", "orbit.cosi", "orbit.ecc", "orbit.esinw" ]
+  t14:
+    unit: "d"
+    internal_unit: "d"
+    latex: "T_{14}"
+    description: "Transit Duration"
+    expressions:
+      default:
+        func_name: "calc_t14"
+        deps: [ "ar", "p", "orbit.cosi", "orbit.sini", "orbit.ecc", "orbit.esinw", "orbit.period" ]
+  tfwhm:
+    unit: "d"
+    internal_unit: "d"
+    latex: "T_{\\rm FWHM}"
+    description: "FWHM Transit Duration"
+    expressions:
+      default:
+        func_name: "calc_tfwhm"
+        deps: [ "ar", "p", "orbit.cosi", "orbit.sini", "orbit.ecc", "orbit.esinw", "orbit.period" ]
+  tau:
+    unit: "d"
+    internal_unit: "d"
+    latex: "\\tau"
+    description: "Ingress/Egress Duration"
+    expressions:
+      default:
+        func_name: "calc_tau"
+        deps: [ "ar", "p", "orbit.cosi", "orbit.sini", "orbit.ecc", "orbit.esinw", "orbit.period" ]
+  t14s:
+    unit: "d"
+    internal_unit: "d"
+    latex: "T_{S,14}"
+    description: "Eclipse Duration"
+    expressions:
+      default:
+        func_name: "calc_t14s"
+        deps: [ "ar", "p", "orbit.cosi", "orbit.sini", "orbit.ecc", "orbit.esinw", "orbit.period" ]
+  tfwhms:
+    unit: "d"
+    internal_unit: "d"
+    latex: "T_{S,\\rm FWHM}"
+    description: "FWHM Eclipse Duration"
+    expressions:
+      default:
+        func_name: "calc_tfwhms"
+        deps: [ "ar", "p", "orbit.cosi", "orbit.sini", "orbit.ecc", "orbit.esinw", "orbit.period" ]
+  taus:
+    unit: "d"
+    internal_unit: "d"
+    latex: "\\tau_S"
+    description: "Eclipse Ingress Duration"
+    expressions:
+      default:
+        func_name: "calc_taus"
+        deps: [ "ar", "p", "orbit.cosi", "orbit.sini", "orbit.ecc", "orbit.esinw", "orbit.period" ]
+
   m_total:
     internal_unit: "solMass"
     unit: "solMass"

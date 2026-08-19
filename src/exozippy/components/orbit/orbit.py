@@ -612,6 +612,63 @@ class Orbit(Component):
                             W[i, idx] = 1.0
                 self._group_w[side][ctype] = W
 
+    @property
+    def circular_orbits(self):
+        """Per orbit: is the eccentricity STRUCTURALLY zero? (review 6.8.2)
+
+        True only where the sqrt(e) pair is PINNED at zero -- `sigma: 0` with
+        `initval: 0` on both `secosw` and `sesinw`, which is how a circular
+        fit is written (`examples/kelt17`).  Deliberately not "e is small at
+        the start": an unpinned eccentricity can move, and treating it as
+        circular would silently give the whole run the wrong RV phase.
+
+        Conservative everywhere it cannot be sure -- a V_c/V_e orbit (whose
+        circular case is a different pin, on a coordinate whose inversion is
+        singular exactly there), a parameter that has not been resolved, or
+        anything unpinned -- because the cost of being wrong is a wrong
+        model and the cost of being conservative is the Kepler solve we
+        were paying anyway.
+        """
+        n_el = self.n_elements
+        circ = np.ones(n_el, dtype=bool)
+        for name in ("secosw", "sesinw"):
+            if name not in self.manifest:
+                return np.zeros(n_el, dtype=bool)
+            cfg = self.config_manager.resolve(
+                self.prefix, name, shape=(n_el,), names=self.names
+            )
+            sigma = np.atleast_1d(np.asarray(cfg.get("sigma"), dtype=float))
+            initval = np.atleast_1d(
+                np.asarray(cfg.get("initval"), dtype=float)
+            )
+            if sigma.size != n_el or initval.size != n_el:
+                return np.zeros(n_el, dtype=bool)
+            circ &= (sigma == 0.0) & (initval == 0.0)
+        modes = np.atleast_1d(
+            np.asarray(getattr(self, "ecc_modes", []), dtype=object)
+        )
+        if modes.size == n_el:
+            circ &= modes == "hk"
+        return circ
+
+    def _all_circular(self, orbit_map=None):
+        """True when EVERY orbit `solve_kepler` is about to see is circular.
+
+        All-or-nothing, deliberately: the saving comes from not BUILDING the
+        Newton solve, and a mixed vector still has to build it for the
+        eccentric columns.  Splitting the vector, solving the eccentric
+        subset and reassembling with `set_subtensor` would save arithmetic
+        and cost a graph that no longer matches the simple one -- not worth
+        it until someone measures a system where it matters.
+        """
+        circ = self.circular_orbits
+        if orbit_map is not None:
+            idx = np.atleast_1d(np.asarray(orbit_map, dtype=int))
+            if idx.size == 0:
+                return False
+            circ = circ[idx]
+        return bool(np.all(circ)) and circ.size > 0
+
     def _resolve_initval(self, name, shape):
         """This orbit's stage-2 initval for ``name``, NaN where unseeded.
 
@@ -647,19 +704,94 @@ class Orbit(Component):
         logP = self._resolve_initval("logP", shape)
         return np.where(np.isnan(period_user), 10.0**logP, period_user)
 
+    def _user_seeded_initval(self, param):
+        """Per orbit: did the USER write an `initval` for `param`?
+
+        `_resolve_initval` cannot answer this -- it returns the defaults.yaml
+        value too, and for `tc` that backstop is always a number.  Reads the
+        user's own entries in the two spellings that survive
+        `standardize_param_names`, exactly as `_user_pinned` does.
+        """
+        user = getattr(self.config_manager, "user_params", None) or {}
+        seeded = np.zeros(self.n_elements, dtype=bool)
+        entry = user.get(f"{self.prefix}.{param}")
+        if isinstance(entry, dict) and entry.get("initval") is not None:
+            seeded[:] = True
+        for i in range(self.n_elements):
+            entry = user.get(f"{self.prefix}.{i}.{param}")
+            if isinstance(entry, dict) and entry.get("initval") is not None:
+                seeded[i] = True
+        return seeded
+
+    def _seeded_sqrte_pair(self, shape):
+        """(secosw, sesinw) per orbit implied by the stage-3 seeds.
+
+        Prefers an explicit `ecc` + `omega` pair -- the spelling the RV
+        literature uses -- and falls back to the sqrt(e) pair itself (user
+        entry or defaults.yaml).  Stage 3 again: the relaxation engine, which
+        normally reconciles the two spellings, has not run, so this is the
+        same job `_seeded_period` does for the period.
+        """
+        sc0 = self._resolve_initval("secosw", shape)
+        ss0 = self._resolve_initval("sesinw", shape)
+        factor_om = (
+            self.config_manager.get_conversion_factor(self.prefix, "omega")
+            or 1.0
+        )
+        om = self._resolve_initval("omega", shape) * factor_om
+        e_u = self._resolve_initval("ecc", shape)
+        have_ew = ~np.isnan(om) & ~np.isnan(e_u)
+        sc0 = np.where(have_ew, np.sqrt(np.abs(e_u)) * np.cos(om), sc0)
+        ss0 = np.where(have_ew, np.sqrt(np.abs(e_u)) * np.sin(om), ss0)
+        return sc0, ss0
+
+    def _seeded_ecc_omega(self, shape):
+        """(e, omega in radians) per orbit from `_seeded_sqrte_pair`.
+
+        Same ceiling `calc_ecc` applies, for the same reason: both callers
+        feed the result to a Kepler solve (a forward-model evaluation), not
+        to a bound.
+        """
+        sc0, ss0 = self._seeded_sqrte_pair(shape)
+        ecc0 = np.clip(sc0**2 + ss0**2, 0.0, physics.MAX_ECC)
+        return ecc0, np.arctan2(ss0, sc0)
+
+    def _seeded_tc(self, shape):
+        """Per-orbit time of conjunction in days implied by the stage-3 seeds.
+
+        `tc`'s hard window is `tc_init +/- P/2` and it is declared HERE, at
+        stage 3 -- before the relaxation engine can turn a user's time of
+        PERIASTRON into a time of conjunction (the one-way solver of review
+        8.1.1).  Reading tc's own resolved initval alone therefore returns the
+        defaults.yaml backstop 2460000 for a params file that seeds `tp:`
+        instead, and the tc the engine goes on to solve lands hundreds of
+        thousands of days outside its own window: a fatal out-of-bounds start,
+        naming a parameter the user never wrote.  Exactly the shape of the
+        `_seeded_period` bug `tests/test_orbit_tc_window.py` covers.
+
+        Only where the user did not seed `tc` themselves: an explicit `tc` is
+        RANK_USER, the solver stands down for it, and so must the window.
+        """
+        tc = self._resolve_initval("tc", shape)
+        tp = self._resolve_initval("tp", shape)
+        use_tp = ~np.isnan(tp) & ~self._user_seeded_initval("tc")
+        if not use_tp.any():
+            return tc
+        ecc0, w0 = self._seeded_ecc_omega(shape)
+        implied = physics.tc_from_tp(tp, ecc0, w0, self._seeded_period(shape))
+        return np.where(use_tp, implied, tc)
+
     def register_parameters(self, system):
         """Stage 3: Calculate window constraints and declare the manifest."""
         shape = (self.n_elements,)
 
         # 1. Peer into the config (Pre-flight windows)
-        tc_cfg = self.config_manager.resolve(
-            self.prefix, "tc", shape=shape, names=self.names
-        )
-
-        tc_init = np.atleast_1d(tc_cfg["initval"])
         # tc is periodic (tc and tc + P are the same solution), so one full
-        # period is the right hard window -- but it must be the period the
-        # user actually seeded, in either spelling.  See _seeded_period.
+        # period is the right hard window -- but it must be centred on the tc
+        # the user actually seeded and scaled by the period they actually
+        # seeded, in every legal spelling of each.  See _seeded_tc (which
+        # covers a `tp:` seed) and _seeded_period.
+        tc_init = self._seeded_tc(shape)
         half_period = self._seeded_period(shape) / 2.0
 
         self.manifest = {
@@ -727,6 +859,10 @@ class Orbit(Component):
         )
         for key in ("esinw", "ecosw", "tp"):
             self.manifest[key] = ecc_entries[key]
+        # The occultation time (review 8.8.7).  Here rather than on `planet`
+        # because every input is an orbit parameter and `tc` is one of them;
+        # after `tp` because it is the other Kepler-timing output.
+        self.manifest["ts"] = {"expr_key": "default", "force_node": True}
         for key in ("vcve", "xomega", "yomega"):
             if key in ecc_entries:
                 self.manifest[key] = ecc_entries[key]
@@ -791,9 +927,12 @@ class Orbit(Component):
             # transformation is a reflection through the sky plane
             # (z -> -z): invisible to ANY astrometry, absolute or relative.
             # Only radial information (RVs) identifies the ascending node.
-            has_rv = in_topology(system, "rvinstrument") is not None
-            if not has_rv:
-                self._restrict_bigomega_halfplane(shape)
+            # PER ORBIT, not system-wide: an RV-constrained orbit in a mixed
+            # system is not degenerate at all, and treating it as if it were
+            # cost it a table note it did not deserve.
+            self.node_degenerate = self._node_degenerate_orbits(system)
+            if self.node_degenerate.any():
+                self._declare_node_degeneracy()
 
         i180_arr = np.atleast_1d(getattr(self, "i180", False)) | has_astrometry
         derived_lowers = np.where(i180_arr, -1.0, 0.0)
@@ -834,118 +973,304 @@ class Orbit(Component):
                     "i > 90 deg" if own_i180.any() else "i < 90 deg",
                 )
 
-    def _restrict_bigomega_halfplane(self, shape):
-        """Astrometry without RVs: restrict bigomega to [0, 180] deg.
+    def _node_degenerate_orbits(self, system):
+        """Per orbit: is the ascending node unidentifiable? (review 1.8.3)
 
-        (bigomega, omega_*) and (bigomega+180, omega_*+180) is a reflection
-        through the sky plane, so it produces identical astrometry of every
-        kind (absolute, epoch, and relative); only RVs identify which node
-        is ascending.  Bounding ybigomega >= 0 selects the bigomega in
-        [0, 180] mode.  Seeds in (180, 360) are remapped to the equivalent
-        solution -- which flips (xbigomega, ybigomega) AND (secosw,
-        sesinw), and shifts tc so the orbit's position-vs-time is
-        unchanged.  A table note documents the artificial boundary on
-        omega_* and bigomega.
+        True where astrometry constrains the orbit and nothing radial does.
+        `(bigomega, omega_*) -> (bigomega + 180, omega_* + 180)` with the
+        matching shift of `tc` is a reflection through the sky plane, so it
+        produces identical astrometry of every kind; only an RV says which
+        node is ascending.
+
+        PER ORBIT, which is what the shared `amplitude_constrained_orbits`
+        predicate makes cheap: it already answers "which orbits does an RV
+        measure" and "which does astrometry measure" separately, and the two
+        must never disagree with `Planet._mass_constrained` or
+        `Orbit._transit_only` about either.  The old test was system-wide --
+        any astrometry and no rvinstrument anywhere -- so a mixed system
+        truncated an RV-constrained orbit for nothing.
+        """
+        components = getattr(system, "active_components", None) or {}
+        astrometric = set()
+        ast = components.get("astrometryinstrument")
+        if ast is not None:
+            for i, mode in enumerate(ast.modes):
+                if mode == "rel":
+                    if ast.rel_orbit[i] is not None:
+                        astrometric.add(ast.rel_orbit[i])
+                else:
+                    s_idx = int(ast.config[i].get("star_ndx", 0))
+                    astrometric.update(
+                        o
+                        for o, role in self.star_membership(s_idx)
+                        if role == "primary"
+                    )
+        radial = set()
+        rv = components.get("rvinstrument")
+        if rv is not None:
+            for s_idx in set(rv.star_ndx):
+                radial.update(o for o, _ in self.star_membership(s_idx))
+        return np.array(
+            [
+                (i in astrometric) and (i not in radial)
+                for i in range(self.n_elements)
+            ],
+            dtype=bool,
+        )
+
+    def _declare_node_degeneracy(self):
+        """Seed the node direction vector and annotate the degenerate orbits.
+
+        What this does NOT do any more, and why (review 1.8.3): it used to
+        bound `ybigomega >= 0`, truncating `bigomega` to `[0, 180]` to select
+        one of the two exactly degenerate modes, and remap a seed in
+        `(180, 360)` onto the surviving one.  That HARD truncation biases a
+        posterior that hugs the boundary -- measured on `examples/HIP1349`,
+        which gave `Omega = 176.5 +/- 2.7` against DMSA's `172.6 +/- 3.4`
+        with ZERO origin-crossings in 16k draws.
+
+        The bound is unnecessary, and what it actually cost is worth stating
+        precisely.  A posterior centred near the wall extends PAST it, and
+        the mass past 180 deg is not represented anywhere else in the
+        truncated support -- `(182, omega, tc)` is not the same solution as
+        `(2, omega, tc)`, only as `(2, omega+180, tc')`.  So the wall deleted
+        real posterior mass and piled the rest against itself, which is the
+        HIP1349 measurement.  Without it the chain moves through 180 deg
+        continuously and the bias is gone.
+
+        What removing it does NOT buy is migration between the two labels.
+        The reflection is a THREE-coordinate move -- the node, omega and tc
+        together -- so a straight line through the origin in
+        `(xbigomega, ybigomega)` is not along the degeneracy at all; and
+        measured, the partner sits ~1e5 raw units away in tc (its raw
+        coordinate is scaled to the timing precision, while the two labels
+        are half a period apart).  So `fold_node_degeneracy` exists for
+        chains or SEEDS that start in different labels -- the case that makes
+        Rhat lie -- and not to tidy up after a chain that crossed.
+
+        `src/exozippy/config.md` lists this bound among the manifest's
+        deliberate structural values; that entry now names the fold instead.
         """
         note = (
             r"With astrometry but no RVs, $(\Omega, \omega_*)$ and "
             r"$(\Omega+180^\circ, \omega_*+180^\circ)$ are exactly "
-            r"degenerate (which node is ascending is unknown); "
-            r"$\Omega$ is artificially restricted to "
-            r"$[0^\circ, 180^\circ]$ to select one mode."
+            r"degenerate (which node is ascending is unknown); the "
+            r"posterior is folded onto $\Omega \in [0^\circ, "
+            r"180^\circ)$ after sampling, so the reported interval is a "
+            r"fold of a chain that explored both."
         )
 
-        # NOTE: this runs at stage 3, BEFORE the relaxation engine, so only
-        # user-provided initvals (and defaults) are visible here.  The x/y
-        # direction vector is therefore derived directly from the user's
-        # bigomega initval; the manifest initvals set below override the
-        # relaxation-engine seeds at build time.
-        cm = self.config_manager
-
-        def rslv(name):
-            return self._resolve_initval(name, shape)
-
-        factor_bo = cm.get_conversion_factor(self.prefix, "bigomega") or 1.0
-        bo = rslv("bigomega") * factor_bo  # rad; NaN where unseeded
-
-        # Unseeded elements start at bigomega = 90 deg (center of the
-        # allowed half-plane; y = 0 would sit exactly on the new bound).
-        x_init = np.where(np.isnan(bo), 0.0, np.cos(bo))
-        y_init = np.where(np.isnan(bo), 1.0, np.sin(bo))
-
-        # Seeds with bigomega in (180, 360): remap to the degenerate
-        # partner (bigomega - 180, omega_* + 180, and tc shifted so the
-        # position-vs-time model is unchanged).
-        flip = y_init < 0.0
-        if np.any(flip):
-            logger.warning(
-                f"[{self.prefix}] bigomega initval(s) in (180, 360) deg but no "
-                f"RVs are present; remapping element(s) {np.where(flip)[0]} to "
-                f"the degenerate (bigomega-180, omega+180) solution."
-            )
-
-            # Orientation in the user's own terms: prefer explicit ecc+omega
-            # initvals; otherwise secosw/sesinw (user or defaults).
-            sc0 = rslv("secosw")
-            ss0 = rslv("sesinw")
-            factor_om = cm.get_conversion_factor(self.prefix, "omega") or 1.0
-            om = rslv("omega") * factor_om
-            e_u = rslv("ecc")
-            have_ew = ~np.isnan(om) & ~np.isnan(e_u)
-            sc0 = np.where(have_ew, np.sqrt(np.abs(e_u)) * np.cos(om), sc0)
-            ss0 = np.where(have_ew, np.sqrt(np.abs(e_u)) * np.sin(om), ss0)
-
-            tc0 = rslv("tc")
-            period = self._seeded_period(shape)
-
-            def _M_c(ecc, w):
-                E_c = 2.0 * np.arctan2(
-                    np.sqrt(1.0 - ecc) * (1.0 - np.sin(w)),
-                    np.sqrt(1.0 + ecc) * np.cos(w),
-                )
-                return E_c - ecc * np.sin(E_c)
-
-            # Same ceiling calc_ecc applies, for the same reason: this is a
-            # forward-model evaluation (a Kepler solve), not a bound.
-            ecc0 = np.clip(sc0**2 + ss0**2, 0.0, physics.MAX_ECC)
-            w0 = np.arctan2(ss0, sc0)
-            n_mm = 2.0 * np.pi / period
-            tp = tc0 - _M_c(ecc0, w0) / n_mm
-            tc_new = tp + _M_c(ecc0, w0 + np.pi) / n_mm
-
-            x_init = np.where(flip, -x_init, x_init)
-            y_init = np.where(flip, -y_init, y_init)
-            sc_init = np.where(flip, -sc0, sc0)
-            ss_init = np.where(flip, -ss0, ss0)
-            tc_init = np.where(flip, tc_new, tc0)
-
-            # merge_options, not `{**entry, ...}`: a manifest entry may be None
-            # (a free parameter, which is how mode_manifest spells the
-            # sqrt(e) pair) or a bare string naming an expression, and both
-            # spellings break a splat -- the first with a TypeError, the second
-            # by silently dropping the expr_key (review 4.5.3).
-            self.manifest["secosw"] = merge_options(
-                self.manifest.get("secosw"), initval=sc_init
-            )
-            self.manifest["sesinw"] = merge_options(
-                self.manifest.get("sesinw"), initval=ss_init
-            )
-            half_period = period / 2.0
-            self.manifest["tc"] = merge_options(
-                self.manifest.get("tc"),
-                initval=tc_init,
-                lower=tc_init - half_period,
-                upper=tc_init + half_period,
-            )
-
-        # Keep seeded boundary values (bigomega exactly 0 or 180) strictly
-        # inside the ybigomega >= 0 bound.
-        y_init = np.maximum(y_init, 1e-6)
-
-        self.manifest["xbigomega"] = {"initval": x_init}
-        self.manifest["ybigomega"] = {"initval": y_init, "lower": 0.0}
+        # The direction-vector SEED is not set here any more, and that is a
+        # deletion rather than an omission.  It existed to carry the REMAP --
+        # a seed in (180, 360) had to be flipped onto the surviving label,
+        # and the flip had to beat the relaxation engine, so it was a
+        # manifest option.  With no remap there is nothing to beat: the
+        # engine has `Eq(xbigomega, cos(bigomega))` and its twin and seeds
+        # the pair from a user `bigomega` itself, which is exactly what the
+        # astrometry-WITH-RVs branch has always relied on.  Setting it here
+        # anyway would apply a shape-wide option to every orbit, degenerate
+        # or not, and so move the start of an orbit this has no business
+        # touching -- measured on examples/kelt4, whose planet orbit `b` has
+        # no bigomega seed and would have been moved from 0 to 90 deg.
         self.manifest["bigomega"] = {"expr_key": "default", "table_note": note}
-        self.manifest["omega"] = {"expr_key": "default", "table_note": note}
+        self.manifest["omega"] = merge_options(
+            self.manifest.get("omega"), table_note=note
+        )
+
+    # Sampled coordinates the reflection through the sky plane moves.  The
+    # first four flip sign; `tc` moves to the other conjunction.  Every other
+    # affected quantity -- omega, esinw, ecosw, tp, ts, sinw, cosw, vcve,
+    # bigomega itself -- is DERIVED from these, which is why the fold rewrites
+    # only these five and then has PyMC recompute the rest: a hand-written
+    # list of derived variables to flip is a list that goes stale silently the
+    # next time one is added.
+    _FOLD_FLIP = ("xbigomega", "ybigomega", "secosw", "sesinw")
+
+    def fold_node_degeneracy(self, posterior, verbose=True):
+        """Collapse the ascending-node degeneracy in a posterior, in place.
+
+        `(bigomega, omega_*, tc)` and `(bigomega + 180, omega_* + 180, tc')`
+        describe the SAME physical solution wherever `node_degenerate` is set
+        (review 1.8.3), so once the hard half-plane bound is gone nothing
+        stops two CHAINS -- or two multi-seed starts -- from occupying
+        different labels, and every diagnostic computed on the unfolded
+        coordinate then reports two clusters, or non-convergence, for chains
+        that agree exactly.  (A single chain will not migrate between them;
+        see `_declare_node_degeneracy` for why, and for what removing the
+        bound does buy.)  This is that collapse, and it happens ONCE, at
+        the single point in `run.py` where sampling ends and post-processing
+        begins, so the convergence check, the mode reporter, the seed ledger,
+        the tables and the plots all see the same folded draws.  Doing it per
+        consumer is how they come to disagree.
+
+        It rewrites the RAW sampled coordinates and nothing else; the caller
+        regenerates every Deterministic from them (`pm.compute_deterministics`
+        in `System.fold_degenerate_draws`).  That is the whole reason it is
+        safe: the alternative -- flipping the physical variables one by one --
+        needs a list of every derived quantity that moves, and such a list
+        goes stale the next time somebody adds one, silently reporting a
+        parameter that no longer agrees with the draws it was computed from.
+
+        Returns True when anything moved.
+
+        Called BEFORE the unit conversion, so the physical values decoded
+        here are in internal units (radians, days).
+        """
+        degenerate = np.atleast_1d(
+            np.asarray(getattr(self, "node_degenerate", []), dtype=bool)
+        )
+        if degenerate.size != self.n_elements or not degenerate.any():
+            return False
+
+        moved = False
+        for i in np.where(degenerate)[0]:
+            params = {}
+            skip = None
+            for name in self._FOLD_FLIP + ("tc", "logP"):
+                param = getattr(self, name, None)
+                key = f"{self.prefix}.{name}_raw"
+                if param is None or key not in posterior:
+                    skip = name
+                    break
+                params[name] = (param, key)
+            if skip is not None:
+                logger.warning(
+                    "[%s.%s] the ascending-node fold needs %s to be sampled; "
+                    "leaving this orbit's draws unfolded, so its Rhat and any "
+                    "mode count are computed on the unfolded coordinate.",
+                    self.prefix,
+                    self.names[i] if i < len(self.names) else i,
+                    skip,
+                )
+                continue
+
+            try:
+                phys = {
+                    name: p.element_phys_from_raw(
+                        i, posterior[key].values[..., self._raw_slot(p, i)]
+                    )
+                    for name, (p, key) in params.items()
+                }
+            except ValueError as exc:  # an element that is not sampled
+                logger.warning(
+                    "[%s.%s] ascending-node fold skipped: %s",
+                    self.prefix,
+                    self.names[i] if i < len(self.names) else i,
+                    exc,
+                )
+                continue
+
+            # WHICH half-plane to fold ONTO is chosen from the draws, not
+            # fixed at [0, 180).  A fixed cut manufactures bimodality the
+            # moment a posterior straddles it -- a chain centred on 178 deg
+            # with a 3 deg width would be split into a lump at 179 and a lump
+            # at 1, which is the review item's own complaint in a new form.
+            # `bigomega` is 180-periodic here, so the right centre is the
+            # AXIAL mean direction (the circular mean of 2 bigomega, halved),
+            # and a draw folds only when it is more than 90 deg from it.  The
+            # item offers this as "rotate the cut to bigomega_init +/- 90";
+            # taking the centre from the draws rather than from the seed is
+            # the same idea without trusting a start value.
+            bigomega = np.arctan2(phys["ybigomega"], phys["xbigomega"])
+            # `% pi` picks the [0, 180) representative of the axis, which
+            # is the conventional half-plane -- arctan2's own principal value
+            # would give (-90, 90] and report a perfectly ordinary node as a
+            # negative angle.  Which representative the AXIS gets is a
+            # labelling choice; which half-plane the draws fold onto is not,
+            # and that is set by the centre either way.
+            centre = np.mod(
+                0.5
+                * np.arctan2(
+                    np.sin(2.0 * bigomega).mean(),
+                    np.cos(2.0 * bigomega).mean(),
+                ),
+                np.pi,
+            )
+            flip = np.cos(bigomega - centre) < 0.0
+            if not flip.any():
+                continue
+            moved = True
+
+            ecc = np.clip(
+                phys["secosw"] ** 2 + phys["sesinw"] ** 2,
+                0.0,
+                physics.MAX_ECC,
+            )
+            omega = np.arctan2(phys["sesinw"], phys["secosw"])
+            period = 10.0 ** phys["logP"]
+            # The reflected orbit transits at the OTHER conjunction, so tc
+            # moves by the difference of the two mean anomalies -- the same
+            # `mean_anomaly_at_conjunction` the tp seed solver uses, at omega
+            # and at omega + pi.  Then wrapped by whole periods back into tc's
+            # own window, which is exactly one period wide: tc and tc + P are
+            # the same solution, so there is always exactly one
+            # representative inside and the folded draw stays encodable.
+            delta = (
+                (
+                    physics.mean_anomaly_at_conjunction(ecc, omega + np.pi)
+                    - physics.mean_anomaly_at_conjunction(ecc, omega)
+                )
+                * period
+                / (2.0 * np.pi)
+            )
+            tc_param = params["tc"][0]
+            lower, upper = self._tc_window(tc_param, i)
+            tc_new = phys["tc"] + delta
+            if np.isfinite(lower) and np.isfinite(upper):
+                span = upper - lower
+                tc_new = lower + np.mod(tc_new - lower, span)
+
+            new_phys = {
+                name: np.where(flip, -phys[name], phys[name])
+                for name in self._FOLD_FLIP
+            }
+            new_phys["tc"] = np.where(flip, tc_new, phys["tc"])
+
+            # Only the FLIPPED draws are re-encoded.  A decode/encode round
+            # trip is the identity only to ~1e-15, and an unflipped draw has
+            # no business moving at all -- a fold that perturbs the draws it
+            # decided to leave alone is a fold nobody can check.
+            for name, values in new_phys.items():
+                param, key = params[name]
+                slot = self._raw_slot(param, i)
+                old_raw = posterior[key].values[..., slot]
+                posterior[key].values[..., slot] = np.where(
+                    flip, param.element_raw_from_phys(i, values), old_raw
+                )
+
+            if verbose:
+                logger.info(
+                    "[%s.%s] ascending-node fold: %.1f%% of draws mapped to "
+                    "the degenerate (bigomega-180, omega+180) partner.",
+                    self.prefix,
+                    self.names[i] if i < len(self.names) else i,
+                    100.0 * float(flip.mean()),
+                )
+        return moved
+
+    @staticmethod
+    def _raw_slot(param, index):
+        """Position of element `index` within `param`'s RAW vector.
+
+        Not the element index: only SAMPLED elements get a raw coordinate, so
+        a vector with a pinned element ahead of this one is shorter and
+        shifted.  Reading the raw array at the element index instead is the
+        kind of off-by-one that silently folds the wrong orbit.
+        """
+        tf = getattr(param, "_raw_transform", None)
+        if tf is None:
+            raise ValueError(f"[{param.label}] has no sampled elements")
+        idx = list(tf["sampled_idx"])
+        if index not in idx:
+            raise ValueError(f"[{param.label}] element {index} is not sampled")
+        return idx.index(index)
+
+    def _tc_window(self, tc_param, index):
+        """`tc`'s hard bounds for element `index`, in internal units."""
+        tf = getattr(tc_param, "_raw_transform", None)
+        if tf is None or not tf["use_logit"][index]:
+            return np.nan, np.nan
+        return float(tf["lowers"][index]), float(tf["uppers"][index])
 
     def _validate_bodies(self, system):
         """Check body references against the live system topology.
@@ -1470,15 +1795,36 @@ class Orbit(Component):
         self._vcve_unclipped_nodes = {int(i): mixed for i in idx}
         return mixed
 
-    def get_true_anomaly(self, t):
-        """Returns the true anomaly f for all planets at all times."""
-        t_grid = t[:, None]
-        tp = self.tp.value[None, :]
-        n = self.n.value[None, :]
-        ecc = self.ecc.value[None, :]
+    def get_true_anomaly(self, t, orbit_idx=None):
+        """True anomaly f at times `t`.
+
+        `(N_times, N_orbits)` by default; `(N_times,)` when `orbit_idx` names
+        ONE orbit, and then the Kepler solve is done on that orbit alone
+        (review 6.8.1).  Slicing the answer instead -- which is what `rm.py`
+        did -- solves Kepler's equation on the whole grid and throws every
+        other column away, so an N-planet system paid N times over for one
+        Rossiter-McLaughlin curve.  `get_sky_position` already indexes its
+        inputs before the solve; this is the same pattern.
+        """
+        if orbit_idx is None:
+            t_grid = t[:, None]
+            tp = self.tp.value[None, :]
+            n = self.n.value[None, :]
+            ecc = self.ecc.value[None, :]
+        else:
+            t_grid = t
+            tp = self.tp.value[orbit_idx]
+            n = self.n.value[orbit_idx]
+            ecc = self.ecc.value[orbit_idx]
 
         M = (t_grid - tp) * n
-        sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
+        sinf, cosf = physics.solve_kepler(
+            M,
+            ecc,
+            circular=self._all_circular(
+                None if orbit_idx is None else [orbit_idx]
+            ),
+        )
 
         return pt.arctan2(sinf, cosf)
 
@@ -1505,7 +1851,10 @@ class Orbit(Component):
         ascending node at omega_* + f = 0, where its RV is maximal).
         Without RVs, (bigomega, omega) and (bigomega+180, omega+180) are
         exactly degenerate for astrometry of every kind (a reflection
-        through the sky plane); see _restrict_bigomega_halfplane.
+        through the sky plane); see _node_degenerate_orbits, which declares
+        that per orbit, and System.fold_degenerate_draws, which folds the two
+        labels together for the convergence check, seed ledger and mode
+        reporter (review 1.8.3).
         """
         t_grid = t[:, None]
         tp = self.tp.value[orbit_map][None, :]
@@ -1524,7 +1873,9 @@ class Orbit(Component):
             sinw = -sinw
 
         M = (t_grid - tp) * n
-        sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
+        sinf, cosf = physics.solve_kepler(
+            M, ecc, circular=self._all_circular(orbit_map)
+        )
 
         # Separation from the barycenter (or primary) in units of a_scale
         r = a_scale[None, :] * (1.0 - ecc**2) / (1.0 + ecc * cosf)
@@ -1559,9 +1910,12 @@ class Orbit(Component):
         # M = n * (t - tp)
         M = (t_grid - tp) * n
 
-        # 3. Solve Kepler's Equation
-        # ops.kepler handles the (N_obs, N_planets) grid efficiently
-        sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
+        # 3. Solve Kepler's Equation.  ops.kepler handles the
+        # (N_obs, N_planets) grid efficiently; a wholly circular set of
+        # orbits skips it altogether (review 6.8.2).
+        sinf, cosf = physics.solve_kepler(
+            M, ecc, circular=self._all_circular(orbit_map)
+        )
 
         # 4. Calculate RV per planet
         # Using the identity: cos(w + f) = cos(w)cos(f) - sin(w)sin(f)

@@ -14,6 +14,20 @@ from exozippy.potentials import soft_lower_bound
 from ..orbit.orbit import amplitude_constrained_orbits
 from . import physics
 
+
+def _has_positive_sigma(param):
+    """True where a Parameter carries a user-stated Gaussian width.
+
+    `sigma` is None where nobody stated one, a scalar where a broadcast
+    entry did, and a per-element vector with NaN holes where one element's
+    entry did -- so all three shapes have to answer.
+    """
+    if param is None or param.sigma is None:
+        return False
+    arr = np.atleast_1d(np.asarray(param.sigma, dtype=float))
+    return bool(np.any(np.nan_to_num(arr, nan=0.0) > 0.0))
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,6 +56,14 @@ class Planet(Component):
         self.beam_free = [bool(c.get("beam_free", False)) for c in self.config]
         self.beam_constrains_mass = [
             bool(c.get("beam_constrains_mass", False)) for c in self.config
+        ]
+        # EXOFASTv2's `alloworbitcrossing`, per planet (review 8.8.9).  Per
+        # planet and not per fit because the exception it exists for is a
+        # PAIR of resonant or co-orbital bodies, and naming one of them is
+        # how a user says which pair they mean; a pair is exempt when either
+        # member opts out.
+        self.allow_orbit_crossing = [
+            bool(c.get("allow_orbit_crossing", False)) for c in self.config
         ]
 
     @property
@@ -76,6 +98,21 @@ class Planet(Component):
                     "bolometric approximation) instead of fitting it "
                     "freely -- ties the photometric beaming signal to the "
                     "same mass/K driving the RV model. Default False."
+                ),
+            },
+            {
+                "key": "allow_orbit_crossing",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Exempt this planet from the orbit-crossing / Hill-"
+                    "sphere barrier (EXOFASTv2's alloworbitcrossing). "
+                    "Default False. Crossing orbits ARE stable when "
+                    "protected by a mean-motion resonance (Neptune-Pluto's "
+                    "3:2) and co-orbital pairs live inside their mutual "
+                    "Hill sphere, so a fit of such a system has to set "
+                    "this; a pair is exempt when either member does."
                 ),
             },
             {
@@ -168,9 +205,40 @@ class Planet(Component):
                     "p": "default",
                     "a": "default",
                     "ar": "default",
-                    "b": "default",
+                    # force_node: `b` keeps its historical manifest
+                    # POSITION (insertion order is the build order) and
+                    # gains the pm.Deterministic that `transit.b` used to
+                    # be -- the Winn-2010 parity test reads it out of the
+                    # model, and a derived Parameter that is not a node is
+                    # absent from a posterior point.
+                    "b": {"expr_key": "default", "force_node": True},
                     "K": "default",
                     "max_ecc": "default",
+                }
+            )
+            # Transit/occultation durations (review 8.8.7).  Declared
+            # whenever there is an orbit, with or without transit data:
+            # they are geometry, and a Gaussian on one is how a published
+            # duration or eclipse time constrains e and omega.  They used
+            # to be bare Deterministics inside transit.py, so an RV-only
+            # fit could not state them and a transit fit could not put a
+            # prior on them.
+            # force_node so each is a pm.Deterministic in the trace, as
+            # the transit.py versions were: the phased-plot x-range reads
+            # `planet.t14` out of a posterior point, and a derived
+            # Parameter that is not a node is absent from one.
+            self.manifest.update(
+                {
+                    name: {"expr_key": "default", "force_node": True}
+                    for name in (
+                        "bs",
+                        "t14",
+                        "tfwhm",
+                        "tau",
+                        "t14s",
+                        "tfwhms",
+                        "taus",
+                    )
                 }
             )
 
@@ -508,6 +576,7 @@ class Planet(Component):
             return
 
         orbits = system.orbit
+        self._add_duration_prose(system, orbits)
         # The eccentricity barrier used to live here, on
         # orbits.ecc.value[self.orbit_map] -- i.e. on the node calc_ecc
         # clips at 0.9999, which gave it zero gradient over 21.5% of the
@@ -545,68 +614,196 @@ class Planet(Component):
             return np.full(n, np.nan)
         return out
 
+    def _add_duration_prose(self, system, orbits):
+        """Modeling-draft sentences for the durations and eclipse time.
+
+        Declared here because this is where they become part of the model:
+        the durations and `orbit.ts` are derived Parameters, so a user's
+        `mu`/`sigma` on one is a Gaussian in the logp and the gradient
+        reaches the eccentricity vector through the expression -- there is no
+        separate potential to hang the sentence off, which is precisely why
+        the "declare it next to the pm.Potential" rule needs reading as
+        "declare it where the feature is".
+        """
+        prose = get_collector(system)
+        prose.add(
+            r"We report the transit and occultation durations "
+            r"($T_{14}$, $T_{\rm FWHM}$, $\tau$ and their eclipse "
+            r"counterparts) and the time of secondary eclipse computed "
+            r"from the orbital elements following \citet{Winn:2010}.",
+            section="orbits",
+            key=f"{self.prefix}.durations",
+        )
+
+        constrained = [
+            name
+            for name, param in (
+                ("transit duration", getattr(self, "t14", None)),
+                ("FWHM transit duration", getattr(self, "tfwhm", None)),
+                ("ingress/egress duration", getattr(self, "tau", None)),
+                ("occultation duration", getattr(self, "t14s", None)),
+                ("FWHM occultation duration", getattr(self, "tfwhms", None)),
+                ("time of secondary eclipse", getattr(orbits, "ts", None)),
+            )
+            if _has_positive_sigma(param)
+        ]
+        if not constrained:
+            return
+        prose.add(
+            "We applied Gaussian priors to the "
+            + join_names(constrained)
+            + ", which constrain the eccentricity and argument of "
+            r"periastron: the phase of the secondary eclipse measures "
+            r"$e\cos{\omega_*}$ and the ratio of the occultation to the "
+            r"transit duration measures $e\sin{\omega_*}$ "
+            r"\citep{Winn:2010,Charbonneau:2005}.",
+            section="orbits",
+            key=f"{self.prefix}.duration_constraints",
+        )
+
     def _add_crossing_potential(self, system, orbits):
-        """Soft non-crossing barrier between neighboring planets' orbits.
+        """Soft orbit-crossing / Hill-sphere barrier between planet pairs.
 
-        Two planets whose orbits intersect are dynamically unstable on
-        timescales far shorter than the age of any system we fit, so the
-        posterior is bounded by keeping the outer planet's periastron,
-        a_out (1 - e_out), outside the inner planet's apastron,
-        a_in (1 + e_in).  This is the constraint the original (never
-        executed) block described; three things about it are new:
+        The port of EXOFASTv2's `exofast_chi2v2.pro`:445-468 (review 8.8.9).
+        Two planets whose orbits approach within a Hill radius are unstable
+        on timescales far shorter than the age of any system we fit, so the
+        posterior is bounded by keeping the annuli
 
-        - It reads the component's own vectors.  The old code walked a
-          ``self.planets`` list of per-planet objects with ``.orbit.a`` /
-          ``.orbit.a_val`` attributes, none of which have existed since the
-          vectorized refactor -- so ANY system with two or more planets
-          raised AttributeError here.  A planet's semi-major axis is
-          ``planet.a`` (internally solRad, derived from m_total and the orbit's
-          period) and its eccentricity is its orbit's, via ``orbit_map``.
-        - The wall is a soft bound, not ``pt.switch(..., 0, -inf)``.  A -inf
-          gives NUTS no gradient to follow out of the forbidden region (and
-          NaNs the JAX backward pass), so this uses the same clipped
-          log-sigmoid barrier as every other soft constraint here.  The
-          transition width is 1% of the inner planet's starting semi-major
-          axis, i.e. the barrier is scaled to the orbit it guards.
-        - Planets are ordered ONCE, by their starting semi-major axes.  The
-          ordering is a topology choice, not a sampled quantity: re-deriving
-          it per draw would make the potential discontinuous wherever two
-          orbits swap places.
+            [ (1 - e) a - h,  (1 + e) a + h ],
+            h = (1 - e) a (m_p / 3 M_*)^(1/3)
 
-        Limitation, deliberately not modeled: only adjacent pairs are
-        constrained, and only pairs on distinct orbits.  For nested
-        hierarchical orbits (a planet orbiting a body group) this compares
-        semi-major axes about different centers, which is the right
-        first-order condition but not a stability criterion.
+        from overlapping.  What the earlier version had was the bare apsidal
+        test with no Hill pad, on ADJACENT pairs only; what it replaced was a
+        never-executed `-inf` block that walked attributes deleted in the
+        vectorized refactor, so any two-planet system raised AttributeError.
+
+        Four things about this port, all deliberate:
+
+        - **Soft, not `+infinity` chi2.**  EXOFASTv2 rejects outright; a
+          gradient sampler cannot be given a wall with no gradient to follow
+          out of (and the JAX backward pass NaNs on one).  It is the same
+          clipped log-sigmoid barrier as every other soft constraint here,
+          with a transition width of 1% of the inner planet's STARTING
+          semi-major axis, so the barrier is scaled to the orbit it guards.
+        - **All pairs**, as EXOFASTv2 does.  Adjacent-only was an
+          approximation with nothing to recommend it: three planets can have
+          a widely eccentric outer one crossing the innermost while missing
+          its neighbour.
+        - **Planets are ordered ONCE**, by their starting semi-major axes.
+          The ordering is a topology choice, not a sampled quantity:
+          re-deriving it per draw would make the potential discontinuous
+          wherever two orbits swap places.
+        - **The Hill radius is each planet's OWN, not the mutual one**, and
+          the threshold is EXOFASTv2's one-Hill pad.  That is a port, not a
+          claim about stability, and the criterion is crude in both
+          directions -- EXOFASTv2's own comment says so.  Too strict:
+          resonant protection makes crossing orbits stable (Neptune-Pluto's
+          3:2), co-orbital and Trojan pairs live INSIDE the mutual Hill
+          sphere, and mutual inclination separates orbits that overlap in
+          radius, none of which is modeled.  Too loose: the empirical
+          long-term threshold for multiplanet systems is ~8-12 MUTUAL Hill
+          radii (Chambers, Wetherill & Boss 1996; Pu & Wu 2015; Obertas, Van
+          Laerhoven & Tamayo 2017), which this is nowhere near.  Real
+          stability is an N-body / SPOCK-style follow-up, not a per-step
+          penalty.  A system that needs the strict side loosened sets
+          `allow_orbit_crossing: true` on either member of the pair.
+
+        Limitation, unchanged and deliberate: only pairs on distinct orbits
+        are constrained.  For nested hierarchical orbits (a planet orbiting
+        a body group) this compares semi-major axes about different centers,
+        which is the right first-order condition but not a stability
+        criterion.
         """
         # Semi-major axis (solRad) and eccentricity, per planet.
         a = self.a.value
         ecc = orbits.ecc.value[self.orbit_map]
+        star = system.active_components["star"]
+        m_star = star.mass.value[self.star_map]
+
+        # Hill radius at periastron, EXOFASTv2's h.  The cube root's argument
+        # is floored rather than the result: `planet.mass` may be NEGATIVE in
+        # `linear` mass mode, `x**(1/3)` is NaN there, and flooring after the
+        # root multiplies its infinite derivative at zero by pt.maximum's zero
+        # gradient to give NaN -- the calc_theta_E / calc_jitter idiom.  1e-30
+        # leaves h at ~1e-10 a, i.e. no pad at all, which is the right answer
+        # for a planet the data say has no mass.
+        mass_ratio = pt.maximum(self.mass.value / (3.0 * m_star), 1e-30)
+        hill = (1.0 - ecc) * a * mass_ratio ** (1.0 / 3.0)
+
+        inner_edge = (1.0 - ecc) * a - hill
+        outer_edge = (1.0 + ecc) * a + hill
 
         a_init = self._initial_semimajor_axes()
         # A missing start sorts last but must not become the barrier scale.
         order = np.argsort(np.where(np.isfinite(a_init), a_init, np.inf))
 
-        for k in range(len(order) - 1):
-            i, j = int(order[k]), int(order[k + 1])
-            if self.orbit_map[i] == self.orbit_map[j]:
-                # One orbit cannot cross itself; two planets sharing an
-                # orbit index are co-orbital by construction.
-                continue
+        for k, i_raw in enumerate(order[:-1]):
+            i = int(i_raw)
+            for j_raw in order[k + 1 :]:
+                j = int(j_raw)
+                if self.orbit_map[i] == self.orbit_map[j]:
+                    # One orbit cannot cross itself; two planets sharing an
+                    # orbit index are co-orbital by construction.
+                    continue
+                if (
+                    self.allow_orbit_crossing[i]
+                    or self.allow_orbit_crossing[j]
+                ):
+                    logger.info(
+                        "[%s] orbit-crossing barrier skipped for the "
+                        "%s/%s pair (allow_orbit_crossing).",
+                        self.prefix,
+                        self.names[i],
+                        self.names[j],
+                    )
+                    continue
 
-            inner_apastron = a[i] * (1.0 + ecc[i])
-            outer_periastron = a[j] * (1.0 - ecc[j])
+                scale = a_init[i] if np.isfinite(a_init[i]) else 0.0
+                scale = float(max(abs(scale), 1e-6))
 
-            scale = a_init[i] if np.isfinite(a_init[i]) else 0.0
-            scale = float(max(abs(scale), 1e-6))
+                pm.Potential(
+                    f"{self.prefix}.crossing_bound_"
+                    f"{self.names[i]}_{self.names[j]}",
+                    soft_lower_bound(
+                        inner_edge[j] - outer_edge[i], 0.0, scale=scale
+                    ),
+                )
 
-            pm.Potential(
-                f"{self.prefix}.crossing_bound_"
-                f"{self.names[i]}_{self.names[j]}",
-                soft_lower_bound(
-                    outer_periastron - inner_apastron, 0.0, scale=scale
-                ),
+        self._add_crossing_prose(system, order)
+
+    def _add_crossing_prose(self, system, order):
+        """The modeling-draft sentence for the barrier above.
+
+        Declared next to the `pm.Potential` it describes, the
+        outputs/prose.py rule.
+        """
+        exempt = [
+            nm for nm, off in zip(self.names, self.allow_orbit_crossing) if off
+        ]
+        constrained = [
+            self.names[int(i)]
+            for i in order
+            if not self.allow_orbit_crossing[int(i)]
+        ]
+        if len(constrained) < 2:
+            return
+        prose = get_collector(system)
+        text = (
+            "We required the orbits of "
+            + join_names(latex_escape(n) for n in constrained)
+            + " not to approach within a Hill radius of one another, as a "
+            r"soft penalty rather than the hard rejection of "
+            r"\citet{Eastman:2019}; the criterion neglects mutual "
+            "inclination and resonant protection."
+        )
+        if exempt:
+            noun = "Planet" if len(exempt) == 1 else "Planets"
+            text += (
+                f"  {noun} "
+                + join_names(latex_escape(n) for n in exempt)
+                + " were exempted from it."
             )
+        prose.add(text, section="orbits", key=f"{self.prefix}.orbit_crossing")
 
     def _add_chen_potential(self):
         """Gaussian tie between each chen-enabled planet's mass and radius.

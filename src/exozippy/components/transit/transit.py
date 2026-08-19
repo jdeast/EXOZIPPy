@@ -6,7 +6,6 @@ import pytensor
 
 logger = logging.getLogger(__name__)
 import pytensor.tensor as pt
-from exoplanet_core.pymc import ops as ops
 
 from exozippy.components.instrument import Instrument
 from exozippy.components.limbdark import quad_limb_darkened_flux
@@ -14,6 +13,7 @@ from exozippy.outputs.prose import get_collector
 from exozippy.outputs.texutils import latex_escape
 
 from .. import ltt
+from ..orbit import physics as orbit_physics
 from . import physics
 
 
@@ -558,8 +558,7 @@ class Transit(Instrument):
         # 1. Start with the photometric baseline
         lc_model = self.baseline.value[self.inst_map_tensor]
 
-        # 1b. Per-planet transit/occultation geometry (impact parameter & durations),
-        # exposed as Deterministics for diagnostics and plotting (e.g. phased-plot xlim).
+        # 1b. Per-planet orbital vectors, gathered onto the planet index.
         ecc_p = orbits.ecc.value[planets.orbit_map]  # (N_planets,)
         esinw_p = orbits.esinw.value[planets.orbit_map]
         inc_p = orbits.inc.value[planets.orbit_map]
@@ -568,81 +567,15 @@ class Transit(Instrument):
         ar_p = planets.ar.value
         p_p = planets.p.value
 
-        # Numerical-stability floor for the geometry below. Keeps arcsin arguments
-        # strictly inside (-1, 1) (where its derivative is finite) and denominators
-        # away from 0, so a transient excursion during NUTS leapfrog steps (e.g.
-        # inc away from 90 deg, or ecc/esinw near 1) can't produce a NaN/inf
-        # gradient. Values at the actual posterior mode are far from these floors,
-        # so the reported b/t14/tau are unaffected.
-        _GEOM_EPS = 1e-6
-
-        sini_p = pt.sin(inc_p)
-        cosi_p = pt.cos(inc_p)
-        ecc_factor = pt.sqrt(pt.clip(1.0 - pt.sqr(ecc_p), _GEOM_EPS, 1.0))
-
-        denom_minus = pt.clip(1.0 - esinw_p, _GEOM_EPS, np.inf)
-        denom_plus = pt.clip(1.0 + esinw_p, _GEOM_EPS, np.inf)
-        sini_ar = pt.clip(pt.abs(sini_p * ar_p), _GEOM_EPS, np.inf)
-
-        # Winn 2010 eqs 7-8: the primary transit happens at true anomaly
-        # pi/2 - omega (see calc_tp), where r = a(1-e^2)/(1 + esinw); the
-        # secondary sits at the opposite conjunction, r = a(1-e^2)/(1 - esinw).
-        dur_b = ar_p * cosi_p * (1.0 - pt.sqr(ecc_p)) / denom_plus
-        dur_bs = ar_p * cosi_p * (1.0 - pt.sqr(ecc_p)) / denom_minus
-
-        def _arcsin_term(p_offset_sq, dur_bx):
-            radicand = pt.clip(p_offset_sq - pt.sqr(dur_bx), 0.0, np.inf)
-            arg = pt.clip(
-                pt.sqrt(radicand) / sini_ar, -1.0 + _GEOM_EPS, 1.0 - _GEOM_EPS
-            )
-            return pt.arcsin(arg)
-
-        # Winn 2010 eqs 14-16: the duration's eccentricity correction is
-        # sqrt(1-e^2)/(1 + esinw) for the primary and sqrt(1-e^2)/(1 - esinw)
-        # for the secondary.
-        dur_t14 = (
-            (period_p / np.pi)
-            * _arcsin_term(pt.sqr(1.0 + p_p), dur_b)
-            * ecc_factor
-            / denom_plus
-        )
-        dur_t14s = (
-            (period_p / np.pi)
-            * _arcsin_term(pt.sqr(1.0 + p_p), dur_bs)
-            * ecc_factor
-            / denom_minus
-        )
-
-        # The (1-p)^2 arcsin term is Winn 2010's t23 (full-occultation
-        # duration, 2nd to 3rd contact); the FWHM is (t14 + t23)/2 and the
-        # ingress/egress duration tau is (t14 - t23)/2 (EXOFASTv2
-        # derivepars.pro convention).
-        dur_t23 = (
-            (period_p / np.pi)
-            * _arcsin_term(pt.sqr(1.0 - p_p), dur_b)
-            * ecc_factor
-            / denom_plus
-        )
-        dur_t23s = (
-            (period_p / np.pi)
-            * _arcsin_term(pt.sqr(1.0 - p_p), dur_bs)
-            * ecc_factor
-            / denom_minus
-        )
-
-        dur_tfwhm = (dur_t14 + dur_t23) / 2.0
-        dur_tfwhms = (dur_t14s + dur_t23s) / 2.0
-        dur_tau = (dur_t14 - dur_t23) / 2.0
-        dur_taus = (dur_t14s - dur_t23s) / 2.0
-
-        pm.Deterministic(f"{self.prefix}.b", dur_b)
-        pm.Deterministic(f"{self.prefix}.bs", dur_bs)
-        pm.Deterministic(f"{self.prefix}.t14", dur_t14)
-        pm.Deterministic(f"{self.prefix}.t14s", dur_t14s)
-        pm.Deterministic(f"{self.prefix}.tfwhm", dur_tfwhm)
-        pm.Deterministic(f"{self.prefix}.tfwhms", dur_tfwhms)
-        pm.Deterministic(f"{self.prefix}.tau", dur_tau)
-        pm.Deterministic(f"{self.prefix}.taus", dur_taus)
+        # The per-planet transit/occultation geometry (impact
+        # parameters and durations) used to be built here as bare
+        # Deterministics.  It moved to the planet component in review 8.8.7,
+        # where it is a set of ordinary derived Parameters -- table rows,
+        # LaTeX macros, units, and a user-settable Gaussian, which is what
+        # lets a published duration or eclipse time constrain e and omega.
+        # It is geometry, not photometry: no light curve enters it, and an
+        # RV-only fit has the same durations.  The phased-plot x-range below
+        # reads `planet.t14` for that reason.
 
         # 2. Orbital elements per planet. These don't depend on the
         # observation/sub-exposure grid, so they're computed once and
@@ -671,6 +604,11 @@ class Transit(Instrument):
         # terms uncorrected, as here until 2026-08-15) mixes time
         # references differing by ~a/c within a single phase curve.
         ltt_active = self._ltt_active(orbits)
+        # Structural, not a runtime test: True only where every orbit
+        # these planets sit on has its sqrt(e) pair PINNED at zero, in
+        # which case the Kepler solve is a sine and a cosine
+        # (orbit.physics.solve_kepler, review 6.8.2).
+        circular_kepler = orbits._all_circular(planets.orbit_map)
         a_rel = ltt_factor = ltt_reflect_factor = ltt_star_factor = None
         if ltt_active.any():
             a_rel = orbits.a.value[planets.orbit_map][
@@ -798,6 +736,7 @@ class Transit(Instrument):
                     a_rel,
                     factor=role_factor,
                     z0=0.0,
+                    circular=circular_kepler,
                 )
                 if lt_active_rows.all():
                     return corrected
@@ -834,7 +773,12 @@ class Transit(Instrument):
                 )
 
             M = (t_grid_final - tp) * n
-            sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
+            # The shared solve, which skips the Newton iteration outright
+            # when every orbit these planets sit on is pinned circular
+            # (review 6.8.2).
+            sinf, cosf = orbit_physics.solve_kepler(
+                M, ecc, circular=orbits._all_circular(planets.orbit_map)
+            )
 
             r_norm = a_rstar * (1.0 - pt.sqr(ecc)) / (1.0 + ecc * cosf)
 
@@ -978,6 +922,7 @@ class Transit(Instrument):
                     orbits.a.value[planets.orbit_map][p_idx],
                     factor=ltt_star_factor[p_idx],
                     z0=0.0,
+                    circular=circular_kepler,
                 )
                 if ltt_active.all():
                     time_star = star_corrected
@@ -1130,6 +1075,7 @@ class Transit(Instrument):
             # at shifted t), so it's (N_times, N_planets) here vs
             # (n_g, k_g, N_planets) there.
             lt_active_arr = self._ltt_active(orbits)
+            circular_kepler = orbits._all_circular(planets.orbit_map)
             a_rel = None
             ltt_factor = ltt_reflect_factor = ltt_star_factor = None
             if lt_active_arr.any():
@@ -1165,6 +1111,7 @@ class Transit(Instrument):
                     a_rel,
                     factor=role_factor,
                     z0=0.0,
+                    circular=circular_kepler,
                 )
                 if lt_active_arr.all():
                     return corrected
@@ -1202,7 +1149,12 @@ class Transit(Instrument):
                 ) + pt.zeros((1, planets.n_elements))
 
             M = (t_grid_final - tp) * n
-            sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
+            # The shared solve, which skips the Newton iteration outright
+            # when every orbit these planets sit on is pinned circular
+            # (review 6.8.2).
+            sinf, cosf = orbit_physics.solve_kepler(
+                M, ecc, circular=orbits._all_circular(planets.orbit_map)
+            )
 
             a_rstar = planets.ar.value[None, :]
             p_ratio = planets.p.value[None, :]
@@ -1704,7 +1656,9 @@ class Transit(Instrument):
                     }
                     # Zoom to +/- t14 around mid-transit when the point
                     # carries a transit duration for this planet.
-                    t14_raw = point.get(f"{self.prefix}.t14")
+                    # `planet.t14`, not `transit.t14`: the durations are
+                    # planet geometry now (review 8.8.7).
+                    t14_raw = point.get("planet.t14")
                     if t14_raw is not None:
                         t14_ref = float(np.atleast_1d(t14_raw)[p_idx])
                         meta["x_range"] = [-t14_ref, t14_ref]
