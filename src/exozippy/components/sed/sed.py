@@ -753,6 +753,20 @@ class SED(Component):
     #    floor potentials tying the SED-side parameters to the primary
     #    stellar parameters.
     # ------------------------------------------------------------------
+    @staticmethod
+    def _fractional_floor_logp(value, sed_value, floor):
+        """Per-element Gaussian logp with sigma = floor * value, NORMALIZED.
+
+        Same shape as ``relations._add_penalty(..., normalize=True)``, and
+        normalized for the same reason: sigma tracks a sampled quantity, so
+        -log(sigma) is a function of the parameters and not a constant.
+        The 2pi is dropped, exactly as it is there.
+        """
+        sigma = value * floor
+        return -0.5 * pt.sqr((value - sed_value) / sigma) - pt.log(
+            pt.abs(sigma)
+        )
+
     def build_likelihood(self, model, system):
         star = system.star
 
@@ -776,17 +790,27 @@ class SED(Component):
                 observed=mag_data,
             )
 
-        # this links the two with a user settable error floor
+        # These link the SED-derived teff/fbol to the star's own, with a user
+        # settable FRACTIONAL error floor -- so sigma is a function of a
+        # sampled parameter, not a constant, and the -log(sigma) term is kept.
+        #
+        # That is the house convention and the reason for it is statistical,
+        # not cosmetic (components/relations.py `_add_penalty`, and mann vs
+        # torres): with sigma proportional to x, dropping the normalization
+        # leaves a -d/dx log(x) = -1/x tilt, i.e. exactly 1 nat of free
+        # likelihood per e-fold of x, pushing teff and fbol up for no
+        # physical reason. torres drops the term only because ITS sigma is a
+        # constant in dex, where it is an additive constant.
         self.teffsed_floor_prior = pm.Potential(
             "sed.teffsed_floor_prior",
             pt.sum(
-                -0.5 * ((teff - teffsed) / (teff * self.teffsedfloor)) ** 2
+                self._fractional_floor_logp(teff, teffsed, self.teffsedfloor)
             ),
         )
         self.fbolsed_floor_prior = pm.Potential(
             "sed.fbolsed_floor_prior",
             pt.sum(
-                -0.5 * ((fbol - fbolsed) / (fbol * self.fbolsedfloor)) ** 2
+                self._fractional_floor_logp(fbol, fbolsed, self.fbolsedfloor)
             ),
         )
 
