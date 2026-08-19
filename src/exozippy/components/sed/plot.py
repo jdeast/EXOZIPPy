@@ -1,5 +1,6 @@
 import json
 import logging
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Literal, Sequence, Tuple
 
@@ -31,10 +32,47 @@ logger = logging.getLogger(__name__)
 
 
 def _read_spectra_csv(path: Path) -> pd.DataFrame:
-    """Read a model's spectra table and parse its per-row flux arrays."""
+    """Read a model's spectra table and parse its per-row flux arrays.
+
+    Cached (review 6.9.1). NextGen's table is ~250 MB and every row's
+    ``flux`` cell is a JSON array that has to be parsed into a numpy array;
+    the whole thing was re-read and re-parsed on EVERY Plot construction,
+    which is once per posterior-plot pass and, in the GUI's live mode,
+    once per slider move.
+
+    Keyed on the file's mtime and size as well as its path, for the same
+    reason as bc_grid._load_alias_table: a regenerated table must not be
+    served from the cache. maxsize=1 because these frames are enormous --
+    holding a second model's copy is not worth the memory.
+
+    The frame is SHARED between Plot instances; treat it as read-only.
+    """
+    path = Path(path)
+    stat = path.stat()
+    return _read_spectra_csv_cached(path, stat.st_mtime_ns, stat.st_size)
+
+
+@lru_cache(maxsize=1)
+def _read_spectra_csv_cached(
+    path: Path, _mtime_ns: int, _size: int
+) -> pd.DataFrame:
     df = pd.read_csv(path)
     df["flux"] = df["flux"].apply(json.loads).apply(np.array)
     return df
+
+
+def _read_wavelength_csv(path: Path) -> pd.DataFrame:
+    """The wavelength grid beside a spectra table, cached alongside it."""
+    path = Path(path)
+    stat = path.stat()
+    return _read_wavelength_csv_cached(path, stat.st_mtime_ns, stat.st_size)
+
+
+@lru_cache(maxsize=2)
+def _read_wavelength_csv_cached(
+    path: Path, _mtime_ns: int, _size: int
+) -> pd.DataFrame:
+    return pd.read_csv(path)
 
 
 class Plot:
@@ -225,7 +263,7 @@ class Plot:
             wave_path = fallback / "NextGen.wavelength.csv"
 
         df_spec = _read_spectra_csv(spec_path)
-        df_wave = pd.read_csv(wave_path)
+        df_wave = _read_wavelength_csv(wave_path)
 
         self.df_spec = df_spec
         self.df_wave = df_wave
