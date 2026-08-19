@@ -708,6 +708,17 @@ class RegularGridInterpolator:
     fill_value : float, optional
         Value used when coords are outside the grid. None leaves
         extrapolation to the caller.
+
+        No caller in the tree passes it, and that is a DECISION, not an
+        oversight (review 5.9.2): the SED builds this with fill_value=None
+        deliberately, so an off-grid draw is linearly extrapolated off the
+        edge cell rather than replaced. The restoring force is the measured
+        soft barrier on the one reachably off-grid axis, star.loggsed --
+        see components/sed/sed.md, which spells out why a wall (-inf, NaN,
+        or a constant) would be strictly worse: NUTS has nothing to follow
+        across one. The parameter stays as the seam for a grid whose
+        off-grid answer really is a constant; do not delete it, and do not
+        wire the SED to it without reading that ruling first.
     """
 
     def __init__(self, points, values, fill_value=None):

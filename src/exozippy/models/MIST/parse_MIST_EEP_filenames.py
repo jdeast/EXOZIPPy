@@ -1,5 +1,4 @@
 import re
-from fileinput import filename
 from typing import Literal
 
 # -------------------------------------------------------------------

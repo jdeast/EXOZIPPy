@@ -41,11 +41,6 @@ from .physics import *
 
 logger = logging.getLogger(__name__)
 
-try:
-    current_dir = Path(__file__).parent
-except NameError:
-    current_dir = Path.cwd()
-
 
 def load_model_plot_module(plot_path: Path, model: str):
     """Import a model family's ``BCs/plot.py``, wherever it lives.
