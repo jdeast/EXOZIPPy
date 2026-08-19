@@ -1,8 +1,39 @@
 import numpy as np
 import pytensor.tensor as pt
+from exoplanet_core.pymc import ops
 
 from ...constants import TWOPI
 from ...physics_registry import register_physics
+
+
+def solve_kepler(M, ecc, circular=False):
+    """``(sin f, cos f)`` from the mean anomaly -- the ONE Kepler solve.
+
+    `circular=True` skips the Newton iteration entirely and returns
+    `(sin M, cos M)`, which for `e = 0` is not an approximation: the
+    eccentric and true anomalies both equal the mean anomaly there (review
+    6.8.2).  A circular fit is a common one -- `secosw`/`sesinw` pinned at 0,
+    as `examples/kelt17` writes it -- and it was paying an exoplanet-core
+    Newton solve per epoch, per orbit, for an answer available from one sine
+    and one cosine.
+
+    `circular` is a STRUCTURAL claim the caller makes, never a runtime test,
+    and both halves matter.  Structural, because the two branches must not
+    both be built: a `pt.switch` would evaluate the Newton solve anyway
+    (which is the whole cost) and hand `where`'s VJP a branch to multiply by
+    zero.  A claim about the PIN and not about the value, because an
+    eccentricity that merely starts at zero can move, and a fit whose e is
+    free would then be solved as if it were circular for the whole run --
+    silently, and with a wrong RV phase.  `Orbit.circular_orbits` is the one
+    place that judgement is made.
+
+    The `ecc + pt.zeros_like(M)` broadcast in the eccentric branch is
+    load-bearing and pre-existing: exoplanet-core's op wants the two arrays
+    the same shape.
+    """
+    if circular:
+        return pt.sin(M), pt.cos(M)
+    return ops.kepler(M, ecc + pt.zeros_like(M))
 
 
 @register_physics

@@ -625,6 +625,63 @@ class Orbit(Component):
                             W[i, idx] = 1.0
                 self._group_w[side][ctype] = W
 
+    @property
+    def circular_orbits(self):
+        """Per orbit: is the eccentricity STRUCTURALLY zero? (review 6.8.2)
+
+        True only where the sqrt(e) pair is PINNED at zero -- `sigma: 0` with
+        `initval: 0` on both `secosw` and `sesinw`, which is how a circular
+        fit is written (`examples/kelt17`).  Deliberately not "e is small at
+        the start": an unpinned eccentricity can move, and treating it as
+        circular would silently give the whole run the wrong RV phase.
+
+        Conservative everywhere it cannot be sure -- a V_c/V_e orbit (whose
+        circular case is a different pin, on a coordinate whose inversion is
+        singular exactly there), a parameter that has not been resolved, or
+        anything unpinned -- because the cost of being wrong is a wrong
+        model and the cost of being conservative is the Kepler solve we
+        were paying anyway.
+        """
+        n_el = self.n_elements
+        circ = np.ones(n_el, dtype=bool)
+        for name in ("secosw", "sesinw"):
+            if name not in self.manifest:
+                return np.zeros(n_el, dtype=bool)
+            cfg = self.config_manager.resolve(
+                self.prefix, name, shape=(n_el,), names=self.names
+            )
+            sigma = np.atleast_1d(np.asarray(cfg.get("sigma"), dtype=float))
+            initval = np.atleast_1d(
+                np.asarray(cfg.get("initval"), dtype=float)
+            )
+            if sigma.size != n_el or initval.size != n_el:
+                return np.zeros(n_el, dtype=bool)
+            circ &= (sigma == 0.0) & (initval == 0.0)
+        modes = np.atleast_1d(
+            np.asarray(getattr(self, "ecc_modes", []), dtype=object)
+        )
+        if modes.size == n_el:
+            circ &= modes == "hk"
+        return circ
+
+    def _all_circular(self, orbit_map=None):
+        """True when EVERY orbit `solve_kepler` is about to see is circular.
+
+        All-or-nothing, deliberately: the saving comes from not BUILDING the
+        Newton solve, and a mixed vector still has to build it for the
+        eccentric columns.  Splitting the vector, solving the eccentric
+        subset and reassembling with `set_subtensor` would save arithmetic
+        and cost a graph that no longer matches the simple one -- not worth
+        it until someone measures a system where it matters.
+        """
+        circ = self.circular_orbits
+        if orbit_map is not None:
+            idx = np.atleast_1d(np.asarray(orbit_map, dtype=int))
+            if idx.size == 0:
+                return False
+            circ = circ[idx]
+        return bool(np.all(circ)) and circ.size > 0
+
     def _resolve_initval(self, name, shape):
         """This orbit's stage-2 initval for ``name``, NaN where unseeded.
 
@@ -1582,7 +1639,13 @@ class Orbit(Component):
             ecc = self.ecc.value[orbit_idx]
 
         M = (t_grid - tp) * n
-        sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
+        sinf, cosf = physics.solve_kepler(
+            M,
+            ecc,
+            circular=self._all_circular(
+                None if orbit_idx is None else [orbit_idx]
+            ),
+        )
 
         return pt.arctan2(sinf, cosf)
 
@@ -1628,7 +1691,9 @@ class Orbit(Component):
             sinw = -sinw
 
         M = (t_grid - tp) * n
-        sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
+        sinf, cosf = physics.solve_kepler(
+            M, ecc, circular=self._all_circular(orbit_map)
+        )
 
         # Separation from the barycenter (or primary) in units of a_scale
         r = a_scale[None, :] * (1.0 - ecc**2) / (1.0 + ecc * cosf)
@@ -1663,9 +1728,12 @@ class Orbit(Component):
         # M = n * (t - tp)
         M = (t_grid - tp) * n
 
-        # 3. Solve Kepler's Equation
-        # ops.kepler handles the (N_obs, N_planets) grid efficiently
-        sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
+        # 3. Solve Kepler's Equation.  ops.kepler handles the
+        # (N_obs, N_planets) grid efficiently; a wholly circular set of
+        # orbits skips it altogether (review 6.8.2).
+        sinf, cosf = physics.solve_kepler(
+            M, ecc, circular=self._all_circular(orbit_map)
+        )
 
         # 4. Calculate RV per planet
         # Using the identity: cos(w + f) = cos(w)cos(f) - sin(w)sin(f)

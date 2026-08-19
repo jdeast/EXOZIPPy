@@ -431,6 +431,7 @@ def compute_rm_rv(
             a_rel,
             factor=ltt_factor,
             z0=0.0,
+            circular=orbit._all_circular([orbit_idx]),
         )
     else:
         time_corrected = time

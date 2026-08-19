@@ -6,7 +6,6 @@ import pytensor
 
 logger = logging.getLogger(__name__)
 import pytensor.tensor as pt
-from exoplanet_core.pymc import ops as ops
 
 from exozippy.components.instrument import Instrument
 from exozippy.components.limbdark import quad_limb_darkened_flux
@@ -14,6 +13,7 @@ from exozippy.outputs.prose import get_collector
 from exozippy.outputs.texutils import latex_escape
 
 from .. import ltt
+from ..orbit import physics as orbit_physics
 from . import physics
 
 
@@ -604,6 +604,11 @@ class Transit(Instrument):
         # terms uncorrected, as here until 2026-08-15) mixes time
         # references differing by ~a/c within a single phase curve.
         ltt_active = self._ltt_active(orbits)
+        # Structural, not a runtime test: True only where every orbit
+        # these planets sit on has its sqrt(e) pair PINNED at zero, in
+        # which case the Kepler solve is a sine and a cosine
+        # (orbit.physics.solve_kepler, review 6.8.2).
+        circular_kepler = orbits._all_circular(planets.orbit_map)
         a_rel = ltt_factor = ltt_reflect_factor = ltt_star_factor = None
         if ltt_active.any():
             a_rel = orbits.a.value[planets.orbit_map][
@@ -731,6 +736,7 @@ class Transit(Instrument):
                     a_rel,
                     factor=role_factor,
                     z0=0.0,
+                    circular=circular_kepler,
                 )
                 if lt_active_rows.all():
                     return corrected
@@ -767,7 +773,12 @@ class Transit(Instrument):
                 )
 
             M = (t_grid_final - tp) * n
-            sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
+            # The shared solve, which skips the Newton iteration outright
+            # when every orbit these planets sit on is pinned circular
+            # (review 6.8.2).
+            sinf, cosf = orbit_physics.solve_kepler(
+                M, ecc, circular=orbits._all_circular(planets.orbit_map)
+            )
 
             r_norm = a_rstar * (1.0 - pt.sqr(ecc)) / (1.0 + ecc * cosf)
 
@@ -911,6 +922,7 @@ class Transit(Instrument):
                     orbits.a.value[planets.orbit_map][p_idx],
                     factor=ltt_star_factor[p_idx],
                     z0=0.0,
+                    circular=circular_kepler,
                 )
                 if ltt_active.all():
                     time_star = star_corrected
@@ -1063,6 +1075,7 @@ class Transit(Instrument):
             # at shifted t), so it's (N_times, N_planets) here vs
             # (n_g, k_g, N_planets) there.
             lt_active_arr = self._ltt_active(orbits)
+            circular_kepler = orbits._all_circular(planets.orbit_map)
             a_rel = None
             ltt_factor = ltt_reflect_factor = ltt_star_factor = None
             if lt_active_arr.any():
@@ -1098,6 +1111,7 @@ class Transit(Instrument):
                     a_rel,
                     factor=role_factor,
                     z0=0.0,
+                    circular=circular_kepler,
                 )
                 if lt_active_arr.all():
                     return corrected
@@ -1135,7 +1149,12 @@ class Transit(Instrument):
                 ) + pt.zeros((1, planets.n_elements))
 
             M = (t_grid_final - tp) * n
-            sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
+            # The shared solve, which skips the Newton iteration outright
+            # when every orbit these planets sit on is pinned circular
+            # (review 6.8.2).
+            sinf, cosf = orbit_physics.solve_kepler(
+                M, ecc, circular=orbits._all_circular(planets.orbit_map)
+            )
 
             a_rstar = planets.ar.value[None, :]
             p_ratio = planets.p.value[None, :]

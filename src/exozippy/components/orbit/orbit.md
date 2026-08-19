@@ -22,6 +22,20 @@ The window has to move with it, and `Orbit._seeded_tc` is where: stage 3 runs be
 
 Consumers are membership-based: `rvinstrument` (per-instrument `star_ndx`, default 0) sums `orbit.K` over every orbit containing the observed star (`Orbit.star_membership`; companion-side membership flips sign and rescales by `m_primary/m_companion`); `astrometryinstrument` rel mode references an orbit by name (`orbit:` key; legacy `planet_ndx` still resolves) and models the companion group relative to the primary group, adding the photocenter wobble of any orbit nested inside a group (SED-weighted when `band:` is given, dark-companion beta=0 otherwise, barycenter fallback with a warning); gaia/abs photocenter wobble sums the orbits whose primary group contains the target star. Stars only get sampled `ra/dec/pm_ra/pm_dec` when a gaia/abs dataset exists -- rel data are differential and need only the parallax scale.
 
+## The Kepler solve
+
+Every Keplerian evaluation in the tree goes through `physics.solve_kepler(M, ecc, circular=False)` -- `get_true_anomaly`, `get_sky_position`, `get_radial_velocity`, transit's two, and the Roemer-delay one in `ltt.py`.
+
+**Index before the solve, not after** (review 6.8.1). `get_true_anomaly` takes an optional `orbit_idx`; with it the solve is done on that one orbit rather than on the whole `(N_times, N_orbits)` grid with every other column discarded. `rm.py` was the caller that sliced afterwards, so an N-planet system paid N times over for one Rossiter-McLaughlin curve; `get_sky_position` already indexed its inputs first, and this is that pattern.
+
+**A structurally circular orbit skips the solve entirely** (review 6.8.2). At `e = 0` the mean, eccentric and true anomalies all coincide, so `(sin M, cos M)` is not an approximation -- it is the answer, and it is the exact one where exoplanet-core returns a converged iterate. On `examples/kelt17`, the shipped circular fit, this moves the start logp by 4.9e-9 nats (3.3e-12 relative), in the direction of the exact value.
+
+- **`circular` is a STRUCTURAL claim the caller makes, never a runtime test**, and both halves of that matter. Structural, because a `pt.switch` would build the Newton solve anyway -- which is the whole cost -- and hand `where`'s VJP a branch to multiply by zero. A claim about the PIN and not about the value, because an eccentricity that merely *starts* at zero can move, and treating it as circular would silently give the whole run the wrong RV phase.
+- `Orbit.circular_orbits` is the one place that judgement is made: `sigma: 0` **and** `initval: 0` on **both** `secosw` and `sesinw`, which is how `examples/kelt17` writes a circular fit. It is conservative everywhere it cannot be sure -- a V_c/V_e orbit (whose circular case is a pin on a coordinate whose inversion is singular exactly there), an unresolved parameter, anything unpinned -- because being wrong costs a wrong model while being conservative costs the solve we were already paying.
+- `_all_circular(orbit_map)` is all-or-nothing on purpose: the saving is in not BUILDING the solve, and a mixed vector has to build it for the eccentric columns anyway. Splitting the vector and reassembling with `set_subtensor` would save arithmetic and cost a graph that no longer matches the simple one; not worth it until someone measures a system where it matters.
+
+Tests: `tests/test_circular_fast_path.py`.
+
 ## Transit and occultation durations, and what they measure (review 8.8.7)
 
 `planet.t14` / `tfwhm` / `tau`, their occultation twins `t14s` / `tfwhms` / `taus`, the occultation impact parameter `planet.bs`, and the eclipse time `orbit.ts` are ordinary **derived Parameters**. They were bare `pm.Deterministic`s built inline in `transit.py`, which cost two things: an RV-only fit could not state them at all, and no fit could put a prior on one. They are geometry, not photometry -- every input is a planet or orbit parameter -- so they are declared **wherever there is an orbit**, transit data or not.
