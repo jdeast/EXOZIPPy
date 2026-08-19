@@ -119,8 +119,13 @@ machines.
    verifies it.
 
 Native Windows would additionally need a GCC-style C++ compiler for PyTensor's
-runtime compilation (MSVC will not do), which we have never tested. See
-`notes/todo.txt` if you want to pick native Windows up -- patches welcome.
+runtime compilation (MSVC will not do), which we have never tested.
+
+Those are the headline reasons, not the whole list. If you want to pick native
+Windows up, [`docs/windows-native.md`](docs/windows-native.md) is the running
+inventory of known blockers -- each one with what breaks, why, and the minimum
+work to clear it -- so you can size the job before starting it. Patches
+welcome.
 
 #### Quickstart
 

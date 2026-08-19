@@ -13,6 +13,8 @@ The reference implementation used here builds the sky position via explicit
 independent of the Thiele-Innes shortcut used in Orbit.get_sky_position.
 """
 
+import logging
+
 import numpy as np
 import pymc as pm
 import pytensor
@@ -1210,3 +1212,410 @@ def test_repeated_identical_epochs_are_accepted(tmp_path):
 
     # Assert
     assert comp.epoch == pytest.approx(2457389.0)
+
+
+# ---------------------------------------------------------------------------
+# build_maps builds star_map and nothing else (review 5.10.1)
+# ---------------------------------------------------------------------------
+
+
+def test_build_maps_does_not_build_a_dead_planet_map(tmp_path):
+    """
+    Given a rel dataset using the legacy `planet_ndx` alias,
+    When build_maps runs,
+    Then there is no `planet_map`: rel-orbit resolution lives in __init__
+      (self.rel_orbit), nothing read the map, and stage 5 turned every
+      `*_map` attribute into an int32 shared variable -- so the dead
+      assignment cost one per fit.  star_map stays; it IS read.
+    """
+    # Arrange
+    f = tmp_path / "rel.astrom"
+    _write_interferometric_rel(f)
+    comp = AstrometryInstrument(
+        [
+            {
+                "name": "R",
+                "file": str(f),
+                "mode": "rel",
+                "planet_ndx": 0,
+                "star_ndx": 0,
+            }
+        ],
+        ConfigManager({}),
+    )
+
+    # Act
+    comp.build_maps()
+
+    # Assert
+    assert not hasattr(comp, "planet_map")
+    assert list(comp.star_map) == [0]
+    # the legacy alias still resolves -- it just does so in __init__
+    assert comp.rel_orbit == [0]
+
+
+# ---------------------------------------------------------------------------
+# The NUMERIC photocenter displacement under a nonzero beta (review 7.10.2,
+# the residual of closed item 9.5)
+# ---------------------------------------------------------------------------
+#
+# Already covered: that `fluxfrac` is pinned, and what its VALUE is.  Not
+# covered until now: the flux-weighted OFFSET it produces.  The photocenter
+# of an unresolved pair sits at
+#
+#     a_phot = a_rel * (M_c / M_tot - beta),   beta = F_c / (F_c + F_h)
+#
+# so beta enters as a straight subtraction from the mass fraction.  A sign
+# error, a `1 - beta`, or a beta dropped on the floor all leave the
+# dark-companion case (beta = 0) exactly right and every luminous one wrong,
+# which is precisely the gap these close.  The sharpest of them is the
+# vanishing one: at beta = M_c/M_tot the photocenter IS the barycenter and
+# the wobble is identically zero, a statement no scaling error can satisfy
+# by accident.
+
+_PHOTO_TRUTH = dict(
+    ra0=262.171207,
+    dec0=-0.581091,
+    plx=20.0,
+    pmra=-7.70,
+    pmdec=-25.85,
+    P=400.0,
+    mstar=1.0,
+    mcomp=0.2,  # solMass; modeled as a planet body so it is a pure mass
+    ecc=0.3,
+    w=np.radians(35.0),
+    bigom=np.radians(70.0),
+    inc=np.radians(60.0),
+)
+_MJUP_PER_MSUN = 1047.5655
+
+
+def _photocenter_track(tmp_dir, beta):
+    """Modeled wobble (t, dE, dN) in mas with fluxfrac = beta, + M_c/M_tot.
+
+    The mass fraction is read back from the RESOLVED start values rather
+    than recomputed from _PHOTO_TRUTH: the Mjup -> solMass conversion the
+    config goes through is not bit-exact against a hand-written constant,
+    and a 1e-8 relative offset in the mass fraction is enough to leave a
+    1e-8 residual in the term that is supposed to cancel exactly.
+    """
+    T = _PHOTO_TRUTH
+    rng = np.random.default_rng(11)
+    t = np.sort(rng.uniform(2456900.0, 2457900.0, 30))
+    err = np.full(30, 0.1)
+    path = tmp_dir / f"photo_{beta:.6f}.astrom"
+    np.savetxt(
+        path,
+        np.column_stack(
+            [
+                t,
+                rng.normal(0, err),
+                err,
+                np.degrees(rng.uniform(0, 2 * np.pi, 30)),
+            ]
+        ),
+    )
+    config = {
+        "name": "photo",
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "B"}],
+        "orbit": [{"name": "B"}],
+        "astrometryinstrument": [
+            {
+                "name": "G",
+                "file": str(path),
+                "mode": "gaia",
+                "observer_location": "earth",
+                "epoch": 2457400.0,
+            }
+        ],
+    }
+    user_params = {
+        "star.A.mass": {"initval": T["mstar"], "sigma": 0.05},
+        "star.A.radius": {"initval": 1.0, "sigma": 0.1},
+        "star.A.teff": {"initval": 5800, "sigma": 100},
+        "star.A.feh": {"initval": 0.0, "sigma": 0.1},
+        "star.A.ra": {"initval": T["ra0"]},
+        "star.A.dec": {"initval": T["dec0"]},
+        "star.A.pm_ra": {"initval": T["pmra"]},
+        "star.A.pm_dec": {"initval": T["pmdec"]},
+        "star.A.distance": {"initval": 1000.0 / T["plx"]},
+        "planet.B.mass": {"initval": T["mcomp"] * _MJUP_PER_MSUN},
+        "planet.B.radius": {"initval": 1.0, "sigma": 0},
+        "orbit.B.period": {"initval": T["P"]},
+        "orbit.B.tc": {"initval": 2457000.0},
+        "orbit.B.secosw": {"initval": np.sqrt(T["ecc"]) * np.cos(T["w"])},
+        "orbit.B.sesinw": {"initval": np.sqrt(T["ecc"]) * np.sin(T["w"])},
+        "orbit.B.bigomega": {"initval": np.degrees(T["bigom"])},
+        "orbit.B.cosi": {"initval": np.cos(T["inc"])},
+        # fluxfrac's defaults.yaml sigma is 0, so an initval alone pins it.
+        "astrometryinstrument.G.fluxfrac": {"initval": beta},
+    }
+    system = System(config, user_params=user_params)
+    system.prepare()
+    model = system.build_model()
+    point = system.get_internal_point(model, model.initial_point())
+    system.compile_plotter_functions(model)
+
+    inst = system.astrometryinstrument
+    vals = inst._point_values(system, point)
+    dE, dN = inst._eval_photo(0, t, vals)
+    # Internal units are solMass on both sides, so this is exactly the
+    # m_companion / m_total the orbit's photocenter term forms.
+    m_p = float(np.atleast_1d(system.planet.mass.initval)[0])
+    m_s = float(np.atleast_1d(system.star.mass.initval)[0])
+    return t, np.asarray(dE), np.asarray(dN), m_p / (m_p + m_s)
+
+
+@pytest.fixture(scope="module")
+def photocenter_tracks(tmp_path_factory):
+    """The wobble at four flux fractions, keyed by beta, plus M_c/M_tot."""
+    tmp_dir = tmp_path_factory.mktemp("photocenter")
+    t, dE0, dN0, mass_frac = _photocenter_track(tmp_dir, 0.0)
+    tracks = {0.0: (t, dE0, dN0)}
+    for beta in (0.5 * mass_frac, mass_frac, 1.0):
+        tracks[beta] = _photocenter_track(tmp_dir, beta)[:3]
+    return tracks, mass_frac
+
+
+@pytest.mark.slow
+def test_dark_companion_wobble_matches_the_analytic_photocenter(
+    photocenter_tracks,
+):
+    """
+    Given: a gaia fit of a 0.2 solMass companion with fluxfrac = 0
+    When: the modeled photocenter wobble is evaluated at the start
+    Then: it equals the Keplerian track of amplitude
+      a_rel * (M_c/M_tot) * plx, computed independently from Kepler's third
+      law -- so the beta = 0 leg of a_phot = a_rel (M_c/M_tot - beta) is
+      pinned in absolute mas, not only relatively to the other betas.
+    """
+    # Arrange
+    tracks, mass_frac = photocenter_tracks
+    T = _PHOTO_TRUTH
+    t, dE, dN = tracks[0.0]
+    mtot = T["mstar"] + T["mcomp"]
+    a_AU = (mtot * (T["P"] / 365.25) ** 2) ** (1.0 / 3.0)
+    a_phot = a_AU * mass_frac * T["plx"]  # mas
+    tp = _tp_from_tc(2457000.0, T["P"], T["ecc"], T["w"])
+
+    # Act
+    eE, eN = _sky_pos_reference(
+        t, T["P"], tp, T["ecc"], T["w"], T["bigom"], T["inc"], a_phot
+    )
+
+    # Assert: a real signal, and it is the expected one
+    assert np.ptp(eE) > 5.0
+    np.testing.assert_allclose(dE, eE, rtol=2e-3, atol=1e-3)
+    np.testing.assert_allclose(dN, eN, rtol=2e-3, atol=1e-3)
+
+
+@pytest.mark.slow
+def test_photocenter_vanishes_when_beta_equals_the_mass_fraction(
+    photocenter_tracks,
+):
+    """
+    Given: a companion whose flux fraction EQUALS its mass fraction
+    When: the photocenter wobble is evaluated
+    Then: it is identically zero -- the photocenter and the barycenter
+      coincide, and the barycenter does not move.  This is the assertion a
+      dropped or mis-signed beta cannot pass: at beta = 0 every wrong
+      formula still agrees with the right one.
+    """
+    # Arrange / Act
+    tracks, mass_frac = photocenter_tracks
+    _, dE, dN = tracks[mass_frac]
+    _, dE0, dN0 = tracks[0.0]
+
+    # Assert: zero against the scale of the wobble it cancels
+    scale = max(np.max(np.abs(dE0)), np.max(np.abs(dN0)))
+    assert scale > 1.0  # milliarcsec: the wobble being cancelled is real
+    assert np.max(np.abs(dE)) < 1e-10 * scale
+    assert np.max(np.abs(dN)) < 1e-10 * scale
+
+
+@pytest.mark.slow
+def test_photocenter_is_linear_in_beta_and_flips_past_the_mass_fraction(
+    photocenter_tracks,
+):
+    """
+    Given: the wobble at beta = 0, M_c/2M_tot and 1
+    When: the tracks are compared,
+    Then: the amplitude scales as (M_c/M_tot - beta) exactly -- half the
+      mass fraction halves it, and a fully luminous companion (beta = 1)
+      REVERSES it, the photocenter then tracing the companion's own orbit
+      about the barycenter with amplitude a_rel*(1 - M_c/M_tot).  The sign
+      flip is the part a `1 - beta` typo gets backwards.
+    """
+    # Arrange
+    tracks, mass_frac = photocenter_tracks
+    _, dE0, dN0 = tracks[0.0]
+    _, dE_half, dN_half = tracks[0.5 * mass_frac]
+    _, dE_lum, dN_lum = tracks[1.0]
+
+    # Act / Assert
+    np.testing.assert_allclose(dE_half, 0.5 * dE0, rtol=1e-9, atol=1e-11)
+    np.testing.assert_allclose(dN_half, 0.5 * dN0, rtol=1e-9, atol=1e-11)
+
+    ratio = (mass_frac - 1.0) / mass_frac
+    assert ratio < 0.0
+    np.testing.assert_allclose(dE_lum, ratio * dE0, rtol=1e-9, atol=1e-11)
+    np.testing.assert_allclose(dN_lum, ratio * dN0, rtol=1e-9, atol=1e-11)
+
+
+# ---------------------------------------------------------------------------
+# fluxfrac is a gaia/abs parameter; on a rel dataset it is INACTIVE
+# (review 3.10.1 -- KELT-4's "why is the companion flux fixed to zero?")
+# ---------------------------------------------------------------------------
+#
+# `fluxfrac` is the photocenter flux fraction and `_photocenter_terms` is its
+# only consumer, so a rel dataset never reads it: rel mode weighs each NESTED
+# orbit's photocenter separately (`_pair_beta`, from the SED in `band:`).  A
+# rel element is therefore not part of the physics and is inactive rather than
+# pinned -- which is what stops a rel-only fit such as examples/kelt4 from
+# reporting a companion flux "Fixed" at zero for a quantity that never entered
+# its likelihood.  Logp-neutral: defaults.yaml already gives fluxfrac
+# `sigma: 0.0`, so the element was fixed either way.
+
+
+def _rel_and_gaia_system(tmp_dir, modes):
+    """One System whose astrometry datasets have the given modes, in order."""
+    T = _PHOTO_TRUTH
+    rng = np.random.default_rng(19)
+    insts = []
+    for k, mode in enumerate(modes):
+        path = tmp_dir / f"m{k}_{mode}.astrom"
+        if mode == "rel":
+            _write_interferometric_rel(path)
+            insts.append({"name": f"R{k}", "file": str(path), "mode": "rel"})
+        else:
+            t = np.sort(rng.uniform(2456900.0, 2457900.0, 25))
+            err = np.full(25, 0.1)
+            np.savetxt(
+                path,
+                np.column_stack(
+                    [
+                        t,
+                        rng.normal(0, err),
+                        err,
+                        np.degrees(rng.uniform(0, 2 * np.pi, 25)),
+                    ]
+                ),
+            )
+            insts.append(
+                {
+                    "name": f"G{k}",
+                    "file": str(path),
+                    "mode": "gaia",
+                    "observer_location": "earth",
+                    "epoch": 2457400.0,
+                }
+            )
+    config = {
+        "name": "fluxfracmodes",
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "B"}],
+        "orbit": [{"name": "B"}],
+        "astrometryinstrument": insts,
+    }
+    user_params = {
+        "star.A.mass": {"initval": T["mstar"], "sigma": 0.05},
+        "star.A.radius": {"initval": 1.0, "sigma": 0.1},
+        "star.A.teff": {"initval": 5800, "sigma": 100},
+        "star.A.feh": {"initval": 0.0, "sigma": 0.1},
+        "star.A.ra": {"initval": T["ra0"]},
+        "star.A.dec": {"initval": T["dec0"]},
+        "star.A.pm_ra": {"initval": T["pmra"]},
+        "star.A.pm_dec": {"initval": T["pmdec"]},
+        "star.A.distance": {"initval": 1000.0 / T["plx"]},
+        "planet.B.mass": {"initval": T["mcomp"] * _MJUP_PER_MSUN},
+        "planet.B.radius": {"initval": 1.0, "sigma": 0},
+        "orbit.B.period": {"initval": T["P"]},
+        "orbit.B.tc": {"initval": 2457000.0},
+        "orbit.B.cosi": {"initval": np.cos(T["inc"])},
+    }
+    system = System(config, user_params=user_params)
+    system.prepare()
+    model = system.build_model()
+    return system, model
+
+
+@pytest.mark.slow
+def test_rel_mode_fluxfrac_is_inactive_not_merely_pinned(tmp_path):
+    """
+    Given a rel-only astrometry fit -- the examples/kelt4 topology,
+    When the model is built,
+    Then its fluxfrac element is INACTIVE: nothing samples it, and it is
+      suppressed from the tables rather than reported as a companion flux
+      fixed at zero.  It is not a parameter of a rel dataset at all.
+    """
+    # Arrange / Act
+    system, model = _rel_and_gaia_system(tmp_path, ["rel"])
+    inst = system.astrometryinstrument
+
+    # Assert
+    assert inst.fluxfrac.element_is_active(0) is False
+    assert not [
+        rv.name
+        for rv in model.free_RVs
+        if rv.name.startswith("astrometryinstrument.fluxfrac")
+    ]
+    active = system.active_elements()[("astrometryinstrument", "fluxfrac")]
+    assert not active.any()
+
+
+@pytest.mark.slow
+def test_fluxfrac_activity_is_per_dataset_when_the_modes_are_mixed(tmp_path):
+    """
+    Given one fit holding a rel dataset AND a gaia dataset,
+    When the model is built,
+    Then only the gaia element is active.  The role is per element because
+      the fact it states -- "this dataset has a photocenter" -- is per
+      dataset; a whole-vector answer would have to be wrong for one of them.
+    """
+    # Arrange / Act
+    system, _ = _rel_and_gaia_system(tmp_path, ["rel", "gaia"])
+
+    # Assert
+    active = system.active_elements()[("astrometryinstrument", "fluxfrac")]
+    assert list(active) == [False, True]
+
+
+def test_companion_star_ndx_on_a_rel_dataset_warns_and_is_ignored(
+    tmp_path, caplog
+):
+    """
+    Given a rel dataset given the gaia/abs key `companion_star_ndx`,
+    When parameters are registered,
+    Then it warns and no SED fluxfrac is wired -- silently building a
+      `fluxfrac_sed` Deterministic no likelihood reads is exactly the
+      "I configured it and nothing happened" failure the guard prevents.
+    """
+    # Arrange
+    f = tmp_path / "rel.astrom"
+    _write_interferometric_rel(f)
+    cm = ConfigManager({})
+    cm.system_config = {"sed": [{"file": "unused.sed"}]}
+    comp = AstrometryInstrument(
+        [
+            {
+                "name": "R",
+                "file": str(f),
+                "mode": "rel",
+                "band": "V",
+                "companion_star_ndx": 1,
+            }
+        ],
+        cm,
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+    comp.load_data(system)
+
+    # Act
+    with caplog.at_level(logging.WARNING):
+        comp.register_parameters(system)
+
+    # Assert
+    assert comp._sed_fluxfrac == [False]
+    assert "companion_star_ndx is a gaia/abs key" in caplog.text

@@ -2,7 +2,7 @@
 
 ## 1. **Run `download_MIST_EEPs.py`**
 
-You can visit [MIST.SCIENCE](https://mist.science/model_grids.html#eeps) to determine which evolutionary tracks you would like to download.  Currently, there are two options: MISTv1.2 and MISTv2.5.  MISTv2.5 has an added dimension of alpha enhancement, and is the default assumed in `download_MIST_EEPs.py`.  You can specify which values of $[\text{Fe}/\text{H}]_\text{initial}$, $[\alpha/\text{Fe}]$, and $v/v_\text{crit}$ you would like to download by changing the values in the arrays on Lines 37-42, which by default is set to:
+You can visit [MIST.SCIENCE](https://mist.science/model_grids.html#eeps) to determine which evolutionary tracks you would like to download.  Currently, there are two options: MISTv1.2 and MISTv2.5.  MISTv2.5 has an added dimension of alpha enhancement, and is the default assumed in `download_MIST_EEPs.py`.  You can specify which values of $[\text{Fe}/\text{H}]_\text{initial}$, $[\alpha/\text{Fe}]$, and $v/v_\text{crit}$ you would like to download by changing the `initfeh_vals` / `alpha_vals` / `vvcrit_vals` arrays in `__main__`, which by default are set to:
 
 ```
 initfeh_vals = [ -4.0,  -3.5,  -3.0, -2.75,  
@@ -13,7 +13,7 @@ alpha_vals = [-0.2, 0.0, 0.2, 0.4, 0.6]
 vvcrit_vals = [0.0, 0.4]
 ```
 
-You also should set the path for where you want these tracks saved on Line 33:
+You also should set `EEP_PATH`, the path where you want these tracks saved:
 
 ```
 EEP_PATH = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/raw_tracks/") # change path to where you want to store the EEP tracks
@@ -21,6 +21,8 @@ EEP_PATH = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/raw_tracks/") # change path t
 
 > [!WARNING]
 > Downloading the full raw grid of tracks for MISTv2.5 is ~186 GB and can take multiple hours to fully download.
+
+The download is resumable: each grid point is extracted into its own `EEP_PATH/feh_..._afe_..._vvcrit...` directory, and a re-run skips the ones already there. A grid point is only moved into place once its archive has downloaded and extracted completely, so an interrupted run leaves nothing a later run could mistake for finished.
 
 ## 2. **Run `generate_MIST_EEP_Tables.py`**
 

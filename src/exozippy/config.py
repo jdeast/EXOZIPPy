@@ -847,6 +847,28 @@ class ConfigManager:
 
             yaml_key = getattr(module, "comp_key", py_file.parent.name)
 
+            # A relations file may be CONDITIONAL on the topology.  It is
+            # keyed on one YAML block (comp_key), but that block is not
+            # always the one whose presence makes the relations mean
+            # anything: sed/symbolic_physics.py piggybacks on `star` so its
+            # relations instantiate once per star, yet what they describe
+            # (teffsed = teff, radiussed = radius) only exists when there is
+            # a `sed:` block -- and star.py's manifest already declares
+            # teffsed/radiussed only then.  Registering them regardless put
+            # phantom leaf symbols, and their ledger rows, into every
+            # non-SED config (review 1.9.4).
+            #
+            # A module opts in by defining relations_apply(system_config).
+            # Absent, the relations always apply: that is the historical
+            # behaviour and the right default for a file keyed on its own
+            # block.  This is the symbolic-side analogue of the per-child
+            # JITTER_RELATIONS registration (instrument.md) -- WHICH configs
+            # a relation applies to is a fact only the relation's own file
+            # knows, so it is the file that states it.
+            applies = getattr(module, "relations_apply", None)
+            if applies is not None and not applies(self.system_config):
+                continue
+
             if (
                 hasattr(module, "get_symbol_map")
                 and yaml_key in self.system_config

@@ -1,9 +1,17 @@
 """The orbit-crossing / Hill-sphere barrier (review 8.8.9).
 
-The port of EXOFASTv2's `exofast_chi2v2.pro`:445-468.  What was here before
-was the bare apsidal test -- outer periastron outside inner apastron -- on
-ADJACENT pairs only.  What this adds is the Hill-radius pad on each side, all
-pairs, and EXOFASTv2's `alloworbitcrossing` off switch, spelled per planet.
+Descended from EXOFASTv2's `exofast_chi2v2.pro`:445-468.  What was here
+before was the bare apsidal test -- outer periastron outside inner apastron
+-- on ADJACENT pairs only; then the faithful port, which padded each side by
+that planet's OWN Hill radius.  What the threshold is stated in NOW is the
+MUTUAL Hill radius,
+
+    R_H = ((m1 + m2) / 3 M_*)^(1/3) (a1 + a2) / 2,
+
+with a per-planet `min_hill_separation` defaulting to 1.0 -- EXOFASTv2's
+one-Hill pad, so the DEFAULT strictness stays at the port's while the
+formulation becomes the one the dynamics literature quotes separations in.
+All pairs and EXOFASTv2's `alloworbitcrossing` off switch are unchanged.
 
 Kept SOFT, deliberately: EXOFASTv2 returns +infinity chi2, and a wall with no
 gradient is nothing a gradient sampler can follow out of.
@@ -138,42 +146,125 @@ def _logp(model):
     return float(model.compile_logp()(model.initial_point()))
 
 
+def _penalty(model, name="planet.crossing_bound_b_c"):
+    """The named crossing potential, evaluated at the start point."""
+    crossing = [p for p in model.potentials if p.name == name]
+    assert crossing, f"{name} must exist"
+    fn = model.compile_fn(model.replace_rvs_by_values([crossing[0]]))
+    point = model.initial_point()
+    args = {k: v for k, v in point.items() if k in fn.f._finder}
+    return float(fn(args)[0])
+
+
 def test_the_hill_pad_penalizes_a_geometry_the_bare_apsidal_test_allows():
     """
     Given two planets whose apsides just miss but whose Hill spheres
       overlap,
     When the barrier is evaluated,
     Then it charges something.  This is exactly what the pre-port version
-      did not do: `h = (1-e) a (m_p/3 M_*)^(1/3)` is what turns "the orbits
-      do not intersect" into "the orbits are not within a Hill radius".
+      did not do: the mutual Hill radius is what turns "the orbits do not
+      intersect" into "the orbits are not within a Hill radius".
     """
     # Arrange: a pair packed close enough that the pads overlap.
-    system, model = _system(
-        2,
-        periods={"b": 10.0, "c": 11.0},
+    _, model = _system(2, periods={"b": 10.0, "c": 11.0})
+
+    # Act / Assert: a real cost, not the ~0 an easily satisfied bound gives.
+    assert _penalty(model) < -1.0
+
+
+# ---------------------------------------------------------------------------
+# 3b. The threshold is in MUTUAL Hill radii, and it is settable
+# ---------------------------------------------------------------------------
+
+
+def test_the_pad_is_the_mutual_hill_radius_not_the_sum_of_the_two_own_ones():
+    """
+    Given a packed pair,
+    When the barrier's argument is reconstructed from the resolved start
+      values both ways,
+    Then it matches the MUTUAL form and not the per-planet-pad form that
+      preceded it.  For an equal-mass pair at e = 0 the two differ by a
+      constant factor -- summed own pads give (a1+a2)(m/3M)^(1/3) while
+      the mutual radius gives 2^(1/3)/2 = 0.63 of that -- so the mutual
+      threshold is the LOOSER of the two at the same k = 1, which is the
+      only sense in which "the formulation changes, the default strictness
+      does not" is inexact.
+
+    Note the reference gap uses the resolved eccentricity rather than
+    assuming zero: sqrt(e)cos/sin(omega) do not resolve to exactly 0, and
+    an assumed-circular reference misses by ~2% of the penalty.
+    """
+    # Arrange
+    system, model = _system(2, periods={"b": 10.0, "c": 11.0})
+    planet = system.planet
+    a = np.atleast_1d(planet.a.initval) * np.ones(2)
+    m = np.atleast_1d(planet.mass.initval) * np.ones(2)
+    m_star = np.atleast_1d(system.star.mass.initval)[0]
+    ecc = np.atleast_1d(system.orbit.ecc.initval) * np.ones(2)
+
+    gap = a[1] * (1.0 - ecc[1]) - a[0] * (1.0 + ecc[0])
+    r_mutual = ((m[0] + m[1]) / (3.0 * m_star)) ** (1.0 / 3.0) * 0.5 * sum(a)
+    own_pads = sum(
+        (1.0 - ecc[k]) * a[k] * (m[k] / (3.0 * m_star)) ** (1.0 / 3.0)
+        for k in (0, 1)
     )
-    crossing = [
-        p for p in model.potentials if p.name == "planet.crossing_bound_b_c"
-    ]
-    assert crossing, "the pair must carry a barrier"
+
+    import pytensor.tensor as pt
+
+    from exozippy.potentials import soft_lower_bound
+
+    def barrier(pad):
+        return float(
+            soft_lower_bound(
+                pt.as_tensor_variable(gap - pad), 0.0, scale=float(a[0])
+            ).eval()
+        )
 
     # Act
-    point = model.initial_point()
-    penalty = float(
-        model.compile_fn(model.replace_rvs_by_values([crossing[0]]))(
-            {
-                k: v
-                for k, v in point.items()
-                if k
-                in model.compile_fn(
-                    model.replace_rvs_by_values([crossing[0]])
-                ).f._finder
-            }
-        )[0]
+    measured = _penalty(model)
+
+    # Assert
+    assert measured == pytest.approx(barrier(r_mutual), rel=1e-6)
+    assert measured != pytest.approx(barrier(own_pads), rel=1e-3)
+    # ... and the mutual radius really is the smaller pad here.
+    assert r_mutual < own_pads
+
+
+def test_min_hill_separation_tightens_the_threshold():
+    """
+    Given a pair that is comfortably separated at the default 1 mutual
+      Hill radius,
+    When one planet asks for the ~8-12 mutual Hill radii the empirical
+      long-term stability literature quotes,
+    Then the same geometry is now penalized.  A pair takes the LARGER of
+      its two members' values, since the number says how much room that
+      planet needs.
+    """
+    # Arrange / Act
+    _, relaxed = _system(2, periods={"b": 10.0, "c": 30.0})
+    _, strict = _system(
+        2,
+        periods={"b": 10.0, "c": 30.0},
+        c={"min_hill_separation": 10.0},
     )
 
-    # Assert: a real cost, not the ~0 an easily satisfied bound gives.
-    assert penalty < -1.0
+    # Assert
+    assert _penalty(relaxed) == pytest.approx(0.0, abs=1e-9)
+    assert _penalty(strict) < -1.0
+
+
+def test_min_hill_separation_is_a_declared_config_key():
+    """
+    Given the schema a config is validated against,
+    When it is read,
+    Then `min_hill_separation` is in it -- an undeclared key is silently
+      ignored, which is exactly what a stability prior must not be.
+    """
+    from exozippy.components.planet.planet import Planet
+
+    assert "min_hill_separation" in {
+        entry["key"] for entry in Planet.config_schema()
+    }
 
 
 def test_a_widely_separated_pair_pays_almost_nothing():

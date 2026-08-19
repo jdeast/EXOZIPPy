@@ -12,6 +12,7 @@ import contextlib
 import logging
 import os
 import warnings
+from functools import lru_cache
 
 import numpy as np
 from astropy.coordinates import (
@@ -206,6 +207,27 @@ def get_observer_position(
         )
 
 
+@lru_cache(maxsize=32)
+def _ephemeris_spline(ephemeris_file, _stamp):
+    """Parse one .eph file and fit its CubicSpline, once (review 6.10.1).
+
+    Returns `(spline, t_min, t_max)`.  Keyed on the path AND a `_stamp` of
+    `(st_mtime_ns, st_size)` taken by the caller, so an ephemeris
+    regenerated under the same name is re-read rather than served stale --
+    a plain path key would outlive a `get_ephemeris.py` re-run inside one
+    process (the GUI, a notebook, a test that rewrites its tmp file).
+
+    What is NOT cached is the extrapolation check: it depends on the
+    requested epochs, not on the file, and it has to warn every time.
+    """
+    data = np.loadtxt(ephemeris_file)
+    t_grid = data[:, 0]
+    xyz_grid = data[:, 1:4]
+    # bc_type='not-a-knot' is standard for smooth orbital curves
+    spline = CubicSpline(t_grid, xyz_grid, axis=0, bc_type="not-a-knot")
+    return spline, float(np.min(t_grid)), float(np.max(t_grid))
+
+
 def interpolate_ephemeris(time, ephemeris_file):
     """
     Interpolates a Barycentric ephemeris file.
@@ -228,15 +250,16 @@ def interpolate_ephemeris(time, ephemeris_file):
         (N, 3) array of barycentric X, Y, Z coordinates in AU (ICRS/J2000
         equatorial frame).
     """
-    # Load data, skipping the header lines
-    # data[:, 0] = BJD_TDB, [:, 1:4] = X, Y, Z
-    data = np.loadtxt(ephemeris_file)
-
-    t_grid = data[:, 0]
-    xyz_grid = data[:, 1:4]
+    # Parse + fit once per (file, mtime, size); see _ephemeris_spline.  This
+    # is called per instrument at load AND from plot_sky's 4000-point grids
+    # and the mulens plotters, so a multi-draw plotting pass used to re-parse
+    # the same .eph dozens of times.
+    st = os.stat(ephemeris_file)
+    cs, t_min, t_max = _ephemeris_spline(
+        ephemeris_file, (st.st_mtime_ns, st.st_size)
+    )
 
     # Check if we are extrapolating (which is dangerous)
-    t_min, t_max = np.min(t_grid), np.max(t_grid)
     below = np.asarray(time) < t_min
     above = np.asarray(time) > t_max
     if np.any(below) or np.any(above):
@@ -258,9 +281,5 @@ def interpolate_ephemeris(time, ephemeris_file):
             f"ephemeris to cover these epochs (see "
             f"ephemerides/get_ephemeris.py)."
         )
-
-    # Create the spline object
-    # bc_type='not-a-knot' is standard for smooth orbital curves
-    cs = CubicSpline(t_grid, xyz_grid, axis=0, bc_type="not-a-knot")
 
     return cs(time)
