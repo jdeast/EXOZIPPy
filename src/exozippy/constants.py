@@ -20,7 +20,20 @@ LOGG_CONST = np.log10(const.GM_sun.cgs.value / const.R_sun.cgs.value**2)  # cgs
 LUM_CONST = 1.0 / (
     (const.L_sun / const.sigma_sb / const.R_sun**2).cgs.value / (4.0 * np.pi)
 )  # K^-4
-FBOL_CONST = 1.0 / (4.0 * np.pi * (const.pc / const.R_sun) ** 2.0)
+# Bolometric flux at Earth: F = L / (4 pi d^2), with L in solLum and d in pc
+# (calc_fbol's two inputs) and F in erg s-1 cm-2 (star.fbol's declared unit,
+# which is also its internal_unit -- so NOTHING downstream converts, and this
+# constant alone has to carry L_sun and pc into cgs).
+#
+# It was `1/(4 pi (pc/R_sun)^2)` until 2026-08 -- DIMENSIONLESS, i.e. really
+# solLum/solRad^2, so every reported F_Bol was low by exactly
+# L_sun/R_sun^2 = 7.909e11 while labeled cgs (review 1.8.1; gj1214 shipped
+# \ezstarfbol ~ 7.3e-22 for a true ~5.8e-10).  No posterior moved, because the
+# sole likelihood consumer is sed.py's fbolsed floor, whose
+# (fbol - fbolsed)/(fbol*frac) cancels any common factor exactly -- which is
+# also why nothing caught it.  The Sun at 10 pc is 3.20e-7 erg s-1 cm-2;
+# tests/test_star_fbol.py pins that.
+FBOL_CONST = (const.L_sun / (4.0 * np.pi * const.pc**2)).cgs.value
 DENSITY_CONST = 3.0 / (4.0 * np.pi)
 
 PC_TO_RSUN_CONST = u.pc.to(u.R_sun)
