@@ -859,14 +859,17 @@ class Planet(Component):
         # pair threshold is the larger of its two members'.
         if len(seps) == 1:
             sep_txt = f"{seps[0]:g}"
+            unit = "radius" if seps[0] == 1.0 else "radii"
         else:
             sep_txt = f"{seps[0]:g}--{seps[-1]:g}"
+            unit = "radii"
         prose = get_collector(system)
         text = (
             "We required the orbits of "
             + join_names(latex_escape(n) for n in constrained)
             + f" to stay separated by at least {sep_txt} mutual Hill "
-            r"radii, $R_{\rm H} = [(m_1 + m_2)/3 M_\star]^{1/3} "
+            + unit
+            + r", $R_{\rm H} = [(m_1 + m_2)/3 M_\star]^{1/3} "
             r"(a_1 + a_2)/2$, as a soft penalty rather than the hard "
             r"rejection of \citet{Eastman:2019}; the criterion neglects "
             "mutual inclination and resonant protection, and one mutual "
