@@ -65,6 +65,14 @@ class Planet(Component):
         self.allow_orbit_crossing = [
             bool(c.get("allow_orbit_crossing", False)) for c in self.config
         ]
+        # How many MUTUAL Hill radii a pair must be separated by (review
+        # 8.8.9).  Per planet for the same reason as the switch above, and
+        # a pair takes the LARGER of its two members' values: the number is
+        # a statement about how much room that planet needs, so the
+        # stricter statement wins.  1.0 is EXOFASTv2's one-Hill pad.
+        self.min_hill_separation = [
+            float(c.get("min_hill_separation", 1.0)) for c in self.config
+        ]
 
     @property
     def prefix(self):
@@ -113,6 +121,24 @@ class Planet(Component):
                     "3:2) and co-orbital pairs live inside their mutual "
                     "Hill sphere, so a fit of such a system has to set "
                     "this; a pair is exempt when either member does."
+                ),
+            },
+            {
+                "key": "min_hill_separation",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Minimum separation between this planet's orbit and "
+                    "every other planet's, in MUTUAL Hill radii "
+                    "R_H = ((m1+m2)/(3 M_*))^(1/3) (a1+a2)/2. Default 1.0, "
+                    "EXOFASTv2's one-Hill pad -- a crossing criterion, NOT "
+                    "a stability claim. The empirical long-term stability "
+                    "threshold for multiplanet systems is ~8-12 mutual "
+                    "Hill radii (Chambers, Wetherill & Boss 1996; Pu & Wu "
+                    "2015; Obertas, Van Laerhoven & Tamayo 2017), so set "
+                    "it there for a real stability prior. A pair takes the "
+                    "larger of its two members' values."
                 ),
             },
             {
@@ -664,20 +690,29 @@ class Planet(Component):
     def _add_crossing_potential(self, system, orbits):
         """Soft orbit-crossing / Hill-sphere barrier between planet pairs.
 
-        The port of EXOFASTv2's `exofast_chi2v2.pro`:445-468 (review 8.8.9).
-        Two planets whose orbits approach within a Hill radius are unstable
-        on timescales far shorter than the age of any system we fit, so the
-        posterior is bounded by keeping the annuli
+        Descended from EXOFASTv2's `exofast_chi2v2.pro`:445-468 (review
+        8.8.9).  Two planets whose orbits approach within a Hill radius are
+        unstable on timescales far shorter than the age of any system we
+        fit, so the posterior is bounded by requiring the radial gap between
+        the inner planet's apastron and the outer's periastron to be at
+        least `k` MUTUAL Hill radii:
 
-            [ (1 - e) a - h,  (1 + e) a + h ],
-            h = (1 - e) a (m_p / 3 M_*)^(1/3)
+            a_out (1 - e_out) - a_in (1 + e_in)  >=  k R_H,
+            R_H = ((m_in + m_out) / 3 M_*)^(1/3) (a_in + a_out) / 2
 
-        from overlapping.  What the earlier version had was the bare apsidal
-        test with no Hill pad, on ADJACENT pairs only; what it replaced was a
-        never-executed `-inf` block that walked attributes deleted in the
-        vectorized refactor, so any two-planet system raised AttributeError.
+        `k` is `min_hill_separation`, per planet, defaulting to **1.0** --
+        EXOFASTv2's one-Hill pad, so the formulation below differs from the
+        port while the default STRICTNESS does not.  A pair takes the larger
+        of its two members' `k`.
 
-        Four things about this port, all deliberate:
+        What the earlier versions had: first the bare apsidal test with no
+        Hill pad, on ADJACENT pairs only (before that, a never-executed
+        `-inf` block that walked attributes deleted in the vectorized
+        refactor, so any two-planet system raised AttributeError); then the
+        faithful port, which pads each side by that planet's OWN Hill radius
+        `h_i = (1 - e_i) a_i (m_i / 3 M_*)^(1/3)`.
+
+        Five things about it, all deliberate:
 
         - **Soft, not `+infinity` chi2.**  EXOFASTv2 rejects outright; a
           gradient sampler cannot be given a wall with no gradient to follow
@@ -693,20 +728,35 @@ class Planet(Component):
           The ordering is a topology choice, not a sampled quantity:
           re-deriving it per draw would make the potential discontinuous
           wherever two orbits swap places.
-        - **The Hill radius is each planet's OWN, not the mutual one**, and
-          the threshold is EXOFASTv2's one-Hill pad.  That is a port, not a
-          claim about stability, and the criterion is crude in both
-          directions -- EXOFASTv2's own comment says so.  Too strict:
-          resonant protection makes crossing orbits stable (Neptune-Pluto's
-          3:2), co-orbital and Trojan pairs live INSIDE the mutual Hill
-          sphere, and mutual inclination separates orbits that overlap in
-          radius, none of which is modeled.  Too loose: the empirical
-          long-term threshold for multiplanet systems is ~8-12 MUTUAL Hill
-          radii (Chambers, Wetherill & Boss 1996; Pu & Wu 2015; Obertas, Van
-          Laerhoven & Tamayo 2017), which this is nowhere near.  Real
-          stability is an N-body / SPOCK-style follow-up, not a per-step
-          penalty.  A system that needs the strict side loosened sets
-          `allow_orbit_crossing: true` on either member of the pair.
+        - **The Hill radius is the MUTUAL one, not each planet's own.**  It
+          is the length the dynamics literature states separations in, so
+          `min_hill_separation` is a number a user can look up rather than
+          one only this file's algebra defines; it is symmetric in the pair
+          by construction; and it depends on the two masses only through
+          their SUM, so a marginal secondary mass no longer moves the
+          threshold on its own.  Everything it needs is a node that already
+          exists.  `M_*` is the INNER planet's host: for the ordinary case
+          of two planets round one star that is simply the star, and where
+          the hosts differ the criterion is not a stability criterion anyway
+          (see the nested-orbit limitation below).
+        - **1 R_H is a crossing criterion, NOT a stability claim, and the
+          default is deliberately permissive.**  The criterion is crude in
+          both directions and EXOFASTv2's own comment says so.  *Too
+          strict*: **resonant protection makes crossing orbits stable** --
+          Neptune and Pluto cross in radius and are protected by their 3:2
+          mean-motion resonance, and co-orbital / Trojan pairs live INSIDE
+          their mutual Hill sphere, i.e. at a separation of ZERO by this
+          measure.  Mutual inclination, which also separates orbits that
+          overlap in radius, is not modeled either.  A fit of such a system
+          must set `allow_orbit_crossing: true` on a member of the pair (or
+          lower `min_hill_separation`) -- otherwise the barrier quietly
+          penalizes the very configuration being measured.  *Too loose*: the
+          empirical long-term threshold for multiplanet systems is ~8-12
+          mutual Hill radii (Chambers, Wetherill & Boss 1996; Pu & Wu 2015;
+          Obertas, Van Laerhoven & Tamayo 2017), so a user who wants a real
+          stability prior sets `min_hill_separation` in that range.  Real
+          stability is an N-body / SPOCK-style analysis, a follow-up rather
+          than a per-step penalty.
 
         Limitation, unchanged and deliberate: only pairs on distinct orbits
         are constrained.  For nested hierarchical orbits (a planet orbiting
@@ -720,18 +770,8 @@ class Planet(Component):
         star = system.active_components["star"]
         m_star = star.mass.value[self.star_map]
 
-        # Hill radius at periastron, EXOFASTv2's h.  The cube root's argument
-        # is floored rather than the result: `planet.mass` may be NEGATIVE in
-        # `linear` mass mode, `x**(1/3)` is NaN there, and flooring after the
-        # root multiplies its infinite derivative at zero by pt.maximum's zero
-        # gradient to give NaN -- the calc_theta_E / calc_jitter idiom.  1e-30
-        # leaves h at ~1e-10 a, i.e. no pad at all, which is the right answer
-        # for a planet the data say has no mass.
-        mass_ratio = pt.maximum(self.mass.value / (3.0 * m_star), 1e-30)
-        hill = (1.0 - ecc) * a * mass_ratio ** (1.0 / 3.0)
-
-        inner_edge = (1.0 - ecc) * a - hill
-        outer_edge = (1.0 + ecc) * a + hill
+        inner_edge = (1.0 - ecc) * a
+        outer_edge = (1.0 + ecc) * a
 
         a_init = self._initial_semimajor_axes()
         # A missing start sorts last but must not become the barrier scale.
@@ -761,11 +801,31 @@ class Planet(Component):
                 scale = a_init[i] if np.isfinite(a_init[i]) else 0.0
                 scale = float(max(abs(scale), 1e-6))
 
+                # Mutual Hill radius of the pair.  The cube root's ARGUMENT
+                # is floored, never its result: `planet.mass` may be
+                # negative in `linear` mass mode, `x**(1/3)` is NaN there,
+                # and flooring after the root would multiply its infinite
+                # derivative at zero by pt.maximum's zero gradient and give
+                # NaN again -- the calc_theta_E / calc_jitter idiom.  1e-30
+                # leaves R_H at ~1e-10 a, i.e. no pad at all, which is the
+                # right answer for a pair the data say has no mass.
+                mass_ratio = pt.maximum(
+                    (self.mass.value[i] + self.mass.value[j])
+                    / (3.0 * m_star[i]),
+                    1e-30,
+                )
+                r_hill = mass_ratio ** (1.0 / 3.0) * 0.5 * (a[i] + a[j])
+                k = max(
+                    self.min_hill_separation[i], self.min_hill_separation[j]
+                )
+
                 pm.Potential(
                     f"{self.prefix}.crossing_bound_"
                     f"{self.names[i]}_{self.names[j]}",
                     soft_lower_bound(
-                        inner_edge[j] - outer_edge[i], 0.0, scale=scale
+                        inner_edge[j] - outer_edge[i] - k * r_hill,
+                        0.0,
+                        scale=scale,
                     ),
                 )
 
@@ -787,14 +847,31 @@ class Planet(Component):
         ]
         if len(constrained) < 2:
             return
+        seps = sorted(
+            {
+                self.min_hill_separation[int(i)]
+                for i in order
+                if not self.allow_orbit_crossing[int(i)]
+            }
+        )
+        # A config fact, so it may be interpolated (outputs/prose.py).  One
+        # number when every planet agrees, a range when they do not -- the
+        # pair threshold is the larger of its two members'.
+        if len(seps) == 1:
+            sep_txt = f"{seps[0]:g}"
+        else:
+            sep_txt = f"{seps[0]:g}--{seps[-1]:g}"
         prose = get_collector(system)
         text = (
             "We required the orbits of "
             + join_names(latex_escape(n) for n in constrained)
-            + " not to approach within a Hill radius of one another, as a "
-            r"soft penalty rather than the hard rejection of "
-            r"\citet{Eastman:2019}; the criterion neglects mutual "
-            "inclination and resonant protection."
+            + f" to stay separated by at least {sep_txt} mutual Hill "
+            r"radii, $R_{\rm H} = [(m_1 + m_2)/3 M_\star]^{1/3} "
+            r"(a_1 + a_2)/2$, as a soft penalty rather than the hard "
+            r"rejection of \citet{Eastman:2019}; the criterion neglects "
+            "mutual inclination and resonant protection, and one mutual "
+            "Hill radius is a crossing criterion rather than a long-term "
+            "stability requirement."
         )
         if exempt:
             noun = "Planet" if len(exempt) == 1 else "Planets"
