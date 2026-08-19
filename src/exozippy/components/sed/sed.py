@@ -1659,6 +1659,17 @@ class SED(Component):
                     # per-filter width.
                     "file_tag": "SED",
                     "figsize": (max(6, 0.6 * plot_obj.nfilters + 2), 6),
+                    # The modeling draft's figure caption (standing rule:
+                    # a component fills in its own). LaTeX, verbatim.
+                    "caption": (
+                        "Spectral energy distribution. Points are the "
+                        "broadband photometry, with horizontal bars "
+                        "spanning each filter's bandpass and vertical bars "
+                        "the quoted magnitude uncertainty; curves are the "
+                        "extinguished model spectra at the plotted draw, "
+                        "one per star, scaled to Earth by the stellar "
+                        "radius and distance."
+                    ),
                 },
             )
         ]
