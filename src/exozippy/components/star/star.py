@@ -478,28 +478,45 @@ class Star(Component):
 
         return out
 
+    # The fields that state a posterior term or a support, exactly as
+    # Parameter._user_constraint_fields defines them -- and deliberately NOT
+    # `initval`, which is a start value and cannot move a posterior.  A star
+    # whose params file carries only an initval for its radius has said where
+    # the number is, not that anything should fit it.
+    USER_CONSTRAINT_FIELDS = ("mu", "sigma", "lower", "upper")
+
     def _user_prior_stars(self, param):
-        """Stars whose ``param`` the USER gave a prior in the params file.
+        """Stars whose ``param`` the USER constrained in the params file.
 
-        A ``mu``, or a NONZERO ``sigma``, is a term in the logp -- the user
-        asserting a spectroscopic measurement -- so it makes the parameter
-        read by definition, and the element has to stay free for it to apply
-        to.  Five shipped examples do exactly this (kelt17's
-        7454 +/- 75 K and [Fe/H] 0.21 +/- 0.08, hd80606, GaiaBH1, HIP1349,
-        kelt4): deactivating those would DROP a real constraint and stop
-        reporting a quantity the user measured, which is the opposite of the
-        point.  It is also why readership cannot be answered from the
-        component topology alone.
+        A ``mu``/``sigma`` is a term in the logp -- the user asserting a
+        spectroscopic measurement -- so it makes the parameter read by
+        definition, and the element has to stay free for it to apply to.
+        Five shipped examples do exactly this (kelt17's 7454 +/- 75 K and
+        [Fe/H] 0.21 +/- 0.08, hd80606, GaiaBH1, HIP1349, kelt4):
+        deactivating those would DROP a real constraint and stop reporting a
+        quantity the user measured, which is the opposite of the point.  It
+        is also why readership cannot be answered from the component topology
+        alone.
 
-        ``sigma: 0`` deliberately does NOT count.  That is a pin, and the
-        inactive role subsumes it exactly -- the value is held, nothing is
-        sampled, no prior applies -- so honoring it here would make review
-        3.8.1's fix a no-op on the very files it exists for (ob08092 and
-        DC2018_128 pin all six that way by hand).  Those entries become
-        redundant, and ``build_pymc`` says so per element.
+        ``lower``/``upper`` count too, and that is a deliberate widening
+        rather than an oversight.  It is arguable that a bound on a quantity
+        nothing reads restrains nothing -- but the user has stated an opinion
+        about this parameter, and the cost of ignoring it is concrete:
+        ``solve_api._bounds_diagnostics`` skips inactive elements, so a bound
+        that excludes its own initval stopped being reported to the GUI at
+        all (caught by
+        ``test_solve_api.py::test_bounds_excluding_initval_yields_diagnostic``,
+        which sets exactly ``star.0.teff: {initval: 6207, lower: 7000}``).
+        Silently dropping a user's input is the failure mode this whole item
+        is about; do not narrow this back.
 
-        ``lower``/``upper`` do not count either: a bound on a quantity
-        nothing reads restrains nothing.
+        ``sigma: 0`` is the ONE exception, and it overrides the rest of the
+        entry.  That is a pin, and the inactive role subsumes it exactly --
+        the value is held, nothing is sampled, no prior applies -- so
+        honoring it here would make review 3.8.1's fix a no-op on the very
+        files it exists for (ob08092 and DC2018_128 pinned all six that way
+        by hand).  Those entries become redundant, and ``build_pymc`` says so
+        per element.
 
         Read from ``user_params`` (standardized to the index spelling at
         ConfigManager construction, i.e. before this runs) and never from the
@@ -512,13 +529,13 @@ class Star(Component):
         it cannot happen for a well-formed params file.
         """
 
-        def has_prior(entry):
+        def is_constrained(entry):
             sigma = entry.get("sigma")
-            return "mu" in entry or (
-                isinstance(sigma, (int, float)) and float(sigma) != 0.0
-            )
+            if isinstance(sigma, (int, float)) and float(sigma) == 0.0:
+                return False  # an explicit pin, which inactive subsumes
+            return any(f in entry for f in self.USER_CONSTRAINT_FIELDS)
 
-        return self._user_entry_stars(param, has_prior)
+        return self._user_entry_stars(param, is_constrained)
 
     def _user_pinned_stars(self, param):
         """Stars whose ``param`` the user pinned outright (``sigma: 0``)."""

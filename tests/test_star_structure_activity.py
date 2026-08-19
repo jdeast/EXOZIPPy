@@ -196,6 +196,51 @@ def test_a_user_prior_makes_the_parameter_read():
     assert _mask(star, "teff") == [False, True]
 
 
+def test_a_user_bound_also_makes_the_parameter_read():
+    """
+    Given a params file that only BOUNDS the source radius,
+    When the star component registers its parameters,
+    Then that element stays active.
+
+    Arguable on physics -- a bound on a quantity nothing reads restrains
+    nothing -- and settled by a concrete cost: `solve_api._bounds_diagnostics`
+    skips inactive elements, so a bound excluding its own initval stopped
+    being reported to the GUI at all
+    (test_solve_api.py::test_bounds_excluding_initval_yields_diagnostic caught
+    exactly that).  Silently dropping a user's input is the failure mode this
+    whole item is about.
+    """
+    # Arrange / Act
+    star = _star(
+        _mulens_config(),
+        {"star.Source.radius": {"initval": 0.5, "lower": 0.3}},
+    )
+
+    # Assert
+    assert _mask(star, "radius") == [False, True]
+
+
+def test_a_bare_initval_does_NOT_make_the_parameter_read():
+    """
+    Given a params file carrying only an initval,
+    When the star component registers its parameters,
+    Then the element is still inactive.
+
+    An initval is a START VALUE and cannot move a posterior, so it is not an
+    opinion about whether the quantity should be fit -- it says where the
+    number is.  This is load-bearing: after review 3.8.1 the shipped
+    microlensing params files keep their arbitrary ~M dwarf values as
+    initvals precisely so they document the assumption AND seed the fit if an
+    `sed:` block is ever added, and honoring them here would undo the fix on
+    those same files.
+    """
+    # Arrange / Act
+    star = _star(_mulens_config(), {"star.Source.radius": {"initval": 0.519}})
+
+    # Assert
+    assert _mask(star, "radius") == [False, False]
+
+
 def test_a_user_sigma_zero_is_a_pin_and_does_not_reactivate():
     """
     Given a params file that pins the teff outright (`sigma: 0`),
