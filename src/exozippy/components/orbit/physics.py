@@ -33,6 +33,45 @@ def calc_n(period):
 MAX_ECC = 0.9999
 
 
+# Floor on the radicand of sqrt(e) (review 1.8.2).  An exactly circular
+# seed -- `secosw: 0, sesinw: 0` in a params file, which is how a user spells
+# "start circular" -- makes d(sqrt e)/de infinite, and `de/d(secosw) = 2 secosw`
+# is exactly zero there, so pytensor's chain rule multiplies inf by 0 and the
+# START GRADIENT is NaN with nothing naming the cause.  The floor goes on the
+# RADICAND and never on the result, the house rule (calc_theta_E, calc_jitter,
+# _vcve_quadratic): clamping after the root multiplies sqrt'(0) = inf by
+# pt.maximum's zero gradient on the clamped side, which is the same NaN again.
+# 1e-30 leaves sqrt(e) = 1e-15, a quantization far below any eccentricity a fit
+# can distinguish, and it is inert for every e above it -- pt.maximum returns
+# its argument bit-for-bit, so no non-circular fit moves.
+ECC_FLOOR = 1e-30
+
+
+def _sqrt_ecc(ecc):
+    """``sqrt(e)`` with the radicand floored -- see ECC_FLOOR."""
+    return pt.sqrt(pt.maximum(ecc, ECC_FLOOR))
+
+
+def _circular_bias(ecc_raw):
+    """``1.0`` where the sqrt(e) pair is EXACTLY zero, ``0.0`` elsewhere.
+
+    An ADDITIVE nudge, deliberately, rather than a `pt.switch` selecting
+    between an angle and a convention.  A switch is the where-trap's exact
+    shape: `arctan2(0, 0)` has a NaN gradient, the switch keeps it as the
+    UNSELECTED branch, and `where`'s VJP multiplies that branch by zero.
+    Measured, and worth stating precisely: on this PyTensor and the C
+    backend the two switch-guarded angles (`calc_omega`, `calc_lam_from_sv`)
+    do NOT in fact produce a NaN -- a rewrite gets there first -- so unlike
+    `calc_tp` and the linear e vector they were not a live bug.  They are
+    written this way anyway, because the guard must not depend on a rewrite
+    surviving a backend change, and because biasing the arctan2 ARGUMENTS
+    costs nothing: one branch, no unselected one to poison anything, exactly
+    inert away from the origin (`x + 0.0` is bit-identical) and at the origin
+    it reproduces the convention it replaces.
+    """
+    return pt.switch(pt.eq(ecc_raw, 0.0), 1.0, 0.0)
+
+
 def ecc_from_sqrte(secosw, sesinw):
     """Unclipped eccentricity, secosw^2 + sesinw^2.
 
@@ -52,11 +91,19 @@ def calc_ecc(secosw, sesinw):
 
 @register_physics
 def calc_omega(secosw, sesinw):
+    """Argument of periastron from the sqrt(e) pair.
+
+    At exactly zero the angle is undefined and the convention is omega = 90
+    deg, so the RV phase stays perfectly aligned.  The convention is applied
+    by biasing the arctan2 argument rather than by switching on the answer --
+    `arctan2(1, 0)` IS pi/2 -- so that `arctan2(0, 0)` never appears as an
+    unselected branch for `where`'s VJP to multiply by zero (see
+    _circular_bias, review 1.8.2, including the measurement that says this
+    one was hardening rather than a live bug).  Every non-circular value is
+    bit-identical: the bias is exactly 0.0 there.
+    """
     e_raw = pt.sqr(sesinw) + pt.sqr(secosw)
-    # If exactly 0, enforce the limit so the RV phase stays perfectly aligned
-    return pt.switch(
-        pt.eq(e_raw, 0.0), np.pi / 2.0, pt.arctan2(sesinw, secosw)
-    )
+    return pt.arctan2(sesinw + _circular_bias(e_raw), secosw)
 
 
 # ----------------------------------------------------------------------
@@ -301,12 +348,14 @@ def calc_cosw(omega):
 
 @register_physics
 def calc_esinw(ecc, sesinw):
-    return pt.sqrt(ecc) * sesinw
+    """e sin(omega) as sqrt(e) * sesinw.  Radicand floored -- see ECC_FLOOR."""
+    return _sqrt_ecc(ecc) * sesinw
 
 
 @register_physics
 def calc_ecosw(ecc, secosw):
-    return pt.sqrt(ecc) * secosw
+    """e cos(omega) as sqrt(e) * secosw.  Radicand floored -- see ECC_FLOOR."""
+    return _sqrt_ecc(ecc) * secosw
 
 
 @register_physics
@@ -326,14 +375,35 @@ def calc_b(ar, cosi, ecc, esinw):
     return ar * cosi * (1.0 - pt.sqr(ecc)) / (1.0 + esinw)
 
 
-# Stable Tc -> Tp logic
-# arctan(x/y) -> arctan2(x,y)
-# we multiply both x and y by sqrt(e) so we can use the step parameter directly and avoid the singularity at e=0
 @register_physics
 def calc_tp(ecc, sesinw, secosw, tc, n):
+    """Time of periastron from the sqrt(e) pair (the Tc -> Tp inversion).
+
+    `arctan(x/y) -> arctan2(x, y)`, with both arguments multiplied through by
+    sqrt(e) so the sampled pair appears directly and the 1/sqrt(e) singularity
+    of the naive form cancels.
+
+    Two shields, both for review 1.8.2's exactly-circular seed, and neither
+    changes any other start by a single bit:
+
+    * `sqrt(e)` takes the floored radicand (ECC_FLOOR), because
+      `d(sqrt e)/de = inf` times `de/d(secosw) = 0` is NaN.
+    * both arctan2 arguments vanish together at e = 0 -- the pair IS the two
+      arguments -- and `arctan2(0, 0)` has a NaN gradient.  `_circular_bias`
+      pushes the x argument to 1 there, giving `E0 = 2 arctan2(0, 1) = 0` and
+      so `tp = tc`.  That is the same orbit `calc_tp_from_ecc` describes at
+      (e = 0, omega = pi/2), i.e. it agrees with `calc_omega`'s convention for
+      the very configuration that made omega undefined.
+
+    `calc_tp_from_ecc` remains the better-behaved form on general grounds (it
+    cancels the sqrt(e) factor algebraically rather than flooring it) and is
+    what a V_c/V_e orbit uses; this one is kept because the sqrt(e)cos/sin
+    path's reported `tp` -- which differs from the other form by a whole
+    period on part of the domain -- must not move for every shipped fit.
+    """
     E0 = 2.0 * pt.arctan2(
-        pt.sqrt(1.0 - ecc) * (pt.sqrt(ecc) - sesinw),
-        pt.sqrt(1.0 + ecc) * secosw,
+        pt.sqrt(1.0 - ecc) * (_sqrt_ecc(ecc) - sesinw),
+        pt.sqrt(1.0 + ecc) * secosw + _circular_bias(ecc),
     )
     M0 = E0 - ecc * pt.sin(E0)
     return tc - M0 / n
@@ -507,6 +577,15 @@ def calc_vsini_from_sv(svcoslam, svsinlam):
 
 @register_physics
 def calc_lam_from_sv(svcoslam, svsinlam):
+    """Spin-orbit angle from the sqrt(vsini) pair.
+
+    At exactly 0 the angle is undefined and the convention is 0 (aligned) --
+    and `svcoslam: 0, svsinlam: 0` is precisely how an aligned start is
+    spelled, so this is the same case `calc_omega` has, and it is hardened
+    the same way and for the same reason: biasing the x argument to
+    `arctan2(0, 1) = 0` keeps the convention with ONE branch, leaving no
+    unselected `arctan2(0, 0)` for `where`'s VJP to multiply by zero
+    (see _circular_bias, review 1.8.2).
+    """
     v_raw = pt.sqr(svcoslam) + pt.sqr(svsinlam)
-    # At exactly 0 the angle is undefined; pin to 0 (aligned) like calc_omega.
-    return pt.switch(pt.eq(v_raw, 0.0), 0.0, pt.arctan2(svsinlam, svcoslam))
+    return pt.arctan2(svsinlam, svcoslam + _circular_bias(v_raw))
