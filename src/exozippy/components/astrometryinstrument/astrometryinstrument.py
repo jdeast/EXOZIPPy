@@ -98,6 +98,7 @@ import pytensor.tensor as pt
 from exozippy.components.instrument import Instrument
 from exozippy.components.orbit.bodies import component_instance_names
 from exozippy.ephemeris import get_observer_position
+from exozippy.outputs.texutils import latex_escape
 from exozippy.skyframe import parallax_factors
 
 RAD2MAS = (1.0 * u.rad).to(u.mas).value  # 2.06264806e8
@@ -1235,6 +1236,14 @@ class AstrometryInstrument(Instrument):
                 xlabel = "Time [BJD_TDB]"
                 ylabel = "Along-scan position [mas]"
                 title = f"Epoch astrometry: {name} ({sysname})"
+                meta["caption"] = (
+                    r"Along-scan epoch astrometry of "
+                    rf"{latex_escape(sysname)} from "
+                    rf"{latex_escape(name)} (black), with the model "
+                    r"projected onto each epoch's scan angle (red): "
+                    r"proper motion, parallax and the photocenter "
+                    r"reflex motion of the star's member orbits."
+                )
 
             elif mode == "abs":
                 # Sky-plane: data minus the linear (pm+plx) model when a
@@ -1294,6 +1303,14 @@ class AstrometryInstrument(Instrument):
                 xlabel = r"$\Delta\alpha^*$ [mas]"
                 ylabel = r"$\Delta\delta$ [mas]"
                 title = f"Absolute astrometry: {name} ({sysname})"
+                meta["caption"] = (
+                    r"Absolute astrometry of "
+                    rf"{latex_escape(sysname)} from "
+                    rf"{latex_escape(name)}, with proper motion and "
+                    r"parallax subtracted from the measured positions so "
+                    r"that what remains is the photocenter orbit (line). "
+                    r"East is to the LEFT and the axes are equal-scale."
+                )
 
             else:  # rel
                 traces.append(
@@ -1344,6 +1361,16 @@ class AstrometryInstrument(Instrument):
                 xlabel = r"$\Delta\alpha^*$ [mas]"
                 ylabel = r"$\Delta\delta$ [mas]"
                 title = f"Relative astrometry: {name} ({sysname})"
+                meta["caption"] = (
+                    r"Relative astrometry of "
+                    rf"{latex_escape(sysname)} from "
+                    rf"{latex_escape(name)}: the measured separations and "
+                    r"position angles (points, PA East of North) of the "
+                    r"orbit's companion group with respect to its primary "
+                    r"group, which sits at the origin (star), with the "
+                    r"modeled relative orbit (line). East is to the LEFT "
+                    r"and the axes are equal-scale."
+                )
 
             specs.append(
                 PlotSpec(
