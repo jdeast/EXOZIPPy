@@ -56,18 +56,17 @@ star.dec:
     initval: -27.188861
     sigma: 0
 
-# Lens radii aren't constrained by anything in this model (no SED data, and
-# finite_source/rho only couples to the SOURCE radii below) — fix them at
-# their arbitrary starting values.  teff/feh have no physics wiring at all
-# without an SED/isochrone component, so fix those for every star.
-star.Lens.radius:
-    sigma: 0.0
-star.LensB.radius:
-    sigma: 0.0
-star.teff:
-    sigma: 0.0
-star.feh:
-    sigma: 0.0
+# The lens bodies' radii and every star's teff/feh used to be pinned by hand
+# here.  They are deactivated automatically now (review 3.8.1): with no SED and
+# no evolutionary model nothing reads them, so they are not parameters of this
+# configuration at all.
+#
+# The SOURCE radii are the reason that had to change.  This file already said
+# they must be free -- see the note below -- but they were NOT: the old blanket
+# auto-pin fixed the radius of every microlensing-only source star, so
+# finite_source's rho was read off a radius nobody had chosen.  Measured here:
+# before, 56 free RVs and start logp 79356.588 with no star.radius among them;
+# after, 58 and 79339.520 with star.radius sampled.
 
 # Source radii are NOT fixed: rho (fit directly against the finite-source
 # lightcurve shape) is derived from radius via calc_rho(radius, distance,

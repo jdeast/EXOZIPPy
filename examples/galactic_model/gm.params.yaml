@@ -37,13 +37,13 @@ star.BulgeTarget.rv:
   #sigma: 10000
 
 # these aren't constrained and they don't depend on anything, just fix them
+# No `sigma: 0`: with only a galactic model in the topology nothing reads any
+# of these three, so they are not parameters of this configuration at all
+# (review 3.8.1).  The values stay as starts.
 star.BulgeTarget.radius:
   initval: 1.0
-  sigma: 0
 star.BulgeTarget.teff:
   initval: 5778
-  sigma: 0
 star.BulgeTarget.feh:
   initval: 0
-  sigma: 0
 

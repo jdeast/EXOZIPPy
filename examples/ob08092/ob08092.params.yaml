@@ -52,31 +52,32 @@ star.Source.dec:
 #    # sigma: 3.0 # this comes from teh galactic prior
 
 # how does he get this? source/blend flux? prior?
+# No `sigma: 0` needed: this is a point-source fit with no SED, so nothing
+# reads the source radius and it is not a parameter of this configuration at
+# all (review 3.8.1).  The initval is kept because it is what the reported
+# value would be, and because it is the right start if an sed: block is ever
+# added -- which flips all six of these back to free automatically.
 star.Source.radius:
     initval: 0.519 # Poleski+ 2014
-    sigma: 0.0
 #star.Lens.logmass:
 #    initval: -0.8239     # M_sun (Typical M-dwarf lens)
 
-# these don't impact the likelihood
-# so we're just going to fix these at arbitrary ~M dwarf values for now.
-# eventually, they won't even be sampled for such fits (without additional components that actually can constrain these)
-# or they'll be loosely constrained by the source/blend flux + SED
+# these don't impact the likelihood, and as of review 3.8.1 they are not
+# sampled for such fits either -- which is what the old note here asked for
+# ("eventually, they won't even be sampled for such fits"), now done by
+# Star.structure_consumers rather than by hand.  The arbitrary ~M dwarf values
+# stay as start values: add an `sed:` block (or mann/torres) and these become
+# free, constrained parameters again with no edit to this file.
 star.Lens.radius:
     initval: 0.3
-    sigma: 0.0
 star.Lens.teff:
     initval: 3500
-    sigma: 0.0
 star.Lens.feh:
     initval: 0.0
-    sigma: 0.0
 star.Source.mass:
     initval: 0.3
     sigma: 0.0
 star.Source.teff:
     initval: 3500
-    sigma: 0.0
 star.Source.feh:
     initval: 0
-    sigma: 0.0

@@ -51,22 +51,13 @@ star.Source.dec:
     initval: -28.982
     sigma: 0
 
-# these shouldn't be fit for such models (on the to do list)
-# but as a temporary hack, we're just going to fix them at their arbitrary starting values
-star.Lens.radius:
-    sigma: 0.0
-star.Lens.teff:
-    sigma: 0.0
-star.Lens.feh:
-    sigma: 0.0
-star.Source.teff:
-    sigma: 0.0
-star.Source.feh:
-    sigma: 0.0
+# star.Lens/Source radius, teff and feh USED to be pinned by hand here, with
+# the note "these shouldn't be fit for such models (on the to do list)".  They
+# are not fit for such models any more, and nothing has to say so: this is a
+# point-source fit with no SED, no evolutionary model and no empirical
+# relation, so nothing reads any of the six and Star.structure_consumers
+# deactivates them (review 3.8.1).  Add an `sed:` block and they become free
+# and constrained again with no edit here.
 planet.Companion.radius:
     sigma: 0
-
-# Source radius is unconstrained without SED data (same reasoning as Lens.radius).
-star.Source.radius:
-    sigma: 0.0
 
