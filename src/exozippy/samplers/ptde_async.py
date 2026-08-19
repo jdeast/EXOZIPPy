@@ -107,6 +107,7 @@ def ptde_async_sample(
     adapt_gamma=True,
     gamma_adapt_window=None,
     adapt_ladder=False,
+    ladder_adapt_window=None,
     de_jitter=DE_JITTER,
     swap_interval=None,
     swap_schedule="deo",
@@ -150,6 +151,14 @@ def ptde_async_sample(
                stretch, and a geometric ladder cannot fix that by getting
                longer (measured on DC2018 event 128 -- see the block that
                calls _update_ladder_barrier below).
+    ladder_adapt_window : int | None -- re-space the ladder no more often
+               than once per this many swap PROPOSALS. None -> max(200,
+               20 * (n_temps - 1)), i.e. about 20 proposals per adjacent
+               pair. Unlike gamma's window this is not a cadence knob: the
+               adaptation zeroes the per-pair swap counters, so it measures
+               only what accumulated since it last ran, and running it more
+               often than this makes it re-space on noise (see the block
+               that calls _update_ladder_barrier).
     gamma_adapt_window : int | None -- adapt gamma once per this many
                completed T=1 proposals still within their own chain's tune
                phase. None -> max(n_chains, (tune * n_chains) // 20), i.e.
@@ -305,6 +314,14 @@ def ptde_async_sample(
         if gamma_adapt_window
         else max(n_chains, (tune * n_chains) // 20)
     )
+    # Enough swap proposals behind a per-pair rejection rate for it to mean
+    # anything: ~20 per adjacent pair, floored at 200 so a short ladder still
+    # accumulates a usable sample.  See the gating in the adaptation block.
+    ladder_adapt_window = (
+        max(1, int(ladder_adapt_window))
+        if ladder_adapt_window
+        else max(200, 20 * max(n_temps - 1, 1))
+    )
     # One async "step" = n_slots completed evaluations, the work of one
     # synchronous ptde.py step -- so log_interval means the same thing in
     # both samplers' configs.
@@ -351,9 +368,24 @@ def ptde_async_sample(
     # Per-rung explored span: see _common.SpanTracker for what it is for
     # and the DC2018 event 128 numbers that motivate reporting it live.
     spans = _common.SpanTracker(n_temps, raw_start, layout)
+    # Windowed twin, reset at every progress line.  The cumulative tracker
+    # can never shed the pre-equilibration transient, so on its own it
+    # answers "where has this rung ever been" and not "how far is it
+    # exploring now"; both are worth a column (SpanTracker.reset).
+    spans_window = _common.SpanTracker(n_temps, raw_start, layout)
 
+    # Swap counters, in two windows because two consumers need different
+    # ones.  The ADAPTATION window is zeroed by each re-spacing, because a
+    # re-spaced ladder's acceptances say nothing about the ladder that
+    # produced them -- and the wrap-up ladder_health_report wants exactly
+    # that window too, since its claim is about the FINAL ladder.  The
+    # progress line wants the opposite: a rate that does not collapse to
+    # noise every time the adaptation fires.
     n_swap_accept = np.zeros(max(n_temps - 1, 1))
     n_swap_propose = np.zeros(max(n_temps - 1, 1))
+    n_swap_accept_cum = np.zeros(max(n_temps - 1, 1))
+    n_swap_propose_cum = np.zeros(max(n_temps - 1, 1))
+    n_ladder_adapts = [0]  # re-spacing MEASUREMENTS, moved or not
     n_eval_timeouts = [0]
     n_swap_discards = [0]  # in-flight proposals invalidated by a swap
     rung_times = [[] for _ in range(n_temps)]
@@ -454,6 +486,7 @@ def ptde_async_sample(
         if lp_i is None or lp_j is None:
             return  # one side hasn't completed its first evaluation yet
         n_swap_propose[k] += 1
+        n_swap_propose_cum[k] += 1
         log_a = (lp_j - lp_i) * (
             1.0 / temperatures[k] - 1.0 / temperatures[k + 1]
         )
@@ -474,6 +507,7 @@ def ptde_async_sample(
             state_gen[k][i] += 1
             state_gen[k + 1][j] += 1
             n_swap_accept[k] += 1
+            n_swap_accept_cum[k] += 1
         # Update round-trip tags after every swap event (idempotent): a config
         # sitting at either extreme rung is tagged accordingly and a completed
         # cold -> hot -> cold excursion is counted.
@@ -724,6 +758,7 @@ def ptde_async_sample(
                 current_state[k][i] = prop
                 current_lp[k][i] = lp
                 spans.update(k, prop)
+                spans_window.update(k, prop)
             else:
                 T = temperatures[k]
                 n_propose[k] += 1
@@ -739,6 +774,7 @@ def ptde_async_sample(
                     current_lp[k][i] = lp
                     n_accept[k] += 1
                     spans.update(k, prop)
+                    spans_window.update(k, prop)
                     # Runaway-lp early detection (see LpPlausibilityGuard).
                     if k == 0:
                         lp_guard.check(i, lp)
@@ -832,18 +868,35 @@ def ptde_async_sample(
             # re-spacing once any chain is RECORDING would break invariance.
             # `temperatures` is mutated IN PLACE because _attempt_swap closes
             # over it by reference and never rebinds it.
+            # WINDOWED on the swap counters, and that gate is the whole
+            # correctness of this block, not a tuning preference.  The
+            # synchronous copy sits inside `if (step + 1) % log_every == 0`
+            # and so is windowed by construction; this one runs per completed
+            # EVALUATION, and since it zeroes the counters on the way out,
+            # `n_swap_propose.sum() > 0` meant it fired again on the very next
+            # proposal -- measuring a "barrier" from one or two swaps and
+            # re-spacing the ladder on it.  Observed on DC2018 event 128:
+            # zero re-spacing lines in 10 hours (every measurement said the
+            # ladder was already equalized, because a single accepted swap
+            # says every pair it touched is perfect), while the reported swap
+            # acceptances read 0.11-0.18 against 0.46-0.70 for the same
+            # ladder with adapt_ladder off -- the counters were being read
+            # one proposal after they were cleared.
             if (
                 adapt_ladder
                 and not gamma_frozen[0]
                 and n_temps > 2
-                and n_swap_propose.sum() > 0
+                and n_swap_propose.sum() >= ladder_adapt_window
             ):
+                n_measured = int(n_swap_propose.sum())
+                n_ladder_adapts[0] += 1
                 new_T = _update_ladder_barrier(
                     temperatures, n_swap_accept, n_swap_propose
                 )
                 if not np.allclose(new_T, temperatures):
                     logger.info(
-                        "PTDE-async ladder (barrier-equalized): "
+                        "PTDE-async ladder (barrier-equalized, from "
+                        f"{n_measured} swap proposals): "
                         f"T=[{', '.join(f'{t:.1f}' for t in new_T)}]"
                     )
                     temperatures[:] = new_T
@@ -855,7 +908,11 @@ def ptde_async_sample(
 
             if n_completed_total[0] % log_every_evals == 0:
                 ar = n_accept / np.maximum(n_propose, 1)
-                sr = n_swap_accept / np.maximum(n_swap_propose, 1)
+                # CUMULATIVE, and labelled as such below.  The adaptation
+                # window would read near zero for one line after every
+                # re-spacing, which is indistinguishable here from a ladder
+                # that has stopped communicating.
+                sr = n_swap_accept_cum / np.maximum(n_swap_propose_cum, 1)
                 rt_rate = round_trips[0] / max(n_swap_rounds[0], 1)
                 logger.info(
                     f"PTDE-async: {n_completed_total[0]} evals  "
@@ -865,21 +922,42 @@ def ptde_async_sample(
                     f"accept=[{', '.join(f'{r:.2f}' for r in ar)}]  "
                     f"gamma={gamma_box[0]:.4f}  "
                     + (
-                        f"swap=[{', '.join(f'{r:.2f}' for r in sr)}]  "
+                        f"swap(cum)=[{', '.join(f'{r:.2f}' for r in sr)}]  "
                         f"round_trips={round_trips[0]} "
                         f"(rate={rt_rate:.3f}/swap)"
                         if n_temps > 1
                         else ""
                     )
                 )
-                span_rep = spans.report()
-                logger.info(
-                    "PTDE-async explored span (raw sigma, running): "
-                    f"T=1 {span_rep[0][0]:.1f} ({span_rep[0][1]})  "
-                    f"T={temperatures[-1]:.0f} {span_rep[-1][0]:.1f} "
-                    f"({span_rep[-1][1]})  "
-                    f"top/cold={span_rep[-1][0] / max(span_rep[0][0], 1e-9):.0f}x"
-                )
+                # ONE variable -- whichever ranges widest at the HOT
+                # rung -- measured at both ends, so top/cold is a ratio of
+                # the same thing.  Each rung's own widest is generally a
+                # different parameter: on event 128 this divided the hot
+                # rung's log_f_total span by the cold rung's pm_ra span and
+                # printed "3x", which is a ratio of nothing.
+                hot_key = spans.widest_at(n_temps - 1)
+                if hot_key is None:
+                    # No accepted state at the hot rung yet, so there is no
+                    # variable to measure at both ends.  Say that, rather
+                    # than fall back to report(None) -- per-rung maxima are
+                    # exactly the incomparable pair this block removes.
+                    logger.info(
+                        "PTDE-async explored span: no states recorded at "
+                        f"T={temperatures[-1]:.0f} yet"
+                    )
+                else:
+                    cum = spans.report(hot_key)
+                    win = spans_window.report(hot_key)
+                    ratio = cum[-1][0] / max(cum[0][0], 1e-9)
+                    logger.info(
+                        f"PTDE-async explored span (raw sigma) [{hot_key}]: "
+                        f"cumulative T=1 {cum[0][0]:.1f}  "
+                        f"T={temperatures[-1]:.0f} {cum[-1][0]:.1f}  "
+                        f"(top/cold {ratio:.1f}x)  |  this window T=1 "
+                        f"{win[0][0]:.1f}  T={temperatures[-1]:.0f} "
+                        f"{win[-1][0]:.1f}"
+                    )
+                spans_window.reset()
 
             _maybe_stop()
             if not stopping[0]:
@@ -983,6 +1061,16 @@ def ptde_async_sample(
         _extras.append(f"  swap_discards={n_swap_discards[0]}")
     if n_eval_timeouts[0]:
         _extras.append(f"  eval_timeouts={n_eval_timeouts[0]}")
+    # Both the stamp below and the ladder_health_report after it are fed the
+    # ADAPTATION window, deliberately: each makes a claim about the ladder
+    # that is in `temperatures` NOW.  With adapt_ladder off nothing ever
+    # clears these counters and the window is the whole run (tune+draw --
+    # there is no global tune/draw boundary here to reset on, chains
+    # transition individually, which is why the synchronous sampler's
+    # reset-at-`step == tune` rule has no analog); with it on, the window
+    # runs from the last re-spacing, which is the only span over which the
+    # final ladder was the one being measured.  Feeding either the cumulative
+    # counters instead would average over every ladder the run ever had.
     _common.stamp_and_log_run_summary(
         idata,
         "PTDE-async",
@@ -1000,9 +1088,19 @@ def ptde_async_sample(
         rate_unit="swap",
         extras=_extras,
     )
-    # Async never resets the swap counters, so these stats span tune+draw;
-    # still the right order of magnitude for the barrier check.
     ladder_health_report(temperatures, n_swap_accept, n_swap_propose)
+    if adapt_ladder and n_temps > 2 and not n_ladder_adapts[0]:
+        logger.warning(
+            "PTDE-async: adapt_ladder was requested but the ladder was never "
+            f"re-spaced -- no {ladder_adapt_window}-swap-proposal window "
+            "completed before the first T=1 chain left its tune phase. The "
+            "ladder sampled is the one it started with. Lengthen tune, "
+            "shorten swap_interval (currently "
+            f"{swap_interval} evaluations per swap attempt), or pass a "
+            "smaller ladder_adapt_window -- but note the window exists so "
+            "the barrier is measured from enough swaps to mean anything, so "
+            "prefer the first two."
+        )
 
     if collect_rung_timing:
         _common.log_rung_timing(rung_times, temperatures, "PTDE-async", logger)

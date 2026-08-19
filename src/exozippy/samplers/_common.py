@@ -515,34 +515,84 @@ class SpanTracker:
         np.minimum(self.lo[k], vec, out=self.lo[k])
         np.maximum(self.hi[k], vec, out=self.hi[k])
 
-    def report(self):
+    def reset(self):
+        """Discard the accumulated extremes and start a fresh window.
+
+        The CUMULATIVE span cannot answer the question it appears to.
+        min/max only ever widens, so a rung's span is permanently set by the
+        widest excursion it ever made -- which early in a run is where the
+        chains were thrown at initialization, not where the rung explores at
+        equilibrium, and no amount of subsequent sampling washes that out.
+        Measured on DC2018 event 128 still in its tune phase, the cumulative
+        T=1 span read 5995 sigma: a burn-in transient, reported in the same
+        field and the same units as a posterior width.
+
+        Both windows are worth having and the samplers keep two trackers:
+        the cumulative one is the honest answer to "where has this rung ever
+        been" (the reachability question this class was written for), the
+        windowed one to "how far is it exploring now".
+        """
+        self.lo[:] = np.inf
+        self.hi[:] = -np.inf
+
+    def _slice_of(self, key):
+        """(start, stop) of ``key``'s elements in the packed vector."""
+        for name, (a, b, _) in zip(self.layout.keys, self.layout.slices):
+            if name == key:
+                return a, b
+        raise KeyError(f"{key!r} is not a raw variable of this layout")
+
+    def _key_of(self, j):
+        """Parameter that owns packed element ``j``."""
+        for key, (a, b, _) in zip(self.layout.keys, self.layout.slices):
+            if a <= j < b:
+                return key
+        return "-"
+
+    def _widest(self, k, key=None):
+        """(span, owning parameter) at rung ``k``, over one variable or all.
+
+        A keyed call keeps naming its variable even where the span is 0.0:
+        the caller asked about that one, and reporting "-" back would lose
+        which parameter the zero belongs to.
+        """
+        unvisited = "-" if key is None else key
+        a, b = (0, self.layout.total) if key is None else self._slice_of(key)
+        span = self.hi[k, a:b] - self.lo[k, a:b]
+        finite = np.isfinite(span)
+        if not finite.any():
+            return 0.0, unvisited
+        masked = np.where(finite, span, -np.inf)
+        j = int(np.argmax(masked))
+        best = float(masked[j])
+        if best <= 0.0:
+            return 0.0, unvisited
+        return best, key if key is not None else self._key_of(a + j)
+
+    def report(self, key=None):
         """[(widest span in sigma, which parameter)] per rung.
 
         A rung no slot has reported yet gives (0.0, "-") rather than nan or
         inf: an unvisited rung has no span, and a diagnostic that prints inf
         reads as a bug rather than as "no data yet".
+
+        With ``key``, report THAT variable's span at every rung instead of
+        each rung's own widest.  That is what makes a top/cold RATIO
+        meaningful: each rung's independent max is generally a different
+        parameter, so dividing one by the other is not a ratio of anything.
+        On event 128 the hot rung's widest was log_f_total and the cold
+        rung's was pm_ra, and the reported "3x" compared the two.
         """
-        out = []
-        for k in range(self.n_temps):
-            span = self.hi[k] - self.lo[k]
-            finite = np.isfinite(span)
-            if not finite.any():
-                out.append((0.0, "-"))
-                continue
-            masked = np.where(finite, span, -np.inf)
-            j = int(np.argmax(masked))
-            best = float(masked[j])
-            if best <= 0.0:
-                out.append((0.0, "-"))
-                continue
-            # Map the winning element back to the parameter that owns it.
-            best_key = "-"
-            for key, (a, b, _) in zip(self.layout.keys, self.layout.slices):
-                if a <= j < b:
-                    best_key = key
-                    break
-            out.append((best, best_key))
-        return out
+        return [self._widest(k, key) for k in range(self.n_temps)]
+
+    def widest_at(self, k):
+        """Name of the widest-spanning variable at rung ``k``, or None.
+
+        The argument to pass back as ``report(key=...)`` when what is wanted
+        is one variable measured at both ends of the ladder.
+        """
+        _, key = self._widest(k)
+        return None if key == "-" else key
 
 
 # ---------------------------------------------------------------------------
