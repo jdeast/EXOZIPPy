@@ -2827,6 +2827,68 @@ class Parameter:
             bs["sv"].set_value(b)
         return True
 
+    def element_phys_from_raw(self, index, raw):
+        """Physical value(s) for element ``index`` from raw coordinate(s).
+
+        Vectorized over whatever shape ``raw`` has -- a whole posterior's
+        worth of draws, which is what review 1.8.3's degeneracy fold needs and
+        what the per-element loops in ``phys_from_raw`` / ``raw_from_initval``
+        cannot give.
+
+        ``index`` is the ELEMENT index (not the position within the sampled
+        subset), and the element must be sampled -- a fixed or derived one has
+        no raw coordinate at all.
+        """
+        tf = self._require_raw_transform(index)
+        raw = np.asarray(raw, dtype=float)
+        if tf["use_logit"][index]:
+            lq = (
+                tf["logit_q_inits"][index]
+                + tf["init_scale_logits"][index] * raw
+            )
+            q = 1.0 / (
+                1.0
+                + np.exp(
+                    -np.clip(lq, -_LOGIT_SATURATION_LQ, _LOGIT_SATURATION_LQ)
+                )
+            )
+            lower, upper = tf["lowers"][index], tf["uppers"][index]
+            return lower + (upper - lower) * q
+        return tf["gaussian_mus"][index] + tf["gaussian_scales"][index] * raw
+
+    def element_raw_from_phys(self, index, value):
+        """The inverse of :meth:`element_phys_from_raw`, same contract.
+
+        Clips into the transform's own ``q_floor`` rather than raising, and
+        that is the right choice HERE and not in ``raw_from_initval``: a SEED
+        outside the bounds is a start the user asked for and must be told
+        about, while this is applied to values a fold computed from draws that
+        were already inside them.
+        """
+        tf = self._require_raw_transform(index)
+        v = np.asarray(value, dtype=float)
+        if tf["use_logit"][index]:
+            lower, upper = tf["lowers"][index], tf["uppers"][index]
+            q = (v - lower) / (upper - lower)
+            qf = tf["q_floors"][index]
+            q = np.clip(q, qf, 1.0 - qf)
+            lq = np.log(q / (1.0 - q))
+            return (lq - tf["logit_q_inits"][index]) / max(
+                tf["init_scale_logits"][index], 1e-30
+            )
+        return (v - tf["gaussian_mus"][index]) / max(
+            tf["gaussian_scales"][index], 1e-30
+        )
+
+    def _require_raw_transform(self, index):
+        tf = getattr(self, "_raw_transform", None)
+        if tf is None or index not in set(tf["sampled_idx"]):
+            raise ValueError(
+                f"[{self.label}] element {index} is not sampled, so it has "
+                f"no raw coordinate"
+            )
+        return tf
+
     def raw_from_initval(self, initval_internal):
         """Map an alternate physical initval (internal units) to the raw N(0,1)
         start for this parameter's sampled elements, using the frozen forward

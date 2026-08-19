@@ -804,6 +804,22 @@ def _run_fit(config, gui, user_params=None):
     # Sampling is done; the rest is post-processing + report/plot output.
     gui.phase("writing")
 
+    # Collapse any exact label degeneracy a component declares (review
+    # 1.8.3's ascending node is the one case today).  HERE, and exactly once:
+    # this is the seam both paths -- fresh draws and a reloaded trace --
+    # arrive at, and everything below consumes what it leaves.  Folding per
+    # consumer is how the convergence check, the mode reporter and the seed
+    # ledger come to disagree about how many solutions a chain found.
+    refolded = system.fold_degenerate_draws(idata, model)
+    if refolded:
+        # The regenerated deterministics come back in INTERNAL units --
+        # PyMC recomputes them from the model graph, which knows nothing
+        # about the conversion already applied to the rest of the
+        # posterior -- so put just those back in the user's units.
+        _convert_posterior_to_user_units(
+            idata, system.get_parameter_lookup(), only=refolded
+        )
+
     # Post-hoc burn-in + stuck-chain trimming (samplers/convergence.py). We
     # keep the FULL, untrimmed trace on disk (idata.to_netcdf above / the
     # loaded .nc) so any reanalysis can recompute this, but every downstream
@@ -2154,7 +2170,7 @@ def _sanitize_netcdf_attrs(idata):
                 ds.attrs[k] = json.dumps(v)
 
 
-def _convert_posterior_to_user_units(idata, param_lookup):
+def _convert_posterior_to_user_units(idata, param_lookup, only=None):
     """Convert idata.posterior in-place from internal math units to user units.
 
     Each non-raw variable in the posterior whose Parameter has a non-trivial
@@ -2169,8 +2185,15 @@ def _convert_posterior_to_user_units(idata, param_lookup):
     total size -- would reject it.  The direction is the only thing that
     matters here, and it is stated: internal -> user multiplies, and
     get_draws (user trace -> internal for the physics) divides.
+
+    `only` restricts the pass to a subset, which the degeneracy fold
+    (review 1.8.3) needs: it runs AFTER this conversion and regenerates
+    some deterministics from PyMC, so those few come back in internal
+    units and have to be converted again -- while re-converting the whole
+    posterior would multiply everything else a second time.
     """
-    for var_name in list(idata.posterior.data_vars):
+    names = list(idata.posterior.data_vars) if only is None else list(only)
+    for var_name in names:
         if var_name.endswith("_raw") or var_name not in param_lookup:
             continue
         factor = np.squeeze(
