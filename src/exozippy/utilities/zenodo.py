@@ -98,6 +98,15 @@ logger = logging.getLogger(__name__)
 _DOWNLOAD_ATTEMPTS = 4
 _RETRY_BACKOFF = 5  # seconds; doubles each attempt
 
+# Socket timeout for the download, applied to the connect AND to every
+# individual read. It is NOT a budget for the whole transfer: a healthy 250 MB
+# download delivers a chunk every few milliseconds, so this only fires when the
+# far end has genuinely gone quiet. Without it a stalled (as opposed to
+# erroring) connection blocks forever inside stage 1a of a fit, and the retry
+# ladder below never engages because no exception is ever raised.
+_DOWNLOAD_TIMEOUT = 60.0  # seconds of silence before the socket errors
+_DOWNLOAD_CHUNK = 1 << 20  # bytes per read
+
 # Shared-cache configuration.
 _CACHE_ENV = "EXOZIPPY_CACHE_DIR"
 _CACHE_APP_DIR = "exozippy"
@@ -438,6 +447,28 @@ def _adopt_destination(
 # --- downloading -----------------------------------------------------------
 
 
+def _urlretrieve(url: str, dest: Path) -> None:
+    """Fetch `url` onto `dest`, with a socket timeout on every read.
+
+    This is `urllib.request.urlretrieve` with the one thing it cannot be
+    given: a timeout.  urlretrieve has no timeout parameter and no way to
+    reach the socket it opens, so a connection that STALLS rather than
+    erroring hangs the caller forever -- inside stage 1a of a fit, with the
+    retry ladder in `_download_verified` never engaging because nothing was
+    ever raised.  `urlopen(timeout=)` sets the timeout on the connect and on
+    each individual read, so a quiet peer raises (a `URLError` wrapping
+    `TimeoutError`, or a bare `TimeoutError` mid-body) and the ladder can do
+    its job.
+
+    A partial body left behind by a mid-transfer failure is the caller's to
+    clean up -- exactly as it is for urlretrieve, whose truncated writes are
+    what the size/md5 checks exist to catch.
+    """
+    with urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT) as response:
+        with open(dest, "wb") as handle:
+            shutil.copyfileobj(response, handle, _DOWNLOAD_CHUNK)
+
+
 def _download_verified(
     meta: Mapping[str, object], filename: str, part: Path
 ) -> None:
@@ -459,7 +490,7 @@ def _download_verified(
     last_error: BaseException | None = None
     for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
         try:
-            urllib.request.urlretrieve(meta["url"], part)
+            _urlretrieve(str(meta["url"]), part)
             size = part.stat().st_size
             if size != meta["size"]:
                 raise RuntimeError(

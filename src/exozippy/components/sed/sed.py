@@ -1,6 +1,8 @@
-import ast
 import importlib
+import importlib.util
 import logging
+import os
+import sys
 from pathlib import Path
 
 import astropy.units as u
@@ -39,10 +41,84 @@ from .physics import *
 
 logger = logging.getLogger(__name__)
 
-try:
-    current_dir = Path(__file__).parent
-except NameError:
-    current_dir = Path.cwd()
+
+def load_model_plot_module(plot_path: Path, model: str):
+    """Import a model family's ``BCs/plot.py``, wherever it lives.
+
+    ``importlib.import_module("exozippy.models.<model>.BCs.plot")`` can only
+    ever resolve inside the installed package, so a configured
+    ``model_root:`` pointing at a user directory could not be reached at all
+    -- the fixed package namespace either raised or, worse, imported the
+    packaged model of the same name (review 1.9.5).
+
+    A path inside the package still goes through the ordinary dotted
+    import, so its module identity matches a normal
+    ``from exozippy.models... import`` elsewhere.  Anything else is loaded
+    from its file by spec and registered in ``sys.modules`` under a
+    path-derived name, so a second call reuses it instead of re-executing
+    the module.
+    """
+    plot_path = Path(plot_path).resolve()
+    if not plot_path.is_file():
+        raise FileNotFoundError(
+            f"No plot module for SED model '{model}' at {plot_path}. A model "
+            "family directory must carry BCs/plot.py (see "
+            "src/exozippy/models/NextGen/BCs/plot.py)."
+        )
+
+    try:
+        rel = plot_path.relative_to(Path(DEFAULT_MODEL_ROOT).resolve())
+    except ValueError:
+        rel = None
+    if rel is not None:
+        return importlib.import_module(
+            "exozippy.models." + ".".join(rel.with_suffix("").parts)
+        )
+
+    mod_name = "exozippy._model_plot_" + str(plot_path).replace(
+        os.sep, "_"
+    ).replace(".", "_")
+    cached = sys.modules.get(mod_name)
+    if cached is not None:
+        return cached
+    spec = importlib.util.spec_from_file_location(mod_name, plot_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[mod_name]
+        raise
+    return module
+
+
+def plot_class_from(module, plot_path):
+    """The model's Plot subclass in ``module``.
+
+    Selected by SUBCLASSING, not by being the first ``class`` statement in
+    the file, which is what an ast parse of the source used to pick: a
+    helper class defined above it would silently have been instantiated as
+    the plotter (review 1.9.5).  Zero or several candidates is a real
+    ambiguity and raises rather than picking one.
+    """
+    from .plot import Plot
+
+    candidates = [
+        obj
+        for obj in vars(module).values()
+        if isinstance(obj, type)
+        and issubclass(obj, Plot)
+        and obj is not Plot
+        and obj.__module__ == module.__name__
+    ]
+    if len(candidates) != 1:
+        raise TypeError(
+            f"{plot_path} defines {len(candidates)} subclass(es) of "
+            f"components.sed.plot.Plot ({[c.__name__ for c in candidates]}); "
+            "exactly one is required so the SED figure's model plotter is "
+            "unambiguous."
+        )
+    return candidates[0]
 
 
 class SED(Component):
@@ -443,16 +519,36 @@ class SED(Component):
         """
         from .make_bc import ensure_model_data
 
-        ensure_model_data(self.sedmodel, DEFAULT_MODEL_ROOT)
+        # self.model_root, NOT DEFAULT_MODEL_ROOT: everything else in this
+        # component reads the model under the configured root, so fetching
+        # into the package root instead left a `model_root:` user with the
+        # spectra in a directory nothing would look in -- 259 MB downloaded
+        # twice, once uselessly (review 1.9.5).
+        ensure_model_data(self.sedmodel, self.model_root)
 
     def _collect_band_filters(self):
         """
         Gather filters referenced by Band blocks so cross-component flux
         predictions (mulensing f_source, transit deblending, astrometry
-        fluxfrac) share this SED's BC grid. Band filters whose BC tables
-        are not available are skipped with a warning (they can be
-        generated with the BC table machinery) rather than failing the
-        whole SED.
+        fluxfrac) share this SED's BC grid.
+
+        A band filter whose facility has no BC tables yet is NOT skipped:
+        it is passed to build_bc_grid, which auto-generates the tables from
+        the model spectra -- exactly as it already does for a filter listed
+        in the .sed file, and for a missing column within a facility that
+        does exist (review 2.9.6).  Skipping it instead silently dropped
+        the SED flux constraint that band exists to carry: the mulensing
+        zeropoint tie, the transit dilution, the astrometry fluxfrac.  The
+        cost decision that comes with letting it through is that a band
+        filter whose tables genuinely CANNOT be built now fails the fit
+        rather than quietly weakening it -- again as a .sed filter does.
+
+        The one case still skipped is a filter label with no SVO identity
+        at all -- neither in the alias table nor SVO-shaped
+        ("Facility/Instrument.Band"), e.g. gj1214's "MIRILRS".  There is
+        nothing for the generator to synthesize a bandpass FROM, so the
+        skip is not a deferral of work; the warning says so instead of
+        pointing at machinery that cannot help.
 
         Returns a list of filter names to append to the BC grid build,
         deduplicated against the .sed file's own filters.
@@ -479,12 +575,23 @@ class SED(Component):
                     self.model_root, self.sedmodel, facility
                 )
             except (FileNotFoundError, NotImplementedError) as e:
-                logger.warning(
-                    f"SED: no BC tables for band filter '{name}' "
-                    f"(facility '{facility}'): {e} Flux predictions in this "
-                    f"band will be unavailable."
+                if "/" not in svo:
+                    logger.warning(
+                        f"SED: no BC tables for band filter '{name}' "
+                        f"(facility '{facility}'): {e} That label resolves "
+                        f"to no SVO filter id, so there is no bandpass to "
+                        f"generate a BC table from -- give the band a "
+                        f"'Facility/Instrument.Band' filter to have one "
+                        f"built. Flux predictions in this band will be "
+                        f"unavailable."
+                    )
+                    continue
+                logger.info(
+                    f"SED: band filter '{name}' (facility '{facility}') has "
+                    f"no BC tables yet; they will be generated from the "
+                    f"{self.sedmodel} spectra, as for a filter listed in "
+                    f"the .sed file."
                 )
-                continue
             known_mist.add(mist)
             extra.append(name)
         return extra
@@ -753,6 +860,20 @@ class SED(Component):
     #    floor potentials tying the SED-side parameters to the primary
     #    stellar parameters.
     # ------------------------------------------------------------------
+    @staticmethod
+    def _fractional_floor_logp(value, sed_value, floor):
+        """Per-element Gaussian logp with sigma = floor * value, NORMALIZED.
+
+        Same shape as ``relations._add_penalty(..., normalize=True)``, and
+        normalized for the same reason: sigma tracks a sampled quantity, so
+        -log(sigma) is a function of the parameters and not a constant.
+        The 2pi is dropped, exactly as it is there.
+        """
+        sigma = value * floor
+        return -0.5 * pt.sqr((value - sed_value) / sigma) - pt.log(
+            pt.abs(sigma)
+        )
+
     def build_likelihood(self, model, system):
         star = system.star
 
@@ -776,17 +897,27 @@ class SED(Component):
                 observed=mag_data,
             )
 
-        # this links the two with a user settable error floor
+        # These link the SED-derived teff/fbol to the star's own, with a user
+        # settable FRACTIONAL error floor -- so sigma is a function of a
+        # sampled parameter, not a constant, and the -log(sigma) term is kept.
+        #
+        # That is the house convention and the reason for it is statistical,
+        # not cosmetic (components/relations.py `_add_penalty`, and mann vs
+        # torres): with sigma proportional to x, dropping the normalization
+        # leaves a -d/dx log(x) = -1/x tilt, i.e. exactly 1 nat of free
+        # likelihood per e-fold of x, pushing teff and fbol up for no
+        # physical reason. torres drops the term only because ITS sigma is a
+        # constant in dex, where it is an additive constant.
         self.teffsed_floor_prior = pm.Potential(
             "sed.teffsed_floor_prior",
             pt.sum(
-                -0.5 * ((teff - teffsed) / (teff * self.teffsedfloor)) ** 2
+                self._fractional_floor_logp(teff, teffsed, self.teffsedfloor)
             ),
         )
         self.fbolsed_floor_prior = pm.Potential(
             "sed.fbolsed_floor_prior",
             pt.sum(
-                -0.5 * ((fbol - fbolsed) / (fbol * self.fbolsedfloor)) ** 2
+                self._fractional_floor_logp(fbol, fbolsed, self.fbolsedfloor)
             ),
         )
 
@@ -1002,19 +1133,12 @@ class SED(Component):
         interpolates the model spectra, computes model flux at Earth, and
         converts observed magnitudes to flux for the given draws.
         """
+        sed = system.sed
         plot_class_path = Path(
-            DEFAULT_MODEL_ROOT / system.sed.sedmodel / "BCs" / "plot.py"
+            sed.model_root / sed.sedmodel / "BCs" / "plot.py"
         )
-        parsed_ast = ast.parse(plot_class_path.read_text())
-        plot_cls_str = [
-            node.name
-            for node in parsed_ast.body
-            if isinstance(node, ast.ClassDef)
-        ][0]
-        mod_name = f"exozippy.models.{system.sed.sedmodel}.BCs.plot"
-        module = importlib.import_module(mod_name)
-        plot_cls = getattr(module, plot_cls_str)
-        return plot_cls(system, points)
+        module = load_model_plot_module(plot_class_path, sed.sedmodel)
+        return plot_class_from(module, plot_class_path)(system, points)
 
     @staticmethod
     def _identity_styles(plot_obj):
@@ -1535,6 +1659,17 @@ class SED(Component):
                     # per-filter width.
                     "file_tag": "SED",
                     "figsize": (max(6, 0.6 * plot_obj.nfilters + 2), 6),
+                    # The modeling draft's figure caption (standing rule:
+                    # a component fills in its own). LaTeX, verbatim.
+                    "caption": (
+                        "Spectral energy distribution. Points are the "
+                        "broadband photometry, with horizontal bars "
+                        "spanning each filter's bandpass and vertical bars "
+                        "the quoted magnitude uncertainty; curves are the "
+                        "extinguished model spectra at the plotted draw, "
+                        "one per star, scaled to Earth by the stellar "
+                        "radius and distance."
+                    ),
                 },
             )
         ]
