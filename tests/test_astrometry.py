@@ -13,6 +13,8 @@ The reference implementation used here builds the sky position via explicit
 independent of the Thiele-Innes shortcut used in Orbit.get_sky_position.
 """
 
+import logging
+
 import numpy as np
 import pymc as pm
 import pytensor
@@ -1459,3 +1461,161 @@ def test_photocenter_is_linear_in_beta_and_flips_past_the_mass_fraction(
     assert ratio < 0.0
     np.testing.assert_allclose(dE_lum, ratio * dE0, rtol=1e-9, atol=1e-11)
     np.testing.assert_allclose(dN_lum, ratio * dN0, rtol=1e-9, atol=1e-11)
+
+
+# ---------------------------------------------------------------------------
+# fluxfrac is a gaia/abs parameter; on a rel dataset it is INACTIVE
+# (review 3.10.1 -- KELT-4's "why is the companion flux fixed to zero?")
+# ---------------------------------------------------------------------------
+#
+# `fluxfrac` is the photocenter flux fraction and `_photocenter_terms` is its
+# only consumer, so a rel dataset never reads it: rel mode weighs each NESTED
+# orbit's photocenter separately (`_pair_beta`, from the SED in `band:`).  A
+# rel element is therefore not part of the physics and is inactive rather than
+# pinned -- which is what stops a rel-only fit such as examples/kelt4 from
+# reporting a companion flux "Fixed" at zero for a quantity that never entered
+# its likelihood.  Logp-neutral: defaults.yaml already gives fluxfrac
+# `sigma: 0.0`, so the element was fixed either way.
+
+
+def _rel_and_gaia_system(tmp_dir, modes):
+    """One System whose astrometry datasets have the given modes, in order."""
+    T = _PHOTO_TRUTH
+    rng = np.random.default_rng(19)
+    insts = []
+    for k, mode in enumerate(modes):
+        path = tmp_dir / f"m{k}_{mode}.astrom"
+        if mode == "rel":
+            _write_interferometric_rel(path)
+            insts.append({"name": f"R{k}", "file": str(path), "mode": "rel"})
+        else:
+            t = np.sort(rng.uniform(2456900.0, 2457900.0, 25))
+            err = np.full(25, 0.1)
+            np.savetxt(
+                path,
+                np.column_stack(
+                    [
+                        t,
+                        rng.normal(0, err),
+                        err,
+                        np.degrees(rng.uniform(0, 2 * np.pi, 25)),
+                    ]
+                ),
+            )
+            insts.append(
+                {
+                    "name": f"G{k}",
+                    "file": str(path),
+                    "mode": "gaia",
+                    "observer_location": "earth",
+                    "epoch": 2457400.0,
+                }
+            )
+    config = {
+        "name": "fluxfracmodes",
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "B"}],
+        "orbit": [{"name": "B"}],
+        "astrometryinstrument": insts,
+    }
+    user_params = {
+        "star.A.mass": {"initval": T["mstar"], "sigma": 0.05},
+        "star.A.radius": {"initval": 1.0, "sigma": 0.1},
+        "star.A.teff": {"initval": 5800, "sigma": 100},
+        "star.A.feh": {"initval": 0.0, "sigma": 0.1},
+        "star.A.ra": {"initval": T["ra0"]},
+        "star.A.dec": {"initval": T["dec0"]},
+        "star.A.pm_ra": {"initval": T["pmra"]},
+        "star.A.pm_dec": {"initval": T["pmdec"]},
+        "star.A.distance": {"initval": 1000.0 / T["plx"]},
+        "planet.B.mass": {"initval": T["mcomp"] * _MJUP_PER_MSUN},
+        "planet.B.radius": {"initval": 1.0, "sigma": 0},
+        "orbit.B.period": {"initval": T["P"]},
+        "orbit.B.tc": {"initval": 2457000.0},
+        "orbit.B.cosi": {"initval": np.cos(T["inc"])},
+    }
+    system = System(config, user_params=user_params)
+    system.prepare()
+    model = system.build_model()
+    return system, model
+
+
+@pytest.mark.slow
+def test_rel_mode_fluxfrac_is_inactive_not_merely_pinned(tmp_path):
+    """
+    Given a rel-only astrometry fit -- the examples/kelt4 topology,
+    When the model is built,
+    Then its fluxfrac element is INACTIVE: nothing samples it, and it is
+      suppressed from the tables rather than reported as a companion flux
+      fixed at zero.  It is not a parameter of a rel dataset at all.
+    """
+    # Arrange / Act
+    system, model = _rel_and_gaia_system(tmp_path, ["rel"])
+    inst = system.astrometryinstrument
+
+    # Assert
+    assert inst.fluxfrac.element_is_active(0) is False
+    assert not [
+        rv.name
+        for rv in model.free_RVs
+        if rv.name.startswith("astrometryinstrument.fluxfrac")
+    ]
+    active = system.active_elements()[("astrometryinstrument", "fluxfrac")]
+    assert not active.any()
+
+
+@pytest.mark.slow
+def test_fluxfrac_activity_is_per_dataset_when_the_modes_are_mixed(tmp_path):
+    """
+    Given one fit holding a rel dataset AND a gaia dataset,
+    When the model is built,
+    Then only the gaia element is active.  The role is per element because
+      the fact it states -- "this dataset has a photocenter" -- is per
+      dataset; a whole-vector answer would have to be wrong for one of them.
+    """
+    # Arrange / Act
+    system, _ = _rel_and_gaia_system(tmp_path, ["rel", "gaia"])
+
+    # Assert
+    active = system.active_elements()[("astrometryinstrument", "fluxfrac")]
+    assert list(active) == [False, True]
+
+
+def test_companion_star_ndx_on_a_rel_dataset_warns_and_is_ignored(
+    tmp_path, caplog
+):
+    """
+    Given a rel dataset given the gaia/abs key `companion_star_ndx`,
+    When parameters are registered,
+    Then it warns and no SED fluxfrac is wired -- silently building a
+      `fluxfrac_sed` Deterministic no likelihood reads is exactly the
+      "I configured it and nothing happened" failure the guard prevents.
+    """
+    # Arrange
+    f = tmp_path / "rel.astrom"
+    _write_interferometric_rel(f)
+    cm = ConfigManager({})
+    cm.system_config = {"sed": [{"file": "unused.sed"}]}
+    comp = AstrometryInstrument(
+        [
+            {
+                "name": "R",
+                "file": str(f),
+                "mode": "rel",
+                "band": "V",
+                "companion_star_ndx": 1,
+            }
+        ],
+        cm,
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+    comp.load_data(system)
+
+    # Act
+    with caplog.at_level(logging.WARNING):
+        comp.register_parameters(system)
+
+    # Assert
+    assert comp._sed_fluxfrac == [False]
+    assert "companion_star_ndx is a gaia/abs key" in caplog.text

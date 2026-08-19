@@ -44,14 +44,25 @@ Per-instrument config keys:
   epoch             : reference epoch [BJD_TDB] for ra/dec/pm (default:
                       mean time of all gaia/abs observations)
   sep_unit          : rel mode separation unit (default 'mas')
-  band              : name of a band: block (filter identity for the
-                      SED-derived fluxfrac below)
-  companion_star_ndx: index of the star modeling the luminous companion.
-                      When band, companion_star_ndx, and a sed: block are
-                      all present, the photocenter flux fraction is
-                      derived from the SED (beta = F_c/(F_c+F_host) in
-                      the band) instead of being sampled; the sampled
-                      fluxfrac element is fixed (unused).
+  band              : name of a band: block (filter identity).  gaia/abs:
+                      the filter of the SED-derived fluxfrac below.  rel:
+                      the filter in which the SED weighs the two sides of
+                      each NESTED orbit's photocenter (_pair_beta).
+  companion_star_ndx: gaia/abs only -- index of the star modeling the
+                      luminous companion.  When band, companion_star_ndx,
+                      and a sed: block are all present, the photocenter
+                      flux fraction is derived from the SED
+                      (beta = F_c/(F_c+F_host) in the band) instead of
+                      being sampled; the sampled fluxfrac element is
+                      fixed (unused).  Ignored with a warning on a rel
+                      dataset, which has no per-instrument fraction.
+
+`fluxfrac` is a parameter of a gaia/abs dataset ONLY: _photocenter_terms
+is its one consumer.  On a rel dataset it is INACTIVE (role 4) -- held at
+the dark-companion 0, sampled by nothing and reported nowhere -- because
+rel mode weighs each nested orbit's photocenter separately.  That is why a
+rel-only fit such as examples/kelt4 shows no companion-flux row at all
+rather than one pinned at zero (review 3.10.1).
 
 Conventions follow EXOFASTv2: omega is the argument of periastron of the
 primary's orbit (omega_*); bigomega is the position angle of the ascending
@@ -315,8 +326,12 @@ class AstrometryInstrument(Instrument):
                 "accepts": ["band"],
                 "required": False,
                 "doc": (
-                    "Band used to derive the SED-weighted photocenter flux "
-                    "fraction (with companion_star_ndx)."
+                    "Filter identity. gaia/abs: the band the SED-weighted "
+                    "photocenter flux fraction is computed in (with "
+                    "companion_star_ndx). rel: the band the SED weighs each "
+                    "nested orbit's photocenter in; without it a nested "
+                    "orbit with two luminous sides falls back to its "
+                    "barycenter, with a warning."
                 ),
             },
             {
@@ -325,8 +340,11 @@ class AstrometryInstrument(Instrument):
                 "accepts": ["star"],
                 "required": False,
                 "doc": (
-                    "Index or name of the companion star for the SED-derived "
-                    "photocenter flux fraction (with band)."
+                    "gaia/abs only. Index or name of the companion star for "
+                    "the SED-derived photocenter flux fraction (with band). "
+                    "Ignored with a warning in rel mode, whose photocenter "
+                    "is weighed per nested orbit instead -- a rel dataset's "
+                    "fluxfrac is inactive, not merely pinned."
                 ),
             },
             {
@@ -524,14 +542,33 @@ class AstrometryInstrument(Instrument):
     # Stage 3
     # ------------------------------------------------------------------
     def register_parameters(self, system):
-        self.manifest = {"fluxfrac": None}
+        # `fluxfrac` is the gaia/abs PHOTOCENTER flux fraction, and it is a
+        # parameter only of a gaia/abs dataset: `_photocenter_terms` is its
+        # single consumer, and a rel-mode dataset never calls it.  A rel
+        # element is therefore INACTIVE (role 4, components/parameter.md),
+        # not merely pinned -- held at the dark-companion 0, sampled by
+        # nothing, reported nowhere.  This is what answers KELT-4's "why is
+        # the companion flux fixed to zero?" (review 3.10.1): both of its
+        # datasets are rel, so the row was a pin on a quantity that never
+        # entered its likelihood.  It is logp-neutral -- defaults.yaml
+        # already gives fluxfrac `sigma: 0.0`, so the element was fixed
+        # either way; what changes is that the tables stop reporting it.
+        #
+        # rel mode weighs its own photocenter separately and needs no
+        # per-instrument fraction: `_pair_beta` reads the SED per NESTED
+        # orbit, in the instrument's `band:`, because a rel dataset can hold
+        # more than one luminous pair (KELT-4's A-BC data see the B+C
+        # photocenter).  `band:` is meaningful there; `companion_star_ndx:`
+        # is not.
+        active = [m in ("gaia", "abs") for m in self.modes]
+        self.manifest = {"fluxfrac": {"mask": active, "inactive_value": 0.0}}
         self._register_noise(self.manifest, self.jittervar_lower)
 
-        # SED-derived fluxfrac: instruments with band + companion_star_ndx
-        # in a system with a sed: block get their photocenter flux
-        # fraction from the SED (see _sed_beta_node). Pin the sampled
-        # fluxfrac element for those files -- nothing reads it -- unless the
-        # user configured it themselves.
+        # SED-derived fluxfrac: gaia/abs instruments with band +
+        # companion_star_ndx in a system with a sed: block get their
+        # photocenter flux fraction from the SED (see _sed_beta_node). Pin
+        # the sampled fluxfrac element for those files -- nothing reads it --
+        # unless the user configured it themselves.
         #
         # This is a STRUCTURAL pin, not a start value, so it goes through the
         # manifest "overrides" channel (exactly as Instrument._register_gp
@@ -553,6 +590,21 @@ class AstrometryInstrument(Instrument):
         self._sed_fluxfrac = [False] * self.n_elements
         if "sed" in (self.config_manager.system_config or {}):
             for i, c in enumerate(self.config):
+                if not active[i]:
+                    # A rel dataset's `companion_star_ndx:` would select a
+                    # fraction nothing reads; say so rather than building a
+                    # `fluxfrac_sed` Deterministic that enters no model.
+                    if c.get("companion_star_ndx") is not None:
+                        logger.warning(
+                            f"[{self.prefix}.{self.names[i]}] "
+                            f"companion_star_ndx is a gaia/abs key (it "
+                            f"selects the photocenter flux fraction) and "
+                            f"this dataset is mode '{self.modes[i]}'; it is "
+                            f"ignored. Relative astrometry weighs each "
+                            f"nested orbit's photocenter from the SED in "
+                            f"`band:` instead."
+                        )
+                    continue
                 if (
                     c.get("band") is None
                     or c.get("companion_star_ndx") is None
@@ -564,7 +616,7 @@ class AstrometryInstrument(Instrument):
             # NaN leaves the other elements alone (see resolve()).
             pin = np.full(self.n_elements, np.nan)
             pin[np.asarray(self._sed_fluxfrac, dtype=bool)] = 0.0
-            self.manifest["fluxfrac"] = {"overrides": {"sigma": pin.tolist()}}
+            self.manifest["fluxfrac"]["overrides"] = {"sigma": pin.tolist()}
 
     # ------------------------------------------------------------------
     # Model pieces (PyTensor)
@@ -805,11 +857,16 @@ class AstrometryInstrument(Instrument):
             mode = d["mode"]
             t = d["time"]
             jv = self.jitter_variance.value[i]
-            beta = self._sed_beta_node(system, i)
-            if self._sed_fluxfrac[i]:
-                pm.Deterministic(f"{self.prefix}.{name}.fluxfrac_sed", beta)
 
             if mode in ("gaia", "abs"):
+                # Only gaia/abs has a photocenter flux fraction; on a rel
+                # dataset fluxfrac is inactive and _pair_beta does the
+                # flux weighting per nested orbit instead.
+                beta = self._sed_beta_node(system, i)
+                if self._sed_fluxfrac[i]:
+                    pm.Deterministic(
+                        f"{self.prefix}.{name}.fluxfrac_sed", beta
+                    )
                 dE, dN = self._absolute_model(system, d, t, beta)
 
             if mode == "gaia":
