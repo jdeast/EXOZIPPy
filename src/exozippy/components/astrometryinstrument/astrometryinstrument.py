@@ -511,10 +511,14 @@ class AstrometryInstrument(Instrument):
     # Stage 2
     # ------------------------------------------------------------------
     def build_maps(self):
+        # star_map only.  There WAS a `planet_map` here, built from the
+        # legacy `planet_ndx` key and read by nothing: rel-mode orbit
+        # resolution moved into __init__ (self.rel_orbit, which resolves
+        # `orbit:` by name or index and falls back to the named planet's
+        # orbit_ndx), and every other consumer wants the orbit, not the
+        # planet.  Stage 5 auto-converts every `*_map` attribute into an
+        # int32 shared variable, so the dead assignment cost one per fit.
         self.star_map = np.array([c.get("star_ndx", 0) for c in self.config])
-        self.planet_map = np.array(
-            [c.get("planet_ndx", 0) for c in self.config]
-        )
 
     # ------------------------------------------------------------------
     # Stage 3

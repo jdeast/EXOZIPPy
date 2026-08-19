@@ -1210,3 +1210,43 @@ def test_repeated_identical_epochs_are_accepted(tmp_path):
 
     # Assert
     assert comp.epoch == pytest.approx(2457389.0)
+
+
+# ---------------------------------------------------------------------------
+# build_maps builds star_map and nothing else (review 5.10.1)
+# ---------------------------------------------------------------------------
+
+
+def test_build_maps_does_not_build_a_dead_planet_map(tmp_path):
+    """
+    Given a rel dataset using the legacy `planet_ndx` alias,
+    When build_maps runs,
+    Then there is no `planet_map`: rel-orbit resolution lives in __init__
+      (self.rel_orbit), nothing read the map, and stage 5 turned every
+      `*_map` attribute into an int32 shared variable -- so the dead
+      assignment cost one per fit.  star_map stays; it IS read.
+    """
+    # Arrange
+    f = tmp_path / "rel.astrom"
+    _write_interferometric_rel(f)
+    comp = AstrometryInstrument(
+        [
+            {
+                "name": "R",
+                "file": str(f),
+                "mode": "rel",
+                "planet_ndx": 0,
+                "star_ndx": 0,
+            }
+        ],
+        ConfigManager({}),
+    )
+
+    # Act
+    comp.build_maps()
+
+    # Assert
+    assert not hasattr(comp, "planet_map")
+    assert list(comp.star_map) == [0]
+    # the legacy alias still resolves -- it just does so in __init__
+    assert comp.rel_orbit == [0]
