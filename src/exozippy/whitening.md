@@ -32,11 +32,28 @@ likelihood-free logit element (the only logp is the prior plus its correction):
 | 1e-3  | 368  | 0.37 |
 | 0.1   | 3.75 | 0.38 |
 
-**A wide uniform direction is never flat.** The logit-uniform correction makes
-the raw-space density go as `q(1-q)`, which has real curvature, so the probe
-finds a genuine 0.5-nat contour even with NO likelihood at all -- and drives
-the logit scale to ~0.37 of the span from either direction. That fraction is
-not a heuristic anyone chose; it falls out of the prior's own geometry.
+**A wide uniform direction is never flat, and 0.37 is derivable rather than
+tuned.** The natural objection is that the correction potential cancels the raw
+`N(0,1)` prior, so the raw geometry ought to be flat. It cancels the PRIOR; what
+is left is the JACOBIAN. For `val` to be exactly uniform the raw density must be
+`|dval/draw|/span = q(1-q)*s`, so after the cancellation the raw-space log
+density is `log q + log(1-q)` -- the standard logistic in `lq`, peaked at
+`lq = 0` and going as `-|lq|` in the tails.
+
+That non-flatness IS the uniformity: a uniform density in `val`, pulled back
+through a nonlinear map, is a NON-uniform density in `raw`. A flat raw geometry
+would mean a non-uniform `val`.
+
+The fixed point follows in closed form. At the peak `log q(1-q) = log(1/4)`;
+dropping the probe's 0.5 nats gives `q(1-q) = e^-1.886 = 0.1517`, so `q = 0.8135`
+and `|lq| = 1.473`. The contour is therefore at `|raw| = 1.473/s`, and since
+`dval/dlq = span/4` at the midpoint (`s = 4*init_scale/span`), whitening drives
+
+    scale/span -> 1.473/4 = 0.368
+
+independent of where it started. Checked against the measurements above:
+`s = 4e-3` predicts a multiplier of 368.2 (measured 368) and `s = 0.4` predicts
+3.68 (measured 3.75).
 
 `flat_scale=NaN` (so the element keeps its preliminary scale) is therefore
 reserved for a genuinely degenerate direction: an element saturated past
