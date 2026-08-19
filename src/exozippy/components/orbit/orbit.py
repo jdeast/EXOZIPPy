@@ -663,7 +663,19 @@ class Orbit(Component):
         """
         circ = self.circular_orbits
         if orbit_map is not None:
-            idx = np.atleast_1d(np.asarray(orbit_map, dtype=int))
+            try:
+                idx = np.atleast_1d(np.asarray(orbit_map, dtype=int))
+            except (TypeError, ValueError):
+                # A SYMBOLIC map. Which orbits it selects is not knowable at
+                # graph-build time, so the structural claim cannot be made and
+                # the honest answer is "build the full solve". Declining the
+                # fast path is always correct -- it is an optimization, not a
+                # semantic -- whereas guessing would solve an eccentric orbit
+                # as if it were circular, silently and with a wrong RV phase.
+                # Production does not take this branch (rvinstrument's
+                # _orbit_rv_terms returns a numpy array), but the signature
+                # permits a symbolic map and callers pass one.
+                return False
             if idx.size == 0:
                 return False
             circ = circ[idx]
