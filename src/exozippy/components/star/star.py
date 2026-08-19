@@ -5,7 +5,7 @@ import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 
-from exozippy.components.component import Component
+from exozippy.components.component import Component, in_topology
 from exozippy.components.parameter import sampled_bounds
 from exozippy.components.parameterization import (
     merge_options,
@@ -431,15 +431,7 @@ class Star(Component):
         all_stars = range(self.n_elements)
 
         def _in_topology(name):
-            if getattr(system, name, None) is not None:
-                return True
-            cfg = getattr(system, "config", None)
-            if isinstance(cfg, dict) and cfg.get(name):
-                return True
-            syscfg = getattr(
-                getattr(system, "config_manager", None), "system_config", None
-            )
-            return bool(isinstance(syscfg, dict) and syscfg.get(name))
+            return in_topology(system, name) is not None
 
         if _in_topology("sed"):
             for param in self.STRUCTURE_PARAMS:
@@ -663,35 +655,33 @@ class Star(Component):
     def _galactic_imf(self, system):
         """(galacticmodel present?, its IMF name) as (bool, str or None).
 
-        Prefers the instantiated component and falls back to the raw config,
-        so the answer does not depend on whether galacticmodel happens to
-        have been built before the stars -- a missed lookup here would
-        silently drop a mass-prior floor, which is the one failure mode the
-        floors exist to prevent.
+        ``in_topology`` prefers the instantiated component and falls back to
+        the raw config, so the answer does not depend on whether
+        galacticmodel happens to have been built before the stars -- a missed
+        lookup here would silently drop a mass-prior floor, which is the one
+        failure mode the floors exist to prevent.  What is left here is the
+        only part that is this caller's own: reading ``IMF:`` off whichever
+        of the two shapes came back.
         """
-        gm = None
-        if hasattr(system, "active_components"):
-            gm = system.active_components.get("galacticmodel")
-        if gm is None:
-            gm = getattr(system, "galacticmodel", None)
-        if gm is not None:
-            return True, str(getattr(gm, "imf", "chabrier")).lower()
-
-        cfgs = None
-        for holder in (
-            getattr(system, "config", None),
-            getattr(
-                getattr(system, "config_manager", None), "system_config", None
-            ),
-        ):
-            if isinstance(holder, dict) and holder.get("galacticmodel"):
-                cfgs = holder["galacticmodel"]
-                break
-        if not cfgs:
+        found = in_topology(system, "galacticmodel")
+        if found is None:
             return False, None
 
-        first = cfgs[0] if isinstance(cfgs, (list, tuple)) else cfgs
-        return True, str((first or {}).get("IMF", "chabrier")).lower()
+        imf = getattr(found, "imf", None)
+        if imf is None:
+            # A raw config block: a list of instances, or (defensively) one
+            # bare dict.  GalacticModel itself rejects more than one, so
+            # config[0] is the whole story.  An EMPTY list is treated as no
+            # galacticmodel, which is the historical answer here and the
+            # conservative one -- there is no instance to draw an IMF from.
+            # (Contrast the plain topology question, where an empty block is
+            # a real answer; a premature `evolutionarymodel: {}` is tested.)
+            if isinstance(found, (list, tuple)):
+                if not found:
+                    return False, None
+                found = found[0]
+            imf = (found or {}).get("IMF", "chabrier")
+        return True, str(imf).lower()
 
     def _salpeter_logmass_floor(self, imf):
         """Lower bound to impose on logmass under a power-law IMF, or None.
@@ -852,21 +842,13 @@ class Star(Component):
             }
         )
 
-        # Helper to check if a component is in the system topology,
-        # even if it hasn't been instantiated as an attribute yet.
-        topology_keys = []
-        if hasattr(system, "config"):
-            topology_keys = list(system.config.keys())
-        elif hasattr(system, "config_manager") and hasattr(
-            system.config_manager, "system_config"
-        ):
-            if system.config_manager.system_config:
-                topology_keys = list(
-                    system.config_manager.system_config.keys()
-                )
-
+        # Is a component in the system topology, even if it has not been
+        # instantiated as an attribute yet?  One implementation, in
+        # component.py -- this used to walk its own holder chain with an
+        # `elif` that skipped config_manager.system_config whenever
+        # system.config existed at all (review 4.8.1).
         def in_system(comp_name):
-            return hasattr(system, comp_name) or comp_name in topology_keys
+            return in_topology(system, comp_name) is not None
 
         # 3. Add system-dependent parameters
         if in_system("sed"):
@@ -942,14 +924,17 @@ class Star(Component):
         # position and proper motion; rel-mode data are differential and
         # need only the parallax scale (distance), so those instruments do
         # not add the ra/dec/pm parameters.
-        astrom_comp = getattr(system, "astrometryinstrument", None)
-        if astrom_comp is not None:
-            astrom_modes = astrom_comp.modes
-        else:
-            astrom_cfgs = (
-                getattr(self.config_manager, "system_config", None) or {}
-            ).get("astrometryinstrument") or []
-            astrom_modes = [(c or {}).get("mode", "gaia") for c in astrom_cfgs]
+        #
+        # A fourth holder chain used to be written out here too; it goes
+        # through in_topology now, and what is left is this caller's own
+        # question -- which MODES those instruments are in, off whichever of
+        # the two shapes came back.
+        astrom = in_topology(system, "astrometryinstrument")
+        astrom_modes = getattr(astrom, "modes", None)
+        if astrom_modes is None:
+            astrom_modes = [
+                (c or {}).get("mode", "gaia") for c in (astrom or [])
+            ]
         has_abs_astrom = any(m in ("gaia", "abs") for m in astrom_modes)
 
         if in_system("lens") or in_system("galacticmodel") or has_abs_astrom:

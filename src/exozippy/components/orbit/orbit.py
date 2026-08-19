@@ -9,7 +9,7 @@ import pymc as pm
 import pytensor.tensor as pt
 from exoplanet_core.pymc import ops as ops
 
-from exozippy.components.component import Component
+from exozippy.components.component import Component, in_topology
 from exozippy.components.parameter import Parameter
 from exozippy.components.parameterization import merge_options, mode_manifest
 from exozippy.outputs.prose import get_collector, join_names
@@ -19,23 +19,6 @@ from exozippy.potentials import soft_lower_bound, soft_upper_bound
 # it registers all the mathematical relations
 from . import physics
 from .bodies import parse_orbit_bodies
-
-
-def _topology(system):
-    """Which component kinds this system has, tolerating a partial one.
-
-    The same two-step the astrometry branch of register_parameters already
-    does: a real System exposes `active_components`, while the test harnesses
-    that stand in for one may carry only the raw `config`.  A topology-driven
-    DEFAULT must not crash on the latter -- it should simply see no transits.
-    """
-    components = getattr(system, "active_components", None)
-    if components:
-        return set(components)
-    config = getattr(system, "config", None)
-    if hasattr(config, "keys"):
-        return set(config.keys())
-    return set()
 
 
 def amplitude_constrained_orbits(system, orbit):
@@ -255,7 +238,7 @@ class Orbit(Component):
         data" is a property of the SYSTEM, while "is otherwise constrained"
         is per orbit.
         """
-        if "transit" not in _topology(system):
+        if in_topology(system, "transit") is None:
             return [False] * self.n_elements
         constrained = amplitude_constrained_orbits(system, self)
         return [i not in constrained for i in range(self.n_elements)]
@@ -333,9 +316,13 @@ class Orbit(Component):
         data, and gating it would be a gate where a warning belongs.
         """
         self._chord_planet = self._chord_planet_indices()
-        has_transit = system is not None and (
-            "transit" in getattr(system, "active_components", {})
-        )
+        # in_topology, not a bare active_components lookup: this file asked
+        # the same question three ways and they disagreed about whether a
+        # config-only system counts (review 4.8.1).  It does -- the local
+        # _topology helper this replaced said so, and a topology-driven
+        # DEFAULT must not depend on whether the component happens to be
+        # built yet.
+        has_transit = in_topology(system, "transit") is not None
         self.inc_modes = []
         for i, on in enumerate(self.fitchord):
             name = self.names[i] if i < len(self.names) else i
@@ -792,12 +779,8 @@ class Orbit(Component):
         # vector (xbigomega, ybigomega; each N(0,1) -> uniform marginal on
         # bigomega, like the microlensing trajectory angle alpha) and allow
         # the full inclination range when an astrometry component is active.
-        topology_keys = []
-        if hasattr(system, "config") and hasattr(system.config, "keys"):
-            topology_keys = list(system.config.keys())
         has_astrometry = (
-            hasattr(system, "astrometryinstrument")
-            or "astrometryinstrument" in topology_keys
+            in_topology(system, "astrometryinstrument") is not None
         )
         if has_astrometry:
             self.manifest["xbigomega"] = None
@@ -808,10 +791,7 @@ class Orbit(Component):
             # transformation is a reflection through the sky plane
             # (z -> -z): invisible to ANY astrometry, absolute or relative.
             # Only radial information (RVs) identifies the ascending node.
-            has_rv = (
-                hasattr(system, "rvinstrument")
-                or "rvinstrument" in topology_keys
-            )
+            has_rv = in_topology(system, "rvinstrument") is not None
             if not has_rv:
                 self._restrict_bigomega_halfplane(shape)
 

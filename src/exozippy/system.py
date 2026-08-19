@@ -348,6 +348,19 @@ class System(Component):
         parts = name.split(".")
         return (parts[0], parts[-1])
 
+    def in_topology(self, name):
+        """The component named, as an instance or a raw config block, or None.
+
+        Delegates to ``components.component.in_topology`` -- the one
+        implementation (review 4.8.1).  It lives there rather than here
+        because every caller is a component holding a ``system`` that may be
+        a test double, and a method they cannot rely on is a method they
+        would re-derive.
+        """
+        from exozippy.components.component import in_topology
+
+        return in_topology(self, name)
+
     def derived_params(self):
         """`(component_prefix, param_name)` pairs the manifests actually derive.
 
