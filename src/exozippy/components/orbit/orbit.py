@@ -815,6 +815,10 @@ class Orbit(Component):
         )
         for key in ("esinw", "ecosw", "tp"):
             self.manifest[key] = ecc_entries[key]
+        # The occultation time (review 8.8.7).  Here rather than on `planet`
+        # because every input is an orbit parameter and `tc` is one of them;
+        # after `tp` because it is the other Kepler-timing output.
+        self.manifest["ts"] = {"expr_key": "default", "force_node": True}
         for key in ("vcve", "xomega", "yomega"):
             if key in ecc_entries:
                 self.manifest[key] = ecc_entries[key]

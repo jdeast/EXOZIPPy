@@ -445,6 +445,69 @@ def calc_tp_from_ecc(ecc, omega, tc, n):
     return tc - M0 / n
 
 
+@register_physics
+def calc_ts(ecc, omega, tc, period):
+    """Time of the SECONDARY eclipse (occultation), review 8.8.7.
+
+    The primary transit is at true anomaly `f_c = pi/2 - omega` and the
+    occultation at the opposite conjunction `f_s = -pi/2 - omega`, so the two
+    are separated by the difference of their mean anomalies::
+
+        t_s - t_c = (M_s - M_c) P / 2 pi
+
+    which is `P/2` exactly for a circular orbit and departs from it mainly
+    with `e cos omega` -- the classical statement that the eclipse PHASE
+    measures `e cos omega` (Winn 2010 eq 33; Charbonneau et al. 2005).  That
+    is what makes `ts` an INFERENCE path and not just a table row: a user's
+    Gaussian on this derived parameter constrains the eccentricity vector
+    through exactly this expression, with a gradient.
+
+    Written from the exact anomalies rather than the `(1 + 4 e cos omega/pi)
+    P/2` series, because the series is only first order in e and the exact
+    form costs the same two arctan2s.
+    """
+    return ts_from_ecc_omega(ecc, omega, tc, period, xp=pt)
+
+
+def mean_anomaly_at_true_anomaly(ecc, true_anomaly, xp=pt):
+    """Mean anomaly at a true anomaly, in radians.
+
+    `tan(E/2) = sqrt((1-e)/(1+e)) tan(f/2)` then `M = E - e sin E`, written
+    with arctan2 on the half-angle so nothing divides by a vanishing cosine.
+    The same algebra `calc_tp_from_ecc` uses at `f = pi/2 - omega`; a helper
+    because `calc_ts` needs it at two different anomalies.
+
+    Backend-agnostic through `xp=` for the reason
+    `planet.physics.contact_duration` is: review 8.8.7's seed solver must
+    evaluate the same eclipse-timing model the likelihood does, from inside
+    the relaxation engine, and a numpy transcription would be a second copy
+    free to drift from this one.
+    """
+    half_f = 0.5 * true_anomaly
+    e_anom = 2.0 * xp.arctan2(
+        xp.sqrt(xp.maximum(1.0 - ecc, 0.0)) * xp.sin(half_f),
+        xp.sqrt(1.0 + ecc) * xp.cos(half_f),
+    )
+    return e_anom - ecc * xp.sin(e_anom)
+
+
+def ts_from_ecc_omega(ecc, omega, tc, period, xp=pt):
+    """`calc_ts`'s body; see that docstring and mean_anomaly_at_true_anomaly.
+
+    Both anomalies come out in `(-pi, pi]`, so their difference puts
+    `t_s - t_c` in `(-P, P)`; the branch below reports the eclipse AFTER
+    `tc`, the convention a reader expects and the one EXOFASTv2 uses.  It is
+    a `where` whose two branches are `dt` and `dt + P`, both finite and both
+    differentiable, so it is not the where-trap (that is about a branch which
+    is itself NaN or infinite).  The step it carries is real and sits at
+    `t_s = t_c`, reachable only as `e -> 1` at grazing geometry.
+    """
+    m_c = mean_anomaly_at_true_anomaly(ecc, 0.5 * np.pi - omega, xp=xp)
+    m_s = mean_anomaly_at_true_anomaly(ecc, -0.5 * np.pi - omega, xp=xp)
+    dt = (m_s - m_c) * period / TWOPI
+    return tc + xp.where(dt < 0.0, dt + period, dt)
+
+
 def mean_anomaly_at_conjunction(ecc, omega):
     """``M`` at primary conjunction, in radians -- pure numpy.
 

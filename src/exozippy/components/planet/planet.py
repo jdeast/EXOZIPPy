@@ -14,6 +14,20 @@ from exozippy.potentials import soft_lower_bound
 from ..orbit.orbit import amplitude_constrained_orbits
 from . import physics
 
+
+def _has_positive_sigma(param):
+    """True where a Parameter carries a user-stated Gaussian width.
+
+    `sigma` is None where nobody stated one, a scalar where a broadcast
+    entry did, and a per-element vector with NaN holes where one element's
+    entry did -- so all three shapes have to answer.
+    """
+    if param is None or param.sigma is None:
+        return False
+    arr = np.atleast_1d(np.asarray(param.sigma, dtype=float))
+    return bool(np.any(np.nan_to_num(arr, nan=0.0) > 0.0))
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -168,9 +182,40 @@ class Planet(Component):
                     "p": "default",
                     "a": "default",
                     "ar": "default",
-                    "b": "default",
+                    # force_node: `b` keeps its historical manifest
+                    # POSITION (insertion order is the build order) and
+                    # gains the pm.Deterministic that `transit.b` used to
+                    # be -- the Winn-2010 parity test reads it out of the
+                    # model, and a derived Parameter that is not a node is
+                    # absent from a posterior point.
+                    "b": {"expr_key": "default", "force_node": True},
                     "K": "default",
                     "max_ecc": "default",
+                }
+            )
+            # Transit/occultation durations (review 8.8.7).  Declared
+            # whenever there is an orbit, with or without transit data:
+            # they are geometry, and a Gaussian on one is how a published
+            # duration or eclipse time constrains e and omega.  They used
+            # to be bare Deterministics inside transit.py, so an RV-only
+            # fit could not state them and a transit fit could not put a
+            # prior on them.
+            # force_node so each is a pm.Deterministic in the trace, as
+            # the transit.py versions were: the phased-plot x-range reads
+            # `planet.t14` out of a posterior point, and a derived
+            # Parameter that is not a node is absent from one.
+            self.manifest.update(
+                {
+                    name: {"expr_key": "default", "force_node": True}
+                    for name in (
+                        "bs",
+                        "t14",
+                        "tfwhm",
+                        "tau",
+                        "t14s",
+                        "tfwhms",
+                        "taus",
+                    )
                 }
             )
 
@@ -508,6 +553,7 @@ class Planet(Component):
             return
 
         orbits = system.orbit
+        self._add_duration_prose(system, orbits)
         # The eccentricity barrier used to live here, on
         # orbits.ecc.value[self.orbit_map] -- i.e. on the node calc_ecc
         # clips at 0.9999, which gave it zero gradient over 21.5% of the
@@ -544,6 +590,53 @@ class Planet(Component):
         except (TypeError, ValueError):
             return np.full(n, np.nan)
         return out
+
+    def _add_duration_prose(self, system, orbits):
+        """Modeling-draft sentences for the durations and eclipse time.
+
+        Declared here because this is where they become part of the model:
+        the durations and `orbit.ts` are derived Parameters, so a user's
+        `mu`/`sigma` on one is a Gaussian in the logp and the gradient
+        reaches the eccentricity vector through the expression -- there is no
+        separate potential to hang the sentence off, which is precisely why
+        the "declare it next to the pm.Potential" rule needs reading as
+        "declare it where the feature is".
+        """
+        prose = get_collector(system)
+        prose.add(
+            r"We report the transit and occultation durations "
+            r"($T_{14}$, $T_{\rm FWHM}$, $\tau$ and their eclipse "
+            r"counterparts) and the time of secondary eclipse computed "
+            r"from the orbital elements following \citet{Winn:2010}.",
+            section="orbits",
+            key=f"{self.prefix}.durations",
+        )
+
+        constrained = [
+            name
+            for name, param in (
+                ("transit duration", getattr(self, "t14", None)),
+                ("FWHM transit duration", getattr(self, "tfwhm", None)),
+                ("ingress/egress duration", getattr(self, "tau", None)),
+                ("occultation duration", getattr(self, "t14s", None)),
+                ("FWHM occultation duration", getattr(self, "tfwhms", None)),
+                ("time of secondary eclipse", getattr(orbits, "ts", None)),
+            )
+            if _has_positive_sigma(param)
+        ]
+        if not constrained:
+            return
+        prose.add(
+            "We applied Gaussian priors to the "
+            + join_names(constrained)
+            + ", which constrain the eccentricity and argument of "
+            r"periastron: the phase of the secondary eclipse measures "
+            r"$e\cos{\omega_*}$ and the ratio of the occultation to the "
+            r"transit duration measures $e\sin{\omega_*}$ "
+            r"\citep{Winn:2010,Charbonneau:2005}.",
+            section="orbits",
+            key=f"{self.prefix}.duration_constraints",
+        )
 
     def _add_crossing_potential(self, system, orbits):
         """Soft non-crossing barrier between neighboring planets' orbits.

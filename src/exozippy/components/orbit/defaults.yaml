@@ -46,6 +46,22 @@ orbit:
     latex: "T_C"
     description: "Time of Conjunction"
 
+  # Time of the SECONDARY eclipse (review 8.8.7).  On `orbit` and not on
+  # `planet`, unlike EXOFASTv2, because every input it has -- e, omega, tc,
+  # P -- is an orbit parameter and `tc` itself lives here; the durations,
+  # which need the radius ratio and a/R*, are on `planet` for the mirror
+  # reason.  Derived, so a user's `mu`/`sigma` on it becomes a Gaussian on
+  # the eclipse PHASE, which is the classical measurement of e cos omega.
+  ts:
+    unit: "d"
+    internal_unit: "d"
+    latex: "T_S"
+    description: "Time of Eclipse"
+    expressions:
+      default:
+        func_name: "calc_ts"
+        deps: [ "ecc", "omega", "tc", "period" ]
+
   # --- Physical scale from the member bodies' masses ---
   m_primary:
     unit: "solMass"
