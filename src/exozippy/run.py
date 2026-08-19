@@ -663,6 +663,7 @@ def _run_fit(config, gui, user_params=None):
                     eval_timeout=eval_timeout,
                     collect_rung_timing=collect_rung_timing,
                     swap_schedule=swap_schedule,
+                    adapt_ladder=adapt_ladder,
                     progress_callback=gui.progress_callback,
                 )
             elif method in ("numpyro", "blackjax"):
