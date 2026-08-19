@@ -1559,12 +1559,27 @@ class Orbit(Component):
         self._vcve_unclipped_nodes = {int(i): mixed for i in idx}
         return mixed
 
-    def get_true_anomaly(self, t):
-        """Returns the true anomaly f for all planets at all times."""
-        t_grid = t[:, None]
-        tp = self.tp.value[None, :]
-        n = self.n.value[None, :]
-        ecc = self.ecc.value[None, :]
+    def get_true_anomaly(self, t, orbit_idx=None):
+        """True anomaly f at times `t`.
+
+        `(N_times, N_orbits)` by default; `(N_times,)` when `orbit_idx` names
+        ONE orbit, and then the Kepler solve is done on that orbit alone
+        (review 6.8.1).  Slicing the answer instead -- which is what `rm.py`
+        did -- solves Kepler's equation on the whole grid and throws every
+        other column away, so an N-planet system paid N times over for one
+        Rossiter-McLaughlin curve.  `get_sky_position` already indexes its
+        inputs before the solve; this is the same pattern.
+        """
+        if orbit_idx is None:
+            t_grid = t[:, None]
+            tp = self.tp.value[None, :]
+            n = self.n.value[None, :]
+            ecc = self.ecc.value[None, :]
+        else:
+            t_grid = t
+            tp = self.tp.value[orbit_idx]
+            n = self.n.value[orbit_idx]
+            ecc = self.ecc.value[orbit_idx]
 
         M = (t_grid - tp) * n
         sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
