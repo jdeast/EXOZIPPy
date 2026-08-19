@@ -1,8 +1,11 @@
+import logging
 import os
 import pathlib
 
 # pickling and querying
 import pickle
+import tempfile
+from pathlib import Path
 from typing import Tuple
 
 import numpy as np
@@ -13,6 +16,63 @@ from astropy.io.votable import parse
 from astropy.units import Quantity
 from astroquery.query import BaseQuery
 from scipy import interpolate
+
+logger = logging.getLogger(__name__)
+
+# Where the profiles that SHIP with EXOZIPPy live: this package directory.
+# Read-only by policy -- see _writable_filter_root.
+DEFAULT_FILTER_DIR = pathlib.Path(__file__).parent
+
+# Subdirectory of the machine-level cache that downloaded filter profiles
+# live in, alongside utilities/zenodo.py's "downloads".
+_CACHE_SUBDIR = "filters"
+
+
+def filter_cache_root() -> Path | None:
+    """Where downloaded filter profiles are cached, or None if unavailable.
+
+    The same machine-level root the large Zenodo assets use
+    (``$XDG_CACHE_HOME/exozippy``, relocatable or switchable off with
+    ``EXOZIPPY_CACHE_DIR``), in a ``filters`` subdirectory of its own.
+    Purely a path computation: nothing is created here.
+    """
+    from ..utilities.zenodo import shared_cache_root
+
+    root = shared_cache_root()
+    return None if root is None else root / _CACHE_SUBDIR
+
+
+def _writable_filter_root() -> Path:
+    """The directory a freshly downloaded profile should be written to.
+
+    The cache first. With the cache switched off or unusable, the shipped
+    package directory -- which is the pre-2026-08 behaviour, and the right
+    answer for a dev checkout, where that directory is writable and is where
+    the shipped profiles came from. Only if THAT is read-only too (a
+    site-packages install with no cache) does it fall back to a temporary
+    directory, so the fit still runs; it just re-downloads next time.
+    """
+    cache = filter_cache_root()
+    if cache is not None:
+        try:
+            cache.mkdir(parents=True, exist_ok=True)
+            if os.access(cache, os.W_OK | os.X_OK):
+                return cache
+        except OSError as e:
+            logger.warning("Filter cache %s is unusable (%s).", cache, e)
+
+    if os.access(DEFAULT_FILTER_DIR, os.W_OK | os.X_OK):
+        return DEFAULT_FILTER_DIR
+
+    fallback = Path(tempfile.gettempdir()) / "exozippy-filters"
+    logger.warning(
+        "Neither the filter cache nor %s is writable; caching downloaded "
+        "filter profiles in %s for this run only. Set EXOZIPPY_CACHE_DIR to "
+        "a writable path to keep them.",
+        DEFAULT_FILTER_DIR,
+        fallback,
+    )
+    return fallback
 
 
 def construct_wave_grid(
@@ -91,7 +151,10 @@ def construct_wave_grid(
 
 class Filter(BaseQuery):
     SVO_BASE_URL = "https://svo2.cab.inta-csic.es/theory/fps/"
-    DEFAULT_FILTER_DIR = pathlib.Path(__file__).parent
+    # Alias of the module-level constant, kept for callers that reach for it
+    # on the class. It is the SHIPPED (read-only) root; a download goes to
+    # _writable_filter_root() instead.
+    DEFAULT_FILTER_DIR = globals()["DEFAULT_FILTER_DIR"]
 
     VOTABLE_FIELD_NAMES = [
         "FilterProfileService",
@@ -148,36 +211,59 @@ class Filter(BaseQuery):
             setattr(self, field, state[field])
 
     def __str__(self):
+        # f-string, not concatenation: filterDirectory is a pathlib.Path, so
+        # `str + Path` raised TypeError -- the one debugging affordance this
+        # class offers crashed whenever it was used (review 1.9.6).
         return (
-            self.filterName
-            + " filter data available in "
-            + self.filterDirectory
+            f"{self.filterName} filter data available in "
+            f"{self.filterDirectory}"
         )
 
-    def _check_if_filter_saved(
-        self, filterDir=DEFAULT_FILTER_DIR, overwrite=False
-    ):
+    def _check_if_filter_saved(self, filterDir=None, overwrite=False):
+        """Load this filter from the first place it is found, else fetch it.
 
-        self.filterDirectory = filterDir / self.facility
+        Read order is the shipped package directory first (20 profiles ship
+        with EXOZIPPy) and the machine-level cache second; a fetch is written
+        to the cache. Writing into the package directory -- what this did
+        until 2026-08 -- is a PermissionError on a read-only site-packages
+        install and source-tree litter in a dev checkout (review 2.9.3), and
+        the unconditional makedirs meant even a purely READ path created an
+        empty facility directory there.
+
+        ``filterDir`` overrides both roots with one directory, for a caller
+        that wants a private filter store.
+        """
         filename_filter = self.filterName + ".filter"
 
-        os.makedirs(self.filterDirectory, exist_ok=True)
-
-        # check if we already have created the filter file
-        # if it doesn't exist, let's create it
-        if (not os.path.exists(self.filterDirectory / filename_filter)) or (
-            overwrite
-        ):
-            self._download_filter()
-            self._set_attrs()
-            self._create_filter_file()
-
-            return
-
+        if filterDir is not None:
+            read_roots = [Path(filterDir)]
         else:
-            self._read_filter_file()
+            read_roots = [
+                root
+                for root in (DEFAULT_FILTER_DIR, filter_cache_root())
+                if root is not None
+            ]
 
-            return
+        if not overwrite:
+            for root in read_roots:
+                if (root / self.facility / filename_filter).exists():
+                    self.filterDirectory = root / self.facility
+                    self._read_filter_file()
+                    return
+
+        # Only now, on the path that really has something to write. Choosing
+        # the write root eagerly would create the cache directory even for a
+        # filter that ships with the package.
+        write_root = (
+            Path(filterDir)
+            if filterDir is not None
+            else _writable_filter_root()
+        )
+        self.filterDirectory = write_root / self.facility
+        os.makedirs(self.filterDirectory, exist_ok=True)
+        self._download_filter()
+        self._set_attrs()
+        self._create_filter_file()
 
     def _download_filter(self):
         """Get and save all filter data in response a query sent to SVO FPS.
@@ -354,9 +440,16 @@ class Filter(BaseQuery):
     def _read_filter_file(self):
 
         filename_filter = self.filterName + ".filter"
-        with open(self.filterDirectory / filename_filter, "rb") as file:
+        directory = self.filterDirectory
+        with open(directory / filename_filter, "rb") as file:
             state = pickle.load(file)
 
         self.__setstate__(state)
+        # The pickle carries the filterDirectory of the machine that WROTE
+        # it -- the shipped profiles name a path on a developer's laptop,
+        # under a package layout that no longer exists. Where the file
+        # actually is is what this read just proved, so restore it; otherwise
+        # __str__ (and any later write) points somewhere that does not exist.
+        self.filterDirectory = directory
 
         return
