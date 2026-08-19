@@ -1,6 +1,8 @@
-import ast
 import importlib
+import importlib.util
 import logging
+import os
+import sys
 from pathlib import Path
 
 import astropy.units as u
@@ -43,6 +45,85 @@ try:
     current_dir = Path(__file__).parent
 except NameError:
     current_dir = Path.cwd()
+
+
+def load_model_plot_module(plot_path: Path, model: str):
+    """Import a model family's ``BCs/plot.py``, wherever it lives.
+
+    ``importlib.import_module("exozippy.models.<model>.BCs.plot")`` can only
+    ever resolve inside the installed package, so a configured
+    ``model_root:`` pointing at a user directory could not be reached at all
+    -- the fixed package namespace either raised or, worse, imported the
+    packaged model of the same name (review 1.9.5).
+
+    A path inside the package still goes through the ordinary dotted
+    import, so its module identity matches a normal
+    ``from exozippy.models... import`` elsewhere.  Anything else is loaded
+    from its file by spec and registered in ``sys.modules`` under a
+    path-derived name, so a second call reuses it instead of re-executing
+    the module.
+    """
+    plot_path = Path(plot_path).resolve()
+    if not plot_path.is_file():
+        raise FileNotFoundError(
+            f"No plot module for SED model '{model}' at {plot_path}. A model "
+            "family directory must carry BCs/plot.py (see "
+            "src/exozippy/models/NextGen/BCs/plot.py)."
+        )
+
+    try:
+        rel = plot_path.relative_to(Path(DEFAULT_MODEL_ROOT).resolve())
+    except ValueError:
+        rel = None
+    if rel is not None:
+        return importlib.import_module(
+            "exozippy.models." + ".".join(rel.with_suffix("").parts)
+        )
+
+    mod_name = "exozippy._model_plot_" + str(plot_path).replace(
+        os.sep, "_"
+    ).replace(".", "_")
+    cached = sys.modules.get(mod_name)
+    if cached is not None:
+        return cached
+    spec = importlib.util.spec_from_file_location(mod_name, plot_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[mod_name]
+        raise
+    return module
+
+
+def plot_class_from(module, plot_path):
+    """The model's Plot subclass in ``module``.
+
+    Selected by SUBCLASSING, not by being the first ``class`` statement in
+    the file, which is what an ast parse of the source used to pick: a
+    helper class defined above it would silently have been instantiated as
+    the plotter (review 1.9.5).  Zero or several candidates is a real
+    ambiguity and raises rather than picking one.
+    """
+    from .plot import Plot
+
+    candidates = [
+        obj
+        for obj in vars(module).values()
+        if isinstance(obj, type)
+        and issubclass(obj, Plot)
+        and obj is not Plot
+        and obj.__module__ == module.__name__
+    ]
+    if len(candidates) != 1:
+        raise TypeError(
+            f"{plot_path} defines {len(candidates)} subclass(es) of "
+            f"components.sed.plot.Plot ({[c.__name__ for c in candidates]}); "
+            "exactly one is required so the SED figure's model plotter is "
+            "unambiguous."
+        )
+    return candidates[0]
 
 
 class SED(Component):
@@ -443,7 +524,12 @@ class SED(Component):
         """
         from .make_bc import ensure_model_data
 
-        ensure_model_data(self.sedmodel, DEFAULT_MODEL_ROOT)
+        # self.model_root, NOT DEFAULT_MODEL_ROOT: everything else in this
+        # component reads the model under the configured root, so fetching
+        # into the package root instead left a `model_root:` user with the
+        # spectra in a directory nothing would look in -- 259 MB downloaded
+        # twice, once uselessly (review 1.9.5).
+        ensure_model_data(self.sedmodel, self.model_root)
 
     def _collect_band_filters(self):
         """
@@ -1026,19 +1112,12 @@ class SED(Component):
         interpolates the model spectra, computes model flux at Earth, and
         converts observed magnitudes to flux for the given draws.
         """
+        sed = system.sed
         plot_class_path = Path(
-            DEFAULT_MODEL_ROOT / system.sed.sedmodel / "BCs" / "plot.py"
+            sed.model_root / sed.sedmodel / "BCs" / "plot.py"
         )
-        parsed_ast = ast.parse(plot_class_path.read_text())
-        plot_cls_str = [
-            node.name
-            for node in parsed_ast.body
-            if isinstance(node, ast.ClassDef)
-        ][0]
-        mod_name = f"exozippy.models.{system.sed.sedmodel}.BCs.plot"
-        module = importlib.import_module(mod_name)
-        plot_cls = getattr(module, plot_cls_str)
-        return plot_cls(system, points)
+        module = load_model_plot_module(plot_class_path, sed.sedmodel)
+        return plot_class_from(module, plot_class_path)(system, points)
 
     @staticmethod
     def _identity_styles(plot_obj):
