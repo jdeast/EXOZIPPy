@@ -3,6 +3,7 @@
 import numpy as np
 import pytensor
 import pytensor.tensor as pt
+import pytest
 
 from exozippy.potentials import soft_lower_bound, soft_upper_bound
 
@@ -111,3 +112,38 @@ def test_softness_parameter_controls_turn_on_width():
     np.testing.assert_allclose(
         pen_wide, np.log(pt.sigmoid(4.4).eval()), rtol=0.01
     )
+
+
+def test_soft_bounds_never_plateau_or_underflow():
+    """The barrier is a turn-back wall, not one you can power through.
+
+    Given a violation driven arbitrarily deep past the threshold,
+    When soft_lower_bound and its gradient are evaluated,
+    Then the penalty keeps growing linearly and the gradient stays a finite
+    constant -- no plateau, no -inf, no NaN.
+
+    Two ways this could regress, both of which would be invisible to the
+    other tests in this file, which only probe +/-100:
+
+    - A clip on the FORBIDDEN side.  `_MAX_ARG` deliberately bounds only the
+      allowed side (where sigmoid saturates at 1 and the penalty is ~0);
+      making it symmetric would cap the penalty and let a sampler sit inside
+      a forbidden region at bounded cost.  It would also silently erase the
+      distinction between two different thresholds, since a linear penalty
+      is what makes a threshold change a persistent offset rather than one
+      that washes out deep inside (review 8.8.11).
+    - Underflow.  sigmoid(-748) is 0 in float64, so a naive log(sigmoid(x))
+      would give -inf here with no gradient home.  PyTensor's stabilized
+      log-sigmoid is what prevents that; a rewrite that loses it turns the
+      steepest part of the wall into a flat -inf plateau.
+    """
+    x = pt.dscalar("x")
+    penalty = soft_lower_bound(x, threshold=0.0, scale=1.0)
+    fn = pytensor.function([x], [penalty, pt.grad(penalty, x)])
+
+    steepness = 4.4 / 0.01  # scale=1.0, default softness=0.01
+    for deficit in (1.0, 1.7, 2.0, 50.0):  # 1.7 straddles the exp underflow
+        value, gradient = fn(-deficit)
+        assert np.isfinite(value), f"penalty not finite at deficit {deficit}"
+        assert value == pytest.approx(-steepness * deficit, rel=1e-9)
+        assert gradient == pytest.approx(steepness, rel=1e-9)
