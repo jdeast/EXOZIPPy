@@ -65,12 +65,25 @@ star.C.teff:
   initval: 4800
 # --- Hierarchical orbits: geometry-derived seeds (Eastman+2016) ---
 # BC: B relative to C, one resolved epoch (2012.35): 49.14 mas -> 10.7 AU
-# projected at 218 pc; with M_B + M_C ~ 1.5 Msun, P ~ 29 yr.  logP is
-# seeded directly (the stage-2 tc window peeks at the logP initval before
-# the relaxation engine runs, so seeding through a would leave the tc
-# bounds at the 10-day default).
-orbit.BC.logP:
-  initval: 4.02      # ~29 yr
+# projected at 218 pc; with M_B + M_C ~ 1.5 Msun, P ~ 29 yr.
+#
+# Seeded as `period:` and not as `logP:` (review 8.8.8(c)).  Both spellings
+# now reach the stage-3 tc window through Orbit._seeded_period; the workaround
+# this file used to describe -- "seed logP directly, because the window reads
+# logP's defaults.yaml initval" -- was the bug tests/test_orbit_tc_window.py
+# covers, and it is fixed.  `period:` is the honest spelling of a measured
+# period.
+#
+# The lower bound is the runaway guard the same item asks for.  It is a SOFT
+# barrier (period is derived from the sampled logP), i.e. rope rather than a
+# gate, and it is deliberately far below any believable value: the pair is
+# RESOLVED at 49 mas, so its period cannot be days at all.  3 d is where two
+# ~0.75 solMass stars sit ~10 solRad apart, i.e. the point past which the
+# model stops describing two separate stars -- a validity limit, not a
+# preference.
+orbit.BC.period:
+  initval: 10471.3   # ~28.7 yr; = 10**4.02, the value logP used to carry
+  lower: 3.0
 orbit.BC.tc:
   initval: 2456054.5  # the resolved AO epoch
 # tc is seeded at the AO epoch = conjunction, where the companion sits

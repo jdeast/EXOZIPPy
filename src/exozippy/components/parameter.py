@@ -2181,8 +2181,17 @@ class Parameter:
         needs_barrier = (
             (is_derived & ~is_reported) | (is_sampled & ~use_logit)
         ) & ~is_fixed
-        has_lower = ~np.isinf(lowers) & needs_barrier
-        has_upper = ~np.isinf(uppers) & needs_barrier
+        # np.isfinite, not ~np.isinf: `resolve` writes NaN into a vector for
+        # "this element was never given one", which is exactly what a
+        # PER-ELEMENT bound on a derived vector leaves behind on the elements
+        # the user did not name -- `orbit.BC.period: {lower: 3}` on a
+        # three-orbit system gives `lowers = [nan, 3, nan]`.  `~np.isinf(nan)`
+        # is True, so those elements took the barrier, `soft_lower_bound(v,
+        # nan)` returned NaN, and the WHOLE logp was NaN with nothing naming
+        # the parameter (measured on examples/kelt4's hierarchical triple,
+        # review 8.8.8(c)).  A bound nobody stated is no bound.
+        has_lower = np.isfinite(lowers) & needs_barrier
+        has_upper = np.isfinite(uppers) & needs_barrier
         if np.any(has_lower | has_upper):
             # PRELIMINARY barrier steepness from init_scale (falls back to
             # gaussian_scales for Gaussian params, where gaussian_scales =
@@ -2215,10 +2224,20 @@ class Parameter:
                 "needs_barrier": (has_lower | has_upper).copy(),
             }
 
+            # SANITIZED bounds for the tensor, and the mask is not enough on
+            # its own: `pt.where` discards the unselected element's VALUE but
+            # its VJP multiplies that branch by zero, so a NaN there poisons
+            # the GRADIENT of the whole vector (the where-trap).  +/-inf is
+            # the honest stand-in and is already the path a genuinely
+            # unbounded element takes -- `soft_lower_bound(v, -inf)` is a
+            # clipped log-sigmoid of +inf, i.e. exactly 0 with zero gradient.
+            safe_lowers = np.where(has_lower, lowers, -np.inf)
+            safe_uppers = np.where(has_upper, uppers, np.inf)
+
             if np.any(has_lower):
                 mask = pt.as_tensor_variable(has_lower)
                 penalty = soft_lower_bound(
-                    val_flat, pt.as_tensor_variable(lowers), sv_barrier
+                    val_flat, pt.as_tensor_variable(safe_lowers), sv_barrier
                 )
                 pm.Potential(
                     f"low_bound.{self.label}",
@@ -2228,7 +2247,7 @@ class Parameter:
             if np.any(has_upper):
                 mask = pt.as_tensor_variable(has_upper)
                 penalty = soft_upper_bound(
-                    val_flat, pt.as_tensor_variable(uppers), sv_barrier
+                    val_flat, pt.as_tensor_variable(safe_uppers), sv_barrier
                 )
                 pm.Potential(
                     f"up_bound.{self.label}",

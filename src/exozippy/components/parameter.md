@@ -50,6 +50,12 @@ The multi-seed path already agreed with all of this: `raw_from_initval` raises `
 
 Tests: `tests/test_bad_user_input.py`.
 
+### A per-element bound nobody stated is NO bound, not a NaN one
+
+`resolve` writes **NaN** into a vector for "this element was never given one", so a bound named per element -- `orbit.BC.period: {lower: 3}` on a three-orbit system -- resolves to `lowers = [nan, 3, nan]`. `build_pymc`'s soft-barrier gate was `~np.isinf(lowers)`, and `~np.isinf(nan)` is **True**, so the unnamed elements took the barrier, `soft_lower_bound(v, nan)` returned NaN, and the **whole model logp** was NaN with nothing naming the parameter. Found doing review 8.8.8(c), which asks for exactly that entry on `examples/kelt4`'s hierarchical triple: its start logp went from 82862.6 to `nan`. The gate is `np.isfinite` now, which is False for both `inf` and `NaN`.
+
+The mask is **not** enough on its own, and that is the half worth remembering: `pt.where(mask, penalty, 0.0)` discards the unselected element's VALUE but its VJP multiplies that branch by zero, so a NaN there still poisons the GRADIENT of the whole vector -- the where-trap. The bound arrays fed to `soft_lower_bound`/`soft_upper_bound` are therefore sanitized to `-inf`/`+inf` first. That is the same stand-in a genuinely unbounded element already used, and it is finite in the only sense that matters: a clipped log-sigmoid of `+inf` is exactly 0 with zero gradient. Tests: `tests/test_per_element_soft_bound.py`.
+
 ### A dynamic (linked) bound plus a sigma is a TRUNCATED normal, and it is normalized
 
 Sections A/A2 of `build_pymc` add an **unnormalized** Gaussian on top of the reparameterization's exact `U(lower, upper)`, which for STATIC bounds is fine -- the truncated mass is then a constant. With a **linked** `lower`/`upper` (`linking.py`; see `src/exozippy/config.md`) it is not: the conditional prior's mass `Z = Phi(beta) - Phi(alpha)` moves with the bound-source parameter, and an unaccounted conditional mass reweights that parameter's own posterior. Section **A3** therefore adds one `trunc_norm.<label>.<i>` potential per such element (review 1.2.4; no shipped example combines the two, so this is dark today).
