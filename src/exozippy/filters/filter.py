@@ -1,3 +1,4 @@
+import io
 import logging
 import os
 import pathlib
@@ -26,6 +27,11 @@ DEFAULT_FILTER_DIR = pathlib.Path(__file__).parent
 # Subdirectory of the machine-level cache that downloaded filter profiles
 # live in, alongside utilities/zenodo.py's "downloads".
 _CACHE_SUBDIR = "filters"
+
+# Seconds of silence before an SVO request errors, and the string SVO puts
+# in a calibration cell it has no value for.
+_SVO_TIMEOUT = 60
+_SVO_MISSING_VALUE = "--"
 
 
 def filter_cache_root() -> Path | None:
@@ -291,68 +297,115 @@ class Filter(BaseQuery):
 
         return
 
+    def _fetch_calibration_tables(self, url):
+        """GET `url` and return the HTML tables on it, or raise.
+
+        pd.read_html(url) fetches the page itself, and does not surface the
+        HTTP status: an SVO error page, a redirect to a search form or a
+        proxy's "blocked" notice is just another document with tables in
+        it, whose contents were then parsed positionally and pickled into
+        the package cache forever (review 2.9.1).  Fetching it here means a
+        4xx/5xx raises before anything is parsed.
+        """
+        response = self._session.get(url, timeout=_SVO_TIMEOUT)
+        response.raise_for_status()
+        # pandas needs lxml (or html5lib/bs4) to parse; lxml is a hard
+        # dependency in pyproject.toml specifically for this path.
+        return pd.read_html(io.StringIO(response.text))
+
+    @staticmethod
+    def _parse_calibration_table(df, system, url):
+        """One SVO calibration table -> {attribute suffix: value or None}.
+
+        SVO lays each magnitude system's zeropoints out as a small table
+        whose second and third rows are the F_lambda and F_nu zeropoints
+        and whose columns are (label, specified, calculated, unit).  This
+        was read purely by POSITION, with no check that the rows landed
+        on were the rows meant -- so a layout change silently produced
+        numbers of the wrong quantity, which were then pickled and fed
+        into generated BC tables (review 2.9.1).
+
+        Everything checkable is now checked, and a failure RAISES rather
+        than being cached: the shape, that the two rows really are
+        labelled as zeropoints, that the unit cell (when the page carries
+        one) names the expected physical quantity, and that every value
+        is either the explicit "--" or a finite positive float.
+        """
+        if df.shape[0] < 3 or df.shape[1] < 3:
+            raise ValueError(
+                f"SVO {system} calibration table at {url} has shape "
+                f"{df.shape}; expected at least 3 rows and 3 columns "
+                "(label, specified, calculated). The page layout has "
+                "changed -- these zeropoints are read positionally."
+            )
+
+        out = {}
+        for row, quantity, unit_word in (
+            (1, "Fl", "erg"),
+            (2, "Fv", "jy"),
+        ):
+            label = str(df.iloc[row, 0])
+            if "zeropoint" not in label.lower().replace(" ", ""):
+                raise ValueError(
+                    f"SVO {system} calibration table at {url}: row {row} is "
+                    f"labelled {label!r}, not a zeropoint. The page layout "
+                    "has changed; refusing to guess (and to cache the guess)."
+                )
+            if df.shape[1] > 3:
+                unit = str(df.iloc[row, 3])
+                if unit.strip() and unit_word not in unit.lower():
+                    raise ValueError(
+                        f"SVO {system} calibration table at {url}: the "
+                        f"{quantity} zeropoint is quoted in {unit!r}, which "
+                        f"does not look like a {unit_word} unit. Refusing to "
+                        "cache a value whose quantity cannot be confirmed."
+                    )
+
+            for col, kind in ((1, "Spec"), (2, "Calc")):
+                cell = str(df.iloc[row, col])
+                attr = f"Zp_{kind}_{quantity}_{system}"
+                if _SVO_MISSING_VALUE in cell:
+                    out[attr] = None
+                    continue
+                try:
+                    value = float(cell)
+                except ValueError as e:
+                    raise ValueError(
+                        f"SVO {system} calibration table at {url}: "
+                        f"{quantity} {kind} reads {cell!r}, which is not a "
+                        f"number ({e})."
+                    ) from None
+                if not np.isfinite(value) or value <= 0:
+                    raise ValueError(
+                        f"SVO {system} calibration table at {url}: "
+                        f"{quantity} {kind} is {value!r}. A zeropoint flux "
+                        "must be finite and positive."
+                    )
+                out[attr] = value
+        return out
+
     def _set_zeropoint_values(self):
 
-        ### access zeropoint information ###
-        CALIBRATION_TABLE_DROP_ROWS = [0, 3, 4, 5]
-        CALIBRATION_TABLE_DROP_COLUMNS = [0]
-        CALIBRATION_TABLE_INDEX = {1: "ZeroPoint_Fl", 2: "ZeroPoint_Fv"}
-        CALIBRATION_TABLE_HEADER = {1: "Specified", 2: "Calculated", 3: "Unit"}
-        MISSING_VALUE = "--"
-
         url = self.SVO_BASE_URL + "index.php?id=" + self.filterID
+        extracted_tables = self._fetch_calibration_tables(url)
 
-        # read tables from html url provided
-        extracted_tables = pd.read_html(url)
-        df_calibration_vega = extracted_tables[-3]
-        df_calibration_ab = extracted_tables[-2]
-        df_calibration_st = extracted_tables[-1]
+        # The three calibration tables are the last three on the page, in
+        # the order Vega, AB, ST. That is still positional -- there is no
+        # header text on them to key on -- but every row read out of them
+        # is now verified, which is what turns a layout change from a wrong
+        # cached number into an error.
+        if len(extracted_tables) < 3:
+            raise ValueError(
+                f"{url} has only {len(extracted_tables)} HTML table(s); the "
+                "SVO filter page carries at least three (the Vega, AB and ST "
+                "calibration tables). Nothing was cached."
+            )
 
-        # make the tables nice and easily parsable
-        df_vega = (
-            df_calibration_vega.drop(CALIBRATION_TABLE_DROP_ROWS)
-            .drop(columns=CALIBRATION_TABLE_DROP_COLUMNS)
-            .rename(index=CALIBRATION_TABLE_INDEX)
-            .rename(columns=CALIBRATION_TABLE_HEADER)
-        )
-        df_ab = (
-            df_calibration_ab.drop(CALIBRATION_TABLE_DROP_ROWS)
-            .drop(columns=CALIBRATION_TABLE_DROP_COLUMNS)
-            .rename(index=CALIBRATION_TABLE_INDEX)
-            .rename(columns=CALIBRATION_TABLE_HEADER)
-        )
-        df_st = (
-            df_calibration_st.drop(CALIBRATION_TABLE_DROP_ROWS)
-            .drop(columns=CALIBRATION_TABLE_DROP_COLUMNS)
-            .rename(index=CALIBRATION_TABLE_INDEX)
-            .rename(columns=CALIBRATION_TABLE_HEADER)
-        )
-
-        # initialize dictionary and lists
-        df_dict = {
-            "Vega": {"df": df_vega, "suffix": "_Vega"},
-            "AB": {"df": df_ab, "suffix": "_AB"},
-            "ST": {"df": df_st, "suffix": "_ST"},
-        }
-        rows = ["ZeroPoint_Fl", "ZeroPoint_Fv"]
-        columns = ["Specified", "Calculated"]
-        attr_names = ["Zp_Spec_Fl", "Zp_Calc_Fl", "Zp_Spec_Fv", "Zp_Calc_Fv"]
-
-        # loops through lists and set zeropoint attributes
-        for df_sys in df_dict:
-            count = 0
-            for row in rows:
-                for column in columns:
-                    field = attr_names[count] + df_dict[df_sys]["suffix"]
-                    if (
-                        MISSING_VALUE
-                        not in df_dict[df_sys]["df"].loc[row][column]
-                    ):
-                        value = float(df_dict[df_sys]["df"].loc[row][column])
-                        setattr(self, field, value)
-                    else:
-                        setattr(self, field, None)
-                    count += 1
+        for df, system in zip(extracted_tables[-3:], ("Vega", "AB", "ST")):
+            for attr, value in self._parse_calibration_table(
+                df, system, url
+            ).items():
+                setattr(self, attr, value)
 
         return
 
