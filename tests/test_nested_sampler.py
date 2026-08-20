@@ -194,3 +194,46 @@ def test_bridge_maps_raw_elements_past_pinned_physical_elements():
     assert b._col_map == [("x", 0), ("x", 2)]
     np.testing.assert_allclose(b.lower, [1.0, -4.0], atol=1e-8)
     np.testing.assert_allclose(b.lower + b.span, [3.0, 4.0], atol=1e-8)
+
+
+def test_bridge_classifies_and_samples_a_normal_prior_element():
+    """
+    Given a model mixing a logit-bounded element with a raw-Normal-prior one
+      (an unbounded linear transform, no correction potential -- the
+      Gaussian-kinematics pattern),
+    When the bridge classifies and nested sampling runs,
+    Then the element is recognized as non-logit, and its posterior under a
+      Gaussian likelihood matches the analytic product of prior and
+      likelihood.
+
+    This is the d=27 pilot's failure as a regression: pm_ra/pm_dec/rv and
+    the log-normal error scales are raw-Normal-prior elements, and fitting a
+    logit to them produced c ~ 0, s ~ 0.05, raw(u) ~ +/-50 -- a wrong prior.
+    """
+    with pm.Model() as model:
+        b_raw = pm.Normal("b_raw", 0.0, 1.0)
+        q = pm.math.sigmoid(b_raw)
+        pm.Deterministic("b", 1.0 + 2.0 * q)
+        pm.Potential(
+            "logit_correction",
+            pt.log(q)
+            + pt.log(1 - q)
+            + 0.5 * b_raw**2
+            + 0.5 * np.log(2 * np.pi),
+        )
+        g_raw = pm.Normal("g_raw", 0.0, 1.0)
+        g = pm.Deterministic("g", 5.0 + 2.0 * g_raw)  # prior N(5, 2)
+        # likelihood N(9, 1) on g -> posterior N(8.2, sqrt(0.8))
+        pm.Potential("g_like", -0.5 * ((g - 9.0) / 1.0) ** 2)
+
+    b = UnitCubeBridge(model)
+    b.verify()
+    kinds = dict(zip(b.flat_names, b.is_logit))
+    assert kinds["b_raw[0]"] if "b_raw[0]" in kinds else kinds["b_raw"]
+    g_key = "g_raw[0]" if "g_raw[0]" in kinds else "g_raw"
+    assert not kinds[g_key], "Gaussian element misclassified as logit"
+
+    idata = nested_sample(model, None, nlive=300, dlogz=0.1, cores=1, seed=5)
+    g_post = np.asarray(idata.posterior["g"]).ravel()
+    assert g_post.mean() == pytest.approx(8.2, abs=0.1)
+    assert g_post.std() == pytest.approx(np.sqrt(0.8), abs=0.1)

@@ -828,8 +828,23 @@ def discover_hot_modes(
 
     candidates = []  # (lp, packed raw row)
     per_level = []
+    lp_best = np.nanmax(lp[good])
+    prev_level = 0.0
     for level in ladder:
-        v = good & (lp >= np.nanmax(lp[good]) - level)
+        # Cluster the SHELL -- draws new at this level -- not the cumulative
+        # sublevel set.  Measured failure of the cumulative version on the
+        # DC2018-128 trace: at margin 1000 the mirror basin is 12k of 1.26M
+        # viable draws (~1%), and k-means simply never places a centroid on
+        # a small remote cluster, so every level's candidates were the main
+        # basin again.  In the 500-1000 shell the same basin is ~11% of the
+        # points and separates reliably; a basin whose depth falls between
+        # two levels ALWAYS dominates some shell, which is the whole logic
+        # of a level-set filtration.
+        v = good & (lp >= lp_best - level) & (lp < lp_best - prev_level)
+        if prev_level == 0.0:
+            # the innermost shell includes the best point itself
+            v = good & (lp >= lp_best - level)
+        prev_level = level
         Xv, lpv = X[v], lp[v]
         if Xv.shape[0] < min_points:
             per_level.append((level, int(Xv.shape[0]), 0))
@@ -849,17 +864,42 @@ def discover_hot_modes(
         per_level.append((level, int(Xv.shape[0]), int(len(ks))))
         for c in ks:
             sel = labels == c
-            b = int(np.argmax(lpv[sel]))
-            candidates.append((float(lpv[sel][b]), Xv[sel][b]))
+            b_i = int(np.argmax(lpv[sel]))
+            candidates.append((float(lpv[sel][b_i]), Xv[sel][b_i]))
 
-    # Pre-dedup candidates by raw distance so the polish stage does not run
-    # once per level per basin: keep the best-lp candidate of any group
-    # within 25 whitened sigma (well inside any basin separation worth
-    # reporting, well outside within-basin scatter of a best-lp point).
+    # Pre-dedup candidates by the MIDPOINT TEST -- topological, scale-free.
+    # Position thresholds cannot work here: under unmeasured preliminary
+    # whitening a toy's two genuine basins sat 2.2 "sigma" apart while the
+    # real run's same-basin annulus duplicates sat hundreds out, so any
+    # fixed or lp-implied radius misclassifies one of them.  The property
+    # that actually distinguishes "same basin" is concavity along the chord:
+    # within one concave basin, lp at the midpoint of two points is >= the
+    # smaller endpoint lp (a concave function on a segment attains its
+    # minimum at an endpoint); a VALLEY between two basins breaks that by
+    # construction.  One logp evaluation per pair, using the model's own lp.
     candidates.sort(key=lambda t: -t[0])
+    logp_fn = model.compile_logp()
+
+    def _lp_of_row(row):
+        cand, ofs = {}, 0
+        for key in raw_keys:
+            n = shapes[key]
+            cand[key] = np.array(row[ofs : ofs + n], dtype=float)
+            ofs += n
+        try:
+            return float(logp_fn(cand))
+        except Exception:
+            return -np.inf
+
     kept = []
     for lp_c, x_c in candidates:
-        if all(np.linalg.norm(x_c - x_k) > 25.0 for _, x_k in kept):
+        dup = False
+        for lp_k, x_k in kept:
+            lp_mid = _lp_of_row(0.5 * (x_c + x_k))
+            if lp_mid >= min(lp_c, lp_k) - 1.0:
+                dup = True  # no valley between them: same basin
+                break
+        if not dup:
             kept.append((lp_c, x_c))
     status["n_clusters"] = int(len(kept))
     logger.info(
@@ -882,26 +922,20 @@ def discover_hot_modes(
             cand[key] = np.array(x_best[ofs : ofs + n], dtype=float)
             ofs += n
 
-        polished, _dlps, _method = polish_raw_starts(
+        # NOTE a convergence flag ("polish still improving at the cap") was
+        # tried here twice and removed twice: any second polish call --
+        # whether extending the budget or splitting it -- rebuilds the
+        # population with fresh jitter and measurably changes which basin a
+        # candidate lands in (a toy suppressed-basin test hopped basins and
+        # dedup erased its discovery).  Flagging convergence honestly needs
+        # the polish itself to report its stop reason; follow-up, not this
+        # change.
+        polished2, _dlps, _method = polish_raw_starts(
             model, [cand], n_steps=polish_steps
         )
-        # Convergence check: one short second leg.  The main polish is
-        # STEP-CAPPED, not convergence-stopped, so a candidate still climbing
-        # at the cap would be Laplace-characterized mid-slope and enter the
-        # ledger looking like a mode -- transit scatter dressed up as a
-        # basin.  If the second leg still gains, record the better point but
-        # SAY the characterization is provisional.
-        polished2, dlps2, _m2 = polish_raw_starts(
-            model, polished, n_steps=max(25, polish_steps // 3)
-        )
-        unconverged = bool(np.max(np.abs(dlps2)) > 1.0)
         recs = build_seed_ledger(system, model, polished2, [next_index])
         rec = recs[0]
-        rec.source = (
-            "hot-chain (unconverged: polish still improving at the cap)"
-            if unconverged
-            else "hot-chain"
-        )
+        rec.source = "hot-chain"
 
         # Dedup: an existing record already sitting in this basin (within
         # MATCH_SIGMA of the polished point, in the new record's own

@@ -146,52 +146,78 @@ class UnitCubeBridge:
         self._phys_at = phys_at
         z = np.zeros(self.ndim)
         p0 = phys_at(z)
-        # Bounds probed PER ELEMENT (others at the raw origin): pushing every
-        # element to +/-40 at once inverts intervals whenever a transform is
-        # decreasing or elements couple, which is exactly how the first
-        # version of this died.
-        lower = np.empty(self.ndim)
-        upper = np.empty(self.ndim)
-        for k in range(self.ndim):
-            e = z.copy()
-            e[k] = -40.0
-            a = phys_at(e)[k]
-            e[k] = 40.0
-            b = phys_at(e)[k]
-            lower[k], upper[k] = min(a, b), max(a, b)
-        span = upper - lower
-        if not np.all(span > 0) or not np.all(np.isfinite(span)):
-            bad = [
-                self.flat_names[k]
-                for k in np.where(~(span > 0) | ~np.isfinite(span))[0]
-            ]
+
+        # ELEMENT CLASSIFICATION, probed numerically.  Not every sampled
+        # element is logit-bounded: the build also carries raw-Normal-prior
+        # elements -- Gaussian/unbounded kinematics (pm_ra, pm_dec, rv) and
+        # log-normal error scales -- whose physical transform never
+        # saturates.  Fitting a logit to those is what produced c ~ 0,
+        # s ~ 0.05 and raw(u) of +/-50 on the first d=27 pilot: a wrong
+        # prior, caught by verify().  The discriminator is SATURATION: a
+        # logit element is frozen between raw = 40 and raw = 80; a
+        # Normal-prior element keeps moving.  A Normal-prior element needs
+        # NO recovered constants at all -- its prior IS the raw N(0,1), so
+        # raw = Phi^-1(u) exactly, whatever the physical transform is.
+        probes = {}
+        for r in (-80.0, -40.0, 40.0, 80.0):
+            vals = np.empty(self.ndim)
+            for k in range(self.ndim):
+                e = z.copy()
+                e[k] = r
+                vals[k] = phys_at(e)[k]
+            probes[r] = vals
+        inner = np.abs(probes[40.0] - probes[-40.0])
+        outer = np.abs(probes[80.0] - probes[40.0]) + np.abs(
+            probes[-40.0] - probes[-80.0]
+        )
+        if not np.all(inner > 0):
+            bad = [self.flat_names[k] for k in np.where(~(inner > 0))[0]]
             raise NestedBridgeError(
-                f"non-positive or non-finite support on {bad[:5]}; these "
-                "elements are not static-bounds logit and `method: nested` "
-                "cannot sample them yet"
+                f"transform is flat over raw +/-40 on {bad[:5]}"
             )
-        q0 = np.clip((p0 - lower) / span, 1e-12, 1 - 1e-12)
-        c = np.log(q0 / (1 - q0))
-        s = np.empty(self.ndim)
-        for k in range(self.ndim):
+        self.is_logit = outer < 1e-9 * inner
+
+        lower = np.where(
+            self.is_logit,
+            np.minimum(probes[-40.0], probes[40.0]),
+            np.nan,
+        )
+        upper = np.where(
+            self.is_logit,
+            np.maximum(probes[-40.0], probes[40.0]),
+            np.nan,
+        )
+        span = upper - lower
+        c = np.zeros(self.ndim)
+        s_arr = np.ones(self.ndim)
+        for k in np.where(self.is_logit)[0]:
+            q0 = np.clip((p0[k] - lower[k]) / span[k], 1e-12, 1 - 1e-12)
+            c[k] = np.log(q0 / (1 - q0))
             e = z.copy()
             e[k] = 1.0
             qk = np.clip(
                 (phys_at(e)[k] - lower[k]) / span[k], 1e-12, 1 - 1e-12
             )
-            s[k] = np.log(qk / (1 - qk)) - c[k]
-        if not np.all(np.isfinite(s)) or np.any(s == 0):
-            bad = [
-                self.flat_names[k]
-                for k in range(self.ndim)
-                if not np.isfinite(s[k]) or s[k] == 0
-            ]
-            raise NestedBridgeError(f"degenerate logit scale on {bad[:5]}")
-        self.lower, self.span, self.c, self.s = lower, span, c, s
+            s_arr[k] = np.log(qk / (1 - qk)) - c[k]
+            if not np.isfinite(s_arr[k]) or s_arr[k] == 0:
+                raise NestedBridgeError(
+                    f"degenerate logit scale on {self.flat_names[k]}"
+                )
+        self.lower, self.span, self.c, self.s = lower, span, c, s_arr
+        n_logit = int(self.is_logit.sum())
+        logger.info(
+            f"UnitCubeBridge: {n_logit} logit-bounded and "
+            f"{self.ndim - n_logit} raw-Normal-prior element(s)"
+        )
 
     def raw_from_u(self, u):
+        from scipy.special import ndtri
+
         u = np.clip(np.asarray(u, dtype=float), 1e-12, 1 - 1e-12)
-        return (np.log(u / (1 - u)) - self.c) / self.s
+        raw = ndtri(u)  # Normal-prior elements: raw = Phi^-1(u), exact
+        m = self.is_logit
+        raw[m] = (np.log(u[m] / (1 - u[m])) - self.c[m]) / self.s[m]
+        return raw
 
     def point_from_raw(self, raw):
         point, ofs = {}, 0
@@ -201,36 +227,44 @@ class UnitCubeBridge:
         return point
 
     def log_jac(self, u):
-        """log |d raw / d u| at u (span factors are constants; dropped)."""
+        """log |d raw / d u| at u, per element class.
+
+        Logit: 1 / (s * u(1-u)).  Normal-prior: 1 / phi(Phi^-1(u)) =
+        raw^2/2 + log sqrt(2 pi) -- exactly what cancels the raw N(0,1)
+        prior inside model.logp, leaving that element's likelihood share.
+        """
         u = np.clip(np.asarray(u, dtype=float), 1e-12, 1 - 1e-12)
-        return float(
-            -np.sum(np.log(np.abs(self.s))) - np.sum(np.log(u) + np.log1p(-u))
-        )
+        raw = self.raw_from_u(u)
+        out = 0.5 * raw**2 + 0.5 * np.log(2 * np.pi)
+        m = self.is_logit
+        out[m] = -np.log(np.abs(self.s[m])) - (np.log(u[m]) + np.log1p(-u[m]))
+        return float(np.sum(out))
 
     def verify(self, n=5, seed=1, rtol=1e-6):
-        """Round-trip the transform at random u; raise on any mismatch.
+        """Round-trip the LOGIT elements at random u; raise on mismatch.
 
-        This is the guard that catches coupled or non-logit elements the
-        per-element probes cannot see (a dynamic bound read from another
-        parameter changes when that parameter moves).
+        Normal-prior elements are exact by construction (raw = Phi^-1(u)
+        uses no recovered constants), so only the logit elements' (c, s,
+        lower, span) recovery is checkable -- and only there can a coupled
+        or non-static support hide.
         """
+        if not np.any(self.is_logit):
+            return
         rng = np.random.default_rng(seed)
+        m = self.is_logit
         for _ in range(n):
             u = rng.uniform(0.02, 0.98, self.ndim)
-            got = self._phys_at(self.raw_from_u(u))
-            want = self.lower + self.span * u
-            err = np.max(np.abs(got - want) / np.maximum(np.abs(want), 1e-9))
-            if err > rtol:
-                k = int(
-                    np.argmax(
-                        np.abs(got - want) / np.maximum(np.abs(want), 1e-9)
-                    )
-                )
+            got = self._phys_at(self.raw_from_u(u))[m]
+            want = (self.lower + self.span * u)[m]
+            rel = np.abs(got - want) / np.maximum(np.abs(want), 1e-9)
+            if np.max(rel) > rtol:
+                k = np.where(m)[0][int(np.argmax(rel))]
                 raise NestedBridgeError(
-                    f"transform round-trip failed (rel err {err:.2e}, worst "
-                    f"element {self.flat_names[k]}); an element's support "
-                    "is not static, so `method: nested` cannot sample this "
-                    "model yet"
+                    f"transform round-trip failed (rel err "
+                    f"{np.max(rel):.2e}, worst element "
+                    f"{self.flat_names[k]}); an element's support is not "
+                    "static, so `method: nested` cannot sample this model "
+                    "yet"
                 )
 
 

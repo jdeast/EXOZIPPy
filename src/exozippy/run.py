@@ -705,7 +705,6 @@ def _run_fit(config, gui, user_params=None):
                         else None
                     ),
                     cores=cores,
-                    seed=sampler_cfg.get("seed"),
                 )
             elif method in ("numpyro", "blackjax"):
                 import jax
