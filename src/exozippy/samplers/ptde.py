@@ -198,7 +198,17 @@ def ladder_health_report(temperatures, n_swap_accept, n_swap_propose):
             f"{1.0 - lam / max(n_temps - 1, 1):.2f}, which is what makes "
             f"Lambda higher than the spacing assumed. Lambda is measured, "
             f"so this recommendation is problem-specific; the formula "
-            f"cannot be."
+            f"cannot be. NOTE that this criterion is NECESSARY, not "
+            f"sufficient: measured on a 27-D Gaussian, round trips collapse "
+            f"far faster than the DEO ceiling 1/(2+2*Lambda) predicts -- 4x "
+            f"below it at Lambda=1.8, 13x at 4.1, and unobservable past "
+            f"Lambda~5 at any affordable budget. DC2018 event 128 SATISFIES "
+            f"2*Lambda+1 at n_temps=48 with Lambda=19.8 and still makes zero "
+            f"round trips, so more rungs alone will not restore transport at "
+            f"high Lambda; see notes/pt_round_trip_collapse.txt. Where "
+            f"Lambda is this large, between-mode traffic has to come from "
+            f"multi-seed starts, per-mode evidence weighting or explicit "
+            f"mode jumps rather than from tempering."
         )
     return lam
 

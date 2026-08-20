@@ -1008,7 +1008,14 @@ def ptde_async_sample(
                 # different parameter: on event 128 this divided the hot
                 # rung's log_f_total span by the cold rung's pm_ra span and
                 # printed "3x", which is a ratio of nothing.
-                hot_key = spans.widest_at(n_temps - 1)
+                # Largest hot/cold RATIO, not the widest absolute span:
+                # the latter reports whichever variable has the broadest
+                # prior and explores it at every rung, which on DC2018
+                # event 128 meant star.pm_ra and star.logmass rather than
+                # lens.log_s.  See SpanTracker.ratio_key.
+                hot_key = spans.ratio_key(0, n_temps - 1) or spans.widest_at(
+                    n_temps - 1
+                )
                 if hot_key is None:
                     # No accepted state at the hot rung yet, so there is no
                     # variable to measure at both ends.  Say that, rather
