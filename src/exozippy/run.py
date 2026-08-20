@@ -57,6 +57,10 @@ KNOWN_SAMPLER_KEYS = {
     "n_chains",
     "adapt_ladder",
     "de_mode_hop",
+    "nested_backend",
+    "nlive",
+    "dlogz",
+    "walks",
     "recompute_trace",
     "nthin",
     "measure_scales",
@@ -673,6 +677,35 @@ def _run_fit(config, gui, user_params=None):
                     adapt_ladder=adapt_ladder,
                     de_mode_hop=de_mode_hop,
                     progress_callback=gui.progress_callback,
+                )
+            elif method == "nested":
+                # Nested sampling on the full model (samplers/nested.py):
+                # gradient-free, needs no seeds or transport, returns mass
+                # weights and logZ, and its dead points are the explored-
+                # and-rejected record.  tune/draws/n_temps do not apply; the
+                # posterior group is equal-weight pseudo-chains so every
+                # downstream consumer works unchanged, and the full weighted
+                # run rides along as the `nested` trace group.
+                from exozippy.samplers.nested import nested_sample
+
+                if raw_starts is not None and len(raw_starts) > 1:
+                    logger.info(
+                        "nested: multi-seed starts are ignored -- the "
+                        "search is prior-driven by construction"
+                    )
+                idata = nested_sample(
+                    model,
+                    system,
+                    backend=sampler_cfg.get("nested_backend", "dynesty"),
+                    nlive=int(sampler_cfg.get("nlive", 500)),
+                    dlogz=float(sampler_cfg.get("dlogz", 0.5)),
+                    walks=(
+                        int(sampler_cfg["walks"])
+                        if "walks" in sampler_cfg
+                        else None
+                    ),
+                    cores=cores,
+                    seed=sampler_cfg.get("seed"),
                 )
             elif method in ("numpyro", "blackjax"):
                 import jax
