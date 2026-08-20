@@ -270,6 +270,7 @@ def polish_seed_starts(
     tol_window=POLISH_TOL_WINDOW,
     pool=None,
     adapt_gamma=False,
+    trust_fraction=0.5,
     target_accept=POLISH_TARGET_ACCEPT,
     gamma_window=POLISH_GAMMA_WINDOW,
 ):
@@ -353,6 +354,27 @@ def polish_seed_starts(
 
     Returns (polished_starts, dlp_per_seed).
     """
+    # MULTI-SEED TRUST REGION (`trust_fraction`).  The polish is a
+    # basin-agnostic optimizer: nothing ties a seed to the basin it was
+    # provided to represent, and a seed far below its own optimum will walk
+    # wherever the surface leads.  Measured on DC2018 event 128: the two
+    # MMEXOFAST seeds (s = 0.977 and its s <-> 1/s mirror at 0.863) BOTH
+    # polished across s = 1 onto nearby shoulders, so the mirror basin
+    # entered sampling unrepresented -- and, for the record, NOT through
+    # cross-seed proposals: difference vectors always came from the seed's
+    # own population, and the "pooled across seeds" in this docstring refers
+    # to evaluation batching only.  Each seed's own walk did it.
+    #
+    # With several seeds the whole point is preserving their DISTINCTNESS,
+    # so each seed's accepted moves are confined to a radius of
+    # `trust_fraction` times the distance (in preliminary-scale units) to
+    # its nearest other seed: no seed can cross the midpoint toward a
+    # neighbour.  A single seed keeps radius infinity -- the canonical start
+    # may legitimately need to travel thousands of nats (ob140939), and its
+    # basin identity is not load-bearing.  `trust_fraction=None` disables.
+    # Wrap-up logs each seed's displacement and warns when two polished
+    # seeds end closer than a quarter of their original separation, which
+    # is what basin collapse looks like from the outside.
     if isinstance(raw_starts, dict):
         raw_starts = [raw_starts]
     keys = list(raw_starts[0].keys())
@@ -382,6 +404,30 @@ def polish_seed_starts(
                 }
             )
         pops.append(pop)
+
+    def _dist(a, b):
+        return float(
+            np.sqrt(
+                sum(np.sum(((a[k] - b[k]) / scales[k]) ** 2) for k in keys)
+            )
+        )
+
+    origins = [
+        {k: np.array(c[k], dtype=float) for k in keys} for c in raw_starts
+    ]
+    if trust_fraction is not None and n_seeds > 1:
+        radii = []
+        for s_i in range(n_seeds):
+            d_min = min(
+                _dist(origins[s_i], origins[t])
+                for t in range(n_seeds)
+                if t != s_i
+            )
+            radii.append(trust_fraction * d_min)
+    else:
+        radii = [np.inf] * n_seeds
+    n_trust_rej = [0] * n_seeds
+
     flat = [p for pop in pops for p in pop]
     flat_lps = _lps(flat)
     for s, center in enumerate(raw_starts):
@@ -439,6 +485,9 @@ def polish_seed_starts(
             st = states[s]
             st["n_prop"] += 1
             if np.isfinite(lp) and np.log(rng.random()) < lp - st["lps"][i]:
+                if _dist(prop, origins[s]) > radii[s]:
+                    n_trust_rej[s] += 1
+                    continue
                 pops[s][i], st["lps"][i] = prop, lp
                 st["n_acc"] += 1
                 if lp > st["best_lp"]:
@@ -481,6 +530,35 @@ def polish_seed_starts(
             f"{st['steps']} steps x {pop_size} pop, gamma "
             f"{gamma:.4f}->{st['gamma']:.4f}, {reason})"
         )
+    # Basin-coverage diagnostics: say where each seed went, and warn when
+    # two polished seeds have effectively merged -- the failure mode the
+    # trust region exists to prevent, still reachable via trust_fraction=None
+    # or by seeds that were near-duplicates to begin with.
+    if n_seeds > 1:
+        for s_i in range(n_seeds):
+            moved = _dist(polished[s_i], origins[s_i])
+            extra = (
+                f", {n_trust_rej[s_i]} proposals refused by the trust radius"
+                f" ({radii[s_i]:.1f} scale units)"
+                if np.isfinite(radii[s_i])
+                else ""
+            )
+            logger.info(
+                f"PTDE seed polish: seed {s_i} moved {moved:.1f} scale "
+                f"units from its start{extra}."
+            )
+        for s_i in range(n_seeds):
+            for t in range(s_i + 1, n_seeds):
+                d0 = _dist(origins[s_i], origins[t])
+                d1 = _dist(polished[s_i], polished[t])
+                if d0 > 0 and d1 < 0.25 * d0:
+                    logger.warning(
+                        f"PTDE seed polish: seeds {s_i} and {t} ended "
+                        f"{d1:.1f} scale units apart (started {d0:.1f}) -- "
+                        "multi-seed basin coverage may have collapsed; the "
+                        "sampler will start these chains in what is "
+                        "effectively one basin."
+                    )
     return polished, dlps
 
 
