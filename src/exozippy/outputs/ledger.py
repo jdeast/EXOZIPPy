@@ -914,32 +914,42 @@ def discover_hot_modes(
     from ..polish import polish_raw_starts
 
     next_index = max((r.seed_index for r in ledger), default=-1) + 1
+
+    # Rebuild raw dicts for every kept candidate, then polish them as ONE
+    # BATCH.  Polishing one candidate at a time gives each an infinite trust
+    # radius (a single seed is unconstrained by design), and a candidate
+    # from a suppressed basin defects to the dominant one during its own
+    # polish -- the mirror, 779 nats below the main mode, walked out exactly
+    # as the MMEXOFAST seeds once did, and dedup then erased the discovery.
+    # As one batch, polish_seed_starts' multi-seed trust region cages each
+    # candidate within half the distance to its nearest neighbour, which is
+    # the same contract multi-seed sampling starts get.
+    cands = []
     for _lp_c, x_best in kept:
-        # rebuild the raw dict for this candidate
         cand, ofs = {}, 0
         for key in raw_keys:
             n = shapes[key]
             cand[key] = np.array(x_best[ofs : ofs + n], dtype=float)
             ofs += n
-
-        # NOTE a convergence flag ("polish still improving at the cap") was
-        # tried here twice and removed twice: any second polish call --
-        # whether extending the budget or splitting it -- rebuilds the
-        # population with fresh jitter and measurably changes which basin a
-        # candidate lands in (a toy suppressed-basin test hopped basins and
-        # dedup erased its discovery).  Flagging convergence honestly needs
-        # the polish itself to report its stop reason; follow-up, not this
-        # change.
-        polished2, _dlps, _method = polish_raw_starts(
-            model, [cand], n_steps=polish_steps
+        cands.append(cand)
+    if cands:
+        polished_all, _dlps, _method = polish_raw_starts(
+            model, cands, n_steps=polish_steps
         )
-        recs = build_seed_ledger(system, model, polished2, [next_index])
-        rec = recs[0]
-        rec.source = "hot-chain"
+        recs_all = build_seed_ledger(
+            system,
+            model,
+            polished_all,
+            list(range(next_index, next_index + len(polished_all))),
+        )
+    else:
+        recs_all = []
 
+    for rec in recs_all:
+        rec.source = "hot-chain"
         # Dedup: an existing record already sitting in this basin (within
-        # MATCH_SIGMA of the polished point, in the new record's own
-        # widths) makes this a rediscovery, not a discovery.
+        # MATCH_SIGMA of the polished point, in the new record's own widths)
+        # makes this a rediscovery, not a discovery.
         dup = False
         for other in ledger:
             ds = []
@@ -949,28 +959,21 @@ def discover_hot_modes(
                     other.raw_point.get(key, np.full_like(a, np.nan)),
                     dtype=float,
                 ).reshape(-1)
-                s = np.asarray(rec.raw_scales[key], dtype=float).reshape(-1)
+                sc = np.asarray(rec.raw_scales[key], dtype=float).reshape(-1)
                 if b.shape != a.shape or not np.all(np.isfinite(b)):
                     ds = []
                     break
-                ds.extend(np.abs(a - b) / np.maximum(s, 1e-300))
+                ds.extend(np.abs(a - b) / np.maximum(sc, 1e-300))
             if ds and max(ds) <= MATCH_SIGMA:
                 dup = True
                 break
         if dup:
             continue
-        ledger.append(rec)
-        next_index += 1
         logger.info(
             f"Hot-chain discovery: new basin at lp={rec.lp_max:.2f} "
             f"recorded as ledger entry {rec.seed_index} (hot-chain)."
         )
-
-    # delta_lp is relative to the best record across the WHOLE ledger.
-    if ledger:
-        best_lp = max(r.lp_max for r in ledger)
-        for r in ledger:
-            r.delta_lp = best_lp - r.lp_max
+        ledger.append(rec)
     n_new = len(ledger) - n_before
     if n_new:
         return _finish(
