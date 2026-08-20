@@ -737,6 +737,7 @@ def ptde_sample(
     swap_schedule="deo",
     target_swap_rate=None,
     adapt_ladder=False,
+    de_mode_hop=0.0,
     rung_thin_factor=1,
     rung_thin_start=None,
     collect_rung_timing=False,
@@ -1099,6 +1100,13 @@ def ptde_sample(
         n_propose = np.zeros(n_temps)
         n_swap_accept = np.zeros(max(n_temps - 1, 1))
         n_swap_propose = np.zeros(max(n_temps - 1, 1))
+        # gamma=1 mode hops, tracked per rung so they can be REMOVED from the
+        # acceptance the gamma adapter reads: hops are deliberately over-sized
+        # and mostly rejected, and letting them depress that rate would make
+        # the adapter shrink gamma, degrading within-mode sampling as the
+        # price of attempting hops.
+        n_hop_propose = np.zeros(n_temps)
+        n_hop_accept = np.zeros(n_temps)
 
         # DEO schedule + round-trip diagnostics state. direction[k][i] tags the
         # configuration in slot (k, i) with the last extreme rung it visited;
@@ -1132,22 +1140,36 @@ def ptde_sample(
                 n_propose[:] = 0
                 n_swap_accept[:] = 0
                 n_swap_propose[:] = 0
+                n_hop_propose[:] = 0
+                n_hop_accept[:] = 0
 
             # 1. build DE proposals for every chain at every ACTIVE temperature
             #    (rung thinning skips hot rungs on most steps; see _active_rungs)
             props_vec = []  # packed, for the population
             props_flat = []  # unpacked, for the workers
+            props_hop = []  # was this proposal a gamma=1 mode hop?
             prop_map = []
             for k in _active_rungs(
                 step, n_temps, _rung_thin_start, _rung_thin_factor
             ):
                 pop_k = populations[k]
                 for i in range(n_chains):
+                    # ter Braak 2006's mode-hopping move: gamma = 1 on a
+                    # fraction of proposals.  Decided here rather than inside
+                    # RawLayout.propose, which documents bit-identical rng
+                    # draw order; the extra draw is consumed only when hops
+                    # are enabled, so de_mode_hop=0 is bit-identical.
+                    hop = de_mode_hop > 0.0 and rng.random() < de_mode_hop
                     vec = layout.propose(
-                        rng, pop_k, i, gamma, jitter=de_jitter
+                        rng,
+                        pop_k,
+                        i,
+                        1.0 if hop else gamma,
+                        jitter=de_jitter,
                     )
                     props_vec.append(vec)
                     props_flat.append(layout.unpack(vec))
+                    props_hop.append(hop)
                     prop_map.append((k, i))
             _t_build = time.time()
 
@@ -1166,12 +1188,16 @@ def ptde_sample(
                 T = temperatures[k]
                 lp_new = prop_lps[idx]
                 n_propose[k] += 1
+                if props_hop[idx]:
+                    n_hop_propose[k] += 1
                 if np.isfinite(lp_new) and rng.random() < np.exp(
                     min(0.0, (lp_new - logps[k][i]) / T)
                 ):
                     populations[k][i] = props_vec[idx]
                     logps[k][i] = lp_new
                     n_accept[k] += 1
+                    if props_hop[idx]:
+                        n_hop_accept[k] += 1
                     # Runaway-lp early detection (see LpPlausibilityGuard).
                     if k == 0:
                         lp_guard.check(i, lp_new)
@@ -1285,7 +1311,10 @@ def ptde_sample(
                     # here that is one log interval of a tempered sampler,
                     # where the T=1 rung can legitimately stall while the
                     # ladder is still equilibrating.
-                    ar_T1 = ar[0]
+                    # NON-hop T=1 rate: see n_hop_propose above.
+                    ar_T1 = (n_accept[0] - n_hop_accept[0]) / max(
+                        n_propose[0] - n_hop_propose[0], 1.0
+                    )
                     if ar_T1 > 0:
                         gamma_new = next_gamma(gamma, ar_T1, target_accept)
                         if abs(gamma_new - gamma) / gamma > 0.01:

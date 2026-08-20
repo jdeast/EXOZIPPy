@@ -108,6 +108,7 @@ def ptde_async_sample(
     gamma_adapt_window=None,
     adapt_ladder=False,
     ladder_adapt_window=None,
+    de_mode_hop=0.0,
     de_jitter=DE_JITTER,
     swap_interval=None,
     swap_schedule="deo",
@@ -159,6 +160,29 @@ def ptde_async_sample(
                only what accumulated since it last ran, and running it more
                often than this makes it re-space on noise (see the block
                that calls _update_ladder_barrier).
+    de_mode_hop : float -- probability of replacing the scaled DE gamma with
+               gamma = 1 on a given proposal (ter Braak 2006's mode-hopping
+               move; 0.1 is conventional). Default 0.0, i.e. OFF and
+               bit-identical to before -- the extra rng draw is consumed only
+               when this is nonzero.
+
+               Why it exists: the DE move is x_i + gamma*(x_j - x_k) with
+               gamma ~ 2.38/sqrt(2d) (0.32 at d=27, and the adapter drives it
+               lower still). When x_j and x_k straddle two modes their
+               difference IS the inter-mode vector -- but scaled by 0.32 the
+               proposal lands a third of the way across, in the valley, and
+               is rejected. So the DE move cannot cross modes at its own
+               optimal scale, and ALL between-mode transport falls to PT round
+               trips. At gamma = 1 the proposal translates by the full
+               difference vector and arrives in the other mode. Both kernels
+               are symmetric in (x_j, x_k), so the mixture needs no Hastings
+               correction.
+
+               Hop proposals are EXCLUDED from the gamma adaptation counters.
+               They are deliberately over-sized and mostly rejected, so
+               letting them into the measured T=1 acceptance would drive the
+               adapter to shrink gamma -- degrading within-mode sampling as
+               the price of attempting hops, which is precisely backwards.
     gamma_adapt_window : int | None -- adapt gamma once per this many
                completed T=1 proposals still within their own chain's tune
                phase. None -> max(n_chains, (tune * n_chains) // 20), i.e.
@@ -385,6 +409,15 @@ def ptde_async_sample(
     n_swap_propose = np.zeros(max(n_temps - 1, 1))
     n_swap_accept_cum = np.zeros(max(n_temps - 1, 1))
     n_swap_propose_cum = np.zeros(max(n_temps - 1, 1))
+    de_mode_hop = float(de_mode_hop or 0.0)
+    if not 0.0 <= de_mode_hop < 1.0:
+        raise ValueError(f"de_mode_hop must be in [0, 1), got {de_mode_hop}")
+    # Per-slot flag: was the in-flight proposal a gamma=1 hop?  Set when the
+    # proposal is built, read when its result is scored -- safe as plain
+    # state because the parent builds and scores in one thread.
+    hop_flag = [[False] * n_chains for _ in range(n_temps)]
+    n_hop_propose = [0]
+    n_hop_accept = [0]
     n_ladder_adapts = [0]  # re-spacing MEASUREMENTS, moved or not
     n_eval_timeouts = [0]
     n_swap_discards = [0]  # in-flight proposals invalidated by a swap
@@ -436,9 +469,21 @@ def ptde_async_sample(
         """The slot's next PACKED proposal (see _common.RawLayout)."""
         if current_lp[k][i] is None:
             # First evaluation for this slot: evaluate the start state itself.
+            hop_flag[k][i] = False
             return current_state[k][i].copy()
+        # The hop decision lives HERE rather than inside RawLayout.propose:
+        # that class documents bit-identical rng draw order as a property, and
+        # the caller is the only place that knows whether this proposal should
+        # be a hop.  The extra draw is taken only when hops are enabled, so
+        # de_mode_hop=0 leaves the stream exactly as it was.
+        hop = de_mode_hop > 0.0 and rng.random() < de_mode_hop
+        hop_flag[k][i] = hop
         return layout.propose(
-            rng, current_state[k], i, gamma_box[0], jitter=de_jitter
+            rng,
+            current_state[k],
+            i,
+            1.0 if hop else gamma_box[0],
+            jitter=de_jitter,
         )
 
     def _submit(k, i):
@@ -765,7 +810,12 @@ def ptde_async_sample(
                 accepted = np.isfinite(lp) and rng.random() < np.exp(
                     min(0.0, (lp - current_lp[k][i]) / T)
                 )
-                if k == 0 and iter_count[k][i] < tune:
+                if hop_flag[k][i]:
+                    n_hop_propose[0] += 1
+                    if accepted:
+                        n_hop_accept[0] += 1
+                elif k == 0 and iter_count[k][i] < tune:
+                    # NON-hop proposals only -- see de_mode_hop above.
                     n_propose_T1_window[0] += 1
                     if accepted:
                         n_accept_T1_window[0] += 1
@@ -894,10 +944,33 @@ def ptde_async_sample(
                     temperatures, n_swap_accept, n_swap_propose
                 )
                 if not np.allclose(new_T, temperatures):
+                    # Log the MEASUREMENT next to the decision it drove.
+                    # Without the per-pair acceptances this line says what
+                    # the ladder became but not why, and the acceptances
+                    # otherwise appear only on the progress line -- one per
+                    # n_slots*(tune+draws)//20 evaluations, which on
+                    # DC2018_128 is 7.1M evals against a re-spacing every
+                    # ~51k.  That is ~140 adaptations per glimpse of the
+                    # only data that says whether they are helping, and it
+                    # made "is the adaptation working?" unanswerable for
+                    # hours on a run whose whole purpose was to answer it.
+                    # Full precision on T for the same reason: at %.1f,
+                    # neighbouring cold rungs print identically and there is
+                    # no way to tell a genuinely crowded ladder from a
+                    # rounded one.
+                    acc_win = n_swap_accept / np.maximum(n_swap_propose, 1)
                     logger.info(
                         "PTDE-async ladder (barrier-equalized, from "
                         f"{n_measured} swap proposals): "
-                        f"T=[{', '.join(f'{t:.1f}' for t in new_T)}]"
+                        f"T=[{', '.join(f'{t:.4g}' for t in new_T)}]"
+                    )
+                    logger.info(
+                        "PTDE-async ladder measurement: swap accept="
+                        f"[{', '.join(f'{r:.2f}' for r in acc_win)}]  "
+                        f"mean={float(acc_win.mean()):.3f} "
+                        f"spread={float(acc_win.max() - acc_win.min()):.2f} "
+                        f"Lambda={float(np.sum(1.0 - acc_win)):.1f} "
+                        f"(target accept 0.50, i.e. equal barrier per pair)"
                     )
                     temperatures[:] = new_T
                 # Fresh measurement per adaptation window, as the sync
@@ -1088,6 +1161,15 @@ def ptde_async_sample(
         rate_unit="swap",
         extras=_extras,
     )
+    if de_mode_hop > 0.0:
+        logger.info(
+            f"PTDE-async DE mode hops (gamma=1, p={de_mode_hop:g}): "
+            f"{n_hop_accept[0]}/{n_hop_propose[0]} accepted "
+            f"({n_hop_accept[0] / max(n_hop_propose[0], 1):.4f}); excluded "
+            "from the gamma adaptation. Compare against the mode-change "
+            "count in the mode report: hops are the DE path between basins, "
+            "PT round trips are the other one."
+        )
     ladder_health_report(temperatures, n_swap_accept, n_swap_propose)
     if adapt_ladder and n_temps > 2 and not n_ladder_adapts[0]:
         logger.warning(
