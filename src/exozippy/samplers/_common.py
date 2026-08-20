@@ -585,6 +585,35 @@ class SpanTracker:
         """
         return [self._widest(k, key) for k in range(self.n_temps)]
 
+    def ratio_key(self, k_cold, k_hot):
+        """Variable whose k_hot/k_cold span RATIO is largest, or None.
+
+        The right selector for "is tempering doing any work?", and not the
+        same as the widest absolute span.  `widest_at(hot)` picks whichever
+        variable RANGES furthest at the top of the ladder, which in practice
+        is whichever has the broadest PRIOR: on DC2018 event 128 it reported
+        star.pm_ra (top/cold 2.1x) and then star.logmass (5.9x), both of them
+        galactic-prior dominated, and never lens.log_s -- the one direction
+        the run existed to measure, whose second basin sits ~296 sigma away.
+        A prior-dominated coordinate explores its prior at every rung, so its
+        ratio is near 1 and it carries no information about the barrier.
+
+        The ratio picks out the direction where the hot rungs reach somewhere
+        the cold rung cannot, which is exactly the reachability question.
+        """
+        best, best_key = -np.inf, None
+        for name in self.layout.keys:
+            hot, _ = self._widest(k_hot, name)
+            cold, _ = self._widest(k_cold, name)
+            if not np.isfinite(hot) or hot <= 0.0:
+                continue
+            # A cold span of zero would divide to inf and win trivially; floor
+            # it at the smallest span that has actually been observed.
+            r = hot / max(cold, 1e-12)
+            if r > best:
+                best, best_key = r, name
+        return best_key
+
     def widest_at(self, k):
         """Name of the widest-spanning variable at rung ``k``, or None.
 

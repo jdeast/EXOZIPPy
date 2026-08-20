@@ -376,3 +376,64 @@ def test_async_exposes_ladder_adapt_window_and_defaults_it_to_none():
     sig = inspect.signature(ptde_async_sample)
     assert "ladder_adapt_window" in sig.parameters
     assert sig.parameters["ladder_adapt_window"].default is None
+
+
+def test_ratio_key_finds_the_tempered_direction_not_the_broadest_prior():
+    """
+    Given a prior-dominated variable that ranges widely at EVERY rung and a
+      likelihood-dominated one that only the hot rung reaches,
+    When the span selector is asked which variable to report,
+    Then the ratio selector names the tempered one while the widest-absolute
+      selector names the prior-dominated one.
+
+    This is the flaw the DC2018-128 run exposed in the reporting added by
+    #195.  `widest_at(hot)` picks whichever variable RANGES furthest at the
+    top of the ladder, which in practice is whichever has the broadest prior:
+    that run reported star.pm_ra (top/cold 2.1x) and then star.logmass (5.9x),
+    both galactic-prior dominated, and never lens.log_s -- the one direction
+    the run existed to measure, whose second basin sits ~296 sigma away.  A
+    prior-dominated coordinate explores its prior at every rung, so its ratio
+    is near 1 and it says nothing about reachability.
+    """
+    # ARRANGE
+    from exozippy.samplers._common import RawLayout, SpanTracker
+
+    start = {"broad_prior": np.zeros(()), "tempered": np.zeros(())}
+    layout = RawLayout(start)
+    tr = SpanTracker(n_temps=2, raw_start=start, layout=layout)
+    # Cold rung: the prior-dominated variable already spans 500, the
+    # likelihood-dominated one only 2.
+    for bp, tv in ((-250.0, -1.0), (250.0, 1.0)):
+        tr.update(
+            0, _packed(layout, broad_prior=np.array(bp), tempered=np.array(tv))
+        )
+    # Hot rung: the prior one barely widens (600), the tempered one reaches
+    # 200 -- a 100x ratio against the prior variable's 1.2x.
+    for bp, tv in ((-300.0, -100.0), (300.0, 100.0)):
+        tr.update(
+            1, _packed(layout, broad_prior=np.array(bp), tempered=np.array(tv))
+        )
+
+    # ACT
+    widest = tr.widest_at(1)
+    ratio = tr.ratio_key(0, 1)
+
+    # ASSERT
+    assert widest == "broad_prior", (
+        "precondition: the absolute-span selector should pick the prior "
+        "variable, which is the behaviour this test exists to improve on"
+    )
+    assert ratio == "tempered", (
+        f"ratio selector picked {ratio!r}; it must find the direction the hot "
+        f"rung reaches and the cold one does not"
+    )
+
+
+def test_ratio_key_is_none_before_anything_is_recorded():
+    """No spans yet means no direction to name, rather than a spurious pick."""
+    from exozippy.samplers._common import RawLayout, SpanTracker
+
+    start = {"a": np.zeros(())}
+    tr = SpanTracker(n_temps=2, raw_start=start, layout=RawLayout(start))
+
+    assert tr.ratio_key(0, 1) is None
