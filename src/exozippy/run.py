@@ -56,6 +56,7 @@ KNOWN_SAMPLER_KEYS = {
     "T_max",
     "n_chains",
     "adapt_ladder",
+    "de_mode_hop",
     "recompute_trace",
     "nthin",
     "measure_scales",
@@ -316,6 +317,11 @@ def _run_fit(config, gui, user_params=None):
     # round trip must cross every pair and more rungs cannot fix a badly
     # SHAPED ladder.
     adapt_ladder = bool(sampler_cfg.get("adapt_ladder", False))
+    # ter Braak 2006 mode hopping: probability of a gamma=1 DE proposal.  0
+    # (default) is off and bit-identical.  Forwarded to BOTH PTDE samplers --
+    # a knob one of them silently ignores is exactly the adapt_ladder bug
+    # (tests/test_sampler_kwarg_plumbing.py pins the symmetry).
+    de_mode_hop = float(sampler_cfg.get("de_mode_hop", 0.0) or 0.0)
     _n_temps_raw = sampler_cfg.get("n_temps", 8)
     n_temps = (
         _n_temps_raw if isinstance(_n_temps_raw, str) else int(_n_temps_raw)
@@ -630,6 +636,7 @@ def _run_fit(config, gui, user_params=None):
                     collect_rung_timing=collect_rung_timing,
                     swap_schedule=swap_schedule,
                     adapt_ladder=adapt_ladder,
+                    de_mode_hop=de_mode_hop,
                     progress_callback=gui.progress_callback,
                 )
             elif method == "ptde_async":
@@ -664,6 +671,7 @@ def _run_fit(config, gui, user_params=None):
                     collect_rung_timing=collect_rung_timing,
                     swap_schedule=swap_schedule,
                     adapt_ladder=adapt_ladder,
+                    de_mode_hop=de_mode_hop,
                     progress_callback=gui.progress_callback,
                 )
             elif method in ("numpyro", "blackjax"):
