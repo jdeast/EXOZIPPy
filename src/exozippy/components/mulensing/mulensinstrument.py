@@ -1132,45 +1132,34 @@ class MulensInstrument(Instrument):
 
             self._seed_source_star_from_flux(system)
 
-    # Main-sequence dwarf locus for source seeding: Mamajek's living
-    # "Modern Mean Dwarf Stellar Color and Effective Temperature Sequence"
-    # (EEM_dwarf_UBVIJHK_colors_Teff.txt, shipped verbatim with its header;
-    # cite Pecaut & Mamajek 2013, ApJS 208, 9).  Loaded lazily, capped at
-    # 2.2 Msun: a bulge source brighter than the locus top is far likelier
-    # a giant (or a wrong zeropoint) than an early-type dwarf, and the
-    # bright guard below should say so rather than seed one.
+    # Main-sequence dwarf locus for source seeding, from the shared
+    # Mamajek-table reader (components/star/mamajek.py).
     _MS_LOCUS_CACHE = None
 
     @classmethod
     def _ms_locus(cls):
-        """(teff K, radius Rsun, mass Msun) rows, brightest first."""
+        """(teff K, radius Rsun, mass Msun) rows, brightest first.
+
+        Backed by the shared Mamajek-table reader (components/star/
+        mamajek.py, the getstar.pro port), capped at 2.2 Msun: a bulge
+        source brighter than the dwarf-locus top is far likelier a giant
+        (or a wrong zeropoint) than an early-type dwarf, and the bright
+        guard should say so rather than seed one.
+        """
         if cls._MS_LOCUS_CACHE is not None:
             return cls._MS_LOCUS_CACHE
-        path = Path(__file__).parent / "EEM_dwarf_UBVIJHK_colors_Teff.txt"
-        cols = None
-        rows = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            tokens = line.split()
-            if not tokens:
-                continue
-            if tokens[0] == "#SpT" and "Teff" in tokens:
-                header = [tok.lstrip("#") for tok in tokens]
-                cols = {name: i for i, name in enumerate(header)}
-                continue
-            if line.startswith("#") or cols is None:
-                continue
-            try:
-                teff = float(tokens[cols["Teff"]])
-                radius = float(tokens[cols["R_Rsun"]])
-                mass = float(tokens[cols["Msun"]])
-            except (ValueError, IndexError):
-                continue
-            if 0.078 <= mass <= 2.2:
-                rows.append((teff, radius, mass))
+        from exozippy.components.star.mamajek import read_mamajek
+
+        table = read_mamajek(minmass=0.078)
+        rows = [
+            (float(te), float(r), float(m))
+            for te, r, m in zip(table["Teff"], table["R_Rsun"], table["Msun"])
+            if np.isfinite(te) and np.isfinite(r) and m <= 2.2
+        ]
         if len(rows) < 10:
             raise RuntimeError(
-                f"dwarf locus table {path} parsed to only {len(rows)} "
-                f"usable rows; the file or its header format changed."
+                f"dwarf locus parsed to only {len(rows)} usable rows; "
+                f"the Mamajek table or its reader changed."
             )
         rows.sort(key=lambda r: -r[2])  # brightest (most massive) first
         cls._MS_LOCUS_CACHE = rows
