@@ -191,12 +191,19 @@ lens:
   log_rho:
     # Sampled ONLY when the lens sets `star_constrains_rho: false`; otherwise absent
     # from the manifest entirely.  Log coordinate because candidate rho
-    # spans decades (mirrors log_s/s and planet log_q).  Upper mirrors
-    # rho's own soft cap (10); the lower bound sits far below any
+    # spans decades (mirrors log_s/s and planet log_q).  Upper = rho 0.5:
+    # rho's own comment already says real events live below ~0.5 and that
+    # larger rho both erases the signal (A -> 1) and drives VBM's
+    # finite-source machinery into its most expensive regime -- and the
+    # first severed 128 run proved it operationally: hot tempering chains
+    # pushed the free log_rho toward the old rho<=10 bound and drowned the
+    # run in 10s eval_timeout rejections and worker-pool recycling.  The
+    # derived rho keeps its soft 10 cap; only the SAMPLED coordinate is
+    # confined to the physical regime.  The lower bound sits far below any
     # detectable finite-source effect, where the likelihood is flat in
     # log_rho and the fit degrades gracefully to point-source.
     lower: -6.0
-    upper: 1.0
+    upper: -0.301
     initval: -2.0
     init_scale: 0.1
     unit: ""
