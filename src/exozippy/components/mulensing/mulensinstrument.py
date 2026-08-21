@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 
 import numpy as np
 
@@ -1131,24 +1132,49 @@ class MulensInstrument(Instrument):
 
             self._seed_source_star_from_flux(system)
 
-    # Approximate main-sequence dwarf locus (Pecaut & Mamajek 2013),
-    # brightest first: (teff K, radius Rsun, mass Msun).  Seeds only -- a
-    # 10% error here moves a START value, nothing else.
-    _MS_LOCUS = [
-        (9700.0, 2.10, 2.10),
-        (8100.0, 1.80, 1.80),
-        (7220.0, 1.60, 1.55),
-        (6510.0, 1.40, 1.33),
-        (5930.0, 1.10, 1.06),
-        (5770.0, 1.00, 1.02),
-        (5490.0, 0.94, 0.94),
-        (5270.0, 0.88, 0.87),
-        (4830.0, 0.78, 0.78),
-        (4440.0, 0.70, 0.70),
-        (3870.0, 0.60, 0.57),
-        (3550.0, 0.45, 0.44),
-        (3210.0, 0.27, 0.23),
-    ]
+    # Main-sequence dwarf locus for source seeding: Mamajek's living
+    # "Modern Mean Dwarf Stellar Color and Effective Temperature Sequence"
+    # (EEM_dwarf_UBVIJHK_colors_Teff.txt, shipped verbatim with its header;
+    # cite Pecaut & Mamajek 2013, ApJS 208, 9).  Loaded lazily, capped at
+    # 2.2 Msun: a bulge source brighter than the locus top is far likelier
+    # a giant (or a wrong zeropoint) than an early-type dwarf, and the
+    # bright guard below should say so rather than seed one.
+    _MS_LOCUS_CACHE = None
+
+    @classmethod
+    def _ms_locus(cls):
+        """(teff K, radius Rsun, mass Msun) rows, brightest first."""
+        if cls._MS_LOCUS_CACHE is not None:
+            return cls._MS_LOCUS_CACHE
+        path = Path(__file__).parent / "EEM_dwarf_UBVIJHK_colors_Teff.txt"
+        cols = None
+        rows = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            tokens = line.split()
+            if not tokens:
+                continue
+            if tokens[0] == "#SpT" and "Teff" in tokens:
+                header = [tok.lstrip("#") for tok in tokens]
+                cols = {name: i for i, name in enumerate(header)}
+                continue
+            if line.startswith("#") or cols is None:
+                continue
+            try:
+                teff = float(tokens[cols["Teff"]])
+                radius = float(tokens[cols["R_Rsun"]])
+                mass = float(tokens[cols["Msun"]])
+            except (ValueError, IndexError):
+                continue
+            if 0.078 <= mass <= 2.2:
+                rows.append((teff, radius, mass))
+        if len(rows) < 10:
+            raise RuntimeError(
+                f"dwarf locus table {path} parsed to only {len(rows)} "
+                f"usable rows; the file or its header format changed."
+            )
+        rows.sort(key=lambda r: -r[2])  # brightest (most massive) first
+        cls._MS_LOCUS_CACHE = rows
+        return rows
 
     def _user_or_default(self, paths, field, default):
         """First user_params value for any spelling in ``paths``."""
@@ -1237,7 +1263,7 @@ class MulensInstrument(Instrument):
             # own BC grid (teff, logg, feh=0, av), at the assumed distance.
             col = sed.filter_column(fk)
             m_pred = []
-            for teff, radius, mass in self._MS_LOCUS:
+            for teff, radius, mass in self._ms_locus():
                 logg = 4.438 + np.log10(mass) - 2.0 * np.log10(radius)
                 coords = np.array([[teff, logg, 0.0, av]])
                 bc = float(
@@ -1277,18 +1303,18 @@ class MulensInstrument(Instrument):
                     f"({m_pred[-1]:.2f}); seeding at the faint end."
                 )
                 m_meas = m_pred[-1]
+            # BC wiggles can make m_pred locally non-monotonic; interp
+            # over the magnitude-sorted pairs.
+            order = np.argsort(m_pred)
+            locus_masses = np.array([r[2] for r in self._ms_locus()])
             masses.append(
-                float(
-                    np.interp(
-                        m_meas, m_pred, [row[2] for row in self._MS_LOCUS]
-                    )
-                )
+                float(np.interp(m_meas, m_pred[order], locus_masses[order]))
             )
 
         if not masses:
             return
         mass = float(np.median(masses))
-        loci = np.array(self._MS_LOCUS)[::-1]  # ascending mass for interp
+        loci = np.array(self._ms_locus())[::-1]  # ascending mass for interp
         teff = float(np.interp(mass, loci[:, 2], loci[:, 0]))
         radius = float(np.interp(mass, loci[:, 2], loci[:, 1]))
         logger.info(
