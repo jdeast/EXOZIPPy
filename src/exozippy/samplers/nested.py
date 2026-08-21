@@ -413,6 +413,31 @@ def nested_sample(
         f"ncall={ncall}  wall={wall / 3600:.2f} h"
     )
 
+    # TRUTH-FREE PEAK-MISS DIAGNOSTIC.  For any d-dimensional posterior with
+    # a quadratic peak, max(logl) stands ~ H + d/2 above logZ (H = the
+    # prior-to-posterior compression the run itself estimates as
+    # iterations/nlive).  A gap far BELOW d/2 is impossible for a genuinely
+    # explored peak: it means the live points plateaued on a shoulder, the
+    # dlogz criterion saw nothing above them, and the run terminated cleanly
+    # around a peak it never entered.  Measured on DC2018 event 128 at
+    # d = 27: gap = 7.2 nats against a 13.5-nat floor and an ~80-nat
+    # expectation -- the run had silently stopped 1,319 nats below the known
+    # optimum, with a plausible-looking logZ and error bar.  The healthy
+    # d = 7 benchmark gives gap = 54.8 vs H + d/2 ~ 55.
+    gap = float(np.max(logl) - logz)
+    n_iter = max(len(logl) - nlive, 1)
+    h_est = n_iter / max(nlive, 1)
+    if gap < 0.5 * (h_est + 0.5 * bridge.ndim) or gap < 0.5 * bridge.ndim:
+        logger.warning(
+            f"nested[{backend}]: max(logl) - logZ = {gap:.1f} nats, far "
+            f"below the ~H + d/2 = {h_est:.0f} + {bridge.ndim / 2:.1f} a "
+            "resolved peak implies. The sampler most likely terminated on a "
+            "SHOULDER without entering the posterior's core: treat logZ as "
+            "a lower bound and the posterior moments as suspect. Remedies: "
+            "a step sampler that penetrates sharp cores "
+            "(nested_backend: ultranest), more walks, or larger nlive."
+        )
+
     # Equal-weight resample -> pseudo-chains -> physical posterior group.
     rng = np.random.default_rng(seed)
     w = np.exp(logwt - logwt.max())
