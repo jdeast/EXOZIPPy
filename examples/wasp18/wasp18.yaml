@@ -25,7 +25,7 @@ torres:
 
 planet:
   - name: "b"
-    beam_free: true
+    fitbeam: true
 
 orbit:
   - name: "b"

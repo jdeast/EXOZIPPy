@@ -181,7 +181,7 @@ lens:
       default:
         func_name: "calc_rho"
         deps: [ "star.radius[source_map]", "star.distance[source_map]", "theta_E" ]
-      # Selected by `rho_free: true` on the lens: rho becomes the light
+      # Selected by `fitrho: true` on the lens: rho becomes the light
       # curve's own parameter (via the sampled log_rho) and the stellar
       # chain's prediction moves to rho_pred, so the two never silently
       # trade against each other (see rho_pred's note).
@@ -189,7 +189,7 @@ lens:
         func_name: "calc_rho_from_log"
         deps: [ "log_rho" ]
   log_rho:
-    # Sampled ONLY when the lens sets `rho_free: true`; otherwise absent
+    # Sampled ONLY when the lens sets `fitrho: true`; otherwise absent
     # from the manifest entirely.  Log coordinate because candidate rho
     # spans decades (mirrors log_s/s and planet log_q).  Upper mirrors
     # rho's own soft cap (10); the lower bound sits far below any
@@ -205,7 +205,7 @@ lens:
     description: "log10 source radius"
   rho_pred:
     # The stellar chain's prediction theta_star/theta_E, reported ONLY when
-    # `rho_free: true` severs the rho = theta_star/theta_E identity (with
+    # `fitrho: true` severs the rho = theta_star/theta_E identity (with
     # the identity intact this would duplicate rho's row).  Publishing both
     # makes the pull between the light curve's rho and the chain's rho a
     # visible number: on DC2018 event 128 the identity + the event-rate

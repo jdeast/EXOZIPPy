@@ -459,7 +459,7 @@ def calc_alpha(xalpha, yalpha):
 
 @register_physics
 def calc_rho_from_log(log_rho):
-    # Sampled coordinate for `rho_free: true` lenses: rho spans decades
+    # Sampled coordinate for `fitrho: true` lenses: rho spans decades
     # (1e-4 .. 0.5 across published events), so the free coordinate is
     # log10(rho), mirroring log_s/s and planet log_q.
     return pt.power(10.0, log_rho)

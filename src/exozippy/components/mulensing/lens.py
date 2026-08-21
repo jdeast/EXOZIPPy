@@ -348,7 +348,7 @@ class Lens(Component):
                 "doc": "Index or name of the source star. Default 1.",
             },
             {
-                "key": "rho_free",
+                "key": "fitrho",
                 "kind": "option",
                 "accepts": None,
                 "required": False,
@@ -359,7 +359,7 @@ class Lens(Component):
                     "prediction is then reported as rho_pred so the pull "
                     "between the two is visible. Default False (the "
                     "identity holds). Requires finite_source. Same "
-                    "vocabulary as the planet component's beam_free."
+                    "vocabulary as the planet component's fitbeam."
                 ),
             },
             {
@@ -845,25 +845,25 @@ class Lens(Component):
                 )
 
         if any(self.finite_source):
-            # `rho_free: true` severs the rho = theta_star/theta_E identity:
+            # `fitrho: true` severs the rho = theta_star/theta_E identity:
             # rho becomes the light curve's own parameter (sampled as
             # log_rho, mirroring log_s/s) and the stellar chain's
             # prediction is reported separately as rho_pred, so the pull
             # between the two is a published number instead of a silently
             # resolved tension (see rho_pred's defaults.yaml note; the
-            # planet component's beam_free is the same vocabulary).  The
+            # planet component's fitbeam is the same vocabulary).  The
             # relaxation engine still knows BOTH relations, so a rho seed
             # (user or MMEXOFAST) back-solves to a log_rho start and the
             # stellar chain still seeds consistently.
-            if bool(self.config[0].get("rho_free", False)):
+            if bool(self.config[0].get("fitrho", False)):
                 self.manifest["log_rho"] = per_source()
                 self.manifest["rho"] = per_source("from_log_rho")
                 self.manifest["rho_pred"] = per_source("default")
             else:
                 self.manifest["rho"] = per_source("default")
-        elif bool(self.config[0].get("rho_free", False)):
+        elif bool(self.config[0].get("fitrho", False)):
             logger.warning(
-                "lens: rho_free is set but finite_source is not -- rho "
+                "lens: fitrho is set but finite_source is not -- rho "
                 "never enters the magnification, so nothing is freed; "
                 "ignoring it."
             )

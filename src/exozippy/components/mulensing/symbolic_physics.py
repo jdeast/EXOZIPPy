@@ -137,9 +137,9 @@ def get_symbol_map(lens_config_list):
             result["log_s"] = "lens.0.log_s"
 
         # log_rho exists only when the lens frees rho from the stellar
-        # chain (`rho_free: true`); the rho <-> log_rho relation stays
+        # chain (`fitrho: true`); the rho <-> log_rho relation stays
         # inert otherwise, exactly like s/log_s for PSPL.
-        if lens_config_list.get("rho_free"):
+        if lens_config_list.get("fitrho"):
             result["log_rho"] = f"lens.{j}.log_rho"
 
         maps.append(result)
@@ -185,7 +185,7 @@ RELATIONS = [
     # Only active for binary lenses (s/log_s mapped in get_symbol_map there);
     # inert for PSPL.  Lets user lens.s initvals back-solve to a log_s start.
     sp.Eq(s, 10**log_s),
-    # rho reparameterization, active only for `rho_free: true` lenses
+    # rho reparameterization, active only for `fitrho: true` lenses
     # (log_rho mapped in get_symbol_map there; inert otherwise).  Lets a
     # user or MMEXOFAST rho seed back-solve to a log_rho start.
     sp.Eq(rho, 10**log_rho),
