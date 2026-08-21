@@ -99,6 +99,17 @@ def determine_pymc_build_order(active_components, config_manager):
                     if "." in d:
                         # Strip off any bracket indicators to get the raw structural key (e.g., "star.mass")
                         clean_dep = d.split("[")[0] if "[" in d else d
+                        # A dep naming the parameter being built is a
+                        # same-parameter element reference (fitmurel's
+                        # pm[lens] <- pm[source] + mu_rel), resolved
+                        # against the pre-patch tensor inside build_pymc
+                        # exactly like the same-parameter element LINKS in
+                        # 2b -- as an edge it would be an unorderable
+                        # self-loop.  Elementwise acyclicity is enforced
+                        # at patch time instead (only SAMPLED elements may
+                        # be referenced; see Parameter._patch_elements).
+                        if clean_dep == global_key:
+                            continue
                         forward_graph[global_key].add(clean_dep)
                     else:
                         forward_graph[global_key].add(f"{comp_name}.{d}")
