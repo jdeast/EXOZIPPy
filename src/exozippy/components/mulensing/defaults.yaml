@@ -213,13 +213,21 @@ lens:
     # the prior's favor (rho low by ~8x); a reported rho vs rho_pred pull
     # is the diagnostic that failure mode cannot hide from.
     # The severed pair also composes with the user link machinery into a
-    # SOFT tie at a width of the user's choosing -- the dual-constraint
-    # middle ground -- with no further code:
-    #   star_constrains_rho: false          (lens block)
-    #   lens.Lens.rho: {initval: <n>, mu: lens.Lens.rho_pred, sigma: 0.002}
-    # (mu link = Gaussian potential on the difference; keep a NUMERIC
-    # initval -- an initval link would replace the seed and can trip the
-    # MMEXOFAST sufficiency probe.)  Tests: tests/test_star_constrains_rho.py.
+    # SOFT tie (star_constrains_rho: false + params
+    # lens.Lens.rho: {initval: <n>, mu: lens.Lens.rho_pred, sigma: 0.002};
+    # mu link = Gaussian potential on the difference; keep a NUMERIC
+    # initval -- an initval link replaces the seed and can trip the
+    # MMEXOFAST sufficiency probe).  It builds and is pinned by test
+    # (tests/test_star_constrains_rho.py), but it is NOT a recommended
+    # third mode: rho = theta_star/theta_E is exact physics, so any
+    # nonzero sigma inserts arbitrary slop between quantities that have
+    # none, and a tight-but-nonzero tie is a narrow curved ridge in the
+    # joint space -- hard to traverse for exactly the gradient-free
+    # samplers this component requires.  The two honest positions are the
+    # exact identity (default; it already blends the light curve's and
+    # the chain's information optimally when both are sound) and fully
+    # severed with the rho vs rho_pred pull reported (when one of them
+    # may not be).
     upper: 10.0
     unit: ""
     internal_unit: ""
