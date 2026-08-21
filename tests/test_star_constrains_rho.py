@@ -1,15 +1,17 @@
 """
-Tests for `fitrho: true` on the lens (severing rho = theta_star/theta_E).
+Tests for `star_constrains_rho: false` (severing rho = theta_star/theta_E).
 
-With the flag on, rho becomes the light curve's own parameter -- sampled as
-log_rho (mirroring log_s/s) -- and the stellar chain's prediction is
-reported separately as rho_pred, so the pull between the light curve's rho
-and the chain's rho is a published number instead of a silently resolved
-tension.  With the flag off (the default) nothing changes: rho stays the
-derived identity and neither log_rho nor rho_pred exists.
+The finite-source effect is a direct measurement of rho and always acts;
+the flag toggles whether the stellar model (SED, evolutionary models,
+relations, or priors) ALSO constrains it through the identity.  Set false,
+rho becomes the light curve's own parameter -- sampled as log_rho
+(mirroring log_s/s) -- and the stellar prediction is reported separately
+as rho_pred, so the pull between the two is a published number instead of
+a silently resolved tension.  Default true: rho stays the derived identity
+and neither log_rho nor rho_pred exists.
 
-Vocabulary matches the planet component's fitbeam (sample the quantity
-directly instead of deriving it from the physical chain).
+Vocabulary matches the planet component's beam_constrains_mass and the
+instrument's sed_constrain_blend (X_constrains_Y = the tie is on).
 """
 
 from pathlib import Path
@@ -24,7 +26,7 @@ from exozippy.system import System
 _KMT_DIR = Path(__file__).parent.parent / "examples" / "KMT-2019-BLG-1806"
 
 
-def _load_kmt(fitrho=False, extra_params=None, build=False):
+def _load_kmt(sever=False, extra_params=None, build=False):
     import os
 
     if not _KMT_DIR.is_dir():
@@ -39,8 +41,8 @@ def _load_kmt(fitrho=False, extra_params=None, build=False):
             user_params = yaml.safe_load(f)
         for k in ("run", "prefix", "parameter_file", "sampler"):
             config.pop(k, None)
-        if fitrho:
-            config["lens"][0]["fitrho"] = True
+        if sever:
+            config["lens"][0]["star_constrains_rho"] = False
         if extra_params:
             user_params.update(extra_params)
         system = System(config, user_params=user_params)
@@ -52,12 +54,12 @@ def _load_kmt(fitrho=False, extra_params=None, build=False):
 
 
 @pytest.fixture(scope="module")
-def kmt_fitrho():
-    """Given the KMT example with fitrho: true and an explicit user rho
-    start, when the system is prepared and built, provide
-    (system, model, initial point)."""
+def kmt_severed():
+    """Given the KMT example with star_constrains_rho: false and an
+    explicit user rho start, when the system is prepared and built,
+    provide (system, model, initial point)."""
     system, model = _load_kmt(
-        fitrho=True,
+        sever=True,
         extra_params={"lens.Lens.rho": {"initval": 0.005}},
         build=True,
     )
@@ -72,7 +74,7 @@ def _eval(model, node, point):
 
 def test_default_off_no_new_parameters():
     """
-    Given the shipped KMT config (no fitrho),
+    Given the shipped KMT config (star_constrains_rho absent, so true),
     When the system is prepared,
     Then rho stays the derived identity and neither log_rho nor rho_pred
     is declared.
@@ -84,14 +86,14 @@ def test_default_off_no_new_parameters():
     assert manifest["rho"].get("expr_key") == "default"
 
 
-def test_fitrho_samples_log_rho(kmt_fitrho):
+def test_severed_samples_log_rho(kmt_severed):
     """
-    Given fitrho: true,
+    Given star_constrains_rho: false,
     When the model is built,
     Then log_rho is sampled, rho = 10**log_rho, and the user's rho initval
     back-solved to the log_rho start through the relaxation engine.
     """
-    system, model, point = kmt_fitrho
+    system, model, point = kmt_severed
     assert "lens.log_rho_raw" in [v.name for v in model.value_vars]
 
     # Derived Parameters do not emit named Deterministics; evaluate the
@@ -104,15 +106,15 @@ def test_fitrho_samples_log_rho(kmt_fitrho):
     assert np.isclose(log_rho[0], np.log10(0.005), atol=1e-6)
 
 
-def test_rho_pred_reports_the_chain(kmt_fitrho):
+def test_rho_pred_reports_the_chain(kmt_severed):
     """
-    Given fitrho: true,
+    Given star_constrains_rho: false,
     When the model is built,
     Then rho_pred carries the stellar chain's theta_star/theta_E -- the
     quantity rho used to BE -- computed from the same star radius/distance
     and theta_E, and it is decoupled from the sampled rho.
     """
-    system, model, point = kmt_fitrho
+    system, model, point = kmt_severed
     rho_pred = float(
         np.atleast_1d(_eval(model, system.lens.rho_pred.value, point))[0]
     )

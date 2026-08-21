@@ -348,18 +348,22 @@ class Lens(Component):
                 "doc": "Index or name of the source star. Default 1.",
             },
             {
-                "key": "fitrho",
+                "key": "star_constrains_rho",
                 "kind": "option",
                 "accepts": None,
                 "required": False,
                 "doc": (
-                    "Sample rho directly from the light curve (as "
-                    "log_rho) instead of deriving it from the stellar "
-                    "chain (rho = theta_star/theta_E); the chain's "
-                    "prediction is then reported as rho_pred so the pull "
-                    "between the two is visible. Default False (the "
-                    "identity holds). Requires finite_source. Same "
-                    "vocabulary as the planet component's fitbeam."
+                    "Default True: rho is the identity theta_star/theta_E "
+                    "-- the stellar model (SED, evolutionary models, "
+                    "relations, or priors) constrains rho alongside the "
+                    "light curve's finite-source measurement. Set False "
+                    "to sever the tie: rho is sampled directly (as "
+                    "log_rho) and the stellar prediction is reported as "
+                    "rho_pred, so the pull between the two is visible "
+                    "instead of silently arbitrated. Requires "
+                    "finite_source. Same vocabulary as the planet "
+                    "component's beam_constrains_mass and the "
+                    "instrument's sed_constrain_blend."
                 ),
             },
             {
@@ -845,27 +849,28 @@ class Lens(Component):
                 )
 
         if any(self.finite_source):
-            # `fitrho: true` severs the rho = theta_star/theta_E identity:
+            # `star_constrains_rho: false` severs rho = theta_star/theta_E:
             # rho becomes the light curve's own parameter (sampled as
             # log_rho, mirroring log_s/s) and the stellar chain's
             # prediction is reported separately as rho_pred, so the pull
             # between the two is a published number instead of a silently
             # resolved tension (see rho_pred's defaults.yaml note; the
-            # planet component's fitbeam is the same vocabulary).  The
+            # planet component's beam_constrains_mass is the same
+            # vocabulary).  The
             # relaxation engine still knows BOTH relations, so a rho seed
             # (user or MMEXOFAST) back-solves to a log_rho start and the
             # stellar chain still seeds consistently.
-            if bool(self.config[0].get("fitrho", False)):
+            if not bool(self.config[0].get("star_constrains_rho", True)):
                 self.manifest["log_rho"] = per_source()
                 self.manifest["rho"] = per_source("from_log_rho")
                 self.manifest["rho_pred"] = per_source("default")
             else:
                 self.manifest["rho"] = per_source("default")
-        elif bool(self.config[0].get("fitrho", False)):
+        elif not bool(self.config[0].get("star_constrains_rho", True)):
             logger.warning(
-                "lens: fitrho is set but finite_source is not -- rho "
-                "never enters the magnification, so nothing is freed; "
-                "ignoring it."
+                "lens: star_constrains_rho is false but finite_source is "
+                "not set -- rho never enters the magnification, so there "
+                "is nothing to sever; ignoring it."
             )
 
         # Seed alpha hint (degrees, user unit) so inspect_start can display it

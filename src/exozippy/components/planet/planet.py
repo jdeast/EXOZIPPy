@@ -54,8 +54,8 @@ class Planet(Component):
         # per-band (EXOFASTv2 declares it ss.planet[i].beam, unlike
         # thermal/reflect/ellipsoidal which are ss.band[i].*).
         self.fitbeam = [bool(c.get("fitbeam", False)) for c in self.config]
-        self.derivebeam = [
-            bool(c.get("derivebeam", False)) for c in self.config
+        self.beam_constrains_mass = [
+            bool(c.get("beam_constrains_mass", False)) for c in self.config
         ]
         # EXOFASTv2's `alloworbitcrossing`, per planet (review 8.8.9).  Per
         # planet and not per fit because the exception it exists for is a
@@ -91,12 +91,12 @@ class Planet(Component):
                     "directly from the photometry, independent of the RV "
                     "semi-amplitude K -- does not constrain planet mass. "
                     "Default False, which pins beam at 0. If "
-                    "derivebeam is also set, derivebeam "
+                    "beam_constrains_mass is also set, beam_constrains_mass "
                     "wins and beam is derived from K instead of fit freely."
                 ),
             },
             {
-                "key": "derivebeam",
+                "key": "beam_constrains_mass",
                 "kind": "option",
                 "accepts": None,
                 "required": False,
@@ -269,11 +269,11 @@ class Planet(Component):
             )
 
         # BEER (PR 1.b): beam is either (a) derived from K for every planet
-        # (derivebeam), (b) free-fit for every planet (fitbeam),
+        # (beam_constrains_mass), (b) free-fit for every planet (fitbeam),
         # or (c) pinned at 0 everywhere (neither set -- transit model
         # unchanged). The two flags are not mutually exclusive: per
         # EXOFASTv2's step2pars.pro (~line 256), beam is computed whenever
-        # either is set, and derivebeam takes priority -- when
+        # either is set, and beam_constrains_mass takes priority -- when
         # both are set, beam is still derived from K, not fit freely.
         # Unlike thermal/reflect/ellipsoidal's per-band opt-in, this is a
         # single mode for the whole component: Component.add_parameter
@@ -281,29 +281,29 @@ class Planet(Component):
         # ("default") or a whole-component free/fixed tensor (via per-element
         # sigma), never a mix of the two within one parameter -- so a
         # per-planet mix of derived/free/off beam isn't supported yet.
-        any_derivebeam = any(self.derivebeam)
+        any_beam_constrains_mass = any(self.beam_constrains_mass)
         any_fitbeam = any(self.fitbeam)
-        if any_derivebeam and not has_orbit:
+        if any_beam_constrains_mass and not has_orbit:
             raise ValueError(
-                f"[{self.prefix}] derivebeam requires an orbit "
+                f"[{self.prefix}] beam_constrains_mass requires an orbit "
                 f"component (beam is derived from K, which requires the "
                 f"orbital elements)."
             )
         if (
             len(set(self.fitbeam)) > 1
-            or len(set(self.derivebeam)) > 1
+            or len(set(self.beam_constrains_mass)) > 1
         ):
             logger.warning(
-                f"[{self.prefix}] fitbeam/derivebeam differ "
+                f"[{self.prefix}] fitbeam/beam_constrains_mass differ "
                 f"across planets (fitbeam={self.fitbeam}, "
-                f"derivebeam={self.derivebeam}); beam "
+                f"beam_constrains_mass={self.beam_constrains_mass}); beam "
                 f"is a whole-component mode, not per-planet (see the "
                 f"comment above), so the resolved mode applies to every "
                 f"planet -- derived-from-K if any planet set "
-                f"derivebeam, else free-fit if any set "
+                f"beam_constrains_mass, else free-fit if any set "
                 f"fitbeam, else pinned at 0."
             )
-        if any_derivebeam:
+        if any_beam_constrains_mass:
             self.manifest["beam"] = "default"
         elif any_fitbeam:
             off = [i for i in range(self.n_elements) if not self.fitbeam[i]]
