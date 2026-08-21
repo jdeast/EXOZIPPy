@@ -416,6 +416,29 @@ mulensinstrument:
   # facility -- unit conversion, the LaTeX table, links, bound_scale -- works
   # on it.  Override per light curve in params.yaml; sigma must be nonzero
   # (an exact zeropoint would make f_source deterministic given the SED).
+  neighbor_flux:
+    # Third light: blend flux NOT supplied by any modeled star, in the data
+    # file's own flux system.  Exists because the blend-tie assumption
+    # f_blend = (modeled non-source stars) is violated as a RULE at Roman
+    # resolution: across the 44 Roman-fidelity DC2018 events the lens star
+    # supplies a median 15% of the blend, and unrelated line-of-sight stars
+    # dominate it in 80% of events.  With this term the tie becomes the
+    # physically correct inequality f_blend >= f_lens (positivity does the
+    # work).  Sampled ONLY on light curves with `sed_constrain_blend: true`
+    # -- with the tie off, f_blend is already free and a neighbor term is
+    # exactly degenerate with it in ANY light curve, finite-source or not
+    # (the light curve measures only the sum).  upper/initval are installed
+    # per light curve from the bootstrapped baseline flux, like the other
+    # flux amplitudes: the file's flux zeropoint is arbitrary.
+    lower: 0.0
+    upper: 1.0e+30
+    initval: 0.0
+    init_scale: 0.1
+    unit: ""
+    internal_unit: ""
+    description: "Neighbor blend flux"
+    latex: f_{\rm nb}
+
   zeropoint:
     # No `initval:` key, like every other DERIVED parameter in this file
     # (f_source, f_blend, s, ...): the expression IS the value.  It carried a

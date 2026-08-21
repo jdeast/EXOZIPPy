@@ -16,6 +16,7 @@ from exozippy.ephemeris import get_observer_position
 from exozippy.outputs.prose import get_collector
 from exozippy.skyframe import observer_sky_offset
 
+from ..parameterization import pin_unselected
 from . import mmexofast_support
 from .physics import (
     RHO_FLOOR,
@@ -1089,6 +1090,45 @@ class MulensInstrument(Instrument):
                 "force_node": True,
             }
 
+            # Neighbor third light, per light curve, sampled only where the
+            # blend tie is on: with the tie off f_blend is already free and
+            # this parameter is exactly degenerate with it (the light curve
+            # measures only the sum, finite-source or not).  With the tie on
+            # it converts f_blend = f_lens_pred -- an identity the DC2018
+            # Roman-fidelity sims violate in 80% of events (unrelated
+            # line-of-sight stars dominate the blend; the lens supplies a
+            # median 15% of it) -- into the correct inequality
+            # f_blend >= f_lens_pred, positivity doing the work.  upper and
+            # the selected elements' initval scale with the bootstrapped
+            # baseline flux, the same reasoning as _scale_flux_amplitudes:
+            # the file's flux zeropoint is arbitrary.  Pinned elements keep
+            # the defaults.yaml 0.0 (NaN initval = leave alone).
+            nb_selected = [
+                bool(c.get("sed_constrain_blend", False)) for c in self.config
+            ]
+            if any(nb_selected):
+                entry = pin_unselected(self.n_elements, nb_selected)
+                overrides = dict(entry.get("overrides") or {})
+                scale = np.asarray(f_total_init, dtype=float)
+                overrides["upper"] = (2.0 * scale).tolist()
+                overrides["initval"] = [
+                    (0.05 * float(sc) if sel else float("nan"))
+                    for sc, sel in zip(scale, nb_selected)
+                ]
+                entry["overrides"] = overrides
+                self.manifest["neighbor_flux"] = entry
+                # Preliminary whitening scale on the light curve's own flux
+                # scale (the defaults.yaml 0.1 is meaningless against an
+                # arbitrary flux zeropoint, and a scale >> span trips the
+                # on-the-bound nudge).  The startup probe measures the real
+                # scale; this only seeds it.
+                for i, sel in enumerate(nb_selected):
+                    if sel:
+                        self.config_manager.add_scale_hint(
+                            f"{self.prefix}.{i}.neighbor_flux",
+                            0.1 * float(scale[i]),
+                        )
+
     # Flux-space images of the magnitude caps these amplitudes used to carry:
     # a 5 mag GP amplitude is a factor 10**(0.4*5) = 100 in flux, and a 10 mag
     # outlier scale a factor 10**(0.4*10) = 1e4.  Applied per light curve
@@ -1465,10 +1505,23 @@ class MulensInstrument(Instrument):
                 other_indices, filter_keys[i], system
             )
             fb_i = pt.maximum(self.f_blend.value[i], 1e-30)
-            m_blend_inst = -2.5 * pt.log10(fb_i) + self.zeropoint.value[i]
+            # Predicted blend in the INSTRUMENT's flux system: the modeled
+            # non-source stars plus the fitted neighbor third light.  At
+            # neighbor_flux = 0 the residual is algebraically identical to
+            # the old m_blend_pred - m_blend_inst magnitude difference (same
+            # square), so a config without the neighbor term builds the same
+            # potential.  With it, positivity makes the tie one-sided: a
+            # blend BRIGHTER than the lens is absorbed by f_nb, a blend
+            # FAINTER than the lens still costs -- "the blend must contain
+            # at least the lens's light".
+            f_lens_inst = 10 ** (
+                -0.4 * (m_blend_pred - self.zeropoint.value[i])
+            )
+            f_pred = f_lens_inst + self.neighbor_flux.value[i]
+            resid = 2.5 * pt.log10(pt.maximum(f_pred, 1e-30) / fb_i)
             pm.Potential(
                 f"{self.prefix}.{name}.sed_blend_prior",
-                -0.5 * ((m_blend_pred - m_blend_inst) / blend_sigma) ** 2,
+                -0.5 * (resid / blend_sigma) ** 2,
             )
 
     def compile_plotters(self, model, system):
