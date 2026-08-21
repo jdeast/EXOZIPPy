@@ -1250,20 +1250,29 @@ class MulensInstrument(Instrument):
 
             # Predicted apparent mag of each locus row through the SED's
             # own BC grid (teff, logg, feh=0, av), at the assumed distance.
+            # ONE vectorized evaluate for the whole locus: a per-row
+            # .eval() meant 61 pytensor compiles per band per prepare, and
+            # under six xdist workers those serialized on the shared
+            # compiledir's FileLock until pytest-timeout killed the
+            # module fixture (ezsuite 15363115's deterministic errors).
             col = sed.filter_column(fk)
-            m_pred = []
-            for teff, radius, mass in self._ms_locus():
-                logg = 4.438 + np.log10(mass) - 2.0 * np.log10(radius)
-                coords = np.array([[teff, logg, 0.0, av]])
-                bc = float(
-                    np.asarray(sed.bc_interpolator.evaluate(coords).eval())[
-                        0, col
-                    ]
-                )
-                lbol = radius**2 * (teff / 5772.0) ** 4
-                mbol = 4.74 - 2.5 * np.log10(lbol)
-                m_pred.append(mbol - bc + 5.0 * np.log10(d_pc) - 5.0)
-            m_pred = np.asarray(m_pred)
+            locus = np.asarray(self._ms_locus(), dtype=float)
+            teff_v, radius_v, mass_v = locus[:, 0], locus[:, 1], locus[:, 2]
+            logg_v = 4.438 + np.log10(mass_v) - 2.0 * np.log10(radius_v)
+            coords = np.column_stack(
+                [
+                    teff_v,
+                    logg_v,
+                    np.zeros_like(teff_v),
+                    np.full_like(teff_v, av),
+                ]
+            )
+            bc_v = np.asarray(sed.bc_interpolator.evaluate(coords).eval())[
+                :, col
+            ]
+            lbol_v = radius_v**2 * (teff_v / 5772.0) ** 4
+            mbol_v = 4.74 - 2.5 * np.log10(lbol_v)
+            m_pred = mbol_v - bc_v + 5.0 * np.log10(d_pc) - 5.0
 
             if m_meas < m_pred[0]:
                 logger.warning(
