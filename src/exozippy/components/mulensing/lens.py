@@ -709,15 +709,32 @@ class Lens(Component):
         # reads this flag and derives the LENS star's pm = pm_source +
         # mu_rel (|J| = 1; see star.py and notes observable_coordinates).
         fitmurel = bool(self.config[0].get("fitmurel", False))
-        murel_entry = per_source() if fitmurel else per_source("default")
+
+        def murel_entry():
+            if not fitmurel:
+                return per_source("default")
+            # Sampled mode: start at 0 relative pm through the overrides
+            # channel (defaults.yaml deliberately carries no initval --
+            # the engine's default-armor would seed mu_rel = 0 into every
+            # config and break the t_E derivation chain), with a
+            # preliminary 1 mas/yr whitening scale.  The engine's mu_rel
+            # relation upgrades the start from any pm/mmexofast seeds.
+            entry = per_source()
+            entry["overrides"] = {"initval": [0.0] * self.n_sources}
+            return entry
+
+        if fitmurel:
+            for j in range(self.n_sources):
+                self.config_manager.add_scale_hint(f"lens.{j}.mu_ra_rel", 1.0)
+                self.config_manager.add_scale_hint(f"lens.{j}.mu_dec_rel", 1.0)
 
         self.manifest = {
             "t_0": per_source(),
             "u_0": per_source(),
             "pi_rel": per_source("default"),
             "theta_E": per_source("default"),
-            "mu_ra_rel": dict(murel_entry),
-            "mu_dec_rel": dict(murel_entry),
+            "mu_ra_rel": murel_entry(),
+            "mu_dec_rel": murel_entry(),
             "mu_rel_mag": per_source("default"),
             "mu_ra_rel_geo": per_source("default"),
             "mu_dec_rel_geo": per_source("default"),

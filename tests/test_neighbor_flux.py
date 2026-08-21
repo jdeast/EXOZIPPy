@@ -24,6 +24,26 @@ from exozippy.system import System
 _KMT_DIR = Path(__file__).parent.parent / "examples" / "KMT-2019-BLG-1806"
 
 
+_WORKDIR = None
+
+
+def _kmt_workdir():
+    """A private copy of the example dir for THIS test module.
+
+    Six xdist workers otherwise read and write (fitresults, mmexofast
+    cache, whitening state) one shared examples/KMT-2019-BLG-1806
+    concurrently -- the ezsuite-15362719 interference cluster.
+    """
+    global _WORKDIR
+    if _WORKDIR is None:
+        import shutil
+        import tempfile
+
+        _WORKDIR = Path(tempfile.mkdtemp(prefix="kmt_test_")) / "KMT"
+        shutil.copytree(_KMT_DIR, _WORKDIR)
+    return _WORKDIR
+
+
 def _load_kmt(constrain_blend_on=()):
     """Load the KMT-2019-BLG-1806 example config + params, optionally
     switching ``sed_constrains_blend: true`` on the named light curves."""
@@ -33,7 +53,7 @@ def _load_kmt(constrain_blend_on=()):
         pytest.skip("KMT-2019-BLG-1806 example not present")
 
     cwd = os.getcwd()
-    os.chdir(_KMT_DIR)
+    os.chdir(_kmt_workdir())
     try:
         with open("KMT-2019-BLG-1806.yaml") as f:
             config = yaml.safe_load(f)
@@ -60,7 +80,7 @@ def kmt_nb_system():
 
     system = _load_kmt(constrain_blend_on=("KMTC04",))
     cwd = os.getcwd()
-    os.chdir(_KMT_DIR)
+    os.chdir(_kmt_workdir())
     try:
         model = system.build_model()
     finally:

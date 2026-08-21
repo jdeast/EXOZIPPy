@@ -99,15 +99,15 @@ lens:
   mu_ra_rel:
     # Sampled (fitmurel: true) or derived (default).  fitmurel makes the
     # LC-measured relative pm the coordinate and derives the lens star's
-    # pm = pm_source + mu_rel instead (|J| = 1): the kinematic prior on
-    # the broad disk-or-bulge lens pm then acts on a derived quantity,
-    # instead of shaping a curved ridge through four sampled pm
-    # components.  initval/init_scale only matter in fitmurel mode (the
-    # engine's mu_rel relation back-solves seeds in both directions).
+    # pm = pm_source + mu_rel instead (|J| = 1).  NO initval here: a
+    # defaults.yaml initval is registered by the relaxation engine's
+    # default-armor for EVERY config, and a mu_rel = 0 seed broke the
+    # t_E = theta_E/mu_rel derivation chain everywhere (six-test suite
+    # regression, ezsuite 15362719).  The fitmurel start arrives through
+    # the lens manifest's overrides channel instead, which only exists
+    # when the mode is selected.
     lower: -10000.0
     upper: 10000.0
-    initval: 0.0
-    init_scale: 1.0
     unit: "mas/yr"
     internal_unit: "mas/yr"
     latex: "\\mu_{\\alpha,rel,helio}"
@@ -119,15 +119,15 @@ lens:
   mu_dec_rel:
     # Sampled (fitmurel: true) or derived (default).  fitmurel makes the
     # LC-measured relative pm the coordinate and derives the lens star's
-    # pm = pm_source + mu_rel instead (|J| = 1): the kinematic prior on
-    # the broad disk-or-bulge lens pm then acts on a derived quantity,
-    # instead of shaping a curved ridge through four sampled pm
-    # components.  initval/init_scale only matter in fitmurel mode (the
-    # engine's mu_rel relation back-solves seeds in both directions).
+    # pm = pm_source + mu_rel instead (|J| = 1).  NO initval here: a
+    # defaults.yaml initval is registered by the relaxation engine's
+    # default-armor for EVERY config, and a mu_rel = 0 seed broke the
+    # t_E = theta_E/mu_rel derivation chain everywhere (six-test suite
+    # regression, ezsuite 15362719).  The fitmurel start arrives through
+    # the lens manifest's overrides channel instead, which only exists
+    # when the mode is selected.
     lower: -10000.0
     upper: 10000.0
-    initval: 0.0
-    init_scale: 1.0
     unit: "mas/yr"
     internal_unit: "mas/yr"
     latex: "\\mu_{\\delta,rel,helio}"
