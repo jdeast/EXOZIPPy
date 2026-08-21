@@ -5,7 +5,7 @@ import pytensor.tensor as pt
 
 from ..manifest import interpret_manifest_entry
 from ..physics_registry import PHYSICS_REGISTRY
-from .parameter import ElementExpression, Parameter
+from .parameter import ElementExpression, OwnPrePatchRef, Parameter
 
 
 def in_topology(system, name):
@@ -555,9 +555,19 @@ class Component(ABC):
             for d in entry.dep_names(sel.config)
         ]
         nodes = [node for _d, node, _aligned in deps]
+        own_refs = [n for n in nodes if isinstance(n, OwnPrePatchRef)]
 
-        def full_expr(nodes=nodes):
-            return func(*nodes)
+        def full_expr(nodes=nodes, prepatch=None):
+            resolved = [
+                prepatch[pt.as_tensor_variable(n.idx.astype("int32"))]
+                if isinstance(n, OwnPrePatchRef)
+                else n
+                for n in nodes
+            ]
+            return func(*resolved)
+
+        if own_refs:
+            full_expr._own_ref_idx = np.concatenate([r.idx for r in own_refs])
 
         if sel.mask is None or bool(np.all(sel.mask)):
             return ElementExpression(
@@ -569,6 +579,19 @@ class Component(ABC):
         idx = np.nonzero(sel.mask)[0]
         sliced = []
         for d, node, aligned in deps:
+            if isinstance(node, OwnPrePatchRef):
+                # The sentinel's map has one entry per element of THIS
+                # parameter (enforced below via `aligned`); slice the
+                # INDEX ARRAY to the selected elements -- the tensor it
+                # points into does not exist yet.
+                if not aligned:
+                    raise ValueError(
+                        f"[{where}] same-parameter dep '{d}' must carry "
+                        f"an index map with one entry per element of "
+                        f"this parameter."
+                    )
+                sliced.append(OwnPrePatchRef(node.idx[idx]))
+                continue
             if getattr(node, "ndim", 0) == 0:
                 sliced.append(node)  # a scalar applies to every element
                 continue
@@ -589,11 +612,28 @@ class Component(ABC):
                 )
             sliced.append(node[pt.as_tensor_variable(idx.astype("int32"))])
 
-        def sliced_expr(sliced=sliced):
-            return func(*sliced)
+        own_sliced = [s for s in sliced if isinstance(s, OwnPrePatchRef)]
+
+        def sliced_expr(sliced=sliced, prepatch=None):
+            resolved = [
+                prepatch[pt.as_tensor_variable(s.idx.astype("int32"))]
+                if isinstance(s, OwnPrePatchRef)
+                else s
+                for s in sliced
+            ]
+            return func(*resolved)
+
+        if own_sliced:
+            sliced_expr._own_ref_idx = np.concatenate(
+                [s.idx for s in own_sliced]
+            )
 
         register = getattr(system, "register_element_slice_check", None)
-        if callable(register):
+        if callable(register) and not own_refs:
+            # An own-ref expression cannot be evaluated without the
+            # parameter's own pre-patch tensor, which the slice checker
+            # does not have; correctness there is covered by the
+            # sampled-elements-only guard in build_pymc instead.
             register(where, func_name, idx, sliced_expr, full_expr)
         return ElementExpression(
             mask=sel.mask,
@@ -652,6 +692,32 @@ class Component(ABC):
             raise ValueError(
                 f"[{where}] Component '{ext_comp_name}' is not active."
             )
+
+        # A dep naming the parameter BEING BUILT (fitmurel's
+        # pm[lens] <- pm[source] + mu_rel) cannot recurse into
+        # add_parameter -- the tensor does not exist yet.  Return an
+        # OwnPrePatchRef sentinel; _patch_elements substitutes the
+        # pre-patch tensor's elements at patch time, and build_pymc
+        # refuses any referenced element that is not SAMPLED (only
+        # sampled elements are final pre-patch).  `where` is
+        # f"{prefix}.{param_name}" at both call sites, which is what
+        # identifies the parameter under construction.
+        building = None
+        prefix_dot = f"{self.prefix}."
+        if where.startswith(prefix_dot):
+            building = where[len(prefix_dot) :]
+        if ext_comp is self and ext_param_name == building:
+            if custom_slice is None:
+                raise ValueError(
+                    f"[{where}] same-parameter element dep '{d}' needs "
+                    f"an explicit index map ('{d}[<map_name>]', one "
+                    f"entry per element of this parameter): without "
+                    f"one there is no way to say WHICH of its own "
+                    f"elements the expression reads."
+                )
+            idx = np.asarray(getattr(self, custom_slice), dtype=int)
+            aligned = n_elements is not None and idx.size == int(n_elements)
+            return d, OwnPrePatchRef(idx), aligned
 
         # Ensure the dependency node is built lazily on demand
         if not self._has_built_parameter(ext_comp, ext_param_name):

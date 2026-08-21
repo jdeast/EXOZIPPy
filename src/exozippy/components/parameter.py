@@ -567,6 +567,24 @@ class PriorContribution:
     support_phrase: str = "normalized on"
 
 
+class OwnPrePatchRef:
+    """Sentinel dependency: element(s) of the parameter BEING BUILT.
+
+    A same-parameter element dep (fitmurel's pm[lens] <- pm[source] +
+    mu_rel) cannot be resolved to a node at wiring time -- the parameter's
+    tensor does not exist yet, and as a build-order edge it would be an
+    unorderable self-loop (graph.py skips it).  Component._resolve_dep_node
+    returns this sentinel instead; Parameter._patch_elements hands the
+    expression closure the PRE-PATCH tensor at patch time, whose SAMPLED
+    elements are already final (the same guarantee the same-parameter
+    element LINKS rely on).  build_pymc refuses a reference to any
+    non-sampled element -- those slots hold placeholders or pins.
+    """
+
+    def __init__(self, idx):
+        self.idx = np.asarray(idx, dtype=int)
+
+
 @dataclass(frozen=True)
 class ElementExpression:
     """One expression and the ELEMENTS of a parameter vector it supplies.
@@ -1314,7 +1332,19 @@ class Parameter:
         scalar result broadcasts (a one-element mask, or physics that returns a
         scalar for a whole group).
         """
-        val = expr() if callable(expr) else expr
+        if callable(expr):
+            # A closure carrying same-parameter element deps
+            # (OwnPrePatchRef) declares a `prepatch` kwarg and
+            # substitutes prepatch[idx] for the sentinels; every other
+            # closure keeps its historical zero-argument signature.
+            import inspect
+
+            if "prepatch" in inspect.signature(expr).parameters:
+                val = expr(prepatch=phys_val)
+            else:
+                val = expr()
+        else:
+            val = expr
         if hasattr(val, "value") and hasattr(val, "unit"):
             val = (
                 val.value
@@ -1938,6 +1968,37 @@ class Parameter:
             # see finalize_deferred.  Their expressions read quantities that,
             # on other elements, are derived from THIS parameter, so they can
             # only be built once every parameter exists.
+            # Same-parameter element deps read the PRE-PATCH tensor,
+            # which is only final on SAMPLED elements: derived/reported
+            # slots hold placeholders and inactive ones bookkeeping pins.
+            # Refuse a reference to any of those, per element, before
+            # anything is assembled.  (The deferred/reported pass patches
+            # against the FINAL tensor and carries no such refs today.)
+            _all_masks = [
+                np.asarray(m, dtype=bool) for m, _e, _o, _s in expr_specs
+            ]
+            _non_sampled = (
+                self._inactive_mask(_all_masks[0].size)
+                if _all_masks
+                else None
+            )
+            for _m in _all_masks:
+                _non_sampled = _non_sampled | _m
+            for _m, _expr, _o, _s in expr_specs if _all_masks else ():
+                _own = getattr(_expr, "_own_ref_idx", None)
+                if _own is None:
+                    continue
+                _own = np.asarray(_own, dtype=int)
+                if _non_sampled[_own].any():
+                    bad = sorted(set(_own[_non_sampled[_own]].tolist()))
+                    raise ValueError(
+                        f"Parameter '{self.label}': a same-parameter "
+                        f"element dep references element(s) {bad}, "
+                        f"which are not SAMPLED -- the pre-patch tensor "
+                        f"is only final on sampled elements.  Reference "
+                        f"sampled elements only, or derive through a "
+                        f"separate parameter."
+                    )
             for mask, expr, output_only, sliced in expr_specs:
                 if output_only:
                     continue
