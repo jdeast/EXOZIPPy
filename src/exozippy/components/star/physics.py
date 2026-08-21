@@ -58,3 +58,15 @@ def calc_parallax(distance):
 @register_physics
 def calc_absmag(appmag, distance):
     return appmag - 5.0 * pt.log10(distance) + 5.0
+
+
+@register_physics
+def calc_pm_from_murel(pm_source, mu_rel_component):
+    # fitmurel inverse (one component; ra and dec each call it): the LENS
+    # star's pm derived from the sampled source pm and the sampled
+    # heliocentric relative pm.  Linear, |J| = 1, so no correction
+    # potential accompanies the swap.  pm_source arrives through a
+    # same-parameter element dep (star.pm_*[murel_source_map]), i.e. the
+    # pre-patch tensor of the very parameter being built -- see
+    # OwnPrePatchRef in components/parameter.py.
+    return pm_source + mu_rel_component

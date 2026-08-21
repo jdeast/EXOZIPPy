@@ -97,8 +97,17 @@ lens:
   # prior and Gaia priors constrain).  The *_geo trio below converts to the
   # geocentric frame at t0_par for the light-curve chain.
   mu_ra_rel:
+    # Sampled (fitmurel: true) or derived (default).  fitmurel makes the
+    # LC-measured relative pm the coordinate and derives the lens star's
+    # pm = pm_source + mu_rel instead (|J| = 1): the kinematic prior on
+    # the broad disk-or-bulge lens pm then acts on a derived quantity,
+    # instead of shaping a curved ridge through four sampled pm
+    # components.  initval/init_scale only matter in fitmurel mode (the
+    # engine's mu_rel relation back-solves seeds in both directions).
     lower: -10000.0
     upper: 10000.0
+    initval: 0.0
+    init_scale: 1.0
     unit: "mas/yr"
     internal_unit: "mas/yr"
     latex: "\\mu_{\\alpha,rel,helio}"
@@ -108,8 +117,17 @@ lens:
         func_name: "calc_mu_ra_rel"
         deps: [ "star.pm_ra[lens_map]", "star.pm_ra[source_map]" ]
   mu_dec_rel:
+    # Sampled (fitmurel: true) or derived (default).  fitmurel makes the
+    # LC-measured relative pm the coordinate and derives the lens star's
+    # pm = pm_source + mu_rel instead (|J| = 1): the kinematic prior on
+    # the broad disk-or-bulge lens pm then acts on a derived quantity,
+    # instead of shaping a curved ridge through four sampled pm
+    # components.  initval/init_scale only matter in fitmurel mode (the
+    # engine's mu_rel relation back-solves seeds in both directions).
     lower: -10000.0
     upper: 10000.0
+    initval: 0.0
+    init_scale: 1.0
     unit: "mas/yr"
     internal_unit: "mas/yr"
     latex: "\\mu_{\\delta,rel,helio}"

@@ -348,6 +348,21 @@ class Lens(Component):
                 "doc": "Index or name of the source star. Default 1.",
             },
             {
+                "key": "fitmurel",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Sample the heliocentric lens-source relative proper "
+                    "motion (mu_ra_rel/mu_dec_rel) directly -- the "
+                    "combination the light curve measures -- and derive "
+                    "the lens star's pm as pm_source + mu_rel, instead of "
+                    "sampling both stars' pm and deriving mu_rel. A "
+                    "coordinate choice like fitvcve: same joint density "
+                    "(|J| = 1), better-conditioned axes. Default False."
+                ),
+            },
+            {
                 "key": "star_constrains_rho",
                 "kind": "option",
                 "accepts": None,
@@ -689,13 +704,20 @@ class Lens(Component):
                 entry["names"] = src_names
             return entry
 
+        # fitmurel (coordinate choice, fitvcve family): sample the
+        # LC-measured relative proper motion directly; the star component
+        # reads this flag and derives the LENS star's pm = pm_source +
+        # mu_rel (|J| = 1; see star.py and notes observable_coordinates).
+        fitmurel = bool(self.config[0].get("fitmurel", False))
+        murel_entry = per_source() if fitmurel else per_source("default")
+
         self.manifest = {
             "t_0": per_source(),
             "u_0": per_source(),
             "pi_rel": per_source("default"),
             "theta_E": per_source("default"),
-            "mu_ra_rel": per_source("default"),
-            "mu_dec_rel": per_source("default"),
+            "mu_ra_rel": dict(murel_entry),
+            "mu_dec_rel": dict(murel_entry),
             "mu_rel_mag": per_source("default"),
             "mu_ra_rel_geo": per_source("default"),
             "mu_dec_rel_geo": per_source("default"),
