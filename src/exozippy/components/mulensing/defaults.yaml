@@ -181,6 +181,46 @@ lens:
       default:
         func_name: "calc_rho"
         deps: [ "star.radius[source_map]", "star.distance[source_map]", "theta_E" ]
+      # Selected by `rho_free: true` on the lens: rho becomes the light
+      # curve's own parameter (via the sampled log_rho) and the stellar
+      # chain's prediction moves to rho_pred, so the two never silently
+      # trade against each other (see rho_pred's note).
+      from_log_rho:
+        func_name: "calc_rho_from_log"
+        deps: [ "log_rho" ]
+  log_rho:
+    # Sampled ONLY when the lens sets `rho_free: true`; otherwise absent
+    # from the manifest entirely.  Log coordinate because candidate rho
+    # spans decades (mirrors log_s/s and planet log_q).  Upper mirrors
+    # rho's own soft cap (10); the lower bound sits far below any
+    # detectable finite-source effect, where the likelihood is flat in
+    # log_rho and the fit degrades gracefully to point-source.
+    lower: -6.0
+    upper: 1.0
+    initval: -2.0
+    init_scale: 0.1
+    unit: ""
+    internal_unit: ""
+    latex: "\\log\\rho"
+    description: "log10 source radius"
+  rho_pred:
+    # The stellar chain's prediction theta_star/theta_E, reported ONLY when
+    # `rho_free: true` severs the rho = theta_star/theta_E identity (with
+    # the identity intact this would duplicate rho's row).  Publishing both
+    # makes the pull between the light curve's rho and the chain's rho a
+    # visible number: on DC2018 event 128 the identity + the event-rate
+    # prior + the Hogg mixture silently resolved a 601-nat disagreement in
+    # the prior's favor (rho low by ~8x); a reported rho vs rho_pred pull
+    # is the diagnostic that failure mode cannot hide from.
+    upper: 10.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\rho_{\\rm pred}"
+    description: "chain-predicted rho"
+    expressions:
+      default:
+        func_name: "calc_rho"
+        deps: [ "star.radius[source_map]", "star.distance[source_map]", "theta_E" ]
   mlens_total:
     lower: 0.0
     upper: 500.0
