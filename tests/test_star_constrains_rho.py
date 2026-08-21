@@ -142,3 +142,32 @@ def test_rho_pred_reports_the_chain(kmt_severed):
     )
     assert not np.isclose(rho2, rho, rtol=1e-3)
     assert np.isclose(rho_pred2, rho_pred, rtol=1e-12)
+
+
+def test_soft_tie_composes_with_link_machinery():
+    """
+    Given star_constrains_rho: false plus a params-file mu link from rho to
+    rho_pred,
+    When the model is built,
+    Then rho is still sampled (log_rho), the link adds a Gaussian potential
+    on rho - rho_pred, and the start logp is finite -- the severed pair plus
+    the existing link machinery IS the soft (dual-constraint) tie, no new
+    code.  The initval stays NUMERIC: an initval link would replace the rho
+    seed and can trip the MMEXOFAST sufficiency probe into an auto-run.
+    """
+    system, model = _load_kmt(
+        sever=True,
+        extra_params={
+            "lens.Lens.rho": {
+                "initval": 1.1022118088011409e-08,
+                "mu": "lens.Lens.rho_pred",
+                "sigma": 0.002,
+            }
+        },
+        build=True,
+    )
+    pot_names = [p.name for p in model.potentials]
+    assert "link_mu.lens.rho.0" in pot_names
+    assert "lens.log_rho_raw" in [v.name for v in model.value_vars]
+    point = model.initial_point()
+    assert np.isfinite(float(model.compile_logp()(point)))
