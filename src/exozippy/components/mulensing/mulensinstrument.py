@@ -1129,6 +1129,185 @@ class MulensInstrument(Instrument):
                             0.1 * float(scale[i]),
                         )
 
+            self._seed_source_star_from_flux(system)
+
+    # Approximate main-sequence dwarf locus (Pecaut & Mamajek 2013),
+    # brightest first: (teff K, radius Rsun, mass Msun).  Seeds only -- a
+    # 10% error here moves a START value, nothing else.
+    _MS_LOCUS = [
+        (9700.0, 2.10, 2.10),
+        (8100.0, 1.80, 1.80),
+        (7220.0, 1.60, 1.55),
+        (6510.0, 1.40, 1.33),
+        (5930.0, 1.10, 1.06),
+        (5770.0, 1.00, 1.02),
+        (5490.0, 0.94, 0.94),
+        (5270.0, 0.88, 0.87),
+        (4830.0, 0.78, 0.78),
+        (4440.0, 0.70, 0.70),
+        (3870.0, 0.60, 0.57),
+        (3550.0, 0.45, 0.44),
+        (3210.0, 0.27, 0.23),
+    ]
+
+    def _user_or_default(self, paths, field, default):
+        """First user_params value for any spelling in ``paths``."""
+        up = self.config_manager.user_params
+        for path in paths:
+            entry = up.get(path)
+            if isinstance(entry, dict) and entry.get(field) is not None:
+                return float(entry[field])
+            if entry is not None and not isinstance(entry, dict):
+                return float(entry)
+        return default
+
+    def _seed_source_star_from_flux(self, system):
+        """Stage 3: seed the SOURCE star's stellar start from its own flux.
+
+        Without this, a microlensing-only source starts as an exact solar
+        clone (the star defaults), even though its apparent magnitude is
+        MEASURED: the bootstrapped baseline f_source through the light
+        curve's photometric zeropoint.  On DC2018 event 128 the solar-clone
+        start let the polish/sampler walk into a swapped configuration
+        (M-dwarf source, G-star lens) that the flux data disfavor.
+
+        Chain: m_source = zp_mu - 2.5*log10(f_source_init); assume the
+        source is a main-sequence dwarf at the event's source distance
+        (user initval, an existing engine hint, or 8 kpc -- microlensing
+        sources are bulge stars by construction of the event rate); scan
+        the approximate dwarf locus through the SED's own BC grid to find
+        the (teff, radius, mass) whose predicted apparent magnitude
+        matches; push RANK_DERIVED_DATA hints (they override defaults and
+        yield to the user, like every data-derived start).
+
+        The zeropoint mu is a calibration statement whether the user wrote
+        it or defaults.yaml's 0.0 did ("flux is 10**(-0.4 m)").  When that
+        statement is wrong, the measured magnitude is absurd and the guard
+        below skips seeding with a warning -- which doubles as the alarm
+        that the zeropoint prior does not describe the file.
+
+        A source BRIGHTER than the locus top is likely a giant (common for
+        bulge sources): no seed, warned, the defaults stand.  Multi-source
+        events are skipped -- f_source is the SUM and splitting it needs
+        q_flux, which has its own hint path.
+        """
+        if getattr(self, "_n_sources", 1) > 1:
+            return
+        sed = system.sed
+        filter_keys = self._sed_filter_keys(system)
+        src = int(system.lens.source_map[0])
+        src_name = system.star.names[src]
+
+        d_pc = self._user_or_default(
+            [f"star.{src}.distance", f"star.{src_name}.distance"],
+            "initval",
+            None,
+        )
+        if d_pc is None:
+            d_pc = self.config_manager.hints.get(f"star.{src}.distance")
+        if d_pc is None:
+            d_pc = 8000.0
+            logger.info(
+                f"source-flux seeding: no distance start for star "
+                f"'{src_name}'; assuming a bulge source at {d_pc:.0f} pc."
+            )
+        av = self._user_or_default(
+            [f"star.{src}.av", f"star.{src_name}.av"], "initval", 0.0
+        )
+
+        masses = []
+        for i, name in enumerate(self.names):
+            fk = filter_keys[i]
+            if fk is None:
+                continue
+            zp_mu = self._user_or_default(
+                [
+                    f"{self.prefix}.{name}.zeropoint",
+                    f"{self.prefix}.{i}.zeropoint",
+                ],
+                "mu",
+                0.0,
+            )
+            f_src = float(self.fs_init[i]) * float(self.q_source_init[i])
+            if f_src <= 0:
+                continue
+            m_meas = zp_mu - 2.5 * np.log10(f_src)
+
+            # Predicted apparent mag of each locus row through the SED's
+            # own BC grid (teff, logg, feh=0, av), at the assumed distance.
+            col = sed.filter_column(fk)
+            m_pred = []
+            for teff, radius, mass in self._MS_LOCUS:
+                logg = 4.438 + np.log10(mass) - 2.0 * np.log10(radius)
+                coords = np.array([[teff, logg, 0.0, av]])
+                bc = float(
+                    np.asarray(sed.bc_interpolator.evaluate(coords).eval())[
+                        0, col
+                    ]
+                )
+                lbol = radius**2 * (teff / 5772.0) ** 4
+                mbol = 4.74 - 2.5 * np.log10(lbol)
+                m_pred.append(mbol - bc + 5.0 * np.log10(d_pc) - 5.0)
+            m_pred = np.asarray(m_pred)
+
+            if m_meas < m_pred[0]:
+                logger.warning(
+                    f"source-flux seeding ({name}): the measured source "
+                    f"magnitude {m_meas:.2f} is BRIGHTER than the whole "
+                    f"dwarf locus ({m_pred[0]:.2f} at its top, "
+                    f"{d_pc:.0f} pc): a giant source, or a zeropoint "
+                    f"prior that does not describe this file. Not seeding "
+                    f"from this light curve."
+                )
+                continue
+            if m_meas > m_pred[-1] + 3.0:
+                logger.warning(
+                    f"source-flux seeding ({name}): measured source mag "
+                    f"{m_meas:.2f} is far fainter than the locus bottom "
+                    f"({m_pred[-1]:.2f}): a sub-stellar source makes no "
+                    f"sense, so the zeropoint prior likely does not "
+                    f"describe this file. Not seeding from this light "
+                    f"curve."
+                )
+                continue
+            if m_meas > m_pred[-1]:
+                logger.warning(
+                    f"source-flux seeding ({name}): measured source mag "
+                    f"{m_meas:.2f} is fainter than the locus bottom "
+                    f"({m_pred[-1]:.2f}); seeding at the faint end."
+                )
+                m_meas = m_pred[-1]
+            masses.append(
+                float(
+                    np.interp(
+                        m_meas, m_pred, [row[2] for row in self._MS_LOCUS]
+                    )
+                )
+            )
+
+        if not masses:
+            return
+        mass = float(np.median(masses))
+        loci = np.array(self._MS_LOCUS)[::-1]  # ascending mass for interp
+        teff = float(np.interp(mass, loci[:, 2], loci[:, 0]))
+        radius = float(np.interp(mass, loci[:, 2], loci[:, 1]))
+        logger.info(
+            f"source-flux seeding: star '{src_name}' starts as a "
+            f"{mass:.2f} Msun / {radius:.2f} Rsun / {teff:.0f} K dwarf "
+            f"(from f_source through the zeropoint at {d_pc:.0f} pc), "
+            f"replacing the solar-clone default."
+        )
+        for param, val in (
+            ("logmass", float(np.log10(mass))),
+            ("teff", teff),
+            ("radius", radius),
+            ("teffsed", teff),
+            ("radiussed", radius),
+        ):
+            self.config_manager.add_hint(
+                f"star.{src}.{param}", val, rank=RANK_DERIVED_DATA
+            )
+
     # Flux-space images of the magnitude caps these amplitudes used to carry:
     # a 5 mag GP amplitude is a factor 10**(0.4*5) = 100 in flux, and a 10 mag
     # outlier scale a factor 10**(0.4*10) = 1e4.  Applied per light curve
