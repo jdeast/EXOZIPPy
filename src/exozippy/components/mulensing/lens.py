@@ -363,7 +363,7 @@ class Lens(Component):
                     "instead of silently arbitrated. Requires "
                     "finite_source. Same vocabulary as the planet "
                     "component's beam_constrains_mass and the "
-                    "instrument's sed_constrain_blend."
+                    "instrument's sed_constrains_blend. A tie is a physics LINK, not a one-way assignment: information flows toward whichever side is less constrained elsewhere (components.md, 'Config flag vocabulary')."
                 ),
             },
             {

@@ -5,7 +5,7 @@ The parameter exists because the blend-tie assumption
 ``f_blend = SED-predicted flux of the modeled non-source stars`` is violated
 as a rule at Roman resolution (unrelated line-of-sight stars dominate the
 blend in most simulated events).  It is sampled ONLY on light curves with
-``sed_constrain_blend: true``: with the tie off, f_blend is already free and
+``sed_constrains_blend: true``: with the tie off, f_blend is already free and
 a neighbor term is exactly degenerate with it (the light curve measures only
 the sum, finite-source or not).  With the tie on, positivity of the neighbor
 flux converts the tie from the equality ``f_blend = f_lens_pred`` into the
@@ -26,7 +26,7 @@ _KMT_DIR = Path(__file__).parent.parent / "examples" / "KMT-2019-BLG-1806"
 
 def _load_kmt(constrain_blend_on=()):
     """Load the KMT-2019-BLG-1806 example config + params, optionally
-    switching ``sed_constrain_blend: true`` on the named light curves."""
+    switching ``sed_constrains_blend: true`` on the named light curves."""
     import os
 
     if not _KMT_DIR.is_dir():
@@ -43,7 +43,7 @@ def _load_kmt(constrain_blend_on=()):
             config.pop(k, None)
         for entry in config["mulensinstrument"]:
             if entry["name"] in constrain_blend_on:
-                entry["sed_constrain_blend"] = True
+                entry["sed_constrains_blend"] = True
         system = System(config, user_params=user_params)
         system.prepare()
         return system
@@ -53,7 +53,7 @@ def _load_kmt(constrain_blend_on=()):
 
 @pytest.fixture(scope="module")
 def kmt_nb_system():
-    """Given the KMT example with ``sed_constrain_blend: true`` on KMTC04
+    """Given the KMT example with ``sed_constrains_blend: true`` on KMTC04
     only, when the system is prepared and built, provide
     (system, model, initial point)."""
     import os
@@ -77,7 +77,7 @@ def _eval(model, node, point):
 
 def test_no_gate_no_parameter():
     """
-    Given the shipped KMT config (no sed_constrain_blend anywhere),
+    Given the shipped KMT config (no sed_constrains_blend anywhere),
     When the system is prepared,
     Then neighbor_flux is not declared at all -- the parameter only exists
     where the blend tie makes it identifiable.
@@ -88,7 +88,7 @@ def test_no_gate_no_parameter():
 
 def test_gated_manifest_pins_and_scales(kmt_nb_system):
     """
-    Given sed_constrain_blend on KMTC04 only,
+    Given sed_constrains_blend on KMTC04 only,
     When the model is built,
     Then neighbor_flux element 0 is sampled and elements 1-2 are pinned at
     the defaults.yaml 0.0, and upper/initval scale with each light curve's

@@ -464,7 +464,7 @@ mulensinstrument:
     # supplies a median 15% of the blend, and unrelated line-of-sight stars
     # dominate it in 80% of events.  With this term the tie becomes the
     # physically correct inequality f_blend >= f_lens (positivity does the
-    # work).  Sampled ONLY on light curves with `sed_constrain_blend: true`
+    # work).  Sampled ONLY on light curves with `sed_constrains_blend: true`
     # -- with the tie off, f_blend is already free and a neighbor term is
     # exactly degenerate with it in ANY light curve, finite-source or not
     # (the light curve measures only the sum).  upper/initval are installed

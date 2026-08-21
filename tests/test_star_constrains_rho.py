@@ -11,7 +11,7 @@ a silently resolved tension.  Default true: rho stays the derived identity
 and neither log_rho nor rho_pred exists.
 
 Vocabulary matches the planet component's beam_constrains_mass and the
-instrument's sed_constrain_blend (X_constrains_Y = the tie is on).
+instrument's sed_constrains_blend (X_constrains_Y = the tie is on).
 """
 
 from pathlib import Path

@@ -105,7 +105,11 @@ class Planet(Component):
                     "the RV semi-amplitude K (Faigler & Mazeh 2011 eq. 1, "
                     "bolometric approximation) instead of fitting it "
                     "freely -- ties the photometric beaming signal to the "
-                    "same mass/K driving the RV model. Default False."
+                    "same mass/K driving the RV model. Default False. "
+                    "A tie is a physics LINK, not a one-way assignment: "
+                    "information flows toward whichever side is less "
+                    "constrained elsewhere (components.md, 'Config flag "
+                    "vocabulary')."
                 ),
             },
             {

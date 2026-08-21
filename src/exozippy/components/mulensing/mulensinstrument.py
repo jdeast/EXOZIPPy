@@ -145,13 +145,13 @@ class MulensInstrument(Instrument):
                 "doc": "Name of the band: block associated with this light curve.",
             },
             {
-                "key": "sed_constrain_blend",
+                "key": "sed_constrains_blend",
                 "kind": "option",
                 "accepts": [True, False],
                 "required": False,
                 "doc": (
                     "When an SED is present, also tie f_blend to the "
-                    "SED-predicted flux. Default false."
+                    "SED-predicted flux. Default false. A tie is a physics LINK, not a one-way assignment: information flows toward whichever side is less constrained elsewhere (components.md, 'Config flag vocabulary')."
                 ),
             },
             {
@@ -161,7 +161,7 @@ class MulensInstrument(Instrument):
                 "required": False,
                 "doc": (
                     "Gaussian width (mag) of the SED f_blend constraint when "
-                    "sed_constrain_blend is set. Default 0.2."
+                    "sed_constrains_blend is set. Default 0.2."
                 ),
             },
             {
@@ -1105,7 +1105,7 @@ class MulensInstrument(Instrument):
             # the file's flux zeropoint is arbitrary.  Pinned elements keep
             # the defaults.yaml 0.0 (NaN initval = leave alone).
             nb_selected = [
-                bool(c.get("sed_constrain_blend", False)) for c in self.config
+                bool(c.get("sed_constrains_blend", False)) for c in self.config
             ]
             if any(nb_selected):
                 entry = pin_unselected(self.n_elements, nb_selected)
@@ -1682,7 +1682,7 @@ class MulensInstrument(Instrument):
         flux-ratio (q_flux) constraint is future work.
 
         What remains here at stage 7 is the opt-in blend tie:
-        `sed_constrain_blend: true` additionally ties f_blend to the
+        `sed_constrains_blend: true` additionally ties f_blend to the
         SED-predicted blend of the modeled non-source stars through the same
         zeropoint (Gaussian potential with `sed_blend_sigma`, default 0.2
         mag). f_blend also contains any unrelated field stars, so leave this
@@ -1697,11 +1697,11 @@ class MulensInstrument(Instrument):
         for i, name in enumerate(self.names):
             if filter_keys[i] is None:
                 continue
-            if not self.config[i].get("sed_constrain_blend", False):
+            if not self.config[i].get("sed_constrains_blend", False):
                 continue
             if not other_indices:
                 logger.warning(
-                    f"mulensinstrument {name}: sed_constrain_blend is "
+                    f"mulensinstrument {name}: sed_constrains_blend is "
                     f"set but every modeled star is a source; skipping."
                 )
                 continue
