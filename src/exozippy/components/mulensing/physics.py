@@ -458,6 +458,13 @@ def calc_alpha(xalpha, yalpha):
 
 
 @register_physics
+def calc_pi_rel_from_log(log_pi_rel):
+    # Sampled coordinate for `fitpirel: true` lenses (swap 2): pi_rel
+    # spans decades, so the free coordinate is log10(pi_rel).
+    return pt.power(10.0, log_pi_rel)
+
+
+@register_physics
 def calc_rho_from_log(log_rho):
     # Sampled coordinate for `star_constrains_rho: false` lenses: rho spans decades
     # (1e-4 .. 0.5 across published events), so the free coordinate is

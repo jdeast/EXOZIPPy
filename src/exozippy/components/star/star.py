@@ -863,6 +863,29 @@ class Star(Component):
         self.murel_traj_map = np.zeros(n, dtype=int)
         return {"expr_key": {"from_mulens_murel": [int(l_idx)]}}
 
+    def _distance_manifest_entry(self, system):
+        """distance entry: sampled everywhere, except that a single-source
+        lens with `fitpirel: true` flips its PRIMARY lens star's element to
+        derived, D_l = 1000/(pi_rel + 1000/D_s) -- swap 2 of the surgical
+        coordinate plan.  Same staging and maps as _pm_manifest_entry; the
+        map builder there runs first when both flags are set.
+        """
+        lens = getattr(system, "lens", None)
+        if lens is None or not getattr(lens, "lens_bodies", None):
+            return None
+        if not bool(lens.config[0].get("fitpirel", False)):
+            return None
+        if int(getattr(lens, "n_sources", 1)) > 1:
+            return None  # lens.py warns; the flag is ignored there too
+        l_type, l_idx = lens.lens_bodies[0][0]
+        s_type, s_idx = lens.source_bodies[0][0]
+        if l_type != "star" or s_type != "star":
+            return None
+        n = self.n_elements
+        self.murel_source_map = np.full(n, int(s_idx), dtype=int)
+        self.murel_traj_map = np.zeros(n, dtype=int)
+        return {"expr_key": {"from_mulens_pirel": [int(l_idx)]}}
+
     def register_parameters(self, system):
         """Stage 3: Declare the manifest and push to ConfigManager."""
 
@@ -989,7 +1012,7 @@ class Star(Component):
                     "dec": None,
                     "pm_ra": self._pm_manifest_entry(system),
                     "pm_dec": self._pm_manifest_entry(system),
-                    "distance": None,
+                    "distance": self._distance_manifest_entry(system),
                 }
             )
         elif astrom_modes:

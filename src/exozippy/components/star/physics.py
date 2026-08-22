@@ -70,3 +70,16 @@ def calc_pm_from_murel(pm_source, mu_rel_component):
     # pre-patch tensor of the very parameter being built -- see
     # OwnPrePatchRef in components/parameter.py.
     return pm_source + mu_rel_component
+
+
+@register_physics
+def calc_dl_from_pirel(d_source, pi_rel):
+    # fitpirel inverse (swap 2): the LENS star's distance derived from
+    # the sampled log-relative-parallax and the sampled source distance.
+    # pi_rel[mas] = 1000/D_l - 1000/D_s  =>  D_l = 1000/(pi_rel + 1000/D_s),
+    # automatically 0 < D_l < D_s for pi_rel > 0 (the self-guarding map).
+    # d_source arrives through a same-parameter element dep
+    # (star.distance[murel_source_map]); see OwnPrePatchRef.
+    # NONLINEAR: the |dD_l/dlog_pi_rel| Jacobian potential lives in
+    # Lens.build_likelihood (unlike fitmurel's |J| = 1 swap).
+    return 1000.0 / (pi_rel + 1000.0 / d_source)

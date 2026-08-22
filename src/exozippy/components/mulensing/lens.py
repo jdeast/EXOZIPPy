@@ -363,6 +363,24 @@ class Lens(Component):
                 ),
             },
             {
+                "key": "fitpirel",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Sample the lens-source relative parallax directly (as "
+                    "log_pi_rel) -- the combination the light curve "
+                    "measures -- and derive the lens star's distance as "
+                    "D_l = 1000/(pi_rel + 1000/D_s), automatically inside "
+                    "(0, D_s). A coordinate choice like fitvcve; the "
+                    "nonlinear map's Jacobian potential is added in "
+                    "build_likelihood so the joint density is unchanged. "
+                    "Single-source lenses only (per-source pi_rel would "
+                    "overdetermine the shared lens distance). "
+                    "Default False."
+                ),
+            },
+            {
                 "key": "star_constrains_rho",
                 "kind": "option",
                 "accepts": None,
@@ -728,13 +746,30 @@ class Lens(Component):
                 self.config_manager.add_scale_hint(f"lens.{j}.mu_ra_rel", 1.0)
                 self.config_manager.add_scale_hint(f"lens.{j}.mu_dec_rel", 1.0)
 
+        # fitpirel (swap 2): sample log_pi_rel, derive pi_rel from it, and
+        # the star component derives the lens distance (see star.py).
+        # Single-source only: per-source pi_rel would overdetermine the
+        # shared lens distance.
+        fitpirel = bool(self.config[0].get("fitpirel", False))
+        if fitpirel and self.n_sources > 1:
+            logger.warning(
+                "lens: fitpirel is set on a multi-source event -- "
+                "per-source pi_rel would overdetermine the shared lens "
+                "distance; ignoring it."
+            )
+            fitpirel = False
+        self._fitpirel = fitpirel
+        if fitpirel:
+            self.config_manager.add_scale_hint("lens.0.log_pi_rel", 0.1)
+
         self.manifest = {
             "t_0": per_source(),
             "u_0": per_source(),
-            "pi_rel": per_source("default"),
+            "pi_rel": per_source("from_log_pi_rel" if fitpirel else "default"),
             "theta_E": per_source("default"),
             "mu_ra_rel": murel_entry(),
             "mu_dec_rel": murel_entry(),
+            **({"log_pi_rel": per_source()} if fitpirel else {}),
             "mu_rel_mag": per_source("default"),
             "mu_ra_rel_geo": per_source("default"),
             "mu_dec_rel_geo": per_source("default"),
@@ -1367,6 +1402,25 @@ class Lens(Component):
         """Stage 7: Observational penalties on the lensing geometry."""
         self._validate_q_start()
         self._validate_pspl_start()
+
+        # fitpirel's change of variables is NONLINEAR (unlike fitmurel's),
+        # so preserving the joint density needs the Jacobian of the
+        # replaced physical coordinate with respect to the sampled one:
+        # D_l = 1000/(pi_rel + 1000/D_s)  =>
+        # |dD_l/dlog_pi_rel| = ln10 * pi_rel * D_l^2 / 1000.
+        # Without this term the swap would silently reweight the lens
+        # distance by exactly that factor.  The sampled-side uniform
+        # measure and logit corrections are Parameter.build_pymc's, as for
+        # every sampled coordinate; this potential is only the map's own
+        # stretch factor.
+        if getattr(self, "_fitpirel", False):
+            l_idx = int(self.lens_bodies[0][0][1])
+            d_l = system.star.distance.value[l_idx]
+            pi_rel_v = self.pi_rel.value[0]
+            pm.Potential(
+                f"{self.prefix}.fitpirel_jacobian",
+                pt.log(np.log(10.0) * pi_rel_v * d_l**2 / 1000.0),
+            )
 
         # GEOCENTRIC mu_rel: the event-rate selection is the sky-sweep rate
         # in the frame the event is observed in (rp.py used the geocentric

@@ -87,6 +87,17 @@ star:
     internal_unit: "pc"
     latex: "D"
     description: "Distance"
+    expressions:
+      # Selected per element by Star.register_parameters when the lens
+      # sets `fitpirel: true` (swap 2): the LENS star's distance becomes
+      # derived from the sampled relative parallax and the sampled source
+      # distance (self-guarding: 0 < D_l < D_s).  The star.distance dep
+      # is a same-parameter element reference (pre-patch tensor; only
+      # sampled elements may be referenced).  The nonlinear map's
+      # Jacobian potential is Lens.build_likelihood's.
+      from_mulens_pirel:
+        func_name: "calc_dl_from_pirel"
+        deps: [ "star.distance[murel_source_map]", "lens.pi_rel[murel_traj_map]" ]
   # --- Sampled Parameters ---
   radius:
     lower: 0.1
