@@ -64,6 +64,15 @@ def _expression_info(raw):
 
     Returns (derived, expressions) where ``expressions`` maps each
     expression key (e.g. "default") to {"func_name", "deps"}.
+
+    ``derived`` means derived BY DEFAULT: the block carries a "default"
+    expression, the one a bare-string manifest entry selects.  A block
+    holding only mode-selected expressions (the surgical coordinate
+    swaps' ``from_mulens_*`` blocks on pm_ra/pm_dec/distance/logmass;
+    ``fitvcve``'s alternates) describes a parameter that is SAMPLED
+    unless a flag flips it, and a static schema answers for the default
+    configuration.  The expressions are still reported either way, so a
+    GUI can show what the modes would do.
     """
     expr_block = raw.get("expressions")
     if not isinstance(expr_block, dict) or not expr_block:
@@ -75,7 +84,7 @@ def _expression_info(raw):
             "func_name": cfg.get("func_name"),
             "deps": list(cfg.get("deps", []) or []),
         }
-    return True, out
+    return "default" in out, out
 
 
 def _param_schema(name, raw):
@@ -93,7 +102,7 @@ def _param_schema(name, raw):
         if field in raw:
             entry[field] = raw[field]
 
-    if derived:
+    if expressions:
         entry["expressions"] = expressions
         # Convenience: flatten the "default" dependency list to top level.
         default_expr = expressions.get("default")
