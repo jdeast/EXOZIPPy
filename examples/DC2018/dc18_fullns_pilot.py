@@ -35,7 +35,21 @@ def main():
     args = ap.parse_args()
     out_path = Path(args.out).resolve()
 
-    os.chdir(RUN)
+    # Run in the CONFIG's own directory: its data-file and mmexofast
+    # paths are relative to where it lives (configs/ for the persistent
+    # configs).  A bare filename that does not exist relative to the
+    # caller's cwd is looked up in the legacy RUN dir.
+    cfg_path = Path(args.config)
+    if not cfg_path.exists():
+        cfg_path = RUN / cfg_path.name
+    cfg_path = cfg_path.resolve()
+    if not cfg_path.exists():
+        raise SystemExit(f"config not found: {args.config}")
+    args.config = cfg_path.name
+    if args.ckpt:
+        args.ckpt = str(Path(args.ckpt).resolve())
+    out_dir = Path(args.out).resolve().parent
+    os.chdir(cfg_path.parent)
     from exozippy.samplers.nested import nested_sample
     from exozippy.system import System
 
