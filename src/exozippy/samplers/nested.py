@@ -71,7 +71,7 @@ class NestedBridgeError(RuntimeError):
 class UnitCubeBridge:
     """Numeric unit-cube <-> raw bridge for an EXOZIPPy-built model."""
 
-    def __init__(self, model):
+    def __init__(self, model, sampled_masks=None):
         (
             self._raw_to_phys,
             self.raw_to_phys_batched,
@@ -124,6 +124,20 @@ class UnitCubeBridge:
                     np.asarray(phys_dict(e)[base], dtype=float).ravel() - ref
                 )
                 hits = np.where(moved > 1e-9 * np.maximum(np.abs(ref), 1.0))[0]
+                if hits.size > 1 and sampled_masks and base in sampled_masks:
+                    # Same-parameter derived elements (the surgical swaps:
+                    # pm[lens] = pm[source] + mu_rel) legitimately co-move
+                    # with the sampled element that drives them.  The raw
+                    # coordinate CONTROLS its sampled element; the derived
+                    # movers are reconstructed by the physical graph either
+                    # way, so the map keeps the sampled one.  Role masks
+                    # come from the caller (nested_sample has the System);
+                    # a hand-built model without them keeps the strict
+                    # exactly-one contract below.
+                    mask = np.asarray(sampled_masks[base], dtype=bool).ravel()
+                    sampled_hits = hits[mask[hits]]
+                    if sampled_hits.size == 1:
+                        hits = sampled_hits
                 if hits.size != 1:
                     raise NestedBridgeError(
                         f"raw element {v}[{j}] moves {hits.size} elements "
@@ -310,6 +324,7 @@ def nested_sample(
     seed=None,
     maxiter=None,
     n_pseudo_chains=4,
+    checkpoint_dir=None,
 ):
     """Run nested sampling and return an arviz.InferenceData.
 
@@ -324,7 +339,21 @@ def nested_sample(
     integrals.  posterior attrs carry logz/logzerr/ncall/backend.
     """
     t0 = time.time()
-    bridge = UnitCubeBridge(model)
+    sampled_masks = None
+    if system is not None:
+        # Per-parameter sampled-element masks, so the raw->physical probe
+        # can disambiguate same-parameter derived elements (see _col_map).
+        sampled_masks = {}
+        for comp in system.active_components.values():
+            for pname in comp.manifest or {}:
+                param = getattr(comp, pname, None)
+                if param is None or not hasattr(param, "element_is_sampled"):
+                    continue
+                n = param._n_elements()
+                sampled_masks[f"{comp.prefix}.{pname}"] = np.array(
+                    [bool(param.element_is_sampled(i)) for i in range(n)]
+                )
+    bridge = UnitCubeBridge(model, sampled_masks=sampled_masks)
     bridge.verify()
     logp_fn = model.compile_logp()
     _NB.update(bridge=bridge, logp_fn=logp_fn, pool=None)
@@ -353,8 +382,19 @@ def nested_sample(
                 pool=pool,
                 queue_size=actual if pool is not None else None,
             )
+            dy_kwargs = {}
+            if checkpoint_dir:
+                import os as _os
+                from pathlib import Path as _Path
+
+                _os.makedirs(str(checkpoint_dir), exist_ok=True)
+                dy_kwargs = {
+                    "checkpoint_file": str(
+                        _Path(checkpoint_dir) / "dynesty.ckpt"
+                    )
+                }
             sampler.run_nested(
-                dlogz=dlogz, maxiter=maxiter, print_progress=False
+                **dy_kwargs, dlogz=dlogz, maxiter=maxiter, print_progress=False
             )
             res = sampler.results
             U = np.asarray(res.samples)
@@ -367,19 +407,38 @@ def nested_sample(
             import ultranest
             import ultranest.stepsampler
 
+            un_kwargs = {}
+            if checkpoint_dir:
+                # log_dir + resume makes SIGTERM survivable: a resubmitted
+                # job continues from the stored live points, and a
+                # truncated run still holds a valid logZ lower bound and
+                # the dead-point record.  The first d=27 pilot predated
+                # this and burned ~2.9 days unrecoverably.
+                un_kwargs = {"log_dir": str(checkpoint_dir), "resume": True}
             sampler = ultranest.ReactiveNestedSampler(
                 bridge.flat_names,
                 _loglike_u_batch,
                 transform=_transform_batch,
                 vectorized=True,
+                **un_kwargs,
             )
             if bridge.ndim >= 15:
-                # Region sampling degrades in high d; slice steps are
-                # ultranest's own recommendation there.
-                sampler.stepsampler = ultranest.stepsampler.SliceSampler(
+                # Region sampling degrades in high d; slice stepping is
+                # ultranest's own recommendation there -- but the plain
+                # SliceSampler is SEQUENTIAL (each step depends on the
+                # previous accept/reject), so it hands the vectorized
+                # likelihood batches of size ~1 and starves the worker
+                # pool: the first d=27 pilot ran at 1/64 = 1.6% CPU on a
+                # 64-slot node for 2.9 days.  The population variant
+                # advances popsize walkers concurrently, producing real
+                # batches sized to keep every pool worker busy.
+                import ultranest.popstepsampler as _pss
+
+                sampler.stepsampler = _pss.PopulationSliceSampler(
+                    popsize=max(2 * actual, 8),
                     nsteps=2 * bridge.ndim,
                     generate_direction=(
-                        ultranest.stepsampler.generate_mixture_random_direction
+                        _pss.generate_mixture_random_direction
                     ),
                 )
             res = sampler.run(
