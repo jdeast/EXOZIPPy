@@ -12,6 +12,7 @@ import contextlib
 import logging
 import os
 import warnings
+import zlib
 from functools import lru_cache
 
 import numpy as np
@@ -212,10 +213,22 @@ def _ephemeris_spline(ephemeris_file, _stamp):
     """Parse one .eph file and fit its CubicSpline, once (review 6.10.1).
 
     Returns `(spline, t_min, t_max)`.  Keyed on the path AND a `_stamp` of
-    `(st_mtime_ns, st_size)` taken by the caller, so an ephemeris
+    `(st_mtime_ns, st_size, crc32)` taken by the caller, so an ephemeris
     regenerated under the same name is re-read rather than served stale --
     a plain path key would outlive a `get_ephemeris.py` re-run inside one
     process (the GUI, a notebook, a test that rewrites its tmp file).
+
+    The crc32 is in the stamp because (mtime_ns, size) alone is not a
+    content fingerprint: a same-size rewrite within one filesystem
+    timestamp tick collides, and that is a REAL case, not a pathology --
+    a GUI-triggered get_ephemeris.py re-run finishes well inside a
+    second, and coarse-mtime filesystems (the cluster scratch the test
+    suite runs on) truncate the tick to that scale.  The suite caught it
+    as a load-dependent flake in test_a_regenerated_ephemeris_is_re_read
+    (ezsuite 15363602: stale spline served exactly when two writes landed
+    in one tick).  The cost is reading the file bytes on every call; the
+    call sites are per-instrument load and plotting grids, not the
+    likelihood, and the parse+fit (the expensive part) stays cached.
 
     What is NOT cached is the extrapolation check: it depends on the
     requested epochs, not on the file, and it has to warn every time.
@@ -255,8 +268,10 @@ def interpolate_ephemeris(time, ephemeris_file):
     # and the mulens plotters, so a multi-draw plotting pass used to re-parse
     # the same .eph dozens of times.
     st = os.stat(ephemeris_file)
+    with open(ephemeris_file, "rb") as fh:
+        crc = zlib.crc32(fh.read())
     cs, t_min, t_max = _ephemeris_spline(
-        ephemeris_file, (st.st_mtime_ns, st.st_size)
+        ephemeris_file, (st.st_mtime_ns, st.st_size, crc)
     )
 
     # Check if we are extrapolating (which is dangerous)
