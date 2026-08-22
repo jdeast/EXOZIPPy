@@ -87,6 +87,7 @@ def test_bridge_refuses_a_coupled_support():
 
 
 def test_nested_recovers_evidence_and_posterior_of_a_gaussian():
+    pytest.importorskip("dynesty")  # optional backend; CI may not ship it
     """
     Given a uniform prior on [0, 10] and a Gaussian likelihood N(3, 0.5),
     When nested sampling runs,
@@ -114,6 +115,7 @@ def test_nested_recovers_evidence_and_posterior_of_a_gaussian():
 
 
 def test_nested_weighs_two_modes_by_mass_not_peak():
+    pytest.importorskip("dynesty")  # optional backend; CI may not ship it
     """
     Given two well-separated Gaussian modes where the SECOND is taller but
       narrower, arranged so the wider mode carries 4x the mass,
@@ -197,6 +199,7 @@ def test_bridge_maps_raw_elements_past_pinned_physical_elements():
 
 
 def test_bridge_classifies_and_samples_a_normal_prior_element():
+    pytest.importorskip("dynesty")  # optional backend; CI may not ship it
     """
     Given a model mixing a logit-bounded element with a raw-Normal-prior one
       (an unbounded linear transform, no correction potential -- the
