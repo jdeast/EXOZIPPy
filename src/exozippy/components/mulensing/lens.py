@@ -381,6 +381,22 @@ class Lens(Component):
                 ),
             },
             {
+                "key": "fitthetae",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Sample the Einstein radius directly (as log_theta_E) "
+                    "and derive the HOST star's logmass from "
+                    "theta_E^2 = kappa * M_tot * pi_rel (M_host = "
+                    "M_tot/(1+q) with a log_q companion). A coordinate "
+                    "choice like fitvcve; log-linear map, constant "
+                    "Jacobian, no correction potential. Single-source "
+                    "lenses with at most one log_q companion. "
+                    "Default False."
+                ),
+            },
+            {
                 "key": "star_constrains_rho",
                 "kind": "option",
                 "accepts": None,
@@ -762,14 +778,53 @@ class Lens(Component):
         if fitpirel:
             self.config_manager.add_scale_hint("lens.0.log_pi_rel", 0.1)
 
+        # fitthetae (swap 3): sample log_theta_E, derive theta_E from it,
+        # and the star component derives the HOST logmass (see star.py).
+        # Constraints: single source (theta_E is per-source), and at most
+        # one companion, which must carry a sampled log_q (the inverse
+        # needs M_host = M_tot/(1+q) with q available as a coordinate).
+        fitthetae = bool(self.config[0].get("fitthetae", False))
+        if fitthetae:
+            reason = None
+            if self.n_sources > 1:
+                reason = "multi-source events are not supported"
+            elif self.n_companions > 1:
+                reason = "more than one companion is not supported"
+            elif self.n_companions == 1:
+                c_type, c_idx = self.lens_bodies[0][1]
+                if c_type != "planet":
+                    reason = f"the companion is a '{c_type}', not a planet"
+                else:
+                    mp = "log_q"
+                    comp = getattr(system, "planet", None)
+                    if comp is not None:
+                        mp = comp.config[c_idx].get(
+                            "mass_parameterization", "log_q"
+                        )
+                    if mp != "log_q":
+                        reason = (
+                            "the companion samples a linear mass, not log_q"
+                        )
+            if reason is not None:
+                logger.warning(
+                    f"lens: fitthetae is set but {reason}; ignoring it."
+                )
+                fitthetae = False
+        self._fitthetae = fitthetae
+        if fitthetae:
+            self.config_manager.add_scale_hint("lens.0.log_theta_E", 0.1)
+
         self.manifest = {
             "t_0": per_source(),
             "u_0": per_source(),
             "pi_rel": per_source("from_log_pi_rel" if fitpirel else "default"),
-            "theta_E": per_source("default"),
+            "theta_E": per_source(
+                "from_log_theta_E" if fitthetae else "default"
+            ),
             "mu_ra_rel": murel_entry(),
             "mu_dec_rel": murel_entry(),
             **({"log_pi_rel": per_source()} if fitpirel else {}),
+            **({"log_theta_E": per_source()} if fitthetae else {}),
             "mu_rel_mag": per_source("default"),
             "mu_ra_rel_geo": per_source("default"),
             "mu_dec_rel_geo": per_source("default"),
@@ -834,9 +889,10 @@ class Lens(Component):
                 "shape": (1,),
                 "deps": ["star.mass[primary_lens_map]"] + companion_mass_deps,
             }
-            theta_entry = dict(self.manifest["theta_E"])
-            theta_entry["deps"] = ["mlens_total", "pi_rel"]
-            self.manifest["theta_E"] = theta_entry
+            if not fitthetae:
+                theta_entry = dict(self.manifest["theta_E"])
+                theta_entry["deps"] = ["mlens_total", "pi_rel"]
+                self.manifest["theta_E"] = theta_entry
 
         if self.n_companions >= 2:
             # The symbolic relaxation engine only knows the binary mass-sum

@@ -1,6 +1,12 @@
 import pytensor.tensor as pt
 
-from ...constants import DENSITY_CONST, FBOL_CONST, LOGG_CONST, LUM_CONST
+from ...constants import (
+    DENSITY_CONST,
+    FBOL_CONST,
+    KAPPA,
+    LOGG_CONST,
+    LUM_CONST,
+)
 from ...physics_registry import register_physics
 
 
@@ -83,3 +89,23 @@ def calc_dl_from_pirel(d_source, pi_rel):
     # NONLINEAR: the |dD_l/dlog_pi_rel| Jacobian potential lives in
     # Lens.build_likelihood (unlike fitmurel's |J| = 1 swap).
     return 1000.0 / (pi_rel + 1000.0 / d_source)
+
+
+@register_physics
+def calc_logmass_from_thetae(theta_E, pi_rel):
+    # fitthetae inverse (swap 3), single lens body: the HOST star's
+    # logmass derived from the sampled Einstein radius and the relative
+    # parallax, theta_E^2 = kappa * M * pi_rel.  Log-linear in the
+    # sampled coordinate (|J| = 2, constant), so no Jacobian potential.
+    return pt.log10(theta_E**2 / (KAPPA * pt.maximum(pi_rel, 1e-12)))
+
+
+@register_physics
+def calc_logmass_from_thetae_binary(theta_E, pi_rel, log_q):
+    # fitthetae inverse, star + one log_q companion: theta_E references
+    # the TOTAL lens mass, so M_host = M_tot / (1 + q).
+    return pt.log10(
+        theta_E**2
+        / (KAPPA * pt.maximum(pi_rel, 1e-12))
+        / (1.0 + pt.power(10.0, log_q))
+    )

@@ -22,6 +22,7 @@ pi_E_N, pi_E_E = sp.symbols("pi_E_N pi_E_E")
 rho, source_radius = sp.symbols("rho source_radius")
 log_rho = sp.symbols("log_rho", real=True)
 log_pi_rel = sp.symbols("log_pi_rel", real=True)
+log_theta_E = sp.symbols("log_theta_E", real=True)
 q_lens, companion_mass = sp.symbols("q_lens companion_mass")
 alpha, xalpha, yalpha = sp.symbols("alpha xalpha yalpha")
 # Projected separation: log_s is sampled, s is derived (s = 10**log_s).  The
@@ -147,6 +148,10 @@ def get_symbol_map(lens_config_list):
         if lens_config_list.get("fitpirel"):
             result["log_pi_rel"] = f"lens.{j}.log_pi_rel"
 
+        # log_theta_E exists only under fitthetae (swap 3).
+        if lens_config_list.get("fitthetae"):
+            result["log_theta_E"] = f"lens.{j}.log_theta_E"
+
         maps.append(result)
 
     return maps
@@ -199,6 +204,9 @@ RELATIONS = [
     # (swap 2); inert otherwise.  Lets the distance-derived pi_rel seed
     # back-solve to a log_pi_rel start.
     sp.Eq(pi_rel, 10**log_pi_rel),
+    # theta_E reparameterization, active only for `fitthetae: true` (swap
+    # 3); inert otherwise.
+    sp.Eq(theta_E, 10**log_theta_E),
     # Binary lens mass ratio: q = M_companion / M_primary
     # companion_mass/primary_lens_mass are only in the symbol map for binary
     # events, so these relations are automatically inert for PSPL (relaxation

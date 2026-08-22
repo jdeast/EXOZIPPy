@@ -112,6 +112,25 @@ lens:
       default:
         func_name: "calc_theta_E"
         deps: [ "star.mass[lens_map]", "pi_rel" ]
+      # Selected by `fitthetae: true` (swap 3): theta_E becomes the
+      # sampled coordinate (as log_theta_E) and the HOST star's logmass
+      # is derived instead (see star.py).  In log coordinates the map is
+      # LINEAR (logM = 2 log theta_E - log kappa pi_rel - log(1+q)), so
+      # unlike fitpirel there is no Jacobian potential: |J| = 2, constant.
+      from_log_theta_E:
+        func_name: "calc_theta_E_from_log"
+        deps: [ "log_theta_E" ]
+  log_theta_E:
+    # Sampled ONLY when the lens sets `fitthetae: true`; otherwise absent.
+    # Log coordinate: theta_E spans ~1e-2 mas (FFP) to ~10 mas (nearby
+    # stellar lens).  NO initval (the mu_rel lesson, 4745cd7e): the
+    # engine back-solves the start through theta_E <-> log_theta_E.
+    lower: -4.0
+    upper: 2.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\log\\theta_E"
+    description: "log10 Einstein radius"
   # mu_ra_rel / mu_dec_rel / mu_rel_mag are HELIOCENTRIC: differences of the
   # stars' barycentric proper motions (the frame the galactic kinematic
   # prior and Gaia priors constrain).  The *_geo trio below converts to the

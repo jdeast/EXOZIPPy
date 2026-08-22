@@ -24,6 +24,17 @@ star:
     internal_unit: "dex(solMass)"
     latex: "\\log{M}"
     description: "Log of Mass"
+    expressions:
+      # Selected per element by Star.register_parameters when the lens
+      # sets `fitthetae: true` (swap 3): the HOST star's logmass becomes
+      # derived from the sampled log_theta_E (through lens.theta_E) and
+      # pi_rel.  Log-linear map, constant Jacobian, no potential needed.
+      from_mulens_thetae:
+        func_name: "calc_logmass_from_thetae"
+        deps: [ "lens.theta_E[murel_traj_map]", "lens.pi_rel[murel_traj_map]" ]
+      from_mulens_thetae_binary:
+        func_name: "calc_logmass_from_thetae_binary"
+        deps: [ "lens.theta_E[murel_traj_map]", "lens.pi_rel[murel_traj_map]", "planet.log_q[murel_companion_map]" ]
   mass:
     unit: "solMass"
     internal_unit: "solMass"
