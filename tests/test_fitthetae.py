@@ -108,3 +108,44 @@ def test_linear_mass_companion_guard(caplog):
         "fitthetae" in r.message and "linear mass" in r.message
         for r in caplog.records
     )
+
+
+def test_all_three_swaps_compose_into_observable_coordinates():
+    """fitmurel + fitpirel + fitthetae + star_constrains_rho: false is the
+    observable-coordinates parameterization of notes/
+    observable_coordinates.txt: the sampled microlensing coordinates ARE
+    the observable set, the whole lens-star physical state is derived,
+    and every physical prior evaluates on the derived point."""
+    import os
+
+    cwd = os.getcwd()
+    os.chdir(_kmt_workdir())
+    try:
+        with open("KMT-2019-BLG-1806.yaml") as f:
+            config = yaml.safe_load(f)
+        with open(config["parameter_file"]) as f:
+            user_params = yaml.safe_load(f)
+        for k in ("run", "prefix", "parameter_file", "sampler"):
+            config.pop(k, None)
+        for flag in ("fitmurel", "fitpirel", "fitthetae"):
+            config["lens"][0][flag] = True
+        config["lens"][0]["star_constrains_rho"] = False
+        system = System(config, user_params=user_params)
+        system.prepare()
+        model = system.build_model()
+    finally:
+        os.chdir(cwd)
+
+    vv = [v.name for v in model.value_vars]
+    for name in (
+        "lens.mu_ra_rel_raw",
+        "lens.mu_dec_rel_raw",
+        "lens.log_pi_rel_raw",
+        "lens.log_theta_E_raw",
+        "lens.log_rho_raw",
+    ):
+        assert name in vv, name
+    l_idx = int(system.lens.lens_bodies[0][0][1])
+    for param in ("pm_ra", "pm_dec", "distance", "logmass"):
+        assert getattr(system.star, param).element_is_derived(l_idx), param
+    assert np.isfinite(float(model.compile_logp()(model.initial_point())))
