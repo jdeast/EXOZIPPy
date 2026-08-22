@@ -89,14 +89,23 @@ lens:
         deps: [ "log_pi_rel" ]
   log_pi_rel:
     # Sampled ONLY when the lens sets `fitpirel: true`; otherwise absent.
-    # Log coordinate: pi_rel spans decades (0.1 uas for a bulge-bulge
-    # event to ~1 arcsec for a lens at 1 pc).  NO initval here (the
+    # Log coordinate: pi_rel spans decades.  NO initval here (the
     # engine's default-armor registers every defaults initval for every
     # config -- the mu_rel lesson, commit 4745cd7e); the relaxation
     # engine back-solves the start from the distances through the
     # pi_rel <-> log_pi_rel relation.
+    #
+    # Upper = 10 mas (lens beyond ~100 pc): in physical coordinates the
+    # galactic d^2 volume prior made nearer lenses vanishingly rare, but
+    # a flat-in-log measure up to the old arcsecond ceiling handed the
+    # hot tempering chains ~40% of the coordinate range with pi_E ~ 10
+    # -- wildly looping parallax trajectories in VBM's most expensive
+    # regime.  The first fitpirel A/B arm (job 15363587) drowned in
+    # eval_timeouts within minutes, the same operational signature as
+    # log_rho's cap (1e162a1a).  A genuinely nearby lens is exotica the
+    # user can override per event.
     lower: -4.0
-    upper: 3.0
+    upper: 1.0
     unit: ""
     internal_unit: ""
     latex: "\\log\\pi_{rel}"
