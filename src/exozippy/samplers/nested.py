@@ -310,6 +310,7 @@ def nested_sample(
     seed=None,
     maxiter=None,
     n_pseudo_chains=4,
+    checkpoint_dir=None,
 ):
     """Run nested sampling and return an arviz.InferenceData.
 
@@ -353,8 +354,19 @@ def nested_sample(
                 pool=pool,
                 queue_size=actual if pool is not None else None,
             )
+            dy_kwargs = {}
+            if checkpoint_dir:
+                import os as _os
+                from pathlib import Path as _Path
+
+                _os.makedirs(str(checkpoint_dir), exist_ok=True)
+                dy_kwargs = {
+                    "checkpoint_file": str(
+                        _Path(checkpoint_dir) / "dynesty.ckpt"
+                    )
+                }
             sampler.run_nested(
-                dlogz=dlogz, maxiter=maxiter, print_progress=False
+                **dy_kwargs, dlogz=dlogz, maxiter=maxiter, print_progress=False
             )
             res = sampler.results
             U = np.asarray(res.samples)
@@ -367,19 +379,38 @@ def nested_sample(
             import ultranest
             import ultranest.stepsampler
 
+            un_kwargs = {}
+            if checkpoint_dir:
+                # log_dir + resume makes SIGTERM survivable: a resubmitted
+                # job continues from the stored live points, and a
+                # truncated run still holds a valid logZ lower bound and
+                # the dead-point record.  The first d=27 pilot predated
+                # this and burned ~2.9 days unrecoverably.
+                un_kwargs = {"log_dir": str(checkpoint_dir), "resume": True}
             sampler = ultranest.ReactiveNestedSampler(
                 bridge.flat_names,
                 _loglike_u_batch,
                 transform=_transform_batch,
                 vectorized=True,
+                **un_kwargs,
             )
             if bridge.ndim >= 15:
-                # Region sampling degrades in high d; slice steps are
-                # ultranest's own recommendation there.
-                sampler.stepsampler = ultranest.stepsampler.SliceSampler(
+                # Region sampling degrades in high d; slice stepping is
+                # ultranest's own recommendation there -- but the plain
+                # SliceSampler is SEQUENTIAL (each step depends on the
+                # previous accept/reject), so it hands the vectorized
+                # likelihood batches of size ~1 and starves the worker
+                # pool: the first d=27 pilot ran at 1/64 = 1.6% CPU on a
+                # 64-slot node for 2.9 days.  The population variant
+                # advances popsize walkers concurrently, producing real
+                # batches sized to keep every pool worker busy.
+                import ultranest.popstepsampler as _pss
+
+                sampler.stepsampler = _pss.PopulationSliceSampler(
+                    popsize=max(2 * actual, 8),
                     nsteps=2 * bridge.ndim,
                     generate_direction=(
-                        ultranest.stepsampler.generate_mixture_random_direction
+                        _pss.generate_mixture_random_direction
                     ),
                 )
             res = sampler.run(
