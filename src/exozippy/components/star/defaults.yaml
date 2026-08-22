@@ -24,6 +24,17 @@ star:
     internal_unit: "dex(solMass)"
     latex: "\\log{M}"
     description: "Log of Mass"
+    expressions:
+      # Selected per element by Star.register_parameters when the lens
+      # sets `fitthetae: true` (swap 3): the HOST star's logmass becomes
+      # derived from the sampled log_theta_E (through lens.theta_E) and
+      # pi_rel.  Log-linear map, constant Jacobian, no potential needed.
+      from_mulens_thetae:
+        func_name: "calc_logmass_from_thetae"
+        deps: [ "lens.theta_E[murel_traj_map]", "lens.pi_rel[murel_traj_map]" ]
+      from_mulens_thetae_binary:
+        func_name: "calc_logmass_from_thetae_binary"
+        deps: [ "lens.theta_E[murel_traj_map]", "lens.pi_rel[murel_traj_map]", "planet.log_q[murel_companion_map]" ]
   mass:
     unit: "solMass"
     internal_unit: "solMass"
@@ -87,6 +98,17 @@ star:
     internal_unit: "pc"
     latex: "D"
     description: "Distance"
+    expressions:
+      # Selected per element by Star.register_parameters when the lens
+      # sets `fitpirel: true` (swap 2): the LENS star's distance becomes
+      # derived from the sampled relative parallax and the sampled source
+      # distance (self-guarding: 0 < D_l < D_s).  The star.distance dep
+      # is a same-parameter element reference (pre-patch tensor; only
+      # sampled elements may be referenced).  The nonlinear map's
+      # Jacobian potential is Lens.build_likelihood's.
+      from_mulens_pirel:
+        func_name: "calc_dl_from_pirel"
+        deps: [ "star.distance[murel_source_map]", "lens.pi_rel[murel_traj_map]" ]
   # --- Sampled Parameters ---
   radius:
     lower: 0.1

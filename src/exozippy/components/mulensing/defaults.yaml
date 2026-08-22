@@ -81,6 +81,35 @@ lens:
       default:
         func_name: "calc_pi_rel"
         deps: [ "star.distance[lens_map]", "star.distance[source_map]"]
+      # Selected by `fitpirel: true` (swap 2 of the surgical coordinate
+      # plan): pi_rel becomes the sampled coordinate (as log_pi_rel) and
+      # the LENS star's distance is derived instead (see star.py).
+      from_log_pi_rel:
+        func_name: "calc_pi_rel_from_log"
+        deps: [ "log_pi_rel" ]
+  log_pi_rel:
+    # Sampled ONLY when the lens sets `fitpirel: true`; otherwise absent.
+    # Log coordinate: pi_rel spans decades.  NO initval here (the
+    # engine's default-armor registers every defaults initval for every
+    # config -- the mu_rel lesson, commit 4745cd7e); the relaxation
+    # engine back-solves the start from the distances through the
+    # pi_rel <-> log_pi_rel relation.
+    #
+    # Upper = 10 mas (lens beyond ~100 pc): in physical coordinates the
+    # galactic d^2 volume prior made nearer lenses vanishingly rare, but
+    # a flat-in-log measure up to the old arcsecond ceiling handed the
+    # hot tempering chains ~40% of the coordinate range with pi_E ~ 10
+    # -- wildly looping parallax trajectories in VBM's most expensive
+    # regime.  The first fitpirel A/B arm (job 15363587) drowned in
+    # eval_timeouts within minutes, the same operational signature as
+    # log_rho's cap (1e162a1a).  A genuinely nearby lens is exotica the
+    # user can override per event.
+    lower: -4.0
+    upper: 1.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\log\\pi_{rel}"
+    description: "log10 rel. parallax"
   theta_E:
     lower: 0.0
     upper: 1000.0
@@ -92,6 +121,25 @@ lens:
       default:
         func_name: "calc_theta_E"
         deps: [ "star.mass[lens_map]", "pi_rel" ]
+      # Selected by `fitthetae: true` (swap 3): theta_E becomes the
+      # sampled coordinate (as log_theta_E) and the HOST star's logmass
+      # is derived instead (see star.py).  In log coordinates the map is
+      # LINEAR (logM = 2 log theta_E - log kappa pi_rel - log(1+q)), so
+      # unlike fitpirel there is no Jacobian potential: |J| = 2, constant.
+      from_log_theta_E:
+        func_name: "calc_theta_E_from_log"
+        deps: [ "log_theta_E" ]
+  log_theta_E:
+    # Sampled ONLY when the lens sets `fitthetae: true`; otherwise absent.
+    # Log coordinate: theta_E spans ~1e-2 mas (FFP) to ~10 mas (nearby
+    # stellar lens).  NO initval (the mu_rel lesson, 4745cd7e): the
+    # engine back-solves the start through theta_E <-> log_theta_E.
+    lower: -4.0
+    upper: 2.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\log\\theta_E"
+    description: "log10 Einstein radius"
   # mu_ra_rel / mu_dec_rel / mu_rel_mag are HELIOCENTRIC: differences of the
   # stars' barycentric proper motions (the frame the galactic kinematic
   # prior and Gaia priors constrain).  The *_geo trio below converts to the

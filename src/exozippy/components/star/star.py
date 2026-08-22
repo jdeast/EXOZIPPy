@@ -863,13 +863,82 @@ class Star(Component):
         self.murel_traj_map = np.zeros(n, dtype=int)
         return {"expr_key": {"from_mulens_murel": [int(l_idx)]}}
 
+    def _distance_manifest_entry(self, system):
+        """distance entry: sampled everywhere, except that a single-source
+        lens with `fitpirel: true` flips its PRIMARY lens star's element to
+        derived, D_l = 1000/(pi_rel + 1000/D_s) -- swap 2 of the surgical
+        coordinate plan.  Same staging and maps as _pm_manifest_entry; the
+        map builder there runs first when both flags are set.
+        """
+        lens = getattr(system, "lens", None)
+        if lens is None or not getattr(lens, "lens_bodies", None):
+            return None
+        if not bool(lens.config[0].get("fitpirel", False)):
+            return None
+        if int(getattr(lens, "n_sources", 1)) > 1:
+            return None  # lens.py warns; the flag is ignored there too
+        l_type, l_idx = lens.lens_bodies[0][0]
+        s_type, s_idx = lens.source_bodies[0][0]
+        if l_type != "star" or s_type != "star":
+            return None
+        n = self.n_elements
+        self.murel_source_map = np.full(n, int(s_idx), dtype=int)
+        self.murel_traj_map = np.zeros(n, dtype=int)
+        return {"expr_key": {"from_mulens_pirel": [int(l_idx)]}}
+
+    def _logmass_thetae_entry(self, system):
+        """expr_key flip for `fitthetae: true` (swap 3): the HOST star's
+        logmass derived from the sampled log_theta_E (through lens.theta_E)
+        and pi_rel; with a log_q companion, M_host = M_tot/(1+q).  Same
+        staging rules as _pm_manifest_entry.  Lens.register_parameters
+        enforces the same guards and warns; this mirror keeps the two
+        components' answers identical without cross-stage reads.
+        """
+        lens = getattr(system, "lens", None)
+        if lens is None or not getattr(lens, "lens_bodies", None):
+            return None
+        if not bool(lens.config[0].get("fitthetae", False)):
+            return None
+        if int(getattr(lens, "n_sources", 1)) > 1:
+            return None
+        bodies = lens.lens_bodies[0]
+        if len(bodies) > 2:
+            return None
+        l_type, l_idx = bodies[0]
+        if l_type != "star":
+            return None
+        n = self.n_elements
+        self.murel_traj_map = np.zeros(n, dtype=int)
+        if len(bodies) == 2:
+            c_type, c_idx = bodies[1]
+            if c_type != "planet":
+                return None
+            comp = getattr(system, "planet", None)
+            mp = "log_q"
+            if comp is not None:
+                mp = comp.config[c_idx].get("mass_parameterization", "log_q")
+            if mp != "log_q":
+                return None
+            self.murel_companion_map = np.full(n, int(c_idx), dtype=int)
+            return {"expr_key": {"from_mulens_thetae_binary": [int(l_idx)]}}
+        return {"expr_key": {"from_mulens_thetae": [int(l_idx)]}}
+
     def register_parameters(self, system):
         """Stage 3: Declare the manifest and push to ConfigManager."""
 
         # 1. Get the stellar parameters we always want.  logmass may carry a
         # power-law-IMF floor (None otherwise, i.e. a plain free parameter).
+        logmass_entry = self._logmass_manifest_entry(system)
+        thetae_entry = self._logmass_thetae_entry(system)
+        if thetae_entry is not None:
+            # Merge the fitthetae expr_key flip into the IMF-floor entry
+            # (both are dicts of disjoint keys; the floor's per-element
+            # "overrides" apply to the still-sampled elements, and a bound
+            # on the derived host element degrades to a soft barrier).
+            logmass_entry = {**(logmass_entry or {}), **thetae_entry}
+
         self.manifest = {
-            "logmass": self._logmass_manifest_entry(system),
+            "logmass": logmass_entry,
             "radius": None,
             "mass": "default",
             "density": "default",
@@ -989,7 +1058,7 @@ class Star(Component):
                     "dec": None,
                     "pm_ra": self._pm_manifest_entry(system),
                     "pm_dec": self._pm_manifest_entry(system),
-                    "distance": None,
+                    "distance": self._distance_manifest_entry(system),
                 }
             )
         elif astrom_modes:
