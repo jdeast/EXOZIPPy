@@ -11,6 +11,12 @@ from exozippy.components.relations import (
 )
 
 from ..star.physics import calc_absmag
+
+# A_Ks / A_V of the SHIPPED extinction law (models/extinction_law.ascii,
+# ext(2.159 um) / ext(0.55 um) = 26.462 / 212.097) -- the same law make_bc
+# bakes into the SED's bolometric-correction grids, so dereddening with this
+# ratio removes exactly the extinction a synthetic Ks contains.
+KS_AV_RATIO = 0.12476
 from . import physics
 
 # The bandpass the Mann relations are calibrated on.  EXOFASTv2 hardcodes
@@ -230,8 +236,19 @@ class Mann(StellarRelation, Component):
         appks = self._ks_source(system) + ks_err * self.ks_offset.value
         pm.Deterministic(f"{self.prefix}.appks", appks)
 
-        # 2. Absolute Ks -- the relations' actual input.
-        absks = calc_absmag(appks, distance)
+        # 2. Absolute Ks -- the relations' actual input.  Dereddened: the
+        # apparent Ks is EXTINCTED in both pathways (predict_star_appmag
+        # interpolates BC(teff, logg, feh, AV), so the av axis folds A_lambda
+        # into the synthetic magnitude; an observed Ks is extincted by
+        # nature), while Mann+2015/2019 calibrate on true absolute M_Ks of
+        # nearby, essentially unreddened M dwarfs.  Subtracting only the
+        # distance modulus handed the relations M_Ks + A_Ks, biasing mass
+        # and radius LOW by ~5-8% at bulge sightline extinctions (A_V ~ 2,
+        # A_Ks ~ 0.24) -- comparable to several times the relations' own
+        # scatter.  The ratio matches the SED's own extinction law, so what
+        # is added by the BC grid is exactly what is removed here.
+        a_ks = KS_AV_RATIO * star.av.value[smap]
+        absks = calc_absmag(appks, distance) - a_ks
         pm.Deterministic(f"{self.prefix}.absks", absks)
 
         # 3. Relation predictions. The [Fe/H]-dependent form is a per-instance

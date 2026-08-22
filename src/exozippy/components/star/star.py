@@ -835,6 +835,34 @@ class Star(Component):
             )
         return {"overrides": {"lower": floors.tolist()}}
 
+    def _pm_manifest_entry(self, system):
+        """pm_ra/pm_dec manifest entry: sampled everywhere, except that a
+        lens with `fitmurel: true` flips its PRIMARY lens star's element to
+        derived (pm = pm_source + mu_rel; the sampled coordinate is the
+        LC-measured relative pm on the lens component).  Deriving the LENS
+        element rather than the source's is load-bearing: the source pm
+        carries the tight bulge prior, so deriving the source would turn
+        that prior into a difference constraint and recreate the ridge the
+        swap removes.  Reads only raw lens config and stage-1/2 attributes
+        (lens_bodies/source_bodies) -- component order within stage 3 is
+        not guaranteed.  Also builds the two index maps the expression's
+        deps name: murel_source_map (per star element, the index of the
+        lens's first source star) and murel_traj_map (trajectory 0).
+        """
+        lens = getattr(system, "lens", None)
+        if lens is None or not getattr(lens, "lens_bodies", None):
+            return None
+        if not bool(lens.config[0].get("fitmurel", False)):
+            return None
+        l_type, l_idx = lens.lens_bodies[0][0]
+        s_type, s_idx = lens.source_bodies[0][0]
+        if l_type != "star" or s_type != "star":
+            return None
+        n = self.n_elements
+        self.murel_source_map = np.full(n, int(s_idx), dtype=int)
+        self.murel_traj_map = np.zeros(n, dtype=int)
+        return {"expr_key": {"from_mulens_murel": [int(l_idx)]}}
+
     def register_parameters(self, system):
         """Stage 3: Declare the manifest and push to ConfigManager."""
 
@@ -959,8 +987,8 @@ class Star(Component):
                 {
                     "ra": None,
                     "dec": None,
-                    "pm_ra": None,
-                    "pm_dec": None,
+                    "pm_ra": self._pm_manifest_entry(system),
+                    "pm_dec": self._pm_manifest_entry(system),
                     "distance": None,
                 }
             )

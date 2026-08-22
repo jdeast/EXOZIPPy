@@ -243,6 +243,16 @@ star:
     internal_unit: "mas/yr"
     latex: "\\mu_{\\alpha*}"
     description: "Proper Motion (RA)"
+    expressions:
+      # Selected per element by Star.register_parameters when the lens
+      # sets `fitmurel: true`: the LENS star's pm becomes derived,
+      # pm = pm_source + mu_rel (the sampled, LC-measured coordinate).
+      # The star.pm_ra dep is a same-parameter element reference,
+      # resolved against the pre-patch tensor (only sampled elements may
+      # be referenced; the source star's pm stays sampled).
+      from_mulens_murel:
+        func_name: "calc_pm_from_murel"
+        deps: [ "star.pm_ra[murel_source_map]", "lens.mu_ra_rel[murel_traj_map]" ]
   pm_dec:
     initval: -3.0
     init_scale: 0.05
@@ -253,6 +263,11 @@ star:
     internal_unit: "mas/yr"
     latex: "\\mu_\\delta"
     description: "Proper Motion (Dec)"
+    expressions:
+      # fitmurel twin of pm_ra's block; see the note there.
+      from_mulens_murel:
+        func_name: "calc_pm_from_murel"
+        deps: [ "star.pm_dec[murel_source_map]", "lens.mu_dec_rel[murel_traj_map]" ]
   ra:
     initval: 180.0
     init_scale: 20e-6

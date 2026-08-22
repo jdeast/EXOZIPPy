@@ -49,6 +49,33 @@ The per-element roles these tables expand into are documented in
 
 The sibling helper `pin_unselected(n_elements, selected)` is the **opt-in** pin, and the difference from an inactive element is the reason both exist: it pins through `"overrides"`, which layers *under* the params file, for a parameter that exists for every instance but is only wanted on some (a GP hyperparameter on the files that asked for one, an LD coefficient on the bands something reads, the BEER terms on the bands that fit them) -- so a user who explicitly wants one back still wins. An inactive element's pin is structural and unreported, because freeing it would add a dimension no likelihood term reads. `Instrument._register_gp`, `Instrument._register_robust` and `Band` (BEER terms + the unread-LD autopin) had that loop written out line for line; it is one function now (review 4.5.2, 4.5.3).
 
+## Config flag vocabulary
+
+Boolean config flags come in exactly three kinds, and the kinds do not share a
+spelling.  Before adding a flag, pick its kind and follow that template.
+
+- **Include-this-signal toggles, `fit<x>`** (`fitbeam`, `fitellip`, `fitthermal`,
+  `fitreflect`): add a signal and its free amplitude to the model.  `finite_source`
+  is this kind in spirit (physics inclusion) and is deliberately NOT spelled
+  `fit_finite_source`: the finite-source effect is a direct measurement of rho and
+  is always on when the physics is.
+- **Coordinate choices, `fit<coord>`** (`fitvcve`, `fitchord`): sample in this
+  parameterization rather than the default.  Nothing becomes more or less
+  constrained; only the coordinates change.
+- **Tie toggles, `X_constrains_Y`** (`beam_constrains_mass`, `sed_constrains_blend`,
+  `star_constrains_rho`): supply or sever a physics link between two quantities.
+  The name states the INTENT -- the reason a user turns the tie on is that they
+  want X's information to sharpen Y.  The mechanism is symmetric: a tie is a link
+  in a joint density, not a one-way assignment, and information flows toward
+  whichever side is less constrained by everything else.  That reversal is not
+  hypothetical: on DC2018 event 128 the rho = theta_star/theta_E identity (the tie
+  `star_constrains_rho` now controls) ran BACKWARD -- the priors on theta_E's side
+  overrode the light curve's 2.5%-precise rho -- which is why each tie flag's
+  severed mode reports the untied prediction (`rho_pred`) so the pull is visible.
+  A `Z_links_X_and_Y` spelling would name the mechanism more honestly, but buries
+  the searchable quantity mid-name and reads worse at the call site; the ruling is
+  intent-named flags, mechanism documented here and in each flag's schema doc.
+
 ## Adding a new component
 
 1. Create `src/exozippy/components/<name>/` with the four standard files.

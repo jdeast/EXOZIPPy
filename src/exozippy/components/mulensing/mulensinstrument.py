@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 
 import numpy as np
 
@@ -16,6 +17,7 @@ from exozippy.ephemeris import get_observer_position
 from exozippy.outputs.prose import get_collector
 from exozippy.skyframe import observer_sky_offset
 
+from ..parameterization import pin_unselected
 from . import mmexofast_support
 from .physics import (
     RHO_FLOOR,
@@ -143,13 +145,13 @@ class MulensInstrument(Instrument):
                 "doc": "Name of the band: block associated with this light curve.",
             },
             {
-                "key": "sed_constrain_blend",
+                "key": "sed_constrains_blend",
                 "kind": "option",
                 "accepts": [True, False],
                 "required": False,
                 "doc": (
                     "When an SED is present, also tie f_blend to the "
-                    "SED-predicted flux. Default false."
+                    "SED-predicted flux. Default false. A tie is a physics LINK, not a one-way assignment: information flows toward whichever side is less constrained elsewhere (components.md, 'Config flag vocabulary')."
                 ),
             },
             {
@@ -159,7 +161,7 @@ class MulensInstrument(Instrument):
                 "required": False,
                 "doc": (
                     "Gaussian width (mag) of the SED f_blend constraint when "
-                    "sed_constrain_blend is set. Default 0.2."
+                    "sed_constrains_blend is set. Default 0.2."
                 ),
             },
             {
@@ -1089,6 +1091,247 @@ class MulensInstrument(Instrument):
                 "force_node": True,
             }
 
+            # Neighbor third light, per light curve, sampled only where the
+            # blend tie is on: with the tie off f_blend is already free and
+            # this parameter is exactly degenerate with it (the light curve
+            # measures only the sum, finite-source or not).  With the tie on
+            # it converts f_blend = f_lens_pred -- an identity the DC2018
+            # Roman-fidelity sims violate in 80% of events (unrelated
+            # line-of-sight stars dominate the blend; the lens supplies a
+            # median 15% of it) -- into the correct inequality
+            # f_blend >= f_lens_pred, positivity doing the work.  upper and
+            # the selected elements' initval scale with the bootstrapped
+            # baseline flux, the same reasoning as _scale_flux_amplitudes:
+            # the file's flux zeropoint is arbitrary.  Pinned elements keep
+            # the defaults.yaml 0.0 (NaN initval = leave alone).
+            nb_selected = [
+                bool(c.get("sed_constrains_blend", False)) for c in self.config
+            ]
+            if any(nb_selected):
+                entry = pin_unselected(self.n_elements, nb_selected)
+                overrides = dict(entry.get("overrides") or {})
+                scale = np.asarray(f_total_init, dtype=float)
+                overrides["upper"] = (2.0 * scale).tolist()
+                overrides["initval"] = [
+                    (0.05 * float(sc) if sel else float("nan"))
+                    for sc, sel in zip(scale, nb_selected)
+                ]
+                entry["overrides"] = overrides
+                self.manifest["neighbor_flux"] = entry
+                # Preliminary whitening scale on the light curve's own flux
+                # scale (the defaults.yaml 0.1 is meaningless against an
+                # arbitrary flux zeropoint, and a scale >> span trips the
+                # on-the-bound nudge).  The startup probe measures the real
+                # scale; this only seeds it.
+                for i, sel in enumerate(nb_selected):
+                    if sel:
+                        self.config_manager.add_scale_hint(
+                            f"{self.prefix}.{i}.neighbor_flux",
+                            0.1 * float(scale[i]),
+                        )
+
+            self._seed_source_star_from_flux(system)
+
+    # Main-sequence dwarf locus for source seeding, from the shared
+    # Mamajek-table reader (components/star/mamajek.py).
+    _MS_LOCUS_CACHE = None
+
+    @classmethod
+    def _ms_locus(cls):
+        """(teff K, radius Rsun, mass Msun) rows, brightest first.
+
+        Backed by the shared Mamajek-table reader (components/star/
+        mamajek.py, the getstar.pro port), capped at 2.2 Msun: a bulge
+        source brighter than the dwarf-locus top is far likelier a giant
+        (or a wrong zeropoint) than an early-type dwarf, and the bright
+        guard should say so rather than seed one.
+        """
+        if cls._MS_LOCUS_CACHE is not None:
+            return cls._MS_LOCUS_CACHE
+        from exozippy.components.star.mamajek import read_mamajek
+
+        table = read_mamajek(minmass=0.078)
+        rows = [
+            (float(te), float(r), float(m))
+            for te, r, m in zip(table["Teff"], table["R_Rsun"], table["Msun"])
+            if np.isfinite(te) and np.isfinite(r) and m <= 2.2
+        ]
+        if len(rows) < 10:
+            raise RuntimeError(
+                f"dwarf locus parsed to only {len(rows)} usable rows; "
+                f"the Mamajek table or its reader changed."
+            )
+        rows.sort(key=lambda r: -r[2])  # brightest (most massive) first
+        cls._MS_LOCUS_CACHE = rows
+        return rows
+
+    def _user_or_default(self, paths, field, default):
+        """First user_params value for any spelling in ``paths``."""
+        up = self.config_manager.user_params
+        for path in paths:
+            entry = up.get(path)
+            if isinstance(entry, dict) and entry.get(field) is not None:
+                return float(entry[field])
+            if entry is not None and not isinstance(entry, dict):
+                return float(entry)
+        return default
+
+    def _seed_source_star_from_flux(self, system):
+        """Stage 3: seed the SOURCE star's stellar start from its own flux.
+
+        Without this, a microlensing-only source starts as an exact solar
+        clone (the star defaults), even though its apparent magnitude is
+        MEASURED: the bootstrapped baseline f_source through the light
+        curve's photometric zeropoint.  On DC2018 event 128 the solar-clone
+        start let the polish/sampler walk into a swapped configuration
+        (M-dwarf source, G-star lens) that the flux data disfavor.
+
+        Chain: m_source = zp_mu - 2.5*log10(f_source_init); assume the
+        source is a main-sequence dwarf at the event's source distance
+        (user initval, an existing engine hint, or 8 kpc -- microlensing
+        sources are bulge stars by construction of the event rate); scan
+        the approximate dwarf locus through the SED's own BC grid to find
+        the (teff, radius, mass) whose predicted apparent magnitude
+        matches; push RANK_DERIVED_DATA hints (they override defaults and
+        yield to the user, like every data-derived start).
+
+        The zeropoint mu is a calibration statement whether the user wrote
+        it or defaults.yaml's 0.0 did ("flux is 10**(-0.4 m)").  When that
+        statement is wrong, the measured magnitude is absurd and the guard
+        below skips seeding with a warning -- which doubles as the alarm
+        that the zeropoint prior does not describe the file.
+
+        A source BRIGHTER than the locus top is likely a giant (common for
+        bulge sources): no seed, warned, the defaults stand.  Multi-source
+        events are skipped -- f_source is the SUM and splitting it needs
+        q_flux, which has its own hint path.
+        """
+        if getattr(self, "_n_sources", 1) > 1:
+            return
+        sed = system.sed
+        filter_keys = self._sed_filter_keys(system)
+        src = int(system.lens.source_map[0])
+        src_name = system.star.names[src]
+
+        d_pc = self._user_or_default(
+            [f"star.{src}.distance", f"star.{src_name}.distance"],
+            "initval",
+            None,
+        )
+        if d_pc is None:
+            d_pc = self.config_manager.hints.get(f"star.{src}.distance")
+        if d_pc is None:
+            d_pc = 8000.0
+            logger.info(
+                f"source-flux seeding: no distance start for star "
+                f"'{src_name}'; assuming a bulge source at {d_pc:.0f} pc."
+            )
+        av = self._user_or_default(
+            [f"star.{src}.av", f"star.{src_name}.av"], "initval", 0.0
+        )
+
+        masses = []
+        for i, name in enumerate(self.names):
+            fk = filter_keys[i]
+            if fk is None:
+                continue
+            zp_mu = self._user_or_default(
+                [
+                    f"{self.prefix}.{name}.zeropoint",
+                    f"{self.prefix}.{i}.zeropoint",
+                ],
+                "mu",
+                0.0,
+            )
+            f_src = float(self.fs_init[i]) * float(self.q_source_init[i])
+            if f_src <= 0:
+                continue
+            m_meas = zp_mu - 2.5 * np.log10(f_src)
+
+            # Predicted apparent mag of each locus row through the SED's
+            # own BC grid (teff, logg, feh=0, av), at the assumed distance.
+            # ONE vectorized evaluate for the whole locus: a per-row
+            # .eval() meant 61 pytensor compiles per band per prepare, and
+            # under six xdist workers those serialized on the shared
+            # compiledir's FileLock until pytest-timeout killed the
+            # module fixture (ezsuite 15363115's deterministic errors).
+            col = sed.filter_column(fk)
+            locus = np.asarray(self._ms_locus(), dtype=float)
+            teff_v, radius_v, mass_v = locus[:, 0], locus[:, 1], locus[:, 2]
+            logg_v = 4.438 + np.log10(mass_v) - 2.0 * np.log10(radius_v)
+            coords = np.column_stack(
+                [
+                    teff_v,
+                    logg_v,
+                    np.zeros_like(teff_v),
+                    np.full_like(teff_v, av),
+                ]
+            )
+            bc_v = np.asarray(sed.bc_interpolator.evaluate(coords).eval())[
+                :, col
+            ]
+            lbol_v = radius_v**2 * (teff_v / 5772.0) ** 4
+            mbol_v = 4.74 - 2.5 * np.log10(lbol_v)
+            m_pred = mbol_v - bc_v + 5.0 * np.log10(d_pc) - 5.0
+
+            if m_meas < m_pred[0]:
+                logger.warning(
+                    f"source-flux seeding ({name}): the measured source "
+                    f"magnitude {m_meas:.2f} is BRIGHTER than the whole "
+                    f"dwarf locus ({m_pred[0]:.2f} at its top, "
+                    f"{d_pc:.0f} pc): a giant source, or a zeropoint "
+                    f"prior that does not describe this file. Not seeding "
+                    f"from this light curve."
+                )
+                continue
+            if m_meas > m_pred[-1] + 3.0:
+                logger.warning(
+                    f"source-flux seeding ({name}): measured source mag "
+                    f"{m_meas:.2f} is far fainter than the locus bottom "
+                    f"({m_pred[-1]:.2f}): a sub-stellar source makes no "
+                    f"sense, so the zeropoint prior likely does not "
+                    f"describe this file. Not seeding from this light "
+                    f"curve."
+                )
+                continue
+            if m_meas > m_pred[-1]:
+                logger.warning(
+                    f"source-flux seeding ({name}): measured source mag "
+                    f"{m_meas:.2f} is fainter than the locus bottom "
+                    f"({m_pred[-1]:.2f}); seeding at the faint end."
+                )
+                m_meas = m_pred[-1]
+            # BC wiggles can make m_pred locally non-monotonic; interp
+            # over the magnitude-sorted pairs.
+            order = np.argsort(m_pred)
+            locus_masses = np.array([r[2] for r in self._ms_locus()])
+            masses.append(
+                float(np.interp(m_meas, m_pred[order], locus_masses[order]))
+            )
+
+        if not masses:
+            return
+        mass = float(np.median(masses))
+        loci = np.array(self._ms_locus())[::-1]  # ascending mass for interp
+        teff = float(np.interp(mass, loci[:, 2], loci[:, 0]))
+        radius = float(np.interp(mass, loci[:, 2], loci[:, 1]))
+        logger.info(
+            f"source-flux seeding: star '{src_name}' starts as a "
+            f"{mass:.2f} Msun / {radius:.2f} Rsun / {teff:.0f} K dwarf "
+            f"(from f_source through the zeropoint at {d_pc:.0f} pc), "
+            f"replacing the solar-clone default."
+        )
+        for param, val in (
+            ("logmass", float(np.log10(mass))),
+            ("teff", teff),
+            ("radius", radius),
+            ("teffsed", teff),
+            ("radiussed", radius),
+        ):
+            self.config_manager.add_hint(
+                f"star.{src}.{param}", val, rank=RANK_DERIVED_DATA
+            )
+
     # Flux-space images of the magnitude caps these amplitudes used to carry:
     # a 5 mag GP amplitude is a factor 10**(0.4*5) = 100 in flux, and a 10 mag
     # outlier scale a factor 10**(0.4*10) = 1e4.  Applied per light curve
@@ -1437,7 +1680,7 @@ class MulensInstrument(Instrument):
         flux-ratio (q_flux) constraint is future work.
 
         What remains here at stage 7 is the opt-in blend tie:
-        `sed_constrain_blend: true` additionally ties f_blend to the
+        `sed_constrains_blend: true` additionally ties f_blend to the
         SED-predicted blend of the modeled non-source stars through the same
         zeropoint (Gaussian potential with `sed_blend_sigma`, default 0.2
         mag). f_blend also contains any unrelated field stars, so leave this
@@ -1452,11 +1695,11 @@ class MulensInstrument(Instrument):
         for i, name in enumerate(self.names):
             if filter_keys[i] is None:
                 continue
-            if not self.config[i].get("sed_constrain_blend", False):
+            if not self.config[i].get("sed_constrains_blend", False):
                 continue
             if not other_indices:
                 logger.warning(
-                    f"mulensinstrument {name}: sed_constrain_blend is "
+                    f"mulensinstrument {name}: sed_constrains_blend is "
                     f"set but every modeled star is a source; skipping."
                 )
                 continue
@@ -1465,10 +1708,23 @@ class MulensInstrument(Instrument):
                 other_indices, filter_keys[i], system
             )
             fb_i = pt.maximum(self.f_blend.value[i], 1e-30)
-            m_blend_inst = -2.5 * pt.log10(fb_i) + self.zeropoint.value[i]
+            # Predicted blend in the INSTRUMENT's flux system: the modeled
+            # non-source stars plus the fitted neighbor third light.  At
+            # neighbor_flux = 0 the residual is algebraically identical to
+            # the old m_blend_pred - m_blend_inst magnitude difference (same
+            # square), so a config without the neighbor term builds the same
+            # potential.  With it, positivity makes the tie one-sided: a
+            # blend BRIGHTER than the lens is absorbed by f_nb, a blend
+            # FAINTER than the lens still costs -- "the blend must contain
+            # at least the lens's light".
+            f_lens_inst = 10 ** (
+                -0.4 * (m_blend_pred - self.zeropoint.value[i])
+            )
+            f_pred = f_lens_inst + self.neighbor_flux.value[i]
+            resid = 2.5 * pt.log10(pt.maximum(f_pred, 1e-30) / fb_i)
             pm.Potential(
                 f"{self.prefix}.{name}.sed_blend_prior",
-                -0.5 * ((m_blend_pred - m_blend_inst) / blend_sigma) ** 2,
+                -0.5 * (resid / blend_sigma) ** 2,
             )
 
     def compile_plotters(self, model, system):

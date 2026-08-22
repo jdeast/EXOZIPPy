@@ -10,7 +10,7 @@ variations), building on fitthermal (PR 1.a).
     the phase/period shape fails loudly rather than silently.
   - planet/physics.py's calc_beam_from_K: unit/magnitude sanity for the
     beam_constrains_mass formula.
-  - Band/Planet manifest wiring: fitreflect/fitellip/beam_free/
+  - Band/Planet manifest wiring: fitreflect/fitellip/fitbeam/
     beam_constrains_mass parsing and the opt-in pinning gate (mirrors
     fitthermal's).
   - Integration: planetvisible gates thermal/reflect but not ellipsoidal,
@@ -365,13 +365,13 @@ def test_band_reflect_ellip_pinned_when_not_opted_in():
 
 
 # ---------------------------------------------------------------------------
-# Planet manifest wiring: beam_free / beam_constrains_mass
+# Planet manifest wiring: fitbeam / beam_constrains_mass
 # ---------------------------------------------------------------------------
 
 
-def test_planet_beam_free_beam_constrains_mass_default_false():
+def test_planet_fitbeam_beam_constrains_mass_default_false():
     planet = _make_planet([{"name": "b"}])
-    assert planet.beam_free == [False]
+    assert planet.fitbeam == [False]
     assert planet.beam_constrains_mass == [False]
 
 
@@ -384,8 +384,8 @@ def test_planet_beam_absent_when_neither_set():
     assert "beam" not in planet.manifest
 
 
-def test_planet_beam_free_with_beam_free():
-    planet = _make_planet([{"name": "b", "beam_free": True}])
+def test_planet_fitbeam_with_fitbeam():
+    planet = _make_planet([{"name": "b", "fitbeam": True}])
     planet.register_parameters(system=_FakeSystemNoOrbit())
     assert planet.manifest["beam"] == {}
 
@@ -396,9 +396,9 @@ def test_planet_beam_uses_expression_with_beam_constrains_mass():
     assert planet.manifest["beam"] == "default"
 
 
-def test_planet_beam_free_and_beam_constrains_mass_together_derives():
+def test_planet_fitbeam_and_beam_constrains_mass_together_derives():
     """
-    Given both beam_free and beam_constrains_mass set on the same planet,
+    Given both fitbeam and beam_constrains_mass set on the same planet,
     When register_parameters runs,
     Then beam_constrains_mass wins: beam is still derived from K via the
     "default" expression rather than fit freely. Per EXOFASTv2's
@@ -406,7 +406,7 @@ def test_planet_beam_free_and_beam_constrains_mass_together_derives():
     beam is computed whenever either is set.
     """
     planet = _make_planet(
-        [{"name": "b", "beam_free": True, "beam_constrains_mass": True}]
+        [{"name": "b", "fitbeam": True, "beam_constrains_mass": True}]
     )
     planet.register_parameters(system=_FakeSystemWithOrbit())
     assert planet.manifest["beam"] == "default"
@@ -439,7 +439,7 @@ def test_beam_off_does_not_require_K_no_orbit_config():
     expression dependency in the *beam_constrains_mass* case.
 
     Regression test for a real bug found in review: Planet.register_
-    parameters's off/beam_free manifest entries are dicts with no explicit
+    parameters's off/fitbeam manifest entries are dicts with no explicit
     "expr_key" ({} or {"overrides": ...}), which is supposed to mean "no
     expression" -- but graph.py's build-order step had a bug (see
     graph.py's determine_pymc_build_order) that treated any non-None dict
@@ -607,7 +607,7 @@ def test_ellipsoidal_survives_secondary_eclipse_thermal_and_reflect_dont(
 def test_reflect_ellip_beam_are_exactly_zero_by_default(tmp_path_factory):
     """
     Given a band with no fitreflect/fitellip and a planet with no
-    beam_free/beam_constrains_mass,
+    fitbeam/beam_constrains_mass,
     When the model is built,
     Then band.reflect, band.ellipsoidal, and planet.beam all evaluate to
     exactly 0 -- the same guarantee already established for thermal.
@@ -648,7 +648,7 @@ def test_beam_diluted_when_sed_dilution_active(tmp_path_factory):
     """
     Given a two-identical-star system (SED dilution = 0.5, same setup as
     test_sed_deblending_dilutes_transit_depth in test_transit_band.py)
-    with beam_free on the planet and thermal/reflect/ellipsoidal left at
+    with fitbeam on the planet and thermal/reflect/ellipsoidal left at
     their default off,
     When build_likelihood's actual mu is evaluated at quadrature phase
     (tc + period/4 -- away from any transit/eclipse, where beam is
@@ -672,7 +672,7 @@ def test_beam_diluted_when_sed_dilution_active(tmp_path_factory):
 
     config = {
         "star": [{"name": "A", "mist": False}, {"name": "B", "mist": False}],
-        "planet": [{"name": "b", "beam_free": True}],
+        "planet": [{"name": "b", "fitbeam": True}],
         "orbit": [{"name": "b"}],
         "band": [
             {"name": "V", "filter": "V", "ld_law": "quadratic", "star_ndx": 0}

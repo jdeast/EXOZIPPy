@@ -233,3 +233,48 @@ def test_config_errors_are_actionable(cfg, match):
     """
     with pytest.raises(ValueError, match=match):
         _mann(cfg)
+
+
+def test_ks_extinction_ratio_matches_the_shipped_law():
+    """
+    Given the extinction law the SED's BC grids are generated from,
+    When A_Ks / A_V is computed at Ks (2.159 um) against V (0.55 um),
+    Then it equals the KS_AV_RATIO Mann dereddens with.
+
+    The dereddening exists because the apparent Ks entering the relations is
+    EXTINCTED in both pathways -- predict_star_appmag interpolates
+    BC(teff, logg, feh, AV), so the av axis folds A_lambda into the synthetic
+    magnitude, and an observed Ks is extincted by nature -- while
+    Mann+2015/2019 calibrate on true M_Ks of nearby, essentially unreddened
+    M dwarfs.  Subtracting only the distance modulus handed the relations
+    M_Ks + A_Ks: mass and radius biased LOW by ~5-8% at bulge extinctions
+    (A_V ~ 2), several times the relations' own scatter.  Pinning the ratio
+    to the SHIPPED law (not a literature value) is the point of this test:
+    what the BC grid adds is exactly what mann.py removes, and if the law
+    file ever changes, this fails instead of silently splitting the two.
+    """
+    import numpy as np
+
+    from exozippy.components.mann.mann import KS_AV_RATIO
+    from exozippy.components.sed.bc_grid import DEFAULT_MODEL_ROOT
+
+    lam, ext = np.loadtxt(
+        DEFAULT_MODEL_ROOT / "extinction_law.ascii", unpack=True
+    )
+    ratio = np.interp(2.159, lam, ext) / np.interp(0.55, lam, ext)
+    assert KS_AV_RATIO == pytest.approx(ratio, abs=5e-4)
+
+
+def test_dereddening_term_is_wired_into_build_likelihood():
+    """The absks fed to the relations subtracts KS_AV_RATIO * av.
+
+    Source-level because Mann's build_likelihood needs a full System; the
+    physics (ratio value) is pinned against the law file above, and this
+    pins that the subtraction actually happens where the relations read
+    their input.
+    """
+    import inspect
+
+    src = inspect.getsource(Mann.build_likelihood)
+    assert "KS_AV_RATIO * star.av.value" in src
+    assert "calc_absmag(appks, distance) - a_ks" in src

@@ -348,6 +348,40 @@ class Lens(Component):
                 "doc": "Index or name of the source star. Default 1.",
             },
             {
+                "key": "fitmurel",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Sample the heliocentric lens-source relative proper "
+                    "motion (mu_ra_rel/mu_dec_rel) directly -- the "
+                    "combination the light curve measures -- and derive "
+                    "the lens star's pm as pm_source + mu_rel, instead of "
+                    "sampling both stars' pm and deriving mu_rel. A "
+                    "coordinate choice like fitvcve: same joint density "
+                    "(|J| = 1), better-conditioned axes. Default False."
+                ),
+            },
+            {
+                "key": "star_constrains_rho",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Default True: rho is the identity theta_star/theta_E "
+                    "-- the stellar model (SED, evolutionary models, "
+                    "relations, or priors) constrains rho alongside the "
+                    "light curve's finite-source measurement. Set False "
+                    "to sever the tie: rho is sampled directly (as "
+                    "log_rho) and the stellar prediction is reported as "
+                    "rho_pred, so the pull between the two is visible "
+                    "instead of silently arbitrated. Requires "
+                    "finite_source. Same vocabulary as the planet "
+                    "component's beam_constrains_mass and the "
+                    "instrument's sed_constrains_blend. A tie is a physics LINK, not a one-way assignment: information flows toward whichever side is less constrained elsewhere (components.md, 'Config flag vocabulary')."
+                ),
+            },
+            {
                 "key": "mmexofast",
                 "kind": "datafile",
                 "accepts": "*.json",
@@ -670,13 +704,37 @@ class Lens(Component):
                 entry["names"] = src_names
             return entry
 
+        # fitmurel (coordinate choice, fitvcve family): sample the
+        # LC-measured relative proper motion directly; the star component
+        # reads this flag and derives the LENS star's pm = pm_source +
+        # mu_rel (|J| = 1; see star.py and notes observable_coordinates).
+        fitmurel = bool(self.config[0].get("fitmurel", False))
+
+        def murel_entry():
+            if not fitmurel:
+                return per_source("default")
+            # Sampled mode: start at 0 relative pm through the overrides
+            # channel (defaults.yaml deliberately carries no initval --
+            # the engine's default-armor would seed mu_rel = 0 into every
+            # config and break the t_E derivation chain), with a
+            # preliminary 1 mas/yr whitening scale.  The engine's mu_rel
+            # relation upgrades the start from any pm/mmexofast seeds.
+            entry = per_source()
+            entry["overrides"] = {"initval": [0.0] * self.n_sources}
+            return entry
+
+        if fitmurel:
+            for j in range(self.n_sources):
+                self.config_manager.add_scale_hint(f"lens.{j}.mu_ra_rel", 1.0)
+                self.config_manager.add_scale_hint(f"lens.{j}.mu_dec_rel", 1.0)
+
         self.manifest = {
             "t_0": per_source(),
             "u_0": per_source(),
             "pi_rel": per_source("default"),
             "theta_E": per_source("default"),
-            "mu_ra_rel": per_source("default"),
-            "mu_dec_rel": per_source("default"),
+            "mu_ra_rel": murel_entry(),
+            "mu_dec_rel": murel_entry(),
             "mu_rel_mag": per_source("default"),
             "mu_ra_rel_geo": per_source("default"),
             "mu_dec_rel_geo": per_source("default"),
@@ -830,7 +888,29 @@ class Lens(Component):
                 )
 
         if any(self.finite_source):
-            self.manifest["rho"] = per_source("default")
+            # `star_constrains_rho: false` severs rho = theta_star/theta_E:
+            # rho becomes the light curve's own parameter (sampled as
+            # log_rho, mirroring log_s/s) and the stellar chain's
+            # prediction is reported separately as rho_pred, so the pull
+            # between the two is a published number instead of a silently
+            # resolved tension (see rho_pred's defaults.yaml note; the
+            # planet component's beam_constrains_mass is the same
+            # vocabulary).  The
+            # relaxation engine still knows BOTH relations, so a rho seed
+            # (user or MMEXOFAST) back-solves to a log_rho start and the
+            # stellar chain still seeds consistently.
+            if not bool(self.config[0].get("star_constrains_rho", True)):
+                self.manifest["log_rho"] = per_source()
+                self.manifest["rho"] = per_source("from_log_rho")
+                self.manifest["rho_pred"] = per_source("default")
+            else:
+                self.manifest["rho"] = per_source("default")
+        elif not bool(self.config[0].get("star_constrains_rho", True)):
+            logger.warning(
+                "lens: star_constrains_rho is false but finite_source is "
+                "not set -- rho never enters the magnification, so there "
+                "is nothing to sever; ignoring it."
+            )
 
         # Seed alpha hint (degrees, user unit) so inspect_start can display it
         # even before the expression graph is built.

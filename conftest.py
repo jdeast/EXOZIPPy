@@ -150,6 +150,41 @@ if _BASE_COMPILEDIR is not None:
             p for p in (_ours, _existing) if p
         )
 
+# ---------------------------------------------------------------------------
+# Per-xdist-worker compiledir
+# ---------------------------------------------------------------------------
+# PyTensor serializes ALL compilation behind one lock per compiledir, and
+# compile__timeout=600 above is exactly pytest-timeout's own 600 s ceiling --
+# so on a cold cache a worker queued behind the others' compiles dies by
+# pytest-timeout without ever failing the lock.  Measured (ezsuite 15363115,
+# 15363286): the cluster suite jobs override base_compiledir to per-job local
+# scratch (cold by construction, deliberately -- the home directory is NFS
+# and the client drops advisory locks under -n 6), and whichever test owned
+# the largest compile at the wrong moment died -- first the KMT provenance
+# fixtures behind a 122-compile seeding storm (fixed at the source), then the
+# kelt4 hierarchical logp, the suite's biggest single compile, which passes
+# alone in ~143 s.  A worker suffix on the FINAL winning base_compiledir
+# removes the shared lock entirely; the price is duplicated compiles of
+# common ops across workers, paid in parallel instead of in a queue.
+# Appended as the rightmost flag, so it wins whatever base won above
+# (parse_config_string builds its dict left to right).
+_worker = os.environ.get("PYTEST_XDIST_WORKER")
+if _worker and "pytensor" not in sys.modules:
+    _flags = os.environ.get("PYTENSOR_FLAGS", "")
+    _base = None
+    for _part in _flags.split(","):
+        if _part.strip().startswith("base_compiledir="):
+            _base = _part.split("=", 1)[1].strip().strip("'\"")
+    if _base:
+        os.environ["PYTENSOR_FLAGS"] = ",".join(
+            part
+            for part in (
+                _flags,
+                "base_compiledir=" + shlex.quote(str(Path(_base) / _worker)),
+            )
+            if part
+        )
+
 
 def _load_budget_module():
     """Import scripts/pytensor_cache_budget.py by path.

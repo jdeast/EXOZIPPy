@@ -97,6 +97,15 @@ lens:
   # prior and Gaia priors constrain).  The *_geo trio below converts to the
   # geocentric frame at t0_par for the light-curve chain.
   mu_ra_rel:
+    # Sampled (fitmurel: true) or derived (default).  fitmurel makes the
+    # LC-measured relative pm the coordinate and derives the lens star's
+    # pm = pm_source + mu_rel instead (|J| = 1).  NO initval here: a
+    # defaults.yaml initval is registered by the relaxation engine's
+    # default-armor for EVERY config, and a mu_rel = 0 seed broke the
+    # t_E = theta_E/mu_rel derivation chain everywhere (six-test suite
+    # regression, ezsuite 15362719).  The fitmurel start arrives through
+    # the lens manifest's overrides channel instead, which only exists
+    # when the mode is selected.
     lower: -10000.0
     upper: 10000.0
     unit: "mas/yr"
@@ -108,6 +117,15 @@ lens:
         func_name: "calc_mu_ra_rel"
         deps: [ "star.pm_ra[lens_map]", "star.pm_ra[source_map]" ]
   mu_dec_rel:
+    # Sampled (fitmurel: true) or derived (default).  fitmurel makes the
+    # LC-measured relative pm the coordinate and derives the lens star's
+    # pm = pm_source + mu_rel instead (|J| = 1).  NO initval here: a
+    # defaults.yaml initval is registered by the relaxation engine's
+    # default-armor for EVERY config, and a mu_rel = 0 seed broke the
+    # t_E = theta_E/mu_rel derivation chain everywhere (six-test suite
+    # regression, ezsuite 15362719).  The fitmurel start arrives through
+    # the lens manifest's overrides channel instead, which only exists
+    # when the mode is selected.
     lower: -10000.0
     upper: 10000.0
     unit: "mas/yr"
@@ -177,6 +195,69 @@ lens:
     internal_unit: ""
     latex: "\\rho"
     description: "source radius"
+    expressions:
+      default:
+        func_name: "calc_rho"
+        deps: [ "star.radius[source_map]", "star.distance[source_map]", "theta_E" ]
+      # Selected by `star_constrains_rho: false` on the lens: rho becomes the light
+      # curve's own parameter (via the sampled log_rho) and the stellar
+      # chain's prediction moves to rho_pred, so the two never silently
+      # trade against each other (see rho_pred's note).
+      from_log_rho:
+        func_name: "calc_rho_from_log"
+        deps: [ "log_rho" ]
+  log_rho:
+    # Sampled ONLY when the lens sets `star_constrains_rho: false`; otherwise absent
+    # from the manifest entirely.  Log coordinate because candidate rho
+    # spans decades (mirrors log_s/s and planet log_q).  Upper = rho 0.5:
+    # rho's own comment already says real events live below ~0.5 and that
+    # larger rho both erases the signal (A -> 1) and drives VBM's
+    # finite-source machinery into its most expensive regime -- and the
+    # first severed 128 run proved it operationally: hot tempering chains
+    # pushed the free log_rho toward the old rho<=10 bound and drowned the
+    # run in 10s eval_timeout rejections and worker-pool recycling.  The
+    # derived rho keeps its soft 10 cap; only the SAMPLED coordinate is
+    # confined to the physical regime.  The lower bound sits far below any
+    # detectable finite-source effect, where the likelihood is flat in
+    # log_rho and the fit degrades gracefully to point-source.
+    lower: -6.0
+    upper: -0.301
+    initval: -2.0
+    init_scale: 0.1
+    unit: ""
+    internal_unit: ""
+    latex: "\\log\\rho"
+    description: "log10 source radius"
+  rho_pred:
+    # The stellar chain's prediction theta_star/theta_E, reported ONLY when
+    # `star_constrains_rho: false` severs rho = theta_star/theta_E (with
+    # the identity intact this would duplicate rho's row).  Publishing both
+    # makes the pull between the light curve's rho and the chain's rho a
+    # visible number: on DC2018 event 128 the identity + the event-rate
+    # prior + the Hogg mixture silently resolved a 601-nat disagreement in
+    # the prior's favor (rho low by ~8x); a reported rho vs rho_pred pull
+    # is the diagnostic that failure mode cannot hide from.
+    # The severed pair also composes with the user link machinery into a
+    # SOFT tie (star_constrains_rho: false + params
+    # lens.Lens.rho: {initval: <n>, mu: lens.Lens.rho_pred, sigma: 0.002};
+    # mu link = Gaussian potential on the difference; keep a NUMERIC
+    # initval -- an initval link replaces the seed and can trip the
+    # MMEXOFAST sufficiency probe).  It builds and is pinned by test
+    # (tests/test_star_constrains_rho.py), but it is NOT a recommended
+    # third mode: rho = theta_star/theta_E is exact physics, so any
+    # nonzero sigma inserts arbitrary slop between quantities that have
+    # none, and a tight-but-nonzero tie is a narrow curved ridge in the
+    # joint space -- hard to traverse for exactly the gradient-free
+    # samplers this component requires.  The two honest positions are the
+    # exact identity (default; it already blends the light curve's and
+    # the chain's information optimally when both are sound) and fully
+    # severed with the rho vs rho_pred pull reported (when one of them
+    # may not be).
+    upper: 10.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\rho_{\\rm pred}"
+    description: "chain-predicted rho"
     expressions:
       default:
         func_name: "calc_rho"
@@ -416,6 +497,29 @@ mulensinstrument:
   # facility -- unit conversion, the LaTeX table, links, bound_scale -- works
   # on it.  Override per light curve in params.yaml; sigma must be nonzero
   # (an exact zeropoint would make f_source deterministic given the SED).
+  neighbor_flux:
+    # Third light: blend flux NOT supplied by any modeled star, in the data
+    # file's own flux system.  Exists because the blend-tie assumption
+    # f_blend = (modeled non-source stars) is violated as a RULE at Roman
+    # resolution: across the 44 Roman-fidelity DC2018 events the lens star
+    # supplies a median 15% of the blend, and unrelated line-of-sight stars
+    # dominate it in 80% of events.  With this term the tie becomes the
+    # physically correct inequality f_blend >= f_lens (positivity does the
+    # work).  Sampled ONLY on light curves with `sed_constrains_blend: true`
+    # -- with the tie off, f_blend is already free and a neighbor term is
+    # exactly degenerate with it in ANY light curve, finite-source or not
+    # (the light curve measures only the sum).  upper/initval are installed
+    # per light curve from the bootstrapped baseline flux, like the other
+    # flux amplitudes: the file's flux zeropoint is arbitrary.
+    lower: 0.0
+    upper: 1.0e+30
+    initval: 0.0
+    init_scale: 0.1
+    unit: ""
+    internal_unit: ""
+    description: "Neighbor blend flux"
+    latex: f_{\rm nb}
+
   zeropoint:
     # No `initval:` key, like every other DERIVED parameter in this file
     # (f_source, f_blend, s, ...): the expression IS the value.  It carried a

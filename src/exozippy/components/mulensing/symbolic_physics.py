@@ -20,6 +20,7 @@ lens_pm_ra, source_pm_ra = sp.symbols("lens_pm_ra source_pm_ra")
 lens_pm_dec, source_pm_dec = sp.symbols("lens_pm_dec source_pm_dec")
 pi_E_N, pi_E_E = sp.symbols("pi_E_N pi_E_E")
 rho, source_radius = sp.symbols("rho source_radius")
+log_rho = sp.symbols("log_rho", real=True)
 q_lens, companion_mass = sp.symbols("q_lens companion_mass")
 alpha, xalpha, yalpha = sp.symbols("alpha xalpha yalpha")
 # Projected separation: log_s is sampled, s is derived (s = 10**log_s).  The
@@ -135,6 +136,12 @@ def get_symbol_map(lens_config_list):
             result["s"] = "lens.0.s"
             result["log_s"] = "lens.0.log_s"
 
+        # log_rho exists only when the lens frees rho from the stellar
+        # chain (`star_constrains_rho: false`); the relation stays
+        # inert otherwise, exactly like s/log_s for PSPL.
+        if not lens_config_list.get("star_constrains_rho", True):
+            result["log_rho"] = f"lens.{j}.log_rho"
+
         maps.append(result)
 
     return maps
@@ -178,6 +185,11 @@ RELATIONS = [
     # Only active for binary lenses (s/log_s mapped in get_symbol_map there);
     # inert for PSPL.  Lets user lens.s initvals back-solve to a log_s start.
     sp.Eq(s, 10**log_s),
+    # rho reparameterization, active only when the lens severs the
+    # stellar tie (`star_constrains_rho: false`)
+    # (log_rho mapped in get_symbol_map there; inert otherwise).  Lets a
+    # user or MMEXOFAST rho seed back-solve to a log_rho start.
+    sp.Eq(rho, 10**log_rho),
     # Binary lens mass ratio: q = M_companion / M_primary
     # companion_mass/primary_lens_mass are only in the symbol map for binary
     # events, so these relations are automatically inert for PSPL (relaxation

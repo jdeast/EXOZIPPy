@@ -53,7 +53,7 @@ class Planet(Component):
         # BEER (PR 1.b): Doppler beaming amplitude. Per-planet, not
         # per-band (EXOFASTv2 declares it ss.planet[i].beam, unlike
         # thermal/reflect/ellipsoidal which are ss.band[i].*).
-        self.beam_free = [bool(c.get("beam_free", False)) for c in self.config]
+        self.fitbeam = [bool(c.get("fitbeam", False)) for c in self.config]
         self.beam_constrains_mass = [
             bool(c.get("beam_constrains_mass", False)) for c in self.config
         ]
@@ -82,7 +82,7 @@ class Planet(Component):
     def config_schema(cls):
         return [
             {
-                "key": "beam_free",
+                "key": "fitbeam",
                 "kind": "option",
                 "accepts": None,
                 "required": False,
@@ -105,7 +105,11 @@ class Planet(Component):
                     "the RV semi-amplitude K (Faigler & Mazeh 2011 eq. 1, "
                     "bolometric approximation) instead of fitting it "
                     "freely -- ties the photometric beaming signal to the "
-                    "same mass/K driving the RV model. Default False."
+                    "same mass/K driving the RV model. Default False. "
+                    "A tie is a physics LINK, not a one-way assignment: "
+                    "information flows toward whichever side is less "
+                    "constrained elsewhere (components.md, 'Config flag "
+                    "vocabulary')."
                 ),
             },
             {
@@ -269,7 +273,7 @@ class Planet(Component):
             )
 
         # BEER (PR 1.b): beam is either (a) derived from K for every planet
-        # (beam_constrains_mass), (b) free-fit for every planet (beam_free),
+        # (beam_constrains_mass), (b) free-fit for every planet (fitbeam),
         # or (c) pinned at 0 everywhere (neither set -- transit model
         # unchanged). The two flags are not mutually exclusive: per
         # EXOFASTv2's step2pars.pro (~line 256), beam is computed whenever
@@ -282,7 +286,7 @@ class Planet(Component):
         # sigma), never a mix of the two within one parameter -- so a
         # per-planet mix of derived/free/off beam isn't supported yet.
         any_beam_constrains_mass = any(self.beam_constrains_mass)
-        any_beam_free = any(self.beam_free)
+        any_fitbeam = any(self.fitbeam)
         if any_beam_constrains_mass and not has_orbit:
             raise ValueError(
                 f"[{self.prefix}] beam_constrains_mass requires an orbit "
@@ -290,23 +294,23 @@ class Planet(Component):
                 f"orbital elements)."
             )
         if (
-            len(set(self.beam_free)) > 1
+            len(set(self.fitbeam)) > 1
             or len(set(self.beam_constrains_mass)) > 1
         ):
             logger.warning(
-                f"[{self.prefix}] beam_free/beam_constrains_mass differ "
-                f"across planets (beam_free={self.beam_free}, "
+                f"[{self.prefix}] fitbeam/beam_constrains_mass differ "
+                f"across planets (fitbeam={self.fitbeam}, "
                 f"beam_constrains_mass={self.beam_constrains_mass}); beam "
                 f"is a whole-component mode, not per-planet (see the "
                 f"comment above), so the resolved mode applies to every "
                 f"planet -- derived-from-K if any planet set "
                 f"beam_constrains_mass, else free-fit if any set "
-                f"beam_free, else pinned at 0."
+                f"fitbeam, else pinned at 0."
             )
         if any_beam_constrains_mass:
             self.manifest["beam"] = "default"
-        elif any_beam_free:
-            off = [i for i in range(self.n_elements) if not self.beam_free[i]]
+        elif any_fitbeam:
+            off = [i for i in range(self.n_elements) if not self.fitbeam[i]]
             entry = {}
             if off:
                 pin = np.full(self.n_elements, np.nan)
