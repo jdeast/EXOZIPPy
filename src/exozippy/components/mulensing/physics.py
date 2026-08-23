@@ -471,6 +471,14 @@ def calc_theta_E_from_log(log_theta_E):
 
 
 @register_physics
+def calc_u0_from_u0te(u0te, t_E):
+    # fitu0te inverse (swap 4): u_0 = u0te / t_E, both signed.
+    # |du_0/du0te| = 1/t_E is NOT constant; the correction potential
+    # lives in Lens.build_likelihood.
+    return u0te / pt.maximum(t_E, 1e-12)
+
+
+@register_physics
 def calc_rho_from_log(log_rho):
     # Sampled coordinate for `star_constrains_rho: false` lenses: rho spans decades
     # (1e-4 .. 0.5 across published events), so the free coordinate is

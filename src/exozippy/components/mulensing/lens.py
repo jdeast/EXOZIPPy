@@ -397,6 +397,21 @@ class Lens(Component):
                 ),
             },
             {
+                "key": "fitu0te",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Sample the SIGNED effective timescale u0te = u_0*t_E "
+                    "(days) and derive u_0 = u0te/t_E. Named for the "
+                    "product because t_eff collides with the stellar "
+                    "effective temperature in the config namespace; the "
+                    "LaTeX symbol stays t_eff. A coordinate choice like "
+                    "fitvcve; the 1/t_E Jacobian potential is added in "
+                    "build_likelihood. Default False."
+                ),
+            },
+            {
                 "key": "star_constrains_rho",
                 "kind": "option",
                 "accepts": None,
@@ -778,6 +793,15 @@ class Lens(Component):
         if fitpirel:
             self.config_manager.add_scale_hint("lens.0.log_pi_rel", 0.1)
 
+        # fitu0te (swap 4): sample the signed effective timescale, derive
+        # u_0 = u0te/t_E (see the defaults.yaml naming note: u0te, not
+        # t_eff -- the stellar teff collision).
+        fitu0te = bool(self.config[0].get("fitu0te", False))
+        self._fitu0te = fitu0te
+        if fitu0te:
+            for j in range(self.n_sources):
+                self.config_manager.add_scale_hint(f"lens.{j}.u0te", 0.05)
+
         # fitthetae (swap 3): sample log_theta_E, derive theta_E from it,
         # and the star component derives the HOST logmass (see star.py).
         # Constraints: single source (theta_E is per-source), and at most
@@ -816,7 +840,7 @@ class Lens(Component):
 
         self.manifest = {
             "t_0": per_source(),
-            "u_0": per_source(),
+            "u_0": per_source("from_u0te" if fitu0te else None),
             "pi_rel": per_source("from_log_pi_rel" if fitpirel else "default"),
             "theta_E": per_source(
                 "from_log_theta_E" if fitthetae else "default"
@@ -824,6 +848,7 @@ class Lens(Component):
             "mu_ra_rel": murel_entry(),
             "mu_dec_rel": murel_entry(),
             **({"log_pi_rel": per_source()} if fitpirel else {}),
+            **({"u0te": per_source()} if fitu0te else {}),
             **({"log_theta_E": per_source()} if fitthetae else {}),
             "mu_rel_mag": per_source("default"),
             "mu_ra_rel_geo": per_source("default"),
@@ -1469,6 +1494,15 @@ class Lens(Component):
         # measure and logit corrections are Parameter.build_pymc's, as for
         # every sampled coordinate; this potential is only the map's own
         # stretch factor.
+        # fitu0te's change of variables: u_0 = u0te/t_E, so
+        # |du_0/du0te| = 1/t_E and the correction is -log(t_E) per source
+        # trajectory.  Same reasoning as fitpirel's potential below.
+        if getattr(self, "_fitu0te", False):
+            pm.Potential(
+                f"{self.prefix}.fitu0te_jacobian",
+                -pt.log(pt.maximum(self.t_E.value[0], 1e-12)),
+            )
+
         if getattr(self, "_fitpirel", False):
             l_idx = int(self.lens_bodies[0][0][1])
             d_l = system.star.distance.value[l_idx]
