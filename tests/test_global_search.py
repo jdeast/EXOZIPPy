@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 from exozippy.components import globalsearch
+from exozippy.config import RANK_DERIVED_DATA
 from exozippy.system import System
 
 # --- synthetic data -----------------------------------------------------------
@@ -398,6 +399,34 @@ def test_the_seeded_start_beats_the_unseeded_one(tmp_path):
     # Assert
     assert np.isfinite(lp_seeded)
     assert lp_seeded > lp_blind + 100.0
+
+
+def test_the_seed_is_pushed_through_the_hint_channel_alone(tmp_path):
+    """Given a blindly seeded transit fit,
+    when the searched period and epoch are pushed,
+    then they reach the config manager through add_hint ONLY -- nothing is
+    written a second time through the override channel.
+
+    Until review 3.14.3 this module wrote every seed twice, because
+    ConfigManager.resolve() did not layer self.hints and the stage-2 reader
+    that builds tc's window could not otherwise see it. resolve() layers
+    hints now (tests/test_hint_resolution.py), so the duplicate is gone. It
+    must not come back: an override carries no rank, so a second write is
+    invisible to the provenance ledger and can only ever drift from the hint
+    it shadows."""
+    # Arrange
+    config = transit_config(tmp_path)
+
+    # Act
+    system = prepared(config)
+    cm = system.config_manager
+
+    # Assert -- the ranked channel carries them ...
+    assert "orbit.0.tc" in cm.hints
+    assert cm.hint_ranks["orbit.0.tc"] == RANK_DERIVED_DATA
+    assert "orbit.0.logP" in cm.hints or "orbit.0.period" in cm.hints
+    # ... and the unranked one carries nothing for this orbit.
+    assert not [k for k in cm.param_overrides if k.startswith("orbit.")]
 
 
 # --- end to end: precedence ---------------------------------------------------
