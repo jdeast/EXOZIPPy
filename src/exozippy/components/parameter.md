@@ -72,6 +72,16 @@ Tests: `tests/test_linked_params.py`.
 
 **The sample axis is still a Python loop, and that is now a measured choice, not an oversight.** The obvious batching is `pytensor.graph.replace.vectorize_graph` over one extra leading axis; it is bit-identical, and it is a ~200x pessimization. On a 4-element derived parameter over 20 000 draws the loop costs **0.078 s** (~4 us a draw -- pytensor's call overhead is not the bottleneck the item assumed) while compiling the vectorized Blockwise graph costs **16 s warm, 112 s cold**, once per parameter. The cheaper-looking `clone_replace` with wider inputs is rejected outright by pytensor's type check (a `(?, ?)` matrix cannot stand in for a `(4,)` vector), and would only be valid for a wholly elementwise graph in any case. Re-measure those two numbers before re-attempting it.
 
+### A summary belongs to the draws it came from
+
+`Parameter.posterior` is a **property**, and its setter drops `summary` and `mode_summaries`. It has to: both are caches of one set of draws, and every consumer recomputes only `if p.summary is None` (`to_latex_def`, `build_csv_output`, `latex._value_cells`). `distribute_posterior` used to overwrite `posterior` and leave them alone, so a SECOND report off one live System -- `exozippy-modes`, a GUI re-solve, any script that fits and then re-reports -- published the FIRST trace's medians, silently, because a median is a plausible number whichever trace it came from (review 3.14.7; measured as two bit-identical results CSVs from two different traces). Assign through `posterior`, never to the `_posterior` slot behind it.
+
+2.11.3's fix for the `mode_summaries` half -- recompute when the cached LENGTH disagrees with the new mode count -- does **not** transfer to `summary`: a single summary has no length to compare. That check survives in `_ensure_mode_summaries` anyway, as the guard for a caller that recomputes the modes without redistributing the posterior.
+
+Invalidating at the write was chosen over the other candidate, a `summary` cached property keyed on the posterior it came from. `summary is None` is the "not computed yet" sentinel three call sites branch on, and a property that computes on access is never None -- each site would change meaning, and each would have to answer for a Parameter with no posterior at all, which is the normal state of a fixed element and of every parameter before the fit. Keying on object identity also catches only an assignment (exactly what the setter catches) while missing an in-place mutation of the same array.
+
+Tests: `tests/test_second_report_staleness.py`.
+
 ## Reporting component-added priors (`parameter.py`, `PriorContribution`)
 
 `get_prior_str` can only see a Parameter's **own** fields (`sigma`, `mu`, `lower`/`upper`), so a `pm.Potential` a *component* adds at stage 7 was invisible to it and the parameter was reported as whatever those fields implied -- "Uniform" for a bounded element with no sigma, which is exactly the prior such a potential replaces. `star.distance` (volume prior / galactic model), `star.logmass` (Chabrier or Salpeter IMF) and the FFP mass function were all misreported that way.

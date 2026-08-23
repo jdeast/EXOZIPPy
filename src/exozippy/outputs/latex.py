@@ -169,6 +169,13 @@ def _ensure_mode_summaries(system, p, mode_report):
 
     Recomputing on a length mismatch is the whole guard: the count is the
     one property of the cache that the new report can check.
+
+    Since 3.14.7 ``Parameter.posterior``'s setter drops both ``summary`` and
+    ``mode_summaries`` when new draws arrive, so the ordinary re-report path
+    no longer reaches here with a stale cache.  The length check stays: it
+    costs nothing, it is the only guard for a caller that recomputes the
+    modes WITHOUT redistributing the posterior, and it is what pins the
+    property that ``mode_summaries`` is one entry per mode.
     """
     if p.posterior is None:
         return

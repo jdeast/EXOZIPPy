@@ -773,9 +773,10 @@ class Parameter:
         default=None, init=False
     )  # pm RV or pm.Deterministic after build_pymc()
     latex_varname: str = field(default="", init=False)
-    posterior: Any = (
-        None  # user stores idata posterior samples here if desired
-    )
+    # Backing slot for the `posterior` property below.  Assign through the
+    # property (`param.posterior = ...`), never to `_posterior`: the setter
+    # is what drops the summaries derived from the OLD draws.
+    _posterior: Any = None
     summary: Optional[PosteriorSummary] = field(default=None, init=False)
     # one entry per posterior mode (same structure as summary), filled by
     # compute_mode_summaries when a mode report exists
@@ -1978,9 +1979,7 @@ class Parameter:
                 np.asarray(m, dtype=bool) for m, _e, _o, _s in expr_specs
             ]
             _non_sampled = (
-                self._inactive_mask(_all_masks[0].size)
-                if _all_masks
-                else None
+                self._inactive_mask(_all_masks[0].size) if _all_masks else None
             )
             for _m in _all_masks:
                 _non_sampled = _non_sampled | _m
@@ -3678,6 +3677,54 @@ class Parameter:
         return self._table_row(
             index, self.latex, idx_str, sigfigs, note_mark, mode_suffixes
         )
+
+    # ---------
+    # Posterior samples
+    # ---------
+    @property
+    def posterior(self):
+        """The draws this Parameter was last given, in USER units.
+
+        Written by ``System.distribute_posterior`` -- once per report, and a
+        live System can be reported more than once (``exozippy-modes``, the
+        GUI's re-solve, any script that fits and then re-reports).
+        """
+        return self._posterior
+
+    @posterior.setter
+    def posterior(self, value):
+        """Take new draws and DROP everything computed from the old ones.
+
+        Review 3.14.7.  ``summary`` and ``mode_summaries`` are caches of a
+        specific set of draws, and both are only recomputed when they are
+        None (``to_latex_def``, ``build_csv_output``, ``latex._value_cells``).
+        ``distribute_posterior`` overwrote ``posterior`` and left them alone,
+        so a SECOND report off one live System published the FIRST trace's
+        medians -- silently, since a median is a plausible number whichever
+        trace it came from.  2.11.3 caught the ``mode_summaries`` half by
+        comparing the cached LENGTH against the new mode count; there is no
+        length to compare for ``summary``, which is why this is a separate
+        item and a different fix.
+
+        Invalidating at the WRITE was chosen over the alternative the item
+        offered -- making ``summary`` a cached property keyed on the
+        posterior it came from.  Two reasons.  ``summary is None`` is the
+        "not computed yet" sentinel three call sites branch on, and a
+        property that computes on access is never None, so each of them
+        would have to change meaning and each would have to answer for a
+        Parameter with NO posterior (a fixed element, or any read before the
+        fit -- the normal case, not an edge one).  And keying on the object
+        the summary came from only catches an assignment, exactly what the
+        setter catches, while missing an in-place mutation of the same
+        array; it buys no coverage for the extra machinery.
+
+        The setter also covers writers other than ``distribute_posterior``
+        -- the mode CLI, the GUI, tests that inject draws by hand -- which a
+        fix inside ``distribute_posterior`` would not.
+        """
+        self._posterior = value
+        self.summary = None
+        self.mode_summaries = None
 
     # ---------
     # Posterior summary
