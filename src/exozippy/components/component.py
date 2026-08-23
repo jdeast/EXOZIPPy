@@ -1,3 +1,4 @@
+import weakref
 from abc import ABC, abstractmethod
 
 import numpy as np
@@ -282,6 +283,22 @@ class Component(ABC):
         """
         pass
 
+    # Attribute names holding something that BELONGS TO ONE BUILD: a
+    # pytensor node the component stashed, or a function compiled against
+    # one.  ``System.build_model`` clears every one of them before stage 5,
+    # so a second build on a live System cannot be handed the first model's
+    # graph (reviews 1.5.2, 3.14.12).  Declare the name here rather than
+    # writing another ad-hoc reset: a stage-6 cache (the SED's predicted
+    # apparent magnitudes, read while parameters are still being
+    # materialized) cannot be cleared at the top of stage 7, which is where
+    # the first round of these resets landed.
+    per_build_caches = ()
+
+    def reset_build_caches(self):
+        """Drop this component's per-build node caches.  See ``per_build_caches``."""
+        for name in self.per_build_caches:
+            setattr(self, name, None)
+
     def build_tensor_maps(self):
         """
         Stage 5: Automatic PyTensor Conversion.
@@ -349,6 +366,40 @@ class Component(ABC):
         """
         return isinstance(getattr(comp, name, None), Parameter)
 
+    @staticmethod
+    def _parameter_is_current(comp, name, model):
+        """Is ``comp.name`` a Parameter built for **this** ``model``?
+
+        The build-time predicate, and the one every "do not build it again"
+        site asks.  ``_has_built_parameter`` answers the narrower question
+        "is there a Parameter here at all", which was the whole predicate
+        until review 3.14.12: a component persists on the System, so a SECOND
+        ``system.build_model()`` found every parameter still holding the FIRST
+        model's node and handed it straight back -- the second model then
+        contained the first model's random variables and its logp compile
+        raised "Random variables detected in the logp graph".  The guard that
+        makes a recursive dependency resolve once per build was also the thing
+        that made a rebuild impossible.
+
+        The stamp is a weakref, so a discarded model is not kept alive by the
+        component that outlived it.
+
+        Absent provenance counts as CURRENT, deliberately: a component that
+        never went through ``add_parameter`` (a test double, or a Parameter
+        set by hand) has no stamp registry and no name in it, and the only
+        behaviour that may change here is the rebuild one.  A stamp naming a
+        DIFFERENT model is the sole stale verdict.
+        """
+        if not Component._has_built_parameter(comp, name):
+            return False
+        stamps = getattr(comp, "_built_for_model", None)
+        if not stamps:
+            return True
+        ref = stamps.get(name)
+        if ref is None:
+            return True
+        return ref() is model
+
     def declared_star_names(self):
         """Star instance names from the raw system config, or ``[]``.
 
@@ -387,8 +438,10 @@ class Component(ABC):
         if not hasattr(self, "_pending_reported"):
             self._pending_reported = {}
 
-        # 0. Prevent double-building nodes
-        if self._has_built_parameter(self, param_name):
+        # 0. Prevent double-building nodes -- within THIS build.  A node
+        # stamped for an earlier model is stale and must be rebuilt; see
+        # _parameter_is_current (review 3.14.12).
+        if self._parameter_is_current(self, param_name, model):
             return getattr(self, param_name).value
 
         if not hasattr(self, "manifest"):
@@ -513,6 +566,12 @@ class Component(ABC):
         )
 
         setattr(self, param_name, param_obj)
+        # Stamp which model this node belongs to, so the guard above can tell
+        # "already built in this build" from "left over from the last one".
+        if model is not None:
+            if not hasattr(self, "_built_for_model"):
+                self._built_for_model = {}
+            self._built_for_model[param_name] = weakref.ref(model)
         return param_obj.build_pymc()
 
     def _element_expression(
@@ -669,7 +728,7 @@ class Component(ABC):
 
         if "." not in d:
             # Local tracking recursive lookup
-            if not self._has_built_parameter(self, d):
+            if not self._parameter_is_current(self, d, model):
                 self.add_parameter(model, d, system, context_nodes)
             local = getattr(self, d)
             aligned = n_elements is not None and local._n_elements() == int(
@@ -720,7 +779,7 @@ class Component(ABC):
             return d, OwnPrePatchRef(idx), aligned
 
         # Ensure the dependency node is built lazily on demand
-        if not self._has_built_parameter(ext_comp, ext_param_name):
+        if not self._parameter_is_current(ext_comp, ext_param_name, model):
             ext_comp.add_parameter(
                 model, ext_param_name, system, context_nodes
             )
@@ -828,7 +887,7 @@ class Component(ABC):
                             f"[{self.prefix}.{param_name}] link '{plink.expr_str}' "
                             f"references component '{dcomp}', which is not active."
                         )
-                    if not self._has_built_parameter(comp, dparam):
+                    if not self._parameter_is_current(comp, dparam, model):
                         comp.add_parameter(model, dparam, system)
                     node = getattr(comp, dparam).value
                     if getattr(node, "ndim", 0) >= 1:

@@ -68,6 +68,17 @@ transit:
     unit: ""
     internal_unit: ""
   detrend_coeffs:
+    # THE RULE (review 3.14.10): the design matrix is WHITENED at ingestion
+    # (Instrument._build_block_detrend), so it is dimensionless, and the
+    # coefficient therefore carries the units of WHATEVER THE DOT PRODUCT
+    # FEEDS -- per unit of the raw column, which no unit system can name.
+    # Here `lc_model += pt.dot(detrend, detrend_coeffs)` and lc_model is
+    # NORMALIZED FLUX, so "" is correct rather than merely unfilled: this
+    # coefficient really is dimensionless.  Audited and left alone in
+    # 2026-08; rvinstrument's identical-looking ""/"" was NOT correct (its
+    # model is in the internal solRad/d and it now reports m/s), and
+    # mulensinstrument's is in MAGNITUDES because its coefficient sits
+    # inside 10**(-0.4*...) even though that component models flux.
     initval: 0.0
     init_scale: 1.0
     lower: -1.0e6

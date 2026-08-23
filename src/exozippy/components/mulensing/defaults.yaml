@@ -416,6 +416,16 @@ mulensinstrument:
   # These stay MAGNITUDE-space coefficients -- a throughput/extinction trend
   # is multiplicative in flux -- so the flux model is scaled by
   # 10**(-0.4 * X.c).  Unchanged by the move to a flux likelihood.
+  #
+  # DO NOT "FIX" THIS TO FLUX.  Review 3.14.10's rule is that the design
+  # matrix is whitened at ingestion and so dimensionless, which leaves the
+  # coefficient carrying the units of whatever the dot product feeds -- and
+  # what this one feeds is the EXPONENT of 10**(-0.4 * dot(detrend, c)),
+  # which is magnitudes.  That the component models FLUX is true and
+  # irrelevant here.  The "UNIT CHANGE: ... now in FLUX" note further down
+  # is about the three AMPLITUDES, not these coefficients; an audit that
+  # reads it as covering this block will invert a correct declaration and
+  # break mulens detrending silently.  Verified correct 2026-08-23.
   detrend_coeffs:
     initval: 0.0
     init_scale: 0.01

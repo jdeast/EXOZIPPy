@@ -22,6 +22,7 @@ import numpy as np
 import pymc as pm
 import pytest
 
+import exozippy.components
 from exozippy.components.parameter import Parameter
 from exozippy.components.star.star import Star
 from exozippy.config import ConfigManager, canonical_param_key
@@ -290,3 +291,126 @@ def test_per_element_units_are_reported_per_element(mock_logp, caplog):
     assert "jupiterMass" in row_a
     assert "1.00000000" in row_b
     assert "solMass" in row_b
+
+
+# ---------------------------------------------------------------------------
+# (d) print_to_table -- review 3.14.9
+# ---------------------------------------------------------------------------
+
+
+def _build_star_mass_with(options, model_name):
+    """The two-element star.mass vehicle, plus extra manifest options."""
+    cm = ConfigManager({}, system_config=CONFIG)
+    star = Star(CONFIG["star"], cm)
+    with pm.Model(name=model_name) as model:
+        star.manifest = {
+            "mass": {
+                "lower": 0.1,
+                "upper": 250.0,
+                "overrides": {"initval": 1.0},
+                **options,
+            }
+        }
+        star.add_parameter(model=model, param_name="mass", system=None)
+    return model, _Sys(cm, [star.mass]), star.mass
+
+
+@patch("exozippy.diagnostics.ModelAuditor.get_aggregated_logps")
+def test_a_sampled_parameter_marked_not_for_tables_is_not_printed(
+    mock_logp, caplog
+):
+    """
+    Given a SAMPLED parameter carrying print_to_table: false,
+    When inspect_start renders the startup table,
+    Then it gets no row.
+
+    Review 3.14.9.  The startup table consulted only ``debug_print`` and the
+    sampled-ness of the parameter, so the one flag that says "not for
+    tables" -- a params-file key, so a user's only lever -- was the one
+    thing this table ignored.
+    """
+    # ARRANGE
+    mock_logp.return_value = ({}, {})
+    model, system, p = _build_star_mass_with(
+        {"print_to_table": False}, "model_ptt_false"
+    )
+    assert np.any(p.is_sampled), "the vehicle must be sampled to be a case"
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.run"):
+        inspect_start(model, system, {})
+
+    # ASSERT
+    assert _table_row(caplog, "star.A.mass") is None
+    assert _table_row(caplog, "star.B.mass") is None
+
+
+@patch("exozippy.diagnostics.ModelAuditor.get_aggregated_logps")
+def test_the_same_parameter_is_printed_with_the_flag_left_alone(
+    mock_logp, caplog
+):
+    """
+    Given the identical parameter with print_to_table at its default,
+    When inspect_start renders the startup table,
+    Then it gets its rows.
+
+    The control for the test above: the suppression must come from the flag
+    and not from something else about the vehicle.
+    """
+    mock_logp.return_value = ({}, {})
+    model, system, _ = _build_star_mass_with({}, "model_ptt_default")
+
+    with caplog.at_level(logging.INFO, logger="exozippy.run"):
+        inspect_start(model, system, {})
+
+    assert _table_row(caplog, "star.A.mass") is not None
+    assert _table_row(caplog, "star.B.mass") is not None
+
+
+@patch("exozippy.diagnostics.ModelAuditor.get_aggregated_logps")
+def test_not_for_tables_vetoes_even_an_explicit_debug_print(mock_logp, caplog):
+    """
+    Given a parameter that sets BOTH debug_print: true and
+      print_to_table: false,
+    When inspect_start renders the startup table,
+    Then print_to_table wins and there is no row.
+
+    The precedence is deliberate and is the reason the flag is a veto rather
+    than a default.  Every parameter that opts INTO this table does so with
+    ``debug_print`` in its component's defaults.yaml, which a user cannot
+    edit; ``print_to_table`` is a params-file key.  If ``debug_print`` won,
+    a user would have no way to suppress a row at all.
+    """
+    mock_logp.return_value = ({}, {})
+    model, system, _ = _build_star_mass_with(
+        {"print_to_table": False, "debug_print": True}, "model_ptt_veto"
+    )
+
+    with caplog.at_level(logging.INFO, logger="exozippy.run"):
+        inspect_start(model, system, {})
+
+    assert _table_row(caplog, "star.A.mass") is None
+
+
+def test_orbit_n_is_the_only_shipped_not_for_tables_parameter():
+    """
+    Given the shipped defaults.yaml tree,
+    When print_to_table: false is counted,
+    Then orbit.n is the only user -- so wiring the flag into the startup
+      table changes no shipped table today.
+
+    The item named orbit.n as the LIVE case for 3.14.9; it is not, because
+    orbit.n is derived and the sampled-only default already excluded it.
+    This pins the fact behind that correction, so a future reader who finds
+    a second not-for-tables parameter knows the claim has to be re-checked.
+    """
+    import pathlib
+
+    root = pathlib.Path(exozippy.components.__file__).parent
+    users = sorted(
+        f"{path.parent.name}"
+        for path in root.rglob("defaults.yaml")
+        if "print_to_table: false" in path.read_text()
+    )
+
+    assert users == ["orbit"]

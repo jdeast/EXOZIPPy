@@ -727,6 +727,11 @@ class SED(Component):
         "distance",
     )
 
+    # Built at STAGE 6 (the mulensing zeropoint expression asks for it while
+    # parameters are still being materialized), so it cannot be dropped at
+    # the top of stage 7 the way transit's dilution node is.
+    per_build_caches = ("_m_pred_matrix",)
+
     def _ensure_star_nodes(self, system):
         """Materialize the star Parameters ``_predicted_appmag_node`` reads.
 
@@ -741,7 +746,11 @@ class SED(Component):
             return
         model = pm.modelcontext(None)
         for name in self._STAR_NODE_DEPS:
-            if not isinstance(getattr(star, name, None), Parameter):
+            # The shared build-time predicate, not a local isinstance: a
+            # Parameter left over from an EARLIER model must be rebuilt, or
+            # the SED forward model consumes the previous build's nodes
+            # (review 3.14.12).
+            if not Component._parameter_is_current(star, name, model):
                 star.add_parameter(model, name, system)
 
     def _predicted_appmag_node(self, system):
