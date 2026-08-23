@@ -57,11 +57,23 @@ rvinstrument:
     unit: "m/s"
     internal_unit: "solRad/d"
   detrend_coeffs:
+    # THE RULE (review 3.14.10): the design matrix is WHITENED at ingestion
+    # (Instrument._build_block_detrend), so it is dimensionless, and the
+    # coefficient therefore carries the units of WHATEVER THE DOT PRODUCT
+    # FEEDS -- per unit of the raw column, which no unit system can name.
+    # Here `rv_model += pt.dot(detrend, detrend_coeffs)` and rv_model is in
+    # the internal solRad/d, so this is solRad/d internally and m/s to the
+    # reader.  It said ""/"" until 2026-08 and so reported an RV
+    # coefficient in solRad/d: a true 300 m/s per raw unit printed as
+    # 0.0373.  Applying the same rule elsewhere: transit's is genuinely
+    # dimensionless (normalized flux) and mulensinstrument's is in
+    # MAGNITUDES, because its coefficient sits inside 10**(-0.4*...) even
+    # though that component models flux.  Do not "fix" that one to flux.
     initval: 0.0
     init_scale: 0.1
     lower: -1.0e6
     upper: 1.0e6
-    unit: ""
-    internal_unit: ""
+    unit: "m/s"
+    internal_unit: "solRad/d"
     latex: "c"
     description: "Detrending Coefficients"
