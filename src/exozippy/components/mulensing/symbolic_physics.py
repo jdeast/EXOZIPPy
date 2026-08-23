@@ -22,6 +22,7 @@ pi_E_N, pi_E_E = sp.symbols("pi_E_N pi_E_E")
 rho, source_radius = sp.symbols("rho source_radius")
 log_rho = sp.symbols("log_rho", real=True)
 log_pi_rel = sp.symbols("log_pi_rel", real=True)
+u0te = sp.symbols("u0te", real=True)
 log_theta_E = sp.symbols("log_theta_E", real=True)
 q_lens, companion_mass = sp.symbols("q_lens companion_mass")
 alpha, xalpha, yalpha = sp.symbols("alpha xalpha yalpha")
@@ -148,6 +149,10 @@ def get_symbol_map(lens_config_list):
         if lens_config_list.get("fitpirel"):
             result["log_pi_rel"] = f"lens.{j}.log_pi_rel"
 
+        # u0te exists only under fitu0te (swap 4).
+        if lens_config_list.get("fitu0te"):
+            result["u0te"] = f"lens.{j}.u0te"
+
         # log_theta_E exists only under fitthetae (swap 3).
         if lens_config_list.get("fitthetae"):
             result["log_theta_E"] = f"lens.{j}.log_theta_E"
@@ -204,6 +209,9 @@ RELATIONS = [
     # (swap 2); inert otherwise.  Lets the distance-derived pi_rel seed
     # back-solve to a log_pi_rel start.
     sp.Eq(pi_rel, 10**log_pi_rel),
+    # signed effective-timescale reparameterization, active only for
+    # `fitu0te: true` (swap 4); inert otherwise.
+    sp.Eq(u0te, u_0 * t_E),
     # theta_E reparameterization, active only for `fitthetae: true` (swap
     # 3); inert otherwise.
     sp.Eq(theta_E, 10**log_theta_E),
