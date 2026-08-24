@@ -1515,11 +1515,26 @@ class ConfigManager:
                     if od:
                         apply_overrides(od, [i])
 
-        # propagated_scales and scale_hints are stored in internal units.
-        # Divide by get_conversion_factor (user→internal) to recover user units
-        # before passing to Parameter, which will re-apply the same factor.
-        # This is distinct from unit_scaling (base→user), which only applies to
-        # default values read from defaults.yaml.
+        # propagated_scales and scale_hints are stored in INTERNAL units and
+        # resolve() returns USER units, so both are divided by the ELEMENT's
+        # own user -> internal factor -- the same factor add_scale_hint used
+        # to store them (_translate_and_scale -> get_conversion_factor with
+        # full_path, which honors a user `unit:`), and the same one
+        # Parameter._get_conversion_factors re-applies on the way back in.
+        #
+        # THAT FACTOR IS NOT `internal_factor` ALONE (review 1.14.1).
+        # internal_factor is the DEFAULTS-unit -> internal multiplier;
+        # elem_scaling[i] is defaults -> the element's USER unit, which every
+        # other number in this dict already carries.  So user -> internal is
+        #     internal_factor / elem_scaling[i]
+        # and the recovery multiplies by elem_scaling[i] / internal_factor.
+        # Dividing by internal_factor alone made the two halves of the round
+        # trip disagree by exactly the unit factor whenever an element carried
+        # a `unit:` override: 318x for planet.b.mass in earthMass, 57x for a
+        # deg -> rad angle.  Not cosmetic -- init_scale seeds the whitening
+        # probe and, for an unbounded element with no sigma, IS the prior
+        # width.  The hints loop below does the same arithmetic for the same
+        # reason; keep all three spellings identical.
         internal_factor = (
             self.get_conversion_factor(component_type, param_name) or 1.0
         )
@@ -1534,7 +1549,9 @@ class ConfigManager:
                             "init_scale",
                             resolved["init_scale"],
                             i,
-                            self.propagated_scales[k] / internal_factor,
+                            self.propagated_scales[k]
+                            * elem_scaling[i]
+                            / internal_factor,
                         )
                         break
 
@@ -1548,7 +1565,9 @@ class ConfigManager:
                         "init_scale",
                         resolved["init_scale"],
                         i,
-                        self.scale_hints[k] / internal_factor,
+                        self.scale_hints[k]
+                        * elem_scaling[i]
+                        / internal_factor,
                     )
                     break
 
