@@ -14,6 +14,7 @@ import yaml
 logger = logging.getLogger(__name__)
 import re
 
+from exozippy.constants import SYMPY_SOLVE_TIMEOUT_S
 from exozippy.linking import extract_links
 
 # --- The per-parameter sub-key vocabulary --------------------------------
@@ -142,7 +143,7 @@ def _disarm_alarm(old_handler=None):
 
 
 @contextlib.contextmanager
-def _sympy_time_limit(seconds=2):
+def _sympy_time_limit(seconds=SYMPY_SOLVE_TIMEOUT_S):
     """Hard wall-clock limit for a block of symbolic work.
 
     sp.solve (and evalf on its solutions) can hang effectively forever on
@@ -3256,7 +3257,7 @@ class ConfigManager:
                 solutions = list(self._symbolic_solve_cache[cache_key])
                 logger.debug(f"sp.solve cache hit for {target_str}")
             else:
-                with _sympy_time_limit(2):  # 2-second limit (POSIX only)
+                with _sympy_time_limit():  # POSIX only; see the constant
                     solutions = sp.solve(
                         eq,
                         target_sym,
@@ -3282,7 +3283,7 @@ class ConfigManager:
         # 3. Fallback to nsolve if analytical failed
         if not solutions:
             try:
-                with _sympy_time_limit(2):
+                with _sympy_time_limit():
                     guess = float(resolved.get(target_str, 1.0))
                     sub_dict = {s: resolved[str(s)] for s in inputs}
                     expr = (eq.lhs - eq.rhs).subs(sub_dict).evalf()

@@ -22,6 +22,7 @@ from exozippy.samplers.ptde import ptde_sample
 from exozippy.samplers.ptde_async import ptde_async_sample
 from exozippy.system import System
 
+from .constants import CORE_FRACTION
 from .corner_utils import (
     collect_corner_samples,
     histogram_grid_degenerate,
@@ -313,7 +314,7 @@ def _run_fit(config, gui, user_params=None):
         cores = int(_cores_raw)
     else:
         _phys = mp.cpu_count()
-        cores = max(1, min(int(_phys * 0.75), _phys - 1))
+        cores = max(1, min(int(_phys * CORE_FRACTION), _phys - 1))
     target_accept = sampler_cfg.get("target_accept", 0.9)
     method = sampler_cfg.get(
         "method", None

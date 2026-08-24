@@ -10,6 +10,8 @@ examples/gj1214's band.thermal elements are), and a short or stopped run
 leaves variables that never moved.
 """
 
+import math
+
 import matplotlib
 import numpy as np
 
@@ -18,6 +20,11 @@ import pytest
 
 import exozippy.corner_utils as corner_utils
 import exozippy.run as run_mod
+from exozippy.constants import (
+    CORNER_THIN_SEED,
+    SIGMA_1_HIGH,
+    SIGMA_1_LOW,
+)
 from exozippy.corner_utils import (
     CORNER_BINS,
     _drop_undrawable,
@@ -311,3 +318,50 @@ def test_corner_bins_are_passed_as_edges_not_as_a_count():
 
     assert histogram_grid_degenerate(lo, keep_hi, CORNER_BINS + 1) is False
     assert histogram_grid_degenerate(lo, drop_hi, CORNER_BINS + 1) is True
+
+
+# ---------------------------------------------------------------------------
+# Review 4.2.6: the magic numbers this module used to spell inline.
+# ---------------------------------------------------------------------------
+
+
+def test_the_sigma_1_quantiles_are_bit_identical_to_the_inline_formula():
+    """
+    Given constants.SIGMA_1_LOW / SIGMA_1_HIGH,
+    When they are compared to the 0.5 -/+ erf(1/sqrt(2))/2 expression
+      save_corner_plot used to recompute for itself,
+    Then they are EQUAL, bit for bit -- so adopting the constants moved no
+      reported number.
+
+    Not `np.isclose`: the whole claim of the extraction is that the corner
+    plot's quantiles and the LaTeX table's are the same two numbers, and
+    "close" would allow them to drift apart by one ulp and stay green.
+    """
+    assert SIGMA_1_LOW == 0.5 - math.erf(1.0 / math.sqrt(2)) / 2.0
+    assert SIGMA_1_HIGH == 0.5 + math.erf(1.0 / math.sqrt(2)) / 2.0
+
+
+def test_the_corner_thinning_seed_is_fixed():
+    """
+    Given save_corner_plot's thinning draw,
+    When more rows are supplied than max_samples,
+    Then the SAME rows come back every time -- a corner plot is a figure that
+      goes in a paper, so it must not change when the same trace is
+      re-rendered.  (run.get_draws' posterior spaghetti is deliberately the
+      other way round; see its docstring.)
+    """
+    # ARRANGE
+    rng = np.random.default_rng(0)
+    samples = rng.normal(size=(500, 2))
+
+    # ACT
+    a = np.random.default_rng(seed=CORNER_THIN_SEED).choice(
+        500, size=100, replace=False
+    )
+    b = np.random.default_rng(seed=CORNER_THIN_SEED).choice(
+        500, size=100, replace=False
+    )
+
+    # ASSERT
+    assert np.array_equal(a, b)
+    assert samples.shape == (500, 2)

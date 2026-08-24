@@ -6,10 +6,11 @@ flattening posterior variables into a sample matrix and rendering it.
 """
 
 import logging
-import math
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+from .constants import CORNER_THIN_SEED, SIGMA_1_HIGH, SIGMA_1_LOW
 
 logger = logging.getLogger(__name__)
 
@@ -235,7 +236,7 @@ def save_corner_plot(samples, labels, filename, max_samples=1000):
         return
 
     if samples.shape[0] > max_samples:
-        rng = np.random.default_rng(seed=42)
+        rng = np.random.default_rng(seed=CORNER_THIN_SEED)
         idx = rng.choice(samples.shape[0], size=max_samples, replace=False)
         idx.sort()
         samples = samples[idx]
@@ -248,15 +249,17 @@ def save_corner_plot(samples, labels, filename, max_samples=1000):
         )
         return
 
-    minrank = 0.5 - math.erf(1.0 / math.sqrt(2)) / 2.0
-    maxrank = 0.5 + math.erf(1.0 / math.sqrt(2)) / 2.0
-
     try:
         fig = corner.corner(
             samples,
             labels=labels,
             bins=CORNER_BINS,
-            quantiles=[minrank, 0.5, maxrank],
+            # The 68.27% interval, from the ONE definition in constants.py
+            # (review 4.2.6).  This used to recompute
+            # 0.5 -/+ erf(1/sqrt(2))/2 inline -- the same expression, so the
+            # numbers were identical, but a second copy of a statistical
+            # convention is a second thing to keep in step with the tables.
+            quantiles=[SIGMA_1_LOW, 0.5, SIGMA_1_HIGH],
             show_titles=True,
             title_kwargs={"fontsize": 12},
         )
