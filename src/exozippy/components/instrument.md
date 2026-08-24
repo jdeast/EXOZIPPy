@@ -45,7 +45,18 @@ Three decisions the implementation makes explicitly:
 
 The start point does not move (`detrend_coeffs` starts at 0, so the trend term is zero either way): `examples/gj1214`'s start logp is bit-identical at `116050.274910399`. What moves is the posterior geometry, and the fitted coefficient/offset pair with it.
 
-One known wart, pre-existing and NOT introduced here: `rvinstrument`'s `detrend_coeffs` is declared `unit: ""` while the term it adds is in the internal solRad/d, so the coefficient is reported in solRad/d rather than m/s. Fixing it would change reported numbers and belongs in its own change.
+### What unit IS a detrend coefficient? The dot product decides
+
+Because the design matrix is whitened at ingestion it is **dimensionless**, so **the coefficient carries the units of whatever the dot product feeds** -- per unit of the raw column, which no unit system can name and which therefore never appears in the declaration. That is the whole rule, and it is the only thing a component author needs to check when adding a `detrend_coeffs` block: find the line that adds the term, and read the unit off the thing it is added to. Review 3.14.10; the shipped declarations were audited against it in 2026-08 and are, deliberately, not all the same:
+
+| component | the term | declared | why |
+|-----------|----------|----------|-----|
+| `rvinstrument` | `rv_model += pt.dot(detrend, c)` | `m/s` / `solRad/d` | `rv_model` is in the internal solRad/d, so the coefficient is too. **This one was wrong** (`""` / `""`) and is the item. |
+| `transit` | `lc_model += pt.dot(detrend, c)` | `""` / `""` | normalized flux really is dimensionless -- correct, and now said out loud in defaults.yaml rather than left as a bare `""` that reads like an omission. |
+| `mulensinstrument` | `10.0 ** (-0.4 * pt.dot(detrend, c))` | `mag` / `mag` | **correct, and a trap.** The coefficient sits inside a MAGNITUDE exponent, so it is in magnitudes even though the component models flux. The `UNIT CHANGE: ... now in FLUX` comment a few lines below it in `mulensing/defaults.yaml` is about the three AMPLITUDES, not these coefficients; a quick audit that reads it as covering the block will invert a correct declaration and break mulens detrending silently. Do not change it. |
+| `astrometryinstrument` | -- | -- | has no detrending at all. If one is ever added, the rule gives `mas` directly. |
+
+**Fixing `rvinstrument` CHANGED REPORTED NUMBERS by 8052.083333 (m/s per solRad/d), and only reported ones.** Measured on a one-instrument RV fit with a single airmass-like detrend column carrying an injected 300 m/s per raw column unit: the table reported **0.03725743855109957** before (dimensionless, i.e. `300 / 8052.083`) and **299.99999999999966** m/s after, from the same internal coefficient `0.002106519735659827`. Start logp is **bit-identical** at `-7457.824950347245`, as it must be -- `detrend_coeffs` starts at 0, so the trend term is zero either way and the declaration only changes the internal <-> user map. Two internal quantities do move, both intended and neither a posterior statement at the start point: the defaults' `+/-1.0e6` bounds now mean +/-1e6 m/s per raw unit rather than +/-1e6 solRad/d (+/-7.02 internal instead of +/-56540 on that fit -- still wider than any real RV trend by six orders of magnitude), and the preliminary `init_scale: 0.1` now means 0.1 m/s, which is the bracket the whitening probe starts from before it measures the real scale. No shipped example uses RV detrending, so nothing in `examples/` changes.
 
 ## Plotting a fitted model: the point, and the per-observation terms
 

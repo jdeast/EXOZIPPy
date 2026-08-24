@@ -48,20 +48,19 @@ component's stage 2, so stage 1a is the only placement that is right for
 both orderings.  MMEXOFAST pushes at stage 1a for the same class of reason
 (its own flux bootstrap, later in the same ``load_data``).
 
-The seed goes through TWO channels, and both are needed (:func:`seed_start`):
-
-- ``ConfigManager.add_hint`` at ``RANK_DERIVED_DATA`` is the ranked start
-  value -- what the relaxation engine solves from, what the provenance
-  ledger, ``initval_source`` ("data") and ``export_solution`` report, and
-  what every user entry outranks.  It is the channel a start value must use.
-- ``ConfigManager.add_override(path, initval=...)`` exists here only because
-  ``ConfigManager.resolve()`` does not layer ``self.hints`` -- so the stage-2
-  readers that ask ``resolve()`` for a start value (``Orbit``'s ``tc``
-  window, ``Orbit._seeded_period``) cannot see a hint at all.  Overrides ARE
-  layered by ``resolve()``, before the user's params, so this makes the same
-  number visible to them with the same precedence.  The two carry one value
-  computed once, so they cannot disagree.  The cleaner fix is for
-  ``resolve()`` to layer hints as well; that is ``config.py``.
+The seed goes through ONE channel (:func:`seed_start`):
+``ConfigManager.add_hint`` at ``RANK_DERIVED_DATA``.  That is the ranked
+start value -- what the relaxation engine solves from, what the provenance
+ledger, ``initval_source`` ("data") and ``export_solution`` report, and what
+every user entry outranks -- and since review 3.14.3 ``ConfigManager.resolve()``
+layers ``self.hints`` too (under the user's params, over defaults), so the
+stage-2 readers that ask ``resolve()`` for a start value (``Orbit``'s ``tc``
+window, ``Orbit._seeded_period``) see it directly.  Until then they could
+not, and this module wrote every seed a SECOND time through
+``add_override(path, initval=...)`` purely to be visible to them.  That
+duplicate is gone: one number, one channel.  Do not reintroduce it -- an
+override carries no rank, so a second write is invisible to the ledger and
+can only ever drift from the hint it shadows.
 
 Deliberately NOT seeded, and each for a reason worth not rediscovering:
 
@@ -577,8 +576,9 @@ def seed_start(config_manager, path, value, quality, source):
 
     Returns True when the value was applied.  A path already seeded by a
     better-quality search is left alone (see ``QUALITY_TRANSIT`` /
-    ``QUALITY_RV``); the user always wins regardless, because both channels
-    this writes are layered under ``user_params``.
+    ``QUALITY_RV``); the user always wins regardless, because the hint
+    channel this writes is layered under ``user_params`` everywhere it is
+    read -- by rank in the relaxation engine, by position in ``resolve()``.
     """
     key = config_manager.canonical_key(path)
     registry = _seed_registry(config_manager)
@@ -597,28 +597,18 @@ def seed_start(config_manager, path, value, quality, source):
 
     parts = key.split(".")
     c_type, p_name = parts[0], parts[-1]
-    # add_override takes the parameter's DEFAULTS-yaml unit; add_hint takes
-    # its USER unit.  The searched quantity is in the internal unit, so both
-    # need a factor -- and the override half is only correct when the
-    # defaults unit IS the internal unit, which is true of every parameter
-    # seeded here (days, days, dimensionless) but is worth checking rather
-    # than assuming.
-    base_factor = config_manager.get_conversion_factor(c_type, p_name) or 1.0
+    # add_hint takes the parameter's USER unit and the searched quantity is
+    # in the internal unit, so it needs the factor.  This used to divide out
+    # a SECOND, different factor for an add_override duplicate -- whose
+    # values are in the DEFAULTS-yaml unit, and which was therefore only
+    # correct while the defaults unit happened to be the internal one, with
+    # a warning for the case it was not.  resolve() layers hints now (review
+    # 3.14.3), so the duplicate and its unit caveat are both gone.
     user_factor = (
         config_manager.get_conversion_factor(c_type, p_name, full_path=path)
         or 1.0
     )
     config_manager.add_hint(path, value / user_factor, rank=RANK_DERIVED_DATA)
-    if np.isclose(base_factor, 1.0):
-        config_manager.add_override(path, initval=value)
-    else:
-        logger.warning(
-            "Global search: %s is stored in a unit its defaults.yaml does "
-            "not use (factor %.6g), so only the ranked hint was pushed. Any "
-            "stage-2 window built from resolve() will not see this seed.",
-            key,
-            base_factor,
-        )
     registry[key] = (quality, value, source)
     logger.info(
         "Global search: seeded %s = %.10g (internal units) from %s.",

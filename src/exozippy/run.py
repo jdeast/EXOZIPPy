@@ -1102,6 +1102,40 @@ def _is_unset(x):
         return False
 
 
+def _prints_in_startup_table(p):
+    """Does this Parameter get a row in the startup audit table?
+
+    Two flags, and the order between them is the content of review 3.14.9.
+
+    ``print_to_table: false`` is a VETO, checked first.  The startup table
+    is a table, and until now it was the one table that ignored the flag --
+    so a parameter its author (or the user, since ``print_to_table`` is a
+    params-file key) marked as not-for-tables still appeared here.  Making
+    it a veto rather than merely a default is what gives a USER a way to
+    suppress a row: the parameters that opt in below do so in their
+    component's defaults.yaml, which a user cannot edit.
+
+    ``debug_print`` then decides among what is left.  It is this table's own
+    switch: ``True`` shows a DERIVED parameter that a reader needs at the
+    start anyway (``star.mass``, ``orbit.period``, the microlensing
+    timescales), ``False`` hides a sampled one, and ``None`` -- the default
+    -- means "show it if the sampler moves it".
+
+    The item asked whether the two tables should differ at all, and named
+    ``orbit.n`` as the live case.  That half is wrong and is recorded here
+    so it is not re-derived: ``orbit.n`` is derived, so the sampled-only
+    default already excluded it, and it is the only ``print_to_table:
+    false`` in the shipped tree.  The defect is real but its reachable form
+    is a user marking a SAMPLED parameter not-for-tables.
+    """
+    if not p.print_to_table:
+        return False
+    should_print = getattr(p, "debug_print", None)
+    if should_print is None:
+        should_print = np.any(getattr(p, "is_sampled", False))
+    return bool(np.any(should_print))
+
+
 def inspect_start(
     model,
     system,
@@ -1137,10 +1171,12 @@ def inspect_start(
                 full[: m.size] = m
             mult_map[p.label] = full
 
-    # Dynamic Width Logic
+    # Dynamic Width Logic -- over the rows the table will actually print, so
+    # a suppressed parameter with a long label cannot widen it for nothing.
     display_labels = [
         p.get_display_label(i)
         for p in auditor.all_params
+        if _prints_in_startup_table(p)
         for i in range(np.prod(p.shape).astype(int) if p.shape != () else 1)
     ]
     max_label_len = max(
@@ -1187,13 +1223,7 @@ def inspect_start(
 
     # --- PART 1: CORE PARAMETERS ---
     for p in auditor.all_params:
-        should_print = getattr(p, "debug_print", None)
-        if should_print is None:
-            should_print = np.any(getattr(p, "is_sampled", False))
-            # Handle vectorized boolean flags
-            if isinstance(should_print, np.ndarray):
-                should_print = np.any(should_print)
-        if not should_print:
+        if not _prints_in_startup_table(p):
             continue
 
         raw_v = p.initval
