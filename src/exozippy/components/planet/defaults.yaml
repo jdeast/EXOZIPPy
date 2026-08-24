@@ -114,6 +114,7 @@ planet:
     unit: ""
     internal_unit: ""
     latex: "a/R_*"
+    description: "Semi-major Axis in $R_*$"
     # rank 5: the engine's Condition B rewrites the lowest-ranked
     # symbol of a violated relation, and this one is DERIVED -- its
     # runtime value is its expression -- so it must always be the
@@ -127,6 +128,7 @@ planet:
     unit: ""
     internal_unit: ""
     latex: "b"
+    description: "Transit Impact Parameter"
     expressions:
       default:
         func_name: "calc_b"
