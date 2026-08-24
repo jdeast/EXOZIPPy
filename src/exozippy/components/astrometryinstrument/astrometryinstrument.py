@@ -97,6 +97,10 @@ import pytensor.tensor as pt
 
 from exozippy.components.instrument import Instrument
 from exozippy.components.orbit.bodies import component_instance_names
+from exozippy.components.parameterization import (
+    merge_overrides,
+    pin_unselected,
+)
 from exozippy.ephemeris import get_observer_position
 from exozippy.outputs.texutils import latex_escape
 from exozippy.skyframe import parallax_factors
@@ -613,11 +617,19 @@ class AstrometryInstrument(Instrument):
                     continue
                 self._sed_fluxfrac[i] = True
 
-        if any(self._sed_fluxfrac):
-            # NaN leaves the other elements alone (see resolve()).
-            pin = np.full(self.n_elements, np.nan)
-            pin[np.asarray(self._sed_fluxfrac, dtype=bool)] = 0.0
-            self.manifest["fluxfrac"]["overrides"] = {"sigma": pin.tolist()}
+        # The OPT-IN pin, through the one helper (review 3.14.11).  "Selected"
+        # is the elements that KEEP a sampled fluxfrac, i.e. everything the SED
+        # does not supply; pin_unselected writes `sigma: 0` on the rest and NaN
+        # elsewhere, which leaves those elements alone (see resolve()), and
+        # returns {} when nothing is SED-derived.  merge_overrides folds it into
+        # the entry built above without disturbing its mask/inactive_value.
+        pinned = pin_unselected(
+            self.n_elements, [not sed for sed in self._sed_fluxfrac]
+        )
+        if pinned:
+            self.manifest["fluxfrac"] = merge_overrides(
+                self.manifest["fluxfrac"], pinned["overrides"]
+            )
 
     # ------------------------------------------------------------------
     # Model pieces (PyTensor)

@@ -19,6 +19,8 @@ The distinction these tests pin hardest is between the two pins:
     who wants it back still wins.
 """
 
+import itertools
+
 import numpy as np
 import pytest
 
@@ -298,3 +300,112 @@ def test_pin_unselected_is_a_free_parameter_when_everything_opted_in():
     """
     assert pin_unselected(2, [0, 1]) == {}
     assert pin_unselected(2, np.array([True, True])) == {}
+
+
+# ---------------------------------------------------------------------------
+# Review 3.14.11: the last two literal re-implementations of the opt-in pin
+# (Planet.beam and AstrometryInstrument.fluxfrac) now route through
+# pin_unselected.  Both were cosmetic -- each is the sole writer of its
+# parameter and nothing is droppable -- so the whole point of these tests is
+# that behavior did NOT change.  The two retired loops are reproduced here and
+# the helper is required to agree with them element for element.
+# ---------------------------------------------------------------------------
+
+
+def _retired_planet_beam_loop(n_elements, fitbeam):
+    """Planet.register_parameters' loop as it stood before 3.14.11."""
+    off = [i for i in range(n_elements) if not fitbeam[i]]
+    entry = {}
+    if off:
+        pin = np.full(n_elements, np.nan)
+        pin[off] = 0.0
+        entry["overrides"] = {"sigma": pin.tolist()}
+    return entry
+
+
+def _retired_fluxfrac_loop(n_elements, sed_fluxfrac):
+    """AstrometryInstrument's loop as it stood before 3.14.11."""
+    if not any(sed_fluxfrac):
+        return None
+    pin = np.full(n_elements, np.nan)
+    pin[np.asarray(sed_fluxfrac, dtype=bool)] = 0.0
+    return {"sigma": pin.tolist()}
+
+
+def _same_pin(a, b):
+    """Two sigma vectors equal, treating NaN as equal to NaN."""
+    return np.array_equal(
+        np.asarray(a, dtype=float), np.asarray(b, dtype=float), equal_nan=True
+    )
+
+
+@pytest.mark.parametrize("n_elements", [1, 2, 3, 4])
+def test_planet_beam_pin_is_unchanged_by_the_extraction(n_elements):
+    """
+    Given every possible per-planet fitbeam pattern,
+    When pin_unselected builds the beam manifest entry,
+    Then it is identical to the hand-written loop it replaced -- same keys,
+      same sigma vector, NaN for NaN, and {} when every planet opted in.
+    """
+    for bits in itertools.product([False, True], repeat=n_elements):
+        fitbeam = list(bits)
+
+        # ACT
+        new = pin_unselected(n_elements, fitbeam)
+        old = _retired_planet_beam_loop(n_elements, fitbeam)
+
+        # ASSERT
+        assert set(new) == set(old), fitbeam
+        if old:
+            assert _same_pin(
+                new["overrides"]["sigma"], old["overrides"]["sigma"]
+            ), fitbeam
+
+
+@pytest.mark.parametrize("n_elements", [1, 2, 3, 4])
+def test_fluxfrac_pin_is_unchanged_by_the_extraction(n_elements):
+    """
+    Given every possible SED-derived-fluxfrac pattern,
+    When pin_unselected is asked about the elements that KEEP a sampled
+      fluxfrac (the complement of the SED-derived ones),
+    Then the sigma vector is identical to the hand-written loop it replaced,
+      and the helper returns {} in exactly the cases the old code skipped.
+
+    The complement is where an extraction like this goes wrong: the old loop
+    pinned the SED-derived elements, while pin_unselected pins the UNSELECTED
+    ones, so the caller has to invert.
+    """
+    for bits in itertools.product([False, True], repeat=n_elements):
+        sed = list(bits)
+
+        # ACT
+        new = pin_unselected(n_elements, [not s for s in sed])
+        old = _retired_fluxfrac_loop(n_elements, sed)
+
+        # ASSERT
+        if old is None:
+            assert new == {}, sed
+        else:
+            assert _same_pin(new["overrides"]["sigma"], old["sigma"]), sed
+
+
+def test_merging_the_fluxfrac_pin_keeps_the_structural_mask():
+    """
+    Given the fluxfrac manifest entry, which already carries the structural
+      mask/inactive_value that make a non-gaia/abs dataset's element INACTIVE,
+    When the SED-derived opt-in pin is merged into it,
+    Then both survive -- the two pins are different channels answering
+      different questions, and a raw-dict overrides assignment is exactly what
+      the merge helper replaces.
+    """
+    # ARRANGE
+    entry = {"mask": [True, False, True], "inactive_value": 0.0}
+    pinned = pin_unselected(3, [True, True, False])
+
+    # ACT
+    merged = merge_overrides(entry, pinned["overrides"])
+
+    # ASSERT
+    assert merged["mask"] == [True, False, True]
+    assert merged["inactive_value"] == 0.0
+    assert _same_pin(merged["overrides"]["sigma"], [np.nan, np.nan, 0.0])
