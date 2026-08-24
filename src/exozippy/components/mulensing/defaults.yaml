@@ -27,6 +27,35 @@ lens:
     internal_unit: ""
     latex: "u_0"
     description: "impact parameter"
+    expressions:
+      # Selected by `fitu0te: true` (swap 4): the sampled coordinate is
+      # the SIGNED effective timescale u0te = u_0 * t_E (days) -- on
+      # event 128 corr(log u_0, log t_E) = -0.96 and t_eff is measured
+      # 3x tighter than u_0.  Signed and linear because u_0 itself is
+      # signed here (the +/- reflection is sampled); a log coordinate
+      # would amputate half the modes.  |du_0/du0te| = 1/t_E is not
+      # constant: the correction potential lives in
+      # Lens.build_likelihood, like fitpirel's.
+      from_u0te:
+        func_name: "calc_u0_from_u0te"
+        deps: [ "u0te", "t_E" ]
+  u0te:
+    # Sampled ONLY when the lens sets `fitu0te: true`; otherwise absent.
+    # NAMED FOR THE PRODUCT, not the literature symbol: t_eff collides
+    # with the stellar effective temperature in the config namespace
+    # (star.Lens.teff vs lens.Lens.teff differ only in the component,
+    # and a params-file line names the instance first).  The LaTeX
+    # symbol stays t_eff, where lowercase-t vs uppercase-T is the
+    # published convention.  The same rule is reserved for rho*t_E
+    # (rhote, t_*): the literature's t_star collides with thetastar.
+    # NO initval (the mu_rel lesson, 4745cd7e): the engine back-solves
+    # through the u0te = u_0 * t_E relation.
+    lower: -5000.0
+    upper: 5000.0
+    unit: "d"
+    internal_unit: "d"
+    latex: "t_{\\rm eff}"
+    description: "signed eff. timescale"
   # t_E and the pi_E direction live in the light curve's GEOCENTRIC frame
   # (Skowron+2011 t0_par anchor), so they derive from mu_rel_geo, not from
   # the heliocentric pm difference.

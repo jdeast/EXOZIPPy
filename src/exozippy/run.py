@@ -58,6 +58,7 @@ KNOWN_SAMPLER_KEYS = {
     "adapt_ladder",
     "de_mode_hop",
     "nested_backend",
+    "checkpoint_dir",
     "nlive",
     "dlogz",
     "walks",
@@ -705,6 +706,13 @@ def _run_fit(config, gui, user_params=None):
                         else None
                     ),
                     cores=cores,
+                    # SIGTERM-survivable by default: ultranest resumes from
+                    # the stored live points; dynesty writes a checkpoint
+                    # file (restore is manual).  The first d=27 pilot
+                    # burned 2.9 unrecoverable days for lack of this.
+                    checkpoint_dir=sampler_cfg.get(
+                        "checkpoint_dir", f"{prefix}_nsckpt"
+                    ),
                 )
             elif method in ("numpyro", "blackjax"):
                 import jax
