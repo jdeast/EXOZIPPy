@@ -5,7 +5,7 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
-from exozippy.components.parameterization import mode_manifest
+from exozippy.components.parameterization import mode_manifest, pin_unselected
 from exozippy.constants import KEPLER_CONST, MSUN_TO_MEARTH, RSUN_TO_REARTH
 from exozippy.outputs.prose import get_collector, join_names
 from exozippy.outputs.texutils import latex_escape
@@ -310,13 +310,16 @@ class Planet(Component):
         if any_beam_constrains_mass:
             self.manifest["beam"] = "default"
         elif any_fitbeam:
-            off = [i for i in range(self.n_elements) if not self.fitbeam[i]]
-            entry = {}
-            if off:
-                pin = np.full(self.n_elements, np.nan)
-                pin[off] = 0.0
-                entry["overrides"] = {"sigma": pin.tolist()}
-            self.manifest["beam"] = entry
+            # The OPT-IN pin: `sigma: 0` on the planets that did not set
+            # fitbeam, through the manifest "overrides" channel so a user who
+            # writes their own sigma still wins, and `{}` (a plain free
+            # parameter) when every planet opted in.  That is exactly what the
+            # hand-written loop here used to build; it goes through the one
+            # helper now so the pattern has a single implementation
+            # (review 3.14.11).
+            self.manifest["beam"] = pin_unselected(
+                self.n_elements, self.fitbeam
+            )
         # Neither flag set anywhere: beam does not enter the manifest at
         # all (no parameter, no table row), matching Band's opt-in gating
         # for thermal/reflect/ellipsoidal.  Consumers guard on
@@ -350,10 +353,13 @@ class Planet(Component):
         restoring force).  Those planets sample log_q = log10(m_p / m_host)
         instead, which also turns the microlensing constraint into a shear of
         the sampled pair (star.logmass, planet.log_q) rather than a diagonal
-        ridge -- worth a measured ~4.5x on the whitened 2x2 curvature block of
-        examples/DC2018_128, not the order of magnitude one might expect (see
-        CLAUDE.md).  Removing the unreachable-but-samplable negative region is
-        the larger win.
+        ridge.  Measured on examples/DC2018_128: planet.mass ESS 337 -> 3230
+        and star.logmass 363 -> 2865, i.e. the mass stops being the
+        convergence bottleneck (see "Planet mass parametrization" in
+        src/exozippy/components/star/star.md, which also RETIRES the
+        "~4.5x on the whitened 2x2 curvature block" figure this comment used
+        to quote -- it measured a local block at the start point).  Removing
+        the unreachable-but-samplable negative region is the other half.
 
         Default: 'linear' iff the planet is mass-constrained by RV or
         astrometry AND is not a microlensing lens body; 'log_q' otherwise.  A

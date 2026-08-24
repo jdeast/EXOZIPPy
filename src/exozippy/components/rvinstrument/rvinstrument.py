@@ -449,7 +449,8 @@ class RVInstrument(Instrument):
         # INDEX, do not pt.switch. A switch over the branch VALUES would
         # evaluate the Hirano kernel at every instrument's timestamps and then
         # throw away the rows it does not apply to -- the JAX where-trap
-        # (CLAUDE.md): a `where` whose unselected branch can be invalid poisons
+        # (the CLAUDE.md invariant): a `where` whose unselected branch can be
+        # invalid poisons
         # the gradient of the selected one too. Slicing the RM instrument's own
         # rows makes the unselected rows unreachable by construction instead of
         # merely masked, and is cheaper by exactly the fraction of the data

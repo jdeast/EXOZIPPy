@@ -532,7 +532,7 @@ class Transit(Instrument):
                     f"is not in the SED's BC grid; no depth deblending "
                     f"applied for this instrument."
                 )
-                dils.append(pt.constant(1.0))
+                dils.append(pt.constant(1.0, dtype="float64"))
         if not any_diluted:
             return None
         self._dilution_node = pm.Deterministic(

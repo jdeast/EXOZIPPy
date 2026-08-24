@@ -36,6 +36,28 @@ import pytensor
 if pytensor.config.linker == "auto":
     pytensor.config.linker = "cvm"
 
+# EXOZIPPy is a float64 codebase and one place fails SILENTLY without it, so
+# the assumption is checked here rather than left implicit (review 2.14.2).
+# potentials.py caps the log-sigmoid argument of every soft bound at
+# _MAX_ARG = 700 because exp(700) ~ 1e304 is finite in float64 and exp(710) is
+# not.  Under floatX=float32 the same graph overflows exp at ~88 and
+# underflows sigmoid to exactly 0 far inside the region where float64 still
+# has a finite gradient, so every soft barrier would evaluate to -inf on the
+# forbidden side instead of a linear ramp -- a wall with no restoring force,
+# reported nowhere.  The relaxation engine, the whitening probe and every
+# reported value assume float64 too; this cap is just the one that would not
+# announce itself.  A RuntimeError, not an assert, so `python -O` cannot
+# strip it.
+if pytensor.config.floatX != "float64":
+    raise RuntimeError(
+        f"EXOZIPPy requires pytensor floatX='float64'; got "
+        f"{pytensor.config.floatX!r}.  Soft bounds (exozippy/potentials.py) "
+        f"cap their log-sigmoid argument at 700, which is finite only in "
+        f"float64 -- in float32 every barrier silently becomes -inf on its "
+        f"forbidden side.  Unset PYTENSOR_FLAGS=floatX=float32 or the "
+        f"[global] floatX line in your .pytensorrc."
+    )
+
 from ._version import __version__
 from .system import System
 

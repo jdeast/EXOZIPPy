@@ -212,3 +212,34 @@ LSUN = 1 * u.Lsun
 M_BOL_SUN = LSUN.to(u.M_bol).value
 L0 = LSUN / 10 ** (-0.4 * M_BOL_SUN)
 LOG_L0_CONST = 2.5 * np.log10(L0.value)
+
+
+# --- 7. RUNTIME / PLUMBING CONSTANTS ---------------------------------------
+# Named here rather than inline at their one call site (review 4.2.6) because
+# a bare number in the middle of a function is unsearchable and unexplainable:
+# the next reader cannot tell a measured value from a guess, and cannot find
+# the other place that has to move with it.
+
+# Fraction of the physical cores an unconfigured run takes.  run.py resolves
+# `cores` as max(1, min(int(n_phys * CORE_FRACTION), n_phys - 1)) -- the
+# `n_phys - 1` arm is what always leaves one core for the OS and for the
+# user's shell, and this fraction is what keeps a 64-core node from being
+# taken whole by a fit nobody asked to be exclusive.  A `sampler: cores:` key
+# overrides it outright.
+CORE_FRACTION = 0.75
+
+# Hard wall-clock limit, in seconds, on ONE symbolic solve in the relaxation
+# engine (config._sympy_time_limit).  sp.solve can hang effectively forever on
+# certain equation/target pairs and WHICH pairs get attempted is hash-seed
+# sensitive, so this is a latent-intermittent-hang guard, not a performance
+# knob.  Two seconds is far above any solve the shipped examples need and far
+# below anything a user would sit through; raising it makes a hang look like a
+# slow start, lowering it starts abandoning solves that would have succeeded.
+SYMPY_SOLVE_TIMEOUT_S = 2
+
+# Seed for the corner plot's thinning draw (corner_utils.save_corner_plot).
+# DELIBERATELY fixed, and the opposite choice from run.get_draws' unseeded
+# posterior-spaghetti draw: a corner plot is a figure that goes in a paper, so
+# re-running the same trace must produce the same picture.  Any fixed value
+# does; this one is the historical 42.
+CORNER_THIN_SEED = 42

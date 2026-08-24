@@ -22,6 +22,43 @@ raw scales the samplers are handed come from), `src/exozippy/run.md`.
 - **PyMC's step classes are used directly -- `STEP_CLASSES` names `pm.DEMetropolis` / `pm.DEMetropolisZ`, with no local subclass.** There were two, carrying a `_fix_de_stats` coercion of the `scaling`/`lambda` sampler stats back to scalars: PyMC declared them scalar in `stats_dtypes_shapes` while `astep` returned the `np.atleast_1d` array `Metropolis.__init__` stores, and the trace backend rejected that with `ValueError: setting an array element with a sequence`. Upstream fixed it **below this project's floor** (DEMetropolisZ in pymc 5.26.0, DEMetropolis in 6.0.0; `pyproject.toml` requires `pymc>=6.0.0`), so the patch could not fire on any installable PyMC and was deleted in 2026-08. **The floor is what makes that safe** -- there is a comment on the `pymc` pin saying so; do not lower it. `tests/test_de_metropolis.py` samples both variants end to end and asserts the two stats are present and scalar in the written trace, which is exactly what the patch protected, so a re-regression fails a test rather than crashing a fit.
 
 
+## Reproducibility (`sampler: {seed: ...}`)
+
+`seed:` is the one seed for the whole run. It reaches `pm.sample`'s
+`random_seed` (NUTS and nutpie), `sample_jax_nuts`'s `random_seed`
+(numpyro/blackjax), and the `seed=` argument every in-house sampler already
+had -- `ptde_sample`, `ptde_async_sample`, `de_metropolis_sample`,
+`nested_sample`. Until review 2.14.4 run.py passed no seed to any of them, so
+a user could not reproduce their own fit.
+
+**Absent is not the same as unseeded.** With no `seed:` key, run.py DRAWS one
+from the OS entropy pool, logs it, and stamps it on the trace
+(`posterior.attrs["random_seed"]`); `mkparam` copies it into the restart
+file's header. So the default stays "different every run" -- which is what you
+want for a fresh fit -- while the run that actually happened stays
+reproducible after the fact. A hardcoded default seed would be strictly worse
+than none: it would correlate every user's chains while looking responsible.
+
+**`ptde_async` is the one method a seed cannot make reproducible, and that is
+a trade, not a defect.** It consumes worker results through
+`result_q.get(timeout=...)` -- arrival order -- and whether a proposal is
+accepted depends on which partners' states happen to be visible when it lands.
+A seed fixes the draws, not the trajectory. Making it reproducible would mean
+buffering arrivals into a canonical order, and that IS the synchronous
+sampler: determinism costs exactly the asynchrony `ptde_async` exists for.
+**If you need a bit-reproducible run, use `method: ptde`.** Synchronous PTDE
+is parallel but deterministic on purpose -- it fans proposals out to a shared
+pool and then applies accept/reject "in the same per-seed order"
+(`polish_seed_starts`), so no worker's scheduling can reach the chain state.
+NUTS, numpyro, blackjax and nutpie run independent chains and reproduce
+outright. run.py's startup log says which of the two sentences applies rather
+than emitting one that is true for one path and false for the other.
+
+Two things a seed does NOT cover, both deliberate: the posterior-spaghetti
+draws in the model plots (`run.get_draws`, unseeded so the overlay honestly
+shows spread -- see its docstring), and floating-point non-associativity
+across a different core count.
+
 ## PTDE: the proposal path is BIT-IDENTICAL by construction
 
 A rung's population is one `(n_chains, n_raw_elements)` float64 array

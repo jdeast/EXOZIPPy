@@ -129,7 +129,8 @@ def calc_jitter(jitter_variance):
     DELIBERATE DEPARTURE FROM EXOFASTv2, which floors the jitter at zero.
     This is an upgrade, not a port bug -- do not "restore" the floor.  The
     argument is the one ``planet.mass`` in ``linear`` mode already makes (see
-    the mass-parametrization section of CLAUDE.md): a positive-definite
+    the "Planet mass parametrization" section of
+    ``src/exozippy/components/star/star.md``): a positive-definite
     coordinate biases a marginal detection upward, because the half of the
     posterior that would have balanced it is folded onto the boundary.  Here
     the floor would also throw information away -- a negative jitter is the
@@ -1934,7 +1935,8 @@ class Instrument(Component):
         other one is -- as a Parameter conversion factor, applied by
         ``to_internal`` / ``from_internal`` -- and never hand-written at a
         call site (the two factor functions in this codebase are reciprocals
-        and confusing them is silent; see CLAUDE.md).
+        and confusing them is silent; see the reciprocal-factors invariant in
+        CLAUDE.md and ``src/exozippy/components/parameter.md``).
 
         It is injected HERE, in the base class, rather than in each child's
         manifest, because all three detrending children (`rvinstrument`,

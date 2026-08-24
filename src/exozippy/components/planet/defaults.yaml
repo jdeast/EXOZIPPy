@@ -5,8 +5,9 @@ planet:
   # rather than log(mass) because the microlensing constraint measures q, not
   # the masses, and star.logmass is already the sampled stellar coordinate --
   # so the constraint becomes a shear of the sampled pair.  Measured on
-  # examples/DC2018_128: the whitened 2x2 curvature block conditions ~4.5x
-  # better (48 -> 11); worthwhile, but not the headline (see CLAUDE.md).
+  # examples/DC2018_128: planet.mass ESS 337 -> 3230, star.logmass 363 ->
+  # 2865 (see "Planet mass parametrization" in
+  # src/exozippy/components/star/star.md).
   # Base: log10.
   log_q:
     # q = 1e-9 is an order below lens.q's 1e-8 floor (itself 10x below the
@@ -113,6 +114,7 @@ planet:
     unit: ""
     internal_unit: ""
     latex: "a/R_*"
+    description: "Semi-major Axis in $R_*$"
     # rank 5: the engine's Condition B rewrites the lowest-ranked
     # symbol of a violated relation, and this one is DERIVED -- its
     # runtime value is its expression -- so it must always be the
@@ -126,6 +128,7 @@ planet:
     unit: ""
     internal_unit: ""
     latex: "b"
+    description: "Transit Impact Parameter"
     expressions:
       default:
         func_name: "calc_b"

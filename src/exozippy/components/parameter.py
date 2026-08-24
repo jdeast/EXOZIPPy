@@ -253,7 +253,7 @@ def to_vec(val, n_elements, fill=np.nan):
     if hasattr(raw_val, "eval"):
         try:
             raw_val = raw_val.eval()
-        except:
+        except Exception:
             return np.full(n_elements, fill, dtype=float)
 
     arr = np.atleast_1d(raw_val)
@@ -267,7 +267,7 @@ def to_vec(val, n_elements, fill=np.nan):
                     for x in arr
                 ]
             )
-        except:
+        except Exception:
             return np.full(n_elements, fill, dtype=float)
 
     # 5. Scalar conversion (This is where the crash was!)
@@ -1822,9 +1822,13 @@ class Parameter:
         # 4. BUILD RAW VARIABLES
         raw_elements = [None] * n_elements
 
-        # Fixed / derived: constant 0 in raw space
+        # Fixed / derived: constant 0 in raw space.  dtype is explicit
+        # because a bare 0.0 autocasts to float32 and these are stacked with
+        # the sampled elements -- harmless while at least one element is
+        # sampled (the stack upcasts), but a vector whose elements are ALL
+        # fixed or derived would come out float32 end to end (review 2.14.2).
         for i in np.where(is_fixed | is_derived)[0]:
-            raw_elements[i] = pt.constant(0.0)
+            raw_elements[i] = pt.constant(0.0, dtype="float64")
 
         if np.any(is_sampled):
             idx = np.where(is_sampled)[0]
@@ -2221,7 +2225,12 @@ class Parameter:
             if i in mu_links:
                 mu_i = mu_links[i]["fn"](val_flat)
             elif gaussian_prior_mask[i]:
-                mu_i = pt.as_tensor_variable(float(prior_mus[i]))
+                # np.float64, NOT a bare Python float: pytensor autocasts
+                # a Python float to the SMALLEST dtype that represents it,
+                # so `float(...)` here produced a float32 constant and this
+                # truncation-mass logp term carried a mu rounded to ~1e-7
+                # relative (docs/testing.md's autocast trap; review 2.14.2).
+                mu_i = pt.as_tensor_variable(np.float64(prior_mus[i]))
             else:
                 continue  # no Gaussian on this element: U(lo, up) already
             sig_i = float(sigmas[i])

@@ -665,3 +665,71 @@ def test_evidence_citations_resolve_through_bibtex(tmp_path):
     bbl = (tmp_path / "EV_paper.bbl").read_text()
     for fragment in ("Meng", "hwirth"):
         assert fragment in bbl
+
+
+def test_no_parameter_resolves_to_a_blank_description():
+    """
+    Given every parameter declared in a shipped defaults.yaml,
+    When its ``description`` is resolved the way ConfigManager.resolve() does
+      -- the component's own entry layered over the root
+      ``components/defaults.yaml`` entry of the same name --
+    Then it is non-empty.
+
+    A blank Description column is NOT an "internal parameter" marker and never
+    was (review 3.14.13): before this test it flagged orbit.sini/sinw/cosw,
+    secosw/sesinw/esinw/ecosw and planet.ar/planet.b, every one of which is a
+    standard published table row.  So a new parameter with no description is a
+    documentation gap, and the table has no way to say so -- it just prints an
+    empty cell next to a number.
+
+    Keep a new description to about 25 characters: it sets the LaTeX table's
+    COLUMN WIDTH, and anything longer belongs in a table_note.  That is not
+    asserted here because two shipped descriptions already exceed it, and
+    tightening them would move a published table's geometry -- which wants its
+    own before/after, not a line in this test.
+    """
+    import yaml
+
+    root = yaml.safe_load((SRC / "components" / "defaults.yaml").read_text())
+    inherited = {
+        name: spec.get("description")
+        for name, spec in (root or {}).items()
+        if isinstance(spec, dict)
+    }
+
+    def is_param_spec(spec):
+        # A parameter declaration always carries at least one of these; a
+        # nested options block (expressions:, overrides:) carries none.
+        return isinstance(spec, dict) and bool(
+            spec.keys()
+            & {
+                "lower",
+                "upper",
+                "initval",
+                "unit",
+                "internal_unit",
+                "latex",
+                "description",
+                "expressions",
+                "mu",
+                "sigma",
+                "shape",
+            }
+        )
+
+    blank = []
+    for path in sorted(SRC.rglob("*/defaults.yaml")):
+        doc = yaml.safe_load(path.read_text()) or {}
+        for comp, params in doc.items():
+            if not isinstance(params, dict):
+                continue
+            for name, spec in params.items():
+                if not is_param_spec(spec):
+                    continue
+                desc = spec.get("description")
+                if desc is None:
+                    desc = inherited.get(name)
+                if not str(desc or "").strip():
+                    blank.append(f"{path.relative_to(SRC)}: {comp}.{name}")
+
+    assert not blank, "parameters with no description:\n" + "\n".join(blank)

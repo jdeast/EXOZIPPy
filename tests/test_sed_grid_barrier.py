@@ -354,8 +354,8 @@ def test_prior_contribution_is_declared_and_reported(hat3_star_only):
 
     A derived parameter with two finite bounds reports "U(lo, hi)" from its
     own fields -- exactly the prior a barrier is NOT -- so the declaration
-    is what keeps the table honest.  See CLAUDE.md, "Reporting
-    component-added priors".
+    is what keeps the table honest.  See "Reporting component-added priors"
+    in src/exozippy/components/parameter.md.
     """
     # ARRANGE
     system, _, _ = hat3_star_only

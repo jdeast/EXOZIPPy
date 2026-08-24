@@ -124,6 +124,7 @@ orbit:
     unit: ""
     internal_unit: ""
     latex: "e^{1/2}\\cos{\\omega_*}"
+    description: "$\\sqrt{e}\\cos{\\omega_*}$"
     expressions:
       from_ecc:
         func_name: "calc_secosw_from_ecc"
@@ -136,6 +137,7 @@ orbit:
     unit: ""
     internal_unit: ""
     latex: "e^{1/2}\\sin{\\omega_*}"
+    description: "$\\sqrt{e}\\sin{\\omega_*}$"
     expressions:
       from_ecc:
         func_name: "calc_sesinw_from_ecc"
@@ -365,6 +367,7 @@ orbit:
     unit: ""
     internal_unit: ""
     latex: "\\sin{i}"
+    description: "Sine of Inclination"
     expressions:
       default:
         func_name: "calc_sini"
@@ -373,6 +376,7 @@ orbit:
     unit: ""
     internal_unit: ""
     latex: "\\sin{\\omega_*}"
+    description: "$\\sin{\\omega_*}$"
     expressions:
       default:
         func_name: "calc_sinw"
@@ -381,6 +385,7 @@ orbit:
     unit: ""
     internal_unit: ""
     latex: "\\cos{\\omega_*}"
+    description: "$\\cos{\\omega_*}$"
     expressions:
       default:
         func_name: "calc_cosw"
@@ -389,6 +394,7 @@ orbit:
     unit: ""
     internal_unit: ""
     latex: "e\\sin{\\omega_*}"
+    description: "$e\\sin{\\omega_*}$"
     expressions:
       default:
         func_name: "calc_esinw"
@@ -402,6 +408,7 @@ orbit:
     unit: ""
     internal_unit: ""
     latex: "e\\cos{\\omega_*}"
+    description: "$e\\cos{\\omega_*}$"
     expressions:
       default:
         func_name: "calc_ecosw"

@@ -549,7 +549,8 @@ class Band(Component):
         #
         # Through "overrides" rather than "options" so it combines as
         # min(user_upper, 1.0) and cannot RAISE a bound the user tightened
-        # (the channel note in CLAUDE.md).  This is a validity limit -- past
+        # (the "overrides" vs "options" channel note in
+        # src/exozippy/config.md).  This is a validity limit -- past
         # it the intensity is negative -- which is exactly what that channel
         # is for.  NaN leaves quadratic bands alone.
         if "u1" in self.manifest:

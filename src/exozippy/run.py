@@ -22,7 +22,12 @@ from exozippy.samplers.ptde import ptde_sample
 from exozippy.samplers.ptde_async import ptde_async_sample
 from exozippy.system import System
 
-from .corner_utils import collect_corner_samples, save_corner_plot
+from .constants import CORE_FRACTION
+from .corner_utils import (
+    collect_corner_samples,
+    histogram_grid_degenerate,
+    save_corner_plot,
+)
 from .diagnostics import ModelAuditor
 from .logger import setup_logging
 from .mkparam import write_param_file
@@ -77,6 +82,7 @@ KNOWN_SAMPLER_KEYS = {
     "collect_rung_timing",
     "swap_schedule",
     "seed_polish",
+    "seed",
     "store_hot_chains",
 }
 
@@ -309,7 +315,7 @@ def _run_fit(config, gui, user_params=None):
         cores = int(_cores_raw)
     else:
         _phys = mp.cpu_count()
-        cores = max(1, min(int(_phys * 0.75), _phys - 1))
+        cores = max(1, min(int(_phys * CORE_FRACTION), _phys - 1))
     target_accept = sampler_cfg.get("target_accept", 0.9)
     method = sampler_cfg.get(
         "method", None
@@ -334,6 +340,28 @@ def _run_fit(config, gui, user_params=None):
     T_max = float(sampler_cfg.get("T_max", 200.0))
     _n_chains_raw = sampler_cfg.get("n_chains", None)
     n_chains = int(_n_chains_raw) if _n_chains_raw is not None else None
+    # Reproducibility: one seed for the whole run (review 2.14.4b).
+    #
+    # run.py passed NO random_seed to anything -- not pm.sample, not
+    # sample_jax_nuts, not nutpie, and not PTDE's own `seed=` argument, which
+    # had been sitting unused on all four in-house samplers -- so a user could
+    # not reproduce their OWN fit.
+    #
+    # ABSENT is not the same as UNSEEDED.  Hardcoding a default would be
+    # strictly worse than nothing: it would correlate every user's chains
+    # while looking responsible.  So when the key is absent a seed is DRAWN
+    # from the OS entropy pool, LOGGED, and stamped onto the trace, which
+    # keeps "different every run" -- right for a fresh fit -- without giving
+    # up reproducibility after the fact.  mkparam copies it into the restart
+    # file's header, so a rerun can reproduce the run that actually happened
+    # by pasting one line.
+    _seed_raw = sampler_cfg.get("seed", None)
+    if _seed_raw is None:
+        seed = int(np.random.SeedSequence().entropy % (2**31 - 1))
+        seed_source = "drawn"
+    else:
+        seed = int(_seed_raw)
+        seed_source = "config"
     recompute_trace = sampler_cfg.get("recompute_trace", False)
     nthin = int(sampler_cfg.get("nthin", 1))
     # Data-driven whitening: probe each raw element's true local scale from
@@ -616,12 +644,41 @@ def _run_fit(config, gui, user_params=None):
             # applied.
             warn_maxtime_unsupported(method, maxtime)
 
+            # Say what the seed is, and say honestly what it buys on THIS
+            # path.  One generic sentence would be true for one sampler and
+            # false for another: ptde_async consumes worker results in
+            # ARRIVAL order (`result_q.get`), and a proposal's accept/reject
+            # depends on which partners' states happen to be visible when it
+            # lands -- so a seed fixes the draws but not the trajectory.
+            # Buffering arrivals into a canonical order to fix that IS the
+            # synchronous sampler, so this is a trade the user bought when
+            # they chose ptde_async, not an unfixed defect.  Sync `ptde` is
+            # parallel but deterministic on purpose (polish_seed_starts
+            # re-imposes per-seed order before any state is touched), so it
+            # reproduces; so do NUTS, numpyro, blackjax and nutpie, whose
+            # chains are independent.
+            if method == "ptde_async":
+                logger.info(
+                    f"random seed ({seed_source}): {seed} -- fixes the draws, "
+                    f"but ptde_async consumes results in arrival order, so "
+                    f"the run is NOT bit-reproducible.  Use method: ptde for "
+                    f"a reproducible run.  To reuse this seed: "
+                    f"sampler: {{seed: {seed}}}"
+                )
+            else:
+                logger.info(
+                    f"random seed ({seed_source}): {seed} -- rerunning this "
+                    f"config with sampler: {{seed: {seed}}} reproduces this "
+                    f"fit."
+                )
+
             if method == "ptde":
                 idata = ptde_sample(
                     model,
                     system,
                     draws,
                     tune,
+                    seed=seed,
                     n_temps=n_temps,
                     T_max=T_max,
                     n_chains=n_chains,
@@ -658,6 +715,7 @@ def _run_fit(config, gui, user_params=None):
                     system,
                     draws,
                     tune,
+                    seed=seed,
                     store_hot_chains=store_hot_chains,
                     n_temps=n_temps,
                     T_max=T_max,
@@ -697,6 +755,7 @@ def _run_fit(config, gui, user_params=None):
                 idata = nested_sample(
                     model,
                     system,
+                    seed=seed,
                     backend=sampler_cfg.get("nested_backend", "dynesty"),
                     nlive=int(sampler_cfg.get("nlive", 500)),
                     dlogz=float(sampler_cfg.get("dlogz", 0.5)),
@@ -747,6 +806,7 @@ def _run_fit(config, gui, user_params=None):
                     jitter=sampler_cfg.get("jitter", False),
                     chain_method=chain_method,
                     nuts_sampler=method,
+                    random_seed=seed,
                 )
             elif method == "nutpie":
                 # nutpie ignores initvals; it uses init_mean: a flat float64
@@ -772,6 +832,7 @@ def _run_fit(config, gui, user_params=None):
                         target_accept=target_accept,
                         nuts_sampler_kwargs={"init_mean": nutpie_init_mean},
                         cores=cores,
+                        random_seed=seed,
                         return_inferencedata=True,
                     )
             elif method in de_metropolis.STEP_CLASSES:
@@ -790,6 +851,7 @@ def _run_fit(config, gui, user_params=None):
                         draws,
                         tune,
                         variant=method,
+                        seed=seed,
                         chains=sampler_cfg.get("chains", None),
                         cores=cores,
                         raw_starts=raw_starts,
@@ -823,6 +885,7 @@ def _run_fit(config, gui, user_params=None):
                         init=init,
                         step=step,
                         cores=cores,
+                        random_seed=seed,
                         return_inferencedata=True,
                         callback=nuts_callback,
                     )
@@ -834,6 +897,11 @@ def _run_fit(config, gui, user_params=None):
             # must be told rather than left to assume 1 (see
             # ModeReport.thin_factor / thin_known).
             idata.posterior.attrs["nthin"] = int(nthin)
+            # The seed the run ACTUALLY used, whether the user named it or it
+            # was drawn.  mkparam reads it back out for the restart file's
+            # header, so a fit's exact state stays recoverable from its own
+            # output -- the same philosophy as the start values it writes.
+            idata.posterior.attrs["random_seed"] = int(seed)
             # Ensure lp is in sample_stats; compute and persist if missing,
             # so the archived trace carries it and no later reader (modes,
             # mkparam, the plotters) has to recompute it.
@@ -1256,7 +1324,7 @@ def inspect_start(
                         if hasattr(p.expression(), "eval")
                         else p.expression()
                     )
-                except:
+                except Exception:
                     pass
 
         if raw_v is None:
@@ -1854,7 +1922,11 @@ def _dist_degeneracy(values):
       gracefully stopped, unmixed run produces and what actually crashed CI.
 
     The third test is the exact condition numpy itself raises on, so it
-    tracks the failure rather than approximating it.
+    tracks the failure rather than approximating it, and it is asked through
+    ``corner_utils.histogram_grid_degenerate`` -- the SAME predicate the corner
+    plot uses to decide whether a parameter gets a column at all, only over
+    corner's 20-bin grid instead of arviz's 512.  The two must agree, so there
+    is one implementation.
     """
     x = np.asarray(values, dtype=float).ravel()
     x = x[np.isfinite(x)]
@@ -1863,7 +1935,7 @@ def _dist_degeneracy(values):
     lo, hi = float(x.min()), float(x.max())
     if lo == hi:
         return f"constant at {lo:.10g}"
-    if np.any(np.diff(np.linspace(lo, hi, _KDE_GRID_LEN + 1)) <= 0):
+    if histogram_grid_degenerate(lo, hi, _KDE_GRID_LEN + 1):
         return (
             f"range {hi - lo:.3g} around {lo:.10g} spans fewer than "
             f"{_KDE_GRID_LEN} float64 steps"
@@ -2297,6 +2369,18 @@ def get_draws(idata, n_draws=50, param_lookup=None, mode=None):
     equals this integer (used by the per-mode output loop in run_fit to
     build a mode-specific draw set). If omitted (default), every valid draw
     (mode >= 0) is eligible, matching the combined-posterior behavior.
+
+    THE DRAW IS UNSEEDED, BY DESIGN -- do not "helpfully" pin a seed here
+    (review 2.14.4a).  These are the posterior-spaghetti curves overlaid on
+    the model plots, and the point of overlaying 50 of them is to SHOW the
+    posterior's spread; re-rendering the same trace and getting a different
+    50 is a correct picture of the same distribution, and a fixed subset
+    would quietly become "the" 50 curves the reader believes are special.
+    Nothing downstream is compared between runs, and no reported number comes
+    from this selection.  Contrast ``corner_utils.save_corner_plot``, whose
+    thinning IS seeded (``constants.CORNER_THIN_SEED``) because a corner plot
+    is a figure that goes in a paper and must redraw identically, and
+    ``sampler: {seed:}``, which fixes the chains themselves.
     """
     # 1. Flatten chains/draws into a single 'sample' dimension
     post = az.extract(idata, combined=True, keep_dataset=True)
