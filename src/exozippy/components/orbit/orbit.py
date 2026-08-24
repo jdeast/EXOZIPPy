@@ -1410,7 +1410,11 @@ class Orbit(Component):
         safe = np.where(idx < 0, 0, idx).astype("int32")
         take = pt.as_tensor_variable(safe)
         for name in ("p", "ar"):
-            if not isinstance(getattr(planet, name, None), Parameter):
+            # The shared build-time predicate, not a local isinstance: a
+            # Parameter left over from an EARLIER model must be rebuilt, or
+            # the chord expression consumes the previous build's nodes and
+            # the model cannot compile its logp (review 3.14.12).
+            if not Component._parameter_is_current(planet, name, model):
                 planet.add_parameter(model, name, system)
             ctx[name] = getattr(planet, name).value[take]
         return ctx
@@ -1449,7 +1453,7 @@ class Orbit(Component):
                         (self.n_elements,)
                     )
                     continue
-                if not isinstance(getattr(comp, "mass", None), Parameter):
+                if not Component._parameter_is_current(comp, "mass", model):
                     comp.add_parameter(model, "mass", system)
                 context_nodes[f"{ctype}.mass"] = pt.dot(
                     pt.as_tensor_variable(W), comp.mass.value

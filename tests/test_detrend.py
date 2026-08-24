@@ -14,6 +14,13 @@ quantity).
 nonzero-mean column is exactly degenerate with the instrument offset along
 its mean direction, so the columns are now WHITENED per (instrument, column)
 at ingestion, and the coefficient is reported back in raw units.
+
+3.14.10 -- and because the whitened matrix is DIMENSIONLESS, the coefficient
+carries the units of whatever the dot product feeds.  rvinstrument declared
+none at all while adding its term to a model in the internal solRad/d, so an
+RV detrend coefficient was reported 8052.0833x too small and in the wrong
+unit.  The rule, and the fact that the three declaring components correctly
+disagree with each other, are pinned at the bottom of this file.
 """
 
 import numpy as np
@@ -149,19 +156,21 @@ def test_detrend_coefficient_is_reported_in_raw_units(detrended_rv):
     Given a whitened design matrix,
     When the coefficient Parameter converts internal -> user,
     Then the reported number is the coefficient per RAW column unit --
-    the sampled one divided by that column's standard deviation.
+    the sampled one divided by that column's standard deviation, and in
+    m/s (see the unit test below).
 
     Sample whitened, report un-whitened: the conversion goes through
     Parameter.from_internal like every other unit change, so nothing hand
     writes the factor at a call site.
     """
     system, _, _, _, x = detrended_rv
-    coeffs = system.rvinstrument.detrend_coeffs
+    comp = system.rvinstrument
+    coeffs = comp.detrend_coeffs
 
     reported = coeffs.from_internal(np.array([1.0]))
 
     assert float(np.atleast_1d(reported)[0]) == pytest.approx(
-        1.0 / np.std(x), rel=1e-12
+        comp._rv_factor() / np.std(x), rel=1e-12
     )
 
 
@@ -169,18 +178,99 @@ def test_user_bounds_are_pushed_through_the_same_map(detrended_rv):
     """
     Given the coefficient's raw-unit bounds from defaults.yaml,
     When the Parameter stores them internally,
-    Then they are the raw bounds times the column's standard deviation --
-    a stated prior keeps its meaning under the change of coordinate.
+    Then they are the raw bounds times the column's standard deviation and
+    divided by the m/s-per-internal factor -- a stated prior keeps its
+    meaning under BOTH halves of the change of coordinate.
     """
     system, _, _, _, x = detrended_rv
-    coeffs = system.rvinstrument.detrend_coeffs
+    comp = system.rvinstrument
+    coeffs = comp.detrend_coeffs
+    expected = 1.0e6 * np.std(x) / comp._rv_factor()
 
     assert float(np.atleast_1d(coeffs.lower)[0]) == pytest.approx(
-        -1.0e6 * np.std(x), rel=1e-12
+        -expected, rel=1e-12
     )
     assert float(np.atleast_1d(coeffs.upper)[0]) == pytest.approx(
-        1.0e6 * np.std(x), rel=1e-12
+        expected, rel=1e-12
     )
+
+
+# ---------------------------------------------------------------------------
+# 3.14.10: the coefficient's unit is the unit of what the dot product feeds
+# ---------------------------------------------------------------------------
+
+
+def test_an_rv_detrend_coefficient_is_reported_in_m_per_s(detrended_rv):
+    """
+    Given a detrend column carrying an injected trend of a KNOWN size in
+      m/s per unit of the raw column,
+    When the Parameter converts the internal coefficient that reproduces
+      that trend back to user units,
+    Then the reported number is that size, in m/s.
+
+    Review 3.14.10.  `rv_model += pt.dot(detrend, c)` and rv_model is in
+    the internal solRad/d, so the coefficient is too -- but it was declared
+    `unit: ""` / `internal_unit: ""`, and the table therefore printed the
+    coefficient in solRad/d.  The error is exactly the m/s-per-solRad/d
+    factor 8052.0833...: this fit reported 0.0373 for a real 300 m/s.
+    """
+    system, _, _, _, x = detrended_rv
+    comp = system.rvinstrument
+    coeffs = comp.detrend_coeffs
+
+    # The internal coefficient that reproduces the injected trend: the
+    # trend is _COEFF * (x - mean) m/s = _COEFF * std(x) * whitened_col,
+    # and rv_model carries it in solRad/d.
+    internal = _COEFF * np.std(x) / comp._rv_factor()
+
+    reported = float(
+        np.atleast_1d(coeffs.from_internal(np.array([internal])))[0]
+    )
+
+    assert reported == pytest.approx(_COEFF, rel=1e-12)
+    # The pre-fix value, explicitly excluded.
+    assert reported != pytest.approx(_COEFF / comp._rv_factor(), rel=1e-6)
+
+
+def test_the_declared_units_name_what_the_dot_product_feeds(detrended_rv):
+    """
+    Given the three components that declare detrend_coeffs,
+    When their declarations are read,
+    Then each names the unit of the model term its dot product is added
+      to -- which is NOT the same unit for all three.
+
+    The rule, pinned as a fact rather than as prose: the design matrix is
+    whitened at ingestion and so dimensionless, which leaves the
+    coefficient carrying the units of whatever the dot product feeds.
+    mulensinstrument's `mag` is the trap this guards -- its coefficient
+    sits inside 10**(-0.4*...) so it is in MAGNITUDES even though the
+    component models flux, and an audit that "fixes" it to flux breaks
+    mulens detrending silently.
+    """
+    import pathlib
+
+    import exozippy.components
+    from exozippy.yamlio import load_yaml
+
+    root = pathlib.Path(exozippy.components.__file__).parent
+    declared = {}
+    for path in root.rglob("defaults.yaml"):
+        for prefix, block in (load_yaml(str(path)) or {}).items():
+            entry = (block or {}).get("detrend_coeffs")
+            if isinstance(entry, dict):
+                declared[prefix] = (
+                    entry.get("unit"),
+                    entry.get("internal_unit"),
+                )
+
+    assert declared == {
+        # rv_model is internal solRad/d
+        "rvinstrument": ("m/s", "solRad/d"),
+        # lc_model is normalized flux: genuinely dimensionless
+        "transit": ("", ""),
+        # the coefficient is inside a magnitude exponent
+        "mulensinstrument": ("mag", "mag"),
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -757,6 +757,9 @@ class System(Component):
             # Stage 5: Automatic PyTensor Map Conversion
             # Convert logical numpy arrays into PyTensor variables for the graph
             for comp in self.active_components.values():
+                # Every node a component stashed belongs to the PREVIOUS
+                # model; drop them before anything can read one (3.14.12).
+                comp.reset_build_caches()
                 comp.build_tensor_maps()
 
             # Build order for stage 6: topological sort

@@ -1033,9 +1033,37 @@ class ConfigManager:
         return translated_path, internal_value
 
     def add_hint(self, path, value, rank=RANK_DERIVED_DATA):
-        """
-        API for components to register their data-driven guesses.
-        Converts human-readable paths to strict indices and scales to internal units.
+        """Register a component's ranked, data-driven START VALUE.
+
+        This is the one correct channel for a start value a component
+        computes, and it has TWO consumers that must agree:
+
+        * the relaxation engine (``resolve_and_validate_parameters`` step
+          1.5), which solves from the number and files ``rank`` in the
+          provenance ledger that ``initval_source``, ``export_solution``,
+          the startup table and the GUI all report; and
+        * ``resolve()``, which layers it as ``initval`` under the user's
+          params and over defaults, so the stage-2/3 readers that ask for a
+          start value BEFORE the engine runs -- ``Orbit``'s ``tc`` window,
+          ``Orbit._seeded_period`` -- see the same number.  ``resolve()``
+          did not, until review 3.14.3, which is why
+          ``globalsearch.seed_start`` wrote every seed a SECOND time
+          through ``add_override``.
+
+        Converts human-readable paths to strict indices and scales to
+        internal units (``_translate_and_scale``, shared with every other
+        hint channel).  A hint is one scalar feeding ``initval`` and nothing
+        else: a bound, a prior or a structural pin goes through
+        ``add_override``, a preliminary whitening scale through
+        ``add_scale_hint``.
+
+        PUSH PER-ELEMENT PATHS.  The engine matches a hint by its EXACT
+        path while ``resolve()`` matches it under all three spellings, so a
+        2-part broadcast hint -- which nothing writes today -- would reach
+        every element through ``resolve()`` at the parameter's DEFAULTS rank
+        while reaching the ledger under no symbol at all (and leaving an
+        orphaned 2-part row behind, the kind ``export_solution`` filters out
+        by hand).
         """
         translated_path, internal_value = self._translate_and_scale(
             path, value
@@ -1063,7 +1091,11 @@ class ConfigManager:
         a ranked *start value*: one scalar, feeding ``initval`` only, competing
         in the relaxation engine's provenance ledger.  A bound or a structural
         pin is neither a start value nor ranked -- ``lower``/``upper``/``sigma``
-        never enter the ledger at all.
+        never enter the ledger at all.  The corollary runs the other way too:
+        ``resolve()`` layers hints ABOVE this channel, so an ``initval``
+        written here is a fallback that a hint on the same path replaces.
+        Do not reach for it to make a start value visible -- that is what
+        ``add_hint`` already does.
 
         Writing into ``user_params`` instead (what the SED did until this was
         added) is what this replaces: those entries are indistinguishable from
@@ -1571,6 +1603,69 @@ class ConfigManager:
                         / internal_factor,
                     )
                     break
+
+        # Apply component START-VALUE hints (ConfigManager.add_hint).
+        #
+        # WHY resolve() has to see them at all: a hint is the one correct
+        # channel for a component-supplied start value, but the relaxation
+        # engine that consumes it does not run until stage 4, and several
+        # components ask resolve() for a start value at stage 2/3 -- Orbit
+        # builds tc's HARD window as tc_init +/- P/2 there, so an epoch it
+        # cannot see does not merely start the chain in the wrong place, it
+        # makes the right place unreachable.  Until this existed,
+        # globalsearch.seed_start wrote every searched period and epoch a
+        # SECOND time through add_override purely to be visible here: one
+        # number, two channels, two chances to drift (review 3.14.3).
+        #
+        # THE PRECEDENCE IS THE POINT -- under the user's params, over
+        # everything else.  Do not "simplify" the order:
+        #   * OVER defaults.yaml, because a hint is a measurement (an RV
+        #     median, a BLS epoch, median(err) for a GP amplitude) and the
+        #     defaults.yaml number is the generic backstop it exists to
+        #     replace.  The relaxation engine ranks it exactly that way --
+        #     step 1.5 of resolve_and_validate_parameters overwrites the
+        #     rank-20 default armor -- and resolve() disagreeing with the
+        #     engine about the same number is the bug this whole block is
+        #     avoiding.
+        #   * OVER both override channels, whose numeric payload is
+        #     component-computed DEFAULTS and validity BOUNDS.  Hints touch
+        #     only `initval`, which no shipped override writes, so nothing
+        #     moves today; the order states which wins if one ever does, and
+        #     a ranked measurement beating an unranked fallback is the same
+        #     rule as the line above.
+        #   * UNDER the user, because every hint rank is below RANK_USER and
+        #     the engine enforces precisely that (step 1.5's `< RANK_USER`
+        #     guard).  resolve() has no ledger to consult, so HERE THE ORDER
+        #     IS THE RULE: putting this loop after the user-params loop
+        #     below would let a component's guess silently overwrite a
+        #     number the user typed, in the one place the ledger cannot see.
+        #
+        # Only `initval`: a hint is one scalar start value and can never be
+        # a bound, a prior or a scale (add_scale_hint is the scale channel,
+        # applied just above).  It deliberately does NOT set
+        # `auto_estimated` either -- that flag belongs to the override
+        # channel, and a hint's provenance is already carried by its rank in
+        # the ledger, which is what initval_source and export_solution read.
+        if self.hints:
+            for i in range(n_elements):
+                for k in _lookup_keys(i):
+                    if k in self.hints:
+                        # Hints are stored in INTERNAL units (add_hint ->
+                        # _translate_and_scale) and resolve() returns USER
+                        # units, so divide by the user -> internal factor.
+                        # internal_factor is base(defaults) -> internal and
+                        # elem_scaling[i] is base -> user, so user ->
+                        # internal is internal_factor / elem_scaling[i] --
+                        # the element's own `unit:` override has to be in
+                        # there, or a hint on a planet mass the user asked
+                        # for in earthMass comes back 318x wrong.
+                        apply_value(
+                            "initval",
+                            resolved["initval"],
+                            i,
+                            self.hints[k] * elem_scaling[i] / internal_factor,
+                        )
+                        break
 
         for i in range(n_elements):
             for k in _element_keys(i):
