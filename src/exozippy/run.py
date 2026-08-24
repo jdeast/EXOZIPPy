@@ -1439,6 +1439,17 @@ def inspect_start(
         # seeds from the reverted values.
         v_phys = np.atleast_1d(raw_v).copy()
         s_phys = np.atleast_1d(raw_s if raw_s is not None else np.nan)
+        if s_phys.size < v_phys.size:
+            # A fully DERIVED multi-element parameter has no measured
+            # whitening scales (raw_s is None -> one NaN), and a mixed
+            # vector's scale array covers only its sampled elements with
+            # no alignment information here -- padding positionally would
+            # attribute a sampled element's scale to a derived one.  All
+            # rows show N/A instead.  First hit by lens.t_E on a
+            # TWO-source event (ob161003, queue task 3): every earlier
+            # example's derived vectors were single-element, so
+            # s_phys[i>0] never happened.
+            s_phys = np.full(v_phys.size, np.nan)
         m_phys = np.atleast_1d(mult_map.get(p.label, [np.nan] * len(v_phys)))
 
         user_flag = "*" if getattr(p, "user_prior_modified", False) else ""
