@@ -253,7 +253,7 @@ def to_vec(val, n_elements, fill=np.nan):
     if hasattr(raw_val, "eval"):
         try:
             raw_val = raw_val.eval()
-        except:
+        except Exception:
             return np.full(n_elements, fill, dtype=float)
 
     arr = np.atleast_1d(raw_val)
@@ -267,7 +267,7 @@ def to_vec(val, n_elements, fill=np.nan):
                     for x in arr
                 ]
             )
-        except:
+        except Exception:
             return np.full(n_elements, fill, dtype=float)
 
     # 5. Scalar conversion (This is where the crash was!)
@@ -1978,9 +1978,7 @@ class Parameter:
                 np.asarray(m, dtype=bool) for m, _e, _o, _s in expr_specs
             ]
             _non_sampled = (
-                self._inactive_mask(_all_masks[0].size)
-                if _all_masks
-                else None
+                self._inactive_mask(_all_masks[0].size) if _all_masks else None
             )
             for _m in _all_masks:
                 _non_sampled = _non_sampled | _m

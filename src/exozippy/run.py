@@ -1230,7 +1230,7 @@ def inspect_start(
                         if hasattr(p.expression(), "eval")
                         else p.expression()
                     )
-                except:
+                except Exception:
                     pass
 
         if raw_v is None:

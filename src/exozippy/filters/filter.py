@@ -464,7 +464,7 @@ class Filter(BaseQuery):
             try:
                 value = votable.get_field_by_id_or_name(field).value
                 setattr(self, field, value)
-            except:
+            except Exception:
                 setattr(self, field, None)
 
         self._set_zeropoint_values()

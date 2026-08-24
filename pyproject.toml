@@ -310,11 +310,16 @@ known-first-party = ["exozippy"]
 #   F701  `break` outside a loop
 #   F702  `continue` outside a loop
 #   B002  `++x`, which is two unary plusses and does nothing
+#   E722  bare `except:` -- catches KeyboardInterrupt and SystemExit too, so a
+#         Ctrl-C inside the guarded block is swallowed and the fit carries on.
+#         Zero hits as of review 2.14.1, which converted the last five to
+#         `except Exception:`; enabled so they cannot come back.
 #   PLE   pylint's error (not style) category
 #   I     import sorting -- replaces isort, and produced a zero-line diff
 #         against isort's output when adopted
 select = [
-    "E9", "F821", "F632", "F502", "F522", "F701", "F702", "B002", "PLE", "I",
+    "E9", "F821", "F632", "F502", "F522", "F701", "F702", "B002", "E722",
+    "PLE", "I",
 ]
 
 # NOT enabled, with reasons, so nobody has to re-derive these:
