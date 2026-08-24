@@ -75,8 +75,8 @@ push it into one of these contracts instead.
   the same element by INDEX (`star.0.teff` -- `examples/kelt4/kelt4.params.yaml`
   does), and a literal keyed write appended a TWIN rather than updating the
   entry. Both spellings are equally specific, so nothing downstream could
-  adjudicate: `ConfigManager` refuses such a file outright (see CLAUDE.md's
-  "Parameter naming convention"), and before it did, `standardize_param_names`
+  adjudicate: `ConfigManager` refuses such a file outright (see "Parameter
+  naming convention" in `src/exozippy/config.md`), and before it did, `standardize_param_names`
   kept whichever key came last -- the GUI's -- silently discarding the user's
   whole original entry, `sigma` prior included. Only the two specific
   spellings are matched; a 2-part broadcast entry is a coarser statement that

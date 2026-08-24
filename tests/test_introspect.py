@@ -67,7 +67,8 @@ def test_star_sampled_parameters_have_bounds_and_scale():
     """
     Given star's defaults.yaml,
     When every parameter marked as sampled is inspected,
-    Then each carries lower, upper, and init_scale (per CLAUDE.md).
+    Then each carries lower, upper, and init_scale (per rule 4 of the
+    defaults.yaml contract in src/exozippy/components/components.md).
     """
     # Arrange
     schema = introspect.component_schema("star")

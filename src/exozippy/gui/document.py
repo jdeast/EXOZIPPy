@@ -515,7 +515,7 @@ class RestoreAutosave(Command):
 # GUI's parameter table is allowed to write. DELIBERATELY not the same set as
 # ``linking.LINKABLE_FIELDS``, which it used to be defined as: `bound_scale`
 # (the soft-bound barrier width -- the one user-facing scale knob left, see
-# CLAUDE.md's "Whitening") is a settable field that is deliberately NOT
+# src/exozippy/whitening.md) is a settable field that is deliberately NOT
 # linkable, so equating the two sets made ConfigTab's `bound_scale` column 400
 # on every blur. Keep them decoupled: adding a field here must not make it a
 # link target, and vice versa.
@@ -808,7 +808,8 @@ class ProjectDocument:
 
         Only reachable from a params file that ALREADY names one element
         under both specific spellings -- which ``ConfigManager`` refuses
-        outright (see CLAUDE.md's "Parameter naming convention"), so the
+        outright (see "Parameter naming convention" in
+        ``src/exozippy/config.md``), so the
         collision is a pre-existing fault this edit would otherwise bury.
         """
         landed = {}

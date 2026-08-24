@@ -111,7 +111,8 @@ def _param_schema(name, raw):
 
     # A parameter is "sampled" when it is a free parameter (no derivation),
     # is not fixed (sigma != 0), and carries the lower/upper bounds required
-    # of every sampled parameter (see CLAUDE.md).  Bounds are the marker --
+    # of every sampled parameter (rule 4 of the defaults.yaml contract in
+    # src/exozippy/components/components.md).  Bounds are the marker --
     # init_scale is only a preliminary whitening seed and is optional.
     fixed = raw.get("sigma") == 0
     entry["sampled"] = bool(

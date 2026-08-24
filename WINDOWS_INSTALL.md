@@ -407,9 +407,9 @@ poetry run pytest tests/test_ptde.py -n0 -x        # 28 passed in ~25 s here
 timeout 3000 poetry run pytest -q -rf -n 6         # full suite; see Step 5b
 ```
 
-The suite takes **~18-20 minutes** on this machine (8 cores), not the ~10
-minutes quoted in `CLAUDE.md` for a workstation. Do not set a short timeout,
-but do set the long one from Step 5b.
+The suite takes **~18-20 minutes** on this machine (8 cores), not the ~8
+minutes warm quoted in `docs/testing.md` for a workstation. Do not set a
+short timeout, but do set the long one from Step 5b.
 
 Status: [VERIFIED -- see "Known test results on this machine" below]
 

@@ -1,8 +1,8 @@
 # The test suite and the PyTensor compile cache
 
 This is the runbook for the suite's runtime and for the compile cache that
-dominates it. It replaces the advice in CLAUDE.md's Commands block, which
-told you to run `pytensor-cache cleanup` when a test timed out inside
+dominates it. It replaces the advice that used to live in CLAUDE.md's
+Commands block, which told you to run `pytensor-cache cleanup` when a test timed out inside
 `cmodule.py`. **That command does not fix this and never did** -- see
 "What actually reclaims cache space" below.
 

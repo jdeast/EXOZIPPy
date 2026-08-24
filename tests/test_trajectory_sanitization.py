@@ -990,7 +990,8 @@ def test_the_clip_has_no_nan_gradient_and_no_nan_in_the_unselected_branch():
     When its value and its gradient are evaluated at the boundaries, at both
       infinities and inside the floor,
     Then everything is finite -- a NaN in the UNSELECTED branch of a where is
-      the JAX trap that freezes numpyro chains (see CLAUDE.md), and both
+      the JAX trap that freezes numpyro chains (the where-trap invariant in
+      CLAUDE.md), and both
       branches here are min/max against a finite constant.  NaN INPUT still
       propagates, which is PR #142's rule: a floor is a range decision and
       must never double as a NaN substitution.

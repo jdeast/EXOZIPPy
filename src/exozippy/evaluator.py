@@ -16,7 +16,8 @@ This module supplies the millisecond half of that loop:
     model-trace arrays by calling each owning component's own
     ``plot_data(system, point)`` again at the new point -- the SAME code
     that built the base specs and that the CLI's matplotlib ``plot()``
-    reuses (see CLAUDE.md's "Plotting for the GUI" section) -- rather than
+    reuses (see "Plotting: one description, two renderers" in
+    ``src/exozippy/outputs/outputs.md``) -- rather than
     a second, parallel implementation. There is exactly one place that
     knows how to draw a phased light curve or an SED spectrum; a slider
     move can never drift from what a re-Solve (or the saved PDF) would

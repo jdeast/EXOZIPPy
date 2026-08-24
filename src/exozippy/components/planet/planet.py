@@ -350,10 +350,13 @@ class Planet(Component):
         restoring force).  Those planets sample log_q = log10(m_p / m_host)
         instead, which also turns the microlensing constraint into a shear of
         the sampled pair (star.logmass, planet.log_q) rather than a diagonal
-        ridge -- worth a measured ~4.5x on the whitened 2x2 curvature block of
-        examples/DC2018_128, not the order of magnitude one might expect (see
-        CLAUDE.md).  Removing the unreachable-but-samplable negative region is
-        the larger win.
+        ridge.  Measured on examples/DC2018_128: planet.mass ESS 337 -> 3230
+        and star.logmass 363 -> 2865, i.e. the mass stops being the
+        convergence bottleneck (see "Planet mass parametrization" in
+        src/exozippy/components/star/star.md, which also RETIRES the
+        "~4.5x on the whitened 2x2 curvature block" figure this comment used
+        to quote -- it measured a local block at the start point).  Removing
+        the unreachable-but-samplable negative region is the other half.
 
         Default: 'linear' iff the planet is mass-constrained by RV or
         astrometry AND is not a microlensing lens body; 'log_q' otherwise.  A

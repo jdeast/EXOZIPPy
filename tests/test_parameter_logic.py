@@ -1286,8 +1286,8 @@ def _mixed_bounded_unbounded_model(sigma_on_unbounded):
 def test_mixed_bounded_unbounded_vector_gradient_is_finite(sigma_on_unbounded):
     """
     Given a vector parameter mixing a logit-bounded element with an element
-    whose bounds are +/-inf (CLAUDE.md: "+/-inf is a real bound and is
-    applied"),
+    whose bounds are +/-inf (src/exozippy/config.md: "+/-inf is a real bound
+    and is applied"),
     When the logp gradient is compiled on the C backend, the JAX backend and
     with graph rewrites DISABLED,
     Then it is finite on all three.

@@ -4,8 +4,8 @@ Reprocesses a previously saved trace (``<prefix>_trace.nc``) through the
 posterior mode-identification + reporting pipeline without re-sampling. This
 is a forensic/offline tool: it rebuilds the System from the same config and
 parameter_file YAML used for the original fit (needed for Parameter units,
-expressions, and derived-parameter posteriors -- see CLAUDE.md's six-stage
-lifecycle), loads the saved trace, runs outputs.modes.identify_modes and
+expressions, and derived-parameter posteriors -- see CLAUDE.md's seven
+lifecycle stages), loads the saved trace, runs outputs.modes.identify_modes and
 System.distribute_posterior, and rewrites <prefix>_modes.txt,
 <prefix>_definitions.tex, <prefix>_table.tex, and <prefix>_results.csv.
 
@@ -126,7 +126,7 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
 
     # Build the System (needed for Parameter units/expressions and
     # derived-parameter posteriors) but never sample -- prepare() +
-    # build_model() only, matching the lifecycle documented in CLAUDE.md.
+    # build_model() only, matching CLAUDE.md's seven lifecycle stages.
     system = System(config)
     system.prepare()
     system.build_model()

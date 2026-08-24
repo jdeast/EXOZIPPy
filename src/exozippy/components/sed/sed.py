@@ -934,8 +934,8 @@ class SED(Component):
     # a derived parameter carrying two finite bounds as "U(lo, hi)",
     # which is exactly the prior a barrier is NOT.  The barrier is added
     # by parameter.py rather than here, but the reason it exists is this
-    # component's, so this component declares it (see CLAUDE.md,
-    # "Reporting component-added priors").
+    # component's, so this component declares it (see "Reporting
+    # component-added priors" in src/exozippy/components/parameter.md).
     #
     # The same pass is where an off-grid START is reported.  It has to be
     # a warning and not a raise: the interpolator extrapolates rather
