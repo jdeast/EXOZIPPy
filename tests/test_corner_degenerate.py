@@ -16,7 +16,14 @@ import numpy as np
 matplotlib.use("Agg")
 import pytest
 
-from exozippy.corner_utils import _drop_undrawable, save_corner_plot
+import exozippy.corner_utils as corner_utils
+import exozippy.run as run_mod
+from exozippy.corner_utils import (
+    CORNER_BINS,
+    _drop_undrawable,
+    histogram_grid_degenerate,
+    save_corner_plot,
+)
 
 
 @pytest.fixture
@@ -214,3 +221,93 @@ def test_a_genuinely_narrow_but_drawable_column_is_kept(healthy):
     # ASSERT
     assert out_labels == labels
     assert out.shape == (200, 3)
+
+
+# --- the shared bin-degeneracy predicate (review 3.14.8) ----------------
+#
+# The test used to be written twice: run.py's _dist_degeneracy inlined the
+# monotonicity check and corner_utils kept a one-line copy behind a
+# cross-reference comment.  They MUST agree -- one decides whether a
+# parameter is given a corner column, the other whether a density can be
+# drawn for it -- so these pin that there is one implementation and that
+# both call sites reach it.
+
+
+def test_both_call_sites_use_the_one_predicate():
+    """
+    Given the extracted histogram_grid_degenerate,
+    When run.py's _dist_degeneracy and corner_utils' _drop_undrawable are
+      inspected,
+    Then both reach it -- run.py imports the same function object, and
+      corner_utils' module global is that same object.
+
+    Regression: the two were separate one-liners and could drift.
+    """
+    # ACT / ASSERT
+    assert run_mod.histogram_grid_degenerate is histogram_grid_degenerate
+    assert corner_utils.histogram_grid_degenerate is histogram_grid_degenerate
+
+
+@pytest.mark.parametrize("n_edges", [2, 3, 21, 513])
+def test_a_wide_range_is_never_degenerate(n_edges):
+    """
+    Given a range spanning many float64 steps,
+    When the predicate is asked about any grid length either caller uses,
+    Then it says the grid is fine.
+    """
+    assert histogram_grid_degenerate(0.0, 1.0, n_edges) is False
+
+
+@pytest.mark.parametrize("n_edges", [3, 21, 513])
+def test_a_single_ulp_range_is_degenerate(n_edges):
+    """
+    Given a range spanning exactly one float64 step,
+    When the predicate is asked about a grid of more than two edges,
+    Then it says the grid collapses -- linspace cannot produce distinct
+      interior edges inside a single ULP.
+    """
+    lo = 1.0
+    hi = np.nextafter(lo, lo + 1.0)
+    assert histogram_grid_degenerate(lo, hi, n_edges) is True
+
+
+def test_the_predicate_matches_numpys_own_failure():
+    """
+    Given a range that numpy itself refuses to bin at 512 bins,
+    When the predicate is asked with the same grid length run.py uses,
+    Then it agrees -- the point of the check is to TRACK numpy's condition,
+      not to approximate it.
+    """
+    # ARRANGE: 300 float64 steps -- fine for corner's 20 bins, not for 512.
+    lo = 1.0
+    hi = lo + 300 * np.spacing(lo)
+    data = np.linspace(lo, hi, 50)
+
+    # ACT
+    corner_ok = not histogram_grid_degenerate(lo, hi, CORNER_BINS + 1)
+    kde_bad = histogram_grid_degenerate(lo, hi, 512 + 1)
+    with pytest.raises(ValueError):
+        np.histogram(data, bins=512, range=(lo, hi))
+
+    # ASSERT
+    assert corner_ok
+    assert kde_bad
+
+
+def test_corner_bins_are_passed_as_edges_not_as_a_count():
+    """
+    Given corner's CORNER_BINS bin count,
+    When _drop_undrawable asks the predicate,
+    Then it asks about CORNER_BINS + 1 EDGES -- an off-by-one here would
+      silently loosen or tighten the drop test by one bin.
+
+    Pinned by behavior: a range spanning exactly CORNER_BINS float64 steps
+    has CORNER_BINS + 1 representable edges and must be kept, while one
+    spanning CORNER_BINS - 1 steps must not.
+    """
+    lo = 1.0
+    keep_hi = lo + CORNER_BINS * np.spacing(lo)
+    drop_hi = lo + (CORNER_BINS - 2) * np.spacing(lo)
+
+    assert histogram_grid_degenerate(lo, keep_hi, CORNER_BINS + 1) is False
+    assert histogram_grid_degenerate(lo, drop_hi, CORNER_BINS + 1) is True

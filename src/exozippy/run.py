@@ -22,7 +22,11 @@ from exozippy.samplers.ptde import ptde_sample
 from exozippy.samplers.ptde_async import ptde_async_sample
 from exozippy.system import System
 
-from .corner_utils import collect_corner_samples, save_corner_plot
+from .corner_utils import (
+    collect_corner_samples,
+    histogram_grid_degenerate,
+    save_corner_plot,
+)
 from .diagnostics import ModelAuditor
 from .logger import setup_logging
 from .mkparam import write_param_file
@@ -1824,7 +1828,11 @@ def _dist_degeneracy(values):
       gracefully stopped, unmixed run produces and what actually crashed CI.
 
     The third test is the exact condition numpy itself raises on, so it
-    tracks the failure rather than approximating it.
+    tracks the failure rather than approximating it, and it is asked through
+    ``corner_utils.histogram_grid_degenerate`` -- the SAME predicate the corner
+    plot uses to decide whether a parameter gets a column at all, only over
+    corner's 20-bin grid instead of arviz's 512.  The two must agree, so there
+    is one implementation.
     """
     x = np.asarray(values, dtype=float).ravel()
     x = x[np.isfinite(x)]
@@ -1833,7 +1841,7 @@ def _dist_degeneracy(values):
     lo, hi = float(x.min()), float(x.max())
     if lo == hi:
         return f"constant at {lo:.10g}"
-    if np.any(np.diff(np.linspace(lo, hi, _KDE_GRID_LEN + 1)) <= 0):
+    if histogram_grid_degenerate(lo, hi, _KDE_GRID_LEN + 1):
         return (
             f"range {hi - lo:.3g} around {lo:.10g} spans fewer than "
             f"{_KDE_GRID_LEN} float64 steps"
