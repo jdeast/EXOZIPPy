@@ -358,6 +358,226 @@ def enforce_budget_tree(
     return results
 
 
+# ---------------------------------------------------------------------------
+# Seeding a cold worker compiledir from a warm one
+# ---------------------------------------------------------------------------
+# The per-worker compiledirs are ~95% redundant copies of each other: measured
+# on this repo, each of gw0-gw5 held 1455-1562 entries against 1564 distinct
+# entries for a whole cold run, because most of what gets compiled is shared
+# infrastructure that every file's model builds rather than anything specific
+# to the files that worker drew.
+#
+# That redundancy bills twice:
+#
+#   1. Changing the worker count makes the NEW workers compile everything from
+#      scratch. Measured on the run that took CI from -n2 to -n4: ubuntu 3.12
+#      went 43:21 -> 52:24 and 3.13 went 36:39 -> 39:12, all green, purely
+#      because gw2 and gw3 started empty.
+#   2. It makes the saved CI cache scale with the worker count, so the cache
+#      cannot absorb more parallelism -- sharding the matrix 2x at -n4 would
+#      want ~8 entries x ~1.5 GB, back over GitHub's 10 GB repository budget.
+#
+# Both dissolve if only ONE tree is stored and the others are derived from it.
+# Deriving is cheap because of what a cache entry is made of. Measured over 148
+# entries: the .so is 85.3% of the bytes, the .cpp 13.4%, and key.pkl 1.3%.
+# Only key.pkl is ever rewritten in place -- PyTensor appends to it when a
+# second key maps to one compiled module -- so only key.pkl has to be a private
+# copy. Everything else can be a hard link.
+#
+# Measured on 398 entries: 5.3 s and 7.1 MB of real disk, against 53.6 s and
+# 218 MB for a full copy. Extrapolated to a 1800-entry tree, ~24 s and ~32 MB
+# per extra worker, instead of a cold compile of every graph.
+_MUTABLE_ENTRY_FILES = frozenset({"key.pkl"})
+
+
+@dataclass
+class SeedStats:
+    """What one seeding pass did."""
+
+    seeded_dirs: list[str] = field(default_factory=list)
+    skipped_dirs: list[str] = field(default_factory=list)
+    entries: int = 0
+    linked: int = 0
+    copied: int = 0
+    # Files that FELL BACK to a copy because os.link refused them. Tracked and
+    # reported because the fallback is silent and turns a 5-second metadata
+    # operation into a multi-minute byte copy. The way it happens in practice
+    # is a cross-device link (EXDEV): point EXOZIPPY_TEST_COMPILEDIR at a
+    # different filesystem from the source tree and every link fails. That is
+    # not hypothetical -- it is how the first measurement of this code was
+    # taken by mistake, reporting 0 hardlinked / 1988 copied.
+    link_fallbacks: int = 0
+
+    def summary(self) -> str:
+        if not self.seeded_dirs:
+            return ""
+        parts = [
+            f"seeded {len(self.seeded_dirs)} worker compiledir(s) from a warm "
+            f"one ({', '.join(self.seeded_dirs)}): {self.entries} entries, "
+            f"{self.linked} hard-linked, {self.copied} copied"
+        ]
+        if self.link_fallbacks:
+            parts.append(
+                f"WARNING: {self.link_fallbacks} hard links fell back to "
+                "copies (cross-device compiledir?), so this was far more "
+                "expensive than it should be"
+            )
+        return "; ".join(parts)
+
+
+def _entry_names(compiledir: Path) -> list[str]:
+    """Real cache entries in ``compiledir``: subdirectories, nothing else.
+
+    Directories only, unlike prune_compiledir's cheap pre-check, which counts
+    raw listdir names deliberately because it needs an UPPER bound. Here an
+    over-count is actively wrong: a compiledir always holds an ``__init__.py``,
+    and counting that as an entry made a brand-new tree look warm enough to be
+    a seed source -- which is how a first run reported "seeded 2 worker
+    compiledir(s) ... 0 entries, 0 hard-linked, 0 copied".
+    """
+    try:
+        return [
+            name
+            for name in os.listdir(compiledir)
+            if name != _LOCK_DIR and (compiledir / name).is_dir()
+        ]
+    except OSError:
+        return []
+
+
+def choose_seed_source(base_compiledir: Path, compiledir: Path) -> Path | None:
+    """The warmest compiledir in the tree, or None if nothing is warm.
+
+    "Warmest" is simply the largest entry count. The controller's own tree is
+    a candidate because that is what a -n0 run populates, and in CI it is the
+    restored one when only a single canonical tree is saved.
+    """
+    candidates = [compiledir]
+    candidates += [
+        d for _, d in worker_compiledirs(base_compiledir, compiledir)
+    ]
+    best, best_count = None, 0
+    for candidate in candidates:
+        count = len(_entry_names(candidate))
+        if count > best_count:
+            best, best_count = candidate, count
+    return best
+
+
+def seed_compiledir(source: Path, target: Path) -> tuple[int, int, int, int]:
+    """Populate ``target`` from ``source``. Returns (entries, linked, copied, fallbacks).
+
+    Hard-links every file in every cache entry except key.pkl, which is copied
+    -- see the module comment above for why that split is exactly right.
+
+    Existing files in ``target`` are left alone, so this is safe to re-run and
+    safe against a partially populated target.
+    """
+    entries = linked = copied = fallbacks = 0
+    try:
+        names = sorted(_entry_names(source))
+    except OSError:  # pragma: no cover - defensive
+        return (0, 0, 0, 0)
+
+    target.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        src_entry = source / name
+        if not src_entry.is_dir():
+            continue
+        entries += 1
+        for root, _dirs, files in os.walk(src_entry):
+            rel = Path(root).relative_to(source)
+            (target / rel).mkdir(parents=True, exist_ok=True)
+            for filename in files:
+                src_file = Path(root) / filename
+                dst_file = target / rel / filename
+                if dst_file.exists():
+                    continue
+                if filename in _MUTABLE_ENTRY_FILES:
+                    try:
+                        shutil.copy2(src_file, dst_file)
+                        copied += 1
+                    except OSError:
+                        pass
+                    continue
+                try:
+                    os.link(src_file, dst_file)
+                    linked += 1
+                except OSError:
+                    # Cross-device, or a filesystem without hard links.
+                    try:
+                        shutil.copy2(src_file, dst_file)
+                        copied += 1
+                        fallbacks += 1
+                    except OSError:
+                        pass
+    return (entries, linked, copied, fallbacks)
+
+
+def seed_worker_compiledirs(
+    base_compiledir: Path,
+    compiledir: Path,
+    n_workers: int,
+    cold_fraction: float = 0.25,
+    dry_run: bool = False,
+) -> SeedStats:
+    """Give every worker this run will start a warm compiledir.
+
+    A worker directory is seeded when it holds less than ``cold_fraction`` of
+    the warmest tree's entry count. That threshold, rather than "is empty", is
+    what makes the pass idempotent AND useful: steady state seeds nothing and
+    costs one listdir per worker, while a worker that was interrupted halfway
+    through populating itself still gets topped up.
+
+    Called from the xdist CONTROLLER before any worker exists -- the same
+    reason the prune lives there. A worker cannot do this for itself: by the
+    time it runs it already holds the ModuleCache it would be seeding.
+    """
+    stats = SeedStats()
+    if n_workers <= 0:
+        return stats
+
+    source = choose_seed_source(base_compiledir, compiledir)
+    if source is None:
+        # Nothing warm anywhere: a genuinely first-ever run. Every worker
+        # compiles from scratch and there is nothing to copy from.
+        return stats
+    source_count = len(_entry_names(source))
+    if source_count == 0:
+        # Nothing warm anywhere. Returning here rather than looping is what
+        # keeps a first-ever run from reporting that it seeded directories it
+        # in fact left empty.
+        return stats
+    threshold = source_count * cold_fraction
+
+    for index in range(n_workers):
+        target = base_compiledir / f"gw{index}" / compiledir.name
+        if target.resolve() == source.resolve():
+            continue
+        count = len(_entry_names(target))
+        if count >= threshold:
+            stats.skipped_dirs.append(f"gw{index}")
+            continue
+        if dry_run:
+            stats.seeded_dirs.append(f"gw{index}")
+            continue
+        entries, linked, copied, fallbacks = seed_compiledir(source, target)
+        if linked + copied == 0:
+            # Claim nothing. The test is on FILES PLACED, not on entry
+            # directories walked: a hollow entry (a directory with no files,
+            # which is a broken cache entry the prune removes anyway) would
+            # otherwise be reported as a successful seed of "1 entries, 0
+            # hard-linked, 0 copied".
+            stats.skipped_dirs.append(f"gw{index}")
+            continue
+        stats.seeded_dirs.append(f"gw{index}")
+        stats.entries += entries
+        stats.linked += linked
+        stats.copied += copied
+        stats.link_fallbacks += fallbacks
+    return stats
+
+
 def summarize_tree(
     results: list[tuple[Path, PruneStats]], max_entries: int
 ) -> str:

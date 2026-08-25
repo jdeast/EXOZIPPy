@@ -134,6 +134,46 @@ ahead of the import.
    paid in parallel instead of in a queue -- and duplicated DISK, which is
    why the budget in point 2 is per compiledir and why it has to be walked
    over these directories explicitly. It was not, until 2026-08-25.
+5. **A missing worker compiledir is SEEDED from the warmest one**, on the
+   controller in `pytest_configure`, right after the prune.
+
+   How redundant these directories are is the point. Measured: each of
+   `gw0`-`gw5` held **1455-1562** entries against the **1564** a whole cold
+   run creates -- so a worker's directory holds nearly every graph the suite
+   compiles, because most of what compiles is shared infrastructure that
+   every file's model builds rather than anything specific to the files that
+   worker drew. They are ~95% copies of each other.
+
+   Left alone, that redundancy bills twice. Raising `-n` makes the NEW
+   workers compile everything from scratch: when CI went from `-n 2` to
+   `-n 4`, ubuntu 3.12 went **43:21 -> 52:24** and 3.13 **36:39 -> 39:12**,
+   all green, purely because `gw2` and `gw3` started empty. And it makes the
+   saved CI cache scale with the worker count, so the cache cannot absorb
+   more parallelism.
+
+   Seeding makes both free, and it is cheap because of what an entry is made
+   of. Measured over 148 entries: the `.so` is **85.3%** of the bytes, the
+   `.cpp` **13.4%**, `key.pkl` **1.3%**. Only `key.pkl` is ever rewritten in
+   place -- PyTensor appends to it when a second key maps to one compiled
+   module -- so `key.pkl` is COPIED and everything else is HARD-LINKED.
+   Measured on 398 entries: **5.3 s and 7.1 MB** of real disk, against
+   **53.6 s and 218 MB** for a full copy.
+
+   Two traps, both hit while building this:
+
+   - **Hard links across filesystems silently become copies.** Point
+     `EXOZIPPY_TEST_COMPILEDIR` at a different filesystem from the source and
+     every `os.link` raises `EXDEV`; the first measurement of this code was
+     taken that way by accident and reported *0 hard-linked, 1988 copied*.
+     `SeedStats.link_fallbacks` counts it and the header says so.
+   - **`__init__.py` is not a cache entry.** Counting raw `listdir` names made
+     a brand-new compiledir look warm enough to seed FROM, and a first run
+     printed *"seeded 2 worker compiledir(s) ... 0 entries"*. The seeding path
+     counts directories; `prune_compiledir`'s pre-check still counts names,
+     deliberately, because there it needs an upper bound.
+
+   Do not try hard-linking `key.pkl` to save the last 1.3%: one worker's
+   append would land in every other worker's cache at once.
 
 Escape hatches:
 
@@ -284,6 +324,46 @@ caches` step now deletes older generations for the job's own os+python.
 
 Check the total with `gh cache list --limit 200 --json key,sizeInBytes` and
 sum `sizeInBytes`; anything approaching 10 GB means eviction is live.
+
+### One canonical tree, and the sharded matrix
+
+Two changes that only make sense together.
+
+**The saved artifact holds ONE worker tree.** Before saving, the job deletes
+every `gw*` but `gw0` **and the controller's own `compiledir_*`**, so the
+archive no longer multiplies by the worker count. The next run reconstitutes
+the rest by seeding (policy point 5), which is why this is safe rather than
+merely smaller. Without it the cache could not absorb more parallelism: 4
+workers x 2 shards would have wanted ~12 GB against the 10 GB repository
+budget.
+
+The controller's tree is worth deleting on its own account. Under `-n` it is
+the one directory no worker ever writes to, so everything in it is stale --
+and it was being saved every run anyway. Measured on the first master run
+after the prune fix, the macOS tree was **5055 entries**: controller 1800 +
+gw0 1578 + gw1 1677. Dropping the controller as well as gw1 makes the artifact
+about **3.2x** smaller rather than 2x.
+
+**The suite is split across 2 shards**, `scripts/pytest_shard.py`
+round-robining the sorted test-file list. Worker count is capped by the runner
+-- measured, `ubuntu-latest` is `cpus=4, memory=15.6 GB` and `macos-latest` is
+`cpus=3, memory=7.0 GB` -- and ~6700 worker-seconds over 4 workers is still
+~22 minutes, so more machines is the only way further down.
+
+Round-robin rather than a duration-aware pack because it needs no state and
+measures well: **1.04x** of a perfectly balanced split at N=2 against real
+per-file durations. It degrades to **1.37x at N=3** and **1.33x at N=4**, as
+the long tail stops averaging out, so going past 2 shards means re-measuring.
+
+Only **shard 1** prunes, saves, and drops superseded caches. Shard 1's tree
+already serves shard 2 almost completely -- the same ~95% redundancy as above
+-- so storing shard 2's would double the cache to buy a few percent. Shard 2
+recompiles that remainder every run, a small bounded cost against a cache
+budget that is not.
+
+The `--verify` flag on the shard split is load-bearing, not a nicety: a split
+that silently DROPS a file leaves every shard green with the coverage gone. It
+runs on every job.
 
 ## A source change can invalidate the whole cache
 

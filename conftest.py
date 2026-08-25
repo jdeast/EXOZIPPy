@@ -283,6 +283,54 @@ def _prune_compiledir(config):
     return module.summarize_tree(results, budget)
 
 
+def _seed_worker_compiledirs(config):
+    """Give every worker this run will start a warm compiledir.
+
+    Controller only, before any worker exists -- same placement and same
+    reason as _prune_compiledir, and for seeding it is not merely convenient
+    but necessary: a worker cannot seed its own compiledir, because by the
+    time it runs it is already holding the ModuleCache it would be seeding.
+
+    This exists because the per-worker compiledirs are ~95% redundant copies
+    of one another (each holds ~1500 of the 1564 entries a whole cold run
+    creates -- most of what compiles is shared infrastructure every file's
+    model builds). Without it, raising -n makes the NEW workers compile every
+    graph from scratch: measured when CI went from -n2 to -n4, ubuntu 3.12
+    went 43:21 -> 52:24 purely because gw2 and gw3 started empty. It also
+    lets CI store ONE canonical tree instead of one per worker, which is what
+    keeps the saved cache under GitHub's 10 GB repository budget as the worker
+    count and the shard count grow.
+
+    See seed_worker_compiledirs for the hard-link/copy split and the measured
+    costs.
+    """
+    module = _load_budget_module()
+    if module is None:  # pragma: no cover - defensive
+        return None
+    n_workers = int(config.getoption("numprocesses", 0) or 0)
+    if n_workers <= 0:
+        # -n0: this process IS the worker and uses the controller compiledir,
+        # which is the seed source rather than a seed target.
+        return None
+    import pytensor  # noqa: PLC0415 -- must follow the PYTENSOR_FLAGS write above
+
+    stats = module.seed_worker_compiledirs(
+        Path(pytensor.config.base_compiledir),
+        Path(pytensor.config.compiledir),
+        n_workers,
+    )
+    summary = stats.summary()
+    if summary:
+        # stderr rather than pytest_report_header, and CI is the reason: it
+        # runs `pytest -q`, which suppresses the header entirely -- and
+        # seeding is the step most worth seeing there, being where a restored
+        # single-tree cache gets fanned back out, and where a cross-device
+        # hard-link fallback would show up as a sudden multi-minute startup.
+        # It prints only when a seed actually happened, so the steady state is
+        # silent rather than one more line of noise.
+        print(summary, file=sys.stderr, flush=True)
+
+
 def _warm_module_cache():
     """Pay the ModuleCache walk here, where no test can be blamed for it.
 
@@ -319,7 +367,12 @@ def pytest_configure(config):
         _warm_module_cache()
         return
 
+    # PRUNE FIRST, THEN SEED, and the order is load-bearing: pruning picks the
+    # seed source down to the budget, so a freshly seeded worker starts inside
+    # the budget instead of immediately over it. Seeding first would copy
+    # entries that the very next prune would evict.
     _compiledir_summary = _prune_compiledir(config)
+    _seed_worker_compiledirs(config)
     if not _xdist_active(config):
         # -n0: this process runs the tests itself, so it is also the one that
         # needs the cache warm.

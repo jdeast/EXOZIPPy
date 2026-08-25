@@ -243,6 +243,11 @@ Other workflow notes:
   because the `-n 2` it replaced was right when a hosted runner had two cores
   and then quietly stopped being right; the job logs the cores and memory it
   saw, so check there rather than assuming a number.
+- CI also splits the suite across **2 shards**, so `pytest (ubuntu-latest,
+  3.12, 1)` runs half the test files and `... 2)` the other half. The required
+  `test` check aggregates every combination, so nothing about that changes what
+  you wait for. If you are reproducing one shard locally,
+  `python scripts/pytest_shard.py --shard 1 --of 2` prints its file list.
 - Contributing from a fork works the same way, and is the right approach if you
   don't have write access. Note that auto-delete-on-merge cannot reach a fork's
   branches, so clean those up yourself after merge.

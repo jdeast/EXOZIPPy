@@ -83,11 +83,30 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         python-version: ["3.12", "3.13", "3.14"]
+        # THE SUITE IS SPLIT ACROSS SHARDS, and this is the lever that
+        # actually reaches the wall-clock target. Worker count is capped by
+        # the runner: measured, ubuntu-latest reports cpus=4/memory=15.6 GB
+        # and macos-latest cpus=3/memory=7.0 GB, so a single job can use at
+        # most 4 and 2 workers respectively. The suite's ~6700 worker-seconds
+        # divided by 4 is still ~22 minutes, so more machines is the only way
+        # further down.
+        #
+        # 2, not more. scripts/pytest_shard.py round-robins the sorted file
+        # list, which measures within 1.04x of a perfectly balanced split at
+        # N=2 against real per-file durations -- and degrades to 1.37x at N=3
+        # and 1.33x at N=4, because the long tail stops averaging out. Going
+        # past 2 means re-measuring, not just editing this list.
+        shard: [1, 2]
         include:
           # CONTRIBUTING documents a macOS setup, and macOS is as fast as Linux
-          # here, so it stays on the pull-request path.
+          # here, so it stays on the pull-request path. Both shards, so the
+          # platform is covered rather than half-covered.
           - os: macos-latest
             python-version: "3.12"
+            shard: 1
+          - os: macos-latest
+            python-version: "3.12"
+            shard: 2
 
     steps:
       - uses: actions/checkout@v7
@@ -257,13 +276,19 @@ jobs:
       # per-worker working set of ~1600 entries is dead weight that only
       # inflates the artifact this job saves. A budget BELOW that working set
       # would evict entries this very run still needs.
+      # --verify is cheap and load-bearing: it asserts the shards partition
+      # the file list exactly. A split that silently DROPS a file leaves every
+      # shard green with the coverage gone, which is the worst way for this to
+      # fail, so the check runs on every job rather than living in a test only.
       - name: Run test suite
         env:
           EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES: "1800"
         run: |
           set -euo pipefail
           workers=$(poetry run python scripts/pytest_workers.py --explain)
-          poetry run pytest -q -n "$workers"
+          files=$(poetry run python scripts/pytest_shard.py \
+            --shard ${{ matrix.shard }} --of 2 --verify)
+          poetry run pytest -q -n "$workers" $files
 
       # The conftest prunes at session START, so at this point the directories
       # hold the budget plus everything this run compiled. Trim again so the
@@ -283,16 +308,67 @@ jobs:
       # evicting least-recently-accessed, which is the scenario the restore
       # step's comment describes as trading a 5-minute cache for a 250 MB
       # download.
+      # SHARD 1 ONLY, and the reason is the same property that makes seeding
+      # work: the per-worker compiledirs are ~95% redundant, because most of
+      # what compiles is shared infrastructure every file's model builds
+      # rather than anything specific to a file. So shard 1's tree already
+      # serves shard 2 almost completely, and storing shard 2's as well would
+      # double the cache to buy the last few percent. Shard 2 recompiles that
+      # remainder each run, which is a small bounded cost against a cache
+      # budget that is not.
       - name: Prune the compile cache before saving it
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/master'
+          && matrix.shard == 1
         run: |
+          set -euo pipefail
           export PYTENSOR_FLAGS="base_compiledir=$HOME/.pytensor-pytest"
           poetry run python scripts/pytensor_cache_budget.py \
             --max-entries 1800 --sweep-other-platforms --include-worker-dirs
 
+          # SAVE ONE CANONICAL TREE, NOT ONE PER WORKER. The worker
+          # compiledirs are ~95% redundant -- each holds ~1500 of the 1564
+          # entries a whole cold run creates, because most of what compiles is
+          # shared infrastructure every file's model builds. Storing all of
+          # them multiplied the artifact by the worker count, which is what
+          # made the cache unable to absorb more parallelism: 4 workers x 2
+          # shards would have wanted ~12 GB against GitHub's 10 GB
+          # repository-wide budget.
+          #
+          # The next run reconstitutes the others: the root conftest seeds
+          # every missing worker compiledir from the warmest one it finds,
+          # hard-linking the write-once files (.so and .cpp, 98.7% of the
+          # bytes) and copying only key.pkl, which is the single file PyTensor
+          # rewrites in place. Measured on 398 entries: 5.3 s and 7.1 MB of
+          # real disk, against 53.6 s and 218 MB for a full copy.
+          #
+          # gw0 rather than "the warmest": they are within a few percent of
+          # each other, and choose_seed_source() picks the warmest at restore
+          # time anyway, so there is nothing to gain from being clever here.
+          #
+          # The CONTROLLER's compiledir goes too, and it is not a rounding
+          # error. Under -n it is the one directory no worker ever writes to,
+          # so everything in it is stale -- yet it was being saved on every
+          # run: measured on the first master run after the prune fix, the
+          # macOS tree was 5055 entries as controller 1800 + gw0 1578 +
+          # gw1 1677. Dropping it as well as gw1 makes the artifact ~3.2x
+          # smaller rather than ~2x. PyTensor recreates the directory on
+          # import, and the conftest seeds the workers from gw0.
+          before=$(du -sm "$HOME/.pytensor-pytest" | cut -f1)
+          find "$HOME/.pytensor-pytest" -mindepth 1 -maxdepth 1 \
+            -name 'gw*' ! -name 'gw0' -exec rm -rf {} +
+          find "$HOME/.pytensor-pytest" -mindepth 1 -maxdepth 1 \
+            -name 'compiledir_*' -exec rm -rf {} +
+          after=$(du -sm "$HOME/.pytensor-pytest" | cut -f1)
+          echo "compiledir tree trimmed to one canonical worker copy:" \
+            "${before} MB -> ${after} MB"
+          ls -1 "$HOME/.pytensor-pytest"
+
       # See the long comment on the restore step for why this is master-only.
       - name: Save the PyTensor compile cache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/master'
+          && matrix.shard == 1
         uses: actions/cache/save@v6
         with:
           path: ~/.pytensor-pytest
@@ -324,7 +400,9 @@ jobs:
       # below: cache housekeeping must never decide a suite's verdict. A
       # transient API error here would otherwise turn a green run red.
       - name: Drop superseded compile caches
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/master'
+          && matrix.shard == 1
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
