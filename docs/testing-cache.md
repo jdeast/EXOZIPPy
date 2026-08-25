@@ -134,6 +134,46 @@ ahead of the import.
    paid in parallel instead of in a queue -- and duplicated DISK, which is
    why the budget in point 2 is per compiledir and why it has to be walked
    over these directories explicitly. It was not, until 2026-08-25.
+5. **A missing worker compiledir is SEEDED from the warmest one**, on the
+   controller in `pytest_configure`, right after the prune.
+
+   How redundant these directories are is the point. Measured: each of
+   `gw0`-`gw5` held **1455-1562** entries against the **1564** a whole cold
+   run creates -- so a worker's directory holds nearly every graph the suite
+   compiles, because most of what compiles is shared infrastructure that
+   every file's model builds rather than anything specific to the files that
+   worker drew. They are ~95% copies of each other.
+
+   Left alone, that redundancy bills twice. Raising `-n` makes the NEW
+   workers compile everything from scratch: when CI went from `-n 2` to
+   `-n 4`, ubuntu 3.12 went **43:21 -> 52:24** and 3.13 **36:39 -> 39:12**,
+   all green, purely because `gw2` and `gw3` started empty. And it makes the
+   saved CI cache scale with the worker count, so the cache cannot absorb
+   more parallelism.
+
+   Seeding makes both free, and it is cheap because of what an entry is made
+   of. Measured over 148 entries: the `.so` is **85.3%** of the bytes, the
+   `.cpp` **13.4%**, `key.pkl` **1.3%**. Only `key.pkl` is ever rewritten in
+   place -- PyTensor appends to it when a second key maps to one compiled
+   module -- so `key.pkl` is COPIED and everything else is HARD-LINKED.
+   Measured on 398 entries: **5.3 s and 7.1 MB** of real disk, against
+   **53.6 s and 218 MB** for a full copy.
+
+   Two traps, both hit while building this:
+
+   - **Hard links across filesystems silently become copies.** Point
+     `EXOZIPPY_TEST_COMPILEDIR` at a different filesystem from the source and
+     every `os.link` raises `EXDEV`; the first measurement of this code was
+     taken that way by accident and reported *0 hard-linked, 1988 copied*.
+     `SeedStats.link_fallbacks` counts it and the header says so.
+   - **`__init__.py` is not a cache entry.** Counting raw `listdir` names made
+     a brand-new compiledir look warm enough to seed FROM, and a first run
+     printed *"seeded 2 worker compiledir(s) ... 0 entries"*. The seeding path
+     counts directories; `prune_compiledir`'s pre-check still counts names,
+     deliberately, because there it needs an upper bound.
+
+   Do not try hard-linking `key.pkl` to save the last 1.3%: one worker's
+   append would land in every other worker's cache at once.
 
 Escape hatches:
 
