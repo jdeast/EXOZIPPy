@@ -91,22 +91,45 @@ jobs:
         # divided by 4 is still ~22 minutes, so more machines is the only way
         # further down.
         #
-        # 2, not more. scripts/pytest_shard.py round-robins the sorted file
-        # list, which measures within 1.04x of a perfectly balanced split at
-        # N=2 against real per-file durations -- and degrades to 1.37x at N=3
-        # and 1.33x at N=4, because the long tail stops averaging out. Going
-        # past 2 means re-measuring, not just editing this list.
-        shard: [1, 2]
+        # FOUR, and the number is measured rather than picked. Re-projecting
+        # from the first sharded run, with both real constraints -- the ~225 s
+        # fixed cost per job, and the fact that --dist loadfile pins a whole
+        # file to one worker so a shard cannot beat its slowest file's SERIAL
+        # time:
+        #
+        #   shards  jobs  wall/job  binding constraint
+        #        2     8     14.6m  spread
+        #        3    12     11.0m  spread
+        #        4    16      9.2m  spread
+        #        6    24      8.1m  slowest single file
+        #        8    32      8.1m  slowest single file
+        #
+        # 4 is the last point where adding machines still helps. Past it the
+        # constraint flips to one file and 8 more jobs buy about a minute; the
+        # floor is 8.1m, set by test_rm_ltt.py at 262 s serial. Going lower
+        # means splitting slow FILES, not editing this list.
+        #
+        # Two shards measured 15:10-26:36 in practice, i.e. a mean right ON the
+        # 20-minute target with runner variance of +/-40% -- so about half of
+        # all runs missed it. 4 shards is chosen for MARGIN against that
+        # variance, not for the mean.
+        shard: [1, 2, 3, 4]
         include:
           # CONTRIBUTING documents a macOS setup, and macOS is as fast as Linux
-          # here, so it stays on the pull-request path. Both shards, so the
-          # platform is covered rather than half-covered.
+          # here, so it stays on the pull-request path. Every shard, so the
+          # platform is covered rather than partly covered.
           - os: macos-latest
             python-version: "3.12"
             shard: 1
           - os: macos-latest
             python-version: "3.12"
             shard: 2
+          - os: macos-latest
+            python-version: "3.12"
+            shard: 3
+          - os: macos-latest
+            python-version: "3.12"
+            shard: 4
 
     steps:
       - uses: actions/checkout@v7
@@ -287,7 +310,7 @@ jobs:
           set -euo pipefail
           workers=$(poetry run python scripts/pytest_workers.py --explain)
           files=$(poetry run python scripts/pytest_shard.py \
-            --shard ${{ matrix.shard }} --of 2 --verify)
+            --shard ${{ matrix.shard }} --of 4 --verify)
           poetry run pytest -q -n "$workers" $files
 
       # The conftest prunes at session START, so at this point the directories
@@ -312,10 +335,10 @@ jobs:
       # work: the per-worker compiledirs are ~95% redundant, because most of
       # what compiles is shared infrastructure every file's model builds
       # rather than anything specific to a file. So shard 1's tree already
-      # serves shard 2 almost completely, and storing shard 2's as well would
-      # double the cache to buy the last few percent. Shard 2 recompiles that
-      # remainder each run, which is a small bounded cost against a cache
-      # budget that is not.
+      # serves the other shards almost completely, and storing theirs as well
+      # would multiply the cache by the shard count to buy the last few
+      # percent. They recompile that remainder each run, which is a small
+      # bounded cost against a cache budget that is not.
       - name: Prune the compile cache before saving it
         if: >-
           github.event_name == 'push' && github.ref == 'refs/heads/master'

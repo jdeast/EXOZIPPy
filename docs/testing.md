@@ -40,11 +40,36 @@ obvious and are wrong:
 
 It is a long tail rather than a few hot spots: the top 30 of 202 files are 67% of the
 total, the worst single file is 5.0%. That shape is why CI splits the suite across
-2 shards (`scripts/pytest_shard.py`, round-robin over the sorted file list, measured at
-1.04x of ideal balance): with no dominant file there is nothing to cut, so the remaining
-lever is more machines. See `docs/testing-cache.md` for the sharding and for the
-compiledir seeding that keeps its cache affordable. The heaviest individual tests, for anyone looking
-for something to cut:
+**4 shards** (`scripts/pytest_shard.py`, packing longest-file-first from
+`tests/durations.json`, measured at 1.00x of ideal balance): with no dominant file there
+is nothing to cut, so the remaining lever is more machines.
+
+Four is where that lever runs out. `--dist loadfile` pins a file to one worker, so a
+shard cannot beat its slowest file's serial time -- past 4 shards the binding constraint
+stops being the spread and becomes `test_rm_ltt.py` alone. Below ~8 minutes the next
+move is splitting slow FILES, which is exactly why `test_runner_lifecycle.py` was split
+out of `test_runner.py`. See `docs/testing-cache.md` for the full arithmetic, the
+sharding, and the compiledir seeding that keeps its cache affordable.
+
+**Two of the heaviest were reviewed and deliberately KEPT** (JDE, 2026-08-25):
+"expensive but worth it". Recorded so a future runtime sweep does not
+re-litigate them.
+
+- `test_runner.py::test_run_without_flag_writes_no_status` (232 s) is the
+  suite's single most expensive test and sets the CI shard floor at ~6.7 min.
+  Its cost is **entirely fixed startup** -- it already runs 2 tune / 1 draw, so
+  no sampler tuning touches it -- and it is deliberately doubling as the
+  end-to-end whitening-probe test, with `measure_scales` left at its default
+  so one real run exercises the startup probe and rescale.
+- `test_examples_prepare.py::test_shipped_example_prepares` (238 s over 25
+  cases) re-prepares every shipped example on every matrix combination. That
+  breadth IS the point: it is the canary that a shipped config still works.
+
+Cutting either is a coverage trade, not a cleanup. The remaining runtime levers
+that cost no coverage are in `docs/testing-cache.md`, and they are nearly
+exhausted -- see the floor arithmetic there.
+
+The heaviest individual tests, for anyone looking for something to cut:
 
 | seconds | test |
 |---|---|

@@ -68,6 +68,12 @@ def _system_configs():
 _CONFIGS = _system_configs()
 
 
+# ~238 s across 25 cases, about 3.6% of the suite, and it pays that on every
+# matrix combination. Reviewed 2026-08-25 during the CI runtime work and
+# deliberately KEPT -- "expensive but worth it" (JDE). The BREADTH is the
+# point: this is the canary that every shipped config still prepares, and
+# narrowing it to a sample, or to one Python version, is what would let a
+# broken example ship. It is a coverage trade, not a cleanup.
 @pytest.mark.parametrize(
     "path,rel", _CONFIGS, ids=[rel for _, rel in _CONFIGS]
 )
