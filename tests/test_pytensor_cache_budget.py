@@ -213,3 +213,165 @@ def test_enforce_budget_combines_the_prune_and_the_sweep(tmp_path):
     assert stats.removed_platform_dirs == ["compiledir_stale"]
     assert not (tmp_path / "compiledir_stale").exists()
     assert [p.name for p in live.iterdir()] == ["entry0"]
+
+
+def _worker_tree(base, worker, platform, entries, extra_platform=None):
+    """One gwN/compiledir_<platform>/ tree with `entries` entries in it."""
+    compiledir = base / worker / platform
+    compiledir.mkdir(parents=True)
+    for i in range(entries):
+        _make_entry(compiledir, f"entry{i}", age_seconds=i)
+    if extra_platform is not None:
+        (base / worker / extra_platform).mkdir()
+    return compiledir
+
+
+def test_worker_compiledirs_finds_each_workers_own_platform_tree(tmp_path):
+    """Given the per-worker layout the root conftest creates,
+    When the worker compiledirs are enumerated,
+    Then each gwN contributes its tree named for the LIVE platform."""
+    # Arrange -- every worker on one machine resolves the same platform
+    # directory name, because the conftest changes only the base.
+    platform = "compiledir_Linux-6.1-x86_64-3.12.13-64"
+    controller = tmp_path / platform
+    controller.mkdir()
+    for worker in ("gw0", "gw1", "gw2"):
+        (tmp_path / worker / platform).mkdir(parents=True)
+    # Not a worker directory, and PyTensor keeps other caches beside these.
+    (tmp_path / "numba").mkdir()
+
+    # Act
+    pairs = budget.worker_compiledirs(tmp_path, controller)
+
+    # Assert
+    assert [base.name for base, _ in pairs] == ["gw0", "gw1", "gw2"]
+    assert [d.name for _, d in pairs] == [platform] * 3
+
+
+def test_the_budget_reaches_the_per_worker_compiledirs(tmp_path):
+    """Given per-worker compiledirs over budget and an empty controller one,
+    When the whole tree is bounded,
+    Then every worker's directory is trimmed, not just what pytensor resolves.
+
+    This is the regression. The prune used to run on
+    pytensor.config.compiledir alone, which in the controller process is the
+    top-level tree -- the one directory no worker ever writes to. It was
+    within budget by virtue of being nearly empty, the pass reported success
+    having removed nothing, and the directories holding the entire cache were
+    never looked at. In CI that made every saved cache artifact bigger than
+    the last until the repository's 10 GB budget went into eviction."""
+    # Arrange
+    platform = "compiledir_Linux-6.1-x86_64-3.12.13-64"
+    controller = tmp_path / platform
+    controller.mkdir()
+    workers = [
+        _worker_tree(tmp_path, name, platform, entries=5)
+        for name in ("gw0", "gw1")
+    ]
+
+    # Act
+    results = budget.enforce_budget_tree(tmp_path, controller, max_entries=2)
+
+    # Assert -- the controller's tree first, then one per worker.
+    assert [d for d, _ in results] == [controller, *workers]
+    for worker_dir in workers:
+        assert sorted(p.name for p in worker_dir.iterdir()) == [
+            "entry0",
+            "entry1",
+        ]
+
+
+def test_the_budget_is_per_compiledir_not_a_total_across_the_tree(tmp_path):
+    """Given two workers each holding exactly the budget,
+    When the tree is bounded,
+    Then nothing is evicted.
+
+    The denominator is deliberate: each worker process builds its own
+    ModuleCache and walks only its own directory, so one directory's entry
+    count is what the startup walk is linear in. A total across the tree
+    would evict entries a worker still needs on the very run that made them."""
+    # Arrange
+    platform = "compiledir_fake-3.12-64"
+    controller = tmp_path / platform
+    controller.mkdir()
+    for name in ("gw0", "gw1"):
+        _worker_tree(tmp_path, name, platform, entries=3)
+
+    # Act
+    results = budget.enforce_budget_tree(tmp_path, controller, max_entries=3)
+
+    # Assert
+    assert all(stats.removed == 0 for _, stats in results)
+    for name in ("gw0", "gw1"):
+        assert len(list((tmp_path / name / platform).iterdir())) == 3
+
+
+def test_a_worker_tree_stranded_by_a_platform_bump_is_swept_too(tmp_path):
+    """Given a worker directory carrying a compiledir from an older kernel,
+    When the tree is swept,
+    Then that stranded sibling goes, the same as at the top level.
+
+    Nothing reads a stranded tree and nothing else would ever delete it, so
+    inside a worker directory it rides along in the CI cache forever -- the
+    footgun the restore step's comment describes, one level down."""
+    # Arrange
+    platform = "compiledir_Linux-6.1-x86_64-3.12.13-64"
+    stale = "compiledir_Linux-4.18-x86_64-3.12.13-64"
+    controller = tmp_path / platform
+    controller.mkdir()
+    _worker_tree(tmp_path, "gw0", platform, entries=1, extra_platform=stale)
+
+    # Act
+    results = budget.enforce_budget_tree(
+        tmp_path, controller, max_entries=10, sweep_platforms=True
+    )
+
+    # Assert
+    assert not (tmp_path / "gw0" / stale).exists()
+    assert (tmp_path / "gw0" / platform).is_dir()
+    swept = [n for _, st in results for n in st.removed_platform_dirs]
+    assert swept == [stale]
+
+
+def test_dry_run_reaches_the_worker_dirs_without_deleting_from_them(tmp_path):
+    """Given per-worker compiledirs over budget,
+    When the tree is bounded with dry_run,
+    Then the excess is reported and every entry survives."""
+    # Arrange
+    platform = "compiledir_fake-3.12-64"
+    controller = tmp_path / platform
+    controller.mkdir()
+    worker = _worker_tree(tmp_path, "gw0", platform, entries=4)
+
+    # Act
+    results = budget.enforce_budget_tree(
+        tmp_path, controller, max_entries=1, dry_run=True
+    )
+
+    # Assert
+    assert dict(results)[worker].removed_lru == 3
+    assert len(list(worker.iterdir())) == 4
+
+
+def test_the_tree_summary_reports_the_total_that_grew_unnoticed(tmp_path):
+    """Given a bounded tree,
+    When it is summarized for the pytest header,
+    Then the line carries the number of compiledirs and the total held.
+
+    The total is the point. Seven per-directory lines saying "within budget"
+    is noise nobody reads; one number that would have visibly climbed is the
+    thing whose absence let this go unnoticed for weeks."""
+    # Arrange
+    platform = "compiledir_fake-3.12-64"
+    controller = tmp_path / platform
+    controller.mkdir()
+    for name in ("gw0", "gw1"):
+        _worker_tree(tmp_path, name, platform, entries=2)
+
+    # Act
+    results = budget.enforce_budget_tree(tmp_path, controller, max_entries=5)
+    line = budget.summarize_tree(results, 5)
+
+    # Assert
+    assert "3 pruned" in line
+    assert "at most 4 entries held in total" in line
