@@ -209,6 +209,18 @@ def test_snapshot_is_thinned_and_atomic(tmp_path):
 # so that xdist's --dist loadfile scheduler runs all three subprocess fits on
 # DIFFERENT workers instead of serializing them on this file's single worker.
 # They import the helpers/fixture below from this module (tests/ is on sys.path).
+# THE SUITE'S SINGLE MOST EXPENSIVE TEST, at ~232 s, and it sets the CI shard
+# floor: --dist loadfile pins a file to one worker, so no amount of sharding
+# finishes a shard faster than this test's serial time (~6.7 min including the
+# per-job fixed cost). Reviewed on that basis 2026-08-25 and deliberately KEPT
+# -- "expensive but worth it" (JDE).
+#
+# Do not try to make it cheaper by shrinking the sampler: the config below is
+# ALREADY 2 tune / 1 draw, so essentially all of the 232 s is fixed startup --
+# subprocess interpreter, `import exozippy`, the System build, the whitening
+# probe, gradient compiles, and writing the outputs. And the one knob that
+# would help, measure_scales, is load-bearing here for a second reason spelled
+# out below.
 @pytest.mark.slow
 @pytest.mark.timeout(900)
 def test_run_without_flag_writes_no_status(kelt4_workdir, tmp_path):
