@@ -81,12 +81,6 @@ def discover_test_files(tests_dir: Path) -> list[str]:
 # checkout always carries it with the files it describes.
 _DURATIONS_FILE = "durations.json"
 
-# Charged to a file the durations record does not mention. The MEDIAN, not zero
-# and not the mean: zero would make every new file free and pile them all into
-# one shard, and the mean is dragged up by the long tail so it would overcharge
-# the typical new file.
-_UNKNOWN_COST = "median"
-
 
 def load_durations(tests_dir: Path) -> dict[str, float]:
     """Per-file weights from tests/durations.json, or {} if absent/unusable.
@@ -111,7 +105,13 @@ def load_durations(tests_dir: Path) -> dict[str, float]:
 
 
 def weigh(files: list[str], durations: dict[str, float]) -> dict[str, float]:
-    """Cost per file, charging the median to anything unrecorded."""
+    """Cost per file, charging the MEDIAN to anything unrecorded.
+
+    The median, not zero and not the mean. Zero would make every newly added
+    file free, so the packer would pile all of them into one shard -- and new
+    files are exactly the ones nobody has measured yet. The mean is dragged up
+    by the long tail, so it would overcharge the typical new file.
+    """
     known = [
         durations[Path(f).name] for f in files if Path(f).name in durations
     ]
