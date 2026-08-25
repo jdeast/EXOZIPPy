@@ -154,3 +154,62 @@ class MockSystem:
         return [
             v for v in self.star.__dict__.values() if isinstance(v, Parameter)
         ]
+
+
+def write_synthetic_mist_grid(
+    root,
+    masses=(0.5, 1.0, 2.0),
+    initfehs=(-0.5, 0.0, 0.5),
+    eeps=(1, 300, 454, 605, 807),
+    model="MISTv2.5",
+    alpha=0.0,
+    vvcrit=0.0,
+):
+    """Write a tiny MIST track grid and return the ``model_root`` for it.
+
+    The shipped grid is a ~130 MB parquet that is gitignored (see
+    mist_grid.load_mist_grid's FileNotFoundError), so no test may depend on
+    it.  This writes a handful of tracks in the same layout and column set,
+    for tests that need the evolutionarymodel component to actually load and
+    interpolate something.
+
+    The tracks are crude but monotone and physically ordered: radius and age
+    grow with EEP, teff falls, feh_mist sits just below initfeh, and
+    dEEP_dage is smallest in the middle (the "main sequence"), which is what
+    the EEP -> age Jacobian is supposed to reward.
+
+    Returns the directory to pass as the component's ``model_root:``.
+    """
+    import pandas as pd
+
+    root = os.fspath(root)
+    eep_dir = os.path.join(root, "MIST", model, "EEPs")
+    os.makedirs(eep_dir, exist_ok=True)
+
+    n_eep = len(eeps)
+    rows = []
+    for mass in masses:
+        for feh in initfehs:
+            for k, eep in enumerate(eeps):
+                frac = k / max(n_eep - 1, 1)
+                # Slowest in the middle of the track, fast at both ends.
+                speed = 1e-9 * (1.0 + 50.0 * abs(frac - 0.5))
+                rows.append(
+                    {
+                        "mass": float(mass),
+                        "EEP": int(eep),
+                        "initfeh": float(feh),
+                        "feh_mist": float(feh) - 0.02 * frac,
+                        "radius_mist": float(mass) * (1.0 + 3.0 * frac),
+                        "teff_mist": 6000.0 * mass**0.5 - 1500.0 * frac,
+                        "age_mist": 1.0e9 * (0.1 + 10.0 * frac) / mass**2,
+                        "dEEP_dage": speed,
+                        "here_be_dragons": 0.0,
+                    }
+                )
+
+    fname = f"afe_p{abs(alpha) * 10:.0f}_vvcrit{vvcrit:0.1f}.grid.parquet"
+    pd.DataFrame(rows).to_parquet(
+        os.path.join(eep_dir, fname), engine="pyarrow", index=False
+    )
+    return root
