@@ -329,7 +329,8 @@ Status: [VERIFIED]
 WSL2 defaults to **50% of host RAM**. On this machine that is 7.6 GiB of
 15.75 GiB -- so a workstation gets handed roughly the memory ceiling of a
 GitHub runner, which is exactly why `.github/workflows/tests.yml` overrides the
-`-n 6` in `pyproject.toml` with `-n 2`.
+`-n 6` in `pyproject.toml` with a count sized to the machine it landed on
+(`scripts/pytest_workers.py`: `min(cores, memory_gb // 3)`).
 
 That ceiling is real here: each worker peaks ~1-2 GB building a `System` and
 compiling PyTensor graphs, and a full `-n 6` run drove **available memory down
@@ -363,9 +364,11 @@ Size `memory` to leave Windows a few GB (12 GB of this machine's 15.75 GB
 leaves ~3.75 GB). It is a ceiling, not a reservation -- WSL reclaims lazily --
 so the cost of setting it too high is Windows swapping, not WSL wasting RAM.
 
-If you would rather not raise the ceiling, run the suite at `-n 2` like CI
-does. Either way, **always run the suite under a timeout** so a wedged xdist
-cannot silently eat an afternoon:
+If you would rather not raise the ceiling, lower `-n` to what the memory
+allows -- `python scripts/pytest_workers.py --explain` computes it the same
+way CI does, and reports the cores and memory it based that on. Either way,
+**always run the suite under a timeout** so a wedged xdist cannot silently eat
+an afternoon:
 
 ```bash
 timeout 3000 poetry run pytest -q -rf -n 6

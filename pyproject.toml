@@ -345,8 +345,11 @@ norecursedirs = ["exozippy", "src"]
 # same worker so module/session-scoped fixtures (many System builds) are shared,
 # not rebuilt per worker. -n is capped at 6 (not "auto") because each worker
 # peaks ~1-2 GB building a System and compiling graphs; 36 workers would OOM.
-# CI overrides this to -n 2 (see .github/workflows/tests.yml) because a GitHub
-# runner cannot afford six. Override for single-test debugging with `-n0`, e.g.
+# CI overrides this with a count computed from the runner's cores and memory
+# (scripts/pytest_workers.py, called from .github/workflows/tests.yml) rather
+# than a number written down here: a GitHub runner cannot afford six, but the
+# `-n 2` that used to be hardcoded there stayed put while the runners grew.
+# Override for single-test debugging with `-n0`, e.g.
 #   poetry run pytest tests/test_foo.py::test_bar -n0 -x
 addopts = "-n 6 --dist loadfile"
 markers = [

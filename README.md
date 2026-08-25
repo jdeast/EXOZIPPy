@@ -161,7 +161,9 @@ feature:
   at 1-2 GB compiling PyTensor graphs. Measured on that machine, available
   memory bottomed out at **41 MB**: workers were killed (`[gwN] node down`),
   xdist died in its own scheduler, and one run hung for hours. Fix it with a
-  `.wslconfig` (see the runbook) or run `-n 2` as CI does.
+  `.wslconfig` (see the runbook) or lower `-n`;
+  `python scripts/pytest_workers.py --explain` prints what this machine's
+  cores and memory can actually afford, which is what CI runs.
 
 Smaller, setup-time only:
 

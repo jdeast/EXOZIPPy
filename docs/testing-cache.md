@@ -123,6 +123,17 @@ ahead of the import.
    worker.** pytest-timeout arms its per-test `SIGALRM` later, so however
    long the walk takes it can no longer fail a test. That is the actual fix
    for the red test; bounding the count is what makes it fast.
+4. **Each xdist worker gets its OWN `base_compiledir`**, `gw0/`, `gw1/`, ...
+   one level below the base, keyed off `PYTEST_XDIST_WORKER`.
+
+   PyTensor serializes ALL compilation behind one lock per compiledir, and
+   `compile__timeout=600` is exactly pytest-timeout's own ceiling -- so on a
+   cold cache a worker queued behind the others died by pytest-timeout
+   without ever failing the lock. The suffix removes the shared lock
+   entirely. The price is duplicated compiles of common ops across workers,
+   paid in parallel instead of in a queue -- and duplicated DISK, which is
+   why the budget in point 2 is per compiledir and why it has to be walked
+   over these directories explicitly. It was not, until 2026-08-25.
 
 Escape hatches:
 
@@ -201,8 +212,9 @@ This is not worth weakening the 300 s cap for. It only bites on a
 genuinely empty compiledir, which is a state you now hit **once**, the
 first time you run the suite after this change. Just re-run -- the second
 run is warm and green -- or make the cold run deliberate with
-`--timeout=1800`. CI never sees it at `-n 2`, where the lock queue is two
-deep instead of six.
+`--timeout=1800`. CI does not see it either, and for a stronger reason than
+the low worker count it used to run at: point 4 above gives every worker its
+own compiledir, so there is no shared compile lock left to queue on.
 
 One full cold run creates **1564 entries / 825 MB**. That is the number the
 budgets are sized against -- a budget below one run's working set would

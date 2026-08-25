@@ -234,10 +234,15 @@ Other workflow notes:
   hand off. Don't feel obligated to file one for every change — a good commit
   message already covers most of what a trivial-fix issue would say.
 - Every push and PR against `master` runs the test suite via GitHub Actions
-  (`.github/workflows/tests.yml`). CI runs pytest with `-n 2`, overriding the
-  `-n 6` in pyproject's addopts: six workers suit a workstation but exhaust a
-  GitHub runner's memory, which shows up as "worker 'gwN' crashed" on whichever
-  heavy test drew the short straw rather than as an honest failure.
+  (`.github/workflows/tests.yml`). CI overrides the `-n 6` in pyproject's
+  addopts with a count computed from the runner it landed on --
+  `min(cores, memory_gb // 3)`, via `scripts/pytest_workers.py`. Six workers
+  suit a workstation but exhaust a GitHub runner's memory, which shows up as
+  "worker 'gwN' crashed" on whichever heavy test drew the short straw rather
+  than as an honest failure. The count is computed rather than written down
+  because the `-n 2` it replaced was right when a hosted runner had two cores
+  and then quietly stopped being right; the job logs the cores and memory it
+  saw, so check there rather than assuming a number.
 - Contributing from a fork works the same way, and is the right approach if you
   don't have write access. Note that auto-delete-on-merge cannot reach a fork's
   branches, so clean those up yourself after merge.
