@@ -311,7 +311,38 @@ jobs:
           workers=$(poetry run python scripts/pytest_workers.py --explain)
           files=$(poetry run python scripts/pytest_shard.py \
             --shard ${{ matrix.shard }} --of 4 --verify)
-          poetry run pytest -q -n "$workers" $files
+          # --durations=0 into a transcript the step below uploads. This is
+          # the ONLY place per-file cost can be measured on the hardware that
+          # actually runs the suite, and measuring it anywhere else provably
+          # does not transfer: weights taken on a 36-core workstation balanced
+          # the recorded sums to 1301 equal ubuntu-seconds per shard and still
+          # produced 14:19 against 8:38 in real wall clock, because the heavy
+          # files cost relatively more on a runner. See
+          # scripts/gen_durations.py.
+          #
+          # `tee` cannot swallow a failure here: `set -o pipefail` above makes
+          # the pipeline exit non-zero when pytest does. Without it a red suite
+          # would report green, which is the worst possible bug to introduce
+          # in the name of collecting timings.
+          poetry run pytest -q -n "$workers" $files \
+            --durations=0 --durations-min=0 | tee durations.txt
+
+      # Uploaded from EVERY job, including macOS, because which combination to
+      # regenerate from is a decision made when regenerating -- ubuntu today,
+      # since it is the slowest and three of the four legs -- and having only
+      # one platform's transcripts would foreclose it. `if: always()` so a
+      # failing shard still yields the timings that might explain why.
+      #
+      # Each job runs ONE shard, so a whole suite is the union of all four
+      # transcripts for one os+python. gen_durations.py takes several inputs
+      # for that reason.
+      - name: Upload the duration transcript
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: durations-${{ matrix.os }}-${{ matrix.python-version }}-${{ matrix.shard }}
+          path: durations.txt
+          if-no-files-found: warn
 
       # The conftest prunes at session START, so at this point the directories
       # hold the budget plus everything this run compiled. Trim again so the
