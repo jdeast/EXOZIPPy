@@ -59,20 +59,30 @@ def star_schema_entry(relation_label):
     }
 
 
-def constrain_schema_entry(inputs_doc):
+def constrain_schema_entry(inputs_doc, options=None):
     """The ``constrain:`` entry of a relation component's ``config_schema``.
 
     ``inputs_doc`` names what the relation predicts from, e.g.
-    ``"absolute Ks"`` or ``"teff/logg/feh"``.
+    ``"absolute Ks"`` or ``"teff/logg/feh"``.  ``options`` is the component's
+    own constrainable set, defaulting to :data:`CONSTRAINABLE` -- the
+    evolutionary model constrains feh/radius/teff/age rather than
+    mass/radius, and reuses this entry (and ``_parse_constrain``) by
+    declaring ``constrainable`` on the class.
     """
+    options = list(CONSTRAINABLE if options is None else options)
+    default = (
+        "both mass and radius"
+        if options == list(CONSTRAINABLE)
+        else "all of " + ", ".join(options)
+    )
     return {
         "key": "constrain",
         "kind": "option",
-        "accepts": list(CONSTRAINABLE),
+        "accepts": options,
         "required": False,
         "doc": (
             f"Which stellar quantities to constrain from {inputs_doc} "
-            f"(a list; default both mass and radius)."
+            f"(a list; default {default})."
         ),
     }
 
@@ -106,9 +116,16 @@ class StellarRelation:
     See the module docstring for what is deliberately *not* here.  A user of
     this mixin is expected to set ``self.star_indices`` (a list of star
     indices, one per instance) and ``self.constrain`` (a list of sets drawn
-    from :data:`CONSTRAINABLE`) during ``load_data``, which is what
+    from :attr:`constrainable`) during ``load_data``, which is what
     :meth:`_resolve_star` and :meth:`_parse_constrain` are for.
     """
+
+    # The quantities THIS component may be asked to constrain.  A class
+    # attribute rather than the module constant so a component whose
+    # constrainable set differs shares one copy of `_parse_constrain` instead
+    # of overriding it with a near-identical body (components/evolutionarymodel
+    # ties feh/radius/teff/age, not mass/radius).
+    constrainable = CONSTRAINABLE
 
     def __init__(self, component_config, config_manager):
         # Name each instance after the star it constrains, so the base class's
@@ -148,23 +165,24 @@ class StellarRelation:
     def _parse_constrain(self, nm, raw):
         """The set of quantities instance ``nm`` asked to constrain.
 
-        ``None`` (the key absent) means both.  A bare string is accepted as a
-        one-element list.
+        ``None`` (the key absent) means every entry of :attr:`constrainable`.
+        A bare string is accepted as a one-element list.
         """
-        con = list(CONSTRAINABLE) if raw is None else raw
+        valid = list(self.constrainable)
+        con = list(valid) if raw is None else raw
         if isinstance(con, str):
             con = [con]
         con = set(con)
-        bad = con - set(CONSTRAINABLE)
+        bad = con - set(valid)
         if bad:
             raise ValueError(
                 f"{self.prefix} '{nm}': unknown 'constrain:' entries "
-                f"{sorted(bad)}; valid entries are 'mass' and 'radius'."
+                f"{sorted(bad)}; valid entries are {valid}."
             )
         if not con:
             raise ValueError(
                 f"{self.prefix} '{nm}': 'constrain:' is empty, so this block "
-                f"would do nothing. Remove it or list 'mass' and/or 'radius'."
+                f"would do nothing. Remove it or list one or more of {valid}."
             )
         return con
 
@@ -191,19 +209,35 @@ class StellarRelation:
         initvals read are the relaxed ones the sampler will actually start
         from.
 
-        ``message`` is a format string taking ``{star}`` (the star's name) and
-        ``{value}``; it is prefixed with ``"<prefix> '<instance>': "``.  The
-        wording is the caller's because the advice is relation-specific (which
-        other relation to prefer, and whether the range is two-sided).
+        ``low``/``high`` are scalars for a relation whose calibration range is
+        a published constant (mann, torres), or per-instance sequences for one
+        whose range is a property of the instance (evolutionarymodel reads
+        each instance's own interpolation grid, and two instances may name
+        different grids).
+
+        ``message`` is a format string taking ``{star}`` (the star's name),
+        ``{value}``, ``{low}`` and ``{high}``; it is prefixed with
+        ``"<prefix> '<instance>': "``.  The wording is the caller's because
+        the advice is relation-specific (which other relation to prefer, and
+        whether the range is two-sided).
         """
+
+        def _at(bound, i):
+            if np.isscalar(bound) or np.ndim(bound) == 0:
+                return float(bound)
+            return float(bound[i])
+
         for i, nm in enumerate(self.names):
             si = self.star_indices[i]
             value = star_initval(param, si)
-            if value is None or low <= value <= high:
+            lo, hi = _at(low, i), _at(high, i)
+            if value is None or lo <= value <= hi:
                 continue
             logger.warning(
                 f"{self.prefix} '{nm}': "
-                + message.format(star=system.star.names[si], value=value)
+                + message.format(
+                    star=system.star.names[si], value=value, low=lo, high=hi
+                )
             )
 
     def _add_penalty(self, which, observed, predicted, sigma, *, normalize):
@@ -250,6 +284,13 @@ class StellarRelation:
         papers -- and ``input_desc`` says what the relation's input is
         ("its absolute $K_s$ magnitude", "its effective temperature,
         surface gravity, and metallicity").
+
+        The quantities named are ``self.constrainable`` in declaration order,
+        so a component with its own set does not have to override this to be
+        listed correctly.  It still may not be the right sentence for one:
+        ``components/evolutionarymodel`` writes its own, because "with the
+        empirical relations of <citation>" is not what a track interpolation
+        with a systematic floor and a reparameterized age prior is.
         """
         from ..outputs.prose import get_collector, join_names
         from ..outputs.texutils import latex_escape
@@ -259,7 +300,7 @@ class StellarRelation:
         by_star = {}
         for i, nm in enumerate(self.names):
             quantities = tuple(
-                q for q in ("mass", "radius") if q in self.constrain[i]
+                q for q in self.constrainable if q in self.constrain[i]
             )
             by_star.setdefault(quantities, []).append(
                 system.star.names[self.star_indices[i]]
