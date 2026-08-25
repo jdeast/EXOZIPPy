@@ -39,7 +39,11 @@ obvious and are wrong:
   still scales nearly linearly -- which is the change CI got.
 
 It is a long tail rather than a few hot spots: the top 30 of 202 files are 67% of the
-total, the worst single file is 5.0%. The heaviest individual tests, for anyone looking
+total, the worst single file is 5.0%. That shape is why CI splits the suite across
+2 shards (`scripts/pytest_shard.py`, round-robin over the sorted file list, measured at
+1.04x of ideal balance): with no dominant file there is nothing to cut, so the remaining
+lever is more machines. See `docs/testing-cache.md` for the sharding and for the
+compiledir seeding that keeps its cache affordable. The heaviest individual tests, for anyone looking
 for something to cut:
 
 | seconds | test |

@@ -325,6 +325,46 @@ caches` step now deletes older generations for the job's own os+python.
 Check the total with `gh cache list --limit 200 --json key,sizeInBytes` and
 sum `sizeInBytes`; anything approaching 10 GB means eviction is live.
 
+### One canonical tree, and the sharded matrix
+
+Two changes that only make sense together.
+
+**The saved artifact holds ONE worker tree.** Before saving, the job deletes
+every `gw*` but `gw0` **and the controller's own `compiledir_*`**, so the
+archive no longer multiplies by the worker count. The next run reconstitutes
+the rest by seeding (policy point 5), which is why this is safe rather than
+merely smaller. Without it the cache could not absorb more parallelism: 4
+workers x 2 shards would have wanted ~12 GB against the 10 GB repository
+budget.
+
+The controller's tree is worth deleting on its own account. Under `-n` it is
+the one directory no worker ever writes to, so everything in it is stale --
+and it was being saved every run anyway. Measured on the first master run
+after the prune fix, the macOS tree was **5055 entries**: controller 1800 +
+gw0 1578 + gw1 1677. Dropping the controller as well as gw1 makes the artifact
+about **3.2x** smaller rather than 2x.
+
+**The suite is split across 2 shards**, `scripts/pytest_shard.py`
+round-robining the sorted test-file list. Worker count is capped by the runner
+-- measured, `ubuntu-latest` is `cpus=4, memory=15.6 GB` and `macos-latest` is
+`cpus=3, memory=7.0 GB` -- and ~6700 worker-seconds over 4 workers is still
+~22 minutes, so more machines is the only way further down.
+
+Round-robin rather than a duration-aware pack because it needs no state and
+measures well: **1.04x** of a perfectly balanced split at N=2 against real
+per-file durations. It degrades to **1.37x at N=3** and **1.33x at N=4**, as
+the long tail stops averaging out, so going past 2 shards means re-measuring.
+
+Only **shard 1** prunes, saves, and drops superseded caches. Shard 1's tree
+already serves shard 2 almost completely -- the same ~95% redundancy as above
+-- so storing shard 2's would double the cache to buy a few percent. Shard 2
+recompiles that remainder every run, a small bounded cost against a cache
+budget that is not.
+
+The `--verify` flag on the shard split is load-bearing, not a nicety: a split
+that silently DROPS a file leaves every shard green with the coverage gone. It
+runs on every job.
+
 ## A source change can invalidate the whole cache
 
 A change to the *structure* of a commonly built graph misses every cached
