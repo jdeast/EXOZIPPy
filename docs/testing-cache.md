@@ -175,6 +175,60 @@ ahead of the import.
    Do not try hard-linking `key.pkl` to save the last 1.3%: one worker's
    append would land in every other worker's cache at once.
 
+### The cache is dense in INODES, not in bytes
+
+This is the constraint that is easy to miss, because every number people
+usually look at says the cache is small.
+
+**A cache entry costs 6 inodes**, not one: the entry directory, `key.pkl`,
+`mod.cpp`, the `.so`, a `__pycache__/` directory and a `.pyc`. Multiply by the
+per-worker layout (point 4) and the arithmetic gets uncomfortable fast.
+Measured on this repo's box, 2026-08-25:
+
+| | entries | ~inodes |
+|---|---|---|
+| `~/.pytensor-pytest` (7 compiledirs, `-n 6`) | 11620 | ~70000 |
+| `~/.pytensor` (interactive) | 4153 | ~25000 |
+
+That is **~95000 inodes for 11.9 GB** -- and the home filesystem there is NFS
+with a hard **300k inode quota**, so the compile caches alone were a third of
+it. The suite then died with 20 failures and 4 errors, all
+`[Errno 122] Disk quota exceeded` raised from
+`pytensor.link.c.cmodule`, while `quota` reported the SPACE at 60% used. If
+you see that error, look at the `files` column and not the `space` column.
+
+Seeding (point 5) helps here but does not solve it: hard links share the `.so`
+and `.cpp` and add no inodes, but each seeded entry still needs its own
+directory, `key.pkl`, `__pycache__/` and `.pyc`. Roughly 4 inodes instead of 6
+-- a third off, not a fix.
+
+**The fix is to put the cache on a filesystem that does not charge you for
+inodes**, which is a per-machine setting rather than anything this repository
+should hardcode:
+
+```bash
+export EXOZIPPY_TEST_COMPILEDIR=/local/scratch/pytensor-pytest
+```
+
+On the box this was measured on that meant `/pool/radish1` -- **ext4, local,
+233M inodes at 2% used** -- against an NFS home at its quota. It is very likely
+faster as well as quota-free: the startup cost this whole document is about is
+an O(entries) walk of `listdir` plus `open` plus unpickle over thousands of
+small files, which is precisely the workload a network filesystem is worst at.
+
+Point 1 says the cache lives under `$HOME` so every worktree shares one warm
+copy. A local scratch path satisfies that too -- the thing being avoided was an
+IN-REPO path, which would make every new worktree pay a full cold compile.
+
+To reclaim inodes in a hurry, delete whole worker directories rather than
+hunting entries; the seeding rebuilds them from whichever one you keep:
+
+```bash
+# Keep gw0 and gw1 as seed sources, drop the rest.
+find ~/.pytensor-pytest -mindepth 1 -maxdepth 1 -name 'gw*' \
+    ! -name 'gw0' ! -name 'gw1' -exec rm -rf {} +
+```
+
 Escape hatches:
 
 | variable | effect |
