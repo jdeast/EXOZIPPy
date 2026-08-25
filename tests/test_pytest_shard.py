@@ -340,6 +340,7 @@ def test_the_generator_and_the_loader_agree_on_the_file_format(tmp_path):
             sys.executable,
             str(_REPO_ROOT / "scripts" / "gen_durations.py"),
             str(transcript),
+            "--output",
             str(out),
         ],
         capture_output=True,
@@ -351,3 +352,80 @@ def test_the_generator_and_the_loader_agree_on_the_file_format(tmp_path):
 
     # Assert -- summed across call/setup/teardown, keyed by BASENAME.
     assert loaded == {"test_alpha.py": 13.54, "test_beta.py": 5.10}
+
+
+def test_several_transcripts_merge_into_one_whole_suite(tmp_path):
+    """Given one transcript per CI shard, each covering different files,
+    When they are merged,
+    Then the result is the union with each file's cost intact.
+
+    This is the shape a CI run produces: every job runs ONE shard and uploads
+    its own transcript, so a whole suite only exists as the union of all four.
+    If merging silently dropped or double-counted a file the weights would be
+    wrong in a way nothing else would notice -- the split would still
+    partition correctly, just badly."""
+    # Arrange -- two shards, disjoint files, as CI would emit them.
+    shard1 = tmp_path / "s1.txt"
+    shard1.write_text(
+        "10.00s call     tests/test_alpha.py::test_one\n"
+        "2.00s setup    tests/test_alpha.py::test_one\n"
+    )
+    shard2 = tmp_path / "s2.txt"
+    shard2.write_text("5.00s call     tests/test_beta.py::test_two\n")
+    out = tmp_path / "durations.json"
+
+    # Act
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(_REPO_ROOT / "scripts" / "gen_durations.py"),
+            str(shard1),
+            str(shard2),
+            "--output",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert done.returncode == 0, done.stderr
+    loaded = shard_mod.load_durations(tmp_path)
+
+    # Assert
+    assert loaded == {"test_alpha.py": 12.0, "test_beta.py": 5.0}
+
+
+def test_the_recorded_source_says_where_the_weights_came_from(tmp_path):
+    """Given a --source note,
+    When the durations file is written,
+    Then it is recorded in the file.
+
+    Load-bearing metadata rather than decoration: weights measured on a
+    workstation and weights measured on a CI runner produce measurably
+    different balance, so "which machine was this?" has to survive in the
+    file. It is the question anyone debugging a lopsided shard asks first."""
+    # Arrange
+    transcript = tmp_path / "t.txt"
+    transcript.write_text("1.00s call     tests/test_a.py::test_x\n")
+    out = tmp_path / "durations.json"
+    note = "CI run 12345, ubuntu-latest 3.12, 4 shards at -n4"
+
+    # Act
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(_REPO_ROOT / "scripts" / "gen_durations.py"),
+            str(transcript),
+            "--output",
+            str(out),
+            "--source",
+            note,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert done.returncode == 0, done.stderr
+
+    # Assert
+    assert json.loads(out.read_text())["_generated_from"] == note

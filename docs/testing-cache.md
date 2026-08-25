@@ -446,12 +446,51 @@ Measured on the real suite, worst shard as a multiple of ideal:
 | 6 | 1.00x | 1.62x |
 
 So round-robin is fine at two shards and wasteful at four, which is what pays
-for carrying the file. Regenerate it after a big change in the suite's shape:
+for carrying the file.
+
+#### Regenerate it from a CI run, not from a workstation
+
+This is the part that is easy to get wrong, and the first sharded run got it
+wrong. Weights measured on a 36-core box at `-n 6` balance the **recorded
+sums** perfectly -- all four shards inside 1301 equal ubuntu-seconds, and
+`--verify` duly reports `1.00x of ideal` -- and still produced a **1.6x spread
+in real wall clock**:
+
+| shard | sum | heaviest file | predicted | observed (3.13/3.14) |
+|---|---|---|---|---|
+| 1 | 1301s | `test_rm_ltt.py` 263s | 325s | 809 / 859 |
+| 2 | 1301s | `test_orbit_crossing.py` 227s | 325s | 627 / 606 |
+| 3 | 1301s | `test_rossiter.py` 218s | 325s | 585 / 736 |
+| 4 | 1301s | `test_robust_likelihood.py` 194s | 325s | 511 / 518 |
+
+The sums are equal by construction, so the excess can only be the heavy files
+costing *relatively* more on a runner than on the workstation. The packing was
+right; the weights were measured on the wrong machine. **"1.00x of ideal" means
+1.00x of the recorded weights, not of wall clock** -- worth remembering before
+trusting that line.
+
+So every matrix job now uploads its `--durations` transcript as an artifact.
+Each job runs ONE shard, so a whole suite is the union of all four for a single
+os+python, and `gen_durations.py` takes several inputs for that reason:
+
+```bash
+gh run download <run-id> -p 'durations-ubuntu-latest-3.12-*' -D /tmp/dur
+poetry run python scripts/gen_durations.py /tmp/dur/*/durations.txt \
+    --source 'CI run <run-id>, ubuntu-latest 3.12, 4 shards at -n4'
+```
+
+Use the **slowest** combination -- ubuntu, which is also three of the four legs
+-- and do not mix platforms: macOS runs 2 workers instead of 4, clang instead
+of gcc, and skips some tests, so blended weights are worse than either
+platform's own.
+
+A local run still works and is fine for a rough refresh after adding a batch of
+tests:
 
 ```bash
 poetry run pytest -q -n6 --dist loadfile --durations=0 --durations-min=0 \
     > /tmp/durations.txt
-poetry run python scripts/gen_durations.py /tmp/durations.txt tests/durations.json
+poetry run python scripts/gen_durations.py /tmp/durations.txt
 ```
 
 Staleness is reported on every run, and raises a GitHub Actions warning
