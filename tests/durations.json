@@ -1,10 +1,10 @@
 {
+  "_comment": "Per-file worker-seconds, for balancing the CI shard split. Regenerate with scripts/gen_durations.py -- see docs/testing-cache.md. These are RELATIVE weights: absolute values depend on the machine and only their ratios matter. A file absent from this map is charged the median cost, so adding a test does not require updating it.",
+  "_generated_from": "pytest -q -n6 --dist loadfile --durations=0",
+  "_measured_on": "2026-08-25",
   "_excluded_local_only": {
     "test_examples_prepare.py": 41.74
   },
-  "_comment": "Per-file worker-seconds, for balancing the CI shard split. Regenerate with scripts/gen_durations.py -- see docs/testing-cache.md. Numbers are RELATIVE weights; absolute values depend on the machine, and only their ratios matter.",
-  "_generated_from": "pytest -q -n6 --dist loadfile --durations=0",
-  "_measured_on": "2026-08-25",
   "_total_worker_seconds": 6673.5,
   "_file_count": 202,
   "durations": {
