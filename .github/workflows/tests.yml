@@ -230,13 +230,25 @@ jobs:
             pytensor-compiledir-p1-${{ matrix.os }}-${{ matrix.python-version }}-${{ hashFiles('poetry.lock') }}-
             pytensor-compiledir-p1-${{ matrix.os }}-${{ matrix.python-version }}-
 
-      # -n 2 overrides the -n 6 in pyproject's addopts. Six workers suit a
-      # workstation but oversubscribe a GitHub runner: each peaks ~1-2 GB
-      # building a System and compiling PyTensor graphs. The symptom was never
-      # an assertion failure but "worker 'gwN' crashed", landing on whichever
-      # heavy test drew the short straw -- it moved between
-      # test_integration_kelt4, test_gp and test_sed_plot_data across runs,
-      # and vanished entirely on others. That is a memory ceiling, not a bug.
+      # The worker count is COMPUTED, not written down here, and the reason
+      # is that the number this replaced went stale without anyone noticing.
+      # `-n 2` was chosen when a hosted Linux runner had two cores; the
+      # runners grew, the suite tripled, and the 2 stayed. Measured on
+      # 2026-08-24 with the compile cache warm on both sides, the four matrix
+      # jobs did the same work PER WORKER as a 36-core workstation -- ubuntu
+      # 3.12 spent 5202 worker-seconds against the workstation's 5682 -- so
+      # the entire 43-minute-vs-15:47 gap was worker count and nothing else.
+      # Replacing one hardcoded number with another would just restart that
+      # clock, so scripts/pytest_workers.py reads the cores and the memory
+      # instead; --explain puts both in the log, which is also how we learn
+      # what a runner actually has rather than inferring it from docs.
+      #
+      # The memory term in that script is the binding one, and the failure it
+      # exists to avoid is specifically "worker 'gwN' crashed" -- a memory
+      # ceiling that presents as a wandering flaky failure, seen on
+      # test_integration_kelt4, test_gp and test_sed_plot_data on different
+      # runs. Do not raise the worker count past what it returns without
+      # raising the memory per worker there too.
       #
       # The compiledir budget is PER COMPILEDIR and there is one per worker
       # (the root conftest gives each its own, so they never queue on
@@ -248,7 +260,10 @@ jobs:
       - name: Run test suite
         env:
           EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES: "1800"
-        run: poetry run pytest -q -n 2
+        run: |
+          set -euo pipefail
+          workers=$(poetry run python scripts/pytest_workers.py --explain)
+          poetry run pytest -q -n "$workers"
 
       # The conftest prunes at session START, so at this point the directories
       # hold the budget plus everything this run compiled. Trim again so the
@@ -418,8 +433,15 @@ jobs:
       - name: Record what actually got resolved
         run: pip freeze | tee resolved.txt
 
+      # Same computed worker count as the matrix job -- see the comment
+      # there. No poetry in this job by design, so the script runs on the
+      # bare interpreter; it imports nothing outside the standard library
+      # precisely so it can.
       - name: Run test suite
-        run: pytest -q -n 2
+        run: |
+          set -euo pipefail
+          workers=$(python scripts/pytest_workers.py --explain)
+          pytest -q -n "$workers"
 
       # Email alone is a weak alarm for this job. A nightly that stays broken
       # for a week sends seven identical emails, which is how an alarm becomes
