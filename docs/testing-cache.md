@@ -58,12 +58,18 @@ To reclaim space by hand:
 
 ```bash
 # What would go, without touching anything.
-poetry run python scripts/pytensor_cache_budget.py --max-entries 2500 --dry-run
+poetry run python scripts/pytensor_cache_budget.py \
+    --max-entries 2000 --include-worker-dirs --dry-run
 
 # Do it. Defaults to whatever pytensor.config resolves, so PYTENSOR_FLAGS
 # is honoured; --compiledir names one explicitly.
-poetry run python scripts/pytensor_cache_budget.py --max-entries 2500
+poetry run python scripts/pytensor_cache_budget.py \
+    --max-entries 2000 --include-worker-dirs
 ```
+
+`--include-worker-dirs` is not optional housekeeping on the suite's own
+cache: without it the command reports success having pruned the one
+directory the workers never read. `--max-entries` is per compiledir.
 
 It evicts least-recently-used on the `atime` of `key.pkl` -- the same stat
 field PyTensor's own `last_access_time()` reads -- and also removes broken
@@ -83,13 +89,51 @@ ahead of the import.
    It lives under `$HOME` rather than in the checkout on purpose: every
    worktree of this repo then shares one **warm** cache, where an in-repo
    path would make each new agent worktree pay a full cold compile.
-2. **It is bounded at 3000 entries**, pruned LRU on the xdist controller in
-   `pytest_configure`, before any worker exists -- which is also what makes
-   the prune safe without taking PyTensor's compile lock.
+2. **Every compiledir in the tree is bounded at 2000 entries**, pruned LRU on
+   the xdist controller in `pytest_configure`, before any worker exists --
+   which is also what makes the prune safe without taking PyTensor's compile
+   lock, and is the only moment at which the per-worker trees below can be
+   pruned at all (a worker cannot prune the ModuleCache it is holding).
+
+   "Every compiledir in the tree", plural, is the correction. Point 4 below
+   gives each xdist worker its own base, so the layout is
+
+   ```
+   ~/.pytensor-pytest/compiledir_<platform>/      <- -n0 runs only
+   ~/.pytensor-pytest/gw0/compiledir_<platform>/  <- worker 0
+   ~/.pytensor-pytest/gw1/compiledir_<platform>/  <- worker 1
+   ```
+
+   and `pytensor.config.compiledir` in the CONTROLLER resolves the first of
+   those -- the one directory no worker ever writes to. The prune ran on that
+   alone until 2026-08-25, so it bounded nothing: measured on this box, the
+   controller's tree sat at 2280 entries against a budget of 3000 and was
+   never touched, while `gw0`-`gw5` held **1455 to 1562 entries each** with
+   no bound of any kind. `enforce_budget_tree` walks all of them.
+
+   The budget is **per compiledir, not a total**, because the walk each
+   worker pays is over its own directory only. The price of that denominator
+   is disk: with W workers the tree holds up to (W + 1) x the budget. That is
+   why the number came DOWN from 3000 when it started applying to seven
+   directories instead of one. It cannot go below ~1600: a worker's own
+   directory holds very nearly the full 1564-entry working set, because most
+   of what gets compiled is shared infrastructure that every file's model
+   builds rather than anything specific to the files that worker drew.
 3. **The `ModuleCache` walk is forced in `pytest_configure`, in every
    worker.** pytest-timeout arms its per-test `SIGALRM` later, so however
    long the walk takes it can no longer fail a test. That is the actual fix
    for the red test; bounding the count is what makes it fast.
+4. **Each xdist worker gets its OWN `base_compiledir`**, `gw0/`, `gw1/`, ...
+   one level below the base, keyed off `PYTEST_XDIST_WORKER`.
+
+   PyTensor serializes ALL compilation behind one lock per compiledir, and
+   `compile__timeout=600` is exactly pytest-timeout's own ceiling -- so on a
+   cold cache a worker queued behind the others died by pytest-timeout
+   without ever failing the lock. The suffix removes the shared lock
+   entirely. The price is duplicated compiles of common ops across workers,
+   paid in parallel instead of in a queue -- and duplicated DISK, which is
+   why the budget in point 2 is per compiledir and why it has to be walked
+   over these directories explicitly. It was not, until 2026-08-25.
 
 Escape hatches:
 
@@ -97,7 +141,7 @@ Escape hatches:
 |---|---|
 | `EXOZIPPY_TEST_COMPILEDIR=/some/path` | put the suite's cache somewhere else |
 | `EXOZIPPY_TEST_COMPILEDIR=` (empty) | opt out; use whatever PyTensor would pick |
-| `EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES=N` | change the budget (CI uses 2500) |
+| `EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES=N` | change the per-compiledir budget (CI uses 1800) |
 
 The prune itself is guarded by a cheap pre-check, and that is load-bearing
 rather than an optimization: its per-entry pass opens a directory and stats
@@ -168,8 +212,9 @@ This is not worth weakening the 300 s cap for. It only bites on a
 genuinely empty compiledir, which is a state you now hit **once**, the
 first time you run the suite after this change. Just re-run -- the second
 run is warm and green -- or make the cold run deliberate with
-`--timeout=1800`. CI never sees it at `-n 2`, where the lock queue is two
-deep instead of six.
+`--timeout=1800`. CI does not see it either, and for a stronger reason than
+the low worker count it used to run at: point 4 above gives every worker its
+own compiledir, so there is no shared compile lock left to queue on.
 
 One full cold run creates **1564 entries / 825 MB**. That is the number the
 budgets are sized against -- a budget below one run's working set would
@@ -207,6 +252,38 @@ That is handled on the pytest side: the conftest prune sweeps stale sibling
 `compiledir_*` trees. This is the same class of bug as the Zenodo cache path
 that went stale in July 2026 and kept reporting "cache hit" while restoring
 132 MB into a directory nothing opened.
+
+### The two ways the saved artifact grew, and the 10 GB wall it hit
+
+Both were found on 2026-08-25 and both are fixed; the shape is worth keeping
+because neither one failed anything, which is why they ran for weeks.
+
+**Each entry grew.** The `Prune the compile cache before saving it` step ran
+`pytensor_cache_budget.py` without `--include-worker-dirs`, so it pruned the
+controller's compiledir -- empty, in a job that runs under `-n` -- reported
+success having removed nothing, and never looked at the `gw*/` trees that
+hold the whole cache. Every merge therefore saved the previous artifact plus
+that run's new entries. Measured across five consecutive master runs, ubuntu
+3.14 went **374 -> 494 -> 606 -> 661 -> 781 MB**.
+
+**Entries were never superseded.** The restore key embeds `github.run_id` so
+each master push writes a NEW entry rather than hitting an existing one and
+skipping the save. That is necessary -- a cache key is immutable once written
+-- but nothing retired the entry it replaced, and only the newest is ever
+restored, because `restore-keys` matches most-recent-first. So old
+generations bought nothing and cost the budget: **five generations retained
+per os+python, 18 entries, 8.05 GB.**
+
+Together those put total repository cache usage at **10.43 GB against a
+10 GB budget**, i.e. GitHub was already evicting least-recently-accessed --
+and the two entries eviction must not take, the 132 MB Zenodo spectra and
+the 115 MB ephemeris kernel, were the smallest things in there. That is the
+exact failure the restore step's comment was written to prevent, arrived at
+from a direction the comment did not consider. The `Drop superseded compile
+caches` step now deletes older generations for the job's own os+python.
+
+Check the total with `gh cache list --limit 200 --json key,sizeInBytes` and
+sum `sizeInBytes`; anything approaching 10 GB means eviction is live.
 
 ## A source change can invalidate the whole cache
 

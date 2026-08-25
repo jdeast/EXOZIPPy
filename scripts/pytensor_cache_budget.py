@@ -74,6 +74,28 @@ _MODULE_SUFFIXES = (".so", ".pyd")
 # compile lock out from under a concurrent process.
 _LOCK_DIR = "lock_dir"
 
+# The root conftest gives every xdist worker its OWN base_compiledir, one
+# level down, named after PYTEST_XDIST_WORKER ("gw0", "gw1", ...). So the
+# tree under the suite's base_compiledir is
+#
+#     ~/.pytensor-pytest/compiledir_<platform>/     <- -n0 runs only
+#     ~/.pytensor-pytest/gw0/compiledir_<platform>/ <- worker 0
+#     ~/.pytensor-pytest/gw1/compiledir_<platform>/ <- worker 1
+#     ...
+#
+# and the ONLY one pytensor.config resolves in the controller is the first.
+# That is why the budget has to be walked explicitly over the rest: pruning
+# what pytensor.config points at bounds the directory no worker ever reads
+# and leaves the six that they do read completely unbounded. Measured on
+# this box before the fix: controller 2280 entries (budget 3000, so never
+# pruned), gw0-gw5 1455-1562 entries EACH, none of them ever considered.
+# In CI the same omission made every saved cache artifact bigger than the
+# last -- ubuntu 3.14 went 374 -> 494 -> 606 -> 661 -> 781 MB over five
+# consecutive master merges -- until the repository-wide 10 GB cache budget
+# went into eviction, which is exactly what the Zenodo-spectra and
+# ephemeris caches cannot afford to lose.
+_WORKER_DIR_GLOB = "gw*"
+
 
 @dataclass
 class PruneStats:
@@ -259,6 +281,124 @@ def enforce_budget(
     return stats
 
 
+def worker_compiledirs(
+    base_compiledir: Path, compiledir: Path
+) -> list[tuple[Path, Path]]:
+    """``(base, compiledir)`` for every per-xdist-worker tree under base.
+
+    ``compiledir`` supplies the platform directory NAME to look for, which
+    is what makes this correct rather than a guess: PyTensor derives that
+    name from the platform, the processor, the Python version and the bit
+    width, and every worker on this machine resolves the same one, because
+    the conftest changes only the base. So the worker's live tree is
+    ``base/gwN/<same name>`` and anything else named ``compiledir_*`` beside
+    it is stranded by a kernel or Python bump, exactly as at the top level.
+
+    Sorted, and worker directories that hold no compiledir at all are still
+    returned: prune_compiledir on a missing directory is a cheap no-op, and
+    reporting the pair keeps the summary honest about what was considered.
+    """
+    if not base_compiledir.is_dir():
+        return []
+    pairs = []
+    for entry in sorted(base_compiledir.glob(_WORKER_DIR_GLOB)):
+        if not entry.is_dir():
+            continue
+        pairs.append((entry, entry / compiledir.name))
+    return pairs
+
+
+def enforce_budget_tree(
+    base_compiledir: Path,
+    compiledir: Path,
+    max_entries: int,
+    sweep_platforms: bool = False,
+    dry_run: bool = False,
+) -> list[tuple[Path, PruneStats]]:
+    """Bound the controller's compiledir AND every per-worker one.
+
+    ``max_entries`` is PER COMPILEDIR, not a total across the tree, because
+    the cost it exists to bound is per compiledir: each worker process
+    builds its own ModuleCache and walks only its own directory, so what
+    determines that walk's length is one directory's entry count. The price
+    of that denominator is disk -- a budget of N with W workers holds up to
+    (W + 1) x N entries -- which is why the default is sized against ONE
+    run's per-worker working set rather than against several.
+
+    Returns one (compiledir, stats) pair per directory considered, the
+    controller's first.
+    """
+    results = [
+        (
+            compiledir,
+            enforce_budget(
+                base_compiledir,
+                compiledir,
+                max_entries,
+                sweep_platforms=sweep_platforms,
+                dry_run=dry_run,
+            ),
+        )
+    ]
+    for worker_base, worker_compiledir in worker_compiledirs(
+        base_compiledir, compiledir
+    ):
+        results.append(
+            (
+                worker_compiledir,
+                enforce_budget(
+                    worker_base,
+                    worker_compiledir,
+                    max_entries,
+                    sweep_platforms=sweep_platforms,
+                    dry_run=dry_run,
+                ),
+            )
+        )
+    return results
+
+
+def summarize_tree(
+    results: list[tuple[Path, PruneStats]], max_entries: int
+) -> str:
+    """One line for the pytest header, however many compiledirs there were.
+
+    The per-directory detail is dropped once everything is within budget --
+    seven identical "not scanned" lines in a test header is noise. What is
+    worth a line every run is the total, because that is the number that
+    grew unnoticed for weeks.
+
+    "at most" when any directory was within budget, and that hedge is not
+    padding: the cheap pre-check proves a directory is under budget from one
+    listdir, whose name count includes lock_dir and any stray file, so it
+    bounds the entry count from above rather than measuring it. PruneStats
+    already refuses to claim otherwise per directory; the total must not
+    launder those bounds into a figure that looks counted.
+    """
+    if not results:
+        return ""
+    touched = [(d, st) for d, st in results if st.removed]
+    total = sum(st.kept for _, st in results)
+    bound = "at most " if any(st.skipped for _, st in results) else ""
+    head = (
+        f"pytensor compiledirs: {len(results)} pruned to <= {max_entries} "
+        f"entries each, {bound}{total} entries held in total"
+    )
+    if not touched:
+        return head
+    detail = "; ".join(
+        f"{d.parent.name}/{d.name}: removed {st.removed}" for d, st in touched
+    )
+    platforms = sorted(
+        name for _, st in results for name in st.removed_platform_dirs
+    )
+    if platforms:
+        detail += "; stale sibling compiledirs removed: " + ", ".join(
+            platforms
+        )
+    return head + " (" + detail + ")"
+
+
 def _resolve_compiledir(args: argparse.Namespace) -> tuple[Path, Path]:
     """Ask PyTensor where its compiledir is, unless told explicitly.
 
@@ -308,6 +448,18 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--include-worker-dirs",
+        action="store_true",
+        help=(
+            "also prune the per-xdist-worker compiledirs (gw*/) that the "
+            "test suite's conftest creates one level below the base. "
+            "pytensor.config resolves only the controller's, which under "
+            "-n is the one directory no worker ever reads -- so without "
+            "this the budget bounds nothing that matters. --max-entries is "
+            "per compiledir, not a total."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="report what would be removed, remove nothing",
@@ -315,6 +467,19 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     base, compiledir = _resolve_compiledir(args)
+    prefix = "[dry run] " if args.dry_run else ""
+    if args.include_worker_dirs:
+        results = enforce_budget_tree(
+            base,
+            compiledir,
+            args.max_entries,
+            sweep_platforms=args.sweep_other_platforms,
+            dry_run=args.dry_run,
+        )
+        print(prefix + summarize_tree(results, args.max_entries))
+        for directory, stats in results:
+            print(prefix + "  " + stats.summary(directory, args.max_entries))
+        return 0
     stats = enforce_budget(
         base,
         compiledir,
@@ -322,7 +487,6 @@ def main(argv: list[str] | None = None) -> int:
         sweep_platforms=args.sweep_other_platforms,
         dry_run=args.dry_run,
     )
-    prefix = "[dry run] " if args.dry_run else ""
     print(prefix + stats.summary(compiledir, args.max_entries))
     return 0
 

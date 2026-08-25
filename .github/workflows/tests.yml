@@ -67,6 +67,14 @@ jobs:
     name: pytest
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+
+    # actions: write is for `gh cache delete` in the housekeeping step at the
+    # end; contents: read is everything else this job does. Scoped to the job
+    # rather than the workflow, so the nightly job below keeps its own narrower
+    # set (issues: write, no actions).
+    permissions:
+      contents: read
+      actions: write
     strategy:
       # Do not cancel the other combinations when one fails. When a new Python
       # breaks something, "3.14 failed and everything else was cancelled" tells
@@ -222,36 +230,65 @@ jobs:
             pytensor-compiledir-p1-${{ matrix.os }}-${{ matrix.python-version }}-${{ hashFiles('poetry.lock') }}-
             pytensor-compiledir-p1-${{ matrix.os }}-${{ matrix.python-version }}-
 
-      # -n 2 overrides the -n 6 in pyproject's addopts. Six workers suit a
-      # workstation but oversubscribe a GitHub runner: each peaks ~1-2 GB
-      # building a System and compiling PyTensor graphs. The symptom was never
-      # an assertion failure but "worker 'gwN' crashed", landing on whichever
-      # heavy test drew the short straw -- it moved between
-      # test_integration_kelt4, test_gp and test_sed_plot_data across runs,
-      # and vanished entirely on others. That is a memory ceiling, not a bug.
+      # The worker count is COMPUTED, not written down here, and the reason
+      # is that the number this replaced went stale without anyone noticing.
+      # `-n 2` was chosen when a hosted Linux runner had two cores; the
+      # runners grew, the suite tripled, and the 2 stayed. Measured on
+      # 2026-08-24 with the compile cache warm on both sides, the four matrix
+      # jobs did the same work PER WORKER as a 36-core workstation -- ubuntu
+      # 3.12 spent 5202 worker-seconds against the workstation's 5682 -- so
+      # the entire 43-minute-vs-15:47 gap was worker count and nothing else.
+      # Replacing one hardcoded number with another would just restart that
+      # clock, so scripts/pytest_workers.py reads the cores and the memory
+      # instead; --explain puts both in the log, which is also how we learn
+      # what a runner actually has rather than inferring it from docs.
       #
-      # The compiledir budget is tighter than the local default (3000). A
-      # developer's cache wants room for several branches' worth of divergent
-      # graphs; a CI job runs one commit, so anything beyond roughly one
-      # suite's 1564 entries is dead weight that only inflates the artifact
-      # this job uploads. 2500 leaves headroom above that measured figure --
-      # a budget BELOW one run's working set would evict entries this very
-      # run still needs.
+      # The memory term in that script is the binding one, and the failure it
+      # exists to avoid is specifically "worker 'gwN' crashed" -- a memory
+      # ceiling that presents as a wandering flaky failure, seen on
+      # test_integration_kelt4, test_gp and test_sed_plot_data on different
+      # runs. Do not raise the worker count past what it returns without
+      # raising the memory per worker there too.
+      #
+      # The compiledir budget is PER COMPILEDIR and there is one per worker
+      # (the root conftest gives each its own, so they never queue on
+      # PyTensor's compile lock). It is tighter than the local default
+      # because a CI job runs one commit: anything beyond roughly one run's
+      # per-worker working set of ~1600 entries is dead weight that only
+      # inflates the artifact this job saves. A budget BELOW that working set
+      # would evict entries this very run still needs.
       - name: Run test suite
         env:
-          EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES: "2500"
-        run: poetry run pytest -q -n 2
+          EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES: "1800"
+        run: |
+          set -euo pipefail
+          workers=$(poetry run python scripts/pytest_workers.py --explain)
+          poetry run pytest -q -n "$workers"
 
-      # The conftest prunes at session START, so at this point the directory
-      # holds the budget plus everything this run compiled. Trim it again so
-      # the uploaded artifact is a bounded, deterministic size rather than
-      # growing by one run's worth on every merge.
+      # The conftest prunes at session START, so at this point the directories
+      # hold the budget plus everything this run compiled. Trim again so the
+      # saved artifact is a bounded size rather than growing by one run's
+      # worth on every merge.
+      #
+      # --include-worker-dirs is what makes that sentence true, and its
+      # absence is why it was false. Without it this pruned only the
+      # compiledir pytensor.config resolves, which under -n is the
+      # controller's -- the one directory no worker ever writes to. It was
+      # empty, the step reported success having removed nothing, and the
+      # per-worker directories that hold the entire cache were never
+      # considered. The artifact grew every merge: ubuntu 3.14 went 374 ->
+      # 494 -> 606 -> 661 -> 781 MB over five consecutive master runs, and
+      # with the generations below retained on top of that the repository's
+      # pytensor caches reached 8.05 GB of the 10 GB budget -- so GitHub was
+      # evicting least-recently-accessed, which is the scenario the restore
+      # step's comment describes as trading a 5-minute cache for a 250 MB
+      # download.
       - name: Prune the compile cache before saving it
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         run: |
           export PYTENSOR_FLAGS="base_compiledir=$HOME/.pytensor-pytest"
           poetry run python scripts/pytensor_cache_budget.py \
-            --max-entries 2500 --sweep-other-platforms
+            --max-entries 1800 --sweep-other-platforms --include-worker-dirs
 
       # See the long comment on the restore step for why this is master-only.
       - name: Save the PyTensor compile cache
@@ -260,6 +297,51 @@ jobs:
         with:
           path: ~/.pytensor-pytest
           key: ${{ steps.compiledir-cache.outputs.cache-primary-key }}
+
+      # The restore step's key embeds github.run_id so that each master push
+      # writes a NEW entry instead of hitting an existing one and skipping the
+      # save. That is necessary -- a cache key is immutable once written -- but
+      # it has a consequence the restore-keys prefix hides: nothing ever
+      # supersedes the entry it replaces. Old generations only leave by
+      # eviction, so they accumulate. Measured 2026-08-25: FIVE generations
+      # retained per os+python, 18 entries, 8.05 GB of the repository's 10 GB
+      # budget, total usage 10.43 GB -- i.e. already evicting, and the two
+      # things eviction must not take (the 132 MB Zenodo spectra and the
+      # 115 MB ephemeris kernel) were the smallest entries in there.
+      #
+      # Only the newest is ever restored: the restore-keys prefix matches
+      # most-recent-first. So the older ones buy nothing and cost the budget.
+      # This deletes them, scoped to THIS job's os+python prefix, so the four
+      # matrix combinations running concurrently cannot interfere with each
+      # other.
+      #
+      # The prefix also spans lockfile hashes, which is intended: after a
+      # dependency bump the first master run restores the old-lock entry as a
+      # partial hit, compiles the delta, saves under the new key, and the old
+      # entry is then genuinely superseded.
+      #
+      # continue-on-error, like the issue bookkeeping in the nightly job
+      # below: cache housekeeping must never decide a suite's verdict. A
+      # transient API error here would otherwise turn a green run red.
+      - name: Drop superseded compile caches
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: ${{ steps.compiledir-cache.outputs.cache-primary-key }}
+          PREFIX: pytensor-compiledir-p1-${{ matrix.os }}-${{ matrix.python-version }}-
+        run: |
+          set -euo pipefail
+          keys="$RUNNER_TEMP/superseded-cache-keys.txt"
+          gh cache list --key "$PREFIX" --limit 100 --json key \
+            --jq '.[].key' > "$keys" || true
+          while read -r key; do
+            if [ -z "$key" ] || [ "$key" = "$KEEP" ]; then
+              continue
+            fi
+            echo "deleting superseded cache: $key"
+            gh cache delete "$key" || true
+          done < "$keys"
 
   # Installs WITHOUT poetry.lock, resolving dependencies fresh the way a user's
   # `pip install exozippy` does.
@@ -351,8 +433,15 @@ jobs:
       - name: Record what actually got resolved
         run: pip freeze | tee resolved.txt
 
+      # Same computed worker count as the matrix job -- see the comment
+      # there. No poetry in this job by design, so the script runs on the
+      # bare interpreter; it imports nothing outside the standard library
+      # precisely so it can.
       - name: Run test suite
-        run: pytest -q -n 2
+        run: |
+          set -euo pipefail
+          workers=$(python scripts/pytest_workers.py --explain)
+          pytest -q -n "$workers"
 
       # Email alone is a weak alarm for this job. A nightly that stays broken
       # for a week sends seven identical emails, which is how an alarm becomes

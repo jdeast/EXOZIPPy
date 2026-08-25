@@ -82,14 +82,26 @@ for _var in (
 _COMPILEDIR_ENV = "EXOZIPPY_TEST_COMPILEDIR"
 _BUDGET_ENV = "EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES"
 
-# One full cold run of this suite creates 1564 entries (measured, 825 MB), so
-# the budget must clear that comfortably or every run would evict what the
-# next one needs and the cache would never be warm. Note a second run on a
-# different branch does NOT add another 1564: it reuses almost everything and
-# adds only the delta for the graphs that changed, so 3000 covers several
-# worktrees rather than the 1.9 runs the arithmetic suggests -- while keeping
-# the startup walk well under the 4035-entry directory this replaces.
-_DEFAULT_MAX_ENTRIES = 3000
+# PER COMPILEDIR, not a total across the tree -- see the per-worker section
+# below, and enforce_budget_tree's docstring for why that is the right
+# denominator (each worker walks only its own directory, so one directory's
+# entry count is what the startup walk is linear in).
+#
+# The number is sized against ONE run's per-worker working set. A full run
+# creates 1564 distinct entries, and measurement shows a worker's own
+# directory holds very nearly all of them -- 1455 to 1562 across gw0-gw5 --
+# because most of what gets compiled is shared infrastructure that every
+# file's model builds, not something specific to the files that worker drew.
+# So the budget has to clear ~1600 or a run would evict entries it still
+# needs, and there is no point going far above it: the headroom that 3000
+# used to buy ("several worktrees") is not available at this denominator,
+# because with W workers the tree now holds up to (W + 1) x this.
+#
+# 3000 was the old value and it was applied to the CONTROLLER's compiledir,
+# which under -n is the one directory no worker ever reads. It therefore
+# bounded nothing: the controller sat at 2280 entries and never hit 3000,
+# while the six directories that do get read grew without any bound at all.
+_DEFAULT_MAX_ENTRIES = 2000
 
 _raw_compiledir = os.environ.get(_COMPILEDIR_ENV)
 if _raw_compiledir is None:
@@ -168,6 +180,16 @@ if _BASE_COMPILEDIR is not None:
 # common ops across workers, paid in parallel instead of in a queue.
 # Appended as the rightmost flag, so it wins whatever base won above
 # (parse_config_string builds its dict left to right).
+#
+# The OTHER price, which went unpaid for weeks: these directories are not
+# where pytensor.config points in the controller, so the budget below has to
+# be walked over them explicitly. It was not, and they grew without bound --
+# locally to six directories of ~1500 entries each, and in CI to a saved
+# cache artifact that got bigger on every master merge until the
+# repository-wide 10 GB budget started evicting the Zenodo and ephemeris
+# caches that the suite cannot cheaply re-download. _prune_compiledir now
+# covers the whole tree; do not "simplify" it back to pytensor.config's
+# single directory.
 _worker = os.environ.get("PYTEST_XDIST_WORKER")
 if _worker and "pytensor" not in sys.modules:
     _flags = os.environ.get("PYTENSOR_FLAGS", "")
@@ -227,12 +249,21 @@ def _xdist_active(config):
 
 
 def _prune_compiledir(config):
-    """Bound the suite's compiledir. Controller only, before workers exist.
+    """Bound the suite's compiledirs. Controller only, before workers exist.
 
     Doing it here rather than in a fixture is what makes the prune safe
     without taking PyTensor's compile lock: ``pytest_configure`` on the
     controller runs before xdist spawns a single worker, so nothing else is
-    walking the directory yet.
+    walking the directories yet. It is also the only moment at which the
+    per-worker trees can be pruned at all -- a worker cannot prune its own,
+    because by the time it runs it is already holding the ModuleCache it
+    would be deleting under itself.
+
+    EVERY compiledir in the tree, not just the one pytensor.config resolves.
+    That distinction is the whole point: this process is the controller, so
+    what it resolves is ``base/compiledir_<platform>``, and under -n that is
+    the one directory none of the workers ever opens. See
+    enforce_budget_tree.
     """
     budget = int(os.environ.get(_BUDGET_ENV, _DEFAULT_MAX_ENTRIES))
     module = _load_budget_module()
@@ -240,7 +271,7 @@ def _prune_compiledir(config):
         return None
     import pytensor  # noqa: PLC0415 -- must follow the PYTENSOR_FLAGS write above
 
-    stats = module.enforce_budget(
+    results = module.enforce_budget_tree(
         Path(pytensor.config.base_compiledir),
         Path(pytensor.config.compiledir),
         budget,
@@ -249,7 +280,7 @@ def _prune_compiledir(config):
         # Python version that nothing will ever read again.
         sweep_platforms=True,
     )
-    return stats.summary(Path(pytensor.config.compiledir), budget)
+    return module.summarize_tree(results, budget)
 
 
 def _warm_module_cache():
