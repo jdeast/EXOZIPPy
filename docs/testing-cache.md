@@ -344,22 +344,72 @@ after the prune fix, the macOS tree was **5055 entries**: controller 1800 +
 gw0 1578 + gw1 1677. Dropping the controller as well as gw1 makes the artifact
 about **3.2x** smaller rather than 2x.
 
-**The suite is split across 2 shards**, `scripts/pytest_shard.py`
-round-robining the sorted test-file list. Worker count is capped by the runner
--- measured, `ubuntu-latest` is `cpus=4, memory=15.6 GB` and `macos-latest` is
-`cpus=3, memory=7.0 GB` -- and ~6700 worker-seconds over 4 workers is still
-~22 minutes, so more machines is the only way further down.
+**The suite is split across 4 shards**, `scripts/pytest_shard.py`. Worker
+count is capped by the runner -- measured, `ubuntu-latest` is `cpus=4,
+memory=15.6 GB` and `macos-latest` is `cpus=3, memory=7.0 GB` -- and ~6700
+worker-seconds over 4 workers is still ~22 minutes, so more machines is the
+only way further down.
 
-Round-robin rather than a duration-aware pack because it needs no state and
-measures well: **1.04x** of a perfectly balanced split at N=2 against real
-per-file durations. It degrades to **1.37x at N=3** and **1.33x at N=4**, as
-the long tail stops averaging out, so going past 2 shards means re-measuring.
+**Why exactly four**, from the first sharded run rather than from taste. Two
+constraints bound a shard's wall clock: a measured **~225 s fixed cost per
+job**, and the fact that `--dist loadfile` pins a whole file to one worker, so
+a shard can never beat its slowest single file's SERIAL time.
 
-Only **shard 1** prunes, saves, and drops superseded caches. Shard 1's tree
-already serves shard 2 almost completely -- the same ~95% redundancy as above
--- so storing shard 2's would double the cache to buy a few percent. Shard 2
-recompiles that remainder every run, a small bounded cost against a cache
-budget that is not.
+| shards | jobs | wall/job | binding constraint |
+|---|---|---|---|
+| 2 | 8 | 14.6m | spread |
+| 3 | 12 | 11.0m | spread |
+| **4** | **16** | **9.2m** | spread |
+| 6 | 24 | 8.1m | slowest single file |
+| 8 | 32 | 8.1m | slowest single file |
+
+Four is the last point where adding machines still helps; past it the
+constraint flips to one file and 8 more jobs buy about a minute. **The floor is
+8.1 min**, set by `test_rm_ltt.py` at 262 s serial on ubuntu. Going below it
+means splitting slow FILES, not adding shards -- and `test_rm_ltt.py` is two
+test functions with no shared fixture, so that is available and cheap when
+wanted.
+
+Four also buys MARGIN, which is the practical argument. Two shards measured
+**15:10 to 26:36** across eight jobs: a mean sitting right on the 20-minute
+target with about +/-40% runner variance, so roughly half of all runs missed
+it. Picking a shard count whose mean equals the target means failing the target
+half the time.
+
+**The split is duration-aware**, packing longest-file-first from
+`tests/durations.json`. That file is a **weighting hint and never a
+correctness input**: a file it does not mention is charged the median cost, and
+a missing or corrupt file degrades to round-robin. Either way the partition
+still covers every file exactly once, which `--verify` checks on every job.
+
+Measured on the real suite, worst shard as a multiple of ideal:
+
+| shards | duration-aware | round-robin |
+|---|---|---|
+| 2 | 1.00x | 1.05x |
+| 3 | 1.00x | 1.23x |
+| 4 | **1.00x** | 1.16x |
+| 6 | 1.00x | 1.62x |
+
+So round-robin is fine at two shards and wasteful at four, which is what pays
+for carrying the file. Regenerate it after a big change in the suite's shape:
+
+```bash
+poetry run pytest -q -n6 --dist loadfile --durations=0 --durations-min=0 \
+    > /tmp/durations.txt
+poetry run python scripts/gen_durations.py /tmp/durations.txt tests/durations.json
+```
+
+Staleness is reported on every run, and raises a GitHub Actions warning
+annotation past 20% unknown files -- a warning, not a failure, because stale
+weights cost balance and never coverage. A test also fails if it drifts past
+35%, which is the point at which the split has quietly become round-robin.
+
+Only **shard 1** prunes, saves, and drops superseded caches. Its tree already
+serves the other shards almost completely -- the same ~95% redundancy as above
+-- so storing theirs would multiply the cache by the shard count to buy a few
+percent. They recompile that remainder every run, a small bounded cost against
+a cache budget that is not.
 
 The `--verify` flag on the shard split is load-bearing, not a nicety: a split
 that silently DROPS a file leaves every shard green with the coverage gone. It

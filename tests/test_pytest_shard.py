@@ -7,6 +7,8 @@ against the REAL tests/ directory, not just against a fixture.
 """
 
 import importlib.util
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -141,3 +143,211 @@ def test_an_out_of_range_shard_index_is_rejected(index, total):
     # Arrange / Act / Assert
     with pytest.raises(ValueError):
         shard_mod.shard(["test_a.py", "test_b.py"], index, total)
+
+
+# ---------------------------------------------------------------------------
+# The duration-aware split
+# ---------------------------------------------------------------------------
+
+
+def _durations_file(tmp_path, durations):
+    (tmp_path / "durations.json").write_text(
+        json.dumps({"durations": durations})
+    )
+
+
+def test_the_shipped_durations_file_covers_almost_every_test_file():
+    """Given the durations file checked in beside the tests,
+    When it is compared against the files actually present,
+    Then it accounts for the large majority of them.
+
+    Not an equality assertion, deliberately: new test files land constantly
+    and must not turn the suite red for it. But a file that has drifted so far
+    that most weights are guesses has stopped doing its job, and the split
+    silently degrades toward round-robin -- which at 4 shards is a third worse.
+    Regenerate with scripts/gen_durations.py."""
+    # Arrange
+    tests_dir = _REPO_ROOT / "tests"
+    files = shard_mod.discover_test_files(tests_dir)
+    durations = shard_mod.load_durations(tests_dir)
+    assert durations, "tests/durations.json is missing or unreadable"
+
+    # Act
+    unknown = [f for f in files if Path(f).name not in durations]
+
+    # Assert
+    share = len(unknown) / len(files)
+    assert share < 0.35, (
+        f"{len(unknown)} of {len(files)} test files ({share:.0%}) have no "
+        f"recorded duration; regenerate tests/durations.json"
+    )
+
+
+def test_duration_aware_packing_beats_round_robin_on_the_real_suite():
+    """Given the real per-file durations,
+    When the suite is split four ways both ways,
+    Then the duration-aware split is measurably better balanced.
+
+    This is the entire justification for carrying a durations file at all. If
+    it ever stops being true the file is dead weight and should go."""
+    # Arrange
+    tests_dir = _REPO_ROOT / "tests"
+    files = shard_mod.discover_test_files(tests_dir)
+    durations = shard_mod.load_durations(tests_dir)
+    weights = shard_mod.weigh(files, durations)
+
+    def worst(groups):
+        loads = [sum(weights[f] for f in g) for g in groups]
+        return max(loads) / (sum(loads) / len(loads))
+
+    # Act
+    packed = worst(shard_mod.pack(files, 4, weights))
+    robin = worst([files[i::4] for i in range(4)])
+
+    # Assert
+    assert packed < 1.10, f"duration-aware split is {packed:.2f}x of ideal"
+    assert packed < robin, (
+        f"duration-aware ({packed:.2f}x) is no better than round-robin "
+        f"({robin:.2f}x); the durations file is not earning its keep"
+    )
+
+
+def test_packing_partitions_exactly_and_is_deterministic(tmp_path):
+    """Given weighted files,
+    When they are packed,
+    Then every file appears exactly once and repeated runs agree.
+
+    Determinism is not cosmetic here: each shard computes the partition
+    independently in its own job, so two of them disagreeing would double-run
+    some files and skip others."""
+    # Arrange
+    files = [f"tests/test_{i:03d}.py" for i in range(37)]
+    weights = {f: (i % 7) + 1.0 for i, f in enumerate(files)}
+
+    # Act
+    first = shard_mod.pack(files, 4, weights)
+    second = shard_mod.pack(files, 4, weights)
+
+    # Assert
+    assert first == second
+    union = [f for g in first for f in g]
+    assert sorted(union) == sorted(files)
+    assert len(union) == len(set(union))
+
+
+def test_an_unrecorded_file_is_charged_the_median_not_zero(tmp_path):
+    """Given a file absent from the durations record,
+    When the files are weighed,
+    Then it costs the median of the known files.
+
+    Zero is the trap: every newly added file would look free, so the packer
+    would pile all of them into one shard -- and new files are exactly the ones
+    nobody has measured yet."""
+    # Arrange
+    durations = {"test_a.py": 1.0, "test_b.py": 3.0, "test_c.py": 100.0}
+    files = [
+        "tests/test_a.py",
+        "tests/test_b.py",
+        "tests/test_c.py",
+        "tests/test_new.py",
+    ]
+
+    # Act
+    weights = shard_mod.weigh(files, durations)
+
+    # Assert -- median of (1, 3, 100) is 3, not 0 and not the mean of 34.7.
+    assert weights["tests/test_new.py"] == 3.0
+
+
+def test_a_corrupt_durations_file_degrades_to_round_robin(tmp_path):
+    """Given a durations file that is not usable JSON,
+    When it is loaded,
+    Then the result is empty rather than an exception.
+
+    The file is a weighting HINT. A truncated or hand-mangled one must cost
+    balance, never correctness -- the caller then falls back to round-robin,
+    which still partitions every file exactly once."""
+    # Arrange
+    (tmp_path / "durations.json").write_text("{ this is not json")
+
+    # Act
+    durations = shard_mod.load_durations(tmp_path)
+
+    # Assert
+    assert durations == {}
+
+
+def test_a_missing_durations_file_is_not_an_error(tmp_path):
+    """Given no durations file at all,
+    When it is loaded,
+    Then the result is empty.
+
+    The state of a fresh checkout before the file existed, and of any tree
+    where someone deleted it."""
+    # Arrange / Act
+    durations = shard_mod.load_durations(tmp_path)
+
+    # Assert
+    assert durations == {}
+
+
+def test_packing_puts_the_heaviest_files_in_different_shards(tmp_path):
+    """Given a few dominant files among many cheap ones,
+    When they are packed into as many shards as there are heavy files,
+    Then no shard gets two of them.
+
+    The property that makes the split worth computing: the slow files are what
+    set a shard's wall clock, so concentrating two of them in one shard wastes
+    the whole point."""
+    # Arrange
+    heavy = [f"tests/test_heavy_{i}.py" for i in range(4)]
+    light = [f"tests/test_light_{i:02d}.py" for i in range(40)]
+    files = sorted(heavy + light)
+    weights = {f: (100.0 if f in heavy else 1.0) for f in files}
+
+    # Act
+    groups = shard_mod.pack(files, 4, weights)
+
+    # Assert
+    for group in groups:
+        assert sum(1 for f in group if f in heavy) == 1
+
+
+def test_the_generator_and_the_loader_agree_on_the_file_format(tmp_path):
+    """Given a pytest --durations transcript,
+    When the generator writes a durations file and the loader reads it back,
+    Then the weights survive the round trip.
+
+    These are two separate scripts with no shared code, joined only by a JSON
+    shape. If they drift, `load_durations` returns {} and the split silently
+    degrades to round-robin -- no error, just a third of the balance gone at
+    4 shards. This is the contract, pinned."""
+    # Arrange -- the exact shape pytest emits for --durations.
+    transcript = tmp_path / "durations.txt"
+    transcript.write_text(
+        "============ slowest durations ============\n"
+        "12.34s call     tests/test_alpha.py::test_one\n"
+        "1.20s setup    tests/test_alpha.py::test_one\n"
+        "5.00s call     tests/test_beta.py::test_two[case-1]\n"
+        "0.10s teardown tests/test_beta.py::test_two[case-1]\n"
+        "not a duration line at all\n"
+    )
+    out = tmp_path / "durations.json"
+
+    # Act -- the generator is a script, so drive it the way a developer would.
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(_REPO_ROOT / "scripts" / "gen_durations.py"),
+            str(transcript),
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert done.returncode == 0, done.stderr
+    loaded = shard_mod.load_durations(tmp_path)
+
+    # Assert -- summed across call/setup/teardown, keyed by BASENAME.
+    assert loaded == {"test_alpha.py": 13.54, "test_beta.py": 5.10}

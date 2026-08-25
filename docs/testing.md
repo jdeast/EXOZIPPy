@@ -40,10 +40,16 @@ obvious and are wrong:
 
 It is a long tail rather than a few hot spots: the top 30 of 202 files are 67% of the
 total, the worst single file is 5.0%. That shape is why CI splits the suite across
-2 shards (`scripts/pytest_shard.py`, round-robin over the sorted file list, measured at
-1.04x of ideal balance): with no dominant file there is nothing to cut, so the remaining
-lever is more machines. See `docs/testing-cache.md` for the sharding and for the
-compiledir seeding that keeps its cache affordable. The heaviest individual tests, for anyone looking
+**4 shards** (`scripts/pytest_shard.py`, packing longest-file-first from
+`tests/durations.json`, measured at 1.00x of ideal balance): with no dominant file there
+is nothing to cut, so the remaining lever is more machines.
+
+Four is where that lever runs out. `--dist loadfile` pins a file to one worker, so a
+shard cannot beat its slowest file's serial time -- past 4 shards the binding constraint
+stops being the spread and becomes `test_rm_ltt.py` alone. Below ~8 minutes the next
+move is splitting slow FILES, which is exactly why `test_runner_lifecycle.py` was split
+out of `test_runner.py`. See `docs/testing-cache.md` for the full arithmetic, the
+sharding, and the compiledir seeding that keeps its cache affordable. The heaviest individual tests, for anyone looking
 for something to cut:
 
 | seconds | test |
