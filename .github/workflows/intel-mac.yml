@@ -144,6 +144,11 @@ jobs:
       # Upstream fix that would delete this step: drop `jax==0.8.0` from
       # celerite2's build requires, since CMake already treats it as
       # optional.
+      #
+      # scripts/bootstrap_intel_mac.sh is this same recipe, for a developer
+      # laptop (it pre-builds into the poetry venv, then runs
+      # `poetry install`). KEEP THE TWO IN SYNC -- if you change the build
+      # requirements or the config-settings here, change them there.
       # numpy is pinned to the SAME range the bulk install uses, not left
       # free. Without that, pip resolves the newest numpy here, celerite2's
       # extension compiles against those headers, and the bulk install then
