@@ -1,0 +1,55 @@
+# HAT-P-3 star-only + MIST.  Diff against hat3_staronly.params.yaml.
+
+# this is always helpful and comes from high resolution spectroscopy
+star.feh:
+    initval: 0.27
+    sigma: 0.08
+
+# NOTE the missing `sigma:`, which is the whole point of this example.
+# hat3_staronly.params.yaml pins this at 0.05 under the comment "the sigma is
+# only necessary because we're not fitting an evolutionary model / it should
+# be removed in a final run".  With the tracks in the fit, the mass is
+# constrained by the MIST radius/teff/age penalties, so the hand-supplied
+# prior comes out and this is a START VALUE only.
+star.mass:
+    initval: 0.92
+
+# we can measure this from spectroscopy, but typically SED + transit is more
+# direct so we're just going to seed it at the spectroscopic value
+star.teff:
+    initval: 5190.0
+
+star.radius:
+    initval: 0.85
+
+# The INITIAL (protostellar) metallicity -- the grid's third axis, distinct
+# from star.feh above, which is the present-day SURFACE value.  MIST evolves
+# one away from the other over a track (diffusion, dredge-up), and the two
+# are tied together only by the feh penalty, never equated.  Seeded slightly
+# above the measured surface value because diffusion depletes the surface of
+# a K dwarf over its lifetime.  A start value, not a prior.
+#
+# defaults.yaml says [-4.0, 0.5], but those are placeholders: the component
+# narrows them to the loaded grid's own axis extent, which for the shipped
+# afe_p0/vvcrit0.0 grid is [-2.5, 0.5] after trimming.
+star.A.initfeh:
+    initval: 0.30
+
+# star.A.eep is deliberately NOT seeded here.  The component searches the
+# grid track nearest (logmass, initfeh) for the EEP minimizing the same
+# objective the fit uses, and hints that -- which is better than a guess,
+# and which an explicit initval here would override (a user value outranks
+# a data-derived hint).  Seed it only if you know the evolutionary phase.
+#
+# star.A.age is likewise left at its defaults.yaml start (4.603 Gyr); the
+# tracks constrain it, and HAT-P-3's age is not independently known.
+
+# this comes from a galactic dust map (see scripts/mkticsed.py)
+star.av:
+    upper: 0.096687450
+
+# NOTE: the Gaia DR3 parallax uncertainty (0.0143000) has been added in
+# quadrature with 0.01 to account for remaining systematic residuals
+star.parallax:
+    initval: 7.45278
+    sigma: 0.01745
