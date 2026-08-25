@@ -75,12 +75,14 @@ def _plot_magnification(system, times):
     )
 
 
-def _likelihood_magnification(system, times, obs_pos, values, u1, bandpass):
+def _likelihood_magnification(
+    system, times, obs_pos, values, u1, bandpass, u2=None
+):
     """Magnification the LIKELIHOOD path builds, compiled the same way."""
     t_in = pt.dvector("t")
     obs_in = pt.dmatrix("obs")
     node = system.lens.get_magnification_op(
-        t_in, obs_in, system, index=0, u1=u1, bandpass=bandpass
+        t_in, obs_in, system, index=0, u1=u1, u2=u2, bandpass=bandpass
     )
     fn = pytensor.function(
         inputs=[t_in, obs_in] + [p.value for p in system.plot_params],
@@ -93,11 +95,11 @@ def _likelihood_magnification(system, times, obs_pos, values, u1, bandpass):
 def test_finite_source_ld_resolver_finds_the_band(finite_source_system):
     """
     Given a finite-source lens whose light curve declares a band,
-    When the shared (u1, bandpass) resolver is asked,
-    Then it returns both -- the precondition for the parity claim below.
+    When the shared (u1, u2, bandpass) resolver is asked,
+    Then it returns them -- the precondition for the parity claim below.
     """
     # Arrange / Act
-    u1, bandpass = (
+    u1, u2, bandpass = (
         finite_source_system.mulensinstrument._finite_source_limb_darkening(
             finite_source_system
         )
@@ -106,6 +108,10 @@ def test_finite_source_ld_resolver_finds_the_band(finite_source_system):
     # Assert
     assert bandpass == "I"
     assert u1 is not None
+    # u2 tracks the band's declared law: present for the quadratic default,
+    # absent from the manifest entirely when every band is linear.
+    band = finite_source_system.band
+    assert (u2 is not None) == ("u2" in band.manifest)
 
 
 def test_plotted_magnification_is_the_limb_darkened_one(finite_source_system):
@@ -119,13 +125,13 @@ def test_plotted_magnification_is_the_limb_darkened_one(finite_source_system):
     # Arrange
     system = finite_source_system
     inst = system.mulensinstrument
-    u1, bandpass = inst._finite_source_limb_darkening(system)
+    u1, u2, bandpass = inst._finite_source_limb_darkening(system)
     times = inst.time[:40]
 
     # Act
     a_plot, values, obs_pos = _plot_magnification(system, times)
     a_fit = _likelihood_magnification(
-        system, times, obs_pos, values, u1, bandpass
+        system, times, obs_pos, values, u1, bandpass, u2=u2
     )
     a_uniform = _likelihood_magnification(
         system, times, obs_pos, values, None, None

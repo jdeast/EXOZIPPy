@@ -356,7 +356,7 @@ class VBMDirectMagOp(Op):
 
     Param vector: [t_0, u_0, t_E, pi_E_N, pi_E_E] + optional [rho]
                   + per companion j: [s_j, q_j, alpha_j_deg]
-                  + optional [u1]
+                  + optional [u1] + optional [u2]
 
     Companion geometry convention (reduces exactly to the MulensModel /
     VBMicrolensing binary convention for one companion): alpha_j is the
@@ -365,6 +365,22 @@ class VBMDirectMagOp(Op):
     TOTAL lens mass. Internally the source moves in the trajectory frame at
     (-tau, -u) and companion j sits at s_j*(cos alpha_j, -sin alpha_j) from
     the primary, with the origin shifted to the lens center of mass.
+
+    ``n_companions = 0`` is the SINGLE-lens (ESPL) case, which exists so that
+    a finite-source point lens can carry a quadratic limb-darkening law: it is
+    the only backend here that can (MulensModel's ``set_limb_coeff_u`` and its
+    Yoo04 B0/B1 formalism are linear-only).  It is NOT the default for a
+    single lens -- see Lens.get_magnification_op, which keeps MulensModel
+    there unless a second LD coefficient is actually in play, because the two
+    disagree by up to ~5 mmag in the deep finite-source regime (Yoo04's table
+    interpolation) and a silent backend flip would move existing answers.
+
+    ``quadratic_ld`` selects VBM's LDquadratic profile and reads u2 from the
+    tail of the param vector.  At u2 = 0 that profile reproduces LDlinear to
+    2.2e-16 fractional (measured over a caustic crossing at rho = 0.015), so
+    turning it on is a no-op for a linear band -- which is what makes the
+    parameter safe to key on the band's declared law rather than on a config
+    flag of its own.
     """
 
     itypes = [pt.dvector, pt.dvector, pt.dmatrix]
@@ -378,6 +394,7 @@ class VBMDirectMagOp(Op):
         bandpass=None,
         accuracy=1e-3,
         relative_accuracy=0.0,
+        quadratic_ld=False,
     ):
         # coords: "<ra>d <dec>d" string — same format the MulensModel Ops take.
         ra_deg, dec_deg = [float(v.rstrip("d")) for v in str(coords).split()]
@@ -395,8 +412,11 @@ class VBMDirectMagOp(Op):
         self.n_companions = int(n_companions)
         self.use_rho = use_rho
         self.bandpass = (
-            bandpass  # None = no LD; str = u1 is last param element
+            bandpass  # None = no LD; str = u1 (then u2) at the param tail
         )
+        # u2 only means anything alongside a u1, so a quadratic law without a
+        # bandpass is a caller bug, not a silently-uniform source.
+        self.quadratic_ld = bool(quadratic_ld) and bandpass is not None
         self._accuracy = float(accuracy)
         self._relative_accuracy = float(relative_accuracy)
         # One VBM instance per Op; PTDE fork workers each inherit a private
@@ -418,6 +438,14 @@ class VBMDirectMagOp(Op):
         vbm = VBMicrolensing.VBMicrolensing()
         vbm.Tol = self._accuracy
         vbm.RelTol = self._relative_accuracy
+        # Profile is instance state, set once; a1/a2 are per-call and set in
+        # _magnify.  Keep it that way: SetLDprofile on every epoch would be
+        # the same shape of waste _deltas exists to avoid.
+        vbm.SetLDprofile(
+            VBMicrolensing.VBMicrolensing.LDquadratic
+            if self.quadratic_ld
+            else VBMicrolensing.VBMicrolensing.LDlinear
+        )
         if self.n_companions >= 2:
             # Multipoly beats the Nopoly default for 3 lenses; Nopoly wins
             # for 4+ (VBM docs, Bozza+2025 A&A 694, 219).  Must precede
@@ -464,8 +492,8 @@ class VBMDirectMagOp(Op):
             self._delta_cache[key] = (p_n, p_e)
         return self._delta_cache[key]
 
-    def _magnify(self, companions, x, y, rho, u1):
-        """One VBM call per epoch on trajectory (x, y); binary or N-lens.
+    def _magnify(self, companions, x, y, rho, u1, u2=None):
+        """One VBM call per epoch on trajectory (x, y); single, binary or N-lens.
 
         Far-field guard: all caustics lie within ~R_inf of the center of
         mass, so a source center farther than R_inf + 2*rho is point-source
@@ -480,6 +508,28 @@ class VBMDirectMagOp(Op):
         """
         vbm = self._vbm
         vbm.a1 = 0.0 if u1 is None else u1
+        if self.quadratic_ld:
+            vbm.a2 = 0.0 if u2 is None else u2
+
+        if self.n_companions == 0:
+            # Single lens.  u is rotation-invariant, so the trajectory frame
+            # needs no alpha and (x, y) may arrive unrotated.
+            u = np.sqrt(x * x + y * y)
+            if not self.use_rho:
+                # Paczynski in closed form -- cheaper and more accurate than a
+                # VBM call, and the only reachable point-source single-lens Op
+                # case is a forced `use_op: true` (the symbolic path otherwise
+                # owns it, and stays differentiable).
+                u2sq = u * u
+                return (u2sq + 2.0) / np.sqrt(u2sq * (u2sq + 4.0))
+            # ESPLMag2 is table-backed and internally short-circuits to the
+            # point source far from the lens, so this needs no far-field guard
+            # of the kind the binary branch below does (VBM's hardcoded
+            # safedist bug is in BinaryMag2, not here).
+            return np.array(
+                [vbm.ESPLMag2(float(ui), rho) for ui in u.tolist()]
+            )
+
         if self.n_companions == 1:
             s, q, _ = companions[0]
             mag2, mag0 = vbm.BinaryMag2, vbm.BinaryMag0
@@ -574,6 +624,8 @@ class VBMDirectMagOp(Op):
             labels += [f"lens.s[{j}]", f"lens.q[{j}]", f"lens.alpha[{j}]"]
         if self.bandpass is not None:
             labels.append("band.u1")
+            if self.quadratic_ld:
+                labels.append("band.u2")
         return labels
 
     def _compute(self, p, times_np, obs_pos_np):
@@ -625,7 +677,16 @@ class VBMDirectMagOp(Op):
                 )
             )
             idx += 3
-        u1 = float(p[-1]) if self.bandpass is not None else None
+        # Index FORWARD from the companion block, not backward from the end.
+        # With u2 optionally following u1, `p[-1]` no longer identifies u1, and
+        # a negative index that quietly means a different parameter depending
+        # on the band's LD law is exactly the kind of layout bug _param_labels
+        # exists to make visible.
+        u1 = u2 = None
+        if self.bandpass is not None:
+            u1 = float(p[idx])
+            if self.quadratic_ld:
+                u2 = float(p[idx + 1])
 
         dN, dE = self._deltas(obs_pos_np)
         tau = (
@@ -644,11 +705,13 @@ class VBMDirectMagOp(Op):
         else:
             # Trajectory frame: same configuration with the rotation applied to
             # the lens positions instead (global rotations leave A invariant).
+            # For n_companions == 0 there is no lens axis at all and only
+            # |(x, y)| is read, so the same two lines serve.
             x = -tau
             y = -u
 
         with np.errstate(invalid="ignore", divide="ignore"):
-            return self._magnify(companions, x, y, rho, u1)
+            return self._magnify(companions, x, y, rho, u1, u2)
 
     def pullback(self, inputs, outputs, cotangents):
         # Deliberately loud: this Op is only reachable from non-gradient

@@ -280,7 +280,10 @@ class Band(Component):
     # would have its band's LD silently pinned.
     #
     #   transit/transit.py       band.u1/u2[obs_band_map]  -- unconditional
-    #   mulensing/mulensinstrument.py  band.u1[band_idx]   -- finite_source only
+    #   mulensing/mulensinstrument.py  band.u1/u2[band_idx] -- finite_source
+    #                            only; u2 reaches the magnification only on
+    #                            a backend that can carry a quadratic profile
+    #                            (Lens._resolve_quadratic_ld)
     #   rm.py (via rvinstrument `rm:`)  band.u1/u2[band_idx]
     #
     # astrometryinstrument's optional `band:` is deliberately absent: it uses

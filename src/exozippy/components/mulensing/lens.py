@@ -180,9 +180,16 @@ class Lens(Component):
 
         # backend: which magnification engine the multi-lens Op path uses.
         #   vbm_direct  — call VBMicrolensing directly (default; ~5x faster,
-        #                 supports 2+ lens bodies)
-        #   mulensmodel — rebuild an mm.Model per call (A/B reference; binary only)
+        #                 supports 2+ lens bodies, and is the ONLY backend
+        #                 that can apply a quadratic limb-darkening profile
+        #                 — see _resolve_quadratic_ld)
+        #   mulensmodel — rebuild an mm.Model per call (A/B reference; binary
+        #                 only; linear LD only)
         self.backend = self.config[0].get("backend", "vbm_direct")
+        # Warn-once flag for a quadratic band on a linear-only backend
+        # (_resolve_quadratic_ld).  It describes the topology, not the call,
+        # so it must not re-fire per source or per instrument.
+        self._warned_linear_ld_backend = False
         if self.backend not in ("vbm_direct", "mulensmodel"):
             raise ValueError(
                 f"lens.backend must be 'vbm_direct' or 'mulensmodel', "
@@ -473,8 +480,12 @@ class Lens(Component):
                 "accepts": ["vbm_direct", "mulensmodel"],
                 "required": False,
                 "doc": (
-                    "Magnification engine for the multi-lens Op path. "
-                    "Default 'vbm_direct'."
+                    "Magnification engine for the multi-lens Op path, and "
+                    "for a finite-source single lens whose band declares "
+                    "'ld_law: quadratic' (only VBMicrolensing can apply a "
+                    "quadratic limb-darkening profile). Default "
+                    "'vbm_direct'; 'mulensmodel' is the A/B reference and "
+                    "is linear-LD only."
                 ),
             },
             {
@@ -1823,8 +1834,61 @@ class Lens(Component):
             )
         return ra_deg, dec_deg
 
+    def _resolve_quadratic_ld(self, u2, effective_bandpass):
+        """Can the selected backend honour the band's second LD coefficient?
+
+        Returns True to put u2 in the param vector, False to drop it -- and
+        when it drops it, says so ONCE, because a silently ignored u2 is the
+        exact defect this plumbing was added to fix.  A dropped u2 is not
+        merely a wrong profile: on a band whose limb darkening only
+        microlensing reads, the magnification is a function of u1 alone, so
+        one combination of the sampled Kipping pair (q1, q2) becomes
+        likelihood-free -- sampled, reported, and constrained by nothing.
+
+        WHO CAN DO WHAT:
+
+        * VBMicrolensing carries LDquadratic for the binary/N-lens solvers
+          (BinaryMag2/MultiMag2) and for the point lens (ESPLMag2).  So
+          `backend: vbm_direct` -- the default -- can honour u2 everywhere.
+        * MulensModel cannot, anywhere: `set_limb_coeff_u` takes one
+          coefficient and the Yoo04 B0/B1 factorization it uses for a finite
+          point source is a linear-law formalism.  `backend: mulensmodel` is
+          the A/B reference, so it keeps being linear and says so.
+
+        WHY THE SINGLE-LENS DEFAULT IS NOT FLIPPED WHOLESALE.  A finite-source
+        point lens goes to MulensModel today, and VBM's ESPLMag2 disagrees
+        with Yoo04 by up to ~5 mmag (1.7 mmag rms) in the deep finite-source
+        regime u_0 << rho -- Yoo04's table interpolation, measured at
+        rho = 0.001-0.05.  Routing every FSPL fit to VBM would therefore move
+        existing answers by more than most of these light curves' error bars,
+        silently, as a side effect of an unrelated fix.  So the switch is
+        keyed on u2 actually being in play: a `ld_law: linear` band keeps
+        MulensModel and is bit-identical to before, and only the
+        configuration that was already WRONG changes backend.  A user who
+        wants VBM's ESPL for its own sake still has no way to ask for it; that
+        is a deliberately separate decision (see notes).
+        """
+        if u2 is None or effective_bandpass is None:
+            return False
+        if self.backend == "vbm_direct":
+            return True
+        if not self._warned_linear_ld_backend:
+            self._warned_linear_ld_backend = True
+            logger.warning(
+                "lens.backend = 'mulensmodel' cannot apply a quadratic "
+                "limb-darkening law (MulensModel's set_limb_coeff_u and its "
+                "Yoo04 finite-source formalism are linear-only), so band.u2 "
+                "is being IGNORED and the source profile is linear in u1. "
+                "Note that this leaves one combination of the band's sampled "
+                "(q1, q2) constrained by nothing but its prior. Fixes: use "
+                "the default 'backend: vbm_direct' to honour u2, or declare "
+                "'ld_law: linear' on the band to make the linear law "
+                "deliberate and drop the unconstrained coordinate."
+            )
+        return False
+
     def get_magnification_op(
-        self, times, obs_pos, system, index=0, u1=None, bandpass=None
+        self, times, obs_pos, system, index=0, u1=None, u2=None, bandpass=None
     ):
         """Magnification dispatcher.
 
@@ -1844,10 +1908,13 @@ class Lens(Component):
         MulensModel as satellite_skycoord (whose satellite channel then
         carries all parallax, annual + satellite).
 
-        u1/bandpass: when finite_source is True and a Band component is wired,
-        u1 (a PyTensor scalar) and bandpass (str) are passed so the Op can call
-        set_limb_coeff_u and get_magnification(bandpass=...).  Passing neither
-        falls back to uniform-source finite-source magnification.
+        u1/u2/bandpass: when finite_source is True and a Band component is
+        wired, u1 (a PyTensor scalar) and bandpass (str) are passed so the Op
+        can apply limb darkening.  Passing neither falls back to
+        uniform-source finite-source magnification.  u2 is the SECOND
+        (quadratic) coefficient and is present only for a band declaring
+        ``ld_law: quadratic`` -- see _resolve_quadratic_ld above for which
+        backends can honour it and what happens when the selected one cannot.
 
         Set ``use_op: true`` in the lens YAML block to force the Op (e.g. for
         testing or when MulensModel's finite-source parallax is needed).
@@ -1871,9 +1938,42 @@ class Lens(Component):
 
         # Apply LD only for finite-source and when a band is connected.
         effective_bandpass = bandpass if (use_rho and u1 is not None) else None
+        use_u2 = self._resolve_quadratic_ld(u2, effective_bandpass)
 
         times_tensor = pt.as_tensor_variable(times)
         obs_tensor = pt.as_tensor_variable(obs_pos)
+
+        single_lens_vbm = (
+            n_lenses == 1
+            and use_rho
+            and use_u2
+            and self.backend == "vbm_direct"
+        )
+
+        if single_lens_vbm:
+            # ESPL through VBM: the only backend here that carries a quadratic
+            # limb-darkening law for a point lens.  Reached ONLY when u2 is
+            # genuinely in play (_resolve_quadratic_ld), so a linear-band fit
+            # keeps MulensModel and stays bit-identical -- see that method.
+            sp = self._get_safe_mm_params(index)
+            param_list = [
+                sp["t_0"],
+                sp["u_0"],
+                sp["t_E"],
+                sp["pi_E_N"],
+                sp["pi_E_E"],
+                self.rho.value[index],
+                u1,
+                u2,
+            ]
+            mag_op = VBMDirectMagOp(
+                coords=coords,
+                n_companions=0,
+                use_rho=True,
+                bandpass=effective_bandpass,
+                quadratic_ld=True,
+            )
+            return mag_op(pt.stack(param_list), times_tensor, obs_tensor)
 
         if n_lenses >= 2 and self.backend == "vbm_direct":
             sp = self._get_safe_mm_params(index)
@@ -1896,11 +1996,14 @@ class Lens(Component):
                 )
             if effective_bandpass is not None:
                 param_list.append(u1)
+                if use_u2:
+                    param_list.append(u2)
             mag_op = VBMDirectMagOp(
                 coords=coords,
                 n_companions=self.n_companions,
                 use_rho=use_rho,
                 bandpass=effective_bandpass,
+                quadratic_ld=use_u2,
             )
         elif n_lenses == 2:
             bp = self._get_binary_mm_params(index)
