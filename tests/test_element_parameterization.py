@@ -1192,3 +1192,157 @@ def test_export_solution_reports_derived_and_active_per_element():
         )
         is True
     )
+
+
+# ---------------------------------------------------------------------------
+# Reporting a vector derived ENTIRELY by element expressions (review 1.10.9)
+# ---------------------------------------------------------------------------
+
+
+def _all_derived_pair():
+    """A sampled driver plus a vector every element of which is derived from it.
+
+    This is the shape the observable-coordinates arm produces: the only active
+    element of star.logmass is derived (from log_theta_E/pi_rel) and the other
+    instance has no mass of its own, so NOTHING in the vector is sampled.
+    """
+    driver = _param(label="comp.drv")
+    with pm.Model() as model:
+        drv_val = driver.build_pymc()
+        derived = _param(
+            label="comp.der",
+            element_expressions=[
+                ElementExpression(
+                    mask=[True, True], expr=lambda: drv_val * 0.5
+                )
+            ],
+        )
+        derived.build_pymc()
+    return model, driver, derived
+
+
+def test_an_all_derived_element_expression_vector_has_no_deterministic():
+    """
+    Given a vector every element of which comes from an element expression,
+    When it is built,
+    Then no node carries its label -- build_pymc tracks a Deterministic only
+      when something is sampled -- and it has no whole-vector `expression`
+      either.
+
+    Both halves matter: this parameter is invisible to the trace AND to the
+    `expression is not None` test the reporting layer used, which is why its
+    value used to be read off the initval.  Pinned so a future change that
+    starts tracking a node here does not silently make the next two tests
+    vacuous.
+    """
+    model, _driver, derived = _all_derived_pair()
+
+    assert derived.label not in [v.name for v in model.deterministics]
+    assert derived.expression is None
+    assert derived.element_expressions
+    assert not np.any(derived.is_sampled)
+    assert np.all(derived.is_derived)
+
+
+def test_an_all_derived_vector_evaluates_its_posterior_from_the_draws():
+    """
+    Given the same vector and a posterior holding its driver's draws,
+    When generate_posterior runs,
+    Then it returns the expression evaluated draw by draw, in the (elements,
+      samples) layout the reporting layer expects -- not None.
+
+    None was the old answer, and the initval with blank errors was what
+    results.csv then printed for a quantity the fit had genuinely constrained.
+    """
+    _model, driver, derived = _all_derived_pair()
+    draws = np.array([[0.4, 0.5, 0.2], [0.6, 0.5, 0.8]])
+
+    got = derived.generate_posterior(
+        {"comp.drv": draws}, param_lookup={"comp.drv": driver}
+    )
+
+    assert got is not None
+    assert np.asarray(got).shape == (2, 3)
+    np.testing.assert_allclose(np.asarray(got), draws * 0.5)
+
+
+def test_the_mixed_case_still_comes_from_its_deterministic():
+    """
+    Given a vector with one sampled and one derived element,
+    When it is built,
+    Then it DOES get a Deterministic, so the trace is its source and
+      generate_posterior declines to reassemble it.
+
+    The fix is scoped to the all-derived hole on purpose: with a sampled
+    element present, a bundle missing the Deterministic is also missing that
+    element's own draws, so there is nothing to evaluate and reassembling
+    around the hole would invent a number.
+    """
+    node = pt.as_tensor_variable(np.array([0.0, 0.25]))
+    mixed = _param(
+        label="comp.mixed",
+        element_expressions=[
+            ElementExpression(mask=[False, True], expr=lambda: node)
+        ],
+    )
+    with pm.Model() as model:
+        mixed.build_pymc()
+
+    assert mixed.label in [v.name for v in model.deterministics]
+    assert mixed.generate_posterior({"comp.other": np.zeros((2, 3))}) is None
+
+
+def test_a_derived_vector_reports_its_posterior_in_the_csv(tmp_path):
+    """
+    Given a component holding a sampled driver and an all-derived vector,
+    When the posterior is distributed and the results CSV is written,
+    Then the derived vector's rows carry its evaluated median AND error bars,
+      not its initval with blank error columns.
+
+    Review 1.10.9: the observable-coordinates arm printed
+    "star.Lens.logmass, -0.5, , " -- the defaults.yaml start with two empty
+    cells -- for a parameter derived from log_theta_E and pi_rel.  This test
+    goes through System._set_comp_posterior because the fall-through was in
+    ITS two cases, not only in generate_posterior.
+    """
+    import csv as csvmod
+
+    from exozippy.outputs.latex import build_csv_output
+    from exozippy.system import System
+
+    _model, driver, derived = _all_derived_pair()
+    comp = type("C", (), {"label": "Comp"})()
+    comp.drv = driver
+    comp.der = derived
+    system = type(
+        "S",
+        (),
+        {"get_all_components": lambda self: [comp], "name": "elemtest"},
+    )()
+
+    draws = np.array([[0.40, 0.50, 0.60], [0.20, 0.30, 0.40]])
+    posterior = {"comp.drv": draws}
+    # _set_comp_posterior touches `self` only to recurse into child
+    # Components, and this stub component has none.
+    System._set_comp_posterior(
+        None, comp, posterior, {"comp.drv": driver, "comp.der": derived}
+    )
+
+    csv_path = tmp_path / "out.csv"
+    build_csv_output(system, str(csv_path))
+    rows = {
+        r[0]: r[1:]
+        for r in csvmod.reader(csv_path.read_text().splitlines())
+        if r and not r[0].startswith("#")
+    }
+
+    der_rows = [k for k in rows if "der" in k]
+    assert len(der_rows) == 2, rows
+    for key in der_rows:
+        value, up_err, low_err = rows[key]
+        assert up_err.strip() and low_err.strip(), (
+            f"{key} reported no error bars: {rows[key]}"
+        )
+        # 0.5 * the driver's draws, so every element sits well below the
+        # 0.5 initval that used to be printed here.
+        assert float(value) < 0.4, rows[key]

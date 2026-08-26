@@ -2500,6 +2500,41 @@ class Parameter:
             self._posterior_fns[key] = fn
         return fn
 
+    def _element_expression_value(self):
+        """The built tensor of a vector derived ENTIRELY by element expressions.
+
+        A vector whose elements were supplied one at a time
+        (``element_expressions``) has no whole-vector ``expression``, and it
+        only gets a ``pm.Deterministic`` -- the trace's copy -- when at least
+        one element is SAMPLED (``build_pymc``'s ``track_node``).  With every
+        element derived there is NEITHER, so the reporting layer found
+        ``posterior is None`` and fell back to the initval: on the
+        observable-coordinates arm ``results.csv`` showed ``star.Lens.logmass``
+        as its defaults.yaml start with blank errors, while its value was in
+        fact derived from ``log_theta_E``/``pi_rel`` (review 1.10.9).
+
+        The tensor ``build_pymc`` assembled into ``self.value`` IS the whole
+        vector's expression, in internal units exactly like ``self.expression``,
+        so ``generate_posterior``'s ancestor walk evaluates it with no other
+        change.
+
+        Restricted to the all-derived case deliberately.  With a sampled
+        element the Deterministic exists and is the right source; if a REUSED
+        trace somehow lacks it, that element's own draws are missing from the
+        bundle too, so there is nothing to evaluate and ``None`` -- the fixed
+        path -- is the honest answer rather than a number assembled around a
+        hole.
+        """
+        if self.expression is not None or not self.element_expressions:
+            return None
+        if not self._built_roles() or np.any(self.is_sampled):
+            return None
+        # A plain array here would carry no ancestors and no .eval(); only a
+        # symbolic value can be walked.
+        if not isinstance(self.value, pytensor.graph.basic.Variable):
+            return None
+        return self.value
+
     def generate_posterior(self, posterior_bundle, param_lookup=None):
         """Evaluate this parameter's expression over the posterior.
 
@@ -2519,12 +2554,13 @@ class Parameter:
         """
         if self.label in posterior_bundle:
             return posterior_bundle[self.label]
-        if self.expression is None:
+        source = self.expression
+        if source is None:
+            source = self._element_expression_value()
+        if source is None:
             return None
 
-        expr = (
-            self.expression() if callable(self.expression) else self.expression
-        )
+        expr = source() if callable(source) else source
 
         # --- Strip Astropy Units before graph walking ---
         if hasattr(expr, "value") and hasattr(expr, "unit"):
