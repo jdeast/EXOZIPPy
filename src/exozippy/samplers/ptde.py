@@ -37,6 +37,7 @@ import time
 
 import numpy as np
 
+from exozippy.logger import fmt_duration
 from exozippy.samplers import _common, convergence
 from exozippy.samplers._common import (  # noqa: F401
     DE_JITTER,
@@ -258,6 +259,19 @@ POLISH_TARGET_ACCEPT = 0.2
 POLISH_GAMMA_WINDOW = 4  # sweeps between gamma updates
 
 
+# Wall-clock heartbeat for the polish, in seconds.  WALL CLOCK rather than
+# "every N sweeps" because the quantity a watcher needs is "is this process
+# alive", and a sweep on a binary-lens model can take anywhere from
+# milliseconds to minutes -- a sweep count that is chatty on one model is
+# silent for 40 minutes on another.  30 s is short enough that a human (or
+# an agent) never has to sample /proc/<pid>/stat to tell computing from
+# hung, and long enough that a fast model adds a handful of lines to the
+# whole run.  A short polish emits NOTHING: the first heartbeat is one
+# interval in, so the test suite and every sub-30 s polish stay silent
+# (review 2.3.5, which cost a wrong diagnosis in the session that found it).
+POLISH_PROGRESS_S = 30.0
+
+
 def polish_seed_starts(
     raw_starts,
     logp_fn,
@@ -273,6 +287,7 @@ def polish_seed_starts(
     trust_fraction=0.5,
     target_accept=POLISH_TARGET_ACCEPT,
     gamma_window=POLISH_GAMMA_WINDOW,
+    progress_interval_s=POLISH_PROGRESS_S,
 ):
     """Parallel T=1 differential-evolution polish of each seed's raw start.
 
@@ -351,6 +366,15 @@ def polish_seed_starts(
 
     ``pool`` is anything with a ``map``; ``None`` keeps the serial path,
     which stays byte-for-byte the old behaviour when ``adapt_gamma=False``.
+
+    PROGRESS.  Every ``progress_interval_s`` seconds of wall clock the sweep
+    loop logs one line: sweeps done against the cap, elapsed, an upper-bound
+    ETA at the rate so far, and each seed's gain so far.  This engine is the
+    long pole of a gradient-free wrap-up and used to run entirely mute -- on
+    examples/ob09020 the log's last line was the gradient-fallback notice
+    and then nothing for 38 minutes, so the only way to tell computing from
+    hung was to sample /proc/<pid>/stat twice (review 2.3.5).  Set
+    ``progress_interval_s=None`` to silence it.
 
     Returns (polished_starts, dlp_per_seed).
     """
@@ -456,6 +480,8 @@ def polish_seed_starts(
             }
         )
 
+    t_start = time.monotonic()
+    t_last_log = t_start
     for _sweep in range(int(n_steps)):
         live = [s for s in range(n_seeds) if not states[s]["done"]]
         if not live:
@@ -514,6 +540,27 @@ def polish_seed_starts(
             ):
                 st["stop"] = "tol"
                 st["done"] = True
+
+        # Heartbeat (see PROGRESS in the docstring).  The ETA is an UPPER
+        # bound and labelled as one: the cap is what it extrapolates to, and
+        # an opted-in tolerance can end the run earlier.
+        now = time.monotonic()
+        if progress_interval_s and now - t_last_log >= float(
+            progress_interval_s
+        ):
+            t_last_log = now
+            n_done = _sweep + 1
+            elapsed = now - t_start
+            eta = elapsed / n_done * (int(n_steps) - n_done)
+            gains = ", ".join(
+                f"{st['best_lp'] - st['lp0']:+.1f}" for st in states
+            )
+            logger.info(
+                f"PTDE seed polish: sweep {n_done}/{int(n_steps)}  "
+                f"elapsed={fmt_duration(elapsed)}  "
+                f"eta<={fmt_duration(eta)}  "
+                f"dlp=[{gains}]  ({len(live)} seed(s) still running)"
+            )
 
     polished, dlps = [], []
     for s, st in enumerate(states):

@@ -339,7 +339,28 @@ def polish_raw_starts(
         pool = mp.Pool(processes=n_proc)
         logger.info(
             f"Seed polish: DE engine on {n_proc} worker process(es), "
-            f"proposals pooled across all {len(raw_starts)} seed(s)."
+            f"proposals pooled across all {len(raw_starts)} seed(s), "
+            f"at most {int(n_steps)} sweeps."
+        )
+    else:
+        # The serial case is ANNOUNCED, not silent.  "gradient graph
+        # unavailable" above reads as a note about capability; what it
+        # actually means for the user is the expensive branch, and on one
+        # core it is the whole wall clock of this stage (review 6.11.3
+        # found the hot-mode caller passing no grant, examples/ob09020:
+        # 1 core of 36 for 38 minutes).  Saying so here means the next
+        # caller that forgets `cores=` is visible in the log rather than
+        # merely slow.
+        why = (
+            "no core grant reached this call (cores=None); pass cores= to "
+            "spread it"
+            if cores is None
+            else f"cores={cores!r}"
+        )
+        logger.info(
+            f"Seed polish: DE engine running SERIAL on one core -- {why}. "
+            f"{len(raw_starts)} seed(s), at most {int(n_steps)} sweeps; "
+            f"this gradient-free branch is far more expensive than L-BFGS."
         )
     try:
         polished, dlps = polish_seed_starts(

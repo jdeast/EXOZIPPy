@@ -627,3 +627,82 @@ def test_auto_stores_hot_chains_end_to_end_for_a_lensy_system():
 
     assert hasattr(idata, "posterior_hot")
     assert idata.posterior_hot.sizes["chain"] == (3 - 1) * 4
+
+
+# ---------------------------------------------------------------------------
+# The candidate polish gets the sampler's cores (review 6.11.3)
+# ---------------------------------------------------------------------------
+
+
+def test_discovery_hands_its_core_grant_to_the_candidate_polish(monkeypatch):
+    """
+    Given a core grant passed to the hot-mode search,
+    When a candidate is found and polished,
+    Then polish_raw_starts receives that same grant.
+
+    Without it _resolve_polish_cores returns 1, no pool is built, and the
+    DE engine -- the branch EVERY gradient-free (VBM-backed) microlensing
+    fit takes -- runs on one core while the other N-1 the sampler just used
+    sit idle.  Measured on examples/ob09020: 1 core of 36 for 38+ minutes,
+    on a single candidate.
+    """
+    # ARRANGE
+    from exozippy import polish as polish_mod
+
+    model, p = _two_basin_model()
+    stub = _StubSystem([p])
+    raw2 = np.asarray(p.raw_from_initval(np.array([2.0])))
+    ledger0 = build_seed_ledger(stub, model, [{"toy.x_raw": raw2}], [0])
+    hot = _fake_hot_group(model, p, np.random.default_rng(11))
+
+    seen = {}
+    real = polish_mod.polish_raw_starts
+
+    def _spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(polish_mod, "polish_raw_starts", _spy)
+
+    # ACT
+    ledger = discover_hot_modes(
+        stub, model, hot, ledger0, min_points=20, cores=7
+    )
+
+    # ASSERT -- a candidate really was polished, with the grant
+    assert len(ledger) == 2
+    assert seen["cores"] == 7
+
+
+def test_run_hot_mode_discovery_forwards_cores(monkeypatch):
+    """
+    Given cores passed to the wrapper run.py actually calls,
+    When it delegates to discover_hot_modes,
+    Then the grant arrives there -- the wrapper's **kwargs is the path the
+      fix travels, so it is pinned rather than assumed.
+    """
+    # ARRANGE
+    from exozippy.outputs import ledger as L
+
+    seen = {}
+
+    def _capture(*a, **k):
+        seen.update(k)
+        return ["ledger"]
+
+    monkeypatch.setattr(L, "discover_hot_modes", _capture)
+    hot = xr.Dataset(
+        {
+            "toy.x_raw": (("chain", "draw"), np.zeros((1, 2))),
+            "lp": (("chain", "draw"), np.zeros((1, 2))),
+        }
+    )
+
+    # ACT
+    out, _status = L.run_hot_mode_discovery(
+        None, None, _idata_with(hot), [], cores=5
+    )
+
+    # ASSERT
+    assert out == ["ledger"]
+    assert seen["cores"] == 5

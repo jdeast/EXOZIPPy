@@ -797,3 +797,121 @@ def test_next_gamma_is_the_damped_clipped_controller_all_three_callers_want():
     # zero acceptance shrinks by the clip factor rather than stalling, and
     # is bit-for-bit the `gamma * 0.1` the polish used to write inline
     assert next_gamma(0.3, 0.0, 0.2) == 0.3 * 0.1
+
+
+# ---------------------------------------------------------------------------
+# Wrap-up visibility: the expensive branch says what it is doing (2.3.5 b/c),
+# and the serial line is what makes a missing `cores=` visible (6.11.3)
+# ---------------------------------------------------------------------------
+
+
+def test_serial_de_polish_announces_the_cost_and_the_missing_grant(caplog):
+    """
+    Given a gradient-free model and a caller that passes no core grant,
+    When polish_raw_starts dispatches the DE engine,
+    Then the log says it is running SERIAL, names the cores value it was
+      handed, and says this branch is the expensive one.
+
+    The gradient-fallback line reads as a note about capability; what it
+    means for the user is one core for the whole stage.  6.11.3 was exactly
+    this omission at the hot-mode call site, and it was invisible in the
+    log -- 38+ minutes on examples/ob09020 with nothing to read but
+    /proc/<pid>/stat.
+    """
+    # ARRANGE
+    with pm.Model() as model:
+        x = pm.Flat("x")
+        pm.Potential("like", _NoGradSquare()(x))
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.polish"):
+        _polished, _dlps, method = polish_raw_starts(
+            model, [{"x": np.array(0.0)}], n_steps=3
+        )
+
+    # ASSERT
+    assert method == "de"
+    assert "SERIAL" in caplog.text
+    assert "cores=None" in caplog.text
+    assert "expensive" in caplog.text
+
+
+def test_pooled_de_polish_announces_its_worker_count(caplog):
+    """
+    Given a core grant of more than one,
+    When the DE engine builds its pool,
+    Then the log names the worker count instead of the serial line, so the
+      two cases stay distinguishable in a fit log after the fact.
+    """
+    # ARRANGE
+    with pm.Model() as model:
+        x = pm.Flat("x")
+        pm.Potential("like", _NoGradSquare()(x))
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.polish"):
+        polish_raw_starts(model, [{"x": np.array(0.0)}], n_steps=2, cores=2)
+
+    # ASSERT
+    assert "worker process(es)" in caplog.text
+    assert "SERIAL" not in caplog.text
+
+
+def test_de_polish_heartbeats_on_wall_clock_not_sweep_count(caplog):
+    """
+    Given a polish long enough to cross the heartbeat interval,
+    When the sweep loop runs,
+    Then it logs progress lines carrying the sweep count, the elapsed time
+      and an upper-bound ETA -- and at the DEFAULT interval a short polish
+      logs none of them.
+
+    Wall clock rather than "every N sweeps": one sweep of a binary-lens
+    model can take milliseconds or minutes, so a sweep count that is chatty
+    on one model is silent for 40 minutes on another (review 2.3.5b).
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    def logp(p):
+        return float(-0.5 * np.sum((p["x"] - 3.0) ** 2))
+
+    seeds = [{"x": np.array([0.0])}]
+    scales = {"x": np.ones(1)}
+
+    # ACT: an interval short enough that every sweep crosses it
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        polish_seed_starts(
+            seeds,
+            logp,
+            np.random.default_rng(0),
+            scales,
+            n_steps=4,
+            pop_size=8,
+            progress_interval_s=1e-9,
+        )
+    beats = [
+        r
+        for r in caplog.records
+        if "PTDE seed polish: sweep" in r.getMessage()
+    ]
+
+    # ASSERT
+    assert len(beats) == 4
+    assert "/4" in beats[0].getMessage()
+    assert "elapsed=" in beats[0].getMessage()
+    assert "eta<=" in beats[0].getMessage()
+
+    # ACT again, at the shipped default: a sub-second polish says nothing
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        polish_seed_starts(
+            seeds,
+            logp,
+            np.random.default_rng(0),
+            scales,
+            n_steps=4,
+            pop_size=8,
+        )
+
+    # ASSERT
+    assert "PTDE seed polish: sweep" not in caplog.text

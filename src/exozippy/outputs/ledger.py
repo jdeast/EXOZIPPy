@@ -548,6 +548,9 @@ def run_hot_mode_discovery(system, model, idata, seed_ledger=None, **kwargs):
     Non-fatal by contract: a wrap-up diagnostic must never take down a
     finished multi-day fit, so the catch stays broad -- but the exception's
     type and message go into the status rather than only into a log line.
+
+    ``**kwargs`` reaches discover_hot_modes; ``cores=`` in particular is
+    what keeps its polish off one core (see that function's docstring).
     """
     if not hasattr(idata, "posterior_hot"):
         return seed_ledger, {
@@ -704,6 +707,7 @@ def discover_hot_modes(
     subsample=20000,
     seed=20260711,
     polish_steps=150,
+    cores=None,
     status=None,
 ):
     """Find posterior-suppressed modes in the thinned hot-rung draws.
@@ -732,6 +736,17 @@ def discover_hot_modes(
     counts) so the final report can say WHICH of the four outcomes occurred
     instead of rendering "searched and found nothing" and "never searched"
     and "crashed" identically.  See hot_status_to_text.
+
+    ``cores`` is the core grant for the polish, and callers must pass it:
+    the DE engine is the branch a gradient-free model (every VBM-backed
+    microlensing fit) takes, and with no grant it runs SERIAL on one core
+    while the rest of the machine the fit just held sits idle -- measured
+    on examples/ob09020 at 1 core of 36 for 38 minutes on a SINGLE
+    candidate.  Left None (serial) rather than defaulted to a core count
+    here because this function must not fork a pool a library caller never
+    asked for; run.py hands over the same grant the sampler used, and
+    polish.py logs the serial case so a third caller omitting it is
+    visible in the log instead of silent (review 6.11.3).
     """
     from .modes import _dip_merge, _kmeans_bic
 
@@ -966,8 +981,19 @@ def discover_hot_modes(
             ofs += n
         cands.append(cand)
     if cands:
+        logger.info(
+            f"Hot-chain discovery: polishing {len(cands)} candidate(s) to "
+            f"their basin optima (at most {int(polish_steps)} steps each)."
+        )
         polished_all, _dlps, _method = polish_raw_starts(
-            model, cands, n_steps=polish_steps
+            model,
+            cands,
+            n_steps=polish_steps,
+            # The SAME core grant run.py hands the pre-sampling polish, and
+            # for the same reason -- this call omitted it and so ran the DE
+            # engine serial on one core of the machine the sampler had just
+            # been using in full (review 6.11.3).
+            cores=cores,
         )
         recs_all = build_seed_ledger(
             system,
