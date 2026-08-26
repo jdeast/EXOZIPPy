@@ -193,12 +193,12 @@ def test_every_named_wrapup_call_is_guarded():
 # go serial (reviews 2.3.5 and 6.11.3)
 # ---------------------------------------------------------------------------
 
-# Every call that starts a polish has to hand over a core grant.  Without one
-# _resolve_polish_cores returns 1, no pool is built, and the DE engine -- the
-# branch every gradient-free (VBM-backed) microlensing fit takes -- runs on
-# one core.  run.py's pre-sampling call had this fixed once already; the
-# hot-mode call site in outputs/ledger.py was missed and cost 38+ minutes at
-# 1/36 throughput on examples/ob09020 (6.11.3).  Pinned across the whole
+# Every call that starts a polish has to hand over a core grant.  Since
+# 6.11.3 an omitted grant no longer means SERIAL -- `cores=None` resolves to
+# _common.default_cores() like every other pool in the package -- so this
+# guard is about the OTHER half of that fix: a call site that names no grant
+# silently ignores the user's `sampler: cores:`, taking the default even from
+# someone who asked for 4 on a shared machine.  Pinned across the whole
 # package rather than at the two known sites, so a THIRD caller cannot
 # reintroduce it.
 CORE_GRANTING_CALLS = ("polish_raw_starts", "run_hot_mode_discovery")
@@ -213,8 +213,8 @@ def test_every_polish_call_site_passes_a_core_grant():
     """
     Given every call in the package that starts (or forwards to) a polish,
     When each call's keywords are read from the source,
-    Then all of them pass `cores=` -- the omission 6.11.3 found is a silent
-      1/N-throughput regression with no failing test of its own.
+    Then all of them pass `cores=` -- so the grant the user configured
+      reaches the stage, instead of the stage quietly picking its own.
     """
     offenders = []
     seen = 0
@@ -235,8 +235,8 @@ def test_every_polish_call_site_passes_a_core_grant():
     assert not offenders, (
         "polish call site(s) with no core grant: "
         + ", ".join(offenders)
-        + " -- the DE engine then runs serial on one core while the rest of "
-        "the machine the fit just held sits idle (review 6.11.3)"
+        + " -- that stage then resolves its own grant and a user's "
+        "`sampler: cores:` never reaches it (review 6.11.3)"
     )
 
 

@@ -98,6 +98,27 @@ still a dict (36 us to pickle, 21 us to unpickle per proposal, against 4.3 and
 changes the contract `polish`, `_make_starts`, `describe_proposal` and the
 tests all share, so it is its own PR.
 
+## `cores`: one rule, and `None` means AUTO
+
+`_common.default_cores()` is the single definition of "how many cores does a
+parallel stage take when nobody named a number": `CORE_FRACTION` (0.75, in
+`constants.py`) of the physical cores, capped at `n_phys - 1` so the OS and the
+user's shell keep one. `sampler: cores: N` overrides it outright, and `run.py`
+forwards whatever it resolved to every stage that forks -- sampling, the
+pre-sampling seed polish, and the hot-mode candidate polish.
+
+**`cores=None` means AUTO in every one of them, never serial. Serial is
+`cores=1`.** That is not a style preference; it is review 6.11.3. The rule had
+three hand-written copies -- `run.py` from the named constant, `create_pool`
+hardcoding 0.75 under a comment claiming it was the "same formula", and
+`nested.py` hardcoding it while dropping the `n_phys - 1` arm -- and, worse,
+`polish._resolve_polish_cores` read `None` as *serial* while `create_pool` read
+it as *auto*. A caller that passed nothing therefore got the whole machine in
+one function and a single core in another, which is exactly how a hot-mode
+polish came to hold 1 of 36 cores for 38 minutes with nothing in the log. If
+you add a stage that forks, call `default_cores()` for its fallback and accept
+a `cores` argument that `run.py` can fill.
+
 ## eval_timeout: what it does, and where it is enforced
 
 `eval_timeout` is opt-in (default None) and exists for a logp that can HANG --

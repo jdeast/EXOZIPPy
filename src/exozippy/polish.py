@@ -261,6 +261,11 @@ def polish_raw_starts(
     a fixed ``n_steps`` sweeps); they do not reach the L-BFGS path, which
     stops on _LBFGS_GTOL.
 
+    ``cores`` is the DE engine's worker grant; None means AUTO (the same
+    rule a sampler uses when nothing names one), and ``cores=1`` is how a
+    caller asks for serial.  The L-BFGS path ignores it -- it is a few
+    hundred evaluations and forks nothing.
+
     Returns (polished_starts, dlps, method) with method in
     {"lbfgs", "de", "none"}.  A seed is never made worse: any engine result
     below the seed's own lp is discarded in favor of the seed.
@@ -346,21 +351,16 @@ def polish_raw_starts(
         # The serial case is ANNOUNCED, not silent.  "gradient graph
         # unavailable" above reads as a note about capability; what it
         # actually means for the user is the expensive branch, and on one
-        # core it is the whole wall clock of this stage (review 6.11.3
-        # found the hot-mode caller passing no grant, examples/ob09020:
-        # 1 core of 36 for 38 minutes).  Saying so here means the next
-        # caller that forgets `cores=` is visible in the log rather than
-        # merely slow.
-        why = (
-            "no core grant reached this call (cores=None); pass cores= to "
-            "spread it"
-            if cores is None
-            else f"cores={cores!r}"
-        )
+        # core it is the whole wall clock of this stage (review 6.11.3,
+        # examples/ob09020: 1 core of 36 for 38 minutes).  Since cores=None
+        # now means AUTO, reaching here at all means somebody asked for
+        # serial -- or the machine has one core -- so the line reports the
+        # request rather than accusing the caller of forgetting.
         logger.info(
-            f"Seed polish: DE engine running SERIAL on one core -- {why}. "
-            f"{len(raw_starts)} seed(s), at most {int(n_steps)} sweeps; "
-            f"this gradient-free branch is far more expensive than L-BFGS."
+            f"Seed polish: DE engine running SERIAL on one core "
+            f"(cores={cores!r}), {len(raw_starts)} seed(s), at most "
+            f"{int(n_steps)} sweeps; this gradient-free branch is far more "
+            f"expensive than L-BFGS."
         )
     try:
         polished, dlps = polish_seed_starts(
@@ -382,16 +382,33 @@ def polish_raw_starts(
 def _resolve_polish_cores(cores, n_seeds):
     """Worker count for the DE polish.
 
+    ``cores=None`` means AUTO -- the same grant a sampler takes when nothing
+    names one (_common.default_cores) -- and NOT serial.  It used to mean
+    serial, which is how review 6.11.3 happened: outputs/ledger.py's
+    hot-mode polish passed nothing, so the one branch every gradient-free
+    microlensing fit takes ran on 1 core of 36 for 38 minutes while the rest
+    of the machine the sampler had just filled sat idle.  Nothing about this
+    stage wants fewer cores than the sampling either side of it, so the
+    default now says so, and a caller that wants serial passes ``cores=1``.
+
     Capped at the batch size (n_seeds * pop_size) upstream by there simply
     being nothing more to hand out; here we only guard against asking for
     more processes than the machine has, and against the degenerate 1.
     """
+    from .samplers._common import default_cores
+
     if cores is None:
-        return 1
+        return default_cores()
     try:
         n = int(cores)
     except (TypeError, ValueError):
-        return 1
+        # Unreadable value: say so and take the auto grant.  Silently
+        # dropping to one core is what made the original bug invisible.
+        logger.warning(
+            f"Seed polish: cores={cores!r} is not an integer; using the "
+            f"default grant instead."
+        )
+        return default_cores()
     if n <= 1:
         return 1
     return max(1, min(n, mp.cpu_count()))

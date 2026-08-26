@@ -115,9 +115,13 @@ def test_gradient_free_model_falls_back_to_de():
         pm.Potential("like", _NoGradSquare()(x))
     start = {"x": np.array(0.0)}
 
-    # ACT
+    # ACT.  cores=1 is deliberate: `cores=None` means AUTO (the sampler's
+    # own grant), so leaving it off would fork a pool of most of the box
+    # for a one-parameter toy -- inside a suite that is already running
+    # xdist workers.  Every test here that takes the DE branch says serial
+    # explicitly for that reason.
     polished, dlps, method = polish_raw_starts(
-        model, [start], n_steps=200, rng=np.random.default_rng(3)
+        model, [start], n_steps=200, rng=np.random.default_rng(3), cores=1
     )
 
     # ASSERT
@@ -800,23 +804,68 @@ def test_next_gamma_is_the_damped_clipped_controller_all_three_callers_want():
 
 
 # ---------------------------------------------------------------------------
-# Wrap-up visibility: the expensive branch says what it is doing (2.3.5 b/c),
-# and the serial line is what makes a missing `cores=` visible (6.11.3)
+# The core grant: `cores=None` means AUTO, not serial (6.11.3), and the
+# expensive branch says which one it got (2.3.5 b/c)
 # ---------------------------------------------------------------------------
 
 
-def test_serial_de_polish_announces_the_cost_and_the_missing_grant(caplog):
+def test_no_grant_means_the_machine_not_one_core():
     """
-    Given a gradient-free model and a caller that passes no core grant,
+    Given a caller that names no core grant,
+    When the DE polish resolves its worker count,
+    Then it takes the SAME grant a sampler takes when nothing names one --
+      not 1.
+
+    This equivalence is the fix for 6.11.3.  `cores=None` meant serial here
+    while it meant "take the machine" in _common.create_pool two modules
+    away, so the hot-mode polish -- which passed nothing -- ran on 1 core of
+    36 for 38 minutes right after a sampling phase that had been using 27.
+    Nothing about the polish wants fewer cores than the sampling either side
+    of it.
+    """
+    from exozippy.polish import _resolve_polish_cores
+    from exozippy.samplers._common import default_cores
+
+    assert _resolve_polish_cores(None, n_seeds=1) == default_cores()
+    assert default_cores() >= 1
+    # and serial is still reachable -- by ASKING for it, which is a
+    # statement rather than an omission
+    assert _resolve_polish_cores(1, n_seeds=1) == 1
+
+
+def test_default_cores_leaves_one_core_for_the_machine():
+    """
+    Given the shared default-grant rule,
+    When it resolves on a multi-core box,
+    Then it is CORE_FRACTION of the physical cores AND at most n_phys - 1.
+
+    The `n_phys - 1` arm is the half that kept getting dropped: one of the
+    three hand-written copies (nested.py) had lost it, so an unconfigured
+    nested run took every core the OS and the user's shell were meant to
+    keep one of.
+    """
+    import multiprocessing as mp
+
+    from exozippy.constants import CORE_FRACTION
+    from exozippy.samplers._common import default_cores
+
+    phys = mp.cpu_count()
+    got = default_cores()
+    assert got == max(1, min(int(phys * CORE_FRACTION), phys - 1))
+    if phys > 1:
+        assert got <= phys - 1
+
+
+def test_serial_de_polish_announces_the_cost(caplog):
+    """
+    Given a caller that explicitly asks for serial,
     When polish_raw_starts dispatches the DE engine,
     Then the log says it is running SERIAL, names the cores value it was
       handed, and says this branch is the expensive one.
 
     The gradient-fallback line reads as a note about capability; what it
-    means for the user is one core for the whole stage.  6.11.3 was exactly
-    this omission at the hot-mode call site, and it was invisible in the
-    log -- 38+ minutes on examples/ob09020 with nothing to read but
-    /proc/<pid>/stat.
+    means for the user is one core for the whole stage, and on ob09020 that
+    was 38+ minutes with nothing to read but /proc/<pid>/stat.
     """
     # ARRANGE
     with pm.Model() as model:
@@ -826,13 +875,13 @@ def test_serial_de_polish_announces_the_cost_and_the_missing_grant(caplog):
     # ACT
     with caplog.at_level(logging.INFO, logger="exozippy.polish"):
         _polished, _dlps, method = polish_raw_starts(
-            model, [{"x": np.array(0.0)}], n_steps=3
+            model, [{"x": np.array(0.0)}], n_steps=3, cores=1
         )
 
     # ASSERT
     assert method == "de"
     assert "SERIAL" in caplog.text
-    assert "cores=None" in caplog.text
+    assert "cores=1" in caplog.text
     assert "expensive" in caplog.text
 
 
