@@ -18,11 +18,11 @@ import pytensor
 from matplotlib.backends.backend_pdf import PdfPages
 
 from exozippy.samplers import convergence, de_metropolis
+from exozippy.samplers._common import default_cores
 from exozippy.samplers.ptde import ptde_sample
 from exozippy.samplers.ptde_async import ptde_async_sample
 from exozippy.system import System
 
-from .constants import CORE_FRACTION
 from .corner_utils import (
     collect_corner_samples,
     histogram_grid_degenerate,
@@ -376,11 +376,7 @@ def _run_fit(config, gui, user_params=None):
     draws = int(sampler_cfg.get("draws", 2000))
     chains = int(sampler_cfg.get("chains", 4))
     _cores_raw = sampler_cfg.get("cores", None)
-    if _cores_raw is not None:
-        cores = int(_cores_raw)
-    else:
-        _phys = mp.cpu_count()
-        cores = max(1, min(int(_phys * CORE_FRACTION), _phys - 1))
+    cores = int(_cores_raw) if _cores_raw is not None else default_cores()
     target_accept = sampler_cfg.get("target_accept", 0.9)
     method = sampler_cfg.get(
         "method", None

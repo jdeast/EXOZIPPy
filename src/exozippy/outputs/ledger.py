@@ -737,16 +737,14 @@ def discover_hot_modes(
     instead of rendering "searched and found nothing" and "never searched"
     and "crashed" identically.  See hot_status_to_text.
 
-    ``cores`` is the core grant for the polish, and callers must pass it:
-    the DE engine is the branch a gradient-free model (every VBM-backed
-    microlensing fit) takes, and with no grant it runs SERIAL on one core
-    while the rest of the machine the fit just held sits idle -- measured
-    on examples/ob09020 at 1 core of 36 for 38 minutes on a SINGLE
-    candidate.  Left None (serial) rather than defaulted to a core count
-    here because this function must not fork a pool a library caller never
-    asked for; run.py hands over the same grant the sampler used, and
-    polish.py logs the serial case so a third caller omitting it is
-    visible in the log instead of silent (review 6.11.3).
+    ``cores`` is the core grant for the candidate polish.  run.py passes the
+    grant the sampler itself used, so a user's ``sampler: cores:`` governs
+    this stage too; None means AUTO (_common.default_cores), never serial.
+    Both halves matter, and review 6.11.3 is what happens without them: this
+    call passed nothing, None meant serial, and the branch every
+    gradient-free (VBM-backed) microlensing fit takes ran on 1 core of 36
+    for 38 minutes on a SINGLE candidate, immediately after a sampling phase
+    that had been using 27.
     """
     from .modes import _dip_merge, _kmeans_bic
 

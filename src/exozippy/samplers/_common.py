@@ -56,6 +56,11 @@ for _tvar in (
 ):
     os.environ.setdefault(_tvar, "1")
 
+# Below the thread-var block on purpose: that block has to run before any
+# import that spins up a native thread pool, and isort treats a statement as
+# a wall, so an import moved above it would be silently hoisted past it.
+from exozippy.constants import CORE_FRACTION
+
 logger = logging.getLogger(__name__)
 
 # Shared with outputs.modes.identify_modes: |lp| above this is numerically
@@ -288,6 +293,28 @@ def _shutdown_pool(pool, grace=1.0):
         watchdog.join()
 
 
+def default_cores():
+    """Cores a parallel stage takes when the caller names no grant.
+
+    ONE spelling of the rule, because there were three and they had already
+    started to drift: run.py resolved it from constants.CORE_FRACTION,
+    create_pool hardcoded 0.75 under a comment claiming it was the "same
+    75% formula", and nested.py hardcoded 0.75 while dropping the
+    `n_phys - 1` arm that is the whole reason the rule exists (leave one
+    core for the OS and the user's shell).
+
+    ``cores=None`` therefore means AUTO everywhere, never serial.  That
+    equivalence is load-bearing: the polish read None as "run on one core"
+    while the sampler pool two modules away read it as "take the machine",
+    and the gap between those two readings is exactly review 6.11.3 -- a
+    hot-mode polish pinned to 1 of 36 cores for 38 minutes because one
+    caller passed nothing.  A caller that genuinely wants serial says
+    ``cores=1``, which is a statement rather than an omission.
+    """
+    phys_cores = mp.cpu_count()
+    return max(1, min(int(phys_cores * CORE_FRACTION), phys_cores - 1))
+
+
 def create_pool(cores, total_proposals, label, log):
     """Resolve the core count and fork the worker pool.
 
@@ -297,8 +324,7 @@ def create_pool(cores, total_proposals, label, log):
     """
     phys_cores = mp.cpu_count()
     if cores is None:
-        # Fallback if called directly (not via run.py): same 75% formula.
-        cores = max(1, min(int(phys_cores * 0.75), phys_cores - 1))
+        cores = default_cores()
     actual_cores = min(cores, total_proposals)
     if cores > phys_cores:
         log.warning(

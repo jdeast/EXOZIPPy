@@ -359,7 +359,10 @@ def nested_sample(
     _NB.update(bridge=bridge, logp_fn=logp_fn, pool=None)
 
     phys_cores = mp.cpu_count()
-    actual = max(1, min(cores or max(1, int(phys_cores * 0.75)), phys_cores))
+    # default_cores(), not a third hand-written 0.75: this copy had dropped
+    # the `phys - 1` arm, so an unconfigured nested run took every core the
+    # OS and the user's shell were meant to keep one of.
+    actual = max(1, min(cores or _common.default_cores(), phys_cores))
     pool = mp.Pool(actual) if actual > 1 else None
     _NB["pool"] = pool
     logger.info(
