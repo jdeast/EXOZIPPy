@@ -250,6 +250,20 @@ def match_ledger_to_modes(ledger, mode_report, match_sigma=MATCH_SIGMA):
     return ledger
 
 
+def _best_laplace_logw(ledger):
+    """Largest finite relative Laplace log-weight in ``ledger``, or None.
+
+    ``SeedRecord.laplace_logw`` carries an unknowable additive constant, so
+    it is only ever reported as a difference against this reference.  A
+    seed whose logp at the optimum was non-finite (an invalid start the
+    polish never rescued) would poison a bare ``max`` and, through it,
+    every other entry's reported gap, so those are skipped; None means no
+    seed had a usable weight and the gap is simply not reportable.
+    """
+    finite = [r.laplace_logw for r in ledger if np.isfinite(r.laplace_logw)]
+    return max(finite) if finite else None
+
+
 def rejected_records(ledger):
     return [r for r in ledger if r.matched_mode is None]
 
@@ -268,6 +282,7 @@ def ledger_to_text(ledger):
         "symmetric-curvature (Laplace) estimates at that optimum, NOT "
         "posterior draws."
     )
+    best_logw = _best_laplace_logw(ledger)
     for r in sorted(ledger, key=lambda r: r.seed_index):
         lines.append("")
         status = (
@@ -277,10 +292,21 @@ def ledger_to_text(ledger):
             else "REJECTED: no surviving posterior mode at this solution"
         )
         lines.append(f"seed {r.seed_index} ({r.source}): {status}")
+        # The Laplace log-weight gap is COMPUTED, not asserted.  This
+        # line used to read "comparable at the ~1-nat level" verbatim on
+        # every entry, which is boilerplate wherever it is not true: the
+        # ob140939 ledger printed it on a delta lp = 106 rejection.  Sign
+        # convention matches _delta_lp_cell -- 0 for the best seed,
+        # negative for anything down-weighted against it.
+        gap = ""
+        if best_logw is not None and np.isfinite(r.laplace_logw):
+            gap = (
+                "; Laplace log-weight vs best = "
+                f"{r.laplace_logw - best_logw:.2f}"
+            )
         lines.append(
             f"  lp at optimum = {r.lp_max:.2f}  (delta vs best seed = "
-            f"{r.delta_lp:.2f}; Laplace log-weight vs best is comparable "
-            "at the ~1-nat level)"
+            f"{r.delta_lp:.2f}{gap})"
         )
         if r.matched_mode is None:
             for name in sorted(r.phys):
@@ -339,11 +365,18 @@ def append_ledger_csv(ledger, csv_filename):
             f"writes {n_cols}-column rows ({', '.join(CSV_COLUMNS_MODE)}); "
             "write it with build_csv_output(..., mode_columns=True)."
         )
-    best_logw = max(r.laplace_logw for r in ledger)
+    best_logw = _best_laplace_logw(ledger)
     with open(csv_filename, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f, lineterminator="\n")
         for r in rej:
-            w = float(np.exp(r.laplace_logw - best_logw))
+            # Blank rather than "nan": with no finite reference anywhere in
+            # the ledger the ratio is not defined, and a bare max() over a
+            # non-finite entry reported every OTHER seed's weight as nan too.
+            w_cell = (
+                f"{float(np.exp(r.laplace_logw - best_logw)):.3g}"
+                if best_logw is not None and np.isfinite(r.laplace_logw)
+                else ""
+            )
             for name in sorted(r.phys):
                 vals = np.asarray(r.phys[name]).reshape(-1)
                 sigs = np.asarray(r.phys_sigma[name]).reshape(-1)
@@ -352,7 +385,7 @@ def append_ledger_csv(ledger, csv_filename):
                         [
                             name,
                             f"rejected-seed{r.seed_index}",
-                            f"{w:.3g}",
+                            w_cell,
                             "",
                             f"{vals[i]:.6g}",
                             f"{sigs[i]:.3g}",
