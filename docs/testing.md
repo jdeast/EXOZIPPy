@@ -51,6 +51,41 @@ move is splitting slow FILES, which is exactly why `test_runner_lifecycle.py` wa
 out of `test_runner.py`. See `docs/testing-cache.md` for the full arithmetic, the
 sharding, and the compiledir seeding that keeps its cache affordable.
 
+### Looking for tests to cut: `scripts/find_redundant_tests.py`
+
+Before proposing a deletion, run it, and read what it says about its own
+limits. It ranks expensive tests by how little unique line coverage they
+contribute and names the single other test that dominates each one -- the
+strongest signal available from a machine, and still only a candidate list.
+
+**Coverage overlap is not redundancy.** Two tests can execute exactly the same
+lines and assert entirely different properties, and in this codebase that is
+the norm. Run over the whole suite on 2026-08-25 it flagged 12 of 62 expensive
+tests, and **none survived review**: 11 were dominated by a peer in the same
+file (5 mutually, meaning identical coverage -- several tests building one
+model and checking different things about it), the most expensive was the
+known JAX blind spot where both backends run the same graph-construction lines,
+and the one cross-file hit was a coincidence involving
+`test_shipped_example_prepares`, which runs `prepare()` on every shipped config
+and so dominates plenty while testing none of it.
+
+Two traps it now guards, both of which produced confidently wrong answers
+first:
+
+- **Cost must be per TEST, not per file.** Weighted by file, every test in
+  `test_vcve.py` was charged that file's 208 s and a ten-line, zero-second
+  numeric check topped the list of things to delete.
+- **Coverage cannot see a subprocess.**
+  `test_run_lifecycle_status_snapshot_and_graceful_stop` costs 128 s and covers
+  **74 lines**, because its work happens in a `python -m exozippy.cli` child
+  that is not traced. It looked maximally redundant while being one of the most
+  expensive tests in the suite. Such tests are now reported separately with no
+  conclusion drawn.
+
+It needs `coverage` and `pytest-cov`, both dev dependencies, and a whole-suite
+run with per-test contexts (about +33% over a normal run). The invocation is in
+the script's docstring.
+
 **Two of the heaviest were reviewed and deliberately KEPT** (JDE, 2026-08-25):
 "expensive but worth it". Recorded so a future runtime sweep does not
 re-litigate them.
