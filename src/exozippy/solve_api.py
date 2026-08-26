@@ -60,11 +60,6 @@ from exozippy.system import System
 
 logger = logging.getLogger(__name__)
 
-# The contract the GUI and any other headless caller depend on (review
-# 8.13.6).  Everything else here is an implementation detail and is already
-# underscored; this list is what `exozippy.solve_api` promises.
-__all__ = ["SolveResult", "solve", "validate"]
-
 
 @dataclass
 class SolveResult:

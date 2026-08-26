@@ -61,46 +61,44 @@ if pytensor.config.floatX != "float64":
 from ._version import __version__
 from .system import System
 
-# THE PUBLIC API SURFACE (review 8.13.6).  Everything not listed here is
-# internal, may be renamed without notice, and should be reached by its module
-# path if at all -- `__all__` used to name only `System` and `__version__`,
-# which left the in-memory entry point, the restart-file writer and the two
-# modules the GUI treats as contracts unmarked and indistinguishable from
-# internals.
+# THE RUN-A-FIT PUBLIC SURFACE (review 8.13.6, scope set by the ruling of
+# 2026-08-23).  These three names are what this package promises to a caller.
+# EVERYTHING ELSE IN exozippy IS INTERNAL: importable, because nothing here is
+# enforcement, but free to change signature without a major version bump.
 #
+#   System            build a model from a config
 #   run_fit           the in-memory entry point (src/exozippy/run.md): a
-#                     config dict in, a finished fit out, no YAML on disk
-#   write_param_file  mkparam's restart writer -- the other half of "a fit's
-#                     state is recoverable from its own output"
-#   solve_api         solve() / validate() / SolveResult: prepare a system and
-#                     evaluate it WITHOUT sampling
-#   introspect        the schema surface (list_components, component_schema,
-#                     full_schema, boolean_option_keys)
+#                     config dict in, a finished fit out, no YAML on disk.
+#                     The batch path, and the primary use case.
+#   __version__
 #
-# The last two are exported as MODULES, not flattened.  They are namespaces
-# with several entry points each, and `exozippy.introspect.full_schema()` says
-# where it comes from in a way a bare `full_schema` does not.
-__all__ = [
-    "System",
-    "__version__",
-    "introspect",
-    "run_fit",
-    "solve_api",
-    "write_param_file",
-]
+# Three things are deliberately NOT here, and the reasons are the ruling's:
+#
+#   write_param_file  stays internal.  "Internal" costs a would-be external
+#                     caller nothing -- `from exozippy.mkparam import
+#                     write_param_file` works -- while PROMOTING it later is
+#                     one non-breaking line and DEMOTING it is breaking.  So
+#                     internal is the cheap default.
+#   solve_api,        the GUI is first-party: it ships in this distribution,
+#   introspect        is versioned with it, and has no third-party consumer.
+#                     Its backend modules stay internal and refactorable, as
+#                     long as both sides move together.
+#   Component,        a DECLARED extension API, but not part of the
+#   Parameter,        run-a-fit surface -- writing a component is a different
+#   the manifest      job from running a fit.  Declared in
+#                     components/components.md, which is where someone
+#                     forking to write their own component will be reading.
+__all__ = ["__version__", "System", "run_fit"]
 
-# Resolved on first access (PEP 562) rather than imported above.  Two reasons,
-# and the second is the one that matters: `run` pulls matplotlib and the whole
-# outputs tree, so eager imports would make `import exozippy` pay for a code
-# path most callers never touch; and `run`/`mkparam` import from this package,
-# so importing them HERE would have this module and those two initializing each
+# run_fit resolves on first access (PEP 562) rather than being imported above.
+# Two reasons, and the second is the one that matters: `run` pulls matplotlib
+# and the whole outputs tree, so an eager import would make `import exozippy`
+# pay for a code path most callers never touch; and `run` imports from this
+# package, so importing it HERE would have the two modules initializing each
 # other.  Lazily the cycle cannot form -- by the time anyone asks for
 # `exozippy.run_fit`, this module is fully initialized.
 _LAZY = {
     "run_fit": ("exozippy.run", "run_fit"),
-    "write_param_file": ("exozippy.mkparam", "write_param_file"),
-    "introspect": ("exozippy.introspect", None),
-    "solve_api": ("exozippy.solve_api", None),
 }
 
 
@@ -121,6 +119,7 @@ def __getattr__(name):
 
 
 def __dir__():
-    # Without this, dir(exozippy) omits every lazy name -- tab completion and
-    # help() would show a public surface smaller than __all__ claims.
+    # Without this, dir(exozippy) omits run_fit until something has already
+    # touched it -- tab completion and help() would show a public surface
+    # smaller than __all__ claims.
     return sorted(set(globals()) | set(_LAZY))

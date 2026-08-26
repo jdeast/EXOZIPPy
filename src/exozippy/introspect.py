@@ -27,15 +27,6 @@ import yaml
 from .components.factory import discover_components
 from .config import NUMERIC_KEYS
 
-# The schema contract the GUI reads (review 8.13.6).  Everything else here is
-# an implementation detail and is already underscored.
-__all__ = [
-    "boolean_option_keys",
-    "component_schema",
-    "full_schema",
-    "list_components",
-]
-
 # Numeric parameter fields (in defaults.yaml) that a GUI cares about.
 # Exactly the numeric sub-keys ConfigManager.resolve() absorbs -- this used
 # to be a third hand-maintained copy and had already lost ``bound_scale``,
