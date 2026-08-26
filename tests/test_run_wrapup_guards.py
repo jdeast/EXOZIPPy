@@ -186,3 +186,136 @@ def test_every_named_wrapup_call_is_guarded():
         f"unguarded wrap-up call(s) in _run_fit: {unguarded} -- a crash there "
         "skips the restart file and the final paper.tex of a finished fit"
     )
+
+
+# ---------------------------------------------------------------------------
+# Wrap-up VISIBILITY: a long fit must not go silent, and the polish must not
+# go serial (reviews 2.3.5 and 6.11.3)
+# ---------------------------------------------------------------------------
+
+# Every call that starts a polish has to hand over a core grant.  Without one
+# _resolve_polish_cores returns 1, no pool is built, and the DE engine -- the
+# branch every gradient-free (VBM-backed) microlensing fit takes -- runs on
+# one core.  run.py's pre-sampling call had this fixed once already; the
+# hot-mode call site in outputs/ledger.py was missed and cost 38+ minutes at
+# 1/36 throughput on examples/ob09020 (6.11.3).  Pinned across the whole
+# package rather than at the two known sites, so a THIRD caller cannot
+# reintroduce it.
+CORE_GRANTING_CALLS = ("polish_raw_starts", "run_hot_mode_discovery")
+
+
+def _package_source_files():
+    root = Path(inspect.getfile(run_module)).parent
+    return sorted(root.rglob("*.py"))
+
+
+def test_every_polish_call_site_passes_a_core_grant():
+    """
+    Given every call in the package that starts (or forwards to) a polish,
+    When each call's keywords are read from the source,
+    Then all of them pass `cores=` -- the omission 6.11.3 found is a silent
+      1/N-throughput regression with no failing test of its own.
+    """
+    offenders = []
+    seen = 0
+    for path in _package_source_files():
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "id", getattr(node.func, "attr", None))
+            if name not in CORE_GRANTING_CALLS:
+                continue
+            seen += 1
+            kwargs = {kw.arg for kw in node.keywords}
+            if "cores" not in kwargs and None not in kwargs:
+                offenders.append(f"{path.name}:{node.lineno} {name}")
+
+    assert seen, "no polish call sites found -- the names must have changed"
+    assert not offenders, (
+        "polish call site(s) with no core grant: "
+        + ", ".join(offenders)
+        + " -- the DE engine then runs serial on one core while the rest of "
+        "the machine the fit just held sits idle (review 6.11.3)"
+    )
+
+
+def test_wrapup_stage_lines_carry_elapsed_time_and_the_stage(caplog):
+    """
+    Given the wrap-up progress announcer,
+    When a stage starts,
+    Then one INFO line names the stage and stamps elapsed time since
+      wrap-up began, and the closing line reports the total.
+
+    Wrap-up used to log NOTHING between the sampler finishing and the
+    reports appearing -- on examples/ob09020 that was 38+ silent minutes,
+    and telling "computing" from "hung" needed /proc/<pid>/stat (2.3.5a).
+    """
+    # ARRANGE
+    progress = run_module.WrapupProgress()
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.run"):
+        progress.stage("hot-chain suppressed-mode search")
+        progress.done()
+
+    # ASSERT
+    assert "Wrap-up (t+" in caplog.text
+    assert "hot-chain suppressed-mode search" in caplog.text
+    assert "Wrap-up complete in" in caplog.text
+
+
+def test_an_interrupt_during_wrapup_says_what_survived(caplog, monkeypatch):
+    """
+    Given a fit interrupted during WRAP-UP rather than during sampling,
+    When run_fit handles the KeyboardInterrupt,
+    Then it says the trace is already saved and names how to regenerate the
+      remaining reports without re-sampling.
+
+    Sampling documents its own interrupt behavior; wrap-up documented none,
+    so an impatient Ctrl-C felt like it might cost the multi-day trace it
+    cannot (review 2.3.5d).  The phase is read from the run's own reporter,
+    which records it even when GUI status output is off -- the default.
+    """
+    # ARRANGE
+    config = {"prefix": "fitresults/planet"}
+
+    def _fake_run_fit(cfg, gui, user_params=None):
+        gui.phase("writing")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(run_module, "_run_fit", _fake_run_fit)
+
+    # ACT
+    with caplog.at_level(logging.WARNING, logger="exozippy.run"):
+        with pytest.raises(KeyboardInterrupt):
+            run_module.run_fit(config)
+
+    # ASSERT
+    assert "Interrupted during wrap-up" in caplog.text
+    assert "fitresults/planet_trace.nc" in caplog.text
+    assert "exozippy-modes" in caplog.text
+
+
+def test_an_interrupt_during_sampling_makes_no_such_claim(caplog, monkeypatch):
+    """
+    Given a fit interrupted during SAMPLING,
+    When run_fit handles the KeyboardInterrupt,
+    Then the wrap-up notice does NOT fire -- at that point the trace is not
+      on disk yet, and telling the user it is would be false assurance.
+    """
+
+    # ARRANGE
+    def _fake_run_fit(cfg, gui, user_params=None):
+        gui.phase("sampling")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(run_module, "_run_fit", _fake_run_fit)
+
+    # ACT
+    with caplog.at_level(logging.WARNING, logger="exozippy.run"):
+        with pytest.raises(KeyboardInterrupt):
+            run_module.run_fit({"prefix": "fitresults/planet"})
+
+    # ASSERT
+    assert "Interrupted during wrap-up" not in caplog.text
