@@ -144,6 +144,26 @@ Everyone has to produce byte-identical output, or merging a long-running branch
 conflicts on formatting rather than on content. Keeping one tool aligned across
 contributors instead of three is most of why ruff replaced black and isort.
 
+That rev is the ONLY authority on the ruff version, and it is why ruff is
+deliberately NOT a dependency of this project -- not in pyproject.toml, not in
+poetry.lock. A declared ruff would be a second pin to keep in sync with the
+hook rev by hand, which is the exact drift the exact pin exists to prevent.
+Consequences, both of which have bitten:
+
+    Run the hooks, never a bare ruff: `poetry run pre-commit run --all-files`
+    (above). `poetry run ruff format` is NOT a supported command. If it works
+    at all, it is finding a ruff that someone pip-installed into the
+    environment by hand at some unknown version -- one such environment was
+    running 0.16.1 against a hook pinned at 0.16.0 -- and after a fresh
+    `poetry install` it is simply absent.
+
+    `pre-commit run` and `ruff format .` are not the same pass. ruff formats
+    python code blocks inside markdown; the ruff-format hook's own type filter
+    is python/pyi/jupyter, so it never touches a .md file. `ruff format .` will
+    happily rewrite the code snippets in CLAUDE.md and the subsystem docs,
+    which are hand-aligned prose. CI runs the hooks (see the `lint` job in
+    .github/workflows/tests.yml), so the hooks are the standard.
+
 `ruff format` is used, but there is deliberately NO second formatter. Do not
 add [tool.black] or [tool.isort] back.
 
