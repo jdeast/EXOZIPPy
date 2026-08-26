@@ -242,6 +242,14 @@ pytest-xdist = ">=3.0"
 # test environment is reproducible rather than lucky.
 httpx = ">=0.27,<1.0"
 
+# For scripts/find_redundant_tests.py only -- nothing in the suite imports
+# them, and no CI job runs them. Kept as dev deps rather than an extra because
+# the analysis is a periodic investigation, not part of any build: it wants a
+# whole-suite run with per-test coverage contexts (about +33% on top of the
+# suite, measured), which is not something to do on every commit.
+coverage = ">=7.6,<8.0"
+pytest-cov = ">=6.0,<8.0"
+
 # Microlensing tooling, git-only and therefore unpublishable as an extra (see
 # the note in [project]). optional = true keeps it out of a default
 # `poetry install`, exactly as the old extra did.
