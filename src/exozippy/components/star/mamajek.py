@@ -50,9 +50,7 @@ def read_mamajek(minmass=None):
                 if cols is not None:
                     break  # the footer repeats the header: end of data
                 # drop the leading and trailing SpT bookend columns
-                cols = [
-                    tok.replace("-", "_") for tok in tokens[1:-1]
-                ]
+                cols = [tok.replace("-", "_") for tok in tokens[1:-1]]
                 continue
             if line.startswith("#") or cols is None:
                 continue
@@ -60,12 +58,7 @@ def read_mamajek(minmass=None):
             if len(vals) != len(cols):
                 continue
             spt.append(tokens[0])
-            rows.append(
-                [
-                    np.nan if "..." in v else float(v)
-                    for v in vals
-                ]
-            )
+            rows.append([np.nan if "..." in v else float(v) for v in vals])
         data = np.asarray(rows, dtype=float)
         _CACHE = {"SpT": spt}
         for j, name in enumerate(cols):
@@ -76,9 +69,7 @@ def read_mamajek(minmass=None):
         keep = np.isfinite(msun) & (msun >= float(minmass))
         for k, v in out.items():
             out[k] = (
-                [s for s, g in zip(v, keep) if g]
-                if k == "SpT"
-                else v[keep]
+                [s for s, g in zip(v, keep) if g] if k == "SpT" else v[keep]
             )
     return out
 
@@ -108,8 +99,7 @@ def get_star(tagname, value, minmass=None):
                 f"SpT value ({value}) not found and cannot be interpolated"
             ) from None
         return {
-            k: (v[i] if k == "SpT" else float(v[i]))
-            for k, v in table.items()
+            k: (v[i] if k == "SpT" else float(v[i])) for k, v in table.items()
         }
 
     col = table[key]
