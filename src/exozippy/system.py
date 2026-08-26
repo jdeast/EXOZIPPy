@@ -1249,10 +1249,20 @@ class System(Component):
                 if attr.label in posterior:
                     # Case A: Named Deterministic in the trace (user units).
                     attr.posterior = posterior[attr.label]
-                elif attr.expression is not None:
+                elif attr.expression is not None or attr.element_expressions:
                     # Case B: Not in the trace; evaluate the PyTensor expression.
                     # Pass param_lookup so generate_posterior converts user-unit
                     # inputs → internal → evaluates → back to user units.
+                    #
+                    # element_expressions belongs in this test as much as the
+                    # whole-vector expression does: a vector every element of
+                    # which is derived one element at a time has NEITHER a
+                    # Deterministic in the trace (build_pymc only tracks a node
+                    # when something is sampled) nor an `expression`, so it fell
+                    # through both cases and the reporting layer showed its
+                    # initval with blank errors (review 1.10.9).
+                    # Parameter._element_expression_value decides what is
+                    # actually evaluable; this test only has to let it be asked.
                     attr.posterior = attr.generate_posterior(
                         posterior, param_lookup=param_lookup
                     )

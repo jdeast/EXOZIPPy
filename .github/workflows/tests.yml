@@ -672,13 +672,79 @@ jobs:
   # `if: always()` is load-bearing. Without it this job is skipped when any
   # matrix combination fails, and a skipped required check reads as neutral
   # rather than failing -- the PR would look mergeable with a red matrix.
+  # LINT AND FORMATTING. Runs on everything, including pull requests.
+  #
+  # This job runs `pre-commit` ITSELF rather than a hand-written `ruff check` /
+  # `ruff format --check` pair, and that is the whole point: CI and the local
+  # hook then execute the same hooks at the same pinned rev BY CONSTRUCTION, so
+  # they cannot disagree about what "formatted" means. A second invocation here
+  # with its own ruff version would be exactly the drift the exact pin in
+  # .pre-commit-config.yaml exists to prevent.
+  #
+  # Until this job existed, NOTHING in CI ran ruff at all. Formatting and lint
+  # were enforced only by the local hook, so a contributor who had not run
+  # `pre-commit install`, or who pushed from a machine without it, was
+  # completely unchecked -- which is how unformatted code reached master
+  # (review 7.13.2).
+  #
+  # The full-suite hook is stage `pre-push`, and `pre-commit run --all-files`
+  # runs the pre-commit stage, so it is skipped here rather than running the
+  # suite a seventeenth time. The `pytest` matrix above is what tests.
+  #
+  # No poetry and no project install: pre-commit builds its own isolated
+  # environment for the ruff hooks, and the one hook that would need the
+  # project installed is not in this stage.
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # Keyed on the hook config, which is where the pinned rev lives, so
+      # bumping ruff invalidates the cache exactly when it has to.
+      - name: Cache the pre-commit hook environments
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      # The same range pyproject's dev group declares -- pre-commit's own
+      # version does not decide formatting (the pinned hook rev does), but a
+      # major bump can change how the config is read.
+      - name: Install pre-commit
+        run: python -m pip install "pre-commit>=4.6.1,<5.0.0"
+
+      # --show-diff-on-failure prints the formatter's own patch, so a red run
+      # says WHAT to change rather than only that something is wrong.
+      - name: Run the pre-commit hooks
+        run: pre-commit run --all-files --show-diff-on-failure
+
+  # THE AGGREGATING GATE. `test` is the one status check the branch ruleset
+  # requires (context "test", no bypass actors), so everything that must block
+  # a merge has to reach the merge decision THROUGH here.
+  #
+  # `lint` is in `needs` for exactly that reason: a required gate that does not
+  # check lint does not check lint (review 7.13.2, paired with 8.13.1). Adding a
+  # second required context in the ruleset would work too, but it would put half
+  # the merge policy in repository settings that no one reviews in a diff.
   test:
     name: test
     if: always()
-    needs: [pytest]
+    needs: [pytest, lint]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any required combination did not succeed
         run: |
           echo "pytest: ${{ needs.pytest.result }}"
+          echo "lint:   ${{ needs.lint.result }}"
           test "${{ needs.pytest.result }}" = "success"
+          test "${{ needs.lint.result }}" = "success"

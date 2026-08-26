@@ -250,6 +250,20 @@ def match_ledger_to_modes(ledger, mode_report, match_sigma=MATCH_SIGMA):
     return ledger
 
 
+def _best_laplace_logw(ledger):
+    """Largest finite relative Laplace log-weight in ``ledger``, or None.
+
+    ``SeedRecord.laplace_logw`` carries an unknowable additive constant, so
+    it is only ever reported as a difference against this reference.  A
+    seed whose logp at the optimum was non-finite (an invalid start the
+    polish never rescued) would poison a bare ``max`` and, through it,
+    every other entry's reported gap, so those are skipped; None means no
+    seed had a usable weight and the gap is simply not reportable.
+    """
+    finite = [r.laplace_logw for r in ledger if np.isfinite(r.laplace_logw)]
+    return max(finite) if finite else None
+
+
 def rejected_records(ledger):
     return [r for r in ledger if r.matched_mode is None]
 
@@ -268,6 +282,7 @@ def ledger_to_text(ledger):
         "symmetric-curvature (Laplace) estimates at that optimum, NOT "
         "posterior draws."
     )
+    best_logw = _best_laplace_logw(ledger)
     for r in sorted(ledger, key=lambda r: r.seed_index):
         lines.append("")
         status = (
@@ -277,10 +292,21 @@ def ledger_to_text(ledger):
             else "REJECTED: no surviving posterior mode at this solution"
         )
         lines.append(f"seed {r.seed_index} ({r.source}): {status}")
+        # The Laplace log-weight gap is COMPUTED, not asserted.  This
+        # line used to read "comparable at the ~1-nat level" verbatim on
+        # every entry, which is boilerplate wherever it is not true: the
+        # ob140939 ledger printed it on a delta lp = 106 rejection.  Sign
+        # convention matches _delta_lp_cell -- 0 for the best seed,
+        # negative for anything down-weighted against it.
+        gap = ""
+        if best_logw is not None and np.isfinite(r.laplace_logw):
+            gap = (
+                "; Laplace log-weight vs best = "
+                f"{r.laplace_logw - best_logw:.2f}"
+            )
         lines.append(
             f"  lp at optimum = {r.lp_max:.2f}  (delta vs best seed = "
-            f"{r.delta_lp:.2f}; Laplace log-weight vs best is comparable "
-            "at the ~1-nat level)"
+            f"{r.delta_lp:.2f}{gap})"
         )
         if r.matched_mode is None:
             for name in sorted(r.phys):
@@ -339,11 +365,18 @@ def append_ledger_csv(ledger, csv_filename):
             f"writes {n_cols}-column rows ({', '.join(CSV_COLUMNS_MODE)}); "
             "write it with build_csv_output(..., mode_columns=True)."
         )
-    best_logw = max(r.laplace_logw for r in ledger)
+    best_logw = _best_laplace_logw(ledger)
     with open(csv_filename, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f, lineterminator="\n")
         for r in rej:
-            w = float(np.exp(r.laplace_logw - best_logw))
+            # Blank rather than "nan": with no finite reference anywhere in
+            # the ledger the ratio is not defined, and a bare max() over a
+            # non-finite entry reported every OTHER seed's weight as nan too.
+            w_cell = (
+                f"{float(np.exp(r.laplace_logw - best_logw)):.3g}"
+                if best_logw is not None and np.isfinite(r.laplace_logw)
+                else ""
+            )
             for name in sorted(r.phys):
                 vals = np.asarray(r.phys[name]).reshape(-1)
                 sigs = np.asarray(r.phys_sigma[name]).reshape(-1)
@@ -352,7 +385,7 @@ def append_ledger_csv(ledger, csv_filename):
                         [
                             name,
                             f"rejected-seed{r.seed_index}",
-                            f"{w:.3g}",
+                            w_cell,
                             "",
                             f"{vals[i]:.6g}",
                             f"{sigs[i]:.3g}",
@@ -515,6 +548,9 @@ def run_hot_mode_discovery(system, model, idata, seed_ledger=None, **kwargs):
     Non-fatal by contract: a wrap-up diagnostic must never take down a
     finished multi-day fit, so the catch stays broad -- but the exception's
     type and message go into the status rather than only into a log line.
+
+    ``**kwargs`` reaches discover_hot_modes; ``cores=`` in particular is
+    what keeps its polish off one core (see that function's docstring).
     """
     if not hasattr(idata, "posterior_hot"):
         return seed_ledger, {
@@ -671,6 +707,7 @@ def discover_hot_modes(
     subsample=20000,
     seed=20260711,
     polish_steps=150,
+    cores=None,
     status=None,
 ):
     """Find posterior-suppressed modes in the thinned hot-rung draws.
@@ -699,6 +736,17 @@ def discover_hot_modes(
     counts) so the final report can say WHICH of the four outcomes occurred
     instead of rendering "searched and found nothing" and "never searched"
     and "crashed" identically.  See hot_status_to_text.
+
+    ``cores`` is the core grant for the polish, and callers must pass it:
+    the DE engine is the branch a gradient-free model (every VBM-backed
+    microlensing fit) takes, and with no grant it runs SERIAL on one core
+    while the rest of the machine the fit just held sits idle -- measured
+    on examples/ob09020 at 1 core of 36 for 38 minutes on a SINGLE
+    candidate.  Left None (serial) rather than defaulted to a core count
+    here because this function must not fork a pool a library caller never
+    asked for; run.py hands over the same grant the sampler used, and
+    polish.py logs the serial case so a third caller omitting it is
+    visible in the log instead of silent (review 6.11.3).
     """
     from .modes import _dip_merge, _kmeans_bic
 
@@ -933,8 +981,19 @@ def discover_hot_modes(
             ofs += n
         cands.append(cand)
     if cands:
+        logger.info(
+            f"Hot-chain discovery: polishing {len(cands)} candidate(s) to "
+            f"their basin optima (at most {int(polish_steps)} steps each)."
+        )
         polished_all, _dlps, _method = polish_raw_starts(
-            model, cands, n_steps=polish_steps
+            model,
+            cands,
+            n_steps=polish_steps,
+            # The SAME core grant run.py hands the pre-sampling polish, and
+            # for the same reason -- this call omitted it and so ran the DE
+            # engine serial on one core of the machine the sampler had just
+            # been using in full (review 6.11.3).
+            cores=cores,
         )
         recs_all = build_seed_ledger(
             system,

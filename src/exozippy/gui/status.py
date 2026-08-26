@@ -133,6 +133,7 @@ class GuiReporter:
         self._t_start = time.time()
         self._last_state = {}
         self._snapshot_over_budget = False
+        self.last_phase = None
 
     @classmethod
     def from_config(cls, config):
@@ -164,7 +165,15 @@ class GuiReporter:
         `state` defaults to the last progress state seen, so a phase change
         (e.g. sampling -> writing) keeps the most recent draw/convergence
         numbers visible instead of blanking them.
+
+        ``last_phase`` is recorded even when the reporter is DISABLED (which
+        is the default, and every non-GUI run).  It is the run's own record
+        of where it is, not a GUI artifact: run.py reads it to tell a Ctrl-C
+        during wrap-up -- where the trace is already safely on disk -- from
+        one during sampling, and it must not depend on a monitoring flag
+        (review 2.3.5d).
         """
+        self.last_phase = phase
         if not self.enabled:
             return
         if state is None:

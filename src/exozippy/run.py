@@ -29,7 +29,7 @@ from .corner_utils import (
     save_corner_plot,
 )
 from .diagnostics import ModelAuditor
-from .logger import setup_logging
+from .logger import fmt_duration, setup_logging
 from .mkparam import write_param_file
 from .outputs.modeling import build_modeling_output, compile_modeling_pdf
 from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix
@@ -149,6 +149,63 @@ def nonfatal_wrapup(what):
         yield
     except Exception:
         logger.warning("%s failed (non-fatal)", what, exc_info=True)
+
+
+class WrapupProgress:
+    """Announce each wrap-up stage as it starts (review 2.3.5).
+
+    Wrap-up used to be MUTE.  On examples/ob09020 the last three log lines
+    were the sampler finishing, the hot-chain clustering, and the
+    gradient-fallback notice -- then nothing at all for 38+ minutes while
+    the serial polish ran (review 6.11.3), and from outside the process the
+    only way to tell "computing" from "hung" was to sample
+    /proc/<pid>/stat twice and see one core pinned.  A user should not need
+    that, and neither should an agent: it cost a wrong diagnosis in the
+    session that found it.
+
+    So each stage says what it is starting and how many items it will chew
+    through, stamped with elapsed time since wrap-up began.  One line per
+    stage, not one per item: the fit log is already INFO-heavy and a stage
+    boundary is the resolution a watcher actually needs -- within a stage,
+    the long poles carry their own heartbeats (the DE polish's is
+    ptde.POLISH_PROGRESS_S).
+
+    No fixed denominator ("stage 3 of 9") on purpose: the stage list is
+    conditional (per-mode outputs only for a multimodal fit, plots only for
+    the components that have them), and a total that lies is worse than no
+    total.
+    """
+
+    def __init__(self):
+        self.t0 = time.time()
+
+    def stage(self, what):
+        logger.info(
+            f"Wrap-up (t+{fmt_duration(time.time() - self.t0)}): {what}"
+        )
+
+    def done(self):
+        logger.info(
+            f"Wrap-up complete in {fmt_duration(time.time() - self.t0)}."
+        )
+
+
+def _wrapup_interrupt_note(config):
+    """What a Ctrl-C during wrap-up did and did not cost (review 2.3.5d).
+
+    Sampling documents its own interrupt behavior ("finishing in-flight
+    evaluations..."); wrap-up documented none, so an impatient Ctrl-C felt
+    like it might throw away the multi-day trace.  It cannot: the trace is
+    written to disk BEFORE any of this runs, and every remaining artifact is
+    a report derived from it, regenerable by ``exozippy-modes``.
+    """
+    prefix = Path(config.get("prefix", "fitresults/planet"))
+    return (
+        f"Interrupted during wrap-up. The trace at {prefix}_trace.nc was "
+        f"saved before wrap-up started and is untouched; only the reports "
+        f"not yet written are missing. Regenerate them without "
+        f"re-sampling: exozippy-modes <this fit's config.yaml>"
+    )
 
 
 # Samplers that cannot honor `maxtime`, and why.  The three external NUTS
@@ -280,6 +337,14 @@ def run_fit(config, user_params=None):
         # PTDE/NUTS raise KeyboardInterrupt for a during-tune or second-signal
         # abort; a graceful during-draws stop instead returns partial draws and
         # completes normally (-> "done" below).
+        #
+        # An interrupt during WRAP-UP is a different event and now says so:
+        # the trace is already on disk, so nothing irreplaceable was lost
+        # and the reports can be regenerated.  Sampling's own interrupt
+        # behavior is announced by the samplers; this was the one phase that
+        # left the user guessing (review 2.3.5d).
+        if getattr(gui, "last_phase", None) == "writing":
+            logger.warning(_wrapup_interrupt_note(config))
         gui.terminal("stopped")
         raise
     except BaseException:
@@ -920,6 +985,12 @@ def _run_fit(config, gui, user_params=None):
 
     # Sampling is done; the rest is post-processing + report/plot output.
     gui.phase("writing")
+    wrapup = WrapupProgress()
+    logger.info(
+        f"Sampling finished; starting wrap-up (reports, plots, restart "
+        f"file). The trace is already saved to {trace_path}, so an "
+        f"interrupt here costs only what is not yet written."
+    )
 
     # Collapse any exact label degeneracy a component declares (review
     # 1.8.3's ascending node is the one case today).  HERE, and exactly once:
@@ -927,6 +998,7 @@ def _run_fit(config, gui, user_params=None):
     # arrive at, and everything below consumes what it leaves.  Folding per
     # consumer is how the convergence check, the mode reporter and the seed
     # ledger come to disagree about how many solutions a chain found.
+    wrapup.stage("collapsing declared label degeneracies")
     refolded = system.fold_degenerate_draws(idata, model)
     if refolded:
         # The regenerated deterministics come back in INTERNAL units --
@@ -961,10 +1033,24 @@ def _run_fit(config, gui, user_params=None):
     # fit -- but the exception type and message now reach the report.
     from .outputs.ledger import run_hot_mode_discovery
 
+    wrapup.stage(
+        "hot-chain suppressed-mode search (cluster, then polish each "
+        "candidate to its basin optimum)"
+    )
     seed_ledger, hot_status = run_hot_mode_discovery(
-        system, model, idata, seed_ledger
+        system,
+        model,
+        idata,
+        seed_ledger,
+        # The core grant the sampler just used.  Without it the candidate
+        # polish ran serial on one core -- the same omission run.py's own
+        # polish call above already carries a comment about, missed at this
+        # second call site (review 6.11.3).  Measured on examples/ob09020:
+        # 1 core of 36 busy for 38+ minutes on a single candidate.
+        cores=cores,
     )
 
+    wrapup.stage("burn-in + stuck-chain analysis")
     idata, burn_diag = convergence.analyze_idata(
         idata, min_ess=min_ess, max_rhat=max_rhat
     )
@@ -978,6 +1064,7 @@ def _run_fit(config, gui, user_params=None):
     # raise_on_invalid=True, overridable via config
     # `modes: {max_invalid_frac: ..., force: true}`), and may opt into
     # per-mode evidence weighting via `modes: {weights: evidence}`.
+    wrapup.stage("mode identification + result tables (LaTeX/CSV)")
     modes_cfg = config.get("modes", {}) or {}
     mode_report = build_mode_reports(
         system,
@@ -1005,6 +1092,10 @@ def _run_fit(config, gui, user_params=None):
     # one component's broken diagnostic costs its own figure and nothing else
     # -- neither its siblings' figures nor, further down, the restart file.
     # make a corner plot of fitted parameters (similar to EXOFASTv2 covar plot)
+    wrapup.stage(
+        f"corner plots (1 global + up to {len(system.active_components)} "
+        f"per-component)"
+    )
     with nonfatal_wrapup("corner plot"):
         make_corner(model, idata, str(prefix) + "_corner.png")
 
@@ -1016,6 +1107,7 @@ def _run_fit(config, gui, user_params=None):
             comp.plot_corner(idata, filename_prefix=str(prefix))
 
     # Save a 1D trace plot (similar to EXOFASTv2 chain file)
+    wrapup.stage("detailed trace plots")
     with nonfatal_wrapup("detailed trace plot"):
         all_params = system.get_all_parameters()
         plot_vars = [
@@ -1047,6 +1139,9 @@ def _run_fit(config, gui, user_params=None):
     # empty first: a get_draws failure must degrade the draft to its
     # data-only specs, not NameError past the wrap.
     draws = []
+    wrapup.stage(
+        f"posterior plots for {len(system.active_components)} component(s)"
+    )
     with nonfatal_wrapup("posterior draw extraction"):
         draws = get_draws(idata, param_lookup=system.get_parameter_lookup())
     for comp in system.active_components.values():
@@ -1061,6 +1156,9 @@ def _run_fit(config, gui, user_params=None):
     # plot outputs, which have no such mechanism. Single-mode runs take this
     # branch never, so they emit zero new files.
     if mode_report is not None and mode_report.n_modes > 1:
+        wrapup.stage(
+            f"per-mode outputs for {mode_report.n_modes} identified modes"
+        )
         try:
             _emit_per_mode_outputs(system, model, idata, mode_report, prefix)
         except Exception:
@@ -1076,6 +1174,10 @@ def _run_fit(config, gui, user_params=None):
     # (config `modeling: {compile: false}` to opt out) compile the draft
     # PDF.  Compile failure or missing TeX never fails the fit.
     modeling_cfg = config.get("modeling", {}) or {}
+    wrapup.stage(
+        "modeling draft (paper.tex)"
+        + (" + pdflatex compile" if modeling_cfg.get("compile", True) else "")
+    )
     for _key in modeling_cfg:
         if _key != "compile":
             logger.warning(
@@ -1096,6 +1198,7 @@ def _run_fit(config, gui, user_params=None):
             "modeling-draft generation failed (non-fatal)", exc_info=True
         )
 
+    wrapup.stage("restart parameter file (mkparam)")
     try:
         # mkparam re-derives the structural fingerprint from this config and
         # the params, not from the live System; measured to reproduce the
@@ -1112,6 +1215,8 @@ def _run_fit(config, gui, user_params=None):
         )
     except Exception:
         logger.exception("mkparam failed (non-fatal)")
+
+    wrapup.done()
 
 
 def _user_initval(config_manager, par, index):

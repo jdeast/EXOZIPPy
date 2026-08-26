@@ -15,6 +15,15 @@ repos:
 # and the merge conflicts on formatting rather than on content. Pinning one
 # tool instead of three is most of the reason for consolidating.
 #
+# THIS REV IS THE ONLY AUTHORITY ON THE RUFF VERSION, which is why ruff is
+# deliberately absent from pyproject.toml and poetry.lock: a declared ruff
+# would be a second pin to keep in sync with this line by hand -- the exact
+# drift the pin exists to prevent. So `poetry run ruff` is not a supported
+# path; if it resolves at all it found a hand-installed binary at an unknown
+# version (one environment was running 0.16.1 against this 0.16.0). Run the
+# hooks, and note that CI runs THESE hooks rather than its own ruff, so the
+# two cannot disagree (the `lint` job in .github/workflows/tests.yml).
+#
 # ruff-check runs BEFORE ruff-format: the linter's import sorting (rule `I`)
 # decides which lines exist, the formatter decides how they wrap.
 #
