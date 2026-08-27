@@ -93,6 +93,127 @@ def calc_mu_dec_rel_geo(mu_dec_rel, pi_rel, earth_vperp_n):
     return mu_dec_rel - pi_rel * earth_vperp_n
 
 
+def lens_geometry_from_orbit(
+    times,
+    tp,
+    n,
+    ecc,
+    sinw,
+    cosw,
+    cosi,
+    bigomega,
+    a,
+    theta_E,
+    d_l,
+    pi_E_N,
+    pi_E_E,
+):
+    """``(s(t), alpha(t) [rad])`` of lens companion 0 driven by a Keplerian
+    orbit -- the C24 keplerian projection, built on the SAME kernel and
+    Thiele-Innes owner every other projection uses (orbit.physics
+    ``state_vector_terms`` / ``thiele_innes_xy``; review 4.8.2).
+
+        delta(t)   = companion position relative to the PRIMARY
+                     (omega_* + pi, the `relative=True` flip), in Einstein
+                     radii: a_scale = a * RSUN_TO_AU * 1000 / (D_L theta_E)
+                     with a [R_sun], D_L [pc], theta_E [mas]
+        s(t)       = |delta(t)|
+        PA_axis(t) = atan2(dE, dN)
+        alpha(t)   = phi_pi - PA_axis(t),   phi_pi = atan2(pi_E_E, pi_E_N)
+
+    The MINUS is C24's `d(PA_axis)/dt = -dalpha/dt` rule (alpha runs
+    opposite to the axis's own position angle); it is absolute -- no
+    t0_par anchor enters, because C15/C20's alpha IS `phi_pi - PA(axis)`
+    at every epoch.  Adds NO free parameters: every input is already in
+    the graph (8.6.8 5b), which is the Skowron+2011 over-constraint the
+    ob09020 example tests.
+    """
+    from ..orbit import physics as orbit_physics
+
+    terms = orbit_physics.state_vector_terms(
+        times, tp, n, ecc, sinw=-sinw, cosw=-cosw
+    )
+    a_scale = (
+        a * RSUN_TO_AU * 1000.0 / (d_l * pt.maximum(theta_E, THETA_E_FLOOR))
+    )
+    r = a_scale * terms.r_over_a
+    X, Y = orbit_physics.thiele_innes_xy(
+        r, terms.coswf, terms.sinwf, cosi, bigomega
+    )
+    s_t = pt.sqrt(pt.sqr(X) + pt.sqr(Y))
+    pa_axis = pt.arctan2(Y, X)
+    phi_pi = pt.arctan2(pi_E_E, pi_E_N)
+    return s_t, phi_pi - pa_axis
+
+
+@register_physics
+def calc_s_from_orbit(
+    lens_t0_par,
+    tp,
+    n,
+    ecc,
+    sinw,
+    cosw,
+    cosi,
+    bigomega,
+    a,
+    theta_E,
+    d_l,
+    pi_E_N,
+    pi_E_E,
+):
+    """Reported s at t0_par in keplerian mode (lens_geometry_from_orbit)."""
+    return lens_geometry_from_orbit(
+        lens_t0_par,
+        tp,
+        n,
+        ecc,
+        sinw,
+        cosw,
+        cosi,
+        bigomega,
+        a,
+        theta_E,
+        d_l,
+        pi_E_N,
+        pi_E_E,
+    )[0]
+
+
+@register_physics
+def calc_alpha_from_orbit(
+    lens_t0_par,
+    tp,
+    n,
+    ecc,
+    sinw,
+    cosw,
+    cosi,
+    bigomega,
+    a,
+    theta_E,
+    d_l,
+    pi_E_N,
+    pi_E_E,
+):
+    """Reported alpha [rad] at t0_par in keplerian mode."""
+    return lens_geometry_from_orbit(
+        lens_t0_par,
+        tp,
+        n,
+        ecc,
+        sinw,
+        cosw,
+        cosi,
+        bigomega,
+        a,
+        theta_E,
+        d_l,
+        pi_E_N,
+        pi_E_E,
+    )[1]
+
+
 @register_physics
 def calc_beta(pi_rel, theta_E, s, ds_dt, dalpha_dt, d_source):
     """E_kin,perp / E_pot,perp from the sky-plane orbital rates alone --

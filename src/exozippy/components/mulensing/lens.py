@@ -5,6 +5,7 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
+from exozippy.components.orbit.bodies import component_instance_names
 from exozippy.config import (
     RANK_DEFAULT,
     RANK_DERIVED_DATA,
@@ -37,6 +38,7 @@ from .physics import (
     apply_u_0_floor,
     clip_q,
     floor_u_0_value,
+    lens_geometry_from_orbit,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,7 +102,9 @@ class Lens(Component):
 
     # Deps satisfied by context-node injection in add_parameter (constants,
     # not manifest parameters); graph.py skips them when ordering the build.
-    context_dep_names = frozenset({"earth_vperp_e", "earth_vperp_n"})
+    context_dep_names = frozenset(
+        {"earth_vperp_e", "earth_vperp_n", "lens_t0_par"}
+    )
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
@@ -229,6 +233,35 @@ class Lens(Component):
                     "orbit that moves the lens bodies (the same vocabulary "
                     "astrometryinstrument's rel mode uses)."
                 )
+            if om == "keplerian" and self.n_sources > 1:
+                raise NotImplementedError(
+                    "lens.orbital_motion: keplerian currently supports a "
+                    "single source (theta_E's per-source normalization "
+                    "would give each source its own Einstein-unit s(t))."
+                )
+
+        # keplerian mode: resolve the orbit reference (name or index) the
+        # way astrometryinstrument's rel mode does.
+        self.kep_orbit_idx = None
+        if om == "keplerian":
+            sys_cfg = getattr(config_manager, "system_config", None) or {}
+            orbit_names = component_instance_names(sys_cfg, "orbit")
+            ref = self.orbit_ref[0]
+            if isinstance(ref, int) or str(ref).isdigit():
+                idx = int(ref)
+                if orbit_names and idx >= len(orbit_names):
+                    raise ValueError(
+                        f"[{self.prefix}] orbit index {idx} out of range; "
+                        f"orbits are {orbit_names}."
+                    )
+            elif ref in orbit_names:
+                idx = orbit_names.index(ref)
+            else:
+                raise ValueError(
+                    f"[{self.prefix}] unknown orbit '{ref}'; orbits are "
+                    f"{orbit_names}."
+                )
+            self.kep_orbit_idx = idx
 
     # ------------------------------------------------------------------
     # Helpers
@@ -755,6 +788,12 @@ class Lens(Component):
             # (star vs planet), so each mass needs its own bracket dep.
             _, p_ndx = self.lens_bodies[0][0]
             self.primary_lens_map = np.array([p_ndx], dtype=int)
+            if self.kep_orbit_idx is not None:
+                # keplerian mode: the orbit element whose Keplerian drives
+                # s(t)/alpha(t) -- the bracket-map for the from_orbit deps.
+                self.lens_kep_orbit_map = np.array(
+                    [self.kep_orbit_idx], dtype=int
+                )
             for j, (_, c_ndx) in enumerate(self.lens_bodies[0][1:]):
                 setattr(
                     self,
@@ -810,9 +849,12 @@ class Lens(Component):
         """Stage 3: Declare the manifest."""
         self._validate_bodies(system)
 
-        # s is derived from the sampled log_s; move any user s bounds onto log_s
-        # before the manifest/relaxation engine run.
-        self._translate_s_bounds_to_log_s()
+        # s is derived from the sampled log_s; move any user s bounds onto
+        # log_s before the manifest/relaxation engine run.  In keplerian
+        # orbital-motion mode there IS no log_s (the geometry is derived
+        # from the orbit), so nothing to translate onto.
+        if self.orbital_motion[0] != "keplerian":
+            self._translate_s_bounds_to_log_s()
 
         # Optional multi-seed sampling from a MMEXOFAST solutions file (P4).
         self._load_mmexofast_seeds()
@@ -960,20 +1002,40 @@ class Lens(Component):
         # than by component element count.
         if self.n_companions >= 1:
             companion_shape = (self.n_companions,)
-            # log_s is the sampled coordinate; s = 10**log_s is derived (the
-            # close/wide degeneracy is then an exact reflection log_s -> -log_s).
-            self.manifest["log_s"] = {"shape": companion_shape}
-            self.manifest["s"] = {
-                "expr_key": "default",
-                "shape": companion_shape,
-            }
-            self.manifest["xalpha"] = {"shape": companion_shape}
-            self.manifest["yalpha"] = {"shape": companion_shape}
-            # alpha derived from xalpha/yalpha via arctan2; internal unit = rad, display = deg
-            self.manifest["alpha"] = {
-                "expr_key": "default",
-                "shape": companion_shape,
-            }
+            if self.orbital_motion[0] == "keplerian":
+                # keplerian mode (C24): NO sampled geometry coordinates at
+                # all -- s and alpha are DERIVED from the referenced orbit
+                # (calc_s_from_orbit / calc_alpha_from_orbit, evaluated at
+                # t0_par for the reported values; the per-epoch series goes
+                # to the backends via _companion_geometry_series).  log_s /
+                # xalpha / yalpha do not exist in this mode, exactly as a
+                # linear-law band has no (q1, q2): a sampled coordinate the
+                # likelihood never reads is the 1.6.12 defect.
+                self.manifest["s"] = {
+                    "expr_key": "from_orbit",
+                    "shape": companion_shape,
+                }
+                self.manifest["alpha"] = {
+                    "expr_key": "from_orbit",
+                    "shape": companion_shape,
+                }
+            else:
+                # log_s is the sampled coordinate; s = 10**log_s is derived
+                # (the close/wide degeneracy is then an exact reflection
+                # log_s -> -log_s).
+                self.manifest["log_s"] = {"shape": companion_shape}
+                self.manifest["s"] = {
+                    "expr_key": "default",
+                    "shape": companion_shape,
+                }
+                self.manifest["xalpha"] = {"shape": companion_shape}
+                self.manifest["yalpha"] = {"shape": companion_shape}
+                # alpha derived from xalpha/yalpha via arctan2; internal
+                # unit = rad, display = deg
+                self.manifest["alpha"] = {
+                    "expr_key": "default",
+                    "shape": companion_shape,
+                }
             if self.orbital_motion[0] == "linear":
                 # Linear lens orbital motion (C24): per-companion rates,
                 # definitional in these coordinates and anchored at t0_par
@@ -1124,30 +1186,34 @@ class Lens(Component):
             )
 
         # Seed alpha hint (degrees, user unit) so inspect_start can display it
-        # even before the expression graph is built.
-        inst = self.names[0] if self.names else "0"
-        ca_entry = (
-            self.config_manager.user_params.get(f"lens.{inst}.xalpha")
-            or self.config_manager.user_params.get(f"lens.0.xalpha")
-            or {}
-        )
-        sa_entry = (
-            self.config_manager.user_params.get(f"lens.{inst}.yalpha")
-            or self.config_manager.user_params.get(f"lens.0.yalpha")
-            or {}
-        )
-        ca = ca_entry.get("initval")
-        sa = sa_entry.get("initval")
-        # List-valued initval (P4 multi-seed sampling): use seed 0.
-        if isinstance(ca, (list, tuple)):
-            ca = ca[0] if ca else None
-        if isinstance(sa, (list, tuple)):
-            sa = sa[0] if sa else None
-        if ca is not None and sa is not None:
-            alpha_deg = float(np.arctan2(float(sa), float(ca)) * _RAD_TO_DEG)
-            self.config_manager.add_hint(
-                f"lens.0.alpha", alpha_deg, rank=RANK_DEFAULT
+        # even before the expression graph is built.  Skipped in keplerian
+        # mode: xalpha/yalpha do not exist there and alpha is orbit-derived.
+        if self.orbital_motion[0] != "keplerian":
+            inst = self.names[0] if self.names else "0"
+            ca_entry = (
+                self.config_manager.user_params.get(f"lens.{inst}.xalpha")
+                or self.config_manager.user_params.get(f"lens.0.xalpha")
+                or {}
             )
+            sa_entry = (
+                self.config_manager.user_params.get(f"lens.{inst}.yalpha")
+                or self.config_manager.user_params.get(f"lens.0.yalpha")
+                or {}
+            )
+            ca = ca_entry.get("initval")
+            sa = sa_entry.get("initval")
+            # List-valued initval (P4 multi-seed sampling): use seed 0.
+            if isinstance(ca, (list, tuple)):
+                ca = ca[0] if ca else None
+            if isinstance(sa, (list, tuple)):
+                sa = sa[0] if sa else None
+            if ca is not None and sa is not None:
+                alpha_deg = float(
+                    np.arctan2(float(sa), float(ca)) * _RAD_TO_DEG
+                )
+                self.config_manager.add_hint(
+                    f"lens.0.alpha", alpha_deg, rank=RANK_DEFAULT
+                )
 
         # Expected proper motions from the galactic model, for the seeds below.
         # None when the line of sight is not known yet, in which case the pm
@@ -1390,13 +1456,24 @@ class Lens(Component):
 
     def add_parameter(self, model, param_name, system, context_nodes=None):
         """Inject the Earth-velocity context constants for the mu_rel_geo
-        chain (see context_dep_names); everything else is generic."""
+        chain (see context_dep_names), and t0_par for the keplerian-mode
+        s/alpha (their from_orbit expressions report the geometry AT the
+        anchor epoch, 5d); everything else is generic."""
         if param_name in ("mu_ra_rel_geo", "mu_dec_rel_geo"):
             context_nodes = dict(context_nodes or {})
             if "earth_vperp_e" not in context_nodes:
                 vperp_e, vperp_n = self._earth_vperp_en(system)
                 context_nodes["earth_vperp_e"] = pt.as_tensor_variable(vperp_e)
                 context_nodes["earth_vperp_n"] = pt.as_tensor_variable(vperp_n)
+        if (
+            param_name in ("s", "alpha")
+            and self.orbital_motion[0] == "keplerian"
+        ):
+            context_nodes = dict(context_nodes or {})
+            context_nodes.setdefault(
+                "lens_t0_par",
+                pt.as_tensor_variable(np.array([float(self.t0_par[0])])),
+            )
         return super().add_parameter(model, param_name, system, context_nodes)
 
     def _earth_vperp_en(self, system):
@@ -1705,7 +1782,7 @@ class Lens(Component):
         """
         return self.alpha.value[j] * _RAD_TO_DEG
 
-    def _companion_geometry_series(self, times):
+    def _companion_geometry_series(self, times, system):
         """Per-epoch companion geometry ``(s_t, alpha_t_deg)`` for companion
         0, or ``None`` when the lens geometry is static.
 
@@ -1741,10 +1818,29 @@ class Lens(Component):
                 + self.dalpha_dt.value[0] * _RAD_TO_DEG * dt_yr
             )
             return s_t, alpha_t_deg
-        raise NotImplementedError(
-            "orbital_motion: keplerian is not wired into the magnification "
-            "yet (review 8.6.8 step 5a/5b)."
+        # keplerian: the same physics function the reported s/alpha use
+        # (evaluated there at t0_par), here over the epoch vector.  No
+        # anchor enters -- alpha(t) = phi_pi - PA_axis(t) is absolute
+        # (C15/C20/C24), and s(t) is the projected separation in Einstein
+        # units.  Adds NO free parameters (8.6.8 5b).
+        j = self.kep_orbit_idx
+        orbit = system.orbit
+        s_t, alpha_t_rad = lens_geometry_from_orbit(
+            pt.as_tensor_variable(times),
+            orbit.tp.value[j],
+            orbit.n.value[j],
+            orbit.ecc.value[j],
+            orbit.sinw.value[j],
+            orbit.cosw.value[j],
+            orbit.cosi.value[j],
+            orbit.bigomega.value[j],
+            orbit.a.value[j],
+            self.theta_E.value[0],
+            system.star.distance.value[self.lens_map[0]],
+            self.pi_E_N.value[0],
+            self.pi_E_E.value[0],
         )
+        return s_t, alpha_t_rad * _RAD_TO_DEG
 
     def _get_safe_mm_params(self, index=0):
         """Range-limited single-source trajectory params.  ``index`` is the
@@ -2133,7 +2229,9 @@ class Lens(Component):
         # plotters' model grids get the same moving geometry the likelihood
         # fits.
         geometry_series = (
-            self._companion_geometry_series(times) if n_lenses >= 2 else None
+            self._companion_geometry_series(times, system)
+            if n_lenses >= 2
+            else None
         )
 
         if n_lenses >= 2 and self.backend == "vbm_direct":
