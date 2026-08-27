@@ -365,9 +365,10 @@ def test_a_mass_seed_reaches_whichever_coordinate_each_planet_samples():
       ratio) while the linear planet's mass is used as written.
 
     Measured rather than assumed.  The engine's relations are instantiated per
-    indexed path, so it is per element already, but RANK is per parameter
-    (`log_q` carries rank 5 and `mass` rank 10 in defaults.yaml, which is what
-    makes log_q absorb the relation) -- so whether a per-element mix of
+    indexed path, so it is per element already, but PRECEDENCE is per
+    parameter (`log_q` carries `rank: 5` and `mass` `rank: 10` in
+    defaults.yaml -- the user-facing key keeps its historical name -- which is
+    what makes log_q absorb the relation) -- so whether a per-element mix of
     coordinates still routes a seed correctly is a question about the engine,
     not about the manifest.  It does; if that ever changes, the symptom is a
     fit silently starting at the defaults.yaml log_q instead of the mass the

@@ -9,7 +9,7 @@ and both are now ordinary citizens of the machinery described in config.py:
      A data-derived START value has exactly the wrong precedence that way --
      an explicit ``transit.<name>.baseline`` (a restart file, or the
      EXOFASTv2 solution in ``examples/gj1214``) was silently discarded.  It
-     is now a ``config_manager.add_hint`` at RANK_DERIVED_DATA: above the
+     is now a ``config_manager.add_hint`` at PRECEDENCE_DERIVED_DATA: above the
      defaults.yaml 1.0, below the user.
 
   2. ``mulensinstrument.zeropoint`` never became a ``Parameter`` at all --
@@ -28,7 +28,11 @@ import numpy as np
 import pytest
 import yaml
 
-from exozippy.config import RANK_DEFAULT, RANK_DERIVED_DATA, RANK_USER
+from exozippy.config import (
+    PRECEDENCE_DEFAULT,
+    PRECEDENCE_DERIVED_DATA,
+    PRECEDENCE_USER,
+)
 from exozippy.system import System
 
 _KMT_DIR = Path(__file__).parent.parent / "examples" / "KMT-2019-BLG-1806"
@@ -91,7 +95,7 @@ def test_baseline_is_a_hint_at_rank_derived_data(tmp_path):
     Given two transit light curves at non-unity flux levels,
     When the system is prepared,
     Then each file's median flux is registered as a ConfigManager HINT at
-    RANK_DERIVED_DATA -- not smuggled in as a manifest option, which would
+    PRECEDENCE_DERIVED_DATA -- not smuggled in as a manifest option, which would
     carry no rank at all.
     """
     system = _prepared(_transit_config(tmp_path), _transit_params())
@@ -101,8 +105,8 @@ def test_baseline_is_a_hint_at_rank_derived_data(tmp_path):
         path = f"transit.{i}.baseline"
         assert path in cm.hints, f"{path} was never hinted"
         assert cm.hints[path] == pytest.approx(level)
-        assert cm.hint_ranks[path] == RANK_DERIVED_DATA
-        assert RANK_DEFAULT < cm.hint_ranks[path] < RANK_USER
+        assert cm.hint_ranks[path] == PRECEDENCE_DERIVED_DATA
+        assert PRECEDENCE_DEFAULT < cm.hint_ranks[path] < PRECEDENCE_USER
 
 
 def test_baseline_manifest_entry_carries_no_initval_option(tmp_path):
@@ -136,8 +140,8 @@ def test_user_baseline_beats_the_data_derived_hint(tmp_path):
     """
     Given a params file that names transit.inst0.baseline explicitly,
     When the model is built,
-    Then the user's value is what the parameter starts at (RANK_USER 100
-    beats RANK_DERIVED_DATA 60), while the file the user said nothing about
+    Then the user's value is what the parameter starts at (PRECEDENCE_USER 100
+    beats PRECEDENCE_DERIVED_DATA 60), while the file the user said nothing about
     still gets its median.
 
     This is the actual improvement: as a manifest option the median

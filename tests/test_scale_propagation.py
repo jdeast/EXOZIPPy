@@ -29,7 +29,7 @@ def _make_cm(extra_user_params):
 
 def test_forward_pass_fills_derived_scale_from_parent():
     """
-    Given a user Gaussian prior (sigma, RANK_USER) on sampled logmass,
+    Given a user Gaussian prior (sigma, PRECEDENCE_USER) on sampled logmass,
     When the relaxation engine's forward Jacobian pass runs,
     Then mass (derived, mass = 10^logmass) gets a propagated scale of
     dmass/dlogmass * sigma = mass * ln10 * sigma, beating mass's own
@@ -93,7 +93,7 @@ def test_user_sigma_still_seeds_the_scale():
     """
     Given the user puts a Gaussian prior (sigma) on sampled logmass,
     When the engine runs,
-    Then that sigma is used as logmass's preliminary scale (RANK_USER) --
+    Then that sigma is used as logmass's preliminary scale (PRECEDENCE_USER) --
     sigma stays user-facing even though init_scale does not.
     """
     # Arrange / Act
@@ -133,7 +133,7 @@ def test_scaleless_solved_target_does_not_crash_the_engine():
     Then the solve completes and the entry simply gets no init_scale.
 
     The user period entry is load-bearing: an initval with no sigma pins the
-    VALUE at RANK_USER while leaving period scale-less, which is what drives
+    VALUE at PRECEDENCE_USER while leaving period scale-less, which is what drives
     the propagated scale rank to zero.
     """
     # Arrange

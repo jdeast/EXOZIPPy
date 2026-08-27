@@ -582,7 +582,7 @@ class AstrometryInstrument(Instrument):
         # from the user's own entry: it reported this component's own decision
         # back to the user as something they had written, in the provenance
         # ledger, export_solution, initval_source and the GUI alike.  The
-        # override sits below RANK_USER and is applied before the user's params
+        # override sits below PRECEDENCE_USER and is applied before the user's params
         # in resolve(), so `sigma: 0` still yields to a user's own sigma --
         # the setdefault semantics this replaces.
         #

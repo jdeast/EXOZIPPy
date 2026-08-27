@@ -1028,18 +1028,18 @@ def test_log_f_total_bootstrap_yields_to_user_params():
     """
     Given a MulensInstrument with a data-estimated total flux,
     When register_parameters declares the manifest,
-    Then log_f_total is pushed as a RANK_DERIVED_DATA hint (so a user value in
+    Then log_f_total is pushed as a PRECEDENCE_DERIVED_DATA hint (so a user value in
       params.yaml wins) and the manifest carries no direct initval override
       (which would bypass provenance ranking and clobber the user's restart
       point from a previous MAP).
     """
-    from exozippy.config import RANK_DERIVED_DATA
+    from exozippy.config import PRECEDENCE_DERIVED_DATA
 
     class _RecordingConfigManager(_DummyConfigManager):
         def __init__(self):
             self.hints = {}
 
-        def add_hint(self, path, value, rank=RANK_DERIVED_DATA):
+        def add_hint(self, path, value, rank=PRECEDENCE_DERIVED_DATA):
             self.hints[path] = (value, rank)
 
     # Arrange
@@ -1070,7 +1070,7 @@ def test_log_f_total_bootstrap_yields_to_user_params():
         "mulensinstrument.0.log_f_total"
     ]
     assert hint_val == pytest.approx(np.log10(0.6038))
-    assert hint_rank == RANK_DERIVED_DATA
+    assert hint_rank == PRECEDENCE_DERIVED_DATA
 
 
 # ---------------------------------------------------------------------------
@@ -1296,7 +1296,7 @@ def test_t0_par_user_t0_beats_seed():
     """
     Given both a user lens.0.t_0 initval and an MMEXOFAST seed,
     When the final t0_par is resolved,
-    Then the user's value wins (seeds sit below RANK_USER).
+    Then the user's value wins (seeds sit below PRECEDENCE_USER).
     """
     inst, system = _t0_par_fixture(
         user_params={"lens.0.t_0": {"initval": 2458800.0}},

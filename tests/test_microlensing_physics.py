@@ -329,7 +329,7 @@ def test_event_rate_prior_and_gradient_are_finite_for_negative_pi_rel():
 
 def test_microlensing_contradiction_no_override(caplog):
     """
-    When all variables in a violated equation are RANK_USER, the solver must
+    When all variables in a violated equation are PRECEDENCE_USER, the solver must
     leave every user value untouched and log a debug message — not silently
     sacrifice one value to satisfy the equation.
     """
@@ -350,6 +350,6 @@ def test_microlensing_contradiction_no_override(caplog):
     with caplog.at_level(logging.DEBUG):
         cm.finalize_user_params()
 
-    # When all variables are RANK_USER the solver skips and logs at debug level
+    # When all variables are PRECEDENCE_USER the solver skips and logs at debug level
     assert "over-constrained" in caplog.text.lower()
     assert "leaving all user values unchanged" in caplog.text.lower()

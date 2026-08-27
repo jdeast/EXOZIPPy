@@ -70,6 +70,12 @@ class SolveResult:
         init_scale, sigma, mu, fixed, derived, provenance}}.  provenance is
         {rank, label, relation}; label is one of "user" | "data" | "solved" |
         "default".  Numeric fields are in each parameter's user unit.
+        The `rank` KEY keeps that spelling deliberately even though the
+        constants feeding it were renamed PRECEDENCE_* (review 3.14.14): it is
+        a wire-format field, typed `rank: number | null` in
+        gui/frontend/src/api.ts, so renaming it breaks the frontend.  See the
+        precedence-scale block in config.py for the two boundaries the rename
+        stops at.
       seeds: list of {user_path: value} start points, present (non-None) only
         when multi-seed sampling produced more than one seed; otherwise None.
       warnings: log warnings emitted during prepare (strings).

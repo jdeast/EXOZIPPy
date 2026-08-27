@@ -184,7 +184,7 @@ orbit:
     # satisfy it -- which moved the start of four shipped examples (hat3, the
     # three kelt4s) and, through K, their planet masses.  It is the right
     # direction in both modes: in V_c/V_e mode a user seeds this parameter and
-    # RANK_USER wins anyway, while a user who seeds ecc/omega instead wants
+    # PRECEDENCE_USER wins anyway, while a user who seeds ecc/omega instead wants
     # exactly this back-solve.
     rank: 5
     expressions:

@@ -394,7 +394,7 @@ def test_an_explicit_eccentricity_still_wins():
       eccentricity,
     When the engine runs,
     Then the user's eccentricity stands: the timing solver carries
-      RANK_DERIVED_MIXED and must not overwrite a RANK_USER entry.
+      PRECEDENCE_DERIVED_MIXED and must not overwrite a PRECEDENCE_USER entry.
     """
     obs = _forward(0.3, 45.0)
     system = _system(

@@ -365,7 +365,7 @@ def validate_sigma_has_center(user_params, links=None, source=None):
     ``mu`` nor ``initval`` is given, Parameter.build_pymc centers that prior on
     whatever start value the system resolved (``prior_mus = np.where(~isnan(mus),
     mus, inits)``) -- and that start is frequently DERIVED FROM THE DATA: a
-    component's RANK_DERIVED_DATA hint, a relaxation-engine solution, or a
+    component's PRECEDENCE_DERIVED_DATA hint, a relaxation-engine solution, or a
     start value mkparam seeded from a previous fit's MAP.  A prior centered on
     the data's own best fit double-counts the data, so there is no
     configuration in which it is what the user meant.  We refuse to run rather
@@ -571,40 +571,88 @@ def _declared_instance_names(system_config):
     return names
 
 
-# Provenance Ranks
-RANK_USER = 100  # Explicitly in params.yaml
-RANK_DERIVED_USER = 80  # Solved using ONLY Rank 100s
-RANK_DERIVED_DATA = 60  # auto-estimated (e.g., K-band mass, RV offsets)
-RANK_DERIVED_MIXED = 40  # Solved using a mix of User and Defaults
-RANK_DEFAULT = 20  # From defaults.yaml
+# ---------------------------------------------------------------------------
+# THE PRECEDENCE SCALE (review 3.14.14).  One ordered scale that decides WHICH
+# statement about a parameter wins.  Renamed from RANK_* 2026-08-27 to say what
+# it decides: the old name read as a quality score, and it never was one -- a
+# defaults.yaml value is not "worse evidence" than a user value, it simply
+# loses to it.
+#
+# HISTORY, so the rejected design is not re-proposed: splitting provenance from
+# precedence into two fields was proposed and JDE rejected it, correctly.  The
+# scale was always a proxy for precedence; ONE ordered scale is right, and the
+# coarse ledger/GUI label stays DERIVED from it (see DATA_PRECEDENCES below)
+# rather than stored beside it.
+#
+# THE RENAME STOPS AT TWO CONTRACT BOUNDARIES, and it stops there on purpose --
+# neither was flagged by the review item, and "finishing" the rename across
+# either one is a breaking change:
+#
+#   1. `rank:` in defaults.yaml (12 sites across orbit/star/planet) is a
+#      USER-FACING CONFIG KEY.  A user may write it in their own params file,
+#      so its spelling is part of the published interface.
+#   2. `"rank"` as an exported dict key -- config.py's provenance dict,
+#      introspect.py's field allowlist, and `rank: number | null` in
+#      gui/frontend/src/api.ts -- is a WIRE-FORMAT contract with the frontend.
+#
+# So the CONSTANTS below are the named levels of the scale and are called
+# PRECEDENCE_*; the FIELD a user writes and the API exports keeps its
+# historical name, `rank`.  Local variables holding that field's value are
+# also still `rank`, deliberately: they carry the thing the key names.  If the
+# user-facing key is ever renamed, do it as its own change with a deprecation
+# path, not as a tidy-up.
+# ---------------------------------------------------------------------------
+PRECEDENCE_USER = 100  # Explicitly in params.yaml
+PRECEDENCE_DERIVED_USER = 80  # Solved using ONLY PRECEDENCE_USER inputs
+PRECEDENCE_DERIVED_DATA = 60  # auto-estimated (e.g., K-band mass, RV offsets)
+PRECEDENCE_DERIVED_MIXED = 40  # Solved using a mix of User and Defaults
+PRECEDENCE_DEFAULT = 20  # From defaults.yaml
 
-# The two ranks BETWEEN default and derived-mixed, both microlensing distance
-# seeds and both load-bearing at exactly these values.  They lived as bare 25
-# and 30 literals in lens.py, documented only in config.md, so nothing tied
-# the two sites that must stay ordered to the sentence explaining why.  Name
-# them; do NOT change them.
+# WITHIN-CLASS TIE-BREAKERS.  These two levels sit BETWEEN default and
+# derived-mixed; both are microlensing distance seeds and both are load-bearing
+# at exactly these values.  They lived as bare 25 and 30 literals in lens.py,
+# documented only in config.md, so nothing tied the two sites that must stay
+# ORDERED to the sentence explaining why.  Name them; do NOT change them.
+#
+# This pair is the PATTERN TO COPY for any future tie-break inside one class of
+# the scale (review 3.14.14's part (c)): give each side its own named level,
+# put them adjacent, and write the cycle they break in the comment between
+# them -- never leave the ordering implicit in two numeric literals in
+# different files.
 #
 # A microlensing lens sits at a few kpc, not at the 10 pc defaults.yaml
-# backstop, so the seed must beat RANK_DEFAULT.  It must also LOSE to the
+# backstop, so the seed must beat PRECEDENCE_DEFAULT.  It must also LOSE to the
 # source-distance seed, because that is what breaks the d_L <-> parallax
-# cycle: pi_rel drives d_L to RANK_MULENS_SOURCE_DISTANCE through the engine's
+# cycle: pi_rel drives d_L to PRECEDENCE_MULENS_SOURCE_DISTANCE through the engine's
 # Condition B, and the parallax is then corrected as the weaker symbol.  Both
 # yield to anything the user writes.
-RANK_MULENS_LENS_DISTANCE = 25  # ~4 kpc lens seed; beats the 10 pc default
-RANK_MULENS_SOURCE_DISTANCE = 30  # ~8 kpc bulge source; beats the lens seed
+PRECEDENCE_MULENS_LENS_DISTANCE = (
+    25  # ~4 kpc lens seed; beats the 10 pc default
+)
+PRECEDENCE_MULENS_SOURCE_DISTANCE = (
+    30  # ~8 kpc bulge source; beats the lens seed
+)
 
-# Which ranks mean "a component pushed this from the DATA", as opposed to
-# "the relaxation engine derived it".  A SET and not a numeric band, because
-# the two data ranks do not bracket a contiguous range: RANK_DERIVED_MIXED
-# (40) sits between them and RANK_DERIVED_USER (80) sits above them, and both
-# are solver ranks.  So the obvious `>= 30 and < RANK_USER` test would report
-# every engine-derived value as data-derived -- the mirror of the bug this
-# replaces, which hardcoded the two literals and so reported any NEW data
-# rank as "solved".  Add a rank here in the same commit that introduces it.
-# RANK_MULENS_LENS_DISTANCE (25) is deliberately NOT here: that is the
+# THE COARSE LABEL IS DERIVED FROM THE SCALE, never stored beside it -- that
+# is 3.14.14's part (b), and this set is the whole of the derivation.  Which
+# levels mean "a component pushed this from the DATA", as opposed to "the
+# relaxation engine derived it".
+#
+# A SET and not a numeric band, because the two data levels do not bracket a
+# contiguous range: PRECEDENCE_DERIVED_MIXED (40) sits between them and
+# PRECEDENCE_DERIVED_USER (80) sits above them, and both are solver levels.  So
+# the obvious `>= 30 and < PRECEDENCE_USER` test would report every
+# engine-derived value as data-derived -- the mirror of the bug this replaces,
+# which hardcoded the two literals and so reported any NEW data level as
+# "solved".  Add a level here in the same commit that introduces it.
+# PRECEDENCE_MULENS_LENS_DISTANCE (25) is deliberately NOT here: that is the
 # historical behavior, and whether those seeds should report as data at all
-# is review item 3.14.6, which also has to weigh their PRECEDENCE.
-DATA_RANKS = frozenset({RANK_DERIVED_DATA, RANK_MULENS_SOURCE_DISTANCE})
+# was review item 3.14.6 -- CLOSED, premise wrong (see the 2026-08-24 review's
+# appendix A): those four sites are computed exclusively from user_params
+# entries, so there was never a provenance lie to remove.
+DATA_PRECEDENCES = frozenset(
+    {PRECEDENCE_DERIVED_DATA, PRECEDENCE_MULENS_SOURCE_DISTANCE}
+)
 
 
 """ 
@@ -783,7 +831,7 @@ class ConfigManager:
         # finalize_user_params runs the relaxation engine once per seed; it
         # stays None for the ordinary single-start case (K == 1).  seed_hint_sets
         # is a per-seed observable channel that components (e.g. the MMEXOFAST
-        # loader) push into; it feeds the relaxation engine at RANK_DERIVED_DATA
+        # loader) push into; it feeds the relaxation engine at PRECEDENCE_DERIVED_DATA
         # -- MMEXOFAST is a (very fancy) derivation FROM THE DATA, not a user
         # statement, so it sits in the same tier as any other data-driven hint
         # and every user entry outranks it.
@@ -1032,7 +1080,7 @@ class ConfigManager:
 
         return translated_path, internal_value
 
-    def add_hint(self, path, value, rank=RANK_DERIVED_DATA):
+    def add_hint(self, path, value, rank=PRECEDENCE_DERIVED_DATA):
         """Register a component's ranked, data-driven START VALUE.
 
         This is the one correct channel for a start value a component
@@ -1120,7 +1168,7 @@ class ConfigManager:
         `seed_dicts` is a list of length K; each entry maps a parameter path
         (human-readable or index form) to a value in that parameter's user
         unit.  These feed the relaxation engine as one complete start point per
-        seed (see finalize_user_params), at RANK_DERIVED_DATA -- the same tier
+        seed (see finalize_user_params), at PRECEDENCE_DERIVED_DATA -- the same tier
         as ``add_hint``'s default, because the MMEXOFAST loader (the primary
         caller) is a derivation from the data, not a user statement.  Every
         user entry therefore outranks a seed.  Paths absent from a given seed
@@ -1633,8 +1681,8 @@ class ConfigManager:
         #     moves today; the order states which wins if one ever does, and
         #     a ranked measurement beating an unranked fallback is the same
         #     rule as the line above.
-        #   * UNDER the user, because every hint rank is below RANK_USER and
-        #     the engine enforces precisely that (step 1.5's `< RANK_USER`
+        #   * UNDER the user, because every hint rank is below PRECEDENCE_USER and
+        #     the engine enforces precisely that (step 1.5's `< PRECEDENCE_USER`
         #     guard).  resolve() has no ledger to consult, so HERE THE ORDER
         #     IS THE RULE: putting this loop after the user-params loop
         #     below would let a component's guess silently overwrite a
@@ -1822,7 +1870,7 @@ class ConfigManager:
         would (a) strip a caller's link strings out of their own dict, so a
         second ConfigManager built from it sees no links and a hard link
         silently degrades to a fixed parameter, and (b) feed the previous
-        solve's answer back in as RANK_USER input.  Pass 2 additionally needs
+        solve's answer back in as PRECEDENCE_USER input.  Pass 2 additionally needs
         the copy per broadcast instance, so the last instance's write does not
         clobber all the others (e.g. per-source radii solved from rho).
         """
@@ -1972,7 +2020,7 @@ class ConfigManager:
             # A list-valued initval is a set of per-seed start points (P4
             # multi-seed sampling).  The base flat_params below seeds the
             # relaxation engine with seed 0; _build_seed_overrides re-injects
-            # each seed's element as a RANK_USER override in the K-solve loop.
+            # each seed's element as a PRECEDENCE_USER override in the K-solve loop.
             if isinstance(val, (list, tuple)):
                 val = val[0]
             if val is not None:
@@ -2033,8 +2081,8 @@ class ConfigManager:
 
         # --- MULTI-SEED SOLVE (P4) ---
         # Build the K per-seed override sets in their two provenance channels
-        # (user initval lists at RANK_USER, component/MMEXOFAST seed hints at
-        # RANK_DERIVED_DATA; both fall back to the shared base_flat for any
+        # (user initval lists at PRECEDENCE_USER, component/MMEXOFAST seed hints at
+        # PRECEDENCE_DERIVED_DATA; both fall back to the shared base_flat for any
         # path they do not touch), then run the relaxation engine once per
         # seed inside this single prepare() call so every seed shares one symbol
         # environment and one relation ordering.
@@ -2188,17 +2236,17 @@ class ConfigManager:
         Two sources feed the seeds, and they are kept in SEPARATE channels
         because they carry different provenance:
           1. User initval lists in params.yaml (`initval: [v0, v1, ...]`) --
-             RANK_USER, merged into the engine's user_provided_params.
+             PRECEDENCE_USER, merged into the engine's user_provided_params.
           2. Component seed hints (config_manager.seed_hint_sets), e.g. the
-             MMEXOFAST loader -- RANK_DERIVED_DATA, passed to the engine as
+             MMEXOFAST loader -- PRECEDENCE_DERIVED_DATA, passed to the engine as
              `seed_hints` and layered in with the other data-driven hints.
 
-        Merging them into one RANK_USER dict (as this did until the 2.1.2
+        Merging them into one PRECEDENCE_USER dict (as this did until the 2.1.2
         review fix) had two consequences: a seed silently clobbered a user's
         *scalar* initval for the same path -- the scalar lives in base_flat,
         which the merged override dict overwrote -- and a seed that disagreed
         with a genuine user entry made every symbol of the connecting relation
-        RANK_USER, tripping the "over-constrained" contradiction clause.
+        PRECEDENCE_USER, tripping the "over-constrained" contradiction clause.
 
         Returns (K, user_overrides, seed_hint_overrides) where K is the seed
         count and each override list has length K of {internal_path_str:
@@ -2248,7 +2296,7 @@ class ConfigManager:
 
         # 3. Split per seed.  No merge: the two channels enter the engine at
         #    different ranks, and a path in both is resolved by rank, not by
-        #    dict order (a user list is RANK_USER and wins).
+        #    dict order (a user list is PRECEDENCE_USER and wins).
         user_overrides = []
         seed_hint_overrides = []
         for k in range(K):
@@ -2323,16 +2371,16 @@ class ConfigManager:
         """Map a numeric provenance rank to a coarse source label."""
         if rank is None:
             return "default"
-        if rank >= RANK_USER:
+        if rank >= PRECEDENCE_USER:
             return "user"
-        # Every rank a component pushes a hint at -- see DATA_RANKS for why
+        # Every rank a component pushes a hint at -- see DATA_PRECEDENCES for why
         # membership and not a numeric band.  Hardcoding the two literals
         # here meant any NEW intermediate data rank silently reported
         # "solved", which is a wrong provenance in the startup table, in
         # export_solution and in the GUI.
-        if rank in DATA_RANKS:
+        if rank in DATA_PRECEDENCES:
             return "data"
-        if rank > RANK_DEFAULT:
+        if rank > PRECEDENCE_DEFAULT:
             return "solved"
         return "default"
 
@@ -2637,7 +2685,7 @@ class ConfigManager:
 
         The test is on **provenance**, not on presence: the engine's "default
         armor" step seeds every mapped path from defaults.yaml, so almost
-        everything comes back resolved.  A rank above RANK_DEFAULT means the
+        everything comes back resolved.  A rank above PRECEDENCE_DEFAULT means the
         value traces back to a user entry or a component hint rather than to
         a default -- i.e. someone actually told us, directly or through a
         relation.
@@ -2692,7 +2740,7 @@ class ConfigManager:
             for attr, value in saved.items():
                 setattr(self, attr, value)
 
-        return {p for p in paths if ranks.get(p, 0) > RANK_DEFAULT}
+        return {p for p in paths if ranks.get(p, 0) > PRECEDENCE_DEFAULT}
 
     def resolve_and_validate_parameters(
         self, user_provided_params, tolerance=1e-3, seed_hints=None
@@ -2700,12 +2748,14 @@ class ConfigManager:
         """Run the relaxation engine.
 
         ``user_provided_params`` is {internal_path: internal_value} at
-        RANK_USER.  ``seed_hints`` is the optional per-seed hint set for this
-        seed (see ``_build_seed_overrides``), layered in at RANK_DERIVED_DATA
+        PRECEDENCE_USER.  ``seed_hints`` is the optional per-seed hint set for this
+        seed (see ``_build_seed_overrides``), layered in at PRECEDENCE_DERIVED_DATA
         alongside ``self.hints``.
         """
         resolved = {str(k): float(v) for k, v in user_provided_params.items()}
-        provenance = {str(k): RANK_USER for k in user_provided_params.keys()}
+        provenance = {
+            str(k): PRECEDENCE_USER for k in user_provided_params.keys()
+        }
         resolved_scales = {}
         scale_provenance = {}
         # Per-solve record of which relation last set each variable (seed 0's
@@ -2730,7 +2780,7 @@ class ConfigManager:
             param_rank = (
                 self.base_defaults.get(c_type, {}).get(p_name, {}).get("rank")
                 or self.base_defaults.get(p_name, {}).get("rank")
-                or RANK_DEFAULT
+                or PRECEDENCE_DEFAULT
             )
 
             if path_str not in resolved and cfg.get("initval") is not None:
@@ -2754,13 +2804,13 @@ class ConfigManager:
 
         # 1.5 LAYER IN COMPONENT HINTS
         for path_str, val in self.hints.items():
-            if provenance.get(path_str, 0) < RANK_USER:
+            if provenance.get(path_str, 0) < PRECEDENCE_USER:
                 resolved[path_str] = val
                 provenance[path_str] = self.hint_ranks.get(
-                    path_str, RANK_DERIVED_DATA
+                    path_str, PRECEDENCE_DERIVED_DATA
                 )
 
-        # 1.5b LAYER IN THIS SEED'S HINT SET (RANK_DERIVED_DATA)
+        # 1.5b LAYER IN THIS SEED'S HINT SET (PRECEDENCE_DERIVED_DATA)
         # Same tier as the component hints above: an MMEXOFAST solution is a
         # derivation from the data, not a user statement.  The guard is `<=`
         # rather than `<` so a seed WINS a tie with an ordinary component
@@ -2770,12 +2820,12 @@ class ConfigManager:
         # carry lens.0.{t_0,u_0,t_E,rho,log_s,alpha,q}, and the only
         # component hint that touches one of those, lens.0.alpha, is rank
         # 20.  The rule is stated so a future overlap has a defined answer.)
-        # Anything above RANK_DERIVED_DATA -- every user entry, in particular
+        # Anything above PRECEDENCE_DERIVED_DATA -- every user entry, in particular
         # a scalar initval, which lives in user_provided_params -- wins.
         for path_str, val in (seed_hints or {}).items():
-            if provenance.get(path_str, 0) <= RANK_DERIVED_DATA:
+            if provenance.get(path_str, 0) <= PRECEDENCE_DERIVED_DATA:
                 resolved[path_str] = val
-                provenance[path_str] = RANK_DERIVED_DATA
+                provenance[path_str] = PRECEDENCE_DERIVED_DATA
 
         # 1.6 LAYER IN SCALE HINTS (correct indexed paths)
         # The initialization loop above calls resolve() without an index, so a hint
@@ -2784,9 +2834,9 @@ class ConfigManager:
         for hint_path, hint_scale in self.scale_hints.items():
             if hint_path in self.master_symbol_map:
                 resolved_scales[hint_path] = hint_scale
-                scale_provenance[hint_path] = RANK_DERIVED_DATA
+                scale_provenance[hint_path] = PRECEDENCE_DERIVED_DATA
 
-        # 1.7 LAYER IN USER-SPECIFIED SIGMAS AS SCALES (RANK_USER)
+        # 1.7 LAYER IN USER-SPECIFIED SIGMAS AS SCALES (PRECEDENCE_USER)
         # A user-supplied Gaussian prior width is also the best available
         # preliminary scale for that parameter, and the engine's per-relation
         # Jacobian propagation (step 6 of _execute_solve) carries it into the
@@ -2813,13 +2863,13 @@ class ConfigManager:
                     c_type, p_name, full_path=path_str
                 )
                 resolved_scales[path_str] = float(up["sigma"]) * factor
-                scale_provenance[path_str] = RANK_USER
+                scale_provenance[path_str] = PRECEDENCE_USER
 
-        # 1.8 PREPARE USER-DEFINED LINK ASSIGNMENTS (directed, RANK_USER)
+        # 1.8 PREPARE USER-DEFINED LINK ASSIGNMENTS (directed, PRECEDENCE_USER)
         # initval/mu links are directed: the target is defined in terms of its
         # dependencies, never the reverse.  They are re-asserted every
         # iteration so downstream physics relations always see the linked
-        # value, and RANK_USER provenance protects it from being overridden.
+        # value, and PRECEDENCE_USER provenance protects it from being overridden.
         directed_links = []
         for link_target, link_fields in self.links.items():
             for link_field, plink in link_fields.items():
@@ -2956,7 +3006,7 @@ class ConfigManager:
         Run standalone-registered custom solvers once per relaxation
         iteration, for every instance path of their target in the symbol
         map.  A solver that raises (missing dependencies) is retried next
-        iteration; results carry RANK_DERIVED_MIXED so user values and
+        iteration; results carry PRECEDENCE_DERIVED_MIXED so user values and
         data-derived hints always win, and re-fire as inputs refine.
 
         "Always win" has to be enforced here, not just asserted: unlike the
@@ -2964,11 +3014,11 @@ class ConfigManager:
         symbol of a violated relation, a standalone solver writes its target
         unconditionally.  ``_meaningful_change`` compares values, not ranks,
         so before the guard below an explicit ``orbit.b.m_total`` in
-        params.yaml (RANK_USER) was overwritten every iteration by the body
-        mass sum and its provenance DOWNGRADED to RANK_DERIVED_MIXED --
+        params.yaml (PRECEDENCE_USER) was overwritten every iteration by the body
+        mass sum and its provenance DOWNGRADED to PRECEDENCE_DERIVED_MIXED --
         exactly the inversion the ranking system exists to prevent.  A path
         already held at a rank the solver cannot beat is therefore skipped;
-        one held at RANK_DERIVED_MIXED or below (including the solver's own
+        one held at PRECEDENCE_DERIVED_MIXED or below (including the solver's own
         previous answer) still re-fires as its inputs refine.
         """
         # Sorted: standalone_solvers is a set, and each solver both reads and
@@ -2990,11 +3040,11 @@ class ConfigManager:
                     continue
                 if pinned_vars and path in pinned_vars:
                     continue
-                if provenance.get(path, 0) > RANK_DERIVED_MIXED:
+                if provenance.get(path, 0) > PRECEDENCE_DERIVED_MIXED:
                     logger.debug(
                         f"Standalone solver for {path} skipped: already held "
                         f"at rank {provenance.get(path)} > "
-                        f"{RANK_DERIVED_MIXED}."
+                        f"{PRECEDENCE_DERIVED_MIXED}."
                     )
                     continue
                 try:
@@ -3009,7 +3059,7 @@ class ConfigManager:
                 if not _meaningful_change(
                     val,
                     resolved.get(path),
-                    RANK_DERIVED_MIXED,
+                    PRECEDENCE_DERIVED_MIXED,
                     provenance.get(path, 0),
                     tolerance,
                     provenance,
@@ -3017,7 +3067,7 @@ class ConfigManager:
                 ):
                     continue
                 resolved[path] = val
-                provenance[path] = RANK_DERIVED_MIXED
+                provenance[path] = PRECEDENCE_DERIVED_MIXED
                 self._last_solved_by[path] = (
                     f"{lookup_key} (standalone solver)"
                 )
@@ -3037,16 +3087,16 @@ class ConfigManager:
         Assert user-defined link assignments (target := f(deps), internal units).
 
         An 'initval' link IS the user's value for the target, so it always
-        wins (RANK_USER).  A 'mu' link only seeds the starting point, so it
-        yields to an explicit numeric initval (which also carries RANK_USER).
-        Scales propagate through the link Jacobian at RANK_DERIVED_USER.
+        wins (PRECEDENCE_USER).  A 'mu' link only seeds the starting point, so it
+        yields to an explicit numeric initval (which also carries PRECEDENCE_USER).
+        Scales propagate through the link Jacobian at PRECEDENCE_DERIVED_USER.
         """
         for target, fld, plink, expr_int in directed_links:
             if pinned_vars and target in pinned_vars:
                 continue
             if not all(d in resolved for d in plink.dep_paths):
                 continue
-            if fld == "mu" and provenance.get(target, 0) >= RANK_USER:
+            if fld == "mu" and provenance.get(target, 0) >= PRECEDENCE_USER:
                 continue
             try:
                 val = float(expr_int.evalf(subs=resolved))
@@ -3059,20 +3109,20 @@ class ConfigManager:
             if _meaningful_change(
                 val,
                 resolved.get(target),
-                RANK_USER,
+                PRECEDENCE_USER,
                 provenance.get(target, 0),
                 tolerance,
                 provenance,
                 target,
             ):
                 resolved[target] = val
-                provenance[target] = RANK_USER
+                provenance[target] = PRECEDENCE_USER
                 logger.debug(
                     f"Updated {target} = {val:.4g} (user link: {plink.expr_str})"
                 )
 
             # Scale propagation through the link Jacobian
-            if scale_provenance.get(target, 0) >= RANK_USER:
+            if scale_provenance.get(target, 0) >= PRECEDENCE_USER:
                 continue
             var = 0.0
             any_input = False
@@ -3092,10 +3142,10 @@ class ConfigManager:
             if (
                 any_input
                 and var > 0
-                and RANK_DERIVED_USER > scale_provenance.get(target, 0)
+                and PRECEDENCE_DERIVED_USER > scale_provenance.get(target, 0)
             ):
                 resolved_scales[target] = float(np.sqrt(var))
-                scale_provenance[target] = RANK_DERIVED_USER
+                scale_provenance[target] = PRECEDENCE_DERIVED_USER
 
     def _relax_equation(
         self,
@@ -3150,7 +3200,7 @@ class ConfigManager:
             target = candidates[0]
 
             # 4. The Contradiction Clause
-            if get_rank(target) >= RANK_USER:
+            if get_rank(target) >= PRECEDENCE_USER:
                 is_contradiction = True
 
         if not target or len(unknowns) > 1:
@@ -3164,18 +3214,20 @@ class ConfigManager:
         # Use min(input_ranks) so a chain is only as strong as its weakest link.
         inputs = [s for s in symbols_in_eq if s != target]
         min_input_rank = (
-            min(get_rank(s) for s in inputs) if inputs else RANK_DEFAULT
+            min(get_rank(s) for s in inputs) if inputs else PRECEDENCE_DEFAULT
         )
-        # Condition A floor: RANK_DEFAULT-1 so an indirectly-derived value
+        # Condition A floor: PRECEDENCE_DEFAULT-1 so an indirectly-derived value
         #   (e.g. ecc from K when secosw/sesinw are unavailable) always yields
         #   to an expression-path derivation or a default in Condition B.
-        # Condition B floor: 0, NOT RANK_DEFAULT -- a duplicate of this comment
-        #   sat directly above and claimed RANK_DEFAULT, which the line below
+        # Condition B floor: 0, NOT PRECEDENCE_DEFAULT -- a duplicate of this comment
+        #   sat directly above and claimed PRECEDENCE_DEFAULT, which the line below
         #   has never done.  0 lets low-rank inputs (e.g. pm defaults at rank
         #   10) produce low-rank results, so they cannot block higher-rank
         #   derivations from the t_E/theta_E/pi_rel chain.
-        rank_floor = RANK_DEFAULT - 1 if len(unknowns) == 1 else 0
-        new_rank = max(rank_floor, min(RANK_DERIVED_USER, min_input_rank))
+        rank_floor = PRECEDENCE_DEFAULT - 1 if len(unknowns) == 1 else 0
+        new_rank = max(
+            rank_floor, min(PRECEDENCE_DERIVED_USER, min_input_rank)
+        )
 
         if is_contradiction:
             # All variables in this equation were explicitly set by the user.
@@ -3481,11 +3533,14 @@ class ConfigManager:
 
             if jac_active_inputs:
                 min_jac_rank = min(
-                    provenance.get(s, RANK_DEFAULT) for s in jac_active_inputs
+                    provenance.get(s, PRECEDENCE_DEFAULT)
+                    for s in jac_active_inputs
                 )
                 # Refine upward only: never reduce a rank that was already determined
-                # by a valid floor (e.g. Condition A floor of RANK_DEFAULT-1).
-                new_rank = max(new_rank, min(RANK_DERIVED_USER, min_jac_rank))
+                # by a valid floor (e.g. Condition A floor of PRECEDENCE_DEFAULT-1).
+                new_rank = max(
+                    new_rank, min(PRECEDENCE_DERIVED_USER, min_jac_rank)
+                )
 
             resolved[target_str] = valid_val
             provenance[target_str] = new_rank

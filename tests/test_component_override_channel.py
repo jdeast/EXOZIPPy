@@ -378,7 +378,7 @@ def test_neither_injection_can_reach_probe_derivable(tmp_path):
     Then the grid bounds contribute nothing to it either before or after the
     move -- they carry no initval and no mu, which is what probe_derivable
     reads.  So the MMEXOFAST run/skip decision (user_hints_sufficient, which
-    tests provenance strictly above RANK_DEFAULT) is untouched by this change.
+    tests provenance strictly above PRECEDENCE_DEFAULT) is untouched by this change.
     """
     system = System(_sed_config(tmp_path), {})
     cm = system.config_manager

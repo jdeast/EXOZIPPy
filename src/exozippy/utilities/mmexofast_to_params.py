@@ -85,7 +85,7 @@ def mmexofast_to_params(
     # offset system.  Subtract it back out, exactly as
     # mmexofast_support.push_seed_hints does -- that is the ONE contract, and
     # this converter writing the un-shifted number is worse than a wrong start
-    # value: the entry it emits is RANK_USER, so it outranks every hint AND
+    # value: the entry it emits is PRECEDENCE_USER, so it outranks every hint AND
     # makes user_hints_sufficient true, suppressing the auto-MMEXOFAST rerun
     # that would otherwise have produced a correct seed.
     jd_offset = float(data.get("jd_offset", 0.0) or 0.0)

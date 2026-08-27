@@ -12,7 +12,7 @@ from scipy.optimize import nnls
 
 from exozippy.compat import patch_mulensmodel_method_order
 from exozippy.components.instrument import Instrument
-from exozippy.config import RANK_DERIVED_DATA
+from exozippy.config import PRECEDENCE_DERIVED_DATA
 from exozippy.ephemeris import get_observer_position
 from exozippy.outputs.prose import get_collector
 from exozippy.skyframe import observer_sky_offset
@@ -989,9 +989,9 @@ class MulensInstrument(Instrument):
 
         # Inject hints for derived f_source / f_blend so the relaxation engine
         # can resolve initial values.  Also push the data-estimated q_source and
-        # log_f_total as RANK_DERIVED_DATA hints so they override the defaults.yaml
+        # log_f_total as PRECEDENCE_DERIVED_DATA hints so they override the defaults.yaml
         # values while still yielding to any explicit user override in params.yaml
-        # (RANK_USER wins — essential when restarting a fit from a previous MAP).
+        # (PRECEDENCE_USER wins — essential when restarting a fit from a previous MAP).
         for i in range(self.n_elements):
             q = q_source_init[i]
             f_source_guess = f_total_init[i] * q
@@ -1003,12 +1003,12 @@ class MulensInstrument(Instrument):
                 f"{self.prefix}.{i}.f_blend", f_blend_guess
             )
             self.config_manager.add_hint(
-                f"{self.prefix}.{i}.q_source", q, rank=RANK_DERIVED_DATA
+                f"{self.prefix}.{i}.q_source", q, rank=PRECEDENCE_DERIVED_DATA
             )
             self.config_manager.add_hint(
                 f"{self.prefix}.{i}.log_f_total",
                 float(np.log10(f_total_init[i])),
-                rank=RANK_DERIVED_DATA,
+                rank=PRECEDENCE_DERIVED_DATA,
             )
 
         self.manifest = {
@@ -1044,7 +1044,7 @@ class MulensInstrument(Instrument):
                 self.config_manager.add_hint(
                     f"{self.prefix}.{i}.q_flux",
                     float(self.q_flux_init[i]),
-                    rank=RANK_DERIVED_DATA,
+                    rank=PRECEDENCE_DERIVED_DATA,
                 )
 
         # Map each instrument to a Band instance by name.
@@ -1192,7 +1192,7 @@ class MulensInstrument(Instrument):
         sources are bulge stars by construction of the event rate); scan
         the approximate dwarf locus through the SED's own BC grid to find
         the (teff, radius, mass) whose predicted apparent magnitude
-        matches; push RANK_DERIVED_DATA hints (they override defaults and
+        matches; push PRECEDENCE_DERIVED_DATA hints (they override defaults and
         yield to the user, like every data-derived start).
 
         The zeropoint mu is a calibration statement whether the user wrote
@@ -1329,7 +1329,7 @@ class MulensInstrument(Instrument):
             ("radiussed", radius),
         ):
             self.config_manager.add_hint(
-                f"star.{src}.{param}", val, rank=RANK_DERIVED_DATA
+                f"star.{src}.{param}", val, rank=PRECEDENCE_DERIVED_DATA
             )
 
     # Flux-space images of the magnitude caps these amplitudes used to carry:

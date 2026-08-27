@@ -1,7 +1,7 @@
 lens:
   # t_0 and u_0 are DATA-DERIVED: their real start comes from the NNLS/grid
   # bootstrap or from MMEXOFAST seeds, both of which enter at
-  # RANK_DERIVED_DATA (60) and so beat these RANK_DEFAULT (20) values in
+  # PRECEDENCE_DERIVED_DATA (60) and so beat these PRECEDENCE_DEFAULT (20) values in
   # every topology that supplies one.  The static numbers are a backstop for
   # the case where nothing does -- every sampled parameter must carry an
   # initval from somewhere, or `sigma: 0` on it would pin it at 0.0 (see the

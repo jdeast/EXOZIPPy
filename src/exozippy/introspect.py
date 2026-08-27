@@ -35,6 +35,11 @@ from .config import NUMERIC_KEYS
 _NUMERIC_FIELDS = NUMERIC_KEYS
 
 # Descriptive (non-numeric) fields we pass through verbatim when present.
+# "rank" keeps that spelling even though the precedence CONSTANTS were renamed
+# PRECEDENCE_* (review 3.14.14): these strings are defaults.yaml keys and are
+# emitted into the schema verbatim, so both the config key a user writes and
+# the schema field a GUI reads would break if it changed here.  config.py's
+# precedence-scale block records the boundary.
 _DESCRIPTIVE_FIELDS = (
     "unit",
     "internal_unit",
