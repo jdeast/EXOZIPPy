@@ -174,6 +174,13 @@ def test_every_example_directory_has_a_config():
         # In-progress event: data and outputs only, no config committed
         # yet (untracked local work as of 2026-08-13).
         "kb180087_obj3",
+        # Same: raw params.dat/phot.dat only, no config committed yet
+        # (untracked local work as of 2026-08-27).  This guard runs against
+        # the WORKING TREE -- which is why an uncommitted in-progress event
+        # directory trips it -- so the entry is here to keep the pre-push
+        # hook usable while that example is being built up.  Drop it once
+        # ob170114 ships a config.
+        "ob170114",
     }
     covered = {rel.split("/")[0] for _, rel in _CONFIGS}
 
