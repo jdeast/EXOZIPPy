@@ -1,0 +1,201 @@
+Unloading tools/local-user <S>
+  ERROR: Unload of sticky module skipped
+
+Unloading uge/8.8.1 <S>
+  ERROR: Unload of sticky module skipped
+sha: 17920911  slots: 8
+host: compute-76-14
+driving 27 blocks
+
+=== N2-planetary / Multipoly / timing ===
+  Multipoly   <0.5    median    2714.7 us  p90    6666.5 us  n=120  A~285
+  Multipoly   0.5-2   median     454.1 us  p90    6721.6 us  n=120  A~48.4
+  Multipoly   2-10    median     325.8 us  p90    1789.3 us  n=120  A~38.1
+  Multipoly   10-100  median     146.3 us  p90     450.7 us  n=120  A~19.4
+  Multipoly   >100    median      59.9 us  p90      64.7 us  n=120  A~1.01
+
+=== N2-planetary / BinaryMag2 / timing ===
+  BinaryMag2  <0.5    median     873.8 us  p90    2635.6 us  n=120  A~285
+  BinaryMag2  0.5-2   median     253.1 us  p90    1897.1 us  n=120  A~48.4
+  BinaryMag2  2-10    median     168.9 us  p90     589.2 us  n=120  A~38.1
+  BinaryMag2  10-100  median     106.0 us  p90     246.0 us  n=120  A~19.4
+  BinaryMag2  >100    median       1.7 us  p90       1.9 us  n=120  A~1.01
+
+=== N2-planetary / BinaryMag2 / selfconv ===
+  selfconv <0.5    rel err median 2.75e-07  max 2.70e-06  (Tol=1e-6 cost 6136.5 us)  n=40
+  selfconv 0.5-2   rel err median 3.63e-07  max 6.96e-06  (Tol=1e-6 cost 1426.3 us)  n=40
+  selfconv 2-10    rel err median 1.90e-07  max 1.87e-06  (Tol=1e-6 cost 1150.7 us)  n=40
+  selfconv 10-100  rel err median 5.01e-07  max 3.80e-06  (Tol=1e-6 cost 544.2 us)  n=40
+  selfconv >100    rel err median nan  max 3.08e-07  (Tol=1e-6 cost 1.1 us)  n=40
+
+=== N2-planetary / BinaryMag2 / irs ===
+  IRS on-caustic  A_vbm=66.271713  A_irs=66.279192  rel=1.13e-04  (vbm 522.2 us, irs 0.1 s)
+  IRS 2rho-off    A_vbm=18.084512  A_irs=18.081770  rel=1.52e-04  (vbm 282.0 us, irs 0.1 s)
+  IRS far         A_vbm=1.050952  A_irs=1.052191  rel=1.18e-03  (vbm 18.0 us, irs 0.3 s)
+
+=== N2-resonant / Multipoly / timing ===
+  Multipoly   <0.5    median     711.7 us  p90    6347.5 us  n=120  A~66.5
+  Multipoly   0.5-2   median     366.1 us  p90    2378.0 us  n=120  A~25.7
+  Multipoly   2-10    median     167.9 us  p90     874.6 us  n=120  A~12.7
+  Multipoly   10-100  median     154.2 us  p90     293.9 us  n=120  A~12.2
+  Multipoly   >100    median      59.7 us  p90      65.3 us  n=120  A~1.01
+
+=== N2-resonant / BinaryMag2 / timing ===
+  BinaryMag2  <0.5    median     349.7 us  p90    1591.8 us  n=120  A~66.5
+  BinaryMag2  0.5-2   median     224.2 us  p90     658.3 us  n=120  A~25.7
+  BinaryMag2  2-10    median     116.5 us  p90     299.1 us  n=120  A~12.7
+  BinaryMag2  10-100  median     100.5 us  p90     171.2 us  n=120  A~12.2
+  BinaryMag2  >100    median       1.8 us  p90       2.0 us  n=120  A~1.01
+
+=== N2-resonant / BinaryMag2 / selfconv ===
+  selfconv <0.5    rel err median 2.16e-07  max 1.20e-05  (Tol=1e-6 cost 3001.3 us)  n=40
+  selfconv 0.5-2   rel err median 1.24e-06  max 1.69e-05  (Tol=1e-6 cost 1461.3 us)  n=40
+  selfconv 2-10    rel err median 1.13e-06  max 4.16e-06  (Tol=1e-6 cost 652.8 us)  n=40
+  selfconv 10-100  rel err median 1.29e-06  max 1.37e-05  (Tol=1e-6 cost 565.8 us)  n=40
+  selfconv >100    rel err median nan  max 1.65e-07  (Tol=1e-6 cost 1.0 us)  n=40
+
+=== N2-resonant / BinaryMag2 / irs ===
+  IRS on-caustic  A_vbm=58.006317  A_irs=58.003135  rel=5.49e-05  (vbm 485.2 us, irs 0.1 s)
+  IRS 2rho-off    A_vbm=17.489571  A_irs=17.453992  rel=2.04e-03  (vbm 240.6 us, irs 0.1 s)
+  IRS far         A_vbm=1.050640  A_irs=1.054401  rel=3.57e-03  (vbm 20.2 us, irs 0.3 s)
+
+=== N2-stellar / Multipoly / timing ===
+  Multipoly   <0.5    median     482.3 us  p90     896.9 us  n=120  A~29.8
+  Multipoly   0.5-2   median     296.5 us  p90     749.4 us  n=120  A~17.9
+  Multipoly   2-10    median     144.2 us  p90     320.9 us  n=120  A~8.09
+  Multipoly   10-100  median      86.6 us  p90     172.1 us  n=120  A~3.56
+  Multipoly   >100    median      60.5 us  p90      65.4 us  n=120  A~1.01
+
+=== N2-stellar / BinaryMag2 / timing ===
+  BinaryMag2  <0.5    median     225.3 us  p90     353.8 us  n=120  A~29.8
+  BinaryMag2  0.5-2   median     162.7 us  p90     336.5 us  n=120  A~17.9
+  BinaryMag2  2-10    median     103.0 us  p90     159.0 us  n=120  A~8.09
+  BinaryMag2  10-100  median      59.0 us  p90     121.8 us  n=120  A~3.56
+  BinaryMag2  >100    median       1.7 us  p90       2.0 us  n=120  A~1.01
+
+=== N2-stellar / BinaryMag2 / selfconv ===
+  selfconv <0.5    rel err median 1.11e-06  max 7.16e-06  (Tol=1e-6 cost 1456.7 us)  n=40
+  selfconv 0.5-2   rel err median 1.76e-06  max 4.83e-05  (Tol=1e-6 cost 1004.0 us)  n=40
+  selfconv 2-10    rel err median 2.06e-06  max 1.23e-05  (Tol=1e-6 cost 467.1 us)  n=40
+  selfconv 10-100  rel err median 1.96e-06  max 3.86e-05  (Tol=1e-6 cost 328.3 us)  n=40
+  selfconv >100    rel err median nan  max 3.24e-07  (Tol=1e-6 cost 1.1 us)  n=40
+
+=== N2-stellar / BinaryMag2 / irs ===
+  IRS on-caustic  A_vbm=12.321913  A_irs=12.301351  rel=1.67e-03  (vbm 249.2 us, irs 0.1 s)
+  IRS 2rho-off    A_vbm=8.179210  A_irs=8.176585  rel=3.21e-04  (vbm 167.8 us, irs 0.1 s)
+  IRS far         A_vbm=1.046030  A_irs=1.032297  rel=1.33e-02  (vbm 18.7 us, irs 0.2 s)
+
+=== N3-two-planets / Multipoly / timing ===
+  Multipoly   <0.5    median     879.5 us  p90   15031.5 us  n=120  A~29.6
+  Multipoly   0.5-2   median     775.9 us  p90   11812.5 us  n=120  A~29.2
+  Multipoly   2-10    median     599.1 us  p90    3721.8 us  n=120  A~26
+  Multipoly   10-100  median     256.9 us  p90     849.8 us  n=120  A~4.27
+  Multipoly   >100    median     173.0 us  p90     187.8 us  n=120  A~1.01
+
+=== N3-two-planets / Nopoly / timing ===
+  *** BLOCK FAILED: SIGNAL 11 (crash) ***
+
+=== N3-two-planets / Singlepoly / timing ===
+  Singlepoly  <0.5    median     799.6 us  p90   12819.4 us  n=120  A~31
+  Singlepoly  0.5-2   median     655.0 us  p90    9620.8 us  n=120  A~29.1
+  Singlepoly  2-10    median     446.9 us  p90    3033.8 us  n=120  A~26
+  Singlepoly  10-100  median     193.4 us  p90     654.7 us  n=120  A~4.27
+  Singlepoly  >100    median  353147.8 us  p90  430104.8 us  n=120  A~1.02
+
+=== N3-two-planets / Multipoly / selfconv ===
+  selfconv <0.5    rel err median 4.32e-07  max 9.73e-06  (Tol=1e-6 cost 7597.4 us)  n=40
+  selfconv 0.5-2   rel err median 9.96e-07  max 7.62e-05  (Tol=1e-6 cost 5641.6 us)  n=40
+  selfconv 2-10    rel err median 8.22e-08  max 1.35e-05  (Tol=1e-6 cost 5280.6 us)  n=40
+  selfconv 10-100  rel err median 3.88e-07  max 1.23e-05  (Tol=1e-6 cost 2833.5 us)  n=40
+  selfconv >100    rel err median 1.37e-05  max 1.37e-05  (Tol=1e-6 cost 819.3 us)  n=40
+
+=== N3-two-planets / Multipoly / irs ===
+  IRS on-caustic  A_vbm=12.730763  A_irs=12.758921  rel=2.21e-03  (vbm 1018.5 us, irs 0.2 s)
+  IRS 2rho-off    A_vbm=57.387368  A_irs=57.397462  rel=1.76e-04  (vbm 2859.2 us, irs 0.2 s)
+  IRS far         A_vbm=1.055663  A_irs=1.056612  rel=8.98e-04  (vbm 198.8 us, irs 0.4 s)
+
+=== N3-binary+planet / Multipoly / timing ===
+  Multipoly   <0.5    median     864.8 us  p90    1714.1 us  n=120  A~13.3
+  Multipoly   0.5-2   median     684.7 us  p90    1900.3 us  n=120  A~13
+  Multipoly   2-10    median     302.8 us  p90     745.2 us  n=120  A~5.1
+  Multipoly   10-100  median     203.8 us  p90     414.1 us  n=120  A~2.32
+  Multipoly   >100    median     173.8 us  p90     184.2 us  n=120  A~1.01
+
+=== N3-binary+planet / Nopoly / timing ===
+  Nopoly      <0.5    median    2264.8 us  p90    5701.2 us  n=120  A~13.3
+  Nopoly      0.5-2   median    1817.7 us  p90    6169.8 us  n=120  A~13
+  Nopoly      2-10    median     719.0 us  p90    2257.7 us  n=120  A~5.1
+  Nopoly      10-100  median     533.2 us  p90     985.0 us  n=120  A~2.32
+  Nopoly      >100    median     229.5 us  p90     360.2 us  n=120  A~1.01
+
+=== N3-binary+planet / Singlepoly / timing ===
+  Singlepoly  <0.5    median     627.9 us  p90    1301.8 us  n=120  A~13.3
+  Singlepoly  0.5-2   median     478.1 us  p90    1489.2 us  n=120  A~13
+  Singlepoly  2-10    median     226.0 us  p90     576.8 us  n=120  A~5.1
+  Singlepoly  10-100  median     142.1 us  p90     289.0 us  n=120  A~2.32
+  Singlepoly  >100    median     134.6 us  p90     143.7 us  n=120  A~1.01
+
+=== N3-binary+planet / Multipoly / selfconv ===
+  selfconv <0.5    rel err median 9.03e-07  max 6.25e-06  (Tol=1e-6 cost 7067.9 us)  n=40
+  selfconv 0.5-2   rel err median 1.16e-06  max 2.33e-05  (Tol=1e-6 cost 5064.7 us)  n=40
+  selfconv 2-10    rel err median 1.66e-06  max 2.39e-05  (Tol=1e-6 cost 1773.5 us)  n=40
+  selfconv 10-100  rel err median 2.06e-06  max 1.35e-05  (Tol=1e-6 cost 1054.3 us)  n=40
+  selfconv >100    rel err median 1.37e-05  max 1.37e-05  (Tol=1e-6 cost 806.1 us)  n=40
+
+=== N3-binary+planet / Multipoly / irs ===
+  IRS on-caustic  A_vbm=3.922642  A_irs=3.921401  rel=3.16e-04  (vbm 407.2 us, irs 0.3 s)
+  IRS 2rho-off    A_vbm=3.775220  A_irs=3.779930  rel=1.25e-03  (vbm 394.6 us, irs 0.3 s)
+  IRS far         A_vbm=1.104428  A_irs=1.103032  rel=1.27e-03  (vbm 205.2 us, irs 0.3 s)
+
+=== N4-three-companions / Multipoly / timing ===
+  Multipoly   <0.5    median    1783.4 us  p90    3384.8 us  n=120  A~10.5
+  Multipoly   0.5-2   median    1409.5 us  p90    4049.6 us  n=120  A~9.11
+  Multipoly   2-10    median     663.4 us  p90    1485.1 us  n=120  A~3.78
+  Multipoly   10-100  median     463.4 us  p90     742.8 us  n=120  A~2.16
+  Multipoly   >100    median     438.0 us  p90     452.3 us  n=120  A~1
+
+=== N4-three-companions / Nopoly / timing ===
+  Nopoly      <0.5    median    3021.4 us  p90    6212.1 us  n=120  A~10.5
+  Nopoly      0.5-2   median    2221.9 us  p90    8207.3 us  n=120  A~9.11
+  Nopoly      2-10    median     978.7 us  p90    2699.5 us  n=120  A~3.78
+  Nopoly      10-100  median     680.4 us  p90    1287.4 us  n=120  A~2.16
+  Nopoly      >100    median     401.0 us  p90     530.7 us  n=120  A~1
+
+=== N4-three-companions / Singlepoly / timing ===
+double free or corruption (!prev)
+  *** BLOCK FAILED: SIGNAL 6 (crash) ***
+
+=== N4-three-companions / Nopoly / selfconv ===
+  *** BLOCK FAILED: SIGNAL 11 (crash) ***
+
+=== N4-three-companions / Nopoly / irs ===
+  IRS on-caustic  A_vbm=2.159722  A_irs=2.148592  rel=5.18e-03  (vbm 1369.8 us, irs 0.5 s)
+  IRS 2rho-off    A_vbm=1.284189  A_irs=1.273240  rel=8.60e-03  (vbm 590.0 us, irs 0.5 s)
+  IRS far         A_vbm=1.047972  A_irs=1.032297  rel=1.52e-02  (vbm 445.6 us, irs 0.7 s)
+
+wrote nlens_vbm_bench.json (108 rows, 3 failed blocks)
+
+=== COST vs N at the SHIPPED dispatch, median us/call ===
+geometry               method           <0.5      0.5-2       2-10     10-100       >100
+N2-planetary           BinaryMag2      873.8      253.1      168.9      106.0        1.7
+N2-resonant            BinaryMag2      349.7      224.2      116.5      100.5        1.8
+N2-stellar             BinaryMag2      225.3      162.7      103.0       59.0        1.7
+N3-two-planets         Multipoly       879.5      775.9      599.1      256.9      173.0
+N3-binary+planet       Multipoly       864.8      684.7      302.8      203.8      173.8
+N4-three-companions    Nopoly         3021.4     2221.9      978.7      680.4      401.0
+
+=== METHOD A/B at N>=3, median us/call ===
+N3-two-planets         Multipoly       879.5      775.9      599.1      256.9      173.0
+N3-two-planets         Nopoly              -          -          -          -          -
+N3-two-planets         Singlepoly      799.6      655.0      446.9      193.4   353147.8
+N3-binary+planet       Multipoly       864.8      684.7      302.8      203.8      173.8
+N3-binary+planet       Nopoly         2264.8     1817.7      719.0      533.2      229.5
+N3-binary+planet       Singlepoly      627.9      478.1      226.0      142.1      134.6
+N4-three-companions    Multipoly      1783.4     1409.5      663.4      463.4      438.0
+N4-three-companions    Nopoly         3021.4     2221.9      978.7      680.4      401.0
+N4-three-companions    Singlepoly          -          -          -          -          -
+
+=== BLOCKS THAT FAILED (these are findings) ===
+  N3-two-planets         Nopoly      timing    SIGNAL 11 (crash)
+  N4-three-companions    Singlepoly  timing    SIGNAL 6 (crash)
+  N4-three-companions    Nopoly      selfconv  SIGNAL 11 (crash)

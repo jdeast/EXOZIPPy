@@ -1,0 +1,26 @@
+Unloading tools/local-user <S>
+  ERROR: Unload of sticky module skipped
+
+Unloading uge/8.8.1 <S>
+  ERROR: Unload of sticky module skipped
+Initializing NUTS using jitter+adapt_diag...
+Multiprocess sampling (4 chains in 4 jobs)
+NUTS: [star.logmass_raw, star.pm_ra_raw, star.pm_dec_raw, star.distance_raw, star.rv_raw, lens.t_0_raw, lens.u_0_raw, mulensinstrument.log_f_total_raw, mulensinstrument.q_source_raw, mulensinstrument.err_scale_raw]
+Sampling 4 chains for 1_000 tune and 1_000 draw iterations (4_000 + 4_000 draws total) took 787 seconds.
+There were 174 divergences after tuning. Increase `target_accept` or reparameterize.
+Chain 0 reached the maximum tree depth. Increase `max_treedepth`, increase `target_accept` or reparameterize.
+Chain 1 reached the maximum tree depth. Increase `max_treedepth`, increase `target_accept` or reparameterize.
+Chain 2 reached the maximum tree depth. Increase `max_treedepth`, increase `target_accept` or reparameterize.
+Chain 3 reached the maximum tree depth. Increase `max_treedepth`, increase `target_accept` or reparameterize.
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+{
+ "pipeline": "mulens_pspl",
+ "seed": 1021,
+ "snr": 300.0,
+ "n_epochs": 100,
+ "lens.t_0": -0.7891839507775964,
+ "lens.u_0": 0.9445792869537352,
+ "lens.t_E": -0.8471019774775571,
+ "mulensinstrument.f_source": 0.8910181845816315,
+ "mulensinstrument.f_blend": -0.7866061640555333
+}
