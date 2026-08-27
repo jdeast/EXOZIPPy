@@ -1,3 +1,5 @@
+from collections import namedtuple
+
 import numpy as np
 import pytensor.tensor as pt
 from exoplanet_core.pymc import ops
@@ -76,6 +78,58 @@ MAX_ECC = 0.9999
 # can distinguish, and it is inert for every e above it -- pt.maximum returns
 # its argument bit-for-bit, so no non-circular fit moves.
 ECC_FLOOR = 1e-30
+
+
+#: Field-by-field meaning documented in `state_vector_terms`.
+StateVectorTerms = namedtuple(
+    "StateVectorTerms",
+    "sinf cosf r_over_a sinwf coswf vx_phase vz_phase ecc_factor",
+)
+
+
+def state_vector_terms(t, tp, n, ecc, sinw=None, cosw=None, circular=False):
+    """The shared Kepler-to-state kernel (review 4.8.2).
+
+    Every element-to-observable projection in the tree -- `get_true_anomaly`,
+    `get_sky_position` / `state_vectors`, `get_radial_velocity`, the transit
+    evaluators' (b, Z) geometry, and `ltt.line_of_sight_kinematics` -- is a
+    composition of these terms with its own amplitude and orientation
+    factors.  One Kepler solve, one set of angle identities, one place an
+    N-body backend has to replace (review 8.8.15).
+
+    Inputs are raw broadcastable tensors, already indexed/broadcast by the
+    caller (`Orbit.state_vectors` does the `[orbit_map][None, :]` dance; the
+    transit evaluators hand in their own retarded-time grids).  `circular`
+    is the caller's STRUCTURAL claim, forwarded to `solve_kepler` (review
+    6.8.2).  With `sinw`/`cosw` omitted (`get_true_anomaly`'s case) the
+    omega-dependent terms are returned as None.
+
+    Returns a `StateVectorTerms` named tuple:
+
+      sinf, cosf   -- sin/cos of the true anomaly
+      r_over_a     -- (1 - e^2) / (1 + e cos f), separation in units of a
+      sinwf, coswf -- sin/cos(omega + f)
+      vx_phase     -- -(sinwf + e sinw):  d/dt[r_over_a * coswf] = k * vx_phase
+      vz_phase     --  (coswf + e cosw):  d/dt[r_over_a * sinwf] = k * vz_phase
+                      with k = n / sqrt(1 - e^2); so a velocity component is
+                      (n * a / ecc_factor) times its phase term.  Named for
+                      the axes they feed in the zero-node edge-on frame.
+      ecc_factor   -- sqrt(1 - e^2)
+    """
+    M = (t - tp) * n
+    sinf, cosf = solve_kepler(M, ecc, circular=circular)
+    r_over_a = (1.0 - pt.sqr(ecc)) / (1.0 + ecc * cosf)
+    if sinw is None:
+        sinwf = coswf = vx_phase = vz_phase = None
+    else:
+        coswf = cosw * cosf - sinw * sinf
+        sinwf = sinw * cosf + cosw * sinf
+        vx_phase = -(sinwf + ecc * sinw)
+        vz_phase = coswf + ecc * cosw
+    ecc_factor = pt.sqrt(1.0 - pt.sqr(ecc))
+    return StateVectorTerms(
+        sinf, cosf, r_over_a, sinwf, coswf, vx_phase, vz_phase, ecc_factor
+    )
 
 
 def _sqrt_ecc(ecc):

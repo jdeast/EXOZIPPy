@@ -772,18 +772,25 @@ class Transit(Instrument):
                     (1, 1, planets.n_elements)
                 )
 
-            M = (t_grid_final - tp) * n
-            # The shared solve, which skips the Newton iteration outright
-            # when every orbit these planets sit on is pinned circular
-            # (review 6.8.2).
-            sinf, cosf = orbit_physics.solve_kepler(
-                M, ecc, circular=orbits._all_circular(planets.orbit_map)
+            # The shared Kepler-to-state kernel (skips the Newton iteration
+            # outright when every orbit these planets sit on is pinned
+            # circular, review 6.8.2).
+            terms = orbit_physics.state_vector_terms(
+                t_grid_final,
+                tp,
+                n,
+                ecc,
+                sinw=sinw,
+                cosw=cosw,
+                circular=orbits._all_circular(planets.orbit_map),
             )
-
-            r_norm = a_rstar * (1.0 - pt.sqr(ecc)) / (1.0 + ecc * cosf)
-
-            sin_wf = sinw * cosf + cosw * sinf
-            cos_wf = cosw * cosf - sinw * sinf
+            # NOT a_rstar * terms.r_over_a: this association is the
+            # pre-refactor one, kept because the reassociated product
+            # rounded differently (1 ulp on hat3's start logp) and the
+            # 4.8.2 refactor is pinned bit-identical.
+            r_norm = a_rstar * (1.0 - pt.sqr(ecc)) / (1.0 + ecc * terms.cosf)
+            sin_wf = terms.sinwf
+            cos_wf = terms.coswf
 
             # (n_g, k_g, N_planets)
             b = pt.sqrt(
@@ -1148,20 +1155,29 @@ class Transit(Instrument):
                     t_grid, ltt_star_factor[None, :]
                 ) + pt.zeros((1, planets.n_elements))
 
-            M = (t_grid_final - tp) * n
-            # The shared solve, which skips the Newton iteration outright
-            # when every orbit these planets sit on is pinned circular
-            # (review 6.8.2).
-            sinf, cosf = orbit_physics.solve_kepler(
-                M, ecc, circular=orbits._all_circular(planets.orbit_map)
+            # The shared Kepler-to-state kernel (skips the Newton iteration
+            # outright when every orbit these planets sit on is pinned
+            # circular, review 6.8.2).
+            terms = orbit_physics.state_vector_terms(
+                t_grid_final,
+                tp,
+                n,
+                ecc,
+                sinw=sinw,
+                cosw=cosw,
+                circular=orbits._all_circular(planets.orbit_map),
             )
 
             a_rstar = planets.ar.value[None, :]
             p_ratio = planets.p.value[None, :]
-            r_norm = a_rstar * (1.0 - pt.sqr(ecc)) / (1.0 + ecc * cosf)
+            # NOT a_rstar * terms.r_over_a: this association is the
+            # pre-refactor one, kept because the reassociated product
+            # rounded differently (1 ulp on hat3's start logp) and the
+            # 4.8.2 refactor is pinned bit-identical.
+            r_norm = a_rstar * (1.0 - pt.sqr(ecc)) / (1.0 + ecc * terms.cosf)
 
-            sin_wf = sinw * cosf + cosw * sinf
-            cos_wf = cosw * cosf - sinw * sinf
+            sin_wf = terms.sinwf
+            cos_wf = terms.coswf
             cos_i = pt.cos(inc)
 
             b = pt.sqrt(
