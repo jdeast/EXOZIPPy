@@ -301,6 +301,48 @@ the angle has no periodic boundary for the sampler to stall against.  This
 is a parameterisation choice and not a convention: the reported $\alpha$
 means C15.
 
+\paragraph{C24 --- lens orbital motion.}  In the linear mode the companion
+geometry evolves as
+\begin{equation}
+s_j(t) = s_{j,0} + \dot{s}_j\,(t - t_{0,\rm par}), \qquad
+\alpha_j(t) = \alpha_{j,0} + \dot{\alpha}_j\,(t - t_{0,\rm par}),
+\end{equation}
+with both rates constant, anchored at the same fiducial epoch
+$t_{0,\rm par}$ the parallax uses (C5) --- the shared anchor, recommended by
+\citet{Skowron:2011} (their Eq.~A17), is what makes the orbital and parallax
+terms composable.  These definitions are those of \texttt{MulensModel} (the
+identity mapping of C18 extends to $\dot{s}$ and $\dot{\alpha}$) and of
+\citet{Skowron:2011} Section~3.3.1 up to one sign of vocabulary: their
+velocity components $(\gamma_\parallel, \gamma_\perp)$ --- parallel and
+perpendicular to the binary axis, a right-handed pair oriented like
+$(N, E)$ --- satisfy
+\begin{equation}
+\gamma_\parallel = \dot{s}/s_0, \qquad
+\gamma_\perp = -\dot{\alpha} = +\frac{d\,\mathrm{PA_{axis}}}{dt},
+\label{eq:gammaperp}
+\end{equation}
+their Appendix~A.4.  The minus sign is a consequence of C15 itself: $\alpha$
+is measured \emph{from} the (moving) binary axis \emph{to} the fixed
+$\hat{\tau}$, so it runs opposite to the axis's own position angle, and
+$\gamma_\perp$ is the axis's physical sky rotation rate, positive in the C2
+sense.  No handedness correction enters: our left-handed triple (C1) and
+\citet{Skowron:2011}'s right-handed one differ only in which way the
+line-of-sight axis points, and that flip cancels the handedness-label flip
+identically in the sky plane.  A sign for $\dot{\alpha}$ or $\gamma_\perp$
+is meaningful only jointly with $\mathrm{sign}(u_0)$: the orbiting-binary
+ecliptic degeneracy (their Eq.~A16) reverses
+$(u_0, \alpha, \pi_{\rm E,\perp}, \gamma_\perp)$ together.  In the Keplerian
+mode the same definitions are driven by a projected orbit,
+$s_j(t) = |\vec{\delta}_j(t)|$ and $\alpha_j(t) = \alpha_{j,0} -
+[\mathrm{PA_{axis}}(t) - \mathrm{PA_{axis}}(t_{0,\rm par})]$, where the
+minus sign is Equation~\ref{eq:gammaperp} again; its correctness is pinned
+against a synthetic orbit of known inclination rather than against a fit,
+because the rotation sense of the binary axis is the only quantity here
+that measures $\mathrm{sign}(\cos i)$, and the wrong sign lowers no
+$\chi^2$ --- it silently reports the reflected orbit
+($\Omega_{\rm node} \rightarrow -\Omega_{\rm node}$,
+$i \rightarrow 180^\circ - i$; their Section~5.2).
+
 \subsection{Translating to and from other conventions}
 \label{sec:conv:mappings}
 

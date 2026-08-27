@@ -350,6 +350,66 @@ seeding `lens.<name>.alpha` in degrees is propagated to the pair by the relaxati
 `alpha`'s user unit is degrees and its internal unit is radians; both magnification
 backends take degrees, which is what `Lens._alpha_deg` converts to.
 
+### C24 -- lens orbital motion: `ds_dt`, `dalpha_dt`, and the gamma identities
+
+**The linear mode is definitional.** Per companion `j`, with `t0_par` the same anchor the
+parallax uses (C5; Skowron Eq. A17 recommends `t_0,kep = t_0,par`, which is what makes the
+orbital and parallax terms composable):
+
+    s_j(t)     = s_j0     + ds_dt_j     * (t - t0_par)/365.25
+    alpha_j(t) = alpha_j0 + dalpha_dt_j * (t - t0_par)/365.25
+
+`ds_dt` is in Einstein radii of the TOTAL mass (C13) per YEAR; `dalpha_dt`'s internal unit
+is rad/yr and its user unit deg/yr -- the identity mapping to MulensModel's `ds_dt` /
+`dalpha_dt` (C18 extends to both), and Skowron's own Section 3.3.1 parameterization up to
+the sign vocabulary below.
+
+**Skowron's gamma vocabulary maps onto these with ONE minus sign, and it is not optional:**
+
+    gamma_par     = ds_dt / s_0
+    gamma_perp    = -dalpha_dt        [rad/yr]
+    d(PA_axis)/dt = +gamma_perp = -dalpha_dt
+
+The identity `gamma_perp = -dalpha/dt` is Skowron+2011 Appendix A.4 verbatim, and their
+Section 3.3.1 writes the linear expansion as `alpha(t) = alpha_0 - gamma_perp (t - t0_par)`.
+It is also a one-line consequence of C15/C20: `alpha = phi_pi - PA(axis)` with `tau_hat`
+fixed, so `alpha` runs OPPOSITE to the axis's own position angle.  `gamma_perp` is therefore
+the axis's physical sky rotation rate, positive in the C2 sense (North through East) --
+`(gamma_par, gamma_perp)` is "right-handed ... just like (N, E)" (A.4), and no handedness
+correction relates it to our frame: C1's left-handed triple and Skowron's right-handed one
+differ only in which way the THIRD axis points, and that flip cancels the handedness label
+flip identically in the sky plane, the only plane `alpha` and `gamma_perp` live in.
+
+**Never quote a sign for `dalpha_dt` or `gamma_perp` without stating `sign(u_0)`.**  The
+orbiting-binary ecliptic degeneracy (Skowron Eq. A16, the C23 mirror extended to orbital
+motion) reverses all four together:
+
+    (u_0, alpha, pi_E_perp, gamma_perp) -> -(u_0, alpha, pi_E_perp, gamma_perp)
+
+For OGLE-2009-BLG-020 itself (their Eq. 16, near-equinox peak) `pi_E_perp ~ pi_E_N`.  A
+mirror seed must flip all four or it is a different (and usually terrible) model, not the
+degenerate partner.
+
+**The keplerian mode projects an orbit through the same definitions**: with
+`delta_j(t) = (dE, dN)` the companion's offset from the primary in Einstein radii
+(`Orbit.state_vectors` scaled by `a / (D_L * theta_E)`),
+
+    s_j(t)      = |delta_j(t)|
+    PA_axis(t)  = atan2(dE, dN)
+    alpha_j(t)  = alpha_j0 - [PA_axis(t) - PA_axis(t0_par)]
+
+The MINUS is the same `d(PA_axis)/dt = -dalpha/dt` rule; getting it wrong does not raise
+chi2 -- it silently reports the wrong inclination branch (the rotation sense of the binary
+axis is the ONLY thing that measures `sign(cos i)` here; Skowron Section 5.2:
+`gamma_perp -> -gamma_perp` is `Omega_node -> -Omega_node, i -> pi - i`).  That is why the
+sign is pinned by a synthetic orbit with KNOWN inclination rather than by a chi2
+improvement.
+
+- Implemented in: `Lens` (config keys `orbital_motion: linear|keplerian`, `orbit:`),
+  `mulensing/physics.py`, `op.VBMDirectMagOp` (per-epoch `s_t`/`alpha_t` inputs).
+- Pinned by: `tests/test_lens_orbital_motion.py` -- the known-inclination sign test, the
+  MulensModel linear-motion parity test, and the A16 mirror test.
+
 ---
 
 ## 5. Mappings to other conventions
@@ -516,3 +576,22 @@ while the fitted `alpha` (307.686) sat 0.3 degrees from the light curve's own op
 - **"Yee+2014"** in `MulensInstrument._abs_to_delta`'s docstring and in review item 3.6.1
   is Yee et al. **2015**, ApJ 802, 76 -- cited by the year of its 2014 arXiv posting
   (arXiv:1410.5429). The bib key added for this document is `Yee:2015`.
+- **MulensModel 3.11.0's KEPLERIAN lens orbital motion contradicts its own linear mode**
+  (found 2026-08-27, measured on the installed package; reproduction in the private notes
+  repo, `mm_keplerian_sign_check.py`).  With `dalpha_dt = +40 deg/yr`, the linear branch of
+  `ModelParameters.get_alpha` returns `d(alpha)/dt = +40` at `t_0_kep` (definitional,
+  correct) while every keplerian variant returns `-40` -- the composition
+  `alpha + atan2(y, x)` should be `alpha - atan2(y, x)` by C24's
+  `d(PA_axis)/dt = -dalpha/dt` rule.  The circular-from-`s_z` variant additionally corrupts
+  the reference geometry (`alpha(t_0_kep)` off by ~19 deg, `ds/dt` sign flipped, plus an
+  IEEE `-0.0` `atan2` edge case).  NOT contaminated, and still good references: the
+  `gamma_perp` property (`-dalpha_dt`, docstring and body -- the C24 identity), the LINEAR
+  orbital-motion branch, and every static/parallax convention C18's parity tests pin.
+  Consequence: EXOZIPPy's keplerian mode is validated against first-principles synthetic
+  orbits, never against MulensModel's keplerian mode.
+- **Skowron+2011 Eq. B9 displays its two rotation matrices under swapped labels**: the
+  matrix printed as `R_x(beta)` rotates about the THIRD axis and the one printed as
+  `R_z(beta)` about the FIRST, while the text says "around the first and third axes
+  respectively" and every use (B8, B15-B17, and `cos i = R_33` in B27) requires the
+  standard z-x-z Euler composition.  A typographic swap with no propagated consequence in
+  the paper -- recorded so nobody transcribes B9 literally.

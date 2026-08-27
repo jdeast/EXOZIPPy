@@ -1,6 +1,6 @@
 import sympy as sp
 
-from ...constants import KAPPA, RSUN_TO_AU
+from ...constants import DAYS_PER_YEAR, KAPPA, RSUN_TO_AU
 
 # 1. Define all possible symbols
 # These MUST match the strings produced by ConfigManager.finalize_user_params
@@ -175,7 +175,7 @@ RELATIONS = [
     # Starts land a few percent off for large-pi_rel events; the samplers
     # absorb that.  (MMEXOFAST t_E seeds are geocentric, so the back-solved
     # pms are helio-approximate too.)
-    sp.Eq(t_E, theta_E / (mu_rel_mag / 365.25)),
+    sp.Eq(t_E, theta_E / (mu_rel_mag / DAYS_PER_YEAR)),
     # Relative Motion Magnitude
     sp.Eq(mu_rel_mag**2, mu_ra_rel**2 + mu_dec_rel**2),
     # Proper Motion Vector Components

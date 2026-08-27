@@ -101,13 +101,13 @@ from exozippy.components.parameterization import (
     merge_overrides,
     pin_unselected,
 )
+from exozippy.constants import DAYS_PER_YEAR
 from exozippy.ephemeris import get_observer_position
 from exozippy.outputs.texutils import latex_escape
 from exozippy.skyframe import parallax_factors
 
 RAD2MAS = (1.0 * u.rad).to(u.mas).value  # 2.06264806e8
 RSUN_AU = (1.0 * u.solRad).to(u.AU).value  # 4.6505e-3
-DAYS_PER_YEAR = 365.25
 
 VALID_MODES = ("gaia", "abs", "rel")
 
