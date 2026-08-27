@@ -1,0 +1,22 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q sThC.q
+#$ -cwd
+#$ -j y
+#$ -N diagcosi
+#$ -o diagcosi.$JOB_ID.log
+#
+#   qsub diag_transit_cosi.job
+# Diagnose planet.b's ESS ~8 in the transit inject-recover leg (7.13.1).
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_$JOB_ID"
+
+cd $HOME/python/EXOZIPPy/examples/validation
+echo "sha: $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)"
+python -u diag_transit_cosi.py

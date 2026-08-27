@@ -1,0 +1,42 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q sThC.q
+#$ -cwd
+#$ -j y
+#$ -N injrec
+#$ -o injrec.$JOB_ID.$TASK_ID.log
+#$ -t 1-1
+#
+#   qsub -t 1-90 inject_recover.job          (the array)
+#   qsub -t 61-90 inject_recover.job         (the transit block alone)
+#   qsub -v SMOKE=1 inject_recover.job       (one smoke realization)
+# Task-id map: pipeline block of 30 (1-30 mulens_pspl, 31-60 rv,
+# 61-90 transit); within a block: snr in {30, 100, 300} x epochs in
+# {100, 400} x 5 seeds.  For the transit leg snr is the PER-POINT DEPTH
+# SNR (sigma_flux = (Rp/Rstar)^2 / snr) and the epochs are split over
+# three transit windows, not spread over the phase curve.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_$JOB_ID.${SGE_TASK_ID:-0}"
+
+cd $HOME/python/EXOZIPPy/examples/validation
+T=${SGE_TASK_ID:-1}
+if [ -n "$SMOKE" ]; then
+  python -u inject_recover.py --pipeline mulens_pspl --seed 7 --snr 100 \
+    --out rows/smoke.json
+  exit $?
+fi
+if [ "$T" -le 30 ]; then PIPE=mulens_pspl; I=$((T-1));
+elif [ "$T" -le 60 ]; then PIPE=rv; I=$((T-31));
+else PIPE=transit; I=$((T-61)); fi
+SNRS=(30 100 300); EPOCHS=(100 400)
+SNR=${SNRS[$(( (I/10) % 3 ))]}
+NEP=${EPOCHS[$(( (I/5) % 2 ))]}
+SEED=$(( 1000 + I ))
+python -u inject_recover.py --pipeline $PIPE --seed $SEED --snr $SNR \
+  --n-epochs $NEP --out rows/${PIPE}_snr${SNR}_n${NEP}_s${SEED}.json
