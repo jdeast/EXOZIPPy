@@ -153,25 +153,23 @@ def line_of_sight_kinematics(
         Line-of-sight position [R_sun], velocity [R_sun/day], and
         acceleration [R_sun/day^2], each scaled by `factor`.
     """
-    M = (t - tp) * n
-    # The one shared Kepler solve; `circular=True` (the caller's STRUCTURAL
-    # claim, from Orbit.circular_orbits) skips the Newton iteration -- see
-    # orbit.physics.solve_kepler, review 6.8.2.
-    sinf, cosf = orbit_physics.solve_kepler(M, ecc, circular=circular)
+    # The shared Kepler-to-state kernel (one Kepler solve; `circular` is
+    # the caller's STRUCTURAL claim from Orbit.circular_orbits, forwarded
+    # -- see orbit.physics.solve_kepler, review 6.8.2).
+    terms = orbit_physics.state_vector_terms(
+        t, tp, n, ecc, sinw=sinw, cosw=cosw, circular=circular
+    )
 
-    ecc_factor = pt.sqrt(1.0 - pt.sqr(ecc))
-    r_over_a = (1.0 - pt.sqr(ecc)) / (1.0 + ecc * cosf)  # r / a_rel
-    sin_wf = sinw * cosf + cosw * sinf  # sin(f + w)
-    cos_wf = cosw * cosf - sinw * sinf  # cos(f + w)
+    r = a_rel * terms.r_over_a  # physical separation, relative orbit [R_sun]
+    z_rel = r * terms.sinwf * sin_i
 
-    r = a_rel * r_over_a  # physical separation, relative orbit [R_sun]
-    z_rel = r * sin_wf * sin_i
-
-    # d/dt[r*sin(f+w)]*sin_i, derived directly (not copied) from
-    # dr/dt = n*a*e*sinf/sqrt(1-e^2) and r^2*df/dt = n*a^2*sqrt(1-e^2):
-    # standard two-body calculus, matching the classic RV-curve form.
-    vamp = n * a_rel / ecc_factor
-    vz_rel = vamp * sin_i * (ecc * cosw + cos_wf)
+    # d/dt[r*sin(f+w)]*sin_i, via the kernel's vz_phase = cos(f+w) + e*cos(w)
+    # (derived directly, not copied, from dr/dt = n*a*e*sinf/sqrt(1-e^2) and
+    # r^2*df/dt = n*a^2*sqrt(1-e^2): standard two-body calculus, matching
+    # the classic RV-curve form).
+    vamp = n * a_rel / terms.ecc_factor
+    vz_rel = vamp * sin_i * terms.vz_phase
+    r_over_a = terms.r_over_a
 
     # Line-of-sight component of the two-body acceleration, -(GM/r^3)*z
     # with GM = n^2*a^3 (Kepler's third law) -- a coordinate-sign-agnostic

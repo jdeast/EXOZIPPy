@@ -1833,31 +1833,34 @@ class Orbit(Component):
             n = self.n.value[orbit_idx]
             ecc = self.ecc.value[orbit_idx]
 
-        M = (t_grid - tp) * n
-        sinf, cosf = physics.solve_kepler(
-            M,
+        terms = physics.state_vector_terms(
+            t_grid,
+            tp,
+            n,
             ecc,
             circular=self._all_circular(
                 None if orbit_idx is None else [orbit_idx]
             ),
         )
 
-        return pt.arctan2(sinf, cosf)
+        return pt.arctan2(terms.sinf, terms.cosf)
 
-    def get_sky_position(self, t, a_scale, orbit_map, relative=False):
-        """
-        Vectorized sky-plane offsets of an orbiting body.
+    def state_vectors(self, t, a_scale, orbit_map, relative=False):
+        """Full sky-frame state of an orbiting body:
+        (X, Y, Z, VX, VY, VZ), each (N_obs, N_planets).
 
         t: (N_obs,) vector of times [BJD_TDB]
         a_scale: (N_planets,) amplitude scaling, e.g. the photocenter or
-                 relative semimajor axis in mas; sets the output units
+                 relative semimajor axis in mas; positions come out in
+                 units of a_scale and velocities in a_scale/day
         orbit_map: integer map from planet slots to orbit elements
         relative: False -> the primary/photocenter orbit around the
                   barycenter (uses omega_*); True -> the companion's orbit
                   relative to the primary (omega_* + 180 deg)
 
-        Returns (dE, dN), each (N_obs, N_planets): offsets toward East and
-        North in the units of a_scale.
+        Axes are skyframe.md's: X = North, Y = East, Z = distance growing
+        AWAY from the observer, so dZ/dt carries the radial-velocity sign
+        (positive = receding).
 
         Conventions (EXOFASTv2): omega is the argument of periastron of the
         PRIMARY's orbit (omega_*). bigomega is the position angle of the
@@ -1871,6 +1874,15 @@ class Orbit(Component):
         that per orbit, and System.fold_degenerate_draws, which folds the two
         labels together for the convergence check, seed ledger and mode
         reporter (review 1.8.3).
+
+        This is the accessor an N-body backend replaces (reviews 4.8.2,
+        8.8.15): a consumer that can take a full state vector should take it
+        from here rather than re-projecting the elements itself.  The
+        `a_scale` factoring (the Keplerian's self-similarity) and the
+        `relative` omega-flip are Keplerian conveniences that will NOT
+        survive that swap -- an integrator emits physical units and
+        `relative` becomes a subtraction -- so new consumers should treat
+        both as this method's business, never re-derive them.
         """
         t_grid = t[:, None]
         tp = self.tp.value[orbit_map][None, :]
@@ -1879,6 +1891,7 @@ class Orbit(Component):
         cosw = self.cosw.value[orbit_map][None, :]
         sinw = self.sinw.value[orbit_map][None, :]
         cosi = self.cosi.value[orbit_map][None, :]
+        sini = self.sini.value[orbit_map][None, :]
         bigomega = self.bigomega.value[orbit_map][None, :]
         cosO = pt.cos(bigomega)
         sinO = pt.sin(bigomega)
@@ -1888,53 +1901,74 @@ class Orbit(Component):
             cosw = -cosw
             sinw = -sinw
 
-        M = (t_grid - tp) * n
-        sinf, cosf = physics.solve_kepler(
-            M, ecc, circular=self._all_circular(orbit_map)
+        terms = physics.state_vector_terms(
+            t_grid,
+            tp,
+            n,
+            ecc,
+            sinw=sinw,
+            cosw=cosw,
+            circular=self._all_circular(orbit_map),
         )
 
         # Separation from the barycenter (or primary) in units of a_scale
-        r = a_scale[None, :] * (1.0 - ecc**2) / (1.0 + ecc * cosf)
-
-        # cos/sin(omega + f)
-        coswf = cosw * cosf - sinw * sinf
-        sinwf = sinw * cosf + cosw * sinf
+        r = a_scale[None, :] * terms.r_over_a
 
         # Thiele-Innes projection (North, East), PA measured East of North:
         # at omega + f = 0 (ascending node) the body sits at PA = bigomega.
-        dN = r * (cosO * coswf - sinO * sinwf * cosi)
-        dE = r * (sinO * coswf + cosO * sinwf * cosi)
-        return dE, dN
+        X = r * (cosO * terms.coswf - sinO * terms.sinwf * cosi)
+        Y = r * (sinO * terms.coswf + cosO * terms.sinwf * cosi)
+        Z = r * terms.sinwf * sini
+
+        # d/dt of the above: vamp * the kernel's velocity phase terms.
+        vamp = n * a_scale[None, :] / terms.ecc_factor
+        VX = vamp * (cosO * terms.vx_phase - sinO * terms.vz_phase * cosi)
+        VY = vamp * (sinO * terms.vx_phase + cosO * terms.vz_phase * cosi)
+        VZ = vamp * terms.vz_phase * sini
+
+        return X, Y, Z, VX, VY, VZ
+
+    def get_sky_position(self, t, a_scale, orbit_map, relative=False):
+        """
+        Vectorized sky-plane offsets of an orbiting body -- the position
+        half of `state_vectors` (whose docstring carries the conventions).
+
+        Returns (dE, dN), each (N_obs, N_planets): offsets toward East and
+        North in the units of a_scale.
+        """
+        X, Y, _, _, _, _ = self.state_vectors(
+            t, a_scale, orbit_map, relative=relative
+        )
+        return Y, X
 
     def get_radial_velocity(self, t, K, orbit_map):
         """
         The optimized vectorized reflex RV signal.
         t: (N_obs,) vector of times
         K: (N_planets,) vector of semi-amplitudes
+
+        This is `state_vectors`' VZ with the amplitude collapsed: K already
+        carries the barycentric fraction, sin(i) and the n*a/sqrt(1-e^2)
+        velocity scale, so only the kernel's phase term remains.
         """
-        # 1. Broadcast time and orbital parameters into 2D grids
-        # Shape: (N_obs, N_planets)
+        # Broadcast time and orbital parameters into (N_obs, N_planets)
+        # grids; the kernel does the Kepler solve (review 6.8.2 forwarding).
         t_grid = t[:, None]
         tp = self.tp.value[orbit_map][None, :]
         n = self.n.value[orbit_map][None, :]
         ecc = self.ecc.value[orbit_map][None, :]
         cosw = self.cosw.value[orbit_map][None, :]
         sinw = self.sinw.value[orbit_map][None, :]
-        K_grid = K[None, :]
 
-        # 2. Calculate Mean Anomaly (M)
-        # M = n * (t - tp)
-        M = (t_grid - tp) * n
-
-        # 3. Solve Kepler's Equation.  ops.kepler handles the
-        # (N_obs, N_planets) grid efficiently; a wholly circular set of
-        # orbits skips it altogether (review 6.8.2).
-        sinf, cosf = physics.solve_kepler(
-            M, ecc, circular=self._all_circular(orbit_map)
+        terms = physics.state_vector_terms(
+            t_grid,
+            tp,
+            n,
+            ecc,
+            sinw=sinw,
+            cosw=cosw,
+            circular=self._all_circular(orbit_map),
         )
 
-        # 4. Calculate RV per planet
-        # Using the identity: cos(w + f) = cos(w)cos(f) - sin(w)sin(f)
-        rv_matrix = K_grid * (cosw * cosf - sinw * sinf + ecc * cosw)
-
-        return rv_matrix
+        # vz_phase = cos(w + f) + e cos(w)
+        return K[None, :] * terms.vz_phase
