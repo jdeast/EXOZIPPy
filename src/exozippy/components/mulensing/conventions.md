@@ -444,6 +444,23 @@ but remains NODE-DEGENERATE -- a sky track of any kind is invariant under the sk
 reflection `(bigomega, omega) -> (bigomega + 180, omega + 180)` -- unlike the LENS
 keplerian case (C24), where the caustic's rotation SENSE breaks it.
 
+**The mapping to MulensModel's `xi_*` elements (Zhai et al. 2024; the parameterization of
+Mroz et al. 2026), VERIFIED to machine precision** (the two shift tracks agree to ~1e-13
+over random draws; found by fitting, then confirmed closed-form -- see
+`tests/test_xallarap.py::test_mm_xi_closed_form_mapping`).  Their frame's reference
+direction is `tau_hat` and its third axis points TOWARD the observer, so, exactly as in
+the Skowron Appendix B frame (C24's Yee mapping):
+
+    bigomega = phi_pi - xi_Omega_node
+    i        = 180 deg - xi_inclination
+    omega_*  = xi_omega_periapsis                  (the SOURCE's own orbit: no 180 flip)
+    e        = xi_eccentricity,   P = xi_period,   t_0_xi = t0_par
+    nu(t_0_xi) = xi_u - xi_omega_periapsis  ->  tp  (the standard anomaly chain)
+    xi_semimajor_axis = a_1 / (D_S * theta_E)      (a_1 = a * m_companion / m_total)
+
+A published `xi_*` solution therefore drops into an EXOZIPPy config through these six
+lines; `examples/ob170114` is the shipped worked case (Mroz et al. 2026 Table B.1).
+
 - Implemented in: `Lens._source_offset_series` (config keys
   `source_orbital_motion: keplerian`, `source_orbit:`),
   `mulensing/physics.source_offset_from_orbit` / `xallarap_trajectory_shift`,

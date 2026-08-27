@@ -338,3 +338,78 @@ def test_config_validation():
             ],
             cm,
         )
+
+
+def test_mm_xi_closed_form_mapping():
+    """
+    Given: random xi_* xallarap draws (the Zhai+2024 / Mroz+2026
+      parameterization, as implemented by MulensModel -- the code Mroz+26
+      used, so its track at published values IS the published motion),
+    When: the C25 closed-form mapping builds the same track from EXOZIPPy
+      elements (bigomega = phi_pi - xi_Omega, i = 180 - xi_i,
+      omega_* = xi_omega, nu(t_0_xi) = xi_u - xi_omega -> tp),
+    Then: the two (dtau, du) tracks agree to 1e-9 -- the mutual
+      verification of both implementations, and the recipe that lets a
+      published xi_* solution seed an EXOZIPPy config (examples/ob170114).
+    """
+    import MulensModel as mm
+
+    rng = np.random.default_rng(20260827)
+    T0, TE = 2457899.3, 173.0
+    for k in range(3):
+        u0 = rng.uniform(-0.3, 0.3)
+        piEN, piEE = rng.normal(0, 0.2, 2)
+        P = rng.uniform(50, 500)
+        a_xi = rng.uniform(0.05, 0.5)
+        e = rng.uniform(0, 0.8)
+        xi_i = rng.uniform(0, 180)
+        xi_Om = rng.uniform(0, 360)
+        xi_u = rng.uniform(0, 360)
+        xi_om = rng.uniform(0, 360)
+        t0par = T0 + rng.uniform(-50, 50)
+        t = np.linspace(t0par - 2 * P, t0par + 2 * P, 101)
+
+        base = dict(t_0=T0, u_0=u0, t_E=TE)
+        tr0 = mm.Trajectory(t, parameters=mm.Model(dict(base)).parameters)
+        m1 = mm.Model(
+            dict(
+                base,
+                xi_period=P,
+                xi_semimajor_axis=a_xi,
+                xi_inclination=xi_i,
+                xi_Omega_node=xi_Om,
+                xi_argument_of_latitude_reference=xi_u,
+                xi_eccentricity=e,
+                xi_omega_periapsis=xi_om,
+                t_0_xi=t0par,
+            )
+        )
+        tr1 = mm.Trajectory(t, parameters=m1.parameters)
+        # MM source shift -> our trajectory (lens - source) shift
+        dtau_mm = -(np.asarray(tr1.x) - np.asarray(tr0.x))
+        du_mm = -(np.asarray(tr1.y) - np.asarray(tr0.y))
+
+        phi_pi = np.arctan2(piEE, piEN)
+        om_node = phi_pi - np.radians(xi_Om)
+        cosi = np.cos(np.radians(180.0 - xi_i))
+        w = np.radians(xi_om)
+        nu0 = np.radians(xi_u - xi_om)
+        E0 = 2 * np.arctan2(
+            np.sqrt(1 - e) * np.sin(nu0 / 2),
+            np.sqrt(1 + e) * np.cos(nu0 / 2),
+        )
+        tp = t0par - (E0 - e * np.sin(E0)) * P / (2 * np.pi)
+        n_mm = 2 * np.pi / P
+
+        sN, sE = _np_source_offset(t, tp, n_mm, e, w, cosi, om_node, a_xi)
+        sN0, sE0 = _np_source_offset(
+            np.array([t0par]), tp, n_mm, e, w, cosi, om_node, a_xi
+        )
+        dN, dE = sN - sN0[0], sE - sE0[0]
+        tn, te = np.cos(phi_pi), np.sin(phi_pi)
+        np.testing.assert_allclose(
+            -(dN * tn + dE * te), dtau_mm, atol=1e-9, err_msg=f"draw {k}"
+        )
+        np.testing.assert_allclose(
+            -(dN * te - dE * tn), du_mm, atol=1e-9, err_msg=f"draw {k}"
+        )

@@ -2366,10 +2366,10 @@ class Lens(Component):
                 "source_orbital_motion requires backend: vbm_direct (the "
                 "point-source single-lens case takes the symbolic path "
                 "and needs neither).  MulensModel's native xi_* xallarap "
-                "is not wired as a backend: its angle conventions "
-                "(tau_hat-referenced) have not been mapped and verified "
-                "against C25's; the published-solution cross-check is "
-                "examples/ob170114."
+                "is not wired as a backend -- unnecessary: C25's machinery "
+                "covers it, and the xi_* mapping is verified "
+                "(conventions.md C25; a published xi_* solution seeds a "
+                "config directly, see examples/ob170114)."
             )
 
         single_lens_vbm = (
