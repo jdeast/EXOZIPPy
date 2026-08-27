@@ -30,25 +30,35 @@ star.dec:
 
 # --------------------------------------------------------------------
 # Light curve -- Skowron+2011 Table 1, the "parallax + full orbit (with
-# priors)" column, read off the published table directly (2026-08-27; the
-# earlier version of this file carried second-hand values that drifted by
-# ~1% on t_E and u_0).
+# priors)" column, read off the PUBLISHED (IOP, ApJ 738, 87) table.
+#
+# WHICH TABLE 1: the arXiv v1 posting (1101.3312, 2011-01) and the IOP
+# version of record (2011-09) print DIFFERENT Table 1 values -- the
+# refereed version re-ran the chains (with-priors t_E 76.02 -> 76.9,
+# u_0 0.06193 -> 0.0613, s_0 0.4315 -> 0.4294, several error bars, and a
+# theta_E row that only exists in IOP).  This file references the IOP
+# version of record throughout; the full arXiv-vs-IOP diff and the reason
+# for the choice are documented in README.md.
 #
 # THAT TABLE IS NOT IN THESE UNITS.  Skowron parameterize a high-
 # magnification binary by the quantities the light curve actually measures
 # (t_eff = u_0 t_E, t_* = rho t_E, u_0/w, log w, log q), but its "derived"
 # block prints the conversions itself:
 #
-#     s_0 = 0.4315,  q = 0.272,  t_E = 76.02 d,  u_0 = +0.06193
+#     s_0 = 0.4294,  q = 0.273,  t_E = 76.9 d,  u_0 = +0.0613,
+#     theta_E = 2.95 mas
 #
-# and the cross-check that the two halves of the table agree:
-# u_0 = (u_0/w) * 10**(log w) = 0.42942 * 0.14421 = 0.06193, identical to
-# the printed derived u_0.  rho = t_*/t_E = 0.11595/76.02 = 0.0015252.
+# Cross-checks: t_eff/u_0 = 4.708/0.0613 = 76.80, consistent with the
+# printed t_E = 76.9 to 0.13% -- but (u_0/w) * 10**(log w) =
+# 0.42942 * 0.14421 = 0.06193, 1% from the printed derived u_0 (these are
+# per-parameter MCMC medians, not one self-consistent point; the arXiv v1
+# derived block matched the product instead).
+# rho = t_*/t_E = 0.11595/76.9 = 0.0015078.
 #
 # THE SIGN OF u_0 IS PART OF THE PUBLISHED SOLUTION.  Table 1's note:
 # "All parameters represent positive u_0 solutions ... which is slightly
 # preferred", and Skowron+2011 Appendix A is EXOZIPPy's convention verbatim
-# (C17) -- so the printed (u_0 = +0.06193, alpha = +189.08) drops straight
+# (C17) -- so the printed (u_0 = +0.0613, alpha = +189.08) drops straight
 # in.  The mirror branch (u_0, alpha, pi_E_N, gamma_perp) ->
 # -(u_0, alpha, pi_E_N, gamma_perp) (their Eq. 16; C23's ecliptic
 # degeneracy extended to orbital motion) is a distinct, slightly disfavored
@@ -62,19 +72,19 @@ star.dec:
 # For the orbital-motion work (notes/orbital_motion_and_nbody.txt), the
 # same column's orbital values, in the SAME u_0 > 0 labeling:
 #
-#     gamma_par  = +0.10 +/- 0.06   /yr      (= (ds/dt)/s_0)
+#     gamma_par  = +0.10 +/- 0.11   /yr      (= (ds/dt)/s_0)
 #     gamma_perp = +2.3  +0.5/-0.3  rad/yr   (= -dalpha/dt: Appendix A.4;
 #                                             so dalpha/dt = -2.3 rad/yr)
-#     gamma_z    = +1.7  +/- 0.6    /yr      (+ = toward the observer)
+#     gamma_z    = +1.5  +/- 1.0    /yr      (+ = toward the observer)
 #     s_z        =  0.0  +/- 0.6    r_E
-#     pi_E_N     = -0.025 +/- 0.075          (degenerate with gamma_perp,
+#     pi_E_N     = -0.022 +/- 0.086          (degenerate with gamma_perp,
 #                                             their Section 4.2)
 #
 # DO NOT seed orbital_motion: linear from THIS column: it is a Keplerian
 # solution, and through the pi_E_N <-> gamma_perp degeneracy its values are
 # self-consistent only as a set.  The linear-model-consistent set is the
-# "parallax + 2 par. motion" column (u_0 = +0.06010, t_E = 78.57,
-# s_0 = 0.4261, alpha = 189.07, pi_E_N = -0.11, pi_E_E = 0.1468,
+# "parallax + 2 par. motion" column (u_0 = +0.0603, t_E = 78.3,
+# s_0 = 0.4268, alpha = 189.06, pi_E_N = -0.11, pi_E_E = 0.1468,
 # gamma_par = +0.12, gamma_perp = +2.78) -- see README's measured table.
 #
 # VERIFIED AGAINST THE DATA, not just transcribed: at these values, with
@@ -87,32 +97,32 @@ lens.Source.t_0:
     initval: 2454917.252      # HJD' 4917.252 +0.016/-0.009
 
 lens.Source.u_0:
-    initval: 0.06193          # POSITIVE, as printed (Table 1's derived
+    initval: 0.0613           # POSITIVE, as printed (IOP Table 1's derived
                               # block, and its note quoted above).
 
 lens.Source.t_E:
-    initval: 76.02            # d (Table 1 derived), referenced to the
+    initval: 76.9             # d (IOP Table 1 derived), referenced to the
                               # TOTAL lens mass
 
 lens.Source.rho:
-    initval: 0.0015252        # = t_*/t_E = 0.11595/76.02
+    initval: 0.0015078        # = t_*/t_E = 0.11595/76.9
 
 # s and alpha are NOT seeded: with orbital_motion: keplerian they are
 # DERIVED from orbit L (no sampled log_s/xalpha/yalpha exist -- C24), and
 # their published values are the ACCEPTANCE CHECK, not inputs.  At the
 # orbit/mass/distance seeds below the derived start is s_0 = 0.4263,
-# alpha_0 = 189.08 deg, gamma_par = +0.135/yr, gamma_perp = +3.356 rad/yr
-# (measured 2026-08-27, scratch kep_branch_scan) -- against the published
-# with-priors s_0 = 0.4315, alpha_0 = 189.08 +/- 0.14, gamma_par = +0.10
-# +/- 0.11, gamma_perp = +2.3 +0.5/-0.3.  s_0 agreeing to 1.2% from a fully
-# independent chain (Yee's orbit + masses + distances) is the two-solution
-# consistency check of notes/orbital_motion_and_nbody.txt 0a; the gamma
-# magnitudes differ at the 2-sigma level because Skowron's is a
+# alpha_0 = 189.08 deg, gamma_par = +0.133/yr, gamma_perp = +3.361 rad/yr
+# (measured 2026-08-27, scratch kep_final_probe) -- against the published
+# (IOP) with-priors s_0 = 0.4294, alpha_0 = 189.08 +/- 0.14, gamma_par =
+# +0.10 +/- 0.11, gamma_perp = +2.3 +0.5/-0.3.  s_0 agreeing to 0.7% from
+# a fully independent chain (Yee's orbit + masses + distances) is the
+# two-solution consistency check of notes/orbital_motion_and_nbody.txt 0a;
+# the gamma magnitudes differ at the 2-sigma level because Skowron's is a
 # microlensing-only fit at a different distance.
 
 lens.OB09020.q:
     initval: 0.2748           # = Yee+2016 joint M2/M1 = 0.244/0.888 (Table 1
-                              # with priors prints 0.272).  The engine
+                              # with priors prints 0.273).  The engine
                               # propagates this through
                               # q * m_primary = m_companion to seed
                               # star.L2.mass.
@@ -329,7 +339,7 @@ orbit.L.sesinw:
 # NOT drop into EXOZIPPy's sky frame.  The EXOZIPPy-frame branch below was
 # pinned numerically (scratch kep_branch_scan.py) by requiring the
 # orbit-derived geometry to reproduce ALL FOUR published orbital-motion
-# observables at t0_par in the u_0 > 0 labeling -- s_0 = 0.4315,
+# observables at t0_par in the u_0 > 0 labeling -- s_0 = 0.4294,
 # alpha_0 = 189.08, gamma_par > 0, gamma_perp > 0 -- on top of the
 # RV-verified omega_* = 331.6 and the joint-consistent phi_pi from the
 # pi_E seeds below:
@@ -337,22 +347,30 @@ orbit.L.sesinw:
 #     candidate (bigomega, cosi)          alpha_0     gamma_perp
 #     (352.23, -0.635)  [Yee as-printed]     wrong      -3.36  rad/yr WRONG
 #     (352.23, +0.635)                       wrong      +3.36
-#     (337.45, +0.635)  [SEEDED]            189.080     +3.36  MATCHES
+#     (337.48, +0.635)  [SEEDED]            189.080     +3.36  MATCHES
 #
-# (337.45 rather than the scan's naive 334.45: alpha_0 = phi_pi - PA(axis)
-# uses the ENGINE-RESOLVED parallax direction, and the relaxation engine's
-# reconciliation of the pi_E/pm/distance chain lands phi_pi at 158.76 deg,
-# 3 deg from the seed-implied value -- so bigomega is tuned against the
-# BUILT model (kep_bigom_scan.py), where the derived alpha_0 = 189.080
-# exactly and the start logp is +3276.  A 3 deg alpha error through this
+# The pinned branch obeys ONE closed-form rule, shared with the verified
+# xallarap xi_* mapping (C25): bigomega_EXOZIPPy = PA(frame's first axis)
+# - Omega_frame.  Here the App-B first axis is the binary axis at t_0,kep,
+# whose PA is phi_pi - alpha_0 = 158.79 - 189.08 = 329.71 deg, so
+# bigomega = 329.71 - (-7.767) = 337.48.  (For the xi_* frame the first
+# axis is tau_hat, PA = phi_pi, giving C25's bigomega = phi_pi - xi_Omega.)
+#
+# (337.48 rather than the naive seed-implied value: alpha_0 =
+# phi_pi - PA(axis) uses the ENGINE-RESOLVED parallax direction, and the
+# relaxation engine's reconciliation of the pi_E/pm/distance chain lands
+# phi_pi at 158.79 deg, 3 deg from the seed-implied value -- so bigomega
+# is checked against the BUILT model (kep_bigom_scan.py /
+# kep_final_probe.py), where the derived alpha_0 = 189.080 exactly and
+# the start logp is +19,024.  A 3 deg alpha error through this
 # caustic-crossing dataset costs ~1e7 nats, so this tuning is
 # load-bearing.)
 #
 # i_EXOZIPPy = 180 - 129.42 = 50.58 deg: the toward/away third-axis flip
 # maps i -> 180 - i, exactly as C24/skyframe.md predict.  The derived
-# start then reproduces s_0 = 0.4263 (published 0.4315, 1.2% -- the 0a
-# two-solution consistency check), gamma_par = +0.135 (+0.10 +/- 0.11) and
-# gamma_perp = +3.356 rad/yr (+2.3 +0.5/-0.3; the 2-sigma magnitude
+# start then reproduces s_0 = 0.4263 (published 0.4294, 0.7% -- the 0a
+# two-solution consistency check), gamma_par = +0.133 (+0.10 +/- 0.11) and
+# gamma_perp = +3.361 rad/yr (+2.3 +0.5/-0.3; the 2-sigma magnitude
 # tension is Skowron-vs-Yee, not a convention).
 orbit.L.cosi:
     initval: 0.635054         # i = 50.576 deg in EXOZIPPy's frame
@@ -362,7 +380,7 @@ orbit.L.cosi:
                               # sign(cos i), which is why the config no
                               # longer needs i180.
 orbit.L.bigomega:
-    initval: 337.45           # EXOZIPPy-frame node PA (E of N); see the
+    initval: 337.484          # EXOZIPPy-frame node PA (E of N); see the
                               # mapping table above.  Sampled (not inert)
                               # because the lens keplerian mode consumes
                               # this orbit; measured by the light curve's

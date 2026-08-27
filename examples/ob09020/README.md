@@ -8,7 +8,7 @@
 > geometry reproduces all four published orbital-motion observables in the
 > published `u_0 > 0` labeling (`s_0`, `alpha_0`, `sign(gamma_par)`,
 > `sign(gamma_perp)`); the Yee (Omega, i) -> EXOZIPPy frame mapping is
-> measured (see the params file); and the start logp is finite (+3,276).
+> measured (see the params file); and the start logp is finite (+19,024).
 > The per-instrument flux/`err_scale` seeds still date from the static
 > geometry and are refreshed by the acceptance fit.  Every sign statement
 > below uses the corrected identity `gamma_perp = -dalpha/dt` (Skowron
@@ -23,9 +23,39 @@ measurements.
 * Skowron et al. 2011, ApJ 738, 87 (arXiv:1101.3312) -- the light-curve
   solution and the prediction.  Its Appendix A is also the convention
   EXOZIPPy follows verbatim (`components/mulensing/conventions.md`, C17), so
-  its parameters transfer with no transformation.
+  its parameters transfer with no transformation.  **The arXiv v1 posting
+  and the IOP version of record print different Table 1 values; this
+  example references the IOP version** -- see "Which Table 1" below.
 * Yee et al. 2016, ApJ 821, 121 (arXiv:1506.01441) -- the Keck/HIRES and
   Magellan/MIKE velocities that tested it, and the joint solution.
+
+### Which Table 1
+
+Skowron+2011 exists in two numerically different versions: the arXiv v1
+posting (1101.3312, 2011 January) and the refereed IOP version of record
+(DOI 10.1088/0004-637X/738/1/87, 2011 September).  The refereed version
+evidently re-ran the chains: in the "with priors" column, `t_E` moved from
+76.02 to 76.9 d, `u_0` from +0.06193 to +0.0613, `s_0` from 0.4315 to
+0.4294, `pi_E_N` from -0.025 +/- 0.075 to -0.022 +/- 0.086, `gamma_z` from
++1.7 +/- 0.6 to +1.5 +/- 1.0, several other error bars changed, and a
+`theta_E` row (2.95 mas with priors) exists only in the IOP table.  The
+"2 par. motion" column moved similarly (`t_E` 78.57 -> 78.3, `u_0`
++0.06010 -> +0.0603, `s_0` 0.4261 -> 0.4268).
+
+**This example references the IOP version of record everywhere** -- it is
+the refereed, later version, and it is the one a citation of ApJ 738, 87
+resolves to.  Two side effects worth knowing:
+
+* Any pre-2026-08-27 record in this repo (or a reader checking against the
+  freely downloadable arXiv PDF) will see ~1% "discrepancies" on `t_E`,
+  `u_0` and `s_0`.  They are version skew, not misreads -- both value sets
+  are faithfully printed in their respective versions.
+* Within the IOP with-priors column, the derived block is self-consistent
+  with `t_eff/t_E` (`4.708/0.0613 = 76.80 ~ 76.9`) but its `u_0` is 1% from
+  the fit-parameter product `(u_0/w) * 10**(log w) = 0.06193`; in arXiv v1
+  the derived block matched the product instead.  These are per-parameter
+  MCMC medians, not one self-consistent point -- do not chase the third
+  decimal across rows.
 
 The lens is a 0.89 + 0.24 Msun binary at 0.75 kpc in a 276.6 d, e = 0.27
 orbit; the source is a bulge K giant.  Because the lens is nearby disk,
@@ -179,34 +209,37 @@ default recommendation for events without RVs.
 
 The linear mode's acceptance measurement, re-made 2026-08-27 with the
 shipped machinery (fluxes fit linearly per instrument, all 2837 points, raw
-errors): at Skowron Table 1's **"parallax + 2 par. motion" column** -- the
+errors): at the IOP Table 1's **"parallax + 2 par. motion" column** -- the
 one fitted with EXACTLY this model, so its printed values are the referee
-(`u_0 = +0.06010`, `t_E = 78.57`, `s_0 = 0.4261`, `alpha = 189.07`,
+(`u_0 = +0.0603`, `t_E = 78.3`, `s_0 = 0.4268`, `alpha = 189.06`,
 `pi_E_N = -0.11`, `gamma_par = +0.12`, `gamma_perp = +2.78`):
 
 | model | chi2 | chi2/N |
 |---|---|---|
-| static `s`, `alpha` | 81,885 | 28.86 |
-| linear, `dalpha/dt = -2.78 rad/yr` (`gamma_perp = +2.78`, as printed) | **15,388** | **5.42** |
-| linear, `dalpha/dt = +2.78 rad/yr` (wrong sign) | 331,126 | 116.72 |
-| `gamma_par` only | 87,957 | 31.00 |
+| static `s`, `alpha` | 72,485 | 25.55 |
+| linear, `dalpha/dt = -2.78 rad/yr` (`gamma_perp = +2.78`, as printed) | **16,308** | **5.75** |
+| linear, `dalpha/dt = +2.78 rad/yr` (wrong sign) | 306,660 | 108.09 |
+| `gamma_par` only | 78,066 | 27.52 |
 
-A factor 5.3 from the printed rates in the printed labeling, with the wrong
-rotation sense 21x worse -- the sign is decisive, and it agrees with
+A factor 4.4 from the printed rates in the printed labeling, with the wrong
+rotation sense 19x worse -- the sign is decisive, and it agrees with
 `gamma_perp = -dalpha/dt` (Skowron A.4; C24) with no transformation.  Two
 traps this measurement stepped in so the next reader does not have to:
 
 * **Do not mix columns.**  The "full orbit (with priors)" column's
   parameters are a KEPLERIAN solution; through the strong
   `pi_E_N`-`gamma_perp` degeneracy (their Section 4.2) its
-  `pi_E_N = -0.025` pairs with the full-orbit trajectory, and evaluating
-  the LINEAR model at that column's values fits WORSE than static
-  (81k/69k vs 29k over these points).  Each column is self-consistent
+  `pi_E_N = -0.022` pairs with the full-orbit trajectory, and the LINEAR
+  model at that column's values gains almost nothing over static
+  (static 30,932 vs 29,376 with the printed rates -- against the factor
+  4.4 the model earns at its own column).  Each column is self-consistent
   only as a set.
-* An earlier version of this README carried a factor-3.5 table
-  (160,258 -> 45,661) measured at second-hand parameter values ~1% off
-  the printed ones; at the correctly-read values its static baseline is
-  not reproducible and that table is superseded by the one above.
+* Earlier versions of this README carried tables measured first at
+  second-hand parameter values and then at the arXiv v1 Table 1
+  (static 81,885 -> 15,388, factor 5.3); the arXiv-vs-IOP version skew
+  ("Which Table 1" above) is ~1% on the trajectory parameters and moves
+  the chi2 baselines by ~10% here.  The table above, at the IOP values,
+  supersedes both.
 
 The design -- source orbital motion, real `gamma_dot`/`gamma_ddot`, and the
 eventual N-body backend -- is in `notes/orbital_motion_and_nbody.txt`.
@@ -221,9 +254,10 @@ and are recorded there in full:
    tabulates `t_eff = u_0 t_E`, `t_* = rho t_E`, `log q` and `log w`, with
    the impact parameter given as `u_0/w` in units of the central-caustic
    width -- but its "derived" block prints the conversions itself
-   (`s_0 = 0.4315`, `q = 0.272`, `t_E = 76.02`, `u_0 = +0.06193`), and the
-   cross-check is exact: `(u_0/w) * 10**(log w) = 0.42942 * 0.14421 =
-   0.06193`, identical to the printed derived `u_0`.
+   (IOP: `s_0 = 0.4294`, `q = 0.273`, `t_E = 76.9`, `u_0 = +0.0613`,
+   `theta_E = 2.95 mas`).  Cross-check with `t_eff/u_0 = 4.708/0.0613 =
+   76.80 ~ 76.9`, NOT with the fit-parameter product ("Which Table 1"
+   above).
 2. **The blending is not what the EWS page says.**  EWS reports `fbl = 0.987`
    from a PSPL fit to survey data alone; the real source fraction is
    `q_source ~ 0.335` (Skowron: `I_s = 16.43`, `I_b = 15.68`).  Fitting
@@ -239,7 +273,7 @@ and are recorded there in full:
 4. **`u_0` is seeded POSITIVE, as published.**  Table 1's own note reads
    "All parameters represent positive u_0 solutions ... which is slightly
    preferred", and Appendix A is EXOZIPPy's convention verbatim (C17), so
-   the printed `(u_0 = +0.06193, alpha = +189.08)` transfers with no
+   the printed `(u_0 = +0.0613, alpha = +189.08)` transfers with no
    transformation.  The mirror `(u_0, alpha, pi_E_N, gamma_perp) ->
    -(...)` (their Eq. 16) is a distinct, slightly disfavored solution once
    parallax and orbital motion are believed -- a candidate second seed for
@@ -251,7 +285,7 @@ and are recorded there in full:
    orientation (bigomega) and rotation sense (`sign(cos i)`) reach the
    light curve; the orbit component samples both over their full ranges
    (`Orbit._lens_keplerian_orbits`).  The seeds carry the frame-mapped
-   Yee branch (`i = 50.58 = 180 - 129.42`, `bigomega = 337.45`; the
+   Yee branch (`i = 50.58 = 180 - 129.42`, `bigomega = 337.48`; the
    mapping table lives in the params file).  The retired `i180: true`
    hand-holding and the inert commented-out `bigomega` are exactly what
    review 8.6.8 5e said this mode would remove.
@@ -270,19 +304,23 @@ between 0.17 and 0.37 at every site against Skowron's calibrated 0.334, the
 spread being the expected consequence of unfiltered detectors with different
 responses.
 
-Start logp is +3,276 in the full keplerian-mode model (2026-08-27).  For
-the record of the seed lineage: the static model started at +41,458 at the
-published-branch seeds, and +47,309 at the retracted mirror seeds.  The
-keplerian start is lower than the static one NOT because the model is
-worse but because the published point-values do not close as a set: the
-per-instrument flux and `err_scale` seeds still date from the static
-geometry (a linear-flux refit at the keplerian start leaves the caustic
-window healthy -- Bronberg chi2/N = 4.3 on raw errors -- while the OGLE
-wings sit at chi2/N ~ 375, carrying the mismatch between Skowron's
-with-priors trajectory values and the joint solution's unprinted ones),
-and Table 1's own medians are mutually inconsistent at the point-estimate
-level (e.g. its printed |pi_E| = 0.151 against the
-theta_E/(kappa M) = 0.30 implied by its own priors' masses -- marginal
-medians, as the params file notes).  Resolving that tension is precisely
-what the acceptance FIT is for; the per-instrument chi2/N table and the
-flux/`err_scale` seeds are refreshed from its posterior.
+Start logp is +19,024 in the full keplerian-mode model at the IOP-referenced
+seeds (2026-08-27; the same model started at +3,276 at the arXiv v1 values
+-- the ~1% version skew on `t_E`/`u_0`/`rho` is worth ~16k nats through
+this caustic-crossing dataset, which is the concrete argument for pinning
+WHICH version a params file references).  For the record of the seed
+lineage: the static model started at +41,458 at the arXiv published-branch
+seeds, and +47,309 at the retracted mirror seeds.  The keplerian start is
+lower than the static one NOT because the model is worse but because the
+published point-values do not close as a set: the per-instrument flux and
+`err_scale` seeds still date from the static geometry (measured at the
+arXiv-seed start: a linear-flux refit leaves the caustic window healthy --
+Bronberg chi2/N = 4.3 on raw errors -- while the OGLE wings sit at
+chi2/N ~ 375, carrying the mismatch between Skowron's with-priors
+trajectory values and the joint solution's unprinted ones), and Table 1's
+own medians are mutually inconsistent at the point-estimate level (e.g.
+its printed |pi_E| = 0.151 against the theta_E/(kappa M) = 0.30 implied by
+its own priors' masses -- marginal medians, as the params file notes).
+Resolving that tension is precisely what the acceptance FIT is for; the
+per-instrument chi2/N table and the flux/`err_scale` seeds are refreshed
+from its posterior.
