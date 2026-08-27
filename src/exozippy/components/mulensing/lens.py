@@ -2148,8 +2148,10 @@ class Lens(Component):
 
         # Xallarap enters at EXACTLY this slot: parallax is the OBSERVER's
         # offset, this is the SOURCE's own (C25; review 8.6.9 / notes 1b).
-        xal = self._source_offset_series(times, system)
-        if xal is not None:
+        # getattr, not a bare attribute: test harnesses borrow this method
+        # onto minimal fakes (tests/test_trajectory_sanitization.py).
+        if getattr(self, "xal_orbit_idx", None) is not None:
+            xal = self._source_offset_series(times, system)
             tau_p = tau_p + xal[0]
             u_p = u_p + xal[1]
 
