@@ -39,6 +39,8 @@ from .physics import (
     clip_q,
     floor_u_0_value,
     lens_geometry_from_orbit,
+    source_offset_from_orbit,
+    xallarap_trajectory_shift,
 )
 
 logger = logging.getLogger(__name__)
@@ -244,24 +246,85 @@ class Lens(Component):
         # way astrometryinstrument's rel mode does.
         self.kep_orbit_idx = None
         if om == "keplerian":
-            sys_cfg = getattr(config_manager, "system_config", None) or {}
-            orbit_names = component_instance_names(sys_cfg, "orbit")
-            ref = self.orbit_ref[0]
-            if isinstance(ref, int) or str(ref).isdigit():
-                idx = int(ref)
-                if orbit_names and idx >= len(orbit_names):
-                    raise ValueError(
-                        f"[{self.prefix}] orbit index {idx} out of range; "
-                        f"orbits are {orbit_names}."
-                    )
-            elif ref in orbit_names:
-                idx = orbit_names.index(ref)
-            else:
-                raise ValueError(
-                    f"[{self.prefix}] unknown orbit '{ref}'; orbits are "
-                    f"{orbit_names}."
+            self.kep_orbit_idx = self._resolve_orbit_ref(
+                config_manager, self.orbit_ref[0]
+            )
+
+        # Source orbital motion -- xallarap (conventions.md C25; review
+        # 8.6.9).  Absent = static source, today's behavior.  Only the
+        # keplerian mode exists: a LINEAR source drift is EXACTLY
+        # unobservable in the light curve alone (absorbed by
+        # t_E/t_0/u_0/alpha), so offering it unconditionally would sample a
+        # flat, prior-dominated direction; it becomes meaningful only where
+        # an external dataset constrains the source's proper motion over a
+        # baseline >> t_E, and THAT predicate (mirroring
+        # Orbit._node_degenerate_orbits) is not built yet.
+        self.source_orbital_motion = [
+            c.get("source_orbital_motion") for c in self.config
+        ]
+        self.source_orbit_ref = [c.get("source_orbit") for c in self.config]
+        som = self.source_orbital_motion[0]
+        self.xal_orbit_idx = None
+        if som is not None:
+            if som == "linear":
+                raise NotImplementedError(
+                    "source_orbital_motion: linear is deliberately not "
+                    "offered: a linear source drift is exactly degenerate "
+                    "with (t_E, t_0, u_0, alpha) in the light curve alone "
+                    "(notes/orbital_motion_and_nbody.txt section 2).  Use "
+                    "'keplerian', or wait for the per-star proper-motion "
+                    "predicate that would make a linear mode meaningful."
                 )
-            self.kep_orbit_idx = idx
+            if som != "keplerian":
+                raise ValueError(
+                    f"lens.source_orbital_motion must be 'keplerian' (or "
+                    f"absent for a static source), got '{som}'."
+                )
+            if self.source_orbit_ref[0] is None:
+                raise ValueError(
+                    "lens.source_orbital_motion: keplerian requires "
+                    "`source_orbit: <orbit instance name>` on the lens "
+                    "block, naming the orbit of the luminous source about "
+                    "its (dark or faint) companion."
+                )
+            if self.n_sources > 1:
+                raise NotImplementedError(
+                    "source_orbital_motion currently supports a single "
+                    "luminous source; the linked binary-source case (both "
+                    "sources on one orbit, opposite offsets scaled by the "
+                    "mass ratio) is the next step of review 8.6.9."
+                )
+            self.xal_orbit_idx = self._resolve_orbit_ref(
+                config_manager, self.source_orbit_ref[0]
+            )
+            if self.xal_orbit_idx == self.kep_orbit_idx and (
+                self.kep_orbit_idx is not None
+            ):
+                raise ValueError(
+                    f"[{self.prefix}] the lens (`orbit:`) and source "
+                    f"(`source_orbit:`) references name the SAME orbit; "
+                    "the lens binary and the source binary are different "
+                    "systems."
+                )
+
+    def _resolve_orbit_ref(self, config_manager, ref):
+        """Resolve an orbit reference (instance name or index) -- the same
+        vocabulary astrometryinstrument's rel mode uses."""
+        sys_cfg = getattr(config_manager, "system_config", None) or {}
+        orbit_names = component_instance_names(sys_cfg, "orbit")
+        if isinstance(ref, int) or str(ref).isdigit():
+            idx = int(ref)
+            if orbit_names and idx >= len(orbit_names):
+                raise ValueError(
+                    f"[{self.prefix}] orbit index {idx} out of range; "
+                    f"orbits are {orbit_names}."
+                )
+            return idx
+        if ref in orbit_names:
+            return orbit_names.index(ref)
+        raise ValueError(
+            f"[{self.prefix}] unknown orbit '{ref}'; orbits are {orbit_names}."
+        )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -584,6 +647,35 @@ class Lens(Component):
                     "mode vocabulary. The orbit's bodies should be the "
                     "lens bodies, so the RV mass function and the lens "
                     "geometry share one mass chain."
+                ),
+            },
+            {
+                "key": "source_orbital_motion",
+                "kind": "option",
+                "accepts": ["keplerian"],
+                "required": False,
+                "doc": (
+                    "Source orbital motion -- xallarap (conventions.md "
+                    "C25; review 8.6.9). The luminous source's own "
+                    "barycentric sky offset, driven by the orbit named in "
+                    "'source_orbit:', enters the trajectory at exactly "
+                    "the parallax slot, anchored at t0_par, with NO new "
+                    "sampled parameters. 'linear' is deliberately not "
+                    "offered: a linear source drift is exactly degenerate "
+                    "with (t_E, t_0, u_0, alpha) in the light curve "
+                    "alone. Single luminous source for now."
+                ),
+            },
+            {
+                "key": "source_orbit",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "source_orbital_motion: keplerian only -- the orbit "
+                    "instance (name or index) of the luminous source "
+                    "about its (dark or faint) companion. Must differ "
+                    "from 'orbit:' (the lens binary)."
                 ),
             },
             {
@@ -1736,6 +1828,22 @@ class Lens(Component):
             pt.sum(soft_lower_bound(theta_E, 1e-6, scale=1e-5)),
         )
 
+        if self.xal_orbit_idx is not None:
+            get_collector(system).add(
+                r"We modeled the orbital motion of the source (the "
+                r"xallarap effect; \citealt{Griest:1992}) by projecting "
+                r"the luminous source's Keplerian barycentric orbit onto "
+                r"the lens-source trajectory, entering at the same slot "
+                r"as the parallax and anchored at the same fiducial epoch "
+                r"$t_{0,\rm par}$, with the orbit's physical parameters "
+                r"(period, eccentricity, orientation, and the companion "
+                r"mass through the barycentric scale) sampled directly "
+                r"\citep[cf.][]{Mroz:2026}.",
+                section="microlensing",
+                key=f"{self.prefix}.xallarap",
+                rank=33,
+            )
+
         if self.orbital_motion[0] == "linear":
             # The bound-orbit rope for the linear rates (C24; Skowron A19):
             # beta = E_kin,perp/E_pot,perp from the sky-plane rates is a
@@ -1841,6 +1949,56 @@ class Lens(Component):
             self.pi_E_E.value[0],
         )
         return s_t, alpha_t_rad * _RAD_TO_DEG
+
+    def _source_offset_series(self, times, system):
+        """Per-epoch xallarap trajectory shift ``(dtau_t, du_t)``, or None
+        for a static source (conventions.md C25; review 8.6.9).
+
+        The luminous source's own barycentric sky offset -- its orbit's
+        primary track, a1 = a * m_companion / m_total, in Einstein units
+        a1/(D_S theta_E) -- anchored at t0_par (the shift VANISHES there,
+        5d: same anchor as the parallax, so t_0/u_0 keep their meaning),
+        and projected on C9's (tau_hat, beta_hat) exactly where the
+        parallax terms enter: parallax is the OBSERVER's offset, xallarap
+        is the SOURCE's, same slot, same sign discipline (C8/C9/C25).
+
+        Built from the TIMES ARGUMENT, so the plotters' model grids carry
+        the same moving source the likelihood fits.
+        """
+        if self.xal_orbit_idx is None:
+            return None
+        j = self.xal_orbit_idx
+        orbit = system.orbit
+        a1 = (
+            orbit.a.value[j]
+            * orbit.m_companion.value[j]
+            / orbit.m_total.value[j]
+        )
+        d_s = system.star.distance.value[self.source_map[0]]
+        args = (
+            orbit.tp.value[j],
+            orbit.n.value[j],
+            orbit.ecc.value[j],
+            orbit.sinw.value[j],
+            orbit.cosw.value[j],
+            orbit.cosi.value[j],
+            orbit.bigomega.value[j],
+            a1,
+            self.theta_E.value[0],
+            d_s,
+        )
+        sig_N, sig_E = source_offset_from_orbit(
+            pt.as_tensor_variable(times), *args
+        )
+        sig_N0, sig_E0 = source_offset_from_orbit(
+            pt.as_tensor_variable(np.array([float(self.t0_par[0])])), *args
+        )
+        mu_mag = pt.maximum(self.mu_rel_geo_mag.value[0], MU_REL_FLOOR)
+        mu_n_hat = self.mu_dec_rel_geo.value[0] / mu_mag
+        mu_e_hat = self.mu_ra_rel_geo.value[0] / mu_mag
+        return xallarap_trajectory_shift(
+            sig_N - sig_N0[0], sig_E - sig_E0[0], mu_n_hat, mu_e_hat
+        )
 
     def _get_safe_mm_params(self, index=0):
         """Range-limited single-source trajectory params.  ``index`` is the
@@ -1987,6 +2145,15 @@ class Lens(Component):
             - delta_e * p["pi_E_E"]
         )
         u_p = p["u_0"] + delta_n * p["pi_E_E"] - delta_e * p["pi_E_N"]
+
+        # Xallarap enters at EXACTLY this slot: parallax is the OBSERVER's
+        # offset, this is the SOURCE's own (C25; review 8.6.9 / notes 1b).
+        # getattr, not a bare attribute: test harnesses borrow this method
+        # onto minimal fakes (tests/test_trajectory_sanitization.py).
+        if getattr(self, "xal_orbit_idx", None) is not None:
+            xal = self._source_offset_series(times, system)
+            tau_p = tau_p + xal[0]
+            u_p = u_p + xal[1]
 
         u2 = pt.sqr(tau_p) + pt.sqr(u_p)
         return (u2 + 2.0) / pt.sqrt(u2 * (u2 + 4.0))
@@ -2192,18 +2359,37 @@ class Lens(Component):
         times_tensor = pt.as_tensor_variable(times)
         obs_tensor = pt.as_tensor_variable(obs_pos)
 
+        # Per-epoch xallarap trajectory shift (source orbital motion, C25)
+        # -- None for a static source.  The symbolic PSPL path above
+        # already carries it; the Op paths take it as two extra inputs.
+        source_series = self._source_offset_series(times, system)
+        if source_series is not None and self.backend == "mulensmodel":
+            raise NotImplementedError(
+                "source_orbital_motion requires backend: vbm_direct (the "
+                "point-source single-lens case takes the symbolic path "
+                "and needs neither).  MulensModel's native xi_* xallarap "
+                "is not wired as a backend -- unnecessary: C25's machinery "
+                "covers it, and the xi_* mapping is verified "
+                "(conventions.md C25; a published xi_* solution seeds a "
+                "config directly, see examples/ob170114)."
+            )
+
         single_lens_vbm = (
             n_lenses == 1
             and use_rho
-            and use_u2
+            and (use_u2 or source_series is not None)
             and self.backend == "vbm_direct"
         )
 
         if single_lens_vbm:
-            # ESPL through VBM: the only backend here that carries a quadratic
-            # limb-darkening law for a point lens.  Reached ONLY when u2 is
-            # genuinely in play (_resolve_quadratic_ld), so a linear-band fit
-            # keeps MulensModel and stays bit-identical -- see that method.
+            # ESPL through VBM: the only backend here that carries a
+            # quadratic limb-darkening law for a point lens, and the one a
+            # finite-source single lens with XALLARAP routes through (the
+            # MulensModel single-lens Op has no slot for a per-epoch
+            # trajectory shift).  Without xallarap it is reached ONLY when
+            # u2 is genuinely in play (_resolve_quadratic_ld), so a
+            # linear-band fit keeps MulensModel and stays bit-identical --
+            # see that method.
             sp = self._get_safe_mm_params(index)
             param_list = [
                 sp["t_0"],
@@ -2212,17 +2398,26 @@ class Lens(Component):
                 sp["pi_E_N"],
                 sp["pi_E_E"],
                 self.rho.value[index],
-                u1,
-                u2,
             ]
+            if effective_bandpass is not None:
+                param_list.append(u1)
+                if use_u2:
+                    param_list.append(u2)
             mag_op = VBMDirectMagOp(
                 coords=coords,
                 n_companions=0,
                 use_rho=True,
                 bandpass=effective_bandpass,
-                quadratic_ld=True,
+                quadratic_ld=use_u2,
+                source_motion=source_series is not None,
             )
-            return mag_op(pt.stack(param_list), times_tensor, obs_tensor)
+            op_inputs = [pt.stack(param_list), times_tensor, obs_tensor]
+            if source_series is not None:
+                op_inputs += [
+                    pt.as_tensor_variable(source_series[0]),
+                    pt.as_tensor_variable(source_series[1]),
+                ]
+            return mag_op(*op_inputs)
 
         # Per-epoch companion geometry (lens orbital motion, C24) -- None
         # for a static lens.  Built from the TIMES ARGUMENT, so the
@@ -2264,16 +2459,21 @@ class Lens(Component):
                 bandpass=effective_bandpass,
                 quadratic_ld=use_u2,
                 orbital_motion=geometry_series is not None,
+                source_motion=source_series is not None,
             )
-            if geometry_series is not None:
-                s_t, alpha_t_deg = geometry_series
-                return mag_op(
-                    pt.stack(param_list),
-                    times_tensor,
-                    obs_tensor,
-                    pt.as_tensor_variable(s_t),
-                    pt.as_tensor_variable(alpha_t_deg),
-                )
+            if geometry_series is not None or source_series is not None:
+                op_inputs = [pt.stack(param_list), times_tensor, obs_tensor]
+                if geometry_series is not None:
+                    op_inputs += [
+                        pt.as_tensor_variable(geometry_series[0]),
+                        pt.as_tensor_variable(geometry_series[1]),
+                    ]
+                if source_series is not None:
+                    op_inputs += [
+                        pt.as_tensor_variable(source_series[0]),
+                        pt.as_tensor_variable(source_series[1]),
+                    ]
+                return mag_op(*op_inputs)
         elif n_lenses == 2:
             if self.orbital_motion[0] == "keplerian":
                 raise NotImplementedError(
@@ -2315,6 +2515,13 @@ class Lens(Component):
                 t_0_kep=self.t0_par[0],
             )
         else:
+            if source_series is not None:
+                raise NotImplementedError(
+                    "source_orbital_motion with a FORCED MulensModel "
+                    "single-lens Op (use_op: true) is not wired; drop "
+                    "use_op (the symbolic path carries xallarap) or use "
+                    "finite_source with backend: vbm_direct."
+                )
             sp = self._get_safe_mm_params(index)
             param_list = [
                 sp["t_0"],

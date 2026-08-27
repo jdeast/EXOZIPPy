@@ -435,6 +435,7 @@ class VBMDirectMagOp(Op):
         relative_accuracy=0.0,
         quadratic_ld=False,
         orbital_motion=False,
+        source_motion=False,
     ):
         # coords: "<ra>d <dec>d" string — same format the MulensModel Ops take.
         ra_deg, dec_deg = [float(v.rstrip("d")) for v in str(coords).split()]
@@ -461,20 +462,25 @@ class VBMDirectMagOp(Op):
         # static s_0/alpha_0 entries (the t0_par values; the series must
         # equal them there), so the layout and _param_labels are unchanged.
         self.orbital_motion = bool(orbital_motion)
-        if self.orbital_motion:
-            if self.n_companions != 1:
-                raise ValueError(
-                    "VBMDirectMagOp(orbital_motion=True) supports exactly "
-                    "one companion (Lens raises earlier; mulensing.md "
-                    "'3+ lens bodies')."
-                )
-            self.itypes = [
-                pt.dvector,
-                pt.dvector,
-                pt.dmatrix,
-                pt.dvector,
-                pt.dvector,
-            ]
+        # Source orbital motion -- xallarap (C25, review 8.6.9): two more
+        # dvector inputs carry the PER-EPOCH trajectory shift (dtau_t,
+        # du_t) built by Lens._source_offset_series, added to (tau, u)
+        # after the parallax terms -- the source's own offset enters at
+        # exactly the parallax slot.  Input order when both motions are on:
+        # [p, times, obs, s_t, alpha_t, dtau_t, du_t].
+        self.source_motion = bool(source_motion)
+        if self.orbital_motion and self.n_companions != 1:
+            raise ValueError(
+                "VBMDirectMagOp(orbital_motion=True) supports exactly "
+                "one companion (Lens raises earlier; mulensing.md "
+                "'3+ lens bodies')."
+            )
+        if self.orbital_motion or self.source_motion:
+            self.itypes = [pt.dvector, pt.dvector, pt.dmatrix]
+            if self.orbital_motion:
+                self.itypes = self.itypes + [pt.dvector, pt.dvector]
+            if self.source_motion:
+                self.itypes = self.itypes + [pt.dvector, pt.dvector]
         # u2 only means anything alongside a u1, so a quadratic law without a
         # bandpass is a caller bug, not a silently-uniform source.
         self.quadratic_ld = bool(quadratic_ld) and bandpass is not None
@@ -660,9 +666,14 @@ class VBMDirectMagOp(Op):
 
     def perform(self, node, inputs, outputs):
         p, times_np, obs_pos_np = inputs[:3]
-        series = inputs[3:] if self.orbital_motion else None
+        k = 3
+        series = None
+        if self.orbital_motion:
+            series = inputs[k : k + 2]
+            k += 2
+        source_series = inputs[k : k + 2] if self.source_motion else None
         try:
-            A = self._compute(p, times_np, obs_pos_np, series)
+            A = self._compute(p, times_np, obs_pos_np, series, source_series)
         except (ValueError, RuntimeError) as exc:
             # Invalid parameter combination -> NaN magnifications -> logp =
             # -inf -> the proposal is rejected.  That is the intended handling
@@ -704,7 +715,9 @@ class VBMDirectMagOp(Op):
                 labels.append("band.u2")
         return labels
 
-    def _compute(self, p, times_np, obs_pos_np, series=None):
+    def _compute(
+        self, p, times_np, obs_pos_np, series=None, source_series=None
+    ):
         # Non-finite check FIRST: it is the explicit handler for a NaN
         # parameter vector (return NaN magnifications -> logp = -inf ->
         # proposal rejected), and running it before the unpacking below means
@@ -717,11 +730,12 @@ class VBMDirectMagOp(Op):
         # is indistinguishable from ordinary rejection unless the first one is
         # reported.  This branch used to return NaN in complete silence.
         #
-        # The per-epoch geometry series (orbital motion) gets the same
-        # treatment: it is a function of the same sampled parameters, so a
-        # NaN there is a rejected proposal, not a crash.
-        if series is not None and not all(
-            np.all(np.isfinite(np.asarray(v, dtype=float))) for v in series
+        # The per-epoch geometry/xallarap series get the same treatment:
+        # they are functions of the same sampled parameters, so a NaN there
+        # is a rejected proposal, not a crash.
+        all_series = list(series or []) + list(source_series or [])
+        if all_series and not all(
+            np.all(np.isfinite(np.asarray(v, dtype=float))) for v in all_series
         ):
             if not self._warned:
                 self._warned = True
@@ -798,6 +812,12 @@ class VBMDirectMagOp(Op):
         )
         u = base["u_0"] - dN * base["pi_E_E"] + dE * base["pi_E_N"]
 
+        if source_series is not None:
+            # Xallarap: the source's own per-epoch trajectory shift, at
+            # exactly the slot the parallax terms occupy (C25).
+            tau = tau + np.asarray(source_series[0], dtype=float)
+            u = u + np.asarray(source_series[1], dtype=float)
+
         if self.n_companions == 1:
             # Rotate into the lens-axis frame (MulensModel Trajectory._get_xy).
             alpha_rad = companions[0][2]
@@ -830,13 +850,16 @@ class VBMDirectMagOp(Op):
         return self.pullback(inputs, [], gradients)
 
     def connection_pattern(self, node):
+        # The per-epoch geometry/xallarap inputs are functions of the
+        # sampled parameters, so they genuinely feed the output -- honesty
+        # here is what keeps pullback's refusal reachable (same reasoning
+        # as _MagGradOp.connection_pattern).
+        pattern = [[True], [False], [False]]
         if self.orbital_motion:
-            # The per-epoch geometry inputs are functions of the sampled
-            # parameters, so they genuinely feed the output -- honesty here
-            # is what keeps pullback's refusal reachable (same reasoning as
-            # _MagGradOp.connection_pattern).
-            return [[True], [False], [False], [True], [True]]
-        return [[True], [False], [False]]
+            pattern += [[True], [True]]
+        if self.source_motion:
+            pattern += [[True], [True]]
+        return pattern
 
 
 class _MagGradOp(Op):

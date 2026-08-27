@@ -410,6 +410,64 @@ improvement.
 - Pinned by: `tests/test_lens_orbital_motion.py` -- the known-inclination sign test, the
   MulensModel linear-motion parity test, and the A16 mirror test.
 
+### C25 -- source orbital motion (xallarap): the SOURCE's offset at the parallax slot
+
+Parallax is the OBSERVER's offset; xallarap is the SOURCE's own.  They enter the
+trajectory at exactly the same slot, with the same sign discipline (C8/C9/C11's "which
+offset does the symbol name" lesson applies verbatim).  With `dsigma = (dsigma_N,
+dsigma_E)` the luminous source's sky offset from its own barycentric motion, in Einstein
+radii and ANCHORED AT `t0_par` (the offset vanishes there, so `t_0`/`u_0` keep their C5
+meaning -- one anchor for the parallax, the lens orbital motion and the source orbital
+motion):
+
+    dtau = -(dsigma_N * tau_hat_N + dsigma_E * tau_hat_E)
+    du   = -(dsigma_N * tau_hat_E - dsigma_E * tau_hat_N)
+
+added to C10's first display.  The MINUS is C7: the trajectory is LENS minus SOURCE, so a
+source displaced by `+dsigma` moves the relative position by `-dsigma`; `tau_hat =
+mu_hat_rel,geo` and `beta_hat = (tau_hat_E, -tau_hat_N)` are C9's basis, the same pair the
+parallax terms project onto.
+
+The offset itself is the orbit component's primary-body track in Einstein units:
+`dsigma(t) = [r_1(t) - r_1(t0_par)]`, `r_1` from `a_1 = a * m_companion / m_total`
+projected through the SAME kernel and Thiele-Innes owner as everything else, scaled by
+`a_1 / (D_S * theta_E)`.  NO new sampled parameters: the orbit's period, eccentricity,
+orientation and the companion mass (through the barycentric scale) are the physical
+coordinates, which is Mroz et al. (2026)'s "ET" philosophy expressed through the component
+graph rather than bolted on.  A LINEAR source drift is deliberately not offered: it is
+EXACTLY degenerate with `(t_E, t_0, u_0, alpha)` in the light curve alone
+(notes/orbital_motion_and_nbody.txt section 2); it becomes meaningful only where an
+external dataset constrains the source's proper motion over a baseline `>> t_E`.
+
+A xallarap orbit measures `bigomega` (the track's sky orientation enters the trajectory)
+but remains NODE-DEGENERATE -- a sky track of any kind is invariant under the sky-plane
+reflection `(bigomega, omega) -> (bigomega + 180, omega + 180)` -- unlike the LENS
+keplerian case (C24), where the caustic's rotation SENSE breaks it.
+
+**The mapping to MulensModel's `xi_*` elements (Zhai et al. 2024; the parameterization of
+Mroz et al. 2026), VERIFIED to machine precision** (the two shift tracks agree to ~1e-13
+over random draws; found by fitting, then confirmed closed-form -- see
+`tests/test_xallarap.py::test_mm_xi_closed_form_mapping`).  Their frame's reference
+direction is `tau_hat` and its third axis points TOWARD the observer, so, exactly as in
+the Skowron Appendix B frame (C24's Yee mapping):
+
+    bigomega = phi_pi - xi_Omega_node
+    i        = 180 deg - xi_inclination
+    omega_*  = xi_omega_periapsis                  (the SOURCE's own orbit: no 180 flip)
+    e        = xi_eccentricity,   P = xi_period,   t_0_xi = t0_par
+    nu(t_0_xi) = xi_u - xi_omega_periapsis  ->  tp  (the standard anomaly chain)
+    xi_semimajor_axis = a_1 / (D_S * theta_E)      (a_1 = a * m_companion / m_total)
+
+A published `xi_*` solution therefore drops into an EXOZIPPy config through these six
+lines; `examples/ob170114` is the shipped worked case (Mroz et al. 2026 Table B.1).
+
+- Implemented in: `Lens._source_offset_series` (config keys
+  `source_orbital_motion: keplerian`, `source_orbit:`),
+  `mulensing/physics.source_offset_from_orbit` / `xallarap_trajectory_shift`,
+  `Lens.get_magnification` (symbolic) and `op.VBMDirectMagOp(source_motion=True)`.
+- Pinned by: `tests/test_xallarap.py` -- the first-principles C9 reconstruction with a
+  displaced source, the t0_par anchor, and symbolic-vs-Op equality.
+
 ---
 
 ## 5. Mappings to other conventions

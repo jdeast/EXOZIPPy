@@ -1,0 +1,164 @@
+# OGLE-2017-BLG-0114 starting values -- Mroz et al. 2026 (arXiv:2606.20555)
+# Table B.1, the "Std: 2L1S + parallax + xallarap" column (u_0-, close,
+# Planet-S1, inner: the BIC-preferred model), with the physical parameters
+# from their Table B.2 and the xallarap elements mapped through
+# conventions.md C25's VERIFIED xi_* -> EXOZIPPy transformation.
+#
+# Convention note: Mroz+26 modeled this event with MulensModel, whose
+# trajectory conventions are EXOZIPPy's (C18 identity), so t_0, u_0 (sign
+# included), t_E, rho, pi_E_N/E, s, q and alpha drop straight in.  Only the
+# xi_* orbital elements need the C25 mapping (their frame is
+# tau_hat-referenced with the third axis toward the observer):
+#
+#     bigomega  = phi_pi - xi_Omega = 37.252 - 250.0  -> 147.252 deg
+#     i         = 180 - xi_i        = 180 - 30.5      -> 149.5 deg
+#                                                        (cosi = -0.86163)
+#     omega_*   = xi_omega                            -> 207.3 deg
+#     nu(t0par) = xi_u - xi_omega   = 28.8 deg        -> tp = 2457930.059
+#     P = xi_P = 221.5 d,  e = xi_e = 0.615
+#
+# (phi_pi = atan2(pi_E_E, pi_E_N) = atan2(0.127, 0.167).)  The amplitude is
+# NOT a parameter here: xi_a = a_1/(D_S theta_E) = 0.200 EMERGES from the
+# masses and distances below -- a_1 = a * M_SComp/M_S,total = 1.469 au at
+# D_S = 8.54 kpc, theta_E = 0.86 mas -- which is the C25/Mroz-ET point:
+# the physical parameters are the coordinates.
+
+star.ra:
+    initval: 260.4905833          # 17:21:57.74 (OGLE EWS)
+    sigma: 0
+star.dec:
+    initval: -29.6236944          # -29:37:25.3
+    sigma: 0
+
+# --------------------------------------------------------------------
+# Trajectory -- Table B.1 Std 2L1S, verbatim (C18 identity)
+# --------------------------------------------------------------------
+lens.Source.t_0:
+    initval: 2457899.3            # +2.7/-3.4
+lens.Source.u_0:
+    initval: -0.144               # +/- 0.023; the printed u_0- branch.
+                                  # (Its A16 mirror partner flips
+                                  # (u_0, alpha, pi_E_perp) and the source
+                                  # orbit's reflection together -- a
+                                  # candidate second seed for the mode
+                                  # reporter.)
+# t_E = 173 +/- 16 d and pi_E = (0.167, 0.127) at t0_par are NOT seeded
+# directly: both are DERIVED from the four pm leaves and the mass/distance
+# chain, and seeding them alongside the pm/distance seeds below
+# over-determines the engine at equal rank -- measured 2026-08-27: the
+# reconciliation rotated phi_pi from 37.25 to 2.5 deg and inflated t_E to
+# 205 d, which through C25's bigomega = phi_pi - xi_Omega corrupted the
+# xallarap track.  The pm/distance seeds below reproduce the printed
+# values EXACTLY as derived quantities instead (t_E = 173.0,
+# |pi_E| = 0.2098, phi_pi = 37.25 deg).
+lens.Source.rho:
+    initval: 0.0109               # +0.0140/-0.0070
+
+# Binary-lens geometry (static -- the LENS binary is not the moving one
+# in this event; the SOURCE is)
+lens.OB170114.s:
+    initval: 0.337                # +/- 0.016: close topology
+lens.OB170114.alpha:
+    initval: 330.4                # +/- 2.6 deg
+lens.OB170114.q:
+    initval: 0.0219               # +0.0054/-0.0039 -> M_b ~ 11.5 M_J; the
+                                  # engine propagates q * m_host to seed
+                                  # planet.b's mass
+
+# --------------------------------------------------------------------
+# The source binary -- the xallarap orbit (C25 mapping above)
+# --------------------------------------------------------------------
+orbit.S.period:
+    initval: 221.5                # +55/-39 d (xi_P)
+# tp = 2457930.059 from nu(t0par) = xi_u - xi_omega = 28.8 deg with
+# e = 0.615 (the C25 anomaly chain).  Seeded through tc rather than tp:
+# tc = tp + M_c(e, omega) P/(2 pi) = 2458125.06 (the conjunction one
+# period forward -- the tc hard window is built with the wrapped-positive
+# M_c, and a tp seed's solved tc landed on the OTHER wrap of the same
+# conjunction, outside its own window; that wrap seam is filed for review).
+orbit.S.tc:
+    initval: 2458125.06
+# e = 0.615 +0.015/-0.018, omega_* = 207.3 deg:
+orbit.S.secosw:
+    initval: -0.69684             # sqrt(e) cos(207.3)
+orbit.S.sesinw:
+    initval: -0.35953             # sqrt(e) sin(207.3)
+orbit.S.cosi:
+    initval: -0.86163             # i = 149.5 = 180 - xi_i: the C25
+                                  # third-axis flip, same as C24's Yee
+                                  # mapping in examples/ob09020
+orbit.S.bigomega:
+    initval: 147.252              # = phi_pi - xi_Omega (C25)
+
+# --------------------------------------------------------------------
+# Physical parameters (Table B.2 Std 2L1S + the C25 amplitude closure)
+# --------------------------------------------------------------------
+star.L1.mass:
+    initval: 0.50                 # M_h = 0.50 +0.90/-0.28 Msun
+star.L1.distance:
+    initval: 3330.0               # B.2 prints D_L = 3.4 +/- 1.8 kpc; 3.33
+                                  # is the value at which the chain's
+                                  # |pi_E| = sqrt(pi_rel/(kappa M)) equals
+                                  # the printed 0.2098 exactly (Table 1
+                                  # medians are marginals; the chain needs
+                                  # one consistent point)
+star.Source.mass:
+    initval: 1.0                  # ASSUMED (a typical bulge red giant;
+                                  # Std does not sample it).  The xallarap
+                                  # amplitude then requires:
+star.SComp.mass:
+    initval: 10.36                # from a_1 = xi_a * theta_E * D_S =
+                                  # 1.469 au with P = 221.5 d and
+                                  # M_S = 1.0: the Std solution's dark
+                                  # companion is ~10 Msun (K_RV,S1 ~ 44
+                                  # km/s, their Table B.2) -- a black-hole
+                                  # candidate if taken at face value,
+                                  # which is precisely the tension the
+                                  # ET/physical parameterization exists to
+                                  # interrogate.
+star.Source.distance:
+    initval: 8540.0               # D_S assumed 8.54 kpc (red clump)
+star.SComp.distance:
+    initval: 8540.0               # one binary
+
+# Proper motions -- ALL FOUR leaves pinned, because t_E and pi_E are
+# derived from them and for this event the Gould-2004 helio->geo term
+# (pi_rel * v_earth_perp ~ 1.1 mas/yr at pi_rel = 0.183) is comparable to
+# mu_rel itself (1.81 mas/yr).  The lens seed is
+#   mu_rel_helio = mu_rel_geo(theta_E/t_E = 1.812 mas/yr along
+#                  phi_pi = 37.25 deg) + pi_rel * v_earth_perp(t0_par)
+#                = (1.336 N, 2.183 E) mas/yr
+# on top of a typical bulge source pm; with the source pm ALSO seeded the
+# engine has nothing left to reconcile and the derived t_E, |pi_E| and
+# phi_pi land on the printed values exactly.
+star.Source.pm_ra:
+    initval: -3.0
+star.Source.pm_dec:
+    initval: -3.0
+star.SComp.pm_ra:
+    initval: -3.0
+star.SComp.pm_dec:
+    initval: -3.0
+star.L1.pm_ra:
+    initval: -0.8170              # = -3.0 + 2.1830
+star.L1.pm_dec:
+    initval: -1.6638              # = -3.0 + 1.3362
+
+# --------------------------------------------------------------------
+# Fluxes and errors
+#
+# Mroz+26 publish f_S1 = 398, f_B = 230 in MulensModel's 22-mag-zeropoint
+# system (baseline I = 15.005, q_source = 0.634) -- but those are for
+# THEIR re-calibrated photometry (2018 reference images), not the EWS
+# quick-look file shipped here (baseline ~ 15.07).  The seeds below are
+# the linear flux solve against THIS file at the seeded geometry
+# (2026-08-27), which is what a start value is for; the published values
+# stay in this comment as the calibrated-data target.  err_scale seeds at
+# their fitted renormalization k_I = 1.98.
+# --------------------------------------------------------------------
+mulensinstrument.OGLE.q_source:
+    initval: 0.30
+mulensinstrument.OGLE.log_f_total:
+    initval: -6.0129
+mulensinstrument.OGLE.err_scale:
+    initval: 1.98

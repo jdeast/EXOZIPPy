@@ -214,6 +214,54 @@ def calc_alpha_from_orbit(
     )[1]
 
 
+def source_offset_from_orbit(
+    times, tp, n, ecc, sinw, cosw, cosi, bigomega, a1, theta_E, d_s
+):
+    """``(sigma_N, sigma_E)``: the luminous source's own sky offset from its
+    barycenter, in Einstein radii, driven by a Keplerian orbit -- the
+    xallarap primitive (C25; review 8.6.9; notes/orbital_motion_and_nbody
+    1b).
+
+    ``a1`` is the SOURCE's barycentric semi-major axis [R_sun]
+    (= a * m_companion / m_total for the orbit's primary body), projected
+    with the primary's own omega_* (``relative=False`` in
+    Orbit.state_vectors' vocabulary); angular units come from
+    a1 * RSUN_TO_AU * 1000 / (D_S * theta_E) with D_S [pc], theta_E [mas].
+    Built on the same kernel and Thiele-Innes owner as every other
+    projection (review 4.8.2).
+    """
+    from ..orbit import physics as orbit_physics
+
+    terms = orbit_physics.state_vector_terms(
+        times, tp, n, ecc, sinw=sinw, cosw=cosw
+    )
+    a_scale = (
+        a1 * RSUN_TO_AU * 1000.0 / (d_s * pt.maximum(theta_E, THETA_E_FLOOR))
+    )
+    r = a_scale * terms.r_over_a
+    sig_N, sig_E = orbit_physics.thiele_innes_xy(
+        r, terms.coswf, terms.sinwf, cosi, bigomega
+    )
+    return sig_N, sig_E
+
+
+def xallarap_trajectory_shift(dsig_N, dsig_E, mu_n_hat, mu_e_hat):
+    """``(dtau, du)`` from an anchored source offset (C25).
+
+    The trajectory is LENS minus SOURCE (C7), so a source displaced by
+    ``+dsigma`` shifts the relative position by ``-dsigma``, projected on
+    C9's basis: ``tau_hat = mu_hat_rel,geo`` and
+    ``beta_hat = (tau_hat_E, -tau_hat_N)`` (the +90 deg North-through-East
+    rotation, exactly the pair the parallax terms use):
+
+        dtau = -(dsigma_N * tau_hat_N + dsigma_E * tau_hat_E)
+        du   = -(dsigma_N * tau_hat_E - dsigma_E * tau_hat_N)
+    """
+    dtau = -(dsig_N * mu_n_hat + dsig_E * mu_e_hat)
+    du = -(dsig_N * mu_e_hat - dsig_E * mu_n_hat)
+    return dtau, du
+
+
 @register_physics
 def calc_beta(pi_rel, theta_E, s, ds_dt, dalpha_dt, d_source):
     """E_kin,perp / E_pot,perp from the sky-plane orbital rates alone --

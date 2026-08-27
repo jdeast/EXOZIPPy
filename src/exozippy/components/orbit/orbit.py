@@ -933,9 +933,17 @@ class Orbit(Component):
         # node is fixed, and the axis's position angle is the node -- it is
         # the ONLY effect here that measures them for a lens binary
         # (review 8.6.8 5e).
-        has_astrometry = in_topology(
-            system, "astrometryinstrument"
-        ) is not None or bool(self._lens_keplerian_orbits(system))
+        # A xallarap orbit (a lens block's `source_orbit:`, C25) is
+        # astrometry-like too: the source's sky track enters the
+        # trajectory, so bigomega is measurable -- but unlike the
+        # lens-geometry case it stays node-DEGENERATE (the track, like all
+        # astrometry, is invariant under the sky-plane reflection); see
+        # _node_degenerate_orbits.
+        has_astrometry = (
+            in_topology(system, "astrometryinstrument") is not None
+            or bool(self._lens_keplerian_orbits(system))
+            or bool(self._lens_xallarap_orbits(system))
+        )
         if has_astrometry:
             self.manifest["xbigomega"] = None
             self.manifest["ybigomega"] = None
@@ -991,31 +999,44 @@ class Orbit(Component):
                     "i > 90 deg" if own_i180.any() else "i < 90 deg",
                 )
 
-    def _lens_keplerian_orbits(self, system):
-        """Orbit indices a lens block drives via ``orbital_motion:
-        keplerian`` (empty set when none).
+    def _lens_orbit_refs(self, system, idx_attr, mode_key, ref_key):
+        """Orbit indices a lens block references through ``ref_key`` when
+        its ``mode_key`` is 'keplerian' (empty set when none).
 
-        Reads the lens INSTANCE when it exists (its ``kep_orbit_idx`` is the
-        resolved reference) and falls back to the raw config block --
-        register_parameters runs per component and the lens may not be
-        constructed yet in a partial harness.
+        Reads the lens INSTANCE when it exists (its resolved ``idx_attr``)
+        and falls back to the raw config block -- register_parameters runs
+        per component and the lens may not be constructed yet in a partial
+        harness.
         """
         lens = in_topology(system, "lens")
         if lens is None:
             return set()
-        idx = getattr(lens, "kep_orbit_idx", None)
+        idx = getattr(lens, idx_attr, None)
         if idx is not None:
             return {int(idx)}
         blocks = lens if isinstance(lens, list) else [lens]
         out = set()
         for b in blocks:
-            if isinstance(b, dict) and b.get("orbital_motion") == "keplerian":
-                ref = b.get("orbit")
+            if isinstance(b, dict) and b.get(mode_key) == "keplerian":
+                ref = b.get(ref_key)
                 if isinstance(ref, int) or str(ref).isdigit():
                     out.add(int(ref))
                 elif ref is not None and ref in list(self.names or []):
                     out.add(list(self.names).index(ref))
         return out
+
+    def _lens_keplerian_orbits(self, system):
+        """Orbits a lens block drives via ``orbital_motion: keplerian``."""
+        return self._lens_orbit_refs(
+            system, "kep_orbit_idx", "orbital_motion", "orbit"
+        )
+
+    def _lens_xallarap_orbits(self, system):
+        """Orbits a lens block's SOURCE moves on (``source_orbital_motion:
+        keplerian`` + ``source_orbit:``, C25)."""
+        return self._lens_orbit_refs(
+            system, "xal_orbit_idx", "source_orbital_motion", "source_orbit"
+        )
 
     def _node_degenerate_orbits(self, system):
         """Per orbit: is the ascending node unidentifiable? (review 1.8.3)
@@ -1049,6 +1070,12 @@ class Orbit(Component):
                         for o, role in self.star_membership(s_idx)
                         if role == "primary"
                     )
+        # A xallarap orbit is astrometry-LIKE for this predicate: the
+        # source's sky track enters the trajectory, and a sky track of any
+        # kind is invariant under the sky-plane reflection -- so it is
+        # node-degenerate exactly as astrometry is, unless something radial
+        # breaks it.
+        astrometric |= self._lens_xallarap_orbits(system)
         radial = set()
         rv = components.get("rvinstrument")
         if rv is not None:
