@@ -94,6 +94,35 @@ def calc_mu_dec_rel_geo(mu_dec_rel, pi_rel, earth_vperp_n):
 
 
 @register_physics
+def calc_beta(pi_rel, theta_E, s, ds_dt, dalpha_dt, d_source):
+    """E_kin,perp / E_pot,perp from the sky-plane orbital rates alone --
+    Skowron+2011 Eq. A19 (after Batista et al. 2011), with gamma_z = 0 and
+    s_z = 0, so it is a LOWER bound on the true ratio and beta < 1 is a
+    NECESSARY condition for a bound lens binary.
+
+        beta = kappa M_sun pi_E (|gamma| yr)^2 s^3
+               / (8 pi^2 theta_E [pi_E + pi_s/theta_E]^3)
+
+    with kappa M_sun = KAPPA [mas] (constants.py), theta_E in mas,
+    gamma = (ds_dt/s, -dalpha_dt) in 1/yr (C24: gamma_perp = -dalpha_dt,
+    and only |gamma|^2 enters), and pi_s = 1000/d_source [mas] the source
+    parallax.  Skowron: this ratio "must absolutely be less than unity, if
+    the system is bound", typically 0.25-0.6 -- which is why the potential
+    on it (Lens.build_likelihood) is a SOFT bound at 1, not a wall.
+    """
+    gamma_sq = (ds_dt / pt.maximum(s, S_FLOOR)) ** 2 + dalpha_dt**2
+    pi_E = pi_rel / pt.maximum(theta_E, THETA_E_FLOOR)
+    pi_s = 1000.0 / d_source
+    denom = (
+        8.0
+        * np.pi**2
+        * pt.maximum(theta_E, THETA_E_FLOOR)
+        * (pi_E + pi_s / pt.maximum(theta_E, THETA_E_FLOOR)) ** 3
+    )
+    return KAPPA * pi_E * gamma_sq * pt.maximum(s, S_FLOOR) ** 3 / denom
+
+
+@register_physics
 def calc_t_E(theta_E, mu_rel_mag):
     # Convert mu_rel_mag from mas/yr to mas/day, then divide theta_E
     return theta_E / (mu_rel_mag / DAYS_PER_YEAR)

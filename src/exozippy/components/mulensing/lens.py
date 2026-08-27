@@ -18,7 +18,7 @@ from exozippy.corner_utils import (
     save_corner_plot,
 )
 from exozippy.outputs.prose import get_collector
-from exozippy.potentials import soft_lower_bound
+from exozippy.potentials import soft_lower_bound, soft_upper_bound
 from exozippy.skyframe import observer_sky_offset, sky_basis
 
 from ..galacticmodel.physics import expected_proper_motion
@@ -196,6 +196,39 @@ class Lens(Component):
                 f"lens.backend must be 'vbm_direct' or 'mulensmodel', "
                 f"got '{self.backend}'."
             )
+
+        # Lens orbital motion (review 8.6.8; conventions.md C24).  Absent =
+        # static geometry, exactly today's behavior.  "linear" samples
+        # per-companion (ds_dt, dalpha_dt) anchored at t0_par; "keplerian"
+        # drives s(t)/alpha(t) from the orbit component named by `orbit:`.
+        self.orbital_motion = [c.get("orbital_motion") for c in self.config]
+        self.orbit_ref = [c.get("orbit") for c in self.config]
+        om = self.orbital_motion[0]
+        if om is not None:
+            if om not in ("linear", "keplerian"):
+                raise ValueError(
+                    f"lens.orbital_motion must be 'linear' or 'keplerian' "
+                    f"(or absent for a static geometry), got '{om}'."
+                )
+            if self.n_companions < 1:
+                raise ValueError(
+                    "lens.orbital_motion needs at least one lens companion: "
+                    "a single point lens has no s or alpha to move.  (Source "
+                    "orbital motion -- xallarap -- is a different key.)"
+                )
+            if self.n_companions > 1:
+                raise NotImplementedError(
+                    "lens.orbital_motion currently supports exactly one "
+                    "companion (the engine's companion relations are "
+                    "binary-only; mulensing.md '3+ lens bodies')."
+                )
+            if om == "keplerian" and self.orbit_ref[0] is None:
+                raise ValueError(
+                    "lens.orbital_motion: keplerian requires `orbit: "
+                    "<orbit instance name>` on the lens block, naming the "
+                    "orbit that moves the lens bodies (the same vocabulary "
+                    "astrometryinstrument's rel mode uses)."
+                )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -490,6 +523,37 @@ class Lens(Component):
                 ),
             },
             {
+                "key": "orbital_motion",
+                "kind": "option",
+                "accepts": ["linear", "keplerian"],
+                "required": False,
+                "doc": (
+                    "Time-dependent lens binary geometry (conventions.md "
+                    "C24; review 8.6.8). Absent = static s/alpha, the "
+                    "default. 'linear' samples per-companion rates ds_dt "
+                    "[Einstein radii/yr] and dalpha_dt [deg/yr user, "
+                    "rad/yr internal], anchored at t0_par, with a soft "
+                    "beta < 1 bound-orbit potential (Skowron+2011 A19). "
+                    "'keplerian' drives s(t)/alpha(t) from the orbit "
+                    "component named by 'orbit:' with NO new free "
+                    "parameters. Exactly one companion for now."
+                ),
+            },
+            {
+                "key": "orbit",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "orbital_motion: keplerian only -- the orbit instance "
+                    "(name or index) whose Keplerian elements move the "
+                    "lens bodies, mirroring astrometryinstrument's rel-"
+                    "mode vocabulary. The orbit's bodies should be the "
+                    "lens bodies, so the RV mass function and the lens "
+                    "geometry share one mass chain."
+                ),
+            },
+            {
                 "key": "finite_source",
                 "kind": "option",
                 "accepts": [True, False],
@@ -679,6 +743,10 @@ class Lens(Component):
         self.source_map = np.array(
             [ndx for (_, ndx) in self.source_bodies[0]], dtype=int
         )
+        # Scalar (length-1) map for the PRIMARY source, mirroring
+        # primary_lens_map below: beta's pi_s dependency needs one source
+        # distance, not the per-source vector.
+        self.primary_source_map = np.array([self.source_map[0]], dtype=int)
 
         if self.n_companions >= 1:
             # Scalar maps (length-1) so the bracket-slice dep yields a scalar
@@ -906,6 +974,21 @@ class Lens(Component):
                 "expr_key": "default",
                 "shape": companion_shape,
             }
+            if self.orbital_motion[0] == "linear":
+                # Linear lens orbital motion (C24): per-companion rates,
+                # definitional in these coordinates and anchored at t0_par
+                # (the parallax anchor -- one epoch is what makes the two
+                # effects composable).  s_0 and alpha_0 above stay the
+                # sampled geometry AT t0_par.
+                self.manifest["ds_dt"] = {"shape": companion_shape}
+                self.manifest["dalpha_dt"] = {"shape": companion_shape}
+                # beta = E_kin,perp/E_pot,perp (Skowron A19) from the
+                # sky-plane rates: reported per source trajectory, softly
+                # bounded below 1 in build_likelihood.
+                self.manifest["beta"] = {
+                    "expr_key": "default",
+                    "shape": (self.n_sources,),
+                }
             # q_j = M_companion_j / M_primary; companion component types vary
             # by config, hence one scalar bracket dep per companion.
             companion_mass_deps = [
@@ -1576,6 +1659,34 @@ class Lens(Component):
             pt.sum(soft_lower_bound(theta_E, 1e-6, scale=1e-5)),
         )
 
+        if self.orbital_motion[0] == "linear":
+            # The bound-orbit rope for the linear rates (C24; Skowron A19):
+            # beta = E_kin,perp/E_pot,perp from the sky-plane rates is a
+            # LOWER bound on the true ratio, so beta < 1 is a NECESSARY
+            # condition for a bound binary.  A SOFT bound (warn-shaped, a
+            # restoring gradient rather than a wall), because typical bound
+            # binaries sit at 0.25-0.6 and the linear parameterization must
+            # stay revisable -- this is the physics that makes a full
+            # Keplerian unnecessary for a short arc (section 3 of
+            # notes/orbital_motion_and_nbody.txt).
+            pm.Potential(
+                f"{self.prefix}.bound_orbit",
+                pt.sum(soft_upper_bound(self.beta.value, 1.0, scale=0.1)),
+            )
+            get_collector(system).add(
+                r"We modeled the orbital motion of the lens binary to "
+                r"first order, $s(t) = s_0 + \dot{s}\,(t - t_{0,\rm par})$ "
+                r"and $\alpha(t) = \alpha_0 + \dot{\alpha}\,(t - "
+                r"t_{0,\rm par})$ \citep{Albrow:2000, Skowron:2011}, and "
+                r"applied a soft upper bound at unity on the projected "
+                r"kinetic-to-potential energy ratio "
+                r"$\beta_{\rm kin}$ \citep{Batista:2011, Skowron:2011}, a "
+                r"necessary condition for a bound lens binary.",
+                section="microlensing",
+                key=f"{self.prefix}.orbital_motion",
+                rank=32,
+            )
+
     # ------------------------------------------------------------------
     # Magnification
     # ------------------------------------------------------------------
@@ -1593,6 +1704,47 @@ class Lens(Component):
         plots see.
         """
         return self.alpha.value[j] * _RAD_TO_DEG
+
+    def _companion_geometry_series(self, times):
+        """Per-epoch companion geometry ``(s_t, alpha_t_deg)`` for companion
+        0, or ``None`` when the lens geometry is static.
+
+        The linear mode is DEFINITIONAL in these coordinates (C24):
+
+            s(t)     = s_0     + ds_dt     * (t - t0_par)/DAYS_PER_YEAR
+            alpha(t) = alpha_0 + dalpha_dt * (t - t0_par)/DAYS_PER_YEAR
+
+        anchored at t0_par -- the same fiducial epoch the parallax uses
+        (5d: one anchor is what makes the two effects composable; Skowron
+        Eq. A17).  ``alpha_t`` is returned in DEGREES, the unit both
+        magnification backends take; ``dalpha_dt``'s internal unit is
+        rad/yr, so the rate converts here alongside alpha itself
+        (_alpha_deg).  Skowron's gamma vocabulary maps as
+        gamma_par = ds_dt/s_0 and gamma_perp = -dalpha_dt -- the minus is
+        C24's rule, and the light curve built from these definitions is
+        pinned against MulensModel's linear branch (the reference
+        implementation) in tests/test_lens_orbital_motion.py.
+
+        ``times`` may be a tensor or a numpy array (the likelihood's
+        concatenated epochs, or a plotter's model grid) -- the series is
+        built from the argument, never from ``self.time``, so the plotted
+        curve is the curve the likelihood fits.
+        """
+        om = self.orbital_motion[0]
+        if om is None:
+            return None
+        dt_yr = (times - self.t0_par[0]) / DAYS_PER_YEAR
+        if om == "linear":
+            s_t = self.s.value[0] + self.ds_dt.value[0] * dt_yr
+            alpha_t_deg = (
+                self._alpha_deg(0)
+                + self.dalpha_dt.value[0] * _RAD_TO_DEG * dt_yr
+            )
+            return s_t, alpha_t_deg
+        raise NotImplementedError(
+            "orbital_motion: keplerian is not wired into the magnification "
+            "yet (review 8.6.8 step 5a/5b)."
+        )
 
     def _get_safe_mm_params(self, index=0):
         """Range-limited single-source trajectory params.  ``index`` is the
@@ -1976,6 +2128,14 @@ class Lens(Component):
             )
             return mag_op(pt.stack(param_list), times_tensor, obs_tensor)
 
+        # Per-epoch companion geometry (lens orbital motion, C24) -- None
+        # for a static lens.  Built from the TIMES ARGUMENT, so the
+        # plotters' model grids get the same moving geometry the likelihood
+        # fits.
+        geometry_series = (
+            self._companion_geometry_series(times) if n_lenses >= 2 else None
+        )
+
         if n_lenses >= 2 and self.backend == "vbm_direct":
             sp = self._get_safe_mm_params(index)
             param_list = [
@@ -2005,8 +2165,25 @@ class Lens(Component):
                 use_rho=use_rho,
                 bandpass=effective_bandpass,
                 quadratic_ld=use_u2,
+                orbital_motion=geometry_series is not None,
             )
+            if geometry_series is not None:
+                s_t, alpha_t_deg = geometry_series
+                return mag_op(
+                    pt.stack(param_list),
+                    times_tensor,
+                    obs_tensor,
+                    pt.as_tensor_variable(s_t),
+                    pt.as_tensor_variable(alpha_t_deg),
+                )
         elif n_lenses == 2:
+            if self.orbital_motion[0] == "keplerian":
+                raise NotImplementedError(
+                    "orbital_motion: keplerian requires backend: vbm_direct."
+                    "  MulensModel's own keplerian lens motion contradicts "
+                    "its linear mode by a sign and is not a usable reference"
+                    " (conventions.md section 6, measured 2026-08-27)."
+                )
             bp = self._get_binary_mm_params(index)
             param_list = [
                 bp["t_0"],
@@ -2018,6 +2195,17 @@ class Lens(Component):
             if use_rho:
                 param_list.append(self.rho.value[index])
             param_list.extend([bp["s"], bp["q"], bp["alpha"]])
+            if geometry_series is not None:
+                # MulensModel's LINEAR branch is definitional in the same
+                # (ds_dt, dalpha_dt) and takes deg/yr; this is the A/B
+                # reference path the parity test pins the per-epoch
+                # vbm_direct construction against.
+                param_list.extend(
+                    [
+                        self.ds_dt.value[0],
+                        self.dalpha_dt.value[0] * _RAD_TO_DEG,
+                    ]
+                )
             if effective_bandpass is not None:
                 param_list.append(u1)
             mag_op = BinaryLensMagOp(
@@ -2025,6 +2213,8 @@ class Lens(Component):
                 mag_method=self.mag_method[index],
                 use_rho=use_rho,
                 bandpass=effective_bandpass,
+                orbital_motion=geometry_series is not None,
+                t_0_kep=self.t0_par[0],
             )
         else:
             sp = self._get_safe_mm_params(index)

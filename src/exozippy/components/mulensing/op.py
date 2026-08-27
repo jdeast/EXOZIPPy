@@ -1,3 +1,4 @@
+import functools
 import warnings
 
 import astropy.units as u
@@ -151,17 +152,26 @@ def _build_pspl_model(p, coords, mag_method, use_rho=False):
                 [t_0 - window, "finite_source_LD_Yoo04", t_0 + window]
             )
         else:
-            model.set_magnification_methods([0.0, "point_source"])
+            model.set_magnification_methods([-np.inf, "point_source", np.inf])
     else:
-        model.set_magnification_methods([0.0, mag_method])
+        model.set_magnification_methods([-np.inf, mag_method, np.inf])
     return model
 
 
-def _build_binary_model(p, coords, mag_method, use_rho=False):
+def _build_binary_model(
+    p, coords, mag_method, use_rho=False, orbital_motion=False, t_0_kep=None
+):
     """Construct a MulensModel for a binary lens.
 
     Param vector: [t_0, u_0, t_E, pi_E_N, pi_E_E] + optional [rho] + [s, q, alpha_deg]
+    + optional [ds_dt, dalpha_dt] (with ``orbital_motion=True``; MulensModel's
+    LINEAR lens-motion branch, both rates per year and dalpha_dt in deg/yr,
+    anchored at the ``t_0_kep`` given here -- EXOZIPPy passes t0_par, C24/5d).
     Extra trailing elements (u1) are ignored by the builder; LD is applied in perform().
+
+    Only the LINEAR branch is ever requested: MulensModel's keplerian lens
+    motion contradicts its own linear mode by a sign (conventions.md
+    section 6) and is not used as a reference for anything.
     """
     mm_params = _base_mm_params(p)
     idx = 5
@@ -171,6 +181,10 @@ def _build_binary_model(p, coords, mag_method, use_rho=False):
     mm_params["s"] = float(max(float(p[idx]), S_FLOOR))
     mm_params["q"] = clip_q_value(p[idx + 1], "lens.q")
     mm_params["alpha"] = float(p[idx + 2])
+    if orbital_motion:
+        mm_params["ds_dt"] = float(p[idx + 3])
+        mm_params["dalpha_dt"] = float(p[idx + 4])
+        mm_params["t_0_kep"] = float(t_0_kep)
 
     model = mm.Model(parameters=mm_params, coords=coords)
     # Same convention as _build_pspl_model: the satellite channel carries
@@ -189,9 +203,9 @@ def _build_binary_model(p, coords, mag_method, use_rho=False):
         # BinaryLensPointSourceMagnification, the exact binary point-source
         # solver (it reproduces VBBL at rho -> 0 to machine precision).
         method = "VBM" if use_rho else "point_source"
-        model.set_magnification_methods([0.0, method])
+        model.set_magnification_methods([-np.inf, method, np.inf])
     else:
-        model.set_magnification_methods([0.0, mag_method])
+        model.set_magnification_methods([-np.inf, mag_method, np.inf])
     return model
 
 
@@ -321,15 +335,40 @@ class BinaryLensMagOp(_MagOpBase):
     """PyTensor Op wrapping MulensModel for binary lens (+ optional finite source).
 
     Param vector: [t_0, u_0, t_E, pi_E_N, pi_E_E] + optional [rho] + [s, q, alpha_deg]
-    + optional [u1]
+    + optional [ds_dt, dalpha_dt] (``orbital_motion=True``: MulensModel's
+    LINEAR lens-motion branch anchored at ``t_0_kep`` = EXOZIPPy's t0_par --
+    this is the A/B reference the per-epoch vbm_direct path is pinned
+    against) + optional [u1]
     """
 
     _builder = staticmethod(_build_binary_model)
 
     def __init__(
-        self, coords, mag_method="auto_vbbl", use_rho=False, bandpass=None
+        self,
+        coords,
+        mag_method="auto_vbbl",
+        use_rho=False,
+        bandpass=None,
+        orbital_motion=False,
+        t_0_kep=None,
     ):
         super().__init__(coords, mag_method, use_rho, bandpass)
+        self.orbital_motion = bool(orbital_motion)
+        self.t_0_kep = t_0_kep
+        if self.orbital_motion:
+            if t_0_kep is None:
+                raise ValueError(
+                    "BinaryLensMagOp(orbital_motion=True) needs t_0_kep "
+                    "(EXOZIPPy passes t0_par; C24/5d -- one anchor for the "
+                    "orbital and parallax terms)."
+                )
+            # functools.partial of a module-level function stays picklable
+            # (PTDE spawn / numba object-mode caching), unlike a lambda.
+            self._builder = functools.partial(
+                _build_binary_model,
+                orbital_motion=True,
+                t_0_kep=float(t_0_kep),
+            )
 
 
 class VBMDirectMagOp(Op):
@@ -395,6 +434,7 @@ class VBMDirectMagOp(Op):
         accuracy=1e-3,
         relative_accuracy=0.0,
         quadratic_ld=False,
+        orbital_motion=False,
     ):
         # coords: "<ra>d <dec>d" string — same format the MulensModel Ops take.
         ra_deg, dec_deg = [float(v.rstrip("d")) for v in str(coords).split()]
@@ -414,6 +454,27 @@ class VBMDirectMagOp(Op):
         self.bandpass = (
             bandpass  # None = no LD; str = u1 (then u2) at the param tail
         )
+        # Lens orbital motion (C24, review 8.6.8 5c): two extra dvector
+        # inputs carry the PER-EPOCH companion geometry -- s_t [r_E] and
+        # alpha_t [DEG] -- built in the graph by
+        # Lens._companion_geometry_series.  The param vector keeps its
+        # static s_0/alpha_0 entries (the t0_par values; the series must
+        # equal them there), so the layout and _param_labels are unchanged.
+        self.orbital_motion = bool(orbital_motion)
+        if self.orbital_motion:
+            if self.n_companions != 1:
+                raise ValueError(
+                    "VBMDirectMagOp(orbital_motion=True) supports exactly "
+                    "one companion (Lens raises earlier; mulensing.md "
+                    "'3+ lens bodies')."
+                )
+            self.itypes = [
+                pt.dvector,
+                pt.dvector,
+                pt.dmatrix,
+                pt.dvector,
+                pt.dvector,
+            ]
         # u2 only means anything alongside a u1, so a quadratic law without a
         # bandpass is a caller bug, not a silently-uniform source.
         self.quadratic_ld = bool(quadratic_ld) and bandpass is not None
@@ -532,6 +593,11 @@ class VBMDirectMagOp(Op):
 
         if self.n_companions == 1:
             s, q, _ = companions[0]
+            # One per-epoch layout whether s is the static scalar or the
+            # orbital-motion series (review 8.6.8 5c: the fast path merges
+            # into the general layout; broadcast_to is a view, so the
+            # static case pays nothing and computes identically).
+            s_arr = np.broadcast_to(np.asarray(s, dtype=float), np.shape(x))
             mag2, mag0 = vbm.BinaryMag2, vbm.BinaryMag0
             if not self.use_rho:
                 # Point source (user's finite_source: False): Mag2's
@@ -542,17 +608,26 @@ class VBMDirectMagOp(Op):
                 # rho, since rho is otherwise a derived/sampled quantity.
                 return np.array(
                     [
-                        mag0(s, q, xi, yi)
-                        for xi, yi in zip(x.tolist(), y.tolist())
+                        mag0(si, q, xi, yi)
+                        for si, xi, yi in zip(
+                            s_arr.tolist(), x.tolist(), y.tolist()
+                        )
                     ]
                 )
-            r_inf = s + 1.0 / s + 2.0
+            r_inf = s_arr + 1.0 / s_arr + 2.0
             far = (x * x + y * y) > (r_inf + 2.0 * rho) ** 2
             return np.array(
                 [
-                    mag0(s, q, xi, yi) if isfar else mag2(s, q, xi, yi, rho)
-                    for xi, yi, isfar in zip(
-                        x.tolist(), y.tolist(), far.tolist()
+                    (
+                        mag0(si, q, xi, yi)
+                        if isfar
+                        else mag2(si, q, xi, yi, rho)
+                    )
+                    for si, xi, yi, isfar in zip(
+                        s_arr.tolist(),
+                        x.tolist(),
+                        y.tolist(),
+                        far.tolist(),
                     )
                 ]
             )
@@ -584,9 +659,10 @@ class VBMDirectMagOp(Op):
         )
 
     def perform(self, node, inputs, outputs):
-        p, times_np, obs_pos_np = inputs
+        p, times_np, obs_pos_np = inputs[:3]
+        series = inputs[3:] if self.orbital_motion else None
         try:
-            A = self._compute(p, times_np, obs_pos_np)
+            A = self._compute(p, times_np, obs_pos_np, series)
         except (ValueError, RuntimeError) as exc:
             # Invalid parameter combination -> NaN magnifications -> logp =
             # -inf -> the proposal is rejected.  That is the intended handling
@@ -628,7 +704,7 @@ class VBMDirectMagOp(Op):
                 labels.append("band.u2")
         return labels
 
-    def _compute(self, p, times_np, obs_pos_np):
+    def _compute(self, p, times_np, obs_pos_np, series=None):
         # Non-finite check FIRST: it is the explicit handler for a NaN
         # parameter vector (return NaN magnifications -> logp = -inf ->
         # proposal rejected), and running it before the unpacking below means
@@ -640,6 +716,24 @@ class VBMDirectMagOp(Op):
         # once: a *misconfigured* model is non-finite on every proposal, which
         # is indistinguishable from ordinary rejection unless the first one is
         # reported.  This branch used to return NaN in complete silence.
+        #
+        # The per-epoch geometry series (orbital motion) gets the same
+        # treatment: it is a function of the same sampled parameters, so a
+        # NaN there is a rejected proposal, not a crash.
+        if series is not None and not all(
+            np.all(np.isfinite(np.asarray(v, dtype=float))) for v in series
+        ):
+            if not self._warned:
+                self._warned = True
+                warnings.warn(
+                    f"{type(self).__name__}: non-finite per-epoch orbital-"
+                    "motion geometry (s_t/alpha_t) -- returning NaN "
+                    "magnifications (logp = -inf) for this proposal.  "
+                    f"{_MM_NAN_ADVICE}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            return np.full(len(times_np), np.nan)
         bad = ~np.isfinite(np.asarray(p, dtype=float))
         if np.any(bad):
             if not self._warned:
@@ -688,6 +782,14 @@ class VBMDirectMagOp(Op):
             if self.quadratic_ld:
                 u2 = float(p[idx + 1])
 
+        if series is not None:
+            # Per-epoch geometry supersedes the scalar s_0/alpha_0 entries
+            # (which remain the t0_par anchors).  Same S_FLOOR as the scalar
+            # path; alpha arrives in degrees, like every alpha here.
+            s_t = np.maximum(np.asarray(series[0], dtype=float), S_FLOOR)
+            alpha_t = np.radians(np.asarray(series[1], dtype=float))
+            companions[0] = (s_t, companions[0][1], alpha_t)
+
         dN, dE = self._deltas(obs_pos_np)
         tau = (
             (times_np - base["t_0"]) / base["t_E"]
@@ -728,6 +830,12 @@ class VBMDirectMagOp(Op):
         return self.pullback(inputs, [], gradients)
 
     def connection_pattern(self, node):
+        if self.orbital_motion:
+            # The per-epoch geometry inputs are functions of the sampled
+            # parameters, so they genuinely feed the output -- honesty here
+            # is what keeps pullback's refusal reachable (same reasoning as
+            # _MagGradOp.connection_pattern).
+            return [[True], [False], [False], [True], [True]]
         return [[True], [False], [False]]
 
 
