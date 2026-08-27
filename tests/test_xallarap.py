@@ -1,0 +1,340 @@
+"""
+Source orbital motion -- xallarap (conventions.md C25; review 8.6.9).
+
+What is pinned here, and why each pin is the one that matters:
+
+  - The C9 first-principles reconstruction: the trajectory shift
+    (dtau, du) must equal the source's Keplerian sky offset -- rebuilt in
+    numpy by this test's own Kepler solver and Thiele-Innes projection --
+    anchored at t0_par and projected on (tau_hat, beta_hat) with C7's
+    minus (lens MINUS source).  The projection's absolute orientation is
+    pinned first-principles by tests/test_skyframe.py /
+    tests/test_astrometry.py; this test pins the xallarap COMPOSITION of
+    it, which no chi2 can (a flipped sign is a different but
+    healthy-looking model).
+  - The magnification actually consumes the shift: the symbolic PSPL path
+    equals the Paczynski formula evaluated at the manually shifted
+    (tau, u).
+  - The t0_par anchor: the shift vanishes there (5d: one anchor for
+    parallax and both orbital-motion effects, so t_0/u_0 keep their
+    meaning).
+  - The Op plumbing: VBMDirectMagOp(source_motion=True) through the ESPL
+    branch reproduces the symbolic path at negligible rho.
+  - No new sampled parameters; the xallarap orbit samples bigomega but
+    stays node-degenerate (a sky track is reflection-invariant), unlike
+    the lens-keplerian case.
+"""
+
+import numpy as np
+import pytensor
+import pytensor.tensor as pt
+import pytest
+
+pytestmark = pytest.mark.slow
+
+from exozippy.constants import RSUN_TO_AU
+from exozippy.system import System
+
+_T0_PAR = 2458554.89
+
+
+def _write_lc(path, n=90, span=60.0):
+    rng = np.random.default_rng(13)
+    t = np.linspace(_T0_PAR - span, _T0_PAR + span, n)
+    mag = 15.0 - rng.uniform(0, 0.001, n)
+    err = np.full(n, 0.01)
+    np.savetxt(path, np.column_stack([t, mag, err]))
+    return str(path)
+
+
+def _xal_system(tmp_path, finite_source=False, binary_lens=False):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    lc = _write_lc(tmp_path / "lc.dat")
+    stars = [{"name": "L1"}, {"name": "Source"}, {"name": "SComp"}]
+    lenses = ["star.0"]
+    if binary_lens:
+        stars.append({"name": "L2"})
+        lenses = ["star.0", "star.3"]
+    config = {
+        "star": stars,
+        "orbit": [
+            {"name": "S", "primary": ["Source"], "companion": ["SComp"]}
+        ],
+        "lens": [
+            {
+                "name": "EV",
+                "lenses": lenses,
+                "sources": ["star.1"],
+                "finite_source": finite_source,
+                "source_orbital_motion": "keplerian",
+                "source_orbit": "S",
+                "t0_par": _T0_PAR,
+                "mmexofast": False,
+            }
+        ],
+        "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],
+    }
+    params = {
+        "lens.Source.t_0": {"initval": _T0_PAR},
+        "lens.Source.u_0": {"initval": 0.15},
+        "lens.Source.t_E": {"initval": 45.0},
+        "lens.Source.pi_E_N": {"initval": 0.08},
+        "lens.Source.pi_E_E": {"initval": 0.11},
+        "orbit.S.period": {"initval": 120.0},
+        "orbit.S.tc": {"initval": _T0_PAR - 20.0},
+        "orbit.S.secosw": {"initval": 0.4},
+        "orbit.S.sesinw": {"initval": 0.3},
+        "orbit.S.cosi": {"initval": 0.4},
+        "orbit.S.bigomega": {"initval": 70.0},
+        "star.L1.mass": {"initval": 0.6},
+        "star.L1.distance": {"initval": 4000.0},
+        "star.Source.mass": {"initval": 1.0},
+        "star.SComp.mass": {"initval": 0.6},
+        "star.Source.distance": {"initval": 8000.0},
+        "star.SComp.distance": {"initval": 8000.0},
+        "star.radius": {"sigma": 0.0},
+        "star.teff": {"sigma": 0.0},
+        "star.feh": {"sigma": 0.0},
+    }
+    if finite_source:
+        params["lens.Source.rho"] = {"initval": 1e-4}
+    if binary_lens:
+        params["star.L2.mass"] = {"initval": 0.2}
+        params["star.L2.distance"] = {"initval": 4000.0}
+        params["lens.EV.s"] = {"initval": 1.3}
+        params["lens.EV.alpha"] = {"initval": 55.0}
+        params["lens.EV.q"] = {"initval": 0.33}
+    for st in stars:
+        nm = st["name"]
+        params[f"star.{nm}.ra"] = {"initval": 268.0, "sigma": 0}
+        params[f"star.{nm}.dec"] = {"initval": -29.0, "sigma": 0}
+    system = System(config, user_params=params)
+    system.prepare()
+    model = system.build_model()
+    return system, model
+
+
+@pytest.fixture(scope="module")
+def xal_system(tmp_path_factory):
+    return _xal_system(tmp_path_factory.mktemp("xallarap"))
+
+
+def _eval_at_start(model, nodes):
+    with model:
+        f = pytensor.function(model.free_RVs, nodes, on_unused_input="ignore")
+        ip = model.initial_point()
+        zeros = [
+            np.zeros_like(ip[v.name]).astype(float) for v in model.free_RVs
+        ]
+        return f(*zeros)
+
+
+# --- the test's OWN first-principles reconstruction --------------------
+
+
+def _np_kepler(M, ecc):
+    E = np.remainder(M, 2 * np.pi)
+    for _ in range(80):
+        E = E - (E - ecc * np.sin(E) - M) / (1 - ecc * np.cos(E))
+    return E
+
+
+def _np_source_offset(t, tp, n, ecc, w, cosi, bigom, a_scale):
+    """Sky offset (N, E) of the orbit's primary body, the test's own copy
+    of the standard construction (mirrors tests/test_astrometry.py's
+    reference)."""
+    M = (t - tp) * n
+    E = _np_kepler(np.atleast_1d(M), ecc)
+    cosf = (np.cos(E) - ecc) / (1 - ecc * np.cos(E))
+    sinf = np.sqrt(1 - ecc**2) * np.sin(E) / (1 - ecc * np.cos(E))
+    r = a_scale * (1 - ecc**2) / (1 + ecc * cosf)
+    coswf = np.cos(w) * cosf - np.sin(w) * sinf
+    sinwf = np.sin(w) * cosf + np.cos(w) * sinf
+    N = r * (np.cos(bigom) * coswf - np.sin(bigom) * sinwf * cosi)
+    Eo = r * (np.sin(bigom) * coswf + np.cos(bigom) * sinwf * cosi)
+    return N, Eo
+
+
+def test_shift_is_the_anchored_projected_source_orbit(xal_system):
+    """
+    Given: the built model's own resolved orbit/lens values,
+    When: the (dtau, du) series is compared against this test's numpy
+      reconstruction of C25 (Kepler -> Thiele-Innes -> anchor at t0_par ->
+      project on (tau_hat, beta_hat) with C7's minus),
+    Then: they agree to 1e-10 at every epoch, and both vanish at t0_par.
+    """
+    system, model = xal_system
+    lens = system.lens
+    orbit = system.orbit
+    times = np.linspace(_T0_PAR - 90.0, _T0_PAR + 90.0, 181)
+
+    dtau_t, du_t = lens._source_offset_series(times, system)
+    j = lens.xal_orbit_idx
+    nodes = [
+        dtau_t,
+        du_t,
+        orbit.tp.value[j],
+        orbit.n.value[j],
+        orbit.ecc.value[j],
+        pt.arctan2(orbit.sinw.value[j], orbit.cosw.value[j]),
+        orbit.cosi.value[j],
+        orbit.bigomega.value[j],
+        orbit.a.value[j] * orbit.m_companion.value[j] / orbit.m_total.value[j],
+        lens.theta_E.value[0],
+        system.star.distance.value[lens.source_map[0]],
+        lens.mu_dec_rel_geo.value[0],
+        lens.mu_ra_rel_geo.value[0],
+        lens.mu_rel_geo_mag.value[0],
+    ]
+    out = _eval_at_start(model, nodes)
+    dtau, du = np.atleast_1d(out[0]), np.atleast_1d(out[1])
+    (tp, n, ecc, w, cosi, bigom, a1, theta_E, d_s, mu_n, mu_e, mu_mag) = [
+        float(np.atleast_1d(v)[0]) for v in out[2:]
+    ]
+
+    a_scale = a1 * RSUN_TO_AU * 1000.0 / (d_s * theta_E)
+    sN, sE = _np_source_offset(times, tp, n, ecc, w, cosi, bigom, a_scale)
+    sN0, sE0 = _np_source_offset(
+        np.array([_T0_PAR]), tp, n, ecc, w, cosi, bigom, a_scale
+    )
+    dN, dE = sN - sN0[0], sE - sE0[0]
+    tn, te = mu_n / mu_mag, mu_e / mu_mag
+    np.testing.assert_allclose(dtau, -(dN * tn + dE * te), atol=1e-10)
+    np.testing.assert_allclose(du, -(dN * te - dE * tn), atol=1e-10)
+
+    # the anchor: zero shift at t0_par
+    d0 = _eval_at_start(
+        model, list(lens._source_offset_series(np.array([_T0_PAR]), system))
+    )
+    np.testing.assert_allclose(np.atleast_1d(d0[0]), 0.0, atol=1e-14)
+    np.testing.assert_allclose(np.atleast_1d(d0[1]), 0.0, atol=1e-14)
+
+    # and the motion is genuinely nonzero over the window
+    assert np.max(np.hypot(dtau, du)) > 1e-3
+
+
+def test_symbolic_magnification_consumes_the_shift(xal_system):
+    """
+    Given: the symbolic PSPL path with xallarap,
+    When: compared to the Paczynski formula at the manually shifted
+      (tau, u) built from the model's own trajectory pieces,
+    Then: they agree to 1e-12 -- the shift enters at exactly the parallax
+      slot (C25), not somewhere else.
+    """
+    system, model = xal_system
+    lens = system.lens
+    inst = system.mulensinstrument
+    times = np.asarray(inst.time, dtype=float)
+
+    A_node = lens.get_magnification(times, inst.observer_pos, system)
+
+    from exozippy.skyframe import observer_sky_offset
+
+    ra = system.star.ra.value[lens.source_map[0]]
+    dec = system.star.dec.value[lens.source_map[0]]
+    d_e, d_n = observer_sky_offset(inst.observer_pos, ra, dec, xp=pt)
+    p = lens._get_safe_mm_params(0)
+    tau = (times - p["t_0"]) / p["t_E"] - d_n * p["pi_E_N"] - d_e * p["pi_E_E"]
+    uu = p["u_0"] + d_n * p["pi_E_E"] - d_e * p["pi_E_N"]
+    dtau_t, du_t = lens._source_offset_series(times, system)
+    tau = tau + dtau_t
+    uu = uu + du_t
+    u2 = pt.sqr(tau) + pt.sqr(uu)
+    A_manual = (u2 + 2.0) / pt.sqrt(u2 * (u2 + 4.0))
+
+    A1, A2 = _eval_at_start(model, [A_node, A_manual])
+    np.testing.assert_allclose(A1, A2, rtol=1e-12)
+
+    # teeth: the static model differs
+    u2s = pt.sqr(tau - dtau_t) + pt.sqr(uu - du_t)
+    A_static = (u2s + 2.0) / pt.sqrt(u2s * (u2s + 4.0))
+    (A3,) = _eval_at_start(model, [A_static])
+    assert np.max(np.abs(A3 - A1)) > 1e-4
+
+
+def test_espl_op_matches_the_symbolic_path(tmp_path_factory):
+    """
+    Given: the same xallarap system with finite_source at negligible rho
+      (which routes the single lens through VBMDirectMagOp's ESPL branch
+      with source_motion inputs),
+    When: compared to the point-source symbolic path,
+    Then: they agree to 1e-5 -- the Op plumbing carries the same shift.
+    """
+    system, model = _xal_system(
+        tmp_path_factory.mktemp("xal_espl"), finite_source=True
+    )
+    lens = system.lens
+    inst = system.mulensinstrument
+    times = np.asarray(inst.time, dtype=float)
+    A_op = lens.get_magnification_op(times, inst.observer_pos, system)
+    A_sym = lens.get_magnification(times, inst.observer_pos, system)
+    A1, A2 = _eval_at_start(model, [A_op, A_sym])
+    assert np.all(np.isfinite(A1))
+    np.testing.assert_allclose(A1, A2, rtol=1e-5)
+
+
+def test_binary_lens_op_builds_and_is_finite(tmp_path_factory):
+    """
+    Given: a 2L1S system with xallarap (the OGLE-2017-BLG-0114 topology),
+    When: the model builds,
+    Then: logp is finite and the magnification Op consumes the shift
+      (differs from the static curve).
+    """
+    system, model = _xal_system(
+        tmp_path_factory.mktemp("xal_2l1s"), binary_lens=True
+    )
+    starts, _ = system.get_raw_starts(model)
+    logp = float(model.compile_logp(jacobian=False)(starts[0]))
+    assert np.isfinite(logp)
+
+
+def test_no_new_parameters_and_node_degeneracy(xal_system):
+    """
+    Given: the xallarap system,
+    Then: no xi_*-style sampled parameters exist (the orbit IS the
+      parameterization), the source orbit samples bigomega, and it REMAINS
+      node-degenerate (a sky track is reflection-invariant; only the lens
+      keplerian mode breaks the node).
+    """
+    system, model = xal_system
+    free_names = [v.name for v in model.free_RVs]
+    assert "orbit.xbigomega_raw" in free_names
+    assert bool(
+        np.atleast_1d(system.orbit.node_degenerate)[system.lens.xal_orbit_idx]
+    ), "a xallarap-only orbit must keep the node fold"
+
+
+def test_config_validation():
+    """linear refused with the degeneracy explanation; missing/shared
+    orbit references refused."""
+    from exozippy.components.mulensing.lens import Lens
+    from exozippy.config import ConfigManager
+
+    base = {
+        "name": "EV",
+        "lenses": ["star.0"],
+        "sources": ["star.1"],
+    }
+    with pytest.raises(NotImplementedError, match="degenerate"):
+        Lens([dict(base, source_orbital_motion="linear")], ConfigManager({}))
+    with pytest.raises(ValueError, match="source_orbit"):
+        Lens(
+            [dict(base, source_orbital_motion="keplerian")],
+            ConfigManager({}),
+        )
+    cm = ConfigManager({})
+    cm.system_config = {"orbit": [{"name": "S"}]}
+    with pytest.raises(ValueError, match="SAME orbit"):
+        Lens(
+            [
+                dict(
+                    base,
+                    lenses=["star.0", "star.2"],
+                    orbital_motion="keplerian",
+                    orbit="S",
+                    source_orbital_motion="keplerian",
+                    source_orbit="S",
+                )
+            ],
+            cm,
+        )

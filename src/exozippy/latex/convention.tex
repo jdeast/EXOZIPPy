@@ -343,6 +343,34 @@ $\chi^2$ --- it silently reports the reflected orbit
 ($\Omega_{\rm node} \rightarrow -\Omega_{\rm node}$,
 $i \rightarrow 180^\circ - i$; their Section~5.2).
 
+\paragraph{C25 --- source orbital motion (xallarap).}  The parallax is the
+\emph{observer's} offset; xallarap is the \emph{source's} own, and it
+enters the trajectory at exactly the same slot with the same sign
+discipline.  With $\delta\vec{\sigma}(t)$ the luminous source's sky offset
+from its own barycentric motion, in Einstein radii and anchored at
+$t_{0,\rm par}$ (the offset vanishes there, so $t_0$ and $u_0$ keep their
+geocentric-frame meaning; one fiducial epoch anchors the parallax and both
+orbital-motion effects),
+\begin{equation}
+\Delta\tau = -\,\delta\vec{\sigma}\cdot\hat{\tau}, \qquad
+\Delta\beta = -\,\delta\vec{\sigma}\cdot\hat{\beta},
+\end{equation}
+where the minus sign is C7 (the trajectory is lens \emph{minus} source)
+and $(\hat{\tau}, \hat{\beta})$ is C9's basis --- the pair the parallax
+terms already project onto.  The offset is the source's Keplerian
+barycentric track, $a_1/(D_{\rm S}\,\theta_{\rm E})$ in amplitude, so the
+mode introduces \emph{no new fitted parameters}: the orbit's period,
+eccentricity, orientation, and the companion mass (through the barycentric
+scale) are the coordinates, i.e. the physical-parameter approach of
+\citet{Mroz:2026} expressed through the model's component graph.  A linear
+source drift is deliberately not offered: it is exactly degenerate with
+$(t_{\rm E}, t_0, u_0, \alpha)$ in the light curve alone, and becomes
+meaningful only where an external dataset constrains the source's proper
+motion over a baseline much longer than $t_{\rm E}$.  A xallarap orbit
+measures $\Omega$ (the track's orientation) but, unlike the lens case
+(C24), remains node-degenerate: a sky track of any kind is invariant under
+the sky-plane reflection.
+
 \subsection{Translating to and from other conventions}
 \label{sec:conv:mappings}
 
