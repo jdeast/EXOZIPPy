@@ -1376,7 +1376,7 @@ class MulensInstrument(Instrument):
         return manifest
 
     def _finite_source_limb_darkening(self, system):
-        """(u1, bandpass) for the finite-source magnification, or (None, None).
+        """(u1, u2, bandpass) for the magnification, or (None, None, None).
 
         ONE resolver, called by both `build_likelihood` and
         `compile_plotters`.  It used to live inline in `build_likelihood`
@@ -1394,13 +1394,28 @@ class MulensInstrument(Instrument):
         source has no limb to darken.  Multiple distinct bands across one
         instrument's finite-source light curves are not yet supported -- the
         first band is used, and said so.
+
+        u2 IS THE SECOND (QUADRATIC) COEFFICIENT, and it is returned rather
+        than dropped because dropping it was a real defect: the magnification
+        used to be a function of u1 alone, so a band declaring the DEFAULT
+        `ld_law: quadratic` (Band._parse_ld_laws) had the wrong source profile
+        AND one combination of its sampled (q1, q2) constrained by nothing but
+        its prior.  Whether a given backend can honour it is not decided here
+        -- see Lens._resolve_quadratic_ld, which is where the backend is
+        known and where the fallback is announced.
+
+        The guard is on the MANIFEST, not on the law: with `ld_law: linear` on
+        every band the parameter does not exist at all (Band.LD_MODE_TABLE via
+        parameterization.mode_manifest omits a parameter no instance uses), so
+        `"u2" in band.manifest` is the only safe test -- the same one
+        transit.py and rm.py use (components/sed/sed.md).
         """
         if not (
             system.lens.finite_source[0]
             and hasattr(system, "band")
             and np.any(self.band_map >= 0)
         ):
-            return None, None
+            return None, None, None
 
         unique = sorted({int(b) for b in self.band_map if b >= 0})
         if len(unique) > 1 and not self._warned_multiband_ld:
@@ -1409,7 +1424,16 @@ class MulensInstrument(Instrument):
                 "Multiple bands for finite-source instruments; using first band's u1."
             )
         band_idx = unique[0]
-        return system.band.u1.value[band_idx], system.band.names[band_idx]
+        u2 = (
+            system.band.u2.value[band_idx]
+            if "u2" in system.band.manifest
+            else None
+        )
+        return (
+            system.band.u1.value[band_idx],
+            u2,
+            system.band.names[band_idx],
+        )
 
     def build_likelihood(self, model, system):
 
@@ -1423,9 +1447,9 @@ class MulensInstrument(Instrument):
         #    PSPL→symbolic (NUTS-friendly), binary/finite-source→MulensModel
         #    Op (use Metropolis).
         #
-        #    u1/bandpass come from the ONE resolver compile_plotters also
+        #    u1/u2/bandpass come from the ONE resolver compile_plotters also
         #    calls, so the plotted curve is the curve the likelihood fits.
-        u1, bandpass = self._finite_source_limb_darkening(system)
+        u1, u2, bandpass = self._finite_source_limb_darkening(system)
 
         # One magnification curve per source trajectory (NSNL)
         n_src = self._n_sources
@@ -1439,6 +1463,7 @@ class MulensInstrument(Instrument):
                     system,
                     index=j,
                     u1=u1,
+                    u2=u2,
                     bandpass=bandpass,
                 )
             )
@@ -1736,10 +1761,11 @@ class MulensInstrument(Instrument):
         param_symbols = [p.value for p in system.plot_params]
 
         n_src = self._n_sources
-        # Same (u1, bandpass) resolution build_likelihood uses -- passing
+        # Same (u1, u2, bandpass) resolution build_likelihood uses -- passing
         # neither here silently plotted the UNIFORM-source magnification for a
-        # limb-darkened fit (review 1.6.1).
-        u1, bandpass = self._finite_source_limb_darkening(system)
+        # limb-darkened fit (review 1.6.1), and passing u1 without u2 would
+        # reintroduce the same class of split for a quadratic band.
+        u1, u2, bandpass = self._finite_source_limb_darkening(system)
         A_per_source = [
             system.lens.get_magnification_op(
                 t_input,
@@ -1747,6 +1773,7 @@ class MulensInstrument(Instrument):
                 system,
                 index=j,
                 u1=u1,
+                u2=u2,
                 bandpass=bandpass,
             )
             for j in range(n_src)
