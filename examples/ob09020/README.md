@@ -157,28 +157,45 @@ and 17 mmag between I and V, against a 26 mmag median error -- cheap here
 (the V band is five points), not cheap for an event with dense simultaneous
 V and I coverage.  Scoped in `notes/orbital_motion_and_nbody.txt` section 4a.
 
-**What is NOT modelled: orbital motion of the lens binary.**  `s` and `alpha`
-are static.  With the follow-up data in, this is now the dominant residual by
-a wide margin.  Fitting fluxes linearly per instrument over all 2832 usable
-points, everything else at the published values:
+**Orbital motion of the lens binary: the machinery is in
+(`orbital_motion: linear`, conventions.md C24), not yet enabled here** --
+this example's endgame is the `keplerian` mode, where the RV-constrained
+orbit drives `s(t)`/`alpha(t)` with no new free parameters (review 8.6.8
+5a/5b), and it flips on when that lands.
+
+The linear mode's acceptance measurement, re-made 2026-08-27 with the
+shipped machinery (fluxes fit linearly per instrument, all 2837 points, raw
+errors): at Skowron Table 1's **"parallax + 2 par. motion" column** -- the
+one fitted with EXACTLY this model, so its printed values are the referee
+(`u_0 = +0.06010`, `t_E = 78.57`, `s_0 = 0.4261`, `alpha = 189.07`,
+`pi_E_N = -0.11`, `gamma_par = +0.12`, `gamma_perp = +2.78`):
 
 | model | chi2 | chi2/N |
 |---|---|---|
-| static `s`, `alpha` | 160,258 | 56.59 |
-| linear `s(t)`, `alpha(t)`, `dalpha/dt = -2.3 rad/yr` | **45,661** | **16.12** |
-| linear `s(t)`, `alpha(t)`, `dalpha/dt = +2.3 rad/yr` | 860,034 | 303.68 |
+| static `s`, `alpha` | 81,885 | 28.86 |
+| linear, `dalpha/dt = -2.78 rad/yr` (`gamma_perp = +2.78`, as printed) | **15,388** | **5.42** |
+| linear, `dalpha/dt = +2.78 rad/yr` (wrong sign) | 331,126 | 116.72 |
+| `gamma_par` only | 87,957 | 31.00 |
 
-A factor of 3.5 from a two-parameter expansion, in the published
-`u_0 > 0 / alpha = +189.08` labeling -- and the winner is equivalently
-`gamma_perp = -dalpha/dt = +2.3 rad/yr`, which is Skowron Table 1's printed
-value with the printed sign.  There is no convention disagreement anywhere
-(an earlier version of this README claimed one and then a mirror-branch
-flip; both rested on one inverted identity and are retracted --
-`notes/code_review_20260824.txt` 3.6.4).  So the fit cannot reproduce
-either paper's error budget until this is in.
-The design -- lens and source orbital motion, real `gamma_dot`/`gamma_ddot`,
-and the eventual N-body backend -- is in
-`notes/orbital_motion_and_nbody.txt`.
+A factor 5.3 from the printed rates in the printed labeling, with the wrong
+rotation sense 21x worse -- the sign is decisive, and it agrees with
+`gamma_perp = -dalpha/dt` (Skowron A.4; C24) with no transformation.  Two
+traps this measurement stepped in so the next reader does not have to:
+
+* **Do not mix columns.**  The "full orbit (with priors)" column's
+  parameters are a KEPLERIAN solution; through the strong
+  `pi_E_N`-`gamma_perp` degeneracy (their Section 4.2) its
+  `pi_E_N = -0.025` pairs with the full-orbit trajectory, and evaluating
+  the LINEAR model at that column's values fits WORSE than static
+  (81k/69k vs 29k over these points).  Each column is self-consistent
+  only as a set.
+* An earlier version of this README carried a factor-3.5 table
+  (160,258 -> 45,661) measured at second-hand parameter values ~1% off
+  the printed ones; at the correctly-read values its static baseline is
+  not reproducible and that table is superseded by the one above.
+
+The design -- source orbital motion, real `gamma_dot`/`gamma_ddot`, and the
+eventual N-body backend -- is in `notes/orbital_motion_and_nbody.txt`.
 
 ## Starting values
 

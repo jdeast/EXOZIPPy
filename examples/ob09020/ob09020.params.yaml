@@ -70,6 +70,13 @@ star.dec:
 #     pi_E_N     = -0.025 +/- 0.075          (degenerate with gamma_perp,
 #                                             their Section 4.2)
 #
+# DO NOT seed orbital_motion: linear from THIS column: it is a Keplerian
+# solution, and through the pi_E_N <-> gamma_perp degeneracy its values are
+# self-consistent only as a set.  The linear-model-consistent set is the
+# "parallax + 2 par. motion" column (u_0 = +0.06010, t_E = 78.57,
+# s_0 = 0.4261, alpha = 189.07, pi_E_N = -0.11, pi_E_E = 0.1468,
+# gamma_par = +0.12, gamma_perp = +2.78) -- see README's measured table.
+#
 # VERIFIED AGAINST THE DATA, not just transcribed: at these values, with
 # f_source/f_blend fit linearly to phot.dat, the recovered source fraction
 # is q_source ~ 0.336 -- against Skowron's published I_s = 16.43,
