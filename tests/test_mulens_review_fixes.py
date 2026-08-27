@@ -155,7 +155,13 @@ def test_finite_source_binary_model_yields_finite_magnifications():
     Given a finite-source binary lens (finite_source true, so VBM),
     When magnifications are computed through the real MulensModel call path,
     Then they are finite and above 1, and agree with the point-source result
-      because rho is small enough to be indistinguishable.
+      to rtol 1e-3 -- rho is small, so the finite-source signal is tiny but
+      NOT zero.  (The original rtol 1e-4 was calibrated while the silent
+      2-element magnification-methods list made "VBM" a no-op, so the
+      "finite-source" curve WAS the point-source curve; with the dispatch
+      fixed -- mulensing.md "Lens orbital motion" -- the two genuinely
+      differ by ~3e-4 at the peak epochs, and that difference is the
+      evidence the method now runs.)
     """
     # Arrange
     times = np.linspace(2449980.0, 2450020.0, 41)
@@ -171,7 +177,9 @@ def test_finite_source_binary_model_yields_finite_magnifications():
     # Assert
     assert np.all(np.isfinite(out_fs[0][0]))
     assert np.all(out_fs[0][0] > 1.0)
-    np.testing.assert_allclose(out_fs[0][0], out_ps[0][0], rtol=1e-4)
+    np.testing.assert_allclose(out_fs[0][0], out_ps[0][0], rtol=1e-3)
+    # ... and the finite-source signal is nonzero: the methods actually ran.
+    assert np.max(np.abs(out_fs[0][0] / out_ps[0][0] - 1.0)) > 1e-5
 
 
 def test_mag_op_warns_once_when_falling_back_to_nan():
