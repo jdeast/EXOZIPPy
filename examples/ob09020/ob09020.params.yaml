@@ -30,101 +30,104 @@ star.dec:
 
 # --------------------------------------------------------------------
 # Light curve -- Skowron+2011 Table 1, the "parallax + full orbit (with
-# priors)" solution.
+# priors)" column, read off the published table directly (2026-08-27; the
+# earlier version of this file carried second-hand values that drifted by
+# ~1% on t_E and u_0).
 #
 # THAT TABLE IS NOT IN THESE UNITS.  Skowron parameterize a high-
-# magnification binary by the quantities the light curve actually measures,
-# and the conversion is done here rather than left implicit:
+# magnification binary by the quantities the light curve actually measures
+# (t_eff = u_0 t_E, t_* = rho t_E, u_0/w, log w, log q), but its "derived"
+# block prints the conversions itself:
 #
-#   t_eff = u_0 * t_E    = 4.708  d      ->  u_0 = t_eff/t_E = 0.06122
-#   t_*   = rho * t_E    = 0.11595 d     ->  rho  = t_*/t_E  = 0.0015078
-#   log q = -0.5637                      ->  q    = 0.2731
-#   log w = -0.8410                      ->  w    = 0.14421  (central-caustic
-#                                             width), and the tabulated
-#                                             u_0/w = 0.42942 gives
-#                                             u_0 = 0.06193 -- agreeing with
-#                                             t_eff/t_E to 1%, which is the
-#                                             cross-check that these really
-#                                             are the published numbers.
-#   t_E = 76.9 d,  s_0 = 0.4294,  theta_E = 2.95 mas   (their derived block)
+#     s_0 = 0.4315,  q = 0.272,  t_E = 76.02 d,  u_0 = +0.06193
+#
+# and the cross-check that the two halves of the table agree:
+# u_0 = (u_0/w) * 10**(log w) = 0.42942 * 0.14421 = 0.06193, identical to
+# the printed derived u_0.  rho = t_*/t_E = 0.11595/76.02 = 0.0015252.
+#
+# THE SIGN OF u_0 IS PART OF THE PUBLISHED SOLUTION.  Table 1's note:
+# "All parameters represent positive u_0 solutions ... which is slightly
+# preferred", and Skowron+2011 Appendix A is EXOZIPPy's convention verbatim
+# (C17) -- so the printed (u_0 = +0.06193, alpha = +189.08) drops straight
+# in.  The mirror branch (u_0, alpha, pi_E_N, gamma_perp) ->
+# -(u_0, alpha, pi_E_N, gamma_perp) (their Eq. 16; C23's ecliptic
+# degeneracy extended to orbital motion) is a distinct, slightly disfavored
+# solution -- NOT an equivalent labeling -- once parallax and orbital
+# motion are in the model.  An earlier version of this file seeded that
+# mirror (u_0 = -0.06122, alpha = 170.92) on an argument that rested on an
+# inverted sign identity; the full retraction is
+# notes/code_review_20260824.txt item 3.6.4 and the corrected record is
+# notes/orbital_motion_and_nbody.txt 0a.
+#
+# For the orbital-motion work (notes/orbital_motion_and_nbody.txt), the
+# same column's orbital values, in the SAME u_0 > 0 labeling:
+#
+#     gamma_par  = +0.10 +/- 0.06   /yr      (= (ds/dt)/s_0)
+#     gamma_perp = +2.3  +0.5/-0.3  rad/yr   (= -dalpha/dt: Appendix A.4;
+#                                             so dalpha/dt = -2.3 rad/yr)
+#     gamma_z    = +1.7  +/- 0.6    /yr      (+ = toward the observer)
+#     s_z        =  0.0  +/- 0.6    r_E
+#     pi_E_N     = -0.025 +/- 0.075          (degenerate with gamma_perp,
+#                                             their Section 4.2)
 #
 # VERIFIED AGAINST THE DATA, not just transcribed: at these values, with
-# f_source/f_blend fit linearly to phot.dat, chi2 = 1.35e5 over 1298 points
-# and the recovered source fraction is q_source = 0.336 -- against Skowron's
-# published I_s = 16.43, I_b = 15.68, i.e. 0.334.  Matching the blending to
-# 0.6% from the light curve alone is what pins the convention branch.
-#
-# THE MIRROR BRANCH.  (u_0, alpha) -> -(u_0, alpha) is an EXACT degeneracy
-# for a static binary with no parallax (C23 / Skowron Eq. A12), so the sign of
-# u_0 and alpha can only ever be established together, and only by something
-# that breaks the mirror.  Three independent lines all pick the SAME branch,
-# u_0 < 0 with alpha_0 = 170.92 (= -189.08 mod 360):
-#
-#   1. Parallax breaks it in the fit: this branch starts 678 nats HIGHER
-#      (47309 vs 46631) with everything else identical.
-#   2. It is the branch consistent with Yee+2016's orbit.  Driving s(t) and
-#      alpha(t) from their Table 7 Keplerian elements, C15's alpha =
-#      phi_pi - PA(axis) -- i.e. alpha(t) = alpha_0 - [PA(t) - PA(t0_par)] --
-#      gives chi2/N = 37.19 here and 473.26 in the u_0 > 0 branch.
-#   3. It puts dalpha/dt > 0, agreeing in sign with Skowron+2011 Table 1's
-#      gamma_perp = +2.3 /yr (and their gamma_par, gamma_z, s_z signs too).
-#
-# The u_0 > 0 branch was seeded here first and is NOT wrong as a static fit --
-# it is the exact mirror, identical chi2 in the light curve alone.  It becomes
-# wrong the moment parallax or lens orbital motion is believed, and it
-# silently inverts the reported alpha rotation and the inclination branch.
-# See notes/orbital_motion_and_nbody.txt section 0a.
+# f_source/f_blend fit linearly to phot.dat, the recovered source fraction
+# is q_source ~ 0.336 -- against Skowron's published I_s = 16.43,
+# I_b = 15.68, i.e. 0.334.  Matching the blending to 0.6% from the light
+# curve alone is what confirms the parameter transfer.
 
 lens.Source.t_0:
-    initval: 2454917.252      # HJD' 4917.252 +/- 0.016
+    initval: 2454917.252      # HJD' 4917.252 +0.016/-0.009
 
 lens.Source.u_0:
-    initval: -0.06122         # = -t_eff/t_E.  NEGATIVE: see the mirror-branch
-                              # note above.  |u_0| is what Skowron tabulate;
-                              # the sign is a branch label (C9/C23).
+    initval: 0.06193          # POSITIVE, as printed (Table 1's derived
+                              # block, and its note quoted above).
 
 lens.Source.t_E:
-    initval: 76.9             # d, referenced to the TOTAL lens mass
+    initval: 76.02            # d (Table 1 derived), referenced to the
+                              # TOTAL lens mass
 
 lens.Source.rho:
-    initval: 0.0015078        # = t_* / t_E
+    initval: 0.0015252        # = t_*/t_E = 0.11595/76.02
 
 lens.OB09020.s:
-    initval: 0.4294           # s_0, at t_0,kep.  A CLOSE binary.
+    initval: 0.4315           # s_0 at t_0,kep (Table 1 derived).  A CLOSE
+                              # binary.
 
 lens.OB09020.alpha:
-    initval: 170.92           # = -189.08 mod 360, the mirror partner of the
-                              # published 189.08 +/- 0.14 deg, at t_0,kep.
+    initval: 189.08           # +/- 0.14 deg, as printed, at t_0,kep.
                               # Degrees; the engine propagates it to
                               # xalpha/yalpha.
 
 lens.OB09020.q:
-    initval: 0.2731           # = 10**(-0.5637) = m_L2 / m_L1.  The engine
-                              # propagates this through
-                              # q * m_primary = m_companion to seed
-                              # star.L2.mass.
+    initval: 0.2723           # = 10**(-0.5650) (Table 1; the derived block
+                              # rounds it to 0.272).  The engine propagates
+                              # this through q * m_primary = m_companion to
+                              # seed star.L2.mass.
 
-# Parallax.  pi_E_E = 0.149 +/- 0.010 is well measured; pi_E_N is NOT --
-# it is degenerate with the perpendicular orbital velocity gamma_perp, which
-# is exactly the degeneracy the RVs (and, later, the orbital-motion wiring)
-# are here to break.  The value below is the one consistent with the
-# published theta_E = 2.95 mas and M_tot = 1.07 Msun,
-#     |pi_E| = theta_E / (kappa M_tot) = 0.3385,
-# i.e. pi_E_N = -sqrt(0.3385**2 - 0.149**2).  Both are DERIVED in EXOZIPPy
-# (from pi_rel, theta_E and the mu_rel direction); seeding them lets the
+# Parallax.  pi_E_E = 0.149 +/- 0.010 is well measured; pi_E_N = -0.025
+# +/- 0.075 is NOT -- it is degenerate with the perpendicular orbital
+# velocity gamma_perp (Skowron Section 4.2), which is exactly the degeneracy
+# the RVs (and the orbital-motion wiring) are here to break.  Both seeds are
+# now the PRINTED with-priors values; an earlier version of this file
+# constructed pi_E_N = -0.3039 from a theta_E and M_tot that are not in
+# Table 1 (retracted, 3.6.4(f) -- the magnitude was inert but the
+# construction rested on nothing).  Both are DERIVED in EXOZIPPy (from
+# pi_rel, theta_E and the mu_rel direction); seeding them lets the
 # relaxation engine back out consistent masses and distances.
 lens.Source.pi_E_N:
-    initval: -0.3039
+    initval: -0.025
 lens.Source.pi_E_E:
     initval: 0.149
 
 # --------------------------------------------------------------------
 # Lens physical parameters
 #
-# Skowron+2011 (light curve + isochrones): M1 = 0.84 +/- 0.03, M2 = 0.23
-# +/- 0.02 Msun, D_L = 1.1 +/- 0.1 kpc, theta_E = 2.95 mas -- a NEARBY DISK
-# lens, which is why theta_E is several mas rather than the sub-mas typical
-# of a bulge lens.
+# Skowron+2011 Eq. 15 (light curve + isochrones, NOT Table 1):
+# M1 = 0.84 +/- 0.03 Msun, D_L = 1.1 +/- 0.1 kpc; M2 = q*M1 ~ 0.23 Msun
+# follows from the mass ratio.  theta_E = theta_*/rho ~ 2.9 mas from their
+# Eq. 11 theta_* = 4.45 +/- 0.40 uas -- a NEARBY DISK lens, which is why
+# theta_E is several mas rather than the sub-mas typical of a bulge lens.
 # Yee+2016 (joint with the RVs) revised these to M_tot = 1.132 +/- 0.097
 # Msun (0.888 + 0.244) at D_L = 0.747 +/- 0.020 kpc.
 #

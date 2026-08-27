@@ -1,29 +1,14 @@
 # OGLE-2009-BLG-020: binary lens + the spectroscopic orbit of its lens
 
-> **WORK IN PROGRESS -- do not treat this as a validated reproduction.**
-> The configuration builds and starts at a sane point, and the data handling
-> (raw files, time systems, column layouts, units) is verified.  The
-> SEED VALUES AND THE CONVENTION DISCUSSION BELOW ARE KNOWN TO BE WRONG IN
-> PLACES and are left as-is pending the fix tracked as item **3.6.4** in
-> `notes/code_review_20260824.txt`.  Specifically:
->
-> * `u_0` is seeded NEGATIVE (`-0.06122`, `alpha = 170.92`).  Skowron+2011
->   Table 1 prints `u_0 = +0.0613`, `alpha = +189.08`, so the seeds must
->   revert to the positive branch.  The narrative below arguing for the
->   negative branch is retracted.
-> * Every statement below of the form "gamma_perp = dalpha/dt" is backwards.
->   The identity is `gamma_perp = -dalpha/dt` (Skowron Appendix A.4;
->   MulensModel `modelparameters.py`).  With it corrected there is no
->   disagreement with Skowron on any orbital-motion sign, and no convention
->   error in either code -- the earlier claim of one was our own error.
-> * `theta_E`, `M_tot`, `M1`, `M2` and `D_L` are cited below as if from
->   Skowron Table 1.  They are NOT in that table and need re-sourcing; the
->   `pi_E_N` seed was constructed from two of them and so rests on nothing
->   (it is also magnitude-inert -- only its sign reaches the model).
-> * Lens orbital motion is not modelled at all, which for this event is a
->   first-order omission rather than a refinement (see below).
->
-> What is trustworthy here: the data files and their read options, the
+> **WORK IN PROGRESS -- do not treat this as a validated reproduction**
+> until lens orbital motion is modelled and the acceptance criteria of
+> review item 8.6.8 are met.  The 3.6.4 convention retraction is APPLIED:
+> the seeds are the published `u_0 > 0` solution, read off Skowron+2011
+> Table 1's "parallax + full orbit (with priors)" column directly
+> (2026-08-27), and every sign statement below uses the corrected identity
+> `gamma_perp = -dalpha/dt` (Skowron Appendix A.4; also their Section 3.3.1
+> in so many symbols: `alpha(t) = alpha_0 - gamma_perp (t - t_0,par)`).
+> What is verified here: the data files and their read options, the
 > per-instrument flux/`err_scale` seeds, the `omega_* = 331.6` result, and
 > the measured size of the missing-orbital-motion effect.
 
@@ -180,18 +165,17 @@ points, everything else at the published values:
 | model | chi2 | chi2/N |
 |---|---|---|
 | static `s`, `alpha` | 160,258 | 56.59 |
-| linear `s(t)`, `alpha(t)`, `gamma_perp = -2.3 /yr` | **45,661** | **16.12** |
-| linear `s(t)`, `alpha(t)`, `gamma_perp = +2.3 /yr` | 860,034 | 303.68 |
+| linear `s(t)`, `alpha(t)`, `dalpha/dt = -2.3 rad/yr` | **45,661** | **16.12** |
+| linear `s(t)`, `alpha(t)`, `dalpha/dt = +2.3 rad/yr` | 860,034 | 303.68 |
 
-A factor of 3.5 from a two-parameter expansion.  Driving `s(t)` and
-`alpha(t)` from Yee's actual Keplerian elements instead -- no free parameters
-at all -- gives chi2/N = 37.19 against the static 56.59.  So the fit cannot
-reproduce either paper's error budget until this is in.
-
-That exercise is also what pinned the mirror branch and the inclination
-(below), and it confirms EXOZIPPy agrees with Skowron+2011 on the sign of
-every orbital-motion parameter.  Details in
-`notes/orbital_motion_and_nbody.txt` sections 0a-0c.
+A factor of 3.5 from a two-parameter expansion, in the published
+`u_0 > 0 / alpha = +189.08` labeling -- and the winner is equivalently
+`gamma_perp = -dalpha/dt = +2.3 rad/yr`, which is Skowron Table 1's printed
+value with the printed sign.  There is no convention disagreement anywhere
+(an earlier version of this README claimed one and then a mirror-branch
+flip; both rested on one inverted identity and are retracted --
+`notes/code_review_20260824.txt` 3.6.4).  So the fit cannot reproduce
+either paper's error budget until this is in.
 The design -- lens and source orbital motion, real `gamma_dot`/`gamma_ddot`,
 and the eventual N-body backend -- is in
 `notes/orbital_motion_and_nbody.txt`.
@@ -202,11 +186,13 @@ Seeded at the published solutions; `ob09020.params.yaml` carries the
 derivation next to each value.  Three things are traps for the next reader
 and are recorded there in full:
 
-1. **Skowron's Table 1 is not in EXOZIPPy's parameters.**  It tabulates
-   `t_eff = u_0 t_E`, `t_* = rho t_E`, `log q` and `log w`, with the impact
-   parameter given as `u_0/w` in units of the central-caustic width.  The
-   conversion is written out in the params file; the cross-check that it is
-   right is that `u_0` from `t_eff/t_E` and from `(u_0/w) * w` agree to 1%.
+1. **Skowron's Table 1 fit block is not in EXOZIPPy's parameters.**  It
+   tabulates `t_eff = u_0 t_E`, `t_* = rho t_E`, `log q` and `log w`, with
+   the impact parameter given as `u_0/w` in units of the central-caustic
+   width -- but its "derived" block prints the conversions itself
+   (`s_0 = 0.4315`, `q = 0.272`, `t_E = 76.02`, `u_0 = +0.06193`), and the
+   cross-check is exact: `(u_0/w) * 10**(log w) = 0.42942 * 0.14421 =
+   0.06193`, identical to the printed derived `u_0`.
 2. **The blending is not what the EWS page says.**  EWS reports `fbl = 0.987`
    from a PSPL fit to survey data alone; the real source fraction is
    `q_source ~ 0.335` (Skowron: `I_s = 16.43`, `I_b = 15.68`).  Fitting
@@ -219,16 +205,16 @@ and are recorded there in full:
    3.2.  (This is just the relative-orbit convention -- omega of the
    companion about the primary, standard for a visual binary -- against
    EXOZIPPy's `omega_*`, the primary about the barycenter.)
-4. **`u_0` is seeded NEGATIVE**, against the published `|u_0|`.
-   `(u_0, alpha) -> -(u_0, alpha)` is an exact degeneracy for a static binary
-   with no parallax (`conventions.md` C23), so the two signs are one solution
-   as far as this light curve alone is concerned -- but they are *not*
-   interchangeable once parallax or lens orbital motion is believed, because
-   the mirror also reverses the apparent rotation sense of the binary axis.
-   Three independent lines pick `u_0 < 0` with `alpha_0 = 170.92`: parallax
-   in this fit prefers it by 678 nats; it is the branch consistent with
-   Yee's Keplerian orbit (chi2/N 37.19 vs 473.26); and it puts
-   `dalpha/dt > 0`, agreeing with Skowron's `gamma_perp = +2.3 /yr`.
+4. **`u_0` is seeded POSITIVE, as published.**  Table 1's own note reads
+   "All parameters represent positive u_0 solutions ... which is slightly
+   preferred", and Appendix A is EXOZIPPy's convention verbatim (C17), so
+   the printed `(u_0 = +0.06193, alpha = +189.08)` transfers with no
+   transformation.  The mirror `(u_0, alpha, pi_E_N, gamma_perp) ->
+   -(...)` (their Eq. 16) is a distinct, slightly disfavored solution once
+   parallax and orbital motion are believed -- a candidate second seed for
+   the mode reporter, not an equivalent labeling.  (An earlier version
+   seeded the mirror on three claimed lines of evidence; all three rested
+   on one inverted sign identity and are retracted, 3.6.4.)
 5. **`orbit.L.bigomega` is inert here and is commented out.**  With no
    astrometry the orbit component never declares it -- verified, there is no
    `bigomega` among the sampled variables -- because RVs carry no information
@@ -252,16 +238,15 @@ between 0.17 and 0.37 at every site against Skowron's calibrated 0.334, the
 spread being the expected consequence of unfiltered detectors with different
 responses.
 
-Start logp is +47,309 over 59 free scalar parameters (22 vector-valued
-`free_RVs`), with 2837 photometric epochs and 14 velocities.  Per-instrument
-chi2/N at the start, on raw errors before `err_scale`:
-
-| OGLE | Bronberg | CAO | CT13_I | CT13_V | FarmCove | Kumeu | Possum | VintageLane |
-|---|---|---|---|---|---|---|---|---|
-| 37.8 | **1.07** | 3.89 | 10.6 | 0.04 | 5.98 | 1.94 | 9.63 | 1.71 |
-
-Bronberg at 1.07 over 839 points spanning the entire caustic crossing, from
-literature values with no fitting, is the strongest single confirmation that
-the parameters and the convention branch are right.  OGLE's 37.8 is mostly
-its 8-year uncorrected baseline (out of event alone it measures 13.2, hence
-`err_scale ~ 3.6`); the rest is the missing orbital motion above.
+Start logp is +41,458 at the published-branch seeds above (it was +47,309
+at the retracted mirror seeds; the drop is expected -- the per-instrument
+flux and `err_scale` seeds were fit at the old geometry, and the model is
+still missing the orbital motion that dominates the residuals either way).
+The per-instrument start chi2/N table that used to sit here was measured at
+the mirror seeds and is removed rather than left to mislead; it is
+re-measured as part of the orbital-motion acceptance (review 8.6.8), along
+with refreshed flux/`err_scale` seeds.  The strongest single pre-revert
+confirmation stands unchanged in kind: Bronberg's 839 points spanning the
+entire caustic crossing sat at chi2/N ~ 1 from literature values with no
+fitting, which is what validates the data handling and the parameter
+transfer.
