@@ -1,0 +1,220 @@
+run:
+  name: "OGLE-2007-BLG-224"
+
+prefix: "fitresults/OGLE-2007-BLG-224"
+logger_level: INFO
+
+# OGLE-2007-BLG-224: the TERRESTRIAL PARALLAX event.  A_max ~ 2350 (8.4 mag
+# of magnification) over a peak lasting minutes, so observatories a few
+# thousand km apart on the SAME NIGHT see measurably different light curves
+# -- Hipparchus' baseline, applied to a brown dwarf 525 pc away.
+#
+#   Gould et al. 2009, ApJ 698, L147 (arXiv:0904.0249) -- the measurement.
+#     M = 0.056 +/- 0.004 Msun, D_L = 525 +/- 40 pc, pi_E = 1.97 +/- 0.13,
+#     theta_E = 0.91 +/- 0.04 mas, t_E = 6.91 +/- 0.13 d,
+#     rho = (8.50 +/- 0.16)e-4.
+#
+# WHAT MAKES THIS CONFIG DIFFERENT from every other microlensing example
+# here is one key repeated on every instrument:
+#
+#     observer_location: "<lon_deg>,<lat_deg>,<height_m>"
+#
+# Elsewhere that key is "earth" (the geocenter) or a spacecraft ephemeris.
+# Here each light curve declares the actual spot on the globe it was taken
+# from, so the Skowron+2011 geocentric deviations that drive the parallax
+# carry the Earth's ROTATION as well as its orbit.  `time_location:` is the
+# same site again, for the HJD_UTC -> BJD_TDB conversion: at a 0.5 s signal
+# the 21 ms geocenter-vs-observatory Romer delay is no longer negligible.
+# See README.md for what the shipped data can and cannot recover.
+
+# 1. The bodies
+star:
+  - name: "Lens"                 # the brown dwarf
+  - name: "Source"               # a bulge dwarf, I_s = 18.91, theta_* = 0.77 uas
+
+lens:
+  - name: "OB07224"
+    lens_ndx: 0
+    source_ndx: 1
+    # rho = 8.5e-4 and the lens TRANSITED the source (impact parameter
+    # ~theta_*/3), so the finite source is the whole peak.  This puts the
+    # event on the MulensModel Op path (finite_source_LD_Yoo04 inside
+    # +/- 5*rho*t_E of t_0, point source outside), which has no gradient --
+    # hence ptde_async below.
+    finite_source: True
+    # The geocentric frame's reference epoch.  For terrestrial parallax it
+    # matters far less than for annual parallax (the whole signal is one
+    # night wide), but it must sit at the peak, not decades away.
+    t0_par: 2454233.667
+    # Every trajectory parameter is seeded from Gould+2009, so the
+    # relaxation engine can derive all of them.  MMEXOFAST is not needed and
+    # is not wanted: it would fit a PSPL start to a light curve whose peak
+    # is entirely finite-source.
+    mmexofast: false
+
+galacticmodel:
+  - name: "OB07224"
+    anchor_idx: 1                # anchor on the source, by microlensing convention
+
+band:
+  # "I" MUST be first.  With finite_source on and more than one band present,
+  # MulensInstrument._finite_source_limb_darkening uses the LOWEST band index
+  # any instrument references and warns that it did -- limb darkening lives
+  # inside the magnification, and one magnification curve is computed per
+  # source over every instrument's concatenated times.  The peak (the only
+  # place LD matters at 2350x magnification) is covered by OGLE I and SMARTS
+  # I, so I is the band whose u1 should win.
+  - name: "I"
+    filter: "Generic/Cousins.I"
+    ld_law: "linear"
+  - name: "V"
+    filter: "Generic/Bessell.V"
+    ld_law: "linear"
+  # Auckland observed in R; Farm Cove and Vintage Lane are UNFILTERED ("U" in
+  # the muFUN filenames).  Cousins R is the usual stand-in for a clear-filter
+  # CCD response.  One shared band, not one per site: the sites differ in
+  # zeropoint, which f_source/f_blend absorb per instrument, not in bandpass.
+  # None of these three covers the peak, so the choice costs nothing here.
+  - name: "R"
+    filter: "Generic/Cousins.R"
+    ld_law: "linear"
+
+mulensinstrument:
+  # ---------------------------------------------------------------------
+  # Site coordinates are GEODETIC STRINGS, "lon,lat,height", lon FIRST
+  # (exozippy/ephemeris.py _parse_geodetic; the same order as astropy's
+  # EarthLocation.from_geodetic and as the `time_location:` list below).
+  # Spelled out rather than given as astropy site names on purpose: three
+  # of these six sites are not in astropy's registry at all, and
+  # EarthLocation.of_site() otherwise needs a network fetch of the site
+  # table for an example that should run offline.
+  #
+  # muFUN telescope coordinates are the collaboration's own, from
+  # https://cgi.astronomy.osu.edu/microfun/microfun.html ; Las Campanas is
+  # astropy's 'lco'.  Heights are nominal (a 100 m error is 1.6e-5 of an
+  # Earth radius -- four orders of magnitude below the effect being fitted).
+  # ---------------------------------------------------------------------
+
+  # --- Chile: the peak ---------------------------------------------------
+  - name: "OGLE"
+    # RAW OGLE-III EWS photometry, used as downloaded.  Columns on disk are
+    #   HJD_UTC  I[mag]  err  seeing[pix]  sky
+    # so the layout is named explicitly.  Naming `columns:` also switches OFF
+    # the "every column past the error is a detrend column" default, which
+    # would otherwise fit a seeing and a sky coefficient nobody asked for.
+    file: "phot.dat"
+    band: "I"
+    columns: {time: 0, mag: 1, err: 2}
+    time_scale: "utc"
+    time_frame: "hjd"
+    time_location: [-70.70167, -29.00333, 2282]
+    observer_location: "-70.70167,-29.00333,2282"   # Warsaw 1.3 m, Las Campanas
+    reference: true
+  - name: "SMARTS_I"
+    file: "COB07224I.pho"
+    band: "I"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    time_scale: "utc"
+    time_frame: "hjd"
+    time_location: [-70.80472, -30.16833, 2215]
+    observer_location: "-70.80472,-30.16833,2215"   # CTIO 1.3 m ANDICAM
+  - name: "SMARTS_V"
+    file: "COB07224V.pho"
+    band: "V"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    time_scale: "utc"
+    time_frame: "hjd"
+    time_location: [-70.80472, -30.16833, 2215]
+    observer_location: "-70.80472,-30.16833,2215"
+
+  # --- New Zealand and Arizona: the wings --------------------------------
+  # None of these four covers the peak (Auckland and Farm Cove stop ~10 h
+  # before it, Vintage Lane and LOAO resume ~6 h after), so they constrain
+  # t_E and the baseline, not pi_E.  Their observer_location is still the
+  # real site: the key is per-instrument, and a mixed set where only some
+  # instruments are topocentric would be a silent inconsistency.
+  - name: "Auckland"
+    file: "AOB07224R.pho"
+    band: "R"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    time_scale: "utc"
+    time_frame: "hjd"
+    time_location: [174.77694, -36.90611, 80]
+    observer_location: "174.77694,-36.90611,80"     # Auckland Obs 0.40 m
+  - name: "FarmCove"
+    file: "FOB07224U.pho"
+    band: "R"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    time_scale: "utc"
+    time_frame: "hjd"
+    time_location: [174.89361, -36.89361, 20]
+    observer_location: "174.89361,-36.89361,20"     # Farm Cove 0.36 m
+  - name: "VintageLane"
+    file: "VOB07224U.pho"
+    band: "R"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    time_scale: "utc"
+    time_frame: "hjd"
+    time_location: [173.83917, -41.49167, 30]
+    observer_location: "173.83917,-41.49167,30"     # Vintage Lane 0.40 m
+  - name: "LOAO"
+    file: "LOB07224I.pho"
+    band: "I"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    time_scale: "utc"
+    time_frame: "hjd"
+    time_location: [-110.78889, 32.44306, 2776]
+    observer_location: "-110.78889,32.44306,2776"   # Mt Lemmon LOAO 1.0 m
+
+  # --- NOT SHIPPED: the two light curves that made the measurement -------
+  # Gould+2009 measured pi_E from a THREE-CONTINENT baseline.  Two legs of
+  # it are not in any public archive and are commented out here so that the
+  # blocks are ready the day they are:
+  #
+  #   Bronberg 0.35 m, Pretoria, South Africa (muFUN; B. Monard) -- 754
+  #     unfiltered images over 6.5 h ending 10 minutes before peak.
+  #   Liverpool Telescope 2 m, Roque de los Muchachos, La Palma (RoboNet) --
+  #     8 R images, two ~35 min before peak and two ~25 min after.
+  #
+  # At the published solution this model predicts each of them differing
+  # from Las Campanas by ~0.24 mag at peak (a 44 s and 60 s shift of the
+  # peak time); the two Chilean data sets that ARE shipped differ from each
+  # other by 5.6 mmag and 0.5 s.  That ratio is the whole example -- see
+  # README.md.
+  #
+  #- name: "Bronberg"
+  #  file: "<not public>"
+  #  band: "R"
+  #  columns: {time: 0, mag: 1, err: 2}
+  #  time_offset: 2450000.0
+  #  time_scale: "utc"
+  #  time_frame: "hjd"
+  #  time_location: [28.43833, -25.90889, 1400]
+  #  observer_location: "28.43833,-25.90889,1400"
+  #- name: "LiverpoolT"
+  #  file: "<not public>"
+  #  band: "R"
+  #  columns: {time: 0, mag: 1, err: 2}
+  #  time_offset: 2450000.0
+  #  time_scale: "utc"
+  #  time_frame: "hjd"
+  #  time_location: [-17.87944, 28.76222, 2363]
+  #  observer_location: "-17.87944,28.76222,2363"
+
+parameter_file: "ob07224.params.yaml"
+
+sampler:
+  # finite_source => the MulensModel Op path, which has no gradient
+  # (components/mulensing/mulensing.md), so NUTS is not available.
+  method: ptde_async
+  n_temps: 8
+  T_max: 200
+  tune: 0
+  draws: 5000
+  recompute_trace: True

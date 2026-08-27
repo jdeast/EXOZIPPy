@@ -1,0 +1,277 @@
+# OGLE-2007-BLG-224 starting values.
+#
+# Source: Gould et al. 2009, ApJ 698, L147 (arXiv:0904.0249).  That Letter
+# quotes the DERIVED quantities (t_E, rho, theta_E, |pi_E|, its position
+# angle, M, D_L) but not t_0, u_0 or any flux, so the three below that it
+# does not print are measured here and the derivation is written out.
+#
+# Convention: EXOZIPPy follows Skowron+2011 Appendix A verbatim
+# (components/mulensing/conventions.md), and Gould+2009 uses the same
+# Gould-convention pi_E, so nothing needs transforming.
+#
+# Addressing: per-source trajectory parameters take the SOURCE star's
+# instance name (lens.Source.<param>); event-level ones take the lens
+# block's name (lens.OB07224.<param>).
+
+# --------------------------------------------------------------------
+# Sky position (OGLE EWS params.dat: 18:05:41.05  -28:45:36.2; the Letter
+# rounds this to 18:05:41 -28:45:36).  Required, not optional: every file
+# here is HJD_UTC and the HJD -> BJD_TDB conversion refuses defaults.yaml
+# placeholder coordinates.  It also sets the galactic model's line of
+# sight -- (l, b) = (2.37, -3.71).
+# --------------------------------------------------------------------
+star.ra:
+    initval: 271.4210417
+    sigma: 0
+star.dec:
+    initval: -28.7600556
+    sigma: 0
+
+# --------------------------------------------------------------------
+# The trajectory
+# --------------------------------------------------------------------
+
+# NOT in the Letter.  Measured here: with t_E, rho and pi_E pinned at the
+# published values and f_source/f_blend solved linearly per instrument
+# (they are linear, so this is exact), t_0 and u_0 were optimized against
+# all 1352 shipped points.  The OGLE EWS PSPL fit independently reports
+# Tmax = 2454233.667, which is the same epoch to 0.7 s.
+lens.Source.t_0:
+    initval: 2454233.667775    # BJD_TDB
+
+# ALSO not in the Letter, which says only that "the lens transited the
+# source with an impact parameter of ~theta_*/3", i.e. u_0 ~ rho/3 =
+# 2.8e-4.  The fit above lands at u_0/rho = 0.41.  Do not read much into
+# the difference: at a source transit the light curve constrains u_0
+# only through the shape of a plateau it barely resolves.
+#
+# SIGN.  Seeded POSITIVE.  For a point lens with parallax, (u_0, pi_E_perp)
+# -> -(u_0, pi_E_perp) is a near-exact degeneracy (conventions.md, C23);
+# what breaks it for TERRESTRIAL parallax is the observatories' arrangement
+# about the Earth's rotation axis, not the ecliptic.  The Letter reports one
+# solution and no mirror, but the shipped data cannot distinguish them (see
+# README).  If the Bronberg / Liverpool light curves are ever added, seed
+# both signs and let PTDE report the two modes.
+lens.Source.u_0:
+    initval: 3.492847e-04
+
+lens.Source.t_E:
+    initval: 6.91              # d.  Published: 6.91 +/- 0.13.
+                               # Refitting it here -- t_0, u_0, t_E, rho and
+                               # the I-band u1 all free, err_scale profiled
+                               # out per instrument, pi_E pinned -- gives
+                               # t_E = 7.10 d and rho = 8.03e-4, i.e. 3% and
+                               # 6% from the published pair, out of raw
+                               # archival photometry.  Left at the published
+                               # values; the refit is the CHECK, not the seed.
+
+lens.Source.rho:
+    initval: 8.50e-4           # Published: (8.50 +/- 0.16)e-4.
+                               # theta_E = theta_*/rho = 0.77 uas / 8.5e-4
+                               # = 0.91 mas.  With star_constrains_rho at
+                               # its default True, rho is DERIVED from
+                               # theta_*/theta_E; this seed back-solves
+                               # through the engine to the stellar chain.
+
+# Parallax.  The Letter gives the magnitude and the direction rather than
+# the components:
+#
+#     |pi_E| = 1.97 +/- 0.13
+#     direction of lens-source relative motion = 52 +/- 5 deg south of west
+#
+# "52 deg south of west" is position angle 270 - 52 = 218 deg measured from
+# North through East, and phi_pi = atan2(pi_E_E, pi_E_N) is exactly that
+# angle (conventions.md, C8), so
+#
+#     pi_E_N = 1.97 * cos(218 deg) = -1.5524
+#     pi_E_E = 1.97 * sin(218 deg) = -1.2129
+#
+# CROSS-CHECK, and the reason to trust the quadrant: the Letter also gives
+# v_tilde_geo = 127 km/s and v_tilde_hel = 112 km/s at 61 deg south of west.
+# Removing the Earth's 23 km/s almost-due-east motion from the geocentric
+# vector, v_hel = v_geo + v_earth_perp, reproduces 114 km/s at 61.1 deg
+# south of west.  The opposite sign convention gives 142 km/s at 61 deg
+# south of EAST, which is not what they print.
+lens.Source.pi_E_N:
+    initval: -1.5524
+lens.Source.pi_E_E:
+    initval: -1.2129
+
+# --------------------------------------------------------------------
+# Lens and source physical parameters (Gould+2009 Section 2.3)
+#
+# The chain closes on itself, which is worth checking by hand once:
+#     pi_rel   = 1000/525 - 1000/8000        = 1.780 mas
+#     theta_E  = sqrt(kappa * M * pi_rel)    = 0.901 mas   (published 0.91)
+#     |pi_E|   = pi_rel / theta_E            = 1.975       (published 1.97)
+#     t_E      = theta_E / mu_geo (48 mas/yr)= 6.86 d      (published 6.91)
+# --------------------------------------------------------------------
+star.Lens.mass:
+    initval: 0.056             # Msun -- a brown dwarf, below the
+                               # hydrogen-burning limit.  +/- 0.004.
+star.Lens.distance:
+    initval: 525.0             # pc, +/- 40.  A THICK-DISK lens, moving
+                               # at 113 +/- 21 km/s counter to Galactic
+                               # rotation -- which is why theta_E is
+                               # ~0.9 mas rather than the sub-mas typical
+                               # of a bulge lens.
+star.Source.distance:
+    initval: 8000.0            # pc.  The Letter assumes a bulge source,
+                               # pi_s = 125 uas.
+
+# --------------------------------------------------------------------
+# Relative proper motion -- WHY THE PROPER MOTIONS ARE SEEDED BY HAND
+#
+# `t_E` and both `pi_E` components are DERIVED here, not sampled:
+#     t_E    = theta_E / mu_rel_geo
+#     pi_E   = (pi_rel / theta_E) * mu_hat_rel_geo
+# and mu_rel = pm(lens) - pm(source), converted to the geocentric frame by
+# Gould (2004),  mu_geo = mu_hel - pi_rel * v_earth_perp(t0_par) / AU.
+#
+# So seeding `lens.Source.t_E` and `lens.Source.pi_E_*` alone does NOT put
+# the model there: the four stellar proper-motion components are the leaves,
+# two constraints cannot determine four unknowns, and the engine is free to
+# land anywhere on the two-dimensional family that satisfies them.  Measured
+# before these entries existed: the model started at t_E = 6.14 d (not 6.91)
+# and pi_E at position angle 224.4 deg (not 218) -- |pi_E| and theta_E were
+# right, the DIRECTION and the timescale were not.  That is exactly the
+# failure mode the terrestrial-parallax signal is sensitive to.
+#
+# The source is pinned at a nominal bulge mean and the lens carries the
+# relative motion.  Working backwards from the published numbers, with
+# theta_E = 0.9009 mas and pi_rel = 1.7798 mas out of the mass/distance
+# block above:
+#     mu_rel_geo  = theta_E/t_E = 47.62 mas/yr at PA 218 deg
+#                 = (E, N) = (-29.319, -37.526) mas/yr
+#     v_earth_perp(t0_par) = (4.7533, 0.4187) /yr  [EXOZIPPy's own constant,
+#                 i.e. 22.5 km/s almost due east -- the Letter's "23 km/s,
+#                 almost due east"]
+#     mu_rel_hel  = mu_rel_geo + pi_rel * v_earth_perp
+#                 = (E, N) = (-20.859, -36.781) mas/yr
+#
+# CROSS-CHECK: |mu_rel_hel| = 42.3 mas/yr at 60.4 deg south of west.  The
+# Letter quotes mu_hel = 43 mas/yr and puts v_tilde_hel at "61 deg south of
+# west".  Neither number was used to build these seeds, and both come out.
+#
+# The lens then moves at 46 mas/yr, i.e. v_t = 115 km/s at 525 pc -- the
+# thick-disk kinematics the Letter's whole argument rests on.
+star.Source.pm_ra:
+    initval: -6.0              # mas/yr, mu_alpha cos(delta), East-positive.
+star.Source.pm_dec:
+    initval: -0.2              # Nominal bulge mean; the Letter gives no
+                               # absolute source proper motion, and only the
+                               # DIFFERENCE enters the model.
+star.Lens.pm_ra:
+    initval: -26.8590          # = mu_rel_hel_E + pm_ra(source)
+star.Lens.pm_dec:
+    initval: -36.9810          # = mu_rel_hel_N + pm_dec(source)
+
+# star.Source.radius is left FREE, exactly as in examples/ob09020, and for
+# the same reason: theta_* = 0.77 +/- 0.03 uas is an ANGLE, and turning it
+# into a radius (1.33 Rsun at 8 kpc) would feed the assumed source distance
+# back into the fit as though it had been measured.  Supply it properly (an
+# `sed:` block, or a colour/surface-brightness relation on the source)
+# rather than through this shortcut.
+
+# --------------------------------------------------------------------
+# Limb darkening
+#
+# The source is a bulge dwarf.  Gould+2009's clump calibration gives
+# E(V-I) = (17.32 - 15.28) - (0.79 + 0.25) = 1.00, so the source's
+# (V-I)_s = 20.58 - 18.91 = 1.67 dereddens to (V-I)_0 = 0.67 -- a G dwarf,
+# Teff ~ 5750 K, log g ~ 4.4.  The seeds below are linear-law coefficients
+# for such a star from the standard tabulations; they are SEEDS, and the I
+# band's is genuinely fit (the lens transited the source, so the peak shape
+# measures the limb).
+#
+# V and R are PINNED, not fit, and that is a statement about the
+# architecture rather than about the star: limb darkening lives inside the
+# magnification and one magnification curve is computed per source over
+# every instrument's concatenated times, so only the LOWEST-indexed band any
+# instrument references is ever read (MulensInstrument
+# ._finite_source_limb_darkening, which warns that it did).  Left free, these
+# two would be exactly flat directions for the sampler to wander in.
+band.I.u1:
+    initval: 0.47
+band.V.u1:
+    initval: 0.64
+    sigma: 0
+band.R.u1:
+    initval: 0.55
+    sigma: 0
+
+# --------------------------------------------------------------------
+# Per-instrument blending and error scaling
+#
+# Every light curve carries its own (log_f_total, q_source) -- f_source =
+# 10**log_f_total * q_source, f_blend = the complement -- and its own
+# err_scale.  These are measured, not guessed: with the geometry above held
+# fixed, f_source and f_blend were fit LINEARLY per instrument against that
+# model, and err_scale is the sqrt(chi2/N) that fit leaves behind.
+#
+# This matters more than usual here.  The six .pho files are RAW
+# INSTRUMENTAL magnitudes with an arbitrary per-site zeropoint, so
+# log_f_total has no meaningful default; and SMARTS_V has fourteen points
+# and no baseline coverage at all, so nothing in its own data could infer
+# one.
+#
+# THE PHYSICAL CROSS-CHECK.  OGLE's q_source comes out at 0.4806.  The
+# published source magnitude I_s = 18.91 against the EWS baseline
+# I_bl = 18.104 predicts 10**(-0.4*(18.91-18.104)) = 0.4761.  Agreeing to
+# 1% from the light curve alone is the strongest single confirmation that
+# t_E, rho and the geometry above are the published solution and not a
+# lookalike.
+# --------------------------------------------------------------------
+
+mulensinstrument.OGLE.q_source:
+    initval: 0.4806
+mulensinstrument.OGLE.log_f_total:
+    initval: -7.24401
+# Deliberately seeded BELOW its own all-points value of 2.56.  Outside the
+# event (957 of 1079 points, where there is no model error) OGLE measures
+# 1.45, which is the honest NOISE scale for an uncorrected eight-year
+# OGLE-III baseline.  The difference is peak systematics -- see README.
+mulensinstrument.OGLE.err_scale:
+    initval: 1.45
+
+mulensinstrument.SMARTS_I.q_source:
+    initval: 0.2151
+mulensinstrument.SMARTS_I.log_f_total:
+    initval: -7.13475
+mulensinstrument.SMARTS_I.err_scale:
+    initval: 2.82
+
+mulensinstrument.SMARTS_V.q_source:
+    initval: 0.2716
+mulensinstrument.SMARTS_V.log_f_total:
+    initval: -6.97071
+mulensinstrument.SMARTS_V.err_scale:
+    initval: 2.90
+
+mulensinstrument.Auckland.q_source:
+    initval: 0.1234
+mulensinstrument.Auckland.log_f_total:
+    initval: -7.28619
+mulensinstrument.Auckland.err_scale:
+    initval: 0.98
+
+mulensinstrument.FarmCove.q_source:
+    initval: 0.1024
+mulensinstrument.FarmCove.log_f_total:
+    initval: -7.04453
+mulensinstrument.FarmCove.err_scale:
+    initval: 1.30
+
+mulensinstrument.VintageLane.q_source:
+    initval: 0.0845
+mulensinstrument.VintageLane.log_f_total:
+    initval: -7.27896
+mulensinstrument.VintageLane.err_scale:
+    initval: 1.27
+
+mulensinstrument.LOAO.q_source:
+    initval: 0.1492
+mulensinstrument.LOAO.log_f_total:
+    initval: -7.37367
+mulensinstrument.LOAO.err_scale:
+    initval: 0.91
