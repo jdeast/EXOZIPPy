@@ -6,6 +6,50 @@ Do not start the full suite with a timeout. Start it and poll.
 
 Testing note: build relation inputs with `pt.dscalar`, **not** `pt.as_tensor_variable(<python float>)` -- pytensor autocasts a bare Python float to the smallest dtype that represents it (5778.0 -> float32), and a unary op like `pt.log10` on it then computes in float32, silently losing ~1e-7. The model always feeds float64. `tests/test_torres.py` pins the port against real IDL output from `massradius_torres.pro`.
 
+## The pre-push hook, and why it does not say `poetry run pytest`
+
+The full suite runs on push, wired in `.pre-commit-config.yaml` (install both hook
+types with `poetry run pre-commit install`). The entry is
+`scripts/pre_push_suite.sh` rather than `poetry run pytest`, because that spelling
+**cannot work from a git worktree** -- and essentially all work here is developed in
+one, so it was on the path of every push. Two failures, one of them silent:
+
+- **Loud.** Poetry names a project's virtualenv from a hash of the project *path*. A
+  worktree is a different path, so `poetry run` there does not find the populated venv;
+  it creates a fresh empty one and dies on `ModuleNotFoundError: pytest`, leaving an
+  orphan venv behind (these have reached tens of GB).
+- **Silent, and the one that matters.** Even once pytest runs, the main venv's editable
+  install is a plain path entry (`exozippy.pth`) pointing at the *shared* checkout's
+  `src`. So the suite imports the other tree's code and reports green -- a hook that
+  proves nothing about what you are pushing.
+
+The script resolves the interpreter and exports `PYTHONPATH=<this tree>/src` itself, so
+the hook tests the tree it was launched from **by construction** rather than by the
+caller remembering to export something. It prints the tree, the interpreter and the
+import path, because the bug it replaces was a hook that passed while testing the wrong
+code. `tests/test_pre_push_hook.py` pins the worktree case, the main-tree case (git
+reports `--git-common-dir` relative there and absolute from a worktree), and the wiring.
+
+Two rejected alternatives, so they are not re-proposed:
+
+- `POETRY_VIRTUALENVS_CREATE=false`, which makes `poetry run` resolve from its own base
+  environment. It fixes the loud half and leaves the silent half live.
+- A per-worktree symlink or a hand-exported `PYTHONPATH`. Both work and both are
+  invisible: the failure mode is a green hook, so a mitigation nobody can see in the
+  repository is not a mitigation.
+
+Knobs: `EXOZIPPY_VENV_PYTHON` names the interpreter explicitly and skips the poetry
+lookup (for a conda or hand-built environment, or CI); `EXOZIPPY_PREPUSH_DRYRUN=1`
+prints the resolution and exits without running the suite.
+
+Two properties of the hook that this did **not** change, and that still bite:
+
+- It tests the **working tree**, not the commits being pushed. Pushing a branch from
+  the main tree therefore tests whatever is checked out there, not the branch.
+- `pre-commit` stashes unstaged changes while hooks run and restores them afterwards.
+  Do not kill a run in progress; the work is recoverable from the patch it prints under
+  `~/.cache/pre-commit/`, but only by hand.
+
 ## Suite runtime and the pytensor compile cache
 
 The suite runs in **~16 minutes warm** on an idle 36-core box (`-n 6`, 3108 tests,
