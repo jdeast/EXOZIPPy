@@ -174,6 +174,10 @@ def test_every_example_directory_has_a_config():
         # In-progress event: data and outputs only, no config committed
         # yet (untracked local work as of 2026-08-13).
         "kb180087_obj3",
+        # OGLE-2017-BLG-0114: raw OGLE EWS params.dat/phot.dat committed,
+        # but no system config yet -- an example still being built up.
+        # Drop this entry once ob170114 ships a config.
+        "ob170114",
     }
     covered = {rel.split("/")[0] for _, rel in _CONFIGS}
 
