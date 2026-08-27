@@ -1,16 +1,19 @@
 # OGLE-2009-BLG-020: binary lens + the spectroscopic orbit of its lens
 
-> **WORK IN PROGRESS -- do not treat this as a validated reproduction**
-> until lens orbital motion is modelled and the acceptance criteria of
-> review item 8.6.8 are met.  The 3.6.4 convention retraction is APPLIED:
-> the seeds are the published `u_0 > 0` solution, read off Skowron+2011
-> Table 1's "parallax + full orbit (with priors)" column directly
-> (2026-08-27), and every sign statement below uses the corrected identity
-> `gamma_perp = -dalpha/dt` (Skowron Appendix A.4; also their Section 3.3.1
-> in so many symbols: `alpha(t) = alpha_0 - gamma_perp (t - t_0,par)`).
-> What is verified here: the data files and their read options, the
-> per-instrument flux/`err_scale` seeds, the `omega_* = 331.6` result, and
-> the measured size of the missing-orbital-motion effect.
+> **WORK IN PROGRESS -- the model is now the full joint one**
+> (`orbital_motion: keplerian`: the RV-constrained orbit drives
+> `s(t)/alpha(t)` with no new free parameters), **but the acceptance FIT of
+> review item 8.6.8 -- recovering Yee+2016's joint solution -- has not run
+> yet.**  What IS verified, at the start point (2026-08-27): the derived
+> geometry reproduces all four published orbital-motion observables in the
+> published `u_0 > 0` labeling (`s_0`, `alpha_0`, `sign(gamma_par)`,
+> `sign(gamma_perp)`); the Yee (Omega, i) -> EXOZIPPy frame mapping is
+> measured (see the params file); and the start logp is finite (+3,276).
+> The per-instrument flux/`err_scale` seeds still date from the static
+> geometry and are refreshed by the acceptance fit.  Every sign statement
+> below uses the corrected identity `gamma_perp = -dalpha/dt` (Skowron
+> Appendix A.4; their Section 3.3.1 in so many symbols:
+> `alpha(t) = alpha_0 - gamma_perp (t - t_0,par)`).
 
 A binary-lens microlensing light curve fit jointly with radial velocities of
 the **lens primary** -- the first (and still cleanest) case where a
@@ -139,9 +142,18 @@ and the light curve's mass ratio are automatically consistent.
 `rvinstrument`'s `star_ndx: 0` makes the RV model the sum of `orbit.K` over
 every orbit L1 belongs to.
 
-`i180: true` on the orbit selects Yee's `i > 90 deg` branch: `i` and
-`180 - i` are a reflection through the sky plane, and RVs alone cannot tell
-them apart.
+With `orbital_motion: keplerian` on the lens block, orbit `L` also drives
+the binary geometry: `s(t) = |delta(t)|` and `alpha(t) = phi_pi - PA(axis)`
+per epoch (conventions.md C24), in Einstein units `a/(D_L theta_E)`.  No
+`i180` hand-holding remains: the sky rotation sense of the binary axis in
+the light curve measures `sign(cos i)`, and the axis orientation measures
+`bigomega` -- both sampled over their full ranges
+(`Orbit._lens_keplerian_orbits`).  NOTE the frame trap the params file
+documents in full: Yee+2016 quote `(Omega_node, i)` in the Skowron
+Appendix B frame (first axis = binary axis, third axis TOWARD the
+observer), so their printed values do NOT drop into EXOZIPPy's sky frame
+-- `i_EXOZIPPy = 180 - i_Yee`, and `bigomega` was pinned numerically
+against the four published orbital-motion observables.
 
 All the unfiltered follow-up shares one band (`N`, standing in as Cousins R);
 the sites differ in zeropoint, which `f_source`/`f_blend` already absorb per
@@ -157,11 +169,13 @@ and 17 mmag between I and V, against a 26 mmag median error -- cheap here
 (the V band is five points), not cheap for an event with dense simultaneous
 V and I coverage.  Scoped in `notes/orbital_motion_and_nbody.txt` section 4a.
 
-**Orbital motion of the lens binary: the machinery is in
-(`orbital_motion: linear`, conventions.md C24), not yet enabled here** --
-this example's endgame is the `keplerian` mode, where the RV-constrained
-orbit drives `s(t)`/`alpha(t)` with no new free parameters (review 8.6.8
-5a/5b), and it flips on when that lands.
+**Orbital motion of the lens binary: `orbital_motion: keplerian` is ON**
+-- the RV-constrained orbit drives `s(t)`/`alpha(t)` with no new free
+parameters (review 8.6.8 5a/5b), which is Skowron+2011's proposed
+over-constraint test on the event they proposed it for.  The start state
+is verified (banner above); the acceptance FIT -- recover (or refute)
+Yee's joint solution -- is the next step.  The `linear` mode remains the
+default recommendation for events without RVs.
 
 The linear mode's acceptance measurement, re-made 2026-08-27 with the
 shipped machinery (fluxes fit linearly per instrument, all 2837 points, raw
@@ -232,14 +246,15 @@ and are recorded there in full:
    the mode reporter, not an equivalent labeling.  (An earlier version
    seeded the mirror on three claimed lines of evidence; all three rested
    on one inverted sign identity and are retracted, 3.6.4.)
-5. **`orbit.L.bigomega` is inert here and is commented out.**  With no
-   astrometry the orbit component never declares it -- verified, there is no
-   `bigomega` among the sampled variables -- because RVs carry no information
-   about the node's position angle.  Yee measure it only because they model
-   the lens orbital motion this fit is missing.  Likewise `i180: true`
-   selects Yee's `i > 90 deg` branch **by hand**: the RV mass function sees
-   only `sin i`, and what would measure the sign is the sky rotation sense,
-   i.e. orbital motion again.
+5. **`orbit.L.bigomega` and `sign(cos i)` are now MEASURED parameters** --
+   the keplerian lens motion consumes the orbit, so the axis's sky
+   orientation (bigomega) and rotation sense (`sign(cos i)`) reach the
+   light curve; the orbit component samples both over their full ranges
+   (`Orbit._lens_keplerian_orbits`).  The seeds carry the frame-mapped
+   Yee branch (`i = 50.58 = 180 - 129.42`, `bigomega = 337.45`; the
+   mapping table lives in the params file).  The retired `i180: true`
+   hand-holding and the inert commented-out `bigomega` are exactly what
+   review 8.6.8 5e said this mode would remove.
 
 Every light curve also carries its own `(log_f_total, q_source)` and
 `err_scale`, and these are fit rather than guessed: with the geometry held
@@ -255,15 +270,19 @@ between 0.17 and 0.37 at every site against Skowron's calibrated 0.334, the
 spread being the expected consequence of unfiltered detectors with different
 responses.
 
-Start logp is +41,458 at the published-branch seeds above (it was +47,309
-at the retracted mirror seeds; the drop is expected -- the per-instrument
-flux and `err_scale` seeds were fit at the old geometry, and the model is
-still missing the orbital motion that dominates the residuals either way).
-The per-instrument start chi2/N table that used to sit here was measured at
-the mirror seeds and is removed rather than left to mislead; it is
-re-measured as part of the orbital-motion acceptance (review 8.6.8), along
-with refreshed flux/`err_scale` seeds.  The strongest single pre-revert
-confirmation stands unchanged in kind: Bronberg's 839 points spanning the
-entire caustic crossing sat at chi2/N ~ 1 from literature values with no
-fitting, which is what validates the data handling and the parameter
-transfer.
+Start logp is +3,276 in the full keplerian-mode model (2026-08-27).  For
+the record of the seed lineage: the static model started at +41,458 at the
+published-branch seeds, and +47,309 at the retracted mirror seeds.  The
+keplerian start is lower than the static one NOT because the model is
+worse but because the published point-values do not close as a set: the
+per-instrument flux and `err_scale` seeds still date from the static
+geometry (a linear-flux refit at the keplerian start leaves the caustic
+window healthy -- Bronberg chi2/N = 4.3 on raw errors -- while the OGLE
+wings sit at chi2/N ~ 375, carrying the mismatch between Skowron's
+with-priors trajectory values and the joint solution's unprinted ones),
+and Table 1's own medians are mutually inconsistent at the point-estimate
+level (e.g. its printed |pi_E| = 0.151 against the
+theta_E/(kappa M) = 0.30 implied by its own priors' masses -- marginal
+medians, as the params file notes).  Resolving that tension is precisely
+what the acceptance FIT is for; the per-instrument chi2/N table and the
+flux/`err_scale` seeds are refreshed from its posterior.

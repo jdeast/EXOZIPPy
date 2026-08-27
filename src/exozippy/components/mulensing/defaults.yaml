@@ -379,6 +379,17 @@ lens:
       default:
         func_name: "calc_alpha"
         deps: [ "xalpha", "yalpha" ]
+      from_orbit:
+        # keplerian lens orbital motion (C24): alpha = phi_pi - PA(axis)
+        # at t0_par, derived from the referenced orbit -- no sampled
+        # xalpha/yalpha exist in this mode.
+        func_name: "calc_alpha_from_orbit"
+        deps: [ "lens_t0_par", "orbit.tp[lens_kep_orbit_map]",
+                "orbit.n[lens_kep_orbit_map]", "orbit.ecc[lens_kep_orbit_map]",
+                "orbit.sinw[lens_kep_orbit_map]", "orbit.cosw[lens_kep_orbit_map]",
+                "orbit.cosi[lens_kep_orbit_map]", "orbit.bigomega[lens_kep_orbit_map]",
+                "orbit.a[lens_kep_orbit_map]", "theta_E",
+                "star.distance[primary_lens_map]", "pi_E_N", "pi_E_E" ]
   # Lens orbital motion, linear mode (conventions.md C24; review 8.6.8).
   # Declared only when the lens block sets `orbital_motion: linear`; absent
   # otherwise, and the geometry is static exactly as before.  Both rates are
@@ -476,6 +487,17 @@ lens:
       default:
         func_name: "calc_s"
         deps: [ "log_s" ]
+      from_orbit:
+        # keplerian lens orbital motion (C24): the reported s at t0_par,
+        # derived from the referenced orbit -- no sampled log_s exists in
+        # this mode.  lens_t0_par is a context node (Lens.add_parameter).
+        func_name: "calc_s_from_orbit"
+        deps: [ "lens_t0_par", "orbit.tp[lens_kep_orbit_map]",
+                "orbit.n[lens_kep_orbit_map]", "orbit.ecc[lens_kep_orbit_map]",
+                "orbit.sinw[lens_kep_orbit_map]", "orbit.cosw[lens_kep_orbit_map]",
+                "orbit.cosi[lens_kep_orbit_map]", "orbit.bigomega[lens_kep_orbit_map]",
+                "orbit.a[lens_kep_orbit_map]", "theta_E",
+                "star.distance[primary_lens_map]", "pi_E_N", "pi_E_E" ]
   xalpha:
     lower: -100.0
     upper: 100.0

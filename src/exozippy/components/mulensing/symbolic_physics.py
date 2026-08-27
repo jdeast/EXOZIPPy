@@ -107,9 +107,6 @@ def get_symbol_map(lens_config_list):
             "mu_dec_rel": f"lens.{j}.mu_dec_rel",
             # Shared per-companion geometry (companion slot 0)
             "q_lens": "lens.0.q",
-            "alpha": "lens.0.alpha",
-            "xalpha": "lens.0.xalpha",
-            "yalpha": "lens.0.yalpha",
             "lens_mass_total": lens_mass_total_path,
             "lens_distance": f"star.{l_idx}.distance",
             "lens_pm_ra": f"star.{l_idx}.pm_ra",
@@ -135,7 +132,17 @@ def get_symbol_map(lens_config_list):
         # mapped.  For 3+ body lenses only slot 0 is covered by the relation;
         # Lens.register_parameters seeds the remaining companions' log_s from
         # user s hints (same fallback as the mlens_total/q seeding).
-        if is_binary_lens:
+        # In keplerian orbital-motion mode NONE of the geometry symbols
+        # (alpha's arctan2 pair, s <-> log_s) map: the geometry is derived
+        # from the referenced orbit and no sampled coordinate exists for
+        # the engine to seed (conventions.md C24).  Their relations go
+        # inert, exactly like s/log_s for PSPL.
+        keplerian = lens_config_list.get("orbital_motion") == "keplerian"
+        if not keplerian:
+            result["alpha"] = "lens.0.alpha"
+            result["xalpha"] = "lens.0.xalpha"
+            result["yalpha"] = "lens.0.yalpha"
+        if is_binary_lens and not keplerian:
             result["s"] = "lens.0.s"
             result["log_s"] = "lens.0.log_s"
 

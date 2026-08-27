@@ -132,6 +132,25 @@ def state_vector_terms(t, tp, n, ecc, sinw=None, cosw=None, circular=False):
     )
 
 
+def thiele_innes_xy(r, coswf, sinwf, cosi, bigomega):
+    """Sky-plane position (X = North, Y = East) of an orbiting body from the
+    in-plane factors -- the Thiele-Innes projection, hoisted out of
+    `Orbit.state_vectors` so the microlensing keplerian mode (which needs
+    the same projection per epoch, in Einstein units) consumes ONE owner
+    rather than a second copy of these two lines.
+
+    `r` is the separation in the caller's amplitude units;
+    `coswf`/`sinwf` come from `state_vector_terms`.  PA measured East of
+    North: at omega + f = 0 (ascending node) the body sits at
+    PA = bigomega.
+    """
+    cosO = pt.cos(bigomega)
+    sinO = pt.sin(bigomega)
+    X = r * (cosO * coswf - sinO * sinwf * cosi)
+    Y = r * (sinO * coswf + cosO * sinwf * cosi)
+    return X, Y
+
+
 def _sqrt_ecc(ecc):
     """``sqrt(e)`` with the radicand floored -- see ECC_FLOOR."""
     return pt.sqrt(pt.maximum(ecc, ECC_FLOOR))

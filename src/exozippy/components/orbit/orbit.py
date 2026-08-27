@@ -927,9 +927,15 @@ class Orbit(Component):
         # vector (xbigomega, ybigomega; each N(0,1) -> uniform marginal on
         # bigomega, like the microlensing trajectory angle alpha) and allow
         # the full inclination range when an astrometry component is active.
-        has_astrometry = (
-            in_topology(system, "astrometryinstrument") is not None
-        )
+        # A lens block driving its geometry from an orbit (orbital_motion:
+        # keplerian, conventions.md C24) measures BOTH the same way: the
+        # sky rotation sense of the binary axis is sign(cos i) once the
+        # node is fixed, and the axis's position angle is the node -- it is
+        # the ONLY effect here that measures them for a lens binary
+        # (review 8.6.8 5e).
+        has_astrometry = in_topology(
+            system, "astrometryinstrument"
+        ) is not None or bool(self._lens_keplerian_orbits(system))
         if has_astrometry:
             self.manifest["xbigomega"] = None
             self.manifest["ybigomega"] = None
@@ -985,6 +991,32 @@ class Orbit(Component):
                     "i > 90 deg" if own_i180.any() else "i < 90 deg",
                 )
 
+    def _lens_keplerian_orbits(self, system):
+        """Orbit indices a lens block drives via ``orbital_motion:
+        keplerian`` (empty set when none).
+
+        Reads the lens INSTANCE when it exists (its ``kep_orbit_idx`` is the
+        resolved reference) and falls back to the raw config block --
+        register_parameters runs per component and the lens may not be
+        constructed yet in a partial harness.
+        """
+        lens = in_topology(system, "lens")
+        if lens is None:
+            return set()
+        idx = getattr(lens, "kep_orbit_idx", None)
+        if idx is not None:
+            return {int(idx)}
+        blocks = lens if isinstance(lens, list) else [lens]
+        out = set()
+        for b in blocks:
+            if isinstance(b, dict) and b.get("orbital_motion") == "keplerian":
+                ref = b.get("orbit")
+                if isinstance(ref, int) or str(ref).isdigit():
+                    out.add(int(ref))
+                elif ref is not None and ref in list(self.names or []):
+                    out.add(list(self.names).index(ref))
+        return out
+
     def _node_degenerate_orbits(self, system):
         """Per orbit: is the ascending node unidentifiable? (review 1.8.3)
 
@@ -1022,9 +1054,18 @@ class Orbit(Component):
         if rv is not None:
             for s_idx in set(rv.star_ndx):
                 radial.update(o for o, _ in self.star_membership(s_idx))
+        # An orbit driving a lens's keplerian geometry is NOT node
+        # degenerate: the sky rotation sense of the binary axis in the
+        # magnification is exactly what the reflection flips (C24; Skowron
+        # Section 5.2's gamma_perp -> -gamma_perp is Omega -> -Omega,
+        # i -> 180 - i), so the light curve identifies the node even with
+        # no radial data.
+        lens_driven = self._lens_keplerian_orbits(system)
         return np.array(
             [
-                (i in astrometric) and (i not in radial)
+                (i in astrometric)
+                and (i not in radial)
+                and (i not in lens_driven)
                 for i in range(self.n_elements)
             ],
             dtype=bool,
@@ -1916,8 +1957,11 @@ class Orbit(Component):
 
         # Thiele-Innes projection (North, East), PA measured East of North:
         # at omega + f = 0 (ascending node) the body sits at PA = bigomega.
-        X = r * (cosO * terms.coswf - sinO * terms.sinwf * cosi)
-        Y = r * (sinO * terms.coswf + cosO * terms.sinwf * cosi)
+        # One owner (physics.thiele_innes_xy) -- the microlensing keplerian
+        # mode projects the same way in Einstein units.
+        X, Y = physics.thiele_innes_xy(
+            r, terms.coswf, terms.sinwf, cosi, bigomega
+        )
         Z = r * terms.sinwf * sini
 
         # d/dt of the above: vamp * the kernel's velocity phase terms.
