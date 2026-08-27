@@ -25,10 +25,37 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "pre_push_suite.sh"
 
 
+def _clean_env():
+    """os.environ with every GIT_* variable removed, plus hermetic git config.
+
+    This matters, and it is not defensive boilerplate. These tests run inside
+    the very pre-push hook this script implements, and a git hook exports
+    GIT_DIR (and friends) into its children. Inherited, they point every `git`
+    call below -- and the script's own `git rev-parse` -- at the REAL
+    repository instead of the throwaway one built in tmp_path. Observed
+    without this: the fixture's `git commit` fails against the real index. The
+    dangerous version is the one where it SUCCEEDS, because then the
+    assertions pass while describing the wrong tree -- which is exactly the
+    silent wrong-tree defect this whole file exists to pin.
+
+    GIT_CONFIG_GLOBAL/SYSTEM point at os.devnull (git >= 2.32) so a runner's
+    global config -- a commit template, gpgsign, hooksPath -- cannot reach
+    into the temp repo either.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    return env
+
+
 def _git(cwd, *args):
     """Run a git command, failing the test loudly on a nonzero exit."""
     subprocess.run(
-        ("git",) + args, cwd=str(cwd), check=True, capture_output=True
+        ("git",) + args,
+        cwd=str(cwd),
+        check=True,
+        capture_output=True,
+        env=_clean_env(),
     )
 
 
@@ -40,7 +67,7 @@ def _run_script(cwd):
     perfectly good stand-in for the project venv (it has pytest, which is how
     this test is executing).
     """
-    env = dict(os.environ)
+    env = _clean_env()
     env["EXOZIPPY_PREPUSH_DRYRUN"] = "1"
     env["EXOZIPPY_VENV_PYTHON"] = sys.executable
     # A deliberately hostile inherited value: the empty entry is what puts the
@@ -147,6 +174,30 @@ def test_an_inherited_pythonpath_is_discarded_and_reported(repo_with_worktree):
     assert "discarded inherited PYTHONPATH" in stdout
 
 
+def test_these_tests_are_immune_to_an_inherited_git_dir(
+    repo_with_worktree, monkeypatch
+):
+    """Given GIT_DIR in the environment, as a git hook exports it,
+    When the worktree case runs,
+    Then it still describes the temp worktree.
+
+    Not a test of the script -- a test of this file. These tests execute
+    INSIDE the pre-push hook, where GIT_DIR is set, and without scrubbing it
+    the temp repo's git commands and the script's own `git rev-parse` both
+    retarget at the real checkout. That failed loudly here; the version worth
+    guarding against is the one that passes while measuring the wrong tree."""
+    # Arrange
+    main, linked = repo_with_worktree
+    monkeypatch.setenv("GIT_DIR", str(main / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(main))
+
+    # Act
+    pythonpath = _pythonpath_line(_run_script(linked))
+
+    # Assert
+    assert pythonpath == str(linked / "src")
+
+
 def test_a_missing_interpreter_fails_with_an_actionable_message(tmp_path):
     """Given an interpreter that does not exist,
     When the hook runs,
@@ -158,7 +209,7 @@ def test_a_missing_interpreter_fails_with_an_actionable_message(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(tmp_path, "init", "-q", "-b", "master", str(repo))
-    env = dict(os.environ)
+    env = _clean_env()
     env["EXOZIPPY_VENV_PYTHON"] = str(tmp_path / "no_such_python")
 
     # Act
