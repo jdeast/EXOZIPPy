@@ -40,14 +40,18 @@ def main():
     wd = Path(tempfile.mkdtemp(prefix="diag_transit_"))
     os.chdir(wd)
     config, params, sampler, truth, checks = ir.make_transit(rng, snr, nep, wd)
-    print("truth: " + "  ".join("%s=%.6g" % (k, v) for k, v in truth.items()),
-          flush=True)
+    print(
+        "truth: " + "  ".join("%s=%.6g" % (k, v) for k, v in truth.items()),
+        flush=True,
+    )
 
     d = np.loadtxt(wd / "synth.trn")
     depth = 1.0 - d[:, 1].min()
-    print("data: n=%d depth=%.5f sigma=%.3e in-transit=%d"
-          % (len(d), depth, d[0, 2], int((d[:, 1] < 1 - 2 * d[0, 2]).sum())),
-          flush=True)
+    print(
+        "data: n=%d depth=%.5f sigma=%.3e in-transit=%d"
+        % (len(d), depth, d[0, 2], int((d[:, 1] < 1 - 2 * d[0, 2]).sum())),
+        flush=True,
+    )
 
     import arviz as az
     import pymc as pm
@@ -61,25 +65,37 @@ def main():
 
     with model:
         idata = pm.sample(
-            draws=sampler["draws"], tune=sampler["tune"],
-            chains=sampler["chains"], cores=sampler["cores"],
+            draws=sampler["draws"],
+            tune=sampler["tune"],
+            chains=sampler["chains"],
+            cores=sampler["cores"],
             target_accept=sampler["target_accept"],
-            progressbar=False, random_seed=seed,
+            progressbar=False,
+            random_seed=seed,
         )
 
     post = idata.posterior
     ss = idata.sample_stats
-    print("\ndivergences per chain: %s"
-          % np.asarray(ss["diverging"]).sum(axis=1).tolist(), flush=True)
+    print(
+        "\ndivergences per chain: %s"
+        % np.asarray(ss["diverging"]).sum(axis=1).tolist(),
+        flush=True,
+    )
     if "step_size" in ss:
-        print("step size per chain: %s"
-              % [float(x) for x in np.asarray(ss["step_size"])[:, -1]],
-              flush=True)
+        print(
+            "step size per chain: %s"
+            % [float(x) for x in np.asarray(ss["step_size"])[:, -1]],
+            flush=True,
+        )
 
-    print("\n=== per-chain ranges (the discriminating measurement) ===",
-          flush=True)
-    print("%-22s %6s %12s %12s %12s %12s"
-          % ("variable", "chain", "mean", "sd", "min", "max"))
+    print(
+        "\n=== per-chain ranges (the discriminating measurement) ===",
+        flush=True,
+    )
+    print(
+        "%-22s %6s %12s %12s %12s %12s"
+        % ("variable", "chain", "mean", "sd", "min", "max")
+    )
     for name in sorted(post.data_vars):
         arr = np.asarray(post[name])
         if arr.ndim > 2:
@@ -96,17 +112,36 @@ def main():
             ess = float("nan")
         if ess > 500 and name not in ("orbit.cosi", "orbit.period"):
             continue
-        print("  %-20s ESS=%.0f  between-chain mean spread=%.4g  "
-              "typical within-chain sd=%.4g  ratio=%.2f"
-              % (name, ess, spread, within,
-                 spread / within if within else float("nan")), flush=True)
+        print(
+            "  %-20s ESS=%.0f  between-chain mean spread=%.4g  "
+            "typical within-chain sd=%.4g  ratio=%.2f"
+            % (
+                name,
+                ess,
+                spread,
+                within,
+                spread / within if within else float("nan"),
+            ),
+            flush=True,
+        )
         for c in range(arr.shape[0]):
-            print("  %-20s %6d %12.6g %12.4g %12.6g %12.6g"
-                  % ("", c, arr[c].mean(), arr[c].std(),
-                     arr[c].min(), arr[c].max()), flush=True)
+            print(
+                "  %-20s %6d %12.6g %12.4g %12.6g %12.6g"
+                % (
+                    "",
+                    c,
+                    arr[c].mean(),
+                    arr[c].std(),
+                    arr[c].min(),
+                    arr[c].max(),
+                ),
+                flush=True,
+            )
 
-    print("\n=== correlations with the worst-mixing sampled coordinate ===",
-          flush=True)
+    print(
+        "\n=== correlations with the worst-mixing sampled coordinate ===",
+        flush=True,
+    )
     flat = {}
     for name in post.data_vars:
         a = np.asarray(post[name])

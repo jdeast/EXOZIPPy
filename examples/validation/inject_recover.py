@@ -197,7 +197,9 @@ def _overlap_area(z, p):
     out[full] = np.pi * p * p
     part = (~full) & (z < 1.0 + p)
     zp = z[part]
-    k0 = np.arccos(np.clip((p * p + zp * zp - 1.0) / (2.0 * p * zp), -1.0, 1.0))
+    k0 = np.arccos(
+        np.clip((p * p + zp * zp - 1.0) / (2.0 * p * zp), -1.0, 1.0)
+    )
     k1 = np.arccos(np.clip((1.0 - p * p + zp * zp) / (2.0 * zp), -1.0, 1.0))
     rad = np.maximum(4.0 * zp * zp - (1.0 + zp * zp - p * p) ** 2, 0.0)
     out[part] = p * p * k0 + k1 - 0.5 * np.sqrt(rad)

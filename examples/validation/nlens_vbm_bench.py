@@ -111,10 +111,18 @@ GEOMETRIES = [
     ("N2-resonant", 2, lambda: _binary(1.0, 1e-2), (1.0, 1e-2)),
     ("N2-stellar", 2, lambda: _binary(1.0, 0.5), (1.0, 0.5)),
     # N=3: a star with two planets, and a stellar binary with one planet.
-    ("N3-two-planets", 3,
-     lambda: _nbody([(1.0, 1e-3, 0.0), (1.6, 3e-4, 70.0)]), None),
-    ("N3-binary+planet", 3,
-     lambda: _nbody([(0.9, 0.4, 0.0), (1.8, 1e-3, 40.0)]), None),
+    (
+        "N3-two-planets",
+        3,
+        lambda: _nbody([(1.0, 1e-3, 0.0), (1.6, 3e-4, 70.0)]),
+        None,
+    ),
+    (
+        "N3-binary+planet",
+        3,
+        lambda: _nbody([(0.9, 0.4, 0.0), (1.8, 1e-3, 40.0)]),
+        None,
+    ),
     # N=4: three companions, the regime where op.py switches to Nopoly.
     (
         "N4-three-companions",
@@ -196,9 +204,7 @@ def sample_positions(caustics, rho, n_per_bin, rng):
         )
     # Far pool: uniform over a box several caustic-spans wide, for >100 rho.
     box = max(3.0 * span, 4.0)
-    pool.append(
-        centre + rng.uniform(-box, box, size=(20000, 2))
-    )
+    pool.append(centre + rng.uniform(-box, box, size=(20000, 2)))
     pool = np.vstack(pool)
 
     d = min_caustic_distance(pool, caustics)
@@ -265,8 +271,16 @@ def stats(times):
 # fraction landing inside the source disk.  A = (rays in disk) * h^2 /
 # (pi rho^2).  No contour integration, no VBM.
 # ---------------------------------------------------------------------------
-def irs_magnification(pos, m, src_x, src_y, rho, rays_per_rho=12.0,
-                      half_width=None, chunk=4_000_000):
+def irs_magnification(
+    pos,
+    m,
+    src_x,
+    src_y,
+    rho,
+    rays_per_rho=12.0,
+    half_width=None,
+    chunk=4_000_000,
+):
     h = rho / rays_per_rho
     if half_width is None:
         # Images lie within ~1 Einstein radius of the lenses plus the source
@@ -303,6 +317,7 @@ def irs_magnification(pos, m, src_x, src_y, rho, rays_per_rho=12.0,
         hit += int(np.count_nonzero(d2 <= rho2))
     return hit * h * h / (np.pi * rho2)
 
+
 # ---------------------------------------------------------------------------
 # Block driver.
 #
@@ -321,8 +336,11 @@ def enumerate_blocks():
             blocks.append((name, mth, "timing"))
         if binary_sq is not None:
             blocks.append((name, "BinaryMag2", "timing"))
-        shipped = "BinaryMag2" if nbodies == 2 else (
-            "Multipoly" if nbodies == 3 else "Nopoly")
+        shipped = (
+            "BinaryMag2"
+            if nbodies == 2
+            else ("Multipoly" if nbodies == 3 else "Nopoly")
+        )
         blocks.append((name, shipped, "selfconv"))
         blocks.append((name, shipped, "irs"))
     return blocks
@@ -353,23 +371,36 @@ def run_block(name, method, leg, args, rng):
             if label not in binned:
                 continue
             pts, dists = binned[label]
-            t, vals, ndone = time_calls(v, pts, RHO_PROD, args.bin_budget,
-                                        binary_sq=sq)
+            t, vals, ndone = time_calls(
+                v, pts, RHO_PROD, args.bin_budget, binary_sq=sq
+            )
             row = {
-                "leg": "timing", "geometry": name, "n_bodies": nbodies,
-                "method": method, "bin_rho": label,
+                "leg": "timing",
+                "geometry": name,
+                "n_bodies": nbodies,
+                "method": method,
+                "bin_rho": label,
                 "d_caustic_median": float(np.median(dists[:ndone]))
-                if ndone else None,
+                if ndone
+                else None,
                 "A_median": float(np.median(vals)) if ndone else None,
                 "truncated": bool(ndone < len(pts)),
             }
             row.update(stats(t))
             rows.append(row)
-            print("  %-11s %-7s median %9.1f us  p90 %9.1f us  n=%3d  A~%.3g%s"
-                  % (method, label, row.get("median_us", float("nan")),
-                     row.get("p90_us", float("nan")), ndone,
-                     row.get("A_median") or float("nan"),
-                     "  [TRUNCATED]" if row["truncated"] else ""), flush=True)
+            print(
+                "  %-11s %-7s median %9.1f us  p90 %9.1f us  n=%3d  A~%.3g%s"
+                % (
+                    method,
+                    label,
+                    row.get("median_us", float("nan")),
+                    row.get("p90_us", float("nan")),
+                    ndone,
+                    row.get("A_median") or float("nan"),
+                    "  [TRUNCATED]" if row["truncated"] else "",
+                ),
+                flush=True,
+            )
         return rows
 
     if leg == "selfconv":
@@ -400,25 +431,38 @@ def run_block(name, method, leg, args, rng):
             good = np.isfinite(a_lo) & np.isfinite(a_hi) & (a_hi != 0)
             rel = np.abs(a_lo[good] - a_hi[good]) / np.abs(a_hi[good])
             row = {
-                "leg": "selfconv", "geometry": name, "n_bodies": nbodies,
-                "method": method, "bin_rho": label, "n": int(good.sum()),
+                "leg": "selfconv",
+                "geometry": name,
+                "n_bodies": nbodies,
+                "method": method,
+                "bin_rho": label,
+                "n": int(good.sum()),
                 "rel_err_median": float(np.median(rel)) if rel.size else None,
                 "rel_err_max": float(np.max(rel)) if rel.size else None,
-                "ref_median_us": float(np.median(t_hi) * 1e6) if t_hi else None,
+                "ref_median_us": float(np.median(t_hi) * 1e6)
+                if t_hi
+                else None,
             }
             rows.append(row)
+
             def _f(v):
                 # `v or nan` would map an exact 0.0 to nan, and 0.0 is a REAL
                 # result here: far from the caustic the point-source shortcut
                 # makes the answer tolerance-independent.
                 return float("nan") if v is None else v
 
-            print("  selfconv %-7s rel err median %.2e  max %.2e  "
-                  "(Tol=1e-6 cost %.1f us)  n=%d"
-                  % (label, _f(row["rel_err_median"]),
-                     _f(row["rel_err_max"]),
-                     _f(row["ref_median_us"]), row["n"]),
-                  flush=True)
+            print(
+                "  selfconv %-7s rel err median %.2e  max %.2e  "
+                "(Tol=1e-6 cost %.1f us)  n=%d"
+                % (
+                    label,
+                    _f(row["rel_err_median"]),
+                    _f(row["rel_err_max"]),
+                    _f(row["ref_median_us"]),
+                    row["n"],
+                ),
+                flush=True,
+            )
         return rows
 
     # leg == "irs": the independent reference.
@@ -440,17 +484,29 @@ def run_block(name, method, leg, args, rng):
         a_irs = irs_magnification(pos, m, float(px), float(py), RHO_IRS)
         t_irs = time.perf_counter() - t0
         rel = abs(a_vbm - a_irs) / abs(a_irs) if a_irs else float("nan")
-        rows.append({
-            "leg": "irs", "geometry": name, "n_bodies": nbodies,
-            "method": method, "probe": tag,
-            "x": float(px), "y": float(py), "rho": RHO_IRS,
-            "A_vbm": float(a_vbm), "A_irs": float(a_irs),
-            "rel_diff": float(rel),
-            "t_vbm_us": float(t_vbm * 1e6), "t_irs_s": float(t_irs),
-        })
-        print("  IRS %-11s A_vbm=%.6f  A_irs=%.6f  rel=%.2e  "
-              "(vbm %.1f us, irs %.1f s)"
-              % (tag, a_vbm, a_irs, rel, t_vbm * 1e6, t_irs), flush=True)
+        rows.append(
+            {
+                "leg": "irs",
+                "geometry": name,
+                "n_bodies": nbodies,
+                "method": method,
+                "probe": tag,
+                "x": float(px),
+                "y": float(py),
+                "rho": RHO_IRS,
+                "A_vbm": float(a_vbm),
+                "A_irs": float(a_irs),
+                "rel_diff": float(rel),
+                "t_vbm_us": float(t_vbm * 1e6),
+                "t_irs_s": float(t_irs),
+            }
+        )
+        print(
+            "  IRS %-11s A_vbm=%.6f  A_irs=%.6f  rel=%.2e  "
+            "(vbm %.1f us, irs %.1f s)"
+            % (tag, a_vbm, a_irs, rel, t_vbm * 1e6, t_irs),
+            flush=True,
+        )
     return rows
 
 
@@ -465,15 +521,23 @@ def drive(args):
         blocks = [b for b in blocks if b[2] != "irs"]
     rows, crashes = [], []
     print("driving %d blocks" % len(blocks), flush=True)
-    for (name, method, leg) in blocks:
+    for name, method, leg in blocks:
         tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         tmp.close()
-        cmd = [sys.executable, os.path.abspath(__file__),
-               "--block", "%s/%s/%s" % (name, method, leg),
-               "--out", tmp.name,
-               "--n-per-bin", str(args.n_per_bin),
-               "--bin-budget", str(args.bin_budget),
-               "--seed", str(args.seed)]
+        cmd = [
+            sys.executable,
+            os.path.abspath(__file__),
+            "--block",
+            "%s/%s/%s" % (name, method, leg),
+            "--out",
+            tmp.name,
+            "--n-per-bin",
+            str(args.n_per_bin),
+            "--bin-budget",
+            str(args.bin_budget),
+            "--seed",
+            str(args.seed),
+        ]
         if args.quick:
             cmd.append("--quick")
         print("\n=== %s / %s / %s ===" % (name, method, leg), flush=True)
@@ -487,15 +551,28 @@ def drive(args):
                 with open(tmp.name) as fh:
                     rows.extend(json.load(fh)["rows"])
             except Exception as exc:  # noqa: BLE001
-                crashes.append({"geometry": name, "method": method,
-                                "leg": leg, "failure": "unreadable output: %r"
-                                % (exc,)})
+                crashes.append(
+                    {
+                        "geometry": name,
+                        "method": method,
+                        "leg": leg,
+                        "failure": "unreadable output: %r" % (exc,),
+                    }
+                )
         else:
-            how = ("TIMEOUT after %gs" % args.block_timeout if rc is None
-                   else ("SIGNAL %d (crash)" % -rc if rc < 0
-                         else "exit %d" % rc))
-            crashes.append({"geometry": name, "method": method, "leg": leg,
-                            "failure": how})
+            how = (
+                "TIMEOUT after %gs" % args.block_timeout
+                if rc is None
+                else ("SIGNAL %d (crash)" % -rc if rc < 0 else "exit %d" % rc)
+            )
+            crashes.append(
+                {
+                    "geometry": name,
+                    "method": method,
+                    "leg": leg,
+                    "failure": how,
+                }
+            )
             print("  *** BLOCK FAILED: %s ***" % how, flush=True)
         try:
             os.unlink(tmp.name)
@@ -506,20 +583,32 @@ def drive(args):
 
 def summarize(rows, crashes):
     timing = [r for r in rows if r.get("leg") == "timing"]
-    print("\n=== COST vs N at the SHIPPED dispatch, median us/call ===",
-          flush=True)
+    print(
+        "\n=== COST vs N at the SHIPPED dispatch, median us/call ===",
+        flush=True,
+    )
     shipped_of = {2: "BinaryMag2", 3: "Multipoly", 4: "Nopoly"}
-    print("%-22s %-11s %s" % ("geometry", "method",
-                              "  ".join("%9s" % b for b in BIN_LABELS)),
-          flush=True)
+    print(
+        "%-22s %-11s %s"
+        % ("geometry", "method", "  ".join("%9s" % b for b in BIN_LABELS)),
+        flush=True,
+    )
     for name, nbodies, _b, _sq in GEOMETRIES:
         meth = shipped_of.get(nbodies, "Multipoly")
         cells = []
         for label in BIN_LABELS:
-            hit = [r for r in timing if r["geometry"] == name
-                   and r["method"] == meth and r["bin_rho"] == label]
-            cells.append("%9.1f" % hit[0]["median_us"]
-                         if hit and "median_us" in hit[0] else "%9s" % "-")
+            hit = [
+                r
+                for r in timing
+                if r["geometry"] == name
+                and r["method"] == meth
+                and r["bin_rho"] == label
+            ]
+            cells.append(
+                "%9.1f" % hit[0]["median_us"]
+                if hit and "median_us" in hit[0]
+                else "%9s" % "-"
+            )
         print("%-22s %-11s %s" % (name, meth, "  ".join(cells)), flush=True)
 
     print("\n=== METHOD A/B at N>=3, median us/call ===", flush=True)
@@ -529,37 +618,61 @@ def summarize(rows, crashes):
         for mth in METHODS:
             cells = []
             for label in BIN_LABELS:
-                hit = [r for r in timing if r["geometry"] == name
-                       and r["method"] == mth and r["bin_rho"] == label]
-                cells.append("%9.1f" % hit[0]["median_us"]
-                             if hit and "median_us" in hit[0]
-                             else "%9s" % "-")
+                hit = [
+                    r
+                    for r in timing
+                    if r["geometry"] == name
+                    and r["method"] == mth
+                    and r["bin_rho"] == label
+                ]
+                cells.append(
+                    "%9.1f" % hit[0]["median_us"]
+                    if hit and "median_us" in hit[0]
+                    else "%9s" % "-"
+                )
             print("%-22s %-11s %s" % (name, mth, "  ".join(cells)), flush=True)
 
     if crashes:
         print("\n=== BLOCKS THAT FAILED (these are findings) ===", flush=True)
         for c in crashes:
-            print("  %-22s %-11s %-9s %s" % (c["geometry"], c["method"],
-                                             c["leg"], c["failure"]),
-                  flush=True)
+            print(
+                "  %-22s %-11s %-9s %s"
+                % (c["geometry"], c["method"], c["leg"], c["failure"]),
+                flush=True,
+            )
     else:
         print("\nno blocks failed.", flush=True)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--quick", action="store_true",
-                    help="small n_per_bin and no IRS leg (smoke test)")
-    ap.add_argument("--drive", action="store_true",
-                    help="run every block in its own subprocess (the real run)")
-    ap.add_argument("--block", default=None,
-                    help="run ONE block: GEOMETRY/METHOD/LEG")
+    ap.add_argument(
+        "--quick",
+        action="store_true",
+        help="small n_per_bin and no IRS leg (smoke test)",
+    )
+    ap.add_argument(
+        "--drive",
+        action="store_true",
+        help="run every block in its own subprocess (the real run)",
+    )
+    ap.add_argument(
+        "--block", default=None, help="run ONE block: GEOMETRY/METHOD/LEG"
+    )
     ap.add_argument("--out", default="nlens_vbm_bench.json")
     ap.add_argument("--n-per-bin", type=int, default=120)
-    ap.add_argument("--bin-budget", type=float, default=60.0,
-                    help="seconds per (geometry, method, bin) timing block")
-    ap.add_argument("--block-timeout", type=float, default=3600.0,
-                    help="seconds before the driver kills one block")
+    ap.add_argument(
+        "--bin-budget",
+        type=float,
+        default=60.0,
+        help="seconds per (geometry, method, bin) timing block",
+    )
+    ap.add_argument(
+        "--block-timeout",
+        type=float,
+        default=3600.0,
+        help="seconds before the driver kills one block",
+    )
     ap.add_argument("--seed", type=int, default=20260827)
     args = ap.parse_args()
 
@@ -568,12 +681,17 @@ def main():
         args.bin_budget = min(args.bin_budget, 5.0)
 
     meta = {
-        "tol_shipped": TOL_SHIPPED, "tol_reference": TOL_REFERENCE,
-        "reltol": RELTOL_SHIPPED, "rho_production": RHO_PROD,
-        "rho_irs": RHO_IRS, "n_per_bin": args.n_per_bin,
-        "bin_budget_s": args.bin_budget, "bin_labels": BIN_LABELS,
+        "tol_shipped": TOL_SHIPPED,
+        "tol_reference": TOL_REFERENCE,
+        "reltol": RELTOL_SHIPPED,
+        "rho_production": RHO_PROD,
+        "rho_irs": RHO_IRS,
+        "n_per_bin": args.n_per_bin,
+        "bin_budget_s": args.bin_budget,
+        "bin_labels": BIN_LABELS,
         "bin_edges_in_rho": [float(e) for e in BIN_EDGES],
-        "seed": args.seed, "vbm_file": VBMicrolensing.__file__,
+        "seed": args.seed,
+        "vbm_file": VBMicrolensing.__file__,
     }
 
     if args.block:
@@ -585,16 +703,23 @@ def main():
         return
 
     if not args.drive:
-        print("Nothing to do: pass --drive for the full sweep, or --block "
-              "GEOMETRY/METHOD/LEG for one measurement.", flush=True)
+        print(
+            "Nothing to do: pass --drive for the full sweep, or --block "
+            "GEOMETRY/METHOD/LEG for one measurement.",
+            flush=True,
+        )
         return
 
     rows, crashes = drive(args)
     with open(args.out, "w") as fh:
-        json.dump({"meta": meta, "rows": rows, "crashes": crashes}, fh,
-                  indent=1)
-    print("\nwrote %s (%d rows, %d failed blocks)"
-          % (args.out, len(rows), len(crashes)), flush=True)
+        json.dump(
+            {"meta": meta, "rows": rows, "crashes": crashes}, fh, indent=1
+        )
+    print(
+        "\nwrote %s (%d rows, %d failed blocks)"
+        % (args.out, len(rows), len(crashes)),
+        flush=True,
+    )
     summarize(rows, crashes)
 
 

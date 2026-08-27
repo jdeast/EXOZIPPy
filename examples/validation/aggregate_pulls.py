@@ -130,16 +130,28 @@ def collect(rows, require_converged):
 
 
 def report(cells, split):
-    print("%-13s %-26s %-9s %4s  %-16s %-16s  %-8s %-8s"
-          % ("pipeline", "parameter", "cell", "N", "pull mean +/- sem",
-             "pull width +/- er", "median", "nMAD"))
+    print(
+        "%-13s %-26s %-9s %4s  %-16s %-16s  %-8s %-8s"
+        % (
+            "pipeline",
+            "parameter",
+            "cell",
+            "N",
+            "pull mean +/- sem",
+            "pull width +/- er",
+            "median",
+            "nMAD",
+        )
+    )
     print("-" * 118)
     verdicts = []
     for (pipe, param), entries in sorted(cells.items()):
         if split == "snr":
             groups = defaultdict(list)
             for pull, snr, nep, f in entries:
-                groups["snr=%g" % snr if snr is not None else "snr=?"].append(pull)
+                groups["snr=%g" % snr if snr is not None else "snr=?"].append(
+                    pull
+                )
         elif split == "epochs":
             groups = defaultdict(list)
             for pull, snr, nep, f in entries:
@@ -152,32 +164,62 @@ def report(cells, split):
             sd, sderr = _sd(pulls)
             med = _median(pulls)
             nmad = _nmad(pulls)
-            print("%-13s %-26s %-9s %4d  %-16s %-16s  %-8s %-8s" % (
-                pipe, param, cell, len(pulls),
-                "%+.3f +/- %.3f" % (m, sem) if sem is not None
-                else ("%+.3f +/- ?" % m if m is not None else "-"),
-                "%.3f +/- %.3f" % (sd, sderr) if sd is not None else "-",
-                "%+.3f" % med if med is not None else "-",
-                "%.3f" % nmad if nmad is not None else "-"))
+            print(
+                "%-13s %-26s %-9s %4d  %-16s %-16s  %-8s %-8s"
+                % (
+                    pipe,
+                    param,
+                    cell,
+                    len(pulls),
+                    "%+.3f +/- %.3f" % (m, sem)
+                    if sem is not None
+                    else ("%+.3f +/- ?" % m if m is not None else "-"),
+                    "%.3f +/- %.3f" % (sd, sderr) if sd is not None else "-",
+                    "%+.3f" % med if med is not None else "-",
+                    "%.3f" % nmad if nmad is not None else "-",
+                )
+            )
             if split is None and sem is not None and sderr is not None:
                 # Bias: is the mean consistent with 0?  Calibration: is the
                 # width consistent with 1?  Both in units of their own error.
-                verdicts.append((pipe, param, len(pulls), m / sem,
-                                 (sd - 1.0) / sderr))
+                verdicts.append(
+                    (pipe, param, len(pulls), m / sem, (sd - 1.0) / sderr)
+                )
     if verdicts:
-        print("\n%-13s %-26s %4s %12s %14s   %s"
-              % ("pipeline", "parameter", "N", "bias (sigma)",
-                 "width-1 (sigma)", "reading"))
+        print(
+            "\n%-13s %-26s %4s %12s %14s   %s"
+            % (
+                "pipeline",
+                "parameter",
+                "N",
+                "bias (sigma)",
+                "width-1 (sigma)",
+                "reading",
+            )
+        )
         print("-" * 104)
         for pipe, param, n, zb, zw in verdicts:
             notes = []
-            notes.append("BIASED" if abs(zb) > 3 else
-                         "bias?" if abs(zb) > 2 else "unbiased")
-            notes.append("UNDER-DISPERSED (errors too small)" if zw > 3 else
-                         "OVER-DISPERSED (errors too big)" if zw < -3 else
-                         "width?" if abs(zw) > 2 else "calibrated")
-            print("%-13s %-26s %4d %12.2f %14.2f   %s"
-                  % (pipe, param, n, zb, zw, "; ".join(notes)))
+            notes.append(
+                "BIASED"
+                if abs(zb) > 3
+                else "bias?"
+                if abs(zb) > 2
+                else "unbiased"
+            )
+            notes.append(
+                "UNDER-DISPERSED (errors too small)"
+                if zw > 3
+                else "OVER-DISPERSED (errors too big)"
+                if zw < -3
+                else "width?"
+                if abs(zw) > 2
+                else "calibrated"
+            )
+            print(
+                "%-13s %-26s %4d %12.2f %14.2f   %s"
+                % (pipe, param, n, zb, zw, "; ".join(notes))
+            )
 
 
 def main():
@@ -186,8 +228,12 @@ def main():
     ap.add_argument("--pipeline", default=None)
     ap.add_argument("--split", choices=["snr", "epochs"], default=None)
     ap.add_argument("--require-converged", action="store_true")
-    ap.add_argument("--outliers", type=float, default=3.0,
-                    help="list any row whose |pull| exceeds this")
+    ap.add_argument(
+        "--outliers",
+        type=float,
+        default=3.0,
+        help="list any row whose |pull| exceeds this",
+    )
     args = ap.parse_args()
 
     rows = load_rows(args.rows, args.pipeline)
@@ -201,8 +247,10 @@ def main():
 
     cells, flagged, dropped = collect(rows, args.require_converged)
     if args.require_converged:
-        print("dropped %d non-converged check(s) "
-              "(rhat > %.2f or ess < %.0f)\n" % (dropped, RHAT_MAX, ESS_MIN))
+        print(
+            "dropped %d non-converged check(s) "
+            "(rhat > %.2f or ess < %.0f)\n" % (dropped, RHAT_MAX, ESS_MIN)
+        )
     report(cells, args.split)
 
     big = []
@@ -218,8 +266,7 @@ def main():
     if flagged:
         print("\n=== convergence-flagged checks (%d) ===" % len(flagged))
         for fname, key, why, pull in flagged[:40]:
-            print("  %-40s %-26s %-22s pull=%+.2f"
-                  % (fname, key, why, pull))
+            print("  %-40s %-26s %-22s pull=%+.2f" % (fname, key, why, pull))
         if len(flagged) > 40:
             print("  ... and %d more" % (len(flagged) - 40))
 
