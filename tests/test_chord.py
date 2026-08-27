@@ -23,6 +23,7 @@ parameterization, because compiling a transit likelihood is what costs.
 """
 
 import numpy as np
+import pytensor
 import pytensor.tensor as pt
 import pytest
 
@@ -229,6 +230,89 @@ def test_the_inversion_and_the_jacobian_stay_finite(chord, p):
 
     assert np.isfinite(cosi) and cosi >= 0.0
     assert np.isfinite(jac)
+
+
+@pytest.mark.parametrize(
+    "chord,p",
+    [
+        (2.5, 0.1),  # deep in the forbidden region
+        (1.5, 0.076),  # the measured case from review 1.8.5
+        (1.1001, 0.1),  # a hair past the grazing limit
+        (1.1, 0.1),  # exactly the grazing limit: radicand is exactly 0
+        (0.5, 0.1),  # a real transiting geometry, for contrast
+    ],
+)
+def test_the_gradient_stays_finite_too(chord, p):
+    """
+    Given a chord anywhere in its bounds, including past the grazing limit,
+    When the GRADIENT of cos i and of the Jacobian w.r.t. the chord is taken,
+    Then both are finite.
+
+    This is review 1.8.5, and it is the sibling of the test above rather than
+    a new subject, because the test above is what let the bug ship: its
+    docstring promises "it must be impossible to draw a NaN likelihood", the
+    VALUES it checks were finite throughout, and the gradient was NaN across
+    ~46% of the chord's sampled support the whole time.
+
+    The mechanism: flooring the radicand at exactly 0.0 leaves
+    ``pt.maximum``'s zero gradient on the clamped side multiplying
+    ``sqrt'(0) = inf``. A finite value with a NaN derivative is the shape of
+    this whole failure class, and one NaN poisons the entire gradient vector,
+    so the soft bound in ``Orbit._add_chord_terms`` had nothing to push
+    through -- chains sat at the denormal minimum step size for a full run.
+    """
+    ct = pt.dscalar("chord")
+    cosi = physics.calc_cosi_from_chord(ct, p, 10.0, 0.0, 0.0, 1.0)
+    jac = physics.chord_log_jacobian(ct, p, 10.0, 0.0, 0.0)
+    grads = pytensor.function(
+        [ct], [pytensor.grad(pt.sum(cosi), ct), pytensor.grad(pt.sum(jac), ct)]
+    )(chord)
+
+    assert np.isfinite(grads[0]), f"d cosi / d chord is {grads[0]}"
+    assert np.isfinite(grads[1]), f"d logJ / d chord is {grads[1]}"
+
+
+def test_the_floor_is_positive_and_inert_where_geometry_exists():
+    """
+    Given the chord radicand's floor,
+    When it is compared against zero and applied to transiting geometries,
+    Then it is strictly positive, and it changes no real value.
+
+    Both halves are the fix. Strictly positive is what makes the gradient
+    finite (review 1.8.5); inert is what makes it safe to change -- the floor
+    must not shift a single geometry a fit could actually observe, so a
+    baseline cannot move.
+
+    The VALUE also matters and is pinned here: the review proposed 1e-12,
+    which leaves b = 1e-6 and lifts it ABOVE the independent
+    ``log(pt.maximum(b, 1e-12))`` floor inside ``chord_log_jacobian``, moving
+    that term by 13.8 nats in the forbidden region. 1e-30 keeps b under that
+    floor, so the Jacobian's value is untouched and only its gradient changes.
+    """
+    assert physics.CHORD_RADICAND_FLOOR > 0.0
+    assert (
+        physics.CHORD_RADICAND_FLOOR**0.5 < 1e-12
+    )  # stays under the log floor
+
+    p = 0.076
+    for chord in (0.0, 0.25, 0.5, 1.0, 1.0759):
+        floored = _f(
+            pt.sqrt(
+                pt.maximum(
+                    physics.chord_radicand(pt.as_tensor_variable(chord), p),
+                    physics.CHORD_RADICAND_FLOOR,
+                )
+            )
+        )[0]
+        unfloored = _f(
+            pt.sqrt(
+                pt.maximum(
+                    physics.chord_radicand(pt.as_tensor_variable(chord), p),
+                    0.0,
+                )
+            )
+        )[0]
+        assert floored == unfloored, f"the floor moved chord={chord}"
 
 
 def test_the_radicand_is_reported_unfloored_for_the_soft_bound():

@@ -1574,10 +1574,15 @@ class Orbit(Component):
         finite-difference check of the derivative passes under either sign.
 
         THE SHIELD is the soft half of the pair.  `chord_radicand` is floored
-        inside `calc_cosi_from_chord`'s sqrt so a NaN is unbuildable, which
-        leaves that whole region flat -- so the penalty here reads the
-        UNFLOORED radicand, where it has a gradient pointing back to a chord
-        that a transit could actually produce.  Same argument, and the same
+        inside `calc_cosi_from_chord`'s sqrt -- at a STRICTLY POSITIVE floor,
+        `physics.CHORD_RADICAND_FLOOR`, and that qualifier is the whole of
+        review 1.8.5: with the floor at 0.0 the shield produced a NaN gradient
+        instead of preventing one, and because one NaN poisons the whole
+        gradient VECTOR, the penalty below could never act.  The shield being
+        correct is a PRECONDITION for this potential doing anything at all.
+        The floor leaves that whole region flat -- so the penalty here reads
+        the UNFLOORED radicand, where it has a gradient pointing back to a
+        chord that a transit could actually produce.  Same argument, and the same
         helper, as the eccentricity bound and the V_c/V_e real-root bound.
         """
         idx = self._chord_indices()

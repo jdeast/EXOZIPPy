@@ -80,6 +80,34 @@ MAX_ECC = 0.9999
 ECC_FLOOR = 1e-30
 
 
+# Floor on the chord's radicand (review 1.8.5) -- ECC_FLOOR's sibling, and the
+# SAME BUG one function over.  1.8.2's comment above states the house rule as
+# "floor the radicand, never the result", and the chord code followed that in
+# letter while flooring the radicand AT ZERO -- which reintroduces the exact
+# product the sentence names, because `pt.maximum(x, 0.0)` on the clamped side
+# has gradient zero and `sqrt'(0)` is infinite.  So the rule needs its second
+# half, and this constant is it: THE FLOOR MUST BE STRICTLY POSITIVE.
+#
+# Measured cost of the old 0.0 (2026-08-27, 7.13.1's transit leg): `d cos i /
+# d chord` is NaN for every chord past `1 + p`, which is ~46% of the sampled
+# support, and one NaN poisons the whole gradient VECTOR -- so the soft bound
+# in `Orbit._add_chord_terms`, which exists precisely to push the chain back,
+# had no finite total gradient to act through.  Two of four chains sat at the
+# denormal minimum step size for 2000 draws without moving; `planet.b` came
+# back ESS 8.0 / Rhat 1.43 while `orbit.period` in the same fit had ESS 3414.
+# That is the failure's signature: the run completes, most parameters look
+# healthy, and only the inclination-dependent ones are destroyed.
+#
+# WHY 1e-30 AND NOT THE 1e-12 THE REVIEW SUGGESTED.  Any positive floor fixes
+# the gradient, but 1e-12 leaves b = 1e-6, which rises ABOVE the independent
+# `log(pt.maximum(b, 1e-12))` floor inside `chord_log_jacobian` and moves that
+# term by 13.8 nats in the forbidden region -- a silent change to the penalty
+# landscape.  1e-30 leaves b = 1e-15, still under that floor, so the Jacobian's
+# VALUE is unchanged and only its gradient becomes finite.  Verified inert for
+# real geometry: bit-identical to the 0.0 floor at chord = 0, 0.5, 1.0, 1.0759.
+CHORD_RADICAND_FLOOR = 1e-30
+
+
 #: Field-by-field meaning documented in `state_vector_terms`.
 StateVectorTerms = namedtuple(
     "StateVectorTerms",
@@ -677,9 +705,11 @@ def tc_from_tp(tp, ecc, omega, period):
 # b >= 0 give exactly one geometry, and the sign of cos i is not a root choice
 # at all but the i <-> 180 - i convention the orbit already carries (i180).
 # What IS shared is the shield discipline -- the radicand is floored inside
-# the sqrt so a NaN is unbuildable, while the UNFLOORED radicand drives the
-# soft bound in Orbit._add_chord_terms, because the floored one is flat over
-# the whole non-transiting region and a flat penalty has no gradient.
+# the sqrt, at a STRICTLY POSITIVE floor (CHORD_RADICAND_FLOOR; flooring at
+# 0.0 is what made a NaN not merely buildable but guaranteed, review 1.8.5),
+# while the UNFLOORED radicand drives the soft bound in
+# Orbit._add_chord_terms, because the floored one is flat over the whole
+# non-transiting region and a flat penalty has no gradient.
 # ----------------------------------------------------------------------
 
 
@@ -714,12 +744,15 @@ def calc_cosi_from_chord(chord, p, ar, ecc, esinw, chord_sign):
     """cos i from the sampled chord (the shielded inverse of `calc_chord`).
 
     `b = sqrt((1 + p)^2 - chord^2)` and `cos i = b / kappa`.  The radicand is
-    floored at zero -- the HARD shield -- so a chord past `1 + p` gives b = 0
-    (a central transit) rather than NaN, and the soft bound supplies the
-    restoring force.  Flooring the RADICAND and not the result is the house
-    rule (calc_theta_E, calc_jitter, _vcve_quadratic): `sqrt'(0)` is infinite,
-    and `pt.maximum`'s zero gradient on the clamped side would turn that into
-    `0 * inf = NaN`.
+    floored at `CHORD_RADICAND_FLOOR` -- the HARD shield -- so a chord past
+    `1 + p` gives b = 1e-15 (a central transit, to fifteen digits) rather than
+    NaN, and the soft bound supplies the restoring force.  Flooring the
+    RADICAND and not the result is the house rule (calc_theta_E, calc_jitter,
+    _vcve_quadratic), and the floor must be STRICTLY POSITIVE: `sqrt'(0)` is
+    infinite, and `pt.maximum`'s zero gradient on the clamped side turns that
+    into `0 * inf = NaN`.  This line floored at 0.0 until 2026-08-27 and did
+    exactly that across ~46% of the chord's support -- see
+    CHORD_RADICAND_FLOOR for the measured consequence (review 1.8.5).
 
     `chord_sign` is +1 or -1, injected per orbit by `Orbit.add_parameter`.
     The chord is even in cos i -- a transit at i and at 180 - i are the same
@@ -730,7 +763,7 @@ def calc_cosi_from_chord(chord, p, ar, ecc, esinw, chord_sign):
     discrete label, and sampling it would be exactly the piecewise-constant
     coordinate the V_c/V_e half went out of its way to avoid.
     """
-    b = pt.sqrt(pt.maximum(chord_radicand(chord, p), 0.0))
+    b = pt.sqrt(pt.maximum(chord_radicand(chord, p), CHORD_RADICAND_FLOOR))
     return chord_sign * b / pt.maximum(chord_kappa(ar, ecc, esinw), 1e-12)
 
 
@@ -742,11 +775,15 @@ def calc_chord_from_cosi(cosi, p, ar, ecc, esinw):
     orbit that does not sample it, so both parameterizations produce the same
     table rows and a params file survives flipping `fitchord`.  `|cos i|`
     because the chord is even in it, and the radicand is floored for the same
-    reason as above: a non-transiting geometry (b > 1 + p) reports chord = 0,
-    which is what a reader should see, rather than NaN.
+    reason as above: a non-transiting geometry (b > 1 + p) reports chord ~ 0,
+    which is what a reader should see, rather than NaN.  Floored positively
+    like its inverse even though this is a reporting path: the two must not
+    drift, and a reported Deterministic is one refactor away from a gradient.
     """
     b = chord_kappa(ar, ecc, esinw) * pt.abs(cosi)
-    return pt.sqrt(pt.maximum(pt.sqr(1.0 + p) - pt.sqr(b), 0.0))
+    return pt.sqrt(
+        pt.maximum(pt.sqr(1.0 + p) - pt.sqr(b), CHORD_RADICAND_FLOOR)
+    )
 
 
 def chord_log_jacobian(chord, p, ar, ecc, esinw):
@@ -773,7 +810,7 @@ def chord_log_jacobian(chord, p, ar, ecc, esinw):
     wrong one.
     """
     kappa = chord_kappa(ar, ecc, esinw)
-    b = pt.sqrt(pt.maximum(chord_radicand(chord, p), 0.0))
+    b = pt.sqrt(pt.maximum(chord_radicand(chord, p), CHORD_RADICAND_FLOOR))
     return (
         pt.log(pt.maximum(kappa, 1e-12))
         + pt.log(pt.maximum(b, 1e-12))
