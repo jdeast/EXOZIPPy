@@ -61,6 +61,16 @@ K_VEL_CONVERSION = (const.au / u.yr).to(u.km / u.s).value
 # real callers and spells something np.pi does not.)
 TWOPI = 2.0 * np.pi
 
+# The Julian year, the "yr" of every microlensing and astrometry rate in the
+# tree (mu_rel [mas/yr], t_E's mas/yr -> mas/day conversion, ds_dt/dalpha_dt
+# [1/yr, rad/yr], astrometric proper motions).  ONE definition (review
+# 4.2.6): the four sites that used to each write the literal 365.25 --
+# lens._earth_vperp_en, mulensing physics.calc_t_E, the engine's t_E
+# relation, and astrometryinstrument -- must stay numerically identical, and
+# a fifth literal that drifted (365.2422, 365.24219...) would silently move
+# t_E by parts in 1e4.
+DAYS_PER_YEAR = 365.25
+
 
 # --- 3. STATISTICAL CONSTANTS (For the Back-End) ---
 # Used for 68% confidence intervals in tables and corner plots

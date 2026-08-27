@@ -1,7 +1,7 @@
 import numpy as np
 import pytensor.tensor as pt
 
-from ...constants import KAPPA, RSUN_TO_AU
+from ...constants import DAYS_PER_YEAR, KAPPA, RSUN_TO_AU
 from ...physics_registry import register_physics
 
 # Positive floors for the two quantities whose logarithm the event-rate prior
@@ -96,7 +96,7 @@ def calc_mu_dec_rel_geo(mu_dec_rel, pi_rel, earth_vperp_n):
 @register_physics
 def calc_t_E(theta_E, mu_rel_mag):
     # Convert mu_rel_mag from mas/yr to mas/day, then divide theta_E
-    return theta_E / (mu_rel_mag / 365.25)
+    return theta_E / (mu_rel_mag / DAYS_PER_YEAR)
 
 
 @register_physics

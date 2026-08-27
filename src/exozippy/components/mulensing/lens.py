@@ -12,6 +12,7 @@ from exozippy.config import (
     RANK_MULENS_LENS_DISTANCE,
     RANK_MULENS_SOURCE_DISTANCE,
 )
+from exozippy.constants import DAYS_PER_YEAR
 from exozippy.corner_utils import (
     collect_parameter_corner_samples,
     save_corner_plot,
@@ -1338,7 +1339,7 @@ class Lens(Component):
                 "velocity term dropped)."
             )
             return 0.0, 0.0
-        v = np.asarray(vel, dtype=float) * 365.25  # AU/day -> AU/yr
+        v = np.asarray(vel, dtype=float) * DAYS_PER_YEAR  # AU/day -> AU/yr
         ra, dec = radec
         # The basis itself, not observer_sky_offset: what is projected here
         # is the Earth's VELOCITY, not its position.
