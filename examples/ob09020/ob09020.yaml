@@ -22,12 +22,14 @@ logger_level: INFO
 #   star.1 = L2      lens companion ~0.23-0.24 Msun -- unseen
 #   star.2 = Source  K giant in the bulge, I_s = 16.43, (V-I)_s = 1.93
 #
-# The two halves of the fit are coupled TODAY only through the masses:
-# lens.q is derived from star.L1.mass / star.L2.mass, and the orbit derives
-# m_total / a / K from the same two mass nodes, so the RV mass function and
-# the light curve's mass ratio are automatically consistent.  What is NOT
-# yet coupled is the lens ORBITAL MOTION -- s and alpha are static here.
-# See README.md ("Orbital motion of the binary lens") for the design.
+# The two halves of the fit are FULLY coupled: lens.q is derived from
+# star.L1.mass / star.L2.mass, the orbit derives m_total / a / K from the
+# same two mass nodes, and -- with orbital_motion: keplerian on the lens
+# block -- the SAME orbit drives the binary geometry s(t)/alpha(t) in the
+# magnification with no new free parameters (conventions.md C24; review
+# 8.6.8 5b).  That is Skowron+2011's proposed over-constraint test: the RVs
+# pin P/tp/e/omega_*/K, the light curve pins the geometry, and bigomega and
+# sign(cos i) -- which RVs cannot see -- become measured quantities.
 
 star:
   - name: "L1"
@@ -43,6 +45,12 @@ lens:
     # Skowron+2011's t_0,kep = t_0 anchors the geocentric frame their
     # pi_E and orbital-velocity parameters are quoted in.
     t0_par: 2454917.52
+    # THE POINT OF THIS EXAMPLE (review 8.6.8 5a/5b): the RV-constrained
+    # orbit L drives s(t)/alpha(t) with NO new free parameters --
+    # conventions.md C24's keplerian mode.  The light curve then measures
+    # bigomega and sign(cos i), which the RVs cannot (see the orbit block).
+    orbital_motion: keplerian
+    orbit: "L"
     # Every trajectory parameter is seeded from the published solution, so
     # the relaxation engine can derive all of them and MMEXOFAST is not
     # needed.  It is also not WANTED: phot.dat is survey-only photometry
@@ -53,14 +61,11 @@ orbit:
   - name: "L"
     primary:   ["L1"]          # the RV star
     companion: ["L2"]
-    # i and 180 - i are a reflection through the sky plane: RVs alone cannot
-    # tell them apart, so cos i's default support is [0, 1] (the i < 90
-    # branch).  Yee+2016 report i = 129.4 deg -- a number only the lens
-    # ORBITAL MOTION in the light curve could produce -- so select that
-    # branch explicitly, which also widens cos i to [-1, 1].
-    # When orbital motion is wired into the trajectory (README), the sign
-    # becomes measured and this key should be dropped so the fit can choose.
-    i180: true
+    # No i180 hand-holding anymore: with orbital_motion: keplerian the lens
+    # geometry consumes this orbit, the sky rotation sense of the binary
+    # axis measures sign(cos i), and the orbit component itself widens
+    # cos i to [-1, 1] and samples bigomega (Orbit._lens_keplerian_orbits).
+    # The verified EXOZIPPy-frame branch is seeded in the params file.
 
 galacticmodel:
   - name: "OB09020"
