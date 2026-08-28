@@ -1,12 +1,12 @@
 # Outputs: the modeling draft, LaTeX macros, and plots
 
 `src/exozippy/outputs/` writes the tables, the modeling-draft `.tex`, the results CSV and
-the mode reports; `src/exozippy/plotspec.py` + `src/exozippy/plotrender.py` describe and
+the mode reports; `src/exozippy/chart.py` + `src/exozippy/plotrender.py` describe and
 render every plot.
 
 Read this before adding a sentence, a table column, a LaTeX macro or a plot. Related:
 `src/exozippy/components/parameter.md` (which emits the value and prior macros this layer cites),
-`src/exozippy/gui/gui.md` (the second renderer of the same plot specs).
+`src/exozippy/gui/gui.md` (the second renderer of the same charts).
 
 ## The modeling-draft scaffold (`outputs/prose.py`, `outputs/modeling.py`)
 
@@ -18,7 +18,7 @@ Every fit emits `<prefix>_paper.tex` -- a **compilable** aastex draft whose pros
 - **Config facts may be interpolated, fitted values may not** (posterior numbers belong to the table, whose `\ez...` macros are the mechanism for citing them in prose). The wrap-up convergence/burn-in numbers are run diagnostics, not fitted values, and are allowed. `join_names`/`plural` (prose.py) aggregate per-instance facts into one sentence; instance names are data, `latex_escape` them.
 - **The output directory is self-contained.** `aastex701.cls` + `aasjournalv7.bst` (AASTeX 7.0.1, LPPL 1.3c -- provenance/hashes in `src/exozippy/latex/README.md`) are copied alongside, so `pdflatex && bibtex && pdflatex && pdflatex` works on a bare TeX Live; that copy is also the ONE vendored aastex (the test fixture copy is gone). run.py runs that cycle at wrap-up (`modeling: {compile: false}` opts out; the block is in `evaluator._NON_STRUCTURAL_CONFIG_KEYS`, so toggling it cannot stale a trace). Missing TeX or a failed compile is a warning naming the .log, **never a failed fit**.
 - **The table file is a fragment now.** `build_latex_output` writes `<prefix>_table.tex` (was `_template.tex`) as a bare deluxetable; modeling.tex is the ONE standalone wrapper (`\input`s `<prefix>_definitions` and the table -- `\input`, not `\include`). The old standalone template ended with `\bibliography{References}` pointing at a file that never existed.
-- **Figures build themselves from PlotSpecs**: `meta["caption"]` (LaTeX, verbatim -- the third consumer of the plot-spec vocabulary, documented in plotrender.py and plotly-adapter.ts) pairs with the posterior PDF `{prefix}_mcmc_{file_tag}.pdf`; only PDFs that exist are included, and a spec without a caption gets a generic one built from its escaped title.
+- **Figures build themselves from Charts**: `meta["caption"]` (LaTeX, verbatim -- the third consumer of the chart vocabulary, documented in plotrender.py and plotly-adapter.ts) pairs with the posterior PDF `{prefix}_mcmc_{file_tag}.pdf`; only PDFs that exist are included, and a spec without a caption gets a generic one built from its escaped title.
 - `system.prose.add_software(name)` feeds the `\software{...}` line (core stack added by the writer); sections are a fixed vocabulary (`SECTION_ORDER`) and an unknown section **raises** -- a silently dropped sentence is a modeling choice the draft never mentions.
 
 Tests: `tests/test_prose.py` (collector, xref, writer, compile-with-bibliography e2e, ob08092 topology integration), plus the aastex compile leg of `tests/test_latex_macro_xref.py`, which now compiles the fragment inside the real wrapper.
@@ -29,7 +29,7 @@ Tests: `tests/test_prose.py` (collector, xref, writer, compile-with-bibliography
 
 ## Plotting: one description, two renderers (`plot_data` + `plotrender`)
 
-Each plot is described ONCE, as the `PlotSpec` list returned by `Component.plot_data(system, point=None)` (see `src/exozippy/plotspec.py`). Two renderers consume the same specs: `src/exozippy/plotrender.py` draws them with matplotlib for the saved PDFs (`Component.plot()` is a one-liner calling `plotrender.plot_via_specs`, which handles the points-list spaghetti: data/decorations from `points[0]`, later draws overlay their model traces; the model alpha is per figure, not per draw -- 0.8 for a single draw, 0.1 for every model trace including `points[0]`'s once there is more than one), and the GUI draws them with plotly (`gui/frontend/src/plotly-adapter.ts`). The two renderers share a meta/style vocabulary (documented in plotrender.py's module docstring: `file_tag` = the PDF filename tag, `figsize`, `hline_y`, `x/y_range`, `x/y_log`, `x/y_inverted`, `aspect_equal`; trace style: `series_index` fixed categorical color, `color`/`marker`/`lw`/`legend`) -- extend BOTH when adding a key. Never hand-draw a data plot in a component again; genuinely bespoke diagnostics (astrometry's `plot_sky`, lens caustics, corner plots) may stay matplotlib-only.
+Each plot is described ONCE, as the `Chart` list returned by `Component.plot_data(system, point=None)` (see `src/exozippy/chart.py`). Two renderers consume the same specs: `src/exozippy/plotrender.py` draws them with matplotlib for the saved PDFs (`Component.plot()` is a one-liner calling `plotrender.plot_via_specs`, which handles the points-list spaghetti: data/decorations from `points[0]`, later draws overlay their model traces; the model alpha is per figure, not per draw -- 0.8 for a single draw, 0.1 for every model trace including `points[0]`'s once there is more than one), and the GUI draws them with plotly (`gui/frontend/src/plotly-adapter.ts`). The two renderers share a meta/style vocabulary (documented in plotrender.py's module docstring: `file_tag` = the PDF filename tag, `figsize`, `hline_y`, `x/y_range`, `x/y_log`, `x/y_inverted`, `aspect_equal`; trace style: `series_index` fixed categorical color, `color`/`marker`/`lw`/`legend`) -- extend BOTH when adding a key. Never hand-draw a data plot in a component again; genuinely bespoke diagnostics (astrometry's `plot_sky`, lens caustics, corner plots) may stay matplotlib-only.
 
 `plot_data` rules: with `point=None` return data-only specs (usable after `load_data()`, before `build_model()`); with a point, add model traces evaluated at that point by reusing the functions from `compile_plotters()` -- do not duplicate physics. Set each spec's `param_deps` via `_model_trace_param_deps(node, system)` on a symbolic node retained by `compile_plotters` -- empty `param_deps` makes the Evaluator's `changed_label` filter skip the component, freezing its charts in GUI live mode. Keep model traces' symbolic nodes on `Trace.node`. `meta.file_tag` must reproduce the component's historical PDF filenames (`{prefix}_{file_tag}.pdf`).
 

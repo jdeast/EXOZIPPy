@@ -11,7 +11,7 @@ invalidates the compiled graph and forces another "Solve".
 This module supplies the millisecond half of that loop:
 
   * ``compile_evaluator(system, model) -> Evaluator`` captures the base
-    PlotSpecs (G4) and remembers which component built each one.
+    Charts (G4) and remembers which component built each one.
   * ``Evaluator.eval_plots(raw_point)`` returns, per plot, the updated
     model-trace arrays by calling each owning component's own
     ``plot_data(system, point)`` again at the new point -- the SAME code
@@ -43,7 +43,7 @@ Model-role traces are always evaluated.  Data traces normally are not --
 raw observations do not move with a slider -- EXCEPT on specs whose meta
 declares ``dynamic_data``, where the plotted data ARE point-dependent
 (phase folds, RV gamma subtraction, mulens flux alignment) and are
-re-shipped too.  See exozippy.plotspec for the PlotSpec/Trace contract and
+re-shipped too.  See exozippy.chart for the Chart/Trace contract and
 Component.plot_data for how a component draws itself at an arbitrary point.
 """
 
@@ -275,7 +275,7 @@ def structural_hash(config: dict, user_params: Optional[dict] = None) -> str:
 class Evaluator:
     """Millisecond-scale forward evaluator for GUI slider updates.
 
-    Construct via :func:`compile_evaluator`.  Holds the base PlotSpecs, which
+    Construct via :func:`compile_evaluator`.  Holds the base Charts, which
     component built each one, and a single cached pytensor function mapping
     the model's raw free variables to the full internal point (free RVs +
     deterministics).  A slider move calls :meth:`set_value` to invert a
@@ -307,8 +307,8 @@ class Evaluator:
             on_unused_input="ignore",
         )
 
-        # Which component built each base PlotSpec, and the sampled-parameter
-        # labels its model traces depend on (PlotSpec.param_deps) -- so a
+        # Which component built each base Chart, and the sampled-parameter
+        # labels its model traces depend on (Chart.param_deps) -- so a
         # slider move only calls plot_data() on components it can affect.
         self._spec_owner = spec_owner
         self._comps_by_id: Dict[int, Any] = {}
@@ -526,7 +526,7 @@ class Evaluator:
 def compile_evaluator(system, model, base_raw_point=None) -> Evaluator:
     """Build an :class:`Evaluator` for a prepared+built system.
 
-    Captures the base PlotSpecs (via each component's ``plot_data`` at the
+    Captures the base Charts (via each component's ``plot_data`` at the
     base point) and remembers which component built each one, so a later
     slider move can call the right component's ``plot_data`` again.
 

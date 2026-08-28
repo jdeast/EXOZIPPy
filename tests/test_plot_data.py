@@ -1,9 +1,9 @@
 """
-Tests for Component.plot_data (GUI PlotSpec pathway, prompt G4).
+Tests for Component.plot_data (GUI Chart pathway, prompt G4).
 
 The GUI consumes plot DATA (arrays + labels) rather than rendered
 matplotlib figures. These tests check that:
-  * each implemented component returns >= 1 PlotSpec after
+  * each implemented component returns >= 1 Chart after
     prepare()+build_model();
   * every spec is JSON-serializable (json.dumps(spec.to_json()));
   * data-only mode (point=None) works after prepare() WITHOUT
@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 import yaml
 
-from exozippy.plotspec import PlotSpec, Trace
+from exozippy.chart import Chart, Trace
 from exozippy.system import System
 
 pytestmark = pytest.mark.slow
@@ -189,7 +189,7 @@ def sed_built():
 
 def _assert_json_roundtrip(specs):
     for spec in specs:
-        assert isinstance(spec, PlotSpec)
+        assert isinstance(spec, Chart)
         payload = spec.to_json()
         text = json.dumps(payload)  # must not raise
         assert isinstance(text, str) and len(text) > 0
@@ -208,7 +208,7 @@ def test_rvinstrument_plot_data_returns_serializable_specs(rvonly_built):
     """
     Given a prepared+built RV-only kelt4 system and a start point,
     When rvinstrument.plot_data(system, point) is called,
-    Then it returns >= 1 PlotSpec and every spec is JSON-serializable.
+    Then it returns >= 1 Chart and every spec is JSON-serializable.
     """
     system, model, point = rvonly_built
 
@@ -279,7 +279,7 @@ def test_transit_plot_data_returns_serializable_specs(transit_built):
     """
     Given a prepared+built transit kelt4 system and a start point,
     When transit.plot_data(system, point) is called,
-    Then it returns >= 1 serializable PlotSpec with finite model traces.
+    Then it returns >= 1 serializable Chart with finite model traces.
     """
     system, model, point = transit_built
 
@@ -365,7 +365,7 @@ def test_sed_plot_data_returns_serializable_specs(sed_built):
     """
     Given a prepared+built rv+transit+sed kelt4 system and a start point,
     When sed.plot_data(system, point) is called,
-    Then it returns >= 1 serializable PlotSpec with finite model traces
+    Then it returns >= 1 serializable Chart with finite model traces
     matching the shared plot-object helper.
     """
     system, model, point = sed_built

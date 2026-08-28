@@ -88,7 +88,7 @@ included `pt.dot(X, c)` but every plotted node excluded it and the data were nev
 corrected -- so any fit with active detrend columns showed a systematic data-vs-model
 mismatch equal to the whole fitted trend in every panel, reading as unmodeled residual
 structure. The correction is applied in NUMPY, so the graph walk that populates
-`PlotSpec.param_deps` cannot see it: `Instrument.detrend_dep_labels()` supplies the
+`Chart.param_deps` cannot see it: `Instrument.detrend_dep_labels()` supplies the
 coefficient label explicitly, exactly as the `gamma` / `baseline` deps next to it do, and
 transit's unphased spec sets `dynamic_data` when (and only when) it has detrend columns.
 `Instrument.detrend_caption()` is the sentence the figure captions owe the reader when that

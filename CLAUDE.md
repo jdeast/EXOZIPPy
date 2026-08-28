@@ -91,7 +91,7 @@ Each line names when to read the doc. Read it first; do not reconstruct its reas
 - Before adding a sampler, or changing chain sizing or start populations, read `src/exozippy/samplers/samplers.md`.
 - Before adding a table column, a LaTeX macro, a prose sentence or a plot, read `src/exozippy/outputs/outputs.md`.
 - Before writing or running tests, read `docs/testing.md`.
-- The GUI (`src/exozippy/gui/`): the optional browser GUI (`exozippy-gui` console script, `gui` extra) is a component-agnostic FastAPI + React wrapper around the backend contracts (`introspect`, `utilities/registry`, `solve_api`, `plotspec`, `evaluator`, `gui/runner`). Its full architecture -- server modules, the HTTP/WebSocket API, the frontend tabs, the Solve-then-live-sliders interaction, and the invariants (component-agnostic, ruamel round-trip, process isolation, local-only) -- is documented in `src/exozippy/gui/gui.md`. Read that before adding a tab, endpoint, or utility to the GUI, or before changing how the GUI consumes a component.
+- The GUI (`src/exozippy/gui/`): the optional browser GUI (`exozippy-gui` console script, `gui` extra) is a component-agnostic FastAPI + React wrapper around the backend contracts (`introspect`, `utilities/registry`, `solve_api`, `chart`, `evaluator`, `gui/runner`). Its full architecture -- server modules, the HTTP/WebSocket API, the frontend tabs, the Solve-then-live-sliders interaction, and the invariants (component-agnostic, ruamel round-trip, process isolation, local-only) -- is documented in `src/exozippy/gui/gui.md`. Read that before adding a tab, endpoint, or utility to the GUI, or before changing how the GUI consumes a component.
 
 ## Tests
 

@@ -608,7 +608,7 @@ class RVInstrument(Instrument):
     # ------------------------------------------------------------------
     # Shared data preparation. Both the matplotlib plot() path and the
     # GUI plot_data() path go through these helpers, so the two paths
-    # always draw the exact same arrays (see plotspec.PlotSpec).
+    # always draw the exact same arrays (see chart.Chart).
     # ------------------------------------------------------------------
     def _rv_factor(self):
         """Internal-units -> user-units (m/s) conversion for RV values.
@@ -752,13 +752,13 @@ class RVInstrument(Instrument):
 
     def plot_data(self, system, point=None):
         """
-        GUI plot specs for the RV instrument: one unphased RV-vs-time
+        GUI charts for the RV instrument: one unphased RV-vs-time
         chart plus one phased chart per member orbit. With point=None only
         the observed data traces are returned (raw preview, no model);
         with a point, model curves are added via the shared prep helpers.
-        See Component.plot_data and plotspec.PlotSpec.
+        See Component.plot_data and chart.Chart.
         """
-        from exozippy.plotspec import PlotSpec, Trace
+        from exozippy.chart import Chart, Trace
 
         factor = self._rv_factor()
         specs = []
@@ -834,7 +834,7 @@ class RVInstrument(Instrument):
                 lbl for lbl in numpy_deps if lbl not in model_deps
             ]
         specs.append(
-            PlotSpec(
+            Chart(
                 id=f"{self.prefix}.unphased",
                 component={"yaml_key": self.prefix, "instance": None},
                 title=f"Unphased RV Model: {getattr(system, 'name', '')}",
@@ -907,7 +907,7 @@ class RVInstrument(Instrument):
                     )
                 oname = system.orbit.names[o_idx]
                 specs.append(
-                    PlotSpec(
+                    Chart(
                         id=f"{self.prefix}.phased.{oname}",
                         component={"yaml_key": self.prefix, "instance": None},
                         title=(

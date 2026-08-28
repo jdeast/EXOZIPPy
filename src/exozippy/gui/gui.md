@@ -9,7 +9,7 @@
 A local, **optional** graphical wrapper around the EXOZIPPy backend. Nothing
 here is required for the scripting/CLI workflow, and no component-specific
 knowledge is hardcoded in the GUI: it consumes only the contracts that
-components declare (introspection schema, utility registry, PlotSpec, solve
+components declare (introspection schema, utility registry, Chart, solve
 provenance). A future component author gets the GUI for free.
 
 This document describes how the GUI is built so a developer (or Claude Code)
@@ -45,7 +45,7 @@ useful to scripting too; the server just exposes them over HTTP/JSON:
 | `exozippy/introspect.py` | `full_schema()` -- every component's parameters + config keys, JSON-safe, no System needed | drives all auto-generated forms and the component-agnostic menus |
 | `exozippy/utilities/registry.py` | `all_utilities()`, `UtilitySpec.to_schema()`, `run_utility()` | the Tools menu + utility runner |
 | `exozippy/solve_api.py` | `solve()` (values/bounds/priors + provenance), `validate()` (structured diagnostics) | the Tune-tab Solve button + Config validation |
-| `exozippy/plotspec.py` | `PlotSpec` contract; `Component.plot_data(system, point=None)` | all charts (data-only previews + model traces) |
+| `exozippy/chart.py` | `Chart` contract; `Component.plot_data(system, point=None)` | all charts (data-only previews + model traces) |
 | `exozippy/evaluator.py` | `compile_evaluator()`, `Evaluator.set_value/eval_plots/structural_hash` | millisecond live-slider plot updates |
 | `exozippy/gui/runner.py` + `status.py` | subprocess fit launch, status/snapshot files, graceful stop | the pinned RunControl |
 
@@ -267,7 +267,7 @@ solve itself; there is no separate prewarm call -- the Tune tab is the landing
 page and auto-Solves on mount, so a prewarm had nothing left to overlap with),
 `GET /api/tune/status`,
 `GET /api/tune/result`, `POST /api/tune/eval`, `GET /api/tune/hash`,
-`GET /api/tune/plots/data` (data-only PlotSpecs, available from the
+`GET /api/tune/plots/data` (data-only Charts, available from the
 "compiling" phase on -- the worker builds them right after `prepare()` via
 `plot_data(point=None)` and ships them with its progress message, so the
 Tune tab draws the observations while the model compiles).
@@ -319,8 +319,8 @@ dependency. See `gui/frontend/README.md` for the dev/build loop.
   identically in the pywebview window and in a plain browser tab. Both call
   sites had their own near-identical copy until 2026-08-12 (review 4.13); add
   a prop rather than a third copy.
-- `src/plotspec.ts` -- TypeScript mirror of `plotspec.py`'s PlotSpec.
-- `src/plotly-adapter.ts` -- the ONE place PlotSpec trace roles map to plotly
+- `src/chart.ts` -- TypeScript mirror of `chart.py`'s Chart.
+- `src/plotly-adapter.ts` -- the ONE place Chart trace roles map to plotly
   encodings (data = markers+error bars, model = line unless kind "scatter").
   It is the GUI half of a two-renderer pair: `src/exozippy/plotrender.py`
   renders the SAME specs with matplotlib for the saved PDFs, and the two

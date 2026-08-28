@@ -959,7 +959,7 @@ class Component(ABC):
         """
         Stage: GUI plot description (the data behind plot()).
 
-        Return a list of exozippy.plotspec.PlotSpec objects -- the arrays
+        Return a list of exozippy.chart.Chart objects -- the arrays
         and labels a browser GUI needs to draw pan/zoomable charts and
         re-render model curves when parameter sliders move. This is the
         data-only counterpart to plot(), which renders matplotlib figures.
@@ -976,7 +976,7 @@ class Component(ABC):
             duplicated here). Requires build_model() to have run.
 
         The default returns []; components that own observational data
-        override it. See plotspec.PlotSpec for the payload contract.
+        override it. See chart.Chart for the payload contract.
         """
         return []
 
@@ -1003,7 +1003,7 @@ class Component(ABC):
         """
         Sampled-parameter labels (a subset of system.plot_params) that a
         symbolic model-trace node depends on, found by walking the
-        pytensor graph. Used to populate PlotSpec.param_deps so a GUI can
+        pytensor graph. Used to populate Chart.param_deps so a GUI can
         highlight the charts a moved slider affects. Returns [] when the
         node or plot_params are unavailable (e.g. data-only mode).
         """

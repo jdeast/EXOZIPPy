@@ -1,4 +1,4 @@
-"""Tests for the generic PlotSpec -> matplotlib renderer (plotrender.py).
+"""Tests for the generic Chart -> matplotlib renderer (plotrender.py).
 
 The renderer is the saved-PDF half of the two-renderer pair (the GUI's
 plotly-adapter.ts is the other); these tests pin its file naming, the
@@ -15,8 +15,8 @@ matplotlib.use("Agg")
 import numpy as np
 import pytest
 
+from exozippy.chart import Chart, Trace
 from exozippy.plotrender import plot_via_specs, render_spec_groups
-from exozippy.plotspec import PlotSpec, Trace
 
 
 def _spec(spec_id="demo.panel", meta=None, extra_traces=()):
@@ -34,7 +34,7 @@ def _spec(spec_id="demo.panel", meta=None, extra_traces=()):
         Trace(name="model", role="model", kind="line", x=x, y=np.sin(x)),
         *extra_traces,
     ]
-    return PlotSpec(
+    return Chart(
         id=spec_id,
         component={"yaml_key": "demo", "instance": None},
         title="Demo",

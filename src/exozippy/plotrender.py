@@ -1,7 +1,7 @@
-"""Render PlotSpecs to matplotlib figures -- the saved-PDF counterpart of the
+"""Render Charts to matplotlib figures -- the saved-PDF counterpart of the
 GUI's plotly-adapter.ts.
 
-A component describes each of its plots ONCE, as the PlotSpec list returned by
+A component describes each of its plots ONCE, as the Chart list returned by
 ``Component.plot_data(system, point)``.  The GUI renders those specs with
 plotly; this module renders the same specs with matplotlib for the pre-flight
 and posterior PDFs.  ``Component.plot`` implementations reduce to::
@@ -36,7 +36,7 @@ Trace ``style`` (all optional): ``series_index`` (fixed categorical color
 ``color`` / ``marker`` user overrides, ``lw`` line width, ``legend`` to
 force a legend entry on a non-data trace.
 
-PlotSpec ``meta`` presentation keys (all optional):
+Chart ``meta`` presentation keys (all optional):
 
 * ``file_tag``   -- output basename: ``{prefix}_{file_tag}.pdf``.  Falls back
   to the spec ``id`` with dots replaced by underscores.
@@ -169,7 +169,7 @@ def render_spec_groups(spec_groups, filename_prefix="debug"):
 
     Parameters
     ----------
-    spec_groups : list[list[PlotSpec]]
+    spec_groups : list[list[Chart]]
         One ``plot_data`` result per posterior point.  The FIRST group is the
         reference: it supplies the data traces, labels, and decorations
         (matching the historical convention that data offsets/cleaning use

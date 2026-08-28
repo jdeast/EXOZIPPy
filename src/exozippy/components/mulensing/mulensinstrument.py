@@ -1960,7 +1960,7 @@ class MulensInstrument(Instrument):
         }
 
     def plot_data(self, system, point=None):
-        """GUI/PDF plot specs: the aligned delta-mag lightcurve, plus a zoom
+        """GUI/PDF charts: the aligned delta-mag lightcurve, plus a zoom
         copy (x_range +/-3 tE) when t_0/t_E seeds are known.
 
         The chart is drawn in magnitudes even though the fit is in flux -- that
@@ -1968,9 +1968,9 @@ class MulensInstrument(Instrument):
         general aligned) flux is not positive comes back as NaN and is simply
         not drawn.  With point=None each instrument's data are returned in its
         own system (no fitted fluxes exist to align them onto one scale).
-        See Component.plot_data and plotspec.PlotSpec.
+        See Component.plot_data and chart.Chart.
         """
-        from exozippy.plotspec import PlotSpec, Trace
+        from exozippy.chart import Chart, Trace
 
         comp_id = {"yaml_key": self.prefix, "instance": None}
         sysname = getattr(system, "name", "")
@@ -2011,7 +2011,7 @@ class MulensInstrument(Instrument):
                     )
                 )
             return [
-                PlotSpec(
+                Chart(
                     id=f"{self.prefix}.lightcurve",
                     component=comp_id,
                     title=title,
@@ -2164,7 +2164,7 @@ class MulensInstrument(Instrument):
             ),
         }
         specs = [
-            PlotSpec(
+            Chart(
                 id=f"{self.prefix}.lightcurve",
                 component=comp_id,
                 title=title,
@@ -2177,7 +2177,7 @@ class MulensInstrument(Instrument):
         ]
         if t0 is not None and tE is not None:
             specs.append(
-                PlotSpec(
+                Chart(
                     id=f"{self.prefix}.lightcurve_zoom",
                     component=comp_id,
                     title=f"{title} (zoom)",

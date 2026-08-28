@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import Plotly from "plotly.js-dist-min";
-import type { PlotSpec } from "../plotspec";
+import type { Chart } from "../chart";
 import { specToPlotly, PLOTLY_CONFIG } from "../plotly-adapter";
 
 // Thin React wrapper over plotly.js-dist-min. Uses Plotly.react so repeated
@@ -8,7 +8,7 @@ import { specToPlotly, PLOTLY_CONFIG } from "../plotly-adapter";
 // tearing it down -- which, combined with the layout's uirevision, preserves
 // the user's pan/zoom across redraws. No react-plotly.js dependency -- keeps the
 // bundle lean and typing simple.
-export default function PlotView({ spec }: { spec: PlotSpec }) {
+export default function PlotView({ spec }: { spec: Chart }) {
   const ref = useRef<HTMLDivElement>(null);
 
   // Patch the chart in place on every spec change. Crucially this effect does

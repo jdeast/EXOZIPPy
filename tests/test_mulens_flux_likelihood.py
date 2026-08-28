@@ -612,7 +612,7 @@ def test_aligned_plot_specs_are_finite_and_drop_non_positive_fluxes(
 def test_plot_specs_drop_non_positive_fluxes_instead_of_clamping(dia_system):
     """
     Given the difference-imaging light curve,
-    When the data-only plot specs are built,
+    When the data-only charts are built,
     Then the negative-flux epochs come back as NaN (not drawn) rather than as
     the ~75 mag spikes the old 1e-30 clamp produced, and the positive ones
     keep their magnitudes.
