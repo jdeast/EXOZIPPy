@@ -1674,10 +1674,11 @@ class Transit(Instrument):
                     # carries a transit duration for this planet.
                     # `planet.t14`, not `transit.t14`: the durations are
                     # planet geometry now (review 8.8.7).
+                    x_range = None
                     t14_raw = point.get("planet.t14")
                     if t14_raw is not None:
                         t14_ref = float(np.atleast_1d(t14_raw)[p_idx])
-                        meta["x_range"] = [-t14_ref, t14_ref]
+                        x_range = [-t14_ref, t14_ref]
                     specs.append(
                         Chart(
                             id=f"{self.prefix}.phased.{self.names[i]}.{pname}",
@@ -1690,6 +1691,7 @@ class Transit(Instrument):
                             ylabel="Flux - Baseline",
                             traces=traces,
                             param_deps=matrix_deps,
+                            x_range=x_range,
                             meta=meta,
                         )
                     )

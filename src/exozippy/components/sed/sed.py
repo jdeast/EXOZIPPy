@@ -1524,7 +1524,8 @@ class SED(Component):
                     ylabel="Apparent Magnitude",
                     traces=traces,
                     param_deps=[],
-                    meta={"x_log": True, "y_inverted": True},
+                    x_log=True,
+                    y_inverted=True,
                 )
             ]
 
@@ -1653,15 +1654,15 @@ class SED(Component):
                 ylabel="log10(lambda F_lambda [erg/s/cm2])",
                 traces=traces,
                 param_deps=deps,
+                x_log=True,
+                # same wavelength window the PDF's shared x-axis uses
+                x_range=[5e-2, 30.0],
+                y_range=[
+                    float(plot_obj.y_lower),
+                    float(plot_obj.y_upper),
+                ],
                 meta={
-                    "x_log": True,
-                    # same wavelength window the PDF's shared x-axis uses
-                    "x_range": [5e-2, 30.0],
-                    "y_range": [
-                        float(plot_obj.y_lower),
-                        float(plot_obj.y_upper),
-                    ],
-                    # Presentation keys for the Chart renderers. plot()
+                    # Annotation keys for the Chart renderers. plot()
                     # itself stays hand-drawn (two-axes figure; see the
                     # comment above plot()), but file_tag records the PDF
                     # basename it saves ({prefix}_SED.pdf) and figsize its

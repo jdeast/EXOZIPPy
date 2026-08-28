@@ -81,6 +81,19 @@ function errorBar(arr: unknown, color: string): Record<string, unknown> {
       };
 }
 
+// Role opacity defaults, mirroring plotrender.py's _DATA_ALPHA. These were
+// the two renderers' one silent disagreement (review 4.11.6): the saved PDF
+// drew data at 0.6 while this drew it fully opaque, so the same fit looked
+// different depending on where you viewed it. JDE ruled "match the pdf", so
+// the PDF's values are canonical here.
+const DATA_ALPHA = 0.6;
+
+/** The trace's own alpha if it set one, else its role default. */
+function traceAlpha(trace: Trace): number {
+  if (trace.alpha != null) return trace.alpha;
+  return trace.role === "model" ? 1.0 : DATA_ALPHA;
+}
+
 /** Convert one Chart trace into a plotly trace object. */
 export function traceToPlotly(trace: Trace): Record<string, unknown> {
   const style = styleOf(trace);
@@ -103,6 +116,7 @@ export function traceToPlotly(trace: Trace): Record<string, unknown> {
     // Legend parity with the PDFs: data traces are labeled; model traces
     // only when the spec asks (style.legend).
     showlegend: trace.role === "data" ? true : Boolean(style.legend),
+    opacity: traceAlpha(trace),
   };
 
   if (isLine) {
@@ -120,12 +134,12 @@ export function traceToPlotly(trace: Trace): Record<string, unknown> {
 
 /** plotly layout for a Chart: a white figure card, like the saved plots. */
 export function specToLayout(spec: Chart): Record<string, unknown> {
-  // Axis scaling comes from the spec's `meta` hints (set by the component's
-  // plot_data). The SED, for one, needs a log wavelength axis and an inverted
-  // magnitude axis -- without honoring these the points collapse to what looks
-  // like a flat line. Keys: x_log/y_log -> logarithmic; x_inverted/y_inverted
-  // -> reversed (magnitudes increase downward). See plotrender.py for the
-  // full shared vocabulary.
+  // Axis scaling comes from the Chart's first-class geometry fields (review
+  // 4.11.3; they were `meta` keys until then). The SED, for one, needs a log
+  // wavelength axis and an inverted magnitude axis -- without honoring these
+  // the points collapse to what looks like a flat line. `meta` is still read
+  // for aspect_equal, which only this renderer honors. See plotrender.py for
+  // the full shared vocabulary.
   const meta = (spec.meta || {}) as Record<string, unknown>;
   const xaxis: Record<string, unknown> = {
     title: { text: spec.xlabel },
@@ -139,25 +153,25 @@ export function specToLayout(spec: Chart): Record<string, unknown> {
     zerolinecolor: "#d8dee4",
     linecolor: "#57606a",
   };
-  if (meta.x_log) xaxis.type = "log";
-  if (meta.y_log) yaxis.type = "log";
-  if (meta.x_inverted) xaxis.autorange = "reversed";
-  if (meta.y_inverted) yaxis.autorange = "reversed";
+  if (spec.x_log) xaxis.type = "log";
+  if (spec.y_log) yaxis.type = "log";
+  if (spec.x_inverted) xaxis.autorange = "reversed";
+  if (spec.y_inverted) yaxis.autorange = "reversed";
   // Explicit [lo, hi] windows (e.g. the SED focuses on the observed data rather
   // than autoranging to the model's numerically-tiny spectral tails). On a log
   // axis plotly expects the range endpoints in log10 units. A reversed axis
   // wants its range descending.
-  if (Array.isArray(meta.x_range)) {
-    let r = meta.x_range as number[];
-    if (meta.x_log) r = r.map((v) => Math.log10(v));
-    xaxis.range = meta.x_inverted ? [r[1], r[0]] : r;
-    if (meta.x_inverted) delete xaxis.autorange;
+  if (Array.isArray(spec.x_range)) {
+    let r = spec.x_range as number[];
+    if (spec.x_log) r = r.map((v) => Math.log10(v));
+    xaxis.range = spec.x_inverted ? [r[1], r[0]] : r;
+    if (spec.x_inverted) delete xaxis.autorange;
   }
-  if (Array.isArray(meta.y_range)) {
-    let r = meta.y_range as number[];
-    if (meta.y_log) r = r.map((v) => Math.log10(v));
-    yaxis.range = meta.y_inverted ? [r[1], r[0]] : r;
-    if (meta.y_inverted) delete yaxis.autorange;
+  if (Array.isArray(spec.y_range)) {
+    let r = spec.y_range as number[];
+    if (spec.y_log) r = r.map((v) => Math.log10(v));
+    yaxis.range = spec.y_inverted ? [r[1], r[0]] : r;
+    if (spec.y_inverted) delete yaxis.autorange;
   }
   // Sky-plane plots (astrometry) need x and y in the same physical scale.
   if (meta.aspect_equal) {

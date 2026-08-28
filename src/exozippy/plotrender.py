@@ -42,16 +42,24 @@ Chart ``meta`` presentation keys (all optional):
   to the spec ``id`` with dots replaced by underscores.
 * ``figsize``    -- ``(w, h)`` inches.
 * ``hline_y``    -- draw a dotted horizontal reference line at this y.
-* ``x_range`` / ``y_range``     -- explicit ``[lo, hi]`` axis windows.
-* ``x_log`` / ``y_log``         -- logarithmic axes.
-* ``x_inverted`` / ``y_inverted`` -- reversed axes (magnitudes, RA).
-* ``aspect_equal`` -- equal-aspect axes (sky-plane plots).
+* ``aspect_equal`` -- equal-aspect axes (sky-plane plots).  Read only here;
+  the plotly adapter ignores it, which is why it was NOT promoted to a Chart
+  field in review 4.11.3 while the six axis-geometry keys were.
 * ``caption``    -- LaTeX figure caption for the generated paper draft
   (``outputs/modeling.py``, the third consumer of these specs).  Neither
   renderer draws it; without one the draft falls back to a generic
   caption built from the spec title.  It is emitted verbatim into
   ``\\caption{...}``, so escape any non-LaTeX pieces (instrument names!)
   with ``latex_escape`` when composing it.
+
+Axis GEOMETRY is no longer here: ``x_range``/``y_range``, ``x_log``/``y_log``
+and ``x_inverted``/``y_inverted`` are first-class ``Chart`` attributes (review
+4.11.3).  They moved because both renderers must consult them to lay out an
+axis at all, so a typo in a stringly-typed key silently produced a linear axis
+where a log one was meant.  ``meta`` now carries annotations only.
+
+Per-trace opacity: ``Trace.alpha`` overrides the role default, and the role
+defaults here are the ones the GUI mirrors (review 4.11.6).
 """
 
 from __future__ import annotations
@@ -67,6 +75,17 @@ logger = logging.getLogger(__name__)
 _DATA_ALPHA = 0.6
 _MODEL_COLOR = "r"
 _RESIDUAL_COLOR = "0.5"
+
+
+def _trace_alpha(trace, default):
+    """The trace's own alpha if it set one, else the role default.
+
+    One resolver so a per-trace override and the role default cannot drift
+    apart, and so the plotly adapter has a single rule to mirror (review
+    4.11.6: the two renderers had silently disagreed, this file drawing data
+    at 0.6 and the GUI drawing it opaque).
+    """
+    return default if trace.alpha is None else float(trace.alpha)
 
 
 def _trace_color(trace, fallback=None):
@@ -95,7 +114,7 @@ def _draw_data(ax, trace):
         xerr=_as_err(trace.xerr),
         fmt=style.get("marker") or "o",
         color=_trace_color(trace),
-        alpha=_DATA_ALPHA,
+        alpha=_trace_alpha(trace, _DATA_ALPHA),
         zorder=1,
         label=trace.name or None,
     )
@@ -111,7 +130,7 @@ def _draw_model(ax, trace, alpha):
             np.asarray(trace.y, dtype=float),
             style.get("marker") or ".",
             color=color,
-            alpha=alpha,
+            alpha=_trace_alpha(trace, alpha),
             zorder=2,
             label=label,
         )
@@ -122,7 +141,7 @@ def _draw_model(ax, trace, alpha):
             "-",
             color=color,
             lw=style.get("lw", 1.5),
-            alpha=alpha,
+            alpha=_trace_alpha(trace, alpha),
             zorder=2,
             label=label,
         )
@@ -135,30 +154,37 @@ def _draw_residual(ax, trace):
         yerr=_as_err(trace.yerr),
         fmt=".",
         color=_RESIDUAL_COLOR,
-        alpha=_DATA_ALPHA,
+        alpha=_trace_alpha(trace, _DATA_ALPHA),
         zorder=1,
         label=trace.name or None,
     )
 
 
-def _apply_meta(ax, meta):
-    """Axis decorations from the spec's meta presentation keys."""
+def _apply_axes(ax, spec):
+    """Axis geometry from the chart's first-class fields, plus meta extras.
+
+    The six geometry fields are attributes on the Chart (review 4.11.3); only
+    `hline_y` and `aspect_equal` are still read from `meta`, because each is
+    honored by exactly this renderer and promoting them would advertise a
+    field the plotly adapter silently ignores.
+    """
+    meta = spec.meta or {}
     if meta.get("hline_y") is not None:
         ax.axhline(
             float(meta["hline_y"]), color="black", linestyle=":", alpha=0.5
         )
-    if meta.get("x_log"):
+    if spec.x_log:
         ax.set_xscale("log")
-    if meta.get("y_log"):
+    if spec.y_log:
         ax.set_yscale("log")
-    if meta.get("x_range") is not None:
-        ax.set_xlim(*[float(v) for v in meta["x_range"]])
-    if meta.get("y_range") is not None:
-        ax.set_ylim(*[float(v) for v in meta["y_range"]])
+    if spec.x_range is not None:
+        ax.set_xlim(*[float(v) for v in spec.x_range])
+    if spec.y_range is not None:
+        ax.set_ylim(*[float(v) for v in spec.y_range])
     # Invert AFTER any explicit range so [lo, hi] semantics stay ascending.
-    if meta.get("x_inverted"):
+    if spec.x_inverted:
         ax.invert_xaxis()
-    if meta.get("y_inverted"):
+    if spec.y_inverted:
         ax.invert_yaxis()
     if meta.get("aspect_equal"):
         ax.set_aspect("equal", adjustable="datalim")
@@ -211,7 +237,7 @@ def render_spec_groups(spec_groups, filename_prefix="debug"):
                 for trace in models:
                     _draw_model(ax, trace, model_alpha)
 
-            _apply_meta(ax, meta)
+            _apply_axes(ax, spec)
             ax.set_xlabel(spec.xlabel)
             ax.set_ylabel(spec.ylabel)
             ax.set_title(spec.title)

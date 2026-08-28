@@ -171,7 +171,9 @@ def test_plot_data_model_traces_at_start(astro_built):
     abs_model = [t for t in specs[1].traces if t.role == "model"][0]
     assert abs_model.kind == "line"
     assert abs_model.name == "photocenter orbit"
-    assert specs[1].meta["x_inverted"] and specs[1].meta["aspect_equal"]
+    # x_inverted is a first-class Chart field since review 4.11.3;
+    # aspect_equal stays in meta because only plotrender honors it.
+    assert specs[1].x_inverted and specs[1].meta["aspect_equal"]
 
     # rel: model line plus the single-point primary-star marker
     rel_models = [
