@@ -275,7 +275,7 @@ export default function TuneTab({
 
   // Structural edits made in OTHER tabs never came through `runCommand` here,
   // and both tabs stay mounted, so nothing re-checked the hash after a
-  // ConfigTab edit: the sliders stayed live and kept committing RANK_USER
+  // ConfigTab edit: the sliders stayed live and kept committing PRECEDENCE_USER
   // initvals against a model the document no longer described. Re-check on
   // reveal, and keep checking while visible and live -- an edit can also
   // arrive without a tab switch (Ctrl+Z, an external write picked up on
@@ -309,7 +309,7 @@ export default function TuneTab({
     }
   }, [result, selected]);
 
-  // Send a document command (undoable, RANK_USER) then refresh staleness.
+  // Send a document command (undoable, PRECEDENCE_USER) then refresh staleness.
   const runCommand = useCallback(
     async (cmd: DocCommand, structural: boolean) => {
       try {
@@ -774,7 +774,7 @@ function DetailPanel({
     [liveEval]
   );
 
-  // Commit the value to params.yaml as an undoable RANK_USER initval override
+  // Commit the value to params.yaml as an undoable PRECEDENCE_USER initval override
   // (one entry per slider release -- coalesces the whole drag).
   const commit = useCallback(
     (v: number) => {
@@ -797,7 +797,7 @@ function DetailPanel({
   // Bounds/prior fields commit onBlur, which fires on a plain click-through
   // with nothing typed. Writing the field back unchanged would turn whatever
   // the panel happens to be showing -- a component default, or another
-  // project's solved bound -- into a RANK_USER override in the params file.
+  // project's solved bound -- into a PRECEDENCE_USER override in the params file.
   // Only a real edit is a command.
   const setFieldIfChanged = useCallback(
     (field: string, raw: string, current: number | null | undefined) => {
@@ -901,7 +901,7 @@ function DetailPanel({
           value={Number.isFinite(value) ? value : ""}
           step={stepSize}
           // Same gate as the slider (canLiveEdit), NOT just `sampled`: this
-          // input commits a RANK_USER initval into the params file, so it must
+          // input commits a PRECEDENCE_USER initval into the params file, so it must
           // be dead whenever the number on screen does not belong to the model
           // the server would write it against -- not live yet, gone stale, or
           // (before the remount fix) left over from another project.

@@ -457,7 +457,7 @@ class Transit(Instrument):
         self.obs_band_map = self.band_map[self.inst_map]
 
     def _hint_baseline(self):
-        """Push each light curve's median flux as a RANK_DERIVED_DATA hint.
+        """Push each light curve's median flux as a PRECEDENCE_DERIVED_DATA hint.
 
         The median is measured in ``load_data`` (stage 1), so it is ready
         by the time this runs at stage 3 -- which is what lets it go through
@@ -469,7 +469,7 @@ class Transit(Instrument):
         acquire a rank.  For a data-derived START value that is backwards --
         an explicit ``transit.<name>.baseline`` in a params file (a restart
         file, say) was silently discarded.  As a hint it sits at
-        RANK_DERIVED_DATA (60), the tier this channel exists for: above the
+        PRECEDENCE_DERIVED_DATA (60), the tier this channel exists for: above the
         defaults.yaml 1.0 (20) and below the user (100), exactly like
         ``rvinstrument``'s gamma (median RV) and ``mulensinstrument``'s
         f_source/log_f_total.

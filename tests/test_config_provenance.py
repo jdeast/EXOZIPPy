@@ -7,8 +7,8 @@ docstring).  Each test here pins one place where that hierarchy was violated
 or where a user's entry vanished without a diagnostic:
 
   2.1.1  the standalone orbit.m_total solver overwrote an explicit user value
-         every iteration, DOWNGRADING its provenance to RANK_DERIVED_MIXED.
-  2.1.2  MMEXOFAST seed hints entered at RANK_USER, so a seed clobbered a
+         every iteration, DOWNGRADING its provenance to PRECEDENCE_DERIVED_MIXED.
+  2.1.2  MMEXOFAST seed hints entered at PRECEDENCE_USER, so a seed clobbered a
          user's scalar initval and a seed disagreeing with a genuine user
          entry tripped the "over-constrained" contradiction clause.
   2.1.3  a 3-part key with a typo'd INSTANCE name was kept as an inert leaf
@@ -19,9 +19,9 @@ import numpy as np
 import pytest
 
 from exozippy.config import (
-    RANK_DERIVED_DATA,
-    RANK_DERIVED_MIXED,
-    RANK_USER,
+    PRECEDENCE_DERIVED_DATA,
+    PRECEDENCE_DERIVED_MIXED,
+    PRECEDENCE_USER,
     ConfigManager,
 )
 
@@ -79,9 +79,9 @@ def test_standalone_solver_does_not_overwrite_a_user_value():
     orbit's member-body masses,
     When the relaxation engine runs (the standalone m_total solver fires once
     per iteration),
-    Then the user's value survives at RANK_USER -- the solver is skipped, not
+    Then the user's value survives at PRECEDENCE_USER -- the solver is skipped, not
     allowed to overwrite it and downgrade its provenance to
-    RANK_DERIVED_MIXED.
+    PRECEDENCE_DERIVED_MIXED.
     """
     params = _orbit_params()
     params["orbit.b.m_total"] = {"initval": 5.0}  # body sum is 1.001
@@ -90,7 +90,7 @@ def test_standalone_solver_does_not_overwrite_a_user_value():
     cm.finalize_user_params()
 
     assert cm._last_resolved["orbit.0.m_total"] == pytest.approx(5.0)
-    assert cm._last_provenance["orbit.0.m_total"] == RANK_USER
+    assert cm._last_provenance["orbit.0.m_total"] == PRECEDENCE_USER
     assert "orbit.0.m_total" not in cm._last_solved_by
 
 
@@ -99,7 +99,7 @@ def test_standalone_solver_still_fires_without_a_user_value():
     Given the same orbit with no user m_total,
     When the engine runs,
     Then the standalone solver still supplies the member-mass sum at
-    RANK_DERIVED_MIXED -- the guard blocks only ranks it cannot beat.
+    PRECEDENCE_DERIVED_MIXED -- the guard blocks only ranks it cannot beat.
     """
     cm = ConfigManager(_orbit_params(), system_config=_orbit_config())
     cm.finalize_user_params()
@@ -107,7 +107,7 @@ def test_standalone_solver_still_fires_without_a_user_value():
     assert cm._last_resolved["orbit.0.m_total"] == pytest.approx(
         1.001, rel=1e-3
     )
-    assert cm._last_provenance["orbit.0.m_total"] == RANK_DERIVED_MIXED
+    assert cm._last_provenance["orbit.0.m_total"] == PRECEDENCE_DERIVED_MIXED
     assert "standalone solver" in cm._last_solved_by["orbit.0.m_total"]
 
 
@@ -121,7 +121,7 @@ def test_seed_hint_does_not_override_a_user_scalar_initval():
     Given a user scalar initval for lens.Lens.t_0 and an MMEXOFAST seed hint
     naming a very different t_0,
     When the engine solves,
-    Then the USER's value is the start and keeps RANK_USER: a seed is a
+    Then the USER's value is the start and keeps PRECEDENCE_USER: a seed is a
     (fancy) derivation from the data and every user entry outranks it.
     """
     cm = ConfigManager(
@@ -132,14 +132,14 @@ def test_seed_hint_does_not_override_a_user_scalar_initval():
     cm.finalize_user_params()
 
     assert cm._last_resolved["lens.0.t_0"] == pytest.approx(2455000.0)
-    assert cm._last_provenance["lens.0.t_0"] == RANK_USER
+    assert cm._last_provenance["lens.0.t_0"] == PRECEDENCE_USER
 
 
 def test_seed_hint_beats_a_default_and_lands_at_derived_data_rank():
     """
     Given no user entry for lens.Lens.t_0,
     When a seed hint supplies one,
-    Then it is used, at RANK_DERIVED_DATA -- above defaults.yaml, below any
+    Then it is used, at PRECEDENCE_DERIVED_DATA -- above defaults.yaml, below any
     user entry.
     """
     cm = ConfigManager({}, system_config=_PSPL_CONFIG)
@@ -147,7 +147,7 @@ def test_seed_hint_beats_a_default_and_lands_at_derived_data_rank():
     cm.finalize_user_params()
 
     assert cm._last_resolved["lens.0.t_0"] == pytest.approx(2459999.0)
-    assert cm._last_provenance["lens.0.t_0"] == RANK_DERIVED_DATA
+    assert cm._last_provenance["lens.0.t_0"] == PRECEDENCE_DERIVED_DATA
 
 
 def test_seed_hint_conflicting_with_a_user_entry_is_not_over_constrained():
@@ -199,7 +199,7 @@ def test_seed_hints_still_vary_the_start_across_seeds():
     Given seed hints only (the ordinary MMEXOFAST case: no user entry),
     When the K seeds are solved,
     Then each seed lands on its own hint value -- the demotion to
-    RANK_DERIVED_DATA must not collapse the seeds onto one start.
+    PRECEDENCE_DERIVED_DATA must not collapse the seeds onto one start.
     """
     cm = ConfigManager({}, system_config=_PSPL_CONFIG)
     cm.add_seed_hints([{"lens.0.t_0": 2459999.0}, {"lens.0.t_0": 2459888.0}])
@@ -216,8 +216,8 @@ def test_seed_hints_do_not_change_the_mmexofast_auto_trigger():
     derivable,
     When probe_derivable is asked (the MMEXOFAST auto-trigger's question),
     Then the answer is unchanged by the presence of seed hints: the probe
-    reads user_params only, and its test is provenance > RANK_DEFAULT, which
-    RANK_DERIVED_DATA (60) satisfies anyway.  Getting this wrong re-runs the
+    reads user_params only, and its test is provenance > PRECEDENCE_DEFAULT, which
+    PRECEDENCE_DERIVED_DATA (60) satisfies anyway.  Getting this wrong re-runs the
     fitter on every restart.
     """
     params = {

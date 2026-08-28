@@ -620,7 +620,7 @@ def test_solve_does_not_inject_results_into_callers_params_dict():
 
     finalize_user_params writes initval/derived into the entries it resolved.
     Were those shared, a reused dict would come back carrying the previous
-    solve's answer at RANK_USER.
+    solve's answer at PRECEDENCE_USER.
     """
     # ARRANGE
     config = {"star": [{"name": "A"}, {"name": "B"}]}

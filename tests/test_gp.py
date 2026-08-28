@@ -927,7 +927,7 @@ def test_user_can_override_a_gp_hyperparameter_prior(two_rv_files):
     instrument name,
     When the model is built,
     Then it lands on the right element of the vector -- component-supplied
-    pins are layered below RANK_USER, so the user always wins.
+    pins are layered below PRECEDENCE_USER, so the user always wins.
     """
     from exozippy.system import System
 

@@ -5,7 +5,7 @@ Two things are pinned here, per the G10 verification list:
   * the ``/api/tune/eval`` round trip, exercised through the full HTTP surface
     with a STUBBED evaluator worker so no real pytensor compile is needed in
     the fast test (the worker is monkeypatched to a canned in-process fake);
-  * a params.yaml written after a slider-style edit (an undoable RANK_USER
+  * a params.yaml written after a slider-style edit (an undoable PRECEDENCE_USER
     ``set_param_field`` initval override through the G8 document) round-trips
     through ``yaml.safe_load`` and still ``prepare()``s -- a smoke test that
     the edit the Tune tab emits produces a runnable configuration.
@@ -269,7 +269,7 @@ def test_slider_edit_params_roundtrip_and_prepare(client, rvonly_project):
     config_path = str(rvonly_project / "kelt4_rvonly.yaml")
     client.post("/api/doc/open", json={"config_path": config_path})
 
-    # A slider release commits one undoable RANK_USER initval override.
+    # A slider release commits one undoable PRECEDENCE_USER initval override.
     resp = client.post(
         "/api/doc/command",
         json={

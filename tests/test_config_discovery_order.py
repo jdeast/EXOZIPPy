@@ -150,7 +150,7 @@ def test_rank_upgrade_tie_break_is_alphabetical(monkeypatch):
     # Arrange
     import sympy as sp
 
-    from exozippy.config import RANK_DEFAULT
+    from exozippy.config import PRECEDENCE_DEFAULT
 
     config, user_params = _dc2018_128_inputs()
     cm = ConfigManager(copy.deepcopy(user_params), copy.deepcopy(config))
@@ -163,7 +163,7 @@ def test_rank_upgrade_tie_break_is_alphabetical(monkeypatch):
     # Both known, both at the same rank, and the relation is violated: that is
     # Condition B, whose whole job is to pick the weakest symbol and rewrite it.
     resolved = {a_name: 1.0, b_name: 2.0}
-    provenance = {a_name: RANK_DEFAULT, b_name: RANK_DEFAULT}
+    provenance = {a_name: PRECEDENCE_DEFAULT, b_name: PRECEDENCE_DEFAULT}
     eq = sp.Eq(a, b)
     monkeypatch.setattr(
         sp.Eq, "free_symbols", property(lambda self: (b, a)), raising=False

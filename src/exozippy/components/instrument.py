@@ -1349,7 +1349,7 @@ class Instrument(Component):
         ``rvinstrument.HARPS.gp_rot_period`` means the HARPS element,
         whichever element that is.  Elements that did not opt into a term are
         pinned fixed (``sigma: 0``) through ``internal_overrides``, which sits
-        below RANK_USER: they cost the sampler nothing, and a user who wants
+        below PRECEDENCE_USER: they cost the sampler nothing, and a user who wants
         one back can still override it.
 
         Returns ``manifest`` for chaining, like ``_register_noise``.

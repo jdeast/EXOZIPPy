@@ -124,8 +124,8 @@ def test_a_user_tc_still_wins_over_a_tp_seed():
     """
     Given a params file that seeds BOTH tc and tp,
     When the engine runs,
-    Then tc is the user's own value: the solver carries RANK_DERIVED_MIXED
-      and a RANK_USER entry is exactly what it must not overwrite.
+    Then tc is the user's own value: the solver carries PRECEDENCE_DERIVED_MIXED
+      and a PRECEDENCE_USER entry is exactly what it must not overwrite.
     """
     got = _resolved_tc(
         _params(

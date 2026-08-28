@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 from exozippy.components import globalsearch
-from exozippy.config import RANK_DERIVED_DATA
+from exozippy.config import PRECEDENCE_DERIVED_DATA
 from exozippy.system import System
 
 # --- synthetic data -----------------------------------------------------------
@@ -423,7 +423,7 @@ def test_the_seed_is_pushed_through_the_hint_channel_alone(tmp_path):
 
     # Assert -- the ranked channel carries them ...
     assert "orbit.0.tc" in cm.hints
-    assert cm.hint_ranks["orbit.0.tc"] == RANK_DERIVED_DATA
+    assert cm.hint_ranks["orbit.0.tc"] == PRECEDENCE_DERIVED_DATA
     assert "orbit.0.logP" in cm.hints or "orbit.0.period" in cm.hints
     # ... and the unranked one carries nothing for this orbit.
     assert not [k for k in cm.param_overrides if k.startswith("orbit.")]

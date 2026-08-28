@@ -60,7 +60,7 @@ Derivability, never a literal-key scan -- the MMEXOFAST rule, for the same reaso
 never names it, and a scan would re-run the search on every second-iteration fit.
 `starts_satisfied` therefore asks `ConfigManager.probe_derivable`, which runs the relaxation
 engine on a snapshot and rolls every mutation back, and tests on **provenance above
-`RANK_DEFAULT`**. A group whose alternatives are all literally named short-circuits the
+`PRECEDENCE_DEFAULT`**. A group whose alternatives are all literally named short-circuits the
 probe, so the ordinary hand-written params file pays nothing.
 
 Two refinements of the MMEXOFAST pattern:
@@ -98,7 +98,7 @@ that is right for both orderings. MMEXOFAST pushes at stage 1a for the same clas
 
 `globalsearch.seed_start` writes each seed twice, and both are needed:
 
-- **`ConfigManager.add_hint`** at `RANK_DERIVED_DATA` is the ranked start value -- what the
+- **`ConfigManager.add_hint`** at `PRECEDENCE_DERIVED_DATA` is the ranked start value -- what the
   relaxation engine solves from, what the provenance ledger, `initval_source` ("data") and
   `export_solution` report, and what every user entry outranks. This is the channel a start
   value must use.
@@ -117,7 +117,7 @@ warning and skipping the override half if the defaults unit is not the internal 
 for all three parameters seeded today: days, days, dimensionless).
 
 `seed_start` also breaks the one tie the rank system cannot: a transit epoch and period beat
-an RV one by orders of magnitude, but both are honestly `RANK_DERIVED_DATA`
+an RV one by orders of magnitude, but both are honestly `PRECEDENCE_DERIVED_DATA`
 (`config._provenance_label` reports any other value as "solved"), and `add_hint` is
 last-writer-wins. A per-ConfigManager registry records `(quality, value, source)` per path,
 so `QUALITY_TRANSIT > QUALITY_RV` decides it whatever order the components ran in.

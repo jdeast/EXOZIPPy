@@ -77,7 +77,7 @@ def test_a_user_param_beats_a_hint():
     When a component hints a different one for the same element,
     Then resolve() returns the USER's value.
 
-    Every hint rank is below RANK_USER and the relaxation engine enforces
+    Every hint rank is below PRECEDENCE_USER and the relaxation engine enforces
     that with an explicit guard.  resolve() has no ledger to consult, so the
     ORDER of the two loops is the only thing enforcing it here.
     """

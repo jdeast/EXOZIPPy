@@ -782,7 +782,7 @@ class Orbit(Component):
         `_seeded_period` bug `tests/test_orbit_tc_window.py` covers.
 
         Only where the user did not seed `tc` themselves: an explicit `tc` is
-        RANK_USER, the solver stands down for it, and so must the window.
+        PRECEDENCE_USER, the solver stands down for it, and so must the window.
         """
         tc = self._resolve_initval("tc", shape)
         tp = self._resolve_initval("tp", shape)

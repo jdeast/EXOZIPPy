@@ -9,7 +9,7 @@ unknowns, and the MMEXOFAST seed carries no ``pi_E`` to break it (issue #93).
 
 Seeding both components at the kinematic prior's mean closes that hole.  The
 interesting part is what the provenance ranking then does on its own: the
-proper motions and the MMEXOFAST ``t_E`` are both RANK_DERIVED_DATA, so
+proper motions and the MMEXOFAST ``t_E`` are both PRECEDENCE_DERIVED_DATA, so
 ``t_E = theta_E / |mu_rel_geo|`` is over-determined, and Condition B rewrites
 its lowest-rank symbol -- ``theta_E``, through the lens mass (defaults.yaml,
 rank 20) and distance (rank 25).  So the measured ``t_E`` survives and the lens
@@ -120,7 +120,7 @@ def test_neither_pm_component_is_left_at_zero(params):
 
 def test_measured_t_E_survives_and_theta_E_yields(params):
     """
-    Given proper motions at RANK_DERIVED_DATA that disagree with the seeded t_E,
+    Given proper motions at PRECEDENCE_DERIVED_DATA that disagree with the seeded t_E,
     When Condition B rewrites the over-determined relation,
     Then t_E keeps the MMEXOFAST value and theta_E is what moves.
 

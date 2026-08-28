@@ -51,7 +51,7 @@ def get_symbol_map(config):
         # it MUST be mapped anyway (review 8.1.1).  A mapped path becomes a
         # leaf symbol of the relaxation engine, which is what lets a user's
         # `orbit.<n>.tp` seed be READ at all; unmapped, it was registered as a
-        # bare 2-part leaf at RANK_USER that reached nothing, so a periastron
+        # bare 2-part leaf at PRECEDENCE_USER that reached nothing, so a periastron
         # time -- how the RV literature quotes an eccentric orbit -- was
         # silently discarded.  Mapping it also gives each orbit its own symbol
         # rather than one shared across all of them (the omega bug).
@@ -205,7 +205,7 @@ def register_solvers(config_manager):
         function small.
 
         Standalone (it is never the last unknown of an equation, having no
-        equation) and RANK_DERIVED_MIXED, so a user's own `orbit.<n>.chord`
+        equation) and PRECEDENCE_DERIVED_MIXED, so a user's own `orbit.<n>.chord`
         wins and a user's `orbit.<n>.cosi` -- what a params file written for the
         conventional parameterization carries -- reaches the chord fit as the
         start it implies.  The reverse is deliberately absent: where cos i is
@@ -268,7 +268,7 @@ def register_solvers(config_manager):
         `calc_tp_from_ecc` that the model itself evaluates.
 
         Standalone (it has no equation, so it can never be the last unknown of
-        one) and RANK_DERIVED_MIXED, so a user's own `orbit.<n>.tc` always
+        one) and PRECEDENCE_DERIVED_MIXED, so a user's own `orbit.<n>.tc` always
         wins and a `tp` seed only fills a tc nobody stated.  The reverse
         direction is deliberately absent: `tp` is a runtime Deterministic, so
         nothing ever needs a start value for it.
@@ -325,7 +325,7 @@ def register_solvers(config_manager):
     # Gated on what the USER WROTE, never on what resolved: `ts` and the
     # durations are derived, so the engine computes values for them every
     # iteration, and seeding (e, omega) from those would be a fixed point
-    # dressed up as an inference -- it would also stamp RANK_DERIVED_MIXED
+    # dressed up as an inference -- it would also stamp PRECEDENCE_DERIVED_MIXED
     # provenance on an eccentricity nobody constrained.
     # ------------------------------------------------------------------
 

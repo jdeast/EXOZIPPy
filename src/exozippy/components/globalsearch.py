@@ -20,12 +20,12 @@ mmexofast_support.py``), which solves the same problem for microlensing:
 
 - **Ask whether seeding is needed by DERIVABILITY, not by presence.**
   ``ConfigManager.probe_derivable`` runs the relaxation engine on a snapshot
-  and rolls every mutation back; a rank above ``RANK_DEFAULT`` means someone
+  and rolls every mutation back; a rank above ``PRECEDENCE_DEFAULT`` means someone
   really said so.  A literal-key scan is wrong for the same reason it was
   wrong there: ``orbit.period`` is a DERIVED parameter (``10**logP``), so a
   restart file written by ``mkparam`` never names it, and a scan would re-run
   the search on every second-iteration fit.  A literal scan is still used as
-  a SHORT-CIRCUIT (naming a value outright makes it RANK_USER, which is
+  a SHORT-CIRCUIT (naming a value outright makes it PRECEDENCE_USER, which is
   derivable by definition), so the ordinary hand-written params file pays
   nothing for the probe.
 - **A search that finds nothing convincing seeds nothing.**  Both functions
@@ -49,7 +49,7 @@ both orderings.  MMEXOFAST pushes at stage 1a for the same class of reason
 (its own flux bootstrap, later in the same ``load_data``).
 
 The seed goes through ONE channel (:func:`seed_start`):
-``ConfigManager.add_hint`` at ``RANK_DERIVED_DATA``.  That is the ranked
+``ConfigManager.add_hint`` at ``PRECEDENCE_DERIVED_DATA``.  That is the ranked
 start value -- what the relaxation engine solves from, what the provenance
 ledger, ``initval_source`` ("data") and ``export_solution`` report, and what
 every user entry outranks -- and since review 3.14.3 ``ConfigManager.resolve()``
@@ -88,7 +88,7 @@ from typing import Optional
 
 import numpy as np
 
-from ..config import RANK_DERIVED_DATA
+from ..config import PRECEDENCE_DERIVED_DATA
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ MIN_LS_POINTS = 10
 # transit epoch and period are better than an RV one by orders of magnitude
 # (a box edge is minutes wide; an RV conjunction is a phase fit), so transit
 # outranks RV -- as a QUALITY here rather than as a provenance rank, because
-# both really are RANK_DERIVED_DATA and config._provenance_label reports any
+# both really are PRECEDENCE_DERIVED_DATA and config._provenance_label reports any
 # other value as "solved".  add_hint is last-writer-wins and the components
 # run in config key order, so the tie has to be broken explicitly.
 QUALITY_TRANSIT = 20
@@ -608,7 +608,9 @@ def seed_start(config_manager, path, value, quality, source):
         config_manager.get_conversion_factor(c_type, p_name, full_path=path)
         or 1.0
     )
-    config_manager.add_hint(path, value / user_factor, rank=RANK_DERIVED_DATA)
+    config_manager.add_hint(
+        path, value / user_factor, rank=PRECEDENCE_DERIVED_DATA
+    )
     registry[key] = (quality, value, source)
     logger.info(
         "Global search: seeded %s = %.10g (internal units) from %s.",
@@ -646,7 +648,7 @@ def starts_satisfied(config_manager, groups):
     in two coordinates.  Returns ``{label: bool}``.
 
     A group every alternative of which is literally named short-circuits the
-    probe (naming a value makes it RANK_USER, which is derivable by
+    probe (naming a value makes it PRECEDENCE_USER, which is derivable by
     definition).  Otherwise the whole question goes to
     ``ConfigManager.probe_derivable``, which is the only thing that can see
     that a period is implied by ``a`` and the member masses, or that a

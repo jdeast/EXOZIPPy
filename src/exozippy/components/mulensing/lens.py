@@ -7,11 +7,11 @@ import pytensor.tensor as pt
 from exozippy.components.component import Component
 from exozippy.components.orbit.bodies import component_instance_names
 from exozippy.config import (
-    RANK_DEFAULT,
-    RANK_DERIVED_DATA,
-    RANK_DERIVED_MIXED,
-    RANK_MULENS_LENS_DISTANCE,
-    RANK_MULENS_SOURCE_DISTANCE,
+    PRECEDENCE_DEFAULT,
+    PRECEDENCE_DERIVED_DATA,
+    PRECEDENCE_DERIVED_MIXED,
+    PRECEDENCE_MULENS_LENS_DISTANCE,
+    PRECEDENCE_MULENS_SOURCE_DISTANCE,
 )
 from exozippy.constants import DAYS_PER_YEAR
 from exozippy.corner_utils import (
@@ -1175,7 +1175,7 @@ class Lens(Component):
             # seeded from the per-body mass initvals instead -- body masses
             # (or logmass) must be supplied in the params file; a user q
             # cannot back-propagate to a companion mass here.
-            # RANK_DERIVED_MIXED: overrides defaults, yields to explicit
+            # PRECEDENCE_DERIVED_MIXED: overrides defaults, yields to explicit
             # user values.
             body_masses = [
                 self._mass_initval(c_type, c_ndx)
@@ -1224,12 +1224,12 @@ class Lens(Component):
                 self.config_manager.add_hint(
                     "lens.0.mlens_total",
                     float(sum(body_masses)),
-                    rank=RANK_DERIVED_MIXED,
+                    rank=PRECEDENCE_DERIVED_MIXED,
                 )
                 for j, m_c in enumerate(body_masses[1:]):
                     q_j = m_c / body_masses[0]
                     self.config_manager.add_hint(
-                        f"lens.{j}.q", q_j, rank=RANK_DERIVED_MIXED
+                        f"lens.{j}.q", q_j, rank=PRECEDENCE_DERIVED_MIXED
                     )
                     self.config_manager.add_scale_hint(
                         f"lens.{j}.q", 0.1 * q_j
@@ -1249,7 +1249,7 @@ class Lens(Component):
                 self.config_manager.add_hint(
                     f"lens.{j}.log_s",
                     float(np.log10(float(s_val))),
-                    rank=RANK_DERIVED_MIXED,
+                    rank=PRECEDENCE_DERIVED_MIXED,
                 )
 
         if any(self.finite_source):
@@ -1304,7 +1304,7 @@ class Lens(Component):
                     np.arctan2(float(sa), float(ca)) * _RAD_TO_DEG
                 )
                 self.config_manager.add_hint(
-                    f"lens.0.alpha", alpha_deg, rank=RANK_DEFAULT
+                    f"lens.0.alpha", alpha_deg, rank=PRECEDENCE_DEFAULT
                 )
 
         # Expected proper motions from the galactic model, for the seeds below.
@@ -1319,17 +1319,17 @@ class Lens(Component):
         for i in range(self.n_elements):
             l_type, l_idx = self._primary_lens(i)
 
-            # RANK_MULENS_LENS_DISTANCE overrides the 10 pc defaults.yaml
-            # default (RANK_DEFAULT) but yields to any value the relaxation
+            # PRECEDENCE_MULENS_LENS_DISTANCE overrides the 10 pc defaults.yaml
+            # default (PRECEDENCE_DEFAULT) but yields to any value the relaxation
             # engine derives from pi_rel + d_S
-            # (RANK_MULENS_SOURCE_DISTANCE).  That ordering is what breaks
+            # (PRECEDENCE_MULENS_SOURCE_DISTANCE).  That ordering is what breaks
             # the d_L <-> parallax cycle: pi_rel drives d_L to the source
             # rank via Condition B, then the parallax is corrected as the
             # weaker symbol.  See the constants' own comment in config.py.
             self.config_manager.add_hint(
                 f"star.{l_idx}.distance",
                 4000.0,
-                rank=RANK_MULENS_LENS_DISTANCE,
+                rank=PRECEDENCE_MULENS_LENS_DISTANCE,
             )
             self.config_manager.add_scale_hint(f"star.{l_idx}.distance", 5.0)
             self.config_manager.add_hint(f"star.{l_idx}.logmass", -0.5)
@@ -1345,7 +1345,7 @@ class Lens(Component):
                 self.config_manager.add_hint(
                     f"star.{s_idx}.distance",
                     8000.0,
-                    rank=RANK_MULENS_SOURCE_DISTANCE,
+                    rank=PRECEDENCE_MULENS_SOURCE_DISTANCE,
                 )
                 self.config_manager.add_scale_hint(
                     f"star.{s_idx}.distance", 5.0
@@ -1365,7 +1365,7 @@ class Lens(Component):
                     self.config_manager.add_hint(
                         f"star.{l2_idx}.distance",
                         4000.0,
-                        rank=RANK_MULENS_LENS_DISTANCE,
+                        rank=PRECEDENCE_MULENS_LENS_DISTANCE,
                     )
                     self.config_manager.add_scale_hint(
                         f"star.{l2_idx}.distance", 5.0
@@ -1492,19 +1492,19 @@ class Lens(Component):
     def _seed_expected_pm(self, line_of_sight, star_idx, population, dist_pc):
         """Seed one star's pm_ra/pm_dec at the galactic model's prior mean.
 
-        RANK_DERIVED_DATA: this is derived from the galactic model the same way
+        PRECEDENCE_DERIVED_DATA: this is derived from the galactic model the same way
         an RV offset is derived from the data, so it belongs in that tier and
         must yield to anything in params.yaml.
 
-        It ties with the MMEXOFAST seeds (also RANK_DERIVED_DATA), which is the
+        It ties with the MMEXOFAST seeds (also PRECEDENCE_DERIVED_DATA), which is the
         point.  Both proper-motion components are now pinned, so ``mu_rel`` has
         a magnitude AND a direction, and the engine no longer has to invert
         ``mu_rel_mag**2 = mu_ra_rel**2 + mu_dec_rel**2`` -- one equation in two
         unknowns -- by choosing a point on a circle (issue #93).  Where that
         disagrees with the seeded ``t_E``, Condition B rewrites the lowest-rank
         symbol in ``t_E = theta_E / |mu_rel_geo|``, which is ``theta_E`` via the
-        lens mass (defaults.yaml, ``RANK_DEFAULT``) and distance
-        (``RANK_MULENS_LENS_DISTANCE``).  So ``t_E``
+        lens mass (defaults.yaml, ``PRECEDENCE_DEFAULT``) and distance
+        (``PRECEDENCE_MULENS_LENS_DISTANCE``).  So ``t_E``
         keeps its measured value, the proper motion keeps the prior's, and the
         lens mass absorbs the difference -- which is the standard microlensing
         chain (a measured t_E plus an assumed mu_rel implies theta_E, hence a
@@ -1535,10 +1535,10 @@ class Lens(Component):
             )
             return
         self.config_manager.add_hint(
-            f"star.{star_idx}.pm_ra", pm_ra, rank=RANK_DERIVED_DATA
+            f"star.{star_idx}.pm_ra", pm_ra, rank=PRECEDENCE_DERIVED_DATA
         )
         self.config_manager.add_hint(
-            f"star.{star_idx}.pm_dec", pm_dec, rank=RANK_DERIVED_DATA
+            f"star.{star_idx}.pm_dec", pm_dec, rank=PRECEDENCE_DERIVED_DATA
         )
         logger.info(
             f"[lens] star.{star_idx} proper motion seeded at the "

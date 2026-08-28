@@ -380,14 +380,14 @@ affine-calibrated-pytensor fast path could not recover either.
 Any structural change (bound/prior/fixed edit, add/remove component) flips the
 `structural_hash`; the UI shows a "Config changed -- re-Solve" banner and
 freezes the live plots until the next Solve. Slider/bound/prior edits are still
-real G8 `set_param_field` commands (undoable, RANK_USER, saved to params.yaml);
+real G8 `set_param_field` commands (undoable, PRECEDENCE_USER, saved to params.yaml);
 the Tune toolbar has its own Save button (the shared document's dirty flag)
 so tuned values can be written to disk without leaving the tab.
 
 **The banner covers edits made ANYWHERE, not only in the Tune tab.** It used
 not to: `TuneTab` checked `/api/tune/hash` at mount and after its own commands
 only, and tabs stay MOUNTED when hidden, so a bound or prior edited in
-`ConfigTab` left the sliders live and still committing RANK_USER initvals
+`ConfigTab` left the sliders live and still committing PRECEDENCE_USER initvals
 against a model the document no longer described. It now takes an `active`
 prop and re-checks the hash on reveal and on a slow timer while visible and
 live. Two independent staleness sources are tracked separately and OR'd --

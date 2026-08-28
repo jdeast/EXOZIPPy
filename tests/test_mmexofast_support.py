@@ -188,7 +188,7 @@ def test_literal_params_skip_the_engine_probe():
     Given a params file that names every required observable outright,
     When sufficiency is checked,
     Then the answer comes from the cheap scan and the relaxation engine is
-    never run -- naming a value makes it RANK_USER, so the probe could not
+    never run -- naming a value makes it PRECEDENCE_USER, so the probe could not
     change the answer, and every ordinary mulens fit would otherwise pay for
     an extra solve.
     """
@@ -425,15 +425,18 @@ def test_errfacs_seed_err_scale_by_element_index():
     Given errfacs for one of two files,
     When pushed,
     Then only that element's err_scale initval hint appears, at
-    RANK_DERIVED_DATA so a user override still wins.
+    PRECEDENCE_DERIVED_DATA so a user override still wins.
     """
-    from exozippy.config import RANK_DERIVED_DATA
+    from exozippy.config import PRECEDENCE_DERIVED_DATA
 
     data = {"errfacs": {"n1.Z087.WFIRST18.128.txt": 1.062}}
     cm = _RecordingConfigManager()
     mmx.push_errfac_hints(data, FILES, "mulensinstrument", cm)
     assert cm.hints == {"mulensinstrument.1.err_scale": 1.062}
-    assert cm.hint_ranks["mulensinstrument.1.err_scale"] == RANK_DERIVED_DATA
+    assert (
+        cm.hint_ranks["mulensinstrument.1.err_scale"]
+        == PRECEDENCE_DERIVED_DATA
+    )
 
 
 def test_errfacs_nonpositive_factor_is_skipped():
