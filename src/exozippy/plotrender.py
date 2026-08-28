@@ -69,12 +69,19 @@ import logging
 import matplotlib.pyplot as plt
 import numpy as np
 
+from . import plot_theme
+
 logger = logging.getLogger(__name__)
 
-# Mirror of plotly-adapter's role encodings.
-_DATA_ALPHA = 0.6
-_MODEL_COLOR = "r"
-_RESIDUAL_COLOR = "0.5"
+# Role encodings come from the ONE shared table (review 4.11.4). They used to
+# be spelled here as matplotlib shorthands -- "r", "0.5", and an implicit
+# f"C{n}" cycle -- and the plotly adapter carried its own hex copies that
+# matched by convention only. Each substitution below is exactly equal to the
+# shorthand it replaces (pinned in tests/test_plot_theme.py), so the saved
+# PDFs do not move; what moved is the GUI, onto these values.
+_DATA_ALPHA = plot_theme.ROLE_ALPHA["data"]
+_MODEL_COLOR = plot_theme.ROLE_COLORS["model"]
+_RESIDUAL_COLOR = plot_theme.ROLE_COLORS["residual"]
 
 
 def _trace_alpha(trace, default):
@@ -89,12 +96,20 @@ def _trace_alpha(trace, default):
 
 
 def _trace_color(trace, fallback=None):
-    """Explicit style color, else the fixed C{series_index}, else fallback."""
+    """Explicit style color, else the shared palette, else fallback.
+
+    The palette lookup replaces an f"C{n}" handoff to matplotlib's own
+    property cycle. That cycle IS tab10 and so resolved to exactly these
+    values, but only by coincidence of matplotlib's defaults -- indexing the
+    shared table makes the agreement with the GUI a fact rather than a
+    coincidence, and survives a matplotlib that ships a different cycle.
+    """
     style = trace.style or {}
     if style.get("color") is not None:
         return style["color"]
     if style.get("series_index") is not None:
-        return f"C{int(style['series_index'])}"
+        idx = int(style["series_index"]) % len(plot_theme.PALETTE)
+        return plot_theme.PALETTE[idx]
     return fallback
 
 
@@ -140,7 +155,7 @@ def _draw_model(ax, trace, alpha):
             np.asarray(trace.y, dtype=float),
             "-",
             color=color,
-            lw=style.get("lw", 1.5),
+            lw=style.get("lw", plot_theme.DEFAULT_LINEWIDTH),
             alpha=_trace_alpha(trace, alpha),
             zorder=2,
             label=label,

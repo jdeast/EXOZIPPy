@@ -36,6 +36,7 @@ Run controls (G11):
 Tune tab (G10):
     POST /api/tune/solve      -- solve + compile the evaluator in a worker proc
     GET  /api/tune/status     -- poll the solve phase (solving/compiling/live)
+    GET  /api/theme           -- a copy of the core chart style table
     GET  /api/tune/result     -- solved parameters + base Charts
     GET  /api/tune/plots/data -- data-only Charts (available from the
                                  "compiling" phase, before the solve is live)
@@ -664,6 +665,22 @@ def create_app(project_dir=None, initial_config=None):
             "initial_project": initial_project,
             "initial_config": initial_config,
         }
+
+    @app.get("/api/theme")
+    def theme():
+        """A COPY of the core chart style table -- never the source of it.
+
+        `plot_theme` lives in the core package precisely so the CLI can draw
+        PDFs with no server running (review 4.11.4: an endpoint-as-source was
+        rejected because it would make the CLI depend on the GUI). This hands
+        the same table to the browser so the frontend does not keep a second,
+        independently-maintained copy of the palette and role colors -- which
+        is exactly how the residual color came to differ between the PDF and
+        the GUI.
+        """
+        from ..plot_theme import as_json
+
+        return JSONResponse(as_json())
 
     @app.get("/api/schema")
     def schema():
