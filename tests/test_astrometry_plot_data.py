@@ -1,6 +1,6 @@
 """
-Tests for AstrometryInstrument.plot_data (GUI PlotSpec pathway) and its
-plot() conversion to the generic PlotSpec renderer.
+Tests for AstrometryInstrument.plot_data (GUI Chart pathway) and its
+plot() conversion to the generic Chart renderer.
 
 Pins, following tests/test_plot_data.py:
   * data-only mode (point=None) works after prepare() WITHOUT
@@ -187,7 +187,7 @@ def test_plot_data_model_traces_at_start(astro_built):
 def test_plot_writes_legacy_pdf_filenames(astro_built, tmp_path):
     """
     Given: the built system and its start point
-    When: plot() renders via the generic PlotSpec renderer
+    When: plot() renders via the generic Chart renderer
     Then: the per-dataset PDFs keep their exact legacy filenames, and the
           hand-drawn sky diagnostics are still written for gaia/abs
     """

@@ -6,7 +6,7 @@ GUI's hybrid loop: after a "Solve" builds the model, dragging a slider
 calls set_value() to rebuild a raw point and eval_plots() to re-render the
 model curves. eval_plots recomputes each affected component's own
 plot_data(system, point) at the new point -- the same code that built the
-base PlotSpecs and that the CLI's matplotlib plot() reuses -- rather than a
+base Charts and that the CLI's matplotlib plot() reuses -- rather than a
 separate compiled-graph implementation; the only optimization is a single
 cached raw-point -> internal-point pytensor function (Evaluator.internal_point),
 built once, in place of System.get_internal_point's per-call recompile.

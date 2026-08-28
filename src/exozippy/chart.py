@@ -5,11 +5,11 @@ Components draw matplotlib figures directly via ``Component.plot`` for
 the CLI, but a browser GUI needs the plot *data* (arrays plus labels),
 not a rendered figure, so it can draw pan/zoomable charts and re-render
 model curves when parameter sliders move.  ``Component.plot_data``
-returns a list of :class:`PlotSpec`; this module defines that container
+returns a list of :class:`Chart`; this module defines that container
 and its ``to_json`` helper (numpy arrays -> rounded Python lists, with
 non-finite values mapped to ``None`` so the payload is valid JSON).
 
-Each :class:`PlotSpec` carries one or more :class:`Trace` objects.  A
+Each :class:`Chart` carries one or more :class:`Trace` objects.  A
 trace's ``role`` is ``"data"`` (observations), ``"model"`` (a model
 curve evaluated at a parameter point) or ``"residual"``.  A trace may
 also carry, in its non-serialized ``node`` field, the symbolic pytensor
@@ -78,7 +78,7 @@ def _jsonify(obj):
 
 @dataclass
 class Trace:
-    """One data or model curve within a :class:`PlotSpec`.
+    """One data or model curve within a :class:`Chart`.
 
     Parameters
     ----------
@@ -135,7 +135,7 @@ class Trace:
 
 
 @dataclass
-class PlotSpec:
+class Chart:
     """A single GUI-renderable chart: data plus optional model curves.
 
     Parameters

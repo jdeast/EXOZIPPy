@@ -1134,7 +1134,7 @@ class SED(Component):
     # ------------------------------------------------------------------
     # Shared data preparation. Both the matplotlib plot() path and the
     # GUI plot_data() path build the model plot object here, so the two
-    # paths always operate on identical arrays (see plotspec.PlotSpec).
+    # paths always operate on identical arrays (see chart.Chart).
     # ------------------------------------------------------------------
     def _make_plot_obj(self, system, points):
         """
@@ -1218,7 +1218,7 @@ class SED(Component):
     # PDF is a single TWO-axes figure (spectra+photometry on top, the
     # magnitude-residual subplot below, sharex, 3:1 height ratio) with
     # per-identity linestyles and a paired line+marker legend -- none of
-    # which the one-axes PlotSpec meta/style vocabulary can express.
+    # which the one-axes Chart meta/style vocabulary can express.
     # The arrays and the identity styling still come from the same
     # helpers plot_data() uses (_make_plot_obj, _identity_styles,
     # _sub_combos), so the hand-drawn PDF and the GUI charts cannot
@@ -1489,13 +1489,13 @@ class SED(Component):
 
     def plot_data(self, system, point=None):
         """
-        GUI plot spec for the SED: observed photometry vs wavelength plus
+        GUI chart for the SED: observed photometry vs wavelength plus
         (with a point) the model spectra. point=None returns a data-only
         preview (observed magnitude vs effective wavelength) without
         loading the model spectra or requiring build_model(). See
-        Component.plot_data and plotspec.PlotSpec.
+        Component.plot_data and chart.Chart.
         """
-        from exozippy.plotspec import PlotSpec, Trace
+        from exozippy.chart import Chart, Trace
 
         if self.nfilters == 0:
             # No catalog photometry rows -- the SED only serves
@@ -1516,7 +1516,7 @@ class SED(Component):
                 )
             ]
             return [
-                PlotSpec(
+                Chart(
                     id=f"{self.prefix}.photometry",
                     component={"yaml_key": self.prefix, "instance": None},
                     title="SED Photometry (observed)",
@@ -1560,7 +1560,7 @@ class SED(Component):
         )
 
         # same fixed identity -> color/marker mapping the PDF uses (the
-        # PDF's per-identity LINESTYLES have no PlotSpec style key, so
+        # PDF's per-identity LINESTYLES have no Chart style key, so
         # every model curve renders solid here)
         id_color, id_marker, _id_line = self._identity_styles(plot_obj)
 
@@ -1645,7 +1645,7 @@ class SED(Component):
         plot_obj._get_ylim()
 
         return [
-            PlotSpec(
+            Chart(
                 id=f"{self.prefix}.sed",
                 component={"yaml_key": self.prefix, "instance": None},
                 title="Spectral Energy Distribution",
@@ -1661,7 +1661,7 @@ class SED(Component):
                         float(plot_obj.y_lower),
                         float(plot_obj.y_upper),
                     ],
-                    # Presentation keys for the PlotSpec renderers. plot()
+                    # Presentation keys for the Chart renderers. plot()
                     # itself stays hand-drawn (two-axes figure; see the
                     # comment above plot()), but file_tag records the PDF
                     # basename it saves ({prefix}_SED.pdf) and figsize its

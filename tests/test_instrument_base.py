@@ -14,10 +14,10 @@ import astropy.units as u
 import numpy as np
 import pytest
 
+from exozippy.chart import Trace
 from exozippy.components.component import Component
 from exozippy.components.factory import discover_components
 from exozippy.components.instrument import Instrument
-from exozippy.plotspec import Trace
 
 
 class _DummyInstrument(Instrument):

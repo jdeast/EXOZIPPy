@@ -1152,7 +1152,7 @@ class AstrometryInstrument(Instrument):
         The specs are the single description of the per-dataset plots --
         the GUI draws the same ones via plotly (see plotrender.py's module
         docstring).  plot_sky stays hand-drawn: its arrows and node
-        annotations are outside the PlotSpec vocabulary.
+        annotations are outside the Chart vocabulary.
 
         The guard below means "compile_plotters has not run yet", nothing
         more: an orbit is not required (review 2.6.3) -- compile_plotters
@@ -1178,14 +1178,14 @@ class AstrometryInstrument(Instrument):
 
     def plot_data(self, system, point=None):
         """
-        GUI plot specs for the astrometry instrument: one chart per
+        GUI charts for the astrometry instrument: one chart per
         dataset (along-scan vs time for gaia mode, sky-plane for abs/rel).
         With point=None only the observed data traces are returned (raw
         preview, usable right after load_data, before build_model); with a
         point, model traces are added via the compiled plotters.  See
-        Component.plot_data and plotspec.PlotSpec.
+        Component.plot_data and chart.Chart.
         """
-        from exozippy.plotspec import PlotSpec, Trace
+        from exozippy.chart import Chart, Trace
 
         sysname = getattr(system, "name", "")
         photo_nodes = getattr(self, "_photo_nodes", None)
@@ -1385,7 +1385,7 @@ class AstrometryInstrument(Instrument):
                 )
 
             specs.append(
-                PlotSpec(
+                Chart(
                     id=f"{self.prefix}.{name}",
                     component={"yaml_key": self.prefix, "instance": name},
                     title=title,

@@ -21,7 +21,7 @@ scaffolding is `src/exozippy/components/instrument.md`.
 
 These are NOT in the package root's `__all__`, and that is deliberate rather than an oversight: `exozippy.__all__` is the run-a-fit surface (`System`, `run_fit`, `__version__`), and writing a component is a different job from running a fit. Import them from their modules.
 
-**Everything in `exozippy` outside those two surfaces is internal** -- importable, since none of this is enforcement, but free to change signature without a major version bump. That includes the GUI's backend modules (`introspect`, `solve_api`, `plotspec`, `evaluator`, `utilities/registry`, `gui/runner`): the GUI ships in this distribution, is versioned with it, and has no third-party consumer, so those stay refactorable as long as both sides move together (`gui/gui.md`). Review 8.13.6; tests: `tests/test_public_api.py`.
+**Everything in `exozippy` outside those two surfaces is internal** -- importable, since none of this is enforcement, but free to change signature without a major version bump. That includes the GUI's backend modules (`introspect`, `solve_api`, `chart`, `evaluator`, `utilities/registry`, `gui/runner`): the GUI ships in this distribution, is versioned with it, and has no third-party consumer, so those stay refactorable as long as both sides move together (`gui/gui.md`). Review 8.13.6; tests: `tests/test_public_api.py`.
 
 ## Component structure
 

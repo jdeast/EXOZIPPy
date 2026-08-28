@@ -1371,7 +1371,7 @@ class Transit(Instrument):
     # ------------------------------------------------------------------
     # Shared data preparation. The matplotlib plot() path and the GUI
     # plot_data() path both go through these helpers, so the two paths
-    # always draw the exact same arrays (see plotspec.PlotSpec).
+    # always draw the exact same arrays (see chart.Chart).
     # ------------------------------------------------------------------
     def _eval_unphased_lc(self, system, point, i):
         """Full model light curve for instrument i: baseline + transit + GP.
@@ -1497,12 +1497,12 @@ class Transit(Instrument):
 
     def plot_data(self, system, point=None):
         """
-        GUI plot specs for the transit photometry: per instrument an
+        GUI charts for the transit photometry: per instrument an
         unphased flux-vs-time chart, and (with a point) one phased chart
         per planet/instrument. point=None returns only the raw data
-        traces. See Component.plot_data and plotspec.PlotSpec.
+        traces. See Component.plot_data and chart.Chart.
         """
-        from exozippy.plotspec import PlotSpec, Trace
+        from exozippy.chart import Chart, Trace
 
         specs = []
         full_deps = self._model_trace_param_deps(
@@ -1575,7 +1575,7 @@ class Transit(Instrument):
                 )
             )
             specs.append(
-                PlotSpec(
+                Chart(
                     id=f"{self.prefix}.unphased.{self.names[i]}",
                     component={
                         "yaml_key": self.prefix,
@@ -1679,7 +1679,7 @@ class Transit(Instrument):
                         t14_ref = float(np.atleast_1d(t14_raw)[p_idx])
                         meta["x_range"] = [-t14_ref, t14_ref]
                     specs.append(
-                        PlotSpec(
+                        Chart(
                             id=f"{self.prefix}.phased.{self.names[i]}.{pname}",
                             component={
                                 "yaml_key": self.prefix,

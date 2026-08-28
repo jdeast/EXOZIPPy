@@ -3,7 +3,7 @@ import {
   api,
   ApiError,
   type DocCommand,
-  type PlotSpec,
+  type Chart,
   type TuneEvalTrace,
   type TuneParam,
   type TuneResult,
@@ -16,7 +16,7 @@ import PlotView from "./PlotView";
 // mode where dragging a slider re-renders the affected model curves in ms.
 //
 // Layout: left = searchable/filterable parameter tree grouped by component
-// instance; center = the PlotSpec plots (highlighted when they depend on the
+// instance; center = the Chart plots (highlighted when they depend on the
 // selected parameter); right = a detail panel with slider / bounds / prior /
 // fix-free controls. Bound/prior/fix edits are structural and flip the
 // evaluator's structural_hash -> a "re-Solve" banner + stale sliders.
@@ -36,7 +36,7 @@ const PROV_HELP: Record<string, string> = {
 };
 
 // A display path (comp.instance.param) reduced to its plot_params label form
-// (comp.param), which is what PlotSpec.param_deps carries.
+// (comp.param), which is what Chart.param_deps carries.
 function labelForm(path: string): string {
   const parts = path.split(".");
   return parts.length === 3 ? `${parts[0]}.${parts[2]}` : path;
@@ -66,7 +66,7 @@ export default function TuneTab({
 }) {
   const [status, setStatus] = useState<TuneStatus | null>(null);
   const [result, setResult] = useState<TuneResult | null>(null);
-  const [specs, setSpecs] = useState<PlotSpec[]>([]);
+  const [specs, setSpecs] = useState<Chart[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Staleness has TWO independent sources and they must not overwrite each

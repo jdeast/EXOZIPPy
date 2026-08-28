@@ -475,7 +475,7 @@ class Instrument(Component):
         Always carries the categorical ``series_index``; adds an explicit
         ``color`` / ``marker`` only when the user configured one (so the theme
         default by index still applies otherwise).  Suitable for
-        ``plotspec.Trace.style``.
+        ``chart.Trace.style``.
         """
         style = {"series_index": int(i)}
         if self.plot_color[i] is not None:

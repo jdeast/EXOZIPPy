@@ -36,8 +36,8 @@ Run controls (G11):
 Tune tab (G10):
     POST /api/tune/solve      -- solve + compile the evaluator in a worker proc
     GET  /api/tune/status     -- poll the solve phase (solving/compiling/live)
-    GET  /api/tune/result     -- solved parameters + base PlotSpecs
-    GET  /api/tune/plots/data -- data-only PlotSpecs (available from the
+    GET  /api/tune/result     -- solved parameters + base Charts
+    GET  /api/tune/plots/data -- data-only Charts (available from the
                                  "compiling" phase, before the solve is live)
     POST /api/tune/eval       -- move one parameter, get updated model curves
     GET  /api/tune/hash       -- structural hash of the open doc (staleness)

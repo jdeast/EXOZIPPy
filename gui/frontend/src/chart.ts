@@ -1,12 +1,12 @@
-// TypeScript mirror of the PlotSpec contract emitted by
-// src/exozippy/plotspec.py (G4). The GUI consumes these JSON payloads and
+// TypeScript mirror of the Chart contract emitted by
+// src/exozippy/chart.py (G4). The GUI consumes these JSON payloads and
 // renders them with plotly; later prompts (G9/G10) re-render model traces as
-// sliders move. Keep this in sync with plotspec.py's to_json() output.
+// sliders move. Keep this in sync with chart.py's to_json() output.
 
 export type TraceRole = "data" | "model" | "residual";
 export type TraceKind = "scatter" | "line";
 
-// Style identity + optional overrides (mirrors plotspec.py's Trace.style):
+// Style identity + optional overrides (mirrors chart.py's Trace.style):
 // series_index drives the fixed categorical color; color/marker/lw are user
 // or component overrides; legend forces a legend entry on a model trace.
 export interface TraceStyle {
@@ -29,9 +29,9 @@ export interface Trace {
   style?: TraceStyle | null;
 }
 
-export interface PlotSpec {
+export interface Chart {
   id: string;
-  // Emitted by plotspec.py as {yaml_key, instance}; older specs used a string.
+  // Emitted by chart.py as {yaml_key, instance}; older specs used a string.
   component: { yaml_key: string; instance: string | null } | string;
   title: string;
   xlabel: string;

@@ -116,13 +116,13 @@ class _DeadlineExpired(Exception):
 
 def _round_list(arr):
     """Convert a numpy array to a JSON-safe list (non-finite -> None)."""
-    from exozippy.plotspec import _array_to_list
+    from exozippy.chart import _array_to_list
 
     return _array_to_list(arr)
 
 
 def _data_only_plots(system):
-    """Data-only PlotSpec JSON from every data-bearing component.
+    """Data-only Chart JSON from every data-bearing component.
 
     ``plot_data(point=None)`` is valid right after ``prepare()``, before any
     model exists -- so the GUI can draw the observations while the
@@ -612,7 +612,7 @@ class TuneSession:
         self.error: Optional[str] = None
         self.structural_hash: Optional[str] = None
         self.result: Optional[dict] = None  # {parameters, seeds, plots}
-        # Data-only PlotSpec JSON, available from the "compiling" phase on so
+        # Data-only Chart JSON, available from the "compiling" phase on so
         # the GUI can draw the observations before the evaluator is live.
         self.data_plots: Optional[list] = None
 

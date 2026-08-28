@@ -1182,7 +1182,7 @@ def _run_fit(config, gui, user_params=None):
             )
     try:
         _add_wrapup_prose(system, burn_diag, mode_report)
-        # One posterior draw unlocks the model-bearing plot specs (phased
+        # One posterior draw unlocks the model-bearing charts (phased
         # panels), whose figures otherwise never enter the draft.
         tex_path = build_modeling_output(
             system, prefix, point=draws[0] if draws else None

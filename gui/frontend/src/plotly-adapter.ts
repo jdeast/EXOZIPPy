@@ -1,4 +1,4 @@
-// PlotSpec -> plotly translation. The single place that maps the backend's
+// Chart -> plotly translation. The single place that maps the backend's
 // trace roles to visual encodings -- the GUI counterpart of
 // src/exozippy/plotrender.py, which renders the SAME specs with matplotlib
 // for the saved PDFs. The two must stay visually equivalent: when you extend
@@ -12,7 +12,7 @@
 // Plots render on WHITE cards (matching the saved figures), even though the
 // surrounding UI is dark -- every color here is chosen for a white background.
 
-import type { PlotSpec, Trace } from "./plotspec";
+import type { Chart, Trace } from "./chart";
 
 // matplotlib's default categorical cycle (C0..C9, tab10). A trace's
 // style.series_index picks from it by FIXED index -- assigned once per
@@ -58,7 +58,7 @@ function markerFor(code: string | undefined): { symbol: string; size: number } {
 }
 
 function errorBar(arr: unknown, color: string): Record<string, unknown> {
-  // Symmetric (N,) or asymmetric (2, N) errors, as plotspec serializes them.
+  // Symmetric (N,) or asymmetric (2, N) errors, as chart serializes them.
   const isAsym = Array.isArray(arr) && Array.isArray((arr as unknown[])[0]);
   return isAsym
     ? {
@@ -81,7 +81,7 @@ function errorBar(arr: unknown, color: string): Record<string, unknown> {
       };
 }
 
-/** Convert one PlotSpec trace into a plotly trace object. */
+/** Convert one Chart trace into a plotly trace object. */
 export function traceToPlotly(trace: Trace): Record<string, unknown> {
   const style = styleOf(trace);
   const color = traceColor(trace);
@@ -118,8 +118,8 @@ export function traceToPlotly(trace: Trace): Record<string, unknown> {
   return out;
 }
 
-/** plotly layout for a PlotSpec: a white figure card, like the saved plots. */
-export function specToLayout(spec: PlotSpec): Record<string, unknown> {
+/** plotly layout for a Chart: a white figure card, like the saved plots. */
+export function specToLayout(spec: Chart): Record<string, unknown> {
   // Axis scaling comes from the spec's `meta` hints (set by the component's
   // plot_data). The SED, for one, needs a log wavelength axis and an inverted
   // magnitude axis -- without honoring these the points collapse to what looks
@@ -202,7 +202,7 @@ export function specToLayout(spec: PlotSpec): Record<string, unknown> {
 }
 
 /** Full (data, layout) pair ready for Plotly.react. */
-export function specToPlotly(spec: PlotSpec): {
+export function specToPlotly(spec: Chart): {
   data: Record<string, unknown>[];
   layout: Record<string, unknown>;
 } {
