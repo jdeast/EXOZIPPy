@@ -1204,6 +1204,7 @@ class AstrometryInstrument(Instrument):
                 "file_tag": f"astrometry_{name}",
                 "figsize": (12, 6),
             }
+            x_inverted = False
 
             if mode == "gaia":
                 # Along-scan data; the model (when a point is given) is the
@@ -1307,7 +1308,7 @@ class AstrometryInstrument(Instrument):
                                 style={"legend": True, "lw": 1},
                             )
                         )
-                meta["x_inverted"] = True  # East to the left
+                x_inverted = True  # East to the left
                 meta["aspect_equal"] = True
                 # The data trace subtracts the point's pm+plx linear terms,
                 # so live evals must re-ship it along with the model.
@@ -1368,7 +1369,7 @@ class AstrometryInstrument(Instrument):
                             },
                         )
                     )
-                meta["x_inverted"] = True  # East to the left
+                x_inverted = True  # East to the left
                 meta["aspect_equal"] = True
                 xlabel = r"$\Delta\alpha^*$ [mas]"
                 ylabel = r"$\Delta\delta$ [mas]"
@@ -1393,6 +1394,7 @@ class AstrometryInstrument(Instrument):
                     ylabel=ylabel,
                     traces=traces,
                     param_deps=deps,
+                    x_inverted=x_inverted,
                     meta=meta,
                 )
             )

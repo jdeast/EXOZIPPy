@@ -2018,8 +2018,8 @@ class MulensInstrument(Instrument):
                     xlabel="Time [BJD]",
                     ylabel="mag",
                     traces=traces,
+                    y_inverted=True,
                     meta={
-                        "y_inverted": True,
                         "file_tag": "mulens",
                         "figsize": (12, 6),
                         # Same caption as the model-bearing spec below: the
@@ -2149,7 +2149,6 @@ class MulensInstrument(Instrument):
             )
 
         meta = {
-            "y_inverted": True,
             "file_tag": "mulens",
             "figsize": (12, 6),
             # The data traces are re-aligned onto the reference flux system
@@ -2172,6 +2171,7 @@ class MulensInstrument(Instrument):
                 ylabel="mag - mag$_0$",
                 traces=traces,
                 param_deps=deps,
+                y_inverted=True,
                 meta=meta,
             )
         ]
@@ -2185,10 +2185,11 @@ class MulensInstrument(Instrument):
                     ylabel="mag - mag$_0$",
                     traces=traces,
                     param_deps=deps,
+                    y_inverted=True,
+                    x_range=[t0 - 3.0 * tE, t0 + 3.0 * tE],
                     meta=dict(
                         meta,
                         file_tag="mulens_zoom",
-                        x_range=[t0 - 3.0 * tE, t0 + 3.0 * tE],
                         caption=(
                             "As the previous figure, zoomed to "
                             r"$t_0 \pm 3\,t_E$."

@@ -100,11 +100,18 @@ class Trace:
         compiled re-evaluation.  Not serialized by ``to_json``.
     style : dict, optional
         Style identity + optional overrides for this series: ``series_index``
-        (drives categorical color), and optional ``color`` / ``marker`` user
-        overrides (see ``Instrument._data_trace_style`` and
+        (drives categorical color), ``legend`` to force a legend entry on a
+        non-data trace, ``lw`` line width, and optional ``color`` / ``marker``
+        user overrides (see ``Instrument._data_trace_style`` and
         ``notes/gui_todo.txt``).  ``role`` still implies everything derivable
         (data = markers, model = line); this carries only identity/overrides.
         Serialized by ``to_json`` when present.
+    alpha : float, optional
+        Per-trace opacity override.  ``None`` means "use the role's default",
+        which is where the two renderers had silently disagreed: the saved
+        PDF drew data at 0.6 while the GUI drew it fully opaque (review
+        4.11.6).  The default now lives in one place per renderer and is the
+        PDF's, so the GUI matches what gets published.
     """
 
     name: str
@@ -116,6 +123,7 @@ class Trace:
     xerr: Optional[Any] = None
     node: Any = field(default=None, repr=False, compare=False)
     style: Optional[dict] = None
+    alpha: Optional[float] = None
 
     def to_json(self) -> dict:
         d = {
@@ -131,6 +139,8 @@ class Trace:
             d["xerr"] = _array_to_list(self.xerr)
         if self.style is not None:
             d["style"] = _jsonify(self.style)
+        if self.alpha is not None:
+            d["alpha"] = float(self.alpha)
         return d
 
 
@@ -151,15 +161,32 @@ class Chart:
         The data/model curves to draw.
     param_deps : list[str]
         Parameter paths (``system.plot_params`` labels, plus any
-        declared cross-component deps) whose change affects this spec's
+        declared cross-component deps) whose change affects this chart's
         model traces.  A GUI highlights the affected charts when a
-        slider moves.  Empty for data-only specs.
+        slider moves.  Empty for data-only charts.
+    x_range, y_range : list[float], optional
+        Explicit ``[lo, hi]`` axis windows.
+    x_log, y_log : bool
+        Logarithmic axes.
+    x_inverted, y_inverted : bool
+        Reversed axes -- magnitudes, and RA increasing to the left.
     meta : dict
-        Free-form metadata (e.g. ``{"phase_folded": True}``).  The
-        presentation keys both renderers honor are documented in
-        ``plotrender.py``'s module docstring; ``meta["caption"]`` is the
-        LaTeX figure caption the generated paper draft
-        (``outputs/modeling.py``) pairs with this spec's saved PDF.
+        Free-form ANNOTATIONS, and nothing a renderer needs to lay out an
+        axis: ``caption`` (the LaTeX figure caption the generated paper
+        draft, ``outputs/modeling.py``, pairs with this chart's saved PDF),
+        ``phase_folded``, ``file_tag``, ``md5``, ``url``, ``size``,
+        ``dynamic_data``.
+
+        THE SIX AXIS-GEOMETRY FIELDS ABOVE USED TO LIVE HERE (review
+        4.11.3).  They were promoted because they are not annotations: both
+        renderers have to consult them to lay out an axis at all, so a typo
+        in a ``meta`` key silently produced a linear axis where a log one
+        was meant, with nothing to catch it -- a stringly-typed field that
+        two independent renderers must agree on is a contract, and a
+        contract belongs in the dataclass.  ``aspect_equal`` and
+        ``hline_y`` deliberately STAYED: each is honored by exactly one
+        renderer, so promoting them would advertise a field the other
+        silently ignores.  Promote them if and when both read them.
     """
 
     id: str
@@ -169,10 +196,16 @@ class Chart:
     ylabel: str
     traces: list = field(default_factory=list)
     param_deps: list = field(default_factory=list)
+    x_range: Optional[Any] = None
+    y_range: Optional[Any] = None
+    x_log: bool = False
+    y_log: bool = False
+    x_inverted: bool = False
+    y_inverted: bool = False
     meta: dict = field(default_factory=dict)
 
     def to_json(self) -> dict:
-        return {
+        d = {
             "id": self.id,
             "component": _jsonify(self.component),
             "title": self.title,
@@ -182,3 +215,14 @@ class Chart:
             "param_deps": list(self.param_deps),
             "meta": _jsonify(self.meta),
         }
+        # Emitted only when set, the same way `yerr` and `style` are: the
+        # default state of an axis is "whatever the renderer would do
+        # anyway", so a payload full of nulls and falses would be noise.
+        if self.x_range is not None:
+            d["x_range"] = _array_to_list(self.x_range)
+        if self.y_range is not None:
+            d["y_range"] = _array_to_list(self.y_range)
+        for name in ("x_log", "y_log", "x_inverted", "y_inverted"):
+            if getattr(self, name):
+                d[name] = True
+        return d
