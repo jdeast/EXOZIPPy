@@ -223,16 +223,20 @@ class System(Component):
         # PRE-FLIGHT SEQUENCE
         # ==========================================================
         # Stages 1-2: DATA & LOGICAL MAPS
+        #
+        # Called unconditionally: `load_data` and `build_maps` are concrete on
+        # Component and `register_parameters` is abstract, so every component
+        # has all three (review 4.2.2). The `hasattr` guards these replace
+        # were always true, and would have SKIPPED a stage in silence for a
+        # component whose method was misnamed -- a guard that can only hide a
+        # bug is worse than no guard.
         for comp in self.active_components.values():
-            if hasattr(comp, "load_data"):
-                comp.load_data(self)
-            if hasattr(comp, "build_maps"):
-                comp.build_maps()
+            comp.load_data(self)
+            comp.build_maps()
 
         # Stage 3: REGISTRATION (The Blueprint)
         for comp in self.active_components.values():
-            if hasattr(comp, "register_parameters"):
-                comp.register_parameters(self)
+            comp.register_parameters(self)
 
         # After stage 3: the REPORTED-element invariant, checked before anything is
         # built (see _validate_reported_not_consumed).
@@ -793,8 +797,7 @@ class System(Component):
 
             # Stage 7: LIKELIHOOD
             for comp in self.active_components.values():
-                if hasattr(comp, "build_likelihood"):
-                    comp.build_likelihood(model, system=self)
+                comp.build_likelihood(model, system=self)
 
             # After stage 7: REPORTED elements (manifest role 3).  Deliberately
             # after stage 7: a reported element is consumed by nothing, so

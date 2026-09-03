@@ -18,15 +18,30 @@ import type { Chart, Trace } from "./chart";
 // style.series_index picks from it by FIXED index -- assigned once per
 // instrument at load, never re-cycled per chart -- so an instrument keeps
 // its color across every panel, exactly as in the PDFs.
+//
+// THIS BLOCK IS A COPY OF src/exozippy/plot_theme.py. Do not hand-edit it:
+// tests/test_plot_theme.py parses this file and fails if it drifts from the
+// Python table, which is the source of truth (review 4.11.4). The GUI also
+// serves the same table at GET /api/theme for any consumer that wants it at
+// runtime.
+//
+// It is a compiled-in copy rather than a fetch on purpose. The reason
+// endpoint-as-source was rejected for the CLI -- a renderer must not need a
+// server to know what color a residual is -- applies to the browser too: a
+// first paint blocked on a network round-trip is worse than a copy a test
+// keeps honest.
+//
+// The residual color moved here (#6e7781 -> #808080, matplotlib's "0.5") when
+// the tables were unified: the two renderers had genuinely disagreed, and JDE
+// ruled 2026-08-27 "match the pdf".
 const TAB10 = [
   "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
   "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
 ];
 
-// matplotlib "r" -- the default model-curve color in the PDFs.
 const MODEL_COLOR = "#ff0000";
 const DATA_COLOR = "#24292f";
-const RESIDUAL_COLOR = "#6e7781";
+const RESIDUAL_COLOR = "#808080";
 
 interface TraceStyle {
   series_index?: number;
@@ -86,7 +101,7 @@ function errorBar(arr: unknown, color: string): Record<string, unknown> {
 // drew data at 0.6 while this drew it fully opaque, so the same fit looked
 // different depending on where you viewed it. JDE ruled "match the pdf", so
 // the PDF's values are canonical here.
-const DATA_ALPHA = 0.6;
+const DATA_ALPHA = 0.6; // plot_theme.ROLE_ALPHA["data"]
 
 /** The trace's own alpha if it set one, else its role default. */
 function traceAlpha(trace: Trace): number {
