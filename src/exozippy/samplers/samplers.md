@@ -59,6 +59,42 @@ draws in the model plots (`run.get_draws`, unseeded so the overlay honestly
 shows spread -- see its docstring), and floating-point non-associativity
 across a different core count.
 
+## `swap_schedule`: DEO, and why `random` is still here
+
+`sampler: {swap_schedule: deo}` is the default and is what you want. It is the
+non-reversible Deterministic Even-Odd schedule (Syed et al. 2022), which turns
+round-trip transport across the ladder from O(n_temps^2) to O(n_temps).
+
+`swap_schedule: random` is the legacy random-pair schedule and is **diagnostic
+only**. It was measured head-to-head against DEO on a real event (review 7.4.4
+leg (a), 2026-08-27):
+
+| | round trips | draws to converge |
+|---|---|---|
+| `deo` | 37/41 | 3,995 |
+| `random` | 0/0 | 55,648, or never |
+
+And the failure is not merely slow. **One random arm lost a mode**: it reported
+1 mode at weight 1.000, zero inter-mode transitions, 34/34 chains in one basin
+-- on an event where every DEO run finds the +/-u_0 pair, and where the -u_0
+solution had been seeded and was sitting in that same run's rejected-seed
+ledger. A schedule that can silently return half the posterior is not a
+performance choice.
+
+**So why keep it?** One real use, and one cheap one. The real use is as the
+CONTROL for diagnosing ladder transport: review 2.4.9 (`ptde_async`'s ladder
+does not transport) was diagnosable precisely because async-on-DEO behaves
+like sync-on-random, and that comparison needs a known-bad schedule to point
+at. The cheap one is that keeping it spares the next investigator from
+re-implementing it to rediscover that it is worse.
+
+It is nearly free to keep. Since review 7.4.4's fold, both schedules share one
+Metropolis test and one state exchange and differ only in which
+`(rung, chain, chain)` triples they attempt -- so PT invariance cannot differ
+between them, and `random` costs one generator rather than a duplicated swap
+loop. Before the fold, sync carried ~25 lines of duplicated exchange while
+`ptde_async` had always shared it.
+
 ## PTDE: the proposal path is BIT-IDENTICAL by construction
 
 A rung's population is one `(n_chains, n_raw_elements)` float64 array

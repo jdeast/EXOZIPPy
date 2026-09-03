@@ -13,8 +13,30 @@ communication barrier during tuning (Syed et al. 2022).
 Temperature swaps use the Deterministic Even-Odd (DEO) schedule by default
 (swap_schedule="deo"; Syed et al. 2022, "Non-reversible parallel tempering"),
 which turns round-trip transport across the ladder from O(n_temps^2) to
-O(n_temps). Pass swap_schedule="random" to restore the legacy random-pair
-schedule for A/B comparison.
+O(n_temps).
+
+swap_schedule="random" restores the legacy random-pair schedule and is
+DIAGNOSTIC ONLY. It was measured head-to-head against DEO on a real event
+(review 7.4.4 leg (a), 2026-08-27, jobs 15378161-64) and lost decisively:
+
+    DEO     37/41 temperature round trips, converged at  3,995 draws
+    random   0/0  round trips,             took         55,648 draws
+                                           or never converged at all
+
+Worse, one random arm LOST A MODE -- it reported 1 mode at weight 1.000 with
+zero inter-mode transitions and 34/34 chains in one basin, on an event where
+every DEO run finds the +/-u_0 pair AND where the -u_0 solution was seeded and
+sat in that same run's rejected-seed ledger. Do not use it for a production
+fit.
+
+It is kept, rather than deleted, for one real use: it is the CONTROL for
+diagnosing ladder transport. Review 2.4.9 (ptde_async's ladder does not
+transport) was diagnosable because async-on-DEO behaves like sync-on-random,
+which needs a known-bad schedule to compare against. Keeping it also spares
+the next investigator from re-implementing it to rediscover that it is worse.
+Since the fold in review 7.4.4, it costs one generator rather than a
+duplicated swap loop -- the Metropolis test and the state exchange are shared,
+so PT invariance cannot differ between the two schedules.
 
 Fork-based parallelism: logp function is inherited by child processes via
 copy-on-write, avoiding the picklability constraint that blocks cloudpickle
@@ -926,6 +948,9 @@ def ptde_sample(
                n_chains <= n_params.
     swap_interval : int  — attempt temperature swaps every N steps
     swap_schedule : {"deo", "random"}  — "deo" (default) uses the
+        non-reversible even-odd schedule; "random" is DIAGNOSTIC ONLY and
+        measured decisively worse (it lost a mode; see this module's
+        docstring for the numbers).  "deo" (default) uses the
                Deterministic Even-Odd non-reversible schedule (Syed et al.
                2022): even swap rounds attempt rung pairs (0,1),(2,3),...;
                odd rounds (1,2),(3,4),.... Within an attempted pair, chain i
@@ -1346,65 +1371,70 @@ def ptde_sample(
             #    pairs and need no fresh evaluation (bug 1.14 -- filtering by
             #    the thinning pattern permanently disconnected the ladder).
             if n_temps > 1 and (step + 1) % swap_interval == 0:
-                if swap_schedule == "deo":
-                    deo_pairs = _deo_pairs(swap_round, n_temps)
+                # ONE swap implementation, two schedules. The schedules differ
+                # ONLY in which (rung, chain, chain) triples they attempt; the
+                # Metropolis test and the state exchange below are shared, so
+                # PT invariance cannot differ between them. ptde_async.py has
+                # always been written this way; sync duplicated the whole
+                # exchange until review 7.4.4.
+                #
+                # GENERATORS, not lists: DEO draws one permutation then one
+                # uniform per attempt, random draws two integers then one
+                # uniform per rung. Materializing the attempts would consume
+                # every integer draw before any uniform and change both rng
+                # streams. DEO is the default, so its stream staying identical
+                # is what keeps shipped fits bit-identical.
+                def _deo_attempts():
                     # Fresh random chain pairing each round: rung-k chain i is
                     # swapped with rung-(k+1) chain perm[i]. Any fixed or
                     # randomized pairing is valid (each pairwise swap satisfies
                     # detailed balance at fixed pairing); a random permutation
                     # spreads swap attempts symmetrically over all n_chains.
                     perm = rng.permutation(n_chains)
-                    for k, kp1 in deo_pairs:
+                    for k, kp1 in _deo_pairs(swap_round, n_temps):
                         for i in range(n_chains):
-                            j = int(perm[i])
-                            n_swap_propose[k] += 1
-                            # (logp_j - logp_i) * (1/T_k - 1/T_{k+1});
-                            # T_k < T_{k+1} -> factor > 0 -> accept lp increase.
-                            log_a = (logps[kp1][j] - logps[k][i]) * (
-                                1.0 / temperatures[k] - 1.0 / temperatures[kp1]
-                            )
-                            if rng.random() < np.exp(min(0.0, log_a)):
-                                # .copy() first: these are numpy ROWS, so
-                                # the tuple would hold views and the second
-                                # assignment would read the first one back.
-                                _tmp = populations[k][i].copy()
-                                populations[k][i] = populations[kp1][j]
-                                populations[kp1][j] = _tmp
-                                logps[k][i], logps[kp1][j] = (
-                                    logps[kp1][j],
-                                    logps[k][i],
-                                )
-                                direction[k][i], direction[kp1][j] = (
-                                    direction[kp1][j],
-                                    direction[k][i],
-                                )
-                                n_swap_accept[k] += 1
-                    swap_round += 1
-                else:
-                    # Legacy random schedule: one random chain pair per
-                    # adjacent rung. Kept for A/B comparison (swap_schedule=
-                    # "random"). Round-trip tags are still tracked so the
-                    # metric is reported the same way for both schedules.
+                            yield k, kp1, i, int(perm[i])
+
+                def _random_attempts():
+                    # Legacy schedule: one random chain pair per adjacent rung.
+                    # DIAGNOSTIC ONLY -- measured decisively worse; see this
+                    # module's docstring for the numbers and the one use it is
+                    # still good for.
                     for k in range(n_temps - 1):
                         i = int(rng.integers(n_chains))
                         j = int(rng.integers(n_chains))
-                        n_swap_propose[k] += 1
-                        log_a = (logps[k + 1][j] - logps[k][i]) * (
-                            1.0 / temperatures[k] - 1.0 / temperatures[k + 1]
+                        yield k, k + 1, i, j
+
+                attempts = (
+                    _deo_attempts()
+                    if swap_schedule == "deo"
+                    else _random_attempts()
+                )
+                for k, kp1, i, j in attempts:
+                    n_swap_propose[k] += 1
+                    # (logp_j - logp_i) * (1/T_k - 1/T_{k+1});
+                    # T_k < T_{k+1} -> factor > 0 -> accept lp increase.
+                    log_a = (logps[kp1][j] - logps[k][i]) * (
+                        1.0 / temperatures[k] - 1.0 / temperatures[kp1]
+                    )
+                    if rng.random() < np.exp(min(0.0, log_a)):
+                        # .copy() first: these are numpy ROWS, so the tuple
+                        # form would hold views and the second assignment
+                        # would read the first one back.
+                        _tmp = populations[k][i].copy()
+                        populations[k][i] = populations[kp1][j]
+                        populations[kp1][j] = _tmp
+                        logps[k][i], logps[kp1][j] = (
+                            logps[kp1][j],
+                            logps[k][i],
                         )
-                        if rng.random() < np.exp(min(0.0, log_a)):
-                            _tmp = populations[k][i].copy()  # views; see above
-                            populations[k][i] = populations[k + 1][j]
-                            populations[k + 1][j] = _tmp
-                            logps[k][i], logps[k + 1][j] = (
-                                logps[k + 1][j],
-                                logps[k][i],
-                            )
-                            direction[k][i], direction[k + 1][j] = (
-                                direction[k + 1][j],
-                                direction[k][i],
-                            )
-                            n_swap_accept[k] += 1
+                        direction[k][i], direction[kp1][j] = (
+                            direction[kp1][j],
+                            direction[k][i],
+                        )
+                        n_swap_accept[k] += 1
+                if swap_schedule == "deo":
+                    swap_round += 1
                 _record_round_trips(direction, round_trips, n_temps)
                 n_swap_rounds += 1
 

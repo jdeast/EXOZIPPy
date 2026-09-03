@@ -136,7 +136,11 @@ def ptde_async_sample(
                completed evaluations (any rung). None -> n_chains, chosen so
                the long-run ratio of evaluations-per-swap-attempt roughly
                matches ptde.py's one-full-round-of-swaps-per-step cadence.
-    swap_schedule : {"deo", "random"} -- "deo" (default) walks the adjacent
+    swap_schedule : {"deo", "random"} -- "random" is DIAGNOSTIC ONLY and
+        measured decisively worse than the default (review 7.4.4 leg (a): 0/0
+        round trips against DEO's 37/41, and one arm lost a mode).  It is kept
+        as the control for diagnosing ladder transport; see ptde.py's module
+        docstring.  "deo" (default) walks the adjacent
                rung pairs in a deterministic non-reversible cycling order
                (even pairs (0,1),(2,3),... first, then odd pairs (1,2),(3,4),
                ..., repeating; see ptde._deo_pair_sequence), the event-time
