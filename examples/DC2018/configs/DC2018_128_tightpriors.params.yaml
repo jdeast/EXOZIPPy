@@ -93,7 +93,15 @@ mulensinstrument.Roman_Z087.err_scale: {lower: 1.0e-2, upper: 1.0e+2}
 # possibly have seen.  This is exactly JDE's path-2 rule ("a few months
 # before the first data point to a few months after the last") applied BY
 # HAND here rather than automatically, because path 2 has not been built.
-lens.DC2018_128.t_0: {lower: 2458256.5, upper: 2460149.3}
+# KEY FORM: `lens.Lens.t_0`, using the INSTANCE NAME from the config's
+# `lens: - name: "Lens"`.  An earlier version of this file wrote
+# `lens.DC2018_128.t_0` -- the RUN name, which is not an instance name and
+# matches nothing.  It would have been silently ignored here, because
+# run.py:1641's "did not match any model parameter" warning lives in the
+# run.py path and dc18_fullns_pilot.py drives the sampler directly.  That is
+# worth a defect of its own: a params key that matches nothing should warn
+# from the config layer, not from one caller.
+lens.Lens.t_0: {lower: 2458256.5, upper: 2460149.3}
 
 # 4. u_0: NOT TIGHTENED, deliberately.  An earlier version of this file cut
 # it to U(-2, 2) for 2.20 nats; JDE vetoed that on 2026-09-04 -- "u_0 +/- 2
