@@ -604,12 +604,19 @@ def seed_start(config_manager, path, value, quality, source):
     # correct while the defaults unit happened to be the internal one, with
     # a warning for the case it was not.  resolve() layers hints now (review
     # 3.14.3), so the duplicate and its unit caveat are both gone.
+    #
+    # Ask about `key`, NOT `path`: `key` is the canonical (index-form)
+    # spelling computed above, and after standardize_param_names that is the
+    # only spelling `user_params` can hold.  Asking under the original path
+    # found no `unit:` override for a name-form seed and silently used the
+    # DEFAULTS unit -- review 2.14.6's defect, at a fifth site, and here the
+    # canonical spelling was already sitting two lines up.
     user_factor = (
-        config_manager.get_conversion_factor(c_type, p_name, full_path=path)
+        config_manager.get_conversion_factor(c_type, p_name, full_path=key)
         or 1.0
     )
     config_manager.add_hint(
-        path, value / user_factor, rank=PRECEDENCE_DERIVED_DATA
+        key, value / user_factor, rank=PRECEDENCE_DERIVED_DATA
     )
     registry[key] = (quality, value, source)
     logger.info(

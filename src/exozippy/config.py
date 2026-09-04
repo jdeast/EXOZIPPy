@@ -808,7 +808,16 @@ class ConfigManager:
             self._strip_user_init_scales()
             self.links = extract_links(self.user_params, system_config)
         else:
-            self.user_params = user_params
+            # DEEPCOPY, because `finalize_user_params` INJECTS BACK into
+            # `self.user_params` (solved values, `derived: True` markers), and
+            # aliasing the caller's dict makes those writes land in their
+            # object.  `standardize_param_names` above returns a fresh dict
+            # and documents non-aliasing as a contract (the #76 lesson); this
+            # branch silently lacked it, so the same ConfigManager built two
+            # ways behaved differently.  Production always passes a
+            # system_config -- this bit tests and direct drivers, which is
+            # exactly where a mutated input is hardest to see (review 2.1.9).
+            self.user_params = copy.deepcopy(user_params)
             self._strip_user_init_scales()
 
         # Must run AFTER extract_links: that call deletes the link string from
@@ -1059,6 +1068,46 @@ class ConfigManager:
                     out.setdefault(fld, {})[int(parts[1])] = plink
         return out
 
+    def _reject_broadcast_hint_path(self, path, translated_path):
+        """Refuse a 2-part broadcast path on an INTERNAL hint channel.
+
+        Only where the broadcast form is genuinely a broadcast, i.e. where
+        the component is a LIST.  For a flat-dict component (``sed.av``) the
+        2-part spelling IS the canonical one and names a single instance, so
+        it stays legal -- which is also why the check is on the component's
+        shape rather than on the number of dots.
+
+        Permissive when there is no ``system_config``: that path cannot tell
+        a broadcast from a canonical 2-part key, and it is the tests-and-
+        direct-drivers mode, not production.
+        """
+        parts = translated_path.split(".")
+        if len(parts) != 2 or not isinstance(self.system_config, dict):
+            return
+        if not isinstance(self.system_config.get(parts[0]), list):
+            return
+        spelled = (
+            f"{path!r}"
+            if path == translated_path
+            else f"{path!r} (translated to {translated_path!r})"
+        )
+        raise ValueError(
+            f"\n!!! BROADCAST PATH ON AN INTERNAL HINT CHANNEL !!!\n"
+            f"{spelled} is the 2-part broadcast form, and "
+            f"'{parts[0]}' is a list component with "
+            f"{len(self.system_config[parts[0]])} instance(s).\n"
+            f"Broadcasting is a USER-FACING convenience: a params-file entry "
+            f"is expanded into one key per element at construction, and "
+            f"nothing downstream sees the broadcast form again.  A hint, a "
+            f"scale hint or a seed is pushed BY A COMPONENT, which knows "
+            f"which element it means -- so push one per element:\n"
+            f"    {parts[0]}.<i>.{parts[1]}\n"
+            f"This is refused rather than expanded because one scalar cannot "
+            f"answer for every element: since review 1.1.5 the elements may "
+            f"carry different `unit:` overrides, so there is no single unit "
+            f"the value could be read in."
+        )
+
     def _translate_and_scale(self, path, value):
         """Standardize a human-readable path to internal-index form and convert
         its value to internal units.  Returns (translated_path, internal_value).
@@ -1072,14 +1121,49 @@ class ConfigManager:
         """
         translated_path = self.canonical_key(path)
 
-        # Scale to Internal Units.  The ORIGINAL path is what carries a user
-        # `unit:` override in user_params, so that is what get_conversion_factor
-        # is asked about; the translated path only supplies the defaults.yaml
-        # lookup pair (component type, parameter name).
+        # Scale to Internal Units, asking about the TRANSLATED path.  The
+        # comment here used to say the opposite -- that the ORIGINAL path is
+        # what carries a user `unit:` override -- and that is precisely
+        # backwards: `standardize_param_names` folds the name form into the
+        # index form at construction, so after it runs `user_params` can
+        # never contain a name-form key, and a hint pushed as
+        # `star.B.distance` looked up a spelling that does not exist and got
+        # the DEFAULTS unit.  Measured: with `star.B.distance: {unit: kpc}`,
+        # pushing the name form scaled by 1.0 and the index form by 1000.0 --
+        # the same element of the same parameter, differing only in spelling
+        # (review 2.14.6).
+        #
+        # Safe because `canonical_key` is the identity wherever `user_params`
+        # keeps the original spelling: it rewrites only the name form, and
+        # only for a LIST component.  So the translated path equals the
+        # original everywhere the original already worked.
+        #
+        # AND THE 2-PART BROADCAST SPELLING IS REFUSED OUTRIGHT (review
+        # 2.14.8).  It would otherwise miss in the same way and for the same
+        # reason -- `canonical_key` leaves `star.distance` alone while
+        # standardization expanded that entry into
+        # `star.0.distance`/`star.1.distance` -- but the fix cannot be
+        # another index translation, because a broadcast hint is ONE scalar
+        # for every element while the elements may legitimately carry
+        # DIFFERENT units (since review 1.1.5 a specific `unit:` overrides a
+        # broadcast one per element).  There is no forced answer to "which
+        # unit is this scalar in", so the channel refuses the question.
+        #
+        # JDE's ruling, 2026-09-04: broadcasting is a USER-FACING
+        # CONVENIENCE.  It is translated once, at construction, and never
+        # thought about again -- so an INTERNAL channel must never be handed
+        # one.  The guard lives here rather than in `add_hint` because this
+        # helper is the single implementation behind add_hint,
+        # add_scale_hint, add_seed_hints and seed_start_value, and all four
+        # are internal.
+        self._reject_broadcast_hint_path(path, translated_path)
+
         final_parts = translated_path.split(".")
         if len(final_parts) >= 2:
             c_type, p_name = final_parts[0], final_parts[-1]
-            factor = self.get_conversion_factor(c_type, p_name, full_path=path)
+            factor = self.get_conversion_factor(
+                c_type, p_name, full_path=translated_path
+            )
             internal_value = float(value) * factor
         else:
             internal_value = float(value)
@@ -1376,12 +1460,21 @@ class ConfigManager:
             scales, scale hints) go through ``_lookup_keys`` below, which
             traverses this same list so that the same entry wins there.
             """
+            # BOTH per-element spellings index through `_eff_idx`, which is
+            # the whole point of that helper: in single-element mode
+            # (shape=(), element=j) the loop variable `i` is always 0 while
+            # the element being resolved is `j`.  The index form used
+            # `_eff_idx(i)` and the name form used `names[i]`, so the two
+            # named DIFFERENT elements -- `star.1.distance` alongside
+            # `star.A.distance` -- and a name-form entry for the element
+            # actually being resolved was never looked up (review 2.1.8).
+            ndx = _eff_idx(i)
             keys = [
                 f"{component_type}.{param_name}",
-                f"{component_type}.{_eff_idx(i)}.{param_name}",
+                f"{component_type}.{ndx}.{param_name}",
             ]
-            if names and i < len(names):
-                keys.append(f"{component_type}.{names[i]}.{param_name}")
+            if names and ndx < len(names):
+                keys.append(f"{component_type}.{names[ndx]}.{param_name}")
             return keys
 
         def _lookup_keys(i):

@@ -27,6 +27,15 @@ settled by specificity BEFORE the strictest-wins clip runs.  The clip itself
 is untouched and still governs user-vs-defaults, which is the case it was
 written for.
 
+AND THE BROADCAST FORM IS USER-FACING ONLY (review 2.14.8, JDE's ruling
+2026-09-04).  It is a convenience for writing a params file: standardization
+expands it into one key per element at construction, and nothing downstream
+sees it again.  So the INTERNAL channels -- ``add_hint``, ``add_scale_hint``,
+``add_seed_hints``, ``seed_start_value`` -- refuse it outright rather than
+expanding it, because one scalar cannot answer for every element once the
+elements may carry different ``unit:`` overrides (which review 1.1.5 made
+possible).  A component knows which element it means; it says so.
+
 The index and name forms name exactly ONE element each and are equally
 specific, so "most specific wins" cannot adjudicate between them -- and the
 two traversals disagreed about it (index in the first-hit lookups, name in
@@ -137,19 +146,27 @@ def test_broadcast_unit_still_covers_elements_with_no_specific_entry():
 
 def test_specific_scale_hint_beats_broadcast_scale_hint():
     """
-    Given a component pushing a broadcast scale hint and a per-element one on
-      the same parameter,
+    Given a broadcast scale hint and a per-element one on the same parameter,
     When resolve() reads init_scale,
     Then element 0 gets the specific hint and element 1 the broadcast hint.
 
     init_scale is not cosmetic: it seeds the whitening probe, and for an
     unbounded element with no sigma it is the prior width itself.
+
+    BUILT WITHOUT A system_config, since review 2.14.8.  This test used to
+    push the broadcast through `add_scale_hint` on a full SYSTEM, which is
+    now refused outright -- a component must say which element it means.
+    The precedence being pinned here is still live, because a 2-part scale
+    hint still ARRIVES by the routes the guard cannot see: this constructor
+    mode, and the relaxation engine's own ledger, which registers unmapped
+    2-part keys as leaf symbols and hands them back through
+    `propagated_scales`.  So the rule is unchanged and only the door the
+    hint comes through has narrowed.
     """
-    # ARRANGE -- the real channel, no dict poking: add_scale_hint keeps a
-    # 2-part path 2-part and translates a 3-part one to the index form.
-    cm = ConfigManager({}, system_config=SYSTEM)
+    # ARRANGE
+    cm = _canonical_cm({})
     cm.add_scale_hint("star.distance", 100.0)
-    cm.add_scale_hint("star.A.distance", 5.0)
+    cm.add_scale_hint("star.0.distance", 5.0)
 
     # ACT
     cfg = cm.resolve("star", "distance", shape=(2,))
@@ -693,3 +710,153 @@ def test_a_list_component_resolves_the_collision_before_resolve():
     cfg = cm.resolve("star", "av", shape=(2,), names=["A", "B"])
     assert np.isclose(cfg["lower"][0], 0.5)
     assert np.isclose(cfg["lower"][1], 1.0)
+
+
+# ---------------------------------------------------------------------------
+# 4. single-element mode: the index form and the name form must name the
+#    SAME element  (review 2.1.8)
+# ---------------------------------------------------------------------------
+
+
+def test_name_form_follows_element_not_the_loop_variable():
+    """
+    Given resolve() in single-element mode -- shape=(), element=1 -- with
+      per-element names,
+    When _element_keys builds the spellings of the element being resolved,
+    Then the name form names element 1, not element 0.
+
+    In single-element mode the loop variable is always 0 while the element
+    being resolved is `element`.  `_eff_idx` exists to carry exactly that
+    distinction, and the index form used it -- but the name form was built
+    from `names[i]`, so the two spellings named DIFFERENT elements
+    (`star.1.distance` alongside `star.A.distance`) and a name-form entry for
+    the element actually being resolved was never found.
+
+    A flat-dict component is the vehicle because it is where a name-form key
+    SURVIVES: for a list component standardize_param_names folds the name
+    form into the index form at construction, so `user_params` never holds
+    one and the name-form spelling is dead for that channel.
+    """
+    # ARRANGE
+    cm = ConfigManager(
+        {"sed.B.av": {"initval": 7.0}},
+        system_config={"sed": {"file": "x.yaml"}},
+    )
+
+    # ACT
+    cfg = cm.resolve("sed", "av", shape=(), element=1, names=["A", "B"])
+
+    # ASSERT
+    assert np.isclose(cfg["initval"][0], 7.0)
+
+
+def test_a_component_override_on_the_name_form_reaches_single_element_mode():
+    """
+    Given a component override registered under the NAME form,
+    When resolve() runs in single-element mode for that element,
+    Then the override is applied.
+
+    The second reachable channel for 2.1.8: `add_override` stores the key as
+    the COMPONENT spelled it, with no standardization pass to fold it, so a
+    cross-component override written by name was invisible in single-element
+    mode.  Measured before the fix: the default 10.0 was returned instead.
+    """
+    # ARRANGE
+    cm = ConfigManager({}, system_config=SYSTEM)
+    cm.add_override("star.B.distance", initval=42.0)
+
+    # ACT
+    cfg = cm.resolve("star", "distance", shape=(), element=1, names=["A", "B"])
+
+    # ASSERT
+    assert np.isclose(cfg["initval"][0], 42.0)
+
+
+# ---------------------------------------------------------------------------
+# 5. the broadcast form is USER-FACING ONLY  (review 2.14.8)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("channel", ["add_hint", "add_scale_hint"])
+def test_an_internal_channel_refuses_a_broadcast_path(channel):
+    """
+    Given a LIST component,
+    When a component pushes a hint under the 2-part broadcast spelling,
+    Then it raises.
+
+    Broadcasting is a user-facing convenience, translated once at
+    construction and never seen again.  A hint is pushed BY A COMPONENT,
+    which knows which element it means.  Refused rather than expanded
+    because one scalar cannot answer for every element: since review 1.1.5
+    the elements may carry different `unit:` overrides, so there is no
+    single unit the value could be read in.
+    """
+    # ARRANGE
+    cm = ConfigManager({}, system_config=SYSTEM)
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match="broadcast form"):
+        getattr(cm, channel)("star.distance", 100.0)
+
+
+@pytest.mark.parametrize("spelling", ["star.0.distance", "star.A.distance"])
+def test_an_internal_channel_still_takes_a_per_element_path(spelling):
+    """
+    Given the same component,
+    When it pushes the index form or the name form,
+    Then the hint is accepted and filed under the index form.
+
+    The guard must reject ONLY the broadcast.  The name form is not a
+    broadcast -- it names exactly one element -- and it is translated, not
+    refused, which is the distinction the ruling turns on.
+    """
+    # ARRANGE
+    cm = ConfigManager({}, system_config=SYSTEM)
+
+    # ACT
+    cm.add_hint(spelling, 100.0)
+
+    # ASSERT
+    assert "star.0.distance" in cm.hints
+
+
+def test_a_flat_dict_components_two_part_key_is_not_a_broadcast():
+    """
+    Given a FLAT-DICT component, whose canonical spelling has two parts,
+    When a hint is pushed under it,
+    Then it is accepted.
+
+    The regression this guard could most easily cause.  `sed.av` has two
+    parts but is not a broadcast -- there is no list to broadcast over, and
+    it is that component's ONLY spelling.  The check therefore keys on the
+    component's shape in system_config, not on the number of dots.
+    """
+    # ARRANGE
+    cm = ConfigManager({}, system_config={"sed": {"file": "x.yaml"}})
+
+    # ACT
+    cm.add_hint("sed.av", 1.0)
+
+    # ASSERT
+    assert "sed.av" in cm.hints
+
+
+def test_no_system_config_stays_permissive():
+    """
+    Given a ConfigManager built with no system_config,
+    When a 2-part path is pushed,
+    Then it is accepted.
+
+    That mode cannot tell a broadcast from a flat-dict component's canonical
+    key -- there is no system_config to ask -- and it is the tests-and-
+    direct-drivers path, not production.  Guessing there would break working
+    callers to guard a case production cannot reach.
+    """
+    # ARRANGE
+    cm = ConfigManager({}, system_config=None)
+
+    # ACT
+    cm.add_hint("star.distance", 100.0)
+
+    # ASSERT
+    assert "star.distance" in cm.hints
