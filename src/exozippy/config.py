@@ -1987,6 +1987,86 @@ class ConfigManager:
             u_str, i_str, full_path or f"{component_type}.{param_name}"
         )
 
+    def _assert_canonical_engine_paths(self, seed_hints=None):
+        """Refuse a non-canonical path at the relaxation engine's door.
+
+        THE STANDING RULE (JDE 2026-09-04): internal syntax is strict, ONE
+        SPELLING ONLY.  Only the USER boundary is permissive, and what it
+        accepts it translates immediately -- `standardize_param_names` folds
+        the name form into the index form and expands a broadcast into every
+        index it covers, and `_translate_and_scale` does the same for every
+        component hint channel.
+
+        This is the assertion that the translation was TOTAL.  It is cheap
+        (about ninety paths, once per seed) and it is the check that would
+        have caught the whole family of defects this exists because of --
+        1.1.5, 1.1.6, 2.1.8, 2.14.6 and 2.14.8 were all one thing: a
+        user-facing spelling surviving past the boundary, with something
+        downstream left to guess which spelling it had.  Each was found
+        separately, by hand, months apart.  One assertion here fails loudly
+        the first time any of them recurs.
+
+        CANONICAL means:
+          * `comp.<i>.param` -- the index form, for a LIST component;
+          * `comp.param` -- for a FLAT-DICT component, where the 2-part form
+            IS the canonical spelling and there is no list to broadcast over
+            (that asymmetry is itself review 3.14.17).
+
+        Deliberately NOT checked here: membership in `master_symbol_map`.
+        That was the obvious formulation and it is WRONG -- measured across
+        all twenty shipped examples, 25 of 72 hint paths are legitimately
+        absent from the map (`mulensinstrument.<i>.f_source`/`f_blend`/
+        `q_flux`), because `resolve()` reads hints too and a hinted parameter
+        need not be an engine symbol.  Gating on the map would have refused
+        every microlensing example.  Shape is the invariant; symbol
+        membership is not.
+        """
+        if not isinstance(self.system_config, dict):
+            # No system config: the tests-and-direct-drivers mode, which
+            # cannot tell a broadcast from a flat-dict component's canonical
+            # key.  Same reason `_reject_broadcast_hint_path` is permissive
+            # there.
+            return
+
+        for channel, paths in (
+            ("add_hint", self.hints),
+            ("add_scale_hint", self.scale_hints),
+            ("add_seed_hints", seed_hints or {}),
+        ):
+            for path in paths:
+                parts = str(path).split(".")
+                comp = self.system_config.get(parts[0]) if parts else None
+                if comp is None:
+                    # A component this config does not declare at all.  Not
+                    # this check's business -- standardize_param_names
+                    # already raises on an undeclared prefix, and refusing
+                    # here would only duplicate it in a worse place.
+                    continue
+                if isinstance(comp, list):
+                    ok = len(parts) == 3 and parts[1].isdigit()
+                    canonical = f"{parts[0]}.<i>.{parts[-1]}"
+                else:
+                    ok = len(parts) == 2
+                    canonical = f"{parts[0]}.{parts[-1]}"
+                if ok:
+                    continue
+                raise ValueError(
+                    f"\n!!! NON-CANONICAL PATH AT THE ENGINE !!!\n"
+                    f"{path!r}, pushed through {channel}, reached the "
+                    f"relaxation engine without being translated to the "
+                    f"canonical internal spelling {canonical!r}.\n"
+                    f"Internal paths carry exactly ONE spelling.  The user "
+                    f"boundary accepts three and translates immediately "
+                    f"(standardize_param_names for params.yaml, "
+                    f"_translate_and_scale for every hint channel), so a "
+                    f"non-canonical path here means a translation was "
+                    f"skipped rather than that a new spelling is legal.\n"
+                    f"This is the guard for the defect class of reviews "
+                    f"1.1.5, 1.1.6, 2.1.8, 2.14.6 and 2.14.8; if you are "
+                    f"adding a channel, translate at its entry point, not "
+                    f"here."
+                )
+
     def canonical_key(self, key):
         """Index-form spelling of ``key`` under THIS manager's system config.
 
@@ -3063,6 +3143,14 @@ class ConfigManager:
                     to_scalar(cfg["init_scale"]) * factor
                 )
                 scale_provenance[path_str] = param_rank
+
+        # THE TRANSLATION WAS TOTAL, or we stop here (review 3.14.15c).
+        # Everything below indexes `resolved`/`provenance` BY PATH, so a
+        # non-canonical key does not fail -- it quietly creates a second,
+        # phantom entry for a parameter that already has one, and the ledger,
+        # export_solution and initval_source then report it.  Checking at the
+        # door is the difference between a loud stop and a silent duplicate.
+        self._assert_canonical_engine_paths(seed_hints)
 
         # 1.5 LAYER IN COMPONENT HINTS
         for path_str, val in self.hints.items():
