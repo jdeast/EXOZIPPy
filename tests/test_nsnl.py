@@ -272,3 +272,91 @@ def test_no_parameter_has_a_non_finite_initval(system_2s2l):
             offenders.append(f"{par.label} = {arr}")
 
     assert offenders == []
+
+
+def test_the_event_rate_prior_is_counted_once_per_encounter(system_2s2l):
+    """Given a 2S event, when build_likelihood adds the event-rate prior,
+    then the term equals ONE copy of log(mu_rel) + log(theta_E), not the sum
+    over sources.
+
+    Review 8.6.18.  Gamma propto mu_rel * theta_E (Batista+2011) is the
+    sky-sweep rate of ONE lens past ONE source system, and both operands are
+    stored per source -- so the old `pt.sum` carried the selection correction
+    SQUARED on a 2S event.  Live on examples/ob161003, and not a small
+    correction: it is the whole event-rate term again, and that term is
+    exactly what tilts the lens mass and distance against the galactic prior.
+
+    ASSERTING THE SHAPE INSTEAD WOULD BE VACUOUS, and the first draft of this
+    test was: `pt.sum(...)` is already ndim 0, so "the potential is a scalar"
+    passes before AND after the fix.  The VALUE is the distinguishing
+    statement, and the teeth below make the difference observable -- the two
+    sources' terms must differ, or summing and taking element 0 would agree
+    and this test could not fail.
+
+    Evaluated at `system.get_raw_start(model)`, NOT at `model.initial_point()`
+    and NOT through `Parameter.value` on its own: the initial point is keyed
+    by raw variables that are not in a sub-graph, and reading `.value`
+    outside a compiled function draws from the prior rather than giving the
+    start.  Both are documented traps and both produced wrong numbers while
+    this was being written.
+    """
+    import pytensor
+
+    system, model = system_2s2l
+    terms = [
+        p
+        for p in model.potentials
+        if "event_rate_prior" in str(getattr(p, "name", "") or "")
+    ]
+    assert len(terms) == 1, [str(p.name) for p in model.potentials]
+
+    vv = list(model.value_vars)
+    fn = pytensor.function(
+        vv,
+        [
+            terms[0],
+            system.lens.mu_rel_geo_mag.value,
+            system.lens.theta_E.value,
+        ],
+        on_unused_input="ignore",
+    )
+    start = system.get_raw_start(model)
+    got, mu, th = fn(*[start[v.name] for v in vv])
+
+    mu = np.atleast_1d(np.asarray(mu, dtype=float))
+    th = np.atleast_1d(np.asarray(th, dtype=float))
+    assert mu.size == 2 and th.size == 2
+    per_source = np.log(mu) + np.log(th)
+
+    # TEETH: if the two sources' terms were equal, one copy and the sum
+    # would be indistinguishable and this test could not fail.
+    assert abs(per_source[1] - per_source[0]) > 1e-3, per_source
+
+    assert float(got) == pytest.approx(per_source[0], rel=1e-9)
+    assert float(got) != pytest.approx(per_source.sum(), rel=1e-6)
+
+
+def test_the_beta_bound_is_counted_once_per_lens_orbit(system_2s2l):
+    """Given a 2S event, when a beta bound exists, then it too is a scalar.
+
+    The same shape as the event-rate term (8.6.18): beta =
+    E_kin,perp/E_pot,perp is a property of the LENS's orbit and is declared
+    shape=(n_sources,) only because it is derived through theta_E, which is
+    stored per source.  Bounding it per source bounded one physical quantity
+    N times.
+
+    Skipped rather than asserted-absent when the model has no such term: the
+    2S2L fixture has no orbital motion, so this pins the SHAPE for whenever
+    the two features are combined -- which no shipped example does today,
+    which is precisely why the defect was latent.
+    """
+    _, model = system_2s2l
+    terms = [
+        p
+        for p in model.potentials
+        if "beta" in str(getattr(p, "name", "") or "")
+    ]
+    if not terms:
+        pytest.skip("no orbital motion in the 2S2L fixture, so no beta bound")
+    for p in terms:
+        assert p.ndim == 0, str(p.name)
