@@ -200,7 +200,12 @@ def test_shift_is_the_anchored_projected_source_orbit(xal_system):
     dN, dE = sN - sN0[0], sE - sE0[0]
     tn, te = mu_n / mu_mag, mu_e / mu_mag
     np.testing.assert_allclose(dtau, -(dN * tn + dE * te), atol=1e-10)
-    np.testing.assert_allclose(du, -(dN * te - dE * tn), atol=1e-10)
+    # du = -(dsigma . beta_hat) with beta_hat = (-tau_hat_E, +tau_hat_N),
+    # C9's +90 North-through-East rotation -- the SAME basis the parallax
+    # terms use.  The sign of this line is review 2.6.13's bug: it was
+    # -(dN * te - dE * tn) (the -90 rotation), which inverted the shift
+    # the light curve actually applied.
+    np.testing.assert_allclose(du, +(dN * te - dE * tn), atol=1e-10)
 
     # the anchor: zero shift at t0_par
     d0 = _eval_at_start(
@@ -346,11 +351,12 @@ def test_mm_xi_closed_form_mapping():
       parameterization, as implemented by MulensModel -- the code Mroz+26
       used, so its track at published values IS the published motion),
     When: the C25 closed-form mapping builds the same track from EXOZIPPy
-      elements (bigomega = phi_pi - xi_Omega, i = 180 - xi_i,
+      elements (bigomega = phi_pi + xi_Omega + 180, i = xi_i,
       omega_* = xi_omega, nu(t_0_xi) = xi_u - xi_omega -> tp),
-    Then: the two (dtau, du) tracks agree to 1e-9 -- the mutual
-      verification of both implementations, and the recipe that lets a
-      published xi_* solution seed an EXOZIPPy config (examples/ob170114).
+    Then: EXOZIPPy's (dtau, du) equals the shift MulensModel APPLIES to
+      its trajectory, with no extra sign, to 1e-9 -- the contract the
+      light curves rest on, and the recipe that lets a published xi_*
+      solution seed an EXOZIPPy config (examples/ob170114).
     """
     import MulensModel as mm
 
@@ -385,13 +391,19 @@ def test_mm_xi_closed_form_mapping():
             )
         )
         tr1 = mm.Trajectory(t, parameters=m1.parameters)
-        # MM source shift -> our trajectory (lens - source) shift
-        dtau_mm = -(np.asarray(tr1.x) - np.asarray(tr0.x))
-        du_mm = -(np.asarray(tr1.y) - np.asarray(tr0.y))
+        # The shift MulensModel APPLIES to its trajectory -- (tau, u) and
+        # MM's (x, y) are the same quantities (C18/C10), so this, with NO
+        # extra sign, is what EXOZIPPy's (dtau, du) must equal for the two
+        # LIGHT CURVES to agree.  Until review 2.6.13 this comparison
+        # carried a hand-written minus and the mapping below was tuned
+        # against the du sign bug, so the two errors cancelled here while
+        # the composed magnification applied the source's offset backwards.
+        dtau_mm = np.asarray(tr1.x) - np.asarray(tr0.x)
+        du_mm = np.asarray(tr1.y) - np.asarray(tr0.y)
 
         phi_pi = np.arctan2(piEE, piEN)
-        om_node = phi_pi - np.radians(xi_Om)
-        cosi = np.cos(np.radians(180.0 - xi_i))
+        om_node = phi_pi + np.radians(xi_Om) + np.pi
+        cosi = np.cos(np.radians(xi_i))
         w = np.radians(xi_om)
         nu0 = np.radians(xi_u - xi_om)
         E0 = 2 * np.arctan2(
@@ -411,5 +423,69 @@ def test_mm_xi_closed_form_mapping():
             -(dN * tn + dE * te), dtau_mm, atol=1e-9, err_msg=f"draw {k}"
         )
         np.testing.assert_allclose(
-            -(dN * te - dE * tn), du_mm, atol=1e-9, err_msg=f"draw {k}"
+            +(dN * te - dE * tn), du_mm, atol=1e-9, err_msg=f"draw {k}"
         )
+
+
+def test_binary_op_matches_mulensmodel_xallarap_lightcurve():
+    """
+    Given: the published OGLE-2017-BLG-0114 Std 2L1S + xallarap solution
+      (Mroz et al. 2026 Table B.1), its xi_* elements mapped through C25,
+      and the shift track MulensModel itself applies,
+    When: VBMDirectMagOp computes the magnification with that track at its
+      source_motion inputs (numpy level, no parallax on either side so the
+      comparison isolates the xallarap composition),
+    Then: the two LIGHT CURVES agree to 1e-10 relative.  This is the pin
+      the track-level test cannot provide: review 2.6.13's du sign bug and
+      the compensating mapping error cancelled in the track comparison and
+      only disagreed in the composed magnification (built A peaked at 8.6
+      where MulensModel -- and the photometry, at chi2/N = 1.5 -- give 3.3).
+    """
+    import MulensModel as mm
+
+    from exozippy.components.mulensing.op import VBMDirectMagOp
+
+    # Arrange: published solution; xi elements; MM reference curves.
+    T0, U0, TE, RHO = 2457899.3, -0.144, 173.0, 0.0109
+    t0par = 2457933.5
+    S, Q, ALPHA = 0.337, 0.0219, 330.4
+    times = np.linspace(2457850.0, 2458000.0, 151)
+    xi = dict(
+        xi_period=221.5,
+        xi_semimajor_axis=0.200,
+        xi_inclination=30.5,
+        xi_Omega_node=250.0,
+        xi_argument_of_latitude_reference=236.1,
+        xi_eccentricity=0.615,
+        xi_omega_periapsis=207.3,
+        t_0_xi=t0par,
+    )
+    base = dict(t_0=T0, u_0=U0, t_E=TE)
+    tr0 = mm.Trajectory(times, parameters=mm.Model(dict(base)).parameters)
+    m_xi = mm.Model(dict(base, **xi))
+    tr1 = mm.Trajectory(times, parameters=m_xi.parameters)
+    # the shift MM applies to (x, y) == our (tau, u); C18/C10 identity
+    dtau = np.asarray(tr1.x) - np.asarray(tr0.x)
+    du = np.asarray(tr1.y) - np.asarray(tr0.y)
+    full = mm.Model(dict(base, rho=RHO, s=S, q=Q, alpha=ALPHA, **xi))
+    full.set_magnification_methods([-np.inf, "VBBL", np.inf])
+    A_mm = np.asarray(full.get_magnification(times), dtype=float)
+
+    # Act: the direct Op with the same shift at its source_motion inputs.
+    op = VBMDirectMagOp(
+        coords="260.4905833d -29.6236944d",
+        n_companions=1,
+        use_rho=True,
+        source_motion=True,
+    )
+    p = np.array([T0, U0, TE, 0.0, 0.0, RHO, S, Q, ALPHA], dtype=float)
+    obs = np.zeros((times.size, 3))
+    A_op = op._compute(p, times, obs, None, (dtau, du))
+
+    # Assert: light-curve parity, and the shift genuinely matters (teeth:
+    # the zero-shift curve differs by far more than the tolerance).
+    np.testing.assert_allclose(A_op, A_mm, rtol=1e-10)
+    A_static = op._compute(
+        p, times, obs, None, (np.zeros_like(dtau), np.zeros_like(du))
+    )
+    assert np.max(np.abs(A_static - A_mm) / A_mm) > 0.5

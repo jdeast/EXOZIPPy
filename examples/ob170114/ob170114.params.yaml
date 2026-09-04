@@ -8,11 +8,11 @@
 # trajectory conventions are EXOZIPPy's (C18 identity), so t_0, u_0 (sign
 # included), t_E, rho, pi_E_N/E, s, q and alpha drop straight in.  Only the
 # xi_* orbital elements need the C25 mapping (their frame is
-# tau_hat-referenced with the third axis toward the observer):
+# tau_hat-referenced; mapping corrected in review 2.6.13):
 #
-#     bigomega  = phi_pi - xi_Omega = 37.252 - 250.0  -> 147.252 deg
-#     i         = 180 - xi_i        = 180 - 30.5      -> 149.5 deg
-#                                                        (cosi = -0.86163)
+#     bigomega  = phi_pi + xi_Omega + 180 = 37.252 + 250.0 + 180
+#                                         -> 467.252 = 107.252 deg
+#     i         = xi_i = 30.5 deg                       (cosi = +0.86163)
 #     omega_*   = xi_omega                            -> 207.3 deg
 #     nu(t0par) = xi_u - xi_omega   = 28.8 deg        -> tp = 2457930.059
 #     P = xi_P = 221.5 d,  e = xi_e = 0.615
@@ -47,8 +47,8 @@ lens.Source.u_0:
 # chain, and seeding them alongside the pm/distance seeds below
 # over-determines the engine at equal rank -- measured 2026-08-27: the
 # reconciliation rotated phi_pi from 37.25 to 2.5 deg and inflated t_E to
-# 205 d, which through C25's bigomega = phi_pi - xi_Omega corrupted the
-# xallarap track.  The pm/distance seeds below reproduce the printed
+# 205 d, which through C25's bigomega = phi_pi + xi_Omega + 180 corrupted
+# the xallarap track.  The pm/distance seeds below reproduce the printed
 # values EXACTLY as derived quantities instead (t_E = 173.0,
 # |pi_E| = 0.2098, phi_pi = 37.25 deg).
 lens.Source.rho:
@@ -84,11 +84,11 @@ orbit.S.secosw:
 orbit.S.sesinw:
     initval: -0.35953             # sqrt(e) sin(207.3)
 orbit.S.cosi:
-    initval: -0.86163             # i = 149.5 = 180 - xi_i: the C25
-                                  # third-axis flip, same as C24's Yee
-                                  # mapping in examples/ob09020
+    initval: 0.86163              # i = xi_i = 30.5 deg (C25 mapping,
+                                  # corrected in review 2.6.13)
 orbit.S.bigomega:
-    initval: 147.252              # = phi_pi - xi_Omega (C25)
+    initval: 107.252              # = phi_pi + xi_Omega + 180 (C25, mod
+                                  # 360; corrected in review 2.6.13)
 
 # --------------------------------------------------------------------
 # Physical parameters (Table B.2 Std 2L1S + the C25 amplitude closure)
@@ -152,13 +152,17 @@ star.L1.pm_dec:
 # THEIR re-calibrated photometry (2018 reference images), not the EWS
 # quick-look file shipped here (baseline ~ 15.07).  The seeds below are
 # the linear flux solve against THIS file at the seeded geometry
-# (2026-08-27), which is what a start value is for; the published values
+# (re-solved 2026-09 after the review 2.6.13 mapping fix), which is what
+# a start value is for; the published values
 # stay in this comment as the calibrated-data target.  err_scale seeds at
 # their fitted renormalization k_I = 1.98.
 # --------------------------------------------------------------------
 mulensinstrument.OGLE.q_source:
-    initval: 0.30
+    initval: 0.6272                # linear flux solve at the seeded geometry
+                                   # (re-done 2026-09 after the C25 mapping
+                                   # fix, review 2.6.13); close to the
+                                   # published 0.634 as it should be
 mulensinstrument.OGLE.log_f_total:
-    initval: -6.0129
+    initval: -6.0295
 mulensinstrument.OGLE.err_scale:
     initval: 1.98

@@ -421,12 +421,20 @@ meaning -- one anchor for the parallax, the lens orbital motion and the source o
 motion):
 
     dtau = -(dsigma_N * tau_hat_N + dsigma_E * tau_hat_E)
-    du   = -(dsigma_N * tau_hat_E - dsigma_E * tau_hat_N)
+    du   = +(dsigma_N * tau_hat_E - dsigma_E * tau_hat_N)
 
-added to C10's first display.  The MINUS is C7: the trajectory is LENS minus SOURCE, so a
-source displaced by `+dsigma` moves the relative position by `-dsigma`; `tau_hat =
-mu_hat_rel,geo` and `beta_hat = (tau_hat_E, -tau_hat_N)` are C9's basis, the same pair the
-parallax terms project onto.
+added to C10's first display.  Both components are `-(dsigma . basis_vector)`, and the
+MINUS is C7: the trajectory is LENS minus SOURCE, so a source displaced by `+dsigma`
+moves the relative position by `-dsigma`; `tau_hat = mu_hat_rel,geo = (tau_hat_N,
+tau_hat_E)` and `beta_hat = (-tau_hat_E, +tau_hat_N)` -- the +90 deg North-through-East
+rotation -- are C9's basis, the SAME pair the parallax terms project onto (C10 display 1's
+`u` term is `-|pi_E| (delta . beta_hat)` with exactly this `beta_hat`).  HISTORY (review
+2.6.13, fixed 2026-09): the `du` line above carried a leading minus, i.e. `beta_hat =
+(tau_hat_E, -tau_hat_N)`, the MINUS-90 rotation -- inconsistent with the parallax slot it
+claims to share -- and the xi_* mapping below had been tuned against that inverted
+projection.  The two errors cancelled in the track-level parity test and inverted the
+shift actually applied to the light curve: on examples/ob170114 the built magnification
+peaked at A = 8.6 where MulensModel (and the photometry, at chi2/N = 1.5) give 3.3.
 
 The offset itself is the orbit component's primary-body track in Einstein units:
 `dsigma(t) = [r_1(t) - r_1(t0_par)]`, `r_1` from `a_1 = a * m_companion / m_total`
@@ -445,14 +453,15 @@ reflection `(bigomega, omega) -> (bigomega + 180, omega + 180)` -- unlike the LE
 keplerian case (C24), where the caustic's rotation SENSE breaks it.
 
 **The mapping to MulensModel's `xi_*` elements (Zhai et al. 2024; the parameterization of
-Mroz et al. 2026), VERIFIED to machine precision** (the two shift tracks agree to ~1e-13
-over random draws; found by fitting, then confirmed closed-form -- see
-`tests/test_xallarap.py::test_mm_xi_closed_form_mapping`).  Their frame's reference
-direction is `tau_hat` and its third axis points TOWARD the observer, so, exactly as in
-the Skowron Appendix B frame (C24's Yee mapping):
+Mroz et al. 2026), VERIFIED at the LIGHT-CURVE level** -- the direct Op reproduces
+MulensModel's full 2L1S + xallarap magnification to 4e-16 at mapped elements, and the
+shift tracks agree to ~1e-9 over random draws
+(`tests/test_xallarap.py::test_mm_xi_closed_form_mapping`,
+`::test_binary_op_matches_mulensmodel_xallarap_lightcurve`).  Their frame's reference
+direction is `tau_hat`; operationally:
 
-    bigomega = phi_pi - xi_Omega_node
-    i        = 180 deg - xi_inclination
+    bigomega = phi_pi + xi_Omega_node + 180 deg
+    i        = xi_inclination
     omega_*  = xi_omega_periapsis                  (the SOURCE's own orbit: no 180 flip)
     e        = xi_eccentricity,   P = xi_period,   t_0_xi = t0_par
     nu(t_0_xi) = xi_u - xi_omega_periapsis  ->  tp  (the standard anomaly chain)
@@ -465,8 +474,12 @@ lines; `examples/ob170114` is the shipped worked case (Mroz et al. 2026 Table B.
   `source_orbital_motion: keplerian`, `source_orbit:`),
   `mulensing/physics.source_offset_from_orbit` / `xallarap_trajectory_shift`,
   `Lens.get_magnification` (symbolic) and `op.VBMDirectMagOp(source_motion=True)`.
-- Pinned by: `tests/test_xallarap.py` -- the first-principles C9 reconstruction with a
-  displaced source, the t0_par anchor, and symbolic-vs-Op equality.
+- Pinned by: `tests/test_xallarap.py` -- the C9 reconstruction with a displaced
+  source, the t0_par anchor, symbolic-vs-Op equality, the xi_* track contract
+  (`test_mm_xi_closed_form_mapping`), and -- the pin the track contract cannot
+  provide -- LIGHT-CURVE parity of the composed 2L1S + xallarap magnification
+  against MulensModel (`test_binary_op_matches_mulensmodel_xallarap_lightcurve`,
+  review 2.6.13's regression test).
 
 ---
 

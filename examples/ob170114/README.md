@@ -1,16 +1,19 @@
 # OGLE-2017-BLG-0114: a planetary binary lens with source orbital motion (xallarap)
 
-> **WORK IN PROGRESS -- the configuration builds and starts inside the
-> published basin, but no fit has run.**  What is verified at the start
-> (2026-08-27): the xallarap amplitude closes through the physical chain
-> (derived `xi_a = 0.2004` against the published `0.200`;
-> `theta_E = 0.858` vs `0.86` mas), the model's xallarap trajectory shift
-> matches MulensModel's native track at the published `xi_*` values to
-> `~5e-3` Einstein radii over the full data span, and the engine-resolved
-> `t_E`, `|pi_E|` and `phi_pi` land on the printed values.  The remaining
-> start-point misfit is within the published parameter uncertainties, and
-> the photometry here is the EWS quick-look file, not the re-calibrated
-> set the paper fit (see Data).
+> **WORK IN PROGRESS -- the start is now verified at the LIGHT-CURVE
+> level, but no production fit has run since the review 2.6.13 fix.**
+> What is verified at the start (2026-09): the built magnification curve
+> reproduces MulensModel's full 2L1S + parallax + xallarap model at the
+> published values to 1.2% max (0.6% rms), and it FITS this photometry --
+> chi2/N = 1.5 at the paper's own error renormalization k_I = 1.98
+> (chi2 = 539 over 351 points, against 526 for MulensModel itself).  The
+> earlier revision of this example verified only the shift TRACK and
+> derived quantities, never the likelihood: the C25 mapping and the
+> xallarap projection each carried a sign error that cancelled in the
+> track comparison and inverted the shift the light curve applied, so the
+> "verified" start actually misfit at chi2/N = 568 (review 2.6.13).  The
+> photometry here is the EWS quick-look file, not the re-calibrated set
+> the paper fit (see Data).
 
 The shipped worked example of `source_orbital_motion: keplerian`
 (conventions.md **C25**; review 8.6.9): a planetary microlensing event
@@ -88,12 +91,13 @@ solution set this example seeds only ONE of).
 Seeded from Mroz+26 Table B.1 "Std: 2L1S" (the BIC-preferred model), with
 three traps recorded in full in the params file:
 
-1. **The `xi_*` -> EXOZIPPy mapping** (C25, verified to machine precision
-   against MulensModel's implementation -- the code the paper used):
-   `bigomega = phi_pi - xi_Omega`, `i = 180 - xi_i`,
-   `omega_* = xi_omega`, `nu(t0_par) = xi_u - xi_omega -> tp`.  The
-   third-axis flip (`180 - xi_i`) is the same toward-the-observer
-   convention difference as ob09020's Yee frame mapping (C24).
+1. **The `xi_*` -> EXOZIPPy mapping** (C25, verified against
+   MulensModel's implementation at the light-curve level -- the code the
+   paper used): `bigomega = phi_pi + xi_Omega + 180`, `i = xi_i`,
+   `omega_* = xi_omega`, `nu(t0_par) = xi_u - xi_omega -> tp`.  (Until
+   review 2.6.13 this read `phi_pi - xi_Omega` / `180 - xi_i`, tuned
+   against a sign error in the shift projection; the pair cancelled in
+   the track-level check and inverted the applied shift.)
 2. **`t_E` and `pi_E` are not seeded** -- they are derived from the four
    proper-motion leaves, and at this event's large `pi_rel` the
    helio->geo term is comparable to `mu_rel` itself, so all four pm
