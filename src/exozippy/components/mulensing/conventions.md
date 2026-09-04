@@ -475,11 +475,25 @@ lines; `examples/ob170114` is the shipped worked case (Mroz et al. 2026 Table B.
   `mulensing/physics.source_offset_from_orbit` / `xallarap_trajectory_shift`,
   `Lens.get_magnification` (symbolic) and `op.VBMDirectMagOp(source_motion=True)`.
 - Pinned by: `tests/test_xallarap.py` -- the C9 reconstruction with a displaced
-  source, the t0_par anchor, symbolic-vs-Op equality, the xi_* track contract
-  (`test_mm_xi_closed_form_mapping`), and -- the pin the track contract cannot
-  provide -- LIGHT-CURVE parity of the composed 2L1S + xallarap magnification
-  against MulensModel (`test_binary_op_matches_mulensmodel_xallarap_lightcurve`,
-  review 2.6.13's regression test).
+  source (against an independent numpy Kepler/Thiele-Innes implementation, which is
+  why that duplicate is kept), the t0_par anchor, symbolic-vs-Op equality, the
+  xi_* mapping driven through the SHIPPED primitives over random draws
+  (`test_mm_xi_closed_form_mapping`), the composition contract of
+  `VBMDirectMagOp(source_motion=True)` against MulensModel's light curve
+  (`test_binary_op_matches_mulensmodel_xallarap_lightcurve`), and -- review
+  2.6.13's regression test -- the whole chain on the shipped example, params file
+  included (`test_shipped_ob170114_production_track_matches_mulensmodel`).
+- **Review 2.6.13 (2026-09), recorded so the shape of the failure is not lost.** The
+  `du` sign above was inverted and the `xi_*` mapping had been tuned against the
+  inversion. The two comparisons against MulensModel that existed both routed AROUND
+  the shipped code -- one built both sides inside the test file and compared them with
+  a hand-written minus (a true algebraic identity, hence unfalsifiable), the other fed
+  MulensModel's own shift into the Op -- so the pair was green while the shipped
+  `examples/ob170114` start fit the real OGLE photometry WORSE than no xallarap at all
+  (chi2 781,739 against 548,162 with the effect off, and 2,113 once fixed). The rule
+  this bought: a convention is pinned only by a test that calls the code the convention
+  lives in, and a second implementation of a mapping sitting beside the real one is a
+  hazard, not a cross-check.
 
 ---
 

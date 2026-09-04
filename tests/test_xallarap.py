@@ -27,15 +27,21 @@ What is pinned here, and why each pin is the one that matters:
     model's own track equals the shift MulensModel applies at the
     published xi_* elements, and is not its negation (review 2.6.13).
 
-Three tests here compare against MulensModel, and they sit on different
-sides of the production boundary.  Only ONE of them runs EXOZIPPy's
-xallarap chain (test_shipped_ob170114_production_track_matches_
-mulensmodel); test_mm_xi_closed_form_mapping is a self-consistent
-algebraic identity built entirely inside this file, and
-test_binary_op_matches_mulensmodel_xallarap_lightcurve feeds MulensModel's
-own shift into the Op to pin the composition contract.  Each says so in
-its docstring, because review 2.6.13's sign error survived precisely by
-being invisible to the two that route around the production code.
+Three tests here compare against MulensModel, and each states in its
+docstring which side of the PRODUCTION BOUNDARY it sits on -- because
+review 2.6.13's sign error survived by being invisible to a comparison
+that routed around the shipped code:
+
+  - test_mm_xi_closed_form_mapping drives the shipped primitives
+    (source_offset_from_orbit + xallarap_trajectory_shift) over random
+    xi_* draws.  It USED to build both sides itself and compare them with
+    a hand-written minus, which is a true algebraic identity and therefore
+    could not fail; it was rewritten in 2026-09 so that it does.
+  - test_shipped_ob170114_production_track_matches_mulensmodel runs the
+    whole chain on the shipped example, params file included.
+  - test_binary_op_matches_mulensmodel_xallarap_lightcurve feeds
+    MulensModel's OWN shift into the Op, so it pins the composition
+    contract and nothing upstream of it; it says so.
 """
 
 import numpy as np
@@ -155,7 +161,21 @@ def _np_kepler(M, ecc):
 def _np_source_offset(t, tp, n, ecc, w, cosi, bigom, a_scale):
     """Sky offset (N, E) of the orbit's primary body, the test's own copy
     of the standard construction (mirrors tests/test_astrometry.py's
-    reference)."""
+    reference).
+
+    This duplicate is DELIBERATE and has exactly one caller,
+    test_shift_is_the_anchored_projected_source_orbit, whose whole job is
+    to check the production projection against an implementation that
+    shares no code with it.  Driving that test from production on both
+    sides would make it a tautology -- which is the disease review 2.6.13
+    was, not the cure.
+
+    What it is NOT, since 2026-09: a second copy of the C25 xi_* mapping.
+    That mapping now appears in exactly one place in this file,
+    test_mm_xi_closed_form_mapping, which feeds it to the SHIPPED
+    primitives.  A duplicate mapping sitting next to the real one is what
+    let a wrong (du sign, mapping) pair look self-consistent for as long
+    as it did; do not reintroduce one here."""
     M = (t - tp) * n
     E = _np_kepler(np.atleast_1d(M), ecc)
     cosf = (np.cos(E) - ecc) / (1 - ecc * np.cos(E))
@@ -363,37 +383,57 @@ def test_mm_xi_closed_form_mapping():
     Given: random xi_* xallarap draws (the Zhai+2024 / Mroz+2026
       parameterization, as implemented by MulensModel -- the code Mroz+26
       used, so its track at published values IS the published motion),
-    When: the C25 closed-form mapping builds the same track from EXOZIPPy
-      elements (bigomega = phi_pi + xi_Omega + 180, i = xi_i,
-      omega_* = xi_omega, nu(t_0_xi) = xi_u - xi_omega -> tp),
-    Then: the mapped track equals the shift MulensModel APPLIES to its
-      trajectory, with no extra sign, to 1e-9 -- the recipe that lets a
-      published xi_* solution seed an EXOZIPPy config
-      (examples/ob170114).
+    When: the C25 closed-form mapping (bigomega = phi_pi + xi_Omega + 180,
+      i = xi_i, omega_* = xi_omega, nu(t_0_xi) = xi_u - xi_omega -> tp,
+      a_1/(D_S theta_E) = xi_a) is fed to the PRODUCTION primitives
+      physics.source_offset_from_orbit + physics.xallarap_trajectory_shift
+      -- the same two calls, in the same order, with the same t0_par
+      anchoring, that Lens._source_offset_series makes,
+    Then: the production (dtau, du) equals the shift MulensModel APPLIES
+      to its trajectory, with NO hand-written sign, to 1e-9.  This is both
+      the recipe that lets a published xi_* solution seed an EXOZIPPy
+      config (examples/ob170114) and a regression pin on the projection's
+      sign.
 
-    SCOPE, AND WHY IT IS RECORDED HERE.  This test contains NO EXOZIPPy
-    production code.  Both sides are built inside this file -- the mapping
-    constants above, this module's own Kepler solver and Thiele-Innes
-    helper (_np_source_offset), and MulensModel.  It therefore verifies
-    the TEST FILE against MulensModel, not EXOZIPPy against MulensModel,
-    and it passes unchanged whatever src/exozippy/components/mulensing/
-    does.  Keep it as executable documentation of the C25 mapping; do not
-    read a green result here as evidence that the shipped code is right.
+    WHY IT CALLS PRODUCTION CODE (review 2.6.13).  Until 2026-09 this test
+    built BOTH sides itself -- the mapping constants, a local Kepler
+    solver and a local Thiele-Innes projection -- and compared them to
+    MulensModel's shift with a hand-written MINUS in front.  That is a
+    self-consistent algebraic identity: it is this statement composed with
+    a reflection, hence equally TRUE, so it passed for as long as it
+    existed while the shipped code applied the source's offset backwards
+    (the projection carried beta_hat = (+tau_hat_E, -tau_hat_N), the -90
+    deg rotation, and the shipped mapping had been tuned against it; the
+    pair produced exactly MINUS MulensModel's shift, and on the real OGLE
+    photometry for examples/ob170114 that start was WORSE than having no
+    xallarap at all).  An identity cannot fail on a wrong pair; only
+    production code can.  Routing the EXOZIPPy side through the shipped
+    primitives is what removes the trap rather than merely labelling it.
 
-    That distinction is not pedantry, it is review 2.6.13's post-mortem.
-    The previous revision of this test asserted the mapping
-    (bigomega = phi_pi - xi_Omega, i = 180 - xi_i) against MulensModel's
-    shift with a hand-written MINUS in front of it.  That statement is a
-    perfectly TRUE algebraic identity -- it is this one composed with a
-    reflection -- so it passed, for years, while the shipped code applied
-    the source's offset backwards.  A self-consistent identity cannot fail
-    on a wrong pair; only production code can.  The pins that do carry
-    production content are
-    test_shift_is_the_anchored_projected_source_orbit (the projection) and
-    test_shipped_ob170114_production_track_matches_mulensmodel (the whole
-    chain, including this mapping as the shipped config spells it).
+    WHAT IS STILL NOT COVERED HERE, named rather than glossed: the wiring
+    inside Lens._source_offset_series -- which graph nodes are handed to
+    these two primitives (a1 = a m_c/m_total, D_S from the SOURCE star,
+    the mu_rel_geo unit vector) -- has no numpy-level entry point, because
+    it reads Parameter.value nodes off a built model.  That half is pinned
+    by test_shift_is_the_anchored_projected_source_orbit and, end to end
+    on the shipped config, by
+    test_shipped_ob170114_production_track_matches_mulensmodel.
     """
     import MulensModel as mm
+
+    from exozippy.components.mulensing.physics import (
+        source_offset_from_orbit,
+        xallarap_trajectory_shift,
+    )
+
+    # The angular scale is arbitrary here: the production amplitude is
+    # a_scale = a1 * RSUN_TO_AU * 1000 / (D_S * theta_E), so any (D_S,
+    # theta_E) pair reproduces MulensModel's xi_a once a1 is solved for it
+    # -- which exercises that closure too.  np.float64 throughout, NOT bare
+    # Python floats: pytensor autocasts a bare float to float32 and a
+    # float32 Kepler solve would swamp the 1e-9 tolerance (docs/testing.md).
+    D_S = np.float64(8000.0)  # pc
+    THETA_E = np.float64(0.86)  # mas
 
     rng = np.random.default_rng(20260827)
     T0, TE = 2457899.3, 173.0
@@ -429,13 +469,11 @@ def test_mm_xi_closed_form_mapping():
         # The shift MulensModel APPLIES to its trajectory -- (tau, u) and
         # MM's (x, y) are the same quantities (C18/C10), so this, with NO
         # extra sign, is what EXOZIPPy's (dtau, du) must equal for the two
-        # LIGHT CURVES to agree.  Until review 2.6.13 this comparison
-        # carried a hand-written minus and the mapping below was tuned
-        # against the du sign bug, so the two errors cancelled here while
-        # the composed magnification applied the source's offset backwards.
+        # LIGHT CURVES to agree.
         dtau_mm = np.asarray(tr1.x) - np.asarray(tr0.x)
         du_mm = np.asarray(tr1.y) - np.asarray(tr0.y)
 
+        # The C25 mapping, stated once, readably.
         phi_pi = np.arctan2(piEE, piEN)
         om_node = phi_pi + np.radians(xi_Om) + np.pi
         cosi = np.cos(np.radians(xi_i))
@@ -447,19 +485,40 @@ def test_mm_xi_closed_form_mapping():
         )
         tp = t0par - (E0 - e * np.sin(E0)) * P / (2 * np.pi)
         n_mm = 2 * np.pi / P
+        a1 = a_xi * D_S * THETA_E / (RSUN_TO_AU * 1000.0)
 
-        sN, sE = _np_source_offset(t, tp, n_mm, e, w, cosi, om_node, a_xi)
-        sN0, sE0 = _np_source_offset(
-            np.array([t0par]), tp, n_mm, e, w, cosi, om_node, a_xi
+        # Act -- the SHIPPED chain: Lens._source_offset_series' two calls,
+        # its t0_par anchoring, and its (tau_hat) unit vector.
+        args = (
+            tp,
+            n_mm,
+            e,
+            np.sin(w),
+            np.cos(w),
+            cosi,
+            om_node,
+            a1,
+            THETA_E,
+            D_S,
         )
-        dN, dE = sN - sN0[0], sE - sE0[0]
-        tn, te = np.cos(phi_pi), np.sin(phi_pi)
+        sig_N, sig_E = source_offset_from_orbit(t, *args)
+        sig_N0, sig_E0 = source_offset_from_orbit(np.array([t0par]), *args)
+        dtau_t, du_t = xallarap_trajectory_shift(
+            sig_N - sig_N0[0],
+            sig_E - sig_E0[0],
+            np.cos(phi_pi),
+            np.sin(phi_pi),
+        )
+        dtau = np.asarray(dtau_t.eval(), dtype=float)
+        du = np.asarray(du_t.eval(), dtype=float)
+
+        # Assert -- no hand-written sign on either side.
         np.testing.assert_allclose(
-            -(dN * tn + dE * te), dtau_mm, atol=1e-9, err_msg=f"draw {k}"
+            dtau, dtau_mm, atol=1e-9, err_msg=f"draw {k}"
         )
-        np.testing.assert_allclose(
-            +(dN * te - dE * tn), du_mm, atol=1e-9, err_msg=f"draw {k}"
-        )
+        np.testing.assert_allclose(du, du_mm, atol=1e-9, err_msg=f"draw {k}")
+        # and the draw is not a degenerate no-op
+        assert np.max(np.hypot(dtau_mm, du_mm)) > 1e-3, f"draw {k}"
 
 
 def test_binary_op_matches_mulensmodel_xallarap_lightcurve():
@@ -489,9 +548,10 @@ def test_binary_op_matches_mulensmodel_xallarap_lightcurve():
     takes the track out of the production builder instead.  The failure
     mode being guarded against is the one 2.6.13 actually hit: a
     comparison that routes around the production code can be true of a
-    wrong pair (see test_mm_xi_closed_form_mapping's note), so every
-    MulensModel comparison in this file states which side of the boundary
-    it sits on.
+    wrong pair -- which is why test_mm_xi_closed_form_mapping was
+    rewritten in 2026-09 to drive the shipped primitives instead of a
+    local copy, and why every MulensModel comparison in this file states
+    which side of the boundary it sits on.
 
     (For the record, the bug this contract exposed: with the pre-2.6.13
     du sign and the mapping tuned against it, the composed magnification
@@ -565,13 +625,14 @@ def test_shipped_ob170114_production_track_matches_mulensmodel(monkeypatch):
     This is review 2.6.13's end-to-end regression test, and it is the only
     test in this file that exercises the whole chain at once: params file
     mapping -> source_offset_from_orbit -> xallarap_trajectory_shift ->
-    (dtau, du).  It exists because the other two MulensModel comparisons
-    here cannot catch a sign error in that chain.  Until 2.6.13 the
-    projection carried beta_hat = (+tau_hat_E, -tau_hat_N) (the -90 deg
-    rotation) and the shipped mapping had been tuned against it; the pair
-    produced EXACTLY MINUS MulensModel's shift, and no test noticed,
-    because test_mm_xi_closed_form_mapping is an algebraic identity with
-    no production code in it and
+    (dtau, du), and it is the only one that reads the shipped params file.
+    Until 2.6.13 the projection carried beta_hat = (+tau_hat_E,
+    -tau_hat_N) (the -90 deg rotation) and the shipped mapping had been
+    tuned against it; the pair produced EXACTLY MINUS MulensModel's shift,
+    and no test noticed, because the only two comparisons against that
+    code both routed around it -- test_mm_xi_closed_form_mapping built
+    both sides itself (since rewritten to drive the shipped primitives,
+    and it now regresses) and
     test_binary_op_matches_mulensmodel_xallarap_lightcurve feeds
     MulensModel's own shift into the Op.  The negated-track assertion
     below is aimed straight at that failure.  Measured 2026-09 against the
