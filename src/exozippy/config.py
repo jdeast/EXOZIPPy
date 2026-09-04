@@ -2016,6 +2016,24 @@ class ConfigManager:
         After this function, self.user_params contains only indexed or flat-dict
         keys internally.  The 2-part form is purely a user convenience.
 
+        PASS 2 MERGES PER FIELD, NOT PER KEY (review 1.1.6).  It used to skip
+        any index a Pass-1 key had already claimed -- `if indexed_key not in
+        standardized` -- which made "explicit beats broadcast" a statement
+        about whole ENTRIES rather than about the fields they set.  So a
+        specific entry that mentioned some OTHER field silently cancelled the
+        broadcast for that element, and it fell back to defaults.yaml:
+
+            star.radius: 3.0                        -> [3.0, 3.0]
+            star.radius: 3.0
+              + star.B.radius: {lower: 0.1}         -> [3.0, 1.0]   B lost 3.0
+
+        A user who put a BOUND on one star silently lost their broadcast
+        START VALUE for that star.  Now the broadcast supplies the base entry
+        and the specific one overrides it field by field, so "the most
+        specific spelling wins, for every field" -- which is what config.md
+        promises in those words -- is true of the standardizer too, and not
+        only of `resolve()`'s later layering.
+
         EVERY pass deepcopies the entry.  The returned dict must share no object
         with the caller's, because downstream code writes through these entries
         in place: extract_links deletes the link-expression fields, and
@@ -2118,8 +2136,14 @@ class ConfigManager:
             # dict (see the aliasing fix in #76).
             standardized[canonical_param_key(key, config)] = copy.deepcopy(val)
 
-        # Pass 2: expand 2-part keys for list components.
-        # Indexed entries written by Pass 1 are never overwritten (explicit beats broadcast).
+        def _as_entry(v):
+            """One user entry as a field dict; a bare scalar means `initval`."""
+            if isinstance(v, dict):
+                return copy.deepcopy(v)
+            return {"initval": copy.deepcopy(v)}
+
+        # Pass 2: expand 2-part keys for list components, merging PER FIELD
+        # into whatever Pass 1 already wrote for that index (review 1.1.6).
         for key, val in user_params.items():
             parts = key.split(".", 2)
             if len(parts) != 2:
@@ -2137,6 +2161,66 @@ class ConfigManager:
                 indexed_key = f"{comp_type}.{i}.{param_name}"
                 if indexed_key not in standardized:
                     standardized[indexed_key] = copy.deepcopy(val)
+                    continue
+
+                # This index already carries a specific entry.  The specific
+                # one wins FIELD BY FIELD; every field it does not mention is
+                # inherited from the broadcast instead of being discarded.
+                specific = standardized[indexed_key]
+                if not isinstance(val, dict) and not isinstance(
+                    specific, dict
+                ):
+                    # Two bare scalars both mean `initval`, so the specific
+                    # one is the whole entry and there is nothing to inherit.
+                    # Left as a scalar rather than promoted to a dict, so the
+                    # stored shape does not change for a case that was
+                    # already right.
+                    continue
+
+                merged = _as_entry(val)
+                overriding = _as_entry(specific)
+
+                # AMBIGUOUS, so it is refused rather than guessed at: the
+                # specific entry redefines `unit` while inheriting a NUMBER
+                # from the broadcast.  A broadcast `{initval: 3, unit: solRad}`
+                # under a specific `{unit: jupiterRad}` leaves "3" with no
+                # determinate meaning -- 3 solRad restated in jupiterRad, or 3
+                # jupiterRad?  Broadcasting is a convenience for the
+                # unambiguous case; this is the ambiguous one, and the user
+                # can say exactly what they mean by spelling the value out
+                # per element.
+                if "unit" in overriding and overriding["unit"] != merged.get(
+                    "unit"
+                ):
+                    inherited = sorted(
+                        f
+                        for f in NUMERIC_KEYS
+                        if f in merged and f not in overriding
+                    )
+                    if inherited:
+                        raise ValueError(
+                            f"\n!!! BROADCAST VALUE WITH A PER-ELEMENT UNIT "
+                            f"!!!\n"
+                            f"'{indexed_key}' overrides unit: "
+                            f"{overriding['unit']!r}, but "
+                            f"{', '.join(inherited)} would be inherited from "
+                            f"the broadcast '{key}'"
+                            + (
+                                f", written in {merged['unit']!r}"
+                                if "unit" in merged
+                                else " (in the default unit)"
+                            )
+                            + f".\n"
+                            f"A broadcast number has no determinate meaning "
+                            f"once one element reads it in a different unit, "
+                            f"so it is refused rather than guessed at.  "
+                            f"Write {', '.join(inherited)} explicitly on "
+                            f"'{indexed_key}' (and on the other elements, or "
+                            f"leave the broadcast to cover them)."
+                        )
+
+                merged.update(overriding)
+                standardized[indexed_key] = merged
 
         # Pass 3: 1-part and other unhandled keys (e.g. 'run').
         for key, val in user_params.items():

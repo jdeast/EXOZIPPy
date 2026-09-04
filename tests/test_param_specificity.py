@@ -27,6 +27,15 @@ settled by specificity BEFORE the strictest-wins clip runs.  The clip itself
 is untouched and still governs user-vs-defaults, which is the case it was
 written for.
 
+AND THE BROADCAST IS EXPANDED PER FIELD, NOT PER KEY (review 1.1.6).
+``standardize_param_names`` Pass 2 used to skip any index a Pass-1 key had
+already claimed, which made "explicit beats broadcast" a claim about whole
+ENTRIES rather than about the fields they set: a specific entry mentioning
+some OTHER field silently cancelled the broadcast for that element and it
+fell back to defaults.  Setting a BOUND on one star discarded that star's
+broadcast START VALUE.  The broadcast now supplies the base entry and the
+specific one overrides it field by field.
+
 AND THE BROADCAST FORM IS USER-FACING ONLY (review 2.14.8, JDE's ruling
 2026-09-04).  It is a convenience for writing a params file: standardization
 expands it into one key per element at construction, and nothing downstream
@@ -860,3 +869,132 @@ def test_no_system_config_stays_permissive():
 
     # ASSERT
     assert "star.distance" in cm.hints
+
+
+# ---------------------------------------------------------------------------
+# 6. the broadcast is expanded PER FIELD  (review 1.1.6)
+# ---------------------------------------------------------------------------
+
+
+def test_a_specific_entry_about_another_field_keeps_the_broadcast_value():
+    """
+    Given a broadcast start value and a specific entry that sets only a BOUND,
+    When the params are standardized and resolved,
+    Then that element keeps the broadcast start AND gets its own bound.
+
+    This is review 1.1.6, and it was a silently wrong START VALUE rather than
+    a merely surprising one: before the fix element 1 fell all the way back to
+    the defaults.yaml radius (1.0) because its `lower` entry had claimed the
+    index, so putting a bound on one star discarded that star's start value.
+    """
+    # ARRANGE
+    cm = ConfigManager(
+        {"star.radius": 3.0, "star.B.radius": {"lower": 0.1}},
+        system_config=SYSTEM,
+    )
+
+    # ACT
+    cfg = cm.resolve("star", "radius", shape=(2,), names=["A", "B"])
+
+    # ASSERT
+    assert np.isclose(cfg["initval"][0], 3.0)
+    assert np.isclose(cfg["initval"][1], 3.0)
+    assert np.isclose(cfg["lower"][1], 0.1)
+
+
+def test_a_specific_entry_about_the_SAME_field_still_wins():
+    """
+    Given a broadcast start value and a specific one for the same element,
+    When both are standardized,
+    Then the specific value wins for that element.
+
+    The half that must NOT change.  Merging per field is only correct if the
+    specific entry still overrides the broadcast wherever the two actually
+    collide -- a fix that merged in the other order, or that concatenated
+    rather than overrode, would invert exactly this.
+    """
+    # ARRANGE
+    cm = ConfigManager(
+        {"star.radius": 3.0, "star.B.radius": {"initval": 9.0}},
+        system_config=SYSTEM,
+    )
+
+    # ACT
+    cfg = cm.resolve("star", "radius", shape=(2,), names=["A", "B"])
+
+    # ASSERT
+    assert np.isclose(cfg["initval"][0], 3.0)
+    assert np.isclose(cfg["initval"][1], 9.0)
+
+
+def test_two_bare_scalars_leave_the_stored_shape_alone():
+    """
+    Given a broadcast scalar and a specific scalar for one element,
+    When the params are standardized,
+    Then the specific entry is still stored as a bare scalar.
+
+    Both spellings mean `initval`, so there is nothing to inherit and the
+    entry does not need promoting to a dict.  Pinned because the merge could
+    easily have rewritten every such entry into `{"initval": x}` -- harmless
+    to `resolve()`, which accepts both, but a gratuitous change to the shape
+    of `user_params` that other readers and tests describe.
+    """
+    # ARRANGE / ACT
+    cm = ConfigManager(
+        {"star.radius": 3.0, "star.B.radius": 9.0}, system_config=SYSTEM
+    )
+
+    # ASSERT
+    assert cm.user_params["star.0.radius"] == 3.0
+    assert cm.user_params["star.1.radius"] == 9.0
+
+
+def test_a_per_element_unit_over_an_inherited_broadcast_value_raises():
+    """
+    Given a broadcast VALUE and a specific entry that only overrides `unit`,
+    When the params are standardized,
+    Then it raises, naming the inherited field and both keys.
+
+    The one case the merge must NOT resolve by guessing.  A broadcast
+    `{initval: 3, unit: solRad}` under a specific `{unit: jupiterRad}` leaves
+    "3" with no determinate meaning -- 3 solRad restated in jupiterRad, or 3
+    jupiterRad?  Broadcasting is a convenience for the unambiguous case, so
+    the ambiguous one is refused and the user is told to spell the value out
+    per element.
+
+    Before 1.1.6 this silently produced the DEFAULT radius for that element,
+    which is neither reading of the user's intent.
+    """
+    # ARRANGE / ACT / ASSERT
+    with pytest.raises(ValueError, match="BROADCAST VALUE WITH A PER-ELEMENT"):
+        ConfigManager(
+            {
+                "star.radius": {"initval": 3.0, "unit": "solRad"},
+                "star.B.radius": {"unit": "jupiterRad"},
+            },
+            system_config=SYSTEM,
+        )
+
+
+def test_a_per_element_unit_with_its_own_value_is_fine():
+    """
+    Given a broadcast value and a specific entry carrying BOTH its own unit
+      and its own value,
+    When the params are standardized,
+    Then nothing raises: no number is inherited across a unit change.
+
+    The guard must fire on the ambiguity, not on the mere presence of a
+    per-element unit -- which is a legitimate and shipped idiom.
+    """
+    # ARRANGE / ACT
+    cm = ConfigManager(
+        {
+            "star.radius": {"initval": 3.0, "unit": "solRad"},
+            "star.B.radius": {"initval": 9.0, "unit": "jupiterRad"},
+        },
+        system_config=SYSTEM,
+    )
+
+    # ASSERT
+    assert cm.user_params["star.1.radius"]["unit"] == "jupiterRad"
+    assert np.isclose(cm.user_params["star.1.radius"]["initval"], 9.0)
