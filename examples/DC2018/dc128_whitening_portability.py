@@ -68,25 +68,50 @@ def build_maps(label):
         fn = pytensor.function(m.value_vars, node, on_unused_input="ignore")
         base = [np.asarray(ip[n]) for n in names]
         k = names.index(raw_name)
-        vals = []
-        for probe in PROBES:
-            args = [np.array(b, copy=True) for b in base]
-            args[k] = np.full_like(np.atleast_1d(args[k]), probe, dtype=float)
-            vals.append(float(np.atleast_1d(np.asarray(fn(*args)))[0]))
+        nel = int(np.atleast_1d(base[k]).size)
+
+        def sweep(el):
+            """Physical value of element `el` as its own raw is swept."""
+            got = []
+            for probe in PROBES:
+                args = [np.array(b, copy=True) for b in base]
+                v = np.atleast_1d(np.array(args[k], dtype=float))
+                v[el] = probe
+                args[k] = v.reshape(np.asarray(args[k]).shape)
+                r = np.atleast_1d(np.asarray(fn(*args), dtype=float))
+                got.append(float(r[el] if r.size > el else r[0]))
+            return got
+
+        # PER ELEMENT, because a vector Parameter can mix pinned and free
+        # elements.  The first version swept the WHOLE vector and read
+        # element 0; on severed-v3 that is star.Lens.radius, which is
+        # PINNED (sigma: 0), so the response was flat and the guard aborted
+        # on a false positive.  A flat element is now reported as pinned --
+        # which is correct behaviour, not the trap-1 bug -- and only an
+        # ALL-flat parameter is treated as evidence of the bug.
+        per_el = {el: sweep(el) for el in range(nel)}
+        live = {el: v for el, v in per_el.items()
+                if max(v) - min(v) > 0.0}
+        for el, v in per_el.items():
+            print("  %-9s %-18s[%d] raw %s -> %s%s"
+                  % (label, w, el, PROBES, ["%.6g" % x for x in v],
+                     "" if el in live else "   (flat: pinned/inactive)"),
+                  flush=True)
+        if not live:
+            raise SystemExit(
+                "ABORT: NO element of %s responds to %s.  If this parameter"
+                " is not entirely pinned, the compiled function is ignoring"
+                " its inputs -- see 2.4.15 trap 1.  Do not interpret"
+                " anything below." % (w, raw_name))
+        el0 = sorted(live)[0]
+        vals = live[el0]
+        out.setdefault("_element", {})[w] = el0
         # SELF-CHECK, and it is not optional: a flat response means the
         # input is being ignored, which is the bug above rather than a
         # result.  `on_unused_input="ignore"` is required here (some value
         # vars genuinely are unused by a given Deterministic) and it is also
         # what silences the only warning, so this check is the only guard.
-        if max(vals) - min(vals) == 0.0:
-            raise SystemExit(
-                "ABORT: %s does not respond to %s over probes %s (all %.6g)."
-                "  The compiled function is ignoring its inputs -- see"
-                " 2.4.15 trap 1.  Do not interpret anything below."
-                % (w, raw_name, PROBES, vals[0]))
         out[w] = vals
-        print("  %-9s %-22s raw %s -> phys %s"
-              % (label, w, PROBES, ["%.6g" % v for v in vals]), flush=True)
     for attr in ("whitening_state", "_whitening_state", "whitening"):
         st = getattr(s, attr, None)
         if st is not None:
@@ -104,7 +129,7 @@ def build_maps(label):
 TRACE = "fitresults_severed_v3/DC2018_128_trace.nc"
 
 
-def run_map(w):
+def run_map(w, el=0):
     """(slope, intercept, raw_lo, raw_hi) of the RUN's raw->physical map.
 
     Fitted, not assumed: the stored pair is exact, but the fit is only valid
@@ -118,8 +143,15 @@ def run_map(w):
     ds = xr.open_dataset(TRACE, group="posterior")
     if w not in ds.data_vars or (w + "_raw") not in ds.data_vars:
         return None
-    r = np.asarray(ds[w + "_raw"].isel(draw=slice(0, None, 200))).ravel()
-    p = np.asarray(ds[w].isel(draw=slice(0, None, 200))).ravel()
+    def col(name):
+        da = ds[name].isel(draw=slice(0, None, 200))
+        extra = [d for d in da.dims if d not in ("chain", "draw")]
+        if extra:
+            e = min(el, da.sizes[extra[0]] - 1)
+            da = da.isel({extra[0]: e})
+        return np.asarray(da).ravel()
+
+    r, p = col(w + "_raw"), col(w)
     m = np.isfinite(r) & np.isfinite(p)
     r, p = r[m], p[m]
     if r.size < 100 or (r.max() - r.min()) < 1e-9:
@@ -137,7 +169,7 @@ b = build_maps("build-2")
 print("\n=== IS THE REBUILD SELF-CONSISTENT? (build 1 vs build 2) ===",
       flush=True)
 for w in WATCH:
-    if w in a and w in b:
+    if w in a and w in b and w != "_element":
         d = float(np.abs(np.array(a[w]) - np.array(b[w])).max())
         print("  %-22s max|diff| %.3e %s"
               % (w, d, "" if d < 1e-9 else "<- two rebuilds also disagree"),
@@ -149,9 +181,9 @@ print("%-22s %11s %11s %11s %11s %9s"
          "ratio"), flush=True)
 verdict = []
 for w in WATCH:
-    if w not in a:
+    if w not in a or w == "_element":
         continue
-    rm = run_map(w)
+    rm = run_map(w, a.get("_element", {}).get(w, 0))
     if rm is None:
         print("  %-20s (no stored raw/physical pair in the trace)" % w,
               flush=True)

@@ -79,9 +79,10 @@ TRUTH = {
 def point_from_trace():
     """The run's argmax-lp draw as {param_key: physical value}."""
     ds = xr.open_dataset(TRACE, group="posterior")
-    lp = np.asarray(ds["lp"]) if "lp" in ds.data_vars else None
-    if lp is None:
-        raise SystemExit("trace has no lp; cannot locate the argmax draw")
+    # lp lives in sample_stats, NOT posterior -- the standard ArviZ layout.
+    # The first version of this looked for it in `posterior` and bailed with
+    # "trace has no lp" (job 15408136).
+    lp = np.asarray(xr.open_dataset(TRACE, group="sample_stats")["lp"])
     c, d = np.unravel_index(int(np.nanargmax(lp)), lp.shape)
     print("argmax lp draw: chain %d draw %d  lp = %.1f"
           % (c, d, float(lp[c, d])), flush=True)
