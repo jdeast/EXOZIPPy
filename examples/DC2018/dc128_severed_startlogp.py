@@ -81,17 +81,98 @@ INSTANCES = {"star": ["Lens", "Source"], "lens": ["Lens"], "planet":
              ["Companion"], "mulensinstrument": ["Roman_W149", "Roman_Z087"],
              "sed": ["sed"], "mann": ["Lens"], "band": ["W149", "Z087"]}
 
-# dc128_truth_forward.json.  The DISPUTED block only -- what the star swap
-# got wrong -- so point B differs from A in exactly this and nothing else.
-TRUTH = {
-    "lens.Lens.log_rho": float(np.log10(0.0060668)),
-    "lens.Lens.log_theta_E": float(np.log10(0.0904643)),
-    "lens.Lens.log_pi_rel": float(np.log10(0.0022108)),
-    "star.Lens.logmass": float(np.log10(0.454)),
-    "star.Lens.distance": 7999.0,
-    "star.Source.radius": 0.961,
-    "star.Source.distance": 8140.0,
+# POINT B, from dc128_truth_forward.json -- which is a COMPLETE forward
+# parameter set, not a handful of derived summaries.  That matters: round 3
+# overrode theta_E and pi_rel but NOT mu_rel, so t_E moved 6.6x while the
+# fluxes stayed at the wrong solution's values and the light curve matched
+# nothing (B - A came out at -10.7 MILLION nats, 99.9% of it in the two Hogg
+# terms).  Setting the SAMPLED coordinates instead -- t_0, u_0, log_s,
+# xalpha/yalpha, mu_rel, pi_rel, log_q, and the lens star -- lets theta_E,
+# t_E and rho be DERIVED consistently, which is the only way point B is a
+# real solution rather than a mixture.
+#
+# The truth file's `star.*` block is the LENS (logmass -0.343 = 0.454 Msun at
+# 7999 pc).  It carries no source, so the source's radius and distance come
+# from the config's own comment (a 0.961 Rsun bulge turnoff star at 8.14
+# kpc).  Instrument nuisances -- fluxes, err_scale, zeropoint -- are NOT
+# truth and are deliberately left at point A: they are calibration, they are
+# fit in both solutions, and holding them fixed keeps the comparison to the
+# geometry.
+TRUTH_FILE = "../dc128_truth_forward.json"
+TRUTH_MAP = {
+    "lens.t_0": "lens.Lens.t_0",
+    "lens.u_0": "lens.Lens.u_0",
+    "lens.log_s": "lens.Lens.log_s",
+    "lens.xalpha": "lens.Lens.xalpha",
+    "lens.yalpha": "lens.Lens.yalpha",
+    "lens.mu_ra_rel": "lens.Lens.mu_ra_rel",
+    "lens.mu_dec_rel": "lens.Lens.mu_dec_rel",
+    "planet.log_q": "planet.Companion.log_q",
+    "star.logmass": "star.Lens.logmass",
+    "star.distance": "star.Lens.distance",
+    "star.radius": "star.Lens.radius",
+    "star.teff": "star.Lens.teff",
+    "star.feh": "star.Lens.feh",
+    "star.pm_ra": "star.Lens.pm_ra",
+    "star.pm_dec": "star.Lens.pm_dec",
+    "star.rv": "star.Lens.rv",
 }
+SOURCE_TRUTH = {"star.Source.radius": 0.961, "star.Source.distance": 8140.0}
+
+
+def truth_overrides(sampled):
+    raw = json.load(open(TRUTH_FILE))
+    flat = {}
+
+    def walk(o, p=""):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                walk(v, p + "." + k if p else k)
+        else:
+            flat[p] = o
+
+    walk(raw)
+    out = {}
+    for src, dst in TRUTH_MAP.items():
+        if src in flat and dst in sampled:
+            out[dst] = float(flat[src])
+    for k, v in SOURCE_TRUTH.items():
+        if k in sampled:
+            out[k] = v
+    return out
+
+
+def sampled_keys():
+    """{param key} for elements the model actually SAMPLES.
+
+    Job 15408150 measured why this matters: injecting all 52 trace values
+    round-tripped 49 of them exactly and failed on the three that are not
+    freely sampled -- planet.Companion.mass (DERIVED from log_q and the lens
+    mass; it came back at 1/1047 of the request) and the star.Lens.radius /
+    teff bookkeeping pins.  That one derived override accounted for
+    essentially the whole 12,107-nat round-trip error.  So the fix for the
+    TEST is to inject only what is sampled; the missing WARNING is 2.3.17.
+    """
+    cfg = yaml.safe_load(io.open(CFG, encoding="utf-8"))
+    sy = System(cfg, user_params=None)
+    sy.prepare()
+    sy.build_model()
+    ok = set()
+    for p in sy.get_all_parameters():
+        lab = getattr(p, "label", "")
+        parts = lab.split(".")
+        if len(parts) != 2:
+            continue
+        comp, pname = parts
+        names = INSTANCES.get(comp)
+        if names is None:
+            continue
+        flags = np.atleast_1d(getattr(p, "is_sampled", False))
+        for i, f in enumerate(flags):
+            if bool(f) and i < len(names):
+                ok.add("%s.%s.%s" % (comp, names[i], pname))
+    print("model samples %d scalar elements" % len(ok), flush=True)
+    return ok
 
 
 def point_from_trace():
@@ -171,7 +252,13 @@ def term_logps(m, ip, label):
         return None
 
 
-A = point_from_trace()
+SAMPLED = sampled_keys()
+A_all = point_from_trace()
+A = {k: v for k, v in A_all.items() if k in SAMPLED}
+print("injecting %d of %d trace values (sampled only; %d skipped as derived"
+      " or pinned)" % (len(A), len(A_all), len(A_all) - len(A)), flush=True)
+for k in sorted(set(A_all) - set(A)):
+    print("   skipped: %s" % k, flush=True)
 RECORDED_MAX = 87786.2
 
 print("\n=== GATE: DOES A SELF-INJECTION ROUND-TRIP? ===", flush=True)
@@ -249,8 +336,14 @@ be retired.
     raise SystemExit(0)
 
 print("\nGATE PASSED -- the comparison below is meaningful.", flush=True)
+TRUTH = truth_overrides(SAMPLED)
 B = dict(A)
 B.update(TRUTH)
+print("\npoint B overrides %d SAMPLED coordinates with truth:" % len(TRUTH),
+      flush=True)
+for k, v in sorted(TRUTH.items()):
+    print("   %-30s A=%-14.6g -> B=%-14.6g" % (k, A.get(k, float("nan")), v),
+          flush=True)
 _, mB, ipB, lpB = build(B, "POINT B")
 tA = term_logps(mA, ipA, "POINT A")
 tB = term_logps(mB, ipB, "POINT B")
