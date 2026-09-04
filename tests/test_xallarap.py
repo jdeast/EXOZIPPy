@@ -555,8 +555,10 @@ def test_binary_op_matches_mulensmodel_xallarap_lightcurve():
 
     (For the record, the bug this contract exposed: with the pre-2.6.13
     du sign and the mapping tuned against it, the composed magnification
-    on examples/ob170114 peaked at A = 8.6 where MulensModel -- and the
-    photometry, at chi2/N = 1.5 -- give 3.3.)
+    on examples/ob170114 peaked at A = 8.58 where MulensModel at the
+    published values gives 4.22 -- measured on one 3001-point grid, no
+    parallax on either side.  Against the real OGLE photometry that pair
+    is chi2 = 781,739 wrong-sign versus 2,062 corrected, on 351 points.)
     """
     import MulensModel as mm
 
@@ -643,24 +645,27 @@ def test_shipped_ob170114_production_track_matches_mulensmodel(monkeypatch):
     tree, on the wrong sign.  Reverting physics.py alone flips only du and
     fails the match assertion at 198.5% of the track amplitude.
 
-    WHY THE TOLERANCE IS PERCENT-LEVEL AND NOT MACHINE PRECISION.  Both
-    sides evaluate the SAME published xi_* elements, but they do not get
-    the same base trajectory.  MulensModel is handed the published
-    (t_0, u_0, t_E) and the published xi_semimajor_axis = 0.200; EXOZIPPy
-    DERIVES t_E and the xallarap amplitude from the physical chain (the
-    four proper-motion leaves, the distances, theta_E and
-    a_1 = a m_c/m_total), and the relaxation engine lands t_E = 176.01 d
-    against the published 173.0 and xi_a = 0.2004 against 0.200.  A ~1.7%
-    error in t_E is a ~1.7% error in the Einstein-radius scale the shift
-    is measured in, which is the whole residual: measured 2026-09,
-    max|dtau - dtau_mm| = 2.66e-03 and max|du - du_mm| = 5.21e-03 against
-    a track amplitude of 0.34, i.e. 0.8% and 1.5%.  The 3% cap below is
-    therefore ~2x the measured deviation and 30x below the negated-track
-    signal -- it is a bound on the derived-vs-published parameter offset,
-    NOT slack for a sign or a mapping.  Tightening it means seeding the
-    published t_E directly, which this example deliberately does not do
-    (seeding t_E alongside the pm/distance seeds over-determines the
-    engine; see the params file).
+    WHY THE TOLERANCE IS NOT MACHINE PRECISION.  Both sides evaluate the
+    SAME published xi_* elements, but they do not get the same base
+    trajectory.  MulensModel is handed the published (t_0, u_0, t_E) and
+    the published xi_semimajor_axis = 0.200; EXOZIPPy DERIVES t_E and the
+    xallarap amplitude from the physical chain (the four proper-motion
+    leaves, the distances, theta_E and a_1 = a m_c/m_total), so any
+    residual offset in those derived values rescales the Einstein-radius
+    units the shift is measured in.  With the params file's mass reseed
+    (see the theta_E = kappa M_tot |pi_E| note there) the derived values
+    land on the published ones to well under 0.1% -- t_E = 172.999 vs
+    173.0, xi_a = 0.19999 vs 0.200, theta_E = 0.86000 vs 0.86 -- and the
+    leftover is the 0.008 deg between the derived phi_pi (37.2440) and the
+    printed 37.252, which rotates the track slightly.  MEASURED 2026-09:
+    max|dtau - dtau_mm| = 1.79e-04 and max|du - du_mm| = 2.10e-04 against
+    a track amplitude of 0.3425, i.e. 0.05% and 0.06%.  The 0.5% cap below
+    is ~8x the measured deviation and ~400x below the negated-track
+    signal (2.0x the amplitude) -- a bound on the derived-vs-published
+    parameter offset, NOT slack for a sign or a mapping.  It was 3% before
+    the reseed, when the seeded M_h = 0.50 forced theta_E 1.5% high and
+    dragged t_E to 176.01; if a seed here changes, RE-MEASURE and move
+    this number rather than leaving the headroom to absorb a real error.
 
     Costs ~18 s under pytest on a warm compile cache (measured 2026-09;
     35 s standalone under a concurrent full-suite run), which is over the
@@ -721,11 +726,11 @@ def test_shipped_ob170114_production_track_matches_mulensmodel(monkeypatch):
     scale = max(np.max(np.abs(dtau_mm)), np.max(np.abs(du_mm)))
     assert scale > 0.1, f"reference xallarap track is degenerate: {scale}"
     matched = max(np.max(np.abs(dtau - dtau_mm)), np.max(np.abs(du - du_mm)))
-    assert matched < 0.03 * scale, (
+    assert matched < 0.005 * scale, (
         f"production xallarap track deviates by {matched:.3e} "
         f"({matched / scale:.1%} of the {scale:.3f} track amplitude); the "
-        f"derived-vs-published t_E offset accounts for ~1.5%, more than "
-        f"that is a mapping or projection error"
+        f"derived-vs-published parameter offset accounts for ~0.06%, "
+        f"more than that is a mapping or projection error"
     )
 
     # Teeth, in the direction the bug actually went: the track must not be

@@ -267,11 +267,15 @@ def xallarap_trajectory_shift(dsig_N, dsig_E, mu_n_hat, mu_e_hat):
     been tuned against that inverted projection, so the two errors cancelled
     in the track-level parity test while the LIGHT CURVE applied the source
     offset with the wrong sign: measured on examples/ob170114 (Mroz et al.
-    2026 Table B.1), the built magnification peaked at A = 8.6 where
-    MulensModel -- the code the published solution comes from, and which the
-    photometry itself confirms at chi2/N = 1.5 -- gives 3.3.  With this sign
-    and the corrected C25 mapping the direct Op reproduces MulensModel's
-    xallarap light curve to 4e-16 (tests/test_xallarap.py).
+    2026 Table B.1), the built magnification peaked at A = 8.58 where
+    MulensModel -- the code the published solution comes from -- gives 4.22
+    at the published values (one 3001-point grid, no parallax on either
+    side), and against the real OGLE photometry the wrong sign cost
+    chi2 = 781,739 on 351 points where the corrected chain gives 2,062 and
+    MulensModel itself 2,063.  With this sign and the corrected C25 mapping
+    the direct Op reproduces MulensModel's xallarap light curve to 4e-16,
+    and the shipped examples/ob170114 model reproduces its full 2L1S +
+    parallax + xallarap curve to 0.03% (tests/test_xallarap.py).
     """
     dtau = -(dsig_N * mu_n_hat + dsig_E * mu_e_hat)
     du = dsig_N * mu_e_hat - dsig_E * mu_n_hat

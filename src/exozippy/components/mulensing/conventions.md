@@ -434,7 +434,9 @@ rotation -- are C9's basis, the SAME pair the parallax terms project onto (C10 d
 claims to share -- and the xi_* mapping below had been tuned against that inverted
 projection.  The two errors cancelled in the track-level parity test and inverted the
 shift actually applied to the light curve: on examples/ob170114 the built magnification
-peaked at A = 8.6 where MulensModel (and the photometry, at chi2/N = 1.5) give 3.3.
+peaked at A = 8.58 where MulensModel at the published values gives 4.22, and against the
+real OGLE photometry the wrong sign cost chi2 = 781,739 on 351 points where the corrected
+chain gives 2,062 (MulensModel itself: 2,063).
 
 The offset itself is the orbit component's primary-body track in Einstein units:
 `dsigma(t) = [r_1(t) - r_1(t0_par)]`, `r_1` from `a_1 = a * m_companion / m_total`
@@ -490,10 +492,23 @@ lines; `examples/ob170114` is the shipped worked case (Mroz et al. 2026 Table B.
   a hand-written minus (a true algebraic identity, hence unfalsifiable), the other fed
   MulensModel's own shift into the Op -- so the pair was green while the shipped
   `examples/ob170114` start fit the real OGLE photometry WORSE than no xallarap at all
-  (chi2 781,739 against 548,162 with the effect off, and 2,113 once fixed). The rule
-  this bought: a convention is pinned only by a test that calls the code the convention
-  lives in, and a second implementation of a mapping sitting beside the real one is a
-  hazard, not a cross-check.
+  (chi2 781,739 against 548,162 with the effect off). Fixing the sign brought it to
+  2,113, and a follow-up mass reseed to 2,062 against MulensModel's own 2,063 on the
+  same 351 points. The rule this bought: a convention is pinned only by a test that
+  calls the code the convention lives in, and a second implementation of a mapping
+  sitting beside the real one is a hazard, not a cross-check.
+- **The reseed, and the published trap behind it (same follow-up).** `theta_E =
+  sqrt(kappa M_tot pi_rel)` with `pi_E = pi_rel/theta_E` collapses to `theta_E =
+  kappa M_tot |pi_E|`, which leaves the lens DISTANCE no say in `theta_E` at all --
+  and `M_tot` is the TOTAL lens mass, because a binary lens references
+  `theta_E`/`t_E`/`rho`/`pi_E` to it (`mlens_total`). Mroz+26's quoted marginal medians
+  (`M_h = 0.50`, `|pi_E| = 0.20980`, `theta_E = 0.86`) do not satisfy it -- they give
+  `theta_E = 0.87312`, 1.5% high -- because independently quoted medians of a correlated
+  posterior need not be mutually consistent. Seeding the rounded `M_h = 0.50` therefore
+  dragged the derived `t_E` to 176.011 and `xi_a` to 0.19698 (+53.9 chi2 net). Any config
+  that seeds a mass, a distance and a published `pi_E` together meets this; seed the mass
+  the identity implies (`examples/ob170114` uses `M_h = 0.492544`) and re-measure the
+  derived values rather than trusting the printed triple.
 
 ---
 

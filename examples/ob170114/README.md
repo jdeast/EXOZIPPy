@@ -1,19 +1,36 @@
 # OGLE-2017-BLG-0114: a planetary binary lens with source orbital motion (xallarap)
 
-> **WORK IN PROGRESS -- the start is now verified at the LIGHT-CURVE
-> level, but no production fit has run since the review 2.6.13 fix.**
-> What is verified at the start (2026-09): the built magnification curve
-> reproduces MulensModel's full 2L1S + parallax + xallarap model at the
-> published values to 1.2% max (0.6% rms), and it FITS this photometry --
-> chi2/N = 1.5 at the paper's own error renormalization k_I = 1.98
-> (chi2 = 539 over 351 points, against 526 for MulensModel itself).  The
-> earlier revision of this example verified only the shift TRACK and
-> derived quantities, never the likelihood: the C25 mapping and the
-> xallarap projection each carried a sign error that cancelled in the
-> track comparison and inverted the shift the light curve applied, so the
-> "verified" start actually misfit at chi2/N = 568 (review 2.6.13).  The
-> photometry here is the EWS quick-look file, not the re-calibrated set
-> the paper fit (see Data).
+> **WORK IN PROGRESS -- the start is verified at the LIGHT-CURVE level
+> and matches MulensModel to the third decimal, but no production fit has
+> run.**  What is verified at the start (2026-09, on the 351 OGLE epochs
+> in this directory): the built magnification curve reproduces
+> MulensModel's full 2L1S + parallax + xallarap model at the published
+> values to `max|dA| = 0.0011` (0.033% peak-relative, rms 0.0004), and it
+> FITS this photometry as well as MulensModel does -- chi2 = 2061.8
+> against MulensModel's 2063.0 with the file's own errors, i.e.
+> chi2/N = 1.498 vs 1.499 at the paper's error renormalization
+> k_I = 1.98.  The derived quantities land on the printed ones:
+> `t_E = 172.999` (173.0), `theta_E = 0.86000` (0.86),
+> `|pi_E| = 0.209805` (0.209805), `xi_a = 0.19999` (0.200).
+>
+> Two earlier revisions were wrong, both recorded in full in the params
+> file because each is a trap a reader can walk into:
+>
+> 1. The first verified only the shift TRACK and the derived quantities,
+>    never the likelihood.  The C25 mapping and the xallarap projection
+>    each carried a sign error that cancelled in the track comparison and
+>    inverted the shift the light curve applied, so the "verified" start
+>    fit this photometry WORSE than switching xallarap off (chi2 781,739
+>    against 548,162 off; review 2.6.13).
+> 2. The second fixed the signs but seeded `M_h = 0.50`, the paper's
+>    printed median.  `theta_E = kappa M_tot |pi_E|` makes that
+>    inconsistent with the printed `theta_E = 0.86` by 1.5%, which dragged
+>    the derived `t_E` to 176.011 and `xi_a` to 0.19698 and cost +53.9
+>    chi2 (2113 rather than 2062) -- entirely parametric, not a code
+>    error.  See the note at `star.L1.mass`.
+>
+> The photometry here is the EWS quick-look file, not the re-calibrated
+> set the paper fit (see Data).
 
 The shipped worked example of `source_orbital_motion: keplerian`
 (conventions.md **C25**; review 8.6.9): a planetary microlensing event
@@ -89,7 +106,7 @@ solution set this example seeds only ONE of).
 ## Starting values
 
 Seeded from Mroz+26 Table B.1 "Std: 2L1S" (the BIC-preferred model), with
-three traps recorded in full in the params file:
+four traps recorded in full in the params file:
 
 1. **The `xi_*` -> EXOZIPPy mapping** (C25, verified against
    MulensModel's implementation at the light-curve level -- the code the
@@ -101,10 +118,17 @@ three traps recorded in full in the params file:
 2. **`t_E` and `pi_E` are not seeded** -- they are derived from the four
    proper-motion leaves, and at this event's large `pi_rel` the
    helio->geo term is comparable to `mu_rel` itself, so all four pm
-   leaves are pinned instead and the printed `t_E`/`|pi_E|`/`phi_pi`
-   emerge exactly.  Seeding them alongside would over-determine the
-   engine (measured: `phi_pi` rotated 35 deg, corrupting the xallarap
-   track through C25's `bigomega = phi_pi - xi_Omega`).
+   leaves are pinned instead.  The printed values then emerge to well
+   under 0.1% (`t_E = 172.999`, `|pi_E| = 0.209805`,
+   `phi_pi = 37.244` deg against 37.252) -- close, but measure rather
+   than assume "exactly".  Seeding them alongside would over-determine
+   the engine (measured: `phi_pi` rotated 35 deg, corrupting the
+   xallarap track through C25's `bigomega = phi_pi + xi_Omega + 180`).
 3. **`orbit.S.tc`** is seeded at the conjunction one period forward of
    the tp-implied one: the tc hard window and the tp->tc solver disagreed
    about the mod-P wrap for this omega quadrant (filed for review).
+4. **The mass is NOT the printed median** -- `theta_E = kappa M_tot
+   |pi_E|` leaves no distance freedom, and the paper's printed
+   (`M_h`, `|pi_E|`, `theta_E`) triple does not satisfy it to 2 s.f.
+   The seed is the `M_h` that closes it.  Full derivation at
+   `star.L1.mass` in the params file.
