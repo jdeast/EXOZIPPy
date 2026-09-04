@@ -23,6 +23,19 @@ What is pinned here, and why each pin is the one that matters:
   - No new sampled parameters; the xallarap orbit samples bigomega but
     stays node-degenerate (a sky track is reflection-invariant), unlike
     the lens-keplerian case.
+  - END TO END, against the other code: the SHIPPED examples/ob170114
+    model's own track equals the shift MulensModel applies at the
+    published xi_* elements, and is not its negation (review 2.6.13).
+
+Three tests here compare against MulensModel, and they sit on different
+sides of the production boundary.  Only ONE of them runs EXOZIPPy's
+xallarap chain (test_shipped_ob170114_production_track_matches_
+mulensmodel); test_mm_xi_closed_form_mapping is a self-consistent
+algebraic identity built entirely inside this file, and
+test_binary_op_matches_mulensmodel_xallarap_lightcurve feeds MulensModel's
+own shift into the Op to pin the composition contract.  Each says so in
+its docstring, because review 2.6.13's sign error survived precisely by
+being invisible to the two that route around the production code.
 """
 
 import numpy as np
@@ -353,10 +366,32 @@ def test_mm_xi_closed_form_mapping():
     When: the C25 closed-form mapping builds the same track from EXOZIPPy
       elements (bigomega = phi_pi + xi_Omega + 180, i = xi_i,
       omega_* = xi_omega, nu(t_0_xi) = xi_u - xi_omega -> tp),
-    Then: EXOZIPPy's (dtau, du) equals the shift MulensModel APPLIES to
-      its trajectory, with no extra sign, to 1e-9 -- the contract the
-      light curves rest on, and the recipe that lets a published xi_*
-      solution seed an EXOZIPPy config (examples/ob170114).
+    Then: the mapped track equals the shift MulensModel APPLIES to its
+      trajectory, with no extra sign, to 1e-9 -- the recipe that lets a
+      published xi_* solution seed an EXOZIPPy config
+      (examples/ob170114).
+
+    SCOPE, AND WHY IT IS RECORDED HERE.  This test contains NO EXOZIPPy
+    production code.  Both sides are built inside this file -- the mapping
+    constants above, this module's own Kepler solver and Thiele-Innes
+    helper (_np_source_offset), and MulensModel.  It therefore verifies
+    the TEST FILE against MulensModel, not EXOZIPPy against MulensModel,
+    and it passes unchanged whatever src/exozippy/components/mulensing/
+    does.  Keep it as executable documentation of the C25 mapping; do not
+    read a green result here as evidence that the shipped code is right.
+
+    That distinction is not pedantry, it is review 2.6.13's post-mortem.
+    The previous revision of this test asserted the mapping
+    (bigomega = phi_pi - xi_Omega, i = 180 - xi_i) against MulensModel's
+    shift with a hand-written MINUS in front of it.  That statement is a
+    perfectly TRUE algebraic identity -- it is this one composed with a
+    reflection -- so it passed, for years, while the shipped code applied
+    the source's offset backwards.  A self-consistent identity cannot fail
+    on a wrong pair; only production code can.  The pins that do carry
+    production content are
+    test_shift_is_the_anchored_projected_source_orbit (the projection) and
+    test_shipped_ob170114_production_track_matches_mulensmodel (the whole
+    chain, including this mapping as the shipped config spells it).
     """
     import MulensModel as mm
 
@@ -435,11 +470,33 @@ def test_binary_op_matches_mulensmodel_xallarap_lightcurve():
     When: VBMDirectMagOp computes the magnification with that track at its
       source_motion inputs (numpy level, no parallax on either side so the
       comparison isolates the xallarap composition),
-    Then: the two LIGHT CURVES agree to 1e-10 relative.  This is the pin
-      the track-level test cannot provide: review 2.6.13's du sign bug and
-      the compensating mapping error cancelled in the track comparison and
-      only disagreed in the composed magnification (built A peaked at 8.6
-      where MulensModel -- and the photometry, at chi2/N = 1.5 -- give 3.3).
+    Then: the two LIGHT CURVES agree to 1e-10 relative.
+
+    WHAT THIS PINS: the Op's COMPOSITION CONTRACT -- that
+    VBMDirectMagOp(source_motion=True) adds its (dtau_t, du_t) inputs to
+    (tau, u) with the same sign and at the same slot MulensModel adds its
+    own xallarap shift, so that "EXOZIPPy's (dtau, du) must equal the
+    shift MulensModel applies, with no extra sign" is the correct contract
+    for everything upstream to satisfy.  It is the anchor the other two
+    MulensModel comparisons in this file are stated against.
+
+    WHAT IT DOES NOT PIN, recorded because the docstring used to claim
+    otherwise: it is NOT review 2.6.13's regression test.  The shift fed to
+    the Op here comes from MulensModel, not from EXOZIPPy, so this test
+    passes unchanged with physics.py's du sign reverted to its pre-2.6.13
+    value -- verified 2026-09.  The regression test is
+    test_shipped_ob170114_production_track_matches_mulensmodel, which
+    takes the track out of the production builder instead.  The failure
+    mode being guarded against is the one 2.6.13 actually hit: a
+    comparison that routes around the production code can be true of a
+    wrong pair (see test_mm_xi_closed_form_mapping's note), so every
+    MulensModel comparison in this file states which side of the boundary
+    it sits on.
+
+    (For the record, the bug this contract exposed: with the pre-2.6.13
+    du sign and the mapping tuned against it, the composed magnification
+    on examples/ob170114 peaked at A = 8.6 where MulensModel -- and the
+    photometry, at chi2/N = 1.5 -- give 3.3.)
     """
     import MulensModel as mm
 
@@ -489,3 +546,138 @@ def test_binary_op_matches_mulensmodel_xallarap_lightcurve():
         p, times, obs, None, (np.zeros_like(dtau), np.zeros_like(du))
     )
     assert np.max(np.abs(A_static - A_mm) / A_mm) > 0.5
+
+
+def test_shipped_ob170114_production_track_matches_mulensmodel(monkeypatch):
+    """
+    Given: the SHIPPED examples/ob170114 configuration (Mroz et al. 2026
+      Table B.1, "Std: 2L1S"), built the way a user builds it --
+      System(cfg, par) -> prepare() -> build_model() -- so the C25
+      xi_* -> EXOZIPPy mapping comes from the params file on disk and the
+      projection comes from physics.xallarap_trajectory_shift,
+    When: the (dtau, du) series is pulled out of the PRODUCTION builder
+      Lens._source_offset_series at the model's start point and compared
+      to the shift MulensModel applies at the published xi_* elements,
+    Then: the two agree at the percent level, and -- the assertion that
+      matters -- the production track is emphatically NOT the NEGATED
+      MulensModel shift.
+
+    This is review 2.6.13's end-to-end regression test, and it is the only
+    test in this file that exercises the whole chain at once: params file
+    mapping -> source_offset_from_orbit -> xallarap_trajectory_shift ->
+    (dtau, du).  It exists because the other two MulensModel comparisons
+    here cannot catch a sign error in that chain.  Until 2.6.13 the
+    projection carried beta_hat = (+tau_hat_E, -tau_hat_N) (the -90 deg
+    rotation) and the shipped mapping had been tuned against it; the pair
+    produced EXACTLY MINUS MulensModel's shift, and no test noticed,
+    because test_mm_xi_closed_form_mapping is an algebraic identity with
+    no production code in it and
+    test_binary_op_matches_mulensmodel_xallarap_lightcurve feeds
+    MulensModel's own shift into the Op.  The negated-track assertion
+    below is aimed straight at that failure.  Measured 2026-09 against the
+    pre-fix tree (physics.py's du sign AND this example's params file
+    reverted together, i.e. the state that actually shipped): the
+    production track was the reference NEGATED, matching -1 x it to
+    2.7e-03 / 5.2e-03 -- the same percent-level residual as the fixed
+    tree, on the wrong sign.  Reverting physics.py alone flips only du and
+    fails the match assertion at 198.5% of the track amplitude.
+
+    WHY THE TOLERANCE IS PERCENT-LEVEL AND NOT MACHINE PRECISION.  Both
+    sides evaluate the SAME published xi_* elements, but they do not get
+    the same base trajectory.  MulensModel is handed the published
+    (t_0, u_0, t_E) and the published xi_semimajor_axis = 0.200; EXOZIPPy
+    DERIVES t_E and the xallarap amplitude from the physical chain (the
+    four proper-motion leaves, the distances, theta_E and
+    a_1 = a m_c/m_total), and the relaxation engine lands t_E = 176.01 d
+    against the published 173.0 and xi_a = 0.2004 against 0.200.  A ~1.7%
+    error in t_E is a ~1.7% error in the Einstein-radius scale the shift
+    is measured in, which is the whole residual: measured 2026-09,
+    max|dtau - dtau_mm| = 2.66e-03 and max|du - du_mm| = 5.21e-03 against
+    a track amplitude of 0.34, i.e. 0.8% and 1.5%.  The 3% cap below is
+    therefore ~2x the measured deviation and 30x below the negated-track
+    signal -- it is a bound on the derived-vs-published parameter offset,
+    NOT slack for a sign or a mapping.  Tightening it means seeding the
+    published t_E directly, which this example deliberately does not do
+    (seeding t_E alongside the pm/distance seeds over-determines the
+    engine; see the params file).
+
+    Costs ~18 s under pytest on a warm compile cache (measured 2026-09;
+    35 s standalone under a concurrent full-suite run), which is over the
+    30 s bar in pyproject.toml's marker description -- the whole module is
+    already pytest.mark.slow, so no extra marker is needed.
+    """
+    from pathlib import Path
+
+    import MulensModel as mm
+    import yaml
+
+    # Arrange: the shipped example, built from its own directory.
+    example = Path(__file__).parent.parent / "examples" / "ob170114"
+    config = yaml.safe_load((example / "ob170114.yaml").read_text())
+    params = yaml.safe_load((example / config["parameter_file"]).read_text())
+    monkeypatch.chdir(example)
+    system = System(config, params)
+    system.prepare()
+    model = system.build_model()
+
+    # Act: the production (dtau, du) at the start point, plus the base
+    # trajectory parameters the ENGINE resolved (not the published ones --
+    # MulensModel must be given the same base track for the comparison to
+    # isolate the xallarap composition).
+    lens = system.lens
+    times = np.linspace(2457850.0, 2458000.0, 301)
+    out = _eval_at_start(
+        model,
+        list(lens._source_offset_series(times, system))
+        + [lens.t_0.value[0], lens.u_0.value[0], lens.t_E.value[0]],
+    )
+    dtau, du = np.atleast_1d(out[0]), np.atleast_1d(out[1])
+    t_0, u_0, t_E = [float(np.atleast_1d(v)[0]) for v in out[2:]]
+
+    # The reference: MulensModel's own applied shift at the PUBLISHED
+    # xi_* elements (Mroz+26 Table B.1).  (tau, u) and MM's (x, y) are the
+    # same quantities (C18/C10), so this is the track EXOZIPPy must equal
+    # with no extra sign.
+    base = dict(t_0=t_0, u_0=u_0, t_E=t_E)
+    xi = dict(
+        xi_period=221.5,
+        xi_semimajor_axis=0.200,
+        xi_inclination=30.5,
+        xi_Omega_node=250.0,
+        xi_argument_of_latitude_reference=236.1,
+        xi_eccentricity=0.615,
+        xi_omega_periapsis=207.3,
+        t_0_xi=2457933.5,
+    )
+    tr0 = mm.Trajectory(times, parameters=mm.Model(dict(base)).parameters)
+    tr1 = mm.Trajectory(
+        times, parameters=mm.Model(dict(base, **xi)).parameters
+    )
+    dtau_mm = np.asarray(tr1.x) - np.asarray(tr0.x)
+    du_mm = np.asarray(tr1.y) - np.asarray(tr0.y)
+
+    # Assert: the track is real, and it MATCHES (see the tolerance note).
+    scale = max(np.max(np.abs(dtau_mm)), np.max(np.abs(du_mm)))
+    assert scale > 0.1, f"reference xallarap track is degenerate: {scale}"
+    matched = max(np.max(np.abs(dtau - dtau_mm)), np.max(np.abs(du - du_mm)))
+    assert matched < 0.03 * scale, (
+        f"production xallarap track deviates by {matched:.3e} "
+        f"({matched / scale:.1%} of the {scale:.3f} track amplitude); the "
+        f"derived-vs-published t_E offset accounts for ~1.5%, more than "
+        f"that is a mapping or projection error"
+    )
+
+    # Teeth, in the direction the bug actually went: the track must not be
+    # MINUS the reference.  The pre-2.6.13 tree (physics.py's du sign and
+    # this example's params file together) landed the production track
+    # exactly here -- see the docstring's measurement.
+    negated = min(np.max(np.abs(dtau + dtau_mm)), np.max(np.abs(du + du_mm)))
+    assert negated > 0.9 * scale, (
+        f"production xallarap track is within {negated:.3e} of MINUS the "
+        f"MulensModel shift -- this is review 2.6.13's sign bug"
+    )
+    assert negated > 20.0 * matched, (
+        f"the negated-track residual ({negated:.3e}) is not decisively "
+        f"larger than the matched one ({matched:.3e}); this test has lost "
+        f"its teeth"
+    )
