@@ -39,10 +39,16 @@ from exozippy.linking import extract_links
 # mkprior restart files name it, so flagging it as a typo would be wrong.
 TUNING_KEYS = ("initval", "init_scale")
 
+# The two INTERVAL fields.  They are the one pair resolve() does not simply
+# assign -- apply_value keeps the strictest of the two -- so the loops that
+# have to treat them differently from every other field name them from here
+# rather than spelling the pair out again (review 1.1.5).
+BOUND_KEYS = ("lower", "upper")
+
 # Keys that change the posterior.  bound_scale is one of them: it sets
 # soft-bound barrier steepness, a real posterior term (unlike init_scale).
 # A user entry touching any of these marks the parameter prior-modified.
-PHYSICS_KEYS = ("lower", "upper", "mu", "sigma", "bound_scale")
+PHYSICS_KEYS = BOUND_KEYS + ("mu", "sigma", "bound_scale")
 
 # Every field resolve() reads as a number and scales by the element's unit.
 NUMERIC_KEYS = TUNING_KEYS + PHYSICS_KEYS
@@ -1515,6 +1521,22 @@ class ConfigManager:
                 resolved[key] = None
 
         def apply_value(key, current_arr, idx, new_val):
+            """Layer one value onto element `idx`; bounds keep the STRICTEST.
+
+            The max()/min() on `lower`/`upper` is the documented
+            defaults-and-component-validity rule stated in the class
+            docstring above: a user bound never WIDENS a physics or grid
+            limit (e.g. Instrument._register_noise's jitter-variance floor).
+
+            It is deliberately NOT a rule between two USER spellings of one
+            parameter.  Order-independent max/min defeated the ordering of
+            `_element_keys`, so a broadcast bound beat a more specific one --
+            the single field where "most specific wins" did not hold (review
+            1.1.5).  That contest is now settled by specificity in the
+            user-params loop BEFORE anything reaches here, so by the time a
+            user bound arrives it is the only user bound in play and this
+            clip can only ever be user-vs-defaults.
+            """
             if new_val is None:
                 return current_arr
             if current_arr is None:
@@ -1716,6 +1738,38 @@ class ConfigManager:
                         break
 
         for i in range(n_elements):
+            # A SPECIFIC USER BOUND IS THE EXCEPTION TO A BROADCAST ONE, NOT
+            # AN ADDITION TO IT (review 1.1.5).  `_element_keys` is in
+            # specificity order and the loop below applies every match, so
+            # for every field the last write wins and the most specific
+            # spelling therefore wins -- which is what config.md promises
+            # "for every field".  Bounds were the silent exception, because
+            # apply_value keeps the strictest instead of assigning: a
+            # broadcast `sed.av: {lower: 1.0}` beat a specific
+            # `sed.0.av: {lower: 0.5}` and nothing said so.
+            #
+            # So pick the most specific spelling that STATES each bound and
+            # let only that one through.  Doing it here, rather than by
+            # weakening apply_value, keeps the two rules apart: user-vs-user
+            # is decided by specificity, user-vs-defaults is still decided by
+            # strictness.  It is also what lets a "the defaults clipped you"
+            # warning be written correctly (2.1.6) -- today the same clip
+            # fires user-vs-user and would mis-blame the wrong entry.
+            #
+            # Reachable only where BOTH spellings survive standardization:
+            # for a LIST component `standardize_param_names` expands a 2-part
+            # key solely into the indices no 3-part key claimed, so the
+            # element never sees the broadcast.  A FLAT-DICT component's
+            # params (`sed.av` and `sed.0.av`) pass through verbatim, and
+            # that is where this bit.
+            bound_source = {}
+            for k in _element_keys(i):
+                scanned = self.user_params.get(k)
+                if isinstance(scanned, dict):
+                    for bkey in BOUND_KEYS:
+                        if bkey in scanned:
+                            bound_source[bkey] = k
+
             for k in _element_keys(i):
                 if k in self.user_params:
                     ov = self.user_params[k]
@@ -1730,6 +1784,12 @@ class ConfigManager:
 
                     for key in all_numeric:
                         if key in ov:
+                            if bound_source.get(key, k) != k:
+                                # A more specific spelling of this element
+                                # states this bound; that one is the whole
+                                # user bound, not a second opinion to be
+                                # combined with this one.
+                                continue
                             v_ov = ov[key]
                             # List-valued initvals are per-seed start points
                             # (P4 multi-seed sampling); bounds/scales and the
