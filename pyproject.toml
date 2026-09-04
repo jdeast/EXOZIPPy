@@ -68,6 +68,16 @@ dependencies = [
     # pin (see samplers/de_metropolis.py).
     "pymc>=6.0.0,<7.0.0",
     "pyyaml>=6.0.3,<7.0.0",
+    # NESTED SAMPLING BACKENDS.  Both were UNDECLARED until 2026-09-04
+    # while run.py:801 makes `method: nested` a first-class sampler and
+    # run.py:820 defaults `nested_backend` to DYNESTY -- so on a clean
+    # install the default nested path died with ModuleNotFoundError.  They
+    # are core rather than an extra for exactly that reason: an undeclared
+    # dependency behind a default is not optional.  Both were installed by
+    # hand in the dev environment (dynesty 3.1.0 / ultranest 4.5.0), which
+    # is why nothing noticed.
+    "dynesty>=3.1.0,<4.0.0",
+    "ultranest>=4.5.0,<5.0.0",
     "matplotlib>=3.11.1,<4.0.0",
     "astropy>=7.2.0,<8.0.0",
     # celerite v1 used to be pinned here. It was imported nowhere in the tree

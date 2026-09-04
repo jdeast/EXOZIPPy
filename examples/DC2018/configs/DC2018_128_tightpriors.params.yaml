@@ -23,9 +23,10 @@
 # (dc128_h_decomposition.py; H_i ~ log(width / sd) - 0.5*log(2*pi*e)):
 #     err_scale     x2   log(2e6 / 200)      = 9.21 nats each   18.4
 #     t_0                log(6e5 / 1893)     = 5.76             5.8
-#     u_0                log(36 / 4)         = 2.20             2.2
 #     log_f_total   x2   log(110 / 20)       = 1.70 each        3.4
-#                                            TOTAL           ~29.8 nats
+#                                            TOTAL           ~27.6 nats
+#   (u_0 was in this table at 2.20 nats and has been REMOVED -- see item 4
+#    below for why it must not be tightened in a template.)
 # against the run's own measured H of 98.0, so ~30% fewer iterations at the
 # same nlive.  READ THAT AS AN ESTIMATE, NOT A PREDICTION: the H_i formula
 # assumes a uniform prior inside each box while the real prior carries
@@ -58,6 +59,30 @@ mulensinstrument.Roman_W149.err_scale: {lower: 1.0e-2, upper: 1.0e+2}
 mulensinstrument.Roman_Z087.err_scale: {lower: 1.0e-2, upper: 1.0e+2}
 
 # 3. t_0: U(2.4e6, 3e6) -> the data span padded by 90 days each side.
+# ON WHETHER THIS SHOULD BE IMPLEMENTED GENERALLY (JDE, 2026-09-04, asking
+# whether the PEAK-based version is robust enough or whether the span-based
+# one gets far enough):  the span-based rule should ship; the peak-based one
+# should not.
+#   SPAN-BASED needs only the loaded time column, which exists for every
+#   microlensing config at lifecycle stage 1 (load_data pushes data-derived
+#   hints), so it is always computable and cannot be absent.  It buys
+#   log(6e5 / 1893) = 5.76 nats of t_0's 17.9.
+#   PEAK-BASED (t_0 +/- a few t_E) would buy log(6e5 / 180) = 8.11 nats at
+#   5 t_E -- i.e. 2.35 nats MORE than span-based, so span-based already
+#   captures 71% of the recoverable total.
+#   AND THERE IS NO IN-TREE PEAK FINDER TO BASE IT ON.  t_0 hints reach the
+#   engine only from MMEXOFAST (mmexofast_support.py:254/290) or from user
+#   params, and MMEXOFAST is OPTIONAL and routinely off (`mmexofast: false`
+#   in examples/ob09020, whose survey-only photometry undersamples the
+#   anomaly).  A bound that exists for some configs and not others is
+#   exactly the fragility JDE's path 2 says must be avoided, and it would
+#   fail hardest where it matters: multi-peak binary caustics, events
+#   peaking off the ends of the data, and low-S/N events -- the cases where
+#   a WRONG tight t_0 bound excludes the true solution outright.
+#   VERDICT: 2.35 nats is not worth making a prior depend on an optional
+#   external fitter.  Implement the span-based rule as path 2, with the pad
+#   user-overridable, and leave peak-based as an explicit opt-in if anyone
+#   ever wants it.
 # MEASURED from the two light curves: W149 spans 2458346.5055-2460059.2414
 # and Z087 2458346.7279-2460058.9182, i.e. 1712.7 days.  The default prior
 # is a 600,000-day window for a 1,713-day data set -- 350x the span -- and
@@ -70,13 +95,35 @@ mulensinstrument.Roman_Z087.err_scale: {lower: 1.0e-2, upper: 1.0e+2}
 # HAND here rather than automatically, because path 2 has not been built.
 lens.DC2018_128.t_0: {lower: 2458256.5, upper: 2460149.3}
 
-# 4. u_0: U(-18, 18) -> U(-2, 2).  10.4 nats.  u_0 is the impact parameter
-# in units of theta_E, so |u_0| > 1 is already a low-magnification event and
-# |u_0| = 18 is a non-detection.  This event's posterior is 0.1421.  Kept at
-# 2 rather than 1 so the low-magnification region remains open, and SIGNED
-# so the +/-u_0 degeneracy both microlensing conventions rely on survives --
-# tightening this to a one-sided bound would silently delete a real mode.
-lens.DC2018_128.u_0: {lower: -2.0, upper: 2.0}
+# 4. u_0: NOT TIGHTENED, deliberately.  An earlier version of this file cut
+# it to U(-2, 2) for 2.20 nats; JDE vetoed that on 2026-09-04 -- "u_0 +/- 2
+# is a very tight bound and i worry users might replicate that template.
+# I'm pretty sure we know systems with larger values" -- and he is right on
+# both counts.
+#
+# WHY IT CANNOT BE DONE ROBUSTLY, WHICH IS THE REAL ANSWER.  u_0 maps to the
+# peak magnification, A_max = (u_0^2 + 2) / (u_0 * sqrt(u_0^2 + 4)), so a
+# bound on u_0 is a bound on the peak amplitude.  But the OBSERVED amplitude
+# is f_source * (A - 1) / (f_source + f_blend): the source flux and the
+# blend are free and mutually degenerate, so a small observed bump is
+# equally a small u_0 with a faint source or a large u_0 with a bright one.
+# No bound on u_0 follows from the light curve alone.  Adding one means
+# asserting something about the blending, which is the very thing being fit.
+# And large u_0 IS real: low-magnification survey events run to |u_0| ~ 1-3
+# (u_0 = 2 gives A_max = 1.06, u_0 = 3 gives 1.017 -- detectable in
+# high-cadence photometry), and in a wide binary u_0 is measured from the
+# CENTRE OF MASS, which the source can miss by well over one theta_E while
+# still crossing a caustic.
+#
+# COST OF LEAVING IT: 2.20 nats of the ~29.8 this file saves, i.e. 7%.  That
+# is the cheapest of the five and by far the most dangerous to copy, so the
+# trade is not close.  Note the default's own 10.4 nats therefore REMAIN --
+# u_0 stays the largest single un-recovered line in the decomposition, and
+# recovering it needs a joint treatment with f_source/f_blend, not a box.
+# The sign is also load-bearing: u_0 must stay SIGNED and symmetric or the
+# +/-u_0 degeneracy that both microlensing conventions rely on is silently
+# deleted -- one shipped `swap_schedule: random` arm already lost that mode
+# by accident (7.4.4 leg (a)), and it is not a mode to lose on purpose.
 
 # 5. log_f_total: U(-100, 10) -> U(-15, 5).  14.0 + 12.4 = 26.4 nats, but
 # only ~1.7 nats each is recoverable this way, because the width enters
