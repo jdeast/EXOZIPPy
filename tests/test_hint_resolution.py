@@ -219,9 +219,19 @@ def test_the_most_specific_hint_spelling_wins():
     Same rule as every other field resolve() layers, and it comes from the
     same shared candidate list (_lookup_keys), so the three spellings cannot
     drift apart per channel.
+
+    BUILT WITHOUT A system_config, since review 2.14.8.  A component may no
+    longer PUSH a broadcast hint -- that is refused now, because one scalar
+    cannot answer for every element once the elements may carry different
+    `unit:` overrides (review 1.1.5) -- but `_lookup_keys` still consults the
+    broadcast spelling, because a 2-part key still ARRIVES by the routes the
+    guard cannot see: this constructor mode, and the relaxation engine's own
+    ledger, which registers unmapped 2-part keys as leaf symbols and hands
+    them back through `propagated_scales`.  The layering rule under test is
+    unchanged; only the door has narrowed.
     """
     # Arrange
-    cm = _cm()
+    cm = ConfigManager({}, system_config=None)
 
     # Act
     cm.add_hint("star.teff", 5000.0)

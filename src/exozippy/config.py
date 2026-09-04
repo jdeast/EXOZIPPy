@@ -1068,6 +1068,46 @@ class ConfigManager:
                     out.setdefault(fld, {})[int(parts[1])] = plink
         return out
 
+    def _reject_broadcast_hint_path(self, path, translated_path):
+        """Refuse a 2-part broadcast path on an INTERNAL hint channel.
+
+        Only where the broadcast form is genuinely a broadcast, i.e. where
+        the component is a LIST.  For a flat-dict component (``sed.av``) the
+        2-part spelling IS the canonical one and names a single instance, so
+        it stays legal -- which is also why the check is on the component's
+        shape rather than on the number of dots.
+
+        Permissive when there is no ``system_config``: that path cannot tell
+        a broadcast from a canonical 2-part key, and it is the tests-and-
+        direct-drivers mode, not production.
+        """
+        parts = translated_path.split(".")
+        if len(parts) != 2 or not isinstance(self.system_config, dict):
+            return
+        if not isinstance(self.system_config.get(parts[0]), list):
+            return
+        spelled = (
+            f"{path!r}"
+            if path == translated_path
+            else f"{path!r} (translated to {translated_path!r})"
+        )
+        raise ValueError(
+            f"\n!!! BROADCAST PATH ON AN INTERNAL HINT CHANNEL !!!\n"
+            f"{spelled} is the 2-part broadcast form, and "
+            f"'{parts[0]}' is a list component with "
+            f"{len(self.system_config[parts[0]])} instance(s).\n"
+            f"Broadcasting is a USER-FACING convenience: a params-file entry "
+            f"is expanded into one key per element at construction, and "
+            f"nothing downstream sees the broadcast form again.  A hint, a "
+            f"scale hint or a seed is pushed BY A COMPONENT, which knows "
+            f"which element it means -- so push one per element:\n"
+            f"    {parts[0]}.<i>.{parts[1]}\n"
+            f"This is refused rather than expanded because one scalar cannot "
+            f"answer for every element: since review 1.1.5 the elements may "
+            f"carry different `unit:` overrides, so there is no single unit "
+            f"the value could be read in."
+        )
+
     def _translate_and_scale(self, path, value):
         """Standardize a human-readable path to internal-index form and convert
         its value to internal units.  Returns (translated_path, internal_value).
@@ -1098,14 +1138,26 @@ class ConfigManager:
         # only for a LIST component.  So the translated path equals the
         # original everywhere the original already worked.
         #
-        # STILL OPEN, deliberately: the 2-PART BROADCAST spelling.
-        # `canonical_key` leaves `star.distance` alone while standardization
-        # expanded it into `star.0.distance`/`star.1.distance`, so that
-        # lookup still misses and still yields 1.0.  Not folded in here
-        # because it is not a spelling fix -- a broadcast hint is ONE scalar
-        # for every element, and since review 1.1.5 the elements may carry
-        # DIFFERENT units, so which unit it should be read in is a design
-        # question, not an index translation.  Filed as its own item.
+        # AND THE 2-PART BROADCAST SPELLING IS REFUSED OUTRIGHT (review
+        # 2.14.8).  It would otherwise miss in the same way and for the same
+        # reason -- `canonical_key` leaves `star.distance` alone while
+        # standardization expanded that entry into
+        # `star.0.distance`/`star.1.distance` -- but the fix cannot be
+        # another index translation, because a broadcast hint is ONE scalar
+        # for every element while the elements may legitimately carry
+        # DIFFERENT units (since review 1.1.5 a specific `unit:` overrides a
+        # broadcast one per element).  There is no forced answer to "which
+        # unit is this scalar in", so the channel refuses the question.
+        #
+        # JDE's ruling, 2026-09-04: broadcasting is a USER-FACING
+        # CONVENIENCE.  It is translated once, at construction, and never
+        # thought about again -- so an INTERNAL channel must never be handed
+        # one.  The guard lives here rather than in `add_hint` because this
+        # helper is the single implementation behind add_hint,
+        # add_scale_hint, add_seed_hints and seed_start_value, and all four
+        # are internal.
+        self._reject_broadcast_hint_path(path, translated_path)
+
         final_parts = translated_path.split(".")
         if len(final_parts) >= 2:
             c_type, p_name = final_parts[0], final_parts[-1]

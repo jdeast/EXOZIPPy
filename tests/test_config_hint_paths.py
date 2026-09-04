@@ -101,25 +101,34 @@ def test_scale_hint_honors_a_user_unit_override():
 
 def test_untranslatable_paths_are_stored_verbatim():
     """
-    Given a 2-part broadcast path and a 3-part path naming no known instance,
-    When they are pushed through both hint channels,
-    Then both channels store them under the path exactly as given.
+    Given a 3-part path naming no known instance,
+    When it is pushed through both hint channels,
+    Then both channels store it under the path exactly as given.
 
-    The broadcast form is how a component says "every element"; resolve()
-    checks it as its first candidate key, so rewriting it would silently
-    demote a system-wide hint to element 0 only.
+    An unrecognised INSTANCE name is not an error here: the component may be
+    registering ahead of an instance that does not exist yet, and review
+    2.1.3 covers the separate question of a typo'd name being silently
+    dropped at resolve().  What matters for this channel is that the two
+    hint channels agree on the key.
+
+    THE BROADCAST HALF OF THIS TEST IS GONE, review 2.14.8.  It used to
+    assert that `star.distance` was stored verbatim too, on the rationale
+    that "the broadcast form is how a component says every element".  That
+    capability was real and worked -- a broadcast hint reached all three
+    elements and a specific hint still overrode per element -- but it is now
+    refused outright, so the assertion is replaced by
+    test_an_internal_channel_refuses_a_broadcast_path in
+    tests/test_param_specificity.py.  No production caller ever used it.
     """
     # ARRANGE
     cm = _cm()
 
     # ACT
-    cm.add_hint("star.distance", 8000.0)
-    cm.add_scale_hint("star.distance", 500.0)
     cm.add_hint("star.Nobody.distance", 8000.0)
     cm.add_scale_hint("star.Nobody.distance", 500.0)
 
     # ASSERT
-    assert set(cm.hints) == {"star.distance", "star.Nobody.distance"}
+    assert set(cm.hints) == {"star.Nobody.distance"}
     assert set(cm.scale_hints) == set(cm.hints)
 
 

@@ -335,3 +335,52 @@ def test_a_hint_pushed_by_name_uses_the_users_unit():
     # ASSERT
     assert factors["star.B.distance"] == factors["star.1.distance"]
     assert np.isclose(factors["star.1.distance"], 1000.0)
+
+
+def test_a_seeded_start_is_scaled_once_whichever_spelling_seeds_it():
+    """
+    Given a user `unit:` override written on the NAME form,
+    When globalsearch.seed_start pushes an INTERNAL value under the name form
+      and under the index form,
+    Then both store the same internal hint -- the value that went in.
+
+    The other half of review 2.14.6, and the reason it must land in the same
+    change as the `_translate_and_scale` fix.  `seed_start` DIVIDES by a
+    factor it looks up itself, and `add_hint` then MULTIPLIES by the factor
+    `_translate_and_scale` looks up.  While BOTH read the original path the
+    two errors cancelled exactly and the result was right by accident.
+    Fixing only the second half breaks the cancellation:
+
+        master (both halves wrong)   name form -> 2000.0    correct
+        _translate_and_scale fixed   name form -> 2000000.0 1000x too big
+        both fixed                   name form -> 2000.0    correct
+
+    That is CLAUDE.md's reciprocal-conversion-factor trap in a new spelling:
+    a divide/multiply pair that was only correct because both halves were
+    wrong, so a half fix is worse than none.  `seed_start` already had the
+    canonical spelling two lines above the defect.
+
+    Latent throughout -- every caller passes the index form, where the
+    original and translated paths are the same string -- which is why the
+    twenty-example bit-identity sweep could not see any of the three states.
+    """
+    # ARRANGE
+    from exozippy.components import globalsearch
+
+    system = {"star": [{"name": "A"}, {"name": "B"}]}
+    internal_value = 2000.0  # pc, the internal unit
+    stored = {}
+
+    # ACT
+    for spelling in ("star.B.distance", "star.1.distance"):
+        cm = ConfigManager(
+            {"star.B.distance": {"unit": "kpc"}}, system_config=system
+        )
+        globalsearch.seed_start(
+            cm, spelling, internal_value, globalsearch.QUALITY_RV, "test"
+        )
+        stored[spelling] = cm.hints["star.1.distance"]
+
+    # ASSERT
+    assert stored["star.B.distance"] == stored["star.1.distance"]
+    assert np.isclose(stored["star.1.distance"], internal_value)
