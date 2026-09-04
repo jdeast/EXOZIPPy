@@ -2013,10 +2013,35 @@ class ConfigManager:
 
         logger.debug("=" * 50 + "\nSYMBOL MAP DEBUGGING\n" + "=" * 50)
 
+        def _user_start(data):
+            """The start value a user entry states, `initval` else `mu`.
+
+            THE FALLBACK IS THE POINT (review 1.1.3).  `resolve()` promotes a
+            lone `mu` to the start -- deliberately, and pinned by
+            tests/test_hint_resolution.py: a user's prior centre is a better
+            start than an arbitrary defaults.yaml value.  So `mu` IS the start
+            the model uses.  The engine used to read only `initval`, which
+            meant a numeric `mu` reached it solely through the default-armor
+            pass at PRECEDENCE_DEFAULT (20) -- so the value was right but its
+            PRECEDENCE was wrong by 80, and any relation touching that symbol
+            was free to solve it away from the number the user wrote.
+            Downstream, the ledger, export_solution and initval_source all
+            reported the hint or default rather than the user's own prior
+            centre, and build_pymc errors blamed "data" for it.
+
+            `probe_derivable` already falls back to `mu`, so before this the
+            same input got two different answers at stage 1a and stage 4.
+            Three readers, one rule.
+            """
+            if not isinstance(data, dict):
+                return data
+            val = data.get("initval")
+            return data.get("mu") if val is None else val
+
         for path, data in self.user_params.items():
             if data is None:
                 continue
-            val = data.get("initval") if isinstance(data, dict) else data
+            val = _user_start(data)
             # A list-valued initval is a set of per-seed start points (P4
             # multi-seed sampling).  The base flat_params below seeds the
             # relaxation engine with seed 0; _build_seed_overrides re-injects
@@ -2064,7 +2089,7 @@ class ConfigManager:
 
                 # Push the user's value into the solver's initial state
                 data = self.user_params[path]
-                val = data.get("initval") if isinstance(data, dict) else data
+                val = _user_start(data)  # initval else mu; review 1.1.3
                 if isinstance(val, (list, tuple)):
                     val = val[0]  # seed 0; see per-seed handling below
                 if val is not None:

@@ -13,6 +13,9 @@ or where a user's entry vanished without a diagnostic:
          entry tripped the "over-constrained" contradiction clause.
   2.1.3  a 3-part key with a typo'd INSTANCE name was kept as an inert leaf
          symbol -- value, bounds and prior silently discarded.
+  1.1.3  a user's numeric `mu` with no `initval` never reached the relaxation
+         engine, so the engine reasoned from a hint or a default while
+         `resolve()` made the `mu` the model's actual start.
 """
 
 import numpy as np
@@ -371,3 +374,126 @@ def test_name_declared_nowhere_raises_even_for_a_borrowing_component():
             {"lens.SourceZ.t_0": {"initval": 2457551.04}},
             system_config=config,
         )
+
+
+# ---------------------------------------------------------------------------
+# 1.1.3: a lone `mu` IS the start, so the engine has to see it
+# ---------------------------------------------------------------------------
+
+_STAR_CONFIG = {"star": [{"name": "A", "mist": False}]}
+
+
+def test_a_lone_mu_reaches_the_engine_at_user_precedence():
+    """
+    Given a user entry with `mu` and `sigma` but NO `initval`,
+    When a component hint competes for the same parameter,
+    Then the engine resolves the user's mu, at PRECEDENCE_USER.
+
+    This is the divergence review 1.1.3 reproduced. `resolve()` promotes a
+    lone `mu` to the start deliberately -- a user's prior centre beats an
+    arbitrary default -- so the mu IS what the model starts at. The engine
+    read only `initval`, so a numeric mu reached it solely through the
+    default-armor pass at PRECEDENCE_DEFAULT: right value, precedence wrong
+    by 80, which left any relation touching the symbol free to solve it away
+    from the number the user wrote.
+    """
+    # Arrange
+    cm = ConfigManager(
+        {"star.0.distance": {"mu": 4000.0, "sigma": 100.0}},
+        system_config=_STAR_CONFIG,
+    )
+    cm.add_hint("star.0.distance", 6500.0)
+
+    # Act
+    cm.finalize_user_params()
+
+    # Assert
+    assert cm._last_resolved["star.0.distance"] == pytest.approx(4000.0)
+    assert cm._last_provenance["star.0.distance"] == PRECEDENCE_USER
+
+
+def test_the_engine_and_resolve_agree_on_a_lone_mu():
+    """
+    Given the same entry,
+    When the engine's resolved value is compared to resolve()'s initval,
+    Then they are the same number.
+
+    The agreement is the property worth pinning, not either value alone.
+    Before the fix these two answered differently for one input -- the model
+    started at 4000 while the ledger, export_solution and initval_source all
+    reported 6500 and labelled it "data" -- so a build_pymc error blamed a
+    number nobody had written.
+    """
+    # Arrange
+    cm = ConfigManager(
+        {"star.0.distance": {"mu": 4000.0, "sigma": 100.0}},
+        system_config=_STAR_CONFIG,
+    )
+    cm.add_hint("star.0.distance", 6500.0)
+    cm.finalize_user_params()
+
+    # Act
+    resolved = cm.resolve("star", "distance", shape=(1,))
+
+    # Assert
+    assert float(np.atleast_1d(resolved["initval"])[0]) == pytest.approx(
+        cm._last_resolved["star.0.distance"]
+    )
+
+
+def test_an_explicit_initval_still_wins_over_mu():
+    """
+    Given an entry carrying BOTH `initval` and `mu`,
+    When the engine reads it,
+    Then the `initval` is used.
+
+    The fallback must not become an override: `mu` fills in only where no
+    `initval` was written. Pins the precedence between the two fields of one
+    user entry, which is the thing a careless fix would invert.
+    """
+    # Arrange
+    cm = ConfigManager(
+        {"star.0.distance": {"initval": 1500.0, "mu": 4000.0, "sigma": 100.0}},
+        system_config=_STAR_CONFIG,
+    )
+
+    # Act
+    cm.finalize_user_params()
+
+    # Assert
+    assert cm._last_resolved["star.0.distance"] == pytest.approx(1500.0)
+    assert cm._last_provenance["star.0.distance"] == PRECEDENCE_USER
+
+
+def test_a_lone_mu_on_an_unmapped_leaf_also_reaches_the_engine():
+    """
+    Given a lone `mu` on a path with no symbol in the master map,
+    When finalize registers it as a leaf,
+    Then the mu is pushed into the solver's initial state.
+
+    The leaf fallback is a SECOND copy of the same read, and fixing only the
+    mapped loop would have left this half broken -- which is why the fix is
+    one shared helper rather than two edits.
+
+    ASSERT THE PRECEDENCE, NOT THE VALUE. The value was already 7.5 before
+    the fix, because the default-armor pass supplied it; what was wrong was
+    that it arrived at PRECEDENCE_DEFAULT (20) rather than PRECEDENCE_USER
+    (100). An earlier draft of this test checked only the value and therefore
+    passed against the bug -- which is the whole shape of review 1.1.3: the
+    right number at the wrong precedence.
+    """
+    # Arrange
+    cm = ConfigManager(
+        {"star.0.some_unmapped_thing": {"mu": 7.5, "sigma": 0.5}},
+        system_config=_STAR_CONFIG,
+    )
+
+    # Act
+    cm.finalize_user_params()
+
+    # Assert
+    assert "star.0.some_unmapped_thing" in cm.master_symbol_map
+    assert cm._last_resolved.get(
+        "star.0.some_unmapped_thing"
+    ) == pytest.approx(7.5)
+    assert cm._last_provenance["star.0.some_unmapped_thing"] == PRECEDENCE_USER
