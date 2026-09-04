@@ -998,3 +998,160 @@ def test_a_per_element_unit_with_its_own_value_is_fine():
     # ASSERT
     assert cm.user_params["star.1.radius"]["unit"] == "jupiterRad"
     assert np.isclose(cm.user_params["star.1.radius"]["initval"], 9.0)
+
+
+# ---------------------------------------------------------------------------
+# 7. the engine only ever sees CANONICAL paths  (review 3.14.15c)
+# ---------------------------------------------------------------------------
+
+_FLATDICT = {"sed": {"file": "x.yaml"}}
+
+
+@pytest.mark.parametrize(
+    "channel, path",
+    [
+        ("hints", "star.B.distance"),
+        ("hints", "star.distance"),
+        ("scale_hints", "star.B.distance"),
+        ("scale_hints", "star.distance"),
+    ],
+)
+def test_a_non_canonical_path_is_refused_at_the_engine(channel, path):
+    """
+    Given a non-canonical path written straight into a hint channel's store,
+      bypassing the translation its public method performs,
+    When the relaxation engine's hint-layering step checks its inputs,
+    Then it raises, naming the path and the canonical spelling.
+
+    This is the assertion that the boundary translation was TOTAL, and it is
+    the guard for a whole family of defects rather than for one: reviews
+    1.1.5, 1.1.6, 2.1.8, 2.14.6 and 2.14.8 were all the same thing -- a
+    user-facing spelling surviving past the boundary, with something
+    downstream left to guess which spelling it had. Each was found
+    separately, by hand, months apart.
+
+    The stores are written directly here on purpose. Going through
+    `add_hint` would be translated (or refused) at the door, which is
+    exactly right and exactly why it cannot exercise THIS check. What is
+    pinned is the second line of defence.
+    """
+    # ARRANGE
+    cm = ConfigManager({}, system_config=SYSTEM)
+    getattr(cm, channel)[path] = 1.0
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match="NON-CANONICAL PATH AT THE ENGINE"):
+        cm._assert_canonical_engine_paths({})
+
+
+def test_a_non_canonical_seed_hint_is_refused_too():
+    """
+    Given a non-canonical path in the per-seed hint set,
+    When the engine checks its inputs,
+    Then it raises.
+
+    Three channels reach this step and all three are checked. A guard that
+    covered only `hints` would leave the seed path -- the one carrying
+    MMEXOFAST solutions, i.e. the least hand-written of the three -- open.
+    """
+    # ARRANGE
+    cm = ConfigManager({}, system_config=SYSTEM)
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match="NON-CANONICAL PATH AT THE ENGINE"):
+        cm._assert_canonical_engine_paths({"star.B.distance": 1.0})
+
+
+def test_the_index_form_passes_the_engine_check():
+    """
+    Given index-form paths in every channel,
+    When the engine checks its inputs,
+    Then nothing raises.
+
+    Measured across all twenty shipped example config/params pairs: every one
+    of the 72 hint paths and 20 scale-hint paths is already index form, so
+    this check is a no-op on everything that ships.
+    """
+    # ARRANGE
+    cm = ConfigManager({}, system_config=SYSTEM)
+    cm.add_hint("star.0.distance", 3000.0)
+    cm.add_scale_hint("star.1.distance", 5.0)
+
+    # ACT
+    cm._assert_canonical_engine_paths({"star.0.teff": 5000.0})
+
+    # ASSERT -- reaching here without raising IS the assertion
+
+
+def test_a_flat_dict_components_two_part_key_passes_the_engine_check():
+    """
+    Given a flat-dict component's 2-part key,
+    When the engine checks its inputs,
+    Then it passes, because there the 2-part form IS canonical.
+
+    The asymmetry is real and is review 3.14.17: a single-instance component
+    has no list to broadcast over, so `sed.av` is its only spelling. The
+    check therefore keys on the component's SHAPE in system_config rather
+    than on the number of dots -- the same distinction 2.14.8's push-time
+    guard makes, deliberately, so the two cannot disagree about what
+    canonical means.
+    """
+    # ARRANGE
+    cm = ConfigManager({}, system_config=_FLATDICT)
+    cm.hints["sed.av"] = 1.0
+
+    # ACT
+    cm._assert_canonical_engine_paths({})
+
+    # ASSERT -- no raise
+
+
+def test_the_engine_check_does_not_gate_on_the_symbol_map():
+    """
+    Given a canonical hint path that is NOT a relaxation-engine symbol,
+    When the engine checks its inputs,
+    Then it passes.
+
+    Pinned because "is it in master_symbol_map" is the obvious formulation
+    of this check and it is WRONG. Measured across the twenty shipped
+    examples, 25 of 72 hint paths are legitimately absent from the map --
+    every `mulensinstrument.<i>.f_source`/`f_blend`/`q_flux` -- because
+    `resolve()` reads hints too and a hinted parameter need not be an engine
+    symbol. Gating on the map would have refused every microlensing example.
+    Shape is the invariant; symbol membership is not.
+    """
+    # ARRANGE -- star.0.av is a real parameter (the SED's extinction) and is
+    # deliberately NOT in the symbol map: `star` declares no symbolic
+    # relation for it.  Checked in the assert below rather than assumed,
+    # because the first draft of this test used star.0.distance, which IS a
+    # symbol, and so demonstrated nothing.
+    cm = ConfigManager({}, system_config=SYSTEM)
+    cm.add_hint("star.0.av", 0.5)
+    assert "star.0.av" not in getattr(cm, "master_symbol_map", {})
+
+    # ACT
+    cm._assert_canonical_engine_paths({})
+
+    # ASSERT -- no raise
+
+
+def test_no_system_config_skips_the_engine_check():
+    """
+    Given a ConfigManager built with no system_config,
+    When the engine checks its inputs,
+    Then a 2-part path is accepted.
+
+    That mode cannot tell a broadcast from a flat-dict component's canonical
+    key, and it is the tests-and-direct-drivers path. Same reason 2.14.8's
+    push-time guard is permissive there; the two must agree, or a path
+    refused at one end and accepted at the other would be worse than either
+    rule alone.
+    """
+    # ARRANGE
+    cm = ConfigManager({}, system_config=None)
+    cm.hints["star.distance"] = 1.0
+
+    # ACT
+    cm._assert_canonical_engine_paths({})
+
+    # ASSERT -- no raise

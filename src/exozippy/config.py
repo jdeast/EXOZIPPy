@@ -1125,10 +1125,11 @@ class ConfigManager:
         # comment here used to say the opposite -- that the ORIGINAL path is
         # what carries a user `unit:` override -- and that is precisely
         # backwards: `standardize_param_names` folds the name form into the
-        # index form at construction, so after it runs `user_params` can
-        # never contain a name-form key, and a hint pushed as
-        # `star.B.distance` looked up a spelling that does not exist and got
-        # the DEFAULTS unit.  Measured: with `star.B.distance: {unit: kpc}`,
+        # index form at construction, so after it runs a LIST component's
+        # `user_params` cannot contain a name-form key (with the two
+        # exceptions named below), and a hint pushed as `star.B.distance`
+        # looked up a spelling that does not exist and got the DEFAULTS
+        # unit.  Measured: with `star.B.distance: {unit: kpc}`,
         # pushing the name form scaled by 1.0 and the index form by 1000.0 --
         # the same element of the same parameter, differing only in spelling
         # (review 2.14.6).
@@ -1504,6 +1505,21 @@ class ConfigManager:
             keys = _element_keys(i)
             return keys[1:] + keys[:1]
 
+        # THE GUARANTEE AND ITS TWO EXCEPTIONS (review 2d-1/2d-4).  Since
+        # System calls `normalize_config_block` on every component's config
+        # BEFORE building the ConfigManager, every derived instance name
+        # exists when standardization runs, so a LIST component's
+        # `user_params` really cannot hold a name-form key.  That was NOT
+        # true until 2026-09: Mann and Torres derived `name:` in their own
+        # __init__, after this object was built, so `mann.A.ks_offset`
+        # survived name-form forever and this very comment was wrong.
+        # Still outstanding, deliberately:
+        #   * a FLAT-DICT component keeps all three spellings verbatim --
+        #     `canonical_key` is the identity there and `sed.B.av` has no
+        #     index to fold into (review 3.14.17);
+        #   * `system_config=None` skips standardization entirely (tests and
+        #     direct drivers).
+        #
         # ONE ELEMENT, ONE SPELLING -- the residual half of the check that
         # runs at construction.  That one sees every collision whose name
         # form is a CONFIG INSTANCE name, because standardize_param_names has
@@ -1513,7 +1529,16 @@ class ConfigManager:
         # its own config instances' names.  `lens` does exactly that
         # (examples/ob161003), labelling its per-source vectors with the
         # SOURCE STARS' names, so `lens.SourceA.t_0` survives standardization
-        # verbatim and coexists with `lens.0.t_0` as two live user keys.
+        # verbatim.
+        #
+        # It does NOT, however, survive to here: `Lens._rewrite_source_param_keys`
+        # runs in `Lens.__init__`, before any stage-1 code, and renames every
+        # such key to its source SLOT.  So by the time `resolve()` is called
+        # the name form is already gone, and this check is reached only via
+        # `_raw_user_param_keys` below -- which is the point of reading the
+        # raw keys rather than `user_params`, and why this site still works.
+        # The older claim here, that the two spellings "coexist as two live
+        # user keys", described a window that closes before stage 1.
         #
         # Only keys the user WROTE count.  finalize_user_params injects the
         # engine's solved start values back under the index form, and on
@@ -1890,22 +1915,49 @@ class ConfigManager:
                             if isinstance(v_ov, (list, tuple)):
                                 v_ov = v_ov[0]
                             apply_value(key, resolved[key], i, v_ov)
-                            # apply_value keeps the TIGHTER of the two bounds.
-                            # When the winner is a component-computed one, say
-                            # so: these are validity limits (the likelihood is
-                            # NaN past them), but the user asked for something
-                            # else and deserves to hear that it did not apply.
-                            if (key, i) in override_bounds and not np.isclose(
-                                resolved[key][i], float(v_ov)
-                            ):
-                                logger.warning(
-                                    f"[{component_type}.{_eff_idx(i)}."
-                                    f"{param_name}] user {key}={float(v_ov):g}"
-                                    f" is outside the component-computed "
-                                    f"validity bound "
-                                    f"{override_bounds[(key, i)]:g}; using "
-                                    f"{resolved[key][i]:g}."
-                                )
+                            # apply_value keeps the TIGHTER of the two bounds,
+                            # so the user's entry may simply not apply.  EITHER
+                            # WAY THEY HEAR ABOUT IT (review 2.1.6).  The clip
+                            # itself is documented design and stays -- a user
+                            # bound never widens a physics or grid limit -- but
+                            # the SILENCE was not designed: an override-bound
+                            # clip warned and a defaults-bound clip said
+                            # nothing, so the same user mistake was announced
+                            # or swallowed depending on which layer happened
+                            # to own the tighter number.  Rope, not gates: the
+                            # user hears that what they wrote did not take
+                            # effect.
+                            #
+                            # Reachable as a clean user-vs-defaults statement
+                            # only since review 1.1.5.  Before that the same
+                            # clip also fired user-vs-USER, so this message
+                            # would have blamed "the defaults" for a broadcast
+                            # entry the user had written themselves.  1.1.5
+                            # settles broadcast-vs-specific by specificity
+                            # first, which is what makes this warning
+                            # truthful.
+                            if not np.isclose(resolved[key][i], float(v_ov)):
+                                if (key, i) in override_bounds:
+                                    logger.warning(
+                                        f"[{component_type}.{_eff_idx(i)}."
+                                        f"{param_name}] user "
+                                        f"{key}={float(v_ov):g}"
+                                        f" is outside the component-computed "
+                                        f"validity bound "
+                                        f"{override_bounds[(key, i)]:g}; "
+                                        f"using {resolved[key][i]:g}."
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"[{component_type}.{_eff_idx(i)}."
+                                        f"{param_name}] user "
+                                        f"{key}={float(v_ov):g} WIDENS the "
+                                        f"defaults.yaml {key} of "
+                                        f"{resolved[key][i]:g} and was NOT "
+                                        f"applied; the stricter bound wins. "
+                                        f"Edit the component's defaults.yaml "
+                                        f"if the limit itself is wrong."
+                                    )
 
                     for str_key in STRING_KEYS:
                         if str_key in ov:
@@ -1986,6 +2038,86 @@ class ConfigManager:
         return unit_conversion(
             u_str, i_str, full_path or f"{component_type}.{param_name}"
         )
+
+    def _assert_canonical_engine_paths(self, seed_hints=None):
+        """Refuse a non-canonical path at the relaxation engine's door.
+
+        THE STANDING RULE (JDE 2026-09-04): internal syntax is strict, ONE
+        SPELLING ONLY.  Only the USER boundary is permissive, and what it
+        accepts it translates immediately -- `standardize_param_names` folds
+        the name form into the index form and expands a broadcast into every
+        index it covers, and `_translate_and_scale` does the same for every
+        component hint channel.
+
+        This is the assertion that the translation was TOTAL.  It is cheap
+        (about ninety paths, once per seed) and it is the check that would
+        have caught the whole family of defects this exists because of --
+        1.1.5, 1.1.6, 2.1.8, 2.14.6 and 2.14.8 were all one thing: a
+        user-facing spelling surviving past the boundary, with something
+        downstream left to guess which spelling it had.  Each was found
+        separately, by hand, months apart.  One assertion here fails loudly
+        the first time any of them recurs.
+
+        CANONICAL means:
+          * `comp.<i>.param` -- the index form, for a LIST component;
+          * `comp.param` -- for a FLAT-DICT component, where the 2-part form
+            IS the canonical spelling and there is no list to broadcast over
+            (that asymmetry is itself review 3.14.17).
+
+        Deliberately NOT checked here: membership in `master_symbol_map`.
+        That was the obvious formulation and it is WRONG -- measured across
+        all twenty shipped examples, 25 of 72 hint paths are legitimately
+        absent from the map (`mulensinstrument.<i>.f_source`/`f_blend`/
+        `q_flux`), because `resolve()` reads hints too and a hinted parameter
+        need not be an engine symbol.  Gating on the map would have refused
+        every microlensing example.  Shape is the invariant; symbol
+        membership is not.
+        """
+        if not isinstance(self.system_config, dict):
+            # No system config: the tests-and-direct-drivers mode, which
+            # cannot tell a broadcast from a flat-dict component's canonical
+            # key.  Same reason `_reject_broadcast_hint_path` is permissive
+            # there.
+            return
+
+        for channel, paths in (
+            ("add_hint", self.hints),
+            ("add_scale_hint", self.scale_hints),
+            ("add_seed_hints", seed_hints or {}),
+        ):
+            for path in paths:
+                parts = str(path).split(".")
+                comp = self.system_config.get(parts[0]) if parts else None
+                if comp is None:
+                    # A component this config does not declare at all.  Not
+                    # this check's business -- standardize_param_names
+                    # already raises on an undeclared prefix, and refusing
+                    # here would only duplicate it in a worse place.
+                    continue
+                if isinstance(comp, list):
+                    ok = len(parts) == 3 and parts[1].isdigit()
+                    canonical = f"{parts[0]}.<i>.{parts[-1]}"
+                else:
+                    ok = len(parts) == 2
+                    canonical = f"{parts[0]}.{parts[-1]}"
+                if ok:
+                    continue
+                raise ValueError(
+                    f"\n!!! NON-CANONICAL PATH AT THE ENGINE !!!\n"
+                    f"{path!r}, pushed through {channel}, reached the "
+                    f"relaxation engine without being translated to the "
+                    f"canonical internal spelling {canonical!r}.\n"
+                    f"Internal paths carry exactly ONE spelling.  The user "
+                    f"boundary accepts three and translates immediately "
+                    f"(standardize_param_names for params.yaml, "
+                    f"_translate_and_scale for every hint channel), so a "
+                    f"non-canonical path here means a translation was "
+                    f"skipped rather than that a new spelling is legal.\n"
+                    f"This is the guard for the defect class of reviews "
+                    f"1.1.5, 1.1.6, 2.1.8, 2.14.6 and 2.14.8; if you are "
+                    f"adding a channel, translate at its entry point, not "
+                    f"here."
+                )
 
     def canonical_key(self, key):
         """Index-form spelling of ``key`` under THIS manager's system config.
@@ -3063,6 +3195,14 @@ class ConfigManager:
                     to_scalar(cfg["init_scale"]) * factor
                 )
                 scale_provenance[path_str] = param_rank
+
+        # THE TRANSLATION WAS TOTAL, or we stop here (review 3.14.15c).
+        # Everything below indexes `resolved`/`provenance` BY PATH, so a
+        # non-canonical key does not fail -- it quietly creates a second,
+        # phantom entry for a parameter that already has one, and the ledger,
+        # export_solution and initval_source then report it.  Checking at the
+        # door is the difference between a loud stop and a silent duplicate.
+        self._assert_canonical_engine_paths(seed_hints)
 
         # 1.5 LAYER IN COMPONENT HINTS
         for path_str, val in self.hints.items():
