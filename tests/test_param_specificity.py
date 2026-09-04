@@ -693,3 +693,63 @@ def test_a_list_component_resolves_the_collision_before_resolve():
     cfg = cm.resolve("star", "av", shape=(2,), names=["A", "B"])
     assert np.isclose(cfg["lower"][0], 0.5)
     assert np.isclose(cfg["lower"][1], 1.0)
+
+
+# ---------------------------------------------------------------------------
+# 4. single-element mode: the index form and the name form must name the
+#    SAME element  (review 2.1.8)
+# ---------------------------------------------------------------------------
+
+
+def test_name_form_follows_element_not_the_loop_variable():
+    """
+    Given resolve() in single-element mode -- shape=(), element=1 -- with
+      per-element names,
+    When _element_keys builds the spellings of the element being resolved,
+    Then the name form names element 1, not element 0.
+
+    In single-element mode the loop variable is always 0 while the element
+    being resolved is `element`.  `_eff_idx` exists to carry exactly that
+    distinction, and the index form used it -- but the name form was built
+    from `names[i]`, so the two spellings named DIFFERENT elements
+    (`star.1.distance` alongside `star.A.distance`) and a name-form entry for
+    the element actually being resolved was never found.
+
+    A flat-dict component is the vehicle because it is where a name-form key
+    SURVIVES: for a list component standardize_param_names folds the name
+    form into the index form at construction, so `user_params` never holds
+    one and the name-form spelling is dead for that channel.
+    """
+    # ARRANGE
+    cm = ConfigManager(
+        {"sed.B.av": {"initval": 7.0}},
+        system_config={"sed": {"file": "x.yaml"}},
+    )
+
+    # ACT
+    cfg = cm.resolve("sed", "av", shape=(), element=1, names=["A", "B"])
+
+    # ASSERT
+    assert np.isclose(cfg["initval"][0], 7.0)
+
+
+def test_a_component_override_on_the_name_form_reaches_single_element_mode():
+    """
+    Given a component override registered under the NAME form,
+    When resolve() runs in single-element mode for that element,
+    Then the override is applied.
+
+    The second reachable channel for 2.1.8: `add_override` stores the key as
+    the COMPONENT spelled it, with no standardization pass to fold it, so a
+    cross-component override written by name was invisible in single-element
+    mode.  Measured before the fix: the default 10.0 was returned instead.
+    """
+    # ARRANGE
+    cm = ConfigManager({}, system_config=SYSTEM)
+    cm.add_override("star.B.distance", initval=42.0)
+
+    # ACT
+    cfg = cm.resolve("star", "distance", shape=(), element=1, names=["A", "B"])
+
+    # ASSERT
+    assert np.isclose(cfg["initval"][0], 42.0)

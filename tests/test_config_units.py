@@ -11,6 +11,14 @@ parameter, and both silently corrupt the starting point rather than raising:
 (b) the relaxation engine's default-armor step converted resolve()'s initval
     -- which is already in USER units -- with no full_path at all, so it too
     always used the default unit's factor.
+
+(c) review 2.14.6: the SAME defect as (a), at a third site.
+    `_translate_and_scale` -- the one implementation shared by add_hint,
+    add_scale_hint, add_seed_hints and seed_start_value -- asked
+    get_conversion_factor about the ORIGINAL path under a comment asserting
+    that the original is what carries the user's `unit:`.  It is not, for
+    the same reason as (a).  Latent only because every production caller
+    happens to push the index form.
 """
 
 import astropy.units as u
@@ -293,3 +301,37 @@ def test_get_conversion_factor_raises_on_an_unparseable_user_unit():
     # ACT / ASSERT
     with pytest.raises(ValueError, match=r"earthMasses"):
         cm.get_conversion_factor("planet", "mass", "planet.0.mass")
+
+
+def test_a_hint_pushed_by_name_uses_the_users_unit():
+    """
+    Given a user `unit:` override written on the NAME form,
+    When a hint is pushed under the NAME form and under the INDEX form,
+    Then both scale by the user's factor, because they name the same element
+      of the same parameter and differ only in spelling.
+
+    Review 2.14.6.  `standardize_param_names` folds the name form into the
+    index form at construction, so `user_params` can never hold a name-form
+    key; asking about the original path therefore missed the override and
+    silently used the DEFAULTS unit.  Measured before the fix: the name form
+    scaled by 1.0 and the index form by 1000.0 -- a 1000x disagreement
+    between two spellings of one thing.
+
+    Pinned as an EQUALITY between the two spellings rather than against a
+    literal, because that is the actual invariant: whatever the factor is,
+    it cannot depend on how the caller spelled the path.
+    """
+    # ARRANGE
+    system = {"star": [{"name": "A"}, {"name": "B"}]}
+    factors = {}
+
+    # ACT
+    for spelling in ("star.B.distance", "star.1.distance"):
+        cm = ConfigManager(
+            {"star.B.distance": {"unit": "kpc"}}, system_config=system
+        )
+        _, factors[spelling] = cm._translate_and_scale(spelling, 1.0)
+
+    # ASSERT
+    assert factors["star.B.distance"] == factors["star.1.distance"]
+    assert np.isclose(factors["star.1.distance"], 1000.0)

@@ -223,3 +223,34 @@ def test_the_substituted_debug_line_is_not_built_below_debug(caplog):
     # ASSERT
     assert at_info == []
     assert at_debug
+
+
+def test_finalize_does_not_mutate_the_callers_user_params():
+    """
+    Given a ConfigManager built with NO system_config,
+    When finalize_user_params injects solved values back,
+    Then the caller's own dict is untouched.
+
+    Review 2.1.9.  `standardize_param_names` returns a fresh dict and
+    documents non-aliasing as a contract; the no-system_config branch
+    assigned the caller's dict directly, so finalize's inject-back wrote
+    `derived: True` markers and solved values into the caller's object.  The
+    same ConfigManager built two ways behaved differently, and production
+    always passes a system_config -- so this bit tests and direct drivers,
+    which is exactly where a mutated input is hardest to notice.
+
+    Asserted on the caller's dict rather than on identity alone: `is not` is
+    necessary but a shallow copy would satisfy it while the ENTRY dicts
+    stayed shared, which is where the inject-back actually writes.
+    """
+    # ARRANGE
+    caller = {"star.0.distance": {"initval": 100.0}}
+    expected = {"star.0.distance": {"initval": 100.0}}
+
+    # ACT
+    cm = ConfigManager(caller, system_config=None)
+    cm.finalize_user_params()
+
+    # ASSERT
+    assert caller == expected
+    assert cm.user_params is not caller
