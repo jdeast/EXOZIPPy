@@ -250,15 +250,35 @@ def xallarap_trajectory_shift(dsig_N, dsig_E, mu_n_hat, mu_e_hat):
 
     The trajectory is LENS minus SOURCE (C7), so a source displaced by
     ``+dsigma`` shifts the relative position by ``-dsigma``, projected on
-    C9's basis: ``tau_hat = mu_hat_rel,geo`` and
-    ``beta_hat = (tau_hat_E, -tau_hat_N)`` (the +90 deg North-through-East
-    rotation, exactly the pair the parallax terms use):
+    C9's basis: ``tau_hat = mu_hat_rel,geo = (tN, tE)`` and
+    ``beta_hat = (-tau_hat_E, +tau_hat_N)`` -- the +90 deg North-through-East
+    rotation, exactly the basis the PARALLAX terms use (C10 display 1:
+    ``u = u_0 + delta_n pi_E_E - delta_e pi_E_N`` is
+    ``u = u_0 - |pi_E| (delta . beta_hat)`` with this beta_hat, and the
+    parallax sign is pinned first-principles by
+    tests/test_skyframe.py::test_microlensing_trajectory_matches_3d_geometry):
 
-        dtau = -(dsigma_N * tau_hat_N + dsigma_E * tau_hat_E)
-        du   = -(dsigma_N * tau_hat_E - dsigma_E * tau_hat_N)
+        dtau = -(dsigma . tau_hat)  = -(dsigma_N * tau_hat_N + dsigma_E * tau_hat_E)
+        du   = -(dsigma . beta_hat) = +(dsigma_N * tau_hat_E - dsigma_E * tau_hat_N)
+
+    The ``du`` line carried the OPPOSITE sign until review 2.6.13 (2026-09),
+    built from a mislabelled ``beta_hat = (tau_hat_E, -tau_hat_N)`` -- the
+    MINUS-90 rotation -- in conventions.md C25.  The C25 xi_* mapping had
+    been tuned against that inverted projection, so the two errors cancelled
+    in the track-level parity test while the LIGHT CURVE applied the source
+    offset with the wrong sign: measured on examples/ob170114 (Mroz et al.
+    2026 Table B.1), the built magnification peaked at A = 8.58 where
+    MulensModel -- the code the published solution comes from -- gives 4.22
+    at the published values (one 3001-point grid, no parallax on either
+    side), and against the real OGLE photometry the wrong sign cost
+    chi2 = 781,739 on 351 points where the corrected chain gives 2,062 and
+    MulensModel itself 2,063.  With this sign and the corrected C25 mapping
+    the direct Op reproduces MulensModel's xallarap light curve to 4e-16,
+    and the shipped examples/ob170114 model reproduces its full 2L1S +
+    parallax + xallarap curve to 0.03% (tests/test_xallarap.py).
     """
     dtau = -(dsig_N * mu_n_hat + dsig_E * mu_e_hat)
-    du = -(dsig_N * mu_e_hat - dsig_E * mu_n_hat)
+    du = dsig_N * mu_e_hat - dsig_E * mu_n_hat
     return dtau, du
 
 

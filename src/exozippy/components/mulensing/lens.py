@@ -954,10 +954,29 @@ class Lens(Component):
         # Per-source vector parameters: one element per source body.  Elements
         # are displayed and addressed by the source star's instance name
         # (lens.SourceB.t_0) or slot index (lens.1.t_0).
+        #
+        # ALWAYS named, single-source included (review 2.6.13).  The VALUES
+        # never depended on this: _rewrite_source_param_keys translates
+        # `lens.<source star>.<param>` keys to index form at construction,
+        # any number of sources.  What the old `n_sources > 1` gate broke is
+        # the DISPLAY side: with no names, get_display_label spells the
+        # per-source elements by the LENS instance's name, so
+        # diagnostics.check_unused_yaml -- which audits the user's own
+        # spellings against the display labels -- flagged every source-named
+        # key of a one-source event as "did not match any model parameter
+        # and were not applied".  Three shipped params files (ob07224,
+        # ob09020, ob170114) spell every per-source seed that way, so every
+        # run of those examples opened with a FALSE claim that its t_0/u_0/
+        # rho seeds were dropped -- which is exactly the misdirection review
+        # 2.6.13's first two diagnosis attempts followed.  Naming the
+        # elements unconditionally makes the one-source display agree with
+        # the multi-source one and the audit agree with the resolution.
+        # The lens-instance spelling (`lens.<lens instance>.t_0`, e.g.
+        # examples/KMT-2019-BLG-1806) keeps working either way:
+        # standardize_param_names folds it to the index form at
+        # ConfigManager construction, before any manifest names exist.
         src_shape = (self.n_sources,)
-        src_names = (
-            self._source_instance_names() if self.n_sources > 1 else None
-        )
+        src_names = self._source_instance_names()
 
         def per_source(expr_key=None):
             entry = {"shape": src_shape}

@@ -349,12 +349,14 @@ orbit.L.sesinw:
 #     (352.23, +0.635)                       wrong      +3.36
 #     (337.48, +0.635)  [SEEDED]            189.080     +3.36  MATCHES
 #
-# The pinned branch obeys ONE closed-form rule, shared with the verified
-# xallarap xi_* mapping (C25): bigomega_EXOZIPPy = PA(frame's first axis)
-# - Omega_frame.  Here the App-B first axis is the binary axis at t_0,kep,
-# whose PA is phi_pi - alpha_0 = 158.79 - 189.08 = 329.71 deg, so
-# bigomega = 329.71 - (-7.767) = 337.48.  (For the xi_* frame the first
-# axis is tau_hat, PA = phi_pi, giving C25's bigomega = phi_pi - xi_Omega.)
+# The pinned branch obeys a closed-form rule: bigomega_EXOZIPPy =
+# PA(frame's first axis) - Omega_frame.  Here the App-B first axis is the
+# binary axis at t_0,kep, whose PA is phi_pi - alpha_0 = 158.79 - 189.08 =
+# 329.71 deg, so bigomega = 329.71 - (-7.767) = 337.48.  (This rule stands
+# on ITS OWN measured pin -- the chi2 scan and known-inclination sign test
+# below; it is NOT shared with the xallarap xi_* mapping, whose corrected
+# C25 form is bigomega = phi_pi + xi_Omega + 180, the reflected node --
+# review 2.6.13.)
 #
 # (337.48 rather than the naive seed-implied value: alpha_0 =
 # phi_pi - PA(axis) uses the ENGINE-RESOLVED parallax direction, and the

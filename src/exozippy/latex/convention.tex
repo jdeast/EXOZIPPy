@@ -371,12 +371,12 @@ measures $\Omega$ (the track's orientation) but, unlike the lens case
 (C24), remains node-degenerate: a sky track of any kind is invariant under
 the sky-plane reflection.  The mapping onto the $\xi$ elements of
 \citet{Zhai:2024} (the parameterization of \citealt{Mroz:2026}), verified
-numerically to machine precision against \texttt{MulensModel}'s
-implementation, is $\Omega = \phi_\pi - \xi_\Omega$,
-$i = 180^\circ - \xi_i$, $\omega_* = \xi_\omega$,
+numerically against \texttt{MulensModel}'s implementation at the level of
+the composed light curve, is
+$\Omega = \phi_\pi + \xi_\Omega + 180^\circ$,
+$i = \xi_i$, $\omega_* = \xi_\omega$,
 $\xi_a = a_1/(D_{\rm S}\,\theta_{\rm E})$, with the phase carried by
-$\nu(t_{0,\xi}) = \xi_u - \xi_\omega$ --- the same
-toward-the-observer third-axis flip as C24's frame mapping.
+$\nu(t_{0,\xi}) = \xi_u - \xi_\omega$.
 
 \subsection{Translating to and from other conventions}
 \label{sec:conv:mappings}

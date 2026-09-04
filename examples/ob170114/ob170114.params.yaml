@@ -8,11 +8,11 @@
 # trajectory conventions are EXOZIPPy's (C18 identity), so t_0, u_0 (sign
 # included), t_E, rho, pi_E_N/E, s, q and alpha drop straight in.  Only the
 # xi_* orbital elements need the C25 mapping (their frame is
-# tau_hat-referenced with the third axis toward the observer):
+# tau_hat-referenced; mapping corrected in review 2.6.13):
 #
-#     bigomega  = phi_pi - xi_Omega = 37.252 - 250.0  -> 147.252 deg
-#     i         = 180 - xi_i        = 180 - 30.5      -> 149.5 deg
-#                                                        (cosi = -0.86163)
+#     bigomega  = phi_pi + xi_Omega + 180 = 37.252 + 250.0 + 180
+#                                         -> 467.252 = 107.252 deg
+#     i         = xi_i = 30.5 deg                       (cosi = +0.86163)
 #     omega_*   = xi_omega                            -> 207.3 deg
 #     nu(t0par) = xi_u - xi_omega   = 28.8 deg        -> tp = 2457930.059
 #     P = xi_P = 221.5 d,  e = xi_e = 0.615
@@ -47,10 +47,18 @@ lens.Source.u_0:
 # chain, and seeding them alongside the pm/distance seeds below
 # over-determines the engine at equal rank -- measured 2026-08-27: the
 # reconciliation rotated phi_pi from 37.25 to 2.5 deg and inflated t_E to
-# 205 d, which through C25's bigomega = phi_pi - xi_Omega corrupted the
-# xallarap track.  The pm/distance seeds below reproduce the printed
-# values EXACTLY as derived quantities instead (t_E = 173.0,
-# |pi_E| = 0.2098, phi_pi = 37.25 deg).
+# 205 d, which through C25's bigomega = phi_pi + xi_Omega + 180 corrupted
+# the xallarap track.  The mass/distance/pm seeds below reproduce them as
+# DERIVED quantities instead.  Measured at the built start (2026-09, after
+# the mass reseed described at star.L1.mass): t_E = 172.999 d against the
+# printed 173.0, |pi_E| = 0.209805 against 0.209805,
+# pi_E_N/E = (0.16702, 0.12698) against (0.167, 0.127), phi_pi = 37.244
+# deg against 37.252, theta_E = 0.86000 mas against 0.86, and the
+# xallarap amplitude xi_a = 0.19999 against the printed 0.200.  (Before
+# that reseed this comment claimed the derived values landed on the
+# printed ones "EXACTLY" and they did not: t_E came out 176.011 and
+# xi_a 0.19698.  If you change a seed here, re-measure and re-state the
+# numbers rather than leaving the claim standing.)
 lens.Source.rho:
     initval: 0.0109               # +0.0140/-0.0070
 
@@ -84,24 +92,56 @@ orbit.S.secosw:
 orbit.S.sesinw:
     initval: -0.35953             # sqrt(e) sin(207.3)
 orbit.S.cosi:
-    initval: -0.86163             # i = 149.5 = 180 - xi_i: the C25
-                                  # third-axis flip, same as C24's Yee
-                                  # mapping in examples/ob09020
+    initval: 0.86163              # i = xi_i = 30.5 deg (C25 mapping,
+                                  # corrected in review 2.6.13)
 orbit.S.bigomega:
-    initval: 147.252              # = phi_pi - xi_Omega (C25)
+    initval: 107.252              # = phi_pi + xi_Omega + 180 (C25, mod
+                                  # 360; corrected in review 2.6.13)
 
 # --------------------------------------------------------------------
 # Physical parameters (Table B.2 Std 2L1S + the C25 amplitude closure)
 # --------------------------------------------------------------------
+# THE IDENTITY THAT FIXES THE MASS, and the published trap in it.
+# Combining theta_E = sqrt(kappa M_tot pi_rel) with pi_E = pi_rel/theta_E
+# eliminates pi_rel entirely:
+#
+#     theta_E = kappa * M_tot * |pi_E|,     kappa = 8.14385 mas/Msun
+#
+# So M_tot and |pi_E| ALONE determine theta_E -- the lens DISTANCE has no
+# say in it (D_L only splits pi_rel between theta_E and |pi_E| once M_tot
+# is set).  M_tot is the TOTAL lens mass, M_h (1 + q), because a binary
+# lens references theta_E/t_E/rho/pi_E to the total mass
+# (Lens.register_parameters wires theta_E to `mlens_total`, matching the
+# published parameterization).  That is also why the older note here --
+# "the D_L at which |pi_E| = sqrt(pi_rel/(kappa M)) equals the printed
+# 0.2098" -- was wrong twice over: no D_L can do that, and the M in it is
+# not M_h.
+#
+# THE TRAP: Mroz+26's Table B.2 triple (M_h = 0.50, |pi_E| = 0.20980,
+# theta_E = 0.86 mas) does NOT satisfy the identity -- it gives
+# theta_E = 0.87312, 1.5% high.  These are independently quoted MARGINAL
+# medians of a correlated posterior, so no single point has to reproduce
+# all three, and a config needs one consistent point.  It closes exactly
+# at M_h = 0.492544, which is 0.50 to the two significant figures the
+# paper prints.  Seeding the rounded 0.50 instead cost the start
+# +199.6 chi2 through the derived t_E (176.011 rather than 173.0) and
+# +88.6 through the xallarap amplitude (xi_a = 0.19698 rather than
+# 0.200), partially cancelling to +53.9 -- entirely PARAMETRIC, not a
+# code error: at equal parameters the built curve matches MulensModel to
+# 0.3 chi2 (review 2.6.13 follow-up, 2026-09).
 star.L1.mass:
-    initval: 0.50                 # M_h = 0.50 +0.90/-0.28 Msun
+    initval: 0.492544             # M_h = 0.50 +0.90/-0.28 Msun printed;
+                                  # this is that value to 2 s.f. AND the
+                                  # one that closes the identity above:
+                                  # = [0.86 / (kappa * 0.209805)] / (1 + q)
 star.L1.distance:
-    initval: 3330.0               # B.2 prints D_L = 3.4 +/- 1.8 kpc; 3.33
-                                  # is the value at which the chain's
-                                  # |pi_E| = sqrt(pi_rel/(kappa M)) equals
-                                  # the printed 0.2098 exactly (Table 1
-                                  # medians are marginals; the chain needs
-                                  # one consistent point)
+    initval: 3361.03              # B.2 prints D_L = 3.4 +/- 1.8 kpc.  With
+                                  # M_h pinned above, theta_E is already
+                                  # fixed, so D_L's job is only to deliver
+                                  # pi_rel = theta_E |pi_E| = 0.86 *
+                                  # 0.209805 = 0.180432 mas against
+                                  # D_S = 8540 pc:  1000/D_L = pi_rel +
+                                  # 1000/D_S  ->  3361.03 pc.
 star.Source.mass:
     initval: 1.0                  # ASSUMED (a typical bulge red giant;
                                   # Std does not sample it).  The xallarap
@@ -123,14 +163,20 @@ star.SComp.distance:
 
 # Proper motions -- ALL FOUR leaves pinned, because t_E and pi_E are
 # derived from them and for this event the Gould-2004 helio->geo term
-# (pi_rel * v_earth_perp ~ 1.1 mas/yr at pi_rel = 0.183) is comparable to
-# mu_rel itself (1.81 mas/yr).  The lens seed is
-#   mu_rel_helio = mu_rel_geo(theta_E/t_E = 1.812 mas/yr along
-#                  phi_pi = 37.25 deg) + pi_rel * v_earth_perp(t0_par)
-#                = (1.336 N, 2.183 E) mas/yr
+# (pi_rel * v_earth_perp ~ 1.1 mas/yr at pi_rel = 0.180) is comparable to
+# mu_rel itself (1.82 mas/yr).  The lens seed is
+#   mu_rel_helio = mu_rel_geo(theta_E/t_E = 1.8157 mas/yr along
+#                  phi_pi = 37.252 deg) + pi_rel * v_earth_perp(t0_par)
+#                = (1.3409 N, 2.1688 E) mas/yr
 # on top of a typical bulge source pm; with the source pm ALSO seeded the
-# engine has nothing left to reconcile and the derived t_E, |pi_E| and
-# phi_pi land on the printed values exactly.
+# engine has nothing left to reconcile -- every leaf sits exactly on its
+# seed, and theta_E = sqrt(kappa M_tot pi_rel) holds to machine precision.
+# The helio->geo term is proportional to pi_rel, so these two numbers
+# moved with the mass reseed (they were (1.3362 N, 2.1830 E) at
+# pi_rel = 0.183).  The derived values they produce are listed at the top
+# of this file; they are close to but NOT identical to the printed ones
+# (phi_pi 37.244 vs 37.252), so do not write "exactly" here again without
+# measuring it.
 star.Source.pm_ra:
     initval: -3.0
 star.Source.pm_dec:
@@ -140,9 +186,9 @@ star.SComp.pm_ra:
 star.SComp.pm_dec:
     initval: -3.0
 star.L1.pm_ra:
-    initval: -0.8170              # = -3.0 + 2.1830
+    initval: -0.831156            # = -3.0 + 2.168844
 star.L1.pm_dec:
-    initval: -1.6638              # = -3.0 + 1.3362
+    initval: -1.659083            # = -3.0 + 1.340917
 
 # --------------------------------------------------------------------
 # Fluxes and errors
@@ -152,13 +198,17 @@ star.L1.pm_dec:
 # THEIR re-calibrated photometry (2018 reference images), not the EWS
 # quick-look file shipped here (baseline ~ 15.07).  The seeds below are
 # the linear flux solve against THIS file at the seeded geometry
-# (2026-08-27), which is what a start value is for; the published values
+# (re-solved 2026-09 after the review 2.6.13 mapping fix), which is what
+# a start value is for; the published values
 # stay in this comment as the calibrated-data target.  err_scale seeds at
 # their fitted renormalization k_I = 1.98.
 # --------------------------------------------------------------------
 mulensinstrument.OGLE.q_source:
-    initval: 0.30
+    initval: 0.6272                # linear flux solve at the seeded geometry
+                                   # (re-done 2026-09 after the C25 mapping
+                                   # fix, review 2.6.13); close to the
+                                   # published 0.634 as it should be
 mulensinstrument.OGLE.log_f_total:
-    initval: -6.0129
+    initval: -6.0295
 mulensinstrument.OGLE.err_scale:
     initval: 1.98
