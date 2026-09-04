@@ -1,0 +1,139 @@
+# Everything in DC2018_128.params.yaml, PLUS the photometric zeropoint.
+star.Lens.ra:   {initval: 267.595, sigma: 0}
+star.Lens.dec:  {initval: -28.982, sigma: 0}
+# star.Lens.teff: UNPINNED for v5 (was {sigma: 0.0}, i.e. held at the 5778 K
+# default).  The v4 note below is right about radius and INCOMPLETE: the teff
+# pin is the larger lever, and it acts through the SED, not through mann.
+#
+#   mann never reads teff.  components/mann/physics.py is
+#   calc_mann_mass(absks, feh) and calc_mann_radius(absks, feh) -- absolute
+#   Ks and metallicity, nothing else.
+#
+#   What the pin actually drives is sed.py:920's `sed.teffsed_floor_prior`,
+#   a Gaussian N(teff, teffsedfloor*teff) with teffsedfloor = 0.020.  Pinning
+#   teff at 5778 therefore clamps the SAMPLED teffsed to 5778 +/- 116 K, the
+#   SED emits a solar-type star's synthetic Ks, and `ks: synthetic` feeds
+#   exactly that Ks to mann as absks.  The solar answer comes back out.
+#   sed.py:926's fbolsed_floor_prior does the same job through fbol, which is
+#   where the pinned RADIUS bit (L = 4 pi R^2 sigma T^4).
+#
+# Measured on severed-v3, which carried both pins: M_lens = 0.899 [0.853,
+# 0.951] against a truth of 0.454 (dc128_truth_forward.json).  theta_E is
+# sqrt(kappa * M * pi_rel), so that alone is sqrt(2.0) = 1.41x of the
+# observed 6.6x theta_E error.  (The other 4.7x is pi_rel, which neither pin
+# touches -- see the review's severed-v3 entry.  This config is not expected
+# to fix theta_E on its own.)
+#
+# Nothing else constrains lens teff once unpinned: mann predicts mass and
+# radius, not temperature, so teff simply follows teffsed through the same
+# floor potential, which is the intended direction.
+star.Lens.feh:    {mu: 0.0, sigma: 0.5}
+# A GENERIC metallicity prior replacing the {sigma: 0.0} pin at exactly solar.
+# mann DOES read this one -- mann.py:232 takes star.feh.value[smap] and
+# mann.py:258-260 passes it to both relations -- so the pin was an
+# uncertainty-free assumption feeding the mass.
+#
+# Be clear about the size of it: the effect is small either way.  The mass
+# relation's metallicity term is (1 + feh * -0.0035), so +/-0.5 dex moves the
+# mass by -/+0.175%; the radius relation's is (1 + 0.04458*feh), i.e. +/-2.2%.
+# This is the honest-uncertainty fix, not the mass fix -- the teff unpin
+# above is the one that moves M_lens.
+#
+# sigma 0.5 is slightly wider than mann's own calibration, FEH_RANGE =
+# (-0.6, 0.4) dex (physics.py:45); the component warns if the start sits
+# outside it, and the prior is deliberately left generic rather than
+# trimmed to the relation's range.
+#
+# star.Lens.radius: UNPINNED (v4).
+# The pin was INHERITED from DC2018_128.params.yaml, the no-SED config, where
+# it is correct bookkeeping: without an SED nothing constrains the lens
+# radius, so it is held at a value nobody chose (review 3.8.1's tier logic).
+# Carried into an SED config it is wrong, and not harmlessly so: radiussed
+# defaults to radius through a symbolic relation, so pinning radius puts a
+# systematic floor under the lens's derived SED luminosity -- the SED and the
+# blend flux DO bound r_lens, and torres/mann can react to that bound.  With
+# the pin in place they cannot.  (JDE 2026-09-03.)
+planet.Companion.radius: {sigma: 0}
+band.W149.u1: {initval: 0.0, sigma: 0}
+band.Z087.u1: {initval: 0.0, sigma: 0}
+
+# THE ZEROPOINT IS NOT OPTIONAL WITH AN SED.
+#
+# calc_zeropoint is zp = m_SED + 2.5*log10(f_source), and defaults.yaml's
+# prior is mu = 0.0 +/- 0.2 mag -- i.e. "flux is 10**(-0.4 m)".  DC2018
+# fluxes are on a ZP = 22.0 system, so the default is ~110 sigma wrong, and
+# it does NOT fail loudly: it drags the SED into making the source ~22 mag
+# too bright and corrupts teff/radius/distance -- the very quantities the
+# SED is here to constrain.
+#
+# 22.0 is measured from the files themselves, two independent ways:
+#   W149: baseline 3.1116 x fs 0.6427 -> f_source 1.9999, m = 21.2476 -> 22.0001
+#   Z087: baseline 0.6213 x fs 0.8135 -> f_source 0.5054, m = 22.7408 -> 22.0000
+# The DC18 README does NOT quote a photometric zeropoint accuracy -- but it
+# does not need to: the challenge distributes MAGNITUDES ("Columns: BJD
+# Magnitude Error"), so for DC2018 the zeropoint is a definition of the
+# mag->flux conversion, not a measurement.  0.02 mag is what real Roman
+# photometry should achieve, so it is used here rather than something
+# tighter: it costs nothing and keeps the configuration honest about what a
+# real analysis faces.
+mulensinstrument.Roman_W149.zeropoint: {mu: 22.0, sigma: 0.02}
+mulensinstrument.Roman_Z087.zeropoint: {mu: 22.0, sigma: 0.02}
+
+# EXTINCTION.  A two-band SED with free Av and free teff is close to
+# degenerate; this is what breaks it.  event_info.txt gives the red-clump
+# extinction along each line of sight WITH dispersions -- for event 128,
+# A_W149 = 1.94 +/- 0.26 and A_Z087 = 3.73 +/- 0.49, i.e.
+# E(Z087-W149) = 1.79.  These are clump estimates, so they are a prior on
+# the source's extinction rather than its value, which is exactly what the
+# quoted dispersions are for.
+star.Source.av: {mu: 1.94, sigma: 0.26}
+
+
+# --------------------------------------------------------------------------
+# Hogg out_scale cap: 10x the median flux error per light curve (in the model's
+# flux system: W149 median sigma_F = 2.620e-2, Z087 = 4.213e-3).  The
+# complicity measurement (dc128_hogg_complicity.py, job 15359549) showed the
+# UNCAPPED mixture fitting out_scale ~300-1000x the median error and
+# forgiving 777 nats of caustic-crossing residuals -- inverting a 601-nat
+# clean-Gaussian preference for the light curve's own rho (7.3e-3) into a
+# +142-nat preference for the wrong mode (1.16e-3).  With the cap, a
+# defecting point buys at most ~ln(10) nats of width, so the finite-source
+# signal survives arbitration.  out_frac stays free: the damage rode on the
+# width, not the count, and out_frac pinned near a cap is one of the
+# architecture alarms.
+# upper = 10x the median flux error IN THE MODEL'S FLUX SYSTEM (the same
+# quantity the component's own data hint uses -- its 10x-median initval of
+# 0.262/0.0421 is what these caps pin); initval = 1x the median error, an
+# explicit in-bounds user start (the component's flux-scaled 0.2*baseline
+# override and the 10x-median hint both sit at or above the cap).
+mulensinstrument.Roman_W149.out_scale: {upper: 0.2620, initval: 0.02620}
+mulensinstrument.Roman_Z087.out_scale: {upper: 0.04213, initval: 0.004213}
+
+
+# severed_v3: the engine cannot back-solve a log_theta_E start in the
+# SED + all-swaps combination (it can in the bare config, via the
+# mmexofast rho seed and the theta_star chain -- the radius/radiussed
+# split blocks that route here; engine gap noted in the private notes).
+# Start at the capped-murel arm posterior, theta_E = 0.63 mas.
+lens.Lens.log_theta_E: {initval: -0.2}
+
+# --- v6 ONLY: CAP sed.errscale -----------------------------------------
+# observable_coordinates.txt:578-583 found sed.errscale = 509 in severed-v3:
+# the SED inflated its own photometric errors 500x, which NULLIFIES the very
+# constraint the SED was attached to provide.  That is the THIRD instance of
+# one pattern (mulensinstrument.err_scale, the Hogg out_scale, now this one):
+# every uncapped noise scale becomes the arbitration escape valve when two
+# parts of the model disagree.  The recorded action item is "cap or alarm
+# sed.errscale".
+#
+# 3.0 is a cap, not a target: it still lets the SED triple its stated errors,
+# which covers honest zero-point and bandpass systematics, while making a
+# 500x inflation impossible.  If the fit piles up AT the cap that is the
+# alarm firing -- it means the SED and the light curve cannot be reconciled,
+# which is the thing severing was built to make visible rather than absorb.
+#
+# WHY THIS IS A SEPARATE ARM AND NOT FOLDED INTO v5: v5 changes the lens's
+# teff/feh pins and nothing else, so it isolates 2.9.10's mechanism.  Adding
+# the errscale cap to the same run would confound the two, and this cap is
+# plausibly the larger lever of the pair.  Run both, compare against v3.
+sed.sed.errscale: {upper: 3.0, initval: 1.0}

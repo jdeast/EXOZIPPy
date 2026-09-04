@@ -1,0 +1,270 @@
+run:
+  name: "OGLE-2009-BLG-020"
+
+prefix: "fitresults_accept48/OGLE-2009-BLG-020"
+logger_level: INFO
+
+# OGLE-2009-BLG-020: a binary-lens microlensing event whose lens is bright
+# enough (I = 15.6) to be followed up spectroscopically -- the first (and
+# still the cleanest) case where a microlensing mass/distance/orbit
+# prediction was tested against Doppler measurements.
+#
+#   Skowron et al. 2011, ApJ 738, 87  (arXiv:1101.3312) -- the light-curve
+#     solution and the prediction.  Its Appendix A is ALSO the convention
+#     EXOZIPPy follows verbatim (see components/mulensing/conventions.md,
+#     C17), so its parameters transfer with no transformation at all.
+#   Yee et al. 2016, ApJ 821, 121  (arXiv:1506.01441) -- the Keck/HIRES and
+#     Magellan/MIKE radial velocities of the lens primary, and the joint
+#     microlensing + RV solution.
+#
+# system architecture:
+#   star.0 = L1      lens primary   ~0.85-0.89 Msun -- THE STAR THE RVs ARE OF
+#   star.1 = L2      lens companion ~0.23-0.24 Msun -- unseen
+#   star.2 = Source  K giant in the bulge, I_s = 16.43, (V-I)_s = 1.93
+#
+# The two halves of the fit are FULLY coupled: lens.q is derived from
+# star.L1.mass / star.L2.mass, the orbit derives m_total / a / K from the
+# same two mass nodes, and -- with orbital_motion: keplerian on the lens
+# block -- the SAME orbit drives the binary geometry s(t)/alpha(t) in the
+# magnification with no new free parameters (conventions.md C24; review
+# 8.6.8 5b).  That is Skowron+2011's proposed over-constraint test: the RVs
+# pin P/tp/e/omega_*/K, the light curve pins the geometry, and bigomega and
+# sign(cos i) -- which RVs cannot see -- become measured quantities.
+
+star:
+  - name: "L1"
+  - name: "L2"
+  - name: "Source"
+
+lens:
+  - name: "OB09020"
+    lenses:  ["star.0", "star.1"]
+    sources: ["star.2"]
+    finite_source: True        # rho = 0.0063; the source is a giant and the
+                               # caustic crossings are resolved
+    # Skowron+2011's t_0,kep = t_0 anchors the geocentric frame their
+    # pi_E and orbital-velocity parameters are quoted in.
+    t0_par: 2454917.52
+    # THE POINT OF THIS EXAMPLE (review 8.6.8 5a/5b): the RV-constrained
+    # orbit L drives s(t)/alpha(t) with NO new free parameters --
+    # conventions.md C24's keplerian mode.  The light curve then measures
+    # bigomega and sign(cos i), which the RVs cannot (see the orbit block).
+    orbital_motion: keplerian
+    orbit: "L"
+    # Every trajectory parameter is seeded from the published solution, so
+    # the relaxation engine can derive all of them and MMEXOFAST is not
+    # needed.  It is also not WANTED: phot.dat is survey-only photometry
+    # (see README) and the binary anomaly is under-sampled in it.
+    mmexofast: false
+
+orbit:
+  - name: "L"
+    primary:   ["L1"]          # the RV star
+    companion: ["L2"]
+    # No i180 hand-holding anymore: with orbital_motion: keplerian the lens
+    # geometry consumes this orbit, the sky rotation sense of the binary
+    # axis measures sign(cos i), and the orbit component itself widens
+    # cos i to [-1, 1] and samples bigomega (Orbit._lens_keplerian_orbits).
+    # The verified EXOZIPPy-frame branch is seeded in the params file.
+
+galacticmodel:
+  - name: "OB09020"
+    anchor_idx: 2              # anchor on the source, by microlensing convention
+
+band:
+  - name: "I"
+    filter: "Generic/Cousins.I"
+    ld_law: "linear"
+  # muFUN follow-up bands.  Uncomment together with the instruments below.
+  - name: "V"
+    filter: "Generic/Bessell.V"
+    ld_law: "linear"
+  # The small-telescope follow-up is UNFILTERED ("U" in the muFUN filenames).
+  # Cousins R is the usual stand-in for a clear-filter CCD response; it only
+  # sets the limb-darkening coefficient (and the SED hook, unused here), and
+  # for a K giant the R-vs-I difference is small compared with what this
+  # light curve constrains.  One shared band, not one per site: the sites
+  # differ in zeropoint, which f_source/f_blend already absorb per
+  # instrument, not in bandpass.
+  - name: "N"
+    filter: "Generic/Cousins.R"
+    ld_law: "linear"
+
+mulensinstrument:
+  - name: "OGLE"
+    # RAW OGLE-III EWS photometry, used as downloaded.  Columns on disk are
+    #   HJD_UTC  I[mag]  err  seeing[pix]  sky
+    # so the layout is named explicitly.  Naming `columns:` also switches OFF
+    # the "every column past the error is a detrend column" default, which
+    # would otherwise fit a seeing and a sky coefficient nobody asked for.
+    # To detrend against seeing after all, add `detrend: [3]` to this map.
+    file: "phot.dat"
+    band: "I"
+    columns: {time: 0, mag: 1, err: 2}
+    # The EWS files are HJD_UTC.  The shared reader converts to BJD_TDB at
+    # load (Eastman, Siverd & Gaudi 2010), which needs a user-set star ra/dec
+    # -- supplied in the params file.
+    time_scale: "utc"
+    time_frame: "hjd"
+    observer_location: "earth"
+    reference: true
+
+  # --- muFUN follow-up photometry -----------------------------------------
+  #
+  # Included by explicit permission of Jennifer Yee (designate of the muFUN
+  # team leader, Andrew Gould), which the archive's conditions of use
+  # require; see README.md for the provenance and the reduction caveat.
+  #
+  # These 1560 points are what OGLE is missing: they cluster in HJD'
+  # 4916-4920, bracketing the caustic entry (4917.3), the peak (4917.6) and
+  # the exit (4917.75).  OGLE alone samples only the exit.
+  #
+  # Format (all nine files): `HJDmid Lens Err FWHM Sky Typ Ref1 Err ...`,
+  # where HJDmid = HJD_UTC - 2450000 at mid-exposure, `Lens` is the target's
+  # RAW INSTRUMENTAL magnitude (uncalibrated, arbitrary zeropoint per site --
+  # which is fine, f_source/f_blend are per instrument) and the trailing
+  # Ref/Err pairs are the comparison stars, a different number per file.
+  # `columns:` therefore names the three roles explicitly and everything past
+  # column 2 is ignored -- including FWHM and Sky, which are NOT detrended
+  # against, exactly as for phot.dat.
+  - name: "Bronberg"
+    file: "Bron_OB09020U.pho"
+    band: "N"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    time_scale: "utc"
+    time_frame: "hjd"
+  - name: "CAO"
+    file: "CAO_OB09020U.pho"
+    band: "N"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    time_scale: "utc"
+    time_frame: "hjd"
+  #  # On-disk row 0 is the file's one failed measurement (mag = 0.000,
+  #  # Typ = 14 where every good row is Typ = 11).  Row INDEX, in on-disk
+  #  # order -- the mask is applied before the time sort for exactly this
+  #  # reason.
+    mask: [0]
+  # Craigie is deliberately OFF.  Its 20 points span 0.035 d (50 minutes) at
+  # HJD' 4919.24, long after the caustic, over which the magnification is
+  # flat -- so the model enters only as f_source*A0 + f_blend with A0
+  # constant, and (f_source, f_blend) has an EXACTLY degenerate direction.
+  # Measured: the linear flux fit returns f_total < 0, i.e. q_source =
+  # -0.117 and log_f_total = NaN.  Two free parameters, one flat direction,
+  # ~zero information about the geometry, on a gradient-free sampler.  The
+  # file is kept; uncomment if you want it.
+  #- name: "Craigie"
+  #  file: "Craigie_OB09020U.pho"
+  #  band: "N"
+  #  columns: {time: 0, mag: 1, err: 2}
+  #  time_offset: 2450000.0
+  #  time_scale: "utc"
+  #  time_frame: "hjd"
+  - name: "CT13_I"
+    file: "CT13_OB09020I.pho"
+    band: "I"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    time_scale: "utc"
+    time_frame: "hjd"
+  - name: "CT13_V"
+    file: "CT13_OB09020V.pho"
+    band: "V"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    time_scale: "utc"
+    time_frame: "hjd"
+  - name: "FarmCove"
+    file: "FCO_OB09020U.pho"
+    band: "N"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    time_scale: "utc"
+    time_frame: "hjd"
+  - name: "Kumeu"
+    file: "Kumeu_OB09020U.pho"
+    band: "N"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    time_scale: "utc"
+    time_frame: "hjd"
+  - name: "Possum"
+    file: "Pos_OB09020U.pho"
+    band: "N"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    time_scale: "utc"
+    time_frame: "hjd"
+  - name: "VintageLane"
+    file: "VLO_OB09020U.pho"
+    band: "N"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    time_scale: "utc"
+    time_frame: "hjd"
+
+rvinstrument:
+  # Yee+2016 Table 5.  Both files are (BJD_TDB - 2450000) in km/s, so the
+  # offset and the unit are declared rather than baked into the file.
+  # star_ndx: 0 -> these are velocities of L1; the model term is the sum of
+  # orbit.K over every orbit L1 is a body of, which here is just orbit.L.
+  - name: "HIRES"
+    file: "OGLE-2009-BLG-020L.HIRES.rv"
+    star_ndx: 0
+    unit: "km/s"
+    time_offset: 2450000.0
+  - name: "MIKE"
+    file: "OGLE-2009-BLG-020L.MIKE.rv"
+    star_ndx: 0
+    unit: "km/s"
+    time_offset: 2450000.0
+    # Separate instrument => separate gamma, which is what absorbs the
+    # HIRES/MIKE zeropoint difference (Yee+2016 fit the same offset).
+
+parameter_file: "ob09020.params.yaml"
+
+sampler:
+  # Binary lens + finite source => the VBMicrolensing Op path, which has no
+  # gradient (components/mulensing/mulensing.md).  PTDE is the sampler.
+  #
+  # SYNC ptde, not ptde_async, and that is the one deliberate difference from
+  # the shipped ob09020.yaml.  Review 7.4.4 leg (c) measured async at 6-11x
+  # WORSE ESS per reserved core-second than sync on ob140939, and 2.4.9
+  # measured its temperature ladder making 0-1 round trips where sync makes
+  # 24-40 at identical Lambda.  For an ACCEPTANCE test -- where the whole
+  # point is that the recovered rates be trustworthy -- the better-mixing
+  # sampler is the right choice, and the shipped config's async default is
+  # not what is under test here.
+  method: ptde
+  # 2.4.11: WITHOUT this, default_cores() guesses from the NODE's CPU
+  # count and ran 96 workers on a 64-slot grant (measured, jobs
+  # 15406655/15406656).  Harmless here -- 184 GB peak against the
+  # 771 GB that killed severed-v3 -- but it is the same defect, and
+  # the fix is to name the grant rather than to detect it.
+  cores: 64
+  # 48 rungs + adaptive spacing.  The first attempt (job 15379264) ran the
+  # shipped default of 8 rungs for a 58-PARAMETER model and froze: per-pair
+  # swap acceptance [0.00, 0.01, 0.02, 0.04, 0.08, 0.11, 0.05] and DEGRADING,
+  # max_rhat 3.78 at 3,236 draws after 34 hours -- the 30,000-draw cap was
+  # ~13 days away with no prospect of a result.  Killed.
+  #
+  # Why 48 and not another guess: severed-v3 (38 params) measured
+  # Lambda = 12.75 and wanted n_temps > 2*Lambda+1 = 27, so a 58-parameter
+  # model needs materially more, and 24 was already shown insufficient on
+  # ob170114.  48 is chosen to be comfortably past that rather than to be
+  # exact -- the run's own ladder-health report measures Lambda and will say
+  # whether 48 was enough, which is the point.
+  n_temps: 48
+  T_max: 200
+  # The docs' own criterion for turning this on is "ladder_health_report
+  # shows NON-UNIFORM per-rung swap acceptance", and 0.00 -> 0.11 -> 0.05
+  # across the ladder is exactly that.
+  adapt_ladder: true
+  tune: 0
+  # A CAP, not a target: sync ptde stops as soon as Rhat <= 1.01 and
+  # ESS >= 1000 are met (it converged at 3,995 of 100,000 on ob140939), so a
+  # generous cap costs nothing and avoids a second submission if 5,000 is
+  # short for a 13-instrument binary-lens fit.
+  draws: 30000
+  recompute_trace: True
