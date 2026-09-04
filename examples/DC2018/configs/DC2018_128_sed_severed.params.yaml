@@ -1,0 +1,61 @@
+# Everything in DC2018_128.params.yaml, PLUS the photometric zeropoint.
+star.Lens.ra:   {initval: 267.595, sigma: 0}
+star.Lens.dec:  {initval: -28.982, sigma: 0}
+star.Lens.teff:   {sigma: 0.0}
+star.Lens.feh:    {sigma: 0.0}
+star.Lens.radius: {sigma: 0.0}
+planet.Companion.radius: {sigma: 0}
+band.W149.u1: {initval: 0.0, sigma: 0}
+band.Z087.u1: {initval: 0.0, sigma: 0}
+
+# THE ZEROPOINT IS NOT OPTIONAL WITH AN SED.
+#
+# calc_zeropoint is zp = m_SED + 2.5*log10(f_source), and defaults.yaml's
+# prior is mu = 0.0 +/- 0.2 mag -- i.e. "flux is 10**(-0.4 m)".  DC2018
+# fluxes are on a ZP = 22.0 system, so the default is ~110 sigma wrong, and
+# it does NOT fail loudly: it drags the SED into making the source ~22 mag
+# too bright and corrupts teff/radius/distance -- the very quantities the
+# SED is here to constrain.
+#
+# 22.0 is measured from the files themselves, two independent ways:
+#   W149: baseline 3.1116 x fs 0.6427 -> f_source 1.9999, m = 21.2476 -> 22.0001
+#   Z087: baseline 0.6213 x fs 0.8135 -> f_source 0.5054, m = 22.7408 -> 22.0000
+# The DC18 README does NOT quote a photometric zeropoint accuracy -- but it
+# does not need to: the challenge distributes MAGNITUDES ("Columns: BJD
+# Magnitude Error"), so for DC2018 the zeropoint is a definition of the
+# mag->flux conversion, not a measurement.  0.02 mag is what real Roman
+# photometry should achieve, so it is used here rather than something
+# tighter: it costs nothing and keeps the configuration honest about what a
+# real analysis faces.
+mulensinstrument.Roman_W149.zeropoint: {mu: 22.0, sigma: 0.02}
+mulensinstrument.Roman_Z087.zeropoint: {mu: 22.0, sigma: 0.02}
+
+# EXTINCTION.  A two-band SED with free Av and free teff is close to
+# degenerate; this is what breaks it.  event_info.txt gives the red-clump
+# extinction along each line of sight WITH dispersions -- for event 128,
+# A_W149 = 1.94 +/- 0.26 and A_Z087 = 3.73 +/- 0.49, i.e.
+# E(Z087-W149) = 1.79.  These are clump estimates, so they are a prior on
+# the source's extinction rather than its value, which is exactly what the
+# quoted dispersions are for.
+star.Source.av: {mu: 1.94, sigma: 0.26}
+
+
+# --------------------------------------------------------------------------
+# Hogg out_scale cap: 10x the median flux error per light curve (in the model's
+# flux system: W149 median sigma_F = 2.620e-2, Z087 = 4.213e-3).  The
+# complicity measurement (dc128_hogg_complicity.py, job 15359549) showed the
+# UNCAPPED mixture fitting out_scale ~300-1000x the median error and
+# forgiving 777 nats of caustic-crossing residuals -- inverting a 601-nat
+# clean-Gaussian preference for the light curve's own rho (7.3e-3) into a
+# +142-nat preference for the wrong mode (1.16e-3).  With the cap, a
+# defecting point buys at most ~ln(10) nats of width, so the finite-source
+# signal survives arbitration.  out_frac stays free: the damage rode on the
+# width, not the count, and out_frac pinned near a cap is one of the
+# architecture alarms.
+# upper = 10x the median flux error IN THE MODEL'S FLUX SYSTEM (the same
+# quantity the component's own data hint uses -- its 10x-median initval of
+# 0.262/0.0421 is what these caps pin); initval = 1x the median error, an
+# explicit in-bounds user start (the component's flux-scaled 0.2*baseline
+# override and the 10x-median hint both sit at or above the cap).
+mulensinstrument.Roman_W149.out_scale: {upper: 0.2620, initval: 0.02620}
+mulensinstrument.Roman_Z087.out_scale: {upper: 0.04213, initval: 0.004213}
