@@ -51,7 +51,7 @@ requires-python = ">=3.12,<3.15"
 dependencies = [
     "pytensor>=3.1.2,<3.2.0",
     "pandas>=1.3.6,<3.0.0",
-    "arviz>=1.1.0,<2.0.0",
+    "arviz>=1.3.0,<2.0.0",
     "dm-tree>=0.1.8",
     # The upper cap is Intel-Mac only, and follows from the numba cap below
     # rather than from anything we need: numba 0.62.1 requires numpy<2.4.
@@ -97,7 +97,7 @@ dependencies = [
     # (exoplanet-dev/exoplanet-core#144). Lowering this floor silently breaks
     # the JAX samplers again.
     "exoplanet-core[pymc]>=0.4.0,<0.5.0",
-    "click>=8.3.3,<9.0.0",
+    "click>=8.5.0,<9.0.0",
     "h5py>=3.16.0,<4.0.0",
     # PyTensor 3 makes numba a HARD dependency (it is the "auto" linker
     # default -- see src/exozippy/__init__.py), and numba's last macOS
@@ -155,11 +155,11 @@ dependencies = [
     # one in by default (it's an optional "io" extra), but we need it to save
     # traces.
     "h5netcdf>=1.8.1,<2.0.0",
-    "lxml>=5.0",
+    "lxml>=6.1.2",
     # Parquet engine for the MIST EEP track grid (src/exozippy/models/MIST);
     # pandas.read_parquet needs one and does not ship it. Was `pyarrow =
     # "^25.0.0"` in the old [tool.poetry.dependencies] table.
-    "pyarrow>=25.0.0,<26.0.0",
+    "pyarrow>=25.0.1,<26.0.0",
 ]
 
 # NOTE: the microlensing tools (mmexofast, sfit-minimizer, emcee) used to live
@@ -187,7 +187,7 @@ dependencies = [
 [project.optional-dependencies]
 gui = [
     "fastapi>=0.141.1,<1.0.0",
-    "uvicorn[standard]>=0.52.1,<1.0.0",
+    "uvicorn[standard]>=0.52.4,<1.0.0",
     "websockets>=13.0,<16.0",
     "pywebview>=5.0,<6.0",
     "ruamel-yaml>=0.18.0,<1.0.0",
@@ -229,10 +229,10 @@ version = "0.0.0"
 [tool.poetry.group.dev.dependencies]
 ipdb = ">=0.13.13,<0.14.0"
 pytest = ">=9.0.3,<10.0.0"
-pre-commit = ">=4.6.1,<5.0.0"
+pre-commit = ">=4.6.2,<5.0.0"
 ipykernel = ">=7.2.0,<8.0.0"
-scipy-stubs = ">=1.17.1.5,<2.0.0.0"
-pandas-stubs = "=3.0.3.260530,<4.0.0.0"
+scipy-stubs = ">=1.18.1.0,<2.0.0.0"
+pandas-stubs = "=3.0.5.260730"
 pytest-timeout = "^2.4.0"
 pytest-xdist = ">=3.0"
 # fastapi.testclient.TestClient is built on httpx, which fastapi does NOT pull
@@ -247,7 +247,7 @@ httpx = ">=0.27,<1.0"
 # the analysis is a periodic investigation, not part of any build: it wants a
 # whole-suite run with per-test coverage contexts (about +33% on top of the
 # suite, measured), which is not something to do on every commit.
-coverage = ">=7.6,<8.0"
+coverage = ">=7.16.0,<8.0"
 pytest-cov = ">=6.0,<8.0"
 
 # Microlensing tooling, git-only and therefore unpublishable as an extra (see
