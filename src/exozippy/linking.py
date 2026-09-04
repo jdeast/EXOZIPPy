@@ -179,10 +179,36 @@ def parse_link_expression(expr_str, system_config, context=""):
             return m.group(0)
         idx = _resolve_instance(comp_key, instance, system_config)
         if idx is None:
+            # Say WHICH names would have worked, and name the one case where
+            # a spelling that is legal elsewhere is not legal here (review
+            # 2.1.7).  `_resolve_instance` scans only the referenced
+            # component's OWN config list, so a per-element name borrowed
+            # from another component's instances -- `lens.SourceA.t_0`, whose
+            # "SourceA" is a STAR -- resolves everywhere else in a params
+            # file and not in a link expression.  Reporting that as "has no
+            # instance named" is true but unhelpful, because the user can see
+            # the name working two lines above.
+            comp_list = system_config.get(comp_key)
+            own = [
+                str(e.get("name"))
+                for e in (comp_list if isinstance(comp_list, list) else [])
+                if isinstance(e, dict) and e.get("name") is not None
+            ]
+            avail = (
+                f" Its instances are: {', '.join(repr(n) for n in own)}."
+                if own
+                else " It declares no named instances; use an index."
+            )
             raise ValueError(
-                f"Link expression '{expr_str}'{context}: '{m.group(0)}' looks like a "
-                f"parameter reference, but '{comp_key}' has no instance named "
-                f"'{instance}'."
+                f"Link expression '{expr_str}'{context}: '{m.group(0)}' looks "
+                f"like a parameter reference, but '{comp_key}' has no "
+                f"instance named '{instance}'.{avail}\n"
+                f"Note that a link expression resolves only a component's OWN "
+                f"instance names. A per-element name a component borrows from "
+                f"elsewhere -- a lens's per-source vectors are labelled with "
+                f"the SOURCE STARS' names -- works in a params KEY but not "
+                f"here; reference it as "
+                f"'{comp_key}.<i>.{param}' instead."
             )
         return _register(f"{comp_key}.{idx}.{param}")
 
@@ -309,10 +335,35 @@ def extract_links(user_params, system_config):
 
             parts = key.split(".")
             if len(parts) != 3 or not parts[1].isdigit():
+                # THE OLD MESSAGE TOLD THE USER TO DO WHAT THEY HAD JUST DONE
+                # (review 2.1.7): it said "use '<comp>.<name>.<param>' with a
+                # name defined in the system config", which is exactly the
+                # spelling that got here.  `standardize_param_names` folds
+                # every CONFIG-INSTANCE name into the index form before this
+                # runs, so a name form surviving to here is one of the cases
+                # that fold cannot reach -- a per-element name supplied by a
+                # component's MANIFEST rather than by its config (`lens`'s
+                # per-source vectors, labelled with the SOURCE STARS' names,
+                # examples/ob161003), or a flat-dict component, whose keys are
+                # never folded at all.  Neither is linkable today, and saying
+                # so with the spelling that DOES work is the whole content of
+                # the message.
+                hint = (
+                    f"Use the index form '{parts[0]}.<i>.{parts[-1]}'"
+                    if len(parts) == 3
+                    else "Use the 3-part index form '<comp>.<i>.<param>'"
+                )
                 raise ValueError(
-                    f"Link on '{key}' could not be resolved to a single "
-                    f"component instance. Use '<comp>.<name>.<param>' with a "
-                    f"name defined in the system config."
+                    f"Link on '{key}' cannot be resolved to a single "
+                    f"component element.\n"
+                    f"A link target must be written in the canonical INDEX "
+                    f"form. Instance names written in the config are "
+                    f"translated for you, but a per-element name that comes "
+                    f"from a component's manifest -- a lens's per-source "
+                    f"vectors are labelled with the SOURCE STARS' names -- is "
+                    f"not, and neither is any key on a single-instance "
+                    f"(flat-dict) component.\n"
+                    f"{hint}."
                 )
 
             context = f" (on {key}.{fld})"

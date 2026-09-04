@@ -607,7 +607,10 @@ def seed_start(config_manager, path, value, quality, source):
     #
     # Ask about `key`, NOT `path`: `key` is the canonical (index-form)
     # spelling computed above, and after standardize_param_names that is the
-    # only spelling `user_params` can hold.  Asking under the original path
+    # only spelling a LIST component's `user_params` can hold (a flat-dict
+    # component keeps its 2-part form, and `system_config=None` skips
+    # standardization -- neither reaches this function, whose callers all
+    # push `orbit.<i>.*` and `planet.<i>.*`).  Asking under the original path
     # found no `unit:` override for a name-form seed and silently used the
     # DEFAULTS unit -- review 2.14.6's defect, at a fifth site, and here the
     # canonical spelling was already sitting two lines up.

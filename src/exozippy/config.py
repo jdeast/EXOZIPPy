@@ -1125,10 +1125,11 @@ class ConfigManager:
         # comment here used to say the opposite -- that the ORIGINAL path is
         # what carries a user `unit:` override -- and that is precisely
         # backwards: `standardize_param_names` folds the name form into the
-        # index form at construction, so after it runs `user_params` can
-        # never contain a name-form key, and a hint pushed as
-        # `star.B.distance` looked up a spelling that does not exist and got
-        # the DEFAULTS unit.  Measured: with `star.B.distance: {unit: kpc}`,
+        # index form at construction, so after it runs a LIST component's
+        # `user_params` cannot contain a name-form key (with the two
+        # exceptions named below), and a hint pushed as `star.B.distance`
+        # looked up a spelling that does not exist and got the DEFAULTS
+        # unit.  Measured: with `star.B.distance: {unit: kpc}`,
         # pushing the name form scaled by 1.0 and the index form by 1000.0 --
         # the same element of the same parameter, differing only in spelling
         # (review 2.14.6).
@@ -1504,6 +1505,21 @@ class ConfigManager:
             keys = _element_keys(i)
             return keys[1:] + keys[:1]
 
+        # THE GUARANTEE AND ITS TWO EXCEPTIONS (review 2d-1/2d-4).  Since
+        # System calls `normalize_config_block` on every component's config
+        # BEFORE building the ConfigManager, every derived instance name
+        # exists when standardization runs, so a LIST component's
+        # `user_params` really cannot hold a name-form key.  That was NOT
+        # true until 2026-09: Mann and Torres derived `name:` in their own
+        # __init__, after this object was built, so `mann.A.ks_offset`
+        # survived name-form forever and this very comment was wrong.
+        # Still outstanding, deliberately:
+        #   * a FLAT-DICT component keeps all three spellings verbatim --
+        #     `canonical_key` is the identity there and `sed.B.av` has no
+        #     index to fold into (review 3.14.17);
+        #   * `system_config=None` skips standardization entirely (tests and
+        #     direct drivers).
+        #
         # ONE ELEMENT, ONE SPELLING -- the residual half of the check that
         # runs at construction.  That one sees every collision whose name
         # form is a CONFIG INSTANCE name, because standardize_param_names has
@@ -1513,7 +1529,16 @@ class ConfigManager:
         # its own config instances' names.  `lens` does exactly that
         # (examples/ob161003), labelling its per-source vectors with the
         # SOURCE STARS' names, so `lens.SourceA.t_0` survives standardization
-        # verbatim and coexists with `lens.0.t_0` as two live user keys.
+        # verbatim.
+        #
+        # It does NOT, however, survive to here: `Lens._rewrite_source_param_keys`
+        # runs in `Lens.__init__`, before any stage-1 code, and renames every
+        # such key to its source SLOT.  So by the time `resolve()` is called
+        # the name form is already gone, and this check is reached only via
+        # `_raw_user_param_keys` below -- which is the point of reading the
+        # raw keys rather than `user_params`, and why this site still works.
+        # The older claim here, that the two spellings "coexist as two live
+        # user keys", described a window that closes before stage 1.
         #
         # Only keys the user WROTE count.  finalize_user_params injects the
         # engine's solved start values back under the index form, and on
@@ -1890,22 +1915,49 @@ class ConfigManager:
                             if isinstance(v_ov, (list, tuple)):
                                 v_ov = v_ov[0]
                             apply_value(key, resolved[key], i, v_ov)
-                            # apply_value keeps the TIGHTER of the two bounds.
-                            # When the winner is a component-computed one, say
-                            # so: these are validity limits (the likelihood is
-                            # NaN past them), but the user asked for something
-                            # else and deserves to hear that it did not apply.
-                            if (key, i) in override_bounds and not np.isclose(
-                                resolved[key][i], float(v_ov)
-                            ):
-                                logger.warning(
-                                    f"[{component_type}.{_eff_idx(i)}."
-                                    f"{param_name}] user {key}={float(v_ov):g}"
-                                    f" is outside the component-computed "
-                                    f"validity bound "
-                                    f"{override_bounds[(key, i)]:g}; using "
-                                    f"{resolved[key][i]:g}."
-                                )
+                            # apply_value keeps the TIGHTER of the two bounds,
+                            # so the user's entry may simply not apply.  EITHER
+                            # WAY THEY HEAR ABOUT IT (review 2.1.6).  The clip
+                            # itself is documented design and stays -- a user
+                            # bound never widens a physics or grid limit -- but
+                            # the SILENCE was not designed: an override-bound
+                            # clip warned and a defaults-bound clip said
+                            # nothing, so the same user mistake was announced
+                            # or swallowed depending on which layer happened
+                            # to own the tighter number.  Rope, not gates: the
+                            # user hears that what they wrote did not take
+                            # effect.
+                            #
+                            # Reachable as a clean user-vs-defaults statement
+                            # only since review 1.1.5.  Before that the same
+                            # clip also fired user-vs-USER, so this message
+                            # would have blamed "the defaults" for a broadcast
+                            # entry the user had written themselves.  1.1.5
+                            # settles broadcast-vs-specific by specificity
+                            # first, which is what makes this warning
+                            # truthful.
+                            if not np.isclose(resolved[key][i], float(v_ov)):
+                                if (key, i) in override_bounds:
+                                    logger.warning(
+                                        f"[{component_type}.{_eff_idx(i)}."
+                                        f"{param_name}] user "
+                                        f"{key}={float(v_ov):g}"
+                                        f" is outside the component-computed "
+                                        f"validity bound "
+                                        f"{override_bounds[(key, i)]:g}; "
+                                        f"using {resolved[key][i]:g}."
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"[{component_type}.{_eff_idx(i)}."
+                                        f"{param_name}] user "
+                                        f"{key}={float(v_ov):g} WIDENS the "
+                                        f"defaults.yaml {key} of "
+                                        f"{resolved[key][i]:g} and was NOT "
+                                        f"applied; the stricter bound wins. "
+                                        f"Edit the component's defaults.yaml "
+                                        f"if the limit itself is wrong."
+                                    )
 
                     for str_key in STRING_KEYS:
                         if str_key in ov:

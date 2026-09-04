@@ -112,12 +112,49 @@ class StellarRelation:
     :meth:`_resolve_star` and :meth:`_parse_constrain` are for.
     """
 
-    def __init__(self, component_config, config_manager):
-        # Name each instance after the star it constrains, so the base class's
-        # duplicate-name check also enforces one instance per star.
-        for c in component_config:
+    @classmethod
+    def normalize_config_block(cls, block):
+        """Name each instance after the star it constrains.
+
+        THE TIMING IS THE POINT.  This used to live in ``__init__``, which
+        runs after ``ConfigManager`` is built -- so
+        ``standardize_param_names`` could not see the name it derives, and a
+        user's ``mann.A.ks_offset`` was never folded to ``mann.0.ks_offset``.
+        It then survived in ``user_params`` permanently and leaked, as a
+        name-form key, into ``master_symbol_map``, the provenance ledger,
+        ``propagated_scales`` and ``export_solution`` -- the ONE live
+        violation of the one-spelling-only rule in the codebase, shipped in
+        examples/gj1214.  Three measured consequences:
+
+          * ``canonical_key`` gave two different answers over one lifecycle
+            -- ``mann.A.ks_offset`` before the component existed and
+            ``mann.0.ks_offset`` after -- so the user's entry and anything
+            canonicalized later were two keys for one parameter;
+          * a user ``unit:`` on that key was honored by ``resolve()``'s
+            per-element scan and invisible to ``get_conversion_factor``,
+            which matches by exact key: review 2.14.6's defect class at a
+            sixth site;
+          * a LINK on it was a hard failure, and ``extract_links`` runs at
+            ConfigManager construction so no later fix could reach it --
+            "Link on 'mann.A.ks_offset' could not be resolved to a single
+            component instance.  Use '<comp>.<name>.<param>' with a name
+            defined in the system config", i.e. the spelling the user had
+            just used.
+
+        Deriving it HERE, before ConfigManager, closes all three by making
+        the boundary translation total, which is what the rule asks for.
+        """
+        for c in block:
             if c.get("name") is None and c.get("star") is not None:
                 c["name"] = str(c["star"]).split(".")[-1]
+        return block
+
+    def __init__(self, component_config, config_manager):
+        # Idempotent with the hook above, which System calls before
+        # ConfigManager.  Kept so a DIRECT instantiation -- tests, a
+        # standalone driver -- still gets named instances; the base class's
+        # duplicate-name check then also enforces one instance per star.
+        self.normalize_config_block(component_config)
         super().__init__(component_config, config_manager)
 
     # ------------------------------------------------------------------

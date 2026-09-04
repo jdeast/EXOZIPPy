@@ -127,6 +127,21 @@ class System(Component):
                 # mkparam's own loader has always normalized it this way.
                 self.user_params = load_yaml(str(user_params_file)) or {}
 
+        # NORMALIZE COMPONENT CONFIG BLOCKS BEFORE THE ConfigManager EXISTS.
+        # `standardize_param_names` folds a user's `comp.<Name>.param` into
+        # the canonical `comp.<i>.param`, and it can only do that for names
+        # that exist when it runs.  A component that DERIVES a name (Mann and
+        # Torres name each instance after the star it constrains) used to do
+        # so in its own __init__, i.e. after this line -- so its users' keys
+        # were never folded and survived name-form forever (review 2d-1).
+        # The registry is discovered here rather than below for the same
+        # reason: the hook lives on the component classes.
+        self.registry = discover_components()
+        for key, block in self.config.items():
+            CompClass = self.registry.get(key)
+            if CompClass is not None and isinstance(block, list):
+                CompClass.normalize_config_block(block)
+
         self.config_manager = ConfigManager(
             self.user_params, system_config=self.config
         )
@@ -153,7 +168,8 @@ class System(Component):
         # disk and so have no file for an error message to point at.
         if user_params is None and user_params_file is not None:
             self.config_manager.param_file = str(user_params_file)
-        self.registry = discover_components()
+        # self.registry was discovered above, before the ConfigManager, so
+        # normalize_config_block could run first.
         self.active_components = {}
 
         # 1. AGNOSTIC INSTANTIATION

@@ -173,6 +173,30 @@ class Component(ABC):
     # setting it as a CLASS attribute also works and is not overwritten.
     label = None
 
+    @classmethod
+    def normalize_config_block(cls, block):
+        """Normalize this component's raw config block BEFORE ConfigManager.
+
+        Called by ``System.__init__`` on every registered component's block,
+        in place, while the ONLY thing that exists is the parsed YAML -- no
+        ConfigManager, no component instances.  Default: do nothing.
+
+        It exists for one reason, and the reason is the standing rule that
+        internal syntax carries exactly ONE spelling: a user's
+        ``comp.<Name>.param`` can only be folded into ``comp.<i>.param`` if
+        the instance NAMES are known when ``standardize_param_names`` runs.
+        A component that DERIVES a name rather than reading it from ``name:``
+        -- Mann and Torres name each instance after the star it constrains --
+        used to do so in its own ``__init__``, which runs AFTER ConfigManager
+        was built.  So the fold could not happen and the name form survived
+        forever (review 2d-1 / 3.14.15).
+
+        Override this, not ``__init__``, for anything the KEY TRANSLATION
+        depends on.  Keep it to config normalization: there is no
+        ConfigManager to talk to and no data has been read.
+        """
+        return block
+
     def __init__(self, component_config, config_manager):
         """Standardized constructor for ALL components."""
         self.config = component_config
