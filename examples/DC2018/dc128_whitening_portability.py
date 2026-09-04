@@ -71,16 +71,27 @@ def build_maps(label):
         nel = int(np.atleast_1d(base[k]).size)
 
         def sweep(el):
-            """Physical value of element `el` as its own raw is swept."""
-            got = []
+            """Sweep RAW element `el`; return the PHYSICAL element that moves.
+
+            The raw and physical vectors DO NOT LINE UP when any element is
+            pinned: on severed-v3 star.radius_raw has ONE element (the free
+            Source) while the physical star.radius has TWO (Lens pinned +
+            Source), so raw[0] drives physical[1].  The previous version
+            assumed index equality, read the pinned physical[0], saw a flat
+            response and aborted -- the second false positive in this file.
+            So the responding element is DISCOVERED, not assumed.
+            """
+            rows = []
             for probe in PROBES:
                 args = [np.array(b, copy=True) for b in base]
                 v = np.atleast_1d(np.array(args[k], dtype=float))
                 v[el] = probe
                 args[k] = v.reshape(np.asarray(args[k]).shape)
-                r = np.atleast_1d(np.asarray(fn(*args), dtype=float))
-                got.append(float(r[el] if r.size > el else r[0]))
-            return got
+                rows.append(np.atleast_1d(np.asarray(fn(*args), dtype=float)))
+            stack = np.vstack(rows)
+            spread = stack.max(axis=0) - stack.min(axis=0)
+            j = int(np.argmax(spread))
+            return [float(r[j]) for r in rows], j
 
         # PER ELEMENT, because a vector Parameter can mix pinned and free
         # elements.  The first version swept the WHOLE vector and read
@@ -89,12 +100,14 @@ def build_maps(label):
         # on a false positive.  A flat element is now reported as pinned --
         # which is correct behaviour, not the trap-1 bug -- and only an
         # ALL-flat parameter is treated as evidence of the bug.
-        per_el = {el: sweep(el) for el in range(nel)}
-        live = {el: v for el, v in per_el.items()
-                if max(v) - min(v) > 0.0}
+        swept = {el: sweep(el) for el in range(nel)}
+        per_el = {el: v for el, (v, _j) in swept.items()}
+        phys_el = {el: j for el, (_v, j) in swept.items()}
+        live = {el: v for el, v in per_el.items() if max(v) - min(v) > 0.0}
         for el, v in per_el.items():
-            print("  %-9s %-18s[%d] raw %s -> %s%s"
-                  % (label, w, el, PROBES, ["%.6g" % x for x in v],
+            print("  %-9s %-16s raw[%d] -> phys[%d]  %s -> %s%s"
+                  % (label, w, el, phys_el[el], PROBES,
+                     ["%.6g" % x for x in v],
                      "" if el in live else "   (flat: pinned/inactive)"),
                   flush=True)
         if not live:
@@ -105,7 +118,7 @@ def build_maps(label):
                 " anything below." % (w, raw_name))
         el0 = sorted(live)[0]
         vals = live[el0]
-        out.setdefault("_element", {})[w] = el0
+        out.setdefault("_element", {})[w] = phys_el[el0]
         # SELF-CHECK, and it is not optional: a flat response means the
         # input is being ignored, which is the bug above rather than a
         # result.  `on_unused_input="ignore"` is required here (some value
