@@ -17,6 +17,16 @@ That is not cosmetic for the two scale channels: ``init_scale`` seeds the
 whitening probe, and for an unbounded element with no sigma it IS the prior
 width, i.e. a posterior term.
 
+BOUNDS WERE THE ONE SILENT EXCEPTION, closed by review 1.1.5.  ``apply_value``
+resolves ``lower`` with max() and ``upper`` with min() rather than assigning,
+which is order-independent and so defeated ``_element_keys`` entirely: a
+broadcast ``sed.av: {lower: 1.0}`` beat a specific ``sed.0.av: {lower: 0.5}``
+and nothing was logged.  The ruling is that a specific entry is the EXCEPTION
+to a broadcast, not an addition to it, so the user-vs-user contest is now
+settled by specificity BEFORE the strictest-wins clip runs.  The clip itself
+is untouched and still governs user-vs-defaults, which is the case it was
+written for.
+
 The index and name forms name exactly ONE element each and are equally
 specific, so "most specific wins" cannot adjudicate between them -- and the
 two traversals disagreed about it (index in the first-hit lookups, name in
@@ -221,7 +231,10 @@ def test_specific_component_override_beats_broadcast_component_override():
 
     initval rather than a bound, deliberately: apply_value combines competing
     bounds as max/min order-independently, so only a plain field can see the
-    ordering at all.
+    ordering at all.  That is still true of THIS channel after review 1.1.5 --
+    an override bound is a validity limit and strictest-wins is the point of
+    it (see add_override's docstring).  It is the USER channel that changed;
+    the pair of tests below pin the difference.
     """
     # ARRANGE
     cm = ConfigManager({}, system_config=SYSTEM)
@@ -550,3 +563,133 @@ def test_single_element_resolution_is_not_checked():
 
     # ASSERT
     assert np.isclose(cfg["initval"][0], 100.0)
+
+
+# ---------------------------------------------------------------------------
+# 1b. user BOUNDS  (review 1.1.5: the one field the rule did not reach)
+# ---------------------------------------------------------------------------
+
+# A flat-dict component, because that is where the collision is REACHABLE.
+# For a LIST component `standardize_param_names` expands a 2-part key only
+# into the indices no 3-part key claimed, so the element never sees the
+# broadcast at all -- pinned by test_a_list_component_resolves_the_collision_
+# before_resolve below, which is why 1.1.5's own `star.av` example does not
+# reproduce and `sed.av` does.
+_FLAT = {"sed": {"file": "x.yaml"}}
+
+
+@pytest.mark.parametrize(
+    "field, broadcast, specific",
+    [("lower", 1.0, 0.5), ("upper", 1.0, 5.0)],
+)
+def test_specific_user_bound_beats_broadcast_user_bound(
+    field, broadcast, specific
+):
+    """
+    Given a broadcast user bound and a specific one on the same element,
+    When resolve() applies the user's params,
+    Then the SPECIFIC bound wins outright, even though it is the looser one.
+
+    This is review 1.1.5.  The specific spelling is the exception to the
+    broadcast, not a second opinion to be combined with it, so the looser
+    specific value is the answer -- which is exactly what max()/min() could
+    never produce and why the ordering was invisible.
+
+    Both fields are exercised because "strictest" points in OPPOSITE
+    directions for the two: a fix that special-cased `lower` alone would
+    still lose `upper`, and vice versa.
+    """
+    # ARRANGE
+    cm = ConfigManager(
+        {"sed.av": {field: broadcast}, "sed.0.av": {field: specific}},
+        system_config=_FLAT,
+    )
+
+    # ACT
+    cfg = cm.resolve("sed", "av", shape=(1,))
+
+    # ASSERT
+    assert np.isclose(cfg[field][0], specific)
+
+
+def test_a_broadcast_user_bound_still_covers_an_element_that_states_none():
+    """
+    Given a broadcast user bound and a specific entry that sets a DIFFERENT
+      field,
+    When resolve() applies the user's params,
+    Then the broadcast bound still lands.
+
+    The fix suppresses a broadcast bound only where a more specific spelling
+    STATES THAT BOUND.  A specific entry about something else must not
+    silently cancel the broadcast -- that would trade one silent override for
+    another.
+    """
+    # ARRANGE
+    cm = ConfigManager(
+        {"sed.av": {"lower": 1.0}, "sed.0.av": {"initval": 3.0}},
+        system_config=_FLAT,
+    )
+
+    # ACT
+    cfg = cm.resolve("sed", "av", shape=(1,))
+
+    # ASSERT
+    assert np.isclose(cfg["lower"][0], 1.0)
+    assert np.isclose(cfg["initval"][0], 3.0)
+
+
+@pytest.mark.parametrize(
+    "field, user, validity, expected",
+    [("lower", 0.5, 2.0, 2.0), ("upper", 5.0, 3.0, 3.0)],
+)
+def test_a_user_bound_still_loses_to_a_component_validity_bound(
+    field, user, validity, expected
+):
+    """
+    Given a component-computed validity bound and a user bound outside it,
+    When resolve() layers them,
+    Then the STRICTEST still wins -- the half 1.1.5 deliberately did not touch.
+
+    Two rules, kept apart: user-vs-user is decided by specificity, but
+    user-vs-defaults is decided by strictness, because a validity bound marks
+    where the likelihood stops being meaningful (a grid edge, a variance
+    floor) and a user preference cannot widen it.  A fix that made the user's
+    bound simply assign would have broken this, silently, in the direction
+    that produces NaNs.
+    """
+    # ARRANGE
+    cm = ConfigManager({"sed.0.av": {field: user}}, system_config=_FLAT)
+    cm.add_override("sed.av", **{field: validity})
+
+    # ACT
+    cfg = cm.resolve("sed", "av", shape=(1,))
+
+    # ASSERT
+    assert np.isclose(cfg[field][0], expected)
+
+
+def test_a_list_component_resolves_the_collision_before_resolve():
+    """
+    Given the broadcast and specific spellings on a LIST component,
+    When the ConfigManager standardizes its params,
+    Then only the specific key survives for the element that claimed it.
+
+    Pinned because it is why review 1.1.5's own worked example (`star.av`
+    vs `star.0.av`) does NOT reproduce, and a later change to
+    standardize_param_names that started keeping both would quietly hand the
+    user-params loop a case it now has to decide.  The rule is the same
+    either way -- the specific entry wins -- so this test states WHERE the
+    decision is made, not what it is.
+    """
+    # ARRANGE / ACT
+    cm = ConfigManager(
+        {"star.av": {"lower": 1.0}, "star.0.av": {"lower": 0.5}},
+        system_config={"star": [{"name": "A"}, {"name": "B"}]},
+    )
+
+    # ASSERT
+    kept = {k: v for k, v in cm.user_params.items() if k.endswith(".av")}
+    assert kept == {"star.0.av": {"lower": 0.5}, "star.1.av": {"lower": 1.0}}
+    cfg = cm.resolve("star", "av", shape=(2,), names=["A", "B"])
+    assert np.isclose(cfg["lower"][0], 0.5)
+    assert np.isclose(cfg["lower"][1], 1.0)
