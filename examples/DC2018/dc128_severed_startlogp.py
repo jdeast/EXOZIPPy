@@ -32,7 +32,25 @@ that kind of interface is what produced this file's previous wrong answer.
 (2.4.14 also measured the gradient-free polish plateauing at ~0.9
 nats/sweep, so it would not have reached either basin's optimum anyway.)
 
-What replaces it is better evidence: the PER-TERM logp breakdown.  If the
+ROUND 3 (job 15408147) FOUND SOMETHING MORE IMPORTANT THAN THE TEST, and
+this version is restructured around it.  Injecting POINT A -- the run's OWN
+argmax draw, all 52 physical values read straight from its trace -- did NOT
+reproduce that point: logp came back 75,679.410 against the draw's recorded
+87,786.2, a loss of 12,107 nats to a self-injection that should have been
+exact.  A posterior point DOES NOT ROUND-TRIP through the params/initval
+interface, because the relaxation engine reconciles every initval against
+everything else rather than taking it verbatim.
+
+That makes the A-vs-B comparison meaningless no matter how B is built, so
+the round-trip is now the PRIMARY measurement and the comparison is REFUSED
+unless it passes.  (Round 3's B - A of -10.7 MILLION nats was not a physics
+result either: point B overrode theta_E and pi_rel but not mu_rel, so t_E
+moved by ~6.6x while the fluxes and t_0 stayed at A's fitted values -- the
+light curve then matched nothing, and 99.9% of the gap sat in the two Hogg
+microlensing terms.  A subset override cannot work: the disputed block is
+coupled to the light-curve observables through t_E.)
+
+What replaces the polish is better evidence: the PER-TERM logp breakdown.  If the
 model prefers the wrong solution, this says WHICH terms pay for it -- the
 microlensing likelihood, the SED photometry, torres/mann, or the priors --
 and that is the actual question behind 8.6.7, not the scalar total.
@@ -117,14 +135,14 @@ def build(overrides, label):
         if isinstance(base, dict) and base.get("sigma") == 0:
             continue
         params[k] = {"initval": v}
-    s = System(cfg, user_params=params)
-    s.prepare()
-    m = s.build_model()
+    sy = System(cfg, user_params=params)
+    sy.prepare()
+    m = sy.build_model()
     ip = m.initial_point()
     lp = float(m.compile_logp()(ip))
-    print("%-10s start logp = %+14.3f   (%d free RVs)"
+    print("%-10s logp = %+14.3f   (%d free RVs)"
           % (label, lp, len(m.free_RVs)), flush=True)
-    return s, m, ip, lp
+    return sy, m, ip, lp
 
 
 def term_logps(m, ip, label):
@@ -154,16 +172,85 @@ def term_logps(m, ip, label):
 
 
 A = point_from_trace()
+RECORDED_MAX = 87786.2
+
+print("\n=== GATE: DOES A SELF-INJECTION ROUND-TRIP? ===", flush=True)
+print("Injecting point A (the run's own argmax) and asking whether the model",
+      flush=True)
+print("reproduces the lp that draw recorded.  If it does not, no comparison",
+      flush=True)
+print("built on injected points means anything.", flush=True)
+sA, mA, ipA, lpA = build(A, "POINT A")
+print("recorded lp for that draw : %+14.3f" % RECORDED_MAX, flush=True)
+print("logp after re-injection   : %+14.3f" % lpA, flush=True)
+print("ROUND-TRIP ERROR          : %+14.3f nats" % (lpA - RECORDED_MAX),
+      flush=True)
+
+# WHICH values failed to take.  This is the actionable half: it names the
+# parameters the engine overrode, which is what a fix has to address.
+print("\n=== WHICH INJECTED VALUES DID NOT TAKE? ===", flush=True)
+bad = []
+for key, want in sorted(A.items()):
+    comp, inst, pname = key.split(".", 2)
+    c = getattr(sA, comp, None)
+    p = getattr(c, pname, None) if c is not None else None
+    if p is None:
+        continue
+    got = np.atleast_1d(np.asarray(p.initval, dtype=float))
+    names = INSTANCES.get(comp, [])
+    if inst not in names:
+        continue
+    i = names.index(inst)
+    if i >= got.size:
+        continue
+    g = float(got[i])
+    if want == 0.0:
+        rel = abs(g)
+    else:
+        rel = abs(g - want) / abs(want)
+    if rel > 1e-6:
+        bad.append((rel, key, want, g))
+bad.sort(reverse=True)
+if not bad:
+    print("  all %d injected values took exactly." % len(A), flush=True)
+else:
+    print("  %d of %d values were OVERRIDDEN by the engine:" % (len(bad),
+          len(A)), flush=True)
+    print("  %-30s %14s %14s %9s" % ("parameter", "requested", "resolved",
+                                     "rel err"), flush=True)
+    for rel, key, want, g in bad[:25]:
+        print("  %-30s %14.6g %14.6g %9.2e" % (key, want, g, rel), flush=True)
+
+if abs(lpA - RECORDED_MAX) > 1.0:
+    print("""
+GATE FAILED -- STOPPING BEFORE THE COMPARISON.
+A posterior point does not round-trip through the params/initval interface,
+so neither "the model at the wrong solution" nor "the model at truth" can be
+constructed this way and 8.6.7's question CANNOT be answered by injection.
+The table above names the parameters the engine overrode.
+
+WHAT WOULD ACTUALLY WORK, in increasing order of effort:
+ 1. Set the VALUE VARS directly -- build the model once, then evaluate
+    model.compile_logp() on a point dict assembled from the trace's raw
+    coordinates.  This bypasses initval resolution entirely.  It needs the
+    RUN's whitening state to map physical -> raw, which is exactly what
+    2.4.15 trap 2 says a rebuild does not have, so it is blocked on that.
+ 2. Re-run the severed model from a truth-seeded start and compare the two
+    converged posteriors' lp -- a fit, not an evaluation, which is what this
+    item was trying to avoid.
+Either way the "cheap start-logp check" framing in 8.6.7 is wrong and should
+be retired.
+""", flush=True)
+    json.dump({"gate": "FAILED", "lp_A": lpA, "recorded_max": RECORDED_MAX,
+               "round_trip_error": lpA - RECORDED_MAX,
+               "overridden": [{"param": k, "requested": w, "resolved": g}
+                              for _r, k, w, g in bad]},
+              open("../dc128_severed_startlogp.json", "w"), indent=1)
+    raise SystemExit(0)
+
+print("\nGATE PASSED -- the comparison below is meaningful.", flush=True)
 B = dict(A)
 B.update(TRUTH)
-print("\npoint B overrides point A in %d of %d values:" % (len(TRUTH), len(A)),
-      flush=True)
-for k, v in TRUTH.items():
-    print("   %-26s A=%-14.6g -> B=%-14.6g" % (k, A.get(k, float("nan")), v),
-          flush=True)
-
-print("\n=== SAME MODEL, TWO COMPLETE POINTS ===", flush=True)
-_, mA, ipA, lpA = build(A, "POINT A")
 _, mB, ipB, lpB = build(B, "POINT B")
 tA = term_logps(mA, ipA, "POINT A")
 tB = term_logps(mB, ipB, "POINT B")
