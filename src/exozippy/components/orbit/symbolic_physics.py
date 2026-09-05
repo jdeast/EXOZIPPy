@@ -28,7 +28,7 @@ vcve, xomega, yomega = sp.symbols("vcve xomega yomega", real=True)
 comp_key = "orbit"
 
 
-def get_symbol_map(config):
+def get_symbol_map(config, system_config):
     return {
         "logP": "logP",
         "period": "period",
