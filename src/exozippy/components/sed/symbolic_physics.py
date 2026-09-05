@@ -30,7 +30,7 @@ def relations_apply(system_config):
     return bool((system_config or {}).get("sed"))
 
 
-def get_symbol_map(config):
+def get_symbol_map(config, system_config):
     return {
         "teff": "teff",
         "teffsed": "teffsed",

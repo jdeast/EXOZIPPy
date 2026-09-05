@@ -267,7 +267,11 @@ def test_the_symbolic_bridge_is_defined_once_on_the_instrument_parent():
         )
         assert JITTER_RELATIONS[0] in module.RELATIONS, comp
         for key, path in JITTER_SYMBOL_MAP.items():
-            assert module.get_symbol_map({})[key] == path, comp
+            # get_symbol_map takes the WHOLE system config as a required second
+            # argument (review 8.6.17 stage 1a): a map builder may need
+            # another component's instances.  Not optional -- one
+            # spelling for an internal interface.
+            assert module.get_symbol_map({}, {})[key] == path, comp
 
 
 def test_every_child_registers_a_fully_bound_jitter_relation():

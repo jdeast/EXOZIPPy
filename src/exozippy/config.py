@@ -950,7 +950,20 @@ class ConfigManager:
                     # maps when one config entry instantiates the relations
                     # multiple times (e.g. a lens with N sources instantiates
                     # the per-source parameter chain once per source).
-                    raw_maps = module.get_symbol_map(entry_cfg)
+                    #
+                    # THE WHOLE SYSTEM CONFIG IS PASSED, not just this
+                    # component's block.  A map builder may need to see
+                    # another component's instances: the `mulensevent` split
+                    # moves the lens and source BODY LISTS off the component
+                    # whose relations reference them, so answering from
+                    # `entry_cfg` alone stops being possible.  The signature
+                    # is a hard contract -- every implementor takes both
+                    # arguments, there is no introspection and no fallback,
+                    # because all nine live in this repo and an internal
+                    # interface carries exactly one spelling.
+                    raw_maps = module.get_symbol_map(
+                        entry_cfg, self.system_config
+                    )
                     if not isinstance(raw_maps, list):
                         raw_maps = [raw_maps]
 

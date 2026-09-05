@@ -35,8 +35,12 @@ s, log_s = sp.symbols("s log_s", real=True)
 comp_key = "lens"
 
 
-def get_symbol_map(lens_config_list):
+def get_symbol_map(lens_config_list, system_config):
     """
+
+    ``system_config`` is the WHOLE parsed config, passed by
+    ``ConfigManager`` so a map builder can reference another component's
+    instances; unused here.
     Dynamically maps SymPy symbols to YAML paths based on lens/source/companion
     body assignments.  Supports both the legacy lens_ndx/source_ndx keys and the
     NLNS lenses:/sources: list syntax.
