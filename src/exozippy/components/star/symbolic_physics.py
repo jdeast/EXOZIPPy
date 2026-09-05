@@ -27,7 +27,7 @@ ra, dec = sp.symbols("ra dec", real=True)
 comp_key = "star"
 
 
-def get_symbol_map(star_config_list):
+def get_symbol_map(star_config_list, system_config):
     return {
         f"logmass": f"logmass",
         f"mass": f"mass",

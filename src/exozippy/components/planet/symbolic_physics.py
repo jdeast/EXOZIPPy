@@ -35,7 +35,7 @@ a, ar, m_total = sp.symbols("a ar m_total", real=True)
 comp_key = "planet"
 
 
-def get_symbol_map(config):
+def get_symbol_map(config, system_config):
     # Grab the indices to know WHICH star and orbit this planet belongs to
     star_idx = config.get("star_ndx", 0)
     orbit_idx = config.get("orbit_ndx", 0)
