@@ -1809,12 +1809,29 @@ class Lens(Component):
         # which is exactly what the soft bounds below exist to avoid; the
         # floors are ~6 decades below their 1e-6 turn-on, so the prior is
         # untouched wherever it was already finite.
+        # ONE ENCOUNTER, ONE WEIGHT (review 8.6.18).  This used to be a
+        # pt.sum over both vectors, and both are PER SOURCE -- so a 2S event
+        # carried the event-rate selection SQUARED: N * log(Gamma) instead of
+        # log(Gamma).  Live on examples/ob161003, the only shipped
+        # multi-source event, and not a small correction: it is the whole
+        # event-rate term again, and that term is exactly what tilts the lens
+        # mass and distance against the galactic prior.
+        #
+        # Gamma propto mu_rel * theta_E (Batista+2011) is the sky-sweep rate
+        # of ONE lens past ONE source system.  Two sources bound in one
+        # system share a distance and share the barycentre's proper motion,
+        # so their theta_E and mu_rel are the same number -- summing was not
+        # a modelling choice about binary sources, it was the same selection
+        # correction counted twice.
+        #
+        # Element 0 rather than a mean: these are one quantity that happens
+        # to be stored per source, and taking [0] is what the fitu0te and
+        # fitpirel Jacobians above already do for the same reason.  When the
+        # 8.6.17 split collapses them to shape (), this indexing goes away.
         pm.Potential(
             f"{self.prefix}.event_rate_prior",
-            pt.sum(
-                pt.log(pt.maximum(mu_rel_geo, MU_REL_FLOOR))
-                + pt.log(pt.maximum(theta_E, THETA_E_FLOOR))
-            ),
+            pt.log(pt.maximum(mu_rel_geo[0], MU_REL_FLOOR))
+            + pt.log(pt.maximum(theta_E[0], THETA_E_FLOOR)),
         )
         get_collector(system).add(
             r"We weighted the lens prior by the microlensing event rate, "
@@ -1832,6 +1849,13 @@ class Lens(Component):
         # mas/yr), matching the previous steepness.
         d_l = system.star.distance.value[self.lens_map]
         d_s = system.star.distance.value[self.source_map]
+        # THESE SUMS ARE CORRECT AND MUST STAY SUMS -- checked while fixing
+        # 8.6.18, and recorded so the fix is not "helpfully" extended to
+        # them.  Each source must independently sit behind the lens, so N
+        # sources really are N constraints; and the singularity guards below
+        # protect each ELEMENT, each of which is separately used to derive
+        # that source's t_E and pi_E.  A statement about the encounter is
+        # counted once; a statement about each source is counted per source.
         pm.Potential(
             f"{self.prefix}.source_behind_lens",
             pt.sum(soft_lower_bound(d_s - d_l, 10.0, scale=440.0)),
@@ -1875,7 +1899,17 @@ class Lens(Component):
             # notes/orbital_motion_and_nbody.txt).
             pm.Potential(
                 f"{self.prefix}.bound_orbit",
-                pt.sum(soft_upper_bound(self.beta.value, 1.0, scale=0.1)),
+                # ONE LENS ORBIT, ONE BOUND (review 8.6.18, same shape as
+                # the event-rate term above).  beta = E_kin,perp/E_pot,perp
+                # is a property of the LENS's orbit; it is declared
+                # shape=(n_sources,) only because it is derived through
+                # theta_E, which is stored per source.  Summing bounded the
+                # same physical quantity once per source.
+                # LATENT, not live: it needs orbital_motion AND more than one
+                # source, and no shipped example has both -- ob09020 has
+                # orbital motion with one source, ob161003 two sources with
+                # no orbital motion -- so every example is bit-identical.
+                soft_upper_bound(self.beta.value[0], 1.0, scale=0.1),
             )
             get_collector(system).add(
                 r"We modeled the orbital motion of the lens binary to "
