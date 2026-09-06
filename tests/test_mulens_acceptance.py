@@ -1,4 +1,4 @@
-"""The acceptance gate for the `mulensevent` split (review 8.6.17, stage 0).
+"""The acceptance gate for the `mulensevent` split (review 8.6.17).
 
 These fixtures are the refactor's measuring device, so this file's first job
 is to check the DEVICE, not the models: a decomposition that does not sum to
@@ -8,10 +8,26 @@ attribution at all.
 The fixtures themselves are recorded by `scripts/make_mulens_fixtures.py` and
 hold, per shipped microlensing example, the reconciled per-term logp
 decomposition at the start point.  During the split, each stage is accepted
-by explaining every moved term against them -- byte-identity is NOT available
-as acceptance for the first time in this review, because the split
-deliberately collapses parameters that are stored per source but physically
-singular.
+by explaining every moved term against them -- byte-identity was NOT assumed
+to be available for this review, because the split collapses parameters that
+are stored per source but physically singular; for the two PSPL cases it
+turned out to hold anyway (below).
+
+STAGE-1 STATE (8.6.17).  The shipped example configs still carry the
+pre-split spellings until stage 3, so they cannot build here.  The two
+always-run PSPL cases therefore build from CONVERTED CONFIG COPIES committed
+under tests/fixtures/mulens/configs/<name>/, and their fixture JSONs point
+there.  Those two fixtures also had their LABELS translated to the
+post-split naming -- the raw value vars lens.{t_0,u_0}_raw ->
+source.{t_0,u_0}_raw, and the per-parameter potentials follow their
+parameters' new component homes (lens.t_E -> mulensevent.t_E etc.); every
+VALUE is bit-identical to the stage-0 recording, which is exactly what
+stage-1 acceptance measured: 0 moved / 0 appeared / 0 vanished at ZERO
+tolerance on both examples, engine-solved starts bitwise identical.  The
+remaining eleven fixtures are untouched stage-0 recordings of example
+configs that cannot build until stage 3; their replay cases are
+xfail(strict=True) so they flip LOUDLY when the examples are converted (and
+the fixtures re-pointed/translated) instead of silently passing.
 
 Most of this is marked slow: each case builds a full System and compiles
 PyTensor graphs.  Two fast, deterministic PSPL examples run unmarked so the
@@ -88,6 +104,12 @@ TERM_ATOL = 1e-3
 # Fast, deterministic, symbolic-PSPL: the instrument runs on these every time.
 UNMARKED = {"ob08092", "ob140939"}
 
+# Fixture configs converted to the post-split spellings live here; a fixture
+# whose "config" points into this tree is buildable at stage 1.  The shipped
+# examples convert at stage 3, at which point the remaining fixtures get the
+# same treatment and their xfails below flip loudly.
+CONVERTED_PREFIX = os.path.join("tests", "fixtures", "mulens", "configs")
+
 
 def _fixture_files():
     return sorted(glob.glob(os.path.join(FIXTURES, "*.json")))
@@ -115,8 +137,38 @@ def _build(fixture):
         os.chdir(cwd)
 
 
-def _case_ids():
-    return [os.path.splitext(os.path.basename(p))[0] for p in _fixture_files()]
+def _replay_cases():
+    """One param per fixture; unconverted ones are strict-xfail (stage 3).
+
+    The eleven fixtures still recorded against the shipped example configs
+    cannot build at stage 1 (the examples carry pre-split spellings until
+    stage 3).  strict=True makes an unexpected PASS an error, so converting
+    the examples without re-pointing and label-translating these fixtures
+    is loud rather than silently green.
+    """
+    cases = []
+    for path in _fixture_files():
+        name = os.path.splitext(os.path.basename(path))[0]
+        converted = _load(path)["config"].startswith(CONVERTED_PREFIX)
+        marks = (
+            []
+            if converted
+            else [
+                pytest.mark.xfail(
+                    strict=True,
+                    reason=(
+                        "stage 3 (8.6.17): this fixture's config is the "
+                        "shipped example, which still carries the "
+                        "pre-split spellings; when the examples are "
+                        "converted, re-point the fixture at the converted "
+                        "config (and translate its labels) so this case "
+                        "runs for real"
+                    ),
+                )
+            ]
+        )
+        cases.append(pytest.param(name, id=name, marks=marks))
+    return cases
 
 
 def test_the_fixture_set_is_not_empty():
@@ -206,7 +258,7 @@ def test_the_term_names_match_the_logp_terms(name):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("name", _case_ids())
+@pytest.mark.parametrize("name", _replay_cases())
 def test_the_model_still_matches_its_recorded_decomposition(name):
     """
     Given a stage-0 fixture recorded before the split,

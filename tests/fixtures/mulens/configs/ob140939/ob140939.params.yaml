@@ -1,0 +1,68 @@
+source.0.t_0:
+  initval:
+  - 2456836.22
+  - 2456836.2
+  - 2456836.06
+  - 2456835.95
+source.0.u_0:
+  initval:
+  - 0.922
+  - -0.913
+  - 0.897
+  - -0.843
+mulensevent.t_E:
+  initval:
+  - 22.87
+  - 22.99
+  - 22.91
+  - 23.87
+mulensevent.pi_E_N:
+  initval:
+  - -0.248
+  - 0.22
+  - -1.37
+  - 1.325
+mulensevent.pi_E_E:
+  initval:
+  - 0.234
+  - 0.238
+  - -0.06
+  - 0.024
+mulensinstrument.OGLE4.q_source:
+  initval:
+  - 1.199
+  - 1.175
+  - 1.135
+  - 1.007
+mulensinstrument.Spitzer.q_source:
+  initval:
+  - 1.019
+  - 1.036
+  - 0.776
+  - 0.764
+mulensinstrument.OGLE4.err_scale:
+  initval: 1.65
+mulensinstrument.Spitzer.err_scale:
+  initval: 17.0
+star.Lens.ra:
+  initval: 266.801041667
+  sigma: 0
+star.Lens.dec:
+  initval: -21.3829722222
+  sigma: 0
+star.Source.ra:
+  initval: 266.801041667
+  sigma: 0
+star.Source.dec:
+  initval: -21.3829722222
+  sigma: 0
+star.Source.pm_ra:
+  initval: -5.31
+  mu: -5.31
+  sigma: 0.45
+star.Source.pm_dec:
+  initval: -0.64
+  mu: -0.64
+  sigma: 0.45
+star.Source.radius:
+  initval: 0.519

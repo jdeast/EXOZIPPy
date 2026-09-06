@@ -36,6 +36,15 @@ The first version of these fixtures conflated the two -- it compared logp at
 each machine's OWN solved start -- and macOS differed by 3.2e-05 nats
 (7.1e-10 relative) where Linux differed by 7.3e-12 (machine epsilon).
 Widening the tolerance would have hidden precisely the interesting part.
+
+STAGE-1 STATE (8.6.17): the shipped example configs carry the pre-split
+spellings until stage 3, so most examples cannot build.  An example whose
+name has a CONVERTED config committed under tests/fixtures/mulens/configs/
+is recorded/checked from that copy instead (currently ob08092 and ob140939,
+whose fixtures were also label-translated to the post-split naming with
+values untouched).  Use --only to limit a run to those, e.g.
+
+    python scripts/make_mulens_fixtures.py --check --only ob08092 --only ob140939
 """
 
 import argparse
@@ -65,6 +74,9 @@ from exozippy.system import System  # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 OUT = os.path.join(ROOT, "tests", "fixtures", "mulens")
+# Stage-1 converted config copies (see the module docstring); an example
+# with a copy here is recorded from it instead of from examples/.
+CONVERTED = os.path.join(OUT, "configs")
 
 
 def microlensing_examples():
@@ -103,6 +115,19 @@ def microlensing_examples():
                 f"{os.path.relpath(par, ROOT)}"
             )
             continue
+
+        # Stage-1 substitution: a converted copy, when committed, is the
+        # buildable form of the same example (see the module docstring).
+        name = os.path.splitext(os.path.basename(cfg))[0]
+        conv = os.path.join(CONVERTED, name, os.path.basename(cfg))
+        if os.path.exists(conv):
+            with open(conv) as fh:
+                conv_doc = yaml.safe_load(fh) or {}
+            conv_par = os.path.join(
+                os.path.dirname(conv),
+                str(conv_doc.get("parameter_file", name + ".params.yaml")),
+            )
+            cfg, par = conv, conv_par
         found.append((cfg, par))
     return found
 
@@ -147,12 +172,25 @@ def record(cfg_path, par_path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true")
+    ap.add_argument(
+        "--only",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=(
+            "limit to the named example(s); repeatable.  At stage 1 the "
+            "unconverted examples cannot build, so --check without --only "
+            "reports them as failures (expected until stage 3)."
+        ),
+    )
     args = ap.parse_args()
 
     os.makedirs(OUT, exist_ok=True)
     failures = []
     for cfg_path, par_path in microlensing_examples():
         name = os.path.splitext(os.path.basename(cfg_path))[0]
+        if args.only and name not in args.only:
+            continue
         dest = os.path.join(OUT, name + ".json")
         try:
             data = record(cfg_path, par_path)
