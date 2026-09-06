@@ -397,10 +397,19 @@ class MulensEvent(Component):
         share one index: the LENSING MASS (star.mass[lens_map] -> theta_E)
         and the KINEMATIC HOST (star.distance/pm_ra/pm_dec[lens_map] ->
         pi_rel and mu_rel).  They coincide only because the primary lens
-        body is always a star, which _validate_bodies enforces; see the
-        pre-split Lens.build_maps note for the history.  source_map is the
-        PRIMARY source's star: under R1 the source SYSTEM's barycentric
-        kinematics are represented by body 0 (design 11.3).
+        body is always a star, which _validate_bodies enforces.  The
+        conflation is exactly what let the silent planet-primary bug
+        through: a planet has a mass but no distance or proper motion of
+        its own, so a planet primary resolved role 1 to the planet (had the
+        deps been typed) and role 2 to whatever star sat at the same index.
+        Splitting the two would mean inventing a "kinematic host star" for
+        a body that by definition has no host -- which is why
+        planet-as-lens was abandoned in favor of declaring a low-mass lens
+        as a star.  Under the guards the roles can never diverge, so this
+        stays one index; the note is here so the next reader does not have
+        to rediscover why.  source_map is the PRIMARY source's star: under
+        R1 the source SYSTEM's barycentric kinematics are represented by
+        body 0 (design 11.3).
         """
         _, p_ndx = self._primary_lens()
         _, s_ndx = self._primary_source()
@@ -417,8 +426,25 @@ class MulensEvent(Component):
 
     def _load_mmexofast_seeds(self):
         """Read an optional MMEXOFAST solutions file and push each fit as a
-        per-seed hint set for multi-seed sampling (P4).  See the pre-split
-        Lens._load_mmexofast_seeds; only the config home moved."""
+        per-seed hint set for multi-seed sampling (P4).
+
+        MMEXOFAST emits multiple lightly-optimized solutions spanning the
+        standard microlensing degeneracies.  Each fit's observable-space
+        values (t_0, u_0, t_E, s, q, alpha, rho) are seeded into the
+        relaxation engine, which back-solves the physical parameters
+        (distances/masses/PMs) exactly as a user typing them into
+        params.yaml K times would.  Enabled by a `mmexofast: <file>` key on
+        the mulensevent config block (path relative to the run cwd, same as
+        the light-curve `file:` key).
+
+        The translation itself (seed sets, scale hints, jd_offset handling,
+        alpha/log_s conventions, and the post-split target paths --
+        source.0.*, mulensevent.0.t_E, lens.1.*) lives in
+        mmexofast_support.push_seed_hints, shared with MulensInstrument's
+        stage-1a auto-initialization (which also applies the JSON's
+        bad-data mask and error factors -- masks must exist before the
+        photometry is read, which is why the instrument owns that half).
+        """
         mmx_file = self.config[0].get("mmexofast") if self.config else None
         # Only an explicit file path is handled here. "auto" / absent-key
         # auto-initialization is owned by MulensInstrument (stage 1), which
@@ -426,6 +452,10 @@ class MulensEvent(Component):
         # opts out entirely.
         if not isinstance(mmx_file, str) or mmx_file == "auto":
             return
+        # None means the file is ABSENT (warn and run unseeded, as before);
+        # a file that exists but cannot be parsed raises out of load_json.
+        # exozippy did not write a user-named file and so cannot regenerate
+        # it -- only run_or_load's own cache has that recovery.
         data = mmexofast_support.load_json(mmx_file)
         if data is None:
             logger.warning(f"No seeds loaded from '{mmx_file}'.")
@@ -574,6 +604,15 @@ class MulensEvent(Component):
                 self._mass_initval(c_type, c_ndx)
                 for c_type, c_ndx in self.lens_bodies
             ]
+            # Seeded at PRECEDENCE_DERIVED_MIXED: overrides defaults, yields
+            # to explicit user values.  Loud, once, at config time, because
+            # the alternative -- a start that quietly comes from nowhere --
+            # is what review 1.6.5 traced (and what 2.6.6 asks be said out
+            # loud until the relations are generalized).  A WARNING and not
+            # an INFO: for a 2-body lens the engine derives all of this from
+            # ANY of the masses, q or the trajectory, so a user who has
+            # never had to supply body masses gets no other signal that a
+            # third body changes the rules.
             user_q = [
                 f"lens.{j + 1}.q"
                 for j in range(1, self.n_companions)
@@ -723,8 +762,33 @@ class MulensEvent(Component):
         """Line of sight for the galactic-model proper-motion seeds.
 
         Returns ``(ra_rad, dec_rad)``, or None when the seeding does not
-        apply.  Ported from the pre-split Lens (its docstring carries the
-        measured chi2 gates; tests/test_seed_quality.py pins the numbers).
+        apply.
+
+        The prior is only allowed to FILL A GAP, never to contradict.  What
+        is open here is the physical side: no example pins the lens mass or
+        distance, because a published light-curve solution (t_0, u_0, t_E,
+        s, q, alpha, rho, sometimes pi_E) does not close the system -- t_E
+        and pi_E without theta_E leave mass, distance and proper motion
+        free.  That gap is what the engine used to fill by inventing a
+        direction (issue #93).
+
+        But where a config DOES imply the proper motion, a prior mean
+        dropped on top fights it.  Measured at the seed (raw = 0), chi2/N
+        ungated vs gated:
+
+            ob140939 (pi_E_N/pi_E_E measured, Yee+2015)  3.04 -> 179.1 | 3.04
+            ob161003 (two sources, t_E + rho each)       1.72 ->   3.9 | 1.72
+            DC2018_128 (t_0/u_0/t_E/s/q/alpha/rho)       1.42 ->   1.21 (kept)
+            ob08092 (t_0/u_0/t_E only, PSPL)             1.50 ->   1.42 (kept)
+
+        So the gates below are what keeps this from making published
+        solutions worse.  Filling only the *direction* and leaving the
+        magnitude to the data would serve every case at once, but the
+        direction is not a symbol, so provenance cannot express it
+        per-symbol; that needs a basis change (mu_rel_mag, mu_rel_pa) which
+        is a sampling-geometry question and does not belong here.
+        tests/test_seed_quality.py pins all four numbers.
+
         The multi-source gate is KEPT at stage 1 -- its retirement is a
         deliberate stage-4 change paired with re-pinning test_seed_quality
         (design section 7).
@@ -792,8 +856,31 @@ class MulensEvent(Component):
 
     def _seed_expected_pm(self, line_of_sight, star_idx, population, dist_pc):
         """Seed one star's pm_ra/pm_dec at the galactic model's prior mean.
-        Ported verbatim from the pre-split Lens._seed_expected_pm; see that
-        history (issue #93, Condition B, PRECEDENCE_DERIVED_DATA tie)."""
+
+        PRECEDENCE_DERIVED_DATA: this is derived from the galactic model
+        the same way an RV offset is derived from the data, so it belongs
+        in that tier and must yield to anything in params.yaml.
+
+        It ties with the MMEXOFAST seeds (also PRECEDENCE_DERIVED_DATA),
+        which is the point.  Both proper-motion components are now pinned,
+        so ``mu_rel`` has a magnitude AND a direction, and the engine no
+        longer has to invert
+        ``mu_rel_mag**2 = mu_ra_rel**2 + mu_dec_rel**2`` -- one equation in
+        two unknowns -- by choosing a point on a circle (issue #93).  Where
+        that disagrees with the seeded ``t_E``, Condition B rewrites the
+        lowest-rank symbol in ``t_E = theta_E / |mu_rel_geo|``, which is
+        ``theta_E`` via the lens mass (defaults.yaml, ``PRECEDENCE_DEFAULT``)
+        and distance (``PRECEDENCE_MULENS_LENS_DISTANCE``).  So ``t_E``
+        keeps its measured value, the proper motion keeps the prior's, and
+        the lens mass absorbs the difference -- which is the standard
+        microlensing chain (a measured t_E plus an assumed mu_rel implies
+        theta_E, hence a mass) and is the quantity a light curve genuinely
+        cannot pin down.
+
+        `dist_pc` must match the distance hint seeded for the same star:
+        the mean velocity is position-dependent, so a mismatch would seed a
+        proper motion for a place the star is not.
+        """
         if line_of_sight is None:
             return
         ra_rad, dec_rad = line_of_sight
@@ -803,7 +890,10 @@ class MulensEvent(Component):
             )
         except Exception as exc:
             # WARNING, not debug: this silently disabled the whole feature
-            # once already (degrees were passed where radians were wanted).
+            # once already (degrees were passed where radians were wanted,
+            # astropy raised, and the seeds just quietly never happened).
+            # A failure here is not fatal -- the old arbitrary start still
+            # works -- but it must be visible.
             logger.warning(
                 f"[{self.prefix}] could not seed star.{star_idx}'s proper "
                 f"motion from the galactic model ({population} at "
@@ -837,8 +927,17 @@ class MulensEvent(Component):
 
     def _earth_vperp_en(self, system):
         """Earth's velocity at t0_par projected on the sky, (East, North),
-        in AU/yr.  The Gould (2004) mu_helio -> mu_geo conversion constant;
-        ported verbatim from the pre-split Lens._earth_vperp_en."""
+        in AU/yr (numerically 1/yr once divided by the 1-AU baseline --
+        multiplying by pi_rel in mas gives mas/yr).
+
+        This is the Gould (2004) mu_helio -> mu_geo conversion constant:
+        mu_geo = mu_helio - pi_rel * v_perp / AU.  The velocity and the
+        (ra, dec) used for the projection come from MulensInstrument -- the
+        SAME anchor epoch and sky position its Skowron deltas use, so the
+        conversion and the trajectory share one frame by construction.
+        Without microlensing data there is no t0_par to anchor the frame;
+        the term is dropped (mu_geo == mu_helio) with a warning.
+        """
         inst = getattr(system, "mulensinstrument", None)
         vel = getattr(inst, "_earth_vel_ref", None)
         radec = getattr(inst, "_source_radec_rad", None)

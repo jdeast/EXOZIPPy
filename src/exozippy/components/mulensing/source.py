@@ -214,14 +214,46 @@ class Source(Component):
 
     def _validate_pspl_start(self):
         """Stage 7: check the START values of the SAMPLED trajectory
-        parameters, loudly and once.  Ported from the pre-split
-        Lens._validate_pspl_start -- t_0 and u_0 are the two trajectory
-        parameters that are sampled here, so their ``initval`` IS the start
-        (raw = 0 maps to it through the logit transform); the derived
-        event-level chain (t_E, theta_E, pi_E) is deliberately NOT checked
-        (a derived parameter's initval is engine bookkeeping, not the value
-        the model starts at -- the ob161003 theta_E lesson in that
-        method's history)."""
+        parameters, loudly and once.  The sibling of
+        :meth:`Lens._validate_q_start`, and it makes the same split for the
+        same reason: NaN raises (the fit cannot start), out of range warns
+        (the fit begins at the floored value rather than at the seeded one
+        -- the "the number I typed is not the number being fitted" case
+        that goes unnoticed for months).  This is the half of the old scrub
+        worth keeping, moved to where a raise is free: a check on the
+        inputs at build time, not a mid-graph assert that would kill a run
+        over a proposal the sampler already rejects on its own.
+
+        **Only t_0 and u_0 are checked, and that is deliberate.**  They are
+        the two trajectory parameters that are sampled here, so their
+        ``initval`` IS the start: raw = 0 maps to it through the logit
+        transform.  The other four quantities
+        ``Lens._get_safe_mm_params`` handles -- t_E, theta_E, pi_E_N and
+        pi_E_E, all on mulensevent post-split -- are DERIVED, and for a
+        derived parameter ``initval`` is the relaxation engine's own
+        bookkeeping, not the value the model starts at; the graph
+        recomputes it from the sampled coordinates.  The two genuinely
+        differ, so checking them here would be a false positive on working
+        configs.  Measured on `examples/ob161003` (2S2L, two source slots,
+        pre-split shapes): the engine left ``theta_E.initval =
+        [nan, 0.8393]`` and ``pi_rel.initval = [nan, 0.125]`` -- it only
+        ever needed to solve the second slot, both sources sharing one
+        lens -- while the model started at a perfectly good
+        ``theta_E = [0.8393, 0.8393]`` and a finite logp.  A NaN there says
+        nothing about the fit.  (That the engine writes a NaN into a
+        resolved value at all is a separate, pre-existing oddity; it is not
+        this guard's business to report it.)
+
+        The one range check is on ``|u_0| < U_0_FLOOR``: the fit will not
+        start where the seed says, it will start at the floored value.
+        ``u_0: 0`` -- a plausible seed for a high-magnification event -- is
+        included, and it used to be the one case the floor MISSED
+        (``sign(0) = 0`` made the old ``sign(u_0) * maximum(|u_0|,
+        U_0_FLOOR)`` return 0 and left the peak magnification singular).
+        ``physics.apply_u_0_floor`` now sends it to ``+U_0_FLOOR``; the
+        warning names the value it will actually start at.  t_0 gets no
+        range check -- it carries two finite hard bounds of its own.
+        """
         sampled = {
             "t_0": self._start_values("t_0"),
             "u_0": self._start_values("u_0"),
