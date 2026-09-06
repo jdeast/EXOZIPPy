@@ -332,10 +332,17 @@ def calc_pi_E_E(pi_rel, theta_E, mu_ra_rel, mu_rel_mag):
 
 @register_physics
 def calc_q(*masses):
-    # (companion_1, ..., companion_k, primary) -> per-companion mass ratios
-    # q_j = M_companion_j / M_primary.  Each dep arrives as a length-1 slice
-    # (scalar bracket maps in Lens.build_maps); k companions concatenate to a
-    # shape-(k,) vector.
+    # (companion_masses, primary_mass) -> per-companion mass ratios
+    # q_j = M_companion_j / M_primary, ELEMENTWISE.  Its only caller is the
+    # lens.q manifest entry (defaults.yaml / Lens.register_parameters),
+    # whose deps are exactly TWO aligned vectors over the active (companion)
+    # elements: `<c_type>.mass[companion_body_map]` -- ALL companions of the
+    # single companion type share one full-length body map, sliced to the
+    # active elements -- and `star.mass[primary_lens_map]`, the primary's
+    # mass broadcast to the same length.  Mixed companion types are refused
+    # in Lens.register_parameters (one typed dep per type would be needed);
+    # the varargs/concatenate branch below is kept for that promised
+    # per-type-dep future (design 3.2) and is currently unreachable.
     companions, primary = masses[:-1], masses[-1]
     if len(companions) == 1:
         return companions[0] / primary
@@ -566,7 +573,7 @@ _MM_NAN_ADVICE = (
     "star.<...>.distance values.  Check the initval (and any 'sigma: 0' "
     "link expression) on star.<lens>.logmass, star.<lens>.distance, "
     "star.<source>.distance and the star.<...>.pm_ra/pm_dec pair, plus "
-    "lens.<...>.t_0 and lens.<...>.u_0, which are sampled directly."
+    "source.<...>.t_0 and source.<...>.u_0, which are sampled directly."
 )
 
 

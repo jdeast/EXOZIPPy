@@ -538,8 +538,14 @@ class Lens(Component):
                     f"lens: companions of mixed component types "
                     f"({sorted(c_types)}) are not supported by the "
                     f"per-body lens component (q's mass dependency is one "
-                    f"typed vector).  Declare the star-type companion as a "
-                    f"planet-mass star block, or file an issue."
+                    f"typed vector).  Declare every companion with the "
+                    f"SAME component type -- e.g. model the planet as a "
+                    f"low-mass 'star' block (star.<name>.logmass reaches "
+                    f"-9 dex) so all companions are star-type -- or file "
+                    f"an issue.  NOTE: design 3.2 promised typed "
+                    f"per-companion deps would survive the split; this "
+                    f"refusal is a design contradiction awaiting a ruling "
+                    f"(stage-1b review, finding 1)."
                 )
             (c_type,) = c_types
             q_spec = {
