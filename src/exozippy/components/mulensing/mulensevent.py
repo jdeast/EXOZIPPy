@@ -31,7 +31,7 @@ from exozippy.skyframe import sky_basis
 
 from ..galacticmodel.physics import expected_proper_motion
 from . import mmexofast_support
-from .bodies import body_entries
+from .bodies import body_entries, validate_event_config
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,12 @@ class MulensEvent(Component):
     context_dep_names = frozenset({"earth_vperp_e", "earth_vperp_n"})
 
     def __init__(self, config, config_manager):
+        # Refuse unknown/misplaced keys BEFORE anything reads the block: a
+        # per-source flag (fitu0te, star_constrains_rho) or a per-companion
+        # key (orbital_motion, orbit) left here would otherwise be silently
+        # ignored while the user believes it is in effect (R3: hard breaks
+        # fail loudly and instructively).
+        validate_event_config(config)
         super().__init__(config, config_manager)
         self.label = "Microlensing Event"
 

@@ -14,7 +14,101 @@ star or a planet, and the component does not grow a key per type.  The
 helpers here resolve that spelling against the raw system config, so every
 consumer -- the three component constructors and the symbol-map builder --
 shares one parser and one error message.
+
+This module also owns the KNOWN-KEY sets for the three blocks and refuses
+an unknown or misplaced key, naming the block it belongs on now.  Ruling R3
+(no backward compatibility) forbids ACCEPTING an old spelling, not
+diagnosing it: the migration mistake this catches is keeping the old
+event-level options (finite_source, t0_par, fit* flags...) on a `lens:`
+entry that now carries `body:` -- pre-fix that built silently with
+finite_source=False and every flag ignored.  The sets are pinned against
+each component's ``config_schema()`` by
+tests/test_mulens_body_config.py, so a new schema key cannot silently
+diverge from the gate here.
 """
+
+# ---------------------------------------------------------------------------
+# The known-key vocabulary, one frozenset per block.  `name` is universal
+# (Component.__init__ reads it, and derive_body_names writes it).
+# ---------------------------------------------------------------------------
+
+EVENT_KEYS = frozenset(
+    {
+        "name",
+        "finite_source",
+        "t0_par",
+        "backend",
+        "mag_method",
+        "use_op",
+        "mmexofast",
+        "mmexofast_options",
+        "fitmurel",
+        "fitpirel",
+        "fitthetae",
+        "source_orbital_motion",
+        "source_orbit",
+    }
+)
+LENS_ENTRY_KEYS = frozenset({"body", "name", "orbital_motion", "orbit"})
+SOURCE_ENTRY_KEYS = frozenset(
+    {"body", "name", "fitu0te", "star_constrains_rho"}
+)
+
+# Where a recognizably misplaced key lives now.  Keys in none of these maps
+# get the generic refusal (typo, or a parameter that belongs in the params
+# file).
+_KEY_HOME = {}
+for _k in EVENT_KEYS - {"name"}:
+    _KEY_HOME[_k] = "the 'mulensevent:' block"
+for _k in ("fitu0te", "star_constrains_rho"):
+    _KEY_HOME[_k] = "the 'source:' entry of the source body it applies to"
+for _k in ("orbital_motion", "orbit"):
+    _KEY_HOME[_k] = (
+        "the 'lens:' entry of the companion whose geometry it moves"
+    )
+for _k in ("lens_ndx", "source_ndx", "lenses", "sources"):
+    _KEY_HOME[_k] = (
+        "nowhere -- it is a pre-v0.1.0 spelling: the lens block was split "
+        "into `mulensevent:` (event options), `lens:` (one entry per lens "
+        "body) and `source:` (one entry per source body)"
+    )
+
+
+def reject_unknown_keys(entry, allowed, where):
+    """Refuse any key outside ``allowed``, saying where each one lives now.
+
+    A hard break must fail loudly and instructively (R3): a misplaced key
+    silently ignored is a config the user believes is in effect and is not
+    -- finite_source left on a lens entry built with finite_source=False and
+    no diagnostic until this gate existed.
+    """
+    unknown = sorted(set(entry or {}) - set(allowed))
+    if not unknown:
+        return
+    lines = []
+    for k in unknown:
+        home = _KEY_HOME.get(k)
+        if home is not None:
+            lines.append(f"  - '{k}' belongs on {home}")
+        else:
+            lines.append(
+                f"  - '{k}' is not a config key of this block (a parameter "
+                f"start value or prior belongs in the params file, e.g. "
+                f"'{where.split('.')[0]}.<instance>.{k}:')"
+            )
+    raise ValueError(
+        f"{where}: unknown config key(s) {unknown}.\n"
+        + "\n".join(lines)
+        + f"\n  Keys this block accepts: {sorted(allowed)}."
+    )
+
+
+def validate_event_config(block):
+    """Enforce the known-key set on every ``mulensevent:`` entry."""
+    for i, entry in enumerate(block or []):
+        if isinstance(entry, dict):
+            reject_unknown_keys(entry, EVENT_KEYS, f"mulensevent.{i}")
+    return block
 
 
 def resolve_body_ref(ref, system_config, where):
@@ -61,12 +155,17 @@ def resolve_body_ref(ref, system_config, where):
 def body_entries(block, comp_key, system_config):
     """``[(comp_type, index), ...]`` for one component's config block.
 
-    Every entry must carry exactly the ``body:`` key.  An entry without one
-    is diagnosed by name: the pre-0.1.0 spellings (``lens_ndx``,
-    ``source_ndx``, ``lenses:``, ``sources:`` and event-level options on the
-    lens block) are a hard break (ruling R3), and the message says what the
-    new shape is rather than leaving a KeyError.
+    Every entry must carry the ``body:`` key and NOTHING outside the
+    block's known-key set.  An entry without ``body:`` is diagnosed by
+    name: the pre-0.1.0 spellings (``lens_ndx``, ``source_ndx``,
+    ``lenses:``, ``sources:`` and event-level options on the lens block)
+    are a hard break (ruling R3), and the message says what the new shape
+    is rather than leaving a KeyError.  An entry WITH ``body:`` but
+    carrying extra keys is the other half of the same migration mistake
+    (keep the old lens block, add ``body:``) and is refused just as
+    loudly -- see ``reject_unknown_keys``.
     """
+    allowed = LENS_ENTRY_KEYS if comp_key == "lens" else SOURCE_ENTRY_KEYS
     out = []
     for i, entry in enumerate(block or []):
         where = f"{comp_key}.{i}"
@@ -93,6 +192,7 @@ def body_entries(block, comp_key, system_config):
                 f"source_orbital_motion) live on the `mulensevent:` block."
                 f"{hint}"
             )
+        reject_unknown_keys(entry, allowed, where)
         out.append(resolve_body_ref(entry["body"], system_config, where))
     return out
 
