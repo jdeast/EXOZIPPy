@@ -32,12 +32,26 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 FIXTURES = os.path.join(HERE, "fixtures", "mulens")
 
-# ob170114 goes through VBM's BinaryMag2, which carries ~1e-14 call-history
-# jitter across compiledirs -- measured, its start logp differs in the last
-# ULP between two worktrees of the same commit.  It can never carry byte
-# acceptance; it is compared with a relative tolerance instead.
-JITTERY = {"ob170114"}
-JITTER_RTOL = 1e-9
+# NO FIXTURE CARRIES BYTE ACCEPTANCE, and the first version of this file was
+# wrong to let most of them try.  These are float64 sums over thousands of
+# epochs; a different CPU, BLAS or PyTensor compiledir reorders them and the
+# last bits differ.  Measured on CI (ubuntu and macos, 3.12/3.13/3.14, all
+# shard 3) against fixtures recorded on the dev box:
+#
+#     RV:mulensinstrument.model   7.3e-12 absolute, 1.6e-16 relative
+#     RV:mulensinstrument.model   2.0e-10 absolute, 7.6e-15 relative
+#     POT:low_bound.lens.mu_rel_mag           1.1e-13 relative (a 1e-220 term)
+#
+# The `--check` determinism pass could never have caught it: it reruns on ONE
+# machine, and same-machine reproducibility is a strictly weaker claim than
+# cross-machine.  Treating one as evidence for the other is the mistake.
+#
+# Tolerances sit four orders above the worst observed noise and many orders
+# below anything physical -- the smallest thing this gate exists to catch is a
+# dropped or duplicated term, and the event-rate copy that motivated the whole
+# instrument was 2.8 nats.
+TERM_RTOL = 1e-10
+TERM_ATOL = 1e-6
 
 # Fast, deterministic, symbolic-PSPL: the instrument runs on these every time.
 UNMARKED = {"ob08092", "ob140939"}
@@ -149,6 +163,9 @@ def test_the_model_still_matches_its_recorded_decomposition(name):
     every moved term explained; a term that vanished alongside one that
     appeared with the same value is a rename, which the diff reports
     separately so it is not mistaken for a match.
+
+    Compared with a tolerance, never to the byte: see TERM_RTOL above for the
+    measured cross-machine float noise that forces it.
     """
     # ARRANGE
     fixture = _load(os.path.join(FIXTURES, name + ".json"))
@@ -158,10 +175,8 @@ def test_the_model_still_matches_its_recorded_decomposition(name):
     parts, _, reconciles, _ = decompose(system, model)
     assert reconciles, "the instrument stopped reconciling; fix it first"
 
-    jittery = any(j in fixture["config"] for j in JITTERY)
-    tol = JITTER_RTOL if jittery else 0.0
     moved, appeared, vanished = compare(
-        fixture["terms"], parts, atol=0.0, rtol=tol
+        fixture["terms"], parts, atol=TERM_ATOL, rtol=TERM_RTOL
     )
 
     # ASSERT

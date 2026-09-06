@@ -12,11 +12,18 @@ reconciled per-term logp decomposition at the start point.  During the
 refactor each stage is accepted by explaining every delta term by term
 against them.
 
-DETERMINISM is checked by --check, which regenerates and compares.  One
-example cannot carry byte acceptance at all: examples/ob170114 goes through
-VBM's BinaryMag2, which has ~1e-14 call-history jitter across compiledirs
-(measured: its start logp differs in the last ULP between two worktrees), so
-it is recorded with a relative tolerance and compared that way.
+--check regenerates and compares WITH A TOLERANCE.  Nothing here is
+byte-comparable and the first version was wrong to try: these are float64
+sums over thousands of epochs, so a different CPU, BLAS or PyTensor
+compiledir reorders them and the last bits differ.  Measured against CI:
+7.3e-12 and 2.0e-10 absolute on ~1e4 terms, i.e. 1.6e-16 and 7.6e-15
+relative.
+
+Note what --check can and cannot establish.  It reruns on ONE machine, so it
+proves the pipeline is deterministic HERE; it says nothing about another
+CPU.  Same-machine reproducibility is a strictly weaker claim than
+cross-machine, and treating the first as evidence for the second is what put
+exact equality in these fixtures to begin with.
 """
 
 import argparse
@@ -34,9 +41,10 @@ from mulens_acceptance import decompose  # noqa: E402
 
 from exozippy.system import System  # noqa: E402
 
-# ob170114 alone cannot be compared to the byte -- see the module docstring.
-JITTERY = {"ob170114"}
-JITTER_RTOL = 1e-9
+# NOTHING is compared to the byte -- see the module docstring.  These match
+# tests/test_mulens_acceptance.py; keep them in step.
+TERM_RTOL = 1e-10
+TERM_ATOL = 1e-6
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
@@ -141,16 +149,11 @@ def main():
                 continue
             with open(dest) as fh:
                 old = json.load(fh)
-            jittery = os.path.basename(os.path.dirname(cfg_path)) in JITTERY
             same = old["terms"].keys() == data["terms"].keys()
             if same:
                 for k, v in data["terms"].items():
                     ref = old["terms"][k]
-                    ok = (
-                        abs(v - ref) <= JITTER_RTOL * max(1.0, abs(ref))
-                        if jittery
-                        else v == ref
-                    )
+                    ok = abs(v - ref) <= TERM_ATOL + TERM_RTOL * abs(ref)
                     if not ok:
                         same = False
                         print(f"{name:32s} term {k} {ref!r} -> {v!r}")
