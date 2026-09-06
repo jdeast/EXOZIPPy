@@ -31,10 +31,10 @@ star:
       # pi_rel.  Log-linear map, constant Jacobian, no potential needed.
       from_mulens_thetae:
         func_name: "calc_logmass_from_thetae"
-        deps: [ "lens.theta_E[murel_traj_map]", "lens.pi_rel[murel_traj_map]" ]
+        deps: [ "mulensevent.theta_E[murel_traj_map]", "mulensevent.pi_rel[murel_traj_map]" ]
       from_mulens_thetae_binary:
         func_name: "calc_logmass_from_thetae_binary"
-        deps: [ "lens.theta_E[murel_traj_map]", "lens.pi_rel[murel_traj_map]", "planet.log_q[murel_companion_map]" ]
+        deps: [ "mulensevent.theta_E[murel_traj_map]", "mulensevent.pi_rel[murel_traj_map]", "planet.log_q[murel_companion_map]" ]
   mass:
     unit: "solMass"
     internal_unit: "solMass"
@@ -108,7 +108,7 @@ star:
       # Jacobian potential is Lens.build_likelihood's.
       from_mulens_pirel:
         func_name: "calc_dl_from_pirel"
-        deps: [ "star.distance[murel_source_map]", "lens.pi_rel[murel_traj_map]" ]
+        deps: [ "star.distance[murel_source_map]", "mulensevent.pi_rel[murel_traj_map]" ]
   # --- Sampled Parameters ---
   radius:
     lower: 0.1
@@ -274,7 +274,7 @@ star:
       # be referenced; the source star's pm stays sampled).
       from_mulens_murel:
         func_name: "calc_pm_from_murel"
-        deps: [ "star.pm_ra[murel_source_map]", "lens.mu_ra_rel[murel_traj_map]" ]
+        deps: [ "star.pm_ra[murel_source_map]", "mulensevent.mu_ra_rel[murel_traj_map]" ]
   pm_dec:
     initval: -3.0
     init_scale: 0.05
@@ -289,7 +289,7 @@ star:
       # fitmurel twin of pm_ra's block; see the note there.
       from_mulens_murel:
         func_name: "calc_pm_from_murel"
-        deps: [ "star.pm_dec[murel_source_map]", "lens.mu_dec_rel[murel_traj_map]" ]
+        deps: [ "star.pm_dec[murel_source_map]", "mulensevent.mu_dec_rel[murel_traj_map]" ]
   ra:
     initval: 180.0
     init_scale: 20e-6

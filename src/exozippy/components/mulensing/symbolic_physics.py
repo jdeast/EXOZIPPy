@@ -9,8 +9,9 @@ theta_E, mu_rel_mag = sp.symbols("theta_E mu_rel_mag")
 pi_rel = sp.symbols("pi_rel")
 # lens_mass_total drives theta_E/t_E/rho/pi_E (community convention: binary-lens
 # parameters are referenced to the TOTAL lens mass).  For single lenses it maps
-# directly to the primary star's mass; for binaries it maps to lens.0.mlens_total
-# and the mass-sum relation below ties it to the per-body masses.
+# directly to the primary star's mass; for binaries it maps to
+# mulensevent.0.mlens_total and the mass-sum relation below ties it to the
+# per-body masses.
 lens_mass_total, primary_lens_mass = sp.symbols(
     "lens_mass_total primary_lens_mass"
 )
@@ -32,85 +33,123 @@ alpha, xalpha, yalpha = sp.symbols("alpha xalpha yalpha")
 # mass/logmass does in the star component.
 s, log_s = sp.symbols("s log_s", real=True)
 
-comp_key = "lens"
+comp_key = "mulensevent"
 
 
-def get_symbol_map(lens_config_list, system_config):
+def _resolve_ref(ref, system_config, where):
+    """'star.Lens' / 'planet.1' -> (comp_type, index), resolved against the
+    raw config.  Local twin of bodies.resolve_body_ref: this module is
+    loaded standalone by ConfigManager's rglob walk (spec_from_file_location,
+    no package context), so it cannot use a relative import."""
+    parts = str(ref).split(".")
+    if len(parts) != 2:
+        raise ValueError(
+            f"{where}: invalid body reference '{ref}': expected "
+            f"'<component>.<name-or-index>'."
+        )
+    comp_type, inst = parts
+    entries = (system_config or {}).get(comp_type) or []
+    if inst.isdigit():
+        return comp_type, int(inst)
+    names = [e.get("name") if isinstance(e, dict) else None for e in entries]
+    if inst in names:
+        return comp_type, names.index(inst)
+    raise ValueError(
+        f"{where}: body reference '{ref}' names no '{comp_type}' instance."
+    )
+
+
+def get_symbol_map(event_cfg, system_config):
+    """Symbol maps for the mulensevent/lens/source split (8.6.17 stage 1).
+
+    ``event_cfg`` is the mulensevent block's (single) entry;
+    ``system_config`` is the WHOLE parsed config, which this builder needs
+    because the lens and source BODY LISTS live on their own components'
+    blocks -- the change get_symbol_map's two-argument contract (stage 1a)
+    exists for.
+
+    Returns a LIST of symbol maps, one per SOURCE INSTANCE: each source has
+    its own trajectory offsets (t_0, u_0, rho and their coordinates) at
+    source.<j>.<param>, while the EVENT CHAIN (t_E, theta_E, pi_rel, pi_E,
+    mu_rel) maps to mulensevent.0.<param> IDENTICALLY in every per-source
+    map -- so the shared relations dedup to ONE instance (ConfigManager
+    collapses identical relation instances), which is ruling R2's collapse
+    happening in the engine for free.  Companion symbols map to LENS
+    ELEMENT 1 (the first companion; element 0 is the masked primary), and
+    only when a companion exists -- the pre-split map registered the
+    alpha/xalpha/yalpha paths for point lenses too, phantom leaf symbols
+    for parameters no manifest declared.
     """
+    lens_block = (system_config or {}).get("lens") or []
+    source_block = (system_config or {}).get("source") or []
+    if not lens_block or not source_block:
+        # An event block without its body lists cannot map anything; the
+        # component constructors raise the user-facing error.
+        return []
 
-    ``system_config`` is the WHOLE parsed config, passed by
-    ``ConfigManager`` so a map builder can reference another component's
-    instances; unused here.
-    Dynamically maps SymPy symbols to YAML paths based on lens/source/companion
-    body assignments.  Supports both the legacy lens_ndx/source_ndx keys and the
-    NLNS lenses:/sources: list syntax.
+    lens_bodies = [
+        _resolve_ref(e.get("body"), system_config, f"lens.{i}")
+        for i, e in enumerate(lens_block)
+        if isinstance(e, dict) and e.get("body") is not None
+    ]
+    source_bodies = [
+        _resolve_ref(e.get("body"), system_config, f"source.{i}")
+        for i, e in enumerate(source_block)
+        if isinstance(e, dict) and e.get("body") is not None
+    ]
+    if not lens_bodies or not source_bodies:
+        return []
 
-    Returns a LIST of symbol maps, one per source body (NSNL): each source has
-    its own trajectory, so the per-source parameter chain (t_0, u_0, rho, t_E,
-    theta_E, pi_rel, pi_E_*, mu_*) is instantiated once per source at the
-    element-index paths lens.<j>.<param>, where j is the source's slot in the
-    ``sources:`` list (matching element j of the lens component's vector
-    parameters).  Lens-side and companion symbols are shared across all maps;
-    ConfigManager dedupes the resulting identical relation instances.
+    _, l_idx = lens_bodies[0]
+    is_binary_lens = len(lens_bodies) > 1
 
-    companion_mass is only added to the map for binary events (len(lenses) > 1).
-    When absent, any RELATION that mentions companion_mass or q_lens will be
-    skipped by the relaxation engine (all symbols must be in master_symbol_map).
-    """
     companion_mass_path = None
-    is_binary_lens = False
+    if len(lens_bodies) == 2:
+        c_comp, c_idx = lens_bodies[1]
+        companion_mass_path = f"{c_comp}.{c_idx}.mass"
+    # 3+ bodies: the binary mass-sum/q relations cannot represent the
+    # extra companions, so companion_mass stays unregistered (both
+    # relations go inert) and MulensEvent.register_parameters seeds
+    # mulensevent.mlens_total from the per-body mass initvals instead.
 
-    if "lenses" in lens_config_list:
-        lenses = lens_config_list["lenses"]
-        l_comp, l_idx = lenses[0].split(".")
-        l_idx = int(l_idx)
-
-        sources = lens_config_list.get("sources", ["star.1"])
-
-        if len(lenses) > 1:
-            is_binary_lens = True
-            if len(lenses) == 2:
-                c_comp, c_idx = lenses[1].split(".")
-                companion_mass_path = f"{c_comp}.{c_idx}.mass"
-            # 3+ bodies: the binary mass-sum/q relations below cannot
-            # represent the extra companions, so companion_mass stays
-            # unregistered (both relations go inert) and
-            # Lens.register_parameters seeds lens.0.mlens_total with a hint
-            # summing the per-body mass initvals instead.
-    else:
-        l_idx = int(lens_config_list.get("lens_ndx", 0))
-        sources = [f"star.{int(lens_config_list.get('source_ndx', 1))}"]
-
-    # theta_E/t_E/rho/pi_E are referenced to the TOTAL lens mass: the primary
-    # star's mass for a single lens, the derived lens.0.mlens_total for a
-    # binary (tied to the per-body masses by the mass-sum relation).
+    # theta_E/t_E/rho/pi_E are referenced to the TOTAL lens mass: the
+    # primary star's mass for a single lens, the derived
+    # mulensevent.0.mlens_total for a binary (tied to the per-body masses
+    # by the mass-sum relation).
     if is_binary_lens:
-        lens_mass_total_path = "lens.0.mlens_total"
+        lens_mass_total_path = "mulensevent.0.mlens_total"
     else:
         lens_mass_total_path = f"star.{l_idx}.mass"
 
-    maps = []
-    for j, src in enumerate(sources):
-        s_comp, s_idx = src.split(".")
-        s_idx = int(s_idx)
+    # In keplerian orbital-motion mode NONE of the geometry symbols
+    # (alpha's arctan2 pair, s <-> log_s) map: the geometry is derived
+    # from the referenced orbit and no sampled coordinate exists for the
+    # engine to seed (conventions.md C24).  The key lives on the COMPANION
+    # entries now.
+    keplerian = any(
+        isinstance(e, dict) and e.get("orbital_motion") == "keplerian"
+        for e in lens_block[1:]
+    )
 
+    maps = []
+    for j, (s_comp, s_idx) in enumerate(source_bodies):
+        src_cfg = source_block[j] if isinstance(source_block[j], dict) else {}
         result = {
-            # Per-source trajectory chain: element j of the lens vector params.
-            # Explicit full paths — only one lens event is allowed, so the
-            # element index unambiguously identifies the source slot.
-            "t_0": f"lens.{j}.t_0",
-            "u_0": f"lens.{j}.u_0",
-            "t_E": f"lens.{j}.t_E",
-            "rho": f"lens.{j}.rho",
-            "theta_E": f"lens.{j}.theta_E",
-            "pi_rel": f"lens.{j}.pi_rel",
-            "pi_E_N": f"lens.{j}.pi_E_N",
-            "pi_E_E": f"lens.{j}.pi_E_E",
-            "mu_rel_mag": f"lens.{j}.mu_rel_mag",
-            "mu_ra_rel": f"lens.{j}.mu_ra_rel",
-            "mu_dec_rel": f"lens.{j}.mu_dec_rel",
-            # Shared per-companion geometry (companion slot 0)
-            "q_lens": "lens.0.q",
+            # Per-source trajectory offsets: element j of the source
+            # component's vectors.
+            "t_0": f"source.{j}.t_0",
+            "u_0": f"source.{j}.u_0",
+            "rho": f"source.{j}.rho",
+            # The event chain, mapped ONCE (identical strings in every
+            # per-source map; relations sharing only these dedup).
+            "t_E": "mulensevent.0.t_E",
+            "theta_E": "mulensevent.0.theta_E",
+            "pi_rel": "mulensevent.0.pi_rel",
+            "pi_E_N": "mulensevent.0.pi_E_N",
+            "pi_E_E": "mulensevent.0.pi_E_E",
+            "mu_rel_mag": "mulensevent.0.mu_rel_mag",
+            "mu_ra_rel": "mulensevent.0.mu_ra_rel",
+            "mu_dec_rel": "mulensevent.0.mu_dec_rel",
             "lens_mass_total": lens_mass_total_path,
             "lens_distance": f"star.{l_idx}.distance",
             "lens_pm_ra": f"star.{l_idx}.pm_ra",
@@ -130,43 +169,39 @@ def get_symbol_map(lens_config_list, system_config):
             result["companion_mass"] = companion_mass_path
             result["primary_lens_mass"] = f"star.{l_idx}.mass"
 
-        # s/log_s exist only for binary (companion) lenses.  Map companion slot
-        # 0 (the single companion for a 2-body lens); like q_lens above, the
-        # s <-> log_s relation stays inert for PSPL where neither symbol is
-        # mapped.  For 3+ body lenses only slot 0 is covered by the relation;
-        # Lens.register_parameters seeds the remaining companions' log_s from
-        # user s hints (same fallback as the mlens_total/q seeding).
-        # In keplerian orbital-motion mode NONE of the geometry symbols
-        # (alpha's arctan2 pair, s <-> log_s) map: the geometry is derived
-        # from the referenced orbit and no sampled coordinate exists for
-        # the engine to seed (conventions.md C24).  Their relations go
-        # inert, exactly like s/log_s for PSPL.
-        keplerian = lens_config_list.get("orbital_motion") == "keplerian"
-        if not keplerian:
-            result["alpha"] = "lens.0.alpha"
-            result["xalpha"] = "lens.0.xalpha"
-            result["yalpha"] = "lens.0.yalpha"
+        # Companion geometry: LENS ELEMENT 1 (companion slot 0; element 0
+        # is the masked primary -- no primary-element path may ever appear
+        # here, or a seed would target a warn-dropped bookkeeping pin).
+        # For 3+ body lenses only element 1 is covered by the relations;
+        # MulensEvent.register_parameters seeds the remaining companions
+        # from user body-mass/s hints.
         if is_binary_lens and not keplerian:
-            result["s"] = "lens.0.s"
-            result["log_s"] = "lens.0.log_s"
+            result["q_lens"] = "lens.1.q"
+            result["alpha"] = "lens.1.alpha"
+            result["xalpha"] = "lens.1.xalpha"
+            result["yalpha"] = "lens.1.yalpha"
+            result["s"] = "lens.1.s"
+            result["log_s"] = "lens.1.log_s"
+        elif is_binary_lens:
+            result["q_lens"] = "lens.1.q"
 
-        # log_rho exists only when the lens frees rho from the stellar
-        # chain (`star_constrains_rho: false`); the relation stays
-        # inert otherwise, exactly like s/log_s for PSPL.
-        if not lens_config_list.get("star_constrains_rho", True):
-            result["log_rho"] = f"lens.{j}.log_rho"
+        # log_rho exists only where THIS source severs the stellar tie
+        # (star_constrains_rho: false, a per-instance flag now); the
+        # relation stays inert otherwise, exactly like s/log_s for PSPL.
+        if not src_cfg.get("star_constrains_rho", True):
+            result["log_rho"] = f"source.{j}.log_rho"
 
-        # log_pi_rel exists only under fitpirel (swap 2).
-        if lens_config_list.get("fitpirel"):
-            result["log_pi_rel"] = f"lens.{j}.log_pi_rel"
+        # u0te exists only where THIS source sets fitu0te (swap 4).
+        if src_cfg.get("fitu0te"):
+            result["u0te"] = f"source.{j}.u0te"
 
-        # u0te exists only under fitu0te (swap 4).
-        if lens_config_list.get("fitu0te"):
-            result["u0te"] = f"lens.{j}.u0te"
+        # log_pi_rel exists only under fitpirel (swap 2), an event flag.
+        if event_cfg.get("fitpirel"):
+            result["log_pi_rel"] = "mulensevent.0.log_pi_rel"
 
-        # log_theta_E exists only under fitthetae (swap 3).
-        if lens_config_list.get("fitthetae"):
-            result["log_theta_E"] = f"lens.{j}.log_theta_E"
+        # log_theta_E exists only under fitthetae (swap 3), an event flag.
+        if event_cfg.get("fitthetae"):
+            result["log_theta_E"] = "mulensevent.0.log_theta_E"
 
         maps.append(result)
 

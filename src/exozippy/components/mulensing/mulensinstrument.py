@@ -357,24 +357,24 @@ class MulensInstrument(Instrument):
     def _resolve_t0_par_final(self, system, all_times):
         """Final t0_par: the reference epoch anchoring the Skowron+2011 frame.
 
-        Lens.__init__ resolves t0_par from the lens config and user_params
-        only; MMEXOFAST seeds arrive later (stage 1, add_seed_hints), so
+        Lens.__init__ resolves t0_par from the mulensevent config and
+        user_params only; MMEXOFAST seeds arrive later (stage 1), so
         the automated workflow -- whose params file deliberately omits the
         microlensing start values -- used to fall through to the 2450000.0
         default, parking the reference epoch decades before the data.
 
-        Priority: explicit lens ``t0_par`` > user ``lens.0.t_0`` initval >
-        MMEXOFAST seed t_0 > median data time.  Any of these keeps the
-        linear Earth extrapolation within the season it is a good
+        Priority: explicit mulensevent ``t0_par`` > user ``source.0.t_0``
+        initval > MMEXOFAST seed t_0 > median data time.  Any of these
+        keeps the linear Earth extrapolation within the season it is a good
         approximation for.
         """
-        lens_config = system.lens.config[0]
-        if "t0_par" in lens_config:
-            return float(lens_config["t0_par"])
+        event_config = system.mulensevent.config[0]
+        if "t0_par" in event_config:
+            return float(event_config["t0_par"])
         cm = self.config_manager
-        val = _raw_initval(cm.user_params.get("lens.0.t_0"))
+        val = _raw_initval(cm.user_params.get("source.0.t_0"))
         if val is None:
-            val = cm.seed_start_value("lens.0.t_0")
+            val = cm.seed_start_value("source.0.t_0")
         if val is not None:
             return float(val)
         t_med = float(np.median(all_times))
@@ -429,14 +429,14 @@ class MulensInstrument(Instrument):
         component knows its files; Lens owns the stage-2 seed path for
         explicit files, and both share mmexofast_support for the translation.
         """
-        lens = getattr(system, "lens", None)
-        if lens is None:
+        event = getattr(system, "mulensevent", None)
+        if event is None:
             return
-        spec = lens.config[0].get("mmexofast") if lens.config else None
+        spec = event.config[0].get("mmexofast") if event.config else None
         if spec is False:
             return
-        is_binary = lens.n_companions >= 1
-        want_rho = bool(any(lens.finite_source))
+        is_binary = event.n_companions >= 1
+        want_rho = bool(event.finite_source)
 
         if isinstance(spec, str) and spec != "auto":
             # Explicit JSON: masks + error factors, and the seed hints too.
@@ -464,7 +464,7 @@ class MulensInstrument(Instrument):
             self._reject_time_spec_with_mmexofast(spec)
             prefix = system.config.get("prefix", "fitresults/planet")
             json_path = f"{prefix}_mmexofast.json"
-            options = dict(lens.config[0].get("mmexofast_options") or {})
+            options = dict(event.config[0].get("mmexofast_options") or {})
             data = mmexofast_support.run_or_load(
                 json_path,
                 self.files,
@@ -603,14 +603,14 @@ class MulensInstrument(Instrument):
                 val = cm.seed_start_value(key)
             return default if val is None else val
 
-        t0 = _get("lens.0.t_0")
-        u0 = _get("lens.0.u_0")
-        tE = _get("lens.0.t_E")
+        t0 = _get("source.0.t_0")
+        u0 = _get("source.0.u_0")
+        tE = _get("mulensevent.0.t_E")
         if t0 is None or u0 is None:
             return
 
-        pi_E_N = _get("lens.0.pi_E_N", 0.0)
-        pi_E_E = _get("lens.0.pi_E_E", 0.0)
+        pi_E_N = _get("mulensevent.0.pi_E_N", 0.0)
+        pi_E_E = _get("mulensevent.0.pi_E_E", 0.0)
 
         delta_e, delta_n = observer_sky_offset(xyz_delta, ra_rad, dec_rad)
         A_traj = self._pspl_magnification(
@@ -816,11 +816,11 @@ class MulensInstrument(Instrument):
         q_flux_user = _get_flux("q_flux")
         q_flux_fallback = q_flux_user if q_flux_user is not None else 1.0
 
-        t0 = _get("lens.0.t_0")
-        u0 = _get("lens.0.u_0")
-        tE = _get("lens.0.t_E")
-        pi_E_N = _get("lens.0.pi_E_N", 0.0)
-        pi_E_E = _get("lens.0.pi_E_E", 0.0)
+        t0 = _get("source.0.t_0")
+        u0 = _get("source.0.u_0")
+        tE = _get("mulensevent.0.t_E")
+        pi_E_N = _get("mulensevent.0.pi_E_N", 0.0)
+        pi_E_E = _get("mulensevent.0.pi_E_E", 0.0)
 
         f_source_user = _get_flux("f_source")
         f_blend_user = _get_flux("f_blend")
@@ -872,12 +872,12 @@ class MulensInstrument(Instrument):
                 )
             ]
             for j in range(1, n_src):
-                t0_j = _get(f"lens.{j}.t_0")
-                u0_j = _get(f"lens.{j}.u_0")
-                tE_j = _get(f"lens.{j}.t_E", tE)
+                t0_j = _get(f"source.{j}.t_0")
+                u0_j = _get(f"source.{j}.u_0")
+                tE_j = tE  # ONE event t_E now (the per-source fallback dance dissolved)
                 if t0_j is None or u0_j is None:
                     logger.warning(
-                        f"lens.{j}.t_0/u_0 missing — flux bootstrap treats source {j} "
+                        f"source.{j}.t_0/u_0 missing — flux bootstrap treats source {j} "
                         f"as blended into source 0."
                     )
                     continue
@@ -1838,19 +1838,16 @@ class MulensInstrument(Instrument):
     def _seed_param(self, base_param):
         """t_0/t_E seed from the solved config (for the model time grid).
 
-        Tries the numeric index form first (user-provided params), then the
-        name form (derived params stored by finalize_user_params under the
-        name key).
+        t_0 is the source component's; t_E the event's.  Index form only:
+        both forms standardize now that the instances carry real names, so
+        the pre-split name-form fallback (which existed for the borrowed-
+        name filing bug) is gone.
         """
         cm = self.config_manager
-        lens_name = (cm.system_config.get("lens") or [{}])[0].get("name", "0")
-        for key in (
-            f"lens.0.{base_param}",
-            f"lens.{lens_name}.{base_param}",
-        ):
-            d = cm.user_params.get(key)
-            if d is not None:
-                return d.get("initval") if isinstance(d, dict) else float(d)
+        owner = "source" if base_param == "t_0" else "mulensevent"
+        d = cm.user_params.get(f"{owner}.0.{base_param}")
+        if d is not None:
+            return d.get("initval") if isinstance(d, dict) else float(d)
         return None
 
     def _model_time_grid(self):

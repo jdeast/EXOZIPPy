@@ -1539,19 +1539,17 @@ class ConfigManager:
         # already folded such a key into the index form by the time we get
         # here.  What only this site can see is the case it cannot: per-
         # element `names` handed in by a component's manifest that are NOT
-        # its own config instances' names.  `lens` does exactly that
-        # (examples/ob161003), labelling its per-source vectors with the
-        # SOURCE STARS' names, so `lens.SourceA.t_0` survives standardization
-        # verbatim.
-        #
-        # It does NOT, however, survive to here: `Lens._rewrite_source_param_keys`
-        # runs in `Lens.__init__`, before any stage-1 code, and renames every
-        # such key to its source SLOT.  So by the time `resolve()` is called
-        # the name form is already gone, and this check is reached only via
-        # `_raw_user_param_keys` below -- which is the point of reading the
-        # raw keys rather than `user_params`, and why this site still works.
-        # The older claim here, that the two spellings "coexist as two live
-        # user keys", described a window that closes before stage 1.
+        # its own config instances' names.  HISTORICAL: the pre-split lens
+        # did exactly that, labelling its per-source vectors with the
+        # SOURCE STARS' names (`lens.SourceA.t_0`), rewritten to slot form
+        # by a lens-private `_rewrite_source_param_keys` pass in its
+        # __init__.  The 8.6.17 split removed the borrowed-name machinery
+        # at the root -- source/lens instances are now NAMED after their
+        # bodies (normalize_config_block, the Mann/Torres idiom), so the
+        # name form folds in standardize_param_names like every other
+        # component's.  This check is reached via `_raw_user_param_keys`
+        # below -- the point of reading the raw keys rather than
+        # `user_params`.
         #
         # Only keys the user WROTE count.  finalize_user_params injects the
         # engine's solved start values back under the index form, and on

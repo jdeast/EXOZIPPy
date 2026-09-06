@@ -343,18 +343,21 @@ class Band(Component):
             )
 
         # Microlensing: the magnification only takes u1 when the source is
-        # resolved.  `any` over the lens elements, not `[0]`, because that is
-        # the conservative direction -- MulensInstrument.build_likelihood
-        # currently gates on finite_source[0].
+        # resolved.  The flag lives on the mulensevent block (8.6.17 split).
         finite_source = any(
-            bool(c.get("finite_source", False)) for c in _cfg("lens")
+            bool(c.get("finite_source", False)) for c in _cfg("mulensevent")
         )
         if finite_source:
             # The source whose surface is resolved.  build_likelihood passes
-            # lens.source_map[0] down, so that is the star the u1 it consumes
-            # belongs to.
+            # the primary source down, so that is the star the u1 it
+            # consumes belongs to.  The source component's star_map is the
+            # post-split home; the lens compat source_map is the stage-1
+            # fallback for partial harnesses.
             smap = list(
-                getattr(getattr(system, "lens", None), "source_map", [])
+                getattr(getattr(system, "source", None), "star_map", None)
+                if getattr(getattr(system, "source", None), "star_map", None)
+                is not None
+                else getattr(getattr(system, "lens", None), "source_map", [])
             )
             src = int(smap[0]) if len(smap) else None
             # Every band a light curve references is marked, not just the

@@ -51,20 +51,17 @@ def _microlensing_only_star_indices(system):
     whole topology, so it is answered by ``Star.structure_consumers``, for
     every star at once.
     """
-    lens = getattr(system, "lens", None)
-    if lens is None or not getattr(lens, "source_bodies", None):
+    source_comp = getattr(system, "source", None)
+    lens_comp = getattr(system, "lens", None)
+    if source_comp is None or not getattr(source_comp, "bodies", None):
         return set()
 
     source_idx = {
-        idx
-        for event in lens.source_bodies
-        for (ctype, idx) in event
-        if ctype == "star"
+        idx for (ctype, idx) in source_comp.bodies if ctype == "star"
     }
     lens_idx = {
         idx
-        for event in lens.lens_bodies
-        for (ctype, idx) in event
+        for (ctype, idx) in getattr(lens_comp, "bodies", None) or []
         if ctype == "star"
     }
     return source_idx - lens_idx
@@ -446,18 +443,17 @@ class Star(Component):
             for param in self.STRUCTURE_PARAMS:
                 _mark("evolutionarymodel", param, opted)
 
-        lens = getattr(system, "lens", None)
-        if lens is not None and any(getattr(lens, "finite_source", [])):
-            # `any`, not `[0]`, and every source body rather than
-            # source_map[0]: the conservative direction, matching
+        event = getattr(system, "mulensevent", None)
+        if event is not None and getattr(event, "finite_source", False):
+            # Every source body, the conservative direction, matching
             # Band.ld_consumers' reasoning about the same flag.
+            source_comp = getattr(system, "source", None)
             sources = {
                 idx
-                for event in getattr(lens, "source_bodies", None) or []
-                for (ctype, idx) in event
+                for (ctype, idx) in getattr(source_comp, "bodies", None) or []
                 if ctype == "star"
             }
-            _mark("lens(finite_source)", "radius", sorted(sources))
+            _mark("mulensevent(finite_source)", "radius", sorted(sources))
 
         planet = getattr(system, "planet", None)
         if planet is not None and _in_topology("orbit"):
@@ -631,8 +627,8 @@ class Star(Component):
         and a finite-source non-detection genuinely bounds rho, hence the
         radius, from ABOVE.  So it is free, and the degeneracy is named.
         """
-        lens = getattr(system, "lens", None)
-        if lens is None or not any(getattr(lens, "finite_source", [])):
+        event = getattr(system, "mulensevent", None)
+        if event is None or not getattr(event, "finite_source", False):
             return
 
         # Only the stars whose radius is read SOLELY because of the finite
@@ -642,7 +638,7 @@ class Star(Component):
         others = {
             c.star
             for c in self.structure_consumers(system)
-            if c.param == "radius" and c.label != "lens(finite_source)"
+            if c.param == "radius" and c.label != "mulensevent(finite_source)"
         }
         # A user's `sigma: 0` is not a prior (so it left the element read
         # only by the finite source) but it IS a decision -- they pinned the
@@ -849,13 +845,19 @@ class Star(Component):
         deps name: murel_source_map (per star element, the index of the
         lens's first source star) and murel_traj_map (trajectory 0).
         """
+        event = getattr(system, "mulensevent", None)
         lens = getattr(system, "lens", None)
-        if lens is None or not getattr(lens, "lens_bodies", None):
+        source = getattr(system, "source", None)
+        if event is None or lens is None or source is None:
             return None
-        if not bool(lens.config[0].get("fitmurel", False)):
+        if not getattr(lens, "bodies", None) or not getattr(
+            source, "bodies", None
+        ):
             return None
-        l_type, l_idx = lens.lens_bodies[0][0]
-        s_type, s_idx = lens.source_bodies[0][0]
+        if not bool(event.config[0].get("fitmurel", False)):
+            return None
+        l_type, l_idx = lens.bodies[0]
+        s_type, s_idx = source.bodies[0]
         if l_type != "star" or s_type != "star":
             return None
         n = self.n_elements
@@ -870,15 +872,22 @@ class Star(Component):
         coordinate plan.  Same staging and maps as _pm_manifest_entry; the
         map builder there runs first when both flags are set.
         """
+        event = getattr(system, "mulensevent", None)
         lens = getattr(system, "lens", None)
-        if lens is None or not getattr(lens, "lens_bodies", None):
+        source = getattr(system, "source", None)
+        if event is None or lens is None or source is None:
             return None
-        if not bool(lens.config[0].get("fitpirel", False)):
+        if not getattr(lens, "bodies", None) or not getattr(
+            source, "bodies", None
+        ):
             return None
-        if int(getattr(lens, "n_sources", 1)) > 1:
-            return None  # lens.py warns; the flag is ignored there too
-        l_type, l_idx = lens.lens_bodies[0][0]
-        s_type, s_idx = lens.source_bodies[0][0]
+        if not bool(event.config[0].get("fitpirel", False)):
+            return None
+        # The pre-split n_sources > 1 bail is GONE: pi_rel is event-level
+        # by construction now (design 1.1 #7), so per-source
+        # overdetermination of the shared lens distance is unrepresentable.
+        l_type, l_idx = lens.bodies[0]
+        s_type, s_idx = source.bodies[0]
         if l_type != "star" or s_type != "star":
             return None
         n = self.n_elements
@@ -894,14 +903,17 @@ class Star(Component):
         enforces the same guards and warns; this mirror keeps the two
         components' answers identical without cross-stage reads.
         """
+        event = getattr(system, "mulensevent", None)
         lens = getattr(system, "lens", None)
-        if lens is None or not getattr(lens, "lens_bodies", None):
+        if event is None or lens is None:
             return None
-        if not bool(lens.config[0].get("fitthetae", False)):
+        if not getattr(lens, "bodies", None):
             return None
-        if int(getattr(lens, "n_sources", 1)) > 1:
+        if not bool(event.config[0].get("fitthetae", False)):
             return None
-        bodies = lens.lens_bodies[0]
+        # The pre-split n_sources guard is GONE (theta_E is event-level
+        # now); the companion checks below survive.
+        bodies = lens.bodies
         if len(bodies) > 2:
             return None
         l_type, l_idx = bodies[0]
@@ -1051,7 +1063,11 @@ class Star(Component):
             ]
         has_abs_astrom = any(m in ("gaia", "abs") for m in astrom_modes)
 
-        if in_system("lens") or in_system("galacticmodel") or has_abs_astrom:
+        if (
+            in_system("mulensevent")
+            or in_system("galacticmodel")
+            or has_abs_astrom
+        ):
             self.manifest.update(
                 {
                     "ra": None,

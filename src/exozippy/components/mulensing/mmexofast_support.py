@@ -158,11 +158,15 @@ def user_hints_sufficient(config_manager, is_binary, want_rho):
     params file on the old zero-cost path and spends the extra solve only
     where the literal scan would have been wrong.
     """
-    required = ["lens.0.t_0", "lens.0.u_0", "lens.0.t_E"]
+    # Post-split spellings: the trajectory offsets are the source
+    # component's element 0, the event chain is mulensevent's, and the
+    # companion geometry is LENS ELEMENT 1 (element 0 is the masked
+    # primary).
+    required = ["source.0.t_0", "source.0.u_0", "mulensevent.0.t_E"]
     if want_rho:
-        required.append("lens.0.rho")
+        required.append("source.0.rho")
     if is_binary:
-        required += ["lens.0.alpha", "lens.0.q"]
+        required += ["lens.1.alpha", "lens.1.q"]
 
     def named(path):
         entry = config_manager.user_params.get(path)
@@ -172,16 +176,16 @@ def user_hints_sufficient(config_manager, is_binary, want_rho):
 
     # s and log_s are one fact in two coordinates; either satisfies it.
     if all(named(p) for p in required) and (
-        not is_binary or named("lens.0.s") or named("lens.0.log_s")
+        not is_binary or named("lens.1.s") or named("lens.1.log_s")
     ):
         return True
 
     derivable = config_manager.probe_derivable(
-        required + ["lens.0.s", "lens.0.log_s"]
+        required + ["lens.1.s", "lens.1.log_s"]
     )
     ok = all(p in derivable for p in required)
     if is_binary:
-        ok = ok and ("lens.0.s" in derivable or "lens.0.log_s" in derivable)
+        ok = ok and ("lens.1.s" in derivable or "lens.1.log_s" in derivable)
     if not ok:
         missing = [p for p in required if p not in derivable]
         logger.debug(
