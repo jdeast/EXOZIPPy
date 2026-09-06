@@ -14,7 +14,7 @@ from ..instrument import JITTER_RELATIONS, JITTER_SYMBOL_MAP
 baseline = sp.symbols("baseline", real=True)
 
 
-def get_symbol_map(config):
+def get_symbol_map(config, system_config):
     return {
         "baseline": "baseline",
         **JITTER_SYMBOL_MAP,

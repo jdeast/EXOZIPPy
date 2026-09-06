@@ -16,7 +16,7 @@ trunk `CLAUDE.md`.
 `src/exozippy/config.py` is the initialization backbone. It:
 
 1. Loads all `defaults.yaml` files (one per component subdirectory) into `base_defaults`.
-2. Loads all `symbolic_physics.py` files; calls `get_symbol_map()` to translate abstract symbols to indexed paths (`star.0.mass`, `lens.0.t_E`, …) and collects `RELATIONS` (SymPy equations).
+2. Loads all `symbolic_physics.py` files; calls `get_symbol_map(component_config, system_config)` — both arguments required, the second being the whole parsed config so a builder can reference another component's instances — to translate abstract symbols to indexed paths (`star.0.mass`, `lens.0.t_E`, …) and collects `RELATIONS` (SymPy equations).
 3. Manages a **precedence** system -- one ordered scale deciding which statement about a parameter wins. Higher precedence wins when values conflict:
    - `PRECEDENCE_USER = 100` — from `params.yaml`
    - `PRECEDENCE_DERIVED_DATA = 60` — from data (e.g., RV offset from median)

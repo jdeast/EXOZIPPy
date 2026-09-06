@@ -23,7 +23,7 @@ comp_key = "astrometryinstrument"
 # Astrometry Instrument component.
 
 
-def get_symbol_map(config):
+def get_symbol_map(config, system_config):
     return {
         "fluxfrac": "fluxfrac",
         **JITTER_SYMBOL_MAP,
