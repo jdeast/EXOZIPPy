@@ -31,6 +31,12 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 
+# planet.radius is the sampled leaf and is in jupiterRad; the geometry the
+# harness injects is p = Rp/Rstar with Rstar in solRad.  Taken from astropy
+# rather than written as a literal, because a unit slip here is silent and
+# is exactly what CLAUDE.md's reciprocal-factors invariant warns about.
+RSUN_IN_RJUP = 9.73115873104683
+
 
 def pspl_mag(t, t0, u0, te):
     u = np.sqrt(u0**2 + ((t - t0) / te) ** 2)
@@ -116,7 +122,7 @@ def make_mulens(rng, snr, n_epochs, workdir):
         "mulensinstrument.f_source",
         "mulensinstrument.f_blend",
     ]
-    return config, params, sampler, truth, checks
+    return config, params, sampler, truth, checks, []
 
 
 def make_rv(rng, snr, n_epochs, workdir):
@@ -155,18 +161,33 @@ def make_rv(rng, snr, n_epochs, workdir):
     }
     truth = {"orbit.K": K, "orbit.period": P, "rvinstrument.gamma": gamma}
     sampler = {
-        # period mixes slowly (ESS ~30 at 1000 draws in the shakedown);
-        # give the RV leg more room.
+        # period mixes slowly.  2000/2000 was NOT enough: measured over the
+        # first 30 realizations, 21 of the 30 orbit.period checks and 11 of
+        # the rvinstrument.gamma checks failed Rhat <= 1.05 / ESS >= 200 and
+        # had to be dropped, which left N = 9 for period -- too few to make
+        # the N(0,1) claim either way.  The pulls that survived were CLEAN
+        # (period bias -0.36 sigma, width 1.08), so this is a sampler cost,
+        # not a calibration problem: pay it.
         "method": "nuts",
-        "tune": 2000,
-        "draws": 2000,
+        "tune": 6000,
+        "draws": 6000,
         "chains": 4,
         "cores": 4,
         "init": "adapt_diag",
+        # BACK TO 0.95.  Raising this to 0.99 at the same time as the draws
+        # was a CONFOUNDED change and it regressed: convergence-flagged
+        # checks went from 40/90 at 2000/2000 + 0.95 to 55/90 at 6000/6000
+        # + 0.99, and the usable N fell for every check (K 30 -> 22, period
+        # 9 -> 5, gamma 11 -> 8).  Absolute ESS went DOWN despite 3x the
+        # draws, which is what a target_accept of 0.99 does to a
+        # badly-conditioned posterior: it shrinks the step until the chain
+        # diffuses instead of exploring.  Changing one thing at a time is
+        # the whole reason the 128 swap A/B (8.6.7) could attribute anything;
+        # this leg deserved the same discipline.
         "target_accept": 0.95,
     }
     checks = ["orbit.K", "orbit.period", "rvinstrument.gamma"]
-    return config, params, sampler, truth, checks
+    return config, params, sampler, truth, checks, []
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +244,9 @@ def make_transit(rng, snr, n_epochs, workdir):
     # up -- which would corrupt the b and T14 pulls for reasons that have
     # nothing to do with the pipeline.  Central and grazing transits are a
     # separate regime and are deliberately out of scope for this leg.
-    b_imp = float(rng.uniform(0.15, 0.60))
+    # Lower edge raised from 0.15 to 0.25 to keep the truth clear of the
+    # chord bound installed below; see the arithmetic there.
+    b_imp = float(rng.uniform(0.25, 0.60))
     cosi = b_imp / ar
     sini = np.sqrt(max(1.0 - cosi * cosi, 1e-12))
     tc = 2456000.0 + float(rng.uniform(0.0, period))
@@ -302,6 +325,30 @@ def make_transit(rng, snr, n_epochs, workdir):
         "band": [{"name": "TESS", "filter": "TESS", "ld_law": "linear"}],
         "transit": [{"name": "SYNTH", "file": "synth.trn", "band": "TESS"}],
     }
+    # ONE set of perturbed start values, used consistently everywhere below.
+    p_init = float(p_ratio * (1 + rng.normal(0, 0.05)))
+    b_init = float(np.clip(b_imp + rng.normal(0, 0.05), 0.0, 0.9))
+    chord_init = float(np.sqrt(max((1.0 + p_init) ** 2 - b_init**2, 1e-12)))
+    period_init = float(period * (1 + rng.normal(0, 0.0005)))
+    tc_init = float(tc + rng.normal(0, 0.002 * t14))
+
+    # What the built model MUST start from, asserted after build_model().
+    # These are the PERTURBED starts, not truth -- the perturbation is the
+    # deliberate prefit stand-in -- so the assertion asks "did the model get
+    # what I gave it", never "does the model agree with truth", which would
+    # be circular.  p and b are DERIVED (from planet.radius and from chord),
+    # which is exactly why they need checking; period and tc are set on
+    # sampled coordinates and get a tight tolerance.
+    truth_checks = [
+        ("planet.p", p_init, 0.01),
+        ("planet.b", b_init, 0.01),
+        # 1e-4, not 1e-6: period is set on a sampled coordinate but reaches
+        # it through logP, and the log/exp round trip alone lands ~2e-5 off.
+        # Measured, not guessed -- 1e-6 fired on a healthy build.
+        ("orbit.period", period_init, 1e-4),
+        ("orbit.tc", tc_init, 1e-9),
+    ]
+
     params = {
         # The star is not a free parameter of this test: with no SED and no
         # evolutionary model nothing constrains it, and a/Rstar depends on
@@ -321,16 +368,66 @@ def make_transit(rng, snr, n_epochs, workdir):
         # convention, so there is no bimodality to fence off and a `lower`
         # on a derived parameter would only be a soft barrier layered on
         # the real support.
+        #
+        # WORKAROUND FOR REVIEW 1.8.5 -- REMOVE WHEN THAT LANDS.
+        # calc_cosi_from_chord floors its radicand at exactly 0.0, so for
+        # chord > 1 + p the gradient d(cos i)/d(chord) is NaN (sqrt'(0) is
+        # infinite and pt.maximum's clamped-side gradient is 0, giving
+        # 0 * inf).  chord's default support is [0, 2] while the geometric
+        # maximum is 1 + p, so ~46% of it is a region that FREEZES any chain
+        # entering it -- measured: 2 of 4 chains at step_size 5e-324 with
+        # 2000/2000 divergences, planet.b at ESS 8.0 / Rhat 1.43.
+        #
+        # This is a bound in a params file, not a src fix: 1.8.5 is itemized
+        # and owned elsewhere, and its own SECONDARY recommendation is
+        # exactly "tighten chord's upper from 2.0 toward 1 + p_max".
+        #
+        # Why 0.9 * p and not p: the NaN needs chord > 1 + p_SAMPLED, so an
+        # upper of exactly 1 + p_truth still leaves a reachable sliver
+        # whenever p samples below truth -- and a chain that enters it never
+        # leaves, so even a 0.03% chance per proposal is hit eventually.  A
+        # 10% margin puts the wall ~25 sigma away (p is recovered to ~0.35%).
+        # The truth stays inside because chord_truth < 1 + 0.9p requires
+        # b^2 > (2 + 1.9p)(0.1p), i.e. b > 0.178 at p = 0.14 and b > 0.113
+        # at p = 0.06 -- so b drawn from [0.25, 0.60] clears it everywhere.
+        # An `upper` ALONE is not enough, and getting that wrong cost a
+        # 30-task array: the engine SOLVES chord's start from cos i (whose
+        # default initval is 1e-07, i.e. edge-on), not from the
+        # planet.b.b impact parameter set above -- so the solved start lands
+        # at ~1 + p, right ON the NaN wall.  Bounding below it then either
+        # threw "start value outside its hard bounds" (27 of 30 tasks) or,
+        # where the start squeaked inside, pinned it against the upper bound
+        # where the logit transform is extreme and every chain froze
+        # (ESS ~5, Rhat 2-3.4 on all five checks).
+        # So set the START too, at the geometric truth
+        # chord = sqrt((1 + p)^2 - b^2), which the b draw above keeps at
+        # least 1.8% inside the bound.
+        # chord is computed from the SAME PERTURBED p and b that are set
+        # above -- not from truth.  Getting that wrong is what produced the
+        # transit leg's +3.2 sigma tc bias: chord came from truth while
+        # planet.b.p/planet.b.b carried ~5% start perturbations, the three
+        # were mutually inconsistent, and the engine reconciled them by
+        # moving b to 0.794 against a truth of 0.547.  The fit then started
+        # at the wrong geometry and, b being weakly constrained, largely
+        # stayed there -- which also dragged t14 and tc.
+        # planet.b.b is NOT set at all any more: under fitchord the impact
+        # parameter is DERIVED from chord, so setting both states the same
+        # geometry twice and invites exactly this contradiction.
+        "orbit.b.chord": {
+            "initval": float(chord_init),
+            "upper": float(1.0 + 0.9 * p_ratio),
+        },
         # u1 = 0 makes the linear law a uniform disk, matching the generator.
         "band.TESS.u1": {"initval": 0.0, "sigma": 0},
-        "orbit.b.period": {
-            "initval": float(period * (1 + rng.normal(0, 0.0005)))
-        },
-        "orbit.b.tc": {"initval": float(tc + rng.normal(0, 0.002 * t14))},
-        "planet.b.p": {"initval": float(p_ratio * (1 + rng.normal(0, 0.05)))},
-        "planet.b.b": {
-            "initval": float(np.clip(b_imp + rng.normal(0, 0.05), 0.0, 0.9))
-        },
+        "orbit.b.period": {"initval": period_init},
+        "orbit.b.tc": {"initval": tc_init},
+        # Set the SAMPLED coordinate, not the derived one.  planet.p is
+        # DERIVED from planet.radius / star.radius (planet.radius is the
+        # leaf, in jupiterRad), so an initval on planet.p is a request the
+        # relaxation engine back-solves and does not have to honour -- it
+        # came out 3% low, and planet.b came out 28% low from the same
+        # class of mistake.  Rp = p * Rstar, converted Rsun -> Rjup.
+        "planet.b.radius": {"initval": float(p_init * rstar * RSUN_IN_RJUP)},
     }
     truth = {
         "orbit.period": period,
@@ -341,19 +438,29 @@ def make_transit(rng, snr, n_epochs, workdir):
     }
     sampler = {
         "method": "nuts",
-        # 2000/2000: the RV leg's lesson (7.13.1) is that a leg whose rows
-        # are convergence-flagged is a leg with no result -- 21 of its 30
-        # orbit.period checks failed Rhat/ESS at 2000/2000 and had to be
-        # dropped.  Pay for the draws up front here.
-        "tune": 2000,
-        "draws": 2000,
+        # 8000/8000, and the number is MEASURED rather than padded.  At
+        # 2000/2000 one chain in four never equilibrated in the chord /
+        # cos i direction: its step size adapted to 0.011 against the other
+        # three at ~0.35-0.40, and orbit.chord's between-chain mean spread
+        # was 6.94x its within-chain sd -- which is what put planet.b at
+        # ESS 7.4 / Rhat 1.49 and planet.t14 at ESS 29 while orbit.period,
+        # orbit.tc and planet.p in the SAME fit sat at ESS 1598-4174 and
+        # Rhat ~1.005.  Re-running the identical realization at 8000/8000
+        # (diag_transit_cosi.py, DIAG_TUNE/DIAG_DRAWS): step sizes 0.378 /
+        # 0.383 / 0.393 / 0.378 and chord's ratio 0.04, i.e. between-chain
+        # spread now 25x SMALLER than within-chain -- fully mixed.
+        # So this was tuning length, not conditioning, and there is no code
+        # defect here (distinct from 1.8.5, which is real but only removed
+        # the divergences).
+        "tune": 8000,
+        "draws": 8000,
         "chains": 4,
         "cores": 4,
         "init": "adapt_diag",
         "target_accept": 0.95,
     }
     checks = ["orbit.period", "orbit.tc", "planet.p", "planet.b", "planet.t14"]
-    return config, params, sampler, truth, checks
+    return config, params, sampler, truth, checks, truth_checks
 
 
 MAKERS = {
@@ -378,9 +485,9 @@ def main():
     workdir = Path(tempfile.mkdtemp(prefix=f"ir_{args.pipeline}_"))
     os.chdir(workdir)
 
-    config, params, sampler, truth, checks = MAKERS[args.pipeline](
-        rng, args.snr, args.n_epochs, workdir
-    )
+    config, params, sampler, truth, checks, truth_checks = MAKERS[
+        args.pipeline
+    ](rng, args.snr, args.n_epochs, workdir)
 
     import pymc as pm
 
@@ -389,6 +496,51 @@ def main():
     system = System(dict(config), user_params=dict(params))
     system.prepare()
     model = system.build_model()
+
+    # VERIFY THE INJECTION, and fail loudly if it did not take.
+    #
+    # This assertion is the single most important line in the harness.  The
+    # transit leg produced a whole pull table -- 30 realizations, a +3.3
+    # sigma tc bias, a -0.42 sigma b bias -- before anyone checked that the
+    # model had actually been GIVEN the geometry that was injected.  It had
+    # not: setting the DERIVED planet.p and planet.b left the model starting
+    # at p -3%, b -28%, t14 +6.6% from truth, and the weakly-constrained
+    # parameters then kept their wrong starts.  Every pull in that table was
+    # measuring the mismatch rather than the pipeline.
+    #
+    # Reading truth back OUT of the model instead would be circular and must
+    # never be done.  The check is one-directional: what was injected must be
+    # what the model starts from, to a tolerance, or the realization is not a
+    # valid test and is refused.
+    if truth_checks:
+        bad = []
+        for name, want, tol in truth_checks:
+            comp, pname = name.split(".", 1)
+            param = getattr(getattr(system, comp), pname, None)
+            if param is None:
+                bad.append("%s: absent from the built model" % name)
+                continue
+            got = float(np.atleast_1d(param.value.eval())[0])
+            if want == 0 or abs(got - want) / abs(want) > tol:
+                bad.append(
+                    "%s: injected %.6g, model has %.6g (%.2f%% off, tol %.0f%%)"
+                    % (
+                        name,
+                        want,
+                        got,
+                        100 * abs(got - want) / abs(want),
+                        100 * tol,
+                    )
+                )
+        if bad:
+            raise RuntimeError(
+                "INJECTION DID NOT TAKE -- this realization is not a valid "
+                "test and no row will be written:\n  "
+                + "\n  ".join(bad)
+                + "\nThe harness sets sampled coordinates (planet.radius, "
+                "orbit.chord, orbit.logP via period, orbit.tc); if one of "
+                "those is now derived instead, the setter must move with it."
+            )
     with model:
         idata = pm.sample(
             draws=sampler["draws"],
