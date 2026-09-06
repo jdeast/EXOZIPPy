@@ -33,6 +33,7 @@ import pytensor.tensor as pt
 from exozippy.components.component import Component
 from exozippy.components.orbit.bodies import component_instance_names
 from exozippy.components.parameterization import mode_manifest
+from exozippy.config import PRECEDENCE_DEFAULT
 from exozippy.constants import DAYS_PER_YEAR
 from exozippy.corner_utils import (
     collect_parameter_corner_samples,
@@ -509,8 +510,18 @@ class Lens(Component):
                         alpha_deg = float(
                             np.arctan2(float(sa), float(ca)) * _RAD_TO_DEG
                         )
+                        # rank=PRECEDENCE_DEFAULT (20), NOT the add_hint
+                        # default of PRECEDENCE_DERIVED_DATA (60): this
+                        # value is arithmetic on the USER's own
+                        # xalpha/yalpha entries, purely for display, and
+                        # must neither be reported as data-derived
+                        # provenance (the startup table's source column,
+                        # export_solution, the GUI) nor outrank an
+                        # engine-solved alpha at rank 40.
                         self.config_manager.add_hint(
-                            f"lens.{elem}.alpha", alpha_deg
+                            f"lens.{elem}.alpha",
+                            alpha_deg,
+                            rank=PRECEDENCE_DEFAULT,
                         )
 
             # q's mass dependencies are typed by the companion components.
