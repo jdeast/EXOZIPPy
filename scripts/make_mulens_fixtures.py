@@ -12,18 +12,30 @@ reconciled per-term logp decomposition at the start point.  During the
 refactor each stage is accepted by explaining every delta term by term
 against them.
 
---check regenerates and compares WITH A TOLERANCE.  Nothing here is
-byte-comparable and the first version was wrong to try: these are float64
-sums over thousands of epochs, so a different CPU, BLAS or PyTensor
-compiledir reorders them and the last bits differ.  Measured against CI:
-7.3e-12 and 2.0e-10 absolute on ~1e4 terms, i.e. 1.6e-16 and 7.6e-15
-relative.
+A fixture stores THREE things: the reconciled per-term logp decomposition,
+the total, and THE START POINT ITSELF.  Storing the start is what lets the
+two questions be asked separately, and they are very different questions:
 
-Note what --check can and cannot establish.  It reruns on ONE machine, so it
-proves the pipeline is deterministic HERE; it says nothing about another
-CPU.  Same-machine reproducibility is a strictly weaker claim than
-cross-machine, and treating the first as evidence for the second is what put
-exact equality in these fixtures to begin with.
+  1. Does the relaxation engine solve the same START on another machine?
+     It contains a numerical solve (`sp.nsolve`, config.py:3839), so a small
+     platform difference here is a solver-convergence difference and is
+     harmless -- a chain forgets its start.
+  2. Is the LIKELIHOOD FUNCTION the same on another machine?  If not, the
+     posterior depends on the hardware, which is serious.
+
+--check answers question 1, STRICTLY: it regenerates on THIS machine and
+demands bit-identity of both the start and every term.  Same-machine
+reproducibility is the right bar for a same-machine tool.
+
+tests/test_mulens_acceptance.py answers question 2: it replays the STORED
+start, so both machines evaluate identical parameter values and any residual
+is the likelihood function alone.  It can therefore hold a tight tolerance
+instead of absorbing the solver's drift.
+
+The first version of these fixtures conflated the two -- it compared logp at
+each machine's OWN solved start -- and macOS differed by 3.2e-05 nats
+(7.1e-10 relative) where Linux differed by 7.3e-12 (machine epsilon).
+Widening the tolerance would have hidden precisely the interesting part.
 """
 
 import argparse
@@ -37,14 +49,18 @@ import yaml
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tests"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mulens_acceptance import decompose  # noqa: E402
+from mulens_acceptance import (  # noqa: E402
+    compare,
+    compare_points,
+    decompose,
+    raw_start,
+)
 
 from exozippy.system import System  # noqa: E402
 
-# NOTHING is compared to the byte -- see the module docstring.  These match
-# tests/test_mulens_acceptance.py; keep them in step.
-TERM_RTOL = 1e-10
-TERM_ATOL = 1e-6
+# --check is a SAME-MACHINE tool, so it demands bit-identity.  The
+# cross-machine tolerances live in tests/test_mulens_acceptance.py, which
+# asks a different question; see the module docstring.
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
@@ -103,7 +119,8 @@ def record(cfg_path, par_path):
         system = System(cfg, par)
         system.prepare()
         model = system.build_model()
-        parts, total, reconciles, summed = decompose(system, model)
+        start = raw_start(system, model)
+        parts, total, reconciles, summed = decompose(system, model, start)
     finally:
         os.chdir(cwd)
 
@@ -120,6 +137,10 @@ def record(cfg_path, par_path):
         "total_logp": total,
         "n_terms": len(parts),
         "terms": dict(sorted(parts.items())),
+        # The point every term above was evaluated at.  Stored so another
+        # machine can replay it instead of solving its own -- see the module
+        # docstring on why that separates two questions.
+        "start": dict(sorted(start.items())),
     }
 
 
@@ -149,17 +170,22 @@ def main():
                 continue
             with open(dest) as fh:
                 old = json.load(fh)
-            same = old["terms"].keys() == data["terms"].keys()
-            if same:
-                for k, v in data["terms"].items():
-                    ref = old["terms"][k]
-                    ok = abs(v - ref) <= TERM_ATOL + TERM_RTOL * abs(ref)
-                    if not ok:
-                        same = False
-                        print(f"{name:32s} term {k} {ref!r} -> {v!r}")
-                        break
-            else:
-                print(f"{name:32s} TERM SET CHANGED")
+
+            # STRICT: this is a same-machine rerun, so anything but
+            # bit-identity is a real nondeterminism worth chasing.
+            moved_pt = compare_points(old.get("start", {}), data["start"])
+            moved, appeared, vanished = compare(old["terms"], data["terms"])
+            same = not (moved_pt or moved or appeared or vanished)
+            if moved_pt:
+                for k, (_, _, d) in list(moved_pt.items())[:3]:
+                    print(f"{name:32s} START {k} moved by {d!r}")
+            for k, (ref, cur, d) in list(moved.items())[:3]:
+                print(f"{name:32s} term {k} {ref!r} -> {cur!r}")
+            if appeared or vanished:
+                print(
+                    f"{name:32s} TERM SET CHANGED "
+                    f"+{sorted(appeared)} -{sorted(vanished)}"
+                )
             print(f"{name:32s} {'ok' if same else 'DIFFERS'}")
             if not same:
                 failures.append(name)

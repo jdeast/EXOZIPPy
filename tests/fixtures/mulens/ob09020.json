@@ -2,6 +2,108 @@
  "config": "examples/ob09020/ob09020.yaml",
  "n_terms": 81,
  "params": "examples/ob09020/ob09020.params.yaml",
+ "start": {
+  "band.u1_raw": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "lens.t_0_raw": [
+   0.0
+  ],
+  "lens.u_0_raw": [
+   0.0
+  ],
+  "mulensinstrument.err_scale_raw": [
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0
+  ],
+  "mulensinstrument.log_f_total_raw": [
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0
+  ],
+  "mulensinstrument.q_source_raw": [
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0
+  ],
+  "orbit.cosi_raw": [
+   0.0
+  ],
+  "orbit.logP_raw": [
+   0.0
+  ],
+  "orbit.secosw_raw": [
+   0.0
+  ],
+  "orbit.sesinw_raw": [
+   0.0
+  ],
+  "orbit.tc_raw": [
+   0.0
+  ],
+  "orbit.xbigomega_raw": [
+   0.0
+  ],
+  "orbit.ybigomega_raw": [
+   0.0
+  ],
+  "rvinstrument.gamma_raw": [
+   0.0,
+   0.0
+  ],
+  "rvinstrument.jitter_variance_raw": [
+   0.0,
+   0.0
+  ],
+  "star.distance_raw": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "star.logmass_raw": [
+   0.0,
+   0.0
+  ],
+  "star.pm_dec_raw": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "star.pm_ra_raw": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "star.radius_raw": [
+   0.0
+  ],
+  "star.rv_raw": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
  "terms": {
   "POT:galacticmodel.imf_prior": -1.6547355156510086,
   "POT:galacticmodel.kinematic_prior": 17.83106084426627,

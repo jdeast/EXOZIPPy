@@ -2,6 +2,45 @@
  "config": "examples/ob140939/ob140939.yaml",
  "n_terms": 50,
  "params": "examples/ob140939/ob140939.params.yaml",
+ "start": {
+  "lens.t_0_raw": [
+   0.0
+  ],
+  "lens.u_0_raw": [
+   0.0
+  ],
+  "mulensinstrument.err_scale_raw": [
+   0.0,
+   0.0
+  ],
+  "mulensinstrument.log_f_total_raw": [
+   0.0,
+   0.0
+  ],
+  "mulensinstrument.q_source_raw": [
+   0.0,
+   0.0
+  ],
+  "star.distance_raw": [
+   0.0,
+   0.0
+  ],
+  "star.logmass_raw": [
+   0.0
+  ],
+  "star.pm_dec_raw": [
+   0.0,
+   0.0
+  ],
+  "star.pm_ra_raw": [
+   0.0,
+   0.0
+  ],
+  "star.rv_raw": [
+   0.0,
+   0.0
+  ]
+ },
  "terms": {
   "POT:galacticmodel.imf_prior": -0.7842089012211686,
   "POT:galacticmodel.kinematic_prior": 10.711746655327834,

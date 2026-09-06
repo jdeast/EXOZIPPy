@@ -32,26 +32,32 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 FIXTURES = os.path.join(HERE, "fixtures", "mulens")
 
-# NO FIXTURE CARRIES BYTE ACCEPTANCE, and the first version of this file was
-# wrong to let most of them try.  These are float64 sums over thousands of
-# epochs; a different CPU, BLAS or PyTensor compiledir reorders them and the
-# last bits differ.  Measured on CI (ubuntu and macos, 3.12/3.13/3.14, all
-# shard 3) against fixtures recorded on the dev box:
+# THIS FILE REPLAYS THE FIXTURE'S STORED START, and that is the whole point.
 #
-#     RV:mulensinstrument.model   7.3e-12 absolute, 1.6e-16 relative
-#     RV:mulensinstrument.model   2.0e-10 absolute, 7.6e-15 relative
-#     POT:low_bound.lens.mu_rel_mag           1.1e-13 relative (a 1e-220 term)
+# The first version evaluated each machine's OWN engine-solved start and
+# compared the results.  Linux differed by 7.3e-12 nats (1.6e-16 relative --
+# machine epsilon) but macOS by 3.2e-05 (7.1e-10), seven orders larger.  The
+# reflex is to widen the tolerance; that would have buried the only
+# interesting question, because those numbers can mean two very different
+# things:
 #
-# The `--check` determinism pass could never have caught it: it reruns on ONE
-# machine, and same-machine reproducibility is a strictly weaker claim than
-# cross-machine.  Treating one as evidence for the other is the mistake.
+#   1. the relaxation engine's NUMERICAL solve (`sp.nsolve`, config.py:3839)
+#      converged slightly differently -- harmless, a chain forgets its start;
+#   2. the LIKELIHOOD FUNCTION differs by platform -- meaning the posterior
+#      depends on the hardware, which is serious.
 #
-# Tolerances sit four orders above the worst observed noise and many orders
-# below anything physical -- the smallest thing this gate exists to catch is a
-# dropped or duplicated term, and the event-rate copy that motivated the whole
-# instrument was 2.8 nats.
-TERM_RTOL = 1e-10
-TERM_ATOL = 1e-6
+# Evaluating at each machine's own start cannot separate them.  Replaying the
+# STORED start does: both machines then evaluate identical parameter values,
+# so anything left is (2) alone and the tolerance can be tight.  Question (1)
+# is answered separately and strictly by `make_mulens_fixtures.py --check`,
+# which reruns on ONE machine and demands bit-identity -- the right bar for a
+# same-machine tool.
+#
+# So a failure here is a real finding, not drift to be absorbed.  The
+# tolerance is near float64 accumulation noise for sums over ~1e4 epochs,
+# not sized to whatever CI happened to produce.
+TERM_RTOL = 1e-12
+TERM_ATOL = 1e-9
 
 # Fast, deterministic, symbolic-PSPL: the instrument runs on these every time.
 UNMARKED = {"ob08092", "ob140939"}
@@ -130,6 +136,29 @@ def test_the_decomposition_reconciles(name):
 
 
 @pytest.mark.parametrize("name", sorted(UNMARKED))
+def test_the_fixture_stores_the_point_it_was_measured_at(name):
+    """
+    Given a recorded fixture,
+    When it is loaded,
+    Then it carries the start point every term was evaluated at.
+
+    Without the point, the cross-machine comparison below silently becomes
+    "each machine solves its own start and we compare the answers", which
+    cannot distinguish a solver converging differently from a likelihood
+    function that differs by platform.  A fixture missing its start is not a
+    weaker fixture, it is a different and much vaguer measurement.
+    """
+    # ARRANGE / ACT
+    path = os.path.join(FIXTURES, name + ".json")
+    if not os.path.exists(path):
+        pytest.skip(f"no fixture for {name}")
+    fixture = _load(path)
+
+    # ASSERT
+    assert fixture.get("start"), "fixture has no stored start point"
+
+
+@pytest.mark.parametrize("name", sorted(UNMARKED))
 def test_the_term_names_match_the_logp_terms(name):
     """
     Given a built model,
@@ -164,15 +193,17 @@ def test_the_model_still_matches_its_recorded_decomposition(name):
     appeared with the same value is a rename, which the diff reports
     separately so it is not mistaken for a match.
 
-    Compared with a tolerance, never to the byte: see TERM_RTOL above for the
-    measured cross-machine float noise that forces it.
+    Evaluated at the fixture's STORED start, not at this machine's own solved
+    one, so a cross-machine failure means the likelihood function differs
+    rather than the solver -- see TERM_RTOL above.
     """
     # ARRANGE
     fixture = _load(os.path.join(FIXTURES, name + ".json"))
     system, model = _build(fixture)
 
-    # ACT
-    parts, _, reconciles, _ = decompose(system, model)
+    # ACT -- replay the STORED start, so this machine and the recording
+    # machine evaluate identical parameter values.
+    parts, _, reconciles, _ = decompose(system, model, fixture["start"])
     assert reconciles, "the instrument stopped reconciling; fix it first"
 
     moved, appeared, vanished = compare(
