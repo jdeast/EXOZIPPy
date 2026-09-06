@@ -14,8 +14,9 @@ lightly-optimized microlensing solutions spanning the standard degeneracies:
 
 Three consumers share this module:
 
-- ``Lens._load_mmexofast_seeds`` (stage 3) pushes each fit as a per-seed hint
-  set when the lens block names an explicit ``mmexofast: <file>``.
+- ``MulensEvent._load_mmexofast_seeds`` (stage 3) pushes each fit as a
+  per-seed hint set when the mulensevent block names an explicit
+  ``mmexofast: <file>``.
 - ``MulensInstrument._resolve_mmexofast`` (stage 1) applies the bad-data
   mask (``excluded_points``) and error-rescaling factors (``errfacs``) to its
   own files, and -- when the user supplied no sufficient start values and no
@@ -253,25 +254,33 @@ def push_seed_hints(data, config_manager, want_rho, is_binary, source="?"):
                 f"this lens topology (binary={is_binary}, "
                 f"finite_source={want_rho})."
             )
+        # Post-split spellings (8.6.17): the trajectory offsets live on the
+        # SOURCE component's element 0, the event chain on mulensevent, and
+        # the companion geometry on LENS ELEMENT 1 -- element 0 is the
+        # masked primary, whose constraints are warn-dropped, so the old
+        # lens.0.* spellings would seed a parameter instance that cannot
+        # take a value while the real one silently kept its default.  Must
+        # match user_hints_sufficient above, which asks whether these same
+        # paths are derivable.
         d = {}
         if "t_0" in p:
-            d["lens.0.t_0"] = float(p["t_0"]) - jd_offset
+            d["source.0.t_0"] = float(p["t_0"]) - jd_offset
         for key, path in (
-            ("u_0", "lens.0.u_0"),
-            ("t_E", "lens.0.t_E"),
+            ("u_0", "source.0.u_0"),
+            ("t_E", "mulensevent.0.t_E"),
         ):
             if key in p:
                 d[path] = float(p[key])
         if want_rho and "rho" in p:
-            d["lens.0.rho"] = float(p["rho"])
+            d["source.0.rho"] = float(p["rho"])
         # s/q/alpha are companion (binary-lens) geometry only.
         if is_binary:
             if "s" in p and float(p["s"]) > 0:
-                d["lens.0.log_s"] = float(np.log10(float(p["s"])))
+                d["lens.1.log_s"] = float(np.log10(float(p["s"])))
             if "alpha" in p:
-                d["lens.0.alpha"] = float(p["alpha"])  # identity convention
+                d["lens.1.alpha"] = float(p["alpha"])  # identity convention
             if "q" in p:
-                d["lens.0.q"] = float(p["q"])
+                d["lens.1.q"] = float(p["q"])
         seed_sets.append(d)
 
     config_manager.add_seed_hints(seed_sets)
@@ -291,18 +300,18 @@ def push_seed_hints(data, config_manager, want_rho, is_binary, source="?"):
         if val is not None and np.isfinite(val) and val > 0:
             config_manager.add_scale_hint(path, float(val))
 
-    _sh("lens.0.t_0", s0.get("t_0"))
-    _sh("lens.0.u_0", s0.get("u_0"))
-    _sh("lens.0.t_E", s0.get("t_E"))
+    _sh("source.0.t_0", s0.get("t_0"))
+    _sh("source.0.u_0", s0.get("u_0"))
+    _sh("mulensevent.0.t_E", s0.get("t_E"))
     if want_rho and "log_rho" in s0 and "rho" in p0:
-        _sh("lens.0.rho", float(p0["rho"]) * float(s0["log_rho"]) * ln10)
+        _sh("source.0.rho", float(p0["rho"]) * float(s0["log_rho"]) * ln10)
     if is_binary:
         if "log_s" in s0:
-            _sh("lens.0.log_s", float(s0["log_s"]))
+            _sh("lens.1.log_s", float(s0["log_s"]))
         if "alpha" in s0:
-            _sh("lens.0.alpha", float(s0["alpha"]))
+            _sh("lens.1.alpha", float(s0["alpha"]))
         if "log_q" in s0 and "q" in p0:
-            _sh("lens.0.q", float(p0["q"]) * float(s0["log_q"]) * ln10)
+            _sh("lens.1.q", float(p0["q"]) * float(s0["log_q"]) * ln10)
 
     return len(seed_sets)
 

@@ -41,21 +41,22 @@ class _RecordingConfigManager:
 
 # The check now asks the relaxation engine whether each observable can be
 # DERIVED, not whether the params file happens to name it, so these tests
-# drive a real ConfigManager over a real lens topology.
+# drive a real ConfigManager over a real (post-split) mulens topology.
+# Index-form paths throughout: a bare ConfigManager never runs the
+# components' normalize_config_block hooks, so the body-derived instance
+# names ("source.Source.t_0") do not exist here.
 _PSPL_CONFIG = {
     "star": [{"name": "Lens"}, {"name": "Source"}],
-    "lens": [{"name": "Lens", "lenses": ["star.0"], "sources": ["star.1"]}],
+    "mulensevent": [{}],
+    "lens": [{"body": "star.Lens"}],
+    "source": [{"body": "star.Source"}],
 }
 _BINARY_CONFIG = {
     "star": [{"name": "Lens"}, {"name": "Source"}],
     "planet": [{"name": "b"}],
-    "lens": [
-        {
-            "name": "Lens",
-            "lenses": ["star.0", "planet.0"],
-            "sources": ["star.1"],
-        }
-    ],
+    "mulensevent": [{}],
+    "lens": [{"body": "star.Lens"}, {"body": "planet.b"}],
+    "source": [{"body": "star.Source"}],
 }
 
 
@@ -67,17 +68,18 @@ def _cm(params, config=None):
 
 def _full_pspl_params():
     return {
-        "lens.Lens.t_0": {"initval": 2458554.9},
-        "lens.Lens.u_0": {"initval": 0.14},
-        "lens.Lens.t_E": {"initval": 18.2},
+        "source.0.t_0": {"initval": 2458554.9},
+        "source.0.u_0": {"initval": 0.14},
+        "mulensevent.0.t_E": {"initval": 18.2},
     }
 
 
 def _binary_geometry():
+    # Companion slot 0 is LENS ELEMENT 1 (element 0 is the masked primary).
     return {
-        "lens.Lens.alpha": {"initval": -52.0},
-        "lens.Lens.q": {"initval": 1.1e-3},
-        "lens.Lens.s": {"initval": 0.98},
+        "lens.1.alpha": {"initval": -52.0},
+        "lens.1.q": {"initval": 1.1e-3},
+        "lens.1.s": {"initval": 0.98},
     }
 
 
@@ -99,7 +101,7 @@ def test_sufficiency_missing_t_E_is_insufficient():
     Then the hints are insufficient.
     """
     params = _full_pspl_params()
-    del params["lens.Lens.t_E"]
+    del params["mulensevent.0.t_E"]
     assert not mmx.user_hints_sufficient(
         _cm(params), is_binary=False, want_rho=False
     )
@@ -129,8 +131,8 @@ def test_sufficiency_accepts_log_s_for_s():
     """
     params = _full_pspl_params()
     params.update(_binary_geometry())
-    params["lens.Lens.log_s"] = params.pop("lens.Lens.s")
-    params["lens.Lens.log_s"] = {"initval": -0.01}
+    params["lens.1.log_s"] = params.pop("lens.1.s")
+    params["lens.1.log_s"] = {"initval": -0.01}
     assert mmx.user_hints_sufficient(
         _cm(params, _BINARY_CONFIG), is_binary=True, want_rho=False
     )
@@ -143,7 +145,7 @@ def test_sufficiency_bounds_only_entry_does_not_count():
     Then the entry does not count as a start value.
     """
     params = _full_pspl_params()
-    params["lens.Lens.t_E"] = {"lower": 1.0, "upper": 100.0}
+    params["mulensevent.0.t_E"] = {"lower": 1.0, "upper": 100.0}
     assert not mmx.user_hints_sufficient(
         _cm(params), is_binary=False, want_rho=False
     )
@@ -174,7 +176,7 @@ def test_sufficiency_accepts_a_derived_q_from_body_masses():
     """
     params = _full_pspl_params()
     params.update(_binary_geometry())
-    del params["lens.Lens.q"]
+    del params["lens.1.q"]
     params["planet.b.mass"] = {"initval": 0.35}
     params["star.Lens.logmass"] = {"initval": -0.4}
 
@@ -227,7 +229,7 @@ def test_probe_derivable_leaves_no_trace():
         for attr in cm._PROBE_SNAPSHOT_ATTRS
     }
 
-    cm.probe_derivable(["lens.0.t_E"])
+    cm.probe_derivable(["mulensevent.0.t_E"])
 
     assert cm.user_params == before[0]
     assert cm.diagnostics == before[1]
@@ -260,7 +262,7 @@ def test_probe_derivable_rolls_back_a_solver_timeout_blacklist(monkeypatch):
     cm = _cm(_full_pspl_params(), _BINARY_CONFIG)
     monkeypatch.setattr(cfgmod.sp, "solve", _always_times_out)
 
-    cm.probe_derivable(["lens.0.t_E"])
+    cm.probe_derivable(["mulensevent.0.t_E"])
 
     assert cm.symbolic_blacklist == set()
 
@@ -296,8 +298,8 @@ def test_seed_hints_subtract_jd_offset_from_t_0_only():
     n = mmx.push_seed_hints(data, cm, want_rho=False, is_binary=False)
     assert n == 1
     seed = cm.seed_hint_sets[0]
-    assert np.isclose(seed["lens.0.t_0"], 8554.9)
-    assert np.isclose(seed["lens.0.t_E"], 18.2)
+    assert np.isclose(seed["source.0.t_0"], 8554.9)
+    assert np.isclose(seed["mulensevent.0.t_E"], 18.2)
 
 
 def test_seed_hints_no_jd_offset_key_is_zero_shift():
@@ -311,7 +313,7 @@ def test_seed_hints_no_jd_offset_key_is_zero_shift():
     }
     cm = _RecordingConfigManager()
     mmx.push_seed_hints(data, cm, want_rho=False, is_binary=False)
-    assert np.isclose(cm.seed_hint_sets[0]["lens.0.t_0"], 2458554.9)
+    assert np.isclose(cm.seed_hint_sets[0]["source.0.t_0"], 2458554.9)
 
 
 # ---------------------------------------------------------------------------
@@ -704,7 +706,7 @@ def test_seed_hints_warn_when_a_fit_lacks_required_observables(caplog):
 
     assert n == 1
     seed = cm.seed_hint_sets[0]
-    assert set(seed) == {"lens.0.t_0", "lens.0.u_0"}
+    assert set(seed) == {"source.0.t_0", "source.0.u_0"}
     msg = " ".join(r.message for r in caplog.records)
     for missing in ("t_E", "rho", "s", "alpha", "q"):
         assert missing in msg
@@ -726,27 +728,27 @@ def test_seed_start_value_returns_user_units():
     """
     from exozippy.config import ConfigManager
 
-    cm = ConfigManager({}, system_config={"lens": [{"name": "Lens"}]})
+    cm = ConfigManager({}, system_config=_BINARY_CONFIG)
     cm.add_seed_hints(
         [
             {
-                "lens.0.t_0": 2458554.82,
-                "lens.0.u_0": 0.131,
-                "lens.0.t_E": 19.16,
-                "lens.0.log_s": -0.066,
-                "lens.0.alpha": -50.37,
-                "lens.0.q": 9.26e-4,
+                "source.0.t_0": 2458554.82,
+                "source.0.u_0": 0.131,
+                "mulensevent.0.t_E": 19.16,
+                "lens.1.log_s": -0.066,
+                "lens.1.alpha": -50.37,
+                "lens.1.q": 9.26e-4,
             },
-            {"lens.0.alpha": -50.47},
+            {"lens.1.alpha": -50.47},
         ]
     )
 
-    stored = cm.seed_hint_sets[0]["lens.0.alpha"]
+    stored = cm.seed_hint_sets[0]["lens.1.alpha"]
     assert np.isclose(stored, np.deg2rad(-50.37))  # internal storage: rad
 
-    assert np.isclose(cm.seed_start_value("lens.0.alpha"), -50.37)
-    assert np.isclose(cm.seed_start_value("lens.0.t_0"), 2458554.82)
-    assert np.isclose(cm.seed_start_value("lens.0.log_s"), -0.066)
-    assert np.isclose(cm.seed_start_value("lens.0.alpha", seed=1), -50.47)
-    assert cm.seed_start_value("lens.0.rho") is None  # never pushed
-    assert cm.seed_start_value("lens.0.t_0", seed=5) is None  # no such seed
+    assert np.isclose(cm.seed_start_value("lens.1.alpha"), -50.37)
+    assert np.isclose(cm.seed_start_value("source.0.t_0"), 2458554.82)
+    assert np.isclose(cm.seed_start_value("lens.1.log_s"), -0.066)
+    assert np.isclose(cm.seed_start_value("lens.1.alpha", seed=1), -50.47)
+    assert cm.seed_start_value("source.0.rho") is None  # never pushed
+    assert cm.seed_start_value("source.0.t_0", seed=5) is None  # no such seed

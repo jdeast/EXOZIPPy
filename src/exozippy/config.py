@@ -3230,9 +3230,10 @@ class ConfigManager:
         # hint -- a per-seed fit of the actual light curve is strictly more
         # informative than the generic guess a component pushes for every
         # seed alike.  (Today no real path is in both channels: the seeds
-        # carry lens.0.{t_0,u_0,t_E,rho,log_s,alpha,q}, and the only
-        # component hint that touches one of those, lens.0.alpha, is rank
-        # 20.  The rule is stated so a future overlap has a defined answer.)
+        # carry source.0.{t_0,u_0,rho}, mulensevent.0.t_E and
+        # lens.1.{log_s,alpha,q}, and the only component hint that touches
+        # one of those, the lens.<j+1>.alpha display hint, is rank 20.  The
+        # rule is stated so a future overlap has a defined answer.)
         # Anything above PRECEDENCE_DERIVED_DATA -- every user entry, in particular
         # a scalar initval, which lives in user_provided_params -- wins.
         for path_str, val in (seed_hints or {}).items():
