@@ -1,5 +1,5 @@
-"""Tests for code-review fixes in the MulensModel Op layer and Lens/Instrument
-config validation."""
+"""Tests for code-review fixes in the MulensModel Op layer and the
+microlensing component/Instrument config validation."""
 
 import logging
 import warnings
@@ -10,6 +10,7 @@ import pytest
 
 from conftest import _DummyComponent, _DummyConfigManager, _DummySystem
 from exozippy.components.mulensing.lens import Lens
+from exozippy.components.mulensing.mulensevent import MulensEvent
 from exozippy.components.mulensing.mulensinstrument import MulensInstrument
 from exozippy.components.mulensing.op import (
     BinaryLensMagOp,
@@ -23,6 +24,77 @@ from exozippy.components.mulensing.op import (
 from exozippy.run import KNOWN_SAMPLER_KEYS
 
 COORDS = "270.0d -28.0d"
+
+
+# ---------------------------------------------------------------------------
+# Post-split config stubs (8.6.17)
+#
+# The pre-split `lens:` block became four components: `mulensevent` (one
+# instance, every event-level option, the magnification dispatcher and the
+# body-reference guards), `lens` (one entry per lens BODY, element 0 the
+# masked primary), `source` (one entry per source body) and the body
+# star/planet components.  `body:` references are resolved against the RAW
+# system config when a component is constructed, so a stub ConfigManager has
+# to carry one -- _DummyConfigManager alone no longer gets a mulens
+# component built.
+# ---------------------------------------------------------------------------
+
+_STAR_NAMES = ["A", "B", "C", "D", "E", "F"]
+_PLANET_NAMES = ["b", "c"]
+
+
+class _MuConfigManager(_DummyConfigManager):
+    """_DummyConfigManager plus the `system_config` that the body-reference
+    parser reads (bodies.resolve_body_ref)."""
+
+    def __init__(self, system_config):
+        self.system_config = system_config
+        self.user_params = {}
+
+
+def _mu_config(n_star=2, n_planet=0, event=None, lens=None, source=None):
+    """A minimal post-split microlensing system config.
+
+    Bodies are referenced BY NAME, not by index: derive_body_names names
+    each lens/source instance after the trailing segment of its `body:`
+    ref, so index-form refs ('star.0', 'star.1') would hand two lens
+    bodies the duplicate instance names '0' and '1' and Component.__init__
+    would refuse the block.  The tuples the guards report are still
+    (component, INDEX), so 'star.A' is ('star', 0), 'planet.b' is
+    ('planet', 0), and the assertions below are unchanged.
+    """
+    cfg = {"star": [{"name": n} for n in _STAR_NAMES[:n_star]]}
+    if n_planet:
+        cfg["planet"] = [{"name": n} for n in _PLANET_NAMES[:n_planet]]
+    cfg["mulensevent"] = [{}] if event is None else event
+    cfg["lens"] = [{"body": "star.A"}] if lens is None else lens
+    cfg["source"] = [{"body": "star.B"}] if source is None else source
+    return cfg
+
+
+def _make_event(**kwargs):
+    """The MulensEvent of the config `_mu_config(**kwargs)` describes."""
+    cfg = _mu_config(**kwargs)
+    return MulensEvent(cfg["mulensevent"], _MuConfigManager(cfg))
+
+
+def _make_lens(**kwargs):
+    """The Lens of the config `_mu_config(**kwargs)` describes."""
+    cfg = _mu_config(**kwargs)
+    return Lens(cfg["lens"], _MuConfigManager(cfg))
+
+
+def _bodies_system(n_star=2, n_planet=0):
+    """A _DummySystem carrying just the body components the validators read.
+
+    (_DummySystem is an empty namespace in the shared conftest; the mulens
+    stubs the split needs are attached here, not there.)
+    """
+    system = _DummySystem()
+    system.star = _DummyComponent(n_star)
+    if n_planet:
+        system.planet = _DummyComponent(n_planet)
+    return system
 
 
 def test_dev_skycoord_cache_distinguishes_same_length_arrays():
@@ -394,42 +466,48 @@ def test_mag_grad_op_still_declares_the_cotangent_connected():
 
 def test_lens_rejects_missing_body_component():
     """
-    Given a lens config referencing 'planet.0' while the system has no
+    Given a lens config referencing 'planet.b' while the system declares no
       planet component,
-    When register_parameters validates the body references,
+    When the body references are resolved,
     Then a clear ValueError is raised instead of an AttributeError deep in
       the model build.
+
+    Post-split the guard fires one stage earlier than it used to: every
+    `body:` reference is resolved against the raw system config when the
+    component is constructed (bodies.resolve_body_ref), and
+    MulensEvent._validate_bodies -- which inherited the pre-split
+    Lens._validate_bodies -- repeats the check against the live components
+    at registration.  Either way it is a named ValueError, which is what
+    this pins.
     """
-    # Arrange
-    lens = Lens(
-        [{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
-        _DummyConfigManager(),
-    )
-    system = _DummySystem()
-    system.star = _DummyComponent(2)
+    # Arrange: no `planet:` block at all, so 'planet.b' resolves to nothing.
+    cfg = _mu_config(n_star=2, lens=[{"body": "star.A"}, {"body": "planet.b"}])
 
     # Act / Assert
     with pytest.raises(ValueError, match="planet"):
-        lens.register_parameters(system)
+        Lens(cfg["lens"], _MuConfigManager(cfg))
 
 
 def test_lens_rejects_out_of_range_body_index():
     """
-    Given a lens config whose source index exceeds the number of configured
+    Given a source config whose body index exceeds the number of configured
       star instances,
-    When register_parameters validates the body references,
+    When the body references are resolved,
     Then a ValueError naming the out-of-range reference is raised.
+
+    Same relocation as the test above: the index-form ref is range-checked
+    against the config block at construction, and again against the live
+    component's n_elements in MulensEvent._validate_bodies.
     """
     # Arrange
-    lens = Lens(
-        [{"lenses": ["star.0"], "sources": ["star.5"]}], _DummyConfigManager()
-    )
-    system = _DummySystem()
-    system.star = _DummyComponent(2)
+    cfg = _mu_config(n_star=2, source=[{"body": "star.5"}])
 
     # Act / Assert
-    with pytest.raises(ValueError, match="out of range"):
-        lens.register_parameters(system)
+    with pytest.raises(ValueError, match="out of range") as excinfo:
+        MulensEvent(cfg["mulensevent"], _MuConfigManager(cfg))
+    assert "star.5" in str(excinfo.value), (
+        "the offending reference must be named"
+    )
 
 
 def test_lens_rejects_a_non_star_primary_body():
@@ -441,25 +519,26 @@ def test_lens_rejects_a_non_star_primary_body():
 
     This config used to build happily and be silently wrong: the lens maps
     carry only an index and every primary-side dependency is hard-coded to
-    the star component (star.mass[lens_map], star.distance[lens_map],
-    star.pm_*[lens_map]).  Measured on examples/ob08092, lenses:
-    ["planet.0"] produced a theta_E bit-identical to lenses: ["star.0"],
-    responding to that star's mass and completely insensitive to the
-    planet's -- a fit that finishes and reports a lens mass which never
-    entered the likelihood.
+    the star component (star.mass[primary_lens_map],
+    star.distance[lens_map], star.pm_*[lens_map]).  Measured on
+    examples/ob08092, a planet primary produced a theta_E bit-identical to
+    the star's, responding to that star's mass and completely insensitive
+    to the planet's -- a fit that finishes and reports a lens mass which
+    never entered the likelihood.  The guard moved to MulensEvent with the
+    split; the physics argument is unchanged.
     """
     # Arrange
-    lens = Lens(
-        [{"lenses": ["planet.0"], "sources": ["star.0"]}],
-        _DummyConfigManager(),
+    event = _make_event(
+        n_star=1,
+        n_planet=1,
+        lens=[{"body": "planet.b"}],
+        source=[{"body": "star.A"}],
     )
-    system = _DummySystem()
-    system.star = _DummyComponent(1)
-    system.planet = _DummyComponent(1)
+    system = _bodies_system(n_star=1, n_planet=1)
 
     # Act / Assert
     with pytest.raises(ValueError, match="primary") as excinfo:
-        lens.register_parameters(system)
+        event.register_parameters(system)
     message = str(excinfo.value)
     assert "planet.0" in message, "the offending entry must be named"
     assert "must be a star" in message
@@ -473,22 +552,26 @@ def test_lens_accepts_a_planet_companion_behind_a_star_primary():
     Then no error is raised -- the primary-type guard must not touch the
       companion slots, whose mass dependencies already carry the component
       type.
+
+    ``lens_bodies`` is a FLAT list of bodies now (one `lens:` entry each)
+    rather than the pre-split per-event nesting, so the assertion drops one
+    level of indexing; the content is the same.
     """
     # Arrange
-    lens = Lens(
-        [{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
-        _DummyConfigManager(),
+    event = _make_event(
+        n_star=2,
+        n_planet=1,
+        lens=[{"body": "star.A"}, {"body": "planet.b"}],
+        source=[{"body": "star.B"}],
     )
-    system = _DummySystem()
-    system.star = _DummyComponent(2)
-    system.planet = _DummyComponent(1)
+    system = _bodies_system(n_star=2, n_planet=1)
 
     # Act
-    lens._validate_bodies(system)
+    event._validate_bodies(system)
 
     # Assert
-    assert lens.lens_bodies[0] == [("star", 0), ("planet", 0)]
-    assert lens.n_companions == 1
+    assert event.lens_bodies == [("star", 0), ("planet", 0)]
+    assert event.n_companions == 1
 
 
 def test_lens_accepts_a_stellar_companion_and_a_plain_single_star_lens():
@@ -498,19 +581,23 @@ def test_lens_accepts_a_stellar_companion_and_a_plain_single_star_lens():
     Then neither raises (the guard is scoped to a non-star PRIMARY only).
     """
     # Arrange
-    system = _DummySystem()
-    system.star = _DummyComponent(3)
+    system = _bodies_system(n_star=3)
 
-    binary = Lens(
-        [{"lenses": ["star.0", "star.1"], "sources": ["star.2"]}],
-        _DummyConfigManager(),
+    binary = _make_event(
+        n_star=3,
+        lens=[{"body": "star.A"}, {"body": "star.B"}],
+        source=[{"body": "star.C"}],
     )
-    single = Lens([{"lens_ndx": 0, "source_ndx": 1}], _DummyConfigManager())
+    # The single-lens case: pre-split this was the legacy lens_ndx/source_ndx
+    # default, which the split removed (every body is an explicit entry).
+    single = _make_event(
+        n_star=3, lens=[{"body": "star.A"}], source=[{"body": "star.B"}]
+    )
 
     # Act / Assert
     binary._validate_bodies(system)
     single._validate_bodies(system)
-    assert single.lens_bodies[0] == [("star", 0)]
+    assert single.lens_bodies == [("star", 0)]
 
 
 def test_lens_rejects_a_non_star_source_body():
@@ -520,24 +607,30 @@ def test_lens_rejects_a_non_star_source_body():
     Then a ValueError explains that a source must be a star, names the star
       that would otherwise have been modeled, and gives the workaround.
 
-    source_map is index-only exactly like lens_map and the whole
-    source-side chain resolves through the star component
-    (star.distance[source_map], star.pm_*[source_map],
-    star.radius[source_map], get_magnification's star.ra/dec), so the
-    failure mode is identical to the lens-primary one.
+    The source-side maps are index-only exactly like the lens ones
+    (MulensEvent.source_map, Source.star_map) and the whole source-side
+    chain resolves through the star component (star.distance[source_map],
+    star.pm_*[source_map], star.radius, the Op's frozen star.ra/dec), so
+    the failure mode is identical to the lens-primary one.
+
+    NOTE (post-split): the message no longer names the star that would
+    otherwise have been modeled, so the second assertion below FAILS.  That
+    clause was deliberate -- it is what tells the user which body the
+    silently-wrong fit was actually using -- and restoring it belongs in
+    MulensEvent._validate_bodies, not here.
     """
     # Arrange
-    lens = Lens(
-        [{"lenses": ["star.0"], "sources": ["planet.0"]}],
-        _DummyConfigManager(),
+    event = _make_event(
+        n_star=1,
+        n_planet=1,
+        lens=[{"body": "star.A"}],
+        source=[{"body": "planet.b"}],
     )
-    system = _DummySystem()
-    system.star = _DummyComponent(1)
-    system.planet = _DummyComponent(1)
+    system = _bodies_system(n_star=1, n_planet=1)
 
     # Act / Assert
     with pytest.raises(ValueError, match="must be a") as excinfo:
-        lens.register_parameters(system)
+        event.register_parameters(system)
     message = str(excinfo.value)
     assert "planet.0" in message, "the offending entry must be named"
     assert "star.0" in message, "name the star that would be modeled instead"
@@ -553,17 +646,17 @@ def test_lens_rejects_a_non_star_body_in_a_second_source_slot():
       independently monitored luminous star.
     """
     # Arrange
-    lens = Lens(
-        [{"lenses": ["star.0"], "sources": ["star.1", "planet.0"]}],
-        _DummyConfigManager(),
+    event = _make_event(
+        n_star=2,
+        n_planet=1,
+        lens=[{"body": "star.A"}],
+        source=[{"body": "star.B"}, {"body": "planet.b"}],
     )
-    system = _DummySystem()
-    system.star = _DummyComponent(2)
-    system.planet = _DummyComponent(1)
+    system = _bodies_system(n_star=2, n_planet=1)
 
     # Act / Assert
     with pytest.raises(ValueError, match="source body 'planet.0'"):
-        lens._validate_bodies(system)
+        event._validate_bodies(system)
 
 
 def test_lens_accepts_multiple_star_sources():
@@ -573,41 +666,44 @@ def test_lens_accepts_multiple_star_sources():
     Then no error is raised and both source slots survive.
     """
     # Arrange
-    lens = Lens(
-        [{"lenses": ["star.0"], "sources": ["star.1", "star.2"]}],
-        _DummyConfigManager(),
+    event = _make_event(
+        n_star=3,
+        lens=[{"body": "star.A"}],
+        source=[{"body": "star.B"}, {"body": "star.C"}],
     )
-    system = _DummySystem()
-    system.star = _DummyComponent(3)
+    system = _bodies_system(n_star=3)
 
     # Act
-    lens._validate_bodies(system)
+    event._validate_bodies(system)
 
     # Assert
-    assert lens.source_bodies[0] == [("star", 1), ("star", 2)]
-    assert lens.n_sources == 2
+    assert event.source_bodies == [("star", 1), ("star", 2)]
+    assert event.n_sources == 2
 
 
 def test_omitted_sources_key_with_one_star_is_caught_not_silent():
     """
-    Given a config that omits 'sources:' entirely while defining only ONE
-      star (so the source_ndx default of 1 points at a star that does not
-      exist),
-    When the body references are validated,
-    Then the existing out-of-range check catches it with a clear message.
+    Given a config that omits the source bodies entirely,
+    When the microlensing components are constructed,
+    Then the omission is caught with a message naming the missing block.
 
-    Recorded because the default is easy to trip: 'sources' defaults to
-    [("star", source_ndx)] with source_ndx = 1, i.e. the SECOND star.
+    Recorded pre-split because the default was easy to trip SILENTLY:
+    'sources' defaulted to [("star", source_ndx)] with source_ndx = 1, i.e.
+    the SECOND star, so a one-star config only failed downstream through
+    the out-of-range check.  That default is gone -- every source body is
+    now an explicit `source:` entry -- so the specific out-of-range
+    mechanism this test pinned has NO post-split equivalent.  What survives
+    is the property the fix was really about: an omitted source is refused,
+    not silently assumed.
     """
     # Arrange
-    lens = Lens([{}], _DummyConfigManager())
-    system = _DummySystem()
-    system.star = _DummyComponent(1)
+    cfg = _mu_config(n_star=1, lens=[{"body": "star.A"}])
+    del cfg["source"]
 
     # Act / Assert
-    with pytest.raises(ValueError, match="out of range") as excinfo:
-        lens._validate_bodies(system)
-    assert "star.1" in str(excinfo.value)
+    with pytest.raises(ValueError, match="must also declare") as excinfo:
+        MulensEvent(cfg["mulensevent"], _MuConfigManager(cfg))
+    assert "source" in str(excinfo.value)
 
 
 def test_lens_rejects_a_body_that_is_both_lens_and_source():
@@ -622,16 +718,14 @@ def test_lens_rejects_a_body_that_is_both_lens_and_source():
     failure far from the config line that caused it.
     """
     # Arrange
-    lens = Lens(
-        [{"lenses": ["star.0"], "sources": ["star.0"]}],
-        _DummyConfigManager(),
+    event = _make_event(
+        n_star=2, lens=[{"body": "star.A"}], source=[{"body": "star.A"}]
     )
-    system = _DummySystem()
-    system.star = _DummyComponent(2)
+    system = _bodies_system(n_star=2)
 
     # Act / Assert
     with pytest.raises(ValueError, match="BOTH a lens body") as excinfo:
-        lens._validate_bodies(system)
+        event._validate_bodies(system)
     message = str(excinfo.value)
     assert "star.0" in message
     assert "pi_rel" in message and "NaN" in message
@@ -639,20 +733,28 @@ def test_lens_rejects_a_body_that_is_both_lens_and_source():
 
 def test_lens_rejects_self_lensing_via_the_legacy_ndx_keys():
     """
-    Given the legacy spelling lens_ndx == source_ndx,
-    When the body references are validated,
-    Then the same error is raised -- the legacy keys normalize into
-      lens_bodies/source_bodies in __init__, so one check covers both
-      spellings.
+    Given the legacy spelling lens_ndx / source_ndx,
+    When the lens block is parsed,
+    Then it is refused as a pre-v0.1.0 spelling, by name.
+
+    The fix this pinned -- the legacy keys normalized into lens_bodies/
+    source_bodies in __init__, so ONE self-lensing check covered both
+    spellings -- has no post-split equivalent: ruling R3 makes the split a
+    hard break and leaves exactly one spelling, which the test above pins.
+    What is kept here is the half that still means something: the dead
+    spelling fails loudly and is named as pre-v0.1.0 rather than silently
+    ignored, which is what a half-migrated config actually does
+    (bodies.body_entries).
     """
     # Arrange
-    lens = Lens([{"lens_ndx": 0, "source_ndx": 0}], _DummyConfigManager())
-    system = _DummySystem()
-    system.star = _DummyComponent(2)
+    cfg = _mu_config(
+        n_star=2, lens=[{"lens_ndx": 0}], source=[{"source_ndx": 0}]
+    )
 
     # Act / Assert
-    with pytest.raises(ValueError, match="BOTH a lens body"):
-        lens._validate_bodies(system)
+    with pytest.raises(ValueError, match="pre-v0.1.0") as excinfo:
+        Lens(cfg["lens"], _MuConfigManager(cfg))
+    assert "lens_ndx" in str(excinfo.value)
 
 
 def test_lens_rejects_overlap_with_a_second_source_body():
@@ -664,68 +766,69 @@ def test_lens_rejects_overlap_with_a_second_source_body():
       just the primary slots.
     """
     # Arrange
-    lens = Lens(
-        [{"lenses": ["star.0", "star.1"], "sources": ["star.2", "star.0"]}],
-        _DummyConfigManager(),
+    event = _make_event(
+        n_star=3,
+        lens=[{"body": "star.A"}, {"body": "star.B"}],
+        source=[{"body": "star.C"}, {"body": "star.A"}],
     )
-    system = _DummySystem()
-    system.star = _DummyComponent(3)
+    system = _bodies_system(n_star=3)
 
     # Act / Assert
     with pytest.raises(ValueError, match="'star.0' is listed as BOTH"):
-        lens._validate_bodies(system)
+        event._validate_bodies(system)
 
 
 def test_distinct_lens_and_source_bodies_are_accepted():
     """
-    Given ordinary configs (single-star PSPL by legacy default, an explicit
-      binary lens, and a 2S source list) where no body is shared,
+    Given ordinary configs (single-star PSPL, an explicit binary lens, and a
+      2S source list) where no body is shared,
     When the body references are validated,
     Then nothing is raised.
     """
     # Arrange
-    system = _DummySystem()
-    system.star = _DummyComponent(4)
-    system.planet = _DummyComponent(1)
-    configs = [
-        {},  # legacy defaults: lens_ndx 0, source_ndx 1
-        {"lenses": ["star.0", "planet.0"], "sources": ["star.1"]},
-        {"lenses": ["star.0"], "sources": ["star.1", "star.2"]},
+    system = _bodies_system(n_star=4, n_planet=1)
+    topologies = [
+        # single-star PSPL (the pre-split legacy lens_ndx/source_ndx default)
+        ([{"body": "star.A"}], [{"body": "star.B"}]),
+        # binary lens with a planet companion
+        ([{"body": "star.A"}, {"body": "planet.b"}], [{"body": "star.B"}]),
+        # 2S: two source bodies
+        ([{"body": "star.A"}], [{"body": "star.B"}, {"body": "star.C"}]),
     ]
 
     # Act / Assert
-    for cfg in configs:
-        Lens([cfg], _DummyConfigManager())._validate_bodies(system)
+    for lens_bodies, source_bodies in topologies:
+        _make_event(
+            n_star=4, n_planet=1, lens=lens_bodies, source=source_bodies
+        )._validate_bodies(system)
 
 
 def test_lens_rejects_malformed_body_reference():
     """
-    Given a body reference without an index ('planet' instead of 'planet.0'),
+    Given a body reference without an instance ('planet' instead of
+      'planet.b'),
     When the Lens component parses its config,
     Then a ValueError explaining the expected format is raised.
     """
+    cfg = _mu_config(n_star=2, lens=[{"body": "planet"}])
     with pytest.raises(ValueError, match="body reference"):
-        Lens(
-            [{"lenses": ["planet"], "sources": ["star.1"]}],
-            _DummyConfigManager(),
-        )
+        Lens(cfg["lens"], _MuConfigManager(cfg))
 
 
 def test_lens_rejects_multiple_events():
     """
-    Given a lens config with two entries (two independent event geometries),
-    When the Lens component is constructed,
+    Given two mulensevent entries (two independent event geometries),
+    When the MulensEvent component is constructed,
     Then a ValueError states that only one event may be modeled at a time
       (instead of downstream code silently fitting all data with event 0).
+
+    The guard moved to the event component with the split -- which is also
+    where it now belongs: multiple lens or source BODIES are ordinary
+    entries of the `lens:`/`source:` lists, and it is a second EVENT that
+    is refused.
     """
     with pytest.raises(ValueError, match="one lensing event"):
-        Lens(
-            [
-                {"lenses": ["star.0"], "sources": ["star.1"]},
-                {"lenses": ["star.2"], "sources": ["star.3"]},
-            ],
-            _DummyConfigManager(),
-        )
+        _make_event(n_star=2, event=[{}, {}])
 
 
 def test_n_lens_bodies_are_accepted_and_sized_per_companion():
@@ -733,30 +836,34 @@ def test_n_lens_bodies_are_accepted_and_sized_per_companion():
     Given a lens config with three lens bodies (one primary + two companions),
     When the Lens registers its parameters,
     Then construction succeeds (no triple-lens rejection) and the companion
-      geometry parameters s/xalpha/yalpha are sized per companion.
+      geometry parameters s/xalpha/yalpha cover exactly the two companions.
+
+    Post-split those vectors are FULL-LENGTH -- one entry per lens BODY --
+    with element 0, the primary, masked INACTIVE (manifest role 4), rather
+    than the pre-split shape (n_companions,).  So "sized per companion" is
+    now spelled as the mask, and the off-by-one it creates is the one to
+    watch: companion slot j is lens element j+1.
     """
     # Arrange
-    lens = Lens(
-        [
-            {
-                "lenses": ["star.0", "planet.0", "planet.1"],
-                "sources": ["star.1"],
-            }
-        ],
-        _DummyConfigManager(),
+    lens = _make_lens(
+        n_star=2,
+        n_planet=2,
+        lens=[{"body": "star.A"}, {"body": "planet.b"}, {"body": "planet.c"}],
+        source=[{"body": "star.B"}],
     )
-    system = _DummySystem()
-    system.star = _DummyComponent(2)
-    system.planet = _DummyComponent(2)
+    system = _bodies_system(n_star=2, n_planet=2)
 
     # Act
     lens.register_parameters(system)
 
     # Assert
     assert lens.n_companions == 2
-    assert lens.manifest["s"]["shape"] == (2,)
-    assert lens.manifest["xalpha"]["shape"] == (2,)
-    assert lens.manifest["yalpha"]["shape"] == (2,)
+    for name in ("s", "xalpha", "yalpha"):
+        np.testing.assert_array_equal(
+            lens.manifest[name]["mask"],
+            [False, True, True],
+            err_msg=f"{name} must be active on the two companions only",
+        )
 
 
 def test_triple_lens_mulensmodel_backend_fails_loudly():
@@ -770,43 +877,33 @@ def test_triple_lens_mulensmodel_backend_fails_loudly():
     The default vbm_direct backend supports 3+ bodies via VBMicrolensing
     MultiMag2 (see test_vbm_direct_vs_mulensmodel.py).
     """
-    lens = Lens(
-        [
-            {
-                "lenses": ["star.0", "planet.0", "planet.1"],
-                "sources": ["star.1"],
-                "backend": "mulensmodel",
-            }
-        ],
-        _DummyConfigManager(),
+    event = _make_event(
+        n_star=2,
+        n_planet=2,
+        event=[{"backend": "mulensmodel"}],
+        lens=[{"body": "star.A"}, {"body": "planet.b"}, {"body": "planet.c"}],
+        source=[{"body": "star.B"}],
     )
     with pytest.raises(NotImplementedError, match="backend"):
-        lens.get_magnification_op(None, None, None, index=0)
+        event.get_magnification_op(None, None, None, index=0)
 
 
 def test_lens_backend_defaults_to_vbm_direct_and_validates():
     """
-    Given a lens block without a backend key,
-    When the Lens is constructed,
+    Given a mulensevent block without a backend key,
+    When the component is constructed,
     Then backend defaults to 'vbm_direct'; an unknown backend raises.
     """
-    lens = Lens(
-        [{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
-        _DummyConfigManager(),
+    binary = dict(
+        n_star=2,
+        n_planet=1,
+        lens=[{"body": "star.A"}, {"body": "planet.b"}],
+        source=[{"body": "star.B"}],
     )
-    assert lens.backend == "vbm_direct"
+    assert _make_event(**binary).backend == "vbm_direct"
 
     with pytest.raises(ValueError, match="backend"):
-        Lens(
-            [
-                {
-                    "lenses": ["star.0", "planet.0"],
-                    "sources": ["star.1"],
-                    "backend": "nope",
-                }
-            ],
-            _DummyConfigManager(),
-        )
+        _make_event(event=[{"backend": "nope"}], **binary)
 
 
 def _make_inst_with_q_source_data(
@@ -827,12 +924,15 @@ def _make_inst_with_q_source_data(
     """
     inst = MulensInstrument.__new__(MulensInstrument)
     inst.config_manager = _DummyConfigManager()
+    # Post-split paths: the per-source trajectory (t_0, u_0) is on `source`,
+    # the event-level scalars (t_E, pi_E_*) on the one-instance
+    # `mulensevent`.
     inst.config_manager.user_params = {
-        "lens.0.t_0": {"initval": t0},
-        "lens.0.u_0": {"initval": u0},
-        "lens.0.t_E": {"initval": tE},
-        "lens.0.pi_E_N": {"initval": 0.0},
-        "lens.0.pi_E_E": {"initval": 0.0},
+        "source.0.t_0": {"initval": t0},
+        "source.0.u_0": {"initval": u0},
+        "mulensevent.0.t_E": {"initval": tE},
+        "mulensevent.0.pi_E_N": {"initval": 0.0},
+        "mulensevent.0.pi_E_E": {"initval": 0.0},
     }
 
     t = np.linspace(t0 - 40, t0 + 40, n)
@@ -892,15 +992,17 @@ def _make_2s_inst(f_blend=0.4, f_src=(0.6, 0.2), n=400):
     inst = MulensInstrument.__new__(MulensInstrument)
     inst._n_sources = 2
     inst.config_manager = _DummyConfigManager()
+    # Post-split: the SECOND source track is source.1.* (a second `source:`
+    # body), and t_E is one event-level scalar shared by both tracks -- the
+    # pre-split lens.1.t_E entry has no successor.
     inst.config_manager.user_params = {
-        "lens.0.t_0": {"initval": t0a},
-        "lens.0.u_0": {"initval": u0},
-        "lens.0.t_E": {"initval": tE},
-        "lens.1.t_0": {"initval": t0b},
-        "lens.1.u_0": {"initval": 0.15},
-        "lens.1.t_E": {"initval": tE},
-        "lens.0.pi_E_N": {"initval": 0.0},
-        "lens.0.pi_E_E": {"initval": 0.0},
+        "source.0.t_0": {"initval": t0a},
+        "source.0.u_0": {"initval": u0},
+        "source.1.t_0": {"initval": t0b},
+        "source.1.u_0": {"initval": 0.15},
+        "mulensevent.0.t_E": {"initval": tE},
+        "mulensevent.0.pi_E_N": {"initval": 0.0},
+        "mulensevent.0.pi_E_E": {"initval": 0.0},
     }
 
     t = np.linspace(t0a - 40, t0a + 40, n)
@@ -1084,11 +1186,8 @@ def test_q_absent_from_pspl_manifest():
     When register_parameters runs,
     Then 'q' is not in the manifest (no companion, no mass ratio).
     """
-    lens = Lens(
-        [{"lenses": ["star.0"], "sources": ["star.1"]}], _DummyConfigManager()
-    )
-    system = _DummySystem()
-    system.star = _DummyComponent(2)
+    lens = _make_lens(n_star=2)
+    system = _bodies_system(n_star=2)
     lens.build_maps()
     lens.register_parameters(system)
 
@@ -1101,21 +1200,35 @@ def test_q_is_derived_for_planet_companion():
     When register_parameters runs,
     Then 'q' is in the manifest as a derived parameter (has expr_key) and
       its deps reference 'planet.mass' for the companion.
+
+    Post-split q is a full-length per-BODY vector with element 0 (the
+    primary) masked inactive, so a wholly derived parameter's expr_key is
+    spelled as the per-element selector {block: mask} rather than the bare
+    block name -- mode_manifest keeps the selector precisely because the
+    inactive element must NOT be claimed by the expression.  Same claim as
+    before: q is derived from the 'default' block on every companion
+    element.
     """
-    lens = Lens(
-        [{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
-        _DummyConfigManager(),
+    lens = _make_lens(
+        n_star=2,
+        n_planet=1,
+        lens=[{"body": "star.A"}, {"body": "planet.b"}],
+        source=[{"body": "star.B"}],
     )
-    system = _DummySystem()
-    system.star = _DummyComponent(2)
-    system.planet = _DummyComponent(1)
+    system = _bodies_system(n_star=2, n_planet=1)
     lens.build_maps()
     lens.register_parameters(system)
 
     assert "q" in lens.manifest
     q_entry = lens.manifest["q"]
     assert isinstance(q_entry, dict)
-    assert q_entry.get("expr_key") == "default"
+    expr_key = q_entry.get("expr_key")
+    assert set(expr_key) == {"default"}
+    np.testing.assert_array_equal(
+        expr_key["default"],
+        [False, True],
+        err_msg="q must be derived on the companion element, not the primary",
+    )
     deps = q_entry.get("deps", [])
     assert any("planet.mass" in d for d in deps), (
         f"planet companion: expected 'planet.mass' dep, got {deps}"
@@ -1132,12 +1245,12 @@ def test_q_deps_use_star_mass_for_stellar_binary():
     Then 'q' deps reference 'star.mass' for both primary and companion
       (not 'planet.mass').
     """
-    lens = Lens(
-        [{"lenses": ["star.0", "star.1"], "sources": ["star.2"]}],
-        _DummyConfigManager(),
+    lens = _make_lens(
+        n_star=3,
+        lens=[{"body": "star.A"}, {"body": "star.B"}],
+        source=[{"body": "star.C"}],
     )
-    system = _DummySystem()
-    system.star = _DummyComponent(3)
+    system = _bodies_system(n_star=3)
     lens.build_maps()
     lens.register_parameters(system)
 
@@ -1156,15 +1269,23 @@ def test_companion_mass_map_points_to_correct_index():
     When build_maps runs,
     Then primary_lens_map points to star index 0 and
       companion0_mass_map points to planet index 0.
-    """
-    lens = Lens(
-        [{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
-        _DummyConfigManager(),
-    )
-    lens.build_maps()
 
-    np.testing.assert_array_equal(lens.primary_lens_map, [0])
-    np.testing.assert_array_equal(lens.companion0_mass_map, [0])
+    The event-level mass maps (mlens_total's typed per-companion deps) are
+    MulensEvent's post-split, and stay length 1 -- the natural shape of a
+    one-instance component.  Lens has its OWN full-length
+    primary_lens_map/companion_body_map for the per-body q; both are
+    exercised by the q tests above.
+    """
+    event = _make_event(
+        n_star=2,
+        n_planet=1,
+        lens=[{"body": "star.A"}, {"body": "planet.b"}],
+        source=[{"body": "star.B"}],
+    )
+    event.build_maps()
+
+    np.testing.assert_array_equal(event.primary_lens_map, [0])
+    np.testing.assert_array_equal(event.companion0_mass_map, [0])
 
 
 def test_companion_mass_map_stellar_binary_points_to_second_star():
@@ -1173,14 +1294,15 @@ def test_companion_mass_map_stellar_binary_points_to_second_star():
     When build_maps runs,
     Then companion0_mass_map points to star index 1.
     """
-    lens = Lens(
-        [{"lenses": ["star.0", "star.1"], "sources": ["star.2"]}],
-        _DummyConfigManager(),
+    event = _make_event(
+        n_star=3,
+        lens=[{"body": "star.A"}, {"body": "star.B"}],
+        source=[{"body": "star.C"}],
     )
-    lens.build_maps()
+    event.build_maps()
 
-    np.testing.assert_array_equal(lens.primary_lens_map, [0])
-    np.testing.assert_array_equal(lens.companion0_mass_map, [1])
+    np.testing.assert_array_equal(event.primary_lens_map, [0])
+    np.testing.assert_array_equal(event.companion0_mass_map, [1])
 
 
 def test_calc_q_returns_mass_ratio():
@@ -1212,10 +1334,7 @@ def test_pspl_lens_has_no_sampler_requirements():
     Then it returns an empty dict — PSPL uses a symbolic PyTensor formula
       that is NUTS-compatible and imposes no sampler constraints.
     """
-    lens = Lens(
-        [{"lenses": ["star.0"], "sources": ["star.1"]}], _DummyConfigManager()
-    )
-    assert lens.sampler_requirements() == {}
+    assert _make_event(n_star=2).sampler_requirements() == {}
 
 
 def test_binary_lens_requires_ptde_and_rejects_gradient_samplers():
@@ -1226,12 +1345,14 @@ def test_binary_lens_requires_ptde_and_rejects_gradient_samplers():
       incompatible and recommends 'ptde_async', because the Op is not
       differentiable and gradient-based samplers produce invalid results.
     """
-    lens = Lens(
-        [{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
-        _DummyConfigManager(),
+    event = _make_event(
+        n_star=2,
+        n_planet=1,
+        lens=[{"body": "star.A"}, {"body": "planet.b"}],
+        source=[{"body": "star.B"}],
     )
 
-    reqs = lens.sampler_requirements()
+    reqs = event.sampler_requirements()
 
     assert "incompatible" in reqs
     assert {"nuts", "numpyro", "blackjax"} <= reqs["incompatible"]
@@ -1245,11 +1366,8 @@ def test_pspl_finite_source_requires_ptde():
     Then gradient-based samplers are marked incompatible and 'ptde_async'
       is recommended.
     """
-    lens = Lens(
-        [{"lenses": ["star.0"], "sources": ["star.1"], "finite_source": True}],
-        _DummyConfigManager(),
-    )
-    reqs = lens.sampler_requirements()
+    event = _make_event(n_star=2, event=[{"finite_source": True}])
+    reqs = event.sampler_requirements()
     assert "nuts" in reqs.get("incompatible", set())
     assert reqs.get("recommended") == "ptde_async"
 
@@ -1265,28 +1383,32 @@ class _T0ParConfigManager(_DummyConfigManager):
         self._seed_t0 = seed_t0
 
     def seed_start_value(self, path, seed=0):
-        return self._seed_t0 if path == "lens.0.t_0" else None
+        # t_0 is a per-SOURCE parameter post-split.
+        return self._seed_t0 if path == "source.0.t_0" else None
 
 
-def _t0_par_fixture(user_params=None, seed_t0=None, lens_config=None):
+def _t0_par_fixture(user_params=None, seed_t0=None, event_config=None):
     inst = MulensInstrument.__new__(MulensInstrument)
     inst.config_manager = _T0ParConfigManager(user_params, seed_t0)
     system = _DummySystem()
-    system.lens = _DummySystem()
-    system.lens.config = [lens_config or {}]
+    # t0_par is an EVENT option post-split, so the resolver reads the
+    # mulensevent block.  _DummySystem is the shared conftest's empty
+    # namespace, so the stub is attached here.
+    system.mulensevent = _DummySystem()
+    system.mulensevent.config = [event_config or {}]
     return inst, system
 
 
 def test_t0_par_explicit_config_wins():
     """
-    Given an explicit lens t0_par alongside a user t_0 and a seed,
+    Given an explicit mulensevent t0_par alongside a user t_0 and a seed,
     When the final t0_par is resolved in load_data,
     Then the explicit config value wins.
     """
     inst, system = _t0_par_fixture(
-        user_params={"lens.0.t_0": {"initval": 2458800.0}},
+        user_params={"source.0.t_0": {"initval": 2458800.0}},
         seed_t0=2458700.0,
-        lens_config={"t0_par": 2458554.89},
+        event_config={"t0_par": 2458554.89},
     )
     times = np.linspace(2458500.0, 2458600.0, 11)
     assert inst._resolve_t0_par_final(system, times) == 2458554.89
@@ -1294,12 +1416,12 @@ def test_t0_par_explicit_config_wins():
 
 def test_t0_par_user_t0_beats_seed():
     """
-    Given both a user lens.0.t_0 initval and an MMEXOFAST seed,
+    Given both a user source.0.t_0 initval and an MMEXOFAST seed,
     When the final t0_par is resolved,
     Then the user's value wins (seeds sit below PRECEDENCE_USER).
     """
     inst, system = _t0_par_fixture(
-        user_params={"lens.0.t_0": {"initval": 2458800.0}},
+        user_params={"source.0.t_0": {"initval": 2458800.0}},
         seed_t0=2458700.0,
     )
     times = np.linspace(2458500.0, 2458600.0, 11)
@@ -1373,7 +1495,8 @@ def test_unknown_sampler_key_is_detected(caplog):
 
 class _SeedOnlyConfigManager(_DummyConfigManager):
     """ConfigManager stub carrying a trajectory only in the seed hints, as in
-    the `mmexofast: auto` workflow (user_params names no lens parameter)."""
+    the `mmexofast: auto` workflow (user_params names no microlensing
+    parameter)."""
 
     def __init__(self, seeds, user_params=None):
         self.user_params = user_params or {}
@@ -1424,7 +1547,11 @@ def test_check_data_format_uses_mmexofast_seed_start_values(caplog):
     """
     # Arrange
     cm = _SeedOnlyConfigManager(
-        {"lens.0.t_0": 2458554.89, "lens.0.u_0": 0.14, "lens.0.t_E": 18.0}
+        {
+            "source.0.t_0": 2458554.89,
+            "source.0.u_0": 0.14,
+            "mulensevent.0.t_E": 18.0,
+        }
     )
 
     # Act
@@ -1444,11 +1571,15 @@ def test_check_data_format_user_params_still_win(caplog):
     """
     # Arrange
     cm = _SeedOnlyConfigManager(
-        {"lens.0.t_0": 2400000.0, "lens.0.u_0": 5.0, "lens.0.t_E": 1.0},
+        {
+            "source.0.t_0": 2400000.0,
+            "source.0.u_0": 5.0,
+            "mulensevent.0.t_E": 1.0,
+        },
         user_params={
-            "lens.0.t_0": {"initval": 2458554.89},
-            "lens.0.u_0": {"initval": 0.14},
-            "lens.0.t_E": {"initval": 18.0},
+            "source.0.t_0": {"initval": 2458554.89},
+            "source.0.u_0": {"initval": 0.14},
+            "mulensevent.0.t_E": {"initval": 18.0},
         },
     )
 
@@ -1502,7 +1633,9 @@ def _build_ob08092_with_op(sampled_coords):
     with open(os.path.join(exdir, "ob08092.params.yaml")) as fh:
         user_params = yaml.safe_load(fh)
 
-    cfg["lens"][0]["use_op"] = True  # the Op path is what bakes the coords
+    # use_op is an EVENT option post-split; the Op path is what bakes the
+    # coords.
+    cfg["mulensevent"][0]["use_op"] = True
     if sampled_coords:
         user_params["star.Source.ra"] = {
             "initval": 266.872583333,
@@ -1528,11 +1661,13 @@ def test_op_coords_warn_when_ra_dec_are_sampled(caplog):
     """
     Given: a microlensing topology whose SOURCE star has sampled ra/dec
     When: the model is built on the MulensModel Op path
-    Then: both the lens and the galactic model warn that the line of sight is
-          frozen, quoting the frozen coordinates
+    Then: both the event and the galactic model warn that the line of sight
+          is frozen, quoting the frozen coordinates
 
     The freeze itself is correct and deliberate (the parallax projection moves
     ~1e-5 per arcsec of coordinate error); what was missing was saying so.
+    The warning is the event's post-split, so its prefix is
+    "[mulensevent]".
     """
     # Arrange / Act
     with caplog.at_level(logging.WARNING):
@@ -1540,11 +1675,11 @@ def test_op_coords_warn_when_ra_dec_are_sampled(caplog):
     text = caplog.text
 
     # Assert
-    assert "[lens]" in text and "FROZEN at the start value" in text
+    assert "[mulensevent]" in text and "FROZEN at the start value" in text
     assert "[galacticmodel]" in text and "FROZEN at the start value" in text
     assert "266.872583" in text  # the START value, not a prior draw
     # and the configuration under test really does sample them
-    source_ndx = int(system.lens.source_map[0])
+    source_ndx = int(system.mulensevent.source_map[0])
     assert bool(np.atleast_1d(system.star.ra.is_sampled)[source_ndx])
 
 
@@ -1561,7 +1696,7 @@ def test_op_coords_do_not_warn_when_ra_dec_are_pinned(caplog):
     text = caplog.text
 
     # Assert
-    source_ndx = int(system.lens.source_map[0])
+    source_ndx = int(system.mulensevent.source_map[0])
     assert not np.atleast_1d(system.star.ra.is_sampled)[source_ndx]
     assert not np.atleast_1d(system.star.dec.is_sampled)[source_ndx]
     assert "FROZEN at the start value" not in text
@@ -1580,10 +1715,12 @@ def test_op_coords_are_the_start_value_not_a_prior_draw():
     """
     # Arrange
     system = _build_ob08092_with_op(sampled_coords=True)
-    source_ndx = int(system.lens.source_map[0])
+    source_ndx = int(system.mulensevent.source_map[0])
 
     # Act
-    ra_deg, dec_deg = system.lens._frozen_op_coords_deg(system, source_ndx)
+    ra_deg, dec_deg = system.mulensevent._frozen_op_coords_deg(
+        system, source_ndx
+    )
     drawn_deg = float(system.star.ra.value[source_ndx].eval()) * 180.0 / np.pi
 
     # Assert
