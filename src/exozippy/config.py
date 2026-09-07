@@ -563,9 +563,10 @@ def _declared_instance_names(system_config):
     This is the universe of legal instance names in a 3-part parameter key.
     It is deliberately NOT per component: a component's per-element names are
     a manifest option that may borrow another component's instance names --
-    the lens's per-source vectors are addressed by the SOURCE STAR's name
-    (``lens.SourceA.t_0``), for instance.  Used by
-    ``standardize_param_names`` to reject typo'd instance names.
+    the source component's instances are named after their body STARS
+    (``source.SourceA.t_0`` with the star declared as ``star: [name:
+    SourceA]``), for instance.  Used by ``standardize_param_names`` to
+    reject typo'd instance names.
     """
     names = set()
     for entries in (system_config or {}).values():
@@ -2229,11 +2230,13 @@ class ConfigManager:
             # config, not just this component's own list, and that width is
             # load-bearing -- a component's per-element names need not be its
             # config entries' names:
-            #   * `lens.SourceA.t_0` (examples/ob161003) addresses element j
-            #     of the lens's per-source vectors by the SOURCE STAR's name;
-            #     the lens block itself has one entry, named "Lens".  The
-            #     per-parameter `names` list is a manifest option and is not
-            #     known until stage 3, long after this runs.
+            #   * `source.SourceA.t_0` addresses a source element named
+            #     after its body STAR (SourceA is a star.name, echoed onto
+            #     the source instance by normalize_config_block); before the
+            #     8.6.17 split the same width covered the pre-split lens's
+            #     borrowed source-star names.  The per-parameter `names`
+            #     list is a manifest option and is not known until stage 3,
+            #     long after this runs.
             #   * `mann.B.ks_offset` names a mann block that has no `name:`
             #     yet: this ConfigManager is built BEFORE the component loop
             #     in System.__init__, and mann/torres derive their name from

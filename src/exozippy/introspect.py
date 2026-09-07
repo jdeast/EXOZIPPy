@@ -135,7 +135,8 @@ def _load_param_block(cls, yaml_key):
     """Load a component's parameter block from its defaults.yaml.
 
     A single defaults.yaml may declare several component blocks (e.g. the
-    mulensing directory declares both ``lens`` and ``mulensinstrument``), so
+    mulensing directory declares ``mulensevent``, ``lens``, ``source`` and
+    ``mulensinstrument``), so
     we index into the block matching this component's yaml_key. Returns an
     empty dict when the file or block is absent (e.g. galacticmodel, which
     declares no sampled parameters).
