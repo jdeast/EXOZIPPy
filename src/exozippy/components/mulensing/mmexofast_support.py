@@ -142,8 +142,8 @@ def user_hints_sufficient(config_manager, is_binary, want_rho):
     Derivability, not literal presence, is the right question, because
     several of these are derived parameters a params file legitimately never
     names.  The case that matters is a restart file written by mkparam: it
-    carries only sampled coordinates, so `lens.q` (derived from the body
-    masses) and `lens.t_E` (from theta_E / mu_rel) are both absent -- yet
+    carries only sampled coordinates, so `lens.1.q` (derived from the body
+    masses) and `mulensevent.0.t_E` (from theta_E / mu_rel) are both absent -- yet
     both are fully determined by the `planet.log_q`/`planet.mass`,
     `star.logmass`, distance and proper-motion entries it does carry.
     Scanning for literal keys therefore declared a complete restart file
