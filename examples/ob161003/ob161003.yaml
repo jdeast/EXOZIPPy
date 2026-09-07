@@ -10,10 +10,10 @@ prefix: "fitresults/OGLE-2016-BLG-1003"
 #   t_E~28.9 d, s~1.033, q~1.19, alpha~48.2 deg, rho_1~4.5e-4, rho_2~1.3e-3
 #
 # system architecture:
-#   star.0 = Lens     (primary lens)
-#   star.1 = LensB    (secondary lens body; q~1.19 → stellar, not planetary)
-#   star.2 = SourceA  (brighter source)
-#   star.3 = SourceB  (fainter source)
+#   star.Lens    = primary lens
+#   star.LensB   = secondary lens body (q~1.19 → stellar, not planetary)
+#   star.SourceA = brighter source
+#   star.SourceB = fainter source
 
 star:
   - name: "Lens"
@@ -21,11 +21,16 @@ star:
   - name: "SourceA"
   - name: "SourceB"
 
+mulensevent:
+  - finite_source: True
+
 lens:
-  - name: "Lens"
-    lenses:  ["star.0", "star.1"]
-    sources: ["star.2", "star.3"]
-    finite_source: True
+  - body: star.Lens
+  - body: star.LensB
+
+source:
+  - body: star.SourceA
+  - body: star.SourceB
 
 galacticmodel:
   - name: "OGLE-2016-BLG-1003"

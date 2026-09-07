@@ -18,14 +18,14 @@ logger_level: INFO
 #     microlensing + RV solution.
 #
 # system architecture:
-#   star.0 = L1      lens primary   ~0.85-0.89 Msun -- THE STAR THE RVs ARE OF
-#   star.1 = L2      lens companion ~0.23-0.24 Msun -- unseen
-#   star.2 = Source  K giant in the bulge, I_s = 16.43, (V-I)_s = 1.93
+#   star.L1     = lens primary   ~0.85-0.89 Msun -- THE STAR THE RVs ARE OF
+#   star.L2     = lens companion ~0.23-0.24 Msun -- unseen
+#   star.Source = K giant in the bulge, I_s = 16.43, (V-I)_s = 1.93
 #
-# The two halves of the fit are FULLY coupled: lens.q is derived from
-# star.L1.mass / star.L2.mass, the orbit derives m_total / a / K from the
-# same two mass nodes, and -- with orbital_motion: keplerian on the lens
-# block -- the SAME orbit drives the binary geometry s(t)/alpha(t) in the
+# The two halves of the fit are FULLY coupled: the companion's q is derived
+# from star.L2.mass / star.L1.mass, the orbit derives m_total / a / K from
+# the same two mass nodes, and -- with orbital_motion: keplerian on the
+# companion's lens entry -- the SAME orbit drives the geometry s(t)/alpha(t) in the
 # magnification with no new free parameters (conventions.md C24; review
 # 8.6.8 5b).  That is Skowron+2011's proposed over-constraint test: the RVs
 # pin P/tp/e/omega_*/K, the light curve pins the geometry, and bigomega and
@@ -37,20 +37,26 @@ star:
   - name: "Source"
 
 lens:
-  - name: "OB09020"
-    lenses:  ["star.0", "star.1"]
-    sources: ["star.2"]
-    finite_source: True        # rho = 0.0063; the source is a giant and the
-                               # caustic crossings are resolved
-    # Skowron+2011's t_0,kep = t_0 anchors the geocentric frame their
-    # pi_E and orbital-velocity parameters are quoted in.
-    t0_par: 2454917.52
+  - body: star.L1
     # THE POINT OF THIS EXAMPLE (review 8.6.8 5a/5b): the RV-constrained
     # orbit L drives s(t)/alpha(t) with NO new free parameters --
     # conventions.md C24's keplerian mode.  The light curve then measures
     # bigomega and sign(cos i), which the RVs cannot (see the orbit block).
+    # Orbital motion is the COMPANION's geometry, so its keys live on the
+    # companion's entry, never the primary's.
+  - body: star.L2
     orbital_motion: keplerian
     orbit: "L"
+
+source:
+  - body: star.Source
+
+mulensevent:
+  - finite_source: True        # rho = 0.0063; the source is a giant and the
+                               # caustic crossings are resolved
+    # Skowron+2011's t_0,kep = t_0 anchors the geocentric frame their
+    # pi_E and orbital-velocity parameters are quoted in.
+    t0_par: 2454917.52
     # Every trajectory parameter is seeded from the published solution, so
     # the relaxation engine can derive all of them and MMEXOFAST is not
     # needed.  It is also not WANTED: phot.dat is survey-only photometry

@@ -9,9 +9,9 @@
 # (components/mulensing/conventions.md), and Gould+2009 uses the same
 # Gould-convention pi_E, so nothing needs transforming.
 #
-# Addressing: per-source trajectory parameters take the SOURCE star's
-# instance name (lens.Source.<param>); event-level ones take the lens
-# block's name (lens.OB07224.<param>).
+# Addressing: per-source trajectory parameters live on the source
+# component (source.Source.<param>); event-level ones live on the event
+# (mulensevent.<param>).
 
 # --------------------------------------------------------------------
 # Sky position (OGLE EWS params.dat: 18:05:41.05  -28:45:36.2; the Letter
@@ -36,7 +36,7 @@ star.dec:
 # (they are linear, so this is exact), t_0 and u_0 were optimized against
 # all 1352 shipped points.  The OGLE EWS PSPL fit independently reports
 # Tmax = 2454233.667, which is the same epoch to 0.7 s.
-lens.Source.t_0:
+source.Source.t_0:
     initval: 2454233.667775    # BJD_TDB
 
 # ALSO not in the Letter, which says only that "the lens transited the
@@ -52,10 +52,10 @@ lens.Source.t_0:
 # solution and no mirror, but the shipped data cannot distinguish them (see
 # README).  If the Bronberg / Liverpool light curves are ever added, seed
 # both signs and let PTDE report the two modes.
-lens.Source.u_0:
+source.Source.u_0:
     initval: 3.492847e-04
 
-lens.Source.t_E:
+mulensevent.t_E:
     initval: 6.91              # d.  Published: 6.91 +/- 0.13.
                                # Refitting it here -- t_0, u_0, t_E, rho and
                                # the I-band u1 all free, err_scale profiled
@@ -65,7 +65,7 @@ lens.Source.t_E:
                                # archival photometry.  Left at the published
                                # values; the refit is the CHECK, not the seed.
 
-lens.Source.rho:
+source.Source.rho:
     initval: 8.50e-4           # Published: (8.50 +/- 0.16)e-4.
                                # theta_E = theta_*/rho = 0.77 uas / 8.5e-4
                                # = 0.91 mas.  With star_constrains_rho at
@@ -92,9 +92,9 @@ lens.Source.rho:
 # vector, v_hel = v_geo + v_earth_perp, reproduces 114 km/s at 61.1 deg
 # south of west.  The opposite sign convention gives 142 km/s at 61 deg
 # south of EAST, which is not what they print.
-lens.Source.pi_E_N:
+mulensevent.pi_E_N:
     initval: -1.5524
-lens.Source.pi_E_E:
+mulensevent.pi_E_E:
     initval: -1.2129
 
 # --------------------------------------------------------------------
@@ -128,7 +128,7 @@ star.Source.distance:
 # and mu_rel = pm(lens) - pm(source), converted to the geocentric frame by
 # Gould (2004),  mu_geo = mu_hel - pi_rel * v_earth_perp(t0_par) / AU.
 #
-# So seeding `lens.Source.t_E` and `lens.Source.pi_E_*` alone does NOT put
+# So seeding `mulensevent.t_E` and `mulensevent.pi_E_*` alone does NOT put
 # the model there: the four stellar proper-motion components are the leaves,
 # two constraints cannot determine four unknowns, and the engine is free to
 # land anywhere on the two-dimensional family that satisfies them.  Measured

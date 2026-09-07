@@ -4,16 +4,16 @@ band.I.u1:
   initval: 0.43628174
   mu: 0.5
   sigma: 0.2
-lens.Lens.alpha:
+lens.Companion.alpha:
   init_scale: 0.48433731
   initval: 1.87693822
-lens.Lens.log_s:
+lens.Companion.log_s:
   init_scale: 0.00643854
   initval: 0.38675415
-lens.Lens.t_0:
+source.Source.t_0:
   init_scale: 0.00685645
   initval: 2458199.23471601
-lens.Lens.u_0:
+source.Source.u_0:
   init_scale: 0.00190436
   initval: 0.07086666
 mulensinstrument.KMTA02.err_scale:

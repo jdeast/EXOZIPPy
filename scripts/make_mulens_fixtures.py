@@ -1,4 +1,4 @@
-"""Record the pre-split acceptance fixtures for review 8.6.17 (stage 0).
+"""Record the acceptance fixtures for review 8.6.17.
 
 Run from the repo root:
 
@@ -37,13 +37,15 @@ each machine's OWN solved start -- and macOS differed by 3.2e-05 nats
 (7.1e-10 relative) where Linux differed by 7.3e-12 (machine epsilon).
 Widening the tolerance would have hidden precisely the interesting part.
 
-STAGE-2 STATE (8.6.17): the shipped example configs carry the pre-split
-spellings until stage 3, so most examples cannot build.  An example whose
-name has a CONVERTED config committed under tests/fixtures/mulens/configs/
-is recorded/checked from that copy instead (ob08092 and ob140939 since
-stage 1b, DC2018_128 and KMT-2019-BLG-1806 since stage 2 -- their fixtures
-were also label-translated to the post-split naming with values untouched).
-Use --only to limit a run to those, e.g.
+STAGE-3 STATE (8.6.17): every shipped example carries the post-split
+spellings, all fixtures replay the examples directly, and the converted
+config copies this script substituted at stages 1b/2 are gone.  The one
+deliberate exception is tests/fixtures/mulens/presplit/ob161003.json: the
+stage-0 recording of the only example whose MODEL changed under the split
+(per-source event-level vectors collapsed), kept -- labels translated,
+values untouched -- as the reference for the analytic reconciliation test
+in tests/test_mulens_acceptance.py.  This script neither writes nor checks
+that file.  Use --only to limit a run, e.g.
 
     python scripts/make_mulens_fixtures.py --check --only ob08092 --only ob140939
 """
@@ -75,13 +77,10 @@ from exozippy.system import System  # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 OUT = os.path.join(ROOT, "tests", "fixtures", "mulens")
-# Stage-1 converted config copies (see the module docstring); an example
-# with a copy here is recorded from it instead of from examples/.
-CONVERTED = os.path.join(OUT, "configs")
 
 
 def microlensing_examples():
-    """Every shipped example whose config declares a `lens:` block.
+    """Every shipped example whose config declares a `mulensevent:` block.
 
     The params file is taken from the config's own `parameter_file:` key,
     NOT from the `<name>.params.yaml` naming convention.  That convention is
@@ -102,7 +101,7 @@ def microlensing_examples():
                 doc = yaml.safe_load(fh) or {}
         except Exception:
             continue
-        if not isinstance(doc, dict) or "lens" not in doc:
+        if not isinstance(doc, dict) or "mulensevent" not in doc:
             continue
         named = doc.get("parameter_file")
         par = (
@@ -117,18 +116,6 @@ def microlensing_examples():
             )
             continue
 
-        # Stage-1 substitution: a converted copy, when committed, is the
-        # buildable form of the same example (see the module docstring).
-        name = os.path.splitext(os.path.basename(cfg))[0]
-        conv = os.path.join(CONVERTED, name, os.path.basename(cfg))
-        if os.path.exists(conv):
-            with open(conv) as fh:
-                conv_doc = yaml.safe_load(fh) or {}
-            conv_par = os.path.join(
-                os.path.dirname(conv),
-                str(conv_doc.get("parameter_file", name + ".params.yaml")),
-            )
-            cfg, par = conv, conv_par
         found.append((cfg, par))
     return found
 
@@ -178,11 +165,7 @@ def main():
         action="append",
         default=None,
         metavar="NAME",
-        help=(
-            "limit to the named example(s); repeatable.  At stage 1 the "
-            "unconverted examples cannot build, so --check without --only "
-            "reports them as failures (expected until stage 3)."
-        ),
+        help=("limit to the named example(s); repeatable."),
     )
     args = ap.parse_args()
 

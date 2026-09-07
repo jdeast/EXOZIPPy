@@ -13,26 +13,27 @@ to be available for this review, because the split collapses parameters that
 are stored per source but physically singular; for the two PSPL cases it
 turned out to hold anyway (below).
 
-STAGE-2 STATE (8.6.17).  The shipped example configs still carry the
-pre-split spellings until stage 3, so they cannot build here.  Fixtures for
-CONVERTED CONFIG COPIES committed under tests/fixtures/mulens/configs/<name>/
-build for real: the two always-run PSPL cases (ob08092, ob140939, converted
-at stage 1b) and the two Op-path companion-bearing cases (DC2018_128,
-KMT-2019-BLG-1806, converted at stage 2 -- the first builds that EXECUTE the
-masked-primary companion stacking).  Their fixture JSONs' LABELS are
-translated to the post-split naming -- the raw value vars follow their
-parameters' new component homes (lens.{t_0,u_0}_raw -> source.*_raw,
-lens.t_E -> mulensevent.t_E, ...), and at stage 2 the four event potentials
-follow the build_likelihood split (lens.event_rate_prior ->
-mulensevent.event_rate_prior etc.); every VALUE is bit-identical to the
-stage-0 recording.  Measured at both stages: 0 moved / 0 appeared /
-0 vanished at ZERO tolerance on all four examples, and (stage 2) the Op-path
-magnification A(t) on the data epochs is bit-identical to the pre-split
-tree at the stored start (870 epochs DC2018_128, 2441 KMT-2019-BLG-1806).
-The remaining nine fixtures are untouched stage-0 recordings of example
-configs that cannot build until stage 3; their replay cases are
-xfail(strict=True) so they flip LOUDLY when the examples are converted (and
-the fixtures re-pointed/translated) instead of silently passing.
+STAGE-3 STATE (8.6.17).  All thirteen shipped example configs carry the
+post-split spellings and every fixture replays its shipped example directly
+(the stage-1b/2 converted config copies are deleted).  Twelve fixtures are
+still the untouched stage-0 recordings with their LABELS translated to the
+post-split naming (raw value vars and per-parameter potentials follow their
+parameters' new component homes; the four event potentials follow the
+build_likelihood split); every VALUE is bit-identical to the stage-0
+recording.  Measured at stage 3: 0 moved / 0 appeared / 0 vanished at ZERO
+tolerance on eleven of the twelve, including ob09020 (keplerian lens
+orbital motion + RVs) and ob170114 (xallarap).  The twelfth, OGLE_0383LD,
+moved by -1.5e-11 nats (5.4e-16 relative) in the data term alone:
+localized to a 1-ulp difference in the derived companion mass ratio q under
+the post-split masked-primary assembly, amplified through the binary-lens
+caustic to <=1.4e-12 relative in A(t) -- the reassociation class the
+design already accepts for VBM examples, and far inside TERM_RTOL.
+
+ob161003 (2S2L) is the ONE example whose model changes BY CONSTRUCTION
+(review R1): its per-source event-level vectors collapse to scalars.  Its
+replay fixture is re-recorded post-split; the stage-0 recording is kept at
+presplit/ob161003.json and the collapse is reconciled ANALYTICALLY, term by
+term, by the tests at the bottom of this file.
 
 Most of this is marked slow: each case builds a full System and compiles
 PyTensor graphs.  Two fast, deterministic PSPL examples run unmarked so the
@@ -109,14 +110,11 @@ TERM_ATOL = 1e-3
 # Fast, deterministic, symbolic-PSPL: the instrument runs on these every time.
 UNMARKED = {"ob08092", "ob140939"}
 
-# Fixture configs converted to the post-split spellings live here; a fixture
-# whose "config" points into this tree is buildable at stage 1.  The shipped
-# examples convert at stage 3, at which point the remaining fixtures get the
-# same treatment and their xfails below flip loudly.
-CONVERTED_PREFIX = os.path.join("tests", "fixtures", "mulens", "configs")
-
 
 def _fixture_files():
+    # presplit/ holds the stage-0 ob161003 recording for the reconciliation
+    # test below -- a reference, not a replay target, so the top-level glob
+    # deliberately does not descend into it.
     return sorted(glob.glob(os.path.join(FIXTURES, "*.json")))
 
 
@@ -125,7 +123,7 @@ def _load(path):
         return json.load(fh)
 
 
-def _build(fixture):
+def _build(fixture, extra_params=None):
     cfg_path = os.path.join(ROOT, fixture["config"])
     par_path = os.path.join(ROOT, fixture["params"])
     cwd = os.getcwd()
@@ -135,6 +133,8 @@ def _build(fixture):
             cfg = yaml.safe_load(fh)
         with open(par_path) as fh:
             par = yaml.safe_load(fh) or {}
+        if extra_params:
+            par.update(extra_params)
         system = System(cfg, par)
         system.prepare()
         return system, system.build_model()
@@ -143,37 +143,17 @@ def _build(fixture):
 
 
 def _replay_cases():
-    """One param per fixture; unconverted ones are strict-xfail (stage 3).
-
-    The eleven fixtures still recorded against the shipped example configs
-    cannot build at stage 1 (the examples carry pre-split spellings until
-    stage 3).  strict=True makes an unexpected PASS an error, so converting
-    the examples without re-pointing and label-translating these fixtures
-    is loud rather than silently green.
-    """
-    cases = []
-    for path in _fixture_files():
-        name = os.path.splitext(os.path.basename(path))[0]
-        converted = _load(path)["config"].startswith(CONVERTED_PREFIX)
-        marks = (
-            []
-            if converted
-            else [
-                pytest.mark.xfail(
-                    strict=True,
-                    reason=(
-                        "stage 3 (8.6.17): this fixture's config is the "
-                        "shipped example, which still carries the "
-                        "pre-split spellings; when the examples are "
-                        "converted, re-point the fixture at the converted "
-                        "config (and translate its labels) so this case "
-                        "runs for real"
-                    ),
-                )
-            ]
+    """One param per fixture.  At stage 3 every fixture replays its shipped
+    example for real; the strict-xfail scaffolding that held this file
+    honest while the examples still carried pre-split spellings is gone
+    with the last unconverted example."""
+    return [
+        pytest.param(
+            os.path.splitext(os.path.basename(path))[0],
+            id=os.path.splitext(os.path.basename(path))[0],
         )
-        cases.append(pytest.param(name, id=name, marks=marks))
-    return cases
+        for path in _fixture_files()
+    ]
 
 
 def test_the_fixture_set_is_not_empty():
@@ -355,4 +335,203 @@ def test_the_model_still_matches_its_recorded_decomposition(name):
     # ASSERT
     assert not (moved or appeared or vanished), (
         f"moved={moved}\nappeared={appeared}\nvanished={vanished}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ob161003 (2S2L): the ONE deliberate model change (design section 4).
+#
+# Under R1 the per-source event-level vectors (t_E, theta_E, pi_rel, pi_E,
+# the mu_rel family, mlens_total) collapse to scalars, so every logp term
+# that used to SUM an identical per-source pair is now counted once.  The
+# trajectory at matched t_0/u_0/t_E/s/q/alpha/rho is UNCHANGED, so the
+# observed-data term must MATCH the stage-0 recording -- not merely be
+# close.  Any motion there is a wiring bug, not a model change; that is the
+# sharpest test in the whole refactor and it is held at ZERO tolerance.
+# ---------------------------------------------------------------------------
+
+# The stage-0 engine solved the proper-motion split itself (sp.nsolve); the
+# shipped params file now seeds the same split in clean round numbers
+# (star.Lens.pm_dec = -13.595474606, everything else -3.0), which differ
+# from the nsolve output at the ~1e-11 level.  Seeding nsolve's own values
+# here puts the post-split model at the stage-0 recording's EXACT start, so
+# the data term can be compared to the byte.  Values dumped from the
+# pre-split tree at full precision (2026-09, stage-3 acceptance).
+_OB161003_PRESPLIT_PM = {
+    "star.SourceA.pm_ra": {"initval": -2.999999999986347},
+    "star.SourceA.pm_dec": {"initval": -2.999999999986347},
+    "star.SourceB.pm_ra": {"initval": -2.999999999986347},
+    "star.SourceB.pm_dec": {"initval": -2.999999999986347},
+    "star.Lens.pm_ra": {"initval": -2.999999999986347},
+    "star.Lens.pm_dec": {"initval": -13.595474606031832},
+    "star.LensB.pm_ra": {"initval": -2.999999999986347},
+    "star.LensB.pm_dec": {"initval": -2.999999999986347},
+}
+
+# Every term whose pre-split value was an identical per-source pair summed
+# over TWO sources and is now a scalar: the post-split value must be
+# EXACTLY half the recording (bitwise -- halving a double is exact).  All
+# but mu_rel_geo_mag's soft lower bound are the ~1e-304 placeholder values
+# of soft bounds evaluated far from their turn-on.
+_OB161003_HALVED = frozenset(
+    {
+        "POT:mulensevent.mu_rel_singularity",
+        "POT:mulensevent.theta_E_singularity",
+        "POT:low_bound.mulensevent.mu_ra_rel",
+        "POT:low_bound.mulensevent.mu_dec_rel",
+        "POT:low_bound.mulensevent.mu_ra_rel_geo",
+        "POT:low_bound.mulensevent.mu_dec_rel_geo",
+        "POT:low_bound.mulensevent.mu_rel_mag",
+        "POT:low_bound.mulensevent.mu_rel_geo_mag",
+        "POT:low_bound.mulensevent.pi_rel",
+        "POT:low_bound.mulensevent.t_E",
+        "POT:low_bound.mulensevent.theta_E",
+        "POT:up_bound.mulensevent.mu_ra_rel",
+        "POT:up_bound.mulensevent.mu_dec_rel",
+        "POT:up_bound.mulensevent.mu_ra_rel_geo",
+        "POT:up_bound.mulensevent.mu_dec_rel_geo",
+        "POT:up_bound.mulensevent.mu_rel_mag",
+        "POT:up_bound.mulensevent.mu_rel_geo_mag",
+        "POT:up_bound.mulensevent.pi_rel",
+        "POT:up_bound.mulensevent.theta_E",
+    }
+)
+
+# The raw->value transform jacobians of the reseeded pm leaves reassociate
+# at the last ulp (initval now enters as a literal seed rather than as
+# nsolve's output); everything else must match to the byte.
+_OB161003_ULP_OK = frozenset(
+    {
+        "POT:logit_uniform_prior.star.pm_ra",
+        "POT:logit_uniform_prior.star.pm_dec",
+    }
+)
+
+
+@pytest.mark.slow
+def test_ob161003_event_potentials_are_scalar_and_single():
+    """
+    Given the ob161003 (2S2L) model,
+    When its logp terms are enumerated,
+    Then the event potentials exist exactly once, the event-rate and
+    singularity potentials are SCALAR (no reduction over sources), and no
+    pre-split lens.* twin survives.
+
+    The design's section-4 potential inventory at its stage-3 vehicle: with
+    TWO sources, a scalar event-rate potential is structurally incapable of
+    the double count review 8.6.18 removed (DC2018_128's single-source
+    inventory could not distinguish the sum from the scalar).
+    source_behind_lens deliberately stays a sum: it is one term PER SOURCE
+    STAR (each source must sit behind the lens).
+    """
+    # ARRANGE
+    fixture = _load(os.path.join(FIXTURES, "ob161003.json"))
+    _, model = _build(fixture)
+
+    # ACT
+    names = term_names(model)
+    counts = {n: names.count(n) for n in names}
+
+    # ASSERT
+    dupes = {n: c for n, c in counts.items() if c > 1}
+    assert not dupes, f"duplicated logp terms: {dupes}"
+
+    for pot in (
+        "POT:mulensevent.event_rate_prior",
+        "POT:mulensevent.source_behind_lens",
+        "POT:mulensevent.mu_rel_singularity",
+        "POT:mulensevent.theta_E_singularity",
+    ):
+        assert counts.get(pot) == 1, f"{pot} missing or duplicated"
+
+    stale = [
+        n
+        for n in names
+        if n.startswith("POT:lens.")
+        and n.split(".", 1)[1]
+        in (
+            "event_rate_prior",
+            "source_behind_lens",
+            "mu_rel_singularity",
+            "theta_E_singularity",
+            "fitpirel_jacobian",
+            "fitu0te_jacobian",
+        )
+    ]
+    assert not stale, f"pre-split event potentials survive on lens: {stale}"
+
+    # Scalar means scalar: log(mu_rel_geo) + log(theta_E) with no pt.sum
+    # over sources.  A sum over the collapsed (1,) event vector would pass
+    # every value check while silently re-growing with a second source.
+    pots = {f"POT:{p.name}": p for p in model.potentials}
+    for pot in (
+        "POT:mulensevent.event_rate_prior",
+        "POT:mulensevent.mu_rel_singularity",
+        "POT:mulensevent.theta_E_singularity",
+    ):
+        assert pots[pot].ndim == 0, (
+            f"{pot} is not scalar (ndim {pots[pot].ndim})"
+        )
+
+
+@pytest.mark.slow
+def test_ob161003_collapse_reconciles_against_the_presplit_recording():
+    """
+    Given the post-split ob161003 model started at the stage-0 recording's
+      exact point (the pre-split engine's own solved proper motions seeded
+      verbatim),
+    When its decomposition is compared to the pre-split recording,
+    Then the OBSERVED-DATA term matches to the BYTE, the only moved terms
+      are the collapsed per-source pairs -- each EXACTLY half -- and
+      nothing appears or vanishes.
+
+    This is design section 4's analytic reconciliation, held as a permanent
+    pin.  The data term at zero tolerance is the sharp edge: the trajectory
+    at matched parameters is unchanged by construction, so ANY motion there
+    is a wiring bug.  Measured at stage 3: 48 of 69 terms bit-identical
+    (data term delta exactly 0.0), 19 terms exactly halved, and the two
+    reseeded-pm transform jacobians moved by one ulp.
+    """
+    # ARRANGE -- the pre-split recording (labels translated, values
+    # untouched) and the post-split model at its exact start.
+    presplit = _load(os.path.join(FIXTURES, "presplit", "ob161003.json"))
+    fixture = _load(os.path.join(FIXTURES, "ob161003.json"))
+    system, model = _build(fixture, extra_params=_OB161003_PRESPLIT_PM)
+
+    # ACT -- decompose at this model's own solved start (which the seeds
+    # above pin to the recording's start).
+    parts, _, reconciles, _ = decompose(system, model)
+    assert reconciles, "the instrument stopped reconciling; fix it first"
+    moved, appeared, vanished = compare(presplit["terms"], parts)  # ZERO tol
+
+    # ASSERT -- the sharp edge first: the data term to the byte.
+    assert (
+        parts["RV:mulensinstrument.model"]
+        == presplit["terms"]["RV:mulensinstrument.model"]
+    ), "the observed-data logp moved at matched trajectory: a wiring bug"
+
+    assert not appeared, f"terms appeared: {sorted(appeared)}"
+    assert not vanished, f"terms vanished: {sorted(vanished)}"
+
+    unexplained = {}
+    halved_seen = set()
+    for name, (before, after, delta) in moved.items():
+        if name in _OB161003_HALVED:
+            # Exactly one of the two identical per-source copies remains;
+            # halving a finite double is exact, so this holds bitwise.
+            if after == before / 2.0:
+                halved_seen.add(name)
+                continue
+        if name in _OB161003_ULP_OK and abs(delta) <= 1e-13 * abs(before):
+            continue
+        unexplained[name] = (before, after, delta)
+    assert not unexplained, f"unexplained logp motion: {unexplained}"
+
+    # Every collapsed term must actually have moved: a halved term that
+    # MATCHES the recording would mean the per-source pair is back.
+    missing = _OB161003_HALVED - halved_seen
+    assert not missing, (
+        f"expected these collapsed terms to be half the recording, but "
+        f"they matched it -- the per-source duplication is back: "
+        f"{sorted(missing)}"
     )

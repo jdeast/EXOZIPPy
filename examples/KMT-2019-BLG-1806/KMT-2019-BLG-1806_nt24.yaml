@@ -3,13 +3,13 @@ run:
 
 prefix: "fitresults/KMT-2019-BLG-1806_nt24"
 
-# Roman Data Challenge 2018, LC 128.  Binary lens + finite source (2L1S).
-# MMEXOFAST solution: t_E~18.2d, s~0.98, q~0.0011, alpha~-52 deg
+# Binary lens + finite source (2L1S).
+# MMEXOFAST solution: t_E~118d, s~1.05, q~2.5e-5, alpha~57 deg
 #
 # system architecture:
-#   star.0 = Lens      (primary lens host)
-#   star.1 = Source    (background source)
-#   planet.0 = Companion (secondary lens body)
+#   star.Lens        = primary lens host    (lens body 0)
+#   planet.Companion = secondary lens body  (lens body 1)
+#   star.Source      = background source
 
 star:
   - name: "Lens"
@@ -18,17 +18,21 @@ star:
 planet:
   - name: "Companion"
 
-lens:
-  - name: "Lens"
-    lenses:  ["star.0", "planet.0"]
-    sources: ["star.1"]
-    finite_source: True
+mulensevent:
+  - finite_source: True
     #mag_method: "auto_vbbl"  # default for binary+finite_source
     t0_par: 2458715.481879152         # approximate t_0 from MMEXOFAST
 
+lens:
+  - body: star.Lens
+  - body: planet.Companion
+
+source:
+  - body: star.Source
+
 galacticmodel:
   - name: "KMT-2019-BLG-1806"
-    anchor_idx: 1              # source is star.1
+    anchor_idx: 1              # anchor on the source (star.Source)
 
 band:
   - name: "I"

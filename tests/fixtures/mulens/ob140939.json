@@ -1,7 +1,7 @@
 {
- "config": "tests/fixtures/mulens/configs/ob140939/ob140939.yaml",
+ "config": "examples/ob140939/ob140939.yaml",
  "n_terms": 50,
- "params": "tests/fixtures/mulens/configs/ob140939/ob140939.params.yaml",
+ "params": "examples/ob140939/ob140939.params.yaml",
  "start": {
   "mulensinstrument.err_scale_raw": [
    0.0,

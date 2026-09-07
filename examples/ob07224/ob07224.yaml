@@ -33,15 +33,18 @@ star:
   - name: "Source"               # a bulge dwarf, I_s = 18.91, theta_* = 0.77 uas
 
 lens:
-  - name: "OB07224"
-    lens_ndx: 0
-    source_ndx: 1
+  - body: star.Lens
+
+source:
+  - body: star.Source
+
+mulensevent:
     # rho = 8.5e-4 and the lens TRANSITED the source (impact parameter
     # ~theta_*/3), so the finite source is the whole peak.  This puts the
     # event on the MulensModel Op path (finite_source_LD_Yoo04 inside
     # +/- 5*rho*t_E of t_0, point source outside), which has no gradient --
     # hence ptde_async below.
-    finite_source: True
+  - finite_source: True
     # The geocentric frame's reference epoch.  For terrestrial parallax it
     # matters far less than for annual parallax (the whole signal is one
     # night wide), but it must sit at the peak, not decades away.

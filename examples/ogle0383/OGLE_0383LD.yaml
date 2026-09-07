@@ -10,15 +10,19 @@ star:
 planet:
   - name: "Companion"
 
+mulensevent:
+  - finite_source: True
+
 lens:
-  - name: "Lens"
-    lenses:  ["star.0", "planet.0"]
-    sources: ["star.1"]
-    finite_source: True
+  - body: star.Lens
+  - body: planet.Companion
+
+source:
+  - body: star.Source
 
 galacticmodel:
   - name: "OGLE_0383"
-    anchor_idx: 1  # we anchor the galactic model to the source star, star.1
+    anchor_idx: 1  # we anchor the galactic model to the source star (star.Source)
 
 band:
   - name: "I"

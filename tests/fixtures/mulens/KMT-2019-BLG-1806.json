@@ -1,7 +1,7 @@
 {
- "config": "tests/fixtures/mulens/configs/KMT-2019-BLG-1806/KMT-2019-BLG-1806.yaml",
+ "config": "examples/KMT-2019-BLG-1806/KMT-2019-BLG-1806.yaml",
  "n_terms": 87,
- "params": "tests/fixtures/mulens/configs/KMT-2019-BLG-1806/KMT-2019-BLG-1806.params.yaml",
+ "params": "examples/KMT-2019-BLG-1806/KMT-2019-BLG-1806.params.yaml",
  "start": {
   "band.u1_raw": [
    0.0
