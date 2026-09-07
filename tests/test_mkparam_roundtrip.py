@@ -35,6 +35,7 @@ Two things here are load-bearing and neither is obvious:
 
 import copy
 import json
+import logging
 import os
 import shutil
 
@@ -306,24 +307,51 @@ def test_the_restart_file_needs_no_mmexofast_rerun(roundtrip, spelling):
     `push_seed_hints` and `user_hints_sufficient` drifted apart once already:
     the probe reported "insufficient" on a perfectly good restart file, an
     expensive MMEXOFAST run followed, and its output was then discarded.
+
+    ASKED AT THE REAL CALL SITE, which the first version of this test got
+    wrong.  It called `prepare()` and THEN `user_hints_sufficient`, by which
+    point `register_parameters` has pushed the hints and the answer is True
+    for essentially any input.  The probe actually runs at STAGE 1, inside
+    `MulensInstrument.load_data` -> `_resolve_mmexofast`, before those hints
+    exist -- mulensing.md: "a False means 'not derivable *yet*'".  So the
+    honest question is whether BUILDING launches MMEXOFAST, and the
+    after-the-fact version passed while a real second-iteration fit of
+    DC2018_128 re-ran it and crashed (review 8.6.22,
+    tests/test_mmexofast_restart_sufficiency.py).
     """
     work = roundtrip["work"]
     config = yaml.safe_load(open(os.path.join(work, CONFIG)))
     config["parameter_file"] = None
 
+    class _Triggered(Exception):
+        pass
+
+    class _Watch(logging.Handler):
+        def emit(self, record):
+            if "no sufficient user start values" in record.getMessage():
+                # Abort at the decision point: letting the fit start would
+                # cost minutes and prove nothing extra.
+                raise _Triggered()
+
+    handler = _Watch()
+    root = logging.getLogger()
+    root.addHandler(handler)
+    previous = root.level
+    root.setLevel(logging.INFO)
+
     cwd = os.getcwd()
     try:
         os.chdir(work)
-        system = System(config, copy.deepcopy(roundtrip["written"][spelling]))
-        system.prepare()
-        n_companions = system.lens.n_elements - 1
-        assert mmexofast_support.user_hints_sufficient(
-            system.config_manager,
-            n_companions >= 1,
-            bool(getattr(system.mulensevent, "finite_source", False)),
-        ), "a restart file is not sufficient to skip an MMEXOFAST re-run"
+        System(config, copy.deepcopy(roundtrip["written"][spelling])).prepare()
+    except _Triggered:
+        raise AssertionError(
+            "building from the restart file launched MMEXOFAST: the file "
+            "mkparam just wrote is not sufficient to restart from"
+        )
     finally:
         os.chdir(cwd)
+        root.removeHandler(handler)
+        root.setLevel(previous)
 
 
 @pytest.mark.parametrize("spelling", ["prepared", "raw"])
