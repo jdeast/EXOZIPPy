@@ -127,7 +127,7 @@ and would see the unconverted times.
 Parameters live in the Skowron+2011 geocentric inertial frame: the frame moving with
 Earth's **position and velocity** at the fiducial epoch `t0_par`. `t0_par` is a
 configuration choice, never a fitted parameter. `MulensInstrument._resolve_t0_par_final`
-picks it in the order explicit `lens: t0_par:` > user `lens.0.t_0` initval > MMEXOFAST seed
+picks it in the order explicit `mulensevent: t0_par:` > user `source.0.t_0` initval > MMEXOFAST seed
 `t_0` > median data time.
 
 `t_E` and the DIRECTION of `pi_E` are geocentric quantities and therefore depend on
