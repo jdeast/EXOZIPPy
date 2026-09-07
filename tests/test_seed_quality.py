@@ -40,8 +40,11 @@ EXAMPLES_DIR = pathlib.Path(__file__).parent / ".." / "examples"
 
 pytestmark = pytest.mark.slow
 
-# (example, ceiling on chi2/N at the seed).  Measured values as of 2026-08-11:
-#   DC2018_128 1.213, ob08092 1.415, ob140939 3.039, ob161003 1.717
+# (example, ceiling on chi2/N at the seed).  Re-measured 2026-09-07 after the
+# mulensevent split and the multi-source galactic-pm gate's retirement:
+#   DC2018_128 1.213, ob08092 1.406, ob140939 3.113, ob161003 1.702
+# (2026-08-11, pre-split: 1.213, 1.415, 3.039, 1.717 -- the split moved every
+# one of these by less than the ceilings' slack, which is the point.)
 CEILINGS = [
     ("DC2018_128", 2.0),
     ("ob08092", 2.5),
@@ -50,8 +53,14 @@ CEILINGS = [
 ]
 
 
-def _seed_chi2(name):
-    """chi2 and chi2/N of the mulens observation at the raw start point."""
+def _seed_chi2(name, strip_prefixes=()):
+    """chi2 and chi2/N of the mulens observation at the raw start point.
+
+    `strip_prefixes` drops matching keys from the params file before
+    building, which is how the multi-source proper-motion seeding is reached
+    at all: ob161003 pins all four pm components, and the seeding's earlier
+    blocker returns on any pm/parallax entry.
+    """
     src = EXAMPLES_DIR / name
     cfg_path = [
         p
@@ -73,6 +82,11 @@ def _seed_chi2(name):
         if param_file and os.path.exists(param_file):
             with open(param_file) as f:
                 user_params = yaml.safe_load(f) or {}
+
+        if strip_prefixes:
+            for key in list(user_params):
+                if key.startswith(tuple(strip_prefixes)):
+                    user_params.pop(key)
 
         system = System(config, user_params)
         system.prepare()
@@ -99,7 +113,16 @@ def _seed_chi2(name):
         ]
         data = np.asarray(node.tag.observations.eval(), dtype=float).ravel()
         chi2 = float(np.sum(((data - mu) / sigma) ** 2))
-        return chi2, chi2 / data.size, data.size
+        # The resolved proper motions come back too: chi2 alone cannot say
+        # whether the galactic seeding fired or was refused upstream, and
+        # "no change" from a gate that was never reached looks identical to
+        # "no change" from a gate that did nothing.
+        pms = {
+            p.label: np.atleast_1d(np.asarray(p.initval, dtype=float))
+            for p in system.get_all_parameters()
+            if p.label.endswith((".pm_ra", ".pm_dec"))
+        }
+        return chi2, chi2 / data.size, data.size, pms
     finally:
         os.chdir(cwd)
 
@@ -115,7 +138,7 @@ def test_seed_is_a_sensible_starting_point(name, ceiling):
     regression; see the module docstring.
     """
     # Arrange / Act
-    chi2, reduced, n = _seed_chi2(name)
+    chi2, reduced, n, _pms = _seed_chi2(name)
 
     # Assert
     assert np.isfinite(chi2), f"{name}: chi2 at the seed is not finite"
@@ -125,4 +148,67 @@ def test_seed_is_a_sensible_starting_point(name, ceiling):
         f"reproduce the solution the observables came from -- check what the "
         f"relaxation engine resolved for the lens mass, distance and proper "
         f"motion."
+    )
+
+
+def test_a_multi_source_event_is_seeded_from_the_galactic_model():
+    """The retired multi-source gate: seeding two sources is an improvement.
+
+    The gate refused to seed proper motions for any event with more than one
+    source, because pre-split each source carried its own mu_rel vector and
+    one prior mean forced them together.  Under R1 there is one mu_rel per
+    event, resolved through source body 0, so the same mean is information:
+    source body 1's pm feeds only its own distance/rho chain.
+
+    ob161003 cannot show this as shipped -- it pins all four pm components,
+    and the seeding's earlier blocker returns on any pm/parallax entry, so
+    the multi-source gate was unreachable for the only multi-source example
+    and its retirement left every pinned number byte-identical.  Stripping
+    those pins reaches it.  Measured 2026-09-07:
+
+        gate present (no pm seeded)   chi2/N 10.91
+        gate retired (pm seeded)      chi2/N  6.94
+
+    Both halves are asserted, because chi2 alone cannot distinguish "seeded
+    and better" from "refused upstream and unchanged".
+    """
+    # Arrange / Act -- remove the pm entries and NOTHING else, so the
+    # galactic model is the only thing that can supply a proper motion while
+    # every other published value stays.  (Stripping `star.Source`/
+    # `star.Lens` wholesale would also drop the distances and radii, and the
+    # numbers above would not be the numbers being measured.)
+    chi2, reduced, n, pms = _seed_chi2(
+        "ob161003",
+        strip_prefixes=(
+            "star.SourceA.pm_",
+            "star.SourceB.pm_",
+            "star.Lens.pm_",
+            "star.LensB.pm_",
+        ),
+    )
+
+    # Assert: the seeding fired, and both sources took the SAME bulge mean.
+    # Element order is star config order: 0=Lens, 1=LensB, 2=SourceA,
+    # 3=SourceB.
+    for axis in ("pm_ra", "pm_dec"):
+        vec = pms["star." + axis]
+        assert vec.size == 4, f"expected 4 stars, got {vec.size}"
+        assert vec[2] == pytest.approx(vec[3]), (
+            f"the two sources got different {axis} seeds ({vec[2]} vs "
+            f"{vec[3]}); under R1 one mu_rel per event means one bulge mean "
+            f"for both source bodies"
+        )
+        assert vec[0] != pytest.approx(vec[2]), (
+            f"the lens and the sources got the same {axis} seed; the lens is "
+            f"seeded from the thin disk at 4 kpc and the sources from the "
+            f"bulge at 8 kpc, so equal values mean neither was seeded"
+        )
+
+    # Assert: and it is better than refusing to seed at all (10.91).
+    assert np.isfinite(chi2)
+    assert reduced < 8.0, (
+        f"chi2/N at the seed is {reduced:.3f} (chi2={chi2:.1f}, N={n}) with "
+        f"no proper motion supplied.  Refusing to seed measured 10.91 and "
+        f"seeding measured 6.94, so above 8.0 means the multi-source "
+        f"seeding has stopped helping and its retirement needs revisiting."
     )

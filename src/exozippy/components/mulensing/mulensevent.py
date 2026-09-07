@@ -937,7 +937,7 @@ class MulensEvent(Component):
             DC2018_128 (t_0/u_0/t_E/s/q/alpha/rho)       1.42 ->   1.21 (kept)
             ob08092 (t_0/u_0/t_E only, PSPL)             1.50 ->   1.42 (kept)
 
-        So the gates below are what keeps this from making published
+        So the gate below is what keeps this from making published
         solutions worse.  Filling only the *direction* and leaving the
         magnitude to the data would serve every case at once, but the
         direction is not a symbol, so provenance cannot express it
@@ -945,9 +945,30 @@ class MulensEvent(Component):
         is a sampling-geometry question and does not belong here.
         tests/test_seed_quality.py pins all four numbers.
 
-        The multi-source gate is KEPT at stage 1 -- its retirement is a
-        deliberate stage-4 change paired with re-pinning test_seed_quality
-        (design section 7).
+        THE MULTI-SOURCE GATE IS RETIRED (stage 4).  It refused to seed any
+        event with more than one source, because pre-split each source
+        carried its own mu_rel vector and one prior mean forced them
+        together -- the 1.72 -> 3.9 row above.  Under R1 there is exactly
+        one mu_rel per event, resolved through source body 0, so the same
+        mean is now information rather than a contradiction: source body 1's
+        pm feeds only its own distance/rho chain.
+
+        Measured rather than argued, because the reasoning above would have
+        justified the retirement even if it were wrong.  All four pinned
+        examples come out BYTE-IDENTICAL with the gate gone, which on its
+        own proves nothing -- ob161003's params file pins
+        star.Source*/star.Lens pm_ra/pm_dec (added with the du-sign work),
+        so the earlier blocker returns first and this gate is unreachable
+        for the only multi-source example shipped.  Stripping those four
+        pins to reach it, chi2/N at the seed:
+
+            gate present (no pm seeded)   10.91
+            gate retired (pm seeded)       6.94
+
+        i.e. the case the gate governed is better without it, and no
+        published solution moves at all.  tests/test_seed_quality.py's
+        test_a_multi_source_event_is_seeded_from_the_galactic_model pins
+        both halves.
         """
         if "galacticmodel" not in getattr(system, "config", {}):
             return None
@@ -966,13 +987,6 @@ class MulensEvent(Component):
                 f"[{self.prefix}] proper motion or parallax already given "
                 f"({', '.join(sorted(blockers))}); not seeding from the "
                 f"galactic model, which would contradict it."
-            )
-            return None
-        if self.n_sources > 1:
-            logger.info(
-                f"[{self.prefix}] {self.n_sources} sources; not seeding "
-                f"proper motions from the galactic model (one mean would "
-                f"tie their mu_rel together)."
             )
             return None
         try:
