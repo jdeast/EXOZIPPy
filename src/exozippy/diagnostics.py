@@ -86,6 +86,48 @@ class ModelAuditor:
 
         return param_logps, other_nodes
 
+    def _engine_consumed(self, key):
+        """True when a params key names a quantity the relaxation engine's
+        relations know, even though no built Parameter carries the label.
+
+        The concrete case (pre-existing, surfaced by the mulensevent split's
+        stage-3 gate): a `source.<star>.rho` seed on a point-source event.
+        finite_source is off so rho is not a model parameter -- but the
+        symbolic map wires rho = theta_star/theta_E unconditionally, so the
+        seed back-solves into the stellar chain and moves the starting
+        theta_E (measured on DC2018_128: dropping the seed moved the start's
+        data logp by 1.3 nats through the flux decomposition).  Reporting it
+        "unused" invites deleting a load-bearing seed, which is worse than
+        the noise it saves.
+
+        Membership is tested against `relation_symbol_paths` -- the subset
+        of the symbol map built from the components' get_symbol_map
+        discovery.  NOT against `master_symbol_map`: finalize_user_params'
+        fallback registers every unmapped user key there as a leaf symbol,
+        so full-map membership is vacuously true for any typo and would
+        destroy the check (measured: two injected typos both reported
+        "consumed" through the full map).
+        """
+        cm = getattr(self.system, "config_manager", None)
+        symbol_paths = getattr(cm, "relation_symbol_paths", None) or set()
+        if key in symbol_paths:
+            return True
+        # Fold the name spelling (source.Source.rho) to the index form the
+        # symbol map stores (source.0.rho).
+        parts = str(key).split(".")
+        if len(parts) != 3 or parts[1].isdigit():
+            return False
+        comp, inst, par = parts
+        entries = (getattr(self.system, "config", None) or {}).get(comp)
+        if not isinstance(entries, list):
+            return False
+        names = [
+            e.get("name") if isinstance(e, dict) else None for e in entries
+        ]
+        if inst not in names:
+            return False
+        return f"{comp}.{names.index(inst)}.{par}" in symbol_paths
+
     def check_unused_yaml(self):
         """Returns keys in YAML that didn't match any built Parameter."""
         used_keys = set()
@@ -102,7 +144,11 @@ class ModelAuditor:
 
         # 1. Top-Level Unused Keys (e.g., misspelled component names: "inst.HIRES.gama")
         for k in self.user_params.keys():
-            if k not in used_keys and k != "run":
+            if (
+                k not in used_keys
+                and k != "run"
+                and not self._engine_consumed(k)
+            ):
                 unused_items.append(k)
 
         # 2. Ignored Sub-Keys (e.g., spelled 'intival' instead of 'initval')

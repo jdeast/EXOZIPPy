@@ -831,6 +831,15 @@ class ConfigManager:
         self.base_defaults = {}
         self.all_relations = []
         self.master_symbol_map = {}
+        # The subset of master_symbol_map that came from the components' own
+        # get_symbol_map discovery -- i.e. paths some RELATION genuinely
+        # knows.  master_symbol_map itself is NOT that set: finalize's
+        # fallback registers every unmapped user key as a leaf symbol there,
+        # so testing membership in the full map to ask "does the engine
+        # consume this key" is vacuously true for any typo.  diagnostics'
+        # check_unused_yaml reads this instead (the DC2018_128 rho-seed
+        # false positive).
+        self.relation_symbol_paths = set()
 
         # Storage for hints passed by components during Registration Sweep
         self.hints = {}
@@ -982,6 +991,7 @@ class ConfigManager:
                             self.master_symbol_map[full_path] = sp.Symbol(
                                 full_path
                             )
+                            self.relation_symbol_paths.add(full_path)
 
                         # Extract the exact SymPy objects (with all their assumptions) from the equations
                         module_symbols = set()
