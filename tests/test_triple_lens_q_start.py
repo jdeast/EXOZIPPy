@@ -2,9 +2,9 @@
 
 The relaxation engine's mass-sum and q relations are binary-only
 (`mulensing/symbolic_physics.get_symbol_map` maps one companion slot), so for a
-lens with three or more bodies `Lens.register_parameters` seeds the per-slot q
-initvals from USER mass entries only.  With no such entries the hint is skipped
-and `resolve()` leaves the unseeded elements NaN, because `q` has no
+lens with three or more bodies `MulensEvent.register_parameters` seeds the
+per-slot q initvals from USER mass entries only.  With no such entries the hint
+is skipped and `resolve()` leaves the unseeded elements NaN, because `q` has no
 defaults.yaml initval.
 
 `_validate_q_start` then raised at stage 7 -- over a parameter that is
@@ -13,8 +13,9 @@ never from that initval.  Exactly the false-positive class
 `_validate_pspl_start`'s docstring warns about (the ob161003 theta_E lesson).
 Review 1.6.5.
 
-The raise is kept for companion slot 0, which the engine really does solve, so
-a NaN there really does mean a non-finite lens body mass.
+The raise is kept for companion slot 0 -- LENS ELEMENT 1 post-split, since
+element 0 is the masked primary -- which the engine really does solve, so a NaN
+there really does mean a non-finite lens body mass.
 """
 
 import numpy as np
@@ -25,31 +26,35 @@ from exozippy.system import System
 
 
 def _triple_lens_config(lc):
-    """One stellar primary plus two planetary companions -- three lens bodies,
-    so n_companions == 2 and the binary-only relations cannot cover slot 1."""
+    """One stellar primary plus two planetary companions -- three lens BODIES,
+    so n_companions == 2 and the binary-only relations cannot cover companion
+    slot 1 (which is LENS ELEMENT 2: element 0 is the masked primary)."""
     return {
         "star": [{"name": "Lens"}, {"name": "Source"}],
         "planet": [{"name": "b", "star_ndx": 0}, {"name": "c", "star_ndx": 0}],
-        "lens": [
+        "mulensevent": [
             {
-                "name": "Lens",
-                "lenses": ["star.0", "planet.0", "planet.1"],
-                "sources": ["star.1"],
                 "finite_source": False,
                 "t0_par": T0,
                 # Never shell out to MMEXOFAST from a unit test.
                 "mmexofast": False,
             }
         ],
+        "lens": [
+            {"body": "star.Lens"},
+            {"body": "planet.b"},
+            {"body": "planet.c"},
+        ],
+        "source": [{"body": "star.Source"}],
         "mulensinstrument": [{"name": "OGLE", "file": lc}],
     }
 
 
 def _triple_lens_params(**extra):
     params = {
-        "lens.Lens.t_0": {"initval": T0},
-        "lens.Lens.u_0": {"initval": U0},
-        "lens.Lens.t_E": {"initval": TE},
+        "source.Source.t_0": {"initval": T0},
+        "source.Source.u_0": {"initval": U0},
+        "mulensevent.t_E": {"initval": TE},
         "star.radius": {"sigma": 0.0},
         "star.teff": {"sigma": 0.0},
         "star.feh": {"sigma": 0.0},
@@ -73,7 +78,8 @@ def triple_lens_system(triple_lens_lc):
     fixture of the second."""
     system = System(
         _triple_lens_config(triple_lens_lc),
-        user_params=_triple_lens_params(**{"lens.0.q": {"initval": 1e-3}}),
+        # Companion slot 0 is lens ELEMENT 1.
+        user_params=_triple_lens_params(**{"lens.1.q": {"initval": 1e-3}}),
     )
     system.prepare()
     system.build_model()
@@ -82,11 +88,13 @@ def triple_lens_system(triple_lens_lc):
 
 def test_partially_seeded_derived_q_builds(triple_lens_system):
     """
-    Given a three-body lens whose params file seeds only companion slot 0's q,
+    Given a three-body lens whose params file seeds only companion slot 0's q
+      (lens element 1),
     When the model is built,
-    Then it builds: slot 1's NaN initval is the engine's bookkeeping for a
-      DERIVED parameter, not a start value, and the graph recomputes q from
-      the mass nodes.  This used to raise at stage 7 (review 1.6.5).
+    Then it builds: slot 1's -- lens element 2's -- NaN initval is the
+      engine's bookkeeping for a DERIVED parameter, not a start value, and the
+      graph recomputes q from the mass nodes.  This used to raise at stage 7
+      (review 1.6.5).
 
     The fixture doing the building is the point -- the assertions below only
     confirm that the state which used to be fatal is still exactly what it
@@ -97,8 +105,14 @@ def test_partially_seeded_derived_q_builds(triple_lens_system):
     # Assert
     q = triple_lens_system.lens.q
     q0 = np.atleast_1d(np.asarray(q.initval, dtype=float))
-    assert np.isnan(q0[1])
-    assert all(q.element_is_derived(i) for i in range(q0.size))
+    # Three bodies -> three elements; element 2 is the unseeded companion.
+    assert q0.size == 3
+    assert np.isnan(q0[2])
+    # Element 0 is the masked primary: q is not a parameter of it at all
+    # (inactive, so neither sampled nor derived).  Every element that IS a
+    # parameter is derived from the body masses.
+    assert not q.element_is_active(0)
+    assert all(q.element_is_derived(i) for i in range(1, q0.size))
 
 
 def test_sampled_q_with_a_nan_start_still_raises(
@@ -154,7 +168,8 @@ def test_missing_body_masses_warn_at_config_time(triple_lens_lc, caplog):
 
 def test_a_user_q_on_an_extra_companion_warns(triple_lens_lc, caplog):
     """
-    Given a three-body lens whose params file sets lens.1.q,
+    Given a three-body lens whose params file sets lens.2.q -- the SECOND
+      companion, since companion slot j is lens element j+1,
     When the lens registers its parameters,
     Then it warns that the entry sets a derived parameter's START but cannot
       set the companion mass the runtime value is computed from -- so the fit
@@ -163,7 +178,7 @@ def test_a_user_q_on_an_extra_companion_warns(triple_lens_lc, caplog):
     # Arrange
     system = System(
         _triple_lens_config(triple_lens_lc),
-        user_params=_triple_lens_params(**{"lens.1.q": {"initval": 1e-3}}),
+        user_params=_triple_lens_params(**{"lens.2.q": {"initval": 1e-3}}),
     )
 
     # Act
@@ -171,5 +186,5 @@ def test_a_user_q_on_an_extra_companion_warns(triple_lens_lc, caplog):
         system.prepare()
 
     # Assert
-    assert "lens.1.q" in caplog.text
+    assert "lens.2.q" in caplog.text
     assert "CANNOT set the companion mass" in caplog.text

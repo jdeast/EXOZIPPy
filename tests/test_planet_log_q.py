@@ -41,8 +41,13 @@ class _FakeRV:
 
 
 class _FakeLens:
+    """The post-split `lens` component: ONE ENTRY PER LENS BODY, so its
+    `bodies` attribute is a flat list of (component, index) refs -- entry 0
+    the primary, the rest its companions.  Pre-split this was one nested
+    per-event list on the single lens instance."""
+
     def __init__(self, bodies):
-        self.lens_bodies = [bodies]
+        self.bodies = bodies
 
 
 class _FakeSystem:
@@ -249,30 +254,32 @@ def test_stale_log_q_in_linear_mode_raises():
 # 2. End to end: a microlensing binary lens builds in log_q
 # ---------------------------------------------------------------------------
 def _binary_config(planet_extra=None):
-    """Minimal single-source binary lens (star + planet companion)."""
+    """Minimal single-source binary lens (star + planet companion).
+
+    One `lens:` entry per body (8.6.17): star.Lens is the primary, the planet
+    is the companion, i.e. LENS ELEMENT 1.
+    """
     planet_cfg = {"name": "b"}
     planet_cfg.update(planet_extra or {})
     return {
         "star": [{"name": "Lens"}, {"name": "Source"}],
         "planet": [planet_cfg],
-        "lens": [
-            {
-                "name": "Lens",
-                "lenses": ["star.0", "planet.0"],
-                "sources": ["star.1"],
-            }
-        ],
+        "mulensevent": [{"finite_source": False}],
+        "lens": [{"body": "star.Lens"}, {"body": "planet.b"}],
+        "source": [{"body": "star.Source"}],
     }
 
 
 def _binary_params(extra=None):
     p = {
-        "lens.Lens.t_0": {"initval": 2460025.0, "init_scale": 0.1},
-        "lens.Lens.u_0": {"initval": 0.1, "init_scale": 0.01},
-        "lens.Lens.t_E": {"initval": 30.0, "init_scale": 1.0},
-        "lens.Lens.s": {"initval": 0.98},
-        "lens.Lens.alpha": {"initval": 60.0, "init_scale": 0.9},
-        "lens.Lens.q": {"initval": 1e-3, "init_scale": 1e-4},
+        # Trajectory per source body, t_E on the event, geometry (including
+        # the mass ratio q) on the COMPANION's lens entry = element 1.
+        "source.Source.t_0": {"initval": 2460025.0, "init_scale": 0.1},
+        "source.Source.u_0": {"initval": 0.1, "init_scale": 0.01},
+        "mulensevent.t_E": {"initval": 30.0, "init_scale": 1.0},
+        "lens.b.s": {"initval": 0.98},
+        "lens.b.alpha": {"initval": 60.0, "init_scale": 0.9},
+        "lens.b.q": {"initval": 1e-3, "init_scale": 1e-4},
         "star.radius": {"sigma": 0.0},
         "star.teff": {"sigma": 0.0},
         "star.feh": {"sigma": 0.0},
@@ -374,9 +381,9 @@ def test_a_mass_seed_reaches_whichever_coordinate_each_planet_samples():
     fit silently starting at the defaults.yaml log_q instead of the mass the
     user asked for.
     """
-    # A plain star + two planets: no lens, so no lens.q seed competes with the
-    # mass seeds for the same relation (that contradiction is a different test's
-    # subject, and the engine resolves it by rank).
+    # A plain star + two planets: no lens, so no lens.<companion>.q seed
+    # competes with the mass seeds for the same relation (that contradiction
+    # is a different test's subject, and the engine resolves it by rank).
     config = {
         "star": [{"name": "A", "mist": False}],
         "planet": [
@@ -439,7 +446,8 @@ def test_derived_mass_matches_the_relation(lens_system):
 
 def test_lens_q_seeds_the_log_q_start(lens_system):
     """
-    Given a user lens.q initval,
+    Given a user lens.b.q initval (the companion's mass ratio, lens element
+      1),
     When the relaxation engine runs,
     Then it back-solves through the mass to a log_q start, and mass keeps
     the matching value.
@@ -451,7 +459,7 @@ def test_lens_q_seeds_the_log_q_start(lens_system):
     star_mass = np.atleast_1d(system.star.mass.initval)[system.planet.star_map]
 
     np.testing.assert_allclose(log_q, np.log10(mass / star_mass), atol=1e-6)
-    # lens.q = 1e-3 was the user's input; the chain should land on it.
+    # lens.b.q = 1e-3 was the user's input; the chain should land on it.
     np.testing.assert_allclose(10.0**log_q, [1e-3], rtol=1e-3)
 
     scale = np.atleast_1d(system.planet.log_q.init_scale)
@@ -550,7 +558,8 @@ def test_theta_E_is_finite_for_negative_lens_mass():
     Given a negative total lens mass (a linear-mode planet mass can drag
     mlens_total below zero),
     When theta_E is evaluated,
-    Then it is finite -- lens.build_likelihood takes log(theta_E), so a NaN
+    Then it is finite -- MulensEvent.build_likelihood (the event owns the
+    event-rate and singularity terms now) takes log(theta_E), so a NaN
     would poison the logp and its gradient over the whole region instead of
     letting the theta_E_singularity soft bound penalize it.
     """
