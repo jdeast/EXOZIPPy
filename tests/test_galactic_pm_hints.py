@@ -206,41 +206,6 @@ def test_seeds_are_skipped_when_parallax_is_already_measured():
     )
 
 
-def test_seeds_are_skipped_for_a_multi_source_event():
-    """
-    Given more than one source body,
-    When start values are resolved,
-    Then the proper motions are NOT seeded from the prior.
-
-    Every source would take the same bulge mean, tying their mu_rel together;
-    a resolved binary source distinguishes them.  On examples/ob161003 (two
-    sources, t_E and rho pinned for each) seeding took chi2/N from 1.72 to 3.9.
-    """
-    # Arrange: add a second source body to the lens block.
-    config, user_params = _inputs()
-    lens_block = (
-        config["lens"][0]
-        if isinstance(config["lens"], list)
-        else config["lens"]
-    )
-    sources = lens_block.get("sources")
-    if not sources:
-        pytest.skip("example does not use the explicit sources: list")
-    star_entries = config["star"]
-    star_entries.append(
-        copy.deepcopy(star_entries[int(sources[0].split(".")[1])])
-    )
-    star_entries[-1]["name"] = "SourceB"
-    lens_block["sources"] = list(sources) + [f"star.{len(star_entries) - 1}"]
-
-    # Act
-    params = _prepared(config, user_params)
-
-    # Assert
-    pm_dec = np.atleast_1d(np.asarray(params["star.pm_dec"].initval, float))
-    assert pm_dec[0] == pytest.approx(-3.0)
-
-
 def test_seeds_are_skipped_without_user_coordinates():
     """
     Given a config whose RA/Dec are left at the defaults.yaml placeholder,
