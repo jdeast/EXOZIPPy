@@ -6,6 +6,52 @@ Do not start the full suite with a timeout. Start it and poll.
 
 Testing note: build relation inputs with `pt.dscalar`, **not** `pt.as_tensor_variable(<python float>)` -- pytensor autocasts a bare Python float to the smallest dtype that represents it (5778.0 -> float32), and a unary op like `pt.log10` on it then computes in float32, silently losing ~1e-7. The model always feeds float64. `tests/test_torres.py` pins the port against real IDL output from `massradius_torres.pro`.
 
+## Renames create tests that pass while testing nothing
+
+A parameter or component rename does not usually make a test fail -- it makes
+it VACUOUS, which is worse, because a green suite tells you to stop looking.
+The 8.6.17 mulensevent split produced four distinct shapes of this in one
+sweep, all found by porting the tests rather than by running them:
+
+- **"The old name is absent."** `assert "lens.log_pi_rel_raw" not in
+  [v.name for v in model.value_vars]` was the *off* half of a coordinate-flag
+  test. After the rename it is trivially true whatever the flag does, so the
+  test passed while asserting nothing. Any `not in` / `not hasattr` /
+  `assert not ...` phrased against a name that MOVED is now free.
+- **A filter keyed on the old prefix.** `{c for c in consumers if
+  c.label.startswith("lens(")}` built the set under test. Renaming only the
+  neighbouring equality assertion left the filter matching nothing, so the
+  test asserted a property of the empty set.
+- **A guard scanning a fixed list of modules.** A check that "no hard-coded
+  u_0 clip survives" scanned the three modules that then held the clip. The
+  code moved to two new modules; the guard kept passing while watching files
+  that no longer contain what it polices.
+- **A precondition that skips.** A test's arrange block did
+  `if not lens_block.get("sources"): pytest.skip(...)`. Post-split that key
+  never exists, so it skipped unconditionally -- a green `s` in the summary
+  and zero execution, for a test whose assertion had also become wrong.
+
+Practical rules, all of which paid for themselves here:
+
+1. After a rename, grep the suite for the OLD name and check every hit that
+   is inside a `not in`, a `startswith`, a module/symbol list, or a skip
+   condition. Those four are where vacuity hides; a direct `assert x == y`
+   fails loudly and needs no hunting.
+2. Verify a renamed name against the code that GENERATES it, not against a
+   plan or a summary. `op.py` spells the post-split companion index out as
+   `f"lens.{j + 1}.s"`; `star.py` emits the literal
+   `"mulensevent(finite_source)"`. Both settled index and label questions
+   that prose had got wrong.
+3. When an exemption is added to a test (this element is allowed to be NaN,
+   this case is allowed to be missing), assert that the exemption FIRED and
+   that the unexempted path was still exercised. Otherwise a later change
+   that broadens the exemption silently empties the test.
+4. When a bug becomes structurally impossible rather than fixed -- the
+   event-rate double-count could only exist while `mu_rel` was per-source,
+   and R1 makes it shape (1,) -- say so in the docstring and pin the SHAPE
+   claim that makes it impossible. Do not leave a test implying it still
+   guards the old failure.
+
 ## The pre-push hook, and why it does not say `poetry run pytest`
 
 The full suite runs on push, wired in `.pre-commit-config.yaml` (install both hook
