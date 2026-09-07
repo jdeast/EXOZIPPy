@@ -1,0 +1,66 @@
+# Post-split (8.6.17 stage 2) conversion of examples/KMT-2019-BLG-1806,
+# committed as a test fixture so the finite-source Op-path acceptance builds
+# before the examples convert at stage 3.  Same physical inputs; only the
+# spellings moved.
+run:
+  name: KMT-2019-BLG-1806
+prefix: fitresults/KMT-2019-BLG-1806
+
+# Binary lens + finite source (2L1S).
+# MMEXOFAST solution: t_E~118d, s~1.05, q~2.5e-5, alpha~57 deg
+
+star:
+- name: Lens
+- name: Source
+
+planet:
+- name: Companion
+
+mulensevent:
+- finite_source: true
+  t0_par: 2458715.481879152   # approximate t_0 from MMEXOFAST
+
+lens:
+- body: star.Lens
+- body: planet.Companion
+
+source:
+- body: star.Source
+
+galacticmodel:
+- name: KMT-2019-BLG-1806
+  anchor_idx: 1              # source is star.1
+
+band:
+- name: I
+  filter: Generic/Cousins.I
+  ld_law: linear
+
+# SED block: even with no catalog photometry (see the .sed file), this
+# activates the source flux constraint -- each light curve's calibrated
+# baseline f_source is tied to the SED-predicted source I mag through a
+# per-lightcurve zeropoint (default prior 0 +/- 0.2 mag).
+sed:
+  file: KMT-2019-BLG-1806.sed.yaml
+
+mulensinstrument:
+- name: KMTC04
+  file: n20260624.I.KMTC04.pys
+  band: I
+- name: KMTS04
+  file: n20260624.I.KMTS04.pys
+  band: I
+- name: KMTA04
+  file: n20260624.I.KMTA04.pys
+  band: I
+
+parameter_file: KMT-2019-BLG-1806.params.yaml
+
+sampler:
+  method: ptde_async
+  n_temps: 8
+  T_max: 200
+  tune: 350
+  draws: 650
+  nthin: 1
+  recompute_trace: true

@@ -37,12 +37,13 @@ each machine's OWN solved start -- and macOS differed by 3.2e-05 nats
 (7.1e-10 relative) where Linux differed by 7.3e-12 (machine epsilon).
 Widening the tolerance would have hidden precisely the interesting part.
 
-STAGE-1 STATE (8.6.17): the shipped example configs carry the pre-split
+STAGE-2 STATE (8.6.17): the shipped example configs carry the pre-split
 spellings until stage 3, so most examples cannot build.  An example whose
 name has a CONVERTED config committed under tests/fixtures/mulens/configs/
-is recorded/checked from that copy instead (currently ob08092 and ob140939,
-whose fixtures were also label-translated to the post-split naming with
-values untouched).  Use --only to limit a run to those, e.g.
+is recorded/checked from that copy instead (ob08092 and ob140939 since
+stage 1b, DC2018_128 and KMT-2019-BLG-1806 since stage 2 -- their fixtures
+were also label-translated to the post-split naming with values untouched).
+Use --only to limit a run to those, e.g.
 
     python scripts/make_mulens_fixtures.py --check --only ob08092 --only ob140939
 """

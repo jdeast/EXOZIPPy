@@ -1,0 +1,62 @@
+# Post-split (8.6.17 stage 2) conversion of the example's params file.
+# Seeded from MMEXOFAST solution(s) [0, 1] (0-indexed);
+# source: examples/DC2018_128/mmexofast.json (n_solutions: 2).
+#
+# Only initvals are used: MMEXOFAST uncertainties are not mapped to
+# sigma (a Gaussian prior would double-count the data), and whitening
+# scales are measured from the data by EXOZIPPy at startup.
+#
+# initval is list-valued: one mutually-consistent start point per
+# solution above (P4 multi-seed sampling -- see config.py's
+# finalize_user_params).  Bounds are NOT per-seed and always come from
+# the first (seed 0) solution.
+
+source.Source.t_0:
+    initval: [2458554.89424795, 2458554.87715006]
+
+source.Source.u_0:
+    initval: [0.14297468, 0.13554066]
+
+# t_E is derived in EXOZIPPy from stellar masses/distances/proper motions.
+# Provided here as an initval hint to seed the relaxation engine.
+mulensevent.t_E:
+    initval: [18.17037538, 18.70647736]
+
+lens.Companion.s:
+    initval: [0.97875222, 0.85373431]
+
+# alpha: relaxation engine propagates the initval to xalpha/yalpha.
+lens.Companion.alpha:
+    initval: [-52.15111098, -51.34370652]
+
+source.Source.rho:
+    initval: [5.38363705e-03, 1.83885815e-07]
+
+# q = M_companion / M_primary.  EXOZIPPy's relaxation engine propagates
+# this through the symbolic relation  q * M_primary = M_companion
+# to set the companion's mass initval automatically.
+lens.Companion.q:
+    initval: [1.10576828e-03, 1.06999723e-03]
+
+star.Lens.ra:
+    initval: 267.595
+    sigma: 0
+star.Lens.dec:
+    initval: -28.982
+    sigma: 0
+star.Source.ra:
+    initval: 267.595
+    sigma: 0
+star.Source.dec:
+    initval: -28.982
+    sigma: 0
+
+# star.Lens/Source radius, teff and feh USED to be pinned by hand here, with
+# the note "these shouldn't be fit for such models (on the to do list)".  They
+# are not fit for such models any more, and nothing has to say so: this is a
+# point-source fit with no SED, no evolutionary model and no empirical
+# relation, so nothing reads any of the six and Star.structure_consumers
+# deactivates them (review 3.8.1).  Add an `sed:` block and they become free
+# and constrained again with no edit here.
+planet.Companion.radius:
+    sigma: 0

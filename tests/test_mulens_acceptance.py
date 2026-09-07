@@ -13,18 +13,23 @@ to be available for this review, because the split collapses parameters that
 are stored per source but physically singular; for the two PSPL cases it
 turned out to hold anyway (below).
 
-STAGE-1 STATE (8.6.17).  The shipped example configs still carry the
-pre-split spellings until stage 3, so they cannot build here.  The two
-always-run PSPL cases therefore build from CONVERTED CONFIG COPIES committed
-under tests/fixtures/mulens/configs/<name>/, and their fixture JSONs point
-there.  Those two fixtures also had their LABELS translated to the
-post-split naming -- the raw value vars lens.{t_0,u_0}_raw ->
-source.{t_0,u_0}_raw, and the per-parameter potentials follow their
-parameters' new component homes (lens.t_E -> mulensevent.t_E etc.); every
-VALUE is bit-identical to the stage-0 recording, which is exactly what
-stage-1 acceptance measured: 0 moved / 0 appeared / 0 vanished at ZERO
-tolerance on both examples, engine-solved starts bitwise identical.  The
-remaining eleven fixtures are untouched stage-0 recordings of example
+STAGE-2 STATE (8.6.17).  The shipped example configs still carry the
+pre-split spellings until stage 3, so they cannot build here.  Fixtures for
+CONVERTED CONFIG COPIES committed under tests/fixtures/mulens/configs/<name>/
+build for real: the two always-run PSPL cases (ob08092, ob140939, converted
+at stage 1b) and the two Op-path companion-bearing cases (DC2018_128,
+KMT-2019-BLG-1806, converted at stage 2 -- the first builds that EXECUTE the
+masked-primary companion stacking).  Their fixture JSONs' LABELS are
+translated to the post-split naming -- the raw value vars follow their
+parameters' new component homes (lens.{t_0,u_0}_raw -> source.*_raw,
+lens.t_E -> mulensevent.t_E, ...), and at stage 2 the four event potentials
+follow the build_likelihood split (lens.event_rate_prior ->
+mulensevent.event_rate_prior etc.); every VALUE is bit-identical to the
+stage-0 recording.  Measured at both stages: 0 moved / 0 appeared /
+0 vanished at ZERO tolerance on all four examples, and (stage 2) the Op-path
+magnification A(t) on the data epochs is bit-identical to the pre-split
+tree at the stored start (870 epochs DC2018_128, 2441 KMT-2019-BLG-1806).
+The remaining nine fixtures are untouched stage-0 recordings of example
 configs that cannot build until stage 3; their replay cases are
 xfail(strict=True) so they flip LOUDLY when the examples are converted (and
 the fixtures re-pointed/translated) instead of silently passing.
@@ -255,6 +260,65 @@ def test_the_term_names_match_the_logp_terms(name):
 
     # ACT / ASSERT
     assert len(term_names(model)) == len(model.logp(sum=False))
+
+
+@pytest.mark.slow
+def test_the_event_potentials_are_single_counted():
+    """
+    Given the DC2018_128 model (Op path, one companion, one source),
+    When its logp terms are enumerated,
+    Then each event potential exists exactly once, under the mulensevent
+    prefix, and no term name is duplicated.
+
+    The design's section-4 potential inventory, at its stage-2 vehicle
+    (design section 7).  What a single-source event CAN pin here: the event
+    potentials moved to their owning component without leaving a lens.*
+    twin behind (a duplicate would double-count the event-rate weight, the
+    defect class section 4 exists for), and `term_names` is collision-free
+    so the decomposition's attribution is trustworthy.  What it CANNOT pin:
+    that the event-rate term is single-counted ACROSS SOURCES -- with one
+    source the sum and the scalar coincide; ob161003 (2S2L) carries that
+    check at stage 3 (section 4's analytic reconciliation).
+    """
+    # ARRANGE
+    path = os.path.join(FIXTURES, "DC2018_128.json")
+    _, model = _build(_load(path))
+
+    # ACT
+    names = term_names(model)
+    counts = {n: names.count(n) for n in names}
+
+    # ASSERT -- no duplicates anywhere (a duplicate name is silently summed
+    # by the decomposition, so it would LOOK reconciled while double
+    # counting).
+    dupes = {n: c for n, c in counts.items() if c > 1}
+    assert not dupes, f"duplicated logp terms: {dupes}"
+
+    for pot in (
+        "POT:mulensevent.event_rate_prior",
+        "POT:mulensevent.source_behind_lens",
+        "POT:mulensevent.mu_rel_singularity",
+        "POT:mulensevent.theta_E_singularity",
+    ):
+        assert counts.get(pot) == 1, f"{pot} missing or duplicated"
+
+    # And the pre-split homes are GONE -- the move must not have left a
+    # lens.* twin adding the same weight twice.
+    stale = [
+        n
+        for n in names
+        if n.startswith("POT:lens.")
+        and n.split(".", 1)[1]
+        in (
+            "event_rate_prior",
+            "source_behind_lens",
+            "mu_rel_singularity",
+            "theta_E_singularity",
+            "fitpirel_jacobian",
+            "fitu0te_jacobian",
+        )
+    ]
+    assert not stale, f"pre-split event potentials survive on lens: {stale}"
 
 
 @pytest.mark.slow

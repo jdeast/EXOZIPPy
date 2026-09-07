@@ -1,0 +1,54 @@
+# Post-split (8.6.17 stage 2) conversion of examples/DC2018_128, committed
+# as a test fixture so the Op-path acceptance builds before the examples
+# convert at stage 3.  Same physical inputs; only the spellings moved.
+run:
+  name: DC2018_128
+prefix: fitresults/DC2018_128
+
+# Roman Data Challenge 2018, LC 128.  Binary lens, point source (2L1S).
+# MMEXOFAST solution: t_E~18.2d, s~0.98, q~0.0011, alpha~-52 deg
+
+star:
+- name: Lens
+- name: Source
+
+planet:
+- name: Companion
+
+mulensevent:
+- finite_source: false
+
+lens:
+- body: star.Lens
+- body: planet.Companion
+
+source:
+- body: star.Source
+
+galacticmodel:
+- name: DC2018_128
+  anchor_idx: 1
+
+band:
+- name: Z087
+  filter: Roman.WFI.Z087
+  ld_law: linear
+
+mulensinstrument:
+- name: Roman_Z087
+  file: n20180816.Z087.WFIRST18.128.txt
+  data_format: flux
+  observer_location: roman_simulated_2018dc
+  band: Z087
+
+parameter_file: DC2018_128.params.yaml
+
+sampler:
+  method: ptde_async
+  n_temps: 8
+  T_max: 200
+  tune: 5000
+  draws: 50000
+  nthin: 1
+  recompute_trace: true
+  eval_timeout: 10
