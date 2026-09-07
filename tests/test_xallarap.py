@@ -70,20 +70,17 @@ def _xal_system(tmp_path, finite_source=False, binary_lens=False):
     tmp_path.mkdir(parents=True, exist_ok=True)
     lc = _write_lc(tmp_path / "lc.dat")
     stars = [{"name": "L1"}, {"name": "Source"}, {"name": "SComp"}]
-    lenses = ["star.0"]
+    lens_bodies = [{"body": "star.L1"}]
     if binary_lens:
         stars.append({"name": "L2"})
-        lenses = ["star.0", "star.3"]
+        lens_bodies = [{"body": "star.L1"}, {"body": "star.L2"}]
     config = {
         "star": stars,
         "orbit": [
             {"name": "S", "primary": ["Source"], "companion": ["SComp"]}
         ],
-        "lens": [
+        "mulensevent": [
             {
-                "name": "EV",
-                "lenses": lenses,
-                "sources": ["star.1"],
                 "finite_source": finite_source,
                 "source_orbital_motion": "keplerian",
                 "source_orbit": "S",
@@ -91,14 +88,16 @@ def _xal_system(tmp_path, finite_source=False, binary_lens=False):
                 "mmexofast": False,
             }
         ],
+        "lens": lens_bodies,
+        "source": [{"body": "star.Source"}],
         "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],
     }
     params = {
-        "lens.Source.t_0": {"initval": _T0_PAR},
-        "lens.Source.u_0": {"initval": 0.15},
-        "lens.Source.t_E": {"initval": 45.0},
-        "lens.Source.pi_E_N": {"initval": 0.08},
-        "lens.Source.pi_E_E": {"initval": 0.11},
+        "source.Source.t_0": {"initval": _T0_PAR},
+        "source.Source.u_0": {"initval": 0.15},
+        "mulensevent.t_E": {"initval": 45.0},
+        "mulensevent.pi_E_N": {"initval": 0.08},
+        "mulensevent.pi_E_E": {"initval": 0.11},
         "orbit.S.period": {"initval": 120.0},
         "orbit.S.tc": {"initval": _T0_PAR - 20.0},
         "orbit.S.secosw": {"initval": 0.4},
@@ -116,13 +115,13 @@ def _xal_system(tmp_path, finite_source=False, binary_lens=False):
         "star.feh": {"sigma": 0.0},
     }
     if finite_source:
-        params["lens.Source.rho"] = {"initval": 1e-4}
+        params["source.Source.rho"] = {"initval": 1e-4}
     if binary_lens:
         params["star.L2.mass"] = {"initval": 0.2}
         params["star.L2.distance"] = {"initval": 4000.0}
-        params["lens.EV.s"] = {"initval": 1.3}
-        params["lens.EV.alpha"] = {"initval": 55.0}
-        params["lens.EV.q"] = {"initval": 0.33}
+        params["lens.L2.s"] = {"initval": 1.3}
+        params["lens.L2.alpha"] = {"initval": 55.0}
+        params["lens.L2.q"] = {"initval": 0.33}
     for st in stars:
         nm = st["name"]
         params[f"star.{nm}.ra"] = {"initval": 268.0, "sigma": 0}
@@ -197,12 +196,12 @@ def test_shift_is_the_anchored_projected_source_orbit(xal_system):
     Then: they agree to 1e-10 at every epoch, and both vanish at t0_par.
     """
     system, model = xal_system
-    lens = system.lens
+    event = system.mulensevent
     orbit = system.orbit
     times = np.linspace(_T0_PAR - 90.0, _T0_PAR + 90.0, 181)
 
-    dtau_t, du_t = lens._source_offset_series(times, system)
-    j = lens.xal_orbit_idx
+    dtau_t, du_t = event._source_offset_series(times, system)
+    j = event.xal_orbit_idx
     nodes = [
         dtau_t,
         du_t,
@@ -213,11 +212,11 @@ def test_shift_is_the_anchored_projected_source_orbit(xal_system):
         orbit.cosi.value[j],
         orbit.bigomega.value[j],
         orbit.a.value[j] * orbit.m_companion.value[j] / orbit.m_total.value[j],
-        lens.theta_E.value[0],
-        system.star.distance.value[lens.source_map[0]],
-        lens.mu_dec_rel_geo.value[0],
-        lens.mu_ra_rel_geo.value[0],
-        lens.mu_rel_geo_mag.value[0],
+        event.theta_E.value[0],
+        system.star.distance.value[event.source_map[0]],
+        event.mu_dec_rel_geo.value[0],
+        event.mu_ra_rel_geo.value[0],
+        event.mu_rel_geo_mag.value[0],
     ]
     out = _eval_at_start(model, nodes)
     dtau, du = np.atleast_1d(out[0]), np.atleast_1d(out[1])
@@ -242,7 +241,7 @@ def test_shift_is_the_anchored_projected_source_orbit(xal_system):
 
     # the anchor: zero shift at t0_par
     d0 = _eval_at_start(
-        model, list(lens._source_offset_series(np.array([_T0_PAR]), system))
+        model, list(event._source_offset_series(np.array([_T0_PAR]), system))
     )
     np.testing.assert_allclose(np.atleast_1d(d0[0]), 0.0, atol=1e-14)
     np.testing.assert_allclose(np.atleast_1d(d0[1]), 0.0, atol=1e-14)
@@ -260,21 +259,21 @@ def test_symbolic_magnification_consumes_the_shift(xal_system):
       slot (C25), not somewhere else.
     """
     system, model = xal_system
-    lens = system.lens
+    event = system.mulensevent
     inst = system.mulensinstrument
     times = np.asarray(inst.time, dtype=float)
 
-    A_node = lens.get_magnification(times, inst.observer_pos, system)
+    A_node = event.get_magnification(times, inst.observer_pos, system)
 
     from exozippy.skyframe import observer_sky_offset
 
-    ra = system.star.ra.value[lens.source_map[0]]
-    dec = system.star.dec.value[lens.source_map[0]]
+    ra = system.star.ra.value[event.source_map[0]]
+    dec = system.star.dec.value[event.source_map[0]]
     d_e, d_n = observer_sky_offset(inst.observer_pos, ra, dec, xp=pt)
-    p = lens._get_safe_mm_params(0)
+    p = event._get_safe_mm_params(system, 0)
     tau = (times - p["t_0"]) / p["t_E"] - d_n * p["pi_E_N"] - d_e * p["pi_E_E"]
     uu = p["u_0"] + d_n * p["pi_E_E"] - d_e * p["pi_E_N"]
-    dtau_t, du_t = lens._source_offset_series(times, system)
+    dtau_t, du_t = event._source_offset_series(times, system)
     tau = tau + dtau_t
     uu = uu + du_t
     u2 = pt.sqr(tau) + pt.sqr(uu)
@@ -301,11 +300,11 @@ def test_espl_op_matches_the_symbolic_path(tmp_path_factory):
     system, model = _xal_system(
         tmp_path_factory.mktemp("xal_espl"), finite_source=True
     )
-    lens = system.lens
+    event = system.mulensevent
     inst = system.mulensinstrument
     times = np.asarray(inst.time, dtype=float)
-    A_op = lens.get_magnification_op(times, inst.observer_pos, system)
-    A_sym = lens.get_magnification(times, inst.observer_pos, system)
+    A_op = event.get_magnification_op(times, inst.observer_pos, system)
+    A_sym = event.get_magnification(times, inst.observer_pos, system)
     A1, A2 = _eval_at_start(model, [A_op, A_sym])
     assert np.all(np.isfinite(A1))
     np.testing.assert_allclose(A1, A2, rtol=1e-5)
@@ -338,43 +337,65 @@ def test_no_new_parameters_and_node_degeneracy(xal_system):
     free_names = [v.name for v in model.free_RVs]
     assert "orbit.xbigomega_raw" in free_names
     assert bool(
-        np.atleast_1d(system.orbit.node_degenerate)[system.lens.xal_orbit_idx]
+        np.atleast_1d(system.orbit.node_degenerate)[
+            system.mulensevent.xal_orbit_idx
+        ]
     ), "a xallarap-only orbit must keep the node fold"
 
 
 def test_config_validation():
     """linear refused with the degeneracy explanation; missing/shared
-    orbit references refused."""
-    from exozippy.components.mulensing.lens import Lens
+    orbit references refused.  Post-split these keys, and their
+    validation, live on the mulensevent block (design 1.4/1.5)."""
+    from exozippy.components.mulensing.mulensevent import MulensEvent
     from exozippy.config import ConfigManager
 
-    base = {
-        "name": "EV",
-        "lenses": ["star.0"],
-        "sources": ["star.1"],
-    }
-    with pytest.raises(NotImplementedError, match="degenerate"):
-        Lens([dict(base, source_orbital_motion="linear")], ConfigManager({}))
-    with pytest.raises(ValueError, match="source_orbit"):
-        Lens(
-            [dict(base, source_orbital_motion="keplerian")],
-            ConfigManager({}),
-        )
-    cm = ConfigManager({})
-    cm.system_config = {"orbit": [{"name": "S"}]}
-    with pytest.raises(ValueError, match="SAME orbit"):
-        Lens(
-            [
-                dict(
-                    base,
-                    lenses=["star.0", "star.2"],
-                    orbital_motion="keplerian",
-                    orbit="S",
-                    source_orbital_motion="keplerian",
-                    source_orbit="S",
-                )
+    def _cm(lens_entries, orbits=None):
+        cm = ConfigManager({})
+        cm.system_config = {
+            "star": [
+                {"name": "L1"},
+                {"name": "Source"},
+                {"name": "SComp"},
+                {"name": "L2"},
             ],
-            cm,
+            "lens": lens_entries,
+            "source": [{"body": "star.Source"}],
+        }
+        if orbits:
+            cm.system_config["orbit"] = orbits
+        return cm
+
+    single = [{"body": "star.L1"}]
+    with pytest.raises(NotImplementedError, match="degenerate"):
+        MulensEvent([{"source_orbital_motion": "linear"}], _cm(single))
+    with pytest.raises(ValueError, match="source_orbit"):
+        MulensEvent([{"source_orbital_motion": "keplerian"}], _cm(single))
+    with pytest.raises(ValueError, match="SAME orbit"):
+        MulensEvent(
+            [
+                {
+                    "source_orbital_motion": "keplerian",
+                    "source_orbit": "S",
+                }
+            ],
+            _cm(
+                [
+                    {"body": "star.L1"},
+                    {
+                        "body": "star.L2",
+                        "orbital_motion": "keplerian",
+                        "orbit": "S",
+                    },
+                ],
+                orbits=[
+                    {
+                        "name": "S",
+                        "primary": ["Source"],
+                        "companion": ["SComp"],
+                    }
+                ],
+            ),
         )
 
 
@@ -388,7 +409,7 @@ def test_mm_xi_closed_form_mapping():
       a_1/(D_S theta_E) = xi_a) is fed to the PRODUCTION primitives
       physics.source_offset_from_orbit + physics.xallarap_trajectory_shift
       -- the same two calls, in the same order, with the same t0_par
-      anchoring, that Lens._source_offset_series makes,
+      anchoring, that MulensEvent._source_offset_series makes,
     Then: the production (dtau, du) equals the shift MulensModel APPLIES
       to its trajectory, with NO hand-written sign, to 1e-9.  This is both
       the recipe that lets a published xi_* solution seed an EXOZIPPy
@@ -411,7 +432,7 @@ def test_mm_xi_closed_form_mapping():
     primitives is what removes the trap rather than merely labelling it.
 
     WHAT IS STILL NOT COVERED HERE, named rather than glossed: the wiring
-    inside Lens._source_offset_series -- which graph nodes are handed to
+    inside MulensEvent._source_offset_series -- which graph nodes are handed to
     these two primitives (a1 = a m_c/m_total, D_S from the SOURCE star,
     the mu_rel_geo unit vector) -- has no numpy-level entry point, because
     it reads Parameter.value nodes off a built model.  That half is pinned
@@ -487,7 +508,7 @@ def test_mm_xi_closed_form_mapping():
         n_mm = 2 * np.pi / P
         a1 = a_xi * D_S * THETA_E / (RSUN_TO_AU * 1000.0)
 
-        # Act -- the SHIPPED chain: Lens._source_offset_series' two calls,
+        # Act -- the SHIPPED chain: MulensEvent._source_offset_series' two calls,
         # its t0_par anchoring, and its (tau_hat) unit vector.
         args = (
             tp,
@@ -618,7 +639,7 @@ def test_shipped_ob170114_production_track_matches_mulensmodel(monkeypatch):
       xi_* -> EXOZIPPy mapping comes from the params file on disk and the
       projection comes from physics.xallarap_trajectory_shift,
     When: the (dtau, du) series is pulled out of the PRODUCTION builder
-      Lens._source_offset_series at the model's start point and compared
+      MulensEvent._source_offset_series at the model's start point and compared
       to the shift MulensModel applies at the published xi_* elements,
     Then: the two agree at the percent level, and -- the assertion that
       matters -- the production track is emphatically NOT the NEGATED
@@ -690,12 +711,16 @@ def test_shipped_ob170114_production_track_matches_mulensmodel(monkeypatch):
     # trajectory parameters the ENGINE resolved (not the published ones --
     # MulensModel must be given the same base track for the comparison to
     # isolate the xallarap composition).
-    lens = system.lens
+    event = system.mulensevent
     times = np.linspace(2457850.0, 2458000.0, 301)
     out = _eval_at_start(
         model,
-        list(lens._source_offset_series(times, system))
-        + [lens.t_0.value[0], lens.u_0.value[0], lens.t_E.value[0]],
+        list(event._source_offset_series(times, system))
+        + [
+            system.source.t_0.value[0],
+            system.source.u_0.value[0],
+            event.t_E.value[0],
+        ],
     )
     dtau, du = np.atleast_1d(out[0]), np.atleast_1d(out[1])
     t_0, u_0, t_E = [float(np.atleast_1d(v)[0]) for v in out[2:]]
