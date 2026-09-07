@@ -11,11 +11,20 @@ Usage:
     # mutually-consistent start point per MMEXOFAST fit (P4: multi-seed
     # sampling, config.py's list-initval relaxation-engine extension).
     python scripts/mmexofast_to_params.py examples/DC2018_128/mmexofast.json \\
-        --lens-name Lens --out examples/DC2018_128/DC2018_128.params.yaml
+        --source-name Source --companion-name Companion \\
+        --out examples/DC2018_128/DC2018_128.params.yaml
 
     # A single solution -> plain scalar initvals (legacy single-start mode).
     python scripts/mmexofast_to_params.py examples/DC2018_128/mmexofast.json \\
-        --lens-name Lens --solution 1 --out examples/DC2018_128/DC2018_128.params.yaml
+        --solution 1 --out examples/DC2018_128/DC2018_128.params.yaml
+
+Emitted paths follow the post-split component homes (review 8.6.17): the
+trajectory offsets go to ``source.<source-name>.t_0/u_0`` (and ``rho``), the
+event timescale to ``mulensevent.t_E``, and the companion geometry to
+``lens.<companion-name>.s/alpha/q``.  The name defaults are the INDEX forms
+(``source.0``, ``lens.1`` -- lens element 0 is the masked primary, so the
+first companion is element 1), which resolve against any config; pass the
+instance names for a params file that reads like the config.
 
 Only MMEXOFAST's initvals are used.  Its estimated uncertainties are neither
 mapped to priors (sigma would double-count the data and artificially shrink
@@ -53,9 +62,15 @@ def _param_block(path, initval):
 
 
 def mmexofast_to_params(
-    json_path, lens_name="Lens", solution_index=None, out_path=None
+    json_path,
+    source_name="0",
+    companion_name="1",
+    solution_index=None,
+    out_path=None,
 ):
-    """Build a params.yaml text seeding ``lens.<lens_name>`` from MMEXOFAST fits.
+    """Build a params.yaml text seeding the microlensing parameters from
+    MMEXOFAST fits: ``source.<source_name>.t_0/u_0`` (+ ``rho``),
+    ``mulensevent.t_E``, ``lens.<companion_name>.s/alpha/q``.
 
     ``solution_index=None`` (default) uses every solution in the file, one
     per list entry, in file order (P4 multi-seed sampling). Pass an int to
@@ -117,12 +132,12 @@ def mmexofast_to_params(
     lines.append("")
 
     lines += _param_block(
-        f"lens.{lens_name}.t_0",
+        f"source.{source_name}.t_0",
         _fmt([fit["parameters"]["t_0"] - jd_offset for fit in chosen], ".8f"),
     )
     lines.append("")
     lines += _param_block(
-        f"lens.{lens_name}.u_0",
+        f"source.{source_name}.u_0",
         _fmt([fit["parameters"]["u_0"] for fit in chosen], ".8f"),
     )
     lines += [
@@ -131,12 +146,12 @@ def mmexofast_to_params(
         f"# Provided here as an initval hint to seed the relaxation engine.",
     ]
     lines += _param_block(
-        f"lens.{lens_name}.t_E",
+        "mulensevent.t_E",
         _fmt([fit["parameters"]["t_E"] for fit in chosen], ".8f"),
     )
     lines.append("")
     lines += _param_block(
-        f"lens.{lens_name}.s",
+        f"lens.{companion_name}.s",
         _fmt([fit["parameters"]["s"] for fit in chosen], ".8f"),
     )
     lines += [
@@ -144,7 +159,7 @@ def mmexofast_to_params(
         f"# alpha: relaxation engine propagates the initval to xalpha/yalpha.",
     ]
     lines += _param_block(
-        f"lens.{lens_name}.alpha",
+        f"lens.{companion_name}.alpha",
         _fmt([fit["parameters"]["alpha"] for fit in chosen], ".8f"),
     )
 
@@ -153,7 +168,7 @@ def mmexofast_to_params(
     if use_rho:
         lines.append("")
         lines += _param_block(
-            f"lens.{lens_name}.rho",
+            f"source.{source_name}.rho",
             _fmt(rhos, ".8e"),
         )
     else:
@@ -171,7 +186,7 @@ def mmexofast_to_params(
             f"# to set the companion's mass initval automatically.",
         ]
         lines += _param_block(
-            f"lens.{lens_name}.q",
+            f"lens.{companion_name}.q",
             _fmt(qs, ".8e"),
         )
 
@@ -195,9 +210,21 @@ def build_parser():
     )
     ap.add_argument("json", help="Path to mmexofast.json")
     ap.add_argument(
-        "--lens-name",
-        default="Lens",
-        help="Lens component name in YAML (default: Lens)",
+        "--source-name",
+        default="0",
+        help=(
+            "Source instance name (or index) the t_0/u_0/rho seeds "
+            "address, i.e. source.<name>.t_0 (default: 0, the index form)"
+        ),
+    )
+    ap.add_argument(
+        "--companion-name",
+        default="1",
+        help=(
+            "Lens COMPANION instance name (or element index) the s/alpha/q "
+            "seeds address, i.e. lens.<name>.s.  Element 0 is the masked "
+            "primary, so the first companion is element 1 (default: 1)"
+        ),
     )
     ap.add_argument(
         "--solution",
@@ -213,7 +240,13 @@ def build_parser():
 def main(argv=None):
     """CLI entry point. Parses argv (or sys.argv) and runs the conversion."""
     args = build_parser().parse_args(argv)
-    mmexofast_to_params(args.json, args.lens_name, args.solution, args.out)
+    mmexofast_to_params(
+        args.json,
+        source_name=args.source_name,
+        companion_name=args.companion_name,
+        solution_index=args.solution,
+        out_path=args.out,
+    )
 
 
 if __name__ == "__main__":

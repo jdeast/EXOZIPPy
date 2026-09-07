@@ -709,7 +709,7 @@ def search_mode(system):
     ``False`` opts out entirely; ``True`` forces the search even when the
     starts are already derivable; absent (the default) runs it only when
     something is missing.  It lives on the orbit block for the same reason
-    ``mmexofast:`` lives on the lens block: that is the thing being seeded,
+    ``mmexofast:`` lives on the mulensevent block: that is the thing being seeded,
     and the instrument that runs the search only borrows the switch.
     Returns one of ``"off"``, ``"force"``, ``"auto"``.
     """

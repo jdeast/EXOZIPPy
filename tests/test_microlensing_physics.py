@@ -69,7 +69,7 @@ def test_pspl_magnification_accuracy():
     t_at_peak = np.array([t0_val])
 
     with model:
-        A_node = system.lens.get_magnification(
+        A_node = system.mulensevent.get_magnification(
             t_at_peak, obs_zero, system, index=0
         )
         f = pytensor.function(model.free_RVs, A_node, on_unused_input="ignore")

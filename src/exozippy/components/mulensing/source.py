@@ -17,6 +17,8 @@ component that owns the coordinate is the established idiom (planet
 import logging
 
 import numpy as np
+import pymc as pm
+import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.components.parameterization import mode_manifest
@@ -228,7 +230,7 @@ class Source(Component):
         the two trajectory parameters that are sampled here, so their
         ``initval`` IS the start: raw = 0 maps to it through the logit
         transform.  The other four quantities
-        ``Lens._get_safe_mm_params`` handles -- t_E, theta_E, pi_E_N and
+        ``MulensEvent._get_safe_mm_params`` handles -- t_E, theta_E, pi_E_N and
         pi_E_E, all on mulensevent post-split -- are DERIVED, and for a
         derived parameter ``initval`` is the relaxation engine's own
         bookkeeping, not the value the model starts at; the graph
@@ -283,7 +285,20 @@ class Source(Component):
             )
 
     def build_likelihood(self, model, system):
-        """Stage 7: start-value validation only.  The fitu0te Jacobian
-        potential stays on Lens.build_likelihood at stage 1 (the
-        build_likelihood splits are stage 2)."""
+        """Stage 7: start-value validation, and the fitu0te change-of-
+        variables Jacobian -- u0te is this component's coordinate, so its
+        correction lives here (design 1.4)."""
         self._validate_pspl_start()
+
+        # fitu0te's change of variables: u_0 = u0te/t_E, so |du_0/du0te| =
+        # 1/t_E and the correction is -log(t_E) per OPTED-IN source track
+        # (per-instance flags; a single opted source reproduces the
+        # pre-split single term).  t_E is the EVENT's -- one shared factor
+        # for every track.
+        n_u0te = int(sum(self._fitu0te))
+        if n_u0te:
+            event = system.mulensevent
+            pm.Potential(
+                f"{self.prefix}.fitu0te_jacobian",
+                -n_u0te * pt.log(pt.maximum(event.t_E.value[0], 1e-12)),
+            )

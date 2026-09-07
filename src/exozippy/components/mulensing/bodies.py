@@ -197,6 +197,31 @@ def body_entries(block, comp_key, system_config):
     return out
 
 
+def resolve_orbit_ref(config_manager, ref, where):
+    """Resolve an orbit reference (instance name or index) -- the same
+    vocabulary astrometryinstrument's rel mode uses.  Shared by the lens
+    (companion ``orbit:``, keplerian orbital motion) and the event
+    (``source_orbit:``, xallarap), which resolve against the same orbit
+    component."""
+    from exozippy.components.orbit.bodies import component_instance_names
+
+    sys_cfg = getattr(config_manager, "system_config", None) or {}
+    orbit_names = component_instance_names(sys_cfg, "orbit")
+    if isinstance(ref, int) or str(ref).isdigit():
+        idx = int(ref)
+        if orbit_names and idx >= len(orbit_names):
+            raise ValueError(
+                f"[{where}] orbit index {idx} out of range; "
+                f"orbits are {orbit_names}."
+            )
+        return idx
+    if ref in orbit_names:
+        return orbit_names.index(ref)
+    raise ValueError(
+        f"[{where}] unknown orbit '{ref}'; orbits are {orbit_names}."
+    )
+
+
 def derive_body_names(block):
     """Set each entry's ``name:`` from its ``body:`` ref (in place).
 

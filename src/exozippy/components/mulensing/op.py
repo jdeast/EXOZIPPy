@@ -54,7 +54,7 @@ def _dev_skycoord(obs_pos_np, cache):
     satellite_skycoord with parallax(satellite=True, earth_orbital=False):
     _get_delta_satellite computes -dot(satellite_skycoord, north/east),
     which on these deviations carries ALL parallax (annual + satellite),
-    exactly matching Lens.get_magnification.
+    exactly matching MulensEvent.get_magnification.
     """
     obs_pos_2d = np.atleast_2d(obs_pos_np)
     # Keyed on the BYTES, not on hash(bytes): a 64-bit siphash can collide,
@@ -74,12 +74,16 @@ def _dev_skycoord(obs_pos_np, cache):
     return cache[key]
 
 
+# Post-split parameter homes (8.6.17): the trajectory offsets live on the
+# source component, the event chain on mulensevent.  These labels only name
+# entries of the positional param vector in diagnostics; the vector layout
+# itself is unchanged.
 _BASE_LABELS = (
-    "lens.t_0",
-    "lens.u_0",
-    "lens.t_E",
-    "lens.pi_E_N",
-    "lens.pi_E_E",
+    "source.t_0",
+    "source.u_0",
+    "mulensevent.t_E",
+    "mulensevent.pi_E_N",
+    "mulensevent.pi_E_E",
 )
 
 
@@ -100,7 +104,7 @@ def _base_mm_params(p):
     return {
         "t_0": t_0,
         # Same floor, same expression as the symbolic path
-        # (Lens._get_safe_mm_params): both go through physics, so the two
+        # (MulensEvent._get_safe_mm_params): both go through physics, so the two
         # backends cannot disagree about where the model is defined.  This
         # used to be a hard-coded 1e-9 against physics.U_0_FLOOR = 1e-6, so a
         # fit visiting 1e-9 <= |u_0| < 1e-6 got a different answer depending
@@ -179,7 +183,9 @@ def _build_binary_model(
         mm_params["rho"] = _safe_rho(p[idx])
         idx += 1
     mm_params["s"] = float(max(float(p[idx]), S_FLOOR))
-    mm_params["q"] = clip_q_value(p[idx + 1], "lens.q")
+    # The binary companion is LENS ELEMENT 1 (element 0 is the masked
+    # primary), so the label names the element the user can address.
+    mm_params["q"] = clip_q_value(p[idx + 1], "lens.1.q")
     mm_params["alpha"] = float(p[idx + 2])
     if orbital_motion:
         mm_params["ds_dt"] = float(p[idx + 3])
@@ -299,7 +305,7 @@ class _MagOpBase(Op):
         # lower than VBMDirectMagOp's -- but the failure mode is worse
         # precisely because it "works": the fit runs, burns the CPU, and
         # returns a posterior nobody has reason to distrust.  The symbolic
-        # PSPL path (Lens.get_magnification) is separate and STAYS
+        # PSPL path (MulensEvent.get_magnification) is separate and STAYS
         # differentiable; that is what NUTS-compatible microlensing means
         # here.  _MagGradOp is kept as the recipe if this is ever revisited.
         raise NotImplementedError(
@@ -409,7 +415,7 @@ class VBMDirectMagOp(Op):
     a finite-source point lens can carry a quadratic limb-darkening law: it is
     the only backend here that can (MulensModel's ``set_limb_coeff_u`` and its
     Yoo04 B0/B1 formalism are linear-only).  It is NOT the default for a
-    single lens -- see Lens.get_magnification_op, which keeps MulensModel
+    single lens -- see MulensEvent.get_magnification_op, which keeps MulensModel
     there unless a second LD coefficient is actually in play, because the two
     disagree by up to ~5 mmag in the deep finite-source regime (Yoo04's table
     interpolation) and a silent backend flip would move existing answers.
@@ -458,13 +464,13 @@ class VBMDirectMagOp(Op):
         # Lens orbital motion (C24, review 8.6.8 5c): two extra dvector
         # inputs carry the PER-EPOCH companion geometry -- s_t [r_E] and
         # alpha_t [DEG] -- built in the graph by
-        # Lens._companion_geometry_series.  The param vector keeps its
+        # MulensEvent._companion_geometry_series.  The param vector keeps its
         # static s_0/alpha_0 entries (the t0_par values; the series must
         # equal them there), so the layout and _param_labels are unchanged.
         self.orbital_motion = bool(orbital_motion)
         # Source orbital motion -- xallarap (C25, review 8.6.9): two more
         # dvector inputs carry the PER-EPOCH trajectory shift (dtau_t,
-        # du_t) built by Lens._source_offset_series, added to (tau, u)
+        # du_t) built by MulensEvent._source_offset_series, added to (tau, u)
         # after the parallax terms -- the source's own offset enters at
         # exactly the parallax slot.  Input order when both motions are on:
         # [p, times, obs, s_t, alpha_t, dtau_t, du_t].
@@ -706,9 +712,16 @@ class VBMDirectMagOp(Op):
         just that something did."""
         labels = list(_BASE_LABELS)
         if self.use_rho:
-            labels.append("lens.rho")
+            labels.append("source.rho")
         for j in range(self.n_companions):
-            labels += [f"lens.s[{j}]", f"lens.q[{j}]", f"lens.alpha[{j}]"]
+            # The Op's companion index j is 0-based; the lens component's
+            # vector element (and the user-facing spelling) is j+1, element
+            # 0 being the masked primary.
+            labels += [
+                f"lens.{j + 1}.s",
+                f"lens.{j + 1}.q",
+                f"lens.{j + 1}.alpha",
+            ]
         if self.bandpass is not None:
             labels.append("band.u1")
             if self.quadratic_ld:
@@ -780,7 +793,7 @@ class VBMDirectMagOp(Op):
             companions.append(
                 (
                     float(max(float(p[idx]), S_FLOOR)),
-                    clip_q_value(p[idx + 1], f"lens.q[{j}]"),
+                    clip_q_value(p[idx + 1], f"lens.{j + 1}.q"),
                     float(np.radians(float(p[idx + 2]))),
                 )
             )

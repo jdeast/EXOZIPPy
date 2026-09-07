@@ -214,25 +214,28 @@ class MulensInstrument(Instrument):
     def load_data(self, system):
         """Stage 1: Load photometry and pre-calculate observer positions.
 
-        Single-event assumption (enforced by Lens.__init__): index 0 is the
-        only event, so the event-0 source, t0_par, and magnification are used
-        throughout.
+        Single-event assumption (enforced by MulensEvent.__init__): there is
+        one mulensevent instance, so its t0_par and magnification dispatch
+        are used throughout.
         """
         self.fs_init = []
         self.q_source_init = []
         self.q_flux_init = []  # per-instrument f_s2/f_s1 (binary source)
         blocks = self._concat_blocks()
 
-        self._n_sources = int(system.lens.n_sources)
+        # n_elements, not star_map: this is stage 1, and the source
+        # component's maps are built in stage 2 (component order within a
+        # stage is the user's config key order, so they may not exist yet).
+        self._n_sources = int(system.source.n_elements)
 
         # MMEXOFAST integration (masks + error factors + auto seeds) -- must
         # run before the file loop so excluded points never enter the arrays.
         self._resolve_mmexofast(system)
 
         # Source RA/Dec (degrees from resolve → radians for projection math).
-        # Stashed for Lens._earth_vperp_en: the mu_helio -> mu_geo conversion
-        # must project Earth's velocity with the same (ra, dec) the Skowron
-        # deltas are projected with.
+        # Stashed for MulensEvent._earth_vperp_en: the mu_helio -> mu_geo
+        # conversion must project Earth's velocity with the same (ra, dec)
+        # the Skowron deltas are projected with.
         ra_deg, dec_deg = self._resolve_source_radec_deg(system)
         ra_rad = ra_deg * np.pi / 180.0
         dec_rad = dec_deg * np.pi / 180.0
@@ -272,16 +275,16 @@ class MulensInstrument(Instrument):
         # Geocentric reference (Skowron+2011 convention): Earth's position and
         # velocity at t_0_par define the inertial frame.  All observer positions
         # are stored as deviations from this linear Earth trajectory so that
-        # t_0/u_0 remain geocentric parameters.  Re-resolved here rather than
-        # taken from Lens.__init__: MMEXOFAST seeds arrive in stage 1 (via
-        # _resolve_mmexofast above), after the Lens snapshotted user_params,
-        # and a reference epoch far from the data makes the linear Earth
-        # extrapolation diverge (O(100) AU after ~20 yr), shearing tau/u by
-        # O(deviation x pi_E).
+        # t_0/u_0 remain geocentric parameters.  Re-resolved here rather
+        # than taken from MulensEvent.__init__: MMEXOFAST seeds arrive in
+        # stage 1 (via _resolve_mmexofast above), after MulensEvent
+        # snapshotted user_params, and a reference epoch far from the data
+        # makes the linear Earth extrapolation diverge (O(100) AU after
+        # ~20 yr), shearing tau/u by O(deviation x pi_E).
         self._t0_par = self._resolve_t0_par_final(
             system, np.concatenate([f[0] for f in per_file])
         )
-        system.lens.t0_par[0] = self._t0_par
+        system.mulensevent.t0_par[0] = self._t0_par
         self._earth_pos_ref = self.get_observer_position(
             np.array([self._t0_par]), "earth"
         )[0]  # (3,) AU
@@ -294,7 +297,8 @@ class MulensInstrument(Instrument):
         )[0]
         self._earth_vel_ref = (_ep - _em) / (2.0 * _dt)  # AU/day
 
-        # Median absolute position per instrument (used by Lens to detect parallax)
+        # Median absolute position per instrument (used by MulensEvent to
+        # detect satellite parallax when sizing the logmass scale)
         self.inst_ref_pos = []
 
         # Pass 2: observer positions, flux bootstraps, and sanity checks.
@@ -357,7 +361,7 @@ class MulensInstrument(Instrument):
     def _resolve_t0_par_final(self, system, all_times):
         """Final t0_par: the reference epoch anchoring the Skowron+2011 frame.
 
-        Lens.__init__ resolves t0_par from the mulensevent config and
+        MulensEvent.__init__ resolves t0_par from its config and
         user_params only; MMEXOFAST seeds arrive later (stage 1), so
         the automated workflow -- whose params file deliberately omits the
         microlensing start values -- used to fall through to the 2450000.0
@@ -409,11 +413,11 @@ class MulensInstrument(Instrument):
     def _resolve_mmexofast(self, system):
         """Stage-1a half of the MMEXOFAST integration.
 
-        Three modes, keyed off the lens block's ``mmexofast`` entry:
+        Three modes, keyed off the mulensevent block's ``mmexofast`` entry:
 
         - explicit file path: the JSON's bad-data mask (``excluded_points``)
           and error factors (``errfacs``) are applied to this component's
-          files; the seed hints are pushed by Lens at stage 3 as before. An
+          files; the seed hints are pushed by MulensEvent at stage 3 as before. An
           absent file warns and skips; an unparseable one raises (see
           ``mmexofast_support.load_json``) rather than dropping the mask and
           the error factors along with the seeds.
@@ -424,9 +428,9 @@ class MulensInstrument(Instrument):
           masks and error factors are all consumed here.
         - ``false``: fully opts out.
 
-        This lives on the instrument rather than Lens because the mask must
+        This lives on the instrument rather than MulensEvent because the mask must
         exist before the photometry is read (load_data), and only this
-        component knows its files; Lens owns the stage-2 seed path for
+        component knows its files; MulensEvent owns the stage-3 seed path for
         explicit files, and both share mmexofast_support for the translation.
         """
         event = getattr(system, "mulensevent", None)
@@ -440,7 +444,7 @@ class MulensInstrument(Instrument):
 
         if isinstance(spec, str) and spec != "auto":
             # Explicit JSON: masks + error factors, and the seed hints too.
-            # Lens re-pushes the same seeds at stage 3 (harmless, identical
+            # MulensEvent re-pushes the same seeds at stage 3 (harmless, identical
             # content); pushing them HERE as well makes them visible to this
             # component's flux bootstrap (_estimate_flux_components), which
             # runs later in this same load_data call -- stage 3 would be too
@@ -511,7 +515,9 @@ class MulensInstrument(Instrument):
         coincident by construction, so params.yaml only needs to state the
         target coordinates once, on the lens.
         """
-        source_ndx = int(system.lens.source_map[0])
+        # bodies, not star_map: called from load_data (stage 1), before the
+        # source component's build_maps has necessarily run.
+        source_ndx = int(system.source.bodies[0][1])
         n_stars = system.star.n_elements
         ra_all = self.config_manager.resolve("star", "ra", shape=(n_stars,))[
             "initval"
@@ -533,7 +539,7 @@ class MulensInstrument(Instrument):
             primary_lens_idx = next(
                 (
                     idx
-                    for (ctype, idx) in system.lens.lens_bodies[0]
+                    for (ctype, idx) in system.lens.bodies
                     if ctype == "star"
                 ),
                 None,
@@ -688,14 +694,17 @@ class MulensInstrument(Instrument):
         MulensModel fails — the caller then falls back to the PSPL columns.
         Parallax is intentionally ignored (flux scales only).
         """
-        s_val = _get("lens.0.s")
+        # The companion geometry is LENS ELEMENT 1 (element 0 is the masked
+        # primary; a lens.0.* read here would silently see nothing and drop
+        # every event to the degenerate PSPL columns).
+        s_val = _get("lens.1.s")
         if s_val is None:
             # MMEXOFAST seeds carry log_s (the sampled coordinate), not s.
-            log_s = _get("lens.0.log_s")
+            log_s = _get("lens.1.log_s")
             if log_s is not None:
                 s_val = 10.0 ** float(log_s)
-        q_val = _get("lens.0.q")
-        alpha = _get("lens.0.alpha")
+        q_val = _get("lens.1.q")
+        alpha = _get("lens.1.alpha")
         if s_val is None or q_val is None or alpha is None:
             return None
 
@@ -713,9 +722,11 @@ class MulensInstrument(Instrument):
 
             cols = []
             for j in range(n_src):
-                t0 = _get(f"lens.{j}.t_0")
-                u0 = _get(f"lens.{j}.u_0")
-                tE = _get(f"lens.{j}.t_E", _get("lens.0.t_E"))
+                t0 = _get(f"source.{j}.t_0")
+                u0 = _get(f"source.{j}.u_0")
+                # ONE event t_E: the per-source fallback dance dissolved
+                # with the split (design 5.2).
+                tE = _get("mulensevent.0.t_E")
                 if t0 is None or u0 is None or tE is None:
                     return None
                 params = {
@@ -726,10 +737,10 @@ class MulensInstrument(Instrument):
                     "u_0": floor_u_0_value(u0),
                     "t_E": max(float(tE), T_E_FLOOR),
                     "s": max(float(s_val), S_FLOOR),
-                    "q": clip_q_value(q_val, "lens.0.q (flux bootstrap)"),
+                    "q": clip_q_value(q_val, "lens.1.q (flux bootstrap)"),
                     "alpha": float(alpha),
                 }
-                rho = _get(f"lens.{j}.rho")
+                rho = _get(f"source.{j}.rho")
                 if rho is not None:
                     params["rho"] = max(float(rho), RHO_FLOOR)
                 model = mm.Model(params)
@@ -776,7 +787,8 @@ class MulensInstrument(Instrument):
 
         With N sources the decomposition solves the linear model
         F(t) = Σ_j f_s,j · A_j(t) + f_b via NNLS, where A_j is the PSPL
-        magnification along source j's trajectory (lens.<j>.t_0/u_0/t_E).
+        magnification along source j's trajectory (source.<j>.t_0/u_0, the
+        shared mulensevent t_E).
         The binary-lens perturbation is irrelevant here — we only need flux
         scales, not a precise model.
 
@@ -1210,7 +1222,7 @@ class MulensInstrument(Instrument):
             return
         sed = system.sed
         filter_keys = self._sed_filter_keys(system)
-        src = int(system.lens.source_map[0])
+        src = int(system.source.star_map[0])
         src_name = system.star.names[src]
 
         d_pc = self._user_or_default(
@@ -1401,7 +1413,7 @@ class MulensInstrument(Instrument):
         `ld_law: quadratic` (Band._parse_ld_laws) had the wrong source profile
         AND one combination of its sampled (q1, q2) constrained by nothing but
         its prior.  Whether a given backend can honour it is not decided here
-        -- see Lens._resolve_quadratic_ld, which is where the backend is
+        -- see MulensEvent._resolve_quadratic_ld, which is where the backend is
         known and where the fallback is announced.
 
         The guard is on the MANIFEST, not on the law: with `ld_law: linear` on
@@ -1411,7 +1423,7 @@ class MulensInstrument(Instrument):
         transit.py and rm.py use (components/sed/sed.md).
         """
         if not (
-            system.lens.finite_source[0]
+            system.mulensevent.finite_source
             and hasattr(system, "band")
             and np.any(self.band_map >= 0)
         ):
@@ -1455,9 +1467,9 @@ class MulensInstrument(Instrument):
         n_src = self._n_sources
         A_per_source = []
         for j in range(n_src):
-            system.lens.resolve_auto_vbbl(self.time, index=j)
+            system.mulensevent.resolve_auto_vbbl(self.time, index=j)
             A_per_source.append(
-                system.lens.get_magnification_op(
+                system.mulensevent.get_magnification_op(
                     t,
                     self.observer_pos,
                     system,
@@ -1507,9 +1519,9 @@ class MulensInstrument(Instrument):
 
         # Modeling-draft prose for the magnification model and the flux-space
         # likelihood, declared next to the model they describe.
-        lens = system.lens
-        if lens.uses_op(0):
-            if lens.backend == "mulensmodel":
+        event = system.mulensevent
+        if event.uses_op(0):
+            if event.backend == "mulensmodel":
                 mag_cite = (
                     r"computed with MulensModel \citep{Poleski:2019}, which "
                     r"wraps VBBinaryLensing \citep{Bozza:2010, Bozza:2018}"
@@ -1565,7 +1577,7 @@ class MulensInstrument(Instrument):
 
     def _sed_source_indices(self, system):
         """Star indices whose blended SED flux is the microlensing source."""
-        return [int(i) for i in system.lens.source_map]
+        return [int(i) for i in system.source.star_map]
 
     def _sed_filter_keys(self, system):
         """Per light curve, the BC-grid filter key, or None where absent.
@@ -1767,7 +1779,7 @@ class MulensInstrument(Instrument):
         # reintroduce the same class of split for a quadratic band.
         u1, u2, bandpass = self._finite_source_limb_darkening(system)
         A_per_source = [
-            system.lens.get_magnification_op(
+            system.mulensevent.get_magnification_op(
                 t_input,
                 obs_pos_input,
                 system,

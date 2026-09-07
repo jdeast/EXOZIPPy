@@ -61,11 +61,11 @@ def _eval_both(system, model, obs_dev, t_vals):
     convention both magnification paths consume.
     """
     with model:
-        A_sym_node = system.lens.get_magnification(
+        A_sym_node = system.mulensevent.get_magnification(
             t_vals, obs_dev, system, index=0
         )
 
-        sp = system.lens._get_safe_mm_params(system, 0)
+        sp = system.mulensevent._get_safe_mm_params(system, 0)
         mag_op = MulensMagOp(
             coords=_COORDS, mag_method="point_source", use_rho=False
         )
