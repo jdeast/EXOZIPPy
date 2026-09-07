@@ -56,6 +56,11 @@ EXAMPLE = os.path.join(
 )
 CONFIG = "ob161003.yaml"
 
+# Every test here builds a full System and compiles PyTensor graphs, which is
+# what the marker means (pyproject.toml). Without it `-m 'not slow'` would
+# quietly still pay for a 2S2L build.
+pytestmark = pytest.mark.slow
+
 # The nudge that makes a written start distinguishable from the start it was
 # built at, so "the value landed" cannot pass by accident.
 NUDGE = 0.01
