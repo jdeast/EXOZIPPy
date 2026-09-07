@@ -55,14 +55,11 @@ def _mulens_config(finite_source=False, extra=None):
     """A point-source (or finite-source) microlensing topology, no data."""
     config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [
-            {
-                "name": "L",
-                "lens_ndx": 0,
-                "source_ndx": 1,
-                "finite_source": finite_source,
-            }
-        ],
+        # Post-split layout: finite_source is an EVENT key, while `lens:` and
+        # `source:` carry one entry per physical body.
+        "mulensevent": [{"finite_source": finite_source}],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
         "galacticmodel": [{"name": "gm", "anchor_idx": 1}],
     }
     config.update(extra or {})
@@ -311,9 +308,13 @@ def test_the_consumer_predicate_names_who_reads_what(tmp_path):
     # Assert
     labels = {c.label for c in consumers}
     assert "sed" in labels
-    assert "lens(finite_source)" in labels
+    assert "mulensevent(finite_source)" in labels
     # The finite source reads the SOURCE's radius, star 1, and only that.
-    fs = {(c.param, c.star) for c in consumers if c.label.startswith("lens(")}
+    fs = {
+        (c.param, c.star)
+        for c in consumers
+        if c.label.startswith("mulensevent(")
+    }
     assert fs == {("radius", 1)}
 
 

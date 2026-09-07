@@ -203,7 +203,7 @@ def test_vbm_espl_and_mulensmodel_yoo04_disagree_enough_to_matter():
     This is the measurement that justifies NOT flipping the single-lens
     default backend: Yoo04 interpolates B0/B1 tables, VBM integrates, and the
     difference is real.  If this test ever starts failing because the two
-    agree, the conditional dispatch in Lens._resolve_quadratic_ld can be
+    agree, the conditional dispatch in MulensEvent._resolve_quadratic_ld can be
     simplified away -- so it is a guard on the REASON, not just the behaviour.
     """
     # Arrange
@@ -241,15 +241,17 @@ def _fs_system(tmp_path, ld_law, backend=None):
     tmp_path.mkdir(parents=True, exist_ok=True)
     lc = _write_pspl_lc(tmp_path / "lc.dat")
     params = _mulens_params(finite_source=True)
-    params["lens.Lens.rho"] = {"initval": RHO}
-    params["lens.Lens.u_0"] = {"initval": U0}
+    # rho and u_0 belong to the SOURCE's trajectory; the backend is an
+    # event-level choice.
+    params["source.Source.rho"] = {"initval": RHO}
+    params["source.Source.u_0"] = {"initval": U0}
     config = _mulens_config(
         lc,
         bands=[{"name": "I", "filter": "I", "ld_law": ld_law}],
         finite_source=True,
     )
     if backend is not None:
-        config["lens"][0]["backend"] = backend
+        config["mulensevent"][0]["backend"] = backend
     system = System(config, user_params=params)
     system.prepare()
     system.build_model()
@@ -290,7 +292,7 @@ def test_mulensmodel_backend_drops_u2_and_says_so(tmp_path, caplog):
     """
     # Arrange
     system = _fs_system(tmp_path, "quadratic", backend="mulensmodel")
-    lens = system.lens
+    event = system.mulensevent
     _, u2, bandpass = system.mulensinstrument._finite_source_limb_darkening(
         system
     )
@@ -298,8 +300,8 @@ def test_mulensmodel_backend_drops_u2_and_says_so(tmp_path, caplog):
 
     # Act
     with caplog.at_level(logging.WARNING):
-        first = lens._resolve_quadratic_ld(u2, bandpass)
-        second = lens._resolve_quadratic_ld(u2, bandpass)
+        first = event._resolve_quadratic_ld(u2, bandpass)
+        second = event._resolve_quadratic_ld(u2, bandpass)
 
     # Assert
     assert first is False and second is False
@@ -321,8 +323,8 @@ def test_vbm_backend_honours_u2(tmp_path):
     _, u2, bandpass = system.mulensinstrument._finite_source_limb_darkening(
         system
     )
-    assert system.lens.backend == "vbm_direct"
-    assert system.lens._resolve_quadratic_ld(u2, bandpass) is True
+    assert system.mulensevent.backend == "vbm_direct"
+    assert system.mulensevent._resolve_quadratic_ld(u2, bandpass) is True
 
 
 def test_no_u2_means_no_quadratic_law(tmp_path):
@@ -337,7 +339,7 @@ def test_no_u2_means_no_quadratic_law(tmp_path):
         system
     )
     assert u2 is None
-    assert system.lens._resolve_quadratic_ld(u2, bandpass) is False
+    assert system.mulensevent._resolve_quadratic_ld(u2, bandpass) is False
 
 
 @pytest.mark.parametrize("law", ["linear", "quadratic"])
@@ -348,7 +350,8 @@ def test_single_lens_backend_switches_only_when_u2_is_in_play(tmp_path, law):
     Then a linear band produces the MulensModel Op and a quadratic band
       produces the VBM ESPL Op.
 
-    This is the decision recorded in Lens._resolve_quadratic_ld's docstring,
+    This is the decision recorded in the docstring of
+    MulensEvent._resolve_quadratic_ld,
     pinned as behaviour: the backend moves only for the configuration that was
     already producing the wrong profile, never for one that was fine.
     """
@@ -361,7 +364,7 @@ def test_single_lens_backend_switches_only_when_u2_is_in_play(tmp_path, law):
     obs_in = pt.dmatrix("obs")
 
     # Act
-    node = system.lens.get_magnification_op(
+    node = system.mulensevent.get_magnification_op(
         t_in, obs_in, system, index=0, u1=u1, u2=u2, bandpass=bandpass
     )
     op = node.owner.op
@@ -394,7 +397,7 @@ def test_the_graph_actually_responds_to_u2(tmp_path):
     obs_in = pt.dmatrix("obs")
     u1_in = pt.dscalar("u1")
     u2_in = pt.dscalar("u2")
-    node = system.lens.get_magnification_op(
+    node = system.mulensevent.get_magnification_op(
         t_in, obs_in, system, index=0, u1=u1_in, u2=u2_in, bandpass=bandpass
     )
     fn = pytensor.function(

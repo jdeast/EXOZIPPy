@@ -10,7 +10,8 @@ file, so an explicit user entry still frees it).
 
 The consumers, and the condition under which each reads a band's LD:
   transit           -- unconditional (any transit referencing the band)
-  mulensinstrument  -- only when lens.finite_source is on
+  mulensinstrument  -- only when mulensevent.finite_source is on (the flag
+                       moved off the `lens:` block in the 8.6.17 split)
   rvinstrument rm:  -- the `rm_band` band, or band 0 when unset
   astrometry band:  -- NOT a consumer (filter identity only, for the SED)
 """
@@ -44,11 +45,10 @@ def _write_pspl_lc(path, n=60):
 def _mulens_config(lc, bands=None, mulens_band="I", finite_source=False):
     config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [
+        # Event-level keys (finite_source, t0_par, use_op, mmexofast) live on
+        # `mulensevent:`; `lens:`/`source:` name one physical body each.
+        "mulensevent": [
             {
-                "name": "Lens",
-                "lens_ndx": 0,
-                "source_ndx": 1,
                 "finite_source": finite_source,
                 "t0_par": T0,
                 "use_op": False,
@@ -56,6 +56,8 @@ def _mulens_config(lc, bands=None, mulens_band="I", finite_source=False):
                 "mmexofast": False,
             }
         ],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
         "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],
     }
     if bands is not None:
@@ -67,9 +69,10 @@ def _mulens_config(lc, bands=None, mulens_band="I", finite_source=False):
 
 def _mulens_params(finite_source=False):
     params = {
-        "lens.Lens.t_0": {"initval": T0},
-        "lens.Lens.u_0": {"initval": U0},
-        "lens.Lens.t_E": {"initval": TE},
+        # t_0/u_0/rho are per SOURCE; t_E is event-level.
+        "source.Source.t_0": {"initval": T0},
+        "source.Source.u_0": {"initval": U0},
+        "mulensevent.t_E": {"initval": TE},
         "star.radius": {"sigma": 0.0},
         "star.teff": {"sigma": 0.0},
         "star.feh": {"sigma": 0.0},
@@ -78,7 +81,7 @@ def _mulens_params(finite_source=False):
         params[f"star.{nm}.ra"] = {"initval": 264.0, "sigma": 0}
         params[f"star.{nm}.dec"] = {"initval": -27.0, "sigma": 0}
     if finite_source:
-        params["lens.Lens.rho"] = {"initval": 1.0e-3}
+        params["source.Source.rho"] = {"initval": 1.0e-3}
     return params
 
 
@@ -185,7 +188,8 @@ def test_omission_is_logged_at_info(pspl_lc, caplog):
 # --------------------------------------------------------------------------
 def test_finite_source_frees_the_limb_darkening(pspl_lc):
     """
-    Given the same fit with lens.finite_source: true and nothing else changed,
+    Given the same fit with mulensevent.finite_source: true and nothing
+      else changed,
     When the model is built,
     Then the band's q1/q2 are free RVs again.
     """
@@ -440,12 +444,14 @@ def test_point_source_mulens_band_is_not_an_ld_consumer():
     Then the band is not a consumer; turning finite_source on makes it one.
     """
     band = _band_for(["I"])
+    # finite_source is read off the one `mulensevent:` entry, not off the
+    # per-body `lens:` entries (8.6.17 split).
     point = _StubSystem(
-        lens=[{"finite_source": False}],
+        mulensevent=[{"finite_source": False}],
         mulensinstrument=[{"name": "OGLE", "band": "I"}],
     )
     finite = _StubSystem(
-        lens=[{"finite_source": True}],
+        mulensevent=[{"finite_source": True}],
         mulensinstrument=[{"name": "OGLE", "band": "I"}],
     )
     assert set(band._ld_consumer_indices(point)) == set()
