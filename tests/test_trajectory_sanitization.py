@@ -1,7 +1,8 @@
 """Trajectory-parameter (t_0, u_0, t_E, theta_E, pi_E_N, pi_E_E) sanitization.
 
-The sequel to tests/test_q_sanitization.py.  ``Lens._get_safe_mm_params`` used
-to scrub all five of its inputs with ``pt.nan_to_num``::
+The sequel to tests/test_q_sanitization.py.
+``MulensEvent._get_safe_mm_params`` used to scrub all five of its inputs with
+``pt.nan_to_num``::
 
     t_E -> 100 d,  u_0 -> 1,  theta_E -> 0,  pi_E_N -> 0,  pi_E_E -> 0
 
@@ -10,7 +11,13 @@ a healthy-looking likelihood.  The scrub is gone; the three RANGE decisions it
 was tangled up with (the t_E floor, the |u_0| floor, the no-lensing parallax
 gate) survive, and the failure now names the parameter -- in the graph by
 propagating to logp, on the numeric Op path by raising, and at build time by
-``Lens._validate_pspl_start``.
+``Source._validate_pspl_start``.
+
+Post-split the five quantities live on two components: ``t_0``/``u_0`` are
+per-source-body and sit on ``source``, while ``t_E``/``theta_E``/``pi_E_N``/
+``pi_E_E`` are shared by every track and sit on the single ``mulensevent``
+instance.  ``MulensEvent._get_safe_mm_params`` reaches the source half through
+``system``, which is why the stand-ins below carry a miniature system.
 
 The last section covers the sequel: the |u_0| floor was TWO different numbers
 (1e-6 symbolic, a hard-coded 1e-9 on the Op path, plus a third copy in the flux
@@ -29,9 +36,11 @@ import pytensor.tensor as pt
 import pytest
 
 from exozippy.components.mulensing import lens as lens_module
+from exozippy.components.mulensing import mulensevent as me_module
 from exozippy.components.mulensing import mulensinstrument as mi_module
 from exozippy.components.mulensing import op as op_module
-from exozippy.components.mulensing.lens import Lens
+from exozippy.components.mulensing import source as source_module
+from exozippy.components.mulensing.mulensevent import MulensEvent
 from exozippy.components.mulensing.mulensinstrument import MulensInstrument
 from exozippy.components.mulensing.op import (
     MulensMagOp,
@@ -47,6 +56,7 @@ from exozippy.components.mulensing.physics import (
     floor_u_0_value,
     require_mm_number,
 )
+from exozippy.components.mulensing.source import Source
 from exozippy.system import System
 
 _COORDS = "268.0d -29.0d"
@@ -63,22 +73,20 @@ _LEGACY_U_0_FLOOR = 1e-6
 
 
 def _pspl_config():
-    """A minimal PSPL topology: star.0 lens, star.1 source."""
+    """A minimal PSPL topology: star.Lens the lens body, star.Source the
+    source body.  Post-split that is one `mulensevent` entry carrying the
+    event-level flags, one `lens` entry per lens body (element 0 is the
+    masked primary) and one `source` entry per source body."""
     config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [
-            {
-                "name": "Lens",
-                "lenses": ["star.0"],
-                "sources": ["star.1"],
-                "finite_source": False,
-            }
-        ],
+        "mulensevent": [{"finite_source": False}],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
     }
     user_params = {
-        "lens.Lens.t_0": {"initval": 2455379.571},
-        "lens.Lens.u_0": {"initval": 0.523},
-        "lens.Lens.t_E": {"initval": 17.94},
+        "source.Source.t_0": {"initval": 2455379.571},
+        "source.Source.u_0": {"initval": 0.523},
+        "mulensevent.t_E": {"initval": 17.94},
         "star.Lens.ra": {"initval": 268.0, "sigma": 0},
         "star.Lens.dec": {"initval": -29.0, "sigma": 0},
         "star.Source.ra": {"initval": 268.0, "sigma": 0},
@@ -103,21 +111,53 @@ class _FakeParam:
         self.value = node
 
 
-class _FakeLens:
-    """Enough of a Lens to call _get_safe_mm_params on symbolic inputs."""
+class _FakeStarParam:
+    def __init__(self, value):
+        self.value = pt.as_tensor_variable(np.array([value], dtype=float))
+
+
+class _FakeSource:
+    """The source-side half of the post-split trajectory: t_0 and u_0 are
+    per-source-body, so _get_safe_mm_params reads them off system.source."""
 
     def __init__(self):
         self.t_0 = _FakeParam(pt.dvector("t_0"))
         self.u_0 = _FakeParam(pt.dvector("u_0"))
+
+
+class _FakeSystem:
+    """Enough of a System for the two production methods borrowed below:
+    ``source`` (post-split home of t_0/u_0) and star.ra / star.dec (the live
+    line of sight get_magnification projects the parallax onto)."""
+
+    def __init__(self, source, ra_rad=0.0, dec_rad=0.0):
+        self.source = source
+        self.star = type(
+            "S",
+            (),
+            {"ra": _FakeStarParam(ra_rad), "dec": _FakeStarParam(dec_rad)},
+        )()
+
+
+class _FakeEvent:
+    """Enough of a MulensEvent to call _get_safe_mm_params on symbolic
+    inputs.  The event owns t_E/theta_E/pi_E_N/pi_E_E (one instance, so the
+    production code indexes them at 0); t_0/u_0 belong to the source
+    component and arrive through ``self.system``, the miniature System the
+    method is handed."""
+
+    def __init__(self, ra_rad=0.0, dec_rad=0.0):
         self.t_E = _FakeParam(pt.dvector("t_E"))
         self.theta_E = _FakeParam(pt.dvector("theta_E"))
         self.pi_E_N = _FakeParam(pt.dvector("pi_E_N"))
         self.pi_E_E = _FakeParam(pt.dvector("pi_E_E"))
+        self.source = _FakeSource()
+        self.system = _FakeSystem(self.source, ra_rad, dec_rad)
 
     def inputs(self):
         return [
-            self.t_0.value,
-            self.u_0.value,
+            self.source.t_0.value,
+            self.source.u_0.value,
             self.t_E.value,
             self.theta_E.value,
             self.pi_E_N.value,
@@ -133,13 +173,20 @@ _KEYS = ("t_0", "u_0", "t_E", "pi_E_N", "pi_E_E")
 _LEGACY_KEYS = ("t0", "u0", "tE", "pi_N", "pi_E")
 
 
-def _legacy_safe_mm_params(lens, index=0):
-    """The pre-fix body of Lens._get_safe_mm_params, verbatim."""
-    tE_raw = lens.t_E.value[index]
-    u0_raw = lens.u_0.value[index]
-    theta_E_raw = lens.theta_E.value[index]
-    pi_N_raw = lens.pi_E_N.value[index]
-    pi_E_raw = lens.pi_E_E.value[index]
+def _legacy_safe_mm_params(event, index=0):
+    """The pre-fix body of _get_safe_mm_params, verbatim.
+
+    The only edit is where the vectors are READ FROM: post-split t_0/u_0 are
+    the source component's and the other four are the event's length-1 ones.
+    Every arithmetic step -- the five nan_to_num substitutions and the three
+    floors -- is the pre-fix expression unchanged, which is the whole point
+    of the replica.
+    """
+    tE_raw = event.t_E.value[0]
+    u0_raw = event.source.u_0.value[index]
+    theta_E_raw = event.theta_E.value[0]
+    pi_N_raw = event.pi_E_N.value[0]
+    pi_E_raw = event.pi_E_E.value[0]
 
     tE_scrubbed = pt.nan_to_num(tE_raw, nan=100.0)
     u0_scrubbed = pt.nan_to_num(u0_raw, nan=1.0)
@@ -152,7 +199,7 @@ def _legacy_safe_mm_params(lens, index=0):
     is_physical = pt.gt(theta_E_scrubbed, 1e-6)
 
     return {
-        "t0": lens.t_0.value[index],
+        "t0": event.source.t_0.value[index],
         "u0": u0_safe,
         "tE": tE_safe,
         "pi_N": pt.switch(is_physical, pi_N_scrubbed, 0.0),
@@ -162,8 +209,8 @@ def _legacy_safe_mm_params(lens, index=0):
 
 def _compiled_pair():
     """(new, legacy) evaluators of the five outputs on the same inputs."""
-    fake = _FakeLens()
-    new = Lens._get_safe_mm_params(fake, 0)
+    fake = _FakeEvent()
+    new = MulensEvent._get_safe_mm_params(fake, fake.system, 0)
     old = _legacy_safe_mm_params(fake, 0)
     ins = fake.inputs()
     f_new = pytensor.function(ins, [new[k] for k in _KEYS])
@@ -375,7 +422,7 @@ def test_no_scrub_survives_in_the_source():
     Then it neither calls nan_to_num nor open-codes the three floors, so the
       fabrication cannot creep back by copy-paste without failing here.
     """
-    src = inspect.getsource(Lens._get_safe_mm_params)
+    src = inspect.getsource(MulensEvent._get_safe_mm_params)
     body = src.split('"""')[-1]
     assert "nan_to_num" not in body
     assert "1e-4" not in body
@@ -399,10 +446,13 @@ def test_the_five_stay_finite_over_the_whole_sampled_support(pspl_system):
       This is the premise the removal rests on.
     """
     system, model = pspl_system
-    lens = system.lens
+    # The five (six, counting theta_E) now straddle two components: t_0/u_0
+    # are the source's, the rest the event's.
     names = ["t_0", "u_0", "t_E", "theta_E", "pi_E_N", "pi_E_E"]
+    owner = {"t_0": system.source, "u_0": system.source}
+    pars = [getattr(owner.get(n, system.mulensevent), n) for n in names]
     rvs = list(model.value_vars)
-    outs = model.replace_rvs_by_values([getattr(lens, n).value for n in names])
+    outs = model.replace_rvs_by_values([p.value for p in pars])
     fn = pytensor.function(rvs, outs, on_unused_input="ignore")
 
     ip = model.initial_point()
@@ -465,11 +515,11 @@ def test_a_nan_raw_coordinate_already_makes_logp_nan(pspl_system):
 @pytest.mark.parametrize(
     "index, label",
     [
-        (0, "lens.t_0"),
-        (1, "lens.u_0"),
-        (2, "lens.t_E"),
-        (3, "lens.pi_E_N"),
-        (4, "lens.pi_E_E"),
+        (0, "source.t_0"),
+        (1, "source.u_0"),
+        (2, "mulensevent.t_E"),
+        (3, "mulensevent.pi_E_N"),
+        (4, "mulensevent.pi_E_E"),
     ],
 )
 def test_base_mm_params_raises_naming_the_nan_parameter(index, label):
@@ -516,8 +566,8 @@ def test_require_mm_number_passes_infinities_through():
       out-of-range value the caller's own floor handles; NaN has no value at
       all.
     """
-    assert require_mm_number(np.inf, "lens.t_E") == np.inf
-    assert require_mm_number(-np.inf, "lens.u_0") == -np.inf
+    assert require_mm_number(np.inf, "mulensevent.t_E") == np.inf
+    assert require_mm_number(-np.inf, "source.u_0") == -np.inf
     assert (
         _base_mm_params(np.array([2458554.89, 0.1, np.inf, 0.0, 0.0]))["t_E"]
         == np.inf
@@ -529,7 +579,8 @@ def test_pspl_op_reports_a_nan_by_name_and_still_rejects_the_proposal():
     Given a param vector whose t_E is NaN,
     When MulensMagOp.perform runs,
     Then it still returns all-NaN magnifications (logp = -inf, proposal
-      rejected -- unchanged), but the warn-once message now names lens.t_E.
+      rejected -- unchanged), but the warn-once message now names
+      mulensevent.t_E.
     """
     p = np.array([2458554.89, 0.1, np.nan, 0.0, 0.0])
     t = np.linspace(2458554.89 - 5, 2458554.89 + 5, 21)
@@ -543,7 +594,7 @@ def test_pspl_op_reports_a_nan_by_name_and_still_rejects_the_proposal():
         )
 
     assert np.all(np.isnan(out[0][0]))
-    assert any("lens.t_E" in str(w.message) for w in caught)
+    assert any("mulensevent.t_E" in str(w.message) for w in caught)
 
 
 def test_build_pspl_model_is_unchanged_for_a_healthy_vector():
@@ -567,7 +618,7 @@ def test_vbm_direct_names_the_non_finite_entry_it_short_circuits_on():
     Given a param vector with a NaN t_E,
     When VBMDirectMagOp.perform runs,
     Then it returns all-NaN through its own non-finite guard -- unchanged --
-      but warns once naming lens.t_E.  That branch used to return NaN in
+      but warns once naming mulensevent.t_E.  That branch used to return NaN in
       complete silence, which is indistinguishable from an ordinary rejected
       proposal even when the model is misconfigured on every one.
     """
@@ -583,7 +634,7 @@ def test_vbm_direct_names_the_non_finite_entry_it_short_circuits_on():
         )
 
     assert np.all(np.isnan(out[0][0]))
-    assert any("lens.t_E" in str(w.message) for w in caught)
+    assert any("mulensevent.t_E" in str(w.message) for w in caught)
 
 
 def test_vbm_direct_labels_cover_the_whole_param_vector():
@@ -592,19 +643,24 @@ def test_vbm_direct_labels_cover_the_whole_param_vector():
     When the label list is built,
     Then it lines up with the vector the Op actually unpacks, so the warning
       cannot name the wrong parameter.
+
+    The names are the post-split user-facing paths, and the companion block
+    carries the off-by-one that goes with them: the Op's 0-based companion j
+    is lens VECTOR ELEMENT j+1, because lens element 0 is the masked
+    primary.  So the Op's first companion is spelled ``lens.1.*``.
     """
     op = VBMDirectMagOp(coords=_COORDS, n_companions=2, use_rho=True)
     labels = op._param_labels()
     assert labels[:5] == [
-        "lens.t_0",
-        "lens.u_0",
-        "lens.t_E",
-        "lens.pi_E_N",
-        "lens.pi_E_E",
+        "source.t_0",
+        "source.u_0",
+        "mulensevent.t_E",
+        "mulensevent.pi_E_N",
+        "mulensevent.pi_E_E",
     ]
-    assert labels[5] == "lens.rho"
-    assert labels[6:9] == ["lens.s[0]", "lens.q[0]", "lens.alpha[0]"]
-    assert labels[9:12] == ["lens.s[1]", "lens.q[1]", "lens.alpha[1]"]
+    assert labels[5] == "source.rho"
+    assert labels[6:9] == ["lens.1.s", "lens.1.q", "lens.1.alpha"]
+    assert labels[9:12] == ["lens.2.s", "lens.2.q", "lens.2.alpha"]
     assert len(labels) == 12
 
 
@@ -621,7 +677,7 @@ def test_a_healthy_pspl_start_neither_warns_nor_raises(pspl_system, caplog):
     """
     system, _ = pspl_system
     with caplog.at_level("WARNING"):
-        system.lens._validate_pspl_start()
+        system.source._validate_pspl_start()
     assert "starts at" not in caplog.text
 
 
@@ -637,12 +693,12 @@ def test_a_nan_sampled_start_raises_naming_the_parameter(pspl_system, name):
       already rejects on its own.
     """
     system, _ = pspl_system
-    par = getattr(system.lens, name)
+    par = getattr(system.source, name)
     saved = par.initval
     try:
         par.initval = np.array([np.nan])
         with pytest.raises(ValueError) as exc:
-            system.lens._validate_pspl_start()
+            system.source._validate_pspl_start()
     finally:
         par.initval = saved
 
@@ -670,12 +726,13 @@ def test_a_derived_parameters_initval_is_not_treated_as_the_start(
     refuse to build a working, shipped example.
     """
     system, _ = pspl_system
-    par = getattr(system.lens, name)
+    # All four derived quantities are the EVENT's post-split.
+    par = getattr(system.mulensevent, name)
     saved = par.initval
     try:
         par.initval = np.array([np.nan])
         with caplog.at_level("WARNING"):
-            system.lens._validate_pspl_start()  # must not raise
+            system.source._validate_pspl_start()  # must not raise
     finally:
         par.initval = saved
     assert "starts at" not in caplog.text
@@ -693,12 +750,12 @@ def test_a_tiny_u_0_start_warns(pspl_system, caplog, u0):
       confessing that the floor gave up.
     """
     system, _ = pspl_system
-    par = system.lens.u_0
+    par = system.source.u_0
     saved = par.initval
     try:
         par.initval = np.array([u0])
         with caplog.at_level("WARNING"):
-            system.lens._validate_pspl_start()
+            system.source._validate_pspl_start()
     finally:
         par.initval = saved
     assert ".u_0 starts at" in caplog.text
@@ -714,12 +771,12 @@ def test_a_u_0_start_exactly_at_the_floor_does_not_warn(pspl_system, caplog):
       on a seed/start MISMATCH, not on smallness.
     """
     system, _ = pspl_system
-    par = system.lens.u_0
+    par = system.source.u_0
     saved = par.initval
     try:
         par.initval = np.array([-U_0_FLOOR])
         with caplog.at_level("WARNING"):
-            system.lens._validate_pspl_start()
+            system.source._validate_pspl_start()
     finally:
         par.initval = saved
     assert ".u_0 starts at" not in caplog.text
@@ -735,12 +792,12 @@ def test_an_infinite_start_does_not_raise(pspl_system, caplog):
       has no value at all.
     """
     system, _ = pspl_system
-    par = system.lens.u_0
+    par = system.source.u_0
     saved = par.initval
     try:
         par.initval = np.array([-np.inf])
         with caplog.at_level("WARNING"):
-            system.lens._validate_pspl_start()  # must not raise
+            system.source._validate_pspl_start()  # must not raise
     finally:
         par.initval = saved
     assert ".u_0 starts at" not in caplog.text
@@ -755,7 +812,7 @@ def test_the_examples_that_ship_build_without_the_guard_firing(pspl_system):
       resolved theta_E initval carries a NaN in the slot it never needed to
       solve while the model itself starts fine.
     """
-    src = inspect.getsource(Lens._validate_pspl_start)
+    src = inspect.getsource(Source._validate_pspl_start)
     body = src.split('"""')[-1]
     assert '"t_0"' in body and '"u_0"' in body
     for derived in ("t_E", "theta_E", "pi_E_N", "pi_E_E"):
@@ -787,41 +844,28 @@ def _u_0_grid():
     return np.array(sorted(vals))
 
 
-class _FakeStarParam:
-    def __init__(self, value):
-        self.value = pt.as_tensor_variable(np.array([value], dtype=float))
-
-
-class _FakeSystem:
-    """Enough of a System for Lens.get_magnification: star.ra / star.dec."""
-
-    def __init__(self, ra_rad, dec_rad):
-        self.star = type(
-            "S",
-            (),
-            {"ra": _FakeStarParam(ra_rad), "dec": _FakeStarParam(dec_rad)},
-        )()
-
-
 @functools.lru_cache(maxsize=1)
 def _symbolic_A():
     """Compile the PRODUCTION symbolic magnification as a function of u_0.
 
-    Uses ``Lens.get_magnification`` itself -- not a transcription of the
-    Paczynski formula -- so the comparison below really is between the two
-    backends and not between two copies of the same algebra.
+    Uses ``MulensEvent.get_magnification`` itself -- not a transcription of
+    the Paczynski formula -- so the comparison below really is between the
+    two backends and not between two copies of the same algebra.
     """
-    fake = _FakeLens()
-    fake.source_map = np.array([0])
+    fake = _FakeEvent(np.deg2rad(268.0), np.deg2rad(-29.0))
+    # get_magnification looks the source star up through source_bodies (the
+    # (component, index) pair per source slot) rather than the pre-split
+    # source_map; slot 0 is star.0 here.
+    fake.source_bodies = [("star", 0)]
     # get_magnification calls self._get_safe_mm_params -- bind the production
     # method so the clip under test is the one the model really uses.
     fake._get_safe_mm_params = functools.partial(
-        Lens._get_safe_mm_params, fake
+        MulensEvent._get_safe_mm_params, fake
     )
-    system = _FakeSystem(np.deg2rad(268.0), np.deg2rad(-29.0))
+    system = fake.system
     times = pt.dvector("times")
     obs = pt.dmatrix("obs")
-    node = Lens.get_magnification(fake, times, obs, system, 0)
+    node = MulensEvent.get_magnification(fake, times, obs, system, 0)
     fn = pytensor.function(
         fake.inputs() + [times, obs], node, on_unused_input="ignore"
     )
@@ -1071,8 +1115,20 @@ def test_no_hard_coded_u_0_clip_survives_in_the_mulensing_sources():
       form appears nowhere, and every u_0 floor goes through the two shared
       helpers.  Three copies drifting apart is exactly how the 1e-6 / 1e-9
       disagreement happened; a fourth must not be able to appear silently.
+
+    The symbolic copy used to sit in lens.py and now lives on mulensevent,
+    and the start-value guard that reports the floor moved to source.py, so
+    the scan covers every post-split mulensing module rather than only the
+    three original homes -- a fourth copy must not be able to hide in the
+    two new files either.
     """
-    for module in (lens_module, op_module, mi_module):
+    for module in (
+        lens_module,
+        me_module,
+        source_module,
+        op_module,
+        mi_module,
+    ):
         src = inspect.getsource(module)
         code = "\n".join(
             line
