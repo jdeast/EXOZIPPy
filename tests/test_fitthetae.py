@@ -1,7 +1,7 @@
 """
-Tests for `fitthetae: true` (lens block): sample log_theta_E, derive the
-HOST star's logmass from theta_E^2 = kappa * M_tot * pi_rel (with a
-log_q companion, M_host = M_tot/(1+q)).
+Tests for `fitthetae: true` (mulensevent block): sample log_theta_E,
+derive the HOST star's logmass from theta_E^2 = kappa * M_tot * pi_rel
+(with a log_q companion, M_host = M_tot/(1+q)).
 
 Swap 3 of the surgical coordinate plan.  In log coordinates the map is
 LINEAR (logM = 2 log theta_E - log kappa pi_rel - log(1+q)), so unlike
@@ -50,7 +50,7 @@ def _build(fitthetae, planet_linear=False, prepare_only=False):
         for k in ("run", "prefix", "parameter_file", "sampler"):
             config.pop(k, None)
         if fitthetae:
-            config["lens"][0]["fitthetae"] = True
+            config["mulensevent"][0]["fitthetae"] = True
         if planet_linear:
             config["planet"][0]["mass_parameterization"] = "linear"
         system = System(config, user_params=user_params)
@@ -69,22 +69,22 @@ def _eval(model, node, point):
 
 def test_off_is_the_physical_parameterization():
     system, _ = _build(fitthetae=False, prepare_only=True)
-    assert "log_theta_E" not in system.lens.manifest
-    entry = system.lens.manifest["theta_E"]
+    assert "log_theta_E" not in system.mulensevent.manifest
+    entry = system.mulensevent.manifest["theta_E"]
     assert entry.get("expr_key") == "default"
 
 
 def test_swapped_roles_identity_no_jacobian():
     system, model = _build(fitthetae=True)
-    assert "lens.log_theta_E_raw" in [v.name for v in model.value_vars]
+    assert "mulensevent.log_theta_E_raw" in [v.name for v in model.value_vars]
 
-    l_idx = int(system.lens.lens_bodies[0][0][1])
+    l_idx = int(system.mulensevent.lens_bodies[0][1])
     assert system.star.logmass.element_is_derived(l_idx)
 
     point = model.initial_point()
     lm = np.atleast_1d(_eval(model, system.star.logmass.value, point))
-    te = np.atleast_1d(_eval(model, system.lens.theta_E.value, point))
-    pr = np.atleast_1d(_eval(model, system.lens.pi_rel.value, point))
+    te = np.atleast_1d(_eval(model, system.mulensevent.theta_E.value, point))
+    pr = np.atleast_1d(_eval(model, system.mulensevent.pi_rel.value, point))
     lq = np.atleast_1d(_eval(model, system.planet.log_q.value, point))
     expect = np.log10(te[0] ** 2 / (KAPPA * pr[0]) / (1.0 + 10.0 ** lq[0]))
     assert np.isclose(lm[l_idx], expect, rtol=1e-10)
@@ -103,7 +103,7 @@ def test_linear_mass_companion_guard(caplog):
         system, _ = _build(
             fitthetae=True, planet_linear=True, prepare_only=True
         )
-    assert "log_theta_E" not in system.lens.manifest
+    assert "log_theta_E" not in system.mulensevent.manifest
     assert any(
         "fitthetae" in r.message and "linear mass" in r.message
         for r in caplog.records
@@ -128,8 +128,9 @@ def test_all_three_swaps_compose_into_observable_coordinates():
         for k in ("run", "prefix", "parameter_file", "sampler"):
             config.pop(k, None)
         for flag in ("fitmurel", "fitpirel", "fitthetae"):
-            config["lens"][0][flag] = True
-        config["lens"][0]["star_constrains_rho"] = False
+            config["mulensevent"][0][flag] = True
+        # star_constrains_rho is a per-SOURCE flag post-split.
+        config["source"][0]["star_constrains_rho"] = False
         system = System(config, user_params=user_params)
         system.prepare()
         model = system.build_model()
@@ -138,14 +139,14 @@ def test_all_three_swaps_compose_into_observable_coordinates():
 
     vv = [v.name for v in model.value_vars]
     for name in (
-        "lens.mu_ra_rel_raw",
-        "lens.mu_dec_rel_raw",
-        "lens.log_pi_rel_raw",
-        "lens.log_theta_E_raw",
-        "lens.log_rho_raw",
+        "mulensevent.mu_ra_rel_raw",
+        "mulensevent.mu_dec_rel_raw",
+        "mulensevent.log_pi_rel_raw",
+        "mulensevent.log_theta_E_raw",
+        "source.log_rho_raw",
     ):
         assert name in vv, name
-    l_idx = int(system.lens.lens_bodies[0][0][1])
+    l_idx = int(system.mulensevent.lens_bodies[0][1])
     for param in ("pm_ra", "pm_dec", "distance", "logmass"):
         assert getattr(system.star, param).element_is_derived(l_idx), param
     assert np.isfinite(float(model.compile_logp()(model.initial_point())))

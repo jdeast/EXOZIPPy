@@ -80,7 +80,8 @@ def test_proper_motions_are_seeded_at_the_galactic_prior_mean(params):
     """
     # Arrange: the same expectation the seeding claims to use.  DC2018_128 is
     # at (267.595, -28.982) deg; lens seeded as thin disk at 4 kpc, source as
-    # bulge at 8 kpc, matching the distance hints in Lens.register_parameters.
+    # bulge at 8 kpc, matching the distance hints in
+    # MulensEvent.register_parameters.
     ra, dec = np.radians(267.595), np.radians(-28.982)
     lens_pm = expected_proper_motion(ra, dec, 4000.0, "thin_disk")
     source_pm = expected_proper_motion(ra, dec, 8000.0, "bulge")
@@ -107,10 +108,10 @@ def test_neither_pm_component_is_left_at_zero(params):
     """
     # Act / Assert
     for label in (
-        "lens.mu_ra_rel",
-        "lens.mu_dec_rel",
-        "lens.pi_E_N",
-        "lens.pi_E_E",
+        "mulensevent.mu_ra_rel",
+        "mulensevent.mu_dec_rel",
+        "mulensevent.pi_E_N",
+        "mulensevent.pi_E_E",
     ):
         value = float(
             np.atleast_1d(np.asarray(params[label].initval, float))[0]
@@ -137,13 +138,17 @@ def test_measured_t_E_survives_and_theta_E_yields(params):
 
     # Act
     t_E = float(
-        np.atleast_1d(np.asarray(params["lens.t_E"].initval, float))[0]
+        np.atleast_1d(np.asarray(params["mulensevent.t_E"].initval, float))[0]
     )
     theta_E = float(
-        np.atleast_1d(np.asarray(params["lens.theta_E"].initval, float))[0]
+        np.atleast_1d(
+            np.asarray(params["mulensevent.theta_E"].initval, float)
+        )[0]
     )
     mu_rel = float(
-        np.atleast_1d(np.asarray(params["lens.mu_rel_mag"].initval, float))[0]
+        np.atleast_1d(
+            np.asarray(params["mulensevent.mu_rel_mag"].initval, float)
+        )[0]
     )
 
     # Assert
@@ -182,8 +187,8 @@ def test_seeds_are_skipped_when_parallax_is_already_measured():
     """
     # Arrange
     config, user_params = _inputs()
-    user_params["lens.Lens.pi_E_N"] = {"initval": -0.2}
-    user_params["lens.Lens.pi_E_E"] = {"initval": 0.1}
+    user_params["mulensevent.pi_E_N"] = {"initval": -0.2}
+    user_params["mulensevent.pi_E_E"] = {"initval": 0.1}
 
     ra, dec = np.radians(267.595), np.radians(-28.982)
     prior_pm_dec = expected_proper_motion(ra, dec, 4000.0, "thin_disk")[1]

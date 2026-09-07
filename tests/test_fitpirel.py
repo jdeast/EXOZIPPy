@@ -1,6 +1,6 @@
 """
-Tests for `fitpirel: true` (lens block): sample log_pi_rel, derive the
-lens star's distance D_l = 1000/(pi_rel + 1000/D_s).
+Tests for `fitpirel: true` (mulensevent block): sample log_pi_rel, derive
+the lens star's distance D_l = 1000/(pi_rel + 1000/D_s).
 
 Swap 2 of the surgical coordinate plan.  Unlike fitmurel this map is
 NONLINEAR, so a Jacobian potential (|dD_l/dlog_pi_rel|) accompanies it;
@@ -49,7 +49,7 @@ def _build(fitpirel):
         for k in ("run", "prefix", "parameter_file", "sampler"):
             config.pop(k, None)
         if fitpirel:
-            config["lens"][0]["fitpirel"] = True
+            config["mulensevent"][0]["fitpirel"] = True
         system = System(config, user_params=user_params)
         system.prepare()
         model = system.build_model()
@@ -71,7 +71,9 @@ def _eval(model, node, point):
 
 def test_off_is_the_physical_parameterization():
     system, model = _build(fitpirel=False)
-    assert "lens.log_pi_rel_raw" not in [v.name for v in model.value_vars]
+    assert "mulensevent.log_pi_rel_raw" not in [
+        v.name for v in model.value_vars
+    ]
     for i in range(system.star.n_elements):
         assert system.star.distance.element_is_sampled(i)
     assert not any("fitpirel_jacobian" in p.name for p in model.potentials)
@@ -79,16 +81,16 @@ def test_off_is_the_physical_parameterization():
 
 def test_swapped_roles_identity_and_jacobian(swapped):
     system, model = swapped
-    assert "lens.log_pi_rel_raw" in [v.name for v in model.value_vars]
+    assert "mulensevent.log_pi_rel_raw" in [v.name for v in model.value_vars]
 
-    l_idx = int(system.lens.lens_bodies[0][0][1])
-    s_idx = int(system.lens.source_bodies[0][0][1])
+    l_idx = int(system.mulensevent.lens_bodies[0][1])
+    s_idx = int(system.mulensevent.source_bodies[0][1])
     assert system.star.distance.element_is_derived(l_idx)
     assert system.star.distance.element_is_sampled(s_idx)
 
     point = model.initial_point()
     d = np.atleast_1d(_eval(model, system.star.distance.value, point))
-    pr = np.atleast_1d(_eval(model, system.lens.pi_rel.value, point))
+    pr = np.atleast_1d(_eval(model, system.mulensevent.pi_rel.value, point))
     assert np.isclose(
         d[l_idx], 1000.0 / (pr[0] + 1000.0 / d[s_idx]), rtol=1e-12
     )
@@ -102,11 +104,13 @@ def test_swapped_roles_identity_and_jacobian(swapped):
 
     def at(delta):
         pt2 = dict(point)
-        pt2["lens.log_pi_rel_raw"] = point["lens.log_pi_rel_raw"] + delta
+        pt2["mulensevent.log_pi_rel_raw"] = (
+            point["mulensevent.log_pi_rel_raw"] + delta
+        )
         d2 = np.atleast_1d(_eval(model, system.star.distance.value, pt2))
         import math
 
-        pr2 = np.atleast_1d(_eval(model, system.lens.pi_rel.value, pt2))
+        pr2 = np.atleast_1d(_eval(model, system.mulensevent.pi_rel.value, pt2))
         return float(d2[l_idx]), math.log10(float(pr2[0]))
 
     eps = 1e-4
