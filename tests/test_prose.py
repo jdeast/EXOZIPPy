@@ -495,7 +495,9 @@ def test_ob08092_prose_matches_its_topology(ob08092_system):
     assert "mulensinstrument.flux_likelihood" in keys
     assert "galacticmodel.imf" in keys
     assert "galacticmodel.kinematic" in keys
-    assert "lens.event_rate" in keys
+    # The event-rate prior is event-scoped, so its sentence is keyed on
+    # `mulensevent` after the mulensevent/lens/source split.
+    assert "mulensevent.event_rate" in keys
 
     # PSPL, symbolic path: Paczynski, no VBM/MulensModel software entry.
     mag = prose._sentences["mulensinstrument.magnification"].text

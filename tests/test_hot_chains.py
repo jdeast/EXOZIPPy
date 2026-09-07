@@ -556,18 +556,22 @@ def test_an_unrecognized_store_hot_chains_string_raises():
         _resolve("yes-please", _TopologySystem(lens=True))
 
 
-def test_lens_component_declares_that_it_expects_suppressed_modes():
+def test_mulensevent_component_declares_that_it_expects_suppressed_modes():
     """
-    Given the shipped Lens component,
+    Given the shipped MulensEvent component,
     When its capability flag is read,
     Then it declares expects_suppressed_modes, and the base Component does
       not -- this is the whole topology signal, so pin it here rather than
       only through a duck-typed stand-in.
+
+    The flag lives on MulensEvent (the one-instance EVENT component) after
+    the mulensevent/lens/source split; before the split it sat on the old
+    all-in-one Lens component.
     """
     from exozippy.components.component import Component
-    from exozippy.components.mulensing.lens import Lens
+    from exozippy.components.mulensing.mulensevent import MulensEvent
 
-    assert Lens.expects_suppressed_modes is True
+    assert MulensEvent.expects_suppressed_modes is True
     assert Component.expects_suppressed_modes is False
 
 

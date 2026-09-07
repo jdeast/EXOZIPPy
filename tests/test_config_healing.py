@@ -13,18 +13,24 @@ def test_config_derives_te_from_physical_input():
     When: ConfigManager is provided topology and finalized.
     Then: It should derive t_E and inject it into user_params.
     """
-    # 1. Define the system topology so it knows what "Lens" and "Source" mean
+    # 1. Define the system topology so it knows what "Lens" and "Source" mean.
+    # Post-split shape: the event-level options live on `mulensevent:`, while
+    # `lens:`/`source:` name one physical BODY each (lens element 0 is the
+    # primary).
     system_config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}],
+        "mulensevent": [{}],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
     }
 
     user_params = {
         "star.Lens.mass": {"initval": 0.5},
         "star.Lens.distance": {"initval": 4000.0},
         "star.Source.distance": {"initval": 8000.0},
-        "lens.Lens.u_0": {"initval": 0.5},
-        "lens.Lens.t_0": {"initval": 2460000.0},
+        # t_0/u_0 are per-SOURCE trajectory offsets after the split.
+        "source.Source.u_0": {"initval": 0.5},
+        "source.Source.t_0": {"initval": 2460000.0},
         "star.Lens.pm_ra": {"initval": 5.0},  # mas/yr
         "star.Lens.pm_dec": {"initval": 0.0},
         "star.Source.pm_ra": {"initval": 0.0},
@@ -34,12 +40,13 @@ def test_config_derives_te_from_physical_input():
     cm = ConfigManager(user_params, system_config=system_config)
     cm.finalize_user_params()
 
-    # Check if t_E was derived and injected.  The engine's solution is filed
-    # under the canonical INDEX form (lens.0.t_E) -- the only spelling
+    # Check if t_E was derived and injected.  t_E is event-level after the
+    # mulensevent split, so the engine's solution is filed under the canonical
+    # INDEX form on the EVENT (mulensevent.0.t_E) -- the only spelling
     # ConfigManager.resolve reads for every element of every component.  See
     # the inject-back comment in finalize_user_params and tests/test_nsnl.py.
-    assert "lens.0.t_E" in cm.user_params
-    derived_te = cm.user_params["lens.0.t_E"]["initval"]
+    assert "mulensevent.0.t_E" in cm.user_params
+    derived_te = cm.user_params["mulensevent.0.t_E"]["initval"]
 
     # Manual check:
     # pi_rel = 1000/4000 - 1000/8000 = 0.125

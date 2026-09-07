@@ -39,8 +39,9 @@ def finite_source_system(tmp_path_factory):
     # source is a point as far as the magnification is concerned and limb
     # darkening changes nothing, which would make the parity assertion below
     # pass for the wrong reason.
-    params["lens.Lens.rho"] = {"initval": 0.05}
-    params["lens.Lens.u_0"] = {"initval": 0.01}
+    # rho and u_0 are per-SOURCE after the mulensevent/lens/source split.
+    params["source.Source.rho"] = {"initval": 0.05}
+    params["source.Source.u_0"] = {"initval": 0.01}
     system = System(
         _mulens_config(
             lc, bands=[{"name": "I", "filter": "I"}], finite_source=True
@@ -81,7 +82,9 @@ def _likelihood_magnification(
     """Magnification the LIKELIHOOD path builds, compiled the same way."""
     t_in = pt.dvector("t")
     obs_in = pt.dmatrix("obs")
-    node = system.lens.get_magnification_op(
+    # The magnification dispatcher is event-scoped: it moved from the old
+    # all-in-one lens component to `mulensevent` in the split.
+    node = system.mulensevent.get_magnification_op(
         t_in, obs_in, system, index=0, u1=u1, u2=u2, bandpass=bandpass
     )
     fn = pytensor.function(

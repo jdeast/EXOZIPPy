@@ -22,7 +22,12 @@ CORE_COMPONENTS = {
     "transit",
     "rvinstrument",
     "sed",
+    # The microlensing trio: `mulensevent` (the event), `lens` (one entry per
+    # lens body) and `source` (one entry per source body).  Before the split
+    # all three were the single all-in-one `lens` component.
+    "mulensevent",
     "lens",
+    "source",
     "mulensinstrument",
     "astrometryinstrument",
     "galacticmodel",
@@ -258,13 +263,16 @@ def test_no_defaults_yaml_string_contains_a_control_character():
 
 def test_parallax_latex_labels_are_well_formed():
     """
-    Given the lens component's north/east microlensing parallax parameters,
+    Given the event component's north/east microlensing parallax parameters,
     When their latex labels are read,
     Then both are the intended \\pi_{\\rm E,*} macro (this is the parameter
       pair whose labels carried an embedded carriage return until 2026-08).
+
+    The parallax vector is event-level, so it lives on `mulensevent` after
+    the mulensevent/lens/source split (it was `lens.pi_E_N` before).
     """
     # Arrange / Act
-    params = introspect.component_schema("lens")["parameters"]
+    params = introspect.component_schema("mulensevent")["parameters"]
 
     # Assert
     assert params["pi_E_N"]["latex"] == r"\pi_{\rm E,N}"

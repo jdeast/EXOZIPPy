@@ -185,9 +185,12 @@ def test_mmexofast_key_absent_is_a_noop():
 def test_mmexofast_alpha_convention_is_identity_not_180_minus():
     """
     Given the shipped examples/DC2018_128/DC2018_128.params.yaml (seeded from
-    mmexofast.json by scripts/mmexofast_to_params.py, whose lens.Lens.alpha
-    initval is list-valued -- one entry per MMEXOFAST solution, in file
-    order -- and which examples/DC2018_128/compare_results.py compares
+    mmexofast.json by scripts/mmexofast_to_params.py, whose
+    lens.Companion.alpha initval is list-valued -- one entry per MMEXOFAST
+    solution, in file order; the key names the COMPANION lens body (lens
+    element 1) after the mulensevent/lens/source split, where the pre-split
+    file named the single lens instance, lens.Lens.alpha -- and which
+    examples/DC2018_128/compare_results.py compares
     directly against MMEXOFAST/DC18 truth with no remapping),
     Then that params.yaml's seed-0 alpha initval equals the raw MMEXOFAST
     fit-0 alpha value -- confirming the IDENTITY convention (not the
@@ -202,7 +205,7 @@ def test_mmexofast_alpha_convention_is_identity_not_180_minus():
     with open(params_path) as f:
         params = yaml.safe_load(f)
 
-    alpha_entry = params["lens.Lens.alpha"]
+    alpha_entry = params["lens.Companion.alpha"]
     initval = (
         alpha_entry["initval"]
         if isinstance(alpha_entry, dict)
