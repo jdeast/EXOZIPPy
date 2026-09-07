@@ -1361,13 +1361,20 @@ class ConfigManager:
         parameter's element count is a manifest option (``shape``) and need not
         equal the config-list length, in EITHER direction:
 
-          * LONGER than the config list -- ``lens`` has one config entry while
-            its per-source vectors (``t_0``, ``u_0``, ``rho``, ...) carry one
-            element per SOURCE.  ``lens.t_0: 2450000`` expanded to
-            ``lens.0.t_0`` only, and element 1 silently fell back to the
+          * LONGER than the config list -- HISTORICAL, and the reason this
+            check was written: the pre-split ``lens`` had ONE config entry
+            while its per-source vectors (``t_0``, ``u_0``, ``rho``, ...)
+            carried one element per SOURCE, so ``lens.t_0: 2450000`` expanded
+            to ``lens.0.t_0`` only and element 1 silently fell back to the
             defaults.yaml backstop.  Not a start-value-only defect: a
             broadcast ``sigma:``/``mu:``/``lower:`` applied the PRIOR to
             element 0 alone, i.e. a silent posterior change on a 2S2L fit.
+            The 8.6.17 split removed that mismatch at the root -- ``source``
+            now has one entry per source body and ``lens`` one per lens body,
+            so those vectors' lengths equal their own config lists.  The
+            branch is kept because nothing STOPS a component declaring a
+            ``shape`` longer than its config list; it simply no longer has a
+            shipped instance.
           * SHORTER than the config list -- ``detrend_coeffs`` has shape
             (total detrend columns,), which for two files with one column
             between them is 1 while the config list is 2.  Pass 2 then writes
@@ -1375,12 +1382,13 @@ class ConfigManager:
 
         So raise, rather than teach Pass 2 to fill: the count is unknowable
         where the expansion happens and known here, and there is no filling
-        rule that is right for both surfaces anyway (element j of a lens
-        vector is a SOURCE, element j of ``detrend_coeffs`` is a COLUMN --
-        neither is "instance j", which is the only thing a broadcast key can
-        possibly mean).  Costs users nothing: no shipped example writes a
-        2-part broadcast on any such parameter (``examples/ob161003`` spells
-        every per-source entry by the source star's name).
+        rule that is right for both surfaces anyway (element j of a
+        pre-split lens vector was a SOURCE, element j of ``detrend_coeffs``
+        is a COLUMN -- neither is "instance j", which is the only thing a
+        broadcast key can possibly mean).  Costs users nothing: no shipped
+        example writes a 2-part broadcast on any such parameter
+        (``examples/ob161003`` spells every per-source entry by the source
+        star's name).
 
         Only checked when the caller passed an explicit vector ``shape``.  The
         single-element modes -- ``shape=()`` with or without ``element=`` --
