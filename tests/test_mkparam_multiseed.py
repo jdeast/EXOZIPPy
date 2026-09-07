@@ -18,8 +18,14 @@ from exozippy.mkparam import write_param_file
 
 
 def _make_trace(tmp_path, nchain=4, ndraw=400, seed=0):
-    """Synthetic trace: a scalar lens param, a 2-star vector param, an
-    xalpha/yalpha direction pair, each with a _raw counterpart, plus lp."""
+    """Synthetic trace: a scalar per-source param, a 2-star vector param,
+    an xalpha/yalpha direction pair, each with a _raw counterpart, plus
+    lp.
+
+    `t_0` is per-SOURCE and `xalpha`/`yalpha` are per-COMPANION, which is
+    why only the former sits under `source.*` here: alpha stays on the
+    lens (one angle per companion), so those two names are unchanged by
+    the mulensevent split."""
     rng = np.random.default_rng(seed)
 
     def pair(shape):
@@ -27,8 +33,8 @@ def _make_trace(tmp_path, nchain=4, ndraw=400, seed=0):
         return raw
 
     post = {
-        "lens.t_0": 2000.0 + pair((nchain, ndraw)),
-        "lens.t_0_raw": pair((nchain, ndraw)),
+        "source.t_0": 2000.0 + pair((nchain, ndraw)),
+        "source.t_0_raw": pair((nchain, ndraw)),
         "star.mass": 1.0 + 0.1 * pair((nchain, ndraw, 2)),
         "star.mass_raw": pair((nchain, ndraw, 2)),
         "lens.xalpha": pair((nchain, ndraw)),
@@ -36,7 +42,7 @@ def _make_trace(tmp_path, nchain=4, ndraw=400, seed=0):
         "lens.yalpha": pair((nchain, ndraw)),
         "lens.yalpha_raw": pair((nchain, ndraw)),
     }
-    lp = -0.5 * (post["lens.t_0_raw"] ** 2)
+    lp = -0.5 * (post["source.t_0_raw"] ** 2)
     idata = az.from_dict({"posterior": post, "sample_stats": {"lp": lp}})
     trace_path = tmp_path / "run_trace.nc"
     idata.to_netcdf(str(trace_path))
@@ -47,6 +53,7 @@ def _config():
     return {
         "prefix": "run",
         "star": [{"name": "A"}, {"name": "B"}],
+        "source": [{"name": "SourceA"}],
         "lens": [{"name": "L"}],
     }
 
@@ -65,7 +72,7 @@ def test_single_seed_emits_scalars(tmp_path):
     )
     params = yaml.safe_load(out.read_text())
     # Then every sampled initval is a plain scalar (legacy behavior)
-    assert isinstance(params["lens.L.t_0"]["initval"], float)
+    assert isinstance(params["source.SourceA.t_0"]["initval"], float)
     assert isinstance(params["star.A.mass"]["initval"], float)
 
 
@@ -84,7 +91,7 @@ def test_multi_seed_emits_length_k_lists(tmp_path):
     params = yaml.safe_load(out.read_text())
     # Then each sampled initval is a length-3 list (and no obsolete
     # init_scale is written -- whitening scales are measured at startup)
-    for key in ("lens.L.t_0", "star.A.mass", "star.B.mass"):
+    for key in ("source.SourceA.t_0", "star.A.mass", "star.B.mass"):
         iv = params[key]["initval"]
         assert isinstance(iv, list) and len(iv) == 3, key
         assert "init_scale" not in params[key], key
@@ -136,7 +143,7 @@ def test_n_seeds_is_read_from_the_mkparam_config_block(tmp_path):
 
     # ASSERT
     params = yaml.safe_load(out.read_text())
-    assert len(params["lens.L.t_0"]["initval"]) == 3
+    assert len(params["source.SourceA.t_0"]["initval"]) == 3
 
 
 def test_an_unrecognized_config_block_does_not_set_n_seeds(tmp_path):
@@ -161,7 +168,7 @@ def test_an_unrecognized_config_block_does_not_set_n_seeds(tmp_path):
 
     # ASSERT
     assert isinstance(
-        yaml.safe_load(out.read_text())["lens.L.t_0"]["initval"], float
+        yaml.safe_load(out.read_text())["source.SourceA.t_0"]["initval"], float
     )
 
 
@@ -191,7 +198,7 @@ def test_multi_seed_seed0_is_map(tmp_path):
     idata = az.from_netcdf(str(trace))
     lp = idata.sample_stats["lp"].values
     mc, md = np.unravel_index(np.argmax(lp), lp.shape)
-    map_t0 = float(idata.posterior["lens.t_0"].values[mc, md])
+    map_t0 = float(idata.posterior["source.t_0"].values[mc, md])
     out = tmp_path / "out.params.yaml"
     # When mkparam emits multiple seeds
     write_param_file(
@@ -203,7 +210,7 @@ def test_multi_seed_seed0_is_map(tmp_path):
     )
     params = yaml.safe_load(out.read_text())
     # Then seed 0 of the list is exactly the MAP value
-    assert params["lens.L.t_0"]["initval"][0] == pytest.approx(
+    assert params["source.SourceA.t_0"]["initval"][0] == pytest.approx(
         map_t0, abs=1e-6
     )
 
@@ -220,8 +227,8 @@ def _make_bimodal_trace(tmp_path, nchain=6, ndraw=400, seed=0):
     lp = 1000.0 + 3.0 * rng.standard_normal((nchain, ndraw))
     lp[5] += 500.0  # minority mode fits better
     post = {
-        "lens.t_0": 2000.0 + t0_raw,
-        "lens.t_0_raw": t0_raw,
+        "source.t_0": 2000.0 + t0_raw,
+        "source.t_0_raw": t0_raw,
     }
     idata = az.from_dict({"posterior": post, "sample_stats": {"lp": lp}})
     trace_path = tmp_path / "run_trace.nc"
@@ -239,14 +246,14 @@ def test_multi_seed_stratifies_across_modes(tmp_path):
     """
     trace_path = _make_bimodal_trace(tmp_path)
     out = write_param_file(
-        {"prefix": "run", "lens": [{"name": "L"}]},
+        {"prefix": "run", "source": [{"name": "SourceA"}]},
         base_dir=tmp_path,
         trace_path=trace_path,
         n_seeds=8,
     )
     params = yaml.safe_load(Path(out).read_text())
 
-    t0_seeds = np.asarray(params["lens.L.t_0"]["initval"], dtype=float)
+    t0_seeds = np.asarray(params["source.SourceA.t_0"]["initval"], dtype=float)
     assert len(t0_seeds) == 8
     in_minority = t0_seeds > 2004.0  # displaced basin sits at ~2008
     in_majority = t0_seeds < 2004.0
@@ -285,8 +292,8 @@ def _make_all_invalid_trace(
     rng = np.random.default_rng(0)
     t0_raw = rng.standard_normal((nchain, ndraw))
     post = {
-        "lens.t_0": 2000.0 + t0_raw,
-        "lens.t_0_raw": t0_raw,
+        "source.t_0": 2000.0 + t0_raw,
+        "source.t_0_raw": t0_raw,
         "star.mass": 1.0 + 0.1 * rng.standard_normal((nchain, ndraw, 2)),
         "star.mass_raw": rng.standard_normal((nchain, ndraw, 2)),
     }
@@ -403,7 +410,7 @@ def test_mkparam_force_emits_seeds_and_stamps_the_file(tmp_path, n_seeds):
     assert "All 1600 draws (100.00%)" in text
     assert "mkparam: {force: true}" in text
     params = yaml.safe_load(text)
-    assert "lens.L.t_0" in params  # seeds were in fact emitted
+    assert "source.SourceA.t_0" in params  # seeds were in fact emitted
 
 
 def test_an_ordinary_mode_pass_failure_still_falls_back_unchanged(
@@ -464,7 +471,7 @@ def test_a_partially_invalid_trace_is_left_alone(tmp_path):
     t0_raw = rng.standard_normal((nchain, ndraw))
     lp = -0.5 * t0_raw**2
     lp[0, :50] = np.nan  # 3.1% invalid
-    post = {"lens.t_0": 2000.0 + t0_raw, "lens.t_0_raw": t0_raw}
+    post = {"source.t_0": 2000.0 + t0_raw, "source.t_0_raw": t0_raw}
     trace_path = tmp_path / "partial_trace.nc"
     az.from_dict({"posterior": post, "sample_stats": {"lp": lp}}).to_netcdf(
         str(trace_path)
@@ -472,14 +479,14 @@ def test_a_partially_invalid_trace_is_left_alone(tmp_path):
 
     out = tmp_path / "out.params.yaml"
     write_param_file(
-        {"prefix": "run", "lens": [{"name": "L"}]},
+        {"prefix": "run", "source": [{"name": "SourceA"}]},
         base_dir=tmp_path,
         trace_path=trace_path,
         output_path=out,
         n_seeds=4,
     )
     params = yaml.safe_load(out.read_text())
-    assert len(params["lens.L.t_0"]["initval"]) == 4
+    assert len(params["source.SourceA.t_0"]["initval"]) == 4
 
 
 # --- 1.3.1: seed 0 is the best VALID draw, not np.argmax's -------------------
@@ -487,7 +494,7 @@ def test_a_partially_invalid_trace_is_left_alone(tmp_path):
 
 def _write_trace(tmp_path, t0_raw, lp, name="run_trace.nc"):
     """One-parameter trace built from explicit raw values and lp."""
-    post = {"lens.t_0": 2000.0 + t0_raw, "lens.t_0_raw": t0_raw}
+    post = {"source.t_0": 2000.0 + t0_raw, "source.t_0_raw": t0_raw}
     trace_path = tmp_path / name
     az.from_dict({"posterior": post, "sample_stats": {"lp": lp}}).to_netcdf(
         str(trace_path)
@@ -498,13 +505,13 @@ def _write_trace(tmp_path, t0_raw, lp, name="run_trace.nc"):
 def _seed0_t0(tmp_path, trace_path, n_seeds=1):
     out = tmp_path / "out.params.yaml"
     write_param_file(
-        {"prefix": "run", "lens": [{"name": "L"}]},
+        {"prefix": "run", "source": [{"name": "SourceA"}]},
         base_dir=tmp_path,
         trace_path=trace_path,
         output_path=out,
         n_seeds=n_seeds,
     )
-    initval = yaml.safe_load(out.read_text())["lens.L.t_0"]["initval"]
+    initval = yaml.safe_load(out.read_text())["source.SourceA.t_0"]["initval"]
     return initval[0] if isinstance(initval, list) else initval
 
 
