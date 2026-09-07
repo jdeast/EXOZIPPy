@@ -520,9 +520,12 @@ class MulensEvent(Component):
                 raise ValueError(
                     f"mulensevent: source body '{s_type}.{s_idx}' must be "
                     f"a star -- a microlensing source is the background "
-                    f"star being monitored for magnification.  A genuinely "
-                    f"faint source (a brown dwarf, say) is a 'star' block "
-                    f"with a low star.<name>.logmass."
+                    f"star being monitored for magnification.  Because the "
+                    f"map carries only an index, this config would "
+                    f"silently model star.{s_idx} instead of "
+                    f"'{s_type}.{s_idx}'.  A genuinely faint source (a "
+                    f"brown dwarf, say) is a 'star' block with a low "
+                    f"star.<name>.logmass."
                 )
 
         # A body cannot lens itself: pi_rel = 1000/d_L - 1000/d_S is then
