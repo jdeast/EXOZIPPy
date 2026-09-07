@@ -41,8 +41,21 @@ DC18_TIME_ORIGIN = 2458234.0
 
 PARAMS = ["t_0", "u_0", "t_E", "rho", "s", "q", "alpha"]
 
-# results.csv parname -> comparison param
-RESULTS_CSV_MAP = {f"lens.{p}": p for p in PARAMS}
+# results.csv parname -> comparison param.  No longer one component:
+# the trajectory offsets and source size are per-SOURCE, the timescale
+# is EVENT-level, and the geometry is per-COMPANION (named by the lens
+# body, since a two-element lens vector reports per element).  Measured
+# against a post-split fit's DC2018_128_results.csv.
+COMPANION = "Companion"
+RESULTS_CSV_MAP = {
+    "source.t_0": "t_0",
+    "source.u_0": "u_0",
+    "source.rho": "rho",
+    "mulensevent.t_E": "t_E",
+    f"lens.{COMPANION}.s": "s",
+    f"lens.{COMPANION}.q": "q",
+    f"lens.{COMPANION}.alpha": "alpha",
+}
 
 
 def data_dir_or_raise(data_dir=None):

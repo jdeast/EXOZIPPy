@@ -115,17 +115,19 @@ def build_config(name, files, prefix, mmx_json, args):
         "prefix": str(prefix),
         "star": [{"name": "Lens"}, {"name": "Source"}],
         "planet": [{"name": "Companion"}],
-        "lens": [
+        # Event-level keys live on the event; the lens is one entry per
+        # lens BODY (primary first) and the source one per source body.
+        "mulensevent": [
             {
-                "name": "Lens",
-                "lenses": ["star.0", "planet.0"],
-                "sources": ["star.1"],
                 "finite_source": bool(args.finite_source),
-                # Explicit step-1 output: seeds (stage 2, Lens) + bad-data
-                # mask and error factors (stage 1a, MulensInstrument).
+                # Explicit step-1 output: seeds (stage 3, MulensEvent)
+                # + bad-data mask and error factors (stage 1,
+                # MulensInstrument).
                 "mmexofast": str(mmx_json),
             }
         ],
+        "lens": [{"body": "star.Lens"}, {"body": "planet.Companion"}],
+        "source": [{"body": "star.Source"}],
         "galacticmodel": [{"name": name, "anchor_idx": 1}],
         "band": [
             {

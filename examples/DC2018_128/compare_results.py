@@ -102,15 +102,17 @@ def _parse_csv(csv_path):
     return result
 
 
-# CSV parname → comparison param name
+# CSV parname -> comparison param name.  Three components now, and the
+# companion geometry is reported per lens BODY; measured against a
+# post-split fit's DC2018_128_results.csv.
 CSV_MAPPING = {
-    "lens.t_0": "t_0",
-    "lens.u_0": "u_0",
-    "lens.t_E": "t_E",
-    "lens.rho": "rho",
-    "lens.s": "s",
-    "lens.q": "q",
-    "lens.alpha": "alpha",
+    "source.t_0": "t_0",
+    "source.u_0": "u_0",
+    "source.rho": "rho",
+    "mulensevent.t_E": "t_E",
+    "lens.Companion.s": "s",
+    "lens.Companion.q": "q",
+    "lens.Companion.alpha": "alpha",
 }
 
 exo, exo_hi, exo_lo = {}, {}, {}
