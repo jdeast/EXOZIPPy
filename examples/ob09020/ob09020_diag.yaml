@@ -36,26 +36,36 @@ star:
   - name: "L2"
   - name: "Source"
 
-lens:
-  - name: "OB09020"
-    lenses:  ["star.0", "star.1"]
-    sources: ["star.2"]
-    finite_source: True        # rho = 0.0063; the source is a giant and the
-                               # caustic crossings are resolved
-    # Skowron+2011's t_0,kep = t_0 anchors the geocentric frame their
-    # pi_E and orbital-velocity parameters are quoted in.
+# PORTED to the post-8.6.17 component split (PR #246).  Event-shared
+# quantities and the coordinate-swap flags -> `mulensevent`; one `lens:`
+# entry per lens BODY; the source's own track and its tie toggle ->
+# `source:`.  Key homes per components/mulensing/bodies.py.
+mulensevent:
+  - finite_source: true
     t0_par: 2454917.52
-    # THE POINT OF THIS EXAMPLE (review 8.6.8 5a/5b): the RV-constrained
-    # orbit L drives s(t)/alpha(t) with NO new free parameters --
-    # conventions.md C24's keplerian mode.  The light curve then measures
-    # bigomega and sign(cos i), which the RVs cannot (see the orbit block).
-    orbital_motion: keplerian
-    orbit: "L"
-    # Every trajectory parameter is seeded from the published solution, so
-    # the relaxation engine can derive all of them and MMEXOFAST is not
-    # needed.  It is also not WANTED: phot.dat is survey-only photometry
-    # (see README) and the binary anomaly is under-sampled in it.
     mmexofast: false
+
+lens:
+  - body: star.L1
+  - body: star.L2
+    orbital_motion: "keplerian"
+    orbit: "L"
+
+source:
+  - body: star.Source
+
+# caustic crossings are resolved
+# Skowron+2011's t_0,kep = t_0 anchors the geocentric frame their
+# pi_E and orbital-velocity parameters are quoted in.
+# THE POINT OF THIS EXAMPLE (review 8.6.8 5a/5b): the RV-constrained
+# orbit L drives s(t)/alpha(t) with NO new free parameters --
+# conventions.md C24's keplerian mode.  The light curve then measures
+# bigomega and sign(cos i), which the RVs cannot (see the orbit block).
+# Every trajectory parameter is seeded from the published solution, so
+# the relaxation engine can derive all of them and MMEXOFAST is not
+# needed.  It is also not WANTED: phot.dat is survey-only photometry
+# (see README) and the binary anomaly is under-sampled in it.
+
 
 orbit:
   - name: "L"

@@ -24,26 +24,36 @@ star:
 planet:
   - name: "Companion"
 
-lens:
-  - name: "Lens"
-    lenses:  ["star.0", "planet.0"]
-    sources: ["star.1"]
-    finite_source: True
-    # Sever rho from the stellar chain: rho is sampled (log_rho) from the
-    # finite-source signal alone; the chain's theta_star/theta_E is
-    # reported as rho_pred so the pull is a published number.  On this
-    # event the intact identity let the event-rate/kinematics priors and
-    # the uncapped Hogg mixture hold rho ~8x below the light curve's own
-    # 2.5%-precise preference.
-    star_constrains_rho: False
-    # Full current stack (the 15360856 post-mortem: that run predated the
-    # source seeding and the coordinate swaps, initialized in the swapped
-    # basin, and at Lambda=21.5 could never leave it -- occupancy
-    # IACT 54k, N_eff 63).  Observable coordinates + flux-seeded source.
-    fitmurel: True
-    fitpirel: True
-    fitthetae: True
+# PORTED to the post-8.6.17 component split (PR #246).  Event-shared
+# quantities and the coordinate-swap flags -> `mulensevent`; one `lens:`
+# entry per lens BODY; the source's own track and its tie toggle ->
+# `source:`.  Key homes per components/mulensing/bodies.py.
+mulensevent:
+  - finite_source: true
+    fitmurel: true
+    fitpirel: true
+    fitthetae: true
     mmexofast: "../events/128/DC2018_128_mmexofast.json"
+
+lens:
+  - body: star.Lens
+  - body: planet.Companion
+
+source:
+  - body: star.Source
+    star_constrains_rho: false
+
+# Sever rho from the stellar chain: rho is sampled (log_rho) from the
+# finite-source signal alone; the chain's theta_star/theta_E is
+# reported as rho_pred so the pull is a published number.  On this
+# event the intact identity let the event-rate/kinematics priors and
+# the uncapped Hogg mixture hold rho ~8x below the light curve's own
+# 2.5%-precise preference.
+# Full current stack (the 15360856 post-mortem: that run predated the
+# source seeding and the coordinate swaps, initialized in the swapped
+# basin, and at Lambda=21.5 could never leave it -- occupancy
+# IACT 54k, N_eff 63).  Observable coordinates + flux-seeded source.
+
 
 galacticmodel:
   - name: "DC2018_128"

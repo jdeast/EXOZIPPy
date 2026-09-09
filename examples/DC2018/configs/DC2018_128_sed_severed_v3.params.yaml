@@ -66,4 +66,4 @@ mulensinstrument.Roman_Z087.out_scale: {upper: 0.04213, initval: 0.004213}
 # mmexofast rho seed and the theta_star chain -- the radius/radiussed
 # split blocks that route here; engine gap noted in the private notes).
 # Start at the capped-murel arm posterior, theta_E = 0.63 mas.
-lens.Lens.log_theta_E: {initval: -0.2}
+mulensevent.log_theta_E: {initval: -0.2}

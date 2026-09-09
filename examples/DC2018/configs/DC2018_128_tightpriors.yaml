@@ -24,21 +24,31 @@ star:
 planet:
   - name: "Companion"
 
-lens:
-  - name: "Lens"
-    lenses:  ["star.0", "planet.0"]
-    sources: ["star.1"]
-    finite_source: True
-    # The fully composed observable-coordinates arm: all
-    # three surgical swaps plus severed rho.  The sampled
-    # microlensing coordinates are the observable set; the
-    # lens star's physical state is derived; every prior
-    # acts on the derived point.
-    fitmurel: True
-    fitpirel: True
-    fitthetae: True
-    star_constrains_rho: False
+# PORTED to the post-8.6.17 component split (PR #246).  Event-shared
+# quantities and the coordinate-swap flags -> `mulensevent`; one `lens:`
+# entry per lens BODY; the source's own track and its tie toggle ->
+# `source:`.  Key homes per components/mulensing/bodies.py.
+mulensevent:
+  - finite_source: true
+    fitmurel: true
+    fitpirel: true
+    fitthetae: true
     mmexofast: "../events/128/DC2018_128_mmexofast.json"
+
+lens:
+  - body: star.Lens
+  - body: planet.Companion
+
+source:
+  - body: star.Source
+    star_constrains_rho: false
+
+# The fully composed observable-coordinates arm: all
+# three surgical swaps plus severed rho.  The sampled
+# microlensing coordinates are the observable set; the
+# lens star's physical state is derived; every prior
+# acts on the derived point.
+
 
 galacticmodel:
   - name: "DC2018_128"
