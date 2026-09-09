@@ -38,5 +38,12 @@ SNRS=(30 100 300); EPOCHS=(100 400)
 SNR=${SNRS[$(( (I/10) % 3 ))]}
 NEP=${EPOCHS[$(( (I/5) % 2 ))]}
 SEED=$(( 1000 + I ))
+# ROWTAG lets a RERUN write beside its predecessor instead of over it.
+#   qsub -t 31-60 -v ROWTAG=_v2 inject_recover.job
+# The 2x2 sampler A/B (review 7.4.4) lost four runs' outputs to a shared
+# prefix; the same mistake here would silently destroy the rows a published
+# pull table was computed from.  Default is empty, so normal runs are
+# unchanged.
 python -u inject_recover.py --pipeline $PIPE --seed $SEED --snr $SNR \
-  --n-epochs $NEP --out rows/${PIPE}_snr${SNR}_n${NEP}_s${SEED}.json
+  --n-epochs $NEP \
+  --out rows/${PIPE}${ROWTAG}_snr${SNR}_n${NEP}_s${SEED}.json

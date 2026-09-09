@@ -39,7 +39,9 @@ def main():
     rng = np.random.default_rng(seed)
     wd = Path(tempfile.mkdtemp(prefix="diag_transit_"))
     os.chdir(wd)
-    config, params, sampler, truth, checks = ir.make_transit(rng, snr, nep, wd)
+    config, params, sampler, truth, checks, _tc = ir.make_transit(
+        rng, snr, nep, wd
+    )
     print(
         "truth: " + "  ".join("%s=%.6g" % (k, v) for k, v in truth.items()),
         flush=True,
@@ -63,10 +65,16 @@ def main():
     model = system.build_model()
     print("free RVs: %s" % sorted(v.name for v in model.free_RVs), flush=True)
 
+    # DIAG_TUNE / DIAG_DRAWS override the harness's settings, so the
+    # question "is the chord/cos i direction merely SLOW, or is it badly
+    # conditioned?" can be answered by scaling draws rather than argued.
+    tune = int(os.environ.get("DIAG_TUNE", sampler["tune"]))
+    draws = int(os.environ.get("DIAG_DRAWS", sampler["draws"]))
+    print("sampling tune=%d draws=%d" % (tune, draws), flush=True)
     with model:
         idata = pm.sample(
-            draws=sampler["draws"],
-            tune=sampler["tune"],
+            draws=draws,
+            tune=tune,
             chains=sampler["chains"],
             cores=sampler["cores"],
             target_accept=sampler["target_accept"],
