@@ -105,17 +105,26 @@ def build_maps(label):
         phys_el = {el: j for el, (_v, j) in swept.items()}
         live = {el: v for el, v in per_el.items() if max(v) - min(v) > 0.0}
         for el, v in per_el.items():
-            print("  %-9s %-16s raw[%d] -> phys[%d]  %s -> %s%s"
-                  % (label, w, el, phys_el[el], PROBES,
-                     ["%.6g" % x for x in v],
-                     "" if el in live else "   (flat: pinned/inactive)"),
-                  flush=True)
+            print(
+                "  %-9s %-16s raw[%d] -> phys[%d]  %s -> %s%s"
+                % (
+                    label,
+                    w,
+                    el,
+                    phys_el[el],
+                    PROBES,
+                    ["%.6g" % x for x in v],
+                    "" if el in live else "   (flat: pinned/inactive)",
+                ),
+                flush=True,
+            )
         if not live:
             raise SystemExit(
                 "ABORT: NO element of %s responds to %s.  If this parameter"
                 " is not entirely pinned, the compiled function is ignoring"
                 " its inputs -- see 2.4.15 trap 1.  Do not interpret"
-                " anything below." % (w, raw_name))
+                " anything below." % (w, raw_name)
+            )
         el0 = sorted(live)[0]
         vals = live[el0]
         out.setdefault("_element", {})[w] = phys_el[el0]
@@ -128,8 +137,11 @@ def build_maps(label):
     for attr in ("whitening_state", "_whitening_state", "whitening"):
         st = getattr(s, attr, None)
         if st is not None:
-            print("  %-9s system.%s present: %s"
-                  % (label, attr, type(st).__name__), flush=True)
+            print(
+                "  %-9s system.%s present: %s"
+                % (label, attr, type(st).__name__),
+                flush=True,
+            )
             break
     return out
 
@@ -156,6 +168,7 @@ def run_map(w, el=0):
     ds = xr.open_dataset(TRACE, group="posterior")
     if w not in ds.data_vars or (w + "_raw") not in ds.data_vars:
         return None
+
     def col(name):
         da = ds[name].isel(draw=slice(0, None, 200))
         extra = [d for d in da.dims if d not in ("chain", "draw")]
@@ -179,59 +192,96 @@ a = build_maps("build-1")
 print("=== BUILD 2 (same config, same process) ===", flush=True)
 b = build_maps("build-2")
 
-print("\n=== IS THE REBUILD SELF-CONSISTENT? (build 1 vs build 2) ===",
-      flush=True)
+print(
+    "\n=== IS THE REBUILD SELF-CONSISTENT? (build 1 vs build 2) ===",
+    flush=True,
+)
 for w in WATCH:
     if w in a and w in b and w != "_element":
         d = float(np.abs(np.array(a[w]) - np.array(b[w])).max())
-        print("  %-22s max|diff| %.3e %s"
-              % (w, d, "" if d < 1e-9 else "<- two rebuilds also disagree"),
-              flush=True)
+        print(
+            "  %-22s max|diff| %.3e %s"
+            % (w, d, "" if d < 1e-9 else "<- two rebuilds also disagree"),
+            flush=True,
+        )
 
 print("\n=== DOES THE REBUILD REPRODUCE THE RUN'S MAP? ===", flush=True)
-print("%-22s %11s %11s %11s %11s %9s"
-      % ("parameter", "slope(new)", "slope(run)", "icept(new)", "icept(run)",
-         "ratio"), flush=True)
+print(
+    "%-22s %11s %11s %11s %11s %9s"
+    % (
+        "parameter",
+        "slope(new)",
+        "slope(run)",
+        "icept(new)",
+        "icept(run)",
+        "ratio",
+    ),
+    flush=True,
+)
 verdict = []
 for w in WATCH:
     if w not in a or w == "_element":
         continue
     rm = run_map(w, a.get("_element", {}).get(w, 0))
     if rm is None:
-        print("  %-20s (no stored raw/physical pair in the trace)" % w,
-              flush=True)
+        print(
+            "  %-20s (no stored raw/physical pair in the trace)" % w,
+            flush=True,
+        )
         continue
     sl_r, ic_r, lo, hi, res = rm
     sl_n = (a[w][-1] - a[w][0]) / (PROBES[-1] - PROBES[0])
     ic_n = a[w][0] - sl_n * PROBES[0]
     ratio = sl_n / sl_r if sl_r else float("nan")
-    print("%-22s %11.5g %11.5g %11.5g %11.5g %9.3g"
-          % (w, sl_n, sl_r, ic_n, ic_r, ratio), flush=True)
-    print("      run fit valid over raw %.4f..%.4f, max residual %.2e"
-          % (lo, hi, res), flush=True)
+    print(
+        "%-22s %11.5g %11.5g %11.5g %11.5g %9.3g"
+        % (w, sl_n, sl_r, ic_n, ic_r, ratio),
+        flush=True,
+    )
+    print(
+        "      run fit valid over raw %.4f..%.4f, max residual %.2e"
+        % (lo, hi, res),
+        flush=True,
+    )
     # evaluate both maps at the middle of the run's own sampled range
     mid = 0.5 * (lo + hi)
-    print("      at raw=%.4f:  rebuild %.5g   run %.5g   DIFF %.5g"
-          % (mid, sl_n * mid + ic_n, sl_r * mid + ic_r,
-             (sl_n * mid + ic_n) - (sl_r * mid + ic_r)), flush=True)
+    print(
+        "      at raw=%.4f:  rebuild %.5g   run %.5g   DIFF %.5g"
+        % (
+            mid,
+            sl_n * mid + ic_n,
+            sl_r * mid + ic_r,
+            (sl_n * mid + ic_n) - (sl_r * mid + ic_r),
+        ),
+        flush=True,
+    )
     verdict.append(abs(ratio - 1.0))
 
 print("", flush=True)
 if verdict and max(verdict) > 0.01:
-    print("""CONFIRMED (2.4.15 trap 2): the rebuild's raw->physical map does NOT
+    print(
+        """CONFIRMED (2.4.15 trap 2): the rebuild's raw->physical map does NOT
 match the run's, so a stored raw coordinate has no build-independent meaning.
 A SLOPE ratio far from 1 is a whitening SCALE difference, which is the
 expected signature -- init_scale/bound_scale are curvature-measured at the
 start point, so a rebuild probing from a different start gets a different
 affine map.  Consequence: post-hoc analysis must read the stored posterior
 Deterministics, and reconstructing from raw needs the RUN's whitening state.
-""", flush=True)
+""",
+        flush=True,
+    )
 elif verdict:
-    print("""NOT CONFIRMED: the rebuild reproduces the run's map to better than
+    print(
+        """NOT CONFIRMED: the rebuild reproduces the run's map to better than
 1%%, so raw coordinates ARE portable and 2.4.15 trap 2 should be withdrawn.
 In that case the whole 3.65 discrepancy was trap 1 (the prior-draw bug) and
 the hot-chain analysis can proceed on a corrected script.
-""", flush=True)
+""",
+        flush=True,
+    )
 else:
-    print("INCONCLUSIVE: no watched parameter had both a rebuild map and a "
-          "usable run fit.", flush=True)
+    print(
+        "INCONCLUSIVE: no watched parameter had both a rebuild map and a "
+        "usable run fit.",
+        flush=True,
+    )

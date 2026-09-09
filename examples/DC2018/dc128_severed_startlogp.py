@@ -77,9 +77,15 @@ CFG = "DC2018_128_severed_v3.yaml"
 TRACE = "fitresults_severed_v3/DC2018_128_trace.nc"
 
 # Instance order per component, as the components build their vectors.
-INSTANCES = {"star": ["Lens", "Source"], "lens": ["Lens"], "planet":
-             ["Companion"], "mulensinstrument": ["Roman_W149", "Roman_Z087"],
-             "sed": ["sed"], "mann": ["Lens"], "band": ["W149", "Z087"]}
+INSTANCES = {
+    "star": ["Lens", "Source"],
+    "lens": ["Lens"],
+    "planet": ["Companion"],
+    "mulensinstrument": ["Roman_W149", "Roman_Z087"],
+    "sed": ["sed"],
+    "mann": ["Lens"],
+    "band": ["W149", "Z087"],
+}
 
 # POINT B, from dc128_truth_forward.json -- which is a COMPLETE forward
 # parameter set, not a handful of derived summaries.  That matters: round 3
@@ -164,12 +170,17 @@ def truth_overrides(sampled):
 
     expected = [k for k in unmatched if k.startswith(CALIBRATION)]
     holes = [k for k in unmatched if not k.startswith(CALIBRATION)]
-    print("\ntruth coverage of the %d sampled coordinates:" % len(sampled),
-          flush=True)
+    print(
+        "\ntruth coverage of the %d sampled coordinates:" % len(sampled),
+        flush=True,
+    )
     print("  matched to truth              : %d" % len(out), flush=True)
     print("  unmatched, EXPECTED (calib.)  : %d" % len(expected), flush=True)
-    print("  unmatched, PHYSICS HOLES      : %d %s"
-          % (len(holes), holes if holes else ""), flush=True)
+    print(
+        "  unmatched, PHYSICS HOLES      : %d %s"
+        % (len(holes), holes if holes else ""),
+        flush=True,
+    )
     return out, holes
 
 
@@ -214,8 +225,11 @@ def point_from_trace():
     # "trace has no lp" (job 15408136).
     lp = np.asarray(xr.open_dataset(TRACE, group="sample_stats")["lp"])
     c, d = np.unravel_index(int(np.nanargmax(lp)), lp.shape)
-    print("argmax lp draw: chain %d draw %d  lp = %.1f"
-          % (c, d, float(lp[c, d])), flush=True)
+    print(
+        "argmax lp draw: chain %d draw %d  lp = %.1f"
+        % (c, d, float(lp[c, d])),
+        flush=True,
+    )
     out = {}
     for v in ds.data_vars:
         if v.endswith("_raw") or v in ("lp",):
@@ -252,8 +266,10 @@ def build(overrides, label):
     m = sy.build_model()
     ip = m.initial_point()
     lp = float(m.compile_logp()(ip))
-    print("%-10s logp = %+14.3f   (%d free RVs)"
-          % (label, lp, len(m.free_RVs)), flush=True)
+    print(
+        "%-10s logp = %+14.3f   (%d free RVs)" % (label, lp, len(m.free_RVs)),
+        flush=True,
+    )
     return sy, m, ip, lp
 
 
@@ -267,42 +283,60 @@ def term_logps(m, ip, label):
     the thing to look at.
     """
     import pytensor
+
     try:
         terms = m.logp(sum=False)
-        names = [getattr(t, "name", None) or "term%d" % i
-                 for i, t in enumerate(terms)]
+        names = [
+            getattr(t, "name", None) or "term%d" % i
+            for i, t in enumerate(terms)
+        ]
         fn = pytensor.function(m.value_vars, terms, on_unused_input="ignore")
         vals = fn(*[ip[v.name] for v in m.value_vars])
         out = {n: float(np.sum(np.asarray(v))) for n, v in zip(names, vals)}
-        print("%-10s %d logp terms, total %+.3f"
-              % (label, len(out), sum(out.values())), flush=True)
+        print(
+            "%-10s %d logp terms, total %+.3f"
+            % (label, len(out), sum(out.values())),
+            flush=True,
+        )
         return out
     except Exception as e:  # noqa: BLE001
-        print("%-10s PER-TERM BREAKDOWN UNAVAILABLE (%s: %s)"
-              % (label, type(e).__name__, e), flush=True)
+        print(
+            "%-10s PER-TERM BREAKDOWN UNAVAILABLE (%s: %s)"
+            % (label, type(e).__name__, e),
+            flush=True,
+        )
         return None
 
 
 SAMPLED = sampled_keys()
 A_all = point_from_trace()
 A = {k: v for k, v in A_all.items() if k in SAMPLED}
-print("injecting %d of %d trace values (sampled only; %d skipped as derived"
-      " or pinned)" % (len(A), len(A_all), len(A_all) - len(A)), flush=True)
+print(
+    "injecting %d of %d trace values (sampled only; %d skipped as derived"
+    " or pinned)" % (len(A), len(A_all), len(A_all) - len(A)),
+    flush=True,
+)
 for k in sorted(set(A_all) - set(A)):
     print("   skipped: %s" % k, flush=True)
 RECORDED_MAX = 87786.2
 
 print("\n=== GATE: DOES A SELF-INJECTION ROUND-TRIP? ===", flush=True)
-print("Injecting point A (the run's own argmax) and asking whether the model",
-      flush=True)
-print("reproduces the lp that draw recorded.  If it does not, no comparison",
-      flush=True)
+print(
+    "Injecting point A (the run's own argmax) and asking whether the model",
+    flush=True,
+)
+print(
+    "reproduces the lp that draw recorded.  If it does not, no comparison",
+    flush=True,
+)
 print("built on injected points means anything.", flush=True)
 sA, mA, ipA, lpA = build(A, "POINT A")
 print("recorded lp for that draw : %+14.3f" % RECORDED_MAX, flush=True)
 print("logp after re-injection   : %+14.3f" % lpA, flush=True)
-print("ROUND-TRIP ERROR          : %+14.3f nats" % (lpA - RECORDED_MAX),
-      flush=True)
+print(
+    "ROUND-TRIP ERROR          : %+14.3f nats" % (lpA - RECORDED_MAX),
+    flush=True,
+)
 
 # WHICH values failed to take.  This is the actionable half: it names the
 # parameters the engine overrode, which is what a fix has to address.
@@ -332,10 +366,16 @@ bad.sort(reverse=True)
 if not bad:
     print("  all %d injected values took exactly." % len(A), flush=True)
 else:
-    print("  %d of %d values were OVERRIDDEN by the engine:" % (len(bad),
-          len(A)), flush=True)
-    print("  %-30s %14s %14s %9s" % ("parameter", "requested", "resolved",
-                                     "rel err"), flush=True)
+    print(
+        "  %d of %d values were OVERRIDDEN by the engine:"
+        % (len(bad), len(A)),
+        flush=True,
+    )
+    print(
+        "  %-30s %14s %14s %9s"
+        % ("parameter", "requested", "resolved", "rel err"),
+        flush=True,
+    )
     for rel, key, want, g in bad[:25]:
         print("  %-30s %14.6g %14.6g %9.2e" % (key, want, g, rel), flush=True)
 
@@ -350,10 +390,14 @@ else:
 # round-trip is exact.  The comparison runs, and the verdict below refuses
 # to claim anything unless |B - A| exceeds 10x this floor.
 NOISE_FLOOR = abs(lpA - RECORDED_MAX)
-print("\nnoise floor (round-trip error): %.1f nats -- a verdict needs"
-      " |B - A| > %.0f" % (NOISE_FLOOR, 10 * NOISE_FLOOR), flush=True)
+print(
+    "\nnoise floor (round-trip error): %.1f nats -- a verdict needs"
+    " |B - A| > %.0f" % (NOISE_FLOOR, 10 * NOISE_FLOOR),
+    flush=True,
+)
 if NOISE_FLOOR > 500.0:
-    print("""
+    print(
+        """
 GATE FAILED -- the round-trip error exceeds 500 nats, which is large
 enough to swamp the effect being measured.  STOPPING.
 A posterior point does not round-trip through the params/initval interface,
@@ -372,34 +416,56 @@ WHAT WOULD ACTUALLY WORK, in increasing order of effort:
     item was trying to avoid.
 Either way the "cheap start-logp check" framing in 8.6.7 is wrong and should
 be retired.
-""", flush=True)
-    json.dump({"gate": "FAILED", "lp_A": lpA, "recorded_max": RECORDED_MAX,
-               "round_trip_error": lpA - RECORDED_MAX,
-               "overridden": [{"param": k, "requested": w, "resolved": g}
-                              for _r, k, w, g in bad]},
-              open("../dc128_severed_startlogp.json", "w"), indent=1)
+""",
+        flush=True,
+    )
+    json.dump(
+        {
+            "gate": "FAILED",
+            "lp_A": lpA,
+            "recorded_max": RECORDED_MAX,
+            "round_trip_error": lpA - RECORDED_MAX,
+            "overridden": [
+                {"param": k, "requested": w, "resolved": g}
+                for _r, k, w, g in bad
+            ],
+        },
+        open("../dc128_severed_startlogp.json", "w"),
+        indent=1,
+    )
     raise SystemExit(0)
 
 print("\nGATE PASSED -- the comparison below is meaningful.", flush=True)
 TRUTH, HOLES = truth_overrides(SAMPLED)
 if HOLES:
-    print("""
+    print(
+        """
 REFUSING TO COMPARE: %d sampled PHYSICS coordinate(s) have no truth value,
 so point B would be a mixture of the two solutions rather than a solution --
 which is how rounds 3 and 6 produced -10.7 million and -81.7 million nats
 and called them verdicts.  Add them to the truth source or exclude them
 deliberately, then re-run.
-""" % len(HOLES), flush=True)
-    json.dump({"gate": "REFUSED", "physics_holes": HOLES},
-              open("../dc128_severed_startlogp.json", "w"), indent=1)
+"""
+        % len(HOLES),
+        flush=True,
+    )
+    json.dump(
+        {"gate": "REFUSED", "physics_holes": HOLES},
+        open("../dc128_severed_startlogp.json", "w"),
+        indent=1,
+    )
     raise SystemExit(0)
 B = dict(A)
 B.update(TRUTH)
-print("\npoint B overrides %d SAMPLED coordinates with truth:" % len(TRUTH),
-      flush=True)
+print(
+    "\npoint B overrides %d SAMPLED coordinates with truth:" % len(TRUTH),
+    flush=True,
+)
 for k, v in sorted(TRUTH.items()):
-    print("   %-30s A=%-14.6g -> B=%-14.6g" % (k, A.get(k, float("nan")), v),
-          flush=True)
+    print(
+        "   %-30s A=%-14.6g -> B=%-14.6g" % (k, A.get(k, float("nan")), v),
+        flush=True,
+    )
 _, mB, ipB, lpB = build(B, "POINT B")
 tA = term_logps(mA, ipA, "POINT A")
 tB = term_logps(mB, ipB, "POINT B")
@@ -409,39 +475,59 @@ print("A = run's own argmax   : logp %+14.3f" % lpA, flush=True)
 print("B = A + truth physics  : logp %+14.3f" % lpB, flush=True)
 gap = lpB - lpA
 print("B - A                  : %+14.3f nats" % gap, flush=True)
-print("noise floor            : %14.1f nats (10x = %.0f)"
-      % (NOISE_FLOOR, 10 * NOISE_FLOOR), flush=True)
+print(
+    "noise floor            : %14.1f nats (10x = %.0f)"
+    % (NOISE_FLOOR, 10 * NOISE_FLOOR),
+    flush=True,
+)
 if abs(gap) < 10 * NOISE_FLOOR:
-    print(">>> INCONCLUSIVE: |B - A| does not clear 10x the round-trip"
-          " noise floor.  No claim.", flush=True)
+    print(
+        ">>> INCONCLUSIVE: |B - A| does not clear 10x the round-trip"
+        " noise floor.  No claim.",
+        flush=True,
+    )
 elif gap < 0:
-    print(">>> THE MODEL PREFERS THE WRONG SOLUTION by %.0f nats."
-          "  Misspecification, not a sampler failure." % (-gap), flush=True)
+    print(
+        ">>> THE MODEL PREFERS THE WRONG SOLUTION by %.0f nats."
+        "  Misspecification, not a sampler failure." % (-gap),
+        flush=True,
+    )
 else:
-    print(">>> THE CORRECT SOLUTION SCORES BETTER by %.0f nats."
-          "  A SEARCH failure: the star-swap basin is a trap, not the"
-          " optimum." % gap, flush=True)
+    print(
+        ">>> THE CORRECT SOLUTION SCORES BETTER by %.0f nats."
+        "  A SEARCH failure: the star-swap basin is a trap, not the"
+        " optimum." % gap,
+        flush=True,
+    )
 
 if tA and tB:
-    print("\n=== WHERE THE DIFFERENCE LIVES (B - A, per logp term) ===",
-          flush=True)
-    keys = sorted(set(tA) | set(tB),
-                  key=lambda k: -abs(tB.get(k, 0.0) - tA.get(k, 0.0)))
+    print(
+        "\n=== WHERE THE DIFFERENCE LIVES (B - A, per logp term) ===",
+        flush=True,
+    )
+    keys = sorted(
+        set(tA) | set(tB), key=lambda k: -abs(tB.get(k, 0.0) - tA.get(k, 0.0))
+    )
     print("%-44s %14s %14s %14s" % ("term", "A", "B", "B - A"), flush=True)
     for k in keys:
         va, vb = tA.get(k, float("nan")), tB.get(k, float("nan"))
         if abs(vb - va) < 0.05:
             continue
-        print("%-44s %14.3f %14.3f %+14.3f" % (k[:44], va, vb, vb - va),
-              flush=True)
-    print("\nRead the sign per term: a term that is WORSE at truth (negative"
-          "\nB - A) is a term whose model disagrees with the truth, which is"
-          "\nthe misspecification 8.6.7 is looking for.  If the SED/torres/"
-          "\nmann terms carry it, the stellar chain is the culprit; if the"
-          "\nmicrolensing likelihood carries it, the light curve itself"
-          "\nprefers the wrong geometry and that is a much bigger claim.",
-          flush=True)
-print("""
+        print(
+            "%-44s %14.3f %14.3f %+14.3f" % (k[:44], va, vb, vb - va),
+            flush=True,
+        )
+    print(
+        "\nRead the sign per term: a term that is WORSE at truth (negative"
+        "\nB - A) is a term whose model disagrees with the truth, which is"
+        "\nthe misspecification 8.6.7 is looking for.  If the SED/torres/"
+        "\nmann terms carry it, the stellar chain is the culprit; if the"
+        "\nmicrolensing likelihood carries it, the light curve itself"
+        "\nprefers the wrong geometry and that is a much bigger claim.",
+        flush=True,
+    )
+print(
+    """
 B - A NEGATIVE and LARGE -> this model genuinely prefers the wrong solution.
      MISSPECIFICATION, not a sampler failure; 8.6.7's "NOT CLAIMED" becomes
      a claim.  The per-term table then says which terms bought it.
@@ -451,7 +537,17 @@ B - A POSITIVE           -> the correct solution scores better and the
 |B - A| SMALL            -> INCONCLUSIVE.  Neither point is a basin optimum
      and this script does not polish (see the module docstring), so a gap of
      order tens of nats on a total near 87,786 decides nothing.
-""", flush=True)
-json.dump({"lp_A": lpA, "lp_B": lpB, "terms_A": tA, "terms_B": tB,
-           "truth_overrides": TRUTH},
-          open("../dc128_severed_startlogp.json", "w"), indent=1)
+""",
+    flush=True,
+)
+json.dump(
+    {
+        "lp_A": lpA,
+        "lp_B": lpB,
+        "terms_A": tA,
+        "terms_B": tB,
+        "truth_overrides": TRUTH,
+    },
+    open("../dc128_severed_startlogp.json", "w"),
+    indent=1,
+)
