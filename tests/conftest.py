@@ -4,7 +4,12 @@ Plain classes (not fixtures) — imported explicitly by test files that need the
 Pytest adds the tests/ directory to sys.path, so ``from conftest import ...`` works.
 """
 
+import glob
+import json
 import os
+import platform
+import shutil
+import tempfile
 
 import numpy as np
 import pytensor.tensor as pt
@@ -154,3 +159,172 @@ class MockSystem:
         return [
             v for v in self.star.__dict__.values() if isinstance(v, Parameter)
         ]
+
+
+# ---------------------------------------------------------------------------
+# Acceptance delta dump (review 3.14.20)
+# ---------------------------------------------------------------------------
+# macOS and Linux build slightly different models -- `scipy.optimize.nnls` at
+# build time disagrees between LAPACK implementations, and it sets seeds,
+# scales AND bounds.  The effect is deterministic per platform (repeat runs on
+# one machine are byte-identical), but whether macOS sits CONSISTENTLY one
+# side of Linux or scatters was never established, and it matters: a
+# directional offset does not average out over draws, scatter largely does.
+#
+# The acceptance tolerance is loose enough that macOS passes silently, so
+# these hooks print every term's delta and a SIGN TALLY whether or not
+# anything failed.  Numbers only; the verdict depends on them.
+_DELTA_DIR_ENV = "EXOZIPPY_DELTA_DIR"
+
+
+def pytest_configure(config):
+    """Point the acceptance dump at a fresh directory (controller only).
+
+    Set in the environment rather than on `config` so xdist WORKERS inherit
+    it: they are spawned after this hook runs, and the recording happens in
+    the worker processes.
+    """
+    if hasattr(config, "workerinput"):
+        return  # an xdist worker; the controller has already done this
+    directory = os.environ.get(_DELTA_DIR_ENV)
+    if not directory:
+        directory = os.path.join(
+            tempfile.gettempdir(), "exozippy_acceptance_deltas"
+        )
+        os.environ[_DELTA_DIR_ENV] = directory
+    shutil.rmtree(directory, ignore_errors=True)
+    os.makedirs(directory, exist_ok=True)
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Print the per-term deltas and the sign tally that answers 3.14.20."""
+    if hasattr(config, "workerinput"):
+        return
+    directory = os.environ.get(_DELTA_DIR_ENV)
+    if not directory or not os.path.isdir(directory):
+        return
+
+    rows = []
+    for entry in sorted(glob.glob(os.path.join(directory, "deltas-*.jsonl"))):
+        with open(entry) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    continue
+    if not rows:
+        return
+
+    write = terminalreporter.write_line
+    write("")
+    write("=" * 72)
+    write("acceptance delta dump -- review 3.14.20 (platform comparison)")
+    write("=" * 72)
+    write(
+        "The fixtures were recorded on the Linux reference machine, so ON "
+        "THAT MACHINE"
+    )
+    write(
+        "these deltas are ~0 by construction.  A log of zeros here means "
+        "'this is the"
+    )
+    write(
+        "reference platform', NOT 'no cross-platform difference exists' -- "
+        "compare a"
+    )
+    write("macOS run against a Linux one.")
+    write("")
+    write("platform : %s" % platform.platform())
+    write("python   : %s" % platform.python_version())
+    try:
+        import numpy
+
+        write("numpy    : %s" % numpy.__version__)
+    except Exception:
+        pass
+    try:
+        import scipy
+
+        write("scipy    : %s" % scipy.__version__)
+    except Exception:
+        pass
+    try:
+        # Which BLAS/LAPACK actually backs nnls is the mechanism at issue.
+        import numpy as _np
+
+        cfg = _np.__config__.show(mode="dicts")
+        blas = (cfg or {}).get("Build Dependencies", {}).get("blas", {})
+        lapack = (cfg or {}).get("Build Dependencies", {}).get("lapack", {})
+        if blas or lapack:
+            write(
+                "blas     : %s %s"
+                % (blas.get("name", "?"), blas.get("version", ""))
+            )
+            write(
+                "lapack   : %s %s"
+                % (lapack.get("name", "?"), lapack.get("version", ""))
+            )
+    except Exception:
+        pass
+    write("")
+
+    def rel(row):
+        before = row["before"]
+        denom = abs(before) if abs(before) > 0 else 1.0
+        return (row["after"] - before) / denom
+
+    by_case = {}
+    for row in rows:
+        by_case.setdefault(row["case"], []).append(row)
+
+    write("per fixture:")
+    write(
+        "  %-26s %6s  %12s  %s" % ("case", "terms", "max |rel|", "worst term")
+    )
+    for case in sorted(by_case):
+        case_rows = by_case[case]
+        worst = max(case_rows, key=lambda r: abs(rel(r)))
+        write(
+            "  %-26s %6d  %12.3e  %s"
+            % (case, len(case_rows), abs(rel(worst)), worst["term"])
+        )
+    write("")
+
+    above = sum(1 for r in rows if r["after"] > r["before"])
+    below = sum(1 for r in rows if r["after"] < r["before"])
+    exact = sum(1 for r in rows if r["after"] == r["before"])
+    write("sign tally over %d terms:" % len(rows))
+    write("  current > recorded : %d" % above)
+    write("  current < recorded : %d" % below)
+    write("  bit-identical      : %d" % exact)
+    write(
+        "  (one-sided counts => a DIRECTIONAL offset, which does not average "
+        "out;"
+    )
+    write(
+        "   mixed counts => scatter.  All-identical => this is the reference "
+        "machine.)"
+    )
+    write("")
+
+    moved = sorted(
+        (r for r in rows if r["after"] != r["before"]),
+        key=lambda r: abs(rel(r)),
+        reverse=True,
+    )
+    if moved:
+        write("largest %d deltas:" % min(10, len(moved)))
+        for row in moved[:10]:
+            write(
+                "  %-22s %-30s %+.6e  rel %+.3e"
+                % (
+                    row["case"],
+                    row["term"],
+                    row["after"] - row["before"],
+                    rel(row),
+                )
+            )
+    write("=" * 72)

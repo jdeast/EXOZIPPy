@@ -367,8 +367,14 @@ class Planet(Component):
         """
         mass_sides = self._mass_constrained(system)
 
+        # The lens component is one instance per lens BODY (8.6.17 split);
+        # its `bodies` list is [(comp_type, index), ...], primary first.
         lens = system.active_components.get("lens")
-        lens_bodies = set(lens.lens_bodies[0]) if lens is not None else set()
+        lens_bodies = (
+            set(getattr(lens, "bodies", []) or [])
+            if lens is not None
+            else set()
+        )
 
         modes, reasons = [], []
         for p, (c, nm) in enumerate(zip(self.config, self.names)):

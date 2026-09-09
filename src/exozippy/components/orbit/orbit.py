@@ -999,22 +999,27 @@ class Orbit(Component):
                     "i > 90 deg" if own_i180.any() else "i < 90 deg",
                 )
 
-    def _lens_orbit_refs(self, system, idx_attr, mode_key, ref_key):
-        """Orbit indices a lens block references through ``ref_key`` when
-        its ``mode_key`` is 'keplerian' (empty set when none).
+    def _lens_orbit_refs(self, system, comp_name, idx_attr, mode_key, ref_key):
+        """Orbit indices the ``comp_name`` microlensing component references
+        through ``ref_key`` when its ``mode_key`` is 'keplerian' (empty set
+        when none).
 
-        Reads the lens INSTANCE when it exists (its resolved ``idx_attr``)
-        and falls back to the raw config block -- register_parameters runs
-        per component and the lens may not be constructed yet in a partial
-        harness.
+        Post-split homes (8.6.17): the keplerian LENS motion keys
+        (``orbital_motion``/``orbit``) live on the lens component's
+        COMPANION entries; the xallarap keys
+        (``source_orbital_motion``/``source_orbit``) live on the single
+        ``mulensevent:`` block.  Reads the component INSTANCE when it exists
+        (its resolved ``idx_attr``) and falls back to the raw config block
+        -- register_parameters runs per component and the microlensing
+        components may not be constructed yet in a partial harness.
         """
-        lens = in_topology(system, "lens")
-        if lens is None:
+        comp = in_topology(system, comp_name)
+        if comp is None:
             return set()
-        idx = getattr(lens, idx_attr, None)
+        idx = getattr(comp, idx_attr, None)
         if idx is not None:
             return {int(idx)}
-        blocks = lens if isinstance(lens, list) else [lens]
+        blocks = comp if isinstance(comp, list) else [comp]
         out = set()
         for b in blocks:
             if isinstance(b, dict) and b.get(mode_key) == "keplerian":
@@ -1026,16 +1031,21 @@ class Orbit(Component):
         return out
 
     def _lens_keplerian_orbits(self, system):
-        """Orbits a lens block drives via ``orbital_motion: keplerian``."""
+        """Orbits a lens COMPANION entry drives via ``orbital_motion:
+        keplerian`` (+ ``orbit:``, C24)."""
         return self._lens_orbit_refs(
-            system, "kep_orbit_idx", "orbital_motion", "orbit"
+            system, "lens", "kep_orbit_idx", "orbital_motion", "orbit"
         )
 
     def _lens_xallarap_orbits(self, system):
-        """Orbits a lens block's SOURCE moves on (``source_orbital_motion:
-        keplerian`` + ``source_orbit:``, C25)."""
+        """Orbits the event's SOURCE moves on (``source_orbital_motion:
+        keplerian`` + ``source_orbit:`` on the mulensevent block, C25)."""
         return self._lens_orbit_refs(
-            system, "xal_orbit_idx", "source_orbital_motion", "source_orbit"
+            system,
+            "mulensevent",
+            "xal_orbit_idx",
+            "source_orbital_motion",
+            "source_orbit",
         )
 
     def _node_degenerate_orbits(self, system):

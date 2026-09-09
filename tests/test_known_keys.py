@@ -726,3 +726,66 @@ def test_a_valid_subkey_is_not_reported_but_a_typo_still_is():
 
     # ASSERT
     assert reported == ["star.A.teff -> 'intival'"]
+
+
+def test_an_engine_consumed_key_is_not_reported_but_a_lookalike_typo_is():
+    """
+    Given a params key that matches NO built Parameter but IS a path the
+      relaxation engine's component relations know
+      (config_manager.relation_symbol_paths),
+    When check_unused_yaml runs,
+    Then the key is NOT reported -- and a typo'd sibling still is.
+
+    The concrete case (stage 3 of the 8.6.17 split): a `source.<star>.rho`
+    seed on a point-source event.  rho is not a model parameter there, but
+    the symbolic map wires rho = theta_star/theta_E unconditionally, so the
+    seed back-solves into the stellar chain; measured on DC2018_128,
+    deleting it moved the start's data logp by 1.3 nats through the flux
+    decomposition.  Reporting it "unused" invites deleting a load-bearing
+    seed.  The membership test deliberately reads relation_symbol_paths and
+    NOT master_symbol_map: finalize_user_params registers every unmapped
+    user key in the full map as a leaf symbol, so full-map membership is
+    vacuously true for any typo (measured: two injected typos both came
+    back "consumed" through the full map).
+    """
+
+    # ARRANGE -- a fake just rich enough for the two code paths: one key the
+    # relations know (name form, folded through system.config), one typo.
+    class _FakeParam:
+        label = "star.teff"
+        shape = ()
+
+        def get_display_label(self, i):
+            return "star.A.teff"
+
+    class _FakeCM:
+        relation_symbol_paths = {"source.0.rho"}
+
+    class _FakeSystem:
+        user_params = {
+            "source.S.rho": {"initval": 0.005},
+            "source.S.rhoo": {"initval": 0.005},
+        }
+        config = {"source": [{"name": "S"}]}
+        config_manager = _FakeCM()
+
+        def get_parameter_lookup(self):
+            return {}
+
+        def get_all_parameters(self):
+            return [_FakeParam()]
+
+    auditor = diagnostics_mod.ModelAuditor.__new__(
+        diagnostics_mod.ModelAuditor
+    )
+    system = _FakeSystem()
+    auditor.system = system
+    auditor.user_params = system.user_params
+    auditor.all_params = system.get_all_parameters()
+
+    # ACT
+    reported = auditor.check_unused_yaml()
+
+    # ASSERT -- the engine-consumed seed is exempt; the typo is not.
+    assert "source.S.rho" not in reported, reported
+    assert "source.S.rhoo" in reported, reported

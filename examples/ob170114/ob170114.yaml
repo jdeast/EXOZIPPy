@@ -14,13 +14,13 @@
 #     supersedes it with the full source-system treatment).
 #
 # system architecture:
-#   star.0   = L1      lens host      ~0.50 Msun at ~3.4 kpc
-#   star.1   = Source  luminous source, a bulge red giant at ~8.5 kpc
-#   star.2   = SComp   the source's DARK companion (nothing else models
-#                      it: no flux, no lensing -- it exists to move the
-#                      source, and its mass is what the xallarap
-#                      amplitude measures)
-#   planet.0 = b       lens planet, q = 0.0219 -> ~11.5 M_J
+#   star.L1     = lens host      ~0.50 Msun at ~3.4 kpc
+#   star.Source = luminous source, a bulge red giant at ~8.5 kpc
+#   star.SComp  = the source's DARK companion (nothing else models
+#                 it: no flux, no lensing -- it exists to move the
+#                 source, and its mass is what the xallarap
+#                 amplitude measures)
+#   planet.b    = lens planet, q = 0.0219 -> ~11.5 M_J
 #
 # The Std 2L1S solution's xallarap amplitude (xi_a = 0.200 of theta_E
 # with P = 221.5 d) implies a MASSIVE dark companion: at an assumed
@@ -38,7 +38,7 @@ star:
 planet:
   - name: "b"
 
-# The SOURCE binary's orbit.  The lens block's source_orbital_motion
+# The SOURCE binary's orbit.  The mulensevent's source_orbital_motion
 # consumes it: the luminous source's barycentric track, in Einstein units
 # a_1/(D_S * theta_E), enters the trajectory at the parallax slot (C25).
 orbit:
@@ -47,10 +47,14 @@ orbit:
     companion: ["SComp"]
 
 lens:
-  - name: "OB170114"
-    lenses:  ["star.0", "planet.0"]
-    sources: ["star.1"]
-    finite_source: True          # rho = 0.0109; the secondary peak
+  - body: star.L1
+  - body: planet.b
+
+source:
+  - body: star.Source
+
+mulensevent:
+  - finite_source: True          # rho = 0.0109; the secondary peak
                                  # resolves the source
     # Mroz+26's reference epoch for BOTH the parallax and the xallarap
     # anchor (their t_0,par = t_0,xi; our 5d one-anchor rule is the same

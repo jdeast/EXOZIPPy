@@ -1,32 +1,32 @@
 # Jung et al. 2017 (ApJ 841, 75), Table 1, 2S2L "standard" solution.
 #
-# Per-source trajectory parameters are addressed by the source star's
-# instance name: lens.SourceA.<param> / lens.SourceB.<param>
-# (equivalently by slot index: lens.0.<param> / lens.1.<param>, matching
-# the order of the sources: list in the lens block).
-# Event-level (shared) parameters use the lens event's name: lens.Lens.<param>.
+# Per-source trajectory parameters live on the source component, addressed
+# by the source star's instance name: source.SourceA.<param> /
+# source.SourceB.<param> (equivalently by slot index: source.0.<param> /
+# source.1.<param>, matching the order of the source: list).
+# Event-level (shared) parameters live on the event: mulensevent.<param>.
+# The binary geometry lives on the companion's lens entry: lens.LensB.<param>.
 
-lens.SourceA.t_0:
+source.SourceA.t_0:
     initval: 2457551.038
 
-lens.SourceB.t_0:
+source.SourceB.t_0:
     initval: 2457552.517
 
-lens.SourceA.u_0:
+source.SourceA.u_0:
     initval: 0.059
 
-lens.SourceB.u_0:
+source.SourceB.u_0:
     initval: 0.135
 
-# t_E is shared by both sources in the published solution (both sources are
-# in the bulge with a common lens); referenced to the TOTAL lens mass.
-lens.SourceA.t_E:
+# t_E is event-level (one lens system, one co-moving source system -> one
+# Einstein-crossing time; Jung+2017's Table 1 likewise prints ONE t_E);
+# referenced to the TOTAL lens mass.  Pre-split this file seeded the SAME
+# 28.931 d on both sources' per-source copies.
+mulensevent.t_E:
     initval: 28.931
 
-lens.SourceB.t_E:
-    initval: 28.931
-
-lens.Lens.s:
+lens.LensB.s:
     initval: 1.033
 
 # alpha: relaxation engine propagates the initval to xalpha/yalpha.
@@ -34,19 +34,19 @@ lens.Lens.s:
 # MulensModel's (used internally) as alpha_MM = 180 - alpha_paper.
 # (Verified by chi2 scan over {±alpha, 180±alpha} × u_0 sign: 131.757 with
 # u_0 > 0 gives chi2/N ~ 1.25; all other combinations are catastrophic.)
-lens.Lens.alpha:
+lens.LensB.alpha:
     initval: 131.757
 
-lens.SourceA.rho:
+source.SourceA.rho:
     initval: 0.000451
 
-lens.SourceB.rho:
+source.SourceB.rho:
     initval: 0.001293
 
 # q = M_LensB / M_Lens (~1.19: the "companion" is the more massive body).
 # EXOZIPPy's relaxation engine propagates this through the symbolic relation
 # q * M_primary = M_companion to set LensB's mass initval automatically.
-lens.Lens.q:
+lens.LensB.q:
     initval: 1.188
 
 star.ra:
@@ -55,6 +55,28 @@ star.ra:
 star.dec:
     initval: -27.188861
     sigma: 0
+
+# Proper motions: all four leaves of the mu_rel chain are seeded, because
+# t_E is DERIVED (t_E = theta_E / mu_rel_geo) and a t_E seed alone leaves
+# the engine a two-dimensional family of proper-motion splits to land on
+# (the documented failure mode -- see examples/ob07224's params for the
+# full derivation of the same recipe).  Jung+2017's standard solution has
+# no parallax, so the DIRECTION of mu_rel is unconstrained by the data;
+# what these seeds pin is (a) the magnitude, so the derived t_E starts on
+# the published 28.931 d, and (b) an arbitrary-but-stated axis (due south)
+# for the direction.  The magnitude is theta_E/t_E = 0.8392544/28.931 *
+# 365.25 = 10.5954746 mas/yr on top of a nominal bulge-mean source pm.
+# Before these seeds the engine chose the split itself, and its choice
+# changed with the internal ordering of the (renamed) relation set -- the
+# start silently rotated phi_pi ~90 deg and missed the t_E seed by 7%.
+star.SourceA.pm_ra:
+    initval: -3.0
+star.SourceA.pm_dec:
+    initval: -3.0
+star.Lens.pm_ra:
+    initval: -3.0
+star.Lens.pm_dec:
+    initval: -13.595474606      # = -3.0 - theta_E/t_E (mas/yr; see above)
 
 # The lens bodies' radii and every star's teff/feh used to be pinned by hand
 # here.  They are deactivated automatically now (review 3.8.1): with no SED and

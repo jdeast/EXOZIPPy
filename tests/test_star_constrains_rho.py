@@ -1,5 +1,6 @@
 """
-Tests for `star_constrains_rho: false` (severing rho = theta_star/theta_E).
+Tests for `star_constrains_rho: false` (a per-SOURCE flag, carried on
+each `source:` entry post-split: severing rho = theta_star/theta_E).
 
 The finite-source effect is a direct measurement of rho and always acts;
 the flag toggles whether the stellar model (SED, evolutionary models,
@@ -21,6 +22,7 @@ import pytensor
 import pytest
 import yaml
 
+from exozippy.manifest import interpret_manifest_entry
 from exozippy.system import System
 
 _KMT_DIR = Path(__file__).parent.parent / "examples" / "KMT-2019-BLG-1806"
@@ -62,7 +64,7 @@ def _load_kmt(sever=False, extra_params=None, build=False):
         for k in ("run", "prefix", "parameter_file", "sampler"):
             config.pop(k, None)
         if sever:
-            config["lens"][0]["star_constrains_rho"] = False
+            config["source"][0]["star_constrains_rho"] = False
         if extra_params:
             user_params.update(extra_params)
         system = System(config, user_params=user_params)
@@ -80,7 +82,7 @@ def kmt_severed():
     provide (system, model, initial point)."""
     system, model = _load_kmt(
         sever=True,
-        extra_params={"lens.Lens.rho": {"initval": 0.005}},
+        extra_params={"source.Source.rho": {"initval": 0.005}},
         build=True,
     )
     return system, model, model.initial_point()
@@ -100,10 +102,13 @@ def test_default_off_no_new_parameters():
     is declared.
     """
     system, _ = _load_kmt()
-    manifest = system.lens.manifest
+    manifest = system.source.manifest
     assert "log_rho" not in manifest
     assert "rho_pred" not in manifest
-    assert manifest["rho"].get("expr_key") == "default"
+    # mode_manifest writes the bare expr_key string for a
+    # no-options entry, so read it through the interpreter rather than
+    # assuming the dict spelling.
+    assert interpret_manifest_entry(manifest["rho"]).expr_key == "default"
 
 
 def test_severed_samples_log_rho(kmt_severed):
@@ -114,12 +119,12 @@ def test_severed_samples_log_rho(kmt_severed):
     back-solved to the log_rho start through the relaxation engine.
     """
     system, model, point = kmt_severed
-    assert "lens.log_rho_raw" in [v.name for v in model.value_vars]
+    assert "source.log_rho_raw" in [v.name for v in model.value_vars]
 
     # Derived Parameters do not emit named Deterministics; evaluate the
     # Parameter value nodes (graphs over the model's RVs) directly.
-    log_rho = np.atleast_1d(_eval(model, system.lens.log_rho.value, point))
-    rho = np.atleast_1d(_eval(model, system.lens.rho.value, point))
+    log_rho = np.atleast_1d(_eval(model, system.source.log_rho.value, point))
+    rho = np.atleast_1d(_eval(model, system.source.rho.value, point))
     assert np.allclose(rho, 10.0**log_rho, rtol=1e-12)
     # The engine's rho <-> log_rho relation turned the user rho start into
     # the sampled coordinate's start.
@@ -136,29 +141,31 @@ def test_rho_pred_reports_the_chain(kmt_severed):
     """
     system, model, point = kmt_severed
     rho_pred = float(
-        np.atleast_1d(_eval(model, system.lens.rho_pred.value, point))[0]
+        np.atleast_1d(_eval(model, system.source.rho_pred.value, point))[0]
     )
     theta_e = float(
-        np.atleast_1d(_eval(model, system.lens.theta_E.value, point))[0]
+        np.atleast_1d(_eval(model, system.mulensevent.theta_E.value, point))[0]
     )
     radius = np.atleast_1d(_eval(model, system.star.radius.value, point))
     distance = np.atleast_1d(_eval(model, system.star.distance.value, point))
-    src = int(system.lens.source_map[0])
+    src = int(system.source.star_map[0])
     RSUN_TO_AU = 0.0046505
     theta_star_mas = radius[src] * RSUN_TO_AU / distance[src] * 1000.0
     assert np.isclose(rho_pred, theta_star_mas / theta_e, rtol=1e-3)
 
-    rho = float(np.atleast_1d(_eval(model, system.lens.rho.value, point))[0])
+    rho = float(np.atleast_1d(_eval(model, system.source.rho.value, point))[0])
     assert np.isclose(rho, 0.005, rtol=1e-6)
     # At the START they coincide by design: the relaxation engine knows both
     # relations, so the user rho seeded the stellar chain consistently.
     # Decoupling means moving the sampled coordinate moves rho and NOT
     # rho_pred -- the severed identity in one perturbation.
     point2 = dict(point)
-    point2["lens.log_rho_raw"] = point["lens.log_rho_raw"] + 3.0
-    rho2 = float(np.atleast_1d(_eval(model, system.lens.rho.value, point2))[0])
+    point2["source.log_rho_raw"] = point["source.log_rho_raw"] + 3.0
+    rho2 = float(
+        np.atleast_1d(_eval(model, system.source.rho.value, point2))[0]
+    )
     rho_pred2 = float(
-        np.atleast_1d(_eval(model, system.lens.rho_pred.value, point2))[0]
+        np.atleast_1d(_eval(model, system.source.rho_pred.value, point2))[0]
     )
     assert not np.isclose(rho2, rho, rtol=1e-3)
     assert np.isclose(rho_pred2, rho_pred, rtol=1e-12)
@@ -178,16 +185,16 @@ def test_soft_tie_composes_with_link_machinery():
     system, model = _load_kmt(
         sever=True,
         extra_params={
-            "lens.Lens.rho": {
+            "source.Source.rho": {
                 "initval": 1.1022118088011409e-08,
-                "mu": "lens.Lens.rho_pred",
+                "mu": "source.Source.rho_pred",
                 "sigma": 0.002,
             }
         },
         build=True,
     )
     pot_names = [p.name for p in model.potentials]
-    assert "link_mu.lens.rho.0" in pot_names
-    assert "lens.log_rho_raw" in [v.name for v in model.value_vars]
+    assert "link_mu.source.rho.0" in pot_names
+    assert "source.log_rho_raw" in [v.name for v in model.value_vars]
     point = model.initial_point()
     assert np.isfinite(float(model.compile_logp()(point)))

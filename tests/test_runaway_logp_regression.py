@@ -87,10 +87,16 @@ EXAMPLE_DIR = os.path.join(
 # along).  Its historical value was -37530.31612758304; the parameter no longer
 # exists, so the coordinate cannot be supplied.  The whitening fixture lost its
 # band.u1 entry for the same reason -- every other entry is untouched.
+# t_0/u_0 are the OTHER pure key rename, from the mulensevent/lens/source
+# split: they are per-SOURCE trajectory offsets now, so lens.t_0_raw ->
+# source.t_0_raw and lens.u_0_raw -> source.u_0_raw.  log_s/xalpha/yalpha stay
+# on `lens`, and the sampled vectors stay length 1 -- the companion is lens
+# element 1, but element 0 (the masked primary) is inactive and never sampled,
+# so no coordinate had to be invented for it.  See the fixture note below.
 RUNAWAY_RAW = {
     "lens.log_s_raw": [12868418.484993141],
-    "lens.t_0_raw": [597790902870.5624],
-    "lens.u_0_raw": [-85147091.07538812],
+    "source.t_0_raw": [597790902870.5624],
+    "source.u_0_raw": [-85147091.07538812],
     "lens.xalpha_raw": [35067.89879449546],
     "lens.yalpha_raw": [-207142.0549616936],
     "mulensinstrument.err_scale_raw": [227.84215680882753],
@@ -123,8 +129,8 @@ RUNAWAY_RAW = {
 # (band.u1_raw was 0.2176204790834511 here; see the note on RUNAWAY_RAW.)
 GOOD_RAW = {
     "lens.log_s_raw": [-16.184426615189963],
-    "lens.t_0_raw": [4.88478412864818],
-    "lens.u_0_raw": [-42.52723267883055],
+    "source.t_0_raw": [4.88478412864818],
+    "source.u_0_raw": [-42.52723267883055],
     "lens.xalpha_raw": [-109.86398001224084],
     "lens.yalpha_raw": [123.27869830685752],
     "mulensinstrument.err_scale_raw": [2.786029660640395],
@@ -142,6 +148,25 @@ GOOD_RAW = {
 # Restoring it is what makes a raw-space point mean the same thing here as it
 # did in the fit; without it the same numbers decode to a different physical
 # state entirely.
+#
+# THE FIXTURE WAS NOT RE-MEASURED for the mulensevent/lens/source split, and
+# must not be: a re-probed file would be a probe of the CURRENT start, which
+# these draws never saw, and would silently re-pin the whole test.  It was
+# key-RENAMED instead, exactly as the raw points above were:
+#   * the twelve event-level entries (t_E, theta_E, pi_rel, mlens_total, the
+#     four mu_rel components and the two geocentric ones) moved
+#     lens.* -> mulensevent.*, and t_0/u_0 moved lens.* -> source.*.  All are
+#     length 1 on both sides, so every number is the original.
+#   * the five that stay on `lens` (log_s, xalpha, yalpha, s, q) are now
+#     FULL-LENGTH vectors: the companion is element 1 and element 0 is the
+#     masked primary lens body.  The historical value sits at element 1;
+#     element 0 is a shape filler following what a live probe writes into a
+#     masked slot on this same example (scale_logits 0.0; gaussian_scales and
+#     barrier_scales come from the manifest and are identical for every
+#     element).  That slot is provably inert: the logp at GOOD_RAW is
+#     bit-identical for fillers of 1e-9 and 1e3.
+# The check that the rename is faithful is GOOD_EXPECTED_LP below, which the
+# ported fixture reproduces to every digit it was recorded at.
 WHITENING_FIXTURE = os.path.join(
     os.path.dirname(__file__), "fixtures", "DC2018_128_whitening.json"
 )
@@ -323,5 +348,5 @@ def test_runaway_draw_no_longer_produces_large_positive_logp(dc2018_128_logp):
     )
     assert val < -1e10, (
         f"expected a deeply negative logp at a state this far outside any "
-        f"bound (lens.t_0_raw alone is ~6e11); got {val:.3e}"
+        f"bound (source.t_0_raw alone is ~6e11); got {val:.3e}"
     )

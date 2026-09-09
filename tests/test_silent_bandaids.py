@@ -46,9 +46,15 @@ def test_config_naming_an_unimportable_component_raises(monkeypatch):
 
     from exozippy.system import System
 
+    # A config that would BUILD if the import succeeded (post-split shape),
+    # so the ImportError this test wants is the only thing that can raise --
+    # a pre-split lens block would raise the migration ValueError instead and
+    # the guard would stop watching the import path.
     config = {
-        "star": [{"name": "Lens"}],
-        "lens": [{"name": "L", "lenses": ["star.0"], "sources": ["star.0"]}],
+        "star": [{"name": "Lens"}, {"name": "Source"}],
+        "mulensevent": [{}],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
     }
 
     # ACT / ASSERT
@@ -89,7 +95,7 @@ def test_unknown_yaml_key_still_only_warns(caplog):
 
 def test_named_dep_map_that_does_not_exist_raises():
     """
-    Given a lens whose manifest deps name 'lens_map' but whose lens_map is
+    Given an event whose manifest deps name 'lens_map' but whose lens_map is
       gone (a build_maps bug, or a dep renamed without its map),
     When build_model wires the expressions,
     Then it raises naming the dependency and the missing map.
@@ -98,6 +104,10 @@ def test_named_dep_map_that_does_not_exist_raises():
     physics function in place of the requested elements.  Where the lengths
     happened to match, it broadcast silently and paired the wrong bodies --
     another star's mass into this lens's theta_E, with a healthy logp.
+
+    lens_map (the primary lens body's star index, which theta_E's
+    `star.mass[lens_map]` dep names) lives on `mulensevent` after the
+    mulensevent/lens/source split; before it, on the all-in-one lens.
     """
     # ARRANGE
     from exozippy.system import System
@@ -107,14 +117,14 @@ def test_named_dep_map_that_does_not_exist_raises():
             {"name": "Lens", "mist": False},
             {"name": "Source", "mist": False},
         ],
-        "lens": [
-            {"name": "Lens", "lenses": ["star.0"], "sources": ["star.1"]}
-        ],
+        "mulensevent": [{}],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
     }
     system = System(config, {})
     system.prepare()
-    assert hasattr(system.lens, "lens_map")
-    del system.lens.lens_map
+    assert hasattr(system.mulensevent, "lens_map")
+    del system.mulensevent.lens_map
 
     # ACT / ASSERT
     with pytest.raises(AttributeError) as exc:

@@ -19,10 +19,10 @@ from exozippy.components.mulensing.op import MulensMagOp
 from exozippy.system import System
 
 _BASE_USER_PARAMS = {
-    "lens.Lens.t_0": {"initval": 2460025.0},
-    "lens.Lens.u_0": {"initval": 0.2},
-    "lens.Lens.pi_E_N": {"initval": 0.0, "sigma": 0.0},
-    "lens.Lens.pi_E_E": {"initval": 0.0, "sigma": 0.0},
+    "source.Source.t_0": {"initval": 2460025.0},
+    "source.Source.u_0": {"initval": 0.2},
+    "mulensevent.pi_E_N": {"initval": 0.0, "sigma": 0.0},
+    "mulensevent.pi_E_E": {"initval": 0.0, "sigma": 0.0},
     "star.Lens.distance": {"initval": 4000.0},
     "star.Source.distance": {"initval": 8000.0},
     "star.Lens.mass": {"initval": 0.5},
@@ -37,7 +37,9 @@ _BASE_USER_PARAMS = {
 }
 _CONFIG = {
     "star": [{"name": "Lens"}, {"name": "Source"}],
-    "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}],
+    "mulensevent": [{}],
+    "lens": [{"body": "star.Lens", "name": "Lens"}],
+    "source": [{"body": "star.Source", "name": "Source"}],
 }
 _COORDS = "266.4168d -29.0078d"
 
@@ -59,11 +61,11 @@ def _eval_both(system, model, obs_dev, t_vals):
     convention both magnification paths consume.
     """
     with model:
-        A_sym_node = system.lens.get_magnification(
+        A_sym_node = system.mulensevent.get_magnification(
             t_vals, obs_dev, system, index=0
         )
 
-        sp = system.lens._get_safe_mm_params(0)
+        sp = system.mulensevent._get_safe_mm_params(system, 0)
         mag_op = MulensMagOp(
             coords=_COORDS, mag_method="point_source", use_rho=False
         )

@@ -486,7 +486,7 @@ def _run_fit(config, gui, user_params=None):
     # sorted(), not next(iter(...)): _recommended is a set, so with two
     # components recommending different samplers the choice would be a
     # PYTHONHASHSEED coin flip -- i.e. a different sampler per run.  Only one
-    # component recommends anything today (mulensing's Lens), so this is
+    # component recommends anything today (mulensing's MulensEvent), so this is
     # inert; it stops being inert silently.
     if method is None:
         method = sorted(_recommended)[0] if _recommended else "nuts"
@@ -1445,7 +1445,7 @@ def inspect_start(
             # vector's scale array covers only its sampled elements with
             # no alignment information here -- padding positionally would
             # attribute a sampled element's scale to a derived one.  All
-            # rows show N/A instead.  First hit by lens.t_E on a
+            # rows show N/A instead.  First hit by the pre-split lens.t_E on a
             # TWO-source event (ob161003, queue task 3): every earlier
             # example's derived vectors were single-element, so
             # s_phys[i>0] never happened.

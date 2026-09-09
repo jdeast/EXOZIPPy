@@ -21,14 +21,19 @@ MMX_PATH = (
     Path(__file__).parent.parent / "examples" / "DC2018_128" / "mmexofast.json"
 )
 
+# The converter's output, one entry per cardinality the split separated:
+# the trajectory offsets and the source size are PER-SOURCE, the timescale
+# is EVENT-level, and the geometry is PER-COMPANION -- lens element 1,
+# because element 0 is the masked primary.  Measured against
+# examples/DC2018_128/mmexofast.json rather than assumed.
 PARAM_PATHS = [
-    "lens.Lens.t_0",
-    "lens.Lens.u_0",
-    "lens.Lens.t_E",
-    "lens.Lens.s",
-    "lens.Lens.alpha",
-    "lens.Lens.rho",
-    "lens.Lens.q",
+    "source.0.t_0",
+    "source.0.u_0",
+    "source.0.rho",
+    "mulensevent.t_E",
+    "lens.1.s",
+    "lens.1.alpha",
+    "lens.1.q",
 ]
 
 
@@ -147,7 +152,7 @@ def test_t_0_has_jd_offset_subtracted(tmp_path, solution_index):
         else [raw["fits"][solution_index]]
     )
     expected = [fit["parameters"]["t_0"] - jd_offset for fit in fits]
-    got = parsed["lens.Lens.t_0"]["initval"]
+    got = parsed["source.0.t_0"]["initval"]
     got = got if isinstance(got, list) else [got]
     assert got == pytest.approx(expected, abs=1e-7)
 
@@ -163,7 +168,7 @@ def test_no_jd_offset_key_leaves_t_0_alone(tmp_path):
     )
 
     expected = [fit["parameters"]["t_0"] for fit in raw["fits"]]
-    assert parsed["lens.Lens.t_0"]["initval"] == pytest.approx(
+    assert parsed["source.0.t_0"]["initval"] == pytest.approx(
         expected, abs=1e-7
     )
 

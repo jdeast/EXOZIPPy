@@ -1,6 +1,6 @@
 """
-Tests for `fitmurel: true` (lens block): sample the LC-measured relative
-proper motion, derive the lens star's pm = pm_source + mu_rel.
+Tests for `fitmurel: true` (mulensevent block): sample the LC-measured
+relative proper motion, derive the lens star's pm = pm_source + mu_rel.
 
 The first surgical coordinate swap (notes/observable_coordinates.txt):
 |J| = 1, so the joint density over the physical variables is unchanged --
@@ -58,7 +58,7 @@ def _build(fitmurel):
         for k in ("run", "prefix", "parameter_file", "sampler"):
             config.pop(k, None)
         if fitmurel:
-            config["lens"][0]["fitmurel"] = True
+            config["mulensevent"][0]["fitmurel"] = True
         system = System(config, user_params=user_params)
         system.prepare()
         model = system.build_model()
@@ -88,7 +88,7 @@ def test_off_is_the_physical_parameterization(physical):
     derived, no mu_rel raw coordinate."""
     system, model = physical
     vv = [v.name for v in model.value_vars]
-    assert "lens.mu_ra_rel_raw" not in vv
+    assert "mulensevent.mu_ra_rel_raw" not in vv
     for i in range(system.star.n_elements):
         assert system.star.pm_ra.element_is_sampled(i)
         assert system.star.pm_dec.element_is_sampled(i)
@@ -99,17 +99,22 @@ def test_swapped_roles_and_assembly(swapped):
     equal to pm_source + mu_rel in the assembled tensors; finite logp."""
     system, model = swapped
     vv = [v.name for v in model.value_vars]
-    assert "lens.mu_ra_rel_raw" in vv and "lens.mu_dec_rel_raw" in vv
+    assert (
+        "mulensevent.mu_ra_rel_raw" in vv
+        and "mulensevent.mu_dec_rel_raw" in vv
+    )
 
-    l_idx = int(system.lens.lens_bodies[0][0][1])
-    s_idx = int(system.lens.source_bodies[0][0][1])
+    l_idx = int(system.mulensevent.lens_bodies[0][1])
+    s_idx = int(system.mulensevent.source_bodies[0][1])
     for pm in (system.star.pm_ra, system.star.pm_dec):
         assert pm.element_is_derived(l_idx)
         assert pm.element_is_sampled(s_idx)
 
     point = model.initial_point()
     pm_ra = np.atleast_1d(_eval(model, system.star.pm_ra.value, point))
-    mu_ra = np.atleast_1d(_eval(model, system.lens.mu_ra_rel.value, point))
+    mu_ra = np.atleast_1d(
+        _eval(model, system.mulensevent.mu_ra_rel.value, point)
+    )
     assert np.isclose(pm_ra[l_idx], pm_ra[s_idx] + mu_ra[0], rtol=1e-12)
 
     lp = float(model.compile_logp()(point))

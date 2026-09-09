@@ -308,7 +308,7 @@ class Band(Component):
           ``_resolve_ld_stars``, which warns rather than raising: a second
           band with the same filter cannot fix that one, because the band is
           per light curve and not per planet).
-        * **mulensinstrument** -- the SOURCE star, ``lens.source_map[0]``,
+        * **mulensinstrument** -- the SOURCE star, ``source.star_map[0]``,
           and only when the source is resolved (``finite_source``); a point
           source takes no limb darkening at all.
         * **rvinstrument** ``rm:`` -- the primary star of the RM orbit.
@@ -343,19 +343,24 @@ class Band(Component):
             )
 
         # Microlensing: the magnification only takes u1 when the source is
-        # resolved.  `any` over the lens elements, not `[0]`, because that is
-        # the conservative direction -- MulensInstrument.build_likelihood
-        # currently gates on finite_source[0].
+        # resolved.  The flag lives on the mulensevent block (8.6.17 split).
         finite_source = any(
-            bool(c.get("finite_source", False)) for c in _cfg("lens")
+            bool(c.get("finite_source", False)) for c in _cfg("mulensevent")
         )
         if finite_source:
             # The source whose surface is resolved.  build_likelihood passes
-            # lens.source_map[0] down, so that is the star the u1 it consumes
-            # belongs to.
-            smap = list(
-                getattr(getattr(system, "lens", None), "source_map", [])
-            )
+            # the primary source down, so that is the star the u1 it
+            # consumes belongs to.  star_map when built (stage 2), the
+            # source component's bodies (set in __init__) otherwise -- a
+            # partial harness may call this before build_maps.
+            source_comp = getattr(system, "source", None)
+            smap = getattr(source_comp, "star_map", None)
+            if smap is None:
+                smap = [
+                    ndx
+                    for (_, ndx) in getattr(source_comp, "bodies", None) or []
+                ]
+            smap = list(smap)
             src = int(smap[0]) if len(smap) else None
             # Every band a light curve references is marked, not just the
             # lowest-indexed one build_likelihood actually passes down (it
@@ -607,7 +612,7 @@ class Band(Component):
 
         # Settle whose limb darkening each band carries before anything reads
         # star_indices (transit's SED deblending host) -- stage 3, because the
-        # consumers' own maps (lens.source_map, orbit.primary_bodies) are
+        # consumers' own maps (source.star_map, orbit.primary_bodies) are
         # built in stage 2.
         self._resolve_ld_stars(system)
 

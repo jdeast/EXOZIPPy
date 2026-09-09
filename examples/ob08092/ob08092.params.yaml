@@ -3,11 +3,11 @@
 
 # eventually, these will be initialized from the LC by running Jennifer Yee's MMEXOFAST
 # for now, we're taking the values from Poleski+ 2014, Table 1
-lens.Lens.t_0:
+source.Source.t_0:
     initval: 2455379.571
-lens.Lens.u_0:
+source.Source.u_0:
     initval: 0.523
-lens.Lens.t_E:
+mulensevent.t_E:
     initval: 17.94
 
 # these were iteratively determined from the curvatures of previous runs

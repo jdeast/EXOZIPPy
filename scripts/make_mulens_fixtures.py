@@ -1,4 +1,4 @@
-"""Record the pre-split acceptance fixtures for review 8.6.17 (stage 0).
+"""Record the acceptance fixtures for review 8.6.17.
 
 Run from the repo root:
 
@@ -36,6 +36,18 @@ The first version of these fixtures conflated the two -- it compared logp at
 each machine's OWN solved start -- and macOS differed by 3.2e-05 nats
 (7.1e-10 relative) where Linux differed by 7.3e-12 (machine epsilon).
 Widening the tolerance would have hidden precisely the interesting part.
+
+STAGE-3 STATE (8.6.17): every shipped example carries the post-split
+spellings, all fixtures replay the examples directly, and the converted
+config copies this script substituted at stages 1b/2 are gone.  The one
+deliberate exception is tests/fixtures/mulens/presplit/ob161003.json: the
+stage-0 recording of the only example whose MODEL changed under the split
+(per-source event-level vectors collapsed), kept -- labels translated,
+values untouched -- as the reference for the analytic reconciliation test
+in tests/test_mulens_acceptance.py.  This script neither writes nor checks
+that file.  Use --only to limit a run, e.g.
+
+    python scripts/make_mulens_fixtures.py --check --only ob08092 --only ob140939
 """
 
 import argparse
@@ -68,7 +80,7 @@ OUT = os.path.join(ROOT, "tests", "fixtures", "mulens")
 
 
 def microlensing_examples():
-    """Every shipped example whose config declares a `lens:` block.
+    """Every shipped example whose config declares a `mulensevent:` block.
 
     The params file is taken from the config's own `parameter_file:` key,
     NOT from the `<name>.params.yaml` naming convention.  That convention is
@@ -89,7 +101,7 @@ def microlensing_examples():
                 doc = yaml.safe_load(fh) or {}
         except Exception:
             continue
-        if not isinstance(doc, dict) or "lens" not in doc:
+        if not isinstance(doc, dict) or "mulensevent" not in doc:
             continue
         named = doc.get("parameter_file")
         par = (
@@ -103,6 +115,7 @@ def microlensing_examples():
                 f"{os.path.relpath(par, ROOT)}"
             )
             continue
+
         found.append((cfg, par))
     return found
 
@@ -147,12 +160,21 @@ def record(cfg_path, par_path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true")
+    ap.add_argument(
+        "--only",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=("limit to the named example(s); repeatable."),
+    )
     args = ap.parse_args()
 
     os.makedirs(OUT, exist_ok=True)
     failures = []
     for cfg_path, par_path in microlensing_examples():
         name = os.path.splitext(os.path.basename(cfg_path))[0]
+        if args.only and name not in args.only:
+            continue
         dest = os.path.join(OUT, name + ".json")
         try:
             data = record(cfg_path, par_path)

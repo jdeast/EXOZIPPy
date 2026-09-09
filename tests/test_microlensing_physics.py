@@ -39,13 +39,15 @@ def test_pspl_magnification_accuracy():
 
     config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}],
+        "mulensevent": [{}],
+        "lens": [{"body": "star.Lens", "name": "Lens"}],
+        "source": [{"body": "star.Source", "name": "Source"}],
     }
     user_params = {
-        "lens.Lens.t_0": {"initval": t0_val},
-        "lens.Lens.u_0": {"initval": u0_val},
-        "lens.Lens.pi_E_N": {"initval": 0.0, "sigma": 0.0},
-        "lens.Lens.pi_E_E": {"initval": 0.0, "sigma": 0.0},
+        "source.Source.t_0": {"initval": t0_val},
+        "source.Source.u_0": {"initval": u0_val},
+        "mulensevent.pi_E_N": {"initval": 0.0, "sigma": 0.0},
+        "mulensevent.pi_E_E": {"initval": 0.0, "sigma": 0.0},
         "star.Lens.distance": {"initval": 4000.0},
         "star.Source.distance": {"initval": 8000.0},
         "star.Lens.mass": {"initval": 0.5},
@@ -67,7 +69,7 @@ def test_pspl_magnification_accuracy():
     t_at_peak = np.array([t0_val])
 
     with model:
-        A_node = system.lens.get_magnification(
+        A_node = system.mulensevent.get_magnification(
             t_at_peak, obs_zero, system, index=0
         )
         f = pytensor.function(model.free_RVs, A_node, on_unused_input="ignore")
@@ -128,7 +130,9 @@ def test_microlensing_sympy_pytensor_equivalence():
     # 1. Define Topology
     system_config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}],
+        "mulensevent": [{}],
+        "lens": [{"body": "star.Lens", "name": "Lens"}],
+        "source": [{"body": "star.Source", "name": "Source"}],
     }
 
     user_params = {
@@ -146,14 +150,14 @@ def test_microlensing_sympy_pytensor_equivalence():
     cm.finalize_user_params()
 
     # Verify the solver completed the chain.  Derived values are injected
-    # under the canonical INDEX form (lens.0.t_E) -- the only spelling
+    # under the canonical INDEX form (mulensevent.0.t_E) -- the only spelling
     # ConfigManager.resolve reads for every element.  See the inject-back
     # comment in finalize_user_params and tests/test_nsnl.py.
-    assert "lens.0.t_E" in cm.user_params
+    assert "mulensevent.0.t_E" in cm.user_params
 
-    te_sympy = cm.user_params["lens.0.t_E"]["initval"]
-    thetaE_sympy = cm.user_params["lens.0.theta_E"]["initval"]
-    pirel_sympy = cm.user_params["lens.0.pi_rel"]["initval"]
+    te_sympy = cm.user_params["mulensevent.0.t_E"]["initval"]
+    thetaE_sympy = cm.user_params["mulensevent.0.theta_E"]["initval"]
+    pirel_sympy = cm.user_params["mulensevent.0.pi_rel"]["initval"]
 
     # 3. Feed the SAME raw inputs into the PyTensor graph
     # (Using .eval() to pull the numeric result out of the graph)
@@ -336,12 +340,14 @@ def test_microlensing_contradiction_no_override(caplog):
     # Given: distances that imply pi_rel ~ 0.125, but user also sets pi_rel = 0.999
     system_config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}],
+        "mulensevent": [{}],
+        "lens": [{"body": "star.Lens", "name": "Lens"}],
+        "source": [{"body": "star.Source", "name": "Source"}],
     }
     user_params = {
         "star.Lens.distance": 4000.0,
         "star.Source.distance": 8000.0,
-        "lens.Lens.pi_rel": 0.999,
+        "mulensevent.pi_rel": 0.999,
     }
 
     import logging

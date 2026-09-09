@@ -7,15 +7,15 @@
 #   seed 2: u0,+,+  281.5/265  (dchi2 = 8)
 #   seed 3: u0,+,-  290.2/265  (dchi2 = 17)
 # eventually, we'd like to get this from MMEXOFAST
-lens.Lens.t_0:
+source.Source.t_0:
     initval: [2456836.22, 2456836.20, 2456836.06, 2456835.95]
-lens.Lens.u_0:
+source.Source.u_0:
     initval: [0.922, -0.913, 0.897, -0.843]
-lens.Lens.t_E:
+mulensevent.t_E:
     initval: [22.87, 22.99, 22.91, 23.87]
-lens.Lens.pi_E_N:
+mulensevent.pi_E_N:
     initval: [-0.248, 0.220, -1.370, 1.325]
-lens.Lens.pi_E_E:
+mulensevent.pi_E_E:
     initval: [0.234, 0.238, -0.060, 0.024]
 
 # the solver needs this, but it shouldn't

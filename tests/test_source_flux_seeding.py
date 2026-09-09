@@ -2,7 +2,7 @@
 Tests for seeding the SOURCE star's start from its own measured flux.
 
 Without the seed, a microlensing-only source starts as a solar-mass
-placeholder (lens.py's logmass -0.5 hint) even though its apparent
+placeholder (mulensevent.py's logmass -0.5 hint) even though its apparent
 magnitude is MEASURED: bootstrapped f_source through the zeropoint prior's
 mu.  On DC2018 event 128 that placeholder start let the polish walk into a
 swapped source/lens configuration.
@@ -80,7 +80,7 @@ def test_shipped_config_seeds_a_late_type_dwarf():
     When the system is prepared,
     Then the source (m_I ~ 21.3 at the 8 kpc bulge seed -> M_I ~ 6.8) is
     seeded as a K/M dwarf: the teff/radius hints exist (only this seeding
-    writes them), logmass moved off lens.py's -0.5 placeholder, and the
+    writes them), logmass moved off mulensevent.py's -0.5 placeholder, and the
     resolved start carries the seed.
 
     The shipped params file's own Source teff/radius starts are dropped
@@ -91,7 +91,7 @@ def test_shipped_config_seeds_a_late_type_dwarf():
         drop_params=("star.Source.radius", "star.Source.teff")
     )
     cm = system.config_manager
-    src = int(system.lens.source_map[0])
+    src = int(system.mulensevent.source_map[0])
     for param in ("logmass", "teff", "radius", "teffsed", "radiussed"):
         assert f"star.{src}.{param}" in cm.hints, param
 
@@ -117,7 +117,7 @@ def test_user_start_outranks_the_seed():
     """
     system = _prepare_kmt()
     cm = system.config_manager
-    src = int(system.lens.source_map[0])
+    src = int(system.mulensevent.source_map[0])
     assert f"star.{src}.teffsed" in cm.hints  # seed computed...
     resolved = cm.user_params[f"star.{src}.teff"]
     assert np.isclose(float(resolved["initval"]), 5800.0)  # ...user won
@@ -139,7 +139,7 @@ def test_faint_miscalibration_guard(caplog):
             }
         )
     cm = system.config_manager
-    src = int(system.lens.source_map[0])
+    src = int(system.mulensevent.source_map[0])
     assert f"star.{src}.teff" not in cm.hints
     assert any("far fainter" in r.message for r in caplog.records)
 
@@ -160,6 +160,6 @@ def test_bright_giant_guard(caplog):
             }
         )
     cm = system.config_manager
-    src = int(system.lens.source_map[0])
+    src = int(system.mulensevent.source_map[0])
     assert f"star.{src}.teff" not in cm.hints
     assert any("BRIGHTER than the whole" in r.message for r in caplog.records)

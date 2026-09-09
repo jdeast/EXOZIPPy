@@ -54,10 +54,13 @@ def _stars(*names):
 
 
 def _finite_source_system(source_idx=1, band="I"):
+    # Post-split: finite_source is an event key, and the source body (whose
+    # surface the magnification resolves) is a `source:` entry of its own.
     return _StubSystem(
         star=_stars("Lens", "Source"),
-        lens=_StubComp(
-            [{"finite_source": True}], source_map=np.array([source_idx])
+        mulensevent=_StubComp([{"finite_source": True}]),
+        source=_StubComp(
+            [{"body": "star.Source"}], star_map=np.array([source_idx])
         ),
         mulensinstrument=_StubComp([{"name": "OGLE", "band": band}]),
     )

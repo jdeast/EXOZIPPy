@@ -94,7 +94,12 @@ def test_mmexofast_schema_exposes_json_and_options():
     """
     Given mmexofast_to_params's parser,
     When converted to a schema,
-    Then the positional 'json' and options '--lens-name'/'--out' appear.
+    Then the positional 'json' and options
+      '--source-name'/'--companion-name'/'--out' appear.
+
+    The single '--lens-name' of the pre-split converter became one option per
+    body list: t_0/u_0/rho are filed under `source.<source-name>` and the
+    companion geometry under `lens.<companion-name>`.
     """
     # Act
     names = {
@@ -103,7 +108,8 @@ def test_mmexofast_schema_exposes_json_and_options():
 
     # Assert
     assert "json" in names
-    assert "--lens-name" in names
+    assert "--source-name" in names
+    assert "--companion-name" in names
     assert "--out" in names
 
 
@@ -159,7 +165,9 @@ def test_all_utilities_gathers_expected_names():
     ):
         assert name in utils, name
     assert utils["mkticsed"].component_keys == ["sed"]
-    assert utils["mmexofast_to_params"].component_keys == ["lens"]
+    # The MMEXOFAST converter is declared by the EVENT component after the
+    # mulensevent/lens/source split (the seeding is event-scoped).
+    assert utils["mmexofast_to_params"].component_keys == ["mulensevent"]
 
 
 def test_utility_to_schema_round_trips_through_json():

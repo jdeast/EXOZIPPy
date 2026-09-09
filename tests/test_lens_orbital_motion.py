@@ -360,32 +360,34 @@ def _om_system(tmp_path, orbital_motion="linear", backend="vbm_direct"):
 
     config = {
         "star": [{"name": "L1"}, {"name": "L2"}, {"name": "Source"}],
-        "lens": [
+        "mulensevent": [
             {
-                "name": "EV",
-                "lenses": ["star.0", "star.1"],
-                "sources": ["star.2"],
                 "finite_source": True,
-                "orbital_motion": orbital_motion,
                 "backend": backend,
                 "t0_par": _T0_PAR,
                 "mmexofast": False,
             }
         ],
+        "lens": [
+            {"body": "star.L1"},
+            # Orbital motion is the COMPANION's geometry (design 1.4).
+            {"body": "star.L2", "orbital_motion": orbital_motion},
+        ],
+        "source": [{"body": "star.Source"}],
         "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],
     }
     params = {
-        "lens.Source.t_0": {"initval": _MAP["t_0"]},
-        "lens.Source.u_0": {"initval": _MAP["u_0"]},
-        "lens.Source.t_E": {"initval": _MAP["t_E"]},
-        "lens.Source.rho": {"initval": _MAP["rho"]},
-        "lens.EV.s": {"initval": _MAP["s"]},
-        "lens.EV.alpha": {"initval": _MAP["alpha"]},
-        "lens.EV.q": {"initval": _MAP["q"]},
-        "lens.Source.pi_E_N": {"initval": _MAP["pi_E_N"]},
-        "lens.Source.pi_E_E": {"initval": _MAP["pi_E_E"]},
-        "lens.EV.ds_dt": {"initval": _MAP["ds_dt"]},
-        "lens.EV.dalpha_dt": {"initval": _MAP["dalpha_dt"]},
+        "source.Source.t_0": {"initval": _MAP["t_0"]},
+        "source.Source.u_0": {"initval": _MAP["u_0"]},
+        "mulensevent.t_E": {"initval": _MAP["t_E"]},
+        "source.Source.rho": {"initval": _MAP["rho"]},
+        "lens.L2.s": {"initval": _MAP["s"]},
+        "lens.L2.alpha": {"initval": _MAP["alpha"]},
+        "lens.L2.q": {"initval": _MAP["q"]},
+        "mulensevent.pi_E_N": {"initval": _MAP["pi_E_N"]},
+        "mulensevent.pi_E_E": {"initval": _MAP["pi_E_E"]},
+        "lens.L2.ds_dt": {"initval": _MAP["ds_dt"]},
+        "lens.L2.dalpha_dt": {"initval": _MAP["dalpha_dt"]},
         "star.L1.mass": {"initval": 0.84},
         "star.L1.distance": {"initval": 1100.0},
         "star.Source.distance": {"initval": 8000.0},
@@ -418,8 +420,9 @@ def test_linear_mode_declares_rates_and_beta(linear_om_system):
     lens = system.lens
     for name in ("ds_dt", "dalpha_dt", "beta"):
         assert name in lens.manifest, f"{name} missing from manifest"
-    # user unit deg/yr -> internal rad/yr
-    got = float(np.atleast_1d(lens.dalpha_dt.initval)[0])
+    # user unit deg/yr -> internal rad/yr; element 1 is the companion
+    # (element 0 is the masked primary, pinned at 0).
+    got = float(np.atleast_1d(lens.dalpha_dt.initval)[1])
     np.testing.assert_allclose(got, np.radians(_MAP["dalpha_dt"]), rtol=1e-12)
 
 
@@ -445,8 +448,8 @@ def test_beta_is_the_a19_ratio_and_logp_is_finite(linear_om_system):
             model.free_RVs,
             [
                 system.lens.beta.value,
-                system.lens.pi_rel.value,
-                system.lens.theta_E.value,
+                system.mulensevent.pi_rel.value,
+                system.mulensevent.theta_E.value,
                 system.lens.s.value,
                 system.lens.ds_dt.value,
                 system.lens.dalpha_dt.value,
@@ -462,10 +465,12 @@ def test_beta_is_the_a19_ratio_and_logp_is_finite(linear_om_system):
 
     pi_rel = float(np.atleast_1d(pi_rel)[0])
     theta_E = float(np.atleast_1d(theta_E)[0])
-    s0 = float(np.atleast_1d(s0)[0])
-    ds_dt = float(np.atleast_1d(ds_dt)[0])
-    dalpha_dt = float(np.atleast_1d(dalpha_dt)[0])
-    d_s = float(np.atleast_1d(dist)[system.lens.source_map[0]])
+    # Companion geometry lives on element 1; element 0 is the masked
+    # primary (s = 1, rates = 0, beta = 0).
+    s0 = float(np.atleast_1d(s0)[1])
+    ds_dt = float(np.atleast_1d(ds_dt)[1])
+    dalpha_dt = float(np.atleast_1d(dalpha_dt)[1])
+    d_s = float(np.atleast_1d(dist)[system.mulensevent.source_map[0]])
     pi_E = pi_rel / theta_E
     gamma_sq = (ds_dt / s0) ** 2 + dalpha_dt**2
     expected = (
@@ -476,7 +481,7 @@ def test_beta_is_the_a19_ratio_and_logp_is_finite(linear_om_system):
         / (8 * np.pi**2 * theta_E * (pi_E + (1000.0 / d_s) / theta_E) ** 3)
     )
     np.testing.assert_allclose(
-        float(np.atleast_1d(beta_v)[0]), expected, rtol=1e-6
+        float(np.atleast_1d(beta_v)[1]), expected, rtol=1e-6
     )
 
 
@@ -502,17 +507,18 @@ def test_orbital_motion_requires_a_companion():
     from exozippy.components.mulensing.lens import Lens
     from exozippy.config import ConfigManager
 
-    with pytest.raises(ValueError, match="companion"):
+    cm = ConfigManager({})
+    cm.system_config = {
+        "star": [{"name": "L1"}, {"name": "Source"}],
+        "mulensevent": [{}],
+        "source": [{"body": "star.Source"}],
+    }
+    # Post-split the mistake spells itself as orbital_motion on the ONLY
+    # (hence primary) lens entry, and the refusal names the primary.
+    with pytest.raises(ValueError, match="primary|companion"):
         Lens(
-            [
-                {
-                    "name": "EV",
-                    "lenses": ["star.0"],
-                    "sources": ["star.1"],
-                    "orbital_motion": "linear",
-                }
-            ],
-            ConfigManager({}),
+            [{"body": "star.L1", "orbital_motion": "linear"}],
+            cm,
         )
 
 

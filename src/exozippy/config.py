@@ -563,9 +563,10 @@ def _declared_instance_names(system_config):
     This is the universe of legal instance names in a 3-part parameter key.
     It is deliberately NOT per component: a component's per-element names are
     a manifest option that may borrow another component's instance names --
-    the lens's per-source vectors are addressed by the SOURCE STAR's name
-    (``lens.SourceA.t_0``), for instance.  Used by
-    ``standardize_param_names`` to reject typo'd instance names.
+    the source component's instances are named after their body STARS
+    (``source.SourceA.t_0`` with the star declared as ``star: [name:
+    SourceA]``), for instance.  Used by ``standardize_param_names`` to
+    reject typo'd instance names.
     """
     names = set()
     for entries in (system_config or {}).values():
@@ -830,6 +831,15 @@ class ConfigManager:
         self.base_defaults = {}
         self.all_relations = []
         self.master_symbol_map = {}
+        # The subset of master_symbol_map that came from the components' own
+        # get_symbol_map discovery -- i.e. paths some RELATION genuinely
+        # knows.  master_symbol_map itself is NOT that set: finalize's
+        # fallback registers every unmapped user key as a leaf symbol there,
+        # so testing membership in the full map to ask "does the engine
+        # consume this key" is vacuously true for any typo.  diagnostics'
+        # check_unused_yaml reads this instead (the DC2018_128 rho-seed
+        # false positive).
+        self.relation_symbol_paths = set()
 
         # Storage for hints passed by components during Registration Sweep
         self.hints = {}
@@ -981,6 +991,7 @@ class ConfigManager:
                             self.master_symbol_map[full_path] = sp.Symbol(
                                 full_path
                             )
+                            self.relation_symbol_paths.add(full_path)
 
                         # Extract the exact SymPy objects (with all their assumptions) from the equations
                         module_symbols = set()
@@ -1350,13 +1361,20 @@ class ConfigManager:
         parameter's element count is a manifest option (``shape``) and need not
         equal the config-list length, in EITHER direction:
 
-          * LONGER than the config list -- ``lens`` has one config entry while
-            its per-source vectors (``t_0``, ``u_0``, ``rho``, ...) carry one
-            element per SOURCE.  ``lens.t_0: 2450000`` expanded to
-            ``lens.0.t_0`` only, and element 1 silently fell back to the
+          * LONGER than the config list -- HISTORICAL, and the reason this
+            check was written: the pre-split ``lens`` had ONE config entry
+            while its per-source vectors (``t_0``, ``u_0``, ``rho``, ...)
+            carried one element per SOURCE, so ``lens.t_0: 2450000`` expanded
+            to ``lens.0.t_0`` only and element 1 silently fell back to the
             defaults.yaml backstop.  Not a start-value-only defect: a
             broadcast ``sigma:``/``mu:``/``lower:`` applied the PRIOR to
             element 0 alone, i.e. a silent posterior change on a 2S2L fit.
+            The 8.6.17 split removed that mismatch at the root -- ``source``
+            now has one entry per source body and ``lens`` one per lens body,
+            so those vectors' lengths equal their own config lists.  The
+            branch is kept because nothing STOPS a component declaring a
+            ``shape`` longer than its config list; it simply no longer has a
+            shipped instance.
           * SHORTER than the config list -- ``detrend_coeffs`` has shape
             (total detrend columns,), which for two files with one column
             between them is 1 while the config list is 2.  Pass 2 then writes
@@ -1364,12 +1382,13 @@ class ConfigManager:
 
         So raise, rather than teach Pass 2 to fill: the count is unknowable
         where the expansion happens and known here, and there is no filling
-        rule that is right for both surfaces anyway (element j of a lens
-        vector is a SOURCE, element j of ``detrend_coeffs`` is a COLUMN --
-        neither is "instance j", which is the only thing a broadcast key can
-        possibly mean).  Costs users nothing: no shipped example writes a
-        2-part broadcast on any such parameter (``examples/ob161003`` spells
-        every per-source entry by the source star's name).
+        rule that is right for both surfaces anyway (element j of a
+        pre-split lens vector was a SOURCE, element j of ``detrend_coeffs``
+        is a COLUMN -- neither is "instance j", which is the only thing a
+        broadcast key can possibly mean).  Costs users nothing: no shipped
+        example writes a 2-part broadcast on any such parameter
+        (``examples/ob161003`` spells every per-source entry by the source
+        star's name).
 
         Only checked when the caller passed an explicit vector ``shape``.  The
         single-element modes -- ``shape=()`` with or without ``element=`` --
@@ -1539,19 +1558,17 @@ class ConfigManager:
         # already folded such a key into the index form by the time we get
         # here.  What only this site can see is the case it cannot: per-
         # element `names` handed in by a component's manifest that are NOT
-        # its own config instances' names.  `lens` does exactly that
-        # (examples/ob161003), labelling its per-source vectors with the
-        # SOURCE STARS' names, so `lens.SourceA.t_0` survives standardization
-        # verbatim.
-        #
-        # It does NOT, however, survive to here: `Lens._rewrite_source_param_keys`
-        # runs in `Lens.__init__`, before any stage-1 code, and renames every
-        # such key to its source SLOT.  So by the time `resolve()` is called
-        # the name form is already gone, and this check is reached only via
-        # `_raw_user_param_keys` below -- which is the point of reading the
-        # raw keys rather than `user_params`, and why this site still works.
-        # The older claim here, that the two spellings "coexist as two live
-        # user keys", described a window that closes before stage 1.
+        # its own config instances' names.  HISTORICAL: the pre-split lens
+        # did exactly that, labelling its per-source vectors with the
+        # SOURCE STARS' names (`lens.SourceA.t_0`), rewritten to slot form
+        # by a lens-private `_rewrite_source_param_keys` pass in its
+        # __init__.  The 8.6.17 split removed the borrowed-name machinery
+        # at the root -- source/lens instances are now NAMED after their
+        # bodies (normalize_config_block, the Mann/Torres idiom), so the
+        # name form folds in standardize_param_names like every other
+        # component's.  This check is reached via `_raw_user_param_keys`
+        # below -- the point of reading the raw keys rather than
+        # `user_params`.
         #
         # Only keys the user WROTE count.  finalize_user_params injects the
         # engine's solved start values back under the index form, and on
@@ -2231,11 +2248,13 @@ class ConfigManager:
             # config, not just this component's own list, and that width is
             # load-bearing -- a component's per-element names need not be its
             # config entries' names:
-            #   * `lens.SourceA.t_0` (examples/ob161003) addresses element j
-            #     of the lens's per-source vectors by the SOURCE STAR's name;
-            #     the lens block itself has one entry, named "Lens".  The
-            #     per-parameter `names` list is a manifest option and is not
-            #     known until stage 3, long after this runs.
+            #   * `source.SourceA.t_0` addresses a source element named
+            #     after its body STAR (SourceA is a star.name, echoed onto
+            #     the source instance by normalize_config_block); before the
+            #     8.6.17 split the same width covered the pre-split lens's
+            #     borrowed source-star names.  The per-parameter `names`
+            #     list is a manifest option and is not known until stage 3,
+            #     long after this runs.
             #   * `mann.B.ks_offset` names a mann block that has no `name:`
             #     yet: this ConfigManager is built BEFORE the component loop
             #     in System.__init__, and mann/torres derive their name from
@@ -3232,9 +3251,10 @@ class ConfigManager:
         # hint -- a per-seed fit of the actual light curve is strictly more
         # informative than the generic guess a component pushes for every
         # seed alike.  (Today no real path is in both channels: the seeds
-        # carry lens.0.{t_0,u_0,t_E,rho,log_s,alpha,q}, and the only
-        # component hint that touches one of those, lens.0.alpha, is rank
-        # 20.  The rule is stated so a future overlap has a defined answer.)
+        # carry source.0.{t_0,u_0,rho}, mulensevent.0.t_E and
+        # lens.1.{log_s,alpha,q}, and the only component hint that touches
+        # one of those, the lens.<j+1>.alpha display hint, is rank 20.  The
+        # rule is stated so a future overlap has a defined answer.)
         # Anything above PRECEDENCE_DERIVED_DATA -- every user entry, in particular
         # a scalar initval, which lives in user_provided_params -- wins.
         for path_str, val in (seed_hints or {}).items():
@@ -3313,6 +3333,9 @@ class ConfigManager:
         while iteration < max_iter:
             iteration += 1
             resolved_snapshot = dict(resolved)
+            # Ranks are part of the state this loop converges, not just a
+            # by-product of it: see the convergence check below.
+            provenance_snapshot = dict(provenance)
 
             self._apply_directed_links(
                 directed_links,
@@ -3353,6 +3376,16 @@ class ConfigManager:
                 if abs(v - old) / ref >= tolerance:
                     net_changed = True
                     break
+            if not net_changed and provenance != provenance_snapshot:
+                # A pass that moved no VALUE can still have improved a rank:
+                # a satisfied equation promotes its symbols to what it proves
+                # they are reachable from (see _relax_equation), and those
+                # promotions have to be allowed to propagate to whatever
+                # consumed them.  Stopping on values alone left a derived
+                # value holding the rank it happened to get on the pass that
+                # first set it -- order-dependent, and wrong whenever an
+                # input was promoted later (review 8.6.22).
+                net_changed = True
             if not net_changed:
                 break
 
@@ -3607,6 +3640,31 @@ class ConfigManager:
                 return False
 
             if error <= tolerance:
+                # The VALUES are right, but a rank may still be understated.
+                # A rank is set when an equation fires, from the input ranks
+                # AT THAT MOMENT; a later iteration can promote an input
+                # without ever revisiting what consumed it, and this early
+                # return is where that revisit was being skipped.  So prove
+                # what the equation now proves: every symbol in a satisfied
+                # equation is reachable from the others, so its rank is at
+                # least theirs.  Condition B's floor is 0 and the cap is
+                # PRECEDENCE_DERIVED_USER, exactly as below -- same rule,
+                # not a second copy of it.
+                #
+                # RAISE-ONLY, so no value moves and nothing can outrank a
+                # real user entry.  The loop's convergence test watches
+                # provenance as well as values, so these promotions
+                # propagate over further passes until nothing improves.
+                for sym in symbols_in_eq:
+                    others = [s for s in symbols_in_eq if s != sym]
+                    if not others:
+                        continue
+                    reachable = min(
+                        PRECEDENCE_DERIVED_USER,
+                        min(get_rank(s) for s in others),
+                    )
+                    if reachable > get_rank(sym):
+                        provenance[sym] = reachable
                 return False  # Equation is perfectly satisfied. Stop here.
 
             # Equation is broken. Find the weakest armor.

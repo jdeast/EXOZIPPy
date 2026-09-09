@@ -33,9 +33,9 @@ star.dec:
 # --------------------------------------------------------------------
 # Trajectory -- Table B.1 Std 2L1S, verbatim (C18 identity)
 # --------------------------------------------------------------------
-lens.Source.t_0:
+source.Source.t_0:
     initval: 2457899.3            # +2.7/-3.4
-lens.Source.u_0:
+source.Source.u_0:
     initval: -0.144               # +/- 0.023; the printed u_0- branch.
                                   # (Its A16 mirror partner flips
                                   # (u_0, alpha, pi_E_perp) and the source
@@ -59,16 +59,16 @@ lens.Source.u_0:
 # printed ones "EXACTLY" and they did not: t_E came out 176.011 and
 # xi_a 0.19698.  If you change a seed here, re-measure and re-state the
 # numbers rather than leaving the claim standing.)
-lens.Source.rho:
+source.Source.rho:
     initval: 0.0109               # +0.0140/-0.0070
 
 # Binary-lens geometry (static -- the LENS binary is not the moving one
 # in this event; the SOURCE is)
-lens.OB170114.s:
+lens.b.s:
     initval: 0.337                # +/- 0.016: close topology
-lens.OB170114.alpha:
+lens.b.alpha:
     initval: 330.4                # +/- 2.6 deg
-lens.OB170114.q:
+lens.b.q:
     initval: 0.0219               # +0.0054/-0.0039 -> M_b ~ 11.5 M_J; the
                                   # engine propagates q * m_host to seed
                                   # planet.b's mass
@@ -111,8 +111,8 @@ orbit.S.bigomega:
 # say in it (D_L only splits pi_rel between theta_E and |pi_E| once M_tot
 # is set).  M_tot is the TOTAL lens mass, M_h (1 + q), because a binary
 # lens references theta_E/t_E/rho/pi_E to the total mass
-# (Lens.register_parameters wires theta_E to `mlens_total`, matching the
-# published parameterization).  That is also why the older note here --
+# (MulensEvent.register_parameters wires theta_E to `mlens_total`,
+# matching the published parameterization).  That is also why the older note here --
 # "the D_L at which |pi_E| = sqrt(pi_rel/(kappa M)) equals the printed
 # 0.2098" -- was wrong twice over: no D_L can do that, and the M in it is
 # not M_h.

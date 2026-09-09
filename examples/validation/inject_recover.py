@@ -56,17 +56,18 @@ def make_mulens(rng, snr, n_epochs, workdir):
 
     config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [
+        # Event-level keys on the event; one `lens`/`source` entry per
+        # body.  1L1S, so one of each.
+        "mulensevent": [
             {
-                "name": "Lens",
                 "finite_source": False,
-                "lens_ndx": 0,
-                "source_ndx": 1,
                 "t0_par": float(round(t0, 1)),
                 "use_op": False,
                 "mmexofast": False,
             }
         ],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
         "galacticmodel": [{"name": "synth", "anchor_idx": 1}],
         "band": [{"name": "Cousins_I", "filter": "Cousins_I"}],
         "mulensinstrument": [
@@ -84,14 +85,14 @@ def make_mulens(rng, snr, n_epochs, workdir):
         "star.Lens.dec": {"initval": -34.73, "sigma": 0},
         "star.Source.ra": {"initval": 266.87, "sigma": 0},
         "star.Source.dec": {"initval": -34.73, "sigma": 0},
-        "lens.Lens.t_0": {"initval": float(t0 + rng.normal(0, 0.1))},
-        "lens.Lens.u_0": {"initval": float(u0 * (1 + rng.normal(0, 0.1)))},
-        "lens.Lens.t_E": {"initval": float(te * (1 + rng.normal(0, 0.1)))},
+        "source.Source.t_0": {"initval": float(t0 + rng.normal(0, 0.1))},
+        "source.Source.u_0": {"initval": float(u0 * (1 + rng.normal(0, 0.1)))},
+        "mulensevent.t_E": {"initval": float(te * (1 + rng.normal(0, 0.1)))},
     }
     truth = {
-        "lens.t_0": t0,
-        "lens.u_0": u0,
-        "lens.t_E": te,
+        "source.t_0": t0,
+        "source.u_0": u0,
+        "mulensevent.t_E": te,
         "mulensinstrument.f_source": fs / 10 ** (-0.4 * 22.0) * 1e-9,
     }
     # f_source in the file's flux system: F = 10**(-0.4 m); truth fs is in
@@ -109,9 +110,9 @@ def make_mulens(rng, snr, n_epochs, workdir):
         "target_accept": 0.95,
     }
     checks = [
-        "lens.t_0",
-        "lens.u_0",
-        "lens.t_E",
+        "source.t_0",
+        "source.u_0",
+        "mulensevent.t_E",
         "mulensinstrument.f_source",
         "mulensinstrument.f_blend",
     ]
@@ -455,7 +456,7 @@ def main():
         # signed parameters: fold the reflection PER DRAW (u_0 -> -u_0 is
         # a mode; folding the median of a sign-mixing posterior would
         # average the modes instead)
-        if name == "lens.u_0":
+        if name == "source.u_0":
             v, tval = np.abs(v), abs(tval)
         med = float(np.median(v))
         lo, hi = np.percentile(v, [15.865, 84.135])
@@ -464,7 +465,7 @@ def main():
         # estimate to truth in units of half the 68% interval.  Where the
         # marginal is SKEWED that statistic is biased even when the
         # posterior is perfectly calibrated -- measured on this very
-        # harness for lens.t_E, whose pull mean runs -1.24 +/- 0.40 at
+        # harness for mulensevent.t_E, whose pull mean runs -1.24 +/- 0.40 at
         # snr=30, -0.58 at 100 and +0.26 at 300, with a pull distribution
         # whose negative tail reaches -4.8 while its positive tail stops
         # at +1.1.
@@ -491,7 +492,7 @@ def main():
         else:
             # DERIVED check: there is no posterior variable to hand arviz, so
             # this branch used to record no diagnostic at all -- and the one
-            # check that turned out to have a problem (lens.t_E) was derived,
+            # check that turned out to have a problem (mulensevent.t_E) was derived,
             # so it silently escaped every convergence filter.  Rebuild a
             # (chain, draw) view of the evaluated quantity and diagnose it
             # like any other.  draws_of() strides the flattened draws, so the

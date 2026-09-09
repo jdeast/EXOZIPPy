@@ -11,9 +11,10 @@
 # Einstein radii of the total mass.  So NOTHING below needs the eight-way
 # (+/-u_0) x (alpha, -alpha, 180 +/- alpha) scan examples/ob161003 needed.
 #
-# Addressing: per-source trajectory parameters take the SOURCE star's
-# instance name (lens.Source.<param>); parameters shared by the whole event
-# take the LENS BLOCK's name (lens.OB09020.<param>).
+# Addressing: per-source trajectory parameters live on the source
+# component (source.Source.<param>); parameters shared by the whole event
+# live on the event (mulensevent.<param>); the binary geometry lives on
+# the companion's lens entry (lens.L2.<param>).
 
 # --------------------------------------------------------------------
 # Sky position (OGLE EWS: 18:04:20.99 -29:31:08.6).  Un-indexed, so it
@@ -93,18 +94,18 @@ star.dec:
 # I_b = 15.68, i.e. 0.334.  Matching the blending to 0.6% from the light
 # curve alone is what confirms the parameter transfer.
 
-lens.Source.t_0:
+source.Source.t_0:
     initval: 2454917.252      # HJD' 4917.252 +0.016/-0.009
 
-lens.Source.u_0:
+source.Source.u_0:
     initval: 0.0613           # POSITIVE, as printed (IOP Table 1's derived
                               # block, and its note quoted above).
 
-lens.Source.t_E:
+mulensevent.t_E:
     initval: 76.9             # d (IOP Table 1 derived), referenced to the
                               # TOTAL lens mass
 
-lens.Source.rho:
+source.Source.rho:
     initval: 0.0015078        # = t_*/t_E = 0.11595/76.9
 
 # s and alpha are NOT seeded: with orbital_motion: keplerian they are
@@ -120,7 +121,7 @@ lens.Source.rho:
 # the gamma magnitudes differ at the 2-sigma level because Skowron's is a
 # microlensing-only fit at a different distance.
 
-lens.OB09020.q:
+lens.L2.q:
     initval: 0.2748           # = Yee+2016 joint M2/M1 = 0.244/0.888 (Table 1
                               # with priors prints 0.273).  The engine
                               # propagates this through
@@ -144,9 +145,9 @@ lens.OB09020.q:
 # pi_E_N):  pi_E_N = -sqrt(0.363^2 - 0.149^2) = -0.331.  (The retracted
 # earlier file computed this same construction but aimed it at Skowron's
 # microlensing-only column, where it does not belong -- 3.6.4(f).)
-lens.Source.pi_E_N:
+mulensevent.pi_E_N:
     initval: -0.331
-lens.Source.pi_E_E:
+mulensevent.pi_E_E:
     initval: 0.149
 
 # --------------------------------------------------------------------
@@ -160,7 +161,7 @@ lens.Source.pi_E_E:
 # Yee+2016 (joint with the RVs) revised these to M_tot = 1.132 +/- 0.097
 # Msun (0.888 + 0.244) at D_L = 0.747 +/- 0.020 kpc.
 #
-# Only the PRIMARY mass is seeded: star.L2.mass follows from lens.q above,
+# Only the PRIMARY mass is seeded: star.L2.mass follows from lens.L2.q above,
 # and seeding both would give the engine two ways to say the same thing.
 # Starting at the microlensing-only value is deliberate -- the point of the
 # example is to watch the RVs move it.

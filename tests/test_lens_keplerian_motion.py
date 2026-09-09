@@ -61,27 +61,28 @@ def _kep_system(tmp_path, cosi=0.5):
                 "companion": ["star.1"],
             }
         ],
-        "lens": [
+        "mulensevent": [
             {
-                "name": "EV",
-                "lenses": ["star.0", "star.1"],
-                "sources": ["star.2"],
                 "finite_source": True,
-                "orbital_motion": "keplerian",
-                "orbit": "L",
                 "t0_par": _T0_PAR,
                 "mmexofast": False,
             }
         ],
+        "lens": [
+            {"body": "star.L1"},
+            # Orbital motion is the COMPANION's geometry (design 1.4).
+            {"body": "star.L2", "orbital_motion": "keplerian", "orbit": "L"},
+        ],
+        "source": [{"body": "star.Source"}],
         "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],
     }
     params = {
-        "lens.Source.t_0": {"initval": _T0_PAR},
-        "lens.Source.u_0": {"initval": 0.08},
-        "lens.Source.t_E": {"initval": 60.0},
-        "lens.Source.rho": {"initval": 0.002},
-        "lens.Source.pi_E_N": {"initval": -0.05},
-        "lens.Source.pi_E_E": {"initval": 0.12},
+        "source.Source.t_0": {"initval": _T0_PAR},
+        "source.Source.u_0": {"initval": 0.08},
+        "mulensevent.t_E": {"initval": 60.0},
+        "source.Source.rho": {"initval": 0.002},
+        "mulensevent.pi_E_N": {"initval": -0.05},
+        "mulensevent.pi_E_E": {"initval": 0.12},
         "orbit.L.period": {"initval": 300.0},
         "orbit.L.tc": {"initval": _T0_PAR - 40.0},
         "orbit.L.secosw": {"initval": 0.3},
@@ -125,7 +126,9 @@ def _eval_at_start(system, model, nodes):
 def _series_and_pa(system, model, times):
     import pytensor.tensor as pt
 
-    s_t, alpha_t_deg = system.lens._companion_geometry_series(times, system)
+    s_t, alpha_t_deg = system.mulensevent._companion_geometry_series(
+        times, system
+    )
     omap = np.array([system.lens.kep_orbit_idx])
     dE, dN = system.orbit.get_sky_position(
         pt.as_tensor_variable(times),
@@ -135,7 +138,8 @@ def _series_and_pa(system, model, times):
     )
     pa = pt.arctan2(dE[:, 0], dN[:, 0])
     phi_pi = pt.arctan2(
-        system.lens.pi_E_E.value[0], system.lens.pi_E_N.value[0]
+        system.mulensevent.pi_E_E.value[0],
+        system.mulensevent.pi_E_N.value[0],
     )
     out = _eval_at_start(system, model, [s_t, alpha_t_deg, pa, phi_pi])
     return [np.atleast_1d(np.asarray(x, dtype=float)) for x in out]
@@ -218,7 +222,14 @@ def test_no_new_free_parameters_and_reported_geometry(kep_system):
     for name in ("log_s", "xalpha", "yalpha", "ds_dt", "dalpha_dt", "beta"):
         assert name not in lens.manifest, f"{name} should not exist"
     for name in ("s", "alpha"):
-        assert lens.manifest[name]["expr_key"] == "from_orbit"
+        # Post-split the geometry is per-BODY with a masked primary, so the
+        # from_orbit expression carries an element selector: active exactly
+        # on the companion (element 1).
+        ek = lens.manifest[name]["expr_key"]
+        assert "from_orbit" in ek, ek
+        np.testing.assert_array_equal(
+            np.asarray(ek["from_orbit"]), [False, True]
+        )
     free_names = [v.name for v in model.free_RVs]
     assert "lens.log_s_raw" not in free_names
     assert "lens.xalpha_raw" not in free_names
@@ -229,17 +240,21 @@ def test_no_new_free_parameters_and_reported_geometry(kep_system):
         "the lens rotation sense identifies the node"
     )
 
-    times = np.array([float(lens.t0_par[0])])
+    times = np.array([float(system.mulensevent.t0_par[0])])
     s_t, alpha_deg, _, _ = _series_and_pa(system, model, times)
     s0, alpha0 = _eval_at_start(
         system, model, [lens.s.value, lens.alpha.value]
     )
-    np.testing.assert_allclose(float(np.atleast_1d(s0)[0]), s_t[0], rtol=1e-10)
+    # Element 1 is the companion; element 0 is the masked primary, pinned
+    # at its bookkeeping values (s = 1, alpha = 0) that nothing reads.
+    np.testing.assert_allclose(float(np.atleast_1d(s0)[1]), s_t[0], rtol=1e-10)
     np.testing.assert_allclose(
-        _wrap_deg(np.degrees(float(np.atleast_1d(alpha0)[0])) - alpha_deg[0]),
+        _wrap_deg(np.degrees(float(np.atleast_1d(alpha0)[1])) - alpha_deg[0]),
         0.0,
         atol=1e-8,
     )
+    np.testing.assert_allclose(float(np.atleast_1d(s0)[0]), 1.0)
+    np.testing.assert_allclose(float(np.atleast_1d(alpha0)[0]), 0.0)
 
     starts, _ = system.get_raw_starts(model)
     logp = float(model.compile_logp(jacobian=False)(starts[0]))
@@ -248,22 +263,106 @@ def test_no_new_free_parameters_and_reported_geometry(kep_system):
 
 def test_keplerian_config_validation():
     """
-    Given: keplerian without an orbit reference, or an unknown name,
-    Then: construction raises naming the problem.
+    Given: keplerian without an orbit reference, an unknown orbit name, or
+      the key on the primary's entry,
+    Then: construction raises naming the problem (the keys live on the
+      COMPANION's lens entry post-split, design 1.4).
     """
     from exozippy.components.mulensing.lens import Lens
     from exozippy.config import ConfigManager
 
-    base = {
-        "name": "EV",
-        "lenses": ["star.0", "star.1"],
-        "sources": ["star.2"],
-        "orbital_motion": "keplerian",
-    }
-    with pytest.raises(ValueError, match="orbit"):
-        Lens([dict(base)], ConfigManager({}))
+    def _cm(orbits=None):
+        cm = ConfigManager({})
+        cm.system_config = {
+            "star": [{"name": "L1"}, {"name": "L2"}, {"name": "Source"}],
+            "mulensevent": [{}],
+            "source": [{"body": "star.Source"}],
+        }
+        if orbits:
+            cm.system_config["orbit"] = orbits
+        return cm
 
-    cm = ConfigManager({})
-    cm.system_config = {"orbit": [{"name": "L"}]}
+    with pytest.raises(ValueError, match="orbit"):
+        Lens(
+            [
+                {"body": "star.L1"},
+                {"body": "star.L2", "orbital_motion": "keplerian"},
+            ],
+            _cm(),
+        )
+
     with pytest.raises(ValueError, match="unknown orbit"):
-        Lens([dict(base, orbit="nope")], cm)
+        Lens(
+            [
+                {"body": "star.L1"},
+                {
+                    "body": "star.L2",
+                    "orbital_motion": "keplerian",
+                    "orbit": "nope",
+                },
+            ],
+            _cm(orbits=[{"name": "L"}]),
+        )
+
+    with pytest.raises(ValueError, match="primary"):
+        Lens(
+            [
+                {
+                    "body": "star.L1",
+                    "orbital_motion": "keplerian",
+                    "orbit": "L",
+                },
+                {"body": "star.L2"},
+            ],
+            _cm(orbits=[{"name": "L"}]),
+        )
+
+
+def test_the_magnification_consumes_the_moving_geometry(kep_system):
+    """
+    Given: the keplerian-mode system,
+    When: the production magnification is re-evaluated with ONLY the
+      orbit's period moved (which changes s(t)/alpha(t) away from t0_par
+      while leaving the t0_par snapshot and every trajectory parameter
+      untouched),
+    Then: the curve responds -- the likelihood genuinely consumes the
+      s(t)/alpha(t) SERIES, not just the reported t0_par snapshot.
+
+    This closes the stage-2 gap (8.6.17): s(t0_par)/alpha(t0_par) were
+    verified bitwise at START values only, never through a likelihood.
+    (On the shipped example the same fact is pinned END TO END by
+    tests/test_mulens_acceptance.py's ob09020 replay: its recorded
+    RV:mulensinstrument.model term -- the data likelihood under the moving
+    geometry -- reproduces the pre-split recording at zero tolerance.)
+    """
+    system, model = kep_system
+    event = system.mulensevent
+    inst = system.mulensinstrument
+    times = np.asarray(inst.time, dtype=float)
+
+    A_moving = event.get_magnification_op(times, inst.observer_pos, system)
+    f = pytensor.function(model.free_RVs, [A_moving], on_unused_input="ignore")
+    ip = model.initial_point()
+    zeros = {
+        v.name: np.zeros_like(ip[v.name], dtype=float) for v in model.free_RVs
+    }
+    A_base = np.atleast_1d(
+        np.asarray(f(*[zeros[v.name] for v in model.free_RVs])[0])
+    )
+    assert np.all(np.isfinite(A_base))
+
+    period_raws = [n for n in zeros if "period" in n or "logP" in n]
+    assert period_raws, sorted(zeros)
+    bumped = dict(zeros)
+    bumped[period_raws[0]] = zeros[period_raws[0]] + 0.3
+    A_bump = np.atleast_1d(
+        np.asarray(f(*[bumped[v.name] for v in model.free_RVs])[0])
+    )
+    # A different period changes s(t)/alpha(t) AWAY from t0_par while the
+    # t0_par snapshot (and t_0/u_0/t_E/rho) is unchanged; if the
+    # magnification only read the snapshot, these two curves would be
+    # equal.
+    assert np.max(np.abs(A_bump - A_base)) > 1e-6, (
+        "the magnification did not respond to the orbit: the likelihood "
+        "is reading the frozen t0_par geometry, not the series"
+    )

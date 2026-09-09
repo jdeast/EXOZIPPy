@@ -1619,19 +1619,65 @@ class Parameter:
         # Deliberately not an error: the point of per-element roles is that one
         # params file can be carried across a parameterization toggle.
         for i in np.nonzero(is_inactive)[0]:
-            fields = self._user_constraint_fields(int(i))
-            if not fields:
-                continue
             where = f" ({self.source_file})" if self.source_file else ""
-            logger.warning(
-                f"Parameter '{self.get_display_label(int(i))}': your "
-                f"{'/'.join(fields)}{where} is DROPPED -- this element is not "
-                f"a parameter of its instance's parameterization, so it is "
-                f"held at a bookkeeping value, given no prior, and reported "
-                f"nowhere. Put the constraint on the quantity this instance "
-                f"actually samples, or change the instance's parameterization "
-                f"if you meant to fit it."
-            )
+            fields = self._user_constraint_fields(int(i))
+            if fields:
+                logger.warning(
+                    f"Parameter '{self.get_display_label(int(i))}': your "
+                    f"{'/'.join(fields)}{where} is DROPPED -- this element is "
+                    f"not a parameter of its instance's parameterization, so "
+                    f"it is held at a bookkeeping value, given no prior, and "
+                    f"reported nowhere. Put the constraint on the quantity "
+                    f"this instance actually samples, or change the "
+                    f"instance's parameterization if you meant to fit it."
+                )
+
+            # A START VALUE IS DROPPED JUST AS SILENTLY, and until 2026-09
+            # nothing said so.  `_user_constraint_fields` excludes `initval`
+            # on the grounds that a start cannot move a posterior -- true of
+            # an ACTIVE element, and precisely why the loss goes unnoticed
+            # here.  Measured on the mulensevent split: an MMEXOFAST seed set
+            # put log10(s) and alpha on the masked primary and produced no
+            # diagnostic of any kind, while the design's stated mitigation
+            # was "grep the run log for DROPPED".
+            #
+            # Keyed on the PROVENANCE, not on `user_params`: a params-file
+            # lookup would catch a user's own typo and miss every
+            # `add_hint`/`add_seed_hints` write, which is where the real risk
+            # is -- a component seeding a path that moved.  "user" and "data"
+            # each mean somebody deliberately supplied a start; "solved" is
+            # the engine's own bookkeeping, not lost intent, so it is quiet.
+            #
+            # ONLY FOR A *MIXED* PARAMETER, and that restriction is the
+            # difference between a useful warning and noise.  A WHOLLY
+            # inactive parameter means this parameterization does not use the
+            # quantity -- `star.radius`/`teff`/`feh` on a point-source event,
+            # where a hint pushed for every star legitimately lands on an
+            # unused element.  Warning there fired six times on a clean
+            # build, which would teach everyone to ignore the message.  A
+            # MIXED parameter is the dangerous shape: the value went to the
+            # wrong ELEMENT of a live vector, which is precisely the
+            # masked-primary off-by-one this exists to catch.
+            if is_inactive.all():
+                continue
+            start_src = self._element_initval_source(int(i))
+            if start_src in ("user", "data"):
+                whose = (
+                    "your start value"
+                    if start_src == "user"
+                    else "a component's data-derived start value"
+                )
+                logger.warning(
+                    f"Parameter '{self.get_display_label(int(i))}': "
+                    f"{whose}{where if start_src == 'user' else ''} is "
+                    f"DROPPED -- this element is not a parameter of its "
+                    f"instance's parameterization, so it is held at a "
+                    f"bookkeeping value whatever start was supplied, while "
+                    f"OTHER elements of this parameter are live -- so the "
+                    f"value most likely went to the wrong element. If a "
+                    f"component wrote this, it is seeding an element that no "
+                    f"longer samples: check the path it pushed."
+                )
         self.is_sampled = is_sampled
         self.is_derived = is_derived
         self.is_reported = is_reported
