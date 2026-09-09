@@ -50,6 +50,8 @@ is review 3.14.19's control-must-fire rule applied to the measuring device
 itself.
 """
 
+import os
+
 import numpy as np
 import pytensor
 
@@ -149,6 +151,44 @@ def compare(reference, current, atol=0.0, rtol=0.0):
         if name not in reference:
             appeared[name] = after
     return moved, appeared, vanished
+
+
+def record_deltas(case, rows):
+    """Append per-term deltas for the CI dump (review 3.14.20).
+
+    `rows` is an iterable of (name, before, after).  Recorded
+    unconditionally, including when every term is inside tolerance: on macOS
+    the acceptance tests PASS, so a dump that only fired on failure would
+    never answer the question it exists for.
+
+    One file per process because the suite runs under xdist; the controller
+    aggregates them in `pytest_terminal_summary`.  Best-effort by design -- a
+    diagnostic must never be able to fail a test run, so errors are
+    swallowed and a missing EXOZIPPY_DELTA_DIR simply disables it.
+    """
+    import json
+
+    directory = os.environ.get("EXOZIPPY_DELTA_DIR")
+    if not directory:
+        return
+    try:
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, "deltas-%d.jsonl" % os.getpid())
+        with open(path, "a") as fh:
+            for name, before, after in rows:
+                fh.write(
+                    json.dumps(
+                        {
+                            "case": case,
+                            "term": name,
+                            "before": before,
+                            "after": after,
+                        }
+                    )
+                    + "\n"
+                )
+    except Exception:
+        pass
 
 
 def compare_points(reference, current, atol=0.0, rtol=0.0):

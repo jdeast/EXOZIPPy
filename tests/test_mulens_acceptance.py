@@ -46,7 +46,12 @@ import os
 
 import pytest
 import yaml
-from mulens_acceptance import compare, decompose, term_names
+from mulens_acceptance import (
+    compare,
+    decompose,
+    record_deltas,
+    term_names,
+)
 
 from exozippy.system import System
 
@@ -327,6 +332,20 @@ def test_the_model_still_matches_its_recorded_decomposition(name):
     # machine evaluate identical parameter values.
     parts, _, reconciles, _ = decompose(system, model, fixture["start"])
     assert reconciles, "the instrument stopped reconciling; fix it first"
+
+    # Record EVERY term's delta, in tolerance or not, so CI on a
+    # second platform can answer whether the LAPACK/nnls difference
+    # behind 3.14.20 is directional or scatter.  `compare` below
+    # reports only terms that EXCEED tolerance, and on macOS none
+    # do -- which is precisely why it cannot answer the question.
+    record_deltas(
+        name,
+        [
+            (term, fixture["terms"][term], parts[term])
+            for term in sorted(fixture["terms"])
+            if term in parts
+        ],
+    )
 
     moved, appeared, vanished = compare(
         fixture["terms"], parts, atol=TERM_ATOL, rtol=TERM_RTOL
