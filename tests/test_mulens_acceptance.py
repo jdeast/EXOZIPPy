@@ -112,6 +112,29 @@ FIXTURES = os.path.join(HERE, "fixtures", "mulens")
 TERM_RTOL = 1e-6
 TERM_ATOL = 1e-3
 
+# The collapse reconciliation below compares this machine against the
+# PRE-SPLIT recording, and it used byte equality: at matched parameters the
+# trajectory is unchanged by construction, so motion means a wiring bug.
+# That is true of the mathematics and false of the arithmetic -- macOS builds
+# on Accelerate, Linux on scipy-openblas, `scipy.optimize.nnls` disagrees
+# between them, and it sets seeds, scales and bounds at build time (review
+# 3.14.20).  CI duly failed at 6.8e-14 relative.
+#
+# So the edge stays sharp but moves off zero, sized from both measured
+# magnitudes: ob161003's worst cross-platform term is 2.0e-13 relative, while
+# the stage-2 controls for this comparison fired at 5.7e-04 and -8.7e-02 and
+# a collapsed per-source pair moves by 50%.  1e-9 is three orders above the
+# noise and five below the smallest signal.
+COLLAPSE_RTOL = 1e-9
+# NO absolute floor here, deliberately, and it cost a red run to learn why:
+# most of the collapsed terms are bound potentials evaluated at an interior
+# point, i.e. near zero.  An atol of 1e-12 made them compare EQUAL to the
+# recording, so they never entered `moved`, and the "every collapsed term
+# must actually have halved" check then fired -- the tolerance swallowed the
+# very signal the test exists to see.  A relative test is scale-free and
+# right for them: halving is exact in binary, so on another platform the only
+# difference is in the last bits of `after` itself.
+
 # Fast, deterministic, symbolic-PSPL: the instrument runs on these every time.
 UNMARKED = {"ob08092", "ob140939"}
 
@@ -500,16 +523,23 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
       exact point (the pre-split engine's own solved proper motions seeded
       verbatim),
     When its decomposition is compared to the pre-split recording,
-    Then the OBSERVED-DATA term matches to the BYTE, the only moved terms
-      are the collapsed per-source pairs -- each EXACTLY half -- and
-      nothing appears or vanishes.
+    Then the OBSERVED-DATA term matches to COLLAPSE_RTOL, the only moved
+      terms are the collapsed per-source pairs -- each half to within
+      that same tolerance -- and nothing appears or vanishes.
 
     This is design section 4's analytic reconciliation, held as a permanent
-    pin.  The data term at zero tolerance is the sharp edge: the trajectory
-    at matched parameters is unchanged by construction, so ANY motion there
-    is a wiring bug.  Measured at stage 3: 48 of 69 terms bit-identical
-    (data term delta exactly 0.0), 19 terms exactly halved, and the two
-    reseeded-pm transform jacobians moved by one ulp.
+    pin.  The data term is the sharp edge: the trajectory at matched
+    parameters is unchanged by construction, so motion there is a wiring
+    bug.  Measured at stage 3 on the recording machine: 48 of 69 terms
+    bit-identical (data term delta exactly 0.0), 19 terms exactly halved,
+    and the two reseeded-pm transform jacobians moved by one ulp.
+
+    The comparison is at COLLAPSE_RTOL rather than at zero because it runs
+    on more than one platform: see that constant.  It is NOT the replay
+    tolerance -- this test solves its own start rather than replaying a
+    stored one, so it carries the build difference as well as the
+    evaluation difference, and it is held four orders tighter than the
+    replay tests all the same.
     """
     # ARRANGE -- the pre-split recording (labels translated, values
     # untouched) and the post-split model at its exact start.
@@ -521,13 +551,19 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     # above pin to the recording's start).
     parts, _, reconciles, _ = decompose(system, model)
     assert reconciles, "the instrument stopped reconciling; fix it first"
-    moved, appeared, vanished = compare(presplit["terms"], parts)  # ZERO tol
+    moved, appeared, vanished = compare(
+        presplit["terms"], parts, rtol=COLLAPSE_RTOL
+    )
 
     # ASSERT -- the sharp edge first: the data term to the byte.
-    assert (
-        parts["RV:mulensinstrument.model"]
-        == presplit["terms"]["RV:mulensinstrument.model"]
-    ), "the observed-data logp moved at matched trajectory: a wiring bug"
+    data_now = parts["RV:mulensinstrument.model"]
+    data_ref = presplit["terms"]["RV:mulensinstrument.model"]
+    assert abs(data_now - data_ref) <= COLLAPSE_RTOL * abs(data_ref), (
+        f"the observed-data logp moved at matched trajectory: a wiring "
+        f"bug. {data_ref} -> {data_now} "
+        f"(relative {(data_now - data_ref) / abs(data_ref):.3e}, and "
+        f"cross-platform noise on this example is ~2e-13)"
+    )
 
     assert not appeared, f"terms appeared: {sorted(appeared)}"
     assert not vanished, f"terms vanished: {sorted(vanished)}"
@@ -536,9 +572,14 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     halved_seen = set()
     for name, (before, after, delta) in moved.items():
         if name in _OB161003_HALVED:
-            # Exactly one of the two identical per-source copies remains;
-            # halving a finite double is exact, so this holds bitwise.
-            if after == before / 2.0:
+            # Exactly one of the two identical per-source copies remains.
+            # Halving a finite double IS exact, but `after` is this
+            # machine's own value rather than a halved copy of `before`,
+            # so on another platform it lands within rounding of half
+            # instead of on it.  The signal here is 50%; the tolerance is
+            # 1e-9, so nothing is hidden.
+            half = before / 2.0
+            if abs(after - half) <= COLLAPSE_RTOL * abs(half):
                 halved_seen.add(name)
                 continue
         if name in _OB161003_ULP_OK and abs(delta) <= 1e-13 * abs(before):
