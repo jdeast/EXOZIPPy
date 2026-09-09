@@ -66,9 +66,15 @@ pytestmark = pytest.mark.slow
 NUDGE = 0.01
 
 
-def _build(work):
-    """Build the example in `work`, returning (system, model, config)."""
-    with open(os.path.join(work, CONFIG)) as fh:
+def _build(work, config_name=None):
+    """Build the example in `work`, returning (system, model, config).
+
+    `config_name` defaults to this module's ob161003 config; it is a
+    parameter so `test_mmexofast_restart_sufficiency.py` can reuse this and
+    the trace fabrication below to write a REAL restart file for whichever
+    example it is pinning.
+    """
+    with open(os.path.join(work, config_name or CONFIG)) as fh:
         config = yaml.safe_load(fh)
     with open(os.path.join(work, config["parameter_file"])) as fh:
         params = yaml.safe_load(fh) or {}

@@ -3333,6 +3333,9 @@ class ConfigManager:
         while iteration < max_iter:
             iteration += 1
             resolved_snapshot = dict(resolved)
+            # Ranks are part of the state this loop converges, not just a
+            # by-product of it: see the convergence check below.
+            provenance_snapshot = dict(provenance)
 
             self._apply_directed_links(
                 directed_links,
@@ -3373,6 +3376,16 @@ class ConfigManager:
                 if abs(v - old) / ref >= tolerance:
                     net_changed = True
                     break
+            if not net_changed and provenance != provenance_snapshot:
+                # A pass that moved no VALUE can still have improved a rank:
+                # a satisfied equation promotes its symbols to what it proves
+                # they are reachable from (see _relax_equation), and those
+                # promotions have to be allowed to propagate to whatever
+                # consumed them.  Stopping on values alone left a derived
+                # value holding the rank it happened to get on the pass that
+                # first set it -- order-dependent, and wrong whenever an
+                # input was promoted later (review 8.6.22).
+                net_changed = True
             if not net_changed:
                 break
 
@@ -3627,6 +3640,31 @@ class ConfigManager:
                 return False
 
             if error <= tolerance:
+                # The VALUES are right, but a rank may still be understated.
+                # A rank is set when an equation fires, from the input ranks
+                # AT THAT MOMENT; a later iteration can promote an input
+                # without ever revisiting what consumed it, and this early
+                # return is where that revisit was being skipped.  So prove
+                # what the equation now proves: every symbol in a satisfied
+                # equation is reachable from the others, so its rank is at
+                # least theirs.  Condition B's floor is 0 and the cap is
+                # PRECEDENCE_DERIVED_USER, exactly as below -- same rule,
+                # not a second copy of it.
+                #
+                # RAISE-ONLY, so no value moves and nothing can outrank a
+                # real user entry.  The loop's convergence test watches
+                # provenance as well as values, so these promotions
+                # propagate over further passes until nothing improves.
+                for sym in symbols_in_eq:
+                    others = [s for s in symbols_in_eq if s != sym]
+                    if not others:
+                        continue
+                    reachable = min(
+                        PRECEDENCE_DERIVED_USER,
+                        min(get_rank(s) for s in others),
+                    )
+                    if reachable > get_rank(sym):
+                        provenance[sym] = reachable
                 return False  # Equation is perfectly satisfied. Stop here.
 
             # Equation is broken. Find the weakest armor.
