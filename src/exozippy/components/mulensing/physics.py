@@ -349,6 +349,41 @@ def calc_q(*masses):
     return pt.concatenate([pt.atleast_1d(c) for c in companions]) / primary
 
 
+@register_physics
+def calc_q_mixed(*args):
+    """Per-companion q for a lens whose companions span SEVERAL types.
+
+    ``args`` is ``(*type_mass_vectors, primary_mass, type_code)``: one
+    element-aligned mass vector per companion type in a canonical (sorted)
+    type order, then the primary's mass broadcast to the same length, then a
+    per-element integer naming which type each element is -- the position of
+    that element's type in the same sorted order.
+
+    Every vector here is element-aligned, so by the time this runs they have
+    all been sliced to the same elements and positions correspond.  The
+    companion mass is SCATTERED into the positions each type owns:
+
+      * `pt.set_subtensor`, not a masked sum of `indicator * mass`.  A sum
+        multiplies the off-type slots by zero, and `0 * NaN` is NaN, which
+        poisons the gradient of the whole expression on every backend
+        (CLAUDE.md's where-trap, same mechanism).  It would also only be
+        CORRECT while the off-type slots hold finite fillers.  A scatter
+        never reads them.
+      * not `pt.concatenate` either, which is what `calc_q`'s reserved
+        varargs branch does: concatenation yields companions in TYPE order,
+        and that equals ELEMENT order only when the elements happen to be
+        grouped by type.  This is order-free, so an interleaved lens
+        (star, planet, star) is right with no ordering convention to
+        remember.
+    """
+    masses, primary, type_code = args[:-2], args[-2], args[-1]
+    companion = pt.zeros_like(primary)
+    for k, mass in enumerate(masses):
+        owned = pt.eq(type_code, k).nonzero()[0]
+        companion = pt.set_subtensor(companion[owned], mass[owned])
+    return companion / primary
+
+
 # --- Mass-ratio sanitization ------------------------------------------------
 # Validity range of the binary/multiple-lens magnification backends.  Both
 # MulensModel and VBMicrolensing require a strictly positive, finite q, and the

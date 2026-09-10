@@ -55,7 +55,16 @@ class Lens(Component):
 
     # The keplerian-mode s/alpha expressions report the geometry AT the
     # anchor epoch; t0_par is injected as a context constant (add_parameter).
-    context_dep_names = frozenset({"lens_t0_par"})
+    context_dep_names = frozenset({"lens_t0_par", "companion_type_code"})
+
+    # `companion_type_code` carries ONE ENTRY PER LENS ELEMENT, so the
+    # per-element machinery may slice it alongside the per-type mass vectors
+    # it selects between (8.6.21).  Declaring it here is a promise -- see
+    # Component.aligned_context_deps -- and it is true by construction:
+    # build_maps writes it full-length, one code per element.  `lens_t0_par`
+    # is deliberately NOT here: it is injected as a scalar so the slicing
+    # skips it.
+    aligned_context_deps = frozenset({"companion_type_code"})
 
     @classmethod
     def normalize_config_block(cls, block):
@@ -72,6 +81,10 @@ class Lens(Component):
         sys_cfg = getattr(config_manager, "system_config", None) or {}
         self.bodies = body_entries(self.config, "lens", sys_cfg)
         self.n_companions = self.n_elements - 1
+        # Config-derived, so it lives here rather than in build_maps:
+        # register_parameters reads it and must not depend on stage 2 having
+        # run.  Sorted for a deterministic per-type dep order.
+        self.companion_types = tuple(sorted({t for (t, _) in self.bodies[1:]}))
 
         # The event options live on the mulensevent block (MulensEvent owns
         # them and the magnification dispatcher).  Checked here as well so a
@@ -288,6 +301,39 @@ class Lens(Component):
             for j, (_, c_ndx) in enumerate(self.bodies[1:]):
                 body_map[j + 1] = c_ndx
             self.companion_body_map = body_map
+
+            # MIXED COMPANION TYPES (8.6.21) need one map PER TYPE, because
+            # `companion_body_map` holds each body's index within its OWN
+            # component: read through a single typed dep it points a planet's
+            # element at a star, and for [star, star, planet] it pointed the
+            # planet's element at star.0 -- the PRIMARY -- so q came out 1.0
+            # there with the planet's mass never entering.
+            #
+            # Each per-type map is FULL-LENGTH so the per-element machinery
+            # can prove alignment (see this docstring), and elements NOT of
+            # that type hold that type's first body index: a filler that
+            # keeps the map inside its component's rows.  `calc_q_mixed`
+            # scatters rather than sums, so no filler is ever read -- the
+            # filler exists only to keep the indexing legal.
+            type_code = np.zeros(n, dtype=int)
+            for t_pos, c_type in enumerate(self.companion_types):
+                own = [
+                    (j + 1, c_ndx)
+                    for j, (t, c_ndx) in enumerate(self.bodies[1:])
+                    if t == c_type
+                ]
+                per_type = np.full(n, own[0][1], dtype=int)
+                for elem, c_ndx in own:
+                    per_type[elem] = c_ndx
+                    type_code[elem] = t_pos
+                # NAME ENDS IN `_map`, which is load-bearing: build_tensor_maps
+                # (stage 5) converts exactly the attributes matching that
+                # suffix into int32 tensors, so `companion_body_map_star`
+                # was silently skipped and the dep resolver found nothing.
+                setattr(self, f"companion_body_{c_type}_map", per_type)
+            # Element 0 is the masked primary; its code is a filler for the
+            # same reason as the maps above.
+            self.companion_type_code = type_code
         if self.kep_orbit_idx is not None:
             self.lens_kep_orbit_map = np.full(n, self.kep_orbit_idx, dtype=int)
 
@@ -350,29 +396,36 @@ class Lens(Component):
             # manifest cannot express; no shipped or tested configuration
             # has a mixed-type multi-companion lens, so it is refused
             # rather than silently mis-paired.
-            c_types = {t for (t, _) in self.bodies[1:]}
+            c_types = self.companion_types
             if len(c_types) > 1:
-                raise NotImplementedError(
-                    f"lens: companions of mixed component types "
-                    f"({sorted(c_types)}) are not supported by the "
-                    f"per-body lens component (q's mass dependency is one "
-                    f"typed vector).  Declare every companion with the "
-                    f"SAME component type -- e.g. model the planet as a "
-                    f"low-mass 'star' block (star.<name>.logmass reaches "
-                    f"-9 dex) so all companions are star-type -- or file "
-                    f"an issue.  NOTE: design 3.2 promised typed "
-                    f"per-companion deps would survive the split; this "
-                    f"refusal is a design contradiction awaiting a ruling "
-                    f"(stage-1b review, finding 1)."
-                )
-            (c_type,) = c_types
-            q_spec = {
-                "expr_key": "default",
-                "deps": [
-                    f"{c_type}.mass[companion_body_map]",
-                    "star.mass[primary_lens_map]",
-                ],
-            }
+                # MIXED TYPES (8.6.21): one element-aligned mass vector per
+                # type, then the primary's, then the per-element type code
+                # naming which vector each element reads.  `calc_q_mixed`
+                # SCATTERS into the positions each type owns, so this is
+                # order-free -- an interleaved lens (star, planet, star) is
+                # right with no "group the elements by type" convention for
+                # anyone to forget.  That convention is exactly what the
+                # reserved `pt.concatenate` branch in `calc_q` would have
+                # needed, and it is the trap recorded in 8.6.21.
+                q_spec = {
+                    "expr_key": "mixed_types",
+                    "deps": [
+                        f"{t}.mass[companion_body_{t}_map]" for t in c_types
+                    ]
+                    + [
+                        "star.mass[primary_lens_map]",
+                        "companion_type_code",
+                    ],
+                }
+            else:
+                (c_type,) = c_types
+                q_spec = {
+                    "expr_key": "default",
+                    "deps": [
+                        f"{c_type}.mass[companion_body_map]",
+                        "star.mass[primary_lens_map]",
+                    ],
+                }
 
         # The parameterization table: element 0 (the primary) is mode
         # "primary", which names NO parameters -- every geometry entry is
@@ -465,6 +518,17 @@ class Lens(Component):
             context_nodes.setdefault(
                 "lens_t0_par",
                 pt.as_tensor_variable(float(system.mulensevent.t0_par[0])),
+            )
+        if param_name == "q" and len(getattr(self, "companion_types", ())) > 1:
+            # Which per-type mass vector each element reads, for
+            # `calc_q_mixed`'s scatter (8.6.21).  A constant, so it costs the
+            # graph nothing; int32 to match the other index maps.
+            context_nodes = dict(context_nodes or {})
+            context_nodes.setdefault(
+                "companion_type_code",
+                pt.as_tensor_variable(
+                    self.companion_type_code.astype("int32")
+                ),
             )
         return super().add_parameter(model, param_name, system, context_nodes)
 
