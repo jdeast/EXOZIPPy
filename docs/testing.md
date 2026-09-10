@@ -52,6 +52,37 @@ Practical rules, all of which paid for themselves here:
    claim that makes it impossible. Do not leave a test implying it still
    guards the old failure.
 
+## Covering a code path is not testing its numbers
+
+Distinct from the six shapes above, because nothing here is stale and nothing
+is vacuous: the test runs the code, and would catch a crash, a shape change
+or a role change. It is simply blind to the arithmetic.
+
+`tests/test_triple_lens_q_start.py` is the ONLY coverage of the
+`n_companions >= 2` seeding branch. It asserts `q0.size == 3`, `isnan` on the
+unseeded slot, `element_is_active` / `element_is_derived` per element, and
+the text of two warnings. Every one of those is a structural property. So
+when `_mass_initval` seeded a planet's mass in jupiterMass where solMass was
+promised -- `mlens_total`, and through it `theta_E`, `t_E` and every
+per-element `q`, 1047x too large -- that file went on passing, and it was the
+only file that could have noticed.
+
+It surfaced because a 3-body lens was built for an unrelated reason and one
+number looked wrong by suspiciously close to a mass-unit ratio.
+
+- If a test is the only thing exercising a branch, assert at least one VALUE
+  from it, not only shapes and roles. Shapes catch wiring; values catch
+  arithmetic, and unit errors are arithmetic.
+- Prefer an assertion that needs no constant of its own. The regression test
+  here compares the SEEDED value against what the BUILT graph computes, so it
+  carries no jupiter/solar factor -- it cannot repeat the mistake it guards
+  against, and it fails on a slip in either direction. A hand-computed
+  expected value would have been a second place for the same error to live
+  (CLAUDE.md: never hand-write a conversion).
+- Suspect a clean ratio. 1047.6 is not noise; a factor that lands on
+  jupiter/solar, 365.25, 206265 or a power of ten is a unit or a
+  radians/degrees slip, and is worth chasing even when a test is green.
+
 ## The pre-push hook, and why it does not say `poetry run pytest`
 
 The full suite runs on push, wired in `.pre-commit-config.yaml` (install both hook
