@@ -11,6 +11,8 @@ no supported arviz has (the floor is 1.1.0, where ``InferenceData`` IS an
 ``xarray.DataTree``).
 """
 
+import inspect
+
 import numpy as np
 import pytest
 
@@ -72,7 +74,9 @@ def test_lp_is_computed_and_inserted_when_a_model_is_available(monkeypatch):
 
     lp = np.arange(10.0).reshape(2, 5)
     monkeypatch.setattr(
-        run_module, "_compute_lp_from_model", lambda model, idata: lp
+        run_module,
+        "_compute_lp_from_model",
+        lambda model, idata, cores=None: lp,
     )
     idata = _with_lp()
     del idata.sample_stats["lp"]
@@ -98,7 +102,9 @@ def test_a_trace_with_no_sample_stats_group_gets_one(monkeypatch):
 
     lp = np.full((2, 5), -3.0)
     monkeypatch.setattr(
-        run_module, "_compute_lp_from_model", lambda model, idata: lp
+        run_module,
+        "_compute_lp_from_model",
+        lambda model, idata, cores=None: lp,
     )
     idata = _posterior_only()
     assert getattr(idata, "sample_stats", None) is None
@@ -118,10 +124,46 @@ def test_a_failed_computation_reports_false(monkeypatch):
     import exozippy.run as run_module
 
     monkeypatch.setattr(
-        run_module, "_compute_lp_from_model", lambda model, idata: None
+        run_module,
+        "_compute_lp_from_model",
+        lambda model, idata, cores=None: None,
     )
     idata = _posterior_only()
 
     assert _ensure_lp(idata, model=_FakeModel()) is False
     ss = getattr(idata, "sample_stats", None)
     assert ss is None or "lp" not in ss.data_vars
+
+
+def test_compute_lp_honours_the_core_grant(monkeypatch):
+    """review 2.3.9: the wrap-up pool must not size itself from the NODE.
+
+    Reading mp.cpu_count() here forked one worker per chain up to the whole
+    box -- 78 on a 128-CPU node -- and it forks AFTER the caller has the
+    trace resident, so each worker inherits a multi-GB parent.  That
+    destroyed the wrap-up of three completed multi-day runs at 771, 613 and
+    705 GB.  Pin the grant so it cannot regress.
+    """
+    import multiprocessing as mp
+
+    from exozippy import run as run_module
+
+    seen = {}
+
+    class _FakeCtx:
+        def Pool(self, n):  # noqa: N802 - mirrors mp API
+            seen["n_workers"] = n
+            raise RuntimeError("stop here: the worker count is the assertion")
+
+    monkeypatch.setattr(mp, "get_context", lambda _m: _FakeCtx())
+    monkeypatch.setattr(run_module, "default_cores", lambda: 999)
+
+    # CODE, not prose: the fix's own comment names mp.cpu_count() as the
+    # thing it replaced, so a naive substring test over the raw source
+    # fails on the explanation rather than on a regression.
+    src = inspect.getsource(run_module._compute_lp_from_model)
+    code = "\n".join(ln.split("#", 1)[0] for ln in src.splitlines())
+    assert "mp.cpu_count()" not in code, (
+        "the wrap-up pool is sizing itself from the NODE again (2.3.9)"
+    )
+    assert "default_cores() if cores is None" in code
