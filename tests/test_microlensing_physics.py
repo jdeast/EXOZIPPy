@@ -115,7 +115,9 @@ def test_microlensing_physics_conversions():
 
 def test_lens_parameter_unit_handling():
     """Ensure lens parameters correctly handle 'd' and 'mas' string units."""
-    p = Parameter(label="lens.t_E", unit="d", internal_unit="d", initval=50.0)
+    p = Parameter(
+        label="mulensevent.t_E", unit="d", internal_unit="d", initval=50.0
+    )
     # If the gatekeeper is working, this should stay 50.0
     # If internal_unit was accidentally '', it would have crashed or scaled.
     assert p.initval == 50.0

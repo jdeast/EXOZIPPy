@@ -109,10 +109,10 @@ def test_a_mask_sized_from_the_wrong_element_count_raises():
     would mark real elements inactive with no message.
     """
     with pytest.raises(ElementSelectorError) as exc:
-        normalize_selector([True, False], 3, "lens.t_0")
+        normalize_selector([True, False], 3, "source.t_0")
 
     msg = str(exc.value)
-    assert "lens.t_0" in msg
+    assert "source.t_0" in msg
     assert "length 2" in msg and "3 element" in msg
 
 

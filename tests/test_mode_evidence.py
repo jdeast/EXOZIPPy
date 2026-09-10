@@ -342,7 +342,7 @@ def test_logp_point_shapes_come_from_the_value_variable(rv_shape):
     Given a trace whose posterior stores a variable as 0-d, for a model in
       which that variable is EITHER a genuinely scalar free RV (rv_shape
       None) OR a length-1 vector (rv_shape 1, which is what every EXOZIPPy
-      Parameter with one element is -- lens.t_0_raw, star.logmass_raw,
+      Parameter with one element is -- source.t_0_raw, star.logmass_raw,
       planet.mass_raw are all shape (1,), stored squeezed in the trace),
     When estimate_mode_evidences evaluates the model logp at those draws,
     Then the evaluations succeed in both cases.

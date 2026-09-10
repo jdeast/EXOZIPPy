@@ -293,7 +293,7 @@ def test_pinned_derived_parameter_with_no_value_warns_but_does_not_raise(
     # ARRANGE
     expr_val = pt.as_tensor_variable(np.float64(3.0))
     p = Parameter(
-        label="lens.t_E",
+        label="mulensevent.t_E",
         sigma=0,
         expression=lambda: expr_val,
         unit="",
@@ -566,7 +566,7 @@ def test_no_start_error_tailors_its_advice_to_the_provenance():
     """
     # ARRANGE
     p = Parameter(
-        label="lens.t_E",
+        label="mulensevent.t_E",
         lower=1.0,
         upper=500.0,
         unit="",
@@ -632,7 +632,7 @@ def test_derived_element_needs_no_start_value():
     # ARRANGE
     expr_val = pt.as_tensor_variable(np.float64(3.0))
     p = Parameter(
-        label="lens.t_E",
+        label="mulensevent.t_E",
         expression=lambda: expr_val,
         unit="",
         internal_unit="",
@@ -1264,7 +1264,7 @@ def test_out_of_bounds_error_blames_the_engine_for_a_derived_value():
     """
     # ARRANGE
     p = Parameter(
-        label="lens.t_E",
+        label="mulensevent.t_E",
         initval=1e6,
         lower=0.0,
         upper=1000.0,
