@@ -24,6 +24,12 @@ recorded.  `tightpriors` is discussed below.
 
 ## NOT ported -- pre-#246, will not load
 
+**These are shipped deliberately broken.**  JDE's ruling 2026-09-09: keep
+them with this README, and DELETE THEM WHEN 8.6.7 LANDS if they turn out to
+have no further value.  So this section is expected to shrink to nothing,
+and nobody should invest in porting one unless they are actually about to
+re-run it.
+
 Everything else here (`DC2018_128_mulens*.yaml`, `*_severed_forensic.yaml`,
 `*mulens+sed*.yaml`) still uses the pre-split surface: a single `lens:`
 entry carrying `lenses:`/`sources:` lists.  They are kept for PROVENANCE --
