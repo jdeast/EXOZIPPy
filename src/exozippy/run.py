@@ -966,7 +966,7 @@ def _run_fit(config, gui, user_params=None):
             # Ensure lp is in sample_stats; compute and persist if missing,
             # so the archived trace carries it and no later reader (modes,
             # mkparam, the plotters) has to recompute it.
-            _ensure_lp(idata, model)
+            _ensure_lp(idata, model, cores=cores)
             # Convert sampled variables to user-facing units before archiving.
             # This makes the trace file, trace plots, ArviZ summary, and
             # mkparam output all use the same units the user specified.
@@ -1859,7 +1859,7 @@ def _lp_eval_chain(args):
     return chain_idx, lp_chain
 
 
-def _ensure_lp(idata, model=None):
+def _ensure_lp(idata, model=None, cores=None):
     """Make sure ``idata.sample_stats["lp"]`` exists; return whether it does.
 
     NUTS writes lp itself; the Metropolis/DE families and PTDE do not, so it
@@ -1887,7 +1887,7 @@ def _ensure_lp(idata, model=None):
         return False
 
     logger.info("lp is not in the trace -- computing it from the model")
-    lp_vals = _compute_lp_from_model(model, idata)
+    lp_vals = _compute_lp_from_model(model, idata, cores=cores)
     if lp_vals is None:
         return False
 
@@ -1906,7 +1906,7 @@ def _ensure_lp(idata, model=None):
     return True
 
 
-def _compute_lp_from_model(model, idata):
+def _compute_lp_from_model(model, idata, cores=None):
     """Compute log posterior at each draw by evaluating the compiled model logp.
 
     Used when the sampler (Metropolis) doesn't write lp to sample_stats.
@@ -1959,13 +1959,32 @@ def _compute_lp_from_model(model, idata):
         _LP_FN = logp_fn
         _LP_POINT_MAP = point_map
 
-        n_workers = min(n_chains, mp.cpu_count())
+        # RESPECT THE USER'S GRANT (review 2.3.9).  This read
+        # mp.cpu_count() directly, which is the NODE's CPU count and not
+        # what the job was given, so on a 128-CPU node with 78 chains it
+        # forked 78 workers -- and it forks them AFTER the caller has loaded
+        # the whole trace, so each worker inherits a multi-GB parent.  fork
+        # is copy-on-write in principle, but CPython touches refcounts on
+        # everything it reads, so the pages copy in practice.  Measured: it
+        # destroyed the WRAP-UP of three completed multi-day runs at 771,
+        # 613 and 705 GB (severed-v3/v5/v6, all exit 137, all after sampling
+        # finished and the trace was written).  cores=None means AUTO, the
+        # same convention as _common.default_cores everywhere else.
+        grant = default_cores() if cores is None else max(1, int(cores))
+        n_workers = min(n_chains, grant)
         ctx = mp.get_context("fork")
-        with ctx.Pool(n_workers) as pool:
-            results = pool.map(
-                _lp_eval_chain,
-                [(arr, c, n_draws) for c, arr in enumerate(chain_arrays)],
-            )
+        try:
+            with ctx.Pool(n_workers) as pool:
+                results = pool.map(
+                    _lp_eval_chain,
+                    [(arr, c, n_draws) for c, arr in enumerate(chain_arrays)],
+                )
+        finally:
+            # Also 2.3.9: these kept the compiled logp alive for the whole
+            # of wrap-up, which is the other half of the footprint the fork
+            # above multiplies.
+            _LP_FN = None
+            _LP_POINT_MAP = None
 
         lp_vals = np.full((n_chains, n_draws), np.nan)
         for chain_idx, chain_lp in results:
