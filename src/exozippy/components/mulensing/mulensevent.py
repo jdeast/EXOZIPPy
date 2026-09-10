@@ -446,9 +446,31 @@ class MulensEvent(Component):
         entry = up.get(f"{comp_type}.{ndx}.mass")
         val = entry.get("initval") if isinstance(entry, dict) else entry
         if val is not None:
-            return float(val)
+            # A user_params `mass` is in that BODY's own user unit, and this
+            # function's contract is solMass.  `star.mass` is solMass so the
+            # two coincide, but `planet.mass` is jupiterMass
+            # (planet/defaults.yaml), so returning it raw seeded
+            # mulensevent.mlens_total -- and through it theta_E, t_E and
+            # every per-element q -- too large by 1047 on any lens with 2+
+            # companions one of which is a planet.  Measured: a two-planet
+            # lens seeded q = 1.995e-3 where the built graph computes
+            # 1.9047e-6.  Single-companion lenses never reached here, which
+            # is why it survived.
+            #
+            # config_manager's factor is the USER -> INTERNAL one; it is the
+            # RECIPROCAL of Parameter's (CLAUDE.md), so it multiplies here.
+            # Reaching for it in a component is the existing idiom
+            # (orbit.py:750) -- what is forbidden is hand-writing the number.
+            factor = self.config_manager.get_conversion_factor(
+                comp_type, "mass", full_path=f"{comp_type}.{ndx}.mass"
+            )
+            return float(val) * float(factor if factor else 1.0)
         entry = up.get(f"{comp_type}.{ndx}.logmass")
         val = entry.get("initval") if isinstance(entry, dict) else entry
+        # Only `star` declares logmass, in dex(solMass), so 10** already
+        # lands in the internal unit.  A component that ever declares a
+        # logmass in another dex base needs the same factor treatment as
+        # `mass` above.
         return float(10.0 ** float(val)) if val is not None else None
 
     def _validate_bodies(self, system):

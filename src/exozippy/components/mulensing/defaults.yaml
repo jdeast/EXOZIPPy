@@ -365,6 +365,19 @@ lens:
         # overridden per-config: the companion-type mass vector and the
         # primary's, both full-length maps (Lens.register_parameters)
         deps: ["planet.mass[companion_body_map]", "star.mass[primary_lens_map]"]
+      # Companions of SEVERAL types (star + planet).  Deps are
+      # overridden per-config too: one element-aligned mass vector per
+      # type, then the primary's, then the per-element type code that
+      # says which vector each element takes its mass from.  The listing
+      # here is the two-type shape; Lens.register_parameters writes the
+      # real one.
+      mixed_types:
+        func_name: "calc_q_mixed"
+        deps:
+          - "planet.mass[companion_body_planet_map]"
+          - "star.mass[companion_body_star_map]"
+          - "star.mass[primary_lens_map]"
+          - "companion_type_code"
   alpha:
     unit: "deg"
     internal_unit: "rad"
