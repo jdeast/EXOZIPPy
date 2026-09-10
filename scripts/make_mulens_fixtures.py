@@ -65,6 +65,7 @@ from mulens_acceptance import (  # noqa: E402
     compare,
     compare_points,
     decompose,
+    platform_fingerprint,
     raw_start,
 )
 
@@ -154,6 +155,11 @@ def record(cfg_path, par_path):
         # machine can replay it instead of solving its own -- see the module
         # docstring on why that separates two questions.
         "start": dict(sorted(start.items())),
+        # WHICH MACHINE measured the terms above, so the acceptance test
+        # can hold this machine to BIT IDENTITY and any other to the
+        # physics tolerance (review 3.14.20).  Coarse on purpose -- see
+        # mulens_acceptance.platform_fingerprint.
+        "platform": platform_fingerprint(),
     }
 
 

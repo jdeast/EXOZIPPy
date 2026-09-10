@@ -2,6 +2,11 @@
  "config": "examples/KMT-2019-BLG-1806/KMT-2019-BLG-1806_nt24.yaml",
  "n_terms": 87,
  "params": "examples/KMT-2019-BLG-1806/KMT-2019-BLG-1806.params.yaml",
+ "platform": {
+  "blas": "scipy-openblas",
+  "machine": "x86_64",
+  "system": "Linux"
+ },
  "start": {
   "band.u1_raw": [
    0.0

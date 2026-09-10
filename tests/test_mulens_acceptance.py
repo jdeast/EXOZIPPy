@@ -49,6 +49,7 @@ import yaml
 from mulens_acceptance import (
     compare,
     decompose,
+    is_reference_platform,
     record_deltas,
     term_names,
 )
@@ -111,6 +112,22 @@ FIXTURES = os.path.join(HERE, "fixtures", "mulens")
 # nats.
 TERM_RTOL = 1e-6
 TERM_ATOL = 1e-3
+
+# The STRICT tier, used only on the machine that recorded a fixture (see
+# is_reference_platform).  NOT zero, and that is a measurement rather than a
+# hedge: the generator's own --check is exact equality, and on this machine
+# 12 of the 13 fixtures reproduce exactly while OGLE_0383LD's
+# RV:mulensinstrument.model comes back 26832.036090685935 ->
+# 26832.03609068592 -- 1.5e-11 absolute, 5.4e-16 relative, the same delta on
+# every run.  So that one recorded value is about an ulp stale relative to
+# the current code, and a zero tolerance would fail the reference platform
+# against its own fixtures.
+#
+# 1e-14 is a few ulp at these magnitudes: still EIGHT orders tighter than
+# the cross-platform tier, so it restores the regression sensitivity that a
+# single loose tolerance gives up, while tolerating the last-bit drift that
+# a pre-split recording legitimately carries.
+REFERENCE_RTOL = 1e-14
 
 # The collapse reconciliation below compares this machine against the
 # PRE-SPLIT recording, and it used byte equality: at matched parameters the
@@ -370,12 +387,40 @@ def test_the_model_still_matches_its_recorded_decomposition(name):
         ],
     )
 
+    # TWO TIERS (review 3.14.20).  On the machine that RECORDED this
+    # fixture, hold it to bit identity: a single tolerance sized to the
+    # worst cross-platform difference (rtol 1e-6) is also blind to any
+    # regression smaller than that, everywhere, permanently -- a real
+    # 1e-4 nat change on the reference machine would pass.  Elsewhere,
+    # hold it to the physics tolerance, because the platforms genuinely
+    # differ: macOS builds on accelerate and Linux on scipy-openblas,
+    # scipy.optimize.nnls disagrees between them at build time, and that
+    # sets seeds, scales AND bounds.  Measured on PR #246's macOS job:
+    # 786 of 925 terms bit-identical, largest absolute difference
+    # 2.2e-06 nats, signs mixed 74/65 (scatter, not a directional
+    # offset).  For scale, 0.1 sigma on a 1-D Gaussian is ~5e-3 nats.
+    #
+    # A fixture with no fingerprint predates this and takes the loose
+    # tier: an old recording gets the physics bound rather than a
+    # bit-identity claim nobody measured.
+    reference = is_reference_platform(fixture)
+    rtol, atol = (REFERENCE_RTOL, 0.0) if reference else (TERM_RTOL, TERM_ATOL)
+
     moved, appeared, vanished = compare(
-        fixture["terms"], parts, atol=TERM_ATOL, rtol=TERM_RTOL
+        fixture["terms"], parts, atol=atol, rtol=rtol
     )
 
-    # ASSERT
+    # ASSERT -- naming the TIER, because the two mean very different
+    # things: a term moving by 5e-16 is a real finding on the reference
+    # machine and noise anywhere else.
+    tier = (
+        f"the REFERENCE tolerance rtol={REFERENCE_RTOL} (this is the "
+        f"machine that recorded the fixture)"
+        if reference
+        else f"the physics tolerance (rtol={TERM_RTOL}, atol={TERM_ATOL})"
+    )
     assert not (moved or appeared or vanished), (
+        f"held to {tier}\n"
         f"moved={moved}\nappeared={appeared}\nvanished={vanished}"
     )
 
@@ -594,4 +639,58 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
         f"expected these collapsed terms to be half the recording, but "
         f"they matched it -- the per-source duplication is back: "
         f"{sorted(missing)}"
+    )
+
+
+def test_both_tolerance_tiers_are_reachable():
+    """
+    Given a fixture recorded on this machine and one recorded elsewhere,
+    When the tier is selected,
+    Then the first gets REFERENCE_RTOL and the second the physics tolerance.
+
+    THE POINT IS THE SECOND HALF.  Every fixture in the tree carries this
+    machine's fingerprint, so on the reference platform the strict tier is
+    the only one the suite ever exercises -- and a bug making
+    `is_reference_platform` answer True unconditionally would be invisible
+    here while holding macOS to a tolerance eight orders too tight.  That is
+    the shape of the vacuity failures in docs/testing.md: the guarded path
+    passes and the unguarded one is never entered.
+
+    So assert both directions, with a FABRICATED foreign fingerprint rather
+    than a second real platform.
+    """
+    # Arrange -- a real fixture, the same one relabelled foreign, and one
+    # with the key removed (an old recording).
+    # `_replay_cases()` yields pytest.param objects, not names -- use the
+    # file list directly.
+    path = sorted(_fixture_files())[0]
+    name = os.path.splitext(os.path.basename(path))[0]
+    fixture = _load(path)
+    assert fixture.get("platform"), (
+        f"{name} carries no fingerprint, so it cannot select the strict "
+        f"tier; the generator should have recorded one"
+    )
+
+    foreign = dict(fixture)
+    foreign["platform"] = {
+        "system": "Darwin",
+        "machine": "arm64",
+        "blas": "accelerate",
+    }
+    unstamped = {k: v for k, v in fixture.items() if k != "platform"}
+
+    # Act / Assert
+    assert is_reference_platform(fixture), (
+        "this machine does not match the fingerprint in its own fixtures, so "
+        "the strict tier is unreachable and every run silently takes the "
+        "loose one"
+    )
+    assert not is_reference_platform(foreign), (
+        "a fixture recorded on macOS/arm64/accelerate was accepted as this "
+        "machine's own, which would hold a foreign platform to REFERENCE_RTOL"
+    )
+    assert not is_reference_platform(unstamped), (
+        "a fixture with NO fingerprint claimed the strict tier; an old "
+        "recording must get the physics bound rather than a bit-identity "
+        "claim nobody measured"
     )

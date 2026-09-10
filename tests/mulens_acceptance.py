@@ -153,6 +153,50 @@ def compare(reference, current, atol=0.0, rtol=0.0):
     return moved, appeared, vanished
 
 
+def platform_fingerprint():
+    """A COARSE identity for the machine a fixture was measured on.
+
+    system + machine + the BLAS name, and deliberately NOT the version.
+    The point of the fingerprint is to decide whether this run may be held
+    to BIT IDENTITY against a recording, and a BLAS point release that
+    changes no result must not silently downgrade the reference machine to
+    the loose tier.  One that DOES change a result is caught by the loose
+    tier regardless (review 3.14.20).
+
+    Best-effort: an unknown BLAS reads as "unknown", which simply means a
+    run cannot claim to be the reference platform -- the safe direction.
+    """
+    import platform
+
+    blas = "unknown"
+    try:
+        import numpy as _np
+
+        cfg = _np.__config__.show(mode="dicts") or {}
+        deps = cfg.get("Build Dependencies", {})
+        blas = str(deps.get("blas", {}).get("name", "unknown"))
+    except Exception:
+        pass
+    return {
+        "system": platform.system(),
+        "machine": platform.machine(),
+        "blas": blas,
+    }
+
+
+def is_reference_platform(fixture):
+    """True when THIS machine is the one that recorded `fixture`.
+
+    A fixture without a fingerprint predates it, and answers False: an old
+    recording gets the physics tolerance rather than a bit-identity claim
+    nobody measured.
+    """
+    recorded = fixture.get("platform")
+    if not recorded:
+        return False
+    return platform_fingerprint() == recorded
+
+
 def record_deltas(case, rows):
     """Append per-term deltas for the CI dump (review 3.14.20).
 
