@@ -188,3 +188,71 @@ def test_a_user_q_on_an_extra_companion_warns(triple_lens_lc, caplog):
     # Assert
     assert "lens.2.q" in caplog.text
     assert "CANNOT set the companion mass" in caplog.text
+
+
+def test_the_seeded_companion_mass_is_in_internal_units(triple_lens_lc):
+    """
+    Given a 3+ body lens whose companions are PLANETS (planet.mass is
+      declared in jupiterMass, internal solMass),
+    When MulensEvent seeds mlens_total and the per-element q from the
+      user-supplied body masses,
+    Then the seed agrees with what the built graph computes.
+
+    `MulensEvent._mass_initval` promises solMass and used to return the raw
+    user_params value.  For `star.mass` those coincide; `planet.mass` is
+    jupiterMass, so on any lens with 2+ companions -- the only case that
+    reaches that seeding branch -- mlens_total and every per-element q were
+    seeded 1047x too large, and theta_E and t_E followed.  Measured before
+    the fix: q seeded 1.995e-3 where the graph computes 1.9047e-6.
+
+    THE ASSERTION IS SEED-vs-BUILT, deliberately, rather than a
+    hand-computed number: it needs no jupiter/solar constant of its own, so
+    it cannot repeat the mistake it exists to catch (CLAUDE.md -- never
+    hand-write a conversion), and it fails on a slip in EITHER direction.
+
+    Why the rest of this file missed it: every other test here asserts SHAPE
+    and ROLES -- q0.size, isnan on the unseeded slot, active/derived -- and
+    never a seeded VALUE, so a purely numeric error in the path they all
+    exercise was invisible to them.
+    """
+    # Arrange -- a mass for every body, which is what makes the 3+ body
+    # branch seed rather than warn, with the planet masses in THEIR user unit.
+    system = System(
+        _triple_lens_config(triple_lens_lc),
+        _triple_lens_params(
+            **{
+                "star.Lens.logmass": {"initval": -0.3},
+                "planet.b.mass": {"initval": 1.0e-3},
+                "planet.c.mass": {"initval": 2.0e-3},
+            }
+        ),
+    )
+    system.prepare()
+    model = system.build_model()
+
+    # Act -- the seed the engine resolved, and what the graph computes.
+    q = system.lens.q
+    seeded = np.atleast_1d(np.asarray(q.initval, dtype=float))
+
+    import pytensor
+
+    start = system.get_raw_start(model)
+    fn = pytensor.function(
+        model.value_vars,
+        model.replace_rvs_by_values([q.value]),
+        on_unused_input="ignore",
+    )
+    (built,) = fn(*[start[v.name] for v in model.value_vars])
+    built = np.atleast_1d(np.asarray(built, dtype=float))
+
+    # Assert -- on the ACTIVE elements only: element 0 is the masked
+    # primary, whose seed is NaN by design and whose built value is the
+    # bookkeeping pin.
+    active = [i for i in range(seeded.size) if q.element_is_active(i)]
+    assert active, "no active companion elements; the fixture stopped biting"
+    for i in active:
+        assert seeded[i] == pytest.approx(built[i], rel=1e-6), (
+            f"element {i}: seeded {seeded[i]:.6e} but the graph computes "
+            f"{built[i]:.6e} (ratio {seeded[i] / built[i]:.1f}); a body mass "
+            f"is being seeded in its USER unit instead of solMass"
+        )
