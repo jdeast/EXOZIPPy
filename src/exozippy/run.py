@@ -1305,6 +1305,51 @@ def _prints_in_startup_table(p):
     return bool(np.any(should_print))
 
 
+def _flat_probe_directions(all_params, mult_map, whiten_report):
+    """Every sampled element the whitening probe found FLAT, table or no table.
+
+    A NaN (or infinite) multiplier means the probe could not find a 0.5-nat
+    contour along that raw direction: logp ignores it, the element keeps its
+    preliminary scale, and -- as the warning this feeds says out loud -- even
+    one unconstrained direction destroys HMC efficiency.  That is a statement
+    about the SAMPLER, so it is collected here rather than inside the startup
+    table's row loop, which is where it used to live: the loop `continue`s on
+    ``_prints_in_startup_table``, so ``print_to_table: false`` (a params-file
+    key, i.e. a user's own cosmetic choice) or a ``debug_print: false`` in a
+    component's defaults.yaml silently disabled a health diagnostic (review
+    2.3.7).  No shipped default hits that; a user marking a SAMPLED parameter
+    not-for-tables does.
+
+    Element-by-element, and INACTIVE elements are skipped, because that is
+    what the row loop did: an inactive element is not part of its instance's
+    parameterization and is not sampled, so it has no direction to be flat
+    along.  A parameter with no ``mult_map`` entry at all counts as flat on
+    every sampled element, which is also the old behaviour -- the probe
+    reports one entry per sampled raw variable, so a missing entry means the
+    element was never measured.
+
+    Returns the display labels, in table order, for the warning to name.
+    """
+    if whiten_report is None:
+        return []
+    flat = []
+    for p in all_params:
+        n_elements = int(np.prod(p.shape)) if p.shape not in ((), None) else 1
+        m_phys = np.atleast_1d(
+            mult_map.get(p.label, np.full(n_elements, np.nan))
+        )
+        sampled_arr = np.atleast_1d(getattr(p, "is_sampled", False))
+        for i in range(n_elements):
+            if not p.element_is_active(i):
+                continue
+            if not (bool(sampled_arr[i]) if i < sampled_arr.size else False):
+                continue
+            raw_m = m_phys[i] if i < m_phys.size else np.nan
+            if np.isnan(raw_m) or np.isinf(raw_m):
+                flat.append(p.get_display_label(i))
+    return flat
+
+
 def inspect_start(
     model,
     system,
@@ -1339,6 +1384,12 @@ def inspect_start(
             elif m.size <= n_elements:
                 full[: m.size] = m
             mult_map[p.label] = full
+
+    # SAMPLER HEALTH, not table content: collected over every sampled element
+    # rather than over the rows the table prints (review 2.3.7).
+    flat_warnings = _flat_probe_directions(
+        auditor.all_params, mult_map, whiten_report
+    )
 
     # Dynamic Width Logic -- over the rows the table will actually print, so
     # a suppressed parameter with a long label cannot widen it for nothing.
@@ -1387,8 +1438,6 @@ def inspect_start(
     logger.info("-" * table_width)
     logger.info(header)
     logger.info("-" * table_width)
-
-    flat_warnings = []
 
     # --- PART 1: CORE PARAMETERS ---
     for p in auditor.all_params:
@@ -1450,7 +1499,6 @@ def inspect_start(
             # example's derived vectors were single-element, so
             # s_phys[i>0] never happened.
             s_phys = np.full(v_phys.size, np.nan)
-        m_phys = np.atleast_1d(mult_map.get(p.label, [np.nan] * len(v_phys)))
 
         user_flag = "*" if getattr(p, "user_prior_modified", False) else ""
 
@@ -1532,16 +1580,10 @@ def inspect_start(
                 else f"{'N/A':>10}"
             )
 
-            # A NaN multiplier on a sampled element means the probe found
-            # logp flat along it (it keeps its preliminary scale) -- warn
-            # after the table.
-            raw_m = m_phys[i] if i < len(m_phys) else np.nan
-            if (
-                whiten_report is not None
-                and elem_sampled
-                and (np.isnan(raw_m) or np.isinf(raw_m))
-            ):
-                flat_warnings.append(row_label)
+            # The flat-direction check used to live here, and that gating it
+            # behind this row loop is what review 2.3.7 was about -- see
+            # _flat_probe_directions, which now collects it over every sampled
+            # element whether or not the element gets a row.
 
             prior_str = p.get_prior_str(i, latex=False)
 

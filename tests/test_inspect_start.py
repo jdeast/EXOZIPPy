@@ -26,7 +26,11 @@ import exozippy.components
 from exozippy.components.parameter import Parameter
 from exozippy.components.star.star import Star
 from exozippy.config import ConfigManager, canonical_param_key
-from exozippy.run import _user_initval, inspect_start
+from exozippy.run import (
+    _prints_in_startup_table,
+    _user_initval,
+    inspect_start,
+)
 
 CONFIG = {"star": [{"name": "A"}, {"name": "B"}]}
 
@@ -414,3 +418,106 @@ def test_orbit_n_is_the_only_shipped_not_for_tables_parameter():
     )
 
     assert users == ["orbit"]
+
+
+# ---------------------------------------------------------------------------
+# (e) the flat-direction warning is sampler health, not table content
+#     -- review 2.3.7
+# ---------------------------------------------------------------------------
+
+
+def _flat_report(p):
+    """A whitening report whose probe found every element of ``p`` flat."""
+    n = int(np.prod(p.shape)) if p.shape not in ((), None) else 1
+    return {"multipliers": {f"{p.label}_raw": np.full(n, np.nan)}}
+
+
+def _flat_warning(caplog):
+    """The 'logp is flat along' warning, or None."""
+    for rec in caplog.records:
+        if "logp is flat along" in rec.getMessage():
+            return rec.getMessage()
+    return None
+
+
+@pytest.mark.parametrize(
+    "suppress", [{"print_to_table": False}, {"debug_print": False}]
+)
+@patch("exozippy.diagnostics.ModelAuditor.get_aggregated_logps")
+def test_a_flat_sampled_parameter_is_warned_about_with_no_table_row(
+    mock_logp, caplog, suppress
+):
+    """
+    Given a SAMPLED parameter the table is told not to print
+      (``print_to_table: false``, or ``debug_print: false``) whose probe
+      multipliers came back NaN,
+    When inspect_start runs,
+    Then it gets no row AND the flat-direction warning still names both of
+      its elements.
+
+    Review 2.3.7: the collection used to sit inside the row loop, which
+    `continue`s on _prints_in_startup_table, so a cosmetic table flag -- and
+    ``print_to_table`` is a params-file key, i.e. the user's own -- silently
+    disabled a sampler-health diagnostic whose own text says one
+    unconstrained parameter destroys HMC efficiency.
+    """
+    # ARRANGE
+    mock_logp.return_value = ({}, {})
+    key = "_".join(suppress)
+    model, system, p = _build_star_mass_with(suppress, f"model_flat_{key}")
+    assert np.all(p.is_sampled), "the vehicle must be sampled to be a case"
+    assert not _prints_in_startup_table(p), "the flag must suppress the rows"
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.run"):
+        inspect_start(model, system, {}, whiten_report=_flat_report(p))
+
+    # ASSERT
+    assert _table_row(caplog, "star.A.mass") is None
+    assert _table_row(caplog, "star.B.mass") is None
+    warning = _flat_warning(caplog)
+    assert warning is not None, [r.getMessage() for r in caplog.records]
+    assert "star.A.mass" in warning and "star.B.mass" in warning
+
+
+@patch("exozippy.diagnostics.ModelAuditor.get_aggregated_logps")
+def test_a_measured_direction_is_not_called_flat(mock_logp, caplog):
+    """
+    Given the same suppressed parameter with FINITE probe multipliers,
+    When inspect_start runs,
+    Then no flat warning is emitted.
+
+    The control for the test above: the warning has to come from the NaN
+    multipliers rather than from having stopped consulting the table flags,
+    or widening the collection would just warn about everything.
+    """
+    # ARRANGE
+    mock_logp.return_value = ({}, {})
+    model, system, p = _build_star_mass_with(
+        {"print_to_table": False}, "model_flat_control"
+    )
+    report = {"multipliers": {f"{p.label}_raw": np.array([2.5, 3.0])}}
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.run"):
+        inspect_start(model, system, {}, whiten_report=report)
+
+    # ASSERT
+    assert _flat_warning(caplog) is None
+
+
+@patch("exozippy.diagnostics.ModelAuditor.get_aggregated_logps")
+def test_no_whitening_report_means_no_flat_verdict(mock_logp, caplog):
+    """
+    Given a run with no whitening report at all (``measure_scales: false``),
+    When inspect_start runs,
+    Then nothing is reported flat -- unmeasured is not the same as flat, and
+      a warning on every un-probed run would be noise.
+    """
+    mock_logp.return_value = ({}, {})
+    model, system, _ = _build_star_mass_with({}, "model_flat_unprobed")
+
+    with caplog.at_level(logging.INFO, logger="exozippy.run"):
+        inspect_start(model, system, {}, whiten_report=None)
+
+    assert _flat_warning(caplog) is None
