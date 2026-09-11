@@ -2761,10 +2761,18 @@ class Parameter:
             try:
                 return float(self.internal_unit.to(target_u))
             except Exception as e:
-                # Halt immediately if units are incompatible (e.g., mass to time)
+                # Halt immediately if units are incompatible (e.g., mass to
+                # time).  The direction in the message is INTERNAL -> USER,
+                # matching the `internal_unit.to(target_u)` above: this
+                # function is the internal -> user multiplier, the reciprocal
+                # of ConfigManager.get_conversion_factor.  It used to name the
+                # two units the other way round, which is the one mistake the
+                # reciprocal-factor rule in CLAUDE.md exists to prevent.
                 raise ValueError(
-                    f"[{self.label}] Conversion failure from '{u_str}' to '{i_str}'. "
-                    f"Ensure units are valid astropy strings. Original error: {e}"
+                    f"[{self.label}] Conversion failure from '{i_str}' to '{u_str}'. "
+                    f"Either a unit is not a valid astropy string, or the two are "
+                    f"dimensionally incompatible (e.g. a dex internal unit against "
+                    f"a linear user one). Original error: {e}"
                 )
 
         if is_sequence:
