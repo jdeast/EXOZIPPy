@@ -131,10 +131,15 @@ Four places where the fit was not frictionless:
    `assay` therefore inherits `Component` directly, and **what it
    re-implements is the finding**: CSV reading, a column-role mapping
    (extended to accept header names), non-finite row dropping, a data-side
-   unit conversion, and a per-file noise seed pushed through `add_hint`. That
-   is a short list, and it is the argument for splitting a field-neutral data
-   base out of `Instrument` -- but that refactor should be driven by this list,
-   not started before it existed.
+   unit conversion, and a per-file noise seed pushed through `add_hint`.
+
+   **ACTED ON, partly.** The time layer is now a separable mixin,
+   `components/timesystem.py`, extracted verbatim from `Instrument` -- see
+   `components/instrument.md`. That is the field-coupled half; the remaining
+   list above is the field-neutral half, and is what a future `DataComponent`
+   base would carry. `tests/test_timesystem_split.py` pins that `assay` has no
+   time vocabulary, which is the property the split exists to guarantee rather
+   than merely intend.
 
 Two smaller notes: `utilities/zenodo.fetch_assets` is generic despite its name
 and is reused here for a non-Zenodo URL, but it prints "Downloading ... from
