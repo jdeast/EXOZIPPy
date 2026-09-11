@@ -1643,6 +1643,31 @@ def inspect_start(
             "This can be safely ignored if intentional, but check for typos."
         )
 
+    # THE CONTRACT: a value the user set is either produced by the model or
+    # explained.  Until this block the second half did not happen -- a pin
+    # the derivation could not deliver was silent, so the only way to find
+    # one was to compile the graph by hand.  Published parameter sets are
+    # routinely NOT self-consistent (marginal medians from one table, or
+    # values taken from two papers), so this is the expected case for a
+    # real fit, not an error: report it and start.
+    start_misses = auditor.check_user_starts()
+    if start_misses:
+        lines = []
+        for f in start_misses:
+            lines.append(
+                f"  {f['key']}: you set {f['requested']:.6g}, the model "
+                f"starts at {f['produced']:.6g} ({f['rel']:+.2%}) -- "
+                f"{f['detail']}"
+            )
+        logger.warning(
+            "?" * 60 + "\n"
+            "WARNING: the model does not start at every value you set:\n"
+            + "\n".join(lines)
+            + "\nThese are START values, so the fit can still move to the "
+            "right answer -- but if a value above is one you meant to "
+            "pin, the model is not starting where you think.\n" + "?" * 60
+        )
+
 
 def _add_sampler_prose(system, method, swap_schedule="deo"):
     """Declare the run-level modeling prose (intro + sampler paragraph).

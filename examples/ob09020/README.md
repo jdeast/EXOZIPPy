@@ -8,7 +8,7 @@
 > geometry reproduces all four published orbital-motion observables in the
 > published `u_0 > 0` labeling (`s_0`, `alpha_0`, `sign(gamma_par)`,
 > `sign(gamma_perp)`); the Yee (Omega, i) -> EXOZIPPy frame mapping is
-> measured (see the params file); and the start logp is finite (+19,024).
+> measured (see the params file); and the start logp is finite (+36,397).
 > The per-instrument flux/`err_scale` seeds still date from the static
 > geometry and are refreshed by the acceptance fit.  Every sign statement
 > below uses the corrected identity `gamma_perp = -dalpha/dt` (Skowron
@@ -304,23 +304,29 @@ between 0.17 and 0.37 at every site against Skowron's calibrated 0.334, the
 spread being the expected consequence of unfiltered detectors with different
 responses.
 
-Start logp is +19,024 in the full keplerian-mode model at the IOP-referenced
-seeds (2026-08-27; the same model started at +3,276 at the arXiv v1 values
+Start logp is +36,397 in the full keplerian-mode model at the IOP-referenced
+seeds (2026-09-11; the same model started at +3,276 at the arXiv v1 values
 -- the ~1% version skew on `t_E`/`u_0`/`rho` is worth ~16k nats through
 this caustic-crossing dataset, which is the concrete argument for pinning
 WHICH version a params file references).  For the record of the seed
 lineage: the static model started at +41,458 at the arXiv published-branch
-seeds, and +47,309 at the retracted mirror seeds.  The keplerian start is
-lower than the static one NOT because the model is worse but because the
-published point-values do not close as a set: the per-instrument flux and
-`err_scale` seeds still date from the static geometry (measured at the
-arXiv-seed start: a linear-flux refit leaves the caustic window healthy --
-Bronberg chi2/N = 4.3 on raw errors -- while the OGLE wings sit at
-chi2/N ~ 375, carrying the mismatch between Skowron's with-priors
-trajectory values and the joint solution's unprinted ones), and Table 1's
-own medians are mutually inconsistent at the point-estimate level (e.g.
-its printed |pi_E| = 0.151 against the theta_E/(kappa M) = 0.30 implied by
-its own priors' masses -- marginal medians, as the params file notes).
+seeds, and +47,309 at the retracted mirror seeds; the keplerian model
+started at +19,024 while the params file carried a hand-constructed
+`pi_E_N` and a `bigomega` tuned against it, before both were replaced by
+the published values and the frame rule (2026-09-11).
+
+The published point-values do not close as a set, and the startup report
+now says so rather than leaving it to this README: five user values are
+reported as not reproduced, led by `pi_E_N` (set -0.022, starts -0.345)
+and `theta_E` (set 2.95, starts 3.343).  Both are the same tension --
+Table 1's printed |pi_E| = 0.151 against the theta_E/(kappa M) = 0.30
+implied by its own priors' masses, which are marginal medians rather than
+a joint point.  The per-instrument flux and
+`err_scale` seeds also still date from the static geometry (measured at
+the arXiv-seed start: a linear-flux refit leaves the caustic window
+healthy -- Bronberg chi2/N = 4.3 on raw errors -- while the OGLE wings sit
+at chi2/N ~ 375, carrying the mismatch between Skowron's with-priors
+trajectory values and the joint solution's unprinted ones).
 Resolving that tension is precisely what the acceptance FIT is for; the
 per-instrument chi2/N table and the flux/`err_scale` seeds are refreshed
 from its posterior.
