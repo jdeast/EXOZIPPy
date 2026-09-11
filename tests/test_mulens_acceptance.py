@@ -50,6 +50,7 @@ from mulens_acceptance import (
     compare,
     decompose,
     is_reference_platform,
+    platform_fingerprint,
     record_deltas,
     term_names,
 )
@@ -681,11 +682,19 @@ def test_both_tolerance_tiers_are_reachable():
         f"tier; the generator should have recorded one"
     )
 
+    # STAMP THE OWN-MACHINE CASE, do not assume the fixture is one.  The
+    # shipped fixtures carry the RECORDING box's fingerprint (Linux), so
+    # asserting on them directly passes only there and fails on every other
+    # runner -- which is exactly how this test went red on macOS.  What is
+    # under test is the SELECTOR, not where the suite happens to run.
+    own = dict(fixture)
+    own["platform"] = platform_fingerprint()
+
     foreign = dict(fixture)
     foreign["platform"] = {
-        "system": "Darwin",
-        "machine": "arm64",
-        "blas": "accelerate",
+        "system": "NotAnOS",
+        "machine": "notanarch",
+        "blas": "notablas",
     }
     unstamped = {k: v for k, v in fixture.items() if k != "platform"}
 
@@ -697,15 +706,15 @@ def test_both_tolerance_tiers_are_reachable():
     with unittest.mock.patch.dict(
         os.environ, {"EXOZIPPY_ACCEPTANCE_STRICT": "1"}
     ):
-        assert is_reference_platform(fixture), (
+        assert is_reference_platform(own), (
             "opted in and the fingerprint matches, yet the strict tier was "
             "not selected -- it is unreachable and every run silently takes "
             "the loose one"
         )
         assert not is_reference_platform(foreign), (
-            "a fixture recorded on macOS/arm64/accelerate was accepted as "
-            "this machine's own, which would hold a foreign platform to "
-            "REFERENCE_RTOL"
+            "a fixture recorded on a fabricated foreign platform was "
+            "accepted as this machine's own, which would hold a foreign "
+            "platform to REFERENCE_RTOL"
         )
         assert not is_reference_platform(unstamped), (
             "a fixture with NO fingerprint claimed the strict tier; an old "
@@ -721,7 +730,7 @@ def test_both_tolerance_tiers_are_reachable():
     env = dict(os.environ)
     env.pop("EXOZIPPY_ACCEPTANCE_STRICT", None)
     with unittest.mock.patch.dict(os.environ, env, clear=True):
-        assert not is_reference_platform(fixture), (
+        assert not is_reference_platform(own), (
             "the strict tier was claimed WITHOUT the opt-in; any machine of "
             "this platform class would then be held to REFERENCE_RTOL"
         )
