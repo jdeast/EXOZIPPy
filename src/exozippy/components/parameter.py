@@ -14,6 +14,7 @@ from typing import (
     Any,
     List,
     Mapping,
+    NamedTuple,
     Optional,
     Sequence,
     Tuple,
@@ -477,6 +478,24 @@ class UnitTranslator:
 # ----------------------------
 
 
+class FormattedSummary(NamedTuple):
+    """What ``PosteriorSummary.format`` returns, in ITS OWN order.
+
+    A plain 3-tuple of strings is trivially mis-unpacked, and was: the two
+    error columns of every ``<prefix>_results.csv`` were transposed from the
+    day the file was added (2026-07-01) until 2026-09-11, because
+    ``outputs/latex.py`` bound the result as ``med, ep, em`` (review 1.11.4,
+    the third positional-unpack defect in the outputs layer).  A
+    NamedTuple is a tuple -- every positional unpack and every index keeps
+    working -- but it also lets a call site say ``.err_plus`` and be immune.
+    Prefer the field names at any new call site.
+    """
+
+    median: str
+    err_minus: str
+    err_plus: str
+
+
 @dataclass(slots=True)
 class PosteriorSummary:
     """Numeric + formatted summary for tables."""
@@ -485,7 +504,7 @@ class PosteriorSummary:
     err_minus: float
     err_plus: float
 
-    def format(self, sigfigs: int = 2) -> Tuple[str, str, str]:
+    def format(self, sigfigs: int = 2) -> FormattedSummary:
         """
         Return (median_str, err_minus_str, err_plus_str) with sensible rounding:
         - errors rounded to `sigfigs` significant figures
@@ -496,7 +515,7 @@ class PosteriorSummary:
             or math.isnan(self.err_minus)
             or math.isnan(self.err_plus)
         ):
-            return ("NaN", "NaN", "NaN")
+            return FormattedSummary("NaN", "NaN", "NaN")
 
         em = abs(self.err_minus)
         ep = abs(self.err_plus)
@@ -504,7 +523,7 @@ class PosteriorSummary:
             # A pinned element reaching this path (e.g. a Deterministic of
             # fixed inputs): full-precision repr here put
             # '0.31622776601683794 +/- 0' in the table.
-            return (f"{self.median:.6g}", "0", "0")
+            return FormattedSummary(f"{self.median:.6g}", "0", "0")
 
         # Determine decimal places from error sig figs
         def decimals_from_sigfigs(val: float) -> int:
@@ -529,7 +548,7 @@ class PosteriorSummary:
         # there is none to claim.
         em_s = "0" if em == 0 else str(round(em, n_minus))
         ep_s = "0" if ep == 0 else str(round(ep, n_plus))
-        return (med_s, em_s, ep_s)
+        return FormattedSummary(med_s, em_s, ep_s)
 
     def latex_value(self, sigfigs: int = 2) -> str:
         med_s, em_s, ep_s = self.format(sigfigs=sigfigs)

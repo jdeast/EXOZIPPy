@@ -242,14 +242,19 @@ def build_csv_output(
                     return s_list[index] if index < len(s_list) else s_list[-1]
 
                 if p.summary is not None:
-                    med, ep, em = summ_at(p.summary).format(sigfigs=2)
+                    # format() returns (median, err_MINUS, err_PLUS) -- unpack
+                    # in that order.  Binding it as (med, ep, em) put err_minus
+                    # in the 'up_err' column and err_plus in 'low_err' for
+                    # every asymmetric posterior in every results.csv ever
+                    # written (review 1.11.4); the appends below are right.
+                    med, em, ep = summ_at(p.summary).format(sigfigs=2)
                     if mode_cols:
                         rows.append((name, "all", 1.0, "", med, ep, em))
                     else:
                         rows.append((name, med, ep, em))
                     if per_mode:
                         for k, m in enumerate(mode_report.modes):
-                            med, ep, em = summ_at(p.mode_summaries[k]).format(
+                            med, em, ep = summ_at(p.mode_summaries[k]).format(
                                 sigfigs=2
                             )
                             rows.append(
