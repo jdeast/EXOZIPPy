@@ -1420,7 +1420,6 @@ def inspect_start(
     # and hand over were never read.
     auditor = ModelAuditor(model, system, transformed_inits)
     param_logps, other_nodes = auditor.get_aggregated_logps()
-    unused_yaml = auditor.check_unused_yaml()
 
     # Map the whitening probe's measured multipliers (one per SAMPLED element,
     # keyed by raw-variable name) back to full per-parameter element vectors.
@@ -1737,12 +1736,12 @@ def inspect_start(
             * 60
         )
 
-    if unused_yaml:
-        logger.warning(
-            f"The following parameters in the parameter.yaml file did not match any model parameter "
-            f"and were not applied: {unused_yaml}\n"
-            "This can be safely ignored if intentional, but check for typos."
-        )
+    # The unmatched-params-key warning used to be emitted here, from this
+    # function -- i.e. only for `exozippy <config>`, so a harness driving a
+    # sampler directly got nothing and a mis-keyed bound was silently absent
+    # (review 2.3.16, measured on DC2018_128).  Same authority
+    # (ModelAuditor.check_unused_yaml), now reported from
+    # System.build_model, which every caller passes through.
 
     # THE CONTRACT: a value the user set is either produced by the model or
     # explained.  Until this block the second half did not happen -- a pin

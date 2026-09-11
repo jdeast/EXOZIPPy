@@ -863,6 +863,11 @@ class System(Component):
             # term the model has, so every term has to exist first.
             self._add_branch_mixtures(model)
 
+        # A params key that matched NO parameter is reported HERE, because
+        # this is the first point at which every caller can be told
+        # (review 2.3.16).  See _warn_unmatched_user_params.
+        self._warn_unmatched_user_params(model)
+
         # Mixed-parameterization vectors only: verify that each sliced
         # expression agrees with the unsliced one on the elements it supplies,
         # at the start point.  No-op (and no compile) for a model without one.
@@ -870,6 +875,72 @@ class System(Component):
 
         self.compile_plotter_functions(model)
         return model
+
+    def _warn_unmatched_user_params(self, model):
+        """Report params-file keys that matched no parameter of this model.
+
+        ONE AUTHORITY, MOVED -- not a new check.
+        ``diagnostics.ModelAuditor.check_unused_yaml`` already owns the
+        question ("check_unused_yaml owns unmatched keys" is written into
+        ``check_user_starts``' own skip), carries the
+        ``relation_symbol_paths`` exemption for a seed the relaxation engine
+        consumes without building a parameter, and audits the per-entry
+        sub-keys besides.  What was wrong was WHERE it was reported: from
+        ``run.inspect_start``, i.e. run.py's startup reporting, so it fired
+        for ``exozippy <config>`` and for nothing else.
+
+        MEASURED, and it cost a run.  DC2018_128_tightpriors.params.yaml
+        keyed a bound as ``lens.DC2018_128.t_0`` -- the RUN name, where the
+        config declares ``lens: - name: "Lens"``.  The key matched nothing,
+        the t_0 tightening (5.76 of that file's ~27.6 nats) was absent, and
+        a nested-sampling job ran over an hour before the mistake was found
+        by READING THE CONFIG.  ``examples/DC2018/dc18_fullns_pilot.py``
+        drives the sampler directly, so run.py's warning never executed.  A
+        params file is exactly where a silent no-op is most expensive: the
+        whole point of the file is to constrain something.
+
+        WHY THE STRICT NAMING CHECK DID NOT CATCH IT, since it looks like it
+        should have: ``config.standardize_param_names`` DOES refuse a 3-part
+        key naming an undeclared instance, but its accepted set is every
+        ``name:`` declared by ANY list component, deliberately -- a
+        component's per-element names may borrow another's (``source.<star
+        name>.rho``).  The tightpriors config declares
+        ``galacticmodel: - name: "DC2018_128"``, so the mis-keyed name was
+        "declared" and passed.  Widening that check cannot fix this without
+        breaking the borrowed-name spellings; reporting the residue here
+        can.
+
+        WHY HERE AND NOT ``finalize_user_params``, which the item proposed:
+        ``Parameter`` objects are created in stage 6, so after ``prepare()``
+        alone ``get_all_parameters()`` is EMPTY (measured) and the check has
+        nothing to compare keys against.  ``build_model`` is the first place
+        the answer exists, and every caller that samples passes through it.
+
+        Once per System: a live System can legitimately be rebuilt (reviews
+        1.5.2, 3.14.12) and the params file does not change between builds,
+        so a second identical warning would be noise -- the GUI rebuilds on
+        interaction.
+        """
+        if getattr(self, "_warned_unmatched_user_params", False):
+            return []
+        from .diagnostics import ModelAuditor
+
+        try:
+            unmatched = ModelAuditor(model, self, {}).check_unused_yaml()
+        except Exception:
+            # A diagnostic must never be the reason a model does not build.
+            logger.debug("unmatched params-key audit failed", exc_info=True)
+            return []
+        self._warned_unmatched_user_params = True
+        if unmatched:
+            logger.warning(
+                f"The following parameters in the parameter.yaml file did "
+                f"not match any model parameter and were not applied: "
+                f"{unmatched}\n"
+                "This can be safely ignored if intentional, but check for "
+                "typos."
+            )
+        return unmatched
 
     def get_all_parameters(self):
         """
