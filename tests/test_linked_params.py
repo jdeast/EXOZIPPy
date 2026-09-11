@@ -11,6 +11,10 @@ upper, init_scale) to a string expression referencing other parameters:
 
 Unit convention: referenced parameters contribute their values in their own
 user units; the expression result is interpreted in the target's user unit.
+
+Nothing here builds an ElementExpression, so a link crossed with a per-element
+ROLE (a derived element of a mixed vector) is not covered in this file: that
+seam is tests/test_element_links_and_roles.py.
 """
 
 import copy
