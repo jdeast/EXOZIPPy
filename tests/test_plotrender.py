@@ -104,6 +104,81 @@ def test_render_full_meta_vocabulary(tmp_path):
     assert len(written) == 1
 
 
+def test_the_legend_names_each_series_once_across_the_spaghetti(tmp_path):
+    """Given a named model trace overlaid once per posterior draw, When the
+    figure is rendered, Then the legend names it ONCE -- 50 identical rows
+    would otherwise swamp the panel."""
+    labeled = Trace(
+        name="A MIST track",
+        role="model",
+        kind="line",
+        x=np.linspace(0.0, 1.0, 5),
+        y=np.linspace(0.0, 1.0, 5),
+        style={"legend": True},
+    )
+    groups = [[_spec(meta={"file_tag": "legend"}, extra_traces=(labeled,))]
+              for _ in range(6)]
+
+    import matplotlib.pyplot as plt
+
+    import exozippy.plotrender as pr
+
+    figures = []
+    original = pr.plt.subplots
+
+    def spy(**kwargs):
+        fig, ax = original(**kwargs)
+        figures.append((fig, ax))
+        return fig, ax
+
+    pr.plt.subplots = spy
+    try:
+        pr.render_spec_groups(groups, filename_prefix=str(tmp_path / "p"))
+        labels = [t.get_text() for t in figures[0][1].get_legend().get_texts()]
+    finally:
+        pr.plt.subplots = original
+        plt.close("all")
+
+    assert labels.count("A MIST track") == 1
+    assert len(labels) == len(set(labels))
+
+
+def test_zorder_style_overrides_the_roles_default_draw_order(tmp_path):
+    """Given a data mark that must sit ON TOP of the model spaghetti rather
+    than under it, When the style names a zorder, Then it overrides the
+    role's default (data 1, model 2) instead of being ignored."""
+    mark = Trace(
+        name="mark",
+        role="data",
+        kind="scatter",
+        x=np.array([1.0]),
+        y=np.array([2.0]),
+        style={"marker": "s", "zorder": 5},
+    )
+    spec = _spec(meta={"file_tag": "zorder"}, extra_traces=(mark,))
+
+    render_spec_groups([[spec]], filename_prefix=str(tmp_path / "p"))
+
+    # Redraw onto a live axes so the artists can be inspected.
+    import matplotlib.pyplot as plt
+
+    from exozippy.plotrender import _draw_data, _draw_model
+
+    fig, ax = plt.subplots()
+    try:
+        _draw_data(ax, mark)
+        _draw_model(ax, spec.traces[1], 0.8)
+        _draw_data(ax, spec.traces[0])
+        zorders = [line.get_zorder() for line in ax.get_lines()]
+    finally:
+        plt.close(fig)
+
+    # errorbar offsets its line's zorder by +0.1, so compare the ORDER, not
+    # the literal numbers: raised mark above model above plain data.
+    assert zorders[0] > zorders[1] > zorders[2]
+    assert zorders[1] == 2  # model, at its default
+
+
 class _FakeComponent:
     """plot_data stub: fails on request for a given draw index."""
 
