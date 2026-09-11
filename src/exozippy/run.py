@@ -945,19 +945,12 @@ def _run_fit(config, gui, user_params=None):
                     tune=tune,
                     chains=chains,
                     target_accept=target_accept,
-                    initvals=internal_start,
                     jitter=sampler_cfg.get("jitter", False),
                     chain_method=chain_method,
                     nuts_sampler=method,
                     random_seed=seed,
                 )
             elif method == "nutpie":
-                nutpie_init_mean = np.concatenate(
-                    [
-                        np.asarray(raw_start[v.name], dtype=float).ravel()
-                        for v in model.free_RVs
-                    ]
-                )
                 # No start is passed, and here that FIXES the branch rather
                 # than merely simplifying it (review 4.3.1).  It used to hand
                 # nutpie `init_mean`, a flat float64 array in free_RVs order,
@@ -988,7 +981,6 @@ def _run_fit(config, gui, user_params=None):
                         chains=chains,
                         nuts_sampler="nutpie",
                         target_accept=target_accept,
-                        nuts_sampler_kwargs={"init_mean": nutpie_init_mean},
                         cores=cores,
                         random_seed=seed,
                         return_inferencedata=True,
