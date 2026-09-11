@@ -34,7 +34,9 @@ Trace ``role`` drives the mark (mirroring plotly-adapter):
 Trace ``style`` (all optional): ``series_index`` (fixed categorical color
 ``C{i}`` -- assigned per instrument at load, never re-cycled per chart),
 ``color`` / ``marker`` user overrides, ``lw`` line width, ``legend`` to
-force a legend entry on a non-data trace.
+force a legend entry on a non-data trace, ``zorder`` to override the
+role's default draw order (data 1, model 2) -- for a mark that must sit
+ON TOP of the model spaghetti rather than under it.
 
 PlotSpec ``meta`` presentation keys (all optional):
 
@@ -96,7 +98,7 @@ def _draw_data(ax, trace):
         fmt=style.get("marker") or "o",
         color=_trace_color(trace),
         alpha=_DATA_ALPHA,
-        zorder=1,
+        zorder=style.get("zorder", 1),
         label=trace.name or None,
     )
 
@@ -105,6 +107,7 @@ def _draw_model(ax, trace, alpha):
     style = trace.style or {}
     color = _trace_color(trace, fallback=_MODEL_COLOR)
     label = trace.name if style.get("legend") else None
+    zorder = style.get("zorder", 2)
     if trace.kind == "scatter":
         ax.plot(
             np.asarray(trace.x, dtype=float),
@@ -112,7 +115,7 @@ def _draw_model(ax, trace, alpha):
             style.get("marker") or ".",
             color=color,
             alpha=alpha,
-            zorder=2,
+            zorder=zorder,
             label=label,
         )
     else:
@@ -123,7 +126,7 @@ def _draw_model(ax, trace, alpha):
             color=color,
             lw=style.get("lw", 1.5),
             alpha=alpha,
-            zorder=2,
+            zorder=zorder,
             label=label,
         )
 
@@ -215,9 +218,22 @@ def render_spec_groups(spec_groups, filename_prefix="debug"):
             ax.set_xlabel(spec.xlabel)
             ax.set_ylabel(spec.ylabel)
             ax.set_title(spec.title)
-            handles, _labels = ax.get_legend_handles_labels()
+            # De-duplicate by LABEL: a spaghetti figure overlays the same
+            # named model trace once per draw (50 identical "A MIST track"
+            # rows would otherwise swamp the panel), and a component may
+            # legitimately name the same series in more than one trace.
+            # First occurrence wins, so the legend keeps spec order.
+            handles, labels = ax.get_legend_handles_labels()
             if handles:
-                ax.legend(loc="best", fontsize="small")
+                unique = {}
+                for handle, label in zip(handles, labels):
+                    unique.setdefault(label, handle)
+                ax.legend(
+                    unique.values(),
+                    unique.keys(),
+                    loc="best",
+                    fontsize="small",
+                )
             fig.tight_layout()
 
             tag = meta.get("file_tag") or spec.id.replace(".", "_")
