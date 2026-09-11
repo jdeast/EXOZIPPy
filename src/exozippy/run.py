@@ -608,8 +608,11 @@ def _run_fit(config, gui, user_params=None):
     tune = int(sampler_cfg.get("tune", 2000))
     draws = int(sampler_cfg.get("draws", 2000))
     chains = int(sampler_cfg.get("chains", 4))
-    _cores_raw = resolve_cores_setting(sampler_cfg.get("cores", None))
-    cores = _cores_raw if _cores_raw is not None else default_cores()
+    # None (absent, or explicitly null) means AUTO everywhere -- never
+    # serial; serial is cores: 1 (review 6.11.3).
+    cores = resolve_cores_setting(sampler_cfg.get("cores", None))
+    if cores is None:
+        cores = default_cores()
     target_accept = sampler_cfg.get("target_accept", 0.9)
     method = sampler_cfg.get(
         "method", None
