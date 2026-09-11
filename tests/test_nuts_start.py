@@ -93,8 +93,15 @@ _START_KWARGS = {
 # polished start after `recenter_whitening_anchor` (review 4.3.1).  They are
 # guarded by the mechanism (below) rather than by a kwarg.  `sample_jax_nuts`
 # is here because `set_initval` was measured to place its first draw bit for
-# bit where `initvals=` did; the two `pm.sample` calls are here because
-# pymc reads the model's initial point for both.
+# bit where `initvals=` did.
+#
+# The two `pm.sample` branches (plain NUTS, nutpie) belong to the same group
+# but CANNOT be members of this set: `pm.sample` is an attribute call with
+# two call sites, so a bare name would not tell them apart.  They get their
+# own test, `test_neither_pm_sample_branch_is_handed_a_start`, which is what
+# replaces 1.3.6's `test_both_pm_sample_branches_consume_the_start` in the
+# new polarity.  This set's only jobs are the ordering `min()` and the
+# disjointness assertion.
 _MODEL_START_BRANCHES = {"sample_jax_nuts"}
 
 # `nested_sample` is the one branch that takes no start for a DIFFERENT
@@ -221,6 +228,53 @@ def test_the_no_start_exemption_fires_and_says_why(func):
     assert "prior-driven" in src, (
         "the reason nested takes no start is no longer recorded at the call "
         "site; without it this exemption reads as an omission"
+    )
+
+
+def test_neither_pm_sample_branch_is_handed_a_start():
+    """
+    Given run.py's two `pm.sample` branches (plain NUTS and nutpie),
+    When their call sites are read,
+    Then neither passes a start of its own.
+
+    This is 1.3.6's `test_both_pm_sample_branches_consume_the_start` in the
+    NEW polarity.  Its two spellings are what the guard watches for coming
+    back: `initvals=` on the plain branch (1.3.6's own fix, superseded
+    because it starts at a better physical point and a far worse RAW one --
+    max |raw| 684 on kelt4 RV-only against master's 0), and `init_mean` on
+    the nutpie branch, which was MEASURED inert for a pymc-compiled model
+    (nutpie's `_make_model` takes it and never uses it) and so was a second
+    live instance of the same bug class.
+
+    Handled apart from the parametrized cases because `pm.sample` is an
+    attribute call with two call sites, so a bare function name cannot tell
+    them apart.  Asserting the ABSENCE is safe only because the sibling
+    dynamic test pins that the start the model carries is the right one; on
+    its own this would pass against a broken start too.
+    """
+    src = RUN_PY.read_text(encoding="utf-8")
+
+    # ACT
+    pm_calls = [
+        c for c in _call_sources(src, "sample") if c.startswith("pm.sample(")
+    ]
+
+    # ASSERT
+    assert len(pm_calls) >= 2, f"expected 2+ pm.sample calls, got {pm_calls}"
+    nutpie = [c for c in pm_calls if "nutpie" in c]
+    plain = [c for c in pm_calls if "nutpie" not in c]
+    assert len(nutpie) == 1, f"expected one nutpie branch, got {len(nutpie)}"
+    assert len(plain) == 1, f"expected one plain-NUTS branch, got {len(plain)}"
+
+    assert not re.search(r"\binitvals\s*=", plain[0]), (
+        "the plain-NUTS branch is being handed initvals= again; after 4.3.1 "
+        "Model.initial_point() IS the polished start, and a second channel "
+        f"for it is what let one branch disagree with the others:\n{plain[0]}"
+    )
+    assert not re.search(r"\binit_mean\b", nutpie[0]), (
+        "the nutpie branch passes init_mean again; it is INERT for a "
+        "pymc-compiled model (measured on nutpie 0.16.11), so it reads as a "
+        f"start being consumed while nothing consumes it:\n{nutpie[0]}"
     )
 
 
