@@ -2390,14 +2390,29 @@ class Parameter:
         has_lower = np.isfinite(lowers) & needs_barrier
         has_upper = np.isfinite(uppers) & needs_barrier
         if np.any(has_lower | has_upper):
-            # PRELIMINARY barrier steepness from init_scale (falls back to
-            # gaussian_scales for Gaussian params, where gaussian_scales =
-            # sigma).  These are replaced after the whitening rescale by the
-            # measured 1-sigma response of this parameter to unit raw steps
-            # (whitening.measure_barrier_scales -> set_barrier_scales), via
-            # the shared variable below.  A user bound_scale pins an element
-            # (a modeling choice: barrier transition width = 0.01 * scale).
-            barrier_scales = np.where(use_logit, scales, gaussian_scales)
+            # PRELIMINARY barrier steepness: gaussian_scales, which is
+            # init_scale except on the elements that carry an explicit sigma
+            # (where it IS sigma) -- see section 3.  These are replaced after
+            # the whitening rescale by the measured 1-sigma response of this
+            # parameter to unit raw steps (whitening.measure_barrier_scales ->
+            # set_barrier_scales), via the shared variable below.  A user
+            # bound_scale pins an element (a modeling choice: barrier
+            # transition width = 0.01 * scale).
+            #
+            # This was `np.where(use_logit, scales, gaussian_scales)`, whose
+            # first arm cannot be selected on any element the barrier reads
+            # and made no difference anywhere even so (review 5.2.3).  Both
+            # halves are proven by construction and were measured on all 31
+            # shipped configs (1771 parameters, 980 logit elements, 422
+            # barrier elements: zero overlap, zero difference).  Do not
+            # reintroduce it as "defensive": (1) `use_logit` is set only
+            # inside `if is_sampled[i]` while needs_barrier's sampled arm is
+            # `is_sampled & ~use_logit` and its derived arm is disjoint from
+            # is_sampled, so needs_barrier & use_logit is empty; and (2) even
+            # off the barrier's elements, gaussian_scales starts as a copy of
+            # `scales` and is written ONLY in the two branches a logit element
+            # never takes, so the two arms hold the same number there anyway.
+            barrier_scales = gaussian_scales.copy()
             # A missing scale (e.g. a derived vector element the relaxation
             # engine never resolved) must soften the barrier, not poison the
             # whole logp with NaN.

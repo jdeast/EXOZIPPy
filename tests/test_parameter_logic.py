@@ -1676,3 +1676,45 @@ def test_draws_piled_on_one_quantile_edge_render_a_bare_zero():
     assert summary.err_plus > 0.0
     assert summary.format()[1] == "0"
     assert "_{-0.0}" not in summary.latex_value()
+
+
+# ---------------------------------------------------------------------------
+# No logit element ever takes a soft barrier (review 5.2.3)
+# ---------------------------------------------------------------------------
+
+
+def test_a_logit_element_never_takes_a_soft_barrier():
+    """
+    Given a vector with one bounded SAMPLED element (the logit transform) and
+    one DERIVED element carrying finite bounds (a soft barrier),
+    When it is built,
+    Then the two sets are disjoint: no element both uses the logit transform
+    and reads a barrier scale.
+
+    This is what made build_pymc's `np.where(use_logit, scales,
+    gaussian_scales)` a dead arm: needs_barrier's sampled arm is
+    `is_sampled & ~use_logit` and its derived arm is disjoint from
+    is_sampled, so the first arm cannot be selected on any element the
+    barrier consumes.  Pinned so the arm is not reintroduced as
+    "defensive" -- and so that a future role change that DOES put a barrier
+    on a logit element fails here, where the scale it would read is decided.
+    """
+    p = _two_element_param(
+        element_expressions=[
+            ElementExpression(
+                mask=[False, True],
+                expr=lambda: pt.as_tensor_variable(np.array([0.0, 0.42])),
+            )
+        ],
+    )
+
+    with pm.Model():
+        p.build_pymc()
+
+    use_logit = np.asarray(p._raw_transform["use_logit"], dtype=bool)
+    needs_barrier = np.asarray(p._barrier_state["needs_barrier"], dtype=bool)
+
+    # The control: both sets are non-empty, so "disjoint" is a real claim.
+    assert use_logit.tolist() == [True, False]
+    assert needs_barrier.tolist() == [False, True]
+    assert not np.any(use_logit & needs_barrier)
