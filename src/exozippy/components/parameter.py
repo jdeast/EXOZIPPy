@@ -576,9 +576,24 @@ class OwnPrePatchRef:
     unorderable self-loop (graph.py skips it).  Component._resolve_dep_node
     returns this sentinel instead; Parameter._patch_elements hands the
     expression closure the PRE-PATCH tensor at patch time, whose SAMPLED
-    elements are already final (the same guarantee the same-parameter
-    element LINKS rely on).  build_pymc refuses a reference to any
-    non-sampled element -- those slots hold placeholders or pins.
+    and FIXED elements are already final (the same guarantee the
+    same-parameter element LINKS rely on).
+
+    Fixed counts as final, and deliberately: a `sigma: 0` pin takes the
+    constant-0 raw coordinate and the linear branch, so its pre-patch slot
+    holds exactly `inits[i]` -- its pin -- and the pin rule guarantees that
+    number exists.  What build_pymc refuses is a reference to a DERIVED,
+    REPORTED or INACTIVE element: the first two slots hold the transform's
+    placeholder until an expression overwrites them, and an inactive one
+    holds a bookkeeping pin that may be anything it resolved to.  The guard
+    is `_non_sampled = inactive | (every expression mask)` -- read it as
+    "not yet final", not as "not sampled".
+
+    The one element the guard does NOT cover is a HARD-LINKED one: it is
+    `sigma: 0` too, but section 5b writes its value AFTER 5a's patch, so its
+    pre-patch slot holds its resolved initval rather than the link's value.
+    Nothing combines a hard link with a same-parameter element dep today; if
+    something does, widen the mask rather than trusting this paragraph.
     """
 
     def __init__(self, idx):
@@ -2019,12 +2034,15 @@ class Parameter:
             # see finalize_deferred.  Their expressions read quantities that,
             # on other elements, are derived from THIS parameter, so they can
             # only be built once every parameter exists.
-            # Same-parameter element deps read the PRE-PATCH tensor,
-            # which is only final on SAMPLED elements: derived/reported
-            # slots hold placeholders and inactive ones bookkeeping pins.
-            # Refuse a reference to any of those, per element, before
-            # anything is assembled.  (The deferred/reported pass patches
-            # against the FINAL tensor and carries no such refs today.)
+            # Same-parameter element deps read the PRE-PATCH tensor, which
+            # is final on SAMPLED and FIXED elements but not on the rest:
+            # derived/reported slots still hold the transform's placeholder
+            # and inactive ones a bookkeeping pin.  A `sigma: 0` pin IS
+            # final here -- its raw is the constant 0 and the linear branch
+            # returns exactly its initval -- so the mask below refuses
+            # derived | reported | inactive, per element, before anything is
+            # assembled.  (The deferred/reported pass patches against the
+            # FINAL tensor and carries no such refs today.)
             _all_masks = [
                 np.asarray(m, dtype=bool) for m, _e, _o, _s in expr_specs
             ]
@@ -2043,10 +2061,12 @@ class Parameter:
                     raise ValueError(
                         f"Parameter '{self.label}': a same-parameter "
                         f"element dep references element(s) {bad}, "
-                        f"which are not SAMPLED -- the pre-patch tensor "
-                        f"is only final on sampled elements.  Reference "
-                        f"sampled elements only, or derive through a "
-                        f"separate parameter."
+                        f"which are DERIVED, REPORTED or INACTIVE -- the "
+                        f"pre-patch tensor is final only on sampled "
+                        f"elements and on active 'sigma: 0' pins; those "
+                        f"slots still hold a placeholder or a bookkeeping "
+                        f"pin.  Reference a sampled or fixed element, or "
+                        f"derive through a separate parameter."
                     )
             for mask, expr, output_only, sliced in expr_specs:
                 if output_only:

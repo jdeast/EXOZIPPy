@@ -781,8 +781,9 @@ class Component(ABC):
         # add_parameter -- the tensor does not exist yet.  Return an
         # OwnPrePatchRef sentinel; _patch_elements substitutes the
         # pre-patch tensor's elements at patch time, and build_pymc
-        # refuses any referenced element that is not SAMPLED (only
-        # sampled elements are final pre-patch).  `where` is
+        # refuses any referenced element that is DERIVED, REPORTED or
+        # INACTIVE (sampled elements and active `sigma: 0` pins are the
+        # ones already final pre-patch -- see OwnPrePatchRef).  `where` is
         # f"{prefix}.{param_name}" at both call sites, which is what
         # identifies the parameter under construction.
         building = None
