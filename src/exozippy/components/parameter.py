@@ -237,7 +237,47 @@ def _as_flat_array(x: Any) -> np.ndarray:
     return arr
 
 
-def to_vec(val, n_elements, fill=np.nan):
+def _refuse_over_long_vector(size, n_elements, where):
+    """Refuse a value array LONGER than the parameter's element count.
+
+    SHORTER is legal and load-bearing: ``ConfigManager.resolve`` leaves the
+    elements nobody named as NaN and ``to_vec`` fills the tail, which is what
+    ``_initval_present`` reads as "this element was never set".  LONGER has no
+    reading at all -- ``to_vec`` copied the first ``n_elements`` and dropped
+    the rest with no message, so a wrongly sized array produced a model built
+    from the values that happened to land first.
+
+    The user's vectors are sized upstream (``resolve`` returns one entry per
+    element, and a per-seed ``initval`` list collapses to seed 0 there), and a
+    component ``"overrides"`` array is indexed element by element, so the live
+    caller is a component writing a manifest OPTION -- ``lower``/``upper``/
+    ``sigma`` straight onto the entry, which win outright and reach
+    ``Parameter`` unsized.  Sizing such an array from the component's config
+    list rather than from the parameter's own ``shape`` is review 1.1.1's
+    hazard, and every other spelling of it RAISES: 1.1.1 itself
+    (``_check_broadcast_covers_vector``), 2.5.2 (an ambiguous inline mask) and
+    ``manifest.normalize_selector`` (a per-element mask sized from the wrong
+    count).  This is the same class and gets the same answer.
+    """
+    if size <= n_elements:
+        return
+    who = where or "to_vec"
+    raise ValueError(
+        f"{who}: a value vector of length {size} was supplied for a "
+        f"parameter with {n_elements} element(s); the last "
+        f"{size - n_elements} would be dropped silently. Size the array from "
+        f"the PARAMETER's element count (its manifest 'shape'), not from the "
+        f"component's config list. A SHORTER array is legal (the unnamed "
+        f"elements stay unset); a longer one has no reading."
+    )
+
+
+def to_vec(val, n_elements, fill=np.nan, where=None):
+    """One value per element, from a scalar, an array or a symbolic node.
+
+    ``where`` names the field for the error message an over-long array now
+    raises (``_refuse_over_long_vector``); it is otherwise unused.
+    """
     if val is None:
         return np.full(n_elements, fill, dtype=float)
 
@@ -277,6 +317,7 @@ def to_vec(val, n_elements, fill=np.nan):
             return arr[0]
         return np.full(n_elements, float(arr[0]), dtype=float)
 
+    _refuse_over_long_vector(arr.size, n_elements, where)
     res = np.full(n_elements, fill, dtype=float)
     n_to_copy = min(n_elements, arr.size)
     res[:n_to_copy] = arr.astype(float)[:n_to_copy]
@@ -1002,6 +1043,10 @@ class Parameter:
                                (``to_vec`` fills them), and ``NaN`` means
                                absent (``ConfigManager.resolve`` writes NaN
                                into an array for "this element was never set").
+
+        An array LONGER than ``n_elements`` raises, exactly as ``to_vec``
+        does, so the mask and the vector cannot disagree about which element
+        is which (review 2.2.4).
         """
         init = self.initval
         if init is None:
@@ -1018,6 +1063,7 @@ class Parameter:
             return np.zeros(n_elements, dtype=bool)
         if arr.size == 1:
             return np.full(n_elements, not bool(np.isnan(arr[0])))
+        _refuse_over_long_vector(arr.size, n_elements, f"{self.label}.initval")
         present = np.zeros(n_elements, dtype=bool)
         n_copy = min(n_elements, arr.size)
         present[:n_copy] = ~np.isnan(arr[:n_copy])
@@ -1428,12 +1474,35 @@ class Parameter:
         )
         n_elements = self._n_elements()
 
-        inits = to_vec(self.initval, n_elements, fill=0.0)
-        scales = to_vec(self.init_scale, n_elements, fill=np.nan)
-        mus = to_vec(self.mu, n_elements, fill=np.nan)
-        sigmas = to_vec(self.sigma, n_elements, fill=np.nan)
-        lowers = to_vec(self.lower, n_elements, fill=-np.inf)
-        uppers = to_vec(self.upper, n_elements, fill=np.inf)
+        # `where=` only names the field in the error an over-long array
+        # raises (review 2.2.4); it changes nothing about the vector.
+        inits = to_vec(
+            self.initval,
+            n_elements,
+            fill=0.0,
+            where=f"{self.label}.initval",
+        )
+        scales = to_vec(
+            self.init_scale,
+            n_elements,
+            fill=np.nan,
+            where=f"{self.label}.init_scale",
+        )
+        mus = to_vec(
+            self.mu, n_elements, fill=np.nan, where=f"{self.label}.mu"
+        )
+        sigmas = to_vec(
+            self.sigma, n_elements, fill=np.nan, where=f"{self.label}.sigma"
+        )
+        lowers = to_vec(
+            self.lower,
+            n_elements,
+            fill=-np.inf,
+            where=f"{self.label}.lower",
+        )
+        uppers = to_vec(
+            self.upper, n_elements, fill=np.inf, where=f"{self.label}.upper"
+        )
 
         # 2. IDENTIFY ROLES, PER ELEMENT
         #
@@ -1465,7 +1534,12 @@ class Parameter:
         # every check below -- including the pin-must-say-what-it-pins-to one,
         # which such a pin now satisfies by construction.
         if np.any(is_inactive) and self.inactive_value is not None:
-            fill = to_vec(self.inactive_value, n_elements, fill=np.nan)
+            fill = to_vec(
+                self.inactive_value,
+                n_elements,
+                fill=np.nan,
+                where=f"{self.label}.inactive_value",
+            )
             take = is_inactive & np.isfinite(fill)
             inits = np.where(take, fill, inits)
         # sigma == 0 is the ONE way for a USER to pin an element.  A tiny
@@ -2324,7 +2398,12 @@ class Parameter:
                 barrier_scales,
                 1.0,
             )
-            user_bound = to_vec(self.bound_scale, n_elements, fill=np.nan)
+            user_bound = to_vec(
+                self.bound_scale,
+                n_elements,
+                fill=np.nan,
+                where=f"{self.label}.bound_scale",
+            )
             pinned = np.isfinite(user_bound) & (user_bound > 0)
             barrier_scales = np.where(pinned, user_bound, barrier_scales)
 
@@ -2873,7 +2952,12 @@ class Parameter:
         tf["gaussian_scales"] = gauss_scales.copy()
 
         n_elements = self._n_elements()
-        phys_scales = to_vec(self.init_scale, n_elements, fill=1.0)
+        phys_scales = to_vec(
+            self.init_scale,
+            n_elements,
+            fill=1.0,
+            where=f"{self.label}.init_scale",
+        )
         raw_init = (
             np.asarray(self.raw_initval, dtype=float).reshape(-1)
             if self.raw_initval is not None
@@ -3060,7 +3144,11 @@ class Parameter:
             return np.zeros(0)
         idx = tf["sampled_idx"]
         n_elements = self._n_elements()
-        v = to_vec(initval_internal, n_elements)
+        v = to_vec(
+            initval_internal,
+            n_elements,
+            where=f"{self.label} seed initval",
+        )
         v = np.asarray(v, dtype=float).reshape(-1)
         raw = np.zeros(len(idx))
         for j, i in enumerate(idx):

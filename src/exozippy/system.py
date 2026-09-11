@@ -1083,7 +1083,12 @@ class System(Component):
                         else 1
                     )
                     iv = np.asarray(
-                        to_vec(par.initval, n_elements, fill=np.nan),
+                        to_vec(
+                            par.initval,
+                            n_elements,
+                            fill=np.nan,
+                            where=f"{par.label}.initval",
+                        ),
                         dtype=float,
                     )
                     for i in tf["sampled_idx"]:
@@ -1114,7 +1119,9 @@ class System(Component):
         n_elements = (
             int(np.prod(par.shape)) if par.shape not in ((), None) else 1
         )
-        base_iv = to_vec(par.initval, n_elements, fill=np.nan)
+        base_iv = to_vec(
+            par.initval, n_elements, fill=np.nan, where=f"{par.label}.initval"
+        )
         vals = np.array(base_iv, dtype=float).reshape(-1).copy()
         found = False
         for i in range(n_elements):

@@ -6,7 +6,13 @@ import pytensor.tensor as pt
 import pytest
 
 from conftest import MockSystem
-from exozippy.components.parameter import Parameter, UnitTranslator, to_vec
+from exozippy.components.parameter import (
+    ElementExpression,
+    Parameter,
+    PosteriorSummary,
+    UnitTranslator,
+    to_vec,
+)
 from exozippy.components.star.star import Star
 from exozippy.config import ConfigManager
 from exozippy.diagnostics import ModelAuditor
@@ -1477,3 +1483,128 @@ def test_to_latex_prior_def_stays_unsuffixed_for_a_scalar():
         p.to_latex_prior_def()
     )
     assert f"\\{p.latex_varname}prior" in p.to_table_line()
+
+
+# ---------------------------------------------------------------------------
+# An over-long value vector (review 2.2.4)
+#
+# SHORTER than the element count is legal and load-bearing: `resolve` leaves
+# the elements nobody named as NaN and to_vec fills the tail, which is what
+# `_initval_present` reads as "never set".  LONGER had no reading -- to_vec
+# copied the first n and dropped the rest with no message -- so a wrongly
+# sized array built a model out of whichever values happened to land first.
+# Every other spelling of that sizing hazard raises (1.1.1's
+# _check_broadcast_covers_vector, 2.5.2's ambiguous inline mask,
+# manifest.normalize_selector), and so does this one.
+# ---------------------------------------------------------------------------
+
+
+def _two_element_param(**kwargs):
+    """A two-element sampled Parameter with everything the build needs."""
+    defaults = dict(
+        initval=np.full(2, 0.5),
+        init_scale=np.full(2, 0.1),
+        lower=np.zeros(2),
+        upper=np.ones(2),
+        unit="",
+        internal_unit="",
+        shape=(2,),
+        names=["i0", "i1"],
+    )
+    defaults.update(kwargs)
+    return Parameter(label="comp.p", **defaults)
+
+
+@pytest.mark.parametrize(
+    "val,expected",
+    [
+        (None, [np.nan, np.nan]),  # nothing anywhere
+        (0.25, [0.25, 0.25]),  # scalar broadcast
+        ([7.0], [7.0, 7.0]),  # length-1 broadcast
+        ([1.0, 2.0], [1.0, 2.0]),  # exactly one per element
+    ],
+)
+def test_to_vec_still_accepts_every_legal_vector_length(val, expected):
+    """
+    Given a value that is absent, scalar or no longer than the element count,
+    When to_vec sizes it for a two-element parameter,
+    Then it comes back unchanged.
+
+    The control for the raise below: the guard must reject ONLY the
+    over-long case, and a shorter array in particular has to keep working --
+    resolve writes NaN for "this element was never set" and to_vec's fill is
+    how that reaches _initval_present.
+    """
+    got = to_vec(val, 2)
+
+    assert np.allclose(got, expected, equal_nan=True)
+
+
+def test_to_vec_short_vector_still_fills_the_tail():
+    """
+    Given a length-2 array for a THREE-element parameter,
+    When to_vec sizes it,
+    Then the named elements survive and the unnamed one is the fill.
+    """
+    got = to_vec([1.0, 2.0], 3, fill=-np.inf)
+
+    assert got.tolist() == [1.0, 2.0, -np.inf]
+
+
+def test_to_vec_refuses_an_over_long_vector_instead_of_truncating():
+    """
+    Given a length-3 value array for a two-element parameter,
+    When to_vec sizes it,
+    Then it raises, naming the field and both lengths.
+
+    Before: it returned the first two entries and dropped the third with no
+    message, so the built model was indistinguishable from one whose array
+    was the right length all along.
+    """
+    with pytest.raises(ValueError, match="length 3.*2 element"):
+        to_vec([1.0, 2.0, 3.0], 2, where="comp.p.sigma")
+
+    # The message has to name the field, because the whole point is telling
+    # a component author WHICH manifest entry is mis-sized.
+    try:
+        to_vec([1.0, 2.0, 3.0], 2, where="comp.p.sigma")
+    except ValueError as exc:
+        assert "comp.p.sigma" in str(exc)
+
+
+@pytest.mark.parametrize(
+    "field", ["initval", "sigma", "lower", "upper", "mu", "init_scale"]
+)
+def test_an_over_long_field_is_refused_at_build_time(field):
+    """
+    Given a two-element Parameter handed a length-3 array in one field,
+    When build_pymc reads it,
+    Then it raises naming that field, rather than silently dropping
+    element 2.
+
+    This is the live path: a component writing a manifest OPTION
+    (lower/upper/sigma straight onto the entry) sized from its own config
+    list instead of from the parameter's manifest `shape`.  The user's
+    vectors are sized upstream by resolve.
+    """
+    p = _two_element_param(**{field: np.full(3, 0.25)})
+
+    with pm.Model():
+        with pytest.raises(ValueError, match=f"comp.p.{field}"):
+            p.build_pymc()
+
+
+def test_the_initval_present_mask_refuses_the_same_over_long_vector():
+    """
+    Given a two-element Parameter with a length-3 initval,
+    When _initval_present builds its per-element mask,
+    Then it raises, exactly as to_vec does.
+
+    The mask mirrors to_vec's broadcasting rules so it lines up element for
+    element with the vector to_vec returns; if only one of the two refused an
+    over-long array the pair could disagree about which element is which.
+    """
+    p = _two_element_param(initval=np.array([0.25, 0.75, 0.9]))
+
+    with pytest.raises(ValueError, match="length 3.*2 element"):
+        p._initval_present(2)
