@@ -911,8 +911,16 @@ def write_param_file(
         # Sorted: the body deletes the x/y entries and inserts the angle in
         # their place, so a hash-ordered set intersection would shuffle the
         # written params file's key order from run to run.
-        for prefix in sorted(set(_x_keys) & set(_y_keys)):
-            x_key, y_key = _x_keys[prefix], _y_keys[prefix]
+        #
+        # `pair_prefix` is the PARAMETER-NAME stem the pair shares -- "lens",
+        # "orbit.b" -- and is emphatically not the run `prefix` bound at the
+        # top of this function from `config["prefix"]`.  It used to be spelled
+        # `prefix` and so shadowed it (review 2.3.8); nothing below the loop
+        # read the outer name, so the bug was latent rather than live, but any
+        # future line down there would have silently got "lens" where it
+        # wanted "fitresults/model".
+        for pair_prefix in sorted(set(_x_keys) & set(_y_keys)):
+            x_key, y_key = _x_keys[pair_prefix], _y_keys[pair_prefix]
             xv, yv = output[x_key]["initval"], output[y_key]["initval"]
             # initval may be a scalar (single-seed) or a length-K list
             # (multi-seed): convert every seed's (x, y) to its own angle.
@@ -934,15 +942,15 @@ def write_param_file(
             # this the pass-through loop below would overwrite the fresh MAP
             # angle with the stale entry, breaking the restart contract.
             comp_key, idx, name = key_context.get(
-                x_key, (prefix.split(".", 1)[0], 0, None)
+                x_key, (pair_prefix.split(".", 1)[0], 0, None)
             )
             existing_key, existing_entry = _find_existing(
                 existing_params, comp_key, idx, name, angle_name
             )
             if existing_key:
                 consumed_existing.add(existing_key)
-            output[f"{prefix}.{angle_name}"] = _apply_existing_constraints(
-                angle_entry, existing_entry
+            output[f"{pair_prefix}.{angle_name}"] = (
+                _apply_existing_constraints(angle_entry, existing_entry)
             )
 
     _CONSTRAINT_FIELDS = {"sigma", "upper", "lower"}
