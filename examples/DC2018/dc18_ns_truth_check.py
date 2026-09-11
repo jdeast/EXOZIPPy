@@ -86,6 +86,14 @@ def main():
         seed=11,
         checkpoint_dir=args.ckpt,
     )
+    # Keep the trace (see the note in dc18_dynesty_sweep.py): a summary
+    # cannot be rescored when the metric turns out to be wrong.
+    try:
+        idata.to_netcdf(os.path.abspath("ns_truth_check_trace.nc"))
+        print("saved trace -> ns_truth_check_trace.nc", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print("WARNING: trace not saved (%s)" % type(e).__name__, flush=True)
+
     post = idata.posterior
     print(
         "posterior vars: %d   draws: %s"

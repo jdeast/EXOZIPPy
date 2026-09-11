@@ -8,12 +8,18 @@ wrapper hardcoded `sample="rwalk"`, which dynesty recommends only for
 d=27 (the usual guidance is ~50*ndim).  So the open question is whether
 that collapse indicts the BACKEND or the DEFAULTS.
 
-THE SCORE IS THE TRUTH PULL, not the wall clock.  A fast wrong answer is
-worse than a slow right one, and the previous round's mistake was reading
-speed as success.  Only the LIGHT-CURVE OBSERVABLES count: t_0, u_0, log_s,
-log_q and log_rho are what the data constrain.  theta_E/pi_rel/mass need
-theta_star, which this arm has no SED to supply, so they inherit 8.6.7's
-mu_rel error whatever the sampler does and are reported but EXCLUDED.
+THE PULL REPORTED HERE IS NOT A VALID RANKING -- see review 7.15.1.  It was
+the metric when this grid was written, and the grid itself disproved it:
+max|pull| came back MONOTONIC IN n_eff (4,803 -> 25.5; 33,752 -> 27.6;
+80,138 -> 43.2), because resolving a posterior better makes it narrower and
+narrow-in-the-wrong-mode is what a pull punishes.  PTDE, the control, scores
+39.4 on the same arm.  So this number ranks samplers by how VAGUE they are.
+It is kept because it is cheap and comparable across the grid, but the
+verdict belongs to dc18_mode_aware_score.py, which asks whether truth's mode
+was found at all, what weight it carries, and the pull WITHIN it.
+That is why the trace is now saved (see the note by to_netcdf): this grid
+could not be rescored the first time, which is the whole reason 7.15.1 has
+no sampler ranking attached to it yet.
 """
 
 import argparse
@@ -117,8 +123,28 @@ def main():
         if scored and np.isfinite(pull):
             pulls.append(abs(pull))
 
+    # SAVE THE TRACE, ALWAYS.  Twice now a comparison has had to be
+    # abandoned because a harness kept only its summary: the severed-v3
+    # hot-chain analysis, and this very grid, whose ranking could not be
+    # rescored when the metric it used turned out to be wrong (7.15.1).  A
+    # summary is a CLAIM ABOUT a trace; keeping only the claim means the
+    # next question cannot be asked without paying for the fit again.
+    trace_path = os.path.abspath("dynsweep_%s_trace.nc" % args.tag)
+    try:
+        idata.to_netcdf(trace_path)
+        print("saved trace -> %s" % trace_path, flush=True)
+    except Exception as e:  # noqa: BLE001
+        trace_path = None
+        print(
+            "WARNING: could not save the trace (%s: %s) -- the summary below "
+            "is then the ONLY record and cannot be rescored"
+            % (type(e).__name__, e),
+            flush=True,
+        )
+
     out = {
         "tag": args.tag,
+        "trace": trace_path,
         "nlive": args.nlive,
         "sample": args.sample or "auto-by-ndim",
         "bound": args.bound or "multi",
