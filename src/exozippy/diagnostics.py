@@ -2,7 +2,10 @@ from typing import Dict
 
 import numpy as np
 import pytensor
+import pytensor.graph.basic
+import pytensor.graph.traversal
 
+from .components.parameter import derived_constraint_message
 from .config import USER_PARAM_KEYS
 
 # check_user_starts' noise floor.  A derived quantity reassembled through a
@@ -168,6 +171,60 @@ class ModelAuditor:
 
         return unused_items
 
+    def _derived_sources(self, p):
+        """The SAMPLED parameters a derived value is computed FROM.
+
+        Read off the GRAPH, like every other answer in
+        ``check_user_starts``: the tensor ``build_pymc`` assembled is what
+        the value actually consumes, so the names it reaches are the ones
+        that can move it.  A manifest ``deps`` list would be the other
+        candidate and is the wrong one -- it is what a component DECLARED,
+        which is a statement about the build order rather than about this
+        vector's value.
+
+        Scope is the WHOLE VECTOR, deliberately.  A mixed vector (some
+        instances derived, some sampled) has one built tensor, so a
+        per-element answer would mean calling each ``ElementExpression``'s
+        closure again outside the model context -- a rebuild, for a
+        diagnostic, on a graph that may not be reconstructible there.  The
+        superset is honest advice ("fix the sampled parameter(s) it is
+        derived from") and costs one graph walk.
+
+        Returns [] on anything unexpected: with no names the message falls
+        back to naming the CLASS, which is what the ``sigma: 0`` warning
+        this shares its wording with has always done.
+        """
+        try:
+            node = getattr(p, "value", None)
+            if not isinstance(node, pytensor.graph.basic.Variable):
+                return []
+            sampled = set()
+            for q in self.all_params:
+                if q is p:
+                    continue
+                n = int(np.prod(q.shape)) if q.shape != () else 1
+                if any(q.element_is_sampled(i) for i in range(n)):
+                    sampled.add(q.label)
+            found = set()
+            for anc in pytensor.graph.traversal.ancestors([node]):
+                name = getattr(anc, "name", None)
+                if not name:
+                    continue
+                # A sampled parameter reaches the graph as its own
+                # Deterministic (named for the label) or, one step lower, as
+                # the `<label>_raw` coordinate; the same suffix list the
+                # logp grouping strips.
+                for suffix in self.hidden_suffixes:
+                    if name.endswith(suffix):
+                        name = name[: -len(suffix)]
+                        break
+                if name in sampled:
+                    found.add(name)
+            return sorted(found)
+        except Exception:
+            # A diagnostic must never be the reason a fit does not start.
+            return []
+
     @staticmethod
     def _wrap_if_angle(diff, unit):
         """Degrees are periodic: 352.57 and -7.43 are the SAME start.
@@ -188,7 +245,14 @@ class ModelAuditor:
         was silent -- ob09020 pins t_E = 76.9 and starts at 74.48, and the
         only way to find out was to compile the graph by hand.
 
-        Two reasons, and the ledger separates them without guessing:
+        Three reasons, and the ROLE plus the ledger separate them without
+        guessing:
+
+          the element is DERIVED -> its value is an expression, so no
+              channel `initval` has can hold it; the remedy is to set the
+              SAMPLED parameter(s) it is derived from, which is
+              `parameter.py`'s own sentence for the `sigma: 0` twin of
+              this mistake (review 2.3.17).
 
           ledger == user, built != user -> the DERIVATION cannot preserve
               it.  The pin was recorded at rank 100 and never touched; the
@@ -359,6 +423,47 @@ class ModelAuditor:
             kept = held_user is not None and abs(
                 self._wrap_if_angle(held_user - requested, unit)
             ) <= max(USER_START_ATOL, denom * USER_START_RTOL)
+
+            # A DERIVED element outranks both readings below, and the
+            # codebase already knows what to say about it: its value IS an
+            # expression, so `initval` has no channel that can hold it (the
+            # engine can only back-solve the request into whatever is
+            # sampled, and here that did not deliver it).  "your value was
+            # kept, but the derivation reproduces it only approximately"
+            # understated exactly this case by three orders of magnitude --
+            # a derived planet.mass came back at 1/1047 of the request
+            # (review 2.3.17) -- and pointed the user nowhere.  The
+            # sentence is `parameter.py`'s own, shared rather than
+            # paraphrased.
+            #
+            # An engine-recorded contradiction still wins (above): there the
+            # user wrote a second pin, and naming THAT is better advice than
+            # naming the class of the first.
+            if p.element_is_derived(i):
+                detail = derived_constraint_message(
+                    "initval", self._derived_sources(p)
+                ) + (
+                    " A value written here reaches the model only by "
+                    "back-solving into those, and here that did not "
+                    "reproduce it"
+                )
+                if held_user is not None and not kept:
+                    detail += (
+                        f" (the relaxation engine resolved it to "
+                        f"{held_user:.6g} via "
+                        f"{who or 'the relaxation engine'})"
+                    )
+                findings.append(
+                    {
+                        "key": key,
+                        "requested": requested,
+                        "produced": got,
+                        "rel": rel,
+                        "reason": "derived",
+                        "detail": detail,
+                    }
+                )
+                continue
 
             if held_user is not None and not kept:
                 findings.append(

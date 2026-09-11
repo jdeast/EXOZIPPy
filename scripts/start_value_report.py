@@ -17,10 +17,12 @@ Two modes:
     # element roles, bounds, and what the compiled graph produces
     python scripts/start_value_report.py --example ob09020 --param t_E
 
-The second mode is what tells the two failure classes apart.  The ledger
-holding the user's value while the graph disagrees means the DERIVATION
-cannot deliver it; the ledger holding something else means the engine
-overwrote it, and ``solved by`` names the equation.
+The second mode is what tells the failure classes apart.  A DERIVED
+element (the roles it prints) cannot be set at all -- the value is an
+expression, and only the sampled parameters under it can move it.  Failing
+that: the ledger holding the user's value while the graph disagrees means
+the DERIVATION cannot deliver it; the ledger holding something else means
+the engine overwrote it, and ``solved by`` names the equation.
 
 READ OFF THE COMPILED GRAPH.  Not ``Parameter.value`` (a draw from the
 prior) and not ``Parameter.initval`` (the ledger, which is half of what is
@@ -104,7 +106,12 @@ def _build(example_dir, name):
 
 
 def sweep():
-    totals = {"examples": 0, "misses": 0, "approximate": 0, "overspecified": 0}
+    # One counter per reason check_user_starts can return, so a reason added
+    # there shows up in the summary line instead of being silently counted
+    # and not printed.
+    totals = {"examples": 0, "misses": 0}
+    reasons = ("derived", "approximate", "overspecified")
+    totals.update({r: 0 for r in reasons})
     for d in sorted(os.listdir(EXAMPLES)):
         path = os.path.join(EXAMPLES, d)
         if not os.path.isdir(path) or d in SKIP:
@@ -144,9 +151,17 @@ def sweep():
 
     print()
     print(
-        "examples built %(examples)d | misses %(misses)d "
-        "(approximate %(approximate)d, overspecified %(overspecified)d)"
-        % totals
+        "examples built %d | misses %d (%s)"
+        % (
+            totals["examples"],
+            totals["misses"],
+            ", ".join(
+                "%s %d" % (r, totals.get(r, 0))
+                for r in sorted(
+                    k for k in totals if k not in ("examples", "misses")
+                )
+            ),
+        )
     )
     return totals
 
