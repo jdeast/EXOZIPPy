@@ -127,3 +127,33 @@ of listing the eight that do.
 
 Add a key to whichever table applies in the same commit that adds it to the
 vocabulary. Tests: `tests/test_method_only_sampler_keys.py`.
+
+## `init:` is retired, not made live (review 5.3.3a)
+
+The `init` sampler key was read and forwarded to `pm.sample` for as long as
+run.py existed, and it was inert for just as long. That is worth stating
+carefully, because the obvious reading -- "dead code" -- is wrong and sends the
+next reader looking for an unused variable that does not exist. The key was
+read, bound to a local, and passed by name; what was dead was its EFFECT.
+pymc's own `pm.sample` docstring says of `init`, verbatim, *"This argument is
+ignored when manually passing the NUTS step method"*, and the plain-NUTS branch
+passes `step=pm.NUTS(...)`. Fifteen shipped example configs carried
+`init: adapt_diag`, and it never did anything in any of them.
+
+**It is DELETED rather than enlivened, and the reason is the seed polish.**
+Making it live means dropping the explicit step, and `initvals`' own docstring
+entry reads *"Initialization methods for NUTS (see ``init`` keyword) can
+overwrite the default"* -- so a live `adapt_diag` would be licensed to jitter
+the chain off the polished start, which is the exact pathology `seed_polish`
+exists to prevent (the ob140939 postmortem). Keeping the explicit step is what
+makes the start authoritative. So the key goes, and the comment on the `# 4.
+Sample` header that claimed "we use adapt_diag to start exactly at our
+estimated means" goes with it: it was false in both halves, since `init` was
+ignored and `adapt_diag` jitters rather than sitting on a mean.
+
+A retired key gets its own channel. `RETIRED_SAMPLER_KEYS` maps it to what
+became of it and `warn_retired_sampler_keys` says so, excluded from
+`warn_unknown_sampler_keys` so one stale line earns one message. A user who
+wrote `init:` was following documentation that used to look right, and "Did you
+mean 'method'?" tells them nothing; the retired message names the pymc rule and
+says to delete the line. Tests: `tests/test_run_dead_residue.py`.

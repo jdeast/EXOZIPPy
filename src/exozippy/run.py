@@ -50,7 +50,6 @@ logger = logging.getLogger(__name__)
 # accesses in this module's own source, in both directions, so it cannot
 # silently drift again. Add the key here in the same edit that consumes it.
 KNOWN_SAMPLER_KEYS = {
-    "init",
     "tune",
     "draws",
     "chains",
@@ -367,11 +366,6 @@ METHOD_ONLY_SAMPLER_KEYS = {
     "store_hot_chains": ("ptde_async",),
     "rung_thin_factor": ("ptde",),
     "rung_thin_start": ("ptde",),
-    # run.py forwards `init` to the plain-NUTS branch and to nothing else.
-    # Whether pymc then HONORS it there is a separate question with a
-    # separate answer -- it does not, because that branch passes an explicit
-    # step -- and review 5.3.3(a) deletes the key for exactly that reason.
-    "init": ("nuts",),
 }
 
 # The other half of the vocabulary: keys every path reads, whatever `method:`
@@ -437,13 +431,101 @@ def warn_method_only_sampler_keys(sampler_cfg, method):
     return warned
 
 
+# Sampler keys this project used to accept, and what happened to them.  A
+# retired key is not a typo -- it is a line a working config once needed --
+# so it gets its own sentence instead of "Did you mean 'method'?".
+#
+# `init` (review 5.3.3a): read and forwarded to pm.sample for as long as run.py
+# has existed, and inert for just as long.  pymc's own pm.sample docstring says
+# of it, verbatim, "This argument is ignored when manually passing the NUTS
+# step method", and the plain-NUTS branch passes `step=pm.NUTS(...)`.  So a
+# grep for an unused variable found nothing while the key did nothing, which
+# is why it survived every refactor.  It is DELETED rather than made live, and
+# that is JDE's ruling with a reason: `initvals`' own docstring entry reads
+# "Initialization methods for NUTS (see ``init`` keyword) can overwrite the
+# default", so dropping the explicit step to give `init` its effect back would
+# let an adapt_diag jitter move the chain off the polished start -- the exact
+# pathology seed_polish exists to prevent.  Keeping the step is what makes the
+# start authoritative.
+RETIRED_SAMPLER_KEYS = {
+    "init": (
+        "pm.sample ignores `init` whenever an explicit NUTS step is passed "
+        "(pymc's own docstring), and run.py always passes one, so this key "
+        "has never had an effect. Delete the line: the start values come "
+        "from the relaxation engine and the seed polish, which is what "
+        "keeping the explicit step protects."
+    ),
+}
+
+
+def resolve_cores_setting(raw):
+    """Turn a user's `sampler: cores:` value into an int, or None for AUTO.
+
+    Review 5.3.3(e).  `cores: "auto"` used to reach a bare ``int()`` and die
+    with ``invalid literal for int() with base 10: 'auto'`` raised from inside
+    run.py -- a traceback naming neither the config key nor the remedy, for a
+    spelling ``n_temps:`` accepts -- while the SAME value handed to the seed
+    polish warned by name and took the default grant.
+
+    Failing fast is right HERE and warn-and-continue is right THERE, and the
+    difference is positional rather than a disagreement: this parse runs
+    before any work exists to lose, whereas ``_resolve_polish_cores`` can be
+    reached from a wrap-up stage, where no diagnostic may kill a finished fit
+    (``nonfatal_wrapup``).  What the two must not do is disagree about what
+    the key MEANS -- that is how one rule came to have two behaviors (review
+    6.11.3) -- so both messages say that an ABSENT cores is the automatic
+    grant and that ``cores: 1`` is how to ask for serial.
+
+    Deliberately no floor.  ``cores: 0`` means three different things across
+    the three resolvers and unifying that is review 2.4.8; a validation added
+    here would hide it rather than fix it.
+    """
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"sampler: cores: {raw!r} is not a number of cores. Omit the "
+            f"`cores:` key entirely for the automatic grant (a fraction of "
+            f"the physical cores, leaving one for the OS and your shell), "
+            f"or write `cores: 1` for serial."
+        ) from None
+
+
+def warn_retired_sampler_keys(sampler_cfg):
+    """Say what became of a `sampler:` key this project used to accept.
+
+    Split out of ``warn_unknown_sampler_keys`` so a retired key gets an
+    explanation rather than a typo suggestion: a user who wrote it was
+    following documentation that used to be right, and "Did you mean
+    'method'?" tells them nothing about what to do now.
+
+    Returns the sorted list of retired keys present, so the check is
+    exercisable without running a fit -- same shape as its siblings.
+    """
+    retired = sorted(set(sampler_cfg) & set(RETIRED_SAMPLER_KEYS))
+    for key in retired:
+        logger.warning(
+            f"sampler key '{key}' is RETIRED and does nothing. "
+            f"{RETIRED_SAMPLER_KEYS[key]}"
+        )
+    return retired
+
+
 def warn_unknown_sampler_keys(sampler_cfg):
     """Warn about `sampler:` keys this module does not consume.
 
     Returns the sorted list of unrecognized keys (empty when all are known),
     so the check is exercisable without running a fit.
+
+    Retired keys are excluded here and reported by
+    ``warn_retired_sampler_keys`` instead -- two messages about one line
+    would be one too many, and only one of them is useful.
     """
-    unknown = sorted(set(sampler_cfg) - KNOWN_SAMPLER_KEYS)
+    unknown = sorted(
+        set(sampler_cfg) - KNOWN_SAMPLER_KEYS - set(RETIRED_SAMPLER_KEYS)
+    )
     if unknown:
         logger.warning(
             f"Unrecognized key(s) in the sampler block will be ignored: "
@@ -523,12 +605,11 @@ def _run_fit(config, gui, user_params=None):
 
     # 2. Load the sampler settings (flat under sampler:)
     sampler_cfg = config.get("sampler", {})
-    init = sampler_cfg.get("init", "adapt_diag")
     tune = int(sampler_cfg.get("tune", 2000))
     draws = int(sampler_cfg.get("draws", 2000))
     chains = int(sampler_cfg.get("chains", 4))
-    _cores_raw = sampler_cfg.get("cores", None)
-    cores = int(_cores_raw) if _cores_raw is not None else default_cores()
+    _cores_raw = resolve_cores_setting(sampler_cfg.get("cores", None))
+    cores = _cores_raw if _cores_raw is not None else default_cores()
     target_accept = sampler_cfg.get("target_accept", 0.9)
     method = sampler_cfg.get(
         "method", None
@@ -615,6 +696,7 @@ def _run_fit(config, gui, user_params=None):
         pytensor.config.profile = True
 
     # Warn about unrecognized keys in the sampler block so they are never silently ignored.
+    warn_retired_sampler_keys(sampler_cfg)
     warn_unknown_sampler_keys(sampler_cfg)
 
     # 3. Build the stellar system into a PyMC Graph
@@ -669,7 +751,14 @@ def _run_fit(config, gui, user_params=None):
         )
 
     # 4. Sample
-    # We use adapt_diag to start exactly at our estimated means
+    #
+    # Nothing here uses a pymc `init` method, and the claim that used to sit
+    # on this line ("we use adapt_diag to start exactly at our estimated
+    # means") was false in both halves: pm.sample ignores `init` whenever an
+    # explicit NUTS step is passed, and adapt_diag JITTERS its start rather
+    # than sitting on a mean.  The start is built below instead -- explicitly,
+    # in raw coordinates -- and handed to each sampler by its own spelling
+    # (review 5.3.3a; which branches consume it is review 1.3.6).
     with model:
         # Build the raw starting point explicitly: 0 for logit params,
         # (initval - mu)/sigma for Gaussian-path params, so the physical
@@ -785,7 +874,16 @@ def _run_fit(config, gui, user_params=None):
         # get_raw_starts returns just [raw_start], [0] for the ordinary case.
         # After a polish, seed 0 comes from the polished raw_initval and
         # seeds k>0 are re-derived from their polished physical values.
-        raw_starts, seed_indices = system.get_raw_starts(model)
+        #
+        # Not built on the trace-REUSE path, where nothing consumes it
+        # (review 5.3.3d): no sampler branch is entered and the seed ledger
+        # is already skipped, so the only effect was re-solving every seeded
+        # parameter's forward transform, once per seed, for a fit that is not
+        # going to happen.  Empty LISTS rather than None, because the two
+        # readers below ask len() of it.
+        raw_starts, seed_indices = [], []
+        if not reusing_trace:
+            raw_starts, seed_indices = system.get_raw_starts(model)
 
         # Seeded-solution ledger (multi-seed fits only): a Laplace record
         # of every polished seed -- peak logp and curvature widths at the
@@ -1095,7 +1193,6 @@ def _run_fit(config, gui, user_params=None):
                         draws=draws,
                         tune=tune,
                         chains=chains,
-                        init=init,
                         step=step,
                         cores=cores,
                         random_seed=seed,
@@ -1245,7 +1342,7 @@ def _run_fit(config, gui, user_params=None):
         f"per-component)"
     )
     with nonfatal_wrapup("corner plot"):
-        make_corner(model, idata, str(prefix) + "_corner.png")
+        make_corner(idata, str(prefix) + "_corner.png")
 
     # Component-specific corner plots (e.g. mulensing geometry). Unlike
     # comp.plot(), which also runs pre-flight on a single point, this only
@@ -1264,23 +1361,6 @@ def _run_fit(config, gui, user_params=None):
         save_multipage_trace(
             idata, plot_vars, str(prefix) + "_trace_detailed.pdf", model=model
         )
-
-    # Pick the suspected troublemakers
-    # List every tracked parameter in the posterior
-    # available_vars = list(idata.posterior.data_vars)
-    # print("All available variables:\n", available_vars)
-
-    # Automatically filter for the ones we care about
-    # vars_to_check = [v for v in available_vars if any(sub in v for sub in ['secosw', 'sesinw', 'ecc', 'omega', 'mass'])]
-    # print("\nFiltered variables to plot:\n", vars_to_check)
-    # az.plot_pair(
-    #    idata,
-    #    var_names=vars_to_check,
-    #    kind='scatter',
-    #    divergences=True,
-    #    divergences_kwargs={'color': 'C3', 'alpha': 0.5, 'markersize': 5}  # C3 is usually red
-    # )
-    # plt.show()
 
     # Generate final plots.  `draws` outlives this block -- the modeling
     # draft reads draws[0] for its model-bearing figures -- so it is seeded
@@ -1308,7 +1388,7 @@ def _run_fit(config, gui, user_params=None):
             f"per-mode outputs for {mode_report.n_modes} identified modes"
         )
         try:
-            _emit_per_mode_outputs(system, model, idata, mode_report, prefix)
+            _emit_per_mode_outputs(system, idata, mode_report, prefix)
         except Exception:
             logger.warning(
                 "Per-mode output generation failed; the combined "
@@ -2004,7 +2084,15 @@ def _format_summary(idata, diag):
     return "\n".join(header) + "\n" + df.to_string() + "\n"
 
 
-def make_corner(model, idata, filename, max_samples=1000):
+def make_corner(idata, filename, max_samples=1000):
+    """Corner-plot every physical variable in a trace's posterior group.
+
+    Takes no `model` (review 5.3.3b): it selects its variables by NAME off
+    idata.posterior -- dropping the `_raw` companions, the interval-transform
+    duplicates and the mode label -- so it never needed one, and the argument
+    it used to accept made the call sites look like they were plotting from a
+    model they were not.
+    """
     all_vars = list(idata["posterior"].data_vars)
     physical_vars = [
         v
@@ -2764,7 +2852,7 @@ def _idata_for_mode(idata, mode_k):
     return az.from_dict({"posterior": data})
 
 
-def _emit_per_mode_outputs(system, model, idata, mode_report, prefix):
+def _emit_per_mode_outputs(system, idata, mode_report, prefix):
     """Re-emit the combined-posterior corner + component plots once per mode.
 
     Interim (P7) multimodal reporting: loop the existing single-posterior
@@ -2785,7 +2873,7 @@ def _emit_per_mode_outputs(system, model, idata, mode_report, prefix):
         t0 = time.time()
 
         idata_k = _idata_for_mode(idata, k)
-        make_corner(model, idata_k, f"{prefix}_corner_{suffix}.png")
+        make_corner(idata_k, f"{prefix}_corner_{suffix}.png")
 
         # Same draw-count knob as the combined-posterior plots (get_draws'
         # n_draws default) -- no extra stratification needed here since each

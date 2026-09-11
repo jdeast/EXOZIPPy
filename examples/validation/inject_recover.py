@@ -112,7 +112,6 @@ def make_mulens(rng, snr, n_epochs, workdir):
         "draws": 1000,
         "chains": 4,
         "cores": 4,
-        "init": "adapt_diag",
         "target_accept": 0.95,
     }
     checks = [
@@ -173,7 +172,6 @@ def make_rv(rng, snr, n_epochs, workdir):
         "draws": 6000,
         "chains": 4,
         "cores": 4,
-        "init": "adapt_diag",
         # BACK TO 0.95.  Raising this to 0.99 at the same time as the draws
         # was a CONFOUNDED change and it regressed: convergence-flagged
         # checks went from 40/90 at 2000/2000 + 0.95 to 55/90 at 6000/6000
@@ -456,7 +454,6 @@ def make_transit(rng, snr, n_epochs, workdir):
         "draws": 8000,
         "chains": 4,
         "cores": 4,
-        "init": "adapt_diag",
         "target_accept": 0.95,
     }
     checks = ["orbit.period", "orbit.tc", "planet.p", "planet.b", "planet.t14"]

@@ -19,6 +19,5 @@ sampler:
   draws: 3000
   chains: 4
   cores: 1
-  init: adapt_diag
   target_accept: 0.99
   recompute_trace: True

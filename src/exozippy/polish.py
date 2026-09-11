@@ -404,9 +404,18 @@ def _resolve_polish_cores(cores, n_seeds):
     except (TypeError, ValueError):
         # Unreadable value: say so and take the auto grant.  Silently
         # dropping to one core is what made the original bug invisible.
+        #
+        # The message says the same two things run.resolve_cores_setting's
+        # refusal says -- an absent/None cores IS the automatic grant, and
+        # cores=1 is how to ask for serial -- because the two used to
+        # disagree about a value neither could use (review 5.3.3e).  Only
+        # the OUTCOME differs, and positionally: run.py can still refuse the
+        # run, while this can be reached from a wrap-up stage that must not
+        # kill a finished fit.
         logger.warning(
-            f"Seed polish: cores={cores!r} is not an integer; using the "
-            f"default grant instead."
+            f"Seed polish: cores={cores!r} is not a number of cores; using "
+            f"the automatic grant instead (which is also what an absent "
+            f"cores takes; cores=1 is serial)."
         )
         return default_cores()
     if n <= 1:
