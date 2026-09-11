@@ -20,12 +20,13 @@ building a non-astronomy component actually ran into.
 | Component | Instances | Owns | Astronomy analogue |
 |-----------|-----------|------|--------------------|
 | `subject` | one per individual | the PK parameters | `star` |
+| `population` | one, optional | the distribution the subjects are drawn from, and the covariate model | `galacticmodel` |
 | `assay` | one per data file | observations, residual error model, likelihood | `rvinstrument` |
 
-`population` (between-subject variability, allometric covariate) is P4 and does
-not exist; every subject here is independent, so this is not yet "population"
-PK in the field's sense. `physics.py` holds the forward model and is where the
-numerically interesting part lives.
+`population` is optional, and without it every subject is independent -- a
+stack of separate fits sharing an error model rather than a population
+analysis. `physics.py` holds the forward model and is where the numerically
+interesting part lives.
 
 ## The forward model, and its two numerical traps
 
@@ -118,6 +119,69 @@ and still the one quantity a PK table exists to show.
    literature quotes these, would be silently discarded. As a derived element
    it becomes a Gaussian on `ke`, which is what the user asked for.
 
+## The hierarchy
+
+`population` supplies a prior over another component's instances and owns no
+data of its own, which is `galacticmodel`'s shape. With a `population:` block,
+each subject's sampled log-coordinate stops being free:
+
+    log_q_i = mu_log_q + beta_q * log10(WT_i / WT_ref) + omega_q * eta_q_i
+
+`mu`, `beta`, `omega` and `WT_ref` are the population's; `eta` and `WT` are the
+subject's. Everything a component needs from the other side arrives through
+`population_map`, the `"comp.param[map_name]"` syntax, and the gating is the
+`evolutionarymodel` pattern -- what is in the topology decides what `subject`
+declares.
+
+**Non-centered, and that is structural rather than stylistic.** The centered
+form gives each subject's coordinate a scale of `omega`, so a small `omega`
+closes the funnel NUTS is famous for failing on -- and a small `omega` is
+exactly what these data produce: the canonical `nlme` fit drives the
+between-subject SD of `lKe` to 1.9e-05. Sampling the standardized deviation
+keeps every coordinate O(1) whatever `omega` does.
+
+**Where eta lives was an open question in the design, and the answer is
+`subject`.** Two things settled it. There is one eta per subject, so on
+`subject` it inherits that subject's name and the table row reads
+`subject.S7.eta_cl` rather than `population.eta_cl[6]`; and it keeps every
+parameter vector one-per-instance, so nothing needs a manifest `shape`
+computed from another component's element count. The cross-component
+dependency syntax is exercised either way.
+
+**Between-subject variability is defined IN a basis, which is why a third one
+exists.** A diagonal set of omegas in one coordinate basis is not diagonal in
+another: with `(CL, V)` varying independently, `var(log ke) = var(log CL) +
+var(log V)`, so the collapsed `lKe` the canonical fit reports is not
+representable at all. R's `SSfol` -- and so that fit -- is parameterized in
+`(lKe, lKa, lCl)`, so `cl_ke` is a third value of `parameterization:`, and
+reproducing a published set of random effects means fitting in the basis they
+were estimated in. It follows that **every subject must share one basis when a
+population is present**, and `Population._resolve_basis` raises otherwise:
+a population whose members disagree about the basis does not name a
+distribution. Separately, `cl_v` and `cl_ke` cannot be mixed even without a
+population -- one derives `ke` from `(cl, v)` and the other derives `v` from
+`(cl, ke)`, so the per-parameter build order would need each to precede the
+other. `Subject.INCOMPATIBLE_BASES` says so rather than letting a cycle error
+surface from the sort.
+
+**The covariate model has no flag, deliberately.** Allometric scaling of
+clearance as `WT^0.75` and volume as `WT^1` is in nearly every population PK
+model, and its exponents are ordinary PINNED parameters here -- so turning it
+off is `population.beta_cl: {initval: 0.0}` in a params file and estimating it
+is `{sigma: 0.2}`, neither of which needs a switch. A `covariate: none` flag
+beside a user-freed exponent would be a fourth state that means nothing.
+
+**CV% is a derived parameter, and that turned out to be better than the extra
+table column the design asked for.** A popPK table quotes spread as a
+coefficient of variation, `100*sqrt(exp(sigma_ln^2) - 1)` with
+`sigma_ln = omega*ln(10)`, and `outputs.md` pins `results.csv` to two fixed
+layouts ending in one `(up_err, low_err)` pair -- so a CV% column is a new
+LAYOUT, not a new value. Declaring `cv_cl` as a derived parameter instead
+needs no core change at all and is strictly more informative: it arrives with
+a median and a credible interval of its own, where a column computed from a
+point estimate could not. **This does not close the extra-column question**;
+see the core findings below for the part it does not solve.
+
 ## What building this found about the core
 
 The point of the exercise. Measured, not speculated.
@@ -129,7 +193,7 @@ any component. Both components were written against `Component` + `Parameter` +
 the manifest vocabulary + the four-file layout, as `components.md` declares,
 and needed no change to the core to build, sample, and report.
 
-Five places where the fit was not frictionless:
+Six places where the fit was not frictionless:
 
 1. **The reporting convention was hardcoded, and it mattered most.** Median +
    68.3% (1-sigma) is astronomy's; pharmacometrics reports 95%. Fixed before
@@ -214,6 +278,27 @@ Five places where the fit was not frictionless:
    `orbit.b.secosw: {mu, sigma}` under `fitvcve` -- found from a field with
    no stars in it, which is the sort of thing this exercise is for.
 
+6. **There is no channel for a POST-FIT, component-supplied number, and
+   eta-shrinkage is the case that needs one.** Shrinkage --
+   `1 - SD(eta_EBE)/omega`, per random effect, as a percentage -- is a
+   standard popPK diagnostic with no astronomy analogue: above ~20-30% the
+   field says out loud that the diagnostic plots based on individual
+   estimates are invalid. It is **not** a width problem and CV%'s solution
+   does not reach it. CV% works as a derived parameter because it is a
+   function of a model quantity; shrinkage is a function of the TRACE --
+   specifically of the spread across subjects of each eta's posterior MEAN,
+   which no per-draw expression can compute (the per-draw `1 - sd(eta)` is a
+   different number, and reporting it under the field's name would be worse
+   than reporting nothing). The component hooks that see a trace are
+   `plot_corner` and `distribute_posterior`; neither can contribute a row, a
+   column or a sentence to the report. What the channel has to carry is
+   narrow and worth stating precisely: **a component-owned scalar, computed
+   from the finished trace, with a name, a format and a place in the
+   report.** The nearest existing shapes are `table_note` (per row, but
+   static, fixed at manifest time) and the prose collector (per sentence, but
+   built at stage 7, before any sampling). Deferred rather than guessed at,
+   and it is the one thing P4 owes that P4 does not deliver.
+
 Two smaller notes: `utilities/zenodo.fetch_assets` is generic despite its name
 and is reused here for a non-Zenodo URL, but it prints "Downloading ... from
 Zenodo", which is now inaccurate for one caller; and `add_hint` correctly
@@ -239,16 +324,16 @@ CSV.
 
 ## Phases
 
-P0 (reporting width), P1 (these two components) and P3 (the TRANS1/TRANS2
-coordinate choice, above) are done. P2 -- still open -- adds
-`symbolic_physics.py` so the relaxation engine can accept a half-life where the
-model wants a clearance. P4 adds `population`; P5 does the degeneracy
-reporting. See `README.md` for the table and for which caveat copies each phase
-owes.
+P0 (reporting width), P1 (these components), P3 (the coordinate choice) and P4
+(the hierarchy) are done. P2 -- still open -- adds `symbolic_physics.py` so the
+relaxation engine can accept a half-life where the model wants a clearance. P5
+does the degeneracy reporting. See `README.md` for the table and for which
+caveat copies each phase owes.
 
-P3 was done before P2 deliberately: they are independent, and P3 is the one
-that tests a documented core contract (the element roles) rather than adding a
-convenience. Note what P2 would change about P3: today a user's `cl` in the
+P3 and P4 were done before P2 deliberately: they are independent, and they are
+the ones that test documented core contracts (the element roles; a
+prior-supplying component over another component's instances) rather than
+adding a convenience. Note what P2 would change about P3: today a user's `cl` in the
 `ke_v` basis reaches nothing at all, because with no relations the engine cannot
 translate a clearance into a `log_ke` start either.
 

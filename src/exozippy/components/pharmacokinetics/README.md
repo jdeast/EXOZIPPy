@@ -125,8 +125,8 @@ never a modelling choice.
 
 ## Status
 
-P0, P1 and P3 are implemented, and P1 is validated against R (see above). P2,
-P4 and P5 are not started. The design is in `notes/pharmacokinetics.txt`
+P0, P1, P3 and P4 are implemented, and P1 is validated against R (see above).
+P2 and P5 are not started. The design is in `notes/pharmacokinetics.txt`
 (private notes repository). Phases:
 
 | Phase | Scope | State |
@@ -135,7 +135,7 @@ P4 and P5 are not started. The design is in `notes/pharmacokinetics.txt`
 | P1 | `subject` + `assay`, no hierarchy | DONE, validated (above) |
 | P2 | Symbolic relations / relaxation-engine seeding | not started |
 | P3 | TRANS1/TRANS2 parameterization via element roles (`parameterization:`) | DONE |
-| P4 | `population`: between-subject variability + allometric covariate | not started |
+| P4 | `population`: between-subject variability + allometric covariate | DONE (implementation; see below) |
 | P5 | Flip-flop degeneracy: mode reporting and the opt-in ordering bound | not started |
 
 **P4 is not a convenience feature**, and the validation above is why: the
@@ -143,6 +143,24 @@ canonical published fit is a MIXED-EFFECTS fit, so a rigorous population-level
 comparison is impossible until a `population` component exists. Without it this
 is twelve independent fits sharing an error model -- no between-subject
 variability, no shrinkage, and no CV%/eta-shrinkage to report.
+
+**What P4 delivers, and what it does not.** The `population` component exists,
+the hierarchy is non-centred, the allometric covariate is in, CV% is reported
+as a derived parameter with its own credible interval, and the coordinate basis
+R's `nlme` fits in (`parameterization: cl_ke`) is available so the comparison
+can be made in the basis the published random effects were estimated in. Two
+things are still owed:
+
+* **eta-shrinkage is not reported.** It is a function of the finished TRACE,
+  not of the model, and there is no channel for a component to contribute a
+  post-fit number to the report -- see `pharmacokinetics.md`, which states
+  exactly what such a channel has to carry.
+* **the population-level comparison against `nlme` has not been recorded
+  here.** The numbers in "Validation" above are P1's, against `nlsList`, and
+  remain true of the no-population fit. Until a hierarchical fit is run and
+  its typical values, CVs and residual error are compared to the `nlme` fit
+  quoted there, P4's implementation is tested (`tests/test_pharmacokinetics_population.py`)
+  but not validated, and this file must keep saying so.
 
 P0 comes first because reporting a pharmacokinetic result in the astronomy
 convention (median + 68%) would be misread as the 95% interval that field uses,

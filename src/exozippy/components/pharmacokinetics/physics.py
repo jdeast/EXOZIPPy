@@ -226,6 +226,78 @@ def calc_pk_log_cl_from_ke(ke, v):
 
 
 @register_physics
+def calc_pk_v_from_rates(cl, ke):
+    """Apparent volume ``V = CL / ke``.
+
+    The third bridge, for the basis that samples the two RATES and derives the
+    volume.  That is what R's ``SSfol`` -- and so the canonical ``nlme`` fit of
+    the Theophylline data -- is parameterized in, which is why it exists here:
+    between-subject variability is defined IN a basis, so reproducing a
+    published set of random effects means fitting in the basis they were
+    estimated in.
+    """
+    return cl / ke
+
+
+@register_physics
+def calc_pk_log_v_from_rates(cl, ke):
+    """``log10(V) = log10(CL / ke)``.  The REPORTED log-volume under `cl_ke`."""
+    return pt.log10(cl / ke)
+
+
+@register_physics
+def calc_pk_population_value(mu, beta, weight, wt_ref, omega, eta):
+    """One subject's log-coordinate, drawn from the population.
+
+    ``mu + beta*log10(WT/WT_ref) + omega*eta`` -- a typical value, an
+    allometric covariate, and this subject's own deviation, all in dex.
+
+    NON-CENTERED, and that is structural rather than stylistic.  The centered
+    form gives the per-subject coordinate a scale of ``omega``, so a small
+    ``omega`` closes the funnel NUTS is famous for failing on -- and a small
+    ``omega`` is exactly what these data produce: the canonical ``nlme`` fit
+    of the Theophylline set drives one of the three between-subject SDs to
+    zero.  Sampling the standardized deviation keeps every coordinate O(1)
+    whatever ``omega`` does.
+
+    ``beta`` is a parameter and not a literal 0.75 so that it can be pinned,
+    reported and -- for a study with the weight range to support it --
+    estimated, which is what makes the covariate model revisable rather than
+    baked in.
+    """
+    return mu + beta * pt.log10(weight / wt_ref) + omega * eta
+
+
+@register_physics
+def calc_pk_population_typical(mu, beta, weight, wt_ref):
+    """The same, for a coordinate with no between-subject variability.
+
+    Every subject takes the typical value for its own weight.  A separate
+    function rather than :func:`calc_pk_population_value` with ``omega``
+    pinned to zero, because a pinned ``omega`` would leave one free ``eta``
+    per subject that no term of the likelihood reads.
+    """
+    return mu + beta * pt.log10(weight / wt_ref)
+
+
+@register_physics
+def calc_pk_cv_percent(omega):
+    """Between-subject variability as the field quotes it: a CV, in percent.
+
+    For a log-normal, ``CV = sqrt(exp(sigma_ln**2) - 1)``.  ``omega`` here is
+    the SD of the base-10 logarithm, so ``sigma_ln = omega * ln(10)`` -- the
+    factor of 2.3026 between this component's ``omega`` and the one a NONMEM
+    or Monolix table prints, which is the whole reason this is computed rather
+    than left to the reader.
+
+    ``expm1`` because the interesting limit is a SMALL omega: a between-subject
+    SD collapsing toward zero is a real result on these data, and
+    ``exp(x) - 1`` loses every significant digit of it.
+    """
+    return 100.0 * pt.sqrt(pt.expm1(pt.sqr(omega * np.log(10.0))))
+
+
+@register_physics
 def calc_pk_half_life(ke):
     """Terminal half-life ``ln(2) / ke``, in the time unit of ``ke``."""
     return pt.log(2.0) / ke

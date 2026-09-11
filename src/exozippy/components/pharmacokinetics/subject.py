@@ -8,8 +8,8 @@ import logging
 import numpy as np
 from astropy import units as u
 
-from ..component import Component
-from ..parameterization import mode_manifest
+from ..component import Component, in_topology
+from ..parameterization import merge_options, mode_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +71,22 @@ class Subject(Component):
     quantity every reader of a PK table wants, which is precisely the
     ``reported`` element role.
 
-    Every subject is independent here. Between-subject variability -- the
-    hierarchy that makes this "population" PK rather than a stack of separate
-    fits -- is P4, and arrives as a separate component supplying a prior over
-    these instances, the way ``galacticmodel`` supplies one over ``star``.
+    WITH A ``population:`` BLOCK the sampled log-coordinates stop being free:
+    each becomes ``mu + beta*log10(WT/WT_ref) + omega*eta``, with the typical
+    value, the covariate exponent and the between-subject SD owned by
+    ``population`` and the standardized deviation ``eta`` owned here, where it
+    inherits the subject's own name. Without one, every subject is
+    independent -- which is a stack of separate fits sharing an error model
+    rather than a population analysis. That gating is the
+    ``evolutionarymodel`` pattern: what is in the topology decides what this
+    component declares.
+
+    Note what the flip does to this component's bounds, because it is easy to
+    read as a double count and is not one: ``log_cl``'s ``lower``/``upper``
+    were the hard logit support while it was sampled and become a soft
+    barrier once it is derived (``parameter.md``). They make the same
+    statement either way -- an individual's clearance stays in the stated
+    range -- and the statement was always there.
 
     THE FLIP-FLOP DEGENERACY. The likelihood has two exactly equal modes:
     swapping ``ka`` and ``ke`` and rescaling ``V -> V*ke/ka`` leaves every
@@ -123,27 +135,92 @@ class Subject(Component):
     # inactive, because both have a computable inverse -- parameter.md's rule
     # for which role a masked-out coordinate takes.  That is also what keeps a
     # user's `subject.S1.log_ke: {lower: -3}` meaningful after a flip.
+    # Every row is COMPLETE -- it names log_v/log_ka/v/ka too, which no basis
+    # moves -- so that "which coordinates does this basis sample?" can be read
+    # off the table rather than restated in a second list beside it.
+    # `population` asks exactly that question, and a table carrying only the
+    # coordinates that DIFFER answers it wrongly by omission.  A parameter
+    # every mode samples expands to `None` and one every mode derives by the
+    # same block to that block's name, so carrying them costs nothing:
+    # the expansion is identical to the manifest written by hand.
     COORD_MODE_TABLE = {
         # NONMEM TRANS2, and the default here for the same reason it is
         # theirs: clearance is the quantity dosing decisions are made on.
         "cl_v": {
             "log_cl": None,
+            "log_v": None,
+            "log_ka": None,
             "cl": "default",
+            "v": "default",
+            "ka": "default",
             "ke": "default",
             "log_ke": {"output_expr_key": "from_cl"},
         },
         # NONMEM TRANS1.
         "ke_v": {
             "log_ke": None,
+            "log_v": None,
+            "log_ka": None,
             "ke": "from_log",
+            "v": "default",
+            "ka": "default",
             "cl": {"output_expr_key": "from_ke"},
             "log_cl": {"output_expr_key": "from_ke"},
         },
+        # R's `SSfol`, and so the canonical `nlme` fit of the Theophylline
+        # data: sample both RATES and derive the volume.  NONMEM has no TRANS
+        # number for it.  It is here because between-subject variability is
+        # defined IN a basis -- a diagonal set of omegas in one basis is not
+        # diagonal in another -- so reproducing a published set of random
+        # effects means fitting in the basis they were estimated in, and that
+        # published fit's are on (lKe, lKa, lCl).
+        "cl_ke": {
+            "log_cl": None,
+            "log_ke": None,
+            "log_ka": None,
+            "cl": "default",
+            "ke": "from_log",
+            "ka": "default",
+            "v": "from_rates",
+            "log_v": {"output_expr_key": "from_rates"},
+        },
     }
+
+    # Bases that cannot appear in one system, and why.  `cl_v` derives ke from
+    # (cl, v) while `cl_ke` derives v from (cl, ke), so a system holding both
+    # asks graph.py for an order in which v precedes ke AND ke precedes v.
+    # The value graph is still acyclic per element -- it is the per-parameter
+    # sort that cannot be done -- but there is no way to express that here, so
+    # this raises with the reason instead of letting a cycle error surface
+    # from the sort.  The other pairs are fine: `ke_v` reports cl rather than
+    # deriving it, and a reported selection contributes no edge.
+    INCOMPATIBLE_BASES = frozenset({("cl_ke", "cl_v")})
+
+    # The bare quantity names a basis SAMPLES, read off the table above.
+    # `population` needs these to know which mu/omega/eta to declare.
+    QUANTITIES = ("cl", "v", "ka", "ke")
+
+    @classmethod
+    def sampled_quantities(cls, basis):
+        """Which of ``QUANTITIES`` the given basis samples, in table order."""
+        table = cls.COORD_MODE_TABLE[basis]
+        return tuple(
+            q for q in cls.QUANTITIES if table.get(f"log_{q}", "") is None
+        )
 
     # The default, named once: `config_schema`'s doc, `_parse_parameterization`
     # and the log line all have to agree about it.
     DEFAULT_COORDS = "cl_v"
+
+    # What each basis samples, in words, for the one line the run prints.  A
+    # coordinate choice moves no posterior and produces a table with the same
+    # rows either way -- which is the whole point of the `reported` role and
+    # also what would make a stray `parameterization:` invisible.
+    BASIS_DESCRIPTIONS = {
+        "cl_v": "(CL, V) -- NONMEM TRANS2",
+        "ke_v": "(ke, V) -- NONMEM TRANS1",
+        "cl_ke": "(CL, ke), with V derived -- R's SSfol",
+    }
 
     @property
     def prefix(self):
@@ -178,11 +255,16 @@ class Subject(Component):
                 "doc": (
                     "Which coordinates this subject is sampled in, named "
                     "after the sampled pair: 'cl_v' (clearance and volume; "
-                    "NONMEM TRANS2; the default) or 'ke_v' (elimination rate "
-                    "and volume; NONMEM TRANS1). A coordinate choice -- the "
-                    "same model in different coordinates, so nothing becomes "
-                    "more or less constrained, and whichever quantities are "
-                    "not sampled are still computed and reported."
+                    "NONMEM TRANS2; the default), 'ke_v' (elimination rate "
+                    "and volume; NONMEM TRANS1), or 'cl_ke' (both rates, "
+                    "volume derived; R's SSfol, and the basis the canonical "
+                    "nlme fit of the Theophylline data is in). A coordinate "
+                    "choice -- the same model in different coordinates, so "
+                    "nothing becomes more or less constrained, and whichever "
+                    "quantities are not sampled are still computed and "
+                    "reported. It is NOT free of consequence once a "
+                    "'population:' block exists: between-subject variability "
+                    "is defined in a basis."
                 ),
             },
             {
@@ -224,6 +306,29 @@ class Subject(Component):
 
         self.weight_kg = np.asarray(self.weight_kg, dtype=float)
         self.dose_mg = np.asarray(self.dose_mg, dtype=float)
+
+        # Captured here because build_maps (stage 2) takes no `system`.
+        # `in_topology` answers from `active_components`, which System fills
+        # in its own __init__, so this does not depend on whether the
+        # population's own stage-1 pass has run yet.
+        self._has_population = in_topology(system, "population") is not None
+
+    # ------------------------------------------------------------------
+    # Stage 2
+    # ------------------------------------------------------------------
+
+    def build_maps(self):
+        """``population_map``: which population each subject belongs to.
+
+        All zeros, because exactly one population is supported -- but it is a
+        real map rather than an implied broadcast, and that is the point. A
+        bare ``population.mu_log_cl`` dep would resolve to the whole vector of
+        the OTHER component's elements and line up with this one only by
+        coincidence; naming the map is what makes the pairing provable (and
+        is what a second population would extend).
+        """
+        if self._has_population:
+            self.population_map = np.zeros(self.n_elements, dtype=int)
 
     @classmethod
     def _parse_parameterization(cls, cfg, where):
@@ -354,7 +459,15 @@ class Subject(Component):
             n_elements=self.n_elements,
             where=f"{self.prefix}.parameterization",
         )
+        self._reject_incompatible_bases()
         self._log_parameterization_choices()
+
+        # The hierarchy, if there is one: `population` turns the sampled
+        # log-coordinates into expressions and adds this component's own
+        # per-subject latents.  `coords` is edited IN PLACE, which is the
+        # evolutionarymodel pattern in star.py -- a component's manifest
+        # depends on what else is in the topology.
+        hierarchy = self._apply_population(system, coords)
 
         # Insertion order is load-bearing: graph.py registers its build-order
         # nodes in manifest order, so this is the order the PyMC nodes -- and
@@ -363,12 +476,12 @@ class Subject(Component):
         # the other log coordinates, where a reader looks for it.
         self.manifest = {
             "log_cl": coords["log_cl"],
-            "log_v": None,
-            "log_ka": None,
+            "log_v": coords["log_v"],
+            "log_ka": coords["log_ka"],
             "log_ke": coords["log_ke"],
             "cl": coords["cl"],
-            "v": "default",
-            "ka": "default",
+            "v": coords["v"],
+            "ka": coords["ka"],
             "ke": coords["ke"],
             "t_half": "default",
             "tmax": "default",
@@ -381,6 +494,91 @@ class Subject(Component):
                 }
             },
         }
+        # After the fixed keys, so an independent-subjects system's manifest
+        # -- and so its build order, and so its table -- is unchanged by the
+        # existence of this block.
+        self.manifest.update(hierarchy)
+
+    def _apply_population(self, system, coords):
+        """Wire this component into a ``population``, if one is present.
+
+        Edits ``coords`` in place: each coordinate the population speaks for
+        stops being sampled and becomes an expression of that population's
+        parameters. Returns the entries this component gains as a result --
+        one standardized deviation per varying coordinate, and the body
+        weight the covariate model reads.
+
+        Returns ``{}`` with no population, which is what makes the hierarchy
+        genuinely optional rather than a default with a switch.
+        """
+        population = in_topology(system, "population")
+        if population is None:
+            return {}
+
+        varying = set(population.varying)
+        gained = {}
+        for quantity in population.sampled_quantities:
+            key = f"log_{quantity}"
+            block = (
+                "from_population"
+                if quantity in varying
+                else "from_population_typical"
+            )
+            # merge_options rather than plain assignment: the entry may
+            # already carry a mask or an output_expr_key from the coordinate
+            # choice, and both spellings that "obviously" work here drop one
+            # of them (components/parameterization.py).
+            coords[key] = merge_options(coords[key], expr_key=block)
+            if quantity in varying:
+                gained[f"eta_{quantity}"] = None
+
+        # The covariate datum. Required for every subject once a population
+        # exists, and not before: without one, `weight:` is config that
+        # load_data uses to turn a per-kg dose into milligrams, and a subject
+        # dosed in absolute mg legitimately has none.
+        missing = [
+            name
+            for name, weight in zip(self.names, self.weight_kg)
+            if not np.isfinite(weight)
+        ]
+        if missing:
+            raise ValueError(
+                f"[{self.prefix}] a 'population:' block scales clearance and "
+                f"volume with body weight, so every subject needs a "
+                f"'weight:' in kg. Missing for: {', '.join(missing)}."
+            )
+        gained["weight"] = {
+            "overrides": {
+                "initval": list(self.weight_kg),
+                "sigma": 0.0,
+            }
+        }
+        return gained
+
+    def _reject_incompatible_bases(self):
+        """Refuse a pair of bases whose build order cannot be sorted."""
+        present = set(self.coord_modes)
+        for pair in self.INCOMPATIBLE_BASES:
+            if present.issuperset(pair):
+                a, b = sorted(pair)
+                named = {
+                    mode: [
+                        n
+                        for n, m in zip(self.names, self.coord_modes)
+                        if m == mode
+                    ]
+                    for mode in (a, b)
+                }
+                raise ValueError(
+                    f"[{self.prefix}] subjects {named[a]} are in the '{a}' "
+                    f"basis and {named[b]} in '{b}', and those two cannot be "
+                    f"mixed in one system: '{a}' derives one of (v, ke) from "
+                    f"the other and '{b}' derives it the other way, so the "
+                    f"build order would need each to come first. Use one of "
+                    f"them for every subject, or pair either with 'ke_v', "
+                    f"which reports the coordinate it does not sample rather "
+                    f"than deriving it."
+                )
 
     def _log_parameterization_choices(self):
         """Say which coordinates each subject samples, once, at stage 3.
@@ -391,20 +589,22 @@ class Subject(Component):
         the `reported` role and also what makes the choice invisible
         otherwise.
         """
-        flipped = [
-            name
-            for name, mode in zip(self.names, self.coord_modes)
-            if mode != self.DEFAULT_COORDS
-        ]
-        if not flipped:
+        if set(self.coord_modes) == {self.DEFAULT_COORDS}:
             return
-        logger.info(
-            "[%s] sampling (ke, V) -- NONMEM TRANS1 -- for %s; CL is derived "
-            "and reported. The other %d subject(s) sample (CL, V) (TRANS2).",
-            self.prefix,
-            ", ".join(flipped),
-            self.n_elements - len(flipped),
-        )
+        for mode in dict.fromkeys(self.coord_modes):
+            named = [
+                name
+                for name, m in zip(self.names, self.coord_modes)
+                if m == mode
+            ]
+            logger.info(
+                "[%s] sampling %s (%s) for %d subject(s): %s.",
+                self.prefix,
+                self.BASIS_DESCRIPTIONS[mode],
+                mode,
+                len(named),
+                ", ".join(named),
+            )
 
     # ------------------------------------------------------------------
     # Reporting
