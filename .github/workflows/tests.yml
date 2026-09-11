@@ -338,6 +338,15 @@ jobs:
       # for that reason.
       - name: Upload the duration transcript
         if: always()
+        # A failed UPLOAD must not fail the job: this transcript is a
+        # diagnostic (it feeds gen_durations.py), and GitHub's artifact
+        # endpoint is reachable-or-not independently of anything in the
+        # diff. PR #246 lost a green run to
+        # "Failed to CreateArtifact: ENOTFOUND" after the work had passed,
+        # and the only remedy was a human recognising that a red check was
+        # not a real failure -- which teaches people to re-run reds instead
+        # of reading them (review 3.14.21).
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: durations-${{ matrix.os }}-${{ matrix.python-version }}-${{ matrix.shard }}

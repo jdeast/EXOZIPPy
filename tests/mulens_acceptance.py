@@ -153,6 +153,64 @@ def compare(reference, current, atol=0.0, rtol=0.0):
     return moved, appeared, vanished
 
 
+def platform_fingerprint():
+    """A COARSE identity for the machine a fixture was measured on.
+
+    system + machine + the BLAS name, and deliberately NOT the version.
+    The point of the fingerprint is to decide whether this run may be held
+    to BIT IDENTITY against a recording, and a BLAS point release that
+    changes no result must not silently downgrade the reference machine to
+    the loose tier.  One that DOES change a result is caught by the loose
+    tier regardless (review 3.14.20).
+
+    Best-effort: an unknown BLAS reads as "unknown", which simply means a
+    run cannot claim to be the reference platform -- the safe direction.
+    """
+    import platform
+
+    blas = "unknown"
+    try:
+        import numpy as _np
+
+        cfg = _np.__config__.show(mode="dicts") or {}
+        deps = cfg.get("Build Dependencies", {})
+        blas = str(deps.get("blas", {}).get("name", "unknown"))
+    except Exception:
+        pass
+    return {
+        "system": platform.system(),
+        "machine": platform.machine(),
+        "blas": blas,
+    }
+
+
+def is_reference_platform(fixture):
+    """True when THIS machine is the one that recorded `fixture`.
+
+    Requires BOTH a fingerprint match AND an explicit opt-in, and the
+    opt-in is not belt-and-braces -- the fingerprint alone is provably
+    insufficient.  It names a platform CLASS (system, machine, BLAS), and
+    CI's Linux runner shares this box's class while disagreeing with it:
+    on PR #251 the runner produced OGLE_0383LD's RV:mulensinstrument.model
+    as 26832.036090686284 against the recorded 26832.036090685935 --
+    relative 1.3e-14, and in the OPPOSITE direction from this machine's
+    5.4e-16.  OpenBLAS dispatches kernels by CPU capability at runtime, so
+    two machines of one class round differently.
+
+    Making the fingerprint finer (CPU model, OpenBLAS core) would demote the
+    reference machine on any hardware change and is a guess about which
+    attributes matter.  Requiring the claim to be STATED is honest: the
+    default is the physics tolerance, which is always safe, and only
+    somewhere that knows it recorded the fixtures opts in.
+    """
+    if not os.environ.get("EXOZIPPY_ACCEPTANCE_STRICT"):
+        return False
+    recorded = fixture.get("platform")
+    if not recorded:
+        return False
+    return platform_fingerprint() == recorded
+
+
 def record_deltas(case, rows):
     """Append per-term deltas for the CI dump (review 3.14.20).
 

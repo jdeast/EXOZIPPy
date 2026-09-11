@@ -2,6 +2,11 @@
  "config": "examples/ogle0383/OGLE_0383LD.yaml",
  "n_terms": 71,
  "params": "examples/ogle0383/OGLE_0383.paramsLD.yaml",
+ "platform": {
+  "blas": "scipy-openblas",
+  "machine": "x86_64",
+  "system": "Linux"
+ },
  "start": {
   "band.u1_raw": [
    0.0

@@ -475,10 +475,18 @@ TWO_SOURCE_SYSTEM = {
 
 def test_broadcast_shorter_than_the_vector_raises():
     """
-    Given a 2-part broadcast `lens.t_0` on a system whose lens has ONE config
-      entry but TWO sources, so the parameter has two elements,
+    Given a 2-part broadcast `lens.t_0` on a PRE-SPLIT system whose lens
+      has ONE config entry but TWO sources, so the parameter has two
+      elements,
     When resolve() is asked for the full vector,
     Then it raises, naming the per-element spellings that do work.
+
+    The CONFIG here is deliberately the pre-split shape, and passes only
+    because ConfigManager does not validate a lens block -- the check
+    under test is component-agnostic, so a fictional lens exercises it as
+    well as a real component would.  The 8.6.17 split removed this
+    direction's shipped instance (`source` now has one entry per source
+    body); the LIVE case is the shorter direction, `detrend_coeffs`.
 
     standardize_param_names expands a broadcast key by the CONFIG LIST length
     -- all it can see, running before any manifest exists -- so `lens.t_0`

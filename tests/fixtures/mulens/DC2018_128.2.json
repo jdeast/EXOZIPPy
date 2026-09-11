@@ -2,6 +2,11 @@
  "config": "examples/DC2018_128/DC2018_128.2.yaml",
  "n_terms": 67,
  "params": "examples/DC2018_128/DC2018_128.params.yaml",
+ "platform": {
+  "blas": "scipy-openblas",
+  "machine": "x86_64",
+  "system": "Linux"
+ },
  "start": {
   "lens.log_s_raw": [
    0.0

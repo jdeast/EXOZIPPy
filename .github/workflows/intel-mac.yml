@@ -275,6 +275,12 @@ jobs:
       # file and whatever pip managed to resolve are the diagnosis.
       - name: Upload the resolution record
         if: always()
+        # A failed UPLOAD must not fail the job -- see the same guard in
+        # tests.yml. This record is the diagnosis when the install fails
+        # (the comment above), so losing it costs a diagnostic; failing the
+        # job on it costs a signal. This is the step that actually cost PR
+        # #246 a green run (review 3.14.21).
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: intel-mac-${{ matrix.python-version }}

@@ -219,8 +219,8 @@ def test_non_sampled_initval_only_is_discarded(tmp_path):
     import yaml
 
     existing_params = {
-        "lens.Lens.t_0": {"initval": 2456836.22},
-        "lens.Lens.u_0": {"mu": 0.5},  # mu without sigma — not a prior
+        "source.Source.t_0": {"initval": 2456836.22},
+        "source.Source.u_0": {"mu": 0.5},  # mu without sigma -- not a prior
         "star.Lens.ra": {"initval": 266.8, "sigma": 0.0},
     }
     param_file = tmp_path / "ob.params.yaml"
@@ -243,10 +243,10 @@ def test_non_sampled_initval_only_is_discarded(tmp_path):
     )
 
     result = yaml.safe_load(open(out))
-    assert "lens.Lens.t_0" not in result, (
+    assert "source.Source.t_0" not in result, (
         "initval-only non-sampled entry should be dropped"
     )
-    assert "lens.Lens.u_0" not in result, (
+    assert "source.Source.u_0" not in result, (
         "mu-only entry (no sigma) should be dropped"
     )
     assert "star.Lens.ra" in result, (

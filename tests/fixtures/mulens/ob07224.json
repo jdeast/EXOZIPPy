@@ -2,6 +2,11 @@
  "config": "examples/ob07224/ob07224.yaml",
  "n_terms": 53,
  "params": "examples/ob07224/ob07224.params.yaml",
+ "platform": {
+  "blas": "scipy-openblas",
+  "machine": "x86_64",
+  "system": "Linux"
+ },
  "start": {
   "band.u1_raw": [
    0.0
