@@ -139,6 +139,8 @@ from ..sed.bc_grid import DEFAULT_MODEL_ROOT, RegularGridInterpolator
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MIST_MODEL_ROOT = DEFAULT_MODEL_ROOT / "MIST"
+
 # Column order of the interpolator's trailing (output) axis. age_mist is
 # converted yr -> Gyr before stacking (see _assemble_grid) to match
 # star.age's unit; the rest are used exactly as tabulated.
@@ -227,7 +229,7 @@ def grid_path(
     model: str = "MISTv2.5",
     alpha: float = 0.0,
     vvcrit: float = 0.0,
-    model_root: Path | str = DEFAULT_MODEL_ROOT,
+    model_root: Path | str = DEFAULT_MIST_MODEL_ROOT,
 ) -> Path:
     """Path to the grid.parquet for one (model, alpha, vvcrit).
 
@@ -240,7 +242,7 @@ def grid_path(
     else:
         token = _afe_token_v12(alpha)
         fname = f"afe_{token}_{_vvcrit_token(vvcrit)}.grid.parquet"
-    return model_root / "MIST" / model / "EEPs" / fname
+    return model_root / model / "EEPs" / fname
 
 
 # ---------------------------------------------------------------------
@@ -581,7 +583,7 @@ def _resolve_grid_file(model, alpha, vvcrit, model_root) -> Path:
     if path.is_file():
         return path
 
-    default_root = Path(model_root) == Path(DEFAULT_MODEL_ROOT)
+    default_root = Path(model_root) == Path(DEFAULT_MIST_MODEL_ROOT)
     if default_root and _model_version(model) == "2.5":
         from ...models.MIST.eep_grid import ensure_eep_grid
 
@@ -623,7 +625,7 @@ def load_mist_grid(
     model: str = "MISTv2.5",
     alpha: float = 0.0,
     vvcrit: float = 0.0,
-    model_root: Path | str = DEFAULT_MODEL_ROOT,
+    model_root: Path | str = DEFAULT_MIST_MODEL_ROOT,
 ) -> Dict:
     """Load, trim and assemble the MIST grid for one (model, alpha, vvcrit).
 
