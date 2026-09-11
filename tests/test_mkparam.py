@@ -369,6 +369,69 @@ def test_derived_parameter_excluded_from_output(tmp_path):
         )
 
 
+def test_derived_parameter_bound_scale_survives_the_round_trip(tmp_path):
+    """
+    Given a params file whose DERIVED parameter carries only a bound_scale
+      (examples/gj1214's `star.A.loggsed: {bound_scale: 25.0}`, the one place
+      bound_scale is load-bearing today),
+    When mkparam runs on a trace where loggsed is a Deterministic (no _raw),
+    Then the entry is re-emitted with its bound_scale intact -- and with NO
+      initval, because nothing invented a start value for it.
+
+    Review 2.3.13.  bound_scale was already in
+    `_apply_existing_constraints`'s constraint loop, so the fix was not
+    there: a derived parameter is never in `sampled_vars`, so that loop
+    never sees it and the end-of-function pass-through is its only path
+    into the file.  `_CONSTRAINT_FIELDS` listed sigma/upper/lower but not
+    bound_scale, so the whole entry was discarded as an initval-only stale
+    guess and the gj1214 example's softened barrier had to be re-added by
+    hand after every restart-file cycle (sed.md's "known gap").
+
+    The second assertion is the scope guard, not a detail.  A derived
+    parameter's initval is silently overridden by the model (review
+    2.3.17), so a restart file naming one would resume NEAR rather than AT
+    the point it claims.  The pass-through reads the USER's file and never
+    the trace, which is exactly what keeps the MAP out of this entry.
+    """
+    import yaml
+
+    existing_params = {"star.A.loggsed": {"bound_scale": 25.0}}
+    param_file = tmp_path / "gj.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    # loggsed is DERIVED (calc_logg_from_logmass on logmass and radiussed),
+    # so it appears in the posterior with no _raw companion.
+    trace = _make_idata(
+        {"star.teff": 3250.0, "star.loggsed": 5.0223},
+        tmpdir=tmp_path,
+        derived_vars={"star.loggsed"},
+    )
+    config = {
+        "prefix": "fitresults/gj",
+        "parameter_file": "gj.params.yaml",
+        "star": [{"name": "A"}],
+    }
+
+    out = write_param_file(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    result = yaml.safe_load(open(out))
+    assert "star.A.loggsed" in result, (
+        "a derived parameter's bound_scale must survive the round trip -- "
+        "dropping it silently re-stiffens a barrier the user widened"
+    )
+    assert result["star.A.loggsed"]["bound_scale"] == pytest.approx(25.0)
+    assert "initval" not in result["star.A.loggsed"], (
+        "carrying bound_scale must not drag a start value along: a derived "
+        "parameter's initval is silently overridden by the model"
+    )
+
+
 def test_output_filename_increments(tmp_path):
     """
     Given parameter_file = "kelt4.params.2.yaml",

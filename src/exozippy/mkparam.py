@@ -163,8 +163,9 @@ def _apply_existing_constraints(entry, existing_entry):
     # do: dropping it silently re-stiffens a barrier the user deliberately
     # widened.  NOTE this only reaches parameters mkparam emits at all; a
     # DERIVED parameter (star.loggsed, the one place bound_scale is
-    # load-bearing today) gets no entry, so a bound_scale on one is still
-    # lost on the round trip.  See examples/gj1214/gj1214.params.yaml.
+    # load-bearing today) is not one of them, and gets its constraints
+    # carried by the pass-through loop at the end of `write_param_file`
+    # instead -- see `_CONSTRAINT_FIELDS` there, and review 2.3.13.
     for constraint_key in ("mu", "sigma", "lower", "upper", "bound_scale"):
         if constraint_key in existing_entry:
             entry[constraint_key] = existing_entry[constraint_key]
@@ -953,7 +954,30 @@ def write_param_file(
                 _apply_existing_constraints(angle_entry, existing_entry)
             )
 
-    _CONSTRAINT_FIELDS = {"sigma", "upper", "lower"}
+    # config.PHYSICS_KEYS minus `mu`: the fields whose presence makes an
+    # entry worth keeping even though the trace says nothing about it.  `mu`
+    # is left out deliberately -- a center with no width is not a prior, and
+    # `config.validate_sigma_has_center` guards the reverse spelling -- so
+    # this is not simply PHYSICS_KEYS and must not be replaced by it.
+    #
+    # `bound_scale` is here for the same reason `lower`/`upper` are: it is a
+    # soft bound's transition width, a real posterior term the user stated,
+    # and dropping it silently re-stiffens a barrier they deliberately
+    # widened.  Review 2.3.13 is what its omission cost, and the reason it
+    # cost anything is that a DERIVED parameter never appears in
+    # `sampled_vars`: it is never consumed above, so this loop is its only
+    # path into the output file -- and a derived element is exactly where
+    # `Parameter.build_pymc` puts a barrier for `bound_scale` to tune.
+    # `examples/gj1214`'s `star.A.loggsed: {bound_scale: 25.0}` -- the one
+    # place bound_scale is load-bearing today -- therefore had no path at
+    # all, and had to be re-added by hand after every restart-file cycle.
+    #
+    # What this deliberately does NOT do is start writing derived parameters
+    # a START VALUE.  Nothing here reads the trace: the entry is passed
+    # through VERBATIM from the file the user wrote, so a derived parameter
+    # gets a restart entry only for constraints it already carried, never a
+    # MAP `initval` the model would silently override (review 2.3.17).
+    _CONSTRAINT_FIELDS = {"sigma", "upper", "lower", "bound_scale"}
 
     # Pass through existing entries not touched by the trace only if they carry
     # a constraint (prior, bound, or fixed value).  Pure initval-only entries

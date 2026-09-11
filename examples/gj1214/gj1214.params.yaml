@@ -93,11 +93,12 @@ mann.A.ks_offset:
 # What would remove the need is a BC grid covering logg > 5; until then
 # treat teffsed/radiussed/fbolsed and anything downstream accordingly.
 #
-# mkparam does not carry this entry into its restart file (loggsed is
-# derived, so it is not emitted at all) -- re-add it by hand if you switch
-# parameter_file: to a generated one.  The off-grid warning keys on the
-# VALUE, not on the barrier, so it still fires either way and its text
-# says which barrier is actually in force.
+# mkparam carries this entry into its restart file since review 2.3.13
+# (2026-09) -- verbatim, with no start value added, since loggsed is
+# derived and its initval would be overridden by the model anyway.  Before
+# that it had to be re-added by hand after every restart-file cycle.  The
+# off-grid warning keys on the VALUE, not on the barrier, so it fires
+# either way and its text says which barrier is actually in force.
 star.A.loggsed:
   bound_scale: 25.0
 
