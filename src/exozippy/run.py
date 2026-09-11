@@ -1409,6 +1409,75 @@ def _flat_probe_directions(all_params, mult_map, whiten_report):
     return flat
 
 
+def _expression_start_values(auditor):
+    """Start values for the parameters whose START is an expression's value.
+
+    A parameter reaches this only when it carries NO ``initval`` and the
+    user/solved table has nothing for it either -- so neither of the
+    table's two ordinary sources exists and the row would otherwise be
+    dropped.  For such a parameter the start genuinely IS whatever its
+    expression computes, so the value is read off the compiled graph at the
+    start point (``ModelAuditor.values_at_start``, which is also what
+    ``check_user_starts`` reads and which exists because ``p.value.eval()``
+    would draw from the prior instead).
+
+    Review 3.14.16: the gate here used to be ``p.expression is not None``,
+    inherited from 1.10.9.  A vector derived one element at a time has no
+    whole-vector ``expression`` -- ``element_expressions`` is where its
+    derivation lives -- so it failed that test, fell off the end of the
+    lookup chain and got NO ROW AT ALL: ``examples/ob09020``'s
+    ``lens.alpha``, the one shipped case, was simply missing from the
+    startup table.  The posterior-side twin of the same gate was widened in
+    the same way (``System._set_comp_posterior``, review 1.10.9), and this
+    keeps the two tables' notions of "derived and therefore evaluable"
+    identical.
+
+    Returns ``{id(parameter): internal-unit array}``, empty (and with no
+    PyTensor compile at all) when nothing needs it -- which is every
+    shipped example but one.
+    """
+    cfg_mgr = getattr(auditor.system, "config_manager", None)
+    needy = []
+    for p in auditor.all_params:
+        if not _prints_in_startup_table(p):
+            continue
+        if p.initval is not None:
+            continue
+        if p.expression is None and not getattr(
+            p, "element_expressions", None
+        ):
+            continue
+        n_elements = int(np.prod(p.shape)) if p.shape not in ((), None) else 1
+        try:
+            if any(
+                _user_initval(cfg_mgr, p, i) is not None
+                for i in range(n_elements)
+            ):
+                continue
+        except Exception:
+            continue
+        needy.append(p)
+    if not needy:
+        return {}
+    produced = auditor.values_at_start(needy)
+    # Size every vector to the parameter's own element count, so the row
+    # loop below cannot silently print fewer rows than the vector has (a
+    # scalar answer for a 2-element parameter would otherwise drop one).
+    sized = {}
+    for p in needy:
+        arr = produced.get(id(p))
+        if arr is None:
+            continue
+        n_elements = int(np.prod(p.shape)) if p.shape not in ((), None) else 1
+        if arr.size == n_elements:
+            sized[id(p)] = arr
+        else:
+            full = np.full(n_elements, np.nan)
+            full[: min(arr.size, n_elements)] = arr[:n_elements]
+            sized[id(p)] = full
+    return sized
+
+
 def inspect_start(
     model,
     system,
@@ -1448,6 +1517,11 @@ def inspect_start(
     flat_warnings = _flat_probe_directions(
         auditor.all_params, mult_map, whiten_report
     )
+
+    # Parameters whose START IS their expression's value: no initval of
+    # their own and no user/solved entry either, so the only honest source
+    # for the row is what the built graph computes (review 3.14.16).
+    expression_starts = _expression_start_values(auditor)
 
     # Dynamic Width Logic -- over the rows the table will actually print, so
     # a suppressed parameter with a long label cannot widen it for nothing.
@@ -1522,18 +1596,18 @@ def inspect_start(
             except Exception:
                 pass
 
-            # 2. Last resort: Eval the expression if it exists
-            if raw_v is None and p.expression is not None:
-                try:
-                    # 'deps' often need to be resolved. This is a hacky but effective way
-                    # to visualize the starting point of a deterministic.
-                    raw_v = (
-                        p.expression().eval()
-                        if hasattr(p.expression(), "eval")
-                        else p.expression()
-                    )
-                except Exception:
-                    pass
+            # 2. Last resort: what the BUILT GRAPH computes at the start
+            #    point.  For a parameter with neither an initval nor a
+            #    user/solved entry the start IS its expression's value, and
+            #    this is the only source that has it.  See
+            #    _expression_start_values: the gate used to be
+            #    `p.expression is not None`, which a vector derived
+            #    element-by-element fails, so its row was dropped
+            #    (review 3.14.16); and the eval used to be
+            #    `p.expression().eval()`, which draws from the prior.
+            produced = expression_starts.get(id(p))
+            if raw_v is None and produced is not None:
+                raw_v = produced if n_elements > 1 else float(produced[0])
 
         if raw_v is None:
             continue

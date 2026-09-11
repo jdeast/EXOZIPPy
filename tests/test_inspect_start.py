@@ -23,7 +23,7 @@ import pymc as pm
 import pytest
 
 import exozippy.components
-from exozippy.components.parameter import Parameter
+from exozippy.components.parameter import ElementExpression, Parameter
 from exozippy.components.star.star import Star
 from exozippy.config import ConfigManager, canonical_param_key
 from exozippy.run import (
@@ -521,3 +521,166 @@ def test_no_whitening_report_means_no_flat_verdict(mock_logp, caplog):
         inspect_start(model, system, {}, whiten_report=None)
 
     assert _flat_warning(caplog) is None
+
+
+# ---------------------------------------------------------------------------
+# (f) a parameter whose START is its expression's value -- review 3.14.16
+# ---------------------------------------------------------------------------
+
+
+def _row_value(caplog, label):
+    """The Value column of one startup-table row, as a float."""
+    row = _table_row(caplog, label)
+    assert row is not None, f"no row for {label}"
+    return float(row.split("|")[1].strip())
+
+
+def _derived_pair(model_name, by_element):
+    """A sampled driver plus a DERIVED parameter with no initval at all.
+
+    ``by_element=True`` derives it one element at a time
+    (``element_expressions``, so there is no whole-vector ``expression``),
+    which is the shape 3.14.16 is about; ``False`` uses the whole-vector
+    ``expression`` that the old gate already accepted, as the control.
+
+    The driver starts at 0.5 on bounds [0, 1] and the derivation halves it,
+    so the derived start is exactly 0.25 -- a number a draw from the
+    driver's U(0, 1) prior would essentially never produce, which is what
+    makes this also a test that the value is read AT THE START POINT.
+    """
+    driver = Parameter(
+        label="comp.drv",
+        initval=np.full(2, 0.5),
+        init_scale=np.full(2, 0.1),
+        lower=np.zeros(2),
+        upper=np.ones(2),
+        unit="",
+        internal_unit="",
+        shape=(2,),
+        names=["i0", "i1"],
+    )
+    with pm.Model(name=model_name) as model:
+        drv = driver.build_pymc()
+        kwargs = (
+            {
+                "element_expressions": [
+                    ElementExpression(
+                        mask=[True, True], expr=lambda: drv * 0.5
+                    )
+                ]
+            }
+            if by_element
+            else {"expression": lambda: drv * 0.5}
+        )
+        derived = Parameter(
+            label="comp.der",
+            initval=None,
+            unit="",
+            internal_unit="",
+            shape=(2,),
+            names=["i0", "i1"],
+            debug_print=True,
+            **kwargs,
+        )
+        derived.build_pymc()
+
+    system = _Sys(ConfigManager({}, system_config={}), [driver, derived])
+    point = model.initial_point()
+    return model, system, derived, point
+
+
+@pytest.mark.parametrize("by_element", [True, False])
+@patch("exozippy.diagnostics.ModelAuditor.get_aggregated_logps")
+def test_a_derived_parameter_with_no_initval_reports_its_start(
+    mock_logp, caplog, by_element
+):
+    """
+    Given a DERIVED parameter carrying no initval and no user entry -- so
+      its start IS whatever its expression computes,
+    When inspect_start renders the startup table,
+    Then its rows carry that computed value, whether the derivation is
+      declared per ELEMENT or for the whole vector.
+
+    Review 3.14.16: the last-resort lookup was gated on ``p.expression is
+    not None``, a whole-vector test inherited from 1.10.9, so the
+    per-element form fell through it and the parameter got NO ROW at all.
+    Measured on the one shipped case, ``examples/ob09020``'s
+    ``lens.alpha``: the row was missing, and it now reads 189.082 deg --
+    which is that example's published alpha_0 = 189.08, recorded in its own
+    params file as the acceptance check.
+
+    The posterior-side twin of this gate was widened the same way in
+    System._set_comp_posterior; both tables now agree on what "derived and
+    therefore evaluable" means.
+    """
+    # ARRANGE
+    mock_logp.return_value = ({}, {})
+    model, system, derived, point = _derived_pair(
+        f"model_derived_{by_element}", by_element
+    )
+    assert derived.initval is None
+    assert np.all(derived.is_derived)
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.run"):
+        inspect_start(model, system, point)
+
+    # ASSERT
+    for element in ("i0", "i1"):
+        row = _table_row(caplog, f"comp.{element}.der")
+        assert row is not None, [r.getMessage() for r in caplog.records]
+        assert "0.25000000" in row, row
+        # and it really is half the driver's own reported start, so the row
+        # is the derivation's answer rather than a coincidence
+        assert _row_value(caplog, f"comp.{element}.der") == pytest.approx(
+            0.5 * _row_value(caplog, f"comp.{element}.drv")
+        )
+
+
+@patch("exozippy.diagnostics.ModelAuditor.get_aggregated_logps")
+def test_the_value_comes_from_the_start_point_not_from_a_prior_draw(
+    mock_logp, caplog
+):
+    """
+    Given the same per-element derived parameter,
+    When the driver's start is MOVED before the table is rendered,
+    Then the reported value follows the new start.
+
+    The property that matters and that ``p.value.eval()`` -- the spelling
+    the item proposed -- does not have: evaluating the graph with its RVs
+    still in place samples the driver's prior, so the row would be a random
+    number that merely looks plausible.  ModelAuditor.values_at_start
+    replaces the RVs by their value variables and feeds the start point,
+    which is why moving the start moves the row.
+    """
+    # ARRANGE
+    mock_logp.return_value = ({}, {})
+    model, system, _derived, point = _derived_pair("model_derived_start", True)
+    moved = {k: np.asarray(v) for k, v in point.items()}
+    # raw 0 maps to the driver's initval (0.5); +1.0 in logit space moves it
+    # to sigmoid(logit(0.5) + 1*scale), i.e. away from 0.5 but still inside
+    # the bounds, so the derived value must move with it.
+    key = next(k for k in moved if "comp.drv" in k)
+    moved[key] = moved[key] + 1.0
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.run"):
+        inspect_start(model, system, moved)
+
+    # ASSERT: the derived row moved with the point, and it is still exactly
+    # half of what the DRIVER'S OWN node evaluates to at that same point --
+    # so the row is the derivation's answer at the given start, not a
+    # number from somewhere else.  (The driver's own row deliberately keeps
+    # reporting its `initval`, which is the authoritative start of a
+    # SAMPLED element; in a real run get_raw_start builds the point from
+    # exactly that, so the two agree there.)
+    from exozippy.diagnostics import ModelAuditor
+
+    at_point = ModelAuditor(model, system, moved).values_at_start(
+        [system._params[0], system._params[1]]
+    )
+    driver_at_point = float(at_point[id(system._params[0])][0])
+    derived_value = _row_value(caplog, "comp.i0.der")
+
+    assert derived_value == pytest.approx(0.5 * driver_at_point)
+    assert derived_value != pytest.approx(0.25), derived_value

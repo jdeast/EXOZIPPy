@@ -168,6 +168,55 @@ class ModelAuditor:
 
         return unused_items
 
+    def values_at_start(self, params):
+        """What the model PRODUCES for each Parameter at the start point.
+
+        ``{id(parameter): 1-D array in INTERNAL units}``, empty when the
+        graph cannot be evaluated -- a diagnostic must never be the reason
+        a fit does not start.
+
+        This is the one place allowed to answer "what value does this node
+        actually have at the start", and the reason it is a method rather
+        than two copies of ten lines is that the obvious spellings are both
+        wrong in the silent direction: ``p.value.eval()`` DRAWS FROM THE
+        PRIOR (it evaluates the graph with its RVs still in place) and
+        ``p.initval`` is the ledger, which is exactly the thing a caller
+        here is usually checking the graph against.  Read at the start
+        point means: replace the RVs by their value variables and feed
+        ``transformed_inits``.
+
+        ONE compiled function over the distinct nodes, because compiling
+        per parameter would add a PyTensor compile to startup for every
+        parameter asked about.  ``id()`` keys rather than labels: two
+        parameters can share a label across models, and the caller already
+        holds the objects.
+        """
+        distinct, nodes = [], []
+        for p in params:
+            node = getattr(p, "value", None)
+            if node is None or any(q is p for q in distinct):
+                continue
+            distinct.append(p)
+            nodes.append(node)
+        if not nodes:
+            return {}
+        try:
+            fn = pytensor.function(
+                self.model.value_vars,
+                self.model.replace_rvs_by_values(nodes),
+                on_unused_input="ignore",
+            )
+            point = [
+                self.transformed_inits[v.name] for v in self.model.value_vars
+            ]
+            produced = fn(*point)
+        except Exception:
+            return {}
+        return {
+            id(p): np.atleast_1d(np.asarray(v, dtype=float))
+            for p, v in zip(distinct, produced)
+        }
+
     @staticmethod
     def _wrap_if_angle(diff, unit):
         """Degrees are periodic: 352.57 and -7.43 are the SAME start.
@@ -273,34 +322,15 @@ class ModelAuditor:
         if not targets:
             return []
 
-        # ONE compiled function over the distinct value nodes.  Compiling
-        # per parameter would add a PyTensor compile to startup for every
-        # seed in the file.
-        nodes, node_of = [], {}
-        for _key, p, _i, _req in targets:
-            if id(p) not in node_of:
-                node_of[id(p)] = len(nodes)
-                nodes.append(p.value)
-
-        try:
-            fn = pytensor.function(
-                self.model.value_vars,
-                self.model.replace_rvs_by_values(nodes),
-                on_unused_input="ignore",
-            )
-            point = [
-                self.transformed_inits[v.name] for v in self.model.value_vars
-            ]
-            produced = fn(*point)
-        except Exception:
-            # A diagnostic must never be the reason a fit does not start.
+        produced = self.values_at_start([p for _key, p, _i, _req in targets])
+        if not produced:
             return []
 
         findings = []
         for key, p, i, requested in targets:
-            arr = np.atleast_1d(
-                np.asarray(produced[node_of[id(p)]], dtype=float)
-            )
+            arr = produced.get(id(p))
+            if arr is None:
+                continue
             j = min(i, arr.size - 1)
             unit = getattr(p, "unit", "")
             got = float(p.from_internal(arr[j], index=j))
