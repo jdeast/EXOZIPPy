@@ -230,12 +230,19 @@ LOG_L0_CONST = 2.5 * np.log10(L0.value)
 # the next reader cannot tell a measured value from a guess, and cannot find
 # the other place that has to move with it.
 
-# Fraction of the physical cores an unconfigured run takes.  run.py resolves
-# `cores` as max(1, min(int(n_phys * CORE_FRACTION), n_phys - 1)) -- the
-# `n_phys - 1` arm is what always leaves one core for the OS and for the
-# user's shell, and this fraction is what keeps a 64-core node from being
-# taken whole by a fit nobody asked to be exclusive.  A `sampler: cores:` key
-# overrides it outright.
+# Fraction of the physical cores an unconfigured run takes.  The rule has
+# exactly ONE spelling -- `samplers/_common.default_cores()`, which returns
+# max(1, min(int(n_phys * CORE_FRACTION), n_phys - 1)) -- and this constant
+# is its only input; PR #215 collapsed three drifting copies (run.py's
+# inline formula, create_pool's and nested.py's hardcoded 0.75) into it, so
+# anything that resolves an unnamed core grant calls that function rather
+# than rewriting the arithmetic.  The `n_phys - 1` arm is what always leaves
+# one core for the OS and for the user's shell, and this fraction is what
+# keeps a 64-core node from being taken whole by a fit nobody asked to be
+# exclusive.  `cores=None` therefore means AUTO, never serial (see
+# default_cores' own docstring for why that equivalence is load-bearing); a
+# `sampler: cores:` key is passed through by run.py instead and bypasses
+# this constant entirely.
 CORE_FRACTION = 0.75
 
 # Hard wall-clock limit, in seconds, on ONE symbolic solve in the relaxation
