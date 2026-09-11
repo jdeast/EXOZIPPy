@@ -2,7 +2,7 @@
 
 ## READ THIS FIRST: what this is, and what it is not
 
-**This component was written by an astronomer and an LLM. No biologist,
+**This component was written by an astrophysicist and an LLM. No biologist,
 pharmacologist, clinician, or pharmacometrician has reviewed it.**
 
 It exists to **demonstrate and enforce the component-agnostic architecture**,

@@ -1,7 +1,7 @@
 """One-compartment pharmacokinetics with first-order absorption.
 
 See this directory's README.md before relying on anything here: the component
-set is written by an astronomer and an LLM with no domain reviewer, and the
+set is written by an astrophysicist and an LLM with no domain reviewer, and the
 modelling choices are unreviewed.
 
 THE MODEL
@@ -150,6 +150,26 @@ def calc_pk_concentration(t, dose, ka, ke, v):
     m = 0.5 * (ka + ke) * t
     s = 0.5 * (ka - ke) * t
     return (dose * ka / v) * t * _damped_sinhc(m, s)
+
+
+@register_physics
+def calc_pk_pow10(log_x):
+    """``10**log_x``.  The sampled-in-log -> physical bridge.
+
+    ONE function serving CL, V and ka rather than three identical ones: the
+    physics registry is a flat namespace keyed by function name, so three
+    spellings of ``10**x`` would be three names to keep in step for no gain.
+    Each parameter selects its own input through its ``deps``.
+
+    The rates and volumes are sampled in log10 for the usual two reasons --
+    they are positive scale parameters spanning decades, and a log coordinate
+    makes the prior scale-invariant -- and for one specific to this model: the
+    flip-flop degeneracy (see the module docstring) is a reflection that swaps
+    ka and ke, which in log space is a translation of their difference and
+    keeps both modes at comparable sampler scales.  Mirrors ``star.logmass ->
+    mass`` and ``mulensing.log_s -> s``.
+    """
+    return pt.power(10.0, log_x)
 
 
 @register_physics

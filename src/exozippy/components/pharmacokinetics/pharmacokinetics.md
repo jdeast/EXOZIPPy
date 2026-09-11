@@ -1,0 +1,173 @@
+# Pharmacokinetics: the components, and what building them found
+
+## READ THIS FIRST
+
+**This component set was written by an astrophysicist and an LLM. No biologist,
+pharmacologist, clinician, or pharmacometrician has reviewed it.** It exists to
+demonstrate and enforce the component-agnostic architecture and to be a
+starting point for non-astronomy development. Reproducing a published fit
+validates that the code computes the model it claims to; it does not validate
+that the model or its priors suit anyone's data. The full caveat, and what a
+domain expert would need to check, is in `README.md` next to this file -- read
+that before changing anything here.
+
+Read this document before editing the components. It is the ruling record: the
+design decisions, and -- because that is half the point of the exercise -- what
+building a non-astronomy component actually ran into.
+
+## The components
+
+| Component | Instances | Owns | Astronomy analogue |
+|-----------|-----------|------|--------------------|
+| `subject` | one per individual | the PK parameters | `star` |
+| `assay` | one per data file | observations, residual error model, likelihood | `rvinstrument` |
+
+`population` (between-subject variability, allometric covariate) is P4 and does
+not exist; every subject here is independent, so this is not yet "population"
+PK in the field's sense. `physics.py` holds the forward model and is where the
+numerically interesting part lives.
+
+## The forward model, and its two numerical traps
+
+One compartment, first-order absorption, single oral dose. `F` is pinned at 1
+because it is exactly confounded with `V` and `CL` on oral-only data, so every
+estimate is an *apparent* `CL/F` or `V/F` -- the labels say so, and a reader who
+takes them for `CL` and `V` is wrong by `1/F`.
+
+**The `ka == ke` singularity is removable and must not be branched.** Folding
+`exp(-ke t)` into the bracket turns the curve into `exp(-m) sinh(s)/s`, with
+`m` and `s` the mean and half-difference of `ke*t` and `ka*t`. `sinh(s)/s` is
+even, so the floor goes on `s**2` -- no sign to lose -- and the floor is
+**strictly positive**, the `CHORD_RADICAND_FLOOR` rule.
+
+**How that term is spelled cost two wrong answers, both found by numerical test
+and both now pinned:**
+
+- `exp(-m) * sinh(y)/y` **overflows**: `sinh` reaches `inf` near `y = 710` while
+  `exp(-m)` has underflowed to `0`, giving `0 * inf` -> NaN. That is the exact
+  gradient poisoning the floor exists to prevent, reintroduced at the other end
+  of the range, and it is reachable by an ordinary excursion to a large `ka`
+  over a 25-hour window.
+- `(exp(y-m) - exp(-y-m)) / 2y` fixes the overflow and loses **six digits** to
+  cancellation at small `y` (measured: 1.1e-10 relative error at the limit).
+
+The working form is `exp(y-m) * (-expm1(-2y)) / (2y)`. Do not "simplify" it
+back; `_damped_sinhc` carries the measurements.
+
+**The flip-flop degeneracy is exact.** Swapping `ka <-> ke` and rescaling
+`V -> V*ke/ka` leaves every prediction bit-identical, with `CL` invariant and
+`V` not. Nothing breaks the symmetry: it is a real property of oral-only data,
+and truncating one mode away would be a hard bound on a posterior that hugs it
+(the failure `_restrict_bigomega_halfplane`'s removal documents). `Subject`
+sets `expects_suppressed_modes = True`, which turns on hot-chain retention
+generically.
+
+## What building this found about the core
+
+The point of the exercise. Measured, not speculated.
+
+**The core is genuinely component-agnostic.** `src/exozippy/*.py` and
+`outputs/*.py` contain zero hardcoded component names (the only hit for "star"
+is a plot marker glyph in `plot_theme.py`), and `system.py` has no reference to
+any component. Both components were written against `Component` + `Parameter` +
+the manifest vocabulary + the four-file layout, as `components.md` declares,
+and needed no change to the core to build, sample, and report.
+
+Four places where the fit was not frictionless:
+
+1. **The reporting convention was hardcoded, and it mattered most.** Median +
+   68.3% (1-sigma) is astronomy's; pharmacometrics reports 95%. Fixed before
+   any of this component existed -- `exozippy.reporting`, and the
+   "credible-interval width" section of `outputs/outputs.md`. Note the two
+   fields do not merely use different widths but different *kinds* of number:
+   sigma multiples versus exact round probabilities.
+2. **The prose layer's ORDERING vocabulary is astronomy-shaped** -- but only
+   the ordering, and this is milder than it first looks. Two mechanisms are
+   easy to conflate and only one has a problem:
+
+   - The **results-table side headings** come from `Component.label` and are
+     component-generated already (`outputs/latex.py`'s `\sidehead`). `Subject`
+     and `Assay` supply their own; no astronomy vocabulary is involved. This
+     is exactly the firewall it was designed to be, and it works.
+   - The **modeling-draft prose** (`outputs/prose.py`) keys each sentence to
+     one of thirteen `SECTION_ORDER` slots, four of which are `stellar`,
+     `planetary`, `orbits`, `microlensing`. An unknown slot *raises*, rightly.
+
+   Crucially those slot names are **not printed**: `modeling._DOC_SECTIONS`
+   routes all thirteen into just three `\section{}` headings -- Observations,
+   Modeling, Results -- which are already field-neutral. So a reader never sees
+   the word "stellar", and the astronomy vocabulary is purely an internal
+   ordering key.
+
+   The residual problem is therefore ordering, not text: a non-astronomy
+   component has no slot that describes it, so `Subject`'s "what we fitted"
+   sentence is filed under `data`, where it will be ordered among
+   data-inventory sentences rather than after them.
+
+   **Proposed fix, not implemented here:** collapse the four physics slots into
+   one `model` slot and order sentences within it by the component's position
+   in `graph.determine_pymc_build_order`'s topological sort. Dependency order
+   is the right editorial order -- inputs before things derived from them --
+   and it reproduces stellar -> planetary -> orbits for astronomy while giving
+   subject -> assay here, with no vocabulary to extend when a new field
+   arrives. The printed headings do not change. Verify against the shipped
+   examples before adopting: the four slots encode an editorial order that a
+   graph sort should reproduce but has not been shown to.
+3. **Numeric instance names are rejected, and clinical data are numerically
+   labelled.** `validate_instance_names` refuses a purely numeric name because
+   it would be ambiguous with the internal `subject.0` index form -- correct,
+   and it collides head-on with a field where subjects are `1..12`. Handled in
+   the component with an explicit `subject_prefix` on `assay` rather than a
+   fallback that tries the bare name and then a prefixed one, since a silent
+   second attempt would pair the wrong rows whenever both spellings exist.
+4. **`Instrument` is the astronomy-coupled scaffold, not the core.** Its data
+   machinery -- columns, masks, detrending, GP, robust likelihoods, jitter -- is
+   field-neutral and would fit `assay`. Its vocabulary is not: `time_frame`
+   defaults to `bjd`, `time_offset` is in days, `_to_bjd_tdb`, `time_location`
+   as an observatory. Those defaults pass a blood draw through **untouched**,
+   which is the trap: inheriting would have worked while documenting a
+   barycentric correction on a plasma sample.
+
+   `assay` therefore inherits `Component` directly, and **what it
+   re-implements is the finding**: CSV reading, a column-role mapping
+   (extended to accept header names), non-finite row dropping, a data-side
+   unit conversion, and a per-file noise seed pushed through `add_hint`. That
+   is a short list, and it is the argument for splitting a field-neutral data
+   base out of `Instrument` -- but that refactor should be driven by this list,
+   not started before it existed.
+
+Two smaller notes: `utilities/zenodo.fetch_assets` is generic despite its name
+and is reused here for a non-Zenodo URL, but it prints "Downloading ... from
+Zenodo", which is now inaccurate for one caller; and `add_hint` correctly
+refuses a 2-part broadcast path, which is worth knowing before writing a
+component's first seed.
+
+## Data, units, and why the data are fetched
+
+Internal units are hours, mg, L and mg/L. Parameters convert through the
+`Parameter` layer; the two *data* columns have no `Parameter` and are converted
+in `Assay.load_data`, loudly -- `conc_unit: ng/mL` is a factor of 1000, the size
+of error this codebase has hidden before.
+
+The Theophylline data are **not redistributed**. EXOZIPPy is BSD-3-Clause and
+the table reaches most people through R's GPL-2 `datasets` package; bundling
+GPL-2 material in a BSD distribution is a compatibility problem for this
+project, even though GPL-2 plainly permits redistribution -- it is copyleft, not
+a ban, and the table is in any case measured factual data whose
+copyrightability is doubtful. Rather than make that judgement call on a user's
+behalf, `exozippy-fetch-theoph` downloads it on request, md5-pinned.
+`examples/theophylline/.gitignore` is the enforcement; do not `git add -f` the
+CSV.
+
+## Phases
+
+P0 (reporting width) and P1 (these two components) are done. P2 adds
+`symbolic_physics.py` so the relaxation engine can accept a half-life where the
+model wants a clearance; P3 adds the NONMEM TRANS1/TRANS2 coordinate choice as
+a per-instance `mode_manifest`, which is where the `reported` element role
+earns its place; P4 adds `population`; P5 does the degeneracy reporting. See
+`README.md` for the table and for which caveat copies each phase owes.
+
+Tests: `tests/test_pharmacokinetics_physics.py` (the forward model),
+`tests/test_pharmacokinetics_components.py` (config, maps, units, the built
+model).

@@ -1,6 +1,6 @@
 """The one-compartment PK forward model (components/pharmacokinetics/physics.py).
 
-See that directory's README.md: the component set is written by an astronomer
+See that directory's README.md: the component set is written by an astrophysicist
 and an LLM with no domain reviewer.  These tests pin that the code computes the
 model it says it computes -- the textbook closed form, its removable
 singularity, and the exact degeneracy the model carries.  They do NOT and

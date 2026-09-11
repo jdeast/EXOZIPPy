@@ -235,6 +235,9 @@ Homepage = "https://github.com/jdeast/EXOZIPPy"
 exozippy = "exozippy.cli:main"
 exozippy-modes = "exozippy.cli_modes:main"
 exozippy-gui = "exozippy.gui.app:main"
+# Example data that is NOT redistributed with EXOZIPPy (licence
+# compatibility -- see components/pharmacokinetics/fetch_theoph.py).
+exozippy-fetch-theoph = "exozippy.components.pharmacokinetics.fetch_theoph:main"
 
 # Only poetry-specific configuration belongs under [tool.poetry] now; every
 # field above is standard PEP 621 metadata that any tool can read.

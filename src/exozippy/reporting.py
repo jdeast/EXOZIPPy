@@ -30,7 +30,7 @@ PROVENANCE OF THE NON-ASTRONOMY CLAIMS ABOVE
 --------------------------------------------
 
 The statements about pharmacometrics, clinical and epidemiological practice
-were written by an astronomer and an LLM.  NO domain expert has reviewed them.
+were written by an astrophysicist and an LLM.  NO domain expert has reviewed them.
 They are the reason this setting exists and they are believed accurate, but
 they are secondary knowledge, not expertise: treat a specific claim (which
 regulator asks for which width, what a given field's default is) as a starting

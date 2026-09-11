@@ -1,0 +1,214 @@
+# Population pharmacokinetics -- parameter defaults.
+#
+# READ README.md IN THIS DIRECTORY FIRST.  Written by an astrophysicist and an LLM
+# with no domain reviewer; the modelling choices below, INCLUDING EVERY BOUND
+# AND START VALUE, are unreviewed.  They are chosen to be permissive enough
+# not to exclude a plausible drug rather than to encode knowledge about one.
+#
+# Internal units are hours, mg, L, and mg/L throughout, so ka/ke are 1/hr,
+# V is L, CL is L/hr and concentrations are mg/L.  A user may write any
+# astropy-convertible unit on a parameter and the Parameter layer converts.
+
+subject:
+  # --- sampled coordinates -------------------------------------------------
+  #
+  # CL, V and ka are sampled in log10 and derived by 10**x (see
+  # physics.calc_pk_pow10).  Only these three carry bounds: they are the
+  # SAMPLED coordinates, so their bounds are the hard logit support.  The
+  # derived quantities below deliberately carry NO bounds, because a finite
+  # bound on a DERIVED element becomes a soft barrier (see parameter.md) --
+  # i.e. an extra prior term -- and the constraint is already stated once,
+  # here.  Stating it twice would double-count it.
+
+  log_cl:
+    # CL/F from 0.01 to 100 L/hr.  Spans roughly the whole range of small-
+    # molecule apparent clearances, from a slowly cleared drug to a rapidly
+    # cleared one, with margin at both ends.
+    lower: -2.0
+    upper: 2.0
+    initval: 0.45
+    # d(log10 CL) for a ~25% change in CL: 0.25/ln(10) ~ 0.11.
+    init_scale: 0.11
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "\\log{(CL/F)}"
+    description: "log10 apparent clearance"
+
+  log_v:
+    # V/F from 0.1 to 1000 L.  The upper end covers a drug distributing well
+    # beyond total body water; the lower end is far below plasma volume.
+    lower: -1.0
+    upper: 3.0
+    initval: 1.5
+    init_scale: 0.11
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "\\log{(V/F)}"
+    description: "log10 apparent volume of distribution"
+
+  log_ka:
+    # Absorption rate 0.01 to 100 /hr, i.e. absorption half-lives from a few
+    # seconds to a few days.  Deliberately wide: ka is the least constrained
+    # of the three on sparse data, and it is the coordinate the flip-flop
+    # degeneracy moves, so a tight bound here would truncate one of the two
+    # modes rather than resolve it (README, "the flip-flop degeneracy").
+    lower: -2.0
+    upper: 2.0
+    initval: 0.18
+    init_scale: 0.15
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "\\log{k_a}"
+    description: "log10 absorption rate constant"
+
+  # --- derived, and CONSUMED by the forward model --------------------------
+
+  cl:
+    unit: "L/hr"
+    internal_unit: "L/hr"
+    # CL/F, not CL: bioavailability F is exactly confounded with CL and V on
+    # oral-only data and is not fitted, so every estimate here is an APPARENT
+    # clearance.  The label says so because a reader who takes this for CL is
+    # wrong by 1/F, which for a poorly absorbed drug is a large factor.
+    latex: "CL/F"
+    description: "Apparent clearance"
+    expressions:
+      default:
+        func_name: "calc_pk_pow10"
+        deps: ["log_cl"]
+
+  v:
+    unit: "L"
+    internal_unit: "L"
+    latex: "V/F"
+    description: "Apparent volume of distribution"
+    expressions:
+      default:
+        func_name: "calc_pk_pow10"
+        deps: ["log_v"]
+
+  ka:
+    unit: "1/hr"
+    internal_unit: "1/hr"
+    latex: "k_a"
+    description: "Absorption rate constant"
+    expressions:
+      default:
+        func_name: "calc_pk_pow10"
+        deps: ["log_ka"]
+
+  ke:
+    # ke = CL/V is NONMEM's TRANS2 -> TRANS1 bridge and is what the forward
+    # model actually consumes.  Which of (CL, V) and (ke, V) is sampled is a
+    # per-instance coordinate choice in the field; only TRANS2 exists here.
+    # TRANS1 is deferred to P3, where it is an element-role question rather
+    # than a second expression (see README).
+    unit: "1/hr"
+    internal_unit: "1/hr"
+    latex: "k_e"
+    description: "Elimination rate constant"
+    expressions:
+      default:
+        func_name: "calc_pk_ke_from_cl"
+        deps: ["cl", "v"]
+
+  # --- derived, and consumed by NOTHING: reporting only --------------------
+  #
+  # No bounds, for the reason given at the top of this block.  In P3 these
+  # become the `reported` element role proper; until then they are ordinary
+  # derived parameters, which computes and reports the same numbers and
+  # differs only in that they sit in the build DAG.
+
+  t_half:
+    unit: "hr"
+    internal_unit: "hr"
+    latex: "t_{1/2}"
+    description: "Terminal half-life"
+    expressions:
+      default:
+        func_name: "calc_pk_half_life"
+        deps: ["ke"]
+
+  tmax:
+    unit: "hr"
+    internal_unit: "hr"
+    latex: "t_{max}"
+    description: "Time of peak concentration"
+    expressions:
+      default:
+        func_name: "calc_pk_tmax"
+        deps: ["ka", "ke"]
+
+  cmax:
+    unit: "mg/L"
+    internal_unit: "mg/L"
+    latex: "C_{max}"
+    description: "Peak concentration"
+    expressions:
+      default:
+        func_name: "calc_pk_cmax"
+        deps: ["dose", "ka", "ke", "v"]
+
+  auc:
+    # AUC to infinity for a single dose.  Written from CL so the expression
+    # reads as the identity D/CL that it is.
+    unit: "mg hr / L"
+    internal_unit: "mg hr / L"
+    latex: "AUC"
+    description: "Area under the curve to infinity"
+    expressions:
+      default:
+        func_name: "calc_pk_auc"
+        deps: ["dose", "cl"]
+
+  # --- per-subject data, not a fitted quantity -----------------------------
+
+  dose:
+    # The administered dose in absolute mg, converted from the config's
+    # `dose:` / `dose_unit:` at stage 1 (a per-kg dose is multiplied by the
+    # subject's weight).  It is a PINNED parameter rather than a bare numpy
+    # array so that it can be a dep of the expressions above and so that it
+    # appears in the results table -- a reader checking a PK fit wants to see
+    # the dose it assumed.  sigma: 0 pins it; the initval is supplied per
+    # element by the component, which is what a pin must have (parameter.md).
+    sigma: 0.0
+    initval: 100.0
+    lower: 0.0
+    upper: 1.0e6
+    unit: "mg"
+    internal_unit: "mg"
+    latex: "D"
+    description: "Administered dose"
+
+assay:
+  # Combined residual error model, sigma = sqrt(add^2 + (prop*C)^2) -- the
+  # NONMEM/Monolix default and the direct analogue of this codebase's
+  # jitter-in-quadrature.
+  #
+  # BOTH TERMS ARE POSITIVE-BOUNDED, unlike rvinstrument's SIGNED
+  # jitter_variance.  That is deliberate and is not an oversight: RV jitter is
+  # added in quadrature to a REPORTED per-point error and may legitimately go
+  # negative to absorb an over-estimated one, whereas these data carry no
+  # reported error for a negative term to correct, and a negative sigma here
+  # would simply make the likelihood undefined.
+
+  sigma_add:
+    lower: 0.0
+    upper: 100.0
+    initval: 0.1
+    init_scale: 0.05
+    unit: "mg/L"
+    internal_unit: "mg/L"
+    latex: "\\sigma_{add}"
+    description: "Additive residual error"
+
+  sigma_prop:
+    # A fraction, not a percentage: 0.1 is 10% proportional error.
+    lower: 0.0
+    upper: 2.0
+    initval: 0.1
+    init_scale: 0.05
+    unit: ""
+    internal_unit: ""
+    latex: "\\sigma_{prop}"
+    description: "Proportional residual error"

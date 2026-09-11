@@ -1,0 +1,25 @@
+# Parameter overrides for the Theophylline example.
+#
+# Deliberately empty.  The defaults in
+# src/exozippy/components/pharmacokinetics/defaults.yaml are wide enough to
+# start this fit without help, and a params file is a TEMPLATE: it carries
+# published values, not numbers somebody read off an earlier run of this same
+# fit.  Seeding it from our own posterior would make the example look better
+# and test less.
+#
+# What you WOULD put here:
+#
+#   subject.S1.log_cl: {initval: 0.45}          # a start value
+#   subject.S1.cl:     {mu: 2.8, sigma: 0.5}    # a prior, in L/hr
+#   subject.log_ka:    {lower: -1.0}            # tighten a bound (all subjects)
+#
+# Any of the three spellings works for one element: the broadcast
+# `subject.log_cl`, the index form `subject.0.log_cl`, or the name form
+# `subject.S1.log_cl`.  Most specific wins.
+#
+# NOTE the units.  A value written against `cl` is in L/hr and one written
+# against `log_cl` is in dex; the two are the same quantity in different
+# coordinates and the relaxation engine will solve for whichever you did not
+# write.  That is also how you can seed this fit by HALF-LIFE if that is what
+# your reference quotes -- but not yet: the symbolic relations that make
+# t_half an acceptable input are P2 (see the component README).
