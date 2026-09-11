@@ -99,47 +99,23 @@ Note also that `0.95` here means **exactly 95%**, the round probability, not
 2 sigma (which is 95.45%). The two fields use different kinds of number, not
 just different widths; see `src/exozippy/reporting.py`.
 
-## What a first run shows (NOT validation)
-
-Recorded because it is informative, and labelled because it is **not** the
-validation this component still owes.
-
-Fitting all 12 subjects and comparing to an independent per-subject
-least-squares fit of the same closed-form model (scipy `curve_fit`, nothing to
-do with EXOZIPPy):
-
-| quantity | agreement |
-|----------|-----------|
-| `CL/F` | within **3.6%** on every subject, median ratio 0.994 |
-| `V/F` | agrees except subject 7 |
-| `ka` | agrees except subjects 7 and 9 |
-
-The population medians come out at `CL/F` ~ 0.043 L/hr/kg and `t_half` ~ 7.7 h,
-which sit in the range usually quoted for theophylline in adults.
-
-**Subject 7 is the flip-flop degeneracy, caught in the wild.** Its chain
-settled in the mirrored mode, and the signature is exactly the one the algebra
-predicts: EXOZIPPy's `ka` (0.112 /hr) equals the conventional fit's `ke`
-(0.102 /hr), `V` has moved toward the predicted `V*ke/ka`, and **`CL` is
-unchanged** (3.296 vs 3.333 L/hr). That is the degeneracy behaving as derived,
-not a bug -- and it is why the mode report warns that the chains do not mix
-between modes.
-
-It is also the practical lesson the degeneracy carries: the clearance-derived
-quantities are trustworthy here and the volume-derived ones are not, for that
-subject, without outside information to pick the branch.
-
-Subject 9's `ka` is a different matter -- simply poorly determined, because the
-absorption phase is faster than the sampling times can resolve.
-
 ## Validation
 
-**Not yet performed.** The comparison above is against *another fit of the same
-model by us*, which checks the implementation's internal consistency and
-nothing else. It is not a comparison against a published population fit, it
-does not test the modelling choices, and no domain expert has reviewed any of
-it.
+**Performed 2026-09-11 against R's `nlme`** -- an independent implementation of
+this model on this dataset. Headlines:
 
-Until this section carries a named publication and real numbers, treat what
-this example produces as unverified as well as unreviewed. The bar and the gate
-are in `src/exozippy/components/pharmacokinetics/README.md`.
+* our forward model agrees with R's `SSfol` to **1.7e-13** (float64 round-off,
+  i.e. it is the same function);
+* per-subject `CL/F` agrees with R's `nlsList` -- the estimator-matched
+  comparison -- to **3.6% on every one of the 12 subjects**, median ratio 0.990;
+* population `CL/F` and `t_half` land within ~8% and ~5% of `nlme`'s fixed
+  effects, which is **indicative only**: `nlme` is a mixed-effects fit and this
+  component has no population model yet, so the two are different estimators.
+
+The full table, including why subject 12 differs (the flip-flop) and why
+subject 9 differs for an unrelated reason (`ka` unidentifiable above ~5/hr with
+a first sample at 0.25 h), is in
+`src/exozippy/components/pharmacokinetics/README.md`.
+
+**This validates the implementation, not the modelling choices.** The caveat at
+the top of this file is unchanged.
