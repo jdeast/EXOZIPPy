@@ -52,6 +52,39 @@ careful here rather than a reassurance:
 positionally a plain tuple, so nothing had to change to adopt it -- but a new
 call site should say `.err_plus` and be immune.
 
+## The credible-interval width is a setting, and the caption is generated from it
+
+`src/exozippy/reporting.py` holds ONE run-level width, read by
+`Parameter._summarize_array` (so the table, `<prefix>_results.csv` and the mode
+report all follow it), by `corner_utils` and by the `\tablecaption{}` that
+`outputs/report_pipeline.py` builds. Default 0.6827 -- the 1-sigma astronomy
+convention every shipped example reports and none of them move. Set it with
+`reporting: {credible_interval: 0.95}`.
+
+**The caption is BUILT from the width** (`reporting.caption_phrase`), and was the
+literal `"Median and 68\% Confidence intervals for "` until 2026-09-11. Two
+reasons it cannot go back. A caption that disagrees with the numbers beside it is
+worse than either being wrong alone, and it is the one error a reader cannot
+detect from the table. And the word "1-sigma" is true of 68.27% and false of
+every other width, so it is emitted only for that one.
+
+**Why a setting at all:** median + 68% is an *astronomy* convention, not a
+universal one. Pharmacometrics, epidemiology and clinical work report 95%
+(bioequivalence reports a 90% interval whose bounds are in FDA/EMA guidance).
+Annotating an unidiomatic interval does not rescue it -- a reader whose field has
+exactly one convention does not check the caption, so a 68% interval is read as
+95% and the uncertainty is understated about twofold. A component that emits a
+result for a field reports it in that field's convention.
+
+Per-RUN and not per-component or per-parameter, deliberately: a table whose rows
+carried different widths would be unreadable and its caption could not describe
+it. The width is in `evaluator._NON_STRUCTURAL_CONFIG_KEYS`, so re-reporting an
+existing trace at a different width does not stale it -- that is what it is for.
+What this setting does NOT solve is a SECOND error column: a population-PK table
+reports both an estimate's precision (RSE%) and the population's spread (CV%),
+and `CSV_COLUMNS_PLAIN`/`CSV_COLUMNS_MODE` above are two fixed layouts with one
+error pair. That is a new layout, not a new value, and it has no channel yet.
+
 ## LaTeX macro names
 
 - **Every piece of a generated LaTeX macro name has exactly one implementation, in `outputs/texutils.py`** (`DIGIT_WORDS`, `idx_to_words`, `mode_word`, `mode_suffix`) -- because the name `\<varname><idx><suffix>` is built in *two* modules: `parameter.py` **emits** the `\providecommand`, `outputs/latex.py` **refers** to it from the deluxetable body, and `run.py` reuses `mode_suffix` a third time for the per-mode plot filenames. A drift between emitter and referrer spells a macro that was never defined ("Undefined control sequence" at the end of a long fit) or, worse, one that exists and holds another parameter's value. It lives in `texutils` and not in `parameter.py` because `components -> outputs.texutils` is an existing edge (`latex_escape`) while the reverse would close an import cycle; `outputs/modes.py` re-exports `mode_suffix` so it still reads as a modes concept at its call sites. Note two deliberately different conventions for the same mode `k`: the value macros take `mode_suffix(k)` (`\ezteffmodeone`) while the mode-*weight* macros take the bare `mode_word(k)` (`\ezmodeweightone`), since `\ezmodeweight` is already a mode-specific stem. Both are 1-based labels of a 0-based index, and that `+1` lives in `mode_word` alone. `tests/test_latex_macro_xref.py` pins the cross-reference itself -- every `\ez...` the table cites must be defined by the variable file, checked statically and, where a TeX install exists, by really running `pdflatex` over the macro set.

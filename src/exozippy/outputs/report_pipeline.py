@@ -11,6 +11,7 @@ drift apart: both call sites import build_mode_reports from this module.
 import logging
 from pathlib import Path
 
+from .. import reporting
 from .latex import build_csv_output, build_latex_output
 from .modes import (
     DEFAULT_MAX_INVALID_FRAC,
@@ -431,7 +432,13 @@ def build_mode_reports(
         system,
         var_filename=str(prefix) + "_definitions.tex",
         table_filename=str(prefix) + "_table.tex",
-        caption=r"Median and 68\% Confidence intervals for "
+        # The width is a run-level setting (exozippy.reporting), so the
+        # caption is GENERATED from it.  It was the literal "Median and 68\%"
+        # until 2026-09-11, which is the astronomy convention and was the only
+        # one any shipped component wanted; a caption that disagrees with the
+        # numbers beside it is the worst of the available failures.
+        caption=reporting.caption_phrase(capitalized=True)
+        + " for "
         + latex_escape(prefix.stem),
         tablecomments=table_comments,
         mode_report=mode_report,

@@ -28,7 +28,7 @@ import pytensor.graph.traversal
 import pytensor.tensor as pt
 from astropy import units as u
 
-from exozippy.constants import SIGMA_1_HIGH, SIGMA_1_LOW
+from exozippy import reporting
 from exozippy.manifest import normalize_selector
 from exozippy.outputs.texutils import (
     DIGIT_WORDS,
@@ -926,6 +926,26 @@ class Parameter:
     # one entry per posterior mode (same structure as summary), filled by
     # compute_mode_summaries when a mode report exists
     mode_summaries: Optional[list] = field(default=None, init=False)
+    # The reporting interval width (exozippy.reporting) each cache above was
+    # computed at.  A summary belongs to the draws it came from -- which is
+    # what the `posterior` setter below enforces -- AND to the width it was
+    # computed at, which is what these enforce: `summary_is_current` and
+    # `mode_summaries_are_current` compare against the ACTIVE width and the
+    # `ensure_*` path recomputes when it has moved.  None means "nothing
+    # cached yet".  Without them, re-reporting one live System at a second
+    # width (exozippy-modes, the GUI, any script that fits and then
+    # re-reports) would publish the FIRST width's intervals under the second
+    # width's caption -- the same silent-staleness shape as review 3.14.7,
+    # and worse, because an interval is plausible at ANY width.
+    #
+    # TWO stamps, not one, even though every call site today computes both
+    # caches at the same width in the same pass.  One shared stamp is wrong
+    # the moment they are computed at different widths: stamping it from
+    # `compute_mode_summaries` would mark a `summary` built at the OLD width
+    # current, which is precisely the failure these fields exist to catch.
+    # The coupling is invisible while the call order happens to prevent it.
+    _summary_ci: Optional[float] = field(default=None, init=False)
+    _mode_summaries_ci: Optional[float] = field(default=None, init=False)
     table_note: Optional[str] = None
     # Prior terms added from OUTSIDE this Parameter -- a component's
     # pm.Potential -- declared via add_prior_contribution so the reported
@@ -3536,8 +3556,7 @@ class Parameter:
             )
 
         # SAMPLED PARAMETER PATH
-        if self.summary is None:
-            self.compute_summary()
+        self.ensure_summary()
 
         if isinstance(self.summary, list):
             lines = []
@@ -3950,8 +3969,7 @@ class Parameter:
         if self.print_to_table:
             val_txt = self._value_cells(idx_str, mode_suffixes)
         else:
-            if self.summary is None:
-                self.compute_summary()
+            self.ensure_summary()
             summ = (
                 self.summary[index]
                 if isinstance(self.summary, list)
@@ -4069,16 +4087,22 @@ class Parameter:
         self._posterior = value
         self.summary = None
         self.mode_summaries = None
+        self._summary_ci = None
+        self._mode_summaries_ci = None
 
     # ---------
     # Posterior summary
     # ---------
     @staticmethod
     def _summarize_array(arr: np.ndarray) -> Any:
-        """Median + 68% interval over the LAST axis (the samples).
+        """Median + the reporting credible interval over the LAST axis (samples).
 
-        Returns a PosteriorSummary, or a list of them for vector parameters.
+        The width is ``exozippy.reporting.get_credible_interval()`` -- one
+        run-level setting shared with the corner plots and the table caption,
+        defaulting to the historical 68.27% (1 sigma).  Returns a
+        PosteriorSummary, or a list of them for vector parameters.
         """
+        q_low, q_high = reporting.quantiles()
 
         def get_stat(data):
             if data.size == 0 or not np.isfinite(data).any():
@@ -4088,8 +4112,8 @@ class Parameter:
                     err_plus=float("nan"),
                 )
             med = float(np.nanquantile(data, 0.5))
-            lo = float(np.nanquantile(data, SIGMA_1_LOW))
-            hi = float(np.nanquantile(data, SIGMA_1_HIGH))
+            lo = float(np.nanquantile(data, q_low))
+            hi = float(np.nanquantile(data, q_high))
             return PosteriorSummary(
                 median=med, err_minus=med - lo, err_plus=hi - med
             )
@@ -4108,12 +4132,17 @@ class Parameter:
         return get_stat(arr)
 
     def compute_summary(self) -> Any:
-        """Median and 68% interval over the trace, in user units.
+        """Median and the reporting credible interval over the trace, in user units.
 
-        The interval width is not a knob: ``_summarize_array`` reports the
-        1-sigma quantiles every consumer (LaTeX tables, CSV, mode report)
-        assumes.  This used to take an ``nsigma`` argument that nothing read,
-        so ``compute_summary(nsigma=2)`` silently returned 1 sigma.
+        Recomputes unconditionally; callers that want the cache should say
+        ``ensure_summary()``.  The width comes from ``exozippy.reporting`` and
+        is stamped on the Parameter so a later report at a different width
+        recomputes rather than publishing this one.
+
+        It is NOT the ``nsigma`` argument this method used to carry.  That one
+        was read by nothing, so ``compute_summary(nsigma=2)`` silently returned
+        1 sigma; the width now reaches every consumer or none of them, and the
+        stamp closes the staleness the argument never had to answer for.
         """
         # arr from az.extract places the 'sample' dimension LAST.
         # Posterior is stored in user units (from the user-unit trace Deterministic).
@@ -4121,6 +4150,46 @@ class Parameter:
             getattr(self.posterior, "values", self.posterior), dtype=float
         )
         self.summary = self._summarize_array(arr)
+        self._summary_ci = reporting.get_credible_interval()
+        return self.summary
+
+    def summary_is_current(self) -> bool:
+        """Is the cached ``summary`` both present and at the active width?"""
+        return (
+            self.summary is not None
+            and self._summary_ci == reporting.get_credible_interval()
+        )
+
+    def mode_summaries_are_current(self, n_modes: int) -> bool:
+        """Is the cached ``mode_summaries`` usable for a report of ``n_modes``?
+
+        Two questions, and both have to be yes.  The LENGTH is review
+        2.11.3's guard: a second report with a different mode count met a
+        list sized for the first one, and too many entries silently reported
+        the previous run's splits under the new run's labels.  The WIDTH is
+        the same question ``summary_is_current`` asks, for the same reason --
+        one interval is as plausible as another, so a stale width is invisible
+        in the output.
+        """
+        return (
+            self.mode_summaries is not None
+            and len(self.mode_summaries) == n_modes
+            and self._mode_summaries_ci == reporting.get_credible_interval()
+        )
+
+    def ensure_summary(self) -> Any:
+        """The summary, computing it if it is missing OR at a stale width.
+
+        THE question every lazy call site asks, so it is asked here once
+        rather than rewritten as ``if p.summary is None`` at each of them --
+        that spelling is the one that cannot see a width change.  Returns
+        None when there are no draws to summarize, which is the normal state
+        of a fixed element and of every parameter before the fit.
+        """
+        if self.posterior is None:
+            return self.summary
+        if not self.summary_is_current():
+            self.compute_summary()
         return self.summary
 
     def compute_mode_summaries(self, mode_labels, n_modes: int) -> Any:
@@ -4145,4 +4214,5 @@ class Parameter:
                 self._summarize_array(arr[..., labels == k])
                 for k in range(n_modes)
             ]
+        self._mode_summaries_ci = reporting.get_credible_interval()
         return self.mode_summaries

@@ -312,6 +312,14 @@ _GLOBAL_KEY_INFO = {
         ["compile"],
         "Modeling-draft block: {compile} for <prefix>_paper.tex.",
     ),
+    "reporting": (
+        "block",
+        ["credible_interval"],
+        "Reporting block: {credible_interval} is the interval width the "
+        "tables, CSV, mode report and corner plots are written at, as a "
+        "probability (0.95 for 95%). Default 0.6827, the 1-sigma astronomy "
+        "convention.",
+    ),
 }
 
 

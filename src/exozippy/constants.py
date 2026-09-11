@@ -73,10 +73,17 @@ DAYS_PER_YEAR = 365.25
 
 
 # --- 3. STATISTICAL CONSTANTS (For the Back-End) ---
-# Used for 68% confidence intervals in tables and corner plots
+# The probability mass within +/- 1 Gaussian sigma.  It is the DEFAULT
+# reporting credible interval and the one definition of it; the width actually
+# used is a run-level setting and the quantiles are derived from it, both in
+# `exozippy.reporting` (see `src/exozippy/outputs/outputs.md`).
+#
+# SIGMA_1_LOW / SIGMA_1_HIGH used to sit here and were read by
+# `Parameter._summarize_array` and `corner_utils.save_corner_plot`.  Both now
+# ask `reporting.quantiles()`, which derives the pair from whatever width is
+# active, so a fixed pair had no consumer left -- and a constant nothing reads
+# is a convention that can silently stop matching the tables.
 SIGMA_1 = math.erf(1.0 / math.sqrt(2.0))
-SIGMA_1_LOW = 0.5 - SIGMA_1 / 2.0
-SIGMA_1_HIGH = 0.5 + SIGMA_1 / 2.0
 
 # --- 5. BULGE CONSTANTS ---
 BULGE_BAR_ANGLE = np.radians(25.0)  # bar axis relative to Sun direction

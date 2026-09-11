@@ -77,6 +77,7 @@ RESERVED_CONFIG_KEYS = frozenset(
         "mkparam",
         "gui",
         "modeling",
+        "reporting",
     }
 )
 
