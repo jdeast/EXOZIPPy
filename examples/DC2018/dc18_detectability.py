@@ -153,18 +153,25 @@ def main():
         "draws": args.draws,
         "cores": int(os.environ.get("NSLOTS", 32)),
     }
+    # READ THE TRACE FROM DISK, do not trust a return value.  run_fit is
+    # SIDE-EFFECTING: it writes {prefix}_trace.nc (run.py:543) and returns
+    # None, so unpacking its result gave
+    # "AttributeError: 'NoneType' object has no attribute 'sample_stats'"
+    # on event 223 -- while the fit itself had succeeded and left a complete
+    # 19.7 MB trace on disk.  The result was never lost, only unreachable.
+    truth_trace = str(prefix) + "_trace.nc"
     try:
-        out = run_fit(c1, copy.deepcopy(params))
-        idata = out[0] if isinstance(out, tuple) else out
-        lp = np.asarray(idata.sample_stats["lp"]).ravel()
-        lp = lp[np.isfinite(lp)]
-        truth_best = float(lp.max()) if lp.size else float("nan")
+        run_fit(c1, copy.deepcopy(params))
     except Exception as e:  # noqa: BLE001
         print(
-            "the truth-seeded short fit FAILED (%s: %s)"
-            % (type(e).__name__, str(e)[:140]),
+            "the truth-seeded short fit raised (%s: %s) -- checking for a "
+            "trace anyway, since run_fit writes before it returns"
+            % (type(e).__name__, str(e)[:120]),
             flush=True,
         )
+    truth_best = best_lp_of(truth_trace)
+    if truth_best is None:
+        print("no usable lp in %s" % truth_trace, flush=True)
         truth_best = float("nan")
     print(
         "best lp reachable from truth (short fit): %.3f" % truth_best,

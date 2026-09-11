@@ -33,6 +33,9 @@ NLIVES=(500 1350 2700)
 i=$((SGE_TASK_ID - 1))
 S=${SAMPLES[$((i % 4))]}
 N=${NLIVES[$((i / 4))]}
-TAG="${S}_nlive${N}"
+# TAGSUFFIX keeps a rerun from overwriting the previous record.  The
+# first pass of this grid saved summaries only, so its four results
+# cannot be rescored mode-aware -- keep both rather than lose either.
+TAG="${S}_nlive${N}${TAGSUFFIX}"
 echo "task $SGE_TASK_ID: sample=$S nlive=$N  ($NSLOTS cores)"
 python -u dc18_dynesty_sweep.py --sample "$S" --nlive "$N" --tag "$TAG"
