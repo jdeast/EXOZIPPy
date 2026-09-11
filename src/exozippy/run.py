@@ -937,6 +937,46 @@ def _run_fit(config, gui, user_params=None):
                             )
                             raise KeyboardInterrupt
 
+                # `initvals=` is what actually places the chains here, and
+                # nothing else does (review 1.3.6).  With an explicit `step`
+                # pm.sample ignores `init` -- pymc 6.3.2's own docstring says
+                # so verbatim: "This argument is ignored when manually passing
+                # the NUTS step method" -- so before this kwarg existed the
+                # chains began at Model.initial_point(), i.e. the
+                # creation-time initvals frozen at RV creation, and nothing on
+                # the DEFAULT sampler consumed the seed polish.  Every other
+                # branch already did (jax `initvals=`, nutpie `init_mean`,
+                # ptde/ptde_async/demc `raw_starts=`).
+                #
+                # What that cost is NOT the whitening: the whitening is a
+                # reparameterization baked into the graph as shared variables
+                # and the sampler samples `raw`, so the gradients are in
+                # whitened coordinates wherever the chain starts, and
+                # pm.NUTS(target_accept=) with no scaling/potential builds a
+                # QuadPotentialDiagAdapt identity metric on raw -- which is
+                # the RIGHT metric precisely because the graph is already
+                # whitened, and takes nothing from the start point but its
+                # size.  What is lost is the CO-LOCATION of the start with the
+                # metric.  The polish deliberately runs BEFORE the probe (see
+                # the comment at the polish call site) so that the scales are
+                # measured around the polished point; starting at the anchor
+                # instead hands NUTS's first adaptation windows curvature the
+                # metric was never measured for -- the ob140939 mechanism,
+                # reintroduced on the default sampler alone.
+                #
+                # The explicit step is KEPT rather than dropped in favor of a
+                # live `init`, and that is the deliberate half: `initvals`'
+                # own docstring entry reads "Initialization methods for NUTS
+                # (see ``init`` keyword) can overwrite the default", so making
+                # `init` live would let an adapt_diag jitter move the chain
+                # back off the polished point -- the exact pathology
+                # seed_polish exists to prevent.  Keeping the step is what
+                # makes `initvals=` authoritative.
+                #
+                # `transformed_inits` is the get_mcmc_init(model) computed
+                # above, after the polish and after the whitening rescale;
+                # it is reused rather than recomputed because get_mcmc_init
+                # compiles and evaluates a transform graph per free RV.
                 step = pm.NUTS(target_accept=target_accept)
                 with sigterm_as_interrupt():
                     idata = pm.sample(
@@ -945,6 +985,7 @@ def _run_fit(config, gui, user_params=None):
                         chains=chains,
                         init=init,
                         step=step,
+                        initvals=transformed_inits,
                         cores=cores,
                         random_seed=seed,
                         return_inferencedata=True,
