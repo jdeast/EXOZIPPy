@@ -21,7 +21,7 @@ from exozippy.samplers import convergence, de_metropolis
 from exozippy.samplers._common import default_cores
 from exozippy.samplers.ptde import ptde_sample
 from exozippy.samplers.ptde_async import ptde_async_sample
-from exozippy.system import System
+from exozippy.system import KNOWN_BLOCK_KEYS, System
 
 from .corner_utils import (
     collect_corner_samples,
@@ -301,6 +301,51 @@ def warn_unknown_sampler_keys(sampler_cfg):
     return unknown
 
 
+def warn_unknown_block_keys(block_cfg, known, name):
+    """Warn about unrecognized sub-keys in one reserved config BLOCK.
+
+    The same shape as ``warn_unknown_sampler_keys`` above, deliberately:
+    before review 2.3.10 the file had two shapes for this and only one
+    block that used either -- ``modeling:`` warned through an inline loop
+    while ``modes:``, ``mkparam:`` and ``gui:`` said nothing, so
+    ``modes: {ledgr: false}`` left the seed ledger on and
+    ``mkparam: {forse: true}`` left the invalid-seed refusal armed.  A
+    params-or-config key that states an intention and silently delivers the
+    opposite is the whole defect.
+
+    ``known`` comes from ``system.KNOWN_BLOCK_KEYS``, which is the one owner
+    of these vocabularies (introspect.py publishes the same table to the
+    GUI).  Returns the sorted unrecognized keys, so the check is exercisable
+    without running a fit.
+    """
+    if not isinstance(block_cfg, dict):
+        return []
+    unknown = sorted(set(block_cfg) - set(known))
+    if unknown:
+        logger.warning(
+            f"Unrecognized key(s) in the {name} block will be ignored: "
+            f"{unknown}. Valid {name} keys: {sorted(known)}"
+        )
+    return unknown
+
+
+def warn_unknown_config_blocks(config):
+    """Run ``warn_unknown_block_keys`` over every reserved block (2.3.10).
+
+    Called once at startup rather than where each block is consumed: two of
+    the four are read by other modules (``mkparam:`` by mkparam.py,
+    ``gui:`` by gui/status.py) and ``modeling:`` is not read until wrap-up,
+    so a warning at the point of use would reach the user hours into a fit
+    -- or, for a fit that died first, never.
+    """
+    reported = {}
+    for name, known in KNOWN_BLOCK_KEYS.items():
+        unknown = warn_unknown_block_keys(config.get(name) or {}, known, name)
+        if unknown:
+            reported[name] = unknown
+    return reported
+
+
 def run_fit(config, user_params=None):
     """The main library entry point to run an orbital fit.
 
@@ -464,6 +509,17 @@ def _run_fit(config, gui, user_params=None):
 
     # Warn about unrecognized keys in the sampler block so they are never silently ignored.
     warn_unknown_sampler_keys(sampler_cfg)
+
+    # ... and in every other reserved block, for the same reason (2.3.10).
+    # Here, not at each block's point of use: `mkparam:` and `gui:` are
+    # consumed by other modules and `modeling:` not until wrap-up, so a
+    # typo there would surface hours in or not at all.
+    warn_unknown_config_blocks(config)
+
+    # The multimode block, read once: its two consumers below (the seed
+    # ledger switch and the mode-report call) used to read `config["modes"]`
+    # separately, which left the block's vocabulary spelled in two places.
+    modes_cfg = config.get("modes", {}) or {}
 
     # 3. Build the stellar system into a PyMC Graph
     system = System(config, user_params=user_params)
@@ -646,7 +702,7 @@ def _run_fit(config, gui, user_params=None):
         # (Skipped when reusing an existing trace: the polish was skipped
         # there too, so seed lp would be a start value, not a basin peak.)
         seed_ledger = None
-        _ledger_on = (config.get("modes", {}) or {}).get("ledger", True)
+        _ledger_on = modes_cfg.get("ledger", True)
         if len(raw_starts) > 1 and _ledger_on and not reusing_trace:
             from .outputs.ledger import build_seed_ledger
 
@@ -1061,7 +1117,6 @@ def _run_fit(config, gui, user_params=None):
     # `modes: {max_invalid_frac: ..., force: true}`), and may opt into
     # per-mode evidence weighting via `modes: {weights: evidence}`.
     wrapup.stage("mode identification + result tables (LaTeX/CSV)")
-    modes_cfg = config.get("modes", {}) or {}
     mode_report = build_mode_reports(
         system,
         idata,
@@ -1079,10 +1134,18 @@ def _run_fit(config, gui, user_params=None):
         hot_status=hot_status,
     )
 
+    # Wrapped and announced like every other wrap-up step (review 2.3.12).
+    # It was the one bare call left between two guarded stages, and it is a
+    # write plus an az.summary: measured on the kelt4 RV-only example, an
+    # OSError raised here took out the trace plots, the corner plot, the
+    # compiled paper.pdf AND the restart file -- every artifact after it --
+    # and returned a non-zero exit for a fit that had finished sampling.
+    wrapup.stage("convergence summary")
     summary_path = Path(str(prefix) + "_summary.txt")
-    summary_path.write_text(
-        _format_summary(idata, burn_diag), encoding="utf-8"
-    )
+    with nonfatal_wrapup("convergence summary"):
+        summary_path.write_text(
+            _format_summary(idata, burn_diag), encoding="utf-8"
+        )
 
     # Every plot below is wrapped, and per COMPONENT rather than per loop, so
     # one component's broken diagnostic costs its own figure and nothing else
@@ -1174,12 +1237,8 @@ def _run_fit(config, gui, user_params=None):
         "modeling draft (paper.tex)"
         + (" + pdflatex compile" if modeling_cfg.get("compile", True) else "")
     )
-    for _key in modeling_cfg:
-        if _key != "compile":
-            logger.warning(
-                f"Unrecognized key '{_key}' in the modeling block will be "
-                f"ignored (known: compile)."
-            )
+    # (the unknown-key warning for this block, and for the other three, is
+    # warn_unknown_config_blocks at startup -- not an inline loop here)
     try:
         _add_wrapup_prose(system, burn_diag, mode_report)
         # One posterior draw unlocks the model-bearing charts (phased
@@ -1305,6 +1364,120 @@ def _prints_in_startup_table(p):
     return bool(np.any(should_print))
 
 
+def _flat_probe_directions(all_params, mult_map, whiten_report):
+    """Every sampled element the whitening probe found FLAT, table or no table.
+
+    A NaN (or infinite) multiplier means the probe could not find a 0.5-nat
+    contour along that raw direction: logp ignores it, the element keeps its
+    preliminary scale, and -- as the warning this feeds says out loud -- even
+    one unconstrained direction destroys HMC efficiency.  That is a statement
+    about the SAMPLER, so it is collected here rather than inside the startup
+    table's row loop, which is where it used to live: the loop `continue`s on
+    ``_prints_in_startup_table``, so ``print_to_table: false`` (a params-file
+    key, i.e. a user's own cosmetic choice) or a ``debug_print: false`` in a
+    component's defaults.yaml silently disabled a health diagnostic (review
+    2.3.7).  No shipped default hits that; a user marking a SAMPLED parameter
+    not-for-tables does.
+
+    Element-by-element, and INACTIVE elements are skipped, because that is
+    what the row loop did: an inactive element is not part of its instance's
+    parameterization and is not sampled, so it has no direction to be flat
+    along.  A parameter with no ``mult_map`` entry at all counts as flat on
+    every sampled element, which is also the old behaviour -- the probe
+    reports one entry per sampled raw variable, so a missing entry means the
+    element was never measured.
+
+    Returns the display labels, in table order, for the warning to name.
+    """
+    if whiten_report is None:
+        return []
+    flat = []
+    for p in all_params:
+        n_elements = int(np.prod(p.shape)) if p.shape not in ((), None) else 1
+        m_phys = np.atleast_1d(
+            mult_map.get(p.label, np.full(n_elements, np.nan))
+        )
+        sampled_arr = np.atleast_1d(getattr(p, "is_sampled", False))
+        for i in range(n_elements):
+            if not p.element_is_active(i):
+                continue
+            if not (bool(sampled_arr[i]) if i < sampled_arr.size else False):
+                continue
+            raw_m = m_phys[i] if i < m_phys.size else np.nan
+            if np.isnan(raw_m) or np.isinf(raw_m):
+                flat.append(p.get_display_label(i))
+    return flat
+
+
+def _expression_start_values(auditor):
+    """Start values for the parameters whose START is an expression's value.
+
+    A parameter reaches this only when it carries NO ``initval`` and the
+    user/solved table has nothing for it either -- so neither of the
+    table's two ordinary sources exists and the row would otherwise be
+    dropped.  For such a parameter the start genuinely IS whatever its
+    expression computes, so the value is read off the compiled graph at the
+    start point (``ModelAuditor.values_at_start``, which is also what
+    ``check_user_starts`` reads and which exists because ``p.value.eval()``
+    would draw from the prior instead).
+
+    Review 3.14.16: the gate here used to be ``p.expression is not None``,
+    inherited from 1.10.9.  A vector derived one element at a time has no
+    whole-vector ``expression`` -- ``element_expressions`` is where its
+    derivation lives -- so it failed that test, fell off the end of the
+    lookup chain and got NO ROW AT ALL: ``examples/ob09020``'s
+    ``lens.alpha``, the one shipped case, was simply missing from the
+    startup table.  The posterior-side twin of the same gate was widened in
+    the same way (``System._set_comp_posterior``, review 1.10.9), and this
+    keeps the two tables' notions of "derived and therefore evaluable"
+    identical.
+
+    Returns ``{id(parameter): internal-unit array}``, empty (and with no
+    PyTensor compile at all) when nothing needs it -- which is every
+    shipped example but one.
+    """
+    cfg_mgr = getattr(auditor.system, "config_manager", None)
+    needy = []
+    for p in auditor.all_params:
+        if not _prints_in_startup_table(p):
+            continue
+        if p.initval is not None:
+            continue
+        if p.expression is None and not getattr(
+            p, "element_expressions", None
+        ):
+            continue
+        n_elements = int(np.prod(p.shape)) if p.shape not in ((), None) else 1
+        try:
+            if any(
+                _user_initval(cfg_mgr, p, i) is not None
+                for i in range(n_elements)
+            ):
+                continue
+        except Exception:
+            continue
+        needy.append(p)
+    if not needy:
+        return {}
+    produced = auditor.values_at_start(needy)
+    # Size every vector to the parameter's own element count, so the row
+    # loop below cannot silently print fewer rows than the vector has (a
+    # scalar answer for a 2-element parameter would otherwise drop one).
+    sized = {}
+    for p in needy:
+        arr = produced.get(id(p))
+        if arr is None:
+            continue
+        n_elements = int(np.prod(p.shape)) if p.shape not in ((), None) else 1
+        if arr.size == n_elements:
+            sized[id(p)] = arr
+        else:
+            full = np.full(n_elements, np.nan)
+            full[: min(arr.size, n_elements)] = arr[:n_elements]
+            sized[id(p)] = full
+    return sized
+
+
 def inspect_start(
     model,
     system,
@@ -1316,7 +1489,6 @@ def inspect_start(
     # and hand over were never read.
     auditor = ModelAuditor(model, system, transformed_inits)
     param_logps, other_nodes = auditor.get_aggregated_logps()
-    unused_yaml = auditor.check_unused_yaml()
 
     # Map the whitening probe's measured multipliers (one per SAMPLED element,
     # keyed by raw-variable name) back to full per-parameter element vectors.
@@ -1339,6 +1511,17 @@ def inspect_start(
             elif m.size <= n_elements:
                 full[: m.size] = m
             mult_map[p.label] = full
+
+    # SAMPLER HEALTH, not table content: collected over every sampled element
+    # rather than over the rows the table prints (review 2.3.7).
+    flat_warnings = _flat_probe_directions(
+        auditor.all_params, mult_map, whiten_report
+    )
+
+    # Parameters whose START IS their expression's value: no initval of
+    # their own and no user/solved entry either, so the only honest source
+    # for the row is what the built graph computes (review 3.14.16).
+    expression_starts = _expression_start_values(auditor)
 
     # Dynamic Width Logic -- over the rows the table will actually print, so
     # a suppressed parameter with a long label cannot widen it for nothing.
@@ -1388,8 +1571,6 @@ def inspect_start(
     logger.info(header)
     logger.info("-" * table_width)
 
-    flat_warnings = []
-
     # --- PART 1: CORE PARAMETERS ---
     for p in auditor.all_params:
         if not _prints_in_startup_table(p):
@@ -1415,18 +1596,18 @@ def inspect_start(
             except Exception:
                 pass
 
-            # 2. Last resort: Eval the expression if it exists
-            if raw_v is None and p.expression is not None:
-                try:
-                    # 'deps' often need to be resolved. This is a hacky but effective way
-                    # to visualize the starting point of a deterministic.
-                    raw_v = (
-                        p.expression().eval()
-                        if hasattr(p.expression(), "eval")
-                        else p.expression()
-                    )
-                except Exception:
-                    pass
+            # 2. Last resort: what the BUILT GRAPH computes at the start
+            #    point.  For a parameter with neither an initval nor a
+            #    user/solved entry the start IS its expression's value, and
+            #    this is the only source that has it.  See
+            #    _expression_start_values: the gate used to be
+            #    `p.expression is not None`, which a vector derived
+            #    element-by-element fails, so its row was dropped
+            #    (review 3.14.16); and the eval used to be
+            #    `p.expression().eval()`, which draws from the prior.
+            produced = expression_starts.get(id(p))
+            if raw_v is None and produced is not None:
+                raw_v = produced if n_elements > 1 else float(produced[0])
 
         if raw_v is None:
             continue
@@ -1450,7 +1631,6 @@ def inspect_start(
             # example's derived vectors were single-element, so
             # s_phys[i>0] never happened.
             s_phys = np.full(v_phys.size, np.nan)
-        m_phys = np.atleast_1d(mult_map.get(p.label, [np.nan] * len(v_phys)))
 
         user_flag = "*" if getattr(p, "user_prior_modified", False) else ""
 
@@ -1532,16 +1712,10 @@ def inspect_start(
                 else f"{'N/A':>10}"
             )
 
-            # A NaN multiplier on a sampled element means the probe found
-            # logp flat along it (it keeps its preliminary scale) -- warn
-            # after the table.
-            raw_m = m_phys[i] if i < len(m_phys) else np.nan
-            if (
-                whiten_report is not None
-                and elem_sampled
-                and (np.isnan(raw_m) or np.isinf(raw_m))
-            ):
-                flat_warnings.append(row_label)
+            # The flat-direction check used to live here, and that gating it
+            # behind this row loop is what review 2.3.7 was about -- see
+            # _flat_probe_directions, which now collects it over every sampled
+            # element whether or not the element gets a row.
 
             prior_str = p.get_prior_str(i, latex=False)
 
@@ -1636,12 +1810,12 @@ def inspect_start(
             * 60
         )
 
-    if unused_yaml:
-        logger.warning(
-            f"The following parameters in the parameter.yaml file did not match any model parameter "
-            f"and were not applied: {unused_yaml}\n"
-            "This can be safely ignored if intentional, but check for typos."
-        )
+    # The unmatched-params-key warning used to be emitted here, from this
+    # function -- i.e. only for `exozippy <config>`, so a harness driving a
+    # sampler directly got nothing and a mis-keyed bound was silently absent
+    # (review 2.3.16, measured on DC2018_128).  Same authority
+    # (ModelAuditor.check_unused_yaml), now reported from
+    # System.build_model, which every caller passes through.
 
     # THE CONTRACT: a value the user set is either produced by the model or
     # explained.  Until this block the second half did not happen -- a pin

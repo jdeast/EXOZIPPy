@@ -296,20 +296,23 @@ _GLOBAL_KEY_INFO = {
         "Sampler configuration block. Recognized keys are listed in "
         "'accepts'; unrecognized keys are warned about and ignored by run.py.",
     ),
+    # The four block vocabularies below are filled from
+    # system.KNOWN_BLOCK_KEYS in _global_schema, exactly as `sampler` is
+    # filled from run.KNOWN_SAMPLER_KEYS: one owner per vocabulary.
     "modes": (
         "block",
-        ["ledger", "max_invalid_frac", "force", "weights"],
+        None,
         "Multimode reporting block (outputs/modes.py).",
     ),
     "mkparam": (
         "block",
-        ["n_seeds", "force"],
+        None,
         "Restart-file writer block (mkparam.write_param_file).",
     ),
-    "gui": ("block", ["snapshot"], "GUI status block (gui.status)."),
+    "gui": ("block", None, "GUI status block (gui.status)."),
     "modeling": (
         "block",
-        ["compile"],
+        None,
         "Modeling-draft block: {compile} for <prefix>_paper.tex.",
     ),
 }
@@ -339,11 +342,13 @@ def _global_schema():
         sampler_keys = []
 
     try:
-        from .system import RESERVED_CONFIG_KEYS
+        from .system import KNOWN_BLOCK_KEYS, RESERVED_CONFIG_KEYS
 
         keys = sorted(RESERVED_CONFIG_KEYS)
+        block_keys = {k: sorted(v) for k, v in KNOWN_BLOCK_KEYS.items()}
     except Exception:  # pragma: no cover - defensive fallback
         keys = sorted(_GLOBAL_KEY_INFO)
+        block_keys = {}
 
     schema = {}
     for key in keys:
@@ -352,6 +357,12 @@ def _global_schema():
         )
         if key == "sampler":
             accepts = sampler_keys
+        elif key in block_keys:
+            # system.KNOWN_BLOCK_KEYS is the one owner of these
+            # vocabularies (run.warn_unknown_block_keys warns from the same
+            # table); this used to be a second literal copy, which is how
+            # the global-key list had already drifted once.
+            accepts = block_keys[key]
         schema[key] = {
             "key": key,
             "kind": kind,

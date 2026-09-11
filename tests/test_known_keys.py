@@ -34,8 +34,17 @@ from exozippy import config as config_mod
 from exozippy import diagnostics as diagnostics_mod
 from exozippy import introspect as introspect_mod
 from exozippy.components.factory import discover_components
-from exozippy.run import KNOWN_SAMPLER_KEYS, warn_unknown_sampler_keys
-from exozippy.system import RESERVED_CONFIG_KEYS, System
+from exozippy.run import (
+    KNOWN_SAMPLER_KEYS,
+    warn_unknown_block_keys,
+    warn_unknown_config_blocks,
+    warn_unknown_sampler_keys,
+)
+from exozippy.system import (
+    KNOWN_BLOCK_KEYS,
+    RESERVED_CONFIG_KEYS,
+    System,
+)
 
 SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "exozippy"
 EXAMPLES = pathlib.Path(__file__).resolve().parents[1] / "examples"
@@ -789,3 +798,219 @@ def test_an_engine_consumed_key_is_not_reported_but_a_lookalike_typo_is():
     # ASSERT -- the engine-consumed seed is exempt; the typo is not.
     assert "source.S.rho" not in reported, reported
     assert "source.S.rhoo" in reported, reported
+
+
+# ---------------------------------------------------------------------------
+# The fourth vocabulary: sub-keys inside the reserved BLOCKS (review 2.3.10).
+#
+# `modeling:` warned about its unknown sub-keys through an inline loop of its
+# own while `modes:`, `mkparam:` and `gui:` said nothing at all -- so
+# `modes: {ledgr: false}` left the seed ledger on and `mkparam: {forse:
+# true}` left the invalid-seed refusal armed, each inverting what the user
+# wrote with no message.  system.KNOWN_BLOCK_KEYS is now the one owner and
+# run.warn_unknown_block_keys the one reporter.
+#
+# Each block names the module that CONSUMES it and the receiver expression
+# its reads go through, so the cross-check below can find them by AST the
+# same way the sampler block's are found.
+# ---------------------------------------------------------------------------
+
+_BLOCK_CONSUMERS = {
+    # block: (source file relative to src/exozippy, receiver expressions)
+    "modes": ("run.py", {"modes_cfg"}),
+    "modeling": ("run.py", {"modeling_cfg"}),
+    "mkparam": ("mkparam.py", {"mkparam_cfg"}),
+    # gui/status.py: `cfg = config.get("gui")`, then `cfg.get("snapshot")`.
+    "gui": ("gui/status.py", {"cfg"}),
+}
+
+
+def _scan_block_keys(block):
+    """{key: {"file:line", ...}} for every literal read of one block."""
+    rel, receivers = _BLOCK_CONSUMERS[block]
+    tree = ast.parse((SRC / rel).read_text(encoding="utf-8"))
+    return {
+        key: {f"{rel}:{line}" for line in lines}
+        for key, lines in _literal_keys_accessed(tree, receivers).items()
+    }
+
+
+@pytest.mark.parametrize("block", sorted(_BLOCK_CONSUMERS))
+def test_every_consumed_block_key_is_declared(block):
+    """
+    Given every literal read off a reserved block's config dict, parsed out
+      of the module that consumes that block,
+    When compared against system.KNOWN_BLOCK_KEYS[block],
+    Then no consumed key is missing from it.
+
+    The consumed-but-undeclared direction, and the same false-"ignored"
+    hazard KNOWN_SAMPLER_KEYS has: a key the code really honors, reported as
+    about to be dropped, teaches users to disbelieve the warnings.
+    """
+    # ARRANGE
+    consumed = _scan_block_keys(block)
+    # Vacuity guard: a renamed receiver would otherwise make this free.
+    assert consumed, (
+        f"the scan found no reads of the {block} block in "
+        f"{_BLOCK_CONSUMERS[block][0]} -- the scan needs updating, not the "
+        "vocabulary"
+    )
+
+    # ACT
+    undeclared = {
+        k: sorted(v)
+        for k, v in consumed.items()
+        if k not in KNOWN_BLOCK_KEYS[block]
+    }
+
+    # ASSERT
+    assert undeclared == {}, (
+        f"keys consumed from the {block} block but missing from "
+        f"system.KNOWN_BLOCK_KEYS (users get a false 'will be ignored' "
+        f"warning): {undeclared}"
+    )
+
+
+@pytest.mark.parametrize("block", sorted(_BLOCK_CONSUMERS))
+def test_no_dead_block_vocabulary(block):
+    """
+    Given system.KNOWN_BLOCK_KEYS[block],
+    When compared against the keys its consumer really reads,
+    Then every declared key is consumed somewhere.
+
+    The mirror direction: a declared-but-unread key silently accepts a knob
+    that does nothing, and makes a real typo that collides with it pass.
+    """
+    # ARRANGE
+    consumed = set(_scan_block_keys(block))
+
+    # ACT
+    dead = sorted(set(KNOWN_BLOCK_KEYS[block]) - consumed)
+
+    # ASSERT
+    assert dead == [], (
+        f"declared in system.KNOWN_BLOCK_KEYS[{block!r}] but read nowhere in "
+        f"{_BLOCK_CONSUMERS[block][0]}; either wire them up or drop them: "
+        f"{dead}"
+    )
+
+
+def test_the_block_vocabularies_have_one_owner():
+    """
+    Given introspect's published schema for the four reserved blocks,
+    When its 'accepts' lists are compared with system.KNOWN_BLOCK_KEYS,
+    Then they ARE that table -- introspect restates none of it.
+
+    Structural, like its sibling for the sub-key vocabularies:
+    introspect._GLOBAL_KEY_INFO carried a second literal copy of all four
+    lists, and the GUI reads this schema, so a drift would have shown the
+    user one vocabulary while run.py enforced another.
+    """
+    # ARRANGE / ACT
+    schema = introspect_mod._global_schema()
+
+    # ASSERT
+    for block, known in KNOWN_BLOCK_KEYS.items():
+        assert schema[block]["kind"] == "block"
+        assert schema[block]["accepts"] == sorted(known), block
+        # the literal table must carry no vocabulary of its own
+        assert introspect_mod._GLOBAL_KEY_INFO[block][1] is None, block
+
+
+@pytest.mark.parametrize("block", sorted(_BLOCK_CONSUMERS))
+def test_a_block_typo_is_reported_and_the_real_keys_are_not(block, caplog):
+    """
+    Given a reserved block holding every legal key plus one typo,
+    When warn_unknown_block_keys runs on it,
+    Then only the typo is reported, and the warning names the block.
+
+    The user-facing half, independent of the AST scans. On pre-fix src/
+    nothing was reported for modes/mkparam/gui at all.
+    """
+    # ARRANGE
+    known = sorted(KNOWN_BLOCK_KEYS[block])
+    block_cfg = {k: True for k in known}
+    block_cfg["nosuchkey"] = True
+
+    # ACT
+    with caplog.at_level("WARNING", logger="exozippy.run"):
+        unknown = warn_unknown_block_keys(
+            block_cfg, KNOWN_BLOCK_KEYS[block], block
+        )
+
+    # ASSERT
+    assert unknown == ["nosuchkey"]
+    assert any(
+        block in r.getMessage() and "nosuchkey" in r.getMessage()
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+def test_every_reserved_block_is_checked_for_typos():
+    """
+    Given the reserved keys that are BLOCKS (a dict of sub-keys),
+    When warn_unknown_config_blocks runs over a config that misspells one
+      sub-key in each,
+    Then every block is reported.
+
+    The coverage half: three of the four had no unknown-key check at all,
+    and the failure mode of adding a fifth block is that it quietly has
+    none either.  Two blocks are excluded by construction: `sampler`, which
+    has run.KNOWN_SAMPLER_KEYS' own richer check, and `run`, the free-form
+    documentation block (_INERT_RESERVED_KEYS) whose contents nothing reads
+    -- a vocabulary for it would be a vocabulary for prose.
+    """
+    # ARRANGE
+    blocks = (
+        {
+            k
+            for k, info in introspect_mod._GLOBAL_KEY_INFO.items()
+            if info[0] == "block"
+        }
+        - {"sampler"}
+        - _INERT_RESERVED_KEYS
+    )
+    assert blocks == set(KNOWN_BLOCK_KEYS), (
+        "a reserved block with no entry in system.KNOWN_BLOCK_KEYS has no "
+        f"typo check: {sorted(blocks ^ set(KNOWN_BLOCK_KEYS))}"
+    )
+    config = {b: {"nosuchkey": True} for b in blocks}
+
+    # ACT
+    reported = warn_unknown_config_blocks(config)
+
+    # ASSERT
+    assert reported == {b: ["nosuchkey"] for b in blocks}
+
+
+def test_a_shipped_example_config_triggers_no_block_warning():
+    """
+    Given every shipped example config,
+    When warn_unknown_config_blocks runs on it,
+    Then nothing is reported -- the new check must not cry wolf on the tree.
+
+    The sibling of test_no_example_config_triggers_the_ignored_warning, one
+    level down: that one guards the top-level keys, this one the sub-keys of
+    the four blocks.
+    """
+    # ARRANGE
+    yaml = pytest.importorskip("yaml")
+    offenders = {}
+    configs = _example_config_files()
+    assert configs, "no example configs found -- the scan is vacuous"
+
+    # ACT
+    for path, _keys in configs:
+        cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        bad = {
+            name: sorted(set(cfg.get(name) or {}) - set(known))
+            for name, known in KNOWN_BLOCK_KEYS.items()
+            if isinstance(cfg.get(name), dict) and set(cfg[name]) - set(known)
+        }
+        if bad:
+            offenders[str(path)] = bad
+
+    # ASSERT
+    assert offenders == {}, (
+        f"shipped configs with unrecognized block sub-keys: {offenders}"
+    )
