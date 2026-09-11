@@ -498,3 +498,194 @@ def test_the_start_sits_at_raw_zero_without_the_whitening_probe(
     assert _max_abs_raw(after) == 0.0, (
         "this model is all-logit, so the whole start should be exactly 0"
     )
+
+
+# ---------------------------------------------------------------------------
+# Mechanism (2): the GAUSSIAN path's center is the prior mean and must not
+# move.  Its polished offset rides on Model.set_initval instead.
+# ---------------------------------------------------------------------------
+
+
+def _mixed_model():
+    """One LOGIT element (two finite bounds) and one GAUSSIAN-PATH element
+    carrying an explicit `mu` != `initval`, in one pm.Model.
+
+    The shipped orbit config the other tests use is all-logit, so without
+    this the `Model.set_initval` half of the mechanism has no coverage at
+    all -- and it is the half whose failure mode is a moved PRIOR.
+    """
+    import pymc as pm
+
+    from exozippy.components.parameter import Parameter
+
+    p_logit = Parameter(label="toy.x", initval=2.0, lower=0.0, upper=10.0)
+    p_gauss = Parameter(
+        label="toy.z",
+        initval=0.5,  # start
+        mu=0.0,  # PRIOR MEAN -- deliberately not the start
+        sigma=2.0,
+        lower=-np.inf,
+        upper=np.inf,
+    )
+    with pm.Model() as model:
+        xv = p_logit.build_pymc()
+        zv = p_gauss.build_pymc()
+        pm.Potential("like", -0.5 * ((xv - 2.5) / 0.5) ** 2 + 0.0 * zv)
+    return model, p_logit, p_gauss
+
+
+class _StubSystem:
+    """Duck-typed stand-in for System: parameter lookup only.
+
+    The shape `tests/test_polish.py` uses to drive `System` methods against
+    hand-built Parameters -- `recenter_whitening_anchor` needs only
+    `get_all_parameters()` and the model.
+    """
+
+    def __init__(self, params):
+        self._params = params
+
+    def get_all_parameters(self):
+        return self._params
+
+
+def test_the_gaussian_paths_center_is_never_moved_but_its_start_is_carried():
+    """
+    Given a polished start on BOTH a logit element and a Gaussian-path
+      element whose `mu` differs from its `initval`,
+    When the anchor is re-centered,
+    Then the logit element's anchor absorbs its displacement and its
+      `raw_initval` becomes 0, while the Gaussian element's CENTER is
+      untouched, its `raw_initval` is kept, and `Model.initial_point()`
+      carries that nonzero value -- via `Model.set_initval`.
+
+    This is mechanism (2), and the reason it is a second mechanism rather
+    than the same one: there `val = gaussian_mus + gaussian_scales * raw`
+    with `raw ~ N(0,1)` AS THE PRIOR, and `gaussian_mus` is the prior MEAN
+    whenever a `mu` was given.  Folding a start displacement into it would
+    move the prior -- a change to the model, not to the coordinates -- and
+    an added offset fails the same way by a longer route (`mu + scale*(raw +
+    off)` has prior `N(mu + scale*off, scale)`).
+
+    "The prior did not move" is asserted EXACTLY and three ways, because it
+    is the whole claim: the center and width are bit-identical in all three
+    mirrors (the frozen transform, and the shared variable the graph reads),
+    and the raw -> physical map is bit-identical over a grid of raw values,
+    which is that prior's pushforward.
+
+    The TOTAL start logp is held to a derived bound rather than to equality,
+    and the reason is worth keeping.  It moved by 4.440892098500626e-16
+    nats here -- exactly one ULP of the total, -3.8868507502328575 -- and
+    that is summation round-off, not a density change: the logit element's
+    correction potential cancels its `-0.5*raw**2` symbolically, so folding
+    its displacement into the anchor removes a +/-0.18 pair from a sum whose
+    total is -3.89, and the last bit of that sum is free to land either way.
+    Verified separately that the re-centering itself introduces no error:
+    `lq0 + scale*raw` is bit-identical in numpy and in the compiled graph
+    (no FMA re-association), so the stored anchor IS the old `lq`.  See
+    `tests/test_nuts_start.py` for the same bound at kelt4 scale, where the
+    cancellation term dominates instead.
+    """
+    from exozippy.system import System
+
+    # ARRANGE
+    model, p_logit, p_gauss = _mixed_model()
+    stub = _StubSystem([p_logit, p_gauss])
+    logp = model.compile_logp()
+
+    gauss_j = 0  # toy.z has exactly one sampled element
+    gauss_i = int(p_gauss._raw_transform["sampled_idx"][gauss_j])
+    mu_before = p_gauss._raw_transform["gaussian_mus"].copy()
+    sigma_before = p_gauss._raw_transform["gaussian_scales"].copy()
+    sv_before = p_gauss._whiten_state["sv_gaussian_scales"].get_value().copy()
+    # The prior's pushforward: the raw -> physical map over a spread of raw
+    # values, which is what a moved center or width would change.
+    raw_grid = np.array([-3.0, -1.0, 0.0, 0.25, 1.0, 3.0])
+    map_before = np.asarray(
+        p_gauss.element_phys_from_raw(gauss_i, raw_grid), dtype=float
+    )
+
+    # PRECONDITION: mu != initval, so this element's raw start is genuinely
+    # nonzero and there is something for set_initval to carry.
+    assert float(np.asarray(p_gauss.raw_initval, dtype=float)[gauss_j]) != 0.0
+
+    # A polished start: displace BOTH elements off wherever they sit.
+    for par in (p_logit, p_gauss):
+        par.raw_initval = (
+            np.asarray(par.raw_initval, dtype=float) + 0.6
+        ).copy()
+    gauss_raw_wanted = float(
+        np.asarray(p_gauss.raw_initval, dtype=float)[gauss_j]
+    )
+    start_before = {
+        f"{par.label}_raw": np.asarray(par.raw_initval, dtype=float).copy()
+        for par in (p_logit, p_gauss)
+    }
+    lp_before = float(logp(start_before))
+    raw_sq_before = sum(float(np.sum(v**2)) for v in start_before.values())
+
+    # ACT
+    moved = System.recenter_whitening_anchor(stub, model)
+
+    # ASSERT -- the logit element folded, the Gaussian one did not.
+    assert "toy.x" in moved, "the logit element's anchor did not move"
+    assert "toy.z" not in moved, (
+        "the Gaussian-path element's center was MOVED; that changes its "
+        "prior from N(mu, sigma) to N(mu + scale*off, sigma)"
+    )
+    assert np.asarray(p_logit.raw_initval, dtype=float)[0] == 0.0
+    assert (
+        np.asarray(p_gauss.raw_initval, dtype=float)[gauss_j]
+        == gauss_raw_wanted
+    )
+
+    # THE PRIOR DID NOT MOVE -- center, width, and the pushforward, exactly.
+    np.testing.assert_array_equal(
+        p_gauss._raw_transform["gaussian_mus"], mu_before
+    )
+    np.testing.assert_array_equal(
+        p_gauss._raw_transform["gaussian_scales"], sigma_before
+    )
+    np.testing.assert_array_equal(
+        p_gauss._whiten_state["sv_gaussian_scales"].get_value(), sv_before
+    )
+    np.testing.assert_array_equal(
+        np.asarray(
+            p_gauss.element_phys_from_raw(gauss_i, raw_grid), dtype=float
+        ),
+        map_before,
+        err_msg=(
+            "the Gaussian-path element's raw -> physical map changed, so its "
+            "N(mu, sigma) prior is no longer the prior the user stated "
+            "(review 4.3.1)"
+        ),
+    )
+
+    # Model.set_initval carried the Gaussian element's nonzero start.
+    point = model.initial_point()
+    assert (
+        float(np.asarray(point["toy.z_raw"]).ravel()[gauss_j])
+        == gauss_raw_wanted
+    ), (
+        "Model.initial_point() does not carry the Gaussian-path element's "
+        "polished raw start; set_initval is the ONLY channel for it, since "
+        "its center may not absorb the displacement (review 4.3.1)"
+    )
+    assert float(np.asarray(point["toy.x_raw"]).ravel()[0]) == 0.0
+
+    # ...and the start logp is unchanged up to summation round-off.
+    start_after = {
+        f"{par.label}_raw": np.asarray(par.raw_initval, dtype=float).copy()
+        for par in (p_logit, p_gauss)
+    }
+    lp_after = float(logp(start_after))
+    bound = (
+        4.0 * (0.5 * raw_sq_before * 2.0**-52)
+        + 8.0 * abs(lp_before) * 2.0**-52
+    )
+    assert abs(lp_after - lp_before) <= bound, (
+        f"the start logp moved {lp_after - lp_before!r} nats "
+        f"({lp_before!r} -> {lp_after!r}), more than the "
+        f"{bound:.3g} that summation round-off can account for; the "
+        f"re-centering has changed the density"
+    )
