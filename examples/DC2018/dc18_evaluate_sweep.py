@@ -31,7 +31,20 @@ def paths(ev):
         "trace": str(fr / (tag + "_trace.nc")),
         "modes_txt": str(fr / (tag + "_modes.txt")),
         "log": log,
-        "detect_json": "anomaly_detect_%03d.json" % ev,
+        # dc18_detectability.py writes detect_<NNN>.json; the older
+        # anomaly test writes anomaly_detect_<NNN>.json and is
+        # accepted as a fallback.
+        "detect_json": next(
+            (
+                p
+                for p in (
+                    "detect_%03d.json" % ev,
+                    "anomaly_detect_%03d.json" % ev,
+                )
+                if Path(p).exists()
+            ),
+            "detect_%03d.json" % ev,
+        ),
     }
 
 
