@@ -26,9 +26,11 @@ The item that asked for this named `orbit.n` as the live case; that half is wron
 
 ## `maxtime:` is never silently ignored
 
-`run.warn_maxtime_unsupported` says so when the selected sampler cannot honor `maxtime:`. Today that is exactly `numpyro`, `blackjax` and `nutpie` (`MAXTIME_UNSUPPORTED_METHODS`): all three run the whole chain outside Python's per-draw loop -- the JAX ones inside one jitted scan, nutpie inside Rust -- so there is no point at which a wall-clock check could raise the `KeyboardInterrupt` that the maxtime mechanism turns into a graceful stop. PyMC agrees and says so out loud: `pm.sample` **raises** for a `callback` with any `nuts_sampler` but its own, which `tests/test_run_maxtime_support.py` pins upstream so that a future PyMC forwarding callbacks turns into a failing test rather than a permanent warning.
+`run.warn_maxtime_unsupported` says so when the selected sampler cannot honor `maxtime:`. Today that is `numpyro`, `blackjax`, `nutpie` and `nested` (`MAXTIME_UNSUPPORTED_METHODS`), and **the reason is per method, not one sentence for all four** -- the three external NUTS backends run the whole chain outside Python's per-draw loop (the JAX ones inside one jitted scan, nutpie inside Rust), so there is no point at which a wall-clock check could raise the `KeyboardInterrupt` that the maxtime mechanism turns into a graceful stop. PyMC agrees and says so out loud: `pm.sample` **raises** for a `callback` with any `nuts_sampler` but its own, which `tests/test_run_maxtime_support.py` pins upstream so that a future PyMC forwarding callbacks turns into a failing test rather than a permanent warning. `nested` is there for a different reason and was added while review 2.3.6's consumer table was being re-verified: nested sampling stops on its own evidence criterion, `nested_sample` takes an iteration cap (`maxiter`) and no wall clock, and run.py forwards neither -- so `maxtime` under `nested` had been silent too.
 
-A silently ignored key is worse than a refused one: the whole point of `maxtime` is that a scheduler-bound job stops itself before the queue kills it, so a user who sets it and gets nothing has no partial trace AND no idea why. `demc` already warned for the same reason on the samplers side (`samplers.md`); these three were the remaining silent ones. The check runs **after** the missing-backend import fallback, so a config asking for numpyro on a box without it -- which lands on PyMC NUTS, where maxtime IS honored -- is not warned about a limit that will be applied.
+A silently ignored key is worse than a refused one: the whole point of `maxtime` is that a scheduler-bound job stops itself before the queue kills it, so a user who sets it and gets nothing has no partial trace AND no idea why. `demc` already warned for the same reason on the samplers side (`samplers.md`). The check runs **after** the missing-backend import fallback, so a config asking for numpyro on a box without it -- which lands on PyMC NUTS, where maxtime IS honored -- is not warned about a limit that will be applied.
+
+This is also why `maxtime` is NOT in `METHOD_ONLY_SAMPLER_KEYS`: a consumer list would replace four accurate reasons with one method tuple, and two channels warning about one key is one too many.
 
 ## A typo in a reserved block is never silent either (review 2.3.10)
 
@@ -86,7 +88,7 @@ The seed is a COMMENT in the params file, not a key: that file is parameter over
 
 The stamp also records the code that produced the draws -- `exozippy_version` plus, when running from a checkout, `exozippy_git_commit` / `exozippy_git_describe` / `exozippy_git_dirty` (dirty = uncommitted *tracked* changes; untracked example data and notes are ignored or every run would flag) -- and a `StaleTraceError` quotes them and prints the `git worktree add <commit>` + `poetry install` lines that recreate that code. This is **diagnostic only: nothing ever compares versions**. A version or commit difference never raises, so newer code with a structurally unchanged model still reuses its trace; only the structural hash decides staleness. Traces stamped from an installed wheel say the source cannot be checked out; traces predating the metadata say so plainly rather than printing a git command with a missing commit. Tests: `tests/test_trace_staleness.py`.
 
-## A sampler key only one method consumes must say so (review 2.4.2)
+## A sampler key some method ignores must say so (reviews 2.4.2, 2.3.6)
 
 `store_hot_chains` is forwarded only to `ptde_async`; `rung_thin_factor` and
 `rung_thin_start` only to `ptde`. All three are in `KNOWN_SAMPLER_KEYS`, so
@@ -96,10 +98,78 @@ hot-chain mode discovery never ran and nothing said so.
 
 `METHOD_ONLY_SAMPLER_KEYS` maps each such key to the methods that DO consume
 it, and `warn_method_only_sampler_keys` reports the mismatch. Two deliberate
-properties: it warns only for keys the user EXPLICITLY set (all three have
+properties: it warns only for keys the user EXPLICITLY set (they all have
 defaults, and warning about a default nobody wrote would fire every run and
 teach people to ignore the log), and it is called AFTER `method` is resolved
 and lowercased -- not beside `warn_unknown_sampler_keys`, which runs early
 enough that `method` may still be None because auto-selection has not happened.
-Add a key to the table in the same commit that makes it method-specific.
-Tests: `tests/test_method_only_sampler_keys.py`.
+
+**2.4.2 landed the mechanism for three keys; there were more than twenty.** `chains`
+is the one that mattered: run.py forwards it to the HMC branches and to
+`demc`/`demcz` and to nothing else, so under `method: ptde`/`ptde_async` --
+the recommended default for every microlensing fit -- a user's
+`sampler: {chains: 16}` did nothing at all, and those samplers sized their
+population from the parameter count instead (`_common.resolve_n_chains`; the
+PTDE spelling is `n_chains`). Measured end to end on `examples/kelt4` RV-only,
+2026-09-11: `chains: 5` gave **5** chains under `method: nuts` and **30**
+under `method: ptde`. It is the single most likely spelling of "give me more
+chains".
+
+**What keeps it fixed is the partition, not the list.** `KNOWN_SAMPLER_KEYS`
+is now exactly `METHOD_ONLY_SAMPLER_KEYS` plus `ALL_METHOD_SAMPLER_KEYS`, with
+no overlap, and `tests/test_method_only_sampler_keys.py` asserts that in both
+directions. The defect was never any one key -- it was that a key could join
+the vocabulary with nobody ruling on whether some method silently ignores it.
+A new `sampler:` key now fails that test until it is classified.
+
+Four keys sit in `ALL_METHOD_SAMPLER_KEYS` despite being only PARTIALLY
+honored, because on no path are they inert and a warning would therefore be
+false: `cores` (not passed to `sample_jax_nuts`, but it governs the seed polish
+and the post-hoc `lp` fill everywhere), `min_ess`/`max_rhat` (the PTDE early
+stop, but also the convergence-report thresholds every path prints), and
+`maxtime`, which keeps its own channel -- `warn_maxtime_unsupported` names a
+per-sampler REASON rather than a consumer list. That channel gained `nested`
+while this table was being re-verified: nested sampling stops on its own
+evidence criterion and `nested_sample` takes an iteration cap and no wall
+clock, so `maxtime` under `nested` had been silent too.
+
+Two properties of the scoring, each a way the generalized table could have
+started lying. An unrecognized `method:` value falls through to the nuts branch
+(`samplers.md`), so `_effective_sampler_branch` scores it as `nuts` --
+otherwise `method: nutts` would be told `chains` is ignored by the very branch
+that reads it. And the message names whichever side of the split is SHORTER,
+so `draws` under `nested` reads "every method except nested reads it" instead
+of listing the eight that do.
+
+Add a key to whichever table applies in the same commit that adds it to the
+vocabulary. Tests: `tests/test_method_only_sampler_keys.py`.
+
+## `init:` is retired, not made live (review 5.3.3a)
+
+The `init` sampler key was read and forwarded to `pm.sample` for as long as
+run.py existed, and it was inert for just as long. That is worth stating
+carefully, because the obvious reading -- "dead code" -- is wrong and sends the
+next reader looking for an unused variable that does not exist. The key was
+read, bound to a local, and passed by name; what was dead was its EFFECT.
+pymc's own `pm.sample` docstring says of `init`, verbatim, *"This argument is
+ignored when manually passing the NUTS step method"*, and the plain-NUTS branch
+passes `step=pm.NUTS(...)`. Fifteen shipped example configs carried
+`init: adapt_diag`, and it never did anything in any of them.
+
+**It is DELETED rather than enlivened, and the reason is the seed polish.**
+Making it live means dropping the explicit step, and `initvals`' own docstring
+entry reads *"Initialization methods for NUTS (see ``init`` keyword) can
+overwrite the default"* -- so a live `adapt_diag` would be licensed to jitter
+the chain off the polished start, which is the exact pathology `seed_polish`
+exists to prevent (the ob140939 postmortem). Keeping the explicit step is what
+makes the start authoritative. So the key goes, and the comment on the `# 4.
+Sample` header that claimed "we use adapt_diag to start exactly at our
+estimated means" goes with it: it was false in both halves, since `init` was
+ignored and `adapt_diag` jitters rather than sitting on a mean.
+
+A retired key gets its own channel. `RETIRED_SAMPLER_KEYS` maps it to what
+became of it and `warn_retired_sampler_keys` says so, excluded from
+`warn_unknown_sampler_keys` so one stale line earns one message. A user who
+wrote `init:` was following documentation that used to look right, and "Did you
+mean 'method'?" tells them nothing; the retired message names the pymc rule and
+says to delete the line. Tests: `tests/test_run_dead_residue.py`.

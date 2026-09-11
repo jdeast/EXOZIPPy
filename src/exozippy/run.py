@@ -50,7 +50,6 @@ logger = logging.getLogger(__name__)
 # accesses in this module's own source, in both directions, so it cannot
 # silently drift again. Add the key here in the same edit that consumes it.
 KNOWN_SAMPLER_KEYS = {
-    "init",
     "tune",
     "draws",
     "chains",
@@ -208,13 +207,76 @@ def _wrapup_interrupt_note(config):
     )
 
 
-# Samplers that cannot honor `maxtime`, and why.  The three external NUTS
-# backends run their whole chain outside Python's per-draw loop -- the JAX
-# ones inside one jitted scan, nutpie inside Rust -- so there is no point at
-# which a wall-clock check could raise the KeyboardInterrupt that the maxtime
-# mechanism turns into a graceful stop.  PyMC agrees and says so out loud:
-# pm.sample RAISES for a `callback` with any `nuts_sampler` but its own.
-MAXTIME_UNSUPPORTED_METHODS = ("numpyro", "blackjax", "nutpie")
+# Every `method:` value _run_fit dispatches on, in the order the dispatch
+# tests them.  This is the universe METHOD_ONLY_SAMPLER_KEYS is scored
+# against, so a new sampler branch belongs here in the same edit.
+SAMPLER_METHODS = (
+    "nuts",
+    "numpyro",
+    "blackjax",
+    "nutpie",
+    "nested",
+    "ptde",
+    "ptde_async",
+    "demc",
+    "demcz",
+)
+
+# The three families the dispatch really has.  Named once, because the
+# method-only table below is mostly these three tuples and a per-family knob
+# that silently grew a second consumer is the 2.4.2 defect arriving from the
+# other direction.
+_HMC_METHODS = ("nuts", "numpyro", "blackjax", "nutpie")
+_JAX_METHODS = ("numpyro", "blackjax")
+_PTDE_METHODS = ("ptde", "ptde_async")
+_DE_METHODS = ("demc", "demcz")
+# Every method that draws a fixed-length MCMC chain, i.e. everything but
+# nested sampling, whose length is set by its own stopping rule.
+_CHAIN_METHODS = tuple(m for m in SAMPLER_METHODS if m != "nested")
+
+
+def _effective_sampler_branch(method):
+    """The branch `_run_fit` will actually take for ``method``.
+
+    An unrecognized `method:` value falls through to the nuts branch and
+    always has (samplers.md), so it must be scored as `nuts` here: warning
+    that `chains` is IGNORED under `method: nutts` would be FALSE, since the
+    branch that runs does consume it.  A warning that cries wolf is the exact
+    failure this whole mechanism exists to avoid.
+    """
+    return method if method in SAMPLER_METHODS else "nuts"
+
+
+# Samplers that cannot honor `maxtime`, and why -- one reason each, because
+# they are not the same reason.  The three external NUTS backends run their
+# whole chain outside Python's per-draw loop (the JAX ones inside one jitted
+# scan, nutpie inside Rust), so there is no point at which a wall-clock check
+# could raise the KeyboardInterrupt that the maxtime mechanism turns into a
+# graceful stop; PyMC agrees and says so out loud, since pm.sample RAISES for
+# a `callback` with any `nuts_sampler` but its own.  `nested` is here for a
+# different reason: nested_sample takes an iteration cap (`maxiter`) and no
+# wall clock at all, and run.py forwards neither -- found while re-verifying
+# review 2.3.6's consumer table, and silent until then.
+_MAXTIME_UNSUPPORTED_REASONS = {
+    "numpyro": (
+        "external NUTS samplers run the chain outside Python's per-draw "
+        "loop and invoke no callback, so there is nothing to interrupt"
+    ),
+    "blackjax": (
+        "external NUTS samplers run the chain outside Python's per-draw "
+        "loop and invoke no callback, so there is nothing to interrupt"
+    ),
+    "nutpie": (
+        "external NUTS samplers run the chain outside Python's per-draw "
+        "loop and invoke no callback, so there is nothing to interrupt"
+    ),
+    "nested": (
+        "nested sampling stops on its own evidence criterion and takes no "
+        "wall-clock cap (nested_sample has maxiter, which run.py does not "
+        "forward)"
+    ),
+}
+MAXTIME_UNSUPPORTED_METHODS = tuple(_MAXTIME_UNSUPPORTED_REASONS)
 
 
 def warn_maxtime_unsupported(method, maxtime):
@@ -224,37 +286,108 @@ def warn_maxtime_unsupported(method, maxtime):
     whole point of `maxtime` is that a scheduler-bound job stops itself
     before the queue kills it, so a user who sets it and gets nothing has no
     partial trace AND no idea why.  demc already warns for exactly this
-    reason (PyMC's population path discards per-draw callbacks); these three
-    were the remaining silent ones.
+    reason (PyMC's population path discards per-draw callbacks); these were
+    the remaining silent ones.
 
     Returns True when a warning was emitted, so the check is exercisable
     without running a fit -- same shape as ``warn_unknown_sampler_keys``.
     """
-    if maxtime is None or method not in MAXTIME_UNSUPPORTED_METHODS:
+    reason = _MAXTIME_UNSUPPORTED_REASONS.get(method)
+    if maxtime is None or reason is None:
         return False
     logger.warning(
-        f"{method}: maxtime={float(maxtime):.0f}s is IGNORED -- external NUTS "
-        f"samplers run the chain outside Python's per-draw loop and invoke no "
-        f"callback, so there is nothing to interrupt. Use method: nuts, "
-        f"ptde_async or demcz for a wall-clock cap."
+        f"{method}: maxtime={float(maxtime):.0f}s is IGNORED -- {reason}. "
+        f"Use method: nuts, ptde_async or demcz for a wall-clock cap."
     )
     return True
 
 
-# Sampler keys that only ONE method consumes.  A key here is silently inert
-# under any other method: it is in KNOWN_SAMPLER_KEYS, so warn_unknown_sampler_keys
+# Sampler keys only SOME methods consume.  A key here is silently inert under
+# every other method: it is in KNOWN_SAMPLER_KEYS, so warn_unknown_sampler_keys
 # says nothing, and the branch that would read it is never taken.
 #
-# That is the whole defect (review 2.4.2).  store_hot_chains is forwarded only
-# to ptde_async, so under method: ptde the hot-chain mode discovery simply
-# never runs and the user is told nothing; rung_thin_factor / rung_thin_start
-# are the same thing mirrored -- ptde-only, silently ignored by ptde_async.
+# That is the whole defect (reviews 2.4.2 and 2.3.6).  2.4.2 landed the
+# mechanism for the three keys it had traced -- store_hot_chains is forwarded
+# only to ptde_async, so under method: ptde the hot-chain mode discovery
+# simply never runs and the user is told nothing; rung_thin_factor /
+# rung_thin_start are the same thing mirrored, ptde-only and silently ignored
+# by ptde_async.  2.3.6 is that finding on the full list: at least a dozen
+# more keys are read by exactly one branch or family.
 #
-# Values are the methods that DO consume the key.
+# THE HEADLINE IS `chains`.  It is forwarded to the HMC branches and to demc /
+# demcz and to nothing else, so under method: ptde / ptde_async -- the
+# recommended default for every microlensing fit -- a user's
+# `sampler: {chains: 16}` was silently ignored, and those samplers size their
+# population from the parameter count instead (_common.resolve_n_chains).
+# Measured on examples/kelt4 RV-only, 2026-09-11: `chains: 5` gave 5 chains
+# under method: nuts and 30 under method: ptde.  It is the single most likely
+# spelling of "give me more chains", and the PTDE spelling is `n_chains`.
+#
+# Values are the methods that DO consume the key.  Deliberately NOT in this
+# table, and each for the same reason -- the warning would be false:
+#
+#   * `cores` -- not passed to sample_jax_nuts, but it governs the seed
+#     polish and the post-hoc lp fill on EVERY path, so it is never inert;
+#   * `min_ess` / `max_rhat` -- the PTDE samplers' early stop, but also the
+#     convergence-report thresholds every path prints;
+#   * `maxtime` -- has its own channel (warn_maxtime_unsupported above),
+#     which names the per-sampler reason rather than a consumer list;
+#   * `seed`, `nthin`, `measure_scales`, `profile`, `recompute_trace`,
+#     `seed_polish`, `method` -- read on every path.
 METHOD_ONLY_SAMPLER_KEYS = {
+    # Chain geometry.  `chains` is the headline above; tune/draws are the
+    # same shape against `nested`, whose length comes from its own stopping
+    # rule and whose posterior group is a fixed-size equal-weight resample.
+    "chains": _HMC_METHODS + _DE_METHODS,
+    "tune": _CHAIN_METHODS,
+    "draws": _CHAIN_METHODS,
+    # Hamiltonian step size adaptation: no gradient-free sampler has a
+    # target acceptance to aim at.
+    "target_accept": _HMC_METHODS,
+    # pymc.sampling.jax.sample_jax_nuts only.
+    "chain_method": _JAX_METHODS,
+    "jitter": _JAX_METHODS,
+    # samplers/nested.py only.
+    "nested_backend": ("nested",),
+    "nlive": ("nested",),
+    "dlogz": ("nested",),
+    "walks": ("nested",),
+    "checkpoint_dir": ("nested",),
+    # The parallel-tempered DE family.
+    "n_temps": _PTDE_METHODS,
+    "T_max": _PTDE_METHODS,
+    "n_chains": _PTDE_METHODS,
+    "adapt_ladder": _PTDE_METHODS,
+    "de_mode_hop": _PTDE_METHODS,
+    "eval_timeout": _PTDE_METHODS,
+    "swap_schedule": _PTDE_METHODS,
+    "collect_rung_timing": _PTDE_METHODS,
+    # ... and the two documented asymmetries inside it.
     "store_hot_chains": ("ptde_async",),
     "rung_thin_factor": ("ptde",),
     "rung_thin_start": ("ptde",),
+}
+
+# The other half of the vocabulary: keys every path reads, whatever `method:`
+# selects.  Together with METHOD_ONLY_SAMPLER_KEYS this PARTITIONS
+# KNOWN_SAMPLER_KEYS, and tests/test_method_only_sampler_keys.py asserts the
+# partition in both directions -- so a key cannot join the vocabulary without
+# a ruling on whether some method silently ignores it, which is how a dozen
+# came to be silent (2.3.6).  The four entries here whose honoring is PARTIAL
+# rather than universal carry their reason in the comment above
+# METHOD_ONLY_SAMPLER_KEYS; they are here because on no path are they inert.
+ALL_METHOD_SAMPLER_KEYS = {
+    "method",
+    "cores",
+    "seed",
+    "seed_polish",
+    "nthin",
+    "measure_scales",
+    "profile",
+    "recompute_trace",
+    "min_ess",
+    "max_rhat",
+    "maxtime",
 }
 
 
@@ -269,20 +402,115 @@ def warn_method_only_sampler_keys(sampler_cfg, method):
     does not live beside warn_unknown_sampler_keys, which runs early enough
     that `method` may still be None (auto-selection has not happened yet).
 
+    The message names whichever side of the split is SHORTER -- the consumers
+    for a key one family owns, the non-consumers for a key only `nested`
+    ignores -- because "only nuts / numpyro / blackjax / nutpie / ptde /
+    ptde_async / demc / demcz consume it" is a list a reader has to diff by
+    hand to find the one method that matters.
+
     Returns the sorted list of (key, method) pairs warned about, so the check
     is exercisable without running a fit -- same shape as its two siblings.
     """
+    branch = _effective_sampler_branch(method)
     warned = []
     for key, consumers in sorted(METHOD_ONLY_SAMPLER_KEYS.items()):
-        if key not in sampler_cfg or method in consumers:
+        if key not in sampler_cfg or branch in consumers:
             continue
         warned.append((key, method))
+        ignored_by = tuple(m for m in SAMPLER_METHODS if m not in consumers)
+        if len(consumers) <= len(ignored_by):
+            detail = f"only {' / '.join(consumers)} consume(s) it"
+            remedy = f"switch method to one of: {', '.join(consumers)}"
+        else:
+            detail = f"every method except {' / '.join(ignored_by)} reads it"
+            remedy = f"switch method away from: {', '.join(ignored_by)}"
         logger.warning(
-            f"{method}: sampler key '{key}' is IGNORED -- only "
-            f"{' / '.join(consumers)} consume(s) it. Remove it, or switch "
-            f"method to one of: {', '.join(consumers)}."
+            f"{method}: sampler key '{key}' is IGNORED -- {detail}. "
+            f"Remove it, or {remedy}."
         )
     return warned
+
+
+# Sampler keys this project used to accept, and what happened to them.  A
+# retired key is not a typo -- it is a line a working config once needed --
+# so it gets its own sentence instead of "Did you mean 'method'?".
+#
+# `init` (review 5.3.3a): read and forwarded to pm.sample for as long as run.py
+# has existed, and inert for just as long.  pymc's own pm.sample docstring says
+# of it, verbatim, "This argument is ignored when manually passing the NUTS
+# step method", and the plain-NUTS branch passes `step=pm.NUTS(...)`.  So a
+# grep for an unused variable found nothing while the key did nothing, which
+# is why it survived every refactor.  It is DELETED rather than made live, and
+# that is JDE's ruling with a reason: `initvals`' own docstring entry reads
+# "Initialization methods for NUTS (see ``init`` keyword) can overwrite the
+# default", so dropping the explicit step to give `init` its effect back would
+# let an adapt_diag jitter move the chain off the polished start -- the exact
+# pathology seed_polish exists to prevent.  Keeping the step is what makes the
+# start authoritative.
+RETIRED_SAMPLER_KEYS = {
+    "init": (
+        "pm.sample ignores `init` whenever an explicit NUTS step is passed "
+        "(pymc's own docstring), and run.py always passes one, so this key "
+        "has never had an effect. Delete the line: the start values come "
+        "from the relaxation engine and the seed polish, which is what "
+        "keeping the explicit step protects."
+    ),
+}
+
+
+def resolve_cores_setting(raw):
+    """Turn a user's `sampler: cores:` value into an int, or None for AUTO.
+
+    Review 5.3.3(e).  `cores: "auto"` used to reach a bare ``int()`` and die
+    with ``invalid literal for int() with base 10: 'auto'`` raised from inside
+    run.py -- a traceback naming neither the config key nor the remedy, for a
+    spelling ``n_temps:`` accepts -- while the SAME value handed to the seed
+    polish warned by name and took the default grant.
+
+    Failing fast is right HERE and warn-and-continue is right THERE, and the
+    difference is positional rather than a disagreement: this parse runs
+    before any work exists to lose, whereas ``_resolve_polish_cores`` can be
+    reached from a wrap-up stage, where no diagnostic may kill a finished fit
+    (``nonfatal_wrapup``).  What the two must not do is disagree about what
+    the key MEANS -- that is how one rule came to have two behaviors (review
+    6.11.3) -- so both messages say that an ABSENT cores is the automatic
+    grant and that ``cores: 1`` is how to ask for serial.
+
+    Deliberately no floor.  ``cores: 0`` means three different things across
+    the three resolvers and unifying that is review 2.4.8; a validation added
+    here would hide it rather than fix it.
+    """
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"sampler: cores: {raw!r} is not a number of cores. Omit the "
+            f"`cores:` key entirely for the automatic grant (a fraction of "
+            f"the physical cores, leaving one for the OS and your shell), "
+            f"or write `cores: 1` for serial."
+        ) from None
+
+
+def warn_retired_sampler_keys(sampler_cfg):
+    """Say what became of a `sampler:` key this project used to accept.
+
+    Split out of ``warn_unknown_sampler_keys`` so a retired key gets an
+    explanation rather than a typo suggestion: a user who wrote it was
+    following documentation that used to be right, and "Did you mean
+    'method'?" tells them nothing about what to do now.
+
+    Returns the sorted list of retired keys present, so the check is
+    exercisable without running a fit -- same shape as its siblings.
+    """
+    retired = sorted(set(sampler_cfg) & set(RETIRED_SAMPLER_KEYS))
+    for key in retired:
+        logger.warning(
+            f"sampler key '{key}' is RETIRED and does nothing. "
+            f"{RETIRED_SAMPLER_KEYS[key]}"
+        )
+    return retired
 
 
 def warn_unknown_sampler_keys(sampler_cfg):
@@ -290,8 +518,14 @@ def warn_unknown_sampler_keys(sampler_cfg):
 
     Returns the sorted list of unrecognized keys (empty when all are known),
     so the check is exercisable without running a fit.
+
+    Retired keys are excluded here and reported by
+    ``warn_retired_sampler_keys`` instead -- two messages about one line
+    would be one too many, and only one of them is useful.
     """
-    unknown = sorted(set(sampler_cfg) - KNOWN_SAMPLER_KEYS)
+    unknown = sorted(
+        set(sampler_cfg) - KNOWN_SAMPLER_KEYS - set(RETIRED_SAMPLER_KEYS)
+    )
     if unknown:
         logger.warning(
             f"Unrecognized key(s) in the sampler block will be ignored: "
@@ -416,12 +650,14 @@ def _run_fit(config, gui, user_params=None):
 
     # 2. Load the sampler settings (flat under sampler:)
     sampler_cfg = config.get("sampler", {})
-    init = sampler_cfg.get("init", "adapt_diag")
     tune = int(sampler_cfg.get("tune", 2000))
     draws = int(sampler_cfg.get("draws", 2000))
     chains = int(sampler_cfg.get("chains", 4))
-    _cores_raw = sampler_cfg.get("cores", None)
-    cores = int(_cores_raw) if _cores_raw is not None else default_cores()
+    # None (absent, or explicitly null) means AUTO everywhere -- never
+    # serial; serial is cores: 1 (review 6.11.3).
+    cores = resolve_cores_setting(sampler_cfg.get("cores", None))
+    if cores is None:
+        cores = default_cores()
     target_accept = sampler_cfg.get("target_accept", 0.9)
     method = sampler_cfg.get(
         "method", None
@@ -508,6 +744,7 @@ def _run_fit(config, gui, user_params=None):
         pytensor.config.profile = True
 
     # Warn about unrecognized keys in the sampler block so they are never silently ignored.
+    warn_retired_sampler_keys(sampler_cfg)
     warn_unknown_sampler_keys(sampler_cfg)
 
     # ... and in every other reserved block, for the same reason (2.3.10).
@@ -573,7 +810,14 @@ def _run_fit(config, gui, user_params=None):
         )
 
     # 4. Sample
-    # We use adapt_diag to start exactly at our estimated means
+    #
+    # Nothing here uses a pymc `init` method, and the claim that used to sit
+    # on this line ("we use adapt_diag to start exactly at our estimated
+    # means") was false in both halves: pm.sample ignores `init` whenever an
+    # explicit NUTS step is passed, and adapt_diag JITTERS its start rather
+    # than sitting on a mean.  The start is built below instead -- explicitly,
+    # in raw coordinates -- and handed to each sampler by its own spelling
+    # (review 5.3.3a; which branches consume it is review 1.3.6).
     with model:
         # Build the raw starting point explicitly: 0 for logit params,
         # (initval - mu)/sigma for Gaussian-path params, so the physical
@@ -689,7 +933,16 @@ def _run_fit(config, gui, user_params=None):
         # get_raw_starts returns just [raw_start], [0] for the ordinary case.
         # After a polish, seed 0 comes from the polished raw_initval and
         # seeds k>0 are re-derived from their polished physical values.
-        raw_starts, seed_indices = system.get_raw_starts(model)
+        #
+        # Not built on the trace-REUSE path, where nothing consumes it
+        # (review 5.3.3d): no sampler branch is entered and the seed ledger
+        # is already skipped, so the only effect was re-solving every seeded
+        # parameter's forward transform, once per seed, for a fit that is not
+        # going to happen.  Empty LISTS rather than None, because the two
+        # readers below ask len() of it.
+        raw_starts, seed_indices = [], []
+        if not reusing_trace:
+            raw_starts, seed_indices = system.get_raw_starts(model)
 
         # Seeded-solution ledger (multi-seed fits only): a Laplace record
         # of every polished seed -- peak logp and curvature widths at the
@@ -999,7 +1252,6 @@ def _run_fit(config, gui, user_params=None):
                         draws=draws,
                         tune=tune,
                         chains=chains,
-                        init=init,
                         step=step,
                         cores=cores,
                         random_seed=seed,
@@ -1156,7 +1408,7 @@ def _run_fit(config, gui, user_params=None):
         f"per-component)"
     )
     with nonfatal_wrapup("corner plot"):
-        make_corner(model, idata, str(prefix) + "_corner.png")
+        make_corner(idata, str(prefix) + "_corner.png")
 
     # Component-specific corner plots (e.g. mulensing geometry). Unlike
     # comp.plot(), which also runs pre-flight on a single point, this only
@@ -1175,23 +1427,6 @@ def _run_fit(config, gui, user_params=None):
         save_multipage_trace(
             idata, plot_vars, str(prefix) + "_trace_detailed.pdf", model=model
         )
-
-    # Pick the suspected troublemakers
-    # List every tracked parameter in the posterior
-    # available_vars = list(idata.posterior.data_vars)
-    # print("All available variables:\n", available_vars)
-
-    # Automatically filter for the ones we care about
-    # vars_to_check = [v for v in available_vars if any(sub in v for sub in ['secosw', 'sesinw', 'ecc', 'omega', 'mass'])]
-    # print("\nFiltered variables to plot:\n", vars_to_check)
-    # az.plot_pair(
-    #    idata,
-    #    var_names=vars_to_check,
-    #    kind='scatter',
-    #    divergences=True,
-    #    divergences_kwargs={'color': 'C3', 'alpha': 0.5, 'markersize': 5}  # C3 is usually red
-    # )
-    # plt.show()
 
     # Generate final plots.  `draws` outlives this block -- the modeling
     # draft reads draws[0] for its model-bearing figures -- so it is seeded
@@ -1219,7 +1454,7 @@ def _run_fit(config, gui, user_params=None):
             f"per-mode outputs for {mode_report.n_modes} identified modes"
         )
         try:
-            _emit_per_mode_outputs(system, model, idata, mode_report, prefix)
+            _emit_per_mode_outputs(system, idata, mode_report, prefix)
         except Exception:
             logger.warning(
                 "Per-mode output generation failed; the combined "
@@ -2026,7 +2261,15 @@ def _format_summary(idata, diag):
     return "\n".join(header) + "\n" + df.to_string() + "\n"
 
 
-def make_corner(model, idata, filename, max_samples=1000):
+def make_corner(idata, filename, max_samples=1000):
+    """Corner-plot every physical variable in a trace's posterior group.
+
+    Takes no `model` (review 5.3.3b): it selects its variables by NAME off
+    idata.posterior -- dropping the `_raw` companions, the interval-transform
+    duplicates and the mode label -- so it never needed one, and the argument
+    it used to accept made the call sites look like they were plotting from a
+    model they were not.
+    """
     all_vars = list(idata["posterior"].data_vars)
     physical_vars = [
         v
@@ -2786,7 +3029,7 @@ def _idata_for_mode(idata, mode_k):
     return az.from_dict({"posterior": data})
 
 
-def _emit_per_mode_outputs(system, model, idata, mode_report, prefix):
+def _emit_per_mode_outputs(system, idata, mode_report, prefix):
     """Re-emit the combined-posterior corner + component plots once per mode.
 
     Interim (P7) multimodal reporting: loop the existing single-posterior
@@ -2807,7 +3050,7 @@ def _emit_per_mode_outputs(system, model, idata, mode_report, prefix):
         t0 = time.time()
 
         idata_k = _idata_for_mode(idata, k)
-        make_corner(model, idata_k, f"{prefix}_corner_{suffix}.png")
+        make_corner(idata_k, f"{prefix}_corner_{suffix}.png")
 
         # Same draw-count knob as the combined-posterior plots (get_draws'
         # n_draws default) -- no extra stratification needed here since each

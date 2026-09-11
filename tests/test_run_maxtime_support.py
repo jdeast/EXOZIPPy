@@ -7,6 +7,12 @@ AND no idea why.  `demc` already warned (PyMC's population path discards
 per-draw callbacks); numpyro, blackjax and nutpie were the remaining silent
 ones -- external NUTS samplers run the chain outside Python's per-draw loop
 and invoke no callback at all.
+
+`nested` joined them while review 2.3.6's consumer table was being
+re-verified, for a DIFFERENT reason -- nested sampling stops on its own
+evidence criterion, `nested_sample` takes an iteration cap and no wall clock,
+and run.py forwards neither -- which is why the reason is now per method
+rather than one sentence about external NUTS backends.
 """
 
 import inspect
@@ -18,7 +24,7 @@ import pytest
 from exozippy import run
 
 
-@pytest.mark.parametrize("method", ["numpyro", "blackjax", "nutpie"])
+@pytest.mark.parametrize("method", ["numpyro", "blackjax", "nutpie", "nested"])
 def test_an_unsupported_sampler_says_maxtime_is_ignored(method, caplog):
     """
     Given maxtime set and a sampler that cannot honor it,
@@ -35,7 +41,9 @@ def test_an_unsupported_sampler_says_maxtime_is_ignored(method, caplog):
     assert "ptde_async" in caplog.text  # points at one that works
 
 
-@pytest.mark.parametrize("method", ["nuts", "ptde", "ptde_async", "demcz"])
+@pytest.mark.parametrize(
+    "method", ["nuts", "ptde", "ptde_async", "demc", "demcz"]
+)
 def test_a_supporting_sampler_is_not_warned_about(method, caplog):
     """
     Given maxtime set and a sampler that honors it,
