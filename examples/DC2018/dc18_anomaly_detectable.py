@@ -123,16 +123,23 @@ def main():
     prefix = base / "detect" / ("DC2018_%s" % ev)
     prefix.parent.mkdir(parents=True, exist_ok=True)
 
-    class _A:
-        finite_source = True
-        fix_u1 = True
+    # BORROW run_event's own parser rather than stubbing an args object.
+    # build_config reads eleven attributes off it, and hand-stubbed classes
+    # crashed both these scripts with AttributeError on args.sampler -- a
+    # bug that recurs whenever that parser gains an option.
+    a = R.build_parser().parse_args([str(args.event)])
+    a.finite_source = True
+    a.fix_u1 = True
+    a.sampler = "ptde"
+    a.tune = args.tune
+    a.draws = args.draws
 
     cfg2 = R.build_config(
         "DC2018_%s" % ev,
         files,
         prefix,
         base / ("DC2018_%s_mmexofast.json" % ev),
-        _A(),
+        a,
     )
     # SEED AT TRUTH.  Post-#246 homes: the track is per-source, the geometry
     # per-companion, the timescale event-level.
