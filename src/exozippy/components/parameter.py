@@ -457,8 +457,16 @@ class PosteriorSummary:
         n_med = max(n_minus, n_plus)
 
         med_s = str(round(self.median, n_med))
-        em_s = str(round(em, n_minus))
-        ep_s = str(round(ep, n_plus))
+        # A zero on ONE side only (the both-zero case returned above): a mode
+        # slice whose draws pile on a quantile edge, e.g. a mode pinned at a
+        # bound, where the 15.865% quantile and the median coincide.  Render
+        # it the way the both-zero path renders a zero -- the bare "0" -- and
+        # not through decimals_from_sigfigs(0), whose 0 decimal places print
+        # it as "0.0" and reach the published table as "^{+0.05}_{-0.0}"
+        # (review 2.2.5).  A rounded zero is a claim about precision, and
+        # there is none to claim.
+        em_s = "0" if em == 0 else str(round(em, n_minus))
+        ep_s = "0" if ep == 0 else str(round(ep, n_plus))
         return (med_s, em_s, ep_s)
 
     def latex_value(self, sigfigs: int = 2) -> str:

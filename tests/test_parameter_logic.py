@@ -1608,3 +1608,71 @@ def test_the_initval_present_mask_refuses_the_same_over_long_vector():
 
     with pytest.raises(ValueError, match="length 3.*2 element"):
         p._initval_present(2)
+
+
+# ---------------------------------------------------------------------------
+# A one-sided zero error (review 2.2.5)
+# ---------------------------------------------------------------------------
+
+
+def test_a_one_sided_zero_error_renders_as_a_bare_zero():
+    """
+    Given a summary whose error is zero on ONE side only,
+    When it is formatted for the table,
+    Then the zero side renders as "0", the way the both-zero case does.
+
+    err_minus == 0 with err_plus > 0 used to reach
+    decimals_from_sigfigs(0) -> 0 decimal places and print "0.0", which
+    landed in a published LaTeX table as "^{+0.05}_{-0.0}".  A rounded zero
+    is a claim about precision and there is none to claim.
+    """
+    one_sided = PosteriorSummary(median=1.2345, err_minus=0.0, err_plus=0.05)
+    other_side = PosteriorSummary(median=1.2345, err_minus=0.05, err_plus=0.0)
+
+    assert one_sided.format() == ("1.234", "0", "0.05")
+    assert one_sided.latex_value() == "1.234^{+0.05}_{-0}"
+    assert other_side.format() == ("1.234", "0.05", "0")
+    assert other_side.latex_value() == "1.234^{+0}_{-0.05}"
+
+
+def test_a_two_sided_and_a_both_zero_summary_are_unchanged():
+    """
+    Given the two cases that already rendered correctly,
+    When they are formatted,
+    Then nothing moves.
+
+    The control: "0" on one side must not have been bought by collapsing a
+    real error, and the both-zero case must still be the FIXED rendering
+    (an "\\equiv", not "x \\pm 0"), which is what the one-sided zero is
+    being made consistent with.
+    """
+    two_sided = PosteriorSummary(median=1.2345, err_minus=0.05, err_plus=0.07)
+    both_zero = PosteriorSummary(
+        median=0.31622776, err_minus=0.0, err_plus=0.0
+    )
+
+    assert two_sided.format() == ("1.234", "0.05", "0.07")
+    assert two_sided.latex_value() == "1.234^{+0.07}_{-0.05}"
+    assert both_zero.format() == ("0.316228", "0", "0")
+    assert both_zero.latex_value() == "\\equiv 0.316228"
+
+
+def test_draws_piled_on_one_quantile_edge_render_a_bare_zero():
+    """
+    Given draws more than half of which sit on one edge (a mode slice pinned
+    at a bound),
+    When the summary is computed from them and formatted,
+    Then err_minus is exactly zero and renders as "0".
+
+    The vehicle matters: the item's claim is that the case is REACHABLE from
+    real draws, not just constructible by hand, so the summary here comes
+    from _summarize_array rather than from a literal.
+    """
+    draws = np.concatenate([np.zeros(600), np.linspace(0.0, 0.2, 400)])
+
+    summary = Parameter._summarize_array(draws)
+
+    assert summary.err_minus == 0.0
+    assert summary.err_plus > 0.0
+    assert summary.format()[1] == "0"
+    assert "_{-0.0}" not in summary.latex_value()
