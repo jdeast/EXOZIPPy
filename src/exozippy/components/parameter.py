@@ -352,6 +352,68 @@ def sampled_bounds(param):
     return lower, upper
 
 
+# The advice half of _derived_link_error, kept separate only because it is the
+# half that has nothing to do with WHICH link was written: both spellings that
+# DO work on a derived value are listed, because the two mechanisms that share
+# the params-file words `lower:`/`upper:` are easy to confuse and the user's
+# instinct (constrain a derived quantity) is a reasonable one.
+_DERIVED_LINK_ADVICE = (
+    "Two things do work on a derived element: a NUMERIC 'lower'/'upper', "
+    "which becomes a soft barrier whose gradient acts on the parameters this "
+    "element is derived FROM -- the only thing that can move a derived value "
+    "-- with 'bound_scale' setting its steepness; and a 'mu' link with a "
+    "'sigma', which is a soft Gaussian pull toward a tensor-valued center."
+)
+
+_DERIVED_LINK_KINDS = {
+    # kind -> (what was written, what applying it would do)
+    "bound": (
+        "a dynamic bound link ('lower'/'upper' naming another parameter)",
+        "replace the derived value with the MIDPOINT of the linked interval "
+        "(a dynamic bound re-maps the element's own sampling coordinate into "
+        "that interval, and a derived element has none, so the coordinate "
+        "sits at its center)",
+    ),
+    "hard": (
+        "a hard link (an 'initval' link with sigma: 0)",
+        "replace the derived value with the link expression's own value",
+    ),
+    "whole_vector": (
+        "a hard or bound ('lower'/'upper') link",
+        "replace the derived value with the link's own",
+    ),
+}
+
+
+def _derived_link_error(label, kind, index=None, name=None):
+    """The ONE message refusing a hard or bound LINK on a derived value.
+
+    Shared by the whole-vector refusal and the per-element one so the two
+    cannot drift apart: they refuse the same thing for the same reason, and
+    the per-element path exists only because element ROLES are per element.
+
+    A `lower:`/`upper:` LINK is NOT a bound.  It is a reparameterization --
+    the element's value becomes the image of its own logit coordinate inside
+    the linked interval -- so on a derived element, which has no coordinate of
+    its own, the logit raw sits at its center and the remap hands back the
+    interval's midpoint in place of the physics.  A hard link overwrites the
+    expression outright.  A NUMERIC bound is the other mechanism entirely (a
+    soft barrier, section B) and is deliberately still legal here.
+    """
+    who = f"Parameter '{label}'"
+    if index is not None:
+        who += f"[{index}]"
+        if name:
+            who += f" ('{name}')"
+    what, effect = _DERIVED_LINK_KINDS[kind]
+    return ValueError(
+        f"{who}: {what} is not supported here: this element's value comes "
+        f"from an expression (it is DERIVED), so a link cannot constrain it "
+        f"-- it can only take its place.  Applying this one would {effect}.  "
+        f"{_DERIVED_LINK_ADVICE}"
+    )
+
+
 class UnitTranslator:
     # Essential "Pretty" Mapping
     SOLAR_DENSITY_UNIT = u.def_unit(
@@ -2171,10 +2233,43 @@ class Parameter:
             if expr_raw is not None and any(
                 k in links for k in ("hard", "lower", "upper")
             ):
-                raise ValueError(
-                    f"Parameter '{self.label}': hard/bound links are not supported "
-                    f"on derived (expression) parameters; only 'mu' links are."
-                )
+                raise _derived_link_error(self.label, "whole_vector")
+
+            # ...and the same refusal PER ELEMENT.  The check above predates
+            # per-element roles and reads the WHOLE-VECTOR expression only, so
+            # an element derived by an `element_expressions` spec sailed
+            # through both loops below: `is_sampled[i]` is False there, which
+            # is exactly what the dynamic-bound loop's own guard tests, and
+            # the pt.set_subtensor then replaced the expression's value with
+            # the interval midpoint (measured: a derived 7.77 became 6.5) or,
+            # where the element has no finite static upper, with +inf.  The
+            # hard loop overwrote it outright.  Neither warned.
+            #
+            # Refused as a PRE-PASS over both loops rather than inside each,
+            # so nothing is partially re-mapped before the error, and the
+            # element reported is the first one the user wrote rather than
+            # whichever loop ran first.  `is_derived` covers REPORTED elements
+            # too (role 3), which is right: their patch is deferred and would
+            # overwrite the link anyway.
+            #
+            # NOT refused: a numeric `lower:`/`upper:` (a different mechanism
+            # -- section B's soft barrier, which is the right answer on a
+            # derived element and works today), and a 'mu' link (the soft
+            # Gaussian channel, legal here exactly as it is whole-vector).
+            for _field in ("lower", "upper", "hard"):
+                for _i in sorted(links.get(_field, {})):
+                    if is_derived[_i]:
+                        raise _derived_link_error(
+                            self.label,
+                            "hard" if _field == "hard" else "bound",
+                            index=_i,
+                            name=(
+                                self.names[_i]
+                                if self.names is not None
+                                and _i < len(self.names)
+                                else None
+                            ),
+                        )
 
             # Dynamic bounds: re-map the element's sigmoid coordinate q into
             # the tensor-valued interval.  q comes from the same logit raw

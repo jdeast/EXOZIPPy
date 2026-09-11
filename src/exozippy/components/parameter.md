@@ -69,6 +69,49 @@ Sections A/A2 of `build_pymc` add an **unnormalized** Gaussian on top of the rep
 
 Tests: `tests/test_linked_params.py`.
 
+### A LINKED bound is not a bound, and a DERIVED element cannot take one
+
+Two different mechanisms share the params-file words `lower:`/`upper:`, and
+telling them apart is the whole of this ruling:
+
+- **`lower: 3` (a NUMBER) is a soft barrier, and a derived element gets one
+  today.** `needs_barrier = ((is_derived & ~is_reported) | (is_sampled &
+  ~use_logit)) & ~is_fixed` puts `is_derived` in the FIRST arm; the penalty is
+  `potentials.soft_lower_bound`/`soft_upper_bound`, `bound_scale` tunes its
+  steepness, and the gradient acts on the PARENTS the element is derived from
+  -- the only thing that can move a derived value. This is the right answer
+  for "keep this derived quantity above 3" and it is not going anywhere
+  (`tests/test_per_element_soft_bound.py`).
+- **`lower: <expression naming another parameter>` (a LINK) is a
+  reparameterization.** `phys_val = pt.set_subtensor(phys_val[i], lo_t +
+  span_t * q_i)`: the element's value BECOMES the image of its own logit
+  coordinate inside the linked interval, which is a hard constraint by
+  construction. Correct and desirable on a SAMPLED element.
+
+On a DERIVED element the second one has nothing to re-map: `is_sampled[i]` is
+False, `lq[i]` sits at its center, `q_i = 0.5`, and the `set_subtensor`
+discarded the expression's value in favour of the interval midpoint -- measured
+as a derived 7.77 evaluating to 6.5, and as a mixed V_c/V_e system's
+`orbit.ecc` evaluating to `+inf` (the parameter has no finite static upper), in
+both cases with no error and no warning. A hard link (an `initval` link with
+`sigma: 0`) overwrote it outright. `build_pymc` now refuses all three, **per
+element**, sharing one message (`_derived_link_error`) with the whole-vector
+refusal that has always existed -- the guards predated per-element roles and
+keyed on the whole-vector `expression` only, which is the entire bug. `mu`
+links stay legal, per element as whole-vector: a `mu` plus a `sigma` is the
+soft Gaussian channel, and it is the closest thing to a dynamic soft bound the
+code has (there is no spelling for "penalize leaving an interval whose edge is
+itself a parameter"; that absence is filed separately).
+
+The refusal is a pre-pass over both link loops rather than a check inside each,
+so nothing is partially re-mapped before the error and the element named is the
+first one the user wrote. It covers `reported` elements too, whose deferred
+patch would overwrite the link in any case.
+
+Tests: `tests/test_element_links_and_roles.py` -- the links x roles seam, in
+both directions (what raises, and that a numeric bound, a `mu` link and a link
+on the SAMPLED element of the same mixed vector all still work).
+
 ### Evaluating a derived parameter over the trace
 
 `generate_posterior` walks the expression's ancestors, finds the inputs present in the posterior, compiles a pytensor function and evaluates it draw by draw. The compile is **cached per Parameter**, keyed by the tuple of input names -- the signature that decides the positional call (review 6.2.1). It used to happen on every call, and `distribute_posterior` calls it once per derived parameter and runs again for every mode report and every GUI re-solve. Nothing about a cached function goes stale: the graph is rebuilt deterministically from the same captured nodes, and every scale the model can change at runtime lives in a `pytensor.shared` the function reads by reference.
