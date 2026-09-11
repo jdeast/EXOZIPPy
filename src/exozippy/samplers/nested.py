@@ -320,6 +320,8 @@ def nested_sample(
     nlive=500,
     dlogz=0.5,
     walks=None,
+    sample=None,
+    bound=None,
     cores=None,
     seed=None,
     maxiter=None,
@@ -374,12 +376,26 @@ def nested_sample(
         if backend == "dynesty":
             import dynesty
 
+            # SAMPLING MODE IS DIMENSION-DEPENDENT and this used to be
+            # hardcoded to "rwalk".  dynesty recommends rwalk only for
+            # 10 <= ndim <= 20 and slice sampling above that, so on DC2018's
+            # d=27 observable arm the hardcoded choice was outside its own
+            # regime -- and it showed: the run TERMINATED in 1.6 h and landed
+            # up to 40 SIGMA from truth on the light-curve observables with
+            # absurdly small errors, which is a collapsed live-point set
+            # rather than efficient exploration (review 8.2.3).
+            #
+            # `sample=None` therefore means "choose by dimension" rather than
+            # "rwalk regardless".  An explicit value still wins, so a caller
+            # can sweep it.
+            eff_sample = sample or ("rwalk" if bridge.ndim <= 20 else "rslice")
             sampler = dynesty.NestedSampler(
                 _loglike_u,
                 _identity_transform,
                 ndim=bridge.ndim,
                 nlive=nlive,
-                sample="rwalk",
+                sample=eff_sample,
+                **({"bound": bound} if bound else {}),
                 walks=walks or max(25, 2 * bridge.ndim),
                 rstate=np.random.default_rng(seed),
                 pool=pool,
@@ -398,6 +414,14 @@ def nested_sample(
                 }
             sampler.run_nested(
                 **dy_kwargs, dlogz=dlogz, maxiter=maxiter, print_progress=False
+            )
+            logger.info(
+                "dynesty: ndim=%d nlive=%d sample=%s bound=%s walks=%s",
+                bridge.ndim,
+                nlive,
+                eff_sample,
+                bound or "multi",
+                walks or max(25, 2 * bridge.ndim),
             )
             res = sampler.results
             U = np.asarray(res.samples)
