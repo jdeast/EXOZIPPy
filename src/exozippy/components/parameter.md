@@ -175,3 +175,39 @@ Declaring a per-instance parameterization as a mode table
 
 
 Tests: `tests/test_element_parameterization.py`, `tests/test_parameterization_modes.py`.
+
+### Constraining a derived element: ONE rule, TWO fields, ONE sentence
+
+A derived element's value IS its expression, so no field the user can write
+holds it directly -- the only things that can move it are the SAMPLED
+parameters under it. `build_pymc` has said that about `sigma: 0` since long
+before per-element roles; `initval` is the same rule and was the field that
+silently cost the most (review 2.3.17: a derived `planet.mass` built at
+**1/1047** of the requested value, which accounted for essentially the whole
+12,107-nat gap of a posterior point that would not round-trip through the
+params interface). The two are not quite symmetric -- an `initval` on a
+derived element is a PRECEDENCE_USER assignment the relaxation engine
+propagates into whatever *is* sampled, and when the relations invert cleanly
+it is honored exactly (`examples/DC2018_128` pins the derived
+`lens.Companion.alpha` and the engine back-solves `xalpha`/`yalpha` =
+cos/sin of it at rank 80) -- so the *report* is what fires, not a refusal:
+`diagnostics.ModelAuditor.check_user_starts` compares every user `initval`
+against the COMPILED GRAPH and, for a derived element, returns reason
+`"derived"` carrying `requested`/`produced`/`rel` and the remedy.
+
+The sentence lives **once**, in `parameter.derived_constraint_message`, and
+both sites call it: two spellings of one rule is how these drift, and the
+generic alternative ("your value was kept, but the derivation reproduces it
+only approximately") understated the 1047x case by three orders of magnitude
+while pointing nowhere. The remedy NAMES the sampled parameters where it
+can, read off the built graph's ancestors (`_derived_sources`) rather than a
+manifest `deps` list -- a manifest states build order, the graph states what
+the value consumes. That answer is per PARAMETER, not per element: a mixed
+vector has one built tensor, and re-invoking an `ElementExpression` closure
+outside the model context to narrow it is a rebuild for a diagnostic. On all
+19 shipped examples the eleven start-value misses are all on derived
+elements, and the named parents are exactly the documented recipe (seeding
+`mulensevent.t_E`/`pi_E_*` does not place the model; pinning
+`star.pm_ra`/`pm_dec`/`distance`/`logmass` does).
+
+Tests: `tests/test_user_start_check.py`.
