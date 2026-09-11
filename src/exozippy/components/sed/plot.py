@@ -33,17 +33,17 @@ class Plot:
     # star/combo's spectrum curve (drawn translucent) and its data-point
     # marker (drawn opaque), so identity is color-consistent across both;
     # markers additionally vary by shape so identity is never color-alone.
-    colors_spec = [
-        "#2a78d6",
-        "#1baf7a",
-        "#eda100",
-        "#008300",
-        "#4a3aa7",
-        "#e34948",
-        "#e87ba4",
-        "#eb6834",
-    ]
+    colors_spec = ["#005f73",
+                   "#bb3e03",
+                   "#a72564",
+                   "#33846e",
+                   "#9d6e06",
+                   "#9b2226",
+                   "#4d194d",
+                   "#752929"]
+
     colors_obs = colors_spec
+
     linetypes = ["solid", "dashed", "dashdot", "dotted"]
     markers = ["o", "D", "v", "s", "^", "P", "X", "*"]
 
