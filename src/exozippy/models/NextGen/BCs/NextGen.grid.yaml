@@ -14,3 +14,4 @@ grid:
        4.  , 6.  ]
 url: "https://svo2.cab.inta-csic.es/theory/newov2/ssap.php?model=bt-nextgen-agss2009"
 note: "url links to a raw html table of all grid values and their associated IDs that can be used for retrieval; this is for the raw spectra"
+citation: "Allard:2012, Allard:2011, Asplund:2009, Barber:2006"

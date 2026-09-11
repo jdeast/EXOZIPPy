@@ -6,4 +6,5 @@ grid:
   vvcrit: [0.0, 0.4]
 note: "[Fe/H=+0.5 only has up to alpha=+0.4]"
 url: "https://mist.science/data/tarballs_v2.5/eeps/"
+citation: "Dotter:2026, Bauer:2026, Dotter2016, Choi2016"
 log_surf_fe_over_x_solar: -2.7564377470584445
