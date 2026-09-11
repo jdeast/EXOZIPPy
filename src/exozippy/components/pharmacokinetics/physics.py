@@ -195,21 +195,58 @@ def calc_pk_cl_from_ke(ke, v):
 
 
 @register_physics
+def calc_pk_log_ke_from_cl(cl, v):
+    """``log10(ke) = log10(CL / V)``.  The REPORTED log-rate under TRANS2.
+
+    An instance that samples (CL, V) does not sample ``log_ke``, but the
+    quantity exists and has a computable inverse, so it is reported rather
+    than left inactive (the rule is in ``parameter.md``): a user's prior or
+    bound written against ``log_ke`` survives the flip to TRANS1 only if the
+    element stays in the table.
+
+    It reads ``cl`` and ``v`` rather than the already-derived ``ke`` for no
+    numerical reason -- the two agree to a rounding -- but because under
+    TRANS1 the mirror of this function must not read ``cl`` at all (that is a
+    reported element there), and the two expressions are easier to keep
+    honest when they take the same shape.
+    """
+    return pt.log10(cl / v)
+
+
+@register_physics
+def calc_pk_log_cl_from_ke(ke, v):
+    """``log10(CL) = log10(ke * V)``.  The REPORTED log-clearance under TRANS1.
+
+    The mirror of :func:`calc_pk_log_ke_from_cl`.  It takes ``(ke, v)`` and
+    NOT ``cl``, even though ``cl`` is right there with the same value: under
+    TRANS1 ``cl`` is itself reported, and a reported element may not be
+    consumed.
+    """
+    return pt.log10(ke * v)
+
+
+@register_physics
 def calc_pk_half_life(ke):
     """Terminal half-life ``ln(2) / ke``, in the time unit of ``ke``."""
     return pt.log(2.0) / ke
 
 
 @register_physics
-def calc_pk_auc(dose, cl):
-    """Area under the curve to infinity for a single dose, ``D / CL``.
+def calc_pk_auc(dose, ke, v):
+    """Area under the curve to infinity for a single dose, ``D / (ke*V)``.
 
-    Written in terms of CL rather than ke*V so the expression reads as the
-    identity it is.  The component wires CL's own expression so that this is
-    valid in both parameterizations without consuming a `reported` element --
-    see the component docstring.
+    ``ke * V`` IS the apparent clearance, so this is the textbook ``D / CL``
+    written in the two coordinates every parameterization has.  Spelling it
+    ``dose / cl`` would read better and is what the design first called for,
+    and it is WRONG under TRANS1: there ``cl`` is a REPORTED element (nothing
+    in the likelihood consumes it), and nothing may consume a reported element
+    -- the consumer would read its pre-patch placeholder.
+    ``System._validate_reported_not_consumed`` refuses that manifest outright,
+    so the trap is a loud one; this spelling avoids it in both directions
+    because ``ke`` and ``v`` are sampled-or-derived in both.  See
+    ``subject.Subject.COORD_MODE_TABLE``.
     """
-    return dose / cl
+    return dose / (ke * v)
 
 
 @register_physics

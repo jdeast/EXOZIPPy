@@ -33,6 +33,14 @@ subject:
     internal_unit: "dex"
     latex: "\\log{(CL/F)}"
     description: "log10 apparent clearance"
+    expressions:
+      # `ke_v` only, where this is a REPORTED element (subject.py's
+      # COORD_MODE_TABLE).  It reads (ke, v) and NOT the cl sitting right
+      # there with the same value, because under TRANS1 cl is reported too
+      # and nothing may consume a reported element.
+      from_ke:
+        func_name: "calc_pk_log_cl_from_ke"
+        deps: ["ke", "v"]
 
   log_v:
     # V/F from 0.1 to 1000 L.  The upper end covers a drug distributing well
@@ -61,6 +69,35 @@ subject:
     latex: "\\log{k_a}"
     description: "log10 absorption rate constant"
 
+  log_ke:
+    # THE TRANS1 COORDINATE, sampled only where `parameterization: ke_v`
+    # (see the component docstring); elsewhere it is REPORTED from CL/V and
+    # these bounds are inert, because a reported element carries no potential.
+    #
+    # Elimination rate 1e-4 to 100 /hr -- terminal half-lives from ~25 s to
+    # ~290 days.  Wider at the slow end than log_cl/log_v imply on their own
+    # (their corners give log_ke in [-5, 3]) because the two ends mean
+    # different things: a bound on log_cl is a statement about a drug, a bound
+    # on log_ke a statement about a half-life, and neither implies the other
+    # when only one of the pair is sampled.
+    lower: -4.0
+    upper: 2.0
+    # ke = 0.1/hr, a ~7-hour terminal half-life: the middle of the range for
+    # an orally dosed small molecule, and deliberately NOT the value the
+    # Theophylline data imply -- a defaults.yaml start is a template, not a
+    # number read off this example's own posterior.
+    initval: -1.0
+    init_scale: 0.11
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "\\log{k_e}"
+    description: "log10 elimination rate constant"
+    expressions:
+      # TRANS2 (the default), where this is REPORTED rather than sampled.
+      from_cl:
+        func_name: "calc_pk_log_ke_from_cl"
+        deps: ["cl", "v"]
+
   # --- derived, and CONSUMED by the forward model --------------------------
 
   cl:
@@ -76,6 +113,13 @@ subject:
       default:
         func_name: "calc_pk_pow10"
         deps: ["log_cl"]
+      # TRANS1: CL = ke*V, and it is REPORTED there -- the likelihood needs
+      # only (ka, ke, V), so nothing consumes it, which is exactly the
+      # `reported` element role (parameter.md).  It is still the quantity
+      # every reader of a PK table wants, which is why the role exists.
+      from_ke:
+        func_name: "calc_pk_cl_from_ke"
+        deps: ["ke", "v"]
 
   v:
     unit: "L"
@@ -98,11 +142,10 @@ subject:
         deps: ["log_ka"]
 
   ke:
-    # ke = CL/V is NONMEM's TRANS2 -> TRANS1 bridge and is what the forward
-    # model actually consumes.  Which of (CL, V) and (ke, V) is sampled is a
-    # per-instance coordinate choice in the field; only TRANS2 exists here.
-    # TRANS1 is deferred to P3, where it is an element-role question rather
-    # than a second expression (see README).
+    # What the forward model actually consumes, in BOTH parameterizations.
+    # Which of (CL, V) and (ke, V) is sampled is a per-instance coordinate
+    # choice in the field -- NONMEM's TRANS2 and TRANS1 -- and it is spelled
+    # `parameterization:` on a subject block (subject.COORD_MODE_TABLE).
     unit: "1/hr"
     internal_unit: "1/hr"
     latex: "k_e"
@@ -111,13 +154,25 @@ subject:
       default:
         func_name: "calc_pk_ke_from_cl"
         deps: ["cl", "v"]
+      # TRANS1: sampled in log10 directly, exactly as CL is under TRANS2.
+      from_log:
+        func_name: "calc_pk_pow10"
+        deps: ["log_ke"]
 
   # --- derived, and consumed by NOTHING: reporting only --------------------
   #
-  # No bounds, for the reason given at the top of this block.  In P3 these
-  # become the `reported` element role proper; until then they are ordinary
-  # derived parameters, which computes and reports the same numbers and
-  # differs only in that they sit in the build DAG.
+  # No bounds, for the reason given at the top of this block.
+  #
+  # THESE STAY `derived`, NOT `reported`, and the design note that said P3
+  # would flip them was wrong.  "Nothing consumes it" is the role's
+  # description, not its purpose: `reported` exists for a coordinate that a
+  # parameterization MASKED OUT, where the same statement is already being
+  # made on whatever that instance samples instead, and it deliberately
+  # carries NO potential (parameter.md's role table).  A half-life is not
+  # masked out of anything -- it is the coordinate the literature quotes, so
+  # `subject.S1.t_half: {mu: 8.0, sigma: 0.5}` is a constraint a user will
+  # really write, and as a derived element it becomes a Gaussian on ke, which
+  # is exactly right.  Flipping these to `reported` would silently discard it.
 
   t_half:
     unit: "hr"
@@ -150,8 +205,14 @@ subject:
         deps: ["dose", "ka", "ke", "v"]
 
   auc:
-    # AUC to infinity for a single dose.  Written from CL so the expression
-    # reads as the identity D/CL that it is.
+    # AUC to infinity for a single dose, D/CL -- written as dose/(ke*v).
+    #
+    # THE SPELLING IS LOAD-BEARING AND THE OBVIOUS ONE IS WRONG.  `deps:
+    # ["dose", "cl"]` reads as the identity it is, and it raises under TRANS1:
+    # cl is a REPORTED element there and nothing may consume a reported
+    # element (System._validate_reported_not_consumed refuses the manifest).
+    # ke and v are sampled-or-derived in BOTH parameterizations, so this form
+    # is valid in both and needs no second expressions: block.
     unit: "mg hr / L"
     internal_unit: "mg hr / L"
     latex: "AUC"
@@ -159,7 +220,7 @@ subject:
     expressions:
       default:
         func_name: "calc_pk_auc"
-        deps: ["dose", "cl"]
+        deps: ["dose", "ke", "v"]
 
   # --- per-subject data, not a fitted quantity -----------------------------
 

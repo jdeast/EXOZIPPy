@@ -125,8 +125,8 @@ never a modelling choice.
 
 ## Status
 
-P0 and P1 are implemented and the implementation is validated against R (see
-above). P2-P5 are not started. The design is in `notes/pharmacokinetics.txt`
+P0, P1 and P3 are implemented, and P1 is validated against R (see above). P2,
+P4 and P5 are not started. The design is in `notes/pharmacokinetics.txt`
 (private notes repository). Phases:
 
 | Phase | Scope | State |
@@ -134,7 +134,7 @@ above). P2-P5 are not started. The design is in `notes/pharmacokinetics.txt`
 | P0 | Credible-interval width as a run-level setting (`exozippy.reporting`) | DONE |
 | P1 | `subject` + `assay`, no hierarchy | DONE, validated (above) |
 | P2 | Symbolic relations / relaxation-engine seeding | not started |
-| P3 | TRANS1/TRANS2 parameterization via element roles | not started |
+| P3 | TRANS1/TRANS2 parameterization via element roles (`parameterization:`) | DONE |
 | P4 | `population`: between-subject variability + allometric covariate | not started |
 | P5 | Flip-flop degeneracy: mode reporting and the opt-in ordering bound | not started |
 

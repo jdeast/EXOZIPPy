@@ -9,6 +9,7 @@ import numpy as np
 from astropy import units as u
 
 from ..component import Component
+from ..parameterization import mode_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,32 @@ class Subject(Component):
     model itself, and the removable ``ka == ke`` singularity it has to
     survive, are in ``physics.py``.
 
+    THE COORDINATE CHOICE, per subject::
+
+        subject:
+          - {name: "1", weight: 79.6, dose: 4.02, parameterization: "ke_v"}
+
+    The same model can be written in several coordinate bases and the field
+    uses more than one: ``cl_v`` samples (CL, V) and derives ``ke = CL/V``
+    (NONMEM's TRANS2, the default here and there); ``ke_v`` samples (ke, V)
+    and derives ``CL = ke*V`` (NONMEM's TRANS1). Nothing becomes more or
+    less constrained -- only the coordinates change.
+
+    Spelled as an ENUM and not as a ``fit<coord>`` boolean, which is what
+    ``components.md``'s flag vocabulary would suggest: that vocabulary is
+    explicitly about BOOLEAN flags, and this choice is not a boolean. The
+    shipped precedent for an n-way per-instance choice is ``band.ld_law``
+    and ``planet.mass_parameterization``. The value names the sampled pair,
+    so the config says what it selects without a lookup, and a third basis
+    (see ``COORD_MODE_TABLE``) is a new value rather than a second flag.
+
+    The choice is per instance, so a system may mix them -- and the point of
+    ``COORD_MODE_TABLE`` is that the roles fall out rather than being
+    hand-masked. Under ``ke_v``, ``cl`` is consumed by nothing at all (the
+    likelihood needs only ``ka``, ``ke`` and ``V``) while remaining the one
+    quantity every reader of a PK table wants, which is precisely the
+    ``reported`` element role.
+
     Every subject is independent here. Between-subject variability -- the
     hierarchy that makes this "population" PK rather than a stack of separate
     fits -- is P4, and arrives as a separate component supplying a prior over
@@ -75,6 +102,49 @@ class Subject(Component):
 
     label = "Subject"
 
+    # The coordinate bases, as a mode table (see
+    # components/parameterization.py).  Mode keys name the SAMPLED PAIR
+    # rather than NONMEM's numbers, because "cl_v" says what it selects and
+    # "TRANS2" has to be looked up -- the field's names are in the docstring,
+    # the schema doc and the log line.  They are also the user-facing config
+    # values, so there is no second vocabulary to translate.
+    #
+    # Read it as a mirror: each mode samples one log-rate, derives the other
+    # rate through V, and REPORTS the coordinates it did not sample.  What
+    # makes it a mirror rather than two independent cases is that the derived
+    # side of one mode is the reported side of the other, and no parameter is
+    # ever derived from a quantity the other mode reports -- which is what
+    # keeps the per-parameter build order acyclic.  `cl` is derived under
+    # "cl" (ke consumes it) and reported under "ke" (nothing does), so the
+    # would-be cycle cl -> ke -> cl in a MIXED system never forms: a reported
+    # selection contributes no edge to graph.py (parameter.md).
+    #
+    # Both log-rates report the one they do not sample, rather than leaving it
+    # inactive, because both have a computable inverse -- parameter.md's rule
+    # for which role a masked-out coordinate takes.  That is also what keeps a
+    # user's `subject.S1.log_ke: {lower: -3}` meaningful after a flip.
+    COORD_MODE_TABLE = {
+        # NONMEM TRANS2, and the default here for the same reason it is
+        # theirs: clearance is the quantity dosing decisions are made on.
+        "cl_v": {
+            "log_cl": None,
+            "cl": "default",
+            "ke": "default",
+            "log_ke": {"output_expr_key": "from_cl"},
+        },
+        # NONMEM TRANS1.
+        "ke_v": {
+            "log_ke": None,
+            "ke": "from_log",
+            "cl": {"output_expr_key": "from_ke"},
+            "log_cl": {"output_expr_key": "from_ke"},
+        },
+    }
+
+    # The default, named once: `config_schema`'s doc, `_parse_parameterization`
+    # and the log line all have to agree about it.
+    DEFAULT_COORDS = "cl_v"
+
     @property
     def prefix(self):
         return "subject"
@@ -99,6 +169,21 @@ class Subject(Component):
                 "accepts": None,
                 "required": True,
                 "doc": "Administered dose, in the units of 'dose_unit'.",
+            },
+            {
+                "key": "parameterization",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Which coordinates this subject is sampled in, named "
+                    "after the sampled pair: 'cl_v' (clearance and volume; "
+                    "NONMEM TRANS2; the default) or 'ke_v' (elimination rate "
+                    "and volume; NONMEM TRANS1). A coordinate choice -- the "
+                    "same model in different coordinates, so nothing becomes "
+                    "more or less constrained, and whichever quantities are "
+                    "not sampled are still computed and reported."
+                ),
             },
             {
                 "key": "dose_unit",
@@ -127,6 +212,7 @@ class Subject(Component):
         """
         self.weight_kg = []
         self.dose_mg = []
+        self.coord_modes = []
 
         for cfg, name in zip(self.config, self.names):
             where = f"{self.prefix} '{name}'"
@@ -134,9 +220,36 @@ class Subject(Component):
             self.dose_mg.append(
                 self._parse_dose(cfg, where, self.weight_kg[-1])
             )
+            self.coord_modes.append(self._parse_parameterization(cfg, where))
 
         self.weight_kg = np.asarray(self.weight_kg, dtype=float)
         self.dose_mg = np.asarray(self.dose_mg, dtype=float)
+
+    @classmethod
+    def _parse_parameterization(cls, cfg, where):
+        """This subject's mode key for ``COORD_MODE_TABLE``.
+
+        The one wrong value worth naming is a NONMEM TRANS number: somebody
+        transcribing a control stream writes ``1`` or ``2``, and those mean
+        the opposite of each other.  A bare number is not a legal value here
+        either way, so the message says which spelling to use rather than
+        guessing at an intent.
+        """
+        raw = cfg.get("parameterization", cls.DEFAULT_COORDS)
+        if raw in cls.COORD_MODE_TABLE:
+            return raw
+        legal = ", ".join(f"'{k}'" for k in cls.COORD_MODE_TABLE)
+        extra = ""
+        if raw in (1, 2, "1", "2", True, False):
+            extra = (
+                " That looks like a NONMEM TRANS number: TRANS1 is 'ke_v' "
+                "and TRANS2 is 'cl_v'."
+            )
+        raise ValueError(
+            f"[{where}] 'parameterization:' must be one of {legal}; got "
+            f"{raw!r}. It names the pair of coordinates this subject is "
+            f"sampled in.{extra}"
+        )
 
     @staticmethod
     def _parse_weight(cfg, where):
@@ -231,14 +344,32 @@ class Subject(Component):
         layers UNDER the params file, so a user who really wants to probe a
         different dose can still say so.
         """
+        # The coordinate choice, per subject (see COORD_MODE_TABLE).  An
+        # all-`cl_v` system -- the default, and every example that does not ask
+        # otherwise -- expands to exactly the entries this used to write by
+        # hand, plus the `log_ke` it now REPORTS.
+        coords = mode_manifest(
+            self.coord_modes,
+            self.COORD_MODE_TABLE,
+            n_elements=self.n_elements,
+            where=f"{self.prefix}.parameterization",
+        )
+        self._log_parameterization_choices()
+
+        # Insertion order is load-bearing: graph.py registers its build-order
+        # nodes in manifest order, so this is the order the PyMC nodes -- and
+        # so the terms of the summed logp -- are created in.  The historical
+        # keys keep their historical positions and `log_ke` is inserted beside
+        # the other log coordinates, where a reader looks for it.
         self.manifest = {
-            "log_cl": None,
+            "log_cl": coords["log_cl"],
             "log_v": None,
             "log_ka": None,
-            "cl": "default",
+            "log_ke": coords["log_ke"],
+            "cl": coords["cl"],
             "v": "default",
             "ka": "default",
-            "ke": "default",
+            "ke": coords["ke"],
             "t_half": "default",
             "tmax": "default",
             "cmax": "default",
@@ -250,6 +381,30 @@ class Subject(Component):
                 }
             },
         }
+
+    def _log_parameterization_choices(self):
+        """Say which coordinates each subject samples, once, at stage 3.
+
+        A coordinate choice moves no posterior, so the only way anybody
+        notices a stray ``parameterization:`` is if the run says so -- and the
+        modes produce tables with the same rows, which is the whole point of
+        the `reported` role and also what makes the choice invisible
+        otherwise.
+        """
+        flipped = [
+            name
+            for name, mode in zip(self.names, self.coord_modes)
+            if mode != self.DEFAULT_COORDS
+        ]
+        if not flipped:
+            return
+        logger.info(
+            "[%s] sampling (ke, V) -- NONMEM TRANS1 -- for %s; CL is derived "
+            "and reported. The other %d subject(s) sample (CL, V) (TRANS2).",
+            self.prefix,
+            ", ".join(flipped),
+            self.n_elements - len(flipped),
+        )
 
     # ------------------------------------------------------------------
     # Reporting

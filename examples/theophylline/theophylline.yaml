@@ -29,6 +29,13 @@ reporting:
 # purely numeric instance name is rejected by the core (it would be
 # ambiguous with the internal subject.0 index form); the assay block's
 # subject_prefix maps the data's bare numbers onto these names.
+#
+# Each subject may also carry `parameterization: "ke_v"`, which samples
+# (ke, V) instead of (CL, V) -- NONMEM's TRANS1 rather than its TRANS2.  It is
+# a coordinate choice: the same model, so the posterior does not move and the
+# table has the same rows either way (whichever of CL and ke is not sampled is
+# derived and reported).  Left at the default because TRANS2 is NONMEM's
+# default too.
 subject:
   - {name: "S1", weight: 79.6, dose: 4.02, dose_unit: "mg/kg"}
   - {name: "S2", weight: 72.4, dose: 4.4, dose_unit: "mg/kg"}

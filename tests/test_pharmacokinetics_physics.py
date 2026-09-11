@@ -315,13 +315,16 @@ def test_tmax_actually_maximizes_the_curve(conc, tmax):
 
 
 def test_auc_equals_the_numerically_integrated_curve(conc):
-    """Given D/CL, Then it equals the integral of C(t) from 0 to infinity.
+    """Given D/(ke*V), Then it equals the integral of C(t) from 0 to infinity.
 
     AUC = D/CL is an identity of the model, not a definition, so it is worth
-    checking against the curve the model actually produces.
+    checking against the curve the model actually produces. It is spelled
+    ``D/(ke*V)`` rather than ``D/CL`` because under TRANS1 ``cl`` is a
+    REPORTED element and nothing may consume one; this asserts the spelling
+    the manifest has to use is the same number.
     """
-    auc = _fn(P.calc_pk_auc, 2)
-    analytic = auc(np.array([DOSE]), np.array([KE * V]))[0]
+    auc = _fn(P.calc_pk_auc, 3)
+    analytic = auc(np.array([DOSE]), np.array([KE]), np.array([V]))[0]
 
     grid = np.linspace(0.0, 4000.0, 400_001)[1:]
     numeric = np.trapezoid(_c(conc, grid), grid)

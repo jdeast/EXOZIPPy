@@ -10,7 +10,10 @@ Theophylline example fetches its data over the network, which a test must not
 depend on.
 """
 
+import logging
+
 import numpy as np
+import pytensor
 import pytest
 
 from exozippy import reporting
@@ -72,6 +75,17 @@ def _config(csv, prefix_dir, **assay_overrides):
         ],
         "assay": [assay],
     }
+
+
+def _system(csv, tmp_path, ke_v=(), user_params=None):
+    """A prepared System, optionally flipping some subjects to (ke, V)."""
+    cfg = _config(csv, tmp_path)
+    for block in cfg["subject"]:
+        if block["name"] in ke_v:
+            block["parameterization"] = "ke_v"
+    system = System(cfg, user_params=dict(user_params or {}))
+    system.prepare()
+    return system
 
 
 @pytest.fixture
@@ -480,3 +494,209 @@ def test_the_example_asks_for_the_pharmacometrics_convention():
     assert width == 0.95
     assert reporting.sigma_multiple(width) is None
     assert reporting.label(width) == "95"
+
+
+# ---------------------------------------------------------------------------
+# The coordinate choice: NONMEM TRANS1 vs TRANS2 (P3)
+# ---------------------------------------------------------------------------
+
+
+def test_trans2_is_the_default_and_the_log_rate_it_drops_is_reported(prepared):
+    """Given no flag, Then (CL, V) is sampled and log_ke is REPORTED.
+
+    The default must be the manifest the component hand-wrote before the mode
+    table existed, plus the coordinate it now reports -- that equivalence is
+    what makes adopting a mode table safe for every config that made one
+    choice (components.md).
+    """
+    subject = prepared.subject
+    prepared.build_model()
+
+    assert list(subject.coord_modes) == ["cl_v", "cl_v", "cl_v"]
+    assert subject.log_cl.is_sampled.all()
+    assert subject.cl.is_derived.all()
+    assert not subject.cl.is_reported.any()
+    assert subject.ke.is_derived.all()
+
+    # log_ke has a computable inverse, so it is REPORTED rather than inactive
+    # (parameter.md's rule), which means it still has a table row.
+    assert subject.log_ke.is_reported.all()
+    assert subject.log_ke.is_active.all()
+
+
+def test_the_ke_v_basis_flips_which_rate_is_sampled(synth_csv, tmp_path):
+    """Given parameterization: ke_v, Then CL becomes REPORTED.
+
+    CL is consumed by nothing under TRANS1 -- the likelihood needs only ka,
+    ke and V -- while staying the quantity a PK table exists to show. That is
+    the `reported` role's own definition, arrived at from a field with no
+    stars in it.
+    """
+    system = _system(synth_csv, tmp_path, ke_v={"S1", "S2", "S3"})
+    subject = system.subject
+    model = system.build_model()
+
+    assert subject.log_ke.is_sampled.all()
+    assert subject.cl.is_reported.all()
+    assert subject.log_cl.is_reported.all()
+    assert subject.ke.is_derived.all()
+
+    raw = {v.name for v in model.free_RVs}
+    assert "subject.log_ke_raw" in raw
+    assert "subject.log_cl_raw" not in raw
+
+
+def test_a_mixed_system_gives_each_subject_its_own_roles(synth_csv, tmp_path):
+    """Given one flipped subject, Then the roles differ per ELEMENT.
+
+    The per-instance case is the one the roles exist for, and it is also the
+    one that would deadlock a naive wiring: `cl` is derived-and-consumed on
+    the TRANS2 subjects and reported on the TRANS1 one, so a per-parameter
+    build order would see cl -> ke -> cl. It does not, because a reported
+    selection contributes no edge (parameter.md).
+    """
+    system = _system(synth_csv, tmp_path, ke_v={"S2"})
+    subject = system.subject
+    system.build_model()
+
+    assert list(subject.coord_modes) == ["cl_v", "ke_v", "cl_v"]
+    assert list(subject.log_cl.is_sampled) == [True, False, True]
+    assert list(subject.log_cl.is_reported) == [False, True, False]
+    assert list(subject.log_ke.is_sampled) == [False, True, False]
+    assert list(subject.cl.is_reported) == [False, True, False]
+    # ke is DERIVED for everyone, by two different expressions.
+    assert subject.ke.is_derived.all()
+    assert not subject.ke.is_reported.any()
+
+
+def test_the_two_parameterizations_have_the_same_likelihood(
+    synth_csv, tmp_path
+):
+    """Given matched physical values, Then the data term is identical.
+
+    The substantive claim a coordinate choice makes: same model, different
+    coordinates. Asserted on the OBSERVED log-likelihood rather than the
+    total logp, because the total legitimately differs -- each
+    parameterization carries its own coordinate prior, which is the Jacobian
+    between them and is not supposed to match.
+    """
+    cl, v, ka = 2.8, 32.0, 1.5
+    shared = {
+        "subject.log_v": {"initval": float(np.log10(v))},
+        "subject.log_ka": {"initval": float(np.log10(ka))},
+        "assay.sigma_add": {"initval": 0.15},
+        "assay.sigma_prop": {"initval": 0.08},
+    }
+
+    trans2 = _system(
+        synth_csv,
+        tmp_path,
+        user_params={
+            **shared,
+            "subject.log_cl": {"initval": float(np.log10(cl))},
+        },
+    )
+    trans1 = _system(
+        synth_csv,
+        tmp_path,
+        ke_v={"S1", "S2", "S3"},
+        user_params={
+            **shared,
+            "subject.log_ke": {"initval": float(np.log10(cl / v))},
+        },
+    )
+
+    lps = []
+    for system in (trans2, trans1):
+        model = system.build_model()
+        lps.append(
+            float(model.compile_fn(model.observedlogp)(model.initial_point()))
+        )
+
+    assert lps[0] == pytest.approx(lps[1], rel=1e-12)
+
+
+def test_auc_is_spelled_so_it_never_consumes_the_reported_clearance(
+    synth_csv, tmp_path
+):
+    """Given TRANS1, Then AUC still builds and equals dose/CL.
+
+    `auc` written as `dose/cl` raises here, because nothing may consume a
+    reported element and `cl` is one under `ke_v`. Written as `dose/(ke*v)`
+    it is the same number in both parameterizations -- so this asserts the
+    number as well as the build, or it would pass on a spelling that quietly
+    computed something else.
+    """
+    system = _system(synth_csv, tmp_path, ke_v={"S1", "S2", "S3"})
+    subject = system.subject
+    model = system.build_model()
+
+    assert subject.auc.is_derived.all()
+    assert "cl" not in subject.manifest["auc"]
+
+    # ONE pytensor call for all three, which is what makes this an identity
+    # check rather than a comparison of two independent prior draws: the
+    # sampled coordinates are evaluated once and every output reads the same
+    # draw. A random point is the better place to check an identity anyway --
+    # the start point is one the component chose.
+    auc, dose, clearance = (
+        np.atleast_1d(a)
+        for a in pytensor.function(
+            [], [subject.auc.value, subject.dose.value, subject.cl.value]
+        )()
+    )
+    np.testing.assert_allclose(auc, dose / clearance, rtol=1e-12)
+
+
+def test_a_prior_on_a_reported_element_is_dropped_but_says_so(
+    synth_csv, tmp_path, caplog
+):
+    """Given a CL prior in the (ke, V) basis, Then it is dropped WITH a warning.
+
+    The lossy case a parameterization flip has, and the reason the warning
+    exists: a reported element's value is patched in after the model is
+    built, so a potential built against it would penalize a placeholder --
+    the exclusion is structural. Until this warning, the drop was silent, and
+    `subject.S1.cl: {mu, sigma}` is the most natural prior a user of this
+    component writes.
+    """
+    prior = {"subject.S1.cl": {"mu": 2.8, "sigma": 0.3}}
+
+    trans2 = _system(synth_csv, tmp_path, user_params=prior)
+    model = trans2.build_model()
+    assert "gaussian_prior.subject.cl" in {p.name for p in model.potentials}
+
+    caplog.clear()
+    with caplog.at_level(
+        logging.WARNING, logger="exozippy.components.parameter"
+    ):
+        trans1 = _system(synth_csv, tmp_path, ke_v={"S1"}, user_params=prior)
+        model = trans1.build_model()
+
+    assert "gaussian_prior.subject.cl" not in {
+        p.name for p in model.potentials
+    }
+    dropped = [
+        r.getMessage()
+        for r in caplog.records
+        if "DROPPED" in r.getMessage() and "subject.S1.cl" in r.getMessage()
+    ]
+    assert dropped, caplog.text
+    assert "REPORTED" in dropped[0]
+
+
+def test_a_nonmem_trans_number_raises_and_says_which_value_it_means(
+    synth_csv, tmp_path
+):
+    """Given `parameterization: 1`, Then it raises naming 'ke_v'.
+
+    1 is what somebody transcribing a NONMEM control stream writes, and
+    TRANS1 and TRANS2 mean the opposite of each other -- so the one
+    plausible wrong value gets the translation rather than a bare "not a
+    legal value".
+    """
+    cfg = _config(synth_csv, tmp_path)
+    cfg["subject"][0]["parameterization"] = 1
+
+    with pytest.raises(ValueError, match="TRANS1 is 'ke_v'"):
+        System(cfg, user_params={}).prepare()

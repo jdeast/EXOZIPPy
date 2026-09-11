@@ -62,6 +62,62 @@ and truncating one mode away would be a hard bound on a posterior that hugs it
 sets `expects_suppressed_modes = True`, which turns on hot-chain retention
 generically.
 
+## The coordinate choice: NONMEM TRANS1 and TRANS2
+
+NONMEM ships two spellings of this one model and users hold opinions about
+which: **TRANS2** samples `(CL, V)` and derives `ke = CL/V`; **TRANS1** samples
+`(ke, V)` and derives `CL = ke*V`. Same model, different coordinates -- so it
+is a *coordinate choice*: `parameterization: cl_v` (the default) or
+`parameterization: ke_v`, per subject, and a system may mix them.
+
+**It is an enum, not a `fit<coord>` boolean, and `components.md` now says
+why.** That flag vocabulary is explicitly about BOOLEAN flags and had no entry
+for an n-way choice, so `fitke: true` looked like the house style. It is not:
+the house style for an n-way per-instance choice is `band.ld_law` and
+`planet.mass_parameterization` -- an enum whose values name the alternatives.
+Here they name the sampled pair, so a config says what it selects without a
+lookup, and P4's third basis is a new VALUE rather than a second flag that
+would have to be checked against the first. (The design note called for
+`pk_trans:`, reasoning that a coordinate choice is "spelled after the
+coordinate, not as a `fit<x>` toggle"; the first half was right.)
+
+`Subject.COORD_MODE_TABLE` is the whole implementation -- a `mode_manifest`
+table, not a hand-built mask -- and **the interesting half is which role each
+coordinate takes, because both of the interesting roles appear:**
+
+| under `cl_v` (TRANS2) | under `ke_v` (TRANS1) | |
+|---|---|---|
+| `log_cl` sampled | `log_cl` **reported** | |
+| `cl` derived, consumed by `ke` | `cl` **reported** | the likelihood needs only `ka`, `ke`, `V` |
+| `ke` derived, consumed by the model | `ke` derived, from `log_ke` | |
+| `log_ke` **reported** | `log_ke` sampled | |
+
+`cl` under `ke_v` is the textbook case for `reported`: consumed by nothing,
+and still the one quantity a PK table exists to show.
+
+**Three traps, all of them load-bearing:**
+
+1. **`auc` must not be written `dose/cl`.** That is the identity it is, and it
+   raises under `ke_v` -- nothing may consume a reported element, and
+   `System._validate_reported_not_consumed` refuses the manifest. It is
+   written `dose/(ke*v)`, which is the same number and consumes only
+   quantities that are sampled-or-derived in both.
+2. **A mixed system would deadlock a naive wiring.** `cl` is derived from
+   `ke` on the `ke_v` subjects while `ke` is derived from `cl` on the `cl_v`
+   ones, so the per-parameter build order would see `cl -> ke -> cl`. It does
+   not, because a *reported* selection contributes no edge to `graph.py`.
+   That is not a coincidence to be re-derived per component: it is the
+   property the role was designed around (`parameter.md`), and a table whose
+   modes derive a quantity from something the other mode *derives* rather
+   than reports would cycle.
+3. **`t_half`, `tmax`, `cmax` and `auc` stay `derived` and must not be
+   flipped to `reported`,** which the design note said P3 would do. "Nothing
+   consumes it" is the role's description, not its purpose. `reported` is for
+   a coordinate a parameterization *masked out*, and it deliberately carries
+   no potential -- so `subject.S1.t_half: {mu: 8.0, sigma: 0.5}`, the way the
+   literature quotes these, would be silently discarded. As a derived element
+   it becomes a Gaussian on `ke`, which is what the user asked for.
+
 ## What building this found about the core
 
 The point of the exercise. Measured, not speculated.
@@ -73,7 +129,7 @@ any component. Both components were written against `Component` + `Parameter` +
 the manifest vocabulary + the four-file layout, as `components.md` declares,
 and needed no change to the core to build, sample, and report.
 
-Four places where the fit was not frictionless:
+Five places where the fit was not frictionless:
 
 1. **The reporting convention was hardcoded, and it mattered most.** Median +
    68.3% (1-sigma) is astronomy's; pharmacometrics reports 95%. Fixed before
@@ -144,6 +200,20 @@ Four places where the fit was not frictionless:
    time vocabulary, which is the property the split exists to guarantee rather
    than merely intend.
 
+5. **A user constraint on a `reported` element was dropped in silence, and
+   now warns.** `parameter.md` said `inactive` was the one lossy role in a
+   parameterization flip. It is not: `gaussian_prior_mask` excludes reported
+   elements and so does the soft barrier, and *necessarily* -- a reported
+   value is a placeholder until `finalize_deferred` patches it after stage 7,
+   so a potential built in phase 1 would penalize the pre-patch vector. The
+   exclusion is right; the silence was not. `subject.S1.cl: {mu, sigma}` is
+   the single most natural prior a user of this component writes, and under
+   `parameterization: ke_v` it vanished without a word. `build_pymc` now warns for a
+   reported element exactly as it does for an inactive one, keyed on what the
+   user wrote. **This is a shipped astronomy bug too**, reached by
+   `orbit.b.secosw: {mu, sigma}` under `fitvcve` -- found from a field with
+   no stars in it, which is the sort of thing this exercise is for.
+
 Two smaller notes: `utilities/zenodo.fetch_assets` is generic despite its name
 and is reused here for a non-Zenodo URL, but it prints "Downloading ... from
 Zenodo", which is now inaccurate for one caller; and `add_hint` correctly
@@ -169,12 +239,18 @@ CSV.
 
 ## Phases
 
-P0 (reporting width) and P1 (these two components) are done. P2 adds
+P0 (reporting width), P1 (these two components) and P3 (the TRANS1/TRANS2
+coordinate choice, above) are done. P2 -- still open -- adds
 `symbolic_physics.py` so the relaxation engine can accept a half-life where the
-model wants a clearance; P3 adds the NONMEM TRANS1/TRANS2 coordinate choice as
-a per-instance `mode_manifest`, which is where the `reported` element role
-earns its place; P4 adds `population`; P5 does the degeneracy reporting. See
-`README.md` for the table and for which caveat copies each phase owes.
+model wants a clearance. P4 adds `population`; P5 does the degeneracy
+reporting. See `README.md` for the table and for which caveat copies each phase
+owes.
+
+P3 was done before P2 deliberately: they are independent, and P3 is the one
+that tests a documented core contract (the element roles) rather than adding a
+convenience. Note what P2 would change about P3: today a user's `cl` in the
+`ke_v` basis reaches nothing at all, because with no relations the engine cannot
+translate a clearance into a `log_ke` start either.
 
 Tests: `tests/test_pharmacokinetics_physics.py` (the forward model),
 `tests/test_pharmacokinetics_components.py` (config, maps, units, the built

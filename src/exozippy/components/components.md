@@ -98,6 +98,19 @@ spelling.  Before adding a flag, pick its kind and follow that template.
   the searchable quantity mid-name and reads worse at the call site; the ruling is
   intent-named flags, mechanism documented here and in each flag's schema doc.
 
+All three kinds are BOOLEAN.  **A choice with more than two alternatives is not
+a flag and must not be spelled as one** -- which is easy to get wrong, because
+the two-valued case is indistinguishable from a coordinate toggle until a third
+value turns up.  Spell it as an option named after the domain concept, whose
+VALUES name the alternatives: `band.ld_law` (`quadratic`/`linear`),
+`planet.mass_parameterization`, `subject.parameterization` (`cl_v`/`ke_v` --
+the sampled coordinate pair).  The test to apply up front is whether a third
+alternative would be a new value or a second flag: two booleans covering three
+states leave a fourth combination that means nothing and that every reader has
+to be warned about.  `pharmacokinetics` wrote `fitke: true` first and had to
+rename it inside the same phase, as soon as the basis R's `nlme` uses turned
+out to be a third one.
+
 ## Adding a new component
 
 1. Create `src/exozippy/components/<name>/` with the four standard files.

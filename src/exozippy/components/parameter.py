@@ -1876,6 +1876,44 @@ class Parameter:
                     f"component wrote this, it is seeding an element that no "
                     f"longer samples: check the path it pushed."
                 )
+        # A CONSTRAINT ON A REPORTED ELEMENT IS DROPPED TOO, and until this
+        # warning existed nothing said so -- which made `reported` look like
+        # the lossless half of a parameterization flip when it is only the
+        # lossless half for the TABLE.  Section A excludes reported elements
+        # from `gaussian_prior_mask` and section B from the barrier, both
+        # deliberately: a reported element's value is a PLACEHOLDER until
+        # `finalize_deferred` patches it after stage 7, so a potential built
+        # here would penalize the pre-patch vector rather than the quantity it
+        # names.  The exclusion is right; the silence was not.
+        #
+        # Found with the pharmacokinetics TRANS1/TRANS2 flip
+        # (`subject.COORD_MODE_TABLE`), where `subject.S1.cl: {mu, sigma}` --
+        # the single most natural prior a user of that component writes -- is
+        # a live Gaussian under TRANS2 and vanishes without a word under
+        # TRANS1.  It applies identically to `orbit.b.secosw: {mu, sigma}`
+        # under `fitvcve`, which is the shipped case.
+        #
+        # Keyed on `_user_constraint_fields`, so it fires only for something a
+        # user actually wrote, never for a defaults.yaml sigma or the bounds
+        # nearly every parameter carries.  A warning and not an error, for the
+        # reason the inactive case is one: the point of per-element roles is
+        # that one params file survives a parameterization toggle.
+        for i in np.nonzero(is_reported)[0]:
+            fields = self._user_constraint_fields(int(i))
+            if not fields:
+                continue
+            where = f" ({self.source_file})" if self.source_file else ""
+            logger.warning(
+                f"Parameter '{self.get_display_label(int(i))}': your "
+                f"{'/'.join(fields)}{where} is DROPPED -- this element is "
+                f"REPORTED under its instance's parameterization (nothing in "
+                f"the model consumes it, and its value is computed after the "
+                f"model is built), so it carries no prior and no bound. It is "
+                f"still computed and still appears in the tables. Put the "
+                f"constraint on a quantity this instance samples or derives "
+                f"if you meant it to shape the fit."
+            )
+
         self.is_sampled = is_sampled
         self.is_derived = is_derived
         self.is_reported = is_reported
