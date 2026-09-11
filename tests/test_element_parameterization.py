@@ -1342,11 +1342,29 @@ def test_a_derived_vector_reports_its_posterior_in_the_csv(tmp_path):
 
     der_rows = [k for k in rows if "der" in k]
     assert len(der_rows) == 2, rows
-    for key in der_rows:
+    summaries = derived.summary
+    assert len(summaries) == len(der_rows)
+    for i, key in enumerate(der_rows):
         value, up_err, low_err = rows[key]
         assert up_err.strip() and low_err.strip(), (
             f"{key} reported no error bars: {rows[key]}"
         )
+        # Non-empty is not enough (docs/testing.md: covering a code path is
+        # not testing its numbers) -- this was the assertion with the best
+        # chance of catching review 1.11.4, the two transposed error
+        # columns, and it only checked the cells were populated.  Pin the
+        # VALUES against this element's own summary, so the cells carry no
+        # constant of their own; rows are emitted in element-index order,
+        # which is what makes the indexing valid, and rel=2% is the 2-sigfig
+        # rounding the CSV applies.  This posterior happens to be symmetric,
+        # so it does not by itself distinguish the two columns -- the SWAP is
+        # pinned in tests/test_results_csv_error_columns.py.
+        assert float(up_err) == pytest.approx(
+            summaries[i].err_plus, rel=0.02
+        ), rows[key]
+        assert float(low_err) == pytest.approx(
+            summaries[i].err_minus, rel=0.02
+        ), rows[key]
         # 0.5 * the driver's draws, so every element sits well below the
         # 0.5 initval that used to be printed here.
         assert float(value) < 0.4, rows[key]

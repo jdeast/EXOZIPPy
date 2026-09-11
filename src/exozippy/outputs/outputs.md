@@ -23,6 +23,35 @@ Every fit emits `<prefix>_paper.tex` -- a **compilable** aastex draft whose pros
 
 Tests: `tests/test_prose.py` (collector, xref, writer, compile-with-bibliography e2e, ob08092 topology integration), plus the aastex compile leg of `tests/test_latex_macro_xref.py`, which now compiles the fragment inside the real wrapper.
 
+## `<prefix>_results.csv`: the two error columns
+
+The machine-readable table (`outputs/latex.py:build_csv_output`, appended to by
+`outputs/ledger.py:append_ledger_csv`) has exactly two layouts, `CSV_COLUMNS_PLAIN`
+and `CSV_COLUMNS_MODE`, and both end `("up_err", "low_err")` -- **`up_err` is
+err_PLUS**. That is worth a paragraph because it was wrong for two months and
+nothing noticed: `PosteriorSummary.format` returns `(median, err_minus, err_plus)`
+and this function unpacked it as `med, ep, em`, so every asymmetric posterior in
+every results.csv was published with its error bars transposed (review 1.11.4).
+
+Three properties of the surrounding code hid it, and each is a reason to be
+careful here rather than a reassurance:
+
+- The LaTeX table renders through `PosteriorSummary.latex_value`, which reads
+  `self.err_minus`/`self.err_plus` **by name** -- so the paper-facing table was
+  right while the machine-readable one was not, and a reader comparing the two
+  formats was the only way to see it.
+- `append_ledger_csv`'s rejected-seed rows write the same Laplace sigma into both
+  error cells. A symmetric row cannot be transposed, so the file's other writer
+  was immune.
+- Every test of this file asserted the column NAMES or that the cells were
+  non-empty. `docs/testing.md`: covering a code path is not testing its numbers.
+  `tests/test_results_csv_error_columns.py` now pins the NUMBERS, asymmetric, in
+  both layouts, read by column name from the file's own header.
+
+`format` returns a `FormattedSummary` NamedTuple for this reason. It is
+positionally a plain tuple, so nothing had to change to adopt it -- but a new
+call site should say `.err_plus` and be immune.
+
 ## LaTeX macro names
 
 - **Every piece of a generated LaTeX macro name has exactly one implementation, in `outputs/texutils.py`** (`DIGIT_WORDS`, `idx_to_words`, `mode_word`, `mode_suffix`) -- because the name `\<varname><idx><suffix>` is built in *two* modules: `parameter.py` **emits** the `\providecommand`, `outputs/latex.py` **refers** to it from the deluxetable body, and `run.py` reuses `mode_suffix` a third time for the per-mode plot filenames. A drift between emitter and referrer spells a macro that was never defined ("Undefined control sequence" at the end of a long fit) or, worse, one that exists and holds another parameter's value. It lives in `texutils` and not in `parameter.py` because `components -> outputs.texutils` is an existing edge (`latex_escape`) while the reverse would close an import cycle; `outputs/modes.py` re-exports `mode_suffix` so it still reads as a modes concept at its call sites. Note two deliberately different conventions for the same mode `k`: the value macros take `mode_suffix(k)` (`\ezteffmodeone`) while the mode-*weight* macros take the bare `mode_word(k)` (`\ezmodeweightone`), since `\ezmodeweight` is already a mode-specific stem. Both are 1-based labels of a 0-based index, and that `+1` lives in `mode_word` alone. `tests/test_latex_macro_xref.py` pins the cross-reference itself -- every `\ez...` the table cites must be defined by the variable file, checked statically and, where a TeX install exists, by really running `pdflatex` over the macro set.
