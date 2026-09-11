@@ -208,13 +208,76 @@ def _wrapup_interrupt_note(config):
     )
 
 
-# Samplers that cannot honor `maxtime`, and why.  The three external NUTS
-# backends run their whole chain outside Python's per-draw loop -- the JAX
-# ones inside one jitted scan, nutpie inside Rust -- so there is no point at
-# which a wall-clock check could raise the KeyboardInterrupt that the maxtime
-# mechanism turns into a graceful stop.  PyMC agrees and says so out loud:
-# pm.sample RAISES for a `callback` with any `nuts_sampler` but its own.
-MAXTIME_UNSUPPORTED_METHODS = ("numpyro", "blackjax", "nutpie")
+# Every `method:` value _run_fit dispatches on, in the order the dispatch
+# tests them.  This is the universe METHOD_ONLY_SAMPLER_KEYS is scored
+# against, so a new sampler branch belongs here in the same edit.
+SAMPLER_METHODS = (
+    "nuts",
+    "numpyro",
+    "blackjax",
+    "nutpie",
+    "nested",
+    "ptde",
+    "ptde_async",
+    "demc",
+    "demcz",
+)
+
+# The three families the dispatch really has.  Named once, because the
+# method-only table below is mostly these three tuples and a per-family knob
+# that silently grew a second consumer is the 2.4.2 defect arriving from the
+# other direction.
+_HMC_METHODS = ("nuts", "numpyro", "blackjax", "nutpie")
+_JAX_METHODS = ("numpyro", "blackjax")
+_PTDE_METHODS = ("ptde", "ptde_async")
+_DE_METHODS = ("demc", "demcz")
+# Every method that draws a fixed-length MCMC chain, i.e. everything but
+# nested sampling, whose length is set by its own stopping rule.
+_CHAIN_METHODS = tuple(m for m in SAMPLER_METHODS if m != "nested")
+
+
+def _effective_sampler_branch(method):
+    """The branch `_run_fit` will actually take for ``method``.
+
+    An unrecognized `method:` value falls through to the nuts branch and
+    always has (samplers.md), so it must be scored as `nuts` here: warning
+    that `chains` is IGNORED under `method: nutts` would be FALSE, since the
+    branch that runs does consume it.  A warning that cries wolf is the exact
+    failure this whole mechanism exists to avoid.
+    """
+    return method if method in SAMPLER_METHODS else "nuts"
+
+
+# Samplers that cannot honor `maxtime`, and why -- one reason each, because
+# they are not the same reason.  The three external NUTS backends run their
+# whole chain outside Python's per-draw loop (the JAX ones inside one jitted
+# scan, nutpie inside Rust), so there is no point at which a wall-clock check
+# could raise the KeyboardInterrupt that the maxtime mechanism turns into a
+# graceful stop; PyMC agrees and says so out loud, since pm.sample RAISES for
+# a `callback` with any `nuts_sampler` but its own.  `nested` is here for a
+# different reason: nested_sample takes an iteration cap (`maxiter`) and no
+# wall clock at all, and run.py forwards neither -- found while re-verifying
+# review 2.3.6's consumer table, and silent until then.
+_MAXTIME_UNSUPPORTED_REASONS = {
+    "numpyro": (
+        "external NUTS samplers run the chain outside Python's per-draw "
+        "loop and invoke no callback, so there is nothing to interrupt"
+    ),
+    "blackjax": (
+        "external NUTS samplers run the chain outside Python's per-draw "
+        "loop and invoke no callback, so there is nothing to interrupt"
+    ),
+    "nutpie": (
+        "external NUTS samplers run the chain outside Python's per-draw "
+        "loop and invoke no callback, so there is nothing to interrupt"
+    ),
+    "nested": (
+        "nested sampling stops on its own evidence criterion and takes no "
+        "wall-clock cap (nested_sample has maxiter, which run.py does not "
+        "forward)"
+    ),
+}
+MAXTIME_UNSUPPORTED_METHODS = tuple(_MAXTIME_UNSUPPORTED_REASONS)
 
 
 def warn_maxtime_unsupported(method, maxtime):
@@ -224,37 +287,113 @@ def warn_maxtime_unsupported(method, maxtime):
     whole point of `maxtime` is that a scheduler-bound job stops itself
     before the queue kills it, so a user who sets it and gets nothing has no
     partial trace AND no idea why.  demc already warns for exactly this
-    reason (PyMC's population path discards per-draw callbacks); these three
-    were the remaining silent ones.
+    reason (PyMC's population path discards per-draw callbacks); these were
+    the remaining silent ones.
 
     Returns True when a warning was emitted, so the check is exercisable
     without running a fit -- same shape as ``warn_unknown_sampler_keys``.
     """
-    if maxtime is None or method not in MAXTIME_UNSUPPORTED_METHODS:
+    reason = _MAXTIME_UNSUPPORTED_REASONS.get(method)
+    if maxtime is None or reason is None:
         return False
     logger.warning(
-        f"{method}: maxtime={float(maxtime):.0f}s is IGNORED -- external NUTS "
-        f"samplers run the chain outside Python's per-draw loop and invoke no "
-        f"callback, so there is nothing to interrupt. Use method: nuts, "
-        f"ptde_async or demcz for a wall-clock cap."
+        f"{method}: maxtime={float(maxtime):.0f}s is IGNORED -- {reason}. "
+        f"Use method: nuts, ptde_async or demcz for a wall-clock cap."
     )
     return True
 
 
-# Sampler keys that only ONE method consumes.  A key here is silently inert
-# under any other method: it is in KNOWN_SAMPLER_KEYS, so warn_unknown_sampler_keys
+# Sampler keys only SOME methods consume.  A key here is silently inert under
+# every other method: it is in KNOWN_SAMPLER_KEYS, so warn_unknown_sampler_keys
 # says nothing, and the branch that would read it is never taken.
 #
-# That is the whole defect (review 2.4.2).  store_hot_chains is forwarded only
-# to ptde_async, so under method: ptde the hot-chain mode discovery simply
-# never runs and the user is told nothing; rung_thin_factor / rung_thin_start
-# are the same thing mirrored -- ptde-only, silently ignored by ptde_async.
+# That is the whole defect (reviews 2.4.2 and 2.3.6).  2.4.2 landed the
+# mechanism for the three keys it had traced -- store_hot_chains is forwarded
+# only to ptde_async, so under method: ptde the hot-chain mode discovery
+# simply never runs and the user is told nothing; rung_thin_factor /
+# rung_thin_start are the same thing mirrored, ptde-only and silently ignored
+# by ptde_async.  2.3.6 is that finding on the full list: at least a dozen
+# more keys are read by exactly one branch or family.
 #
-# Values are the methods that DO consume the key.
+# THE HEADLINE IS `chains`.  It is forwarded to the HMC branches and to demc /
+# demcz and to nothing else, so under method: ptde / ptde_async -- the
+# recommended default for every microlensing fit -- a user's
+# `sampler: {chains: 16}` was silently ignored, and those samplers size their
+# population from the parameter count instead (_common.resolve_n_chains).
+# Measured on examples/kelt4 RV-only, 2026-09-11: `chains: 5` gave 5 chains
+# under method: nuts and 30 under method: ptde.  It is the single most likely
+# spelling of "give me more chains", and the PTDE spelling is `n_chains`.
+#
+# Values are the methods that DO consume the key.  Deliberately NOT in this
+# table, and each for the same reason -- the warning would be false:
+#
+#   * `cores` -- not passed to sample_jax_nuts, but it governs the seed
+#     polish and the post-hoc lp fill on EVERY path, so it is never inert;
+#   * `min_ess` / `max_rhat` -- the PTDE samplers' early stop, but also the
+#     convergence-report thresholds every path prints;
+#   * `maxtime` -- has its own channel (warn_maxtime_unsupported above),
+#     which names the per-sampler reason rather than a consumer list;
+#   * `seed`, `nthin`, `measure_scales`, `profile`, `recompute_trace`,
+#     `seed_polish`, `method` -- read on every path.
 METHOD_ONLY_SAMPLER_KEYS = {
+    # Chain geometry.  `chains` is the headline above; tune/draws are the
+    # same shape against `nested`, whose length comes from its own stopping
+    # rule and whose posterior group is a fixed-size equal-weight resample.
+    "chains": _HMC_METHODS + _DE_METHODS,
+    "tune": _CHAIN_METHODS,
+    "draws": _CHAIN_METHODS,
+    # Hamiltonian step size adaptation: no gradient-free sampler has a
+    # target acceptance to aim at.
+    "target_accept": _HMC_METHODS,
+    # pymc.sampling.jax.sample_jax_nuts only.
+    "chain_method": _JAX_METHODS,
+    "jitter": _JAX_METHODS,
+    # samplers/nested.py only.
+    "nested_backend": ("nested",),
+    "nlive": ("nested",),
+    "dlogz": ("nested",),
+    "walks": ("nested",),
+    "checkpoint_dir": ("nested",),
+    # The parallel-tempered DE family.
+    "n_temps": _PTDE_METHODS,
+    "T_max": _PTDE_METHODS,
+    "n_chains": _PTDE_METHODS,
+    "adapt_ladder": _PTDE_METHODS,
+    "de_mode_hop": _PTDE_METHODS,
+    "eval_timeout": _PTDE_METHODS,
+    "swap_schedule": _PTDE_METHODS,
+    "collect_rung_timing": _PTDE_METHODS,
+    # ... and the two documented asymmetries inside it.
     "store_hot_chains": ("ptde_async",),
     "rung_thin_factor": ("ptde",),
     "rung_thin_start": ("ptde",),
+    # run.py forwards `init` to the plain-NUTS branch and to nothing else.
+    # Whether pymc then HONORS it there is a separate question with a
+    # separate answer -- it does not, because that branch passes an explicit
+    # step -- and review 5.3.3(a) deletes the key for exactly that reason.
+    "init": ("nuts",),
+}
+
+# The other half of the vocabulary: keys every path reads, whatever `method:`
+# selects.  Together with METHOD_ONLY_SAMPLER_KEYS this PARTITIONS
+# KNOWN_SAMPLER_KEYS, and tests/test_method_only_sampler_keys.py asserts the
+# partition in both directions -- so a key cannot join the vocabulary without
+# a ruling on whether some method silently ignores it, which is how a dozen
+# came to be silent (2.3.6).  The four entries here whose honoring is PARTIAL
+# rather than universal carry their reason in the comment above
+# METHOD_ONLY_SAMPLER_KEYS; they are here because on no path are they inert.
+ALL_METHOD_SAMPLER_KEYS = {
+    "method",
+    "cores",
+    "seed",
+    "seed_polish",
+    "nthin",
+    "measure_scales",
+    "profile",
+    "recompute_trace",
+    "min_ess",
+    "max_rhat",
+    "maxtime",
 }
 
 
@@ -269,18 +408,31 @@ def warn_method_only_sampler_keys(sampler_cfg, method):
     does not live beside warn_unknown_sampler_keys, which runs early enough
     that `method` may still be None (auto-selection has not happened yet).
 
+    The message names whichever side of the split is SHORTER -- the consumers
+    for a key one family owns, the non-consumers for a key only `nested`
+    ignores -- because "only nuts / numpyro / blackjax / nutpie / ptde /
+    ptde_async / demc / demcz consume it" is a list a reader has to diff by
+    hand to find the one method that matters.
+
     Returns the sorted list of (key, method) pairs warned about, so the check
     is exercisable without running a fit -- same shape as its two siblings.
     """
+    branch = _effective_sampler_branch(method)
     warned = []
     for key, consumers in sorted(METHOD_ONLY_SAMPLER_KEYS.items()):
-        if key not in sampler_cfg or method in consumers:
+        if key not in sampler_cfg or branch in consumers:
             continue
         warned.append((key, method))
+        ignored_by = tuple(m for m in SAMPLER_METHODS if m not in consumers)
+        if len(consumers) <= len(ignored_by):
+            detail = f"only {' / '.join(consumers)} consume(s) it"
+            remedy = f"switch method to one of: {', '.join(consumers)}"
+        else:
+            detail = f"every method except {' / '.join(ignored_by)} reads it"
+            remedy = f"switch method away from: {', '.join(ignored_by)}"
         logger.warning(
-            f"{method}: sampler key '{key}' is IGNORED -- only "
-            f"{' / '.join(consumers)} consume(s) it. Remove it, or switch "
-            f"method to one of: {', '.join(consumers)}."
+            f"{method}: sampler key '{key}' is IGNORED -- {detail}. "
+            f"Remove it, or {remedy}."
         )
     return warned
 

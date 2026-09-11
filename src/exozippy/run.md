@@ -72,7 +72,7 @@ The seed is a COMMENT in the params file, not a key: that file is parameter over
 
 The stamp also records the code that produced the draws -- `exozippy_version` plus, when running from a checkout, `exozippy_git_commit` / `exozippy_git_describe` / `exozippy_git_dirty` (dirty = uncommitted *tracked* changes; untracked example data and notes are ignored or every run would flag) -- and a `StaleTraceError` quotes them and prints the `git worktree add <commit>` + `poetry install` lines that recreate that code. This is **diagnostic only: nothing ever compares versions**. A version or commit difference never raises, so newer code with a structurally unchanged model still reuses its trace; only the structural hash decides staleness. Traces stamped from an installed wheel say the source cannot be checked out; traces predating the metadata say so plainly rather than printing a git command with a missing commit. Tests: `tests/test_trace_staleness.py`.
 
-## A sampler key only one method consumes must say so (review 2.4.2)
+## A sampler key some method ignores must say so (reviews 2.4.2, 2.3.6)
 
 `store_hot_chains` is forwarded only to `ptde_async`; `rung_thin_factor` and
 `rung_thin_start` only to `ptde`. All three are in `KNOWN_SAMPLER_KEYS`, so
@@ -82,10 +82,48 @@ hot-chain mode discovery never ran and nothing said so.
 
 `METHOD_ONLY_SAMPLER_KEYS` maps each such key to the methods that DO consume
 it, and `warn_method_only_sampler_keys` reports the mismatch. Two deliberate
-properties: it warns only for keys the user EXPLICITLY set (all three have
+properties: it warns only for keys the user EXPLICITLY set (they all have
 defaults, and warning about a default nobody wrote would fire every run and
 teach people to ignore the log), and it is called AFTER `method` is resolved
 and lowercased -- not beside `warn_unknown_sampler_keys`, which runs early
 enough that `method` may still be None because auto-selection has not happened.
-Add a key to the table in the same commit that makes it method-specific.
-Tests: `tests/test_method_only_sampler_keys.py`.
+
+**2.4.2 landed the mechanism for three keys; there were more than twenty.** `chains`
+is the one that mattered: run.py forwards it to the HMC branches and to
+`demc`/`demcz` and to nothing else, so under `method: ptde`/`ptde_async` --
+the recommended default for every microlensing fit -- a user's
+`sampler: {chains: 16}` did nothing at all, and those samplers sized their
+population from the parameter count instead (`_common.resolve_n_chains`; the
+PTDE spelling is `n_chains`). Measured end to end on `examples/kelt4` RV-only,
+2026-09-11: `chains: 5` gave **5** chains under `method: nuts` and **30**
+under `method: ptde`. It is the single most likely spelling of "give me more
+chains".
+
+**What keeps it fixed is the partition, not the list.** `KNOWN_SAMPLER_KEYS`
+is now exactly `METHOD_ONLY_SAMPLER_KEYS` plus `ALL_METHOD_SAMPLER_KEYS`, with
+no overlap, and `tests/test_method_only_sampler_keys.py` asserts that in both
+directions. The defect was never any one key -- it was that a key could join
+the vocabulary with nobody ruling on whether some method silently ignores it.
+A new `sampler:` key now fails that test until it is classified.
+
+Four keys sit in `ALL_METHOD_SAMPLER_KEYS` despite being only PARTIALLY
+honored, because on no path are they inert and a warning would therefore be
+false: `cores` (not passed to `sample_jax_nuts`, but it governs the seed polish
+and the post-hoc `lp` fill everywhere), `min_ess`/`max_rhat` (the PTDE early
+stop, but also the convergence-report thresholds every path prints), and
+`maxtime`, which keeps its own channel -- `warn_maxtime_unsupported` names a
+per-sampler REASON rather than a consumer list. That channel gained `nested`
+while this table was being re-verified: nested sampling stops on its own
+evidence criterion and `nested_sample` takes an iteration cap and no wall
+clock, so `maxtime` under `nested` had been silent too.
+
+Two properties of the scoring, each a way the generalized table could have
+started lying. An unrecognized `method:` value falls through to the nuts branch
+(`samplers.md`), so `_effective_sampler_branch` scores it as `nuts` --
+otherwise `method: nutts` would be told `chains` is ignored by the very branch
+that reads it. And the message names whichever side of the split is SHORTER,
+so `draws` under `nested` reads "every method except nested reads it" instead
+of listing the eight that do.
+
+Add a key to whichever table applies in the same commit that adds it to the
+vocabulary. Tests: `tests/test_method_only_sampler_keys.py`.
