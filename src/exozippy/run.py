@@ -1134,10 +1134,18 @@ def _run_fit(config, gui, user_params=None):
         hot_status=hot_status,
     )
 
+    # Wrapped and announced like every other wrap-up step (review 2.3.12).
+    # It was the one bare call left between two guarded stages, and it is a
+    # write plus an az.summary: measured on the kelt4 RV-only example, an
+    # OSError raised here took out the trace plots, the corner plot, the
+    # compiled paper.pdf AND the restart file -- every artifact after it --
+    # and returned a non-zero exit for a fit that had finished sampling.
+    wrapup.stage("convergence summary")
     summary_path = Path(str(prefix) + "_summary.txt")
-    summary_path.write_text(
-        _format_summary(idata, burn_diag), encoding="utf-8"
-    )
+    with nonfatal_wrapup("convergence summary"):
+        summary_path.write_text(
+            _format_summary(idata, burn_diag), encoding="utf-8"
+        )
 
     # Every plot below is wrapped, and per COMPONENT rather than per loop, so
     # one component's broken diagnostic costs its own figure and nothing else

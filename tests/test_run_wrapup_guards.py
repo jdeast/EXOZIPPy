@@ -36,6 +36,12 @@ GUARDED_WRAPUP_CALLS = (
     "plot_corner",
     "save_multipage_trace",
     "get_draws",
+    # The convergence-summary write (review 2.3.12).  It was the one bare
+    # call left between two guarded stages, and it is a disk write plus an
+    # az.summary: measured on the kelt4 RV-only example, an OSError raised
+    # here cost the trace plots, the corner plot, the compiled paper.pdf
+    # AND the restart file -- every artifact after it.
+    "_format_summary",
 )
 
 
@@ -263,6 +269,56 @@ def test_wrapup_stage_lines_carry_elapsed_time_and_the_stage(caplog):
     assert "Wrap-up (t+" in caplog.text
     assert "hot-chain suppressed-mode search" in caplog.text
     assert "Wrap-up complete in" in caplog.text
+
+
+def _wrapup_stage_labels(func_name="_run_fit"):
+    """Every literal label passed to ``wrapup.stage(...)`` in ``func``."""
+    tree = ast.parse(Path(inspect.getfile(run_module)).read_text())
+    func = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == func_name
+    )
+    labels = []
+    for node in ast.walk(func):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "stage"
+            and getattr(node.func.value, "id", None) == "wrapup"
+            and node.args
+        ):
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                labels.append(arg.value)
+            else:
+                # an f-string / concatenation: keep its literal pieces
+                labels.extend(
+                    piece.value
+                    for piece in ast.walk(arg)
+                    if isinstance(piece, ast.Constant)
+                    and isinstance(piece.value, str)
+                )
+    return labels
+
+
+def test_the_convergence_summary_announces_itself():
+    """
+    Given _run_fit's wrap-up,
+    When its wrapup.stage labels are read out of the source,
+    Then the convergence summary has one.
+
+    Every neighbouring stage got a stage line in PR #214 and this write did
+    not, so the log jumped from "mode identification" to "corner plots"
+    across a step that does its own az.summary (review 2.3.12).  Read from
+    the source for the reason the whole file gives: reaching this line for
+    real costs a full sample-plus-wrap-up, and what the item is about is
+    which calls are announced and guarded.
+    """
+    labels = _wrapup_stage_labels()
+
+    assert labels, "no wrapup.stage calls found in _run_fit"
+    assert any("convergence summary" in label for label in labels), labels
 
 
 def test_an_interrupt_during_wrapup_says_what_survived(caplog, monkeypatch):
