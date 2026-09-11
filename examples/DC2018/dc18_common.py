@@ -174,17 +174,51 @@ def read_results_csv(csv_path):
     """Parse an EXOZIPPy *_results.csv into {param: (value, up, low)}.
 
     Handles both the single-solution header (# parname, value, up_err,
-    low_err) and the multimodal one (# parname, mode, weight, value, up_err,
-    low_err), preferring the combined 'all' mode. Also returns the
-    per-instrument err_scale rows as a second dict.
+    low_err) and the multimodal one (# parname, mode, weight, weight_err,
+    value, up_err, low_err), preferring the combined 'all' mode. Also
+    returns the per-instrument err_scale rows as a second dict.
+
+    THE FIELD LIST IS READ FROM THE HEADER, not hardcoded, and that is the
+    point.  The multimodal branch used to hardcode SIX names and omit
+    `weight_err`, so every column after `weight` shifted by one: `value`
+    picked up the (usually EMPTY) weight_err cell and became None, `up_err`
+    picked up the value.  The comparison table then reported an EMPTY
+    exozippy column for every multimodal event while exiting non-zero with
+    no explanation -- and multimodal is the NORM for microlensing, because
+    the +/-u_0 degeneracy is always there.  Measured on DC2018 events 152,
+    194 and 223: all three fitted, all three wrote results.csv, all three
+    compared to nothing.  Parsing the header keeps this fixed if the writer
+    gains another column.
     """
     with open(csv_path, newline="") as f:
         first = f.readline()
         has_mode = "mode" in first
+        hdr = [c.strip() for c in first.lstrip("#").split(",") if c.strip()]
+        known = {
+            "parname",
+            "mode",
+            "weight",
+            "weight_err",
+            "value",
+            "up_err",
+            "low_err",
+        }
         fields = (
-            ["parname", "mode", "weight", "value", "up_err", "low_err"]
-            if has_mode
-            else ["parname", "value", "up_err", "low_err"]
+            hdr
+            if hdr and set(hdr) <= known and "parname" in hdr
+            else (
+                [
+                    "parname",
+                    "mode",
+                    "weight",
+                    "weight_err",
+                    "value",
+                    "up_err",
+                    "low_err",
+                ]
+                if "mode" in first
+                else ["parname", "value", "up_err", "low_err"]
+            )
         )
         reader = csv.DictReader(f, fieldnames=fields)
         rows = []
