@@ -12,9 +12,6 @@ star.BulgeTarget.dec:
 star.BulgeTarget.mass:
   initval: 0.5
   #sigma: 0.1
-star.BulgeTarget.logmass:
-  initval: -0.3
-  #sigma: 0.1
 star.BulgeTarget.distance:
   initval: 8000.0
   lower: 1

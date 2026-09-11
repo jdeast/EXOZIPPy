@@ -86,18 +86,18 @@
   ]
  },
  "terms": {
-  "POT:galacticmodel.imf_prior": -1.0563830076582732,
+  "POT:galacticmodel.imf_prior": -1.0563830404868038,
   "POT:galacticmodel.kinematic_prior": 16.669804756459484,
   "POT:gaussian_prior.lens.xalpha": -0.14808517301701055,
   "POT:gaussian_prior.lens.yalpha": -0.351914826982989,
-  "POT:gaussian_prior.mulensinstrument.zeropoint": -351.5352854951793,
+  "POT:gaussian_prior.mulensinstrument.zeropoint": -351.5351963151095,
   "POT:logit_uniform_prior.band.u1": -2.0596389143836564,
   "POT:logit_uniform_prior.lens.log_s": -1.3866884376580078,
   "POT:logit_uniform_prior.lens.xalpha": -1.386323978593087,
   "POT:logit_uniform_prior.lens.yalpha": -1.3863647465622844,
   "POT:logit_uniform_prior.mulensinstrument.err_scale": -41.44653767388982,
-  "POT:logit_uniform_prior.mulensinstrument.log_f_total": -6.033554305274755,
-  "POT:logit_uniform_prior.mulensinstrument.q_source": -9.189945459687568,
+  "POT:logit_uniform_prior.mulensinstrument.log_f_total": -6.033554306691813,
+  "POT:logit_uniform_prior.mulensinstrument.q_source": -9.189944508779835,
   "POT:logit_uniform_prior.planet.log_q": -1.400487547991379,
   "POT:logit_uniform_prior.sed.errscale": -6.909754279648304,
   "POT:logit_uniform_prior.source.t_0": -2.427210820458976,
@@ -125,7 +125,7 @@
   "POT:low_bound.mulensevent.t_E": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.theta_E": -9.85967654375977e-305,
   "POT:low_bound.mulensinstrument.f_blend": -2.957902963127931e-304,
-  "POT:low_bound.mulensinstrument.f_source": -2.0794415215324897,
+  "POT:low_bound.mulensinstrument.f_source": -2.0794415215324826,
   "POT:low_bound.planet.mass": -9.85967654375977e-305,
   "POT:low_bound.star.loggsed": -1.971935308751954e-304,
   "POT:mulensevent.event_rate_prior": 1.8777491416736636,
@@ -157,7 +157,7 @@
   "RV:lens.yalpha_raw": -0.9189385332046727,
   "RV:mulensinstrument.err_scale_raw": -2.756815599614018,
   "RV:mulensinstrument.log_f_total_raw": -2.756815599614018,
-  "RV:mulensinstrument.model": 44764.829965810604,
+  "RV:mulensinstrument.model": 44764.823754898265,
   "RV:mulensinstrument.q_source_raw": -2.756815599614018,
   "RV:planet.log_q_raw": -0.9189385332046727,
   "RV:sed.errscale_raw": -0.9189385332046727,
@@ -174,5 +174,5 @@
   "RV:star.teff_raw": -0.9189385332046727,
   "RV:star.teffsed_raw": -1.8378770664093453
  },
- "total_logp": 44310.97164900999
+ "total_logp": 44310.96552819448
 }

@@ -24,8 +24,8 @@ lens.Companion.s:
 lens.Companion.alpha:
     initval: 57.02894037839297
 
-source.Source.rho:
-    initval: 1.1022118088011409e-08
+# rho is not seeded: it is derived from the source radius below, which is
+# what this file pins.
 
 # q = M_companion / M_primary.  EXOZIPPy's relaxation engine propagates
 # this through the symbolic relation  q * M_primary = M_companion
