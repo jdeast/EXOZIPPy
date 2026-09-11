@@ -366,7 +366,7 @@ subject:
     unit: ""
     internal_unit: ""
     latex: "\\eta_{(CL/F)}"
-    description: "Between-subject deviation in log (CL/F), in units of omega"
+    description: "Between-subject deviation in log clearance, in units of omega"
 
   eta_v:
     initval: 0.0
@@ -380,7 +380,7 @@ subject:
     unit: ""
     internal_unit: ""
     latex: "\\eta_{(V/F)}"
-    description: "Between-subject deviation in log (V/F), in units of omega"
+    description: "Between-subject deviation in log volume, in units of omega"
 
   eta_ka:
     initval: 0.0
@@ -394,7 +394,7 @@ subject:
     unit: ""
     internal_unit: ""
     latex: "\\eta_{k_a}"
-    description: "Between-subject deviation in log k_a, in units of omega"
+    description: "Between-subject deviation in log absorption rate, in units of omega"
 
   eta_ke:
     initval: 0.0
@@ -408,7 +408,7 @@ subject:
     unit: ""
     internal_unit: ""
     latex: "\\eta_{k_e}"
-    description: "Between-subject deviation in log k_e, in units of omega"
+    description: "Between-subject deviation in log elimination rate, in units of omega"
 
   weight:
     # Body weight, the covariate.  Declared only when a `population:` block
