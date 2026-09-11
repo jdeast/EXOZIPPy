@@ -313,9 +313,10 @@ def test_pymc_still_ignores_init_when_a_step_is_passed():
     Then it still states that `init` is ignored for a manually passed step.
 
     This is the upstream fact the whole item rests on, pinned rather than
-    quoted: if a future pymc starts honoring `init` alongside an explicit
-    step, `init=init` stops being inert and could overwrite the model's
-    initial point (see review 5.3.3).
+    quoted.  Review 5.3.3a has since deleted the `init` key entirely, so
+    nothing passes one today -- which makes the explicit `step` the only
+    thing left holding that door shut, and this the test that notices if
+    pymc's contract around it changes.
     """
     doc = pm.sample.__doc__ or ""
 

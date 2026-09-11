@@ -1306,16 +1306,19 @@ def _run_fit(config, gui, user_params=None):
                 # the re-centering runs before that guard and so is
                 # independent of the flag.
                 #
-                # With an explicit `step` pm.sample would ignore `init`
-                # anyway -- pymc 6.3.2's own docstring says so verbatim:
-                # "This argument is ignored when manually passing the NUTS
-                # step method" -- and the explicit step is KEPT for the
-                # reason 1.3.6 kept it: `initvals`' docstring entry reads
-                # "Initialization methods for NUTS (see ``init`` keyword) can
-                # overwrite the default", so a live `init` could let an
-                # adapt_diag jitter move the chain off the polished point,
-                # the exact pathology seed_polish exists to prevent.  With
-                # the step passed, `Model.initial_point()` is authoritative.
+                # The explicit `step` is KEPT, and after review 5.3.3 deleted
+                # the dead `init` key that is the only thing still holding
+                # the door shut.  pymc's own docstring says of `init`, "This
+                # argument is ignored when manually passing the NUTS step
+                # method", and of `initvals`, "Initialization methods for
+                # NUTS (see ``init`` keyword) can overwrite the default" --
+                # so a LIVE `init` (this branch passing one, or a future pymc
+                # honoring it alongside a step) could let an adapt_diag
+                # jitter move the chain off the polished point, the exact
+                # pathology seed_polish exists to prevent.  Passing no start
+                # and no init, with the step explicit, is what makes
+                # `Model.initial_point()` authoritative.  The upstream half
+                # of that is pinned in tests/test_nuts_start.py.
                 #
                 # pm.NUTS(target_accept=) with no scaling/potential builds a
                 # QuadPotentialDiagAdapt IDENTITY metric on raw -- the right
