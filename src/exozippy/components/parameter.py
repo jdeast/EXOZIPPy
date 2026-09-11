@@ -49,6 +49,32 @@ class SeedBoundViolation(Exception):
 
 Number = Union[int, float, np.floating]
 
+
+def derived_constraint_message(field, sources=None):
+    """Say that ``field`` cannot constrain a derived value, and what can.
+
+    ONE WORDING, TWO CALLERS.  ``build_pymc`` says this for ``sigma: 0``
+    (a pin on a value that IS an expression cannot pin anything) and
+    ``diagnostics.ModelAuditor.check_user_starts`` says it for ``initval``
+    -- the field that silently moved a derived ``planet.mass`` by 1047x
+    while the report called it "approximate" (review 2.3.17).  The rule is
+    the same in both places and the sentence is deliberately not
+    paraphrased: two spellings of one rule is how these drift.
+
+    ``sources``, when the caller can name them, are the SAMPLED parameters
+    the value is computed from -- the only things that can move it.  With
+    none the message names the class instead, which is what the sigma
+    warning has always done.
+    """
+    remedy = (
+        "To hold it constant, you must fix the corresponding sampled "
+        "parameter(s)"
+    )
+    if sources:
+        remedy += " it is derived from: " + ", ".join(sources)
+    return f"{field} has no effect on a derived parameter. {remedy}."
+
+
 # Section C of build_pymc adds +0.5*raw**2 to exactly cancel the -0.5*raw**2
 # the built-in pm.Normal(0,1) prior contributes for every logit-transformed
 # raw element.  Both are real (not symbolically fused) floating-point terms,
@@ -1782,11 +1808,14 @@ class Parameter:
             else:
                 scales[i] = 1.0
 
-        # Warn if user tried to fix a derived parameter — sigma=0 has no effect on derived params.
+        # Warn if user tried to fix a derived parameter -- sigma=0 has no
+        # effect on derived params.  The sentence lives in
+        # `derived_constraint_message` because check_user_starts says the
+        # same thing about `initval` (review 2.3.17).
         if np.any(is_derived & (sigmas == 0)):
             logger.warning(
-                f"Parameter '{self.label}': sigma=0 has no effect on a derived parameter "
-                f"To hold it constant, you must fix the corresponding sampled parameter(s)."
+                f"Parameter '{self.label}': "
+                + derived_constraint_message("sigma=0")
             )
         # A CONSTRAINT ON AN INACTIVE ELEMENT IS DROPPED, so say so.  This is
         # the one genuinely lossy case in a parameterization switch: a prior or

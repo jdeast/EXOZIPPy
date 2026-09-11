@@ -163,8 +163,9 @@ def _apply_existing_constraints(entry, existing_entry):
     # do: dropping it silently re-stiffens a barrier the user deliberately
     # widened.  NOTE this only reaches parameters mkparam emits at all; a
     # DERIVED parameter (star.loggsed, the one place bound_scale is
-    # load-bearing today) gets no entry, so a bound_scale on one is still
-    # lost on the round trip.  See examples/gj1214/gj1214.params.yaml.
+    # load-bearing today) is not one of them, and gets its constraints
+    # carried by the pass-through loop at the end of `write_param_file`
+    # instead -- see `_CONSTRAINT_FIELDS` there, and review 2.3.13.
     for constraint_key in ("mu", "sigma", "lower", "upper", "bound_scale"):
         if constraint_key in existing_entry:
             entry[constraint_key] = existing_entry[constraint_key]
@@ -911,8 +912,16 @@ def write_param_file(
         # Sorted: the body deletes the x/y entries and inserts the angle in
         # their place, so a hash-ordered set intersection would shuffle the
         # written params file's key order from run to run.
-        for prefix in sorted(set(_x_keys) & set(_y_keys)):
-            x_key, y_key = _x_keys[prefix], _y_keys[prefix]
+        #
+        # `pair_prefix` is the PARAMETER-NAME stem the pair shares -- "lens",
+        # "orbit.b" -- and is emphatically not the run `prefix` bound at the
+        # top of this function from `config["prefix"]`.  It used to be spelled
+        # `prefix` and so shadowed it (review 2.3.8); nothing below the loop
+        # read the outer name, so the bug was latent rather than live, but any
+        # future line down there would have silently got "lens" where it
+        # wanted "fitresults/model".
+        for pair_prefix in sorted(set(_x_keys) & set(_y_keys)):
+            x_key, y_key = _x_keys[pair_prefix], _y_keys[pair_prefix]
             xv, yv = output[x_key]["initval"], output[y_key]["initval"]
             # initval may be a scalar (single-seed) or a length-K list
             # (multi-seed): convert every seed's (x, y) to its own angle.
@@ -934,18 +943,41 @@ def write_param_file(
             # this the pass-through loop below would overwrite the fresh MAP
             # angle with the stale entry, breaking the restart contract.
             comp_key, idx, name = key_context.get(
-                x_key, (prefix.split(".", 1)[0], 0, None)
+                x_key, (pair_prefix.split(".", 1)[0], 0, None)
             )
             existing_key, existing_entry = _find_existing(
                 existing_params, comp_key, idx, name, angle_name
             )
             if existing_key:
                 consumed_existing.add(existing_key)
-            output[f"{prefix}.{angle_name}"] = _apply_existing_constraints(
-                angle_entry, existing_entry
+            output[f"{pair_prefix}.{angle_name}"] = (
+                _apply_existing_constraints(angle_entry, existing_entry)
             )
 
-    _CONSTRAINT_FIELDS = {"sigma", "upper", "lower"}
+    # config.PHYSICS_KEYS minus `mu`: the fields whose presence makes an
+    # entry worth keeping even though the trace says nothing about it.  `mu`
+    # is left out deliberately -- a center with no width is not a prior, and
+    # `config.validate_sigma_has_center` guards the reverse spelling -- so
+    # this is not simply PHYSICS_KEYS and must not be replaced by it.
+    #
+    # `bound_scale` is here for the same reason `lower`/`upper` are: it is a
+    # soft bound's transition width, a real posterior term the user stated,
+    # and dropping it silently re-stiffens a barrier they deliberately
+    # widened.  Review 2.3.13 is what its omission cost, and the reason it
+    # cost anything is that a DERIVED parameter never appears in
+    # `sampled_vars`: it is never consumed above, so this loop is its only
+    # path into the output file -- and a derived element is exactly where
+    # `Parameter.build_pymc` puts a barrier for `bound_scale` to tune.
+    # `examples/gj1214`'s `star.A.loggsed: {bound_scale: 25.0}` -- the one
+    # place bound_scale is load-bearing today -- therefore had no path at
+    # all, and had to be re-added by hand after every restart-file cycle.
+    #
+    # What this deliberately does NOT do is start writing derived parameters
+    # a START VALUE.  Nothing here reads the trace: the entry is passed
+    # through VERBATIM from the file the user wrote, so a derived parameter
+    # gets a restart entry only for constraints it already carried, never a
+    # MAP `initval` the model would silently override (review 2.3.17).
+    _CONSTRAINT_FIELDS = {"sigma", "upper", "lower", "bound_scale"}
 
     # Pass through existing entries not touched by the trace only if they carry
     # a constraint (prior, bound, or fixed value).  Pure initval-only entries
