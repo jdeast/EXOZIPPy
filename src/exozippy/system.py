@@ -50,18 +50,20 @@ can generally construct any model containing arbitrary components.
 #                     gui/runner.py, mulensinstrument's mmexofast cache path.
 #   logger_level   -- run.py, cli.py, cli_modes.py.
 #   sampler        -- run.py (see run.KNOWN_SAMPLER_KEYS for its own block).
-#   modes          -- run.py: {ledger, max_invalid_frac, force, weights}.
-#   mkparam        -- mkparam.write_param_file: {n_seeds, force}.  `force`
-#                     is deliberately NOT `modes: {force: true}`: that one
-#                     authorizes forensic REPORTING off a known-bad
-#                     trace, this one authorizes seeding the NEXT fit
-#                     from one.  See mkparam._refuse_invalid_seed_draws.
-#   gui            -- gui.status.gui_enabled: {snapshot}.
-#   modeling       -- run.py: {compile} for the generated paper-draft
-#                     scaffold (<prefix>_paper.tex).  Output-only, so
+#   modes          -- run.py.
+#   mkparam        -- mkparam.write_param_file.  Its `force` is deliberately
+#                     NOT `modes: {force: true}`: that one authorizes
+#                     forensic REPORTING off a known-bad trace, this one
+#                     authorizes seeding the NEXT fit from one.  See
+#                     mkparam._refuse_invalid_seed_draws.
+#   gui            -- gui.status.gui_enabled.
+#   modeling       -- run.py: the generated paper-draft scaffold
+#                     (<prefix>_paper.tex).  Output-only, so
 #                     evaluator._NON_STRUCTURAL_CONFIG_KEYS excludes it
 #                     from the structural hash: adding the block or
 #                     flipping `compile` must not stale a finished trace.
+#
+# The SUB-key vocabulary of each of those blocks is KNOWN_BLOCK_KEYS below.
 #
 # tests/test_known_keys.py cross-checks this set against the top-level-config
 # accesses in the source, in both directions, so it cannot silently drift.
@@ -79,6 +81,34 @@ RESERVED_CONFIG_KEYS = frozenset(
         "modeling",
     }
 )
+
+# The sub-key vocabulary of each reserved BLOCK, and the ONE owner of it.
+#
+# A typo inside one of these blocks used to be silent (review 2.3.10):
+# `modes: {ledgr: false}` left the seed ledger on, `mkparam: {forse: true}`
+# left the invalid-seed refusal armed, and `gui: {snapshto: true}` wrote no
+# status files -- in each case the user had stated an intention and got the
+# opposite with no message.  `modeling:` alone warned, through an inline loop
+# of its own.  run.warn_unknown_block_keys now reports all four, from this
+# table.
+#
+# `sampler` is NOT here: it is run.KNOWN_SAMPLER_KEYS, which run.py must own
+# because it is the module that consumes every one of those keys, and which
+# carries its own method-only table besides.  Keeping these four here instead
+# is what makes them one vocabulary rather than four: run.py, mkparam.py and
+# gui/status.py each consume a different block, and introspect.py publishes
+# all of them to the GUI -- which it used to do from a second literal copy.
+#
+# tests/test_known_keys.py cross-checks each entry against the reads in the
+# module that consumes it, in both directions, exactly as it already does for
+# KNOWN_SAMPLER_KEYS and RESERVED_CONFIG_KEYS.  Add a key here in the same
+# edit that consumes it.
+KNOWN_BLOCK_KEYS = {
+    "modes": frozenset({"ledger", "max_invalid_frac", "force", "weights"}),
+    "mkparam": frozenset({"n_seeds", "force"}),
+    "gui": frozenset({"snapshot"}),
+    "modeling": frozenset({"compile"}),
+}
 
 
 class System(Component):

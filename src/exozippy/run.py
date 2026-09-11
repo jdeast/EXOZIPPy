@@ -21,7 +21,7 @@ from exozippy.samplers import convergence, de_metropolis
 from exozippy.samplers._common import default_cores
 from exozippy.samplers.ptde import ptde_sample
 from exozippy.samplers.ptde_async import ptde_async_sample
-from exozippy.system import System
+from exozippy.system import KNOWN_BLOCK_KEYS, System
 
 from .corner_utils import (
     collect_corner_samples,
@@ -301,6 +301,51 @@ def warn_unknown_sampler_keys(sampler_cfg):
     return unknown
 
 
+def warn_unknown_block_keys(block_cfg, known, name):
+    """Warn about unrecognized sub-keys in one reserved config BLOCK.
+
+    The same shape as ``warn_unknown_sampler_keys`` above, deliberately:
+    before review 2.3.10 the file had two shapes for this and only one
+    block that used either -- ``modeling:`` warned through an inline loop
+    while ``modes:``, ``mkparam:`` and ``gui:`` said nothing, so
+    ``modes: {ledgr: false}`` left the seed ledger on and
+    ``mkparam: {forse: true}`` left the invalid-seed refusal armed.  A
+    params-or-config key that states an intention and silently delivers the
+    opposite is the whole defect.
+
+    ``known`` comes from ``system.KNOWN_BLOCK_KEYS``, which is the one owner
+    of these vocabularies (introspect.py publishes the same table to the
+    GUI).  Returns the sorted unrecognized keys, so the check is exercisable
+    without running a fit.
+    """
+    if not isinstance(block_cfg, dict):
+        return []
+    unknown = sorted(set(block_cfg) - set(known))
+    if unknown:
+        logger.warning(
+            f"Unrecognized key(s) in the {name} block will be ignored: "
+            f"{unknown}. Valid {name} keys: {sorted(known)}"
+        )
+    return unknown
+
+
+def warn_unknown_config_blocks(config):
+    """Run ``warn_unknown_block_keys`` over every reserved block (2.3.10).
+
+    Called once at startup rather than where each block is consumed: two of
+    the four are read by other modules (``mkparam:`` by mkparam.py,
+    ``gui:`` by gui/status.py) and ``modeling:`` is not read until wrap-up,
+    so a warning at the point of use would reach the user hours into a fit
+    -- or, for a fit that died first, never.
+    """
+    reported = {}
+    for name, known in KNOWN_BLOCK_KEYS.items():
+        unknown = warn_unknown_block_keys(config.get(name) or {}, known, name)
+        if unknown:
+            reported[name] = unknown
+    return reported
+
+
 def run_fit(config, user_params=None):
     """The main library entry point to run an orbital fit.
 
@@ -464,6 +509,17 @@ def _run_fit(config, gui, user_params=None):
 
     # Warn about unrecognized keys in the sampler block so they are never silently ignored.
     warn_unknown_sampler_keys(sampler_cfg)
+
+    # ... and in every other reserved block, for the same reason (2.3.10).
+    # Here, not at each block's point of use: `mkparam:` and `gui:` are
+    # consumed by other modules and `modeling:` not until wrap-up, so a
+    # typo there would surface hours in or not at all.
+    warn_unknown_config_blocks(config)
+
+    # The multimode block, read once: its two consumers below (the seed
+    # ledger switch and the mode-report call) used to read `config["modes"]`
+    # separately, which left the block's vocabulary spelled in two places.
+    modes_cfg = config.get("modes", {}) or {}
 
     # 3. Build the stellar system into a PyMC Graph
     system = System(config, user_params=user_params)
@@ -646,7 +702,7 @@ def _run_fit(config, gui, user_params=None):
         # (Skipped when reusing an existing trace: the polish was skipped
         # there too, so seed lp would be a start value, not a basin peak.)
         seed_ledger = None
-        _ledger_on = (config.get("modes", {}) or {}).get("ledger", True)
+        _ledger_on = modes_cfg.get("ledger", True)
         if len(raw_starts) > 1 and _ledger_on and not reusing_trace:
             from .outputs.ledger import build_seed_ledger
 
@@ -1061,7 +1117,6 @@ def _run_fit(config, gui, user_params=None):
     # `modes: {max_invalid_frac: ..., force: true}`), and may opt into
     # per-mode evidence weighting via `modes: {weights: evidence}`.
     wrapup.stage("mode identification + result tables (LaTeX/CSV)")
-    modes_cfg = config.get("modes", {}) or {}
     mode_report = build_mode_reports(
         system,
         idata,
@@ -1174,12 +1229,8 @@ def _run_fit(config, gui, user_params=None):
         "modeling draft (paper.tex)"
         + (" + pdflatex compile" if modeling_cfg.get("compile", True) else "")
     )
-    for _key in modeling_cfg:
-        if _key != "compile":
-            logger.warning(
-                f"Unrecognized key '{_key}' in the modeling block will be "
-                f"ignored (known: compile)."
-            )
+    # (the unknown-key warning for this block, and for the other three, is
+    # warn_unknown_config_blocks at startup -- not an inline loop here)
     try:
         _add_wrapup_prose(system, burn_diag, mode_report)
         # One posterior draw unlocks the model-bearing charts (phased
