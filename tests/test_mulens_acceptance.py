@@ -128,6 +128,12 @@ TERM_ATOL = 1e-3
 # single loose tolerance gives up, while tolerating the last-bit drift that
 # a pre-split recording legitimately carries.
 REFERENCE_RTOL = 1e-14
+# A denormal floor, strict tier only.  Some bound potentials sit at ~1e-220
+# (CI saw POT:low_bound.mulensevent.mu_rel_mag at -2.0e-220), where a
+# RELATIVE test is meaningless -- the same trap as the delta dump's 266%
+# outlier, whose absolute delta was 3.5e-22.  1e-30 nats is far below
+# anything physical and cannot hide a real term.
+REFERENCE_ATOL = 1e-30
 
 # The collapse reconciliation below compares this machine against the
 # PRE-SPLIT recording, and it used byte equality: at matched parameters the
@@ -404,7 +410,11 @@ def test_the_model_still_matches_its_recorded_decomposition(name):
     # tier: an old recording gets the physics bound rather than a
     # bit-identity claim nobody measured.
     reference = is_reference_platform(fixture)
-    rtol, atol = (REFERENCE_RTOL, 0.0) if reference else (TERM_RTOL, TERM_ATOL)
+    rtol, atol = (
+        (REFERENCE_RTOL, REFERENCE_ATOL)
+        if reference
+        else (TERM_RTOL, TERM_ATOL)
+    )
 
     moved, appeared, vanished = compare(
         fixture["terms"], parts, atol=atol, rtol=rtol
@@ -414,8 +424,8 @@ def test_the_model_still_matches_its_recorded_decomposition(name):
     # things: a term moving by 5e-16 is a real finding on the reference
     # machine and noise anywhere else.
     tier = (
-        f"the REFERENCE tolerance rtol={REFERENCE_RTOL} (this is the "
-        f"machine that recorded the fixture)"
+        f"the REFERENCE tolerance rtol={REFERENCE_RTOL} "
+        f"(EXOZIPPY_ACCEPTANCE_STRICT is set and the fingerprint matches)"
         if reference
         else f"the physics tolerance (rtol={TERM_RTOL}, atol={TERM_ATOL})"
     )
@@ -679,18 +689,39 @@ def test_both_tolerance_tiers_are_reachable():
     }
     unstamped = {k: v for k, v in fixture.items() if k != "platform"}
 
-    # Act / Assert
-    assert is_reference_platform(fixture), (
-        "this machine does not match the fingerprint in its own fixtures, so "
-        "the strict tier is unreachable and every run silently takes the "
-        "loose one"
-    )
-    assert not is_reference_platform(foreign), (
-        "a fixture recorded on macOS/arm64/accelerate was accepted as this "
-        "machine's own, which would hold a foreign platform to REFERENCE_RTOL"
-    )
-    assert not is_reference_platform(unstamped), (
-        "a fixture with NO fingerprint claimed the strict tier; an old "
-        "recording must get the physics bound rather than a bit-identity "
-        "claim nobody measured"
-    )
+    # Act / Assert.  The strict tier needs BOTH the opt-in and the
+    # fingerprint, so drive the env var explicitly rather than depending on
+    # how the suite happens to be invoked.
+    import unittest.mock
+
+    with unittest.mock.patch.dict(
+        os.environ, {"EXOZIPPY_ACCEPTANCE_STRICT": "1"}
+    ):
+        assert is_reference_platform(fixture), (
+            "opted in and the fingerprint matches, yet the strict tier was "
+            "not selected -- it is unreachable and every run silently takes "
+            "the loose one"
+        )
+        assert not is_reference_platform(foreign), (
+            "a fixture recorded on macOS/arm64/accelerate was accepted as "
+            "this machine's own, which would hold a foreign platform to "
+            "REFERENCE_RTOL"
+        )
+        assert not is_reference_platform(unstamped), (
+            "a fixture with NO fingerprint claimed the strict tier; an old "
+            "recording must get the physics bound rather than a bit-identity "
+            "claim nobody measured"
+        )
+
+    # And WITHOUT the opt-in, nothing claims the strict tier -- the default
+    # has to be the safe one.  PR #251 failed exactly here: CI's Linux
+    # runner shares this box's coarse fingerprint (system/machine/BLAS) but
+    # not its rounding, so an inferred claim held it to a tolerance eight
+    # orders too tight.
+    env = dict(os.environ)
+    env.pop("EXOZIPPY_ACCEPTANCE_STRICT", None)
+    with unittest.mock.patch.dict(os.environ, env, clear=True):
+        assert not is_reference_platform(fixture), (
+            "the strict tier was claimed WITHOUT the opt-in; any machine of "
+            "this platform class would then be held to REFERENCE_RTOL"
+        )

@@ -187,10 +187,24 @@ def platform_fingerprint():
 def is_reference_platform(fixture):
     """True when THIS machine is the one that recorded `fixture`.
 
-    A fixture without a fingerprint predates it, and answers False: an old
-    recording gets the physics tolerance rather than a bit-identity claim
-    nobody measured.
+    Requires BOTH a fingerprint match AND an explicit opt-in, and the
+    opt-in is not belt-and-braces -- the fingerprint alone is provably
+    insufficient.  It names a platform CLASS (system, machine, BLAS), and
+    CI's Linux runner shares this box's class while disagreeing with it:
+    on PR #251 the runner produced OGLE_0383LD's RV:mulensinstrument.model
+    as 26832.036090686284 against the recorded 26832.036090685935 --
+    relative 1.3e-14, and in the OPPOSITE direction from this machine's
+    5.4e-16.  OpenBLAS dispatches kernels by CPU capability at runtime, so
+    two machines of one class round differently.
+
+    Making the fingerprint finer (CPU model, OpenBLAS core) would demote the
+    reference machine on any hardware change and is a guess about which
+    attributes matter.  Requiring the claim to be STATED is honest: the
+    default is the physics tolerance, which is always safe, and only
+    somewhere that knows it recorded the fixtures opts in.
     """
+    if not os.environ.get("EXOZIPPY_ACCEPTANCE_STRICT"):
+        return False
     recorded = fixture.get("platform")
     if not recorded:
         return False
