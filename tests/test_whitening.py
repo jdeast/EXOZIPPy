@@ -1141,3 +1141,246 @@ def test_prepare_whitening_reuse_path_writes_nothing_when_absent(tmp_path):
     np.testing.assert_array_equal(
         p_x._whiten_state["sv_scale_logits"].get_value(), prelim
     )
+
+
+# ---------------------------------------------------------------------------
+# Review 4.3.1: the persisted state must carry the ANCHOR, not only the
+# scales.  Before the anchor could move, it was derivable from a rebuilt
+# model -- set_whitening left logit_q_inits exactly where build_pymc put it
+# -- so storing it would have been redundant.  Now that
+# System.recenter_whitening_anchor folds the polished start into it, a raw
+# draw decodes through `lower + span*sigmoid(anchor + scale*raw)` and the
+# anchor is half of what a stored draw MEANS.  An unpersisted moving anchor
+# makes a reused trace decode against the wrong center, silently, because
+# every number involved stays physically plausible.
+# ---------------------------------------------------------------------------
+
+
+def test_the_persisted_state_carries_the_anchor(tmp_path):
+    """
+    Given a measured-and-whitened model,
+    When its state is persisted,
+    Then the file declares schema version 2 and every whitened parameter's
+      entry carries `logit_q_inits` equal to the live shared variable.
+
+    Asserted against the SHARED VARIABLE rather than a recorded constant:
+    the point is that the file records where raw = 0 actually is, and a
+    hand-written expectation would be a second place for the same mistake.
+    """
+    import json
+
+    from exozippy.whitening import _WHITENING_SCHEMA_VERSION
+
+    # Arrange
+    _model, system, (p_x, p_y, p_d), path = _saved_whitening_setup(tmp_path)
+
+    # Act
+    data = json.loads(path.read_text())
+
+    # Assert
+    assert data["version"] == _WHITENING_SCHEMA_VERSION == 2
+    whitened = [p for p in (p_x, p_y, p_d) if p._whiten_state is not None]
+    assert whitened, "no whitened parameter in the toy build"
+    for par in whitened:
+        np.testing.assert_array_equal(
+            np.asarray(data["params"][par.label]["logit_q_inits"]),
+            par._whiten_state["sv_logit_q_inits"].get_value(),
+        )
+    # The barrier-only parameter has no anchor to record, and must not grow
+    # an empty one (that would make the validator's presence check vacuous).
+    assert p_d._whiten_state is None
+    assert "logit_q_inits" not in data["params"][p_d.label]
+
+
+def test_a_moved_anchor_survives_the_round_trip(tmp_path):
+    """
+    Given a build whose anchor has MOVED away from its build-time value
+      (what recenter_on_start does),
+    When the state is saved, the anchor is then disturbed, and the file is
+      loaded back,
+    Then the saved anchor is restored into both the shared variable and the
+      frozen forward transform.
+
+    The disturbance is what makes this a round trip rather than a no-op: a
+    loader that silently ignored the persisted anchor would pass a
+    save-then-load test on an undisturbed build, and that is exactly the
+    silent failure this item exists to prevent.
+    """
+    from exozippy.whitening import load_whitening, save_whitening
+
+    # Arrange
+    _model, p_x, p_y, p_d = _barrier_model()
+    system = _StubSystem([p_x, p_y, p_d])
+    ws = p_x._whiten_state
+    moved = ws["sv_logit_q_inits"].get_value().copy() + 0.75
+    p_x._apply_whitening_state(
+        ws["sv_scale_logits"].get_value(),
+        ws["sv_gaussian_scales"].get_value(),
+        logit_q_inits=moved,
+    )
+    path = tmp_path / "fit_whitening.json"
+    save_whitening(system, str(path))
+
+    # Disturb: pretend a rebuild landed somewhere else entirely.
+    p_x._apply_whitening_state(
+        ws["sv_scale_logits"].get_value(),
+        ws["sv_gaussian_scales"].get_value(),
+        logit_q_inits=np.zeros_like(moved) - 3.0,
+    )
+    assert not np.allclose(ws["sv_logit_q_inits"].get_value(), moved)
+
+    # Act
+    assert load_whitening(system, str(path))
+
+    # Assert -- both mirrors, because phys_from_raw reads the transform copy
+    # while the compiled graph reads the shared variable.
+    np.testing.assert_array_equal(ws["sv_logit_q_inits"].get_value(), moved)
+    np.testing.assert_array_equal(p_x._raw_transform["logit_q_inits"], moved)
+
+
+def test_a_version_2_file_that_omits_the_anchor_is_refused(tmp_path):
+    """
+    Given a version-2 whitening file with a parameter's `logit_q_inits`
+      deleted,
+    When it is restored on the trace-reuse path,
+    Then StaleWhiteningError names the missing key -- rather than applying
+      the scales and leaving the anchor wherever the rebuild put it.
+
+    This is the failure mode the version bump exists to catch.  A file that
+    claims to record the coordinate system but omits its center describes a
+    decode nobody can reproduce, and applying the scales alone would be the
+    partial apply `_validate_whitening_state` refuses everywhere else.
+    """
+    import json
+
+    import pytest
+
+    from exozippy.whitening import (
+        StaleWhiteningError,
+        restore_whitening_for_trace,
+    )
+
+    # Arrange
+    _model, system, (p_x, _p_y, _p_d), path = _saved_whitening_setup(tmp_path)
+    data = json.loads(path.read_text())
+    del data["params"]["toy.x"]["logit_q_inits"]
+    path.write_text(json.dumps(data))
+    anchor_before = p_x._whiten_state["sv_logit_q_inits"].get_value().copy()
+    scales_before = p_x._whiten_state["sv_scale_logits"].get_value().copy()
+
+    # Act
+    with pytest.raises(StaleWhiteningError) as excinfo:
+        restore_whitening_for_trace(system, str(path), "fit_trace.nc")
+
+    # Assert
+    message = str(excinfo.value)
+    assert "logit_q_inits" in message
+    assert "toy.x" in message
+    # ...and nothing was applied: not the anchor, and not the scales either.
+    np.testing.assert_array_equal(
+        p_x._whiten_state["sv_logit_q_inits"].get_value(), anchor_before
+    )
+    np.testing.assert_array_equal(
+        p_x._whiten_state["sv_scale_logits"].get_value(), scales_before
+    )
+
+
+def test_a_version_1_file_still_applies_and_keeps_the_build_anchor(tmp_path):
+    """
+    Given a legacy version-1 whitening file (scales only, no anchor),
+    When it is restored,
+    Then it applies, and the build keeps its own build-time anchor.
+
+    Version-1 files are real and one is SHIPPED --
+    `tests/fixtures/DC2018_128_whitening.json`, which
+    `test_runaway_logp_regression.py` restores to give its pinned raw draws
+    their meaning.  The code that wrote a version-1 file could not move the
+    anchor (set_whitening left it exactly where build_pymc put it), so the
+    rebuilt model's anchor IS the one its trace was sampled under: the
+    absent key is a property of that schema, not a gap to be guessed at.
+    """
+    import json
+
+    from exozippy.whitening import load_whitening
+
+    # Arrange
+    _model, system, (p_x, _p_y, _p_d), path = _saved_whitening_setup(tmp_path)
+    anchor = p_x._whiten_state["sv_logit_q_inits"].get_value().copy()
+    data = json.loads(path.read_text())
+    data["version"] = 1
+    for entry in data["params"].values():
+        entry.pop("logit_q_inits", None)
+    path.write_text(json.dumps(data))
+
+    # Act
+    assert load_whitening(system, str(path))
+
+    # Assert
+    np.testing.assert_array_equal(
+        p_x._whiten_state["sv_logit_q_inits"].get_value(), anchor
+    )
+
+
+def test_a_version_1_file_carrying_an_anchor_is_refused(tmp_path, caplog):
+    """
+    Given a file that declares version 1 but carries an anchor,
+    When it is loaded,
+    Then it is rejected: it is not what its version claims to be.
+
+    The exemption above ("a version-1 file legitimately has no anchor") has
+    to be asserted in both directions or it is a hole -- a version-2 file
+    relabelled 1 would otherwise get its anchor silently ignored while its
+    scales applied, which is the partial apply this module refuses.
+    """
+    import json
+    import logging
+
+    from exozippy.whitening import load_whitening
+
+    # Arrange
+    _model, system, (p_x, _p_y, _p_d), path = _saved_whitening_setup(tmp_path)
+    data = json.loads(path.read_text())
+    data["version"] = 1
+    path.write_text(json.dumps(data))
+    anchor = p_x._whiten_state["sv_logit_q_inits"].get_value().copy()
+
+    # Act
+    with caplog.at_level(logging.WARNING):
+        applied = load_whitening(system, str(path))
+
+    # Assert
+    assert not applied
+    assert "logit_q_inits" in caplog.text
+    np.testing.assert_array_equal(
+        p_x._whiten_state["sv_logit_q_inits"].get_value(), anchor
+    )
+
+
+def test_an_anchor_of_the_wrong_length_is_refused(tmp_path):
+    """
+    Given a version-2 file whose anchor vector no longer matches the model,
+    When it is loaded,
+    Then it is rejected before anything is written.
+
+    Same reasoning as the `gaussian_scales` length check it sits beside: the
+    validator must cover EVERY vector the apply step touches, or a bad one
+    aborts the loop after earlier parameters were already written.
+    """
+    import json
+
+    from exozippy.whitening import load_whitening
+
+    # Arrange
+    _model, system, (p_x, _p_y, _p_d), path = _saved_whitening_setup(tmp_path)
+    data = json.loads(path.read_text())
+    data["params"]["toy.x"]["logit_q_inits"] = [0.0, 0.0, 0.0]
+    path.write_text(json.dumps(data))
+    scales_before = p_x._whiten_state["sv_scale_logits"].get_value().copy()
+
+    # Act
+    assert not load_whitening(system, str(path))
+
+    # Assert
+    np.testing.assert_array_equal(
+        p_x._whiten_state["sv_scale_logits"].get_value(), scales_before
+    )

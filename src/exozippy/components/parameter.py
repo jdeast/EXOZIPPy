@@ -3128,14 +3128,25 @@ class Parameter:
         self._apply_whitening_state(scale_logits, gauss_scales)
         return post
 
-    def _apply_whitening_state(self, scale_logits, gauss_scales):
-        """Push new whitening scale vectors into the shared variables and
-        keep every mirror consistent: the frozen forward transform
+    def _apply_whitening_state(
+        self, scale_logits, gauss_scales, logit_q_inits=None
+    ):
+        """Push new whitening vectors into the shared variables and keep
+        every mirror consistent: the frozen forward transform
         (raw_from_initval / phys_from_raw for multi-seed starts) and the
         physical-units init_scale used for reporting (diagnostics table,
         get_mcmc_init) -- dphys/draw at the start, i.e. scale_logit *
         q_init*(1-q_init)*span for logit elements, the scale itself for
-        linear elements."""
+        linear elements.
+
+        ``logit_q_inits`` is the logit-space ANCHOR (the physical value raw =
+        0 maps to).  It moves in exactly two situations -- ``recenter_on_start``
+        folding a polished displacement into it, and ``load_whitening``
+        restoring the anchor a reused trace was sampled under -- and both go
+        through here so the shared variable and ``_raw_transform`` can never
+        disagree about where raw = 0 is.  Omitted means "unchanged", which is
+        what every scale-only update (``set_whitening``) passes.
+        """
         ws = self._whiten_state
         tf = self._raw_transform
         scale_logits = np.asarray(scale_logits, dtype=float)
@@ -3144,6 +3155,10 @@ class Parameter:
         ws["sv_gaussian_scales"].set_value(gauss_scales)
         tf["init_scale_logits"] = scale_logits.copy()
         tf["gaussian_scales"] = gauss_scales.copy()
+        if logit_q_inits is not None:
+            logit_q_inits = np.asarray(logit_q_inits, dtype=float)
+            ws["sv_logit_q_inits"].set_value(logit_q_inits)
+            tf["logit_q_inits"] = logit_q_inits.copy()
 
         n_elements = self._n_elements()
         phys_scales = to_vec(
@@ -3213,6 +3228,15 @@ class Parameter:
         absolute logit-space scales (not the multipliers) are stored so a
         reload reproduces the sampled trace's raw coordinates exactly, even
         if the preliminary scales of a rebuilt model were to differ.
+
+        The ANCHOR (``logit_q_inits``) is exported for the same reason and it
+        is not optional (review 4.3.1): a raw draw decodes through ``lower +
+        span*sigmoid(anchor + scale*raw)``, so the anchor is half of what
+        "which physical value did the sampler visit" means.  It used to be
+        derivable from the rebuilt model -- ``set_whitening`` left it exactly
+        where ``build_pymc`` put it -- and since ``recenter_on_start`` folds
+        the polished start into it, it is not.  ``whitening.json`` schema
+        version 2 is what carries it.
         """
         out = {}
         if self._whiten_state is not None:
@@ -3221,6 +3245,9 @@ class Parameter:
             )
             out["gaussian_scales"] = (
                 self._whiten_state["sv_gaussian_scales"].get_value().tolist()
+            )
+            out["logit_q_inits"] = (
+                self._whiten_state["sv_logit_q_inits"].get_value().tolist()
             )
         if self._barrier_state is not None:
             out["barrier_scales"] = (
@@ -3233,6 +3260,13 @@ class Parameter:
 
         Returns False (leaving the build untouched) on any shape mismatch --
         the caller should fall back to a fresh probe.
+
+        ``logit_q_inits`` is restored when the file carries it (schema
+        version 2) and left at its build value when it does not: a version-1
+        file was written by code whose anchor could not move, so the rebuilt
+        model's own anchor IS the one that trace was sampled under.  The
+        caller decides which files may omit it -- see
+        ``whitening._validate_whitening_state``.
         """
         ws = self._whiten_state
         if "scale_logits" in state:
@@ -3240,12 +3274,21 @@ class Parameter:
                 return False
             sl = np.asarray(state["scale_logits"], dtype=float)
             gs = np.asarray(state["gaussian_scales"], dtype=float)
+            lq = (
+                np.asarray(state["logit_q_inits"], dtype=float)
+                if "logit_q_inits" in state
+                else None
+            )
             if (
                 sl.shape != ws["sv_scale_logits"].get_value().shape
                 or gs.shape != ws["sv_gaussian_scales"].get_value().shape
+                or (
+                    lq is not None
+                    and lq.shape != ws["sv_logit_q_inits"].get_value().shape
+                )
             ):
                 return False
-            self._apply_whitening_state(sl, gs)
+            self._apply_whitening_state(sl, gs, logit_q_inits=lq)
         if "barrier_scales" in state:
             bs = self._barrier_state
             if bs is None:
