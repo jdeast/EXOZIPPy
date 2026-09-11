@@ -6,7 +6,13 @@ import pytensor.tensor as pt
 import pytest
 
 from conftest import MockSystem
-from exozippy.components.parameter import Parameter, UnitTranslator, to_vec
+from exozippy.components.parameter import (
+    ElementExpression,
+    Parameter,
+    PosteriorSummary,
+    UnitTranslator,
+    to_vec,
+)
 from exozippy.components.star.star import Star
 from exozippy.config import ConfigManager
 from exozippy.diagnostics import ModelAuditor
@@ -1477,3 +1483,238 @@ def test_to_latex_prior_def_stays_unsuffixed_for_a_scalar():
         p.to_latex_prior_def()
     )
     assert f"\\{p.latex_varname}prior" in p.to_table_line()
+
+
+# ---------------------------------------------------------------------------
+# An over-long value vector (review 2.2.4)
+#
+# SHORTER than the element count is legal and load-bearing: `resolve` leaves
+# the elements nobody named as NaN and to_vec fills the tail, which is what
+# `_initval_present` reads as "never set".  LONGER had no reading -- to_vec
+# copied the first n and dropped the rest with no message -- so a wrongly
+# sized array built a model out of whichever values happened to land first.
+# Every other spelling of that sizing hazard raises (1.1.1's
+# _check_broadcast_covers_vector, 2.5.2's ambiguous inline mask,
+# manifest.normalize_selector), and so does this one.
+# ---------------------------------------------------------------------------
+
+
+def _two_element_param(**kwargs):
+    """A two-element sampled Parameter with everything the build needs."""
+    defaults = dict(
+        initval=np.full(2, 0.5),
+        init_scale=np.full(2, 0.1),
+        lower=np.zeros(2),
+        upper=np.ones(2),
+        unit="",
+        internal_unit="",
+        shape=(2,),
+        names=["i0", "i1"],
+    )
+    defaults.update(kwargs)
+    return Parameter(label="comp.p", **defaults)
+
+
+@pytest.mark.parametrize(
+    "val,expected",
+    [
+        (None, [np.nan, np.nan]),  # nothing anywhere
+        (0.25, [0.25, 0.25]),  # scalar broadcast
+        ([7.0], [7.0, 7.0]),  # length-1 broadcast
+        ([1.0, 2.0], [1.0, 2.0]),  # exactly one per element
+    ],
+)
+def test_to_vec_still_accepts_every_legal_vector_length(val, expected):
+    """
+    Given a value that is absent, scalar or no longer than the element count,
+    When to_vec sizes it for a two-element parameter,
+    Then it comes back unchanged.
+
+    The control for the raise below: the guard must reject ONLY the
+    over-long case, and a shorter array in particular has to keep working --
+    resolve writes NaN for "this element was never set" and to_vec's fill is
+    how that reaches _initval_present.
+    """
+    got = to_vec(val, 2)
+
+    assert np.allclose(got, expected, equal_nan=True)
+
+
+def test_to_vec_short_vector_still_fills_the_tail():
+    """
+    Given a length-2 array for a THREE-element parameter,
+    When to_vec sizes it,
+    Then the named elements survive and the unnamed one is the fill.
+    """
+    got = to_vec([1.0, 2.0], 3, fill=-np.inf)
+
+    assert got.tolist() == [1.0, 2.0, -np.inf]
+
+
+def test_to_vec_refuses_an_over_long_vector_instead_of_truncating():
+    """
+    Given a length-3 value array for a two-element parameter,
+    When to_vec sizes it,
+    Then it raises, naming the field and both lengths.
+
+    Before: it returned the first two entries and dropped the third with no
+    message, so the built model was indistinguishable from one whose array
+    was the right length all along.
+    """
+    with pytest.raises(ValueError, match="length 3.*2 element"):
+        to_vec([1.0, 2.0, 3.0], 2, where="comp.p.sigma")
+
+    # The message has to name the field, because the whole point is telling
+    # a component author WHICH manifest entry is mis-sized.
+    try:
+        to_vec([1.0, 2.0, 3.0], 2, where="comp.p.sigma")
+    except ValueError as exc:
+        assert "comp.p.sigma" in str(exc)
+
+
+@pytest.mark.parametrize(
+    "field", ["initval", "sigma", "lower", "upper", "mu", "init_scale"]
+)
+def test_an_over_long_field_is_refused_at_build_time(field):
+    """
+    Given a two-element Parameter handed a length-3 array in one field,
+    When build_pymc reads it,
+    Then it raises naming that field, rather than silently dropping
+    element 2.
+
+    This is the live path: a component writing a manifest OPTION
+    (lower/upper/sigma straight onto the entry) sized from its own config
+    list instead of from the parameter's manifest `shape`.  The user's
+    vectors are sized upstream by resolve.
+    """
+    p = _two_element_param(**{field: np.full(3, 0.25)})
+
+    with pm.Model():
+        with pytest.raises(ValueError, match=f"comp.p.{field}"):
+            p.build_pymc()
+
+
+def test_the_initval_present_mask_refuses_the_same_over_long_vector():
+    """
+    Given a two-element Parameter with a length-3 initval,
+    When _initval_present builds its per-element mask,
+    Then it raises, exactly as to_vec does.
+
+    The mask mirrors to_vec's broadcasting rules so it lines up element for
+    element with the vector to_vec returns; if only one of the two refused an
+    over-long array the pair could disagree about which element is which.
+    """
+    p = _two_element_param(initval=np.array([0.25, 0.75, 0.9]))
+
+    with pytest.raises(ValueError, match="length 3.*2 element"):
+        p._initval_present(2)
+
+
+# ---------------------------------------------------------------------------
+# A one-sided zero error (review 2.2.5)
+# ---------------------------------------------------------------------------
+
+
+def test_a_one_sided_zero_error_renders_as_a_bare_zero():
+    """
+    Given a summary whose error is zero on ONE side only,
+    When it is formatted for the table,
+    Then the zero side renders as "0", the way the both-zero case does.
+
+    err_minus == 0 with err_plus > 0 used to reach
+    decimals_from_sigfigs(0) -> 0 decimal places and print "0.0", which
+    landed in a published LaTeX table as "^{+0.05}_{-0.0}".  A rounded zero
+    is a claim about precision and there is none to claim.
+    """
+    one_sided = PosteriorSummary(median=1.2345, err_minus=0.0, err_plus=0.05)
+    other_side = PosteriorSummary(median=1.2345, err_minus=0.05, err_plus=0.0)
+
+    assert one_sided.format() == ("1.234", "0", "0.05")
+    assert one_sided.latex_value() == "1.234^{+0.05}_{-0}"
+    assert other_side.format() == ("1.234", "0.05", "0")
+    assert other_side.latex_value() == "1.234^{+0}_{-0.05}"
+
+
+def test_a_two_sided_and_a_both_zero_summary_are_unchanged():
+    """
+    Given the two cases that already rendered correctly,
+    When they are formatted,
+    Then nothing moves.
+
+    The control: "0" on one side must not have been bought by collapsing a
+    real error, and the both-zero case must still be the FIXED rendering
+    (an "\\equiv", not "x \\pm 0"), which is what the one-sided zero is
+    being made consistent with.
+    """
+    two_sided = PosteriorSummary(median=1.2345, err_minus=0.05, err_plus=0.07)
+    both_zero = PosteriorSummary(
+        median=0.31622776, err_minus=0.0, err_plus=0.0
+    )
+
+    assert two_sided.format() == ("1.234", "0.05", "0.07")
+    assert two_sided.latex_value() == "1.234^{+0.07}_{-0.05}"
+    assert both_zero.format() == ("0.316228", "0", "0")
+    assert both_zero.latex_value() == "\\equiv 0.316228"
+
+
+def test_draws_piled_on_one_quantile_edge_render_a_bare_zero():
+    """
+    Given draws more than half of which sit on one edge (a mode slice pinned
+    at a bound),
+    When the summary is computed from them and formatted,
+    Then err_minus is exactly zero and renders as "0".
+
+    The vehicle matters: the item's claim is that the case is REACHABLE from
+    real draws, not just constructible by hand, so the summary here comes
+    from _summarize_array rather than from a literal.
+    """
+    draws = np.concatenate([np.zeros(600), np.linspace(0.0, 0.2, 400)])
+
+    summary = Parameter._summarize_array(draws)
+
+    assert summary.err_minus == 0.0
+    assert summary.err_plus > 0.0
+    assert summary.format()[1] == "0"
+    assert "_{-0.0}" not in summary.latex_value()
+
+
+# ---------------------------------------------------------------------------
+# No logit element ever takes a soft barrier (review 5.2.3)
+# ---------------------------------------------------------------------------
+
+
+def test_a_logit_element_never_takes_a_soft_barrier():
+    """
+    Given a vector with one bounded SAMPLED element (the logit transform) and
+    one DERIVED element carrying finite bounds (a soft barrier),
+    When it is built,
+    Then the two sets are disjoint: no element both uses the logit transform
+    and reads a barrier scale.
+
+    This is what made build_pymc's `np.where(use_logit, scales,
+    gaussian_scales)` a dead arm: needs_barrier's sampled arm is
+    `is_sampled & ~use_logit` and its derived arm is disjoint from
+    is_sampled, so the first arm cannot be selected on any element the
+    barrier consumes.  Pinned so the arm is not reintroduced as
+    "defensive" -- and so that a future role change that DOES put a barrier
+    on a logit element fails here, where the scale it would read is decided.
+    """
+    p = _two_element_param(
+        element_expressions=[
+            ElementExpression(
+                mask=[False, True],
+                expr=lambda: pt.as_tensor_variable(np.array([0.0, 0.42])),
+            )
+        ],
+    )
+
+    with pm.Model():
+        p.build_pymc()
+
+    use_logit = np.asarray(p._raw_transform["use_logit"], dtype=bool)
+    needs_barrier = np.asarray(p._barrier_state["needs_barrier"], dtype=bool)
+
+    # The control: both sets are non-empty, so "disjoint" is a real claim.
+    assert use_logit.tolist() == [True, False]
+    assert needs_barrier.tolist() == [False, True]
+    assert not np.any(use_logit & needs_barrier)
