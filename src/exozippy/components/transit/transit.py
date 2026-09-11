@@ -502,7 +502,11 @@ class Transit(Instrument):
         Instruments whose band filter is unavailable get dilution 1.
 
         The cache is per BUILD, not per component: ``build_likelihood``
-        clears it (see ``_reset_build_caches``).  Components persist on the
+        clears it with an inline ``self._dilution_node = None`` at the top of
+        stage 7 (the general seam is ``Component.per_build_caches`` /
+        ``reset_build_caches``, which ``System.build_model`` runs before
+        stage 5; this cache does not use it because nothing reads the node
+        before stage 7 -- see ``components.md``).  Components persist on the
         System and a second ``system.build_model()`` is supported (the GUI
         does it), so a cache that outlived the model handed the second
         build's likelihood a Deterministic belonging to the FIRST model --
