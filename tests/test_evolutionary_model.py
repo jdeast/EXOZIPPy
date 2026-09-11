@@ -30,6 +30,11 @@ from exozippy.components.evolutionarymodel.evolutionarymodel import (
     CONSTRAINABLE,
     DEEP_DAGE_MAX,
     DEEP_DAGE_MIN,
+    KIEL_EEP_WINDOW,
+    KIEL_X_PAD_FRAC,
+    KIEL_INDEX,
+    KIEL_LOGG_WINDOW,
+    KIEL_WINDOW_MARGIN_FRAC,
     EvolutionaryModel,
 )
 from exozippy.components.relations import StellarRelation
@@ -1357,9 +1362,346 @@ def test_the_track_stops_where_the_models_stop_being_trustworthy():
     df.loc[df["EEP"] >= 3, "here_be_dragons"] = 1.0
     comp._grids = [mist_grid._assemble_grid(df)]
 
-    # Act
-    teff, logg = comp._track_curve(0, 0.0, 0.0)
+    # Act -- an EEP window wide enough to keep every synthetic row, so the
+    # dragon cut is the only thing under test here.
+    teff, logg = comp._track_curve(0, 0.0, 0.0, (0.0, 1.0e4))
 
     # Assert
     assert teff.size == 2  # EEP 1 and 2 only
     assert np.all(np.isfinite(logg))
+
+
+# ----------------------------------------------------------------------
+# The Kiel diagram's plotting windows, and its once-per-fit marks
+# ----------------------------------------------------------------------
+
+
+def _kiel_system(model_root, user_params=None):
+    """A fresh one-star system, for tests that mutate plotting state.
+
+    The `built` fixture is module-scoped, and `_reported_kiel` memoizes, so
+    a test that attaches a posterior would leak into every later test.
+    """
+    from exozippy.system import System
+
+    system = System(
+        {
+            "sampler": {"draws": 10},
+            "star": [{"name": "A"}],
+            "evolutionarymodel": [{"star": "A", "model_root": model_root}],
+        },
+        dict(user_params or {}),
+    )
+    system.prepare()
+    system.build_model()
+    return system, system.active_components["evolutionarymodel"]
+
+
+def test_a_value_comfortably_inside_the_window_leaves_it_alone():
+    """
+    Given a window and a value well inside it,
+    When the window is extended,
+    Then nothing moves -- the nominal window is the answer in the ordinary
+    case, and widening it for a star it already contains would throw away
+    the framing it exists to provide.
+    """
+    # Act
+    lo, hi = EvolutionaryModel._extend_window((3.0, 5.0), [4.0], 0.2)
+
+    # Assert
+    assert (lo, hi) == (3.0, 5.0)
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (3.1, (2.9, 5.0)),  # NEAR the lower edge (within the margin)
+        (2.0, (1.8, 5.0)),  # fully OUTSIDE it
+        (4.95, (3.0, 5.15)),  # near the upper edge
+        (7.0, (3.0, 7.2)),  # fully outside it
+    ],
+)
+def test_the_window_widens_for_a_value_near_or_past_an_edge(value, expected):
+    """
+    Given a star sitting near a window edge, or past it,
+    When the window is extended,
+    Then that edge moves out to `value -/+ margin` -- "very near the bound"
+    and "outside the bound" are the same comparison once the margin is
+    folded in, and a window that clips the star it describes is worse than
+    no window at all.
+    """
+    # Act
+    got = EvolutionaryModel._extend_window((3.0, 5.0), [value], 0.2)
+
+    # Assert
+    assert got == pytest.approx(expected)
+
+
+def test_the_drawn_track_is_restricted_to_the_requested_eeps(model_root):
+    """
+    Given the chart is about the main sequence and the red giant branch,
+    When the track is drawn over the nominal EEP window,
+    Then the pre-main-sequence and post-RGB rows are cut.
+
+    The synthetic grid tabulates EEPs (1, 300, 454, 605, 807), so [202, 630]
+    keeps exactly the three middle ones.
+    """
+    # Arrange
+    _system, comp = _kiel_system(model_root)
+
+    # Act
+    kept = comp._track_curve(0, 0.0, 0.0, KIEL_EEP_WINDOW)[0]
+    everything = comp._track_curve(0, 0.0, 0.0, (0.0, 1.0e4))[0]
+
+    # Assert
+    assert kept.size == 3
+    assert everything.size == 5
+
+
+def test_the_drawn_track_widens_for_a_star_past_the_eep_window(model_root):
+    """
+    Given a star whose fitted EEP sits past the nominal window,
+    When the Kiel diagram is built,
+    Then the drawn arc is widened to reach it -- the window is presentation,
+    not physics, and must never hide the star the chart describes.
+    """
+    # Arrange
+    _base_system, base = _kiel_system(model_root)
+    base_spec = _kiel_spec(_base_system, base)
+    system, comp = _kiel_system(model_root, {"star.A.eep": 800.0})
+
+    # Act
+    spec = _kiel_spec(system, comp)
+
+    # Assert -- EEP 807 is inside 800 + margin, and was outside 630
+    assert np.atleast_1d(base_spec.traces[0].x).size == 3
+    assert np.atleast_1d(spec.traces[0].x).size == 4
+
+
+def test_the_logg_axis_is_the_nominal_window_for_a_dwarf(built):
+    """
+    Given the chart is meant to exclude giants by default,
+    When a main-sequence star is drawn,
+    Then the logg axis is exactly the nominal window.  It is stated ascending
+    because plotrender applies `y_range` BEFORE `y_inverted`, so the drawn
+    axis runs 5.0 at the bottom to 3.0 at the top.
+    """
+    # Arrange
+    system, _ = built
+
+    # Act
+    spec = _kiel_spec(system, system.active_components["evolutionarymodel"])
+
+    # Assert
+    assert spec.meta["y_range"] == list(KIEL_LOGG_WINDOW)
+
+
+def test_the_logg_axis_widens_for_a_star_outside_it(model_root):
+    """
+    Given a star whose fitted logg falls outside the nominal window,
+    When the Kiel diagram is built,
+    Then the axis is widened past it by the margin, rather than drawing a
+    chart the star is not on.
+    """
+    # Arrange -- a 30 solRad star: logg = C + logmass - 2*log10(R) ~ 1.5
+    system, comp = _kiel_system(model_root, {"star.A.radius": 30.0})
+
+    # Act
+    spec = _kiel_spec(system, comp)
+    lo, hi = spec.meta["y_range"]
+    fit_logg = float(np.atleast_1d(spec.traces[2].y)[0])
+    margin = KIEL_WINDOW_MARGIN_FRAC * (
+        KIEL_LOGG_WINDOW[1] - KIEL_LOGG_WINDOW[0]
+    )
+
+    # Assert
+    assert fit_logg < KIEL_LOGG_WINDOW[0]
+    assert lo <= fit_logg - margin
+    assert hi == KIEL_LOGG_WINDOW[1]
+
+
+def test_the_marks_are_drawn_once_however_many_draws_are_overlaid(built):
+    """
+    Given plotrender takes only role="model" traces from the non-reference
+    draws,
+    When the Kiel spec is built,
+    Then both marks carry role="data" -- so 50 overlaid draws produce 50
+    tracks but exactly one MIST point and one fitted point -- and both sit
+    above the track spaghetti via an explicit zorder.
+    """
+    # Arrange
+    system, _ = built
+
+    # Act
+    spec = _kiel_spec(system, system.active_components["evolutionarymodel"])
+    track, mist_point, fit_point = spec.traces
+
+    # Assert
+    assert track.role == "model"
+    assert mist_point.role == fit_point.role == "data"
+    # _draw_model's default is 2; the marks must land above it.
+    assert mist_point.style["zorder"] > 2
+    assert fit_point.style["zorder"] > mist_point.style["zorder"]
+
+
+def test_the_marks_sit_at_the_reported_medians_not_at_the_drawn_draw(
+    model_root,
+):
+    """
+    Given the marks are single numbers a reader compares against the table,
+    When a posterior is attached and the diagram is drawn at some OTHER
+    point,
+    Then the marks stay at the posterior medians while the track follows the
+    drawn point -- the tracks carry the uncertainty, the marks carry the
+    reported answer.
+    """
+    # Arrange
+    system, comp = _kiel_system(model_root)
+    at_initval = {p.label: p.initval for p in system.plot_params}
+    # A posterior pinned at each parameter's start value (user units, sample
+    # dimension LAST -- the layout System.distribute_posterior produces).
+    for param in system.plot_params:
+        user = np.asarray(param.from_internal(param.initval), dtype=float)
+        param.posterior = np.repeat(user[..., None], 7, axis=-1)
+    assert comp._reported_kiel(system) is not None
+
+    moved = dict(at_initval)
+    moved["star.teff"] = np.atleast_1d(moved["star.teff"]) * 1.10
+
+    # Act
+    spec = comp.plot_data(system, moved)[0]
+    _track, mist_point, fit_point = spec.traces
+    reference = _kiel_spec(system, comp)
+
+    # Assert -- the marks ignore the moved draw entirely
+    assert float(np.atleast_1d(fit_point.x)[0]) == pytest.approx(
+        float(np.atleast_1d(reference.traces[2].x)[0])
+    )
+    assert float(np.atleast_1d(fit_point.x)[0]) == pytest.approx(
+        float(np.atleast_1d(at_initval["star.teff"])[0])
+    )
+    assert float(np.atleast_1d(mist_point.y)[0]) == pytest.approx(
+        float(np.atleast_1d(reference.traces[1].y)[0])
+    )
+
+
+def test_without_a_posterior_the_marks_fall_back_to_the_drawn_point(built):
+    """
+    Given the pre-flight plot and the GUI's live-slider mode have no
+    posterior to report,
+    When the diagram is drawn,
+    Then the marks come from the point they were handed -- which in both of
+    those cases is the only point there is.
+    """
+    # Arrange
+    system, _ = built
+    comp = system.active_components["evolutionarymodel"]
+    assert comp._reported_kiel(system) is None
+
+    # Act
+    kiel = np.atleast_2d(
+        comp._compiled_kiel(*comp._point_to_plot_params(
+            {p.label: p.initval for p in system.plot_params}, system
+        ))
+    )
+    spec = _kiel_spec(system, comp)
+
+    # Assert
+    assert float(np.atleast_1d(spec.traces[2].x)[0]) == pytest.approx(
+        float(kiel[0, KIEL_INDEX["teff_fit"]])
+    )
+
+
+def test_an_empty_set_of_values_leaves_the_axis_to_autoscale():
+    """
+    Given nothing finite is on the chart,
+    When the padded range is computed,
+    Then it is None -- the caller omits the range key rather than inventing
+    an axis, which is the honest answer when there is nothing to scale to.
+    """
+    # Act / Assert
+    assert EvolutionaryModel._padded_range([], 0.05) is None
+    assert (
+        EvolutionaryModel._padded_range([np.array([np.nan, np.inf])], 0.05)
+        is None
+    )
+
+
+def test_a_single_point_still_gets_a_nonzero_axis_span():
+    """
+    Given one star, one draw, and a zero-width spread,
+    When the padded range is computed,
+    Then the pad comes from the value's own magnitude rather than leaving a
+    zero-width axis the renderer cannot draw.
+    """
+    # Act
+    lo, hi = EvolutionaryModel._padded_range([np.array([5000.0])], 0.05)
+
+    # Assert
+    assert lo < 5000.0 < hi
+    assert hi - lo == pytest.approx(2 * 0.05 * 5000.0)
+
+
+def test_the_teff_axis_covers_exactly_what_is_on_the_chart(built):
+    """
+    Given the Teff axis is set from the drawn content rather than autoscaled,
+    When the spec is built,
+    Then it spans the marks (error bars included) and the in-window track,
+    padded, and is stated ascending because plotrender applies `x_range`
+    BEFORE `x_inverted`.
+    """
+    # Arrange
+    system, _ = built
+    spec = _kiel_spec(system, system.active_components["evolutionarymodel"])
+    track, mist_point, fit_point = spec.traces
+
+    on_chart = np.concatenate(
+        [
+            np.atleast_1d(track.x),
+            np.atleast_1d(mist_point.x),
+            np.atleast_1d(fit_point.x) - np.atleast_1d(fit_point.xerr),
+            np.atleast_1d(fit_point.x) + np.atleast_1d(fit_point.xerr),
+        ]
+    )
+    pad = KIEL_X_PAD_FRAC * (on_chart.max() - on_chart.min())
+
+    # Act
+    lo, hi = spec.meta["x_range"]
+
+    # Assert
+    assert lo < hi
+    assert lo == pytest.approx(on_chart.min() - pad)
+    assert hi == pytest.approx(on_chart.max() + pad)
+
+
+def test_the_teff_axis_ignores_track_rows_the_logg_window_clips_away(
+    model_root,
+):
+    """
+    Given a track that continues past the logg window -- a main-sequence
+    star's arc runs on down the red giant branch to ~3000 K at logg < 3,
+    When the Teff axis is set,
+    Then those rows do not stretch it.  They are drawn but clipped away, and
+    letting them autoscale the axis is what left more than half of a
+    HAT-P-3 panel as whitespace.
+    """
+    # Arrange -- swap in a track whose last in-EEP-window row is a cool giant.
+    # Only _track_curve reads _grids; the marks come from the compiled node.
+    system, comp = _kiel_system(model_root)
+    df = _track_table(
+        [(1.0, 0.0), (1.0, 0.5), (2.0, 0.0), (2.0, 0.5)],
+        eeps=(300, 454, 605),
+    )
+    cool_giant = df["EEP"] == 605
+    df.loc[cool_giant, "radius_mist"] = 100.0  # logg ~ 0.4
+    df.loc[cool_giant, "teff_mist"] = 3000.0
+    comp._grids = [mist_grid._assemble_grid(df)]
+
+    # Act
+    spec = _kiel_spec(system, comp)
+    lo, hi = spec.meta["x_range"]
+
+    # Assert -- drawn, but not on the axis
+    assert 3000.0 in set(np.atleast_1d(spec.traces[0].x).tolist())
+    assert lo > 3000.0
+    assert spec.meta["y_range"] == list(KIEL_LOGG_WINDOW)
