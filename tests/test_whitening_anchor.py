@@ -410,3 +410,91 @@ def test_scales_without_the_anchor_decode_the_draw_somewhere_else(
         f"relative, which is too small for this test to demonstrate the "
         f"failure it describes"
     )
+
+
+# ---------------------------------------------------------------------------
+# Review 2.3.18: the start's |raw| must be ~0 whether or not the probe ran
+# ---------------------------------------------------------------------------
+
+
+def _max_abs_raw(point):
+    return max(
+        float(np.max(np.abs(np.asarray(v, dtype=float))))
+        for v in point.values()
+    )
+
+
+def test_the_start_sits_at_raw_zero_without_the_whitening_probe(
+    tmp_path_factory,
+):
+    """
+    Given a polished start and NO whitening measurement (`measure_scales:
+    false`),
+    When the anchor is re-centered,
+    Then `max |raw|` of the start is exactly 0 -- so the chain begins where
+      the identity metric is calibrated.
+
+    THIS IS REVIEW 2.3.18, and it is the half a `set_whitening`-based fix
+    could not reach.  The polish runs under `if not reusing_trace:`,
+    independently of the whitening, and stores its displacement in
+    PRELIMINARY scale units; `set_whitening` was what re-expressed it, and
+    `measure_scales: false` stops `set_whitening` running at all.  Measured
+    on `examples/kelt4` RV-only, which is what
+    `tests/test_integration_kelt4.py` configures:
+
+        measure_scales   no re-centering   re-centered
+        false                 684.07            0.0
+        true                   10.58            0.0
+
+    With `pm.NUTS`'s identity metric on raw and steps of order one raw unit,
+    a start 684 sigma out is what made a 1-draw integration test scatter to
+    6.7 Mjup.  Re-centering is independent of `measure_scales` BY
+    CONSTRUCTION -- run.py calls it before the `reusing_trace or
+    measure_scales` guard -- which is what this test pins.
+
+    The sibling fixture covers `measure_scales: true` (it runs the real
+    probe); this case runs no probe at all, so the two together are the 2x2.
+    """
+    tmp_path = tmp_path_factory.mktemp("anchor_noprobe")
+    orig_cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        system, model = _build(str(tmp_path / "noprobe"))
+        _displace(system, model)
+
+        # PRECONDITION: the polish really did move the start off raw = 0, in
+        # preliminary scale units, with no probe to re-express it.
+        before = _max_abs_raw(system.get_raw_start(model))
+        assert before > 0.1, (
+            f"max |raw| after the polish is {before:.3g}; with no "
+            f"displacement this test is vacuous"
+        )
+
+        # ACT -- no measure_and_whiten call anywhere in this test.
+        system.recenter_whitening_anchor(model)
+        after = system.get_raw_start(model)
+    finally:
+        os.chdir(orig_cwd)
+
+    # ASSERT: every logit element is at exactly 0.  A Gaussian-path element
+    # may legitimately be nonzero -- its center is its prior mean and must
+    # not move, so `Model.set_initval` carries its offset instead -- so the
+    # assertion is per element, against that element's own role.
+    lookup = {p.label: p for p in system.get_all_parameters()}
+    checked = 0
+    for key, vec in after.items():
+        par = lookup[key[: -len("_raw")]]
+        tf = par._raw_transform
+        vals = np.asarray(vec, dtype=float).reshape(-1)
+        for j, i in enumerate(tf["sampled_idx"]):
+            if tf["use_logit"][i]:
+                assert vals[j] == 0.0, (
+                    f"{par.label}[{i}] starts at raw = {vals[j]!r} with no "
+                    f"whitening measurement; the identity metric is "
+                    f"calibrated at raw = 0 (review 2.3.18)"
+                )
+                checked += 1
+    assert checked, "no logit element in this build to check"
+    assert _max_abs_raw(after) == 0.0, (
+        "this model is all-logit, so the whole start should be exactly 0"
+    )
