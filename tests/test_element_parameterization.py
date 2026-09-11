@@ -25,6 +25,10 @@ What these tests pin, in order:
      other parameterization's physics, its static alignment proof, and the
      start-point check that catches a non-elementwise expression;
   4. that the whole-vector paths are untouched (a bit-identical graph).
+
+Nothing here sets ``element_links``, so a user LINK aimed at an element whose
+role this file establishes is covered next door, in
+``tests/test_element_links_and_roles.py``.
 """
 
 import numpy as np
