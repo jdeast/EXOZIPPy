@@ -57,11 +57,37 @@ back; `_damped_sinhc` carries the measurements.
 
 **The flip-flop degeneracy is exact.** Swapping `ka <-> ke` and rescaling
 `V -> V*ke/ka` leaves every prediction bit-identical, with `CL` invariant and
-`V` not. Nothing breaks the symmetry: it is a real property of oral-only data,
-and truncating one mode away would be a hard bound on a posterior that hugs it
-(the failure `_restrict_bigomega_halfplane`'s removal documents). `Subject`
-sets `expects_suppressed_modes = True`, which turns on hot-chain retention
-generically.
+`V` not. `Subject` sets `expects_suppressed_modes = True`, which turns on
+hot-chain retention generically -- a pharmacology component reaching a sampler
+hook that names no component is about the strongest evidence of agnosticism
+available in the tree.
+
+Three things follow, and they are P5:
+
+- **Nothing breaks the symmetry by default.** Both solutions are a real
+  property of oral-only data, resolved in practice by an IV reference arm
+  rather than by a modelling choice, and truncating one away would be a hard
+  bound on a posterior that hugs it -- the failure
+  `_restrict_bigomega_halfplane`'s removal documents.
+- **`assume_fast_absorption: true` is the opt-in, and it is SOFT.** Outside
+  knowledge that absorption is faster than elimination, entered as
+  `potentials.soft_lower_bound` on `log10(ka/ke)` with a gradient pointing
+  back, so a chain that starts in the mirrored mode is pushed out of it rather
+  than walled in. Per subject. It reads `ka` and `ke` and never
+  `log_ka`/`log_ke`: under `cl_v` the log-rate is a REPORTED element, whose
+  value is a placeholder until `finalize_deferred` patches it *after* stage 7.
+- **The table says which rows move.** `V` and `log_v` carry a `table_note`
+  naming the degeneracy, because `CL`, `AUC` and the half-life are invariant
+  across the swap and `V` is not -- a reader of a bimodal table has to be able
+  to tell which is which. Emitted only while at least one subject is left
+  degenerate: a note that is sometimes describing a mode the fit does not
+  report is worse than no note.
+
+**The hierarchy can resolve the degeneracy where the data cannot**, and on
+these data it does: subject 12 settles in the mirrored mode when fitted alone
+(`README.md`'s validation section) and in the direct one under a population,
+pulled there by the other eleven. That is shrinkage doing exactly what it is
+for, and it is a reason the two phases are worth having in this order.
 
 ## The coordinate choice: NONMEM TRANS1 and TRANS2
 
@@ -324,11 +350,11 @@ CSV.
 
 ## Phases
 
-P0 (reporting width), P1 (these components), P3 (the coordinate choice) and P4
-(the hierarchy) are done. P2 -- still open -- adds `symbolic_physics.py` so the
-relaxation engine can accept a half-life where the model wants a clearance. P5
-does the degeneracy reporting. See `README.md` for the table and for which
-caveat copies each phase owes.
+P0 (reporting width), P1 (these components), P3 (the coordinate choice), P4
+(the hierarchy) and P5 (the degeneracy, above) are done. P2 -- the only one
+still open -- adds `symbolic_physics.py` so the relaxation engine can accept a
+half-life where the model wants a clearance. See `README.md` for the table and
+for which caveat copies each phase owes.
 
 P3 and P4 were done before P2 deliberately: they are independent, and they are
 the ones that test documented core contracts (the element roles; a
@@ -339,4 +365,7 @@ translate a clearance into a `log_ke` start either.
 
 Tests: `tests/test_pharmacokinetics_physics.py` (the forward model),
 `tests/test_pharmacokinetics_components.py` (config, maps, units, the built
-model).
+model, and the coordinate choice),
+`tests/test_pharmacokinetics_population.py` (the hierarchy, the covariate, the
+basis rules), `tests/test_pharmacokinetics_degeneracy.py` (the flip-flop at
+model level, and the opt-in bound).

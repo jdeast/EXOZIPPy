@@ -125,8 +125,8 @@ never a modelling choice.
 
 ## Status
 
-P0, P1, P3 and P4 are implemented, and P1 is validated against R (see above).
-P2 and P5 are not started. The design is in `notes/pharmacokinetics.txt`
+P0, P1, P3, P4 and P5 are implemented; P2 is not started. P1 and P4 are
+validated against R (see above). The design is in `notes/pharmacokinetics.txt`
 (private notes repository). Phases:
 
 | Phase | Scope | State |
@@ -136,7 +136,7 @@ P2 and P5 are not started. The design is in `notes/pharmacokinetics.txt`
 | P2 | Symbolic relations / relaxation-engine seeding | not started |
 | P3 | TRANS1/TRANS2 parameterization via element roles (`parameterization:`) | DONE |
 | P4 | `population`: between-subject variability + allometric covariate | DONE (implementation; see below) |
-| P5 | Flip-flop degeneracy: mode reporting and the opt-in ordering bound | not started |
+| P5 | Flip-flop degeneracy: mode reporting and the opt-in ordering bound | DONE |
 
 **P4 is not a convenience feature**, and the validation above is why: the
 canonical published fit is a MIXED-EFFECTS fit, so a rigorous population-level

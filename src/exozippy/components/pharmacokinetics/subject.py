@@ -6,8 +6,11 @@ READ README.md IN THIS DIRECTORY FIRST.
 import logging
 
 import numpy as np
+import pymc as pm
+import pytensor.tensor as pt
 from astropy import units as u
 
+from ...potentials import soft_lower_bound
 from ..component import Component, in_topology
 from ..parameterization import merge_options, mode_manifest
 
@@ -106,6 +109,27 @@ class Subject(Component):
     # Declared on Component precisely so a component with degenerate solutions
     # can opt in without the sampler layer learning any component's name.
     expects_suppressed_modes = True
+
+    # The SOFT ordering bound `assume_fast_absorption:` applies, in dex of
+    # log10(ka/ke).  `scale` is the natural unit of that quantity -- one dex
+    # is a factor of ten in the rate ratio -- and `softness` sets the
+    # transition width as a fraction of it, so the penalty runs from ~0 to
+    # ~-4.4 nats over 0.1 dex (a 26% rate ratio) and then grows at about 44
+    # nats per dex.  Firm enough to keep a chain out of the mirrored mode,
+    # gentle enough that a chain started inside it is pushed rather than
+    # stopped -- which is the whole difference from the hard truncation
+    # `_restrict_bigomega_halfplane`'s removal documents.
+    ABSORPTION_ORDER_SCALE = 1.0
+    ABSORPTION_ORDER_SOFTNESS = 0.1
+
+    # Attached to the rows the flip-flop degeneracy MOVES, so a reader of a
+    # multimodal table knows which numbers to distrust.  CL, and everything
+    # derived from it, is invariant across the swap; V is not.
+    FLIP_FLOP_NOTE = (
+        "not invariant under the flip-flop degeneracy: the mirrored solution "
+        "(ka and ke exchanged) fits identically with this quantity scaled by "
+        "ke/ka. CL, AUC and half-life are unchanged across the swap."
+    )
 
     # This component set's own prose topic.  Its "what we fitted"
     # sentence had to go under `data` until the topic band became
@@ -268,6 +292,23 @@ class Subject(Component):
                 ),
             },
             {
+                "key": "assume_fast_absorption",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Add a SOFT ordering bound ka > ke for this subject, "
+                    "which is outside knowledge that absorption is faster "
+                    "than elimination. It selects one of the two exactly "
+                    "equal solutions the flip-flop degeneracy produces. Off "
+                    "by default: both solutions are a real property of "
+                    "oral-only data, and they are resolved in practice by an "
+                    "IV reference arm, not by a modelling choice. Soft, not "
+                    "a truncation -- a chain that starts in the mirrored mode "
+                    "is pushed out of it rather than walled in."
+                ),
+            },
+            {
                 "key": "dose_unit",
                 "kind": "option",
                 "accepts": None,
@@ -295,6 +336,7 @@ class Subject(Component):
         self.weight_kg = []
         self.dose_mg = []
         self.coord_modes = []
+        self.fast_absorption = []
 
         for cfg, name in zip(self.config, self.names):
             where = f"{self.prefix} '{name}'"
@@ -303,6 +345,9 @@ class Subject(Component):
                 self._parse_dose(cfg, where, self.weight_kg[-1])
             )
             self.coord_modes.append(self._parse_parameterization(cfg, where))
+            self.fast_absorption.append(
+                self._parse_flag(cfg, "assume_fast_absorption", where)
+            )
 
         self.weight_kg = np.asarray(self.weight_kg, dtype=float)
         self.dose_mg = np.asarray(self.dose_mg, dtype=float)
@@ -329,6 +374,21 @@ class Subject(Component):
         """
         if self._has_population:
             self.population_map = np.zeros(self.n_elements, dtype=int)
+
+    @staticmethod
+    def _parse_flag(cfg, key, where):
+        """A per-subject boolean, with no truthiness.
+
+        `assume_fast_absorption: 1` is not obviously an error to a reader and
+        would be accepted by `bool()`; refusing it costs nothing and keeps the
+        one legal spelling the only spelling.
+        """
+        raw = cfg.get(key, False)
+        if not isinstance(raw, bool):
+            raise ValueError(
+                f"[{where}] '{key}:' must be true or false; got {raw!r}."
+            )
+        return raw
 
     @classmethod
     def _parse_parameterization(cls, cfg, where):
@@ -498,6 +558,26 @@ class Subject(Component):
         # -- and so its build order, and so its table -- is unchanged by the
         # existence of this block.
         self.manifest.update(hierarchy)
+        self._note_flip_flop_rows()
+
+    def _note_flip_flop_rows(self):
+        """Mark the rows the flip-flop degeneracy moves.
+
+        Only when at least one subject is left degenerate: with
+        ``assume_fast_absorption`` on everywhere the mirrored solution is
+        pushed away, so the note would be describing a mode this fit does not
+        report. A note that is sometimes wrong is worse than none, because the
+        reader cannot tell which time it is.
+        """
+        if all(self.fast_absorption):
+            return
+        for name in ("v", "log_v"):
+            entry = self.manifest.get(name)
+            if entry is None and name not in self.manifest:
+                continue
+            self.manifest[name] = merge_options(
+                entry, table_note=self.FLIP_FLOP_NOTE
+            )
 
     def _apply_population(self, system, coords):
         """Wire this component into a ``population``, if one is present.
@@ -614,9 +694,57 @@ class Subject(Component):
         """No likelihood of its own: a subject has parameters, not data.
 
         The data belong to ``assay``, which reads these parameters through its
-        own subject map -- the same split as ``star`` and an instrument.
+        own subject map -- the same split as ``star`` and an instrument. The
+        one term added here is not a likelihood either: it is the opt-in soft
+        ordering bound that picks one of the two mirrored solutions.
         """
+        self._add_absorption_order_bound(model)
         self._add_prose(system)
+
+    def _add_absorption_order_bound(self, model):
+        """A soft ``ka > ke`` for the subjects that asked for one.
+
+        SOFT, and that is the ruling rather than an implementation detail. The
+        two flip-flop solutions are exactly equal in likelihood and both are a
+        real property of oral-only data; truncating one away would be a hard
+        bound on a posterior that hugs it, which is the failure
+        ``_restrict_bigomega_halfplane``'s removal documents. This is outside
+        knowledge -- that absorption is faster than elimination -- entered as
+        a penalty with a gradient pointing back, so a chain that starts in the
+        mirrored mode is pushed out of it rather than walled in.
+
+        Reads ``ka`` and ``ke``, never ``log_ka``/``log_ke``: under ``cl_v``
+        the log-rate this would want is a REPORTED element, whose value is a
+        placeholder until ``finalize_deferred`` patches it AFTER stage 7. The
+        two derived rates are real in every basis.
+        """
+        selected = np.flatnonzero(self.fast_absorption)
+        if not selected.size:
+            return
+
+        index = pt.as_tensor_variable(selected.astype("int64"))
+        # log10(ka/ke) > 0, indexed rather than masked: pt.where over a
+        # log-density is the where-trap, and selecting the elements up front
+        # is both safer and cheaper than evaluating a penalty for subjects
+        # that did not ask for one.
+        ratio = pt.log10(self.ka.value[index] / self.ke.value[index])
+        pm.Potential(
+            f"{self.prefix}.absorption_order",
+            pt.sum(
+                soft_lower_bound(
+                    ratio,
+                    0.0,
+                    self.ABSORPTION_ORDER_SCALE,
+                    softness=self.ABSORPTION_ORDER_SOFTNESS,
+                )
+            ),
+        )
+        logger.info(
+            "[%s] assuming ka > ke (a soft bound, not a truncation) for %s; "
+            "the mirrored flip-flop solution is penalized, not excluded.",
+            self.prefix,
+            ", ".join(str(self.names[i]) for i in selected),
+        )
 
     def _add_prose(self, system):
         """Declare the modeling-draft sentence, at the site that owns it."""
@@ -643,6 +771,41 @@ class Subject(Component):
             section=self.prose_topic,
             key=f"{self.prefix}.model",
         )
+
+        # The degeneracy, described where it is created.  It is a property of
+        # the model rather than of this dataset, so it is stated whenever it
+        # is left in -- a reader of a bimodal posterior needs to know that the
+        # two modes are exactly equal by construction and not a feature of
+        # the data.
+        assumed = [
+            name for name, on in zip(self.names, self.fast_absorption) if on
+        ]
+        if len(assumed) < n:
+            prose.add(
+                "Oral dosing alone does not distinguish absorption from "
+                "elimination: exchanging $k_a$ and $k_e$ and scaling $V/F$ by "
+                "$k_e/k_a$ reproduces every predicted concentration exactly, "
+                "so the likelihood has two equal modes. Clearance, and "
+                "therefore the area under the curve and the terminal "
+                "half-life, is the same in both; the volume of distribution "
+                "is not.",
+                section=self.prose_topic,
+                key=f"{self.prefix}.flipflop",
+            )
+        if assumed:
+            prose.add(
+                "For "
+                + (
+                    "every subject"
+                    if len(assumed) == n
+                    else ", ".join(assumed)
+                )
+                + " we broke that symmetry with a soft ordering constraint "
+                "$k_a > k_e$, penalizing rather than excluding the mirrored "
+                "solution.",
+                section=self.prose_topic,
+                key=f"{self.prefix}.absorption_order",
+            )
 
     def compile_plotters(self, model, system):
         pass
