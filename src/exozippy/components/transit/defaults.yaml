@@ -19,8 +19,12 @@ transit:
     latex: "F_0"
     description: "Relative flux baseline"
   jitter_variance:
+    # Because the light curve is normalized to ~1, a variance of 1 is a
+    # 100%-of-signal noise term, which follows our conservative uniform
+    # prior standard.  The lower bound stays a wide backstop: the binding
+    # one is per-instrument and data-derived (Instrument._jitter_floor).
     lower: -1000.0
-    upper: 100000.0
+    upper: 1.0
     initval: 0.0
     init_scale: 0.000001
     unit: ""

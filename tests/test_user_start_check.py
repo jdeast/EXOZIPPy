@@ -274,3 +274,53 @@ def test_a_compile_failure_does_not_break_startup(monkeypatch):
 
     monkeypatch.setattr(diagnostics_mod.pytensor, "function", _boom)
     assert a.check_user_starts() == []
+
+
+def test_an_engine_recorded_contradiction_names_the_other_pin(monkeypatch):
+    """
+    Given two user pins the same relation links, which cannot both hold,
+    When the check classifies the resulting miss,
+    Then it says 'overspecified' and NAMES the other pin.
+
+    The mechanism alone is not advice.  examples/galactic_model pinned
+    star.BulgeTarget.mass = 0.5 AND star.BulgeTarget.logmass = -0.3, and
+    log10(0.5) = -0.30103, so the model started at 10**-0.3 = 0.501187.
+    The ledger kept mass = 0.5 untouched, so the value-only reading is
+    "the derivation cannot preserve this" -- true of the mechanism, and it
+    sends the user looking for a broken derivation instead of at the
+    second pin they wrote.  `_relax_equation` already recorded the
+    relation and both paths; this asserts the report uses them.
+    """
+    # Arrange -- the miss, plus the diagnostic the engine files for it.
+    p = _FakeParam("star.mass", names=["BulgeTarget"], unit="solMass")
+    a = _auditor(
+        [p],
+        {"star.BulgeTarget.mass": {"initval": 0.5}},
+        ledger={"star.0.mass": 0.5},
+    )
+    a.system.config_manager.diagnostics = [
+        {
+            "severity": "error",
+            "message": (
+                "Over-constrained relation 'star.0.mass = "
+                "10**star.0.logmass' is violated (relative error "
+                "0.002369): every parameter it links was set explicitly, "
+                "so no value can be adjusted to satisfy it."
+            ),
+            "param_paths": ["star.0.logmass", "star.0.mass"],
+        }
+    ]
+    _with_produced(monkeypatch, [0.501187])
+
+    # Act
+    (found,) = a.check_user_starts()
+
+    # Assert
+    assert found["reason"] == "overspecified", (
+        "a relation the engine itself called over-constrained was reported "
+        "as an approximation, which points the user at the wrong thing"
+    )
+    assert "star.0.logmass" in found["detail"], (
+        "the report must name the OTHER pin; 'something had to give' "
+        "without saying what gave is not actionable"
+    )

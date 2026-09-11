@@ -211,6 +211,31 @@ class ModelAuditor:
         ledger = dict(getattr(cm, "_last_resolved", None) or {})
         solved_by = dict(getattr(cm, "_last_solved_by", None) or {})
 
+        # THE ENGINE ALREADY KNOWS about one whole class of these, and it
+        # names the relation: when every symbol of a violated relation is
+        # user-set, nothing can be adjusted and _relax_equation records an
+        # "over-constrained" diagnostic.  Without reading it, such a miss
+        # reports as "the derivation cannot preserve your value", which is
+        # true of the mechanism and useless as advice -- the fix is to drop
+        # one of two pins, and the user has to be told WHICH.  Measured on
+        # examples/galactic_model, which pinned mass = 0.5 and
+        # logmass = -0.3 (log10(0.5) = -0.30103) and started at 10**-0.3.
+        #
+        # NOT every double pin lands here: the clause needs ALL symbols at
+        # user rank, so a relation carrying one derived symbol is invisible
+        # to it (KMT-2019-BLG-1806 pins both rho and the source radius, and
+        # rho's relation also holds theta_E at rank 60).  This reads what
+        # the engine recorded; it does not re-derive the class.
+        contradiction_of = {}
+        for entry in getattr(cm, "diagnostics", None) or []:
+            if entry.get("severity") != "error":
+                continue
+            paths = list(entry.get("param_paths") or [])
+            for p in paths:
+                contradiction_of.setdefault(
+                    str(p), (entry.get("message", ""), paths)
+                )
+
         # Invert get_display_label -- the SAME mapping check_unused_yaml
         # builds, so the two checks agree on which key names which element
         # and all three user spellings (star.L1.mass / star.0.mass /
@@ -288,12 +313,38 @@ class ModelAuditor:
 
             held = ledger.get(key)
             who = solved_by.get(key)
-            if held is None:
-                parts = key.split(".")
-                if len(parts) == 3:
-                    idx_key = f"{parts[0]}.{i}.{parts[-1]}"
-                    held = ledger.get(idx_key)
-                    who = who or solved_by.get(idx_key)
+            parts = key.split(".")
+            idx_key = f"{parts[0]}.{i}.{parts[-1]}" if len(parts) == 3 else key
+            if held is None and idx_key != key:
+                held = ledger.get(idx_key)
+                who = who or solved_by.get(idx_key)
+
+            # An engine-recorded contradiction outranks every other reading:
+            # it already knows the relation and the other pin.
+            clash = contradiction_of.get(key) or contradiction_of.get(idx_key)
+            if clash is not None:
+                message, paths = clash
+                others = [q for q in paths if q not in (key, idx_key)]
+                findings.append(
+                    {
+                        "key": key,
+                        "requested": requested,
+                        "produced": got,
+                        "rel": rel,
+                        "reason": "overspecified",
+                        "detail": (
+                            "you also set "
+                            + (
+                                ", ".join(others)
+                                if others
+                                else "a linked parameter"
+                            )
+                            + ", which the same relation fixes; both cannot "
+                            "hold, so drop one. " + message
+                        ),
+                    }
+                )
+                continue
 
             # THE LEDGER IS IN INTERNAL UNITS (config.py:890,
             # "internal_path -> internal value") and `requested` came from
