@@ -51,8 +51,17 @@ It is the canonical nonlinear mixed-effects example, and ships with R as
 ## The model
 
 One compartment, first-order absorption, single oral dose -- NONMEM's ADVAN2,
-nlme's `SSfol`. Each subject has its own apparent clearance `CL/F`, apparent
-volume `V/F`, and absorption rate `ka`, sampled in log10.
+nlme's `SSfol`. Each subject has its own apparent clearance `CL/F`, absorption
+rate `ka` and elimination rate `ke`, sampled in log10, with the apparent volume
+`V/F = CL/ke` derived. That basis (`parameterization: "cl_ke"`) is `SSfol`'s,
+and is chosen deliberately: see the config's own comment and "Validation"
+below.
+
+The twelve subjects are drawn from a **population** -- a typical value, an
+allometric scaling with body weight, and a log-normal between-subject
+deviation per subject, written non-centred. That is what makes this population
+PK rather than twelve separate fits, and it is what the canonical published
+fit of these data does.
 
 Bioavailability `F` is not identifiable from oral dosing alone, so it is fixed
 at 1 and every clearance and volume here is an **apparent** value. A reader who
@@ -63,11 +72,19 @@ takes `CL/F` for `CL` is wrong by `1/F`.
 Named explicitly, because they are exactly the kind of choice that looks
 settled in a config file and is not:
 
-1. **Every subject is independent.** This is *not* population PK in the field's
-   sense. There is no between-subject variability model, no shrinkage, and no
-   covariate model -- so a subject with uninformative data is constrained only
-   by the wide priors in `defaults.yaml`, not pulled toward a population mean.
-   That component (`population`) is P4 and does not exist yet.
+1. **The covariate model is allometric and its exponents are fixed.**
+   Clearance scales as `WT^0.75` and volume as `WT^1` about a 70 kg
+   reference, which is the field's default and not a measurement on this
+   cohort. They are pinned parameters, so freeing one (`population.beta_cl:
+   {sigma: 0.2}`) or switching it off (`{initval: 0.0}`) is a line in the
+   params file -- but as shipped they encode a convention. The canonical
+   `nlme` fit of these data uses no covariate at all and an implied exponent
+   of 1, and the two agree at the reference weight and differ by up to ~6% at
+   the ends of this cohort's weight range.
+
+   Related: the between-subject variability is **diagonal**. Real popPK
+   models frequently estimate a correlation between CL and V, and this one
+   cannot.
 2. **The `t = 0` samples are kept.** Nine subjects have exactly `conc = 0` at
    `t = 0`, and three have 0.15, 0.24 and 0.74 mg/L. The model predicts
    *exactly* zero at `t = 0`, so those three contribute residuals that the
@@ -108,9 +125,11 @@ this model on this dataset. Headlines:
   i.e. it is the same function);
 * per-subject `CL/F` agrees with R's `nlsList` -- the estimator-matched
   comparison -- to **3.6% on every one of the 12 subjects**, median ratio 0.990;
-* population `CL/F` and `t_half` land within ~8% and ~5% of `nlme`'s fixed
-  effects, which is **indicative only**: `nlme` is a mixed-effects fit and this
-  component has no population model yet, so the two are different estimators.
+* with the population model, the mixed-effects typical values match `nlme`'s
+  to better than **0.5%** on all four of `ke`, `t_half`, `ka` and `CL/F`, and
+  the between-subject spreads sit inside the posterior's own 95% intervals --
+  including reproducing `nlme`'s finding that `ke` has essentially no
+  between-subject variability.
 
 The full table, including why subject 12 differs (the flip-flop) and why
 subject 9 differs for an unrelated reason (`ka` unidentifiable above ~5/hr with

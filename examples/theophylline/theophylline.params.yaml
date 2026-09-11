@@ -18,8 +18,19 @@
 # `subject.S1.log_cl`.  Most specific wins.
 #
 # NOTE the units.  A value written against `cl` is in L/hr and one written
-# against `log_cl` is in dex; the two are the same quantity in different
-# coordinates and the relaxation engine will solve for whichever you did not
-# write.  That is also how you can seed this fit by HALF-LIFE if that is what
-# your reference quotes -- but not yet: the symbolic relations that make
-# t_half an acceptable input are P2 (see the component README).
+# against `log_cl` is in dex.
+#
+# AND NOTE WHICH ONE REACHES THE SAMPLER, because today only one does.  A
+# START VALUE has to be written against a SAMPLED coordinate: `log_cl` (or
+# `log_ke`, or `log_v`, or `log_ka`, depending on this subject's
+# `parameterization:`).  Writing one against `cl`, or `t_half`, does not move
+# the fit -- the relaxation engine can translate between coordinates only
+# where a component supplies symbolic relations, and this one does not yet;
+# that is P2 (see the component README).  A run through `exozippy` says so:
+# its start-value audit reports a user start that did not reach the model.
+#
+# A PRIOR is different and does work on either: `subject.S1.cl: {mu, sigma}`
+# is a Gaussian on the derived clearance, which is a perfectly good
+# constraint.  The one case where it is silently NOT applied is a coordinate
+# your `parameterization:` makes `reported` -- `cl` itself under
+# `parameterization: ke_v` -- and the run warns when that happens.

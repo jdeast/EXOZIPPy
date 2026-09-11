@@ -111,11 +111,75 @@ The residual error models also differ in form -- ours is combined
 the 132 real observations has rms **0.813 mg/L** against `nlme`'s 0.709, a
 ratio of 1.15.
 
+### 4. Population level vs `nlme` (estimator-matched, 2026-09-11)
+
+**This is the comparison section 3 could not make.** With the `population`
+component (P4) the fit is mixed-effects like `nlme`'s, and in the same
+coordinate basis: `parameterization: cl_ke` puts the random effects on
+(lKe, lKa, lCl), which is what `SSfol` is parameterized in. A diagonal set of
+omegas in one basis is not diagonal in another, so this is not a detail --
+without it the two models are different models.
+
+The shipped `examples/theophylline` config, as it stands: 4 chains, 2000 tune
++ 2000 draws, `target_accept: 0.95`. Max Rhat 1.001, min ESS 2016, 48
+divergences in 8000 draws (0.6%) which sit in the upper tail of `omega_ka` --
+the least identified quantity in the fit -- and not at an omega -> 0 boundary.
+
+**Typical values, all four within 0.5%:**
+
+| quantity | ours | `nlme` | ratio |
+|----------|------|--------|-------|
+| `ke` | 0.08551 /hr | 0.085894 | 0.9955 |
+| `t_half` | 8.106 h | 8.0698 | 1.0045 |
+| `ka` | 1.5849 /hr | 1.592813 | 0.9950 |
+| `CL/F` at 70 kg | 2.7797 L/hr | 2.7768 (0.039668 x 70) | 1.0011 |
+
+`nlme`'s clearance is per kg -- an allometric exponent of exactly 1 -- while
+this fit uses the field-standard 0.75 about a 70 kg reference, so the two
+covariate models agree at the reference weight and diverge by at most ~6% at
+the ends of this cohort's 54.6-86.4 kg range. That difference is a modelling
+choice, not a discrepancy.
+
+**Between-subject variability.** Our `omega` is the SD of the base-10
+logarithm; `nlme`'s is of the natural one, a factor of ln(10) = 2.3026 apart.
+Converted:
+
+| | ours (ln units) | `nlme` | |
+|---|---|---|---|
+| `lCl` | 0.228 | 0.1669 | `nlme` inside our 95% interval |
+| `lKa` | 0.783 | 0.6439 | `nlme` inside our 95% interval |
+| `lKe` | 0.094 | 1.9e-05 | see below |
+
+**The collapsed `lKe` reproduces qualitatively and must not be claimed as a
+numerical match.** `nlme` drives that random effect to 1.9e-05 -- effectively
+exactly zero. Ours is the smallest of the three by a factor of eight
+(`omega_ke` 0.041 dex against 0.099 and 0.34) with a 95% interval reaching to
+0.003 dex, and a posterior for a positive scale parameter cannot reach zero,
+so "consistent with no between-subject variability in `ke`" is what our fit
+says and is the same finding. It is not the same number, and the design note
+that called reproducing this "a genuine test for P4" is satisfied by the
+former, not the latter.
+
+Residual error: ours is combined (`sigma_add` 0.36 mg/L, `sigma_prop` 0.122),
+`nlme`'s additive-only (0.7092), so only magnitudes compare -- our combined
+sigma has rms **0.786 mg/L** over the 132 observations against 0.709, a ratio
+of 1.11.
+
+**The hierarchy resolved subject 12's flip-flop**, which is worth recording
+because it is shrinkage doing exactly what it is for. Fitted alone that
+subject settled in the mirrored mode (section 2); under a population it is at
+`ka` = 0.85/hr, `ke` = 0.093/hr, `V/F` = 26.0 L -- the direct mode, and close
+to `nlsList`'s 24.1 L -- pulled there by the other eleven. Subject 9's `ka`
+remains large (6.8/hr) and unidentified, for the unrelated reason section 2
+gives.
+
 ### What this does and does not establish
 
-**Established:** the code computes the model it claims to (1), and it recovers
+**Established:** the code computes the model it claims to (1); it recovers
 per-subject estimates matching an independent reference implementation on real
-data (2).
+data (2); and, with the population component, it recovers that implementation's
+mixed-effects typical values to better than 0.5% and its between-subject
+variability within the posterior's own intervals (4).
 
 **NOT established:** that the modelling choices are right for anyone's data. No
 domain expert has reviewed the priors, the error model, the handling of the
@@ -146,21 +210,17 @@ variability, no shrinkage, and no CV%/eta-shrinkage to report.
 
 **What P4 delivers, and what it does not.** The `population` component exists,
 the hierarchy is non-centred, the allometric covariate is in, CV% is reported
-as a derived parameter with its own credible interval, and the coordinate basis
-R's `nlme` fits in (`parameterization: cl_ke`) is available so the comparison
-can be made in the basis the published random effects were estimated in. Two
-things are still owed:
+as a derived parameter with its own credible interval, and the fit is done in
+the coordinate basis R's `nlme` uses (`parameterization: cl_ke`) so that the
+comparison is of the same model. One thing is still owed:
 
 * **eta-shrinkage is not reported.** It is a function of the finished TRACE,
   not of the model, and there is no channel for a component to contribute a
   post-fit number to the report -- see `pharmacokinetics.md`, which states
   exactly what such a channel has to carry.
-* **the population-level comparison against `nlme` has not been recorded
-  here.** The numbers in "Validation" above are P1's, against `nlsList`, and
-  remain true of the no-population fit. Until a hierarchical fit is run and
-  its typical values, CVs and residual error are compared to the `nlme` fit
-  quoted there, P4's implementation is tested (`tests/test_pharmacokinetics_population.py`)
-  but not validated, and this file must keep saying so.
+* **eta-shrinkage is the only thing P4 owes and does not deliver** -- the
+  population-level comparison against `nlme` is in section 4 of Validation
+  above.
 
 P0 comes first because reporting a pharmacokinetic result in the astronomy
 convention (median + 68%) would be misread as the 95% interval that field uses,

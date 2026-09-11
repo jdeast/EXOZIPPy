@@ -219,7 +219,7 @@ any component. Both components were written against `Component` + `Parameter` +
 the manifest vocabulary + the four-file layout, as `components.md` declares,
 and needed no change to the core to build, sample, and report.
 
-Six places where the fit was not frictionless:
+Seven places where the fit was not frictionless:
 
 1. **The reporting convention was hardcoded, and it mattered most.** Median +
    68.3% (1-sigma) is astronomy's; pharmacometrics reports 95%. Fixed before
@@ -324,6 +324,22 @@ Six places where the fit was not frictionless:
    static, fixed at manifest time) and the prose collector (per sentence, but
    built at stage 7, before any sampling). Deferred rather than guessed at,
    and it is the one thing P4 owes that P4 does not deliver.
+
+7. **The start-value audit reports the right miss with the wrong reason.**
+   The user-start contract holds -- `diagnostics.check_user_starts` does catch
+   `subject.S1.cl: {initval: 10.0}` reaching nothing, which is what matters --
+   but it classifies it as *"your value was kept, but the derivation
+   reproduces it only approximately"* on a **72% miss** (measured: requested
+   10.0, produced 2.818). The classifier is binary: the ledger changed ->
+   `overspecified`, the ledger was kept -> `approximate`. This is a third
+   case, and it is the one a component with no `symbolic_physics.py` produces
+   for every derived parameter: the ledger kept the value because nothing in
+   the engine could *use* it, so no derivation was attempted, approximately or
+   otherwise. The remedy differs too -- "write the start against the sampled
+   coordinate, or give the component a relation" -- which is the same shape as
+   the fix commit 8ed321a9 made for a neighbouring case. Not fixed here
+   because choosing the discriminator is a policy question that touches every
+   astronomy fit's wording, and this phase had no business making it.
 
 Two smaller notes: `utilities/zenodo.fetch_assets` is generic despite its name
 and is reused here for a non-Zenodo URL, but it prints "Downloading ... from
