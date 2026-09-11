@@ -991,6 +991,7 @@ class SED(Component):
         for d, draw in enumerate(plot_obj.draws):
             for nstar in range(plot_obj.nstars):
                 name = plot_obj.star_names[nstar]
+                # plot the per-star spectrum (translucent line, no marker)
                 y_spec = np.log10(
                     plot_obj.flux_model_draws[d][nstar] * wave_ang
                 )
@@ -1049,6 +1050,7 @@ class SED(Component):
             label = plot_obj.point_labels[p]
             color = id_color[label]
             marker = id_marker[label]
+            edgecolor = "#FFFFFF"
 
             ax_top.errorbar(
                 x[p : p + 1],
@@ -1061,7 +1063,8 @@ class SED(Component):
                 linestyle="None",
                 zorder=3,
             )
-            ax_top.scatter(x[p], y[p], color=color, marker=marker, zorder=3)
+            ax_top.scatter(x[p], y[p], color=color, marker=marker, edgecolors=edgecolor, 
+                           s=85, linewidths=1.5, zorder=3)
 
         # ---- residuals: one per filter ROW (the actual measurement),  ----
         # ---- against its combined (blend/diff) prediction              ----
@@ -1120,7 +1123,9 @@ class SED(Component):
                     color="none",
                     marker=id_marker[name],
                     markerfacecolor=id_color[name],
-                    markeredgecolor=id_color[name],
+                    markeredgecolor="#FFFFFF",
+                    markeredgewidth = 1.5,
+                    markersize=8,
                     alpha=1.0,
                 )
                 legend_handles.append((line, marker))
@@ -1175,7 +1180,9 @@ class SED(Component):
                         color="none",
                         marker=id_marker[combo],
                         markerfacecolor=id_color[combo],
-                        markeredgecolor=id_color[combo],
+                        markeredgecolor="#FFFFFF",
+                        markeredgewidth=1.5,
+                        markersize=8,
                     )
                 )
                 labels.append(combo)
