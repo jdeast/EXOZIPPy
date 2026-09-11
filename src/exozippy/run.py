@@ -884,6 +884,25 @@ def _run_fit(config, gui, user_params=None):
                 system.apply_polished_starts(polished, seed_indices_pre)
                 raw_start = system.get_raw_start(model)
 
+            # Re-center the whitening anchor on the (now polished) start, so
+            # raw = 0 IS the start and `model.initial_point()` is correct BY
+            # CONSTRUCTION on every path (review 4.3.1).  HERE, between the
+            # polish and the probe, because the probe must measure its
+            # contours around the NEW anchor -- it reads the pytensor.shared
+            # anchor through the model, and its raw start is re-read below,
+            # so nothing carries a stale copy across.
+            #
+            # Unconditional rather than gated on `polish_steps`: the
+            # Gaussian-path half is a `Model.set_initval` that is worth
+            # making structural even when it changes nothing, and the logit
+            # half is a no-op on an unpolished start.  Not on the reuse path
+            # (this whole block) -- there the anchor comes out of
+            # whitening.json, which is the anchor the draws were sampled
+            # under, and re-centering on a start nothing will sample from
+            # would silently re-coordinate the trace.
+            system.recenter_whitening_anchor(model)
+            raw_start = system.get_raw_start(model)
+
         whiten_report = None
         # Fresh run -> measure + persist.  Reuse -> restore only: the
         # whitening is a property of the draws being decoded, so it is
@@ -1157,6 +1176,13 @@ def _run_fit(config, gui, user_params=None):
                 from pymc.sampling.jax import sample_jax_nuts
 
                 chain_method = sampler_cfg.get("chain_method", "parallel")
+                # No `initvals=`: the start is `Model.initial_point()` and
+                # `System.recenter_whitening_anchor` made that the polished
+                # start by construction (review 4.3.1).  VERIFIED against
+                # pymc 6.3.2 and 6.0.0 -- `sample_jax_nuts` with no initvals
+                # draws the same first point, bit for bit, as it did with
+                # them.
+                #
                 # jitter=False: the JAX samplers default to jittering each
                 # chain by U(-1, 1) in raw (whitened) space, i.e. +/- one
                 # whitening scale per parameter.  We deliberately construct
@@ -1172,21 +1198,29 @@ def _run_fit(config, gui, user_params=None):
                     tune=tune,
                     chains=chains,
                     target_accept=target_accept,
-                    initvals=internal_start,
                     jitter=sampler_cfg.get("jitter", False),
                     chain_method=chain_method,
                     nuts_sampler=method,
                     random_seed=seed,
                 )
             elif method == "nutpie":
-                # nutpie ignores initvals; it uses init_mean: a flat float64
-                # array in model.free_RVs order (raw/unconstrained space).
-                nutpie_init_mean = np.concatenate(
-                    [
-                        np.asarray(raw_start[v.name], dtype=float).ravel()
-                        for v in model.free_RVs
-                    ]
-                )
+                # No start is passed, and here that FIXES the branch rather
+                # than merely simplifying it (review 4.3.1).  It used to hand
+                # nutpie `init_mean`, a flat float64 array in free_RVs order,
+                # on the belief that nutpie ignores `initvals` and reads
+                # that instead.  MEASURED against nutpie 0.16.11 + pymc
+                # 6.3.2: `init_mean` is inert for a pymc-compiled model
+                # through EITHER spelling (`nuts_sampler_kwargs=` or the
+                # newer `nuts=`).  The mechanism is in nutpie's own source --
+                # `CompiledPyMCModel._make_model(init_mean)` takes the
+                # argument and never uses it, passing
+                # `self.initial_point_func` to `PyMcModel` instead -- so the
+                # start comes from the MODEL, and this branch was a second
+                # live instance of 1.3.6's bug class.  Probed three ways
+                # (init_mean, no start, set_initval): the first two give an
+                # identical first draw and the third moves it by exactly the
+                # requested offset.
+                #
                 # Wrapped like the other two pm.sample branches, and it pays
                 # off here: nutpie.sample catches a KeyboardInterrupt and
                 # returns `background_sampler.abort()`, i.e. the draws taken
@@ -1200,7 +1234,6 @@ def _run_fit(config, gui, user_params=None):
                         chains=chains,
                         nuts_sampler="nutpie",
                         target_accept=target_accept,
-                        nuts_sampler_kwargs={"init_mean": nutpie_init_mean},
                         cores=cores,
                         random_seed=seed,
                         return_inferencedata=True,
@@ -1246,6 +1279,55 @@ def _run_fit(config, gui, user_params=None):
                             )
                             raise KeyboardInterrupt
 
+                # NO start is passed, and the reason is structural rather
+                # than an omission (review 4.3.1, building on 1.3.6).  The
+                # chains begin at `Model.initial_point()`, and
+                # `System.recenter_whitening_anchor` above made that the
+                # POLISHED start by construction: the logit anchor was
+                # re-centered onto it (free -- section C's correction cancels
+                # the raw N(0,1), so the anchor is pure parameterization) and
+                # the Gaussian-path elements, whose center IS their prior
+                # mean and so may not move, were pushed through
+                # `Model.set_initval`.  1.3.6 proposed `initvals=` here
+                # (PR #263) and that was HELD and superseded by this: it
+                # starts at a better PHYSICAL point and a far worse RAW one
+                # (measured on examples/kelt4 RV-only, max |raw| = 684 under
+                # `measure_scales: false`, 10.58 with it on), and with this
+                # branch's identity metric on raw that is what made a 1-draw
+                # integration test scatter to 6.7 Mjup.  Re-centering gives
+                # both: the polished physical point AND raw = 0, where the
+                # metric is calibrated.  It also kills the bug CLASS rather
+                # than the instance -- this branch was one of five passing a
+                # start by five spellings, and that only dies when there is
+                # nothing to pass.  See also review 2.3.18: the polish stores
+                # its displacement in PRELIMINARY scale units and
+                # `set_whitening` was what re-expressed it, so
+                # `measure_scales: false` left the displacement full-size;
+                # the re-centering runs before that guard and so is
+                # independent of the flag.
+                #
+                # The explicit `step` is KEPT, and after review 5.3.3 deleted
+                # the dead `init` key that is the only thing still holding
+                # the door shut.  pymc's own docstring says of `init`, "This
+                # argument is ignored when manually passing the NUTS step
+                # method", and of `initvals`, "Initialization methods for
+                # NUTS (see ``init`` keyword) can overwrite the default" --
+                # so a LIVE `init` (this branch passing one, or a future pymc
+                # honoring it alongside a step) could let an adapt_diag
+                # jitter move the chain off the polished point, the exact
+                # pathology seed_polish exists to prevent.  Passing no start
+                # and no init, with the step explicit, is what makes
+                # `Model.initial_point()` authoritative.  The upstream half
+                # of that is pinned in tests/test_nuts_start.py.
+                #
+                # pm.NUTS(target_accept=) with no scaling/potential builds a
+                # QuadPotentialDiagAdapt IDENTITY metric on raw -- the right
+                # metric precisely because the graph is already whitened --
+                # and what the old bug cost was the CO-LOCATION of the start
+                # with that metric, not the metric itself.  The polish runs
+                # BEFORE the probe so the scales are measured around the
+                # polished point; re-centering is what makes the start sit
+                # there too.
                 step = pm.NUTS(target_accept=target_accept)
                 with sigterm_as_interrupt():
                     idata = pm.sample(

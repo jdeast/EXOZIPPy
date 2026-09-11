@@ -3047,13 +3047,28 @@ class Parameter:
         contour at exactly one raw unit, which is the "curvature = -1"
         conditioning the old init_scale tuning loop approximated by hand.
 
-        Deliberately does NOT recompute logit_q_inits / q_floors: the
-        anchor (raw = 0) stays exactly where build_pymc placed it, so the
-        update is a pure scale change in logit space.  A NONZERO
-        ``raw_initval`` (a pre-whitening seed polish moved the start off the
-        anchor) is rescaled by 1/multiplier in the same pass -- lq = lq0 +
-        scale*raw is invariant under (scale, raw) -> (scale*m, raw/m) -- so
-        the start stays the same PHYSICAL point the probe measured around.
+        Deliberately does NOT move the anchor (``logit_q_inits``) or
+        recompute ``q_floors``: this is the SCALE half of the whitening, and
+        the anchor half belongs to ``recenter_on_start``, which runs once
+        BEFORE the probe.  Both are legal to move for the same reason, and
+        it is a statement about the DENSITY rather than about invariance:
+        section C's correction cancels the raw N(0,1) symbolically, so on a
+        logit element ``sv_logit_q_inits`` and ``sv_scale_logits`` are BOTH
+        pure parameterization and neither enters the posterior.
+
+        What the rescale has to preserve is therefore not the density but
+        the physical START, and after ``recenter_on_start`` that is free:
+        ``raw_initval`` is 0 on every logit element, the start is at the
+        anchor, and ``lq = lq0 + scale*0 == lq0`` for ANY scale -- so the
+        start cannot move however far the scale does.  (This retires the
+        older argument, which read "the anchor stays where build_pymc put
+        it, so the update is a pure scale change in logit space", and leaned
+        on ``lq = lq0 + scale*raw`` being invariant under ``(scale, raw) ->
+        (scale*m, raw/m)``.  That invariance is still what makes the
+        ``raw_initval /= m`` line below correct, and it is still exercised
+        -- by a caller that rescales a displaced start WITHOUT recentering
+        first, which is what a tool or a test may legitimately do -- but it
+        is no longer what carries the production path.)
         Elements whose raw N(0,1) IS the prior -- every NON-LOGIT element,
         i.e. anything without two finite bounds -- are never touched.  Their
         scale is the prior width (sigma when one was given, init_scale when
@@ -3115,9 +3130,15 @@ class Parameter:
                 # (PTDE uses it to disperse chains).
                 post[j] = m
 
-        # Keep a polished (nonzero) raw start pinned to the same physical
-        # point through the rescale.  Historically raw_initval was always 0
-        # for rescaled elements, making this a silent no-op.
+        # Keep a DISPLACED (nonzero) raw start pinned to the same physical
+        # point through the rescale, via the (scale, raw) -> (scale*m, raw/m)
+        # invariance.  On the production path this is a no-op again, and this
+        # time by construction rather than by accident: recenter_on_start has
+        # already folded the polish into the anchor and zeroed raw_initval on
+        # every logit element, and 0/m == 0.  It is live for any caller that
+        # rescales without recentering first (whitening's own toy fixtures,
+        # tests/test_polish.py's invariance test), and dropping it would make
+        # such a rescale silently move the start.
         if self.raw_initval is not None:
             ri = np.asarray(self.raw_initval, dtype=float).reshape(-1).copy()
             if ri.size == len(idx):
@@ -3128,14 +3149,136 @@ class Parameter:
         self._apply_whitening_state(scale_logits, gauss_scales)
         return post
 
-    def _apply_whitening_state(self, scale_logits, gauss_scales):
-        """Push new whitening scale vectors into the shared variables and
-        keep every mirror consistent: the frozen forward transform
+    def recenter_on_start(self):
+        """Fold a displaced raw start into the ANCHOR, so raw = 0 IS the start.
+
+        The whitening has two halves and this is the anchor half (review
+        4.3.1); ``set_whitening`` is the scale half.  Called once, from
+        ``System.recenter_whitening_anchor``, between the seed polish and the
+        whitening probe -- so the probe measures its contours around the new
+        anchor, which is also the polished point.
+
+        WHY THIS IS FREE, and why it is done here rather than by adding an
+        offset: on a LOGIT element section C's correction potential cancels
+        the raw N(0,1) prior symbolically, so ``lq = anchor + scale*raw`` is
+        PURE PARAMETERIZATION -- the anchor is no more a posterior term than
+        the scale is, and moving it changes no density.  ``raw = 0`` then maps
+        to the polished physical value by construction, and every consumer of
+        the start (``Model.initial_point()`` included) is correct without
+        being handed anything.
+
+        NON-LOGIT elements are deliberately untouched, and the reason is the
+        mirror image.  There ``val = gaussian_mus + gaussian_scales * raw``
+        with ``raw ~ N(0,1)`` AS THE PRIOR, and ``gaussian_mus`` is the prior
+        MEAN whenever the user gave an explicit ``mu``: folding a start
+        displacement into it would move the prior, i.e. change the model
+        rather than the coordinates.  An added offset fails the same way by a
+        longer route -- ``val = mu + scale*(raw + off)`` with ``raw ~ N(0,1)``
+        has prior ``N(mu + scale*off, scale)``.  Those elements keep their
+        nonzero ``raw_initval``, and ``System.recenter_whitening_anchor``
+        hands it to ``Model.set_initval`` instead.
+
+        THE PHYSICAL START DOES NOT MOVE, exactly: the new anchor is the old
+        ``lq`` AT the start, so the value ``raw = 0`` decodes to is the value
+        the displaced coordinate decoded to.  That is what makes a
+        re-centered build's start logp bit-identical to the same physical
+        start in the old coordinates.
+
+        Returns the list of element indices whose anchor moved (empty when
+        nothing was displaced, which is every unpolished run).
+        """
+        ws = self._whiten_state
+        tf = self._raw_transform
+        if ws is None or tf is None or self.raw_initval is None:
+            return []
+        idx = tf["sampled_idx"]
+        ri = np.asarray(self.raw_initval, dtype=float).reshape(-1)
+        if ri.size != len(idx):
+            return []
+
+        anchors = ws["sv_logit_q_inits"].get_value().copy()
+        scale_logits = ws["sv_scale_logits"].get_value()
+        new_ri = ri.copy()
+        moved = []
+        for j, i in enumerate(idx):
+            if not tf["use_logit"][i] or ri[j] == 0.0:
+                continue
+            lq_start = anchors[i] + scale_logits[i] * ri[j]
+            if not np.isfinite(lq_start):
+                # Nothing to fold: a non-finite raw start has no anchor to
+                # move to, and silently pinning it at raw = 0 would invent a
+                # physical start.  Leave the displacement where it is so the
+                # existing start-value checks keep reporting it.
+                logger.warning(
+                    f"Parameter '{self.label}'[{i}]: raw start {ri[j]} puts "
+                    f"the logit anchor at {lq_start}; leaving the anchor "
+                    f"where it is rather than re-centering on a "
+                    f"non-representable point."
+                )
+                continue
+            anchors[i] = lq_start
+            new_ri[j] = 0.0
+            moved.append(int(i))
+
+            # The q_floor nudge has to stay MEANINGFUL when the anchor moves
+            # (review 4.3.1).  Its threshold is unchanged -- it is a property
+            # of the BOUNDS and the whitening scale, not of the anchor -- and
+            # it still does its job for an alternate seed's physical value in
+            # raw_from_initval.  What is new is that the anchor itself can now
+            # land inside it, if the polish drove this element onto a wall.
+            # Warn, do not clamp: clamping would move the polished physical
+            # start (breaking the bit-identity above) and would override an
+            # optimizer result with a guess, which is the opposite of this
+            # codebase's rope-not-gates rule.  build_pymc's own nudge stands
+            # unchanged for the START VALUE a user or the engine supplies.
+            qf = tf["q_floors"][i]
+            if qf > 0.0:
+                q = 1.0 / (1.0 + np.exp(-np.clip(lq_start, -100.0, 100.0)))
+                if q < qf or q > 1.0 - qf:
+                    logger.warning(
+                        f"Parameter '{self.label}'[{i}]: the polished start "
+                        f"sits within q_floor ({qf:.3g}) of its bounds "
+                        f"[{tf['lowers'][i]}, {tf['uppers'][i]}] (q="
+                        f"{q:.3g}); the re-centered anchor is kept there "
+                        f"rather than nudged inward, so raw = 0 still means "
+                        f"the value the polish found. A start pinned on a "
+                        f"wall usually means the bound, not the start, is "
+                        f"the thing to revisit."
+                    )
+
+        if not moved:
+            return []
+        self.raw_initval = new_ri
+        # Through _apply_whitening_state so the shared variable and the frozen
+        # transform's copy move together, and init_scale is re-derived at the
+        # new anchor (numerically identical: it was already evaluated at the
+        # START, which is where the anchor now is).
+        self._apply_whitening_state(
+            scale_logits,
+            ws["sv_gaussian_scales"].get_value(),
+            logit_q_inits=anchors,
+        )
+        return moved
+
+    def _apply_whitening_state(
+        self, scale_logits, gauss_scales, logit_q_inits=None
+    ):
+        """Push new whitening vectors into the shared variables and keep
+        every mirror consistent: the frozen forward transform
         (raw_from_initval / phys_from_raw for multi-seed starts) and the
         physical-units init_scale used for reporting (diagnostics table,
         get_mcmc_init) -- dphys/draw at the start, i.e. scale_logit *
         q_init*(1-q_init)*span for logit elements, the scale itself for
-        linear elements."""
+        linear elements.
+
+        ``logit_q_inits`` is the logit-space ANCHOR (the physical value raw =
+        0 maps to).  It moves in exactly two situations -- ``recenter_on_start``
+        folding a polished displacement into it, and ``load_whitening``
+        restoring the anchor a reused trace was sampled under -- and both go
+        through here so the shared variable and ``_raw_transform`` can never
+        disagree about where raw = 0 is.  Omitted means "unchanged", which is
+        what every scale-only update (``set_whitening``) passes.
+        """
         ws = self._whiten_state
         tf = self._raw_transform
         scale_logits = np.asarray(scale_logits, dtype=float)
@@ -3144,6 +3287,10 @@ class Parameter:
         ws["sv_gaussian_scales"].set_value(gauss_scales)
         tf["init_scale_logits"] = scale_logits.copy()
         tf["gaussian_scales"] = gauss_scales.copy()
+        if logit_q_inits is not None:
+            logit_q_inits = np.asarray(logit_q_inits, dtype=float)
+            ws["sv_logit_q_inits"].set_value(logit_q_inits)
+            tf["logit_q_inits"] = logit_q_inits.copy()
 
         n_elements = self._n_elements()
         phys_scales = to_vec(
@@ -3213,6 +3360,15 @@ class Parameter:
         absolute logit-space scales (not the multipliers) are stored so a
         reload reproduces the sampled trace's raw coordinates exactly, even
         if the preliminary scales of a rebuilt model were to differ.
+
+        The ANCHOR (``logit_q_inits``) is exported for the same reason and it
+        is not optional (review 4.3.1): a raw draw decodes through ``lower +
+        span*sigmoid(anchor + scale*raw)``, so the anchor is half of what
+        "which physical value did the sampler visit" means.  It used to be
+        derivable from the rebuilt model -- ``set_whitening`` left it exactly
+        where ``build_pymc`` put it -- and since ``recenter_on_start`` folds
+        the polished start into it, it is not.  ``whitening.json`` schema
+        version 2 is what carries it.
         """
         out = {}
         if self._whiten_state is not None:
@@ -3221,6 +3377,9 @@ class Parameter:
             )
             out["gaussian_scales"] = (
                 self._whiten_state["sv_gaussian_scales"].get_value().tolist()
+            )
+            out["logit_q_inits"] = (
+                self._whiten_state["sv_logit_q_inits"].get_value().tolist()
             )
         if self._barrier_state is not None:
             out["barrier_scales"] = (
@@ -3233,6 +3392,13 @@ class Parameter:
 
         Returns False (leaving the build untouched) on any shape mismatch --
         the caller should fall back to a fresh probe.
+
+        ``logit_q_inits`` is restored when the file carries it (schema
+        version 2) and left at its build value when it does not: a version-1
+        file was written by code whose anchor could not move, so the rebuilt
+        model's own anchor IS the one that trace was sampled under.  The
+        caller decides which files may omit it -- see
+        ``whitening._validate_whitening_state``.
         """
         ws = self._whiten_state
         if "scale_logits" in state:
@@ -3240,12 +3406,21 @@ class Parameter:
                 return False
             sl = np.asarray(state["scale_logits"], dtype=float)
             gs = np.asarray(state["gaussian_scales"], dtype=float)
+            lq = (
+                np.asarray(state["logit_q_inits"], dtype=float)
+                if "logit_q_inits" in state
+                else None
+            )
             if (
                 sl.shape != ws["sv_scale_logits"].get_value().shape
                 or gs.shape != ws["sv_gaussian_scales"].get_value().shape
+                or (
+                    lq is not None
+                    and lq.shape != ws["sv_logit_q_inits"].get_value().shape
+                )
             ):
                 return False
-            self._apply_whitening_state(sl, gs)
+            self._apply_whitening_state(sl, gs, logit_q_inits=lq)
         if "barrier_scales" in state:
             bs = self._barrier_state
             if bs is None:

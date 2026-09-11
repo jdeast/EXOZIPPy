@@ -964,8 +964,17 @@ class System(Component):
         starting value is always initval even when an explicit prior mean
         mu != initval.
 
-        We override model.initial_point() here to guarantee the physical
-        starting value is always our initval.
+        This used to OVERRIDE ``model.initial_point()`` -- the model's own
+        start was frozen at RV creation and a seed polish never reached it,
+        so every sampler branch had to be handed this dict by hand and the
+        default NUTS branch forgot to (review 1.3.6).  It does not any more:
+        ``recenter_whitening_anchor`` makes ``model.initial_point()`` equal
+        to what this returns, ELEMENT FOR ELEMENT, by construction -- see
+        that method for the two mechanisms.  So this is now the canonical
+        ACCESSOR rather than a correction, kept because the whitening probe,
+        PTDE, the seed ledger and the jitter all want the start keyed by raw
+        variable and want it without a model context.  A mismatch between
+        the two is a bug, and ``tests/test_nuts_start.py`` pins the equality.
         """
         raw_start = model.initial_point()
         lookup = {p.label: p for p in self.get_all_parameters()}
@@ -1211,6 +1220,71 @@ class System(Component):
                         seed_resolved[k][f"{comp_type}.{i}.{param_name}"] = (
                             float(phys[i])
                         )
+
+    def recenter_whitening_anchor(self, model):
+        """Make ``model.initial_point()`` the canonical start, structurally.
+
+        Review 4.3.1.  Called once per fresh run, AFTER the seed polish and
+        BEFORE the whitening probe, so the probe measures its contours around
+        the start it is about to condition (`run.py`'s polish comment is the
+        reason that ordering exists).  Idempotent, and a no-op on an
+        unpolished run, where the two points already agree.
+
+        ``raw`` means two different things on the two element paths, so one
+        mechanism cannot serve both:
+
+        1. LOGIT elements -- ``Parameter.recenter_on_start`` folds the
+           displacement into the ANCHOR and zeroes ``raw_initval``.  Free:
+           section C's correction cancels the raw N(0,1) symbolically, so the
+           anchor is pure parameterization and moving it changes no density.
+           ``raw = 0`` then IS the polished start.
+        2. GAUSSIAN-PATH elements -- the center is NOT touched.  There
+           ``raw ~ N(0,1)`` IS the prior and ``gaussian_mus`` is the prior
+           mean whenever the user gave a ``mu``, so folding a start
+           displacement into it would move the PRIOR: a change to the model,
+           not to the coordinates.  Their nonzero ``raw_initval`` stays, and
+           ``Model.set_initval`` is what carries it into the model's own
+           initial point.
+
+        With both in place ``model.initial_point()`` is correct by
+        construction on every path, which is why no sampler branch has to be
+        handed a start any more and why no future one can forget to: there is
+        nothing to pass.  ``Model.set_initval`` is given the WHOLE raw vector
+        (the logit entries are 0 by then), so a mixed vector needs no
+        per-element plumbing.
+
+        The RV is looked up from the model rather than held on the Parameter
+        on purpose: a Parameter is pickled out to PTDE's worker pools, and a
+        graph reference on it would travel with it.
+
+        Returns ``{label: [element indices whose anchor moved]}`` for the
+        parameters that moved, which is what the caller logs.
+        """
+        raw_rvs = {rv.name: rv for rv in model.free_RVs}
+        moved = {}
+        for par in self.get_all_parameters():
+            recenter = getattr(par, "recenter_on_start", None)
+            if recenter is not None:
+                elements = recenter()
+                if elements:
+                    moved[par.label] = elements
+            raw_init = getattr(par, "raw_initval", None)
+            if raw_init is None:
+                continue
+            rv = raw_rvs.get(f"{par.label}_raw")
+            if rv is None:
+                continue
+            model.set_initval(
+                rv, np.asarray(raw_init, dtype=float).reshape(rv.shape.eval())
+            )
+        if moved:
+            n = sum(len(v) for v in moved.values())
+            logger.info(
+                f"Whitening anchor re-centered on the polished start: "
+                f"{n} logit element(s) across {len(moved)} parameter(s) now "
+                f"have raw = 0 at the start."
+            )
+        return moved
 
     def _seed_initvals_for(self, par, resolved):
         """Internal-unit initval vector for one Parameter under one seed's solved
@@ -1466,8 +1540,12 @@ class System(Component):
 
         The whitened start is 0.0 for every logit element and
         ``(initval - mu)/sigma`` for a Gaussian-path one (see
-        ``get_raw_start``); this forwards it through each RV's transform so
-        PyMC can take it as an ``initvals`` dict.
+        ``get_raw_start``); this forwards it through each RV's transform, so
+        it is comparable to -- and after ``recenter_whitening_anchor``, equal
+        to -- ``Model.initial_point()``.  Nothing passes it to a sampler as
+        an ``initvals`` dict any more (review 4.3.1): the model's own initial
+        point is the start.  Its consumer is the startup audit table, which
+        reports the point the sampler will actually begin from.
 
         Returns only that dict.  It used to return three more things -- a
         vector of 1.0s sized by the total transformed dimension (for a NUTS

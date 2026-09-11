@@ -53,6 +53,14 @@ The multi-seed path already agreed with all of this: `raw_from_initval` raises `
 
 Tests: `tests/test_bad_user_input.py`.
 
+### `raw = 0` is the start, on the logit path only (review 4.3.1)
+
+`raw_initval` is what the polish writes and what every consumer of the start reads, and after a polish it is **zero on every logit element** -- because `Parameter.recenter_on_start` folds the displacement into the ANCHOR (`sv_logit_q_inits`) instead of carrying it as a coordinate. So `raw = 0` decodes to the polished physical value by construction, and `Model.initial_point()` needs no override: see `src/exozippy/whitening.md` for why moving the anchor is free (section C's correction cancels the raw N(0,1), so the anchor is pure parameterization) and `src/exozippy/run.md` for what that lets the sampler dispatch delete.
+
+**Gaussian-path elements keep a nonzero `raw_initval`, and that is not an oversight.** There `val = gaussian_mus + gaussian_scales * raw` with `raw ~ N(0,1)` *as the prior*, and `gaussian_mus[i] = mus[i] if has_mu else inits[i]`: for any element carrying an explicit user `mu` the center **is** the prior mean, so folding a start displacement into it would move the prior -- a change to the model, not to the coordinates. `System.recenter_whitening_anchor` hands those to `Model.set_initval` instead. The asymmetry is the same one that decides which elements `set_whitening` may rescale, and for the same reason.
+
+The **`q_floor` nudge is unchanged** by this: its threshold is a property of the bounds and the whitening scale, not of the anchor, and `build_pymc` still applies it to the start value a user or the engine supplies. What is new is that a *re-centered anchor* can land inside it, when the polish drives an element onto a wall -- that warns and is deliberately not clamped, since clamping would override an optimizer's result and move the physical start.
+
 ### A per-element bound nobody stated is NO bound, not a NaN one
 
 `resolve` writes **NaN** into a vector for "this element was never given one", so a bound named per element -- `orbit.BC.period: {lower: 3}` on a three-orbit system -- resolves to `lowers = [nan, 3, nan]`. `build_pymc`'s soft-barrier gate was `~np.isinf(lowers)`, and `~np.isinf(nan)` is **True**, so the unnamed elements took the barrier, `soft_lower_bound(v, nan)` returned NaN, and the **whole model logp** was NaN with nothing naming the parameter. Found doing review 8.8.8(c), which asks for exactly that entry on `examples/kelt4`'s hierarchical triple: its start logp went from 82862.6 to `nan`. The gate is `np.isfinite` now, which is False for both `inf` and `NaN`.
