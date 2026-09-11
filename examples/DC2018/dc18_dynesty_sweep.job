@@ -1,0 +1,38 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 64
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N dynsweep
+#$ -o dynsweep.$JOB_ID.$TASK_ID.log
+#
+#   qsub -t 1-12 dc18_dynesty_sweep.job
+#
+# One task = one (nlive, sample) combination on DC2018-128's d=27 observable
+# arm, scored against TRUTH rather than against wall clock.  The grid tests
+# whether 8.2.3's 40-sigma collapse indicts dynesty or only the hardcoded
+# sample="rwalk" (dynesty's own guidance: rwalk for 10 <= ndim <= 20, slice
+# sampling above) and the thin nlive=500 (guidance ~50*ndim = 1350 here).
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_$JOB_ID"
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy/examples/DC2018
+
+# 4 sampling modes x 3 nlive.  rwalk is the CURRENT hardcoded behaviour and
+# is included as the control; unif is included as a deliberate NEGATIVE
+# control (dynesty recommends it only below ndim ~10, so if it does not fail
+# the score is not measuring what it claims to).
+SAMPLES=(rwalk rslice slice unif)
+NLIVES=(500 1350 2700)
+i=$((SGE_TASK_ID - 1))
+S=${SAMPLES[$((i % 4))]}
+N=${NLIVES[$((i / 4))]}
+TAG="${S}_nlive${N}"
+echo "task $SGE_TASK_ID: sample=$S nlive=$N  ($NSLOTS cores)"
+python -u dc18_dynesty_sweep.py --sample "$S" --nlive "$N" --tag "$TAG"

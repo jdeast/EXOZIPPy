@@ -1,0 +1,27 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 64
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N nstruth
+#$ -o nstruth.$JOB_ID.log
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_$JOB_ID"
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy/examples/DC2018
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+echo "sha: $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)"
+python -u dc18_ns_truth_check.py \
+  --config "${CFG:-configs/DC2018_128_tightpriors.yaml}" \
+  --ckpt "${CKPT:-dc18_ns_dynesty_ckpt}" \
+  --backend "${BACKEND:-dynesty}" \
+  --out "${OUT:-dc18_ns_truth_check.json}"
