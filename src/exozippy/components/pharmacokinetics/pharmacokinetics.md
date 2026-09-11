@@ -104,15 +104,18 @@ Four places where the fit was not frictionless:
    sentence is filed under `data`, where it will be ordered among
    data-inventory sentences rather than after them.
 
-   **Proposed fix, not implemented here:** collapse the four physics slots into
+   **FIXED.** The band is now extensible: a component declares `prose_topic` and `System` registers it in build-graph order (`outputs/outputs.md`). `subject` declares `pharmacokinetics`, so its model sentence has its own paragraph under Modeling instead of sitting among the data inventory. An all-astronomy system's order is unchanged. The originally proposed fix was WRONG and worth recording as such: collapse the four physics slots into
    one `model` slot and order sentences within it by the component's position
    in `graph.determine_pymc_build_order`'s topological sort. Dependency order
    is the right editorial order -- inputs before things derived from them --
    and it reproduces stellar -> planetary -> orbits for astronomy while giving
    subject -> assay here, with no vocabulary to extend when a new field
-   arrives. The printed headings do not change. Verify against the shipped
-   examples before adopting: the four slots encode an editorial order that a
-   graph sort should reproduce but has not been shown to.
+   arrives -- but it would have MERGED FOUR PARAGRAPHS INTO ONE and destroyed
+   the topical grouping, which is real information (an orbit-ish sentence from
+   `rvinstrument` belongs with `orbit`'s, not with `rvinstrument`'s other
+   sentences). Keeping topics as named subjects and deriving only their ORDER
+   from the graph is what preserves both. The ordering half of the instinct
+   was right and is what shipped.
 3. **Numeric instance names are rejected, and clinical data are numerically
    labelled.** `validate_instance_names` refuses a purely numeric name because
    it would be ambiguous with the internal `subject.0` index form -- correct,

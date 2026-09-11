@@ -205,6 +205,12 @@ class System(Component):
         for key, comp in self.active_components.items():
             logger.info(f"  {key} ({comp.n_elements})")
 
+        # Prose topic vocabulary: HERE, once every component exists, because a
+        # component may add a sentence as early as stage 1 and add() validates
+        # the section name.  The ORDER is refined in build_model(), when the
+        # real build graph is available.
+        self._register_prose_topics()
+
         # Structural fingerprint of the inputs, snapshotted HERE: after the
         # components have normalized their own config blocks (Mann/Torres
         # derive `name:` from their `star:` key in __init__), and before
@@ -234,6 +240,42 @@ class System(Component):
         (mkparam.write_param_file) reproduces it exactly.
         """
         return self._structural_hash, self._structural_payload
+
+    def _register_prose_topics(self):
+        """Register each component's ``prose_topic``, in build-graph order.
+
+        The ORDER is the point: a topic sits where the component that declared
+        it sits in the dependency graph, so inputs are described before what
+        is derived from them.  Measured on examples/kelt4, that reproduces the
+        hand-chosen stellar -> planetary -> orbits exactly.
+
+        Falls back to component declaration order when the graph is not
+        available yet -- the manifests only exist after stage 3, and this runs
+        at construction so that a sentence added during stages 1-7 already
+        validates against the extended vocabulary.  The fallback only affects
+        ORDER, never whether a section is accepted, and `build_model` calls
+        this again once the real order is known.
+        """
+        components = getattr(self, "active_components", None) or {}
+        order = list(components)
+        try:
+            from .graph import determine_pymc_build_order
+
+            built = determine_pymc_build_order(components, self.config_manager)
+            seen = []
+            for key in built:
+                name = str(key).split(".")[0]
+                if name in components and name not in seen:
+                    seen.append(name)
+            # Components with no manifest entry never appear in the graph.
+            order = seen + [c for c in components if c not in seen]
+        except Exception:  # noqa: BLE001 - order only; never fail a fit for it
+            pass
+
+        for name in order:
+            topic = getattr(components[name], "prose_topic", None)
+            if topic:
+                self.prose.register_topic(topic)
 
     def prepare(self):
         # ==========================================================

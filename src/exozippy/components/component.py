@@ -164,6 +164,20 @@ class Component(ABC):
     # not.
     aligned_context_deps = frozenset()
 
+    # Topic section this component owns in the modeling-draft prose
+    # (outputs/prose.py).  None -- the default -- means it writes only into
+    # the shared sections (data, noise, priors, ...).
+    #
+    # Declared here rather than inferred, for the same reason `label` is: the
+    # prose vocabulary used to be a CLOSED astronomy list, so a component from
+    # another field had nowhere of its own to stand and had to file its "what
+    # we fitted" sentence under `data`.  A topic groups sentences by subject
+    # ACROSS components (rvinstrument writes into orbits, transit into
+    # planetary), so it cannot be derived from the component list -- but its
+    # POSITION can be, and System registers topics in build-graph order so
+    # dependency order becomes the editorial order.
+    prose_topic = None
+
     # Human-readable heading for this component's block of the results table
     # (outputs/latex.py's \sidehead).  DECLARED here, rather than only being
     # assigned in ten component __init__s, so a generic consumer can read

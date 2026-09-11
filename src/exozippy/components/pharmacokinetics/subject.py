@@ -68,6 +68,11 @@ class Subject(Component):
     # can opt in without the sampler layer learning any component's name.
     expects_suppressed_modes = True
 
+    # This component set's own prose topic.  Its "what we fitted"
+    # sentence had to go under `data` until the topic band became
+    # extensible -- see outputs/prose.py.
+    prose_topic = "pharmacokinetics"
+
     label = "Subject"
 
     @property
@@ -274,16 +279,13 @@ class Subject(Component):
             "Bioavailability $F$ is not identifiable from oral dosing alone "
             "and was fixed at unity, so clearance and volume are apparent "
             "values.",
-            # SECTION_ORDER has no generic slot for "the model we fitted":
-            # its vocabulary is intro/data/stellar/planetary/orbits/
-            # microlensing/noise/priors/sampling/results/convergence/modes,
-            # and an unknown section RAISES (by design -- a silently dropped
-            # sentence is a modelling choice the draft never mentions).  So a
-            # component from another field has nowhere of its own to stand and
-            # "data" is the least wrong.  Recorded as an agnosticism finding
-            # rather than fixed here: widening a core vocabulary to suit one
-            # component is the opposite of what this component is for.
-            section="data",
+            # This component's OWN topic, declared as `prose_topic` above.
+            # It went under "data" until the prose topic band was made
+            # extensible: the vocabulary was a closed astronomy list, so a
+            # sentence from another field had nowhere of its own to stand and
+            # was ordered among the data-inventory sentences rather than
+            # after them.
+            section=self.prose_topic,
             key=f"{self.prefix}.model",
         )
 
