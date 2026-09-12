@@ -98,37 +98,84 @@ def flat_via_model(event, files, mmx, outdir, tune, draws):
     return cfg, trace, extra
 
 
-def data_lnL(trace, model=None):
-    """Max DATA log-likelihood over the draws.
+def data_lnL(trace, cfg=None, params=None):
+    """Max DATA log-likelihood over the draws -- priors EXCLUDED.
 
-    Reads the Hogg per-instrument likelihood terms from the trace's
-    log_likelihood group when present; otherwise falls back to lp, which
-    INCLUDES priors and is flagged so a reader does not mistake it for a
-    likelihood.
+    lp will not do.  Rungs differ in dimension and in which priors exist, so
+    a difference of POSTERIORS is not a likelihood ratio and the nested test
+    would be measuring prior normalisation alongside fit quality.  Measured
+    on DC2018-128 the individual prior terms run to tens of nats
+    (logit_uniform on err_scale alone was -27.4), so this is not a rounding
+    error.
+
+    The model is therefore rebuilt and only the INSTRUMENT DATA terms are
+    summed, evaluated at the trace's best draw.  It falls back to lp only
+    when that is impossible, and SAYS SO in the provenance string it
+    returns, so a reader cannot mistake one for the other.
     """
     import xarray as xr
 
-    try:
-        ll = xr.open_dataset(trace, group="log_likelihood")
-        tot = None
-        for v in ll.data_vars:
-            a = np.asarray(ll[v])
-            a = a.reshape(a.shape[0], a.shape[1], -1).sum(axis=2)
-            tot = a if tot is None else tot + a
-        ll.close()
-        if tot is not None:
-            t = tot[np.isfinite(tot)]
-            if t.size:
-                return float(t.max()), "log_likelihood group"
-    except Exception:  # noqa: BLE001
-        pass
+    if cfg is not None and params is not None:
+        try:
+            import copy as _copy
+
+            import pytensor
+
+            from exozippy.system import System
+
+            c = _copy.deepcopy(cfg)
+            for k in ("run", "prefix", "sampler"):
+                c.pop(k, None)
+            sysm = System(c, _copy.deepcopy(params))
+            sysm.prepare()
+            m = sysm.build_model()
+            terms = m.logp(sum=False)
+            names = [getattr(t, "name", "") or "" for t in terms]
+            keep = [
+                i
+                for i, n in enumerate(names)
+                if "mulensinstrument" in n and "model" in n
+            ]
+            if keep:
+                fn = pytensor.function(
+                    m.value_vars,
+                    [terms[i] for i in keep],
+                    on_unused_input="ignore",
+                )
+                post = xr.open_dataset(trace, group="posterior")
+                ss = xr.open_dataset(trace, group="sample_stats")
+                lp = np.asarray(ss["lp"])
+                ss.close()
+                ci, di = np.unravel_index(int(np.nanargmax(lp)), lp.shape)
+                argv = []
+                for v in m.value_vars:
+                    if v.name not in post.data_vars:
+                        argv = None
+                        break
+                    argv.append(
+                        np.atleast_1d(
+                            np.asarray(post[v.name].isel(chain=ci, draw=di))
+                        )
+                    )
+                post.close()
+                if argv is not None:
+                    vals = fn(*argv)
+                    tot = float(sum(np.sum(np.asarray(x)) for x in vals))
+                    return tot, "data terms only (%d)" % len(keep)
+        except Exception as e:  # noqa: BLE001
+            print(
+                "    (pure-lnL path unavailable: %s: %s)"
+                % (type(e).__name__, str(e)[:90]),
+                flush=True,
+            )
+
     try:
         ss = xr.open_dataset(trace, group="sample_stats")
         a = np.asarray(ss["lp"]).ravel()
         ss.close()
         a = a[np.isfinite(a)]
         if a.size:
-            return float(a.max()), "lp (INCLUDES PRIORS -- not a pure lnL)"
+            return float(a.max()), "lp -- INCLUDES PRIORS, NOT a likelihood"
     except Exception:  # noqa: BLE001
         pass
     return None, "unavailable"
@@ -240,6 +287,18 @@ def main():
                 args.draws,
             )
             rung_params = params
+        # A PARAMS KEY FOR A COMPONENT THE RUNG DOES NOT HAVE IS A HARD
+        # ERROR, not a no-op.  Dropping the `planet` block for the
+        # point-lens rungs left build_user_params' planet.Companion.radius
+        # behind, and strict naming refused the whole config -- "Parameter
+        # 'planet.Companion.radius' uses the prefix 'planet', but 'planet'
+        # is not ...".  Both point-lens rungs died that way on event 8.
+        if "planet" not in cfg:
+            rung_params = {
+                k: v
+                for k, v in rung_params.items()
+                if not k.startswith("planet.")
+            }
         print(
             "\n=== rung %s (binary=%s finite_source=%s) ==="
             % (name, binary, fs),
@@ -254,7 +313,7 @@ def main():
                 % (type(e).__name__, str(e)[:110]),
                 flush=True,
             )
-        lnL, src = data_lnL(trace)
+        lnL, src = data_lnL(trace, cfg, rung_params)
         k = n_free(trace)
         if lnL is None:
             print("  NO RESULT (%s)" % src, flush=True)
