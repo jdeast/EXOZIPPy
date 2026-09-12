@@ -51,6 +51,18 @@ logging.disable(logging.WARNING)
 # single name cannot serve both, and deriving the trace name from the params
 # key silently found only t_0 and u_0 (2 of 6 observables) on the first
 # version of the basin test.  t_E is derived and appears in no trace.
+# Per-observable tolerance: "the right MODE", not "the right draw".  Also
+# the INFORMATIVENESS scale -- a posterior wider than this has localized
+# nothing, so its agreement with truth is vacuous.
+TOL = {
+    "t_0": 0.05,
+    "u_0": 0.005,
+    "t_E": 0.30,
+    "rho": 0.060,
+    "s": 0.010,
+    "q": 0.030,
+}
+
 INJECT = [
     ("t_0", "source.Source.t_0", ("source.t_0",), False),
     ("u_0", "source.Source.u_0", ("source.u_0",), False),
@@ -267,23 +279,44 @@ def main():
                     continue
                 t = float(np.log10(t))
             z = (med - t) / sd if sd > 0 else float("nan")
+            # INFORMATIVENESS GATE.  z = (median - truth)/sd is SMALL
+            # whenever sd is LARGE, so an unconstrained parameter always
+            # "stays" -- the identical vagueness reward that invalidated
+            # the per-parameter pull (review 7.15.1).  Measured: on events
+            # 152 and 194 the truth-seeded fits reported 4 of 4 "stayed"
+            # while log_s sat at EXACTLY 0 (the s <-> 1/s symmetry point)
+            # with sd 43-45x its tolerance, and log_q had sd ~2.1 in log10,
+            # a factor of 126.  Those are diffuse blobs, not basins, and
+            # both BASIN_OMITTED verdicts were withdrawn.
+            tol = TOL.get(tkey, 1.0)
+            informative = bool(sd > 0 and sd < tol)
+            stayed = bool(informative and abs(z) < 5.0)
             basin[tkey] = {
                 "truth": t,
                 "median": med,
                 "sd": sd,
                 "z": z,
-                "stayed": bool(abs(z) < 5.0),
+                "sd_over_tol": (sd / tol) if tol else None,
+                "informative": informative,
+                "stayed": stayed,
             }
             print(
-                "  %-6s truth %-14.6g settled %-14.6g sd %-10.3g "
-                "z=%+7.2f  %s"
+                "  %-6s truth %-13.6g settled %-13.6g sd %-9.3g (%.1fx tol)"
+                "  z=%+7.2f  %s"
                 % (
                     tkey,
                     t,
                     med,
                     sd,
+                    sd / tol,
                     z,
-                    "stayed" if abs(z) < 5.0 else "DRIFTED",
+                    "stayed"
+                    if stayed
+                    else (
+                        "UNCONSTRAINED -- no evidence either way"
+                        if not informative
+                        else "DRIFTED"
+                    ),
                 ),
                 flush=True,
             )
@@ -296,12 +329,28 @@ def main():
         )
 
     stayed = [k for k, v in basin.items() if v["stayed"]]
-    is_basin = bool(basin) and len(stayed) >= max(1, len(basin) - 1)
+    inform = [k for k, v in basin.items() if v["informative"]]
+    # A basin claim rests on the INFORMATIVE subset, and needs at least TWO
+    # of them: one constrained parameter agreeing with truth is a
+    # coincidence, not a localized solution.
+    is_basin = len(inform) >= 2 and len(stayed) >= max(1, len(inform) - 1)
     print(
-        "  -> truth %s a local basin (%d of %d parameters stayed)"
-        % ("IS" if is_basin else "is NOT", len(stayed), len(basin)),
+        "  -> %d of %d parameters INFORMATIVE (sd < tol); %d of those stayed"
+        % (len(inform), len(basin), len(stayed)),
         flush=True,
     )
+    if len(inform) < 2:
+        print(
+            "  -> NO BASIN CLAIM POSSIBLE: fewer than two constrained "
+            "parameters, so the fit localized nothing and its agreement "
+            "with truth is vacuous.",
+            flush=True,
+        )
+    else:
+        print(
+            "  -> truth %s a local basin" % ("IS" if is_basin else "is NOT"),
+            flush=True,
+        )
 
     # 4. what the production fit found
     fr = base / "fitresults" / ("DC2018_%s_trace.nc" % ev)
