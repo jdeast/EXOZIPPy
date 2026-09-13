@@ -964,3 +964,238 @@ def test_de_polish_heartbeats_on_wall_clock_not_sweep_count(caplog):
 
     # ASSERT
     assert "PTDE seed polish: sweep" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The heartbeat has to fire from INSIDE a sweep (3.4.4)
+# ---------------------------------------------------------------------------
+
+
+class _FakeAsyncResult:
+    """One `pool.apply_async` handle that takes real wall-clock time.
+
+    The clock starts when the collector FIRST waits on this result, not at
+    submission, so results stay spread out over wall clock even if the test
+    process is descheduled for a while before collection begins -- which on
+    a loaded box is otherwise how every result in a batch becomes ready at
+    once and the heartbeat has nothing to beat between.
+    """
+
+    def __init__(self, pool, fn, arg, wedged):
+        self.pool, self.fn, self.arg = pool, fn, arg
+        self.wedged = wedged
+        self.ready_at = None
+
+    def get(self, timeout=None):
+        import multiprocessing as mp
+        import time
+
+        if self.wedged:
+            # The near-caustic VBM evaluation: never comes back, whatever
+            # anyone waits.
+            if timeout is not None:
+                time.sleep(timeout)
+            raise mp.TimeoutError
+        if self.ready_at is None:
+            self.ready_at = time.monotonic() + self.pool.per_item
+        remaining = self.ready_at - time.monotonic()
+        if remaining > 0:
+            if timeout is not None and timeout < remaining:
+                time.sleep(timeout)
+                raise mp.TimeoutError
+            time.sleep(remaining)
+        return self.fn(self.arg)
+
+
+class _FakeAsyncPool:
+    """A one-worker multiprocessing.Pool, in-process and on a real clock.
+
+    Items queue behind each other (`per_item` seconds apiece) so a batch's
+    results arrive spread out over wall clock, which is the only thing that
+    makes a mid-batch heartbeat observable.  `wedge` names submission
+    indices whose result never arrives.
+
+    `map` deliberately REFUSES a batch containing a wedged item instead of
+    emulating the block: a real pool.map would hang the test process
+    forever, which is the defect, and a hung test is indistinguishable from
+    an infrastructure problem.
+    """
+
+    def __init__(self, per_item=0.0, wedge=()):
+        self.per_item = per_item
+        self.wedge = set(wedge)
+        self.n_submitted = 0
+        self.n_apply_async = 0
+        self.evaluated = []
+
+    def map(self, fn, items):
+        n0 = self.n_submitted
+        self.n_submitted += len(items)
+        if self.wedge & set(range(n0, self.n_submitted)):
+            raise AssertionError(
+                "pool.map was handed a batch containing a proposal that "
+                "never returns; a real pool would block here forever"
+            )
+        self.evaluated.extend(items)
+        return [fn(x) for x in items]
+
+    def apply_async(self, fn, args):
+        self.n_apply_async += 1
+        idx = self.n_submitted
+        self.n_submitted += 1
+        wedged = idx in self.wedge
+        if not wedged:
+            self.evaluated.append(args[0])
+        return _FakeAsyncResult(self, fn, args[0], wedged)
+
+
+def _quadratic_logp(p):
+    return float(-0.5 * np.sum((p["x"] - 3.0) ** 2))
+
+
+def test_heartbeat_fires_inside_a_sweep_not_only_between_them(caplog):
+    """
+    Given a pool whose results arrive spread out over wall clock,
+    When one sweep takes several heartbeat intervals,
+    Then that ONE sweep produces several progress lines, each naming the
+      sweep as in progress and how many of its proposals have come back.
+
+    One sweep is one batch of n_seeds * pop_size evaluations.  While that
+    batch was a single blocking pool.map the heartbeat could only fire
+    after it returned, so the interval the user configured bought nothing
+    on the one engine it was written for -- a sweep of a binary-lens model
+    can take minutes, and a wedged evaluation takes forever (3.4.4).
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    pool = _FakeAsyncPool(per_item=0.05)
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        polish_seed_starts(
+            [{"x": np.array([0.0])}],
+            _quadratic_logp,
+            np.random.default_rng(0),
+            {"x": np.ones(1)},
+            n_steps=2,
+            pop_size=6,
+            pool=pool,
+            progress_interval_s=0.06,
+        )
+
+    msgs = [r.getMessage() for r in caplog.records]
+    mid = [m for m in msgs if "IN PROGRESS" in m]
+
+    # ASSERT: several beats inside sweep 1 alone, each carrying the count
+    in_sweep_1 = [m for m in mid if "sweep 1/2 IN PROGRESS" in m]
+    assert len(in_sweep_1) >= 2, msgs
+    assert all("proposals back)" in m for m in in_sweep_1)
+    # sweep 2 gets its own, so the label tracks the sweep rather than being
+    # a fixed string
+    assert any("sweep 2/2 IN PROGRESS" in m for m in mid), msgs
+    # the opening batch, which scores every population, is covered too
+    assert any("scoring the initial population" in m for m in msgs), msgs
+
+
+def test_a_wedged_proposal_does_not_silence_the_heartbeat(caplog):
+    """
+    Given one proposal whose logp call never returns and an eval_timeout,
+    When the polish evaluates the sweep containing it,
+    Then the heartbeat keeps beating while that proposal is outstanding,
+      the proposal is abandoned and scored -inf (so it can never become the
+      polished point), the pool is recycled, and the sweep completes.
+
+    This is the case the heartbeat exists for and the one it used to miss
+    entirely: a hung evaluation blocked the whole pool.map, so the log went
+    quiet forever precisely when a watcher needed to tell computing from
+    hung.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    # submissions 0-3 are the opening population batch; 4-7 are sweep 1
+    pool = _FakeAsyncPool(per_item=0.01, wedge=(5,))
+    recycled = []
+
+    def _recycler(dead):
+        recycled.append(dead)
+        return dead  # the same fake stands in for the fresh pool
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        polished, dlps = polish_seed_starts(
+            [{"x": np.array([0.0])}],
+            _quadratic_logp,
+            np.random.default_rng(0),
+            {"x": np.ones(1)},
+            n_steps=1,
+            pop_size=4,
+            pool=pool,
+            progress_interval_s=0.05,
+            eval_timeout=0.2,
+            pool_recycler=_recycler,
+        )
+
+    msgs = [r.getMessage() for r in caplog.records]
+
+    # ASSERT
+    assert any("IN PROGRESS" in m for m in msgs), msgs
+    assert any("exceeded" in m and "eval_timeout" in m for m in msgs), msgs
+    assert recycled == [pool]
+    # the sweep finished, and the abandoned proposal -- which was never
+    # evaluated at all -- cannot be what the polish returned
+    assert np.isfinite(dlps[0])
+    assert any(np.allclose(polished[0]["x"], e["x"]) for e in pool.evaluated)
+
+
+def test_the_interleaved_path_returns_the_same_stream_as_map():
+    """
+    Given the same seeds, rng stream and settings,
+    When the polish runs serially, through a map-only pool and through a
+      pool that supports apply_async,
+    Then all of them return the same polished point.
+
+    Collecting a batch one result at a time is a change to WHEN the parent
+    regains control, not to the chain: submission order is preserved, the
+    accept/reject loop still runs afterwards in per-seed order, and no
+    random number is drawn differently.  The last arm also pins the one
+    configuration that keeps the single blocking pool.map even on a pool
+    that could interleave -- no heartbeat and no timeout means nothing to
+    interleave for.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    class _SerialPool:
+        def map(self, fn, items):
+            return [fn(x) for x in items]
+
+    kw = dict(n_steps=10, pop_size=8, adapt_gamma=True)
+    seeds = [{"x": np.array([0.0])}, {"x": np.array([6.0])}]
+
+    def _run(**extra):
+        return polish_seed_starts(
+            [dict(s) for s in seeds],
+            _quadratic_logp,
+            np.random.default_rng(7),
+            {"x": np.ones(1)},
+            **kw,
+            **extra,
+        )
+
+    # ACT
+    a, dlp_a = _run()
+    b, dlp_b = _run(pool=_SerialPool())
+    async_pool = _FakeAsyncPool()
+    c, dlp_c = _run(pool=async_pool)
+    quiet_pool = _FakeAsyncPool()
+    d, dlp_d = _run(pool=quiet_pool, progress_interval_s=None)
+
+    # ASSERT
+    assert async_pool.n_apply_async > 0
+    assert quiet_pool.n_apply_async == 0
+    for other, dlp_other in ((b, dlp_b), (c, dlp_c), (d, dlp_d)):
+        for pa, pb in zip(a, other):
+            np.testing.assert_allclose(pa["x"], pb["x"])
+        np.testing.assert_allclose(dlp_a, dlp_other)

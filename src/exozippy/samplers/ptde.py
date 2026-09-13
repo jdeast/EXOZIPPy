@@ -293,6 +293,12 @@ POLISH_GAMMA_WINDOW = 4  # sweeps between gamma updates
 # (review 2.3.5, which cost a wrong diagnosis in the session that found it).
 POLISH_PROGRESS_S = 30.0
 
+# Floor on how often the in-batch wait wakes up to let the heartbeat fire.
+# The wait aims at a quarter of `progress_interval_s` so a beat is never much
+# more than 25% late; the floor is what stops a tiny interval -- the test
+# suite passes 1e-9 -- from turning that wait into a spin loop.
+POLISH_POLL_MIN_S = 0.05
+
 
 def polish_seed_starts(
     raw_starts,
@@ -310,6 +316,8 @@ def polish_seed_starts(
     target_accept=POLISH_TARGET_ACCEPT,
     gamma_window=POLISH_GAMMA_WINDOW,
     progress_interval_s=POLISH_PROGRESS_S,
+    eval_timeout=None,
+    pool_recycler=None,
 ):
     """Parallel T=1 differential-evolution polish of each seed's raw start.
 
@@ -388,15 +396,48 @@ def polish_seed_starts(
 
     ``pool`` is anything with a ``map``; ``None`` keeps the serial path,
     which stays byte-for-byte the old behaviour when ``adapt_gamma=False``.
+    A pool that also has ``apply_async`` -- every ``multiprocessing.Pool``
+    -- gets the interleaved evaluation described under PROGRESS.
 
-    PROGRESS.  Every ``progress_interval_s`` seconds of wall clock the sweep
-    loop logs one line: sweeps done against the cap, elapsed, an upper-bound
-    ETA at the rate so far, and each seed's gain so far.  This engine is the
-    long pole of a gradient-free wrap-up and used to run entirely mute -- on
+    PROGRESS.  Every ``progress_interval_s`` seconds of wall clock one line
+    is logged: which sweep against the cap, elapsed, an upper-bound ETA at
+    the rate so far, and each seed's gain so far.  This engine is the long
+    pole of a gradient-free wrap-up and used to run entirely mute -- on
     examples/ob09020 the log's last line was the gradient-fallback notice
     and then nothing for 38 minutes, so the only way to tell computing from
     hung was to sample /proc/<pid>/stat twice (review 2.3.5).  Set
     ``progress_interval_s=None`` to silence it.
+
+    **The beat fires from INSIDE a batch, not only between sweeps** (review
+    3.4.4).  One sweep is one batch of ``n_seeds * pop_size`` evaluations,
+    and when that batch was one blocking ``pool.map`` the heartbeat could
+    only fire after it returned -- so a wedged VBM evaluation, the single
+    case this feature exists for, produced silence forever and the /proc
+    claim above was false exactly when it mattered.  On a pool with
+    ``apply_async`` the batch is now collected one result at a time (in
+    submission order, so the accept/reject stream is unchanged), the wait
+    wakes every ``POLISH_POLL_MIN_S``-floored quarter-interval, and a
+    mid-batch line says which sweep is IN PROGRESS and how many of its
+    proposals have come back.  A repeating "17/64 proposals back" is what
+    "computing" looks like; a frozen one is what "hung" looks like.  The
+    opening batch that scores the populations gets the same treatment.  A
+    bare-``map`` pool and the serial path keep the single blocking call and
+    beat between sweeps only, as before.
+
+    ``eval_timeout`` (seconds, default None = wait forever) is the same
+    contract the samplers' ``sampler: eval_timeout:`` has: a single logp
+    call that exceeds it is abandoned and scored -inf, which the Metropolis
+    test rejects for free.  It needs a real pool -- there is no way to time
+    out a call in-process -- and it leaves a WEDGED WORKER behind, which no
+    ``multiprocessing.Pool`` can kill individually.  So a caller that sets
+    it should also pass ``pool_recycler``: a callable taking the current
+    pool and returning a fresh one (``_common.recycle_pool``), which is
+    called after any batch that timed out.  The pool stays the CALLER's to
+    tear down -- the recycler is how the caller learns which object it now
+    owns, so its own teardown (``_common._shutdown_pool``, never
+    ``join()``: review 2.4.1) reaches the live pool rather than the dead
+    one.  Without a recycler the timeouts are still honored and the loss of
+    the worker is logged.
 
     Returns (polished_starts, dlp_per_seed).
     """
@@ -431,11 +472,120 @@ def polish_seed_starts(
         gamma = 2.38 / np.sqrt(2 * max(n_params, 1))
 
     n_seeds = len(raw_starts)
-    _map = pool.map if pool is not None else lambda f, xs: [f(x) for x in xs]
+    n_timeouts = 0
 
-    def _lps(props):
+    # Bound late, not captured: a timeout recycles `pool` into a NEW object
+    # and the old one is dead, so `_map = pool.map` would keep calling the
+    # corpse.
+    def _map(f, xs):
+        return pool.map(f, xs) if pool is not None else [f(x) for x in xs]
+
+    # Interleaved collection (see PROGRESS in the docstring) needs a pool
+    # that hands back one result at a time.  With neither a heartbeat nor a
+    # timeout there is nothing to interleave FOR, so that case keeps the
+    # single blocking call it has always made.
+    _interleave = (
+        pool is not None
+        and hasattr(pool, "apply_async")
+        and bool(progress_interval_s or eval_timeout is not None)
+    )
+    poll_s = None
+    if _interleave and progress_interval_s:
+        poll_s = max(POLISH_POLL_MIN_S, float(progress_interval_s) / 4.0)
+
+    def _lps(props, on_progress=None):
         """Evaluate a flat list of proposals, pooled across seeds."""
-        return [float(v) for v in _map(logp_fn, props)]
+        nonlocal pool, n_timeouts
+        if not _interleave:
+            return [float(v) for v in _map(logp_fn, props)]
+        vals, timed_out = _common._map_logp_timeout(
+            pool,
+            props,
+            eval_timeout,
+            fn=logp_fn,
+            poll=poll_s,
+            on_poll=on_progress,
+        )
+        if timed_out:
+            n_timeouts += len(timed_out)
+            logger.error(
+                f"PTDE seed polish: {len(timed_out)} logp call(s) exceeded "
+                f"eval_timeout={float(eval_timeout):.0f}s -- scoring them "
+                f"-inf, which the Metropolis test rejects for free."
+            )
+            if pool_recycler is not None:
+                logger.warning(
+                    "PTDE seed polish: recycling the worker pool -- a hung "
+                    "worker never rejoins it on its own."
+                )
+                pool = pool_recycler(pool)
+            else:
+                logger.warning(
+                    "PTDE seed polish: no pool_recycler was supplied, so the "
+                    "worker(s) that hung are gone for the rest of this "
+                    "polish and every later batch runs on fewer of them."
+                )
+        return [float(v) for v in vals]
+
+    t_start = time.monotonic()
+    t_last_log = t_start
+
+    def _heartbeat(n_swept, n_live=None, partial=None):
+        """One progress line, RATE-LIMITED to `progress_interval_s`.
+
+        Called between sweeps and, on an interleaving pool, once per
+        proposal that comes back.  Idempotent by construction: every caller
+        shares the one `t_last_log` clock, so calling it 64 times a sweep
+        produces no more lines than calling it once -- which is what makes
+        it safe to hand to `_map_logp_timeout` as an `on_poll`.
+
+        `n_live=None` marks the opening batch (no sweep has started);
+        `partial=(n_back, n_batch)` marks a batch still in flight.
+        """
+        nonlocal t_last_log
+        if not progress_interval_s:
+            return
+        now = time.monotonic()
+        if now - t_last_log < float(progress_interval_s):
+            return
+        t_last_log = now
+        elapsed = now - t_start
+        if n_live is None:
+            # The opening batch scores every seed's population before sweep
+            # 1 exists.  It is one blocking batch like any other and hangs
+            # like any other, so it gets a line -- but there is no sweep
+            # rate yet to extrapolate an ETA from.
+            k, m = partial
+            logger.info(
+                f"PTDE seed polish: scoring the initial population "
+                f"({k}/{m} evaluations back)  "
+                f"elapsed={fmt_duration(elapsed)}"
+            )
+            return
+        # The ETA is an UPPER bound and labelled as one: the cap is what it
+        # extrapolates to, and an opted-in tolerance can end the run earlier.
+        if partial is None:
+            n_done = float(n_swept)
+            where = f"sweep {n_swept}/{int(n_steps)}"
+        else:
+            k, m = partial
+            n_done = n_swept + (k / m if m else 0.0)
+            where = (
+                f"sweep {n_swept + 1}/{int(n_steps)} IN PROGRESS "
+                f"({k}/{m} proposals back)"
+            )
+        eta = (
+            fmt_duration(elapsed / n_done * (int(n_steps) - n_done))
+            if n_done > 0
+            else "?"
+        )
+        gains = ", ".join(f"{st['best_lp'] - st['lp0']:+.1f}" for st in states)
+        logger.info(
+            f"PTDE seed polish: {where}  "
+            f"elapsed={fmt_duration(elapsed)}  "
+            f"eta<={eta}  "
+            f"dlp=[{gains}]  ({n_live} seed(s) still running)"
+        )
 
     # --- build every seed's population, then score them all in one batch ---
     pops, states = [], []
@@ -475,7 +625,10 @@ def polish_seed_starts(
     n_trust_rej = [0] * n_seeds
 
     flat = [p for pop in pops for p in pop]
-    flat_lps = _lps(flat)
+    n_flat = len(flat)
+    flat_lps = _lps(
+        flat, on_progress=lambda k: _heartbeat(0, None, (k, n_flat))
+    )
     for s, center in enumerate(raw_starts):
         lps = np.array(flat_lps[s * pop_size : (s + 1) * pop_size])
         # Non-finite members re-center (a jitter may cross a hard bound).
@@ -502,8 +655,6 @@ def polish_seed_starts(
             }
         )
 
-    t_start = time.monotonic()
-    t_last_log = t_start
     for _sweep in range(int(n_steps)):
         live = [s for s in range(n_seeds) if not states[s]["done"]]
         if not live:
@@ -527,7 +678,11 @@ def polish_seed_starts(
                     }
                 )
                 index.append((s, i))
-        lps_batch = _lps(batch)
+        n_batch, n_live = len(batch), len(live)
+        lps_batch = _lps(
+            batch,
+            on_progress=lambda k: _heartbeat(_sweep, n_live, (k, n_batch)),
+        )
 
         for (s, i), prop, lp in zip(index, batch, lps_batch):
             st = states[s]
@@ -563,26 +718,18 @@ def polish_seed_starts(
                 st["stop"] = "tol"
                 st["done"] = True
 
-        # Heartbeat (see PROGRESS in the docstring).  The ETA is an UPPER
-        # bound and labelled as one: the cap is what it extrapolates to, and
-        # an opted-in tolerance can end the run earlier.
-        now = time.monotonic()
-        if progress_interval_s and now - t_last_log >= float(
-            progress_interval_s
-        ):
-            t_last_log = now
-            n_done = _sweep + 1
-            elapsed = now - t_start
-            eta = elapsed / n_done * (int(n_steps) - n_done)
-            gains = ", ".join(
-                f"{st['best_lp'] - st['lp0']:+.1f}" for st in states
-            )
-            logger.info(
-                f"PTDE seed polish: sweep {n_done}/{int(n_steps)}  "
-                f"elapsed={fmt_duration(elapsed)}  "
-                f"eta<={fmt_duration(eta)}  "
-                f"dlp=[{gains}]  ({len(live)} seed(s) still running)"
-            )
+        # Heartbeat (see PROGRESS in the docstring).
+        _heartbeat(_sweep + 1, len(live))
+
+    if n_timeouts:
+        logger.warning(
+            f"PTDE seed polish: {n_timeouts} proposal(s) exceeded "
+            f"eval_timeout={float(eval_timeout):.0f}s and were rejected.  "
+            f"The polished seeds are still valid -- a rejected proposal "
+            f"cannot move a population -- but that part of the surface went "
+            f"unexplored, and a hang this repeatable is worth reproducing "
+            f"offline."
+        )
 
     polished, dlps = [], []
     for s, st in enumerate(states):
