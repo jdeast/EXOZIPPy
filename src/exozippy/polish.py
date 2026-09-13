@@ -246,6 +246,7 @@ def polish_raw_starts(
     tol_window=_UNSET,
     cores=None,
     adapt_gamma=_UNSET,
+    eval_timeout=None,
 ):
     """Polish each raw start toward its own basin's optimum.
 
@@ -265,6 +266,16 @@ def polish_raw_starts(
     rule a sampler uses when nothing names one), and ``cores=1`` is how a
     caller asks for serial.  The L-BFGS path ignores it -- it is a few
     hundred evaluations and forks nothing.
+
+    ``eval_timeout`` (seconds, default None = wait forever) is the DE
+    engine's per-logp-call wall-clock budget, the same contract the PTDE
+    samplers' ``sampler: eval_timeout:`` key carries: a call that exceeds it
+    is abandoned and scored -inf, and the pool it wedged is recycled before
+    the next batch.  It needs a pool (``cores > 1``), and the L-BFGS path
+    ignores it -- scipy calls the gradient function in-process, where there
+    is nothing to time out against.  **run.py does not currently pass one**;
+    see run.md for why that is a config-vocabulary decision rather than an
+    oversight.
 
     Returns (polished_starts, dlps, method) with method in
     {"lbfgs", "de", "none"}.  A seed is never made worse: any engine result
@@ -362,6 +373,24 @@ def polish_raw_starts(
             f"{int(n_steps)} sweeps; this gradient-free branch is far more "
             f"expensive than L-BFGS."
         )
+    _common.warn_serial_eval_timeout(
+        eval_timeout, pool, n_proc, "Seed polish", logger
+    )
+
+    def _recycle(dead):
+        """Swap in a fresh pool after a logp call wedged a worker.
+
+        THIS FUNCTION IS WHY THE POOL STAYS OURS.  polish_seed_starts cannot
+        own the teardown -- it is handed `pool` and does not know how many
+        workers to fork -- so it calls back here and we rebind the name the
+        `finally` below tears down.  Without the rebind that `finally` would
+        close the corpse and leak the live pool's workers for the rest of
+        the process.
+        """
+        nonlocal pool
+        pool = _common.recycle_pool(dead, n_proc)
+        return pool
+
     try:
         polished, dlps = polish_seed_starts(
             raw_starts,
@@ -370,12 +399,17 @@ def polish_raw_starts(
             scales,
             n_steps=n_steps,
             pool=pool,
+            eval_timeout=eval_timeout,
+            pool_recycler=_recycle if pool is not None else None,
             **de_kwargs,
         )
     finally:
         if pool is not None:
-            pool.close()
-            pool.join()
+            # terminate(), never close() + join(): a worker wedged in a
+            # pathological logp never finishes its task, so close() leaves it
+            # running and join() waits for it forever -- and a recycled pool
+            # has SIGTERM-ignoring workers on top of that (review 2.4.1).
+            _common._shutdown_pool(pool)
     return polished, dlps, "de"
 
 

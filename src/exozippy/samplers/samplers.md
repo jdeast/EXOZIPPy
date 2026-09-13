@@ -184,7 +184,26 @@ worth knowing before changing it:
   coming.
 - Both samplers tear the pool down with `_common._shutdown_pool`, never
   `close()` + `join()`: the workers ignore SIGTERM by design, so `join()` on a
-  wedged worker never returns (2.4.1).
+  wedged worker never returns (2.4.1). **`polish.polish_raw_starts` now does
+  the same** -- it used to `close()` + `join()`, which was survivable only
+  while nothing in that stage could wedge a worker.
+
+**The seed polish enforces it too, but nothing configures it yet (3.4.4).**
+`ptde.polish_seed_starts` and `polish.polish_raw_starts` take an
+`eval_timeout` with the same semantics as above, plus a `pool_recycler`
+callable -- `_common.recycle_pool`, supplied by whoever OWNS the pool, which
+for this stage is `polish_raw_starts`. The recycler is not a style choice:
+`polish_seed_starts` is handed a pool and does not know how many workers to
+fork, so the owner has to learn which object it now owns or its own teardown
+closes the corpse and leaks the live one. Both default to `None`, and
+**`run.py` passes neither**, so today's behaviour is unchanged: `sampler:
+eval_timeout:` is in `run.METHOD_ONLY_SAMPLER_KEYS` as a PTDE-family key, and
+`warn_method_only_sampler_keys` tells a `demc`/`demcz`/`nested` user it is
+IGNORED -- which honoring it in a stage that runs under every method would
+turn into a lie for a gradient-free model. That partition is review 2.3.6's
+ruling; re-opening it is its own change. What the polish gained regardless is
+the mid-batch heartbeat (see `run.md`), which needs no timeout to tell
+computing from hung.
 
 ## Chain starts
 
