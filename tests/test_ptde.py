@@ -1543,3 +1543,144 @@ def test_ladder_update_is_a_noop_when_nothing_was_proposed():
     np.testing.assert_allclose(
         _update_ladder_barrier(temps, zeros, zeros), temps
     )
+
+
+# ---------------------------------------------------------------------------
+# Windowed gamma adaptation vs the mode-hop counters (review 1.4.3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("hop_p", [0.2, 0.5])
+def test_windowed_gamma_adaptation_measures_hops_on_its_own_window(
+    monkeypatch, hop_p
+):
+    """
+    Given de_mode_hop > 0, adapt_gamma on, and a tune phase spanning several
+      log_interval windows,
+    When the adapter computes the non-hop T=1 acceptance rate
+      (n_accept - n_hop_accept) / (n_propose - n_hop_propose),
+    Then every rate it measures is a RATE -- strictly positive and at most
+      1.0 -- because the hop counters it subtracts are reset with the window
+      they are subtracted from.
+
+    The windowed tune-phase reset used to zero n_accept/n_propose and the
+    swap counters but NOT the two hop counters, so from the second window on
+    a CUMULATIVE hop count was taken off a WINDOWED one.  The denominator
+    shrinks toward (and past) zero, pushing the measured rate above 1.0 and
+    gamma AWAY from target_accept; once the numerator goes negative the
+    `ar_T1 > 0` guard skips the adaptation for the rest of tune without
+    logging anything, so a run enters its draw phase on a garbage frozen
+    gamma.  Only de_mode_hop > 0 reaches it, which is why the default 0.0
+    hid it.  ptde_async was never affected: it keeps separate window
+    counters for the adapter and lets the hop counters run cumulatively for
+    its wrap-up report.
+
+    Two hop probabilities, because how far the unfixed code gets before the
+    subtraction stops the adaptation depends on p: measured here it adapts
+    in 2 of the 10 tune windows at p=0.2 and in 1 at p=0.5, against 8 and 10
+    with the fix.  A rate ABOVE 1.0 -- 1.222 in the review's probe, taking
+    gamma 0.872 -> 2.155 -- is the same subtraction seen from the other
+    side, when the denominator is still positive as it collapses.  The two
+    assertions pin one arm each; which one a given seed shows is not
+    something to depend on.
+    """
+    # ARRANGE: record every rate the tune-phase adapter hands to next_gamma.
+    from exozippy.samplers._common import next_gamma as _real_next_gamma
+
+    seen = []
+
+    def _spy(gamma, ar, target_accept, **kwargs):
+        seen.append(float(ar))
+        return _real_next_gamma(gamma, ar, target_accept, **kwargs)
+
+    monkeypatch.setattr("exozippy.samplers.ptde.next_gamma", _spy)
+
+    # ACT: 10 adaptation windows during tune, hops at probability hop_p.
+    ptde_sample(
+        _simple_model(),
+        _MinimalSystem(),
+        draws=10,
+        tune=60,
+        n_temps=2,
+        T_max=4.0,
+        n_chains=4,
+        cores=1,
+        seed=7,
+        log_interval=6,
+        de_mode_hop=hop_p,
+        adapt_gamma=True,
+        adapt_ladder=False,
+        min_ess=None,
+        max_rhat=None,
+    )
+
+    # ASSERT: the adaptation ran in most windows (it is skipped only by a
+    # window that accepted no non-hop proposal at all), and every rate it
+    # saw is a rate.
+    assert len(seen) >= 5, (
+        "the gamma adaptation barely ran -- a negative numerator silently "
+        f"skipping it is exactly the failure under test: {seen}"
+    )
+    assert all(0.0 < ar <= 1.0 for ar in seen), (
+        f"a non-hop acceptance RATE cannot exceed 1.0: {seen}"
+    )
+
+
+def test_sync_reports_its_mode_hop_acceptance_at_wrap_up(caplog):
+    """
+    Given a synchronous run with de_mode_hop > 0,
+    When it finishes,
+    Then the wrap-up logs the gamma=1 hop acceptance, as ptde_async has since
+      the feature shipped.
+
+    Both call one helper (_common.log_mode_hop_summary) so the two samplers
+    cannot drift apart again; sync's counts span the draw phase, because its
+    counters are zeroed at the tune -> draw boundary.
+    """
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        ptde_sample(
+            _simple_model(),
+            _MinimalSystem(),
+            draws=20,
+            tune=20,
+            n_temps=2,
+            T_max=4.0,
+            n_chains=4,
+            cores=1,
+            seed=8,
+            log_interval=1000,
+            de_mode_hop=0.3,
+            min_ess=None,
+            max_rhat=None,
+        )
+
+    hops = [r.message for r in caplog.records if "DE mode hops" in r.message]
+    assert len(hops) == 1, f"expected one hop summary, got {hops}"
+    assert hops[0].startswith("PTDE DE mode hops (gamma=1, p=0.3):")
+    assert "accepted" in hops[0]
+
+
+def test_mode_hop_summary_is_silent_when_hops_are_off(caplog):
+    """
+    Given de_mode_hop at its default of 0.0,
+    When a run finishes,
+    Then nothing is reported about hops -- a line reading 0/0 in every
+      existing fit's log would be noise.
+    """
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        ptde_sample(
+            _simple_model(),
+            _MinimalSystem(),
+            draws=10,
+            tune=10,
+            n_temps=2,
+            T_max=4.0,
+            n_chains=4,
+            cores=1,
+            seed=9,
+            log_interval=1000,
+            min_ess=None,
+            max_rhat=None,
+        )
+
+    assert not [r for r in caplog.records if "DE mode hops" in r.message]

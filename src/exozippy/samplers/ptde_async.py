@@ -1172,15 +1172,9 @@ def ptde_async_sample(
         rate_unit="swap",
         extras=_extras,
     )
-    if de_mode_hop > 0.0:
-        logger.info(
-            f"PTDE-async DE mode hops (gamma=1, p={de_mode_hop:g}): "
-            f"{n_hop_accept[0]}/{n_hop_propose[0]} accepted "
-            f"({n_hop_accept[0] / max(n_hop_propose[0], 1):.4f}); excluded "
-            "from the gamma adaptation. Compare against the mode-change "
-            "count in the mode report: hops are the DE path between basins, "
-            "PT round trips are the other one."
-        )
+    _common.log_mode_hop_summary(
+        "PTDE-async", logger, de_mode_hop, n_hop_accept[0], n_hop_propose[0]
+    )
     ladder_health_report(temperatures, n_swap_accept, n_swap_propose)
     if adapt_ladder and n_temps > 2 and not n_ladder_adapts[0]:
         logger.warning(

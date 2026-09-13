@@ -1514,11 +1514,30 @@ def ptde_sample(
                 # is a fresh measurement (only matters while adapting; the
                 # tune -> draw boundary reset at the top of the loop is
                 # unconditional and is what the wrap-up report relies on).
+                #
+                # THE TWO RESETS MUST AGREE ON THEIR WINDOW.  ar_T1 above
+                # subtracts the hop counters from n_accept/n_propose, and a
+                # CUMULATIVE count subtracted from a WINDOWED one is not a
+                # rate: while the hop counters were left out here, every
+                # window after the first shrank its own denominator by all
+                # the hops of every earlier window, so ar_T1 ran above 1.0
+                # (measured 1.222, gamma 0.872 -> 2.155 instead of adapting
+                # toward target_accept) or went negative, which trips the
+                # `if ar_T1 > 0` guard and silently ends the adaptation for
+                # the rest of tune (review 1.4.3).  Every counter that enters
+                # that expression is windowed together.
+                #
+                # After the tune -> draw boundary reset the hop counters then
+                # accumulate over the whole draw phase -- exactly the window
+                # n_accept/n_propose report on -- which is what the wrap-up
+                # log_mode_hop_summary below quotes.
                 if phase == "tune" and (adapt_gamma or adapt_ladder):
                     n_accept[:] = 0
                     n_propose[:] = 0
                     n_swap_accept[:] = 0
                     n_swap_propose[:] = 0
+                    n_hop_propose[:] = 0
+                    n_hop_accept[:] = 0
 
                 rt_rate = round_trips[0] / max(n_swap_rounds, 1)
                 logger.info(
@@ -1652,6 +1671,9 @@ def ptde_sample(
         extras=(
             [f"  eval_timeouts={n_eval_timeouts}"] if n_eval_timeouts else []
         ),
+    )
+    _common.log_mode_hop_summary(
+        "PTDE", logger, de_mode_hop, n_hop_accept[0], n_hop_propose[0]
     )
     # Post-tune swap counters (they are zeroed at the tune -> draw boundary;
     # see the step loop), so this measures the FINAL ladder's communication
