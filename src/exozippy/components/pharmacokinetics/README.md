@@ -197,6 +197,53 @@ to `nlsList`'s 24.1 L -- pulled there by the other eleven. Subject 9's `ka`
 remains large (6.8/hr) and unidentified, for the unrelated reason section 2
 gives.
 
+### 5. Against an independent BAYESIAN implementation (2026-09-13)
+
+`nlme` is maximum likelihood, so section 4 compares a posterior to a point
+estimate with a standard error. This is the like-for-like check: the same
+data, the same structural model, the same priors, in a model written directly
+against `numpyro` -- no EXOZIPPy component machinery, a different sampler, and
+deliberately the TEXTBOOK forward model, `D*ka/(V*(ka-ke)) * (exp(-ke t) -
+exp(-ka t))`, so the reference shares no algebra with the implementation it
+checks. The script is `notes/theoph_numpyro_reference.py` (private notes
+repository), kept because a reference nobody can re-run is an assertion.
+
+Conditioned on the direct mode (see below), every population parameter:
+
+| | numpyro | EXOZIPPy | separation |
+|---|---|---|---|
+| `mu_log_cl` | 0.44473 +/- 0.03365 | 0.44389 +/- 0.03358 | 0.018 sigma |
+| `mu_log_ke` | -1.06687 +/- 0.02482 | -1.06757 +/- 0.02368 | 0.020 sigma |
+| `mu_log_ka` | 0.19198 +/- 0.11279 | 0.19768 +/- 0.11268 | 0.036 sigma |
+| `omega_cl` (median, dex) | 0.0982 | 0.0988 | |
+| `omega_ke` | 0.0407 | 0.0410 | |
+| `omega_ka` | 0.3393 | 0.3400 | |
+| `sigma_add` (mg/L) | 0.3616 | 0.3574 | |
+| `sigma_prop` | 0.1221 | 0.1225 | |
+
+This is the check that a component-assembly error would fail -- the forward
+model, the non-centred hierarchy, the allometric covariate, the units and the
+basis all have to be right for it to pass. It is deliberately NOT a logp-level
+match: EXOZIPPy also puts a soft barrier on each subject's derived
+log-coordinates whose transition width the whitening probe measures at
+runtime, and restating that here would mean copying the machinery this is
+supposed to be independent of.
+
+**AND IT FOUND THE SECOND MODE WHERE WE DID NOT, which is a caution about our
+own mode report rather than a success.** The numpyro chains split 75/25
+between the direct solution and the flip-flop mirror, with marginal
+`r_hat = 1.53` and bulk ESS of 7 on `ka` and `ke` -- exactly the signature of
+a degenerate pair whose roles swap. The EXOZIPPy run of the same model at the
+same settings reported `identify_modes: 1 mode(s), unimodal`. The difference
+is initialization, not the model: our four chains start from the polished
+whitening start and stayed in one basin, while numpyro's more diffuse
+initialization reached both. So `expects_suppressed_modes` being set is not by
+itself evidence that a degeneracy has been explored, and "unimodal" in our
+report means "these chains saw one mode". The no-population `fitkev` fit of
+the same data DID report three modes, with the machinery's own
+"weights reflect initialization, not posterior mass" warning attached -- which
+is the honest reading of both results.
+
 ### What kind of comparison this is, and what it is not
 
 `nlme` fits by **maximum likelihood** (its default, and what was used here;
@@ -205,13 +252,11 @@ posterior with proper priors. The two agreeing to a twentieth of a sigma says
 the likelihood dominates and both implementations are computing the same
 model -- it is not a claim that ML and Bayes are the same procedure.
 
-**This is not the first Bayesian analysis of the Theophylline data, and
-nothing here should be read as claiming otherwise.** `Theoph` is the standard
-worked example of the field's Bayesian tooling -- the Stan/Torsten tutorial
-of Margossian, Zhang & Gillespie is the best-known -- and it appears
-throughout `nlmixr2`, Monolix and NONMEM `$BAYES` material. What is new here
-is only that a component from this field runs on this astronomy code's
-machinery, which is an architectural claim and not a pharmacometric one.
+`Theoph` is the standard reference dataset of population PK and has been
+fitted by most of the field's tools, Bayesian ones included. Nothing here is a
+new result about theophylline; what is being checked is that a component from
+this field runs on this astronomy code's machinery and produces the same
+numbers as the field's own implementations.
 
 ### What this does and does not establish
 

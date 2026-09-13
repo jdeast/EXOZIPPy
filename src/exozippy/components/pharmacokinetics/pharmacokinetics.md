@@ -89,6 +89,18 @@ these data it does: subject 12 settles in the mirrored mode when fitted alone
 pulled there by the other eleven. That is shrinkage doing exactly what it is
 for, and it is a reason the two phases are worth having in this order.
 
+**But `expects_suppressed_modes` being set is not evidence that a degeneracy
+was explored, and this example is the counter-example.** An independent
+`numpyro` fit of the same hierarchy (README section 5) splits 75/25 between
+the direct solution and the mirror, with marginal `r_hat = 1.53` on `ka` and
+`ke`. The EXOZIPPy run of the same model at the same settings reported
+`1 mode(s), unimodal`. The difference is initialization -- our four chains
+start from the polished whitening start and stayed in one basin -- not the
+model or the flag. Read "unimodal" from the mode report as "these chains saw
+one mode". The no-population `fitkev` fit of the same data does report three,
+carrying the machinery's own "weights reflect initialization, not posterior
+mass" warning, which is the honest form of the same statement.
+
 ## The coordinate choice: NONMEM TRANS1 and TRANS2
 
 NONMEM ships two spellings of this one model and users hold opinions about
