@@ -476,14 +476,28 @@ def resolve_cores_setting(raw):
     6.11.3) -- so both messages say that an ABSENT cores is the automatic
     grant and that ``cores: 1`` is how to ask for serial.
 
-    Deliberately no floor.  ``cores: 0`` means three different things across
-    the three resolvers and unifying that is review 2.4.8; a validation added
-    here would hide it rather than fix it.
+    ``cores: 0`` -- and any negative value -- is the AUTOMATIC grant, and it
+    is normalized to the ``None`` sentinel HERE, at the parse boundary, so
+    the three resolvers downstream cannot disagree about it (review 2.4.8).
+    They used to: ``create_pool`` took ``min(0, total_proposals)`` and ran
+    SERIAL, ``_resolve_polish_cores`` read ``n <= 1`` and ran SERIAL, and
+    ``nested.py``'s ``cores or default_cores()`` read 0 as falsy and took the
+    AUTO grant -- one written number, three behaviors, in the three stages of
+    a single run.  JDE's ruling is that ``<= 0`` means AUTO everywhere, which
+    is also the reading a user who wrote 0 most likely meant.
+
+    It WARNS rather than raising or silently clamping -- rope, not gates.  A
+    zero is a plausible spelling of "let the machine decide", so the run
+    continues with that reading, but the user is told which reading they got
+    and that ``cores: 1`` is how to ask for serial instead.  The wording
+    matches this function's own refusal and ``_resolve_polish_cores``'s
+    warning: all three say that an absent cores IS the automatic grant and
+    that ``cores: 1`` is serial.
     """
     if raw is None:
         return None
     try:
-        return int(raw)
+        n = int(raw)
     except (TypeError, ValueError):
         raise ValueError(
             f"sampler: cores: {raw!r} is not a number of cores. Omit the "
@@ -491,6 +505,16 @@ def resolve_cores_setting(raw):
             f"the physical cores, leaving one for the OS and your shell), "
             f"or write `cores: 1` for serial."
         ) from None
+    if n <= 0:
+        logger.warning(
+            f"sampler: cores: {n} is not a number of cores; taking the "
+            f"automatic grant instead (which is also what an absent cores "
+            f"takes: a fraction of the physical cores, leaving one for the "
+            f"OS and your shell). If you meant one core, write cores: 1 for "
+            f"serial."
+        )
+        return None
+    return n
 
 
 def warn_retired_sampler_keys(sampler_cfg):

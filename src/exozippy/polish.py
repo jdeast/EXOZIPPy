@@ -418,6 +418,15 @@ def _resolve_polish_cores(cores, n_seeds):
             f"cores takes; cores=1 is serial)."
         )
         return default_cores()
-    if n <= 1:
+    # `cores <= 0` is the automatic grant, the same as None (review 2.4.8).
+    # It used to be swept into the `n <= 1` serial arm, while the same 0 was
+    # serial in create_pool and AUTO in nested.py.  run.py warns about it at
+    # the parse boundary, where the user's own spelling is still in hand; by
+    # the time it reaches this stage the only thing left to do is agree with
+    # the other two resolvers.  ONE is still serial -- that is the statement
+    # a caller makes when they mean it.
+    if n <= 0:
+        return default_cores()
+    if n == 1:
         return 1
     return max(1, min(n, mp.cpu_count()))
