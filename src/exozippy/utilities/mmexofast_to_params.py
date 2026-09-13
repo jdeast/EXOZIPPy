@@ -129,6 +129,20 @@ def mmexofast_to_params(
             f"# lands in the data's own time system (same contract as",
             f"# mmexofast_support.push_seed_hints).",
         ]
+    # The writer declares whether its seeds still want scattering, because the
+    # reader cannot tell (review 8.3.3).  These are MMEXOFAST OPTIMA -- one
+    # point per solution, each the best fit of its own mode -- and not draws
+    # from any posterior, so they carry no spread of their own and the chains
+    # must be scattered around them.  `true` is also what an ABSENT key means;
+    # it is written out so the statement is explicit rather than inherited.
+    lines += [
+        "#",
+        "# Chain starts: these seeds are single optima (one per MMEXOFAST",
+        "# solution), not posterior draws, so the sampler still has to",
+        "# scatter the chains around them.  See samplers/samplers.md,",
+        '# "Chain starts".',
+        "overdisperse: true",
+    ]
     lines.append("")
 
     lines += _param_block(

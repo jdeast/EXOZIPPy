@@ -1024,20 +1024,109 @@ class RawLayout:
         return pop[i] + step
 
 
+def de_span_floor(n_params):
+    """Smallest DE population that can span parameter space: n_params + 2.
+
+    A DE proposal for member i draws its difference vector from the OTHER
+    members, so n - 1 members span at most n - 2 directions and it takes
+    n >= n_params + 2 to reach every direction at all.  ONE definition, because
+    the same number gates two different quantities -- the CHAIN count
+    (warn_if_population_degenerate) and the number of UNIQUE SEEDS a
+    `overdisperse: false` population is built from
+    (warn_if_seed_population_degenerate, review 8.3.3) -- and two constants
+    meaning the same thing would drift.
+    """
+    return n_params + 2
+
+
+#: What running below ``de_span_floor`` costs, stated wherever it is warned
+#: about.  Raw (whitened) scales are ~1 by construction, so escaping the hull
+#: on DE_JITTER alone is a random walk of step 1e-4: off-hull displacement
+#: goes as jitter*sqrt(steps), and covering ONE whitened sigma therefore takes
+#: ~(1/DE_JITTER)**2 = 1e8 accepted steps.  Ergodic in principle, hopeless in
+#: practice -- which is the difference between "mixes slowly" and "does not
+#: sample that direction", and is why the wording escalates here.
+SUBSPACE_CONSEQUENCE = (
+    "The DE difference vectors then span a proper SUBSPACE of parameter "
+    "space and the only escape is the epsilon jitter (DE_JITTER=1e-4) "
+    "alone: off-hull diffusion goes as jitter*sqrt(steps), so covering ONE "
+    "whitened sigma takes ~1e8 accepted steps -- ergodic in principle, "
+    "hopeless in practice."
+)
+
+
 def warn_if_population_degenerate(n_chains, n_params, label, log):
     """Warn when the DE population cannot span parameter space.
 
-    With n_chains < n_params + 2 the difference vectors span a proper
-    subspace, and the epsilon jitter (DE_JITTER) is the only escape from
-    it -- ergodic in principle, hopeless in practice. The default
-    n_chains = 2 * n_params never triggers this.
+    With n_chains < de_span_floor(n_params) the difference vectors span a
+    proper subspace, and the epsilon jitter (DE_JITTER) is the only escape
+    from it. The default n_chains = 2 * n_params never triggers this.
     """
-    if n_chains < n_params + 2:
+    floor = de_span_floor(n_params)
+    if n_chains < floor:
         log.warning(
-            f"{label}: n_chains={n_chains} < n_params + 2 = {n_params + 2}; "
-            f"DE difference vectors cannot span parameter space and mixing "
-            f"across the missing directions relies on the tiny epsilon "
-            f"jitter alone. Raise n_chains (default 2 x n_params)."
+            f"{label}: n_chains={n_chains} < n_params + 2 = {floor}; "
+            f"DE difference vectors cannot span parameter space. "
+            f"{SUBSPACE_CONSEQUENCE} Raise n_chains (default 2 x n_params)."
+        )
+
+
+def warn_if_seed_population_degenerate(n_unique, n_params, label, log):
+    """Warn when an ``overdisperse: false`` start set is built from too few
+    distinct seeds.
+
+    Only reachable when the params file declares ``overdisperse: false``:
+    every chain then starts exactly at its round-robin seed, so the
+    population's affine hull is the hull of the UNIQUE SEEDS, not of
+    n_chains points.  Seeding many chains from few unique values is ALLOWED
+    -- it is a legitimate way to start a restart -- but it is warned about
+    in two tiers, because the two say different things:
+
+      * below 2 * n_params (the default chain count, and ter Braak's mixing
+        recommendation, so this tier has headroom) it is a MIXING complaint:
+        DE has few difference vectors to choose from and explores slowly.
+      * below de_span_floor(n_params) it stops being a mixing complaint at
+        all -- the population cannot span parameter space at all, with the
+        consequence SUBSPACE_CONSEQUENCE states, so some directions are
+        effectively never sampled.
+
+    THE CHECK LIVES HERE, AT SAMPLER START, AND NOT IN mkparam, and that is
+    not a convenience: ``n_params`` belongs to the NEXT fit's model, which
+    may differ from the one that produced the seeds (added data, a changed
+    parameterization), so the writer cannot evaluate the threshold at all.
+
+    What this cannot see: K seeds drawn off a chain whose bulk-ESS is n_eff
+    are only ~n_eff EFFECTIVELY INDEPENDENT points, so the affine-hull
+    argument really applies with n_eff and not with K -- forty seeds off an
+    ESS-5 chain span at most a 4-dimensional hull.  And seeds drawn from an
+    unconverged or mode-stuck posterior are properly dispersed with respect
+    to what was SAMPLED while being badly under-dispersed with respect to
+    the TRUE posterior.  No local test on the seed list can detect either,
+    which is why mkparam RECORDS the min ESS / max Rhat of the fit its seeds
+    came from in the file it writes, for the human to read.
+    """
+    floor = de_span_floor(n_params)
+    remedy = (
+        "Write more seeds (mkparam: {n_seeds: N} emits a length-N initval "
+        "list), or set `overdisperse: true` in the params file to scatter "
+        "the chains around them."
+    )
+    if n_unique < floor:
+        log.warning(
+            f"{label}: `overdisperse: false` with only {n_unique} unique "
+            f"seed(s) against n_params={n_params}. {n_unique} points span at "
+            f"most {max(n_unique - 2, 0)} directions, below the "
+            f"n_params + 2 = {floor} needed to span parameter space at all. "
+            f"{SUBSPACE_CONSEQUENCE} {remedy}"
+        )
+    elif n_unique < 2 * n_params:
+        log.warning(
+            f"{label}: `overdisperse: false` with {n_unique} unique seeds "
+            f"against n_params={n_params}. That spans parameter space "
+            f"({n_unique} >= n_params + 2 = {floor}) but is below the "
+            f"default chain count 2 x n_params = {2 * n_params}, ter Braak's "
+            f"mixing recommendation, so DE has few difference vectors to "
+            f"choose from and will mix slowly. {remedy}"
         )
 
 
@@ -1119,6 +1208,7 @@ def _make_starts(
     seed_indices=None,
     system=None,
     raw_scales=None,
+    overdisperse=None,
 ):
     """Generate n_chains starting points near one or more seeds (P4).
 
@@ -1126,6 +1216,19 @@ def _make_starts(
     dicts (multi-seed sampling). Chains are assigned to seeds round-robin
     (chain j -> seed j % K); the first chain of each seed group starts exactly
     at that seed's solved point, the rest jitter around their seed's center.
+
+    ``overdisperse`` is the params file's declaration of whether its seeds
+    still want scattering (review 8.3.3); ``None`` reads it off the system,
+    where an ABSENT key means True.  It exists because K seeds mean one of
+    exactly two things and nothing here can tell them apart at run time --
+    K modes a user is trying, each of which wants dispersing, or K posterior
+    draws off a finished fit, which are already dispersed -- so the WRITER
+    declares it instead of the reader guessing.  False means "use these seeds
+    exactly as they are": every chain starts at its round-robin seed with no
+    jitter at all.  It RAISES on a single seed (every chain would start at the
+    identical point, every difference vector would be exactly zero) and warns
+    in two tiers when the unique-seed count is small
+    (warn_if_seed_population_degenerate).
 
     Mirrors EXOFASTv2: scatter chains by factor x scale where
     factor = min(sqrt(500/n_params), 3), accept any finite logp (no proximity
@@ -1157,6 +1260,25 @@ def _make_starts(
     K = len(raw_starts)
     if seed_indices is None:
         seed_indices = list(range(K))
+
+    if overdisperse is None:
+        overdisperse = getattr(system, "overdisperse", True)
+    overdisperse = bool(overdisperse)
+    # Before the probe: this is an input error, and the probe costs
+    # n_elements x O(10) logp calls to tell the user nothing they did not
+    # already write.
+    if not overdisperse and K < 2:
+        raise ValueError(
+            f"The params file declares `overdisperse: false`, but it carries "
+            f"only {K} seed. That declaration means 'use these seeds exactly "
+            f"as they are', so every one of the {n_chains} chains would start "
+            f"at the IDENTICAL point: every DE difference vector is exactly "
+            f"zero and the population can never move apart. Either write "
+            f"several seeds (mkparam: {{n_seeds: N}} emits a length-N initval "
+            f"list), or set `overdisperse: true` -- which is also what an "
+            f"ABSENT `overdisperse:` key means -- to scatter the chains "
+            f"around the one seed."
+        )
 
     if raw_scales is not None:
         map_lp = float(logp_fn(raw_starts[0]))
@@ -1202,18 +1324,30 @@ def _make_starts(
     # chains always get the factor-scaled jitter.
     max_exact = max(1, n_chains // 2)
     n_exact = 0
-    if K > max_exact:
+    if overdisperse:
+        if K > max_exact:
+            logger.info(
+                f"PTDE init: {K} seeds > {max_exact} exact-start budget "
+                f"(half the {n_chains} chains); the rest start jittered around "
+                f"their seed to keep restart overdispersion."
+            )
+    else:
+        # The writer declared these seeds already dispersed, so the budget
+        # above does not apply: EVERY chain starts exactly at its round-robin
+        # seed.  The population's affine hull is therefore the hull of the
+        # UNIQUE seeds, which is what the two-tier warning measures.
         logger.info(
-            f"PTDE init: {K} seeds > {max_exact} exact-start budget "
-            f"(half the {n_chains} chains); the rest start jittered around "
-            f"their seed to keep restart overdispersion."
+            f"PTDE init: `overdisperse: false` -- all {n_chains} chains start "
+            f"exactly at their round-robin seed (no jitter), from {K} seeds."
         )
+        warn_if_seed_population_degenerate(K, n_params, "PTDE init", logger)
     for j in range(n_chains):
         s = j % K
         center = raw_starts[s]
         # First chain of each seed group starts exactly at the solved seed
-        # (up to the overdispersion budget above).
-        if s not in seed_seen and n_exact < max_exact:
+        # (up to the overdispersion budget above); with overdisperse false,
+        # every chain does.
+        if not overdisperse or (s not in seed_seen and n_exact < max_exact):
             lp0 = float(logp_fn(center))
             if np.isfinite(lp0):
                 starts.append({k: v.copy() for k, v in center.items()})
@@ -1276,6 +1410,7 @@ def resolve_start_population(
     raw_starts=None,
     seed_indices=None,
     raw_scales=None,
+    overdisperse=None,
 ):
     """Resolve the T=1 chain starts: explicit initvals, or multi-seed
     round-robin via _make_starts (P4).
@@ -1283,6 +1418,11 @@ def resolve_start_population(
     raw_starts/seed_indices come from run.py when available; else fall back
     to system.get_raw_starts, and further to a bare raw_start (single start)
     for minimal test/system stubs that don't implement get_raw_starts at all.
+
+    ``overdisperse`` (None -> read off the system, where an absent params-file
+    key means True) is forwarded to _make_starts; the explicit-``initvals``
+    bypass ignores it, since that list already IS one start per chain and
+    nothing here has ever scattered it.
 
     The explicit-``initvals`` bypass RAISES on a length mismatch rather than
     asserting it: `python -O` compiles an assert out entirely, and the list
@@ -1315,6 +1455,7 @@ def resolve_start_population(
         seed_indices,
         system=system,
         raw_scales=raw_scales,
+        overdisperse=overdisperse,
     )
 
 
