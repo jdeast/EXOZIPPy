@@ -134,6 +134,67 @@ still a dict (36 us to pickle, 21 us to unpickle per proposal, against 4.3 and
 changes the contract `polish`, `_make_starts`, `describe_proposal` and the
 tests all share, so it is its own PR.
 
+## Sync and async share a lot -- and the parity rule for what they share
+
+`ptde.py` and `ptde_async.py` are two loops around one sampler, and the
+sharing is deliberate. Two channels carry it, and the second one is
+invisible if you only grep for `_common`:
+
+- **`_common.py`** owns the non-statistical scaffolding both call: the
+  packing and the DE move (`RawLayout`), the positional logp
+  (`PositionalLogp`), the worker pool (`create_pool`, `recycle_pool`,
+  `_shutdown_pool`, `_worker_init`, `warn_serial_eval_timeout`), the start
+  population (`resolve_n_chains`, `resolve_start_population`,
+  `_make_starts`, `plot_start_ensemble`), the gamma rule (`next_gamma`),
+  the stop handlers, `LpPlausibilityGuard`, the draw buffers
+  (`grow_draw_storage` and its hot sibling `grow_hot_draw_storage`), and
+  the output (`assemble_inference_data`, `stamp_and_log_run_summary`).
+- **`ptde.py` itself** owns nine statistical helpers that `ptde_async`
+  imports from it directly: `_geometric_ladder`, `resolve_n_temps`,
+  `ladder_health_report`, `_deo_pair_sequence`, `_record_round_trips`,
+  `_update_ladder_barrier`, `_convergence_check_schedule`,
+  `_safe_progress`, `_check_convergence`.
+
+**What is deliberately NOT shared** is the loop itself, and everything whose
+shape follows from it: the stop/abort path (sync breaks inline, async runs a
+`_maybe_stop` closure over a category state machine), `eval_timeout`
+enforcement (sync blocks on a batch `_map_logp_timeout`, async scans
+in-flight submissions on a wall clock), the ladder- and gamma-adaptation
+windows (sync gets its window free from `log_every`; async has to count
+proposals and freeze gamma when the first chain starts recording), the
+progress line, and the hot-rung storage, which is async-only. Folding those
+into one function would mean re-deriving the asynchrony ptde_async exists
+for -- do not try.
+
+**The rule, which is what review 6.4.6 is about.** 6.4.5 stopped the T=1
+draw buffers being preallocated at the full configured `draws` -- ~1.6 GB of
+resident memory reserved and touched for draws an early-stopped run never
+takes -- and closed, having fixed `ptde.py` only. `ptde_async`, the
+production default, kept preallocating (~2.9 GB on a DC2018-shaped run,
+before the hot group) because nothing failed when only one of the two was
+fixed. So: **a storage or memory fix to one PTDE sampler is not done until
+the parity test covers both.** That test is
+`tests/test_ptde.py::test_an_early_stop_does_not_allocate_the_draws_it_never_takes`,
+parametrized over `ptde_sample` and `ptde_async_sample` -- the same "one
+rule, N callers" shape `tests/test_polish.py` uses for `next_gamma`. Add the
+arm before the fix, not after.
+
+The parallel code paths most likely to drift the same way, honestly: the
+nine-key `_safe_progress` payload dict (written out verbatim in both files,
+so a new GUI snapshot key lands in one), the two `eval_timeout` mechanisms,
+the ladder-adaptation blocks (async's has already learned a windowing fix
+sync's has not), and the stop/abort wording. None is a bug today; all four
+are two copies of one intention.
+
+**6.4.6 is not the only instance, which is the point.** Reviews 1.4.3 and
+2.4.16 are the same shape in the argument surface rather than the storage:
+`de_mode_hop` is validated in `ptde_async_sample` (it raises outside
+`[0, 1)`) and NOT in `ptde_sample`, while `run.py` feeds the identical
+config value to both. So the useful question is never "is this knob
+validated" -- it is **"which shared knobs does exactly one of the two
+samplers validate, and which shared buffers does exactly one of them
+manage?"** Ask it of anything `run.py` forwards to both.
+
 ## `cores`: one rule, and `None` means AUTO
 
 `_common.default_cores()` is the single definition of "how many cores does a

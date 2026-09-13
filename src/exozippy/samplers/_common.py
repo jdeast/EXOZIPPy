@@ -1533,16 +1533,63 @@ def grow_draw_storage(stored_raw, stored_lp, needed, chunk=DRAW_CHUNK):
 
     Returns the (possibly new) stored_lp array.
     """
-    have = stored_lp.shape[1]
+    return _grow_storage(
+        stored_raw, stored_lp, needed, chunk, axis=1, lp_fill=0.0
+    )
+
+
+def _grow_storage(stored_raw, stored_lp, needed, chunk, axis, lp_fill):
+    """Shared growth core for the cold (2-D) and hot (3-D) draw buffers.
+
+    `axis` is the DRAW axis of stored_lp, and of every array in stored_raw
+    (whose trailing axes are the parameter's own shape).  Mutates the dict
+    in place and returns the new lp array -- see grow_draw_storage for why
+    the two halves are handled differently.
+    """
+    have = stored_lp.shape[axis]
     if needed <= have:
         return stored_lp
     add = max(chunk, needed - have)
-    n_chains = stored_lp.shape[0]
     for key, arr in stored_raw.items():
-        pad = np.zeros((n_chains, add) + arr.shape[2:], dtype=arr.dtype)
-        stored_raw[key] = np.concatenate([arr, pad], axis=1)
+        pad_shape = list(arr.shape)
+        pad_shape[axis] = add
+        pad = np.zeros(pad_shape, dtype=arr.dtype)
+        stored_raw[key] = np.concatenate([arr, pad], axis=axis)
+    pad_shape = list(stored_lp.shape)
+    pad_shape[axis] = add
     return np.concatenate(
-        [stored_lp, np.zeros((n_chains, add), dtype=stored_lp.dtype)], axis=1
+        [stored_lp, np.full(pad_shape, lp_fill, dtype=stored_lp.dtype)],
+        axis=axis,
+    )
+
+
+def hot_draw_chunk(n_hot_groups, chunk=DRAW_CHUNK):
+    """Draws per growth step for the thinned hot-rung buffers.
+
+    The hot buffers carry a leading rung axis, so a growth step of
+    DRAW_CHUNK draws would cost (n_temps - 1) times what the same step
+    costs at T=1 -- 816 MB for a DC2018-shaped 8-rung x 54-chain run.
+    Dividing by the rung count makes one growth step cost the same memory
+    in both groups.
+    """
+    return max(1, int(chunk) // max(int(n_hot_groups), 1))
+
+
+def grow_hot_draw_storage(stored_hot_raw, stored_hot_lp, needed, chunk=None):
+    """grow_draw_storage's sibling for the (rung, chain, draw) hot buffers.
+
+    Same contract: mutates `stored_hot_raw` in place, returns the new
+    `stored_hot_lp`, which the caller must re-bind.  The unwritten lp pad
+    is NaN, matching the initial np.full allocation -- the hot group is cut
+    rectangularly at per_hot_draws.min() on the way out, so a written-looking
+    zero in the tail would be a trap rather than a value.
+
+    `chunk` defaults to hot_draw_chunk() of the buffer's own rung count.
+    """
+    if chunk is None:
+        chunk = hot_draw_chunk(stored_hot_lp.shape[0])
+    return _grow_storage(
+        stored_hot_raw, stored_hot_lp, needed, chunk, axis=2, lp_fill=np.nan
     )
 
 

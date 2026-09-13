@@ -31,6 +31,7 @@ from exozippy.samplers.ptde import (
     _worker_init,
     ptde_sample,
 )
+from exozippy.samplers.ptde_async import ptde_async_sample
 from exozippy.system import System
 
 
@@ -882,7 +883,80 @@ def test_draw_storage_grows_in_chunks_and_preserves_what_was_written():
     assert grow_draw_storage(stored_raw, stored_lp, needed=10) is before
 
 
-def test_an_early_stop_does_not_allocate_the_draws_it_never_takes():
+def test_hot_draw_storage_grows_on_the_draw_axis_and_pads_with_nan():
+    """
+    Given thinned hot-rung buffers, which carry a leading rung axis,
+    When they are grown,
+    Then the DRAW axis (axis 2) is the one that grows, what was written
+      survives, and the unwritten lp tail is NaN -- not a zero that would
+      read as a real log-density.
+
+    grow_draw_storage's sibling, for review 6.4.6's hot group.  The default
+    chunk is divided by the rung count so one growth step costs the same
+    memory here as it does at T=1.
+    """
+    # ARRANGE
+    from exozippy.samplers._common import (
+        DRAW_CHUNK,
+        grow_hot_draw_storage,
+        hot_draw_chunk,
+    )
+
+    stored_raw = {"x": np.zeros((2, 3, 4)), "y": np.zeros((2, 3, 4, 5))}
+    stored_lp = np.full((2, 3, 4), np.nan)
+    same_dict = stored_raw
+    stored_raw["x"][...] = 7.0
+    stored_lp[...] = -1.5
+
+    # ACT
+    stored_lp = grow_hot_draw_storage(stored_raw, stored_lp, 5, chunk=6)
+
+    # ASSERT
+    assert stored_raw is same_dict
+    assert stored_raw["x"].shape == (2, 3, 10)
+    assert stored_raw["y"].shape == (2, 3, 10, 5)
+    assert stored_lp.shape == (2, 3, 10)
+    assert (stored_raw["x"][:, :, :4] == 7.0).all()
+    assert (stored_lp[:, :, :4] == -1.5).all()
+    assert np.isnan(stored_lp[:, :, 4:]).all()
+    # already big enough -> untouched, same object
+    before = stored_lp
+    assert grow_hot_draw_storage(stored_raw, stored_lp, 10) is before
+    # the per-step cost is normalized by the rung count
+    assert hot_draw_chunk(8) == DRAW_CHUNK // 8
+    assert hot_draw_chunk(0) == DRAW_CHUNK
+
+
+def _early_stop_kwargs(sampler):
+    """The common early-stop invocation for both PTDE samplers.
+
+    ptde_async also owns the hot-rung buffers; they are switched off here so
+    the measurement is of the T=1 group in both arms.
+    """
+    kwargs = dict(
+        draws=10**6,
+        tune=2,
+        n_temps=2,
+        T_max=2.0,
+        n_chains=4,
+        cores=1,
+        seed=4,
+        log_interval=10**6,
+        maxtime=0.5,
+        min_ess=None,
+        max_rhat=None,
+    )
+    if sampler is ptde_async_sample:
+        kwargs["store_hot_chains"] = False
+    return kwargs
+
+
+@pytest.mark.parametrize(
+    "sampler",
+    [ptde_sample, ptde_async_sample],
+    ids=["ptde", "ptde_async"],
+)
+def test_an_early_stop_does_not_allocate_the_draws_it_never_takes(sampler):
     """
     Given a huge configured draw count and a run that stops almost at once,
     When sampling finishes,
@@ -892,26 +966,20 @@ def test_an_early_stop_does_not_allocate_the_draws_it_never_takes():
     ~1.6 GB of resident memory for draws the run never took.  Here the same
     shape is 4 chains x 1e6 draws x 2 variables = 96 MB, measured with
     tracemalloc (which counts numpy's own allocations).
+
+    ONE RULE, BOTH SAMPLERS -- that is what the parametrization is for.
+    Review 6.4.5 fixed this in ptde.py and closed; ptde_async, which is the
+    production default, kept preallocating for another review cycle (6.4.6)
+    because nothing failed when only one of the two was fixed.  A storage or
+    memory fix to one PTDE sampler is not done until this test covers both.
     """
     # ARRANGE / ACT
     from exozippy.samplers._common import DRAW_CHUNK
 
     tracemalloc.start()
     try:
-        idata = ptde_sample(
-            _simple_model(),
-            _MinimalSystem(),
-            draws=10**6,
-            tune=2,
-            n_temps=2,
-            T_max=2.0,
-            n_chains=4,
-            cores=1,
-            seed=4,
-            log_interval=10**6,
-            maxtime=0.5,
-            min_ess=None,
-            max_rhat=None,
+        idata = sampler(
+            _simple_model(), _MinimalSystem(), **_early_stop_kwargs(sampler)
         )
         peak_mb = tracemalloc.get_traced_memory()[1] / 1e6
     finally:
@@ -922,6 +990,47 @@ def test_an_early_stop_does_not_allocate_the_draws_it_never_takes():
     assert peak_mb < 40.0, (
         f"peak {peak_mb:.0f} MB -- the full 96 MB draw buffer was allocated "
         f"for a run that took {idata.posterior.sizes['draw']} draws"
+    )
+
+
+def test_an_early_stop_does_not_allocate_the_hot_draws_it_never_takes():
+    """
+    Given store_hot_chains on and a huge configured draw count,
+    When the async run stops almost at once,
+    Then the (rung, chain, draw) hot buffers are chunked too.
+
+    The hot group is the bigger of the two: (n_temps - 1) x n_chains x
+    (draws // hot_thin).  Here 7 rungs x 4 chains x 5e5 draws x 2 variables
+    is ~224 MB that a 0.5 s run has no use for.  ptde_async only.
+    """
+    # ARRANGE / ACT
+    tracemalloc.start()
+    try:
+        idata = ptde_async_sample(
+            _simple_model(),
+            _MinimalSystem(),
+            draws=10**6,
+            tune=2,
+            n_temps=8,
+            T_max=2.0,
+            n_chains=4,
+            cores=1,
+            seed=4,
+            log_interval=10**6,
+            maxtime=0.5,
+            min_ess=None,
+            max_rhat=None,
+            store_hot_chains=2,
+        )
+        peak_mb = tracemalloc.get_traced_memory()[1] / 1e6
+    finally:
+        tracemalloc.stop()
+
+    # ASSERT
+    assert idata.posterior.sizes["draw"] >= 1
+    assert peak_mb < 60.0, (
+        f"peak {peak_mb:.0f} MB -- the full hot buffer was allocated for a "
+        f"run that took {idata.posterior.sizes['draw']} draws"
     )
 
 
