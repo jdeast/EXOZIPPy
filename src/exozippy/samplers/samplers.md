@@ -39,6 +39,22 @@ want for a fresh fit -- while the run that actually happened stays
 reproducible after the fact. A hardcoded default seed would be strictly worse
 than none: it would correlate every user's chains while looking responsible.
 
+**The nested backends take the seed two different ways, and ultranest's is a
+process-global one.** dynesty has an `rstate=` argument and gets
+`np.random.default_rng(seed)` handed to it. ultranest (4.5.0) has no such
+argument on `ReactiveNestedSampler` OR on `popstepsampler.PopulationSliceSampler`,
+and draws its live-point indices and slice positions from numpy's LEGACY GLOBAL
+state -- so `nested._seed_ultranest` calls `np.random.seed(seed)` immediately
+before the sampler is constructed, which is ultranest's own mechanism
+(`ultranest.solvecompat.solve` does exactly that). Until review 2.4.7 it did
+not, so `sampler: seed:` reached the dynesty branch and nothing else while
+run.py's startup line promised the user a reproducible rerun. Perturbing the
+process-global generator is acceptable only because `nested_sample` owns the
+process there -- one sampler is dispatched, the forked workers only evaluate a
+deterministic logp, and every draw EXOZIPPy makes for itself goes through an
+explicit `default_rng`. If a later ultranest grows a real seed argument, use it
+and delete the global.
+
 **`ptde_async` is the one method a seed cannot make reproducible, and that is
 a trade, not a defect.** It consumes worker results through
 `result_q.get(timeout=...)` -- arrival order -- and whether a proposal is
@@ -154,6 +170,21 @@ one function and a single core in another, which is exactly how a hot-mode
 polish came to hold 1 of 36 cores for 38 minutes with nothing in the log. If
 you add a stage that forks, call `default_cores()` for its fallback and accept
 a `cores` argument that `run.py` can fill.
+
+**`cores <= 0` is that same automatic grant** (review 2.4.8). It is the `None`
+rule's loophole: `0` is not `None`, so the three resolvers each did their own
+thing with it -- `create_pool` took `min(0, total_proposals)` and ran serial,
+`_resolve_polish_cores` swept it into its `n <= 1` serial arm, and `nested.py`
+read it as AUTO because `cores or default_cores()` treats 0 as falsy -- so one
+written number produced two different behaviors within a single run, and a
+negative value produced a negative pool size in the third. `run.py`'s
+`resolve_cores_setting` now normalizes `<= 0` to the `None` sentinel at the
+parse boundary and **warns** rather than raising or clamping silently (rope,
+not gates: `cores: 0` most plausibly means "let the machine decide", so the run
+takes that reading and the message says which reading it got and that
+`cores: 1` is how to ask for serial). All three resolvers carry the same arm
+anyway, so a direct caller -- a test, a script, the GUI -- lands where `run.py`
+would have put it.
 
 ## eval_timeout: what it does, and where it is enforced
 

@@ -856,6 +856,116 @@ def test_default_cores_leaves_one_core_for_the_machine():
         assert got <= phys - 1
 
 
+def _create_pool_cores(cores, monkeypatch):
+    """``create_pool``'s resolved worker count, without forking a pool.
+
+    The fork itself is not what is under test and would cost `default_cores()`
+    processes per parametrized case, so the context's Pool is stubbed out.
+    """
+    import multiprocessing as mp
+
+    from exozippy.samplers import _common
+
+    class _FakeCtx:
+        def Pool(self, n, initializer=None):
+            return f"pool[{n}]"
+
+    monkeypatch.setattr(mp, "get_context", lambda _kind: _FakeCtx())
+    # total_proposals large enough that the batch-size cap never binds: the
+    # grant is what is being measured, not `min(grant, work_available)`.
+    _pool, actual = _common.create_pool(
+        cores, 10**6, "test", logging.getLogger("test")
+    )
+    return actual
+
+
+def _resolvers():
+    """The three functions that turn a `cores` value into a worker count."""
+    from exozippy.polish import _resolve_polish_cores
+    from exozippy.samplers.nested import _resolve_nested_cores
+
+    return {
+        "create_pool": lambda c, mp_: _create_pool_cores(c, mp_),
+        "polish": lambda c, mp_: _resolve_polish_cores(c, n_seeds=1000),
+        "nested": lambda c, mp_: _resolve_nested_cores(c),
+    }
+
+
+@pytest.mark.parametrize("resolver", sorted(_resolvers()))
+@pytest.mark.parametrize("value", [0, -4, None])
+def test_zero_and_negative_cores_are_the_automatic_grant(
+    resolver, value, monkeypatch
+):
+    """
+    Given `cores` written as 0, as a negative number, or omitted,
+    When each of the three resolvers turns it into a worker count,
+    Then all three return the SAME automatic grant.
+
+    Review 2.4.8: `0` is not `None`, so the `cores=None` rule (6.11.3) left
+    it to each resolver's accident.  create_pool took
+    `min(0, total_proposals)` and ran SERIAL, _resolve_polish_cores swept it
+    into its `n <= 1` SERIAL arm, and nested.py read it as AUTO because
+    `cores or default_cores()` treats 0 as falsy -- one written number, two
+    behaviors inside a single run.  A negative value was worse: it reached
+    nested.py's pool size unclamped.  JDE's ruling is that `<= 0` is the
+    automatic grant everywhere.
+    """
+    from exozippy.samplers._common import default_cores
+
+    # ACT
+    got = _resolvers()[resolver](value, monkeypatch)
+
+    # ASSERT
+    assert got == default_cores()
+
+
+@pytest.mark.parametrize("resolver", sorted(_resolvers()))
+def test_one_core_is_still_serial_in_every_resolver(resolver, monkeypatch):
+    """
+    Given `cores: 1`,
+    When each of the three resolvers turns it into a worker count,
+    Then all three return 1.
+
+    The other half of 2.4.8: folding `<= 0` into AUTO must not take serial
+    away.  `cores=1` is the statement a caller makes when they mean one core,
+    and it is the only way to ask for it.
+    """
+    # ACT
+    got = _resolvers()[resolver](1, monkeypatch)
+
+    # ASSERT
+    assert got == 1
+
+
+def test_zero_cores_warns_and_resolves_to_the_auto_sentinel(caplog):
+    """
+    Given a config that writes `sampler: cores: 0`,
+    When run.py parses it,
+    Then it returns the None AUTO sentinel and WARNS, naming serial as the
+      thing `cores: 1` asks for.
+
+    Rope, not gates: 0 is a plausible spelling of "let the machine decide",
+    so the run continues with that reading rather than raising -- but the
+    user is told which reading they got, because the other reading (serial)
+    is the one two of the three resolvers used to take.  Normalizing here, at
+    the parse boundary, is what keeps the three from disagreeing at all.
+    """
+    from exozippy.run import resolve_cores_setting
+
+    # ACT
+    with caplog.at_level(logging.WARNING, logger="exozippy.run"):
+        got = resolve_cores_setting(0)
+
+    # ASSERT
+    assert got is None
+    assert "automatic grant" in caplog.text
+    assert "cores: 1" in caplog.text
+    assert "serial" in caplog.text
+    # and a real count is still passed through untouched
+    assert resolve_cores_setting(3) == 3
+    assert resolve_cores_setting(None) is None
+
+
 def test_serial_de_polish_announces_the_cost(caplog):
     """
     Given a caller that explicitly asks for serial,
