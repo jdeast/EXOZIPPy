@@ -207,3 +207,62 @@ scatter factor is `min(sqrt(500/D), 3)`.
 Explicit `initvals` are consumed positionally, one per chain, and a
 wrong-length list RAISES (it used to be a bare `assert`, which `python -O`
 compiles out, leaving chains paired with the wrong starts).
+
+**The params file DECLARES whether its seeds want dispersing; the sampler does
+not guess** (`overdisperse:`, review 8.3.3). K seeds mean one of exactly two
+things and nothing at run time can tell them apart: the user is seeding at K
+MODES, each of which still wants scattering, or they are iterating from a file
+whose seeds are ALREADY properly dispersed -- joint posterior draws off a
+finished fit, spread across its covariance by construction. So the writer says
+which. `mkparam` writes `overdisperse: false` for a multi-seed restart file (a
+true statement about the seeds' ORIGIN, not a claim that the fit converged) and
+`true` for its default single-seed one; `utilities/mmexofast_to_params` writes
+`true` (its seeds are single optima, one per solution). An **absent** key means
+`true` -- the safe direction for a hand-written file, since over-dispersing a
+good seed set costs some burn-in while under-dispersing a bad one makes Rhat
+read ~1.00 on chains that never mixed. It is a reserved NON-parameter key and
+is stripped by `ConfigManager` before anything downstream sees it
+(`src/exozippy/config.md`).
+
+`false` means "use these seeds exactly as they are": every chain starts at its
+round-robin seed with no jitter, and the `max_exact = n_chains // 2` budget
+does not apply. Two guards come with it, both at sampler start:
+
+- **One seed plus `false` RAISES.** Every chain would start at the identical
+  point, so every DE difference vector is exactly zero and the population can
+  never move apart.
+- **Few unique seeds WARN, in two tiers.** Below `2 * n_params` (the default
+  chain count, and ter Braak's mixing recommendation, so the tier has headroom)
+  it is a mixing complaint. Below `de_span_floor(n_params) = n_params + 2` it
+  stops being one: a DE proposal for member i draws its difference vector from
+  the OTHER members, so n-1 members span at most n-2 directions and it takes
+  `n >= n_params + 2` to span parameter space at all. Below that the population
+  sits in a proper subspace whose only escape is `DE_JITTER = 1e-4`, and
+  off-hull diffusion goes as `jitter*sqrt(steps)`, so covering ONE whitened
+  sigma takes ~1e8 accepted steps -- ergodic in principle, hopeless in
+  practice. The escalated message says so. `de_span_floor` is the ONE owner of
+  that number, shared with `warn_if_population_degenerate`, which asks the same
+  question of the CHAIN count.
+
+**The threshold check is here and not in `mkparam`**, and that is structural:
+`n_params` belongs to the NEXT fit's model, which may differ from the one that
+produced the seeds (added data, a changed parameterization), so the writer
+cannot evaluate it. What the writer CAN do is record what it measured, and
+`mkparam`'s header comment carries the min bulk-ESS and max split-Rhat of the
+fit its seeds came from. Those are a RECORD and deliberately **not** a gate.
+A plain "did it converge?" boolean would be the wrong gate because nobody
+reruns a well-mixed fit: the population of fits `mkparam` processes is selected
+for being unsatisfactory, so the flag would read False almost always and
+`overdisperse: false` would be dead code. The two also gate different failures.
+CONVERGENCE (max Rhat) asks whether the seeds come from the right distribution
+at all; MIXING (min ESS) asks how many EFFECTIVELY INDEPENDENT seeds there are
+-- K seeds off a chain with bulk-ESS `n_eff` are ~`n_eff` independent points,
+so the affine-hull argument above really applies with `n_eff` and not with K,
+and forty seeds off an ESS-5 chain span at most a 4-dimensional hull. And
+seeds drawn from an unconverged or mode-stuck posterior are properly dispersed
+with respect to what was SAMPLED while being badly under-dispersed with respect
+to the TRUE posterior; no local test on the seed list can detect that, which is
+exactly why the numbers are printed for a human. `warn_if_starts_underdispersed`
+still runs on an `overdisperse: false` population and will usually fire: that is
+correct, since Rhat is compromised either way, and it is measurement rather than
+contradiction. Tests: `tests/test_overdisperse_declaration.py`.

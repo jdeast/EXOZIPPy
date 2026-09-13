@@ -315,6 +315,70 @@ def _reject_list_valued_fields(user_params, source=None):
                 )
 
 
+# ---------------------------------------------------------------------------
+# Reserved NON-PARAMETER keys in a params file
+# ---------------------------------------------------------------------------
+
+#: Top-level keys a params file may carry that are NOT parameters.  They are
+#: split off (``split_reserved_param_keys``) before any other reader sees the
+#: mapping, because ``finalize_user_params`` registers every unmapped
+#: ``user_params`` key as a LEAF SYMBOL in the relaxation engine -- see the
+#: "never write into user_params" invariant in CLAUDE.md.  Measured, not
+#: assumed: a bare ``overdisperse: false`` became the symbol ``overdisperse``,
+#: entered ``_last_resolved``, and the engine INJECTED BACK
+#: ``{'initval': 0.0, 'derived': True}`` over the user's own boolean.
+#:
+#: Value contract, one entry per key:
+#:   overdisperse -- bool.  Do these seeds still want scattering before the
+#:     chains start?  An ABSENT key means True (the safe direction for a
+#:     hand-written file).  Read by samplers/_common.py's ``_make_starts``;
+#:     the reasoning is in samplers/samplers.md, "Chain starts".
+RESERVED_PARAM_KEYS = frozenset({"overdisperse"})
+
+
+def split_reserved_param_keys(user_params, source=None):
+    """Split a params mapping into (parameters, reserved non-parameter keys).
+
+    Returns two NEW dicts and never mutates the caller's: ``System`` keeps the
+    file exactly as read (``structural_payload`` and ``mkparam`` both read it
+    again), so popping in place would quietly edit their input.
+
+    An unknown top-level key with a SCALAR value is warned about BY NAME here
+    rather than being carried on.  Every parameter path has a dot in it, so a
+    dot-less scalar entry is either a reserved key or a mistake -- and the
+    mistake is otherwise perfectly silent: it becomes a leaf symbol with its
+    own ledger row and its own inject-back initval, for a parameter that does
+    not exist.  A dot-less entry whose value is a DICT is left alone; only the
+    scalar form is diagnosable this cheaply.
+    """
+    where = f" in {source}" if source else ""
+    params, reserved = {}, {}
+    for key, val in (user_params or {}).items():
+        skey = str(key)
+        if skey in RESERVED_PARAM_KEYS:
+            reserved[skey] = val
+            continue
+        if "." not in skey and not isinstance(val, dict):
+            logger.warning(
+                f"'{skey}'{where} is not a parameter (a parameter path has a "
+                f"dot in it: 'star.A.teff') and is not one of the reserved "
+                f"params-file keys {sorted(RESERVED_PARAM_KEYS)}. It is "
+                f"IGNORED. Check the spelling, or delete the line."
+            )
+            continue
+        params[skey] = val
+
+    od = reserved.get("overdisperse")
+    if od is not None and not isinstance(od, bool):
+        raise ValueError(
+            f"'overdisperse'{where} is {od!r}; it must be a boolean "
+            f"(`overdisperse: true` / `overdisperse: false`). It declares "
+            f"whether the seeds in this file still want scattering before the "
+            f"chains start -- an absent key means true."
+        )
+    return params, reserved
+
+
 def _reject_bare_string_values(user_params, source=None):
     """Raise on a bare (non-dict) parameter value that is not a number.
 
@@ -761,6 +825,14 @@ class ConfigManager:
         self.custom_solvers = {}
         self.standalone_solvers = set()
 
+        # FIRST, before any other reader: a reserved key is not a parameter,
+        # and everything below -- the validators, standardize_param_names'
+        # pass 3, and above all finalize_user_params' leaf-symbol fallback --
+        # would treat it as one.  See RESERVED_PARAM_KEYS.
+        user_params, self.reserved_params = split_reserved_param_keys(
+            user_params
+        )
+
         _reject_renamed_arsun(user_params)
         _reject_list_valued_fields(user_params)
         _reject_bare_string_values(user_params)
@@ -1029,6 +1101,21 @@ class ConfigManager:
         # Add this inside ConfigManager.__init__ after filling all_relations
         for rel in self.all_relations:
             logger.debug(f"Relation: {rel}")
+
+    @property
+    def overdisperse(self):
+        """Do this params file's seeds still want scattering? (default True.)
+
+        The WRITER declares it, because the reader cannot tell the two cases
+        apart at run time: K seeds may be K modes a user is trying (each of
+        which wants dispersing) or K posterior draws off a finished fit
+        (already dispersed, by construction).  ABSENT means True -- the safe
+        direction for a hand-written file, since over-dispersing a good seed
+        set costs some burn-in while under-dispersing a bad one makes Rhat
+        read ~1.00 on chains that never mixed.  Consumed by
+        samplers/_common.py's ``_make_starts``; see samplers/samplers.md.
+        """
+        return bool(self.reserved_params.get("overdisperse", True))
 
     def register_custom_solver(
         self, target_str, solver_func, standalone=False

@@ -264,6 +264,18 @@ class System(Component):
         """
         return self._structural_hash, self._structural_payload
 
+    @property
+    def overdisperse(self):
+        """The params file's ``overdisperse:`` declaration (absent -> True).
+
+        Forwarded from the ConfigManager so the samplers have one attribute to
+        read on the object they are already handed, and so a minimal test
+        System that has no ConfigManager at all falls back to the same default
+        an absent key gives.  See ``ConfigManager.overdisperse``.
+        """
+        cm = getattr(self, "config_manager", None)
+        return True if cm is None else cm.overdisperse
+
     def prepare(self):
         # ==========================================================
         # PRE-FLIGHT SEQUENCE
