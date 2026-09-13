@@ -134,6 +134,28 @@ still a dict (36 us to pickle, 21 us to unpickle per proposal, against 4.3 and
 changes the contract `polish`, `_make_starts`, `describe_proposal` and the
 tests all share, so it is its own PR.
 
+## `de_mode_hop`: the counters the adapter reads must share one window
+
+ter Braak's gamma=1 mode hop (`sampler: {de_mode_hop: p}`, default 0.0 = off)
+is deliberately over-sized and mostly rejected, so both samplers SUBTRACT the
+hop accept/propose counts from the T=1 rate the gamma adapter reads. Letting
+hops depress that rate would make the adapter shrink gamma, degrading
+within-mode sampling as the price of attempting hops.
+
+**A counter subtracted from a windowed counter must itself be windowed.**
+`ptde` zeroed `n_accept`/`n_propose` at each `log_interval` during tune and
+left the hop counters cumulative, so from the second window on the
+denominator was short by every earlier window's hops: the measured rate ran
+above 1.0 (1.222, gamma 0.872 -> 2.155, away from target) and, once the
+numerator went negative, the `ar_T1 > 0` guard ended the adaptation for the
+rest of tune in silence, freezing a garbage gamma into the draw phase
+(review 1.4.3). `ptde_async` was never affected -- it keeps SEPARATE window
+counters for the adapter and lets the hop counters run cumulatively for its
+report. After `ptde`'s unconditional tune -> draw reset its hop counters span
+the draw phase, which is the same window `n_accept`/`n_propose` report on.
+Both samplers log the hop acceptance at wrap-up through one
+`_common.log_mode_hop_summary`, so the message cannot drift again.
+
 ## `cores`: one rule, and `None` means AUTO
 
 `_common.default_cores()` is the single definition of "how many cores does a

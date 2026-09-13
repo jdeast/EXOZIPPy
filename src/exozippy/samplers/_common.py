@@ -1604,6 +1604,37 @@ def stamp_and_log_run_summary(
     )
 
 
+def log_mode_hop_summary(label, log, de_mode_hop, n_hop_accept, n_hop_propose):
+    """Log the gamma=1 mode-hop acceptance at wrap-up (no-op when hops are off).
+
+    Shared so the two samplers cannot drift: ptde_async has reported this
+    since the feature shipped and ptde reported nothing at all, which is how
+    review 1.4.3's windowing bug went unseen in a run's log.
+
+    ``n_hop_accept`` / ``n_hop_propose`` are already-indexed T=1 scalars,
+    coerced to int here because ptde counts in a numpy float array and
+    ptde_async in a Python list.
+
+    What the counts SPAN differs between the callers, the same asymmetry
+    stamp_and_log_run_summary carries for n_accept: ptde zeroes them at the
+    tune -> draw boundary (and per window while adapting, because the gamma
+    adapter subtracts them from a windowed rate), so it reports the draw
+    phase; ptde_async never resets, so it reports the whole run.
+    """
+    if not de_mode_hop > 0.0:
+        return
+    n_accept = int(n_hop_accept)
+    n_propose = int(n_hop_propose)
+    log.info(
+        f"{label} DE mode hops (gamma=1, p={de_mode_hop:g}): "
+        f"{n_accept}/{n_propose} accepted "
+        f"({n_accept / max(n_propose, 1):.4f}); excluded "
+        "from the gamma adaptation. Compare against the mode-change "
+        "count in the mode report: hops are the DE path between basins, "
+        "PT round trips are the other one."
+    )
+
+
 def log_rung_timing(rung_times, temperatures, label, log):
     """Per-rung logp wall-time summary (collect_rung_timing diagnostic)."""
     log.info(f"{label} per-rung logp timing (seconds):")
