@@ -33,8 +33,19 @@ reporting:
 # `parameterization:` picks the coordinates each subject is sampled in, named
 # after the sampled pair: "cl_v" (CL and V; NONMEM TRANS2; the default),
 # "ke_v" (ke and V; NONMEM TRANS1), or "cl_ke" (both rates, V derived; R's
-# SSfol).  On its own it is free of consequence -- the same model, so the
-# posterior does not move and the table has the same rows either way.
+# SSfol).  The LIKELIHOOD is identical in all three -- the same curve, checked
+# to 1e-12 -- and the table has the same rows either way.
+#
+# THE PRIOR IS NOT QUITE IDENTICAL, and the claim that "the posterior does not
+# move" was wrong.  Each sampled coordinate carries a prior uniform over its
+# own bounds, so the three bases are related by maps of unit determinant (all
+# three are linear in log space: log_ke = log_cl - log_v) -- flat stays flat,
+# no density is reweighted, and no Jacobian term is owed.  What differs is the
+# SUPPORT: a box in one basis is a parallelogram in another, so each admits
+# corners the others exclude.  Contrast orbit's fitvcve/fitchord, whose maps
+# are non-linear: there the component owes a Jacobian and supplies one
+# (orbit.md), which is the house convention this basis choice satisfies
+# trivially rather than escapes.
 #
 # IT IS NOT FREE OF CONSEQUENCE WITH A `population:` BLOCK, which is why every
 # subject here says "cl_ke".  Between-subject variability is defined IN a

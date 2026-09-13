@@ -82,8 +82,18 @@ spelling.  Before adding a flag, pick its kind and follow that template.
   `fit_finite_source`: the finite-source effect is a direct measurement of rho and
   is always on when the physics is.
 - **Coordinate choices, `fit<coord>`** (`fitvcve`, `fitchord`): sample in this
-  parameterization rather than the default.  Nothing becomes more or less
-  constrained; only the coordinates change.
+  parameterization rather than the default.  Only the coordinates change --
+  **but that is a property the flag's owner has to PAY FOR, not one it gets.**
+  Every sampled parameter carries a prior uniform over its own bounds and
+  nothing generic inserts a Jacobian, so a non-linear change of coordinates
+  silently changes the prior unless the component adds the term: `orbit` adds
+  minus `vcve_log_jacobian` and minus `chord_log_jacobian` for exactly this
+  reason, and `orbit.md` records that the SIGN is the term and needs its own
+  test, because a finite-difference check passes under either.  A flip whose
+  map has unit determinant (`pharmacokinetics`'s bases, which are linear in
+  log space) owes nothing and satisfies this trivially.  Differing SUPPORT
+  between two parameterizations is separate and is allowed -- `planet`'s
+  `linear` mass coordinate admits a negative mass and its `log_q` one cannot.
 - **Tie toggles, `X_constrains_Y`** (`beam_constrains_mass`, `sed_constrains_blend`,
   `star_constrains_rho`): supply or sever a physics link between two quantities.
   The name states the INTENT -- the reason a user turns the tie on is that they

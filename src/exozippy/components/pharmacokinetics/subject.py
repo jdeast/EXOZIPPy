@@ -56,8 +56,19 @@ class Subject(Component):
     The same model can be written in several coordinate bases and the field
     uses more than one: ``cl_v`` samples (CL, V) and derives ``ke = CL/V``
     (NONMEM's TRANS2, the default here and there); ``ke_v`` samples (ke, V)
-    and derives ``CL = ke*V`` (NONMEM's TRANS1). Nothing becomes more or
-    less constrained -- only the coordinates change.
+    and derives ``CL = ke*V`` (NONMEM's TRANS1); ``cl_ke`` samples both rates
+    and derives ``V = CL/ke`` (R's ``SSfol``).
+
+    The LIKELIHOOD is identical in all three, to machine precision. The PRIOR
+    is identical only where their supports overlap, and saying "nothing
+    becomes more or less constrained" was too strong: each sampled coordinate
+    is uniform over its own bounds, and while the three bases are related by
+    unit-determinant maps -- all linear in log space, since
+    ``log_ke = log_cl - log_v`` -- so that flat stays flat and no Jacobian
+    term is owed, a box in one basis is a parallelogram in another. Each
+    admits corners the others exclude. (``orbit``'s ``fitvcve``/``fitchord``
+    are the non-linear case, where the component owes a Jacobian and supplies
+    one; see ``orbit.md``.)
 
     Spelled as an ENUM and not as a ``fit<coord>`` boolean, which is what
     ``components.md``'s flag vocabulary would suggest: that vocabulary is

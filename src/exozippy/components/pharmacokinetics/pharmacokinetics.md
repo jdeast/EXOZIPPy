@@ -122,6 +122,31 @@ coordinate takes, because both of the interesting roles appear:**
 `cl` under `ke_v` is the textbook case for `reported`: consumed by nothing,
 and still the one quantity a PK table exists to show.
 
+**Does the flip preserve the prior?  Here, yes, and the reason is worth
+stating because it is not general.** Every sampled parameter carries a prior
+uniform over its own bounds (`logit_uniform_prior`), and nothing generic
+inserts a Jacobian when a component changes coordinates -- the component owes
+one, which is what `orbit._add_vcve_terms` and `_add_chord_terms` supply to
+keep `e` uniform and `cos i` isotropic (`orbit.md`). These three bases owe
+nothing, because they are related by UNIT-DETERMINANT LINEAR maps in log
+space (`log_ke = log_cl - log_v`): flat stays flat, no density is reweighted.
+What differs is the SUPPORT -- a box in one basis is a parallelogram in
+another, so each admits corners the others exclude. (`planet`'s
+`mass_parameterization` has the same character: `linear` admits a negative
+mass and `log_q` cannot represent one.)
+
+**Measured, 2026-09-11, and the first answer was wrong.** Fitting the twelve
+Theophylline subjects with no population in `cl_v` and in `ke_v`: `CL/F` and
+`AUC` agree to under 1% on every subject, while `V/F`, `ka` and `t_half`
+differ by up to 80% on subjects 7 and 12. That looks like a basis effect and
+is not: **a reseed in the SAME basis reproduces the same 80% swing** (subject
+12's `V/F` goes 4.7 L -> 23 L on a reseed, against 4.7 -> 22 across the
+basis, with `CL/F` at 2.57 in all three). It is flip-flop mode occupancy. Run
+the control before attributing a difference to the coordinates -- and note
+what the control says about the degeneracy itself: without something pinning
+the mode, a per-subject volume is not reproducible between reseeds, which is
+the practical case for P5's opt-in bound.
+
 **Three traps, all of them load-bearing:**
 
 1. **`auc` must not be written `dose/cl`.** That is the identity it is, and it
