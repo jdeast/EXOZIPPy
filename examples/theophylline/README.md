@@ -53,7 +53,7 @@ It is the canonical nonlinear mixed-effects example, and ships with R as
 One compartment, first-order absorption, single oral dose -- NONMEM's ADVAN2,
 nlme's `SSfol`. Each subject has its own apparent clearance `CL/F`, absorption
 rate `ka` and elimination rate `ke`, sampled in log10, with the apparent volume
-`V/F = CL/ke` derived. That basis (`parameterization: "cl_ke"`) is `SSfol`'s,
+`V/F = CL/ke` derived. That basis (`fitclke: true`) is `SSfol`'s,
 and is chosen deliberately: see the config's own comment and "Validation"
 below.
 

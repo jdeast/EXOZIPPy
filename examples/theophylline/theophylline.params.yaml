@@ -29,8 +29,7 @@
 # that is P2 (see the component README).  A run through `exozippy` says so:
 # its start-value audit reports a user start that did not reach the model.
 #
-# A PRIOR is different and does work on either: `subject.S1.cl: {mu, sigma}`
-# is a Gaussian on the derived clearance, which is a perfectly good
-# constraint.  The one case where it is silently NOT applied is a coordinate
-# your `parameterization:` makes `reported` -- `cl` itself under
-# `parameterization: ke_v` -- and the run warns when that happens.
+# A PRIOR is different and works on any of them: `subject.S1.cl: {mu, sigma}`
+# is a Gaussian on the derived clearance, and it holds whichever basis this
+# subject is fitted in -- including `fitkev: true`, where `cl` is computed
+# after the model is built rather than during it.

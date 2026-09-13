@@ -30,11 +30,11 @@ reporting:
 # ambiguous with the internal subject.0 index form); the assay block's
 # subject_prefix maps the data's bare numbers onto these names.
 #
-# `parameterization:` picks the coordinates each subject is sampled in, named
-# after the sampled pair: "cl_v" (CL and V; NONMEM TRANS2; the default),
-# "ke_v" (ke and V; NONMEM TRANS1), or "cl_ke" (both rates, V derived; R's
-# SSfol).  The LIKELIHOOD is identical in all three -- the same curve, checked
-# to 1e-12 -- and the table has the same rows either way.
+# One boolean per coordinate basis, at most one true, none = the default:
+# `fitclv` (CL and V; NONMEM TRANS2; the default), `fitkev` (ke and V; NONMEM
+# TRANS1), or `fitclke` (both rates, V derived; R's SSfol).  The LIKELIHOOD is
+# identical in all three -- the same curve, checked to 1e-12 -- and the table
+# has the same rows either way.
 #
 # THE PRIOR IS NOT QUITE IDENTICAL, and the claim that "the posterior does not
 # move" was wrong.  Each sampled coordinate carries a prior uniform over its
@@ -48,7 +48,7 @@ reporting:
 # trivially rather than escapes.
 #
 # IT IS NOT FREE OF CONSEQUENCE WITH A `population:` BLOCK, which is why every
-# subject here says "cl_ke".  Between-subject variability is defined IN a
+# subject here sets `fitclke`.  Between-subject variability is defined IN a
 # basis: a diagonal set of omegas in one basis is not diagonal in another.
 # The canonical mixed-effects fit of these data (R's nlme, via SSfol) has its
 # random effects on (lKe, lKa, lCl), so fitting in that basis is what makes
@@ -57,29 +57,29 @@ reporting:
 # subjects and refuses a mixture, for the same reason.
 subject:
   - {name: "S1", weight: 79.6, dose: 4.02, dose_unit: "mg/kg",
-     parameterization: "cl_ke"}
+     fitclke: true}
   - {name: "S2", weight: 72.4, dose: 4.4, dose_unit: "mg/kg",
-     parameterization: "cl_ke"}
+     fitclke: true}
   - {name: "S3", weight: 70.5, dose: 4.53, dose_unit: "mg/kg",
-     parameterization: "cl_ke"}
+     fitclke: true}
   - {name: "S4", weight: 72.7, dose: 4.4, dose_unit: "mg/kg",
-     parameterization: "cl_ke"}
+     fitclke: true}
   - {name: "S5", weight: 54.6, dose: 5.86, dose_unit: "mg/kg",
-     parameterization: "cl_ke"}
+     fitclke: true}
   - {name: "S6", weight: 80.0, dose: 4.0, dose_unit: "mg/kg",
-     parameterization: "cl_ke"}
+     fitclke: true}
   - {name: "S7", weight: 64.6, dose: 4.95, dose_unit: "mg/kg",
-     parameterization: "cl_ke"}
+     fitclke: true}
   - {name: "S8", weight: 70.5, dose: 4.53, dose_unit: "mg/kg",
-     parameterization: "cl_ke"}
+     fitclke: true}
   - {name: "S9", weight: 86.4, dose: 3.1, dose_unit: "mg/kg",
-     parameterization: "cl_ke"}
+     fitclke: true}
   - {name: "S10", weight: 58.2, dose: 5.5, dose_unit: "mg/kg",
-     parameterization: "cl_ke"}
+     fitclke: true}
   - {name: "S11", weight: 65.0, dose: 4.92, dose_unit: "mg/kg",
-     parameterization: "cl_ke"}
+     fitclke: true}
   - {name: "S12", weight: 60.5, dose: 5.3, dose_unit: "mg/kg",
-     parameterization: "cl_ke"}
+     fitclke: true}
 
 # The population the twelve subjects are drawn from.  Without this block they
 # are twelve independent fits sharing an error model -- no between-subject

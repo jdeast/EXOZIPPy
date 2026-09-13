@@ -35,10 +35,10 @@ def _system(csv, tmp_path, population=None, basis=None, user_params=None):
     """A prepared System, with an optional population over the subjects."""
     cfg = _config(csv, tmp_path)
     if basis is not None:
+        flag = {"cl_v": "fitclv", "ke_v": "fitkev", "cl_ke": "fitclke"}
         for i, block in enumerate(cfg["subject"]):
-            block["parameterization"] = (
-                basis[i] if isinstance(basis, (list, tuple)) else basis
-            )
+            name = basis[i] if isinstance(basis, (list, tuple)) else basis
+            block[flag[name]] = True
     if population is not None:
         cfg["population"] = [{"name": "adults", **population}]
     system = System(cfg, user_params=dict(user_params or {}))
@@ -239,7 +239,7 @@ def test_variability_may_name_a_subset(synth_csv, tmp_path):
 def test_the_cl_ke_basis_samples_both_rates_and_derives_the_volume(
     synth_csv, tmp_path
 ):
-    """Given parameterization: cl_ke, Then V is derived and log_v REPORTED.
+    """Given fitclke, Then V is derived and log_v REPORTED.
 
     R's `SSfol` is parameterized in (lKe, lKa, lCl), so the canonical nlme
     fit's random effects are in that basis. It exists here because a

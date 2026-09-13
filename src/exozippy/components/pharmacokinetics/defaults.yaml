@@ -154,8 +154,9 @@ subject:
           - "population.wt_ref[population_map]"
 
   log_ke:
-    # THE TRANS1 COORDINATE, sampled only where `parameterization: ke_v`
-    # (see the component docstring); elsewhere it is REPORTED from CL/V and
+    # THE TRANS1 COORDINATE, sampled only where `fitkev: true` or
+    # `fitclke: true` (see the component docstring); elsewhere it is
+    # REPORTED from CL/V and
     # these bounds are inert, because a reported element carries no potential.
     #
     # Elimination rate 1e-4 to 100 /hr -- terminal half-lives from ~25 s to
@@ -259,7 +260,8 @@ subject:
     # What the forward model actually consumes, in BOTH parameterizations.
     # Which of (CL, V) and (ke, V) is sampled is a per-instance coordinate
     # choice in the field -- NONMEM's TRANS2 and TRANS1 -- and it is spelled
-    # `parameterization:` on a subject block (subject.COORD_MODE_TABLE).
+    # one boolean per basis on a subject block: fitclv / fitkev / fitclke
+    # (subject.COORD_MODE_TABLE).
     unit: "1/hr"
     internal_unit: "1/hr"
     latex: "k_e"

@@ -111,59 +111,83 @@ The residual error models also differ in form -- ours is combined
 the 132 real observations has rms **0.813 mg/L** against `nlme`'s 0.709, a
 ratio of 1.15.
 
-### 4. Population level vs `nlme` (estimator-matched, 2026-09-11)
+### 4. Population level vs `nlme` (estimator-matched, 2026-09-12)
 
 **This is the comparison section 3 could not make.** With the `population`
 component (P4) the fit is mixed-effects like `nlme`'s, and in the same
-coordinate basis: `parameterization: cl_ke` puts the random effects on
+coordinate basis: `fitclke: true` puts the random effects on
 (lKe, lKa, lCl), which is what `SSfol` is parameterized in. A diagonal set of
 omegas in one basis is not diagonal in another, so this is not a detail --
 without it the two models are different models.
 
-The shipped `examples/theophylline` config, as it stands: 4 chains, 2000 tune
-+ 2000 draws, `target_accept: 0.95`. Max Rhat 1.001, min ESS 2016, 48
-divergences in 8000 draws (0.6%) which sit in the upper tail of `omega_ka` --
-the least identified quantity in the fit -- and not at an omega -> 0 boundary.
+**Which published model.** Pinheiro & Bates fit *three* to these data, and the
+script that reproduces the book ships with `nlme`
+(`system.file("scripts", package="nlme")`, `ch08.R`):
 
-**Typical values, all four within 0.5%:**
+| | random effects | lKe | lKa | lCl |
+|---|---|---|---|---|
+| `fm1Theo.nlme` | unstructured (correlated) | -2.432671 | 0.451410 | -3.214452 |
+| `fm2Theo.nlme` | `pdDiag(lKe + lKa + lCl)` | -2.454646 | 0.465505 | -3.227198 |
+| `fm3Theo.nlme` | `pdDiag(lKa + lCl)` | -2.454704 | 0.465734 | -3.227223 |
 
-| quantity | ours | `nlme` | ratio |
-|----------|------|--------|-------|
-| `ke` | 0.08551 /hr | 0.085894 | 0.9955 |
-| `t_half` | 8.106 h | 8.0698 | 1.0045 |
-| `ka` | 1.5849 /hr | 1.592813 | 0.9950 |
-| `CL/F` at 70 kg | 2.7797 L/hr | 2.7768 (0.039668 x 70) | 1.0011 |
+`fm3` is the book's final model (it is the one it goes on to plot and
+diagnose), and its fixed effects agree with `fm2`'s to 1e-4. **That is what we
+compare against.** `fm1`'s differ, and the difference matters -- see the
+random effects below.
+
+**The run**, as the shipped `examples/theophylline` config stands: 4 chains,
+2000 tune + 2000 draws, `target_accept: 0.95`. Max Rhat 1.001, min ESS 2016,
+48 divergences in 8000 draws (0.6%), sitting in the upper tail of `omega_ka`
+-- the least identified quantity -- and not at an omega -> 0 boundary.
+
+**Typical values, compared in units of sigma**, because a percentage is not a
+statement about agreement. Ours is the posterior SD, `nlme`'s the standard
+error from `summary()`; the difference is divided by their quadrature sum:
+
+| quantity | ours (log10) | `nlme` fm3 (log10) | difference | n sigma |
+|----------|--------------|--------------------|-----------|---------|
+| `log ke` | -1.06757 +/- 0.02368 | -1.06604 +/- 0.02280 | -0.00153 | **0.05** |
+| `log ka` | 0.19768 +/- 0.11268 | 0.20217 +/- 0.08627 | -0.00449 | **0.03** |
+| `log CL/F` at 70 kg | 0.44389 +/- 0.03358 | 0.44354 +/- 0.02606 | +0.00035 | **0.01** |
 
 `nlme`'s clearance is per kg -- an allometric exponent of exactly 1 -- while
 this fit uses the field-standard 0.75 about a 70 kg reference, so the two
 covariate models agree at the reference weight and diverge by at most ~6% at
-the ends of this cohort's 54.6-86.4 kg range. That difference is a modelling
-choice, not a discrepancy.
+the ends of this cohort's 54.6-86.4 kg range. A modelling choice, not a
+discrepancy.
 
 **Between-subject variability.** Our `omega` is the SD of the base-10
-logarithm; `nlme`'s is of the natural one, a factor of ln(10) = 2.3026 apart.
-Converted:
+logarithm and `nlme`'s of the natural one, a factor of ln(10) = 2.3026 apart.
+Converted, against `fm2` (the matching structure):
 
-| | ours (ln units) | `nlme` | |
-|---|---|---|---|
-| `lCl` | 0.228 | 0.1669 | `nlme` inside our 95% interval |
-| `lKa` | 0.783 | 0.6439 | `nlme` inside our 95% interval |
-| `lKe` | 0.094 | 1.9e-05 | see below |
+| | ours, median [95%] | `nlme` fm2, est [95%] |
+|---|---|---|
+| `lCl` | 0.228 [0.143, 0.409] | 0.1669 [0.109, 0.256] |
+| `lKa` | 0.792 [0.494, 1.450] | 0.6439 [0.406, 1.021] |
+| `lKe` | 0.095 [0.007, 0.244] | 1.6e-05 [2.4e-143, 1.1e+133] |
 
-**The collapsed `lKe` reproduces qualitatively and must not be claimed as a
-numerical match.** `nlme` drives that random effect to 1.9e-05 -- effectively
-exactly zero. Ours is the smallest of the three by a factor of eight
-(`omega_ke` 0.041 dex against 0.099 and 0.34) with a 95% interval reaching to
-0.003 dex, and a posterior for a positive scale parameter cannot reach zero,
-so "consistent with no between-subject variability in `ke`" is what our fit
-says and is the same finding. It is not the same number, and the design note
-that called reproducing this "a genuine test for P4" is satisfied by the
-former, not the latter.
+**The "collapsed lKe" is an artifact of forcing the covariance diagonal, and
+reporting it as a result was our error.** Two things say so. `nlme`'s own
+interval on it spans 276 orders of magnitude -- the variance component is
+completely unidentified, so its point estimate carries no information and
+"we do not reproduce 1.6e-05" was conceding to a number that means nothing
+(it also moves between runs: 1.61e-05 here, 1.92e-05 in an earlier one).
+And `fm1`, which lets the random effects correlate, finds **sd(lKe) = 0.131
+with corr(lKe, lCl) = 0.995** -- no collapse at all. The physical statement is
+not "ke does not vary between subjects", it is "lKe and lCl vary almost
+perfectly together", which is what one would expect when V = CL/ke is the
+quantity that is stable across subjects.
 
-Residual error: ours is combined (`sigma_add` 0.36 mg/L, `sigma_prop` 0.122),
-`nlme`'s additive-only (0.7092), so only magnitudes compare -- our combined
-sigma has rms **0.786 mg/L** over the 132 observations against 0.709, a ratio
-of 1.11.
+**So the honest gap is that this component cannot represent `fm1`.** `omega`
+is diagonal by construction: there is one between-subject SD per coordinate
+and no correlation. Adding a correlated `omega` (a Cholesky factor, the
+standard non-centred hierarchical form) is the concrete next feature, and
+until it exists the `fm1` row above is a model we can fit *to*, not *with*.
+
+Residual error: ours is combined (`sigma_add` 0.357 mg/L [0.199, 0.641],
+`sigma_prop` 0.123 [0.059, 0.163]), `nlme`'s additive-only
+(0.7092 [0.620, 0.811]), so only magnitudes compare -- our combined sigma has
+rms **0.786 mg/L** over the 132 observations against 0.709.
 
 **The hierarchy resolved subject 12's flip-flop**, which is worth recording
 because it is shrinkage doing exactly what it is for. Fitted alone that
@@ -172,6 +196,22 @@ subject settled in the mirrored mode (section 2); under a population it is at
 to `nlsList`'s 24.1 L -- pulled there by the other eleven. Subject 9's `ka`
 remains large (6.8/hr) and unidentified, for the unrelated reason section 2
 gives.
+
+### What kind of comparison this is, and what it is not
+
+`nlme` fits by **maximum likelihood** (its default, and what was used here;
+REML gives identical fixed effects on these data). This is a Bayesian
+posterior with proper priors. The two agreeing to a twentieth of a sigma says
+the likelihood dominates and both implementations are computing the same
+model -- it is not a claim that ML and Bayes are the same procedure.
+
+**This is not the first Bayesian analysis of the Theophylline data, and
+nothing here should be read as claiming otherwise.** `Theoph` is the standard
+worked example of the field's Bayesian tooling -- the Stan/Torsten tutorial
+of Margossian, Zhang & Gillespie is the best-known -- and it appears
+throughout `nlmixr2`, Monolix and NONMEM `$BAYES` material. What is new here
+is only that a component from this field runs on this astronomy code's
+machinery, which is an architectural claim and not a pharmacometric one.
 
 ### What this does and does not establish
 
@@ -198,7 +238,7 @@ validated against R (see above). The design is in `notes/pharmacokinetics.txt`
 | P0 | Credible-interval width as a run-level setting (`exozippy.reporting`) | DONE |
 | P1 | `subject` + `assay`, no hierarchy | DONE, validated (above) |
 | P2 | Symbolic relations / relaxation-engine seeding | not started |
-| P3 | TRANS1/TRANS2 parameterization via element roles (`parameterization:`) | DONE |
+| P3 | TRANS1/TRANS2 parameterization via element roles (`fitclv`/`fitkev`/`fitclke`) | DONE |
 | P4 | `population`: between-subject variability + allometric covariate | DONE (implementation; see below) |
 | P5 | Flip-flop degeneracy: mode reporting and the opt-in ordering bound | DONE |
 
@@ -211,7 +251,7 @@ variability, no shrinkage, and no CV%/eta-shrinkage to report.
 **What P4 delivers, and what it does not.** The `population` component exists,
 the hierarchy is non-centred, the allometric covariate is in, CV% is reported
 as a derived parameter with its own credible interval, and the fit is done in
-the coordinate basis R's `nlme` uses (`parameterization: cl_ke`) so that the
+the coordinate basis R's `nlme` uses (`fitclke: true`) so that the
 comparison is of the same model. One thing is still owed:
 
 * **eta-shrinkage is not reported.** It is a function of the finished TRACE,

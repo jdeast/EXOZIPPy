@@ -149,14 +149,14 @@ class Population(Component):
     def _resolve_basis(self, subjects):
         """The single coordinate basis every subject must share.
 
-        `Subject._parse_parameterization` is a classmethod precisely so this
-        can ask the same question the same way: one parser, so a new basis
-        cannot be legal on a subject and unknown here.
+        `Subject._parse_basis` is a classmethod precisely so this can ask
+        the same question the same way: one parser, so a new basis cannot be
+        legal on a subject and unknown here.
         """
         modes = {}
         for i, cfg in enumerate(subjects):
             name = cfg.get("name", i)
-            mode = Subject._parse_parameterization(cfg, f"subject '{name}'")
+            mode = Subject._parse_basis(cfg, f"subject '{name}'")
             modes.setdefault(mode, []).append(str(name))
         if len(modes) > 1:
             listing = "; ".join(
@@ -167,9 +167,9 @@ class Population(Component):
                 f"coordinate basis ({listing}), and a population cannot span "
                 f"them. Between-subject variability is defined IN a basis -- "
                 f"a diagonal set of omegas in one basis is not diagonal in "
-                f"another -- so give every subject the same "
-                f"'parameterization:', or drop the 'population:' block and "
-                f"fit them independently."
+                f"another -- so give every subject the same basis flag "
+                f"(fitclv / fitkev / fitclke), or drop the 'population:' "
+                f"block and fit them independently."
             )
         return next(iter(modes))
 
@@ -218,7 +218,7 @@ class Population(Component):
                 f"samples {list(sampled)}). Between-subject variability has "
                 f"to be stated in the basis being fitted: put the variability "
                 f"on a sampled coordinate, or change the subjects' "
-                f"'parameterization:' to the basis you mean."
+                f"basis flag to the one you mean."
             )
         # Preserve the basis order rather than the user's, so the manifest --
         # and so the build order, and so the table -- does not depend on the

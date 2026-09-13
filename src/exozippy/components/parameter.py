@@ -882,6 +882,10 @@ class Parameter:
     # to broadcast to.  None for every parameter without role-3 elements, which
     # is every parameter that does not flip a parameterization.
     _deferred_reported: Optional[dict] = field(default=None, init=False)
+    # Prior/barrier inputs for REPORTED elements, whose potentials cannot be
+    # created until finalize_deferred has patched the value.  See build_pymc
+    # section A.
+    _deferred_potentials: Optional[dict] = field(default=None, init=False)
     # generate_posterior's compiled evaluators, keyed by the tuple of input
     # names it found in the posterior.  Compiling is the expensive half of
     # evaluating a derived parameter over a trace, and distribute_posterior is
@@ -1876,44 +1880,6 @@ class Parameter:
                     f"component wrote this, it is seeding an element that no "
                     f"longer samples: check the path it pushed."
                 )
-        # A CONSTRAINT ON A REPORTED ELEMENT IS DROPPED TOO, and until this
-        # warning existed nothing said so -- which made `reported` look like
-        # the lossless half of a parameterization flip when it is only the
-        # lossless half for the TABLE.  Section A excludes reported elements
-        # from `gaussian_prior_mask` and section B from the barrier, both
-        # deliberately: a reported element's value is a PLACEHOLDER until
-        # `finalize_deferred` patches it after stage 7, so a potential built
-        # here would penalize the pre-patch vector rather than the quantity it
-        # names.  The exclusion is right; the silence was not.
-        #
-        # Found with the pharmacokinetics TRANS1/TRANS2 flip
-        # (`subject.COORD_MODE_TABLE`), where `subject.S1.cl: {mu, sigma}` --
-        # the single most natural prior a user of that component writes -- is
-        # a live Gaussian under TRANS2 and vanishes without a word under
-        # TRANS1.  It applies identically to `orbit.b.secosw: {mu, sigma}`
-        # under `fitvcve`, which is the shipped case.
-        #
-        # Keyed on `_user_constraint_fields`, so it fires only for something a
-        # user actually wrote, never for a defaults.yaml sigma or the bounds
-        # nearly every parameter carries.  A warning and not an error, for the
-        # reason the inactive case is one: the point of per-element roles is
-        # that one params file survives a parameterization toggle.
-        for i in np.nonzero(is_reported)[0]:
-            fields = self._user_constraint_fields(int(i))
-            if not fields:
-                continue
-            where = f" ({self.source_file})" if self.source_file else ""
-            logger.warning(
-                f"Parameter '{self.get_display_label(int(i))}': your "
-                f"{'/'.join(fields)}{where} is DROPPED -- this element is "
-                f"REPORTED under its instance's parameterization (nothing in "
-                f"the model consumes it, and its value is computed after the "
-                f"model is built), so it carries no prior and no bound. It is "
-                f"still computed and still appears in the tables. Put the "
-                f"constraint on a quantity this instance samples or derives "
-                f"if you meant it to shape the fit."
-            )
-
         self.is_sampled = is_sampled
         self.is_derived = is_derived
         self.is_reported = is_reported
@@ -2464,13 +2430,47 @@ class Parameter:
         #      = truncated normal.
         #    Unbounded sampled Gaussian params encode their prior in raw ~
         #    N(0,1); no double-count.
-        #    REPORTED elements (role 3) are excluded even though they are
-        #    derived: nothing consumes them, so a prior there would be a logp
-        #    term on a quantity the model never uses -- and the same statement
-        #    is already being made on the coordinate that instance samples.
+        #
+        #    REPORTED elements USED TO BE EXCLUDED HERE, on the reasoning that
+        #    "nothing consumes them, so a prior there would be a logp term on a
+        #    quantity the model never uses -- and the same statement is already
+        #    being made on the coordinate that instance samples".  The first
+        #    clause is a non-sequitur (a reported element is a deterministic
+        #    function of sampled ones, so a Gaussian on it is a perfectly
+        #    well-defined statement about the sampled space) and the second is
+        #    simply false: nothing translates the user's prior onto the sampled
+        #    coordinate.  The effect was that `orbit.b.chord: {mu, sigma}` -- a
+        #    transit-duration prior, on a DEFAULT config -- was discarded in
+        #    silence.  They are included now; what still cannot happen in this
+        #    phase is CREATING the potential, because the value is a
+        #    placeholder until finalize_deferred patches it after stage 7.  So
+        #    the mask is computed here, with everything else, and the term is
+        #    built there.
+        #
+        #    WHAT A LATE-BUILT ELEMENT GETS IS WHAT THE USER WROTE, and only
+        #    that.  Full parity with an ordinary derived element would also
+        #    make its defaults.yaml bounds and sigma live, and those were
+        #    never active before -- `orbit.md` picks `vcve`'s upper bound
+        #    knowing it is inert on a sqrt(e) orbit, "which is also why
+        #    widening it moved no shipped example".  Measured: turning them on
+        #    left every shipped logp unchanged (the barriers evaluate to ~0)
+        #    and put NaN in the GRADIENT of every V_c/V_e system, through six
+        #    barriers nobody asked for.  So the rule is the one the
+        #    inactive-element warning already uses: key on `user_params`, via
+        #    `_user_constraint_fields`.
+        user_fields = [
+            set(self._user_constraint_fields(i)) for i in range(n_elements)
+        ]
+        user_prior = np.array(
+            [bool({"mu", "sigma"} & f) for f in user_fields], dtype=bool
+        )
+        user_lower = np.array(["lower" in f for f in user_fields], dtype=bool)
+        user_upper = np.array(["upper" in f for f in user_fields], dtype=bool)
+
         gaussian_prior_mask = (
             (
                 (is_derived & ~is_reported)
+                | (is_reported & user_prior)
                 | (is_sampled & use_logit & has_sigma_prior)
             )
             & ~np.isnan(sigmas)
@@ -2483,8 +2483,17 @@ class Parameter:
         for i in mu_links:
             gaussian_prior_mask[i] = False
         prior_mus = np.where(~np.isnan(mus), mus, inits)
-        if np.any(gaussian_prior_mask):
-            mask = pt.as_tensor_variable(gaussian_prior_mask)
+        # Split, not skipped: the reported elements' term is identical in form
+        # and is built by finalize_deferred against the patched vector.
+        prior_now = gaussian_prior_mask & ~is_reported
+        if np.any(gaussian_prior_mask & is_reported):
+            self._deferred_potentials = {
+                "prior_mask": gaussian_prior_mask & is_reported,
+                "prior_mus": prior_mus.copy(),
+                "sigmas": sigmas.copy(),
+            }
+        if np.any(prior_now):
+            mask = pt.as_tensor_variable(prior_now)
             penalty = (
                 -0.5
                 * (
@@ -2542,6 +2551,13 @@ class Parameter:
         #
         #     Static bounds need none of this: Z is then a constant.
         for i, (lo_t, up_t, span_t) in dyn_bounds.items():
+            if is_reported[i]:
+                # A LINKED bound on a reported element: the truncation mass
+                # would have to be computed against the patched vector, and
+                # nothing in the tree does this.  Left unsupported rather than
+                # built against the placeholder, which would be silently wrong
+                # in exactly the way this whole block was.
+                continue
             if i in mu_links:
                 mu_i = mu_links[i]["fn"](val_flat)
             elif gaussian_prior_mask[i]:
@@ -2566,9 +2582,15 @@ class Parameter:
         #    not apply). Fully-bounded sampled params: sigmoid is a hard
         #    constraint — no barrier needed.
         #    Fixed params: constant, so barrier adds only a harmless constant — skip.
-        #    REPORTED elements get none, for the reason section A gives.
+        #    LATE-BUILT (reported) elements enter only where the USER wrote
+        #    the bound -- section A gives the reason and the measurement.
+        #    They are in `needs_barrier` so that `_barrier_state` covers them
+        #    and the whitening probe measures a scale for them like any other
+        #    barrier element; only the potential waits for finalize_deferred.
         needs_barrier = (
-            (is_derived & ~is_reported) | (is_sampled & ~use_logit)
+            (is_derived & ~is_reported)
+            | (is_reported & (user_lower | user_upper))
+            | (is_sampled & ~use_logit)
         ) & ~is_fixed
         # np.isfinite, not ~np.isinf: `resolve` writes NaN into a vector for
         # "this element was never given one", which is exactly what a
@@ -2640,11 +2662,38 @@ class Parameter:
             # the honest stand-in and is already the path a genuinely
             # unbounded element takes -- `soft_lower_bound(v, -inf)` is a
             # clipped log-sigmoid of +inf, i.e. exactly 0 with zero gradient.
-            safe_lowers = np.where(has_lower, lowers, -np.inf)
-            safe_uppers = np.where(has_upper, uppers, np.inf)
+            # Sanitized PER PHASE.  The mask alone is not enough (the
+            # where-trap: its VJP multiplies the unselected branch by zero and
+            # 0*NaN poisons the whole gradient), and a late-built element's
+            # pre-patch value is LEGITIMATELY NaN -- sqrt of a negative
+            # eccentricity the other parameterization never promised.  So this
+            # phase's bounds must be infinite wherever this phase does not
+            # penalize, which includes every deferred element; the deferred
+            # pass builds its own.  Getting this wrong put NaN in the gradient
+            # of every V_c/V_e system (tests/test_vcve.py).
+            safe_lowers = np.where(has_lower & ~is_reported, lowers, -np.inf)
+            safe_uppers = np.where(has_upper & ~is_reported, uppers, np.inf)
+            has_lower = has_lower & (~is_reported | user_lower)
+            has_upper = has_upper & (~is_reported | user_upper)
 
-            if np.any(has_lower):
-                mask = pt.as_tensor_variable(has_lower)
+            if np.any((has_lower | has_upper) & is_reported):
+                state = self._deferred_potentials or {}
+                state.update(
+                    {
+                        "has_lower": has_lower & is_reported,
+                        "has_upper": has_upper & is_reported,
+                        "lowers": lowers.copy(),
+                        "uppers": uppers.copy(),
+                        "sv_barrier": sv_barrier,
+                    }
+                )
+                self._deferred_potentials = state
+
+            low_now = has_lower & ~is_reported
+            up_now = has_upper & ~is_reported
+
+            if np.any(low_now):
+                mask = pt.as_tensor_variable(low_now)
                 penalty = soft_lower_bound(
                     val_flat, pt.as_tensor_variable(safe_lowers), sv_barrier
                 )
@@ -2653,8 +2702,8 @@ class Parameter:
                     pm.math.sum(pt.where(mask, penalty, 0.0)),
                 )
 
-            if np.any(has_upper):
-                mask = pt.as_tensor_variable(has_upper)
+            if np.any(up_now):
+                mask = pt.as_tensor_variable(up_now)
                 penalty = soft_upper_bound(
                     val_flat, pt.as_tensor_variable(safe_uppers), sv_barrier
                 )
@@ -2744,12 +2793,17 @@ class Parameter:
           consumed by nothing (the vocabulary's definition, and what makes the
           cycle dissolve), so every consumer that read ``self.value`` during
           stage 6 or 6 read an element this patch does not touch.
-        * The patch adds no logp term.  It creates one ``pm.Deterministic`` and
-          no potential: ``build_pymc`` already excludes reported elements from
-          the Gaussian prior (section A) and the soft barriers (section B), and
-          they carry no raw coordinate to correct (section C).  A prior on a
-          quantity the model does not consume would be a logp term with no data
-          behind it.
+        * The patch adds the logp terms the reported elements OWE, and could
+          not have added them earlier.  A reported element is derived, so it
+          takes a Gaussian on its value and a soft barrier from its bounds
+          exactly as any other derived element does (``build_pymc`` sections A
+          and B compute the masks); what it cannot do is build those terms
+          against the pre-patch placeholder, which is why they are created
+          here.  It carries no raw coordinate, so section C is not owed.
+
+          Until 2026-09 they were not created at all, and a user's
+          ``orbit.b.chord: {mu, sigma}`` -- a transit-duration prior on a
+          DEFAULT config -- was discarded without a word.
 
         ``specs`` are the wired ``ElementExpression``s, supplied by
         ``Component.finalize_reported`` (which could only build them now).  With
@@ -2802,7 +2856,80 @@ class Parameter:
 
         self._deferred_reported = None
         self.value = pm.Deterministic(self.label, val_to_save)
+        self._add_deferred_potentials(phys_val)
         return self.value
+
+    def _add_deferred_potentials(self, val_flat):
+        """The Gaussian prior and soft bounds owed by REPORTED elements.
+
+        Same two terms, same spellings, same masks as ``build_pymc``'s
+        sections A and B -- only the vector is different, because this one has
+        been patched and theirs had not been. Split rather than duplicated:
+        every array here was computed there, beside the elements it shares a
+        parameter with, so the two halves cannot drift about what a bound or a
+        sigma means.
+
+        Idempotent with ``finalize_deferred``, which clears the state.
+        """
+        state = self._deferred_potentials
+        if not state:
+            return
+        self._deferred_potentials = None
+
+        import pymc as pm
+        import pytensor.tensor as pt
+
+        # INDEXED, never masked.  `pt.where(mask, penalty, 0)` is what
+        # build_pymc uses, and it is safe there only because that phase
+        # sanitizes the unselected elements' BOUNDS to +/-infinity.  Here the
+        # unselected elements include ordinary derived ones whose bounds are
+        # finite and whose penalty would therefore be a real number -- but
+        # also, on the same vector, elements a sibling expression may have
+        # left NaN.  Taking the elements out by index removes the question:
+        # nothing is evaluated off the mask, and the VJP is a scatter.
+        prior_mask = state.get("prior_mask")
+        if prior_mask is not None and np.any(prior_mask):
+            idx = np.flatnonzero(prior_mask)
+            sigmas = state["sigmas"][idx]
+            centres = state["prior_mus"][idx]
+            pm.Potential(
+                f"gaussian_prior.{self.label}.reported",
+                pm.math.sum(
+                    -0.5
+                    * (
+                        (
+                            val_flat[pt.as_tensor_variable(idx)]
+                            - pt.as_tensor_variable(centres)
+                        )
+                        / pt.as_tensor_variable(
+                            np.where(sigmas > 0, sigmas, 1.0)
+                        )
+                    )
+                    ** 2
+                ),
+            )
+
+        sv_barrier = state.get("sv_barrier")
+        if sv_barrier is None:
+            return
+        for key, bound_key, helper, name in (
+            ("has_lower", "lowers", soft_lower_bound, "low_bound"),
+            ("has_upper", "uppers", soft_upper_bound, "up_bound"),
+        ):
+            mask = state.get(key)
+            if mask is None or not np.any(mask):
+                continue
+            idx = np.flatnonzero(mask)
+            pm.Potential(
+                f"{name}.{self.label}.reported",
+                pm.math.sum(
+                    helper(
+                        val_flat[pt.as_tensor_variable(idx)],
+                        pt.as_tensor_variable(state[bound_key][idx]),
+                        sv_barrier[pt.as_tensor_variable(idx)],
+                    )
+                ),
+            )
 
     def _posterior_evaluator(self, expr, inputs):
         """The compiled per-sample evaluator for ``expr``, cached.

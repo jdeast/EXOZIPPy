@@ -51,7 +51,7 @@ class Subject(Component):
     THE COORDINATE CHOICE, per subject::
 
         subject:
-          - {name: "1", weight: 79.6, dose: 4.02, parameterization: "ke_v"}
+          - {name: "1", weight: 79.6, dose: 4.02, fitkev: true}
 
     The same model can be written in several coordinate bases and the field
     uses more than one: ``cl_v`` samples (CL, V) and derives ``ke = CL/V``
@@ -70,13 +70,13 @@ class Subject(Component):
     are the non-linear case, where the component owes a Jacobian and supplies
     one; see ``orbit.md``.)
 
-    Spelled as an ENUM and not as a ``fit<coord>`` boolean, which is what
-    ``components.md``'s flag vocabulary would suggest: that vocabulary is
-    explicitly about BOOLEAN flags, and this choice is not a boolean. The
-    shipped precedent for an n-way per-instance choice is ``band.ld_law``
-    and ``planet.mass_parameterization``. The value names the sampled pair,
-    so the config says what it selects without a lookup, and a third basis
-    (see ``COORD_MODE_TABLE``) is a new value rather than a second flag.
+    Spelled as one BOOLEAN PER BASIS -- ``fitclv`` (the default),
+    ``fitkev``, ``fitclke`` -- at most one true, in the house style of
+    ``fitvcve`` and ``fitchord``. An enum would make the illegal "two bases
+    at once" combination unrepresentable rather than merely rejected, and
+    that argument lost to a stronger one: a user who meets ``fitvcve`` in an
+    orbit block and an enum here has to learn two spellings for one idea.
+    ``_parse_basis`` rejects more than one by name.
 
     The choice is per instance, so a system may mix them -- and the point of
     ``COORD_MODE_TABLE`` is that the roles fall out rather than being
@@ -243,14 +243,30 @@ class Subject(Component):
             q for q in cls.QUANTITIES if table.get(f"log_{q}", "") is None
         )
 
-    # The default, named once: `config_schema`'s doc, `_parse_parameterization`
-    # and the log line all have to agree about it.
+    # The default, named once: `config_schema`'s doc, `_parse_basis` and the
+    # log line all have to agree about it.
     DEFAULT_COORDS = "cl_v"
+
+    # ONE BOOLEAN PER BASIS, mutually exclusive, none true = the default.
+    # Not an enum, and the ruling is about consistency rather than about this
+    # component: a user who meets `fitvcve` and `fitchord` in an orbit block
+    # and then an enum in a subject block has to learn
+    # two spellings for one idea.  The cost is real and is paid here -- three
+    # alternatives cannot be encoded in booleans without an illegal
+    # combination, so `_parse_basis` has to reject "more than one true"
+    # explicitly, which an enum would have made unrepresentable.  See
+    # notes/code_review_20260824.txt item 4.2.7 for the same ruling applied to
+    # planet.mass_parameterization.
+    BASIS_FLAGS = {
+        "fitclv": "cl_v",
+        "fitkev": "ke_v",
+        "fitclke": "cl_ke",
+    }
 
     # What each basis samples, in words, for the one line the run prints.  A
     # coordinate choice moves no posterior and produces a table with the same
     # rows either way -- which is the whole point of the `reported` role and
-    # also what would make a stray `parameterization:` invisible.
+    # also what would make a stray basis flag invisible.
     BASIS_DESCRIPTIONS = {
         "cl_v": "(CL, V) -- NONMEM TRANS2",
         "ke_v": "(ke, V) -- NONMEM TRANS1",
@@ -283,23 +299,44 @@ class Subject(Component):
                 "doc": "Administered dose, in the units of 'dose_unit'.",
             },
             {
-                "key": "parameterization",
+                "key": "fitclv",
                 "kind": "option",
                 "accepts": None,
                 "required": False,
                 "doc": (
-                    "Which coordinates this subject is sampled in, named "
-                    "after the sampled pair: 'cl_v' (clearance and volume; "
-                    "NONMEM TRANS2; the default), 'ke_v' (elimination rate "
-                    "and volume; NONMEM TRANS1), or 'cl_ke' (both rates, "
-                    "volume derived; R's SSfol, and the basis the canonical "
-                    "nlme fit of the Theophylline data is in). A coordinate "
-                    "choice -- the same model in different coordinates, so "
-                    "nothing becomes more or less constrained, and whichever "
-                    "quantities are not sampled are still computed and "
-                    "reported. It is NOT free of consequence once a "
-                    "'population:' block exists: between-subject variability "
-                    "is defined in a basis."
+                    "Sample this subject in the (CL, V) basis -- clearance "
+                    "and volume, NONMEM's TRANS2 -- and derive ke = CL/V. "
+                    "This is the default, so the flag exists to say so "
+                    "explicitly. At most one of fitclv/fitkev/fitclke may be "
+                    "true."
+                ),
+            },
+            {
+                "key": "fitkev",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Sample this subject in the (ke, V) basis -- elimination "
+                    "rate and volume, NONMEM's TRANS1 -- and derive "
+                    "CL = ke*V. A coordinate choice: the same model, so "
+                    "nothing becomes more or less constrained, and CL is "
+                    "still computed and reported."
+                ),
+            },
+            {
+                "key": "fitclke",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Sample this subject in the (CL, ke) basis -- both rates, "
+                    "with the volume derived as V = CL/ke. This is R's "
+                    "'SSfol' parameterization, and so the basis the canonical "
+                    "nlme fit of the Theophylline data estimates its random "
+                    "effects in. It matters once a 'population:' block "
+                    "exists, because between-subject variability is defined "
+                    "IN a basis."
                 ),
             },
             {
@@ -355,7 +392,7 @@ class Subject(Component):
             self.dose_mg.append(
                 self._parse_dose(cfg, where, self.weight_kg[-1])
             )
-            self.coord_modes.append(self._parse_parameterization(cfg, where))
+            self.coord_modes.append(self._parse_basis(cfg, where))
             self.fast_absorption.append(
                 self._parse_flag(cfg, "assume_fast_absorption", where)
             )
@@ -402,30 +439,38 @@ class Subject(Component):
         return raw
 
     @classmethod
-    def _parse_parameterization(cls, cfg, where):
+    def _parse_basis(cls, cfg, where):
         """This subject's mode key for ``COORD_MODE_TABLE``.
 
-        The one wrong value worth naming is a NONMEM TRANS number: somebody
-        transcribing a control stream writes ``1`` or ``2``, and those mean
-        the opposite of each other.  A bare number is not a legal value here
-        either way, so the message says which spelling to use rather than
-        guessing at an intent.
+        At most one basis flag may be true; none means the default. The
+        "more than one" case is the price of spelling an n-way choice in
+        booleans, so it is rejected by name rather than left to whichever
+        flag happens to be checked first.
         """
-        raw = cfg.get("parameterization", cls.DEFAULT_COORDS)
-        if raw in cls.COORD_MODE_TABLE:
-            return raw
-        legal = ", ".join(f"'{k}'" for k in cls.COORD_MODE_TABLE)
-        extra = ""
-        if raw in (1, 2, "1", "2", True, False):
-            extra = (
-                " That looks like a NONMEM TRANS number: TRANS1 is 'ke_v' "
-                "and TRANS2 is 'cl_v'."
+        chosen = []
+        for flag, mode in cls.BASIS_FLAGS.items():
+            raw = cfg.get(flag, False)
+            if not isinstance(raw, bool):
+                extra = ""
+                if raw in (1, 2, "1", "2"):
+                    extra = (
+                        " That looks like a NONMEM TRANS number: TRANS1 is "
+                        "'fitkev: true' and TRANS2 is the default."
+                    )
+                raise ValueError(
+                    f"[{where}] '{flag}:' must be true or false; got "
+                    f"{raw!r}.{extra}"
+                )
+            if raw:
+                chosen.append(flag)
+        if len(chosen) > 1:
+            raise ValueError(
+                f"[{where}] {', '.join(chosen)} are all true, and they name "
+                f"different coordinate bases -- a subject is sampled in one. "
+                f"Set at most one (leave them all out for the default, "
+                f"'{cls.DEFAULT_COORDS}')."
             )
-        raise ValueError(
-            f"[{where}] 'parameterization:' must be one of {legal}; got "
-            f"{raw!r}. It names the pair of coordinates this subject is "
-            f"sampled in.{extra}"
-        )
+        return cls.BASIS_FLAGS[chosen[0]] if chosen else cls.DEFAULT_COORDS
 
     @staticmethod
     def _parse_weight(cfg, where):
@@ -528,7 +573,7 @@ class Subject(Component):
             self.coord_modes,
             self.COORD_MODE_TABLE,
             n_elements=self.n_elements,
-            where=f"{self.prefix}.parameterization",
+            where=f"{self.prefix}.basis",
         )
         self._reject_incompatible_bases()
         self._log_parameterization_choices()
@@ -660,22 +705,24 @@ class Subject(Component):
                     ]
                     for mode in (a, b)
                 }
+                flag = {m: f for f, m in self.BASIS_FLAGS.items()}
                 raise ValueError(
                     f"[{self.prefix}] subjects {named[a]} are in the '{a}' "
-                    f"basis and {named[b]} in '{b}', and those two cannot be "
-                    f"mixed in one system: '{a}' derives one of (v, ke) from "
-                    f"the other and '{b}' derives it the other way, so the "
-                    f"build order would need each to come first. Use one of "
-                    f"them for every subject, or pair either with 'ke_v', "
-                    f"which reports the coordinate it does not sample rather "
-                    f"than deriving it."
+                    f"basis ({flag[a]}) and {named[b]} in '{b}' "
+                    f"({flag[b]}), and those two cannot be mixed in one "
+                    f"system: '{a}' derives one of (v, ke) from the other and "
+                    f"'{b}' derives it the other way, so the build order "
+                    f"would need each to come first. Use one of them for "
+                    f"every subject, or pair either with 'fitkev', which "
+                    f"reports the coordinate it does not sample rather than "
+                    f"deriving it."
                 )
 
     def _log_parameterization_choices(self):
         """Say which coordinates each subject samples, once, at stage 3.
 
         A coordinate choice moves no posterior, so the only way anybody
-        notices a stray ``parameterization:`` is if the run says so -- and the
+        notices a stray basis flag is if the run says so -- and the
         modes produce tables with the same rows, which is the whole point of
         the `reported` role and also what makes the choice invisible
         otherwise.

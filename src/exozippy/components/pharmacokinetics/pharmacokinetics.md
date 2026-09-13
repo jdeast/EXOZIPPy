@@ -94,32 +94,33 @@ for, and it is a reason the two phases are worth having in this order.
 NONMEM ships two spellings of this one model and users hold opinions about
 which: **TRANS2** samples `(CL, V)` and derives `ke = CL/V`; **TRANS1** samples
 `(ke, V)` and derives `CL = ke*V`. Same model, different coordinates -- so it
-is a *coordinate choice*: `parameterization: cl_v` (the default) or
-`parameterization: ke_v`, per subject, and a system may mix them.
+is a *coordinate choice*: one boolean per basis, at most one true --
+`fitclv` (the default), `fitkev`, `fitclke` -- per subject, and a system may
+mix them.
 
-**It is an enum, not a `fit<coord>` boolean, and `components.md` now says
-why.** That flag vocabulary is explicitly about BOOLEAN flags and had no entry
-for an n-way choice, so `fitke: true` looked like the house style. It is not:
-the house style for an n-way per-instance choice is `band.ld_law` and
-`planet.mass_parameterization` -- an enum whose values name the alternatives.
-Here they name the sampled pair, so a config says what it selects without a
-lookup, and P4's third basis is a new VALUE rather than a second flag that
-would have to be checked against the first. (The design note called for
-`pk_trans:`, reasoning that a coordinate choice is "spelled after the
-coordinate, not as a `fit<x>` toggle"; the first half was right.)
+**Booleans, not an enum, and the reason is the user rather than the
+encoding.** Three alternatives cannot be encoded in booleans without an
+illegal combination, so `_parse_basis` owes an explicit "more than one is set"
+error that an enum would have made unnecessary. That argument lost to a
+stronger one: a reader who meets `fitvcve` in an orbit block and an enum here
+has to learn two spellings for one idea. `components.md`'s flag vocabulary now
+states the ruling, and `planet.mass_parameterization` -- the one enum in the
+tree that really is a coordinate choice -- is filed for renaming to `fitlogq`
+(`notes/code_review_20260824.txt` 4.2.7). (The design note called for
+`pk_trans:`; the "named after the coordinate" half was right.)
 
 `Subject.COORD_MODE_TABLE` is the whole implementation -- a `mode_manifest`
 table, not a hand-built mask -- and **the interesting half is which role each
 coordinate takes, because both of the interesting roles appear:**
 
-| under `cl_v` (TRANS2) | under `ke_v` (TRANS1) | |
+| under `fitclv` (TRANS2) | under `fitkev` (TRANS1) | |
 |---|---|---|
 | `log_cl` sampled | `log_cl` **reported** | |
 | `cl` derived, consumed by `ke` | `cl` **reported** | the likelihood needs only `ka`, `ke`, `V` |
 | `ke` derived, consumed by the model | `ke` derived, from `log_ke` | |
 | `log_ke` **reported** | `log_ke` sampled | |
 
-`cl` under `ke_v` is the textbook case for `reported`: consumed by nothing,
+`cl` under `fitkev` is the textbook case for `reported`: consumed by nothing,
 and still the one quantity a PK table exists to show.
 
 **Does the flip preserve the prior?  Here, yes, and the reason is worth
@@ -150,13 +151,13 @@ the practical case for P5's opt-in bound.
 **Three traps, all of them load-bearing:**
 
 1. **`auc` must not be written `dose/cl`.** That is the identity it is, and it
-   raises under `ke_v` -- nothing may consume a reported element, and
+   raises under `fitkev` -- nothing may consume a reported element, and
    `System._validate_reported_not_consumed` refuses the manifest. It is
    written `dose/(ke*v)`, which is the same number and consumes only
    quantities that are sampled-or-derived in both.
 2. **A mixed system would deadlock a naive wiring.** `cl` is derived from
-   `ke` on the `ke_v` subjects while `ke` is derived from `cl` on the `cl_v`
-   ones, so the per-parameter build order would see `cl -> ke -> cl`. It does
+   `ke` on the `fitkev` subjects while `ke` is derived from `cl` on the
+   `fitclv` ones, so the per-parameter build order would see `cl -> ke -> cl`. It does
    not, because a *reported* selection contributes no edge to `graph.py`.
    That is not a coincidence to be re-derived per component: it is the
    property the role was designed around (`parameter.md`), and a table whose
@@ -204,7 +205,7 @@ exists.** A diagonal set of omegas in one coordinate basis is not diagonal in
 another: with `(CL, V)` varying independently, `var(log ke) = var(log CL) +
 var(log V)`, so the collapsed `lKe` the canonical fit reports is not
 representable at all. R's `SSfol` -- and so that fit -- is parameterized in
-`(lKe, lKa, lCl)`, so `cl_ke` is a third value of `parameterization:`, and
+`(lKe, lKa, lCl)`, so `fitclke` is a third basis flag, and
 reproducing a published set of random effects means fitting in the basis they
 were estimated in. It follows that **every subject must share one basis when a
 population is present**, and `Population._resolve_basis` raises otherwise:
@@ -315,19 +316,29 @@ Seven places where the fit was not frictionless:
    time vocabulary, which is the property the split exists to guarantee rather
    than merely intend.
 
-5. **A user constraint on a `reported` element was dropped in silence, and
-   now warns.** `parameter.md` said `inactive` was the one lossy role in a
-   parameterization flip. It is not: `gaussian_prior_mask` excludes reported
-   elements and so does the soft barrier, and *necessarily* -- a reported
-   value is a placeholder until `finalize_deferred` patches it after stage 7,
-   so a potential built in phase 1 would penalize the pre-patch vector. The
-   exclusion is right; the silence was not. `subject.S1.cl: {mu, sigma}` is
-   the single most natural prior a user of this component writes, and under
-   `parameterization: ke_v` it vanished without a word. `build_pymc` now warns for a
-   reported element exactly as it does for an inactive one, keyed on what the
-   user wrote. **This is a shipped astronomy bug too**, reached by
-   `orbit.b.secosw: {mu, sigma}` under `fitvcve` -- found from a field with
-   no stars in it, which is the sort of thing this exercise is for.
+5. **A user constraint on a late-built (`reported`) element was dropped in
+   silence. FIXED, and the role is gone.** `parameter.md` said `inactive` was
+   the one lossy role in a parameterization flip; it was not. An element that
+   nothing consumes got no Gaussian and no barrier, so
+   `subject.S1.cl: {mu, sigma}` -- the single most natural prior a user of
+   this component writes -- vanished under `fitkev: true` without a
+   word. **The shipped astronomy case is worse**: on a default transiting
+   config (`examples/hat3`) both `orbit.vcve` and `orbit.chord` are in that
+   state, so a transit-duration prior did nothing.
+
+   The *deferral* is a necessity -- the value is a placeholder until
+   `finalize_deferred` patches it after stage 7, so a potential built in phase
+   1 would penalize the pre-patch vector -- but dropping the term was not.
+   `build_pymc` now computes these elements' masks with all the others and
+   `finalize_deferred` builds the terms against the patched vector. `reported`
+   is no longer a role: it is `derived`, built late. The name was wrong twice
+   over, since every role is reported and the distinguishing property is that
+   nothing consumes it -- which is what the code's own
+   `ElementExpression(output_only=True)` already said.
+
+   Worth keeping: the unit tests did not catch this because they assert
+   exactly the buggy behaviour (`reported logp == plain logp`). What was
+   wrong was the DESIGN claim in `parameter.md`, and no test catches a doc.
 
 6. **There is no channel for a POST-FIT, component-supplied number, and
    eta-shrinkage is the case that needs one.** Shrinkage --

@@ -82,7 +82,7 @@ def _system(csv, tmp_path, ke_v=(), user_params=None):
     cfg = _config(csv, tmp_path)
     for block in cfg["subject"]:
         if block["name"] in ke_v:
-            block["parameterization"] = "ke_v"
+            block["fitkev"] = True
     system = System(cfg, user_params=dict(user_params or {}))
     system.prepare()
     return system
@@ -525,7 +525,7 @@ def test_trans2_is_the_default_and_the_log_rate_it_drops_is_reported(prepared):
 
 
 def test_the_ke_v_basis_flips_which_rate_is_sampled(synth_csv, tmp_path):
-    """Given parameterization: ke_v, Then CL becomes REPORTED.
+    """Given fitkev, Then CL becomes REPORTED.
 
     CL is consumed by nothing under TRANS1 -- the likelihood needs only ka,
     ke and V -- while staying the quantity a PK table exists to show. That is
@@ -648,55 +648,68 @@ def test_auc_is_spelled_so_it_never_consumes_the_reported_clearance(
     np.testing.assert_allclose(auc, dose / clearance, rtol=1e-12)
 
 
-def test_a_prior_on_a_reported_element_is_dropped_but_says_so(
-    synth_csv, tmp_path, caplog
-):
-    """Given a CL prior in the (ke, V) basis, Then it is dropped WITH a warning.
+def test_a_prior_on_a_late_built_element_is_applied(synth_csv, tmp_path):
+    """Given a CL prior in the (ke, V) basis, Then it is a real logp term.
 
-    The lossy case a parameterization flip has, and the reason the warning
-    exists: a reported element's value is patched in after the model is
-    built, so a potential built against it would penalize a placeholder --
-    the exclusion is structural. Until this warning, the drop was silent, and
-    `subject.S1.cl: {mu, sigma}` is the most natural prior a user of this
-    component writes.
+    `cl` is consumed by nothing there, so its expression is applied in the
+    deferred pass after stage 7 -- and for two years that meant it also got
+    no potential, so this prior (the most natural one a user of this
+    component writes) was discarded in silence. The term is built against the
+    PATCHED vector now, which is the only point at which it could be.
     """
     prior = {"subject.S1.cl": {"mu": 2.8, "sigma": 0.3}}
 
     trans2 = _system(synth_csv, tmp_path, user_params=prior)
     model = trans2.build_model()
+    # Consumed by `ke` here, so it is an ordinary derived element and its
+    # prior is built in phase 1.
     assert "gaussian_prior.subject.cl" in {p.name for p in model.potentials}
 
-    caplog.clear()
-    with caplog.at_level(
-        logging.WARNING, logger="exozippy.components.parameter"
-    ):
-        trans1 = _system(synth_csv, tmp_path, ke_v={"S1"}, user_params=prior)
-        model = trans1.build_model()
-
-    assert "gaussian_prior.subject.cl" not in {
+    trans1 = _system(synth_csv, tmp_path, ke_v={"S1"}, user_params=prior)
+    model = trans1.build_model()
+    assert trans1.subject.cl.is_reported[0]
+    assert "gaussian_prior.subject.cl.reported" in {
         p.name for p in model.potentials
     }
-    dropped = [
-        r.getMessage()
-        for r in caplog.records
-        if "DROPPED" in r.getMessage() and "subject.S1.cl" in r.getMessage()
-    ]
-    assert dropped, caplog.text
-    assert "REPORTED" in dropped[0]
+
+    # ...and it is worth something: the same model without the prior differs
+    # by the term, and the gradient survives it.
+    bare = _system(synth_csv, tmp_path, ke_v={"S1"})
+    bare_model = bare.build_model()
+    point = model.initial_point()
+    with_prior = float(model.compile_logp()(point))
+    without = float(bare_model.compile_logp()(bare_model.initial_point()))
+    assert with_prior != pytest.approx(without)
+    assert np.all(np.isfinite(model.compile_dlogp()(point)))
 
 
-def test_a_nonmem_trans_number_raises_and_says_which_value_it_means(
+def test_a_nonmem_trans_number_raises_and_says_which_flag_it_means(
     synth_csv, tmp_path
 ):
-    """Given `parameterization: 1`, Then it raises naming 'ke_v'.
+    """Given `fitkev: 1`, Then it raises naming the flag.
 
     1 is what somebody transcribing a NONMEM control stream writes, and
     TRANS1 and TRANS2 mean the opposite of each other -- so the one
-    plausible wrong value gets the translation rather than a bare "not a
-    legal value".
+    plausible wrong value gets the translation rather than a bare type
+    complaint.
     """
     cfg = _config(synth_csv, tmp_path)
-    cfg["subject"][0]["parameterization"] = 1
+    cfg["subject"][0]["fitkev"] = 1
 
-    with pytest.raises(ValueError, match="TRANS1 is 'ke_v'"):
+    with pytest.raises(ValueError, match="TRANS1 is 'fitkev: true'"):
+        System(cfg, user_params={}).prepare()
+
+
+def test_two_basis_flags_at_once_are_refused(synth_csv, tmp_path):
+    """Given fitkev AND fitclke, Then it names both and refuses.
+
+    The price of spelling a three-way choice in booleans: the illegal
+    combination is representable, so it has to be rejected by name rather
+    than resolved by whichever flag is read first.
+    """
+    cfg = _config(synth_csv, tmp_path)
+    cfg["subject"][0]["fitkev"] = True
+    cfg["subject"][0]["fitclke"] = True
+
+    with pytest.raises(ValueError, match="are all true"):
         System(cfg, user_params={}).prepare()
