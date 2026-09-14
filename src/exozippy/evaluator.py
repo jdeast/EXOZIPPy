@@ -80,7 +80,11 @@ class NeedsResolve(Exception):
 # Config keys that carry no structural meaning for the compiled graph.
 # "modeling" is output-only (the generated paper-draft scaffold): adding
 # the block or flipping its `compile` key must not stale a finished trace.
-_NON_STRUCTURAL_CONFIG_KEYS = {"run", "modeling"}
+# "reporting" is output-only too: it sets the credible-interval width the
+# tables, CSV, mode report and corner plots are written at.  Re-reporting an
+# existing trace at a different width is exactly what it is for, so it must
+# not invalidate one.
+_NON_STRUCTURAL_CONFIG_KEYS = {"run", "modeling", "reporting"}
 
 
 def _canon(value: Any) -> Any:

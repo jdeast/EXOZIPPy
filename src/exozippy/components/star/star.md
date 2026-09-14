@@ -68,7 +68,7 @@ Tests: `tests/test_distance_volume_prior.py`.
 
 ## Which stellar structure parameters a topology actually has
 
-`star.radius`, `star.teff` and `star.feh` are declared for every star unconditionally, because the reporting chain every star carries (`logg`, `density`, `luminosity`, `fbol`) names them in its own `deps`. Whether anything in the **likelihood** reads them is a property of the topology, and in a point-source microlensing fit with no SED, no evolutionary model and no empirical relation the answer is *nothing at all*. Left free they refill their prior; pinned they change nothing. So they are neither: `Star._apply_structure_activity` declares them **inactive** per star (role 4 -- no raw coordinate, no potential, no table row) wherever nothing reads them, driven by the one predicate `Star.structure_consumers`.
+`star.radius`, `star.teff` and `star.feh` are declared for every star unconditionally, because the reporting chain every star carries (`logg`, `density`, `luminosity`, `fbol`) names them in its own `deps`. Whether anything in the **likelihood** reads them is a property of the topology, and in a point-source microlensing fit with no SED, no evolutionary model and no empirical relation the answer is *nothing at all*. Left free they refill their prior; pinned they change nothing. So they are neither: `Star._apply_structure_activity` declares them **inactive** per star (no raw coordinate, no potential, no table row) wherever nothing reads them, driven by the one predicate `Star.structure_consumers`.
 
 The rule the three tiers state, and the reason this is not a pin:
 

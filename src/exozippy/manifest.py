@@ -47,7 +47,7 @@ as some elements of a vector being sampled while others are derived or absent
 entirely.  ``Parameter.build_pymc`` was uniform on that axis --
 ``is_derived = np.full(n_elements, expr_raw is not None)`` -- which is why
 those four features each shipped a hard error or a silent downgrade instead.
-See ``ROLE_*`` below for the four roles and ``ManifestEntry`` for the three
+See ``ROLE_*`` below for the element roles and ``ManifestEntry`` for the three
 options that select them.
 
 Nothing here imports from the rest of the package, so every consumer can
@@ -60,22 +60,35 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-# The four roles an ELEMENT of a parameter vector can have.  Roles are per
-# element because the modeling choices that select them are per instance: one
-# band's limb darkening is Kipping-quadratic while another's is linear, one
-# orbit uses sqrt(e)cos/sin(omega) while another uses V_c/V_e, one star has an
+# The roles an ELEMENT of a parameter vector can have.  Roles are per element
+# because the modeling choices that select them are per instance: one band's
+# limb darkening is Kipping-quadratic while another's is linear, one orbit
+# uses sqrt(e)cos/sin(omega) while another uses V_c/V_e, one star has an
 # evolutionary track and another does not.
 #
 #   SAMPLED   a raw coordinate of its own (the default, and every element of
 #             every parameter before this vocabulary existed).
 #   DERIVED   its value is an expression, and the model CONSUMES it.
-#   REPORTED  its value is an expression that nothing consumes -- the reverse
+#   REPORTED  its value is an expression that NOTHING consumes -- the reverse
 #             direction of a parameterization flip (report sqrt(e)cos(omega)
-#             for an orbit that sampled V_c/V_e).  Declared here; the deferred
-#             build pass it needs lands with the first real consumer (vcve).
+#             for an orbit that sampled V_c/V_e).
 #   INACTIVE  not a parameter of this element's parameterization at all (a
 #             non-MIST star's EEP).  Held at a bookkeeping value, given no
 #             potential, and reported nowhere.
+#
+# REPORTED IS A KIND OF DERIVED and is treated as one wherever the difference
+# does not matter -- in particular it takes the same Gaussian prior and the
+# same soft bounds from a USER-WRITTEN constraint.  It is a separate constant
+# only because it needs a separate BUILD: contributing no dependency edge is
+# what dissolves the cycle when two parameterizations derive each other in
+# opposite directions (`ecc` reads `secosw` on a sqrt(e) orbit while `secosw`
+# reads `ecc` on a V_c/V_e one), so its expression -- and the potentials built
+# on it -- are applied in a deferred pass after stage 7.
+#
+# IT USED TO MEAN "given no potential", AND THAT WAS A BUG, not a definition:
+# a user's `orbit.b.chord: {mu, sigma}` -- a transit-duration prior on a
+# DEFAULT config -- was discarded in silence.  The deferral is a necessity;
+# dropping the term was not.  See `components/parameter.md`.
 ROLE_SAMPLED = "sampled"
 ROLE_DERIVED = "derived"
 ROLE_REPORTED = "reported"
@@ -150,7 +163,7 @@ class ExpressionSelection:
     ``mask`` is ``None`` when the block supplies EVERY element (the historical
     case, and the one that keeps its byte-for-byte build path in
     ``Parameter.build_pymc``); otherwise it is a boolean mask.  ``output_only``
-    marks a REPORTED selection (role 3): the elements are derived but consumed
+    marks a REPORTED selection: the elements are derived but consumed
     by nothing, so they carry no potential and contribute no build-order edge.
     """
 
@@ -171,16 +184,16 @@ class ManifestEntry:
     ...) -- never ``expr_key`` itself.
 
     Three options are per-element and are read here rather than by the
-    consumers, so the four element roles have one interpreter:
+    consumers, so the element roles have one interpreter:
 
     * ``expr_key`` may be a DICT ``{block name: element selector}`` instead of
       a string, selecting a different expression per element -- ``ecc`` from
       sqrt(e)cos/sin(omega) on one orbit and from V_c/V_e on the next.  The
       string form means "every element", and keeps its own build path.
-    * ``output_expr_key`` takes the same two shapes for REPORTED elements
-      (role 3): derived, but consumed by nothing.
+    * ``output_expr_key`` takes the same two shapes for REPORTED elements:
+      derived, but consumed by nothing, and so built in the deferred pass.
     * ``mask`` is the ACTIVITY selector.  Elements outside it are INACTIVE
-      (role 4): held at ``inactive_value`` (or their resolved ``initval``),
+      when INACTIVE: held at ``inactive_value`` (or their resolved ``initval``),
       never sampled, never given a potential, and never reported.
     """
 
@@ -384,7 +397,7 @@ class ManifestEntry:
     def activity_mask(
         self, n_elements: int, where: Optional[str] = None
     ) -> np.ndarray:
-        """Boolean mask of the ACTIVE elements (role 4 is the complement).
+        """Boolean mask of the ACTIVE elements (INACTIVE is the complement).
 
         All-True when the entry carries no ``mask`` option, which is every
         entry that predates this vocabulary.

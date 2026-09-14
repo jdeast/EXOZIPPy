@@ -58,7 +58,7 @@ Per-instrument config keys:
                       dataset, which has no per-instrument fraction.
 
 `fluxfrac` is a parameter of a gaia/abs dataset ONLY: _photocenter_terms
-is its one consumer.  On a rel dataset it is INACTIVE (role 4) -- held at
+is its one consumer.  On a rel dataset it is INACTIVE -- held at
 the dark-companion 0, sampled by nothing and reported nowhere -- because
 rel mode weighs each nested orbit's photocenter separately.  That is why a
 rel-only fit such as examples/kelt4 shows no companion-flux row at all
@@ -550,7 +550,7 @@ class AstrometryInstrument(Instrument):
         # `fluxfrac` is the gaia/abs PHOTOCENTER flux fraction, and it is a
         # parameter only of a gaia/abs dataset: `_photocenter_terms` is its
         # single consumer, and a rel-mode dataset never calls it.  A rel
-        # element is therefore INACTIVE (role 4, components/parameter.md),
+        # element is therefore INACTIVE (components/parameter.md),
         # not merely pinned -- held at the dark-companion 0, sampled by
         # nothing, reported nowhere.  This is what answers KELT-4's "why is
         # the companion flux fixed to zero?" (review 3.10.1): both of its

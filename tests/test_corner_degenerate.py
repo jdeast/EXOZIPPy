@@ -20,11 +20,8 @@ import pytest
 
 import exozippy.corner_utils as corner_utils
 import exozippy.run as run_mod
-from exozippy.constants import (
-    CORNER_THIN_SEED,
-    SIGMA_1_HIGH,
-    SIGMA_1_LOW,
-)
+from exozippy import reporting
+from exozippy.constants import CORNER_THIN_SEED
 from exozippy.corner_utils import (
     CORNER_BINS,
     _drop_undrawable,
@@ -327,18 +324,27 @@ def test_corner_bins_are_passed_as_edges_not_as_a_count():
 
 def test_the_sigma_1_quantiles_are_bit_identical_to_the_inline_formula():
     """
-    Given constants.SIGMA_1_LOW / SIGMA_1_HIGH,
-    When they are compared to the 0.5 -/+ erf(1/sqrt(2))/2 expression
-      save_corner_plot used to recompute for itself,
-    Then they are EQUAL, bit for bit -- so adopting the constants moved no
-      reported number.
+    Given the DEFAULT reporting width,
+    When reporting.quantiles() is compared to the 0.5 -/+ erf(1/sqrt(2))/2
+      expression save_corner_plot used to recompute for itself,
+    Then they are EQUAL, bit for bit -- so neither extracting the constants
+      (review 4.2.6) nor making the width a setting moved any reported number.
 
-    Not `np.isclose`: the whole claim of the extraction is that the corner
-    plot's quantiles and the LaTeX table's are the same two numbers, and
-    "close" would allow them to drift apart by one ulp and stay green.
+    Not `np.isclose`: the whole claim is that the corner plot's quantiles and
+    the LaTeX table's are the same two numbers, and "close" would allow them
+    to drift apart by one ulp and stay green.
+
+    This used to read `constants.SIGMA_1_LOW` / `SIGMA_1_HIGH` directly.  Those
+    are gone: the quantiles are derived from whatever width is active
+    (`exozippy.reporting`), so a fixed pair had no production consumer left,
+    and a constant nothing reads is a convention that can silently stop
+    matching the tables.  Asserting against the live function is also what
+    stops this test being a tautology -- it now checks the code the corner
+    plot and the table actually call.
     """
-    assert SIGMA_1_LOW == 0.5 - math.erf(1.0 / math.sqrt(2)) / 2.0
-    assert SIGMA_1_HIGH == 0.5 + math.erf(1.0 / math.sqrt(2)) / 2.0
+    low, high = reporting.quantiles()
+    assert low == 0.5 - math.erf(1.0 / math.sqrt(2)) / 2.0
+    assert high == 0.5 + math.erf(1.0 / math.sqrt(2)) / 2.0
 
 
 def test_the_corner_thinning_seed_is_fixed():

@@ -23,6 +23,7 @@ from exozippy.samplers.ptde import ptde_sample
 from exozippy.samplers.ptde_async import ptde_async_sample
 from exozippy.system import KNOWN_BLOCK_KEYS, System
 
+from . import reporting
 from .corner_utils import (
     collect_corner_samples,
     histogram_grid_degenerate,
@@ -671,6 +672,20 @@ def _run_fit(config, gui, user_params=None):
     parent_dir.mkdir(parents=True, exist_ok=True)
 
     setup_logging(prefix, config.get("logger_level", "INFO"))
+
+    # 1b. The credible-interval width every report is written in.  Applied
+    # HERE, before anything can summarize a posterior, because the setting is
+    # process-wide (exozippy.reporting) and a summary computed at the default
+    # would be cached with that width.  Unrecognized keys are warned about and
+    # ignored, matching the modeling: block below.
+    reporting_cfg = config.get("reporting", {}) or {}
+    for _key in reporting_cfg:
+        if _key != reporting.CONFIG_KEY:
+            logger.warning(
+                f"Unrecognized key '{_key}' in the reporting block will be "
+                f"ignored. Recognized keys: ['{reporting.CONFIG_KEY}']."
+            )
+    reporting.configure_from(reporting_cfg)
 
     # 2. Load the sampler settings (flat under sampler:)
     sampler_cfg = config.get("sampler", {})

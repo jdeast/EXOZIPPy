@@ -164,6 +164,20 @@ class Component(ABC):
     # not.
     aligned_context_deps = frozenset()
 
+    # Topic section this component owns in the modeling-draft prose
+    # (outputs/prose.py).  None -- the default -- means it writes only into
+    # the shared sections (data, noise, priors, ...).
+    #
+    # Declared here rather than inferred, for the same reason `label` is: the
+    # prose vocabulary used to be a CLOSED astronomy list, so a component from
+    # another field had nowhere of its own to stand and had to file its "what
+    # we fitted" sentence under `data`.  A topic groups sentences by subject
+    # ACROSS components (rvinstrument writes into orbits, transit into
+    # planetary), so it cannot be derived from the component list -- but its
+    # POSITION can be, and System registers topics in build-graph order so
+    # dependency order becomes the editorial order.
+    prose_topic = None
+
     # Human-readable heading for this component's block of the results table
     # (outputs/latex.py's \sidehead).  DECLARED here, rather than only being
     # assigned in ten component __init__s, so a generic consumer can read
@@ -341,7 +355,7 @@ class Component(ABC):
                     setattr(self, tensor_name, tensor_var)
 
     def finalize_reported(self, model, system, context_nodes=None):
-        """Wire and apply this component's REPORTED elements (manifest role 3).
+        """Wire and apply this component's REPORTED elements.
 
         The second phase of the two-phase build, called by
         ``System.build_model`` after stage 7 for every component, inside the
@@ -456,7 +470,7 @@ class Component(ABC):
 
     def add_parameter(self, model, param_name, system, context_nodes=None):
         context_nodes = context_nodes or {}
-        # Reported (role 3) selections park here until finalize_reported; keyed
+        # Reported selections park here until finalize_reported; keyed
         # per parameter name, so a second build_model on one System starts clean
         # (the GUI builds more than once).
         if not hasattr(self, "_pending_reported"):
@@ -536,7 +550,7 @@ class Component(ABC):
             built = []
             for sel in selections:
                 if sel.output_only:
-                    # REPORTED elements (role 3) defer their WHOLE wiring, not
+                    # REPORTED elements defer their WHOLE wiring, not
                     # just the patch.  Resolving their dependencies here would
                     # recurse: the dep is a parameter that, on other elements,
                     # is derived from this one, and this parameter is not yet

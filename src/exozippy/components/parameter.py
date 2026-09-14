@@ -28,7 +28,7 @@ import pytensor.graph.traversal
 import pytensor.tensor as pt
 from astropy import units as u
 
-from exozippy.constants import SIGMA_1_HIGH, SIGMA_1_LOW
+from exozippy import reporting
 from exozippy.manifest import normalize_selector
 from exozippy.outputs.texutils import (
     DIGIT_WORDS,
@@ -769,10 +769,14 @@ class ElementExpression:
 
     ``mask`` is a boolean array over the parameter's elements.  ``expr`` is a
     callable (or node) exactly as ``Parameter.expression`` is, evaluated over
-    the elements the mask selects.  ``output_only`` marks a REPORTED element
-    (manifest role 3): derived, consumed by nothing, and therefore given NO
-    potential -- a prior or barrier on a quantity nothing reads would be a
-    logp term with no data behind it.
+    the elements the mask selects.  ``output_only`` marks a REPORTED element:
+    derived, consumed by nothing, and therefore built in the DEFERRED pass
+    (``finalize_deferred``) rather than in build order -- contributing no
+    dependency edge is what dissolves the cycle when two parameterizations
+    derive each other in opposite directions.  It still takes the Gaussian
+    prior and the soft bounds a USER wrote for it; those are built there, on
+    the patched vector.  Until 2026-09 they were not built at all, which
+    discarded a user's ``orbit.b.chord: {mu, sigma}`` in silence.
     """
 
     mask: Any
@@ -840,7 +844,7 @@ class Parameter:
     names: Optional[Sequence[str]] = None
     # ACTIVITY selector (manifest `mask`): which elements are parameters of
     # their instance's parameterization at all.  Elements outside it are
-    # INACTIVE (manifest role 4) -- a non-MIST star's EEP, a linear-law band's
+    # INACTIVE -- a non-MIST star's EEP, a linear-law band's
     # u2: held at `inactive_value` (or their resolved initval) purely so the
     # vector has a number, never sampled, given no potential, and suppressed
     # from every report, because a value nothing reads is at best meaningless
@@ -908,6 +912,10 @@ class Parameter:
     # to broadcast to.  None for every parameter without role-3 elements, which
     # is every parameter that does not flip a parameterization.
     _deferred_reported: Optional[dict] = field(default=None, init=False)
+    # Prior/barrier inputs for REPORTED elements, whose potentials cannot be
+    # created until finalize_deferred has patched the value.  See build_pymc
+    # section A.
+    _deferred_potentials: Optional[dict] = field(default=None, init=False)
     # generate_posterior's compiled evaluators, keyed by the tuple of input
     # names it found in the posterior.  Compiling is the expensive half of
     # evaluating a derived parameter over a trace, and distribute_posterior is
@@ -952,6 +960,26 @@ class Parameter:
     # one entry per posterior mode (same structure as summary), filled by
     # compute_mode_summaries when a mode report exists
     mode_summaries: Optional[list] = field(default=None, init=False)
+    # The reporting interval width (exozippy.reporting) each cache above was
+    # computed at.  A summary belongs to the draws it came from -- which is
+    # what the `posterior` setter below enforces -- AND to the width it was
+    # computed at, which is what these enforce: `summary_is_current` and
+    # `mode_summaries_are_current` compare against the ACTIVE width and the
+    # `ensure_*` path recomputes when it has moved.  None means "nothing
+    # cached yet".  Without them, re-reporting one live System at a second
+    # width (exozippy-modes, the GUI, any script that fits and then
+    # re-reports) would publish the FIRST width's intervals under the second
+    # width's caption -- the same silent-staleness shape as review 3.14.7,
+    # and worse, because an interval is plausible at ANY width.
+    #
+    # TWO stamps, not one, even though every call site today computes both
+    # caches at the same width in the same pass.  One shared stamp is wrong
+    # the moment they are computed at different widths: stamping it from
+    # `compute_mode_summaries` would mark a `summary` built at the OLD width
+    # current, which is precisely the failure these fields exist to catch.
+    # The coupling is invisible while the call order happens to prevent it.
+    _summary_ci: Optional[float] = field(default=None, init=False)
+    _mode_summaries_ci: Optional[float] = field(default=None, init=False)
     table_note: Optional[str] = None
     # Prior terms added from OUTSIDE this Parameter -- a component's
     # pm.Potential -- declared via add_prior_contribution so the reported
@@ -1070,10 +1098,11 @@ class Parameter:
 
         The per-element form of ``expression is not None``, which is a
         WHOLE-VECTOR question and the wrong one for a vector whose instances
-        chose different parameterizations.  REPORTED elements (role 3) count as
-        derived here -- their value is an expression -- and are told apart by
-        ``element_is_reported`` where the difference matters (they carry no
-        potential).
+        chose different parameterizations.  REPORTED elements count as
+        derived here -- their value is an expression, and they ARE a kind of
+        derived -- and are told apart by ``element_is_reported`` where the
+        difference matters (their value, and so any potential built on it, is
+        patched in after stage 7).
 
         Callable only after the model has been built; before that the mask does
         not exist and this falls back to the whole-vector answer.
@@ -1091,7 +1120,7 @@ class Parameter:
     def element_is_active(self, index=0):
         """False if element ``index`` is not a parameter of its instance.
 
-        INACTIVE elements (manifest role 4) are held at a bookkeeping value and
+        INACTIVE elements are held at a bookkeeping value and
         must be suppressed from every report; see the ``mask`` field.  Answered
         from the ``mask`` field before the build and from the build's own array
         after it, so the reporting layer gets the same answer either way.
@@ -1639,9 +1668,10 @@ class Parameter:
         # `is_derived` covers every element whose value comes from an
         # expression, whether the whole vector shares one (the historical case)
         # or each instance names its own; `is_reported` is the subset of those
-        # that nothing consumes (manifest role 3), which differ only in taking
-        # no potential.  `is_inactive` is the `mask` complement: not a
-        # parameter of that instance's parameterization at all (role 4), held
+        # that nothing consumes, which differ only in being BUILT LATE -- same
+        # kind, same potentials, a later pass.  `is_inactive` is the `mask`
+        # complement: not a
+        # parameter of that instance's parameterization at all, held
         # at a bookkeeping value and reported nowhere.
         is_derived = np.full(n_elements, expr_raw is not None, dtype=bool)
         is_reported = np.zeros(n_elements, dtype=bool)
@@ -2222,7 +2252,7 @@ class Parameter:
             # dependency slicing (Component._element_expression) keeps them out
             # of the expression in the first place wherever it can prove the
             # alignment.
-            # REPORTED elements (role 3) are deliberately NOT patched here --
+            # REPORTED elements are deliberately NOT patched here --
             # see finalize_deferred.  Their expressions read quantities that,
             # on other elements, are derived from THIS parameter, so they can
             # only be built once every parameter exists.
@@ -2297,7 +2327,7 @@ class Parameter:
             # so nothing is partially re-mapped before the error, and the
             # element reported is the first one the user wrote rather than
             # whichever loop ran first.  `is_derived` covers REPORTED elements
-            # too (role 3), which is right: their patch is deferred and would
+            # too, which is right: their patch is deferred and would
             # overwrite the link anyway.
             #
             # NOT refused: a numeric `lower:`/`upper:` (a different mechanism
@@ -2435,13 +2465,47 @@ class Parameter:
         #      = truncated normal.
         #    Unbounded sampled Gaussian params encode their prior in raw ~
         #    N(0,1); no double-count.
-        #    REPORTED elements (role 3) are excluded even though they are
-        #    derived: nothing consumes them, so a prior there would be a logp
-        #    term on a quantity the model never uses -- and the same statement
-        #    is already being made on the coordinate that instance samples.
+        #
+        #    REPORTED elements USED TO BE EXCLUDED HERE, on the reasoning that
+        #    "nothing consumes them, so a prior there would be a logp term on a
+        #    quantity the model never uses -- and the same statement is already
+        #    being made on the coordinate that instance samples".  The first
+        #    clause is a non-sequitur (a reported element is a deterministic
+        #    function of sampled ones, so a Gaussian on it is a perfectly
+        #    well-defined statement about the sampled space) and the second is
+        #    simply false: nothing translates the user's prior onto the sampled
+        #    coordinate.  The effect was that `orbit.b.chord: {mu, sigma}` -- a
+        #    transit-duration prior, on a DEFAULT config -- was discarded in
+        #    silence.  They are included now; what still cannot happen in this
+        #    phase is CREATING the potential, because the value is a
+        #    placeholder until finalize_deferred patches it after stage 7.  So
+        #    the mask is computed here, with everything else, and the term is
+        #    built there.
+        #
+        #    WHAT A LATE-BUILT ELEMENT GETS IS WHAT THE USER WROTE, and only
+        #    that.  Full parity with an ordinary derived element would also
+        #    make its defaults.yaml bounds and sigma live, and those were
+        #    never active before -- `orbit.md` picks `vcve`'s upper bound
+        #    knowing it is inert on a sqrt(e) orbit, "which is also why
+        #    widening it moved no shipped example".  Measured: turning them on
+        #    left every shipped logp unchanged (the barriers evaluate to ~0)
+        #    and put NaN in the GRADIENT of every V_c/V_e system, through six
+        #    barriers nobody asked for.  So the rule is the one the
+        #    inactive-element warning already uses: key on `user_params`, via
+        #    `_user_constraint_fields`.
+        user_fields = [
+            set(self._user_constraint_fields(i)) for i in range(n_elements)
+        ]
+        user_prior = np.array(
+            [bool({"mu", "sigma"} & f) for f in user_fields], dtype=bool
+        )
+        user_lower = np.array(["lower" in f for f in user_fields], dtype=bool)
+        user_upper = np.array(["upper" in f for f in user_fields], dtype=bool)
+
         gaussian_prior_mask = (
             (
                 (is_derived & ~is_reported)
+                | (is_reported & user_prior)
                 | (is_sampled & use_logit & has_sigma_prior)
             )
             & ~np.isnan(sigmas)
@@ -2454,8 +2518,17 @@ class Parameter:
         for i in mu_links:
             gaussian_prior_mask[i] = False
         prior_mus = np.where(~np.isnan(mus), mus, inits)
-        if np.any(gaussian_prior_mask):
-            mask = pt.as_tensor_variable(gaussian_prior_mask)
+        # Split, not skipped: the reported elements' term is identical in form
+        # and is built by finalize_deferred against the patched vector.
+        prior_now = gaussian_prior_mask & ~is_reported
+        if np.any(gaussian_prior_mask & is_reported):
+            self._deferred_potentials = {
+                "prior_mask": gaussian_prior_mask & is_reported,
+                "prior_mus": prior_mus.copy(),
+                "sigmas": sigmas.copy(),
+            }
+        if np.any(prior_now):
+            mask = pt.as_tensor_variable(prior_now)
             penalty = (
                 -0.5
                 * (
@@ -2513,6 +2586,13 @@ class Parameter:
         #
         #     Static bounds need none of this: Z is then a constant.
         for i, (lo_t, up_t, span_t) in dyn_bounds.items():
+            if is_reported[i]:
+                # A LINKED bound on a reported element: the truncation mass
+                # would have to be computed against the patched vector, and
+                # nothing in the tree does this.  Left unsupported rather than
+                # built against the placeholder, which would be silently wrong
+                # in exactly the way this whole block was.
+                continue
             if i in mu_links:
                 mu_i = mu_links[i]["fn"](val_flat)
             elif gaussian_prior_mask[i]:
@@ -2537,9 +2617,15 @@ class Parameter:
         #    not apply). Fully-bounded sampled params: sigmoid is a hard
         #    constraint — no barrier needed.
         #    Fixed params: constant, so barrier adds only a harmless constant — skip.
-        #    REPORTED elements get none, for the reason section A gives.
+        #    LATE-BUILT (reported) elements enter only where the USER wrote
+        #    the bound -- section A gives the reason and the measurement.
+        #    They are in `needs_barrier` so that `_barrier_state` covers them
+        #    and the whitening probe measures a scale for them like any other
+        #    barrier element; only the potential waits for finalize_deferred.
         needs_barrier = (
-            (is_derived & ~is_reported) | (is_sampled & ~use_logit)
+            (is_derived & ~is_reported)
+            | (is_reported & (user_lower | user_upper))
+            | (is_sampled & ~use_logit)
         ) & ~is_fixed
         # np.isfinite, not ~np.isinf: `resolve` writes NaN into a vector for
         # "this element was never given one", which is exactly what a
@@ -2611,11 +2697,38 @@ class Parameter:
             # the honest stand-in and is already the path a genuinely
             # unbounded element takes -- `soft_lower_bound(v, -inf)` is a
             # clipped log-sigmoid of +inf, i.e. exactly 0 with zero gradient.
-            safe_lowers = np.where(has_lower, lowers, -np.inf)
-            safe_uppers = np.where(has_upper, uppers, np.inf)
+            # Sanitized PER PHASE.  The mask alone is not enough (the
+            # where-trap: its VJP multiplies the unselected branch by zero and
+            # 0*NaN poisons the whole gradient), and a late-built element's
+            # pre-patch value is LEGITIMATELY NaN -- sqrt of a negative
+            # eccentricity the other parameterization never promised.  So this
+            # phase's bounds must be infinite wherever this phase does not
+            # penalize, which includes every deferred element; the deferred
+            # pass builds its own.  Getting this wrong put NaN in the gradient
+            # of every V_c/V_e system (tests/test_vcve.py).
+            safe_lowers = np.where(has_lower & ~is_reported, lowers, -np.inf)
+            safe_uppers = np.where(has_upper & ~is_reported, uppers, np.inf)
+            has_lower = has_lower & (~is_reported | user_lower)
+            has_upper = has_upper & (~is_reported | user_upper)
 
-            if np.any(has_lower):
-                mask = pt.as_tensor_variable(has_lower)
+            if np.any((has_lower | has_upper) & is_reported):
+                state = self._deferred_potentials or {}
+                state.update(
+                    {
+                        "has_lower": has_lower & is_reported,
+                        "has_upper": has_upper & is_reported,
+                        "lowers": lowers.copy(),
+                        "uppers": uppers.copy(),
+                        "sv_barrier": sv_barrier,
+                    }
+                )
+                self._deferred_potentials = state
+
+            low_now = has_lower & ~is_reported
+            up_now = has_upper & ~is_reported
+
+            if np.any(low_now):
+                mask = pt.as_tensor_variable(low_now)
                 penalty = soft_lower_bound(
                     val_flat, pt.as_tensor_variable(safe_lowers), sv_barrier
                 )
@@ -2624,8 +2737,8 @@ class Parameter:
                     pm.math.sum(pt.where(mask, penalty, 0.0)),
                 )
 
-            if np.any(has_upper):
-                mask = pt.as_tensor_variable(has_upper)
+            if np.any(up_now):
+                mask = pt.as_tensor_variable(up_now)
                 penalty = soft_upper_bound(
                     val_flat, pt.as_tensor_variable(safe_uppers), sv_barrier
                 )
@@ -2701,7 +2814,7 @@ class Parameter:
 
         The second half of a two-phase build, called by ``System.build_model``
         once every parameter exists (inside the model context).  A REPORTED
-        element (manifest role 3) is derived from a quantity that, on OTHER
+        element is derived from a quantity that, on OTHER
         elements of some parameter, is derived from this one -- a V_c/V_e orbit
         reports ``secosw`` computed from its ``ecc``/``omega``, while a
         sqrt(e)cos/sin orbit derives its ``ecc`` from ``secosw``.  Per element
@@ -2715,12 +2828,17 @@ class Parameter:
           consumed by nothing (the vocabulary's definition, and what makes the
           cycle dissolve), so every consumer that read ``self.value`` during
           stage 6 or 6 read an element this patch does not touch.
-        * The patch adds no logp term.  It creates one ``pm.Deterministic`` and
-          no potential: ``build_pymc`` already excludes reported elements from
-          the Gaussian prior (section A) and the soft barriers (section B), and
-          they carry no raw coordinate to correct (section C).  A prior on a
-          quantity the model does not consume would be a logp term with no data
-          behind it.
+        * The patch adds the logp terms the reported elements OWE, and could
+          not have added them earlier.  A reported element is derived, so it
+          takes a Gaussian on its value and a soft barrier from its bounds
+          exactly as any other derived element does (``build_pymc`` sections A
+          and B compute the masks); what it cannot do is build those terms
+          against the pre-patch placeholder, which is why they are created
+          here.  It carries no raw coordinate, so section C is not owed.
+
+          Until 2026-09 they were not created at all, and a user's
+          ``orbit.b.chord: {mu, sigma}`` -- a transit-duration prior on a
+          DEFAULT config -- was discarded without a word.
 
         ``specs`` are the wired ``ElementExpression``s, supplied by
         ``Component.finalize_reported`` (which could only build them now).  With
@@ -2773,7 +2891,80 @@ class Parameter:
 
         self._deferred_reported = None
         self.value = pm.Deterministic(self.label, val_to_save)
+        self._add_deferred_potentials(phys_val)
         return self.value
+
+    def _add_deferred_potentials(self, val_flat):
+        """The Gaussian prior and soft bounds owed by REPORTED elements.
+
+        Same two terms, same spellings, same masks as ``build_pymc``'s
+        sections A and B -- only the vector is different, because this one has
+        been patched and theirs had not been. Split rather than duplicated:
+        every array here was computed there, beside the elements it shares a
+        parameter with, so the two halves cannot drift about what a bound or a
+        sigma means.
+
+        Idempotent with ``finalize_deferred``, which clears the state.
+        """
+        state = self._deferred_potentials
+        if not state:
+            return
+        self._deferred_potentials = None
+
+        import pymc as pm
+        import pytensor.tensor as pt
+
+        # INDEXED, never masked.  `pt.where(mask, penalty, 0)` is what
+        # build_pymc uses, and it is safe there only because that phase
+        # sanitizes the unselected elements' BOUNDS to +/-infinity.  Here the
+        # unselected elements include ordinary derived ones whose bounds are
+        # finite and whose penalty would therefore be a real number -- but
+        # also, on the same vector, elements a sibling expression may have
+        # left NaN.  Taking the elements out by index removes the question:
+        # nothing is evaluated off the mask, and the VJP is a scatter.
+        prior_mask = state.get("prior_mask")
+        if prior_mask is not None and np.any(prior_mask):
+            idx = np.flatnonzero(prior_mask)
+            sigmas = state["sigmas"][idx]
+            centres = state["prior_mus"][idx]
+            pm.Potential(
+                f"gaussian_prior.{self.label}.late",
+                pm.math.sum(
+                    -0.5
+                    * (
+                        (
+                            val_flat[pt.as_tensor_variable(idx)]
+                            - pt.as_tensor_variable(centres)
+                        )
+                        / pt.as_tensor_variable(
+                            np.where(sigmas > 0, sigmas, 1.0)
+                        )
+                    )
+                    ** 2
+                ),
+            )
+
+        sv_barrier = state.get("sv_barrier")
+        if sv_barrier is None:
+            return
+        for key, bound_key, helper, name in (
+            ("has_lower", "lowers", soft_lower_bound, "low_bound"),
+            ("has_upper", "uppers", soft_upper_bound, "up_bound"),
+        ):
+            mask = state.get(key)
+            if mask is None or not np.any(mask):
+                continue
+            idx = np.flatnonzero(mask)
+            pm.Potential(
+                f"{name}.{self.label}.late",
+                pm.math.sum(
+                    helper(
+                        val_flat[pt.as_tensor_variable(idx)],
+                        pt.as_tensor_variable(state[bound_key][idx]),
+                        sv_barrier[pt.as_tensor_variable(idx)],
+                    )
+                ),
+            )
 
     def _posterior_evaluator(self, expr, inputs):
         """The compiled per-sample evaluator for ``expr``, cached.
@@ -3740,8 +3931,7 @@ class Parameter:
             )
 
         # SAMPLED PARAMETER PATH
-        if self.summary is None:
-            self.compute_summary()
+        self.ensure_summary()
 
         if isinstance(self.summary, list):
             lines = []
@@ -4154,8 +4344,7 @@ class Parameter:
         if self.print_to_table:
             val_txt = self._value_cells(idx_str, mode_suffixes)
         else:
-            if self.summary is None:
-                self.compute_summary()
+            self.ensure_summary()
             summ = (
                 self.summary[index]
                 if isinstance(self.summary, list)
@@ -4273,16 +4462,22 @@ class Parameter:
         self._posterior = value
         self.summary = None
         self.mode_summaries = None
+        self._summary_ci = None
+        self._mode_summaries_ci = None
 
     # ---------
     # Posterior summary
     # ---------
     @staticmethod
     def _summarize_array(arr: np.ndarray) -> Any:
-        """Median + 68% interval over the LAST axis (the samples).
+        """Median + the reporting credible interval over the LAST axis (samples).
 
-        Returns a PosteriorSummary, or a list of them for vector parameters.
+        The width is ``exozippy.reporting.get_credible_interval()`` -- one
+        run-level setting shared with the corner plots and the table caption,
+        defaulting to the historical 68.27% (1 sigma).  Returns a
+        PosteriorSummary, or a list of them for vector parameters.
         """
+        q_low, q_high = reporting.quantiles()
 
         def get_stat(data):
             if data.size == 0 or not np.isfinite(data).any():
@@ -4292,8 +4487,8 @@ class Parameter:
                     err_plus=float("nan"),
                 )
             med = float(np.nanquantile(data, 0.5))
-            lo = float(np.nanquantile(data, SIGMA_1_LOW))
-            hi = float(np.nanquantile(data, SIGMA_1_HIGH))
+            lo = float(np.nanquantile(data, q_low))
+            hi = float(np.nanquantile(data, q_high))
             return PosteriorSummary(
                 median=med, err_minus=med - lo, err_plus=hi - med
             )
@@ -4312,12 +4507,17 @@ class Parameter:
         return get_stat(arr)
 
     def compute_summary(self) -> Any:
-        """Median and 68% interval over the trace, in user units.
+        """Median and the reporting credible interval over the trace, in user units.
 
-        The interval width is not a knob: ``_summarize_array`` reports the
-        1-sigma quantiles every consumer (LaTeX tables, CSV, mode report)
-        assumes.  This used to take an ``nsigma`` argument that nothing read,
-        so ``compute_summary(nsigma=2)`` silently returned 1 sigma.
+        Recomputes unconditionally; callers that want the cache should say
+        ``ensure_summary()``.  The width comes from ``exozippy.reporting`` and
+        is stamped on the Parameter so a later report at a different width
+        recomputes rather than publishing this one.
+
+        It is NOT the ``nsigma`` argument this method used to carry.  That one
+        was read by nothing, so ``compute_summary(nsigma=2)`` silently returned
+        1 sigma; the width now reaches every consumer or none of them, and the
+        stamp closes the staleness the argument never had to answer for.
         """
         # arr from az.extract places the 'sample' dimension LAST.
         # Posterior is stored in user units (from the user-unit trace Deterministic).
@@ -4325,6 +4525,46 @@ class Parameter:
             getattr(self.posterior, "values", self.posterior), dtype=float
         )
         self.summary = self._summarize_array(arr)
+        self._summary_ci = reporting.get_credible_interval()
+        return self.summary
+
+    def summary_is_current(self) -> bool:
+        """Is the cached ``summary`` both present and at the active width?"""
+        return (
+            self.summary is not None
+            and self._summary_ci == reporting.get_credible_interval()
+        )
+
+    def mode_summaries_are_current(self, n_modes: int) -> bool:
+        """Is the cached ``mode_summaries`` usable for a report of ``n_modes``?
+
+        Two questions, and both have to be yes.  The LENGTH is review
+        2.11.3's guard: a second report with a different mode count met a
+        list sized for the first one, and too many entries silently reported
+        the previous run's splits under the new run's labels.  The WIDTH is
+        the same question ``summary_is_current`` asks, for the same reason --
+        one interval is as plausible as another, so a stale width is invisible
+        in the output.
+        """
+        return (
+            self.mode_summaries is not None
+            and len(self.mode_summaries) == n_modes
+            and self._mode_summaries_ci == reporting.get_credible_interval()
+        )
+
+    def ensure_summary(self) -> Any:
+        """The summary, computing it if it is missing OR at a stale width.
+
+        THE question every lazy call site asks, so it is asked here once
+        rather than rewritten as ``if p.summary is None`` at each of them --
+        that spelling is the one that cannot see a width change.  Returns
+        None when there are no draws to summarize, which is the normal state
+        of a fixed element and of every parameter before the fit.
+        """
+        if self.posterior is None:
+            return self.summary
+        if not self.summary_is_current():
+            self.compute_summary()
         return self.summary
 
     def compute_mode_summaries(self, mode_labels, n_modes: int) -> Any:
@@ -4349,4 +4589,5 @@ class Parameter:
                 self._summarize_array(arr[..., labels == k])
                 for k in range(n_modes)
             ]
+        self._mode_summaries_ci = reporting.get_credible_interval()
         return self.mode_summaries

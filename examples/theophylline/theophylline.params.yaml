@@ -1,0 +1,35 @@
+# Parameter overrides for the Theophylline example.
+#
+# Deliberately empty.  The defaults in
+# src/exozippy/components/pharmacokinetics/defaults.yaml are wide enough to
+# start this fit without help, and a params file is a TEMPLATE: it carries
+# published values, not numbers somebody read off an earlier run of this same
+# fit.  Seeding it from our own posterior would make the example look better
+# and test less.
+#
+# What you WOULD put here:
+#
+#   subject.S1.log_cl: {initval: 0.45}          # a start value
+#   subject.S1.cl:     {mu: 2.8, sigma: 0.5}    # a prior, in L/hr
+#   subject.log_ka:    {lower: -1.0}            # tighten a bound (all subjects)
+#
+# Any of the three spellings works for one element: the broadcast
+# `subject.log_cl`, the index form `subject.0.log_cl`, or the name form
+# `subject.S1.log_cl`.  Most specific wins.
+#
+# NOTE the units.  A value written against `cl` is in L/hr and one written
+# against `log_cl` is in dex.
+#
+# AND NOTE WHICH ONE REACHES THE SAMPLER, because today only one does.  A
+# START VALUE has to be written against a SAMPLED coordinate: `log_cl` (or
+# `log_ke`, or `log_v`, or `log_ka`, depending on this subject's
+# `parameterization:`).  Writing one against `cl`, or `t_half`, does not move
+# the fit -- the relaxation engine can translate between coordinates only
+# where a component supplies symbolic relations, and this one does not yet;
+# that is P2 (see the component README).  A run through `exozippy` says so:
+# its start-value audit reports a user start that did not reach the model.
+#
+# A PRIOR is different and works on any of them: `subject.S1.cl: {mu, sigma}`
+# is a Gaussian on the derived clearance, and it holds whichever basis this
+# subject is fitted in -- including `fitkev: true`, where `cl` is computed
+# after the model is built rather than during it.

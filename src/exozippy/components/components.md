@@ -6,7 +6,7 @@ per-instance parameterization.
 
 Read this before adding a component, before touching the manifest vocabulary
 (`src/exozippy/manifest.py`), the build graph (`src/exozippy/graph.py`) or the physics
-registry (`src/exozippy/physics_registry.py`). Related: the four element roles a manifest
+registry (`src/exozippy/physics_registry.py`). Related: the element roles a manifest
 entry can declare are in `src/exozippy/components/parameter.md`; the shared data-component
 scaffolding is `src/exozippy/components/instrument.md`.
 
@@ -82,8 +82,18 @@ spelling.  Before adding a flag, pick its kind and follow that template.
   `fit_finite_source`: the finite-source effect is a direct measurement of rho and
   is always on when the physics is.
 - **Coordinate choices, `fit<coord>`** (`fitvcve`, `fitchord`): sample in this
-  parameterization rather than the default.  Nothing becomes more or less
-  constrained; only the coordinates change.
+  parameterization rather than the default.  Only the coordinates change --
+  **but that is a property the flag's owner has to PAY FOR, not one it gets.**
+  Every sampled parameter carries a prior uniform over its own bounds and
+  nothing generic inserts a Jacobian, so a non-linear change of coordinates
+  silently changes the prior unless the component adds the term: `orbit` adds
+  minus `vcve_log_jacobian` and minus `chord_log_jacobian` for exactly this
+  reason, and `orbit.md` records that the SIGN is the term and needs its own
+  test, because a finite-difference check passes under either.  A flip whose
+  map has unit determinant (`pharmacokinetics`'s bases, which are linear in
+  log space) owes nothing and satisfies this trivially.  Differing SUPPORT
+  between two parameterizations is separate and is allowed -- `planet`'s
+  `linear` mass coordinate admits a negative mass and its `log_q` one cannot.
 - **Tie toggles, `X_constrains_Y`** (`beam_constrains_mass`, `sed_constrains_blend`,
   `star_constrains_rho`): supply or sever a physics link between two quantities.
   The name states the INTENT -- the reason a user turns the tie on is that they
@@ -97,6 +107,25 @@ spelling.  Before adding a flag, pick its kind and follow that template.
   A `Z_links_X_and_Y` spelling would name the mechanism more honestly, but buries
   the searchable quantity mid-name and reads worse at the call site; the ruling is
   intent-named flags, mechanism documented here and in each flag's schema doc.
+
+All three kinds are BOOLEAN, and **an n-way choice is still spelled with
+booleans: one per alternative, at most one true, raising when more than one
+is** (`subject.fitclv` / `fitkev` / `fitclke`, the three coordinate bases of
+the pharmacokinetics model).  RULING (JDE, 2026-09-12), and it is about the
+user rather than about the encoding: *"consistency is important; if the user
+has two different ways to do the same thing in different contexts, it's
+confusing."*  A reader who meets `fitvcve` in an orbit block and an enum in a
+subject block has to learn two spellings for one idea, and that cost is paid
+on every config anyone writes.
+
+Be clear-eyed about what it costs in exchange: n booleans for n alternatives
+make the illegal combinations REPRESENTABLE, so the parser owes an explicit
+"more than one is set" error naming the flags -- an enum would have made that
+state impossible.  That is a real trade and it was made deliberately, not
+overlooked.  `band.ld_law` is NOT a counterexample: `quadratic` vs `linear` is
+a different model (different parameter count), not a coordinate choice.
+`planet.mass_parameterization` IS drift and is filed for renaming to
+`fitlogq` (`notes/code_review_20260824.txt` item 4.2.7).
 
 ## Adding a new component
 

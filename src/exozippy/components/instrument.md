@@ -2,8 +2,10 @@
 
 `src/exozippy/components/instrument.py` owns the scaffolding shared by the four data
 components (`rvinstrument`, `transit`, `mulensinstrument`, `astrometryinstrument`): file
-reading, column layout, masks, time systems, detrending, the noise model, Gaussian-process
-noise (`components/gp.py`) and robust observation likelihoods (`components/likelihood.py`).
+reading, column layout, masks, detrending, the noise model, Gaussian-process noise
+(`components/gp.py`) and robust observation likelihoods (`components/likelihood.py`). The
+astronomical time systems are mixed in from `components/timesystem.py` -- see below for
+why they are separate.
 
 Read this before touching how data files are read or how an observation likelihood is
 built. Related: `src/exozippy/components/components.md` (the component contract),
@@ -12,7 +14,13 @@ flux).
 
 ## The Instrument base and the shared file reader
 
-The four data components (`rvinstrument`, `transit`, `mulensinstrument`, `astrometryinstrument`) subclass `Instrument(Component)` (`components/instrument.py`), which owns their shared scaffolding.
+The four data components (`rvinstrument`, `transit`, `mulensinstrument`, `astrometryinstrument`) subclass `Instrument(TimeSystem, Component)` (`components/instrument.py`), which owns their shared scaffolding.
+
+**The astronomical TIME layer is mixed in from `components/timesystem.py`, not defined here** (2026-09). The per-file `time_offset` / `time_scale` / `time_frame` / `time_location` / `time_ephemeris` keys, `_parse_time_spec`, `_to_bjd_tdb`, `_time_coord`, `_time_location`, `has_nontrivial_time_spec` and `_time_config_schema` all live there. The move was VERBATIM -- the bodies are byte-identical and the converted times are bit-identical on all 28 shipped example configs (41 instrument instances, 37 time arrays, 11 of them exercising a real conversion).
+
+The split exists because that layer is the one genuinely field-coupled part of an otherwise field-neutral class: it assumes the independent variable is a Julian Date, that there is a solar system to correct light travel across, and that the observation has a place on the Earth. **Its defaults are silent** -- `bjd` + `tdb` sets `needs_conversion` False and passes input through untouched -- so before the split a data component from another field could inherit the whole of `Instrument`, work perfectly, and still advertise a barycentric correction and an observatory location on a measurement that has neither. Working-but-wrong, with nothing failing. `components/pharmacokinetics/assay` is the live case that found it; it inherits `Component` directly. Tests: `tests/test_timesystem_split.py`.
+
+`TimeSystem` is a plain mixin, not a `Component` subclass, so the factory's sweep cannot register it as a `timesystem:` YAML key (same reason as `relations.StellarRelation`). It imports nothing from the component tree and takes `prefix`, `names`, `config`, `config_manager` and `resolve_star_ndx` from its host by duck typing -- which is what would let a field-neutral data base sit between it and `Instrument` later without an import cycle.
 
 `Instrument._sort_by_time(df)` sorts each data file ascending by time at read time, before any column is split out or anything is derived from the times — so the observable, errors, detrend columns and per-epoch side arrays (mulens observer positions, astrometry parallax factors) stay aligned by construction. **Per file, never globally**: the concatenated arrays must stay contiguous per instrument or `_build_block_detrend`'s block-diagonal row ranges and mulens's row-aligned `observer_pos` both break silently.
 

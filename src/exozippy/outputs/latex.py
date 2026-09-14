@@ -167,8 +167,12 @@ def _ensure_mode_summaries(system, p, mode_report):
     the previous report's splits under the new run's labels, which is the
     worse half because nothing anywhere says so.
 
-    Recomputing on a length mismatch is the whole guard: the count is the
-    one property of the cache that the new report can check.
+    Recomputing on a length mismatch is most of the guard: the count is the
+    one property of the cache that a new report can check against ITS OWN
+    modes.  The other property is the reporting interval width
+    (``exozippy.reporting``), which a re-report may also have changed;
+    ``Parameter.mode_summaries_are_current`` asks both questions so neither
+    is rewritten here.
 
     Since 3.14.7 ``Parameter.posterior``'s setter drops both ``summary`` and
     ``mode_summaries`` when new draws arrive, so the ordinary re-report path
@@ -179,10 +183,7 @@ def _ensure_mode_summaries(system, p, mode_report):
     """
     if p.posterior is None:
         return
-    if (
-        p.mode_summaries is not None
-        and len(p.mode_summaries) == mode_report.n_modes
-    ):
+    if p.mode_summaries_are_current(mode_report.n_modes):
         return
     labels = getattr(system, "mode_labels", None)
     if labels is None:
@@ -227,8 +228,7 @@ def build_csv_output(
         printable = [p for p in comp_params if p.print_to_table]
         for p in printable:
             n_instances = _instance_count(p)
-            if p.posterior is not None and p.summary is None:
-                p.compute_summary()
+            p.ensure_summary()
             if per_mode:
                 _ensure_mode_summaries(system, p, mode_report)
 

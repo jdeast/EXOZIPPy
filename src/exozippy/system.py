@@ -18,6 +18,7 @@ try:
 except ImportError:  # pragma: no cover - older pytensor
     from pytensor.graph.basic import ancestors
 
+from exozippy import reporting
 from exozippy.components.component import Component
 from exozippy.components.factory import discover_components, import_failures
 from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
@@ -79,6 +80,7 @@ RESERVED_CONFIG_KEYS = frozenset(
         "mkparam",
         "gui",
         "modeling",
+        "reporting",
     }
 )
 
@@ -108,6 +110,11 @@ KNOWN_BLOCK_KEYS = {
     "mkparam": frozenset({"n_seeds", "force"}),
     "gui": frozenset({"snapshot"}),
     "modeling": frozenset({"compile"}),
+    # `reporting:` predates this table (it arrived with the credible-interval
+    # width) and was the block the typo check had no entry for -- caught by
+    # tests/test_known_keys.py on merge, which is exactly what that test is
+    # for.  One key today; `reporting.CONFIG_KEY` is its owner.
+    "reporting": frozenset({reporting.CONFIG_KEY}),
 }
 
 
@@ -234,6 +241,12 @@ class System(Component):
         for key, comp in self.active_components.items():
             logger.info(f"  {key} ({comp.n_elements})")
 
+        # Prose topic vocabulary: HERE, once every component exists, because a
+        # component may add a sentence as early as stage 1 and add() validates
+        # the section name.  The ORDER is refined in build_model(), when the
+        # real build graph is available.
+        self._register_prose_topics()
+
         # Structural fingerprint of the inputs, snapshotted HERE: after the
         # components have normalized their own config blocks (Mann/Torres
         # derive `name:` from their `star:` key in __init__), and before
@@ -263,6 +276,42 @@ class System(Component):
         (mkparam.write_param_file) reproduces it exactly.
         """
         return self._structural_hash, self._structural_payload
+
+    def _register_prose_topics(self):
+        """Register each component's ``prose_topic``, in build-graph order.
+
+        The ORDER is the point: a topic sits where the component that declared
+        it sits in the dependency graph, so inputs are described before what
+        is derived from them.  Measured on examples/kelt4, that reproduces the
+        hand-chosen stellar -> planetary -> orbits exactly.
+
+        Falls back to component declaration order when the graph is not
+        available yet -- the manifests only exist after stage 3, and this runs
+        at construction so that a sentence added during stages 1-7 already
+        validates against the extended vocabulary.  The fallback only affects
+        ORDER, never whether a section is accepted, and `build_model` calls
+        this again once the real order is known.
+        """
+        components = getattr(self, "active_components", None) or {}
+        order = list(components)
+        try:
+            from .graph import determine_pymc_build_order
+
+            built = determine_pymc_build_order(components, self.config_manager)
+            seen = []
+            for key in built:
+                name = str(key).split(".")[0]
+                if name in components and name not in seen:
+                    seen.append(name)
+            # Components with no manifest entry never appear in the graph.
+            order = seen + [c for c in components if c not in seen]
+        except Exception:  # noqa: BLE001 - order only; never fail a fit for it
+            pass
+
+        for name in order:
+            topic = getattr(components[name], "prose_topic", None)
+            if topic:
+                self.prose.register_topic(topic)
 
     @property
     def overdisperse(self):
@@ -306,7 +355,7 @@ class System(Component):
     def _validate_reported_not_consumed(self):
         """Refuse a manifest where something CONSUMES a reported element.
 
-        Manifest role 3 rests on one property: a reported element is consumed by
+        The REPORTED role rests on one property: such an element is consumed by
         nothing.  That is what lets its expression be applied in a second phase
         (Parameter.finalize_deferred) after the parameter it reads has been
         built, and what makes the per-parameter cycle such a pair would
@@ -390,7 +439,7 @@ class System(Component):
                             f"[{prefix}.{name}] its '{sel.key}' expression "
                             f"consumes '{dep}', whose element(s) "
                             f"{clash.tolist()} are REPORTED "
-                            f"({dep_key[0]}.{dep_key[1]}, manifest role 3). A "
+                            f"({dep_key[0]}.{dep_key[1]}, a REPORTED element). A "
                             f"reported element is applied in a second build "
                             f"phase, after every parameter exists, so a "
                             f"consumer would read its pre-patch placeholder -- "
@@ -506,7 +555,7 @@ class System(Component):
     def active_elements(self):
         """``(component_prefix, param_name) -> boolean mask`` of ACTIVE elements.
 
-        The complement is manifest role 4: elements that are not parameters of
+        The complement is the INACTIVE role: elements that are not parameters of
         their instance's parameterization (a non-MIST star's EEP).  Only entries
         that actually mask something appear, so a caller can treat a missing key
         as "every element active".  Valid after stage 3, and the reporting
@@ -857,7 +906,7 @@ class System(Component):
             for comp in self.active_components.values():
                 comp.build_likelihood(model, system=self)
 
-            # After stage 7: REPORTED elements (manifest role 3).  Deliberately
+            # After stage 7: REPORTED elements.  Deliberately
             # after stage 7: a reported element is consumed by nothing, so
             # every consumer in stages 6-7 has already read the phase-1 tensor
             # -- which is what makes the per-parameter cycle these expressions

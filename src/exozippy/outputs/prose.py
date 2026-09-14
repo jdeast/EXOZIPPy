@@ -75,6 +75,28 @@ SECTION_ORDER = (
 # the document into "Modeling" (everything before) and "Results".
 POST_FIT_SECTIONS = ("results", "convergence", "modes", "evidence")
 
+# The four physics slots above are TOPICS, and the band they occupy is
+# extensible.  A topic groups sentences by subject ACROSS components --
+# rvinstrument writes into "orbits", transit into "planetary", and planet
+# writes into both -- which is why a topic is not a synonym for a component
+# and why this band cannot simply be derived from the component list.
+#
+# The four shipped names are astronomy's, and the vocabulary used to be
+# CLOSED: a component from another field had nowhere of its own to stand, so
+# components/pharmacokinetics filed its "what we fitted" sentence under
+# "data", where it is ordered among data-inventory sentences rather than after
+# them.  A component may now DECLARE a topic (``Component.prose_topic``) and
+# it is appended to this band.
+#
+# Their ORDER comes from the build graph: System registers each component's
+# topic in graph.determine_pymc_build_order order, so dependency order is the
+# editorial order -- inputs before what is derived from them.  Measured on
+# examples/kelt4 (build order star -> planet -> orbit) that reproduces the
+# hand-chosen stellar -> planetary -> orbits exactly, which is what makes it
+# safe to let the graph decide the new entries rather than a literal.
+TOPIC_SECTIONS = ("stellar", "planetary", "orbits", "microlensing")
+_TOPIC_BAND_END = SECTION_ORDER.index(TOPIC_SECTIONS[-1]) + 1
+
 # \cite, \citet, \citep, \citealt, \citeauthor, starred forms, and the
 # optional [pre][post] arguments; group 1 is the comma-separated key list.
 _CITE_RE = re.compile(r"\\cite[a-zA-Z]*\*?(?:\[[^\]]*\]){0,2}\{([^{}]+)\}")
@@ -184,6 +206,38 @@ class ProseCollector:
         self._sentences = {}  # key -> ProseSentence, insertion-ordered
         self._counter = 0
         self._software = []  # names for the \software{...} line
+        # Component-declared topic sections, in render order.  Empty for an
+        # all-astronomy system, which therefore sees exactly the historical
+        # SECTION_ORDER and cannot move.
+        self._topics = []
+
+    def register_topic(self, name):
+        """Declare an extra topic section, appended to the topic band.
+
+        Called by ``System`` for each component's ``prose_topic``, in build-
+        graph order, so the band ends up ordered by dependency.  Idempotent;
+        a name already in SECTION_ORDER is a no-op, since a component
+        declaring "stellar" is claiming the shipped topic rather than making
+        a second one with the same name.
+        """
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                f"prose_topic must be a non-empty string; got {name!r}"
+            )
+        if name in SECTION_ORDER or name in self._topics:
+            return
+        self._topics.append(name)
+
+    @property
+    def section_order(self):
+        """SECTION_ORDER with any registered topics spliced into the band."""
+        if not self._topics:
+            return SECTION_ORDER
+        return (
+            SECTION_ORDER[:_TOPIC_BAND_END]
+            + tuple(self._topics)
+            + SECTION_ORDER[_TOPIC_BAND_END:]
+        )
 
     def add_software(self, name):
         """Declare a package for the document's ``\\software{...}`` line.
@@ -208,12 +262,14 @@ class ProseCollector:
         original position in insertion order -- regeneration must not
         shuffle the paragraph.
         """
-        if section not in SECTION_ORDER:
+        order = self.section_order
+        if section not in order:
             raise ValueError(
                 f"Unknown prose section '{section}'. Valid sections, in "
-                f"document order: {', '.join(SECTION_ORDER)}. (Raising "
-                f"rather than ignoring: a silently dropped sentence is a "
-                f"modeling choice the draft never mentions.)"
+                f"document order: {', '.join(order)}. A component may add a "
+                f"topic of its own by setting `prose_topic` on its class. "
+                f"(Raising rather than ignoring: a silently dropped sentence "
+                f"is a modeling choice the draft never mentions.)"
             )
         if key is None:
             key = text
@@ -231,11 +287,12 @@ class ProseCollector:
         Sorted by (section order, rank, insertion order).  ``sections``
         optionally restricts to an iterable of section names.
         """
-        wanted = set(SECTION_ORDER if sections is None else sections)
+        order = self.section_order
+        wanted = set(order if sections is None else sections)
         chosen = [s for s in self._sentences.values() if s.section in wanted]
         return sorted(
             chosen,
-            key=lambda s: (SECTION_ORDER.index(s.section), s.rank, s._order),
+            key=lambda s: (order.index(s.section), s.rank, s._order),
         )
 
     def paragraphs(self, sections=None):
@@ -245,7 +302,7 @@ class ProseCollector:
         layout.
         """
         out = []
-        for section in SECTION_ORDER if sections is None else sections:
+        for section in self.section_order if sections is None else sections:
             texts = [s.text for s in self.sentences(sections=[section])]
             if texts:
                 out.append((section, texts))

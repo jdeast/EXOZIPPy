@@ -19,6 +19,7 @@ Every fit emits `<prefix>_paper.tex` -- a **compilable** aastex draft whose pros
 - **The output directory is self-contained.** `aastex701.cls` + `aasjournalv7.bst` (AASTeX 7.0.1, LPPL 1.3c -- provenance/hashes in `src/exozippy/latex/README.md`) are copied alongside, so `pdflatex && bibtex && pdflatex && pdflatex` works on a bare TeX Live; that copy is also the ONE vendored aastex (the test fixture copy is gone). run.py runs that cycle at wrap-up (`modeling: {compile: false}` opts out; the block is in `evaluator._NON_STRUCTURAL_CONFIG_KEYS`, so toggling it cannot stale a trace). Missing TeX or a failed compile is a warning naming the .log, **never a failed fit**.
 - **The table file is a fragment now.** `build_latex_output` writes `<prefix>_table.tex` (was `_template.tex`) as a bare deluxetable; modeling.tex is the ONE standalone wrapper (`\input`s `<prefix>_definitions` and the table -- `\input`, not `\include`). The old standalone template ended with `\bibliography{References}` pointing at a file that never existed.
 - **Figures build themselves from Charts**: `meta["caption"]` (LaTeX, verbatim -- the third consumer of the chart vocabulary, documented in plotrender.py and plotly-adapter.ts) pairs with the posterior PDF `{prefix}_mcmc_{file_tag}.pdf`; only PDFs that exist are included, and a spec without a caption gets a generic one built from its escaped title.
+- **The topic band is extensible, and its order comes from the build graph.** `stellar`/`planetary`/`orbits`/`microlensing` are TOPICS, not component names -- they group sentences by subject across components (`rvinstrument` writes into `orbits`, `transit` into `planetary`, `planet` into both), which is why the band cannot be derived from the component list. That vocabulary was CLOSED and astronomy-specific, so a component from another field had to file its "what we fitted" sentence under `data`, ordered among data-inventory sentences rather than after them. A component now declares `prose_topic` on its class and `System._register_prose_topics` registers it -- in `graph.determine_pymc_build_order` order, so dependency order is the editorial order (measured on `examples/kelt4`: star -> planet -> orbit reproduces the hand-chosen stellar -> planetary -> orbits exactly). A system declaring no topic gets `SECTION_ORDER` unchanged, so no astronomy paragraph moves. An unknown section still RAISES -- accepting any string would trade the typo guard, which matters more, for extensibility. `modeling._doc_sections` routes declared topics into Modeling; an unrouted topic would be the same silent drop the import-time assert prevents for the shipped names. Tests: `tests/test_prose_topics.py`.
 - `system.prose.add_software(name)` feeds the `\software{...}` line (core stack added by the writer); sections are a fixed vocabulary (`SECTION_ORDER`) and an unknown section **raises** -- a silently dropped sentence is a modeling choice the draft never mentions.
 
 Tests: `tests/test_prose.py` (collector, xref, writer, compile-with-bibliography e2e, ob08092 topology integration), plus the aastex compile leg of `tests/test_latex_macro_xref.py`, which now compiles the fragment inside the real wrapper.
@@ -51,6 +52,39 @@ careful here rather than a reassurance:
 `format` returns a `FormattedSummary` NamedTuple for this reason. It is
 positionally a plain tuple, so nothing had to change to adopt it -- but a new
 call site should say `.err_plus` and be immune.
+
+## The credible-interval width is a setting, and the caption is generated from it
+
+`src/exozippy/reporting.py` holds ONE run-level width, read by
+`Parameter._summarize_array` (so the table, `<prefix>_results.csv` and the mode
+report all follow it), by `corner_utils` and by the `\tablecaption{}` that
+`outputs/report_pipeline.py` builds. Default 0.6827 -- the 1-sigma astronomy
+convention every shipped example reports and none of them move. Set it with
+`reporting: {credible_interval: 0.95}`.
+
+**The caption is BUILT from the width** (`reporting.caption_phrase`), and was the
+literal `"Median and 68\% Confidence intervals for "` until 2026-09-11. Two
+reasons it cannot go back. A caption that disagrees with the numbers beside it is
+worse than either being wrong alone, and it is the one error a reader cannot
+detect from the table. And the word "1-sigma" is true of 68.27% and false of
+every other width, so it is emitted only for that one.
+
+**Why a setting at all:** median + 68% is an *astronomy* convention, not a
+universal one. Pharmacometrics, epidemiology and clinical work report 95%
+(bioequivalence reports a 90% interval whose bounds are in FDA/EMA guidance).
+Annotating an unidiomatic interval does not rescue it -- a reader whose field has
+exactly one convention does not check the caption, so a 68% interval is read as
+95% and the uncertainty is understated about twofold. A component that emits a
+result for a field reports it in that field's convention.
+
+Per-RUN and not per-component or per-parameter, deliberately: a table whose rows
+carried different widths would be unreadable and its caption could not describe
+it. The width is in `evaluator._NON_STRUCTURAL_CONFIG_KEYS`, so re-reporting an
+existing trace at a different width does not stale it -- that is what it is for.
+What this setting does NOT solve is a SECOND error column: a population-PK table
+reports both an estimate's precision (RSE%) and the population's spread (CV%),
+and `CSV_COLUMNS_PLAIN`/`CSV_COLUMNS_MODE` above are two fixed layouts with one
+error pair. That is a new layout, not a new value, and it has no channel yet.
 
 ## LaTeX macro names
 

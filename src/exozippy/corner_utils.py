@@ -10,9 +10,16 @@ import logging
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .constants import CORNER_THIN_SEED, SIGMA_1_HIGH, SIGMA_1_LOW
+from . import reporting
+from .constants import CORNER_THIN_SEED
 
 logger = logging.getLogger(__name__)
+
+
+def _quantile_triple():
+    """``[low, 0.5, high]`` for corner's ``quantiles=``, at the reporting width."""
+    low, high = reporting.quantiles()
+    return [low, 0.5, high]
 
 
 def _flatten_arrays(items):
@@ -254,12 +261,14 @@ def save_corner_plot(samples, labels, filename, max_samples=1000):
             samples,
             labels=labels,
             bins=CORNER_BINS,
-            # The 68.27% interval, from the ONE definition in constants.py
-            # (review 4.2.6).  This used to recompute
-            # 0.5 -/+ erf(1/sqrt(2))/2 inline -- the same expression, so the
-            # numbers were identical, but a second copy of a statistical
-            # convention is a second thing to keep in step with the tables.
-            quantiles=[SIGMA_1_LOW, 0.5, SIGMA_1_HIGH],
+            # The reporting interval, from the ONE setting in reporting.py
+            # -- the same width the tables and the caption use, so a run at
+            # 95% cannot show 95% intervals in the table and 68% ones in the
+            # corner plot.  This used to recompute 0.5 -/+ erf(1/sqrt(2))/2
+            # inline (review 4.2.6), then read the SIGMA_1_* constants; the
+            # constants are still the DEFAULT, reporting.py just makes the
+            # width one question instead of a convention copied per site.
+            quantiles=_quantile_triple(),
             show_titles=True,
             title_kwargs={"fontsize": 12},
         )
