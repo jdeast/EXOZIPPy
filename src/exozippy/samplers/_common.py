@@ -368,7 +368,9 @@ def _map_logp(pool, proposals):
     return pool.map(_eval_logp, proposals)
 
 
-def _map_logp_timeout(pool, proposals, timeout):
+def _map_logp_timeout(
+    pool, proposals, timeout, *, fn=None, poll=None, on_poll=None
+):
     """Evaluate logps with a per-call wall-clock timeout.
 
     Each proposal individually gets up to `timeout` seconds (not a deadline
@@ -376,6 +378,8 @@ def _map_logp_timeout(pool, proposals, timeout):
     not eat into the budget of proposals evaluated later in the same step).
     A proposal that doesn't complete in time receives -inf, so the caller's
     normal Metropolis accept/reject logic rejects it automatically.
+    ``timeout=None`` never gives up, which is how a caller that wants only
+    the `poll` behaviour below asks for it.
 
     A logp evaluation can call into external/compiled code that occasionally
     enters a genuine infinite loop for some pathological parameter
@@ -391,13 +395,35 @@ def _map_logp_timeout(pool, proposals, timeout):
     before. The caller should warn about this once at startup if cores<=1
     (warn_serial_eval_timeout).
 
+    `fn` is the worker callable, defaulting to this module's `_eval_logp`.
+    It is submitted to the pool by reference, so anything else passed here
+    must be picklable (a module-level function, not a closure) -- the
+    samplers all want the default; `polish_seed_starts` is documented to
+    accept whatever logp the caller installed in the workers.
+
+    `poll` / `on_poll` are what let a CALLER'S heartbeat fire in the middle
+    of a batch.  With `poll=None` the wait for one item is exactly
+    ``r.get(timeout=timeout)``, so a batch that blocks blocks silently --
+    which is the right shape for a sampler that logs per step, and the wrong
+    one for a stage whose single batch IS the long pole (review 3.4.4).
+    With `poll` set, the wait wakes every `poll` seconds and calls
+    ``on_poll(n_resolved)`` -- also once after every item that comes back,
+    so a batch of many FAST items still reports progress -- where
+    `n_resolved` counts the entries already in `lps` (returned or timed
+    out).  The per-item wait is then bounded by BOTH: it wakes on the poll
+    interval and still gives up at that item's own `timeout` deadline.
+    `on_poll` must be cheap and idempotent; it is called on a clock the
+    callee does not own.
+
     Returns (lps, timed_out) where timed_out is a list of indices into
     `proposals`.
     """
+    if fn is None:
+        fn = _eval_logp
     if pool is None:
-        return [_eval_logp(p) for p in proposals], []
+        return [fn(p) for p in proposals], []
 
-    async_results = [pool.apply_async(_eval_logp, (p,)) for p in proposals]
+    async_results = [pool.apply_async(fn, (p,)) for p in proposals]
     lps = []
     timed_out = []
     # Keep the timeout sentinel the same shape _eval_logp returns (a bare
@@ -405,11 +431,31 @@ def _map_logp_timeout(pool, proposals, timeout):
     # every entry in `lps` is uniformly typed for the caller to unpack.
     timeout_val = (-np.inf, timeout) if _PTDE_COLLECT_TIMING else -np.inf
     for idx, r in enumerate(async_results):
-        try:
-            lps.append(r.get(timeout=timeout))
-        except mp.TimeoutError:
-            lps.append(timeout_val)
-            timed_out.append(idx)
+        if poll is None:
+            try:
+                lps.append(r.get(timeout=timeout))
+            except mp.TimeoutError:
+                lps.append(timeout_val)
+                timed_out.append(idx)
+            continue
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if deadline is None:
+                wait = poll
+            else:
+                wait = min(poll, deadline - time.monotonic())
+                if wait <= 0.0:
+                    lps.append(timeout_val)
+                    timed_out.append(idx)
+                    break
+            try:
+                lps.append(r.get(timeout=wait))
+                break
+            except mp.TimeoutError:
+                if on_poll is not None:
+                    on_poll(len(lps))
+        if on_poll is not None:
+            on_poll(len(lps))
     return lps, timed_out
 
 
