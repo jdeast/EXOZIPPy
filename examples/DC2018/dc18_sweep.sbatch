@@ -9,7 +9,17 @@
 #   sbatch --array=1-6 dc18_sweep.sbatch
 #
 #SBATCH --job-name=dc18swp
-#SBATCH --partition=shared
+# sapphire, NOT shared.  Probed on Cannon with `sbatch --test-only`
+# (2.4.18): `shared` nodes carry 48 cores and SLURM grants only ~160 G of
+# the 192,560 MB sinfo advertises, so `-c 64 --mem=256G` is unsatisfiable
+# twice over -- and MEMORY is the binding half, since all 48 cores are
+# grantable while 176 G is not.  Event 062's measured 201 G maxrss
+# therefore has no home on `shared` at ANY core count.  sapphire (112
+# cores, 1007 G, 184 nodes, same 3-day limit) takes -c 64 --mem=256G
+# IMMEDIATELY, so one template covers the 51 G typical event and the 201 G
+# blended one together.  `bigmem` is not the escape hatch it looks like:
+# it is policy-gated and refuses anything under 1000 G per node.
+#SBATCH --partition=sapphire
 #SBATCH --array=1-6
 #
 # ONE NODE, MANY THREADS.  PTDE/ptde_async is a shared-memory sampler with
