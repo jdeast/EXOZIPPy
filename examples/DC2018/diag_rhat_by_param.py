@@ -32,8 +32,18 @@ import arviz as az  # noqa: E402
 # treated as physics, so a NEW physics parameter shows up as physics rather
 # than being silently excluded.
 NUISANCE_HINTS = (
-    "instrument", "flux", "blend", "zero", "detrend", "jitter",
-    "errscale", "sigma", "outlier", "hogg", "gp_", "noise",
+    "instrument",
+    "flux",
+    "blend",
+    "zero",
+    "detrend",
+    "jitter",
+    "errscale",
+    "sigma",
+    "outlier",
+    "hogg",
+    "gp_",
+    "noise",
 )
 
 

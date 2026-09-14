@@ -133,6 +133,7 @@ def find_pspl_seed(curves, mag_fn=None):
         return None
 
     if mag_fn is None:
+
         def mag_fn(t, t_0, u_0, t_E):
             u2 = ((t - t_0) / t_E) ** 2 + u_0 * u_0
             return (u2 + 2.0) / np.sqrt(u2 * (u2 + 4.0))
@@ -229,16 +230,25 @@ def push_peak_find_hints(seed, config_manager, source="peak finder"):
     """
     if not seed:
         return 0
-    config_manager.add_seed_hints([{
-        "source.0.t_0": float(seed["t_0"]),
-        "source.0.u_0": float(seed["u_0"]),
-        "mulensevent.0.t_E": float(seed["t_E"]),
-    }])
+    config_manager.add_seed_hints(
+        [
+            {
+                "source.0.t_0": float(seed["t_0"]),
+                "source.0.u_0": float(seed["u_0"]),
+                "mulensevent.0.t_E": float(seed["t_E"]),
+            }
+        ]
+    )
     logger.info(
         "Peak finder (%s): t_0 = %.4f, u_0 = %.4f, t_E = %.3f d "
         "from %d epochs (chi2 = %.1f%s).  s, alpha, q and rho keep their "
         "defaults; the sampler finds the anomaly.",
-        source, seed["t_0"], seed["u_0"], seed["t_E"], seed["n_points"],
-        seed["chi2"], "" if seed["converged"] else ", NOT converged",
+        source,
+        seed["t_0"],
+        seed["u_0"],
+        seed["t_E"],
+        seed["n_points"],
+        seed["chi2"],
+        "" if seed["converged"] else ", NOT converged",
     )
     return 1

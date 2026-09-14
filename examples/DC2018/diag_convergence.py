@@ -63,7 +63,7 @@ def classify(path):
     # 105,000; an lp-based test called that "SLOW/ok, just needs more
     # draws" for a fit that demonstrably has two modes and is missing a
     # third.  lp cannot see a mirror.
-    q4 = lp[:, 3 * ndr // 4:]
+    q4 = lp[:, 3 * ndr // 4 :]
     per = np.nanmean(q4, axis=1)
     within = float(np.nanmedian(np.nanstd(q4, axis=1)))
     sep = 0.0
@@ -71,15 +71,20 @@ def classify(path):
     try:
         post = xr.open_dataset(path, group="posterior")
         # the parameters the known degeneracies act on
-        for v in ("source.u_0", "lens.u_0", "lens.log_s",
-                  "lens.Companion.log_s", "planet.log_q"):
+        for v in (
+            "source.u_0",
+            "lens.u_0",
+            "lens.log_s",
+            "lens.Companion.log_s",
+            "planet.log_q",
+        ):
             if v not in post.data_vars:
                 continue
             a = np.asarray(post[v], dtype=float)
             if a.ndim < 2:
                 continue
             a = a.reshape(a.shape[0], a.shape[1], -1)[:, :, 0]
-            b = a[:, 3 * a.shape[1] // 4:]
+            b = a[:, 3 * a.shape[1] // 4 :]
             w = float(np.nanmedian(np.nanstd(b, axis=1)))
             x = float(np.nanstd(np.nanmean(b, axis=1)))
             r = x / w if w > 0 else 0.0
@@ -105,16 +110,20 @@ def classify(path):
 
 
 def main(paths):
-    print("%-38s %-12s %5s %8s %10s %8s"
-          % ("run", "diagnosis", "chn", "draws", "lp drift", "mode sep"))
+    print(
+        "%-38s %-12s %5s %8s %10s %8s"
+        % ("run", "diagnosis", "chn", "draws", "lp drift", "mode sep")
+    )
     print("-" * 88)
     for p in paths:
         lab, kind, note, nch, ndr, drift, sep = classify(p)
         if nch is None:
             print("%-38s %-12s %s" % (lab[:38], kind, note))
             continue
-        print("%-38s %-12s %5d %8d %10.1f %8.1f  %s"
-              % (lab[:38], kind, nch, ndr, drift, sep, note))
+        print(
+            "%-38s %-12s %5d %8d %10.1f %8.1f  %s"
+            % (lab[:38], kind, nch, ndr, drift, sep, note)
+        )
     print("\nlp drift = (mean lp of the last quarter - the third quarter) in")
     print("units of the LAG-1 noise.  >3 means not stationary (2.4.13).")
     print("mode sep = spread of per-chain means / within-chain scatter, in")

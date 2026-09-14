@@ -73,8 +73,9 @@ AV_COLS = (5, 6)
 
 
 def event_info_row(event):
-    rows = np.genfromtxt(os.path.join(DATA, "event_info.txt"), dtype=None,
-                         encoding="utf-8")
+    rows = np.genfromtxt(
+        os.path.join(DATA, "event_info.txt"), dtype=None, encoding="utf-8"
+    )
     for r in rows:
         if int(r[1]) == int(event):
             return r
@@ -93,16 +94,19 @@ def build(event, outdir, draws, tune, cores, t_max):
     ra, dec = float(row[2]), float(row[3])
     av_mu, av_sd = float(row[AV_COLS[0]]), float(row[AV_COLS[1]])
 
-    files = {b: os.path.join(DATA, "n20180816.%s.WFIRST18.%s.txt" % (b, ev3))
-             for b, _ in BANDS}
+    files = {
+        b: os.path.join(DATA, "n20180816.%s.WFIRST18.%s.txt" % (b, ev3))
+        for b, _ in BANDS
+    }
     for b, p in files.items():
         if not os.path.exists(p):
             raise SystemExit("missing light curve: %s" % p)
 
     seed = os.path.abspath("events/%s/%s_seed.json" % (ev3, name))
     if not os.path.exists(seed):
-        raise SystemExit("no seed for %s -- run: python dc18_seed.py %s"
-                         % (ev3, int(event)))
+        raise SystemExit(
+            "no seed for %s -- run: python dc18_seed.py %s" % (ev3, int(event))
+        )
 
     base = os.path.abspath(os.path.join(outdir, ev3))
     os.makedirs(base, exist_ok=True)
@@ -115,39 +119,56 @@ def build(event, outdir, draws, tune, cores, t_max):
     # flux constraining its radius -- and it is what v7 validated.
     sed_path = os.path.join(base, "%s.sed.yaml" % name)
     io.open(sed_path, "w", encoding="utf-8").write(
-        "model: NextGen\nfilters: []\n")
+        "model: NextGen\nfilters: []\n"
+    )
 
     cfg = {
         "run": {"name": name},
         "star": [{"name": "Lens"}, {"name": "Source"}],
         "planet": [{"name": "Companion"}],
-        "mulensevent": [{
-            "finite_source": True,
-            "fitmurel": True,
-            "fitpirel": True,
-            "fitthetae": True,
-            "mmexofast": seed,
-        }],
+        "mulensevent": [
+            {
+                "finite_source": True,
+                "fitmurel": True,
+                "fitpirel": True,
+                "fitthetae": True,
+                "mmexofast": seed,
+            }
+        ],
         "lens": [{"body": "star.Lens"}, {"body": "planet.Companion"}],
         "source": [{"body": "star.Source", "star_constrains_rho": True}],
         "galacticmodel": [{"name": name, "anchor_idx": 1}],
-        "band": ([{"name": b, "filter": f, "ld_law": "linear"}
-                  for b, f in BANDS]
-                 + [{"name": "Ks_bcgrid", "filter": "2MASS/2MASS.Ks",
-                     "ld_law": "linear"}]),
-        "mulensinstrument": [{
-            "name": "Roman_%s" % b,
-            "file": files[b],
-            "data_format": "flux",
-            "observer_location": "roman_simulated_2018dc",
-            "band": b,
-            "likelihood": "hogg",
-        } for b, _ in BANDS],
+        "band": (
+            [{"name": b, "filter": f, "ld_law": "linear"} for b, f in BANDS]
+            + [
+                {
+                    "name": "Ks_bcgrid",
+                    "filter": "2MASS/2MASS.Ks",
+                    "ld_law": "linear",
+                }
+            ]
+        ),
+        "mulensinstrument": [
+            {
+                "name": "Roman_%s" % b,
+                "file": files[b],
+                "data_format": "flux",
+                "observer_location": "roman_simulated_2018dc",
+                "band": b,
+                "likelihood": "hogg",
+            }
+            for b, _ in BANDS
+        ],
         "prefix": os.path.join(base, name),
         "sed": {"file": sed_path},
         "torres": [{"star": "Source", "constrain": ["mass", "radius"]}],
-        "mann": [{"star": "Lens", "ks": "synthetic",
-                  "constrain": ["mass", "radius"]}],
+        "mann": [
+            {
+                "star": "Lens",
+                "ks": "synthetic",
+                "constrain": ["mass", "radius"],
+            }
+        ],
         "sampler": {
             "method": "ptde_async",
             "cores": cores,
@@ -194,15 +215,19 @@ def build(event, outdir, draws, tune, cores, t_max):
         params["%s.out_scale" % inst] = {"upper": 10.0 * med, "initval": med}
 
     io.open(cfg["parameter_file"], "w", encoding="utf-8").write(
-        yaml.safe_dump(params, sort_keys=True, default_flow_style=False))
+        yaml.safe_dump(params, sort_keys=True, default_flow_style=False)
+    )
     cfg_path = os.path.join(base, "%s.yaml" % name)
     io.open(cfg_path, "w", encoding="utf-8").write(
-        yaml.safe_dump(cfg, sort_keys=False, default_flow_style=False))
+        yaml.safe_dump(cfg, sort_keys=False, default_flow_style=False)
+    )
 
     s = json.load(io.open(seed))["fits"][0]["parameters"]
-    print("%s  ra=%.4f dec=%.4f  av=%.2f+/-%.2f  seed t_0=%.3f u_0=%.4f "
-          "t_E=%.2f\n    -> %s" % (name, ra, dec, av_mu, av_sd,
-                                   s["t_0"], s["u_0"], s["t_E"], cfg_path))
+    print(
+        "%s  ra=%.4f dec=%.4f  av=%.2f+/-%.2f  seed t_0=%.3f u_0=%.4f "
+        "t_E=%.2f\n    -> %s"
+        % (name, ra, dec, av_mu, av_sd, s["t_0"], s["u_0"], s["t_E"], cfg_path)
+    )
     return cfg_path
 
 

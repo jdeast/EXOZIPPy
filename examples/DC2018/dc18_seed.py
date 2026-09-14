@@ -133,8 +133,11 @@ def find_seed(curves, verbose=True):
                 if c < best[0]:
                     best = (c, (t0, u0, tE))
     if verbose:
-        print("  grid best: t_0=%.4f u_0=%.4f t_E=%.3f  chi2=%.1f"
-              % (best[1] + (best[0],)), flush=True)
+        print(
+            "  grid best: t_0=%.4f u_0=%.4f t_E=%.3f  chi2=%.1f"
+            % (best[1] + (best[0],)),
+            flush=True,
+        )
 
     # Refine in log(u_0), log(t_E) so the optimizer cannot step negative.
     t0g, u0g, tEg = best[1]
@@ -142,17 +145,33 @@ def find_seed(curves, verbose=True):
     def wrapped(p):
         return _chi2((p[0], np.exp(p[1]), np.exp(p[2])), curves)
 
-    res = minimize(wrapped, [t0g, np.log(u0g), np.log(tEg)],
-                   method="Nelder-Mead",
-                   options={"maxiter": 4000, "xatol": 1e-6, "fatol": 1e-3})
+    res = minimize(
+        wrapped,
+        [t0g, np.log(u0g), np.log(tEg)],
+        method="Nelder-Mead",
+        options={"maxiter": 4000, "xatol": 1e-6, "fatol": 1e-3},
+    )
     t_0, u_0, t_E = res.x[0], float(np.exp(res.x[1])), float(np.exp(res.x[2]))
     chi2 = float(res.fun)
     if verbose:
-        print("  refined  : t_0=%.4f u_0=%.4f t_E=%.3f  chi2=%.1f (%s)"
-              % (t_0, u_0, t_E, chi2, "converged" if res.success else "NOT converged"),
-              flush=True)
-    return {"t_0": float(t_0), "u_0": u_0, "t_E": t_E, "chi2": chi2,
-            "t_span": (tmin, tmax)}
+        print(
+            "  refined  : t_0=%.4f u_0=%.4f t_E=%.3f  chi2=%.1f (%s)"
+            % (
+                t_0,
+                u_0,
+                t_E,
+                chi2,
+                "converged" if res.success else "NOT converged",
+            ),
+            flush=True,
+        )
+    return {
+        "t_0": float(t_0),
+        "u_0": u_0,
+        "t_E": t_E,
+        "chi2": chi2,
+        "t_span": (tmin, tmax),
+    }
 
 
 # Generic companion seeds.  s = 1 is defaults.yaml's log_s initval; the two
@@ -192,7 +211,9 @@ def main():
     t_0, u_0, t_E = seed["t_0"], seed["u_0"], seed["t_E"]
 
     ra, dec = C.event_coords(d, args.event)
-    fits = [{"parameters": dict(t_0=t_0, u_0=u_0, t_E=t_E, **g)} for g in GENERIC]
+    fits = [
+        {"parameters": dict(t_0=t_0, u_0=u_0, t_E=t_E, **g)} for g in GENERIC
+    ]
 
     # mag_methods is the finite-source window: [t_start, method, t_end].
     # +/- 2 t_E around the peak covers the caustic crossings for any s the
@@ -206,8 +227,10 @@ def main():
         "mag_methods": [lo, "VBBL", hi],
         "coords": "%.6f %.6f" % (ra, dec),
         "jd_offset": 0.0,
-        "excluded_points": {n: {"n_data": int(len(c[0])), "indices": [], "times": []}
-                            for n, c in zip(names, curves)},
+        "excluded_points": {
+            n: {"n_data": int(len(c[0])), "indices": [], "times": []}
+            for n, c in zip(names, curves)
+        },
         "_provenance": {
             "writer": "examples/DC2018/dc18_seed.py (PSPL peak fit, no MMEXOFAST)",
             "pspl_chi2": seed["chi2"],

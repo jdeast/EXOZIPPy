@@ -609,13 +609,8 @@ class MulensInstrument(Instrument):
             return
 
         curves = []
-        for (t, f, e, _df) in per_file:
-            ok = (
-                np.isfinite(t)
-                & np.isfinite(f)
-                & np.isfinite(e)
-                & (e > 0)
-            )
+        for t, f, e, _df in per_file:
+            ok = np.isfinite(t) & np.isfinite(f) & np.isfinite(e) & (e > 0)
             if ok.sum() >= 4:
                 curves.append((t[ok], f[ok], 1.0 / e[ok] ** 2))
         if not curves:

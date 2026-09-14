@@ -47,15 +47,21 @@ def main():
 
     cfg = yaml.safe_load(io.open(a.config, encoding="utf-8"))
 
-    bad = [k for k in _PATH_KEYS
-           if isinstance(cfg.get(k), str) and not os.path.isabs(cfg[k])]
+    bad = [
+        k
+        for k in _PATH_KEYS
+        if isinstance(cfg.get(k), str) and not os.path.isabs(cfg[k])
+    ]
     for inst in cfg.get("mulensinstrument") or []:
         f = inst.get("file")
         if isinstance(f, str) and not os.path.isabs(f):
             bad.append("mulensinstrument.file=%s" % f)
     sed = cfg.get("sed")
-    if isinstance(sed, dict) and isinstance(sed.get("file"), str) \
-            and not os.path.isabs(sed["file"]):
+    if (
+        isinstance(sed, dict)
+        and isinstance(sed.get("file"), str)
+        and not os.path.isabs(sed["file"])
+    ):
         bad.append("sed.file=%s" % sed["file"])
     if bad:
         sys.exit(
@@ -69,9 +75,12 @@ def main():
     cfg.setdefault("sampler", {})["cores"] = int(a.cores)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)) or ".", exist_ok=True)
     io.open(a.out, "w", encoding="utf-8").write(
-        yaml.safe_dump(cfg, sort_keys=False, default_flow_style=False))
-    print("cores %s -> %d   %s -> %s"
-          % (old, a.cores, a.config, a.out), flush=True)
+        yaml.safe_dump(cfg, sort_keys=False, default_flow_style=False)
+    )
+    print(
+        "cores %s -> %d   %s -> %s" % (old, a.cores, a.config, a.out),
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

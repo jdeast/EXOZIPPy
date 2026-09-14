@@ -18,8 +18,9 @@ def _pspl(t, t_0, u_0, t_E):
     return (u2 + 2.0) / np.sqrt(u2 * (u2 + 4.0))
 
 
-def _curve(t_0, u_0, t_E, f_source, f_blend, n=3000, span=200.0, noise=1e-3,
-           seed=0):
+def _curve(
+    t_0, u_0, t_E, f_source, f_blend, n=3000, span=200.0, noise=1e-3, seed=0
+):
     rng = np.random.default_rng(seed)
     t = np.linspace(t_0 - span / 2, t_0 + span / 2, n)
     flux = f_source * _pspl(t, t_0, u_0, t_E) + f_blend
@@ -30,9 +31,9 @@ def _curve(t_0, u_0, t_E, f_source, f_blend, n=3000, span=200.0, noise=1e-3,
 @pytest.mark.parametrize(
     "t_0, u_0, t_E",
     [
-        (2458550.0, 0.15, 18.0),     # the DC2018-128-like case
-        (2458550.0, 0.01, 9.5),      # high magnification
-        (2458550.0, 1.20, 26.0),     # low magnification, wide wing
+        (2458550.0, 0.15, 18.0),  # the DC2018-128-like case
+        (2458550.0, 0.01, 9.5),  # high magnification
+        (2458550.0, 1.20, 26.0),  # low magnification, wide wing
     ],
 )
 def test_recovers_the_injected_geometry(t_0, u_0, t_E):
@@ -90,9 +91,7 @@ def test_flat_curve_still_returns_something_finite():
 
 def test_too_few_epochs_returns_none_rather_than_raising():
     t = np.array([2458550.0, 2458551.0])
-    assert peakfind.find_pspl_seed(
-        [(t, np.ones(2), np.ones(2))]
-    ) is None
+    assert peakfind.find_pspl_seed([(t, np.ones(2), np.ones(2))]) is None
     assert peakfind.find_pspl_seed([]) is None
 
 
@@ -107,16 +106,24 @@ def test_push_hints_seeds_exactly_three_paths():
             pushed["sets"] = sets
 
     n = peakfind.push_peak_find_hints(
-        {"t_0": 1.0, "u_0": 0.2, "t_E": 20.0, "chi2": 1.0,
-         "n_points": 10, "converged": True},
+        {
+            "t_0": 1.0,
+            "u_0": 0.2,
+            "t_E": 20.0,
+            "chi2": 1.0,
+            "n_points": 10,
+            "converged": True,
+        },
         FakeCM(),
     )
     assert n == 1
-    assert pushed["sets"] == [{
-        "source.0.t_0": 1.0,
-        "source.0.u_0": 0.2,
-        "mulensevent.0.t_E": 20.0,
-    }]
+    assert pushed["sets"] == [
+        {
+            "source.0.t_0": 1.0,
+            "source.0.u_0": 0.2,
+            "mulensevent.0.t_E": 20.0,
+        }
+    ]
 
 
 def test_push_hints_is_a_no_op_without_a_seed():
