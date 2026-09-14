@@ -59,7 +59,17 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dc18_common as C  # noqa: E402
 
-DATA = "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge"
+# $DC18_DATA, matching run_event.py's spelling.  Hardcoding this made every
+# generated config machine-locked to one home directory: 36 tracked files
+# pinned their seed JSON, both light curves, `prefix`, `sed.file` and
+# `parameter_file` to /home/jeastman, and on a second machine not one of
+# them resolved -- the fit died in load_data before sampling (2.4.19).  The
+# rest of the generator was already portable (everything else is
+# os.path.abspath against the CWD), so this constant was the whole defect,
+# and it is INVISIBLE on the machine that wrote it.
+DATA = os.environ.get(
+    "DC18_DATA", "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge"
+)
 BANDS = [("W149", "Roman/WFI.F146"), ("Z087", "Roman/WFI.F087")]
 
 # event_info.txt columns, 0-based: 5 = A_W149, 6 = its dispersion.
