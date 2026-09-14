@@ -10,11 +10,11 @@ code. Related: `src/exozippy/skyframe.md` (the frame itself, and the one owner o
 projection onto it), `src/exozippy/components/mulensing/mulensing.md` (the flux likelihood,
 MMEXOFAST seeding, and the lens/source body rules).
 
-## The two artifacts, and which one is normative
+## The three artifacts, and which one is normative
 
 This file is the **normative** list. `src/exozippy/latex/convention.tex` is a drop-in
 section for the EXOZIPPy microlensing paper carrying the *same* claim list in the paper's
-register, with the same identifiers `C1`...`C23`. The identifiers are the anti-drift
+register, with the same identifiers `C1`...`C25`. The identifiers are the anti-drift
 device: a claim may be reworded in either file, but a `C`-number must mean the same thing
 in both, and a claim added to one must be added to the other under the same number. There
 is no generator and no test enforcing that -- keep them in one commit.
@@ -23,6 +23,16 @@ The split of labour is: **this file names the code**, `convention.tex` names the
 **literature**. Nothing in the paper section should assert a convention that is not a
 `C`-number here, and nothing here should be a bare claim without a file or a test beside
 it.
+
+**There is a THIRD copy, and it is not in this repository.** The Conventions section of
+`paper3_microlensing.tex`, in the paper repo at `~/old_home/papers/exozippy` (whose remote
+is the Overleaf project), carries the same `C`-numbers as the submitted text. Being a
+separate repository it cannot ride the same commit, which is exactly why it is the copy
+most likely to drift: paper3 gained `C26`-`C28` -- the Keplerian reconciliation
+(`alpha = phi_pi - PA_axis`, so `alpha` is a derived position angle and not an independent
+convention), which body an `omega` belongs to, and the node fold plus the third-axis trap
+-- before either file here did. When you change a `C`-rule, decide explicitly whether the
+paper moves too, and say so in the commit message when it does not.
 
 ## Notation used below
 
@@ -396,7 +406,27 @@ degenerate partner.
 
     s_j(t)      = |delta_j(t)|
     PA_axis(t)  = atan2(dE, dN)
-    alpha_j(t)  = alpha_j0 - [PA_axis(t) - PA_axis(t0_par)]
+    alpha_j(t)  = phi_pi - PA_axis(t),   phi_pi = atan2(pi_E_E, pi_E_N)
+
+That form is ABSOLUTE, and deliberately so: **no `t0_par` anchor enters and there is no
+`alpha_j0` term**, because C15/C20's `alpha` simply IS `phi_pi - PA(axis)` evaluated at
+every epoch rather than once.  Its time derivative is the `d(PA_axis)/dt = -dalpha/dt`
+rule above, so the linear and keplerian modes agree by construction rather than through a
+fitted offset.  (An anchored spelling `alpha_j0 - [PA_axis(t) - PA_axis(t0_par)]` is
+algebraically the same thing ONLY because `alpha_j0` is itself derived; this file used to
+write it that way, which read as though `alpha_j0` were free.  It is not -- see the next
+paragraph.)
+
+**The keplerian mode has NO free geometry parameters at all.**  `Lens.register_parameters`
+gives `companion_keplerian` neither `log_s` nor `xalpha`/`yalpha` -- only `s: from_orbit`,
+`alpha: from_orbit` and `q` -- so the binary geometry entering the magnification is a
+function purely of the referenced orbit's `(P, tp, ecc, omega_*, cosi, bigomega, a)` plus
+the frame quantities `phi_pi`, `theta_E` and `D_L` the fit already carries.  That is the
+whole point of the mode and the Skowron+2011 over-constraint `examples/ob09020` tests: the
+RVs pin `P/tp/ecc/omega_*/K`, the light curve pins the projected geometry, and `bigomega`
+and `sign(cos i)` -- which no RV can see -- become MEASURED.  A sampled coordinate the
+likelihood never reads would be the 1.6.12 defect, which is why they are absent rather
+than pinned.
 
 The MINUS is the same `d(PA_axis)/dt = -dalpha/dt` rule; getting it wrong does not raise
 chi2 -- it silently reports the wrong inclination branch (the rotation sense of the binary

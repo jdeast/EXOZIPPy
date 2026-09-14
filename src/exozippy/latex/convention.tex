@@ -17,11 +17,20 @@
 %
 % THIS FILE IS ONE OF A PAIR.  Its twin,
 % src/exozippy/components/mulensing/conventions.md, is the normative
-% developer-facing list: it carries the SAME numbered claims C1-C23, and
+% developer-facing list: it carries the SAME numbered claims C1-C25, and
 % names for each one the source file that implements it and the test that
 % pins it.  A claim may be reworded in either file, but a C-number must
 % mean the same thing in both, and a claim added to one must be added to
 % the other under the same number.  Keep them in one commit.
+%
+% A THIRD COPY LIVES OUTSIDE THIS REPOSITORY: the Conventions section of
+% paper3_microlensing.tex in the paper repo (~/old_home/papers/exozippy,
+% remote on Overleaf) carries the same C-numbers as the submitted text.
+% It cannot ride the same commit, so it is the copy most likely to drift
+% -- paper3 gained C26-C28 (the Keplerian reconciliation, which body's
+% omega, the node fold and the third-axis trap) before this file did.
+% When you change a C-rule, decide explicitly whether the paper moves
+% too, and say so in the commit message when it does not.
 % =====================================================================
 
 \section{Conventions}
@@ -333,9 +342,17 @@ is meaningful only jointly with $\mathrm{sign}(u_0)$: the orbiting-binary
 ecliptic degeneracy (their Eq.~A16) reverses
 $(u_0, \alpha, \pi_{\rm E,\perp}, \gamma_\perp)$ together.  In the Keplerian
 mode the same definitions are driven by a projected orbit,
-$s_j(t) = |\vec{\delta}_j(t)|$ and $\alpha_j(t) = \alpha_{j,0} -
-[\mathrm{PA_{axis}}(t) - \mathrm{PA_{axis}}(t_{0,\rm par})]$, where the
-minus sign is Equation~\ref{eq:gammaperp} again; its correctness is pinned
+$s_j(t) = |\vec{\delta}_j(t)|$ and $\alpha_j(t) = \phi_\pi -
+\mathrm{PA_{axis}}(t)$, where the minus sign is
+Equation~\ref{eq:gammaperp} again.  That expression is absolute --- no
+anchor enters, because C15's $\alpha$ simply \emph{is} $\phi_\pi$ minus
+the axis's position angle, evaluated at every epoch rather than once ---
+and it leaves the mode with \emph{no free geometry parameters whatever}:
+neither $s_0$ nor $\alpha_0$ is sampled, and the geometry entering the
+magnification is a function purely of the referenced orbit's elements
+together with the $\phi_\pi$, $\theta_{\rm E}$ and $D_{\rm L}$ the fit
+already carries.  That is the over-constraint \citet{Skowron:2011}
+proposed.  The sign's correctness is pinned
 against a synthetic orbit of known inclination rather than against a fit,
 because the rotation sense of the binary axis is the only quantity here
 that measures $\mathrm{sign}(\cos i)$, and the wrong sign lowers no

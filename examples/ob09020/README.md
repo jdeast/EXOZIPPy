@@ -285,10 +285,13 @@ and are recorded there in full:
    orientation (bigomega) and rotation sense (`sign(cos i)`) reach the
    light curve; the orbit component samples both over their full ranges
    (`Orbit._lens_keplerian_orbits`).  The seeds carry the frame-mapped
-   Yee branch (`i = 50.58 = 180 - 129.42`, `bigomega = 337.48`; the
-   mapping table lives in the params file).  The retired `i180: true`
-   hand-holding and the inert commented-out `bigomega` are exactly what
-   review 8.6.8 5e said this mode would remove.
+   Yee branch (`i = 50.58 = 180 - 129.42`, `bigomega = 340.755`; the
+   mapping table lives in the params file).  `ob09020.params.yaml` is the
+   value of record for `bigomega` -- it is frame-converted against the
+   built model rather than read off Yee's table (C28), so quote it from
+   there and not from here.  The retired `i180: true` hand-holding and the
+   inert commented-out `bigomega` are exactly what review 8.6.8 5e said
+   this mode would remove.
 
 Every light curve also carries its own `(log_f_total, q_source)` and
 `err_scale`, and these are fit rather than guessed: with the geometry held
