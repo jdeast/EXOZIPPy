@@ -296,7 +296,7 @@ _GLOBAL_KEY_INFO = {
         "Sampler configuration block. Recognized keys are listed in "
         "'accepts'; unrecognized keys are warned about and ignored by run.py.",
     ),
-    # The four block vocabularies below are filled from
+    # The block vocabularies below are filled from
     # system.KNOWN_BLOCK_KEYS in _global_schema, exactly as `sampler` is
     # filled from run.KNOWN_SAMPLER_KEYS: one owner per vocabulary.
     "modes": (
@@ -317,7 +317,7 @@ _GLOBAL_KEY_INFO = {
     ),
     "reporting": (
         "block",
-        ["credible_interval"],
+        None,  # filled from system.KNOWN_BLOCK_KEYS below, like the rest
         "Reporting block: {credible_interval} is the interval width the "
         "tables, CSV, mode report and corner plots are written at, as a "
         "probability (0.95 for 95%). Default 0.6827, the 1-sigma astronomy "

@@ -18,6 +18,7 @@ try:
 except ImportError:  # pragma: no cover - older pytensor
     from pytensor.graph.basic import ancestors
 
+from exozippy import reporting
 from exozippy.components.component import Component
 from exozippy.components.factory import discover_components, import_failures
 from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
@@ -109,6 +110,11 @@ KNOWN_BLOCK_KEYS = {
     "mkparam": frozenset({"n_seeds", "force"}),
     "gui": frozenset({"snapshot"}),
     "modeling": frozenset({"compile"}),
+    # `reporting:` predates this table (it arrived with the credible-interval
+    # width) and was the block the typo check had no entry for -- caught by
+    # tests/test_known_keys.py on merge, which is exactly what that test is
+    # for.  One key today; `reporting.CONFIG_KEY` is its owner.
+    "reporting": frozenset({reporting.CONFIG_KEY}),
 }
 
 
