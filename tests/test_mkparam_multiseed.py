@@ -112,10 +112,11 @@ def test_multi_seed_lists_share_one_length(tmp_path):
     )
     params = yaml.safe_load(out.read_text())
     # Then every list-valued initval has length exactly 3
+    # (a reserved non-parameter key such as `overdisperse:` is not an entry)
     lengths = {
         len(v["initval"])
         for v in params.values()
-        if isinstance(v.get("initval"), list)
+        if isinstance(v, dict) and isinstance(v.get("initval"), list)
     }
     assert lengths == {3}
 

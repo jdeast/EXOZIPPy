@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from exozippy.config import RESERVED_PARAM_KEYS
 from exozippy.utilities.mmexofast_to_params import mmexofast_to_params
 
 MMX_PATH = (
@@ -35,6 +36,18 @@ PARAM_PATHS = [
     "lens.1.alpha",
     "lens.1.q",
 ]
+
+
+def _params_only(parsed):
+    """The PARAMETER entries of a converted file.
+
+    A params file may also carry reserved NON-parameter keys -- today
+    ``overdisperse:``, the converter's declaration that its seeds are single
+    optima and so still want scattering (review 8.3.3).  Filtered by
+    ``config.RESERVED_PARAM_KEYS`` rather than by name so this tracks the real
+    vocabulary instead of a copy of it.
+    """
+    return {k: v for k, v in parsed.items() if k not in RESERVED_PARAM_KEYS}
 
 
 def _write_without_sigmas(tmp_path, keep=None):
@@ -61,7 +74,7 @@ def test_sigmas_present_are_not_emitted(tmp_path):
         mmexofast_to_params(MMX_PATH, out_path=tmp_path / "out.yaml")
     )
 
-    assert sorted(parsed) == sorted(PARAM_PATHS)
+    assert sorted(_params_only(parsed)) == sorted(PARAM_PATHS)
     for path in PARAM_PATHS:
         assert "initval" in parsed[path], path
         assert "init_scale" not in parsed[path], path
@@ -77,8 +90,8 @@ def test_missing_sigmas_still_converts(tmp_path):
         mmexofast_to_params(path, out_path=tmp_path / "out.yaml")
     )
 
-    assert sorted(parsed) == sorted(PARAM_PATHS)
-    for name, entry in parsed.items():
+    assert sorted(_params_only(parsed)) == sorted(PARAM_PATHS)
+    for name, entry in _params_only(parsed).items():
         assert "initval" in entry, name
         assert "init_scale" not in entry, name
 
@@ -93,7 +106,9 @@ def test_partial_sigmas_also_not_emitted(tmp_path):
     )
 
     with_scale = {
-        name for name, entry in parsed.items() if "init_scale" in entry
+        name
+        for name, entry in _params_only(parsed).items()
+        if "init_scale" in entry
     }
     assert with_scale == set()
 
@@ -112,7 +127,7 @@ def test_output_is_valid_yaml_without_sigmas(tmp_path, solution_index):
 
     parsed = yaml.safe_load(text)
     assert parsed
-    assert all("initval" in entry for entry in parsed.values())
+    assert all("initval" in entry for entry in _params_only(parsed).values())
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ import pytensor.graph.basic
 import pytensor.graph.traversal
 
 from .components.parameter import derived_constraint_message
-from .config import USER_PARAM_KEYS
+from .config import RESERVED_PARAM_KEYS, USER_PARAM_KEYS
 
 # check_user_starts' noise floor.  A derived quantity reassembled through a
 # different float path than the seed differs in the last bits; reporting
@@ -153,10 +153,19 @@ class ModelAuditor:
         unused_items = []
 
         # 1. Top-Level Unused Keys (e.g., misspelled component names: "inst.HIRES.gama")
+        #
+        # RESERVED_PARAM_KEYS is exempt for the same reason "run" is, and the
+        # exemption has to be HERE rather than upstream: this auditor reads
+        # `system.user_params` -- the file exactly as written -- while
+        # `ConfigManager` reads its own copy with the reserved keys already
+        # split off.  Without this, `overdisperse:` (which mkparam writes into
+        # every restart file) would be reported as a key that matched no
+        # parameter, on every restart, forever.
         for k in self.user_params.keys():
             if (
                 k not in used_keys
                 and k != "run"
+                and k not in RESERVED_PARAM_KEYS
                 and not self._engine_consumed(k)
             ):
                 unused_items.append(k)
