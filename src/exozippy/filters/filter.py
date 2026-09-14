@@ -345,14 +345,38 @@ class Filter(BaseQuery):
             (2, "Fv", "jy"),
         ):
             label = str(df.iloc[row, 0])
+            unit = str(df.iloc[row, 3]) if df.shape[1] > 3 else ""
             if "zeropoint" not in label.lower().replace(" ", ""):
-                raise ValueError(
-                    f"SVO {system} calibration table at {url}: row {row} is "
-                    f"labelled {label!r}, not a zeropoint. The page layout "
-                    "has changed; refusing to guess (and to cache the guess)."
+                # SVO spans ONE "Zero Point" label down the Fl and Fv rows
+                # with a rowspan, so pandas fills the continuation row's
+                # label cell with NaN (observed 2026-09-14 on Roman/WFI.F146,
+                # Roman/WFI.F087 and 2MASS/2MASS.Ks).  That is a MISSING
+                # label, not a wrong one, and refusing it blocks every
+                # facility whose BC tables are not already cached.
+                #
+                # Accepting it is not a guess, which is what 2.9.1 forbids:
+                # it is accepted only when the row above carries the label
+                # AND this row's own unit cell names the expected quantity,
+                # and that unit cell is what actually pins the row's
+                # identity.  Confirmed against the two system-defining
+                # constants, which land on the rows this reads: the AB Fv
+                # zeropoint is 3631.00 Jy and the ST Fl zeropoint is
+                # 3.631e-9 erg/cm2/s/A, for every filter checked.
+                continuation = (
+                    row > 0
+                    and label.strip().lower() in ("", "nan")
+                    and "zeropoint"
+                    in str(df.iloc[row - 1, 0]).lower().replace(" ", "")
                 )
+                if not (continuation and unit_word in unit.lower()):
+                    raise ValueError(
+                        f"SVO {system} calibration table at {url}: row {row} "
+                        f"is labelled {label!r}, not a zeropoint, and is not "
+                        f"a rowspan continuation carrying a {unit_word} unit "
+                        f"(unit cell {unit!r}). The page layout has changed; "
+                        "refusing to guess (and to cache the guess)."
+                    )
             if df.shape[1] > 3:
-                unit = str(df.iloc[row, 3])
                 if unit.strip() and unit_word not in unit.lower():
                     raise ValueError(
                         f"SVO {system} calibration table at {url}: the "
