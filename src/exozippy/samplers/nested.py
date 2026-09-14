@@ -313,6 +313,62 @@ def _transform_batch(U):
     return np.asarray(U, dtype=float)
 
 
+def _resolve_nested_cores(cores):
+    """Worker count for the nested backends' likelihood pool.
+
+    ``default_cores()``, not a third hand-written 0.75: this copy had dropped
+    the ``phys - 1`` arm, so an unconfigured nested run took every core the
+    OS and the user's shell were meant to keep one of (review 6.11.3).
+
+    ``cores <= 0`` takes that same automatic grant (review 2.4.8).  This
+    branch already did the right thing for 0, but only because 0 is FALSY in
+    ``cores or default_cores()`` -- right by accident, and wrong for a
+    negative value, which sailed straight through into a negative pool size.
+    It is spelled out, and lifted out of the middle of ``nested_sample``, so
+    the next reader does not have to know that and the rule can be tested
+    beside its two siblings without building a model.
+    """
+    phys_cores = mp.cpu_count()
+    if cores is None or cores <= 0:
+        grant = _common.default_cores()
+    else:
+        grant = int(cores)
+    return max(1, min(grant, phys_cores))
+
+
+def _seed_ultranest(seed):
+    """Make the ultranest backend honor the run's seed (review 2.4.7).
+
+    ultranest exposes NO seed: neither ``ReactiveNestedSampler`` nor
+    ``popstepsampler.PopulationSliceSampler`` takes an ``rstate`` or ``seed``
+    argument the way ``dynesty.NestedSampler`` does (checked against the
+    installed 4.5.0), and both draw from numpy's LEGACY GLOBAL state --
+    ``np.random.randint`` for the live point each walker starts from,
+    ``np.random.uniform`` for the slice positions.  So seeding that global
+    state IS ultranest's mechanism, and it is the one ultranest itself uses:
+    ``ultranest.solvecompat.solve`` calls ``np.random.seed(seed)``.  Until
+    this existed, ``sampler: seed:`` reached the dynesty branch and nothing
+    else, while run.py's startup line promised the user a reproducible rerun.
+
+    **This perturbs process-global numpy state**, and that is said out loud
+    rather than buried: it is acceptable HERE and would not be elsewhere.
+    ``nested_sample`` owns the process at this point -- run.py dispatches to
+    exactly one sampler, the worker pool is already forked and its children
+    only evaluate a deterministic logp, and every draw EXOZIPPy makes for
+    itself goes through an explicit ``np.random.default_rng``, never the
+    global generator.  If a later ultranest grows a real seed argument,
+    prefer it and delete this.
+
+    ``seed=None`` (no seed anywhere in the run) is left alone, so an unseeded
+    run stays unseeded rather than being pinned to some arbitrary constant.
+    """
+    if seed is None:
+        return
+    # np.random.seed's legacy domain is [0, 2**32); the run's seed is drawn
+    # well inside it, but a user may write anything in `sampler: seed:`.
+    np.random.seed(int(seed) % (2**32))
+
+
 def nested_sample(
     model,
     system,
@@ -360,11 +416,7 @@ def nested_sample(
     logp_fn = model.compile_logp()
     _NB.update(bridge=bridge, logp_fn=logp_fn, pool=None)
 
-    phys_cores = mp.cpu_count()
-    # default_cores(), not a third hand-written 0.75: this copy had dropped
-    # the `phys - 1` arm, so an unconfigured nested run took every core the
-    # OS and the user's shell were meant to keep one of.
-    actual = max(1, min(cores or _common.default_cores(), phys_cores))
+    actual = _resolve_nested_cores(cores)
     pool = mp.Pool(actual) if actual > 1 else None
     _NB["pool"] = pool
     logger.info(
@@ -442,6 +494,10 @@ def nested_sample(
                 # the dead-point record.  The first d=27 pilot predated
                 # this and burned ~2.9 days unrecoverably.
                 un_kwargs = {"log_dir": str(checkpoint_dir), "resume": True}
+            # ultranest takes no rstate/seed: the ONLY way in is numpy's
+            # global state, which is what it reads.  See _seed_ultranest --
+            # including why a process-global side effect is acceptable here.
+            _seed_ultranest(seed)
             sampler = ultranest.ReactiveNestedSampler(
                 bridge.flat_names,
                 _loglike_u_batch,

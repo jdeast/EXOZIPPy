@@ -280,3 +280,98 @@ def test_get_draws_says_its_unseeded_draw_is_deliberate():
     doc = get_draws.__doc__
     assert "UNSEEDED" in doc
     assert "BY DESIGN" in doc
+
+
+# ---------------------------------------------------------------------------
+# The seed has to reach the BACKEND, not just the wrapper (review 2.4.7)
+# ---------------------------------------------------------------------------
+
+NESTED_PY = REPO_ROOT / "src" / "exozippy" / "samplers" / "nested.py"
+
+
+def test_the_ultranest_backend_seeds_numpys_global_generator(monkeypatch):
+    """
+    Given the run's seed and the ultranest backend,
+    When nested.py seeds it,
+    Then numpy's LEGACY GLOBAL generator is seeded -- because that is the
+      only way in: ultranest exposes no rstate/seed argument.
+
+    Regression: the dynesty branch got `rstate=np.random.default_rng(seed)`
+    and the resample rng was seeded, but the ultranest branch took no seed at
+    all and drew from whatever the global state happened to hold.  So
+    `sampler: seed:` did nothing on that backend while run.py's startup line
+    told the user the rerun would reproduce the fit.
+    """
+    from exozippy.samplers.nested import _seed_ultranest
+
+    calls = []
+    monkeypatch.setattr(np.random, "seed", lambda s: calls.append(s))
+
+    # ACT
+    _seed_ultranest(4242)
+
+    # ASSERT
+    assert calls == [4242]
+
+    # ACT: an unseeded run stays unseeded rather than being pinned to some
+    # arbitrary constant -- absent is not the same as zero.
+    calls.clear()
+    _seed_ultranest(None)
+
+    # ASSERT
+    assert calls == []
+
+
+def test_the_ultranest_sampler_is_constructed_after_the_seed_is_set():
+    """
+    Given ultranest's sampler construction,
+    When nested.py's source is read,
+    Then `_seed_ultranest(seed)` stands BEFORE it.
+
+    Static, like the forwarding test above, because the backend is optional
+    and the ordering is the whole content of the fix: seeding the global
+    generator after the sampler has drawn its first live points buys nothing.
+    """
+    src = NESTED_PY.read_text(encoding="utf-8")
+
+    # ACT
+    i_seed = src.find("_seed_ultranest(seed)")
+    i_sampler = src.find("ultranest.ReactiveNestedSampler(")
+
+    # ASSERT
+    assert i_seed > 0, "the ultranest branch does not call _seed_ultranest"
+    assert i_sampler > 0, "no ultranest.ReactiveNestedSampler(...) call"
+    assert i_seed < i_sampler, (
+        "_seed_ultranest(seed) must run BEFORE ReactiveNestedSampler is built"
+    )
+
+
+def test_ultranest_still_exposes_no_seed_of_its_own():
+    """
+    Given the installed ultranest,
+    When its two constructors are introspected,
+    Then neither takes a seed/rstate argument -- which is WHY the global
+      generator is the mechanism.
+
+    If this ever fails, ultranest has grown a real seed argument: prefer it
+    and delete `_seed_ultranest`, rather than keeping a process-global side
+    effect that is no longer necessary.  Checked against 4.5.0, whose
+    ReactiveNestedSampler and popstepsampler.PopulationSliceSampler both read
+    np.random.randint / np.random.uniform directly.
+    """
+    import inspect
+
+    ultranest = pytest.importorskip("ultranest")  # optional backend
+    pss = pytest.importorskip("ultranest.popstepsampler")
+
+    for ctor in (
+        ultranest.ReactiveNestedSampler.__init__,
+        pss.PopulationSliceSampler.__init__,
+    ):
+        params = set(inspect.signature(ctor).parameters)
+
+        # ASSERT
+        assert not params & {"seed", "rstate", "random_state", "rng"}, (
+            f"{ctor.__qualname__} now takes a seed: use it and delete "
+            f"nested._seed_ultranest"
+        )

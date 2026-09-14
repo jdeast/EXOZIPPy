@@ -345,9 +345,10 @@ def test_an_integer_cores_is_taken_as_written(value):
     When it is resolved,
     Then the number is passed through untouched.
 
-    Deliberately no floor: `cores: 0` means three different things across the
-    resolvers and unifying that is review 2.4.8, which must not be
-    pre-empted here with a validation that hides it.
+    A POSITIVE count is what passes through untouched.  `cores: 0` and any
+    negative are normalized to the None AUTO sentinel with a warning (review
+    2.4.8, pinned in tests/test_polish.py) -- they used to pass through here
+    and then mean three different things in the three resolvers downstream.
     """
     assert run_mod.resolve_cores_setting(value) == int(value)
 

@@ -323,7 +323,13 @@ def create_pool(cores, total_proposals, label, log):
     None in serial mode (actual_cores <= 1).
     """
     phys_cores = mp.cpu_count()
-    if cores is None:
+    # `cores <= 0` is the automatic grant, exactly like `cores=None` (review
+    # 2.4.8).  It used to fall through to `min(0, total_proposals)` -> 0 ->
+    # SERIAL here, while the same 0 took the AUTO grant in nested.py and
+    # serial again in the polish: one written number, three behaviors.
+    # run.py normalizes at the parse boundary; this arm is what makes a
+    # direct caller (a test, a script) land the same way.
+    if cores is None or cores <= 0:
         cores = default_cores()
     actual_cores = min(cores, total_proposals)
     if cores > phys_cores:
