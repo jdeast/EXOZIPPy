@@ -359,13 +359,24 @@ def ptde_async_sample(
         else max(n_slots, (n_slots * (tune + draws)) // 20)
     )
 
-    # storage: raw values from T=1 chains only; each chain records exactly
-    # `draws` samples (its own post-tune iterations), so no dynamic growth
-    # is needed -- capacity is a hard per-chain cap by construction.
+    # storage: raw values from T=1 chains only.  Each chain records at most
+    # `draws` samples (its own post-tune iterations), but the buffers are
+    # grown in chunks rather than allocated at that cap up front: a run that
+    # stops on convergence, maxtime or a user interrupt otherwise reserves
+    # -- and, being np.zeros, TOUCHES -- the entire trace it will never
+    # write, ~2.9 GB for a DC2018-shaped run (review 6.4.6; 6.4.5 fixed the
+    # same defect in the synchronous sampler and this one was missed).
+    #
+    # Async chains advance independently, so a growth step is triggered by
+    # whichever chain is furthest ahead while capacity stays uniform across
+    # chains.  That is the intended behavior: the worst-case over-allocation
+    # is one DRAW_CHUNK beyond the leading chain, independent of how far the
+    # chains have spread.
+    _cap0 = min(int(draws), _common.DRAW_CHUNK)
     stored_raw = {
-        k: np.zeros((n_chains, draws) + raw_start[k].shape) for k in model_keys
+        k: np.zeros((n_chains, _cap0) + raw_start[k].shape) for k in model_keys
     }
-    stored_lp = np.zeros((n_chains, draws))
+    stored_lp = np.zeros((n_chains, _cap0))
     per_chain_draws = np.zeros(n_chains, dtype=int)
 
     # Optional thinned hot-rung storage (store_hot_chains): detector data
@@ -382,13 +393,19 @@ def ptde_async_sample(
         "PTDE-async",
         logger,
     )
+    # hot_cap stays the LOGICAL per-(rung, chain) cap that the store site
+    # tests against; the allocation below is only the starting capacity and
+    # grows in chunks the same way the T=1 buffers do (6.4.6).
     hot_cap = max(1, draws // hot_thin) if hot_thin else 0
     if hot_thin:
+        _hot_cap0 = min(hot_cap, _common.hot_draw_chunk(n_temps - 1))
         stored_hot_raw = {
-            k: np.zeros((n_temps - 1, n_chains, hot_cap) + raw_start[k].shape)
+            k: np.zeros(
+                (n_temps - 1, n_chains, _hot_cap0) + raw_start[k].shape
+            )
             for k in model_keys
         }
-        stored_hot_lp = np.full((n_temps - 1, n_chains, hot_cap), np.nan)
+        stored_hot_lp = np.full((n_temps - 1, n_chains, _hot_cap0), np.nan)
         per_hot_draws = np.zeros((n_temps - 1, n_chains), dtype=int)
 
     n_accept = np.zeros(n_temps)
@@ -855,6 +872,15 @@ def ptde_async_sample(
                     and per_chain_draws[i] < draws
                 ):
                     d = per_chain_draws[i]
+                    # Grow BEFORE the write: store_draw indexes into the
+                    # dict this rebinds in place.  The rebinding of
+                    # stored_lp happens in ptde_async_sample's own scope,
+                    # so the closure cell _maybe_stop reads (it hands both
+                    # buffers to _check_convergence and to the GUI progress
+                    # payload) sees the new array, not a stale one.
+                    stored_lp = _common.grow_draw_storage(
+                        stored_raw, stored_lp, d + 1
+                    )
                     layout.store_draw(stored_raw, current_state[k][i], i, d)
                     stored_lp[i, d] = current_lp[k][i]
                     per_chain_draws[i] = d + 1
@@ -868,6 +894,9 @@ def ptde_async_sample(
                     and per_hot_draws[k - 1, i] < hot_cap
                 ):
                     d = per_hot_draws[k - 1, i]
+                    stored_hot_lp = _common.grow_hot_draw_storage(
+                        stored_hot_raw, stored_hot_lp, d + 1
+                    )
                     layout.store_draw(
                         stored_hot_raw, current_state[k][i], k - 1, i, d
                     )
