@@ -8,6 +8,13 @@ notice. Everything checkable is now checked, and a failure raises instead of
 being cached.
 
 Nothing here touches the network: the tables are built in the test.
+
+The rowspan cases at the bottom are the 2026-09-14 regression: SVO spans one
+"Zero Point" label down BOTH zeropoint rows, so the second row's label cell
+arrives as NaN and the schema check rejected the page outright -- which
+blocked BC generation for every facility whose tables were not already
+cached. A missing label is not a wrong one, and the unit cell is what
+actually identifies the row.
 """
 
 import numpy as np
@@ -213,3 +220,93 @@ def test_the_three_systems_are_read_in_order(monkeypatch):
     assert filt.Zp_Spec_Fl_AB == 2e-9
     assert filt.Zp_Spec_Fl_ST == 3e-9
     assert np.isfinite(filt.Zp_Spec_Fv_Vega)
+
+
+def _svo_rowspan_table(fv_unit="(Jy)", fl_label="Zero Point (?) :"):
+    """The layout SVO actually served on 2026-09-14, reproduced exactly.
+
+    Captured from Roman/WFI.F146, and identical in shape on
+    Roman/WFI.F087 and 2MASS/2MASS.Ks. The F_nu row's label is NaN because
+    the "Zero Point" cell above it carries a rowspan of 2, and the
+    "-------" in the Specified column is SVO's missing-value marker.
+    """
+    return pd.DataFrame(
+        [
+            ["Property", "Specified", "Calculated", "Unit"],
+            [fl_label, "-------", "2.02559e-10", "(erg/cm2/s/A)"],
+            [np.nan, "-------", "1396.74", fv_unit],
+            ["ZP Type (?) :", "Pogson", "Pogson", "Pogson"],
+            [
+                "PhotCal ID (?) :",
+                "Roman/WFI.F146/Vega",
+                "Roman/WFI.F146/Vega",
+                "Roman/WFI.F146/Vega",
+            ],
+            [np.nan, np.nan, np.nan, np.nan],
+        ]
+    )
+
+
+def test_the_live_svo_rowspan_layout_parses():
+    """
+    Given the calibration table SVO serves today, whose F_nu row inherits
+      its label from a rowspan and so reads as NaN,
+    When it is parsed,
+    Then both zeropoints come back, and the absent "Specified" values are
+      None rather than an error.
+
+    Regression: this raised "row 2 is labelled 'nan', not a zeropoint" and
+    took the whole BC auto-generation path down with it, so a machine with
+    no cached Roman tables could not build a Roman SED at all.
+    """
+    # ARRANGE
+    df = _svo_rowspan_table()
+
+    # ACT
+    got = Filter._parse_calibration_table(df, "Vega", _URL)
+
+    # ASSERT
+    assert got == {
+        "Zp_Spec_Fl_Vega": None,
+        "Zp_Calc_Fl_Vega": 2.02559e-10,
+        "Zp_Spec_Fv_Vega": None,
+        "Zp_Calc_Fv_Vega": 1396.74,
+    }
+
+
+def test_a_rowspan_continuation_still_requires_a_confirming_unit():
+    """
+    Given a row whose label is missing AND whose unit does not name the
+      expected quantity,
+    When it is parsed,
+    Then it raises.
+
+    This is why accepting the NaN label is not a guess: with no label, the
+    unit cell is the only thing left that identifies the row, so it becomes
+    mandatory rather than optional. The accepted row is checked MORE
+    strictly than a labelled one, not less.
+    """
+    # ARRANGE
+    df = _svo_rowspan_table(fv_unit="(erg/cm2/s/A)")
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match="not a zeropoint"):
+        Filter._parse_calibration_table(df, "Vega", _URL)
+
+
+def test_a_missing_label_on_the_first_zeropoint_row_still_raises():
+    """
+    Given a table whose FIRST zeropoint row has no label either,
+    When it is parsed,
+    Then it raises, because there is no labelled row above it for the NaN
+      to be a continuation OF.
+
+    Without this, "the label may be missing" would degrade into reading
+    rows 1 and 2 positionally again, which is the whole of 2.9.1.
+    """
+    # ARRANGE
+    df = _svo_rowspan_table(fl_label=np.nan)
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match="not a zeropoint"):
+        Filter._parse_calibration_table(df, "Vega", _URL)
