@@ -18,7 +18,7 @@ from exozippy.outputs.prose import get_collector
 from exozippy.skyframe import observer_sky_offset
 
 from ..parameterization import pin_unselected
-from . import mmexofast_support
+from . import mmexofast_support, peakfind
 from .physics import (
     RHO_FLOOR,
     S_FLOOR,
@@ -272,6 +272,17 @@ class MulensInstrument(Instrument):
 
             per_file.append((t, f, e, df))
 
+        # THE BUILT-IN PEAK FINDER (8.4.9).  Runs HERE, after pass 1, rather
+        # than beside the MMEXOFAST hook above, and the difference matters:
+        # MMEXOFAST has to run before the photometry is read because it
+        # supplies the bad-data MASK, while this needs no mask and so gets
+        # to see the data as the model will -- masked, detrended, and
+        # already converted to flux.  It also has to land BEFORE
+        # `_estimate_flux_components` in pass 2, which reads the seed t_0 /
+        # u_0 / t_E to decompose each band's flux and silently falls back to
+        # median-flux / q_source = 0.95 without them.
+        self._peak_find_seeds(system, per_file)
+
         # Geocentric reference (Skowron+2011 convention): Earth's position and
         # velocity at t_0_par define the inertial frame.  All observer positions
         # are stored as deviations from this linear Earth trajectory so that
@@ -439,6 +450,16 @@ class MulensInstrument(Instrument):
         spec = event.config[0].get("mmexofast") if event.config else None
         if spec is False:
             return
+        # Whether THIS call ends up pushing seeds.  The peak finder has to
+        # know, because `ConfigManager.add_seed_hints` ASSIGNS
+        # `seed_hint_sets` (config.py:1299) instead of appending -- so a
+        # second caller silently REPLACES the first, and MMEXOFAST's K seed
+        # sets, including its binary-lens s/q/alpha, would be thrown away
+        # for one point-lens seed.  `user_hints_sufficient` cannot stand in
+        # for this test: it inspects user_params and probe_derivable, and
+        # seed hints appear in NEITHER, so it stays False even after a
+        # successful MMEXOFAST push.
+        self._mmexofast_seeded = False
         is_binary = event.n_companions >= 1
         want_rho = bool(event.finite_source)
 
@@ -453,12 +474,14 @@ class MulensInstrument(Instrument):
             self._reject_time_spec_with_mmexofast(spec)
             data = mmexofast_support.load_json(spec)
             if data is not None:
-                mmexofast_support.push_seed_hints(
-                    data,
-                    self.config_manager,
-                    want_rho=want_rho,
-                    is_binary=is_binary,
-                    source=spec,
+                self._mmexofast_seeded = bool(
+                    mmexofast_support.push_seed_hints(
+                        data,
+                        self.config_manager,
+                        want_rho=want_rho,
+                        is_binary=is_binary,
+                        source=spec,
+                    )
                 )
         else:
             if spec != "auto" and mmexofast_support.user_hints_sufficient(
@@ -477,12 +500,14 @@ class MulensInstrument(Instrument):
                 options=options,
             )
             if data is not None:
-                mmexofast_support.push_seed_hints(
-                    data,
-                    self.config_manager,
-                    want_rho=want_rho,
-                    is_binary=is_binary,
-                    source=json_path,
+                self._mmexofast_seeded = bool(
+                    mmexofast_support.push_seed_hints(
+                        data,
+                        self.config_manager,
+                        want_rho=want_rho,
+                        is_binary=is_binary,
+                        source=json_path,
+                    )
                 )
         if data is None:
             return
@@ -504,6 +529,135 @@ class MulensInstrument(Instrument):
             "curves were derived with MMEXOFAST (in preparation).",
             section="microlensing",
             key=f"{self.prefix}.mmexofast",
+            rank=30,
+        )
+
+    def _peak_find_seeds(self, system, per_file):
+        """Seed t_0/u_0/t_E with the built-in PSPL fit when nothing else did.
+
+        STRICTLY A FALLBACK, by default.  `peak_find` on the mulensevent
+        block takes:
+
+          - ``auto`` (default): run only when the microlensing observables
+            are still unseeded at this point -- i.e. the user named none, no
+            explicit MMEXOFAST JSON was given, and the automatic MMEXOFAST
+            path either opted out (``mmexofast: false``) or produced nothing
+            usable.  Those cases previously started t_0/u_0/t_E at
+            ``defaults.yaml``, which for a real event is a start no sampler
+            recovers from, so a fallback here can only help and cannot
+            change any fit that was already seeded.
+          - ``true``: run REGARDLESS, replacing whatever seeded the
+            observables that ranks no higher than derived-from-data.  This
+            is the mmexofast-free mode and the A/B handle for comparing the
+            two seeders on one event.
+          - ``false``: never run.
+
+        Failure is not fatal.  A seeder that raises should leave the fit in
+        exactly the state it would have been in without this module, which
+        is why the search is wrapped -- a start value moves no posterior,
+        and killing a run over one is the wrong trade.
+        """
+        event = getattr(system, "mulensevent", None)
+        if event is None or not event.config:
+            return
+        spec = event.config[0].get("peak_find", "auto")
+        if spec is False:
+            return
+        forced = spec is True
+
+        # SEEDS ALREADY EXIST -> DO NOT TOUCH THEM.  See the note in
+        # _resolve_mmexofast: add_seed_hints overwrites, so running here
+        # after a successful MMEXOFAST push would discard every solution it
+        # found and replace them with one point-lens seed.  `forced` still
+        # overrides, because replacing MMEXOFAST's seeds on purpose is the
+        # entire point of the A/B mode -- but it says so.
+        if getattr(self, "_mmexofast_seeded", False):
+            if not forced:
+                return
+            logger.warning(
+                f"[{self.prefix}] peak_find: true REPLACES the MMEXOFAST "
+                f"seeds already loaded for this fit -- add_seed_hints "
+                f"overwrites rather than appends, so its multi-seed "
+                f"solutions (and any s/q/alpha) are discarded."
+            )
+
+        # The seed paths are the POST-SPLIT spellings (`source.0.t_0`), the
+        # same ones push_seed_hints uses, so a config with no `source:`
+        # block cannot take them: _translate_and_scale resolves the index
+        # and then strict naming refuses the prefix outright.  MMEXOFAST
+        # never trips this because it only runs on configs that named
+        # nothing, but this used to, and the failure was a hard refusal
+        # mid-build rather than a skipped seed.  tests/test_seed_quality.py
+        # reaches it because its harness picks whichever example YAML glob
+        # returns first, which on the microlensing examples is often a
+        # pre-split variant.
+        if getattr(system, "source", None) is None:
+            logger.debug(
+                f"[{self.prefix}] peak finder: no 'source' component in "
+                f"this configuration, so there is nothing to seed."
+            )
+            return
+
+        # Gate on t_0 ALONE, not on the full observable set -- see
+        # peakfind.t_0_is_already_available for why user_hints_sufficient is
+        # the wrong question here (it treats a t_E legitimately derived from
+        # the galactic model's kinematics as "unseeded" and lets the finder
+        # override it).
+        if not forced and peakfind.t_0_is_already_available(
+            self.config_manager
+        ):
+            return
+
+        curves = []
+        for t, f, e, _df in per_file:
+            ok = np.isfinite(t) & np.isfinite(f) & np.isfinite(e) & (e > 0)
+            if ok.sum() >= 4:
+                curves.append((t[ok], f[ok], 1.0 / e[ok] ** 2))
+        if not curves:
+            logger.warning(
+                f"[{self.prefix}] peak finder: no usable epochs; "
+                f"t_0/u_0/t_E keep their defaults."
+            )
+            return
+
+        # Hand the search this component's OWN magnification so the seed is
+        # built with the same u_0 floor the likelihood uses.  Parallax is
+        # held at zero (delta_e = delta_n = 0), matching run_or_load's
+        # no_parallax default: a PSPL seed cannot resolve the trajectory
+        # asymmetry, so it should not claim to.
+        zeros = {}
+
+        def mag_fn(t, t_0, u_0, t_E):
+            d = zeros.get(len(t))
+            if d is None:
+                d = np.zeros_like(t)
+                zeros[len(t)] = d
+            return self._pspl_magnification(t, d, d, t_0, u_0, t_E, 0.0, 0.0)
+
+        try:
+            seed = peakfind.find_pspl_seed(curves, mag_fn=mag_fn)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"[{self.prefix}] peak finder failed "
+                f"({type(exc).__name__}: {exc}); t_0/u_0/t_E keep their "
+                f"defaults."
+            )
+            return
+        if seed is None:
+            logger.warning(
+                f"[{self.prefix}] peak finder found no PSPL solution; "
+                f"t_0/u_0/t_E keep their defaults."
+            )
+            return
+        peakfind.push_peak_find_hints(
+            seed, self.config_manager, source=self.prefix
+        )
+        get_collector(system).add(
+            "Starting values for the microlensing trajectory "
+            "($t_0$, $u_0$, $t_{\\rm E}$) were derived from a point-lens "
+            "point-source fit to the light curves.",
+            section="microlensing",
+            key=f"{self.prefix}.peakfind",
             rank=30,
         )
 

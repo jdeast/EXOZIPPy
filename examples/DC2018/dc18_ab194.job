@@ -1,0 +1,75 @@
+# /bin/sh
+# ----------------Parameters---------------------- #
+#$ -S /bin/sh
+#$ -pe mthread 32-64
+#$ -q lThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc194ab
+#$ -o ab194/dc18_ab194.$JOB_ID.$TASK_ID.log
+#
+# FOUR ARMS ON EVENT 194, one change each (JDE items 1, 3, 5, 7).
+#
+#   qsub -t 1-4 dc18_ab194.job
+#
+# WHY 194.  Its simulated mu_rel is 11.49 mas/yr, against 4.7-11.5 for the
+# other five events and 1.81 for DC2018-128.  128's truth sits deep in the
+# wing of the galactic kinematic prior, which is what produced its 6.6x
+# theta_E error (8.6.7); 194's sits where the prior actually lives.  So if
+# the physical parameters come back right here and wrong on 128, the
+# difference is the SIMULATION's atypical draw and not our model -- which is
+# a claim only a sane-truth event can support.
+#
+# THE ARMS, and each one answers a specific question:
+#   async  the control: ptde_async, the sweep's own configuration.
+#   sync   ptde instead.  Changes NOTHING else, which is the point: the two
+#          are advertised as the same algorithm and 2.4.16 found their
+#          validation has already diverged.
+#   tight  data-driven prior bounds (8.2.2 path 1) applied by hand: t_0 to
+#          the observing season, |u_0| <= 3, err_scale to [0.1, 10],
+#          log_f_total to the measured baseline +/-2 dex.  8.2.2's 57%-of-
+#          cost measurement was a NESTED SAMPLING result (cost ~ nlive * H);
+#          with NS shelved, this asks whether the bounds buy anything for
+#          PTDE, where they enter through the whitening probe, the start
+#          dispersion and how much useless volume the hot rungs explore.
+#   u0te   fitu0te on the source: sample u_0*t_E instead of u_0.  The one
+#          coordinate swap the sweep has never used, and the coordinate for
+#          exactly the u_0/t_E/f_blend degeneracy that makes the heavily
+#          blended events hard.
+#
+# SLOTS ARE REQUESTED AS A RANGE (32-64) and `sampler.cores` is then set
+# from $NSLOTS on the node.  Both halves are needed and neither works alone:
+# mthread's allocation_rule is $pe_slots, so all slots must land on ONE
+# host, and lThC.q had 3,510 of 4,616 slots free while a flat 64-slot
+# request still would not start -- the cluster was not full, the individual
+# NODES were.  A range schedules against whatever a node has spare.  But a
+# config still claiming `cores: 64` after SGE granted 32 oversubscribes the
+# node 2x, which is precisely review 2.4.11's defect, so dc18_set_cores.py
+# writes a per-job copy of the config with the granted count.  It copies
+# rather than edits: the committed configs are read by neighbouring array
+# tasks, and what ran stays reproducible from the committed file plus
+# $NSLOTS.
+#
+# ----------------Modules------------------------- #
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+# PyTensor's compile lock uses flock(); ~/.pytensor is on NFS here and this
+# cluster's NFS client drops advisory locks mid-compile (ENOLCK/ESTALE).
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+ev=$(sed -n "${SGE_TASK_ID}p" ab194/arms.txt)
+if [ -z "$ev" ]; then
+    echo "No event for task ${SGE_TASK_ID:-<unset>}" >&2
+    exit 1
+fi
+
+echo "event $ev   commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)   $(date)"
+cfg="${TMPDIR:-/tmp}/$(basename ${ev})_$$.yaml"
+python dc18_set_cores.py "ab194/$ev/DC2018_194.yaml" "$cfg" --cores "${NSLOTS:?NSLOTS unset}"
+exozippy "$cfg"
+echo "exit $?   $(date)"

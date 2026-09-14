@@ -62,12 +62,26 @@ def _seed_chi2(name, strip_prefixes=()):
     blocker returns on any pm/parallax entry.
     """
     src = EXAMPLES_DIR / name
-    cfg_path = [
+    # PREFER THE CANONICAL CONFIG, <name>.yaml, AND SORT THE FALLBACK.
+    # `glob.glob(...)[0]` is FILESYSTEM ORDER, so which config this picked
+    # depended on directory layout: in a long-lived checkout it returned
+    # `ob140939_ab_deo.yaml` and `ob161003_long.yaml` -- pre-split A/B
+    # variants with no `source:` block -- while the params files those
+    # configs name carry post-split `source.*` keys, so the build died with
+    # a STRICT NAMING ERROR.  In a fresh worktree the same glob returned the
+    # shipped `ob140939.yaml` / `ob161003.yaml` and every test passed.  So
+    # this file passed or failed according to where it was checked out,
+    # which cost a full afternoon of hunting a regression that did not
+    # exist.  The canonical config is also the one whose seed quality anyone
+    # reading these numbers would assume was measured.
+    candidates = sorted(
         p
         for p in glob.glob(str(src / "*.yaml"))
         if "params" not in os.path.basename(p)
         and "hpc" not in os.path.basename(p)
-    ][0]
+    )
+    canonical = str(src / f"{name}.yaml")
+    cfg_path = canonical if canonical in candidates else candidates[0]
     work = pathlib.Path(tempfile.mkdtemp()) / name
     shutil.copytree(
         src, work, ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#")

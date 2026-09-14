@@ -243,25 +243,42 @@ KELT4_START = {
 # property of this system, not evidence that m sin i is the better statistic.
 # We report both because the field's standard is m sin i.
 #
-# WHY THE MASS STARTS ~7% ABOVE THE PUBLISHED 0.90 Mjup.  kelt4_rvonly.yaml
+# WHY THE MASS STARTS ~10% ABOVE THE PUBLISHED 0.878 Mjup.  kelt4_rvonly.yaml
 # is RV-only, so there is no inclination information.  The params file's
 # `orbit.0.cosi: 0.11996` (the published, transit-derived i = 83.1 deg) is
 # only a START, the polish is free to walk cosi, and it lands at 0.50545,
 # i = 59.6 deg.  `mass = m sin i / sin i` inherits that entirely.
 #
-# WHAT WAS MEASURED, AND WHY THE LITERATURE BAND IS WIDE.  At this start
-# sin i = 0.862855 and m sin i = 0.834700 Mjup.  Against a published 0.902
-# that is -7.5% (-6.8% against the published m sin i of 0.8956); against the
-# 0.878 that run.md quotes it is -4.9%.  So the agreement is real but not
-# tight, and three things explain the gap without any of them being a defect:
-# this is a START (one L-BFGS local optimum), it uses two of the four
-# published RV datasets (EXPERT and FIES are commented out of the config) and
-# no long-term trend for the BC companions, and the repo records no published
-# mass of its own -- the review doc quotes 0.90 and run.md quotes 0.878.  The
-# eccentricity difference is NOT one of them: e = 0.0789 here gives
-# sqrt(1-e^2) = 0.9969, a 0.3% effect.  The band below is therefore
-# calibrated from that -7.5%, not from a claim of agreement, and it is still
-# tight enough to catch a factor-of-two or a unit slip.
+# WHAT WAS MEASURED.  At this start sin i = 0.862855 and m sin i = 0.834700
+# Mjup.
+#
+# WHICH PUBLISHED NUMBER TO COMPARE AGAINST -- and there are FOUR, which is
+# what an earlier version of this comment got wrong.  Eastman+2016 (AJ 151,
+# 45) reports an ECCENTRIC and a CIRCULAR solution for KELT-4Ab, each with a
+# mass and an m sin i:
+#
+#     mass    eccentric  0.878 +0.070/-0.067    circular  0.902 +0.060/-0.059
+#     m sin i eccentric  0.871 +0.069/-0.066    circular  0.896 +0.060/-0.058
+#
+# kelt4_rvonly.yaml FITS ECCENTRICITY (e = 0.0789 at this start), so the
+# ECCENTRIC column is the comparable one.  Against it:
+#
+#     m sin i  0.834700 vs 0.871   ->   -4.2%,  -0.55 sigma
+#     mass     0.967370 vs 0.878   ->  +10.2%,  +1.28 sigma
+#
+# So m sin i sits INSIDE the published uncertainty and the mass is 1.28
+# sigma high -- the prior-domination signature this file documents, and a
+# factor 2.3 better in sigma for the quantity the RVs actually constrain.
+# The earlier reading here ("-7.5%, about as far the other way") differenced
+# against 0.902, the CIRCULAR MASS: wrong solution AND wrong quantity.  0.90
+# and 0.878 were never two sources disagreeing -- they are two solutions in
+# one paper, and a KELT-4Ab mass quoted without saying WHICH is unusable.
+#
+# The residual -4.2% needs no defect to explain it: this is a START (one
+# L-BFGS local optimum, not a posterior), and the config uses two of the
+# four published RV datasets (EXPERT and FIES are commented out) with no
+# long-term trend for the BC companions.  Eccentricity is not a factor
+# either way: sqrt(1-e^2) = 0.9969, a 0.3% term.
 #
 # `orbit.sini` is a manifest parameter but appears in neither this table nor
 # the trace, so sin i is derived from cosi.  Implementing m sin i as a
@@ -275,8 +292,13 @@ KELT4_START_MSINI = 0.834700  # Mjup; golden regression
 # that, tighter than every other parameter tolerance here, and it is the
 # assertion that would notice the mass and the inclination drifting apart.
 KELT4_MSINI_RTOL = 5.0e-3
-KELT4_PUBLISHED_MASS = 0.90  # Mjup, Beatty+2016; see the band above
-KELT4_PUBLISHED_RTOL = 0.15
+# Eastman+2016 (AJ 151, 45), the ECCENTRIC solution's m sin i -- the
+# quantity this config fits and the quantity the RVs constrain.  Asserted
+# against the PUBLISHED UNCERTAINTY rather than an invented percentage, so
+# the band means something: our start is 0.55 sigma low, and 1 sigma leaves
+# ~2x headroom while still catching a factor-of-two or a unit slip.
+KELT4_PUBLISHED_MSINI = 0.871  # Mjup
+KELT4_PUBLISHED_MSINI_SIGMA = 0.066  # the lower error; we sit below
 
 # THE GOLDEN START LOGP, and why it is the more robust of the two assertions
 # (JDE, 2026-09-14).  logp is STATIONARY at an optimum, so the 6e-4 of
@@ -478,18 +500,22 @@ def test_run_fit_kelt4_start_is_physical(kelt4_result):
     )
 
     # (b) PHYSICS: m sin i is the RV-constrained quantity, so unlike the
-    #     mass it IS comparable to the published value.  The band is wide
-    #     for the reasons recorded above (a start, not a posterior; two of
-    #     four RV datasets; no published value in the repo) and is there to
-    #     catch a gross regression -- a factor of two, a unit slip -- not to
-    #     claim tight agreement.
-    assert msini == pytest.approx(
-        KELT4_PUBLISHED_MASS, rel=KELT4_PUBLISHED_RTOL
-    ), (
-        f"m sin i at the start is {msini:.4f} Mjup, more than "
-        f"{KELT4_PUBLISHED_RTOL:.0%} from the published "
-        f"{KELT4_PUBLISHED_MASS} Mjup. m sin i is what the RVs constrain, so "
-        f"unlike planet.b.mass this one IS comparable to the literature."
+    #     mass it IS comparable to the published value -- and it must be
+    #     compared against the ECCENTRIC solution, because that is what this
+    #     config fits.  Asserted against the published UNCERTAINTY rather
+    #     than an invented percentage: the start sits 0.55 sigma low, so one
+    #     sigma is a real constraint with about 2x headroom, and it still
+    #     catches a factor of two or a unit slip.
+    offset = abs(msini - KELT4_PUBLISHED_MSINI)
+    assert offset < KELT4_PUBLISHED_MSINI_SIGMA, (
+        f"m sin i at the start is {msini:.4f} Mjup, "
+        f"{offset / KELT4_PUBLISHED_MSINI_SIGMA:.2f} sigma from Eastman+2016's "
+        f"eccentric-solution {KELT4_PUBLISHED_MSINI} +/- "
+        f"{KELT4_PUBLISHED_MSINI_SIGMA} Mjup. m sin i is what the RVs "
+        f"constrain, so unlike planet.b.mass this one IS comparable to the "
+        f"literature -- but only to the ECCENTRIC column, since this config "
+        f"fits eccentricity (the circular solution's 0.896 is a different "
+        f"number for a different model)."
     )
 
 

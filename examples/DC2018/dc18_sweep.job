@@ -1,0 +1,61 @@
+# /bin/sh
+# ----------------Parameters---------------------- #
+#$ -S /bin/sh
+#$ -pe mthread 32-64
+#$ -q lThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc18swp
+#$ -o sweep/dc18_sweep.$JOB_ID.$TASK_ID.log
+#
+# THE DC2018 SWEEP: six events, one identical recipe, no MMEXOFAST.
+#
+#   qsub -t 1-6 dc18_sweep.job
+#
+# Every config was written by dc18_sweep_config.py from rules that are the
+# same for all six -- see that file's docstring for each rule and for what
+# was deliberately NOT carried over from v7 (the log_theta_E start that used
+# the answer, MMEXOFAST, and the solar pins).  Seeds come from dc18_seed.py,
+# a 3-second PSPL peak fit that reproduces MMEXOFAST's t_0/u_0/t_E to 4-5
+# significant figures on every event where MMEXOFAST produced one, and
+# produces seeds for 008 and 062 where MMEXOFAST produced none.
+#
+# ONE TASK = ONE EVENT.  They are independent; a failure in one says nothing
+# about the others, which is the point of running them identically.
+#
+# SLOTS ARE REQUESTED AS A RANGE (32-64) and `sampler.cores` is then set
+# from $NSLOTS on the node.  Both halves are needed and neither works alone:
+# mthread's allocation_rule is $pe_slots, so all slots must land on ONE
+# host, and lThC.q had 3,510 of 4,616 slots free while a flat 64-slot
+# request still would not start -- the cluster was not full, the individual
+# NODES were.  A range schedules against whatever a node has spare.  But a
+# config still claiming `cores: 64` after SGE granted 32 oversubscribes the
+# node 2x, which is precisely review 2.4.11's defect, so dc18_set_cores.py
+# writes a per-job copy of the config with the granted count.  It copies
+# rather than edits: the committed configs are read by neighbouring array
+# tasks, and what ran stays reproducible from the committed file plus
+# $NSLOTS.
+#
+# ----------------Modules------------------------- #
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+# PyTensor's compile lock uses flock(); ~/.pytensor is on NFS here and this
+# cluster's NFS client drops advisory locks mid-compile (ENOLCK/ESTALE).
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+ev=$(sed -n "${SGE_TASK_ID}p" sweep/events.txt)
+if [ -z "$ev" ]; then
+    echo "No event for task ${SGE_TASK_ID:-<unset>}" >&2
+    exit 1
+fi
+
+echo "event $ev   commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)   $(date)"
+cfg="${TMPDIR:-/tmp}/$(basename ${ev})_$$.yaml"
+python dc18_set_cores.py "sweep/$ev/DC2018_$ev.yaml" "$cfg" --cores "${NSLOTS:?NSLOTS unset}"
+exozippy "$cfg"
+echo "exit $?   $(date)"
