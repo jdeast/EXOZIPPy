@@ -450,6 +450,16 @@ class MulensInstrument(Instrument):
         spec = event.config[0].get("mmexofast") if event.config else None
         if spec is False:
             return
+        # Whether THIS call ends up pushing seeds.  The peak finder has to
+        # know, because `ConfigManager.add_seed_hints` ASSIGNS
+        # `seed_hint_sets` (config.py:1299) instead of appending -- so a
+        # second caller silently REPLACES the first, and MMEXOFAST's K seed
+        # sets, including its binary-lens s/q/alpha, would be thrown away
+        # for one point-lens seed.  `user_hints_sufficient` cannot stand in
+        # for this test: it inspects user_params and probe_derivable, and
+        # seed hints appear in NEITHER, so it stays False even after a
+        # successful MMEXOFAST push.
+        self._mmexofast_seeded = False
         is_binary = event.n_companions >= 1
         want_rho = bool(event.finite_source)
 
@@ -464,12 +474,14 @@ class MulensInstrument(Instrument):
             self._reject_time_spec_with_mmexofast(spec)
             data = mmexofast_support.load_json(spec)
             if data is not None:
-                mmexofast_support.push_seed_hints(
-                    data,
-                    self.config_manager,
-                    want_rho=want_rho,
-                    is_binary=is_binary,
-                    source=spec,
+                self._mmexofast_seeded = bool(
+                    mmexofast_support.push_seed_hints(
+                        data,
+                        self.config_manager,
+                        want_rho=want_rho,
+                        is_binary=is_binary,
+                        source=spec,
+                    )
                 )
         else:
             if spec != "auto" and mmexofast_support.user_hints_sufficient(
@@ -488,12 +500,14 @@ class MulensInstrument(Instrument):
                 options=options,
             )
             if data is not None:
-                mmexofast_support.push_seed_hints(
-                    data,
-                    self.config_manager,
-                    want_rho=want_rho,
-                    is_binary=is_binary,
-                    source=json_path,
+                self._mmexofast_seeded = bool(
+                    mmexofast_support.push_seed_hints(
+                        data,
+                        self.config_manager,
+                        want_rho=want_rho,
+                        is_binary=is_binary,
+                        source=json_path,
+                    )
                 )
         if data is None:
             return
@@ -550,6 +564,22 @@ class MulensInstrument(Instrument):
         if spec is False:
             return
         forced = spec is True
+
+        # SEEDS ALREADY EXIST -> DO NOT TOUCH THEM.  See the note in
+        # _resolve_mmexofast: add_seed_hints overwrites, so running here
+        # after a successful MMEXOFAST push would discard every solution it
+        # found and replace them with one point-lens seed.  `forced` still
+        # overrides, because replacing MMEXOFAST's seeds on purpose is the
+        # entire point of the A/B mode -- but it says so.
+        if getattr(self, "_mmexofast_seeded", False):
+            if not forced:
+                return
+            logger.warning(
+                f"[{self.prefix}] peak_find: true REPLACES the MMEXOFAST "
+                f"seeds already loaded for this fit -- add_seed_hints "
+                f"overwrites rather than appends, so its multi-seed "
+                f"solutions (and any s/q/alpha) are discarded."
+            )
 
         is_binary = event.n_companions >= 1
         want_rho = bool(event.finite_source)

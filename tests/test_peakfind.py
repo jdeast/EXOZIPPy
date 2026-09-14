@@ -121,3 +121,32 @@ def test_push_hints_seeds_exactly_three_paths():
 
 def test_push_hints_is_a_no_op_without_a_seed():
     assert peakfind.push_peak_find_hints(None, object()) == 0
+
+
+def test_add_seed_hints_overwrites_which_is_why_the_gate_exists():
+    """The reason _peak_find_seeds must not run after MMEXOFAST.
+
+    ConfigManager.add_seed_hints ASSIGNS seed_hint_sets rather than
+    appending (config.py), so two callers do not compose -- the second
+    silently discards the first.  MMEXOFAST pushes one seed set per
+    solution, including the binary-lens s/q/alpha; the peak finder pushes
+    exactly one point-lens set.  Running it second therefore threw away
+    every MMEXOFAST solution, and user_hints_sufficient could not catch it
+    because that reads user_params and probe_derivable, where seed hints
+    never appear.  This pins the overwrite so the gate is not "fixed" away
+    by someone who assumes the calls accumulate.
+    """
+    from exozippy.config import ConfigManager
+
+    cm = ConfigManager.__new__(ConfigManager)
+    cm.seed_hint_sets = []
+    cm._translate_and_scale = lambda path, value: (path, value)
+
+    cm.add_seed_hints([{"a": 1.0}, {"a": 2.0}])
+    assert len(cm.seed_hint_sets) == 2
+    cm.add_seed_hints([{"a": 3.0}])
+    assert len(cm.seed_hint_sets) == 1, (
+        "add_seed_hints now appends; the peak finder's _mmexofast_seeded "
+        "gate in mulensinstrument was written for overwrite semantics and "
+        "should be revisited"
+    )
