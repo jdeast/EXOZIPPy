@@ -35,7 +35,7 @@ from .outputs.modes import MODE_NO_VALID_DRAWS
 from .outputs.report_pipeline import build_mode_reports
 from .system import System
 from .trace_meta import check_trace_freshness
-from .yamlio import load_yaml
+from .yamlio import load_system_config
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,9 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
     since the whole point of this command is to be able to inspect an
     already-finished trace.
     """
-    config = load_yaml(config_file)
+    # An empty or non-mapping config is refused by name here rather than
+    # crashing on `config.get("prefix", ...)` below (review 2.3.11).
+    config = load_system_config(config_file)
 
     if logger_level:
         config["logger_level"] = logger_level.upper()

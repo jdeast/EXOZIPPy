@@ -39,6 +39,22 @@ want for a fresh fit -- while the run that actually happened stays
 reproducible after the fact. A hardcoded default seed would be strictly worse
 than none: it would correlate every user's chains while looking responsible.
 
+**The nested backends take the seed two different ways, and ultranest's is a
+process-global one.** dynesty has an `rstate=` argument and gets
+`np.random.default_rng(seed)` handed to it. ultranest (4.5.0) has no such
+argument on `ReactiveNestedSampler` OR on `popstepsampler.PopulationSliceSampler`,
+and draws its live-point indices and slice positions from numpy's LEGACY GLOBAL
+state -- so `nested._seed_ultranest` calls `np.random.seed(seed)` immediately
+before the sampler is constructed, which is ultranest's own mechanism
+(`ultranest.solvecompat.solve` does exactly that). Until review 2.4.7 it did
+not, so `sampler: seed:` reached the dynesty branch and nothing else while
+run.py's startup line promised the user a reproducible rerun. Perturbing the
+process-global generator is acceptable only because `nested_sample` owns the
+process there -- one sampler is dispatched, the forked workers only evaluate a
+deterministic logp, and every draw EXOZIPPy makes for itself goes through an
+explicit `default_rng`. If a later ultranest grows a real seed argument, use it
+and delete the global.
+
 **`ptde_async` is the one method a seed cannot make reproducible, and that is
 a trade, not a defect.** It consumes worker results through
 `result_q.get(timeout=...)` -- arrival order -- and whether a proposal is
@@ -134,6 +150,88 @@ still a dict (36 us to pickle, 21 us to unpickle per proposal, against 4.3 and
 changes the contract `polish`, `_make_starts`, `describe_proposal` and the
 tests all share, so it is its own PR.
 
+## Sync and async share a lot -- and the parity rule for what they share
+
+`ptde.py` and `ptde_async.py` are two loops around one sampler, and the
+sharing is deliberate. Two channels carry it, and the second one is
+invisible if you only grep for `_common`:
+
+- **`_common.py`** owns the non-statistical scaffolding both call: the
+  packing and the DE move (`RawLayout`), the positional logp
+  (`PositionalLogp`), the worker pool (`create_pool`, `recycle_pool`,
+  `_shutdown_pool`, `_worker_init`, `warn_serial_eval_timeout`), the start
+  population (`resolve_n_chains`, `resolve_start_population`,
+  `_make_starts`, `plot_start_ensemble`), the gamma rule (`next_gamma`),
+  the stop handlers, `LpPlausibilityGuard`, the draw buffers
+  (`grow_draw_storage` and its hot sibling `grow_hot_draw_storage`), and
+  the output (`assemble_inference_data`, `stamp_and_log_run_summary`).
+- **`ptde.py` itself** owns nine statistical helpers that `ptde_async`
+  imports from it directly: `_geometric_ladder`, `resolve_n_temps`,
+  `ladder_health_report`, `_deo_pair_sequence`, `_record_round_trips`,
+  `_update_ladder_barrier`, `_convergence_check_schedule`,
+  `_safe_progress`, `_check_convergence`.
+
+**What is deliberately NOT shared** is the loop itself, and everything whose
+shape follows from it: the stop/abort path (sync breaks inline, async runs a
+`_maybe_stop` closure over a category state machine), `eval_timeout`
+enforcement (sync blocks on a batch `_map_logp_timeout`, async scans
+in-flight submissions on a wall clock), the ladder- and gamma-adaptation
+windows (sync gets its window free from `log_every`; async has to count
+proposals and freeze gamma when the first chain starts recording), the
+progress line, and the hot-rung storage, which is async-only. Folding those
+into one function would mean re-deriving the asynchrony ptde_async exists
+for -- do not try.
+
+**The rule, which is what review 6.4.6 is about.** 6.4.5 stopped the T=1
+draw buffers being preallocated at the full configured `draws` -- ~1.6 GB of
+resident memory reserved and touched for draws an early-stopped run never
+takes -- and closed, having fixed `ptde.py` only. `ptde_async`, the
+production default, kept preallocating (~2.9 GB on a DC2018-shaped run,
+before the hot group) because nothing failed when only one of the two was
+fixed. So: **a storage or memory fix to one PTDE sampler is not done until
+the parity test covers both.** That test is
+`tests/test_ptde.py::test_an_early_stop_does_not_allocate_the_draws_it_never_takes`,
+parametrized over `ptde_sample` and `ptde_async_sample` -- the same "one
+rule, N callers" shape `tests/test_polish.py` uses for `next_gamma`. Add the
+arm before the fix, not after.
+
+The parallel code paths most likely to drift the same way, honestly: the
+nine-key `_safe_progress` payload dict (written out verbatim in both files,
+so a new GUI snapshot key lands in one), the two `eval_timeout` mechanisms,
+the ladder-adaptation blocks (async's has already learned a windowing fix
+sync's has not), and the stop/abort wording. None is a bug today; all four
+are two copies of one intention.
+
+**6.4.6 is not the only instance, which is the point.** Reviews 1.4.3 and
+2.4.16 are the same shape in the argument surface rather than the storage:
+`de_mode_hop` is validated in `ptde_async_sample` (it raises outside
+`[0, 1)`) and NOT in `ptde_sample`, while `run.py` feeds the identical
+config value to both. So the useful question is never "is this knob
+validated" -- it is **"which shared knobs does exactly one of the two
+samplers validate, and which shared buffers does exactly one of them
+manage?"** Ask it of anything `run.py` forwards to both.
+## `de_mode_hop`: the counters the adapter reads must share one window
+
+ter Braak's gamma=1 mode hop (`sampler: {de_mode_hop: p}`, default 0.0 = off)
+is deliberately over-sized and mostly rejected, so both samplers SUBTRACT the
+hop accept/propose counts from the T=1 rate the gamma adapter reads. Letting
+hops depress that rate would make the adapter shrink gamma, degrading
+within-mode sampling as the price of attempting hops.
+
+**A counter subtracted from a windowed counter must itself be windowed.**
+`ptde` zeroed `n_accept`/`n_propose` at each `log_interval` during tune and
+left the hop counters cumulative, so from the second window on the
+denominator was short by every earlier window's hops: the measured rate ran
+above 1.0 (1.222, gamma 0.872 -> 2.155, away from target) and, once the
+numerator went negative, the `ar_T1 > 0` guard ended the adaptation for the
+rest of tune in silence, freezing a garbage gamma into the draw phase
+(review 1.4.3). `ptde_async` was never affected -- it keeps SEPARATE window
+counters for the adapter and lets the hop counters run cumulatively for its
+report. After `ptde`'s unconditional tune -> draw reset its hop counters span
+the draw phase, which is the same window `n_accept`/`n_propose` report on.
+Both samplers log the hop acceptance at wrap-up through one
+`_common.log_mode_hop_summary`, so the message cannot drift again.
+
 ## `cores`: one rule, and `None` means AUTO
 
 `_common.default_cores()` is the single definition of "how many cores does a
@@ -154,6 +252,21 @@ one function and a single core in another, which is exactly how a hot-mode
 polish came to hold 1 of 36 cores for 38 minutes with nothing in the log. If
 you add a stage that forks, call `default_cores()` for its fallback and accept
 a `cores` argument that `run.py` can fill.
+
+**`cores <= 0` is that same automatic grant** (review 2.4.8). It is the `None`
+rule's loophole: `0` is not `None`, so the three resolvers each did their own
+thing with it -- `create_pool` took `min(0, total_proposals)` and ran serial,
+`_resolve_polish_cores` swept it into its `n <= 1` serial arm, and `nested.py`
+read it as AUTO because `cores or default_cores()` treats 0 as falsy -- so one
+written number produced two different behaviors within a single run, and a
+negative value produced a negative pool size in the third. `run.py`'s
+`resolve_cores_setting` now normalizes `<= 0` to the `None` sentinel at the
+parse boundary and **warns** rather than raising or clamping silently (rope,
+not gates: `cores: 0` most plausibly means "let the machine decide", so the run
+takes that reading and the message says which reading it got and that
+`cores: 1` is how to ask for serial). All three resolvers carry the same arm
+anyway, so a direct caller -- a test, a script, the GUI -- lands where `run.py`
+would have put it.
 
 ## eval_timeout: what it does, and where it is enforced
 
@@ -184,7 +297,26 @@ worth knowing before changing it:
   coming.
 - Both samplers tear the pool down with `_common._shutdown_pool`, never
   `close()` + `join()`: the workers ignore SIGTERM by design, so `join()` on a
-  wedged worker never returns (2.4.1).
+  wedged worker never returns (2.4.1). **`polish.polish_raw_starts` now does
+  the same** -- it used to `close()` + `join()`, which was survivable only
+  while nothing in that stage could wedge a worker.
+
+**The seed polish enforces it too, but nothing configures it yet (3.4.4).**
+`ptde.polish_seed_starts` and `polish.polish_raw_starts` take an
+`eval_timeout` with the same semantics as above, plus a `pool_recycler`
+callable -- `_common.recycle_pool`, supplied by whoever OWNS the pool, which
+for this stage is `polish_raw_starts`. The recycler is not a style choice:
+`polish_seed_starts` is handed a pool and does not know how many workers to
+fork, so the owner has to learn which object it now owns or its own teardown
+closes the corpse and leaks the live one. Both default to `None`, and
+**`run.py` passes neither**, so today's behaviour is unchanged: `sampler:
+eval_timeout:` is in `run.METHOD_ONLY_SAMPLER_KEYS` as a PTDE-family key, and
+`warn_method_only_sampler_keys` tells a `demc`/`demcz`/`nested` user it is
+IGNORED -- which honoring it in a stage that runs under every method would
+turn into a lie for a gradient-free model. That partition is review 2.3.6's
+ruling; re-opening it is its own change. What the polish gained regardless is
+the mid-batch heartbeat (see `run.md`), which needs no timeout to tell
+computing from hung.
 
 ## Chain starts
 
@@ -207,3 +339,62 @@ scatter factor is `min(sqrt(500/D), 3)`.
 Explicit `initvals` are consumed positionally, one per chain, and a
 wrong-length list RAISES (it used to be a bare `assert`, which `python -O`
 compiles out, leaving chains paired with the wrong starts).
+
+**The params file DECLARES whether its seeds want dispersing; the sampler does
+not guess** (`overdisperse:`, review 8.3.3). K seeds mean one of exactly two
+things and nothing at run time can tell them apart: the user is seeding at K
+MODES, each of which still wants scattering, or they are iterating from a file
+whose seeds are ALREADY properly dispersed -- joint posterior draws off a
+finished fit, spread across its covariance by construction. So the writer says
+which. `mkparam` writes `overdisperse: false` for a multi-seed restart file (a
+true statement about the seeds' ORIGIN, not a claim that the fit converged) and
+`true` for its default single-seed one; `utilities/mmexofast_to_params` writes
+`true` (its seeds are single optima, one per solution). An **absent** key means
+`true` -- the safe direction for a hand-written file, since over-dispersing a
+good seed set costs some burn-in while under-dispersing a bad one makes Rhat
+read ~1.00 on chains that never mixed. It is a reserved NON-parameter key and
+is stripped by `ConfigManager` before anything downstream sees it
+(`src/exozippy/config.md`).
+
+`false` means "use these seeds exactly as they are": every chain starts at its
+round-robin seed with no jitter, and the `max_exact = n_chains // 2` budget
+does not apply. Two guards come with it, both at sampler start:
+
+- **One seed plus `false` RAISES.** Every chain would start at the identical
+  point, so every DE difference vector is exactly zero and the population can
+  never move apart.
+- **Few unique seeds WARN, in two tiers.** Below `2 * n_params` (the default
+  chain count, and ter Braak's mixing recommendation, so the tier has headroom)
+  it is a mixing complaint. Below `de_span_floor(n_params) = n_params + 2` it
+  stops being one: a DE proposal for member i draws its difference vector from
+  the OTHER members, so n-1 members span at most n-2 directions and it takes
+  `n >= n_params + 2` to span parameter space at all. Below that the population
+  sits in a proper subspace whose only escape is `DE_JITTER = 1e-4`, and
+  off-hull diffusion goes as `jitter*sqrt(steps)`, so covering ONE whitened
+  sigma takes ~1e8 accepted steps -- ergodic in principle, hopeless in
+  practice. The escalated message says so. `de_span_floor` is the ONE owner of
+  that number, shared with `warn_if_population_degenerate`, which asks the same
+  question of the CHAIN count.
+
+**The threshold check is here and not in `mkparam`**, and that is structural:
+`n_params` belongs to the NEXT fit's model, which may differ from the one that
+produced the seeds (added data, a changed parameterization), so the writer
+cannot evaluate it. What the writer CAN do is record what it measured, and
+`mkparam`'s header comment carries the min bulk-ESS and max split-Rhat of the
+fit its seeds came from. Those are a RECORD and deliberately **not** a gate.
+A plain "did it converge?" boolean would be the wrong gate because nobody
+reruns a well-mixed fit: the population of fits `mkparam` processes is selected
+for being unsatisfactory, so the flag would read False almost always and
+`overdisperse: false` would be dead code. The two also gate different failures.
+CONVERGENCE (max Rhat) asks whether the seeds come from the right distribution
+at all; MIXING (min ESS) asks how many EFFECTIVELY INDEPENDENT seeds there are
+-- K seeds off a chain with bulk-ESS `n_eff` are ~`n_eff` independent points,
+so the affine-hull argument above really applies with `n_eff` and not with K,
+and forty seeds off an ESS-5 chain span at most a 4-dimensional hull. And
+seeds drawn from an unconverged or mode-stuck posterior are properly dispersed
+with respect to what was SAMPLED while being badly under-dispersed with respect
+to the TRUE posterior; no local test on the seed list can detect that, which is
+exactly why the numbers are printed for a human. `warn_if_starts_underdispersed`
+still runs on an `overdisperse: false` population and will usually fire: that is
+correct, since Rhat is compromised either way, and it is measurement rather than
+contradiction. Tests: `tests/test_overdisperse_declaration.py`.

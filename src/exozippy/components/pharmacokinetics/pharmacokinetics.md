@@ -373,21 +373,24 @@ Seven places where the fit was not frictionless:
    built at stage 7, before any sampling). Deferred rather than guessed at,
    and it is the one thing P4 owes that P4 does not deliver.
 
-7. **The start-value audit reports the right miss with the wrong reason.**
-   The user-start contract holds -- `diagnostics.check_user_starts` does catch
-   `subject.S1.cl: {initval: 10.0}` reaching nothing, which is what matters --
-   but it classifies it as *"your value was kept, but the derivation
-   reproduces it only approximately"* on a **72% miss** (measured: requested
-   10.0, produced 2.818). The classifier is binary: the ledger changed ->
-   `overspecified`, the ledger was kept -> `approximate`. This is a third
-   case, and it is the one a component with no `symbolic_physics.py` produces
-   for every derived parameter: the ledger kept the value because nothing in
-   the engine could *use* it, so no derivation was attempted, approximately or
-   otherwise. The remedy differs too -- "write the start against the sampled
-   coordinate, or give the component a relation" -- which is the same shape as
-   the fix commit 8ed321a9 made for a neighbouring case. Not fixed here
-   because choosing the discriminator is a policy question that touches every
-   astronomy fit's wording, and this phase had no business making it.
+7. **The start-value audit reported the right miss with the wrong reason --
+   and master had already fixed it.** Worth keeping as a finding because of
+   how it was found and how it resolved, not because anything is outstanding.
+   `diagnostics.check_user_starts` does catch `subject.S1.cl: {initval: 10.0}`
+   reaching nothing, which is what matters; on the base this branch started
+   from it classified the 72% miss as *"your value was kept, but the
+   derivation reproduces it only approximately"*, because the classifier was
+   binary (ledger changed -> `overspecified`, ledger kept -> `approximate`)
+   and a derived element whose value no `initval` channel can hold is a third
+   case.
+
+   **Independently found and fixed upstream the same week** (review 2.3.17,
+   commit `8ed321a9`), from a derived `planet.mass` coming back at 1/1047 of
+   the request -- the same defect reached from astronomy. Verified on the PK
+   case after merging master: the audit now reports `reason: "derived"` and
+   names the coordinates to write against instead, `subject.log_cl` for a
+   `cl` start and `subject.log_cl, subject.log_v` for a `t_half` one. Nothing
+   is owed here.
 
 Two smaller notes: `utilities/zenodo.fetch_assets` is generic despite its name
 and is reused here for a non-Zenodo URL, but it prints "Downloading ... from

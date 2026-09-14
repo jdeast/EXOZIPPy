@@ -38,6 +38,9 @@ class _FakeParam:
         factor=1.0,
         n=1,
         active=True,
+        derived=False,
+        sampled=True,
+        value=None,
     ):
         self.label = label
         self.names = names or []
@@ -45,8 +48,12 @@ class _FakeParam:
         self._factor = factor  # internal = user * factor
         self._n = n
         self._active = active
+        self._derived = derived
+        self._sampled = sampled
         self.shape = () if n == 1 else (n,)
-        self.value = object()  # opaque: the compiled fn is monkeypatched
+        # Opaque by default: the compiled fn is monkeypatched.  A real node
+        # is passed only where the graph WALK is under test.
+        self.value = object() if value is None else value
 
     def get_display_label(self, index=0):
         parts = self.label.split(".")
@@ -58,6 +65,12 @@ class _FakeParam:
 
     def element_is_active(self, index=0):
         return self._active
+
+    def element_is_derived(self, index=0):
+        return self._derived
+
+    def element_is_sampled(self, index=0):
+        return self._sampled and not self._derived
 
     def from_internal(self, val, index=None):
         return float(val) / self._factor
@@ -84,6 +97,9 @@ def _auditor(params, user_params, ledger=None, solved_by=None):
     a.transformed_inits = {}
     a.user_params = user_params
     a.all_params = params
+    # __init__ is bypassed, so mirror the one attribute the graph walk
+    # reads (a sampled parameter reaches an expression as `<label>_raw`).
+    a.hidden_suffixes = ["_raw", "_raw_n", "_raw_u", "_interval__", "_log__"]
     return a
 
 
@@ -324,3 +340,168 @@ def test_an_engine_recorded_contradiction_names_the_other_pin(monkeypatch):
         "the report must name the OTHER pin; 'something had to give' "
         "without saying what gave is not actionable"
     )
+
+
+def test_a_derived_parameter_gets_its_own_remedy_not_approximate(monkeypatch):
+    """
+    Given an ``initval`` on an element whose value is an EXPRESSION,
+    When the resulting miss is classified,
+    Then the reason is 'derived' and the detail carries the remedy --
+         not 'approximate'.
+
+    THIS IS THE WHOLE OF REVIEW 2.3.17's RESIDUE.  A derived
+    ``planet.Companion.mass`` came back at 1/1047 of the requested value
+    (1.03762 -> 0.00099051), which is the size measured in job 15408150 and
+    essentially the whole 12,107-nat round-trip loss.  Calling that "your
+    value was kept, but the derivation reproduces it only approximately"
+    understates it by three orders of magnitude AND points the user
+    nowhere: there is no channel an ``initval`` on a derived quantity can
+    reach, so the fix is to set the sampled parameter(s) it is computed
+    from.  ``parameter.py`` already says exactly that about ``sigma: 0``.
+    """
+    # Arrange -- the derived planet mass, requested and produced as measured.
+    p = _FakeParam(
+        "planet.mass", names=["Companion"], unit="jupiterMass", derived=True
+    )
+    a = _auditor(
+        [p],
+        {"planet.Companion.mass": {"initval": 1.03762}},
+        ledger={"planet.0.mass": 1.03762},
+    )
+    _with_produced(monkeypatch, [0.00099051])
+
+    # Act
+    (found,) = a.check_user_starts()
+
+    # Assert -- the reason, the remedy, and the SIZE all survive.
+    assert found["reason"] == "derived", (
+        "a pin on a derived quantity was classified as an approximation, "
+        "which is the misdirection 2.3.17 is about"
+    )
+    assert "only approximately" not in found["detail"]
+    assert "has no effect on a derived parameter" in found["detail"]
+    assert found["requested"] == pytest.approx(1.03762)
+    assert found["produced"] == pytest.approx(0.00099051)
+    assert found["rel"] == pytest.approx(-0.999, abs=1e-3)
+
+
+def test_the_derived_remedy_is_parameter_pys_own_sentence(monkeypatch):
+    """
+    Given the ``sigma: 0`` warning build_pymc emits for the same mistake,
+    When a derived ``initval`` miss is reported,
+    Then both carry the SAME remedy sentence.
+
+    Two spellings of one rule is how these drift: the codebase has said
+    "to hold a derived quantity constant, fix the sampled parameter(s)"
+    since before this check existed, and the report must not invent a
+    second wording for it.  Asserting the SHARED phrase rather than a
+    literal of its own is what makes this a drift guard -- reword either
+    site and this fails.
+    """
+    from exozippy.components.parameter import derived_constraint_message
+
+    shared = derived_constraint_message("sigma=0")
+    phrase = shared.split(". ", 1)[1].rstrip(".")
+    assert "sampled parameter(s)" in phrase  # the remedy, not a typo
+
+    p = _FakeParam("star.logmass", unit="dex(solMass)", derived=True)
+    a = _auditor([p], {"star.logmass": {"initval": -0.343}})
+    _with_produced(monkeypatch, [-0.2])
+
+    (found,) = a.check_user_starts()
+    assert phrase in found["detail"]
+
+
+def test_the_derived_remedy_names_the_sampled_parameters_it_reads(
+    monkeypatch,
+):
+    """
+    Given a derived value whose graph reads two sampled parameters,
+    When the remedy is written,
+    Then it NAMES them.
+
+    "Fix the sampled parameter(s)" is the class; the names are what make it
+    actionable, and they are read off the BUILT GRAPH rather than a
+    manifest -- the same source the produced value itself comes from.  Both
+    spellings a sampled parameter reaches the graph by are covered: its own
+    Deterministic (named for the label) and the ``<label>_raw`` coordinate
+    one step below it.
+    """
+    import pytensor.tensor as pt
+
+    # Arrange -- a derived mass built out of one label-named node and one
+    # raw coordinate, plus a sampled parameter it does not read.
+    log_q = pt.dscalar("lens.log_q")
+    m_raw = pt.dscalar("star.logmass_raw")
+    derived_node = 1047.0 * log_q * m_raw
+
+    p = _FakeParam("planet.mass", derived=True, value=derived_node)
+    q1 = _FakeParam("lens.log_q", value=log_q)
+    q2 = _FakeParam("star.logmass", value=m_raw)
+    q3 = _FakeParam("mulensinstrument.flux", value=pt.dscalar("unrelated"))
+
+    a = _auditor([p, q1, q2, q3], {"planet.mass": {"initval": 1.03762}})
+    _with_produced(monkeypatch, [0.00099051])
+
+    # Act
+    (found,) = a.check_user_starts()
+
+    # Assert
+    assert found["reason"] == "derived"
+    assert "lens.log_q" in found["detail"]
+    assert "star.logmass" in found["detail"]
+    assert "mulensinstrument.flux" not in found["detail"], (
+        "the remedy named a sampled parameter the expression does not "
+        "read, which sends the user to change the wrong number"
+    )
+
+
+def test_a_derived_pin_the_engine_also_overwrote_says_both(monkeypatch):
+    """
+    Given a derived element whose ledger row the engine ALSO resolved away,
+    When the miss is classified,
+    Then it reads 'derived' and still reports what the engine resolved it to.
+
+    Both facts are true and they are not alternatives: the remedy is the
+    derived one (there is no channel for the request), while the engine's
+    value is how far the back-solve got.  Reporting only the second was the
+    'overspecified' misdirection; reporting only the first would throw away
+    the one number that says where the request went.
+    """
+    p = _FakeParam("planet.mass", names=["Companion"], derived=True)
+    a = _auditor(
+        [p],
+        {"planet.Companion.mass": {"initval": 1.03762}},
+        ledger={"planet.0.mass": 0.5},
+        solved_by={"planet.0.mass": "planet.mass = q * star.mass"},
+    )
+    _with_produced(monkeypatch, [0.00099051])
+
+    (found,) = a.check_user_starts()
+    assert found["reason"] == "derived"
+    assert "sampled parameter(s)" in found["detail"]
+    assert "0.5" in found["detail"]
+    assert "planet.mass = q * star.mass" in found["detail"]
+
+
+def test_a_sampled_parameter_is_still_reported_the_old_way(monkeypatch):
+    """
+    Given the SAME size of miss on a SAMPLED element,
+    When it is classified,
+    Then it is 'approximate', exactly as before.
+
+    The new reason is keyed on the element's ROLE and nothing else: leaking
+    it onto sampled parameters would tell every user of a seeded start to
+    go and fix a parameter that does not exist.
+    """
+    p = _FakeParam("mulensevent.t_E", unit="d", derived=False)
+    a = _auditor(
+        [p],
+        {"mulensevent.t_E": {"initval": 76.9}},
+        ledger={"mulensevent.t_E": 76.9},
+    )
+    _with_produced(monkeypatch, [74.4767])
+
+    (found,) = a.check_user_starts()
+    assert found["reason"] == "approximate"
+    assert "has no effect on a derived parameter" not in found["detail"]

@@ -1,5 +1,3 @@
-from unittest.mock import patch
-
 import numpy as np
 import pymc as pm
 import pytest
@@ -60,16 +58,20 @@ def test_user_init_scale_is_ignored_and_sigma_seeds_the_scale():
     assert np.isclose(star.radius_test3.init_scale[0], 0.05)
 
 
-@patch("exozippy.diagnostics.ModelAuditor.get_aggregated_logps")
-def test_unrecognized_yaml_subkey_triggers_auditor_warning(mock_logp, caplog):
+def test_unrecognized_yaml_subkey_is_reported_by_the_auditor():
     """
     Given a YAML dictionary containing a misspelled sub-key (e.g., 'sigm' instead of 'sigma'),
     When the ModelAuditor inspects the starting state,
-    Then it should log a warning flagging the unused key.
+    Then it reports the unused key by name.
+
+    Asserted on the auditor's verdict rather than on inspect_start's log,
+    because review 2.3.16 moved the EMISSION to System.build_model -- so
+    that every caller gets it, not only `exozippy <config>`.  The authority
+    is unchanged (ModelAuditor.check_unused_yaml), which is what this test
+    was always really about; the logging half is covered end-to-end, on a
+    real System, in tests/test_unmatched_params_keys.py.
     """
     # ARRANGE
-    mock_logp.return_value = ({}, {})
-
     label = "star.A.mass_test4"
     user_params = {
         label: {"initval": 1.0, "sigm": 0.05, "lower": 0.0, "upper": 10.0}
@@ -83,31 +85,25 @@ def test_unrecognized_yaml_subkey_triggers_auditor_warning(mock_logp, caplog):
         star.add_parameter(model=model, param_name="mass_test4", system=None)
 
     # ACT
-    import logging
+    from exozippy.diagnostics import ModelAuditor
 
-    from exozippy.run import inspect_start
-
-    with caplog.at_level(logging.WARNING):
-        inspect_start(model, system, {})
+    reported = ModelAuditor(model, system, {}).check_unused_yaml()
 
     # ASSERT
-    assert "sigm" in caplog.text
+    assert any("sigm" in item for item in reported), reported
 
 
-@patch("exozippy.diagnostics.ModelAuditor.get_aggregated_logps")
-def test_unrecognized_top_level_yaml_key_triggers_auditor_warning(
-    mock_logp, caplog
-):
+def test_unrecognized_top_level_yaml_key_is_reported_by_the_auditor():
     """
     Given a YAML configuration containing a completely unrecognized top-level parameter,
     When the ModelAuditor inspects the starting state,
-    Then it should log a warning explicitly naming the orphaned key.
+    Then it reports the orphaned key explicitly by name.
+
+    Asserted on the verdict rather than on inspect_start's log, for the
+    reason given on its sibling above: review 2.3.16 moved the emission to
+    System.build_model so that every caller sees it.
     """
     # ARRANGE
-    from exozippy.run import inspect_start
-
-    mock_logp.return_value = ({}, {})
-
     user_params = {"star.A.radiuss": 1.0}  # Misspelled 'radiuss'
     system = MockSystem(user_params)
     star = Star([{"name": "A"}], system.config_manager)
@@ -131,13 +127,12 @@ def test_unrecognized_top_level_yaml_key_triggers_auditor_warning(
         star.add_parameter(model=model, param_name="mass", system=None)
 
     # ACT
-    import logging
+    from exozippy.diagnostics import ModelAuditor
 
-    with caplog.at_level(logging.WARNING):
-        inspect_start(model, system, {})
+    reported = ModelAuditor(model, system, {}).check_unused_yaml()
 
     # ASSERT
-    assert "star.A.radiuss" in caplog.text
+    assert "star.A.radiuss" in reported, reported
 
 
 def test_user_boundary_overrides_tighten_but_never_expand_limits():

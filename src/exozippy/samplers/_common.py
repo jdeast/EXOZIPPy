@@ -323,7 +323,13 @@ def create_pool(cores, total_proposals, label, log):
     None in serial mode (actual_cores <= 1).
     """
     phys_cores = mp.cpu_count()
-    if cores is None:
+    # `cores <= 0` is the automatic grant, exactly like `cores=None` (review
+    # 2.4.8).  It used to fall through to `min(0, total_proposals)` -> 0 ->
+    # SERIAL here, while the same 0 took the AUTO grant in nested.py and
+    # serial again in the polish: one written number, three behaviors.
+    # run.py normalizes at the parse boundary; this arm is what makes a
+    # direct caller (a test, a script) land the same way.
+    if cores is None or cores <= 0:
         cores = default_cores()
     actual_cores = min(cores, total_proposals)
     if cores > phys_cores:
@@ -368,7 +374,9 @@ def _map_logp(pool, proposals):
     return pool.map(_eval_logp, proposals)
 
 
-def _map_logp_timeout(pool, proposals, timeout):
+def _map_logp_timeout(
+    pool, proposals, timeout, *, fn=None, poll=None, on_poll=None
+):
     """Evaluate logps with a per-call wall-clock timeout.
 
     Each proposal individually gets up to `timeout` seconds (not a deadline
@@ -376,6 +384,8 @@ def _map_logp_timeout(pool, proposals, timeout):
     not eat into the budget of proposals evaluated later in the same step).
     A proposal that doesn't complete in time receives -inf, so the caller's
     normal Metropolis accept/reject logic rejects it automatically.
+    ``timeout=None`` never gives up, which is how a caller that wants only
+    the `poll` behaviour below asks for it.
 
     A logp evaluation can call into external/compiled code that occasionally
     enters a genuine infinite loop for some pathological parameter
@@ -391,13 +401,35 @@ def _map_logp_timeout(pool, proposals, timeout):
     before. The caller should warn about this once at startup if cores<=1
     (warn_serial_eval_timeout).
 
+    `fn` is the worker callable, defaulting to this module's `_eval_logp`.
+    It is submitted to the pool by reference, so anything else passed here
+    must be picklable (a module-level function, not a closure) -- the
+    samplers all want the default; `polish_seed_starts` is documented to
+    accept whatever logp the caller installed in the workers.
+
+    `poll` / `on_poll` are what let a CALLER'S heartbeat fire in the middle
+    of a batch.  With `poll=None` the wait for one item is exactly
+    ``r.get(timeout=timeout)``, so a batch that blocks blocks silently --
+    which is the right shape for a sampler that logs per step, and the wrong
+    one for a stage whose single batch IS the long pole (review 3.4.4).
+    With `poll` set, the wait wakes every `poll` seconds and calls
+    ``on_poll(n_resolved)`` -- also once after every item that comes back,
+    so a batch of many FAST items still reports progress -- where
+    `n_resolved` counts the entries already in `lps` (returned or timed
+    out).  The per-item wait is then bounded by BOTH: it wakes on the poll
+    interval and still gives up at that item's own `timeout` deadline.
+    `on_poll` must be cheap and idempotent; it is called on a clock the
+    callee does not own.
+
     Returns (lps, timed_out) where timed_out is a list of indices into
     `proposals`.
     """
+    if fn is None:
+        fn = _eval_logp
     if pool is None:
-        return [_eval_logp(p) for p in proposals], []
+        return [fn(p) for p in proposals], []
 
-    async_results = [pool.apply_async(_eval_logp, (p,)) for p in proposals]
+    async_results = [pool.apply_async(fn, (p,)) for p in proposals]
     lps = []
     timed_out = []
     # Keep the timeout sentinel the same shape _eval_logp returns (a bare
@@ -405,11 +437,31 @@ def _map_logp_timeout(pool, proposals, timeout):
     # every entry in `lps` is uniformly typed for the caller to unpack.
     timeout_val = (-np.inf, timeout) if _PTDE_COLLECT_TIMING else -np.inf
     for idx, r in enumerate(async_results):
-        try:
-            lps.append(r.get(timeout=timeout))
-        except mp.TimeoutError:
-            lps.append(timeout_val)
-            timed_out.append(idx)
+        if poll is None:
+            try:
+                lps.append(r.get(timeout=timeout))
+            except mp.TimeoutError:
+                lps.append(timeout_val)
+                timed_out.append(idx)
+            continue
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if deadline is None:
+                wait = poll
+            else:
+                wait = min(poll, deadline - time.monotonic())
+                if wait <= 0.0:
+                    lps.append(timeout_val)
+                    timed_out.append(idx)
+                    break
+            try:
+                lps.append(r.get(timeout=wait))
+                break
+            except mp.TimeoutError:
+                if on_poll is not None:
+                    on_poll(len(lps))
+        if on_poll is not None:
+            on_poll(len(lps))
     return lps, timed_out
 
 
@@ -1024,20 +1076,109 @@ class RawLayout:
         return pop[i] + step
 
 
+def de_span_floor(n_params):
+    """Smallest DE population that can span parameter space: n_params + 2.
+
+    A DE proposal for member i draws its difference vector from the OTHER
+    members, so n - 1 members span at most n - 2 directions and it takes
+    n >= n_params + 2 to reach every direction at all.  ONE definition, because
+    the same number gates two different quantities -- the CHAIN count
+    (warn_if_population_degenerate) and the number of UNIQUE SEEDS a
+    `overdisperse: false` population is built from
+    (warn_if_seed_population_degenerate, review 8.3.3) -- and two constants
+    meaning the same thing would drift.
+    """
+    return n_params + 2
+
+
+#: What running below ``de_span_floor`` costs, stated wherever it is warned
+#: about.  Raw (whitened) scales are ~1 by construction, so escaping the hull
+#: on DE_JITTER alone is a random walk of step 1e-4: off-hull displacement
+#: goes as jitter*sqrt(steps), and covering ONE whitened sigma therefore takes
+#: ~(1/DE_JITTER)**2 = 1e8 accepted steps.  Ergodic in principle, hopeless in
+#: practice -- which is the difference between "mixes slowly" and "does not
+#: sample that direction", and is why the wording escalates here.
+SUBSPACE_CONSEQUENCE = (
+    "The DE difference vectors then span a proper SUBSPACE of parameter "
+    "space and the only escape is the epsilon jitter (DE_JITTER=1e-4) "
+    "alone: off-hull diffusion goes as jitter*sqrt(steps), so covering ONE "
+    "whitened sigma takes ~1e8 accepted steps -- ergodic in principle, "
+    "hopeless in practice."
+)
+
+
 def warn_if_population_degenerate(n_chains, n_params, label, log):
     """Warn when the DE population cannot span parameter space.
 
-    With n_chains < n_params + 2 the difference vectors span a proper
-    subspace, and the epsilon jitter (DE_JITTER) is the only escape from
-    it -- ergodic in principle, hopeless in practice. The default
-    n_chains = 2 * n_params never triggers this.
+    With n_chains < de_span_floor(n_params) the difference vectors span a
+    proper subspace, and the epsilon jitter (DE_JITTER) is the only escape
+    from it. The default n_chains = 2 * n_params never triggers this.
     """
-    if n_chains < n_params + 2:
+    floor = de_span_floor(n_params)
+    if n_chains < floor:
         log.warning(
-            f"{label}: n_chains={n_chains} < n_params + 2 = {n_params + 2}; "
-            f"DE difference vectors cannot span parameter space and mixing "
-            f"across the missing directions relies on the tiny epsilon "
-            f"jitter alone. Raise n_chains (default 2 x n_params)."
+            f"{label}: n_chains={n_chains} < n_params + 2 = {floor}; "
+            f"DE difference vectors cannot span parameter space. "
+            f"{SUBSPACE_CONSEQUENCE} Raise n_chains (default 2 x n_params)."
+        )
+
+
+def warn_if_seed_population_degenerate(n_unique, n_params, label, log):
+    """Warn when an ``overdisperse: false`` start set is built from too few
+    distinct seeds.
+
+    Only reachable when the params file declares ``overdisperse: false``:
+    every chain then starts exactly at its round-robin seed, so the
+    population's affine hull is the hull of the UNIQUE SEEDS, not of
+    n_chains points.  Seeding many chains from few unique values is ALLOWED
+    -- it is a legitimate way to start a restart -- but it is warned about
+    in two tiers, because the two say different things:
+
+      * below 2 * n_params (the default chain count, and ter Braak's mixing
+        recommendation, so this tier has headroom) it is a MIXING complaint:
+        DE has few difference vectors to choose from and explores slowly.
+      * below de_span_floor(n_params) it stops being a mixing complaint at
+        all -- the population cannot span parameter space at all, with the
+        consequence SUBSPACE_CONSEQUENCE states, so some directions are
+        effectively never sampled.
+
+    THE CHECK LIVES HERE, AT SAMPLER START, AND NOT IN mkparam, and that is
+    not a convenience: ``n_params`` belongs to the NEXT fit's model, which
+    may differ from the one that produced the seeds (added data, a changed
+    parameterization), so the writer cannot evaluate the threshold at all.
+
+    What this cannot see: K seeds drawn off a chain whose bulk-ESS is n_eff
+    are only ~n_eff EFFECTIVELY INDEPENDENT points, so the affine-hull
+    argument really applies with n_eff and not with K -- forty seeds off an
+    ESS-5 chain span at most a 4-dimensional hull.  And seeds drawn from an
+    unconverged or mode-stuck posterior are properly dispersed with respect
+    to what was SAMPLED while being badly under-dispersed with respect to
+    the TRUE posterior.  No local test on the seed list can detect either,
+    which is why mkparam RECORDS the min ESS / max Rhat of the fit its seeds
+    came from in the file it writes, for the human to read.
+    """
+    floor = de_span_floor(n_params)
+    remedy = (
+        "Write more seeds (mkparam: {n_seeds: N} emits a length-N initval "
+        "list), or set `overdisperse: true` in the params file to scatter "
+        "the chains around them."
+    )
+    if n_unique < floor:
+        log.warning(
+            f"{label}: `overdisperse: false` with only {n_unique} unique "
+            f"seed(s) against n_params={n_params}. {n_unique} points span at "
+            f"most {max(n_unique - 2, 0)} directions, below the "
+            f"n_params + 2 = {floor} needed to span parameter space at all. "
+            f"{SUBSPACE_CONSEQUENCE} {remedy}"
+        )
+    elif n_unique < 2 * n_params:
+        log.warning(
+            f"{label}: `overdisperse: false` with {n_unique} unique seeds "
+            f"against n_params={n_params}. That spans parameter space "
+            f"({n_unique} >= n_params + 2 = {floor}) but is below the "
+            f"default chain count 2 x n_params = {2 * n_params}, ter Braak's "
+            f"mixing recommendation, so DE has few difference vectors to "
+            f"choose from and will mix slowly. {remedy}"
         )
 
 
@@ -1119,6 +1260,7 @@ def _make_starts(
     seed_indices=None,
     system=None,
     raw_scales=None,
+    overdisperse=None,
 ):
     """Generate n_chains starting points near one or more seeds (P4).
 
@@ -1126,6 +1268,19 @@ def _make_starts(
     dicts (multi-seed sampling). Chains are assigned to seeds round-robin
     (chain j -> seed j % K); the first chain of each seed group starts exactly
     at that seed's solved point, the rest jitter around their seed's center.
+
+    ``overdisperse`` is the params file's declaration of whether its seeds
+    still want scattering (review 8.3.3); ``None`` reads it off the system,
+    where an ABSENT key means True.  It exists because K seeds mean one of
+    exactly two things and nothing here can tell them apart at run time --
+    K modes a user is trying, each of which wants dispersing, or K posterior
+    draws off a finished fit, which are already dispersed -- so the WRITER
+    declares it instead of the reader guessing.  False means "use these seeds
+    exactly as they are": every chain starts at its round-robin seed with no
+    jitter at all.  It RAISES on a single seed (every chain would start at the
+    identical point, every difference vector would be exactly zero) and warns
+    in two tiers when the unique-seed count is small
+    (warn_if_seed_population_degenerate).
 
     Mirrors EXOFASTv2: scatter chains by factor x scale where
     factor = min(sqrt(500/n_params), 3), accept any finite logp (no proximity
@@ -1157,6 +1312,25 @@ def _make_starts(
     K = len(raw_starts)
     if seed_indices is None:
         seed_indices = list(range(K))
+
+    if overdisperse is None:
+        overdisperse = getattr(system, "overdisperse", True)
+    overdisperse = bool(overdisperse)
+    # Before the probe: this is an input error, and the probe costs
+    # n_elements x O(10) logp calls to tell the user nothing they did not
+    # already write.
+    if not overdisperse and K < 2:
+        raise ValueError(
+            f"The params file declares `overdisperse: false`, but it carries "
+            f"only {K} seed. That declaration means 'use these seeds exactly "
+            f"as they are', so every one of the {n_chains} chains would start "
+            f"at the IDENTICAL point: every DE difference vector is exactly "
+            f"zero and the population can never move apart. Either write "
+            f"several seeds (mkparam: {{n_seeds: N}} emits a length-N initval "
+            f"list), or set `overdisperse: true` -- which is also what an "
+            f"ABSENT `overdisperse:` key means -- to scatter the chains "
+            f"around the one seed."
+        )
 
     if raw_scales is not None:
         map_lp = float(logp_fn(raw_starts[0]))
@@ -1202,18 +1376,30 @@ def _make_starts(
     # chains always get the factor-scaled jitter.
     max_exact = max(1, n_chains // 2)
     n_exact = 0
-    if K > max_exact:
+    if overdisperse:
+        if K > max_exact:
+            logger.info(
+                f"PTDE init: {K} seeds > {max_exact} exact-start budget "
+                f"(half the {n_chains} chains); the rest start jittered around "
+                f"their seed to keep restart overdispersion."
+            )
+    else:
+        # The writer declared these seeds already dispersed, so the budget
+        # above does not apply: EVERY chain starts exactly at its round-robin
+        # seed.  The population's affine hull is therefore the hull of the
+        # UNIQUE seeds, which is what the two-tier warning measures.
         logger.info(
-            f"PTDE init: {K} seeds > {max_exact} exact-start budget "
-            f"(half the {n_chains} chains); the rest start jittered around "
-            f"their seed to keep restart overdispersion."
+            f"PTDE init: `overdisperse: false` -- all {n_chains} chains start "
+            f"exactly at their round-robin seed (no jitter), from {K} seeds."
         )
+        warn_if_seed_population_degenerate(K, n_params, "PTDE init", logger)
     for j in range(n_chains):
         s = j % K
         center = raw_starts[s]
         # First chain of each seed group starts exactly at the solved seed
-        # (up to the overdispersion budget above).
-        if s not in seed_seen and n_exact < max_exact:
+        # (up to the overdispersion budget above); with overdisperse false,
+        # every chain does.
+        if not overdisperse or (s not in seed_seen and n_exact < max_exact):
             lp0 = float(logp_fn(center))
             if np.isfinite(lp0):
                 starts.append({k: v.copy() for k, v in center.items()})
@@ -1276,6 +1462,7 @@ def resolve_start_population(
     raw_starts=None,
     seed_indices=None,
     raw_scales=None,
+    overdisperse=None,
 ):
     """Resolve the T=1 chain starts: explicit initvals, or multi-seed
     round-robin via _make_starts (P4).
@@ -1283,6 +1470,11 @@ def resolve_start_population(
     raw_starts/seed_indices come from run.py when available; else fall back
     to system.get_raw_starts, and further to a bare raw_start (single start)
     for minimal test/system stubs that don't implement get_raw_starts at all.
+
+    ``overdisperse`` (None -> read off the system, where an absent params-file
+    key means True) is forwarded to _make_starts; the explicit-``initvals``
+    bypass ignores it, since that list already IS one start per chain and
+    nothing here has ever scattered it.
 
     The explicit-``initvals`` bypass RAISES on a length mismatch rather than
     asserting it: `python -O` compiles an assert out entirely, and the list
@@ -1315,6 +1507,7 @@ def resolve_start_population(
         seed_indices,
         system=system,
         raw_scales=raw_scales,
+        overdisperse=overdisperse,
     )
 
 
@@ -1533,16 +1726,63 @@ def grow_draw_storage(stored_raw, stored_lp, needed, chunk=DRAW_CHUNK):
 
     Returns the (possibly new) stored_lp array.
     """
-    have = stored_lp.shape[1]
+    return _grow_storage(
+        stored_raw, stored_lp, needed, chunk, axis=1, lp_fill=0.0
+    )
+
+
+def _grow_storage(stored_raw, stored_lp, needed, chunk, axis, lp_fill):
+    """Shared growth core for the cold (2-D) and hot (3-D) draw buffers.
+
+    `axis` is the DRAW axis of stored_lp, and of every array in stored_raw
+    (whose trailing axes are the parameter's own shape).  Mutates the dict
+    in place and returns the new lp array -- see grow_draw_storage for why
+    the two halves are handled differently.
+    """
+    have = stored_lp.shape[axis]
     if needed <= have:
         return stored_lp
     add = max(chunk, needed - have)
-    n_chains = stored_lp.shape[0]
     for key, arr in stored_raw.items():
-        pad = np.zeros((n_chains, add) + arr.shape[2:], dtype=arr.dtype)
-        stored_raw[key] = np.concatenate([arr, pad], axis=1)
+        pad_shape = list(arr.shape)
+        pad_shape[axis] = add
+        pad = np.zeros(pad_shape, dtype=arr.dtype)
+        stored_raw[key] = np.concatenate([arr, pad], axis=axis)
+    pad_shape = list(stored_lp.shape)
+    pad_shape[axis] = add
     return np.concatenate(
-        [stored_lp, np.zeros((n_chains, add), dtype=stored_lp.dtype)], axis=1
+        [stored_lp, np.full(pad_shape, lp_fill, dtype=stored_lp.dtype)],
+        axis=axis,
+    )
+
+
+def hot_draw_chunk(n_hot_groups, chunk=DRAW_CHUNK):
+    """Draws per growth step for the thinned hot-rung buffers.
+
+    The hot buffers carry a leading rung axis, so a growth step of
+    DRAW_CHUNK draws would cost (n_temps - 1) times what the same step
+    costs at T=1 -- 816 MB for a DC2018-shaped 8-rung x 54-chain run.
+    Dividing by the rung count makes one growth step cost the same memory
+    in both groups.
+    """
+    return max(1, int(chunk) // max(int(n_hot_groups), 1))
+
+
+def grow_hot_draw_storage(stored_hot_raw, stored_hot_lp, needed, chunk=None):
+    """grow_draw_storage's sibling for the (rung, chain, draw) hot buffers.
+
+    Same contract: mutates `stored_hot_raw` in place, returns the new
+    `stored_hot_lp`, which the caller must re-bind.  The unwritten lp pad
+    is NaN, matching the initial np.full allocation -- the hot group is cut
+    rectangularly at per_hot_draws.min() on the way out, so a written-looking
+    zero in the tail would be a trap rather than a value.
+
+    `chunk` defaults to hot_draw_chunk() of the buffer's own rung count.
+    """
+    if chunk is None:
+        chunk = hot_draw_chunk(stored_hot_lp.shape[0])
+    return _grow_storage(
+        stored_hot_raw, stored_hot_lp, needed, chunk, axis=2, lp_fill=np.nan
     )
 
 
@@ -1601,6 +1841,37 @@ def stamp_and_log_run_summary(
             else ""
         )
         + "".join(extras)
+    )
+
+
+def log_mode_hop_summary(label, log, de_mode_hop, n_hop_accept, n_hop_propose):
+    """Log the gamma=1 mode-hop acceptance at wrap-up (no-op when hops are off).
+
+    Shared so the two samplers cannot drift: ptde_async has reported this
+    since the feature shipped and ptde reported nothing at all, which is how
+    review 1.4.3's windowing bug went unseen in a run's log.
+
+    ``n_hop_accept`` / ``n_hop_propose`` are already-indexed T=1 scalars,
+    coerced to int here because ptde counts in a numpy float array and
+    ptde_async in a Python list.
+
+    What the counts SPAN differs between the callers, the same asymmetry
+    stamp_and_log_run_summary carries for n_accept: ptde zeroes them at the
+    tune -> draw boundary (and per window while adapting, because the gamma
+    adapter subtracts them from a windowed rate), so it reports the draw
+    phase; ptde_async never resets, so it reports the whole run.
+    """
+    if not de_mode_hop > 0.0:
+        return
+    n_accept = int(n_hop_accept)
+    n_propose = int(n_hop_propose)
+    log.info(
+        f"{label} DE mode hops (gamma=1, p={de_mode_hop:g}): "
+        f"{n_accept}/{n_propose} accepted "
+        f"({n_accept / max(n_propose, 1):.4f}); excluded "
+        "from the gamma adaptation. Compare against the mode-change "
+        "count in the mode report: hops are the DE path between basins, "
+        "PT round trips are the other one."
     )
 
 

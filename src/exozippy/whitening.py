@@ -778,14 +778,39 @@ def measure_and_whiten(system, model, raw_start=None, logp_fn=None):
     return report
 
 
+# Schema version of <prefix>_whitening.json.
+#
+# 1 -- scales only (scale_logits, gaussian_scales, barrier_scales).  Written
+#      by code in which the logit ANCHOR could not move: set_whitening left
+#      logit_q_inits exactly where build_pymc put it, so the anchor was
+#      derivable from a rebuilt model and did not need storing.
+# 2 -- adds `logit_q_inits`, the anchor, because it CAN now move:
+#      System.recenter_whitening_anchor folds the polished start into it
+#      before the probe (review 4.3.1).  A raw draw decodes through
+#      `lower + span*sigmoid(anchor + scale*raw)`, so a moving anchor that
+#      was not persisted would make a reused trace decode against the wrong
+#      center -- silently, since every number involved stays plausible.
+#
+# Version 1 files stay READABLE (their traces are real and their anchors are
+# reproducible by construction) and are never written again.  The validator
+# is what enforces that a version-2 file may not omit the anchor.
+_WHITENING_SCHEMA_VERSION = 2
+_WHITENING_READABLE_VERSIONS = (1, 2)
+
+
 def save_whitening(system, path, map_lp=None):
     """Persist the ABSOLUTE whitening + barrier state next to the trace.
 
-    The absolute logit-space scales (not multipliers) are stored so a reload
-    reproduces the sampled trace's raw coordinates exactly, independent of
-    the rebuilt model's preliminary scales.
+    The absolute logit-space scales and the logit-space ANCHOR (not
+    multipliers, not displacements) are stored so a reload reproduces the
+    sampled trace's raw coordinates exactly, independent of the rebuilt
+    model's preliminary scales and of where the rebuild's own anchor sits.
     """
-    data = {"version": 1, "map_lp": map_lp, "params": {}}
+    data = {
+        "version": _WHITENING_SCHEMA_VERSION,
+        "map_lp": map_lp,
+        "params": {},
+    }
     for p in system.get_all_parameters():
         exporter = getattr(p, "export_whitening", None)
         state = exporter() if exporter is not None else None
@@ -796,16 +821,27 @@ def save_whitening(system, path, map_lp=None):
     logger.debug(f"Whitening: state saved to {path}")
 
 
-def _validate_whitening_state(system, saved, lookup):
+def _validate_whitening_state(system, saved, lookup, version):
     """Check a persisted params mapping against the current build.
 
     Returns None when it applies cleanly, or a human-readable reason string.
     Every vector the apply step will touch is checked here -- both whitening
-    vectors AND the barrier vector -- so the apply step below cannot fail
-    part way through and leave the model in a half-restored state (the two
-    are different measures: rescaling the whitening is posterior-preserving,
-    but the barrier IS a posterior term, so a model carrying one file's
-    barriers and another's whitening has a logp that was never sampled).
+    vectors, the ANCHOR, AND the barrier vector -- so the apply step below
+    cannot fail part way through and leave the model in a half-restored
+    state (they are different measures: rescaling the whitening is
+    posterior-preserving, but the barrier IS a posterior term, so a model
+    carrying one file's barriers and another's whitening has a logp that was
+    never sampled).
+
+    ``version`` decides only one thing: whether the ANCHOR
+    (``logit_q_inits``) may be absent.  In a version-1 file it MUST be --
+    the code that wrote it could not move the anchor, so the rebuilt model's
+    own anchor is the one its trace was sampled under and there was nothing
+    to record.  In a version-2 file it must be PRESENT and the right length,
+    because a version-2 writer that omitted it would be describing a
+    coordinate system it did not record the center of.  Both directions are
+    checked: the absent-in-v2 case is the silent one, and the
+    present-in-v1 case means the file is not what its version claims.
     """
     # Coverage: every parameter that carries restorable state must appear in
     # the file.  Barrier-ONLY parameters (derived ones: no _whiten_state, a
@@ -837,10 +873,18 @@ def _validate_whitening_state(system, saved, lookup):
             # them together, and checking only scale_logits let a bad
             # gaussian_scales abort mid-loop after earlier parameters had
             # already been written.
-            for key, sv in (
+            required = [
                 ("scale_logits", ws["sv_scale_logits"]),
                 ("gaussian_scales", ws["sv_gaussian_scales"]),
-            ):
+            ]
+            if version >= 2:
+                required.append(("logit_q_inits", ws["sv_logit_q_inits"]))
+            elif "logit_q_inits" in state:
+                return (
+                    f"'{label}' carries an anchor ('logit_q_inits') that a "
+                    f"version-1 file cannot have written"
+                )
+            for key, sv in required:
                 if key not in state:
                     return f"'{label}' is missing '{key}'"
                 if len(state[key]) != np.asarray(sv.get_value()).size:
@@ -872,18 +916,25 @@ def _apply_whitening_file(system, path):
 
     This is the shared body of :func:`load_whitening` (fresh path: warn and
     re-measure) and :func:`restore_whitening_for_trace` (reuse path: raise).
+
+    A version-1 file (scales, no anchor) still applies: it was written by
+    code whose anchor could not move, so the rebuilt model's build-time
+    anchor is the one its trace was sampled under.  Nothing is guessed --
+    the absent key is a property of that schema, enforced in both directions
+    by the validator.
     """
     try:
         with open(path) as f:
             data = json.load(f)
     except (OSError, ValueError) as e:
         return f"{path} could not be read ({e})"
-    if data.get("version") != 1:
-        return f"{path} has an unknown version ({data.get('version')!r})"
+    version = data.get("version")
+    if version not in _WHITENING_READABLE_VERSIONS:
+        return f"{path} has an unknown version ({version!r})"
     saved = data.get("params", {})
     lookup = {p.label: p for p in system.get_all_parameters()}
 
-    reason = _validate_whitening_state(system, saved, lookup)
+    reason = _validate_whitening_state(system, saved, lookup, version)
     if reason is not None:
         return reason
 
@@ -895,7 +946,10 @@ def _apply_whitening_file(system, path):
                 f"applying persisted state for '{label}' failed AFTER "
                 f"validation; the build may be partially restored"
             )
-    logger.debug(f"Whitening: state restored from {path} (no probe needed).")
+    logger.debug(
+        f"Whitening: state restored from {path} (schema version {version}, "
+        f"no probe needed)."
+    )
     return None
 
 
