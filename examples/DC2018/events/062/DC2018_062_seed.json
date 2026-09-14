@@ -1,0 +1,54 @@
+{
+ "fits": [
+  {
+   "parameters": {
+    "t_0": 2458750.060521515,
+    "u_0": 0.024989635079143733,
+    "t_E": 39.45600710077106,
+    "s": 1.0,
+    "q": 0.001,
+    "alpha": 0.0,
+    "rho": 0.001
+   }
+  },
+  {
+   "parameters": {
+    "t_0": 2458750.060521515,
+    "u_0": 0.024989635079143733,
+    "t_E": 39.45600710077106,
+    "s": 1.0,
+    "q": 0.001,
+    "alpha": 90.0,
+    "rho": 0.001
+   }
+  }
+ ],
+ "errfacs": {
+  "n20180816.W149.WFIRST18.062.txt": 1.0,
+  "n20180816.Z087.WFIRST18.062.txt": 1.0
+ },
+ "mag_methods": [
+  2458671.1485073133,
+  "VBBL",
+  2458828.972535717
+ ],
+ "coords": "267.162000 -29.874700",
+ "jd_offset": 0.0,
+ "excluded_points": {
+  "n20180816.W149.WFIRST18.062.txt": {
+   "n_data": 38568,
+   "indices": [],
+   "times": []
+  },
+  "n20180816.Z087.WFIRST18.062.txt": {
+   "n_data": 870,
+   "indices": [],
+   "times": []
+  }
+ },
+ "_provenance": {
+  "writer": "examples/DC2018/dc18_seed.py (PSPL peak fit, no MMEXOFAST)",
+  "pspl_chi2": 41342.59641028524,
+  "note": "s/q/alpha are defaults.yaml generics, NOT fitted."
+ }
+}

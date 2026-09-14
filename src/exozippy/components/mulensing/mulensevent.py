@@ -351,6 +351,24 @@ class MulensEvent(Component):
                 ),
             },
             {
+                "key": "peak_find",
+                "kind": "option",
+                "accepts": "auto | true | false",
+                "required": False,
+                "doc": (
+                    "Built-in point-lens peak finder for t_0, u_0 and t_E. "
+                    "'auto' (default) runs it only when those three are "
+                    "still unseeded -- no user values, no MMEXOFAST -- "
+                    "where they would otherwise start at defaults.yaml; "
+                    "true always runs it, which is the MMEXOFAST-free mode; "
+                    "false never does. It fits a PSPL model to the light "
+                    "curves with the source and blend fluxes profiled out "
+                    "analytically, and seeds only those three: s, alpha, q "
+                    "and rho keep their defaults and the sampler finds the "
+                    "anomaly itself."
+                ),
+            },
+            {
                 "key": "mmexofast_options",
                 "kind": "option",
                 "accepts": None,

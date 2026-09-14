@@ -253,7 +253,20 @@ def build_user_params(ra, dec, fix_u1=False, bands_for_u1=()):
     return params
 
 
-def main(argv=None):
+def build_parser():
+    """The CLI, as a parser other drivers can borrow.
+
+    EXTRACTED so a caller can get every default without hand-stubbing an
+    args object.  build_config reads eleven attributes off `args`
+    (adapt_ladder, cores, draws, finite_source, n_chains, n_temps,
+    recompute, sampler, seed_polish, t_max, tune), and two helper scripts
+    crashed with AttributeError on a stub that had two of them -- a bug that
+    recurs every time this parser gains an option.  Borrow the parser
+    instead:
+
+        args = build_parser().parse_args([str(event)])
+        args.finite_source = True        # then override what you mean to
+    """
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -375,6 +388,11 @@ def main(argv=None):
         "clipping artifact). --mmx-emcee turns the hours-long polish "
         "back on",
     )
+    return ap
+
+
+def main(argv=None):
+    ap = build_parser()
     args = ap.parse_args(argv)
 
     if args.quick:
