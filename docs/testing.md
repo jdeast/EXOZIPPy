@@ -166,6 +166,24 @@ Two options were considered and rejected, so they are not re-proposed.
 *Buying a real tuning budget* is honest but is a separate, `slow`-marked test
 if it is wanted at all; it is not what this test is for.
 
+**A golden value and a literature value are different claims, and a
+parameter earns one or the other.** In `kelt4_rvonly.yaml` the RV data
+constrains `m sin i`, not the mass: there is no inclination information, so
+`cosi` is prior-dominated (the polish walks it from the params file's
+transit-derived 0.11996 to 0.50545) and `mass = m sin i / sin i` inherits
+that. So `m sin i` is the quantity comparable to a published value and
+carries the LITERATURE check, while `planet.mass` is still perfectly
+deterministic given the same code and priors and carries a GOLDEN-VALUE
+REGRESSION check against our own recorded number. Assert both, and say in
+the test which is which -- otherwise the next reader either "fixes" the mass
+against the literature or deletes it as prior-dependent noise, and both are
+wrong. What the comment must NOT say is that `m sin i` is the trustworthy
+one: a mass marginalized over the inclination prior IS a posterior for the
+mass, and its width says how much of it is prior, whereas `m sin i` is a
+lower bound the field routinely quotes as a measurement. KELT-4Ab agrees
+well because it transits (i ~ 83 deg, so it sits near its minimum mass) --
+a property of that system, not of the statistic.
+
 **What the old assertion was incidentally covering, and what replaces it.**
 Reading `planet.mass` out of `idata.posterior` did exercise the path where a
 quantity is computed during sampling, written to the trace and converted to

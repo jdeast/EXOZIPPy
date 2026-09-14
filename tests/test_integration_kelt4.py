@@ -178,34 +178,62 @@ KELT4_START = {
     "star.A.logmass": (0.08057130, "dex(solMass)", "dex"),
     "planet.b.mass": (0.96736983, "jupiterMass", "linear"),
     "orbit.b.logP": (0.47562107, "dex(d)", "dex"),
+    # cosi is here because the mass story below turns on it: it is the one
+    # parameter the RV data says nothing about.
+    "orbit.b.cosi": (0.50545129, "", "linear"),
 }
 
-# WHY planet.b.mass STARTS ~7% ABOVE THE PUBLISHED 0.90 Mjup, AND WHY THAT IS
-# NOT A BUG TO "FIX" BY EDITING THE GOLDEN VALUE.  kelt4_rvonly.yaml is
-# RV-ONLY, so there is no inclination information: RVs constrain m sin i, the
-# params file's `orbit.0.cosi: 0.11996` (the published, transit-derived
-# i = 83.1 deg) is only a start value, and the polish is free to walk cosi
-# anywhere -- it lands at 0.50545 here, i = 59.6 deg.  `mass` then inherits
-# that entirely.  KELT-4Ab's published fit IS transit-constrained, so there
-# sin i = 0.993 and the published mass and its m sin i are nearly the same
-# number; comparing our RV-only mass to it compares two different quantities.
+# THE PLANET MASS AND m sin i ARE TWO DIFFERENT CLAIMS, AND EACH EARNS A
+# DIFFERENT KIND OF ASSERTION (JDE's ruling, recorded in review 8.8.17).
 #
-# The obvious repair -- assert m sin i instead -- was MEASURED AND DOES NOT
-# RECONCILE, so it is deliberately not done here.  At this start
-# sin i = 0.862855, giving m sin i = 0.834700 Mjup; against a published 0.902
-# that is -7.5% (and -6.8% against the published m sin i of 0.8956), against
-# the 0.878 quoted in run.md it is -4.9%.  So m sin i is not closer to
-# published than the mass is, it is about equally far the other way, and the
-# start also carries e = 0.0789 (secosw/sesinw above) against a published
-# near-circular orbit, which enters K through the same relation.  Two
-# differences, not one.  `orbit.sini` is a manifest parameter but appears
-# neither in this table nor in the trace, so even reading it costs a
-# derivation from cosi.  The missing-m-sin-i gap is review item 8.8.17; it is
-# a relation plus a reporting ruling and it is not this test's business.
+#   m sin i is what the RV data actually CONSTRAINS, so it is the quantity
+#   comparable to a published value, and it carries the LITERATURE check.
 #
-# The consequence for this file: `planet.b.mass`'s golden value is a fact
-# about where OUR polish lands for an RV-only config, not a claim about
-# KELT-4Ab.  Do not "correct" it toward the published mass.
+#   planet.b.mass is prior-dominated here and so is NOT comparable to a
+#   transit-constrained published mass -- but it is perfectly DETERMINISTIC
+#   given the same code and the same priors, so it carries a GOLDEN-VALUE
+#   REGRESSION check against our own recorded number.  That is a regression
+#   claim, not a physics one.
+#
+# Two natural mistakes this comment exists to prevent: do not "fix" the mass
+# assertion by comparing it to the literature, and do not delete it as
+# meaningless because it is prior-dependent.
+#
+# AND DO NOT READ THIS AS "m sin i IS THE TRUSTWORTHY ONE".  It is the other
+# way round.  A mass marginalized over the inclination prior IS a posterior
+# for the mass, and its width says how much of it is prior; m sin i is a
+# LOWER BOUND that the field routinely quotes as though it were a
+# measurement.  KELT-4Ab happens to agree well because it TRANSITS -- i is
+# about 83 deg, so the planet sits near its minimum mass -- which is a
+# property of this system, not evidence that m sin i is the better statistic.
+# We report both because the field's standard is m sin i.
+#
+# WHY THE MASS STARTS ~7% ABOVE THE PUBLISHED 0.90 Mjup.  kelt4_rvonly.yaml
+# is RV-only, so there is no inclination information.  The params file's
+# `orbit.0.cosi: 0.11996` (the published, transit-derived i = 83.1 deg) is
+# only a START, the polish is free to walk cosi, and it lands at 0.50545,
+# i = 59.6 deg.  `mass = m sin i / sin i` inherits that entirely.
+#
+# WHAT WAS MEASURED, AND WHY THE LITERATURE BAND IS WIDE.  At this start
+# sin i = 0.862855 and m sin i = 0.834700 Mjup.  Against a published 0.902
+# that is -7.5% (-6.8% against the published m sin i of 0.8956); against the
+# 0.878 that run.md quotes it is -4.9%.  So the agreement is real but not
+# tight, and three things explain the gap without any of them being a defect:
+# this is a START (one L-BFGS local optimum), it uses two of the four
+# published RV datasets (EXPERT and FIES are commented out of the config) and
+# no long-term trend for the BC companions, and the repo records no published
+# mass of its own -- the review doc quotes 0.90 and run.md quotes 0.878.  The
+# eccentricity difference is NOT one of them: e = 0.0789 here gives
+# sqrt(1-e^2) = 0.9969, a 0.3% effect.  The band below is therefore
+# calibrated from that -7.5%, not from a claim of agreement, and it is still
+# tight enough to catch a factor-of-two or a unit slip.
+#
+# `orbit.sini` is a manifest parameter but appears in neither this table nor
+# the trace, so sin i is derived from cosi.  Implementing m sin i as a
+# reported parameter is review item 8.8.17 and is not this test's business.
+KELT4_START_MSINI = 0.834700  # Mjup; golden regression, same rtol as linear
+KELT4_PUBLISHED_MASS = 0.90  # Mjup, Beatty+2016; see the band above
+KELT4_PUBLISHED_RTOL = 0.15
 
 # THE GOLDEN START LOGP, and why it is the more robust of the two assertions
 # (JDE, 2026-09-14).  logp is STATIONARY at an optimum, so the 6e-4 of
@@ -388,6 +416,38 @@ def test_run_fit_kelt4_start_is_physical(kelt4_result):
             f"({bound}). If this move is intended, update KELT4_START and "
             f"say in the commit why the sampler now begins somewhere else."
         )
+
+    # m sin i, the quantity the RV data constrains -- two assertions of two
+    # different kinds, per the ruling above.  sin i comes from cosi because
+    # orbit.sini is in neither the startup table nor the trace.
+    cosi, _u = start["orbit.b.cosi"]
+    sini = np.sqrt(max(1.0 - cosi**2, 0.0))
+    msini = planet_mass * sini
+
+    # (a) REGRESSION: our own recorded product, at the linear tolerance.
+    assert np.isclose(
+        msini, KELT4_START_MSINI, rtol=KELT4_LINEAR_RTOL, atol=0.0
+    ), (
+        f"m sin i starts at {msini!r} Mjup (mass={planet_mass!r} x "
+        f"sin i={sini!r} from cosi={cosi!r}), recorded "
+        f"{KELT4_START_MSINI!r} (rtol {KELT4_LINEAR_RTOL}). If this move is "
+        f"intended, update KELT4_START_MSINI and say why in the commit."
+    )
+
+    # (b) PHYSICS: m sin i is the RV-constrained quantity, so unlike the
+    #     mass it IS comparable to the published value.  The band is wide
+    #     for the reasons recorded above (a start, not a posterior; two of
+    #     four RV datasets; no published value in the repo) and is there to
+    #     catch a gross regression -- a factor of two, a unit slip -- not to
+    #     claim tight agreement.
+    assert msini == pytest.approx(
+        KELT4_PUBLISHED_MASS, rel=KELT4_PUBLISHED_RTOL
+    ), (
+        f"m sin i at the start is {msini:.4f} Mjup, more than "
+        f"{KELT4_PUBLISHED_RTOL:.0%} from the published "
+        f"{KELT4_PUBLISHED_MASS} Mjup. m sin i is what the RVs constrain, so "
+        f"unlike planet.b.mass this one IS comparable to the literature."
+    )
 
 
 def test_run_fit_kelt4_derived_parameters_are_self_consistent(kelt4_result):
