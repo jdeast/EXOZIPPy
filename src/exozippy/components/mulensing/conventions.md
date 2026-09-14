@@ -396,7 +396,27 @@ degenerate partner.
 
     s_j(t)      = |delta_j(t)|
     PA_axis(t)  = atan2(dE, dN)
-    alpha_j(t)  = alpha_j0 - [PA_axis(t) - PA_axis(t0_par)]
+    alpha_j(t)  = phi_pi - PA_axis(t),   phi_pi = atan2(pi_E_E, pi_E_N)
+
+That form is ABSOLUTE, and deliberately so: **no `t0_par` anchor enters and there is no
+`alpha_j0` term**, because C15/C20's `alpha` simply IS `phi_pi - PA(axis)` evaluated at
+every epoch rather than once.  Its time derivative is the `d(PA_axis)/dt = -dalpha/dt`
+rule above, so the linear and keplerian modes agree by construction rather than through a
+fitted offset.  (An anchored spelling `alpha_j0 - [PA_axis(t) - PA_axis(t0_par)]` is
+algebraically the same thing ONLY because `alpha_j0` is itself derived; this file used to
+write it that way, which read as though `alpha_j0` were free.  It is not -- see the next
+paragraph.)
+
+**The keplerian mode has NO free geometry parameters at all.**  `Lens.register_parameters`
+gives `companion_keplerian` neither `log_s` nor `xalpha`/`yalpha` -- only `s: from_orbit`,
+`alpha: from_orbit` and `q` -- so the binary geometry entering the magnification is a
+function purely of the referenced orbit's `(P, tp, ecc, omega_*, cosi, bigomega, a)` plus
+the frame quantities `phi_pi`, `theta_E` and `D_L` the fit already carries.  That is the
+whole point of the mode and the Skowron+2011 over-constraint `examples/ob09020` tests: the
+RVs pin `P/tp/ecc/omega_*/K`, the light curve pins the projected geometry, and `bigomega`
+and `sign(cos i)` -- which no RV can see -- become MEASURED.  A sampled coordinate the
+likelihood never reads would be the 1.6.12 defect, which is why they are absent rather
+than pinned.
 
 The MINUS is the same `d(PA_axis)/dt = -dalpha/dt` rule; getting it wrong does not raise
 chi2 -- it silently reports the wrong inclination branch (the rotation sense of the binary
