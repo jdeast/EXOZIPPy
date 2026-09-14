@@ -374,7 +374,7 @@ def calc_vcve(ecc, omega):
     """V_c/V_e from (e, omega) -- eq 4, the forward direction.
 
     Used to REPORT V_c/V_e on an orbit that samples sqrt(e)cos/sin(omega)
-    (manifest role 3), and as the relaxation engine's bridge between the two
+    (REPORTED), and as the relaxation engine's bridge between the two
     parameterizations.  The denominator is floored: it vanishes only in the
     unreachable corner e -> 1 with sin(omega) -> -1, and a reported quantity
     must not be the thing that puts an inf in the trace.
@@ -450,13 +450,13 @@ def calc_ecosw_from_ecc(ecc, omega):
 
 @register_physics
 def calc_secosw_from_ecc(ecc, omega):
-    """sqrt(e) cos(omega) -- reported on a V_c/V_e orbit (manifest role 3)."""
+    """sqrt(e) cos(omega) -- REPORTED on a V_c/V_e orbit (built late)."""
     return pt.sqrt(pt.maximum(ecc, 0.0)) * pt.cos(omega)
 
 
 @register_physics
 def calc_sesinw_from_ecc(ecc, omega):
-    """sqrt(e) sin(omega) -- reported on a V_c/V_e orbit (manifest role 3)."""
+    """sqrt(e) sin(omega) -- REPORTED on a V_c/V_e orbit (built late)."""
     return pt.sqrt(pt.maximum(ecc, 0.0)) * pt.sin(omega)
 
 
@@ -546,7 +546,7 @@ def calc_tp_from_ecc(ecc, omega, tc, n):
     """Time of periastron from (e, omega) instead of the sqrt(e) pair.
 
     Needed because a V_c/V_e orbit does not SAMPLE `secosw`/`sesinw` -- it
-    reports them (manifest role 3), and a reported element is by definition
+    reports them (REPORTED), and such an element is by definition
     consumed by nothing.  `calc_tp` above consumes them, so on a V_c/V_e orbit
     it would read their pre-patch placeholder: a silently wrong periastron.
     This is the same quantity written in the coordinates that orbit does have.
@@ -771,7 +771,7 @@ def calc_cosi_from_chord(chord, p, ar, ecc, esinw, chord_sign):
 def calc_chord_from_cosi(cosi, p, ar, ecc, esinw):
     """The chord of the transit an orbit sampling cos i implies.
 
-    The forward direction, used to REPORT the chord (manifest role 3) on an
+    The forward direction, used to REPORT the chord on an
     orbit that does not sample it, so both parameterizations produce the same
     table rows and a params file survives flipping `fitchord`.  `|cos i|`
     because the chord is even in it, and the radicand is floored for the same

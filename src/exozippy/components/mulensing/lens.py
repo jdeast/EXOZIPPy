@@ -4,7 +4,7 @@ One instance per LENS BODY, primary first.  The per-companion geometry --
 `s`, `alpha` (and their coordinates `log_s`, `xalpha`/`yalpha`), the mass
 ratio `q`, and the linear orbital-motion rates -- lives here as vectors of
 the component's own element count, with element 0 (the primary) INACTIVE
-(manifest role 4, the Band/orbit mode idiom): a primary has no separation
+(INACTIVE, the Band/orbit mode idiom): a primary has no separation
 from itself, so those are not parameters of that element at all.  "Companion
 slot j" is therefore "lens element j+1" everywhere.
 
@@ -429,7 +429,7 @@ class Lens(Component):
 
         # The parameterization table: element 0 (the primary) is mode
         # "primary", which names NO parameters -- every geometry entry is
-        # inactive there (role 4), pinned at a bookkeeping value strictly
+        # inactive there, pinned at a bookkeeping value strictly
         # interior to its bounds (the pinned element still goes through the
         # logit transform; design 2.2), given no prior, and reported
         # nowhere.  The inactive values are mutually consistent under the

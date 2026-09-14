@@ -96,7 +96,7 @@ class Orbit(Component):
     # components/parameterization.py).  `hk` samples the sqrt(e)cos/sin(omega)
     # pair and derives (ecc, omega) from it; `vcve` samples V_c/V_e and an omega
     # direction vector, derives (ecc, omega) from those, and REPORTS the
-    # sqrt(e)cos/sin pair (role 3) so both parameterizations produce the same
+    # sqrt(e)cos/sin pair (REPORTED) so both parameterizations produce the same
     # table rows and a user's prior on either survives the switch.  V_c/V_e
     # itself is reported on an `hk` orbit, for the same reason.  Orbits may
     # differ: element roles are per instance.

@@ -13,7 +13,7 @@ here.
 Two helpers, and the difference between them is the whole reason there are two:
 
 * :func:`mode_manifest` -- the parameterization table.  A parameter that a
-  given mode does not name is INACTIVE for those elements (manifest role 4):
+  given mode does not name is INACTIVE for those elements:
   it is not a parameter of that instance at all, so it is pinned for
   bookkeeping, given no potential, and reported nowhere.  That pin is
   STRUCTURAL: it goes in the ``mask`` channel, which a params file cannot

@@ -355,7 +355,7 @@ class Component(ABC):
                     setattr(self, tensor_name, tensor_var)
 
     def finalize_reported(self, model, system, context_nodes=None):
-        """Wire and apply this component's REPORTED elements (manifest role 3).
+        """Wire and apply this component's REPORTED elements.
 
         The second phase of the two-phase build, called by
         ``System.build_model`` after stage 7 for every component, inside the
@@ -470,7 +470,7 @@ class Component(ABC):
 
     def add_parameter(self, model, param_name, system, context_nodes=None):
         context_nodes = context_nodes or {}
-        # Reported (role 3) selections park here until finalize_reported; keyed
+        # Reported selections park here until finalize_reported; keyed
         # per parameter name, so a second build_model on one System starts clean
         # (the GUI builds more than once).
         if not hasattr(self, "_pending_reported"):
@@ -550,7 +550,7 @@ class Component(ABC):
             built = []
             for sel in selections:
                 if sel.output_only:
-                    # REPORTED elements (role 3) defer their WHOLE wiring, not
+                    # REPORTED elements defer their WHOLE wiring, not
                     # just the patch.  Resolving their dependencies here would
                     # recurse: the dep is a parameter that, on other elements,
                     # is derived from this one, and this parameter is not yet

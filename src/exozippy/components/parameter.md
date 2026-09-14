@@ -146,7 +146,7 @@ Design points:
 
 Tests: `tests/test_prior_reporting.py`.
 
-## Per-element parameterization: the four element roles
+## Per-element parameterization: the element roles
 
 A modeling choice that differs between two instances of one component -- limb-darkening law per band, mass coordinate per planet, evolutionary track per star, eccentricity parameterization per orbit -- shows up as some ELEMENTS of a parameter vector being sampled while others are derived or absent. `Parameter.build_pymc` was uniform on that axis (`is_derived = np.full(n_elements, expr_raw is not None)`), and four shipped features paid for it: `band.ld_law` **raised** on a system mixing quadratic and linear bands, `planet.mass_parameterization` (filed for renaming to the boolean `fitlogq`, review 4.2.7) raised on explicit disagreement and silently fell back to all-`linear` on an implicit one, `star.mist`'s declared `mask` was **never read** (so a premature `evolutionarymodel:` block materialized three free likelihood-free dimensions -- review 3.8.2), and `orbit.fitvcve`'s WIP guard named the unconsumed `mask` field as its real blocker, ahead of the missing physics.
 

@@ -668,7 +668,7 @@ def test_a_prior_on_a_late_built_element_is_applied(synth_csv, tmp_path):
     trans1 = _system(synth_csv, tmp_path, ke_v={"S1"}, user_params=prior)
     model = trans1.build_model()
     assert trans1.subject.cl.is_reported[0]
-    assert "gaussian_prior.subject.cl.reported" in {
+    assert "gaussian_prior.subject.cl.late" in {
         p.name for p in model.potentials
     }
 

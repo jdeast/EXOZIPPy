@@ -307,7 +307,7 @@ class System(Component):
     def _validate_reported_not_consumed(self):
         """Refuse a manifest where something CONSUMES a reported element.
 
-        Manifest role 3 rests on one property: a reported element is consumed by
+        The REPORTED role rests on one property: such an element is consumed by
         nothing.  That is what lets its expression be applied in a second phase
         (Parameter.finalize_deferred) after the parameter it reads has been
         built, and what makes the per-parameter cycle such a pair would
@@ -391,7 +391,7 @@ class System(Component):
                             f"[{prefix}.{name}] its '{sel.key}' expression "
                             f"consumes '{dep}', whose element(s) "
                             f"{clash.tolist()} are REPORTED "
-                            f"({dep_key[0]}.{dep_key[1]}, manifest role 3). A "
+                            f"({dep_key[0]}.{dep_key[1]}, a REPORTED element). A "
                             f"reported element is applied in a second build "
                             f"phase, after every parameter exists, so a "
                             f"consumer would read its pre-patch placeholder -- "
@@ -507,7 +507,7 @@ class System(Component):
     def active_elements(self):
         """``(component_prefix, param_name) -> boolean mask`` of ACTIVE elements.
 
-        The complement is manifest role 4: elements that are not parameters of
+        The complement is the INACTIVE role: elements that are not parameters of
         their instance's parameterization (a non-MIST star's EEP).  Only entries
         that actually mask something appear, so a caller can treat a missing key
         as "every element active".  Valid after stage 3, and the reporting
@@ -858,7 +858,7 @@ class System(Component):
             for comp in self.active_components.values():
                 comp.build_likelihood(model, system=self)
 
-            # After stage 7: REPORTED elements (manifest role 3).  Deliberately
+            # After stage 7: REPORTED elements.  Deliberately
             # after stage 7: a reported element is consumed by nothing, so
             # every consumer in stages 6-7 has already read the phase-1 tensor
             # -- which is what makes the per-parameter cycle these expressions

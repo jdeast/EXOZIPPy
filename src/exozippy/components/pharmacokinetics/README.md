@@ -135,6 +135,24 @@ diagnose), and its fixed effects agree with `fm2`'s to 1e-4. **That is what we
 compare against.** `fm1`'s differ, and the difference matters -- see the
 random effects below.
 
+**WHAT IS VERIFIED AGAINST THE LITERATURE, AND WHAT IS NOT.** Be precise about
+this, because the three rows above have different provenance:
+
+* The **model definitions** for all three are the book's own, not a
+  reconstruction: `ch08.R` ships inside the package and is the script that
+  reproduces the chapter.
+* `fm1`'s **numbers** are verified against the published values -- an
+  independent search surfaces `-2.43267 / 0.45141 / -3.21445` for this fit,
+  and the rerun here gives `-2.432671 / 0.451410 / -3.214452`, agreeing to
+  every published digit.
+* `fm2`'s and `fm3`'s numbers are from the **rerun**, not from a page. The
+  book's printed tables for them could not be located in any accessible
+  source (checked: the nlme reference manual, the 1998 `lme`/`nlme` manual,
+  and a literature search). The `fm1` agreement is the evidence that this R
+  environment reproduces the book, which makes the rerun trustworthy -- but
+  it is indirect, and saying so is cheaper than implying a citation that was
+  never checked.
+
 **The run**, as the shipped `examples/theophylline` config stands: 4 chains,
 2000 tune + 2000 draws, `target_accept: 0.95`. Max Rhat 1.001, min ESS 2016,
 48 divergences in 8000 draws (0.6%), sitting in the upper tail of `omega_ka`

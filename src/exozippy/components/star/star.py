@@ -351,8 +351,8 @@ class Star(Component):
     # even be sampled for such fits" -- examples/ob08092), which is exactly
     # the state review 3.8.1 asked to end.
     #
-    # So they are declared INACTIVE per star where nothing reads them (role 4
-    # -- no raw coordinate, no potential, no table row), and left FREE where
+    # So they are declared INACTIVE per star where nothing reads them
+    # -- no raw coordinate, no potential, no table row -- and left FREE where
     # something does.  The mask is computed from the CONFIG, so adding an
     # `sed:` block flips them back on with no user action, and never pins a
     # value in code for a parameter the model reads: an element is either not

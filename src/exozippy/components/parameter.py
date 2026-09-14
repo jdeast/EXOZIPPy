@@ -743,10 +743,14 @@ class ElementExpression:
 
     ``mask`` is a boolean array over the parameter's elements.  ``expr`` is a
     callable (or node) exactly as ``Parameter.expression`` is, evaluated over
-    the elements the mask selects.  ``output_only`` marks a REPORTED element
-    (manifest role 3): derived, consumed by nothing, and therefore given NO
-    potential -- a prior or barrier on a quantity nothing reads would be a
-    logp term with no data behind it.
+    the elements the mask selects.  ``output_only`` marks a REPORTED element:
+    derived, consumed by nothing, and therefore built in the DEFERRED pass
+    (``finalize_deferred``) rather than in build order -- contributing no
+    dependency edge is what dissolves the cycle when two parameterizations
+    derive each other in opposite directions.  It still takes the Gaussian
+    prior and the soft bounds a USER wrote for it; those are built there, on
+    the patched vector.  Until 2026-09 they were not built at all, which
+    discarded a user's ``orbit.b.chord: {mu, sigma}`` in silence.
     """
 
     mask: Any
@@ -814,7 +818,7 @@ class Parameter:
     names: Optional[Sequence[str]] = None
     # ACTIVITY selector (manifest `mask`): which elements are parameters of
     # their instance's parameterization at all.  Elements outside it are
-    # INACTIVE (manifest role 4) -- a non-MIST star's EEP, a linear-law band's
+    # INACTIVE -- a non-MIST star's EEP, a linear-law band's
     # u2: held at `inactive_value` (or their resolved initval) purely so the
     # vector has a number, never sampled, given no potential, and suppressed
     # from every report, because a value nothing reads is at best meaningless
@@ -1068,10 +1072,11 @@ class Parameter:
 
         The per-element form of ``expression is not None``, which is a
         WHOLE-VECTOR question and the wrong one for a vector whose instances
-        chose different parameterizations.  REPORTED elements (role 3) count as
-        derived here -- their value is an expression -- and are told apart by
-        ``element_is_reported`` where the difference matters (they carry no
-        potential).
+        chose different parameterizations.  REPORTED elements count as
+        derived here -- their value is an expression, and they ARE a kind of
+        derived -- and are told apart by ``element_is_reported`` where the
+        difference matters (their value, and so any potential built on it, is
+        patched in after stage 7).
 
         Callable only after the model has been built; before that the mask does
         not exist and this falls back to the whole-vector answer.
@@ -1089,7 +1094,7 @@ class Parameter:
     def element_is_active(self, index=0):
         """False if element ``index`` is not a parameter of its instance.
 
-        INACTIVE elements (manifest role 4) are held at a bookkeeping value and
+        INACTIVE elements are held at a bookkeeping value and
         must be suppressed from every report; see the ``mask`` field.  Answered
         from the ``mask`` field before the build and from the build's own array
         after it, so the reporting layer gets the same answer either way.
@@ -1637,9 +1642,10 @@ class Parameter:
         # `is_derived` covers every element whose value comes from an
         # expression, whether the whole vector shares one (the historical case)
         # or each instance names its own; `is_reported` is the subset of those
-        # that nothing consumes (manifest role 3), which differ only in taking
-        # no potential.  `is_inactive` is the `mask` complement: not a
-        # parameter of that instance's parameterization at all (role 4), held
+        # that nothing consumes, which differ only in being BUILT LATE -- same
+        # kind, same potentials, a later pass.  `is_inactive` is the `mask`
+        # complement: not a
+        # parameter of that instance's parameterization at all, held
         # at a bookkeeping value and reported nowhere.
         is_derived = np.full(n_elements, expr_raw is not None, dtype=bool)
         is_reported = np.zeros(n_elements, dtype=bool)
@@ -2217,7 +2223,7 @@ class Parameter:
             # dependency slicing (Component._element_expression) keeps them out
             # of the expression in the first place wherever it can prove the
             # alignment.
-            # REPORTED elements (role 3) are deliberately NOT patched here --
+            # REPORTED elements are deliberately NOT patched here --
             # see finalize_deferred.  Their expressions read quantities that,
             # on other elements, are derived from THIS parameter, so they can
             # only be built once every parameter exists.
@@ -2292,7 +2298,7 @@ class Parameter:
             # so nothing is partially re-mapped before the error, and the
             # element reported is the first one the user wrote rather than
             # whichever loop ran first.  `is_derived` covers REPORTED elements
-            # too (role 3), which is right: their patch is deferred and would
+            # too, which is right: their patch is deferred and would
             # overwrite the link anyway.
             #
             # NOT refused: a numeric `lower:`/`upper:` (a different mechanism
@@ -2779,7 +2785,7 @@ class Parameter:
 
         The second half of a two-phase build, called by ``System.build_model``
         once every parameter exists (inside the model context).  A REPORTED
-        element (manifest role 3) is derived from a quantity that, on OTHER
+        element is derived from a quantity that, on OTHER
         elements of some parameter, is derived from this one -- a V_c/V_e orbit
         reports ``secosw`` computed from its ``ecc``/``omega``, while a
         sqrt(e)cos/sin orbit derives its ``ecc`` from ``secosw``.  Per element
@@ -2893,7 +2899,7 @@ class Parameter:
             sigmas = state["sigmas"][idx]
             centres = state["prior_mus"][idx]
             pm.Potential(
-                f"gaussian_prior.{self.label}.reported",
+                f"gaussian_prior.{self.label}.late",
                 pm.math.sum(
                     -0.5
                     * (
@@ -2921,7 +2927,7 @@ class Parameter:
                 continue
             idx = np.flatnonzero(mask)
             pm.Potential(
-                f"{name}.{self.label}.reported",
+                f"{name}.{self.label}.late",
                 pm.math.sum(
                     helper(
                         val_flat[pt.as_tensor_variable(idx)],

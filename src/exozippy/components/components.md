@@ -6,7 +6,7 @@ per-instance parameterization.
 
 Read this before adding a component, before touching the manifest vocabulary
 (`src/exozippy/manifest.py`), the build graph (`src/exozippy/graph.py`) or the physics
-registry (`src/exozippy/physics_registry.py`). Related: the four element roles a manifest
+registry (`src/exozippy/physics_registry.py`). Related: the element roles a manifest
 entry can declare are in `src/exozippy/components/parameter.md`; the shared data-component
 scaffolding is `src/exozippy/components/instrument.md`.
 
