@@ -135,21 +135,35 @@ dex/log quantity, a relative one for a linear one.
 *And the scatter is the optimizer, not float noise.* The value being asserted
 is POST-POLISH, and the polish is an iterative optimizer terminating on
 `|grad| < 0.01` nats/unit, so a BLAS/LAPACK difference moves the point where
-that test first passes. Measured in three clusters -- dev linux 0.08057130,
-CI ubuntu 0.08047306 (3.12 and 3.14 identical to the last digit, which is the
-control saying platform not interpreter), CI macOS 0.08073805 -- five orders
-of magnitude above 3.14.20's build difference. Any golden value downstream of
-an optimizer needs a tolerance calibrated from a real cross-platform
-measurement, not from first principles.
+that test first passes -- five orders of magnitude above 3.14.20's build
+difference. Measured across the dev box and all four shipped CI combinations:
+
+| platform | `star.A.logmass` | `planet.b.mass` | `orbit.b.logP` | start logp |
+|---|---|---|---|---|
+| dev (linux) | 0.08057130 | 0.96736983 | 0.47562107 | -601.1 -> 81.4 |
+| CI ubuntu 3.12 | 0.08047306 | 0.96681714 | 0.47562081 | -601.1 -> 81.4 |
+| CI ubuntu 3.13 | 0.08047306 | 0.96681714 | 0.47562081 | -601.1 -> 81.4 |
+| CI ubuntu 3.14 | 0.08047306 | 0.96681714 | 0.47562081 | -601.1 -> 81.4 |
+| CI macOS 3.12 | 0.08073805 | 0.96338280 | 0.47562067 | -601.1 -> 81.4 |
+| **spread** | 2.65e-4 dex | 4.1e-3 rel | 4.0e-7 dex | **0** |
+
+Three ubuntu Pythons identical to the last digit is the control: platform,
+not interpreter. Any golden value downstream of an optimizer needs a
+tolerance calibrated from a real cross-platform measurement like this one,
+not from first principles.
 
 **Prefer a golden START LOGP to golden parameter values**, and assert both.
-logp is STATIONARY at an optimum, so that 6e-4 of optimizer scatter perturbs
-it only at second order (~1e-4 nats here, below the 0.1 nat the polish line
-prints), while a changed prior, a unit-conversion slip or a lost likelihood
-term moves it by O(1) nats. The parameter values are the readable failure
-message; the logp is the discriminating assertion. Pin BOTH ends of the
-polish: the pre-polish value is a plain evaluation at the build start with no
-optimizer in it at all, so it carries none of that scatter.
+logp is STATIONARY at an optimum, so optimizer scatter perturbs it only at
+second order (~1e-4 nats here, below the 0.1 nat the polish line prints),
+while a changed prior, a unit-conversion slip or a lost likelihood term moves
+it by O(1) nats. The right-hand column above is that argument confirmed
+rather than assumed: **both logp values are identical on all five platforms**
+while the parameters under them scatter by up to 4.1e-3, so the logp carries
+a 0.2-nat tolerance where the linear values need 1.5e-2 relative. The
+parameter values are the readable failure message; the logp is the
+discriminating assertion. Pin BOTH ends of the polish: the pre-polish value
+is a plain evaluation at the build start with no optimizer in it at all, so
+it carries none of that scatter.
 
 **One instance of the same shape is knowingly left in place**, so a later
 reader does not think the sweep missed it: `..._posterior_in_user_units` in

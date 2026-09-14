@@ -138,22 +138,26 @@ def test_run_fit_kelt4_trace_has_expected_variables(kelt4_result):
 # re-centered the whitening anchor on the polished start.
 #
 # WHY THE TOLERANCES ARE THIS LOOSE, AND WHY TIGHTENING THEM WILL GO RED.
-# Bit-identical on ONE box is not portable.  `star.A.logmass` measured on
-# three platforms:
+# Bit-identical on ONE box is not portable.  MEASURED on all four shipped CI
+# combinations plus the dev box (2026-09-14):
 #
-#     dev box (linux)      0.08057130 dex   (1.203847 Msun)
-#     CI ubuntu 3.12/3.14  0.08047306 dex   (1.203575 Msun)
-#     CI macOS 3.12        0.08073805 dex   (1.204309 Msun)
+#   platform             star.A.logmass   planet.b.mass   orbit.b.logP
+#   dev box (linux)        0.08057130      0.96736983      0.47562107
+#   CI ubuntu 3.12         0.08047306      0.96681714      0.47562081
+#   CI ubuntu 3.13         0.08047306      0.96681714      0.47562081
+#   CI ubuntu 3.14         0.08047306      0.96681714      0.47562081
+#   CI macOS 3.12          0.08073805      0.96338280      0.47562067
 #
-# That is 2.65e-4 ABSOLUTE in dex, i.e. 6.1e-4 relative in the physical mass.
-# It is NOT the ~1e-9 build difference of review 3.14.20, and it is five
-# orders of magnitude bigger: the value being asserted is POST-POLISH, and
-# the polish is an ITERATIVE optimizer that terminates on |grad| < 0.01
-# nats/unit.  A small BLAS/LAPACK difference moves the point at which that
-# test first passes, so a different BLAS build lands somewhere else on the
-# same basin floor.  Three clusters, one per platform family, is exactly that
-# signature.  The two ubuntu Pythons agreeing to the last digit is the
-# control: it is the platform, not the interpreter.
+#   spread                 2.65e-4 dex     4.1e-3 rel      4.0e-7 dex
+#
+# The three ubuntu Pythons agreeing to the LAST DIGIT is the control: this is
+# the platform, not the interpreter.  And it is NOT the ~1e-9 build
+# difference of review 3.14.20 -- it is five orders of magnitude bigger --
+# because the value being asserted is POST-POLISH and the polish is an
+# ITERATIVE optimizer that terminates on |grad| < 0.01 nats/unit.  A BLAS or
+# LAPACK difference moves the point at which that test first passes, so a
+# different BLAS build lands somewhere else on the same basin floor.  Three
+# clusters, one per platform family, is exactly that signature.
 #
 # So the tolerance is applied in each quantity's OWN domain -- absolute in
 # dex for a dex/log quantity, relative for a linear one.  Applying a single
@@ -163,12 +167,12 @@ def test_run_fit_kelt4_trace_has_expected_variables(kelt4_result):
 # mass is 6.1e-4 and would have passed.  A relative tolerance on a quantity
 # whose zero is arbitrary measures the offset, not the error.
 #
-# Headroom is deliberate, ~10x the measured spread, and cross-platform data
-# exists for star.A.logmass only -- the other two rows were never reached
-# before the first assertion failed.  A real start regression is far larger:
-# review 1.3.6 moved planet.mass by 8%.
+# Headroom over the measured spread is ~11x in dex and ~3.7x in the linear
+# rtol -- the linear one is tighter because planet.b.mass is the widest
+# scatter in the table and CI runner images change.  A real start regression
+# is far larger: review 1.3.6 moved planet.mass by 8%.
 KELT4_DEX_ATOL = 3.0e-3  # dex, for log/dex quantities (11x observed)
-KELT4_LINEAR_RTOL = 1.0e-2  # relative, for linear quantities (16x observed)
+KELT4_LINEAR_RTOL = 1.5e-2  # relative, for linear quantities (3.7x observed)
 
 # The keys are the STARTUP TABLE's per-element display labels, which are not
 # the trace's variable names (planet.b.mass here, planet.mass there).
@@ -231,7 +235,14 @@ KELT4_START = {
 # `orbit.sini` is a manifest parameter but appears in neither this table nor
 # the trace, so sin i is derived from cosi.  Implementing m sin i as a
 # reported parameter is review item 8.8.17 and is not this test's business.
-KELT4_START_MSINI = 0.834700  # Mjup; golden regression, same rtol as linear
+KELT4_START_MSINI = 0.834700  # Mjup; golden regression
+# m sin i's own cross-platform spread has NOT been measured -- `orbit.b.cosi`
+# was added to the table in the same commit that added this, so the CI sweep
+# that calibrated the three rows above predates it.  3e-2 until the
+# calibration warning below reports it, then tighten toward KELT4_LINEAR_RTOL.
+# It is still 2.5x tighter than the mass's own offset from published, so it
+# is not vacuous meanwhile.
+KELT4_MSINI_RTOL = 3.0e-2
 KELT4_PUBLISHED_MASS = 0.90  # Mjup, Beatty+2016; see the band above
 KELT4_PUBLISHED_RTOL = 0.15
 
@@ -250,15 +261,17 @@ KELT4_PUBLISHED_RTOL = 0.15
 # the sharper detector of a prior/unit/likelihood change.  The POST-polish
 # value is the point the sampler actually begins from.
 #
-# PROVISIONAL TOLERANCE.  2.0 nats is deliberately generous for a first CI
-# pass: the cross-platform spread of these two numbers has not been measured
-# yet (the calibration warning below reports it), and a second red CI round
-# costs more than a temporarily loose bound.  Tighten it once the three
-# platforms have reported -- the expectation is that they agree to the
-# printed 0.1 nat.
+# AND THE PREDICTION HELD, MEASURED.  Both numbers came back IDENTICAL on
+# the dev box, CI ubuntu 3.12, 3.13 and 3.14, and CI macOS 3.12 -- -601.1 and
+# 81.4 on all five -- while the parameter values under them scattered by up
+# to 4.1e-3 relative on the same runs.  That is the stationarity argument
+# confirmed rather than assumed, and it is why the tolerance here is 0.2 nats
+# (twice the printed resolution) against the 1.5e-2 the linear values need.
+# So this is the assertion that will catch a changed prior first, and by a
+# wide margin.
 KELT4_BUILD_LOGP = -601.1  # lp at the build start, before the polish
 KELT4_START_LOGP = 81.4  # lp at the polished start the sampler uses
-KELT4_LOGP_ATOL = 2.0  # nats; provisional, see above
+KELT4_LOGP_ATOL = 0.2  # nats; 2x the 0.1-nat print resolution
 
 # One row of run.inspect_start's startup table, as the file log handler (always
 # DEBUG, so the table is there whatever logger_level the config asks for)
@@ -348,10 +361,16 @@ def test_run_fit_kelt4_start_is_physical(kelt4_result):
     start = read_start_table(log_path)
     build_lp, polished_lp = read_polish_logp(log_path)
 
-    # CALIBRATION PROBE, temporary.  pytest -q prints the warnings summary, so
-    # this is how the three CI platforms report their own numbers for a golden
-    # value whose cross-platform spread has not been measured yet.  Delete it
-    # once KELT4_LOGP_ATOL has been set from that data (review 7.13.6).
+    # CALIBRATION PROBE, TEMPORARY -- DELETE IT AFTER THE NEXT CI ROUND.
+    # pytest -q prints the warnings summary, which is how each CI platform
+    # reports its own numbers for a golden value whose cross-platform spread
+    # has not been measured yet.  It has already done its job once: the two
+    # logp values and the three parameter rows above are calibrated from what
+    # it reported on ubuntu 3.12/3.13/3.14 and macOS 3.12.  What is still
+    # UNMEASURED is `orbit.b.cosi` and the m sin i product, which were added
+    # after that sweep -- hence KELT4_MSINI_RTOL's provisional 3e-2.  Once
+    # this round reports them, tighten that and remove this block
+    # (review 7.13.6).
     warnings.warn(
         "kelt4 start calibration: "
         f"build_lp={build_lp!r} polished_lp={polished_lp!r} "
@@ -426,11 +445,11 @@ def test_run_fit_kelt4_start_is_physical(kelt4_result):
 
     # (a) REGRESSION: our own recorded product, at the linear tolerance.
     assert np.isclose(
-        msini, KELT4_START_MSINI, rtol=KELT4_LINEAR_RTOL, atol=0.0
+        msini, KELT4_START_MSINI, rtol=KELT4_MSINI_RTOL, atol=0.0
     ), (
         f"m sin i starts at {msini!r} Mjup (mass={planet_mass!r} x "
         f"sin i={sini!r} from cosi={cosi!r}), recorded "
-        f"{KELT4_START_MSINI!r} (rtol {KELT4_LINEAR_RTOL}). If this move is "
+        f"{KELT4_START_MSINI!r} (rtol {KELT4_MSINI_RTOL}). If this move is "
         f"intended, update KELT4_START_MSINI and say why in the commit."
     )
 
