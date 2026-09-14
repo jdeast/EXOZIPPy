@@ -1,7 +1,7 @@
 # /bin/sh
 # ----------------Parameters---------------------- #
 #$ -S /bin/sh
-#$ -pe mthread 64
+#$ -pe mthread 32-64
 #$ -q lThC.q
 #$ -cwd
 #$ -j y
@@ -23,6 +23,19 @@
 # ONE TASK = ONE EVENT.  They are independent; a failure in one says nothing
 # about the others, which is the point of running them identically.
 #
+# SLOTS ARE REQUESTED AS A RANGE (32-64) and `sampler.cores` is then set
+# from $NSLOTS on the node.  Both halves are needed and neither works alone:
+# mthread's allocation_rule is $pe_slots, so all slots must land on ONE
+# host, and lThC.q had 3,510 of 4,616 slots free while a flat 64-slot
+# request still would not start -- the cluster was not full, the individual
+# NODES were.  A range schedules against whatever a node has spare.  But a
+# config still claiming `cores: 64` after SGE granted 32 oversubscribes the
+# node 2x, which is precisely review 2.4.11's defect, so dc18_set_cores.py
+# writes a per-job copy of the config with the granted count.  It copies
+# rather than edits: the committed configs are read by neighbouring array
+# tasks, and what ran stays reproducible from the committed file plus
+# $NSLOTS.
+#
 # ----------------Modules------------------------- #
 module purge
 module load tools/python/3.13
@@ -42,5 +55,7 @@ if [ -z "$ev" ]; then
 fi
 
 echo "event $ev   commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)   $(date)"
-exozippy "sweep/$ev/DC2018_$ev.yaml"
+cfg="${TMPDIR:-/tmp}/$(basename ${ev})_$$.yaml"
+python dc18_set_cores.py "sweep/$ev/DC2018_$ev.yaml" "$cfg" --cores "${NSLOTS:?NSLOTS unset}"
+exozippy "$cfg"
 echo "exit $?   $(date)"
