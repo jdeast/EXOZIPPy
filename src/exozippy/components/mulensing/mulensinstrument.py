@@ -18,7 +18,7 @@ from exozippy.outputs.prose import get_collector
 from exozippy.skyframe import observer_sky_offset
 
 from ..parameterization import pin_unselected
-from . import mmexofast_support
+from . import mmexofast_support, peakfind
 from .physics import (
     RHO_FLOOR,
     S_FLOOR,
@@ -272,6 +272,17 @@ class MulensInstrument(Instrument):
 
             per_file.append((t, f, e, df))
 
+        # THE BUILT-IN PEAK FINDER (8.4.9).  Runs HERE, after pass 1, rather
+        # than beside the MMEXOFAST hook above, and the difference matters:
+        # MMEXOFAST has to run before the photometry is read because it
+        # supplies the bad-data MASK, while this needs no mask and so gets
+        # to see the data as the model will -- masked, detrended, and
+        # already converted to flux.  It also has to land BEFORE
+        # `_estimate_flux_components` in pass 2, which reads the seed t_0 /
+        # u_0 / t_E to decompose each band's flux and silently falls back to
+        # median-flux / q_source = 0.95 without them.
+        self._peak_find_seeds(system, per_file)
+
         # Geocentric reference (Skowron+2011 convention): Earth's position and
         # velocity at t_0_par define the inertial frame.  All observer positions
         # are stored as deviations from this linear Earth trajectory so that
@@ -504,6 +515,104 @@ class MulensInstrument(Instrument):
             "curves were derived with MMEXOFAST (in preparation).",
             section="microlensing",
             key=f"{self.prefix}.mmexofast",
+            rank=30,
+        )
+
+    def _peak_find_seeds(self, system, per_file):
+        """Seed t_0/u_0/t_E with the built-in PSPL fit when nothing else did.
+
+        STRICTLY A FALLBACK, by default.  `peak_find` on the mulensevent
+        block takes:
+
+          - ``auto`` (default): run only when the microlensing observables
+            are still unseeded at this point -- i.e. the user named none, no
+            explicit MMEXOFAST JSON was given, and the automatic MMEXOFAST
+            path either opted out (``mmexofast: false``) or produced nothing
+            usable.  Those cases previously started t_0/u_0/t_E at
+            ``defaults.yaml``, which for a real event is a start no sampler
+            recovers from, so a fallback here can only help and cannot
+            change any fit that was already seeded.
+          - ``true``: run REGARDLESS, replacing whatever seeded the
+            observables that ranks no higher than derived-from-data.  This
+            is the mmexofast-free mode and the A/B handle for comparing the
+            two seeders on one event.
+          - ``false``: never run.
+
+        Failure is not fatal.  A seeder that raises should leave the fit in
+        exactly the state it would have been in without this module, which
+        is why the search is wrapped -- a start value moves no posterior,
+        and killing a run over one is the wrong trade.
+        """
+        event = getattr(system, "mulensevent", None)
+        if event is None or not event.config:
+            return
+        spec = event.config[0].get("peak_find", "auto")
+        if spec is False:
+            return
+        forced = spec is True
+
+        is_binary = event.n_companions >= 1
+        want_rho = bool(event.finite_source)
+        if not forced and mmexofast_support.user_hints_sufficient(
+            self.config_manager, is_binary, want_rho
+        ):
+            return
+
+        curves = []
+        for (t, f, e, _df) in per_file:
+            ok = (
+                np.isfinite(t)
+                & np.isfinite(f)
+                & np.isfinite(e)
+                & (e > 0)
+            )
+            if ok.sum() >= 4:
+                curves.append((t[ok], f[ok], 1.0 / e[ok] ** 2))
+        if not curves:
+            logger.warning(
+                f"[{self.prefix}] peak finder: no usable epochs; "
+                f"t_0/u_0/t_E keep their defaults."
+            )
+            return
+
+        # Hand the search this component's OWN magnification so the seed is
+        # built with the same u_0 floor the likelihood uses.  Parallax is
+        # held at zero (delta_e = delta_n = 0), matching run_or_load's
+        # no_parallax default: a PSPL seed cannot resolve the trajectory
+        # asymmetry, so it should not claim to.
+        zeros = {}
+
+        def mag_fn(t, t_0, u_0, t_E):
+            d = zeros.get(len(t))
+            if d is None:
+                d = np.zeros_like(t)
+                zeros[len(t)] = d
+            return self._pspl_magnification(t, d, d, t_0, u_0, t_E, 0.0, 0.0)
+
+        try:
+            seed = peakfind.find_pspl_seed(curves, mag_fn=mag_fn)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"[{self.prefix}] peak finder failed "
+                f"({type(exc).__name__}: {exc}); t_0/u_0/t_E keep their "
+                f"defaults."
+            )
+            return
+        if seed is None:
+            logger.warning(
+                f"[{self.prefix}] peak finder found no PSPL solution; "
+                f"t_0/u_0/t_E keep their defaults."
+            )
+            return
+        peakfind.push_peak_find_hints(
+            seed, self.config_manager, source=self.prefix
+        )
+        get_collector(system).add(
+            "Starting values for the microlensing trajectory "
+            "($t_0$, $u_0$, $t_{\\rm E}$) were derived from a point-lens "
+            "point-source fit to the light curves.",
+            section="microlensing",
+            key=f"{self.prefix}.peakfind",
             rank=30,
         )
 

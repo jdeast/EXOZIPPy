@@ -42,6 +42,7 @@ EVENT_KEYS = frozenset(
         "use_op",
         "mmexofast",
         "mmexofast_options",
+        "peak_find",
         "fitmurel",
         "fitpirel",
         "fitthetae",
