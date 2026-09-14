@@ -139,37 +139,44 @@ point where that test first passes -- five orders of magnitude above
 3.14.20's build difference. Measured across the dev box (solo AND inside the
 full `-n6` suite) and all four shipped CI combinations:
 
-| run | `star.A.logmass` | `planet.b.mass` | `orbit.b.cosi` | start logp |
-|---|---|---|---|---|
-| dev, solo | 0.08057130 | 0.96736983 | 0.50545129 | -601.1 -> 81.4 |
-| dev, `-n6` suite | 0.08054904 | 0.96234938 | 0.49730418 | -601.1 -> 81.4 |
-| CI ubuntu 3.12 | 0.08047306 | 0.96681714 | n/a | -601.1 -> 81.4 |
-| CI ubuntu 3.13 | 0.08047306 | 0.96681714 | n/a | -601.1 -> 81.4 |
-| CI ubuntu 3.14 | 0.08047306 | 0.96681714 | n/a | -601.1 -> 81.4 |
-| CI macOS 3.12 | 0.08073805 | 0.96338280 | n/a | -601.1 -> 81.4 |
-| **spread** | 2.65e-4 dex | 5.2e-3 rel | 1.6e-2 rel | **0** |
+| run | `star.A.logmass` | `planet.b.mass` | `orbit.b.cosi` | `m sin i` | start logp |
+|---|---|---|---|---|---|
+| dev, solo | 0.08057130 | 0.96736983 | 0.50545129 | 0.83470003 | -601.1 -> 81.4 |
+| dev, `-n6` suite | 0.08054904 | 0.96234938 | 0.49730418 | 0.83491147 | -601.1 -> 81.4 |
+| CI ubuntu 3.12 | 0.08047306 | 0.96681714 | 0.50424569 | 0.83490484 | -601.1 -> 81.4 |
+| CI ubuntu 3.13 | 0.08047306 | 0.96681714 | 0.50424569 | 0.83490484 | -601.1 -> 81.4 |
+| CI ubuntu 3.14 | 0.08057639 | 0.96445481 | 0.50099724 | 0.83468634 | -601.1 -> 81.4 |
+| CI macOS 3.12 | 0.08073805 | 0.96338280 | 0.49789929 | 0.83547914 | -601.1 -> 81.4 |
+| **full width** | 2.65e-4 dex | 5.2e-3 rel | 1.6e-2 rel | 9.5e-4 rel | **0** |
 
-Three ubuntu Pythons identical to the last digit is the control: platform,
-not interpreter.
-
-**And it is not even cross-machine only.** The same box gives different
-answers solo and under the full suite, because the polish's BLAS is
-multithreaded and its work partitioning depends on machine LOAD. So a golden
-value downstream of an optimizer cannot be calibrated from repeated solo runs
-however many you do -- it needs runs under load, and on the other platforms,
-before you believe a tolerance. Both of this test's red rounds came from
+**It is not cross-machine only, and it is not even per-platform
+deterministic.** The same box disagrees with itself solo and under the full
+suite, because the polish's BLAS is multithreaded and partitions its work by
+machine LOAD. And the three ubuntu Pythons agreed to the last digit on one CI
+run, then 3.14 diverged on the next -- so "platform, not interpreter", which
+an earlier version of this section asserted, is wrong. So a golden value
+downstream of an optimizer **cannot be calibrated from repeated runs of one
+condition, however many**: seven bit-identical solo runs opened that PR and
+proved nothing about portability. All three of its red rounds came from
 skipping a step of that.
 
+**How to calibrate one, then.** Put a temporary `warnings.warn` in the test
+reporting the values; `pytest -q` prints the warnings summary, so every CI
+platform reports its own numbers on a GREEN run and you set the tolerance
+from data instead of from an argument. Remove the probe once they have all
+reported.
+
 **The scatter is also not uniform across parameters, and that part is physics
-rather than noise.** Ranked by how far they move: the start logp (0,
-stationary), `orbit.logP` (1.5e-7, pinned by the data), `star.logmass`
-(2.8e-4, pinned by its Gaussian prior), `m sin i` (2.5e-4, what the RVs
-constrain), `planet.mass` (5.2e-3, which is `m sin i / sin i` and so inherits
-`cosi`), and `orbit.cosi` (1.6e-2, the flat direction an RV-only fit says
-nothing about). One tolerance across that range is either vacuous at the top
-or red at the bottom, so give the flat direction its own -- and note that the
-hierarchy itself is informative: if `cosi` ever stops being the loosest row,
-something has started constraining the inclination.
+rather than noise.** Ranked by how far they move over those six runs: the
+start logp (**0**, stationary), `orbit.logP` (4.1e-7 dex, pinned by the
+data), `star.logmass` (2.7e-4 dex, pinned by its Gaussian prior), `m sin i`
+(9.5e-4, what the RVs constrain), `planet.mass` (5.2e-3, which is
+`m sin i / sin i` and so inherits `cosi`), and `orbit.cosi` (1.6e-2, the flat
+direction an RV-only fit says nothing about). One tolerance across that range
+is either vacuous at the top or red at the bottom, so give the flat direction
+its own -- and note that the hierarchy itself is informative: if `cosi` ever
+stops being the loosest row, something has started constraining the
+inclination.
 
 **Prefer a golden START LOGP to golden parameter values**, and assert both.
 logp is STATIONARY at an optimum, so optimizer scatter perturbs it only at

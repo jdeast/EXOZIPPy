@@ -13,7 +13,6 @@ Marked 'slow'; excluded from fast CI with ``pytest -m "not slow"``.
 import os
 import re
 import shutil
-import warnings
 from pathlib import Path
 
 import arviz as az
@@ -141,41 +140,46 @@ def test_run_fit_kelt4_trace_has_expected_variables(kelt4_result):
 #
 # WHY THE TOLERANCES ARE WHAT THEY ARE, AND WHY EACH QUANTITY NEEDS ITS OWN.
 # Bit-identical on ONE box, run one way, is not portable.  MEASURED on all
-# four shipped CI combinations, plus the dev box run BOTH solo and inside the
-# full -n6 suite (2026-09-14):
+# four shipped CI combinations plus the dev box run BOTH solo and inside the
+# full -n6 suite -- six environments, 2026-09-14:
 #
-#   run                 star.A.logmass  planet.b.mass  orbit.b.cosi  start lp
-#   dev box, solo         0.08057130     0.96736983     0.50545129   -601.1 -> 81.4
-#   dev box, -n6 suite    0.08054904     0.96234938     0.49730418   -601.1 -> 81.4
-#   CI ubuntu 3.12        0.08047306     0.96681714      (not yet)   -601.1 -> 81.4
-#   CI ubuntu 3.13        0.08047306     0.96681714      (not yet)   -601.1 -> 81.4
-#   CI ubuntu 3.14        0.08047306     0.96681714      (not yet)   -601.1 -> 81.4
-#   CI macOS 3.12         0.08073805     0.96338280      (not yet)   -601.1 -> 81.4
+#   run              star.A.logmass  planet.b.mass  orbit.b.cosi   m sin i    start lp
+#   dev box solo       0.08057130     0.96736983     0.50545129  0.83470003  -601.1 -> 81.4
+#   dev box -n6        0.08054904     0.96234938     0.49730418  0.83491147  -601.1 -> 81.4
+#   CI ubuntu 3.12     0.08047306     0.96681714     0.50424569  0.83490484  -601.1 -> 81.4
+#   CI ubuntu 3.13     0.08047306     0.96681714     0.50424569  0.83490484  -601.1 -> 81.4
+#   CI ubuntu 3.14     0.08057639     0.96445481     0.50099724  0.83468634  -601.1 -> 81.4
+#   CI macOS 3.12      0.08073805     0.96338280     0.49789929  0.83547914  -601.1 -> 81.4
 #
-#   spread                2.65e-4 dex    5.2e-3 rel     1.6e-2 rel      0
+#   full width        2.65e-4 dex    5.2e-3 rel     1.6e-2 rel   9.5e-4 rel      0
 #
-# THREE THINGS THAT TOOK A RED RUN EACH TO LEARN, all of them the same
-# underlying fact -- the value asserted is POST-POLISH and the polish is an
-# ITERATIVE optimizer terminating on |grad| < 0.01 nats/unit, so anything
-# that perturbs the arithmetic moves where that test first passes and the
-# run lands somewhere else on the same basin floor.
+# THREE THINGS THAT COST A RED RUN EACH, all of them the same underlying
+# fact -- the value asserted is POST-POLISH and the polish is an ITERATIVE
+# optimizer terminating on |grad| < 0.01 nats/unit, so anything that
+# perturbs the arithmetic moves where that test first passes and the run
+# lands somewhere else on the same basin floor.
 #
-# (1) IT IS NOT float NOISE.  This is five orders of magnitude above the
-#     ~1e-9 build difference of review 3.14.20.  The three ubuntu Pythons
-#     agreeing to the last digit is the control: platform, not interpreter.
+# (1) IT IS NOT float NOISE.  It is five orders of magnitude above the ~1e-9
+#     build difference of review 3.14.20, which the first version cited.
 #
-# (2) IT IS NOT EVEN CROSS-MACHINE ONLY.  The same box gives different
-#     answers solo and under the full -n6 suite, because the polish's BLAS
-#     is multithreaded and its work partitioning depends on machine LOAD.
-#     So a golden value here cannot be calibrated from repeated solo runs,
-#     however many; it has to be calibrated from runs under load too.
+# (2) IT IS NOT CROSS-MACHINE ONLY, AND IT IS NOT EVEN PER-PLATFORM
+#     DETERMINISTIC.  The same box disagrees with itself solo vs under the
+#     -n6 suite, because the polish's BLAS is multithreaded and partitions
+#     its work by machine LOAD.  And the three ubuntu Pythons agreed to the
+#     last digit on one CI run and 3.14 then diverged on the next, so
+#     "platform, not interpreter" -- which an earlier version of this
+#     comment asserted -- is WRONG: there is run-to-run variation within a
+#     platform too.  The practical rule: a golden value downstream of an
+#     optimizer cannot be calibrated from repeated runs of one condition,
+#     however many.  Seven bit-identical solo runs opened this PR and proved
+#     nothing about portability.
 #
 # (3) THE SCATTER IS NOT UNIFORM ACROSS PARAMETERS, AND THAT IS PHYSICS
-#     RATHER THAN NOISE.  Ranked by how much they move:
+#     RATHER THAN NOISE.  Ranked by how far each moves over those six runs:
 #       start logp      0          stationary at an optimum (see below)
-#       orbit.b.logP    1.5e-7     pinned by the data
-#       star.A.logmass  2.8e-4     pinned by its Gaussian prior
-#       m sin i         2.5e-4     what the RV data actually constrains
+#       orbit.b.logP    4.1e-7 dex pinned by the data
+#       star.A.logmass  2.7e-4 dex pinned by its Gaussian prior
+#       m sin i         9.5e-4     what the RV data actually constrains
 #       planet.b.mass   5.2e-3     m sin i / sin i, so it inherits cosi
 #       orbit.b.cosi    1.6e-2     THE FLAT DIRECTION: RVs say nothing
 #     A single tolerance across that range is either vacuous at the top or
@@ -191,8 +195,9 @@ def test_run_fit_kelt4_trace_has_expected_variables(kelt4_result):
 # mass is 6.1e-4 and would have passed.  A relative tolerance on a quantity
 # whose zero is arbitrary measures the offset, not the error.
 #
-# Headroom is 3-11x the measured spread in every row.  A real start
-# regression is far larger: review 1.3.6 moved planet.mass by 8%.
+# Every tolerance below is now calibrated from that six-environment table
+# with 3-11x headroom.  A real start regression is far larger: review 1.3.6
+# moved planet.mass by 8%.
 KELT4_DEX_ATOL = 3.0e-3  # dex, log/dex quantities (11x observed)
 KELT4_LINEAR_RTOL = 2.5e-2  # relative, linear quantities (4.8x observed)
 KELT4_FLAT_RTOL = 5.0e-2  # relative, the prior-dominated flat direction
@@ -262,15 +267,14 @@ KELT4_START = {
 # the trace, so sin i is derived from cosi.  Implementing m sin i as a
 # reported parameter is review item 8.8.17 and is not this test's business.
 KELT4_START_MSINI = 0.834700  # Mjup; golden regression
-# AND IT IS THE TIGHTEST PARAMETER ASSERTION IN THE FILE, which is the point.
-# Between the dev box's solo run and the same box under the full -n6 suite,
-# `orbit.b.cosi` moved by 1.6e-2 relative and `planet.b.mass` by 5.2e-3 --
-# but the PRODUCT moved by 2.5e-4, because mass and sin i are anti-correlated
-# and it is m sin i that the RV data pins.  1.5e-2 is 60x that spread and is
-# the cross-platform margin, not the measured one: the CI sweep predates
-# `orbit.b.cosi` being in the table, so the four platforms have not yet
-# reported this row.  Tighten it once they have.
-KELT4_MSINI_RTOL = 1.5e-2
+# AND IT IS THE TIGHTEST PARAMETER ASSERTION IN THE FILE, which is the point
+# and is measured rather than hoped for.  Over the six environments in the
+# table above, `orbit.b.cosi` moved by 1.6e-2 relative and `planet.b.mass`
+# by 5.2e-3, while the PRODUCT moved by 9.5e-4 -- because mass and sin i are
+# anti-correlated and it is m sin i that the RV data pins.  5e-3 is 5.3x
+# that, tighter than every other parameter tolerance here, and it is the
+# assertion that would notice the mass and the inclination drifting apart.
+KELT4_MSINI_RTOL = 5.0e-3
 KELT4_PUBLISHED_MASS = 0.90  # Mjup, Beatty+2016; see the band above
 KELT4_PUBLISHED_RTOL = 0.15
 
@@ -390,22 +394,12 @@ def test_run_fit_kelt4_start_is_physical(kelt4_result):
     start = read_start_table(log_path)
     build_lp, polished_lp = read_polish_logp(log_path)
 
-    # CALIBRATION PROBE, TEMPORARY -- DELETE IT AFTER THE NEXT CI ROUND.
-    # pytest -q prints the warnings summary, which is how each CI platform
-    # reports its own numbers for a golden value whose cross-platform spread
-    # has not been measured yet.  It has already done its job once: the two
-    # logp values and the three parameter rows above are calibrated from what
-    # it reported on ubuntu 3.12/3.13/3.14 and macOS 3.12.  What is still
-    # UNMEASURED is `orbit.b.cosi` and the m sin i product, which were added
-    # after that sweep -- hence KELT4_MSINI_RTOL's provisional 1.5e-2.  Once
-    # this round reports them, tighten that and remove this block
-    # (review 7.13.6).
-    warnings.warn(
-        "kelt4 start calibration: "
-        f"build_lp={build_lp!r} polished_lp={polished_lp!r} "
-        + " ".join(f"{k}={start.get(k, (None,))[0]!r}" for k in KELT4_START),
-        stacklevel=1,
-    )
+    # HOW THE TABLE ABOVE WAS MEASURED, since a future tolerance change will
+    # need the same trick: a temporary `warnings.warn` here reporting these
+    # values.  `pytest -q` prints the warnings summary, so each CI platform
+    # then reports its own numbers in a GREEN run, and the spread can be
+    # calibrated from data instead of from an argument.  The probe was
+    # removed once all six environments had reported (review 7.13.6).
 
     missing = set(KELT4_START) - set(start)
     assert not missing, (
