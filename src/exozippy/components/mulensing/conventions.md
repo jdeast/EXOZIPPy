@@ -14,7 +14,7 @@ MMEXOFAST seeding, and the lens/source body rules).
 
 This file is the **normative** list. `src/exozippy/latex/convention.tex` is a drop-in
 section for the EXOZIPPy microlensing paper carrying the *same* claim list in the paper's
-register, with the same identifiers `C1`...`C25`. The identifiers are the anti-drift
+register, with the same identifiers `C1`...`C28`. The identifiers are the anti-drift
 device: a claim may be reworded in either file, but a `C`-number must mean the same thing
 in both, and a claim added to one must be added to the other under the same number. There
 is no generator and no test enforcing that -- keep them in one commit.
@@ -26,13 +26,12 @@ it.
 
 **There is a THIRD copy, and it is not in this repository.** The Conventions section of
 `paper3_microlensing.tex`, in the paper repo at `~/old_home/papers/exozippy` (whose remote
-is the Overleaf project), carries the same `C`-numbers as the submitted text. Being a
-separate repository it cannot ride the same commit, which is exactly why it is the copy
-most likely to drift: paper3 gained `C26`-`C28` -- the Keplerian reconciliation
-(`alpha = phi_pi - PA_axis`, so `alpha` is a derived position angle and not an independent
-convention), which body an `omega` belongs to, and the node fold plus the third-axis trap
--- before either file here did. When you change a `C`-rule, decide explicitly whether the
-paper moves too, and say so in the commit message when it does not.
+is the Overleaf project), carries the same `C`-numbers as the submitted text. All three
+are in step through `C28`. Being a separate repository it cannot ride the same commit, so
+the rule is simply that **a `C`-rule is not finished until all three carry it**: pull the
+paper repo, make the matching edit there, and name that commit in this one. The paper is
+not licensed to run ahead -- it did once, and the drift lasted exactly as long as it took
+somebody to notice.
 
 ## Notation used below
 
@@ -283,7 +282,7 @@ is the whole of the apparent "sign disagreement" between the two components.
 
 ---
 
-## 4. Binary and multiple lenses
+## 4. Binary and multiple lenses, orbital motion, and the Keplerian elements
 
 ### C12 -- the origin is the lens CENTER OF MASS
 
@@ -539,6 +538,144 @@ lines; `examples/ob170114` is the shipped worked case (Mroz et al. 2026 Table B.
   that seeds a mass, a distance and a published `pi_E` together meets this; seed the mass
   the identity implies (`examples/ob170114` uses `M_h = 0.492544`) and re-measure the
   derived values rather than trusting the printed triple.
+
+### C26 -- the Keplerian elements, and why `alpha` is NOT an independent convention
+
+Everything above is in microlensing's own vocabulary, where a binary lens's orientation is
+the single angle `alpha`. That is self-contained only while nothing in the model has an
+orbit. Once the lens binary moves (C24) or the source is itself a binary (C25), the fit
+carries the textbook elements too, and the question is how `alpha` relates to `bigomega`.
+
+**The element set is the textbook one in C1's frame** (skyframe.md owns it): `inc` from the
+plane of the sky, `bigomega` the position angle of the ascending node East of North (C2),
+and `omega` = `omega_*`, the argument of periastron of the PRIMARY's orbit about the
+barycenter (C27). The ascending node is the node at which the body RECEDES, which is what
+ties `bigomega` to the sign of the radial velocity and is the only reason the node is
+identifiable at all (C28). The projection is the standard Euler application
+`Rz(bigomega) Rx(inc) Rz(omega)`, so at `omega + f = 0` the body sits at `PA = bigomega`
+exactly -- the same single owner (`orbit/physics.thiele_innes_xy`) the astrometry and RV
+models use.
+
+**The reconciliation is then ONE equation.** With `delta_j(t)` companion `j`'s offset from
+the primary -- the RELATIVE orbit, hence `omega_* + 180` (C27) -- projected through that
+Euler chain and scaled into Einstein radii by `a / (D_L * theta_E)`:
+
+    s_j(t)      = |delta_j(t)|
+    PA_axis(t)  = atan2(dE, dN)
+    alpha_j(t)  = phi_pi - PA_axis(t),   phi_pi = atan2(pi_E_E, pi_E_N)
+
+which is C15/C20 evaluated at every epoch rather than once; its time derivative is C24's
+`d(PA_axis)/dt = -dalpha/dt`, so the linear and keplerian modes agree by construction and
+not through a fitted offset. Two consequences, and they are the point of this rule:
+
+1. **`alpha` is DERIVED, and is not a convention at all.** It is a position angle
+   subtracted from another position angle. A microlensing `alpha` and a Keplerian
+   `bigomega` therefore can never genuinely disagree about orientation: a mismatch is
+   always a disagreement about where `phi_pi` points (C8, hence about the C5 frame) or
+   about which end of the binary axis a position angle names (C20) -- both answerable
+   without reference to either code's internals. Microlensing, which looks at first as
+   though it carries an orientation convention all its own, carries NONE.
+
+2. **The keplerian mode has no free geometry parameters** (C24): neither `s_0` nor
+   `alpha_0` is sampled, and the geometry entering the magnification is a function purely
+   of `(P, tp, ecc, omega_*, cosi, bigomega, a)` plus `phi_pi`, `theta_E`, `D_L`.
+
+`examples/ob09020` is the worked case and the reason the machinery exists in this form:
+Yee+2016's Keck/Magellan RVs of the lens primary pin `P/tp/ecc/omega_*/K`, the light curve
+pins the projected geometry, and `bigomega` and `sign(cos i)` -- which no RV can see --
+become MEASURED. The published `s_0 = 0.4294` and `alpha_0 = 189.08` are an acceptance
+check on that fit, not inputs to it.
+
+- Implemented in: `orbit/physics.thiele_innes_xy` (the one Thiele-Innes owner),
+  `Orbit.state_vectors`, `skyframe.py`, `mulensing/physics.lens_geometry_from_orbit`,
+  `Lens.register_parameters` (the `companion_keplerian` manifest).
+- Pinned by: `tests/test_skyframe.py::test_keplerian_sky_and_rv_are_left_handed` (the
+  frame and Euler claims), `tests/test_lens_keplerian_motion.py`
+  `::test_alpha_runs_opposite_the_axis_pa` and
+  `::test_no_new_free_parameters_and_reported_geometry`.
+
+### C27 -- which body's `omega`
+
+A single orbit has TWO arguments of periastron, exactly 180 apart:
+
+    omega_*     the PRIMARY's orbit about the barycenter        <- what EXOZIPPy samples
+    omega_comp  the COMPANION's orbit relative to the primary   = omega_* + 180
+
+Neither spelling is wrong and both are in common use: the RV literature reports `omega_*`
+because that is the orbit the spectrograph measures, the visual-binary literature reports
+the relative orbit because that is the one the eye sees. **An `omega` quoted without naming
+its body is a 180-degree ambiguity and nothing more.** We sample and report `omega_*`
+throughout and apply the flip internally wherever the relative orbit is the one wanted --
+`Orbit.state_vectors(relative=True)` negates `cosw`/`sinw`, and
+`lens_geometry_from_orbit` passes `sinw=-sinw, cosw=-cosw` into the shared kernel for
+exactly this reason.
+
+**Any radial information resolves it in one evaluation**, because a 180 shift in `omega_*`
+inverts the velocity curve -- so measure it rather than assuming. Yee+2016 Table 7 tabulate
+`omega_peri = 151.600` for OGLE-2009-BLG-020L. Taken as `omega_*` that puts the RV model in
+antiphase with the measurements (chi2 = 2087 for 14 points); at
+`omega_* = 331.600 = 151.600 + 180` the same model gives chi2 = 3.2. The published number
+is the COMPANION's, as the visual-binary habit would suggest.
+
+Note that xallarap (C25) inverts the usual expectation: the orbit entering a xallarap fit
+is the SOURCE's own track about its barycenter, so it is `omega_*` that maps across with NO
+flip (`omega_* = xi_omega_periapsis`) while the NODE acquires one
+(`bigomega = phi_pi + xi_Omega_node + 180`).
+
+- Implemented in: `Orbit.state_vectors(relative=...)`,
+  `mulensing/physics.lens_geometry_from_orbit`.
+- Pinned by: `tests/test_state_vectors.py::test_relative_is_the_exact_negation` (the flip
+  is the exact negation of all six state components) and `::test_ascending_node_convention`.
+
+### C28 -- the node degeneracy, what breaks it, and the THIRD-AXIS trap
+
+    (bigomega, omega_*) -> (bigomega + 180, omega_* + 180),   inc UNCHANGED
+
+with the matching shift of `tc`, is a reflection through the plane of the sky: substituted
+into C26's Euler chain it leaves the sky coordinates `(X, Y)` identically unaltered and
+reverses only `Z`. It is therefore invisible to astrometry of EVERY kind -- absolute,
+relative, and C25's xallarap track -- and only radial information identifies which node is
+the ascending one. Declared PER ORBIT, not per system: an RV-constrained orbit in a mixed
+system is not degenerate at all.
+
+**For a LENS binary there is a second breaker, and it is the one genuinely
+microlensing-specific measurement here:** the rotation SENSE of the binary axis on the sky.
+Once the node is fixed, that sense measures `sign(cos i)` through C24's minus sign
+(Skowron Section 5.2: `gamma_perp -> -gamma_perp` is `Omega_node -> -Omega_node,
+i -> pi - i`). It is not a goodness-of-fit question -- the wrong sign raises no chi2, it
+silently reports the reflected orbit -- which is why it is pinned against a synthetic orbit
+of KNOWN inclination rather than against a fit, and why the keplerian mode is validated
+against first-principles synthetic orbits and never against MulensModel's keplerian branch
+(section 6).
+
+**A published `(bigomega, inc)` pair is meaningless without its frame's THIRD axis.**
+Reversing that axis flips the handedness of the sky pair, sending `inc -> 180 - inc` and
+reversing the sense in which `bigomega` is measured; a code reporting `inc > 90` where
+another reports `inc < 90` is usually announcing its third axis, not disagreeing about the
+orbit. Skowron+2011 Appendix B is the case that matters here, since it is the frame
+microlensing orbital solutions are most often quoted in: its first axis is the BINARY AXIS
+and its third points TOWARD the observer, opposite C1's `+Z`. Yee+2016 quote
+OGLE-2009-BLG-020L in it, so their printed values do not drop into the sky frame -- BOTH
+angles move:
+
+    inc      = 180 - inc_B                        (129.424 -> 50.576)
+    bigomega = PA_axis(t_0,kep) - bigomega_B      (their Omega_node = -7.767)
+
+the first because of the third axis, the second because `bigomega_B` is referred to the
+binary axis rather than to North. The node cannot be converted from the published table
+alone: `PA_axis` is not a published quantity -- it is `phi_pi - alpha_0` by C26, and
+`phi_pi` is an OUTPUT of the fit -- so `examples/ob09020` frame-converts it against the
+BUILT MODEL rather than reading it off, and the likelihood is sharp enough in it (+/-10 deg
+costs >1e6 nats) that rounding the result is not an option. See also section 6 on Eq. B9's
+swapped matrix labels, which is a transcription hazard in the same appendix.
+
+- Implemented in: `Orbit._node_degenerate_orbits`, `Orbit._FOLD_FLIP` /
+  `System.fold_degenerate_draws`, `Orbit._lens_keplerian_orbits`.
+- Pinned by: `tests/test_node_degeneracy.py::test_the_two_labels_have_the_same_likelihood`,
+  `::test_the_fold_maps_the_partner_back`,
+  `::test_an_rv_constrained_orbit_is_not_degenerate`; and
+  `tests/test_lens_keplerian_motion.py::test_cosi_sign_flips_the_rotation_sense` for the
+  `sign(cos i)` breaker.
 
 ---
 
