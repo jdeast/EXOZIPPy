@@ -121,6 +121,36 @@ identical** every time (`planet.b.mass` 0.96736983 on all six), while the
 draw those runs produced ranged over 0.8158-1.4158 Mjup, a factor of 1.7 --
 and that is the well-behaved case, inside the old bounds.
 
+**A golden start value cannot be pinned to the ~1e-9 of review 3.14.20, and
+the first version of this test went red on CI for assuming it could.** Two
+compounding mistakes, both worth knowing before you write another one.
+
+*A relative tolerance on a log quantity measures the offset, not the error.*
+`star.A.logmass` is 0.08 dex, so 2.65e-4 of absolute dex scatter reads as
+3.3e-3 RELATIVE -- an `rtol=1e-3` fails on it -- while the SAME scatter in the
+physical mass (1.203575 to 1.204309 Msun) is 6.1e-4 relative and passes.
+Compare each quantity in its own domain: an absolute tolerance in dex for a
+dex/log quantity, a relative one for a linear one.
+
+*And the scatter is the optimizer, not float noise.* The value being asserted
+is POST-POLISH, and the polish is an iterative optimizer terminating on
+`|grad| < 0.01` nats/unit, so a BLAS/LAPACK difference moves the point where
+that test first passes. Measured in three clusters -- dev linux 0.08057130,
+CI ubuntu 0.08047306 (3.12 and 3.14 identical to the last digit, which is the
+control saying platform not interpreter), CI macOS 0.08073805 -- five orders
+of magnitude above 3.14.20's build difference. Any golden value downstream of
+an optimizer needs a tolerance calibrated from a real cross-platform
+measurement, not from first principles.
+
+**Prefer a golden START LOGP to golden parameter values**, and assert both.
+logp is STATIONARY at an optimum, so that 6e-4 of optimizer scatter perturbs
+it only at second order (~1e-4 nats here, below the 0.1 nat the polish line
+prints), while a changed prior, a unit-conversion slip or a lost likelihood
+term moves it by O(1) nats. The parameter values are the readable failure
+message; the logp is the discriminating assertion. Pin BOTH ends of the
+polish: the pre-polish value is a plain evaluation at the build start with no
+optimizer in it at all, so it carries none of that scatter.
+
 **One instance of the same shape is knowingly left in place**, so a later
 reader does not think the sweep missed it: `..._posterior_in_user_units` in
 the same file reads the same single draw, against a tighter `0.3 < logP <

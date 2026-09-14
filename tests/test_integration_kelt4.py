@@ -13,6 +13,7 @@ Marked 'slow'; excluded from fast CI with ``pytest -m "not slow"``.
 import os
 import re
 import shutil
+import warnings
 from pathlib import Path
 
 import arviz as az
@@ -122,10 +123,10 @@ def test_run_fit_kelt4_trace_has_expected_variables(kelt4_result):
 # CONDITIONING rather than by the model, so asserting hard physical bounds on
 # it is a lottery: the same assertion on planet.mass has been observed at
 # 0.81, 2.870, 5.7693 (local, on plain master), 6.724 and 8.718 (CI) while
-# nothing about the fit was wrong.  It cost three separate triages.  The start
-# itself, by contrast, is deterministic -- the pre-whitening polish has no RNG
-# -- so that is what this test measures.  See review 7.13.6 and run.md's
-# section on Model.initial_point() being the start.
+# nothing about the fit was wrong.  It cost three separate triages.  The start,
+# by contrast, is reproducible: the polish has no RNG, so seven consecutive
+# runs on one box gave BIT-IDENTICAL start values.  See review 7.13.6 and
+# run.md's section on Model.initial_point() being the start.
 #
 # GOLDEN VALUES, ON PURPOSE.  These numbers are the whole point: an
 # intentional change to where the sampler begins (a new polish, a re-centered
@@ -136,14 +137,73 @@ def test_run_fit_kelt4_trace_has_expected_variables(kelt4_result):
 # Recorded 2026-09-14 against 1fed94c1, i.e. after batch 4F (PR #265)
 # re-centered the whitening anchor on the polished start.
 #
+# WHY THE TOLERANCES ARE THIS LOOSE, AND WHY TIGHTENING THEM WILL GO RED.
+# Bit-identical on ONE box is not portable.  `star.A.logmass` measured on
+# three platforms:
+#
+#     dev box (linux)      0.08057130 dex   (1.203847 Msun)
+#     CI ubuntu 3.12/3.14  0.08047306 dex   (1.203575 Msun)
+#     CI macOS 3.12        0.08073805 dex   (1.204309 Msun)
+#
+# That is 2.65e-4 ABSOLUTE in dex, i.e. 6.1e-4 relative in the physical mass.
+# It is NOT the ~1e-9 build difference of review 3.14.20, and it is five
+# orders of magnitude bigger: the value being asserted is POST-POLISH, and
+# the polish is an ITERATIVE optimizer that terminates on |grad| < 0.01
+# nats/unit.  A small BLAS/LAPACK difference moves the point at which that
+# test first passes, so a different BLAS build lands somewhere else on the
+# same basin floor.  Three clusters, one per platform family, is exactly that
+# signature.  The two ubuntu Pythons agreeing to the last digit is the
+# control: it is the platform, not the interpreter.
+#
+# So the tolerance is applied in each quantity's OWN domain -- absolute in
+# dex for a dex/log quantity, relative for a linear one.  Applying a single
+# rtol to everything is what broke the first version of this test:
+# star.A.logmass is only 0.08, so 2.65e-4 of dex scatter reads as 3.3e-3
+# RELATIVE and blew an rtol of 1e-3, while the same scatter in the physical
+# mass is 6.1e-4 and would have passed.  A relative tolerance on a quantity
+# whose zero is arbitrary measures the offset, not the error.
+#
+# Headroom is deliberate, ~10x the measured spread, and cross-platform data
+# exists for star.A.logmass only -- the other two rows were never reached
+# before the first assertion failed.  A real start regression is far larger:
+# review 1.3.6 moved planet.mass by 8%.
+KELT4_DEX_ATOL = 3.0e-3  # dex, for log/dex quantities (11x observed)
+KELT4_LINEAR_RTOL = 1.0e-2  # relative, for linear quantities (16x observed)
+
 # The keys are the STARTUP TABLE's per-element display labels, which are not
 # the trace's variable names (planet.b.mass here, planet.mass there).
+# kind: "dex" -> compare with KELT4_DEX_ATOL; "linear" -> KELT4_LINEAR_RTOL.
 KELT4_START = {
-    # label            value        units
-    "star.A.logmass": (0.08057130, "dex(solMass)"),
-    "planet.b.mass": (0.96736983, "jupiterMass"),
-    "orbit.b.logP": (0.47562107, "dex(d)"),
+    # label            value        units           kind
+    "star.A.logmass": (0.08057130, "dex(solMass)", "dex"),
+    "planet.b.mass": (0.96736983, "jupiterMass", "linear"),
+    "orbit.b.logP": (0.47562107, "dex(d)", "dex"),
 }
+
+# THE GOLDEN START LOGP, and why it is the more robust of the two assertions
+# (JDE, 2026-09-14).  logp is STATIONARY at an optimum, so the 6e-4 of
+# optimizer scatter above perturbs it only at SECOND order -- of order
+# delta_theta**2 times the curvature, which for this start is ~1e-4 nats,
+# below the 0.1-nat resolution the polish line prints.  Any real change, by
+# contrast, moves it by O(1) nats or more: a changed prior, a unit conversion
+# slip, a likelihood term added or lost.  That is exactly the discrimination
+# wanted, and it is why a loose tolerance here still bites.
+#
+# Both ends of the polish are pinned, because they fail for different
+# reasons.  The PRE-polish value is the BUILD start -- a plain evaluation with
+# no optimizer in it at all, so it carries none of the scatter above and is
+# the sharper detector of a prior/unit/likelihood change.  The POST-polish
+# value is the point the sampler actually begins from.
+#
+# PROVISIONAL TOLERANCE.  2.0 nats is deliberately generous for a first CI
+# pass: the cross-platform spread of these two numbers has not been measured
+# yet (the calibration warning below reports it), and a second red CI round
+# costs more than a temporarily loose bound.  Tighten it once the three
+# platforms have reported -- the expectation is that they agree to the
+# printed 0.1 nat.
+KELT4_BUILD_LOGP = -601.1  # lp at the build start, before the polish
+KELT4_START_LOGP = 81.4  # lp at the polished start the sampler uses
+KELT4_LOGP_ATOL = 2.0  # nats; provisional, see above
 
 # One row of run.inspect_start's startup table, as the file log handler (always
 # DEBUG, so the table is there whatever logger_level the config asks for)
@@ -154,6 +214,13 @@ _START_ROW = re.compile(
     r"\s+(?P<value>\S+)\s+\|"
     r"\s+(?P<scale>\S+)\s+\|"
     r"\s+(?P<units>[^|]*?)\s*\|"
+)
+
+# polish.py's own summary line, the only place the run reports a TOTAL logp:
+#   ... exozippy.polish: Seed polish (L-BFGS): seed 0 lp -601.1 -> 81.4 (...)
+_POLISH_LP = re.compile(
+    r"Seed polish \(L-BFGS\): seed 0 lp\s+"
+    r"(?P<before>-?[\d.]+)\s+->\s+(?P<after>-?[\d.]+)"
 )
 
 
@@ -185,29 +252,57 @@ def read_start_table(log_path):
     return values
 
 
+def read_polish_logp(log_path):
+    """Total logp before and after the seed polish, from `<prefix>.log`.
+
+    Returns (build_lp, polished_lp), or (None, None) if no polish line is
+    present.  `inspect_start` prints a per-parameter Log-Prob column but no
+    total, and the rows it suppresses (the logit-uniform log-volume terms)
+    mean the printed column cannot be summed into one; the polish summary is
+    the run's only whole-model logp.
+    """
+    for line in Path(log_path).read_text().splitlines():
+        m = _POLISH_LP.search(line)
+        if m is not None:
+            return float(m.group("before")), float(m.group("after"))
+    return None, None
+
+
 def test_run_fit_kelt4_start_is_physical(kelt4_result):
     """
     Given the kelt4rvonly example and the polish + whitening-anchor pipeline,
     When run_fit reports the point the sampler starts from,
-    Then that start is the recorded one, to 1e-3 relative, in user units.
+    Then that start -- its logp, and three of its parameter values -- is the
+    recorded one, within a per-quantity tolerance, in user units.
 
     This deliberately does NOT look at the trace.  With tune: 2 / draws: 1 the
     single draw is one un-adapted jump whose physical size is set by the
     start's conditioning, not by the model, so no physical bound on it can be
-    both tight and reliable (review 7.13.6).  The start is deterministic and
-    is the thing worth pinning.
+    both tight and reliable (review 7.13.6).  The start is reproducible and is
+    the thing worth pinning.
 
-    rtol=1e-3 rather than exact equality: this start is the output of an
-    L-BFGS polish, so its last digits are a BLAS/scipy detail and not
-    portable, and model construction generally is platform-dependent at the
-    ~1e-9 level (review 3.14.20 -- whose own NNLS mechanism does not apply to
-    this RV-only config, but the class of difference does).  1e-3 is far
-    tighter than any real start regression and far looser than that noise.
-    The physical-range checks are kept alongside so a wildly wrong start
-    reports as "outside plausible range" rather than as a tolerance mismatch.
+    The logp assertion is the discriminating one and the parameter values are
+    the readable one; the reasoning behind both tolerances, and why neither
+    can be tightened to the ~1e-9 of review 3.14.20, is in the comments above
+    KELT4_DEX_ATOL and KELT4_START_LOGP.  The physical-range checks are kept
+    so a wildly wrong start reports as "outside plausible range" rather than
+    as a tolerance mismatch.
     """
     out_dir, _ = kelt4_result
-    start = read_start_table(out_dir / "KELT-4A.log")
+    log_path = out_dir / "KELT-4A.log"
+    start = read_start_table(log_path)
+    build_lp, polished_lp = read_polish_logp(log_path)
+
+    # CALIBRATION PROBE, temporary.  pytest -q prints the warnings summary, so
+    # this is how the three CI platforms report their own numbers for a golden
+    # value whose cross-platform spread has not been measured yet.  Delete it
+    # once KELT4_LOGP_ATOL has been set from that data (review 7.13.6).
+    warnings.warn(
+        "kelt4 start calibration: "
+        f"build_lp={build_lp!r} polished_lp={polished_lp!r} "
+        + " ".join(f"{k}={start.get(k, (None,))[0]!r}" for k in KELT4_START),
+        stacklevel=1,
+    )
 
     missing = set(KELT4_START) - set(start)
     assert not missing, (
@@ -231,16 +326,40 @@ def test_run_fit_kelt4_start_is_physical(kelt4_result):
         f"start star logmass={star_logmass:.4f} outside [-0.3, 0.5]"
     )
 
-    # Then the golden values themselves.
-    for label, (expected, units) in KELT4_START.items():
+    # The golden logp, both ends of the polish.
+    assert polished_lp is not None, (
+        "no 'Seed polish (L-BFGS): seed 0 lp ... -> ...' line in "
+        f"{log_path.name}; the polish is what defines this start"
+    )
+    for what, got, expected in (
+        ("build", build_lp, KELT4_BUILD_LOGP),
+        ("polished", polished_lp, KELT4_START_LOGP),
+    ):
+        assert abs(got - expected) <= KELT4_LOGP_ATOL, (
+            f"{what} start logp is {got!r} nats, recorded {expected!r} "
+            f"(tolerance {KELT4_LOGP_ATOL} nats). logp is stationary at the "
+            f"start, so optimizer scatter cannot move it this far -- a "
+            f"prior, a unit conversion or a likelihood term changed. If this "
+            f"move is intended, update KELT4_BUILD_LOGP/KELT4_START_LOGP and "
+            f"say in the commit why the model now scores differently there."
+        )
+
+    # Then the golden parameter values, each in its own domain.
+    for label, (expected, units, kind) in KELT4_START.items():
         got, got_units = start[label]
         assert got_units == units, (
             f"{label} start is reported in {got_units!r}, expected {units!r}"
         )
-        assert np.isclose(got, expected, rtol=1e-3, atol=0.0), (
-            f"{label} starts at {got!r} {units}, recorded {expected!r}. "
-            f"If this move is intended, update KELT4_START and say in the "
-            f"commit why the sampler now begins somewhere else."
+        if kind == "dex":
+            ok = abs(got - expected) <= KELT4_DEX_ATOL
+            bound = f"atol {KELT4_DEX_ATOL} dex"
+        else:
+            ok = np.isclose(got, expected, rtol=KELT4_LINEAR_RTOL, atol=0.0)
+            bound = f"rtol {KELT4_LINEAR_RTOL}"
+        assert ok, (
+            f"{label} starts at {got!r} {units}, recorded {expected!r} "
+            f"({bound}). If this move is intended, update KELT4_START and "
+            f"say in the commit why the sampler now begins somewhere else."
         )
 
 
