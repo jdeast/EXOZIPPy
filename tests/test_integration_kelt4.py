@@ -123,10 +123,12 @@ def test_run_fit_kelt4_trace_has_expected_variables(kelt4_result):
 # CONDITIONING rather than by the model, so asserting hard physical bounds on
 # it is a lottery: the same assertion on planet.mass has been observed at
 # 0.81, 2.870, 5.7693 (local, on plain master), 6.724 and 8.718 (CI) while
-# nothing about the fit was wrong.  It cost three separate triages.  The start,
-# by contrast, is reproducible: the polish has no RNG, so seven consecutive
-# runs on one box gave BIT-IDENTICAL start values.  See review 7.13.6 and
-# run.md's section on Model.initial_point() being the start.
+# nothing about the fit was wrong.  It cost three separate triages.  The
+# start, by contrast, is reproducible: the polish has no RNG, so seven
+# consecutive runs on one box under the same conditions gave BIT-IDENTICAL
+# start values (what a CHANGE of conditions does to them is the next block
+# down).  See review 7.13.6 and run.md's section on Model.initial_point()
+# being the start.
 #
 # GOLDEN VALUES, ON PURPOSE.  These numbers are the whole point: an
 # intentional change to where the sampler begins (a new polish, a re-centered
@@ -137,29 +139,51 @@ def test_run_fit_kelt4_trace_has_expected_variables(kelt4_result):
 # Recorded 2026-09-14 against 1fed94c1, i.e. after batch 4F (PR #265)
 # re-centered the whitening anchor on the polished start.
 #
-# WHY THE TOLERANCES ARE THIS LOOSE, AND WHY TIGHTENING THEM WILL GO RED.
-# Bit-identical on ONE box is not portable.  MEASURED on all four shipped CI
-# combinations plus the dev box (2026-09-14):
+# WHY THE TOLERANCES ARE WHAT THEY ARE, AND WHY EACH QUANTITY NEEDS ITS OWN.
+# Bit-identical on ONE box, run one way, is not portable.  MEASURED on all
+# four shipped CI combinations, plus the dev box run BOTH solo and inside the
+# full -n6 suite (2026-09-14):
 #
-#   platform             star.A.logmass   planet.b.mass   orbit.b.logP
-#   dev box (linux)        0.08057130      0.96736983      0.47562107
-#   CI ubuntu 3.12         0.08047306      0.96681714      0.47562081
-#   CI ubuntu 3.13         0.08047306      0.96681714      0.47562081
-#   CI ubuntu 3.14         0.08047306      0.96681714      0.47562081
-#   CI macOS 3.12          0.08073805      0.96338280      0.47562067
+#   run                 star.A.logmass  planet.b.mass  orbit.b.cosi  start lp
+#   dev box, solo         0.08057130     0.96736983     0.50545129   -601.1 -> 81.4
+#   dev box, -n6 suite    0.08054904     0.96234938     0.49730418   -601.1 -> 81.4
+#   CI ubuntu 3.12        0.08047306     0.96681714      (not yet)   -601.1 -> 81.4
+#   CI ubuntu 3.13        0.08047306     0.96681714      (not yet)   -601.1 -> 81.4
+#   CI ubuntu 3.14        0.08047306     0.96681714      (not yet)   -601.1 -> 81.4
+#   CI macOS 3.12         0.08073805     0.96338280      (not yet)   -601.1 -> 81.4
 #
-#   spread                 2.65e-4 dex     4.1e-3 rel      4.0e-7 dex
+#   spread                2.65e-4 dex    5.2e-3 rel     1.6e-2 rel      0
 #
-# The three ubuntu Pythons agreeing to the LAST DIGIT is the control: this is
-# the platform, not the interpreter.  And it is NOT the ~1e-9 build
-# difference of review 3.14.20 -- it is five orders of magnitude bigger --
-# because the value being asserted is POST-POLISH and the polish is an
-# ITERATIVE optimizer that terminates on |grad| < 0.01 nats/unit.  A BLAS or
-# LAPACK difference moves the point at which that test first passes, so a
-# different BLAS build lands somewhere else on the same basin floor.  Three
-# clusters, one per platform family, is exactly that signature.
+# THREE THINGS THAT TOOK A RED RUN EACH TO LEARN, all of them the same
+# underlying fact -- the value asserted is POST-POLISH and the polish is an
+# ITERATIVE optimizer terminating on |grad| < 0.01 nats/unit, so anything
+# that perturbs the arithmetic moves where that test first passes and the
+# run lands somewhere else on the same basin floor.
 #
-# So the tolerance is applied in each quantity's OWN domain -- absolute in
+# (1) IT IS NOT float NOISE.  This is five orders of magnitude above the
+#     ~1e-9 build difference of review 3.14.20.  The three ubuntu Pythons
+#     agreeing to the last digit is the control: platform, not interpreter.
+#
+# (2) IT IS NOT EVEN CROSS-MACHINE ONLY.  The same box gives different
+#     answers solo and under the full -n6 suite, because the polish's BLAS
+#     is multithreaded and its work partitioning depends on machine LOAD.
+#     So a golden value here cannot be calibrated from repeated solo runs,
+#     however many; it has to be calibrated from runs under load too.
+#
+# (3) THE SCATTER IS NOT UNIFORM ACROSS PARAMETERS, AND THAT IS PHYSICS
+#     RATHER THAN NOISE.  Ranked by how much they move:
+#       start logp      0          stationary at an optimum (see below)
+#       orbit.b.logP    1.5e-7     pinned by the data
+#       star.A.logmass  2.8e-4     pinned by its Gaussian prior
+#       m sin i         2.5e-4     what the RV data actually constrains
+#       planet.b.mass   5.2e-3     m sin i / sin i, so it inherits cosi
+#       orbit.b.cosi    1.6e-2     THE FLAT DIRECTION: RVs say nothing
+#     A single tolerance across that range is either vacuous at the top or
+#     red at the bottom.  `orbit.b.cosi` therefore gets its own, and the
+#     hierarchy itself is the useful thing: if cosi ever stops being the
+#     loosest row, something has started constraining the inclination.
+#
+# And the tolerance is applied in each quantity's OWN domain -- absolute in
 # dex for a dex/log quantity, relative for a linear one.  Applying a single
 # rtol to everything is what broke the first version of this test:
 # star.A.logmass is only 0.08, so 2.65e-4 of dex scatter reads as 3.3e-3
@@ -167,24 +191,26 @@ def test_run_fit_kelt4_trace_has_expected_variables(kelt4_result):
 # mass is 6.1e-4 and would have passed.  A relative tolerance on a quantity
 # whose zero is arbitrary measures the offset, not the error.
 #
-# Headroom over the measured spread is ~11x in dex and ~3.7x in the linear
-# rtol -- the linear one is tighter because planet.b.mass is the widest
-# scatter in the table and CI runner images change.  A real start regression
-# is far larger: review 1.3.6 moved planet.mass by 8%.
-KELT4_DEX_ATOL = 3.0e-3  # dex, for log/dex quantities (11x observed)
-KELT4_LINEAR_RTOL = 1.5e-2  # relative, for linear quantities (3.7x observed)
+# Headroom is 3-11x the measured spread in every row.  A real start
+# regression is far larger: review 1.3.6 moved planet.mass by 8%.
+KELT4_DEX_ATOL = 3.0e-3  # dex, log/dex quantities (11x observed)
+KELT4_LINEAR_RTOL = 2.5e-2  # relative, linear quantities (4.8x observed)
+KELT4_FLAT_RTOL = 5.0e-2  # relative, the prior-dominated flat direction
+#                           (cosi; 3.1x observed)
 
 # The keys are the STARTUP TABLE's per-element display labels, which are not
 # the trace's variable names (planet.b.mass here, planet.mass there).
-# kind: "dex" -> compare with KELT4_DEX_ATOL; "linear" -> KELT4_LINEAR_RTOL.
+# kind: "dex" -> KELT4_DEX_ATOL; "linear" -> KELT4_LINEAR_RTOL;
+# "flat" -> KELT4_FLAT_RTOL (a direction the data does not constrain).
 KELT4_START = {
     # label            value        units           kind
     "star.A.logmass": (0.08057130, "dex(solMass)", "dex"),
     "planet.b.mass": (0.96736983, "jupiterMass", "linear"),
     "orbit.b.logP": (0.47562107, "dex(d)", "dex"),
     # cosi is here because the mass story below turns on it: it is the one
-    # parameter the RV data says nothing about.
-    "orbit.b.cosi": (0.50545129, "", "linear"),
+    # parameter the RV data says nothing about, which is also why it is the
+    # only "flat" row and needs its own, looser tolerance.
+    "orbit.b.cosi": (0.50545129, "", "flat"),
 }
 
 # THE PLANET MASS AND m sin i ARE TWO DIFFERENT CLAIMS, AND EACH EARNS A
@@ -236,13 +262,15 @@ KELT4_START = {
 # the trace, so sin i is derived from cosi.  Implementing m sin i as a
 # reported parameter is review item 8.8.17 and is not this test's business.
 KELT4_START_MSINI = 0.834700  # Mjup; golden regression
-# m sin i's own cross-platform spread has NOT been measured -- `orbit.b.cosi`
-# was added to the table in the same commit that added this, so the CI sweep
-# that calibrated the three rows above predates it.  3e-2 until the
-# calibration warning below reports it, then tighten toward KELT4_LINEAR_RTOL.
-# It is still 2.5x tighter than the mass's own offset from published, so it
-# is not vacuous meanwhile.
-KELT4_MSINI_RTOL = 3.0e-2
+# AND IT IS THE TIGHTEST PARAMETER ASSERTION IN THE FILE, which is the point.
+# Between the dev box's solo run and the same box under the full -n6 suite,
+# `orbit.b.cosi` moved by 1.6e-2 relative and `planet.b.mass` by 5.2e-3 --
+# but the PRODUCT moved by 2.5e-4, because mass and sin i are anti-correlated
+# and it is m sin i that the RV data pins.  1.5e-2 is 60x that spread and is
+# the cross-platform margin, not the measured one: the CI sweep predates
+# `orbit.b.cosi` being in the table, so the four platforms have not yet
+# reported this row.  Tighten it once they have.
+KELT4_MSINI_RTOL = 1.5e-2
 KELT4_PUBLISHED_MASS = 0.90  # Mjup, Beatty+2016; see the band above
 KELT4_PUBLISHED_RTOL = 0.15
 
@@ -261,14 +289,15 @@ KELT4_PUBLISHED_RTOL = 0.15
 # the sharper detector of a prior/unit/likelihood change.  The POST-polish
 # value is the point the sampler actually begins from.
 #
-# AND THE PREDICTION HELD, MEASURED.  Both numbers came back IDENTICAL on
-# the dev box, CI ubuntu 3.12, 3.13 and 3.14, and CI macOS 3.12 -- -601.1 and
-# 81.4 on all five -- while the parameter values under them scattered by up
-# to 4.1e-3 relative on the same runs.  That is the stationarity argument
-# confirmed rather than assumed, and it is why the tolerance here is 0.2 nats
-# (twice the printed resolution) against the 1.5e-2 the linear values need.
-# So this is the assertion that will catch a changed prior first, and by a
-# wide margin.
+# AND THE PREDICTION HELD, MEASURED SIX WAYS.  Both numbers came back
+# IDENTICAL -- -601.1 and 81.4 -- on the dev box solo, the dev box under the
+# full -n6 suite, CI ubuntu 3.12, 3.13 and 3.14, and CI macOS 3.12, while on
+# those same runs `orbit.b.cosi` moved by 1.6e-2 relative.  That is the
+# stationarity argument confirmed rather than assumed, and it is why the
+# tolerance here is 0.2 nats (twice the printed resolution) against the
+# 2.5e-2 the linear values need and the 5e-2 the flat direction needs.  This
+# is the assertion that will catch a changed prior first, and by a wide
+# margin.
 KELT4_BUILD_LOGP = -601.1  # lp at the build start, before the polish
 KELT4_START_LOGP = 81.4  # lp at the polished start the sampler uses
 KELT4_LOGP_ATOL = 0.2  # nats; 2x the 0.1-nat print resolution
@@ -368,7 +397,7 @@ def test_run_fit_kelt4_start_is_physical(kelt4_result):
     # logp values and the three parameter rows above are calibrated from what
     # it reported on ubuntu 3.12/3.13/3.14 and macOS 3.12.  What is still
     # UNMEASURED is `orbit.b.cosi` and the m sin i product, which were added
-    # after that sweep -- hence KELT4_MSINI_RTOL's provisional 3e-2.  Once
+    # after that sweep -- hence KELT4_MSINI_RTOL's provisional 1.5e-2.  Once
     # this round reports them, tighten that and remove this block
     # (review 7.13.6).
     warnings.warn(
@@ -428,8 +457,9 @@ def test_run_fit_kelt4_start_is_physical(kelt4_result):
             ok = abs(got - expected) <= KELT4_DEX_ATOL
             bound = f"atol {KELT4_DEX_ATOL} dex"
         else:
-            ok = np.isclose(got, expected, rtol=KELT4_LINEAR_RTOL, atol=0.0)
-            bound = f"rtol {KELT4_LINEAR_RTOL}"
+            rtol = KELT4_FLAT_RTOL if kind == "flat" else KELT4_LINEAR_RTOL
+            ok = np.isclose(got, expected, rtol=rtol, atol=0.0)
+            bound = f"rtol {rtol}"
         assert ok, (
             f"{label} starts at {got!r} {units}, recorded {expected!r} "
             f"({bound}). If this move is intended, update KELT4_START and "

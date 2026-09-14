@@ -134,23 +134,42 @@ dex/log quantity, a relative one for a linear one.
 
 *And the scatter is the optimizer, not float noise.* The value being asserted
 is POST-POLISH, and the polish is an iterative optimizer terminating on
-`|grad| < 0.01` nats/unit, so a BLAS/LAPACK difference moves the point where
-that test first passes -- five orders of magnitude above 3.14.20's build
-difference. Measured across the dev box and all four shipped CI combinations:
+`|grad| < 0.01` nats/unit, so anything that perturbs the arithmetic moves the
+point where that test first passes -- five orders of magnitude above
+3.14.20's build difference. Measured across the dev box (solo AND inside the
+full `-n6` suite) and all four shipped CI combinations:
 
-| platform | `star.A.logmass` | `planet.b.mass` | `orbit.b.logP` | start logp |
+| run | `star.A.logmass` | `planet.b.mass` | `orbit.b.cosi` | start logp |
 |---|---|---|---|---|
-| dev (linux) | 0.08057130 | 0.96736983 | 0.47562107 | -601.1 -> 81.4 |
-| CI ubuntu 3.12 | 0.08047306 | 0.96681714 | 0.47562081 | -601.1 -> 81.4 |
-| CI ubuntu 3.13 | 0.08047306 | 0.96681714 | 0.47562081 | -601.1 -> 81.4 |
-| CI ubuntu 3.14 | 0.08047306 | 0.96681714 | 0.47562081 | -601.1 -> 81.4 |
-| CI macOS 3.12 | 0.08073805 | 0.96338280 | 0.47562067 | -601.1 -> 81.4 |
-| **spread** | 2.65e-4 dex | 4.1e-3 rel | 4.0e-7 dex | **0** |
+| dev, solo | 0.08057130 | 0.96736983 | 0.50545129 | -601.1 -> 81.4 |
+| dev, `-n6` suite | 0.08054904 | 0.96234938 | 0.49730418 | -601.1 -> 81.4 |
+| CI ubuntu 3.12 | 0.08047306 | 0.96681714 | n/a | -601.1 -> 81.4 |
+| CI ubuntu 3.13 | 0.08047306 | 0.96681714 | n/a | -601.1 -> 81.4 |
+| CI ubuntu 3.14 | 0.08047306 | 0.96681714 | n/a | -601.1 -> 81.4 |
+| CI macOS 3.12 | 0.08073805 | 0.96338280 | n/a | -601.1 -> 81.4 |
+| **spread** | 2.65e-4 dex | 5.2e-3 rel | 1.6e-2 rel | **0** |
 
 Three ubuntu Pythons identical to the last digit is the control: platform,
-not interpreter. Any golden value downstream of an optimizer needs a
-tolerance calibrated from a real cross-platform measurement like this one,
-not from first principles.
+not interpreter.
+
+**And it is not even cross-machine only.** The same box gives different
+answers solo and under the full suite, because the polish's BLAS is
+multithreaded and its work partitioning depends on machine LOAD. So a golden
+value downstream of an optimizer cannot be calibrated from repeated solo runs
+however many you do -- it needs runs under load, and on the other platforms,
+before you believe a tolerance. Both of this test's red rounds came from
+skipping a step of that.
+
+**The scatter is also not uniform across parameters, and that part is physics
+rather than noise.** Ranked by how far they move: the start logp (0,
+stationary), `orbit.logP` (1.5e-7, pinned by the data), `star.logmass`
+(2.8e-4, pinned by its Gaussian prior), `m sin i` (2.5e-4, what the RVs
+constrain), `planet.mass` (5.2e-3, which is `m sin i / sin i` and so inherits
+`cosi`), and `orbit.cosi` (1.6e-2, the flat direction an RV-only fit says
+nothing about). One tolerance across that range is either vacuous at the top
+or red at the bottom, so give the flat direction its own -- and note that the
+hierarchy itself is informative: if `cosi` ever stops being the loosest row,
+something has started constraining the inclination.
 
 **Prefer a golden START LOGP to golden parameter values**, and assert both.
 logp is STATIONARY at an optimum, so optimizer scatter perturbs it only at
