@@ -10,11 +10,11 @@ code. Related: `src/exozippy/skyframe.md` (the frame itself, and the one owner o
 projection onto it), `src/exozippy/components/mulensing/mulensing.md` (the flux likelihood,
 MMEXOFAST seeding, and the lens/source body rules).
 
-## The two artifacts, and which one is normative
+## The three artifacts, and which one is normative
 
 This file is the **normative** list. `src/exozippy/latex/convention.tex` is a drop-in
 section for the EXOZIPPy microlensing paper carrying the *same* claim list in the paper's
-register, with the same identifiers `C1`...`C23`. The identifiers are the anti-drift
+register, with the same identifiers `C1`...`C25`. The identifiers are the anti-drift
 device: a claim may be reworded in either file, but a `C`-number must mean the same thing
 in both, and a claim added to one must be added to the other under the same number. There
 is no generator and no test enforcing that -- keep them in one commit.
@@ -23,6 +23,16 @@ The split of labour is: **this file names the code**, `convention.tex` names the
 **literature**. Nothing in the paper section should assert a convention that is not a
 `C`-number here, and nothing here should be a bare claim without a file or a test beside
 it.
+
+**There is a THIRD copy, and it is not in this repository.** The Conventions section of
+`paper3_microlensing.tex`, in the paper repo at `~/old_home/papers/exozippy` (whose remote
+is the Overleaf project), carries the same `C`-numbers as the submitted text. Being a
+separate repository it cannot ride the same commit, which is exactly why it is the copy
+most likely to drift: paper3 gained `C26`-`C28` -- the Keplerian reconciliation
+(`alpha = phi_pi - PA_axis`, so `alpha` is a derived position angle and not an independent
+convention), which body an `omega` belongs to, and the node fold plus the third-axis trap
+-- before either file here did. When you change a `C`-rule, decide explicitly whether the
+paper moves too, and say so in the commit message when it does not.
 
 ## Notation used below
 
