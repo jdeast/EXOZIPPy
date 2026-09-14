@@ -11,6 +11,7 @@ Marked 'slow'; excluded from fast CI with ``pytest -m "not slow"``.
 """
 
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -109,33 +110,138 @@ def test_run_fit_kelt4_trace_has_expected_variables(kelt4_result):
     assert not missing, f"Missing expected posterior variables: {missing}"
 
 
-def test_run_fit_kelt4_posterior_in_sane_range(kelt4_result):
+# ---------------------------------------------------------------------------
+# The START the run actually began from (review 7.13.6)
+# ---------------------------------------------------------------------------
+#
+# WHY THIS IS NOT A POSTERIOR TEST.  The fixture drives tune: 2, draws: 1,
+# chains: 1, so NUTS's dual averaging has adapted nothing by the time the
+# single draw is taken: the step size is still the step_scale / size**0.25
+# heuristic and that draw is essentially ONE RANDOM JUMP of a fixed size, in
+# raw space, away from the start.  Its physical size is set by the START'S
+# CONDITIONING rather than by the model, so asserting hard physical bounds on
+# it is a lottery: the same assertion on planet.mass has been observed at
+# 0.81, 2.870, 5.7693 (local, on plain master), 6.724 and 8.718 (CI) while
+# nothing about the fit was wrong.  It cost three separate triages.  The start
+# itself, by contrast, is deterministic -- the pre-whitening polish has no RNG
+# -- so that is what this test measures.  See review 7.13.6 and run.md's
+# section on Model.initial_point() being the start.
+#
+# GOLDEN VALUES, ON PURPOSE.  These numbers are the whole point: an
+# intentional change to where the sampler begins (a new polish, a re-centered
+# whitening anchor, a changed hint or default) SHOULD require editing them,
+# so the move is visible in the diff and has to be justified in the commit
+# that makes it.  Review 1.3.6 was a wrong default start that survived months
+# precisely because nothing in the suite asserted where the sampler begins.
+# Recorded 2026-09-14 against 1fed94c1, i.e. after batch 4F (PR #265)
+# re-centered the whitening anchor on the polished start.
+#
+# The keys are the STARTUP TABLE's per-element display labels, which are not
+# the trace's variable names (planet.b.mass here, planet.mass there).
+KELT4_START = {
+    # label            value        units
+    "star.A.logmass": (0.08057130, "dex(solMass)"),
+    "planet.b.mass": (0.96736983, "jupiterMass"),
+    "orbit.b.logP": (0.47562107, "dex(d)"),
+}
+
+# One row of run.inspect_start's startup table, as the file log handler (always
+# DEBUG, so the table is there whatever logger_level the config asks for)
+# writes it:
+#   ... exozippy.run:   planet.b.mass |      0.96736983 |  0.100 |  jupiterMass | ...
+_START_ROW = re.compile(
+    r"exozippy\.run:\s+(?P<label>[A-Za-z_][\w.]*)\s+\|"
+    r"\s+(?P<value>\S+)\s+\|"
+    r"\s+(?P<scale>\S+)\s+\|"
+    r"\s+(?P<units>[^|]*?)\s*\|"
+)
+
+
+def read_start_table(log_path):
+    """Parse `<prefix>.log` for run.inspect_start's startup table.
+
+    Returns {display_label: (value, units)} in USER units, for every row whose
+    Value column is a number (N/A rows and the header are skipped).
+
+    This reads the start THE RUN ITSELF REPORTED, which is what keeps this an
+    integration test: rebuilding the System from the same config would miss the
+    pre-whitening polish and the anchor re-centering, both of which happen
+    inside run_fit and both of which MOVE the start.  run_fit returns nothing
+    and writes no machine-readable start file, so the log is the only existing
+    channel; adding one purely for a test would be a design change.
     """
-    Given the kelt4rvonly example seeded at the MAP from kelt4.params.yaml,
-    When run_fit completes with 1 draw starting near MAP,
-    Then key parameters are within physically plausible ranges (user units).
+    values = {}
+    for line in Path(log_path).read_text().splitlines():
+        m = _START_ROW.search(line)
+        if m is None:
+            continue
+        try:
+            values[m.group("label")] = (
+                float(m.group("value")),
+                m.group("units").strip(),
+            )
+        except ValueError:
+            continue  # the header row, or an N/A value
+    return values
+
+
+def test_run_fit_kelt4_start_is_physical(kelt4_result):
+    """
+    Given the kelt4rvonly example and the polish + whitening-anchor pipeline,
+    When run_fit reports the point the sampler starts from,
+    Then that start is the recorded one, to 1e-3 relative, in user units.
+
+    This deliberately does NOT look at the trace.  With tune: 2 / draws: 1 the
+    single draw is one un-adapted jump whose physical size is set by the
+    start's conditioning, not by the model, so no physical bound on it can be
+    both tight and reliable (review 7.13.6).  The start is deterministic and
+    is the thing worth pinning.
+
+    rtol=1e-3 rather than exact equality: this start is the output of an
+    L-BFGS polish, so its last digits are a BLAS/scipy detail and not
+    portable, and model construction generally is platform-dependent at the
+    ~1e-9 level (review 3.14.20 -- whose own NNLS mechanism does not apply to
+    this RV-only config, but the class of difference does).  1e-3 is far
+    tighter than any real start regression and far looser than that noise.
+    The physical-range checks are kept alongside so a wildly wrong start
+    reports as "outside plausible range" rather than as a tolerance mismatch.
     """
     out_dir, _ = kelt4_result
-    idata = az.from_netcdf(str(out_dir / "KELT-4A_trace.nc"))
-    post = idata.posterior
+    start = read_start_table(out_dir / "KELT-4A.log")
 
-    # logP ≈ log10(3 d) ≈ 0.476 for KELT-4Ab
-    logP = float(post["orbit.logP"].values.mean())
+    missing = set(KELT4_START) - set(start)
+    assert not missing, (
+        f"startup table has no row for {sorted(missing)}; "
+        f"rows present: {sorted(start)}"
+    )
+
+    # Physical plausibility first: a readable failure for a badly wrong start.
+    # logP = log10(3 d) = 0.476 and star logmass = 0.08 (1.2 Msun) for
+    # KELT-4A; the planet is ~0.9 Mjup.
+    logP, _u = start["orbit.b.logP"]
     assert 0.2 < logP < 0.7, (
-        f"logP={logP:.4f} outside plausible range [0.2, 0.7]"
+        f"start logP={logP:.4f} outside plausible range [0.2, 0.7]"
     )
-
-    # Planet mass ≈ 0.9 Mjup; allow a broad range given only 1 draw
-    planet_mass = float(post["planet.mass"].values.mean())
+    planet_mass, _u = start["planet.b.mass"]
     assert 0.3 < planet_mass < 2.5, (
-        f"planet mass={planet_mass:.3f} Mjup outside [0.3, 2.5]"
+        f"start planet mass={planet_mass:.3f} Mjup outside [0.3, 2.5]"
+    )
+    star_logmass, _u = start["star.A.logmass"]
+    assert -0.3 < star_logmass < 0.5, (
+        f"start star logmass={star_logmass:.4f} outside [-0.3, 0.5]"
     )
 
-    # Star logmass ≈ 0.08 (≈1.2 Msun)
-    star_logmass = float(post["star.logmass"].values.mean())
-    assert -0.3 < star_logmass < 0.5, (
-        f"star logmass={star_logmass:.4f} outside [-0.3, 0.5]"
-    )
+    # Then the golden values themselves.
+    for label, (expected, units) in KELT4_START.items():
+        got, got_units = start[label]
+        assert got_units == units, (
+            f"{label} start is reported in {got_units!r}, expected {units!r}"
+        )
+        assert np.isclose(got, expected, rtol=1e-3, atol=0.0), (
+            f"{label} starts at {got!r} {units}, recorded {expected!r}. "
+            f"If this move is intended, update KELT4_START and say in the "
+            f"commit why the sampler now begins somewhere else."
+        )
 
 
 def test_run_fit_kelt4_posterior_in_user_units(kelt4_result):

@@ -83,6 +83,65 @@ number looked wrong by suspiciously close to a mass-unit ratio.
   jupiter/solar, 365.25, 206265 or a power of ten is a unit or a
   radians/degrees slip, and is worth chasing even when a test is green.
 
+## A sampler budget too small to adapt cannot test a posterior
+
+Same family as the section above, and the sharper case: the test runs real
+code, asserts a real number, and the number it asserts is a coin flip.
+
+`tests/test_integration_kelt4.py` drives `tune: 2, draws: 1, chains: 1` -- the
+right budget for an end-to-end pipeline test, and the reason the file is
+affordable at all. A test named `test_run_fit_kelt4_posterior_in_sane_range`
+then asserted hard physical bounds on the resulting "posterior mean". That
+cannot work, for a reason that has nothing to do with the model: at `tune: 2`
+dual averaging has adapted nothing, so the step size is still the
+`step_scale / size**0.25` heuristic and the single draw is **one random jump**
+of that size, in raw space, away from the start. The jump's PHYSICAL size is
+therefore set by the start's CONDITIONING, not by the physics. While the start
+sat at `raw = 0` eight seeds agreed on `planet.mass` to 1% (0.8304-0.8721) and
+the bounds looked solid; once review 1.3.6's fix moved the start off `raw = 0`
+the same jump landed anywhere from 0.81 to 8.718 Mjup. Out-of-bound values
+observed before it was rescoped: 2.870 and 5.7693 locally (the second on plain
+master), 6.724 and 8.718 on CI. Each one read as a branch regression and cost
+a triage.
+
+**The remedy is to assert the START** (review 7.13.6, ruled by JDE), because
+that is the one quantity such a budget actually determines: the pre-whitening
+polish has no RNG, so the start is bit-reproducible run to run, while the draw
+is not. `test_run_fit_kelt4_start_is_physical` reads the startup table out of
+`<prefix>.log` -- the start the run ITSELF reported, which is what keeps it an
+integration test; rebuilding the System from the same config would miss the
+polish and the anchor re-centering, both of which happen inside `run_fit` and
+both of which move the start. It is a deliberate **golden-value** test: an
+intentional change to where the sampler begins has to edit those numbers, so
+the move shows up in the diff and gets justified in the commit. Review 1.3.6
+was a wrong default start that survived months precisely because nothing in
+the suite asserted where the sampler begins. Measured over six consecutive
+runs of the same fixture on one box: the three start values were **bit-
+identical** every time (`planet.b.mass` 0.96736983 on all six), while the
+draw those runs produced ranged over 0.8158-1.4158 Mjup, a factor of 1.7 --
+and that is the well-behaved case, inside the old bounds.
+
+**One instance of the same shape is knowingly left in place**, so a later
+reader does not think the sweep missed it: `..._posterior_in_user_units` in
+the same file reads the same single draw, against a tighter `0.3 < logP <
+0.65`. It is left because `orbit.logP`'s whitening scale is 1e-5, so the jump
+moves it by ~1e-5 against a window of 0.35 -- measured spread over those six
+runs, 0.475620-0.475637. The window is 20000x the noise, and the regression it
+watches for (internal vs user units) is a factor of ~1000. Rescope it if that
+scale ever changes.
+
+Two options were considered and rejected, so they are not re-proposed.
+*Widening the bound* encodes the noise rather than measuring it -- 6.724 is
+~7x truth and the single-draw tail already reached the old 2.5 bound.
+*Buying a real tuning budget* is honest but is a separate, `slow`-marked test
+if it is wanted at all; it is not what this test is for.
+
+When you write an end-to-end test, the question to ask is not "does this
+exercise the sampler" but "does this budget DETERMINE the quantity I am about
+to assert". A start value, a shape, a file, a variable name and a finiteness
+check all survive `draws: 1`. A mean, a physical range, an Rhat and an ESS do
+not.
+
 ## The pre-push hook, and why it does not say `poetry run pytest`
 
 The full suite runs on push, wired in `.pre-commit-config.yaml` (install both hook
