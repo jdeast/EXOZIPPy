@@ -166,11 +166,27 @@ Two options were considered and rejected, so they are not re-proposed.
 *Buying a real tuning budget* is honest but is a separate, `slow`-marked test
 if it is wanted at all; it is not what this test is for.
 
+**What the old assertion was incidentally covering, and what replaces it.**
+Reading `planet.mass` out of `idata.posterior` did exercise the path where a
+quantity is computed during sampling, written to the trace and converted to
+user units on the way out. Presence and units were already covered by sibling
+tests; the IDENTITY was not.
+`test_run_fit_kelt4_derived_parameters_are_self_consistent` recomputes a
+derived value from its parents AT THE SAME DRAW -- `orbit.period == 10 **
+orbit.logP`, and `orbit.vcve` from the `sqrt(e)cos/sin(omega)` pair -- and
+one draw is not a compromise there, it is sufficient by construction: a
+derived quantity is a deterministic function of its parents, so the identity
+either holds everywhere or is broken. Two subjects that look obvious and are
+not: `planet.mass` is SAMPLED in this config (the trace carries
+`planet.mass_raw`; the relation runs the other way, K from the mass), and
+`star.mass` is derived but never appears in `idata.posterior` at all, because
+a pure-expression parameter never does.
+
 When you write an end-to-end test, the question to ask is not "does this
 exercise the sampler" but "does this budget DETERMINE the quantity I am about
-to assert". A start value, a shape, a file, a variable name and a finiteness
-check all survive `draws: 1`. A mean, a physical range, an Rhat and an ESS do
-not.
+to assert". A start value, a shape, a file, a variable name, a finiteness
+check and an IDENTITY between a derived value and its parents all survive
+`draws: 1`. A mean, a physical range, an Rhat and an ESS do not.
 
 ## The pre-push hook, and why it does not say `poetry run pytest`
 

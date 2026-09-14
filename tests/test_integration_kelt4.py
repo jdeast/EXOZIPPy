@@ -180,6 +180,33 @@ KELT4_START = {
     "orbit.b.logP": (0.47562107, "dex(d)", "dex"),
 }
 
+# WHY planet.b.mass STARTS ~7% ABOVE THE PUBLISHED 0.90 Mjup, AND WHY THAT IS
+# NOT A BUG TO "FIX" BY EDITING THE GOLDEN VALUE.  kelt4_rvonly.yaml is
+# RV-ONLY, so there is no inclination information: RVs constrain m sin i, the
+# params file's `orbit.0.cosi: 0.11996` (the published, transit-derived
+# i = 83.1 deg) is only a start value, and the polish is free to walk cosi
+# anywhere -- it lands at 0.50545 here, i = 59.6 deg.  `mass` then inherits
+# that entirely.  KELT-4Ab's published fit IS transit-constrained, so there
+# sin i = 0.993 and the published mass and its m sin i are nearly the same
+# number; comparing our RV-only mass to it compares two different quantities.
+#
+# The obvious repair -- assert m sin i instead -- was MEASURED AND DOES NOT
+# RECONCILE, so it is deliberately not done here.  At this start
+# sin i = 0.862855, giving m sin i = 0.834700 Mjup; against a published 0.902
+# that is -7.5% (and -6.8% against the published m sin i of 0.8956), against
+# the 0.878 quoted in run.md it is -4.9%.  So m sin i is not closer to
+# published than the mass is, it is about equally far the other way, and the
+# start also carries e = 0.0789 (secosw/sesinw above) against a published
+# near-circular orbit, which enters K through the same relation.  Two
+# differences, not one.  `orbit.sini` is a manifest parameter but appears
+# neither in this table nor in the trace, so even reading it costs a
+# derivation from cosi.  The missing-m-sin-i gap is review item 8.8.17; it is
+# a relation plus a reporting ruling and it is not this test's business.
+#
+# The consequence for this file: `planet.b.mass`'s golden value is a fact
+# about where OUR polish lands for an RV-only config, not a claim about
+# KELT-4Ab.  Do not "correct" it toward the published mass.
+
 # THE GOLDEN START LOGP, and why it is the more robust of the two assertions
 # (JDE, 2026-09-14).  logp is STATIONARY at an optimum, so the 6e-4 of
 # optimizer scatter above perturbs it only at SECOND order -- of order
@@ -361,6 +388,89 @@ def test_run_fit_kelt4_start_is_physical(kelt4_result):
             f"({bound}). If this move is intended, update KELT4_START and "
             f"say in the commit why the sampler now begins somewhere else."
         )
+
+
+def test_run_fit_kelt4_derived_parameters_are_self_consistent(kelt4_result):
+    """
+    Given the one draw this fixture's sampler budget produces,
+    When a DERIVED parameter and its parents are read back out of the trace,
+    Then the derived value equals the function of those parents evaluated at
+    THAT SAME DRAW, in user units, to float tolerance.
+
+    ONE DRAW IS SUFFICIENT AND MORE WOULD BUY NOTHING -- do not "improve"
+    this by raising the budget.  This is an IDENTITY, not a distribution: a
+    derived quantity is a deterministic function of its parents, so it either
+    holds at every point or it is broken, and a converged posterior would
+    demonstrate exactly the same thing at 100x the cost.  That is precisely
+    what makes it the right use of a tune: 2 / draws: 1 trace, and the
+    contrast with the assertion this file used to carry, which asked the same
+    single draw for a statistical claim it could not support (review 7.13.6).
+
+    WHAT IT GUARDS.  The old `..._posterior_in_sane_range` incidentally
+    exercised the path where a derived quantity is computed during sampling,
+    written to the trace, and converted to user units on the way out; the
+    sibling tests already cover that variable's PRESENCE and its units, and
+    nothing covered the identity.  The failure classes are: a derived value
+    written in internal units but labelled user units; the two RECIPROCAL
+    conversion factors being confused (CLAUDE.md's invariant -- the factor**2
+    bug that shipped in the seed ledger); and a parent/child wiring slip that
+    leaves both values individually plausible.  Neither recomputation below
+    hand-writes a conversion factor, which is the point: `10**` between
+    dex(d) and d, and a dimensionless ratio, are the two shapes where a
+    mislabelled unit cannot hide.
+
+    TWO PARAMETERS THAT LOOK LIKE OBVIOUS SUBJECTS AND ARE NOT, recorded so
+    the next reader does not add them and find them missing:
+
+    - `planet.mass` is SAMPLED in this configuration, not derived -- the
+      trace carries a `planet.mass_raw` for it, and the relation in
+      planet/symbolic_physics.py runs the other way (K is derived FROM the
+      mass, eccentricity, sin i, period and stellar mass).  There is no
+      identity to check for it here.
+    - `star.mass` IS derived (`10**star.logmass`), and is printed in the
+      startup table, but it does not appear in `idata.posterior` at all: a
+      pure-expression parameter never does.  So the trace cannot be asked
+      about it, and this is the documented gotcha rather than an omission.
+    """
+    out_dir, _ = kelt4_result
+    idata = az.from_netcdf(str(out_dir / "KELT-4A_trace.nc"))
+    post = idata.posterior
+
+    def draw(name):
+        assert name in post.data_vars, (
+            f"{name} is not in idata.posterior; a pure-expression parameter "
+            f"never is, so this identity cannot be checked from the trace. "
+            f"Present: {sorted(post.data_vars)}"
+        )
+        return float(np.asarray(post[name].values).ravel()[0])
+
+    # 1. orbit.period [d] == 10 ** orbit.logP [dex(d)].
+    #    The dex/linear pair, and the one place a user-vs-internal unit
+    #    mislabelling on either side shows up as a gross mismatch rather than
+    #    as a plausible number.
+    logP, period = draw("orbit.logP"), draw("orbit.period")
+    assert period == pytest.approx(10.0**logP, rel=1e-12), (
+        f"orbit.period={period!r} d but orbit.logP={logP!r} dex(d) implies "
+        f"{10.0**logP!r} d, at the same draw. Either one of the two is not "
+        f"in the units its label claims, or they are not the same quantity."
+    )
+
+    # 2. orbit.vcve == sqrt(1 - e^2) / (1 + e sin omega), with e and omega
+    #    from the sqrt(e)cos/sin(omega) pair the sampler actually moves
+    #    (orbit/physics.py: calc_vcve).  A multi-parent physics expression,
+    #    all of it dimensionless, so what it tests is the wiring and the
+    #    arithmetic rather than a unit.
+    secosw, sesinw = draw("orbit.secosw"), draw("orbit.sesinw")
+    ecc = secosw**2 + sesinw**2
+    omega = np.arctan2(sesinw, secosw)
+    expected_vcve = np.sqrt(max(1.0 - ecc**2, 0.0)) / max(
+        1.0 + ecc * np.sin(omega), 1e-12
+    )
+    assert draw("orbit.vcve") == pytest.approx(expected_vcve, rel=1e-12), (
+        f"orbit.vcve={draw('orbit.vcve')!r} but (secosw={secosw!r}, "
+        f"sesinw={sesinw!r}) -> e={ecc!r}, omega={omega!r} gives "
+        f"{expected_vcve!r} at the same draw."
+    )
 
 
 def test_run_fit_kelt4_posterior_in_user_units(kelt4_result):
