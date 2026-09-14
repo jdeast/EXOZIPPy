@@ -83,6 +83,169 @@ number looked wrong by suspiciously close to a mass-unit ratio.
   jupiter/solar, 365.25, 206265 or a power of ten is a unit or a
   radians/degrees slip, and is worth chasing even when a test is green.
 
+## A sampler budget too small to adapt cannot test a posterior
+
+Same family as the section above, and the sharper case: the test runs real
+code, asserts a real number, and the number it asserts is a coin flip.
+
+`tests/test_integration_kelt4.py` drives `tune: 2, draws: 1, chains: 1` -- the
+right budget for an end-to-end pipeline test, and the reason the file is
+affordable at all. A test named `test_run_fit_kelt4_posterior_in_sane_range`
+then asserted hard physical bounds on the resulting "posterior mean". That
+cannot work, for a reason that has nothing to do with the model: at `tune: 2`
+dual averaging has adapted nothing, so the step size is still the
+`step_scale / size**0.25` heuristic and the single draw is **one random jump**
+of that size, in raw space, away from the start. The jump's PHYSICAL size is
+therefore set by the start's CONDITIONING, not by the physics. While the start
+sat at `raw = 0` eight seeds agreed on `planet.mass` to 1% (0.8304-0.8721) and
+the bounds looked solid; once review 1.3.6's fix moved the start off `raw = 0`
+the same jump landed anywhere from 0.81 to 8.718 Mjup. Out-of-bound values
+observed before it was rescoped: 2.870 and 5.7693 locally (the second on plain
+master), 6.724 and 8.718 on CI. Each one read as a branch regression and cost
+a triage.
+
+**The remedy is to assert the START** (review 7.13.6, ruled by JDE), because
+that is the one quantity such a budget actually determines: the pre-whitening
+polish has no RNG, so the start is bit-reproducible run to run, while the draw
+is not. `test_run_fit_kelt4_start_is_physical` reads the startup table out of
+`<prefix>.log` -- the start the run ITSELF reported, which is what keeps it an
+integration test; rebuilding the System from the same config would miss the
+polish and the anchor re-centering, both of which happen inside `run_fit` and
+both of which move the start. It is a deliberate **golden-value** test: an
+intentional change to where the sampler begins has to edit those numbers, so
+the move shows up in the diff and gets justified in the commit. Review 1.3.6
+was a wrong default start that survived months precisely because nothing in
+the suite asserted where the sampler begins. Measured over six consecutive
+runs of the same fixture on one box: the three start values were **bit-
+identical** every time (`planet.b.mass` 0.96736983 on all six), while the
+draw those runs produced ranged over 0.8158-1.4158 Mjup, a factor of 1.7 --
+and that is the well-behaved case, inside the old bounds.
+
+**A golden start value cannot be pinned to the ~1e-9 of review 3.14.20, and
+the first version of this test went red on CI for assuming it could.** Two
+compounding mistakes, both worth knowing before you write another one.
+
+*A relative tolerance on a log quantity measures the offset, not the error.*
+`star.A.logmass` is 0.08 dex, so 2.65e-4 of absolute dex scatter reads as
+3.3e-3 RELATIVE -- an `rtol=1e-3` fails on it -- while the SAME scatter in the
+physical mass (1.203575 to 1.204309 Msun) is 6.1e-4 relative and passes.
+Compare each quantity in its own domain: an absolute tolerance in dex for a
+dex/log quantity, a relative one for a linear one.
+
+*And the scatter is the optimizer, not float noise.* The value being asserted
+is POST-POLISH, and the polish is an iterative optimizer terminating on
+`|grad| < 0.01` nats/unit, so anything that perturbs the arithmetic moves the
+point where that test first passes -- five orders of magnitude above
+3.14.20's build difference. Measured across the dev box (solo AND inside the
+full `-n6` suite) and all four shipped CI combinations:
+
+| run | `star.A.logmass` | `planet.b.mass` | `orbit.b.cosi` | `m sin i` | start logp |
+|---|---|---|---|---|---|
+| dev, solo | 0.08057130 | 0.96736983 | 0.50545129 | 0.83470003 | -601.1 -> 81.4 |
+| dev, `-n6` suite | 0.08054904 | 0.96234938 | 0.49730418 | 0.83491147 | -601.1 -> 81.4 |
+| CI ubuntu 3.12 | 0.08047306 | 0.96681714 | 0.50424569 | 0.83490484 | -601.1 -> 81.4 |
+| CI ubuntu 3.13 | 0.08047306 | 0.96681714 | 0.50424569 | 0.83490484 | -601.1 -> 81.4 |
+| CI ubuntu 3.14 | 0.08057639 | 0.96445481 | 0.50099724 | 0.83468634 | -601.1 -> 81.4 |
+| CI macOS 3.12 | 0.08073805 | 0.96338280 | 0.49789929 | 0.83547914 | -601.1 -> 81.4 |
+| **full width** | 2.65e-4 dex | 5.2e-3 rel | 1.6e-2 rel | 9.5e-4 rel | **0** |
+
+**It is not cross-machine only, and it is not even per-platform
+deterministic.** The same box disagrees with itself solo and under the full
+suite, because the polish's BLAS is multithreaded and partitions its work by
+machine LOAD. And the three ubuntu Pythons agreed to the last digit on one CI
+run, then 3.14 diverged on the next -- so "platform, not interpreter", which
+an earlier version of this section asserted, is wrong. So a golden value
+downstream of an optimizer **cannot be calibrated from repeated runs of one
+condition, however many**: seven bit-identical solo runs opened that PR and
+proved nothing about portability. All three of its red rounds came from
+skipping a step of that.
+
+**How to calibrate one, then.** Put a temporary `warnings.warn` in the test
+reporting the values; `pytest -q` prints the warnings summary, so every CI
+platform reports its own numbers on a GREEN run and you set the tolerance
+from data instead of from an argument. Remove the probe once they have all
+reported.
+
+**The scatter is also not uniform across parameters, and that part is physics
+rather than noise.** Ranked by how far they move over those six runs: the
+start logp (**0**, stationary), `orbit.logP` (4.1e-7 dex, pinned by the
+data), `star.logmass` (2.7e-4 dex, pinned by its Gaussian prior), `m sin i`
+(9.5e-4, what the RVs constrain), `planet.mass` (5.2e-3, which is
+`m sin i / sin i` and so inherits `cosi`), and `orbit.cosi` (1.6e-2, the flat
+direction an RV-only fit says nothing about). One tolerance across that range
+is either vacuous at the top or red at the bottom, so give the flat direction
+its own -- and note that the hierarchy itself is informative: if `cosi` ever
+stops being the loosest row, something has started constraining the
+inclination.
+
+**Prefer a golden START LOGP to golden parameter values**, and assert both.
+logp is STATIONARY at an optimum, so optimizer scatter perturbs it only at
+second order (~1e-4 nats here, below the 0.1 nat the polish line prints),
+while a changed prior, a unit-conversion slip or a lost likelihood term moves
+it by O(1) nats. The right-hand column above is that argument confirmed
+rather than assumed: **both logp values are identical on all five platforms**
+while the parameters under them scatter by up to 4.1e-3, so the logp carries
+a 0.2-nat tolerance where the linear values need 1.5e-2 relative. The
+parameter values are the readable failure message; the logp is the
+discriminating assertion. Pin BOTH ends of the polish: the pre-polish value
+is a plain evaluation at the build start with no optimizer in it at all, so
+it carries none of that scatter.
+
+**One instance of the same shape is knowingly left in place**, so a later
+reader does not think the sweep missed it: `..._posterior_in_user_units` in
+the same file reads the same single draw, against a tighter `0.3 < logP <
+0.65`. It is left because `orbit.logP`'s whitening scale is 1e-5, so the jump
+moves it by ~1e-5 against a window of 0.35 -- measured spread over those six
+runs, 0.475620-0.475637. The window is 20000x the noise, and the regression it
+watches for (internal vs user units) is a factor of ~1000. Rescope it if that
+scale ever changes.
+
+Two options were considered and rejected, so they are not re-proposed.
+*Widening the bound* encodes the noise rather than measuring it -- 6.724 is
+~7x truth and the single-draw tail already reached the old 2.5 bound.
+*Buying a real tuning budget* is honest but is a separate, `slow`-marked test
+if it is wanted at all; it is not what this test is for.
+
+**A golden value and a literature value are different claims, and a
+parameter earns one or the other.** In `kelt4_rvonly.yaml` the RV data
+constrains `m sin i`, not the mass: there is no inclination information, so
+`cosi` is prior-dominated (the polish walks it from the params file's
+transit-derived 0.11996 to 0.50545) and `mass = m sin i / sin i` inherits
+that. So `m sin i` is the quantity comparable to a published value and
+carries the LITERATURE check, while `planet.mass` is still perfectly
+deterministic given the same code and priors and carries a GOLDEN-VALUE
+REGRESSION check against our own recorded number. Assert both, and say in
+the test which is which -- otherwise the next reader either "fixes" the mass
+against the literature or deletes it as prior-dependent noise, and both are
+wrong. What the comment must NOT say is that `m sin i` is the trustworthy
+one: a mass marginalized over the inclination prior IS a posterior for the
+mass, and its width says how much of it is prior, whereas `m sin i` is a
+lower bound the field routinely quotes as a measurement. KELT-4Ab agrees
+well because it transits (i ~ 83 deg, so it sits near its minimum mass) --
+a property of that system, not of the statistic.
+
+**What the old assertion was incidentally covering, and what replaces it.**
+Reading `planet.mass` out of `idata.posterior` did exercise the path where a
+quantity is computed during sampling, written to the trace and converted to
+user units on the way out. Presence and units were already covered by sibling
+tests; the IDENTITY was not.
+`test_run_fit_kelt4_derived_parameters_are_self_consistent` recomputes a
+derived value from its parents AT THE SAME DRAW -- `orbit.period == 10 **
+orbit.logP`, and `orbit.vcve` from the `sqrt(e)cos/sin(omega)` pair -- and
+one draw is not a compromise there, it is sufficient by construction: a
+derived quantity is a deterministic function of its parents, so the identity
+either holds everywhere or is broken. Two subjects that look obvious and are
+not: `planet.mass` is SAMPLED in this config (the trace carries
+`planet.mass_raw`; the relation runs the other way, K from the mass), and
+`star.mass` is derived but never appears in `idata.posterior` at all, because
+a pure-expression parameter never does.
+
+When you write an end-to-end test, the question to ask is not "does this
+exercise the sampler" but "does this budget DETERMINE the quantity I am about
+to assert". A start value, a shape, a file, a variable name, a finiteness
+check and an IDENTITY between a derived value and its parents all survive
+`draws: 1`. A mean, a physical range, an Rhat and an ESS do not.
+
 ## The pre-push hook, and why it does not say `poetry run pytest`
 
 The full suite runs on push, wired in `.pre-commit-config.yaml` (install both hook
