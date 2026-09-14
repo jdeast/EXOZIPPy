@@ -21,6 +21,7 @@ reason, never dropped silently.
 """
 
 import os
+import pathlib
 from pathlib import Path
 
 import numpy as np
@@ -68,6 +69,48 @@ def _system_configs():
 _CONFIGS = _system_configs()
 
 
+def _unshipped_data(config, directory):
+    """Datafiles this config names that are DELIBERATELY not redistributed.
+
+    Returns the missing paths that the example's own ``.gitignore`` lists --
+    and only those. The distinction is the point: a data file that is absent
+    AND gitignored is a licence decision (``examples/theophylline`` fetches
+    the Theophylline table at run time, because shipping GPL-2 material
+    inside a BSD-3-Clause project is what the fetcher exists to avoid), while
+    a data file that is absent and NOT gitignored is rot, which is what this
+    whole module is the canary for. Skipping the first and failing the second
+    keeps both properties.
+
+    Deliberately not a hardcoded example name: the next component that fetches
+    its own data gets this for free, and gets it for the stated reason rather
+    than because someone remembered to add it to a list.
+    """
+    ignore = directory / ".gitignore"
+    if not ignore.is_file():
+        return []
+    patterns = {
+        line.strip()
+        for line in ignore.read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    }
+    missing = []
+    for block in config.values():
+        entries = block if isinstance(block, list) else [block]
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("datafile")
+            if not name:
+                continue
+            path = directory / str(name)
+            if (
+                not path.is_file()
+                and pathlib.PurePath(str(name)).name in patterns
+            ):
+                missing.append(str(name))
+    return missing
+
+
 # ~238 s across 25 cases, about 3.6% of the suite, and it pays that on every
 # matrix combination. Reviewed 2026-08-25 during the CI runtime work and
 # deliberately KEPT -- "expensive but worth it" (JDE). The BREADTH is the
@@ -87,6 +130,15 @@ def test_shipped_example_prepares(path, rel, monkeypatch, caplog):
         pytest.skip(f"{rel}: {_EXCLUDED[rel]}")
 
     config = yaml.safe_load(path.read_text())
+
+    unshipped = _unshipped_data(config, path.parent)
+    if unshipped:
+        pytest.skip(
+            f"{rel}: {', '.join(unshipped)} is not redistributed with "
+            f"EXOZIPPy and has not been fetched here (see the example's "
+            f"README). Fetch it and this case runs."
+        )
+
     monkeypatch.chdir(path.parent)
 
     param_file = config.get("parameter_file")
