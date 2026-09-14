@@ -180,6 +180,44 @@ def find_pspl_seed(curves, mag_fn=None):
     }
 
 
+T_0_PATH = "source.0.t_0"
+
+
+def t_0_is_already_available(config_manager):
+    """True when t_0 is named outright or derivable from what is.
+
+    WHY THIS AND NOT `user_hints_sufficient`, which is the obvious choice
+    and was the first one used here.  That function asks whether EVERY
+    observable this topology needs is available -- t_0, u_0, t_E, plus rho
+    and s/alpha/q where they apply -- which is far too strong a trigger for
+    a peak finder.  A config that names t_0 and u_0 and legitimately DERIVES
+    t_E from the galactic model's kinematics fails it, because t_E comes
+    from theta_E and mu_rel and mu_rel comes from the proper motions.  The
+    peak finder then fired and supplied a PSPL t_E in place of the
+    kinematic one -- which is exactly what tests/test_seed_quality.py's
+    multi-source case measures, and it changed that measurement
+    (chi2/N 6.94 with the galactic seed).
+
+    t_0 is the right question because t_0 is the only one whose default is
+    UNRECOVERABLE: on DC2018-128 `defaults.yaml` puts it 1,445 days from the
+    event's own peak, where the likelihood is flat and no sampler returns.
+    A wrong-but-finite u_0 or t_E start is a slow fit; a wrong t_0 is not a
+    fit at all.  So the finder earns its keep precisely when t_0 is absent,
+    and has no business overriding a model that is already answering.
+    """
+    entry = config_manager.user_params.get(T_0_PATH)
+    if isinstance(entry, dict) and (
+        entry.get("initval") is not None or entry.get("mu") is not None
+    ):
+        return True
+    try:
+        return T_0_PATH in config_manager.probe_derivable([T_0_PATH])
+    except Exception:  # noqa: BLE001
+        # A probe that cannot run is not evidence that t_0 is available, and
+        # guessing "available" here would silently disable the finder.
+        return False
+
+
 def push_peak_find_hints(seed, config_manager, source="peak finder"):
     """Seed t_0, u_0 and t_E from ``find_pspl_seed``'s result.
 

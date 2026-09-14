@@ -581,10 +581,30 @@ class MulensInstrument(Instrument):
                 f"solutions (and any s/q/alpha) are discarded."
             )
 
-        is_binary = event.n_companions >= 1
-        want_rho = bool(event.finite_source)
-        if not forced and mmexofast_support.user_hints_sufficient(
-            self.config_manager, is_binary, want_rho
+        # The seed paths are the POST-SPLIT spellings (`source.0.t_0`), the
+        # same ones push_seed_hints uses, so a config with no `source:`
+        # block cannot take them: _translate_and_scale resolves the index
+        # and then strict naming refuses the prefix outright.  MMEXOFAST
+        # never trips this because it only runs on configs that named
+        # nothing, but this used to, and the failure was a hard refusal
+        # mid-build rather than a skipped seed.  tests/test_seed_quality.py
+        # reaches it because its harness picks whichever example YAML glob
+        # returns first, which on the microlensing examples is often a
+        # pre-split variant.
+        if getattr(system, "source", None) is None:
+            logger.debug(
+                f"[{self.prefix}] peak finder: no 'source' component in "
+                f"this configuration, so there is nothing to seed."
+            )
+            return
+
+        # Gate on t_0 ALONE, not on the full observable set -- see
+        # peakfind.t_0_is_already_available for why user_hints_sufficient is
+        # the wrong question here (it treats a t_E legitimately derived from
+        # the galactic model's kinematics as "unseeded" and lets the finder
+        # override it).
+        if not forced and peakfind.t_0_is_already_available(
+            self.config_manager
         ):
             return
 
