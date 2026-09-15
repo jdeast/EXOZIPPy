@@ -410,3 +410,24 @@ def test_plotted_model_matches_likelihood_model(tmp_path_factory):
     np.testing.assert_allclose(
         smeared_matrix.sum(axis=1), smeared_decrement, atol=1e-10
     )
+
+
+def test_non_numeric_exptime_names_the_instrument(tmp_path_factory):
+    """
+    Given a transit instrument whose exptime is the string "abc",
+    When load_data runs (via system.prepare()),
+    Then it raises a ValueError naming the instrument and the offending
+    value, chaining the original conversion error -- the bare float() used
+    to surface it as "could not convert string to float: 'abc'" with no
+    instrument in it (review 2.14.3).  Unlike the RANGE checks, which warn
+    and fall back, a non-numeric value has no sensible fallback.
+    """
+    d = tmp_path_factory.mktemp("bad_exptime")
+    t = np.linspace(TC - 0.1, TC + 0.1, 5)
+    lcs = [_write_lc(d / "lc0.dat", t), _write_lc(d / "lc1.dat", t)]
+    config = _config(lcs, [{"exptime": "abc", "ninterp": 3}, {}])
+
+    system = System(config, user_params=_params())
+    with pytest.raises(ValueError, match=r"transit\[inst0\].*abc") as excinfo:
+        system.prepare()
+    assert isinstance(excinfo.value.__cause__, ValueError)

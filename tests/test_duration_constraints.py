@@ -131,7 +131,11 @@ def test_transit_no_longer_builds_its_own_duration_deterministics():
 
     src = inspect.getsource(transit_mod)
     assert 'pm.Deterministic(f"{self.prefix}.t14"' not in src
-    assert 'point.get("planet.t14")' in src
+    # The read goes through _point_value since 2.5.4 (a scalar or short t14
+    # in the point used to IndexError on p_idx > 0); the planet is still the
+    # source.
+    assert 'getattr(planets, "t14", None)' in src
+    assert "self._point_value(point, t14_param, p_idx)" in src
 
 
 # ---------------------------------------------------------------------------

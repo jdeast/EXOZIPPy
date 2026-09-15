@@ -131,7 +131,9 @@ def test_build_block_detrend_places_columns_on_the_diagonal():
     """
     a = np.array([[1.0], [2.0], [3.0]])  # inst 0: 3 obs, 1 col
     b = np.array([[4.0, 5.0], [6.0, 7.0]])  # inst 1: 2 obs, 2 cols
-    inst = _make([{"name": "A"}, {"name": "B"}])
+    inst = _make(
+        [{"name": "A", "file": "a.dat"}, {"name": "B", "file": "b.dat"}]
+    )
     matrix, per_inst, total, _ = inst._build_block_detrend([a, b], 5)
 
     assert per_inst == [1, 2]
@@ -152,7 +154,9 @@ def test_build_block_detrend_handles_no_detrend_columns():
     Then it returns a (n_obs, 0) matrix and total 0.
     """
     empties = [np.empty((3, 0)), np.empty((2, 0))]
-    inst = _make([{"name": "A"}, {"name": "B"}])
+    inst = _make(
+        [{"name": "A", "file": "a.dat"}, {"name": "B", "file": "b.dat"}]
+    )
     matrix, per_inst, total, scales = inst._build_block_detrend(empties, 5)
     assert total == 0
     assert per_inst == [0, 0]
@@ -633,3 +637,82 @@ def test_rows_refuses_a_component_that_never_concatenated():
 
     with pytest.raises(ValueError, match="no row_ranges"):
         inst.rows(0)
+
+
+# ---------------------------------------------------------------------------
+# Data-read failure diagnostics (review 2.14.3)
+#
+# A missing file used to surface as pandas' own error naming no instrument
+# and no config key; an absent `file:` key as "Invalid file path or buffer
+# object type: <class 'NoneType'>".  Every message now carries the prefix,
+# the element name and the path, and keeps the original as __cause__.
+# ---------------------------------------------------------------------------
+_ROLES = ("time", "rv", "err")
+
+
+def test_missing_file_key_raises_at_construction():
+    """
+    Given an instrument entry with no `file:` key,
+    When the component is constructed,
+    Then it raises naming `dummy[B]` and the key -- at construction, like
+    a malformed mask:/columns: spec, not at stage 1 inside pandas.
+    """
+    with pytest.raises(ValueError, match=r"dummy\[B\].*'file:'"):
+        _make([{"name": "A", "file": "a.dat"}, {"name": "B"}])
+
+
+def test_missing_data_file_names_the_instrument_and_path(tmp_path):
+    """
+    Given a `file:` that does not exist,
+    When the shared reader opens it,
+    Then the FileNotFoundError names the prefix, the element and the path,
+    and chains the original pandas/OS error as its cause.
+    """
+    path = str(tmp_path / "does_not_exist.rv")
+    inst = _make([{"name": "HIRES", "file": path}])
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        inst._read_data(0, roles=_ROLES)
+
+    message = str(excinfo.value)
+    assert "dummy[HIRES]" in message
+    assert path in message
+    assert "'file:'" in message
+    assert isinstance(excinfo.value.__cause__, FileNotFoundError)
+
+
+def test_unparseable_data_file_names_the_instrument_and_path(tmp_path):
+    """
+    Given a `file:` that exists but holds nothing pandas can parse (empty),
+    When the shared reader opens it,
+    Then the ValueError names the prefix, the element and the path, and
+    chains pandas' EmptyDataError as its cause.
+    """
+    path = tmp_path / "empty.rv"
+    path.write_text("")
+    inst = _make([{"name": "HIRES", "file": str(path)}])
+
+    with pytest.raises(ValueError) as excinfo:
+        inst._read_data(0, roles=_ROLES)
+
+    message = str(excinfo.value)
+    assert "dummy[HIRES]" in message
+    assert str(path) in message
+    assert excinfo.value.__cause__ is not None
+    assert "EmptyDataError" in type(excinfo.value.__cause__).__name__
+
+
+def test_a_readable_file_still_reads(tmp_path):
+    """
+    Given a well-formed three-column file,
+    When the shared reader opens it,
+    Then the wrapped read is a no-op: the frame comes back sorted by time.
+    """
+    path = tmp_path / "ok.rv"
+    np.savetxt(path, [[3.0, 1.0, 0.1], [1.0, 2.0, 0.1], [2.0, 3.0, 0.1]])
+    inst = _make([{"name": "HIRES", "file": str(path)}])
+
+    df = inst._read_data(0, roles=_ROLES)
+
+    np.testing.assert_array_equal(df.iloc[:, 0].values, [1.0, 2.0, 3.0])
+    np.testing.assert_array_equal(df.iloc[:, 1].values, [2.0, 3.0, 1.0])

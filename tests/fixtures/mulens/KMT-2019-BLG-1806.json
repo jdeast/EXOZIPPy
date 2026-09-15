@@ -91,7 +91,7 @@
   "POT:gaussian_prior.lens.xalpha": -0.14808517301701055,
   "POT:gaussian_prior.lens.yalpha": -0.351914826982989,
   "POT:gaussian_prior.mulensinstrument.zeropoint": -351.5351963151095,
-  "POT:logit_uniform_prior.band.u1": -2.0596389143836564,
+  "POT:logit_uniform_prior.band.u1": -1.5606477482646683,
   "POT:logit_uniform_prior.lens.log_s": -1.3866884376580078,
   "POT:logit_uniform_prior.lens.xalpha": -1.386323978593087,
   "POT:logit_uniform_prior.lens.yalpha": -1.3863647465622844,
@@ -157,7 +157,7 @@
   "RV:lens.yalpha_raw": -0.9189385332046727,
   "RV:mulensinstrument.err_scale_raw": -2.756815599614018,
   "RV:mulensinstrument.log_f_total_raw": -2.756815599614018,
-  "RV:mulensinstrument.model": 44764.823754898265,
+  "RV:mulensinstrument.model": 44764.82375489827,
   "RV:mulensinstrument.q_source_raw": -2.756815599614018,
   "RV:planet.log_q_raw": -0.9189385332046727,
   "RV:sed.errscale_raw": -0.9189385332046727,
@@ -174,5 +174,5 @@
   "RV:star.teff_raw": -0.9189385332046727,
   "RV:star.teffsed_raw": -1.8378770664093453
  },
- "total_logp": 44310.96552819448
+ "total_logp": 44311.46451936062
 }

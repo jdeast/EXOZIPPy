@@ -59,6 +59,7 @@ Gaussian-only).  Off by default everywhere: with no ``likelihood:`` key the
 model is byte-for-byte what it was before this feature existed.
 """
 
+import copy
 import logging
 
 import numpy as np
@@ -421,6 +422,19 @@ class Instrument(TimeSystem, Component):
         # Every instrument reads its data from per-element files and tracks a
         # running observation count.
         self.files = [c.get("file") for c in self.config]
+        # The schema says `file` is required, but nothing enforced it: an
+        # entry without one reached pandas at stage 1 as `read_csv(None)`
+        # and died with "Invalid file path or buffer object type: <class
+        # 'NoneType'>", naming no instrument and no key.  Fail here, at
+        # construction, like the malformed mask:/columns: specs below do
+        # (review 2.14.3).
+        for i, f in enumerate(self.files):
+            if f is None:
+                raise ValueError(
+                    f"[{self.prefix}[{self.names[i]}]] has no 'file:' key. "
+                    f"Every {self.prefix} entry must name the data file it "
+                    f"reads."
+                )
         self.n_total_obs = 0
         # One standard deviation per global detrend column, published by
         # ConcatenatedData.finalize; None until then (and for a child that
@@ -719,9 +733,27 @@ class Instrument(TimeSystem, Component):
                 f"[{self.prefix}] _read_data roles must start with 'time'; "
                 f"got {list(roles)}."
             )
-        df = pd.read_csv(
-            self.files[i], sep=r"\s+", engine="c", header=None, comment="#"
-        )
+        # A bad path or an unreadable file used to surface as pandas' own
+        # error -- a bare FileNotFoundError, or "No columns to parse from
+        # file" -- with no instrument and no config key in it, so on a
+        # config with a dozen light curves the user had to bisect.  Re-raise
+        # with the prefix, the element name and the path, keeping the
+        # original as __cause__ (review 2.14.3).
+        path = self.files[i]
+        try:
+            df = pd.read_csv(
+                path, sep=r"\s+", engine="c", header=None, comment="#"
+            )
+        except FileNotFoundError as e:
+            raise FileNotFoundError(
+                f"[{self.prefix}[{self.names[i]}]] data file not found: "
+                f"{path!r} (the 'file:' key of this entry)."
+            ) from e
+        except (pd.errors.EmptyDataError, pd.errors.ParserError) as e:
+            raise ValueError(
+                f"[{self.prefix}[{self.names[i]}]] could not parse data "
+                f"file {path!r} (the 'file:' key of this entry): {e}"
+            ) from e
         df = self._select_columns(df, i, roles, detrend, shared_roles)
         df = self._apply_mask(df, i)
         t = self._to_bjd_tdb(df.iloc[:, 0].values.astype(float), i)
@@ -1066,7 +1098,13 @@ class Instrument(TimeSystem, Component):
                 continue
             entry = pin_unselected(self.n_elements, on)
             for param in gp_support.GP_TERM_PARAMS[kind]:
-                manifest[param] = dict(entry)
+                # deepcopy, not dict(): a shallow copy shares the nested
+                # {"overrides": {"sigma": [...]}} across every parameter of
+                # the term, and Instrument.add_parameter already mutates a
+                # manifest entry in place (detrend_coeffs).  This codebase
+                # shipped exactly that aliasing once, in the broadcast
+                # shared-dict bug (review 2.5.5).
+                manifest[param] = copy.deepcopy(entry)
         return manifest
 
     def _build_log10_deterministics(self, log_params):
@@ -1557,7 +1595,8 @@ class Instrument(TimeSystem, Component):
             entry = pin_unselected(self.n_elements, on)
             alarm = [i in on for i in range(self.n_elements)]
             for param in robust_support.LIKELIHOOD_PARAMS[kind]:
-                manifest[param] = dict(entry)
+                # deepcopy per parameter, for the reason _register_gp gives.
+                manifest[param] = copy.deepcopy(entry)
                 if param in robust_support.LIKELIHOOD_CAP_ALARM.get(kind, ()):
                     manifest[param] = merge_options(
                         manifest[param], cap_alarm=list(alarm)
@@ -1859,6 +1898,32 @@ class Instrument(TimeSystem, Component):
         label = getattr(getattr(self, "detrend_coeffs", None), "label", None)
         return [label] if label else []
 
+    def gp_dep_labels(self):
+        """``param_deps`` entries for this instrument's GP hyperparameters.
+
+        The GP conditional mean reaches the panels in NUMPY too
+        (``gp_mean_at_data`` / ``gp_mean_on_grid`` are compiled celerite2
+        evaluators, not nodes of the plotted model trace), so the graph walk
+        cannot see it and, until 2026-09, no ``gp_*`` label ever reached
+        ``param_deps``: a GP hyperparameter slider in the GUI never
+        re-rendered a chart (review 1.12.9).  The eval path does ask for a
+        fresh point on every slider move -- ``param_deps`` was the only
+        blocker.  Same label convention as ``detrend_dep_labels``: the built
+        Parameter's own ``label``, for the terms actually on somewhere.
+        ``[]`` without a GP, so no chart without one changes.
+        """
+        if not getattr(self, "has_gp", False):
+            return []
+        labels = []
+        for kind in gp_support.GP_TERMS:
+            if not self._gp_elements(kind):
+                continue
+            for name in gp_support.GP_TERM_PARAMS[kind]:
+                label = getattr(getattr(self, name, None), "label", None)
+                if label:
+                    labels.append(label)
+        return labels
+
     # ------------------------------------------------------------------
     # Shared noise machinery
     # ------------------------------------------------------------------
@@ -1984,13 +2049,23 @@ class Instrument(TimeSystem, Component):
                 col = np.asarray(block[:, j], dtype=float)
                 sd = float(np.std(col))
                 if not np.isfinite(sd) or sd == 0.0:
+                    # One raise for two causes, and the message names both:
+                    # an all-NaN (or NaN-bearing) column has sd = nan and
+                    # used to read "constant (value nan)", which sends the
+                    # user hunting for a repeated value that does not exist
+                    # (review 2.14.3).
+                    why = (
+                        "constant"
+                        if np.isfinite(sd)
+                        else "non-finite (it contains NaN or inf)"
+                    )
                     raise ValueError(
                         f"[{self.prefix}[{self.names[i]}]] detrend column "
-                        f"{j} is constant (value {col.flat[0]!r}), so it "
-                        f"carries no information and is exactly degenerate "
-                        f"with this instrument's offset.  Remove the column "
-                        f"(or list only the varying ones with `columns: "
-                        f"{{detrend: [...]}}`)."
+                        f"{j} is {why} (first value {col.flat[0]!r}), so "
+                        f"it carries no information and is exactly "
+                        f"degenerate with this instrument's offset.  Remove "
+                        f"the column (or list only the varying ones with "
+                        f"`columns: {{detrend: [...]}}`)."
                     )
                 matrix[r : r + n_r, c + j] = (col - np.mean(col)) / sd
                 scales[c + j] = sd

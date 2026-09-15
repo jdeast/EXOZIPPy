@@ -525,7 +525,9 @@ class Band(Component):
         (register_parameters), so a filter-identity-only band contributes
         no table rows.  This pin covers the mixed case -- the manifest is
         per parameter, so one consumed band forces the whole vector to
-        exist, and the unread elements are fixed here.
+        exist, and the unread elements are fixed here.  It also applies the
+        linear law's u1 <= 1 validity cap, which is NOT conditional on an
+        unread band existing -- see the comment at the cap.
 
         Which coordinate gets pinned is PER BAND, because which coordinate a
         band samples is: a quadratic band samples the Kipping pair (its u1/u2
@@ -543,8 +545,6 @@ class Band(Component):
         if consumers is None:
             consumers = self._ld_consumer_indices(system)
         unread = [i for i in range(self.n_elements) if i not in consumers]
-        if not unread:
-            return
 
         # A LINEAR law caps u1 at 1: the profile is
         # I(mu)/I(1) = 1 - u1*(1 - mu), so u1 > 1 puts NEGATIVE surface
@@ -561,6 +561,15 @@ class Band(Component):
         # src/exozippy/config.md).  This is a validity limit -- past
         # it the intensity is negative -- which is exactly what that channel
         # is for.  NaN leaves quadratic bands alone.
+        #
+        # This block sits ABOVE the `if not unread: return` below on
+        # purpose.  The cap depends only on each band's law, not on whether
+        # anything reads it, and its motivating configuration -- event 128's
+        # one linear band, consumed by its finite-source light curve -- is
+        # exactly the all-consumed case that early return covers.  Until
+        # 2026-09 the cap sat after the return, so it applied only to a
+        # topology that ALSO carried an unread band, and the shipped fits
+        # that needed it never got it (review 1.5.4).
         if "u1" in self.manifest:
             cap = np.full(self.n_elements, np.nan)
             for i, law in enumerate(self.ld_laws):
@@ -570,6 +579,9 @@ class Band(Component):
                 self.manifest["u1"] = merge_overrides(
                     self.manifest.get("u1"), {"upper": cap.tolist()}
                 )
+
+        if not unread:
+            return
 
         # Per parameter, the elements that BOTH sample it and are unread; the
         # same opt-in pin the BEER terms and Instrument's GP/robust
