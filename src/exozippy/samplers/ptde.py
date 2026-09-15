@@ -1052,6 +1052,7 @@ def ptde_sample(
     max_rhat=1.01,
     maxtime=None,
     eval_timeout=None,
+    start_dispersion=None,
     lp_plausibility_ceiling=None,
     progress_callback=None,
 ):
@@ -1226,17 +1227,23 @@ def ptde_sample(
     )
 
     # initialize populations
-    t1_starts, chain_seed_index = _common.resolve_start_population(
-        model,
-        system,
-        n_chains,
-        logp_fn,
-        rng,
-        raw_start,
-        initvals=initvals,
-        raw_starts=raw_starts,
-        seed_indices=seed_indices,
-        raw_scales=raw_scales,
+    t1_starts, chain_seed_index, rung_starts, _dispersions, _disp_desc = (
+        _common.build_rung_populations(
+            model,
+            system,
+            n_chains,
+            logp_fn,
+            rng,
+            raw_start,
+            temperatures,
+            start_dispersion,
+            initvals=initvals,
+            raw_starts=raw_starts,
+            seed_indices=seed_indices,
+            raw_scales=raw_scales,
+            n_params=n_params,
+            log=logger,
+        )
     )
 
     # ensemble start plots (T=1 starts only; raw→physical via the batched fn)
@@ -1250,15 +1257,19 @@ def ptde_sample(
         logger,
     )
 
-    # Replicate T=1 starts to all rungs; hotter chains spread quickly during
-    # tune.  A rung's population is ONE (n_chains, n_raw_elements) array, not
-    # a list of dicts: the DE move is then three vector operations instead of
-    # a Python loop over the free RVs (see _common.RawLayout, which owns the
+    # Each rung gets its OWN population, dispersed at its own temperature
+    # (review 8.4.7).  This used to replicate the T=1 population to every
+    # rung under the note "hotter chains spread quickly during tune" -- an
+    # assumption the code stated and never checked; build_rung_populations
+    # now reports each rung's spread and start logp so it can be.
+    # A rung's population is ONE (n_chains, n_raw_elements) array, not a list
+    # of dicts: the DE move is then three vector operations instead of a
+    # Python loop over the free RVs (see _common.RawLayout, which owns the
     # packing and the proof that it is bit-identical).
     layout = _common.RawLayout(raw_start, model_keys)
     populations = [
-        layout.pack_many([t1_starts[i % n_chains] for i in range(n_chains)])
-        for _ in range(n_temps)
+        layout.pack_many([pop[i % n_chains] for i in range(n_chains)])
+        for pop in rung_starts
     ]
 
     # start pool AFTER set_worker_globals so fork children inherit the logp fn

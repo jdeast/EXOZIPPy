@@ -84,6 +84,7 @@ KNOWN_SAMPLER_KEYS = {
     "seed_polish",
     "seed",
     "store_hot_chains",
+    "start_dispersion",
 }
 
 
@@ -363,6 +364,9 @@ METHOD_ONLY_SAMPLER_KEYS = {
     "eval_timeout": _PTDE_METHODS,
     "swap_schedule": _PTDE_METHODS,
     "collect_rung_timing": _PTDE_METHODS,
+    # Per-RUNG start dispersion (8.4.7): meaningless without a ladder, so it
+    # is PTDE-only rather than an all-method key.
+    "start_dispersion": _PTDE_METHODS,
     # ... and the two documented asymmetries inside it.
     "store_hot_chains": ("ptde_async",),
     "rung_thin_factor": ("ptde",),
@@ -763,6 +767,10 @@ def _run_fit(config, gui, user_params=None):
     eval_timeout = (
         float(_eval_timeout_raw) if _eval_timeout_raw is not None else None
     )
+    # Passed through as given (number, list or 'auto'); the ladder is not
+    # known here, so _common.resolve_start_dispersion validates it against
+    # the rung count and raises there (review 8.4.7).
+    start_dispersion = sampler_cfg.get("start_dispersion", None)
     # Thinned hot-rung retention (ptde_async only): detector data for
     # post-hoc discovery of posterior-suppressed modes; see
     # outputs.ledger.discover_hot_modes.  "auto" | False | True (thin 20) |
@@ -1121,6 +1129,7 @@ def _run_fit(config, gui, user_params=None):
                     max_rhat=max_rhat,
                     maxtime=maxtime,
                     eval_timeout=eval_timeout,
+                    start_dispersion=start_dispersion,
                     rung_thin_factor=rung_thin_factor,
                     rung_thin_start=rung_thin_start,
                     collect_rung_timing=collect_rung_timing,
@@ -1159,6 +1168,7 @@ def _run_fit(config, gui, user_params=None):
                     max_rhat=max_rhat,
                     maxtime=maxtime,
                     eval_timeout=eval_timeout,
+                    start_dispersion=start_dispersion,
                     collect_rung_timing=collect_rung_timing,
                     swap_schedule=swap_schedule,
                     adapt_ladder=adapt_ladder,
