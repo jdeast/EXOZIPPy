@@ -170,8 +170,22 @@ class Transit(Instrument):
         self.exptime_min = [1.0] * self.n_elements
         self.ninterp = [1] * self.n_elements
         for i, c in enumerate(self.config):
-            exptime = float(c.get("exptime", 1.0))
-            ninterp = int(c.get("ninterp", 1))
+            # A non-numeric value is a hard error (unlike the RANGE checks
+            # below, which warn and fall back): `exptime: "abc"` is a typo
+            # with no sensible fallback, and the bare `float()` used to
+            # surface it as "could not convert string to float" naming no
+            # instrument and no key (review 2.14.3).
+            try:
+                exptime = float(c.get("exptime", 1.0))
+                ninterp = int(c.get("ninterp", 1))
+            except (TypeError, ValueError) as e:
+                raise ValueError(
+                    f"[{self.prefix}[{self.names[i]}]] exptime/ninterp must "
+                    f"be numeric (exposure duration in minutes and the "
+                    f"number of sub-samples); got "
+                    f"exptime={c.get('exptime', '<unset>')!r}, "
+                    f"ninterp={c.get('ninterp', '<unset>')!r}: {e}"
+                ) from e
             if (
                 ninterp < 1
                 or exptime <= 0
