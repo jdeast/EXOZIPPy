@@ -1674,15 +1674,24 @@ class Transit(Instrument):
                         # all point-dependent, so live evals must re-ship it.
                         "dynamic_data": True,
                     }
-                    # Zoom to +/- t14 around mid-transit when the point
-                    # carries a transit duration for this planet.
-                    # `planet.t14`, not `transit.t14`: the durations are
-                    # planet geometry now (review 8.8.7).
+                    # Zoom to +/- t14 around mid-transit when a transit
+                    # duration is known for this planet.  `planet.t14`, not
+                    # `transit.t14`: the durations are planet geometry now
+                    # (review 8.8.7).  Read through _point_value like the
+                    # period and tc above, NOT `point["planet.t14"][p_idx]`:
+                    # this read sits outside the panel's try, so a scalar or
+                    # short t14 in the point IndexError'ed on p_idx > 0 and
+                    # killed plot_data for the whole component (review
+                    # 2.5.4); the helper falls back to element 0 for a
+                    # broadcast scalar and to the Parameter's own start when
+                    # the point lacks it.  A non-finite duration (no start
+                    # to fall back on) simply means no zoom.
                     x_range = None
-                    t14_raw = point.get("planet.t14")
-                    if t14_raw is not None:
-                        t14_ref = float(np.atleast_1d(t14_raw)[p_idx])
-                        x_range = [-t14_ref, t14_ref]
+                    t14_param = getattr(planets, "t14", None)
+                    if t14_param is not None:
+                        t14_ref = self._point_value(point, t14_param, p_idx)
+                        if np.isfinite(t14_ref):
+                            x_range = [-t14_ref, t14_ref]
                     specs.append(
                         Chart(
                             id=f"{self.prefix}.phased.{self.names[i]}.{pname}",

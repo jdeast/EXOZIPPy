@@ -789,3 +789,99 @@ def test_point_value_falls_back_to_the_initval(pinned_gamma_rv_system):
     assert got == pytest.approx(
         float(np.atleast_1d(system.orbit.tc.initval)[0]), rel=1e-12
     )
+
+
+# ---------------------------------------------------------------------------
+# The phased-LC zoom reads planet.t14 through _point_value (review 2.5.4)
+#
+# The +/- t14 x_range used to be `float(np.atleast_1d(point["planet.t14"])
+# [p_idx])`, OUTSIDE the panel's try, so a scalar or short t14 in the point
+# IndexError'ed on the second planet and killed plot_data for the whole
+# component.  Synthetic light curve, no example directory needed.
+# ---------------------------------------------------------------------------
+_TWO_P1, _TWO_P2, _TWO_TC = 4.0, 11.0, 2459200.0
+
+
+@pytest.fixture(scope="module")
+def two_planet_transit(tmp_path_factory):
+    """One light curve of a star with TWO planets, built with a point."""
+    path = tmp_path_factory.mktemp("two_planet_lc") / "two.TESS.dat"
+    n = 240
+    t = np.linspace(_TWO_TC - 0.25, _TWO_TC + 0.25, n)
+    flux = 1.0 - 0.01 * (np.abs(t - _TWO_TC) < 0.05)
+    np.savetxt(path, np.column_stack([t, flux, np.full_like(t, 3.0e-4)]))
+
+    config = {
+        "run": {"name": "two_planet_lc"},
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "b"}, {"name": "c"}],
+        "orbit": [
+            {"name": "b", "primary": ["A"], "companion": ["b"]},
+            {"name": "c", "primary": ["A"], "companion": ["c"]},
+        ],
+        "band": [{"name": "TESS", "filter": "TESS"}],
+        "transit": [{"name": "TESS", "file": str(path), "band": "TESS"}],
+    }
+    params = {
+        "star.A.mass": {"initval": 1.0, "sigma": 0.05},
+        "star.A.radius": {"initval": 1.0, "sigma": 0.1},
+        "star.A.teff": {"initval": 5800, "sigma": 100},
+        "star.A.feh": {"initval": 0.0, "sigma": 0.1},
+        "orbit.b.period": {"initval": _TWO_P1},
+        "orbit.b.tc": {"initval": _TWO_TC},
+        "orbit.c.period": {"initval": _TWO_P2},
+        "orbit.c.tc": {"initval": _TWO_TC},
+    }
+    system = System(config, user_params=params)
+    system.prepare()
+    model = system.build_model()
+    with model:
+        point = system.get_internal_point(model, system.get_raw_start(model))
+    system.compile_plotter_functions(model)
+    return system, point
+
+
+def test_phased_lc_zoom_is_per_planet(two_planet_transit):
+    """
+    Given two planets whose point carries a two-element planet.t14,
+    When plot_data builds the phased panels,
+    Then each panel's x_range is +/- ITS planet's duration.
+    """
+    system, point = two_planet_transit
+    t14 = np.atleast_1d(point["planet.t14"])
+    assert t14.shape == (2,)
+
+    phased = [
+        s
+        for s in system.transit.plot_data(system, point)
+        if s.meta["phase_folded"]
+    ]
+
+    assert [s.meta["planet"] for s in phased] == ["b", "c"]
+    for p_idx, spec in enumerate(phased):
+        assert spec.x_range == pytest.approx([-t14[p_idx], t14[p_idx]])
+
+
+def test_phased_lc_panels_survive_a_scalar_t14_with_two_planets(
+    two_planet_transit,
+):
+    """
+    Given a point whose planet.t14 is a bare SCALAR (a broadcast value, as a
+    short vector in the point is),
+    When plot_data builds the phased panel for the SECOND planet,
+    Then every panel is still returned -- the read goes through _point_value,
+    which falls back to element 0 -- and the zoom uses that scalar.
+
+    Regression: `np.atleast_1d(scalar)[1]` raised IndexError outside the
+    panel's try and plot_data returned nothing for the component.
+    """
+    system, point = two_planet_transit
+    scalar_point = dict(point)
+    scalar_point["planet.t14"] = np.float64(0.1)
+
+    specs = system.transit.plot_data(system, scalar_point)
+    phased = [s for s in specs if s.meta["phase_folded"]]
+
+    assert {s.meta["planet"] for s in phased} == {"b", "c"}
+    for spec in phased:
+        assert spec.x_range == pytest.approx([-0.1, 0.1])
