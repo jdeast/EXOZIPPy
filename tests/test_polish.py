@@ -1194,6 +1194,7 @@ def test_heartbeat_fires_inside_a_sweep_not_only_between_them(caplog):
             pop_size=6,
             pool=pool,
             progress_interval_s=0.06,
+            asynchronous=False,
         )
 
     msgs = [r.getMessage() for r in caplog.records]
@@ -1245,6 +1246,7 @@ def test_a_wedged_proposal_does_not_silence_the_heartbeat(caplog):
             pop_size=4,
             pool=pool,
             progress_interval_s=0.05,
+            asynchronous=False,
             eval_timeout=0.2,
             pool_recycler=_recycler,
         )
@@ -1275,6 +1277,11 @@ def test_the_interleaved_path_returns_the_same_stream_as_map():
     configuration that keeps the single blocking pool.map even on a pool
     that could interleave -- no heartbeat and no timeout means nothing to
     interleave for.
+
+    All of this is the SYNCHRONOUS engine, selected explicitly: on a pool
+    with apply_async the default is now the asynchronous engine, whose
+    trajectory depends on arrival order by design (see the async tests
+    below).
     """
     # ARRANGE
     from exozippy.samplers.ptde import polish_seed_starts
@@ -1300,9 +1307,11 @@ def test_the_interleaved_path_returns_the_same_stream_as_map():
     a, dlp_a = _run()
     b, dlp_b = _run(pool=_SerialPool())
     async_pool = _FakeAsyncPool()
-    c, dlp_c = _run(pool=async_pool)
+    c, dlp_c = _run(pool=async_pool, asynchronous=False)
     quiet_pool = _FakeAsyncPool()
-    d, dlp_d = _run(pool=quiet_pool, progress_interval_s=None)
+    d, dlp_d = _run(
+        pool=quiet_pool, progress_interval_s=None, asynchronous=False
+    )
 
     # ASSERT
     assert async_pool.n_apply_async > 0
@@ -1485,3 +1494,301 @@ def test_ulp_perturbation_does_not_move_the_polished_start(
         f"({lps}); at a converged optimum it moves at second order (~1e-6 "
         f"here; at the old gtol 0.01 stop it was 0.24)."
     )
+
+
+# The asynchronous engine (review 2.4.14): ptde_async's procedure for the polish
+# ---------------------------------------------------------------------------
+
+
+class _CallbackPool:
+    """A multiprocessing.Pool stand-in on threads, with the two apply_async
+    shapes the engine uses: callbacks (the async loop) and a handle with
+    ``get(timeout)`` (the opening batch through ``_map_logp_timeout``).
+
+    ``delay(idx)`` is the wall-clock cost of submission ``idx``; ``hang``
+    names submissions that never return until ``release()`` is called.
+    ``completed`` records submission indices in the order their results
+    were delivered, which is what makes non-blocking behaviour observable.
+    """
+
+    def __init__(self, workers=2, delay=None, hang=()):
+        import concurrent.futures
+        import threading
+
+        self._ex = concurrent.futures.ThreadPoolExecutor(workers)
+        self._delay = delay or (lambda idx: 0.0)
+        self._hang = set(hang)
+        self._release = threading.Event()
+        self._lock = threading.Lock()
+        self.n_apply_async = 0
+        self.completed = []
+
+    def release(self):
+        self._release.set()
+        self._ex.shutdown(wait=False)
+
+    def apply_async(self, fn, args, callback=None, error_callback=None):
+        import multiprocessing as mp
+        import time
+
+        idx = self.n_apply_async
+        self.n_apply_async += 1
+
+        def _run():
+            if idx in self._hang:
+                self._release.wait()
+                return None
+            time.sleep(self._delay(idx))
+            try:
+                r = fn(args[0])
+            except Exception as exc:  # pragma: no cover - defensive
+                if error_callback is not None:
+                    error_callback(exc)
+                raise
+            with self._lock:
+                self.completed.append(idx)
+            if callback is not None:
+                callback(r)
+            return r
+
+        fut = self._ex.submit(_run)
+
+        class _Res:
+            def get(self, timeout=None):
+                import concurrent.futures
+
+                try:
+                    return fut.result(timeout=timeout)
+                except concurrent.futures.TimeoutError:
+                    raise mp.TimeoutError
+
+        return _Res()
+
+
+def test_async_de_polish_climbs_to_the_mode_and_reports_its_population(caplog):
+    """
+    Given a pool whose apply_async delivers results through callbacks,
+    When the DE polish runs with the default asynchronous engine,
+    Then it climbs the quadratic to its mode, spends exactly the sweep
+      budget as completed proposals, and the wrap-up says how many members
+      never moved -- the diagnostic 2.4.14 needed and could not get.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    pool = _CallbackPool(workers=3)
+    seeds = [{"x": np.array([0.0])}]
+    n_steps, pop = 40, 8
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        polished, dlps = polish_seed_starts(
+            seeds,
+            _quadratic_logp,
+            np.random.default_rng(0),
+            {"x": np.ones(1)},
+            n_steps=n_steps,
+            pop_size=pop,
+            pool=pool,
+        )
+    pool.release()
+
+    # ASSERT
+    assert abs(float(polished[0]["x"][0]) - 3.0) < 0.5
+    assert dlps[0] > 0
+    # opening batch (pop) + n_steps sweeps of pop proposals
+    assert pool.n_apply_async == pop * (n_steps + 1)
+    assert f"{n_steps} steps x {pop} pop" in caplog.text
+    assert "members never moved" in caplog.text
+    assert "(asynchronous engine)" in caplog.text
+
+
+def test_async_de_polish_does_not_wait_on_a_slow_proposal():
+    """
+    Given one proposal in the first sweep that takes far longer than the rest,
+    When the asynchronous engine runs on two workers,
+    Then many later-submitted proposals complete BEFORE it does: the slow
+      evaluation costs one worker and nothing else waits on it.
+
+    The synchronous batch engine could not do this -- a sweep is one
+    barrier, so at most the rest of that batch (pop - 1 items) can finish
+    ahead of its slowest member.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    pop, n_steps = 8, 12
+    slow = pop + 3  # a first-sweep proposal; 0..pop-1 is the opening batch
+    pool = _CallbackPool(
+        workers=2, delay=lambda idx: 0.4 if idx == slow else 0.0
+    )
+
+    # ACT
+    polish_seed_starts(
+        [{"x": np.array([0.0])}],
+        _quadratic_logp,
+        np.random.default_rng(1),
+        {"x": np.ones(1)},
+        n_steps=n_steps,
+        pop_size=pop,
+        pool=pool,
+    )
+    pool.release()
+
+    # ASSERT: the slow item was delivered long after items submitted after it
+    position = pool.completed.index(slow)
+    assert position >= 3 * pop, (position, pool.completed[: position + 1])
+
+
+def test_async_de_polish_spends_exactly_the_budget_per_seed(caplog):
+    """
+    Given two seeds and the asynchronous engine,
+    When the polish runs to its cap,
+    Then each seed reports exactly n_steps steps and the pool saw exactly
+      n_seeds * pop * (n_steps + 1) submissions: the budget is counted in
+      completed proposals and does not leak across seeds or sweeps.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    pool = _CallbackPool(workers=4)
+    seeds = [{"x": np.array([0.0])}, {"x": np.array([6.0])}]
+    n_steps, pop = 7, 8
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        polish_seed_starts(
+            seeds,
+            _quadratic_logp,
+            np.random.default_rng(3),
+            {"x": np.ones(1)},
+            n_steps=n_steps,
+            pop_size=pop,
+            pool=pool,
+        )
+    pool.release()
+
+    # ASSERT
+    assert pool.n_apply_async == len(seeds) * pop * (n_steps + 1)
+    assert caplog.text.count(f"{n_steps} steps x {pop} pop") == len(seeds)
+
+
+def test_async_de_polish_heartbeats_with_the_sweep_count(caplog):
+    """
+    Given a heartbeat interval every result crosses,
+    When the asynchronous engine runs,
+    Then progress lines carry the sweep count against the cap, elapsed and
+      an upper-bound ETA, in the same shape the synchronous engine logs.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    pool = _CallbackPool(workers=2)
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        polish_seed_starts(
+            [{"x": np.array([0.0])}],
+            _quadratic_logp,
+            np.random.default_rng(0),
+            {"x": np.ones(1)},
+            n_steps=6,
+            pop_size=8,
+            pool=pool,
+            progress_interval_s=1e-9,
+        )
+    pool.release()
+    beats = [
+        r.getMessage()
+        for r in caplog.records
+        if "PTDE seed polish: sweep" in r.getMessage()
+    ]
+
+    # ASSERT
+    assert beats
+    assert any("/6" in b for b in beats)
+    assert all("elapsed=" in b and "eta<=" in b for b in beats)
+
+
+def test_async_de_polish_eval_timeout_writes_off_and_recycles(caplog):
+    """
+    Given a proposal whose evaluation never returns and an eval_timeout,
+    When the asynchronous engine runs with a pool_recycler,
+    Then the stale submission is scored -inf and logged, the recycler is
+      called, the written-off legitimate work is resubmitted, and the polish
+      still spends its full budget and returns a finite point.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    pop, n_steps = 8, 10
+    hung = _CallbackPool(workers=2, hang={pop + 1})
+    fresh = []
+
+    def _recycle(dead):
+        assert dead is hung or dead in fresh
+        new = _CallbackPool(workers=2)
+        fresh.append(new)
+        return new
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        polished, dlps = polish_seed_starts(
+            [{"x": np.array([0.0])}],
+            _quadratic_logp,
+            np.random.default_rng(5),
+            {"x": np.ones(1)},
+            n_steps=n_steps,
+            pop_size=pop,
+            pool=hung,
+            eval_timeout=0.2,
+            pool_recycler=_recycle,
+        )
+    hung.release()
+    for p in fresh:
+        p.release()
+
+    # ASSERT
+    assert fresh, "the recycler was never called"
+    assert "exceeded eval_timeout" in caplog.text
+    assert "recycling the worker pool" in caplog.text
+    assert np.all(np.isfinite(polished[0]["x"]))
+    assert f"{n_steps} steps x {pop} pop" in caplog.text
+    assert dlps[0] > 0
+
+
+def test_polish_raw_starts_forwards_the_engine_choice(monkeypatch):
+    """
+    Given polish_raw_starts on a gradient-free model,
+    When it is called with asynchronous=False,
+    Then the DE engine receives that flag: the pipeline can ask for the
+      bit-reproducible synchronous engine without reaching into ptde.
+    """
+    # ARRANGE
+    import exozippy.polish as polish_mod
+    from exozippy.samplers import ptde as ptde_mod
+
+    seen = {}
+
+    def _spy(raw_starts, logp_fn, rng, scales, **kw):
+        seen.update(kw)
+        return list(raw_starts), [0.0 for _ in raw_starts]
+
+    monkeypatch.setattr(ptde_mod, "polish_seed_starts", _spy)
+    monkeypatch.setattr(polish_mod, "_compile_logp_grad", lambda model: None)
+
+    class _Model:
+        def compile_logp(self):
+            return _quadratic_logp
+
+    # ACT
+    polish_mod.polish_raw_starts(
+        _Model(),
+        [{"x": np.array([0.0])}],
+        n_steps=3,
+        cores=1,
+        asynchronous=False,
+    )
+
+    # ASSERT
+    assert seen["asynchronous"] is False
