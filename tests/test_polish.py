@@ -10,6 +10,7 @@ through a rescale.
 """
 
 import logging
+from pathlib import Path
 
 import numpy as np
 import pymc as pm
@@ -339,8 +340,8 @@ def test_integer_one_is_one_step_not_the_default():
     Regression (notes/code_review_20260808.txt 2.9.1): the old
     `spec in (True, "on")` test matched the integer 1, because 1 == True in
     Python, so asking for a single step silently got DEFAULT_POLISH_STEPS
-    (150).  Every small integer 2..N was honored, which is what made the
-    one-value hole invisible.
+    (then 150, now 400).  Every small integer 2..N was honored, which is
+    what made the one-value hole invisible.
     """
     assert resolve_polish_steps(1, n_seeds=1, has_seed_hints=False) == 1
     assert resolve_polish_steps(2, n_seeds=1, has_seed_hints=False) == 2
@@ -508,7 +509,8 @@ def test_an_improvement_window_would_quit_on_a_staircase_plateau():
 
 def test_lbfgs_polish_stops_on_the_gradient_not_the_cap():
     """
-    Given a smooth quadratic basin and the default 150-iteration cap,
+    Given a smooth quadratic basin and a 150-iteration cap (the shipped
+      DEFAULT_POLISH_STEPS is larger; the point is that neither is reached),
     When the L-BFGS engine polishes,
     Then it converges on the gradient tolerance in a handful of iterations
       -- the cap is a safety net, never the stopping criterion -- and
@@ -1309,3 +1311,177 @@ def test_the_interleaved_path_returns_the_same_stream_as_map():
         for pa, pb in zip(a, other):
             np.testing.assert_allclose(pa["x"], pb["x"])
         np.testing.assert_allclose(dlp_a, dlp_other)
+
+
+# ---------------------------------------------------------------------------
+# review 7.13.8: the stop must not amplify arithmetic noise.  A 1-ulp
+# perturbation of (lp, grad) may not move the polished start.
+# ---------------------------------------------------------------------------
+#
+# THE MECHANISM THIS GUARDS.  scipy's gtol test is `max|proj g| <= gtol` on
+# the CURRENT iterate, so it fires on the FIRST evaluation that dips under
+# the threshold.  On a ridge (kelt4 RV-only: a tc/logP degeneracy with
+# Hessian condition number 5.4e6) a loose gtol therefore stops mid-climb, on
+# a shoulder where the endpoint depends on every bit of the path -- and the
+# path differs whenever the arithmetic does, which across CI runners it
+# always does (a different OpenBLAS kernel in scipy's own L-BFGS-B
+# bookkeeping perturbs one iterate by 1 ulp at evaluation 4).  At the old
+# gtol = 0.01 that moved the polished cosi by 8.5% (16-seed full width) and
+# the polished lp by 0.24 nats, and 3 of 16 arithmetics hit the 150 cap;
+# tests/test_integration_kelt4.py went red three times on it.
+#
+# THE HARNESS.  "The same function computed by a different but equally
+# correct arithmetic" is modelled as the compiled objective times
+# (1 + s * 2**-52), s in {-1, 0, +1} a hash of (x, component, seed) -- one
+# ulp of relative error on every output, chosen independently per
+# evaluation.  Seed 0 is unperturbed.  Under the shipped constants the four
+# seeds here must land on the same optimum: this is what makes the flake
+# structurally impossible to reintroduce, because a first-dip stop fails it
+# by two orders of magnitude while a converged stop passes with 5x to spare.
+# The full 16-seed sweep and the numbers behind the bounds are in the header
+# of tests/test_integration_kelt4.py.
+
+_KELT4_DIR = Path(__file__).parent.parent / "examples" / "kelt4"
+
+# Measured 2026-09-14, 16 seeds, gtol 1e-4 / cap 400: cosi full width
+# 8.6e-4 relative (4.3e-4 absolute), polished lp full width 9.1e-7 nats,
+# 240-294 iterations.  Bounds are ~5x those widths.  The absolute cosi
+# bound also has a first-principles ceiling: cosi's Schur-complement
+# curvature is 0.0044 nats/raw^2, so the |grad| < 1e-4 stopping set spans
+# +/-0.023 raw = +/-5e-4 in cosi, and 2e-3 absolute sits above even that.
+_ULP_COSI_ATOL = 2.0e-3  # absolute, in cosi
+_ULP_LP_ATOL = 5.0e-6  # nats
+_ULP_SEEDS = (0, 1, -1, 3)
+
+
+@pytest.fixture(scope="module")
+def kelt4_rvonly_polish_inputs():
+    """The kelt4 RV-only model, its raw start and polish.py's own compiled
+    lp+grad function -- exactly what polish_raw_starts hands _lbfgs_polish_one."""
+    import os
+
+    import yaml
+
+    from exozippy.polish import _compile_logp_grad
+
+    if not _KELT4_DIR.is_dir():
+        pytest.skip("kelt4 example not present")
+    cwd = os.getcwd()
+    os.chdir(_KELT4_DIR)
+    try:
+        with open("kelt4_rvonly.yaml") as f:
+            config = yaml.safe_load(f)
+        system = System(config)
+        system.prepare()
+        model = system.build_model()
+        raw_start = system.get_raw_start(model)
+        fn = _compile_logp_grad(model)
+    finally:
+        os.chdir(cwd)
+    assert fn is not None, "kelt4 RV-only must be on the L-BFGS path"
+    cosi = next(
+        p for p in system.get_all_parameters() if p.label == "orbit.cosi"
+    )
+    return model, raw_start, fn, cosi
+
+
+def _ulp_perturbed(fn, keys, seed):
+    """`fn` with every output multiplied by (1 + s * 2**-52), s in {-1, 0, 1}
+    a deterministic hash of (x, output component, seed); seed 0 unperturbed."""
+    import hashlib
+
+    eps = 2.0**-52
+
+    def perturbed(point):
+        vals = fn(point)
+        if seed == 0:
+            return vals
+        x = np.concatenate(
+            [np.asarray(point[k], float).reshape(-1) for k in keys]
+        )
+        flat = [np.asarray(v, float) for v in vals]
+        m = sum(v.size for v in flat)
+        h = hashlib.blake2b(
+            x.tobytes() + int(seed).to_bytes(4, "little", signed=True),
+            digest_size=32,
+        ).digest()
+        r = np.frombuffer(
+            hashlib.blake2b(h, digest_size=4 * m).digest(), dtype=np.uint32
+        )
+        s = (r % 3).astype(float) - 1.0
+        out, ofs = [], 0
+        for v in flat:
+            n = v.size
+            out.append(
+                (v.reshape(-1) * (1.0 + s[ofs : ofs + n] * eps)).reshape(
+                    v.shape
+                )
+            )
+            ofs += n
+        return out
+
+    return perturbed
+
+
+def test_ulp_perturbation_does_not_move_the_polished_start(
+    kelt4_rvonly_polish_inputs,
+):
+    """
+    Given the kelt4 RV-only model and its raw start, with the compiled
+      (lp, grad) multiplied by (1 + s*2**-52) for four seeds -- one ulp of
+      arithmetic difference per evaluation, the size of a cross-runner
+      libm/BLAS-kernel difference,
+    When each is polished by _lbfgs_polish_one under the SHIPPED constants,
+    Then every seed converges (none hits DEFAULT_POLISH_STEPS) and the four
+      polished starts agree in cosi to ~5x the measured 16-seed width and
+      in lp to ~5x its width -- i.e. the stop is a converged optimum, not
+      a first dip on the ridge (review 7.13.8).
+    """
+    from exozippy.polish import DEFAULT_POLISH_STEPS, _lbfgs_polish_one
+
+    model, raw_start, fn, cosi_par = kelt4_rvonly_polish_inputs
+    keys = list(raw_start.keys())
+    shapes = [np.shape(raw_start[k]) for k in keys]
+    sizes = [int(np.asarray(raw_start[k]).size) for k in keys]
+    assert "orbit.cosi_raw" in keys
+
+    # Act
+    cosis, lps, iters, capped = [], [], [], []
+    for seed in _ULP_SEEDS:
+        best, lp0, lp_best, _n_evals, n_iter, hit_cap = _lbfgs_polish_one(
+            raw_start,
+            _ulp_perturbed(fn, keys, seed),
+            keys,
+            shapes,
+            sizes,
+            maxiter=DEFAULT_POLISH_STEPS,
+        )
+        raw = float(np.asarray(best["orbit.cosi_raw"]).reshape(-1)[0])
+        cosis.append(float(cosi_par.element_phys_from_raw(0, raw)))
+        lps.append(lp_best)
+        iters.append(n_iter)
+        capped.append(hit_cap)
+    assert lps[0] > lp0 + 100.0, "the polish did not climb; harness is broken"
+
+    # Assert: converged, not capped
+    assert not any(capped), (
+        f"seeds {[s for s, c in zip(_ULP_SEEDS, capped) if c]} hit the "
+        f"{DEFAULT_POLISH_STEPS}-iteration cap ({iters} iterations). Under the "
+        f"shipped gtol kelt4 needs 240-294; a cap-stop is an unconverged "
+        f"start whose value depends on the arithmetic that produced it."
+    )
+    # Assert: one optimum, whatever the arithmetic
+    cosi_width = max(cosis) - min(cosis)
+    assert cosi_width <= _ULP_COSI_ATOL, (
+        f"one ulp of arithmetic moved the polished cosi by {cosi_width:.3g} "
+        f"({cosis}), more than {_ULP_COSI_ATOL}: the polish is stopping on a "
+        f"first dip of |grad| below _LBFGS_GTOL mid-climb rather than at the "
+        f"basin optimum (review 7.13.8; at gtol 0.01 this width was 4.3e-2). "
+        f"Do not widen this bound -- tighten the stop."
+    )
+    lp_width = max(lps) - min(lps)
+    assert lp_width <= _ULP_LP_ATOL, (
+        f"one ulp of arithmetic moved the polished lp by {lp_width:.3g} nats "
+        f"({lps}); at a converged optimum it moves at second order (~1e-6 "
+        f"here; at the old gtol 0.01 stop it was 0.24)."
+    )

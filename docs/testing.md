@@ -116,7 +116,8 @@ intentional change to where the sampler begins has to edit those numbers, so
 the move shows up in the diff and gets justified in the commit. Review 1.3.6
 was a wrong default start that survived months precisely because nothing in
 the suite asserted where the sampler begins. Measured over six consecutive
-runs of the same fixture on one box: the three start values were **bit-
+runs of the same fixture on one box (under the old polish stop, which is why
+the value differs from today's golden): the three start values were **bit-
 identical** every time (`planet.b.mass` 0.96736983 on all six), while the
 draw those runs produced ranged over 0.8158-1.4158 Mjup, a factor of 1.7 --
 and that is the well-behaved case, inside the old bounds.
@@ -134,62 +135,88 @@ dex/log quantity, a relative one for a linear one.
 
 *And the scatter is the optimizer, not float noise.* The value being asserted
 is POST-POLISH, and the polish is an iterative optimizer terminating on
-`|grad| < 0.01` nats/unit, so anything that perturbs the arithmetic moves the
-point where that test first passes -- five orders of magnitude above
-3.14.20's build difference. Measured across the dev box (solo AND inside the
-full `-n6` suite) and all four shipped CI combinations:
+`|grad|_inf < polish._LBFGS_GTOL` nats/unit, so ANY difference in the
+arithmetic that feeds it -- of any size -- moves the point where it stops.
+Review 7.13.8 measured what does and does not count as such a difference.
+NOT: machine load (to 28.9 on a 36-core box), BLAS thread count,
+`PYTHONHASHSEED`, a cold or per-worker pytensor compiledir, heap churn, or
+another `System` built first in the same process -- fifteen same-machine
+runs varying all of those were bit-identical over all 177 evaluations. (An
+earlier version of this section blamed "multithreaded BLAS partitioning by
+load"; the compiled objective has no BLAS op, and that story was wrong.)
+YES: a different OpenBLAS kernel inside scipy's OWN L-BFGS-B bookkeeping --
+what a different CI runner CPU picks under `DYNAMIC_ARCH`, reproducible
+locally with `OPENBLAS_CORETYPE=Haswell` -- which changes one iterate by ONE
+ULP at evaluation 4; or an equivalent but differently-fused compiled graph
+(`optimizer_excluding=fusion`), which differs at evaluation 0 by 7e-10
+relative. Either lands the polish somewhere else on the same basin.
+Cross-platform libm/compiler/SIMD differences are >= 1 ulp by construction,
+so this cannot be removed; it can only be kept from being AMPLIFIED.
 
-| run | `star.A.logmass` | `planet.b.mass` | `orbit.b.cosi` | `m sin i` | start logp |
-|---|---|---|---|---|---|
-| dev, solo | 0.08057130 | 0.96736983 | 0.50545129 | 0.83470003 | -601.1 -> 81.4 |
-| dev, `-n6` suite | 0.08054904 | 0.96234938 | 0.49730418 | 0.83491147 | -601.1 -> 81.4 |
-| CI ubuntu 3.12 | 0.08047306 | 0.96681714 | 0.50424569 | 0.83490484 | -601.1 -> 81.4 |
-| CI ubuntu 3.13 | 0.08047306 | 0.96681714 | 0.50424569 | 0.83490484 | -601.1 -> 81.4 |
-| CI ubuntu 3.14 | 0.08057639 | 0.96445481 | 0.50099724 | 0.83468634 | -601.1 -> 81.4 |
-| CI macOS 3.12 | 0.08073805 | 0.96338280 | 0.49789929 | 0.83547914 | -601.1 -> 81.4 |
-| **full width** | 2.65e-4 dex | 5.2e-3 rel | 1.6e-2 rel | 9.5e-4 rel | **0** |
+**The amplifier was the stop, and the fix is in `polish.py`, not in the
+test.** scipy's gtol test is on the CURRENT iterate, so it fires on the first
+evaluation to dip under the threshold. At the old `gtol = 0.01` that was a
+first dip mid-climb on kelt4's tc/logP ridge (Hessian condition number
+5.4e6): exactly one of 177 evaluations was under 0.01, it fired 0.507 nats
+below the basin optimum, and on that shoulder one ulp moved `cosi` by 8.5%
+and the polished logp by 0.24 nats -- more than the test's own 0.2-nat logp
+tolerance, which the six observed environments passed only by chance. The
+shipped `gtol = 1e-4` (cap 400) stops at the optimum, where the same
+perturbation moves `cosi` by 8.6e-4; the numbers are in the header of
+`tests/test_integration_kelt4.py` and on `polish._LBFGS_GTOL`.
 
-**It is not cross-machine only, and it is not even per-platform
-deterministic.** The same box disagrees with itself solo and under the full
-suite, because the polish's BLAS is multithreaded and partitions its work by
-machine LOAD. And the three ubuntu Pythons agreed to the last digit on one CI
-run, then 3.14 diverged on the next -- so "platform, not interpreter", which
-an earlier version of this section asserted, is wrong. So a golden value
-downstream of an optimizer **cannot be calibrated from repeated runs of one
-condition, however many**: seven bit-identical solo runs opened that PR and
-proved nothing about portability. All three of its red rounds came from
-skipping a step of that.
+**How to calibrate a post-optimizer golden value, then -- and the rule.**
+NEVER from repeated runs of one environment, however many, and not from a
+handful of environments either: seven bit-identical solo runs opened that PR
+and proved nothing, and the six-environment table its second version
+calibrated from (dev box solo and under `-n6`, four CI combinations) was a
+six-point SAMPLE of a distribution whose full width turned out to be 5x their
+spread. The calibration is the **ulp-perturbation harness**: run
+`polish._lbfgs_polish_one` from the fixture's raw start with the compiled
+`(lp, grad)` multiplied by `(1 + s * 2**-52)`, `s` in {-1, 0, +1} a hash of
+(x, output component, seed) -- "the same function computed by a different
+but equally correct arithmetic" -- for 16 seeds, and set each tolerance to
+~5x the full width it reports; the golden values are the unperturbed seed.
+`tests/test_polish.py::test_ulp_perturbation_does_not_move_the_polished_start`
+runs a four-seed version on every CI run, so a stop that amplifies again
+fails there rather than as an intermittent red in the integration test.
+Measured 2026-09-14 under the shipped constants:
 
-**How to calibrate one, then.** Put a temporary `warnings.warn` in the test
-reporting the values; `pytest -q` prints the warnings summary, so every CI
-platform reports its own numbers on a GREEN run and you set the tolerance
-from data instead of from an argument. Remove the probe once they have all
-reported.
+| quantity | golden | 16-seed full width | tolerance | at the old gtol 0.01 |
+|---|---|---|---|---|
+| `star.A.logmass` | 0.08052772 | 2.4e-6 dex | 2e-5 dex | 2.7e-4 dex |
+| `planet.b.mass` | 0.96091637 | 3.0e-4 rel | 2e-3 rel | 2.1e-2 rel |
+| `orbit.b.logP` | 0.47554391 | 1.1e-7 dex | 2e-5 dex | 3.1e-6 dex |
+| `orbit.b.cosi` | 0.50012485 | 8.6e-4 rel | 5e-3 rel | 8.5e-2 rel |
+| `m sin i` | 0.83210871 | 2.6e-5 rel | 2e-4 rel | 9.5e-3 rel |
+| polished logp | 81.947279 | 9.1e-7 nats | 0.2 nats (print resolution) | 0.24 nats |
+| iterations | 268 | 240-294, none of 16 capped | cap 400 | 134-150, 3 of 16 capped |
 
 **The scatter is also not uniform across parameters, and that part is physics
-rather than noise.** Ranked by how far they move over those six runs: the
-start logp (**0**, stationary), `orbit.logP` (4.1e-7 dex, pinned by the
-data), `star.logmass` (2.7e-4 dex, pinned by its Gaussian prior), `m sin i`
-(9.5e-4, what the RVs constrain), `planet.mass` (5.2e-3, which is
-`m sin i / sin i` and so inherits `cosi`), and `orbit.cosi` (1.6e-2, the flat
+rather than noise.** Ranked by the harness width: the start logp (stationary
+at the optimum), `orbit.logP` (pinned by the data), `star.logmass` (pinned by
+its Gaussian prior), `m sin i` (what the RVs constrain), `planet.mass` (which
+is `m sin i / sin i` and so inherits `cosi`), and `orbit.cosi` (the flat
 direction an RV-only fit says nothing about). One tolerance across that range
 is either vacuous at the top or red at the bottom, so give the flat direction
 its own -- and note that the hierarchy itself is informative: if `cosi` ever
 stops being the loosest row, something has started constraining the
 inclination.
 
-**Prefer a golden START LOGP to golden parameter values**, and assert both.
-logp is STATIONARY at an optimum, so optimizer scatter perturbs it only at
-second order (~1e-4 nats here, below the 0.1 nat the polish line prints),
-while a changed prior, a unit-conversion slip or a lost likelihood term moves
-it by O(1) nats. The right-hand column above is that argument confirmed
-rather than assumed: **both logp values are identical on all five platforms**
-while the parameters under them scatter by up to 4.1e-3, so the logp carries
-a 0.2-nat tolerance where the linear values need 1.5e-2 relative. The
-parameter values are the readable failure message; the logp is the
-discriminating assertion. Pin BOTH ends of the polish: the pre-polish value
-is a plain evaluation at the build start with no optimizer in it at all, so
-it carries none of that scatter.
+**Prefer a golden START LOGP to golden parameter values**, and assert both --
+but the stationarity argument holds only when the optimizer actually reaches
+the optimum. logp is STATIONARY there, so optimizer scatter perturbs it only
+at second order (9e-7 nats here, six orders below the 0.1 nat the polish line
+prints), while a changed prior, a unit-conversion slip or a lost likelihood
+term moves it by O(1) nats. On the old first-dip shoulder it was NOT
+stationary (0.24 nats of harness width against a 0.2-nat tolerance), which
+is why the perturbation test above is what makes the logp assertion the
+discriminating one. The parameter values are the readable failure message;
+the logp is the discriminating assertion. Pin BOTH ends of the polish: the
+pre-polish value is a plain evaluation at the build start with no optimizer
+in it at all, so it carries none of that scatter -- and the 7.13.8 stop
+change is the worked example: build logp unchanged at -601.1, polished logp
+81.4 -> 81.9, the half nat the first dip had been leaving on the table.
 
 **One instance of the same shape is knowingly left in place**, so a later
 reader does not think the sweep missed it: `..._posterior_in_user_units` in
@@ -210,7 +237,7 @@ if it is wanted at all; it is not what this test is for.
 parameter earns one or the other.** In `kelt4_rvonly.yaml` the RV data
 constrains `m sin i`, not the mass: there is no inclination information, so
 `cosi` is prior-dominated (the polish walks it from the params file's
-transit-derived 0.11996 to 0.50545) and `mass = m sin i / sin i` inherits
+transit-derived 0.11996 to 0.50012) and `mass = m sin i / sin i` inherits
 that. So `m sin i` is the quantity comparable to a published value and
 carries the LITERATURE check, while `planet.mass` is still perfectly
 deterministic given the same code and priors and carries a GOLDEN-VALUE
