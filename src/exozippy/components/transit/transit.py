@@ -1516,16 +1516,19 @@ class Transit(Instrument):
             getattr(self, "_lc_matrix_node", None), system
         )
 
-        # The baseline and the fitted detrend model enter the panels in
-        # numpy (_point_value / detrend_at_data), not through the symbolic
-        # nodes, so the graph walk cannot see them -- without these deps a
-        # baseline or detrend-coefficient slider would never refresh these
-        # charts in the GUI.
+        # The baseline, the fitted detrend model and the GP conditional
+        # mean enter the panels in numpy (_point_value / detrend_at_data /
+        # gp_mean_at_data), not through the symbolic nodes, so the graph
+        # walk cannot see them -- without these deps a baseline, detrend
+        # coefficient or GP hyperparameter slider would never refresh these
+        # charts in the GUI (review 1.12.9 for the GP labels).
         baseline_label = getattr(
             getattr(self, "baseline", None), "label", None
         )
-        numpy_deps = ([baseline_label] if baseline_label else []) + (
-            self.detrend_dep_labels()
+        numpy_deps = (
+            ([baseline_label] if baseline_label else [])
+            + self.detrend_dep_labels()
+            + self.gp_dep_labels()
         )
         full_deps = full_deps + [
             lbl for lbl in numpy_deps if lbl not in full_deps

@@ -784,8 +784,13 @@ class RVInstrument(Instrument):
             )
             # One physical+GP curve per GP instrument (see
             # _eval_unphased_gp_models). No symbolic node: the GP conditional
-            # mean is not part of the model graph, so the GUI cannot re-render
-            # these on a slider move -- it must ask for a fresh point.
+            # mean is not part of the model graph, so the GUI re-renders
+            # these by asking for a fresh point on a slider move -- which its
+            # eval path does, PROVIDED the GP hyperparameters are declared in
+            # param_deps (gp_dep_labels, below).  A previous version of this
+            # comment said the GUI "cannot re-render these on a slider move";
+            # it could all along, and the missing deps were the only blocker
+            # (review 1.12.9).
             for i, t_gp, y_gp in self._eval_unphased_gp_models(system, point):
                 traces.append(
                     Trace(
@@ -824,10 +829,14 @@ class RVInstrument(Instrument):
         # the point too (dynamic_data) and those sliders must reach this
         # component through param_deps -- both are applied in numpy, not
         # through the symbolic model node, so the graph walk alone would miss
-        # them.
+        # them.  The GP hyperparameters are the same case (the model+GP
+        # curves above and the phased cleaning both use the compiled
+        # celerite2 conditional mean), see Instrument.gp_dep_labels.
         gamma_label = getattr(getattr(self, "gamma", None), "label", None)
-        numpy_deps = ([gamma_label] if gamma_label else []) + (
-            self.detrend_dep_labels()
+        numpy_deps = (
+            ([gamma_label] if gamma_label else [])
+            + self.detrend_dep_labels()
+            + self.gp_dep_labels()
         )
         if point is not None:
             model_deps = model_deps + [

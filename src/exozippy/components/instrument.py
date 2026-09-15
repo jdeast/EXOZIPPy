@@ -1867,6 +1867,32 @@ class Instrument(TimeSystem, Component):
         label = getattr(getattr(self, "detrend_coeffs", None), "label", None)
         return [label] if label else []
 
+    def gp_dep_labels(self):
+        """``param_deps`` entries for this instrument's GP hyperparameters.
+
+        The GP conditional mean reaches the panels in NUMPY too
+        (``gp_mean_at_data`` / ``gp_mean_on_grid`` are compiled celerite2
+        evaluators, not nodes of the plotted model trace), so the graph walk
+        cannot see it and, until 2026-09, no ``gp_*`` label ever reached
+        ``param_deps``: a GP hyperparameter slider in the GUI never
+        re-rendered a chart (review 1.12.9).  The eval path does ask for a
+        fresh point on every slider move -- ``param_deps`` was the only
+        blocker.  Same label convention as ``detrend_dep_labels``: the built
+        Parameter's own ``label``, for the terms actually on somewhere.
+        ``[]`` without a GP, so no chart without one changes.
+        """
+        if not getattr(self, "has_gp", False):
+            return []
+        labels = []
+        for kind in gp_support.GP_TERMS:
+            if not self._gp_elements(kind):
+                continue
+            for name in gp_support.GP_TERM_PARAMS[kind]:
+                label = getattr(getattr(self, name, None), "label", None)
+                if label:
+                    labels.append(label)
+        return labels
+
     # ------------------------------------------------------------------
     # Shared noise machinery
     # ------------------------------------------------------------------
