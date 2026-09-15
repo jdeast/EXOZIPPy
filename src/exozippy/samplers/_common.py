@@ -933,6 +933,142 @@ def start_spread_ratios(starts, scales):
     return ratios
 
 
+#: Absolute start dispersion at the T=1 rung, in probe-scale units (review
+#: 8.4.7).  3.0 is not a new number: ``min(sqrt(500/D), 3)`` has been the
+#: rule since the EXOFASTv2 port, and its CAP BINDS for every model with
+#: <= 55 parameters -- essentially every PTDE run this repo has made.
+#: Spelling it absolutely says what actually happens, instead of hiding it
+#: behind a dimension term that is dead in practice.  The one place the two
+#: spellings differ is D > 500 (where sqrt(500/D) drops below 1), and
+#: ``resolve_start_dispersion`` says so out loud rather than letting it be
+#: discovered.
+DEFAULT_T1_DISPERSION = 3.0
+
+
+#: Legacy rule, kept only so the difference can be reported (and so
+#: ``dispersion=None`` still reproduces it bit-for-bit).
+def legacy_dispersion(n_params):
+    """The pre-8.4.7 rule: min(sqrt(500/D), 3)."""
+    return float(min(np.sqrt(500.0 / max(int(n_params), 1)), 3.0))
+
+
+def resolve_start_dispersion(spec, temperatures, n_params, log=None):
+    """Per-rung ABSOLUTE start dispersion, in probe-scale units.
+
+    JDE's ruling on 8.4.7: per-TEMPERATURE, and absolute rather than a
+    multiplier -- "defaulting to 3 for the t=1 rung (so absolute, not
+    multiplier, but recreating the current behavior) and then scaling with
+    temperature."
+
+    ``spec`` accepts:
+
+    * ``None`` / ``'auto'`` -- ``DEFAULT_T1_DISPERSION * sqrt(T)`` per rung.
+      The sqrt law is not a taste: a rung at temperature ``T`` targets a
+      distribution ~``sqrt(T)`` wider for a Gaussian, so this is the choice
+      that keeps each rung's start population matched to the width it is
+      being dispersed against.  T=1 therefore lands on exactly 3.0.
+    * a NUMBER -- that dispersion at EVERY rung.  This is the control arm,
+      and it is what the sampler did before 8.4.7: hot rungs were verbatim
+      copies of the T=1 population, i.e. T=1's dispersion everywhere.
+    * a LIST -- one value per rung, explicitly.  Length must match the
+      ladder, because a short list silently leaves hot rungs at a value
+      nobody chose.
+
+    WHAT CHANGES vs. before: only the HOT rungs, and only under 'auto'.
+    T=1 keeps 3.0, which equals the old ``min(sqrt(500/D), 3)`` for every
+    model with D <= 55.  For D > 500 the old rule fell below 1.0 and this
+    does not, so those models start wider than they used to; that is
+    reported at WARNING rather than left to be discovered.
+
+    Returns ``(dispersions, description)``.
+    """
+    temps = np.asarray(temperatures, dtype=float)
+    if temps.ndim == 0:
+        temps = temps.reshape(1)
+    n_rungs = int(temps.size)
+    legacy = legacy_dispersion(n_params)
+
+    if spec is None or (isinstance(spec, str) and spec.lower() == "auto"):
+        base = DEFAULT_T1_DISPERSION
+        disp = base * np.sqrt(temps)
+        desc = f"auto ({base:g}*sqrt(T))"
+        if log is not None and not np.isclose(legacy, base):
+            log.warning(
+                f"PTDE start dispersion: T=1 is now {base:g} (absolute, "
+                f"review 8.4.7) where the previous rule min(sqrt(500/D), 3) "
+                f"gave {legacy:.3f} for D={int(n_params)}. This model starts "
+                f"{base / legacy:.2f}x wider at T=1 than it used to; set "
+                f"`start_dispersion: {legacy:.3f}` to keep the old value."
+            )
+    elif isinstance(spec, (list, tuple, np.ndarray)):
+        disp = np.asarray(spec, dtype=float)
+        if disp.size != n_rungs:
+            raise ValueError(
+                f"start_dispersion has {disp.size} entries but the ladder "
+                f"has {n_rungs} rungs; it is consumed positionally, so a "
+                f"short list would leave hot rungs at a value nobody chose. "
+                f"Give one value per rung, a single number for all rungs, "
+                f"or omit the key for auto (3*sqrt(T))."
+            )
+        desc = "explicit per-rung list"
+    else:
+        try:
+            val = float(spec)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"start_dispersion must be a number, a list with one entry "
+                f"per rung, or 'auto'; got {spec!r}."
+            ) from None
+        disp = np.full(n_rungs, val, dtype=float)
+        desc = f"flat {val:g} at every rung"
+
+    if not np.all(np.isfinite(disp)) or np.any(disp <= 0):
+        raise ValueError(
+            f"start_dispersion must be finite and positive at every rung; "
+            f"resolved to {np.array2string(disp, precision=3)}. A zero would "
+            f"start every chain of that rung at the same point, which is the "
+            f"one thing Rhat cannot diagnose (review 2.4.5)."
+        )
+    return disp, desc
+
+
+def report_rung_dispersion(populations, scales, temperatures, logp_fn, log):
+    """Per-rung start spread and start logp -- 8.4.7's observability half.
+
+    The knob is useless without this.  Before 8.4.7 the ONLY witness to the
+    start population was the single "PTDE init:" line, measured on T=1, and
+    the hot rungs were never examined at all -- ptde.py replicated T=1 to
+    every rung under the comment "hotter chains spread quickly during tune",
+    an assumption the code stated and never verified.  Reporting spread AND
+    logp per rung is what makes it checkable, and is what lets 7.4.5's "all
+    rungs seed off one pool" question be answered.
+    """
+    for k, (starts, T) in enumerate(zip(populations, temperatures)):
+        lps = np.array([float(logp_fn(s)) for s in starts], dtype=float)
+        finite = lps[np.isfinite(lps)]
+        spread_txt = ""
+        if scales is not None and len(starts) > 1:
+            ratios = start_spread_ratios(starts, scales)
+            if ratios:
+                med = float(
+                    np.median(
+                        np.concatenate([np.ravel(v) for v in ratios.values()])
+                    )
+                )
+                spread_txt = f", median spread {med:.2f} probe-sigma"
+        if finite.size:
+            log.info(
+                f"PTDE rung {k} (T={T:.3g}): start lp median "
+                f"{np.median(finite):.1f} [min {finite.min():.1f}, max "
+                f"{finite.max():.1f}]{spread_txt}"
+            )
+        else:
+            log.warning(
+                f"PTDE rung {k} (T={T:.3g}): NO finite start logp in "
+                f"{len(starts)} chains{spread_txt}"
+            )
+
+
 def warn_if_starts_underdispersed(starts, scales, label, log):
     """Warn when the chains start narrower than the posterior they sample.
 
@@ -1261,6 +1397,8 @@ def _make_starts(
     system=None,
     raw_scales=None,
     overdisperse=None,
+    dispersion=None,
+    label="PTDE init",
 ):
     """Generate n_chains starting points near one or more seeds (P4).
 
@@ -1346,7 +1484,15 @@ def _make_starts(
         # per-parameter jitter scale is reused around every seed.
         map_lp, scales = _probe_scales(raw_starts[0], logp_fn)
     n_params = sum(v.size for v in raw_starts[0].values())
-    factor = min(np.sqrt(500.0 / max(n_params, 1)), 3.0)
+    # ``dispersion`` is the ABSOLUTE per-rung value from
+    # resolve_start_dispersion (review 8.4.7).  None keeps the pre-8.4.7
+    # rule verbatim, so every caller that does not pass it -- and
+    # de_metropolis, which has no ladder at all -- is bit-identical.
+    factor = (
+        legacy_dispersion(n_params)
+        if dispersion is None
+        else float(dispersion)
+    )
     max_iter = 1000
 
     _jitter = (
@@ -1355,7 +1501,7 @@ def _make_starts(
         else None
     )
     logger.info(
-        f"PTDE init: MAP lp={map_lp:.1f}, n_params={n_params}, factor={factor:.2f}, "
+        f"{label}: MAP lp={map_lp:.1f}, n_params={n_params}, factor={factor:.2f}, "
         f"jitter={'physical (truncated)' if _jitter else 'raw (fallback)'}"
         + (
             f", {K} seeds (round-robin over {n_chains} chains)"
@@ -1447,7 +1593,7 @@ def _make_starts(
             )
     # Over-dispersion is what makes Rhat mean anything; measure it once, on
     # the population that will actually run (review 2.4.5).
-    warn_if_starts_underdispersed(starts, scales, "PTDE init", logger)
+    warn_if_starts_underdispersed(starts, scales, label, logger)
     return starts, chain_seed_index
 
 
@@ -1463,6 +1609,8 @@ def resolve_start_population(
     seed_indices=None,
     raw_scales=None,
     overdisperse=None,
+    dispersion=None,
+    label="PTDE init",
 ):
     """Resolve the T=1 chain starts: explicit initvals, or multi-seed
     round-robin via _make_starts (P4).
@@ -1508,7 +1656,144 @@ def resolve_start_population(
         system=system,
         raw_scales=raw_scales,
         overdisperse=overdisperse,
+        dispersion=dispersion,
+        label=label,
     )
+
+
+def build_rung_populations(
+    model,
+    system,
+    n_chains,
+    logp_fn,
+    rng,
+    raw_start,
+    temperatures,
+    dispersion_spec=None,
+    *,
+    initvals=None,
+    raw_starts=None,
+    seed_indices=None,
+    raw_scales=None,
+    overdisperse=None,
+    n_params=None,
+    log=logger,
+):
+    """One start population PER RUNG, each at its own dispersion (8.4.7).
+
+    Before this, both PTDE variants resolved a single T=1 population and
+    REPLICATED it verbatim to every rung ("hotter chains spread quickly
+    during tune") -- so there was no per-rung dispersion to set and nothing
+    per-rung to check.  This generates each rung's population at the
+    dispersion ``resolve_start_dispersion`` gives it, and reports spread and
+    start logp per rung.
+
+    Rung 0 IS the T=1 population and is returned separately, because it is
+    what the ensemble start plots and ``chain_seed_index`` describe.  It is
+    drawn FIRST from ``rng``, so a run whose rung-0 dispersion matches the
+    old rule draws exactly the numbers it used to.
+
+    ``initvals`` is one explicit start per chain and has never been
+    scattered, so it cannot be dispersed per rung: every rung gets the same
+    list.  An EXPLICIT non-flat request alongside it is refused rather than
+    silently ignored; the non-flat DEFAULT is not, since raising on that
+    would break every existing initvals run.
+
+    Returns ``(t1_starts, chain_seed_index, populations, dispersions, desc)``
+    where ``populations`` is a list of per-rung start lists.
+    """
+    temps = np.asarray(temperatures, dtype=float)
+    if temps.ndim == 0:
+        temps = temps.reshape(1)
+    n_rungs = int(temps.size)
+
+    # Resolve the seeds FIRST: every rung disperses around the same seeds,
+    # and n_params is read off them rather than guessed from raw_start
+    # (which may be a bare dict or a list depending on the caller).
+    if raw_starts is None and initvals is None:
+        if hasattr(system, "get_raw_starts"):
+            raw_starts, seed_indices = system.get_raw_starts(model)
+        else:
+            raw_starts, seed_indices = [raw_start], [0]
+    if n_params is None:
+        ref = raw_starts[0] if raw_starts else raw_start
+        n_params = sum(int(np.asarray(v).size) for v in ref.values())
+
+    dispersions, desc = resolve_start_dispersion(
+        dispersion_spec, temps, n_params, log=log
+    )
+
+    if initvals is not None:
+        # Only an EXPLICIT non-flat request is a contradiction.  The DEFAULT
+        # is non-flat (3*sqrt(T)), and raising on it would break every
+        # existing initvals run -- which is not a ruling anybody made.
+        asked_explicitly = dispersion_spec is not None and not (
+            isinstance(dispersion_spec, str)
+            and dispersion_spec.lower() == "auto"
+        )
+        if asked_explicitly and not np.allclose(dispersions, dispersions[0]):
+            raise ValueError(
+                "start_dispersion asks for different dispersion per rung, but "
+                "`initvals` supplies one explicit start per chain and has "
+                "never been scattered -- there is nothing to disperse. Drop "
+                "one of the two."
+            )
+        t1_starts, chain_seed_index = resolve_start_population(
+            model,
+            system,
+            n_chains,
+            logp_fn,
+            rng,
+            raw_start,
+            initvals=initvals,
+            raw_starts=raw_starts,
+            seed_indices=seed_indices,
+            raw_scales=raw_scales,
+            overdisperse=overdisperse,
+        )
+        return (
+            t1_starts,
+            chain_seed_index,
+            [t1_starts for _ in range(n_rungs)],
+            dispersions,
+            desc + " (initvals: one start per chain, replicated)",
+        )
+
+    log.info(
+        f"PTDE start dispersion: {desc}, {n_rungs} rung(s), "
+        f"T=1 {dispersions[0]:.3g} -> T={temps[-1]:.3g} {dispersions[-1]:.3g} "
+        f"(probe-scale units)"
+    )
+
+    populations = []
+    for k in range(n_rungs):
+        starts, idx = _make_starts(
+            n_chains,
+            raw_starts,
+            logp_fn,
+            rng,
+            seed_indices,
+            system=system,
+            raw_scales=raw_scales,
+            overdisperse=overdisperse,
+            dispersion=float(dispersions[k]),
+            label="PTDE init" if k == 0 else f"PTDE init rung {k}",
+        )
+        populations.append(starts)
+        if k == 0:
+            t1_starts, chain_seed_index = starts, idx
+
+    scales_for_report = None
+    if raw_scales is not None:
+        scales_for_report = {
+            k: np.asarray(
+                raw_scales.get(k, np.ones_like(np.asarray(v, dtype=float))),
+                dtype=float,
+            ).reshape(np.shape(v))
+            for k, v in raw_starts[0].items()
+        }
+    report_rung_dispersion(populations, scales_for_report, temps, logp_fn, log)
+    return t1_starts, chain_seed_index, populations, dispersions, desc
 
 
 def plot_start_ensemble(

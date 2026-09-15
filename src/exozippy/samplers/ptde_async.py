@@ -119,6 +119,7 @@ def ptde_async_sample(
     max_rhat=1.01,
     maxtime=None,
     eval_timeout=None,
+    start_dispersion=None,
     lp_plausibility_ceiling=None,
     collect_rung_timing=False,
     progress_callback=None,
@@ -275,17 +276,23 @@ def ptde_async_sample(
         f"PTDE-async: {n_params} params, {n_chains} chains/rung, gamma={gamma:.4f}"
     )
 
-    t1_starts, chain_seed_index = _common.resolve_start_population(
-        model,
-        system,
-        n_chains,
-        logp_fn,
-        rng,
-        raw_start,
-        initvals=initvals,
-        raw_starts=raw_starts,
-        seed_indices=seed_indices,
-        raw_scales=raw_scales,
+    t1_starts, chain_seed_index, rung_starts, _dispersions, _disp_desc = (
+        _common.build_rung_populations(
+            model,
+            system,
+            n_chains,
+            logp_fn,
+            rng,
+            raw_start,
+            temperatures,
+            start_dispersion,
+            initvals=initvals,
+            raw_starts=raw_starts,
+            seed_indices=seed_indices,
+            raw_scales=raw_scales,
+            n_params=n_params,
+            log=logger,
+        )
     )
 
     _common.plot_start_ensemble(
@@ -304,10 +311,12 @@ def ptde_async_sample(
     # list of dicts, so the DE move is three vector operations instead of a
     # Python loop over the free RVs; _common.RawLayout owns the packing and
     # the proof that it is bit-identical (review 6.4.2).
+    # Per-rung populations, each dispersed at its own temperature (8.4.7);
+    # this used to replicate T=1 to every rung.
     layout = _common.RawLayout(raw_start, model_keys)
     current_state = [
-        layout.pack_many([t1_starts[i % n_chains] for i in range(n_chains)])
-        for _ in range(n_temps)
+        layout.pack_many([pop[i % n_chains] for i in range(n_chains)])
+        for pop in rung_starts
     ]
     current_lp = [[None] * n_chains for _ in range(n_temps)]
     iter_count = [[0] * n_chains for _ in range(n_temps)]
