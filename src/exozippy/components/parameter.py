@@ -945,6 +945,14 @@ class Parameter:
     # LaTeX/table metadata
     latex: Optional[str] = ""
     description: Optional[str] = ""
+    # The component's own sentence about what a value against this
+    # parameter's bound MEANS and what to do about it, appended to the
+    # near-bound warnings (the post-polish wall warning in
+    # recenter_on_start, and diagnostics.warn_posterior_near_bounds at
+    # wrap-up).  Declared in defaults.yaml, never by a user: the generic
+    # half of those warnings can only say "revisit the bound", and for a
+    # nuisance scale like err_scale that is the wrong advice (review 8.2.2).
+    near_bound_remedy: Optional[str] = None
     latex_prefix: str = "ez"
 
     # Runtime fields
@@ -3442,7 +3450,7 @@ class Parameter:
                         f"rather than nudged inward, so raw = 0 still means "
                         f"the value the polish found. A start pinned on a "
                         f"wall usually means the bound, not the start, is "
-                        f"the thing to revisit."
+                        f"the thing to revisit." + self.remedy_suffix()
                     )
 
         if not moved:
@@ -3849,6 +3857,16 @@ class Parameter:
                 f"{n_val} values -- cannot convert."
             )
         return f
+
+    def remedy_suffix(self):
+        """The component's near-bound sentence, ready to append to a warning.
+
+        Empty when the component declared none, so a caller can always
+        concatenate it.  One place, so the start-time and posterior-time
+        warnings cannot phrase the same remedy two ways.
+        """
+        remedy = (self.near_bound_remedy or "").strip()
+        return f"  {remedy}" if remedy else ""
 
     def to_internal(self, val=None, index=None):
         """USER units -> INTERNAL units.

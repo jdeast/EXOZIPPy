@@ -153,6 +153,21 @@ def find_seed(curves, verbose=True):
     )
     t_0, u_0, t_E = res.x[0], float(np.exp(res.x[1])), float(np.exp(res.x[2]))
     chi2 = float(res.fun)
+    # The u_0 -> 0, t_E -> inf degeneracy that produced DC2018-001's and
+    # 226's seeds (t_E = 1e7 and 4e8 days): the thresholds and the reasoning
+    # are the component's (peakfind.refinement_is_degenerate), imported so
+    # the two finders cannot disagree about what a non-seed looks like.
+    from exozippy.components.mulensing.peakfind import refinement_is_degenerate
+
+    if refinement_is_degenerate(u_0, t_E, tmax - tmin):
+        if verbose:
+            print(
+                "  refined  : DEGENERATE (u_0=%.3g t_E=%.3g d over a %.1f d "
+                "span) -- keeping the grid seed" % (u_0, t_E, tmax - tmin),
+                flush=True,
+            )
+        t_0, u_0, t_E, chi2 = t0g, u0g, tEg, best[0]
+        res.success = False
     if verbose:
         print(
             "  refined  : t_0=%.4f u_0=%.4f t_E=%.3f  chi2=%.1f (%s)"

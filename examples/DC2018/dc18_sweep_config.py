@@ -223,6 +223,13 @@ def build(event, outdir, draws, tune, cores, t_max):
         med = median_flux_err(files[b])
         params["%s.zeropoint" % inst] = {"mu": 22.0, "sigma": 0.02}
         params["%s.out_scale" % inst] = {"upper": 10.0 * med, "initval": med}
+        # These are SIMULATED curves with honest error bars, so err_scale is
+        # a check, not a fit: 0.5-2 (JDE 2026-09-15, review 8.2.2), tighter
+        # than defaults.yaml's 0.01-100.  On 226 the point-lens basin had
+        # inflated both bands 300-460x and turned the anomaly into noise;
+        # with this bound the fit has to explain the data or sit against
+        # the wall where the near-bound warning names the real remedy.
+        params["%s.err_scale" % inst] = {"lower": 0.5, "upper": 2.0}
 
     io.open(cfg["parameter_file"], "w", encoding="utf-8").write(
         yaml.safe_dump(params, sort_keys=True, default_flow_style=False)
