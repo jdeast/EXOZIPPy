@@ -264,7 +264,15 @@ def _point(raw_dict):
 # GOOD_RAW (+2.713 nats).  Another CHANGE OF MEASURE -- the model has one fewer
 # dimension -- and not a change of fit: nothing in the light-curve sector moved,
 # which is why the chi2/N check below is unchanged at the same point.
-GOOD_EXPECTED_LP = 3401.6002
+#
+# 3401.6002 -> 3410.7850 when mulensinstrument.err_scale's bounds moved from
+# U(1e-6, 1e6) to U(0.01, 100) (review 8.2.2, PR after #285).  The logit-
+# uniform prior's term is log(q(1-q)) with q = (v - lower)/(upper - lower),
+# so at the same physical err_scale a narrower interval puts q nearer the
+# middle and the term rises: +9.185 nats over the two instruments at
+# GOOD_RAW.  A CHANGE OF PRIOR, not of fit -- the light-curve sector is
+# untouched, and the chi2/N check below is unchanged at the same point.
+GOOD_EXPECTED_LP = 3410.7850
 
 
 def test_good_draw_logp_matches_deterministic_build(dc2018_128_logp):

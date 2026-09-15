@@ -83,7 +83,7 @@
   "POT:logit_uniform_prior.lens.log_s": -1.5457070750471322,
   "POT:logit_uniform_prior.lens.xalpha": -1.3863942638752946,
   "POT:logit_uniform_prior.lens.yalpha": -1.3862944633546057,
-  "POT:logit_uniform_prior.mulensinstrument.err_scale": -82.89307534777964,
+  "POT:logit_uniform_prior.mulensinstrument.err_scale": -27.750425086166562,
   "POT:logit_uniform_prior.mulensinstrument.log_f_total": -12.449564877654396,
   "POT:logit_uniform_prior.mulensinstrument.q_source": -18.283461039633497,
   "POT:logit_uniform_prior.planet.log_q": -1.391136902783634,
@@ -146,5 +146,5 @@
   "RV:star.pm_ra_raw": -1.8378770664093453,
   "RV:star.rv_raw": -1.8378770664093453
  },
- "total_logp": 26679.397331821907
+ "total_logp": 26734.53998208352
 }
