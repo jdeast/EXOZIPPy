@@ -429,3 +429,340 @@ def test_the_recorded_source_says_where_the_weights_came_from(tmp_path):
 
     # Assert
     assert json.loads(out.read_text())["_generated_from"] == note
+
+
+# ---------------------------------------------------------------------------
+# The loadfile floor, the split file, and the drift-prevention loop
+# ---------------------------------------------------------------------------
+
+_GEN_NAME = "_gen_durations"
+if _GEN_NAME in sys.modules:
+    gen_mod = sys.modules[_GEN_NAME]
+else:
+    _GEN_SPEC = importlib.util.spec_from_file_location(
+        _GEN_NAME, _REPO_ROOT / "scripts" / "gen_durations.py"
+    )
+    gen_mod = importlib.util.module_from_spec(_GEN_SPEC)
+    sys.modules[_GEN_NAME] = gen_mod
+    _GEN_SPEC.loader.exec_module(gen_mod)
+
+
+@pytest.mark.parametrize("total", [3, 4])
+def test_duration_aware_packing_partitions_the_real_tree_exactly(total):
+    """Given this repository's tests/ and its shipped durations file,
+    When the files are PACKED (the CI path, not round-robin) 3 and 4 ways,
+    Then every file lands in exactly one shard.
+
+    3 and 4 because those are the two shard counts CI runs today (macOS and
+    ubuntu). The round-robin partition is pinned above; this is the one the
+    matrix actually uses, against the real tree, so a real file the packer
+    somehow mishandles is caught here and not by a green shard."""
+    # Arrange
+    tests_dir = _REPO_ROOT / "tests"
+    files = shard_mod.discover_test_files(tests_dir)
+    durations = shard_mod.load_durations(tests_dir)
+    assert durations, "tests/durations.json is missing or unreadable"
+
+    # Act
+    groups = shard_mod.pack(files, total, shard_mod.weigh(files, durations))
+
+    # Assert
+    union = [f for g in groups for f in g]
+    assert sorted(union) == files
+    assert len(union) == len(set(union)), "a file landed in two shards"
+    assert all(groups), "an empty shard would be a job that runs nothing"
+
+
+def test_the_mulens_acceptance_gate_is_two_weighted_files():
+    """Given the test tree and the durations file,
+    When the mulens acceptance files are looked up,
+    Then both halves are discovered, both carry a recorded weight, and the
+    single file they replaced is gone.
+
+    The split exists because --dist loadfile pins a file to one worker and
+    the single 873 s file set the shard floor (2026-09-14). Folding it back
+    together would fail nothing else; the weights matter because a half that
+    is absent from the map is charged the median, which is precisely how the
+    original was mis-packed."""
+    # Arrange
+    tests_dir = _REPO_ROOT / "tests"
+    names = {Path(f).name for f in shard_mod.discover_test_files(tests_dir)}
+    durations = shard_mod.load_durations(tests_dir)
+
+    # Assert
+    for half in ("test_mulens_acceptance_a.py", "test_mulens_acceptance_b.py"):
+        assert half in names, f"{half} is not collected"
+        assert half in durations, f"{half} has no recorded weight"
+        assert durations[half] > 0
+    assert "test_mulens_acceptance.py" not in names
+    assert "test_mulens_acceptance.py" not in durations
+
+
+def test_the_generator_keeps_tracked_examples_and_drops_only_named_ones():
+    """Given transcript rows parametrized over an example directory,
+    When they are parsed with and without that example named local-only,
+    Then the default keeps every row and the exclusion drops exactly them.
+
+    The regression: a hardcoded ("ob09020",) outlived the example being
+    untracked, and the generator dropped 316 s that CI was paying on every
+    run. The default must therefore be "exclude nothing", with the exclusion
+    an explicit, derived input -- and matched inside the parametrize brackets
+    only, so a test whose NAME mentions an example is not swept up."""
+    # Arrange -- the shapes CI actually emits for ob09020.
+    transcript = (
+        "141.15s call     tests/test_mulens_acceptance_a.py::"
+        "test_the_model_still_matches_its_recorded_decomposition[ob09020]\n"
+        "35.00s call     tests/test_examples_prepare.py::"
+        "test_shipped_example_prepares[ob09020/ob09020.yaml]\n"
+        "2.00s call     tests/test_examples_prepare.py::"
+        "test_shipped_example_prepares[kelt4/kelt4.yaml]\n"
+        "1.00s call     tests/test_ob09020_helpers.py::test_name_mentions_it\n"
+    )
+
+    # Act
+    kept, skipped = gen_mod.parse(transcript)
+    dropped, excluded = gen_mod.parse(transcript, local_only=("ob09020",))
+
+    # Assert -- nothing excluded by default...
+    assert skipped == {}
+    assert kept["tests/test_mulens_acceptance_a.py"] == 141.15
+    assert kept["tests/test_examples_prepare.py"] == 37.0
+    # ...and the named exclusion takes exactly the parametrized rows.
+    assert "tests/test_mulens_acceptance_a.py" not in dropped
+    assert dropped["tests/test_examples_prepare.py"] == 2.0
+    assert excluded == {
+        "tests/test_mulens_acceptance_a.py": 141.15,
+        "tests/test_examples_prepare.py": 35.0,
+    }
+    # A test whose function name carries the tag is not a parametrized case
+    # of that example and stays counted.
+    assert dropped["tests/test_ob09020_helpers.py"] == 1.0
+
+
+def test_local_only_examples_are_the_untracked_example_dirs(tmp_path):
+    """Given a repository with one tracked and one untracked example,
+    When the local-only set is derived,
+    Then it names the untracked one only -- and nothing when there is no
+    examples/ directory at all.
+
+    Derived from git rather than written down, because the written-down
+    version went stale the moment the example was committed."""
+    # Arrange -- a throwaway repository, not this one: the real tree's
+    # untracked examples are whatever the developer happens to have.
+    repo = tmp_path / "repo"
+    (repo / "examples" / "tracked").mkdir(parents=True)
+    (repo / "examples" / "tracked" / "t.yaml").write_text("a: 1\n")
+    (repo / "examples" / "untracked").mkdir()
+    (repo / "examples" / "untracked" / "u.yaml").write_text("b: 2\n")
+    (repo / "examples" / "loose_file.txt").write_text("not a dir\n")
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+        "HOME": str(tmp_path),
+    }
+    for cmd in (
+        ["git", "init", "-q"],
+        ["git", "add", "examples/tracked"],
+        ["git", "commit", "-q", "-m", "tracked example"],
+    ):
+        subprocess.run(cmd, cwd=repo, check=True, env=env, timeout=60)
+
+    # Act / Assert
+    assert gen_mod.local_only_examples(repo) == ("untracked",)
+    assert gen_mod.local_only_examples(tmp_path / "nowhere") == ()
+
+
+def test_measured_age_is_counted_from_the_measurement_date():
+    """Given a durations payload with a _measured_on stamp,
+    When its age is asked for,
+    Then it is the days since that stamp -- and None when there is none.
+
+    The stamp is the transcript's date, so this is the age of the
+    MEASUREMENT; the point of reporting it is judging staleness."""
+    import datetime
+
+    today = datetime.date(2026, 9, 14)
+    assert (
+        shard_mod.measured_age_days({"_measured_on": "2026-08-25"}, today)
+        == 20
+    )
+    assert shard_mod.measured_age_days({}, today) is None
+    assert shard_mod.measured_age_days({"_measured_on": "soon"}, today) is None
+
+
+def test_verify_writes_the_job_summary_and_annotates_from_shard_one(
+    tmp_path, monkeypatch, capsys
+):
+    """Given a tests dir with a file the durations map does not know,
+    When --verify runs with GITHUB_STEP_SUMMARY set,
+    Then the summary file names the absent file and the age, the ::warning::
+    annotation is emitted from shard 1 and NOT from shard 2, and the file
+    list is still printed.
+
+    This is the loud half of drift prevention. A warning line in a log
+    nobody opens is how 20 days of staleness went unnoticed; the summary
+    page and the annotation are where people actually look. From shard 1
+    only so a run carries one annotation per os+python leg, not one per
+    job."""
+    # Arrange
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    for name in ("test_a.py", "test_b.py", "test_new.py"):
+        (tests_dir / name).touch()
+    (tests_dir / "durations.json").write_text(
+        json.dumps(
+            {
+                "_measured_on": "2026-01-01",
+                "_generated_from": "CI run 1",
+                "durations": {"test_a.py": 10.0, "test_b.py": 4.0},
+            }
+        )
+    )
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+
+    # Act -- shard 1
+    rc = shard_mod.main(
+        [
+            "--shard",
+            "1",
+            "--of",
+            "2",
+            "--verify",
+            "--tests-dir",
+            str(tests_dir),
+        ]
+    )
+    out1 = capsys.readouterr()
+
+    # Assert
+    assert rc == 0
+    assert "::warning title=Stale shard durations::" in out1.out
+    assert "1 of 3 test files" in out1.err
+    text = summary.read_text()
+    assert "test_new.py" in text, text
+    assert "absent" in text
+    assert "measured on 2026-01-01" in text
+    assert "partition cleanly into 2 shards" in out1.err
+    # The file list itself is the LAST stdout line, untouched by the report.
+    assert out1.out.strip().splitlines()[-1].endswith("test_a.py")
+
+    # Act -- shard 2: same warning on stderr, no annotation.
+    summary.unlink()
+    rc = shard_mod.main(
+        [
+            "--shard",
+            "2",
+            "--of",
+            "2",
+            "--verify",
+            "--tests-dir",
+            str(tests_dir),
+        ]
+    )
+    out2 = capsys.readouterr()
+    assert rc == 0
+    assert "::warning" not in out2.out
+    assert "WARNING" in out2.err
+    assert summary.exists(), "the summary is written from every shard"
+
+
+def test_without_the_summary_variable_nothing_is_written(
+    tmp_path, monkeypatch
+):
+    """Given no GITHUB_STEP_SUMMARY in the environment,
+    When the summary writer is called,
+    Then it reports that it wrote nothing and touches no file.
+
+    Off CI the variable is unset; a developer's shell must not grow a
+    stray file."""
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert shard_mod.write_step_summary("t", ["x"]) is False
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_balance_json_prices_the_stale_packing_by_the_new_weights(
+    tmp_path, capsys
+):
+    """Given an old and a new durations file over the same four test files,
+    When --balance-json --compare-to is asked for,
+    Then the stale packing is the OLD file's partition costed at the NEW
+    weights, and the current packing is the new file's own.
+
+    This is the number the refresh workflow decides on. Priced any other way
+    -- old packing at old weights -- a stale file always looks balanced,
+    because it balanced the numbers it believed."""
+    # Arrange -- equal old weights put {a, c} and {b, d} together; the new
+    # measurement says a and c are the heavy ones, so that packing is bad.
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    for name in "abcd":
+        (tests_dir / f"test_{name}.py").touch()
+    old = tmp_path / "old.json"
+    old.write_text(
+        json.dumps({"durations": {f"test_{n}.py": 1.0 for n in "abcd"}})
+    )
+    (tests_dir / "durations.json").write_text(
+        json.dumps(
+            {
+                "_measured_on": "2026-09-14",
+                "durations": {
+                    "test_a.py": 10.0,
+                    "test_b.py": 1.0,
+                    "test_c.py": 10.0,
+                    "test_d.py": 1.0,
+                },
+            }
+        )
+    )
+
+    # Act
+    rc = shard_mod.main(
+        [
+            "--of",
+            "2",
+            "--balance-json",
+            "--compare-to",
+            str(old),
+            "--tests-dir",
+            str(tests_dir),
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    # Assert
+    assert rc == 0
+    assert report["worst_shard_seconds"] == 11.0
+    assert report["ideal_shard_seconds"] == 11.0
+    assert report["stale_packing_worst_shard_seconds"] == 20.0
+    assert report["unknown"] == 0 and report["stale_unknown"] == 0
+    assert report["slowest_file"] == "test_a.py"
+    assert report["measured_on"] == "2026-09-14"
+    assert "groups" not in report, "the file lists are not part of the report"
+
+
+def test_the_refresh_workflow_exists_and_drives_the_scripts():
+    """Given the drift-prevention workflow,
+    When it is read,
+    Then it is scheduled, dispatchable, and calls both scripts by name with
+    the flags this module tests.
+
+    A light contract test so that renaming a flag here cannot silently
+    orphan the workflow that depends on it -- the workflow is YAML, so no
+    import would notice."""
+    text = (
+        _REPO_ROOT / ".github" / "workflows" / "refresh-durations.yml"
+    ).read_text()
+    assert "schedule:" in text and "workflow_dispatch:" in text
+    assert "scripts/gen_durations.py" in text
+    assert "scripts/pytest_shard.py" in text
+    assert "--balance-json" in text and "--compare-to" in text
+    assert "durations-ubuntu-latest-3.12-*" in text
+    # The matrix step passes the per-OS shard count, not a literal 4.
+    tests_yml = (
+        _REPO_ROOT / ".github" / "workflows" / "tests.yml"
+    ).read_text()
+    assert "--of ${{ matrix.shards }} --verify" in tests_yml
