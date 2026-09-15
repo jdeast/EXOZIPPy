@@ -601,6 +601,28 @@ def calc_ts(ecc, omega, tc, period):
     return ts_from_ecc_omega(ecc, omega, tc, period, xp=pt)
 
 
+@register_physics
+def calc_bjd_shift(value, delta):
+    """`value + delta` -- the observed-frame (BJD_TDB) convert-back for a
+    target-frame timing quantity, shared by `tc_bjd` and `tp_bjd`.
+
+    `delta` is the light-travel delay from `ltt.retarded_time`, evaluated at
+    `tc` and masked per orbit (see `Orbit._ltt_delta_context`) -- the SAME
+    delay for tc_bjd and tp_bjd, since `calc_tp`/`calc_tp_from_ecc` are
+    additive in `tc` (`tp = tc - M0/n`, with `M0` independent of `tc`), so
+    `tp + delta(tc) == (tc + delta(tc)) - M0/n` exactly: `tp_bjd` needs no
+    physics of its own beyond reusing tc_bjd's delay.  `_ltt_delta_context`
+    builds that delay fresh per consumer (the same `_chord_context` idiom
+    `p`/`ar`/`chord_sign` already use for cosi/chord) rather than caching it
+    -- the two builds are structurally identical, so pytensor's merge
+    optimizer collapses them to one Kepler solve in the compiled graph
+    (confirmed: one `Kepler` Apply node for [tc_bjd, tp_bjd] together).  All
+    the physics lives in the delay itself; this function is deliberately
+    trivial.
+    """
+    return value + delta
+
+
 def mean_anomaly_at_true_anomaly(ecc, true_anomaly, xp=pt):
     """Mean anomaly at a true anomaly, in radians.
 
