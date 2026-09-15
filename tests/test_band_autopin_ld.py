@@ -456,3 +456,65 @@ def test_point_source_mulens_band_is_not_an_ld_consumer():
     )
     assert set(band._ld_consumer_indices(point)) == set()
     assert set(band._ld_consumer_indices(finite)) == {0}
+
+
+# --------------------------------------------------------------------------
+# 7. The linear law's u1 <= 1 validity cap (review 1.5.4), directly on the
+#    method.  The cap used to sit AFTER the "every band is read, nothing to
+#    pin" early return, so the one configuration it was written for -- a
+#    single linear band consumed by a finite-source light curve, DC2018
+#    event 128, which shipped u1 = 1.45 and 1.87 -- never received it.
+# --------------------------------------------------------------------------
+def _consumed_band(law):
+    """A one-band Band under ``law`` with its LD manifest declared and the
+    band CONSUMED (consumers={0}), i.e. nothing unread."""
+    from conftest import _DummyConfigManager
+    from exozippy.components.band.band import Band
+    from exozippy.components.parameterization import mode_manifest
+
+    band = Band(
+        [{"name": "I", "filter": "I", "ld_law": law}], _DummyConfigManager()
+    )
+    band.load_data(system=None)
+    # The manifest register_parameters writes before it pins, verbatim.
+    band.manifest = mode_manifest(
+        band.ld_laws,
+        band.LD_MODE_TABLE,
+        n_elements=band.n_elements,
+        options={"u2": {"inactive_value": 0.0}},
+        where="band.ld_law",
+    )
+    band._pin_unread_limb_darkening(system=None, consumers={0})
+    return band
+
+
+def _overrides_of(entry):
+    return entry.get("overrides", {}) if isinstance(entry, dict) else {}
+
+
+def test_linear_cap_applies_when_every_band_is_consumed():
+    """
+    Given one linear-law band that IS read (consumers={0}, so no band is
+    unread and there is nothing to pin),
+    When the unread-LD pass runs,
+    Then u1 still carries the validity cap upper=[1.0] through the
+    "overrides" channel -- the cap depends on the law, not on whether an
+    unread band happens to exist.
+    """
+    band = _consumed_band("linear")
+
+    assert band.manifest["u1"]["overrides"]["upper"] == [1.0]
+    # ... and no pin was written: the band is read.
+    assert "sigma" not in _overrides_of(band.manifest["u1"])
+
+
+def test_quadratic_band_gets_no_u1_cap():
+    """
+    Given one quadratic-law band that is read,
+    When the unread-LD pass runs,
+    Then u1 carries no upper override: u1 is DERIVED from the Kipping pair
+    there, and may legitimately exceed 1 against a negative u2.
+    """
+    band = _consumed_band("quadratic")
+
+    assert "upper" not in _overrides_of(band.manifest["u1"])
