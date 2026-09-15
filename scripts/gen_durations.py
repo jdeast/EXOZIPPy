@@ -49,6 +49,7 @@ import argparse
 import collections
 import datetime
 import json
+import os
 import re
 import subprocess
 import sys
@@ -85,6 +86,13 @@ def local_only_examples(repo_root: Path) -> tuple[str, ...]:
     examples = repo_root / "examples"
     if not examples.is_dir():
         return ()
+    # Ask about repo_root and nothing else: git exports GIT_DIR (and in a
+    # worktree GIT_WORK_TREE / GIT_INDEX_FILE) into the environment of every
+    # hook it runs, and an inherited GIT_DIR makes `git -C <other repo>`
+    # answer for the hook's repository instead. The pre-push suite hit
+    # exactly that: the test's throwaway repository reported both of its
+    # examples untracked because the index consulted was this one's.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
         out = subprocess.run(
             ["git", "-C", str(repo_root), "ls-files", "--", "examples"],
@@ -92,6 +100,7 @@ def local_only_examples(repo_root: Path) -> tuple[str, ...]:
             text=True,
             check=True,
             timeout=60,
+            env=env,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return ()
