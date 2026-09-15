@@ -318,6 +318,72 @@ ruling; re-opening it is its own change. What the polish gained regardless is
 the mid-batch heartbeat (see `run.md`), which needs no timeout to tell
 computing from hung.
 
+## The seed polish is asynchronous on a pool (2.4.14)
+
+`ptde.polish_seed_starts` is the DE engine behind `polish.polish_raw_starts`
+on every model whose gradient graph does not build (finite-source and
+binary-lens microlensing). It used to be a synchronous batch loop: one sweep =
+one batch of `n_seeds * pop_size` proposals, one barrier. That is the defect
+`ptde_async` was written to remove, and it was measured on DC2018-226 (32
+workers, job 46562457): each ~23 s sweep had all 32 workers busy for ~6 s and
+then drained 19, 15, 10, 8, 6, 4, 2, 1 while the batch's dearest VBM proposals
+finished -- 15.3 of 32 workers computing on average, 43% per-worker CPU over
+ten hours -- because a population that has partly migrated proposes a few
+very expensive points per sweep and the whole node waited for them.
+
+**On a real pool the polish now follows `ptde_async`'s procedure** (JDE
+2026-09-15): every (seed, member) slot keeps ONE proposal in flight, results
+are consumed in arrival order, each is accepted or rejected against its own
+member's current lp, and the slot's next proposal is drawn from the population
+as it is THEN. The budget is unchanged in meaning -- `n_steps` sweeps, counted
+as `n_steps * pop_size` completed proposals per seed -- and the gamma
+adaptation, the opt-in improvement window, the trust radius, best-visited
+tracking and the wrap-up lines are shared with the synchronous engine through
+`_accept` / `_end_of_sweep`, so the two cannot drift on the statistics.
+`eval_timeout` is enforced the async way: stale in-flight submissions are
+found on a wall clock, a stale one writes off EVERY in-flight submission (a
+pool cannot lose one worker), the pool is recycled through `pool_recycler`,
+and the written-off slots are resubmitted; a result that raced the write-off
+finds its id gone and is dropped.
+
+**What it costs is exactly what `ptde_async` costs under "Reproducibility"
+above:** the trajectory depends on arrival order, so the DE-path START of a
+pipeline run on `cores > 1` is no longer bit-identical run to run (the 44-event
+survey's 150-sweep numbers for DC2018-226 were reproduced bit for bit by the
+synchronous engine on a different node, and will not be by this one).
+`asynchronous=False` on either function restores the synchronous engine; the
+serial path and a bare-`map` pool always run it, and the L-BFGS path has no RNG
+and is untouched. Nothing in the `sampler:` vocabulary selects it yet -- that
+is a config-vocabulary decision like `eval_timeout`'s (2.3.6), and a caller
+that needs determinism has `cores: 1`.
+
+**Measured head to head on the event that motivated it** (DC2018-226, 32
+workers, five 150-sweep restart legs from the same degenerate seed, jobs
+46629651 synchronous and 46630701 asynchronous, 2026-09-15):
+
+| leg | sync s | sync sweeps/min | async s | async sweeps/min |
+|---|---|---|---|---|
+| 1 | 175 | 52 | 121 | 74 |
+| 2 | 533 | 17 | 50 | 180 |
+| 3 | 59 | 154 | 45 | 201 |
+| 4 | 103 | 87 | 38 | 236 |
+| 5 | 70 | 128 | 38 | 240 |
+| 750 sweeps | 940 | | 292 | |
+
+Same lp plateau (-185.5k on both seeds either way), 3.2x less wall clock, and
+the asynchronous rate CLIMBS as the population settles where the synchronous
+one collapses whenever a few proposals wander into the expensive region
+(legs 2 and 6 of the synchronous run: 17 and 20 sweeps/min). The expensive
+proposals are still evaluated -- asynchrony removes the idling, not the cost.
+
+The wrap-up now also reports, per seed, how many population members NEVER
+accepted a move and the population's median and max distance from the best
+point. At the fixed 2.38/sqrt(2D) step the T=1 acceptance is ~0.3%, so a
+polish that ran for thousands of sweeps can be one migrant plus 63 members
+still at their birth positions; that population proposes 70-unit throws for
+the rest of the run, and until this line existed nothing said so.
+Tests: `tests/test_polish.py`, the `_CallbackPool` block.
+
 ## Chain starts
 
 `store_hot_chains` (ptde_async only) takes `auto` / true / false / an integer

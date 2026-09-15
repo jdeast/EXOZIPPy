@@ -54,6 +54,7 @@ Returns arviz.InferenceData compatible with the EXOZIPPy pipeline.
 """
 
 import logging
+import queue
 import signal
 import time
 
@@ -318,6 +319,7 @@ def polish_seed_starts(
     progress_interval_s=POLISH_PROGRESS_S,
     eval_timeout=None,
     pool_recycler=None,
+    asynchronous=True,
 ):
     """Parallel T=1 differential-evolution polish of each seed's raw start.
 
@@ -398,6 +400,44 @@ def polish_seed_starts(
     which stays byte-for-byte the old behaviour when ``adapt_gamma=False``.
     A pool that also has ``apply_async`` -- every ``multiprocessing.Pool``
     -- gets the interleaved evaluation described under PROGRESS.
+
+    ASYNCHRONOUS BY DEFAULT ON A REAL POOL (``asynchronous=True``, review
+    2.4.14, JDE 2026-09-15).  The sweep-batch description above is the
+    SYNCHRONOUS engine, and it has the defect ptde_async was written to
+    remove: one batch of ``n_seeds * pop_size`` proposals is one barrier,
+    so a single expensive evaluation idles every other worker until it
+    returns.  Measured on DC2018-226 (32 workers, job 46562457): each ~23 s
+    sweep had all 32 workers busy for ~6 s and then drained 19, 15, 10, 8,
+    6, 4, 2, 1 while the batch's dearest VBM proposals finished -- 15.3 of
+    32 workers computing on average, 43% per-worker CPU over ten hours.
+    So on a pool whose ``apply_async`` takes ``callback`` / ``error_callback``
+    (every ``multiprocessing.Pool``) the polish now follows ptde_async's
+    procedure: every (seed, member) slot keeps ONE proposal in flight,
+    results are consumed in ARRIVAL order, each result is accepted or
+    rejected against its own member's current lp, and the slot's next
+    proposal is drawn from the population AS IT IS THEN -- other members
+    may have moved while this one was out.  Nothing waits for anything but
+    its own evaluation, so a 15 s proposal costs one worker 15 s and the
+    other 31 keep polishing.  The budget is the same ``n_steps`` SWEEPS,
+    counted as ``n_steps * pop_size`` completed proposals per seed; gamma
+    adaptation and the opt-in improvement window run on the same
+    per-sweep cadence, counted in completed proposals.  The trust radius,
+    best-visited tracking and every wrap-up line are shared with the
+    synchronous engine.
+
+    What the asynchrony costs is exactly what it costs ptde_async
+    (samplers.md, "Reproducibility"): the trajectory depends on arrival
+    order, so a seed fixes the draws and not the chain, and two runs on a
+    pool are no longer bit-identical.  ``asynchronous=False`` restores the
+    deterministic batch engine, which is also what the serial path and a
+    bare-``map`` pool always run.  The pipeline's start under the DE polish
+    is therefore reproducible only with ``cores: 1`` or the synchronous
+    flag -- the L-BFGS path has no RNG and is unaffected.  ``eval_timeout``
+    is enforced the async way too: in-flight submissions are scanned on a
+    wall clock, a stale one writes off EVERY in-flight submission (a pool
+    cannot lose one worker), the pool is recycled through ``pool_recycler``
+    and the written-off slots are resubmitted with fresh proposals; a
+    result that raced the write-off finds its id gone and is dropped.
 
     PROGRESS.  Every ``progress_interval_s`` seconds of wall clock one line
     is logged: which sweep against the cap, elapsed, an upper-bound ETA at
@@ -492,6 +532,14 @@ def polish_seed_starts(
     poll_s = None
     if _interleave and progress_interval_s:
         poll_s = max(POLISH_POLL_MIN_S, float(progress_interval_s) / 4.0)
+    # The asynchronous engine needs a pool whose apply_async delivers results
+    # through callbacks (see ASYNCHRONOUS in the docstring).  A bare-map pool
+    # and the serial path keep the synchronous batch loop.
+    _async = (
+        bool(asynchronous)
+        and pool is not None
+        and hasattr(pool, "apply_async")
+    )
 
     def _lps(props, on_progress=None):
         """Evaluate a flat list of proposals, pooled across seeds."""
@@ -648,6 +696,8 @@ def polish_seed_starts(
                 "gamma": float(gamma),
                 "n_acc": 0,
                 "n_prop": 0,
+                "n_acc_member": np.zeros(pop_size, dtype=int),
+                "n_done": 0,  # completed proposals (async budget)
                 "history": [],
                 "done": False,
                 "steps": 0,
@@ -655,7 +705,195 @@ def polish_seed_starts(
             }
         )
 
-    for _sweep in range(int(n_steps)):
+    def _propose(s, i):
+        pop, g = pops[s], states[s]["gamma"]
+        j1, j2 = _pick_two(rng, pop_size, i)
+        return {
+            k: pop[i][k]
+            + g * (pop[j1][k] - pop[j2][k])
+            + 1e-4 * scales[k] * rng.standard_normal(np.shape(pop[i][k]))
+            for k in keys
+        }
+
+    def _accept(s, i, prop, lp):
+        """One Metropolis test for member i of seed s; shared by both engines."""
+        st = states[s]
+        st["n_prop"] += 1
+        if np.isfinite(lp) and np.log(rng.random()) < lp - st["lps"][i]:
+            if _dist(prop, origins[s]) > radii[s]:
+                n_trust_rej[s] += 1
+                return
+            pops[s][i], st["lps"][i] = prop, lp
+            st["n_acc"] += 1
+            st["n_acc_member"][i] += 1
+            if lp > st["best_lp"]:
+                st["best_lp"] = lp
+                st["best"] = {k: v.copy() for k, v in prop.items()}
+
+    def _end_of_sweep(s):
+        """Per-sweep bookkeeping: gamma adaptation and the opt-in window."""
+        st = states[s]
+        st["steps"] += 1
+        if adapt_gamma and st["steps"] % gamma_window == 0:
+            # Nothing accepted at all is next_gamma's shrink branch:
+            # the (ar/target)**0.5 rule has no signal to use there.
+            ar = st["n_acc"] / max(st["n_prop"], 1)
+            st["gamma"] = next_gamma(st["gamma"], ar, target_accept)
+            st["n_acc"] = st["n_prop"] = 0
+        if tol is None or not tol_window:
+            return
+        st["history"].append(st["best_lp"])
+        if (
+            len(st["history"]) > tol_window
+            and st["history"][-1] - st["history"][-1 - tol_window] < tol
+        ):
+            st["stop"] = "tol"
+            st["done"] = True
+
+    def _run_async():
+        """ptde_async's procedure for the polish (see ASYNCHRONOUS above)."""
+        nonlocal pool, n_timeouts
+        budget = int(n_steps) * pop_size
+        result_q = queue.Queue()
+        in_flight = {}  # sub_id -> (s, i, prop, t_submitted)
+        n_sub = [0] * n_seeds
+        seq = [0]
+
+        def _submit(s, i):
+            prop = _propose(s, i)
+            seq[0] += 1
+            sub_id = seq[0]
+            in_flight[sub_id] = (s, i, prop, time.monotonic())
+            n_sub[s] += 1
+
+            def _cb(result, sub_id=sub_id):
+                result_q.put((sub_id, result))
+
+            def _ecb(exc, sub_id=sub_id, s=s, i=i):
+                logger.error(
+                    f"PTDE seed polish: worker exception at seed {s} "
+                    f"member {i}: {exc}"
+                )
+                result_q.put((sub_id, -np.inf))
+
+            pool.apply_async(
+                logp_fn, (prop,), callback=_cb, error_callback=_ecb
+            )
+
+        def _live():
+            return [s for s in range(n_seeds) if not states[s]["done"]]
+
+        def _beat():
+            live = _live()
+            if not live:
+                return
+            done_sweeps = min(states[s]["n_done"] for s in live)
+            _heartbeat(
+                done_sweeps // pop_size,
+                len(live),
+                (done_sweeps % pop_size, pop_size),
+            )
+
+        wait_s = poll_s if poll_s is not None else 1.0
+        if eval_timeout is not None:
+            wait_s = min(
+                wait_s, max(POLISH_POLL_MIN_S, float(eval_timeout) / 4.0)
+            )
+        last_scan = [time.monotonic()]
+
+        def _enforce_timeout():
+            """Write off every in-flight submission once one is stale."""
+            nonlocal pool, n_timeouts
+            if eval_timeout is None or not in_flight:
+                return
+            now = time.monotonic()
+            if now - last_scan[0] < wait_s:
+                return
+            last_scan[0] = now
+            stale = [
+                sid
+                for sid, (_, _, _, t0) in in_flight.items()
+                if now - t0 > float(eval_timeout)
+            ]
+            if not stale:
+                return
+            n_timeouts += len(stale)
+            logger.error(
+                f"PTDE seed polish: {len(stale)} logp call(s) exceeded "
+                f"eval_timeout={float(eval_timeout):.0f}s -- scoring them "
+                f"-inf, which the Metropolis test rejects for free."
+            )
+            lost = list(in_flight.items())
+            in_flight.clear()
+            for sid, (s, i, prop, _) in lost:
+                if sid in stale:
+                    # A timed-out proposal IS a proposal: rejected, counted.
+                    _accept(s, i, prop, -np.inf)
+                    _complete(s, i)
+                else:
+                    n_sub[s] -= (
+                        1  # legitimate work written off; resubmit below
+                    )
+            if pool_recycler is not None:
+                logger.warning(
+                    "PTDE seed polish: recycling the worker pool -- a hung "
+                    "worker never rejoins it on its own."
+                )
+                pool = pool_recycler(pool)
+            else:
+                logger.warning(
+                    "PTDE seed polish: no pool_recycler was supplied, so the "
+                    "worker(s) that hung are gone for the rest of this "
+                    "polish and every later batch runs on fewer of them."
+                )
+            for sid, (s, i, _, _) in lost:
+                if (
+                    sid not in stale
+                    and not states[s]["done"]
+                    and n_sub[s] < budget
+                ):
+                    _submit(s, i)
+
+        def _complete(s, i):
+            """Count one finished proposal; keep the slot busy while budget remains."""
+            st = states[s]
+            st["n_done"] += 1
+            if st["n_done"] % pop_size == 0:
+                _end_of_sweep(s)
+            if not st["done"] and n_sub[s] < budget:
+                _submit(s, i)
+
+        for s in _live():
+            for i in range(pop_size):
+                if n_sub[s] < budget:
+                    _submit(s, i)
+
+        while in_flight:
+            try:
+                sub_id, result = result_q.get(timeout=wait_s)
+            except queue.Empty:
+                _beat()
+                _enforce_timeout()
+                continue
+            meta = in_flight.pop(sub_id, None)
+            if meta is None:
+                continue  # written off by the timeout recovery
+            s, i, prop, _ = meta
+            try:
+                lp = float(result)
+            except (TypeError, ValueError):
+                lp = -np.inf
+            _accept(s, i, prop, lp)
+            _complete(s, i)
+            _beat()
+            _enforce_timeout()
+
+    if _async:
+        _run_async()
+
+    # The synchronous batch engine.  Zero sweeps when the asynchronous one
+    # has already spent the budget above.
+    for _sweep in range(0 if _async else int(n_steps)):
         live = [s for s in range(n_seeds) if not states[s]["done"]]
         if not live:
             break
@@ -664,19 +902,8 @@ def polish_seed_starts(
         # population as frozen at the start of this sweep.
         batch, index = [], []
         for s in live:
-            pop, g = pops[s], states[s]["gamma"]
             for i in range(pop_size):
-                j1, j2 = _pick_two(rng, pop_size, i)
-                batch.append(
-                    {
-                        k: pop[i][k]
-                        + g * (pop[j1][k] - pop[j2][k])
-                        + 1e-4
-                        * scales[k]
-                        * rng.standard_normal(np.shape(pop[i][k]))
-                        for k in keys
-                    }
-                )
+                batch.append(_propose(s, i))
                 index.append((s, i))
         n_batch, n_live = len(batch), len(live)
         lps_batch = _lps(
@@ -685,38 +912,10 @@ def polish_seed_starts(
         )
 
         for (s, i), prop, lp in zip(index, batch, lps_batch):
-            st = states[s]
-            st["n_prop"] += 1
-            if np.isfinite(lp) and np.log(rng.random()) < lp - st["lps"][i]:
-                if _dist(prop, origins[s]) > radii[s]:
-                    n_trust_rej[s] += 1
-                    continue
-                pops[s][i], st["lps"][i] = prop, lp
-                st["n_acc"] += 1
-                if lp > st["best_lp"]:
-                    st["best_lp"] = lp
-                    st["best"] = {k: v.copy() for k, v in prop.items()}
+            _accept(s, i, prop, lp)
 
         for s in live:
-            st = states[s]
-            st["steps"] += 1
-
-            if adapt_gamma and st["steps"] % gamma_window == 0:
-                # Nothing accepted at all is next_gamma's shrink branch:
-                # the (ar/target)**0.5 rule has no signal to use there.
-                ar = st["n_acc"] / max(st["n_prop"], 1)
-                st["gamma"] = next_gamma(st["gamma"], ar, target_accept)
-                st["n_acc"] = st["n_prop"] = 0
-
-            if tol is None or not tol_window:
-                continue
-            st["history"].append(st["best_lp"])
-            if (
-                len(st["history"]) > tol_window
-                and st["history"][-1] - st["history"][-1 - tol_window] < tol
-            ):
-                st["stop"] = "tol"
-                st["done"] = True
+            _end_of_sweep(s)
 
         # Heartbeat (see PROGRESS in the docstring).
         _heartbeat(_sweep + 1, len(live))
@@ -745,6 +944,19 @@ def polish_seed_starts(
             f"{st['best_lp']:.1f} (dlp=+{st['best_lp'] - st['lp0']:.1f}, "
             f"{st['steps']} steps x {pop_size} pop, gamma "
             f"{gamma:.4f}->{st['gamma']:.4f}, {reason})"
+        )
+        # Where the population ENDED, not only its best member.  At the
+        # fixed step's ~0.3% acceptance most members never leave their
+        # birth position, and a population that is one migrant plus 63
+        # frozen members proposes 70-unit throws for the rest of the run
+        # (review 2.4.14).  These two numbers are how that is seen.
+        frozen = int(np.sum(st["n_acc_member"] == 0))
+        radii_to_best = sorted(_dist(m, st["best"]) for m in pops[s])
+        logger.info(
+            f"PTDE seed polish: seed {s} population: {frozen}/{pop_size} "
+            f"members never moved; distance to best (scale units) median "
+            f"{radii_to_best[pop_size // 2]:.1f}, max {radii_to_best[-1]:.1f}"
+            f"{' (asynchronous engine)' if _async else ''}."
         )
     # Basin-coverage diagnostics: say where each seed went, and warn when
     # two polished seeds have effectively merged -- the failure mode the

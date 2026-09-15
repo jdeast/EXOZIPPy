@@ -297,6 +297,7 @@ def polish_raw_starts(
     cores=None,
     adapt_gamma=_UNSET,
     eval_timeout=None,
+    asynchronous=True,
 ):
     """Polish each raw start toward its own basin's optimum.
 
@@ -326,6 +327,14 @@ def polish_raw_starts(
     is nothing to time out against.  **run.py does not currently pass one**;
     see run.md for why that is a config-vocabulary decision rather than an
     oversight.
+
+    ``asynchronous`` (default True) selects the DE engine's ptde_async-style
+    loop on a real pool -- one proposal in flight per population member,
+    results consumed in arrival order, so one slow VBM evaluation costs one
+    worker and not the batch (review 2.4.14).  ``False`` restores the
+    synchronous sweep-batch engine, which is bit-reproducible for a given
+    rng and the only one the serial path runs.  See
+    ``ptde.polish_seed_starts``.
 
     Returns (polished_starts, dlps, method) with method in
     {"lbfgs", "de", "none"}.  A seed is never made worse: any engine result
@@ -451,6 +460,7 @@ def polish_raw_starts(
             pool=pool,
             eval_timeout=eval_timeout,
             pool_recycler=_recycle if pool is not None else None,
+            asynchronous=asynchronous,
             **de_kwargs,
         )
     finally:
