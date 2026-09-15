@@ -183,7 +183,7 @@ def dc2018_128_system(tmp_path_factory):
     shutil.copytree(
         EXAMPLE_DIR,
         work_dir,
-        ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"),
+        ignore=shutil.ignore_patterns("fitresults*", ".#*", "#*#"),
     )
 
     orig_cwd = os.getcwd()

@@ -153,7 +153,7 @@ def test_dc2018_128_example_builds_with_list_valued_mmexofast_seeds(tmp_path):
     shutil.copytree(
         example_dir,
         work_dir,
-        ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"),
+        ignore=shutil.ignore_patterns("fitresults*", ".#*", "#*#"),
     )
 
     orig_cwd = os.getcwd()

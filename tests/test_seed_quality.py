@@ -82,9 +82,17 @@ def _seed_chi2(name, strip_prefixes=()):
     )
     canonical = str(src / f"{name}.yaml")
     cfg_path = canonical if canonical in candidates else candidates[0]
-    work = pathlib.Path(tempfile.mkdtemp()) / name
+    # A TEMP ROOT WE OWN MUST BE REMOVED BY US.  pytest prunes its
+    # own tmp_path trees to the last three runs; a bare mkdtemp() is
+    # nobody's to collect, and this helper runs once per event per
+    # test.  74 such copies had accumulated on a shared login node
+    # (143 GB, because the ignore pattern above was also missing the
+    # suffixed fitresults dirs) before an admin asked for the disk
+    # back.  Cleaned in the finally below, next to the chdir.
+    tmproot = pathlib.Path(tempfile.mkdtemp())
+    work = tmproot / name
     shutil.copytree(
-        src, work, ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#")
+        src, work, ignore=shutil.ignore_patterns("fitresults*", ".#*", "#*#")
     )
     cwd = os.getcwd()
     os.chdir(work)
@@ -139,6 +147,7 @@ def _seed_chi2(name, strip_prefixes=()):
         return chi2, chi2 / data.size, data.size, pms
     finally:
         os.chdir(cwd)
+        shutil.rmtree(tmproot, ignore_errors=True)
 
 
 @pytest.mark.parametrize("name,ceiling", CEILINGS)

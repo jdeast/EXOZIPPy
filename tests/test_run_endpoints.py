@@ -150,7 +150,7 @@ def kelt4_workdir(tmp_path):
     shutil.copytree(
         EXAMPLE_DIR,
         work_dir,
-        ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"),
+        ignore=shutil.ignore_patterns("fitresults*", ".#*", "#*#"),
     )
     return work_dir
 
