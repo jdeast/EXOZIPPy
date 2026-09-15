@@ -367,6 +367,37 @@ def test_register_gp_registers_both_terms_independently():
     assert sho_pin[0] == 0.0 and np.isnan(sho_pin[1])
 
 
+def test_register_gp_entries_do_not_share_one_overrides_dict():
+    """
+    Given a term registered on some but not all files (so a pin exists),
+    When one parameter's pin list is mutated in place,
+    Then its siblings are unchanged -- each entry is a deep copy (review
+    2.5.5).
+
+    `dict(entry)` was a SHALLOW copy, so gp_rot_sigma/period/log_q0/log_dq/f
+    shared one nested {"overrides": {"sigma": [...]}} object, and
+    Instrument.add_parameter already mutates a manifest entry in place
+    (detrend_coeffs).  This codebase shipped exactly that aliasing before,
+    in the broadcast shared-dict bug.
+    """
+    inst = _make([{"file": "a.rv", "gp": "rotation"}, {"file": "b.rv"}])
+    manifest = {}
+    inst._register_gp(manifest)
+
+    manifest["gp_rot_sigma"]["overrides"]["sigma"][1] = 5.0
+    manifest["gp_rot_sigma"]["overrides"]["extra"] = True
+
+    for name in gp_support.GP_TERM_PARAMS["rotation"]:
+        if name == "gp_rot_sigma":
+            continue
+        assert manifest[name]["overrides"]["sigma"][1] == 0.0, name
+        assert "extra" not in manifest[name]["overrides"], name
+    assert (
+        manifest["gp_rot_sigma"]["overrides"]
+        is not (manifest["gp_rot_period"]["overrides"])
+    )
+
+
 def test_prepare_gp_sorts_each_file_by_time_and_hints_the_white_noise_level():
     """
     Given interleaved, unsorted observations from two files (only the second

@@ -947,3 +947,27 @@ def test_user_can_override_a_robust_parameter_by_instrument_name(
     frac = system.rvinstrument.out_frac
     assert float(np.ravel(frac.initval)[0]) == pytest.approx(0.12)
     assert float(np.ravel(frac.sigma)[0]) == pytest.approx(0.03)
+
+
+def test_register_robust_entries_do_not_share_one_overrides_dict():
+    """
+    Given the hogg family registered on some but not all files (so a pin
+    exists),
+    When out_frac's pin list is mutated in place,
+    Then out_scale's is unchanged -- each entry is a deep copy, not the
+    shallow `dict(entry)` that shared one nested {"overrides": {"sigma":
+    [...]}} between them (review 2.5.5; the same aliasing this codebase
+    shipped in the broadcast shared-dict bug).
+    """
+    inst = _make([{"file": "a.rv", "likelihood": "hogg"}, {"file": "b.rv"}])
+    manifest = inst._register_robust({})
+
+    manifest["out_frac"]["overrides"]["sigma"][1] = 5.0
+    manifest["out_frac"]["overrides"]["extra"] = True
+
+    assert manifest["out_scale"]["overrides"]["sigma"][1] == 0.0
+    assert "extra" not in manifest["out_scale"]["overrides"]
+    assert (
+        manifest["out_frac"]["overrides"]
+        is not (manifest["out_scale"]["overrides"])
+    )

@@ -59,6 +59,7 @@ Gaussian-only).  Off by default everywhere: with no ``likelihood:`` key the
 model is byte-for-byte what it was before this feature existed.
 """
 
+import copy
 import logging
 
 import numpy as np
@@ -1066,7 +1067,13 @@ class Instrument(TimeSystem, Component):
                 continue
             entry = pin_unselected(self.n_elements, on)
             for param in gp_support.GP_TERM_PARAMS[kind]:
-                manifest[param] = dict(entry)
+                # deepcopy, not dict(): a shallow copy shares the nested
+                # {"overrides": {"sigma": [...]}} across every parameter of
+                # the term, and Instrument.add_parameter already mutates a
+                # manifest entry in place (detrend_coeffs).  This codebase
+                # shipped exactly that aliasing once, in the broadcast
+                # shared-dict bug (review 2.5.5).
+                manifest[param] = copy.deepcopy(entry)
         return manifest
 
     def _build_log10_deterministics(self, log_params):
@@ -1557,7 +1564,8 @@ class Instrument(TimeSystem, Component):
             entry = pin_unselected(self.n_elements, on)
             alarm = [i in on for i in range(self.n_elements)]
             for param in robust_support.LIKELIHOOD_PARAMS[kind]:
-                manifest[param] = dict(entry)
+                # deepcopy per parameter, for the reason _register_gp gives.
+                manifest[param] = copy.deepcopy(entry)
                 if param in robust_support.LIKELIHOOD_CAP_ALARM.get(kind, ()):
                     manifest[param] = merge_options(
                         manifest[param], cap_alarm=list(alarm)
