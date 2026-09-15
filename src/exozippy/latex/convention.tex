@@ -17,7 +17,7 @@
 %
 % THIS FILE IS ONE OF A PAIR.  Its twin,
 % src/exozippy/components/mulensing/conventions.md, is the normative
-% developer-facing list: it carries the SAME numbered claims C1-C25, and
+% developer-facing list: it carries the SAME numbered claims C1-C28, and
 % names for each one the source file that implements it and the test that
 % pins it.  A claim may be reworded in either file, but a C-number must
 % mean the same thing in both, and a claim added to one must be added to
@@ -26,11 +26,10 @@
 % A THIRD COPY LIVES OUTSIDE THIS REPOSITORY: the Conventions section of
 % paper3_microlensing.tex in the paper repo (~/old_home/papers/exozippy,
 % remote on Overleaf) carries the same C-numbers as the submitted text.
-% It cannot ride the same commit, so it is the copy most likely to drift
-% -- paper3 gained C26-C28 (the Keplerian reconciliation, which body's
-% omega, the node fold and the third-axis trap) before this file did.
-% When you change a C-rule, decide explicitly whether the paper moves
-% too, and say so in the commit message when it does not.
+% All three are in step through C28.  It cannot ride the same commit, so
+% the rule is that a C-rule is not finished until all three carry it:
+% pull the paper repo, make the matching edit there, and name that commit
+% in this one.  The paper is not licensed to run ahead.
 % =====================================================================
 
 \section{Conventions}
@@ -395,6 +394,161 @@ $i = \xi_i$, $\omega_* = \xi_\omega$,
 $\xi_a = a_1/(D_{\rm S}\,\theta_{\rm E})$, with the phase carried by
 $\nu(t_{0,\xi}) = \xi_u - \xi_\omega$.
 
+\paragraph{C26 --- the Keplerian elements, and why $\alpha$ is not an
+independent convention.}  The element set is the textbook one, expressed in
+the frame of C1: $i$ is measured from the plane of the sky, $\Omega$ is the
+position angle of the ascending node East of North (C2), and $\omega$ is
+$\omega_*$, the argument of periastron of the \emph{primary's} orbit about
+the system barycentre (C27).  The ascending node is the node at which the
+body \emph{recedes} from the observer, which is what ties $\Omega$ to the
+sign of the radial velocity and is the only reason the node is identifiable
+at all (C28).  The sky position follows from the standard Euler application
+$R_z(\Omega)\,R_x(i)\,R_z(\omega)$, so that at $\omega + f = 0$ the body
+sits at position angle exactly $\Omega$; this is the same projection, and
+the same single implementation, that the astrometric and radial-velocity
+models share.
+
+The reconciliation with microlensing is then one equation.  Writing
+$\vec{\delta}_j(t)$ for companion $j$'s offset from the primary --- the
+\emph{relative} orbit, hence $\omega_* + 180^\circ$ (C27) --- projected
+through that Euler chain and scaled into Einstein radii by
+$a/(D_{\rm L}\,\theta_{\rm E})$,
+\begin{eqnarray}
+  s_j(t)  &=& |\vec{\delta}_j(t)|, \qquad
+  \mathrm{PA_{axis}}(t) \;=\; \mathrm{atan2}(\delta_{j,E}, \delta_{j,N}),
+  \nonumber \\
+  \alpha_j(t) &=& \phi_\pi - \mathrm{PA_{axis}}(t),
+  \label{eq:alphakep}
+\end{eqnarray}
+with $\phi_\pi$ from Equation~(\ref{eq:phipi}).  Equation~(\ref{eq:alphakep})
+is C15 and C20 evaluated at every epoch rather than once; its time
+derivative is Equation~(\ref{eq:gammaperp}), so the linear and Keplerian
+modes agree by construction rather than by a fitted offset.  Two
+consequences are worth stating separately.
+
+First, \emph{$\alpha$ is a derived quantity and not a convention}.  It is a
+position angle subtracted from another position angle.  A microlensing
+$\alpha$ and a Keplerian $\Omega$ can therefore never genuinely disagree
+about orientation; a mismatch between them is always a disagreement about
+where $\phi_\pi$ points (C8, hence about the frame of C5) or about which
+end of the binary axis a position angle names (C20) --- both of which are
+answerable without reference to either code's internals.  This is the
+sense in which microlensing, which appears at first to carry an orientation
+convention all its own, in fact carries none.
+
+Second, in the Keplerian mode there is no free $\alpha_0$ and no free $s_0$
+at all: both sides of Equation~(\ref{eq:alphakep}) are consumed, and the
+binary geometry entering the magnification is a function purely of
+$(P, t_p, e, \omega_*, i, \Omega, a)$ together with the frame quantities
+$\phi_\pi$, $\theta_{\rm E}$ and $D_{\rm L}$ that the fit already carries.
+The mode adds no parameters, which is precisely the over-constraint
+\citet{Skowron:2011} proposed.  OGLE-2009-BLG-020 is our worked example and
+the reason the machinery exists in this form: the Keck and Magellan radial
+velocities of the lens primary \citep{Yee:2016} pin $P$, $t_p$, $e$,
+$\omega_*$ and $K$, the light curve pins the projected geometry, and
+$\Omega$ and $\mathrm{sign}(\cos i)$ --- which no radial velocity can see
+--- become measured quantities rather than assumptions.  The published
+$s_0 = 0.4294$ and $\alpha_0 = 189.08^\circ$ are an acceptance check on
+that fit, not inputs to it.
+
+\paragraph{C27 --- which body's $\omega$.}  A single orbit has two
+arguments of periastron differing by exactly $180^\circ$: $\omega_*$, of
+the primary's orbit about the barycentre, and $\omega_{\rm comp} = \omega_*
++ 180^\circ$, of the companion's orbit relative to the primary.  Neither
+spelling is wrong and both are in common use --- the radial-velocity
+literature reports $\omega_*$ because that is the orbit the spectrograph
+measures, while the visual-binary literature reports the relative orbit
+because that is the one the eye sees --- so an $\omega$ quoted without
+naming its body is a $180^\circ$ ambiguity and nothing more.  We report and
+sample $\omega_*$ throughout, and apply the flip internally wherever the
+relative orbit is the one required, as in Equation~(\ref{eq:alphakep}).
+
+The ambiguity is cheap to resolve whenever any radial information exists,
+because a $180^\circ$ shift in $\omega_*$ inverts the velocity curve, and
+this is worth doing rather than assuming.  \citet{Yee:2016} tabulate
+$\omega_{\rm peri} = 151.600^\circ$ for OGLE-2009-BLG-020L.  Taken as
+$\omega_*$ that value puts the radial-velocity model in antiphase with the
+measurements, $\chi^2 = 2087$ for 14 points; at $\omega_* = 331.600^\circ =
+151.600^\circ + 180^\circ$ the same model gives $\chi^2 = 3.2$.  The
+published number is the companion's, as the visual-binary habit would
+suggest, and the flip is a statement about vocabulary that the data confirm
+in one evaluation.  Note also that xallarap (C25) inverts the usual
+expectation: the orbit that enters a xallarap fit is the \emph{source's
+own} track about its barycentre, so it is $\omega_*$ that maps across with
+no flip, while the node acquires one.
+
+\paragraph{C28 --- the node degeneracy, what breaks it, and the third-axis
+trap.}  The transformation
+\begin{equation}
+  (\Omega,\, \omega_*) \;\longrightarrow\;
+  (\Omega + 180^\circ,\, \omega_* + 180^\circ),
+  \label{eq:nodefold}
+\end{equation}
+with the matching shift of $t_C$ and with $i$ \emph{unchanged}, is a
+reflection through the plane of the sky: substituted into the Euler chain of
+C26 it leaves the sky coordinates $(X, Y)$ identically unaltered and
+reverses only $Z$.  It is therefore invisible to astrometry of every kind
+--- absolute, relative, and the xallarap track of C25 --- and only radial
+information identifies which node is the ascending one.  We declare it per
+orbit rather than per system, because an orbit that a radial velocity
+constrains is not degenerate at all even when it sits in a system full of
+orbits that are, and we fold the two labels together when assessing
+convergence so that a sampler exploring both is not mistaken for one that
+has failed to converge.
+
+For a lens binary there is a second thing that breaks it, and it is the one
+genuinely microlensing-specific measurement in this section: the
+\emph{rotation sense} of the binary axis on the sky.  Once the node is
+fixed, that sense measures $\mathrm{sign}(\cos i)$, through the minus sign
+of Equation~(\ref{eq:gammaperp}) --- equivalently, $\gamma_\perp
+\rightarrow -\gamma_\perp$ is $\Omega \rightarrow -\Omega$, $i \rightarrow
+180^\circ - i$ \citep[Section~5.2]{Skowron:2011}.  Because that sign is not
+a goodness-of-fit question --- getting it backwards raises no $\chi^2$, it
+silently reports the reflected orbit --- we pin it against a synthetic orbit
+of known inclination rather than against any fit, and we validate the
+Keplerian mode against first-principles synthetic orbits rather than against
+another code's Keplerian implementation.\footnote{We record, since it is the
+kind of thing this section exists to prevent, that \texttt{MulensModel}
+3.11.0's Keplerian lens orbital motion contradicts its own linear mode on
+this sign: with $\dot{\alpha} = +40^\circ\,{\rm yr}^{-1}$ its linear branch
+returns $+40$ at $t_{0,\rm kep}$, as it must by definition, while its
+Keplerian variants return $-40$.  The composition needs the minus of
+Equation~(\ref{eq:gammaperp}).  The package's linear branch, its
+$\gamma_\perp$ property and every static and parallax convention of C18 are
+unaffected, and remain the references our parity tests use.}
+
+Finally, and most portably: \emph{a published $(\Omega, i)$ pair is
+meaningless without its frame's third axis}.  Reversing that axis flips the
+handedness of the sky pair, sending $i \rightarrow 180^\circ - i$ and
+reversing the sense in which $\Omega$ is measured, and a code reporting
+$i > 90^\circ$ for a system another code reports at $i < 90^\circ$ is
+usually announcing its third axis rather than disagreeing about the orbit.
+\citet{Skowron:2011} Appendix~B is a case in point and a common one, since
+it is the frame in which microlensing orbital solutions are most often
+quoted: its first axis is the binary axis and its third points
+\emph{toward} the observer, the opposite of C1's $+Z$.  \citet{Yee:2016}
+quote the OGLE-2009-BLG-020L orbit in that frame, so their tabulated values
+do not drop into the sky frame unchanged.  Both angles move:
+\begin{equation}
+  i = 180^\circ - i_{\rm B}, \qquad
+  \Omega = \mathrm{PA_{axis}}(t_{0,\rm kep}) - \Omega_{\rm B},
+  \label{eq:appb}
+\end{equation}
+the first because of the third axis and the second because $\Omega_{\rm B}$
+is referred to the binary axis rather than to North.  Their $i_{\rm B} =
+129.424^\circ$ is $i = 50.576^\circ$ here.  The node cannot be converted
+from the published table alone, because $\mathrm{PA_{axis}}$ is not a
+published quantity --- it is $\phi_\pi - \alpha_0$ by
+Equation~(\ref{eq:alphakep}), and $\phi_\pi$ is an output of the fit --- so
+we convert it against the built model rather than reading it off, and the
+likelihood is sharp enough in it ($\pm 10^\circ$ costs more than
+$10^6$ nats) that rounding the result is not an option.\footnote{A
+transcription hazard in the same appendix, recorded for anyone working from
+it: Equation~B9 displays its two rotation matrices under swapped labels ---
+the matrix printed as $R_x$ rotates about the third axis and the one
+printed as $R_z$ about the first --- while the surrounding text and every
+subsequent use require the standard $z$--$x$--$z$ composition.  The paper's
+own results are unaffected; only a literal transcription of B9 is.}
 \subsection{Translating to and from other conventions}
 \label{sec:conv:mappings}
 
