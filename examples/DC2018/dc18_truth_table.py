@@ -40,6 +40,7 @@ import glob
 import io
 import json
 import os
+import re
 import sys
 import warnings
 
@@ -581,6 +582,12 @@ def main():
     ap.add_argument("--data-dir", default=None)
     ap.add_argument("--tier", default="default", choices=sorted(TIERS))
     ap.add_argument("--json-out", default=None)
+    ap.add_argument(
+        "--event",
+        type=int,
+        default=None,
+        help="event number, when the prefix does not carry it",
+    )
     a = ap.parse_args()
     d = C.data_dir_or_raise(a.data_dir)
     out = []
@@ -592,13 +599,35 @@ def main():
                 if h.endswith("_results.csv")
                 else (h[: -len("_trace.nc")] if h.endswith("_trace.nc") else h)
             )
-            ev = None
-            for part in os.path.normpath(p).split(os.sep):
-                if part.isdigit():
-                    ev = int(part)
+            # THE EVENT NUMBER COMES FROM THE RUN PREFIX THE PIPELINE
+            # ITSELF WROTE -- `DC2018_<NNN>` -- and only then from a
+            # digits-only directory.  The old order was the reverse with a
+            # `digits[:3]` fallback, and on any layout whose directories are
+            # not bare numbers (ab194/sync/DC2018_194, the A/B arms) that
+            # fallback concatenated every digit in the basename and took the
+            # first three: "DC2018_194" -> "2018194" -> event 201.  It then
+            # printed a complete, plausible-looking table against event 201's
+            # truth, with a t_0 pull of 21,897 reading as a physics failure
+            # instead of a parse bug.  Nothing in the output said which event
+            # the truth came from, so the two rules are now cross-checked and
+            # a disagreement is LOUD rather than silent.
+            ev = a.event
             if ev is None:
-                digits = "".join(c for c in os.path.basename(p) if c.isdigit())
-                ev = int(digits[:3]) if digits else None
+                m = re.search(r"DC2018[_-]?(\d{3})", os.path.basename(p))
+                ev = int(m.group(1)) if m else None
+                dir_ev = None
+                for part in os.path.normpath(p).split(os.sep):
+                    if part.isdigit():
+                        dir_ev = int(part)
+                if ev is None:
+                    ev = dir_ev
+                elif dir_ev is not None and dir_ev != ev:
+                    print(
+                        "WARNING %s: prefix says event %d but a parent "
+                        "directory says %d -- scoring %d (the prefix is what "
+                        "the pipeline wrote); pass --event to override"
+                        % (p, ev, dir_ev, ev)
+                    )
             if ev is None:
                 print("skip %s: cannot infer the event number" % p)
                 continue
