@@ -1,7 +1,7 @@
 {
  "config": "examples/ob161003/ob161003.yaml",
  "n_terms": 69,
- "note": "PRE-SPLIT (stage-0) recording of examples/ob161003, labels translated to the post-split naming with every value untouched.  ob161003 is the one example whose MODEL changes under the 8.6.17 split (the per-source event-level vectors collapse), so this recording is kept as the reference for the analytic reconciliation test in tests/test_mulens_acceptance.py rather than replayed directly.",
+ "note": "PRE-SPLIT (stage-0) recording of examples/ob161003, labels translated to the post-split naming with every value untouched.  ob161003 is the one example whose MODEL changes under the 8.6.17 split (the per-source event-level vectors collapse), so this recording is kept as the reference for the analytic reconciliation test in tests/test_mulens_acceptance_b.py rather than replayed directly.",
  "params": "examples/ob161003/ob161003.params.yaml",
  "start": {
   "band.u1_raw": [
