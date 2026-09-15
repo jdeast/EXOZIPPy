@@ -319,12 +319,15 @@ Two properties of the hook that this did **not** change, and that still bite:
 
 ## Suite runtime and the pytensor compile cache
 
-The suite runs in **~16 minutes warm** on an idle 36-core box (`-n 6`, 3108 tests,
-measured 2026-08-19 at 2977 tests / 11:37 and 2026-08-25 at 3052 / 15:47). A cold run is
-**~25 minutes** and happens once per fresh checkout or worktree, and on CI until its
-compiledir cache is populated. The runbook -- what the cache is, how it is bounded, how
-to reclaim space, and how to measure a run honestly -- is in `docs/testing-cache.md`.
-Read that before changing anything about the compile cache or the suite's timing.
+The suite ran in **~16 minutes warm** on an idle 36-core box (`-n 6`, 3108 tests,
+measured 2026-08-19 at 2977 tests / 11:37 and 2026-08-25 at 3052 / 15:47); it has grown
+19% in worker-seconds since (**11987 ubuntu worker-seconds over 229 files** on CI run
+34888667878, 2026-09-14, against 10055 over 204 files on 2026-08-25), so expect a warm
+local run nearer 19-20 minutes today. A cold run is **~25 minutes** and happens once per
+fresh checkout or worktree, and on CI until its compiledir cache is populated. The
+runbook -- what the cache is, how it is bounded, how to reclaim space, and how to measure
+a run honestly -- is in `docs/testing-cache.md`. Read that before changing anything
+about the compile cache or the suite's timing.
 
 ### Where the time actually goes (measured 2026-08-25, review item 6.13.1)
 
@@ -351,16 +354,58 @@ obvious and are wrong:
 
 It is a long tail rather than a few hot spots: the top 30 of 202 files are 67% of the
 total, the worst single file is 5.0%. That shape is why CI splits the suite across
-**4 shards** (`scripts/pytest_shard.py`, packing longest-file-first from
+shards (`scripts/pytest_shard.py`, packing longest-file-first from
 `tests/durations.json`, measured at 1.00x of ideal balance): with no dominant file there
-is nothing to cut, so the remaining lever is more machines.
+is nothing to cut, so the remaining lever is more machines -- **4 ubuntu shards and 3
+macOS** (macOS is 3.2x faster per worker-second, and the free plan caps concurrent macOS
+jobs at 5).
 
-Four is where that lever runs out. `--dist loadfile` pins a file to one worker, so a
-shard cannot beat its slowest file's serial time -- past 4 shards the binding constraint
-stops being the spread and becomes `test_rm_ltt.py` alone. Below ~8 minutes the next
-move is splitting slow FILES, which is exactly why `test_runner_lifecycle.py` was split
-out of `test_runner.py`. See `docs/testing-cache.md` for the full arithmetic, the
+Where that lever runs out (re-measured 2026-09-14). `--dist loadfile` pins a file to
+one worker, so a shard cannot beat its slowest file's serial time, and a CI job's wall
+clock is `~100 s fixed + max(shard worker-seconds / workers, slowest file)` to within 4%.
+When the 873 s `test_mulens_acceptance.py` landed it exceeded the ~750 s per-worker share
+at 4 shards, and the worst job stayed at 16.2 min at 4, 5, 6 and 8 shards alike: more
+machines bought nothing. Splitting the file (`test_mulens_acceptance_a.py` / `_b.py`, by
+fixture-name partition in `tests/mulens_acceptance_replay.py`) is what brought it to
+14.2 min. So below ~10 minutes the move is splitting slow FILES -- which is also why
+`test_runner_lifecycle.py` was split out of `test_runner.py` -- and never adding jobs
+past the concurrency cap. See `docs/testing-cache.md` for the full arithmetic, the
 sharding, and the compiledir seeding that keeps its cache affordable.
+
+### Keeping tests/durations.json current
+
+`tests/durations.json` is the per-file weighting the shard split packs from. Two rules
+and one mechanism, because the file silently drifted for 20 days and 25 new test files
+before anyone looked (2026-09-14), and the cost was a shard running 17 minutes against
+another's 11:
+
+- **It is regenerated from CI artifacts, never from a workstation.** Every pytest job
+  uploads its `--durations=0` transcript as a `durations-<os>-<python>-<shard>` artifact;
+  the whole suite is the union of one os+python's shards. Workstation weights balance the
+  recorded sums and still produce a 1.6x spread in real wall clock (the arithmetic is in
+  `docs/testing-cache.md`).
+- **Regenerate whenever a test file is added or a file's cost changes materially**
+  (a new fixture in a parametrized replay, a sampler budget change, a split). A file
+  absent from the map is charged the median, which is exactly how an 873 s file got packed
+  as an 8 s one.
+
+  ```bash
+  gh run download <master-run-id> -p 'durations-ubuntu-latest-3.12-*' -D /tmp/dur
+  poetry run python scripts/gen_durations.py /tmp/dur/*/durations.txt \
+      --source 'CI run <master-run-id>, ubuntu-latest 3.12, 4 shards at -n4'
+  ```
+
+- **CI closes the loop and warns when it is stale.** `.github/workflows/refresh-durations.yml`
+  runs weekly (and on `gh workflow run refresh-durations.yml`): it downloads the latest
+  green master run's ubuntu-3.12 transcripts, regenerates the file, and proposes the result
+  when the predicted worst shard improves by more than 60 s of wall clock or any test file
+  was absent -- as a pull request if the repository lets Actions open them, otherwise as a
+  pushed branch plus a tracking issue with the one-click compare link. Independently,
+  every pytest job's `pytest_shard.py --verify` reports the weights' age and the absent
+  files on its job summary page, and shard 1 of each leg raises a `::warning::` annotation
+  when any file is absent (`scripts/pytest_shard.py --balance-json` prints the same
+  numbers for a human). There is no per-test timing logger to add: the artifacts ARE the
+  per-test timing on the hardware that runs the suite.
 
 ### Looking for tests to cut: `scripts/find_redundant_tests.py`
 
@@ -425,6 +470,25 @@ The heaviest individual tests, for anyone looking for something to cut:
 | 167.1 | `test_rm_ltt.py::test_rm_ltt_off_reproduces_pre_ltt_output` |
 | 144.9 | `test_rossiter.py::test_rm_two_instrument_logp_and_gradient_finite_on_both_backends` |
 | 139.6 | `test_mkparam_in_memory.py` (fixture setup) |
+
+The same list **on CI** (ubuntu-latest 3.12, run 34888667878, 2026-09-14; 10182 s `call`
+against 1817 s `setup`, i.e. 85% / 15% -- the split has not moved). The two heaviest are
+build-and-evaluate tests with no sampler, and they are heavy on CI because their graphs
+never enter the compile cache: only shard 1's tree is saved, and both live in other shards
+(`docs/testing-cache.md`). `test_rm_ltt.py`, the 2026-08 floor file, is 26 s now.
+
+| seconds | test |
+|---|---|
+| 483.6 | `test_band_autopin_ld.py::test_two_transits_may_use_different_limb_darkening_laws` |
+| 375.6 | `test_robust_likelihood.py::test_outlier_prob_at_data_flags_a_planted_outlier` |
+| 329.8 | `test_vcve.py::test_each_vcve_orbit_adds_one_branch[modes0-2-True]` |
+| 232.5 | `test_runner.py::test_run_without_flag_writes_no_status` |
+| 221.2 | `test_rossiter.py::test_rm_system_with_linear_ld_builds` |
+| 217.4 | `test_integration_kelt4.py::test_run_fit_kelt4_trace_file_written` |
+| 199.8 | `test_run_endpoints.py::test_endpoint_run_lifecycle_start_sampling_stop` |
+| 187.9 | `test_runner_lifecycle.py::test_run_lifecycle_status_snapshot_and_graceful_stop` |
+| 176.2 | `test_mkparam_in_memory.py::test_restart_file_is_written_for_an_in_memory_run` |
+| 141.2 | `test_mulens_acceptance_a.py::...recorded_decomposition[ob09020]` |
 
 Most of that is `build_model()` plus compiling logp/dlogp inside the test body, and the
 `both_backends` cases pay it twice. Compilation is not what a WARM run spends its time
