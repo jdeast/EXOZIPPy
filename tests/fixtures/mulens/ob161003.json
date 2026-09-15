@@ -104,7 +104,7 @@
   "POT:galacticmodel.kinematic_prior": 32.786072622516784,
   "POT:gaussian_prior.lens.xalpha": -0.22175989125310563,
   "POT:gaussian_prior.lens.yalpha": -0.27824010874690136,
-  "POT:logit_uniform_prior.band.u1": -6.178916743150969,
+  "POT:logit_uniform_prior.band.u1": -4.681943244794005,
   "POT:logit_uniform_prior.lens.log_s": -1.386493199953978,
   "POT:logit_uniform_prior.lens.xalpha": -1.3863387140817194,
   "POT:logit_uniform_prior.lens.yalpha": -1.3863500106900486,
@@ -170,5 +170,5 @@
   "RV:star.radius_raw": -1.8378770664093453,
   "RV:star.rv_raw": -3.6757541328186907
  },
- "total_logp": 79337.3561833532
+ "total_logp": 79338.85315685156
 }

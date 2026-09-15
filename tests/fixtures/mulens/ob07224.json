@@ -70,7 +70,7 @@
  "terms": {
   "POT:galacticmodel.imf_prior": -1.2894404484599473,
   "POT:galacticmodel.kinematic_prior": 6.318027826355615,
-  "POT:logit_uniform_prior.band.u1": -1.7160492099935796,
+  "POT:logit_uniform_prior.band.u1": -1.3899008567140023,
   "POT:logit_uniform_prior.mulensinstrument.err_scale": -93.84871164425992,
   "POT:logit_uniform_prior.mulensinstrument.log_f_total": -14.182637090986043,
   "POT:logit_uniform_prior.mulensinstrument.q_source": -17.94099942092381,
@@ -122,5 +122,5 @@
   "RV:star.radius_raw": -0.9189385332046727,
   "RV:star.rv_raw": -1.8378770664093453
  },
- "total_logp": 23072.125172636177
+ "total_logp": 23072.451320989458
 }

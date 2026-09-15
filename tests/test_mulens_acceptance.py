@@ -44,6 +44,7 @@ import glob
 import json
 import os
 
+import numpy as np
 import pytest
 import yaml
 from mulens_acceptance import (
@@ -498,6 +499,24 @@ _OB161003_HALVED = frozenset(
 # The raw->value transform jacobians of the reseeded pm leaves reassociate
 # at the last ulp (initval now enters as a literal seed rather than as
 # nsolve's output); everything else must match to the byte.
+_U1_PRIOR_TERM = "POT:logit_uniform_prior.band.u1"
+
+
+def _u1_span_narrowing_delta(system):
+    """The logit-uniform potential's change when u1's span goes [0, 2] -> [0, 1].
+
+    For a bounded parameter x in [lo, hi] the potential is
+    log((x - lo) (hi - x) / (hi - lo)) - log(hi - lo): the transform's
+    Jacobian plus the uniform density.  At a fixed x that is
+    log(x (2 - x)) - 2 log 2 before the cap and log(x (1 - x)) after it,
+    summed over the bands (one shared potential).  The u1 start is read from
+    the built system, so a params-file change moves this with it."""
+    u1 = np.atleast_1d(np.asarray(system.band.u1.initval, dtype=float))
+    before = np.log(u1 * (2.0 - u1)) - 2.0 * np.log(2.0)
+    after = np.log(u1 * (1.0 - u1))
+    return float(np.sum(after - before))
+
+
 _OB161003_ULP_OK = frozenset(
     {
         "POT:logit_uniform_prior.star.pm_ra",
@@ -640,6 +659,17 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
                 continue
         if name in _OB161003_ULP_OK and abs(delta) <= 1e-13 * abs(before):
             continue
+        if name == _U1_PRIOR_TERM:
+            # Not a collapse term: the linear-law u1 prior span narrowed
+            # from [0, 2] to [0, 1] when the validity cap started applying
+            # to consumed bands (review 1.5.4), AFTER this recording. At an
+            # unchanged u1 the logit-uniform potential moves by a closed
+            # form per band, so the recording still reconciles analytically
+            # rather than being re-recorded (it is the stage-0 model by
+            # definition).
+            expected = _u1_span_narrowing_delta(system)
+            if abs(delta - expected) <= COLLAPSE_RTOL * abs(before):
+                continue
         unexplained[name] = (before, after, delta)
     assert not unexplained, f"unexplained logp motion: {unexplained}"
 

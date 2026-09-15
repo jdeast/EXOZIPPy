@@ -14,7 +14,12 @@ def test_instrument_name_override_resolves_correctly():
     """Verify that System correctly identifies and registers instruments."""
     config = {
         "star": [{"name": "A"}],
-        "rvinstrument": [{"name": "HIRES"}, {"name": "HARPS"}],
+        # A `file:` per entry: its absence is refused at construction since
+        # 2.14.3; nothing here reads it (load_data is never triggered).
+        "rvinstrument": [
+            {"name": "HIRES", "file": "hires.rv"},
+            {"name": "HARPS", "file": "harps.rv"},
+        ],
     }
     # Don't pass user_params, don't trigger load_data, don't register parameters.
     # Just build the system and check the registry.

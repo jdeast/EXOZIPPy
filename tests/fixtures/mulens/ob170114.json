@@ -98,7 +98,7 @@
   "POT:gaussian_prior.lens.yalpha": -0.12198928378235384,
   "POT:gaussian_prior.orbit.xbigomega": -0.04397833900031094,
   "POT:gaussian_prior.orbit.ybigomega": -0.4560216609996824,
-  "POT:logit_uniform_prior.band.u1": -2.0596389143836564,
+  "POT:logit_uniform_prior.band.u1": -1.5606477482646683,
   "POT:logit_uniform_prior.lens.log_s": -1.6387811327492807,
   "POT:logit_uniform_prior.lens.xalpha": -1.3863699661211202,
   "POT:logit_uniform_prior.lens.yalpha": -1.3863187592742796,
@@ -184,5 +184,5 @@
   "RV:star.radius_raw": -1.8378770664093453,
   "RV:star.rv_raw": -2.756815599614018
  },
- "total_logp": 5929.677189230544
+ "total_logp": 5930.176180396663
 }
