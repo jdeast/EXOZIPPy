@@ -331,7 +331,7 @@ def test_the_magnification_consumes_the_moving_geometry(kep_system):
     This closes the stage-2 gap (8.6.17): s(t0_par)/alpha(t0_par) were
     verified bitwise at START values only, never through a likelihood.
     (On the shipped example the same fact is pinned END TO END by
-    tests/test_mulens_acceptance.py's ob09020 replay: its recorded
+    tests/test_mulens_acceptance_a.py's ob09020 replay: its recorded
     RV:mulensinstrument.model term -- the data likelihood under the moving
     geometry -- reproduces the pre-split recording at zero tolerance.)
     """
