@@ -639,15 +639,20 @@ def test_verify_writes_the_job_summary_and_annotates_from_shard_one(
 
     # Assert
     assert rc == 0
-    assert "::warning title=Stale shard durations::" in out1.out
+    # The annotation is a workflow command on STDERR: the workflow captures
+    # stdout as the pytest file list, and an annotation there became test
+    # paths (every shard 1 collected nothing, exit 5, on the first CI run).
+    assert "::warning title=Stale shard durations::" in out1.err
+    assert "::warning" not in out1.out
     assert "1 of 3 test files" in out1.err
     text = summary.read_text()
     assert "test_new.py" in text, text
     assert "absent" in text
     assert "measured on 2026-01-01" in text
     assert "partition cleanly into 2 shards" in out1.err
-    # The file list itself is the LAST stdout line, untouched by the report.
-    assert out1.out.strip().splitlines()[-1].endswith("test_a.py")
+    # stdout is the file list and NOTHING else: the workflow takes all of it.
+    assert len(out1.out.strip().splitlines()) == 1
+    assert out1.out.strip().endswith("test_a.py")
 
     # Act -- shard 2: same warning on stderr, no annotation.
     summary.unlink()
@@ -665,6 +670,7 @@ def test_verify_writes_the_job_summary_and_annotates_from_shard_one(
     out2 = capsys.readouterr()
     assert rc == 0
     assert "::warning" not in out2.out
+    assert "::warning" not in out2.err
     assert "WARNING" in out2.err
     assert summary.exists(), "the summary is written from every shard"
 
