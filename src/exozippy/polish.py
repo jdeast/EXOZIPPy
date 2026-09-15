@@ -4,11 +4,13 @@ basin's optimum BEFORE anything downstream consumes the start.
 Why before whitening: the startup probe (whitening.probe_scales) measures
 logp contours around the start.  From a start far below its basin's optimum
 the contours are gradient-dominated and the measured scales come out
-arbitrarily tight -- on examples/ob140939 a start ~5900 nats low (raw error
-bars underestimated; err_scale starting at 1.0) measured scales ~1000x too
-small, NUTS's mass matrix re-widened the raw posterior to sd ~5e3 units, and
-86% of draws diverged against parameter.py's _RAW_CANCELLATION_CLIP wall at
-|raw| = 1e4.  Polishing first fixes that at the source; the probe then
+arbitrarily tight -- on examples/ob140939 a start ~5900 nats low (2026-08,
+raw error bars underestimated; err_scale starting at 1.0) measured scales
+~1000x too small, NUTS's mass matrix re-widened the raw posterior to sd ~5e3
+units, and 86% of draws diverged against parameter.py's
+_RAW_CANCELLATION_CLIP wall at |raw| = 1e4.  (The same example's four
+literature seeds start 565-3493 nats below their polished values today,
+2026-09-14.)  Polishing first fixes that at the source; the probe then
 measures curvature at a genuine optimum, the barrier steepness measurement
 uses honest unit steps, PTDE scatters chains around a real basin center, and
 NUTS starts inside the typical set.  This generalizes the PTDE-only seed
@@ -36,15 +38,28 @@ counterpart on the other path:
 
 - L-BFGS-B stops on the GRADIENT NORM (_LBFGS_GTOL, nats per raw unit) with
   maxiter as its safety net.  That is a real statement about the local
-  surface and needs no history.  Measured on examples/ob140939 (4 literature
-  seeds): 2 of 4 reach |grad| < 0.01 at 432 and 655 iterations; the other 2
-  are still crawling along a flat direction at 5000, where 33x the default
-  cap buys 9 nats out of a 547-nat climb (1.6%) and doubles the wall time.
+  surface and needs no history -- but it is a statement about the CURRENT
+  iterate only, so the tolerance has to be tight enough that the first
+  iterate to satisfy it is at the optimum and not on a shoulder: at the
+  old 1e-2 it was a first dip mid-climb on examples/kelt4's tc/logP ridge,
+  and one ulp of arithmetic moved the polished cosi by 8.5% (the note on
+  _LBFGS_GTOL below has the measurement; review 7.13.8).  At the shipped
+  1e-4 kelt4 converges in 240-294 iterations across 16 perturbed
+  arithmetics.  Measured on examples/ob140939 (4 literature seeds, 17 raw
+  coordinates, 2026-09-14) under the shipped gtol = 1e-4 / cap 400: every
+  seed climbs 565-3493 nats and every seed is a CAP-STOP at 400 (|grad|
+  0.03-0.3 at the stop), sitting 6-8 nats below the best value a 9000-
+  20000-iteration run reaches -- and 400 -> 5000 iterations buys 3-8 of
+  those nats for 12.5x the wall time (0.25 s -> 3 s per seed), with seeds
+  2 and 3 still crawling along a flat direction at 20000.  Under the old
+  1e-2 / 150 the same four seeds were cap-stops too, 0.3-1.9 nats lower.
   So the cap is not a stand-in for the tolerance -- it is the bound on
-  hierarchical-MAP drift it was documented to be, and 150 is a reasonable
-  place for it.  Do NOT layer a logp-improvement rule on top: the
-  _LBFGS_FTOL note below records what per-iteration improvement tests do to
-  a curved valley.
+  hierarchical-MAP drift it was documented to be -- and on ob140939 it is
+  the stop that fires, by design: a flat direction that gives back <1.5%
+  of the climb per decade of iterations is exactly what the cap exists to
+  bound.  Do NOT layer a logp-improvement rule on top: the _LBFGS_FTOL
+  note below records what per-iteration improvement tests do to a curved
+  valley.
 - The gradient-free DE polish (samplers.ptde.polish_seed_starts) has no
   gradient by construction -- it exists because the binary-lens
   magnification Op has none -- and its only observable, the best-lp history,
@@ -78,22 +93,57 @@ logger = logging.getLogger(__name__)
 # L-BFGS path the gradient tolerance usually ends it first; on the
 # gradient-free path the cap IS the criterion (see "Stopping" in the module
 # docstring for the measurement behind both statements).
-DEFAULT_POLISH_STEPS = 150
+DEFAULT_POLISH_STEPS = 400
 
 # L-BFGS stopping: terminate on the GRADIENT (plus the maxiter cap),
 # never on per-iteration improvement. scipy's `ftol` fires on the FIRST
 # iteration whose gain is small -- and it is RELATIVE to |f|, so the old
 # 1e-3 quit whenever an iteration gained < 1e-3*|lp| (~2 nats at
 # lp ~ 1900), stranding ob140939's seeds ~15 nats below their basin
-# peaks; even an absolute per-iteration threshold dies on a slow first
-# bend of a curved valley (measured: iteration 1 gains 0.004 nats, the
-# remaining 2.0 arrive over the next 33). ftol is therefore disabled.
-# gtol is nats per raw unit -- one preliminary whitening scale, so
-# 0.01 nat/unit is deep inside the flat top of the basin. maxiter stays
-# as the guard against hierarchical-MAP collapse (scale-like parameters
-# can run toward degenerate corners if polished without bound).
+# peaks when first measured (2026-08); re-measured 2026-09-14 on the
+# current model (lp ~ 10600, so the threshold is ~10 nats/iteration) it
+# quits after 6-11 iterations, 10-119 nats below where the gradient stop
+# + cap land the same seeds.  Even an absolute per-iteration threshold
+# dies on a slow first bend of a curved valley (measured: iteration 1
+# gains 0.004 nats, the remaining 2.0 arrive over the next 33). ftol is
+# therefore disabled.
+#
+# gtol is nats per raw unit -- one preliminary whitening scale.  It was
+# 1e-2 ("deep inside the flat top of the basin"), and that reasoning is
+# right about a well-conditioned basin and WRONG about a ridge, which is
+# what a real start climbs: scipy's gtol test is `max|proj g| <= gtol`
+# on the CURRENT iterate, so it fires on the FIRST evaluation that dips
+# under the threshold, whether or not the neighbours do.  Measured on
+# examples/kelt4 RV-only (review 7.13.8, 2026-09-14): of 177 evaluations
+# exactly one had |grad|_inf < 0.01 -- the last; the one before it read
+# 0.017 and four before that 0.19 -- and it fired 0.507 nats BELOW the
+# basin optimum (81.440 against 81.947) on a ridge whose Hessian has
+# condition number 5.4e6 (the tc/logP degeneracy; orbit.0.tc sits ~1200
+# orbits from the RV data), at iteration 148 of a 150 cap.  A first-dip
+# stop on such a ridge is an amplifier: a synthetic ONE-ULP perturbation
+# of (lp, grad) -- the objective times (1 + s*2^-52), i.e. the same
+# function computed by a different but equally correct arithmetic --
+# moved the polished cosi across 0.487..0.530 (8.5% relative width over
+# 16 seeds), the planet mass by 2.1%, the polished lp by 0.24 nats, and
+# 3 of the 16 arithmetics hit the 150 cap.  That is the whole mechanism
+# behind the cross-CI-runner scatter of tests/test_integration_kelt4.py:
+# a different OpenBLAS kernel inside scipy's own L-BFGS-B bookkeeping
+# (not the objective, which has no BLAS op) perturbs one iterate by 1
+# ulp at evaluation 4 and the stop lands elsewhere on the shoulder.
+#
+# At 1e-4 the same 16 perturbed arithmetics span 8.6e-4 in cosi, 3.0e-4
+# in the mass and 1e-6 nats in lp, all sitting at the basin optimum,
+# for ~120 more iterations (240-294 against 134-150) and +0.05 s.  The
+# cap is 400 so that band -- and the wider one on a model with several
+# such ridges -- is not a cap-stop: 150 already capped 3/16 arithmetics
+# at the OLD tolerance.  maxiter stays as the guard against
+# hierarchical-MAP collapse (scale-like parameters can run toward
+# degenerate corners if polished without bound); on ob140939 it is the
+# stop for all four literature seeds, and that is its documented job
+# (module docstring).  tests/test_polish.py pins the perturbation spread under
+# the shipped constants so a first-dip stop cannot come back unnoticed.
 _LBFGS_FTOL = 1e-12  # effectively off; gtol + maxiter terminate
-_LBFGS_GTOL = 1e-2
+_LBFGS_GTOL = 1e-4
 # Non-finite logp guard: L-BFGS line searches handle inf poorly, so a
 # non-finite evaluation returns this plateau plus |x - x0|^2, whose gradient
 # 2*(x - x0) points back at THE POLISH START x0 -- not at the last finite
