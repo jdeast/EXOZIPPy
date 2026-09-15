@@ -1525,9 +1525,14 @@ class MulensInstrument(Instrument):
         The multipliers are the flux-space images of the magnitude caps these
         parameters carried before the switch (see ``_FLUX_AMPLITUDE_CAPS``).
         The ``initval`` is only a fallback -- ``Instrument._prepare_gp`` and
-        ``_prepare_robust`` push data-driven hints (median error bar, and 10x
-        that) which outrank it -- but it matters when a file has degenerate
-        errors and those hints are skipped.
+        ``_prepare_robust`` push data-driven hints (the median error bar,
+        for both) which outrank it -- but it matters when a file has
+        degenerate errors and those hints are skipped.  Likewise the
+        ``upper`` here is only the flux-scaled ceiling: for a hogg file with
+        usable errors ``_register_robust`` has already attached the 10x-
+        median-error cap as an OPTION (review 8.6.3), which replaces this
+        override's min-clip on those elements; this one stands on the
+        degenerate-error files.
         """
         scale = np.asarray(f_total_init, dtype=float)
         for param, (cap, start) in self._FLUX_AMPLITUDE_CAPS.items():

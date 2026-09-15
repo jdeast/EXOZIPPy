@@ -29,7 +29,7 @@ from .corner_utils import (
     histogram_grid_degenerate,
     save_corner_plot,
 )
-from .diagnostics import ModelAuditor
+from .diagnostics import ModelAuditor, cap_alarm_findings, log_cap_alarms
 from .logger import fmt_duration, setup_logging
 from .mkparam import write_param_file
 from .outputs.modeling import build_modeling_output, compile_modeling_pdf
@@ -1517,6 +1517,18 @@ def _run_fit(config, gui, user_params=None):
         hot_status=hot_status,
     )
 
+    # A posterior piled against a component's modelling cap (the hogg
+    # mixture's out_scale / out_frac; review 8.6.3) is an architecture
+    # alarm, not a result: the noise model wants more freedom than the cap
+    # allows.  Manifest-driven (Parameter.cap_alarm), so nothing here names
+    # a component.  Needs the distributed posterior, hence after the mode
+    # reports; the findings also feed the modeling draft below.
+    wrapup.stage("pile-at-cap check on data-capped parameters")
+    cap_findings = []
+    with nonfatal_wrapup("pile-at-cap check"):
+        cap_findings = cap_alarm_findings(system)
+        log_cap_alarms(cap_findings, logger)
+
     # Wrapped and announced like every other wrap-up step (review 2.3.12).
     # It was the one bare call left between two guarded stages, and it is a
     # write plus an az.summary: measured on the kelt4 RV-only example, an
@@ -1606,7 +1618,7 @@ def _run_fit(config, gui, user_params=None):
     # (the unknown-key warning for this block, and for the other three, is
     # warn_unknown_config_blocks at startup -- not an inline loop here)
     try:
-        _add_wrapup_prose(system, burn_diag, mode_report)
+        _add_wrapup_prose(system, burn_diag, mode_report, cap_findings)
         # One posterior draw unlocks the model-bearing charts (phased
         # panels), whose figures otherwise never enter the draft.
         tex_path = build_modeling_output(
@@ -2275,13 +2287,20 @@ def _add_sampler_prose(system, method, swap_schedule="deo"):
         )
 
 
-def _add_wrapup_prose(system, diag, mode_report):
-    """Declare the post-fit prose: burn-in, convergence criteria, modes.
+def _add_wrapup_prose(system, diag, mode_report, cap_findings=None):
+    """Declare the post-fit prose: burn-in, convergence criteria, modes, and
+    any parameter piled against a modelling cap.
 
     These are diagnostics of the run (the convergence criteria the user
     asked the draft to record), not fitted values -- posterior numbers stay
     in the table, whose macros are the mechanism for citing them in prose.
+    The pile-at-cap sentence quotes the cap (a config-derived bound) and
+    the fraction of draws (a run diagnostic, like the burn-in fraction),
+    never a posterior value.
     """
+    from .outputs.prose import join_names
+    from .outputs.texutils import latex_escape
+
     prose = system.prose
     prose.add(
         r"The median values and 68\% confidence intervals of the "
@@ -2330,6 +2349,30 @@ def _add_wrapup_prose(system, diag, mode_report):
             section="convergence",
             key="run.convergence",
             rank=20,
+        )
+    if cap_findings:
+        # Instance names are data: escape them.  Idempotent by key, so a
+        # re-report with no finding leaves the sentence out (regenerate,
+        # never append -- outputs.md).
+        items = [
+            latex_escape(f["display"])
+            + f" ({100 * f['frac']:.0f}\\% of draws within the top "
+            f"{100 * f.get('top_frac', 0.05):.0f}\\% of its allowed range, "
+            f"whose upper bound is {f['cap']:.4g}"
+            + (" " + latex_escape(f["unit"]) if f.get("unit") else "")
+            + ")"
+            for f in cap_findings
+        ]
+        prose.add(
+            "The posterior of "
+            + join_names(items)
+            + " piled against its upper bound, which is a modelling cap "
+            "rather than a physical limit: the noise model asked for more "
+            "freedom than the cap allows, so the residuals of the affected "
+            "data should be inspected before that bound is loosened.",
+            section="convergence",
+            key="run.cap_alarm",
+            rank=30,
         )
     if mode_report is not None and getattr(mode_report, "n_modes", 1) > 1:
         # The provenance is plain text (N_eff, >=): escape it for LaTeX

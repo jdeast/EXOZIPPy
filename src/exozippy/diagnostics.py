@@ -28,6 +28,88 @@ _INERT_SUBKEYS = ("derived",)
 # never restated -- the two used to drift (see USER_PARAM_KEYS' comment).
 VALID_SUBKEYS = frozenset(USER_PARAM_KEYS) | frozenset(_INERT_SUBKEYS)
 
+# The pile-at-cap rule (review 8.6.3): an element whose upper bound is a
+# flagged modelling cap (``Parameter.cap_alarm``) is reported when MORE than
+# CAP_PILE_FRAC of its draws lie within the top CAP_TOP_FRAC of its
+# [lower, upper] range.  Half the posterior in the top twentieth of the
+# support is not a bounded parameter being sampled, it is a parameter that
+# would leave if it could.
+CAP_PILE_FRAC = 0.5
+CAP_TOP_FRAC = 0.05
+
+
+def cap_alarm_findings(system, pile_frac=CAP_PILE_FRAC, top_frac=CAP_TOP_FRAC):
+    """Every sampled element whose posterior piles against a flagged cap.
+
+    Component-agnostic and manifest-driven: the check reads nothing but
+    ``Parameter.cap_alarm`` (set by the owning component through a manifest
+    option) and the distributed posterior, so it never names a component
+    or a parameter.  Call after ``System.distribute_posterior``.  Returns a
+    list of dicts -- ``display`` (the user path, e.g.
+    ``mulensinstrument.Roman_W149.out_scale``), ``label``, ``index``,
+    ``cap`` and ``lower`` (USER units), ``unit`` and ``frac`` -- sorted by
+    label then element, for ``log_cap_alarms`` and the modeling prose.
+    """
+    findings = []
+    for p in system.get_all_parameters():
+        n = int(np.prod(p.shape)) if getattr(p, "shape", ()) else 1
+        n = max(
+            n,
+            int(np.atleast_1d(p.cap_alarm).size)
+            if p.cap_alarm is not None
+            else 1,
+        )
+        for i in range(n):
+            if not p.element_cap_alarm(i):
+                continue
+            # A pinned or derived element cannot pile anywhere; only ask
+            # once the build has written the roles (pre-build, assume free
+            # so a synthetic posterior can be audited).
+            if p._built_roles() and not p.element_is_sampled(i):
+                continue
+            frac = p.cap_saturation(i, top_frac=top_frac)
+            if frac is None or frac <= pile_frac:
+                continue
+            findings.append(
+                {
+                    "display": p.get_display_label(i),
+                    "label": p.label,
+                    "index": i,
+                    "cap": float(
+                        p.from_internal(np.atleast_1d(p.upper)[i], index=i)
+                    ),
+                    "lower": float(
+                        p.from_internal(np.atleast_1d(p.lower)[i], index=i)
+                    ),
+                    "unit": str(p.unit) if p.unit is not None else "",
+                    "frac": frac,
+                    "top_frac": top_frac,
+                }
+            )
+    return findings
+
+
+def log_cap_alarms(findings, log, top_frac=CAP_TOP_FRAC):
+    """One WARNING per finding, naming the parameter, cap and remedy."""
+    for f in findings:
+        unit = f" {f['unit']}" if f.get("unit") else ""
+        log.warning(
+            "PILED AT CAP: %s has %.0f%% of its posterior draws within the "
+            "top %.0f%% of its allowed range [%.4g, %.4g%s] -- the noise "
+            "model wants more freedom than the cap allows.  Inspect the "
+            "residuals of that data set; loosen `%s: {upper: ...}` in the "
+            "params file only if the excess is NOT a real signal the model "
+            "is missing (review 8.6.3: on DC2018 event 128 the uncapped "
+            "mixture absorbed the caustic crossing).",
+            f["display"],
+            100.0 * f["frac"],
+            100.0 * f.get("top_frac", top_frac),
+            f["lower"],
+            f["cap"],
+            unit,
+            f["display"],
+        )
+
 
 class ModelAuditor:
     def __init__(self, model, system, transformed_inits):

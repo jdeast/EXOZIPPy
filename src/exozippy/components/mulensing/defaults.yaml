@@ -593,7 +593,10 @@ mulensinstrument:
       GP SHO-term amplitude, in FLUX in the data file's own system
       (was magnitudes before the flux-likelihood change)
   # Optional hogg-mixture outlier scatter; the rest of the robust-likelihood
-  # blueprint lives in components/defaults.yaml.
+  # blueprint lives in components/defaults.yaml.  The component starts it at
+  # 1 x and caps it at 10 x the file's median flux error (review 8.6.3), so
+  # this static upper -- and _scale_flux_amplitudes' flux-scaled one -- is
+  # only the fallback for a file with degenerate errors.
   out_scale:
     lower: 0.0
     upper: 1.0e30
