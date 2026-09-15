@@ -23,6 +23,13 @@ Use the SLOWEST combination (ubuntu), not macOS and not a mixture: mixed
 weights are worse than either platform's own, and ubuntu is both the slowest
 and three of the four matrix legs.
 
+THIS IS NORMALLY RUN BY CI, not by hand: .github/workflows/refresh-durations.yml
+does exactly the two commands above weekly (and on `gh workflow run
+refresh-durations.yml`) against the latest green master run, and proposes the
+result when the balance has moved. Run it by hand when a PR adds a heavy test
+file and should not wait for Monday. The convention is in docs/testing.md,
+"Keeping tests/durations.json current".
+
 A local run still works, and is fine for a rough refresh:
 
     poetry run pytest -q -n6 --dist loadfile --durations=0 --durations-min=0 \\
@@ -43,6 +50,7 @@ import collections
 import datetime
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -50,14 +58,72 @@ from pathlib import Path
 #   12.34s call     tests/test_alpha.py::test_one[case]
 _LINE = re.compile(r"^([0-9.]+)s\s+(call|setup|teardown)\s+(\S+?)::(\S+)\s*$")
 
-# Test ids naming an example directory that is not in the repository. A
-# developer's untracked examples/<name>/ is collected by
-# test_examples_prepare locally and never on CI, so counting its cost would
-# skew the shard balance for everyone else. Matched against the parametrize id.
-_LOCAL_ONLY = ("ob09020",)
+
+def local_only_examples(repo_root: Path) -> tuple[str, ...]:
+    """Names of ``examples/<name>/`` directories on disk that git does not track.
+
+    A developer's untracked example is collected by test_examples_prepare
+    (and, if a fixture exists for it, by the mulens acceptance files) LOCALLY
+    and never on CI, so counting its cost from a workstation transcript would
+    skew the shard balance for everyone else.
+
+    DERIVED, NOT WRITTEN DOWN. This used to be a hardcoded
+    ``_LOCAL_ONLY = ("ob09020",)``, and the tuple outlived the fact it
+    recorded: examples/ob09020 was committed, CI started paying for its five
+    prepare cases and the single heaviest replay in the suite (316 s together,
+    measured 2026-09-14), and the generator went on silently dropping them --
+    so test_mulens_acceptance.py was weighed at 732 s where CI paid 873 and
+    test_examples_prepare.py at 300 where CI paid 475. Asking git what is
+    untracked cannot go stale that way. On CI (a clean checkout) the answer is
+    always empty, which is exactly right: whatever CI ran, CI paid for.
+
+    Returns () when there is no examples/ directory or git cannot be asked,
+    so a transcript from a tarball still converts -- with nothing excluded.
+    That is the conservative direction: an over-counted file shows up in the
+    output where a reader can see it, a dropped one does not.
+    """
+    examples = repo_root / "examples"
+    if not examples.is_dir():
+        return ()
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-files", "--", "examples"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    tracked = {
+        line.split("/", 2)[1]
+        for line in out.splitlines()
+        if line.count("/") >= 2
+    }
+    return tuple(
+        sorted(
+            d.name
+            for d in examples.iterdir()
+            if d.is_dir() and d.name not in tracked
+        )
+    )
 
 
-def parse(*transcripts: str) -> tuple[dict[str, float], dict[str, float]]:
+def _parametrize_id(test_id: str) -> str:
+    """The ``[...]`` part of ``test_name[param-id]``, or "" when there is none.
+
+    The local-only tags are matched INSIDE the brackets only: an example
+    directory's name is a parametrize id, never part of a test function's
+    name, and matching the whole id would let a short directory name
+    (``hat3``) hit an unrelated test that merely mentions it.
+    """
+    _, bracket, rest = test_id.partition("[")
+    return rest if bracket else ""
+
+
+def parse(
+    *transcripts: str, local_only: tuple[str, ...] = ()
+) -> tuple[dict[str, float], dict[str, float]]:
     """(per-file worker-seconds, per-file seconds excluded as local-only).
 
     Accepts several transcripts and SUMS them, which is what makes merging a
@@ -65,6 +131,10 @@ def parse(*transcripts: str) -> tuple[dict[str, float], dict[str, float]]:
     own shard, so the union across shards is one whole suite and no file
     appears twice. Feeding the same transcript in twice would double its
     files, so pass each shard exactly once.
+
+    ``local_only`` names example directories whose parametrized cases are
+    excluded (see ``local_only_examples``). Empty by default: nothing is
+    dropped unless the caller has established that it does not run on CI.
     """
     per_file: collections.Counter[str] = collections.Counter()
     skipped: collections.Counter[str] = collections.Counter()
@@ -73,7 +143,8 @@ def parse(*transcripts: str) -> tuple[dict[str, float], dict[str, float]]:
             m = _LINE.match(line.strip())
             if not m:
                 continue
-            if any(tag in m[4] for tag in _LOCAL_ONLY):
+            params = _parametrize_id(m[4])
+            if params and any(tag in params for tag in local_only):
                 skipped[m[3]] += float(m[1])
                 continue
             per_file[m[3]] += float(m[1])
@@ -147,7 +218,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     paths = [Path(t) for t in args.transcripts]
-    per_file, skipped = parse(*(p.read_text() for p in paths))
+    local_only = local_only_examples(Path(__file__).resolve().parents[1])
+    if local_only:
+        print(
+            f"excluding untracked local examples: {', '.join(local_only)}",
+            file=sys.stderr,
+        )
+    per_file, skipped = parse(
+        *(p.read_text() for p in paths), local_only=local_only
+    )
     if not per_file:
         listed = ", ".join(str(p) for p in paths)
         print(
