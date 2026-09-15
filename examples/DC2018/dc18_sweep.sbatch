@@ -4,7 +4,7 @@
 # is kept beside it deliberately so users on either scheduler have a
 # working example rather than a translation exercise.  The SGE-to-SLURM
 # mapping, the measured memory figures behind --mem, and a first-hour
-# checklist for a new machine are in notes/canon.txt.
+# checklist for a new machine are in notes/cannon.txt.
 #
 #   sbatch --array=1-6 dc18_sweep.sbatch
 #
