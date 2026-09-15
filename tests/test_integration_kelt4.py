@@ -45,7 +45,7 @@ def kelt4_result(tmp_path_factory):
         work_dir,
         # ".#*"/"#*#" are emacs lock/autosave droppings; the lock is a
         # dangling symlink that would abort the copy.
-        ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"),
+        ignore=shutil.ignore_patterns("fitresults*", ".#*", "#*#"),
     )
 
     orig_cwd = os.getcwd()
