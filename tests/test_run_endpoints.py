@@ -124,6 +124,19 @@ def _write_ptde_config(work_dir, out_prefix, *, draws=100_000):
         "min_ess": 100_000_000,
         "max_rhat": 1.0000001,
     }
+    # The wrap-up's invalid-draw gate (outputs/modes.check_invalid_frac) must
+    # not decide these tests. A 30-step tune with 4 chains per rung (< the
+    # n_params + 2 = 17 that DE needs to span kelt4's 15 parameters) is
+    # burn-in by construction: T=1 starts are dispersed 3 probe units from
+    # the MAP (lp 100-250 nats below it), and since 8.4.7 (#281) the hot rung
+    # is dispersed sqrt(T) wider still instead of copying T=1, so a chain that
+    # starts far out can no longer be pulled in by a swap within the window
+    # the tests sample. About one run in three then stops with a T=1 chain
+    # sitting > 50 nats below the bulk, identify_modes rejects its draws as
+    # "raw-z" invalid, the gate raises, and a LIFECYCLE test fails on the
+    # posterior's quality. force=True downgrades the gate to its warning;
+    # the draws are still written and the trace still asserted valid.
+    config["modes"] = {"force": True}
     config_name = "run_ptde.yaml"
     with open(work_dir / config_name, "w") as fh:
         yaml.safe_dump(config, fh)
