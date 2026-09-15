@@ -398,37 +398,71 @@ after the prune fix, the macOS tree was **5055 entries**: controller 1800 +
 gw0 1578 + gw1 1677. Dropping the controller as well as gw1 makes the artifact
 about **3.2x** smaller rather than 2x.
 
-**The suite is split across 4 shards**, `scripts/pytest_shard.py`. Worker
-count is capped by the runner -- measured, `ubuntu-latest` is `cpus=4,
-memory=15.6 GB` and `macos-latest` is `cpus=3, memory=7.0 GB` -- and ~6700
-worker-seconds over 4 workers is still ~22 minutes, so more machines is the
-only way further down.
+**The suite is split across shards, 4 on ubuntu and 3 on macOS**,
+`scripts/pytest_shard.py` (the per-OS count is the `shards` matrix key in
+tests.yml, passed as `--of`). Worker count is capped by the runner --
+measured, `ubuntu-latest` is `cpus=4, memory=15.6 GB` and `macos-latest` is
+`cpus=3, memory=7.0 GB` -- and ~12000 ubuntu worker-seconds (2026-09-14) over
+4 workers is still ~50 minutes, so more machines is the only way down.
 
-**Why exactly four**, from the first sharded run rather than from taste. Two
-constraints bound a shard's wall clock: a measured **~225 s fixed cost per
-job**, and the fact that `--dist loadfile` pins a whole file to one worker, so
-a shard can never beat its slowest single file's SERIAL time.
+**What bounds a job**, re-measured 2026-09-14 on four master runs (34888667878
+and three siblings) and predicting every observed job within 4%:
 
-| shards | jobs | wall/job | binding constraint |
+    wall/job = ~100 s fixed + max(shard worker-seconds / workers, slowest FILE serial)
+
+The fixed cost is **~100 s** (setup-python cache hit 27-36 s, poetry install
+1-2 s from cache, compile-cache restore 2-3 s, collect and seed 10-15 s, the
+upload and the loadfile tail), not the 225 s the 2026-08 projection assumed.
+The second term is the one that bites: `--dist loadfile` pins a whole file to
+one worker, so a shard never beats its slowest file's SERIAL time, and once
+one file exceeds the per-worker share the shard count stops mattering for the
+job that carries it. Priced with the fresh weights and the script's own
+packing, files as they stood on 2026-09-14:
+
+| ubuntu shards | jobs/push | worst job | best job | binding constraint |
+|---|---|---|---|---|
+| 4 | 16 | 16.2m | 14.2m | one file (`test_mulens_acceptance.py`, 873 s) |
+| 5 | 20 | 16.2m | 11.7m | that file |
+| 6 | 24 | 16.2m | 10.0m | that file |
+| 8 | 32 | 16.2m | 7.9m | that file |
+
+The worst job never moved: adding shards bought nothing until the file was
+split. After splitting it in two (`test_mulens_acceptance_a.py` / `_b.py`,
+~435 s each, a fixture-name partition in `tests/mulens_acceptance_replay.py`
+-- the tests share no fixture setup, so the split is free):
+
+| ubuntu shards | jobs/push | worst job | binding constraint |
 |---|---|---|---|
-| 2 | 8 | 14.6m | spread |
-| 3 | 12 | 11.0m | spread |
-| **4** | **16** | **9.2m** | spread |
-| 6 | 24 | 8.1m | slowest single file |
-| 8 | 32 | 8.1m | slowest single file |
+| **4** | **16** | **14.2m** | spread (749 worker-s per worker) |
+| 5 | 20 | 11.7m | spread |
+| 6 | 24 | 10.0m | spread |
+| 8 | 32 | 9.7m | one file (`test_band_autopin_ld.py`'s mixed-law test, 484 s) |
 
-Four is the last point where adding machines still helps; past it the
-constraint flips to one file and 8 more jobs buy about a minute. **The floor is
-8.1 min**, set by `test_rm_ltt.py` at 262 s serial on ubuntu. Going below it
-means splitting slow FILES, not adding shards -- and `test_rm_ltt.py` is two
-test functions with no shared fixture, so that is available and cheap when
-wanted.
+So the RULE is the same one the 2026-08 projection reached from a different
+floor (`test_rm_ltt.py` at 262 s then; it is 26 s now): **below ~10 minutes
+the lever is splitting slow FILES, never adding jobs.** The next candidates
+are in the table of heaviest tests in `docs/testing.md`: the 484 s band test
+and the 376 s robust-likelihood outlier test are each ONE test using only
+`tmp_path`, so they move to their own files for free.
 
-Four also buys MARGIN, which is the practical argument. Two shards measured
-**15:10 to 26:36** across eight jobs: a mean sitting right on the 20-minute
-target with about +/-40% runner variance, so roughly half of all runs missed
-it. Picking a shard count whose mean equals the target means failing the target
-half the time.
+**Adding jobs also has a hard ceiling**, and it is why ubuntu stays at 4 and
+macOS went from 4 shards to 3. The free plan runs **20 concurrent jobs and 5
+macOS**. A push is 12 ubuntu + 3 macOS + lint + the gate + the 2 Intel-macOS
+probes = 19 jobs, 5 of them macOS -- at the macOS cap. With 4 macOS shards it
+was 6 macOS jobs against 5, so one macOS shard waited ~8 minutes on every push
+even with nothing else running, and the RUN's wall clock (~23 min) was set by
+that queue rather than by any shard; with three PR runs overlapping the queue
+reached 17-18 minutes. macOS is **3.2x faster per worker-second** (3783
+worker-s for the same suite against ubuntu's 11987), so three macOS shards
+land at ~100 + 3783/2/3 = ~730 s = **12.2 min** per job, under the ubuntu
+jobs. A fifth ubuntu shard (+4 jobs = 23) would queue a second wave behind the
+first and cost more than it saves. Count the jobs before editing either list.
+
+Four ubuntu shards also buy MARGIN, which is the practical argument and has
+not changed. Two shards measured **15:10 to 26:36** across eight jobs: a mean
+sitting right on the 20-minute target with about +/-40% runner variance, so
+roughly half of all runs missed it. Picking a shard count whose mean equals
+the target means failing the target half the time.
 
 **The split is duration-aware**, packing longest-file-first from
 `tests/durations.json`. That file is a **weighting hint and never a
@@ -493,10 +527,45 @@ poetry run pytest -q -n6 --dist loadfile --durations=0 --durations-min=0 \
 poetry run python scripts/gen_durations.py /tmp/durations.txt
 ```
 
-Staleness is reported on every run, and raises a GitHub Actions warning
-annotation past 20% unknown files -- a warning, not a failure, because stale
-weights cost balance and never coverage. A test also fails if it drifts past
-35%, which is the point at which the split has quietly become round-robin.
+**Regenerating is not optional, and it is no longer manual.** Between
+2026-08-25 and 2026-09-14 nobody did it: 25 test files landed unrecorded, the
+packer charged the new 873 s `test_mulens_acceptance.py` the 8 s median and
+still believed `test_rossiter.py` was 662 s (457) and `test_rm_ltt.py` 445 s
+(26), and ubuntu shard 3 ran 16-17 minutes against shard 1's 9-11 -- 212 s of
+wall clock from staleness alone, on every push, for three weeks. Two things
+now keep that from recurring, and both read the artifacts described above,
+which is why per-test timing loggers were never the missing piece:
+
+- **`.github/workflows/refresh-durations.yml`** runs weekly and on
+  `gh workflow run refresh-durations.yml`. It finds the latest green master
+  run, downloads its ubuntu-3.12 transcripts (refusing a partial set),
+  regenerates the file, and prices the change with
+  `pytest_shard.py --balance-json --compare-to <old>`: the OLD packing costed
+  by the NEW measurement against the new packing. When the predicted worst
+  shard improves by more than 240 worker-seconds (60 s of wall on 4 workers)
+  or any test file was absent from the committed weights, it pushes a
+  `ci/refresh-durations-<run-id>` branch and opens a pull request -- if the
+  repository allows Actions to open them (Settings > Actions > General >
+  "Allow GitHub Actions to create and approve pull requests"; it was OFF on
+  2026-09-14) -- and otherwise updates one tracking issue with the compare
+  link, which opens the PR in one click. It never touches master itself, and
+  it closes the issue when a later run finds the weights current.
+- **`pytest_shard.py --verify` on every pytest job** writes the weights' date,
+  age, predicted worst shard and the list of absent files to the job's
+  summary page, and shard 1 of each os+python leg raises a GitHub Actions
+  `::warning::` annotation whenever any file is absent (or the measurement is
+  older than 120 days, the backstop for the refresh loop itself having
+  stopped). A warning, not a failure, because stale weights cost balance and
+  never coverage. A test also fails if drift passes 35% of files, which is the
+  point at which the split has quietly become round-robin.
+
+The `_LOCAL_ONLY` trap is the other lesson from that gap. `gen_durations.py`
+carried a hardcoded exclusion for `ob09020`, a then-untracked example, and the
+tuple outlived the fact: once `examples/ob09020` was committed CI paid for it
+(316 s across its prepare cases and the suite's single heaviest replay) while
+the generator went on dropping it. The exclusion is now DERIVED -- an
+`examples/<name>/` directory on disk that `git ls-files` does not know -- so
+it is empty on any clean checkout, including CI's.
 
 Only **shard 1** prunes, saves, and drops superseded caches. Its tree already
 serves the other shards almost completely -- the same ~95% redundancy as above
