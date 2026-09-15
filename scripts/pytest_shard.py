@@ -463,8 +463,17 @@ def main(argv: list[str] | None = None) -> int:
             # and a red suite would be the wrong severity for "please
             # re-measure". From shard 1 only, so a run carries one
             # annotation per os+python leg rather than one per job.
+            # On STDERR, like every other diagnostic here: the workflow
+            # captures this script's stdout wholesale as the pytest file
+            # list (`files=$(... --verify)`), and the first run of this
+            # step handed pytest the annotation text as test paths --
+            # shard 1 of every leg collected nothing and exited 5. The
+            # runner processes workflow commands on either stream.
             if args.shard == 1:
-                print(f"::warning title=Stale shard durations::{note}")
+                print(
+                    f"::warning title=Stale shard durations::{note}",
+                    file=sys.stderr,
+                )
         # The fuller report only under --verify, which is how CI calls
         # this; a developer asking for a file list gets the file list.
         if args.verify:
