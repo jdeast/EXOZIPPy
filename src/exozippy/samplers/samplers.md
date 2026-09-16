@@ -269,6 +269,62 @@ parametrized over both samplers and both knobs. So the useful question is never 
 validated" -- it is **"which shared knobs does exactly one of the two
 samplers validate, and which shared buffers does exactly one of them
 manage?"** Ask it of anything `run.py` forwards to both.
+## `de_partner_snapshot`: async takes DE partners from an archive, not from
+## whatever is visible
+
+`sampler: {de_partner_snapshot: true}` is the default and is a CORRECTNESS
+setting, not a tuning one (review 2.4.20, JDE-proposed).
+
+`ptde_async` chains advance as fast as their likelihood evaluates, and on the
+microlensing Op path evaluation cost rises steeply with caustic proximity --
+that heavy tail is the whole reason async exists. So a chain is slow BECAUSE
+of where it is, and partner states taken "as available" are weighted toward
+chains in cheap regions. The proposal kernel then depends on the proposing
+chain's own cost, and the plain Metropolis ratio does not correct for it:
+detailed balance breaks in a direction that correlates with the physics.
+
+**Time-staleness by itself is NOT the argument**, and the module docstring's
+wording invites that mistake. At stationarity `x_a(t1) - x_b(t2)` is the
+difference of two draws from the same target, so the time indices do not
+enter its distribution at all. What bites is the speed-POSITION correlation
+above, and non-stationarity during burn-in, where "the chains represent the
+posterior" is exactly what is false.
+
+The fix is one archive per rung, refreshed when that rung's SLOWEST chain
+advances, so every chain proposes from the same array. This is the
+DEMetropolisZ construction (ter Braak & Vrugt 2008) -- difference vectors
+from an archive rather than live states -- and `demcz` already ships it here,
+so the validity argument is published rather than invented.
+
+Three properties to preserve if you touch this:
+
+- **The BASE stays `current_state[k][i]`.** `RawLayout.propose` returns
+  `pop[i] + gamma*(partners[j1] - partners[j2])`; only the difference comes
+  from the archive. Taking the base from the archive would propose from a
+  position the chain is not at, against an acceptance test that compares the
+  CURRENT lp.
+- **The rng stream does not move.** One `_pick_two` over an equal-length
+  population, one `standard_normal`, so `partners=pop` is bit-for-bit the old
+  behaviour -- which the tests that pin the proposal path depend on.
+  `tests/test_ptde.py::test_partners_change_the_difference_vector_but_not_the_base_or_the_stream`.
+- **The key is ptde_async-ONLY, and classified as such** in run.py's
+  `METHOD_ONLY_SAMPLER_KEYS`. It is the mirror of `rung_thin_factor`: `ptde`'s
+  population is synchronized by construction, so there is no archive to take
+  a snapshot of.
+
+What it costs is lag, worst exactly where the population is not yet
+stationary. One pathologically slow chain freezes its rung's archive; that is
+unbounded today, and a max-lag forced refresh is the obvious extension.
+
+**What the evidence does and does not say.** The testable prediction
+"stranded chains are the slow ones" FAILED on ab194: the 3 good chains had
+lag-1 lp autocorrelation 0.9998 against the 75 stranded ones' 0.9933 -- the
+stranded chains moved faster. But lp autocorrelation is movement in lp, not
+evaluation wall-time, and per-chain timing was never collected
+(`collect_rung_timing` was off). So the mechanism is UNTESTED rather than
+refuted, the fix rests on the correctness argument alone, and those numbers
+must not be cited as support for it.
+
 ## `de_mode_hop`: the counters the adapter reads must share one window
 
 ter Braak's gamma=1 mode hop (`sampler: {de_mode_hop: p}`, default 0.0 = off)
