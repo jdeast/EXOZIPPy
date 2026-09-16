@@ -1055,6 +1055,7 @@ def ptde_sample(
     start_dispersion=None,
     lp_plausibility_ceiling=None,
     progress_callback=None,
+    store_hot_chains="auto",
 ):
     """
     Parallel Tempering + Differential Evolution sampler.
@@ -1176,10 +1177,9 @@ def ptde_sample(
     """
     lp_guard = LpPlausibilityGuard(lp_plausibility_ceiling, "PTDE", logger)
 
-    if swap_schedule not in ("deo", "random"):
-        raise ValueError(
-            f"swap_schedule must be 'deo' or 'random', got {swap_schedule!r}"
-        )
+    de_mode_hop = _common.validate_shared_ptde_args(
+        swap_schedule, de_mode_hop, "PTDE"
+    )
 
     rng = np.random.default_rng(seed)
 
@@ -1267,6 +1267,28 @@ def ptde_sample(
     # Python loop over the free RVs (see _common.RawLayout, which owns the
     # packing and the proof that it is bit-identical).
     layout = _common.RawLayout(raw_start, model_keys)
+
+    # Thinned hot-rung retention, the SAME recorder ptde_async uses.  This
+    # sampler used to warn that store_hot_chains was ignored, which made
+    # every sync run blind to posterior-suppressed modes
+    # (outputs.ledger.discover_hot_modes has nothing to read) and made a
+    # sync-vs-async comparison unequal in a way that had nothing to do with
+    # scheduling.  Nothing here is synchronous or asynchronous.
+    hot = _common.HotChainRecorder(
+        store_hot_chains,
+        system,
+        n_temps,
+        n_chains,
+        n_params,
+        model_keys,
+        raw_start,
+        raw_to_phys,
+        raw_var_names,
+        draws,
+        layout,
+        "PTDE",
+        logger,
+    )
     populations = [
         layout.pack_many([pop[i % n_chains] for i in range(n_chains)])
         for pop in rung_starts
@@ -1622,6 +1644,22 @@ def ptde_sample(
                     stored_lp[i, draw_idx] = logps[0][i]
                 actual_draws = draw_idx + 1
 
+                # Thinned hot-rung storage (see store_hot_chains).  The
+                # thinning counter is the DRAW INDEX, because this loop is
+                # step-synchronous and every rung advances together -- that
+                # is the synchronous half; the rest is _common's.  Rung 0 is
+                # the cold group above and the recorder refuses it.
+                if hot.enabled:
+                    for k in range(1, n_temps):
+                        for i in range(n_chains):
+                            hot.maybe_store(
+                                k,
+                                i,
+                                populations[k][i],
+                                logps[k][i],
+                                draw_idx,
+                            )
+
             # 6. progress log + gamma adaptation during tune
             if (step + 1) % log_every == 0:
                 ar = n_accept / np.maximum(n_propose, 1)
@@ -1808,6 +1846,8 @@ def ptde_sample(
         "PTDE",
         logger,
     )
+
+    hot.attach(idata, temperatures, logger)
 
     # Ladder communication statistics, stamped on the trace so the mode
     # report can quote them as context (see stamp_and_log_run_summary).

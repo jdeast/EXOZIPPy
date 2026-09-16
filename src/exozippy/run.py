@@ -309,11 +309,13 @@ def warn_maxtime_unsupported(method, maxtime):
 # says nothing, and the branch that would read it is never taken.
 #
 # That is the whole defect (reviews 2.4.2 and 2.3.6).  2.4.2 landed the
-# mechanism for the three keys it had traced -- store_hot_chains is forwarded
-# only to ptde_async, so under method: ptde the hot-chain mode discovery
-# simply never runs and the user is told nothing; rung_thin_factor /
-# rung_thin_start are the same thing mirrored, ptde-only and silently ignored
-# by ptde_async.  2.3.6 is that finding on the full list: at least a dozen
+# mechanism for the three keys it had traced.  store_hot_chains was one of
+# them -- forwarded only to ptde_async, so under method: ptde the hot-chain
+# mode discovery simply never ran and the user was told nothing.  That one is
+# now FIXED AT THE SOURCE rather than described: both loops share
+# samplers._common.HotChainRecorder, so the key is honored either way and no
+# longer appears in the table below.  rung_thin_factor / rung_thin_start
+# remain, ptde-only and correctly so.  2.3.6 is that finding on the full list: at least a dozen
 # more keys are read by exactly one branch or family.
 #
 # THE HEADLINE IS `chains`.  It is forwarded to the HMC branches and to demc /
@@ -367,8 +369,17 @@ METHOD_ONLY_SAMPLER_KEYS = {
     # Per-RUNG start dispersion (8.4.7): meaningless without a ladder, so it
     # is PTDE-only rather than an all-method key.
     "start_dispersion": _PTDE_METHODS,
-    # ... and the two documented asymmetries inside it.
-    "store_hot_chains": ("ptde_async",),
+    # store_hot_chains USED to read ("ptde_async",) here; it is now honored
+    # by BOTH PTDE loops, because retaining a thinned copy of the hot rungs
+    # has nothing to do with how proposals are scheduled
+    # (samplers._common.HotChainRecorder owns it and both call it).  It stays
+    # in this table rather than moving to ALL_METHOD: an HMC or nested run
+    # has no ladder, so there is still a method that ignores it, and the
+    # partition test is what insists the distinction be spelled out.
+    "store_hot_chains": _PTDE_METHODS,
+    # ... and the documented asymmetry that IS real.  These two address the
+    # blocking that async dispatch removes outright, so there is nothing for
+    # ptde_async to honor.
     "rung_thin_factor": ("ptde",),
     "rung_thin_start": ("ptde",),
 }
@@ -1115,6 +1126,7 @@ def _run_fit(config, gui, user_params=None):
                     draws,
                     tune,
                     seed=seed,
+                    store_hot_chains=store_hot_chains,
                     n_temps=n_temps,
                     T_max=T_max,
                     n_chains=n_chains,

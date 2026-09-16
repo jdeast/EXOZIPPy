@@ -224,10 +224,9 @@ def ptde_async_sample(
     -------
     arviz.InferenceData with posterior and sample_stats["lp"] from T=1 chains.
     """
-    if swap_schedule not in ("deo", "random"):
-        raise ValueError(
-            f"swap_schedule must be 'deo' or 'random', got {swap_schedule!r}"
-        )
+    de_mode_hop = _common.validate_shared_ptde_args(
+        swap_schedule, de_mode_hop, "PTDE-async"
+    )
 
     lp_guard = LpPlausibilityGuard(
         lp_plausibility_ceiling, "PTDE-async", logger
@@ -257,16 +256,6 @@ def ptde_async_sample(
     raw_to_phys, raw_to_phys_batched, raw_var_names, out_var_names = (
         _common.compile_conversions(model)
     )
-    # Element count of the PHYSICAL side (sampled + Deterministic), the
-    # denominator of the hot-group trace share below.  One transform
-    # evaluation at the start point; the graph is compiled either way.
-    _n_out_elements = sum(
-        int(np.asarray(v).size)
-        for v in raw_to_phys(
-            *[np.asarray(raw_start[k]) for k in raw_var_names]
-        )
-    )
-
     n_chains = _common.resolve_n_chains(
         n_chains, n_params, "PTDE-async", logger
     )
@@ -390,32 +379,24 @@ def ptde_async_sample(
 
     # Optional thinned hot-rung storage (store_hot_chains): detector data
     # for post-hoc discovery of posterior-suppressed modes; see the
-    # parameter docstring. UNtempered logp is stored (current_lp holds the
-    # raw logp; tempering happens in the acceptance rule), so hot lp values
-    # are directly comparable to T=1.
-    hot_thin = _common.resolve_store_hot_chains(
+    # parameter docstring.  The recorder is shared with ptde.py -- nothing
+    # about retaining hot draws is asynchronous; only WHICH COUNTER thins
+    # is, and that stays at the store site below.
+    hot = _common.HotChainRecorder(
         store_hot_chains,
         system,
         n_temps,
+        n_chains,
         n_params,
-        _n_out_elements,
+        model_keys,
+        raw_start,
+        raw_to_phys,
+        raw_var_names,
+        draws,
+        layout,
         "PTDE-async",
         logger,
     )
-    # hot_cap stays the LOGICAL per-(rung, chain) cap that the store site
-    # tests against; the allocation below is only the starting capacity and
-    # grows in chunks the same way the T=1 buffers do (6.4.6).
-    hot_cap = max(1, draws // hot_thin) if hot_thin else 0
-    if hot_thin:
-        _hot_cap0 = min(hot_cap, _common.hot_draw_chunk(n_temps - 1))
-        stored_hot_raw = {
-            k: np.zeros(
-                (n_temps - 1, n_chains, _hot_cap0) + raw_start[k].shape
-            )
-            for k in model_keys
-        }
-        stored_hot_lp = np.full((n_temps - 1, n_chains, _hot_cap0), np.nan)
-        per_hot_draws = np.zeros((n_temps - 1, n_chains), dtype=int)
 
     n_accept = np.zeros(n_temps)
     n_propose = np.zeros(n_temps)
@@ -439,9 +420,6 @@ def ptde_async_sample(
     n_swap_propose = np.zeros(max(n_temps - 1, 1))
     n_swap_accept_cum = np.zeros(max(n_temps - 1, 1))
     n_swap_propose_cum = np.zeros(max(n_temps - 1, 1))
-    de_mode_hop = float(de_mode_hop or 0.0)
-    if not 0.0 <= de_mode_hop < 1.0:
-        raise ValueError(f"de_mode_hop must be in [0, 1), got {de_mode_hop}")
     # Per-slot flag: was the in-flight proposal a gamma=1 hop?  Set when the
     # proposal is built, read when its result is scored -- safe as plain
     # state because the parent builds and scores in one thread.
@@ -894,23 +872,18 @@ def ptde_async_sample(
                     stored_lp[i, d] = current_lp[k][i]
                     per_chain_draws[i] = d + 1
 
-                # thinned hot-rung storage (see store_hot_chains)
-                if (
-                    hot_thin
-                    and k >= 1
-                    and iter_count[k][i] > tune
-                    and iter_count[k][i] % hot_thin == 0
-                    and per_hot_draws[k - 1, i] < hot_cap
-                ):
-                    d = per_hot_draws[k - 1, i]
-                    stored_hot_lp = _common.grow_hot_draw_storage(
-                        stored_hot_raw, stored_hot_lp, d + 1
+                # Thinned hot-rung storage (see store_hot_chains).  The
+                # thinning counter is THIS CHAIN's own iteration count,
+                # because async chains advance independently -- that is the
+                # asynchronous half; the rest is _common's.
+                if iter_count[k][i] > tune:
+                    hot.maybe_store(
+                        k,
+                        i,
+                        current_state[k][i],
+                        current_lp[k][i],
+                        iter_count[k][i],
                     )
-                    layout.store_draw(
-                        stored_hot_raw, current_state[k][i], k - 1, i, d
-                    )
-                    stored_hot_lp[k - 1, i, d] = current_lp[k][i]
-                    per_hot_draws[k - 1, i] = d + 1
 
             n_completed_total[0] += 1
 
@@ -1131,50 +1104,7 @@ def ptde_async_sample(
         logger,
     )
 
-    if hot_thin:
-        import xarray as xr
-
-        # Rectangular cut at the shortest hot chain (rungs run at slightly
-        # different speeds); rungs x chains flatten into one 'chain' dim
-        # with a per-chain temperature coordinate, which round-trips
-        # through netcdf.
-        n_hot = int(per_hot_draws.min())
-        if n_hot > 0:
-            n_hot_chains = (n_temps - 1) * n_chains
-            data_vars = {}
-            for key in model_keys:
-                arr = stored_hot_raw[key][:, :, :n_hot].reshape(
-                    (n_hot_chains, n_hot) + raw_start[key].shape
-                )
-                dims = ("chain", "draw") + tuple(
-                    f"{key}_dim_{j}" for j in range(arr.ndim - 2)
-                )
-                data_vars[str(key)] = (dims, arr)
-            data_vars["lp"] = (
-                ("chain", "draw"),
-                stored_hot_lp[:, :, :n_hot].reshape(n_hot_chains, n_hot),
-            )
-            idata["posterior_hot"] = xr.Dataset(
-                data_vars,
-                coords={
-                    "chain": np.arange(n_hot_chains),
-                    "draw": np.arange(n_hot),
-                    "temperature": (
-                        "chain",
-                        np.repeat(np.asarray(temperatures[1:]), n_chains),
-                    ),
-                },
-            )
-            logger.info(
-                f"PTDE-async: stored {n_hot} thinned hot draws/chain from "
-                f"{n_temps - 1} rungs x {n_chains} chains "
-                f"(store_hot_chains={store_hot_chains}, thin={hot_thin})"
-            )
-        else:
-            logger.warning(
-                "PTDE-async: store_hot_chains was set but no hot draws "
-                "accumulated (draws too small for the thinning factor?)"
-            )
+    hot.attach(idata, temperatures, logger)
 
     # Ladder communication statistics, stamped on the trace so the mode
     # report can quote them as context (see stamp_and_log_run_summary).
