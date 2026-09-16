@@ -202,11 +202,13 @@ def test_smeared_matches_exofast_tran(parity_no_ltt):
     # an instantaneous evaluation at the same epochs differ by far more
     # than the parity tolerance, so the test above cannot pass by
     # accidentally comparing two instantaneous models.
+    # The instantaneous reference is the 2-minute instrument's (unsmeared,
+    # same band) plotted model at the 30-minute epochs -- the plotted model
+    # smears per instrument exactly as the likelihood does now, so the
+    # smeared instrument itself has no instantaneous curve to ask for.
     t30 = np.array(fix["smeared"]["time"])
     with model:
         point = system.get_internal_point(model, system.get_raw_start(model))
     param_values = system.transit._point_to_plot_params(point, system)
-    instantaneous = 1.0 + system.transit._compiled_full_lc(
-        t30, 1, *param_values
-    )
+    instantaneous, _ = system.transit._lc_at_times(param_values, 0, t30)
     assert np.max(np.abs(instantaneous - fix["smeared"]["flux"])) > 1e-5

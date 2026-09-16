@@ -264,11 +264,10 @@ def _flux_at(system, point, times):
     times, via the same compiled evaluator plot_data/plot() use."""
     transit = system.transit
     param_values = transit._point_to_plot_params(point, system)
-    y = transit._compiled_full_lc(
-        np.asarray(times, dtype=float), 0, *param_values
+    full, _ = transit._lc_at_times(
+        param_values, 0, np.asarray(times, dtype=float)
     )
-    baseline = transit._point_value(point, transit.baseline, 0)
-    return baseline + y
+    return full
 
 
 @pytest.fixture(scope="module")
@@ -512,12 +511,13 @@ def test_thermal_eclipse_is_exposure_smeared(tmp_path_factory):
     (exptime=60 min, ninterp=21) on a light curve finely sampling the
     secondary eclipse,
     When the actual likelihood mu is evaluated,
-    Then it equals the sub-exposure average of the thermal-included
-    instantaneous model (_smeared_full_lc, the plotting path's smearing
-    of the same physics) and NOT the instantaneous model itself --
-    proving the thermal term lives inside the oversampling group loop
-    and gets smeared with the transit, exactly as EXOFASTv2 averages the
-    full model (thermal included) over exofast_chi2v2.pro's grid.
+    Then it equals the plotted model at the same times (the same
+    expression, _lc_model, compiled on the plot grid -- so the plots show
+    the smeared, thermal-included curve the fit scored) and NOT the
+    instantaneous model of a sibling system without smearing -- proving
+    the thermal term lives inside the oversampling group loop and gets
+    smeared with the transit, exactly as EXOFASTv2 averages the full
+    model (thermal included) over exofast_chi2v2.pro's grid.
     """
     d = tmp_path_factory.mktemp("thermal_smeared")
     t_sec = _TC + _PERIOD / 2.0
@@ -540,10 +540,21 @@ def test_thermal_eclipse_is_exposure_smeared(tmp_path_factory):
 
     tr = system.transit
     param_values = tr._point_to_plot_params(point, system)
-    baseline = tr._point_value(point, tr.baseline, 0)
+    smeared, _ = tr._lc_at_times(param_values, 0, t)
+    np.testing.assert_allclose(mu, smeared, atol=1e-12)
 
-    smeared = baseline + tr._smeared_full_lc(t, 0, *param_values)
-    np.testing.assert_allclose(mu, smeared, atol=1e-8)
-
-    instantaneous = baseline + tr._compiled_full_lc(t, 0, *param_values)
+    # The instantaneous reference: the same light curve with no smearing
+    # keys, at the same start point.
+    system_instant = System(
+        _config(lc, fitthermal=True), user_params=_params(_THERMAL_PPM)
+    )
+    system_instant.prepare()
+    model_instant = system_instant.build_model()
+    with model_instant:
+        point_instant = system_instant.get_internal_point(
+            model_instant, system_instant.get_raw_start(model_instant)
+        )
+    instantaneous = _likelihood_mu(
+        system_instant, model_instant, point_instant
+    )
     assert np.max(np.abs(mu - instantaneous)) > 1e-5
