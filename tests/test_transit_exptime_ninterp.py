@@ -78,8 +78,8 @@ T14 = 0.0696  # days; total transit duration at the _params() geometry
 
 def _plot_param_values(system):
     """Reproduce transit.py's own plot_params -> compiled-function argument
-    conversion (see Transit.plot_data), so we can call the untouched
-    compile_plotters path (no oversampling) as an independent reference."""
+    conversion (see Transit.plot_data) at the start point, so the plotted
+    model can be evaluated without a sampler point."""
     return [
         float(np.squeeze(np.asarray(p.initval)))
         if getattr(p.value, "ndim", 0) == 0
@@ -112,11 +112,15 @@ def _model_flux_at_initial_point(system, model):
 
 def test_ninterp_one_matches_instantaneous_model(tmp_path_factory):
     """
-    Given a transit instrument with ninterp=1 and a nonzero exptime,
-    When the model is built,
-    Then transit.model_flux exactly matches the instantaneous model from
-    compile_plotters (which never oversamples) -- ninterp=1 must ignore
-    exptime and short-circuit to the original single-point evaluation.
+    Given a transit instrument with ninterp=1 and a nonzero exptime, and
+    an otherwise identical instrument with no smearing keys at all (the
+    instantaneous model),
+    When both models are built,
+    Then their transit.model_flux agree to floating-point precision --
+    ninterp=1 must ignore exptime and short-circuit to the original
+    single-point evaluation.  (The plotted model used to serve as the
+    instantaneous reference here; it now smears exactly as the likelihood
+    does, so the reference is a sibling system without the keys.)
     """
     d = tmp_path_factory.mktemp("ninterp_one")
     t = np.linspace(TC - 0.55 * T14, TC + 0.55 * T14, 401)
@@ -126,16 +130,16 @@ def test_ninterp_one_matches_instantaneous_model(tmp_path_factory):
     system = System(config, user_params=_params())
     system.prepare()
     model = system.build_model()
-
     model_flux = _model_flux_at_initial_point(system, model)
 
-    decrement = system.transit._compiled_full_lc(
-        system.transit.time, 0, *_plot_param_values(system)
-    )
-    baseline = float(np.atleast_1d(system.transit.baseline.initval)[0])
-    reference = baseline + decrement
+    config_instant = _config([lc])
+    system_instant = System(config_instant, user_params=_params())
+    system_instant.prepare()
+    model_instant = system_instant.build_model()
+    reference = _model_flux_at_initial_point(system_instant, model_instant)
 
-    np.testing.assert_allclose(model_flux, reference, atol=1e-8)
+    assert system.transit.exptime_min == [30.0]
+    np.testing.assert_allclose(model_flux, reference, atol=1e-12)
 
 
 def test_invalid_smearing_config_warns_and_falls_back(
@@ -330,11 +334,14 @@ def test_mixed_ninterp_model_flux_matches_instantaneous_only_for_ninterp_one(
     exptime, ninterp=21), both instruments sampling the same fine time grid
     across one transit,
     When transit.model_flux is evaluated,
-    Then inst0's rows match its own instantaneous (compile_plotters)
-    reference to floating-point precision, while inst1's rows do not --
-    proving the grouped oversampling actually reaches the model's
-    per-observation output correctly for each instrument independently,
-    not just the grid/weight arrays checked in the test above.
+    Then inst0's rows match the plotted model for inst0 (ninterp=1, so
+    the instantaneous model) to floating-point precision, while inst1's
+    rows differ measurably from that same instantaneous curve (the two
+    instruments share the band, so inst0's curve IS inst1's un-smeared
+    model) -- proving the grouped oversampling actually reaches the
+    model's per-observation output correctly for each instrument
+    independently, not just the grid/weight arrays checked in the test
+    above.
     """
     d = tmp_path_factory.mktemp("mixed_ninterp_flux")
     t = np.linspace(TC - 0.55 * T14, TC + 0.55 * T14, 401)
@@ -358,14 +365,16 @@ def test_mixed_ninterp_model_flux_matches_instantaneous_only_for_ninterp_one(
     param_values = _plot_param_values(system)
     baseline = np.atleast_1d(tr.baseline.initval)
 
-    ref0 = baseline[0] + tr._compiled_full_lc(t, 0, *param_values)
-    ref1 = baseline[1] + tr._compiled_full_lc(t, 1, *param_values)
+    ref0, _ = tr._lc_at_times(param_values, 0, t)
+    # inst1's instantaneous reference: the same band's un-smeared curve,
+    # on inst1's own baseline.
+    ref1 = baseline[1] + (ref0 - baseline[0])
 
     # inst0 (ninterp=1): exact match, exptime is ignored.
-    np.testing.assert_allclose(model_flux[inst0_rows], ref0, atol=1e-8)
+    np.testing.assert_allclose(model_flux[inst0_rows], ref0, atol=1e-12)
 
     # inst1 (ninterp=21, exptime=60min): smeared, so it must differ
-    # measurably from its own instantaneous reference.
+    # measurably from the instantaneous reference.
     max_diff_inst1 = np.max(np.abs(model_flux[inst1_rows] - ref1))
     assert max_diff_inst1 > 1e-4
 
@@ -374,15 +383,16 @@ def test_plotted_model_matches_likelihood_model(tmp_path_factory):
     """
     Given a transit instrument with a long exptime and ninterp>1 (Jason's
     PR #20 review, point 2: plots must use the smeared model),
-    When Transit._smeared_full_lc/_smeared_lc_matrix -- the functions
-    plot()/plot_data actually call -- are evaluated at the data's
-    own timestamps,
-    Then they match transit.model_flux (the likelihood's own smeared
-    model) to floating-point precision, unlike the raw instantaneous
-    compile_plotters output (_compiled_full_lc), which the test above
-    shows differs from it measurably for this same ninterp=21 instrument.
-    This proves the plotting path now reproduces the exact model the fit
-    optimized against, not the instantaneous one.
+    When the plotted model -- Transit._lc_model compiled on the plot grid
+    layout, the one function plot()/plot_data evaluate -- is evaluated at
+    the data's own timestamps,
+    Then it matches transit.model_flux (the likelihood's own smeared
+    model) to floating-point precision, whereas the instantaneous model
+    differs from it measurably for this same ninterp=21 instrument (the
+    test above).  The plotting path is the likelihood code run on other
+    times, so smearing is not re-implemented anywhere (reviews 1.5.6,
+    7.14.1); tests/test_model_builder_parity.py extends this to every
+    phase-curve term on a dense grid.
     """
     d = tmp_path_factory.mktemp("plot_matches_fit")
     t = np.linspace(TC - 0.55 * T14, TC + 0.55 * T14, 401)
@@ -399,16 +409,13 @@ def test_plotted_model_matches_likelihood_model(tmp_path_factory):
     param_values = _plot_param_values(system)
     baseline = float(np.atleast_1d(tr.baseline.initval)[0])
 
-    smeared_decrement = tr._smeared_full_lc(tr.time, 0, *param_values)
-    np.testing.assert_allclose(
-        baseline + smeared_decrement, model_flux, atol=1e-8
-    )
+    plotted, plotted_matrix = tr._lc_at_times(param_values, 0, tr.time)
+    np.testing.assert_allclose(plotted, model_flux, atol=1e-12)
 
-    # Sanity check the matrix-valued plotting entry point (used by the
-    # phased plot_data specs) agrees with the scalar one (unphased specs).
-    smeared_matrix = tr._smeared_lc_matrix(tr.time, 0, *param_values)
+    # The per-planet terms (the phased panels' entry point) sum to the
+    # full curve minus the baseline.
     np.testing.assert_allclose(
-        smeared_matrix.sum(axis=1), smeared_decrement, atol=1e-10
+        baseline + plotted_matrix.sum(axis=1), plotted, atol=1e-12
     )
 
 

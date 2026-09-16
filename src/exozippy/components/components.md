@@ -62,6 +62,10 @@ A manifest entry is derived **only** when it is a string or a dict carrying `exp
 
 Tests: `tests/test_rebuild_caches.py`, whose graph walk asserts that no node of the second model descends from a random variable of the first -- the property, rather than the logp-compile symptom, so a leak that lands outside the logp graph is still caught.
 
+## A plot never recomputes the model
+
+**Anything a plot computes outside the model graph either reuses the compiled node or gets a numeric parity pin, including out-of-bounds and clamping behavior** (the standing rule review 7.14.1 asked to be written here; it is where every confirmed plot-vs-likelihood drift lived). For a data component the mechanism is one expression BUILDER that both `build_likelihood` and `compile_plotters` call -- a time tensor plus concrete per-file row blocks in, the model expression out -- so the plotted curve is the likelihood code run on other times (`AstrometryInstrument._rel_model`, `Transit._lc_model`, `RVInstrument._rv_model`; the contract, the drift it replaced and the plot-output consequences are in `src/exozippy/components/instrument.md`). A component that cannot yet do that (`mulensinstrument`) keeps a compiled-function parity test against the likelihood node instead. Do not add a third plot graph.
+
 ## Declaring a parameterization
 
 The per-element roles these tables expand into are documented in
