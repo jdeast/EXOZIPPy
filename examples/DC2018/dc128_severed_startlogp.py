@@ -1,0 +1,553 @@
+"""Does the severed+SED model PREFER the wrong solution? (8.6.7)
+
+8.6.7 deliberately does not claim that severed-v3's wrong solution beats the
+right one: its lp (max 87,786) carries SED/torres/mann terms the capped
+mulens-only baseline (87,759) never evaluates, so the two are incomparable.
+The honest test is the SAME model at two points.
+
+WHY THE FIRST VERSION OF THIS SCRIPT FAILED (job 15408109, recorded under
+8.6.7).  It injected SIX truth values into a 38-parameter model and left the
+other 32 at the as-shipped start.  That is not "the correct solution", it is
+an inconsistent mixture of two, and it returned logp = -3.86e6 -- a number
+about nothing.  The injection did not even take cleanly (log_rho wanted
+-2.217, the relaxation engine reconciled it to -2.051), and the check that
+reported the failure was itself reading prior draws through 2.4.15's trap 1.
+
+WHAT THIS VERSION DOES INSTEAD.  Both points are COMPLETE 38-parameter
+vectors, built the same way through the same engine so any reconciliation
+applies equally to both:
+
+  POINT A  the run's own argmax-lp draw, every physical value read from the
+           trace's stored posterior Deterministics (the only reliable route
+           -- 2.4.15).
+  POINT B  point A with the LENS/SOURCE PHYSICS overwritten by truth
+           (dc128_truth_forward.json) and everything else left at A, so the
+           two differ ONLY in the disputed block and the light-curve
+           nuisances are held fixed.
+
+This is a START-ONLY comparison and says so.  A polish of both points was
+considered and DROPPED rather than wired badly: polish_seed_starts takes a
+RAW-space logp plus whitening scales, not a model, and mis-wiring exactly
+that kind of interface is what produced this file's previous wrong answer.
+(2.4.14 also measured the gradient-free polish plateauing at ~0.9
+nats/sweep, so it would not have reached either basin's optimum anyway.)
+
+ROUND 3 (job 15408147) FOUND SOMETHING MORE IMPORTANT THAN THE TEST, and
+this version is restructured around it.  Injecting POINT A -- the run's OWN
+argmax draw, all 52 physical values read straight from its trace -- did NOT
+reproduce that point: logp came back 75,679.410 against the draw's recorded
+87,786.2, a loss of 12,107 nats to a self-injection that should have been
+exact.  A posterior point DOES NOT ROUND-TRIP through the params/initval
+interface, because the relaxation engine reconciles every initval against
+everything else rather than taking it verbatim.
+
+That makes the A-vs-B comparison meaningless no matter how B is built, so
+the round-trip is now the PRIMARY measurement and the comparison is REFUSED
+unless it passes.  (Round 3's B - A of -10.7 MILLION nats was not a physics
+result either: point B overrode theta_E and pi_rel but not mu_rel, so t_E
+moved by ~6.6x while the fluxes and t_0 stayed at A's fitted values -- the
+light curve then matched nothing, and 99.9% of the gap sat in the two Hogg
+microlensing terms.  A subset override cannot work: the disputed block is
+coupled to the light-curve observables through t_E.)
+
+What replaces the polish is better evidence: the PER-TERM logp breakdown.  If the
+model prefers the wrong solution, this says WHICH terms pay for it -- the
+microlensing likelihood, the SED photometry, torres/mann, or the priors --
+and that is the actual question behind 8.6.7, not the scalar total.
+Because both points are COMPLETE and built through the same engine, a large
+total gap is meaningful even without a polish; a small one is not.
+"""
+
+import io
+import json
+import logging
+import os
+
+import numpy as np
+import yaml
+
+logging.disable(logging.WARNING)
+os.chdir("/home/jeastman/python/EXOZIPPy/examples/DC2018/configs")
+
+import xarray as xr  # noqa: E402
+
+from exozippy.system import System  # noqa: E402
+
+CFG = "DC2018_128_severed_v3.yaml"
+TRACE = "fitresults_severed_v3/DC2018_128_trace.nc"
+
+# Instance order per component, as the components build their vectors.
+INSTANCES = {
+    "star": ["Lens", "Source"],
+    "lens": ["Lens"],
+    "planet": ["Companion"],
+    "mulensinstrument": ["Roman_W149", "Roman_Z087"],
+    "sed": ["sed"],
+    "mann": ["Lens"],
+    "band": ["W149", "Z087"],
+}
+
+# POINT B, from dc128_truth_forward.json -- which is a COMPLETE forward
+# parameter set, not a handful of derived summaries.  That matters: round 3
+# overrode theta_E and pi_rel but NOT mu_rel, so t_E moved 6.6x while the
+# fluxes stayed at the wrong solution's values and the light curve matched
+# nothing (B - A came out at -10.7 MILLION nats, 99.9% of it in the two Hogg
+# terms).  Setting the SAMPLED coordinates instead -- t_0, u_0, log_s,
+# xalpha/yalpha, mu_rel, pi_rel, log_q, and the lens star -- lets theta_E,
+# t_E and rho be DERIVED consistently, which is the only way point B is a
+# real solution rather than a mixture.
+#
+# The truth file's `star.*` block is the LENS (logmass -0.343 = 0.454 Msun at
+# 7999 pc).  It carries no source, so the source's radius and distance come
+# from the config's own comment (a 0.961 Rsun bulge turnoff star at 8.14
+# kpc).  Instrument nuisances -- fluxes, err_scale, zeropoint -- are NOT
+# truth and are deliberately left at point A: they are calibration, they are
+# fit in both solutions, and holding them fixed keeps the comparison to the
+# geometry.
+TRUTH_FILE = "../dc128_truth_forward.json"
+
+# The truth file's `star.*` block is the LENS (logmass -0.343 = 0.454 Msun at
+# 7999 pc).  It carries no source, so the source comes from the config's own
+# comment: a 0.961 Rsun bulge turnoff star at 8.14 kpc.
+SOURCE_TRUTH = {"star.Source.radius": 0.961, "star.Source.distance": 8140.0}
+
+# Instrument CALIBRATION has no truth counterpart and must stay at point A:
+# fluxes, error rescalings and the Hogg mixture are fit in both solutions, so
+# holding them fixed keeps the comparison to the geometry.  Anything else
+# left unmatched is a HOLE in point B, not a choice.
+CALIBRATION = ("mulensinstrument.", "sed.", "mann.", "torres.")
+
+
+def truth_overrides(sampled):
+    """Truth value for every sampled coordinate that has one.
+
+    AUTO-MATCHED, not hand-listed, because a hand-listed map has now
+    produced FOUR spurious results in a row -- each time by omitting a
+    coordinate that the rest of the physics depends on, and each time
+    reporting a huge confident number instead of noticing.  Round 6 omitted
+    `lens.pi_rel` and `lens.rho`: point B then had truth mu_rel with A's
+    pi_rel (22x too large), so theta_E and t_E were wrong, the light curve
+    matched nothing, and B - A came out at -81.7 MILLION nats with 96% of it
+    in the two Hogg terms.  Round 3 failed the same way on mu_rel.
+
+    So the mapping is derived, the LOG coordinates are handled, and every
+    unmatched sampled coordinate is REPORTED and classified.  The caller
+    refuses to compare if a PHYSICS coordinate is unmatched.
+    """
+    raw = json.load(open(TRUTH_FILE))
+    flat = {}
+
+    def walk(o, p=""):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                walk(v, p + "." + k if p else k)
+        else:
+            flat[p] = o
+
+    walk(raw)
+
+    out, unmatched = {}, []
+    for key in sorted(sampled):
+        if key in SOURCE_TRUTH:
+            out[key] = SOURCE_TRUTH[key]
+            continue
+        comp, inst, pname = key.split(".", 2)
+        # the truth file has one star and it is the lens
+        if comp == "star" and inst != "Lens":
+            unmatched.append(key)
+            continue
+        direct = "%s.%s" % (comp, pname)
+        if direct in flat:
+            out[key] = float(flat[direct])
+            continue
+        # a sampled log10 coordinate against a linear truth value
+        if pname.startswith("log_"):
+            lin = "%s.%s" % (comp, pname[4:])
+            if lin in flat and float(flat[lin]) > 0:
+                out[key] = float(np.log10(float(flat[lin])))
+                continue
+        unmatched.append(key)
+
+    expected = [k for k in unmatched if k.startswith(CALIBRATION)]
+    holes = [k for k in unmatched if not k.startswith(CALIBRATION)]
+    print(
+        "\ntruth coverage of the %d sampled coordinates:" % len(sampled),
+        flush=True,
+    )
+    print("  matched to truth              : %d" % len(out), flush=True)
+    print("  unmatched, EXPECTED (calib.)  : %d" % len(expected), flush=True)
+    print(
+        "  unmatched, PHYSICS HOLES      : %d %s"
+        % (len(holes), holes if holes else ""),
+        flush=True,
+    )
+    return out, holes
+
+
+def sampled_keys():
+    """{param key} for elements the model actually SAMPLES.
+
+    Job 15408150 measured why this matters: injecting all 52 trace values
+    round-tripped 49 of them exactly and failed on the three that are not
+    freely sampled -- planet.Companion.mass (DERIVED from log_q and the lens
+    mass; it came back at 1/1047 of the request) and the star.Lens.radius /
+    teff bookkeeping pins.  That one derived override accounted for
+    essentially the whole 12,107-nat round-trip error.  So the fix for the
+    TEST is to inject only what is sampled; the missing WARNING is 2.3.17.
+    """
+    cfg = yaml.safe_load(io.open(CFG, encoding="utf-8"))
+    sy = System(cfg, user_params=None)
+    sy.prepare()
+    sy.build_model()
+    ok = set()
+    for p in sy.get_all_parameters():
+        lab = getattr(p, "label", "")
+        parts = lab.split(".")
+        if len(parts) != 2:
+            continue
+        comp, pname = parts
+        names = INSTANCES.get(comp)
+        if names is None:
+            continue
+        flags = np.atleast_1d(getattr(p, "is_sampled", False))
+        for i, f in enumerate(flags):
+            if bool(f) and i < len(names):
+                ok.add("%s.%s.%s" % (comp, names[i], pname))
+    print("model samples %d scalar elements" % len(ok), flush=True)
+    return ok
+
+
+def point_from_trace():
+    """The run's argmax-lp draw as {param_key: physical value}."""
+    ds = xr.open_dataset(TRACE, group="posterior")
+    # lp lives in sample_stats, NOT posterior -- the standard ArviZ layout.
+    # The first version of this looked for it in `posterior` and bailed with
+    # "trace has no lp" (job 15408136).
+    lp = np.asarray(xr.open_dataset(TRACE, group="sample_stats")["lp"])
+    c, d = np.unravel_index(int(np.nanargmax(lp)), lp.shape)
+    print(
+        "argmax lp draw: chain %d draw %d  lp = %.1f"
+        % (c, d, float(lp[c, d])),
+        flush=True,
+    )
+    out = {}
+    for v in ds.data_vars:
+        if v.endswith("_raw") or v in ("lp",):
+            continue
+        parts = v.split(".", 1)
+        if len(parts) != 2:
+            continue
+        comp, pname = parts
+        names = INSTANCES.get(comp)
+        if names is None:
+            continue
+        da = ds[v].isel(chain=c, draw=d)
+        arr = np.atleast_1d(np.asarray(da, dtype=float))
+        for i, val in enumerate(arr):
+            if i >= len(names) or not np.isfinite(val):
+                continue
+            out["%s.%s.%s" % (comp, names[i], pname)] = float(val)
+    print("read %d physical values from the trace" % len(out), flush=True)
+    return out
+
+
+def build(overrides, label):
+    cfg = yaml.safe_load(io.open(CFG, encoding="utf-8"))
+    params = yaml.safe_load(io.open(cfg["parameter_file"], encoding="utf-8"))
+    for k, v in overrides.items():
+        base = params.get(k)
+        # PRESERVE an existing sigma:0 pin -- overwriting it would change the
+        # MODEL, not just the start, and the two points must share a model.
+        if isinstance(base, dict) and base.get("sigma") == 0:
+            continue
+        params[k] = {"initval": v}
+    sy = System(cfg, user_params=params)
+    sy.prepare()
+    m = sy.build_model()
+    ip = m.initial_point()
+    lp = float(m.compile_logp()(ip))
+    print(
+        "%-10s logp = %+14.3f   (%d free RVs)" % (label, lp, len(m.free_RVs)),
+        flush=True,
+    )
+    return sy, m, ip, lp
+
+
+def term_logps(m, ip, label):
+    """Per-term logp at `ip`, so the difference can be attributed.
+
+    model.logp(sum=False) returns one node per factor (each observed
+    likelihood, each prior, each Potential), which is exactly the
+    decomposition 8.6.7 needs: severed-v3's total is not comparable to the
+    mulens-only baseline BECAUSE of the extra terms, so the extra terms are
+    the thing to look at.
+    """
+    import pytensor
+
+    try:
+        terms = m.logp(sum=False)
+        names = [
+            getattr(t, "name", None) or "term%d" % i
+            for i, t in enumerate(terms)
+        ]
+        fn = pytensor.function(m.value_vars, terms, on_unused_input="ignore")
+        vals = fn(*[ip[v.name] for v in m.value_vars])
+        out = {n: float(np.sum(np.asarray(v))) for n, v in zip(names, vals)}
+        print(
+            "%-10s %d logp terms, total %+.3f"
+            % (label, len(out), sum(out.values())),
+            flush=True,
+        )
+        return out
+    except Exception as e:  # noqa: BLE001
+        print(
+            "%-10s PER-TERM BREAKDOWN UNAVAILABLE (%s: %s)"
+            % (label, type(e).__name__, e),
+            flush=True,
+        )
+        return None
+
+
+SAMPLED = sampled_keys()
+A_all = point_from_trace()
+A = {k: v for k, v in A_all.items() if k in SAMPLED}
+print(
+    "injecting %d of %d trace values (sampled only; %d skipped as derived"
+    " or pinned)" % (len(A), len(A_all), len(A_all) - len(A)),
+    flush=True,
+)
+for k in sorted(set(A_all) - set(A)):
+    print("   skipped: %s" % k, flush=True)
+RECORDED_MAX = 87786.2
+
+print("\n=== GATE: DOES A SELF-INJECTION ROUND-TRIP? ===", flush=True)
+print(
+    "Injecting point A (the run's own argmax) and asking whether the model",
+    flush=True,
+)
+print(
+    "reproduces the lp that draw recorded.  If it does not, no comparison",
+    flush=True,
+)
+print("built on injected points means anything.", flush=True)
+sA, mA, ipA, lpA = build(A, "POINT A")
+print("recorded lp for that draw : %+14.3f" % RECORDED_MAX, flush=True)
+print("logp after re-injection   : %+14.3f" % lpA, flush=True)
+print(
+    "ROUND-TRIP ERROR          : %+14.3f nats" % (lpA - RECORDED_MAX),
+    flush=True,
+)
+
+# WHICH values failed to take.  This is the actionable half: it names the
+# parameters the engine overrode, which is what a fix has to address.
+print("\n=== WHICH INJECTED VALUES DID NOT TAKE? ===", flush=True)
+bad = []
+for key, want in sorted(A.items()):
+    comp, inst, pname = key.split(".", 2)
+    c = getattr(sA, comp, None)
+    p = getattr(c, pname, None) if c is not None else None
+    if p is None:
+        continue
+    got = np.atleast_1d(np.asarray(p.initval, dtype=float))
+    names = INSTANCES.get(comp, [])
+    if inst not in names:
+        continue
+    i = names.index(inst)
+    if i >= got.size:
+        continue
+    g = float(got[i])
+    if want == 0.0:
+        rel = abs(g)
+    else:
+        rel = abs(g - want) / abs(want)
+    if rel > 1e-6:
+        bad.append((rel, key, want, g))
+bad.sort(reverse=True)
+if not bad:
+    print("  all %d injected values took exactly." % len(A), flush=True)
+else:
+    print(
+        "  %d of %d values were OVERRIDDEN by the engine:"
+        % (len(bad), len(A)),
+        flush=True,
+    )
+    print(
+        "  %-30s %14s %14s %9s"
+        % ("parameter", "requested", "resolved", "rel err"),
+        flush=True,
+    )
+    for rel, key, want, g in bad[:25]:
+        print("  %-30s %14.6g %14.6g %9.2e" % (key, want, g, rel), flush=True)
+
+# THE GATE IS A NOISE FLOOR, NOT A PASS/FAIL ON EXACTNESS.  Round 5 measured
+# the sampled-only round-trip at -25.1 nats with all 38 values taking
+# exactly, down from -12,107 when derived parameters were included.  The
+# trace is float64, so 25 nats is NOT storage precision and is genuinely
+# unexplained -- most likely the 14 skipped DERIVED quantities not
+# re-deriving bit-identically.  But 25 nats on 87,786 is 0.03%, and the
+# question this script asks is about a gap of hundreds to thousands, so the
+# right test is whether the SIGNAL clears the NOISE rather than whether the
+# round-trip is exact.  The comparison runs, and the verdict below refuses
+# to claim anything unless |B - A| exceeds 10x this floor.
+NOISE_FLOOR = abs(lpA - RECORDED_MAX)
+print(
+    "\nnoise floor (round-trip error): %.1f nats -- a verdict needs"
+    " |B - A| > %.0f" % (NOISE_FLOOR, 10 * NOISE_FLOOR),
+    flush=True,
+)
+if NOISE_FLOOR > 500.0:
+    print(
+        """
+GATE FAILED -- the round-trip error exceeds 500 nats, which is large
+enough to swamp the effect being measured.  STOPPING.
+A posterior point does not round-trip through the params/initval interface,
+so neither "the model at the wrong solution" nor "the model at truth" can be
+constructed this way and 8.6.7's question CANNOT be answered by injection.
+The table above names the parameters the engine overrode.
+
+WHAT WOULD ACTUALLY WORK, in increasing order of effort:
+ 1. Set the VALUE VARS directly -- build the model once, then evaluate
+    model.compile_logp() on a point dict assembled from the trace's raw
+    coordinates.  This bypasses initval resolution entirely.  It needs the
+    RUN's whitening state to map physical -> raw, which is exactly what
+    2.4.15 trap 2 says a rebuild does not have, so it is blocked on that.
+ 2. Re-run the severed model from a truth-seeded start and compare the two
+    converged posteriors' lp -- a fit, not an evaluation, which is what this
+    item was trying to avoid.
+Either way the "cheap start-logp check" framing in 8.6.7 is wrong and should
+be retired.
+""",
+        flush=True,
+    )
+    json.dump(
+        {
+            "gate": "FAILED",
+            "lp_A": lpA,
+            "recorded_max": RECORDED_MAX,
+            "round_trip_error": lpA - RECORDED_MAX,
+            "overridden": [
+                {"param": k, "requested": w, "resolved": g}
+                for _r, k, w, g in bad
+            ],
+        },
+        open("../dc128_severed_startlogp.json", "w"),
+        indent=1,
+    )
+    raise SystemExit(0)
+
+print("\nGATE PASSED -- the comparison below is meaningful.", flush=True)
+TRUTH, HOLES = truth_overrides(SAMPLED)
+if HOLES:
+    print(
+        """
+REFUSING TO COMPARE: %d sampled PHYSICS coordinate(s) have no truth value,
+so point B would be a mixture of the two solutions rather than a solution --
+which is how rounds 3 and 6 produced -10.7 million and -81.7 million nats
+and called them verdicts.  Add them to the truth source or exclude them
+deliberately, then re-run.
+"""
+        % len(HOLES),
+        flush=True,
+    )
+    json.dump(
+        {"gate": "REFUSED", "physics_holes": HOLES},
+        open("../dc128_severed_startlogp.json", "w"),
+        indent=1,
+    )
+    raise SystemExit(0)
+B = dict(A)
+B.update(TRUTH)
+print(
+    "\npoint B overrides %d SAMPLED coordinates with truth:" % len(TRUTH),
+    flush=True,
+)
+for k, v in sorted(TRUTH.items()):
+    print(
+        "   %-30s A=%-14.6g -> B=%-14.6g" % (k, A.get(k, float("nan")), v),
+        flush=True,
+    )
+_, mB, ipB, lpB = build(B, "POINT B")
+tA = term_logps(mA, ipA, "POINT A")
+tB = term_logps(mB, ipB, "POINT B")
+
+print("\n=== VERDICT ===", flush=True)
+print("A = run's own argmax   : logp %+14.3f" % lpA, flush=True)
+print("B = A + truth physics  : logp %+14.3f" % lpB, flush=True)
+gap = lpB - lpA
+print("B - A                  : %+14.3f nats" % gap, flush=True)
+print(
+    "noise floor            : %14.1f nats (10x = %.0f)"
+    % (NOISE_FLOOR, 10 * NOISE_FLOOR),
+    flush=True,
+)
+if abs(gap) < 10 * NOISE_FLOOR:
+    print(
+        ">>> INCONCLUSIVE: |B - A| does not clear 10x the round-trip"
+        " noise floor.  No claim.",
+        flush=True,
+    )
+elif gap < 0:
+    print(
+        ">>> THE MODEL PREFERS THE WRONG SOLUTION by %.0f nats."
+        "  Misspecification, not a sampler failure." % (-gap),
+        flush=True,
+    )
+else:
+    print(
+        ">>> THE CORRECT SOLUTION SCORES BETTER by %.0f nats."
+        "  A SEARCH failure: the star-swap basin is a trap, not the"
+        " optimum." % gap,
+        flush=True,
+    )
+
+if tA and tB:
+    print(
+        "\n=== WHERE THE DIFFERENCE LIVES (B - A, per logp term) ===",
+        flush=True,
+    )
+    keys = sorted(
+        set(tA) | set(tB), key=lambda k: -abs(tB.get(k, 0.0) - tA.get(k, 0.0))
+    )
+    print("%-44s %14s %14s %14s" % ("term", "A", "B", "B - A"), flush=True)
+    for k in keys:
+        va, vb = tA.get(k, float("nan")), tB.get(k, float("nan"))
+        if abs(vb - va) < 0.05:
+            continue
+        print(
+            "%-44s %14.3f %14.3f %+14.3f" % (k[:44], va, vb, vb - va),
+            flush=True,
+        )
+    print(
+        "\nRead the sign per term: a term that is WORSE at truth (negative"
+        "\nB - A) is a term whose model disagrees with the truth, which is"
+        "\nthe misspecification 8.6.7 is looking for.  If the SED/torres/"
+        "\nmann terms carry it, the stellar chain is the culprit; if the"
+        "\nmicrolensing likelihood carries it, the light curve itself"
+        "\nprefers the wrong geometry and that is a much bigger claim.",
+        flush=True,
+    )
+print(
+    """
+B - A NEGATIVE and LARGE -> this model genuinely prefers the wrong solution.
+     MISSPECIFICATION, not a sampler failure; 8.6.7's "NOT CLAIMED" becomes
+     a claim.  The per-term table then says which terms bought it.
+B - A POSITIVE           -> the correct solution scores better and the
+     sampler never reached it: a SEARCH failure, and the star-swap basin is
+     a trap rather than the optimum.
+|B - A| SMALL            -> INCONCLUSIVE.  Neither point is a basin optimum
+     and this script does not polish (see the module docstring), so a gap of
+     order tens of nats on a total near 87,786 decides nothing.
+""",
+    flush=True,
+)
+json.dump(
+    {
+        "lp_A": lpA,
+        "lp_B": lpB,
+        "terms_A": tA,
+        "terms_B": tB,
+        "truth_overrides": TRUTH,
+    },
+    open("../dc128_severed_startlogp.json", "w"),
+    indent=1,
+)

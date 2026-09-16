@@ -82,3 +82,19 @@ def setup_logging(prefix, level="INFO"):
     )
     setattr(fh, _OWNER_ATTR, "file")
     log.addHandler(fh)
+
+
+def fmt_duration(seconds):
+    """Compact human duration for a log line: '45 s', '38.2 min', '3.1 h'.
+
+    Here rather than beside either caller because both the wrap-up stage
+    announcer (run.py) and the polish heartbeat (samplers/ptde.py) print
+    one, and two spellings of "how long has this been running" in the same
+    fit log is exactly the drift this module exists to prevent.
+    """
+    s = float(seconds)
+    if s < 90.0:
+        return f"{s:.0f} s"
+    if s < 5400.0:
+        return f"{s / 60.0:.1f} min"
+    return f"{s / 3600.0:.1f} h"

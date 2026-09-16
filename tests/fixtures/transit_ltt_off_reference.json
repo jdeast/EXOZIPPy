@@ -1,0 +1,8 @@
+{
+  "provenance": "Generated from exozippy git commit 3ae5466e0c84aeaa8236f226ba856790fffd57c1 (parent of df96bd9, the transit light-travel-time wiring commit; confirmed via grep to have no ltt/LIGHT_TRAVEL references), by scripts/make_transit_ltt_off_reference.py. This is the pre-LTT transit._model_flux_node output for the config/params in tests/test_transit_ltt.py's _ltt_wiring_config/_ltt_wiring_params, evaluated at the model's initial point. Used by test_ltt_off_build_likelihood_reproduces_pre_ltt_model_values so that test never needs to read git history.",
+  "source_commit": "3ae5466e0c84aeaa8236f226ba856790fffd57c1",
+  "model_flux": [
+    0.9970030141493804,
+    0.9999999998835847
+  ]
+}

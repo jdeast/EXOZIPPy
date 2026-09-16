@@ -146,7 +146,7 @@ def main():
 
         print()
         print("=" * 78)
-        print("RESOLVED initval / init_scale / bounds  (stage 3 output)")
+        print("RESOLVED initval / init_scale / bounds  (stage 4 output)")
         print("=" * 78)
         for p in params:
             iv = "SYMBOLIC" if hasattr(p.initval, "owner") else _fmt(p.initval)

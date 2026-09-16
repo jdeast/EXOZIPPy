@@ -110,7 +110,7 @@ def test_seed_hints_and_user_list_both_present_prefer_user_list():
     Given both a component seed_hint_sets entry AND a user initval list for the
     same parameter,
     When finalize_user_params runs,
-    Then the user's explicit list wins (matches the RANK_USER > seed-hint-rank
+    Then the user's explicit list wins (matches the PRECEDENCE_USER > seed-hint-rank
     provenance rule: an explicit user list always overrides a component's
     data-driven seed hint).
     """

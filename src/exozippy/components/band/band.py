@@ -1,10 +1,16 @@
 import logging
+from collections import namedtuple
 
 import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
+from exozippy.components.parameterization import (
+    merge_overrides,
+    mode_manifest,
+    pin_unselected,
+)
 from exozippy.components.sed.bc_grid import (
     AMBIGUOUS_FILTER_ALIASES,
     _load_alias_table,
@@ -13,6 +19,13 @@ from exozippy.components.sed.bc_grid import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# One (band, star) registration by one limb-darkening consumer.  `star` is
+# the star index whose atmosphere that consumer's limb darkening describes,
+# or None when the consumer cannot determine it on its own (see
+# Band.ld_consumers).  `label` names the consumer in error messages.
+LDConsumer = namedtuple("LDConsumer", "label band star")
 
 
 class Band(Component):
@@ -32,13 +45,34 @@ class Band(Component):
     deblending, astrometry fluxfrac) key on.
     """
 
-    yaml_key = "band"
-
     # Accepted `ld_law:` spellings. An unrecognized value raises rather than
     # falling through to the quadratic branch: a silently ignored law key is
     # the same bug class as `IMF: Salpeter` (PR #82), and here it would also
     # silently change the sampled parameter set (q1/q2 instead of u1).
     LD_LAWS = ("quadratic", "linear")
+
+    # What each law's parameters ARE, as a parameterization mode table (see
+    # components/parameterization.py): the quadratic law samples the Kipping
+    # pair and derives (u1, u2) from it; the linear law samples u1 itself and
+    # has no Kipping coordinates and no second coefficient at all.  Bands may
+    # differ -- q1/q2 and u2 are then INACTIVE on the linear bands (not
+    # parameters of theirs: pinned for bookkeeping, no potential, no table row)
+    # and u1 is derived on the quadratic ones and sampled on the linear ones.
+    LD_MODE_TABLE = {
+        "quadratic": {
+            "q1": None,
+            "q2": None,
+            "u1": "default",
+            "u2": "default",
+        },
+        "linear": {"u1": None},
+    }
+
+    # The coordinate each law actually SAMPLES.  Read by the unread-band autopin
+    # (a sigma on a derived element is a silent no-op, so pinning u1 on a
+    # quadratic band would pin nothing) and by anything else that needs to know
+    # which knob a band's limb darkening turns.
+    LD_SAMPLED_PARAMS = {"quadratic": ("q1", "q2"), "linear": ("u1",)}
 
     @property
     def prefix(self):
@@ -65,7 +99,11 @@ class Band(Component):
                 "required": False,
                 "doc": (
                     "Index or name of the star whose limb darkening this "
-                    "band models. Default 0."
+                    "band models ('star.<name>' works too). Default 0, but "
+                    "the LD consumers are asked: a value contradicting the "
+                    "star a transit / finite-source microlensing / RM "
+                    "consumer reads is refused, and with the key absent "
+                    "their answer is used."
                 ),
             },
             {
@@ -76,10 +114,9 @@ class Band(Component):
                 "doc": (
                     "Limb-darkening law. Default 'quadratic' (Kipping "
                     "q1/q2, deriving u1/u2); 'linear' samples u1 directly. "
-                    "Every band must declare the same law -- the "
-                    "limb-darkening manifest is shared by the whole band "
-                    "vector. An unrecognized value, or a mix of laws, "
-                    "raises."
+                    "Bands may declare different laws: a linear band has no "
+                    "Kipping coordinates and no u2 (its second coefficient "
+                    "is exactly 0). An unrecognized value raises."
                 ),
             },
             {
@@ -126,7 +163,24 @@ class Band(Component):
 
     def load_data(self, system):
         self.filter_names = [c.get("filter", "") for c in self.config]
-        self.star_indices = [c.get("star_ndx", 0) for c in self.config]
+        # What the USER declared, or None where the key is absent.  The
+        # resolved answer (declaration validated against, or derived from,
+        # the LD consumers) is written by _resolve_ld_stars at stage 3; this
+        # is the provisional value anything reading earlier would see.
+        # Index or name (as the schema advertises), resolved through the one
+        # shared translator; None where the key is absent.
+        self.star_ndx_declared = [
+            None
+            if c.get("star_ndx") is None
+            else self.resolve_star_ndx(
+                c["star_ndx"],
+                f"[{self.prefix}] band '{c.get('name', i)}' star_ndx",
+            )
+            for i, c in enumerate(self.config)
+        ]
+        self.star_indices = [
+            0 if d is None else int(d) for d in self.star_ndx_declared
+        ]
         self.ld_laws = self._parse_ld_laws()
         self.fitthermal = [
             bool(c.get("fitthermal", False)) for c in self.config
@@ -187,23 +241,21 @@ class Band(Component):
                 )
 
     def _parse_ld_laws(self):
-        """Per-band ``ld_law:``, validated, and required to be uniform.
+        """Per-band ``ld_law:``, validated.  Bands may differ.
 
-        Two things are deliberately hard errors here rather than defaults:
+        An unrecognized law is a hard error rather than a default:
+        ``ld_law: quadratik`` used to satisfy ``law != "linear"`` and be
+        modelled as quadratic -- a typo silently selecting a different sampled
+        parameter set.
 
-        * **An unrecognized law.** ``ld_law: quadratik`` used to satisfy
-          ``law != "linear"`` and be modelled as quadratic -- a typo silently
-          selecting a different sampled parameter set.
-        * **A mix of laws across bands.** The manifest is per *parameter*, not
-          per element: ``Parameter.build_pymc`` derives ``is_derived`` from
-          ``expression is not None`` for the whole vector, so one Band cannot
-          hold a derived ``u1`` (Kipping, quadratic) for some elements and a
-          sampled ``u1`` for others. The old ``any(law != "linear")`` picked
-          the quadratic manifest for everyone, which handed every band a free
-          ``u2`` -- silently modelling a user's declared-linear band as
-          quadratic. Per-element derivation would need the manifest ``mask``
-          field (declared in ``Parameter``, not yet consumed); until that
-          exists, raising is the only non-silent option.
+        A MIX of laws across bands used to be an error too, because
+        ``Parameter.build_pymc`` derived ``is_derived`` for a whole vector, so
+        one Band could not hold a Kipping-derived ``u1`` for some elements and a
+        sampled ``u1`` for others; the workaround was quadratic everywhere with
+        the linear bands' ``q2`` pinned at 0.5 (``u2 = sqrt(q1)(1 - 2 q2) = 0``),
+        at the cost of a prior uniform in ``q1`` rather than in ``u1``.  Roles
+        are per element now (see the manifest vocabulary), so ``register_
+        parameters`` expresses the mix directly and this only validates.
         """
         laws = []
         for i, c in enumerate(self.config):
@@ -217,23 +269,6 @@ class Band(Component):
                     f"sample u1 directly)."
                 )
             laws.append(norm)
-
-        if len(set(laws)) > 1:
-            detail = ", ".join(
-                f"{name}: {law}" for name, law in zip(self.names, laws)
-            )
-            raise ValueError(
-                f"[{self.prefix}] all bands must use the same ld_law; got "
-                f"{detail}. A mixed-law system is not supported: the "
-                f"limb-darkening manifest is shared by every band element, so "
-                f"one law has to be chosen for the whole vector, and the "
-                f"quadratic choice would give the 'linear' bands a free u2 "
-                f"(silently modelling them as quadratic). Use one law "
-                f"everywhere -- 'quadratic' with the linear bands' q2 pinned "
-                f"at 0.5 in the params file reproduces a linear law exactly "
-                f"(u2 = sqrt(q1)*(1 - 2*q2) = 0), at the cost of a prior "
-                f"uniform in q1 rather than in u1."
-            )
         return laws
 
     def build_maps(self):
@@ -245,27 +280,51 @@ class Band(Component):
     # would have its band's LD silently pinned.
     #
     #   transit/transit.py       band.u1/u2[obs_band_map]  -- unconditional
-    #   mulensing/mulensinstrument.py  band.u1[band_idx]   -- finite_source only
+    #   mulensing/mulensinstrument.py  band.u1/u2[band_idx] -- finite_source
+    #                            only; u2 reaches the magnification only on
+    #                            a backend that can carry a quadratic profile
+    #                            (Lens._resolve_quadratic_ld)
     #   rm.py (via rvinstrument `rm:`)  band.u1/u2[band_idx]
     #
     # astrometryinstrument's optional `band:` is deliberately absent: it uses
     # the band only for its filter identity (the SED photocenter fluxfrac),
     # never its limb darkening.
-    def _ld_consumer_indices(self, system):
-        """Band indices whose limb darkening something in this topology reads.
+    def ld_consumers(self, system):
+        """Every LD consumer in this topology, as ``LDConsumer`` records.
+
+        THE single consumer predicate.  Two questions are asked of it and
+        they used to be answered separately: *which* bands are read (the
+        unread-LD autopin) and *whose* limb darkening each read is
+        (``_resolve_ld_stars``).  Answering them apart is how a new consumer
+        gets remembered in one place and forgotten in the other.
+
+        ``star`` is the star index that consumer's limb darkening describes,
+        or ``None`` where the consumer genuinely cannot say:
+
+        * **transit** -- the host stars of the planets it models
+          (``planet.star_ndx``).  A light curve models every planet, so with
+          planets around more than one star its limb darkening is
+          intrinsically ambiguous and it registers ``None`` (see
+          ``_resolve_ld_stars``, which warns rather than raising: a second
+          band with the same filter cannot fix that one, because the band is
+          per light curve and not per planet).
+        * **mulensinstrument** -- the SOURCE star, ``source.star_map[0]``,
+          and only when the source is resolved (``finite_source``); a point
+          source takes no limb darkening at all.
+        * **rvinstrument** ``rm:`` -- the primary star of the RM orbit.
 
         Read from each consumer's raw ``config`` rather than from its parsed
-        band map: ``MulensInstrument.band_map`` is built in *stage 2*
+        band map: ``MulensInstrument.band_map`` is built in *stage 3*
         (``register_parameters``), so whether it exists yet depends on
         component ordering, while ``Component.config`` is set in ``__init__``
         and is always available here.
         """
         name_to_idx = {name: i for i, name in enumerate(self.names)}
-        consumers = set()
+        out = []
 
-        def _mark(idx):
+        def _mark(label, idx, star=None):
             if idx is not None and 0 <= idx < self.n_elements:
-                consumers.add(idx)
+                out.append(LDConsumer(label, int(idx), star))
 
         def _cfg(comp_name):
             comp = getattr(system, comp_name, None)
@@ -273,35 +332,192 @@ class Band(Component):
 
         # Transit: the occultation model cannot be computed without limb
         # darkening, so any transit referencing a band reads it.
-        for c in _cfg("transit"):
-            _mark(name_to_idx.get(c.get("band")))
+        hosts = {int(pcfg.get("star_ndx", 0) or 0) for pcfg in _cfg("planet")}
+        transit_host = hosts.pop() if len(hosts) == 1 else None
+        for i, c in enumerate(_cfg("transit")):
+            name = c.get("name", i)
+            _mark(
+                f"transit[{name}]",
+                name_to_idx.get(c.get("band")),
+                transit_host,
+            )
 
         # Microlensing: the magnification only takes u1 when the source is
-        # resolved.  `any` over the lens elements, not `[0]`, because that is
-        # the conservative direction -- MulensInstrument.build_likelihood
-        # currently gates on finite_source[0].
+        # resolved.  The flag lives on the mulensevent block (8.6.17 split).
         finite_source = any(
-            bool(c.get("finite_source", False)) for c in _cfg("lens")
+            bool(c.get("finite_source", False)) for c in _cfg("mulensevent")
         )
         if finite_source:
+            # The source whose surface is resolved.  build_likelihood passes
+            # the primary source down, so that is the star the u1 it
+            # consumes belongs to.  star_map when built (stage 2), the
+            # source component's bodies (set in __init__) otherwise -- a
+            # partial harness may call this before build_maps.
+            source_comp = getattr(system, "source", None)
+            smap = getattr(source_comp, "star_map", None)
+            if smap is None:
+                smap = [
+                    ndx
+                    for (_, ndx) in getattr(source_comp, "bodies", None) or []
+                ]
+            smap = list(smap)
+            src = int(smap[0]) if len(smap) else None
             # Every band a light curve references is marked, not just the
             # lowest-indexed one build_likelihood actually passes down (it
             # warns and uses the first).  Pinning on that tie-break would make
             # the pin an artifact of an acknowledged limitation.
-            for c in _cfg("mulensinstrument"):
-                _mark(name_to_idx.get(c.get("band")))
+            for i, c in enumerate(_cfg("mulensinstrument")):
+                name = c.get("name", i)
+                _mark(
+                    f"mulensinstrument[{name}]",
+                    name_to_idx.get(c.get("band")),
+                    src,
+                )
 
         # Rossiter-McLaughlin: rvinstrument `rm:` reads the `rm_band` band, or
         # band 0 when unset (see rm.resolve_rm_indices).
-        for c in _cfg("rvinstrument"):
+        for i, c in enumerate(_cfg("rvinstrument")):
             if not c.get("rm"):
                 continue
+            name = c.get("name", i)
             rm_band = c.get("rm_band")
-            _mark(0 if rm_band is None else name_to_idx.get(rm_band))
+            idx = 0 if rm_band is None else name_to_idx.get(rm_band)
+            _mark(
+                f"rvinstrument[{name}].rm",
+                idx,
+                self._rm_host_star(system, c.get("rm")),
+            )
 
-        return consumers
+        return out
 
-    def _pin_unread_limb_darkening(self, system, ld_params, consumers=None):
+    @staticmethod
+    def _rm_host_star(system, orbit_name):
+        """Primary star of the RM orbit, or None if it cannot be resolved.
+
+        Never raises: an unknown ``rm:`` orbit is ``rm.resolve_rm_indices``'s
+        error to report (with its own message), not this predicate's, and a
+        star resolution is not worth failing a fit over.
+        """
+        orbit = getattr(system, "orbit", None)
+        groups = getattr(orbit, "primary_bodies", None)
+        if groups is None:
+            return None
+        names = list(getattr(orbit, "names", []))
+        if orbit_name not in names:
+            return None
+        for comp_type, idx in groups[names.index(orbit_name)]:
+            if comp_type == "star":
+                return int(idx)
+        return None
+
+    def _ld_consumer_indices(self, system):
+        """Band indices whose limb darkening something in this topology reads."""
+        return {c.band for c in self.ld_consumers(system)}
+
+    def _resolve_ld_stars(self, system):
+        """Settle, per band instance, WHOSE limb darkening it carries.
+
+        Limb darkening is physically a property of a (star, band) pair, but
+        the parameters live on the band instance alone, so two hosts sharing
+        one band instance silently share their limb darkening.  The LOCKED
+        design (notes/ld_atm_prior.txt) keeps the parameters per band
+        INSTANCE -- named blocks referencing a filter string are already
+        legal, ``band: {I_A: {filter: I}, I_B: {filter: I}}`` -- and makes
+        the pairing explicit instead: every consumer registers the star it
+        reads the limb darkening of, and a disagreement is refused.
+
+        ``star_ndx:`` on the band block stays the single source of truth (it
+        is what ``transit._build_dilution`` reads for the SED deblending
+        host).  What changes is that it is now VALIDATED against the
+        consumers when the user declares it, and DERIVED from them when the
+        user does not -- so the historical default of 0 no longer silently
+        stands in for a source star that is really star 1.
+
+        Two outcomes, and the difference is whether the user can act on it:
+
+        * A consumer needing a star the band does not carry, or two
+          consumers of one band needing different stars, RAISES -- naming
+          the consumers and pointing at a second band with the same filter.
+        * A single consumer that cannot name its own star (a transit light
+          curve covering planets of several hosts) WARNS.  One light curve
+          models every planet, so its limb darkening is ambiguous no matter
+          how many band blocks exist; refusing would gate a configuration
+          with no legal spelling.
+
+        This is the prerequisite for the limb-darkening atmosphere prior
+        (review 8.5.2), which needs to know which star's atmosphere a band's
+        coefficients are being predicted for.
+        """
+        consumers = self.ld_consumers(system)
+        star_names = list(getattr(getattr(system, "star", None), "names", []))
+
+        for i in range(self.n_elements):
+            mine = [c for c in consumers if c.band == i]
+            declared = self.star_ndx_declared[i]
+            wanted = sorted({c.star for c in mine if c.star is not None})
+
+            if len(wanted) > 1:
+                who = ", ".join(
+                    f"{c.label} -> star {self._star_label(star_names, c.star)}"
+                    for c in mine
+                    if c.star is not None
+                )
+                raise ValueError(
+                    f"[{self.prefix}] band '{self.names[i]}' carries the limb "
+                    f"darkening of more than one star: {who}.  Limb darkening "
+                    f"is a property of a (star, band) pair, so define one "
+                    f"band block per star with the same filter "
+                    f"(e.g. band: [{{name: {self.names[i]}_A, filter: "
+                    f"{self.filter_names[i]}}}, {{name: {self.names[i]}_B, "
+                    f"filter: {self.filter_names[i]}}}]) and point each "
+                    f"consumer at its own."
+                )
+
+            if declared is not None:
+                star = int(declared)
+                if wanted and wanted[0] != star:
+                    who = ", ".join(
+                        c.label for c in mine if c.star is not None
+                    )
+                    raise ValueError(
+                        f"[{self.prefix}] band '{self.names[i]}' declares "
+                        f"star_ndx: {declared} "
+                        f"({self._star_label(star_names, star)}), but {who} "
+                        f"reads its limb darkening for star "
+                        f"{self._star_label(star_names, wanted[0])}.  Either "
+                        f"correct star_ndx or give that consumer its own band "
+                        f"block with the same filter."
+                    )
+            elif wanted:
+                star = wanted[0]
+            else:
+                star = 0
+
+            if mine and not wanted:
+                logger.warning(
+                    f"[{self.prefix}] band '{self.names[i]}': no consumer "
+                    f"could name the star its limb darkening belongs to "
+                    f"({', '.join(c.label for c in mine)}); using star "
+                    f"{self._star_label(star_names, star)}.  A transit light "
+                    f"curve models every planet, so with planets around more "
+                    f"than one star ONE band cannot carry both hosts' limb "
+                    f"darkening -- set star_ndx: on the band to say which "
+                    f"host is meant."
+                )
+            self.star_indices[i] = int(star)
+
+        self.star_map = np.array(self.star_indices, dtype=int)
+
+    @staticmethod
+    def _star_label(star_names, idx):
+        """``"1 ('B')"`` when the names are known, ``"1"`` otherwise."""
+        if idx is None:
+            return "?"
+        if 0 <= idx < len(star_names):
+            return f"{idx} ('{star_names[idx]}')"
+        return str(idx)
+
+    def _pin_unread_limb_darkening(self, system, consumers=None):
         """Pin the LD parameters of the bands nothing in the topology reads.
 
         Only reached when SOME band is consumed: with no consumer at all
@@ -309,7 +525,16 @@ class Band(Component):
         (register_parameters), so a filter-identity-only band contributes
         no table rows.  This pin covers the mixed case -- the manifest is
         per parameter, so one consumed band forces the whole vector to
-        exist, and the unread elements are fixed here.
+        exist, and the unread elements are fixed here.  It also applies the
+        linear law's u1 <= 1 validity cap, which is NOT conditional on an
+        unread band existing -- see the comment at the cap.
+
+        Which coordinate gets pinned is PER BAND, because which coordinate a
+        band samples is: a quadratic band samples the Kipping pair (its u1/u2
+        are derived from it, and a sigma on a derived element is a silent
+        no-op), while a linear band samples u1 itself.  A single pin list would
+        therefore either miss a linear band's only free parameter or write a
+        no-op onto a quadratic band's derived one.
 
         The pin goes through the manifest "overrides" channel, which layers
         UNDER the params file (`sigma` takes apply_value's last-writer-wins
@@ -320,33 +545,88 @@ class Band(Component):
         if consumers is None:
             consumers = self._ld_consumer_indices(system)
         unread = [i for i in range(self.n_elements) if i not in consumers]
+
+        # A LINEAR law caps u1 at 1: the profile is
+        # I(mu)/I(1) = 1 - u1*(1 - mu), so u1 > 1 puts NEGATIVE surface
+        # brightness at the limb (mu = 0).  defaults.yaml's upper bound is 2,
+        # which is right for the QUADRATIC law (u1 can exceed 1 there against
+        # a negative u2) and unphysical for this one -- and the sampler does
+        # go there: on examples/DC2018 event 128 two runs reported
+        # u1 = 1.45 and 1.87, both impossible, both trading against the
+        # source size through the finite-source profile.
+        #
+        # Through "overrides" rather than "options" so it combines as
+        # min(user_upper, 1.0) and cannot RAISE a bound the user tightened
+        # (the "overrides" vs "options" channel note in
+        # src/exozippy/config.md).  This is a validity limit -- past
+        # it the intensity is negative -- which is exactly what that channel
+        # is for.  NaN leaves quadratic bands alone.
+        #
+        # This block sits ABOVE the `if not unread: return` below on
+        # purpose.  The cap depends only on each band's law, not on whether
+        # anything reads it, and its motivating configuration -- event 128's
+        # one linear band, consumed by its finite-source light curve -- is
+        # exactly the all-consumed case that early return covers.  Until
+        # 2026-09 the cap sat after the return, so it applied only to a
+        # topology that ALSO carried an unread band, and the shipped fits
+        # that needed it never got it (review 1.5.4).
+        if "u1" in self.manifest:
+            cap = np.full(self.n_elements, np.nan)
+            for i, law in enumerate(self.ld_laws):
+                if law == "linear":
+                    cap[i] = 1.0
+            if np.isfinite(cap).any():
+                self.manifest["u1"] = merge_overrides(
+                    self.manifest.get("u1"), {"upper": cap.tolist()}
+                )
+
         if not unread:
             return
 
-        pin = np.full(self.n_elements, np.nan)
-        pin[unread] = 0.0
-        for param_name in ld_params:
-            entry = self.manifest.get(param_name)
-            entry = dict(entry) if isinstance(entry, dict) else {}
-            overrides = dict(entry.get("overrides", {}))
-            overrides["sigma"] = pin.tolist()
-            entry["overrides"] = overrides
-            self.manifest[param_name] = entry
+        # Per parameter, the elements that BOTH sample it and are unread; the
+        # same opt-in pin the BEER terms and Instrument's GP/robust
+        # registrations use (components/parameterization.py), merged into
+        # whatever options the entry already carries.
+        for param_name in ("q1", "q2", "u1", "u2"):
+            if param_name not in self.manifest:
+                continue
+            samplers = [
+                i
+                for i in range(self.n_elements)
+                if param_name in self.LD_SAMPLED_PARAMS[self.ld_laws[i]]
+            ]
+            keep = [i for i in samplers if i in consumers]
+            if len(keep) == len(samplers):
+                continue  # every band that samples this one is read
+            pin = pin_unselected(self.n_elements, keep)
+            # merge_overrides reads the entry through the manifest interpreter,
+            # so adding an option cannot drop a bare-string expr_key and turn a
+            # derived parameter into a sampled one (review 4.5.3).
+            self.manifest[param_name] = merge_overrides(
+                self.manifest.get(param_name), pin.get("overrides", {})
+            )
 
-        joined = "/".join(ld_params)
         for i in unread:
+            joined = "/".join(self.LD_SAMPLED_PARAMS[self.ld_laws[i]])
+            first = self.LD_SAMPLED_PARAMS[self.ld_laws[i]][0]
             logger.info(
                 f"[{self.prefix}] pinning {self.prefix}.{self.names[i]}."
                 f"{joined} (sigma=0): nothing in this topology reads this "
                 f"band's limb darkening. Only a transit, a finite-source "
                 f"microlensing light curve, or an rvinstrument 'rm:' block "
                 f"does; astrometry's 'band:' uses the filter identity only. "
-                f"Give {self.prefix}.{self.names[i]}.{ld_params[0]} an entry "
+                f"Give {self.prefix}.{self.names[i]}.{first} an entry "
                 f"in the params file to sample it anyway."
             )
 
     def register_parameters(self, system):
         self.manifest = {}
+
+        # Settle whose limb darkening each band carries before anything reads
+        # star_indices (transit's SED deblending host) -- stage 3, because the
+        # consumers' own maps (source.star_map, orbit.primary_bodies) are
+        # built in stage 2.
+        self._resolve_ld_stars(system)
 
         # Limb darkening enters the manifest ONLY when something in the
         # topology reads it (a transit, a finite-source microlensing light
@@ -358,27 +638,24 @@ class Band(Component):
         # _pin_unread_limb_darkening.
         consumers = self._ld_consumer_indices(system)
         if consumers:
-            # Uniform by construction (_parse_ld_laws raises on a mix), so
-            # the first element's law is the system's law.
-            if self.ld_laws and self.ld_laws[0] == "linear":
-                self.manifest["u1"] = None
-                ld_params = ["u1"]
-            else:
-                self.manifest.update(
-                    {
-                        "q1": None,
-                        "q2": None,
-                        "u1": "default",
-                        "u2": "default",
-                    }
+            # Per band: a quadratic band samples the Kipping pair and derives
+            # (u1, u2) from it; a linear band samples u1 directly and has no
+            # Kipping coordinates and no u2 at all.  mode_manifest turns the
+            # per-band laws into the masks that says so -- and for a system
+            # that made ONE choice it returns exactly the manifest this code
+            # used to write by hand, so those systems build an identical graph.
+            self.manifest.update(
+                mode_manifest(
+                    self.ld_laws,
+                    self.LD_MODE_TABLE,
+                    n_elements=self.n_elements,
+                    # A linear law's second coefficient is exactly zero, not
+                    # "whatever the quadratic default was".
+                    options={"u2": {"inactive_value": 0.0}},
+                    where=f"{self.prefix}.ld_law",
                 )
-                # Pin the SAMPLED coordinates; u1/u2 are Kipping-derived
-                # from them and a sigma on a derived parameter is a silent
-                # no-op.
-                ld_params = ["q1", "q2"]
-            self._pin_unread_limb_darkening(
-                system, ld_params, consumers=consumers
             )
+            self._pin_unread_limb_darkening(system, consumers=consumers)
         else:
             logger.info(
                 f"[{self.prefix}] no limb-darkening parameters: nothing in "
@@ -402,22 +679,16 @@ class Band(Component):
             ("ellipsoidal", self.fitellip),
         ):
             if any(flags):
-                self.manifest[name] = self._pinned_manifest_entry(flags)
-
-    def _pinned_manifest_entry(self, opt_in_flags):
-        """A manifest entry that's free where opt_in_flags is True, and
-        pinned to sigma=0 (fixed at its default initval, 0) elsewhere.
-        Shared by thermal/reflect/ellipsoidal's identical opt-in gating
-        (only reached when some flag is True -- an all-False parameter is
-        omitted from the manifest entirely).
-        """
-        off = [i for i in range(self.n_elements) if not opt_in_flags[i]]
-        entry = {}
-        if off:
-            pin = np.full(self.n_elements, np.nan)
-            pin[off] = 0.0
-            entry["overrides"] = {"sigma": pin.tolist()}
-        return entry
+                # pin_unselected is the ONE opt-in pin (see
+                # components/parameterization.py); Instrument's GP and robust
+                # registrations are the other two callers, and this was the
+                # third line-for-line copy of it.  Routing through it also
+                # retires the hand-written manifest read this used to do as a
+                # WRITER (review 4.5.3): only reached when some band opts in,
+                # so the entry it replaces is always a plain options dict.
+                self.manifest[name] = pin_unselected(
+                    self.n_elements, [i for i, on in enumerate(flags) if on]
+                )
 
     def _may_be_nonzero(self, name):
         """True unless every element of parameter ``name`` is pinned

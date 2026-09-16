@@ -11,31 +11,36 @@
 # finalize_user_params). Bounds are NOT per-seed and
 # always come from the first (seed 0) solution.
 
-lens.Lens.t_0:
+source.Source.t_0:
     initval: [2458554.89424795, 2458554.87715006]
 
-lens.Lens.u_0:
+source.Source.u_0:
     initval: [0.14297468, 0.13554066]
 
 # t_E is derived in EXOZIPPy from stellar masses/distances/proper motions.
 # Provided here as an initval hint to seed the relaxation engine.
-lens.Lens.t_E:
+mulensevent.t_E:
     initval: [18.17037538, 18.70647736]
 
-lens.Lens.s:
+lens.Companion.s:
     initval: [0.97875222, 0.85373431]
 
 # alpha: relaxation engine propagates the initval to xalpha/yalpha.
-lens.Lens.alpha:
+lens.Companion.alpha:
     initval: [-52.15111098, -51.34370652]
 
-lens.Lens.rho:
+# finite_source is False here, so rho itself is not a model parameter -- but
+# this seed is NOT dead: the relaxation engine back-solves it through
+# rho = theta_star/theta_E into the stellar chain, so it informs the starting
+# theta_E (and through it t_E).  Measured: removing it moved the start's
+# data logp by 1.3 nats through the flux decomposition.
+source.Source.rho:
     initval: [5.38363705e-03, 1.83885815e-07]
 
 # q = M_companion / M_primary.  EXOZIPPy's relaxation engine propagates
 # this through the symbolic relation  q * M_primary = M_companion
 # to set the companion's mass initval automatically.
-lens.Lens.q:
+lens.Companion.q:
     initval: [1.10576828e-03, 1.06999723e-03]
 
 star.Lens.ra:
@@ -51,22 +56,13 @@ star.Source.dec:
     initval: -28.982
     sigma: 0
 
-# these shouldn't be fit for such models (on the to do list)
-# but as a temporary hack, we're just going to fix them at their arbitrary starting values
-star.Lens.radius:
-    sigma: 0.0
-star.Lens.teff:
-    sigma: 0.0
-star.Lens.feh:
-    sigma: 0.0
-star.Source.teff:
-    sigma: 0.0
-star.Source.feh:
-    sigma: 0.0
+# star.Lens/Source radius, teff and feh USED to be pinned by hand here, with
+# the note "these shouldn't be fit for such models (on the to do list)".  They
+# are not fit for such models any more, and nothing has to say so: this is a
+# point-source fit with no SED, no evolutionary model and no empirical
+# relation, so nothing reads any of the six and Star.structure_consumers
+# deactivates them (review 3.8.1).  Add an `sed:` block and they become free
+# and constrained again with no edit here.
 planet.Companion.radius:
     sigma: 0
-
-# Source radius is unconstrained without SED data (same reasoning as Lens.radius).
-star.Source.radius:
-    sigma: 0.0
 

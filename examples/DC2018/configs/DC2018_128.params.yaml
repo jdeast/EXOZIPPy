@@ -1,0 +1,26 @@
+# Coordinates from event_info.txt.
+star.Lens.ra:   {initval: 267.595, sigma: 0}
+star.Lens.dec:  {initval: -28.982, sigma: 0}
+
+# Not constrainable without data on the lens itself.  The Source needs none
+# of this: star.py pins mass/teff/feh/radius/ra/dec for any star that is
+# purely a microlensing source -- unless it appears in an SED, which
+# un-pins teff/feh/radius so the photometry can constrain them.
+star.Lens.teff:   {sigma: 0.0}
+star.Lens.feh:    {sigma: 0.0}
+star.Lens.radius: {sigma: 0.0}
+planet.Companion.radius: {sigma: 0}
+
+# The DC2018 simulations contain NO limb darkening: `gamma` is 0 in all 44
+# rows of the answer key, which is already why the MMEXOFAST step passes
+# limb_darkening_coeffs_gamma = 0.  band.u1 is the linear u (op.py applies
+# it through set_limb_coeff_u; gamma = 2u/(3-u), so gamma = 0 <=> u = 0).
+#
+# Left free it does not merely waste a parameter -- limb darkening and
+# source size both shape the finite-source peak and trade against each
+# other.  Across five event-128 runs u1(W149) ran 0.14 -> 1.87 while rho
+# tracked it monotonically, 0.0050 -> 0.0111 against a truth of 0.00607.
+# For real data, use a prior (or a Claret/LDC lookup driven by the SED's own
+# teff/logg); for a dataset generated with zero limb darkening, use zero.
+band.W149.u1: {initval: 0.0, sigma: 0}
+band.Z087.u1: {initval: 0.0, sigma: 0}

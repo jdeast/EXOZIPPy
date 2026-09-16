@@ -1,0 +1,21 @@
+Unloading tools/local-user <S>
+  ERROR: Unload of sticky module skipped
+
+Unloading uge/8.8.1 <S>
+  ERROR: Unload of sticky module skipped
+Initializing NUTS using jitter+adapt_diag...
+Multiprocess sampling (4 chains in 4 jobs)
+NUTS: [star.logmass_raw, star.pm_ra_raw, star.pm_dec_raw, star.distance_raw, star.rv_raw, lens.t_0_raw, lens.u_0_raw, mulensinstrument.log_f_total_raw, mulensinstrument.q_source_raw, mulensinstrument.err_scale_raw]
+Sampling 4 chains for 1_000 tune and 1_000 draw iterations (4_000 + 4_000 draws total) took 443 seconds.
+There were 123 divergences after tuning. Increase `target_accept` or reparameterize.
+{
+ "pipeline": "mulens_pspl",
+ "seed": 1011,
+ "snr": 100.0,
+ "n_epochs": 100,
+ "lens.t_0": 0.4624140107191678,
+ "lens.u_0": -0.09129245331844184,
+ "lens.t_E": 0.18725885113578575,
+ "mulensinstrument.f_source": -0.06673413232083407,
+ "mulensinstrument.f_blend": 0.03306310283874012
+}

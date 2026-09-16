@@ -22,7 +22,12 @@ CORE_COMPONENTS = {
     "transit",
     "rvinstrument",
     "sed",
+    # The microlensing trio: `mulensevent` (the event), `lens` (one entry per
+    # lens body) and `source` (one entry per source body).  Before the split
+    # all three were the single all-in-one `lens` component.
+    "mulensevent",
     "lens",
+    "source",
     "mulensinstrument",
     "astrometryinstrument",
     "galacticmodel",
@@ -67,7 +72,8 @@ def test_star_sampled_parameters_have_bounds_and_scale():
     """
     Given star's defaults.yaml,
     When every parameter marked as sampled is inspected,
-    Then each carries lower, upper, and init_scale (per CLAUDE.md).
+    Then each carries lower, upper, and init_scale (per rule 4 of the
+    defaults.yaml contract in src/exozippy/components/components.md).
     """
     # Arrange
     schema = introspect.component_schema("star")
@@ -158,7 +164,8 @@ def test_component_schema_exposes_utilities():
     assert by_name["getdata"]["available"] is True
     # Arguments carry the JSON argument schema for form rendering.
     assert any(a["name"] == "id" for a in by_name["getdata"]["arguments"])
-    assert by_name["bls"]["available"] is False
+    assert by_name["bls"]["available"] is True
+    assert any(a["name"] == "files" for a in by_name["bls"]["arguments"])
 
 
 def test_every_component_utility_list_is_json_serializable():
@@ -256,13 +263,16 @@ def test_no_defaults_yaml_string_contains_a_control_character():
 
 def test_parallax_latex_labels_are_well_formed():
     """
-    Given the lens component's north/east microlensing parallax parameters,
+    Given the event component's north/east microlensing parallax parameters,
     When their latex labels are read,
     Then both are the intended \\pi_{\\rm E,*} macro (this is the parameter
       pair whose labels carried an embedded carriage return until 2026-08).
+
+    The parallax vector is event-level, so it lives on `mulensevent` after
+    the mulensevent/lens/source split (it was `lens.pi_E_N` before).
     """
     # Arrange / Act
-    params = introspect.component_schema("lens")["parameters"]
+    params = introspect.component_schema("mulensevent")["parameters"]
 
     # Assert
     assert params["pi_E_N"]["latex"] == r"\pi_{\rm E,N}"
@@ -291,3 +301,51 @@ def test_star_mass_declares_no_bounds_but_logmass_does():
     assert params["logmass"]["lower"] == -9.0
     assert params["logmass"]["upper"] == 2.5
     assert params["logmass"]["sampled"] is True
+
+
+def test_global_schema_covers_every_reserved_config_key():
+    """
+    Given the top-level config vocabulary System validates against,
+    When _global_schema describes the global keys,
+    Then every one of them is present.
+
+    The vocabulary lived in three drifting copies: system.RESERVED_CONFIG_KEYS
+    (the tested source of truth, ten keys), _global_schema (three of the ten,
+    while claiming to describe run.py's keys) and the GUI's own literal
+    fallback.  The GUI's config-file DETECTION reads _global_schema().keys(),
+    so the drift was not cosmetic -- a project file whose only non-component
+    keys were, say, `modes:` and `mkparam:` classified as "other".
+    _global_schema is now derived from the frozenset; only the per-key doc and
+    kind are stated here.
+    """
+    # ARRANGE
+    from exozippy.system import RESERVED_CONFIG_KEYS
+
+    # ACT
+    schema = introspect._global_schema()
+
+    # ASSERT
+    assert set(schema) == set(RESERVED_CONFIG_KEYS)
+    for key, entry in schema.items():
+        assert entry["key"] == key
+        assert entry["kind"] in ("option", "block")
+        assert entry["doc"]
+
+
+def test_global_schema_keeps_the_sampler_keys_from_run():
+    """
+    Given the derived global schema,
+    When the sampler block is described,
+    Then its `accepts` is still run.KNOWN_SAMPLER_KEYS.
+
+    Deriving the key SET from RESERVED_CONFIG_KEYS must not cost the one
+    place that was already derived rather than restated.
+    """
+    # ARRANGE
+    from exozippy.run import KNOWN_SAMPLER_KEYS
+
+    # ACT
+    schema = introspect._global_schema()
+
+    # ASSERT
+    assert schema["sampler"]["accepts"] == sorted(KNOWN_SAMPLER_KEYS)

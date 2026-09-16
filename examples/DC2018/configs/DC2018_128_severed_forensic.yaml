@@ -1,0 +1,135 @@
+run:
+  name: "DC2018_128"
+
+# The 2018 Roman Data Challenge, event 128: a 2L1S binary lens with a
+# finite-source peak.  Truth (Answers/master_file.txt row 128):
+#   t_0 = 2458554.8869   u_0 = 0.141832   t_E = 18.2374 d
+#   s = 0.993145   q = 0.0012118   rho = 0.00606537
+#   D_lens = 7999 pc   D_source = 8143 pc   M_lens = 0.454 Msun
+#   theta_E = 0.0905 mas   |pi_E| = 0.0244   R_source = 0.961 Rsun
+#   gamma = 0 -- the simulation has NO limb darkening (all 44 events)
+#
+# alpha is deliberately absent from that list: the answer key's alpha has no
+# global mapping onto the fitted convention.  See
+# scripts/dc18_alpha_convention.py.
+#
+#   star.0   = Lens      (primary lens body, and the kinematic host)
+#   star.1   = Source
+#   planet.0 = Companion (secondary lens body)
+
+star:
+  - name: "Lens"
+  - name: "Source"
+
+planet:
+  - name: "Companion"
+
+lens:
+  - name: "Lens"
+    lenses:  ["star.0", "planet.0"]
+    sources: ["star.1"]
+    finite_source: True
+    # Sever rho from the stellar chain: rho is sampled (log_rho) from the
+    # finite-source signal alone; the chain's theta_star/theta_E is
+    # reported as rho_pred so the pull is a published number.  On this
+    # event the intact identity let the event-rate/kinematics priors and
+    # the uncapped Hogg mixture hold rho ~8x below the light curve's own
+    # 2.5%-precise preference.
+    star_constrains_rho: False
+    mmexofast: "../events/128/DC2018_128_mmexofast.json"
+
+galacticmodel:
+  - name: "DC2018_128"
+    anchor_idx: 1              # the source is star.1
+
+band:
+  - name: "W149"
+    filter: "Roman/WFI.F146"
+    ld_law: "linear"
+  - name: "Z087"
+    filter: "Roman/WFI.F087"
+    ld_law: "linear"
+  # Not observed -- declared so 2MASS Ks enters the SED's BC grid, which is
+  # what `mann: {ks: synthetic}` needs to synthesize the lens's individual
+  # Ks.  The alternative the error message offers, a filter row in the .sed
+  # file, would require a MAGNITUDE we do not have (a row with no `mag:`
+  # becomes NaN and propagates into the likelihood).  No instrument
+  # references this band, so its limb-darkening parameters are simply
+  # pinned as unread.
+  - name: "Ks_bcgrid"
+    filter: "2MASS/2MASS.Ks"
+    ld_law: "linear"
+
+mulensinstrument:
+  - name: "Roman_W149"
+    file: "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.W149.WFIRST18.128.txt"
+    data_format: "flux"
+    observer_location: "roman_simulated_2018dc"
+    band: "W149"
+    likelihood: "hogg"
+  - name: "Roman_Z087"
+    file: "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.Z087.WFIRST18.128.txt"
+    data_format: "flux"
+    observer_location: "roman_simulated_2018dc"
+    band: "Z087"
+    likelihood: "hogg"
+
+prefix: "fitresults_severed/DC2018_128"
+
+sed:
+  file: "DC2018_128.sed.yaml"
+
+# Empirical mass-radius relations, one per star, each chosen for the mass
+# range it is calibrated over -- complements, not alternatives.
+#
+# The SOURCE is a bulge turnoff star (truth: R = 0.961 Rsun at 8.14 kpc),
+# above Mann's 0.7 solMass ceiling, so Torres+2010 applies.  It predicts
+# log10(M) and log10(R) from teff/logg/feh, adds no new parameters, and its
+# scatter is in dex.
+torres:
+  - star: "Source"
+    constrain: [mass, radius]
+
+# The LENS is in the range Mann+2015/2019 is calibrated for (0.075-0.7
+# solMass; truth here 0.454).  `ks: synthetic` takes its INDIVIDUAL Ks from
+# the SED rather than an observed blend -- the only workable route when the
+# lens is unresolved -- and that Ks carries its own scatter, which combines
+# with the relation's published 2.7%/3.3% through the non-centred
+# `ks_offset ~ N(0,1)` parameterization rather than needing hand-inflation.
+#
+# Well posed even when the lens is only bounded ABOVE by the blend flux: as
+# the lens dims its Ks runs faint, the predicted mass runs down to the end
+# of the relation, and the IMF prior closes it from below.  Mann's low-mass
+# boundary and the Salpeter hydrogen-burning floor are the same constant,
+# 0.075 solMass, so the two meet rather than fight.
+#
+# CAVEAT for other events: calibration-range violations are startup
+# WARNINGS only, so a lens above 0.7 solMass still gets the potential
+# applied.  Read the warning before trusting a lens mass.
+mann:
+  - star: "Lens"
+    ks: synthetic
+    constrain: [mass, radius]
+
+sampler:
+  method: "ptde_async"
+  n_temps: "auto"
+  T_max: 200
+  tune: 5000
+  draws: 50000
+  nthin: 1
+  recompute_trace: False
+  eval_timeout: 10
+
+# Degenerate events routinely leave chains split across solution branches
+# with no inter-mode mixing, so occupancy weights would reflect
+# initialization rather than posterior mass.  Bridge-sampling evidence
+# weights are the designed remedy (they fall back to occupancy, loudly, if
+# the bridge iteration does not converge).
+modes:
+  weights: "evidence"
+
+parameter_file: "DC2018_128_sed_severed.params.yaml"
+
+modes:
+  force: true   # forensic re-process of the 9.82%-invalid severed run

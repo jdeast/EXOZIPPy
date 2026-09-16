@@ -12,6 +12,7 @@ import pymc as pm
 
 from exozippy.components.parameter import Parameter
 from exozippy.whitening import (
+    _CLIP_LO,
     apply_measured_whitening,
     probe_scales,
 )
@@ -333,6 +334,210 @@ def test_escalation_resolves_scales_beyond_probe_range():
     _, scales2 = probe_scales(raw_start, logp)
     final = float(np.asarray(scales2["toy.t_raw"])[0])
     assert 0.3 < final < 3.0, final
+
+
+def _too_tight_model(init_scale, true_sigma=1.0):
+    """A bounded parameter whose preliminary scale is far too TIGHT.
+
+    The mirror of the scenario above: there the preliminary scale was too
+    loose (the probe hits its step FLOOR), here it is too tight, so the probe
+    must walk far out in raw units -- past parameter.py's raw-cancellation
+    clip, which is the wall review 1.2.1 is about.
+    """
+    p = Parameter(
+        label="toy.t",
+        initval=2.0,
+        lower=0.0,
+        upper=10.0,
+        init_scale=init_scale,
+    )
+    with pm.Model() as model:
+        tv = p.build_pymc()
+        pm.Potential("like", -0.5 * ((tv - 2.0) / true_sigma) ** 2)
+    return model, p
+
+
+def test_escalation_resolves_a_far_too_tight_preliminary_scale(caplog):
+    """Given a preliminary scale 10 orders of magnitude too TIGHT
+    (init_scale 1e-10 on [0, 10] against a true sigma of 1.0 -- review
+    1.2.1's own reproduction),
+    When apply_measured_whitening runs,
+    Then the escalation resolves it -- a re-probe of the rescaled model lands
+    near 1 -- and no "still unresolved" warning is emitted.
+
+    Before the fix the measured multiplier was exactly the raw-cancellation
+    clip (1e4): that wall manufactures a 0.5-nat contour the probe cannot
+    see past, it sat well INSIDE the escalation window, so no round ran, no
+    warning fired, and the model was left ~1e6 under-whitened.
+    """
+    import logging
+
+    # Arrange
+    model, p = _too_tight_model(1.0e-10)
+    system = _StubSystem([p])
+    logp = model.compile_logp()
+    raw_start = model.initial_point()
+
+    # Act
+    with caplog.at_level(logging.WARNING, logger="exozippy.whitening"):
+        report = apply_measured_whitening(
+            system, model, raw_start, logp_fn=logp
+        )
+
+    # Assert: the cumulative correction is the ~1e10 the setup asks for, not
+    # the 1e4 wall, and the rescaled model probes at ~1.
+    cumulative = float(np.asarray(report["multipliers"]["toy.t_raw"])[0])
+    assert 1e9 < cumulative < 1e11, cumulative
+    _, scales2 = probe_scales(raw_start, logp)
+    final = float(np.asarray(scales2["toy.t_raw"])[0])
+    assert 0.3 < final < 3.0, final
+    assert "still unresolved" not in caplog.text
+
+
+def test_probe_raises_the_raw_cancellation_clip_and_restores_it():
+    """Given the raw-cancellation clip is a sampler safety device,
+    When the whitening probe measures a too-tight element,
+    Then the clip is raised for the measurement and restored afterwards --
+    sampling must never run at the probe's value.
+    """
+    from exozippy.components import parameter as parameter_mod
+    from exozippy.whitening import _PROBE_RAW_CLIP
+
+    # Arrange
+    model, p = _too_tight_model(1.0e-10)
+    system = _StubSystem([p])
+    inner_logp = model.compile_logp()
+    seen = []
+
+    def logp(point):
+        seen.append(parameter_mod.get_raw_cancellation_clip())
+        return inner_logp(point)
+
+    before = parameter_mod.get_raw_cancellation_clip()
+
+    # Act
+    apply_measured_whitening(system, model, model.initial_point(), logp)
+
+    # Assert
+    assert before == parameter_mod._RAW_CANCELLATION_CLIP
+    assert seen and set(seen) == {_PROBE_RAW_CLIP}
+    assert parameter_mod.get_raw_cancellation_clip() == before
+
+
+def test_escalation_iterates_past_two_rounds(caplog):
+    """Given a preliminary scale 19 orders of magnitude too tight -- past the
+    two rounds the escalation used to be hardcoded to (~6.5 orders each),
+    When apply_measured_whitening runs,
+    Then it keeps escalating until nothing is clipped: THREE rounds run and
+    the scale still resolves, so the reach is not a hardcoded number.
+    """
+    import logging
+
+    # Arrange
+    model, p = _too_tight_model(1.0e-19)
+    system = _StubSystem([p])
+    logp = model.compile_logp()
+    raw_start = model.initial_point()
+
+    # Act
+    with caplog.at_level(logging.WARNING, logger="exozippy.whitening"):
+        apply_measured_whitening(system, model, raw_start, logp_fn=logp)
+
+    # Assert
+    rounds = caplog.text.count("escalation round")
+    assert rounds >= 3, caplog.text
+    _, scales2 = probe_scales(raw_start, logp)
+    final = float(np.asarray(scales2["toy.t_raw"])[0])
+    assert 0.3 < final < 3.0, final
+    assert "still unresolved" not in caplog.text
+
+
+def test_no_false_still_unresolved_warning_after_escalation(caplog):
+    """Given the too-LOOSE scenario the shipped escalation test uses
+    (true sigma 5e-15, resolved by one round to a cumulative ~5e-15),
+    When apply_measured_whitening finishes,
+    Then no "still unresolved" warning is emitted: the test is on the LATEST
+    measured multiplier, not on the cumulative one -- which is outside the
+    window by construction after any successful escalation (review 1.2.2).
+    """
+    import logging
+
+    # Arrange
+    p = Parameter(label="toy.t", initval=2.0, lower=0.0, upper=10.0)
+    with pm.Model() as model:
+        tv = p.build_pymc()
+        pm.Potential("like", -0.5 * ((tv - 2.0) / 5.0e-15) ** 2)
+    system = _StubSystem([p])
+    logp = model.compile_logp()
+
+    # Act
+    with caplog.at_level(logging.WARNING, logger="exozippy.whitening"):
+        report = apply_measured_whitening(
+            system, model, model.initial_point(), logp_fn=logp
+        )
+
+    # Assert
+    cumulative = float(np.asarray(report["multipliers"]["toy.t_raw"])[0])
+    assert cumulative < _CLIP_LO  # the cumulative IS outside the window
+    assert "still unresolved" not in caplog.text
+
+
+def test_barrier_correction_round_refreshes_the_probe_diagnostics(monkeypatch):
+    """Given a barrier update that moves the start's logp, so the whitening
+    is re-measured against the final barriers,
+    When measure_and_whiten returns,
+    Then the report's probe_diagnostics come from the SECOND probe.
+
+    Review 3.2.1: only multipliers/raw_scales/map_lp were folded in, so the
+    flat/gradient lists shown to the user described the pre-barrier surface
+    -- stale in exactly the case that triggers the correction round.
+    """
+    from exozippy import whitening
+
+    # Arrange: two canned probes, and a logp that moves when the barriers do.
+    reports = [
+        {
+            "map_lp": 1.0,
+            "multipliers": {"a_raw": np.array([1.0])},
+            "raw_scales": {"a_raw": np.array([1.0])},
+            "probe_diagnostics": {"flat": ["a_raw[0]"], "gradient_nats": {}},
+        },
+        {
+            "map_lp": 2.0,
+            "multipliers": {"a_raw": np.array([1.0])},
+            "raw_scales": {"a_raw": np.array([2.0])},
+            "probe_diagnostics": {
+                "flat": [],
+                "gradient_nats": {"a_raw[0]": 7.0},
+            },
+        },
+    ]
+    monkeypatch.setattr(
+        whitening,
+        "apply_measured_whitening",
+        lambda *a, **k: reports.pop(0),
+    )
+    monkeypatch.setattr(
+        whitening, "measure_barrier_scales", lambda *a, **k: {}
+    )
+    lps = iter([0.0, 5.0, 5.0, 5.0])
+
+    class _NoRefetchSystem(_StubSystem):
+        """The start is already the canonical one (no polish moved it)."""
+
+        get_raw_start = None
+
+    system = _NoRefetchSystem([])
+
+    # Act
+    report = whitening.measure_and_whiten(
+        system, None, {"a_raw": np.zeros(1)}, logp_fn=lambda pt_: next(lps)
+    )
+
+    # Assert
+    assert report["probe_diagnostics"]["flat"] == []
+    assert report["probe_diagnostics"]["gradient_nats"] == {"a_raw[0]": 7.0}
+    assert report["map_lp"] == 2.0
 
 
 def _barrier_model():
@@ -935,4 +1140,247 @@ def test_prepare_whitening_reuse_path_writes_nothing_when_absent(tmp_path):
     assert not path.exists()
     np.testing.assert_array_equal(
         p_x._whiten_state["sv_scale_logits"].get_value(), prelim
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review 4.3.1: the persisted state must carry the ANCHOR, not only the
+# scales.  Before the anchor could move, it was derivable from a rebuilt
+# model -- set_whitening left logit_q_inits exactly where build_pymc put it
+# -- so storing it would have been redundant.  Now that
+# System.recenter_whitening_anchor folds the polished start into it, a raw
+# draw decodes through `lower + span*sigmoid(anchor + scale*raw)` and the
+# anchor is half of what a stored draw MEANS.  An unpersisted moving anchor
+# makes a reused trace decode against the wrong center, silently, because
+# every number involved stays physically plausible.
+# ---------------------------------------------------------------------------
+
+
+def test_the_persisted_state_carries_the_anchor(tmp_path):
+    """
+    Given a measured-and-whitened model,
+    When its state is persisted,
+    Then the file declares schema version 2 and every whitened parameter's
+      entry carries `logit_q_inits` equal to the live shared variable.
+
+    Asserted against the SHARED VARIABLE rather than a recorded constant:
+    the point is that the file records where raw = 0 actually is, and a
+    hand-written expectation would be a second place for the same mistake.
+    """
+    import json
+
+    from exozippy.whitening import _WHITENING_SCHEMA_VERSION
+
+    # Arrange
+    _model, system, (p_x, p_y, p_d), path = _saved_whitening_setup(tmp_path)
+
+    # Act
+    data = json.loads(path.read_text())
+
+    # Assert
+    assert data["version"] == _WHITENING_SCHEMA_VERSION == 2
+    whitened = [p for p in (p_x, p_y, p_d) if p._whiten_state is not None]
+    assert whitened, "no whitened parameter in the toy build"
+    for par in whitened:
+        np.testing.assert_array_equal(
+            np.asarray(data["params"][par.label]["logit_q_inits"]),
+            par._whiten_state["sv_logit_q_inits"].get_value(),
+        )
+    # The barrier-only parameter has no anchor to record, and must not grow
+    # an empty one (that would make the validator's presence check vacuous).
+    assert p_d._whiten_state is None
+    assert "logit_q_inits" not in data["params"][p_d.label]
+
+
+def test_a_moved_anchor_survives_the_round_trip(tmp_path):
+    """
+    Given a build whose anchor has MOVED away from its build-time value
+      (what recenter_on_start does),
+    When the state is saved, the anchor is then disturbed, and the file is
+      loaded back,
+    Then the saved anchor is restored into both the shared variable and the
+      frozen forward transform.
+
+    The disturbance is what makes this a round trip rather than a no-op: a
+    loader that silently ignored the persisted anchor would pass a
+    save-then-load test on an undisturbed build, and that is exactly the
+    silent failure this item exists to prevent.
+    """
+    from exozippy.whitening import load_whitening, save_whitening
+
+    # Arrange
+    _model, p_x, p_y, p_d = _barrier_model()
+    system = _StubSystem([p_x, p_y, p_d])
+    ws = p_x._whiten_state
+    moved = ws["sv_logit_q_inits"].get_value().copy() + 0.75
+    p_x._apply_whitening_state(
+        ws["sv_scale_logits"].get_value(),
+        ws["sv_gaussian_scales"].get_value(),
+        logit_q_inits=moved,
+    )
+    path = tmp_path / "fit_whitening.json"
+    save_whitening(system, str(path))
+
+    # Disturb: pretend a rebuild landed somewhere else entirely.
+    p_x._apply_whitening_state(
+        ws["sv_scale_logits"].get_value(),
+        ws["sv_gaussian_scales"].get_value(),
+        logit_q_inits=np.zeros_like(moved) - 3.0,
+    )
+    assert not np.allclose(ws["sv_logit_q_inits"].get_value(), moved)
+
+    # Act
+    assert load_whitening(system, str(path))
+
+    # Assert -- both mirrors, because phys_from_raw reads the transform copy
+    # while the compiled graph reads the shared variable.
+    np.testing.assert_array_equal(ws["sv_logit_q_inits"].get_value(), moved)
+    np.testing.assert_array_equal(p_x._raw_transform["logit_q_inits"], moved)
+
+
+def test_a_version_2_file_that_omits_the_anchor_is_refused(tmp_path):
+    """
+    Given a version-2 whitening file with a parameter's `logit_q_inits`
+      deleted,
+    When it is restored on the trace-reuse path,
+    Then StaleWhiteningError names the missing key -- rather than applying
+      the scales and leaving the anchor wherever the rebuild put it.
+
+    This is the failure mode the version bump exists to catch.  A file that
+    claims to record the coordinate system but omits its center describes a
+    decode nobody can reproduce, and applying the scales alone would be the
+    partial apply `_validate_whitening_state` refuses everywhere else.
+    """
+    import json
+
+    import pytest
+
+    from exozippy.whitening import (
+        StaleWhiteningError,
+        restore_whitening_for_trace,
+    )
+
+    # Arrange
+    _model, system, (p_x, _p_y, _p_d), path = _saved_whitening_setup(tmp_path)
+    data = json.loads(path.read_text())
+    del data["params"]["toy.x"]["logit_q_inits"]
+    path.write_text(json.dumps(data))
+    anchor_before = p_x._whiten_state["sv_logit_q_inits"].get_value().copy()
+    scales_before = p_x._whiten_state["sv_scale_logits"].get_value().copy()
+
+    # Act
+    with pytest.raises(StaleWhiteningError) as excinfo:
+        restore_whitening_for_trace(system, str(path), "fit_trace.nc")
+
+    # Assert
+    message = str(excinfo.value)
+    assert "logit_q_inits" in message
+    assert "toy.x" in message
+    # ...and nothing was applied: not the anchor, and not the scales either.
+    np.testing.assert_array_equal(
+        p_x._whiten_state["sv_logit_q_inits"].get_value(), anchor_before
+    )
+    np.testing.assert_array_equal(
+        p_x._whiten_state["sv_scale_logits"].get_value(), scales_before
+    )
+
+
+def test_a_version_1_file_still_applies_and_keeps_the_build_anchor(tmp_path):
+    """
+    Given a legacy version-1 whitening file (scales only, no anchor),
+    When it is restored,
+    Then it applies, and the build keeps its own build-time anchor.
+
+    Version-1 files are real and one is SHIPPED --
+    `tests/fixtures/DC2018_128_whitening.json`, which
+    `test_runaway_logp_regression.py` restores to give its pinned raw draws
+    their meaning.  The code that wrote a version-1 file could not move the
+    anchor (set_whitening left it exactly where build_pymc put it), so the
+    rebuilt model's anchor IS the one its trace was sampled under: the
+    absent key is a property of that schema, not a gap to be guessed at.
+    """
+    import json
+
+    from exozippy.whitening import load_whitening
+
+    # Arrange
+    _model, system, (p_x, _p_y, _p_d), path = _saved_whitening_setup(tmp_path)
+    anchor = p_x._whiten_state["sv_logit_q_inits"].get_value().copy()
+    data = json.loads(path.read_text())
+    data["version"] = 1
+    for entry in data["params"].values():
+        entry.pop("logit_q_inits", None)
+    path.write_text(json.dumps(data))
+
+    # Act
+    assert load_whitening(system, str(path))
+
+    # Assert
+    np.testing.assert_array_equal(
+        p_x._whiten_state["sv_logit_q_inits"].get_value(), anchor
+    )
+
+
+def test_a_version_1_file_carrying_an_anchor_is_refused(tmp_path, caplog):
+    """
+    Given a file that declares version 1 but carries an anchor,
+    When it is loaded,
+    Then it is rejected: it is not what its version claims to be.
+
+    The exemption above ("a version-1 file legitimately has no anchor") has
+    to be asserted in both directions or it is a hole -- a version-2 file
+    relabelled 1 would otherwise get its anchor silently ignored while its
+    scales applied, which is the partial apply this module refuses.
+    """
+    import json
+    import logging
+
+    from exozippy.whitening import load_whitening
+
+    # Arrange
+    _model, system, (p_x, _p_y, _p_d), path = _saved_whitening_setup(tmp_path)
+    data = json.loads(path.read_text())
+    data["version"] = 1
+    path.write_text(json.dumps(data))
+    anchor = p_x._whiten_state["sv_logit_q_inits"].get_value().copy()
+
+    # Act
+    with caplog.at_level(logging.WARNING):
+        applied = load_whitening(system, str(path))
+
+    # Assert
+    assert not applied
+    assert "logit_q_inits" in caplog.text
+    np.testing.assert_array_equal(
+        p_x._whiten_state["sv_logit_q_inits"].get_value(), anchor
+    )
+
+
+def test_an_anchor_of_the_wrong_length_is_refused(tmp_path):
+    """
+    Given a version-2 file whose anchor vector no longer matches the model,
+    When it is loaded,
+    Then it is rejected before anything is written.
+
+    Same reasoning as the `gaussian_scales` length check it sits beside: the
+    validator must cover EVERY vector the apply step touches, or a bad one
+    aborts the loop after earlier parameters were already written.
+    """
+    import json
+
+    from exozippy.whitening import load_whitening
+
+    # Arrange
+    _model, system, (p_x, _p_y, _p_d), path = _saved_whitening_setup(tmp_path)
+    data = json.loads(path.read_text())
+    data["params"]["toy.x"]["logit_q_inits"] = [0.0, 0.0, 0.0]
+    path.write_text(json.dumps(data))
+    scales_before = p_x._whiten_state["sv_scale_logits"].get_value().copy()
+
+    # Act
+    assert not load_whitening(system, str(path))
+
+    # Assert
+    np.testing.assert_array_equal(
+        p_x._whiten_state["sv_scale_logits"].get_value(), scales_before
     )

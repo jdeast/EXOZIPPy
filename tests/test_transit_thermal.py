@@ -264,11 +264,10 @@ def _flux_at(system, point, times):
     times, via the same compiled evaluator plot_data/plot() use."""
     transit = system.transit
     param_values = transit._point_to_plot_params(point, system)
-    y = transit._compiled_full_lc(
-        np.asarray(times, dtype=float), 0, *param_values
+    full, _ = transit._lc_at_times(
+        param_values, 0, np.asarray(times, dtype=float)
     )
-    baseline = transit._baseline_for(point, 0)
-    return baseline + y
+    return full
 
 
 @pytest.fixture(scope="module")
@@ -370,7 +369,7 @@ def test_build_likelihood_mu_shows_eclipse_dip_and_transit_dip(
         thermal_on_full_orbit
     )
     mu = _likelihood_mu(system, model, point)
-    baseline = system.transit._baseline_for(point, 0)
+    baseline = system.transit._point_value(point, system.transit.baseline, 0)
     times = system.transit.time
 
     mu_far = mu[_nearest_index(times, t_far)]
@@ -447,7 +446,7 @@ def test_thermal_off_model_is_flat_away_from_transit(thermal_off_system):
     transit-only model is unchanged.
     """
     system, model, point = thermal_off_system
-    baseline = system.transit._baseline_for(point, 0)
+    baseline = system.transit._point_value(point, system.transit.baseline, 0)
     far = _flux_at(system, point, [_TC + _PERIOD * 0.3])[0]
     secondary = _flux_at(system, point, [_TC + _PERIOD / 2.0])[0]
     assert far == pytest.approx(baseline, abs=1e-9)
@@ -464,7 +463,7 @@ def test_thermal_on_adds_constant_bump_away_from_either_conjunction(
     star isn't occulting the planet's disk there).
     """
     system, model, point = thermal_on_system
-    baseline = system.transit._baseline_for(point, 0)
+    baseline = system.transit._point_value(point, system.transit.baseline, 0)
     far = _flux_at(system, point, [_TC + _PERIOD * 0.3])[0]
     assert far == pytest.approx(baseline + _THERMAL_PPM * 1e-6, abs=1e-6)
 
@@ -479,7 +478,7 @@ def test_thermal_on_drops_during_secondary_eclipse(thermal_on_system):
     plateau.
     """
     system, model, point = thermal_on_system
-    baseline = system.transit._baseline_for(point, 0)
+    baseline = system.transit._point_value(point, system.transit.baseline, 0)
     plateau = _flux_at(system, point, [_TC + _PERIOD * 0.3])[0]
     secondary = _flux_at(system, point, [_TC + _PERIOD / 2.0])[0]
     # Should have lost most of the thermal bump...
@@ -501,7 +500,7 @@ def test_thermal_on_primary_transit_is_still_a_dip_below_baseline(
     (planetvisible == 1 in front of the star).
     """
     system, model, point = thermal_on_system
-    baseline = system.transit._baseline_for(point, 0)
+    baseline = system.transit._point_value(point, system.transit.baseline, 0)
     mid_transit = _flux_at(system, point, [_TC])[0]
     assert mid_transit < baseline
 
@@ -512,12 +511,13 @@ def test_thermal_eclipse_is_exposure_smeared(tmp_path_factory):
     (exptime=60 min, ninterp=21) on a light curve finely sampling the
     secondary eclipse,
     When the actual likelihood mu is evaluated,
-    Then it equals the sub-exposure average of the thermal-included
-    instantaneous model (_smeared_full_lc, the plotting path's smearing
-    of the same physics) and NOT the instantaneous model itself --
-    proving the thermal term lives inside the oversampling group loop
-    and gets smeared with the transit, exactly as EXOFASTv2 averages the
-    full model (thermal included) over exofast_chi2v2.pro's grid.
+    Then it equals the plotted model at the same times (the same
+    expression, _lc_model, compiled on the plot grid -- so the plots show
+    the smeared, thermal-included curve the fit scored) and NOT the
+    instantaneous model of a sibling system without smearing -- proving
+    the thermal term lives inside the oversampling group loop and gets
+    smeared with the transit, exactly as EXOFASTv2 averages the full
+    model (thermal included) over exofast_chi2v2.pro's grid.
     """
     d = tmp_path_factory.mktemp("thermal_smeared")
     t_sec = _TC + _PERIOD / 2.0
@@ -540,10 +540,21 @@ def test_thermal_eclipse_is_exposure_smeared(tmp_path_factory):
 
     tr = system.transit
     param_values = tr._point_to_plot_params(point, system)
-    baseline = tr._baseline_for(point, 0)
+    smeared, _ = tr._lc_at_times(param_values, 0, t)
+    np.testing.assert_allclose(mu, smeared, atol=1e-12)
 
-    smeared = baseline + tr._smeared_full_lc(t, 0, *param_values)
-    np.testing.assert_allclose(mu, smeared, atol=1e-8)
-
-    instantaneous = baseline + tr._compiled_full_lc(t, 0, *param_values)
+    # The instantaneous reference: the same light curve with no smearing
+    # keys, at the same start point.
+    system_instant = System(
+        _config(lc, fitthermal=True), user_params=_params(_THERMAL_PPM)
+    )
+    system_instant.prepare()
+    model_instant = system_instant.build_model()
+    with model_instant:
+        point_instant = system_instant.get_internal_point(
+            model_instant, system_instant.get_raw_start(model_instant)
+        )
+    instantaneous = _likelihood_mu(
+        system_instant, model_instant, point_instant
+    )
     assert np.max(np.abs(mu - instantaneous)) > 1e-5

@@ -2,11 +2,10 @@
 Asynchronous (non-blocking) Parallel Tempering + Differential Evolution sampler.
 
 The production default for Op-based (non-differentiable) models (YAML:
-sampler.method: "ptde_async"; see hpc_optimization.txt PROMPT 13). Kept as a
-separate sampler module so the synchronous PTDE in ptde.py -- the reference
-implementation with fully up-to-date DE partner states -- stays available for
-A/B validation. The non-sampling scaffolding both share lives in
-exozippy.samplers._common.
+sampler.method: "ptde_async"). Kept as a separate sampler module so the
+synchronous PTDE in ptde.py -- the reference implementation with fully
+up-to-date DE partner states -- stays available for A/B validation. The
+non-sampling scaffolding both share lives in exozippy.samplers._common.
 
 MOTIVATION: ptde.py's synchronous design must wait for the SLOWEST of all
 n_temps*n_chains proposals before ANY chain can advance to its next step,
@@ -14,9 +13,10 @@ because every chain's next DE proposal needs its rung-mates' CURRENT states,
 and "current" is only well-defined once the whole step resolves. Production
 runs on examples/DC2018_128 show this stalls the entire sampler behind a rare
 but expensive near-caustic evaluation concentrated in the hottest 1-2 rungs
-(see hpc_optimization.txt's 2026-07-07 status update: 0.4%/0.09% of rung 6/7
-calls exceed 0.1s, and with 320 proposals/step the odds NONE of them land in
-that tail across a whole run are essentially zero). This module removes that
+(the per-rung timing table at the top of notes/hpc_optimization.txt:
+0.09%/0.7% of rung 6/7 calls exceed 0.1 s, and with 320 proposals/step the
+odds NONE of them land in that tail across a whole run are essentially zero).
+This module removes that
 barrier: every (rung, chain) slot is its own continuous pipeline against a
 shared worker pool -- as soon as one slot's evaluation resolves, it is
 accepted/rejected and that SAME slot's next proposal is immediately
@@ -54,8 +54,9 @@ per-chain draw counters `per_chain_draws`). A chain that reaches its target
 for chains still catching up) but stops being recorded. The run stops once
 every chain has recorded `draws` samples, or maxtime/convergence/user-
 interrupt fires first; at that point output is truncated to
-min(per_chain_draws) across chains (the simplest correct option per
-hpc_optimization.txt PROMPT 13 item 4).
+min(per_chain_draws) across chains (the simplest correct option: every
+chain then contributes the same number of draws, and no chain contributes
+draws its peers have not caught up to).
 """
 
 import logging
@@ -70,17 +71,12 @@ from exozippy.samplers._common import (
     DE_JITTER,
     LpPlausibilityGuard,
     _eval_logp,
-    de_proposal,
+    next_gamma,
 )
-from exozippy.samplers.ptde import (
-    _check_convergence,
-    _convergence_check_schedule,
+from exozippy.samplers.ladder import (
     _deo_pair_sequence,
-    _geometric_ladder,
     _record_round_trips,
-    _safe_progress,
-    ladder_health_report,
-    resolve_n_temps,
+    _update_ladder_barrier,
 )
 
 logger = logging.getLogger(__name__)
@@ -104,6 +100,9 @@ def ptde_async_sample(
     target_accept=0.20,
     adapt_gamma=True,
     gamma_adapt_window=None,
+    adapt_ladder=False,
+    ladder_adapt_window=None,
+    de_mode_hop=0.0,
     de_jitter=DE_JITTER,
     swap_interval=None,
     swap_schedule="deo",
@@ -114,6 +113,7 @@ def ptde_async_sample(
     max_rhat=1.01,
     maxtime=None,
     eval_timeout=None,
+    start_dispersion=None,
     lp_plausibility_ceiling=None,
     collect_rung_timing=False,
     progress_callback=None,
@@ -131,7 +131,11 @@ def ptde_async_sample(
                completed evaluations (any rung). None -> n_chains, chosen so
                the long-run ratio of evaluations-per-swap-attempt roughly
                matches ptde.py's one-full-round-of-swaps-per-step cadence.
-    swap_schedule : {"deo", "random"} -- "deo" (default) walks the adjacent
+    swap_schedule : {"deo", "random"} -- "random" is DIAGNOSTIC ONLY and
+        measured decisively worse than the default (review 7.4.4 leg (a): 0/0
+        round trips against DEO's 37/41, and one arm lost a mode).  It is kept
+        as the control for diagnosing ladder transport; see ptde.py's module
+        docstring.  "deo" (default) walks the adjacent
                rung pairs in a deterministic non-reversible cycling order
                (even pairs (0,1),(2,3),... first, then odd pairs (1,2),(3,4),
                ..., repeating; see ptde._deo_pair_sequence), the event-time
@@ -139,6 +143,45 @@ def ptde_async_sample(
                legacy random-adjacent-pair draw for A/B comparison. The chains
                swapped within the chosen pair are random either way, and each
                swap is the identical MH test, so invariance is untouched.
+    adapt_ladder : bool -- re-space the ladder during tuning to equalize the
+               per-pair communication barrier (Syed et al. 2022). Default
+               False, matching the synchronous sampler. Turn it on when the
+               per-rung swap acceptances are non-uniform: a round trip must
+               cross every pair, so transport is throttled by the WORST
+               stretch, and a geometric ladder cannot fix that by getting
+               longer (measured on DC2018 event 128 -- see the block that
+               calls _update_ladder_barrier below).
+    ladder_adapt_window : int | None -- re-space the ladder no more often
+               than once per this many swap PROPOSALS. None -> max(200,
+               20 * (n_temps - 1)), i.e. about 20 proposals per adjacent
+               pair. Unlike gamma's window this is not a cadence knob: the
+               adaptation zeroes the per-pair swap counters, so it measures
+               only what accumulated since it last ran, and running it more
+               often than this makes it re-space on noise (see the block
+               that calls _update_ladder_barrier).
+    de_mode_hop : float -- probability of replacing the scaled DE gamma with
+               gamma = 1 on a given proposal (ter Braak 2006's mode-hopping
+               move; 0.1 is conventional). Default 0.0, i.e. OFF and
+               bit-identical to before -- the extra rng draw is consumed only
+               when this is nonzero.
+
+               Why it exists: the DE move is x_i + gamma*(x_j - x_k) with
+               gamma ~ 2.38/sqrt(2d) (0.32 at d=27, and the adapter drives it
+               lower still). When x_j and x_k straddle two modes their
+               difference IS the inter-mode vector -- but scaled by 0.32 the
+               proposal lands a third of the way across, in the valley, and
+               is rejected. So the DE move cannot cross modes at its own
+               optimal scale, and ALL between-mode transport falls to PT round
+               trips. At gamma = 1 the proposal translates by the full
+               difference vector and arrives in the other mode. Both kernels
+               are symmetric in (x_j, x_k), so the mixture needs no Hastings
+               correction.
+
+               Hop proposals are EXCLUDED from the gamma adaptation counters.
+               They are deliberately over-sized and mostly rejected, so
+               letting them into the measured T=1 acceptance would drive the
+               adapter to shrink gamma -- degrading within-mode sampling as
+               the price of attempting hops, which is precisely backwards.
     gamma_adapt_window : int | None -- adapt gamma once per this many
                completed T=1 proposals still within their own chain's tune
                phase. None -> max(n_chains, (tune * n_chains) // 20), i.e.
@@ -175,85 +218,58 @@ def ptde_async_sample(
     -------
     arviz.InferenceData with posterior and sample_stats["lp"] from T=1 chains.
     """
-    if swap_schedule not in ("deo", "random"):
-        raise ValueError(
-            f"swap_schedule must be 'deo' or 'random', got {swap_schedule!r}"
-        )
-
-    lp_guard = LpPlausibilityGuard(
-        lp_plausibility_ceiling, "PTDE-async", logger
-    )
-
-    rng = np.random.default_rng(seed)
-
-    # parameter bookkeeping -- before the ladder, since n_temps may be
-    # "auto" (sized from the parameter count; see ptde.resolve_n_temps).
-    raw_start = system.get_raw_start(model)
-    model_keys = list(raw_start.keys())
-    n_params = sum(v.size for v in raw_start.values())
-    n_temps = resolve_n_temps(n_temps, n_params, T_max)
-    temperatures = _geometric_ladder(n_temps, T_max)
-
-    # compile logp ONCE; install in _common BEFORE forking workers so fork
-    # children inherit it (copy-on-write; see _common.set_worker_globals)
-    logp_fn = model.compile_logp()
-    _common.set_worker_globals(logp_fn, collect_rung_timing)
-
-    # compile raw -> physical conversions ONCE (single-sample and batched;
-    # see _common.compile_conversions for the rationale).
-    raw_to_phys, raw_to_phys_batched, raw_var_names, out_var_names = (
-        _common.compile_conversions(model)
-    )
-    # Element count of the PHYSICAL side (sampled + Deterministic), the
-    # denominator of the hot-group trace share below.  One transform
-    # evaluation at the start point; the graph is compiled either way.
-    _n_out_elements = sum(
-        int(np.asarray(v).size)
-        for v in raw_to_phys(
-            *[np.asarray(raw_start[k]) for k in raw_var_names]
-        )
-    )
-
-    n_chains = _common.resolve_n_chains(
-        n_chains, n_params, "PTDE-async", logger
-    )
-    if gamma is None:
-        gamma = 2.38 / np.sqrt(2 * n_params)
-    logger.info(
-        f"PTDE-async: {n_params} params, {n_chains} chains/rung, gamma={gamma:.4f}"
-    )
-
-    t1_starts, chain_seed_index = _common.resolve_start_population(
+    # ONE shared prologue for both PTDE loops (_common.prepare_ptde_run).
+    # Identical to ptde.py's call but for the label: nothing in resolving a
+    # ladder, compiling a logp or dispersing a start population depends on
+    # whether proposals will be dispatched synchronously.
+    run = _common.prepare_ptde_run(
         model,
         system,
-        n_chains,
-        logp_fn,
-        rng,
-        raw_start,
+        label="PTDE-async",
+        log=logger,
+        draws=draws,
+        tune=tune,
+        n_temps=n_temps,
+        T_max=T_max,
+        n_chains=n_chains,
+        gamma=gamma,
+        seed=seed,
+        swap_schedule=swap_schedule,
+        de_mode_hop=de_mode_hop,
         initvals=initvals,
         raw_starts=raw_starts,
         seed_indices=seed_indices,
         raw_scales=raw_scales,
+        start_dispersion=start_dispersion,
+        plot_prefix=plot_prefix,
+        lp_plausibility_ceiling=lp_plausibility_ceiling,
+        collect_rung_timing=collect_rung_timing,
+        store_hot_chains=store_hot_chains,
     )
-
-    _common.plot_start_ensemble(
-        system,
-        t1_starts,
-        raw_to_phys_batched,
-        raw_var_names,
-        out_var_names,
-        plot_prefix,
-        logger,
+    lp_guard, rng, de_mode_hop = run.lp_guard, run.rng, run.de_mode_hop
+    raw_start, model_keys, n_params = (
+        run.raw_start,
+        run.model_keys,
+        run.n_params,
     )
+    n_temps, temperatures = run.n_temps, run.temperatures
+    logp_fn, layout, hot = run.logp_fn, run.layout, run.hot
+    n_chains, gamma = run.n_chains, run.gamma
+    chain_seed_index, rung_starts = run.chain_seed_index, run.rung_starts
+    raw_to_phys, raw_to_phys_batched = run.raw_to_phys, run.raw_to_phys_batched
+    raw_var_names, out_var_names = run.raw_var_names, run.out_var_names
 
     # Per-(rung, chain) slot state. current_lp[k][i] is None until that
     # slot's first evaluation completes -- doubles as "still initializing".
+    # A rung's states are ONE (n_chains, n_raw_elements) array rather than a
+    # list of dicts, so the DE move is three vector operations instead of a
+    # Python loop over the free RVs; _common.RawLayout owns the packing and
+    # the proof that it is bit-identical (review 6.4.2).
+    # Per-rung populations, each dispersed at its own temperature (8.4.7);
+    # this used to replicate T=1 to every rung.
     current_state = [
-        [
-            {key: v.copy() for key, v in t1_starts[i % n_chains].items()}
-            for i in range(n_chains)
-        ]
-        for _ in range(n_temps)
+        layout.pack_many([pop[i % n_chains] for i in range(n_chains)])
+        for pop in rung_starts
     ]
     current_lp = [[None] * n_chains for _ in range(n_temps)]
     iter_count = [[0] * n_chains for _ in range(n_temps)]
@@ -288,6 +304,14 @@ def ptde_async_sample(
         if gamma_adapt_window
         else max(n_chains, (tune * n_chains) // 20)
     )
+    # Enough swap proposals behind a per-pair rejection rate for it to mean
+    # anything: ~20 per adjacent pair, floored at 200 so a short ladder still
+    # accumulates a usable sample.  See the gating in the adaptation block.
+    ladder_adapt_window = (
+        max(1, int(ladder_adapt_window))
+        if ladder_adapt_window
+        else max(200, 20 * max(n_temps - 1, 1))
+    )
     # One async "step" = n_slots completed evaluations, the work of one
     # synchronous ptde.py step -- so log_interval means the same thing in
     # both samplers' configs.
@@ -297,42 +321,55 @@ def ptde_async_sample(
         else max(n_slots, (n_slots * (tune + draws)) // 20)
     )
 
-    # storage: raw values from T=1 chains only; each chain records exactly
-    # `draws` samples (its own post-tune iterations), so no dynamic growth
-    # is needed -- capacity is a hard per-chain cap by construction.
+    # storage: raw values from T=1 chains only.  Each chain records at most
+    # `draws` samples (its own post-tune iterations), but the buffers are
+    # grown in chunks rather than allocated at that cap up front: a run that
+    # stops on convergence, maxtime or a user interrupt otherwise reserves
+    # -- and, being np.zeros, TOUCHES -- the entire trace it will never
+    # write, ~2.9 GB for a DC2018-shaped run (review 6.4.6; 6.4.5 fixed the
+    # same defect in the synchronous sampler and this one was missed).
+    #
+    # Async chains advance independently, so a growth step is triggered by
+    # whichever chain is furthest ahead while capacity stays uniform across
+    # chains.  That is the intended behavior: the worst-case over-allocation
+    # is one DRAW_CHUNK beyond the leading chain, independent of how far the
+    # chains have spread.
+    _cap0 = min(int(draws), _common.DRAW_CHUNK)
     stored_raw = {
-        k: np.zeros((n_chains, draws) + raw_start[k].shape) for k in model_keys
+        k: np.zeros((n_chains, _cap0) + raw_start[k].shape) for k in model_keys
     }
-    stored_lp = np.zeros((n_chains, draws))
+    stored_lp = np.zeros((n_chains, _cap0))
     per_chain_draws = np.zeros(n_chains, dtype=int)
-
-    # Optional thinned hot-rung storage (store_hot_chains): detector data
-    # for post-hoc discovery of posterior-suppressed modes; see the
-    # parameter docstring. UNtempered logp is stored (current_lp holds the
-    # raw logp; tempering happens in the acceptance rule), so hot lp values
-    # are directly comparable to T=1.
-    hot_thin = _common.resolve_store_hot_chains(
-        store_hot_chains,
-        system,
-        n_temps,
-        n_params,
-        _n_out_elements,
-        "PTDE-async",
-        logger,
-    )
-    hot_cap = max(1, draws // hot_thin) if hot_thin else 0
-    if hot_thin:
-        stored_hot_raw = {
-            k: np.zeros((n_temps - 1, n_chains, hot_cap) + raw_start[k].shape)
-            for k in model_keys
-        }
-        stored_hot_lp = np.full((n_temps - 1, n_chains, hot_cap), np.nan)
-        per_hot_draws = np.zeros((n_temps - 1, n_chains), dtype=int)
 
     n_accept = np.zeros(n_temps)
     n_propose = np.zeros(n_temps)
+    # Per-rung explored span: see _common.SpanTracker for what it is for
+    # and the DC2018 event 128 numbers that motivate reporting it live.
+    spans = _common.SpanTracker(n_temps, raw_start, layout)
+    # Windowed twin, reset at every progress line.  The cumulative tracker
+    # can never shed the pre-equilibration transient, so on its own it
+    # answers "where has this rung ever been" and not "how far is it
+    # exploring now"; both are worth a column (SpanTracker.reset).
+    spans_window = _common.SpanTracker(n_temps, raw_start, layout)
+
+    # Swap counters, in two windows because two consumers need different
+    # ones.  The ADAPTATION window is zeroed by each re-spacing, because a
+    # re-spaced ladder's acceptances say nothing about the ladder that
+    # produced them -- and the wrap-up ladder_health_report wants exactly
+    # that window too, since its claim is about the FINAL ladder.  The
+    # progress line wants the opposite: a rate that does not collapse to
+    # noise every time the adaptation fires.
     n_swap_accept = np.zeros(max(n_temps - 1, 1))
     n_swap_propose = np.zeros(max(n_temps - 1, 1))
+    n_swap_accept_cum = np.zeros(max(n_temps - 1, 1))
+    n_swap_propose_cum = np.zeros(max(n_temps - 1, 1))
+    # Per-slot flag: was the in-flight proposal a gamma=1 hop?  Set when the
+    # proposal is built, read when its result is scored -- safe as plain
+    # state because the parent builds and scores in one thread.
+    hop_flag = [[False] * n_chains for _ in range(n_temps)]
+    n_hop_propose = [0]
+    n_hop_accept = [0]
+    n_ladder_adapts = [0]  # re-spacing MEASUREMENTS, moved or not
     n_eval_timeouts = [0]
     n_swap_discards = [0]  # in-flight proposals invalidated by a swap
     rung_times = [[] for _ in range(n_temps)]
@@ -380,27 +417,38 @@ def ptde_async_sample(
     _sub_seq = [0]
 
     def _build_proposal(k, i):
+        """The slot's next PACKED proposal (see _common.RawLayout)."""
         if current_lp[k][i] is None:
             # First evaluation for this slot: evaluate the start state itself.
-            return {key: v.copy() for key, v in current_state[k][i].items()}
-        return de_proposal(
+            hop_flag[k][i] = False
+            return current_state[k][i].copy()
+        # The hop decision lives HERE rather than inside RawLayout.propose:
+        # that class documents bit-identical rng draw order as a property, and
+        # the caller is the only place that knows whether this proposal should
+        # be a hop.  The extra draw is taken only when hops are enabled, so
+        # de_mode_hop=0 leaves the stream exactly as it was.
+        hop = de_mode_hop > 0.0 and rng.random() < de_mode_hop
+        hop_flag[k][i] = hop
+        return layout.propose(
             rng,
             current_state[k],
             i,
-            gamma_box[0],
-            model_keys,
+            1.0 if hop else gamma_box[0],
             jitter=de_jitter,
         )
 
     def _submit(k, i):
+        # The slot keeps the packed vector; the worker is handed the dict the
+        # compiled logp wants.
         prop = _build_proposal(k, i)
+        payload = layout.unpack(prop)
         _sub_seq[0] += 1
         sub_id = _sub_seq[0]
         in_flight_meta[sub_id] = (k, i, prop, time.time(), state_gen[k][i])
         in_flight[0] += 1
         if pool is None:
             # Serial fallback: no real concurrency, evaluate immediately.
-            result_q.put((sub_id, _eval_logp(prop)))
+            result_q.put((sub_id, _eval_logp(payload)))
             return
 
         def _cb(result, sub_id=sub_id):
@@ -414,7 +462,7 @@ def ptde_async_sample(
             result_q.put((sub_id, failure))
 
         pool.apply_async(
-            _eval_logp, (prop,), callback=_cb, error_callback=_ecb
+            _eval_logp, (payload,), callback=_cb, error_callback=_ecb
         )
 
     def _attempt_swap():
@@ -434,14 +482,16 @@ def ptde_async_sample(
         if lp_i is None or lp_j is None:
             return  # one side hasn't completed its first evaluation yet
         n_swap_propose[k] += 1
+        n_swap_propose_cum[k] += 1
         log_a = (lp_j - lp_i) * (
             1.0 / temperatures[k] - 1.0 / temperatures[k + 1]
         )
         if rng.random() < np.exp(min(0.0, log_a)):
-            current_state[k][i], current_state[k + 1][j] = (
-                current_state[k + 1][j],
-                current_state[k][i],
-            )
+            # .copy() first: these are numpy ROWS, so the tuple form would
+            # hold views and the second assignment would read the first back.
+            _tmp = current_state[k][i].copy()
+            current_state[k][i] = current_state[k + 1][j]
+            current_state[k + 1][j] = _tmp
             current_lp[k][i], current_lp[k + 1][j] = lp_j, lp_i
             direction[k][i], direction[k + 1][j] = (
                 direction[k + 1][j],
@@ -453,6 +503,7 @@ def ptde_async_sample(
             state_gen[k][i] += 1
             state_gen[k + 1][j] += 1
             n_swap_accept[k] += 1
+            n_swap_accept_cum[k] += 1
         # Update round-trip tags after every swap event (idempotent): a config
         # sitting at either extreme rung is tagged accordingly and a completed
         # cold -> hot -> cold excursion is counted.
@@ -462,7 +513,9 @@ def ptde_async_sample(
     _do_convergence = (
         min_ess is not None or max_rhat is not None
     ) and n_chains >= 2
-    _check_gen = _convergence_check_schedule() if _do_convergence else None
+    _check_gen = (
+        _common._convergence_check_schedule() if _do_convergence else None
+    )
     _next_check = [next(_check_gen)] if _check_gen else [None]
 
     stopping = [False]
@@ -493,7 +546,7 @@ def ptde_async_sample(
             and int(per_chain_draws.min()) >= _next_check[0]
         ):
             n_check = int(per_chain_draws.min())
-            converged, rhat_val, ess_val = _check_convergence(
+            converged, rhat_val, ess_val = _common._check_convergence(
                 stored_raw, n_check, min_ess, max_rhat, stored_lp
             )
             logger.info(
@@ -502,19 +555,19 @@ def ptde_async_sample(
             )
             # GUI progress hook (bounded: fires once per geometric check).
             # Passes the live T=1 draw buffers by reference for snapshotting.
-            _safe_progress(
+            _common._safe_progress(
                 progress_callback,
-                {
-                    "n_draws": n_check,
-                    "n_chains": n_chains,
-                    "max_rhat": rhat_val,
-                    "min_ess": ess_val,
-                    "elapsed_s": time.time() - start_time,
-                    "stop_reason": "converged" if converged else None,
-                    "stored_raw": stored_raw,
-                    "stored_lp": stored_lp,
-                    "raw_var_names": model_keys,
-                },
+                _common.progress_state(
+                    n_check,
+                    n_chains,
+                    rhat_val,
+                    ess_val,
+                    start_time,
+                    converged,
+                    stored_raw,
+                    stored_lp,
+                    model_keys,
+                ),
             )
             _next_check[0] = next(_check_gen, None)
             if converged:
@@ -522,9 +575,106 @@ def ptde_async_sample(
                 stop_reason[0] = "convergence criterion met"
                 stop_category[0] = "complete"
 
-    poll_timeout = (
+    # How often the stale scan below may run.  It is O(in-flight), so it is
+    # paced by a WALL CLOCK rather than by a completion count: the run's
+    # completion rate spans microseconds (a toy model) to seconds (a
+    # near-caustic binary lens), and either extreme would make a
+    # "scan every N results" rule either useless or expensive.
+    timeout_scan_interval = (
         max(eval_timeout / 4.0, 0.05) if eval_timeout is not None else None
     )
+    next_timeout_scan = [np.inf]
+    if timeout_scan_interval is not None:
+        next_timeout_scan[0] = time.time() + timeout_scan_interval
+
+    # The main loop's blocking wait is ALWAYS bounded, even with no
+    # eval_timeout (the default).  It used to be `timeout=None` there, so
+    # the loop sat in result_q.get() until a result happened to arrive and
+    # _maybe_stop ran only on the result path: a Ctrl+C, a SIGTERM from the
+    # batch scheduler, or maxtime expiring were honored only when some slot
+    # finished.  On a model where every remaining evaluation is slow that is
+    # exactly when nothing finishes, so the user sent a SECOND signal, which
+    # raises KeyboardInterrupt out of the handler and abandons every draw
+    # already collected -- the abort save path is never reached (2.4.3).
+    # One wakeup a second costs nothing; missing the graceful stop costs the
+    # run.  A shorter eval_timeout tightens it further, since the stale scan
+    # has to keep up too.
+    POLL_CEILING = 1.0
+    poll_timeout = (
+        min(POLL_CEILING, timeout_scan_interval)
+        if timeout_scan_interval is not None
+        else POLL_CEILING
+    )
+
+    def _enforce_eval_timeout():
+        """Write off every in-flight submission once one has gone stale.
+
+        There is no way to kill a single hung worker in a
+        multiprocessing.Pool without tearing down the whole pool (same
+        limitation as ptde.py's _map_logp_timeout), so any OTHER
+        legitimately-still-running slot is also abandoned and immediately
+        resubmitted with a fresh proposal.
+
+        THIS MUST BE REACHABLE WHILE THE QUEUE IS BUSY.  It used to live
+        exclusively inside `except queue.Empty`, which is a state a healthy
+        run essentially never reaches: with hundreds of slots resolving in
+        milliseconds there is always another result waiting, so a genuinely
+        hung logp -- the exact scenario eval_timeout exists for -- froze its
+        slot for the whole run.  A frozen T=1 slot is worse than a lost
+        proposal: its chain stops recording, so min(per_chain_draws) never
+        reaches `draws`, the convergence checks stop firing, and only
+        maxtime or Ctrl+C ends the run (review 1.4.1).
+
+        No-op without a pool: in serial mode the evaluation happens inline
+        in _submit, so every in_flight_meta entry is already COMPLETE and
+        merely waiting to be read off the queue -- scanning their submission
+        times would write off finished work and then try to recycle a pool
+        that does not exist.  warn_serial_eval_timeout says so at startup.
+
+        Returns True when anything was written off.
+        """
+        nonlocal pool
+        if eval_timeout is None or pool is None:
+            return False
+        now = time.time()
+        stale = [
+            sid
+            for sid, (_, _, _, t0, _) in in_flight_meta.items()
+            if now - t0 > eval_timeout
+        ]
+        if not stale:
+            return False
+        n_eval_timeouts[0] += len(stale)
+        for sid in stale:
+            sk, si, stale_prop, _, _ = in_flight_meta[sid]
+            phys_params, raw_params = _common.describe_proposal(
+                layout.unpack(stale_prop),
+                raw_to_phys,
+                raw_var_names,
+                out_var_names,
+            )
+            logger.error(
+                f"PTDE-async: logp call exceeded "
+                f"eval_timeout={eval_timeout:.0f}s at rung {sk} "
+                f"chain {si} — rejecting this proposal.\n"
+                f"  physical params: {phys_params}\n"
+                f"  raw params: {raw_params}"
+            )
+        # Write off EVERY in-flight submission (the pool recycle kills the
+        # workers running them). A written-off result that nevertheless
+        # arrives (it raced us through the queue) finds its sub_id gone and
+        # is dropped, so it can never be double-processed (1.15b).
+        lost = list(in_flight_meta.items())
+        in_flight_meta.clear()
+        in_flight[0] -= len(lost)
+        logger.warning(
+            f"PTDE-async: recycling worker pool ({len(stale)} timeout(s))"
+        )
+        pool = _common.recycle_pool(pool, actual_cores)
+        if not stopping[0]:
+            for _, (sk, si, _, _, _) in lost:
+                _submit(sk, si)
+        return True
 
     try:
         for k, i in slot_list:
@@ -534,51 +684,37 @@ def ptde_async_sample(
             try:
                 sub_id, result = result_q.get(timeout=poll_timeout)
             except queue.Empty:
-                # eval_timeout enforcement: scan for stale in-flight slots.
-                # There is no way to kill a single hung worker in a
-                # multiprocessing.Pool without tearing down the whole pool
-                # (same limitation as ptde.py's _map_logp_timeout), so any
-                # OTHER legitimately-still-running slot is also abandoned
-                # and immediately resubmitted with a fresh proposal.
-                now = time.time()
-                stale = [
-                    sid
-                    for sid, (_, _, _, t0, _) in in_flight_meta.items()
-                    if now - t0 > eval_timeout
-                ]
-                if stale:
-                    n_eval_timeouts[0] += len(stale)
-                    for sid in stale:
-                        sk, si, stale_prop, _, _ = in_flight_meta[sid]
-                        phys_params, raw_params = _common.describe_proposal(
-                            stale_prop,
-                            raw_to_phys,
-                            raw_var_names,
-                            out_var_names,
-                        )
-                        logger.error(
-                            f"PTDE-async: logp call exceeded "
-                            f"eval_timeout={eval_timeout:.0f}s at rung {sk} "
-                            f"chain {si} — rejecting this proposal.\n"
-                            f"  physical params: {phys_params}\n"
-                            f"  raw params: {raw_params}"
-                        )
-                    # Write off EVERY in-flight submission (the pool recycle
-                    # kills the workers running them). A written-off result
-                    # that nevertheless arrives (it raced us through the
-                    # queue) finds its sub_id gone and is dropped, so it can
-                    # never be double-processed (1.15b).
-                    lost = list(in_flight_meta.items())
-                    in_flight_meta.clear()
-                    in_flight[0] -= len(lost)
-                    logger.warning(
-                        f"PTDE-async: recycling worker pool "
-                        f"({len(stale)} timeout(s))"
+                # _enforce_eval_timeout is a no-op when eval_timeout is
+                # unset, which is now a reachable state: the poll is bounded
+                # either way (see POLL_CEILING).  _maybe_stop is what the
+                # bounded poll is FOR -- on a quiet queue it is the only
+                # place a user signal or maxtime can be noticed.  The draws
+                # and convergence conditions it also tests cannot have
+                # changed since the last result, since every result path
+                # calls it too.
+                _enforce_eval_timeout()
+                if timeout_scan_interval is not None:
+                    next_timeout_scan[0] = time.time() + timeout_scan_interval
+                _maybe_stop()
+                if stop_category[0] == "abort":
+                    # Nothing completed within a whole poll, and the user (or
+                    # maxtime) has asked to stop: the remaining evaluations
+                    # are not coming back on any useful timescale, so stop
+                    # waiting on them and go save what is already stored.
+                    # The loop's normal exit is the RESULT path draining
+                    # in_flight to zero, which never happens when every
+                    # in-flight evaluation is wedged -- the state in which
+                    # the user reaches for a second Ctrl+C, and a second
+                    # signal raises straight out of the handler and throws
+                    # the collected draws away.  In-flight proposals carry
+                    # nothing that was recorded; the pool is torn down in
+                    # the `finally`.
+                    logger.info(
+                        f"PTDE-async: {stop_reason[0]} — abandoning "
+                        f"{in_flight[0]} in-flight evaluation(s) that did "
+                        f"not return, and saving what is stored"
                     )
-                    pool = _common.recycle_pool(pool, actual_cores)
-                    if not stopping[0]:
-                        for _, (sk, si, _, _, _) in lost:
-                            _submit(sk, si)
+                    break
                 continue
 
             meta = in_flight_meta.pop(sub_id, None)
@@ -588,6 +724,19 @@ def ptde_async_sample(
                 continue
             k, i, prop, _, gen_at_submit = meta
             in_flight[0] -= 1
+
+            # Same scan on the RESULT path, paced by the wall clock so a
+            # busy queue cannot hide a hung slot (review 1.4.1).  It runs
+            # AFTER the result in hand has been taken off the books, so a
+            # write-off never discards an evaluation that already finished.
+            # A scan that finds nothing stale touches no state and draws no
+            # random numbers, so a run in which no evaluation ever times out
+            # is bit-for-bit the run this sampler produced before.
+            if timeout_scan_interval is not None:
+                now = time.time()
+                if now >= next_timeout_scan[0]:
+                    next_timeout_scan[0] = now + timeout_scan_interval
+                    _enforce_eval_timeout()
 
             if collect_rung_timing:
                 lp, elapsed = result
@@ -606,13 +755,20 @@ def ptde_async_sample(
                 # First evaluation for this slot: the start state itself.
                 current_state[k][i] = prop
                 current_lp[k][i] = lp
+                spans.update(k, prop)
+                spans_window.update(k, prop)
             else:
                 T = temperatures[k]
                 n_propose[k] += 1
                 accepted = np.isfinite(lp) and rng.random() < np.exp(
                     min(0.0, (lp - current_lp[k][i]) / T)
                 )
-                if k == 0 and iter_count[k][i] < tune:
+                if hop_flag[k][i]:
+                    n_hop_propose[0] += 1
+                    if accepted:
+                        n_hop_accept[0] += 1
+                elif k == 0 and iter_count[k][i] < tune:
+                    # NON-hop proposals only -- see de_mode_hop above.
                     n_propose_T1_window[0] += 1
                     if accepted:
                         n_accept_T1_window[0] += 1
@@ -620,6 +776,8 @@ def ptde_async_sample(
                     current_state[k][i] = prop
                     current_lp[k][i] = lp
                     n_accept[k] += 1
+                    spans.update(k, prop)
+                    spans_window.update(k, prop)
                     # Runaway-lp early detection (see LpPlausibilityGuard).
                     if k == 0:
                         lp_guard.check(i, lp)
@@ -646,26 +804,31 @@ def ptde_async_sample(
                     and per_chain_draws[i] < draws
                 ):
                     d = per_chain_draws[i]
-                    for key in model_keys:
-                        stored_raw[key][i, d] = current_state[k][i][key]
+                    # Grow BEFORE the write: store_draw indexes into the
+                    # dict this rebinds in place.  The rebinding of
+                    # stored_lp happens in ptde_async_sample's own scope,
+                    # so the closure cell _maybe_stop reads (it hands both
+                    # buffers to _check_convergence and to the GUI progress
+                    # payload) sees the new array, not a stale one.
+                    stored_lp = _common.grow_draw_storage(
+                        stored_raw, stored_lp, d + 1
+                    )
+                    layout.store_draw(stored_raw, current_state[k][i], i, d)
                     stored_lp[i, d] = current_lp[k][i]
                     per_chain_draws[i] = d + 1
 
-                # thinned hot-rung storage (see store_hot_chains)
-                if (
-                    hot_thin
-                    and k >= 1
-                    and iter_count[k][i] > tune
-                    and iter_count[k][i] % hot_thin == 0
-                    and per_hot_draws[k - 1, i] < hot_cap
-                ):
-                    d = per_hot_draws[k - 1, i]
-                    for key in model_keys:
-                        stored_hot_raw[key][k - 1, i, d] = current_state[k][i][
-                            key
-                        ]
-                    stored_hot_lp[k - 1, i, d] = current_lp[k][i]
-                    per_hot_draws[k - 1, i] = d + 1
+                # Thinned hot-rung storage (see store_hot_chains).  The
+                # thinning counter is THIS CHAIN's own iteration count,
+                # because async chains advance independently -- that is the
+                # asynchronous half; the rest is _common's.
+                if iter_count[k][i] > tune:
+                    hot.maybe_store(
+                        k,
+                        i,
+                        current_state[k][i],
+                        current_lp[k][i],
+                        iter_count[k][i],
+                    )
 
             n_completed_total[0] += 1
 
@@ -678,15 +841,11 @@ def ptde_async_sample(
                 and n_propose_T1_window[0] >= gamma_adapt_window
             ):
                 ar_T1 = n_accept_T1_window[0] / max(n_propose_T1_window[0], 1)
+                # Skipped rather than shrunk when the window accepted
+                # nothing, exactly as in ptde.py; _common.next_gamma owns
+                # the rule itself.
                 if ar_T1 > 0:
-                    scale = (ar_T1 / target_accept) ** 0.5
-                    gamma_new = float(
-                        np.clip(
-                            gamma_box[0] * scale,
-                            gamma_box[0] * 0.1,
-                            gamma_box[0] * 10.0,
-                        )
-                    )
+                    gamma_new = next_gamma(gamma_box[0], ar_T1, target_accept)
                     if abs(gamma_new - gamma_box[0]) / gamma_box[0] > 0.01:
                         logger.info(
                             f"PTDE-async gamma: {gamma_box[0]:.4f} -> {gamma_new:.4f} "
@@ -696,9 +855,97 @@ def ptde_async_sample(
                 n_propose_T1_window[0] = 0
                 n_accept_T1_window[0] = 0
 
+            # Communication-barrier ladder adaptation (Syed et al. 2022),
+            # ported from the synchronous sampler, which had it and this one
+            # did not -- so until now `ptde_async` could not reshape its
+            # ladder AT ALL, only lengthen it via n_temps.
+            #
+            # Why it matters, measured on examples/DC2018 event 128 at
+            # T_max=8500 with n_temps=48 (correctly provisioned: Lambda=18.9
+            # against the 39 rungs the DEO criterion asks for, mean swap
+            # acceptance 0.598 at its 0.5 target): swap acceptance was
+            # strongly NON-uniform, 0.46-0.52 across the cold pairs against
+            # 0.66-0.70 hot, and round trips stayed at ZERO for 21 hours.
+            # The barrier concentrates where the posterior is sharp, while a
+            # geometric ladder spaces rungs uniformly in ln T -- so it
+            # over-resolves the easy hot end and under-resolves the stretch
+            # that actually throttles a traversal.  A round trip must cross
+            # EVERY pair, so the rate is set by the worst stretch, not the
+            # mean, which is why adding rungs uniformly did not help.
+            #
+            # Gated on `not gamma_frozen[0]`, the same flag gamma uses: that
+            # flips the moment the first T=1 chain enters its draw phase, and
+            # re-spacing once any chain is RECORDING would break invariance.
+            # `temperatures` is mutated IN PLACE because _attempt_swap closes
+            # over it by reference and never rebinds it.
+            # WINDOWED on the swap counters, and that gate is the whole
+            # correctness of this block, not a tuning preference.  The
+            # synchronous copy sits inside `if (step + 1) % log_every == 0`
+            # and so is windowed by construction; this one runs per completed
+            # EVALUATION, and since it zeroes the counters on the way out,
+            # `n_swap_propose.sum() > 0` meant it fired again on the very next
+            # proposal -- measuring a "barrier" from one or two swaps and
+            # re-spacing the ladder on it.  Observed on DC2018 event 128:
+            # zero re-spacing lines in 10 hours (every measurement said the
+            # ladder was already equalized, because a single accepted swap
+            # says every pair it touched is perfect), while the reported swap
+            # acceptances read 0.11-0.18 against 0.46-0.70 for the same
+            # ladder with adapt_ladder off -- the counters were being read
+            # one proposal after they were cleared.
+            if (
+                adapt_ladder
+                and not gamma_frozen[0]
+                and n_temps > 2
+                and n_swap_propose.sum() >= ladder_adapt_window
+            ):
+                n_measured = int(n_swap_propose.sum())
+                n_ladder_adapts[0] += 1
+                new_T = _update_ladder_barrier(
+                    temperatures, n_swap_accept, n_swap_propose
+                )
+                if not np.allclose(new_T, temperatures):
+                    # Log the MEASUREMENT next to the decision it drove.
+                    # Without the per-pair acceptances this line says what
+                    # the ladder became but not why, and the acceptances
+                    # otherwise appear only on the progress line -- one per
+                    # n_slots*(tune+draws)//20 evaluations, which on
+                    # DC2018_128 is 7.1M evals against a re-spacing every
+                    # ~51k.  That is ~140 adaptations per glimpse of the
+                    # only data that says whether they are helping, and it
+                    # made "is the adaptation working?" unanswerable for
+                    # hours on a run whose whole purpose was to answer it.
+                    # Full precision on T for the same reason: at %.1f,
+                    # neighbouring cold rungs print identically and there is
+                    # no way to tell a genuinely crowded ladder from a
+                    # rounded one.
+                    acc_win = n_swap_accept / np.maximum(n_swap_propose, 1)
+                    logger.info(
+                        "PTDE-async ladder (barrier-equalized, from "
+                        f"{n_measured} swap proposals): "
+                        f"T=[{', '.join(f'{t:.4g}' for t in new_T)}]"
+                    )
+                    logger.info(
+                        "PTDE-async ladder measurement: swap accept="
+                        f"[{', '.join(f'{r:.2f}' for r in acc_win)}]  "
+                        f"mean={float(acc_win.mean()):.3f} "
+                        f"spread={float(acc_win.max() - acc_win.min()):.2f} "
+                        f"Lambda={float(np.sum(1.0 - acc_win)):.1f} "
+                        f"(target accept 0.50, i.e. equal barrier per pair)"
+                    )
+                    temperatures[:] = new_T
+                # Fresh measurement per adaptation window, as the sync
+                # sampler does: a re-spaced ladder's acceptances say nothing
+                # about the ladder that produced them.
+                n_swap_accept[:] = 0
+                n_swap_propose[:] = 0
+
             if n_completed_total[0] % log_every_evals == 0:
                 ar = n_accept / np.maximum(n_propose, 1)
-                sr = n_swap_accept / np.maximum(n_swap_propose, 1)
+                # CUMULATIVE, and labelled as such below.  The adaptation
+                # window would read near zero for one line after every
+                # re-spacing, which is indistinguishable here from a ladder
+                # that has stopped communicating.
+                sr = n_swap_accept_cum / np.maximum(n_swap_propose_cum, 1)
                 rt_rate = round_trips[0] / max(n_swap_rounds[0], 1)
                 logger.info(
                     f"PTDE-async: {n_completed_total[0]} evals  "
@@ -708,13 +955,49 @@ def ptde_async_sample(
                     f"accept=[{', '.join(f'{r:.2f}' for r in ar)}]  "
                     f"gamma={gamma_box[0]:.4f}  "
                     + (
-                        f"swap=[{', '.join(f'{r:.2f}' for r in sr)}]  "
+                        f"swap(cum)=[{', '.join(f'{r:.2f}' for r in sr)}]  "
                         f"round_trips={round_trips[0]} "
                         f"(rate={rt_rate:.3f}/swap)"
                         if n_temps > 1
                         else ""
                     )
                 )
+                # ONE variable -- whichever ranges widest at the HOT
+                # rung -- measured at both ends, so top/cold is a ratio of
+                # the same thing.  Each rung's own widest is generally a
+                # different parameter: on event 128 this divided the hot
+                # rung's log_f_total span by the cold rung's pm_ra span and
+                # printed "3x", which is a ratio of nothing.
+                # Largest hot/cold RATIO, not the widest absolute span:
+                # the latter reports whichever variable has the broadest
+                # prior and explores it at every rung, which on DC2018
+                # event 128 meant star.pm_ra and star.logmass rather than
+                # lens.log_s.  See SpanTracker.ratio_key.
+                hot_key = spans.ratio_key(0, n_temps - 1) or spans.widest_at(
+                    n_temps - 1
+                )
+                if hot_key is None:
+                    # No accepted state at the hot rung yet, so there is no
+                    # variable to measure at both ends.  Say that, rather
+                    # than fall back to report(None) -- per-rung maxima are
+                    # exactly the incomparable pair this block removes.
+                    logger.info(
+                        "PTDE-async explored span: no states recorded at "
+                        f"T={temperatures[-1]:.0f} yet"
+                    )
+                else:
+                    cum = spans.report(hot_key)
+                    win = spans_window.report(hot_key)
+                    ratio = cum[-1][0] / max(cum[0][0], 1e-9)
+                    logger.info(
+                        f"PTDE-async explored span (raw sigma) [{hot_key}]: "
+                        f"cumulative T=1 {cum[0][0]:.1f}  "
+                        f"T={temperatures[-1]:.0f} {cum[-1][0]:.1f}  "
+                        f"(top/cold {ratio:.1f}x)  |  this window T=1 "
+                        f"{win[0][0]:.1f}  T={temperatures[-1]:.0f} "
+                        f"{win[-1][0]:.1f}"
+                    )
+                spans_window.reset()
 
             _maybe_stop()
             if not stopping[0]:
@@ -741,112 +1024,54 @@ def ptde_async_sample(
             _common._shutdown_pool(pool)
 
     actual_draws = int(per_chain_draws.min())
-    if actual_draws == 0:
-        raise RuntimeError(
-            "PTDE-async: sampling stopped — no draws were collected"
+    # The ladder counters below are the ADAPTATION window, deliberately: each
+    # makes a claim about the ladder that is in `temperatures` NOW.  With
+    # adapt_ladder off nothing ever clears them and the window is the whole
+    # run (there is no global tune/draw boundary here -- chains transition
+    # individually, which is why the synchronous sampler's reset-at-tune rule
+    # has no analog); with it on, the window runs from the last re-spacing,
+    # the only span over which the final ladder was the one being measured.
+    _extras = []
+    if n_swap_discards[0]:
+        _extras.append(f"  swap_discards={n_swap_discards[0]}")
+    if n_eval_timeouts[0]:
+        _extras.append(f"  eval_timeouts={n_eval_timeouts[0]}")
+    _notes = []
+    if adapt_ladder and n_temps > 2 and not n_ladder_adapts[0]:
+        _notes.append(
+            "PTDE-async: adapt_ladder was requested but the ladder was never "
+            f"re-spaced -- no {ladder_adapt_window}-swap-proposal window "
+            "completed before the first T=1 chain left its tune phase. The "
+            "ladder sampled is the one it started with. Lengthen tune, "
+            "shorten swap_interval (currently "
+            f"{swap_interval} evaluations per swap attempt), or pass a "
+            "smaller ladder_adapt_window -- but note the window exists so "
+            "the barrier is measured from enough swaps to mean anything, so "
+            "prefer the first two."
         )
-    if actual_draws < draws:
-        logger.info(
-            f"PTDE-async: early stop ({stop_reason[0]}) — "
-            f"{actual_draws}/{draws} draws/chain collected "
-            f"(some chains ran ahead: max={per_chain_draws.max()})"
-        )
-
-    idata = _common.assemble_inference_data(
+    idata = _common.finish_ptde_run(
+        run,
         stored_raw,
         stored_lp,
         actual_draws,
-        n_chains,
-        raw_start,
-        raw_var_names,
-        out_var_names,
-        raw_to_phys_batched,
-        chain_seed_index,
-        "PTDE-async",
-        logger,
+        early_stop_detail=(
+            f" ({stop_reason[0]}; some chains ran ahead: "
+            f"max={per_chain_draws.max()})"
+        ),
+        summary_kwargs=dict(
+            n_accept=n_accept,
+            n_propose=n_propose,
+            n_swap_accept=n_swap_accept,
+            n_swap_propose=n_swap_propose,
+            round_trips=round_trips[0],
+            n_swap_rounds=n_swap_rounds[0],
+            n_temps=n_temps,
+            swap_schedule=swap_schedule,
+            rate_unit="swap",
+            extras=_extras,
+        ),
+        hop_counts=(n_hop_accept[0], n_hop_propose[0]),
+        rung_times=rung_times if collect_rung_timing else None,
+        notes=_notes,
     )
-
-    if hot_thin:
-        import xarray as xr
-
-        # Rectangular cut at the shortest hot chain (rungs run at slightly
-        # different speeds); rungs x chains flatten into one 'chain' dim
-        # with a per-chain temperature coordinate, which round-trips
-        # through netcdf.
-        n_hot = int(per_hot_draws.min())
-        if n_hot > 0:
-            n_hot_chains = (n_temps - 1) * n_chains
-            data_vars = {}
-            for key in model_keys:
-                arr = stored_hot_raw[key][:, :, :n_hot].reshape(
-                    (n_hot_chains, n_hot) + raw_start[key].shape
-                )
-                dims = ("chain", "draw") + tuple(
-                    f"{key}_dim_{j}" for j in range(arr.ndim - 2)
-                )
-                data_vars[str(key)] = (dims, arr)
-            data_vars["lp"] = (
-                ("chain", "draw"),
-                stored_hot_lp[:, :, :n_hot].reshape(n_hot_chains, n_hot),
-            )
-            idata["posterior_hot"] = xr.Dataset(
-                data_vars,
-                coords={
-                    "chain": np.arange(n_hot_chains),
-                    "draw": np.arange(n_hot),
-                    "temperature": (
-                        "chain",
-                        np.repeat(np.asarray(temperatures[1:]), n_chains),
-                    ),
-                },
-            )
-            logger.info(
-                f"PTDE-async: stored {n_hot} thinned hot draws/chain from "
-                f"{n_temps - 1} rungs x {n_chains} chains "
-                f"(store_hot_chains={store_hot_chains}, thin={hot_thin})"
-            )
-        else:
-            logger.warning(
-                "PTDE-async: store_hot_chains was set but no hot draws "
-                "accumulated (draws too small for the thinning factor?)"
-            )
-
-    # Ladder communication statistics, stamped on the trace so the mode
-    # report can quote them as context.  These are TEMPERATURE round trips of
-    # a replica (T=1 -> T=max -> T=1), NOT mode changes: outputs.modes counts
-    # the latter itself from the stored T=1 labels and labels the two
-    # separately, because "swap" is ambiguous between them.
-    idata.posterior.attrs["ptde_ladder_round_trips"] = int(round_trips[0])
-    idata.posterior.attrs["ptde_swap_rounds"] = int(n_swap_rounds[0])
-
-    ar_T1 = float(n_accept[0] / max(n_propose[0], 1))
-    sr_all = n_swap_accept / np.maximum(n_swap_propose, 1)
-    rt_rate = round_trips[0] / max(n_swap_rounds[0], 1)
-    logger.info(
-        f"PTDE-async done: {actual_draws}/{draws} draws  accept(T=1)={ar_T1:.3f}  "
-        + (
-            f"swap=[{', '.join(f'{r:.2f}' for r in sr_all)}]  "
-            f"round_trips={round_trips[0]} (rate={rt_rate:.3f}/swap, "
-            f"schedule={swap_schedule})"
-            if n_temps > 1
-            else ""
-        )
-        + (
-            f"  swap_discards={n_swap_discards[0]}"
-            if n_swap_discards[0]
-            else ""
-        )
-        + (
-            f"  eval_timeouts={n_eval_timeouts[0]}"
-            if n_eval_timeouts[0]
-            else ""
-        )
-    )
-    # Async never resets the swap counters, so these stats span tune+draw;
-    # still the right order of magnitude for the barrier check.
-    ladder_health_report(temperatures, n_swap_accept, n_swap_propose)
-
-    if collect_rung_timing:
-        _common.log_rung_timing(rung_times, temperatures, "PTDE-async", logger)
-
     return idata

@@ -59,6 +59,7 @@ Gaussian-only).  Off by default everywhere: with no ``likelihood:`` key the
 model is byte-for-byte what it was before this feature existed.
 """
 
+import copy
 import logging
 
 import numpy as np
@@ -71,22 +72,11 @@ from ..physics_registry import register_physics
 from . import gp as gp_support
 from . import likelihood as robust_support
 from .component import Component
+from .parameterization import merge_options, pin_unselected
+from .timesystem import TimeSystem
 
 logger = logging.getLogger(__name__)
 
-# Time-system vocabulary for the per-file time_scale/time_frame keys.
-# Scales are astropy.time scale names ("ut" is accepted as an alias for
-# ut1); frames name where the clock sits: jd = the observatory/geocenter,
-# hjd = heliocenter, bjd = solar-system barycenter.  The astropy
-# light_travel_time "kind" implementing each frame's correction is the
-# mapped value (None = no light-travel correction).
-_TIME_SCALES = ("utc", "tai", "tt", "tdb", "tcb", "tcg", "ut1")
-_TIME_SCALE_ALIASES = {"ut": "ut1"}
-_TIME_FRAMES = {"jd": None, "hjd": "heliocentric", "bjd": "barycentric"}
-# Frame/scale conversion is only meaningful on absolute Julian Dates;
-# anything below this is a truncated time (BJD-2450000, MJD, ...) that
-# needs time_offset first.
-_MIN_ABS_JD = 2_000_000.0
 
 # Radicand floor for the reported jitter's square root, in the parameter's
 # INTERNAL units.  Two knobs in one number: the reported jitter is quantized
@@ -128,7 +118,8 @@ def calc_jitter(jitter_variance):
     DELIBERATE DEPARTURE FROM EXOFASTv2, which floors the jitter at zero.
     This is an upgrade, not a port bug -- do not "restore" the floor.  The
     argument is the one ``planet.mass`` in ``linear`` mode already makes (see
-    the mass-parametrization section of CLAUDE.md): a positive-definite
+    the "Planet mass parametrization" section of
+    ``src/exozippy/components/star/star.md``): a positive-definite
     coordinate biases a marginal detection upward, because the half of the
     posterior that would have balanced it is folded onto the boundary.  Here
     the floor would also throw information away -- a negative jitter is the
@@ -233,8 +224,16 @@ class ConcatenatedData:
     ``mulensinstrument.observer_pos`` is addressed row-for-row against
     ``time``.  Both break silently if a file is added out of order or a side
     array disagrees in length, so ``add`` rejects both, and ``finalize``
-    publishes the resulting ``(start, stop)`` ranges as ``owner.row_ranges``
-    rather than leaving every consumer to re-derive them from ``inst_map``.
+    publishes the resulting ``(start, stop)`` ranges as ``owner.row_ranges``,
+    reached through ``Instrument.rows(i)``.
+
+    ``rows(i)`` and ``inst_map == i`` are two spellings of the same
+    selection, equivalent precisely BECAUSE of the invariant above, and both
+    are in use on purpose: the published range where a contiguous RANGE is
+    wanted, the boolean scan where the mask itself is (the plot paths index
+    several arrays with one) or where the caller was handed ``inst_map``
+    rather than the component (``_prepare_gp``, ``_prepare_robust``, which
+    are driven standalone by their tests).
     """
 
     def __init__(self, owner, n_roles=3):
@@ -331,8 +330,9 @@ class ConcatenatedData:
 
         Sets ``time``, ``<observable>``, ``err``, ``inst_map``,
         ``n_total_obs``, ``row_ranges``, every side array, and the
-        ``detrend_matrix`` / ``n_detrend_per_inst`` / ``total_detrend_cols``
-        triple; then calls ``_prepare_gp`` and ``_prepare_robust``, which are
+        ``detrend_matrix`` / ``n_detrend_per_inst`` / ``total_detrend_cols`` /
+        ``detrend_scales`` quad; then calls ``_prepare_gp`` and
+        ``_prepare_robust``, which are
         no-ops unless a file set ``gp:`` / ``likelihood:``.
 
         ``user_factor`` converts the concatenated error from the internal unit
@@ -351,7 +351,7 @@ class ConcatenatedData:
         setattr(owner, observable, np.concatenate(self.obs).astype(float))
         owner.err = np.concatenate(self.errs).astype(float)
         # Named `inst_map` so Component.build_tensor_maps auto-generates
-        # `inst_map_tensor` in stage 4.
+        # `inst_map_tensor` in stage 5.
         owner.inst_map = np.repeat(
             np.arange(owner.n_elements), self.counts
         ).astype(int)
@@ -365,6 +365,7 @@ class ConcatenatedData:
             owner.detrend_matrix,
             owner.n_detrend_per_inst,
             owner.total_detrend_cols,
+            owner.detrend_scales,
         ) = owner._build_block_detrend(self.detrend, owner.n_total_obs)
 
         owner._prepare_gp(
@@ -382,7 +383,19 @@ class ConcatenatedData:
         ]
 
 
-class Instrument(Component):
+class Instrument(TimeSystem, Component):
+    """Shared scaffolding for a component that owns a data file.
+
+    The astronomical TIME layer is mixed in from ``components/timesystem.py``
+    rather than defined here.  That split is not cosmetic: those methods
+    assume the independent variable is a Julian Date with a solar system to
+    correct light travel across and a place on the Earth to observe from, and
+    their defaults are SILENT -- ``bjd``/``tdb`` passes input through
+    untouched -- so a data component from another field could inherit the
+    whole class, appear to work, and advertise a barycentric correction on a
+    measurement that has no such thing.  See that module's docstring.
+    """
+
     # Noise parameterization: "jitter_variance" (additive) or "err_scale"
     # (multiplicative).  Subclasses override; the default matches the majority
     # (rv/transit/astrometry).
@@ -409,7 +422,25 @@ class Instrument(Component):
         # Every instrument reads its data from per-element files and tracks a
         # running observation count.
         self.files = [c.get("file") for c in self.config]
+        # The schema says `file` is required, but nothing enforced it: an
+        # entry without one reached pandas at stage 1 as `read_csv(None)`
+        # and died with "Invalid file path or buffer object type: <class
+        # 'NoneType'>", naming no instrument and no key.  Fail here, at
+        # construction, like the malformed mask:/columns: specs below do
+        # (review 2.14.3).
+        for i, f in enumerate(self.files):
+            if f is None:
+                raise ValueError(
+                    f"[{self.prefix}[{self.names[i]}]] has no 'file:' key. "
+                    f"Every {self.prefix} entry must name the data file it "
+                    f"reads."
+                )
         self.n_total_obs = 0
+        # One standard deviation per global detrend column, published by
+        # ConcatenatedData.finalize; None until then (and for a child that
+        # never detrends).  It is the internal <-> user coordinate change of
+        # detrend_coeffs -- see _build_block_detrend and add_parameter.
+        self.detrend_scales = None
         # Per-element (start, stop) row ranges into the concatenated arrays,
         # published by ConcatenatedData.finalize.  Empty for a child that does
         # not concatenate (astrometryinstrument keeps per-file datasets).
@@ -421,9 +452,7 @@ class Instrument(Component):
         # time_location/time_ephemeris) and column layout (columns:), both
         # applied by _read_data.  Parsed here so malformed specs fail at
         # construction too.
-        self.time_specs = [
-            self._parse_time_spec(c, i) for i, c in enumerate(self.config)
-        ]
+        self.parse_time_specs()
         self.column_specs = [
             self._parse_columns_spec(c, i) for i, c in enumerate(self.config)
         ]
@@ -458,7 +487,7 @@ class Instrument(Component):
         Always carries the categorical ``series_index``; adds an explicit
         ``color`` / ``marker`` only when the user configured one (so the theme
         default by index still applies otherwise).  Suitable for
-        ``plotspec.Trace.style``.
+        ``chart.Trace.style``.
         """
         style = {"series_index": int(i)}
         if self.plot_color[i] is not None:
@@ -544,7 +573,9 @@ class Instrument(Component):
           boolean-list form below, which is the YAML spelling of the same
           thing.
         - a list of booleans, one per data row: True means EXCLUDE.
-        - a list of integers: 0-based row indices to EXCLUDE.
+        - a list of integers: 0-based row indices to EXCLUDE.  An all-0/1
+          integer list with one entry per row is REFUSED as ambiguous rather
+          than read as indices -- see the guard below.
 
         Absent or ``null`` keeps every point (the default: byte-for-byte the
         pre-feature behavior).
@@ -594,6 +625,27 @@ class Instrument(Component):
                 for v in spec
             ):
                 idx = np.asarray(spec, dtype=int)
+                # An all-0/1 integer list one entry per row is ambiguous, and
+                # the two readings are OPPOSITES: read as indices (what this
+                # branch does) `mask: [1, 0, 1, 0]` excludes rows 0 and 1;
+                # read as flags -- which is what the flag-FILE form of the
+                # same numbers means, and what anyone transcribing one into
+                # YAML would assume -- it excludes rows 0 and 2.  Refuse and
+                # name both explicit spellings rather than picking.
+                if idx.size == n and set(np.unique(idx)) <= {0, 1}:
+                    raise ValueError(
+                        f"[{label}] mask is {n} integers, all 0 or 1, one per "
+                        f"data row -- that is ambiguous.  As ROW INDICES it "
+                        f"would exclude rows "
+                        f"{sorted(set(int(v) for v in idx))}; as PER-ROW "
+                        f"FLAGS (what the mask-FILE form of these numbers "
+                        f"means) it would exclude rows "
+                        f"{[j for j, v in enumerate(idx) if v]}.  Say which: "
+                        f"write the flags as booleans "
+                        f"([true, false, ...]), or put the flags in a file "
+                        f"and give its path, or list only the row indices to "
+                        f"exclude."
+                    )
                 if idx.size and (idx.min() < 0 or idx.max() >= n):
                     raise ValueError(
                         f"[{label}] mask indices must be 0-based row indices "
@@ -640,7 +692,10 @@ class Instrument(Component):
                 "file's own row order before anything is derived from it: a "
                 "path to a file with one 0/1 flag per data row (nonzero = "
                 "exclude), a list of booleans (one per row, true = exclude), "
-                "or a list of 0-based row indices to exclude."
+                "or a list of 0-based row indices to exclude. An inline list "
+                "of integers that are all 0 or 1 with one entry per row is "
+                "refused as ambiguous (it could be either) -- write the "
+                "flags as booleans, or put them in a file."
             ),
         }
 
@@ -678,9 +733,27 @@ class Instrument(Component):
                 f"[{self.prefix}] _read_data roles must start with 'time'; "
                 f"got {list(roles)}."
             )
-        df = pd.read_csv(
-            self.files[i], sep=r"\s+", engine="c", header=None, comment="#"
-        )
+        # A bad path or an unreadable file used to surface as pandas' own
+        # error -- a bare FileNotFoundError, or "No columns to parse from
+        # file" -- with no instrument and no config key in it, so on a
+        # config with a dozen light curves the user had to bisect.  Re-raise
+        # with the prefix, the element name and the path, keeping the
+        # original as __cause__ (review 2.14.3).
+        path = self.files[i]
+        try:
+            df = pd.read_csv(
+                path, sep=r"\s+", engine="c", header=None, comment="#"
+            )
+        except FileNotFoundError as e:
+            raise FileNotFoundError(
+                f"[{self.prefix}[{self.names[i]}]] data file not found: "
+                f"{path!r} (the 'file:' key of this entry)."
+            ) from e
+        except (pd.errors.EmptyDataError, pd.errors.ParserError) as e:
+            raise ValueError(
+                f"[{self.prefix}[{self.names[i]}]] could not parse data "
+                f"file {path!r} (the 'file:' key of this entry): {e}"
+            ) from e
         df = self._select_columns(df, i, roles, detrend, shared_roles)
         df = self._apply_mask(df, i)
         t = self._to_bjd_tdb(df.iloc[:, 0].values.astype(float), i)
@@ -691,7 +764,7 @@ class Instrument(Component):
     # Optional per-file column layout (columns:)
     # ------------------------------------------------------------------
     def _parse_columns_spec(self, c, i):
-        """Validate one config entry's optional ``columns:`` key (stage 0).
+        """Validate one config entry's optional ``columns:`` key (at construction).
 
         The value is a mapping from role name to a 0-based column index in
         the data file, plus an optional ``detrend`` role mapping to a LIST
@@ -869,304 +942,12 @@ class Instrument(Component):
     # ------------------------------------------------------------------
     # Optional per-file time system (time_offset / time_scale / time_frame)
     # ------------------------------------------------------------------
-    def _parse_time_spec(self, c, i):
-        """Validate one config entry's optional time-system keys (stage 0).
-
-        Returns a dict with ``offset`` (days, added to the raw times
-        first), ``scale`` (astropy time scale of the input), ``frame``
-        (jd/hjd/bjd: where the input's clock sits), ``location`` (observer
-        for the jd frame's light-travel and topocentric-scale terms),
-        ``ephemeris`` (solar-system ephemeris for light_travel_time) and
-        ``needs_conversion``.  The default -- offset 0, scale tdb, frame
-        bjd -- is BJD_TDB in, BJD_TDB out, untouched.
-        """
-        label = f"{self.prefix}[{self.names[i]}]"
-
-        offset = c.get("time_offset", 0.0)
-        if isinstance(offset, bool) or not isinstance(
-            offset, (int, float, np.integer, np.floating)
-        ):
-            raise ValueError(
-                f"[{label}] time_offset must be a number (days, added to "
-                f"every input time); got {offset!r}."
-            )
-
-        scale = c.get("time_scale", "tdb")
-        if not isinstance(scale, str):
-            raise ValueError(
-                f"[{label}] time_scale must be one of {list(_TIME_SCALES)}; "
-                f"got {scale!r}."
-            )
-        scale = _TIME_SCALE_ALIASES.get(scale.lower(), scale.lower())
-        if scale not in _TIME_SCALES:
-            raise ValueError(
-                f"[{label}] time_scale must be one of {list(_TIME_SCALES)} "
-                f"(or 'ut' for ut1); got {c.get('time_scale')!r}."
-            )
-
-        frame = c.get("time_frame", "bjd")
-        if not isinstance(frame, str) or frame.lower() not in _TIME_FRAMES:
-            raise ValueError(
-                f"[{label}] time_frame must be one of "
-                f"{list(_TIME_FRAMES)}; got {frame!r}."
-            )
-        frame = frame.lower()
-
-        location = c.get("time_location")
-        if location is not None:
-            ok = isinstance(location, str) or (
-                isinstance(location, (list, tuple))
-                and len(location) in (2, 3)
-                and all(
-                    isinstance(v, (int, float, np.integer, np.floating))
-                    and not isinstance(v, bool)
-                    for v in location
-                )
-            )
-            if not ok:
-                raise ValueError(
-                    f"[{label}] time_location must be an observatory name "
-                    f"(astropy EarthLocation.of_site) or [lon_deg, lat_deg"
-                    f"(, height_m)]; got {location!r}."
-                )
-
-        ephemeris = c.get("time_ephemeris", "builtin")
-        if not isinstance(ephemeris, str):
-            raise ValueError(
-                f"[{label}] time_ephemeris must be an astropy solar-system "
-                f"ephemeris name ('builtin', 'jpl', 'de440', ...); got "
-                f"{ephemeris!r}."
-            )
-
-        return {
-            "offset": float(offset),
-            "scale": scale,
-            "frame": frame,
-            "location": location,
-            "ephemeris": ephemeris,
-            "needs_conversion": scale != "tdb" or frame != "bjd",
-        }
-
-    @property
-    def has_nontrivial_time_spec(self):
-        """True when any file sets a time offset or a time-system conversion."""
-        return any(
-            s["offset"] != 0.0 or s["needs_conversion"]
-            for s in self.time_specs
-        )
-
-    def _to_bjd_tdb(self, t, i):
-        """Convert file ``i``'s raw times to BJD_TDB, per its time spec.
-
-        ``time_offset`` is added first (so truncated times like
-        BJD-2450000 or MJD become absolute JDs); the scale/frame
-        conversion then runs on absolute JDs only.  The algorithm is the
-        standard one (Eastman, Siverd & Gaudi 2010):
-
-        1. strip the input frame's light-travel correction to recover the
-           observer's JD in the input scale -- ``t = t_obs + ltt(t_obs)``
-           is inverted by fixed-point iteration, which converges below a
-           nanosecond in 3 passes because d(ltt)/dt <= v_earth/c ~ 1e-4;
-        2. convert the time scale to TDB (astropy/erfa: leap seconds for
-           UTC/TAI, the erfa TDB-TT model, IERS tables for UT1);
-        3. add back the barycentric light-travel time in TDB.
-
-        Input already in the bjd frame skips 1 and 3: the barycentric
-        correction appears identically on both sides and cancels exactly,
-        so a scale-only conversion (BJD_UTC -> BJD_TDB) needs no
-        coordinates.
-
-        Accuracy notes (why the remaining terms are out of scope):
-        the observer's position enters through ``time_location`` (omitting
-        it costs up to 21 ms of geocenter-vs-observatory Romer delay);
-        the builtin (erfa) ephemeris is good to a few microseconds of
-        light travel (``time_ephemeris: de440`` reaches ns, needs
-        jplephem); a single float64 JD quantizes at ~40 microseconds
-        anyway, which is the real floor here; TT(BIPM) (~30 us), the
-        Shapiro delay (~us; ~100 us within ~1 deg of the Sun), and
-        proper-motion/parallax evolution of the source direction (~us/yr
-        for mas/yr motions) are all below that floor's usefulness and are
-        not modeled.
-        """
-        spec = self.time_specs[i]
-        if spec["offset"] != 0.0:
-            t = t + spec["offset"]
-        if not spec["needs_conversion"]:
-            return t
-
-        label = f"{self.prefix}[{self.names[i]}]"
-        if t.min() < _MIN_ABS_JD:
-            raise ValueError(
-                f"[{label}] time_scale/time_frame conversion needs absolute "
-                f"Julian Dates, but the smallest time after time_offset is "
-                f"{t.min():.3f}. Set time_offset to restore full JDs (e.g. "
-                f"2450000 for BJD-2450000 data, 2400000.5 for MJD)."
-            )
-
-        # astropy.coordinates is deliberately imported lazily: it is slow to
-        # import and only needed when a file actually opts into conversion.
-        from astropy.time import Time
-
-        location = self._time_location(i)
-
-        if spec["frame"] == "bjd":
-            # Scale-only conversion: the barycentric light-travel term is
-            # identical on both sides and cancels exactly (the TDB-vs-UTC
-            # evaluation epoch of the correction matters at the 0.1 us
-            # level), so no coordinates are needed at all.
-            out = Time(
-                t, format="jd", scale=spec["scale"], location=location
-            ).tdb.jd
-        else:
-            coord = self._time_coord(i, label)
-            kind = _TIME_FRAMES[spec["frame"]]
-            ephemeris = spec["ephemeris"]
-
-            t_obs = t
-            if kind is not None:
-                for _ in range(3):
-                    ltt = Time(
-                        t_obs,
-                        format="jd",
-                        scale=spec["scale"],
-                        location=location,
-                    ).light_travel_time(coord, kind=kind, ephemeris=ephemeris)
-                    t_obs = t - ltt.jd
-            t_tdb = Time(
-                t_obs, format="jd", scale=spec["scale"], location=location
-            ).tdb
-            out = (
-                t_tdb.jd
-                + t_tdb.light_travel_time(
-                    coord, kind="barycentric", ephemeris=ephemeris
-                ).jd
-            )
-        logger.info(
-            "[%s] converted %d times from %s_%s to BJD_TDB "
-            "(median shift %+.3f s).",
-            label,
-            t.size,
-            spec["frame"].upper(),
-            spec["scale"].upper(),
-            float(np.median(out - t)) * 86400.0,
-        )
-        return out
-
-    def _time_coord(self, i, label):
-        """The target ICRS direction for file ``i``'s light-travel terms.
-
-        Reuses the star component's ra/dec exactly as astrometry and mulens
-        do (``star_ndx`` on the file's config entry picks the star, default
-        0; every star in one system is the same direction at the accuracy
-        that matters here).  Requiring ``user_modified`` is deliberate: the
-        defaults.yaml ra/dec are placeholders, and a conversion run against
-        them would corrupt every BJD by up to +/-8 minutes with no error.
-        """
-        star_ndx = int(self.config[i].get("star_ndx", 0))
-        ra = self.config_manager.resolve("star", "ra", element=star_ndx)
-        dec = self.config_manager.resolve("star", "dec", element=star_ndx)
-        if not (ra["user_modified"] and dec["user_modified"]):
-            raise ValueError(
-                f"[{label}] time_scale/time_frame conversion needs the "
-                f"target's coordinates: set star.{star_ndx}.ra and "
-                f"star.{star_ndx}.dec (deg) in the params file."
-            )
-        import astropy.units as u
-        from astropy.coordinates import SkyCoord
-
-        # resolve() returns per-element arrays even for shape=(); take the
-        # single element rather than float()-ing an ndarray (NumPy 2 error).
-        return SkyCoord(
-            ra=float(np.ravel(ra["initval"])[0]) * u.Unit(ra["unit"] or "deg"),
-            dec=float(np.ravel(dec["initval"])[0])
-            * u.Unit(dec["unit"] or "deg"),
-        )
-
-    def _time_location(self, i):
-        """File ``i``'s observer EarthLocation (geocenter when unset)."""
-        import astropy.units as u
-        from astropy.coordinates import EarthLocation
-
-        location = self.time_specs[i]["location"]
-        if location is None:
-            return EarthLocation.from_geocentric(0.0, 0.0, 0.0, unit=u.m)
-        if isinstance(location, str):
-            return EarthLocation.of_site(location)
-        lon, lat = float(location[0]), float(location[1])
-        height = float(location[2]) if len(location) == 3 else 0.0
-        return EarthLocation.from_geodetic(lon, lat, height)
-
-    @staticmethod
-    def _time_config_schema():
-        """The shared time-system config-schema entries; children append them."""
-        return [
-            {
-                "key": "time_offset",
-                "kind": "option",
-                "accepts": None,
-                "required": False,
-                "doc": (
-                    "Optional offset in days added to every input time "
-                    "before anything else (e.g. 2450000 for BJD-2450000 "
-                    "data, 2400000.5 for MJD). Default 0."
-                ),
-            },
-            {
-                "key": "time_scale",
-                "kind": "option",
-                "accepts": None,
-                "required": False,
-                "doc": (
-                    "Time scale of the input times: utc, tai, tt, tdb, "
-                    "tcb, tcg or ut1 ('ut' is accepted for ut1; ut1 may "
-                    "trigger an IERS table download). Default tdb."
-                ),
-            },
-            {
-                "key": "time_frame",
-                "kind": "option",
-                "accepts": None,
-                "required": False,
-                "doc": (
-                    "Reference frame of the input times: jd (observer/"
-                    "geocenter), hjd (heliocentric) or bjd (barycentric). "
-                    "Anything but the default bjd+tdb is converted to "
-                    "BJD_TDB at load time, which requires absolute JDs "
-                    "(see time_offset); jd/hjd also require user-set star "
-                    "ra/dec. Default bjd."
-                ),
-            },
-            {
-                "key": "time_location",
-                "kind": "option",
-                "accepts": None,
-                "required": False,
-                "doc": (
-                    "Observer location for the time conversion: an astropy "
-                    "observatory name (EarthLocation.of_site) or [lon_deg, "
-                    "lat_deg(, height_m)]. Default geocenter (up to 21 ms "
-                    "of Romer delay is unmodeled without it)."
-                ),
-            },
-            {
-                "key": "time_ephemeris",
-                "kind": "option",
-                "accepts": None,
-                "required": False,
-                "doc": (
-                    "Solar-system ephemeris for the light-travel terms: "
-                    "'builtin' (erfa, ~us accuracy) or a JPL kernel like "
-                    "'de440' (~ns, needs jplephem + download). Default "
-                    "builtin."
-                ),
-            },
-        ]
 
     # ------------------------------------------------------------------
     # Optional per-file Gaussian-process noise (celerite2)
     # ------------------------------------------------------------------
     def _load_gp_config(self):
-        """Read the per-instrument ``gp:`` key (stage 0, in ``__init__``).
+        """Read the per-instrument ``gp:`` key (at construction, in ``__init__``).
 
         Populates ``self.gp_terms[i]`` -- a (possibly empty) tuple of kernel
         names for element ``i`` -- and ``self.has_gp``.  Absent or ``none``
@@ -1238,7 +1019,7 @@ class Instrument(Component):
         return names
 
     def _prepare_gp(self, time, err, inst_map, user_factor=1.0):
-        """Stage 1a: index and seed the GP terms from the loaded data.
+        """Stage 1: index and seed the GP terms from the loaded data.
 
         Call at the end of ``load_data``, once the concatenated ``time``,
         error and ``inst_map`` arrays exist.  Two jobs:
@@ -1296,14 +1077,14 @@ class Instrument(Component):
                 self.config_manager.add_scale_hint(path, amp)
 
     def _register_gp(self, manifest):
-        """Stage 2: add this component's GP hyperparameters to ``manifest``.
+        """Stage 3: add this component's GP hyperparameters to ``manifest``.
 
         Every GP parameter is a full-length (``n_elements``) vector so that a
         user path resolves the same way as any other instrument parameter --
         ``rvinstrument.HARPS.gp_rot_period`` means the HARPS element,
         whichever element that is.  Elements that did not opt into a term are
         pinned fixed (``sigma: 0``) through ``internal_overrides``, which sits
-        below RANK_USER: they cost the sampler nothing, and a user who wants
+        below PRECEDENCE_USER: they cost the sampler nothing, and a user who wants
         one back can still override it.
 
         Returns ``manifest`` for chaining, like ``_register_noise``.
@@ -1315,14 +1096,15 @@ class Instrument(Component):
             on = set(self._gp_elements(kind))
             if not on:
                 continue
-            off = [i for i in range(self.n_elements) if i not in on]
-            entry = {}
-            if off:
-                pin = np.full(self.n_elements, np.nan)
-                pin[off] = 0.0
-                entry["overrides"] = {"sigma": pin.tolist()}
+            entry = pin_unselected(self.n_elements, on)
             for param in gp_support.GP_TERM_PARAMS[kind]:
-                manifest[param] = dict(entry)
+                # deepcopy, not dict(): a shallow copy shares the nested
+                # {"overrides": {"sigma": [...]}} across every parameter of
+                # the term, and Instrument.add_parameter already mutates a
+                # manifest entry in place (detrend_coeffs).  This codebase
+                # shipped exactly that aliasing once, in the broadcast
+                # shared-dict bug (review 2.5.5).
+                manifest[param] = copy.deepcopy(entry)
         return manifest
 
     def _build_log10_deterministics(self, log_params):
@@ -1492,7 +1274,7 @@ class Instrument(Component):
     def add_observation_likelihood(
         self, name, mu, sigma, observed, system=None
     ):
-        """Stage 6: the observational likelihood, with or without GPs and
+        """Stage 7: the observational likelihood, with or without GPs and
         robust families.
 
         Drop-in replacement for the ``pm.Normal(name, mu, sigma, observed)``
@@ -1658,7 +1440,7 @@ class Instrument(Component):
     # Optional per-file robust likelihood (hogg mixture / Student-t)
     # ------------------------------------------------------------------
     def _load_likelihood_config(self):
-        """Read the per-instrument ``likelihood:`` key (stage 0, in __init__).
+        """Read the per-instrument ``likelihood:`` key (at construction, in __init__).
 
         Populates ``self.likelihood_kinds[i]`` -- ``""`` (plain Gaussian, the
         default for every file) or a key from
@@ -1690,10 +1472,13 @@ class Instrument(Component):
         self.has_robust_likelihood = any(self.likelihood_kinds)
 
         # Element index -> indices into the concatenated observation arrays
-        # (filled by _prepare_robust), the per-file symbolic outlier log-odds
-        # (filled by _add_robust_likelihoods), their lazily compiled
-        # evaluators, and the linear values of log-sampled parameters.
+        # (filled by _prepare_robust), the per-element cap on the mixture
+        # scale in its USER unit (same filler; read by _register_robust), the
+        # per-file symbolic outlier log-odds (filled by
+        # _add_robust_likelihoods), their lazily compiled evaluators, and the
+        # linear values of log-sampled parameters.
         self._robust_obs_index = {}
+        self._robust_scale_caps = {}
         self._hogg_logodds = {}
         self._hogg_prob_fns = None
         self._robust_linear = {}
@@ -1708,20 +1493,33 @@ class Instrument(Component):
         return robust_support.likelihood_config_schema_entry()
 
     def _prepare_robust(self, err, inst_map, user_factor=1.0):
-        """Stage 1a: index the robust files and seed the mixture scale.
+        """Stage 1: index the robust files and seed the mixture scale.
 
         Call at the end of ``load_data``, right next to ``_prepare_gp``.
         Records each opted-in element's indices into the concatenated
         observation arrays (no sort needed -- both families are per-point
-        independent), and pushes a data-driven hint for the hogg background
-        scale: ``10 x median(err)``, i.e. well clear of the inlier scatter,
-        so the two mixture components start separated and cannot swap roles
-        during tuning.  Seeding from the observations' own scatter would
-        instead measure the physical signal (the same reasoning as the GP
-        amplitude seed).
+        independent), and sizes the hogg background scale from the file's
+        median error bar: a START hint of ``SCALE_START_FACTOR x
+        median(err)`` (with a matching whitening scale hint -- the start is
+        the natural width of the parameter), and a CAP of ``SCALE_CAP_FACTOR
+        x median(err)`` recorded in ``_robust_scale_caps`` for
+        ``_register_robust`` to attach at stage 3.  Both are in the USER
+        unit ``out_scale`` is declared in (``user_factor`` converts from the
+        internal unit the caller holds the errors in).
 
-        ``user_factor`` converts the error from the internal unit the caller
-        holds it in to the user unit ``out_scale`` is declared in.
+        The start used to be 10x the median, "so the two mixture components
+        start separated and cannot swap roles during tuning".  Review 8.6.3
+        moved the cap there instead: on DC2018 event 128 the uncapped
+        out_scale ran to 300-1000x the median error and forgave 777 nats of
+        caustic-crossing residuals, inverting a 601-nat preference for the
+        light curve's own rho into +142 nats for the wrong mode; capped at
+        10x, the blind rho came back.  The ruling accepted the trade -- the
+        damage rode on the WIDTH the background component was allowed, not
+        on the count of points it claimed, and out_frac's 0.5 ceiling keeps
+        the roles apart -- so the start is now the median error itself, an
+        in-bounds value a tenth of the way to the cap.  Seeding from the
+        observations' own scatter would instead measure the physical signal
+        (the same reasoning as the GP amplitude seed).
         """
         if not self.has_robust_likelihood:
             return
@@ -1743,23 +1541,49 @@ class Instrument(Component):
             scale_param = robust_support.LIKELIHOOD_SCALE_PARAM.get(kind)
             if scale_param is None:
                 continue
-            scale = 10.0 * float(np.median(err[sel])) * user_factor
-            if not np.isfinite(scale) or scale <= 0.0:
+            median_err = float(np.median(err[sel])) * user_factor
+            if not np.isfinite(median_err) or median_err <= 0.0:
                 # Degenerate (zero/absent) errors: keep the defaults.yaml
-                # start rather than pinning the logit against its bound.
+                # start and its wide static upper rather than pinning the
+                # logit against its bound.
                 continue
+            start = robust_support.SCALE_START_FACTOR * median_err
+            self._robust_scale_caps[i] = (
+                robust_support.SCALE_CAP_FACTOR * median_err
+            )
             path = f"{self.prefix}.{i}.{scale_param}"
-            self.config_manager.add_hint(path, scale)
-            self.config_manager.add_scale_hint(path, scale)
+            self.config_manager.add_hint(path, start)
+            self.config_manager.add_scale_hint(path, start)
 
     def _register_robust(self, manifest):
-        """Stage 2: add this component's robust-likelihood parameters.
+        """Stage 3: add this component's robust-likelihood parameters.
 
         Same shape as ``_register_gp``: every parameter is a full-length
         (``n_elements``) vector so user paths resolve by instrument name, and
         elements that did not opt into a family are pinned fixed
         (``sigma: 0``) through ``internal_overrides`` -- free to the sampler,
         still user-overridable.  Returns ``manifest`` for chaining.
+
+        Two more things ride on the hogg entries (review 8.6.3):
+
+        * The scale parameter's data-derived CAP (``_prepare_robust``) is
+          attached as a per-element ``upper`` through the manifest OPTIONS
+          channel, not ``"overrides"``.  Overrides combine bounds as
+          ``min(user, component)`` -- right for a validity limit (Band's
+          linear-law ``u1 <= 1``, the jitter floor), wrong here: the cap is
+          a modelling default, and the ruling is that the params file may
+          tighten OR loosen it.  Options replace the resolved value
+          outright, so the elements the user bounded (``user_wrote_field``,
+          any of the three spellings) are left NaN -- "keep the resolved
+          value", the same convention the overrides channel uses, honoured
+          by ``Component.add_parameter`` for options too -- and so are the
+          elements with degenerate errors (defaults.yaml's wide static
+          upper stands) and the ones that did not opt in.
+        * Every element that opted in is flagged ``cap_alarm`` on each
+          parameter in ``LIKELIHOOD_CAP_ALARM``: its upper bound is a cap,
+          not a physical limit, so a posterior piled against it is the
+          architecture alarm the wrap-up reports
+          (``diagnostics.cap_alarm_findings``).
         """
         if not self.has_robust_likelihood:
             return manifest
@@ -1768,14 +1592,27 @@ class Instrument(Component):
             on = set(self._robust_elements(kind))
             if not on:
                 continue
-            off = [i for i in range(self.n_elements) if i not in on]
-            entry = {}
-            if off:
-                pin = np.full(self.n_elements, np.nan)
-                pin[off] = 0.0
-                entry["overrides"] = {"sigma": pin.tolist()}
+            entry = pin_unselected(self.n_elements, on)
+            alarm = [i in on for i in range(self.n_elements)]
             for param in robust_support.LIKELIHOOD_PARAMS[kind]:
-                manifest[param] = dict(entry)
+                # deepcopy per parameter, for the reason _register_gp gives.
+                manifest[param] = copy.deepcopy(entry)
+                if param in robust_support.LIKELIHOOD_CAP_ALARM.get(kind, ()):
+                    manifest[param] = merge_options(
+                        manifest[param], cap_alarm=list(alarm)
+                    )
+            scale_param = robust_support.LIKELIHOOD_SCALE_PARAM.get(kind)
+            if scale_param is None or not self._robust_scale_caps:
+                continue
+            user_upper = self.user_wrote_field(scale_param, "upper")
+            caps = np.full(self.n_elements, np.nan)
+            for i, cap in self._robust_scale_caps.items():
+                if i in on and not user_upper[i]:
+                    caps[i] = cap
+            if np.isfinite(caps).any():
+                manifest[scale_param] = merge_options(
+                    manifest[scale_param], upper=caps.tolist()
+                )
         return manifest
 
     def _build_robust_deterministics(self):
@@ -1793,6 +1630,13 @@ class Instrument(Component):
         """Add each robust file's likelihood term (from the dispatcher)."""
         if not self.has_robust_likelihood:
             return
+
+        # New build, new nodes: the lazily compiled outlier-probability
+        # evaluators below close over the PREVIOUS model's plot_params and
+        # logodds nodes.  Rebuilt below; dropped here so a build that adds
+        # fewer files cannot leave a stale entry either.
+        self._hogg_logodds = {}
+        self._hogg_prob_fns = None
 
         self._build_robust_deterministics()
         for i in sorted(self._robust_obs_index):
@@ -1882,6 +1726,204 @@ class Instrument(Component):
     # than fundamental, and is gone too (exoplanet-core >= 0.4.0 makes the
     # limb-darkening op JAX-differentiable).
 
+    def add_parameter(self, model, param_name, system, context_nodes=None):
+        """Stage 6, plus the detrend coefficients' whitening scale.
+
+        ``_build_block_detrend`` WHITENS every detrend column, so the SAMPLED
+        coefficient is per whitened column while the user's bounds and the
+        reported value must stay per RAW column unit.  That is a per-element
+        internal <-> user coordinate change, so it is declared the way every
+        other one is -- as a Parameter conversion factor, applied by
+        ``to_internal`` / ``from_internal`` -- and never hand-written at a
+        call site (the two factor functions in this codebase are reciprocals
+        and confusing them is silent; see the reciprocal-factors invariant in
+        CLAUDE.md and ``src/exozippy/components/parameter.md``).
+
+        It is injected HERE, in the base class, rather than in each child's
+        manifest, because all three detrending children (`rvinstrument`,
+        `transit`, `mulensinstrument`) write the same
+        ``self.manifest["detrend_coeffs"] = {"shape": ...}`` line and a child
+        that forgot the scale would silently report whitened coefficients.
+        ``setdefault`` keeps it overridable and idempotent across the repeat
+        ``build_model()`` the GUI does.
+        """
+        if param_name == "detrend_coeffs" and self.detrend_scales is not None:
+            entry = self.manifest.get(param_name)
+            if isinstance(entry, dict):
+                entry.setdefault(
+                    "internal_to_user_scale", 1.0 / self.detrend_scales
+                )
+        return super().add_parameter(
+            model, param_name, system, context_nodes=context_nodes
+        )
+
+    def rows(self, i):
+        """Element ``i``'s rows in every concatenated array, as a ``slice``.
+
+        The accessor for the ``row_ranges`` ``ConcatenatedData.finalize``
+        publishes.  Equivalent to ``np.flatnonzero(inst_map == i)`` by the
+        contiguity invariant that class ENFORCES -- a file's rows are one
+        contiguous block, in config order, in every array at once -- but a
+        contiguous slice rather than an advanced index, so it is a view, it
+        does not scan, and ``pt.inc_subtensor`` over it stays a plain
+        subtensor.
+
+        Use it where a per-element RANGE is wanted.  ``inst_map == i``
+        remains right where the BOOLEAN array itself is (the plot paths
+        index several arrays with one mask), and where the caller does not
+        have the concatenated arrays -- ``_prepare_gp`` / ``_prepare_robust``
+        take ``inst_map`` as an argument precisely so they can be driven
+        standalone.  Two spellings of one selection, both correct; not a
+        migration left half-done.
+
+        ONE trap when the array being indexed is a TENSOR rather than numpy:
+        a ``pm.Data``'s length is symbolic to pytensor, so a slice's shape is
+        ``min(stop, len) - start`` -- symbolic too -- and the JAX backend
+        cannot trace it ("Shapes must be 1D sequences of concrete values of
+        integer type").  Materialize it there, ``np.arange(sl.start,
+        sl.stop)``: an advanced index of constants has a statically known
+        length.  rvinstrument's Rossiter-McLaughlin subtensor is the live
+        case and says so at the call site.
+        """
+        if not self.row_ranges:
+            raise ValueError(
+                f"[{self.prefix}] has no row_ranges: this component does not "
+                f"concatenate its files (astrometryinstrument keeps per-file "
+                f"datasets), so there is no single row range per element."
+            )
+        lo, hi = self.row_ranges[i]
+        return slice(lo, hi)
+
+    # ------------------------------------------------------------------
+    # Shared plotting helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _point_value(point, param, index=None):
+        """Value of ``param`` from ``point``, else from its own ``initval``.
+
+        The single "value from the point, else the Parameter's start" rule
+        every plot path needs, in internal units.  ``index`` picks one
+        element (falling back to element 0 when the vector is shorter, as a
+        broadcast scalar parameter is); ``index=None`` returns the whole
+        1-D array.  ``param`` may belong to ANY component -- the phased
+        panels read ``system.orbit.tc`` and ``system.orbit.period`` through
+        it.
+
+        A ``point.get(label, <literal>)`` is the bug this replaces, in two
+        flavours, both caused by the same mechanism: a parameter whose every
+        element is pinned (``sigma: 0``) never becomes a pm.Deterministic,
+        so it is in neither ``model.deterministics`` nor the posterior and
+        is simply ABSENT from the point.
+
+        * With a literal default the plot silently substituted a wrong
+          number -- ZERO for a pinned RV ``gamma`` (every point of that
+          instrument drawn a whole offset away from the model the
+          likelihood fit) or UNITY for a pinned transit ``baseline`` (whose
+          seed is the light curve's own median flux, so an un-normalized
+          light curve was drawn off by the entire flux scale).
+        * With NO default it crashed: ``float(np.atleast_1d(None)[i])``.
+          Pinning ``orbit.tc`` to a literature ephemeris -- an ordinary RV
+          config -- killed the fit inside run.py's start plots BEFORE
+          sampling; transit's try/except merely swallowed it and dropped
+          every phased panel.
+        """
+        vals = point.get(param.label)
+        if vals is None:
+            vals = param.initval
+        vals = np.atleast_1d(vals).astype(np.float64)
+        if index is None:
+            return vals
+        return float(vals[index] if index < vals.size else vals[0])
+
+    def detrend_at_data(self, point):
+        """Fitted detrend model at every observation, in internal units.
+
+        ``(n_total_obs,)``, all zeros when this instrument declared no
+        detrend columns or when there is no point.  The plotted DATA are
+        corrected by this (EXOFASTv2's convention): the trend is a
+        per-observation quantity built from the file's own extra columns,
+        so a pretty-grid model curve cannot carry it, and without the
+        correction every panel of a detrending fit showed a systematic
+        data-vs-model mismatch equal to the whole fitted trend, reading as
+        unmodeled residual structure.
+
+        The value is in the same additive space as the likelihood's own
+        ``pt.dot(detrend, detrend_coeffs)`` term, i.e. the WHITENED design
+        matrix times the sampled coefficients (see ``_build_block_detrend``)
+        -- so it is exactly the term the model added, with no un-whitening
+        needed here.
+
+        ADDITIVE, which is what ``rvinstrument`` and ``transit`` want and
+        what a caller must not assume: ``mulensinstrument``'s coefficients
+        are magnitude-space and enter its flux model MULTIPLICATIVELY, as
+        ``10**(-0.4 * X.c)``.  A mulens plot path wants that factor, not
+        this sum, and dividing the plotted flux by it is the correction --
+        not subtracting.
+        """
+        if point is None or getattr(self, "total_detrend_cols", 0) == 0:
+            return np.zeros(self.n_total_obs)
+        coeffs = self._point_value(point, self.detrend_coeffs)
+        return np.asarray(self.detrend_matrix @ coeffs, dtype=float)
+
+    def detrend_caption(self):
+        """The sentence a detrending fit's figure captions owe the reader.
+
+        Empty without detrend columns, so no shipped caption changes unless
+        the fit really does subtract a trend from the plotted points -- which
+        the reader has to be told, since those are then not the raw data
+        (see ``detrend_at_data`` for why the correction goes on the data
+        rather than on the model curve).  It is `meta["caption"]` LaTeX,
+        which is verbatim, so it carries no escaping.
+        """
+        if getattr(self, "total_detrend_cols", 0) == 0:
+            return ""
+        return (
+            " The fitted linear trend against the data file's detrend "
+            "columns has been subtracted from the plotted points; the model "
+            "curve is evaluated on a smooth time grid and so cannot carry a "
+            "per-observation term."
+        )
+
+    def detrend_dep_labels(self):
+        """``param_deps`` entry for the detrend coefficients, or ``[]``.
+
+        ``detrend_at_data`` is applied to the plotted data in NUMPY, not
+        through a symbolic model node, so ``_model_trace_param_deps``'s
+        graph walk cannot see it and a GUI slider on the coefficients would
+        never refresh the charts.  Same reasoning as the explicit gamma /
+        baseline deps next to it.
+        """
+        if getattr(self, "total_detrend_cols", 0) == 0:
+            return []
+        label = getattr(getattr(self, "detrend_coeffs", None), "label", None)
+        return [label] if label else []
+
+    def gp_dep_labels(self):
+        """``param_deps`` entries for this instrument's GP hyperparameters.
+
+        The GP conditional mean reaches the panels in NUMPY too
+        (``gp_mean_at_data`` / ``gp_mean_on_grid`` are compiled celerite2
+        evaluators, not nodes of the plotted model trace), so the graph walk
+        cannot see it and, until 2026-09, no ``gp_*`` label ever reached
+        ``param_deps``: a GP hyperparameter slider in the GUI never
+        re-rendered a chart (review 1.12.9).  The eval path does ask for a
+        fresh point on every slider move -- ``param_deps`` was the only
+        blocker.  Same label convention as ``detrend_dep_labels``: the built
+        Parameter's own ``label``, for the terms actually on somewhere.
+        ``[]`` without a GP, so no chart without one changes.
+        """
+        if not getattr(self, "has_gp", False):
+            return []
+        labels = []
+        for kind in gp_support.GP_TERMS:
+            if not self._gp_elements(kind):
+                continue
+            for name in gp_support.GP_TERM_PARAMS[kind]:
+                label = getattr(getattr(self, name, None), "label", None)
+                if label:
+                    labels.append(label)
+        return labels
+
     # ------------------------------------------------------------------
     # Shared noise machinery
     # ------------------------------------------------------------------
@@ -1955,24 +1997,77 @@ class Instrument(Component):
     # ------------------------------------------------------------------
     # Shared optional detrending against extra data columns
     # ------------------------------------------------------------------
-    @staticmethod
-    def _build_block_detrend(all_detrend, n_total_obs):
+    def _build_block_detrend(self, all_detrend, n_total_obs):
         """Block-diagonal detrend design matrix from per-instrument blocks.
 
         ``all_detrend`` is one ``(n_obs_i, n_cols_i)`` array per instrument
         (``n_cols_i == 0`` when that instrument has no detrend columns).
-        Returns ``(matrix, n_detrend_per_inst, total_detrend_cols)`` where the
-        matrix is ``(n_total_obs, total_detrend_cols)`` with each instrument's
-        columns placed on the block diagonal so coefficients never mix across
-        instruments.
+        Returns ``(matrix, n_detrend_per_inst, total_detrend_cols, scales)``
+        where the matrix is ``(n_total_obs, total_detrend_cols)`` with each
+        instrument's columns placed on the block diagonal so coefficients
+        never mix across instruments.
+
+        Every column is WHITENED as it is placed: mean subtracted, then
+        divided by its own standard deviation.  ``scales`` is one standard
+        deviation per global column, and is what turns the sampled
+        coefficient back into a coefficient per raw column unit.
+
+        Why both halves:
+
+        * The MEAN subtraction removes an exact degeneracy.  A column with a
+          nonzero mean is, along its mean direction, indistinguishable from
+          the instrument's own offset (``gamma`` / ``baseline``), so the pair
+          has a perfectly flat likelihood ridge that no amount of whitening
+          the SAMPLER does can rescue -- whitening fixes scale, not
+          correlation.  EXOFASTv2 mean-subtracts for the same reason.  It
+          does change what the offset MEANS: it is now the model value at
+          the detrend columns' means rather than at column zero, which for
+          an airmass-like basis is the more interpretable of the two.
+        * The SCALE division makes the coefficients comparably conditioned,
+          so the columns' arbitrary physical magnitudes do not set the
+          sampler's step sizes.
+
+        The moments are per (instrument, column) and never global: the
+        design is block diagonal precisely so coefficients cannot mix across
+        instruments, and a global moment would couple the blocks again.
+
+        A CONSTANT column (zero variance) RAISES.  It is exactly degenerate
+        with the offset and carries no information, so there is nothing to
+        estimate: mean-subtracting it alone would leave an all-zero basis
+        vector whose coefficient the likelihood never sees (a free dimension
+        held up only by its bounds), and dividing by an epsilon would invent
+        an arbitrary one.  Refusing names the column instead.
         """
         n_per = [d.shape[1] for d in all_detrend]
         total = sum(n_per)
         matrix = np.zeros((n_total_obs, total))
+        scales = np.ones(total)
         r, c = 0, 0
-        for block in all_detrend:
+        for i, block in enumerate(all_detrend):
             n_r, n_c = block.shape
-            if n_c > 0:
-                matrix[r : r + n_r, c : c + n_c] = block
+            for j in range(n_c):
+                col = np.asarray(block[:, j], dtype=float)
+                sd = float(np.std(col))
+                if not np.isfinite(sd) or sd == 0.0:
+                    # One raise for two causes, and the message names both:
+                    # an all-NaN (or NaN-bearing) column has sd = nan and
+                    # used to read "constant (value nan)", which sends the
+                    # user hunting for a repeated value that does not exist
+                    # (review 2.14.3).
+                    why = (
+                        "constant"
+                        if np.isfinite(sd)
+                        else "non-finite (it contains NaN or inf)"
+                    )
+                    raise ValueError(
+                        f"[{self.prefix}[{self.names[i]}]] detrend column "
+                        f"{j} is {why} (first value {col.flat[0]!r}), so "
+                        f"it carries no information and is exactly "
+                        f"degenerate with this instrument's offset.  Remove "
+                        f"the column (or list only the varying ones with "
+                        f"`columns: {{detrend: [...]}}`)."
+                    )
+                matrix[r : r + n_r, c + j] = (col - np.mean(col)) / sd
+                scales[c + j] = sd
             r, c = r + n_r, c + n_c
-        return matrix, n_per, total
+        return matrix, n_per, total, scales

@@ -1,0 +1,42 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N vbmbench
+#$ -o vbmbench.$JOB_ID.log
+#
+#   qsub nlens_vbm_bench.job
+# N-lens VBMicrolensing benchmark + validation (review 7.6.2, queue TASK 5).
+#
+# 8 slots are RESERVED but the benchmark runs SINGLE-THREADED on purpose: this
+# measures per-call wall time, so the reservation is there to keep other jobs
+# off the cores rather than to use them.  Every threading knob is pinned to 1
+# for the same reason -- a numpy that decides to use 8 threads would make the
+# per-call timings meaningless.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+# The conda env is what has numpy/VBMicrolensing on a compute node; without
+# this the bare module python3 imports nothing (measured: job 15378613 died on
+# `No module named numpy` in under a second).  The script re-invokes itself
+# per block via sys.executable, so activating here covers the subprocesses too.
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+
+cd $HOME/python/EXOZIPPy/examples/validation
+echo "sha: $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)  slots: $NSLOTS"
+echo "host: $(hostname)"
+python3 nlens_vbm_bench.py --drive \
+    --n-per-bin 120 \
+    --bin-budget 60 \
+    --block-timeout 3600 \
+    --out nlens_vbm_bench.json

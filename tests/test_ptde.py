@@ -1,8 +1,10 @@
 """Tests for the PTDE (Parallel Tempering + Differential Evolution) sampler."""
 
+import logging
 import multiprocessing as mp
 import threading
 import time
+import tracemalloc
 
 import arviz as az
 import numpy as np
@@ -13,10 +15,15 @@ from scipy.stats import kstest
 
 from conftest import requires_fork
 from exozippy.components.parameter import Parameter
+from exozippy.samplers._common import (
+    resolve_start_population,
+    start_spread_ratios,
+    warn_if_starts_underdispersed,
+)
+from exozippy.samplers.ladder import _geometric_ladder
 from exozippy.samplers.ptde import (
     _PROBE_FLAT_SCALE,
     _active_rungs,
-    _geometric_ladder,
     _make_starts,
     _probe_scales,
     _probe_step_1d,
@@ -24,6 +31,7 @@ from exozippy.samplers.ptde import (
     _worker_init,
     ptde_sample,
 )
+from exozippy.samplers.ptde_async import ptde_async_sample
 from exozippy.system import System
 
 
@@ -640,6 +648,807 @@ def test_make_starts_falls_back_when_system_has_no_jitter():
     assert all(np.isfinite(float(logp_fn(s))) for s in starts)
 
 
+# ---------------------------------------------------------------------------
+# eval_timeout, actually FIRING (review 7.4.2).  It was only ever tested in
+# the "no timeout fires" regime, so the sentinel handling, describe_proposal
+# and the pool recycle had no coverage at all.
+# ---------------------------------------------------------------------------
+
+
+def _slower_than(seconds):
+    """A logp every call of which outlasts the timeout under test."""
+
+    def _logp(point):
+        time.sleep(seconds)
+        return -0.5 * float(np.asarray(point["x"])) ** 2
+
+    return _logp
+
+
+@requires_fork
+@pytest.mark.parametrize("collect_rung_timing", [False, True])
+def test_sync_eval_timeout_rejects_the_proposal_and_recycles(
+    caplog, collect_rung_timing
+):
+    """
+    Given a logp slower than eval_timeout on EVERY call,
+    When ptde_sample runs,
+    Then each proposal is timed out and rejected, the offending parameters
+      are logged in both physical and raw space, the worker pool is
+      recycled, the count reaches the wrap-up line, and the run still
+      returns a well-formed trace.
+
+    Parameterized over collect_rung_timing because the timeout SENTINEL
+    changes shape with it -- (-inf, elapsed) instead of a bare -inf -- and
+    the unpack that reads it had no coverage either.  Every proposal being
+    rejected also means the stored draw is the start state, which is what
+    makes the whole thing deterministic.
+
+    This exercises the shutdown path too: the last workers are still asleep
+    when the run ends, and they ignore SIGTERM (_worker_init), so a
+    close()+join() at wrap-up would hang here (review 2.4.1).
+    """
+    # ARRANGE
+    if mp.cpu_count() < 2:
+        pytest.skip("eval_timeout has no effect with a single core")
+    with pm.Model() as model:
+        pm.Normal("x", mu=0.0, sigma=1.0)
+    model.compile_logp = lambda *a, **k: _slower_than(1.0)
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        idata = ptde_sample(
+            model,
+            _MinimalSystem(),
+            draws=1,
+            tune=1,
+            n_temps=1,
+            n_chains=4,
+            cores=2,
+            initvals=[{"x": np.array(0.1 * j)} for j in range(4)],
+            seed=8,
+            log_interval=10**6,
+            eval_timeout=0.2,
+            collect_rung_timing=collect_rung_timing,
+            min_ess=None,
+            max_rhat=None,
+        )
+
+    # ASSERT
+    assert "logp call exceeded eval_timeout" in caplog.text
+    assert "physical params" in caplog.text and "raw params" in caplog.text
+    assert "recycling worker pool" in caplog.text
+    assert "eval_timeouts=" in caplog.text
+    assert idata.posterior.sizes["draw"] == 1
+    # every proposal was rejected, so the draw is the start state
+    assert np.allclose(
+        sorted(np.ravel(idata.posterior["x"].values)),
+        [0.0, 0.1, 0.2, 0.3],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sync early-stop paths (review 7.4.1): every one of these was uncovered,
+# while the async sampler's maxtime path was not.
+# ---------------------------------------------------------------------------
+
+
+def test_sync_stops_early_when_the_convergence_criterion_is_met(caplog):
+    """
+    Given loose min_ess/max_rhat thresholds and far more draws than needed,
+    When ptde_sample reaches its first geometric convergence check,
+    Then it stops there, says so, and returns the draws it has -- the
+      min_ess/max_rhat branch and _check_convergence with it, neither of
+      which any test had ever invoked.
+    """
+    # ARRANGE / ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        idata = ptde_sample(
+            _simple_model(),
+            _MinimalSystem(),
+            draws=5000,
+            tune=10,
+            n_temps=2,
+            T_max=2.0,
+            n_chains=4,
+            cores=1,
+            seed=2,
+            log_interval=10**6,
+            min_ess=1.0,
+            max_rhat=100.0,
+        )
+
+    # ASSERT: the first check sits at 100 draws (see
+    # _convergence_check_schedule), so it stops there, not at 5000
+    assert idata.posterior.sizes["draw"] == 100
+    assert "convergence criterion met" in caplog.text
+    assert "PTDE convergence @ 100 draws" in caplog.text
+    assert "early stop" in caplog.text
+
+
+def test_sync_stops_on_maxtime_and_keeps_the_draws_it_has(caplog):
+    """
+    Given a wall-clock budget that expires during the DRAW phase,
+    When ptde_sample runs,
+    Then it stops, logs the limit, and returns the draws collected so far.
+    """
+    # ARRANGE / ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        idata = ptde_sample(
+            _simple_model(),
+            _MinimalSystem(),
+            draws=10**6,
+            tune=1,
+            n_temps=2,
+            T_max=2.0,
+            n_chains=4,
+            cores=1,
+            seed=6,
+            log_interval=10**6,
+            maxtime=0.5,
+            min_ess=None,
+            max_rhat=None,
+        )
+
+    # ASSERT
+    assert 1 <= idata.posterior.sizes["draw"] < 10**6
+    assert "wall-clock limit" in caplog.text
+    assert "early stop" in caplog.text
+
+
+def test_sync_maxtime_during_tune_aborts_rather_than_saving_nothing(caplog):
+    """
+    Given a budget so small it expires during TUNE, before any draw exists,
+    When ptde_sample runs,
+    Then it raises KeyboardInterrupt -- there is nothing to save, and
+      returning an empty InferenceData would look like a completed fit.
+    """
+    with caplog.at_level(logging.WARNING, logger="exozippy.samplers.ptde"):
+        with pytest.raises(KeyboardInterrupt):
+            ptde_sample(
+                _simple_model(),
+                _MinimalSystem(),
+                draws=10,
+                tune=10**6,
+                n_temps=2,
+                T_max=2.0,
+                n_chains=4,
+                cores=1,
+                seed=6,
+                log_interval=10**6,
+                maxtime=0.3,
+                min_ess=None,
+                max_rhat=None,
+            )
+    assert "no draws to save" in caplog.text
+
+
+def test_sync_raises_when_the_run_collects_no_draws_at_all():
+    """
+    Given draws=0,
+    When ptde_sample finishes its tune steps,
+    Then it raises RuntimeError rather than handing back an empty trace.
+    """
+    with pytest.raises(RuntimeError, match="no draws were collected"):
+        ptde_sample(
+            _simple_model(),
+            _MinimalSystem(),
+            draws=0,
+            tune=2,
+            n_temps=2,
+            T_max=2.0,
+            n_chains=4,
+            cores=1,
+            seed=1,
+            log_interval=10**6,
+            min_ess=None,
+            max_rhat=None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Chunked draw storage (review 6.4.5)
+# ---------------------------------------------------------------------------
+
+
+def test_draw_storage_grows_in_chunks_and_preserves_what_was_written():
+    """
+    Given draw buffers smaller than the draws about to be taken,
+    When they are grown,
+    Then the dict is mutated IN PLACE (the GUI callback and the convergence
+      check both hold it by reference), every value already written
+      survives, and the new capacity is a whole chunk.
+    """
+    # ARRANGE
+    from exozippy.samplers._common import grow_draw_storage
+
+    stored_raw = {"x": np.zeros((3, 4)), "y": np.zeros((3, 4, 2))}
+    stored_lp = np.zeros((3, 4))
+    same_dict = stored_raw
+    stored_raw["x"][:, :4] = 7.0
+    stored_lp[:, :4] = -1.5
+
+    # ACT
+    stored_lp = grow_draw_storage(stored_raw, stored_lp, needed=5, chunk=6)
+
+    # ASSERT
+    assert stored_raw is same_dict
+    assert stored_raw["x"].shape == (3, 10)
+    assert stored_raw["y"].shape == (3, 10, 2)
+    assert stored_lp.shape == (3, 10)
+    assert (stored_raw["x"][:, :4] == 7.0).all()
+    assert (stored_lp[:, :4] == -1.5).all()
+    # already big enough -> untouched, same object
+    before = stored_lp
+    assert grow_draw_storage(stored_raw, stored_lp, needed=10) is before
+
+
+def test_hot_draw_storage_grows_on_the_draw_axis_and_pads_with_nan():
+    """
+    Given thinned hot-rung buffers, which carry a leading rung axis,
+    When they are grown,
+    Then the DRAW axis (axis 2) is the one that grows, what was written
+      survives, and the unwritten lp tail is NaN -- not a zero that would
+      read as a real log-density.
+
+    grow_draw_storage's sibling, for review 6.4.6's hot group.  The default
+    chunk is divided by the rung count so one growth step costs the same
+    memory here as it does at T=1.
+    """
+    # ARRANGE
+    from exozippy.samplers._common import (
+        DRAW_CHUNK,
+        grow_hot_draw_storage,
+        hot_draw_chunk,
+    )
+
+    stored_raw = {"x": np.zeros((2, 3, 4)), "y": np.zeros((2, 3, 4, 5))}
+    stored_lp = np.full((2, 3, 4), np.nan)
+    same_dict = stored_raw
+    stored_raw["x"][...] = 7.0
+    stored_lp[...] = -1.5
+
+    # ACT
+    stored_lp = grow_hot_draw_storage(stored_raw, stored_lp, 5, chunk=6)
+
+    # ASSERT
+    assert stored_raw is same_dict
+    assert stored_raw["x"].shape == (2, 3, 10)
+    assert stored_raw["y"].shape == (2, 3, 10, 5)
+    assert stored_lp.shape == (2, 3, 10)
+    assert (stored_raw["x"][:, :, :4] == 7.0).all()
+    assert (stored_lp[:, :, :4] == -1.5).all()
+    assert np.isnan(stored_lp[:, :, 4:]).all()
+    # already big enough -> untouched, same object
+    before = stored_lp
+    assert grow_hot_draw_storage(stored_raw, stored_lp, 10) is before
+    # the per-step cost is normalized by the rung count
+    assert hot_draw_chunk(8) == DRAW_CHUNK // 8
+    assert hot_draw_chunk(0) == DRAW_CHUNK
+
+
+def _early_stop_kwargs(sampler):
+    """The common early-stop invocation for both PTDE samplers.
+
+    The hot-rung buffers are switched off in BOTH arms so the measurement is
+    of the T=1 group -- store_hot_chains used to be a ptde_async-only key and
+    needed a special case here; it is now shared
+    (samplers._common.HotChainRecorder), so both arms take the same kwargs.
+    """
+    kwargs = dict(
+        draws=10**6,
+        tune=2,
+        n_temps=2,
+        T_max=2.0,
+        n_chains=4,
+        cores=1,
+        seed=4,
+        log_interval=10**6,
+        maxtime=0.5,
+        min_ess=None,
+        max_rhat=None,
+    )
+    kwargs["store_hot_chains"] = False
+    return kwargs
+
+
+@pytest.mark.parametrize(
+    "sampler",
+    [ptde_sample, ptde_async_sample],
+    ids=["ptde", "ptde_async"],
+)
+def test_an_early_stop_does_not_allocate_the_draws_it_never_takes(sampler):
+    """
+    Given a huge configured draw count and a run that stops almost at once,
+    When sampling finishes,
+    Then the buffers hold one chunk, not the configured count.
+
+    At draws=252600 on a 27-parameter model the old full preallocation was
+    ~1.6 GB of resident memory for draws the run never took.  Here the same
+    shape is 4 chains x 1e6 draws x 2 variables = 96 MB, measured with
+    tracemalloc (which counts numpy's own allocations).
+
+    ONE RULE, BOTH SAMPLERS -- that is what the parametrization is for.
+    Review 6.4.5 fixed this in ptde.py and closed; ptde_async, which is the
+    production default, kept preallocating for another review cycle (6.4.6)
+    because nothing failed when only one of the two was fixed.  A storage or
+    memory fix to one PTDE sampler is not done until this test covers both.
+    """
+    # ARRANGE / ACT
+    from exozippy.samplers._common import DRAW_CHUNK
+
+    tracemalloc.start()
+    try:
+        idata = sampler(
+            _simple_model(), _MinimalSystem(), **_early_stop_kwargs(sampler)
+        )
+        peak_mb = tracemalloc.get_traced_memory()[1] / 1e6
+    finally:
+        tracemalloc.stop()
+
+    # ASSERT
+    assert 1 <= idata.posterior.sizes["draw"] <= DRAW_CHUNK
+    assert peak_mb < 40.0, (
+        f"peak {peak_mb:.0f} MB -- the full 96 MB draw buffer was allocated "
+        f"for a run that took {idata.posterior.sizes['draw']} draws"
+    )
+
+
+@pytest.mark.parametrize(
+    "sampler",
+    [ptde_sample, ptde_async_sample],
+    ids=["ptde", "ptde_async"],
+)
+def test_an_early_stop_does_not_allocate_the_hot_draws_it_never_takes(sampler):
+    """
+    Given store_hot_chains on and a huge configured draw count,
+    When the run stops almost at once,
+    Then the (rung, chain, draw) hot buffers are chunked too.
+
+    The hot group is the bigger of the two: (n_temps - 1) x n_chains x
+    (draws // hot_thin).  Here 7 rungs x 4 chains x 5e5 draws x 2 variables
+    is ~224 MB that a 0.5 s run has no use for.
+
+    BOTH SAMPLERS, for the reason spelled out in the T=1 twin above: this was
+    ptde_async-only while the key was, and a storage fix to one PTDE sampler
+    is not done until the parity test covers both.
+    """
+    # ARRANGE / ACT
+    tracemalloc.start()
+    try:
+        idata = sampler(
+            _simple_model(),
+            _MinimalSystem(),
+            draws=10**6,
+            tune=2,
+            n_temps=8,
+            T_max=2.0,
+            n_chains=4,
+            cores=1,
+            seed=4,
+            log_interval=10**6,
+            maxtime=0.5,
+            min_ess=None,
+            max_rhat=None,
+            store_hot_chains=2,
+        )
+        peak_mb = tracemalloc.get_traced_memory()[1] / 1e6
+    finally:
+        tracemalloc.stop()
+
+    # ASSERT
+    assert idata.posterior.sizes["draw"] >= 1
+    assert peak_mb < 60.0, (
+        f"peak {peak_mb:.0f} MB -- the full hot buffer was allocated for a "
+        f"run that took {idata.posterior.sizes['draw']} draws"
+    )
+
+
+@pytest.mark.parametrize(
+    "sampler",
+    [ptde_sample, ptde_async_sample],
+    ids=["ptde", "ptde_async"],
+)
+def test_both_samplers_store_the_hot_rungs_they_were_asked_for(sampler):
+    """
+    Given store_hot_chains set explicitly,
+    When either PTDE sampler runs,
+    Then a posterior_hot group is written, shaped (rungs x chains, draws),
+    carrying a per-chain temperature coordinate and finite untempered lp.
+
+    THIS IS THE ASYMMETRY ITSELF, not a guard against re-introducing it.
+    store_hot_chains was honored by ptde_async and IGNORED WITH A WARNING by
+    ptde, so a `method: ptde` fit silently had no suppressed-mode detector --
+    outputs.ledger.discover_hot_modes had nothing to read.  Nothing about
+    retaining a thinned copy of the hot rungs depends on whether proposals
+    are dispatched synchronously, which is why the recorder now lives in
+    _common and both loops call it; the only thing that differs is which
+    counter thins (per-chain iterations for async, the draw index for sync).
+    """
+    # ARRANGE / ACT
+    n_temps, n_chains = 3, 4
+    idata = sampler(
+        _simple_model(),
+        _MinimalSystem(),
+        draws=40,
+        tune=5,
+        n_temps=n_temps,
+        T_max=4.0,
+        n_chains=n_chains,
+        cores=1,
+        seed=11,
+        log_interval=10**6,
+        min_ess=None,
+        max_rhat=None,
+        store_hot_chains=2,
+    )
+
+    # ASSERT
+    assert hasattr(idata, "posterior_hot"), (
+        f"{sampler.__name__} wrote no posterior_hot group; store_hot_chains "
+        f"is shared and must be honored by both samplers"
+    )
+    hot = idata.posterior_hot
+    assert hot.sizes["chain"] == (n_temps - 1) * n_chains
+    assert hot.sizes["draw"] >= 1
+    # the hot rungs, and only the hot rungs, carry their own temperature
+    temps = np.asarray(hot["temperature"])
+    assert temps.shape == ((n_temps - 1) * n_chains,)
+    assert (temps > 1.0).all(), temps
+    # UNtempered lp: comparable to T=1 rather than divided by temperature
+    assert np.isfinite(np.asarray(hot["lp"])).all()
+
+
+@pytest.mark.parametrize(
+    "sampler",
+    [ptde_sample, ptde_async_sample],
+    ids=["ptde", "ptde_async"],
+)
+@pytest.mark.parametrize(
+    "bad",
+    [{"swap_schedule": "alternating"}, {"de_mode_hop": 1.5}],
+    ids=["swap_schedule", "de_mode_hop"],
+)
+def test_both_samplers_reject_the_same_bad_shared_knob(sampler, bad):
+    """
+    Given a knob run.py forwards to both PTDE samplers, set out of range,
+    When either sampler is called,
+    Then both raise, with the sampler named.
+
+    The useful question about a shared knob is not "is it validated" but
+    "is it validated by exactly ONE of them" (reviews 1.4.3, 2.4.16).
+    swap_schedule was checked in both -- two copies of one `if` -- while
+    de_mode_hop was checked only in ptde_async, so the same config raised
+    under one method and was accepted as a probability above 1 under the
+    other.  Both now call _common.validate_shared_ptde_args.
+    """
+    # ARRANGE / ACT / ASSERT
+    with pytest.raises(ValueError) as exc:
+        sampler(
+            _simple_model(),
+            _MinimalSystem(),
+            draws=2,
+            tune=1,
+            n_temps=2,
+            T_max=2.0,
+            n_chains=4,
+            cores=1,
+            seed=3,
+            min_ess=None,
+            max_rhat=None,
+            **bad,
+        )
+    assert list(bad)[0] in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Packed populations (review 6.4.2)
+# ---------------------------------------------------------------------------
+
+
+def _mixed_state(rng):
+    """A raw state with the shapes a real model mixes: 0-d, 1-d and 2-d."""
+    return {
+        "a": rng.standard_normal(()),
+        "b": rng.standard_normal(3),
+        "c": rng.standard_normal((2, 2)),
+        "d": rng.standard_normal(1),
+    }
+
+
+def test_packed_proposal_is_bit_identical_to_the_dict_one():
+    """
+    Given the same population and the same seed,
+    When a DE proposal is built from packed rows and from the dicts,
+    Then the two agree BIT FOR BIT, element by element.
+
+    This is the whole licence for the packing: the partner draw stays per
+    member (a batched one would consume the bit stream in a different
+    order), one standard_normal(total) is the same SEQUENCE as one draw per
+    key in key order, and the arithmetic is elementwise so concatenating
+    the operands changes no rounding.  If any of those three ever stops
+    holding, every PTDE run silently moves.
+    """
+    # ARRANGE
+    from exozippy.samplers._common import RawLayout, de_proposal
+
+    rng = np.random.default_rng(0)
+    pop = [_mixed_state(rng) for _ in range(9)]
+    keys = list(pop[0])
+    layout = RawLayout(pop[0], keys)
+    packed = layout.pack_many(pop)
+    gamma = 0.37
+
+    # ACT / ASSERT: same seed on both sides, several members, jitter on and off
+    for jitter in (1e-4, 0.0):
+        for i in (0, 4, 8):
+            a = de_proposal(
+                np.random.default_rng(5), pop, i, gamma, keys, jitter=jitter
+            )
+            b = layout.propose(
+                np.random.default_rng(5), packed, i, gamma, jitter=jitter
+            )
+            flat = np.concatenate([np.ravel(a[k]) for k in keys])
+            assert np.array_equal(flat, b), (jitter, i)
+
+
+def test_raw_layout_round_trips_shapes_and_does_not_alias():
+    """
+    Given a state with mixed shapes,
+    When it is packed and unpacked,
+    Then every value comes back with its own shape, and the unpacked dict
+      shares no memory with the vector it came from -- a worker's payload
+      must not change under it when the next proposal is built.
+    """
+    # ARRANGE
+    from exozippy.samplers._common import RawLayout
+
+    state = _mixed_state(np.random.default_rng(1))
+    layout = RawLayout(state)
+
+    # ACT
+    vec = layout.pack(state)
+    back = layout.unpack(vec)
+    vec[:] = 0.0
+
+    # ASSERT
+    assert layout.total == 9
+    for k, v in state.items():
+        assert back[k].shape == np.shape(v)
+        assert np.array_equal(back[k], np.asarray(v))
+
+
+# ---------------------------------------------------------------------------
+# The positional logp call (review 6.4.3)
+# ---------------------------------------------------------------------------
+
+
+def test_positional_logp_matches_the_dict_wrapper_bit_for_bit():
+    """
+    Given a model with a scalar, a vector and a TRANSFORMED variable,
+    When the same points are evaluated through pymc's dict wrapper and
+      through the positional wrapper the samplers install,
+    Then the two agree exactly -- including for the numpy SCALARS a DE
+      proposal produces for a 0-d parameter.
+
+    Those scalars are the whole reason the wrapper coerces: trust_input
+    turns the input filter off, and a np.float64 where a 0-d array is
+    expected raises inside the numba backend rather than being converted.
+    """
+    # ARRANGE
+    from exozippy.samplers._common import PositionalLogp
+
+    with pm.Model() as model:
+        pm.Normal("x", mu=0.0, sigma=1.0)
+        pm.Normal("y", mu=3.0, sigma=0.5, shape=3)
+        pm.HalfNormal("s", sigma=2.0)  # sampled as s_log__
+        pm.Normal("obs", mu=0.0, sigma=1.0, observed=np.zeros(5))
+    dict_fn = model.compile_logp()
+    fast = PositionalLogp(model.compile_logp())
+    assert fast.spec is not None, "introspection failed; the test is inert"
+    rng = np.random.default_rng(0)
+    point = model.initial_point()
+
+    # ACT / ASSERT
+    for _ in range(20):
+        prop = {
+            k: np.asarray(v, dtype=float) + rng.standard_normal(np.shape(v))
+            for k, v in point.items()
+        }
+        # a 0-d entry comes out of that arithmetic as a numpy scalar
+        assert not isinstance(prop["x"], np.ndarray)
+        assert float(dict_fn(prop)) == float(fast(prop))
+
+
+def test_positional_logp_falls_back_for_a_plain_callable():
+    """
+    Given a logp that is not a pymc PointFunc (a stub, or a future pymc that
+      renames the attributes),
+    When it is wrapped,
+    Then the wrapper passes calls straight through.
+
+    This is an optimization; losing it must never mean losing the fit.
+    """
+    from exozippy.samplers._common import PositionalLogp
+
+    fast = PositionalLogp(lambda point: -0.5 * float(point["x"]) ** 2)
+
+    assert fast.spec is None
+    assert fast({"x": 2.0}) == pytest.approx(-2.0)
+
+
+# ---------------------------------------------------------------------------
+# Start over-dispersion diagnostic (review 2.4.5)
+# ---------------------------------------------------------------------------
+
+
+def test_underdispersed_starts_are_reported_and_wide_ones_are_not(caplog):
+    """
+    Given two start populations -- one scattered wide of the measured
+      posterior scale, one drawn from well inside it (what seeding from a
+      previous run's posterior draws produces),
+    When the dispersion of each is measured,
+    Then only the tight one warns, and the warning quotes the spread in
+      scale units.
+
+    Rhat's between-chain term is only evidence of non-convergence if the
+    chains started further apart than the posterior is wide, and both
+    convergence.good_chain_mask and the min_ess/max_rhat early stop inherit
+    that assumption.
+    """
+    # ARRANGE
+    rng = np.random.default_rng(0)
+    scales = {"x": np.array(1.0), "y": np.ones(3)}
+    wide = [
+        {
+            "x": np.array(3.0 * rng.standard_normal()),
+            "y": 3.0 * rng.standard_normal(3),
+        }
+        for _ in range(8)
+    ]
+    tight = [
+        {
+            "x": np.array(0.1 * rng.standard_normal()),
+            "y": 0.1 * rng.standard_normal(3),
+        }
+        for _ in range(8)
+    ]
+    log = logging.getLogger("exozippy.test.dispersion")
+
+    # ACT
+    with caplog.at_level(logging.WARNING, logger=log.name):
+        wide_ratio = warn_if_starts_underdispersed(wide, scales, "T", log)
+    assert "UNDER-DISPERSED" not in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=log.name):
+        tight_ratio = warn_if_starts_underdispersed(tight, scales, "T", log)
+
+    # ASSERT
+    assert wide_ratio > 2.0
+    assert tight_ratio < 0.2
+    assert "UNDER-DISPERSED" in caplog.text
+    assert "0.10x the measured posterior scale" in caplog.text
+    # a single start has no between-chain spread to measure, and a flat
+    # probe direction has no posterior width to be dispersed against
+    assert np.isnan(warn_if_starts_underdispersed(tight[:1], scales, "T", log))
+    flat = {"x": np.array(0.0), "y": np.array([np.inf, np.nan, 1.0])}
+    assert np.isfinite(warn_if_starts_underdispersed(wide, flat, "T", log))
+
+
+def test_the_default_jittered_start_population_is_over_dispersed():
+    """
+    Given the ordinary single-seed start population _make_starts builds,
+    When its spread is measured against the probe scales,
+    Then it is comfortably over-dispersed -- so the 2.4.5 diagnostic above
+      is silent on the normal path and only speaks about seeded restarts.
+    """
+    # ARRANGE
+    model = _simple_model()
+    logp_fn = model.compile_logp()
+    raw_start = model.initial_point()
+    scales = {
+        k: np.ones_like(np.asarray(v, dtype=float))
+        for k, v in raw_start.items()
+    }
+
+    # ACT
+    starts, _ = _make_starts(
+        8,
+        raw_start,
+        logp_fn,
+        np.random.default_rng(3),
+        system=None,
+        raw_scales=scales,
+    )
+    ratios = start_spread_ratios(starts, scales)
+
+    # ASSERT: scatter is min(sqrt(500/D), 3) = 3 scale units here
+    flat = np.concatenate([np.ravel(v) for v in ratios.values()])
+    assert np.median(flat) > 1.5
+
+
+# ---------------------------------------------------------------------------
+# Chain initialization: the retry loop's give-up, and the initvals bypass
+# (review 7.4.3, 2.4.4)
+# ---------------------------------------------------------------------------
+
+
+def test_chain_init_raises_when_no_finite_start_can_be_found():
+    """
+    Given a model whose whole start region evaluates to lp = -inf,
+    When _make_starts exhausts its retry budget,
+    Then it raises a RuntimeError naming the chain and pointing at
+      initval/bounds -- rather than returning a population of -inf starts
+      that every later diagnostic would have to explain.
+    """
+    # ARRANGE
+    model = _simple_model()
+    raw_start = model.initial_point()
+    rng = np.random.default_rng(0)
+
+    def _all_minus_inf(_point):
+        return -np.inf
+
+    # raw_scales short-circuits the probe, which would otherwise spend its
+    # own budget on the same flat -inf surface.
+    scales = {
+        k: np.ones_like(np.asarray(v, dtype=float))
+        for k, v in raw_start.items()
+    }
+
+    # ACT / ASSERT
+    with pytest.raises(RuntimeError, match="initialization failed"):
+        _make_starts(
+            2, raw_start, _all_minus_inf, rng, system=None, raw_scales=scales
+        )
+
+
+def test_explicit_initvals_are_used_verbatim_and_length_checked():
+    """
+    Given an explicit initvals list,
+    When the start population is resolved,
+    Then those dicts are the population, in order -- and a list whose length
+      does not match n_chains RAISES.
+
+    The list is consumed positionally (start j becomes chain j), so a wrong
+    length mispairs chains with starts, or hands the sampler fewer members
+    than it will index.  The check used to be a bare `assert`, which
+    `python -O` compiles out entirely (review 2.4.4).
+    """
+    # ARRANGE
+    model = _simple_model()
+    raw_start = model.initial_point()
+    initvals = [
+        {k: np.asarray(v, dtype=float) + j for k, v in raw_start.items()}
+        for j in range(3)
+    ]
+
+    # ACT
+    starts, seed_index = resolve_start_population(
+        model,
+        _MinimalSystem(),
+        3,
+        model.compile_logp(),
+        np.random.default_rng(0),
+        raw_start,
+        initvals=initvals,
+    )
+
+    # ASSERT
+    assert starts is initvals
+    assert seed_index == [0, 0, 0]
+    with pytest.raises(ValueError, match="4 chains per rung"):
+        resolve_start_population(
+            model,
+            _MinimalSystem(),
+            4,
+            model.compile_logp(),
+            np.random.default_rng(0),
+            raw_start,
+            initvals=initvals,
+        )
+
+
 @requires_fork
 def test_shutdown_pool_kills_workers_that_ignore_sigterm():
     """
@@ -699,7 +1508,7 @@ def test_resolve_n_temps_auto_scales_with_dimension():
       adjacent-rung energy-overlap rule -- and an explicit integer passes
       through untouched.
     """
-    from exozippy.samplers.ptde import resolve_n_temps
+    from exozippy.samplers.ladder import resolve_n_temps
 
     assert resolve_n_temps("auto", 5, 200.0) == 9
     assert resolve_n_temps("auto", 27, 200.0) == 20
@@ -722,7 +1531,7 @@ def test_ladder_health_report_warns_only_when_communication_limited(caplog):
     """
     import logging
 
-    from exozippy.samplers.ptde import ladder_health_report
+    from exozippy.samplers.ladder import ladder_health_report
 
     temps = _geometric_ladder(8, 200.0)
 
@@ -736,13 +1545,76 @@ def test_ladder_health_report_warns_only_when_communication_limited(caplog):
         assert any(
             "communication-limited" in r.message for r in caplog.records
         )
-        # recommendation is ceil(2*Lambda)+1
-        assert any("~13" in r.message for r in caplog.records)
+        # The warning must NAME the recommended rung count,
+        # ceil(2*Lambda)+1 = 13.  Asserted on the number rather than on a
+        # surrounding phrase: the remediation text was reworded once the
+        # measurements showed `n_temps: auto` cannot satisfy this criterion
+        # (it is self-consistent only at 0.50 swap acceptance), and a test
+        # pinned to the old wording fails on a message that is more correct.
+        assert any(
+            "13" in r.message and "n_temps" in r.message
+            for r in caplog.records
+        )
 
     assert ladder_health_report(temps, np.zeros(7), np.zeros(7)) is None
     assert (
         ladder_health_report(np.array([1.0]), np.zeros(1), np.zeros(1)) is None
     )
+
+
+def test_the_wrap_up_barrier_measures_the_draw_phase_only(monkeypatch):
+    """
+    Given a run with BOTH adaptations off, so nothing inside the log-window
+      branch ever reset the counters,
+    When the wrap-up ladder health report runs,
+    Then the swap counters it is handed cover exactly the draw phase.
+
+    The comment claimed "window resets stop when tuning ends", but the only
+    resets lived inside the adapt branch at log_every boundaries: with both
+    adaptations off the report measured tune+draws, and with either on it
+    measured whatever fell after the last boundary.  Either way it was not
+    the FINAL ladder's barrier, which is the only thing the report's
+    n_temps recommendation is about (review 3.4.2).  The random schedule
+    proposes exactly one swap per adjacent pair per step, so the expected
+    count is the draw count itself.
+    """
+    # ARRANGE
+    seen = {}
+
+    def _spy(temperatures, n_swap_accept, n_swap_propose):
+        seen["propose"] = np.array(n_swap_propose, dtype=float)
+        seen["accept"] = np.array(n_swap_accept, dtype=float)
+
+    # PATCH WHERE IT IS CALLED FROM, which is now the shared wrap-up
+    # (_common.finish_ptde_run) rather than each sampler's own epilogue.  The
+    # claim under test is unchanged -- which swap counters reach the report --
+    # but the lookup goes through the ladder module, so that is what a spy
+    # has to replace.
+    monkeypatch.setattr("exozippy.samplers.ladder.ladder_health_report", _spy)
+
+    # ACT
+    ptde_sample(
+        _simple_model(),
+        _MinimalSystem(),
+        draws=17,
+        tune=23,
+        n_temps=2,
+        T_max=4.0,
+        n_chains=4,
+        cores=1,
+        seed=3,
+        log_interval=5,
+        swap_schedule="random",
+        swap_interval=1,
+        adapt_gamma=False,
+        adapt_ladder=False,
+        min_ess=None,
+        max_rhat=None,
+    )
+
+    # ASSERT
+    assert seen["propose"].tolist() == [17.0]
+    assert seen["accept"][0] <= 17.0
 
 
 # ---------------------------------------------------------------------------
@@ -832,7 +1704,7 @@ def test_unmeasured_swap_pair_does_not_inflate_the_barrier():
     """
     # ARRANGE: pairs 0 and 2 measured at 20% rejection; pairs 1 and 3 never
     # proposed.
-    from exozippy.samplers.ptde import _update_ladder_barrier
+    from exozippy.samplers.ladder import _update_ladder_barrier
 
     temps = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
     accept = np.array([8.0, 0.0, 8.0, 0.0])
@@ -856,7 +1728,7 @@ def test_unmeasured_pair_is_interpolated_from_its_measured_neighbours():
       stays honest.
     """
     # ARRANGE
-    from exozippy.samplers.ptde import _update_ladder_barrier
+    from exozippy.samplers.ladder import _update_ladder_barrier
 
     temps = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
     # measured: pair0 r=0.1, pair2 r=0.5 -> pair1 should read r=0.3, and
@@ -884,7 +1756,7 @@ def test_ladder_update_is_a_noop_when_nothing_was_proposed():
     Then the ladder is returned unchanged rather than re-spaced against
       four fabricated full-rejection links.
     """
-    from exozippy.samplers.ptde import _update_ladder_barrier
+    from exozippy.samplers.ladder import _update_ladder_barrier
 
     temps = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
     zeros = np.zeros(4)
@@ -892,3 +1764,144 @@ def test_ladder_update_is_a_noop_when_nothing_was_proposed():
     np.testing.assert_allclose(
         _update_ladder_barrier(temps, zeros, zeros), temps
     )
+
+
+# ---------------------------------------------------------------------------
+# Windowed gamma adaptation vs the mode-hop counters (review 1.4.3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("hop_p", [0.2, 0.5])
+def test_windowed_gamma_adaptation_measures_hops_on_its_own_window(
+    monkeypatch, hop_p
+):
+    """
+    Given de_mode_hop > 0, adapt_gamma on, and a tune phase spanning several
+      log_interval windows,
+    When the adapter computes the non-hop T=1 acceptance rate
+      (n_accept - n_hop_accept) / (n_propose - n_hop_propose),
+    Then every rate it measures is a RATE -- strictly positive and at most
+      1.0 -- because the hop counters it subtracts are reset with the window
+      they are subtracted from.
+
+    The windowed tune-phase reset used to zero n_accept/n_propose and the
+    swap counters but NOT the two hop counters, so from the second window on
+    a CUMULATIVE hop count was taken off a WINDOWED one.  The denominator
+    shrinks toward (and past) zero, pushing the measured rate above 1.0 and
+    gamma AWAY from target_accept; once the numerator goes negative the
+    `ar_T1 > 0` guard skips the adaptation for the rest of tune without
+    logging anything, so a run enters its draw phase on a garbage frozen
+    gamma.  Only de_mode_hop > 0 reaches it, which is why the default 0.0
+    hid it.  ptde_async was never affected: it keeps separate window
+    counters for the adapter and lets the hop counters run cumulatively for
+    its wrap-up report.
+
+    Two hop probabilities, because how far the unfixed code gets before the
+    subtraction stops the adaptation depends on p: measured here it adapts
+    in 2 of the 10 tune windows at p=0.2 and in 1 at p=0.5, against 8 and 10
+    with the fix.  A rate ABOVE 1.0 -- 1.222 in the review's probe, taking
+    gamma 0.872 -> 2.155 -- is the same subtraction seen from the other
+    side, when the denominator is still positive as it collapses.  The two
+    assertions pin one arm each; which one a given seed shows is not
+    something to depend on.
+    """
+    # ARRANGE: record every rate the tune-phase adapter hands to next_gamma.
+    from exozippy.samplers._common import next_gamma as _real_next_gamma
+
+    seen = []
+
+    def _spy(gamma, ar, target_accept, **kwargs):
+        seen.append(float(ar))
+        return _real_next_gamma(gamma, ar, target_accept, **kwargs)
+
+    monkeypatch.setattr("exozippy.samplers.ptde.next_gamma", _spy)
+
+    # ACT: 10 adaptation windows during tune, hops at probability hop_p.
+    ptde_sample(
+        _simple_model(),
+        _MinimalSystem(),
+        draws=10,
+        tune=60,
+        n_temps=2,
+        T_max=4.0,
+        n_chains=4,
+        cores=1,
+        seed=7,
+        log_interval=6,
+        de_mode_hop=hop_p,
+        adapt_gamma=True,
+        adapt_ladder=False,
+        min_ess=None,
+        max_rhat=None,
+    )
+
+    # ASSERT: the adaptation ran in most windows (it is skipped only by a
+    # window that accepted no non-hop proposal at all), and every rate it
+    # saw is a rate.
+    assert len(seen) >= 5, (
+        "the gamma adaptation barely ran -- a negative numerator silently "
+        f"skipping it is exactly the failure under test: {seen}"
+    )
+    assert all(0.0 < ar <= 1.0 for ar in seen), (
+        f"a non-hop acceptance RATE cannot exceed 1.0: {seen}"
+    )
+
+
+def test_sync_reports_its_mode_hop_acceptance_at_wrap_up(caplog):
+    """
+    Given a synchronous run with de_mode_hop > 0,
+    When it finishes,
+    Then the wrap-up logs the gamma=1 hop acceptance, as ptde_async has since
+      the feature shipped.
+
+    Both call one helper (_common.log_mode_hop_summary) so the two samplers
+    cannot drift apart again; sync's counts span the draw phase, because its
+    counters are zeroed at the tune -> draw boundary.
+    """
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        ptde_sample(
+            _simple_model(),
+            _MinimalSystem(),
+            draws=20,
+            tune=20,
+            n_temps=2,
+            T_max=4.0,
+            n_chains=4,
+            cores=1,
+            seed=8,
+            log_interval=1000,
+            de_mode_hop=0.3,
+            min_ess=None,
+            max_rhat=None,
+        )
+
+    hops = [r.message for r in caplog.records if "DE mode hops" in r.message]
+    assert len(hops) == 1, f"expected one hop summary, got {hops}"
+    assert hops[0].startswith("PTDE DE mode hops (gamma=1, p=0.3):")
+    assert "accepted" in hops[0]
+
+
+def test_mode_hop_summary_is_silent_when_hops_are_off(caplog):
+    """
+    Given de_mode_hop at its default of 0.0,
+    When a run finishes,
+    Then nothing is reported about hops -- a line reading 0/0 in every
+      existing fit's log would be noise.
+    """
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        ptde_sample(
+            _simple_model(),
+            _MinimalSystem(),
+            draws=10,
+            tune=10,
+            n_temps=2,
+            T_max=4.0,
+            n_chains=4,
+            cores=1,
+            seed=9,
+            log_interval=1000,
+            min_ess=None,
+            max_rhat=None,
+        )
+
+    assert not [r for r in caplog.records if "DE mode hops" in r.message]

@@ -36,9 +36,9 @@ build.
 ## Layout
 
 - `src/api.ts` -- typed client for the FastAPI endpoints.
-- `src/plotspec.ts` -- TypeScript mirror of `plotspec.py`'s PlotSpec contract.
-- `src/plotly-adapter.ts` -- the one place PlotSpec roles map to plotly traces.
+- `src/chart.ts` -- TypeScript mirror of `chart.py`'s Chart contract.
+- `src/plotly-adapter.ts` -- the one place Chart roles map to plotly traces.
 - `src/components/` -- shell (TopBar, Sidebar, LogTerminal), PlotView, tabs.
-- `src/fixtures/` -- canned PlotSpec used by the Welcome tab demo (no fit
+- `src/fixtures/` -- canned Chart used by the Welcome tab demo (no fit
   needed).
 - `src/assets/` -- brand logo + wordmark.

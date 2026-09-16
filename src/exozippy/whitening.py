@@ -47,6 +47,8 @@ import os
 
 import numpy as np
 
+from exozippy.components.parameter import raised_raw_cancellation_clip
+
 logger = logging.getLogger(__name__)
 
 # target = 0.5 nats (dlogp=0.5 <-> dchi2=1, the EXOFASTv2 convention); for a
@@ -358,15 +360,42 @@ def probe_scales(
     return map_lp, scales
 
 
-# A first-round multiplier at/beyond these marks was CLIPPED by the probe's
-# dynamic range -- the true scale was not resolved.  Escalation applies the
-# clipped value (already a huge improvement) and re-probes just those
+# The probe's reach upward is NOT _WHITEN_MAX_STEP.  parameter.py's
+# _RAW_CANCELLATION_CLIP puts a near-vertical wall in logp at |raw| = the
+# clip (past it the +0.5*raw**2 correction stops tracking pm.Normal's
+# -0.5*raw**2, so the drop reaches 0.5 nats within 0.5/clip of the wall).
+# The probe cannot see any real contour beyond it, so at the sampler's clip
+# of 1e4 an element whose preliminary scale was too tight by more than ~4
+# orders measured exactly 1e4 -- inside the old escalation window, hence no
+# re-probe and no warning, and the model stayed silently under-whitened
+# (review 1.2.1: the ob140939 divergence family).  The wall is a sampler
+# safety device, not a property of the posterior, so the probe RAISES it for
+# its own duration.
+#
+# How far may it honestly be raised?  The clip exists because the two
+# -0.5*raw**2 terms cancel only to float64 precision of the larger one, a
+# residual of ~0.5*raw**2 * 2**-52 nats.  That reaches the probe's own 0.5-nat
+# target near |raw| = sqrt(2**53) ~ 7e7, which is the hard ceiling.  At 1e6
+# the residual is 0.5*1e12*2.2e-16 ~ 1.1e-4 nats against a 0.5-nat target
+# (2e-4 relative, well inside _PROBE_RTOL = 5%), and it buys 6 orders of
+# magnitude of reach per round.  Do not raise it toward 7e7 to buy the last
+# order: the noise there is the measurement.
+_PROBE_RAW_CLIP = 1.0e6
+
+# A measured multiplier at/beyond these marks was CLIPPED by one of the
+# probe's three limits -- the step floor, the max step, or the wall above --
+# so the true scale was only bounded, not resolved.  Each mark is half the
+# corresponding limit, i.e. one bracketing step inside it.  Escalation applies
+# the clipped value (already a huge improvement) and re-probes just those
 # elements in the new raw coordinates, where the residual error is within
-# range again.  Two rounds cover preliminary scales off by ~28 orders of
-# magnitude, far beyond any physical case.
+# range again; it repeats until nothing is clipped, so the reach is not a
+# hardcoded number of orders of magnitude on either side.  Per round that is
+# ~14 orders down (_WHITEN_MIN_STEP) and ~6 up (_PROBE_RAW_CLIP, the binding
+# limit -- _WHITEN_MAX_STEP is far beyond it); the cap below only stops a
+# pathological non-converging case, and reaching it warns.
 _CLIP_LO = 2.0 * _WHITEN_MIN_STEP
-_CLIP_HI = 0.5 * _WHITEN_MAX_STEP
-_ESCALATION_ROUNDS = 2
+_CLIP_HI = 0.5 * min(_WHITEN_MAX_STEP, _PROBE_RAW_CLIP)
+_MAX_ESCALATION_ROUNDS = 8
 
 
 def _param_for_raw(lookup, key):
@@ -387,6 +416,23 @@ def _refetch_raw_start(system, model, fallback):
     if getter is None:
         return fallback
     return getter(model)
+
+
+def _clipped_elements(latest, applied):
+    """The (raw_name, flat_index) pairs whose latest multiplier was clipped.
+
+    Only elements that were actually rescaled (`applied`) can be re-probed;
+    a non-finite multiplier is a flat direction, which is a different report
+    and not something another round can resolve.
+    """
+    return [
+        (key, i)
+        for key, mult in latest.items()
+        for i in range(mult.size)
+        if applied[key][i]
+        and np.isfinite(mult.flat[i])
+        and not (_CLIP_LO < abs(mult.flat[i]) < _CLIP_HI)
+    ]
 
 
 def _probe_selected(raw_start, logp_fn, elems):
@@ -423,13 +469,20 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
     bounds, whether its width came from a sigma or from init_scale -- are
     never rescaled.
 
-    Elements whose first-round multiplier hit the probe's dynamic-range
-    limits (a preliminary scale off by more than ~9-14 orders of magnitude,
-    e.g. a period constrained to nanoseconds against day-scale bounds) are
-    escalated: the clipped correction is applied, then just those elements
-    are re-probed in the new raw coordinates, where the residual error is
-    resolvable.  Anything still clipped after the escalation rounds gets a
-    warning naming the element (fix its defaults.yaml init_scale).
+    The whole measurement runs with parameter.py's raw-cancellation clip
+    raised to _PROBE_RAW_CLIP: at its sampling value that wall, not the
+    posterior, is what a badly-too-tight element's 0.5-nat contour would be
+    (see _PROBE_RAW_CLIP).  It is restored before this returns.
+
+    Elements whose measured multiplier hit the probe's dynamic-range limits
+    (a preliminary scale off by more than ~6 orders of magnitude too tight or
+    ~14 too loose, e.g. a period constrained to nanoseconds against day-scale
+    bounds) are escalated: the clipped correction is applied, then just those
+    elements are re-probed in the new raw coordinates, where the residual
+    error is resolvable.  That repeats until nothing is clipped, so the reach
+    is a product of rounds rather than a fixed number of orders of magnitude;
+    an element still clipped at _MAX_ESCALATION_ROUNDS gets a warning naming
+    it (fix its defaults.yaml init_scale).
 
     Returns a report dict:
       map_lp       -- logp at the start
@@ -448,6 +501,18 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
     if logp_fn is None:
         logp_fn = model.compile_logp()
 
+    # The clip is raised for the WHOLE pass, not just around each probe call:
+    # the escalation loop below alternates probing with set_whitening, and a
+    # measurement taken under a different wall than the one it is compared
+    # against is exactly the confusion this fixes.  Restored on exit, by the
+    # context manager, on the error path too -- sampling must never see the
+    # raised value.
+    with raised_raw_cancellation_clip(_PROBE_RAW_CLIP):
+        return _measure_and_apply(system, model, raw_start, logp_fn)
+
+
+def _measure_and_apply(system, model, raw_start, logp_fn):
+    """apply_measured_whitening's body, under the raised probe-time clip."""
     n_elements = sum(v.size for v in raw_start.values())
     logger.debug(
         f"Whitening: probing {n_elements} raw element(s) for their "
@@ -524,23 +589,27 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
     # around the same physical point.
     raw_start = _refetch_raw_start(system, model, raw_start)
 
-    # Escalation: re-probe elements whose multiplier was clipped by the
-    # probe's dynamic range.
-    for round_i in range(_ESCALATION_ROUNDS):
-        clipped = [
-            (key, i)
-            for key, mult in multipliers.items()
-            for i in range(mult.size)
-            if applied[key][i]
-            and np.isfinite(mult.flat[i])
-            and not (_CLIP_LO < abs(mult.flat[i]) < _CLIP_HI)
-        ]
-        if not clipped:
+    # Escalation: re-probe elements whose LATEST measured multiplier was
+    # clipped by one of the probe's limits, until none is -- or the round cap
+    # is reached.  Keyed on the latest measurement, never on the cumulative
+    # product: after a successful escalation the CUMULATIVE is outside the
+    # window by construction (that is what "the preliminary scale was off by
+    # 14 orders" means), so testing it re-probed resolved elements forever
+    # and then declared them "still unresolved" (review 1.2.2).
+    latest = {
+        key: np.asarray(m, dtype=float).copy()
+        for key, m in multipliers.items()
+    }
+    round_i = 0
+    while True:
+        clipped = _clipped_elements(latest, applied)
+        if not clipped or round_i >= _MAX_ESCALATION_ROUNDS:
             break
+        round_i += 1
         logger.warning(
             f"Whitening: {len(clipped)} element(s) hit the probe's dynamic "
-            f"range (preliminary scale off by >9 orders of magnitude); "
-            f"escalation round {round_i + 1}: "
+            f"range (preliminary scale off by >6 orders of magnitude too "
+            f"tight, or >14 too loose); escalation round {round_i}: "
             + "; ".join(f"{k}[{i}]" for k, i in clipped)
         )
         res = _probe_selected(raw_start, logp_fn, clipped)
@@ -552,6 +621,9 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
             n = multipliers[key].size
             mult2 = np.ones(n)
             for i, m in elems.items():
+                # A flat (NaN) re-probe leaves the cumulative alone and drops
+                # the element from the loop: nothing more can be measured.
+                latest[key].flat[i] = m
                 if np.isfinite(m) and m > 0:
                     mult2[i] = m
                     multipliers[key].flat[i] *= m
@@ -559,16 +631,14 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
         raw_start = _refetch_raw_start(system, model, raw_start)
 
     still = [
-        f"{key}[{i}]: cumulative={multipliers[key].flat[i]:.3g}"
-        for key, mult in multipliers.items()
-        for i in range(mult.size)
-        if applied[key][i]
-        and np.isfinite(mult.flat[i])
-        and not (_CLIP_LO < abs(mult.flat[i]) < _CLIP_HI)
+        f"{key}[{i}]: last measured={latest[key].flat[i]:.3g}, "
+        f"cumulative={multipliers[key].flat[i]:.3g}"
+        for key, i in _clipped_elements(latest, applied)
     ]
     if still:
         logger.warning(
-            "Whitening: scale still unresolved after escalation for: "
+            f"Whitening: scale still unresolved after {round_i} escalation "
+            f"round(s) for: "
             + "; ".join(still)
             + " -- set a closer init_scale in the component's defaults.yaml."
         )
@@ -697,19 +767,50 @@ def measure_and_whiten(system, model, raw_start=None, logp_fn=None):
                 m1[keep] = m1[keep] * m2[keep]
         report["raw_scales"] = report2["raw_scales"]
         report["map_lp"] = report2["map_lp"]
+        # ...and the diagnostics, which describe the SURFACE and so are the
+        # part most affected by the barrier update (review 3.2.1).  Keeping
+        # round 1's flat/linear/gradient lists here showed the user the
+        # pre-barrier surface in exactly the case where a soft bound is
+        # active at the start, i.e. exactly when they differ.
+        report["probe_diagnostics"] = report2["probe_diagnostics"]
         measure_barrier_scales(system, model, raw_start)
 
     return report
 
 
+# Schema version of <prefix>_whitening.json.
+#
+# 1 -- scales only (scale_logits, gaussian_scales, barrier_scales).  Written
+#      by code in which the logit ANCHOR could not move: set_whitening left
+#      logit_q_inits exactly where build_pymc put it, so the anchor was
+#      derivable from a rebuilt model and did not need storing.
+# 2 -- adds `logit_q_inits`, the anchor, because it CAN now move:
+#      System.recenter_whitening_anchor folds the polished start into it
+#      before the probe (review 4.3.1).  A raw draw decodes through
+#      `lower + span*sigmoid(anchor + scale*raw)`, so a moving anchor that
+#      was not persisted would make a reused trace decode against the wrong
+#      center -- silently, since every number involved stays plausible.
+#
+# Version 1 files stay READABLE (their traces are real and their anchors are
+# reproducible by construction) and are never written again.  The validator
+# is what enforces that a version-2 file may not omit the anchor.
+_WHITENING_SCHEMA_VERSION = 2
+_WHITENING_READABLE_VERSIONS = (1, 2)
+
+
 def save_whitening(system, path, map_lp=None):
     """Persist the ABSOLUTE whitening + barrier state next to the trace.
 
-    The absolute logit-space scales (not multipliers) are stored so a reload
-    reproduces the sampled trace's raw coordinates exactly, independent of
-    the rebuilt model's preliminary scales.
+    The absolute logit-space scales and the logit-space ANCHOR (not
+    multipliers, not displacements) are stored so a reload reproduces the
+    sampled trace's raw coordinates exactly, independent of the rebuilt
+    model's preliminary scales and of where the rebuild's own anchor sits.
     """
-    data = {"version": 1, "map_lp": map_lp, "params": {}}
+    data = {
+        "version": _WHITENING_SCHEMA_VERSION,
+        "map_lp": map_lp,
+        "params": {},
+    }
     for p in system.get_all_parameters():
         exporter = getattr(p, "export_whitening", None)
         state = exporter() if exporter is not None else None
@@ -720,16 +821,27 @@ def save_whitening(system, path, map_lp=None):
     logger.debug(f"Whitening: state saved to {path}")
 
 
-def _validate_whitening_state(system, saved, lookup):
+def _validate_whitening_state(system, saved, lookup, version):
     """Check a persisted params mapping against the current build.
 
     Returns None when it applies cleanly, or a human-readable reason string.
     Every vector the apply step will touch is checked here -- both whitening
-    vectors AND the barrier vector -- so the apply step below cannot fail
-    part way through and leave the model in a half-restored state (the two
-    are different measures: rescaling the whitening is posterior-preserving,
-    but the barrier IS a posterior term, so a model carrying one file's
-    barriers and another's whitening has a logp that was never sampled).
+    vectors, the ANCHOR, AND the barrier vector -- so the apply step below
+    cannot fail part way through and leave the model in a half-restored
+    state (they are different measures: rescaling the whitening is
+    posterior-preserving, but the barrier IS a posterior term, so a model
+    carrying one file's barriers and another's whitening has a logp that was
+    never sampled).
+
+    ``version`` decides only one thing: whether the ANCHOR
+    (``logit_q_inits``) may be absent.  In a version-1 file it MUST be --
+    the code that wrote it could not move the anchor, so the rebuilt model's
+    own anchor is the one its trace was sampled under and there was nothing
+    to record.  In a version-2 file it must be PRESENT and the right length,
+    because a version-2 writer that omitted it would be describing a
+    coordinate system it did not record the center of.  Both directions are
+    checked: the absent-in-v2 case is the silent one, and the
+    present-in-v1 case means the file is not what its version claims.
     """
     # Coverage: every parameter that carries restorable state must appear in
     # the file.  Barrier-ONLY parameters (derived ones: no _whiten_state, a
@@ -761,10 +873,18 @@ def _validate_whitening_state(system, saved, lookup):
             # them together, and checking only scale_logits let a bad
             # gaussian_scales abort mid-loop after earlier parameters had
             # already been written.
-            for key, sv in (
+            required = [
                 ("scale_logits", ws["sv_scale_logits"]),
                 ("gaussian_scales", ws["sv_gaussian_scales"]),
-            ):
+            ]
+            if version >= 2:
+                required.append(("logit_q_inits", ws["sv_logit_q_inits"]))
+            elif "logit_q_inits" in state:
+                return (
+                    f"'{label}' carries an anchor ('logit_q_inits') that a "
+                    f"version-1 file cannot have written"
+                )
+            for key, sv in required:
                 if key not in state:
                     return f"'{label}' is missing '{key}'"
                 if len(state[key]) != np.asarray(sv.get_value()).size:
@@ -796,18 +916,25 @@ def _apply_whitening_file(system, path):
 
     This is the shared body of :func:`load_whitening` (fresh path: warn and
     re-measure) and :func:`restore_whitening_for_trace` (reuse path: raise).
+
+    A version-1 file (scales, no anchor) still applies: it was written by
+    code whose anchor could not move, so the rebuilt model's build-time
+    anchor is the one its trace was sampled under.  Nothing is guessed --
+    the absent key is a property of that schema, enforced in both directions
+    by the validator.
     """
     try:
         with open(path) as f:
             data = json.load(f)
     except (OSError, ValueError) as e:
         return f"{path} could not be read ({e})"
-    if data.get("version") != 1:
-        return f"{path} has an unknown version ({data.get('version')!r})"
+    version = data.get("version")
+    if version not in _WHITENING_READABLE_VERSIONS:
+        return f"{path} has an unknown version ({version!r})"
     saved = data.get("params", {})
     lookup = {p.label: p for p in system.get_all_parameters()}
 
-    reason = _validate_whitening_state(system, saved, lookup)
+    reason = _validate_whitening_state(system, saved, lookup, version)
     if reason is not None:
         return reason
 
@@ -819,7 +946,10 @@ def _apply_whitening_file(system, path):
                 f"applying persisted state for '{label}' failed AFTER "
                 f"validation; the build may be partially restored"
             )
-    logger.debug(f"Whitening: state restored from {path} (no probe needed).")
+    logger.debug(
+        f"Whitening: state restored from {path} (schema version {version}, "
+        f"no probe needed)."
+    )
     return None
 
 

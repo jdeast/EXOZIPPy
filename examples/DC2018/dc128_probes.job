@@ -1,0 +1,34 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 16
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc18probe
+#$ -o dc18probe.$JOB_ID.log
+#
+#   qsub dc128_probes.job
+# Two cheap model-build probes, one process each, both unblocked:
+#   dc128_severed_startlogp.py      8.6.7's "does the wrong solution WIN?"
+#   dc128_whitening_portability.py  2.4.15's root cause
+# 16 slots: these are single model builds, not fits.  Run SEQUENTIALLY and
+# with `;` not `&&` -- the second must run even if the first raises, which is
+# exactly what went wrong when the start-logp check shared a process with the
+# hot-chain extraction and never executed.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_$JOB_ID"
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+echo "sha: $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)"
+echo "############ 8.6.7 start-logp ############"
+python -u dc128_severed_startlogp.py
+echo "############ 2.4.15 whitening portability ############"
+python -u dc128_whitening_portability.py

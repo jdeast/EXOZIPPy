@@ -1,0 +1,9 @@
+Unloading tools/local-user <S>
+  ERROR: Unload of sticky module skipped
+
+Unloading uge/8.8.1 <S>
+  ERROR: Unload of sticky module skipped
+Parameter 'star.Host.teff': your sigma is DROPPED -- this element is not a parameter of its instance's parameterization, so it is held at a bookkeeping value, given no prior, and reported nowhere. Put the constraint on the quantity this instance actually samples, or change the instance's parameterization if you meant to fit it.
+Parameter 'star.Host.feh': your sigma is DROPPED -- this element is not a parameter of its instance's parameterization, so it is held at a bookkeeping value, given no prior, and reported nowhere. Put the constraint on the quantity this instance actually samples, or change the instance's parameterization if you meant to fit it.
+Parameter 'star.mass': sigma=0 has no effect on a derived parameter To hold it constant, you must fix the corresponding sampled parameter(s).
+Initializing NUTS using jitter+adapt_diag...

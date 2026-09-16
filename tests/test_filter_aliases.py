@@ -180,7 +180,7 @@ def _transit_system(lc_file, filter_name, build=False):
     system.prepare()
     if build:
         # Parameter objects (and so their resolved priors) are materialized
-        # at stage 5, inside build_model().
+        # at stage 6, inside build_model().
         system.build_model()
     return system
 

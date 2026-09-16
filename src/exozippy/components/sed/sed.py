@@ -1,6 +1,8 @@
-import ast
 import importlib
+import importlib.util
 import logging
+import os
+import sys
 from pathlib import Path
 
 import astropy.units as u
@@ -14,9 +16,10 @@ import yaml
 from matplotlib.legend_handler import HandlerTuple
 from matplotlib.lines import Line2D
 
-from exozippy.components.component import Component
+from exozippy.components.component import Component, resolve_star_ref
 from exozippy.components.parameter import Parameter
 from exozippy.constants import ANG_TO_MICRON_CONST, LOGG_CONST
+from exozippy.outputs.prose import get_collector
 
 from ..star.physics import calc_logg_from_logmass, calc_luminosity
 
@@ -38,10 +41,84 @@ from .physics import *
 
 logger = logging.getLogger(__name__)
 
-try:
-    current_dir = Path(__file__).parent
-except NameError:
-    current_dir = Path.cwd()
+
+def load_model_plot_module(plot_path: Path, model: str):
+    """Import a model family's ``BCs/plot.py``, wherever it lives.
+
+    ``importlib.import_module("exozippy.models.<model>.BCs.plot")`` can only
+    ever resolve inside the installed package, so a configured
+    ``model_root:`` pointing at a user directory could not be reached at all
+    -- the fixed package namespace either raised or, worse, imported the
+    packaged model of the same name (review 1.9.5).
+
+    A path inside the package still goes through the ordinary dotted
+    import, so its module identity matches a normal
+    ``from exozippy.models... import`` elsewhere.  Anything else is loaded
+    from its file by spec and registered in ``sys.modules`` under a
+    path-derived name, so a second call reuses it instead of re-executing
+    the module.
+    """
+    plot_path = Path(plot_path).resolve()
+    if not plot_path.is_file():
+        raise FileNotFoundError(
+            f"No plot module for SED model '{model}' at {plot_path}. A model "
+            "family directory must carry BCs/plot.py (see "
+            "src/exozippy/models/NextGen/BCs/plot.py)."
+        )
+
+    try:
+        rel = plot_path.relative_to(Path(DEFAULT_MODEL_ROOT).resolve())
+    except ValueError:
+        rel = None
+    if rel is not None:
+        return importlib.import_module(
+            "exozippy.models." + ".".join(rel.with_suffix("").parts)
+        )
+
+    mod_name = "exozippy._model_plot_" + str(plot_path).replace(
+        os.sep, "_"
+    ).replace(".", "_")
+    cached = sys.modules.get(mod_name)
+    if cached is not None:
+        return cached
+    spec = importlib.util.spec_from_file_location(mod_name, plot_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[mod_name]
+        raise
+    return module
+
+
+def plot_class_from(module, plot_path):
+    """The model's Plot subclass in ``module``.
+
+    Selected by SUBCLASSING, not by being the first ``class`` statement in
+    the file, which is what an ast parse of the source used to pick: a
+    helper class defined above it would silently have been instantiated as
+    the plotter (review 1.9.5).  Zero or several candidates is a real
+    ambiguity and raises rather than picking one.
+    """
+    from .plot import Plot
+
+    candidates = [
+        obj
+        for obj in vars(module).values()
+        if isinstance(obj, type)
+        and issubclass(obj, Plot)
+        and obj is not Plot
+        and obj.__module__ == module.__name__
+    ]
+    if len(candidates) != 1:
+        raise TypeError(
+            f"{plot_path} defines {len(candidates)} subclass(es) of "
+            f"components.sed.plot.Plot ({[c.__name__ for c in candidates]}); "
+            "exactly one is required so the SED figure's model plotter is "
+            "unambiguous."
+        )
+    return candidates[0]
 
 
 class SED(Component):
@@ -123,25 +200,27 @@ class SED(Component):
         # the plot compiler, and the cross-component predict_* API.
         self._m_pred_matrix = None
 
-        # Grid-axis caches, filled by _inject_grid_bounds below.
+        # Grid-axis caches, filled by _inject_grid_bounds below, which
+        # puts ALL FOUR of the BC grid's axes onto star Parameters
+        # through the override channel: teffsed, feh and av are sampled,
+        # so their grid extents are hard bounds the logit transform
+        # cannot leave, and loggsed is derived, so its grid extent is a
+        # soft barrier (steepness measured by
+        # whitening.measure_barrier_scales; pinnable with bound_scale).
         #
-        # NOTHING READS THEM YET. The (logg_min, logg_max) range they
-        # carry was meant to feed a soft potential on the inline loggsed
-        # expression, and that potential was never written:
-        # build_likelihood adds only the teffsed and fbolsed floor
-        # priors. The gap it was meant to close is real. teffsed, feh
-        # and av are held inside the BC grid by _inject_grid_bounds
-        # below, but loggsed is not a named star Parameter -- it is
-        # reconstructed inline from (star.logmass, star.radiussed) in
-        # _predicted_appmag_node -- so there is nothing for the override
-        # channel to bound, and bounding its two inputs separately does
-        # not bound their combination. A draw whose loggsed leaves the
-        # grid (NextGen: 0.0 to 5.0 dex) is therefore linearly
-        # EXTRAPOLATED off the edge cell rather than penalized:
-        # RegularGridInterpolator is built below with fill_value=None,
-        # so it computes out_of_bounds and then discards it. Keep these
-        # caches; add the potential (or a potentials.soft_*_bound on
-        # loggsed) when someone gets to it.
+        # The loggsed half is why star.loggsed exists as a Parameter at
+        # all. It used to be reconstructed inline from (star.logmass,
+        # star.radiussed) inside _predicted_appmag_node, so there was
+        # nothing for the override channel to bound -- and bounding its
+        # two inputs separately does NOT bound their combination, which
+        # is what loggsed is. A draw whose loggsed left the grid
+        # (NextGen: 0.0 to 5.0 dex) was therefore linearly EXTRAPOLATED
+        # off the edge cell rather than penalized, because
+        # RegularGridInterpolator is built below with fill_value=None
+        # and so computes out_of_bounds and then discards it. The
+        # extrapolation is still what the interpolator returns -- the
+        # barrier supplies the restoring force that keeps the sampler
+        # from living out there, which a NaN or a -inf wall could not.
         self.grid_axes = [None]
         self._inject_grid_bounds()
 
@@ -185,6 +264,18 @@ class SED(Component):
     #   The third line is what the old `setdefault` could never do -- it saw
     #   the user's key, left it alone, and never applied the grid bound at
     #   all -- so this comment was wrong from the day it was written.
+    #
+    # Why loggsed is here too, and why it behaves differently:
+    #   teffsed, feh and av are SAMPLED, so two finite bounds put them on
+    #   the logit transform and the grid extent is their exact support --
+    #   they cannot leave the grid at all.  loggsed is DERIVED
+    #   (calc_logg_from_logmass on logmass and radiussed), so the same
+    #   bound becomes a soft barrier: ~0 well inside the grid, growing
+    #   linearly outside, with the steepness measured at startup
+    #   (whitening.measure_barrier_scales) rather than hand-tuned.  That
+    #   is the right shape for it -- the interpolator does not go NaN off
+    #   its edge, it extrapolates off the edge cell, so what was missing
+    #   was never a wall but a restoring force.
     # ------------------------------------------------------------------
     def _inject_grid_bounds(self):
 
@@ -210,6 +301,8 @@ class SED(Component):
 
         teff_lo = float(axes["teff_pts"].min())
         teff_hi = float(axes["teff_pts"].max())
+        logg_lo = float(axes["logg_pts"].min())
+        logg_hi = float(axes["logg_pts"].max())
         feh_lo = float(axes["feh_pts"].min())
         feh_hi = float(axes["feh_pts"].max())
         av_lo = float(axes["av_pts"].min())
@@ -217,6 +310,7 @@ class SED(Component):
 
         overrides = {
             "star.teffsed": {"lower": teff_lo, "upper": teff_hi},
+            "star.loggsed": {"lower": logg_lo, "upper": logg_hi},
             "star.feh": {"lower": feh_lo, "upper": feh_hi},
             "star.av": {"lower": av_lo, "upper": av_hi},
         }
@@ -295,7 +389,7 @@ class SED(Component):
         ]
 
     # ------------------------------------------------------------------
-    # 1) register_parameters — declare the manifest for stage 2.
+    # 1) register_parameters — declare the manifest for stage 3.
     # ------------------------------------------------------------------
     def register_parameters(self, system):
         # in future could foresee doing per facility error scaling
@@ -324,31 +418,13 @@ class SED(Component):
 
     @staticmethod
     def _resolve_star_ref(ref, star_names):
-        """Translate a photType star reference (name or index) to an index."""
-        n = len(star_names)
-        if isinstance(ref, bool):
-            raise ValueError(f"Invalid star reference {ref!r} in photType.")
-        if isinstance(ref, (int, np.integer)):
-            idx = int(ref)
-        elif isinstance(ref, str):
-            if ref in star_names:
-                idx = star_names.index(ref)
-            else:
-                try:
-                    idx = int(ref)
-                except ValueError:
-                    raise ValueError(
-                        f"Unknown star reference '{ref}' in photType. "
-                        f"Known stars: {star_names} (or indices 0..{n - 1})."
-                    )
-        else:
-            raise ValueError(f"Invalid star reference {ref!r} in photType.")
-        if not 0 <= idx < n:
-            raise ValueError(
-                f"Star index {idx} in photType out of range; the system "
-                f"defines {n} star(s): {star_names}."
-            )
-        return idx
+        """A photType star reference (name, path or index) as an index.
+
+        The shared translator, so `photType` accepts exactly what every
+        other star reference does -- including the `star.<name>` path
+        spelling, which this local copy rejected.
+        """
+        return resolve_star_ref(ref, star_names, "photType")
 
     @staticmethod
     def _combo_label(pos, neg, star_names):
@@ -443,16 +519,36 @@ class SED(Component):
         """
         from .make_bc import ensure_model_data
 
-        ensure_model_data(self.sedmodel, DEFAULT_MODEL_ROOT)
+        # self.model_root, NOT DEFAULT_MODEL_ROOT: everything else in this
+        # component reads the model under the configured root, so fetching
+        # into the package root instead left a `model_root:` user with the
+        # spectra in a directory nothing would look in -- 259 MB downloaded
+        # twice, once uselessly (review 1.9.5).
+        ensure_model_data(self.sedmodel, self.model_root)
 
     def _collect_band_filters(self):
         """
         Gather filters referenced by Band blocks so cross-component flux
         predictions (mulensing f_source, transit deblending, astrometry
-        fluxfrac) share this SED's BC grid. Band filters whose BC tables
-        are not available are skipped with a warning (they can be
-        generated with the BC table machinery) rather than failing the
-        whole SED.
+        fluxfrac) share this SED's BC grid.
+
+        A band filter whose facility has no BC tables yet is NOT skipped:
+        it is passed to build_bc_grid, which auto-generates the tables from
+        the model spectra -- exactly as it already does for a filter listed
+        in the .sed file, and for a missing column within a facility that
+        does exist (review 2.9.6).  Skipping it instead silently dropped
+        the SED flux constraint that band exists to carry: the mulensing
+        zeropoint tie, the transit dilution, the astrometry fluxfrac.  The
+        cost decision that comes with letting it through is that a band
+        filter whose tables genuinely CANNOT be built now fails the fit
+        rather than quietly weakening it -- again as a .sed filter does.
+
+        The one case still skipped is a filter label with no SVO identity
+        at all -- neither in the alias table nor SVO-shaped
+        ("Facility/Instrument.Band"), e.g. gj1214's "MIRILRS".  There is
+        nothing for the generator to synthesize a bandpass FROM, so the
+        skip is not a deferral of work; the warning says so instead of
+        pointing at machinery that cannot help.
 
         Returns a list of filter names to append to the BC grid build,
         deduplicated against the .sed file's own filters.
@@ -479,12 +575,23 @@ class SED(Component):
                     self.model_root, self.sedmodel, facility
                 )
             except (FileNotFoundError, NotImplementedError) as e:
-                logger.warning(
-                    f"SED: no BC tables for band filter '{name}' "
-                    f"(facility '{facility}'): {e} Flux predictions in this "
-                    f"band will be unavailable."
+                if "/" not in svo:
+                    logger.warning(
+                        f"SED: no BC tables for band filter '{name}' "
+                        f"(facility '{facility}'): {e} That label resolves "
+                        f"to no SVO filter id, so there is no bandpass to "
+                        f"generate a BC table from -- give the band a "
+                        f"'Facility/Instrument.Band' filter to have one "
+                        f"built. Flux predictions in this band will be "
+                        f"unavailable."
+                    )
+                    continue
+                logger.info(
+                    f"SED: band filter '{name}' (facility '{facility}') has "
+                    f"no BC tables yet; they will be generated from the "
+                    f"{self.sedmodel} spectra, as for a filter listed in "
+                    f"the .sed file."
                 )
-                continue
             known_mist.add(mist)
             extra.append(name)
         return extra
@@ -612,16 +719,22 @@ class SED(Component):
     # ------------------------------------------------------------------
     # Star Parameters the BC forward model below reads directly.  They are
     # not declared as manifest deps of anything on this component, so a
-    # cross-component caller that runs at stage 5 (mulensinstrument's derived
+    # cross-component caller that runs at stage 6 (mulensinstrument's derived
     # zeropoint) can reach here before the topological order has built them.
     _STAR_NODE_DEPS = (
         "teffsed",
         "radiussed",
         "logmass",
+        "loggsed",
         "feh",
         "av",
         "distance",
     )
+
+    # Built at STAGE 6 (the mulensing zeropoint expression asks for it while
+    # parameters are still being materialized), so it cannot be dropped at
+    # the top of stage 7 the way transit's dilution node is.
+    per_build_caches = ("_m_pred_matrix",)
 
     def _ensure_star_nodes(self, system):
         """Materialize the star Parameters ``_predicted_appmag_node`` reads.
@@ -629,7 +742,7 @@ class SED(Component):
         This is the same lazy build ``Component.add_parameter`` performs for
         a declared cross-component dep ("star.mass[lens_map]"); these are
         read through the predict_* API instead of being declared, so the
-        build has to happen here.  A no-op at stage 6, where every manifest
+        build has to happen here.  A no-op at stage 7, where every manifest
         parameter already exists.
         """
         star = getattr(system, "star", None)
@@ -637,7 +750,11 @@ class SED(Component):
             return
         model = pm.modelcontext(None)
         for name in self._STAR_NODE_DEPS:
-            if not isinstance(getattr(star, name, None), Parameter):
+            # The shared build-time predicate, not a local isinstance: a
+            # Parameter left over from an EARLIER model must be rebuilt, or
+            # the SED forward model consumes the previous build's nodes
+            # (review 3.14.12).
+            if not Component._parameter_is_current(star, name, model):
                 star.add_parameter(model, name, system)
 
     def _predicted_appmag_node(self, system):
@@ -649,13 +766,17 @@ class SED(Component):
         star = system.star
         teffsed = star.teffsed.value  # K,        (nstars,)
         radiussed = star.radiussed.value  # R_sun,    (nstars,)
-        logmass = star.logmass.value  # dex(M_sun)
         feh = star.feh.value  # dex
         av = star.av.value  # mag
         distance = star.distance.value  # pc
 
-        # Reconstruct loggsed from logmass + radiussed (NOT radius).
-        loggsed = calc_logg_from_logmass(logmass, radiussed)
+        # loggsed is derived from logmass + radiussed (NOT radius) by the
+        # star component.  Read the Parameter rather than recomputing the
+        # expression here: the grid's logg extent is a soft bound ON THAT
+        # PARAMETER (_inject_grid_bounds), so the quantity the barrier
+        # restrains and the quantity the interpolator is handed have to be
+        # the same node.
+        loggsed = star.loggsed.value  # dex(cm/s2)
 
         # RegularGridInterpolator.evaluate expects shape (ntest, ndim).
         coords = pt.stack([teffsed, loggsed, feh, av], axis=-1)  # (nstars, 4)
@@ -752,6 +873,20 @@ class SED(Component):
     #    floor potentials tying the SED-side parameters to the primary
     #    stellar parameters.
     # ------------------------------------------------------------------
+    @staticmethod
+    def _fractional_floor_logp(value, sed_value, floor):
+        """Per-element Gaussian logp with sigma = floor * value, NORMALIZED.
+
+        Same shape as ``relations._add_penalty(..., normalize=True)``, and
+        normalized for the same reason: sigma tracks a sampled quantity, so
+        -log(sigma) is a function of the parameters and not a constant.
+        The 2pi is dropped, exactly as it is there.
+        """
+        sigma = value * floor
+        return -0.5 * pt.sqr((value - sed_value) / sigma) - pt.log(
+            pt.abs(sigma)
+        )
+
     def build_likelihood(self, model, system):
         star = system.star
 
@@ -775,18 +910,172 @@ class SED(Component):
                 observed=mag_data,
             )
 
-        # this links the two with a user settable error floor
+        # These link the SED-derived teff/fbol to the star's own, with a user
+        # settable FRACTIONAL error floor -- so sigma is a function of a
+        # sampled parameter, not a constant, and the -log(sigma) term is kept.
+        #
+        # That is the house convention and the reason for it is statistical,
+        # not cosmetic (components/relations.py `_add_penalty`, and mann vs
+        # torres): with sigma proportional to x, dropping the normalization
+        # leaves a -d/dx log(x) = -1/x tilt, i.e. exactly 1 nat of free
+        # likelihood per e-fold of x, pushing teff and fbol up for no
+        # physical reason. torres drops the term only because ITS sigma is a
+        # constant in dex, where it is an additive constant.
         self.teffsed_floor_prior = pm.Potential(
             "sed.teffsed_floor_prior",
             pt.sum(
-                -0.5 * ((teff - teffsed) / (teff * self.teffsedfloor)) ** 2
+                self._fractional_floor_logp(teff, teffsed, self.teffsedfloor)
             ),
         )
         self.fbolsed_floor_prior = pm.Potential(
             "sed.fbolsed_floor_prior",
             pt.sum(
-                -0.5 * ((fbol - fbolsed) / (fbol * self.fbolsedfloor)) ** 2
+                self._fractional_floor_logp(fbol, fbolsed, self.fbolsedfloor)
             ),
+        )
+
+        self._declare_grid_support(system)
+
+    # ------------------------------------------------------------------
+    # The BC grid's support, as the reports see it.
+    #
+    # Three of the four grid axes are sampled star Parameters whose grid
+    # extent IS their support (the logit transform), so "U(lo, hi)" is a
+    # true statement about them and nothing needs declaring.  loggsed is
+    # derived, so its grid extent is a soft barrier that
+    # Parameter.build_pymc adds generically -- and _own_prior_str reports
+    # a derived parameter carrying two finite bounds as "U(lo, hi)",
+    # which is exactly the prior a barrier is NOT.  The barrier is added
+    # by parameter.py rather than here, but the reason it exists is this
+    # component's, so this component declares it (see "Reporting
+    # component-added priors" in src/exozippy/components/parameter.md).
+    #
+    # The same pass is where an off-grid START is reported.  It has to be
+    # a warning and not a raise: the interpolator extrapolates rather
+    # than failing there, so such a fit HAS been running -- refusing it
+    # now would break configs that produced published numbers, and the
+    # barrier will pull the chain back on-grid by itself.  The message
+    # names the star, the value, the grid and the two real remedies,
+    # because "your star is off the grid" is a statement about the model
+    # grid's coverage, not about a typo in the params file.
+    # ------------------------------------------------------------------
+    def _declare_grid_support(self, system):
+        from ...outputs.texutils import latex_escape
+
+        axes = self.grid_axes
+        if not isinstance(axes, dict) or "logg_pts" not in axes:
+            return
+        star = getattr(system, "star", None)
+        loggsed = getattr(star, "loggsed", None)
+        if not isinstance(loggsed, Parameter):
+            return
+
+        lo = float(axes["logg_pts"].min())
+        hi = float(axes["logg_pts"].max())
+
+        loggsed.add_prior_contribution(
+            latex=(
+                rf"soft bound to the {latex_escape(self.sedmodel)} "
+                rf"bolometric-correction grid"
+            ),
+            text=f"soft bound to the {self.sedmodel} BC grid",
+            supersedes_bounds=True,
+            # NOT the default "normalized on": this is a barrier at the
+            # interval's edges, not a density over it.
+            support_phrase="whose logg support is",
+        )
+        get_collector(system).add(
+            r"The bolometric corrections are interpolated on a regular "
+            r"grid in effective temperature, surface gravity, metallicity "
+            r"and extinction; each star is held inside that grid's "
+            r"support, the first, third and fourth as hard bounds on the "
+            r"sampled parameters and the surface gravity -- which is "
+            r"derived from the mass and radius, so that bounding its "
+            r"inputs would not bound it -- as a soft barrier at the grid "
+            r"edge.",
+            section="priors",
+            key=f"{self.prefix}.bc_grid_support",
+            rank=20,
+        )
+
+        # loggsed is DERIVED, so it has no initval of its own -- its start
+        # is its expression evaluated at its inputs' starts.  Evaluate the
+        # registered physics function on those (in internal units, which
+        # for both inputs are their user units) rather than open-coding
+        # LOGG_CONST + logmass - 2*log10(radiussed) a second time.
+        try:
+            start = np.atleast_1d(
+                calc_logg_from_logmass(
+                    np.asarray(star.logmass.initval, dtype=float),
+                    np.asarray(star.radiussed.initval, dtype=float),
+                ).eval()
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"SED: could not evaluate the loggsed start: {exc}")
+            return
+        names = list(getattr(star, "names", []) or [])
+        scales = np.atleast_1d(
+            np.asarray(
+                loggsed.bound_scale
+                if loggsed.bound_scale is not None
+                else np.nan,
+                dtype=float,
+            )
+        )
+        for i, val in enumerate(start):
+            if not np.isfinite(val) or lo <= val <= hi:
+                continue
+            label = names[i] if i < len(names) else str(i)
+            scale = scales[i] if i < scales.size else scales[0]
+            logger.warning(
+                f"SED: star '{label}' starts at loggsed = {val:.4f} "
+                f"dex(cm/s2), OUTSIDE the {self.sedmodel} bolometric-"
+                f"correction grid's logg axis [{lo:g}, {hi:g}]. The "
+                f"interpolator EXTRAPOLATES off its edge cell there, so "
+                f"this star's bolometric corrections are NOT measured "
+                f"quantities -- they are the edge cell's slope carried "
+                f"outward. " + self._barrier_advice(label, val, lo, hi, scale)
+            )
+
+    # The second half of the off-grid warning: what the barrier will do
+    # about it.  Split out because the two cases say opposite things and
+    # BOTH have to be true statements -- a message that still described a
+    # measured, effectively-clamping barrier after the user had softened
+    # it with bound_scale would be exactly the kind of stale advice that
+    # teaches people to stop reading warnings.  Note the notice itself is
+    # NOT conditional on the barrier: it keys on the VALUE being off the
+    # grid, so softening the barrier can never silence it.
+    @staticmethod
+    def _barrier_advice(label, val, lo, hi, scale):
+        edge = hi if val > hi else lo
+        if np.isfinite(scale) and scale > 0:
+            # potentials.soft_*_bound: steepness = 4.4 / (scale * softness),
+            # softness = 0.01, and the penalty is log(sigmoid(arg)).
+            steep = 4.4 / (scale * 0.01)
+            arg = -abs(val - edge) * steep
+            penalty = arg - np.log1p(np.exp(arg)) if arg < 0 else -np.log(2.0)
+            return (
+                f"The soft bound on star.{label}.loggsed has been "
+                f"DELIBERATELY WIDENED (bound_scale = {scale:g} dex -> "
+                f"transition width {0.01 * scale:g} dex, slope {steep:g} "
+                f"nats per dex), so this start is admitted at a cost of "
+                f"{-penalty:.2f} nats rather than pulled back to the edge. "
+                f"That is a choice to accept an extrapolated bolometric "
+                f"correction; the restoring force still grows with the "
+                f"excursion. Treat the resulting corrections accordingly."
+            )
+        return (
+            f"The soft bound on star.{label}.loggsed will pull the chain "
+            f"back onto the grid, and its steepness is measured "
+            f"(transition width 1% of loggsed's own posterior width), so a "
+            f"start this far out is effectively clamped to the edge. If "
+            f"the star genuinely lives off this grid, either use a BC "
+            f"model whose logg axis covers it (the .sed file's 'model:' "
+            f"key) or widen the barrier in your params file -- "
+            f"star.{label}.loggsed: {{bound_scale: X}} in dex, which sets "
+            f"the transition width to 0.01*X and the slope to 4.4/(0.01*X) "
+            f"nats per dex -- and treat the resulting bolometric "
+            f"corrections as extrapolated."
         )
 
     # ------------------------------------------------------------------
@@ -808,9 +1097,7 @@ class SED(Component):
         #   _compiled_combined_mag   : (nfilters,) blended/diff row mags
         #   _compiled_logg_calc      : (nstars,) loggsed
         m_star_node = self._predicted_appmag_node(system)[:, : self.nfilters]
-        loggsed_node = calc_logg_from_logmass(
-            star.logmass.value, star.radiussed.value
-        )
+        loggsed_node = star.loggsed.value
 
         # Retain a symbolic model node so plot_data can derive param_deps
         # (graph walk) and hand G5 the tensors behind the model traces.
@@ -851,7 +1138,7 @@ class SED(Component):
     # ------------------------------------------------------------------
     # Shared data preparation. Both the matplotlib plot() path and the
     # GUI plot_data() path build the model plot object here, so the two
-    # paths always operate on identical arrays (see plotspec.PlotSpec).
+    # paths always operate on identical arrays (see chart.Chart).
     # ------------------------------------------------------------------
     def _make_plot_obj(self, system, points):
         """
@@ -859,19 +1146,12 @@ class SED(Component):
         interpolates the model spectra, computes model flux at Earth, and
         converts observed magnitudes to flux for the given draws.
         """
+        sed = system.sed
         plot_class_path = Path(
-            DEFAULT_MODEL_ROOT / system.sed.sedmodel / "BCs" / "plot.py"
+            sed.model_root / sed.sedmodel / "BCs" / "plot.py"
         )
-        parsed_ast = ast.parse(plot_class_path.read_text())
-        plot_cls_str = [
-            node.name
-            for node in parsed_ast.body
-            if isinstance(node, ast.ClassDef)
-        ][0]
-        mod_name = f"exozippy.models.{system.sed.sedmodel}.BCs.plot"
-        module = importlib.import_module(mod_name)
-        plot_cls = getattr(module, plot_cls_str)
-        return plot_cls(system, points)
+        module = load_model_plot_module(plot_class_path, sed.sedmodel)
+        return plot_class_from(module, plot_class_path)(system, points)
 
     @staticmethod
     def _identity_styles(plot_obj):
@@ -942,7 +1222,7 @@ class SED(Component):
     # PDF is a single TWO-axes figure (spectra+photometry on top, the
     # magnitude-residual subplot below, sharex, 3:1 height ratio) with
     # per-identity linestyles and a paired line+marker legend -- none of
-    # which the one-axes PlotSpec meta/style vocabulary can express.
+    # which the one-axes Chart meta/style vocabulary can express.
     # The arrays and the identity styling still come from the same
     # helpers plot_data() uses (_make_plot_obj, _identity_styles,
     # _sub_combos), so the hand-drawn PDF and the GUI charts cannot
@@ -1220,13 +1500,13 @@ class SED(Component):
 
     def plot_data(self, system, point=None):
         """
-        GUI plot spec for the SED: observed photometry vs wavelength plus
+        GUI chart for the SED: observed photometry vs wavelength plus
         (with a point) the model spectra. point=None returns a data-only
         preview (observed magnitude vs effective wavelength) without
         loading the model spectra or requiring build_model(). See
-        Component.plot_data and plotspec.PlotSpec.
+        Component.plot_data and chart.Chart.
         """
-        from exozippy.plotspec import PlotSpec, Trace
+        from exozippy.chart import Chart, Trace
 
         if self.nfilters == 0:
             # No catalog photometry rows -- the SED only serves
@@ -1247,7 +1527,7 @@ class SED(Component):
                 )
             ]
             return [
-                PlotSpec(
+                Chart(
                     id=f"{self.prefix}.photometry",
                     component={"yaml_key": self.prefix, "instance": None},
                     title="SED Photometry (observed)",
@@ -1255,7 +1535,8 @@ class SED(Component):
                     ylabel="Apparent Magnitude",
                     traces=traces,
                     param_deps=[],
-                    meta={"x_log": True, "y_inverted": True},
+                    x_log=True,
+                    y_inverted=True,
                 )
             ]
 
@@ -1291,7 +1572,7 @@ class SED(Component):
         )
 
         # same fixed identity -> color/marker mapping the PDF uses (the
-        # PDF's per-identity LINESTYLES have no PlotSpec style key, so
+        # PDF's per-identity LINESTYLES have no Chart style key, so
         # every model curve renders solid here)
         id_color, id_marker, _id_line = self._identity_styles(plot_obj)
 
@@ -1376,7 +1657,7 @@ class SED(Component):
         plot_obj._get_ylim()
 
         return [
-            PlotSpec(
+            Chart(
                 id=f"{self.prefix}.sed",
                 component={"yaml_key": self.prefix, "instance": None},
                 title="Spectral Energy Distribution",
@@ -1384,21 +1665,32 @@ class SED(Component):
                 ylabel="log10(lambda F_lambda [erg/s/cm2])",
                 traces=traces,
                 param_deps=deps,
+                x_log=True,
+                # same wavelength window the PDF's shared x-axis uses
+                x_range=[5e-2, 30.0],
+                y_range=[
+                    float(plot_obj.y_lower),
+                    float(plot_obj.y_upper),
+                ],
                 meta={
-                    "x_log": True,
-                    # same wavelength window the PDF's shared x-axis uses
-                    "x_range": [5e-2, 30.0],
-                    "y_range": [
-                        float(plot_obj.y_lower),
-                        float(plot_obj.y_upper),
-                    ],
-                    # Presentation keys for the PlotSpec renderers. plot()
+                    # Annotation keys for the Chart renderers. plot()
                     # itself stays hand-drawn (two-axes figure; see the
                     # comment above plot()), but file_tag records the PDF
                     # basename it saves ({prefix}_SED.pdf) and figsize its
                     # per-filter width.
                     "file_tag": "SED",
                     "figsize": (max(6, 0.6 * plot_obj.nfilters + 2), 6),
+                    # The modeling draft's figure caption (standing rule:
+                    # a component fills in its own). LaTeX, verbatim.
+                    "caption": (
+                        "Spectral energy distribution. Points are the "
+                        "broadband photometry, with horizontal bars "
+                        "spanning each filter's bandpass and vertical bars "
+                        "the quoted magnitude uncertainty; curves are the "
+                        "extinguished model spectra at the plotted draw, "
+                        "one per star, scaled to Earth by the stellar "
+                        "radius and distance."
+                    ),
                 },
             )
         ]

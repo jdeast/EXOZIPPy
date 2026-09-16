@@ -85,11 +85,20 @@ def discover_components():
                     key = getattr(obj, "yaml_key", name.lower())
                     registry[key] = obj
 
-        except ImportError as e:
+        except Exception as e:
             # a developer might push an unused, broken component. that
             # shouldn't break the code -- but it MUST break the code if a
             # config actually asks for it.  System.__init__ consults
             # import_failures() before dismissing an unmatched YAML key.
+            #
+            # EVERY exception, not only ImportError (review 2.2.3): a
+            # SyntaxError, a NameError or a failed module-scope table build in
+            # one UNUSED component aborted discovery for every fit and every
+            # GUI open, which is exactly what the sentence above promises will
+            # not happen.  The narrow catch kept that promise for a missing
+            # dependency and broke it for a typo.  Widening it costs nothing,
+            # because a config that names the broken component still fails
+            # loudly through import_failures().
             _IMPORT_FAILURES[rel_path.with_suffix("").parts[-1]] = (
                 module_path,
                 e,

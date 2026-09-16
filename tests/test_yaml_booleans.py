@@ -237,7 +237,10 @@ def test_boolean_option_keys_come_from_the_component_schemas():
 
     keys = boolean_option_keys()
 
-    assert "lens" in keys.get("finite_source", [])
+    # finite_source is an EVENT-level key, so it is owned by `mulensevent`
+    # after the mulensevent/lens/source split (it lived on the old
+    # all-in-one `lens` block before).
+    assert "mulensevent" in keys.get("finite_source", [])
     assert "planet" in keys.get("chen", [])
 
 

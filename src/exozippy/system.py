@@ -1,4 +1,3 @@
-# import ipdb
 import logging
 import os
 
@@ -11,13 +10,22 @@ import pymc as pm
 import pytensor
 import pytensor.tensor as pt
 
+try:
+    # Moved from pytensor.graph.basic in newer pytensor releases (the old
+    # location warns and is scheduled for removal).  Same fallback as
+    # Component._model_trace_param_deps.
+    from pytensor.graph.traversal import ancestors
+except ImportError:  # pragma: no cover - older pytensor
+    from pytensor.graph.basic import ancestors
+
+from exozippy import reporting
 from exozippy.components.component import Component
 from exozippy.components.factory import discover_components, import_failures
 from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
 from exozippy.config import ConfigManager
 from exozippy.evaluator import structural_hash, structural_payload
 from exozippy.graph import determine_pymc_build_order
-from exozippy.manifest import interpret_manifest_entry
+from exozippy.manifest import interpret_manifest_entry, normalize_selector
 from exozippy.outputs.prose import ProseCollector
 from exozippy.yamlio import load_yaml
 
@@ -43,18 +51,20 @@ can generally construct any model containing arbitrary components.
 #                     gui/runner.py, mulensinstrument's mmexofast cache path.
 #   logger_level   -- run.py, cli.py, cli_modes.py.
 #   sampler        -- run.py (see run.KNOWN_SAMPLER_KEYS for its own block).
-#   modes          -- run.py: {ledger, max_invalid_frac, force, weights}.
-#   mkparam        -- mkparam.write_param_file: {n_seeds, force}.  `force`
-#                     is deliberately NOT `modes: {force: true}`: that one
-#                     authorizes forensic REPORTING off a known-bad
-#                     trace, this one authorizes seeding the NEXT fit
-#                     from one.  See mkparam._refuse_invalid_seed_draws.
-#   gui            -- gui.status.gui_enabled: {snapshot}.
-#   modeling       -- run.py: {compile} for the generated paper-draft
-#                     scaffold (<prefix>_paper.tex).  Output-only, so
+#   modes          -- run.py.
+#   mkparam        -- mkparam.write_param_file.  Its `force` is deliberately
+#                     NOT `modes: {force: true}`: that one authorizes
+#                     forensic REPORTING off a known-bad trace, this one
+#                     authorizes seeding the NEXT fit from one.  See
+#                     mkparam._refuse_invalid_seed_draws.
+#   gui            -- gui.status.gui_enabled.
+#   modeling       -- run.py: the generated paper-draft scaffold
+#                     (<prefix>_paper.tex).  Output-only, so
 #                     evaluator._NON_STRUCTURAL_CONFIG_KEYS excludes it
 #                     from the structural hash: adding the block or
 #                     flipping `compile` must not stale a finished trace.
+#
+# The SUB-key vocabulary of each of those blocks is KNOWN_BLOCK_KEYS below.
 #
 # tests/test_known_keys.py cross-checks this set against the top-level-config
 # accesses in the source, in both directions, so it cannot silently drift.
@@ -70,8 +80,42 @@ RESERVED_CONFIG_KEYS = frozenset(
         "mkparam",
         "gui",
         "modeling",
+        "reporting",
     }
 )
+
+# The sub-key vocabulary of each reserved BLOCK, and the ONE owner of it.
+#
+# A typo inside one of these blocks used to be silent (review 2.3.10):
+# `modes: {ledgr: false}` left the seed ledger on, `mkparam: {forse: true}`
+# left the invalid-seed refusal armed, and `gui: {snapshto: true}` wrote no
+# status files -- in each case the user had stated an intention and got the
+# opposite with no message.  `modeling:` alone warned, through an inline loop
+# of its own.  run.warn_unknown_block_keys now reports all four, from this
+# table.
+#
+# `sampler` is NOT here: it is run.KNOWN_SAMPLER_KEYS, which run.py must own
+# because it is the module that consumes every one of those keys, and which
+# carries its own method-only table besides.  Keeping these four here instead
+# is what makes them one vocabulary rather than four: run.py, mkparam.py and
+# gui/status.py each consume a different block, and introspect.py publishes
+# all of them to the GUI -- which it used to do from a second literal copy.
+#
+# tests/test_known_keys.py cross-checks each entry against the reads in the
+# module that consumes it, in both directions, exactly as it already does for
+# KNOWN_SAMPLER_KEYS and RESERVED_CONFIG_KEYS.  Add a key here in the same
+# edit that consumes it.
+KNOWN_BLOCK_KEYS = {
+    "modes": frozenset({"ledger", "max_invalid_frac", "force", "weights"}),
+    "mkparam": frozenset({"n_seeds", "force"}),
+    "gui": frozenset({"snapshot"}),
+    "modeling": frozenset({"compile"}),
+    # `reporting:` predates this table (it arrived with the credible-interval
+    # width) and was the block the typo check had no entry for -- caught by
+    # tests/test_known_keys.py on merge, which is exactly what that test is
+    # for.  One key today; `reporting.CONFIG_KEY` is its owner.
+    "reporting": frozenset({reporting.CONFIG_KEY}),
+}
 
 
 class System(Component):
@@ -84,20 +128,56 @@ class System(Component):
         else:
             user_params_file = self.config.get("parameter_file", None)
             if user_params_file is None:
-                raise ValueError(
-                    "No 'parameter_file' key found in your config YAML. "
-                    "Add a line like:\n"
-                    "  parameter_file: myfit.params.yaml\n"
-                    "and create that file (or copy an example from the examples/ directory)."
+                # An OMITTED key is legal, and says "I have no overrides".
+                # A params file may already be EMPTY -- defaults.yaml, the
+                # component hints and the relaxation engine between them can
+                # start a fit on their own, and since the global search
+                # (8.3.1) a blind fit seeds its own period and epoch from
+                # BLS/Lomb-Scargle -- so requiring the KEY while the FILE it
+                # names may be empty is a distinction with no content, and
+                # exactly the friction a blind fit should not have to pay.
+                # An INFO line, not a warning: this is a supported way to
+                # write a config, not a mistake to apologize for.  A key that
+                # IS present still has to name a file that exists, which is
+                # the real typo (below) and stays fatal.
+                logger.info(
+                    "No 'parameter_file' in the config; proceeding with no "
+                    "user parameter overrides. Start values come from each "
+                    "component's defaults.yaml, its data-derived hints and "
+                    "the relaxation engine. Add "
+                    "'parameter_file: myfit.params.yaml' to override any of "
+                    "them."
                 )
-            if not os.path.exists(user_params_file):
-                raise FileNotFoundError(
-                    f"parameter_file '{user_params_file}' not found. "
-                    f"This path is resolved relative to the directory from which you "
-                    f"run exozippy (currently: {os.getcwd()}). "
-                    f"Check that the file exists and the path in your config YAML is correct."
-                )
-            self.user_params = load_yaml(str(user_params_file))
+                self.user_params = {}
+            else:
+                if not os.path.exists(user_params_file):
+                    raise FileNotFoundError(
+                        f"parameter_file '{user_params_file}' not found. "
+                        f"This path is resolved relative to the directory from which you "
+                        f"run exozippy (currently: {os.getcwd()}). "
+                        f"Check that the file exists and the path in your config YAML is correct."
+                    )
+                # `or {}`: yaml.safe_load returns None for an EMPTY file, and
+                # an empty params file has to mean exactly what an omitted
+                # key does -- "no overrides" -- rather than a third state
+                # every consumer has to spell `user_params or {}` for.
+                # mkparam's own loader has always normalized it this way.
+                self.user_params = load_yaml(str(user_params_file)) or {}
+
+        # NORMALIZE COMPONENT CONFIG BLOCKS BEFORE THE ConfigManager EXISTS.
+        # `standardize_param_names` folds a user's `comp.<Name>.param` into
+        # the canonical `comp.<i>.param`, and it can only do that for names
+        # that exist when it runs.  A component that DERIVES a name (Mann and
+        # Torres name each instance after the star it constrains) used to do
+        # so in its own __init__, i.e. after this line -- so its users' keys
+        # were never folded and survived name-form forever (review 2d-1).
+        # The registry is discovered here rather than below for the same
+        # reason: the hook lives on the component classes.
+        self.registry = discover_components()
+        for key, block in self.config.items():
+            CompClass = self.registry.get(key)
+            if CompClass is not None and isinstance(block, list):
+                CompClass.normalize_config_block(block)
 
         self.config_manager = ConfigManager(
             self.user_params, system_config=self.config
@@ -109,12 +189,24 @@ class System(Component):
         # each checkpoint.  add() is idempotent, so a second build_model()
         # on one System (the GUI) cannot accumulate copies.
         self.prose = ProseCollector()
+        # Sliced per-element expressions awaiting their start-point check
+        # (see register_element_slice_check / verify_element_slices).  Rebuilt
+        # per build_model, so a second build on one System cannot accumulate.
+        self._element_slice_checks = []
+        # Many-to-one parameterizations' alternative branches, declared during
+        # stage 7 and marginalized over at the end of it (see
+        # register_branch_alternative / _add_branch_mixtures).  Rebuilt per
+        # build_model for the same reason.
+        self._branch_alternatives = []
         # Record the params file ONLY when one was really read: an in-memory
         # user_params dict must not be blamed on a parameter_file the config
-        # happens to name but System never opened.
-        if user_params is None:
+        # happens to name but System never opened -- and neither must a config
+        # that names none at all, whose (empty) overrides come from nowhere on
+        # disk and so have no file for an error message to point at.
+        if user_params is None and user_params_file is not None:
             self.config_manager.param_file = str(user_params_file)
-        self.registry = discover_components()
+        # self.registry was discovered above, before the ConfigManager, so
+        # normalize_config_block could run first.
         self.active_components = {}
 
         # 1. AGNOSTIC INSTANTIATION
@@ -149,6 +241,12 @@ class System(Component):
         for key, comp in self.active_components.items():
             logger.info(f"  {key} ({comp.n_elements})")
 
+        # Prose topic vocabulary: HERE, once every component exists, because a
+        # component may add a sentence as early as stage 1 and add() validates
+        # the section name.  The ORDER is refined in build_model(), when the
+        # real build graph is available.
+        self._register_prose_topics()
+
         # Structural fingerprint of the inputs, snapshotted HERE: after the
         # components have normalized their own config blocks (Mann/Torres
         # derive `name:` from their `star:` key in __init__), and before
@@ -157,7 +255,7 @@ class System(Component):
         # mkparam.write_param_file.  Taking it any earlier fingerprints a
         # config spelling that exists only for the first few lines of
         # __init__, so a fingerprint recomputed later would never match;
-        # taking it later would fold in whatever stages 1-6 might one day
+        # taking it later would fold in whatever stages 1-7 might one day
         # write.  The params half is safe at either point: ConfigManager
         # deepcopies before it standardizes keys, strips links and injects
         # solved initvals, so self.user_params stays exactly the file that
@@ -179,24 +277,200 @@ class System(Component):
         """
         return self._structural_hash, self._structural_payload
 
+    def _register_prose_topics(self):
+        """Register each component's ``prose_topic``, in build-graph order.
+
+        The ORDER is the point: a topic sits where the component that declared
+        it sits in the dependency graph, so inputs are described before what
+        is derived from them.  Measured on examples/kelt4, that reproduces the
+        hand-chosen stellar -> planetary -> orbits exactly.
+
+        Falls back to component declaration order when the graph is not
+        available yet -- the manifests only exist after stage 3, and this runs
+        at construction so that a sentence added during stages 1-7 already
+        validates against the extended vocabulary.  The fallback only affects
+        ORDER, never whether a section is accepted, and `build_model` calls
+        this again once the real order is known.
+        """
+        components = getattr(self, "active_components", None) or {}
+        order = list(components)
+        try:
+            from .graph import determine_pymc_build_order
+
+            built = determine_pymc_build_order(components, self.config_manager)
+            seen = []
+            for key in built:
+                name = str(key).split(".")[0]
+                if name in components and name not in seen:
+                    seen.append(name)
+            # Components with no manifest entry never appear in the graph.
+            order = seen + [c for c in components if c not in seen]
+        except Exception:  # noqa: BLE001 - order only; never fail a fit for it
+            pass
+
+        for name in order:
+            topic = getattr(components[name], "prose_topic", None)
+            if topic:
+                self.prose.register_topic(topic)
+
+    @property
+    def overdisperse(self):
+        """The params file's ``overdisperse:`` declaration (absent -> True).
+
+        Forwarded from the ConfigManager so the samplers have one attribute to
+        read on the object they are already handed, and so a minimal test
+        System that has no ConfigManager at all falls back to the same default
+        an absent key gives.  See ``ConfigManager.overdisperse``.
+        """
+        cm = getattr(self, "config_manager", None)
+        return True if cm is None else cm.overdisperse
+
     def prepare(self):
         # ==========================================================
         # PRE-FLIGHT SEQUENCE
         # ==========================================================
-        # Stage 1: DATA & LOGICAL MAPS
+        # Stages 1-2: DATA & LOGICAL MAPS
+        #
+        # Called unconditionally: `load_data` and `build_maps` are concrete on
+        # Component and `register_parameters` is abstract, so every component
+        # has all three (review 4.2.2). The `hasattr` guards these replace
+        # were always true, and would have SKIPPED a stage in silence for a
+        # component whose method was misnamed -- a guard that can only hide a
+        # bug is worse than no guard.
         for comp in self.active_components.values():
-            if hasattr(comp, "load_data"):
-                comp.load_data(self)
-            if hasattr(comp, "build_maps"):
-                comp.build_maps()
+            comp.load_data(self)
+            comp.build_maps()
 
-        # Stage 2: REGISTRATION (The Blueprint)
+        # Stage 3: REGISTRATION (The Blueprint)
         for comp in self.active_components.values():
-            if hasattr(comp, "register_parameters"):
-                comp.register_parameters(self)
+            comp.register_parameters(self)
 
-        # Stage 3: RECONCILIATION (The Solver)
+        # After stage 3: the REPORTED-element invariant, checked before anything is
+        # built (see _validate_reported_not_consumed).
+        self._validate_reported_not_consumed()
+
+        # Stage 4: RECONCILIATION (The Solver)
         self.config_manager.finalize_user_params()
+
+    def _validate_reported_not_consumed(self):
+        """Refuse a manifest where something CONSUMES a reported element.
+
+        The REPORTED role rests on one property: such an element is consumed by
+        nothing.  That is what lets its expression be applied in a second phase
+        (Parameter.finalize_deferred) after the parameter it reads has been
+        built, and what makes the per-parameter cycle such a pair would
+        otherwise form dissolve.  Break it, and the consumer silently reads the
+        PRE-PATCH placeholder: a plausible number that is not the quantity it
+        claims to be, with no error anywhere.
+
+        That is not hypothetical -- it is how ``orbit.tp`` behaved the first
+        time the V_c/V_e parameterization was wired, because `calc_tp` consumes
+        `secosw`/`sesinw`, which a V_c/V_e orbit reports rather than samples.
+        The fix was to give `tp` its own (e, omega) expression on those orbits;
+        the check is here so the next such pairing is a startup error rather
+        than a wrong posterior.
+
+        Checked per ELEMENT, because that is the real condition: in a system
+        with one orbit of each kind, `ecc`'s sqrt(e)cos/sin expression legally
+        reads `secosw` for the hk orbit's elements, which are exactly the
+        elements the other orbit does not report.  Only an overlap is an error.
+        """
+        reported = {}
+        selections = {}
+        for comp in self.active_components.values():
+            manifest = getattr(comp, "manifest", {}) or {}
+            for name, raw in manifest.items():
+                entry = interpret_manifest_entry(raw)
+                n_elements = comp.n_elements
+                if entry.shape:
+                    shape = entry.shape
+                    n_elements = int(
+                        np.prod(shape)
+                        if isinstance(shape, tuple)
+                        else int(shape)
+                    )
+                out_sel = entry.output_expr_selectors or {}
+                if entry.output_expr_key is not None:
+                    out_sel = {entry.output_expr_key: None}
+                if out_sel:
+                    mask = np.zeros(n_elements, dtype=bool)
+                    for sel in out_sel.values():
+                        mask |= normalize_selector(sel, n_elements)
+                    reported[(comp.prefix, name)] = mask
+                selections[(comp.prefix, name)] = (comp, entry, n_elements)
+
+        if not reported:
+            return
+
+        for (prefix, name), (comp, entry, n_elements) in selections.items():
+            cfg = self.config_manager.resolve(
+                comp.prefix, name, shape=(comp.n_elements,)
+            )
+            try:
+                sels = entry.expression_configs(
+                    cfg.get("expressions", {}),
+                    n_elements=n_elements,
+                    where=f"{prefix}.{name}",
+                )
+            except Exception:  # a broken manifest is another check's error
+                continue
+            for sel in sels:
+                if sel.output_only:
+                    continue
+                consumer_mask = (
+                    np.ones(n_elements, dtype=bool)
+                    if sel.mask is None
+                    else sel.mask
+                )
+                for dep in entry.dep_names(sel.config):
+                    dep_key = self._dep_parameter_key(comp, dep)
+                    if dep_key is None or dep_key not in reported:
+                        continue
+                    dep_mask = reported[dep_key]
+                    # Element-for-element only where the two vectors are the
+                    # same length; a mapped dep (a different length) is
+                    # compared conservatively, as any overlap at all.
+                    if dep_mask.size == consumer_mask.size:
+                        clash = np.nonzero(dep_mask & consumer_mask)[0]
+                    else:
+                        clash = np.nonzero(dep_mask)[0]
+                    if clash.size:
+                        raise ValueError(
+                            f"[{prefix}.{name}] its '{sel.key}' expression "
+                            f"consumes '{dep}', whose element(s) "
+                            f"{clash.tolist()} are REPORTED "
+                            f"({dep_key[0]}.{dep_key[1]}, a REPORTED element). A "
+                            f"reported element is applied in a second build "
+                            f"phase, after every parameter exists, so a "
+                            f"consumer would read its pre-patch placeholder -- "
+                            f"a number that looks fine and is not the quantity "
+                            f"it names. Give this parameter an expression in "
+                            f"coordinates the instance actually has (as "
+                            f"orbit.tp does with its 'from_ecc' block), or stop "
+                            f"reporting that element."
+                        )
+
+    @staticmethod
+    def _dep_parameter_key(comp, dep):
+        """``(prefix, param)`` a dependency string names, or None."""
+        name = dep.split("[", 1)[0]
+        if "." not in name:
+            return (comp.prefix, name)
+        parts = name.split(".")
+        return (parts[0], parts[-1])
+
+    def in_topology(self, name):
+        """The component named, as an instance or a raw config block, or None.
+
+        Delegates to ``components.component.in_topology`` -- the one
+        implementation (review 4.8.1).  It lives there rather than here
+        because every caller is a component holding a ``system`` that may be
+        a test double, and a method they cannot rely on is a method they
+        would re-derive.
+        """
+        from exozippy.components.component import in_topology
+
+        return in_topology(self, name)
 
     def derived_params(self):
         """`(component_prefix, param_name)` pairs the manifests actually derive.
@@ -206,10 +480,10 @@ class System(Component):
         derived in another (planet.mass is sampled linearly when RV or
         astrometry measures it, and derived from log_q otherwise). The rule
         is `manifest.interpret_manifest_entry`'s, shared with
-        `Component.add_parameter` (stage 5) and
-        `graph.determine_pymc_build_order` (stage 4) -- a manifest value that
+        `Component.add_parameter` (stage 6) and
+        `graph.determine_pymc_build_order` (the build order) -- a manifest value that
         is a string, or a dict carrying an "expr_key", names an expression; a
-        bare None is a free parameter.  Valid after stage 2.
+        bare None is a free parameter.  Valid after stage 3.
 
         The question is asked through `expression_config` against the
         resolved config, exactly as the two build-time consumers ask it, and
@@ -224,23 +498,113 @@ class System(Component):
         the one tool whose job is to find them.  That is not hypothetical --
         it is what `rvinstrument.gamma` did until 2026-08.
         """
-        out = set()
+        return {
+            key
+            for key, mask in self.derived_elements().items()
+            if bool(np.all(mask))
+        }
+
+    def derived_elements(self):
+        """``(component_prefix, param_name) -> boolean mask`` of derived elements.
+
+        The per-element form of :meth:`derived_params`, and the one every
+        reporting consumer should ask: a vector whose instances chose different
+        parameterizations is derived for SOME elements and sampled for others,
+        and answering per parameter forces a choice between excusing a sampled
+        element from the checks a sampled element needs (``derived_params``'s
+        consumers skip derived parameters) and subjecting a derived one to them.
+
+        ``derived_params`` keeps its historical meaning -- every element derived
+        -- so a partially derived vector no longer counts as derived there.
+        That is the conservative direction: its consumers treat "derived" as
+        "exempt", and a mixed vector has sampled elements that must not be
+        exempt.  Valid after stage 3.
+        """
+        out = {}
         for comp in self.active_components.values():
             for name, raw in getattr(comp, "manifest", {}).items():
                 entry = interpret_manifest_entry(raw)
                 if not entry.names_expression:
                     continue
+                n_elements = comp.n_elements
+                if entry.shape:
+                    shape = entry.shape
+                    n_elements = int(
+                        np.prod(shape)
+                        if isinstance(shape, tuple)
+                        else int(shape)
+                    )
                 cfg = self.config_manager.resolve(
                     comp.prefix, name, shape=(comp.n_elements,)
                 )
-                if (
-                    entry.expression_config(
-                        cfg.get("expressions", {}),
-                        where=f"{comp.prefix}.{name}",
-                    )
-                    is not None
+                mask = np.zeros(n_elements, dtype=bool)
+                for sel in entry.expression_configs(
+                    cfg.get("expressions", {}),
+                    n_elements=n_elements,
+                    where=f"{comp.prefix}.{name}",
                 ):
-                    out.add((comp.prefix, name))
+                    mask |= (
+                        np.ones(n_elements, dtype=bool)
+                        if sel.mask is None
+                        else sel.mask
+                    )
+                if mask.any():
+                    out[(comp.prefix, name)] = mask
+        return out
+
+    def active_elements(self):
+        """``(component_prefix, param_name) -> boolean mask`` of ACTIVE elements.
+
+        The complement is the INACTIVE role: elements that are not parameters of
+        their instance's parameterization (a non-MIST star's EEP).  Only entries
+        that actually mask something appear, so a caller can treat a missing key
+        as "every element active".  Valid after stage 3, and the reporting
+        layer's authority for what to leave out of a table.
+        """
+        out = {}
+        for comp in self.active_components.values():
+            for name, raw in getattr(comp, "manifest", {}).items():
+                entry = interpret_manifest_entry(raw)
+                if entry.options.get("mask") is None:
+                    continue
+                n_elements = comp.n_elements
+                if entry.shape:
+                    shape = entry.shape
+                    n_elements = int(
+                        np.prod(shape)
+                        if isinstance(shape, tuple)
+                        else int(shape)
+                    )
+                out[(comp.prefix, name)] = entry.activity_mask(
+                    n_elements, where=f"{comp.prefix}.{name}"
+                )
+        return out
+
+    def manifest_overrides(self):
+        """``(component_prefix, param_name) -> the manifest "overrides" dict``.
+
+        The third of the after-prepare() tables a reporting consumer needs
+        (with :meth:`derived_elements` and :meth:`active_elements`), and for
+        the same reason: what the BUILD does is decided by the manifest, and a
+        report that re-derives it from the config alone disagrees.
+        ``"overrides"`` is how a component supplies per-element defaults the
+        user may still beat -- including the ``sigma: 0`` pin on a GP
+        hyperparameter of a file that asked for no GP, a robust-likelihood
+        parameter of a file with no ``likelihood:``, or an unread
+        limb-darkening coefficient.  ``ConfigManager.resolve`` applies them
+        only when handed them (``Component.add_parameter`` does), so
+        ``export_solution`` reported every such element as free until it was
+        given this.  Only entries that carry overrides appear.  Valid after
+        stage 2.
+        """
+        out = {}
+        for comp in self.active_components.values():
+            for name, raw in getattr(comp, "manifest", {}).items():
+                overrides = interpret_manifest_entry(raw).options.get(
+                    "overrides"
+                )
+                if overrides:
+                    out[(comp.prefix, name)] = overrides
         return out
 
     def build_likelihood(self, model, system):
@@ -253,21 +617,269 @@ class System(Component):
     def register_parameters(self, system):
         pass
 
+    def register_element_slice_check(
+        self, where, func_name, idx, sliced_expr, full_expr
+    ):
+        """Record a sliced per-element expression for start-point verification.
+
+        Called by ``Component._element_expression`` when an expression supplies
+        a SUBSET of a parameter's elements and its dependencies were therefore
+        sliced.  Slicing is only sound if the physics is elementwise in those
+        deps; the alignment of the deps themselves is proven statically, but
+        "elementwise" is a property of the function, and a function that sums or
+        contracts over the element axis would return something else entirely
+        from sliced inputs.  So both graphs are kept and compared numerically at
+        the start point (``verify_element_slices``), where real values exist --
+        dummy inputs could agree by accident, and evaluating a random variable
+        would draw from its prior instead of reading the start.
+        """
+        self._element_slice_checks.append(
+            {
+                "where": where,
+                "func_name": func_name,
+                "idx": np.asarray(idx, dtype=int),
+                "sliced": sliced_expr,
+                "full": full_expr,
+            }
+        )
+
+    def verify_element_slices(self, model, rtol=1e-9, atol=1e-12):
+        """Check every sliced per-element expression against the full one.
+
+        One compiled function over all the checks, evaluated at the start point.
+        A mismatch RAISES, naming the parameter and the physics function: it
+        means the function is not elementwise in its dependencies, so the
+        elements one instance's parameterization computed were derived from
+        another instance's numbers -- wrong values with no other symptom.
+
+        NaN is treated as agreement ONLY when both sides are NaN at the same
+        entry; a NaN that appears in just one of them is a real disagreement.
+        """
+        checks = self._element_slice_checks
+        if not checks:
+            return 0
+        outputs = []
+        for chk in checks:
+            full = pt.as_tensor_variable(chk["full"]())
+            sliced = pt.as_tensor_variable(chk["sliced"]())
+            take = pt.as_tensor_variable(chk["idx"].astype("int32"))
+            outputs.append(full[take] if full.ndim else full)
+            outputs.append(sliced if sliced.ndim else sliced)
+        # The expressions were built against the model's random variables, but
+        # a point maps the VALUE variables; without this substitution the
+        # compiled function asks for an unnamed RV input the point cannot fill.
+        outputs = model.replace_rvs_by_values(outputs)
+        # inputs=model.value_vars, not the default (whatever the outputs need):
+        # a point carries EVERY value variable, and a function compiled for a
+        # subset rejects the rest ("Too many parameter passed").
+        fn = model.compile_fn(
+            outputs,
+            inputs=model.value_vars,
+            point_fn=True,
+            on_unused_input="ignore",
+        )
+        values = fn(self.get_raw_start(model))
+        for k, chk in enumerate(checks):
+            a = np.atleast_1d(np.asarray(values[2 * k], dtype=float))
+            b = np.atleast_1d(np.asarray(values[2 * k + 1], dtype=float))
+            both_nan = np.isnan(a) & np.isnan(b)
+            if a.shape != b.shape or not np.allclose(
+                np.where(both_nan, 0.0, a),
+                np.where(both_nan, 0.0, b),
+                rtol=rtol,
+                atol=atol,
+                equal_nan=False,
+            ):
+                raise ValueError(
+                    f"[{chk['where']}] the physics function "
+                    f"'{chk['func_name']}' is not elementwise in its "
+                    f"dependencies: evaluated on the dependencies sliced to "
+                    f"element(s) {chk['idx'].tolist()} it gives {b.tolist()}, "
+                    f"but evaluated on the full vectors and then indexed it "
+                    f"gives {a.tolist()}. A per-element parameterization "
+                    f"switch slices the dependencies so an instance that did "
+                    f"not choose this parameterization cannot poison the "
+                    f"result, which is only valid for an elementwise "
+                    f"function. Give the expression a form that treats each "
+                    f"element independently."
+                )
+        return len(checks)
+
+    def register_branch_alternative(self, label, replacements, weight=0.5):
+        """Declare one alternative value of a many-to-one parameterization.
+
+        A component calls this when the coordinate it samples does not determine
+        its physical quantity uniquely -- today only the V_c/V_e eccentricity,
+        whose inversion is a quadratic with two roots (Eastman 2024 eq 5).
+        ``replacements`` maps the node the model was BUILT with to the node the
+        alternative branch would have used; ``label`` names the branch for logs.
+
+        Two branches may name the SAME node -- two V_c/V_e orbits are two
+        elements of one ``ecc`` vector, so they do -- and the mixture then has to
+        apply both at once.  That works only if each replacement is written
+        RELATIVE to the node it replaces (``set_subtensor(ecc[i], ...)``, not a
+        node built from scratch), which is what lets ``_add_branch_mixtures``
+        compose them by substituting one after the other.  It checks, because
+        the failure is silent: merging the two into one dict, as the first
+        version did, kept whichever was declared last and quietly marginalized
+        over 3 of the 4 combinations.
+
+        ``_add_branch_mixtures`` then marginalizes the likelihood over the
+        branches instead of letting the component choose one.  That is the whole
+        point: the paper picks a root with a discrete sign parameter, which for a
+        gradient sampler means a piecewise-constant coordinate and a logp that
+        jumps -- and picking the "physical" root instead means a choice that
+        depends on the current parameters, i.e. the same discontinuity wearing a
+        different hat.  Marginalizing is smooth, and it is also the honest
+        statement: the data do not say which root is real.
+        """
+        replacements = dict(replacements)
+        claimed = {
+            key
+            for branch in self._branch_alternatives
+            for key in branch["replacements"]
+        }
+        for key, value in replacements.items():
+            if key in claimed and key not in ancestors([value]):
+                raise ValueError(
+                    f"[system] branch '{label}' replaces node "
+                    f"'{key.name or key}', which another branch also replaces, "
+                    f"with an expression that does not read it. Two branches "
+                    f"can only be applied together when each is written "
+                    f"relative to the node it replaces (e.g. "
+                    f"set_subtensor(node[i], ...)); as written, one of the two "
+                    f"substitutions would be lost and the mixture would cover "
+                    f"fewer than 2^k combinations."
+                )
+        self._branch_alternatives.append(
+            {
+                "label": label,
+                "replacements": replacements,
+                "weight": weight,
+            }
+        )
+
+    def _add_branch_mixtures(self, model):
+        """Marginalize the likelihood over every declared branch alternative.
+
+        For k declared branches this adds ONE potential covering all 2^k
+        combinations::
+
+            total = logsumexp_over_combinations(log w_c + L_c)
+
+        where ``L_c`` is the sum of every model term with that combination's
+        nodes substituted, and ``w_c`` the product of the branch weights.  It is
+        built as ``logsumexp(...) - L_ref``, because PyMC has already added
+        ``L_ref`` (the as-built terms): the difference cancels it exactly, so no
+        component has to know this is happening and no term is counted twice.
+
+        Two properties fall out of substituting into the WHOLE term sum, and
+        both are wanted:
+
+        * Any term that does not depend on the substituted nodes appears in
+          every branch identically and factors straight out of the logsumexp --
+          so the mixture is over exactly the terms that care.
+        * Any PRIOR term that does depend on them (the V_c/V_e Jacobian, the
+          eccentricity collision bound, and a future orbit-crossing penalty
+          coupling two orbits) is replicated per branch, which makes each
+          branch's weight ``log w + log|J| + barriers`` -- the form review 8.4.4
+          specifies for folded likelihoods, for free.
+
+        Cost is 2^k evaluations of the whole logp, so it is logged, and a
+        warning names the multiplier past two branches.
+        """
+        from pytensor.graph.replace import graph_replace
+
+        branches = list(self._branch_alternatives)
+        if not branches:
+            return 0
+
+        # RV-level terms, deliberately not model.logp(): that graph has already
+        # had the random variables rewritten into value variables, so the nodes
+        # a component handed us are no longer in it and graph_replace would find
+        # nothing to replace.  Potentials and observed logps are stored
+        # RV-level, and PyMC converts them consistently at logp time.
+        terms = [
+            pm.logp(rv, model.rvs_to_values[rv]).sum()
+            for rv in model.observed_RVs
+        ]
+        terms += [pt.sum(p) for p in model.potentials]
+        if not terms:
+            logger.warning(
+                "[system] branch alternatives were declared (%s) but the model "
+                "has no likelihood terms to marginalize; skipping the mixture.",
+                ", ".join(b["label"] for b in branches),
+            )
+            return 0
+        l_ref = terms[0] if len(terms) == 1 else pt.add(*terms)
+
+        n_comb = 2 ** len(branches)
+        labels = ", ".join(b["label"] for b in branches)
+        if len(branches) > 2:
+            logger.warning(
+                "[system] %d branch alternatives (%s) means the likelihood is "
+                "evaluated %d times per step (2^%d) -- every combination of "
+                "roots. Set 'fitvcve: false' on the orbits that do not need it "
+                "to bring that down.",
+                len(branches),
+                labels,
+                n_comb,
+                len(branches),
+            )
+        else:
+            logger.info(
+                "[system] marginalizing the likelihood over %d branch "
+                "combination(s) (%s).",
+                n_comb,
+                labels,
+            )
+
+        pieces = []
+        for combo in range(n_comb):
+            term = l_ref
+            log_w = 0.0
+            for bit, branch in enumerate(branches):
+                if combo & (1 << bit):
+                    # One substitution at a time, NOT one merged dict: two
+                    # branches routinely name the same node (two V_c/V_e orbits
+                    # are two elements of one `ecc` vector), and merging kept
+                    # only the last, silently marginalizing over 3 of the 4
+                    # combinations.  Applied in sequence, the second pass
+                    # rewrites the first's `set_subtensor` base too, so both
+                    # elements land -- which is why register_branch_alternative
+                    # requires a replacement to read the node it replaces.
+                    term = graph_replace(term, branch["replacements"])
+                    log_w += float(np.log(branch["weight"]))
+                else:
+                    log_w += float(np.log1p(-branch["weight"]))
+            pieces.append(term + log_w)
+
+        total = pieces[0]
+        for piece in pieces[1:]:
+            total = pt.logaddexp(total, piece)
+        pm.Potential("branch_mixture", total - l_ref)
+        return n_comb
+
     def build_model(self):
         """Constructs the PyMC probabilistic model for the entire system."""
+        self._element_slice_checks = []
+        self._branch_alternatives = []
         with pm.Model() as model:
-            # Stage 4a: Automatic PyTensor Map Conversion
+            # Stage 5: Automatic PyTensor Map Conversion
             # Convert logical numpy arrays into PyTensor variables for the graph
             for comp in self.active_components.values():
+                # Every node a component stashed belongs to the PREVIOUS
+                # model; drop them before anything can read one (3.14.12).
+                comp.reset_build_caches()
                 comp.build_tensor_maps()
 
-            # Stage 4: Topological Sort for Parameter Building
+            # Build order for stage 6: topological sort
             # Fetch the dynamic, component-agnostic build order driven by the physics dependency graph
             pymc_build_order = determine_pymc_build_order(
                 self.active_components, self.config_manager
             )
 
-            # Stage 5: Linearly materialize the nodes node-by-node
+            # Stage 6: Linearly materialize the nodes node-by-node
             for param_path in pymc_build_order:
                 comp_name, param_name = param_path.split(".", 1)
                 if comp_name in self.active_components:
@@ -290,13 +902,106 @@ class System(Component):
                         f"configuration."
                     )
 
-            # Stage 6: LIKELIHOOD
+            # Stage 7: LIKELIHOOD
             for comp in self.active_components.values():
-                if hasattr(comp, "build_likelihood"):
-                    comp.build_likelihood(model, system=self)
+                comp.build_likelihood(model, system=self)
+
+            # After stage 7: REPORTED elements.  Deliberately
+            # after stage 7: a reported element is consumed by nothing, so
+            # every consumer in stages 6-7 has already read the phase-1 tensor
+            # -- which is what makes the per-parameter cycle these expressions
+            # would otherwise create dissolve.  See
+            # Component.finalize_reported and Parameter.finalize_deferred.
+            for comp in self.active_components.values():
+                finalize = getattr(comp, "finalize_reported", None)
+                if callable(finalize):
+                    finalize(model, system=self)
+
+            # After stage 7: BRANCH MIXTURES.  A component whose parameterization is
+            # many-to-one (today: the V_c/V_e eccentricity, whose inversion is
+            # quadratic) declares its alternative nodes and the likelihood is
+            # marginalized over them here.  Must come last: it snapshots every
+            # term the model has, so every term has to exist first.
+            self._add_branch_mixtures(model)
+
+        # A params key that matched NO parameter is reported HERE, because
+        # this is the first point at which every caller can be told
+        # (review 2.3.16).  See _warn_unmatched_user_params.
+        self._warn_unmatched_user_params(model)
+
+        # Mixed-parameterization vectors only: verify that each sliced
+        # expression agrees with the unsliced one on the elements it supplies,
+        # at the start point.  No-op (and no compile) for a model without one.
+        self.verify_element_slices(model)
 
         self.compile_plotter_functions(model)
         return model
+
+    def _warn_unmatched_user_params(self, model):
+        """Report params-file keys that matched no parameter of this model.
+
+        ONE AUTHORITY, MOVED -- not a new check.
+        ``diagnostics.ModelAuditor.check_unused_yaml`` already owns the
+        question ("check_unused_yaml owns unmatched keys" is written into
+        ``check_user_starts``' own skip), carries the
+        ``relation_symbol_paths`` exemption for a seed the relaxation engine
+        consumes without building a parameter, and audits the per-entry
+        sub-keys besides.  What was wrong was WHERE it was reported: from
+        ``run.inspect_start``, i.e. run.py's startup reporting, so it fired
+        for ``exozippy <config>`` and for nothing else.
+
+        MEASURED, and it cost a run.  DC2018_128_tightpriors.params.yaml
+        keyed a bound as ``lens.DC2018_128.t_0`` -- the RUN name, where the
+        config declares ``lens: - name: "Lens"``.  The key matched nothing,
+        the t_0 tightening (5.76 of that file's ~27.6 nats) was absent, and
+        a nested-sampling job ran over an hour before the mistake was found
+        by READING THE CONFIG.  ``examples/DC2018/dc18_fullns_pilot.py``
+        drives the sampler directly, so run.py's warning never executed.  A
+        params file is exactly where a silent no-op is most expensive: the
+        whole point of the file is to constrain something.
+
+        WHY THE STRICT NAMING CHECK DID NOT CATCH IT, since it looks like it
+        should have: ``config.standardize_param_names`` DOES refuse a 3-part
+        key naming an undeclared instance, but its accepted set is every
+        ``name:`` declared by ANY list component, deliberately -- a
+        component's per-element names may borrow another's (``source.<star
+        name>.rho``).  The tightpriors config declares
+        ``galacticmodel: - name: "DC2018_128"``, so the mis-keyed name was
+        "declared" and passed.  Widening that check cannot fix this without
+        breaking the borrowed-name spellings; reporting the residue here
+        can.
+
+        WHY HERE AND NOT ``finalize_user_params``, which the item proposed:
+        ``Parameter`` objects are created in stage 6, so after ``prepare()``
+        alone ``get_all_parameters()`` is EMPTY (measured) and the check has
+        nothing to compare keys against.  ``build_model`` is the first place
+        the answer exists, and every caller that samples passes through it.
+
+        Once per System: a live System can legitimately be rebuilt (reviews
+        1.5.2, 3.14.12) and the params file does not change between builds,
+        so a second identical warning would be noise -- the GUI rebuilds on
+        interaction.
+        """
+        if getattr(self, "_warned_unmatched_user_params", False):
+            return []
+        from .diagnostics import ModelAuditor
+
+        try:
+            unmatched = ModelAuditor(model, self, {}).check_unused_yaml()
+        except Exception:
+            # A diagnostic must never be the reason a model does not build.
+            logger.debug("unmatched params-key audit failed", exc_info=True)
+            return []
+        self._warned_unmatched_user_params = True
+        if unmatched:
+            logger.warning(
+                f"The following parameters in the parameter.yaml file did "
+                f"not match any model parameter and were not applied: "
+                f"{unmatched}\n"
+                "This can be safely ignored if intentional, but check for "
+                "typos."
+            )
+        return unmatched
 
     def get_all_parameters(self):
         """
@@ -320,8 +1025,17 @@ class System(Component):
         starting value is always initval even when an explicit prior mean
         mu != initval.
 
-        We override model.initial_point() here to guarantee the physical
-        starting value is always our initval.
+        This used to OVERRIDE ``model.initial_point()`` -- the model's own
+        start was frozen at RV creation and a seed polish never reached it,
+        so every sampler branch had to be handed this dict by hand and the
+        default NUTS branch forgot to (review 1.3.6).  It does not any more:
+        ``recenter_whitening_anchor`` makes ``model.initial_point()`` equal
+        to what this returns, ELEMENT FOR ELEMENT, by construction -- see
+        that method for the two mechanisms.  So this is now the canonical
+        ACCESSOR rather than a correction, kept because the whitening probe,
+        PTDE, the seed ledger and the jitter all want the start keyed by raw
+        variable and want it without a model context.  A mismatch between
+        the two is a bug, and ``tests/test_nuts_start.py`` pins the equality.
         """
         raw_start = model.initial_point()
         lookup = {p.label: p for p in self.get_all_parameters()}
@@ -540,7 +1254,12 @@ class System(Component):
                         else 1
                     )
                     iv = np.asarray(
-                        to_vec(par.initval, n_elements, fill=np.nan),
+                        to_vec(
+                            par.initval,
+                            n_elements,
+                            fill=np.nan,
+                            where=f"{par.label}.initval",
+                        ),
                         dtype=float,
                     )
                     for i in tf["sampled_idx"]:
@@ -563,6 +1282,71 @@ class System(Component):
                             float(phys[i])
                         )
 
+    def recenter_whitening_anchor(self, model):
+        """Make ``model.initial_point()`` the canonical start, structurally.
+
+        Review 4.3.1.  Called once per fresh run, AFTER the seed polish and
+        BEFORE the whitening probe, so the probe measures its contours around
+        the start it is about to condition (`run.py`'s polish comment is the
+        reason that ordering exists).  Idempotent, and a no-op on an
+        unpolished run, where the two points already agree.
+
+        ``raw`` means two different things on the two element paths, so one
+        mechanism cannot serve both:
+
+        1. LOGIT elements -- ``Parameter.recenter_on_start`` folds the
+           displacement into the ANCHOR and zeroes ``raw_initval``.  Free:
+           section C's correction cancels the raw N(0,1) symbolically, so the
+           anchor is pure parameterization and moving it changes no density.
+           ``raw = 0`` then IS the polished start.
+        2. GAUSSIAN-PATH elements -- the center is NOT touched.  There
+           ``raw ~ N(0,1)`` IS the prior and ``gaussian_mus`` is the prior
+           mean whenever the user gave a ``mu``, so folding a start
+           displacement into it would move the PRIOR: a change to the model,
+           not to the coordinates.  Their nonzero ``raw_initval`` stays, and
+           ``Model.set_initval`` is what carries it into the model's own
+           initial point.
+
+        With both in place ``model.initial_point()`` is correct by
+        construction on every path, which is why no sampler branch has to be
+        handed a start any more and why no future one can forget to: there is
+        nothing to pass.  ``Model.set_initval`` is given the WHOLE raw vector
+        (the logit entries are 0 by then), so a mixed vector needs no
+        per-element plumbing.
+
+        The RV is looked up from the model rather than held on the Parameter
+        on purpose: a Parameter is pickled out to PTDE's worker pools, and a
+        graph reference on it would travel with it.
+
+        Returns ``{label: [element indices whose anchor moved]}`` for the
+        parameters that moved, which is what the caller logs.
+        """
+        raw_rvs = {rv.name: rv for rv in model.free_RVs}
+        moved = {}
+        for par in self.get_all_parameters():
+            recenter = getattr(par, "recenter_on_start", None)
+            if recenter is not None:
+                elements = recenter()
+                if elements:
+                    moved[par.label] = elements
+            raw_init = getattr(par, "raw_initval", None)
+            if raw_init is None:
+                continue
+            rv = raw_rvs.get(f"{par.label}_raw")
+            if rv is None:
+                continue
+            model.set_initval(
+                rv, np.asarray(raw_init, dtype=float).reshape(rv.shape.eval())
+            )
+        if moved:
+            n = sum(len(v) for v in moved.values())
+            logger.info(
+                f"Whitening anchor re-centered on the polished start: "
+                f"{n} logit element(s) across {len(moved)} parameter(s) now "
+                f"have raw = 0 at the start."
+            )
+        return moved
+
     def _seed_initvals_for(self, par, resolved):
         """Internal-unit initval vector for one Parameter under one seed's solved
         state, or None if that seed does not touch any of its elements."""
@@ -571,7 +1355,9 @@ class System(Component):
         n_elements = (
             int(np.prod(par.shape)) if par.shape not in ((), None) else 1
         )
-        base_iv = to_vec(par.initval, n_elements, fill=np.nan)
+        base_iv = to_vec(
+            par.initval, n_elements, fill=np.nan, where=f"{par.label}.initval"
+        )
         vals = np.array(base_iv, dtype=float).reshape(-1).copy()
         found = False
         for i in range(n_elements):
@@ -600,30 +1386,88 @@ class System(Component):
             var.name: val for var, val in zip(output_vars, physical_values)
         }
 
-    def get_physical_point(self, model, raw_point):
-        output_vars = model.free_RVs + model.deterministics
+    def fold_degenerate_draws(self, idata, model):
+        """Collapse exact label degeneracies in a posterior, in place.
 
-        eval_fn = pytensor.function(
-            inputs=model.free_RVs,
-            outputs=output_vars,
-            on_unused_input="ignore",
+        The one place a component gets to say "these two labels are the same
+        physical solution" (review 1.8.3, whose case is the ascending node:
+        with astrometry and no RVs, `(bigomega, omega, tc)` and
+        `(bigomega+180, omega+180, tc')` are exactly degenerate).  Called
+        ONCE, from `run.py`, at the seam between sampling and
+        post-processing, so the convergence check, the mode reporter, the
+        seed ledger, the tables and the plots all see the same folded draws
+        -- folding per consumer is how they come to disagree, and a
+        diagnostic computed on the unfolded coordinate lies in the direction
+        of reporting non-convergence for chains that agree exactly.
+
+        Component-agnostic, like every other hook here: a component opts in
+        by defining `fold_node_degeneracy(posterior)` (returning True when
+        anything moved) and nothing in `System` or `run.py` learns its name.
+
+        A component rewrites only the RAW sampled coordinates; every
+        Deterministic is regenerated from them here, in one pass.  That is
+        the point of the split -- the alternative, flipping each derived
+        variable by hand, needs a list of everything that moves, and such a
+        list goes stale silently the next time one is added.
+
+        Returns the NAMES it regenerated, which the caller needs because
+        they come back in INTERNAL units while the posterior around them is
+        already in the user's.  Empty when nothing moved.
+
+        `sample_stats["lp"]` is deliberately left alone.  The two labels have
+        the same PHYSICAL posterior density -- the observation term is
+        identical and every prior term is symmetric under the reflection, both
+        asserted in tests/test_node_degeneracy.py -- so a folded draw's stored
+        lp is still its lp.  Where a coordinate's raw excursion trips
+        `_RAW_CANCELLATION_CLIP` (tc's does, by ~1e5 raw units), the
+        difference that clip introduces is an artifact of the sampled
+        coordinate rather than a density, and re-deriving lp from the folded
+        raws would record the artifact instead of removing it.
+        """
+        posterior = getattr(idata, "posterior", None)
+        if posterior is None:
+            return set()
+        moved = False
+        for comp in self.active_components.values():
+            fold = getattr(comp, "fold_node_degeneracy", None)
+            if fold is None:
+                continue
+            try:
+                moved = bool(fold(posterior)) or moved
+            except Exception as exc:  # a fold must never kill a finished fit
+                logger.warning(
+                    "[%s] degeneracy fold failed (%s); the draws are left "
+                    "unfolded, so any diagnostic on the degenerate "
+                    "coordinate is computed on both labels at once.",
+                    getattr(comp, "prefix", comp),
+                    exc,
+                )
+        if not moved:
+            return set()
+        try:
+            regenerated = pm.compute_deterministics(
+                posterior,
+                model=model,
+                merge_dataset=False,
+                progressbar=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "could not regenerate the deterministics after the "
+                "degeneracy fold (%s); the raw draws are folded and the "
+                "derived ones are NOT, so they disagree -- treat this "
+                "trace's derived columns as unreliable.",
+                exc,
+            )
+            return set()
+        for name in regenerated.data_vars:
+            if name in posterior:
+                posterior[name].values[...] = regenerated[name].values
+        logger.info(
+            "degeneracy fold applied; %d deterministics regenerated.",
+            len(regenerated.data_vars),
         )
-
-        # Pull the values in the exact order the function expects them
-        input_values = [raw_point[v.name] for v in model.free_RVs]
-
-        physical_values = eval_fn(*input_values)
-        param_lookup = self.get_parameter_lookup()
-
-        results = {}
-        for var, val in zip(output_vars, physical_values):
-            if var.name in param_lookup:
-                # Standardize: Always use from_internal to ensure we return User Units
-                results[var.name] = param_lookup[var.name].from_internal(val)
-            else:
-                results[var.name] = val
-
-        return results
+        return {n for n in regenerated.data_vars if n in posterior}
 
     def distribute_posterior(self, idata):
         """Maps the traces from idata back to the individual Parameter objects."""
@@ -667,10 +1511,20 @@ class System(Component):
                 if attr.label in posterior:
                     # Case A: Named Deterministic in the trace (user units).
                     attr.posterior = posterior[attr.label]
-                elif attr.expression is not None:
+                elif attr.expression is not None or attr.element_expressions:
                     # Case B: Not in the trace; evaluate the PyTensor expression.
                     # Pass param_lookup so generate_posterior converts user-unit
                     # inputs → internal → evaluates → back to user units.
+                    #
+                    # element_expressions belongs in this test as much as the
+                    # whole-vector expression does: a vector every element of
+                    # which is derived one element at a time has NEITHER a
+                    # Deterministic in the trace (build_pymc only tracks a node
+                    # when something is sampled) nor an `expression`, so it fell
+                    # through both cases and the reporting layer showed its
+                    # initval with blank errors (review 1.10.9).
+                    # Parameter._element_expression_value decides what is
+                    # actually evaluable; this test only has to let it be asked.
                     attr.posterior = attr.generate_posterior(
                         posterior, param_lookup=param_lookup
                     )
@@ -747,8 +1601,12 @@ class System(Component):
 
         The whitened start is 0.0 for every logit element and
         ``(initval - mu)/sigma`` for a Gaussian-path one (see
-        ``get_raw_start``); this forwards it through each RV's transform so
-        PyMC can take it as an ``initvals`` dict.
+        ``get_raw_start``); this forwards it through each RV's transform, so
+        it is comparable to -- and after ``recenter_whitening_anchor``, equal
+        to -- ``Model.initial_point()``.  Nothing passes it to a sampler as
+        an ``initvals`` dict any more (review 4.3.1): the model's own initial
+        point is the start.  Its consumer is the startup audit table, which
+        reports the point the sampler will actually begin from.
 
         Returns only that dict.  It used to return three more things -- a
         vector of 1.0s sized by the total transformed dimension (for a NUTS
@@ -795,7 +1653,19 @@ class System(Component):
         then tells each component to compile its own plotters.
         """
         all_params = self.get_all_parameters()
-        self.plot_params = [p for p in all_params if p.expression is None]
+        # The compiled plotters take the NON-derived parameters as inputs.  A
+        # vector whose instances chose different parameterizations is derived on
+        # only some elements, and it belongs here: its sampled elements have no
+        # other input, and its derived ones are read from the point (which
+        # carries the whole Deterministic vector) rather than recomputed.
+        # (Read from the build's own role masks, not from `expression is None`:
+        # a fully derived vector may be declared per element too, and then its
+        # `expression` field is None while every element is derived.)
+        self.plot_params = [
+            p
+            for p in all_params
+            if not bool(np.all(np.atleast_1d(p.is_derived)))
+        ]
 
         # Delegate the actual compilation to the components
         for comp in self.active_components.values():

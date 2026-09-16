@@ -292,3 +292,77 @@ def test_compute_summary_handles_scalar_float_posterior():
     assert np.isclose(summary.median, 1.0, rtol=1e-6), (
         f"Scalar-float posterior: expected median 1.0, got {summary.median}"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Review 6.2.1 -- cached compile (and why the sample axis is still a loop)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_generate_posterior_compiles_once_across_calls():
+    """
+    Given a derived parameter evaluated over the same posterior twice --
+    which is what a per-mode report, or a GUI re-solve, does,
+    When generate_posterior runs the second time,
+    Then no new pytensor.function is compiled: the evaluator is cached on the
+    Parameter, keyed by the input signature (review 6.2.1).  Compiling was
+    the expensive half; the per-sample loop it feeds costs ~4 us a draw and
+    is measured, in _posterior_evaluator's comment, to be the cheaper answer.
+    """
+    # ARRANGE
+    with pm.Model():
+        p_mass = _mass_param()
+        p_mass.build_pymc()
+        p_double = Parameter(
+            label="planet.b.mass2",
+            unit=u.jupiterMass,
+            internal_unit=u.solMass,
+            expression=lambda: p_mass.value * 2.0,
+        )
+        p_double.build_pymc()
+
+    posterior = {p_mass.label: np.linspace(0.5, 2.0, 8)}
+    first = p_double.generate_posterior(posterior)
+    assert p_double._posterior_fns
+    key = next(iter(p_double._posterior_fns))
+    fn = p_double._posterior_fns[key]
+
+    # ACT
+    second = p_double.generate_posterior(posterior)
+
+    # ASSERT: same cached function object, same answer
+    assert set(p_double._posterior_fns) == {key}
+    assert p_double._posterior_fns[key] is fn
+    np.testing.assert_allclose(first, second, rtol=1e-12)
+
+
+def test_generate_posterior_evaluates_every_draw():
+    """
+    Given a many-draw posterior,
+    When generate_posterior evaluates a derived parameter over it,
+    Then every draw is evaluated -- the result is the expression applied
+    sample by sample, with the sample axis last (the ArviZ convention).
+    """
+    # ARRANGE
+    n_draws = 200
+    with pm.Model():
+        p_mass = _mass_param()
+        p_mass.build_pymc()
+        p_double = Parameter(
+            label="planet.b.mass2",
+            unit=u.solMass,
+            internal_unit=u.solMass,
+            expression=lambda: p_mass.value * 2.0,
+        )
+        p_double.build_pymc()
+
+    rng = np.random.default_rng(0)
+    draws = rng.uniform(0.5, 2.0, size=n_draws)
+    posterior = {p_mass.label: draws}
+
+    # ACT
+    result = np.asarray(p_double.generate_posterior(posterior))
+
+    # ASSERT
+    assert result.shape[-1] == n_draws
+    np.testing.assert_allclose(np.squeeze(result), 2.0 * draws, rtol=1e-12)

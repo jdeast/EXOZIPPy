@@ -26,7 +26,16 @@ class RVInstrument(Instrument):
         # Which star the RVs are of; its Doppler signal is the sum over
         # every orbit that star is a body of (planetary reflex and stellar
         # companions alike).
-        self.star_ndx = [int(c.get("star_ndx", 0)) for c in self.config]
+        # Index or name (as the schema below advertises): resolved through
+        # the one shared translator, which reads the star instance names off
+        # the raw system config -- available here, where system.star is not.
+        self.star_ndx = [
+            self.resolve_star_ndx(
+                c.get("star_ndx"),
+                f"[{self.prefix}] {c.get('name', i)} star_ndx",
+            )
+            for i, c in enumerate(self.config)
+        ]
         # Rossiter-McLaughlin: a file may set `rm: <orbit_name>` to add the
         # in-transit RM distortion of that orbit to this instrument's RV
         # model (off by default -> the RV likelihood is unchanged). Optional
@@ -43,6 +52,14 @@ class RVInstrument(Instrument):
                     f"[{self.prefix}] unknown rm_model {m!r}; expected one of "
                     f"{sorted(_valid_rm)}."
                 )
+        # Light-travel-time (Roemer delay) correction on the RM occultation
+        # geometry (see components/rm.py, components/ltt.py) -- on by
+        # default (Jason's decision: transit/rm/astrometry on, rv/mulens
+        # off; matches EXOFASTv2). Only meaningful on a file that also sets
+        # `rm:`; harmless (unread) otherwise, same as rm_band/rm_model.
+        self.light_travel_time = [
+            bool(c.get("light_travel_time", True)) for c in self.config
+        ]
         self.total_detrend_cols = 0
 
     @property
@@ -71,18 +88,27 @@ class RVInstrument(Instrument):
 
     @classmethod
     def get_utilities(cls):
-        from ...utilities.registry import UtilitySpec
+        from ...utilities import lomb_scargle
+        from ...utilities.registry import (
+            UtilitySpec,
+            argparse_subprocess_runner,
+        )
 
         return [
             UtilitySpec(
                 name="lomb_scargle",
                 label="Lomb-Scargle periodogram",
                 description=(
-                    "Lomb-Scargle radial-velocity periodogram (not yet "
-                    "implemented)."
+                    "Lomb-Scargle radial-velocity periodogram: report the "
+                    "period, epoch and semi-amplitude of the strongest "
+                    "signal."
                 ),
                 component_keys=["rvinstrument"],
-                available=False,
+                available=True,
+                build_parser=lomb_scargle.build_parser,
+                run=argparse_subprocess_runner(
+                    "exozippy.utilities.lomb_scargle"
+                ),
             ),
         ]
 
@@ -106,8 +132,9 @@ class RVInstrument(Instrument):
                 "accepts": ["star"],
                 "required": False,
                 "doc": (
-                    "Index or name of the observed star (default 0). The RV "
-                    "model sums orbit.K over every orbit containing this star."
+                    "Index or name of the observed star (default 0); the "
+                    "'star.<name>' path spelling works too. The RV model "
+                    "sums orbit.K over every orbit containing this star."
                 ),
             },
             {
@@ -129,7 +156,7 @@ class RVInstrument(Instrument):
         ]
 
     def load_data(self, system):
-        """Stage 1a: Load CSVs and generate data-driven bounds/inits."""
+        """Stage 1: Load CSVs and generate data-driven bounds/inits."""
         self.gamma_init = [0.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
 
@@ -163,6 +190,125 @@ class RVInstrument(Instrument):
         blocks.finalize("rv", user_factor=(u.solRad / u.d).to(u.m / u.s))
 
         self.k_init = self._estimate_k_init()
+
+        # Blind seeding: measure the period and conjunction epoch from the
+        # velocities when nothing else supplies them.  Stage 1a, not stage 2
+        # -- see components/globalsearch.py for why (Orbit builds tc's hard
+        # window at stage 2 from whatever start it can see).
+        self.ls_signal = None
+        self._seed_from_lombscargle(system)
+
+    def _seed_from_lombscargle(self, system):
+        """Seed orbital period and conjunction epoch from a Lomb-Scargle peak.
+
+        Runs only when the relaxation engine cannot already DERIVE the period
+        and conjunction time, and seeds only the quantities that were
+        missing.  A transit search on the same orbit outranks this one
+        (``globalsearch.QUALITY_TRANSIT``), so on a system with both, the
+        photometric period and epoch stand and the RVs contribute the
+        semi-amplitude.
+
+        The semi-amplitude is not pushed as a hint: it REPLACES
+        ``self.k_init``, which ``Planet.register_parameters`` already turns
+        into the ``planet.K`` hint at stage 2.  One channel, one number --
+        and the sinusoid fit is the better estimator of the two, since
+        ``sqrt(2) * std`` counts the noise variance as signal.
+        """
+        from .. import globalsearch
+
+        mode = globalsearch.search_mode(system)
+        if mode == "off":
+            return
+        orbit_ndx = globalsearch.sole_orbit_index(system, self.prefix)
+        if orbit_ndx is None:
+            return
+
+        cm = self.config_manager
+        groups = {
+            "period": (
+                f"orbit.{orbit_ndx}.period",
+                f"orbit.{orbit_ndx}.logP",
+            ),
+            "tc": (f"orbit.{orbit_ndx}.tc",),
+        }
+        satisfied = globalsearch.starts_satisfied(cm, groups)
+        if mode != "force" and all(satisfied.values()):
+            logger.debug(
+                "[%s] Lomb-Scargle not needed: the orbital period and "
+                "conjunction time are already derivable.",
+                self.prefix,
+            )
+            return
+
+        logger.info(
+            "[%s] no start value for %s -- running a Lomb-Scargle search "
+            "over %d velocities.",
+            self.prefix,
+            ", ".join(k for k, v in satisfied.items() if not v) or "(forced)",
+            self.time.size,
+        )
+
+        # Work in m/s with each instrument's own offset removed: a
+        # periodogram of the raw concatenation measures the offsets, not the
+        # planet.
+        to_ms = (u.solRad / u.d).to(u.m / u.s)
+        gammas = np.asarray(self.gamma_init, dtype=float)
+        residual = self.rv * to_ms - gammas[self.inst_map]
+        signal = globalsearch.lombscargle_search(
+            self.time,
+            residual,
+            self.err * to_ms,
+            inst_map=self.inst_map,
+            context=self.prefix,
+        )
+        self.ls_signal = signal
+        if signal is None:
+            return
+
+        q = globalsearch.QUALITY_RV
+        source = f"Lomb-Scargle on {self.n_elements} RV data set(s)"
+        applied = []
+        if mode == "force" or not satisfied["period"]:
+            applied.append(
+                globalsearch.seed_start(
+                    cm, f"orbit.{orbit_ndx}.period", signal.period, q, source
+                )
+            )
+        if mode == "force" or not satisfied["tc"]:
+            applied.append(
+                globalsearch.seed_start(
+                    cm, f"orbit.{orbit_ndx}.tc", signal.epoch, q, source
+                )
+            )
+        if np.isfinite(signal.amplitude) and signal.amplitude > 0.0:
+            logger.info(
+                "[%s] planet.K start moved from %.4g to %.4g m/s (the "
+                "Lomb-Scargle sinusoid's semi-amplitude replaces "
+                "sqrt(2) x scatter).",
+                self.prefix,
+                self.k_init,
+                signal.amplitude,
+            )
+            self.k_init = float(signal.amplitude)
+
+        if not any(applied):
+            # Every orbital seed was declined -- a transit search got there
+            # first (QUALITY_TRANSIT).  Saying the period came from the RVs
+            # would be false, and the transit component has already said
+            # where it really came from.
+            return
+
+        get_collector(system).add(
+            "Initial values for the orbital period and time of conjunction "
+            "were measured from the radial velocities with a Lomb-Scargle "
+            r"periodogram \citep{Lomb:1976,Scargle:1982}, as implemented in "
+            r"\texttt{astropy} \citep{VanderPlas:2018,Astropy:2022}. "
+            "Starting values do not enter the likelihood and cannot move the "
+            "posterior.",
+            section="data",
+            key=f"{self.prefix}.global_search",
+            rank=70,
+        )
 
     def _estimate_k_init(self):
         """Seed for the planetary RV semi-amplitude, in m/s.
@@ -211,7 +357,7 @@ class RVInstrument(Instrument):
         return 1.0
 
     def register_parameters(self, system):
-        """Stage 2: Embed data-driven hints into the PyMC manifest."""
+        """Stage 3: Embed data-driven hints into the PyMC manifest."""
         gamma_arr = np.atleast_1d(self.gamma_init)
         for i in range(self.n_elements):
             val = (
@@ -274,65 +420,156 @@ class RVInstrument(Instrument):
             omap.append(o)
         return pt.stack(k_nodes), np.asarray(omap, dtype=int)
 
-    def build_likelihood(self, model, system):
-        time = pm.Data("rv_time", self.time)
-        rv = pm.Data("rv_data", self.rv)
-        err = pm.Data("rv_err", self.err)
+    def _rv_model(self, system, t, blocks, offset=None):
+        """The RV model on times ``t`` -- THE expression, built once.
 
+        ``build_likelihood`` calls this with the data's ``pm.Data`` time
+        vector, the files' own row blocks and the per-row ``gamma`` as
+        ``offset``; ``compile_plotters`` calls it with a symbolic grid laid
+        out in per-file blocks and no offset (the plotted curves are
+        gamma-free, the data are drawn gamma-subtracted).  So the plotted
+        curve is literally the likelihood code run on other times, and the
+        Rossiter-McLaughlin anomaly lands only on the rows of a file that
+        asked for it -- by INDEX, exactly as in the likelihood -- rather
+        than on a whole matrix column for every instrument (review 1.5.5).
+        The in-repo template is ``AstrometryInstrument._rel_model``.
+
+        ``t``      -- ``(N,)`` time tensor.
+        ``blocks`` -- ``[(inst_idx, rows), ...]``: the concrete row indices
+                      of ``t`` that belong to each file (a file may appear
+                      more than once; a file with no rows may be omitted).
+        ``offset`` -- optional ``(N,)`` tensor added first (the likelihood's
+                      ``gamma[inst_map]``), or None.
+
+        Returns ``(rv_model, rv_matrix)``, both in the internal RV unit:
+
+        ``rv_model`` ``(N,)`` -- ``offset`` + the sum over every orbit
+            containing the observed star of ``K * phase`` + each RM file's
+            anomaly on that file's own rows.  WITHOUT the detrend term,
+            which is per observation and is added by ``build_likelihood``
+            alone.
+        ``rv_matrix`` ``(N, n_member_orbits)`` -- the per-orbit columns of
+            the same model (``self._plot_orbit_map`` names the orbit of
+            each column), an RM file's anomaly sitting in ITS orbit's
+            column on ITS rows only, so ``sum(rv_matrix, axis=1)`` is
+            ``rv_model - offset`` and the phased panels' "other orbits"
+            cleaning subtracts the RM from a non-RM instrument's points
+            never, and from the RM instrument's points exactly when the
+            panel is for another orbit.
+
+        The likelihood's numerics are pinned bit-identical on every shipped
+        example, so the op sequence in here -- offset first, then the
+        Keplerian sum, then the RM rows in file order -- is the op sequence
+        the likelihood always had.
+        """
         orbits = system.orbit
-        if len(set(self.star_ndx)) > 1:
-            raise NotImplementedError(
-                f"[{self.prefix}] all RV instruments must observe the same "
-                f"star for now (got star_ndx={self.star_ndx})."
-            )
-
-        # 1. Construct the RV Model: start with the gamma constant offset
-        rv_model = self.gamma.value[self.inst_map_tensor]
+        K_vec, omap = self._orbit_rv_terms(system, self.star_ndx[0])
+        self._plot_orbit_map = omap
 
         # sum the contribution from every orbit containing the observed star
-        K_vec, omap = self._orbit_rv_terms(system, self.star_ndx[0])
-        rv_model += pt.sum(
-            orbits.get_radial_velocity(time, K_vec, omap), axis=1
-        )
+        kep = orbits.get_radial_velocity(t, K_vec, omap)  # (N, n_member)
+        rv_model = pt.sum(kep, axis=1)
+        if offset is not None:
+            rv_model = offset + rv_model
+        rv_matrix = kep
 
-        # 1b. Rossiter-McLaughlin in-transit distortion. No-op unless a file
-        # set `rm: <orbit_name>` -> the RV model above is unchanged byte for
+        # Rossiter-McLaughlin in-transit distortion. No-op unless a file set
+        # `rm: <orbit_name>` -> the RV model above is unchanged byte for
         # byte (mirrors the GP opt-in). compute_rm_rv returns m/s; convert to
         # the internal RV unit (solRad/d) and add only to that file's rows.
         #
         # INDEX, do not pt.switch. A switch over the branch VALUES would
         # evaluate the Hirano kernel at every instrument's timestamps and then
         # throw away the rows it does not apply to -- the JAX where-trap
-        # (CLAUDE.md): a `where` whose unselected branch can be invalid poisons
-        # the gradient of the selected one too. Slicing the RM instrument's own
-        # rows makes the unselected rows unreachable by construction instead of
-        # merely masked, and is cheaper by exactly the fraction of the data
-        # that is not the RM file (the H2011 kernel is a 201 x 64 quadrature
-        # PER ROW; on a 40-of-73-row example it was 83% wasted work).
+        # (the CLAUDE.md invariant): a `where` whose unselected branch can be
+        # invalid poisons the gradient of the selected one too. Slicing the
+        # RM instrument's own rows makes the unselected rows unreachable by
+        # construction instead of merely masked, and is cheaper by exactly
+        # the fraction of the data that is not the RM file (the H2011 kernel
+        # is a 201 x 64 quadrature PER ROW; on a 40-of-73-row example it was
+        # 83% wasted work).
         if any(self.rm_orbit):
             from ..rm import compute_rm_rv, resolve_rm_indices
 
             rv_ms_per_internal = float((u.solRad / u.d).to(u.m / u.s))
-            for i, oname in enumerate(self.rm_orbit):
+            omap_list = list(omap)
+            for inst_idx, rows in blocks:
+                oname = self.rm_orbit[inst_idx]
                 if not oname:
                     continue
-                rows = np.flatnonzero(self.inst_map == i)
+                # A concrete index array, not a slice: `t` may be a pm.Data
+                # whose length pytensor treats as symbolic, so a slice's
+                # shape is symbolic too and the JAX backend cannot trace the
+                # RM subtensor ("Shapes must be 1D sequences of concrete
+                # values of integer type").  An advanced index of constants
+                # has a statically known length and traces fine.
+                rows = np.asarray(rows, dtype=int)
                 if rows.size == 0:
                     continue
                 oidx, pidx, bidx = resolve_rm_indices(
-                    system, oname, self.rm_band[i]
+                    system, oname, self.rm_band[inst_idx]
                 )
+                if oidx not in omap_list:
+                    # The anomaly is the transited star's own line
+                    # distortion; an RM orbit this instrument's star is not
+                    # a body of has no column to live in and no physics to
+                    # justify.  The old plot path dropped it silently.
+                    raise ValueError(
+                        f"[{self.prefix}.{self.names[inst_idx]}] rm: "
+                        f"{oname!r} names an orbit that does not contain "
+                        f"the observed star (star_ndx={self.star_ndx[inst_idx]}"
+                        f"); the RM anomaly can only be modeled on an orbit "
+                        f"the star is a body of."
+                    )
                 rm_ms = compute_rm_rv(
                     system,
-                    time[rows],
+                    t[rows],
                     oidx,
                     pidx,
                     bidx,
-                    model=self.rm_model[i],
+                    model=self.rm_model[inst_idx],
+                    light_travel_time_active=self.light_travel_time[inst_idx],
                 )  # (len(rows),) m/s
-                rv_model = pt.inc_subtensor(
-                    rv_model[rows], rm_ms / rv_ms_per_internal
-                )
+                rm_internal = rm_ms / rv_ms_per_internal
+                rv_model = pt.inc_subtensor(rv_model[rows], rm_internal)
+                col = omap_list.index(oidx)
+                rv_matrix = pt.inc_subtensor(rv_matrix[rows, col], rm_internal)
+
+        return rv_model, rv_matrix
+
+    def _data_blocks(self):
+        """The data's own row blocks, ``[(i, rows_i), ...]`` in file order
+        (``Instrument.rows``, materialized -- see ``_rv_model``)."""
+        blocks = []
+        for i in range(self.n_elements):
+            sl = self.rows(i)
+            blocks.append((i, np.arange(sl.start, sl.stop)))
+        return blocks
+
+    def build_likelihood(self, model, system):
+        time = pm.Data("rv_time", self.time)
+        rv = pm.Data("rv_data", self.rv)
+        err = pm.Data("rv_err", self.err)
+
+        if len(set(self.star_ndx)) > 1:
+            raise NotImplementedError(
+                f"[{self.prefix}] all RV instruments must observe the same "
+                f"star for now (got star_ndx={self.star_ndx})."
+            )
+
+        # 1. The one RV expression (see _rv_model): the gamma constant
+        # offset first, then the Keplerian sum, then each RM file's rows.
+        # Retained as plain attributes (not Deterministics -- (N_obs,) per
+        # draw per chain); compile_plotters compiles the matrix as the
+        # plotted model AT the observations.
+        rv_model, rv_matrix = self._rv_model(
+            system,
+            time,
+            self._data_blocks(),
+            offset=self.gamma.value[self.inst_map_tensor],
+        )
+        self._rv_model_data_node = rv_model
+        self._rv_matrix_data_node = rv_matrix
 
         # detrending
         if self.total_detrend_cols > 0:
@@ -366,90 +603,111 @@ class RVInstrument(Instrument):
         )
         get_collector(system).add_software("exoplanet-core")
 
+    # Points per block on a plotted model grid; one size for the unphased
+    # span and the phased period window so both share one compiled layout.
+    _PLOT_GRID_N = 2000
+
+    def _rm_signature(self, i):
+        """What makes file ``i``'s RV model differ from another file's:
+        its Rossiter-McLaughlin settings (None without ``rm:``)."""
+        if not self.rm_orbit[i]:
+            return None
+        return (
+            self.rm_orbit[i],
+            self.rm_band[i],
+            self.rm_model[i],
+            bool(self.light_travel_time[i]),
+        )
+
+    def _plot_layout(self):
+        """The per-file blocks the plotted model is compiled for.
+
+        Block 0 is the REFERENCE instrument: the first file without
+        ``rm:`` -- the plain Keplerian every non-RM file's likelihood
+        scores -- or file 0 when every file has RM.  Its curve is the
+        chart's "model" trace.  Then one block per instrument whose model
+        differs from the reference's (a different RM signature) and per GP
+        instrument: those get their own curves, mirroring the GP treatment
+        (a per-instrument "model+GP" curve over that instrument's own
+        span).  Returns ``(ref, extra)`` with ``extra`` the sorted list of
+        instrument indices after block 0.
+        """
+        ref = next(
+            (i for i in range(self.n_elements) if not self.rm_orbit[i]), 0
+        )
+        ref_sig = self._rm_signature(ref)
+        extra = {
+            i
+            for i in range(self.n_elements)
+            if self._rm_signature(i) != ref_sig
+        }
+        extra.update(int(i) for i in getattr(self, "_gp_pred_on_grid", {}))
+        return ref, sorted(extra)
+
     def compile_plotters(self, model, system):
-        """Compiles the fast PyTensor functions used by the plot_data specs."""
-        # 1. We need a time grid input
+        """Compile the plotted model -- the likelihood's expression, twice.
+
+        ``_rv_data_fn(*params)`` -> the per-orbit matrix AT the
+            observations: literally the node ``build_likelihood`` built
+            (``_rv_model`` on the data blocks), compiled against the plot
+            parameters.  The phased panels' "other orbits" cleaning reads
+            it, so a non-RM instrument's in-transit points no longer have a
+            spurious RM bump subtracted (review 1.5.5).
+        ``_rv_grid_fn(t, *params)`` -> ``(rv_full, rv_matrix)`` on a plot
+            GRID laid out in ``_plot_layout``'s blocks, ``_PLOT_GRID_N``
+            rows each.  Every model curve -- unphased span, phased period
+            window, per-instrument RM and GP curves -- is this one function
+            fed a different ``t``.
+        """
         t_input = pt.vector("t_input")
-
-        # 2. Get the global symbols to match the MCMC trace signature
         param_symbols = [p.value for p in system.plot_params]
-
-        # 3. Pull the physics from the system
         orbits = getattr(system, "orbit", None)
 
+        # Per-file GP conditional-mean evaluators (no-op without a gp: key).
+        # First, because the plot layout gives every GP instrument a block.
+        self._compile_gp_plotters(system)
+
         if orbits is not None:
-            K_vec, omap = self._orbit_rv_terms(system, self.star_ndx[0])
-            self._plot_orbit_map = omap
-
-            # The matrix of shape (N_times, N_member_orbits)
-            rv_matrix_node = orbits.get_radial_velocity(t_input, K_vec, omap)
-
-            # Rossiter-McLaughlin: fold the in-transit distortion into the
-            # plotted model (it is part of the model the likelihood fits), so
-            # the RM anomaly shows in BOTH the unphased (full) and phased
-            # (per-orbit) RV panels. Added to the RM orbit's own matrix column.
-            # No-op unless a file set `rm:`.
-            if any(self.rm_orbit):
-                from ..rm import compute_rm_rv, resolve_rm_indices
-
-                rv_ms_per_internal = float((u.solRad / u.d).to(u.m / u.s))
-                omap_list = list(omap)
-                seen = set()
-                for i, oname in enumerate(self.rm_orbit):
-                    if not oname or oname in seen:
-                        continue
-                    seen.add(oname)
-                    oidx, pidx, bidx = resolve_rm_indices(
-                        system, oname, self.rm_band[i]
-                    )
-                    if oidx not in omap_list:
-                        continue
-                    col = omap_list.index(oidx)
-                    rm_col = (
-                        compute_rm_rv(
-                            system,
-                            t_input,
-                            oidx,
-                            pidx,
-                            bidx,
-                            model=self.rm_model[i],
-                        )
-                        / rv_ms_per_internal
-                    )
-                    rv_matrix_node = pt.set_subtensor(
-                        rv_matrix_node[:, col], rv_matrix_node[:, col] + rm_col
-                    )
-
-            rv_full_node = pt.sum(rv_matrix_node, axis=1)
+            n_grid = self._PLOT_GRID_N
+            ref, extra = self._plot_layout()
+            self._rv_layout = [ref] + extra
+            blocks = [
+                (inst_idx, np.arange(k * n_grid, (k + 1) * n_grid))
+                for k, inst_idx in enumerate(self._rv_layout)
+            ]
+            rv_full_node, rv_matrix_node = self._rv_model(
+                system, t_input, blocks
+            )
 
             # Retain the symbolic nodes and their time input so plot_data
             # can (a) derive param_deps by walking the graph and (b) hand
-            # G5 the symbolic tensors behind the model traces for its own
-            # compiled re-evaluation. Not needed by the CLI plot() path.
+            # the GUI the symbolic tensors behind the model traces.  Not
+            # needed by the CLI plot() path.
             self._rv_t_input = t_input
             self._rv_matrix_node = rv_matrix_node
             self._rv_full_node = rv_full_node
 
             # Save them to SELF, not the system!
-            self._compiled_full_rv = pytensor.function(
+            self._rv_grid_fn = pytensor.function(
                 inputs=[t_input] + param_symbols,
-                outputs=rv_full_node,
+                outputs=[rv_full_node, rv_matrix_node],
                 on_unused_input="ignore",
             )
-
-            self._compiled_rv_matrix = pytensor.function(
-                inputs=[t_input] + param_symbols,
-                outputs=rv_matrix_node,
-                on_unused_input="ignore",
+            data_node = getattr(self, "_rv_matrix_data_node", None)
+            self._rv_data_fn = (
+                pytensor.function(
+                    inputs=param_symbols,
+                    outputs=data_node,
+                    on_unused_input="ignore",
+                )
+                if data_node is not None
+                else None
             )
-
-        # Per-file GP conditional-mean evaluators (no-op without a gp: key).
-        self._compile_gp_plotters(system)
 
     # ------------------------------------------------------------------
     # Shared data preparation. Both the matplotlib plot() path and the
     # GUI plot_data() path go through these helpers, so the two paths
-    # always draw the exact same arrays (see plotspec.PlotSpec).
+    # always draw the exact same arrays (see chart.Chart).
     # ------------------------------------------------------------------
     def _rv_factor(self):
         """Internal-units -> user-units (m/s) conversion for RV values.
@@ -465,103 +723,219 @@ class RVInstrument(Instrument):
 
     def _unphased_grid(self):
         """Smooth 64-bit time grid spanning the data (for model curves)."""
-        return np.linspace(self.time.min(), self.time.max(), 2000).astype(
+        return np.linspace(
+            self.time.min(), self.time.max(), self._PLOT_GRID_N
+        ).astype(np.float64)
+
+    def _instrument_grid(self, i):
+        """Smooth time grid over instrument ``i``'s own data span."""
+        t_i = self.time[self.rows(i)]
+        return np.linspace(t_i.min(), t_i.max(), self._PLOT_GRID_N).astype(
             np.float64
         )
 
-    def _eval_unphased_model(self, system, point):
+    def _eval_rv_grid(self, t_blocks, param_values):
+        """Evaluate the plotted model on one grid per layout block.
+
+        ``t_blocks[k]`` is the ``(_PLOT_GRID_N,)`` grid for block ``k`` of
+        ``self._rv_layout``.  Returns ``(full, matrix)`` split back per
+        block: ``full[k]`` the gamma-free model on that grid, ``matrix[k]``
+        its ``(_PLOT_GRID_N, n_member_orbits)`` per-orbit columns.
+        Internal units.
+        """
+        n_grid = self._PLOT_GRID_N
+        t_all = np.concatenate(
+            [np.asarray(t, dtype=np.float64) for t in t_blocks]
+        )
+        if t_all.shape[0] != n_grid * len(self._rv_layout):
+            raise ValueError(
+                f"[{self.prefix}] plot grid layout needs {n_grid} points "
+                f"per block, got {[len(t) for t in t_blocks]}."
+            )
+        full, matrix = self._rv_grid_fn(t_all, *param_values)
+        full = np.asarray(full).reshape(len(self._rv_layout), n_grid)
+        matrix = np.asarray(matrix).reshape(len(self._rv_layout), n_grid, -1)
+        return full, matrix
+
+    def _rv_at_times(self, param_values, i, t):
+        """Instrument ``i``'s plotted (gamma-free) model at arbitrary times.
+
+        The compiled grid layout is fixed at ``_PLOT_GRID_N`` rows per
+        block, so ``t`` is fed through it in chunks of that size --
+        instrument ``i``'s block carrying the chunk (padded with its last
+        time), every other block a dummy -- and the results stitched back.
+        An instrument that has no block of its own shares the reference's
+        model by construction (see ``_plot_layout``) and reads block 0.
+        A convenience for a caller that wants the likelihood's model for
+        ONE file at times of its own choosing (tests, a GUI probe); the
+        panels feed the layout directly.  Returns ``(full, matrix)`` in
+        internal units: ``(len(t),)`` and ``(len(t), n_member_orbits)``.
+        """
+        t = np.asarray(t, dtype=np.float64).ravel()
+        n_grid = self._PLOT_GRID_N
+        k = self._rv_layout.index(i) if i in self._rv_layout else 0
+        fulls, mats = [], []
+        for start in range(0, max(t.size, 1), n_grid):
+            chunk = t[start : start + n_grid]
+            fill = chunk[-1] if chunk.size else float(self.time[0])
+            block = np.full(n_grid, fill)
+            block[: chunk.size] = chunk
+            t_blocks = [np.full(n_grid, fill) for _ in self._rv_layout]
+            t_blocks[k] = block
+            full, matrix = self._eval_rv_grid(t_blocks, param_values)
+            fulls.append(full[k][: chunk.size])
+            mats.append(matrix[k][: chunk.size])
+        return np.concatenate(fulls), np.concatenate(mats)
+
+    def _unphased_shared(self, system, point):
+        """One evaluation of the plot layout for the unphased panel: block
+        0 on the full data span, every other block on its own instrument's
+        span.  ``_eval_unphased_model``, ``_eval_unphased_rm_models`` and
+        ``_eval_unphased_gp_models`` all read from it."""
+        param_values = self._point_to_plot_params(point, system)
+        t_blocks = [self._unphased_grid()] + [
+            self._instrument_grid(i) for i in self._rv_layout[1:]
+        ]
+        full, _ = self._eval_rv_grid(t_blocks, param_values)
+        return {"param_values": param_values, "t": t_blocks, "full": full}
+
+    def _eval_unphased_model(self, system, point, shared=None):
         """Summed RV model on the pretty grid, returned in m/s.
 
-        Physical (orbit + gamma-free) signal only; any GP is per-instrument
-        and is added by _eval_unphased_gp_models.
+        The reference instrument's physical (gamma-free) model over the
+        whole data span (see ``_plot_layout``); the per-instrument RM and
+        GP curves are added by the two helpers below.
         """
-        t_pretty = self._unphased_grid()
-        param_values = self._point_to_plot_params(point, system)
-        y_model = self._compiled_full_rv(t_pretty, *param_values)
-        if y_model.ndim > 1:
-            y_model = np.squeeze(y_model)
-        return t_pretty, y_model * self._rv_factor()
+        if shared is None:
+            shared = self._unphased_shared(system, point)
+        return shared["t"][0], shared["full"][0] * self._rv_factor()
 
-    def _eval_unphased_gp_models(self, system, point):
+    def _eval_unphased_rm_models(self, system, point, shared=None):
+        """Physical curves for the instruments whose model differs from the
+        reference's (their own RM settings), each over that instrument's
+        own span.  Returns a list of (instrument index, t, y in m/s); empty
+        when every file shares the reference's model -- the single-RM-file
+        case then draws exactly what it always did.
+        """
+        if shared is None:
+            shared = self._unphased_shared(system, point)
+        ref_sig = self._rm_signature(self._rv_layout[0])
+        factor = self._rv_factor()
+        out = []
+        for k, i in enumerate(self._rv_layout):
+            if k == 0 or self._rm_signature(i) == ref_sig:
+                continue
+            out.append((i, shared["t"][k], shared["full"][k] * factor))
+        return out
+
+    def _eval_unphased_gp_models(self, system, point, shared=None):
         """Full (physical + GP) unphased curves, one per GP instrument.
 
         The GP is a per-instrument noise model, so there is no single "full
         model" curve: each instrument that requested a GP gets its own,
         evaluated only over the span where that instrument actually has data
         (the conditional mean reverts to zero outside it, which would draw a
-        misleading flat line across the whole plot). Returns a list of
-        (instrument index, t, y in m/s); empty without any GP.
+        misleading flat line across the whole plot).  Its physical part is
+        that instrument's OWN block of the layout, so an RM file's GP curve
+        carries its RM too.  Returns a list of (instrument index, t, y in
+        m/s); empty without any GP.
         """
         if not self.has_gp_plotters():
             return []
+        if shared is None:
+            shared = self._unphased_shared(system, point)
         factor = self._rv_factor()
-        param_values = self._point_to_plot_params(point, system)
         out = []
-        for i in sorted(self._gp_pred_on_grid):
-            mask = self.inst_map == i
-            t_i = np.linspace(
-                self.time[mask].min(), self.time[mask].max(), 2000
-            ).astype(np.float64)
-            y_phys = self._compiled_full_rv(t_i, *param_values)
-            if y_phys.ndim > 1:
-                y_phys = np.squeeze(y_phys)
+        for k, i in enumerate(self._rv_layout):
+            if k == 0 or i not in self._gp_pred_on_grid:
+                continue
+            t_i = shared["t"][k]
             y_gp = self.gp_mean_on_grid(system, point, i, t_i)
-            out.append((i, t_i, (y_phys + y_gp) * factor))
+            out.append((i, t_i, (shared["full"][k] + y_gp) * factor))
         return out
 
-    def _instrument_gamma(self, point, i):
-        """The reference-point gamma for instrument i, in internal units.
+    def _phased_shared(self, system, point):
+        """The parts of a phased panel that do NOT depend on which orbit.
 
-        The value comes from the point when it is there, else from the
-        gamma Parameter's own initval -- the same fallback
-        _point_to_plot_params uses for every other plotted parameter.
+        ``_phased_arrays`` is called once per member orbit, and three of the
+        arrays it built were the same every time: the marshalled parameter
+        values, the RV matrix at the OBSERVED times (the model grid's matrix
+        does vary -- its time grid is that orbit's own period window), and
+        the per-observation GP + detrend corrections.  Recomputing them per
+        orbit meant N_orbits evaluations of a compiled function over the full
+        data set per posterior draw, and the spaghetti re-runs the whole
+        thing per draw (review 6.5.1).  Hoisted to once per (instrument,
+        point) and passed down.
 
-        A ``point.get(label, 0.0)`` here silently substituted ZERO for any
-        parameter absent from the draws, and pinned (``sigma: 0``)
-        parameters are always absent (an all-fixed vector never becomes a
-        pm.Deterministic, so it is in neither model.deterministics nor the
-        posterior).  A fit with a pinned nonzero offset therefore plotted
-        every point of that instrument shifted by the whole gamma away
-        from the model curve the likelihood actually fit.
+        Kept as a separate method rather than a cache keyed on the point:
+        ``point`` is a plain dict, so identity is the only key available and
+        it is not a safe one.
         """
-        vals = point.get(self.gamma.label)
-        if vals is None:
-            vals = self.gamma.initval
-        gamma_vals = np.atleast_1d(vals)
-        return gamma_vals[i] if i < len(gamma_vals) else gamma_vals[0]
+        param_values = self._point_to_plot_params(point, system)
+        return {
+            "param_values": param_values,
+            # The likelihood's own per-orbit matrix at the observations
+            # (see compile_plotters): an RM file's anomaly in its orbit's
+            # column on its rows only.
+            "data_rv_matrix": np.asarray(self._rv_data_fn(*param_values)),
+            # Phasing data that still contains the correlated (e.g. rotation)
+            # signal just smears the panel, so the GP conditional mean comes
+            # out of the data along with the other orbits' signal -- as does
+            # the fitted detrend model, which the likelihood adds per
+            # observation (build_likelihood's pt.dot) but no model curve on a
+            # pretty grid can carry.  Both are zeros when the feature is off,
+            # so this is a no-op then.
+            "extra_signals": self.gp_mean_at_data(system, point)
+            + self.detrend_at_data(point),
+        }
 
-    def _phased_arrays(self, system, point, col, o_idx):
+    def _phased_arrays(self, system, point, col, o_idx, shared=None):
         """
         Phase grid, isolated model curve, and the per-observation
         background (all other member orbits' signal) for one member
         orbit -- used by plot_data() (and via it plot()).
+
+        ``y_model`` is the reference instrument's curve; ``extra_models``
+        lists ``(instrument index, y)`` on the same phase grid for every
+        instrument whose model differs on THIS orbit (its RM lives in this
+        column, or the reference's does), so the RM anomaly is drawn on its
+        own instrument's curve and nowhere else.
+
+        ``shared`` is this (instrument, point)'s ``_phased_shared`` dict;
+        omit it and one is built, which is what a standalone caller wants
+        and what the per-orbit loop must NOT do.
         """
+        if shared is None:
+            shared = self._phased_shared(system, point)
         factor = self._rv_factor()
-        P_ref = float(
-            np.atleast_1d(point.get(system.orbit.period.label))[o_idx]
-        )
-        tc_ref = float(np.atleast_1d(point.get(system.orbit.tc.label))[o_idx])
+        P_ref = self._point_value(point, system.orbit.period, o_idx)
+        tc_ref = self._point_value(point, system.orbit.tc, o_idx)
 
         t_model = np.linspace(
-            tc_ref - 0.5 * P_ref, tc_ref + 0.5 * P_ref, 1000
+            tc_ref - 0.5 * P_ref, tc_ref + 0.5 * P_ref, self._PLOT_GRID_N
         ).astype(np.float64)
         phase_model = np.mod((t_model - tc_ref) / P_ref + 0.25, 1.0)
         sort_m = np.argsort(phase_model)
 
-        param_values = self._point_to_plot_params(point, system)
-        rv_matrix = self._compiled_rv_matrix(t_model, *param_values)
-        y_orbit = rv_matrix[:, col]
+        _, matrix = self._eval_rv_grid(
+            [t_model] * len(self._rv_layout), shared["param_values"]
+        )
+        y_orbit = matrix[0][:, col]
 
-        data_rv_matrix = self._compiled_rv_matrix(self.time, *param_values)
+        oname = system.orbit.names[o_idx]
+        ref = self._rv_layout[0]
+        ref_sig = self._rm_signature(ref)
+        extra_models = []
+        for k, i in enumerate(self._rv_layout):
+            if k == 0 or self._rm_signature(i) == ref_sig:
+                continue
+            if oname not in (self.rm_orbit[i], self.rm_orbit[ref]):
+                continue  # identical to the reference on this orbit
+            extra_models.append((i, matrix[k][:, col][sort_m] * factor))
+
         other_mask = np.ones(len(self._plot_orbit_map), dtype=bool)
         other_mask[col] = False
-        other_signals = np.sum(data_rv_matrix[:, other_mask], axis=1)
-
-        # Phasing data that still contains the correlated (e.g. rotation)
-        # signal just smears the panel, so the GP conditional mean is removed
-        # from the data here along with the other orbits' signal. Zeros for
-        # instruments without a GP, so this is a no-op then.
-        gp_signals = self.gp_mean_at_data(system, point)
+        other_signals = np.sum(shared["data_rv_matrix"][:, other_mask], axis=1)
 
         return {
             "P_ref": P_ref,
@@ -569,7 +943,8 @@ class RVInstrument(Instrument):
             "factor": factor,
             "phase_model": phase_model[sort_m],
             "y_model": y_orbit[sort_m] * factor,
-            "other_signals": other_signals + gp_signals,
+            "extra_models": extra_models,
+            "other_signals": other_signals + shared["extra_signals"],
         }
 
     def plot(self, system, points, filename_prefix="debug"):
@@ -584,13 +959,13 @@ class RVInstrument(Instrument):
 
     def plot_data(self, system, point=None):
         """
-        GUI plot specs for the RV instrument: one unphased RV-vs-time
+        GUI charts for the RV instrument: one unphased RV-vs-time
         chart plus one phased chart per member orbit. With point=None only
         the observed data traces are returned (raw preview, no model);
         with a point, model curves are added via the shared prep helpers.
-        See Component.plot_data and plotspec.PlotSpec.
+        See Component.plot_data and chart.Chart.
         """
-        from exozippy.plotspec import PlotSpec, Trace
+        from exozippy.chart import Chart, Trace
 
         factor = self._rv_factor()
         specs = []
@@ -599,7 +974,12 @@ class RVInstrument(Instrument):
         traces = []
         model_deps = []
         if point is not None:
-            t_pretty, y_model = self._eval_unphased_model(system, point)
+            # One evaluation of the compiled layout serves the reference
+            # curve and every per-instrument curve below.
+            shared = self._unphased_shared(system, point)
+            t_pretty, y_model = self._eval_unphased_model(
+                system, point, shared=shared
+            )
             deps = self._model_trace_param_deps(
                 getattr(self, "_rv_full_node", None), system
             )
@@ -614,11 +994,37 @@ class RVInstrument(Instrument):
                     node=getattr(self, "_rv_full_node", None),
                 )
             )
+            # One physical curve per instrument whose model differs from the
+            # reference's -- its own Rossiter-McLaughlin settings -- over
+            # that instrument's own span, so the RM anomaly is drawn on the
+            # curve of the file whose likelihood scored it and on no other
+            # (review 1.5.5).  Empty when every file shares one model.
+            for i, t_rm, y_rm in self._eval_unphased_rm_models(
+                system, point, shared=shared
+            ):
+                traces.append(
+                    Trace(
+                        name=f"{self.names[i]} model",
+                        role="model",
+                        kind="line",
+                        x=t_rm,
+                        y=y_rm,
+                        node=getattr(self, "_rv_full_node", None),
+                        style={"series_index": int(i), "lw": 1.0},
+                    )
+                )
             # One physical+GP curve per GP instrument (see
             # _eval_unphased_gp_models). No symbolic node: the GP conditional
-            # mean is not part of the model graph, so the GUI cannot re-render
-            # these on a slider move -- it must ask for a fresh point.
-            for i, t_gp, y_gp in self._eval_unphased_gp_models(system, point):
+            # mean is not part of the model graph, so the GUI re-renders
+            # these by asking for a fresh point on a slider move -- which its
+            # eval path does, PROVIDED the GP hyperparameters are declared in
+            # param_deps (gp_dep_labels, below).  A previous version of this
+            # comment said the GUI "cannot re-render these on a slider move";
+            # it could all along, and the missing deps were the only blocker
+            # (review 1.12.9).
+            for i, t_gp, y_gp in self._eval_unphased_gp_models(
+                system, point, shared=shared
+            ):
                 traces.append(
                     Trace(
                         name=f"{self.names[i]} model+GP",
@@ -629,30 +1035,48 @@ class RVInstrument(Instrument):
                         style={"series_index": int(i), "lw": 1.0},
                     )
                 )
+        # The fitted trend is per observation, so it comes off the DATA
+        # rather than going onto the model curve (Instrument.detrend_at_data);
+        # zeros without detrend columns.
+        detrend = self.detrend_at_data(point)
         for i in range(self.n_elements):
             mask = self.inst_map == i
             # gamma offset only when a point supplies it; raw data otherwise
-            g = self._instrument_gamma(point, i) if point is not None else 0.0
+            g = (
+                self._point_value(point, self.gamma, i)
+                if point is not None
+                else 0.0
+            )
             traces.append(
                 Trace(
                     name=self.names[i],
                     role="data",
                     kind="scatter",
                     x=self.time[mask],
-                    y=(self.rv[mask] - g) * factor,
+                    y=(self.rv[mask] - g - detrend[mask]) * factor,
                     yerr=self.err[mask] * factor,
                     style=self._data_trace_style(i),
                 )
             )
-        # The data traces are gamma-subtracted, so they move with the point
-        # too (dynamic_data) and the gamma slider must reach this component
-        # through param_deps -- gamma is applied in numpy, not through the
-        # symbolic model node, so the graph walk alone would miss it.
+        # The data traces are gamma- and detrend-subtracted, so they move with
+        # the point too (dynamic_data) and those sliders must reach this
+        # component through param_deps -- both are applied in numpy, not
+        # through the symbolic model node, so the graph walk alone would miss
+        # them.  The GP hyperparameters are the same case (the model+GP
+        # curves above and the phased cleaning both use the compiled
+        # celerite2 conditional mean), see Instrument.gp_dep_labels.
         gamma_label = getattr(getattr(self, "gamma", None), "label", None)
-        if point is not None and gamma_label and gamma_label not in model_deps:
-            model_deps = model_deps + [gamma_label]
+        numpy_deps = (
+            ([gamma_label] if gamma_label else [])
+            + self.detrend_dep_labels()
+            + self.gp_dep_labels()
+        )
+        if point is not None:
+            model_deps = model_deps + [
+                lbl for lbl in numpy_deps if lbl not in model_deps
+            ]
         specs.append(
-            PlotSpec(
+            Chart(
                 id=f"{self.prefix}.unphased",
                 component={"yaml_key": self.prefix, "instance": None},
                 title=f"Unphased RV Model: {getattr(system, 'name', '')}",
@@ -668,7 +1092,7 @@ class RVInstrument(Instrument):
                     "caption": (
                         "Radial velocities with the best-fit model "
                         "(red); posterior draws are overplotted with "
-                        "low opacity."
+                        "low opacity." + self.detrend_caption()
                     ),
                 },
             )
@@ -681,13 +1105,17 @@ class RVInstrument(Instrument):
                 getattr(self, "_rv_matrix_node", None), system
             )
             # The phased DATA moves with the point too: the fold uses tc/P,
-            # and the cleaning subtracts gamma + the other orbits' signal
-            # (all applied in numpy) -- hence dynamic_data below and the
-            # explicit gamma dep the graph walk cannot see.
-            if gamma_label and gamma_label not in deps:
-                deps = deps + [gamma_label]
+            # and the cleaning subtracts gamma + the fitted detrend model +
+            # the other orbits' signal (all applied in numpy) -- hence
+            # dynamic_data below and the explicit deps the graph walk cannot
+            # see.
+            deps = deps + [lbl for lbl in numpy_deps if lbl not in deps]
+            # Once per (instrument, point), not once per orbit (6.5.1).
+            shared = self._phased_shared(system, point)
             for col, o_idx in enumerate(omap):
-                prep = self._phased_arrays(system, point, col, o_idx)
+                prep = self._phased_arrays(
+                    system, point, col, o_idx, shared=shared
+                )
                 P_ref, tc_ref = prep["P_ref"], prep["tc_ref"]
                 otraces = [
                     Trace(
@@ -699,9 +1127,23 @@ class RVInstrument(Instrument):
                         node=getattr(self, "_rv_matrix_node", None),
                     )
                 ]
+                # An instrument whose RM sits on this orbit gets its own
+                # isolated curve, the anomaly included (see _phased_arrays).
+                for i, y_extra in prep["extra_models"]:
+                    otraces.append(
+                        Trace(
+                            name=f"{self.names[i]} model",
+                            role="model",
+                            kind="line",
+                            x=prep["phase_model"],
+                            y=y_extra,
+                            node=getattr(self, "_rv_matrix_node", None),
+                            style={"series_index": int(i), "lw": 1.0},
+                        )
+                    )
                 for i in range(self.n_elements):
                     mask = self.inst_map == i
-                    g = self._instrument_gamma(point, i)
+                    g = self._point_value(point, self.gamma, i)
                     cleaned = (
                         self.rv[mask] - g - prep["other_signals"][mask]
                     ) * factor
@@ -721,7 +1163,7 @@ class RVInstrument(Instrument):
                     )
                 oname = system.orbit.names[o_idx]
                 specs.append(
-                    PlotSpec(
+                    Chart(
                         id=f"{self.prefix}.phased.{oname}",
                         component={"yaml_key": self.prefix, "instance": None},
                         title=(
@@ -745,6 +1187,7 @@ class RVInstrument(Instrument):
                                 + latex_escape(oname)
                                 + ", with the other orbits' "
                                 "contributions removed."
+                                + self.detrend_caption()
                             ),
                             "hline_y": 0.0,
                             "dynamic_data": True,

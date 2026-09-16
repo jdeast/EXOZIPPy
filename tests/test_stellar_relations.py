@@ -114,12 +114,16 @@ def test_an_out_of_range_star_index_is_rejected():
     Given a numeric `star:` past the end of the star list,
     When the shared resolver runs,
     Then it raises rather than silently indexing out of range.
+
+    The message says "out of range", not "unknown star": since the shared
+    component.resolve_star_ref took over the translation, an index that
+    resolves but does not exist is diagnosed as the range error it is.
     """
     # Arrange
     comp = _bare()
 
     # Act / Assert
-    with pytest.raises(ValueError, match="unknown star"):
+    with pytest.raises(ValueError, match="out of range"):
         comp._resolve_star(_FakeSystem(), "i0", 7)
 
 

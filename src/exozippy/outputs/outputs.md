@@ -1,0 +1,98 @@
+# Outputs: the modeling draft, LaTeX macros, and plots
+
+`src/exozippy/outputs/` writes the tables, the modeling-draft `.tex`, the results CSV and
+the mode reports; `src/exozippy/chart.py` + `src/exozippy/plotrender.py` describe and
+render every plot.
+
+Read this before adding a sentence, a table column, a LaTeX macro or a plot. Related:
+`src/exozippy/components/parameter.md` (which emits the value and prior macros this layer cites),
+`src/exozippy/gui/gui.md` (the second renderer of the same charts).
+
+## The modeling-draft scaffold (`outputs/prose.py`, `outputs/modeling.py`)
+
+Every fit emits `<prefix>_paper.tex` -- a **compilable** aastex draft whose prose is crude by design; its value is that every citation relevant to how the fit was configured lands in one place, with enough connective text to seed a paper's modeling section. No LLM anywhere: pure concatenation of declared sentences. Full design history in `notes/modeling_prose.txt`; the non-negotiables:
+
+- **Declare at the implementation site.** A feature's sentence is emitted by the feature's own code path via `system.prose.add(text, section=, key=, rank=)` -- the same rule as `add_prior_contribution`, and for the same reason: prose that re-derives which features were active drifts. `Instrument.add_observation_likelihood(..., system=system)` is the one-call site for a data component's inventory/noise/GP/robust sentences (`_add_observation_prose`); astrometry, which never calls the dispatcher, calls the helper itself. **A feature PR carries its sentence the way it carries its `add_prior_contribution`.**
+- **Regenerate, never append.** The collector lives on `System` (`system.prose`, built in `__init__`); `build_modeling_output(system, prefix)` rewrites the whole file at each checkpoint -- right after `build_model()` in run.py (the citation scaffold survives a fit that dies hours in) and at wrap-up, when the table fragments, figure PDFs and convergence/mode facts exist. What is not on disk or in the collector is simply omitted, so one writer serves both checkpoints; `add()` is idempotent by `key` (a second `build_model()` on one System must not duplicate; last write wins, insertion order kept). `exozippy-modes` regenerates it too.
+- **The sentence text is the single source of citations** -- keys are regex-extracted from `\cite*{...}`; there is no `citations=` argument to drift. Every key must exist in `src/exozippy/latex/references.bib`, the **universal** library shipped as package data and copied VERBATIM next to the .tex (never subset -- bibtex selects; uncited entries are a gift to the user). `tests/test_prose.py` cross-references every key in the source against it, so **add the bib entry in the same commit as the sentence**.
+- **Config facts may be interpolated, fitted values may not** (posterior numbers belong to the table, whose `\ez...` macros are the mechanism for citing them in prose). The wrap-up convergence/burn-in numbers are run diagnostics, not fitted values, and are allowed. `join_names`/`plural` (prose.py) aggregate per-instance facts into one sentence; instance names are data, `latex_escape` them.
+- **The output directory is self-contained.** `aastex701.cls` + `aasjournalv7.bst` (AASTeX 7.0.1, LPPL 1.3c -- provenance/hashes in `src/exozippy/latex/README.md`) are copied alongside, so `pdflatex && bibtex && pdflatex && pdflatex` works on a bare TeX Live; that copy is also the ONE vendored aastex (the test fixture copy is gone). run.py runs that cycle at wrap-up (`modeling: {compile: false}` opts out; the block is in `evaluator._NON_STRUCTURAL_CONFIG_KEYS`, so toggling it cannot stale a trace). Missing TeX or a failed compile is a warning naming the .log, **never a failed fit**.
+- **The table file is a fragment now.** `build_latex_output` writes `<prefix>_table.tex` (was `_template.tex`) as a bare deluxetable; modeling.tex is the ONE standalone wrapper (`\input`s `<prefix>_definitions` and the table -- `\input`, not `\include`). The old standalone template ended with `\bibliography{References}` pointing at a file that never existed.
+- **Figures build themselves from Charts**: `meta["caption"]` (LaTeX, verbatim -- the third consumer of the chart vocabulary, documented in plotrender.py and plotly-adapter.ts) pairs with the posterior PDF `{prefix}_mcmc_{file_tag}.pdf`; only PDFs that exist are included, and a spec without a caption gets a generic one built from its escaped title.
+- **The topic band is extensible, and its order comes from the build graph.** `stellar`/`planetary`/`orbits`/`microlensing` are TOPICS, not component names -- they group sentences by subject across components (`rvinstrument` writes into `orbits`, `transit` into `planetary`, `planet` into both), which is why the band cannot be derived from the component list. That vocabulary was CLOSED and astronomy-specific, so a component from another field had to file its "what we fitted" sentence under `data`, ordered among data-inventory sentences rather than after them. A component now declares `prose_topic` on its class and `System._register_prose_topics` registers it -- in `graph.determine_pymc_build_order` order, so dependency order is the editorial order (measured on `examples/kelt4`: star -> planet -> orbit reproduces the hand-chosen stellar -> planetary -> orbits exactly). A system declaring no topic gets `SECTION_ORDER` unchanged, so no astronomy paragraph moves. An unknown section still RAISES -- accepting any string would trade the typo guard, which matters more, for extensibility. `modeling._doc_sections` routes declared topics into Modeling; an unrouted topic would be the same silent drop the import-time assert prevents for the shipped names. Tests: `tests/test_prose_topics.py`.
+- `system.prose.add_software(name)` feeds the `\software{...}` line (core stack added by the writer); sections are a fixed vocabulary (`SECTION_ORDER`) and an unknown section **raises** -- a silently dropped sentence is a modeling choice the draft never mentions.
+
+Tests: `tests/test_prose.py` (collector, xref, writer, compile-with-bibliography e2e, ob08092 topology integration), plus the aastex compile leg of `tests/test_latex_macro_xref.py`, which now compiles the fragment inside the real wrapper.
+
+## `<prefix>_results.csv`: the two error columns
+
+The machine-readable table (`outputs/latex.py:build_csv_output`, appended to by
+`outputs/ledger.py:append_ledger_csv`) has exactly two layouts, `CSV_COLUMNS_PLAIN`
+and `CSV_COLUMNS_MODE`, and both end `("up_err", "low_err")` -- **`up_err` is
+err_PLUS**. That is worth a paragraph because it was wrong for two months and
+nothing noticed: `PosteriorSummary.format` returns `(median, err_minus, err_plus)`
+and this function unpacked it as `med, ep, em`, so every asymmetric posterior in
+every results.csv was published with its error bars transposed (review 1.11.4).
+
+Three properties of the surrounding code hid it, and each is a reason to be
+careful here rather than a reassurance:
+
+- The LaTeX table renders through `PosteriorSummary.latex_value`, which reads
+  `self.err_minus`/`self.err_plus` **by name** -- so the paper-facing table was
+  right while the machine-readable one was not, and a reader comparing the two
+  formats was the only way to see it.
+- `append_ledger_csv`'s rejected-seed rows write the same Laplace sigma into both
+  error cells. A symmetric row cannot be transposed, so the file's other writer
+  was immune.
+- Every test of this file asserted the column NAMES or that the cells were
+  non-empty. `docs/testing.md`: covering a code path is not testing its numbers.
+  `tests/test_results_csv_error_columns.py` now pins the NUMBERS, asymmetric, in
+  both layouts, read by column name from the file's own header.
+
+`format` returns a `FormattedSummary` NamedTuple for this reason. It is
+positionally a plain tuple, so nothing had to change to adopt it -- but a new
+call site should say `.err_plus` and be immune.
+
+## The credible-interval width is a setting, and the caption is generated from it
+
+`src/exozippy/reporting.py` holds ONE run-level width, read by
+`Parameter._summarize_array` (so the table, `<prefix>_results.csv` and the mode
+report all follow it), by `corner_utils` and by the `\tablecaption{}` that
+`outputs/report_pipeline.py` builds. Default 0.6827 -- the 1-sigma astronomy
+convention every shipped example reports and none of them move. Set it with
+`reporting: {credible_interval: 0.95}`.
+
+**The caption is BUILT from the width** (`reporting.caption_phrase`), and was the
+literal `"Median and 68\% Confidence intervals for "` until 2026-09-11. Two
+reasons it cannot go back. A caption that disagrees with the numbers beside it is
+worse than either being wrong alone, and it is the one error a reader cannot
+detect from the table. And the word "1-sigma" is true of 68.27% and false of
+every other width, so it is emitted only for that one.
+
+**Why a setting at all:** median + 68% is an *astronomy* convention, not a
+universal one. Pharmacometrics, epidemiology and clinical work report 95%
+(bioequivalence reports a 90% interval whose bounds are in FDA/EMA guidance).
+Annotating an unidiomatic interval does not rescue it -- a reader whose field has
+exactly one convention does not check the caption, so a 68% interval is read as
+95% and the uncertainty is understated about twofold. A component that emits a
+result for a field reports it in that field's convention.
+
+Per-RUN and not per-component or per-parameter, deliberately: a table whose rows
+carried different widths would be unreadable and its caption could not describe
+it. The width is in `evaluator._NON_STRUCTURAL_CONFIG_KEYS`, so re-reporting an
+existing trace at a different width does not stale it -- that is what it is for.
+What this setting does NOT solve is a SECOND error column: a population-PK table
+reports both an estimate's precision (RSE%) and the population's spread (CV%),
+and `CSV_COLUMNS_PLAIN`/`CSV_COLUMNS_MODE` above are two fixed layouts with one
+error pair. That is a new layout, not a new value, and it has no channel yet.
+
+## LaTeX macro names
+
+- **Every piece of a generated LaTeX macro name has exactly one implementation, in `outputs/texutils.py`** (`DIGIT_WORDS`, `idx_to_words`, `mode_word`, `mode_suffix`) -- because the name `\<varname><idx><suffix>` is built in *two* modules: `parameter.py` **emits** the `\providecommand`, `outputs/latex.py` **refers** to it from the deluxetable body, and `run.py` reuses `mode_suffix` a third time for the per-mode plot filenames. A drift between emitter and referrer spells a macro that was never defined ("Undefined control sequence" at the end of a long fit) or, worse, one that exists and holds another parameter's value. It lives in `texutils` and not in `parameter.py` because `components -> outputs.texutils` is an existing edge (`latex_escape`) while the reverse would close an import cycle; `outputs/modes.py` re-exports `mode_suffix` so it still reads as a modes concept at its call sites. Note two deliberately different conventions for the same mode `k`: the value macros take `mode_suffix(k)` (`\ezteffmodeone`) while the mode-*weight* macros take the bare `mode_word(k)` (`\ezmodeweightone`), since `\ezmodeweight` is already a mode-specific stem. Both are 1-based labels of a 0-based index, and that `+1` lives in `mode_word` alone. `tests/test_latex_macro_xref.py` pins the cross-reference itself -- every `\ez...` the table cites must be defined by the variable file, checked statically and, where a TeX install exists, by really running `pdflatex` over the macro set.
+
+## Plotting: one description, two renderers (`plot_data` + `plotrender`)
+
+Each plot is described ONCE, as the `Chart` list returned by `Component.plot_data(system, point=None)` (see `src/exozippy/chart.py`). Two renderers consume the same specs: `src/exozippy/plotrender.py` draws them with matplotlib for the saved PDFs (`Component.plot()` is a one-liner calling `plotrender.plot_via_specs`, which handles the points-list spaghetti: data/decorations from `points[0]`, later draws overlay their model traces; the model alpha is per figure, not per draw -- 0.8 for a single draw, 0.1 for every model trace including `points[0]`'s once there is more than one), and the GUI draws them with plotly (`gui/frontend/src/plotly-adapter.ts`). The two renderers share a meta/style vocabulary (documented in plotrender.py's module docstring: `file_tag` = the PDF filename tag, `figsize`, `hline_y`, `x/y_range`, `x/y_log`, `x/y_inverted`, `aspect_equal`; trace style: `series_index` fixed categorical color, `color`/`marker`/`lw`/`legend`) -- extend BOTH when adding a key. Never hand-draw a data plot in a component again; genuinely bespoke diagnostics (astrometry's `plot_sky`, lens caustics, corner plots) may stay matplotlib-only.
+
+`plot_data` rules: with `point=None` return data-only specs (usable after `load_data()`, before `build_model()`); with a point, add model traces evaluated at that point by reusing the functions from `compile_plotters()` -- do not duplicate physics. For a data component that means `compile_plotters` compiles the SAME expression builder `build_likelihood` used, on a plot grid laid out in the data's per-file blocks, and compiles the likelihood's own retained node for the model at the observations; there is no second plot graph (the contract and its history are in `src/exozippy/components/instrument.md`, "The plotted model IS the likelihood code"). Model trace names must be unique within a chart (the GUI evaluator keys them by name); per-instrument curves are `<name> model` / `<name> model+GP`. Set each spec's `param_deps` via `_model_trace_param_deps(node, system)` on a symbolic node retained by `compile_plotters` -- empty `param_deps` makes the Evaluator's `changed_label` filter skip the component, freezing its charts in GUI live mode. Keep model traces' symbolic nodes on `Trace.node`. `meta.file_tag` must reproduce the component's historical PDF filenames (`{prefix}_{file_tag}.pdf`).
+

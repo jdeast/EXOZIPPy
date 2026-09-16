@@ -3,8 +3,13 @@
 Review item 4.5: ``clip(nan_to_num(q), 1e-9, 100)`` was copied to five sites
 and ``arctan2(yalpha, xalpha) * 180/pi`` to two.  Both now have exactly one
 implementation -- ``physics.clip_q`` / ``physics.clip_q_value`` and
-``Lens._alpha_deg`` -- and the ``nan_to_num`` half is gone, because it could
-only ever invent a mass ratio for a computation that had already failed.
+``MulensEvent._alpha_deg`` -- and the ``nan_to_num`` half is gone, because it
+could only ever invent a mass ratio for a computation that had already failed.
+
+The magnification param builders and ``_alpha_deg`` live on ``MulensEvent``
+since the 8.6.17 split; ``lens`` is now one entry per lens BODY, so the
+per-companion geometry (s, q, alpha) is read at ELEMENT j+1 -- a binary's
+companion is element 1, because element 0 is the masked primary.
 """
 
 import inspect
@@ -15,8 +20,8 @@ import pytensor
 import pytensor.tensor as pt
 import pytest
 
-from exozippy.components.mulensing import lens as lens_mod
-from exozippy.components.mulensing.lens import Lens
+from exozippy.components.mulensing import mulensevent as event_mod
+from exozippy.components.mulensing.mulensevent import MulensEvent
 from exozippy.components.mulensing.op import (
     BinaryLensMagOp,
     VBMDirectMagOp,
@@ -35,26 +40,25 @@ _COORDS = "268.0d -29.0d"
 
 
 def _binary_config():
-    """A minimal 2L1S topology: star.0 + planet.0 lens, star.1 source."""
+    """A minimal 2L1S topology: star.Lens + planet.Companion lens bodies,
+    star.Source as the source body."""
     config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
         "planet": [{"name": "Companion"}],
-        "lens": [
-            {
-                "name": "Lens",
-                "lenses": ["star.0", "planet.0"],
-                "sources": ["star.1"],
-                "finite_source": False,
-            }
-        ],
+        "mulensevent": [{"finite_source": False}],
+        # One entry per lens body: the primary first, the companion second.
+        "lens": [{"body": "star.Lens"}, {"body": "planet.Companion"}],
+        "source": [{"body": "star.Source"}],
     }
     user_params = {
-        "lens.Lens.t_0": {"initval": 2458554.89},
-        "lens.Lens.u_0": {"initval": 0.1},
-        "lens.Lens.t_E": {"initval": 18.2},
-        "lens.Lens.s": {"initval": 0.98},
-        "lens.Lens.alpha": {"initval": -52.0},
-        "lens.Lens.q": {"initval": 1.1e-3},
+        # t_0/u_0 are per SOURCE body, t_E is event level, and the geometry
+        # is per COMPANION -- i.e. lens element 1.
+        "source.Source.t_0": {"initval": 2458554.89},
+        "source.Source.u_0": {"initval": 0.1},
+        "mulensevent.t_E": {"initval": 18.2},
+        "lens.Companion.s": {"initval": 0.98},
+        "lens.Companion.alpha": {"initval": -52.0},
+        "lens.Companion.q": {"initval": 1.1e-3},
         "star.Lens.ra": {"initval": 268.0, "sigma": 0},
         "star.Lens.dec": {"initval": -29.0, "sigma": 0},
         "star.Source.ra": {"initval": 268.0, "sigma": 0},
@@ -175,7 +179,10 @@ def test_binary_op_reports_a_nan_q_by_name_and_still_rejects_the_proposal():
     When BinaryLensMagOp.perform runs,
     Then it still returns all-NaN magnifications (logp = -inf, proposal
       rejected -- byte-identical to the old behaviour), but the warn-once
-      message now names lens.q instead of quoting a MulensModel internal.
+      message now names the mass ratio's own parameter path instead of
+      quoting a MulensModel internal.  That path is lens.1.q: a binary's
+      companion is lens ELEMENT 1, element 0 being the masked primary, so
+      the label names the key the user can actually address.
     """
     p = np.array([2458554.89, 0.1, 18.2, 0.02, -0.01, 0.98, np.nan, -52.0])
     t = np.linspace(2458554.89 - 5, 2458554.89 + 5, 21)
@@ -189,7 +196,7 @@ def test_binary_op_reports_a_nan_q_by_name_and_still_rejects_the_proposal():
         ).perform(None, [p, t, obs], out)
 
     assert np.all(np.isnan(out[0][0]))
-    assert any("lens.q" in str(w.message) for w in caught)
+    assert any("lens.1.q" in str(w.message) for w in caught)
 
 
 def test_vbm_direct_still_short_circuits_a_non_finite_param_vector():
@@ -293,20 +300,26 @@ def test_binary_mm_params_q_is_the_q_parameter_clipped(binary_system):
     """
     Given the MulensModel-backend param builder,
     When it reports q,
-    Then it is clip_q(lens.q), bit-identical to the mass ratio it used to
-      recompute inline as ``m_companion / max(m_primary, 1e-10)``.  The
-      pt.maximum floor was provably dead (star.mass = 10**logmass with
-      logmass >= -9 dex is never below 1e-9), and going through the Parameter
-      means the backend, the priors and the reports all see one q.
+    Then it is clip_q(lens.q) at the COMPANION's element, bit-identical to the
+      mass ratio it used to recompute inline as ``m_companion /
+      max(m_primary, 1e-10)``.  The pt.maximum floor was provably dead
+      (star.mass = 10**logmass with logmass >= -9 dex is never below 1e-9),
+      and going through the Parameter means the backend, the priors and the
+      reports all see one q.
     """
     system, model = binary_system
     lens = system.lens
+    event = system.mulensevent
 
-    built = lens._get_binary_mm_params(index=0)["q"]
-    expected = clip_q(lens.q.value[0])
+    built = event._get_binary_mm_params(system, index=0)["q"]
+    # Element 1: companion slot 0.  Element 0 is the masked primary, whose
+    # q is the pinned bookkeeping 1.0.
+    expected = clip_q(lens.q.value[1])
 
-    m1 = system.star.mass.value[lens.lens_bodies[0][0][1]]
-    l2_type, l2_idx = lens.lens_bodies[0][1]
+    # event.lens_bodies is a FLAT list of (component, index) body refs now:
+    # entry 0 is the primary, entry 1 the companion.
+    m1 = system.star.mass.value[event.lens_bodies[0][1]]
+    l2_type, l2_idx = event.lens_bodies[1]
     m2 = getattr(system, l2_type).mass.value[l2_idx]
     legacy = pt.clip(
         pt.nan_to_num(m2 / pt.maximum(m1, 1e-10), nan=1e-9), 1e-9, 100.0
@@ -326,20 +339,22 @@ def test_binary_mm_params_q_is_the_q_parameter_clipped(binary_system):
 
 def test_alpha_deg_has_one_implementation(binary_system):
     """
-    Given Lens._alpha_deg,
+    Given MulensEvent._alpha_deg,
     When it is compared with the open-coded arctan2 the two call sites used,
     Then they are bit-identical -- lens.alpha's expression IS that arctan2
       (physics.calc_alpha), so reading the Parameter changes nothing except
-      that there is now one spelling.
+      that there is now one spelling.  The argument is the COMPANION SLOT
+      (0), which reads lens element 1.
     """
     system, model = binary_system
     lens = system.lens
+    event = system.mulensevent
 
-    consolidated = lens._alpha_deg(0)
-    legacy = pt.arctan2(lens.yalpha.value[0], lens.xalpha.value[0]) * (
+    consolidated = event._alpha_deg(system, 0)
+    legacy = pt.arctan2(lens.yalpha.value[1], lens.xalpha.value[1]) * (
         180.0 / np.pi
     )
-    from_params = lens._get_binary_mm_params(index=0)["alpha"]
+    from_params = event._get_binary_mm_params(system, index=0)["alpha"]
 
     rvs = list(model.value_vars)
     ip = model.initial_point()
@@ -372,7 +387,10 @@ def test_no_call_site_re_derives_q_or_alpha():
       the duplication review item 4.5 named is gone, and cannot creep back by
       copy-paste without failing here.
     """
-    for fn in (Lens._get_binary_mm_params, Lens.get_magnification_op):
+    for fn in (
+        MulensEvent._get_binary_mm_params,
+        MulensEvent.get_magnification_op,
+    ):
         src = inspect.getsource(fn)
         assert "nan_to_num" not in src, (
             f"{fn.__name__} re-introduced the scrub"
@@ -383,14 +401,14 @@ def test_no_call_site_re_derives_q_or_alpha():
 
 def test_alpha_deg_reads_the_shared_rad_to_deg_constant():
     """
-    Given Lens._alpha_deg,
+    Given MulensEvent._alpha_deg,
     When its source is inspected,
     Then it converts through the module-level constant rather than spelling
       180/pi inline, which is how the two call sites drifted apart in the
       first place.
     """
-    assert lens_mod._RAD_TO_DEG == 180.0 / np.pi
-    src = inspect.getsource(Lens._alpha_deg)
+    assert event_mod._RAD_TO_DEG == 180.0 / np.pi
+    src = inspect.getsource(MulensEvent._alpha_deg)
     assert "_RAD_TO_DEG" in src
     assert "np.pi" not in src
 
@@ -412,7 +430,9 @@ def test_out_of_range_q_start_warns_and_says_what_to_do(binary_system, caplog):
     lens = system.lens
     saved = lens.q.initval
     try:
-        lens.q.initval = np.array([1e6])
+        # Element 0 is the masked primary (pinned at 1.0, excluded from the
+        # scan); element 1 is the companion whose start is out of range.
+        lens.q.initval = np.array([1.0, 1e6])
         with caplog.at_level("WARNING"):
             lens._validate_q_start()
     finally:
@@ -437,7 +457,10 @@ def test_nan_q_start_raises(binary_system):
     lens = system.lens
     saved = lens.q.initval
     try:
-        lens.q.initval = np.array([np.nan])
+        # The NaN is on the FIRST COMPANION -- element 1 -- which is the one
+        # element the relaxation engine really does solve, so a NaN there is
+        # fatal rather than bookkeeping.
+        lens.q.initval = np.array([1.0, np.nan])
         with pytest.raises(ValueError) as exc:
             lens._validate_q_start()
     finally:
@@ -460,7 +483,7 @@ def test_infinite_q_start_warns_rather_than_raising(binary_system, caplog):
     lens = system.lens
     saved = lens.q.initval
     try:
-        lens.q.initval = np.array([np.inf])
+        lens.q.initval = np.array([1.0, np.inf])
         with caplog.at_level("WARNING"):
             lens._validate_q_start()
     finally:

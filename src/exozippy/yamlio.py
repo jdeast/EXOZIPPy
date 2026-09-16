@@ -148,7 +148,51 @@ def load_yaml_text(text, source=None):
 
 
 def load_yaml(path):
-    """Load a user YAML file, refusing YAML-1.1-only boolean spellings."""
+    """Load a user YAML file, refusing YAML-1.1-only boolean spellings.
+
+    Returns whatever the file holds, INCLUDING ``None`` for an empty file.
+    That is deliberate and is the params side's contract: an empty params
+    file is a supported way to write a fit (``System.__init__`` normalizes
+    it to ``{}`` with an INFO line -- see run.md), so the loader must not
+    decide that an empty document is an error.  A caller loading a SYSTEM
+    config wants the opposite; that is ``load_system_config`` below.
+    """
     with open(path, "r") as fh:
         text = fh.read()
     return load_yaml_text(text, source=str(path))
+
+
+def load_system_config(path):
+    """Load a SYSTEM config file, refusing one that cannot mean anything.
+
+    An empty system config is not a config: it names no component, no
+    prefix and no parameter file, so there is no fit in it.  Both CLIs used
+    to walk straight off the end of ``load_yaml``'s ``None`` -- a
+    ``TypeError`` on ``config["logger_level"]``, or ``run_fit(None)``'s
+    ``AttributeError: 'NoneType' object has no attribute 'get'``, neither of
+    which names the file the user passed (review 2.3.11).  Same for a
+    document that parses to something other than a mapping (a bare list, a
+    single scalar), which fails the same way one frame later.
+
+    JDE ruled the asymmetry, 2026-09-11: "an empty system config file
+    should fail.  an empty param file might be ok (it might fail later
+    because some component required a specific starting value, but it
+    shouldn't fail by construction)."  So this guard is deliberately NOT in
+    ``load_yaml``, which the params path goes through.
+    """
+    config = load_yaml(path)
+    if config is None:
+        raise ValueError(
+            f"config file '{path}' is empty. A system config must at least "
+            f"declare one component block (e.g. `star:`); see the examples/ "
+            f"directory. An empty PARAMETER file is legal -- an empty "
+            f"system config is not."
+        )
+    if not isinstance(config, dict):
+        raise ValueError(
+            f"config file '{path}' does not contain a YAML mapping: it "
+            f"parsed as {type(config).__name__}. A system config is a "
+            f"mapping of top-level keys (component blocks, `prefix:`, "
+            f"`parameter_file:`, `sampler:`); see the examples/ directory."
+        )
+    return config

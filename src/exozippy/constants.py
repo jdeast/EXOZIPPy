@@ -8,6 +8,11 @@ import numpy as np
 G = const.G.to(u.R_sun**3 / (u.M_sun * u.day**2)).value
 
 RSUN_TO_AU = (1.0 * u.R_sun).to(u.au).value
+# Speed of light in EXOZIPPy's native internal unit system (R_sun, M_sun,
+# day) -- NOT AU/day like exoplanet's own c_light, and NOT AU/s like
+# EXOFASTv2 -- so light-travel-time delays (components/ltt.py) combine
+# directly with orbit.arsun (already in R_sun) with no AU round-trip.
+C_LIGHT_RSUN_PER_DAY = const.c.to(u.R_sun / u.day).value
 KEPLER_CONST = (G / (4.0 * np.pi**2)) ** (1.0 / 3.0)
 C_MPS = const.c.to(u.m / u.s).value
 SOLRAD_PER_DAY_TO_MPS = (1.0 * u.R_sun / u.day).to(u.m / u.s).value
@@ -15,7 +20,20 @@ LOGG_CONST = np.log10(const.GM_sun.cgs.value / const.R_sun.cgs.value**2)  # cgs
 LUM_CONST = 1.0 / (
     (const.L_sun / const.sigma_sb / const.R_sun**2).cgs.value / (4.0 * np.pi)
 )  # K^-4
-FBOL_CONST = 1.0 / (4.0 * np.pi * (const.pc / const.R_sun) ** 2.0)
+# Bolometric flux at Earth: F = L / (4 pi d^2), with L in solLum and d in pc
+# (calc_fbol's two inputs) and F in erg s-1 cm-2 (star.fbol's declared unit,
+# which is also its internal_unit -- so NOTHING downstream converts, and this
+# constant alone has to carry L_sun and pc into cgs).
+#
+# It was `1/(4 pi (pc/R_sun)^2)` until 2026-08 -- DIMENSIONLESS, i.e. really
+# solLum/solRad^2, so every reported F_Bol was low by exactly
+# L_sun/R_sun^2 = 7.909e11 while labeled cgs (review 1.8.1; gj1214 shipped
+# \ezstarfbol ~ 7.3e-22 for a true ~5.8e-10).  No posterior moved, because the
+# sole likelihood consumer is sed.py's fbolsed floor, whose
+# (fbol - fbolsed)/(fbol*frac) cancels any common factor exactly -- which is
+# also why nothing caught it.  The Sun at 10 pc is 3.20e-7 erg s-1 cm-2;
+# tests/test_star_fbol.py pins that.
+FBOL_CONST = (const.L_sun / (4.0 * np.pi * const.pc**2)).cgs.value
 DENSITY_CONST = 3.0 / (4.0 * np.pi)
 
 PC_TO_RSUN_CONST = u.pc.to(u.R_sun)
@@ -38,15 +56,34 @@ KAPPA = (
 K_VEL_CONVERSION = (const.au / u.yr).to(u.km / u.s).value
 
 # --- 2. MATHEMATICAL CONSTANTS ---
-PI = np.pi
+# (PI = np.pi lived here with zero consumers repo-wide -- an alias for a name
+# every module already imports.  Deleted, review 5.2.2.  TWOPI stays: it has
+# real callers and spells something np.pi does not.)
 TWOPI = 2.0 * np.pi
+
+# The Julian year, the "yr" of every microlensing and astrometry rate in the
+# tree (mu_rel [mas/yr], t_E's mas/yr -> mas/day conversion, ds_dt/dalpha_dt
+# [1/yr, rad/yr], astrometric proper motions).  ONE definition (review
+# 4.2.6): the four sites that used to each write the literal 365.25 --
+# lens._earth_vperp_en, mulensing physics.calc_t_E, the engine's t_E
+# relation, and astrometryinstrument -- must stay numerically identical, and
+# a fifth literal that drifted (365.2422, 365.24219...) would silently move
+# t_E by parts in 1e4.
+DAYS_PER_YEAR = 365.25
 
 
 # --- 3. STATISTICAL CONSTANTS (For the Back-End) ---
-# Used for 68% confidence intervals in tables and corner plots
+# The probability mass within +/- 1 Gaussian sigma.  It is the DEFAULT
+# reporting credible interval and the one definition of it; the width actually
+# used is a run-level setting and the quantiles are derived from it, both in
+# `exozippy.reporting` (see `src/exozippy/outputs/outputs.md`).
+#
+# SIGMA_1_LOW / SIGMA_1_HIGH used to sit here and were read by
+# `Parameter._summarize_array` and `corner_utils.save_corner_plot`.  Both now
+# ask `reporting.quantiles()`, which derives the pair from whatever width is
+# active, so a fixed pair had no consumer left -- and a constant nothing reads
+# is a convention that can silently stop matching the tables.
 SIGMA_1 = math.erf(1.0 / math.sqrt(2.0))
-SIGMA_1_LOW = 0.5 - SIGMA_1 / 2.0
-SIGMA_1_HIGH = 0.5 + SIGMA_1 / 2.0
 
 # --- 5. BULGE CONSTANTS ---
 BULGE_BAR_ANGLE = np.radians(25.0)  # bar axis relative to Sun direction
@@ -99,6 +136,35 @@ THICK_DISK_VELOCITY_SIGMA_V = 51.0  # in km/s
 THICK_DISK_VELOCITY_SIGMA_W = 42.0  # in km/s
 KROUPA_IMF_SLOPE = -1.3  # Kroupa IMF (mass range typical for lenses)
 SALPETER_IMF_SLOPE = -2.35  # Salpeter IMF
+
+# Chabrier (2003) SYSTEM IMF, PASP 115, 763, Table 1.  It is PIECEWISE, and
+# all five numbers below are needed to state it:
+#
+#   dN/dlog m ~ exp(-(log m - log Mc)^2 / (2 sigma^2))     m <= 1 Msun
+#   dN/dlog m ~ m^-x                                       m >  1 Msun
+#
+# The lognormal segment alone shipped as "the Chabrier IMF" until 2026-08
+# (review 3.7.1), applied over the whole [-9, 2.5] dex support.  It steepens
+# without limit above the peak -- its slope in log mass is -(x - log Mc)/
+# sigma^2, i.e. -2.02 nats/dex at 1 Msun and -5.10 at 10 -- so every massive
+# star was over-penalized relative to the IMF the label named, and the error
+# GREW with mass.  Not only a massive-lens concern: the imf_prior is one
+# pt.sum over the whole star vector, sources included, and bulge source stars
+# sit near 1 Msun.
+CHABRIER_LOG_MC = math.log10(0.22)  # dex(solMass), lognormal centre
+CHABRIER_SIGMA = 0.57  # dex, lognormal width
+CHABRIER_HIGH_MASS_SLOPE = 1.3  # x in dN/dlog m ~ m^-x above the match
+CHABRIER_MATCH_LOGMASS = 0.0  # dex, where the two segments meet (1 Msun)
+# 10%-90% width of the smoothing ramp between the two segments, in dex.  The
+# true IMF is only C0 continuous at the match -- the slope JUMPS from -2.02 to
+# -1.3*ln10 = -2.99 nats/dex -- so a faithful piecewise form has a logp kink
+# there, the same class of thing as the SHO kernel's Q = 1/2 switch.  Blending
+# across a width D deviates from the exact piecewise form by roughly
+# D * 0.97 / 8, so 0.2 dex costs ~0.02 nats.  Against that, Chabrier's own
+# high-mass exponent is uncertain at x = 1.3 +/- 0.3, i.e. +/-0.69 nats/dex of
+# slope, ~0.7 nats across a decade -- 30x larger.  The smoothing is free at
+# the IMF's own accuracy and cannot be the limiting error.
+CHABRIER_BLEND_WIDTH_DEX = 0.2
 # Hydrogen-burning minimum mass at ~solar composition (Chabrier & Baraffe
 # 2000, ARA&A 38, 337).  Composition-dependent -- ~0.072 Msun at solar
 # metallicity, rising toward ~0.09 Msun in metal-poor material -- and 0.075 is
@@ -163,3 +229,41 @@ LSUN = 1 * u.Lsun
 M_BOL_SUN = LSUN.to(u.M_bol).value
 L0 = LSUN / 10 ** (-0.4 * M_BOL_SUN)
 LOG_L0_CONST = 2.5 * np.log10(L0.value)
+
+
+# --- 7. RUNTIME / PLUMBING CONSTANTS ---------------------------------------
+# Named here rather than inline at their one call site (review 4.2.6) because
+# a bare number in the middle of a function is unsearchable and unexplainable:
+# the next reader cannot tell a measured value from a guess, and cannot find
+# the other place that has to move with it.
+
+# Fraction of the physical cores an unconfigured run takes.  The rule has
+# exactly ONE spelling -- `samplers/_common.default_cores()`, which returns
+# max(1, min(int(n_phys * CORE_FRACTION), n_phys - 1)) -- and this constant
+# is its only input; PR #215 collapsed three drifting copies (run.py's
+# inline formula, create_pool's and nested.py's hardcoded 0.75) into it, so
+# anything that resolves an unnamed core grant calls that function rather
+# than rewriting the arithmetic.  The `n_phys - 1` arm is what always leaves
+# one core for the OS and for the user's shell, and this fraction is what
+# keeps a 64-core node from being taken whole by a fit nobody asked to be
+# exclusive.  `cores=None` therefore means AUTO, never serial (see
+# default_cores' own docstring for why that equivalence is load-bearing); a
+# `sampler: cores:` key is passed through by run.py instead and bypasses
+# this constant entirely.
+CORE_FRACTION = 0.75
+
+# Hard wall-clock limit, in seconds, on ONE symbolic solve in the relaxation
+# engine (config._sympy_time_limit).  sp.solve can hang effectively forever on
+# certain equation/target pairs and WHICH pairs get attempted is hash-seed
+# sensitive, so this is a latent-intermittent-hang guard, not a performance
+# knob.  Two seconds is far above any solve the shipped examples need and far
+# below anything a user would sit through; raising it makes a hang look like a
+# slow start, lowering it starts abandoning solves that would have succeeded.
+SYMPY_SOLVE_TIMEOUT_S = 2
+
+# Seed for the corner plot's thinning draw (corner_utils.save_corner_plot).
+# DELIBERATELY fixed, and the opposite choice from run.get_draws' unseeded
+# posterior-spaghetti draw: a corner plot is a figure that goes in a paper, so
+# re-running the same trace must produce the same picture.  Any fixed value
+# does; this one is the historical 42.
+CORNER_THIN_SEED = 42

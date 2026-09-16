@@ -1,0 +1,173 @@
+Unloading tools/local-user <S>
+  ERROR: Unload of sticky module skipped
+
+Unloading uge/8.8.1 <S>
+  ERROR: Unload of sticky module skipped
+sha: 17920911
+truth: orbit.period=5.76753  orbit.tc=2.456e+06  planet.p=0.0762598  planet.b=0.387942  planet.t14=0.141635
+data: n=99 depth=0.00631 sigma=1.939e-04 in-transit=32
+Parameter 'transit.jitter_variance'[0]: start value 0.0 sits on (or unrepresentably close to) its bounds [-3.5699698650232755e-08, 100000.0], where the logit transform diverges and no raw start exists; nudged inward to 6.430030134980294e-08, a move of 6.43e-08 (internal units). This is the ON-THE-BOUND case only -- a start OUTSIDE the bounds is refused outright, never clipped. Set an 'initval' further inside the bound to remove this nudge.
+free RVs: ['orbit.chord_raw', 'orbit.logP_raw', 'orbit.tc_raw', 'planet.log_q_raw', 'planet.radius_raw', 'transit.baseline_raw', 'transit.jitter_variance_raw']
+Initializing NUTS using jitter+adapt_diag...
+Multiprocess sampling (4 chains in 4 jobs)
+NUTS: [planet.log_q_raw, planet.radius_raw, orbit.logP_raw, orbit.tc_raw, orbit.chord_raw, transit.baseline_raw, transit.jitter_variance_raw]
+Sampling 4 chains for 2_000 tune and 2_000 draw iterations (8_000 + 8_000 draws total) took 429 seconds.
+There were 4000 divergences after tuning. Increase `target_accept` or reparameterize.
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+The effective sample size per chain is smaller than 100 for some parameters.  A higher number is needed for reliable rhat and ess computation. See https://arxiv.org/abs/1903.08008 for details
+
+divergences per chain: [2000, 0, 0, 2000]
+step size per chain: [5e-324, 0.39574369308096485, 0.009198041556525148, 5e-324]
+
+=== per-chain ranges (the discriminating measurement) ===
+variable                chain         mean           sd          min          max
+  orbit.chord          ESS=nan  between-chain mean spread=0.1199  typical within-chain sd=0.0009744  ratio=123.00
+                            0      1.12389     2.22e-16      1.12389      1.12389
+                            1      1.00404     0.001949     0.996841      1.01014
+                            2      1.01799     0.006085      1.00175      1.03189
+                            3       1.1123            0       1.1123       1.1123
+  orbit.chord_raw      ESS=nan  between-chain mean spread=1.198  typical within-chain sd=0.009692  ratio=123.66
+                            0     0.506067     1.11e-16     0.506067     0.506067
+                            1    -0.692397      0.01938    -0.763963    -0.631695
+                            2    -0.553571      0.06054    -0.715134     -0.41531
+                            3     0.389082    1.665e-16     0.389082     0.389082
+  orbit.cosi           ESS=nan  between-chain mean spread=0.02974  typical within-chain sd=0.0001945  ratio=152.94
+                            0            0            0            0            0
+                            1    0.0297428     0.000389    0.0284635    0.0311001
+                            2    0.0263721     0.001497    0.0230032    0.0301641
+                            3            0            0            0            0
+  orbit.logP           ESS=nan  between-chain mean spread=0.000145  typical within-chain sd=5.589e-06  ratio=25.95
+                            0     0.761128     1.11e-16     0.761128     0.761128
+                            1     0.760986    1.141e-05     0.760946     0.761029
+                            2     0.760989    1.118e-05     0.760946     0.761021
+                            3     0.761131     2.22e-16     0.761131     0.761131
+  orbit.logP_raw       ESS=nan  between-chain mean spread=14.5  typical within-chain sd=0.5589  ratio=25.95
+                            0      0.64147     1.11e-16      0.64147      0.64147
+                            1     -13.5641        1.141     -17.5482     -9.20312
+                            2     -13.2852        1.118     -17.4995     -10.0127
+                            3     0.939942     1.11e-16     0.939942     0.939942
+  orbit.period         ESS=nan  between-chain mean spread=0.001926  typical within-chain sd=7.422e-05  ratio=25.95
+                            0      5.76936            0      5.76936      5.76936
+                            1      5.76748    0.0001516      5.76695      5.76806
+                            2      5.76751    0.0001484      5.76695      5.76795
+                            3       5.7694    1.776e-15       5.7694       5.7694
+  orbit.tc             ESS=nan  between-chain mean spread=0.0006851  typical within-chain sd=9.933e-05  ratio=6.90
+                            0    2.456e+06    4.657e-10    2.456e+06    2.456e+06
+                            1    2.456e+06    0.0002052    2.456e+06    2.456e+06
+                            2    2.456e+06    0.0001987    2.456e+06    2.456e+06
+                            3    2.456e+06    9.313e-10    2.456e+06    2.456e+06
+  orbit.tc_raw         ESS=nan  between-chain mean spread=0.6851  typical within-chain sd=0.09933  ratio=6.90
+                            0     0.950878     2.22e-16     0.950878     0.950878
+                            1     0.829152       0.2052      0.16561      1.51484
+                            2     0.774102       0.1987     0.151391      1.47766
+                            3     0.265774     1.11e-16     0.265774     0.265774
+  orbit.ts             ESS=nan  between-chain mean spread=0.001102  typical within-chain sd=7.608e-05  ratio=14.48
+                            0    2.456e+06            0    2.456e+06    2.456e+06
+                            1    2.456e+06    0.0001553    2.456e+06    2.456e+06
+                            2    2.456e+06    0.0001522    2.456e+06    2.456e+06
+                            3    2.456e+06            0    2.456e+06    2.456e+06
+  orbit.vcve           ESS=nan  between-chain mean spread=0  typical within-chain sd=0  ratio=nan
+                            0            1            0            1            1
+                            1            1            0            1            1
+                            2            1            0            1            1
+                            3            1            0            1            1
+  planet.b             ESS=nan  between-chain mean spread=0.3876  typical within-chain sd=0.002534  ratio=152.96
+                            0            0            0            0            0
+                            1     0.387609     0.005068     0.370944     0.405294
+                            2     0.348977      0.01763     0.307217     0.393707
+                            3            0            0            0            0
+  planet.bs            ESS=nan  between-chain mean spread=0.3876  typical within-chain sd=0.002534  ratio=152.96
+                            0            0            0            0            0
+                            1     0.387609     0.005068     0.370944     0.405294
+                            2     0.348977      0.01763     0.307217     0.393707
+                            3            0            0            0            0
+  planet.chen_radius_pred ESS=nan  between-chain mean spread=0.04443  typical within-chain sd=0.001434  ratio=30.98
+                            0     0.125187            0     0.125187     0.125187
+                            1    0.0810238      0.01259    0.0493483     0.130001
+                            2     0.105974     0.002868     0.103043     0.123216
+                            3      0.12545    2.776e-17      0.12545      0.12545
+  planet.log_q         ESS=nan  between-chain mean spread=2.391  typical within-chain sd=0.05555  ratio=43.04
+                            0     -3.02214    4.441e-16     -3.02214     -3.02214
+                            1     -3.76493       0.1111     -4.12202      -3.4078
+                            2     -1.37411       0.2611     -2.86551     -1.10073
+                            3     -3.04286    4.441e-16     -3.04286     -3.04286
+  planet.log_q_raw     ESS=nan  between-chain mean spread=60.19  typical within-chain sd=1.245  ratio=48.35
+                            0    -0.329529     1.11e-16    -0.329529    -0.329529
+                            1      -17.202         2.49     -25.1867     -9.16798
+                            2      42.9851        7.676      3.33343      51.5133
+                            3    -0.810288     1.11e-16    -0.810288    -0.810288
+  planet.mass          ESS=nan  between-chain mean spread=0.04857  typical within-chain sd=2.43e-05  ratio=1998.87
+                            0   0.00095842    2.168e-19   0.00095842   0.00095842
+                            1  0.000179222     4.86e-05  7.61519e-05  0.000394364
+                            2    0.0487514       0.0204   0.00137463    0.0799773
+                            3  0.000913781            0  0.000913781  0.000913781
+  planet.radius        ESS=nan  between-chain mean spread=0.006702  typical within-chain sd=0.0001432  ratio=46.79
+                            0    0.0861415    2.776e-17    0.0861415    0.0861415
+                            1    0.0794395    0.0002865     0.078494    0.0803586
+                            2    0.0794787    0.0002871     0.078495    0.0803902
+                            3    0.0822332    2.776e-17    0.0822332    0.0822332
+  planet.radius_raw    ESS=nan  between-chain mean spread=0.604  typical within-chain sd=0.01344  ratio=44.93
+                            0     0.877719     1.11e-16     0.877719     0.877719
+                            1     0.273763      0.02688     0.184577     0.359564
+                            2     0.277444      0.02693     0.184665     0.362491
+                            3     0.531473     1.11e-16     0.531473     0.531473
+  planet.t14           ESS=nan  between-chain mean spread=0.0113  typical within-chain sd=0.0001371  ratio=82.48
+                            0     0.152676    5.551e-17     0.152676     0.152676
+                            1     0.141643    0.0002741      0.14063     0.142504
+                            2     0.141372    0.0002898     0.140374     0.142366
+                            3     0.152148            0     0.152148     0.152148
+  planet.t14s          ESS=nan  between-chain mean spread=0.0113  typical within-chain sd=0.0001371  ratio=82.48
+                            0     0.152676    5.551e-17     0.152676     0.152676
+                            1     0.141643    0.0002741      0.14063     0.142504
+                            2     0.141372    0.0002898     0.140374     0.142366
+                            3     0.152148            0     0.152148     0.152148
+  planet.tau           ESS=nan  between-chain mean spread=0.0005438  typical within-chain sd=2.625e-05  ratio=20.72
+                            0    0.0116837    3.469e-18    0.0116837    0.0116837
+                            1    0.0116976     5.25e-05    0.0115185    0.0118915
+                            2    0.0113346    0.0001587    0.0109609    0.0117853
+                            3    0.0111538    3.469e-18    0.0111538    0.0111538
+  planet.taus          ESS=nan  between-chain mean spread=0.0005438  typical within-chain sd=2.625e-05  ratio=20.72
+                            0    0.0116837    3.469e-18    0.0116837    0.0116837
+                            1    0.0116976     5.25e-05    0.0115185    0.0118915
+                            2    0.0113346    0.0001587    0.0109609    0.0117853
+                            3    0.0111538    3.469e-18    0.0111538    0.0111538
+  planet.tfwhm         ESS=nan  between-chain mean spread=0.01105  typical within-chain sd=0.0001469  ratio=75.21
+                            0     0.140992    2.776e-17     0.140992     0.140992
+                            1     0.129946    0.0003024     0.128863      0.13092
+                            2     0.130037    0.0002938     0.128977     0.131035
+                            3     0.140994    2.776e-17     0.140994     0.140994
+  planet.tfwhms        ESS=nan  between-chain mean spread=0.01105  typical within-chain sd=0.0001469  ratio=75.21
+                            0     0.140992    2.776e-17     0.140992     0.140992
+                            1     0.129946    0.0003024     0.128863      0.13092
+                            2     0.130037    0.0002938     0.128977     0.131035
+                            3     0.140994    2.776e-17     0.140994     0.140994
+  transit.baseline     ESS=nan  between-chain mean spread=0.004035  typical within-chain sd=1.129e-05  ratio=357.41
+                            0       1.0016            0       1.0016       1.0016
+                            1      1.00001    2.258e-05     0.999933      1.00007
+                            2      1.00001    2.272e-05     0.999939      1.00009
+                            3      1.00404            0      1.00404      1.00404
+  transit.baseline_raw ESS=nan  between-chain mean spread=0.4035  typical within-chain sd=0.001129  ratio=357.41
+                            0     0.170726    5.551e-17     0.170726     0.170726
+                            1    0.0111752     0.002258   0.00362875    0.0177819
+                            2     0.011409     0.002272   0.00419885    0.0190844
+                            3     0.414725            0     0.414725     0.414725
+  transit.jitter_variance ESS=nan  between-chain mean spread=1.525e-07  typical within-chain sd=2.574e-09  ratio=59.23
+                            0  1.48517e-07    2.647e-23  1.48517e-07  1.48517e-07
+                            1 -3.94052e-09    5.148e-09 -1.66964e-08  1.86647e-08
+                            2 -3.86345e-09     5.28e-09    -1.65e-08  2.53571e-08
+                            3  1.08861e-07    2.647e-23  1.08861e-07  1.08861e-07
+  transit.jitter_variance_raw ESS=nan  between-chain mean spread=1.771  typical within-chain sd=0.07958  ratio=22.25
+                            0     0.610942            0     0.610942     0.610942
+                            1     -1.15975       0.1592     -1.66056     -0.60946
+                            2     -1.15779       0.1616     -1.65028    -0.493366
+                            3     0.368528     1.11e-16     0.368528     0.368528
+
+=== correlations with the worst-mixing sampled coordinate ===
+  |corr(orbit.cosi, planet.bs               )| = 1.000
+  |corr(orbit.cosi, planet.b                )| = 1.000
+  |corr(orbit.cosi, orbit.chord             )| = 0.997
+  |corr(orbit.cosi, orbit.chord_raw         )| = 0.997
+  |corr(orbit.cosi, planet.tfwhms           )| = 0.996
+  |corr(orbit.cosi, planet.tfwhm            )| = 0.996
+  |corr(orbit.cosi, planet.t14s             )| = 0.992
+  |corr(orbit.cosi, planet.t14              )| = 0.992

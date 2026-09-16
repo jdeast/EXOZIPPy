@@ -1,7 +1,7 @@
-"""Render PlotSpecs to matplotlib figures -- the saved-PDF counterpart of the
+"""Render Charts to matplotlib figures -- the saved-PDF counterpart of the
 GUI's plotly-adapter.ts.
 
-A component describes each of its plots ONCE, as the PlotSpec list returned by
+A component describes each of its plots ONCE, as the Chart list returned by
 ``Component.plot_data(system, point)``.  The GUI renders those specs with
 plotly; this module renders the same specs with matplotlib for the pre-flight
 and posterior PDFs.  ``Component.plot`` implementations reduce to::
@@ -36,22 +36,30 @@ Trace ``style`` (all optional): ``series_index`` (fixed categorical color
 ``color`` / ``marker`` user overrides, ``lw`` line width, ``legend`` to
 force a legend entry on a non-data trace.
 
-PlotSpec ``meta`` presentation keys (all optional):
+Chart ``meta`` presentation keys (all optional):
 
 * ``file_tag``   -- output basename: ``{prefix}_{file_tag}.pdf``.  Falls back
   to the spec ``id`` with dots replaced by underscores.
 * ``figsize``    -- ``(w, h)`` inches.
 * ``hline_y``    -- draw a dotted horizontal reference line at this y.
-* ``x_range`` / ``y_range``     -- explicit ``[lo, hi]`` axis windows.
-* ``x_log`` / ``y_log``         -- logarithmic axes.
-* ``x_inverted`` / ``y_inverted`` -- reversed axes (magnitudes, RA).
-* ``aspect_equal`` -- equal-aspect axes (sky-plane plots).
+* ``aspect_equal`` -- equal-aspect axes (sky-plane plots).  Read only here;
+  the plotly adapter ignores it, which is why it was NOT promoted to a Chart
+  field in review 4.11.3 while the six axis-geometry keys were.
 * ``caption``    -- LaTeX figure caption for the generated paper draft
   (``outputs/modeling.py``, the third consumer of these specs).  Neither
   renderer draws it; without one the draft falls back to a generic
   caption built from the spec title.  It is emitted verbatim into
   ``\\caption{...}``, so escape any non-LaTeX pieces (instrument names!)
   with ``latex_escape`` when composing it.
+
+Axis GEOMETRY is no longer here: ``x_range``/``y_range``, ``x_log``/``y_log``
+and ``x_inverted``/``y_inverted`` are first-class ``Chart`` attributes (review
+4.11.3).  They moved because both renderers must consult them to lay out an
+axis at all, so a typo in a stringly-typed key silently produced a linear axis
+where a log one was meant.  ``meta`` now carries annotations only.
+
+Per-trace opacity: ``Trace.alpha`` overrides the role default, and the role
+defaults here are the ones the GUI mirrors (review 4.11.6).
 """
 
 from __future__ import annotations
@@ -61,21 +69,47 @@ import logging
 import matplotlib.pyplot as plt
 import numpy as np
 
+from . import plot_theme
+
 logger = logging.getLogger(__name__)
 
-# Mirror of plotly-adapter's role encodings.
-_DATA_ALPHA = 0.6
-_MODEL_COLOR = "r"
-_RESIDUAL_COLOR = "0.5"
+# Role encodings come from the ONE shared table (review 4.11.4). They used to
+# be spelled here as matplotlib shorthands -- "r", "0.5", and an implicit
+# f"C{n}" cycle -- and the plotly adapter carried its own hex copies that
+# matched by convention only. Each substitution below is exactly equal to the
+# shorthand it replaces (pinned in tests/test_plot_theme.py), so the saved
+# PDFs do not move; what moved is the GUI, onto these values.
+_DATA_ALPHA = plot_theme.ROLE_ALPHA["data"]
+_MODEL_COLOR = plot_theme.ROLE_COLORS["model"]
+_RESIDUAL_COLOR = plot_theme.ROLE_COLORS["residual"]
+
+
+def _trace_alpha(trace, default):
+    """The trace's own alpha if it set one, else the role default.
+
+    One resolver so a per-trace override and the role default cannot drift
+    apart, and so the plotly adapter has a single rule to mirror (review
+    4.11.6: the two renderers had silently disagreed, this file drawing data
+    at 0.6 and the GUI drawing it opaque).
+    """
+    return default if trace.alpha is None else float(trace.alpha)
 
 
 def _trace_color(trace, fallback=None):
-    """Explicit style color, else the fixed C{series_index}, else fallback."""
+    """Explicit style color, else the shared palette, else fallback.
+
+    The palette lookup replaces an f"C{n}" handoff to matplotlib's own
+    property cycle. That cycle IS tab10 and so resolved to exactly these
+    values, but only by coincidence of matplotlib's defaults -- indexing the
+    shared table makes the agreement with the GUI a fact rather than a
+    coincidence, and survives a matplotlib that ships a different cycle.
+    """
     style = trace.style or {}
     if style.get("color") is not None:
         return style["color"]
     if style.get("series_index") is not None:
-        return f"C{int(style['series_index'])}"
+        idx = int(style["series_index"]) % len(plot_theme.PALETTE)
+        return plot_theme.PALETTE[idx]
     return fallback
 
 
@@ -95,7 +129,7 @@ def _draw_data(ax, trace):
         xerr=_as_err(trace.xerr),
         fmt=style.get("marker") or "o",
         color=_trace_color(trace),
-        alpha=_DATA_ALPHA,
+        alpha=_trace_alpha(trace, _DATA_ALPHA),
         zorder=1,
         label=trace.name or None,
     )
@@ -111,7 +145,7 @@ def _draw_model(ax, trace, alpha):
             np.asarray(trace.y, dtype=float),
             style.get("marker") or ".",
             color=color,
-            alpha=alpha,
+            alpha=_trace_alpha(trace, alpha),
             zorder=2,
             label=label,
         )
@@ -121,8 +155,8 @@ def _draw_model(ax, trace, alpha):
             np.asarray(trace.y, dtype=float),
             "-",
             color=color,
-            lw=style.get("lw", 1.5),
-            alpha=alpha,
+            lw=style.get("lw", plot_theme.DEFAULT_LINEWIDTH),
+            alpha=_trace_alpha(trace, alpha),
             zorder=2,
             label=label,
         )
@@ -135,30 +169,37 @@ def _draw_residual(ax, trace):
         yerr=_as_err(trace.yerr),
         fmt=".",
         color=_RESIDUAL_COLOR,
-        alpha=_DATA_ALPHA,
+        alpha=_trace_alpha(trace, _DATA_ALPHA),
         zorder=1,
         label=trace.name or None,
     )
 
 
-def _apply_meta(ax, meta):
-    """Axis decorations from the spec's meta presentation keys."""
+def _apply_axes(ax, spec):
+    """Axis geometry from the chart's first-class fields, plus meta extras.
+
+    The six geometry fields are attributes on the Chart (review 4.11.3); only
+    `hline_y` and `aspect_equal` are still read from `meta`, because each is
+    honored by exactly this renderer and promoting them would advertise a
+    field the plotly adapter silently ignores.
+    """
+    meta = spec.meta or {}
     if meta.get("hline_y") is not None:
         ax.axhline(
             float(meta["hline_y"]), color="black", linestyle=":", alpha=0.5
         )
-    if meta.get("x_log"):
+    if spec.x_log:
         ax.set_xscale("log")
-    if meta.get("y_log"):
+    if spec.y_log:
         ax.set_yscale("log")
-    if meta.get("x_range") is not None:
-        ax.set_xlim(*[float(v) for v in meta["x_range"]])
-    if meta.get("y_range") is not None:
-        ax.set_ylim(*[float(v) for v in meta["y_range"]])
+    if spec.x_range is not None:
+        ax.set_xlim(*[float(v) for v in spec.x_range])
+    if spec.y_range is not None:
+        ax.set_ylim(*[float(v) for v in spec.y_range])
     # Invert AFTER any explicit range so [lo, hi] semantics stay ascending.
-    if meta.get("x_inverted"):
+    if spec.x_inverted:
         ax.invert_xaxis()
-    if meta.get("y_inverted"):
+    if spec.y_inverted:
         ax.invert_yaxis()
     if meta.get("aspect_equal"):
         ax.set_aspect("equal", adjustable="datalim")
@@ -169,7 +210,7 @@ def render_spec_groups(spec_groups, filename_prefix="debug"):
 
     Parameters
     ----------
-    spec_groups : list[list[PlotSpec]]
+    spec_groups : list[list[Chart]]
         One ``plot_data`` result per posterior point.  The FIRST group is the
         reference: it supplies the data traces, labels, and decorations
         (matching the historical convention that data offsets/cleaning use
@@ -211,7 +252,7 @@ def render_spec_groups(spec_groups, filename_prefix="debug"):
                 for trace in models:
                     _draw_model(ax, trace, model_alpha)
 
-            _apply_meta(ax, meta)
+            _apply_axes(ax, spec)
             ax.set_xlabel(spec.xlabel)
             ax.set_ylabel(spec.ylabel)
             ax.set_title(spec.title)

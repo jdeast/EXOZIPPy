@@ -1,0 +1,191 @@
+run:
+  name: "DC2018_128"
+
+# The 2018 Roman Data Challenge, event 128: a 2L1S binary lens with a
+# finite-source peak.  Truth (Answers/master_file.txt row 128):
+#   t_0 = 2458554.8869   u_0 = 0.141832   t_E = 18.2374 d
+#   s = 0.993145   q = 0.0012118   rho = 0.00606537
+#   D_lens = 7999 pc   D_source = 8143 pc   M_lens = 0.454 Msun
+#   theta_E = 0.0905 mas   |pi_E| = 0.0244   R_source = 0.961 Rsun
+#   gamma = 0 -- the simulation has NO limb darkening (all 44 events)
+#
+# alpha is deliberately absent from that list: the answer key's alpha has no
+# global mapping onto the fitted convention.  See
+# scripts/dc18_alpha_convention.py.
+#
+#   star.0   = Lens      (primary lens body, and the kinematic host)
+#   star.1   = Source
+#   planet.0 = Companion (secondary lens body)
+
+star:
+  - name: "Lens"
+  - name: "Source"
+
+planet:
+  - name: "Companion"
+
+# PORTED to the post-8.6.17 component split (PR #246, merged 2026-09-09).
+# Shared event quantities (t_E, theta_E, pi_E, mu_rel) and the
+# coordinate-swap flags live on `mulensevent`; each LENS BODY gets its own
+# `lens:` entry; the source's own track (t_0, u_0, rho) and the
+# `star_constrains_rho` tie toggle live on `source:`.
+# src/exozippy/components/mulensing/source.py is the authority.
+mulensevent:
+  - finite_source: True
+    fitmurel: True
+    fitpirel: True
+    fitthetae: True
+    mmexofast: "../events/128/DC2018_128_mmexofast.json"
+
+lens:
+  - body: star.Lens
+  - body: planet.Companion
+
+source:
+  - body: star.Source
+    # RE-LINKED for v7, and this is the whole point of the arm.
+    #
+    # WHY THE SEVERING IS BEING UNDONE.  v3-v6 established that DC128's
+    # theta_E error is entirely a mu_rel error: t_E is recovered to 0.1-0.2%
+    # in every arm (18.25-18.27 d vs truth 18.234), and theta_E = t_E *
+    # mu_rel, so the 6.6x theta_E discrepancy IS the 6.0-6.6x mu_rel
+    # discrepancy (11.9 / 10.8 / 11.1 mas/yr against truth 1.814).  With the
+    # rho tie severed, the ONLY route to theta_E is t_E * mu_rel -- and t_E
+    # is measured -- so severing hands mu_rel to the galactic model's
+    # kinematic prior, which is ~6x off for this event.  Re-linking restores
+    # theta_E = theta_star / rho, which pins theta_E from DATA (the SED's
+    # angular source size and the light curve's rho) instead of from that
+    # prior.  This is not a fundamental degeneracy: the information exists,
+    # severing cut the wire to it.
+    #
+    # WHY IT SHOULD WORK NOW WHERE IT DID NOT BEFORE.  The unsevered run is
+    # what produced the 601-nat backward-running tie (rho held ~8x below the
+    # light curve's own 2.5%-precise preference).  The tie ran backward
+    # because the stellar chain was STIFF AND WRONG: star.Lens.radius pinned
+    # at 1.0 and teff at 5778 forced a solar lens, so when the light curve's
+    # rho disagreed, the stiff side won.  v5 removed exactly that stiffness
+    # (teff freed -> 3514 K, M_lens 0.899 -> 0.385 against truth 0.454), and
+    # v7 keeps v5's unpins.  The hypothesis is that a tie between two
+    # NON-stiff sides transmits information in the intended direction.
+    #
+    # WHAT WOULD FALSIFY IT: rho drifting back below ~0.005.  rho has been
+    # 0.00711-0.00715 in all four severed arms against a truth of 0.0060668;
+    # if the relink drags it down again, the tie still runs backward and the
+    # severing was load-bearing after all.  Watch rho, not just theta_E.
+    #
+    # EXPECTED SIZE, from v5's own posterior rather than from truth:
+    # theta_star = 4.6503 * R_src / D_src = 4.6503 * 0.3871 / 4657 =
+    # 3.86e-4 mas, and rho = 0.00713, so theta_E -> 0.054 mas against the
+    # severed arms' 0.54 and a truth of 0.0905.  That is 0.6x truth instead
+    # of 6.0x -- the error should shrink ~10x and FLIP SIGN.  A 0.6x rather
+    # than 1.0x landing is expected if the source really is being pulled
+    # late-type (see the params file's note on that).
+    # Full current stack (the 15360856 post-mortem: that run predated the
+    # source seeding and the coordinate swaps, initialized in the swapped
+    # basin, and at Lambda=21.5 could never leave it -- occupancy
+    # IACT 54k, N_eff 63).  Observable coordinates + flux-seeded source.
+    # THE v7 CHANGE, now a per-SOURCE flag: the tie is between THIS source's
+    # rho and the stellar chain, so it belongs on the source entry --
+    # source.py, "per-instance flags on the component that owns the
+    # coordinate is the established idiom".
+    star_constrains_rho: True
+
+galacticmodel:
+  - name: "DC2018_128"
+    anchor_idx: 1              # the source is star.1
+
+band:
+  - name: "W149"
+    filter: "Roman/WFI.F146"
+    ld_law: "linear"
+  - name: "Z087"
+    filter: "Roman/WFI.F087"
+    ld_law: "linear"
+  # Not observed -- declared so 2MASS Ks enters the SED's BC grid, which is
+  # what `mann: {ks: synthetic}` needs to synthesize the lens's individual
+  # Ks.  The alternative the error message offers, a filter row in the .sed
+  # file, would require a MAGNITUDE we do not have (a row with no `mag:`
+  # becomes NaN and propagates into the likelihood).  No instrument
+  # references this band, so its limb-darkening parameters are simply
+  # pinned as unread.
+  - name: "Ks_bcgrid"
+    filter: "2MASS/2MASS.Ks"
+    ld_law: "linear"
+
+mulensinstrument:
+  - name: "Roman_W149"
+    file: "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.W149.WFIRST18.128.txt"
+    data_format: "flux"
+    observer_location: "roman_simulated_2018dc"
+    band: "W149"
+    likelihood: "hogg"
+  - name: "Roman_Z087"
+    file: "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.Z087.WFIRST18.128.txt"
+    data_format: "flux"
+    observer_location: "roman_simulated_2018dc"
+    band: "Z087"
+    likelihood: "hogg"
+
+prefix: "fitresults_severed_v7/DC2018_128"
+
+sed:
+  file: "DC2018_128.sed.yaml"
+
+# Empirical mass-radius relations, one per star, each chosen for the mass
+# range it is calibrated over -- complements, not alternatives.
+#
+# The SOURCE is a bulge turnoff star (truth: R = 0.961 Rsun at 8.14 kpc),
+# above Mann's 0.7 solMass ceiling, so Torres+2010 applies.  It predicts
+# log10(M) and log10(R) from teff/logg/feh, adds no new parameters, and its
+# scatter is in dex.
+torres:
+  - star: "Source"
+    constrain: [mass, radius]
+
+# The LENS is in the range Mann+2015/2019 is calibrated for (0.075-0.7
+# solMass; truth here 0.454).  `ks: synthetic` takes its INDIVIDUAL Ks from
+# the SED rather than an observed blend -- the only workable route when the
+# lens is unresolved -- and that Ks carries its own scatter, which combines
+# with the relation's published 2.7%/3.3% through the non-centred
+# `ks_offset ~ N(0,1)` parameterization rather than needing hand-inflation.
+#
+# Well posed even when the lens is only bounded ABOVE by the blend flux: as
+# the lens dims its Ks runs faint, the predicted mass runs down to the end
+# of the relation, and the IMF prior closes it from below.  Mann's low-mass
+# boundary and the Salpeter hydrogen-burning floor are the same constant,
+# 0.075 solMass, so the two meet rather than fight.
+#
+# CAVEAT for other events: calibration-range violations are startup
+# WARNINGS only, so a lens above 0.7 solMass still gets the potential
+# applied.  Read the warning before trusting a lens mass.
+mann:
+  - star: "Lens"
+    ks: synthetic
+    constrain: [mass, radius]
+
+sampler:
+  method: "ptde_async"
+  # cores MUST be set explicitly.  v3 left it unset, so default_cores() took
+  # 0.75 * mp.cpu_count() = 96 on a 128-CPU node against an SGE grant of 64
+  # slots, and the wrap-up's hot-chain polish forked 96 workers that each
+  # inherited the parent footprint -- 771 GB, h_rss kill, 36 hours of
+  # sampling with no report written.  This is a resource fix, not part of
+  # the physics change below.
+  cores: 64
+  n_temps: "auto"
+  T_max: 200
+  tune: 5000
+  draws: 50000
+  nthin: 1
+  recompute_trace: True
+  eval_timeout: 10
+
+# Degenerate events routinely leave chains split across solution branches
+# with no inter-mode mixing, so occupancy weights would reflect
+# initialization rather than posterior mass.  Bridge-sampling evidence
+# weights are the designed remedy (they fall back to occupancy, loudly, if
+# the bridge iteration does not converge).
+modes:
+  weights: "evidence"
+
+parameter_file: "DC2018_128_sed_severed_v7.params.yaml"

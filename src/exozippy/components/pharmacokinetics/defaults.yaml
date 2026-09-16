@@ -1,0 +1,717 @@
+# Population pharmacokinetics -- parameter defaults.
+#
+# READ README.md IN THIS DIRECTORY FIRST.  Written by an astrophysicist and an LLM
+# with no domain reviewer; the modelling choices below, INCLUDING EVERY BOUND
+# AND START VALUE, are unreviewed.  They are chosen to be permissive enough
+# not to exclude a plausible drug rather than to encode knowledge about one.
+#
+# Internal units are hours, mg, L, and mg/L throughout, so ka/ke are 1/hr,
+# V is L, CL is L/hr and concentrations are mg/L.  A user may write any
+# astropy-convertible unit on a parameter and the Parameter layer converts.
+
+subject:
+  # --- sampled coordinates -------------------------------------------------
+  #
+  # CL, V and ka are sampled in log10 and derived by 10**x (see
+  # physics.calc_pk_pow10).  Only these three carry bounds: they are the
+  # SAMPLED coordinates, so their bounds are the hard logit support.  The
+  # derived quantities below deliberately carry NO bounds, because a finite
+  # bound on a DERIVED element becomes a soft barrier (see parameter.md) --
+  # i.e. an extra prior term -- and the constraint is already stated once,
+  # here.  Stating it twice would double-count it.
+
+  log_cl:
+    # CL/F from 0.01 to 100 L/hr.  Spans roughly the whole range of small-
+    # molecule apparent clearances, from a slowly cleared drug to a rapidly
+    # cleared one, with margin at both ends.
+    lower: -2.0
+    upper: 2.0
+    initval: 0.45
+    # d(log10 CL) for a ~25% change in CL: 0.25/ln(10) ~ 0.11.
+    init_scale: 0.11
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "\\log{(CL/F)}"
+    description: "log10 apparent clearance"
+    expressions:
+      # `ke_v` only, where this is a REPORTED element (subject.py's
+      # COORD_MODE_TABLE).  It reads (ke, v) and NOT the cl sitting right
+      # there with the same value, because under TRANS1 cl is reported too
+      # and nothing may consume a reported element.
+      from_ke:
+        func_name: "calc_pk_log_cl_from_ke"
+        deps: ["ke", "v"]
+      # WITH a `population:` block, this coordinate is not sampled per
+      # subject: it is the population typical value, shifted by the
+      # allometric covariate and by this subject's own standardized
+      # deviation.  `population_map` has one (zero) entry per subject, since
+      # there is exactly one population; `eta_cl` and `weight` are this
+      # component's own per-subject vectors.
+      from_population:
+        func_name: "calc_pk_population_value"
+        deps:
+          - "population.mu_log_cl[population_map]"
+          - "population.beta_cl[population_map]"
+          - "weight"
+          - "population.wt_ref[population_map]"
+          - "population.omega_cl[population_map]"
+          - "eta_cl"
+      # The same, for a coordinate the population declares NO variability on:
+      # every subject takes the typical value for its weight.  A separate
+      # block rather than an omega pinned to zero, because a pinned omega
+      # would leave one free eta per subject that no likelihood term reads.
+      from_population_typical:
+        func_name: "calc_pk_population_typical"
+        deps:
+          - "population.mu_log_cl[population_map]"
+          - "population.beta_cl[population_map]"
+          - "weight"
+          - "population.wt_ref[population_map]"
+
+  log_v:
+    # V/F from 0.1 to 1000 L.  The upper end covers a drug distributing well
+    # beyond total body water; the lower end is far below plasma volume.
+    lower: -1.0
+    upper: 3.0
+    initval: 1.5
+    init_scale: 0.11
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "\\log{(V/F)}"
+    description: "log10 apparent volume of distribution"
+    expressions:
+      # `cl_ke` only, where this is a REPORTED element.
+      from_rates:
+        func_name: "calc_pk_log_v_from_rates"
+        deps: ["cl", "ke"]
+      # WITH a `population:` block, this coordinate is not sampled per
+      # subject: it is the population typical value, shifted by the
+      # allometric covariate and by this subject's own standardized
+      # deviation.  `population_map` has one (zero) entry per subject, since
+      # there is exactly one population; `eta_v` and `weight` are this
+      # component's own per-subject vectors.
+      from_population:
+        func_name: "calc_pk_population_value"
+        deps:
+          - "population.mu_log_v[population_map]"
+          - "population.beta_v[population_map]"
+          - "weight"
+          - "population.wt_ref[population_map]"
+          - "population.omega_v[population_map]"
+          - "eta_v"
+      # The same, for a coordinate the population declares NO variability on:
+      # every subject takes the typical value for its weight.  A separate
+      # block rather than an omega pinned to zero, because a pinned omega
+      # would leave one free eta per subject that no likelihood term reads.
+      from_population_typical:
+        func_name: "calc_pk_population_typical"
+        deps:
+          - "population.mu_log_v[population_map]"
+          - "population.beta_v[population_map]"
+          - "weight"
+          - "population.wt_ref[population_map]"
+
+  log_ka:
+    # Absorption rate 0.01 to 100 /hr, i.e. absorption half-lives from a few
+    # seconds to a few days.  Deliberately wide: ka is the least constrained
+    # of the three on sparse data, and it is the coordinate the flip-flop
+    # degeneracy moves, so a tight bound here would truncate one of the two
+    # modes rather than resolve it (README, "the flip-flop degeneracy").
+    lower: -2.0
+    upper: 2.0
+    initval: 0.18
+    init_scale: 0.15
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "\\log{k_a}"
+    description: "log10 absorption rate constant"
+    expressions:
+      # WITH a `population:` block, this coordinate is not sampled per
+      # subject: it is the population typical value, shifted by the
+      # allometric covariate and by this subject's own standardized
+      # deviation.  `population_map` has one (zero) entry per subject, since
+      # there is exactly one population; `eta_ka` and `weight` are this
+      # component's own per-subject vectors.
+      from_population:
+        func_name: "calc_pk_population_value"
+        deps:
+          - "population.mu_log_ka[population_map]"
+          - "population.beta_ka[population_map]"
+          - "weight"
+          - "population.wt_ref[population_map]"
+          - "population.omega_ka[population_map]"
+          - "eta_ka"
+      # The same, for a coordinate the population declares NO variability on:
+      # every subject takes the typical value for its weight.  A separate
+      # block rather than an omega pinned to zero, because a pinned omega
+      # would leave one free eta per subject that no likelihood term reads.
+      from_population_typical:
+        func_name: "calc_pk_population_typical"
+        deps:
+          - "population.mu_log_ka[population_map]"
+          - "population.beta_ka[population_map]"
+          - "weight"
+          - "population.wt_ref[population_map]"
+
+  log_ke:
+    # THE TRANS1 COORDINATE, sampled only where `fitkev: true` or
+    # `fitclke: true` (see the component docstring); elsewhere it is
+    # REPORTED from CL/V and
+    # these bounds are inert, because a reported element carries no potential.
+    #
+    # Elimination rate 1e-4 to 100 /hr -- terminal half-lives from ~25 s to
+    # ~290 days.  Wider at the slow end than log_cl/log_v imply on their own
+    # (their corners give log_ke in [-5, 3]) because the two ends mean
+    # different things: a bound on log_cl is a statement about a drug, a bound
+    # on log_ke a statement about a half-life, and neither implies the other
+    # when only one of the pair is sampled.
+    lower: -4.0
+    upper: 2.0
+    # ke = 0.1/hr, a ~7-hour terminal half-life: the middle of the range for
+    # an orally dosed small molecule, and deliberately NOT the value the
+    # Theophylline data imply -- a defaults.yaml start is a template, not a
+    # number read off this example's own posterior.
+    initval: -1.0
+    init_scale: 0.11
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "\\log{k_e}"
+    description: "log10 elimination rate constant"
+    expressions:
+      # TRANS2 (the default), where this is REPORTED rather than sampled.
+      from_cl:
+        func_name: "calc_pk_log_ke_from_cl"
+        deps: ["cl", "v"]
+      # WITH a `population:` block, this coordinate is not sampled per
+      # subject: it is the population typical value, shifted by the
+      # allometric covariate and by this subject's own standardized
+      # deviation.  `population_map` has one (zero) entry per subject, since
+      # there is exactly one population; `eta_ke` and `weight` are this
+      # component's own per-subject vectors.
+      from_population:
+        func_name: "calc_pk_population_value"
+        deps:
+          - "population.mu_log_ke[population_map]"
+          - "population.beta_ke[population_map]"
+          - "weight"
+          - "population.wt_ref[population_map]"
+          - "population.omega_ke[population_map]"
+          - "eta_ke"
+      # The same, for a coordinate the population declares NO variability on:
+      # every subject takes the typical value for its weight.  A separate
+      # block rather than an omega pinned to zero, because a pinned omega
+      # would leave one free eta per subject that no likelihood term reads.
+      from_population_typical:
+        func_name: "calc_pk_population_typical"
+        deps:
+          - "population.mu_log_ke[population_map]"
+          - "population.beta_ke[population_map]"
+          - "weight"
+          - "population.wt_ref[population_map]"
+
+  # --- derived, and CONSUMED by the forward model --------------------------
+
+  cl:
+    unit: "L/hr"
+    internal_unit: "L/hr"
+    # CL/F, not CL: bioavailability F is exactly confounded with CL and V on
+    # oral-only data and is not fitted, so every estimate here is an APPARENT
+    # clearance.  The label says so because a reader who takes this for CL is
+    # wrong by 1/F, which for a poorly absorbed drug is a large factor.
+    latex: "CL/F"
+    description: "Apparent clearance"
+    expressions:
+      default:
+        func_name: "calc_pk_pow10"
+        deps: ["log_cl"]
+      # TRANS1: CL = ke*V, and it is REPORTED there -- the likelihood needs
+      # only (ka, ke, V), so nothing consumes it, which is exactly the
+      # `reported` element role (parameter.md).  It is still the quantity
+      # every reader of a PK table wants, which is why the role exists.
+      from_ke:
+        func_name: "calc_pk_cl_from_ke"
+        deps: ["ke", "v"]
+
+  v:
+    unit: "L"
+    internal_unit: "L"
+    latex: "V/F"
+    description: "Apparent volume of distribution"
+    expressions:
+      default:
+        func_name: "calc_pk_pow10"
+        deps: ["log_v"]
+      # `cl_ke` only: the basis that samples both rates derives the volume.
+      from_rates:
+        func_name: "calc_pk_v_from_rates"
+        deps: ["cl", "ke"]
+
+  ka:
+    unit: "1/hr"
+    internal_unit: "1/hr"
+    latex: "k_a"
+    description: "Absorption rate constant"
+    expressions:
+      default:
+        func_name: "calc_pk_pow10"
+        deps: ["log_ka"]
+
+  ke:
+    # What the forward model actually consumes, in BOTH parameterizations.
+    # Which of (CL, V) and (ke, V) is sampled is a per-instance coordinate
+    # choice in the field -- NONMEM's TRANS2 and TRANS1 -- and it is spelled
+    # one boolean per basis on a subject block: fitclv / fitkev / fitclke
+    # (subject.COORD_MODE_TABLE).
+    unit: "1/hr"
+    internal_unit: "1/hr"
+    latex: "k_e"
+    description: "Elimination rate constant"
+    expressions:
+      default:
+        func_name: "calc_pk_ke_from_cl"
+        deps: ["cl", "v"]
+      # TRANS1: sampled in log10 directly, exactly as CL is under TRANS2.
+      from_log:
+        func_name: "calc_pk_pow10"
+        deps: ["log_ke"]
+
+  # --- derived, and consumed by NOTHING: reporting only --------------------
+  #
+  # No bounds, for the reason given at the top of this block.
+  #
+  # THESE STAY `derived`, NOT `reported`, and the design note that said P3
+  # would flip them was wrong.  "Nothing consumes it" is the role's
+  # description, not its purpose: `reported` exists for a coordinate that a
+  # parameterization MASKED OUT, where the same statement is already being
+  # made on whatever that instance samples instead, and it deliberately
+  # carries NO potential (parameter.md's role table).  A half-life is not
+  # masked out of anything -- it is the coordinate the literature quotes, so
+  # `subject.S1.t_half: {mu: 8.0, sigma: 0.5}` is a constraint a user will
+  # really write, and as a derived element it becomes a Gaussian on ke, which
+  # is exactly right.  Flipping these to `reported` would silently discard it.
+
+  t_half:
+    unit: "hr"
+    internal_unit: "hr"
+    latex: "t_{1/2}"
+    description: "Terminal half-life"
+    expressions:
+      default:
+        func_name: "calc_pk_half_life"
+        deps: ["ke"]
+
+  tmax:
+    unit: "hr"
+    internal_unit: "hr"
+    latex: "t_{max}"
+    description: "Time of peak concentration"
+    expressions:
+      default:
+        func_name: "calc_pk_tmax"
+        deps: ["ka", "ke"]
+
+  cmax:
+    unit: "mg/L"
+    internal_unit: "mg/L"
+    latex: "C_{max}"
+    description: "Peak concentration"
+    expressions:
+      default:
+        func_name: "calc_pk_cmax"
+        deps: ["dose", "ka", "ke", "v"]
+
+  auc:
+    # AUC to infinity for a single dose, D/CL -- written as dose/(ke*v).
+    #
+    # THE SPELLING IS LOAD-BEARING AND THE OBVIOUS ONE IS WRONG.  `deps:
+    # ["dose", "cl"]` reads as the identity it is, and it raises under TRANS1:
+    # cl is a REPORTED element there and nothing may consume a reported
+    # element (System._validate_reported_not_consumed refuses the manifest).
+    # ke and v are sampled-or-derived in BOTH parameterizations, so this form
+    # is valid in both and needs no second expressions: block.
+    unit: "mg hr / L"
+    internal_unit: "mg hr / L"
+    latex: "AUC"
+    description: "Area under the curve to infinity"
+    expressions:
+      default:
+        func_name: "calc_pk_auc"
+        deps: ["dose", "ke", "v"]
+
+  # --- the hierarchy: present only with a `population:` block --------------
+  #
+  # eta lives HERE rather than on `population`, and the design left the
+  # choice open.  Two things settled it.  There is one eta per SUBJECT, so on
+  # this component it inherits the subject's own name and a table row reads
+  # `subject.S7.eta_cl` instead of `population.eta_cl[6]`; and it keeps every
+  # parameter vector one-per-instance, so nothing needs a manifest `shape`
+  # computed from another component's element count.  The cross-component
+  # dependency syntax is exercised either way -- mu, omega, beta and wt_ref
+  # all arrive through `population_map`.
+  #
+  # NON-CENTERED, which is structural.  In the centered form a subject's
+  # coordinate lives on a scale of omega, so a small omega closes a funnel
+  # NUTS cannot climb -- and a small omega is what these data produce: the
+  # canonical nlme fit drives one of the three between-subject SDs to zero.
+  # Sampling the standardized deviation keeps every coordinate O(1) whatever
+  # omega does.  Same shape as mann's `ks_offset`.
+
+  eta_cl:
+    initval: 0.0
+    init_scale: 1.0
+    mu: 0.0
+    sigma: 1.0
+    # +/- 10 standard deviations: a bound that makes the logit support finite
+    # without excluding anything a real subject could be.
+    lower: -10.0
+    upper: 10.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\eta_{(CL/F)}"
+    description: "Between-subject deviation in log clearance, in units of omega"
+
+  eta_v:
+    initval: 0.0
+    init_scale: 1.0
+    mu: 0.0
+    sigma: 1.0
+    # +/- 10 standard deviations: a bound that makes the logit support finite
+    # without excluding anything a real subject could be.
+    lower: -10.0
+    upper: 10.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\eta_{(V/F)}"
+    description: "Between-subject deviation in log volume, in units of omega"
+
+  eta_ka:
+    initval: 0.0
+    init_scale: 1.0
+    mu: 0.0
+    sigma: 1.0
+    # +/- 10 standard deviations: a bound that makes the logit support finite
+    # without excluding anything a real subject could be.
+    lower: -10.0
+    upper: 10.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\eta_{k_a}"
+    description: "Between-subject deviation in log absorption rate, in units of omega"
+
+  eta_ke:
+    initval: 0.0
+    init_scale: 1.0
+    mu: 0.0
+    sigma: 1.0
+    # +/- 10 standard deviations: a bound that makes the logit support finite
+    # without excluding anything a real subject could be.
+    lower: -10.0
+    upper: 10.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\eta_{k_e}"
+    description: "Between-subject deviation in log elimination rate, in units of omega"
+
+  weight:
+    # Body weight, the covariate.  Declared only when a `population:` block
+    # exists, because that is the only thing that reads it; without one it is
+    # config that `subject.load_data` uses to turn a per-kg dose into
+    # milligrams and nothing more.  Pinned like `dose`, and in the table for
+    # the same reason: an allometrically scaled parameter cannot be checked
+    # without the weight it was scaled by.
+    sigma: 0.0
+    initval: 70.0
+    lower: 1.0
+    upper: 500.0
+    unit: "kg"
+    internal_unit: "kg"
+    latex: "WT"
+    description: "Body weight"
+
+  # --- per-subject data, not a fitted quantity -----------------------------
+
+  dose:
+    # The administered dose in absolute mg, converted from the config's
+    # `dose:` / `dose_unit:` at stage 1 (a per-kg dose is multiplied by the
+    # subject's weight).  It is a PINNED parameter rather than a bare numpy
+    # array so that it can be a dep of the expressions above and so that it
+    # appears in the results table -- a reader checking a PK fit wants to see
+    # the dose it assumed.  sigma: 0 pins it; the initval is supplied per
+    # element by the component, which is what a pin must have (parameter.md).
+    sigma: 0.0
+    initval: 100.0
+    lower: 0.0
+    upper: 1.0e6
+    unit: "mg"
+    internal_unit: "mg"
+    latex: "D"
+    description: "Administered dose"
+
+assay:
+  # Combined residual error model, sigma = sqrt(add^2 + (prop*C)^2) -- the
+  # NONMEM/Monolix default and the direct analogue of this codebase's
+  # jitter-in-quadrature.
+  #
+  # BOTH TERMS ARE POSITIVE-BOUNDED, unlike rvinstrument's SIGNED
+  # jitter_variance.  That is deliberate and is not an oversight: RV jitter is
+  # added in quadrature to a REPORTED per-point error and may legitimately go
+  # negative to absorb an over-estimated one, whereas these data carry no
+  # reported error for a negative term to correct, and a negative sigma here
+  # would simply make the likelihood undefined.
+
+  sigma_add:
+    lower: 0.0
+    upper: 100.0
+    initval: 0.1
+    init_scale: 0.05
+    unit: "mg/L"
+    internal_unit: "mg/L"
+    latex: "\\sigma_{add}"
+    description: "Additive residual error"
+
+  sigma_prop:
+    # A fraction, not a percentage: 0.1 is 10% proportional error.
+    lower: 0.0
+    upper: 2.0
+    initval: 0.1
+    init_scale: 0.05
+    unit: ""
+    internal_unit: ""
+    latex: "\\sigma_{prop}"
+    description: "Proportional residual error"
+
+# ---------------------------------------------------------------------------
+# population: between-subject variability and the covariate model (P4)
+# ---------------------------------------------------------------------------
+#
+# One instance.  It owns the POPULATION parameters -- the typical value of each
+# log-coordinate, the between-subject SD, the covariate exponents and the
+# reference weight -- while the per-subject deviations (eta) live on `subject`,
+# where they get that subject's name in the table.
+#
+# The hierarchy is NON-CENTERED and that is not a style preference: the
+# centered form (log_cl_i ~ N(mu, omega)) has the funnel geometry NUTS is
+# famous for failing on when omega is small, and omega IS small here -- the
+# canonical nlme fit of these data drives one of the three to zero.
+#
+#     log_q_i = mu_log_q + beta_q * log10(WT_i / WT_ref) + omega_q * eta_q_i
+#
+# UNITS.  mu and omega are in dex (log10), so omega is NOT the field's omega,
+# which is the SD of the natural log.  They differ by ln(10) = 2.3026 and the
+# `cv_*` rows below are what a reader should compare to a published CV%.
+population:
+
+  # --- typical values (the "fixed effects") --------------------------------
+  #
+  # Bounds match the corresponding subject coordinate: this is the same
+  # quantity for a typical individual, so a range that is right for one is
+  # right for the other.
+
+  mu_log_cl:
+    lower: -2.0
+    upper: 2.0
+    initval: 0.45
+    init_scale: 0.11
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "\\mu_{\\log{(CL/F)}}"
+    description: "Typical log10 apparent clearance"
+
+  mu_log_v:
+    lower: -1.0
+    upper: 3.0
+    initval: 1.5
+    init_scale: 0.11
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "\\mu_{\\log{(V/F)}}"
+    description: "Typical log10 apparent volume of distribution"
+
+  mu_log_ka:
+    lower: -2.0
+    upper: 2.0
+    initval: 0.18
+    init_scale: 0.15
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "\\mu_{\\log{k_a}}"
+    description: "Typical log10 absorption rate constant"
+
+  mu_log_ke:
+    lower: -4.0
+    upper: 2.0
+    initval: -1.0
+    init_scale: 0.11
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "\\mu_{\\log{k_e}}"
+    description: "Typical log10 elimination rate constant"
+
+  # --- between-subject SD --------------------------------------------------
+  #
+  # In dex.  0 is a real and reachable value -- it is what "no between-subject
+  # variability in this coordinate" means, and the canonical fit of the
+  # Theophylline data finds it for one of the three -- so the lower bound is 0
+  # and not a small positive number.  The upper bound of 1 dex is a factor of
+  # 10 of one-sigma spread (CV ~ 1400%), which is far past anything a real
+  # drug shows and is there to be permissive, not descriptive.
+
+  omega_cl:
+    lower: 0.0
+    upper: 1.0
+    # ~36% CV: the middle of the 20-50% range typical of small-molecule
+    # population PK.  A template start, not a value read off these data.
+    initval: 0.15
+    init_scale: 0.05
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "\\omega_{\\log{(CL/F)}}"
+    description: "Between-subject SD of log10 apparent clearance"
+
+  omega_v:
+    lower: 0.0
+    upper: 1.0
+    initval: 0.15
+    init_scale: 0.05
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "\\omega_{\\log{(V/F)}}"
+    description: "Between-subject SD of log10 apparent volume"
+
+  omega_ka:
+    lower: 0.0
+    upper: 1.0
+    initval: 0.15
+    init_scale: 0.05
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "\\omega_{\\log{k_a}}"
+    description: "Between-subject SD of log10 absorption rate"
+
+  omega_ke:
+    lower: 0.0
+    upper: 1.0
+    initval: 0.15
+    init_scale: 0.05
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "\\omega_{\\log{k_e}}"
+    description: "Between-subject SD of log10 elimination rate"
+
+  # --- the covariate model -------------------------------------------------
+  #
+  # Allometric scaling on body weight, the one covariate that is in almost
+  # every population PK model: a flow (clearance) scales as WT^0.75 and a
+  # volume as WT^1.0, so their ratio ke scales as WT^-0.25 and a first-order
+  # rate constant like ka does not scale at all.
+  #
+  # PINNED, not fixed: `sigma: 0` holds each exponent at its theoretical value,
+  # which is what the field does, and a user who wants to ESTIMATE one writes a
+  # sigma for it in their params file.  That is the difference between a
+  # default and a gate, and estimating the exponent is a real thing to want on
+  # a study with enough weight range to support it.
+  #
+  # `covariate: none` on the config block pins all four to exactly 0 instead,
+  # through the "overrides" channel, which still layers under the params file.
+
+  beta_cl:
+    sigma: 0.0
+    initval: 0.75
+    lower: -2.0
+    upper: 2.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\beta_{CL}"
+    description: "Allometric exponent on weight for clearance"
+
+  beta_v:
+    sigma: 0.0
+    initval: 1.0
+    lower: -2.0
+    upper: 2.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\beta_{V}"
+    description: "Allometric exponent on weight for volume"
+
+  beta_ka:
+    sigma: 0.0
+    initval: 0.0
+    lower: -2.0
+    upper: 2.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\beta_{k_a}"
+    description: "Allometric exponent on weight for absorption rate"
+
+  beta_ke:
+    sigma: 0.0
+    initval: -0.25
+    lower: -2.0
+    upper: 2.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\beta_{k_e}"
+    description: "Allometric exponent on weight for elimination rate"
+
+  wt_ref:
+    # The weight the typical values refer to.  70 kg is the field's
+    # convention and is why a published mu is comparable across studies; it
+    # is a parameter rather than a constant so that the table states it,
+    # because mu_log_cl means nothing without it.
+    sigma: 0.0
+    initval: 70.0
+    lower: 1.0
+    upper: 500.0
+    unit: "kg"
+    internal_unit: "kg"
+    latex: "WT_{ref}"
+    description: "Reference body weight for the covariate model"
+
+  # --- between-subject variability, in the field's own units ---------------
+  #
+  # A popPK table quotes spread as a coefficient of variation, not as an SD in
+  # log units: CV% = 100*sqrt(exp(sigma_ln^2) - 1) for a log-normal, with
+  # sigma_ln = omega * ln(10) because omega here is in dex.  These are derived
+  # parameters rather than a new table column, which turns out to be strictly
+  # better: each gets a median and a credible interval of its own, which a
+  # fixed "CV%" column computed from a point estimate could not.
+  cv_cl:
+    unit: "%"
+    internal_unit: "%"
+    latex: "CV_{CL}"
+    description: "Between-subject CV of apparent clearance"
+    expressions:
+      default:
+        func_name: "calc_pk_cv_percent"
+        deps: ["omega_cl"]
+
+  cv_v:
+    unit: "%"
+    internal_unit: "%"
+    latex: "CV_{V}"
+    description: "Between-subject CV of apparent volume"
+    expressions:
+      default:
+        func_name: "calc_pk_cv_percent"
+        deps: ["omega_v"]
+
+  cv_ka:
+    unit: "%"
+    internal_unit: "%"
+    latex: "CV_{k_a}"
+    description: "Between-subject CV of absorption rate"
+    expressions:
+      default:
+        func_name: "calc_pk_cv_percent"
+        deps: ["omega_ka"]
+
+  cv_ke:
+    unit: "%"
+    internal_unit: "%"
+    latex: "CV_{k_e}"
+    description: "Between-subject CV of elimination rate"
+    expressions:
+      default:
+        func_name: "calc_pk_cv_percent"
+        deps: ["omega_ke"]

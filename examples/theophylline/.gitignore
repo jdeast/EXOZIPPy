@@ -1,0 +1,17 @@
+# The Theophylline data are NOT redistributed with EXOZIPPy -- see
+# src/exozippy/components/pharmacokinetics/fetch_theoph.py for the licence
+# reasoning.  Fetch them with `exozippy-fetch-theoph` from this directory.
+#
+# This file is the enforcement, not just a convenience: committing theoph.csv
+# would put GPL-2-distributed material inside a BSD-3-Clause project, which is
+# the exact thing the fetcher exists to avoid.  Do not remove it, and do not
+# `git add -f` the CSV.
+theoph.csv
+
+# Fit outputs.
+fitresults/
+
+# Restart files written by mkparam at the end of a fit.  Numbered, and
+# _next_versioned_path OVERWRITES an existing .n+1 -- so a committed one would
+# be silently replaced by whoever next runs the example here.
+*.params.[0-9]*.yaml

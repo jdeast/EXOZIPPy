@@ -474,6 +474,26 @@ def test_explicit_integer_thinning_is_honored_in_both_topologies():
     assert _resolve(True, planar) == DEFAULT_HOT_THIN
 
 
+def test_a_non_positive_integer_thinning_means_off_not_maximum_retention():
+    """
+    Given store_hot_chains set to the integer 0 (or a negative),
+    When it is resolved under either topology,
+    Then it means OFF -- the fourth spelling of off, not thin=1.
+
+    `max(1, int(spec))` used to floor it, so `store_hot_chains: 0` resolved
+    to MAXIMUM retention: every hot iteration of every hot rung, the exact
+    opposite of the "0 = off" the resolver's own summary line promises
+    (review 1.4.2).  A microlensing topology is the interesting case, since
+    that is where 'auto' would otherwise have turned retention on.
+    """
+    lensy = _TopologySystem(lens=True)
+    planar = _TopologySystem(transit=False)
+
+    assert _resolve(0, lensy) == 0
+    assert _resolve(0, planar) == 0
+    assert _resolve(-5, lensy) == 0
+
+
 def test_the_auto_decision_and_its_cost_are_logged(caplog):
     """
     Given either topology,
@@ -536,18 +556,22 @@ def test_an_unrecognized_store_hot_chains_string_raises():
         _resolve("yes-please", _TopologySystem(lens=True))
 
 
-def test_lens_component_declares_that_it_expects_suppressed_modes():
+def test_mulensevent_component_declares_that_it_expects_suppressed_modes():
     """
-    Given the shipped Lens component,
+    Given the shipped MulensEvent component,
     When its capability flag is read,
     Then it declares expects_suppressed_modes, and the base Component does
       not -- this is the whole topology signal, so pin it here rather than
       only through a duck-typed stand-in.
+
+    The flag lives on MulensEvent (the one-instance EVENT component) after
+    the mulensevent/lens/source split; before the split it sat on the old
+    all-in-one Lens component.
     """
     from exozippy.components.component import Component
-    from exozippy.components.mulensing.lens import Lens
+    from exozippy.components.mulensing.mulensevent import MulensEvent
 
-    assert Lens.expects_suppressed_modes is True
+    assert MulensEvent.expects_suppressed_modes is True
     assert Component.expects_suppressed_modes is False
 
 
@@ -607,3 +631,82 @@ def test_auto_stores_hot_chains_end_to_end_for_a_lensy_system():
 
     assert hasattr(idata, "posterior_hot")
     assert idata.posterior_hot.sizes["chain"] == (3 - 1) * 4
+
+
+# ---------------------------------------------------------------------------
+# The candidate polish gets the sampler's cores (review 6.11.3)
+# ---------------------------------------------------------------------------
+
+
+def test_discovery_hands_its_core_grant_to_the_candidate_polish(monkeypatch):
+    """
+    Given a core grant passed to the hot-mode search,
+    When a candidate is found and polished,
+    Then polish_raw_starts receives that same grant.
+
+    Without it _resolve_polish_cores returns 1, no pool is built, and the
+    DE engine -- the branch EVERY gradient-free (VBM-backed) microlensing
+    fit takes -- runs on one core while the other N-1 the sampler just used
+    sit idle.  Measured on examples/ob09020: 1 core of 36 for 38+ minutes,
+    on a single candidate.
+    """
+    # ARRANGE
+    from exozippy import polish as polish_mod
+
+    model, p = _two_basin_model()
+    stub = _StubSystem([p])
+    raw2 = np.asarray(p.raw_from_initval(np.array([2.0])))
+    ledger0 = build_seed_ledger(stub, model, [{"toy.x_raw": raw2}], [0])
+    hot = _fake_hot_group(model, p, np.random.default_rng(11))
+
+    seen = {}
+    real = polish_mod.polish_raw_starts
+
+    def _spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(polish_mod, "polish_raw_starts", _spy)
+
+    # ACT
+    ledger = discover_hot_modes(
+        stub, model, hot, ledger0, min_points=20, cores=7
+    )
+
+    # ASSERT -- a candidate really was polished, with the grant
+    assert len(ledger) == 2
+    assert seen["cores"] == 7
+
+
+def test_run_hot_mode_discovery_forwards_cores(monkeypatch):
+    """
+    Given cores passed to the wrapper run.py actually calls,
+    When it delegates to discover_hot_modes,
+    Then the grant arrives there -- the wrapper's **kwargs is the path the
+      fix travels, so it is pinned rather than assumed.
+    """
+    # ARRANGE
+    from exozippy.outputs import ledger as L
+
+    seen = {}
+
+    def _capture(*a, **k):
+        seen.update(k)
+        return ["ledger"]
+
+    monkeypatch.setattr(L, "discover_hot_modes", _capture)
+    hot = xr.Dataset(
+        {
+            "toy.x_raw": (("chain", "draw"), np.zeros((1, 2))),
+            "lp": (("chain", "draw"), np.zeros((1, 2))),
+        }
+    )
+
+    # ACT
+    out, _status = L.run_hot_mode_discovery(
+        None, None, _idata_with(hot), [], cores=5
+    )
+
+    # ASSERT
+    assert out == ["ledger"]
+    assert seen["cores"] == 5

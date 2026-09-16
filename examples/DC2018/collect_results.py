@@ -26,14 +26,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dc18_common as dc
 
-# summary.txt variable(s) providing chain diagnostics for each parameter
+# summary.txt variable(s) providing chain diagnostics for each
+# parameter.  summary.txt carries SAMPLED variables only, so these are
+# the sampled coordinates rather than the reported ones: s and q are
+# sampled as log_s and log_q, and alpha as the (xalpha, yalpha) pair.
+# t_E is derived and never appears, so it is absent rather than
+# pointing at a name that cannot be there.  Measured against a
+# post-split fit's DC2018_128_summary.txt.
 SUMMARY_VARS = {
-    "t_0": ["lens.t_0"],
-    "u_0": ["lens.u_0"],
-    "t_E": ["lens.t_E"],
-    "rho": ["lens.rho"],
-    "s": ["lens.s"],
-    "q": ["lens.q"],
+    "t_0": ["source.t_0"],
+    "u_0": ["source.u_0"],
+    "rho": ["source.rho"],
+    "s": ["lens.log_s"],
+    "q": ["planet.log_q"],
     "alpha": ["lens.xalpha", "lens.yalpha"],
 }
 

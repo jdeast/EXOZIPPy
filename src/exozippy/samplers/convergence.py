@@ -383,9 +383,79 @@ def analyze_idata(idata, min_ess=None, max_rhat=None, var_names=None):
     diag["max_rhat_threshold"] = max_rhat
     diag["min_ess_threshold"] = min_ess
 
+    # 2.4.13: Rhat/ESS presuppose stationarity.  Record whether that holds
+    # so the verdict can refuse to present them as convergence evidence.
+    eq = check_equilibration(lp, diag.get("burnin", 0))
+    diag["equilibration"] = eq
+    if eq is not None and not eq["equilibrated"]:
+        diag["converged"] = False
+
     good_idx = np.nonzero(diag["good_mask"])[0]
     trimmed = trim_groups(idata, good_idx, diag["burnin"])
     return trimmed, diag
+
+
+def check_equilibration(lp, burnin=0):
+    """Is the T=1 log-posterior still TRENDING at the end of the run?
+
+    Rhat and ESS both assume the chains are sampling a stationary
+    distribution.  On a run that is still climbing they are computed
+    anyway and mean nothing -- review 2.4.13, measured on ob09020, which
+    reported `burn-in = 0 draws` and a UNIFORM Rhat ~2.0 across all 27
+    nuisance elements while its T=1 lp climbed monotonically from 44,223 to
+    47,749 and was still rising at draw 442 of 1000.  Uniform Rhat is the
+    signature of a common drift; a real mixing pathology localizes.  That
+    run sent the investigation to the temperature ladder twice, and the
+    ladder was healthy both times.
+
+    The test compares the mean lp of the final quarter against the third
+    quarter, in units of the post-burn-in lp scatter.  At equilibrium the
+    mean is stationary, so that difference is ~0 within the standard error;
+    a persistent climb makes it large and POSITIVE.  Returns a dict, or None
+    when there is no usable lp (the caller must not infer "equilibrated"
+    from absence of evidence).
+    """
+    if lp is None:
+        return None
+    a = np.asarray(lp, dtype=float)
+    if a.ndim == 1:
+        a = a[None, :]
+    if a.ndim != 2 or a.shape[1] < 8:
+        return None
+    a = a[:, int(burnin) :] if 0 < int(burnin) < a.shape[1] - 8 else a
+    n = a.shape[1]
+    if n < 8:
+        return None
+    q3, q4 = a[:, n // 2 : 3 * n // 4], a[:, 3 * n // 4 :]
+    if q3.size == 0 or q4.size == 0:
+        return None
+    m3, m4 = float(np.nanmean(q3)), float(np.nanmean(q4))
+    drift = m4 - m3
+
+    # NOISE, ESTIMATED TREND-IMMUNELY.  The obvious yardstick -- the sd of
+    # the whole lp series -- is CIRCULAR: for a chain that is still climbing
+    # that sd is dominated by the climb itself, so the drift never looks
+    # large next to it.  A linear ramp of 3,526 nats with 5.4-nat noise
+    # scored 0.87 "sigma" and passed on the first version of this check.
+    # The lag-1 difference removes any smooth trend and leaves the noise:
+    # sd(diff) = sqrt(2) * sigma for white noise.
+    d = np.diff(a, axis=1)
+    noise = float(np.nanstd(d)) / np.sqrt(2.0)
+    if not np.isfinite(noise) or noise <= 0:
+        return None
+
+    # 3 sigma is deliberately conservative.  The standard error of a
+    # difference of means is sigma/sqrt(n_eff), i.e. SMALLER than sigma, so
+    # comparing the drift against sigma itself already errs toward silence;
+    # 3x further protects a well-mixed but strongly autocorrelated chain
+    # from being called non-stationary.  The case this must catch --
+    # ob09020 -- sits at ~160 sigma, not 3.
+    return {
+        "lp_drift_nats": drift,
+        "lp_scatter_nats": noise,
+        "lp_drift_sigma": drift / noise,
+        "equilibrated": bool(abs(drift) <= 3.0 * noise),
+    }
 
 
 def log_convergence(diag, log=logger):
@@ -406,6 +476,22 @@ def log_convergence(diag, log=logger):
             "stuck chains.",
             _MIN_GOOD_CHAINS,
         )
+    eq = diag.get("equilibration")
+    if eq is not None and not eq["equilibrated"]:
+        log.warning(
+            "NOT EQUILIBRATED -- Rhat and ESS are NOT convergence evidence "
+            "here: the T=1 log-posterior is still trending (%+.1f nats "
+            "between the last two quarters, %.1f x its own scatter of %.1f). "
+            "The chains have not reached a stationary distribution, so the "
+            "reported Rhat/ESS describe a transient.  %s.  Remedy: a longer "
+            "run, a `tune` phase (whose draws are discarded), or a better "
+            "start -- not a different temperature ladder (review 2.4.13).",
+            eq["lp_drift_nats"],
+            eq["lp_drift_sigma"],
+            eq["lp_scatter_nats"],
+            summary,
+        )
+        return
     if diag.get("converged", False):
         log.info("Convergence OK: %s", summary)
     else:

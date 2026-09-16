@@ -18,6 +18,7 @@ keeps it consistent on any future regeneration too.
 Usage:
     poetry run python src/exozippy/models/MIST/MISTv2.5/merge_interpolated_missing_tracks.py
 """
+
 import shutil
 from pathlib import Path
 
@@ -33,15 +34,33 @@ try:
 except NameError:
     current_dir = Path.cwd()
 
-EEP_PROCESSED_TRACKS_PATH_DEFAULT = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/processed_tracks/")
-EEP_INTERPOLATED_TRACKS_PATH_DEFAULT = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/interpolated_tracks/")
+EEP_PROCESSED_TRACKS_PATH_DEFAULT = Path(
+    "/Volumes/Data/EEP_Tracks/MISTv2.5/processed_tracks/"
+)
+EEP_INTERPOLATED_TRACKS_PATH_DEFAULT = Path(
+    "/Volumes/Data/EEP_Tracks/MISTv2.5/interpolated_tracks/"
+)
 EEP_GRID_PATH_DEFAULT = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/grids/")
 
 BASE_COLUMNS = [
-    "mass", "EEP", "initfeh", "feh_mist", "radius_mist",
-    "teff_mist", "delta_nu", "nu_max", "age_mist", "dEEP_dage", "here_be_dragons",
+    "mass",
+    "EEP",
+    "initfeh",
+    "feh_mist",
+    "radius_mist",
+    "teff_mist",
+    "delta_nu",
+    "nu_max",
+    "age_mist",
+    "dEEP_dage",
+    "here_be_dragons",
 ]
-PROVENANCE_COLUMNS = ["interpolated", "interp_method", "interp_neighbor_1", "interp_neighbor_2"]
+PROVENANCE_COLUMNS = [
+    "interpolated",
+    "interp_method",
+    "interp_neighbor_1",
+    "interp_neighbor_2",
+]
 ALL_COLUMNS = BASE_COLUMNS + PROVENANCE_COLUMNS
 
 
@@ -63,16 +82,23 @@ def _ensure_provenance_columns(df):
     return df
 
 
-def merge_interpolated_tracks_for_alpha_vvcrit(alpha, vvcrit=0.0,
-                                                interpolated_path=EEP_INTERPOLATED_TRACKS_PATH_DEFAULT,
-                                                processed_path=EEP_PROCESSED_TRACKS_PATH_DEFAULT,
-                                                grid_path=EEP_GRID_PATH_DEFAULT):
-    filename_alpha_part, filename_vvcrit_part = _generate_alpha_vvcrit_filename_parts(alpha, vvcrit)
+def merge_interpolated_tracks_for_alpha_vvcrit(
+    alpha,
+    vvcrit=0.0,
+    interpolated_path=EEP_INTERPOLATED_TRACKS_PATH_DEFAULT,
+    processed_path=EEP_PROCESSED_TRACKS_PATH_DEFAULT,
+    grid_path=EEP_GRID_PATH_DEFAULT,
+):
+    filename_alpha_part, filename_vvcrit_part = (
+        _generate_alpha_vvcrit_filename_parts(alpha, vvcrit)
+    )
     suffix = f"_{filename_alpha_part}_{filename_vvcrit_part}.parquet"
 
     interpolated_files = sorted(interpolated_path.glob(f"feh_*{suffix}"))
     if not interpolated_files:
-        print(f"No interpolated tracks found for alpha={alpha}, vvcrit={vvcrit} in {interpolated_path}")
+        print(
+            f"No interpolated tracks found for alpha={alpha}, vvcrit={vvcrit} in {interpolated_path}"
+        )
         return
 
     any_merged = False
@@ -85,15 +111,23 @@ def merge_interpolated_tracks_for_alpha_vvcrit(alpha, vvcrit=0.0,
             )
 
         interp_df = pd.read_parquet(interp_file)
-        processed_df = _ensure_provenance_columns(pd.read_parquet(processed_file))
+        processed_df = _ensure_provenance_columns(
+            pd.read_parquet(processed_file)
+        )
 
-        existing_pairs = set(zip(processed_df["initfeh"].round(6), processed_df["mass"].round(6)))
+        existing_pairs = set(
+            zip(
+                processed_df["initfeh"].round(6), processed_df["mass"].round(6)
+            )
+        )
 
         to_add = []
         for (initfeh, mass), track in interp_df.groupby(["initfeh", "mass"]):
             key = (round(initfeh, 6), round(mass, 6))
             if key in existing_pairs:
-                print(f"  {interp_file.name}: initfeh={initfeh}, mass={mass} already present, skipping")
+                print(
+                    f"  {interp_file.name}: initfeh={initfeh}, mass={mass} already present, skipping"
+                )
                 continue
             to_add.append(track)
 
@@ -101,37 +135,59 @@ def merge_interpolated_tracks_for_alpha_vvcrit(alpha, vvcrit=0.0,
             print(f"{interp_file.name}: nothing new to merge")
             continue
 
-        print(f"{interp_file.name}: merging {len(to_add)} track(s) into {processed_file.name}")
+        print(
+            f"{interp_file.name}: merging {len(to_add)} track(s) into {processed_file.name}"
+        )
         _backup(processed_file)
 
-        merged_df = pd.concat([processed_df[ALL_COLUMNS]] + [t[ALL_COLUMNS] for t in to_add], ignore_index=True)
+        merged_df = pd.concat(
+            [processed_df[ALL_COLUMNS]] + [t[ALL_COLUMNS] for t in to_add],
+            ignore_index=True,
+        )
         merged_df.to_parquet(processed_file, compression="snappy")
         any_merged = True
 
     if not any_merged:
-        print("Nothing new merged into processed_tracks; leaving grid.parquet untouched.")
+        print(
+            "Nothing new merged into processed_tracks; leaving grid.parquet untouched."
+        )
         return
 
-    grid_filename = f"{filename_alpha_part}_{filename_vvcrit_part}.grid.parquet"
+    grid_filename = (
+        f"{filename_alpha_part}_{filename_vvcrit_part}.grid.parquet"
+    )
     grid_file = grid_path / grid_filename
     if grid_file.exists():
         _backup(grid_file)
 
     print(f"Regenerating {grid_filename} from processed_tracks...")
-    generate_EEP_grid_for_alpha_vvcrit(alpha, vvcrit, processed_path=processed_path,
-                                        grid_path=grid_path, save=True)
+    generate_EEP_grid_for_alpha_vvcrit(
+        alpha,
+        vvcrit,
+        processed_path=processed_path,
+        grid_path=grid_path,
+        save=True,
+    )
     print(f"Done -> {grid_file}")
+
 
 # -------------------------------------------------------------------
 # Merge Missing Tracks for Grid Points
 # -------------------------------------------------------------------
 
-EEP_PROCESSED_TRACKS_PATH = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/processed_tracks/")
-EEP_INTERPOLATED_TRACKS_PATH = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/interpolated_tracks/")
+EEP_PROCESSED_TRACKS_PATH = Path(
+    "/Volumes/Data/EEP_Tracks/MISTv2.5/processed_tracks/"
+)
+EEP_INTERPOLATED_TRACKS_PATH = Path(
+    "/Volumes/Data/EEP_Tracks/MISTv2.5/interpolated_tracks/"
+)
 EEP_GRID_PATH = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/grids/")
 
 if __name__ == "__main__":
-    merge_interpolated_tracks_for_alpha_vvcrit(alpha=0.0, vvcrit=0.0, 
-                                               interpolated_path=EEP_INTERPOLATED_TRACKS_PATH,
-                                               processed_path=EEP_PROCESSED_TRACKS_PATH,
-                                               grid_path=EEP_GRID_PATH)
+    merge_interpolated_tracks_for_alpha_vvcrit(
+        alpha=0.0,
+        vvcrit=0.0,
+        interpolated_path=EEP_INTERPOLATED_TRACKS_PATH,
+        processed_path=EEP_PROCESSED_TRACKS_PATH,
+        grid_path=EEP_GRID_PATH,
+    )

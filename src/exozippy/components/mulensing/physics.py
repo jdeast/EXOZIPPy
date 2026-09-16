@@ -1,11 +1,11 @@
 import numpy as np
 import pytensor.tensor as pt
 
-from ...constants import KAPPA, RSUN_TO_AU
+from ...constants import DAYS_PER_YEAR, KAPPA, RSUN_TO_AU
 from ...physics_registry import register_physics
 
 # Positive floors for the two quantities whose logarithm the event-rate prior
-# takes (lens.build_likelihood).  Both are ~6 orders of magnitude below the
+# takes (MulensEvent.build_likelihood).  Both are ~6 orders of magnitude below the
 # 1e-6 turn-on of the matching soft bounds there, so the barrier is already
 # fully engaged wherever the floor bites and no reachable posterior region is
 # affected -- the floors only replace a -inf/NaN wall with a finite plateau
@@ -19,7 +19,7 @@ def calc_pi_rel(dist_lens, dist_source):
     # Parallax = 1000 / distance (pc) -> mas
     # no matter what we do, we must not compute a NaN.
     # we make up values so we can compute some likelihood
-    # then introduce penalties (see lens.build_likelihood) that will reject such non-physical solutions
+    # then introduce penalties (see MulensEvent.build_likelihood) that will reject such non-physical solutions
     return (1000.0 / dist_lens) - (1000.0 / dist_source)
 
 
@@ -28,7 +28,7 @@ def calc_theta_E(mass_lens, pi_rel):
     # Angular Einstein Radius in mas.
     # Guard against negative pi_rel (source in front of lens): no lensing occurs,
     # but we must return a finite value so downstream parameters (rho, pi_E) don't
-    # propagate NaN into the Op.  The lens.build_likelihood potentials penalise
+    # propagate NaN into the Op.  The MulensEvent.build_likelihood potentials penalise
     # this unphysical configuration so the sampler rejects it.
     #
     # mass_lens is guarded for the same reason: a lens body sampling a linear
@@ -93,10 +93,228 @@ def calc_mu_dec_rel_geo(mu_dec_rel, pi_rel, earth_vperp_n):
     return mu_dec_rel - pi_rel * earth_vperp_n
 
 
+def lens_geometry_from_orbit(
+    times,
+    tp,
+    n,
+    ecc,
+    sinw,
+    cosw,
+    cosi,
+    bigomega,
+    a,
+    theta_E,
+    d_l,
+    pi_E_N,
+    pi_E_E,
+):
+    """``(s(t), alpha(t) [rad])`` of lens companion 0 driven by a Keplerian
+    orbit -- the C24 keplerian projection, built on the SAME kernel and
+    Thiele-Innes owner every other projection uses (orbit.physics
+    ``state_vector_terms`` / ``thiele_innes_xy``; review 4.8.2).
+
+        delta(t)   = companion position relative to the PRIMARY
+                     (omega_* + pi, the `relative=True` flip), in Einstein
+                     radii: a_scale = a * RSUN_TO_AU * 1000 / (D_L theta_E)
+                     with a [R_sun], D_L [pc], theta_E [mas]
+        s(t)       = |delta(t)|
+        PA_axis(t) = atan2(dE, dN)
+        alpha(t)   = phi_pi - PA_axis(t),   phi_pi = atan2(pi_E_E, pi_E_N)
+
+    The MINUS is C24's `d(PA_axis)/dt = -dalpha/dt` rule (alpha runs
+    opposite to the axis's own position angle); it is absolute -- no
+    t0_par anchor enters, because C15/C20's alpha IS `phi_pi - PA(axis)`
+    at every epoch.  Adds NO free parameters: every input is already in
+    the graph (8.6.8 5b), which is the Skowron+2011 over-constraint the
+    ob09020 example tests.
+    """
+    from ..orbit import physics as orbit_physics
+
+    terms = orbit_physics.state_vector_terms(
+        times, tp, n, ecc, sinw=-sinw, cosw=-cosw
+    )
+    a_scale = (
+        a * RSUN_TO_AU * 1000.0 / (d_l * pt.maximum(theta_E, THETA_E_FLOOR))
+    )
+    r = a_scale * terms.r_over_a
+    X, Y = orbit_physics.thiele_innes_xy(
+        r, terms.coswf, terms.sinwf, cosi, bigomega
+    )
+    s_t = pt.sqrt(pt.sqr(X) + pt.sqr(Y))
+    pa_axis = pt.arctan2(Y, X)
+    phi_pi = pt.arctan2(pi_E_E, pi_E_N)
+    return s_t, phi_pi - pa_axis
+
+
+@register_physics
+def calc_s_from_orbit(
+    lens_t0_par,
+    tp,
+    n,
+    ecc,
+    sinw,
+    cosw,
+    cosi,
+    bigomega,
+    a,
+    theta_E,
+    d_l,
+    pi_E_N,
+    pi_E_E,
+):
+    """Reported s at t0_par in keplerian mode (lens_geometry_from_orbit)."""
+    return lens_geometry_from_orbit(
+        lens_t0_par,
+        tp,
+        n,
+        ecc,
+        sinw,
+        cosw,
+        cosi,
+        bigomega,
+        a,
+        theta_E,
+        d_l,
+        pi_E_N,
+        pi_E_E,
+    )[0]
+
+
+@register_physics
+def calc_alpha_from_orbit(
+    lens_t0_par,
+    tp,
+    n,
+    ecc,
+    sinw,
+    cosw,
+    cosi,
+    bigomega,
+    a,
+    theta_E,
+    d_l,
+    pi_E_N,
+    pi_E_E,
+):
+    """Reported alpha [rad] at t0_par in keplerian mode."""
+    return lens_geometry_from_orbit(
+        lens_t0_par,
+        tp,
+        n,
+        ecc,
+        sinw,
+        cosw,
+        cosi,
+        bigomega,
+        a,
+        theta_E,
+        d_l,
+        pi_E_N,
+        pi_E_E,
+    )[1]
+
+
+def source_offset_from_orbit(
+    times, tp, n, ecc, sinw, cosw, cosi, bigomega, a1, theta_E, d_s
+):
+    """``(sigma_N, sigma_E)``: the luminous source's own sky offset from its
+    barycenter, in Einstein radii, driven by a Keplerian orbit -- the
+    xallarap primitive (C25; review 8.6.9; notes/orbital_motion_and_nbody
+    1b).
+
+    ``a1`` is the SOURCE's barycentric semi-major axis [R_sun]
+    (= a * m_companion / m_total for the orbit's primary body), projected
+    with the primary's own omega_* (``relative=False`` in
+    Orbit.state_vectors' vocabulary); angular units come from
+    a1 * RSUN_TO_AU * 1000 / (D_S * theta_E) with D_S [pc], theta_E [mas].
+    Built on the same kernel and Thiele-Innes owner as every other
+    projection (review 4.8.2).
+    """
+    from ..orbit import physics as orbit_physics
+
+    terms = orbit_physics.state_vector_terms(
+        times, tp, n, ecc, sinw=sinw, cosw=cosw
+    )
+    a_scale = (
+        a1 * RSUN_TO_AU * 1000.0 / (d_s * pt.maximum(theta_E, THETA_E_FLOOR))
+    )
+    r = a_scale * terms.r_over_a
+    sig_N, sig_E = orbit_physics.thiele_innes_xy(
+        r, terms.coswf, terms.sinwf, cosi, bigomega
+    )
+    return sig_N, sig_E
+
+
+def xallarap_trajectory_shift(dsig_N, dsig_E, mu_n_hat, mu_e_hat):
+    """``(dtau, du)`` from an anchored source offset (C25).
+
+    The trajectory is LENS minus SOURCE (C7), so a source displaced by
+    ``+dsigma`` shifts the relative position by ``-dsigma``, projected on
+    C9's basis: ``tau_hat = mu_hat_rel,geo = (tN, tE)`` and
+    ``beta_hat = (-tau_hat_E, +tau_hat_N)`` -- the +90 deg North-through-East
+    rotation, exactly the basis the PARALLAX terms use (C10 display 1:
+    ``u = u_0 + delta_n pi_E_E - delta_e pi_E_N`` is
+    ``u = u_0 - |pi_E| (delta . beta_hat)`` with this beta_hat, and the
+    parallax sign is pinned first-principles by
+    tests/test_skyframe.py::test_microlensing_trajectory_matches_3d_geometry):
+
+        dtau = -(dsigma . tau_hat)  = -(dsigma_N * tau_hat_N + dsigma_E * tau_hat_E)
+        du   = -(dsigma . beta_hat) = +(dsigma_N * tau_hat_E - dsigma_E * tau_hat_N)
+
+    The ``du`` line carried the OPPOSITE sign until review 2.6.13 (2026-09),
+    built from a mislabelled ``beta_hat = (tau_hat_E, -tau_hat_N)`` -- the
+    MINUS-90 rotation -- in conventions.md C25.  The C25 xi_* mapping had
+    been tuned against that inverted projection, so the two errors cancelled
+    in the track-level parity test while the LIGHT CURVE applied the source
+    offset with the wrong sign: measured on examples/ob170114 (Mroz et al.
+    2026 Table B.1), the built magnification peaked at A = 8.58 where
+    MulensModel -- the code the published solution comes from -- gives 4.22
+    at the published values (one 3001-point grid, no parallax on either
+    side), and against the real OGLE photometry the wrong sign cost
+    chi2 = 781,739 on 351 points where the corrected chain gives 2,062 and
+    MulensModel itself 2,063.  With this sign and the corrected C25 mapping
+    the direct Op reproduces MulensModel's xallarap light curve to 4e-16,
+    and the shipped examples/ob170114 model reproduces its full 2L1S +
+    parallax + xallarap curve to 0.03% (tests/test_xallarap.py).
+    """
+    dtau = -(dsig_N * mu_n_hat + dsig_E * mu_e_hat)
+    du = dsig_N * mu_e_hat - dsig_E * mu_n_hat
+    return dtau, du
+
+
+@register_physics
+def calc_beta(pi_rel, theta_E, s, ds_dt, dalpha_dt, d_source):
+    """E_kin,perp / E_pot,perp from the sky-plane orbital rates alone --
+    Skowron+2011 Eq. A19 (after Batista et al. 2011), with gamma_z = 0 and
+    s_z = 0, so it is a LOWER bound on the true ratio and beta < 1 is a
+    NECESSARY condition for a bound lens binary.
+
+        beta = kappa M_sun pi_E (|gamma| yr)^2 s^3
+               / (8 pi^2 theta_E [pi_E + pi_s/theta_E]^3)
+
+    with kappa M_sun = KAPPA [mas] (constants.py), theta_E in mas,
+    gamma = (ds_dt/s, -dalpha_dt) in 1/yr (C24: gamma_perp = -dalpha_dt,
+    and only |gamma|^2 enters), and pi_s = 1000/d_source [mas] the source
+    parallax.  Skowron: this ratio "must absolutely be less than unity, if
+    the system is bound", typically 0.25-0.6 -- which is why the potential
+    on it (Lens.build_likelihood) is a SOFT bound at 1, not a wall.
+    """
+    gamma_sq = (ds_dt / pt.maximum(s, S_FLOOR)) ** 2 + dalpha_dt**2
+    pi_E = pi_rel / pt.maximum(theta_E, THETA_E_FLOOR)
+    pi_s = 1000.0 / d_source
+    denom = (
+        8.0
+        * np.pi**2
+        * pt.maximum(theta_E, THETA_E_FLOOR)
+        * (pi_E + pi_s / pt.maximum(theta_E, THETA_E_FLOOR)) ** 3
+    )
+    return KAPPA * pi_E * gamma_sq * pt.maximum(s, S_FLOOR) ** 3 / denom
+
+
 @register_physics
 def calc_t_E(theta_E, mu_rel_mag):
     # Convert mu_rel_mag from mas/yr to mas/day, then divide theta_E
-    return theta_E / (mu_rel_mag / 365.25)
+    return theta_E / (mu_rel_mag / DAYS_PER_YEAR)
 
 
 @register_physics
@@ -114,14 +332,56 @@ def calc_pi_E_E(pi_rel, theta_E, mu_ra_rel, mu_rel_mag):
 
 @register_physics
 def calc_q(*masses):
-    # (companion_1, ..., companion_k, primary) -> per-companion mass ratios
-    # q_j = M_companion_j / M_primary.  Each dep arrives as a length-1 slice
-    # (scalar bracket maps in Lens.build_maps); k companions concatenate to a
-    # shape-(k,) vector.
+    # (companion_masses, primary_mass) -> per-companion mass ratios
+    # q_j = M_companion_j / M_primary, ELEMENTWISE.  Its only caller is the
+    # lens.q manifest entry (defaults.yaml / Lens.register_parameters),
+    # whose deps are exactly TWO aligned vectors over the active (companion)
+    # elements: `<c_type>.mass[companion_body_map]` -- ALL companions of the
+    # single companion type share one full-length body map, sliced to the
+    # active elements -- and `star.mass[primary_lens_map]`, the primary's
+    # mass broadcast to the same length.  Mixed companion types are refused
+    # in Lens.register_parameters (one typed dep per type would be needed);
+    # the varargs/concatenate branch below is kept for that promised
+    # per-type-dep future (design 3.2) and is currently unreachable.
     companions, primary = masses[:-1], masses[-1]
     if len(companions) == 1:
         return companions[0] / primary
     return pt.concatenate([pt.atleast_1d(c) for c in companions]) / primary
+
+
+@register_physics
+def calc_q_mixed(*args):
+    """Per-companion q for a lens whose companions span SEVERAL types.
+
+    ``args`` is ``(*type_mass_vectors, primary_mass, type_code)``: one
+    element-aligned mass vector per companion type in a canonical (sorted)
+    type order, then the primary's mass broadcast to the same length, then a
+    per-element integer naming which type each element is -- the position of
+    that element's type in the same sorted order.
+
+    Every vector here is element-aligned, so by the time this runs they have
+    all been sliced to the same elements and positions correspond.  The
+    companion mass is SCATTERED into the positions each type owns:
+
+      * `pt.set_subtensor`, not a masked sum of `indicator * mass`.  A sum
+        multiplies the off-type slots by zero, and `0 * NaN` is NaN, which
+        poisons the gradient of the whole expression on every backend
+        (CLAUDE.md's where-trap, same mechanism).  It would also only be
+        CORRECT while the off-type slots hold finite fillers.  A scatter
+        never reads them.
+      * not `pt.concatenate` either, which is what `calc_q`'s reserved
+        varargs branch does: concatenation yields companions in TYPE order,
+        and that equals ELEMENT order only when the elements happen to be
+        grouped by type.  This is order-free, so an interleaved lens
+        (star, planet, star) is right with no ordering convention to
+        remember.
+    """
+    masses, primary, type_code = args[:-2], args[-2], args[-1]
+    companion = pt.zeros_like(primary)
+    for k, mass in enumerate(masses):
+        owned = pt.eq(type_code, k).nonzero()[0]
+        companion = pt.set_subtensor(companion[owned], mass[owned])
+    return companion / primary
 
 
 # --- Mass-ratio sanitization ------------------------------------------------
@@ -184,7 +444,7 @@ def clip_q(q):
     return pt.clip(q, Q_MIN, Q_MAX)
 
 
-def clip_q_value(q, label="lens.q"):
+def clip_q_value(q, label="lens.<companion>.q"):
     """Numeric counterpart of :func:`clip_q` for the backend Op and bootstrap
     paths, which see concrete floats rather than tensors.
 
@@ -210,7 +470,7 @@ def clip_q_value(q, label="lens.q"):
 
 
 # --- Trajectory (PSPL) parameter floors -------------------------------------
-# The three RANGE decisions Lens._get_safe_mm_params makes on the single-source
+# The three RANGE decisions MulensEvent._get_safe_mm_params makes on the single-source
 # trajectory parameters before handing them to a magnification backend.  Like
 # Q_MIN/Q_MAX above, each is a statement about where the model is DEFINED, and
 # each must stand alone: none of them may be paired with a NaN substitution.
@@ -251,7 +511,7 @@ def clip_q_value(q, label="lens.q"):
 #            all.  Below this the trajectory is evaluated WITHOUT parallax
 #            (pi_E_N = pi_E_E = 0) rather than with a diverging one; the
 #            source_behind_lens / theta_E_singularity soft bounds in
-#            Lens.build_likelihood are what actually push the sampler out.
+#            MulensEvent.build_likelihood are what actually push the sampler out.
 #            It is a comparison, and a comparison against NaN is False, so
 #            this branch never needed a NaN substitution to begin with.
 T_E_FLOOR = 1e-4  # days
@@ -348,7 +608,7 @@ _MM_NAN_ADVICE = (
     "star.<...>.distance values.  Check the initval (and any 'sigma: 0' "
     "link expression) on star.<lens>.logmass, star.<lens>.distance, "
     "star.<source>.distance and the star.<...>.pm_ra/pm_dec pair, plus "
-    "lens.<...>.t_0 and lens.<...>.u_0, which are sampled directly."
+    "source.<...>.t_0 and source.<...>.u_0, which are sampled directly."
 )
 
 
@@ -356,11 +616,11 @@ def require_mm_number(value, label):
     """Numeric guard for a trajectory parameter on its way to a backend.
 
     The counterpart of :func:`clip_q_value` for the five quantities
-    ``Lens._get_safe_mm_params`` handles, and it exists for the same reason:
+    ``MulensEvent._get_safe_mm_params`` handles, and it exists for the same reason:
     ``pt.nan_to_num`` used to replace a NaN t_E with 100 d, a NaN u_0 with 1,
     and a NaN theta_E/pi_E_N/pi_E_E with 0 -- a complete, fabricated PSPL model
     in place of the one quantity that would have named the failure.  That scrub
-    is gone (see ``Lens._get_safe_mm_params``); on the symbolic path a NaN now
+    is gone (see ``MulensEvent._get_safe_mm_params``); on the symbolic path a NaN now
     reaches logp, which is the sampler's own reject signal, and on this numeric
     path it raises with a message that says which parameter it was.
 
@@ -431,14 +691,59 @@ def calc_zeropoint(m_source_pred, zp_center, sed_constrained, f_source):
 
 @register_physics
 def calc_rho(radius, distance, theta_E):
+    """Source radius in Einstein radii.
+
+    The divisor is floored at the SAME ``THETA_E_FLOOR`` ``calc_theta_E``
+    itself uses.  It used to carry a private ``1e-10`` and, in front of it, a
+    ``pt.nan_to_num(theta_E, nan=0.0)``; both are gone (review 2.6.2):
+
+    * two different floors meant rho was computed against a different theta_E
+      than t_E and pi_E for any value in [1e-12, 1e-10) -- three numbers
+      claiming to describe one lens while disagreeing about it;
+    * a floor must never be paired with a NaN substitution (the PR #142
+      policy, argued at length on ``clip_q_value``).  A substitution turns a
+      failed computation into a healthy-looking likelihood with a ZERO
+      gradient, which is the failure the floor exists to avoid, not a belt to
+      go with its braces.  It was unreachable anyway: ``calc_theta_E`` floors
+      its own radicand, so theta_E cannot be NaN unless its inputs are, and a
+      NaN input must reach logp and be rejected.
+    """
     theta_star_mas = (radius * RSUN_TO_AU / distance) * 1000.0
-    theta_E_safe = pt.maximum(pt.nan_to_num(theta_E, nan=0.0), 1e-10)
-    return theta_star_mas / theta_E_safe
+    return theta_star_mas / pt.maximum(theta_E, THETA_E_FLOOR)
 
 
 @register_physics
 def calc_alpha(xalpha, yalpha):
     return pt.arctan2(yalpha, xalpha)
+
+
+@register_physics
+def calc_pi_rel_from_log(log_pi_rel):
+    # Sampled coordinate for `fitpirel: true` lenses (swap 2): pi_rel
+    # spans decades, so the free coordinate is log10(pi_rel).
+    return pt.power(10.0, log_pi_rel)
+
+
+@register_physics
+def calc_theta_E_from_log(log_theta_E):
+    # Sampled coordinate for `fitthetae: true` lenses (swap 3).
+    return pt.power(10.0, log_theta_E)
+
+
+@register_physics
+def calc_u0_from_u0te(u0te, t_E):
+    # fitu0te inverse (swap 4): u_0 = u0te / t_E, both signed.
+    # |du_0/du0te| = 1/t_E is NOT constant; the correction potential
+    # lives in Source.build_likelihood.
+    return u0te / pt.maximum(t_E, 1e-12)
+
+
+@register_physics
+def calc_rho_from_log(log_rho):
+    # Sampled coordinate for `star_constrains_rho: false` lenses: rho spans decades
+    # (1e-4 .. 0.5 across published events), so the free coordinate is
+    # log10(rho), mirroring log_s/s and planet log_q.
+    return pt.power(10.0, log_rho)
 
 
 @register_physics

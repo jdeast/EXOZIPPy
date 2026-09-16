@@ -1,0 +1,593 @@
+# The test suite and the PyTensor compile cache
+
+This is the runbook for the suite's runtime and for the compile cache that
+dominates it. It replaces the advice that used to live in CLAUDE.md's
+Commands block, which told you to run `pytensor-cache cleanup` when a test timed out inside
+`cmodule.py`. **That command does not fix this and never did** -- see
+"What actually reclaims cache space" below.
+
+## The failure it explains
+
+The symptom is a test going red on `Failed: Timeout (>300.0s)` with a
+traceback inside `pytensor/link/c/cmodule.py`, blaming a test that has
+nothing to do with compilation. It moves between tests run to run, and it
+usually passes on a rerun with no source change.
+
+The mechanism: PyTensor caches every compiled C module as one subdirectory
+of its compiledir. The first compile in **any process** constructs the
+`ModuleCache`, whose `refresh()` walks every subdirectory and unpickles
+every `key.pkl`. That walk is `O(entries)` file reads, it happens once per
+process, and it holds the compile lock while it runs -- so under `pytest -n
+6` it happens six times, serialized. Whichever test triggers the first
+compile in its worker is billed for the whole walk, and pytest-timeout's
+300 s cap is what it hits.
+
+Two measurements pin it down:
+
+- The shared `~/.pytensor` had grown to **4035 entries / 4.1 GB**, fed by
+  months of interactive fits and by every agent worktree on the box. A
+  single-process `get_module_cache()` against it took **14 s** with the
+  pages partly warm; the suite's six workers, cold and serialized, showed
+  up as 13 tests taking 60-135 s each -- about 40% of the suite's CPU.
+- Re-running the suite immediately afterwards, against the **same** 4035
+  entries but with the pages now hot, took 9:13 with **zero** failures and
+  a slowest test of 17 s.
+
+So the cost is cold page-cache I/O over the entry files, and it is linear
+in the **entry count**. That is the quantity to bound.
+
+## What actually reclaims cache space
+
+| | what it does | effect here |
+|---|---|---|
+| `pytensor-cache cleanup` | `compiledir.cleanup()` + `ModuleCache.clear_old()` | **nothing** |
+| `scripts/pytensor_cache_budget.py` | LRU eviction down to an entry count | what you want |
+
+`clear_old` deletes only entries older than
+`cmodule__age_thresh_use + 7 days`, i.e. 31 days. On a repository whose
+suite runs daily nothing is ever 31 days untouched -- the `refresh()` walk
+itself bumps every entry's atime on every run, so age is precisely the knob
+that cannot work here. Measured on the 4.1 GB cache: **4035 -> 4034
+entries, 4.1 G -> 4.1 G, 44 s spent.**
+
+Never `rm -rf` the `tmp*/` subdirectories individually thinking they are
+scratch; they **are** the cached modules. Deleting the whole compiledir is
+safe but costs a full cold recompile (see the numbers below).
+
+To reclaim space by hand:
+
+```bash
+# What would go, without touching anything.
+poetry run python scripts/pytensor_cache_budget.py \
+    --max-entries 2000 --include-worker-dirs --dry-run
+
+# Do it. Defaults to whatever pytensor.config resolves, so PYTENSOR_FLAGS
+# is honoured; --compiledir names one explicitly.
+poetry run python scripts/pytensor_cache_budget.py \
+    --max-entries 2000 --include-worker-dirs
+```
+
+`--include-worker-dirs` is not optional housekeeping on the suite's own
+cache: without it the command reports success having pruned the one
+directory the workers never read. `--max-entries` is per compiledir.
+
+It evicts least-recently-used on the `atime` of `key.pkl` -- the same stat
+field PyTensor's own `last_access_time()` reads -- and also removes broken
+entries (a `key.pkl` with no `.so` beside it). `--sweep-other-platforms`
+additionally deletes sibling `compiledir_*` trees stranded by a kernel or
+Python version bump; only use it on a base directory owned by one purpose.
+
+## The test compiledir policy
+
+Two changes in the root `conftest.py`, which is the only place that runs
+before `pytensor` is imported. That timing is forced: `base_compiledir` is
+declared `mutable=False`, so it can only be set through `PYTENSOR_FLAGS`
+ahead of the import.
+
+1. **The suite has its own `base_compiledir`, `~/.pytensor-pytest`.**
+   Interactive fits and the suite stop inflating each other's startup walk.
+   It lives under `$HOME` rather than in the checkout on purpose: every
+   worktree of this repo then shares one **warm** cache, where an in-repo
+   path would make each new agent worktree pay a full cold compile.
+2. **Every compiledir in the tree is bounded at 2000 entries**, pruned LRU on
+   the xdist controller in `pytest_configure`, before any worker exists --
+   which is also what makes the prune safe without taking PyTensor's compile
+   lock, and is the only moment at which the per-worker trees below can be
+   pruned at all (a worker cannot prune the ModuleCache it is holding).
+
+   "Every compiledir in the tree", plural, is the correction. Point 4 below
+   gives each xdist worker its own base, so the layout is
+
+   ```
+   ~/.pytensor-pytest/compiledir_<platform>/      <- -n0 runs only
+   ~/.pytensor-pytest/gw0/compiledir_<platform>/  <- worker 0
+   ~/.pytensor-pytest/gw1/compiledir_<platform>/  <- worker 1
+   ```
+
+   and `pytensor.config.compiledir` in the CONTROLLER resolves the first of
+   those -- the one directory no worker ever writes to. The prune ran on that
+   alone until 2026-08-25, so it bounded nothing: measured on this box, the
+   controller's tree sat at 2280 entries against a budget of 3000 and was
+   never touched, while `gw0`-`gw5` held **1455 to 1562 entries each** with
+   no bound of any kind. `enforce_budget_tree` walks all of them.
+
+   The budget is **per compiledir, not a total**, because the walk each
+   worker pays is over its own directory only. The price of that denominator
+   is disk: with W workers the tree holds up to (W + 1) x the budget. That is
+   why the number came DOWN from 3000 when it started applying to seven
+   directories instead of one. It cannot go below ~1600: a worker's own
+   directory holds very nearly the full 1564-entry working set, because most
+   of what gets compiled is shared infrastructure that every file's model
+   builds rather than anything specific to the files that worker drew.
+3. **The `ModuleCache` walk is forced in `pytest_configure`, in every
+   worker.** pytest-timeout arms its per-test `SIGALRM` later, so however
+   long the walk takes it can no longer fail a test. That is the actual fix
+   for the red test; bounding the count is what makes it fast.
+4. **Each xdist worker gets its OWN `base_compiledir`**, `gw0/`, `gw1/`, ...
+   one level below the base, keyed off `PYTEST_XDIST_WORKER`.
+
+   PyTensor serializes ALL compilation behind one lock per compiledir, and
+   `compile__timeout=600` is exactly pytest-timeout's own ceiling -- so on a
+   cold cache a worker queued behind the others died by pytest-timeout
+   without ever failing the lock. The suffix removes the shared lock
+   entirely. The price is duplicated compiles of common ops across workers,
+   paid in parallel instead of in a queue -- and duplicated DISK, which is
+   why the budget in point 2 is per compiledir and why it has to be walked
+   over these directories explicitly. It was not, until 2026-08-25.
+5. **A missing worker compiledir is SEEDED from the warmest one**, on the
+   controller in `pytest_configure`, right after the prune.
+
+   How redundant these directories are is the point. Measured: each of
+   `gw0`-`gw5` held **1455-1562** entries against the **1564** a whole cold
+   run creates -- so a worker's directory holds nearly every graph the suite
+   compiles, because most of what compiles is shared infrastructure that
+   every file's model builds rather than anything specific to the files that
+   worker drew. They are ~95% copies of each other.
+
+   Left alone, that redundancy bills twice. Raising `-n` makes the NEW
+   workers compile everything from scratch: when CI went from `-n 2` to
+   `-n 4`, ubuntu 3.12 went **43:21 -> 52:24** and 3.13 **36:39 -> 39:12**,
+   all green, purely because `gw2` and `gw3` started empty. And it makes the
+   saved CI cache scale with the worker count, so the cache cannot absorb
+   more parallelism.
+
+   Seeding makes both free, and it is cheap because of what an entry is made
+   of. Measured over 148 entries: the `.so` is **85.3%** of the bytes, the
+   `.cpp` **13.4%**, `key.pkl` **1.3%**. Only `key.pkl` is ever rewritten in
+   place -- PyTensor appends to it when a second key maps to one compiled
+   module -- so `key.pkl` is COPIED and everything else is HARD-LINKED.
+   Measured on 398 entries: **5.3 s and 7.1 MB** of real disk, against
+   **53.6 s and 218 MB** for a full copy.
+
+   Two traps, both hit while building this:
+
+   - **Hard links across filesystems silently become copies.** Point
+     `EXOZIPPY_TEST_COMPILEDIR` at a different filesystem from the source and
+     every `os.link` raises `EXDEV`; the first measurement of this code was
+     taken that way by accident and reported *0 hard-linked, 1988 copied*.
+     `SeedStats.link_fallbacks` counts it and the header says so.
+   - **`__init__.py` is not a cache entry.** Counting raw `listdir` names made
+     a brand-new compiledir look warm enough to seed FROM, and a first run
+     printed *"seeded 2 worker compiledir(s) ... 0 entries"*. The seeding path
+     counts directories; `prune_compiledir`'s pre-check still counts names,
+     deliberately, because there it needs an upper bound.
+
+   Do not try hard-linking `key.pkl` to save the last 1.3%: one worker's
+   append would land in every other worker's cache at once.
+
+### The cache is dense in INODES, not in bytes
+
+This is the constraint that is easy to miss, because every number people
+usually look at says the cache is small.
+
+**A cache entry costs 6 inodes**, not one: the entry directory, `key.pkl`,
+`mod.cpp`, the `.so`, a `__pycache__/` directory and a `.pyc`. Multiply by the
+per-worker layout (point 4) and the arithmetic gets uncomfortable fast.
+Measured on this repo's box, 2026-08-25:
+
+| | entries | ~inodes |
+|---|---|---|
+| `~/.pytensor-pytest` (7 compiledirs, `-n 6`) | 11620 | ~70000 |
+| `~/.pytensor` (interactive) | 4153 | ~25000 |
+
+That is **~95000 inodes for 11.9 GB** -- and the home filesystem there is NFS
+with a hard **300k inode quota**, so the compile caches alone were a third of
+it. The suite then died with 20 failures and 4 errors, all
+`[Errno 122] Disk quota exceeded` raised from
+`pytensor.link.c.cmodule`, while `quota` reported the SPACE at 60% used. If
+you see that error, look at the `files` column and not the `space` column.
+
+Seeding (point 5) helps here but does not solve it: hard links share the `.so`
+and `.cpp` and add no inodes, but each seeded entry still needs its own
+directory, `key.pkl`, `__pycache__/` and `.pyc`. Roughly 4 inodes instead of 6
+-- a third off, not a fix.
+
+**The fix is to put the cache on a filesystem that does not charge you for
+inodes**, which is a per-machine setting rather than anything this repository
+should hardcode:
+
+```bash
+export EXOZIPPY_TEST_COMPILEDIR=/local/scratch/pytensor-pytest
+```
+
+On the box this was measured on that meant `/pool/radish1` -- **ext4, local,
+233M inodes at 2% used** -- against an NFS home at its quota. It is very likely
+faster as well as quota-free: the startup cost this whole document is about is
+an O(entries) walk of `listdir` plus `open` plus unpickle over thousands of
+small files, which is precisely the workload a network filesystem is worst at.
+
+Point 1 says the cache lives under `$HOME` so every worktree shares one warm
+copy. A local scratch path satisfies that too -- the thing being avoided was an
+IN-REPO path, which would make every new worktree pay a full cold compile.
+
+To reclaim inodes in a hurry, delete whole worker directories rather than
+hunting entries; the seeding rebuilds them from whichever one you keep:
+
+```bash
+# Keep gw0 and gw1 as seed sources, drop the rest.
+find ~/.pytensor-pytest -mindepth 1 -maxdepth 1 -name 'gw*' \
+    ! -name 'gw0' ! -name 'gw1' -exec rm -rf {} +
+```
+
+Escape hatches:
+
+| variable | effect |
+|---|---|
+| `EXOZIPPY_TEST_COMPILEDIR=/some/path` | put the suite's cache somewhere else |
+| `EXOZIPPY_TEST_COMPILEDIR=` (empty) | opt out; use whatever PyTensor would pick |
+| `EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES=N` | change the per-compiledir budget (CI uses 1800) |
+
+The prune itself is guarded by a cheap pre-check, and that is load-bearing
+rather than an optimization: its per-entry pass opens a directory and stats
+a `key.pkl` for every entry, which measured **72 s over 4034 entries** on a
+cold page cache. One `listdir` of the parent bounds the entry count from
+above, so being under budget is provable without the pass, and steady state
+is a single directory read. Without it, `pytest -n0 -x` on one test would
+pay the very cost this change removes.
+
+## The three numbers
+
+All on the same 36-core box, `-n 6 --dist loadfile`, same commit.
+
+| | wall | result | notes |
+|---|---|---|---|
+| **Cold compiledir** | **27:15** | 4 failed | empty cache, everything compiles. The best local proxy for a CI job. |
+| **Contaminated warm** | **9:39** | 1 failed | the 4035-entry shared cache, cold pages. The failure is the cache-init victim. |
+| **Clean warm** | **7:36** | all pass | the bounded private cache, page cache evicted first |
+
+The spread is the finding: the same suite, same commit, differs by a factor
+of three and a half depending only on the state of a directory nobody was
+managing.
+
+The sharpest single number is the test that started this. On the
+contaminated cache `test_vcve.py::test_the_inversion_round_trips_the_forward_relation`
+blew the 300 s cap and went red; on a fully hot page cache it still took
+84 s; on the bounded private cache with the walk moved out of band it takes
+**0.32 s**. It was always a 0.32 s test being billed for the cache walk.
+
+The remaining slow tests -- 81 s for
+`test_robust_likelihood::test_outlier_prob_at_data_flags_a_planted_outlier`,
+79 s for the two `test_rm_ltt` cases -- are genuinely slow sampling tests
+and cost the same on a hot cache before this change. They are the next
+thing to look at if the suite needs to get faster; the cache is no longer
+the bottleneck.
+
+### A cold cache is still not a pleasant place, and that is worth knowing
+
+**The cold run's four failures were a separate bug the measurement turned
+up.** They were not the refresh-walk timeout; they were
+`filelock._error.Timeout` on PyTensor's compile lock. All compilation for a
+compiledir is serialized behind that one lock, and its default acquire
+timeout is 120 s (`compile__wait * 24`), which six workers queueing on an
+empty cache blow straight through. It hit `test_distance_volume_prior`,
+`test_nsnl`, `test_rossiter` and `test_multiplanet` -- whichever happened
+to queue behind a long compile, the same lottery as the refresh-walk
+timeout. The conftest now sets `compile__timeout=600`, and a repeat cold
+run confirms it: **4 lock timeouts -> 0**, in 24:57.
+
+That repeat run still had **one** failure, and it is a third, independent
+effect that this change does not fix and does not claim to.
+`test_astrometry.py::test_finite_logp_and_gradient` hit pytest-timeout's
+300 s cap -- not because of the cache walk, which is now paid out of band,
+but because on an empty compiledir the gcc work that test triggers really
+does take that long. It is a 17 s test warm.
+
+The instructive part is the durations either side of it: on the cold run
+`test_band_autopin_ld` took 365 s, `test_vcve` 337 s, `test_rossiter` 328 s
+and `test_run_endpoints` 316 s, and all four **passed**. They overran the
+same cap; the difference is only where the interpreter happened to be when
+`SIGALRM` fired. pytest-timeout's signal method cannot interrupt a process
+blocked in a C extension (see the note on `timeout_method` in
+pyproject.toml), so a test waiting on a gcc subprocess simply ignores the
+alarm until it returns to Python. Whether a cold run goes red is therefore
+a coin flip, exactly as the original bug was, one level down.
+
+This is not worth weakening the 300 s cap for. It only bites on a
+genuinely empty compiledir, which is a state you now hit **once**, the
+first time you run the suite after this change. Just re-run -- the second
+run is warm and green -- or make the cold run deliberate with
+`--timeout=1800`. CI does not see it either, and for a stronger reason than
+the low worker count it used to run at: point 4 above gives every worker its
+own compiledir, so there is no shared compile lock left to queue on.
+
+One full cold run creates **1564 entries / 825 MB**. That is the number the
+budgets are sized against -- a budget below one run's working set would
+evict entries that run still needs. A *second* run on a different branch
+does not add another 1564: it reuses nearly all of them and adds only the
+delta for graphs that changed.
+
+Refresh cost scales with the entry count as advertised: 1561 entries with
+the page cache explicitly evicted takes **6.4 s** in one process, against
+14 s for 4034 entries partly warm.
+
+Note on honesty of the "clean warm" number: re-running a suite immediately
+after another one finds every `key.pkl` already resident in the page cache
+and reports a time nobody will ever see in practice. The clean-warm run
+below was taken after evicting the compiledir from the page cache with
+`posix_fadvise(POSIX_FADV_DONTNEED)`, which is what `drop_caches` does
+globally and needs root for.
+
+## CI
+
+`.github/workflows/tests.yml` now restores the compiledir in every matrix
+job and saves it **only on master pushes**. The reasoning is in the comment
+on the step; the two load-bearing points are that a cache saved on the
+default branch is readable from every branch while a topic-branch one is
+not, and that the 10 GB repository cache budget is evicted
+least-recently-accessed -- so writing a few hundred MB per matrix
+combination on every PR run would churn several GB a day and put the Zenodo
+spectra (132 MB) and ephemeris kernel (115 MB) caches at risk of eviction.
+
+The kernel version is the footgun. PyTensor names the compiledir after the
+platform string, which includes the kernel release, so a runner image bump
+silently strands the whole restored tree -- nothing reads it, and nothing
+would ever delete it either, so it would ride along in the cache forever.
+That is handled on the pytest side: the conftest prune sweeps stale sibling
+`compiledir_*` trees. This is the same class of bug as the Zenodo cache path
+that went stale in July 2026 and kept reporting "cache hit" while restoring
+132 MB into a directory nothing opened.
+
+### The two ways the saved artifact grew, and the 10 GB wall it hit
+
+Both were found on 2026-08-25 and both are fixed; the shape is worth keeping
+because neither one failed anything, which is why they ran for weeks.
+
+**Each entry grew.** The `Prune the compile cache before saving it` step ran
+`pytensor_cache_budget.py` without `--include-worker-dirs`, so it pruned the
+controller's compiledir -- empty, in a job that runs under `-n` -- reported
+success having removed nothing, and never looked at the `gw*/` trees that
+hold the whole cache. Every merge therefore saved the previous artifact plus
+that run's new entries. Measured across five consecutive master runs, ubuntu
+3.14 went **374 -> 494 -> 606 -> 661 -> 781 MB**.
+
+**Entries were never superseded.** The restore key embeds `github.run_id` so
+each master push writes a NEW entry rather than hitting an existing one and
+skipping the save. That is necessary -- a cache key is immutable once written
+-- but nothing retired the entry it replaced, and only the newest is ever
+restored, because `restore-keys` matches most-recent-first. So old
+generations bought nothing and cost the budget: **five generations retained
+per os+python, 18 entries, 8.05 GB.**
+
+Together those put total repository cache usage at **10.43 GB against a
+10 GB budget**, i.e. GitHub was already evicting least-recently-accessed --
+and the two entries eviction must not take, the 132 MB Zenodo spectra and
+the 115 MB ephemeris kernel, were the smallest things in there. That is the
+exact failure the restore step's comment was written to prevent, arrived at
+from a direction the comment did not consider. The `Drop superseded compile
+caches` step now deletes older generations for the job's own os+python.
+
+Check the total with `gh cache list --limit 200 --json key,sizeInBytes` and
+sum `sizeInBytes`; anything approaching 10 GB means eviction is live.
+
+### One canonical tree, and the sharded matrix
+
+Two changes that only make sense together.
+
+**The saved artifact holds ONE worker tree.** Before saving, the job deletes
+every `gw*` but `gw0` **and the controller's own `compiledir_*`**, so the
+archive no longer multiplies by the worker count. The next run reconstitutes
+the rest by seeding (policy point 5), which is why this is safe rather than
+merely smaller. Without it the cache could not absorb more parallelism: 4
+workers x 2 shards would have wanted ~12 GB against the 10 GB repository
+budget.
+
+The controller's tree is worth deleting on its own account. Under `-n` it is
+the one directory no worker ever writes to, so everything in it is stale --
+and it was being saved every run anyway. Measured on the first master run
+after the prune fix, the macOS tree was **5055 entries**: controller 1800 +
+gw0 1578 + gw1 1677. Dropping the controller as well as gw1 makes the artifact
+about **3.2x** smaller rather than 2x.
+
+**The suite is split across shards, 4 on ubuntu and 3 on macOS**,
+`scripts/pytest_shard.py` (the per-OS count is the `shards` matrix key in
+tests.yml, passed as `--of`). Worker count is capped by the runner --
+measured, `ubuntu-latest` is `cpus=4, memory=15.6 GB` and `macos-latest` is
+`cpus=3, memory=7.0 GB` -- and ~12000 ubuntu worker-seconds (2026-09-14) over
+4 workers is still ~50 minutes, so more machines is the only way down.
+
+**What bounds a job**, re-measured 2026-09-14 on four master runs (34888667878
+and three siblings) and predicting every observed job within 4%:
+
+    wall/job = ~100 s fixed + max(shard worker-seconds / workers, slowest FILE serial)
+
+The fixed cost is **~100 s** (setup-python cache hit 27-36 s, poetry install
+1-2 s from cache, compile-cache restore 2-3 s, collect and seed 10-15 s, the
+upload and the loadfile tail), not the 225 s the 2026-08 projection assumed.
+The second term is the one that bites: `--dist loadfile` pins a whole file to
+one worker, so a shard never beats its slowest file's SERIAL time, and once
+one file exceeds the per-worker share the shard count stops mattering for the
+job that carries it. Priced with the fresh weights and the script's own
+packing, files as they stood on 2026-09-14:
+
+| ubuntu shards | jobs/push | worst job | best job | binding constraint |
+|---|---|---|---|---|
+| 4 | 16 | 16.2m | 14.2m | one file (`test_mulens_acceptance.py`, 873 s) |
+| 5 | 20 | 16.2m | 11.7m | that file |
+| 6 | 24 | 16.2m | 10.0m | that file |
+| 8 | 32 | 16.2m | 7.9m | that file |
+
+The worst job never moved: adding shards bought nothing until the file was
+split. After splitting it in two (`test_mulens_acceptance_a.py` / `_b.py`,
+~435 s each, a fixture-name partition in `tests/mulens_acceptance_replay.py`
+-- the tests share no fixture setup, so the split is free):
+
+| ubuntu shards | jobs/push | worst job | binding constraint |
+|---|---|---|---|
+| **4** | **16** | **14.2m** | spread (749 worker-s per worker) |
+| 5 | 20 | 11.7m | spread |
+| 6 | 24 | 10.0m | spread |
+| 8 | 32 | 9.7m | one file (`test_band_autopin_ld.py`'s mixed-law test, 484 s) |
+
+So the RULE is the same one the 2026-08 projection reached from a different
+floor (`test_rm_ltt.py` at 262 s then; it is 26 s now): **below ~10 minutes
+the lever is splitting slow FILES, never adding jobs.** The next candidates
+are in the table of heaviest tests in `docs/testing.md`: the 484 s band test
+and the 376 s robust-likelihood outlier test are each ONE test using only
+`tmp_path`, so they move to their own files for free.
+
+**Adding jobs also has a hard ceiling**, and it is why ubuntu stays at 4 and
+macOS went from 4 shards to 3. The free plan runs **20 concurrent jobs and 5
+macOS**. A push is 12 ubuntu + 3 macOS + lint + the gate + the 2 Intel-macOS
+probes = 19 jobs, 5 of them macOS -- at the macOS cap. With 4 macOS shards it
+was 6 macOS jobs against 5, so one macOS shard waited ~8 minutes on every push
+even with nothing else running, and the RUN's wall clock (~23 min) was set by
+that queue rather than by any shard; with three PR runs overlapping the queue
+reached 17-18 minutes. macOS is **3.2x faster per worker-second** (3783
+worker-s for the same suite against ubuntu's 11987), so three macOS shards
+land at ~100 + 3783/2/3 = ~730 s = **12.2 min** per job, under the ubuntu
+jobs. A fifth ubuntu shard (+4 jobs = 23) would queue a second wave behind the
+first and cost more than it saves. Count the jobs before editing either list.
+
+Four ubuntu shards also buy MARGIN, which is the practical argument and has
+not changed. Two shards measured **15:10 to 26:36** across eight jobs: a mean
+sitting right on the 20-minute target with about +/-40% runner variance, so
+roughly half of all runs missed it. Picking a shard count whose mean equals
+the target means failing the target half the time.
+
+**The split is duration-aware**, packing longest-file-first from
+`tests/durations.json`. That file is a **weighting hint and never a
+correctness input**: a file it does not mention is charged the median cost, and
+a missing or corrupt file degrades to round-robin. Either way the partition
+still covers every file exactly once, which `--verify` checks on every job.
+
+Measured on the real suite, worst shard as a multiple of ideal:
+
+| shards | duration-aware | round-robin |
+|---|---|---|
+| 2 | 1.00x | 1.05x |
+| 3 | 1.00x | 1.23x |
+| 4 | **1.00x** | 1.16x |
+| 6 | 1.00x | 1.62x |
+
+So round-robin is fine at two shards and wasteful at four, which is what pays
+for carrying the file.
+
+#### Regenerate it from a CI run, not from a workstation
+
+This is the part that is easy to get wrong, and the first sharded run got it
+wrong. Weights measured on a 36-core box at `-n 6` balance the **recorded
+sums** perfectly -- all four shards inside 1301 equal ubuntu-seconds, and
+`--verify` duly reports `1.00x of ideal` -- and still produced a **1.6x spread
+in real wall clock**:
+
+| shard | sum | heaviest file | predicted | observed (3.13/3.14) |
+|---|---|---|---|---|
+| 1 | 1301s | `test_rm_ltt.py` 263s | 325s | 809 / 859 |
+| 2 | 1301s | `test_orbit_crossing.py` 227s | 325s | 627 / 606 |
+| 3 | 1301s | `test_rossiter.py` 218s | 325s | 585 / 736 |
+| 4 | 1301s | `test_robust_likelihood.py` 194s | 325s | 511 / 518 |
+
+The sums are equal by construction, so the excess can only be the heavy files
+costing *relatively* more on a runner than on the workstation. The packing was
+right; the weights were measured on the wrong machine. **"1.00x of ideal" means
+1.00x of the recorded weights, not of wall clock** -- worth remembering before
+trusting that line.
+
+So every matrix job now uploads its `--durations` transcript as an artifact.
+Each job runs ONE shard, so a whole suite is the union of all four for a single
+os+python, and `gen_durations.py` takes several inputs for that reason:
+
+```bash
+gh run download <run-id> -p 'durations-ubuntu-latest-3.12-*' -D /tmp/dur
+poetry run python scripts/gen_durations.py /tmp/dur/*/durations.txt \
+    --source 'CI run <run-id>, ubuntu-latest 3.12, 4 shards at -n4'
+```
+
+Use the **slowest** combination -- ubuntu, which is also three of the four legs
+-- and do not mix platforms: macOS runs 2 workers instead of 4, clang instead
+of gcc, and skips some tests, so blended weights are worse than either
+platform's own.
+
+A local run still works and is fine for a rough refresh after adding a batch of
+tests:
+
+```bash
+poetry run pytest -q -n6 --dist loadfile --durations=0 --durations-min=0 \
+    > /tmp/durations.txt
+poetry run python scripts/gen_durations.py /tmp/durations.txt
+```
+
+**Regenerating is not optional, and it is no longer manual.** Between
+2026-08-25 and 2026-09-14 nobody did it: 25 test files landed unrecorded, the
+packer charged the new 873 s `test_mulens_acceptance.py` the 8 s median and
+still believed `test_rossiter.py` was 662 s (457) and `test_rm_ltt.py` 445 s
+(26), and ubuntu shard 3 ran 16-17 minutes against shard 1's 9-11 -- 212 s of
+wall clock from staleness alone, on every push, for three weeks. Two things
+now keep that from recurring, and both read the artifacts described above,
+which is why per-test timing loggers were never the missing piece:
+
+- **`.github/workflows/refresh-durations.yml`** runs weekly and on
+  `gh workflow run refresh-durations.yml`. It finds the latest green master
+  run, downloads its ubuntu-3.12 transcripts (refusing a partial set),
+  regenerates the file, and prices the change with
+  `pytest_shard.py --balance-json --compare-to <old>`: the OLD packing costed
+  by the NEW measurement against the new packing. When the predicted worst
+  shard improves by more than 240 worker-seconds (60 s of wall on 4 workers)
+  or any test file was absent from the committed weights, it pushes a
+  `ci/refresh-durations-<run-id>` branch and opens a pull request -- if the
+  repository allows Actions to open them (Settings > Actions > General >
+  "Allow GitHub Actions to create and approve pull requests"; it was OFF on
+  2026-09-14) -- and otherwise updates one tracking issue with the compare
+  link, which opens the PR in one click. It never touches master itself, and
+  it closes the issue when a later run finds the weights current.
+- **`pytest_shard.py --verify` on every pytest job** writes the weights' date,
+  age, predicted worst shard and the list of absent files to the job's
+  summary page, and shard 1 of each os+python leg raises a GitHub Actions
+  `::warning::` annotation whenever any file is absent (or the measurement is
+  older than 120 days, the backstop for the refresh loop itself having
+  stopped). A warning, not a failure, because stale weights cost balance and
+  never coverage. A test also fails if drift passes 35% of files, which is the
+  point at which the split has quietly become round-robin.
+
+The `_LOCAL_ONLY` trap is the other lesson from that gap. `gen_durations.py`
+carried a hardcoded exclusion for `ob09020`, a then-untracked example, and the
+tuple outlived the fact: once `examples/ob09020` was committed CI paid for it
+(316 s across its prepare cases and the suite's single heaviest replay) while
+the generator went on dropping it. The exclusion is now DERIVED -- an
+`examples/<name>/` directory on disk that `git ls-files` does not know -- so
+it is empty on any clean checkout, including CI's.
+
+Only **shard 1** prunes, saves, and drops superseded caches. Its tree already
+serves the other shards almost completely -- the same ~95% redundancy as above
+-- so storing theirs would multiply the cache by the shard count to buy a few
+percent. They recompile that remainder every run, a small bounded cost against
+a cache budget that is not.
+
+The `--verify` flag on the shard split is load-bearing, not a nicety: a split
+that silently DROPS a file leaves every shard green with the coverage gone. It
+runs on every job.
+
+## A source change can invalidate the whole cache
+
+A change to the *structure* of a commonly built graph misses every cached
+entry, not a few.  Measured 2026-08-18: turning `_RAW_CANCELLATION_CLIP` into a
+`pytensor.shared` (review 1.2.1) altered the graph of every logit-transformed
+element, so the first suite run after it took **14:40 instead of 8:26**, almost
+all of it in `cc1plus`.
+
+This is a one-time cost per such change, and it is expected -- but it looks
+exactly like "the compile cache stopped working", including on CI, where every
+matrix job pays it on the first run after the merge.  Before diagnosing a slow
+run as a cache regression, check whether the diff touched a graph that
+everything builds; the tell is `pgrep cc1plus` during the run, and an entry
+count that climbs rather than holding steady.

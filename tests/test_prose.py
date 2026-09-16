@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from exozippy.outputs import modeling
+from exozippy.outputs import modeling, report_pipeline
 from exozippy.outputs.prose import (
     POST_FIT_SECTIONS,
     SECTION_ORDER,
@@ -495,7 +495,9 @@ def test_ob08092_prose_matches_its_topology(ob08092_system):
     assert "mulensinstrument.flux_likelihood" in keys
     assert "galacticmodel.imf" in keys
     assert "galacticmodel.kinematic" in keys
-    assert "lens.event_rate" in keys
+    # The event-rate prior is event-scoped, so its sentence is keyed on
+    # `mulensevent` after the mulensevent/lens/source split.
+    assert "mulensevent.event_rate" in keys
 
     # PSPL, symbolic path: Paczynski, no VBM/MulensModel software entry.
     mag = prose._sentences["mulensinstrument.magnification"].text
@@ -527,3 +529,209 @@ def test_ob08092_prose_is_idempotent_across_rebuilds(ob08092_system):
     ob08092_system.build_model()
     after = [(s.key, s.text) for s in ob08092_system.prose.sentences()]
     assert before == after
+
+
+# ----------------------------------------------------------------------
+# the evidence section (review 8.11.2)
+# ----------------------------------------------------------------------
+
+
+def test_evidence_weighting_declares_its_method_with_citations():
+    """
+    Given a System whose report opts into per-mode evidence weighting,
+    When the opt-in site declares its prose,
+    Then the "evidence" section carries the bridge-sampling method with both
+      of its citations.  The section was in SECTION_ORDER from the start and
+      nothing ever wrote into it, so the one modeling choice with a real
+      literature method behind it was the one the draft never mentioned.
+    """
+    # ARRANGE
+    system = _FakeSystem()
+
+    # ACT
+    report_pipeline._declare_evidence_prose(system)
+
+    # ASSERT
+    texts = [
+        s.text for s in system.prose.sentences() if s.section == "evidence"
+    ]
+    assert len(texts) == 1
+    assert "bridge sampling" in texts[0]
+    assert extract_cite_keys(texts[0]) == [
+        "Meng:1996",
+        "FruhwirthSchnatter:2004",
+    ]
+
+
+@pytest.mark.parametrize(
+    "applied, failed, expect",
+    [
+        (True, False, "evidence weights"),
+        (False, False, "refused"),
+        (False, True, "did not complete"),
+    ],
+)
+def test_evidence_outcome_says_which_weights_were_reported(
+    applied, failed, expect
+):
+    """
+    Given each of the three ways evidence weighting can end,
+    When the outcome prose is declared,
+    Then the sentence says which weights the table actually carries -- the
+      estimator is allowed to refuse, so a draft describing bridge sampling
+      without saying the run fell back to occupancy would misreport the
+      weights printed next to it.
+    """
+    # ARRANGE
+    system = _FakeSystem()
+
+    # ACT
+    report_pipeline._declare_evidence_outcome_prose(
+        system, applied, failed=failed
+    )
+
+    # ASSERT
+    texts = [
+        s.text for s in system.prose.sentences() if s.section == "evidence"
+    ]
+    assert len(texts) == 1
+    assert expect in texts[0]
+
+
+def test_evidence_prose_is_idempotent_across_two_reports():
+    """
+    Given one System reported twice (the GUI, and exozippy-modes on a live
+      System, both re-report),
+    When both declarations run again,
+    Then the evidence section still holds exactly two sentences, the second
+      reflecting the LAST outcome -- regenerate-not-append, keyed.
+    """
+    # ARRANGE
+    system = _FakeSystem()
+    report_pipeline._declare_evidence_prose(system)
+    report_pipeline._declare_evidence_outcome_prose(system, True)
+
+    # ACT
+    report_pipeline._declare_evidence_prose(system)
+    report_pipeline._declare_evidence_outcome_prose(system, False)
+
+    # ASSERT
+    texts = [
+        s.text for s in system.prose.sentences() if s.section == "evidence"
+    ]
+    assert len(texts) == 2
+    assert "refused" in texts[1]
+
+
+def test_evidence_prose_is_skipped_when_there_is_no_collector():
+    """
+    Given an object with no prose collector (a bare System stub, as the
+      mode-report CLI can pass),
+    When the declarations run,
+    Then they are no-ops rather than raising -- reporting must never take a
+      fit's wrap-up down.
+    """
+
+    # ARRANGE
+    class _NoProse:
+        pass
+
+    bare = _NoProse()
+
+    # ACT / ASSERT
+    report_pipeline._declare_evidence_prose(bare)
+    report_pipeline._declare_evidence_outcome_prose(bare, True)
+
+
+def test_evidence_citations_resolve_through_bibtex(tmp_path):
+    """
+    Given a document citing the two bridge-sampling references,
+    When the full pdflatex/bibtex cycle runs on the shipped references.bib,
+    Then both appear in the .bbl.  The Fruhwirth-Schnatter entry carries an
+      escaped umlaut, which is exactly the kind of thing that parses fine in
+      Python and then breaks bibtex at the end of a long fit.
+    """
+    # ARRANGE
+    system = _FakeSystem()
+    report_pipeline._declare_evidence_prose(system)
+    report_pipeline._declare_evidence_outcome_prose(system, True)
+    prefix = str(tmp_path / "EV")
+
+    # ACT
+    tex_path = modeling.build_modeling_output(system, prefix)
+    pdf = modeling.compile_modeling_pdf(tex_path)
+
+    # ASSERT
+    if pdf is None:
+        pytest.skip("no pdflatex available")
+    bbl = (tmp_path / "EV_paper.bbl").read_text()
+    for fragment in ("Meng", "hwirth"):
+        assert fragment in bbl
+
+
+def test_no_parameter_resolves_to_a_blank_description():
+    """
+    Given every parameter declared in a shipped defaults.yaml,
+    When its ``description`` is resolved the way ConfigManager.resolve() does
+      -- the component's own entry layered over the root
+      ``components/defaults.yaml`` entry of the same name --
+    Then it is non-empty.
+
+    A blank Description column is NOT an "internal parameter" marker and never
+    was (review 3.14.13): before this test it flagged orbit.sini/sinw/cosw,
+    secosw/sesinw/esinw/ecosw and planet.ar/planet.b, every one of which is a
+    standard published table row.  So a new parameter with no description is a
+    documentation gap, and the table has no way to say so -- it just prints an
+    empty cell next to a number.
+
+    Keep a new description to about 25 characters: it sets the LaTeX table's
+    COLUMN WIDTH, and anything longer belongs in a table_note.  That is not
+    asserted here because two shipped descriptions already exceed it, and
+    tightening them would move a published table's geometry -- which wants its
+    own before/after, not a line in this test.
+    """
+    import yaml
+
+    root = yaml.safe_load((SRC / "components" / "defaults.yaml").read_text())
+    inherited = {
+        name: spec.get("description")
+        for name, spec in (root or {}).items()
+        if isinstance(spec, dict)
+    }
+
+    def is_param_spec(spec):
+        # A parameter declaration always carries at least one of these; a
+        # nested options block (expressions:, overrides:) carries none.
+        return isinstance(spec, dict) and bool(
+            spec.keys()
+            & {
+                "lower",
+                "upper",
+                "initval",
+                "unit",
+                "internal_unit",
+                "latex",
+                "description",
+                "expressions",
+                "mu",
+                "sigma",
+                "shape",
+            }
+        )
+
+    blank = []
+    for path in sorted(SRC.rglob("*/defaults.yaml")):
+        doc = yaml.safe_load(path.read_text()) or {}
+        for comp, params in doc.items():
+            if not isinstance(params, dict):
+                continue
+            for name, spec in params.items():
+                if not is_param_spec(spec):
+                    continue
+                desc = spec.get("description")
+                if desc is None:
+                    desc = inherited.get(name)
+                if not str(desc or "").strip():
+                    blank.append(f"{path.relative_to(SRC)}: {comp}.{name}")
+
+    assert not blank, "parameters with no description:\n" + "\n".join(blank)

@@ -1,0 +1,74 @@
+No restart file found at /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138.pkl; starting fresh.
+
+Planned workflow: 
+event_search:run_ef_grid
+fit_static_point_lens:est_pl_params
+fit_static_point_lens:fit_pspl
+search_for_anomaly:compute_residuals
+search_for_anomaly:run_af_grid
+search_for_anomaly:get_anomaly_lc_params
+search_for_anomaly:classify_anomaly
+fit_binary_lens:est_binary_params
+fit_binary_lens:fit_binary_models
+
+
+Running step: event_search:run_ef_grid
+Saved EF grid plot to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138_ef_grid.pdf.
+Best EF grid point: {'t_0': 8282.743812752195, 't_eff': 5.6186556927297655, 'j': 2, 'chi2': -475995.94452543923}
+Step completed: event_search:run_ef_grid
+Restart state saved to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138.pkl.
+
+Running step: fit_static_point_lens:est_pl_params
+Estimated point-lens params: {'t_0': 8282.743812752195, 't_E': 3.0, 'u_0': 1.0}
+Step completed: fit_static_point_lens:est_pl_params
+Restart state saved to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138.pkl.
+
+Running step: fit_static_point_lens:fit_pspl
+Static PSPL: {'t_0': 8281.752567276437, 't_E': 4.547115314765702, 'u_0': 0.5260072305740634, 'chi2': 5524.303490235829}
+    sigmas:  [0.004892678335156699, 0.062352144920141066, 0.01194865979817418, 3.819360702262777, 3.82410968666552, 4.1091647920796035, 4.106025581277129, 3.71958427854518, 3.721667418318005, 4.686758286086344, 4.68201257132237, 4.072621248872545, 4.067323508121523, 4.638729140346207, 4.63528760264125]
+Step completed: fit_static_point_lens:fit_pspl
+Restart state saved to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138.pkl.
+
+Running step: search_for_anomaly:compute_residuals
+Calculating residuals relative to PSPL static
+Step completed: search_for_anomaly:compute_residuals
+Restart state saved to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138.pkl.
+
+Running step: search_for_anomaly:run_af_grid
+Saved AF grid plot to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138_ef_grid.pdf.
+Best AF grid point: {'t_0': 8281.023855333333, 't_eff': 0.421875, 'j': 2.0, 'chi2': 34.19151008711553, 'dchi2_zero': 241.07266581617705, 'dchi2_flat': 237.0181763934209}
+Step completed: search_for_anomaly:run_af_grid
+Restart state saved to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138.pkl.
+
+Running step: search_for_anomaly:get_anomaly_lc_params
+Estimated anomaly params: {'t_0': 8281.752567276437, 't_E': 4.547115314765702, 'u_0': 0.5260072305740634, 'dmag': 0.036318596502432854, 'dt': 0.3260210000007646, 't_pl': 8281.1373405}
+Step completed: search_for_anomaly:get_anomaly_lc_params
+Restart state saved to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138.pkl.
+
+Running step: search_for_anomaly:classify_anomaly
+Anomaly classified as anomaly_type = close
+Step completed: search_for_anomaly:classify_anomaly
+Restart state saved to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138.pkl.
+
+Running step: fit_binary_lens:est_binary_params
+Estimated binary params (ClosePlanet): {'t_0': 8281.752567276437, 'u_0': 0.5260072305740634, 't_E': 4.547115314765702, 's': 0.638644873350305, 'alpha': -106.68734825119489, 'rho': 0.017565535245278992, 'q': 0.0024602139998746563}
+mag_methods: [8274.32371492727, 'point_source', 8277.583924927278, 'hexadecapole', 8278.39897742728, 'VBBL', 8284.877846635547, 'hexadecapole', 8285.692899135549, 'point_source', 8288.953109135557]
+Alternate solution: {'t_0': 8281.752567276437, 'u_0': 0.5260072305740634, 't_E': 4.547115314765702, 's': 0.9155233012553317, 'alpha': -104.42500841078979, 'rho': 0.017924605900255436, 'q': 0.0004242643422273541}
+Step completed: fit_binary_lens:est_binary_params
+Restart state saved to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138.pkl.
+
+Running step: fit_binary_lens:fit_binary_models
+PL chi2: 5524.3, N_good: 3094
+ClosePlanet initial chi2: 5237.3
+initial sigmas: {'t_0': 1e-05, 'u_0': 0.0005260072305740634, 't_E': 0.003260210000007646, 'log_rho': 0.0001, 'log_s': 0.0001, 'log_q': 0.0001, 'alpha': 0.0001}
+Fitted params (ClosePlanet): {'t_0': 8281.736020351003, 'u_0': 0.5163721753510424, 't_E': 4.602576653998782, 's': 0.6353109729016788, 'alpha': -106.78212021819667, 'rho': 4.757468003154527e-12, 'q': 0.002860336176887821, 'chi2': 5225.201672838847}
+       sigmas (ClosePlanet): {'t_0': 0.005359115093597211, 'u_0': 0.011522255054618735, 't_E': 0.0624886016319639, 'log_rho': 3.3926921586040395, 'log_s': 0.005872628503652083, 'log_q': 0.05282135657078357, 'alpha': 0.45274421551572885}
+ClosePlanet_alt initial chi2: 5413.7
+initial sigmas: {'t_0': 1e-05, 'u_0': 0.0005260072305740634, 't_E': 0.003260210000007646, 'log_rho': 0.0001, 'log_s': 0.0001, 'log_q': 0.0001, 'alpha': 0.0001}
+Fitted params (ClosePlanet_alt): {'t_0': 8281.727298895767, 'u_0': 0.523670756760011, 't_E': 4.549722342186367, 's': 0.9120553636014156, 'alpha': -105.6869363718082, 'rho': 2.2578215983768537e-09, 'q': 0.002302019902794096, 'chi2': 5216.613636328625}
+       sigmas (ClosePlanet_alt): {'t_0': 0.0056591619595565135, 'u_0': 0.011831560176762346, 't_E': 0.06165364578124244, 'log_rho': 3.2859309652111133, 'log_s': 0.006186808629014707, 'log_q': 0.06269415528057332, 'alpha': 0.4580014736851368}
+Step completed: fit_binary_lens:fit_binary_models
+Restart state saved to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138.pkl.
+
+Saved latex results table to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138_results.tex.
+Saved light curve plot to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138_lc.pdf.

@@ -24,6 +24,17 @@ star:
     internal_unit: "dex(solMass)"
     latex: "\\log{M}"
     description: "Log of Mass"
+    expressions:
+      # Selected per element by Star.register_parameters when the lens
+      # sets `fitthetae: true` (swap 3): the HOST star's logmass becomes
+      # derived from the sampled log_theta_E (through lens.theta_E) and
+      # pi_rel.  Log-linear map, constant Jacobian, no potential needed.
+      from_mulens_thetae:
+        func_name: "calc_logmass_from_thetae"
+        deps: [ "mulensevent.theta_E[murel_traj_map]", "mulensevent.pi_rel[murel_traj_map]" ]
+      from_mulens_thetae_binary:
+        func_name: "calc_logmass_from_thetae_binary"
+        deps: [ "mulensevent.theta_E[murel_traj_map]", "mulensevent.pi_rel[murel_traj_map]", "planet.log_q[murel_companion_map]" ]
   mass:
     unit: "solMass"
     internal_unit: "solMass"
@@ -51,6 +62,32 @@ star:
       default:
         func_name: "calc_logg_from_logmass"
         deps: ["logmass", "radius"]
+  loggsed:
+    # The SED's own surface gravity: the SECOND axis of the bolometric-
+    # correction grid, reconstructed from logmass and radiussed (NOT
+    # radius) exactly as SED._predicted_appmag_node feeds the
+    # interpolator.  It exists as a Parameter -- rather than as an inline
+    # expression inside the SED, which is what it was until 2026-08 --
+    # so that SED._inject_grid_bounds can put the grid's logg extent on
+    # it through the same override channel it uses for teffsed/feh/av.
+    # Bounding logmass and radiussed separately does NOT bound their
+    # combination, and the interpolator EXTRAPOLATES linearly off its
+    # edge cell rather than returning NaN, so without this a fit could
+    # wander off the BC grid and be scored with no restoring force.
+    # No lower/upper here on purpose: the support belongs to whichever
+    # BC grid the .sed file selects, and a fit with no sed: block has no
+    # grid and so no constraint.  Being derived, the bound acts as a
+    # soft barrier whose steepness is measured at startup
+    # (whitening.measure_barrier_scales); pin it with bound_scale.
+    unit: "dex(cm/s2)"
+    internal_unit: "dex(cm/s2)"
+    latex: "\\log{g_*}"
+    description: "Surface Gravity"
+    table_note: "This value ignores the systematic error and is for reference only"
+    expressions:
+      default:
+        func_name: "calc_logg_from_logmass"
+        deps: ["logmass", "radiussed"]
 
   distance:
     lower: 0.001
@@ -61,6 +98,17 @@ star:
     internal_unit: "pc"
     latex: "D"
     description: "Distance"
+    expressions:
+      # Selected per element by Star.register_parameters when the lens
+      # sets `fitpirel: true` (swap 2): the LENS star's distance becomes
+      # derived from the sampled relative parallax and the sampled source
+      # distance (self-guarding: 0 < D_l < D_s).  The star.distance dep
+      # is a same-parameter element reference (pre-patch tensor; only
+      # sampled elements may be referenced).  The nonlinear map's
+      # Jacobian potential is Lens.build_likelihood's.
+      from_mulens_pirel:
+        func_name: "calc_dl_from_pirel"
+        deps: [ "star.distance[murel_source_map]", "mulensevent.pi_rel[murel_traj_map]" ]
   # --- Sampled Parameters ---
   radius:
     lower: 0.1
@@ -217,6 +265,16 @@ star:
     internal_unit: "mas/yr"
     latex: "\\mu_{\\alpha*}"
     description: "Proper Motion (RA)"
+    expressions:
+      # Selected per element by Star.register_parameters when the lens
+      # sets `fitmurel: true`: the LENS star's pm becomes derived,
+      # pm = pm_source + mu_rel (the sampled, LC-measured coordinate).
+      # The star.pm_ra dep is a same-parameter element reference,
+      # resolved against the pre-patch tensor (only sampled elements may
+      # be referenced; the source star's pm stays sampled).
+      from_mulens_murel:
+        func_name: "calc_pm_from_murel"
+        deps: [ "star.pm_ra[murel_source_map]", "mulensevent.mu_ra_rel[murel_traj_map]" ]
   pm_dec:
     initval: -3.0
     init_scale: 0.05
@@ -227,6 +285,11 @@ star:
     internal_unit: "mas/yr"
     latex: "\\mu_\\delta"
     description: "Proper Motion (Dec)"
+    expressions:
+      # fitmurel twin of pm_ra's block; see the note there.
+      from_mulens_murel:
+        func_name: "calc_pm_from_murel"
+        deps: [ "star.pm_dec[murel_source_map]", "mulensevent.mu_dec_rel[murel_traj_map]" ]
   ra:
     initval: 180.0
     init_scale: 20e-6

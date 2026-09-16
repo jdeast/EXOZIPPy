@@ -1,0 +1,28 @@
+Unloading tools/local-user <S>
+  ERROR: Unload of sticky module skipped
+
+Unloading uge/8.8.1 <S>
+  ERROR: Unload of sticky module skipped
+Parameter 'star.Host.teff': your sigma is DROPPED -- this element is not a parameter of its instance's parameterization, so it is held at a bookkeeping value, given no prior, and reported nowhere. Put the constraint on the quantity this instance actually samples, or change the instance's parameterization if you meant to fit it.
+Parameter 'star.Host.feh': your sigma is DROPPED -- this element is not a parameter of its instance's parameterization, so it is held at a bookkeeping value, given no prior, and reported nowhere. Put the constraint on the quantity this instance actually samples, or change the instance's parameterization if you meant to fit it.
+Parameter 'star.mass': sigma=0 has no effect on a derived parameter To hold it constant, you must fix the corresponding sampled parameter(s).
+Initializing NUTS using jitter+adapt_diag...
+Multiprocess sampling (4 chains in 4 jobs)
+NUTS: [star.logmass_raw, planet.mass_raw, planet.radius_raw, orbit.logP_raw, orbit.cosi_raw, orbit.tc_raw, orbit.secosw_raw, orbit.sesinw_raw, rvinstrument.gamma_raw, rvinstrument.jitter_variance_raw]
+Sampling 4 chains for 2_000 tune and 2_000 draw iterations (8_000 + 8_000 draws total) took 1379 seconds.
+There were 215 divergences after tuning. Increase `target_accept` or reparameterize.
+Chain 0 reached the maximum tree depth. Increase `max_treedepth`, increase `target_accept` or reparameterize.
+Chain 1 reached the maximum tree depth. Increase `max_treedepth`, increase `target_accept` or reparameterize.
+Chain 2 reached the maximum tree depth. Increase `max_treedepth`, increase `target_accept` or reparameterize.
+Chain 3 reached the maximum tree depth. Increase `max_treedepth`, increase `target_accept` or reparameterize.
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+The effective sample size per chain is smaller than 100 for some parameters.  A higher number is needed for reliable rhat and ess computation. See https://arxiv.org/abs/1903.08008 for details
+{
+ "pipeline": "rv",
+ "seed": 1009,
+ "snr": 30.0,
+ "n_epochs": 400,
+ "orbit.K": -1.144880791380303,
+ "orbit.period": -0.9790343586080736,
+ "rvinstrument.gamma": -0.8681942169230291
+}

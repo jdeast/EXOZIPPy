@@ -75,6 +75,23 @@ class NextGenPlot(Plot):
         self.mag_pred_draws = mag_pred_draws
         self.combined_pred_draws = combined_pred_draws
 
+    def _warn_if_off_grid(self, nstar, axis_names, points, eval_point):
+        """Say so when a draw is being extrapolated off the spectra grid.
+
+        The extrapolation itself is the deliberate choice (see the call
+        site); what would be wrong is doing it silently, since the drawn
+        spectrum is then no longer a model spectrum the grid contains.
+        """
+        for axis, axis_pts, value in zip(axis_names, points, eval_point):
+            lo, hi = float(np.min(axis_pts)), float(np.max(axis_pts))
+            if value < lo or value > hi:
+                warnings.warn(
+                    f"{self.sedmodel}: star {nstar} has {axis}={value:g}, "
+                    f"outside the bracketing spectra cell [{lo:g}, {hi:g}]. "
+                    "The plotted spectrum is linearly extrapolated there "
+                    "and is not a model spectrum the grid contains."
+                )
+
     def _interp_spectra(self):
         """
         Linearly interpolates model spectra in n-dimensions
@@ -133,9 +150,30 @@ class NextGenPlot(Plot):
                                     break
 
                             if not matched:
-                                warnings.warn(
-                                    f"No spectrum found for star {nstar} at "
-                                    f"teff={teff_pt}, logg={logg_pt}, feh={feh_pt}"
+                                # Leaving flux_near at its initialized 0.0
+                                # (what this did until 2026-08, behind a
+                                # warnings.warn) does not skip the corner --
+                                # it interpolates against a FABRICATED zero
+                                # flux, dragging the whole plotted spectrum
+                                # toward zero with nothing on the figure to
+                                # say so. The NextGen spectra grid is not a
+                                # full rectangle (12796 of 23716 nodes), and
+                                # _findNearestGridPoints brackets blindly, so
+                                # this is reachable the moment a draw leaves
+                                # the BC grid's own box -- above logg 5.0,
+                                # 385 of the 660 (teff, feh) nodes on the
+                                # logg = 5.5 plane are absent.
+                                raise RuntimeError(
+                                    f"{self.sedmodel}: no model spectrum at "
+                                    f"teff={teff_pt}, logg={logg_pt}, "
+                                    f"feh={feh_pt} (star {nstar}), for any "
+                                    f"alpha in {list(self.ALPHA_GRID_PTS)}. "
+                                    "That node brackets the requested draw, "
+                                    "so the SED figure cannot be built "
+                                    "without inventing a flux for it. Keep "
+                                    "the star inside the BC grid's own box "
+                                    "(this node is outside it), or extend "
+                                    "the model spectra grid."
                                 )
 
             interp_flux = np.zeros((self.nstars, len(self.df_wave)))
@@ -146,8 +184,25 @@ class NextGenPlot(Plot):
                     feh_near[:, nstar],
                 )
                 eval_point = np.array([pt_dict[ax][nstar] for ax in pt_dict])
+                self._warn_if_off_grid(
+                    nstar, list(pt_dict), points, eval_point
+                )
+                # bounds_error=False + fill_value=None -> linear
+                # EXTRAPOLATION off the bracketing cell, deliberately, and
+                # for the same reason the BC interpolator is built with
+                # fill_value=None (see sed.md): the one axis that can leave
+                # the grid is the derived loggsed, whose grid extent is a
+                # soft barrier rather than hard support, so an off-grid draw
+                # is a legal (merely improbable) point the figure has to be
+                # able to draw. scipy's default bounds_error=True raised
+                # instead -- inside SED.plot, i.e. inside run.py's UNGUARDED
+                # pre-sampling plot loop, killing the fit before it started.
                 interp_flux[nstar, :] = interpn(
-                    points, flux_near[nstar], eval_point
+                    points,
+                    flux_near[nstar],
+                    eval_point,
+                    bounds_error=False,
+                    fill_value=None,
                 )
 
             model_spectrum_flux_draws[d, :] = interp_flux

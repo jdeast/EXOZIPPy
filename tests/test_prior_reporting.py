@@ -2,7 +2,7 @@
 
 ``Parameter.get_prior_str`` describes a prior from the parameter's OWN
 fields -- ``sigma``, ``mu``, ``lower``/``upper`` -- so a ``pm.Potential`` a
-component adds in stage 6 was invisible to it.  Three shipped priors were
+component adds in stage 7 was invisible to it.  Three shipped priors were
 misreported that way, every one of them as "Uniform", which is precisely the
 prior they replace:
 

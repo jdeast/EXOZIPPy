@@ -14,9 +14,10 @@ lightly-optimized microlensing solutions spanning the standard degeneracies:
 
 Three consumers share this module:
 
-- ``Lens._load_mmexofast_seeds`` (stage 2) pushes each fit as a per-seed hint
-  set when the lens block names an explicit ``mmexofast: <file>``.
-- ``MulensInstrument._resolve_mmexofast`` (stage 1a) applies the bad-data
+- ``MulensEvent._load_mmexofast_seeds`` (stage 3) pushes each fit as a
+  per-seed hint set when the mulensevent block names an explicit
+  ``mmexofast: <file>``.
+- ``MulensInstrument._resolve_mmexofast`` (stage 1) applies the bad-data
   mask (``excluded_points``) and error-rescaling factors (``errfacs``) to its
   own files, and -- when the user supplied no sufficient start values and no
   explicit file -- runs MMEXOFAST on the raw light curves to generate all of
@@ -60,7 +61,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ...config import RANK_DERIVED_DATA
+from ...config import PRECEDENCE_DERIVED_DATA
 
 logger = logging.getLogger(__name__)
 
@@ -141,8 +142,8 @@ def user_hints_sufficient(config_manager, is_binary, want_rho):
     Derivability, not literal presence, is the right question, because
     several of these are derived parameters a params file legitimately never
     names.  The case that matters is a restart file written by mkparam: it
-    carries only sampled coordinates, so `lens.q` (derived from the body
-    masses) and `lens.t_E` (from theta_E / mu_rel) are both absent -- yet
+    carries only sampled coordinates, so `lens.1.q` (derived from the body
+    masses) and `mulensevent.0.t_E` (from theta_E / mu_rel) are both absent -- yet
     both are fully determined by the `planet.log_q`/`planet.mass`,
     `star.logmass`, distance and proper-motion entries it does carry.
     Scanning for literal keys therefore declared a complete restart file
@@ -150,19 +151,23 @@ def user_hints_sufficient(config_manager, is_binary, want_rho):
 
     So ask the relaxation engine (`ConfigManager.probe_derivable`), which
     follows exactly the relations that will set these values for real at
-    stage 3.  Bounds-only entries still do not count: a bound is not a start.
+    stage 4.  Bounds-only entries still do not count: a bound is not a start.
 
     A literal entry for every observable short-circuits the probe: naming a
-    value outright makes it RANK_USER, which is derivable by definition, so
+    value outright makes it PRECEDENCE_USER, which is derivable by definition, so
     the engine cannot change the answer.  That keeps the common hand-written
     params file on the old zero-cost path and spends the extra solve only
     where the literal scan would have been wrong.
     """
-    required = ["lens.0.t_0", "lens.0.u_0", "lens.0.t_E"]
+    # Post-split spellings: the trajectory offsets are the source
+    # component's element 0, the event chain is mulensevent's, and the
+    # companion geometry is LENS ELEMENT 1 (element 0 is the masked
+    # primary).
+    required = ["source.0.t_0", "source.0.u_0", "mulensevent.0.t_E"]
     if want_rho:
-        required.append("lens.0.rho")
+        required.append("source.0.rho")
     if is_binary:
-        required += ["lens.0.alpha", "lens.0.q"]
+        required += ["lens.1.alpha", "lens.1.q"]
 
     def named(path):
         entry = config_manager.user_params.get(path)
@@ -172,16 +177,16 @@ def user_hints_sufficient(config_manager, is_binary, want_rho):
 
     # s and log_s are one fact in two coordinates; either satisfies it.
     if all(named(p) for p in required) and (
-        not is_binary or named("lens.0.s") or named("lens.0.log_s")
+        not is_binary or named("lens.1.s") or named("lens.1.log_s")
     ):
         return True
 
     derivable = config_manager.probe_derivable(
-        required + ["lens.0.s", "lens.0.log_s"]
+        required + ["lens.1.s", "lens.1.log_s"]
     )
     ok = all(p in derivable for p in required)
     if is_binary:
-        ok = ok and ("lens.0.s" in derivable or "lens.0.log_s" in derivable)
+        ok = ok and ("lens.1.s" in derivable or "lens.1.log_s" in derivable)
     if not ok:
         missing = [p for p in required if p not in derivable]
         logger.debug(
@@ -206,7 +211,7 @@ def push_seed_hints(data, config_manager, want_rho, is_binary, source="?"):
     Epochs are shifted back into the data's own time system by subtracting
     the JSON's ``jd_offset`` (0.0 when absent, and for pre-jd_offset files).
 
-    Rank is RANK_DERIVED_DATA (config.add_seed_hints): MMEXOFAST is a very
+    Rank is PRECEDENCE_DERIVED_DATA (config.add_seed_hints): MMEXOFAST is a very
     fancy derivation FROM THE DATA, not a user statement, so it sits in the
     same tier as any other data-driven hint and EVERY user entry -- an initval
     list, and equally a plain scalar initval -- outranks it.
@@ -249,25 +254,33 @@ def push_seed_hints(data, config_manager, want_rho, is_binary, source="?"):
                 f"this lens topology (binary={is_binary}, "
                 f"finite_source={want_rho})."
             )
+        # Post-split spellings (8.6.17): the trajectory offsets live on the
+        # SOURCE component's element 0, the event chain on mulensevent, and
+        # the companion geometry on LENS ELEMENT 1 -- element 0 is the
+        # masked primary, whose constraints are warn-dropped, so the old
+        # lens.0.* spellings would seed a parameter instance that cannot
+        # take a value while the real one silently kept its default.  Must
+        # match user_hints_sufficient above, which asks whether these same
+        # paths are derivable.
         d = {}
         if "t_0" in p:
-            d["lens.0.t_0"] = float(p["t_0"]) - jd_offset
+            d["source.0.t_0"] = float(p["t_0"]) - jd_offset
         for key, path in (
-            ("u_0", "lens.0.u_0"),
-            ("t_E", "lens.0.t_E"),
+            ("u_0", "source.0.u_0"),
+            ("t_E", "mulensevent.0.t_E"),
         ):
             if key in p:
                 d[path] = float(p[key])
         if want_rho and "rho" in p:
-            d["lens.0.rho"] = float(p["rho"])
+            d["source.0.rho"] = float(p["rho"])
         # s/q/alpha are companion (binary-lens) geometry only.
         if is_binary:
             if "s" in p and float(p["s"]) > 0:
-                d["lens.0.log_s"] = float(np.log10(float(p["s"])))
+                d["lens.1.log_s"] = float(np.log10(float(p["s"])))
             if "alpha" in p:
-                d["lens.0.alpha"] = float(p["alpha"])  # identity convention
+                d["lens.1.alpha"] = float(p["alpha"])  # identity convention
             if "q" in p:
-                d["lens.0.q"] = float(p["q"])
+                d["lens.1.q"] = float(p["q"])
         seed_sets.append(d)
 
     config_manager.add_seed_hints(seed_sets)
@@ -287,18 +300,18 @@ def push_seed_hints(data, config_manager, want_rho, is_binary, source="?"):
         if val is not None and np.isfinite(val) and val > 0:
             config_manager.add_scale_hint(path, float(val))
 
-    _sh("lens.0.t_0", s0.get("t_0"))
-    _sh("lens.0.u_0", s0.get("u_0"))
-    _sh("lens.0.t_E", s0.get("t_E"))
+    _sh("source.0.t_0", s0.get("t_0"))
+    _sh("source.0.u_0", s0.get("u_0"))
+    _sh("mulensevent.0.t_E", s0.get("t_E"))
     if want_rho and "log_rho" in s0 and "rho" in p0:
-        _sh("lens.0.rho", float(p0["rho"]) * float(s0["log_rho"]) * ln10)
+        _sh("source.0.rho", float(p0["rho"]) * float(s0["log_rho"]) * ln10)
     if is_binary:
         if "log_s" in s0:
-            _sh("lens.0.log_s", float(s0["log_s"]))
+            _sh("lens.1.log_s", float(s0["log_s"]))
         if "alpha" in s0:
-            _sh("lens.0.alpha", float(s0["alpha"]))
+            _sh("lens.1.alpha", float(s0["alpha"]))
         if "log_q" in s0 and "q" in p0:
-            _sh("lens.0.q", float(p0["q"]) * float(s0["log_q"]) * ln10)
+            _sh("lens.1.q", float(p0["q"]) * float(s0["log_q"]) * ln10)
 
     return len(seed_sets)
 
@@ -366,7 +379,7 @@ def push_errfac_hints(data, files, prefix, config_manager):
     MMEXOFAST reports the factor its own error renormalization multiplied
     the file's errors by; EXOZIPPy reads the ORIGINAL file and samples a
     multiplicative err_scale, so the factor is the natural start value.
-    RANK_DERIVED_DATA: beats defaults.yaml, yields to the user.
+    PRECEDENCE_DERIVED_DATA: beats defaults.yaml, yields to the user.
     """
     errfacs = data.get("errfacs") or {}
     if not errfacs:
@@ -384,7 +397,7 @@ def push_errfac_hints(data, files, prefix, config_manager):
         if not (np.isfinite(fac) and fac > 0):
             continue
         config_manager.add_hint(
-            f"{prefix}.{i}.err_scale", fac, rank=RANK_DERIVED_DATA
+            f"{prefix}.{i}.err_scale", fac, rank=PRECEDENCE_DERIVED_DATA
         )
         logger.info(
             f"[{prefix}] err_scale[{i}] seeded at the mmexofast error "

@@ -1,0 +1,15 @@
+No restart file found at /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170114.pkl; starting fresh.
+
+Planned workflow: 
+event_search:run_ef_grid
+fit_static_point_lens:est_pl_params
+fit_static_point_lens:fit_pspl
+search_for_anomaly:compute_residuals
+search_for_anomaly:run_af_grid
+search_for_anomaly:get_anomaly_lc_params
+search_for_anomaly:classify_anomaly
+fit_binary_lens:est_binary_params
+fit_binary_lens:fit_binary_models
+
+
+Running step: event_search:run_ef_grid

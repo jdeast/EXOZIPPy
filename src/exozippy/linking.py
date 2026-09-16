@@ -68,6 +68,42 @@ _PATH_2 = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\.([A-Za-z_]\w*)(?![\w.(])")
 
 _SYMPY_LOCALS_BASE = {"pi": sp.pi, "E": sp.E}
 
+# The functions a link expression may call: sympy head -> the pytensor.tensor
+# name that builds it.  ONE table, two consumers -- parse_link_expression
+# rejects everything not in it (below) and sympy_to_pytensor builds from it --
+# because the two must agree by construction.  They did not: the parser
+# validated only free SYMBOLS, so an unknown head (a typo like sqr(), or
+# log10(), which sympy does not define) sailed through as an AppliedUndef and
+# only sympy_to_pytensor's "Unsupported operation" complained -- and only on
+# the two link kinds that build a graph.  A seed-only initval link and a mu
+# link never do: they are consumed by _apply_directed_links, whose
+# float(expr.evalf()) can never evaluate an undefined function, and whose
+# failure is caught as "not evaluable yet" at DEBUG.  The seed simply never
+# applied, silently, forever.
+# Pow (x**y, sqrt) and the arithmetic heads are structural in sympy, not
+# Function subclasses, so they are handled directly by _eval and are
+# deliberately absent here.
+_SUPPORTED_FUNCS = {
+    sp.sin: "sin",
+    sp.cos: "cos",
+    sp.tan: "tan",
+    sp.asin: "arcsin",
+    sp.acos: "arccos",
+    sp.atan: "arctan",
+    sp.atan2: "arctan2",
+    sp.sinh: "sinh",
+    sp.cosh: "cosh",
+    sp.tanh: "tanh",
+    sp.exp: "exp",
+    sp.log: "log",
+    sp.Abs: "abs",
+    sp.sign: "sign",
+    sp.floor: "floor",
+    sp.ceiling: "ceil",
+    sp.Min: "minimum",
+    sp.Max: "maximum",
+}
+
 
 @dataclass
 class ParamLink:
@@ -143,10 +179,36 @@ def parse_link_expression(expr_str, system_config, context=""):
             return m.group(0)
         idx = _resolve_instance(comp_key, instance, system_config)
         if idx is None:
+            # Say WHICH names would have worked, and name the one case where
+            # a spelling that is legal elsewhere is not legal here (review
+            # 2.1.7).  `_resolve_instance` scans only the referenced
+            # component's OWN config list, so a per-element name borrowed
+            # from another component's instances -- `lens.SourceA.t_0`, whose
+            # "SourceA" is a STAR -- resolves everywhere else in a params
+            # file and not in a link expression.  Reporting that as "has no
+            # instance named" is true but unhelpful, because the user can see
+            # the name working two lines above.
+            comp_list = system_config.get(comp_key)
+            own = [
+                str(e.get("name"))
+                for e in (comp_list if isinstance(comp_list, list) else [])
+                if isinstance(e, dict) and e.get("name") is not None
+            ]
+            avail = (
+                f" Its instances are: {', '.join(repr(n) for n in own)}."
+                if own
+                else " It declares no named instances; use an index."
+            )
             raise ValueError(
-                f"Link expression '{expr_str}'{context}: '{m.group(0)}' looks like a "
-                f"parameter reference, but '{comp_key}' has no instance named "
-                f"'{instance}'."
+                f"Link expression '{expr_str}'{context}: '{m.group(0)}' looks "
+                f"like a parameter reference, but '{comp_key}' has no "
+                f"instance named '{instance}'.{avail}\n"
+                f"Note that a link expression resolves only a component's OWN "
+                f"instance names. A per-element name a component borrows from "
+                f"elsewhere -- a lens's per-source vectors are labelled with "
+                f"the SOURCE STARS' names -- works in a params KEY but not "
+                f"here; reference it as "
+                f"'{comp_key}.<i>.{param}' instead."
             )
         return _register(f"{comp_key}.{idx}.{param}")
 
@@ -193,6 +255,29 @@ def parse_link_expression(expr_str, system_config, context=""):
         raise ValueError(
             f"Link expression '{expr_str}'{context} could not be parsed: {e}"
         ) from e
+
+    # A FUNCTION CALL THE BUILDER CANNOT BUILD IS A PARSE ERROR, HERE.
+    # sympify happily turns any unknown name into an AppliedUndef, so `sqr(x)`
+    # (a typo) and `log10(x)` (not a sympy name) parse cleanly.  Deferring the
+    # complaint to sympy_to_pytensor only covers the hard/soft link kinds; the
+    # seed-only and mu links never reach it and silently never applied.  See
+    # _SUPPORTED_FUNCS.
+    bad_funcs = sorted(
+        {
+            str(a.func)
+            for a in expr.atoms(sp.Function)
+            if a.func not in _SUPPORTED_FUNCS
+        }
+    )
+    if bad_funcs:
+        supported = ", ".join(sorted(f.__name__ for f in _SUPPORTED_FUNCS))
+        raise ValueError(
+            f"Link expression '{expr_str}'{context} calls "
+            f"{', '.join(repr(f) for f in bad_funcs)}, which is not a "
+            f"function link expressions support. Supported: {supported}, "
+            f"plus sqrt/** and the arithmetic operators. "
+            f"(For a base-10 logarithm write log(x)/log(10).)"
+        )
 
     dep_paths = sorted(str(f) for f in expr.free_symbols)
     allowed = set(placeholders.values())
@@ -250,10 +335,35 @@ def extract_links(user_params, system_config):
 
             parts = key.split(".")
             if len(parts) != 3 or not parts[1].isdigit():
+                # THE OLD MESSAGE TOLD THE USER TO DO WHAT THEY HAD JUST DONE
+                # (review 2.1.7): it said "use '<comp>.<name>.<param>' with a
+                # name defined in the system config", which is exactly the
+                # spelling that got here.  `standardize_param_names` folds
+                # every CONFIG-INSTANCE name into the index form before this
+                # runs, so a name form surviving to here is one of the cases
+                # that fold cannot reach -- a per-element name supplied by a
+                # component's MANIFEST rather than by its config (`lens`'s
+                # per-source vectors, labelled with the SOURCE STARS' names,
+                # examples/ob161003), or a flat-dict component, whose keys are
+                # never folded at all.  Neither is linkable today, and saying
+                # so with the spelling that DOES work is the whole content of
+                # the message.
+                hint = (
+                    f"Use the index form '{parts[0]}.<i>.{parts[-1]}'"
+                    if len(parts) == 3
+                    else "Use the 3-part index form '<comp>.<i>.<param>'"
+                )
                 raise ValueError(
-                    f"Link on '{key}' could not be resolved to a single "
-                    f"component instance. Use '<comp>.<name>.<param>' with a "
-                    f"name defined in the system config."
+                    f"Link on '{key}' cannot be resolved to a single "
+                    f"component element.\n"
+                    f"A link target must be written in the canonical INDEX "
+                    f"form. Instance names written in the config are "
+                    f"translated for you, but a per-element name that comes "
+                    f"from a component's manifest -- a lens's per-source "
+                    f"vectors are labelled with the SOURCE STARS' names -- is "
+                    f"not, and neither is any key on a single-instance "
+                    f"(flat-dict) component.\n"
+                    f"{hint}."
                 )
 
             context = f" (on {key}.{fld})"
@@ -293,25 +403,12 @@ def sympy_to_pytensor(expr, sym_values):
     """
     import pytensor.tensor as pt
 
+    # Built from the one table the parser validates against, so the set of
+    # functions a link may CONTAIN and the set it can be BUILT from cannot
+    # drift apart (they had, in the direction that fails silently -- see
+    # _SUPPORTED_FUNCS).
     _FUNC_MAP = {
-        sp.sin: pt.sin,
-        sp.cos: pt.cos,
-        sp.tan: pt.tan,
-        sp.asin: pt.arcsin,
-        sp.acos: pt.arccos,
-        sp.atan: pt.arctan,
-        sp.atan2: pt.arctan2,
-        sp.sinh: pt.sinh,
-        sp.cosh: pt.cosh,
-        sp.tanh: pt.tanh,
-        sp.exp: pt.exp,
-        sp.log: pt.log,
-        sp.Abs: pt.abs,
-        sp.sign: pt.sign,
-        sp.floor: pt.floor,
-        sp.ceiling: pt.ceil,
-        sp.Min: pt.minimum,
-        sp.Max: pt.maximum,
+        head: getattr(pt, attr) for head, attr in _SUPPORTED_FUNCS.items()
     }
 
     def _eval(node):

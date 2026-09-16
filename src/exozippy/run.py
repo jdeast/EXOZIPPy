@@ -18,13 +18,19 @@ import pytensor
 from matplotlib.backends.backend_pdf import PdfPages
 
 from exozippy.samplers import convergence, de_metropolis
+from exozippy.samplers._common import default_cores
 from exozippy.samplers.ptde import ptde_sample
 from exozippy.samplers.ptde_async import ptde_async_sample
-from exozippy.system import System
+from exozippy.system import KNOWN_BLOCK_KEYS, System
 
-from .corner_utils import collect_corner_samples, save_corner_plot
-from .diagnostics import ModelAuditor
-from .logger import setup_logging
+from . import reporting
+from .corner_utils import (
+    collect_corner_samples,
+    histogram_grid_degenerate,
+    save_corner_plot,
+)
+from .diagnostics import ModelAuditor, cap_alarm_findings, log_cap_alarms
+from .logger import fmt_duration, setup_logging
 from .mkparam import write_param_file
 from .outputs.modeling import build_modeling_output, compile_modeling_pdf
 from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix
@@ -34,12 +40,6 @@ from .trace_meta import check_trace_freshness, stamp_structural_metadata
 from .whitening import prepare_whitening
 
 logger = logging.getLogger(__name__)
-
-# debugging knobs
-# pytensor.config.optimizer_excluding = "local_elemwise_fusion"
-# pytensor.config.allow_gc = True
-# pytensor.config.linker = "py"
-# import ipdb
 
 # Every key `_run_fit` reads off the `sampler:` block. Anything else is
 # warned about and ignored, so this set must stay a superset of the keys the
@@ -51,7 +51,6 @@ logger = logging.getLogger(__name__)
 # accesses in this module's own source, in both directions, so it cannot
 # silently drift again. Add the key here in the same edit that consumes it.
 KNOWN_SAMPLER_KEYS = {
-    "init",
     "tune",
     "draws",
     "chains",
@@ -61,6 +60,13 @@ KNOWN_SAMPLER_KEYS = {
     "n_temps",
     "T_max",
     "n_chains",
+    "adapt_ladder",
+    "de_mode_hop",
+    "nested_backend",
+    "checkpoint_dir",
+    "nlive",
+    "dlogz",
+    "walks",
     "recompute_trace",
     "nthin",
     "measure_scales",
@@ -76,7 +82,9 @@ KNOWN_SAMPLER_KEYS = {
     "collect_rung_timing",
     "swap_schedule",
     "seed_polish",
+    "seed",
     "store_hot_chains",
+    "start_dispersion",
 }
 
 
@@ -89,7 +97,23 @@ def sigterm_as_interrupt():
     instead of Python's default SIGTERM action (immediate termination with no
     partial trace saved). ``pm.sample`` already handles a KeyboardInterrupt
     raised mid-sampling gracefully -- that's exactly how the maxtime cutoffs
-    work. Used by every branch that calls ``pm.sample`` directly.
+    work.
+
+    Used by every branch that calls ``pm.sample`` directly: PyMC NUTS, the
+    DE-Metropolis variants, and **nutpie**, which was missed until 2026-08
+    and is the one that most needed saying out loud -- it reaches
+    ``pm.sample`` through an EXTERNAL sampler, so whether the interrupt
+    survives is nutpie's decision rather than PyMC's. It does:
+    ``nutpie.sample`` catches ``KeyboardInterrupt`` and returns
+    ``background_sampler.abort()``, i.e. the draws taken so far (verified
+    against nutpie 0.16.11).
+
+    The numpyro/blackjax branch is deliberately NOT wrapped, and that is not
+    an oversight of the same kind: it goes through ``sample_jax_nuts``, whose
+    chain runs inside one jitted scan with no Python frame to raise in --
+    the same reason ``maxtime`` cannot be honored there (see
+    ``warn_maxtime_unsupported``). The PTDE and async-PTDE samplers manage
+    their own signal handling in ``samplers/_common.py``.
     """
     old_sigterm = signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
@@ -98,13 +122,450 @@ def sigterm_as_interrupt():
         signal.signal(signal.SIGTERM, old_sigterm)
 
 
+@contextlib.contextmanager
+def nonfatal_wrapup(what):
+    """Run one wrap-up step; a crash inside it warns instead of aborting.
+
+    Everything after ``pm.sample`` returns is a REPORT on a fit that already
+    finished, and the fit's irreplaceable artifacts -- the trace, the mode
+    report, the restart file -- are cheap to lose and expensive to recreate.
+    The plotting block between the tables and ``write_param_file`` was the
+    one stretch of bare calls in an otherwise wrapped wrap-up, so a
+    degenerate-KDE crash inside ``save_multipage_trace`` (which any short or
+    stopped run can provoke) skipped the restart file and the final
+    paper.tex regeneration of a multi-day fit.
+
+    Deliberately a broad ``except``: the point is that no diagnostic, from
+    any component, may kill a finished fit, and enumerating the exception
+    types a third-party plotting stack can raise is exactly the list that
+    goes stale.  ``exc_info=True`` keeps the traceback in the log (and so in
+    the GUI's status.json) rather than reducing the failure to one line --
+    the alternative, and the reason this is warn-and-continue rather than
+    swallow, is a wrap-up that silently produces fewer files than it should.
+
+    KeyboardInterrupt and SystemExit are NOT caught (they are not
+    ``Exception``): a user interrupting wrap-up wants it to stop.
+    """
+    try:
+        yield
+    except Exception:
+        logger.warning("%s failed (non-fatal)", what, exc_info=True)
+
+
+class WrapupProgress:
+    """Announce each wrap-up stage as it starts (review 2.3.5).
+
+    Wrap-up used to be MUTE.  On examples/ob09020 the last three log lines
+    were the sampler finishing, the hot-chain clustering, and the
+    gradient-fallback notice -- then nothing at all for 38+ minutes while
+    the serial polish ran (review 6.11.3), and from outside the process the
+    only way to tell "computing" from "hung" was to sample
+    /proc/<pid>/stat twice and see one core pinned.  A user should not need
+    that, and neither should an agent: it cost a wrong diagnosis in the
+    session that found it.
+
+    So each stage says what it is starting and how many items it will chew
+    through, stamped with elapsed time since wrap-up began.  One line per
+    stage, not one per item: the fit log is already INFO-heavy and a stage
+    boundary is the resolution a watcher actually needs -- within a stage,
+    the long poles carry their own heartbeats (the DE polish's is
+    ptde.POLISH_PROGRESS_S).
+
+    No fixed denominator ("stage 3 of 9") on purpose: the stage list is
+    conditional (per-mode outputs only for a multimodal fit, plots only for
+    the components that have them), and a total that lies is worse than no
+    total.
+    """
+
+    def __init__(self):
+        self.t0 = time.time()
+
+    def stage(self, what):
+        logger.info(
+            f"Wrap-up (t+{fmt_duration(time.time() - self.t0)}): {what}"
+        )
+
+    def done(self):
+        logger.info(
+            f"Wrap-up complete in {fmt_duration(time.time() - self.t0)}."
+        )
+
+
+def _wrapup_interrupt_note(config):
+    """What a Ctrl-C during wrap-up did and did not cost (review 2.3.5d).
+
+    Sampling documents its own interrupt behavior ("finishing in-flight
+    evaluations..."); wrap-up documented none, so an impatient Ctrl-C felt
+    like it might throw away the multi-day trace.  It cannot: the trace is
+    written to disk BEFORE any of this runs, and every remaining artifact is
+    a report derived from it, regenerable by ``exozippy-modes``.
+    """
+    prefix = Path(config.get("prefix", "fitresults/planet"))
+    return (
+        f"Interrupted during wrap-up. The trace at {prefix}_trace.nc was "
+        f"saved before wrap-up started and is untouched; only the reports "
+        f"not yet written are missing. Regenerate them without "
+        f"re-sampling: exozippy-modes <this fit's config.yaml>"
+    )
+
+
+# Every `method:` value _run_fit dispatches on, in the order the dispatch
+# tests them.  This is the universe METHOD_ONLY_SAMPLER_KEYS is scored
+# against, so a new sampler branch belongs here in the same edit.
+SAMPLER_METHODS = (
+    "nuts",
+    "numpyro",
+    "blackjax",
+    "nutpie",
+    "nested",
+    "ptde",
+    "ptde_async",
+    "demc",
+    "demcz",
+)
+
+# The three families the dispatch really has.  Named once, because the
+# method-only table below is mostly these three tuples and a per-family knob
+# that silently grew a second consumer is the 2.4.2 defect arriving from the
+# other direction.
+_HMC_METHODS = ("nuts", "numpyro", "blackjax", "nutpie")
+_JAX_METHODS = ("numpyro", "blackjax")
+_PTDE_METHODS = ("ptde", "ptde_async")
+_DE_METHODS = ("demc", "demcz")
+# Every method that draws a fixed-length MCMC chain, i.e. everything but
+# nested sampling, whose length is set by its own stopping rule.
+_CHAIN_METHODS = tuple(m for m in SAMPLER_METHODS if m != "nested")
+
+
+def _effective_sampler_branch(method):
+    """The branch `_run_fit` will actually take for ``method``.
+
+    An unrecognized `method:` value falls through to the nuts branch and
+    always has (samplers.md), so it must be scored as `nuts` here: warning
+    that `chains` is IGNORED under `method: nutts` would be FALSE, since the
+    branch that runs does consume it.  A warning that cries wolf is the exact
+    failure this whole mechanism exists to avoid.
+    """
+    return method if method in SAMPLER_METHODS else "nuts"
+
+
+# Samplers that cannot honor `maxtime`, and why -- one reason each, because
+# they are not the same reason.  The three external NUTS backends run their
+# whole chain outside Python's per-draw loop (the JAX ones inside one jitted
+# scan, nutpie inside Rust), so there is no point at which a wall-clock check
+# could raise the KeyboardInterrupt that the maxtime mechanism turns into a
+# graceful stop; PyMC agrees and says so out loud, since pm.sample RAISES for
+# a `callback` with any `nuts_sampler` but its own.  `nested` is here for a
+# different reason: nested_sample takes an iteration cap (`maxiter`) and no
+# wall clock at all, and run.py forwards neither -- found while re-verifying
+# review 2.3.6's consumer table, and silent until then.
+_MAXTIME_UNSUPPORTED_REASONS = {
+    "numpyro": (
+        "external NUTS samplers run the chain outside Python's per-draw "
+        "loop and invoke no callback, so there is nothing to interrupt"
+    ),
+    "blackjax": (
+        "external NUTS samplers run the chain outside Python's per-draw "
+        "loop and invoke no callback, so there is nothing to interrupt"
+    ),
+    "nutpie": (
+        "external NUTS samplers run the chain outside Python's per-draw "
+        "loop and invoke no callback, so there is nothing to interrupt"
+    ),
+    "nested": (
+        "nested sampling stops on its own evidence criterion and takes no "
+        "wall-clock cap (nested_sample has maxiter, which run.py does not "
+        "forward)"
+    ),
+}
+MAXTIME_UNSUPPORTED_METHODS = tuple(_MAXTIME_UNSUPPORTED_REASONS)
+
+
+def warn_maxtime_unsupported(method, maxtime):
+    """Say so when `maxtime:` cannot be honored by the selected sampler.
+
+    A key that is silently ignored is worse than one that is refused: the
+    whole point of `maxtime` is that a scheduler-bound job stops itself
+    before the queue kills it, so a user who sets it and gets nothing has no
+    partial trace AND no idea why.  demc already warns for exactly this
+    reason (PyMC's population path discards per-draw callbacks); these were
+    the remaining silent ones.
+
+    Returns True when a warning was emitted, so the check is exercisable
+    without running a fit -- same shape as ``warn_unknown_sampler_keys``.
+    """
+    reason = _MAXTIME_UNSUPPORTED_REASONS.get(method)
+    if maxtime is None or reason is None:
+        return False
+    logger.warning(
+        f"{method}: maxtime={float(maxtime):.0f}s is IGNORED -- {reason}. "
+        f"Use method: nuts, ptde_async or demcz for a wall-clock cap."
+    )
+    return True
+
+
+# Sampler keys only SOME methods consume.  A key here is silently inert under
+# every other method: it is in KNOWN_SAMPLER_KEYS, so warn_unknown_sampler_keys
+# says nothing, and the branch that would read it is never taken.
+#
+# That is the whole defect (reviews 2.4.2 and 2.3.6).  2.4.2 landed the
+# mechanism for the three keys it had traced.  store_hot_chains was one of
+# them -- forwarded only to ptde_async, so under method: ptde the hot-chain
+# mode discovery simply never ran and the user was told nothing.  That one is
+# now FIXED AT THE SOURCE rather than described: both loops share
+# samplers._common.HotChainRecorder, so the key is honored either way and no
+# longer appears in the table below.  rung_thin_factor / rung_thin_start
+# remain, ptde-only and correctly so.  2.3.6 is that finding on the full list: at least a dozen
+# more keys are read by exactly one branch or family.
+#
+# THE HEADLINE IS `chains`.  It is forwarded to the HMC branches and to demc /
+# demcz and to nothing else, so under method: ptde / ptde_async -- the
+# recommended default for every microlensing fit -- a user's
+# `sampler: {chains: 16}` was silently ignored, and those samplers size their
+# population from the parameter count instead (_common.resolve_n_chains).
+# Measured on examples/kelt4 RV-only, 2026-09-11: `chains: 5` gave 5 chains
+# under method: nuts and 30 under method: ptde.  It is the single most likely
+# spelling of "give me more chains", and the PTDE spelling is `n_chains`.
+#
+# Values are the methods that DO consume the key.  Deliberately NOT in this
+# table, and each for the same reason -- the warning would be false:
+#
+#   * `cores` -- not passed to sample_jax_nuts, but it governs the seed
+#     polish and the post-hoc lp fill on EVERY path, so it is never inert;
+#   * `min_ess` / `max_rhat` -- the PTDE samplers' early stop, but also the
+#     convergence-report thresholds every path prints;
+#   * `maxtime` -- has its own channel (warn_maxtime_unsupported above),
+#     which names the per-sampler reason rather than a consumer list;
+#   * `seed`, `nthin`, `measure_scales`, `profile`, `recompute_trace`,
+#     `seed_polish`, `method` -- read on every path.
+METHOD_ONLY_SAMPLER_KEYS = {
+    # Chain geometry.  `chains` is the headline above; tune/draws are the
+    # same shape against `nested`, whose length comes from its own stopping
+    # rule and whose posterior group is a fixed-size equal-weight resample.
+    "chains": _HMC_METHODS + _DE_METHODS,
+    "tune": _CHAIN_METHODS,
+    "draws": _CHAIN_METHODS,
+    # Hamiltonian step size adaptation: no gradient-free sampler has a
+    # target acceptance to aim at.
+    "target_accept": _HMC_METHODS,
+    # pymc.sampling.jax.sample_jax_nuts only.
+    "chain_method": _JAX_METHODS,
+    "jitter": _JAX_METHODS,
+    # samplers/nested.py only.
+    "nested_backend": ("nested",),
+    "nlive": ("nested",),
+    "dlogz": ("nested",),
+    "walks": ("nested",),
+    "checkpoint_dir": ("nested",),
+    # The parallel-tempered DE family.
+    "n_temps": _PTDE_METHODS,
+    "T_max": _PTDE_METHODS,
+    "n_chains": _PTDE_METHODS,
+    "adapt_ladder": _PTDE_METHODS,
+    "de_mode_hop": _PTDE_METHODS,
+    "eval_timeout": _PTDE_METHODS,
+    "swap_schedule": _PTDE_METHODS,
+    "collect_rung_timing": _PTDE_METHODS,
+    # Per-RUNG start dispersion (8.4.7): meaningless without a ladder, so it
+    # is PTDE-only rather than an all-method key.
+    "start_dispersion": _PTDE_METHODS,
+    # store_hot_chains USED to read ("ptde_async",) here; it is now honored
+    # by BOTH PTDE loops, because retaining a thinned copy of the hot rungs
+    # has nothing to do with how proposals are scheduled
+    # (samplers._common.HotChainRecorder owns it and both call it).  It stays
+    # in this table rather than moving to ALL_METHOD: an HMC or nested run
+    # has no ladder, so there is still a method that ignores it, and the
+    # partition test is what insists the distinction be spelled out.
+    "store_hot_chains": _PTDE_METHODS,
+    # ... and the documented asymmetry that IS real.  These two address the
+    # blocking that async dispatch removes outright, so there is nothing for
+    # ptde_async to honor.
+    "rung_thin_factor": ("ptde",),
+    "rung_thin_start": ("ptde",),
+}
+
+# The other half of the vocabulary: keys every path reads, whatever `method:`
+# selects.  Together with METHOD_ONLY_SAMPLER_KEYS this PARTITIONS
+# KNOWN_SAMPLER_KEYS, and tests/test_method_only_sampler_keys.py asserts the
+# partition in both directions -- so a key cannot join the vocabulary without
+# a ruling on whether some method silently ignores it, which is how a dozen
+# came to be silent (2.3.6).  The four entries here whose honoring is PARTIAL
+# rather than universal carry their reason in the comment above
+# METHOD_ONLY_SAMPLER_KEYS; they are here because on no path are they inert.
+ALL_METHOD_SAMPLER_KEYS = {
+    "method",
+    "cores",
+    "seed",
+    "seed_polish",
+    "nthin",
+    "measure_scales",
+    "profile",
+    "recompute_trace",
+    "min_ess",
+    "max_rhat",
+    "maxtime",
+}
+
+
+def warn_method_only_sampler_keys(sampler_cfg, method):
+    """Warn about keys the CHOSEN method does not consume.
+
+    Only keys the user EXPLICITLY set are reported -- these all have defaults,
+    and warning about a default nobody wrote would fire on every run and teach
+    people to ignore the log.
+
+    Must be called AFTER `method` is resolved and lowercased.  It deliberately
+    does not live beside warn_unknown_sampler_keys, which runs early enough
+    that `method` may still be None (auto-selection has not happened yet).
+
+    The message names whichever side of the split is SHORTER -- the consumers
+    for a key one family owns, the non-consumers for a key only `nested`
+    ignores -- because "only nuts / numpyro / blackjax / nutpie / ptde /
+    ptde_async / demc / demcz consume it" is a list a reader has to diff by
+    hand to find the one method that matters.
+
+    Returns the sorted list of (key, method) pairs warned about, so the check
+    is exercisable without running a fit -- same shape as its two siblings.
+    """
+    branch = _effective_sampler_branch(method)
+    warned = []
+    for key, consumers in sorted(METHOD_ONLY_SAMPLER_KEYS.items()):
+        if key not in sampler_cfg or branch in consumers:
+            continue
+        warned.append((key, method))
+        ignored_by = tuple(m for m in SAMPLER_METHODS if m not in consumers)
+        if len(consumers) <= len(ignored_by):
+            detail = f"only {' / '.join(consumers)} consume(s) it"
+            remedy = f"switch method to one of: {', '.join(consumers)}"
+        else:
+            detail = f"every method except {' / '.join(ignored_by)} reads it"
+            remedy = f"switch method away from: {', '.join(ignored_by)}"
+        logger.warning(
+            f"{method}: sampler key '{key}' is IGNORED -- {detail}. "
+            f"Remove it, or {remedy}."
+        )
+    return warned
+
+
+# Sampler keys this project used to accept, and what happened to them.  A
+# retired key is not a typo -- it is a line a working config once needed --
+# so it gets its own sentence instead of "Did you mean 'method'?".
+#
+# `init` (review 5.3.3a): read and forwarded to pm.sample for as long as run.py
+# has existed, and inert for just as long.  pymc's own pm.sample docstring says
+# of it, verbatim, "This argument is ignored when manually passing the NUTS
+# step method", and the plain-NUTS branch passes `step=pm.NUTS(...)`.  So a
+# grep for an unused variable found nothing while the key did nothing, which
+# is why it survived every refactor.  It is DELETED rather than made live, and
+# that is JDE's ruling with a reason: `initvals`' own docstring entry reads
+# "Initialization methods for NUTS (see ``init`` keyword) can overwrite the
+# default", so dropping the explicit step to give `init` its effect back would
+# let an adapt_diag jitter move the chain off the polished start -- the exact
+# pathology seed_polish exists to prevent.  Keeping the step is what makes the
+# start authoritative.
+RETIRED_SAMPLER_KEYS = {
+    "init": (
+        "pm.sample ignores `init` whenever an explicit NUTS step is passed "
+        "(pymc's own docstring), and run.py always passes one, so this key "
+        "has never had an effect. Delete the line: the start values come "
+        "from the relaxation engine and the seed polish, which is what "
+        "keeping the explicit step protects."
+    ),
+}
+
+
+def resolve_cores_setting(raw):
+    """Turn a user's `sampler: cores:` value into an int, or None for AUTO.
+
+    Review 5.3.3(e).  `cores: "auto"` used to reach a bare ``int()`` and die
+    with ``invalid literal for int() with base 10: 'auto'`` raised from inside
+    run.py -- a traceback naming neither the config key nor the remedy, for a
+    spelling ``n_temps:`` accepts -- while the SAME value handed to the seed
+    polish warned by name and took the default grant.
+
+    Failing fast is right HERE and warn-and-continue is right THERE, and the
+    difference is positional rather than a disagreement: this parse runs
+    before any work exists to lose, whereas ``_resolve_polish_cores`` can be
+    reached from a wrap-up stage, where no diagnostic may kill a finished fit
+    (``nonfatal_wrapup``).  What the two must not do is disagree about what
+    the key MEANS -- that is how one rule came to have two behaviors (review
+    6.11.3) -- so both messages say that an ABSENT cores is the automatic
+    grant and that ``cores: 1`` is how to ask for serial.
+
+    ``cores: 0`` -- and any negative value -- is the AUTOMATIC grant, and it
+    is normalized to the ``None`` sentinel HERE, at the parse boundary, so
+    the three resolvers downstream cannot disagree about it (review 2.4.8).
+    They used to: ``create_pool`` took ``min(0, total_proposals)`` and ran
+    SERIAL, ``_resolve_polish_cores`` read ``n <= 1`` and ran SERIAL, and
+    ``nested.py``'s ``cores or default_cores()`` read 0 as falsy and took the
+    AUTO grant -- one written number, three behaviors, in the three stages of
+    a single run.  JDE's ruling is that ``<= 0`` means AUTO everywhere, which
+    is also the reading a user who wrote 0 most likely meant.
+
+    It WARNS rather than raising or silently clamping -- rope, not gates.  A
+    zero is a plausible spelling of "let the machine decide", so the run
+    continues with that reading, but the user is told which reading they got
+    and that ``cores: 1`` is how to ask for serial instead.  The wording
+    matches this function's own refusal and ``_resolve_polish_cores``'s
+    warning: all three say that an absent cores IS the automatic grant and
+    that ``cores: 1`` is serial.
+    """
+    if raw is None:
+        return None
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"sampler: cores: {raw!r} is not a number of cores. Omit the "
+            f"`cores:` key entirely for the automatic grant (a fraction of "
+            f"the physical cores, leaving one for the OS and your shell), "
+            f"or write `cores: 1` for serial."
+        ) from None
+    if n <= 0:
+        logger.warning(
+            f"sampler: cores: {n} is not a number of cores; taking the "
+            f"automatic grant instead (which is also what an absent cores "
+            f"takes: a fraction of the physical cores, leaving one for the "
+            f"OS and your shell). If you meant one core, write cores: 1 for "
+            f"serial."
+        )
+        return None
+    return n
+
+
+def warn_retired_sampler_keys(sampler_cfg):
+    """Say what became of a `sampler:` key this project used to accept.
+
+    Split out of ``warn_unknown_sampler_keys`` so a retired key gets an
+    explanation rather than a typo suggestion: a user who wrote it was
+    following documentation that used to be right, and "Did you mean
+    'method'?" tells them nothing about what to do now.
+
+    Returns the sorted list of retired keys present, so the check is
+    exercisable without running a fit -- same shape as its siblings.
+    """
+    retired = sorted(set(sampler_cfg) & set(RETIRED_SAMPLER_KEYS))
+    for key in retired:
+        logger.warning(
+            f"sampler key '{key}' is RETIRED and does nothing. "
+            f"{RETIRED_SAMPLER_KEYS[key]}"
+        )
+    return retired
+
+
 def warn_unknown_sampler_keys(sampler_cfg):
     """Warn about `sampler:` keys this module does not consume.
 
     Returns the sorted list of unrecognized keys (empty when all are known),
     so the check is exercisable without running a fit.
+
+    Retired keys are excluded here and reported by
+    ``warn_retired_sampler_keys`` instead -- two messages about one line
+    would be one too many, and only one of them is useful.
     """
-    unknown = sorted(set(sampler_cfg) - KNOWN_SAMPLER_KEYS)
+    unknown = sorted(
+        set(sampler_cfg) - KNOWN_SAMPLER_KEYS - set(RETIRED_SAMPLER_KEYS)
+    )
     if unknown:
         logger.warning(
             f"Unrecognized key(s) in the sampler block will be ignored: "
@@ -112,6 +573,51 @@ def warn_unknown_sampler_keys(sampler_cfg):
             f"Did you mean 'method'? Valid sampler keys: {sorted(KNOWN_SAMPLER_KEYS)}"
         )
     return unknown
+
+
+def warn_unknown_block_keys(block_cfg, known, name):
+    """Warn about unrecognized sub-keys in one reserved config BLOCK.
+
+    The same shape as ``warn_unknown_sampler_keys`` above, deliberately:
+    before review 2.3.10 the file had two shapes for this and only one
+    block that used either -- ``modeling:`` warned through an inline loop
+    while ``modes:``, ``mkparam:`` and ``gui:`` said nothing, so
+    ``modes: {ledgr: false}`` left the seed ledger on and
+    ``mkparam: {forse: true}`` left the invalid-seed refusal armed.  A
+    params-or-config key that states an intention and silently delivers the
+    opposite is the whole defect.
+
+    ``known`` comes from ``system.KNOWN_BLOCK_KEYS``, which is the one owner
+    of these vocabularies (introspect.py publishes the same table to the
+    GUI).  Returns the sorted unrecognized keys, so the check is exercisable
+    without running a fit.
+    """
+    if not isinstance(block_cfg, dict):
+        return []
+    unknown = sorted(set(block_cfg) - set(known))
+    if unknown:
+        logger.warning(
+            f"Unrecognized key(s) in the {name} block will be ignored: "
+            f"{unknown}. Valid {name} keys: {sorted(known)}"
+        )
+    return unknown
+
+
+def warn_unknown_config_blocks(config):
+    """Run ``warn_unknown_block_keys`` over every reserved block (2.3.10).
+
+    Called once at startup rather than where each block is consumed: two of
+    the four are read by other modules (``mkparam:`` by mkparam.py,
+    ``gui:`` by gui/status.py) and ``modeling:`` is not read until wrap-up,
+    so a warning at the point of use would reach the user hours into a fit
+    -- or, for a fit that died first, never.
+    """
+    reported = {}
+    for name, known in KNOWN_BLOCK_KEYS.items():
+        unknown = warn_unknown_block_keys(config.get(name) or {}, known, name)
+        if unknown:
+            reported[name] = unknown
+    return reported
 
 
 def run_fit(config, user_params=None):
@@ -150,6 +656,14 @@ def run_fit(config, user_params=None):
         # PTDE/NUTS raise KeyboardInterrupt for a during-tune or second-signal
         # abort; a graceful during-draws stop instead returns partial draws and
         # completes normally (-> "done" below).
+        #
+        # An interrupt during WRAP-UP is a different event and now says so:
+        # the trace is already on disk, so nothing irreplaceable was lost
+        # and the reports can be regenerated.  Sampling's own interrupt
+        # behavior is announced by the samplers; this was the one phase that
+        # left the user guessing (review 2.3.5d).
+        if getattr(gui, "last_phase", None) == "writing":
+            logger.warning(_wrapup_interrupt_note(config))
         gui.terminal("stopped")
         raise
     except BaseException:
@@ -174,24 +688,47 @@ def _run_fit(config, gui, user_params=None):
 
     setup_logging(prefix, config.get("logger_level", "INFO"))
 
+    # 1b. The credible-interval width every report is written in.  Applied
+    # HERE, before anything can summarize a posterior, because the setting is
+    # process-wide (exozippy.reporting) and a summary computed at the default
+    # would be cached with that width.  Unrecognized keys are warned about and
+    # ignored, matching the modeling: block below.
+    reporting_cfg = config.get("reporting", {}) or {}
+    for _key in reporting_cfg:
+        if _key != reporting.CONFIG_KEY:
+            logger.warning(
+                f"Unrecognized key '{_key}' in the reporting block will be "
+                f"ignored. Recognized keys: ['{reporting.CONFIG_KEY}']."
+            )
+    reporting.configure_from(reporting_cfg)
+
     # 2. Load the sampler settings (flat under sampler:)
     sampler_cfg = config.get("sampler", {})
-    init = sampler_cfg.get("init", "adapt_diag")
     tune = int(sampler_cfg.get("tune", 2000))
     draws = int(sampler_cfg.get("draws", 2000))
     chains = int(sampler_cfg.get("chains", 4))
-    _cores_raw = sampler_cfg.get("cores", None)
-    if _cores_raw is not None:
-        cores = int(_cores_raw)
-    else:
-        _phys = mp.cpu_count()
-        cores = max(1, min(int(_phys * 0.75), _phys - 1))
+    # None (absent, or explicitly null) means AUTO everywhere -- never
+    # serial; serial is cores: 1 (review 6.11.3).
+    cores = resolve_cores_setting(sampler_cfg.get("cores", None))
+    if cores is None:
+        cores = default_cores()
     target_accept = sampler_cfg.get("target_accept", 0.9)
     method = sampler_cfg.get(
         "method", None
     )  # None → auto-select after system is built
     # "auto" passes through to the sampler, which sizes the ladder from the
     # parameter count once the model is built (ptde.resolve_n_temps).
+    # Barrier-equalizing ladder re-spacing during tune (Syed et al. 2022).
+    # Off by default, matching the synchronous sampler; worth turning on when
+    # ladder_health_report shows NON-UNIFORM per-rung swap acceptance, since a
+    # round trip must cross every pair and more rungs cannot fix a badly
+    # SHAPED ladder.
+    adapt_ladder = bool(sampler_cfg.get("adapt_ladder", False))
+    # ter Braak 2006 mode hopping: probability of a gamma=1 DE proposal.  0
+    # (default) is off and bit-identical.  Forwarded to BOTH PTDE samplers --
+    # a knob one of them silently ignores is exactly the adapt_ladder bug
+    # (tests/test_sampler_kwarg_plumbing.py pins the symmetry).
+    de_mode_hop = float(sampler_cfg.get("de_mode_hop", 0.0) or 0.0)
     _n_temps_raw = sampler_cfg.get("n_temps", 8)
     n_temps = (
         _n_temps_raw if isinstance(_n_temps_raw, str) else int(_n_temps_raw)
@@ -199,12 +736,36 @@ def _run_fit(config, gui, user_params=None):
     T_max = float(sampler_cfg.get("T_max", 200.0))
     _n_chains_raw = sampler_cfg.get("n_chains", None)
     n_chains = int(_n_chains_raw) if _n_chains_raw is not None else None
+    # Reproducibility: one seed for the whole run (review 2.14.4b).
+    #
+    # run.py passed NO random_seed to anything -- not pm.sample, not
+    # sample_jax_nuts, not nutpie, and not PTDE's own `seed=` argument, which
+    # had been sitting unused on all four in-house samplers -- so a user could
+    # not reproduce their OWN fit.
+    #
+    # ABSENT is not the same as UNSEEDED.  Hardcoding a default would be
+    # strictly worse than nothing: it would correlate every user's chains
+    # while looking responsible.  So when the key is absent a seed is DRAWN
+    # from the OS entropy pool, LOGGED, and stamped onto the trace, which
+    # keeps "different every run" -- right for a fresh fit -- without giving
+    # up reproducibility after the fact.  mkparam copies it into the restart
+    # file's header, so a rerun can reproduce the run that actually happened
+    # by pasting one line.
+    _seed_raw = sampler_cfg.get("seed", None)
+    if _seed_raw is None:
+        seed = int(np.random.SeedSequence().entropy % (2**31 - 1))
+        seed_source = "drawn"
+    else:
+        seed = int(_seed_raw)
+        seed_source = "config"
     recompute_trace = sampler_cfg.get("recompute_trace", False)
     nthin = int(sampler_cfg.get("nthin", 1))
     # Data-driven whitening: probe each raw element's true local scale from
     # the start and rescale the model's whitening in place before sampling.
     # On by default; 'measure_scales: false' keeps the preliminary scales
-    # (defaults.yaml init_scale or the span-fraction fallback).
+    # (defaults.yaml init_scale or the span-fraction fallback).  It gates the
+    # MEASUREMENT only -- reusing a trace still restores the whitening that
+    # trace was sampled under, whatever this says.
     measure_scales = sampler_cfg.get("measure_scales", True)
     profile = sampler_cfg.get("profile", False)
     _min_ess_raw = sampler_cfg.get("min_ess", 1000)
@@ -217,6 +778,10 @@ def _run_fit(config, gui, user_params=None):
     eval_timeout = (
         float(_eval_timeout_raw) if _eval_timeout_raw is not None else None
     )
+    # Passed through as given (number, list or 'auto'); the ladder is not
+    # known here, so _common.resolve_start_dispersion validates it against
+    # the rung count and raises there (review 8.4.7).
+    start_dispersion = sampler_cfg.get("start_dispersion", None)
     # Thinned hot-rung retention (ptde_async only): detector data for
     # post-hoc discovery of posterior-suppressed modes; see
     # outputs.ledger.discover_hot_modes.  "auto" | False | True (thin 20) |
@@ -237,7 +802,19 @@ def _run_fit(config, gui, user_params=None):
         pytensor.config.profile = True
 
     # Warn about unrecognized keys in the sampler block so they are never silently ignored.
+    warn_retired_sampler_keys(sampler_cfg)
     warn_unknown_sampler_keys(sampler_cfg)
+
+    # ... and in every other reserved block, for the same reason (2.3.10).
+    # Here, not at each block's point of use: `mkparam:` and `gui:` are
+    # consumed by other modules and `modeling:` not until wrap-up, so a
+    # typo there would surface hours in or not at all.
+    warn_unknown_config_blocks(config)
+
+    # The multimode block, read once: its two consumers below (the seed
+    # ledger switch and the mode-report call) used to read `config["modes"]`
+    # separately, which left the block's vocabulary spelled in two places.
+    modes_cfg = config.get("modes", {}) or {}
 
     # 3. Build the stellar system into a PyMC Graph
     system = System(config, user_params=user_params)
@@ -260,7 +837,7 @@ def _run_fit(config, gui, user_params=None):
     # sorted(), not next(iter(...)): _recommended is a set, so with two
     # components recommending different samplers the choice would be a
     # PYTHONHASHSEED coin flip -- i.e. a different sampler per run.  Only one
-    # component recommends anything today (mulensing's Lens), so this is
+    # component recommends anything today (mulensing's MulensEvent), so this is
     # inert; it stops being inert silently.
     if method is None:
         method = sorted(_recommended)[0] if _recommended else "nuts"
@@ -274,9 +851,10 @@ def _run_fit(config, gui, user_params=None):
             f"Set 'method: {rec_str}' in the sampler block."
         )
     method = method.lower()
+    warn_method_only_sampler_keys(sampler_cfg, method)
 
     # First modeling-draft checkpoint: the components declared their prose
-    # during stages 1-6 and the sampler is now resolved, so the citation
+    # during stages 1-7 and the sampler is now resolved, so the citation
     # scaffold (<prefix>_paper.tex) can be written BEFORE sampling --
     # the user keeps it even if the fit dies hours in.  Regenerated (not
     # appended) at wrap-up with the results/convergence/figures/table
@@ -290,7 +868,14 @@ def _run_fit(config, gui, user_params=None):
         )
 
     # 4. Sample
-    # We use adapt_diag to start exactly at our estimated means
+    #
+    # Nothing here uses a pymc `init` method, and the claim that used to sit
+    # on this line ("we use adapt_diag to start exactly at our estimated
+    # means") was false in both halves: pm.sample ignores `init` whenever an
+    # explicit NUTS step is passed, and adapt_diag JITTERS its start rather
+    # than sitting on a mean.  The start is built below instead -- explicitly,
+    # in raw coordinates -- and handed to each sampler by its own spelling
+    # (review 5.3.3a; which branches consume it is review 1.3.6).
     with model:
         # Build the raw starting point explicitly: 0 for logit params,
         # (initval - mu)/sigma for Gaussian-path params, so the physical
@@ -348,19 +933,54 @@ def _run_fit(config, gui, user_params=None):
                     raw_starts_pre,
                     n_steps=polish_steps,
                     seed_indices=seed_indices_pre,
+                    # Same core grant the sampler is about to use: the DE
+                    # engine ran serial here while every one of them sat
+                    # idle, which on a 64-core microlensing job was the
+                    # whole polish stage at 1/64 throughput.
+                    cores=cores,
                 )
                 system.apply_polished_starts(polished, seed_indices_pre)
                 raw_start = system.get_raw_start(model)
 
+            # Re-center the whitening anchor on the (now polished) start, so
+            # raw = 0 IS the start and `model.initial_point()` is correct BY
+            # CONSTRUCTION on every path (review 4.3.1).  HERE, between the
+            # polish and the probe, because the probe must measure its
+            # contours around the NEW anchor -- it reads the pytensor.shared
+            # anchor through the model, and its raw start is re-read below,
+            # so nothing carries a stale copy across.
+            #
+            # Unconditional rather than gated on `polish_steps`: the
+            # Gaussian-path half is a `Model.set_initval` that is worth
+            # making structural even when it changes nothing, and the logit
+            # half is a no-op on an unpolished start.  Not on the reuse path
+            # (this whole block) -- there the anchor comes out of
+            # whitening.json, which is the anchor the draws were sampled
+            # under, and re-centering on a start nothing will sample from
+            # would silently re-coordinate the trace.
+            system.recenter_whitening_anchor(model)
+            raw_start = system.get_raw_start(model)
+
         whiten_report = None
-        if measure_scales:
-            # Fresh run -> measure + persist.  Reuse -> restore only: the
-            # whitening is a property of the draws being decoded, so it is
-            # never re-measured and never rewritten there (a mismatch
-            # raises StaleWhiteningError, a missing file warns and keeps
-            # the preliminary scales).  The old code fell back to
-            # measure + save on BOTH, silently re-coordinating the trace it
-            # was reusing and overwriting the only record of how to read it.
+        # Fresh run -> measure + persist.  Reuse -> restore only: the
+        # whitening is a property of the draws being decoded, so it is
+        # never re-measured and never rewritten there (a mismatch
+        # raises StaleWhiteningError, a missing file warns and keeps
+        # the preliminary scales).  The old code fell back to
+        # measure + save on BOTH, silently re-coordinating the trace it
+        # was reusing and overwriting the only record of how to read it.
+        #
+        # `measure_scales: false` gates only the MEASUREMENT, and cannot gate
+        # the restore: it asks "do not probe this run's start", which is a
+        # statement about a run that is about to sample.  A trace sampled
+        # under measured scales and reloaded with the key off would otherwise
+        # decode its raw draws under preliminary scales, silently and with no
+        # message -- the exact failure restore_whitening_for_trace exists to
+        # prevent.  The reuse path's honest answer when the trace really was
+        # sampled without measurement is already built in: no whitening file
+        # exists, so the restore warns and keeps the preliminary scales, which
+        # for that trace ARE the sampled coordinates.
+        if reusing_trace or measure_scales:
             whiten_report = prepare_whitening(
                 system,
                 model,
@@ -390,7 +1010,16 @@ def _run_fit(config, gui, user_params=None):
         # get_raw_starts returns just [raw_start], [0] for the ordinary case.
         # After a polish, seed 0 comes from the polished raw_initval and
         # seeds k>0 are re-derived from their polished physical values.
-        raw_starts, seed_indices = system.get_raw_starts(model)
+        #
+        # Not built on the trace-REUSE path, where nothing consumes it
+        # (review 5.3.3d): no sampler branch is entered and the seed ledger
+        # is already skipped, so the only effect was re-solving every seeded
+        # parameter's forward transform, once per seed, for a fit that is not
+        # going to happen.  Empty LISTS rather than None, because the two
+        # readers below ask len() of it.
+        raw_starts, seed_indices = [], []
+        if not reusing_trace:
+            raw_starts, seed_indices = system.get_raw_starts(model)
 
         # Seeded-solution ledger (multi-seed fits only): a Laplace record
         # of every polished seed -- peak logp and curvature widths at the
@@ -403,7 +1032,7 @@ def _run_fit(config, gui, user_params=None):
         # (Skipped when reusing an existing trace: the polish was skipped
         # there too, so seed lp would be a start value, not a basin peak.)
         seed_ledger = None
-        _ledger_on = (config.get("modes", {}) or {}).get("ledger", True)
+        _ledger_on = modes_cfg.get("ledger", True)
         if len(raw_starts) > 1 and _ledger_on and not reusing_trace:
             from .outputs.ledger import build_seed_ledger
 
@@ -429,13 +1058,9 @@ def _run_fit(config, gui, user_params=None):
                 filename_prefix=str(prefix) + "_start",
             )
 
-        #### profiling ####
         if profile:
             func = model.logp_dlogp_function(profile=True)
             func.profile.summary()
-            # ipdb.set_trace()
-        ###################
-        # ipdb.set_trace()
 
         if reusing_trace:
             # if we've already done the sampling and don't want to redo it, load it
@@ -460,45 +1085,47 @@ def _run_fit(config, gui, user_params=None):
                     )
                     method = "nuts"
 
+            # Placed AFTER the import fallback above, so a config asking for
+            # numpyro on a box without it -- which lands on PyMC NUTS, where
+            # maxtime IS honored -- is not warned about a limit that will be
+            # applied.
+            warn_maxtime_unsupported(method, maxtime)
+
+            # Say what the seed is, and say honestly what it buys on THIS
+            # path.  One generic sentence would be true for one sampler and
+            # false for another: ptde_async consumes worker results in
+            # ARRIVAL order (`result_q.get`), and a proposal's accept/reject
+            # depends on which partners' states happen to be visible when it
+            # lands -- so a seed fixes the draws but not the trajectory.
+            # Buffering arrivals into a canonical order to fix that IS the
+            # synchronous sampler, so this is a trade the user bought when
+            # they chose ptde_async, not an unfixed defect.  Sync `ptde` is
+            # parallel but deterministic on purpose (polish_seed_starts
+            # re-imposes per-seed order before any state is touched), so it
+            # reproduces; so do NUTS, numpyro, blackjax and nutpie, whose
+            # chains are independent.
+            if method == "ptde_async":
+                logger.info(
+                    f"random seed ({seed_source}): {seed} -- fixes the draws, "
+                    f"but ptde_async consumes results in arrival order, so "
+                    f"the run is NOT bit-reproducible.  Use method: ptde for "
+                    f"a reproducible run.  To reuse this seed: "
+                    f"sampler: {{seed: {seed}}}"
+                )
+            else:
+                logger.info(
+                    f"random seed ({seed_source}): {seed} -- rerunning this "
+                    f"config with sampler: {{seed: {seed}}} reproduces this "
+                    f"fit."
+                )
+
             if method == "ptde":
                 idata = ptde_sample(
                     model,
                     system,
                     draws,
                     tune,
-                    n_temps=n_temps,
-                    T_max=T_max,
-                    n_chains=n_chains,
-                    cores=cores,
-                    raw_starts=raw_starts,
-                    seed_indices=seed_indices,
-                    raw_scales=(
-                        whiten_report["raw_scales"] if whiten_report else None
-                    ),
-                    plot_prefix=str(prefix),
-                    min_ess=min_ess,
-                    max_rhat=max_rhat,
-                    maxtime=maxtime,
-                    eval_timeout=eval_timeout,
-                    rung_thin_factor=rung_thin_factor,
-                    rung_thin_start=rung_thin_start,
-                    collect_rung_timing=collect_rung_timing,
-                    swap_schedule=swap_schedule,
-                    progress_callback=gui.progress_callback,
-                )
-            elif method == "ptde_async":
-                # The non-blocking PTDE dispatch loop (hpc_optimization.txt
-                # PROMPT 13) -- the recommended default for Op-based models;
-                # see exozippy/samplers/ptde_async.py's module docstring for
-                # the stale-DE-partner caveat and how swaps stay rigorous.
-                # rung_thin_factor/rung_thin_start are ptde-only (thinning
-                # addresses the blocking problem that async dispatch removes
-                # outright) and are not forwarded here.
-                idata = ptde_async_sample(
-                    model,
-                    system,
-                    draws,
-                    tune,
+                    seed=seed,
                     store_hot_chains=store_hot_chains,
                     n_temps=n_temps,
                     T_max=T_max,
@@ -514,9 +1141,87 @@ def _run_fit(config, gui, user_params=None):
                     max_rhat=max_rhat,
                     maxtime=maxtime,
                     eval_timeout=eval_timeout,
+                    start_dispersion=start_dispersion,
+                    rung_thin_factor=rung_thin_factor,
+                    rung_thin_start=rung_thin_start,
                     collect_rung_timing=collect_rung_timing,
                     swap_schedule=swap_schedule,
+                    adapt_ladder=adapt_ladder,
+                    de_mode_hop=de_mode_hop,
                     progress_callback=gui.progress_callback,
+                )
+            elif method == "ptde_async":
+                # The non-blocking PTDE dispatch loop (see samplers.md; the
+                # hpc_optimization.txt prompt it used to cite was pruned
+                # PROMPT 13) -- the recommended default for Op-based models;
+                # see exozippy/samplers/ptde_async.py's module docstring for
+                # the stale-DE-partner caveat and how swaps stay rigorous.
+                # rung_thin_factor/rung_thin_start are ptde-only (thinning
+                # addresses the blocking problem that async dispatch removes
+                # outright) and are not forwarded here.
+                idata = ptde_async_sample(
+                    model,
+                    system,
+                    draws,
+                    tune,
+                    seed=seed,
+                    store_hot_chains=store_hot_chains,
+                    n_temps=n_temps,
+                    T_max=T_max,
+                    n_chains=n_chains,
+                    cores=cores,
+                    raw_starts=raw_starts,
+                    seed_indices=seed_indices,
+                    raw_scales=(
+                        whiten_report["raw_scales"] if whiten_report else None
+                    ),
+                    plot_prefix=str(prefix),
+                    min_ess=min_ess,
+                    max_rhat=max_rhat,
+                    maxtime=maxtime,
+                    eval_timeout=eval_timeout,
+                    start_dispersion=start_dispersion,
+                    collect_rung_timing=collect_rung_timing,
+                    swap_schedule=swap_schedule,
+                    adapt_ladder=adapt_ladder,
+                    de_mode_hop=de_mode_hop,
+                    progress_callback=gui.progress_callback,
+                )
+            elif method == "nested":
+                # Nested sampling on the full model (samplers/nested.py):
+                # gradient-free, needs no seeds or transport, returns mass
+                # weights and logZ, and its dead points are the explored-
+                # and-rejected record.  tune/draws/n_temps do not apply; the
+                # posterior group is equal-weight pseudo-chains so every
+                # downstream consumer works unchanged, and the full weighted
+                # run rides along as the `nested` trace group.
+                from exozippy.samplers.nested import nested_sample
+
+                if raw_starts is not None and len(raw_starts) > 1:
+                    logger.info(
+                        "nested: multi-seed starts are ignored -- the "
+                        "search is prior-driven by construction"
+                    )
+                idata = nested_sample(
+                    model,
+                    system,
+                    seed=seed,
+                    backend=sampler_cfg.get("nested_backend", "dynesty"),
+                    nlive=int(sampler_cfg.get("nlive", 500)),
+                    dlogz=float(sampler_cfg.get("dlogz", 0.5)),
+                    walks=(
+                        int(sampler_cfg["walks"])
+                        if "walks" in sampler_cfg
+                        else None
+                    ),
+                    cores=cores,
+                    # SIGTERM-survivable by default: ultranest resumes from
+                    # the stored live points; dynesty writes a checkpoint
+                    # file (restore is manual).  The first d=27 pilot
+                    # burned 2.9 unrecoverable days for lack of this.
+                    checkpoint_dir=sampler_cfg.get(
+                        "checkpoint_dir", f"{prefix}_nsckpt"
+                    ),
                 )
             elif method in ("numpyro", "blackjax"):
                 import jax
@@ -532,6 +1237,13 @@ def _run_fit(config, gui, user_params=None):
                 from pymc.sampling.jax import sample_jax_nuts
 
                 chain_method = sampler_cfg.get("chain_method", "parallel")
+                # No `initvals=`: the start is `Model.initial_point()` and
+                # `System.recenter_whitening_anchor` made that the polished
+                # start by construction (review 4.3.1).  VERIFIED against
+                # pymc 6.3.2 and 6.0.0 -- `sample_jax_nuts` with no initvals
+                # draws the same first point, bit for bit, as it did with
+                # them.
+                #
                 # jitter=False: the JAX samplers default to jittering each
                 # chain by U(-1, 1) in raw (whitened) space, i.e. +/- one
                 # whitening scale per parameter.  We deliberately construct
@@ -547,30 +1259,46 @@ def _run_fit(config, gui, user_params=None):
                     tune=tune,
                     chains=chains,
                     target_accept=target_accept,
-                    initvals=internal_start,
                     jitter=sampler_cfg.get("jitter", False),
                     chain_method=chain_method,
                     nuts_sampler=method,
+                    random_seed=seed,
                 )
             elif method == "nutpie":
-                # nutpie ignores initvals; it uses init_mean: a flat float64
-                # array in model.free_RVs order (raw/unconstrained space).
-                nutpie_init_mean = np.concatenate(
-                    [
-                        np.asarray(raw_start[v.name], dtype=float).ravel()
-                        for v in model.free_RVs
-                    ]
-                )
-                idata = pm.sample(
-                    draws=draws,
-                    tune=tune,
-                    chains=chains,
-                    nuts_sampler="nutpie",
-                    target_accept=target_accept,
-                    nuts_sampler_kwargs={"init_mean": nutpie_init_mean},
-                    cores=cores,
-                    return_inferencedata=True,
-                )
+                # No start is passed, and here that FIXES the branch rather
+                # than merely simplifying it (review 4.3.1).  It used to hand
+                # nutpie `init_mean`, a flat float64 array in free_RVs order,
+                # on the belief that nutpie ignores `initvals` and reads
+                # that instead.  MEASURED against nutpie 0.16.11 + pymc
+                # 6.3.2: `init_mean` is inert for a pymc-compiled model
+                # through EITHER spelling (`nuts_sampler_kwargs=` or the
+                # newer `nuts=`).  The mechanism is in nutpie's own source --
+                # `CompiledPyMCModel._make_model(init_mean)` takes the
+                # argument and never uses it, passing
+                # `self.initial_point_func` to `PyMcModel` instead -- so the
+                # start comes from the MODEL, and this branch was a second
+                # live instance of 1.3.6's bug class.  Probed three ways
+                # (init_mean, no start, set_initval): the first two give an
+                # identical first draw and the third moves it by exactly the
+                # requested offset.
+                #
+                # Wrapped like the other two pm.sample branches, and it pays
+                # off here: nutpie.sample catches a KeyboardInterrupt and
+                # returns `background_sampler.abort()`, i.e. the draws taken
+                # so far (verified against nutpie 0.16.11).  So a scheduler
+                # SIGTERM buys a partial trace instead of an immediate kill,
+                # which is exactly what this context manager is for.
+                with sigterm_as_interrupt():
+                    idata = pm.sample(
+                        draws=draws,
+                        tune=tune,
+                        chains=chains,
+                        nuts_sampler="nutpie",
+                        target_accept=target_accept,
+                        cores=cores,
+                        random_seed=seed,
+                        return_inferencedata=True,
+                    )
             elif method in de_metropolis.STEP_CLASSES:
                 # Gradient-free differential-evolution MCMC (ter Braak 2006 /
                 # ter Braak & Vrugt 2008) on PyMC's own step methods, started
@@ -587,6 +1315,7 @@ def _run_fit(config, gui, user_params=None):
                         draws,
                         tune,
                         variant=method,
+                        seed=seed,
                         chains=sampler_cfg.get("chains", None),
                         cores=cores,
                         raw_starts=raw_starts,
@@ -611,15 +1340,64 @@ def _run_fit(config, gui, user_params=None):
                             )
                             raise KeyboardInterrupt
 
+                # NO start is passed, and the reason is structural rather
+                # than an omission (review 4.3.1, building on 1.3.6).  The
+                # chains begin at `Model.initial_point()`, and
+                # `System.recenter_whitening_anchor` above made that the
+                # POLISHED start by construction: the logit anchor was
+                # re-centered onto it (free -- section C's correction cancels
+                # the raw N(0,1), so the anchor is pure parameterization) and
+                # the Gaussian-path elements, whose center IS their prior
+                # mean and so may not move, were pushed through
+                # `Model.set_initval`.  1.3.6 proposed `initvals=` here
+                # (PR #263) and that was HELD and superseded by this: it
+                # starts at a better PHYSICAL point and a far worse RAW one
+                # (measured on examples/kelt4 RV-only, max |raw| = 684 under
+                # `measure_scales: false`, 10.58 with it on), and with this
+                # branch's identity metric on raw that is what made a 1-draw
+                # integration test scatter to 6.7 Mjup.  Re-centering gives
+                # both: the polished physical point AND raw = 0, where the
+                # metric is calibrated.  It also kills the bug CLASS rather
+                # than the instance -- this branch was one of five passing a
+                # start by five spellings, and that only dies when there is
+                # nothing to pass.  See also review 2.3.18: the polish stores
+                # its displacement in PRELIMINARY scale units and
+                # `set_whitening` was what re-expressed it, so
+                # `measure_scales: false` left the displacement full-size;
+                # the re-centering runs before that guard and so is
+                # independent of the flag.
+                #
+                # The explicit `step` is KEPT, and after review 5.3.3 deleted
+                # the dead `init` key that is the only thing still holding
+                # the door shut.  pymc's own docstring says of `init`, "This
+                # argument is ignored when manually passing the NUTS step
+                # method", and of `initvals`, "Initialization methods for
+                # NUTS (see ``init`` keyword) can overwrite the default" --
+                # so a LIVE `init` (this branch passing one, or a future pymc
+                # honoring it alongside a step) could let an adapt_diag
+                # jitter move the chain off the polished point, the exact
+                # pathology seed_polish exists to prevent.  Passing no start
+                # and no init, with the step explicit, is what makes
+                # `Model.initial_point()` authoritative.  The upstream half
+                # of that is pinned in tests/test_nuts_start.py.
+                #
+                # pm.NUTS(target_accept=) with no scaling/potential builds a
+                # QuadPotentialDiagAdapt IDENTITY metric on raw -- the right
+                # metric precisely because the graph is already whitened --
+                # and what the old bug cost was the CO-LOCATION of the start
+                # with that metric, not the metric itself.  The polish runs
+                # BEFORE the probe so the scales are measured around the
+                # polished point; re-centering is what makes the start sit
+                # there too.
                 step = pm.NUTS(target_accept=target_accept)
                 with sigterm_as_interrupt():
                     idata = pm.sample(
                         draws=draws,
                         tune=tune,
                         chains=chains,
-                        init=init,
                         step=step,
                         cores=cores,
+                        random_seed=seed,
                         return_inferencedata=True,
                         callback=nuts_callback,
                     )
@@ -631,25 +1409,15 @@ def _run_fit(config, gui, user_params=None):
             # must be told rather than left to assume 1 (see
             # ModeReport.thin_factor / thin_known).
             idata.posterior.attrs["nthin"] = int(nthin)
-            # Ensure lp is in sample_stats; compute and persist if missing.
-            ss_vars = (
-                list(idata.sample_stats.data_vars)
-                if hasattr(idata, "sample_stats")
-                else []
-            )
-            if "lp" not in ss_vars:
-                import xarray as xr
-
-                lp_vals = _compute_lp_from_model(model, idata)
-                if lp_vals is not None:
-                    idata.sample_stats["lp"] = xr.DataArray(
-                        lp_vals,
-                        dims=["chain", "draw"],
-                        coords={
-                            "chain": idata.posterior.chain,
-                            "draw": idata.posterior.draw,
-                        },
-                    )
+            # The seed the run ACTUALLY used, whether the user named it or it
+            # was drawn.  mkparam reads it back out for the restart file's
+            # header, so a fit's exact state stays recoverable from its own
+            # output -- the same philosophy as the start values it writes.
+            idata.posterior.attrs["random_seed"] = int(seed)
+            # Ensure lp is in sample_stats; compute and persist if missing,
+            # so the archived trace carries it and no later reader (modes,
+            # mkparam, the plotters) has to recompute it.
+            _ensure_lp(idata, model, cores=cores)
             # Convert sampled variables to user-facing units before archiving.
             # This makes the trace file, trace plots, ArviZ summary, and
             # mkparam output all use the same units the user specified.
@@ -662,11 +1430,31 @@ def _run_fit(config, gui, user_params=None):
             stamp_structural_metadata(idata, system)
             idata.to_netcdf(trace_path)
 
-        # compute the loglikelihoods (super slow? I can't believe this can't be stored/recalled...
-        # loglike = pm.compute_log_likelihood(idata)
-
     # Sampling is done; the rest is post-processing + report/plot output.
     gui.phase("writing")
+    wrapup = WrapupProgress()
+    logger.info(
+        f"Sampling finished; starting wrap-up (reports, plots, restart "
+        f"file). The trace is already saved to {trace_path}, so an "
+        f"interrupt here costs only what is not yet written."
+    )
+
+    # Collapse any exact label degeneracy a component declares (review
+    # 1.8.3's ascending node is the one case today).  HERE, and exactly once:
+    # this is the seam both paths -- fresh draws and a reloaded trace --
+    # arrive at, and everything below consumes what it leaves.  Folding per
+    # consumer is how the convergence check, the mode reporter and the seed
+    # ledger come to disagree about how many solutions a chain found.
+    wrapup.stage("collapsing declared label degeneracies")
+    refolded = system.fold_degenerate_draws(idata, model)
+    if refolded:
+        # The regenerated deterministics come back in INTERNAL units --
+        # PyMC recomputes them from the model graph, which knows nothing
+        # about the conversion already applied to the rest of the
+        # posterior -- so put just those back in the user's units.
+        _convert_posterior_to_user_units(
+            idata, system.get_parameter_lookup(), only=refolded
+        )
 
     # Post-hoc burn-in + stuck-chain trimming (samplers/convergence.py). We
     # keep the FULL, untrimmed trace on disk (idata.to_netcdf above / the
@@ -692,10 +1480,24 @@ def _run_fit(config, gui, user_params=None):
     # fit -- but the exception type and message now reach the report.
     from .outputs.ledger import run_hot_mode_discovery
 
+    wrapup.stage(
+        "hot-chain suppressed-mode search (cluster, then polish each "
+        "candidate to its basin optimum)"
+    )
     seed_ledger, hot_status = run_hot_mode_discovery(
-        system, model, idata, seed_ledger
+        system,
+        model,
+        idata,
+        seed_ledger,
+        # The core grant the sampler just used.  Without it the candidate
+        # polish ran serial on one core -- the same omission run.py's own
+        # polish call above already carries a comment about, missed at this
+        # second call site (review 6.11.3).  Measured on examples/ob09020:
+        # 1 core of 36 busy for 38+ minutes on a single candidate.
+        cores=cores,
     )
 
+    wrapup.stage("burn-in + stuck-chain analysis")
     idata, burn_diag = convergence.analyze_idata(
         idata, min_ess=min_ess, max_rhat=max_rhat
     )
@@ -709,7 +1511,7 @@ def _run_fit(config, gui, user_params=None):
     # raise_on_invalid=True, overridable via config
     # `modes: {max_invalid_frac: ..., force: true}`), and may opt into
     # per-mode evidence weighting via `modes: {weights: evidence}`.
-    modes_cfg = config.get("modes", {}) or {}
+    wrapup.stage("mode identification + result tables (LaTeX/CSV)")
     mode_report = build_mode_reports(
         system,
         idata,
@@ -727,48 +1529,73 @@ def _run_fit(config, gui, user_params=None):
         hot_status=hot_status,
     )
 
-    summary_path = Path(str(prefix) + "_summary.txt")
-    summary_path.write_text(
-        _format_summary(idata, burn_diag), encoding="utf-8"
-    )
+    # A posterior piled against a component's modelling cap (the hogg
+    # mixture's out_scale / out_frac; review 8.6.3) is an architecture
+    # alarm, not a result: the noise model wants more freedom than the cap
+    # allows.  Manifest-driven (Parameter.cap_alarm), so nothing here names
+    # a component.  Needs the distributed posterior, hence after the mode
+    # reports; the findings also feed the modeling draft below.
+    wrapup.stage("pile-at-cap check on data-capped parameters")
+    cap_findings = []
+    with nonfatal_wrapup("pile-at-cap check"):
+        cap_findings = cap_alarm_findings(system)
+        log_cap_alarms(cap_findings, logger)
 
+    # Wrapped and announced like every other wrap-up step (review 2.3.12).
+    # It was the one bare call left between two guarded stages, and it is a
+    # write plus an az.summary: measured on the kelt4 RV-only example, an
+    # OSError raised here took out the trace plots, the corner plot, the
+    # compiled paper.pdf AND the restart file -- every artifact after it --
+    # and returned a non-zero exit for a fit that had finished sampling.
+    wrapup.stage("convergence summary")
+    summary_path = Path(str(prefix) + "_summary.txt")
+    with nonfatal_wrapup("convergence summary"):
+        summary_path.write_text(
+            _format_summary(idata, burn_diag), encoding="utf-8"
+        )
+
+    # Every plot below is wrapped, and per COMPONENT rather than per loop, so
+    # one component's broken diagnostic costs its own figure and nothing else
+    # -- neither its siblings' figures nor, further down, the restart file.
     # make a corner plot of fitted parameters (similar to EXOFASTv2 covar plot)
-    make_corner(model, idata, str(prefix) + "_corner.png")
+    wrapup.stage(
+        f"corner plots (1 global + up to {len(system.active_components)} "
+        f"per-component)"
+    )
+    with nonfatal_wrapup("corner plot"):
+        make_corner(idata, str(prefix) + "_corner.png")
 
     # Component-specific corner plots (e.g. mulensing geometry). Unlike
     # comp.plot(), which also runs pre-flight on a single point, this only
     # runs here, once, when the full posterior (idata) actually exists.
     for comp in system.active_components.values():
-        comp.plot_corner(idata, filename_prefix=str(prefix))
+        with nonfatal_wrapup(f"corner plot for {comp.label}"):
+            comp.plot_corner(idata, filename_prefix=str(prefix))
 
     # Save a 1D trace plot (similar to EXOFASTv2 chain file)
-    all_params = system.get_all_parameters()
-    plot_vars = [p.label for p in all_params if p.label in idata["posterior"]]
-    save_multipage_trace(
-        idata, plot_vars, str(prefix) + "_trace_detailed.pdf", model=model
+    wrapup.stage("detailed trace plots")
+    with nonfatal_wrapup("detailed trace plot"):
+        all_params = system.get_all_parameters()
+        plot_vars = [
+            p.label for p in all_params if p.label in idata["posterior"]
+        ]
+        save_multipage_trace(
+            idata, plot_vars, str(prefix) + "_trace_detailed.pdf", model=model
+        )
+
+    # Generate final plots.  `draws` outlives this block -- the modeling
+    # draft reads draws[0] for its model-bearing figures -- so it is seeded
+    # empty first: a get_draws failure must degrade the draft to its
+    # data-only specs, not NameError past the wrap.
+    draws = []
+    wrapup.stage(
+        f"posterior plots for {len(system.active_components)} component(s)"
     )
-
-    # Pick the suspected troublemakers
-    # List every tracked parameter in the posterior
-    # available_vars = list(idata.posterior.data_vars)
-    # print("All available variables:\n", available_vars)
-
-    # Automatically filter for the ones we care about
-    # vars_to_check = [v for v in available_vars if any(sub in v for sub in ['secosw', 'sesinw', 'ecc', 'omega', 'mass'])]
-    # print("\nFiltered variables to plot:\n", vars_to_check)
-    # az.plot_pair(
-    #    idata,
-    #    var_names=vars_to_check,
-    #    kind='scatter',
-    #    divergences=True,
-    #    divergences_kwargs={'color': 'C3', 'alpha': 0.5, 'markersize': 5}  # C3 is usually red
-    # )
-    # plt.show()
-
-    # Generate final plots
-    draws = get_draws(idata, param_lookup=system.get_parameter_lookup())
+    with nonfatal_wrapup("posterior draw extraction"):
+        draws = get_draws(idata, param_lookup=system.get_parameter_lookup())
     for comp in system.active_components.values():
-        comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
+        with nonfatal_wrapup(f"posterior plots for {comp.label}"):
+            comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
 
     # Multimodal posteriors: re-emit the same corner + component plots once
     # per mode, restricted to that mode's draws (interim solution -- see
@@ -778,8 +1605,11 @@ def _run_fit(config, gui, user_params=None):
     # plot outputs, which have no such mechanism. Single-mode runs take this
     # branch never, so they emit zero new files.
     if mode_report is not None and mode_report.n_modes > 1:
+        wrapup.stage(
+            f"per-mode outputs for {mode_report.n_modes} identified modes"
+        )
         try:
-            _emit_per_mode_outputs(system, model, idata, mode_report, prefix)
+            _emit_per_mode_outputs(system, idata, mode_report, prefix)
         except Exception:
             logger.warning(
                 "Per-mode output generation failed; the combined "
@@ -793,15 +1623,15 @@ def _run_fit(config, gui, user_params=None):
     # (config `modeling: {compile: false}` to opt out) compile the draft
     # PDF.  Compile failure or missing TeX never fails the fit.
     modeling_cfg = config.get("modeling", {}) or {}
-    for _key in modeling_cfg:
-        if _key != "compile":
-            logger.warning(
-                f"Unrecognized key '{_key}' in the modeling block will be "
-                f"ignored (known: compile)."
-            )
+    wrapup.stage(
+        "modeling draft (paper.tex)"
+        + (" + pdflatex compile" if modeling_cfg.get("compile", True) else "")
+    )
+    # (the unknown-key warning for this block, and for the other three, is
+    # warn_unknown_config_blocks at startup -- not an inline loop here)
     try:
-        _add_wrapup_prose(system, burn_diag, mode_report)
-        # One posterior draw unlocks the model-bearing plot specs (phased
+        _add_wrapup_prose(system, burn_diag, mode_report, cap_findings)
+        # One posterior draw unlocks the model-bearing charts (phased
         # panels), whose figures otherwise never enter the draft.
         tex_path = build_modeling_output(
             system, prefix, point=draws[0] if draws else None
@@ -813,6 +1643,7 @@ def _run_fit(config, gui, user_params=None):
             "modeling-draft generation failed (non-fatal)", exc_info=True
         )
 
+    wrapup.stage("restart parameter file (mkparam)")
     try:
         # mkparam re-derives the structural fingerprint from this config and
         # the params, not from the live System; measured to reproduce the
@@ -829,6 +1660,8 @@ def _run_fit(config, gui, user_params=None):
         )
     except Exception:
         logger.exception("mkparam failed (non-fatal)")
+
+    wrapup.done()
 
 
 def _user_initval(config_manager, par, index):
@@ -887,6 +1720,154 @@ def _is_unset(x):
         return False
 
 
+def _prints_in_startup_table(p):
+    """Does this Parameter get a row in the startup audit table?
+
+    Two flags, and the order between them is the content of review 3.14.9.
+
+    ``print_to_table: false`` is a VETO, checked first.  The startup table
+    is a table, and until now it was the one table that ignored the flag --
+    so a parameter its author (or the user, since ``print_to_table`` is a
+    params-file key) marked as not-for-tables still appeared here.  Making
+    it a veto rather than merely a default is what gives a USER a way to
+    suppress a row: the parameters that opt in below do so in their
+    component's defaults.yaml, which a user cannot edit.
+
+    ``debug_print`` then decides among what is left.  It is this table's own
+    switch: ``True`` shows a DERIVED parameter that a reader needs at the
+    start anyway (``star.mass``, ``orbit.period``, the microlensing
+    timescales), ``False`` hides a sampled one, and ``None`` -- the default
+    -- means "show it if the sampler moves it".
+
+    The item asked whether the two tables should differ at all, and named
+    ``orbit.n`` as the live case.  That half is wrong and is recorded here
+    so it is not re-derived: ``orbit.n`` is derived, so the sampled-only
+    default already excluded it, and it is the only ``print_to_table:
+    false`` in the shipped tree.  The defect is real but its reachable form
+    is a user marking a SAMPLED parameter not-for-tables.
+    """
+    if not p.print_to_table:
+        return False
+    should_print = getattr(p, "debug_print", None)
+    if should_print is None:
+        should_print = np.any(getattr(p, "is_sampled", False))
+    return bool(np.any(should_print))
+
+
+def _flat_probe_directions(all_params, mult_map, whiten_report):
+    """Every sampled element the whitening probe found FLAT, table or no table.
+
+    A NaN (or infinite) multiplier means the probe could not find a 0.5-nat
+    contour along that raw direction: logp ignores it, the element keeps its
+    preliminary scale, and -- as the warning this feeds says out loud -- even
+    one unconstrained direction destroys HMC efficiency.  That is a statement
+    about the SAMPLER, so it is collected here rather than inside the startup
+    table's row loop, which is where it used to live: the loop `continue`s on
+    ``_prints_in_startup_table``, so ``print_to_table: false`` (a params-file
+    key, i.e. a user's own cosmetic choice) or a ``debug_print: false`` in a
+    component's defaults.yaml silently disabled a health diagnostic (review
+    2.3.7).  No shipped default hits that; a user marking a SAMPLED parameter
+    not-for-tables does.
+
+    Element-by-element, and INACTIVE elements are skipped, because that is
+    what the row loop did: an inactive element is not part of its instance's
+    parameterization and is not sampled, so it has no direction to be flat
+    along.  A parameter with no ``mult_map`` entry at all counts as flat on
+    every sampled element, which is also the old behaviour -- the probe
+    reports one entry per sampled raw variable, so a missing entry means the
+    element was never measured.
+
+    Returns the display labels, in table order, for the warning to name.
+    """
+    if whiten_report is None:
+        return []
+    flat = []
+    for p in all_params:
+        n_elements = int(np.prod(p.shape)) if p.shape not in ((), None) else 1
+        m_phys = np.atleast_1d(
+            mult_map.get(p.label, np.full(n_elements, np.nan))
+        )
+        sampled_arr = np.atleast_1d(getattr(p, "is_sampled", False))
+        for i in range(n_elements):
+            if not p.element_is_active(i):
+                continue
+            if not (bool(sampled_arr[i]) if i < sampled_arr.size else False):
+                continue
+            raw_m = m_phys[i] if i < m_phys.size else np.nan
+            if np.isnan(raw_m) or np.isinf(raw_m):
+                flat.append(p.get_display_label(i))
+    return flat
+
+
+def _expression_start_values(auditor):
+    """Start values for the parameters whose START is an expression's value.
+
+    A parameter reaches this only when it carries NO ``initval`` and the
+    user/solved table has nothing for it either -- so neither of the
+    table's two ordinary sources exists and the row would otherwise be
+    dropped.  For such a parameter the start genuinely IS whatever its
+    expression computes, so the value is read off the compiled graph at the
+    start point (``ModelAuditor.values_at_start``, which is also what
+    ``check_user_starts`` reads and which exists because ``p.value.eval()``
+    would draw from the prior instead).
+
+    Review 3.14.16: the gate here used to be ``p.expression is not None``,
+    inherited from 1.10.9.  A vector derived one element at a time has no
+    whole-vector ``expression`` -- ``element_expressions`` is where its
+    derivation lives -- so it failed that test, fell off the end of the
+    lookup chain and got NO ROW AT ALL: ``examples/ob09020``'s
+    ``lens.alpha``, the one shipped case, was simply missing from the
+    startup table.  The posterior-side twin of the same gate was widened in
+    the same way (``System._set_comp_posterior``, review 1.10.9), and this
+    keeps the two tables' notions of "derived and therefore evaluable"
+    identical.
+
+    Returns ``{id(parameter): internal-unit array}``, empty (and with no
+    PyTensor compile at all) when nothing needs it -- which is every
+    shipped example but one.
+    """
+    cfg_mgr = getattr(auditor.system, "config_manager", None)
+    needy = []
+    for p in auditor.all_params:
+        if not _prints_in_startup_table(p):
+            continue
+        if p.initval is not None:
+            continue
+        if p.expression is None and not getattr(
+            p, "element_expressions", None
+        ):
+            continue
+        n_elements = int(np.prod(p.shape)) if p.shape not in ((), None) else 1
+        try:
+            if any(
+                _user_initval(cfg_mgr, p, i) is not None
+                for i in range(n_elements)
+            ):
+                continue
+        except Exception:
+            continue
+        needy.append(p)
+    if not needy:
+        return {}
+    produced = auditor.values_at_start(needy)
+    # Size every vector to the parameter's own element count, so the row
+    # loop below cannot silently print fewer rows than the vector has (a
+    # scalar answer for a 2-element parameter would otherwise drop one).
+    sized = {}
+    for p in needy:
+        arr = produced.get(id(p))
+        if arr is None:
+            continue
+        n_elements = int(np.prod(p.shape)) if p.shape not in ((), None) else 1
+        if arr.size == n_elements:
+            sized[id(p)] = arr
+        else:
+            full = np.full(n_elements, np.nan)
+            full[: min(arr.size, n_elements)] = arr[:n_elements]
+            sized[id(p)] = full
+    return sized
+
+
 def inspect_start(
     model,
     system,
@@ -898,7 +1879,6 @@ def inspect_start(
     # and hand over were never read.
     auditor = ModelAuditor(model, system, transformed_inits)
     param_logps, other_nodes = auditor.get_aggregated_logps()
-    unused_yaml = auditor.check_unused_yaml()
 
     # Map the whitening probe's measured multipliers (one per SAMPLED element,
     # keyed by raw-variable name) back to full per-parameter element vectors.
@@ -922,10 +1902,23 @@ def inspect_start(
                 full[: m.size] = m
             mult_map[p.label] = full
 
-    # Dynamic Width Logic
+    # SAMPLER HEALTH, not table content: collected over every sampled element
+    # rather than over the rows the table prints (review 2.3.7).
+    flat_warnings = _flat_probe_directions(
+        auditor.all_params, mult_map, whiten_report
+    )
+
+    # Parameters whose START IS their expression's value: no initval of
+    # their own and no user/solved entry either, so the only honest source
+    # for the row is what the built graph computes (review 3.14.16).
+    expression_starts = _expression_start_values(auditor)
+
+    # Dynamic Width Logic -- over the rows the table will actually print, so
+    # a suppressed parameter with a long label cannot widen it for nothing.
     display_labels = [
         p.get_display_label(i)
         for p in auditor.all_params
+        if _prints_in_startup_table(p)
         for i in range(np.prod(p.shape).astype(int) if p.shape != () else 1)
     ]
     max_label_len = max(
@@ -968,17 +1961,9 @@ def inspect_start(
     logger.info(header)
     logger.info("-" * table_width)
 
-    flat_warnings = []
-
     # --- PART 1: CORE PARAMETERS ---
     for p in auditor.all_params:
-        should_print = getattr(p, "debug_print", None)
-        if should_print is None:
-            should_print = np.any(getattr(p, "is_sampled", False))
-            # Handle vectorized boolean flags
-            if isinstance(should_print, np.ndarray):
-                should_print = np.any(should_print)
-        if not should_print:
+        if not _prints_in_startup_table(p):
             continue
 
         raw_v = p.initval
@@ -1001,18 +1986,18 @@ def inspect_start(
             except Exception:
                 pass
 
-            # 2. Last resort: Eval the expression if it exists
-            if raw_v is None and p.expression is not None:
-                try:
-                    # 'deps' often need to be resolved. This is a hacky but effective way
-                    # to visualize the starting point of a deterministic.
-                    raw_v = (
-                        p.expression().eval()
-                        if hasattr(p.expression(), "eval")
-                        else p.expression()
-                    )
-                except:
-                    pass
+            # 2. Last resort: what the BUILT GRAPH computes at the start
+            #    point.  For a parameter with neither an initval nor a
+            #    user/solved entry the start IS its expression's value, and
+            #    this is the only source that has it.  See
+            #    _expression_start_values: the gate used to be
+            #    `p.expression is not None`, which a vector derived
+            #    element-by-element fails, so its row was dropped
+            #    (review 3.14.16); and the eval used to be
+            #    `p.expression().eval()`, which draws from the prior.
+            produced = expression_starts.get(id(p))
+            if raw_v is None and produced is not None:
+                raw_v = produced if n_elements > 1 else float(produced[0])
 
         if raw_v is None:
             continue
@@ -1025,11 +2010,28 @@ def inspect_start(
         # seeds from the reverted values.
         v_phys = np.atleast_1d(raw_v).copy()
         s_phys = np.atleast_1d(raw_s if raw_s is not None else np.nan)
-        m_phys = np.atleast_1d(mult_map.get(p.label, [np.nan] * len(v_phys)))
+        if s_phys.size < v_phys.size:
+            # A fully DERIVED multi-element parameter has no measured
+            # whitening scales (raw_s is None -> one NaN), and a mixed
+            # vector's scale array covers only its sampled elements with
+            # no alignment information here -- padding positionally would
+            # attribute a sampled element's scale to a derived one.  All
+            # rows show N/A instead.  First hit by the pre-split lens.t_E on a
+            # TWO-source event (ob161003, queue task 3): every earlier
+            # example's derived vectors were single-element, so
+            # s_phys[i>0] never happened.
+            s_phys = np.full(v_phys.size, np.nan)
 
         user_flag = "*" if getattr(p, "user_prior_modified", False) else ""
 
         for i in range(len(v_phys)):
+            # An INACTIVE element is not a parameter of its instance's
+            # parameterization (a non-MIST star's EEP, a linear-law band's u2):
+            # it is held at a bookkeeping value nothing reads, so a row for it
+            # would report a start value the fit does not have.
+            if not p.element_is_active(i):
+                continue
+
             row_label = p.get_display_label(i)
 
             # Parameter.initval is the AUTHORITATIVE start: it is what
@@ -1100,16 +2102,10 @@ def inspect_start(
                 else f"{'N/A':>10}"
             )
 
-            # A NaN multiplier on a sampled element means the probe found
-            # logp flat along it (it keeps its preliminary scale) -- warn
-            # after the table.
-            raw_m = m_phys[i] if i < len(m_phys) else np.nan
-            if (
-                whiten_report is not None
-                and elem_sampled
-                and (np.isnan(raw_m) or np.isinf(raw_m))
-            ):
-                flat_warnings.append(row_label)
+            # The flat-direction check used to live here, and that gating it
+            # behind this row loop is what review 2.3.7 was about -- see
+            # _flat_probe_directions, which now collects it over every sampled
+            # element whether or not the element gets a row.
 
             prior_str = p.get_prior_str(i, latex=False)
 
@@ -1204,11 +2200,36 @@ def inspect_start(
             * 60
         )
 
-    if unused_yaml:
+    # The unmatched-params-key warning used to be emitted here, from this
+    # function -- i.e. only for `exozippy <config>`, so a harness driving a
+    # sampler directly got nothing and a mis-keyed bound was silently absent
+    # (review 2.3.16, measured on DC2018_128).  Same authority
+    # (ModelAuditor.check_unused_yaml), now reported from
+    # System.build_model, which every caller passes through.
+
+    # THE CONTRACT: a value the user set is either produced by the model or
+    # explained.  Until this block the second half did not happen -- a pin
+    # the derivation could not deliver was silent, so the only way to find
+    # one was to compile the graph by hand.  Published parameter sets are
+    # routinely NOT self-consistent (marginal medians from one table, or
+    # values taken from two papers), so this is the expected case for a
+    # real fit, not an error: report it and start.
+    start_misses = auditor.check_user_starts()
+    if start_misses:
+        lines = []
+        for f in start_misses:
+            lines.append(
+                f"  {f['key']}: you set {f['requested']:.6g}, the model "
+                f"starts at {f['produced']:.6g} ({f['rel']:+.2%}) -- "
+                f"{f['detail']}"
+            )
         logger.warning(
-            f"The following parameters in the parameter.yaml file did not match any model parameter "
-            f"and were not applied: {unused_yaml}\n"
-            "This can be safely ignored if intentional, but check for typos."
+            "?" * 60 + "\n"
+            "WARNING: the model does not start at every value you set:\n"
+            + "\n".join(lines)
+            + "\nThese are START values, so the fit can still move to the "
+            "right answer -- but if a value above is one you meant to "
+            "pin, the model is not starting where you think.\n" + "?" * 60
         )
 
 
@@ -1278,13 +2299,20 @@ def _add_sampler_prose(system, method, swap_schedule="deo"):
         )
 
 
-def _add_wrapup_prose(system, diag, mode_report):
-    """Declare the post-fit prose: burn-in, convergence criteria, modes.
+def _add_wrapup_prose(system, diag, mode_report, cap_findings=None):
+    """Declare the post-fit prose: burn-in, convergence criteria, modes, and
+    any parameter piled against a modelling cap.
 
     These are diagnostics of the run (the convergence criteria the user
     asked the draft to record), not fitted values -- posterior numbers stay
     in the table, whose macros are the mechanism for citing them in prose.
+    The pile-at-cap sentence quotes the cap (a config-derived bound) and
+    the fraction of draws (a run diagnostic, like the burn-in fraction),
+    never a posterior value.
     """
+    from .outputs.prose import join_names
+    from .outputs.texutils import latex_escape
+
     prose = system.prose
     prose.add(
         r"The median values and 68\% confidence intervals of the "
@@ -1333,6 +2361,30 @@ def _add_wrapup_prose(system, diag, mode_report):
             section="convergence",
             key="run.convergence",
             rank=20,
+        )
+    if cap_findings:
+        # Instance names are data: escape them.  Idempotent by key, so a
+        # re-report with no finding leaves the sentence out (regenerate,
+        # never append -- outputs.md).
+        items = [
+            latex_escape(f["display"])
+            + f" ({100 * f['frac']:.0f}\\% of draws within the top "
+            f"{100 * f.get('top_frac', 0.05):.0f}\\% of its allowed range, "
+            f"whose upper bound is {f['cap']:.4g}"
+            + (" " + latex_escape(f["unit"]) if f.get("unit") else "")
+            + ")"
+            for f in cap_findings
+        ]
+        prose.add(
+            "The posterior of "
+            + join_names(items)
+            + " piled against its upper bound, which is a modelling cap "
+            "rather than a physical limit: the noise model asked for more "
+            "freedom than the cap allows, so the residuals of the affected "
+            "data should be inspected before that bound is loosened.",
+            section="convergence",
+            key="run.cap_alarm",
+            rank=30,
         )
     if mode_report is not None and getattr(mode_report, "n_modes", 1) > 1:
         # The provenance is plain text (N_eff, >=): escape it for LaTeX
@@ -1395,7 +2447,15 @@ def _format_summary(idata, diag):
     return "\n".join(header) + "\n" + df.to_string() + "\n"
 
 
-def make_corner(model, idata, filename, max_samples=1000):
+def make_corner(idata, filename, max_samples=1000):
+    """Corner-plot every physical variable in a trace's posterior group.
+
+    Takes no `model` (review 5.3.3b): it selects its variables by NAME off
+    idata.posterior -- dropping the `_raw` companions, the interval-transform
+    duplicates and the mode label -- so it never needed one, and the argument
+    it used to accept made the call sites look like they were plotting from a
+    model they were not.
+    """
     all_vars = list(idata["posterior"].data_vars)
     physical_vars = [
         v
@@ -1427,7 +2487,54 @@ def _lp_eval_chain(args):
     return chain_idx, lp_chain
 
 
-def _compute_lp_from_model(model, idata):
+def _ensure_lp(idata, model=None, cores=None):
+    """Make sure ``idata.sample_stats["lp"]`` exists; return whether it does.
+
+    NUTS writes lp itself; the Metropolis/DE families and PTDE do not, so it
+    is computed from the model and persisted -- once, right after sampling,
+    so the saved trace carries it and no reader has to recompute it.  The
+    fallback also serves old trace files written before that was done.
+
+    One function for two call sites that had drifted, and the merge turned up
+    that BOTH were broken for a trace carrying no ``sample_stats`` group at
+    all -- just differently.  The save path checked
+    ``hasattr(idata, "sample_stats")`` and then assigned into
+    ``idata.sample_stats`` regardless, so the assignment raised; the plotting
+    path guarded it with ``idata.add_groups(...)``, which is arviz 0.x API
+    that no supported arviz has (``pyproject.toml`` floors it at 1.1.0, where
+    ``InferenceData`` IS an ``xarray.DataTree``), so it raised too. Adding a
+    group on a DataTree is ``idata["sample_stats"] = xr.Dataset()``.
+
+    ``model=None`` means "report, do not compute": the plotting path can be
+    handed a trace with no model, and there is nothing to fall back to.
+    """
+    ss = getattr(idata, "sample_stats", None)
+    if ss is not None and "lp" in ss.data_vars:
+        return True
+    if model is None:
+        return False
+
+    logger.info("lp is not in the trace -- computing it from the model")
+    lp_vals = _compute_lp_from_model(model, idata, cores=cores)
+    if lp_vals is None:
+        return False
+
+    import xarray as xr
+
+    if getattr(idata, "sample_stats", None) is None:
+        idata["sample_stats"] = xr.Dataset()
+    idata.sample_stats["lp"] = xr.DataArray(
+        lp_vals,
+        dims=["chain", "draw"],
+        coords={
+            "chain": idata.posterior.chain,
+            "draw": idata.posterior.draw,
+        },
+    )
+    return True
+
+
+def _compute_lp_from_model(model, idata, cores=None):
     """Compute log posterior at each draw by evaluating the compiled model logp.
 
     Used when the sampler (Metropolis) doesn't write lp to sample_stats.
@@ -1480,13 +2587,32 @@ def _compute_lp_from_model(model, idata):
         _LP_FN = logp_fn
         _LP_POINT_MAP = point_map
 
-        n_workers = min(n_chains, mp.cpu_count())
+        # RESPECT THE USER'S GRANT (review 2.3.9).  This read
+        # mp.cpu_count() directly, which is the NODE's CPU count and not
+        # what the job was given, so on a 128-CPU node with 78 chains it
+        # forked 78 workers -- and it forks them AFTER the caller has loaded
+        # the whole trace, so each worker inherits a multi-GB parent.  fork
+        # is copy-on-write in principle, but CPython touches refcounts on
+        # everything it reads, so the pages copy in practice.  Measured: it
+        # destroyed the WRAP-UP of three completed multi-day runs at 771,
+        # 613 and 705 GB (severed-v3/v5/v6, all exit 137, all after sampling
+        # finished and the trace was written).  cores=None means AUTO, the
+        # same convention as _common.default_cores everywhere else.
+        grant = default_cores() if cores is None else max(1, int(cores))
+        n_workers = min(n_chains, grant)
         ctx = mp.get_context("fork")
-        with ctx.Pool(n_workers) as pool:
-            results = pool.map(
-                _lp_eval_chain,
-                [(arr, c, n_draws) for c, arr in enumerate(chain_arrays)],
-            )
+        try:
+            with ctx.Pool(n_workers) as pool:
+                results = pool.map(
+                    _lp_eval_chain,
+                    [(arr, c, n_draws) for c, arr in enumerate(chain_arrays)],
+                )
+        finally:
+            # Also 2.3.9: these kept the compiled logp alive for the whole
+            # of wrap-up, which is the other half of the footprint the fork
+            # above multiplies.
+            _LP_FN = None
+            _LP_POINT_MAP = None
 
         lp_vals = np.full((n_chains, n_draws), np.nan)
         for chain_idx, chain_lp in results:
@@ -1555,7 +2681,11 @@ def _dist_degeneracy(values):
       gracefully stopped, unmixed run produces and what actually crashed CI.
 
     The third test is the exact condition numpy itself raises on, so it
-    tracks the failure rather than approximating it.
+    tracks the failure rather than approximating it, and it is asked through
+    ``corner_utils.histogram_grid_degenerate`` -- the SAME predicate the corner
+    plot uses to decide whether a parameter gets a column at all, only over
+    corner's 20-bin grid instead of arviz's 512.  The two must agree, so there
+    is one implementation.
     """
     x = np.asarray(values, dtype=float).ravel()
     x = x[np.isfinite(x)]
@@ -1564,7 +2694,7 @@ def _dist_degeneracy(values):
     lo, hi = float(x.min()), float(x.max())
     if lo == hi:
         return f"constant at {lo:.10g}"
-    if np.any(np.diff(np.linspace(lo, hi, _KDE_GRID_LEN + 1)) <= 0):
+    if histogram_grid_degenerate(lo, hi, _KDE_GRID_LEN + 1):
         return (
             f"range {hi - lo:.3g} around {lo:.10g} spans fewer than "
             f"{_KDE_GRID_LEN} float64 steps"
@@ -1771,38 +2901,12 @@ def save_multipage_trace(
         thin_factor = max(1, n_draws // draws_per_chain)
         idata = idata.isel(draw=slice(None, None, thin_factor))
 
-    # lp is in sample_stats for NUTS traces and for Metropolis traces saved after
-    # the fix that computes and persists it right after pm.sample().
-    # Fall back to computing it for old trace files.
-    ss_vars = (
-        list(idata.sample_stats.data_vars)
-        if hasattr(idata, "sample_stats")
-        else []
-    )
-    if "lp" in ss_vars:
+    # lp is in sample_stats for NUTS traces and for every trace saved after
+    # the fix that computes and persists it right after pm.sample().  Fall
+    # back to computing it for old trace files; a trace with no model to
+    # fall back to simply gets no lp page.
+    if _ensure_lp(idata, model):
         lp_idata, lp_var = idata, "lp"
-    elif model is not None:
-        logger.info("lp not in trace — computing from model (old trace file)")
-        import xarray as xr
-
-        lp_vals = _compute_lp_from_model(model, idata)
-        if lp_vals is not None:
-            if (
-                not hasattr(idata, "sample_stats")
-                or idata.sample_stats is None
-            ):
-                idata.add_groups({"sample_stats": xr.Dataset()})
-            idata.sample_stats["lp"] = xr.DataArray(
-                lp_vals,
-                dims=["chain", "draw"],
-                coords={
-                    "chain": idata.posterior.chain,
-                    "draw": idata.posterior.draw,
-                },
-            )
-            lp_idata, lp_var = idata, "lp"
-        else:
-            lp_idata, lp_var = None, None
     else:
         lp_idata, lp_var = None, None
 
@@ -1976,7 +3080,7 @@ def _sanitize_netcdf_attrs(idata):
                 ds.attrs[k] = json.dumps(v)
 
 
-def _convert_posterior_to_user_units(idata, param_lookup):
+def _convert_posterior_to_user_units(idata, param_lookup, only=None):
     """Convert idata.posterior in-place from internal math units to user units.
 
     Each non-raw variable in the posterior whose Parameter has a non-trivial
@@ -1991,8 +3095,15 @@ def _convert_posterior_to_user_units(idata, param_lookup):
     total size -- would reject it.  The direction is the only thing that
     matters here, and it is stated: internal -> user multiplies, and
     get_draws (user trace -> internal for the physics) divides.
+
+    `only` restricts the pass to a subset, which the degeneracy fold
+    (review 1.8.3) needs: it runs AFTER this conversion and regenerates
+    some deterministics from PyMC, so those few come back in internal
+    units and have to be converted again -- while re-converting the whole
+    posterior would multiply everything else a second time.
     """
-    for var_name in list(idata.posterior.data_vars):
+    names = list(idata.posterior.data_vars) if only is None else list(only)
+    for var_name in names:
         if var_name.endswith("_raw") or var_name not in param_lookup:
             continue
         factor = np.squeeze(
@@ -2017,6 +3128,18 @@ def get_draws(idata, n_draws=50, param_lookup=None, mode=None):
     equals this integer (used by the per-mode output loop in run_fit to
     build a mode-specific draw set). If omitted (default), every valid draw
     (mode >= 0) is eligible, matching the combined-posterior behavior.
+
+    THE DRAW IS UNSEEDED, BY DESIGN -- do not "helpfully" pin a seed here
+    (review 2.14.4a).  These are the posterior-spaghetti curves overlaid on
+    the model plots, and the point of overlaying 50 of them is to SHOW the
+    posterior's spread; re-rendering the same trace and getting a different
+    50 is a correct picture of the same distribution, and a fixed subset
+    would quietly become "the" 50 curves the reader believes are special.
+    Nothing downstream is compared between runs, and no reported number comes
+    from this selection.  Contrast ``corner_utils.save_corner_plot``, whose
+    thinning IS seeded (``constants.CORNER_THIN_SEED``) because a corner plot
+    is a figure that goes in a paper and must redraw identically, and
+    ``sampler: {seed:}``, which fixes the chains themselves.
     """
     # 1. Flatten chains/draws into a single 'sample' dimension
     post = az.extract(idata, combined=True, keep_dataset=True)
@@ -2092,7 +3215,7 @@ def _idata_for_mode(idata, mode_k):
     return az.from_dict({"posterior": data})
 
 
-def _emit_per_mode_outputs(system, model, idata, mode_report, prefix):
+def _emit_per_mode_outputs(system, idata, mode_report, prefix):
     """Re-emit the combined-posterior corner + component plots once per mode.
 
     Interim (P7) multimodal reporting: loop the existing single-posterior
@@ -2113,7 +3236,7 @@ def _emit_per_mode_outputs(system, model, idata, mode_report, prefix):
         t0 = time.time()
 
         idata_k = _idata_for_mode(idata, k)
-        make_corner(model, idata_k, f"{prefix}_corner_{suffix}.png")
+        make_corner(idata_k, f"{prefix}_corner_{suffix}.png")
 
         # Same draw-count knob as the combined-posterior plots (get_draws'
         # n_draws default) -- no extra stratification needed here since each

@@ -3,7 +3,8 @@ Tests for the shared Zenodo fetch-verify-cache core
 (utilities/zenodo.py) and the two wrappers that own asset tables
 (components/sed/make_bc.ensure_model_data, models/MIST/eep_grid).
 
-Nothing here touches the network: urlretrieve is always monkeypatched.
+Nothing here touches the network: zenodo._urlretrieve (or, for the one
+test about the helper itself, urlopen) is always monkeypatched.
 
 The machine-level cache is switched off for the whole suite by conftest's
 autouse _no_shared_download_cache fixture, so every test that is not about
@@ -13,6 +14,7 @@ back in with the `cache_root` fixture.
 
 import errno
 import hashlib
+import io
 import multiprocessing
 import os
 import time
@@ -80,7 +82,7 @@ def test_download_retries_a_transient_gateway_error(tmp_path, monkeypatch):
             )
         Path(dest).write_bytes(payload)
 
-    monkeypatch.setattr(zenodo.urllib.request, "urlretrieve", flaky)
+    monkeypatch.setattr(zenodo, "_urlretrieve", flaky)
 
     # ACT
     zenodo.fetch_assets(_fake_assets(payload), tmp_path)
@@ -105,7 +107,7 @@ def test_download_does_not_retry_a_404(tmp_path, monkeypatch):
         calls.append(url)
         raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
 
-    monkeypatch.setattr(zenodo.urllib.request, "urlretrieve", missing)
+    monkeypatch.setattr(zenodo, "_urlretrieve", missing)
 
     # ACT / ASSERT
     with pytest.raises(urllib.error.HTTPError):
@@ -128,13 +130,89 @@ def test_download_gives_up_after_the_attempt_budget(tmp_path, monkeypatch):
         calls.append(url)
         raise urllib.error.HTTPError(url, 504, "Gateway Time-out", {}, None)
 
-    monkeypatch.setattr(zenodo.urllib.request, "urlretrieve", always_504)
+    monkeypatch.setattr(zenodo, "_urlretrieve", always_504)
 
     # ACT / ASSERT
     with pytest.raises(RuntimeError, match="f.csv"):
         zenodo.fetch_assets(_fake_assets(), tmp_path)
     assert len(calls) == zenodo._DOWNLOAD_ATTEMPTS
     assert not list(tmp_path.glob("*.part")), "left a .part behind"
+
+
+def test_the_download_carries_a_socket_timeout(tmp_path, monkeypatch):
+    """
+    Given the low-level fetch helper,
+    When it opens the URL,
+    Then it passes a finite timeout to urlopen and streams the body out.
+
+    Regression (review 2.9.4): this was urlretrieve, which has no timeout
+    parameter and no way to reach the socket it opens. A connection that
+    STALLS rather than erroring therefore hung a fit indefinitely inside
+    stage 1a, and the retry ladder above never engaged -- nothing was ever
+    raised for it to catch.
+    """
+    # ARRANGE
+    payload = b"hello"
+    seen = {}
+
+    class _FakeResponse(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    def fake_urlopen(url, timeout=None):
+        seen["url"] = url
+        seen["timeout"] = timeout
+        return _FakeResponse(payload)
+
+    monkeypatch.setattr(zenodo.urllib.request, "urlopen", fake_urlopen)
+    dest = tmp_path / "f.csv"
+
+    # ACT
+    zenodo._urlretrieve("https://example.invalid/f.csv", dest)
+
+    # ASSERT
+    assert seen["url"] == "https://example.invalid/f.csv"
+    assert seen["timeout"] == zenodo._DOWNLOAD_TIMEOUT
+    assert 0 < zenodo._DOWNLOAD_TIMEOUT < float("inf")
+    assert dest.read_bytes() == payload
+
+
+def test_a_stalled_download_is_retried_rather_than_hanging(
+    tmp_path, monkeypatch
+):
+    """
+    Given a peer that goes quiet mid-body, so the socket times out,
+    When fetch_assets runs,
+    Then the timeout is treated as a transient transport error and retried.
+
+    The point of the timeout is that a stall becomes an exception at all;
+    this pins that the exception it raises is one the ladder already knows
+    how to handle.
+    """
+    # ARRANGE
+    payload = b"hello"
+    monkeypatch.setattr(zenodo.time, "sleep", lambda *a: None)
+
+    calls = []
+
+    def stalls_once(url, dest):
+        calls.append(url)
+        if len(calls) == 1:
+            raise TimeoutError("The read operation timed out")
+        Path(dest).write_bytes(payload)
+
+    monkeypatch.setattr(zenodo, "_urlretrieve", stalls_once)
+
+    # ACT
+    zenodo.fetch_assets(_fake_assets(payload), tmp_path)
+
+    # ASSERT
+    assert len(calls) == 2
+    assert (tmp_path / "f.csv").read_bytes() == payload
 
 
 # --- integrity: .part staging, size and md5 -------------------------------
@@ -166,7 +244,7 @@ def test_download_stages_on_a_part_file_and_renames_only_when_intact(
         # Mid-download: the real destination must not exist yet.
         seen["final_exists_during"] = (tmp_path / "f.csv").exists()
 
-    monkeypatch.setattr(zenodo.urllib.request, "urlretrieve", observant)
+    monkeypatch.setattr(zenodo, "_urlretrieve", observant)
 
     # ACT
     zenodo.fetch_assets(_fake_assets(payload), tmp_path)
@@ -192,7 +270,7 @@ def test_a_truncated_download_never_reaches_the_destination(
     def truncated(url, dest):
         Path(dest).write_bytes(b"hel")  # payload is b"hello"
 
-    monkeypatch.setattr(zenodo.urllib.request, "urlretrieve", truncated)
+    monkeypatch.setattr(zenodo, "_urlretrieve", truncated)
 
     # ACT / ASSERT
     with pytest.raises(RuntimeError, match="truncated"):
@@ -212,7 +290,7 @@ def test_a_wrong_md5_never_reaches_the_destination(tmp_path, monkeypatch):
     def wrong_bytes(url, dest):
         Path(dest).write_bytes(b"world")  # same length as b"hello"
 
-    monkeypatch.setattr(zenodo.urllib.request, "urlretrieve", wrong_bytes)
+    monkeypatch.setattr(zenodo, "_urlretrieve", wrong_bytes)
 
     # ACT / ASSERT
     with pytest.raises(RuntimeError, match="md5"):
@@ -237,8 +315,8 @@ def test_a_cached_file_of_the_right_size_is_not_refetched(
 
     calls = []
     monkeypatch.setattr(
-        zenodo.urllib.request,
-        "urlretrieve",
+        zenodo,
+        "_urlretrieve",
         lambda url, dest: calls.append(url),
     )
     fetched = []
@@ -270,7 +348,7 @@ def test_a_truncated_cached_file_is_refetched_not_raised(
     def good(url, dest):
         Path(dest).write_bytes(payload)
 
-    monkeypatch.setattr(zenodo.urllib.request, "urlretrieve", good)
+    monkeypatch.setattr(zenodo, "_urlretrieve", good)
 
     # ACT
     zenodo.fetch_assets(_fake_assets(payload), tmp_path)
@@ -326,15 +404,13 @@ def test_a_second_destination_is_served_from_the_cache_with_no_network(
         downloads.append(url)
         Path(dest).write_bytes(payload)
 
-    monkeypatch.setattr(zenodo.urllib.request, "urlretrieve", counting)
+    monkeypatch.setattr(zenodo, "_urlretrieve", counting)
     first = tmp_path / "worktree_a" / "BCs"
     zenodo.fetch_assets(assets, first)
     assert len(downloads) == 1
 
     # ACT -- a fetcher that would blow up if it were called at all
-    monkeypatch.setattr(
-        zenodo.urllib.request, "urlretrieve", _refuse_to_download
-    )
+    monkeypatch.setattr(zenodo, "_urlretrieve", _refuse_to_download)
     second = tmp_path / "worktree_b" / "BCs"
     fetched = []
     zenodo.fetch_assets(assets, second, on_fetch=fetched.append)
@@ -359,8 +435,8 @@ def test_the_cache_hard_links_so_n_worktrees_cost_one_copy(
     payload = b"hello"
     assets = _fake_assets(payload)
     monkeypatch.setattr(
-        zenodo.urllib.request,
-        "urlretrieve",
+        zenodo,
+        "_urlretrieve",
         lambda url, dest: Path(dest).write_bytes(payload),
     )
 
@@ -390,8 +466,8 @@ def test_it_copies_when_the_filesystems_do_not_allow_a_hard_link(
     payload = b"hello"
     assets = _fake_assets(payload)
     monkeypatch.setattr(
-        zenodo.urllib.request,
-        "urlretrieve",
+        zenodo,
+        "_urlretrieve",
         lambda url, dest: Path(dest).write_bytes(payload),
     )
 
@@ -437,7 +513,7 @@ def test_a_corrupt_cache_entry_is_refetched_not_propagated(
         downloads.append(url)
         Path(dest).write_bytes(payload)
 
-    monkeypatch.setattr(zenodo.urllib.request, "urlretrieve", counting)
+    monkeypatch.setattr(zenodo, "_urlretrieve", counting)
 
     # ACT
     zenodo.fetch_assets(assets, tmp_path / "a")
@@ -464,8 +540,8 @@ def test_a_truncated_cache_entry_is_refetched(
     entry.write_bytes(b"hel")
 
     monkeypatch.setattr(
-        zenodo.urllib.request,
-        "urlretrieve",
+        zenodo,
+        "_urlretrieve",
         lambda url, dest: Path(dest).write_bytes(payload),
     )
 
@@ -505,7 +581,7 @@ def test_the_destination_never_sees_a_partial_file_via_the_cache(
         seen["entry_exists_during"] = entry.exists()
         seen["dest_exists_during"] = (tmp_path / "a" / "f.csv").exists()
 
-    monkeypatch.setattr(zenodo.urllib.request, "urlretrieve", observant)
+    monkeypatch.setattr(zenodo, "_urlretrieve", observant)
 
     # ACT
     zenodo.fetch_assets(assets, tmp_path / "a")
@@ -534,9 +610,7 @@ def test_an_existing_destination_is_adopted_into_the_cache(
     old = tmp_path / "old_worktree"
     old.mkdir()
     (old / "f.csv").write_bytes(payload)
-    monkeypatch.setattr(
-        zenodo.urllib.request, "urlretrieve", _refuse_to_download
-    )
+    monkeypatch.setattr(zenodo, "_urlretrieve", _refuse_to_download)
 
     # ACT
     zenodo.fetch_assets(assets, old)  # warm destination: adopt, do not fetch
@@ -565,9 +639,7 @@ def test_a_destination_with_the_wrong_md5_is_not_adopted(
     old = tmp_path / "old"
     old.mkdir()
     (old / "f.csv").write_bytes(b"world")
-    monkeypatch.setattr(
-        zenodo.urllib.request, "urlretrieve", _refuse_to_download
-    )
+    monkeypatch.setattr(zenodo, "_urlretrieve", _refuse_to_download)
 
     # ACT
     with caplog.at_level("WARNING"):
@@ -603,7 +675,7 @@ def test_an_unwritable_cache_degrades_to_a_plain_download(
         assert Path(dest).name == "f.csv.part", "expected the legacy staging"
         Path(dest).write_bytes(payload)
 
-    monkeypatch.setattr(zenodo.urllib.request, "urlretrieve", observant)
+    monkeypatch.setattr(zenodo, "_urlretrieve", observant)
 
     # ACT
     with caplog.at_level("WARNING"):
@@ -640,7 +712,7 @@ def test_concurrent_fetches_download_once_and_never_tear_the_entry(
         time.sleep(0.5)  # long enough for the others to pile up on the lock
         Path(dest).write_bytes(payload)
 
-    monkeypatch.setattr(zenodo.urllib.request, "urlretrieve", slow_download)
+    monkeypatch.setattr(zenodo, "_urlretrieve", slow_download)
 
     dests = [tmp_path / f"worktree{i}" for i in range(4)]
 
@@ -688,8 +760,8 @@ def test_make_bc_warns_about_downsampling_only_when_it_really_fetches(
     monkeypatch.setattr(make_bc, "_MODEL_DATA", {"M": _fake_assets(payload)})
     monkeypatch.setattr(make_bc, "_warned_models", set())
     monkeypatch.setattr(
-        zenodo.urllib.request,
-        "urlretrieve",
+        zenodo,
+        "_urlretrieve",
         lambda url, dest: Path(dest).write_bytes(payload),
     )
 
@@ -726,8 +798,8 @@ def test_mist_grid_fetch_does_not_emit_the_spectra_warning(
     monkeypatch.setattr(eep_grid, "_EEP_GRID_ASSETS", assets)
     monkeypatch.setattr(eep_grid, "EEP_GRID_DIR", tmp_path)
     monkeypatch.setattr(
-        zenodo.urllib.request,
-        "urlretrieve",
+        zenodo,
+        "_urlretrieve",
         lambda url, dest: Path(dest).write_bytes(payload),
     )
 
@@ -759,17 +831,15 @@ def test_the_mist_grid_shares_the_machine_cache_too(
     monkeypatch.setattr(eep_grid, "_EEP_GRID_ASSETS", assets)
     monkeypatch.setattr(eep_grid, "EEP_GRID_DIR", tmp_path / "checkout_a")
     monkeypatch.setattr(
-        zenodo.urllib.request,
-        "urlretrieve",
+        zenodo,
+        "_urlretrieve",
         lambda url, dest: Path(dest).write_bytes(payload),
     )
     eep_grid.ensure_eep_grid()
 
     # ACT
     monkeypatch.setattr(eep_grid, "EEP_GRID_DIR", tmp_path / "checkout_b")
-    monkeypatch.setattr(
-        zenodo.urllib.request, "urlretrieve", _refuse_to_download
-    )
+    monkeypatch.setattr(zenodo, "_urlretrieve", _refuse_to_download)
     path = eep_grid.ensure_eep_grid()
 
     # ASSERT
@@ -797,8 +867,8 @@ def test_mist_grid_is_not_refetched_when_already_cached(tmp_path, monkeypatch):
 
     calls = []
     monkeypatch.setattr(
-        zenodo.urllib.request,
-        "urlretrieve",
+        zenodo,
+        "_urlretrieve",
         lambda url, dest: calls.append(url),
     )
 

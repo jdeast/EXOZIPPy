@@ -30,7 +30,7 @@ _KMT_DIR = Path(__file__).parent.parent / "examples" / "KMT-2019-BLG-1806"
 
 
 # ---------------------------------------------------------------------------
-# Mulensing zeropoint (stage 5)
+# Mulensing zeropoint (stage 6)
 # ---------------------------------------------------------------------------
 
 
@@ -118,7 +118,10 @@ def test_zeropoint_value_matches_manual_computation(kmt_system):
     computed independently from the SED prediction node.
     """
     system, model, point = kmt_system
-    source_idx = int(system.lens.source_map[0])
+    # The source body's star index: `source.star_map` after the
+    # mulensevent/lens/source split (it was the old lens component's
+    # `source_map`), and the same map mulensinstrument's zeropoint reads.
+    source_idx = int(system.source.star_map[0])
     i = _zp_index(system, "KMTC04")
 
     m_pred = system.sed.predict_star_appmag(source_idx, "Cousins_I", system)
@@ -268,7 +271,7 @@ def test_zeropoint_sigma_zero_raises():
 
 
 # ---------------------------------------------------------------------------
-# Astrometry SED fluxfrac (stage 7)
+# Astrometry SED fluxfrac (stage 6)
 # ---------------------------------------------------------------------------
 
 

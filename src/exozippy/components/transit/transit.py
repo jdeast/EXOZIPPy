@@ -6,13 +6,14 @@ import pytensor
 
 logger = logging.getLogger(__name__)
 import pytensor.tensor as pt
-from exoplanet_core.pymc import ops as ops
 
 from exozippy.components.instrument import Instrument
 from exozippy.components.limbdark import quad_limb_darkened_flux
 from exozippy.outputs.prose import get_collector
 from exozippy.outputs.texutils import latex_escape
 
+from .. import ltt
+from ..orbit import physics as orbit_physics
 from . import physics
 
 
@@ -38,6 +39,38 @@ class Transit(Instrument):
         # SED depth-dilution node, built once by build_likelihood and
         # reused by compile_plotters.
         self._dilution_node = None
+        # Light-travel-time (Roemer delay) correction, per file (see
+        # components/ltt.py) -- on by default (Jason's decision: transit/rm/
+        # astrometry on, rv/mulens off; matches EXOFASTv2). Per-file, not a
+        # single component-wide flag, for consistency with every other
+        # per-file key (gp:, likelihood:, ninterp:, rm:) -- build_likelihood's
+        # group loop and compile_plotters both handle a group/instrument
+        # mix of on/off files (see the mask logic there).
+        self._light_travel_time_active = np.array(
+            [bool(c.get("light_travel_time", True)) for c in self.config]
+        )
+
+    def _ltt_active(self, orbits):
+        """Per-file light-travel-time flags, forced off when the orbit
+        cannot supply the parameters the correction needs.
+
+        `Orbit.register_parameters` declares a/m_primary/m_companion/m_total
+        only when its bodies resolve, so a geometry-only orbit has none of
+        them. Since `light_travel_time` defaults to ON, reading them
+        unguarded would turn any such config -- which built fine before the
+        correction existed -- into an AttributeError at build time.
+        """
+        if ltt.orbit_supports_ltt(orbits):
+            return self._light_travel_time_active
+        if self._light_travel_time_active.any():
+            logger.warning(
+                "transit: light-travel-time correction disabled -- the orbit "
+                "does not define %s (its bodies did not resolve; see the "
+                "orbit component's own warning). Set light_travel_time: "
+                "false on the affected transit file(s) to silence this.",
+                ", ".join(ltt.REQUIRED_ORBIT_PARAMS),
+            )
+        return np.zeros_like(self._light_travel_time_active)
 
     @property
     def prefix(self):
@@ -45,7 +78,7 @@ class Transit(Instrument):
 
     @classmethod
     def get_utilities(cls):
-        from ...utilities import getdata
+        from ...utilities import bls, getdata
         from ...utilities.registry import (
             UtilitySpec,
             argparse_subprocess_runner,
@@ -68,11 +101,13 @@ class Transit(Instrument):
                 name="bls",
                 label="BLS period search",
                 description=(
-                    "Box Least Squares transit-period search (not yet "
-                    "implemented)."
+                    "Box Least Squares transit search: report the period, "
+                    "epoch, depth and duration of the strongest signal."
                 ),
                 component_keys=["transit"],
-                available=False,
+                available=True,
+                build_parser=bls.build_parser,
+                run=argparse_subprocess_runner("exozippy.utilities.bls"),
             ),
         ]
 
@@ -119,7 +154,7 @@ class Transit(Instrument):
         ]
 
     def load_data(self, system):
-        """Stage 1a: Load CSVs and generate data-driven bounds/inits."""
+        """Stage 1: Load CSVs and generate data-driven bounds/inits."""
         self.baseline_init = [1.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
 
@@ -135,8 +170,22 @@ class Transit(Instrument):
         self.exptime_min = [1.0] * self.n_elements
         self.ninterp = [1] * self.n_elements
         for i, c in enumerate(self.config):
-            exptime = float(c.get("exptime", 1.0))
-            ninterp = int(c.get("ninterp", 1))
+            # A non-numeric value is a hard error (unlike the RANGE checks
+            # below, which warn and fall back): `exptime: "abc"` is a typo
+            # with no sensible fallback, and the bare `float()` used to
+            # surface it as "could not convert string to float" naming no
+            # instrument and no key (review 2.14.3).
+            try:
+                exptime = float(c.get("exptime", 1.0))
+                ninterp = int(c.get("ninterp", 1))
+            except (TypeError, ValueError) as e:
+                raise ValueError(
+                    f"[{self.prefix}[{self.names[i]}]] exptime/ninterp must "
+                    f"be numeric (exposure duration in minutes and the "
+                    f"number of sub-samples); got "
+                    f"exptime={c.get('exptime', '<unset>')!r}, "
+                    f"ninterp={c.get('ninterp', '<unset>')!r}: {e}"
+                ) from e
             if (
                 ninterp < 1
                 or exptime <= 0
@@ -181,68 +230,226 @@ class Transit(Instrument):
 
         self._build_oversample_grid()
 
-    def _build_oversample_grid(self):
-        """
-        Build per-ninterp observation groups (self._oversample_groups) used
-        to smear the model over each instrument's exposure time (EXOFASTv2
-        exofast_chi2v2.pro parity: a sub-exposure time grid collapsed with
-        a weighted mean per observation).
+        # Blind seeding: measure the period and conjunction epoch from the
+        # photometry when nothing else supplies them.  Stage 1a, not stage 2
+        # -- see components/globalsearch.py for why (Orbit builds tc's hard
+        # window at stage 2 from whatever start it can see).
+        self.bls_signal = None
+        self._seed_from_bls(system)
 
-        exptime/ninterp are per-instrument, but self.time is concatenated
-        across instruments, so instruments may disagree on both. Rather
-        than padding every observation out to the largest ninterp among
-        the active instruments (which would make build_likelihood evaluate
-        the transit model at that many sub-samples even for observations
-        whose own instrument needs only 1), observations are partitioned
-        by their own instrument's ninterp value into groups: each group's
-        sub-exposure time grid is exactly as wide as that group's own
-        ninterp, so a likelihood evaluation costs exactly the sub-samples
-        each observation's instrument needs, never another instrument's
-        larger ninterp.
+    def _seed_from_bls(self, system):
+        """Seed orbital period, conjunction epoch and radius ratio from BLS.
 
-        build_likelihood processes groups in np.unique(ninterp) order, not
-        row order, so self._oversample_inverse_order (the argsort of the
-        concatenated group row-indices) is recorded here to gather
-        per-group results back into original observation order afterward
-        with a plain index, instead of a scatter.
+        Runs only when the relaxation engine cannot already DERIVE the
+        period and conjunction time (``globalsearch.starts_satisfied``), and
+        pushes a value only for the quantities that were missing -- so a
+        params file that gives the period but not the epoch keeps its period
+        and gains an epoch, with no precedence question to adjudicate.
+
+        The radius ratio is opportunistic: a missing ``planet.p`` does not
+        trigger a search (a fit can start at 1 Jupiter radius), but a search
+        that ran for the period reports a depth, and ``sqrt(depth)`` is the
+        radius ratio to the accuracy a start value needs.  The engine turns
+        it into a ``planet.radius`` through ``Eq(p, radius / star_radius)``.
         """
+        from .. import globalsearch
+
+        mode = globalsearch.search_mode(system)
+        if mode == "off":
+            return
+        orbit_ndx = globalsearch.sole_orbit_index(system, self.prefix)
+        if orbit_ndx is None:
+            return
+
+        cm = self.config_manager
+        planet_ndx = self._sole_planet_index(system, orbit_ndx)
+        groups = {
+            "period": (
+                f"orbit.{orbit_ndx}.period",
+                f"orbit.{orbit_ndx}.logP",
+            ),
+            "tc": (f"orbit.{orbit_ndx}.tc",),
+        }
+        if planet_ndx is not None:
+            groups["p"] = (
+                f"planet.{planet_ndx}.p",
+                f"planet.{planet_ndx}.radius",
+            )
+        satisfied = globalsearch.starts_satisfied(cm, groups)
+        required_missing = not (satisfied["period"] and satisfied["tc"])
+        if mode != "force" and not required_missing:
+            logger.debug(
+                "[%s] BLS not needed: the orbital period and conjunction "
+                "time are already derivable.",
+                self.prefix,
+            )
+            return
+
+        logger.info(
+            "[%s] no start value for %s -- running a Box Least Squares "
+            "search over %d photometric points.",
+            self.prefix,
+            ", ".join(k for k, v in satisfied.items() if not v) or "(forced)",
+            self.time.size,
+        )
+
+        # Each file in its own flux system: divide by that file's median so
+        # the concatenation is one relative-flux series and the box depth
+        # means the same thing in every row.
+        baseline = np.asarray(self.baseline_init, dtype=float)
+        scale = np.where(
+            np.isfinite(baseline) & (baseline != 0.0), baseline, 1.0
+        )
+        norm = scale[self.inst_map]
+        signal = globalsearch.bls_search(
+            self.time,
+            self.flux / norm,
+            self.err / norm,
+            context=self.prefix,
+        )
+        self.bls_signal = signal
+        if signal is None:
+            return
+
+        q = globalsearch.QUALITY_TRANSIT
+        source = f"BLS on {self.n_elements} light curve(s)"
+        applied = []
+        if mode == "force" or not satisfied["period"]:
+            applied.append(
+                globalsearch.seed_start(
+                    cm, f"orbit.{orbit_ndx}.period", signal.period, q, source
+                )
+            )
+        if mode == "force" or not satisfied["tc"]:
+            applied.append(
+                globalsearch.seed_start(
+                    cm, f"orbit.{orbit_ndx}.tc", signal.epoch, q, source
+                )
+            )
+        if planet_ndx is not None and (
+            mode == "force" or not satisfied.get("p", True)
+        ):
+            applied.append(
+                globalsearch.seed_start(
+                    cm,
+                    f"planet.{planet_ndx}.p",
+                    float(np.sqrt(signal.depth)),
+                    q,
+                    source,
+                )
+            )
+
+        if not any(applied):
+            # Nothing was actually taken (another search of equal or better
+            # quality got there first).  Prose describes what the fit did.
+            return
+
+        get_collector(system).add(
+            "Initial values for the orbital period and time of conjunction "
+            "were measured from the photometry with a Box Least Squares "
+            r"periodogram \citep{Kovacs:2002}, as implemented in "
+            r"\texttt{astropy} \citep{Astropy:2013,Astropy:2018,Astropy:2022}."
+            " Starting values do not enter the likelihood and cannot move "
+            "the posterior.",
+            section="data",
+            key=f"{self.prefix}.global_search",
+            rank=70,
+        )
+
+    def _sole_planet_index(self, system, orbit_ndx):
+        """The one planet on this orbit, or None if there is not exactly one.
+
+        Read off the raw config rather than ``planet.orbit_map``: this runs
+        at stage 1a, where the maps may not have been built yet.
+        """
+        planets = getattr(system, "planet", None)
+        if planets is None:
+            return None
+        on_orbit = [
+            j
+            for j, entry in enumerate(planets.config)
+            if int((entry or {}).get("orbit_ndx", 0)) == orbit_ndx
+        ]
+        return on_orbit[0] if len(on_orbit) == 1 else None
+
+    def _oversample_partition(self, inst_map):
+        """Partition rows into per-ninterp groups for exposure smearing.
+
+        ``inst_map`` is the per-row instrument index of whatever time
+        vector is being modeled (the data's own ``self.inst_map``, or a
+        plot layout's).  Returns a list of ``(rows, offsets, weights)``:
+        ``rows`` the row indices in the group, ``offsets`` an
+        ``(len(rows), kk)`` array of sub-exposure time offsets in days
+        (``None`` for the ninterp=1 group, whose lone sample sits at the
+        timestamp itself), ``weights`` the ``(kk,)`` averaging weights.
+
+        EXOFASTv2 parity (exofast_chi2v2.pro): a sub-exposure time grid
+        collapsed with a weighted mean per observation.  exptime/ninterp
+        are per-instrument, but the time vector is concatenated across
+        instruments, so instruments may disagree on both.  Rather than
+        padding every observation out to the largest ninterp among the
+        active instruments (which would evaluate the transit model at that
+        many sub-samples even for observations whose own instrument needs
+        only 1), observations are partitioned by their own instrument's
+        ninterp value: each group's sub-exposure grid is exactly as wide as
+        that group's own ninterp, so an evaluation costs exactly the
+        sub-samples each observation's instrument needs.
+
+        The sub-times are midpoint Riemann cells: kk equal-width cells
+        across [-exptime/2, +exptime/2], sampled at each cell's center
+        (offsets (j + 0.5)/kk - 0.5, never the exposure edges) -- exactly
+        EXOFASTv2's grid (dindgen(ninterp)/ninterp - (ninterp-1)/
+        (2*ninterp)), chosen there over trapezoid/Simpson: with uniform
+        1/kk weights, edge samples would overweight the exposure boundaries
+        and systematically over-smear.
+
+        Groups come out in np.unique(ninterp) order, not row order; the
+        caller gathers per-group results back into row order with the
+        argsort of the concatenated group rows (see ``_lc_model``).
+        """
+        inst_map = np.asarray(inst_map, dtype=int)
         exptime_days = np.asarray(self.exptime_min, dtype=float) / 1440.0
         ninterp_per_inst = np.asarray(self.ninterp, dtype=int)
 
-        ninterp_obs = ninterp_per_inst[self.inst_map]  # (N_obs,)
-        exptime_obs = exptime_days[self.inst_map]  # (N_obs,)
+        ninterp_obs = ninterp_per_inst[inst_map]  # (N,)
+        exptime_obs = exptime_days[inst_map]  # (N,)
 
-        self._oversample_groups = []
-        row_order = []
+        groups = []
         for kk in np.unique(ninterp_obs):
             rows = np.nonzero(ninterp_obs == kk)[0]
             if kk == 1:
-                # A lone sample sits at the timestamp itself; exptime is
-                # irrelevant (matches the original instantaneous model).
-                grid = self.time[rows][:, None]
-                weights = np.ones(1)
+                groups.append((rows, None, np.ones(1)))
             else:
-                # Midpoint Riemann sub-times: kk equal-width cells across
-                # [-exptime/2, +exptime/2], sampled at each cell's center
-                # (offsets (j + 0.5)/kk - 0.5, never the exposure edges).
-                # This is exactly EXOFASTv2's grid (exofast_chi2v2.pro:
-                # dindgen(ninterp)/ninterp - (ninterp-1)/(2*ninterp)),
-                # chosen there over trapezoid/Simpson: with uniform 1/kk
-                # weights, edge samples would overweight the exposure
-                # boundaries and systematically over-smear.
                 j = np.arange(kk)
                 frac = (j + 0.5) / kk - 0.5
-                grid = (
-                    self.time[rows][:, None]
-                    + frac[None, :] * exptime_obs[rows][:, None]
-                )
-                weights = np.full(kk, 1.0 / kk)
+                offsets = frac[None, :] * exptime_obs[rows][:, None]
+                groups.append((rows, offsets, np.full(kk, 1.0 / kk)))
+        return groups
+
+    def _build_oversample_grid(self):
+        """
+        Record the data's per-ninterp observation groups
+        (``self._oversample_groups``, a list of ``(rows, grid, weights)``
+        with ``grid`` the concrete ``(n_g, k_g)`` sub-exposure times) --
+        the partition ``_oversample_partition`` makes of ``self.inst_map``,
+        materialized on ``self.time``.  ``_lc_model`` rebuilds the same
+        partition symbolically on whatever time vector it is handed (the
+        likelihood's ``pm.Data`` or a plot grid); this concrete copy is the
+        inspectable record of what the likelihood smears over (see
+        tests/test_transit_exptime_ninterp.py).
+        """
+        self._oversample_groups = []
+        for rows, offsets, weights in self._oversample_partition(
+            self.inst_map
+        ):
+            if offsets is None:
+                grid = self.time[rows][:, None]
+            else:
+                grid = self.time[rows][:, None] + offsets
             self._oversample_groups.append((rows, grid, weights))
-            row_order.append(rows)
-        self._oversample_inverse_order = np.argsort(np.concatenate(row_order))
 
     def register_parameters(self, system):
-        """Stage 2: Embed data-driven hints into the PyMC manifest."""
+        """Stage 3: Embed data-driven hints into the PyMC manifest."""
         self._hint_baseline()
         self.manifest = {"baseline": None}
         self._register_noise(self.manifest, self.jittervar_lower)
@@ -280,10 +487,10 @@ class Transit(Instrument):
         self.obs_band_map = self.band_map[self.inst_map]
 
     def _hint_baseline(self):
-        """Push each light curve's median flux as a RANK_DERIVED_DATA hint.
+        """Push each light curve's median flux as a PRECEDENCE_DERIVED_DATA hint.
 
-        The median is measured in ``load_data`` (stage 1a), so it is ready
-        by the time this runs at stage 2 -- which is what lets it go through
+        The median is measured in ``load_data`` (stage 1), so it is ready
+        by the time this runs at stage 3 -- which is what lets it go through
         the provenance pipeline at all.
 
         It used to be a plain manifest option (``{"baseline": {"initval":
@@ -292,7 +499,7 @@ class Transit(Instrument):
         acquire a rank.  For a data-derived START value that is backwards --
         an explicit ``transit.<name>.baseline`` in a params file (a restart
         file, say) was silently discarded.  As a hint it sits at
-        RANK_DERIVED_DATA (60), the tier this channel exists for: above the
+        PRECEDENCE_DERIVED_DATA (60), the tier this channel exists for: above the
         defaults.yaml 1.0 (20) and below the user (100), exactly like
         ``rvinstrument``'s gamma (median RV) and ``mulensinstrument``'s
         f_source/log_f_total.
@@ -323,6 +530,19 @@ class Transit(Instrument):
         tensor (Deterministic "transit.dilution" for diagnostics), or
         None if no instrument's band filter is in the SED's BC grid.
         Instruments whose band filter is unavailable get dilution 1.
+
+        The cache is per BUILD, not per component: ``build_likelihood``
+        clears it with an inline ``self._dilution_node = None`` at the top of
+        stage 7 (the general seam is ``Component.per_build_caches`` /
+        ``reset_build_caches``, which ``System.build_model`` runs before
+        stage 5; this cache does not use it because nothing reads the node
+        before stage 7 -- see ``components.md``).  Components persist on the
+        System and a second ``system.build_model()`` is supported (the GUI
+        does it), so a cache that outlived the model handed the second
+        build's likelihood a Deterministic belonging to the FIRST model --
+        either a crash at logp compile or, worse, a silently stale dilution.
+        Within one build the cache is still wanted: the node is asked for
+        twice (the group loop and the beam term) and must be one node.
         """
         if getattr(self, "_dilution_node", None) is not None:
             return self._dilution_node
@@ -346,7 +566,7 @@ class Transit(Instrument):
                     f"is not in the SED's BC grid; no depth deblending "
                     f"applied for this instrument."
                 )
-                dils.append(pt.constant(1.0))
+                dils.append(pt.constant(1.0, dtype="float64"))
         if not any_diluted:
             return None
         self._dilution_node = pm.Deterministic(
@@ -354,102 +574,83 @@ class Transit(Instrument):
         )
         return self._dilution_node
 
-    def build_likelihood(self, model, system):
-        time = pm.Data("transit_time", self.time)
-        flux = pm.Data("transit_data", self.flux)
-        err = pm.Data("transit_err", self.err)
+    def _lc_model(self, system, t, blocks):
+        """The transit model on times ``t`` -- THE expression, built once.
 
+        ``build_likelihood`` calls this with the data's ``pm.Data`` time
+        vector and the files' own row blocks; ``compile_plotters`` calls it
+        with a symbolic grid laid out in the same per-file blocks.  So the
+        plotted curve is literally the likelihood code run on other times:
+        there is no second light-curve graph to keep in step, and every
+        per-file choice (band, limb darkening, exptime/ninterp smearing,
+        light-travel-time gating, SED dilution, baseline) is resolved from
+        the block a row belongs to exactly as it is for the data.  The
+        in-repo template is ``AstrometryInstrument._rel_model``.
+
+        ``t``      -- ``(N,)`` time tensor.
+        ``blocks`` -- ``[(inst_idx, rows), ...]``: the concrete row indices
+                      of ``t`` that belong to each file.  Together they
+                      cover ``t``; a file may appear in more than one block
+                      and a file with no rows may be omitted.
+
+        Returns ``(lc_model, planet_terms)``:
+
+        ``lc_model`` ``(N,)`` -- baseline + every planet's transit/eclipse/
+            thermal/reflection (exposure-smeared on each row's own
+            sub-exposure grid) + beaming + ellipsoidal (un-smeared, at the
+            flat per-observation time), WITHOUT the detrend term, which is
+            per observation and is added by ``build_likelihood`` alone.
+        ``planet_terms`` ``(N, N_planets)`` -- the change planet p's step
+            makes to the running model, so ``baseline[inst] +
+            sum(planet_terms, axis=1)`` reproduces ``lc_model`` for ANY
+            planet count.  The ellipsoidal factor multiplies the running
+            total (baseline + the earlier planets), exactly as it does in
+            the model itself; the old plot path folded only the baseline
+            in per planet, which was exact for one planet and an
+            approximation for more (reviews 1.5.6, 7.14.1).
+
+        The likelihood's numerics are pinned bit-identical on every shipped
+        example, so the op sequence in here is the op sequence the
+        likelihood always had -- including associations kept for a 1-ulp
+        reason (see the ``r_norm`` comment).  Change it only with the
+        start-logp table in hand.
+        """
         orbits = system.orbit
         planets = system.planet
+        band = system.band
+
+        # The block layout -> per-row instrument index (numpy, known at
+        # graph-build time -- the group loop's gates are Python if/else on
+        # it) and its int32 tensor twin for indexing per-instrument
+        # parameter vectors (the same construction as stage 5's
+        # ``*_map_tensor``).
+        n_rows = int(sum(len(rows) for _, rows in blocks))
+        inst_map = np.empty(n_rows, dtype=int)
+        for inst_idx, rows in blocks:
+            inst_map[np.asarray(rows, dtype=int)] = int(inst_idx)
+        inst_map_t = pt.as_tensor_variable(inst_map).astype("int32")
+        obs_band_map = self.band_map[inst_map]
+        obs_band_map_t = pt.as_tensor_variable(obs_band_map).astype("int32")
 
         # 1. Start with the photometric baseline
-        lc_model = self.baseline.value[self.inst_map_tensor]
+        lc_model = self.baseline.value[inst_map_t]
 
-        # 1b. Per-planet transit/occultation geometry (impact parameter & durations),
-        # exposed as Deterministics for diagnostics and plotting (e.g. phased-plot xlim).
+        # 1b. Per-planet orbital vectors, gathered onto the planet index.
         ecc_p = orbits.ecc.value[planets.orbit_map]  # (N_planets,)
-        esinw_p = orbits.esinw.value[planets.orbit_map]
         inc_p = orbits.inc.value[planets.orbit_map]
         period_p = orbits.period.value[planets.orbit_map]
         tc_p = orbits.tc.value[planets.orbit_map]
         ar_p = planets.ar.value
-        p_p = planets.p.value
 
-        # Numerical-stability floor for the geometry below. Keeps arcsin arguments
-        # strictly inside (-1, 1) (where its derivative is finite) and denominators
-        # away from 0, so a transient excursion during NUTS leapfrog steps (e.g.
-        # inc away from 90 deg, or ecc/esinw near 1) can't produce a NaN/inf
-        # gradient. Values at the actual posterior mode are far from these floors,
-        # so the reported b/t14/tau are unaffected.
-        _GEOM_EPS = 1e-6
-
-        sini_p = pt.sin(inc_p)
-        cosi_p = pt.cos(inc_p)
-        ecc_factor = pt.sqrt(pt.clip(1.0 - pt.sqr(ecc_p), _GEOM_EPS, 1.0))
-
-        denom_minus = pt.clip(1.0 - esinw_p, _GEOM_EPS, np.inf)
-        denom_plus = pt.clip(1.0 + esinw_p, _GEOM_EPS, np.inf)
-        sini_ar = pt.clip(pt.abs(sini_p * ar_p), _GEOM_EPS, np.inf)
-
-        # Winn 2010 eqs 7-8: the primary transit happens at true anomaly
-        # pi/2 - omega (see calc_tp), where r = a(1-e^2)/(1 + esinw); the
-        # secondary sits at the opposite conjunction, r = a(1-e^2)/(1 - esinw).
-        dur_b = ar_p * cosi_p * (1.0 - pt.sqr(ecc_p)) / denom_plus
-        dur_bs = ar_p * cosi_p * (1.0 - pt.sqr(ecc_p)) / denom_minus
-
-        def _arcsin_term(p_offset_sq, dur_bx):
-            radicand = pt.clip(p_offset_sq - pt.sqr(dur_bx), 0.0, np.inf)
-            arg = pt.clip(
-                pt.sqrt(radicand) / sini_ar, -1.0 + _GEOM_EPS, 1.0 - _GEOM_EPS
-            )
-            return pt.arcsin(arg)
-
-        # Winn 2010 eqs 14-16: the duration's eccentricity correction is
-        # sqrt(1-e^2)/(1 + esinw) for the primary and sqrt(1-e^2)/(1 - esinw)
-        # for the secondary.
-        dur_t14 = (
-            (period_p / np.pi)
-            * _arcsin_term(pt.sqr(1.0 + p_p), dur_b)
-            * ecc_factor
-            / denom_plus
-        )
-        dur_t14s = (
-            (period_p / np.pi)
-            * _arcsin_term(pt.sqr(1.0 + p_p), dur_bs)
-            * ecc_factor
-            / denom_minus
-        )
-
-        # The (1-p)^2 arcsin term is Winn 2010's t23 (full-occultation
-        # duration, 2nd to 3rd contact); the FWHM is (t14 + t23)/2 and the
-        # ingress/egress duration tau is (t14 - t23)/2 (EXOFASTv2
-        # derivepars.pro convention).
-        dur_t23 = (
-            (period_p / np.pi)
-            * _arcsin_term(pt.sqr(1.0 - p_p), dur_b)
-            * ecc_factor
-            / denom_plus
-        )
-        dur_t23s = (
-            (period_p / np.pi)
-            * _arcsin_term(pt.sqr(1.0 - p_p), dur_bs)
-            * ecc_factor
-            / denom_minus
-        )
-
-        dur_tfwhm = (dur_t14 + dur_t23) / 2.0
-        dur_tfwhms = (dur_t14s + dur_t23s) / 2.0
-        dur_tau = (dur_t14 - dur_t23) / 2.0
-        dur_taus = (dur_t14s - dur_t23s) / 2.0
-
-        pm.Deterministic(f"{self.prefix}.b", dur_b)
-        pm.Deterministic(f"{self.prefix}.bs", dur_bs)
-        pm.Deterministic(f"{self.prefix}.t14", dur_t14)
-        pm.Deterministic(f"{self.prefix}.t14s", dur_t14s)
-        pm.Deterministic(f"{self.prefix}.tfwhm", dur_tfwhm)
-        pm.Deterministic(f"{self.prefix}.tfwhms", dur_tfwhms)
-        pm.Deterministic(f"{self.prefix}.tau", dur_tau)
-        pm.Deterministic(f"{self.prefix}.taus", dur_taus)
+        # The per-planet transit/occultation geometry (impact
+        # parameters and durations) used to be built here as bare
+        # Deterministics.  It moved to the planet component in review 8.8.7,
+        # where it is a set of ordinary derived Parameters -- table rows,
+        # LaTeX macros, units, and a user-settable Gaussian, which is what
+        # lets a published duration or eclipse time constrain e and omega.
+        # It is geometry, not photometry: no light curve enters it, and an
+        # RV-only fit has the same durations.  The phased-plot x-range
+        # reads `planet.t14` for that reason.
 
         # 2. Orbital elements per planet. These don't depend on the
         # observation/sub-exposure grid, so they're computed once and
@@ -466,10 +667,55 @@ class Transit(Instrument):
         sin_i = pt.sin(inc)
         cos_i = pt.cos(inc)
 
+        # 2b. Light-travel-time (Roemer delay) inputs -- per-file gating via
+        # ltt_active (self._light_travel_time_active, forced off when the
+        # orbit cannot supply these parameters), resolved per group below.
+        # Three roles, three factors -- see ltt.py's `factor` docs. The
+        # occultation seam takes the mass DIFFERENCE; light EMITTED by the
+        # planet (reflection) takes the planet's own barycentric fraction;
+        # light emitted by the STAR (beaming, ellipsoidal) takes the
+        # star's. One corrected time array cannot serve all three, and
+        # using the geometry's for everything (or leaving the stellar
+        # terms uncorrected, as here until 2026-08-15) mixes time
+        # references differing by ~a/c within a single phase curve.
+        ltt_active = self._ltt_active(orbits)
+        # Structural, not a runtime test: True only where every orbit
+        # these planets sit on has its sqrt(e) pair PINNED at zero, in
+        # which case the Kepler solve is a sine and a cosine
+        # (orbit.physics.solve_kepler, review 6.8.2).
+        circular_kepler = orbits._all_circular(planets.orbit_map)
+        a_rel = ltt_factor = ltt_reflect_factor = ltt_star_factor = None
+        if ltt_active.any():
+            a_rel = orbits.a.value[planets.orbit_map][
+                None, None, :
+            ]  # (1, 1, N_planets), physical semi-major axis [R_sun]
+            # Barycentric scaling for an OCCULTATION seam: the mass
+            # DIFFERENCE, not the planet's own barycentric fraction. A
+            # transit is not an emission event -- the planet blocks light
+            # the STAR emitted -- so both bodies enter at their own
+            # retarded times and the star's delay partially cancels the
+            # planet's. See ltt.py's `factor` docs for the derivation, and
+            # for why m_primary/m_total (used here until 2026-08-15, and by
+            # EXOFASTv2's target2bjd.pro) agrees to O(q) for a planet but
+            # predicts a spurious a/c offset for a comparable-mass pair
+            # whose true offset is exactly zero.
+            m_primary = orbits.m_primary.value[planets.orbit_map]
+            m_companion = orbits.m_companion.value[planets.orbit_map]
+            m_total = orbits.m_total.value[planets.orbit_map]
+            ltt_factor = ((m_primary - m_companion) / m_total)[None, None, :]
+            # Reflected light comes off the planet's disk, so it rides the
+            # planet's own delay about the barycenter.
+            ltt_reflect_factor = (m_primary / m_total)[None, None, :]
+            # Doppler beaming and ellipsoidal variation are the STAR's own
+            # flux (its radial motion and its tidal shape), so they ride
+            # the star's delay -- a factor ~q, not ~1. Flat (N_planets,):
+            # these terms are evaluated per observation, not on the
+            # sub-exposure grid.
+            ltt_star_factor = m_companion / m_total
+
         # 3. Limb Darkening Setup (per observation, mapped from each
         # instrument's Band). When every band uses the linear law, Band's
         # manifest has no u2; the quadratic term is then zero.
-        band = system.band
 
         # Secondary-eclipse thermal emission (fitthermal): gate the whole
         # branch on the resolved parameter state, not the fitthermal
@@ -491,9 +737,7 @@ class Transit(Instrument):
         # the terms are skipped entirely.
         ellip_active = band.ellipsoidal_may_be_nonzero()
         ellip_mapped = (
-            band.ellipsoidal.value[self.obs_band_map_tensor]
-            if ellip_active
-            else None
+            band.ellipsoidal.value[obs_band_map_t] if ellip_active else None
         )
         beam_active = "beam" in planets.manifest
 
@@ -508,29 +752,129 @@ class Transit(Instrument):
         # (EXOFASTv2 parity -- see the beam comment past the group loop).
         dil_obs_flat = None
         if dil_inst is not None:
-            dil_obs_flat = dil_inst[self.inst_map_tensor]  # (N_obs,)
+            dil_obs_flat = dil_inst[inst_map_t]  # (N,)
 
         # 4. Exoplanet-core Transit Model, evaluated once per distinct
-        # ninterp group (see _build_oversample_grid) instead of once for
-        # the whole component at the largest ninterp: each group's sub-exposure
-        # axis is exactly that group's own ninterp wide, so a
+        # ninterp group (see _oversample_partition) instead of once for
+        # the whole component at the largest ninterp: each group's
+        # sub-exposure axis is exactly that group's own ninterp wide, so a
         # short-cadence (ninterp=1) observation is never evaluated at
         # another instrument's larger ninterp. With ninterp==1 everywhere
         # there is exactly one group of width 1, identical to the
         # original (pre-oversampling) computation.
+        groups = self._oversample_partition(inst_map)
+        inverse_order = np.argsort(np.concatenate([g[0] for g in groups]))
         planet_group_decrement = [[] for _ in range(planets.n_elements)]
-        for rows, time_grid_np, weights_np in self._oversample_groups:
-            t_grid = pt.constant(time_grid_np)[:, :, None]  # (n_g, k_g, 1)
+        for rows, offsets_np, weights_np in groups:
+            # This group's sub-exposure time grid, built ON the time tensor
+            # so the same code serves the data and a plot grid.  ninterp=1:
+            # the lone sample sits at the timestamp itself and exptime is
+            # irrelevant (the original instantaneous model).
+            t_rows = t[rows][:, None]  # (n_g, 1)
+            if offsets_np is None:
+                t_grid = t_rows[:, :, None]  # (n_g, 1, 1)
+            else:
+                t_grid = (t_rows + pt.constant(offsets_np))[
+                    :, :, None
+                ]  # (n_g, k_g, 1)
             w_g = pt.constant(weights_np)  # (k_g,)
-            time_g = t_grid[:, :, 0]  # (n_g, k_g), for calc_reflect_term
 
-            M = (t_grid - tp) * n
-            sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
+            # Light-travel-time correction. The factor depends on WHICH
+            # observable is being retarded, not on the timestamps, so one
+            # corrected time array cannot serve the whole model (see
+            # ltt.py's `factor` docs). This group needs two of them:
+            #
+            #   geometry (transit/eclipse shape, and via planetvisible the
+            #     thermal gating) -- the occultation seam, ltt_factor;
+            #   reflected light -- emitted by the PLANET, so its own
+            #     barycentric fraction m_primary/m_total.
+            #
+            # Beaming and ellipsoidal are stellar and un-smeared; they are
+            # corrected after this loop with the primary's factor.
+            #
+            # Per-file gate (this group's own rows may mix files that want
+            # it on and off, since groups are formed by ninterp value, not
+            # by file). Costs nothing extra when every row in the group is
+            # off (no ltt.retarded_time call, no pt.where); costs one extra
+            # Kepler solve per role in use, no pt.where, when every row is
+            # on (the default); costs one extra Kepler solve PLUS one
+            # pt.where only for a genuinely mixed group.
+            lt_active_rows = ltt_active[
+                inst_map[rows]
+            ]  # (n_g,) bool, numpy -- known at graph-build time
 
-            r_norm = a_rstar * (1.0 - pt.sqr(ecc)) / (1.0 + ecc * cosf)
+            def _retard_grid(role_factor):
+                """t_grid retarded with `role_factor`, honoring the
+                per-row gate. Returns t_grid untouched when no row in this
+                group wants the correction."""
+                if not lt_active_rows.any():
+                    return t_grid
+                corrected, _ = ltt.retarded_time(
+                    t_grid,
+                    tp,
+                    n,
+                    ecc,
+                    sinw,
+                    cosw,
+                    sin_i,
+                    a_rel,
+                    factor=role_factor,
+                    z0=0.0,
+                    circular=circular_kepler,
+                )
+                if lt_active_rows.all():
+                    return corrected
+                # Both branches are ordinary, everywhere-finite time
+                # values (no singularity like solve_delay's az=0
+                # branch), so this pt.where carries none of the
+                # where-trap risk that formula guarded against --
+                # verified directly (not just asserted) by
+                # tests/test_transit_ltt.py's
+                # test_mixed_group_ltt_gradient_is_finite.
+                lt_mask = pt.constant(
+                    lt_active_rows[:, None, None].astype("float64")
+                )
+                return pt.where(lt_mask > 0.5, corrected, t_grid)
 
-            sin_wf = sinw * cosf + cosw * sinf
-            cos_wf = cosw * cosf - sinw * sinf
+            t_grid_final = _retard_grid(ltt_factor)
+            # Broadcast to (n_g, k_g, N_planets) unconditionally (a no-op
+            # when t_grid_final already has that shape) so the per-planet
+            # slice below is safe regardless of N_planets: with LTT off (or
+            # a face-value t_grid pass-through), the last dim is the
+            # unbroadcast size 1 from t_grid, and t_grid_final[:, :, p]
+            # would index-error for any p > 0 without this.
+            time_g_corrected = t_grid_final + pt.zeros(
+                (1, 1, planets.n_elements)
+            )
+
+            # Reflected light is emitted by the PLANET, so its phase runs
+            # on the planet's own retarded time, not the occultation
+            # seam's. Only built when reflection is actually on.
+            time_g_reflect = None
+            if reflect_active and ltt_reflect_factor is not None:
+                time_g_reflect = _retard_grid(ltt_reflect_factor) + pt.zeros(
+                    (1, 1, planets.n_elements)
+                )
+
+            # The shared Kepler-to-state kernel (skips the Newton iteration
+            # outright when every orbit these planets sit on is pinned
+            # circular, review 6.8.2).
+            terms = orbit_physics.state_vector_terms(
+                t_grid_final,
+                tp,
+                n,
+                ecc,
+                sinw=sinw,
+                cosw=cosw,
+                circular=orbits._all_circular(planets.orbit_map),
+            )
+            # NOT a_rstar * terms.r_over_a: this association is the
+            # pre-refactor one, kept because the reassociated product
+            # rounded differently (1 ulp on hat3's start logp) and the
+            # 4.8.2 refactor is pinned bit-identical.
+            r_norm = a_rstar * (1.0 - pt.sqr(ecc)) / (1.0 + ecc * terms.cosf)
+            sin_wf = terms.sinwf
+            cos_wf = terms.coswf
 
             # (n_g, k_g, N_planets)
             b = pt.sqrt(
@@ -538,9 +882,9 @@ class Transit(Instrument):
             )
             Z = r_norm * sin_wf * sin_i
 
-            u1_mapped = band.u1.value[self.obs_band_map[rows]]  # (n_g,)
+            u1_mapped = band.u1.value[obs_band_map[rows]]  # (n_g,)
             if "u2" in band.manifest:
-                u2_mapped = band.u2.value[self.obs_band_map[rows]]  # (n_g,)
+                u2_mapped = band.u2.value[obs_band_map[rows]]  # (n_g,)
             else:
                 u2_mapped = pt.zeros_like(u1_mapped)
 
@@ -548,17 +892,17 @@ class Transit(Instrument):
             if thermal_active:
                 # (n_g,) ppm; 0 for any band pinned off (see
                 # Band.register_parameters).
-                thermal_g = band.thermal.value[self.obs_band_map[rows]]
+                thermal_g = band.thermal.value[obs_band_map[rows]]
 
             reflect_g = None
             if reflect_active:
                 # (n_g,) ppm; 0 for any band pinned off (see
                 # Band.register_parameters).
-                reflect_g = band.reflect.value[self.obs_band_map[rows]]
+                reflect_g = band.reflect.value[obs_band_map[rows]]
 
             dil_obs = None
             if dil_inst is not None:
-                dil_obs = dil_inst[self.inst_map[rows]]  # (n_g,)
+                dil_obs = dil_inst[inst_map[rows]]  # (n_g,)
 
             for p_idx in range(planets.n_elements):
                 b_p = b[
@@ -597,8 +941,13 @@ class Transit(Instrument):
                     if thermal_g is not None:
                         net = net - 1e-6 * thermal_g[:, None] * visible
                     if reflect_g is not None:
+                        t_ref = (
+                            time_g_reflect
+                            if time_g_reflect is not None
+                            else time_g_corrected
+                        )
                         reflect_term_g = physics.calc_reflect_term(
-                            time_g,
+                            t_ref[:, :, p_idx],
                             tc_p[p_idx],
                             period_p[p_idx],
                             reflect_g[:, None],
@@ -619,20 +968,64 @@ class Transit(Instrument):
                 net_avg_g = pt.sum(net * w_g[None, :], axis=1)  # (n_g,)
                 planet_group_decrement[p_idx].append(net_avg_g)
 
+        planet_terms = []
         for p_idx in range(planets.n_elements):
             # Groups were visited in np.unique(ninterp) order, not row
-            # order; _oversample_inverse_order restores the original
-            # per-observation order after concatenation. This decrement
-            # already includes the transit, thermal, and (BEER, PR 1.b)
-            # reflection terms, all computed and exposure-smeared in the
-            # group loop above.
+            # order; inverse_order restores the original per-observation
+            # order after concatenation. This decrement already includes
+            # the transit, thermal, and (BEER, PR 1.b) reflection terms,
+            # all computed and exposure-smeared in the group loop above.
             net_avg = pt.concatenate(planet_group_decrement[p_idx])[
-                self._oversample_inverse_order
+                inverse_order
             ]
+            lc_before = lc_model
             lc_model = lc_model - net_avg
+            # This planet's own change to the running model, accumulated
+            # alongside lc_model term by term (see the docstring).
+            step = -net_avg
 
             tc_this = tc_p[p_idx]  # scalar, this planet's time of conjunction
             period_this = period_p[p_idx]
+
+            # Beaming and ellipsoidal are the STAR's own flux, so they are
+            # evaluated at the star's retarded time -- a different time
+            # base from the occultation geometry above (see ltt.py's
+            # `factor` docs). Until 2026-08-15 they used the uncorrected
+            # time while reflection used the geometry's, so a phase curve
+            # mixed three time references differing by ~a/c. Un-smeared,
+            # so this is a flat (N,) correction, and it costs one Kepler
+            # solve per planet only when a stellar term is on.
+            time_star = t
+            need_stellar = beam_active or ellip_mapped is not None
+            if (
+                need_stellar
+                and ltt_star_factor is not None
+                and ltt_active.any()
+            ):
+                # The orbital elements above are shaped (1, 1, N_planets)
+                # for the sub-exposure grid; this term is un-smeared and
+                # per planet, so it needs the FLAT scalars -- indexing the
+                # 3-D versions with [p_idx] would slice axis 0 (size 1).
+                star_corrected, _ = ltt.retarded_time(
+                    t,
+                    tp[0, 0, p_idx],
+                    n[0, 0, p_idx],
+                    ecc[0, 0, p_idx],
+                    sinw[0, 0, p_idx],
+                    cosw[0, 0, p_idx],
+                    sin_i[0, 0, p_idx],
+                    orbits.a.value[planets.orbit_map][p_idx],
+                    factor=ltt_star_factor[p_idx],
+                    z0=0.0,
+                    circular=circular_kepler,
+                )
+                if ltt_active.all():
+                    time_star = star_corrected
+                else:
+                    star_mask = pt.constant(
+                        ltt_active[inst_map].astype("float64")
+                    )
+                    time_star = pt.where(star_mask > 0.5, star_corrected, t)
 
             # Beaming is diluted the same way thermal/reflect are above --
             # EXOFASTv2 parity: exofast_chi2v2.pro:1517/1556 pass both beam
@@ -652,11 +1045,12 @@ class Transit(Instrument):
             if beam_active:
                 beam_p = planets.beam.value[p_idx]  # scalar, ppm
                 beam_term = physics.calc_beam_term(
-                    time, tc_this, period_this, beam_p
+                    time_star, tc_this, period_this, beam_p
                 )
                 if dil_obs_flat is not None:
                     beam_term = beam_term * dil_obs_flat
                 lc_model = lc_model + beam_term
+                step = step + beam_term
 
             # Ellipsoidal is multiplicative (exofast_tran.pro), applied to
             # the running lc_model (baseline + this planet's transit/
@@ -671,24 +1065,68 @@ class Transit(Instrument):
             if ellip_mapped is not None:
                 ellip_dev = (
                     physics.calc_ellipsoidal_factor(
-                        time, tc_this, period_this, ellip_mapped
+                        time_star, tc_this, period_this, ellip_mapped
                     )
                     - 1.0
                 )
                 if dil_obs_flat is not None:
                     ellip_dev = ellip_dev * dil_obs_flat
                 lc_model = lc_model * (1.0 + ellip_dev)
+                # (before + step) * (1 + dev) - before == step + (before +
+                # step) * dev: the factor acts on the whole running total.
+                step = step + (lc_before + step) * ellip_dev
+            planet_terms.append(step)
+
+        return lc_model, pt.stack(planet_terms, axis=1)
+
+    def _data_blocks(self):
+        """The data's own row blocks, ``[(i, rows_i), ...]`` in file order.
+
+        ``Instrument.rows`` publishes each file's contiguous range;
+        materialized as an index array rather than left as the slice for
+        the reason ``rows`` documents (a ``pm.Data``'s length is symbolic,
+        so a slice's shape is too, and the JAX backend cannot trace it).
+        """
+        blocks = []
+        for i in range(self.n_elements):
+            sl = self.rows(i)
+            blocks.append((i, np.arange(sl.start, sl.stop)))
+        return blocks
+
+    def build_likelihood(self, model, system):
+        # Stage 7 is once per BUILD, and a second system.build_model() on one
+        # System is supported (the GUI does it), so every cached NODE has to
+        # be dropped here.  A dilution node that outlived its model was handed
+        # to the second build's likelihood -- a crash at logp compile, or a
+        # silently stale dilution.
+        self._dilution_node = None
+
+        time = pm.Data("transit_time", self.time)
+        flux = pm.Data("transit_data", self.flux)
+        err = pm.Data("transit_err", self.err)
+
+        planets = system.planet
+        band = system.band
+
+        # The one light-curve expression (see _lc_model), on the data's own
+        # times and row blocks.  Retained as plain attributes, not
+        # Deterministics: at (N_obs,) either would add N_obs * draws *
+        # chains floats to every trace.  compile_plotters compiles them as
+        # the plotted model AT the observations (the phased panels' "other
+        # planets" cleaning), and tests compile a one-off function from
+        # _model_flux_node.
+        lc_model, planet_terms = self._lc_model(
+            system, time, self._data_blocks()
+        )
+        self._lc_physical_node = lc_model
+        self._lc_planet_terms_node = planet_terms
 
         if self.total_detrend_cols > 0:
             detrend = pm.Data("transit_detrend", self.detrend_matrix)
             lc_model += pt.dot(detrend, self.detrend_coeffs.value)
 
         # Full per-observation model prediction (baseline + detrend +
-        # exposure-averaged transit decrement). Kept as a plain attribute,
-        # not a Deterministic: at (N_obs,) this would add N_obs * draws *
-        # chains floats to every trace (tens of thousands x the size of the
-        # other diagnostics here, which are all (N_planets,)). Tests compile
-        # a one-off pytensor.function from this node directly instead.
+        # exposure-averaged transit decrement).
         self._model_flux_node = lc_model
 
         # 5. Likelihood (shared base helper: sqrt(err^2 + jitter_variance)).
@@ -705,15 +1143,16 @@ class Transit(Instrument):
         )
 
         # Modeling-draft prose for the transit model itself (the shared
-        # data/noise sentences came from the dispatcher above).
+        # data/noise sentences came from the dispatcher above).  The same
+        # resolved-state gates _lc_model builds the terms from.
         terms = []
-        if thermal_active:
+        if band.thermal_may_be_nonzero():
             terms.append("constant thermal emission")
-        if reflect_active:
+        if band.reflect_may_be_nonzero():
             terms.append("reflected light")
-        if ellip_active:
+        if band.ellipsoidal_may_be_nonzero():
             terms.append("ellipsoidal variation")
-        if beam_active:
+        if "beam" in planets.manifest:
             terms.append(r"Doppler beaming \citep{Faigler:2011}")
         if terms:
             from exozippy.outputs.prose import join_names
@@ -747,304 +1186,255 @@ class Transit(Instrument):
                 rank=21,
             )
 
-    def compile_plotters(self, model, system):
-        """Compiles the fast PyTensor functions for generating plotting lightcurves."""
-        t_input = pt.vector("lc_t_input")
-        inst_idx = pt.iscalar("lc_inst_idx")
+    # Points per instrument on a plotted model grid.  One size for the
+    # unphased span and the phased period window, so the two panels share
+    # a single compiled layout (see compile_plotters).
+    _PLOT_GRID_N = 2000
 
+    def compile_plotters(self, model, system):
+        """Compile the plotted model -- the likelihood's expression, twice.
+
+        Two compiled functions, both from ``_lc_model`` (there is no
+        separate plotting graph any more; reviews 1.5.6, 7.14.1):
+
+        ``_lc_data_fn(*params)`` -> ``(lc_physical, planet_terms)`` AT the
+            observations: literally the nodes ``build_likelihood`` scored
+            (minus the detrend term, which comes off the plotted data
+            instead -- see Instrument.detrend_at_data), compiled against
+            the plot parameters.  The phased panels' "other planets"
+            cleaning reads its ``planet_terms``.
+        ``_lc_grid_fn(t, *params)`` -> ``(lc_full, lc_matrix)`` on a plot
+            GRID laid out in the same per-file blocks as the data:
+            ``_PLOT_GRID_N`` rows per instrument, in file order, so a row's
+            band, smearing, LTT gate and dilution resolve exactly as a data
+            row's would.  Every model curve -- unphased span, phased period
+            window -- is this one function fed a different ``t``.
+
+        Exposure smearing therefore comes from the builder's own ninterp/
+        exptime path; the NumPy re-implementation that used to average an
+        instantaneous compiled function over sub-exposure offsets is gone,
+        and with it the drift it caused: it smeared beaming and ellipsoidal
+        too, which the likelihood deliberately does not (review 1.5.6).
+        """
+        t_input = pt.vector("lc_t_input")
         param_symbols = [p.value for p in system.plot_params]
         planets = getattr(system, "planet", None)
         orbits = getattr(system, "orbit", None)
 
         if planets is not None and orbits is not None:
-            t_grid = t_input[:, None]
-            tp = orbits.tp.value[planets.orbit_map][None, :]
-            n = orbits.n.value[planets.orbit_map][None, :]
-            ecc = orbits.ecc.value[planets.orbit_map][None, :]
-            cosw = orbits.cosw.value[planets.orbit_map][None, :]
-            sinw = orbits.sinw.value[planets.orbit_map][None, :]
-            inc = orbits.inc.value[planets.orbit_map][None, :]
+            n_grid = self._PLOT_GRID_N
+            blocks = [
+                (i, np.arange(i * n_grid, (i + 1) * n_grid))
+                for i in range(self.n_elements)
+            ]
+            lc_full_node, lc_matrix = self._lc_model(system, t_input, blocks)
 
-            M = (t_grid - tp) * n
-            sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
-
-            a_rstar = planets.ar.value[None, :]
-            p_ratio = planets.p.value[None, :]
-            r_norm = a_rstar * (1.0 - pt.sqr(ecc)) / (1.0 + ecc * cosf)
-
-            sin_wf = sinw * cosf + cosw * sinf
-            cos_wf = cosw * cosf - sinw * sinf
-            sin_i = pt.sin(inc)
-            cos_i = pt.cos(inc)
-
-            b = pt.sqrt(
-                pt.sqr(r_norm * cos_wf) + pt.sqr(r_norm * sin_wf * cos_i)
-            )
-            Z = r_norm * sin_wf * sin_i
-
-            band = system.band
-            band_idx = self.band_map_tensor[inst_idx]
-            u1_inst = band.u1.value[band_idx]  # scalar for this instrument
-            if "u2" in band.manifest:
-                u2_inst = band.u2.value[band_idx]
-            else:
-                u2_inst = pt.zeros_like(u1_inst)
-            # Same resolved-state gates as build_likelihood: no thermal or
-            # reflect graph at all when every band's value is pinned at 0.
-            thermal_inst = None
-            if band.thermal_may_be_nonzero():
-                thermal_inst = band.thermal.value[band_idx]  # scalar ppm
-            reflect_inst = None
-            if band.reflect_may_be_nonzero():
-                reflect_inst = band.reflect.value[band_idx]  # scalar ppm
-            ellip_inst = None
-            if band.ellipsoidal_may_be_nonzero():
-                ellip_inst = band.ellipsoidal.value[band_idx]  # scalar ppm
-            beam_active = "beam" in planets.manifest
-            baseline_inst = self.baseline.value[inst_idx]  # scalar
-
-            decrement_matrix_list = []
-            for p_idx in range(planets.n_elements):
-                b_p = b[:, p_idx]  # (N_times,)
-                Z_p = Z[:, p_idx]
-                r_p = planets.p.value[p_idx]
-                tc_this = orbits.tc.value[planets.orbit_map][p_idx]
-                period_this = orbits.period.value[planets.orbit_map][p_idx]
-
-                flux_frac = quad_limb_darkened_flux(
-                    b_p, r_p, u1_inst, u2_inst
-                )  # (N_times,)
-                # Negative so that _compiled_full_lc output + baseline gives a transit dip
-                blocked = pt.where(Z_p > 0.0, 1.0 - flux_frac, 0.0)
-                # match the likelihood's SED depth dilution (built there first)
-                dil_node = getattr(self, "_dilution_node", None)
-                if dil_node is not None:
-                    blocked = blocked * dil_node[inst_idx]
-
-                # Secondary eclipse / constant thermal emission + reflection
-                # -- same shared helpers build_likelihood uses (physics.py),
-                # same resolved-state gates. Both are pre-dilution terms,
-                # like the transit depth above.
-                additive_term = pt.zeros_like(b_p)
-                if thermal_inst is not None or reflect_inst is not None:
-                    planetvisible = physics.calc_planet_visible(b_p, Z_p, r_p)
-                    if reflect_inst is not None:
-                        reflect_term = physics.calc_reflect_term(
-                            t_input,
-                            tc_this,
-                            period_this,
-                            reflect_inst,
-                            planetvisible,
-                        )
-                        additive_term = additive_term + reflect_term
-                    if thermal_inst is not None:
-                        thermal_term = 1e-6 * thermal_inst * planetvisible
-                        additive_term = additive_term + thermal_term
-                if dil_node is not None:
-                    additive_term = additive_term * dil_node[inst_idx]
-
-                # Beaming is diluted like thermal/reflect above (EXOFASTv2
-                # parity: exofast_chi2v2.pro:1517/1556, exofast_tran.pro:157
-                # -- see build_likelihood). Not gated by planetvisible --
-                # same placement as build_likelihood.  Manifest-gated: the
-                # parameter only exists when a beam flag is set.
-                beam_term = pt.zeros_like(b_p)
-                if beam_active:
-                    beam_p = planets.beam.value[p_idx]
-                    beam_term = physics.calc_beam_term(
-                        t_input, tc_this, period_this, beam_p
-                    )
-                    if dil_node is not None:
-                        beam_term = beam_term * dil_node[inst_idx]
-
-                # Ellipsoidal is multiplicative, applied to the running
-                # total *including baseline* (exofast_tran.pro:143). Since
-                # this function's contract is "decrement from baseline"
-                # (baseline is added back separately by callers -- see
-                # _eval_unphased_lc), fold baseline in locally so the
-                # multiplication is exact, then subtract it back out:
-                #   decrement += (baseline + decrement) * (factor - 1)
-                # (algebraically (baseline+dec)*factor - baseline).  Only
-                # exact for a single planet per band; with >1 planet
-                # sharing a band, each gets its own fold-in, same
-                # simplification noted in build_likelihood.  The
-                # ellipsoidal DEVIATION is diluted like every other term,
-                # matching build_likelihood (and exofast_tran.pro, which
-                # dilutes (modelflux - 1) after the factor multiplies in).
-                planet_decrement = -blocked + additive_term + beam_term
-                if ellip_inst is not None:
-                    ellip_dev = (
-                        physics.calc_ellipsoidal_factor(
-                            t_input, tc_this, period_this, ellip_inst
-                        )
-                        - 1.0
-                    )
-                    if dil_node is not None:
-                        ellip_dev = ellip_dev * dil_node[inst_idx]
-                    planet_decrement = (
-                        planet_decrement
-                        + (baseline_inst + planet_decrement) * ellip_dev
-                    )
-                decrement_matrix_list.append(planet_decrement)
-
-            lc_matrix = pt.stack(
-                decrement_matrix_list, axis=1
-            )  # (N_times, N_planets)
-            lc_full_node = pt.sum(lc_matrix, axis=1)
-
-            # Retain the symbolic nodes and their non-param inputs so
-            # plot_data can derive param_deps (graph walk) and hand G5 the
-            # symbolic tensors behind the model traces. Unused by plot().
+            # Retain the symbolic nodes and their time input so plot_data
+            # can derive param_deps (graph walk) and hand the GUI the
+            # symbolic tensors behind the model traces.  Unused by plot().
             self._lc_t_input = t_input
-            self._lc_inst_idx = inst_idx
             self._lc_matrix_node = lc_matrix
             self._lc_full_node = lc_full_node
 
-            self._compiled_full_lc = pytensor.function(
-                inputs=[t_input, inst_idx] + param_symbols,
-                outputs=lc_full_node,
+            self._lc_grid_fn = pytensor.function(
+                inputs=[t_input] + param_symbols,
+                outputs=[lc_full_node, lc_matrix],
                 on_unused_input="ignore",
             )
-            self._compiled_lc_matrix = pytensor.function(
-                inputs=[t_input, inst_idx] + param_symbols,
-                outputs=lc_matrix,
-                on_unused_input="ignore",
+            phys = getattr(self, "_lc_physical_node", None)
+            terms = getattr(self, "_lc_planet_terms_node", None)
+            self._lc_data_fn = (
+                pytensor.function(
+                    inputs=param_symbols,
+                    outputs=[phys, terms],
+                    on_unused_input="ignore",
+                )
+                if phys is not None and terms is not None
+                else None
             )
 
         # Per-file GP conditional-mean evaluators (no-op without a gp: key).
         self._compile_gp_plotters(system)
 
-    def _oversample_offsets(self, inst_idx):
-        """Sub-exposure time offsets (days) and averaging weights for this
-        instrument's own ninterp/exptime -- the same midpoint-Riemann grid
-        across [-exptime/2, +exptime/2] that _build_oversample_grid uses
-        for build_likelihood, so a plot reproduces the smeared model the
-        fit actually optimized against rather than the instantaneous one."""
-        ninterp = int(self.ninterp[inst_idx])
-        if ninterp <= 1:
-            return np.zeros(1), np.ones(1)
-        exptime_days = float(self.exptime_min[inst_idx]) / 1440.0
-        j = np.arange(ninterp)
-        frac = (j + 0.5) / ninterp - 0.5
-        return frac * exptime_days, np.full(ninterp, 1.0 / ninterp)
+    def _eval_lc_grid(self, t_blocks, param_values):
+        """Evaluate the plotted model on one grid per instrument.
 
-    def _smeared_full_lc(self, t, inst_idx, *param_values):
-        """Exposure-smeared counterpart of _compiled_full_lc: averages that
-        same compiled (instantaneous) function over this instrument's own
-        sub-exposure offsets, matching build_likelihood's oversampling. A
-        ninterp=1 instrument short-circuits to the plain instantaneous call."""
-        offsets, weights = self._oversample_offsets(inst_idx)
-        if len(offsets) == 1:
-            return self._compiled_full_lc(t, inst_idx, *param_values)
-        acc = np.zeros_like(t, dtype=float)
-        for off, w in zip(offsets, weights):
-            acc += w * self._compiled_full_lc(t + off, inst_idx, *param_values)
-        return acc
-
-    def _smeared_lc_matrix(self, t, inst_idx, *param_values):
-        """Exposure-smeared counterpart of _compiled_lc_matrix (per-planet
-        decrement columns); see _smeared_full_lc."""
-        offsets, weights = self._oversample_offsets(inst_idx)
-        if len(offsets) == 1:
-            return self._compiled_lc_matrix(t, inst_idx, *param_values)
-        acc = None
-        for off, w in zip(offsets, weights):
-            contrib = w * self._compiled_lc_matrix(
-                t + off, inst_idx, *param_values
+        ``t_blocks[i]`` is instrument ``i``'s ``(_PLOT_GRID_N,)`` time
+        grid.  Returns ``(full, matrix)`` with ``full[i]`` the model light
+        curve (baseline included) and ``matrix[i]`` the ``(_PLOT_GRID_N,
+        N_planets)`` per-planet terms on that grid -- the concatenated
+        layout ``compile_plotters`` compiled, split back per file.
+        """
+        n_grid = self._PLOT_GRID_N
+        t_all = np.concatenate(
+            [np.asarray(t, dtype=np.float64) for t in t_blocks]
+        )
+        if t_all.shape[0] != n_grid * self.n_elements:
+            raise ValueError(
+                f"[{self.prefix}] plot grid layout needs {n_grid} points "
+                f"per instrument, got {[len(t) for t in t_blocks]}."
             )
-            acc = contrib if acc is None else acc + contrib
-        return acc
+        full, matrix = self._lc_grid_fn(t_all, *param_values)
+        full = np.asarray(full).reshape(self.n_elements, n_grid)
+        matrix = np.asarray(matrix).reshape(self.n_elements, n_grid, -1)
+        return full, matrix
+
+    def _eval_lc_data(self, param_values):
+        """The likelihood's own model at the observations: ``(lc_physical,
+        planet_terms)`` as ``(N_obs,)`` and ``(N_obs, N_planets)``."""
+        phys, terms = self._lc_data_fn(*param_values)
+        return np.asarray(phys), np.asarray(terms)
+
+    def _lc_at_times(self, param_values, i, t):
+        """Instrument ``i``'s plotted model at arbitrary times ``t``.
+
+        The compiled grid layout is fixed at ``_PLOT_GRID_N`` rows per
+        instrument, so ``t`` is fed through it in chunks of that size --
+        block ``i`` carrying the chunk (padded with its last time), every
+        other block a dummy -- and the results stitched back.  A
+        convenience for a caller that wants the likelihood's model for ONE
+        file at times of its own choosing (tests, a GUI probe); the panels
+        feed the layout directly.  Returns ``(full, matrix)``: the model
+        light curve (baseline included, GP excluded) ``(len(t),)`` and the
+        per-planet terms ``(len(t), N_planets)``, smeared over instrument
+        ``i``'s own exposure exactly as its data rows are.
+        """
+        t = np.asarray(t, dtype=np.float64).ravel()
+        n_grid = self._PLOT_GRID_N
+        fulls, mats = [], []
+        for start in range(0, max(t.size, 1), n_grid):
+            chunk = t[start : start + n_grid]
+            fill = chunk[-1] if chunk.size else float(self.time[0])
+            block = np.full(n_grid, fill)
+            block[: chunk.size] = chunk
+            t_blocks = [np.full(n_grid, fill) for _ in range(self.n_elements)]
+            t_blocks[i] = block
+            full, matrix = self._eval_lc_grid(t_blocks, param_values)
+            fulls.append(full[i][: chunk.size])
+            mats.append(matrix[i][: chunk.size])
+        return np.concatenate(fulls), np.concatenate(mats)
 
     # ------------------------------------------------------------------
     # Shared data preparation. The matplotlib plot() path and the GUI
     # plot_data() path both go through these helpers, so the two paths
-    # always draw the exact same arrays (see plotspec.PlotSpec).
+    # always draw the exact same arrays (see chart.Chart).
     # ------------------------------------------------------------------
-    def _baseline_for(self, point, i):
-        """Baseline flux for instrument i, in internal units.
+    def _unphased_lc_curves(self, system, point):
+        """Full model light curve per instrument: baseline + transit + GP.
 
-        The value comes from the point when it is there, else from the
-        baseline Parameter's own initval -- the same fallback
-        _point_to_plot_params uses for every other plotted parameter.
-
-        A ``point.get(label, 1.0)`` here silently substituted UNITY for any
-        parameter absent from the draws, and pinned (``sigma: 0``)
-        parameters are always absent (an all-fixed vector never becomes a
-        pm.Deterministic, so it is in neither model.deterministics nor the
-        posterior).  Unity is not a neutral default: load_data seeds each
-        baseline with the light curve's own median flux, so on an
-        un-normalized light curve (raw counts) a pinned baseline plotted
-        the model curve and the phased panel's cleaned flux off by the
-        entire flux scale.
+        Returns ``[(t_pretty_i, y_i), ...]`` in file order, from ONE
+        evaluation of the compiled grid layout.  The unphased panel shows
+        the model the likelihood actually fits, so any GP this light curve
+        requested is included; the phased panels take it back out of the
+        data instead (see _phased_lc_arrays).  The GP term is zero for a
+        light curve without a gp: key.
         """
-        vals = point.get(self.baseline.label)
-        if vals is None:
-            vals = self.baseline.initval
-        base_vals = np.atleast_1d(vals)
-        return float(base_vals[i] if i < len(base_vals) else base_vals[0])
+        param_values = self._point_to_plot_params(point, system)
+        t_blocks = []
+        for i in range(self.n_elements):
+            t_data = self.time[self.rows(i)]
+            t_blocks.append(
+                np.linspace(
+                    t_data.min(), t_data.max(), self._PLOT_GRID_N
+                ).astype(np.float64)
+            )
+        full, _ = self._eval_lc_grid(t_blocks, param_values)
+        curves = []
+        for i, t_pretty in enumerate(t_blocks):
+            y_gp = self.gp_mean_on_grid(system, point, i, t_pretty)
+            curves.append((t_pretty, full[i] + y_gp))
+        return curves
 
     def _eval_unphased_lc(self, system, point, i):
-        """Full model light curve for instrument i: baseline + transit + GP.
+        """Instrument ``i``'s unphased curve, ``(t_pretty, y)``; see
+        ``_unphased_lc_curves``, which plot_data calls once for all."""
+        return self._unphased_lc_curves(system, point)[i]
 
-        The unphased panel shows the model the likelihood actually fits, so
-        any GP this light curve requested is included; the phased panels take
-        it back out of the data instead (see _phased_lc_arrays). The GP term
-        is zero for a light curve without a gp: key. The transit decrement
-        goes through _smeared_full_lc (not _compiled_full_lc directly) so
-        this shared panel reflects the same exposure-time smearing
-        build_likelihood fit against, not the instantaneous model.
+    def _phased_lc_shared(self, system, point):
+        """The parts of a phased panel that do NOT depend on which planet.
+
+        ``_phased_lc_arrays`` is called once per (planet, instrument) and
+        recomputed the same things every time: the marshalled parameter
+        values, the per-observation GP and detrend corrections (both
+        point-only), and the model at the observations -- which the
+        likelihood's own compiled node now supplies for every instrument
+        at once (review 6.5.1 hoisted the per-instrument copies; the
+        builder made the pass a single call).
+
+        Returned as one dict per (component, point).  The per-planet phased
+        model grids fill in lazily as planets are reached
+        (``_phased_lc_grid``), one layout evaluation per planet shared by
+        every instrument's panel.
         """
-        mask = self.inst_map == i
-        t_data = self.time[mask]
-        t_pretty = np.linspace(t_data.min(), t_data.max(), 2000).astype(
-            np.float64
-        )
         param_values = self._point_to_plot_params(point, system)
-        y_decrement = self._smeared_full_lc(t_pretty, i, *param_values)
-        y_gp = self.gp_mean_on_grid(system, point, i, t_pretty)
-        return t_pretty, self._baseline_for(point, i) + y_decrement + y_gp
+        _, data_terms = self._eval_lc_data(param_values)
+        return {
+            "param_values": param_values,
+            # Removed from the phased data along with the other planets':
+            # the correlated component would smear the fold, and the fitted
+            # trend is a per-observation term no pretty-grid curve carries.
+            # Both are zeros when the feature is off.
+            "extra_signals": self.gp_mean_at_data(system, point)
+            + self.detrend_at_data(point),
+            # (N_obs, N_planets): each planet's term at every observation,
+            # from the likelihood's own node.
+            "data_terms": data_terms,
+            "grid": {},
+        }
 
-    def _phased_lc_arrays(self, system, point, p_idx, i):
+    def _phased_lc_grid(self, shared, p_idx, t_model):
+        """Every instrument's per-planet terms on planet ``p_idx``'s phase
+        grid, ``(n_inst, _PLOT_GRID_N, N_planets)``, cached per planet."""
+        cache = shared["grid"]
+        if p_idx not in cache:
+            _, matrix = self._eval_lc_grid(
+                [t_model] * self.n_elements, shared["param_values"]
+            )
+            cache[p_idx] = matrix
+        return cache[p_idx]
+
+    def _phased_lc_arrays(self, system, point, p_idx, i, shared=None):
         """
-        One-period phase grid, isolated model decrement for planet p_idx,
-        and the baseline-subtracted, other-planet-cleaned flux at the
-        observed times -- used by plot_data() (and via it plot()). Uses
-        _smeared_lc_matrix (see _eval_unphased_lc) so the phased panel
-        matches the exposure-smeared model as well.
+        One-period phase grid, isolated model term for planet p_idx on
+        instrument i, and the baseline-subtracted, other-planet-cleaned
+        flux at the observed times -- used by plot_data() (and via it
+        plot()).  Both the grid curve and the cleaning come from
+        ``_lc_model``, so the panel shows the exposure-smeared model the
+        likelihood fit, with beaming/ellipsoidal un-smeared as there.
+
+        ``shared`` is this point's ``_phased_lc_shared`` dict; omit it and
+        one is built, which is what a standalone caller wants and what the
+        per-planet loop must NOT do.
         """
+        if shared is None:
+            shared = self._phased_lc_shared(system, point)
         planets = system.planet
-        P_ref = float(
-            np.atleast_1d(point.get(system.orbit.period.label))[p_idx]
-        )
-        tc_ref = float(np.atleast_1d(point.get(system.orbit.tc.label))[p_idx])
+        P_ref = self._point_value(point, system.orbit.period, p_idx)
+        tc_ref = self._point_value(point, system.orbit.tc, p_idx)
 
         t_model = np.linspace(
-            tc_ref - 0.5 * P_ref, tc_ref + 0.5 * P_ref, 1000
+            tc_ref - 0.5 * P_ref, tc_ref + 0.5 * P_ref, self._PLOT_GRID_N
         ).astype(np.float64)
         phase_model = ((t_model - tc_ref) / P_ref + 0.5) % 1.0 - 0.5
         time_from_center_model = phase_model * P_ref
         sort_m = np.argsort(phase_model)
 
-        param_values = self._point_to_plot_params(point, system)
-        lc_matrix = self._smeared_lc_matrix(t_model, i, *param_values)
-        y_planet = lc_matrix[:, p_idx]
+        y_planet = self._phased_lc_grid(shared, p_idx, t_model)[i][:, p_idx]
 
-        mask = self.inst_map == i
-        data_lc_matrix = self._smeared_lc_matrix(
-            self.time[mask], i, *param_values
-        )
+        rows = self.rows(i)
+        data_terms = shared["data_terms"][rows]
         other_mask = np.ones(planets.n_elements, dtype=bool)
         other_mask[p_idx] = False
-        other_decrements = np.sum(data_lc_matrix[:, other_mask], axis=1)
+        other_terms = np.sum(data_terms[:, other_mask], axis=1)
 
-        baseline = self._baseline_for(point, i)
-        # Remove the correlated component along with the other planets', so
-        # the phased panel is not smeared by it. Zero without a gp: key.
-        gp_signal = self.gp_mean_at_data(system, point)[mask]
+        baseline = self._point_value(point, self.baseline, i)
         cleaned_flux = (
-            self.flux[mask] - baseline - other_decrements - gp_signal
+            self.flux[rows]
+            - baseline
+            - other_terms
+            - shared["extra_signals"][rows]
         )
-        data_phases = ((self.time[mask] - tc_ref) / P_ref + 0.5) % 1.0 - 0.5
+        data_phases = ((self.time[rows] - tc_ref) / P_ref + 0.5) % 1.0 - 0.5
 
         return {
             "P_ref": P_ref,
@@ -1067,12 +1457,12 @@ class Transit(Instrument):
 
     def plot_data(self, system, point=None):
         """
-        GUI plot specs for the transit photometry: per instrument an
+        GUI charts for the transit photometry: per instrument an
         unphased flux-vs-time chart, and (with a point) one phased chart
         per planet/instrument. point=None returns only the raw data
-        traces. See Component.plot_data and plotspec.PlotSpec.
+        traces. See Component.plot_data and chart.Chart.
         """
-        from exozippy.plotspec import PlotSpec, Trace
+        from exozippy.chart import Chart, Trace
 
         specs = []
         full_deps = self._model_trace_param_deps(
@@ -1082,49 +1472,65 @@ class Transit(Instrument):
             getattr(self, "_lc_matrix_node", None), system
         )
 
-        # The baseline enters both panels in numpy (_baseline_for), not
-        # through the symbolic nodes, so the graph walk cannot see it --
-        # without this dep a baseline slider would never refresh these
-        # charts in the GUI.
+        # The baseline, the fitted detrend model and the GP conditional
+        # mean enter the panels in numpy (_point_value / detrend_at_data /
+        # gp_mean_at_data), not through the symbolic nodes, so the graph
+        # walk cannot see them -- without these deps a baseline, detrend
+        # coefficient or GP hyperparameter slider would never refresh these
+        # charts in the GUI (review 1.12.9 for the GP labels).
         baseline_label = getattr(
             getattr(self, "baseline", None), "label", None
         )
-        if baseline_label:
-            if baseline_label not in full_deps:
-                full_deps = full_deps + [baseline_label]
-            if baseline_label not in matrix_deps:
-                matrix_deps = matrix_deps + [baseline_label]
+        numpy_deps = (
+            ([baseline_label] if baseline_label else [])
+            + self.detrend_dep_labels()
+            + self.gp_dep_labels()
+        )
+        full_deps = full_deps + [
+            lbl for lbl in numpy_deps if lbl not in full_deps
+        ]
+        matrix_deps = matrix_deps + [
+            lbl for lbl in numpy_deps if lbl not in matrix_deps
+        ]
 
         # ---- Unphased: flux vs time, per instrument -------------------
+        # The fitted trend is per observation, so it comes off the DATA
+        # rather than going onto the model curve; zeros without detrend
+        # columns (Instrument.detrend_at_data).
+        detrend = self.detrend_at_data(point)
+        # Every instrument's curve comes from ONE evaluation of the compiled
+        # grid layout.  A failed model eval keeps the data-only panels
+        # (matching the per-point tolerance of the old hand-drawn loop).
+        curves = None
+        if point is not None:
+            try:
+                curves = self._unphased_lc_curves(system, point)
+            except Exception as e:  # noqa: BLE001 - bad point/draw
+                logger.warning(f"LC model eval failed: {e}")
         for i in range(self.n_elements):
             mask = self.inst_map == i
             traces = []
             deps = []
-            if point is not None:
-                # A failed model eval keeps the data-only panel (matching the
-                # per-point tolerance of the old hand-drawn loop).
-                try:
-                    t_pretty, y_full = self._eval_unphased_lc(system, point, i)
-                    deps = full_deps
-                    traces.append(
-                        Trace(
-                            name="model",
-                            role="model",
-                            kind="line",
-                            x=t_pretty,
-                            y=y_full,
-                            node=getattr(self, "_lc_full_node", None),
-                        )
+            if curves is not None:
+                t_pretty, y_full = curves[i]
+                deps = full_deps
+                traces.append(
+                    Trace(
+                        name="model",
+                        role="model",
+                        kind="line",
+                        x=t_pretty,
+                        y=y_full,
+                        node=getattr(self, "_lc_full_node", None),
                     )
-                except Exception as e:  # noqa: BLE001 - bad point/draw
-                    logger.warning(f"LC model eval failed: {e}")
+                )
             traces.append(
                 Trace(
                     name=self.names[i],
                     role="data",
                     kind="scatter",
                     x=self.time[mask],
-                    y=self.flux[mask],
+                    y=self.flux[mask] - detrend[mask],
                     yerr=self.err[mask],
                     # Black-dot default (the historical PDF look); a user
                     # plot: color/marker still wins via _data_trace_style.
@@ -1136,7 +1542,7 @@ class Transit(Instrument):
                 )
             )
             specs.append(
-                PlotSpec(
+                Chart(
                     id=f"{self.prefix}.unphased.{self.names[i]}",
                     component={
                         "yaml_key": self.prefix,
@@ -1152,10 +1558,15 @@ class Transit(Instrument):
                         "instrument": self.names[i],
                         "file_tag": f"LC_unphased_{self.names[i]}",
                         "figsize": (12, 5),
+                        # The unphased DATA are detrend-subtracted, so they
+                        # move with the point whenever this instrument has
+                        # detrend columns (and only then).
+                        "dynamic_data": self.total_detrend_cols > 0,
                         "caption": (
                             "Transit photometry from "
                             + latex_escape(self.names[i])
                             + " with the best-fit model (red)."
+                            + self.detrend_caption()
                         ),
                     },
                 )
@@ -1164,12 +1575,17 @@ class Transit(Instrument):
         # ---- Phased: one chart per planet/instrument (needs a model) --
         if point is not None:
             planets = system.planet
+            # Once per (component, point), not once per planet x instrument
+            # (6.5.1); the per-instrument matrices fill in lazily.
+            shared = self._phased_lc_shared(system, point)
             for p_idx in range(planets.n_elements):
                 for i in range(self.n_elements):
                     # A failed prep skips this panel, exactly as the old
                     # hand-drawn loop skipped its figure.
                     try:
-                        prep = self._phased_lc_arrays(system, point, p_idx, i)
+                        prep = self._phased_lc_arrays(
+                            system, point, p_idx, i, shared=shared
+                        )
                     except Exception as e:  # noqa: BLE001 - bad point/draw
                         logger.warning(f"LC phased model eval failed: {e}")
                         continue
@@ -1214,20 +1630,33 @@ class Transit(Instrument):
                             + " in "
                             + latex_escape(self.names[i])
                             + ", baseline and other planets removed."
+                            + self.detrend_caption()
                         ),
                         # The phased DATA re-folds with tc/P and its cleaning
                         # subtracts the baseline, other planets and any GP --
                         # all point-dependent, so live evals must re-ship it.
                         "dynamic_data": True,
                     }
-                    # Zoom to +/- t14 around mid-transit when the point
-                    # carries a transit duration for this planet.
-                    t14_raw = point.get(f"{self.prefix}.t14")
-                    if t14_raw is not None:
-                        t14_ref = float(np.atleast_1d(t14_raw)[p_idx])
-                        meta["x_range"] = [-t14_ref, t14_ref]
+                    # Zoom to +/- t14 around mid-transit when a transit
+                    # duration is known for this planet.  `planet.t14`, not
+                    # `transit.t14`: the durations are planet geometry now
+                    # (review 8.8.7).  Read through _point_value like the
+                    # period and tc above, NOT `point["planet.t14"][p_idx]`:
+                    # this read sits outside the panel's try, so a scalar or
+                    # short t14 in the point IndexError'ed on p_idx > 0 and
+                    # killed plot_data for the whole component (review
+                    # 2.5.4); the helper falls back to element 0 for a
+                    # broadcast scalar and to the Parameter's own start when
+                    # the point lacks it.  A non-finite duration (no start
+                    # to fall back on) simply means no zoom.
+                    x_range = None
+                    t14_param = getattr(planets, "t14", None)
+                    if t14_param is not None:
+                        t14_ref = self._point_value(point, t14_param, p_idx)
+                        if np.isfinite(t14_ref):
+                            x_range = [-t14_ref, t14_ref]
                     specs.append(
-                        PlotSpec(
+                        Chart(
                             id=f"{self.prefix}.phased.{self.names[i]}.{pname}",
                             component={
                                 "yaml_key": self.prefix,
@@ -1238,6 +1667,7 @@ class Transit(Instrument):
                             ylabel="Flux - Baseline",
                             traces=traces,
                             param_deps=matrix_deps,
+                            x_range=x_range,
                             meta=meta,
                         )
                     )

@@ -46,9 +46,18 @@ population would be the majority and the two components swap roles.
 relative flux for a transit curve, flux in the file's own arbitrary system
 for a microlensing curve -- each instrument overrides the unit in its
 defaults.yaml exactly like the GP amplitudes, and MulensInstrument
-additionally rescales the bounds per light curve), and Instrument pushes a
-data-driven hint of ``10 x median(err)``
-so the background component starts well separated from the inlier scatter.
+additionally rescales the bounds per light curve).  Instrument seeds it at
+``SCALE_START_FACTOR x median(err)`` and CAPS it at ``SCALE_CAP_FACTOR x
+median(err)`` per file (review 8.6.3): left uncapped, the background
+component is free to grow until it absorbs genuine model misfit -- on DC2018
+event 128 it fitted 300-1000x the median error, forgave 777 nats of
+caustic-crossing residuals and inverted the light curve's own preference
+for its finite-source size.  With the cap a defecting point buys at most
+~ln(SCALE_CAP_FACTOR) nats of width.  The cap is a modelling default the
+params file can tighten or loosen, and a posterior piled against it (or
+against out_frac's 0.5) is reported at wrap-up as an alarm
+(``LIKELIHOOD_CAP_ALARM``): the noise model wants more freedom than the cap
+allows, and the residuals decide whether that is junk or signal.
 ``nu`` is sampled as ``t_log_nu`` (base 10) because it spans decades and only
 its order of magnitude matters (nu ~ 2 is very heavy-tailed, nu >~ 50 is
 Gaussian for practical purposes); the linear ``t_nu`` is recorded as a
@@ -95,6 +104,26 @@ LIKELIHOOD_PARAMS = {
 # a generic default; Instrument pushes a hint for it (see _prepare_robust).
 LIKELIHOOD_SCALE_PARAM = {
     "hogg": "out_scale",
+}
+
+# That parameter's data-derived START and CAP, as multiples of the file's
+# median error bar (in the parameter's own user unit).  The start used to be
+# 10x, "so the two mixture components start separated and cannot swap
+# roles"; the cap now sits there instead and the start moved down to the
+# median error itself.  The ruling (8.6.3) accepted the trade: the damage on
+# DC2018 event 128 rode on the WIDTH the background component was allowed,
+# not on the count of points it claimed, and out_frac's 0.5 ceiling already
+# keeps the two components from swapping roles.
+SCALE_START_FACTOR = 1.0
+SCALE_CAP_FACTOR = 10.0
+
+# Per family, the parameters whose UPPER bound is a modelling cap rather than
+# a validity limit: out_scale's SCALE_CAP_FACTOR x median error, out_frac's
+# 0.5 role-swap ceiling.  Instrument._register_robust flags the opted-in
+# elements ``cap_alarm`` in the manifest, and the wrap-up
+# (diagnostics.cap_alarm_findings) warns when a posterior piles against one.
+LIKELIHOOD_CAP_ALARM = {
+    "hogg": ("out_frac", "out_scale"),
 }
 
 # Parameters sampled as log10 of the quantity the likelihood actually wants,

@@ -21,7 +21,7 @@ gamma = sp.symbols("gamma", real=True)
 # Maps SymPy symbols back to the local parameter keys inside the RV Instrument component.
 
 
-def get_symbol_map(config):
+def get_symbol_map(config, system_config):
     return {
         "gamma": "gamma",
         **JITTER_SYMBOL_MAP,

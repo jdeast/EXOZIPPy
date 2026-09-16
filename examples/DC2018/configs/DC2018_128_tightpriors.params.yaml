@@ -1,0 +1,148 @@
+# DC2018_128_hoggcap.params.yaml PLUS the five prior tightenings 8.2.2
+# measured to be 57% of this model's nested-sampling cost.
+#
+# THIS IS DELIBERATELY PATH 3 of JDE's three routes (8.2.2, 2026-09-03), the
+# one he called the safest: tighter limits in an EXAMPLE's params file, with
+# comments explaining that the point is runtime.  Nothing here changes a
+# shipped default (path 1, "needs to be very conservative") and nothing here
+# is derived automatically from the data at run time (path 2, "needs to be
+# very robust and user-overrideable").  Every number below is a hand-checked
+# bound for THIS event, and every one is a TIGHTENING -- the tighten-only
+# rule is respected throughout, so no previously-supported region becomes
+# unreachable in a way the engine cannot see.
+#
+# WHY THIS RUN EXISTS.  Every NS cost figure quoted so far -- including the
+# ~16.6 days of 64-core wall / ~25,000 core-hours the observable arm has
+# spent WITHOUT terminating -- was measured with the WIDE defaults.  JDE's
+# objection on 2026-09-04 was precisely that the number being reasoned from
+# is not the number that matters: "we want to evaluate the NS scenario where
+# all reparameterizations knobs have been turned and reasonable prior bounds
+# have been tightened.  I don't think we've done that."  This is that run.
+#
+# EXPECTED SAVING, from the per-parameter H decomposition
+# (dc128_h_decomposition.py; H_i ~ log(width / sd) - 0.5*log(2*pi*e)):
+#     err_scale     x2   log(2e6 / 200)      = 9.21 nats each   18.4
+#     t_0                log(6e5 / 1893)     = 5.76             5.8
+#     log_f_total   x2   log(110 / 20)       = 1.70 each        3.4
+#                                            TOTAL           ~27.6 nats
+#   (u_0 was in this table at 2.20 nats and has been REMOVED -- see item 4
+#    below for why it must not be tightened in a template.)
+# against the run's own measured H of 98.0, so ~30% fewer iterations at the
+# same nlive.  READ THAT AS AN ESTIMATE, NOT A PREDICTION: the H_i formula
+# assumes a uniform prior inside each box while the real prior carries
+# event-rate/IMF/distance terms, so the ranking is robust but the total is
+# not (8.2.2's own caveat).  The measured niter/ncall against job 15382719
+# is the actual result.
+
+star.Lens.ra:   {initval: 267.595, sigma: 0}
+star.Lens.dec:  {initval: -28.982, sigma: 0}
+star.Lens.teff:   {sigma: 0.0}
+star.Lens.feh:    {sigma: 0.0}
+star.Lens.radius: {sigma: 0.0}
+planet.Companion.radius: {sigma: 0}
+band.W149.u1: {initval: 0.0, sigma: 0}
+band.Z087.u1: {initval: 0.0, sigma: 0}
+mulensinstrument.Roman_W149.out_scale: {upper: 0.2620, initval: 0.02620}
+mulensinstrument.Roman_Z087.out_scale: {upper: 0.04213, initval: 0.004213}
+
+# --- THE FIVE TIGHTENINGS ------------------------------------------------
+#
+# 1-2. err_scale: U(1e-6, 1e6) -> U(1e-2, 1e2).  17.9 + 15.8 = 33.7 nats,
+# the single largest line in the decomposition, and the default is a factor
+# of a MILLION in either direction on a multiplicative error rescaling.
+# This model constrains it to sd 0.0043 (W149) and 0.034 (Z087).  A factor
+# of 100 either way still covers any error bar that is wrong by a plausible
+# amount; a data set whose errors are off by more than 100x should be
+# rescaled by hand, which is JDE's own suggested remedy and the reason he
+# wants a near-bound warning attached to path 1.
+mulensinstrument.Roman_W149.err_scale: {lower: 1.0e-2, upper: 1.0e+2}
+mulensinstrument.Roman_Z087.err_scale: {lower: 1.0e-2, upper: 1.0e+2}
+
+# 3. t_0: U(2.4e6, 3e6) -> the data span padded by 90 days each side.
+# ON WHETHER THIS SHOULD BE IMPLEMENTED GENERALLY (JDE, 2026-09-04, asking
+# whether the PEAK-based version is robust enough or whether the span-based
+# one gets far enough):  the span-based rule should ship; the peak-based one
+# should not.
+#   SPAN-BASED needs only the loaded time column, which exists for every
+#   microlensing config at lifecycle stage 1 (load_data pushes data-derived
+#   hints), so it is always computable and cannot be absent.  It buys
+#   log(6e5 / 1893) = 5.76 nats of t_0's 17.9.
+#   PEAK-BASED (t_0 +/- a few t_E) would buy log(6e5 / 180) = 8.11 nats at
+#   5 t_E -- i.e. 2.35 nats MORE than span-based, so span-based already
+#   captures 71% of the recoverable total.
+#   AND THERE IS NO IN-TREE PEAK FINDER TO BASE IT ON.  t_0 hints reach the
+#   engine only from MMEXOFAST (mmexofast_support.py:254/290) or from user
+#   params, and MMEXOFAST is OPTIONAL and routinely off (`mmexofast: false`
+#   in examples/ob09020, whose survey-only photometry undersamples the
+#   anomaly).  A bound that exists for some configs and not others is
+#   exactly the fragility JDE's path 2 says must be avoided, and it would
+#   fail hardest where it matters: multi-peak binary caustics, events
+#   peaking off the ends of the data, and low-S/N events -- the cases where
+#   a WRONG tight t_0 bound excludes the true solution outright.
+#   VERDICT: 2.35 nats is not worth making a prior depend on an optional
+#   external fitter.  Implement the span-based rule as path 2, with the pad
+#   user-overridable, and leave peak-based as an explicit opt-in if anyone
+#   ever wants it.
+# MEASURED from the two light curves: W149 spans 2458346.5055-2460059.2414
+# and Z087 2458346.7279-2460058.9182, i.e. 1712.7 days.  The default prior
+# is a 600,000-day window for a 1,713-day data set -- 350x the span -- and
+# it costs 17.9 nats because the data pin t_0 to sd 0.0025 d.
+# 90 days is chosen to be generous rather than clever: it is far outside any
+# t_E for this event (18 d truth) so a peak sitting just off the ends of the
+# data is still reachable, but it does not admit a peak the data could not
+# possibly have seen.  This is exactly JDE's path-2 rule ("a few months
+# before the first data point to a few months after the last") applied BY
+# HAND here rather than automatically, because path 2 has not been built.
+# KEY FORM: `source.Source.t_0` post-#246 (was `lens.Lens.t_0`), naming the
+# SOURCE instance -- t_0 is a per-track quantity and moved to `source:`
+# with the 8.6.17 split.  The original trap this note records:
+# `lens: - name: "Lens"`.  An earlier version of this file wrote
+# `lens.DC2018_128.t_0` -- the RUN name, which is not an instance name and
+# matches nothing.  It would have been silently ignored here, because
+# run.py:1641's "did not match any model parameter" warning lives in the
+# run.py path and dc18_fullns_pilot.py drives the sampler directly.  That is
+# worth a defect of its own: a params key that matches nothing should warn
+# from the config layer, not from one caller.
+source.Source.t_0: {lower: 2458256.5, upper: 2460149.3}
+
+# 4. u_0: NOT TIGHTENED, deliberately.  An earlier version of this file cut
+# it to U(-2, 2) for 2.20 nats; JDE vetoed that on 2026-09-04 -- "u_0 +/- 2
+# is a very tight bound and i worry users might replicate that template.
+# I'm pretty sure we know systems with larger values" -- and he is right on
+# both counts.
+#
+# WHY IT CANNOT BE DONE ROBUSTLY, WHICH IS THE REAL ANSWER.  u_0 maps to the
+# peak magnification, A_max = (u_0^2 + 2) / (u_0 * sqrt(u_0^2 + 4)), so a
+# bound on u_0 is a bound on the peak amplitude.  But the OBSERVED amplitude
+# is f_source * (A - 1) / (f_source + f_blend): the source flux and the
+# blend are free and mutually degenerate, so a small observed bump is
+# equally a small u_0 with a faint source or a large u_0 with a bright one.
+# No bound on u_0 follows from the light curve alone.  Adding one means
+# asserting something about the blending, which is the very thing being fit.
+# And large u_0 IS real: low-magnification survey events run to |u_0| ~ 1-3
+# (u_0 = 2 gives A_max = 1.06, u_0 = 3 gives 1.017 -- detectable in
+# high-cadence photometry), and in a wide binary u_0 is measured from the
+# CENTRE OF MASS, which the source can miss by well over one theta_E while
+# still crossing a caustic.
+#
+# COST OF LEAVING IT: 2.20 nats of the ~29.8 this file saves, i.e. 7%.  That
+# is the cheapest of the five and by far the most dangerous to copy, so the
+# trade is not close.  Note the default's own 10.4 nats therefore REMAIN --
+# u_0 stays the largest single un-recovered line in the decomposition, and
+# recovering it needs a joint treatment with f_source/f_blend, not a box.
+# The sign is also load-bearing: u_0 must stay SIGNED and symmetric or the
+# +/-u_0 degeneracy that both microlensing conventions rely on is silently
+# deleted -- one shipped `swap_schedule: random` arm already lost that mode
+# by accident (7.4.4 leg (a)), and it is not a mode to lose on purpose.
+
+# 5. log_f_total: U(-100, 10) -> U(-15, 5).  14.0 + 12.4 = 26.4 nats, but
+# only ~1.7 nats each is recoverable this way, because the width enters
+# logarithmically and the default is already a LOG coordinate -- a 110-decade
+# prior on a flux.  10**-15 to 10**5 is 20 decades, still absurdly generous
+# for a Roman light curve, and the data pin it to sd 2.2e-5.
+# NOTE this is the parameter JDE floated a different treatment for ("or your
+# suggested log_f_total modification"); that proposal is NOT implemented here
+# and the bound is left as a plain conservative tightening, so this run does
+# not conflate two changes.
+mulensinstrument.Roman_W149.log_f_total: {lower: -15.0, upper: 5.0}
+mulensinstrument.Roman_Z087.log_f_total: {lower: -15.0, upper: 5.0}

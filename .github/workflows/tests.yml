@@ -42,19 +42,39 @@ jobs:
   # These four combinations cost the SAME wall clock as the single 3.12 job
   # that preceded them, because matrix combinations run concurrently -- a
   # measured run had all four starting within 6 seconds of each other and
-  # finishing between 12 and 16 minutes. Adding Python versions here is
+  # finishing within a few minutes of each other. Adding Python versions here is
   # effectively free; do not trim them to "save time", there is none to save.
   #
-  # WINDOWS IS DELIBERATELY ABSENT. It was tried and removed: the suite takes
-  # over 90 minutes there against ~16 on Linux, and the job was cancelled at
-  # the cap on every attempt -- it never once produced a result, green or red.
-  # Adding it back means first making the suite finish, not raising the
-  # timeout again. The bugs it did find (mkl wheels, SIGALRM, the GUI's
-  # cross-process signal) are fixed and stay fixed. See notes/todo.txt.
+  # THE CAP IS 90 MINUTES, and the number is not arbitrary. That "12 to 16
+  # minutes" above was measured in July 2026 and the suite has roughly tripled
+  # since: on 2026-08-18 master ran ~34 minutes and PR #187 ran 41.7 (3.12),
+  # 44.9 (3.14) and 36.9 (macOS) -- with 3.13 CANCELLED at 45:16. Three of four
+  # jobs landing between 37 and 45 minutes against a 45-minute cap is not a
+  # margin, and the failure it produces is the worst kind: "cancelled", which
+  # reads as a broken PR rather than as a budget that ran out. 90 restores the
+  # ~2x headroom the 45 was chosen to give.
+  #
+  # WINDOWS IS DELIBERATELY ABSENT. It was tried and removed: the suite took
+  # over 90 minutes there against ~16 on Linux at the time, and the job was
+  # cancelled at the cap on every attempt -- it never once produced a result,
+  # green or red. Adding it back means first making the suite finish there, not
+  # raising the timeout until it fits: the cap above is sized to what Linux and
+  # macOS actually take, and a platform that needs several times that is a
+  # different problem. The bugs Windows did find (mkl wheels, SIGALRM, the
+  # GUI's cross-process signal) are fixed and stay fixed. The running list of
+  # what native Windows would still need is docs/windows-native.md.
   pytest:
     name: pytest
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 90
+
+    # actions: write is for `gh cache delete` in the housekeeping step at the
+    # end; contents: read is everything else this job does. Scoped to the job
+    # rather than the workflow, so the nightly job below keeps its own narrower
+    # set (issues: write, no actions).
+    permissions:
+      contents: read
+      actions: write
     strategy:
       # Do not cancel the other combinations when one fails. When a new Python
       # breaks something, "3.14 failed and everything else was cancelled" tells
@@ -63,11 +83,93 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         python-version: ["3.12", "3.13", "3.14"]
+        # THE SUITE IS SPLIT ACROSS SHARDS, and this is the lever that
+        # actually reaches the wall-clock target. Worker count is capped by
+        # the runner: measured, ubuntu-latest reports cpus=4/memory=15.6 GB
+        # and macos-latest cpus=3/memory=7.0 GB, so a single job can use at
+        # most 4 and 2 workers respectively. The suite's ~12000 ubuntu
+        # worker-seconds (2026-09-14) divided by 4 is still ~50 minutes, so
+        # more machines is the only way down -- up to a point, below.
+        #
+        # THE SHARD COUNT IS PER OS (`shards`, read by the pytest step as
+        # `--of`), and both numbers are measured rather than picked. What
+        # bounds a job's wall clock, calibrated on four master runs of
+        # 2026-09-14 (run 34888667878 and three siblings; the prediction is
+        # within 4% of every observed job):
+        #
+        #   wall/job = ~100 s fixed + max(shard worker-s / workers,
+        #                                  slowest FILE in the shard, serial)
+        #
+        # The fixed cost is ~100 s (setup-python cache hit 27-36 s, poetry
+        # install 1-2 s from cache, compile-cache restore 2-3 s, collect and
+        # seed 10-15 s, upload and the loadfile tail), not the 225 s an
+        # earlier projection assumed. The second term is the one to watch:
+        # --dist loadfile pins a whole file to one worker, so a shard never
+        # beats its slowest file's SERIAL time, and once one file exceeds
+        # the per-worker share the shard count stops mattering for the job
+        # that carries it. That is exactly what happened here: the new
+        # test_mulens_acceptance.py cost 873 s serial, the per-worker share
+        # at 4 shards was ~750 s, and the projection read
+        #
+        #   ubuntu shards  jobs/push  worst job  binding constraint
+        #              4         16      16.2m  that one file
+        #              5         20      16.2m  that one file
+        #              6         24      16.2m  that one file
+        #              8         32      16.2m  that one file
+        #
+        # -- adding machines bought NOTHING for the worst job. Splitting the
+        # file in two (test_mulens_acceptance_a.py / _b.py, ~435 s each)
+        # gives 14.2m at 4 shards with every shard equal and spread-bound
+        # again. THE RULE: below ~10 minutes the lever is splitting slow
+        # FILES, never adding jobs. tests/durations.json names the slowest
+        # ones, and the mulens split records how (a fixture-name partition in
+        # a shared helper module, no fixture setup to share).
+        #
+        # ADDING JOBS ALSO HAS A HARD CEILING. The free plan runs 20
+        # concurrent jobs and 5 macOS jobs. A push today is 12 ubuntu + 3
+        # macOS + lint + the gate + the 2 Intel-macOS probes (intel-mac.yml)
+        # = 19 jobs, 5 of them macOS -- AT the macOS cap. Before macOS went
+        # to 3 shards it was 6 macOS jobs against 5, so one macOS shard
+        # waited ~8 minutes on every push even with nothing else running,
+        # and the run's wall clock (~23 m) was set by that queue and not by
+        # any shard. Past the total cap a second wave queues behind the
+        # first, so a fifth ubuntu shard (+4 jobs = 22) would cost more in
+        # queueing than it saves in spread. Count the jobs before editing
+        # either list.
+        #
+        # WHY MACOS IS 3 AND UBUNTU 4. macOS is 3.2x faster per worker-second
+        # (3783 worker-s for the same suite against ubuntu's 11987), so three
+        # macOS shards land at ~100 + 3783/2/3 = ~730 s = 12.2 m per job with
+        # a floor file of 276 s -- under the ubuntu jobs, which they used to
+        # exceed only because of the queue. Three also puts macOS exactly at
+        # the 5-job cap counting the two Intel probes.
+        #
+        # Four ubuntu shards also buy MARGIN, which is the practical argument
+        # that has not changed since the first sharded run: two shards then
+        # measured 15:10-26:36 across eight jobs, a mean right ON the
+        # 20-minute target with +/-40% runner variance, so about half of all
+        # runs missed it. A shard count whose mean equals the target fails
+        # the target half the time.
+        shard: [1, 2, 3, 4]
+        shards: [4]
         include:
-          # CONTRIBUTING documents a macOS setup, and macOS is as fast as Linux
-          # here, so it stays on the pull-request path.
+          # CONTRIBUTING documents a macOS setup, so macOS stays on the
+          # pull-request path. Every shard of ITS OWN split (`shards: 3`), so
+          # the platform is covered rather than partly covered: the three
+          # jobs together run the whole suite, packed 3 ways from the same
+          # durations file and verified by --verify like the ubuntu split.
           - os: macos-latest
             python-version: "3.12"
+            shard: 1
+            shards: 3
+          - os: macos-latest
+            python-version: "3.12"
+            shard: 2
+            shards: 3
+          - os: macos-latest
+            python-version: "3.12"
+            shard: 3
+            shards: 3
 
     steps:
       - uses: actions/checkout@v7
@@ -156,15 +258,283 @@ jobs:
           path: ~/.astropy/cache
           key: astropy-cache-de430
 
-      # -n 2 overrides the -n 6 in pyproject's addopts. Six workers suit a
-      # workstation but oversubscribe a GitHub runner: each peaks ~1-2 GB
-      # building a System and compiling PyTensor graphs. The symptom was never
-      # an assertion failure but "worker 'gwN' crashed", landing on whichever
-      # heavy test drew the short straw -- it moved between
-      # test_integration_kelt4, test_gp and test_sed_plot_data across runs,
-      # and vanished entirely on others. That is a memory ceiling, not a bug.
+      # PyTensor compiles a C module for essentially every distinct graph the
+      # suite builds and caches it in its compiledir. A CI job starts with an
+      # empty one, so EVERY graph is compiled from scratch, and that dominates
+      # the runtime here: locally, one full suite run against an empty
+      # compiledir takes 27 minutes against ~9 warm, on six workers. The
+      # 34-45 minute jobs this workflow currently reports are very largely
+      # gcc.
+      #
+      # RESTORE HERE, SAVE ONLY ON MASTER (the save step is at the end of the
+      # job). Two reasons, and the second is the one that bites:
+      #
+      #   * A cache saved on the default branch is readable from every branch,
+      #     while one saved on a topic branch is visible only to that branch
+      #     and its PR. Saving from master is therefore the only way one entry
+      #     serves every pull request.
+      #   * The repository-wide cache budget is 10 GB and GitHub evicts
+      #     least-recently-ACCESSED to stay under it. A compiledir is a few
+      #     hundred MB per matrix combination, so saving one on every PR run
+      #     would churn several GB a day and put the Zenodo spectra (132 MB)
+      #     and the ephemeris kernel (115 MB) above at risk of eviction --
+      #     trading a 5-minute cache for a 250 MB download. Restricting writes
+      #     to master pushes caps the churn at one set per merge.
+      #
+      # The key carries github.run_id so each master push writes a NEW entry
+      # rather than hitting an existing one and skipping the save (a cache key
+      # is immutable once written -- that is the trap that freezes a cache at
+      # whatever the first run produced). The restore-keys prefix is what
+      # makes that usable: it matches the most recent entry for this os +
+      # python + lockfile, falling back to any entry for this os + python when
+      # the lock moves. A partial hit is worth having -- most graphs are
+      # unaffected by a dependency bump, and those that are simply recompile.
+      #
+      # poetry.lock stands in for the pytensor version: PyTensor's cache keys
+      # already embed its own version, the compiler version and the graph, so
+      # a stale entry is a miss and never a wrong answer.
+      #
+      # The KERNEL VERSION is the footgun to know about here, and it is
+      # handled on the pytest side rather than in the key. PyTensor names the
+      # compiledir after the platform string, which includes the kernel
+      # release, so a runner image bump silently strands the entire restored
+      # tree -- nothing reads it, and nothing would ever delete it either, so
+      # it would ride along in the cache forever making the download bigger
+      # for no benefit. The root conftest's prune sweeps sibling compiledir_*
+      # trees for exactly this case.
+      - name: Restore the PyTensor compile cache
+        id: compiledir-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.pytensor-pytest
+          key: pytensor-compiledir-p1-${{ matrix.os }}-${{ matrix.python-version }}-${{ hashFiles('poetry.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            pytensor-compiledir-p1-${{ matrix.os }}-${{ matrix.python-version }}-${{ hashFiles('poetry.lock') }}-
+            pytensor-compiledir-p1-${{ matrix.os }}-${{ matrix.python-version }}-
+
+      # The worker count is COMPUTED, not written down here, and the reason
+      # is that the number this replaced went stale without anyone noticing.
+      # `-n 2` was chosen when a hosted Linux runner had two cores; the
+      # runners grew, the suite tripled, and the 2 stayed. Measured on
+      # 2026-08-24 with the compile cache warm on both sides, the four matrix
+      # jobs did the same work PER WORKER as a 36-core workstation -- ubuntu
+      # 3.12 spent 5202 worker-seconds against the workstation's 5682 -- so
+      # the entire 43-minute-vs-15:47 gap was worker count and nothing else.
+      # Replacing one hardcoded number with another would just restart that
+      # clock, so scripts/pytest_workers.py reads the cores and the memory
+      # instead; --explain puts both in the log, which is also how we learn
+      # what a runner actually has rather than inferring it from docs.
+      #
+      # The memory term in that script is the binding one, and the failure it
+      # exists to avoid is specifically "worker 'gwN' crashed" -- a memory
+      # ceiling that presents as a wandering flaky failure, seen on
+      # test_integration_kelt4, test_gp and test_sed_plot_data on different
+      # runs. Do not raise the worker count past what it returns without
+      # raising the memory per worker there too.
+      #
+      # The compiledir budget is PER COMPILEDIR and there is one per worker
+      # (the root conftest gives each its own, so they never queue on
+      # PyTensor's compile lock). It is tighter than the local default
+      # because a CI job runs one commit: anything beyond roughly one run's
+      # per-worker working set of ~1600 entries is dead weight that only
+      # inflates the artifact this job saves. A budget BELOW that working set
+      # would evict entries this very run still needs.
+      # --verify is cheap and load-bearing: it asserts the shards partition
+      # the file list exactly. A split that silently DROPS a file leaves every
+      # shard green with the coverage gone, which is the worst way for this to
+      # fail, so the check runs on every job rather than living in a test only.
+      # It also reports how stale tests/durations.json is -- on stderr, on
+      # this job's summary page, and as a ::warning:: annotation when files
+      # are absent -- because a stale weighting silently unbalances the split
+      # (docs/testing.md, "Keeping tests/durations.json current").
+      #
+      # `--of` is the PER-OS shard count from the matrix, not a literal: the
+      # ubuntu and macOS splits are different sizes (see the matrix comment).
       - name: Run test suite
-        run: poetry run pytest -q -n 2
+        env:
+          EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES: "1800"
+        run: |
+          set -euo pipefail
+          workers=$(poetry run python scripts/pytest_workers.py --explain)
+          files=$(poetry run python scripts/pytest_shard.py \
+            --shard ${{ matrix.shard }} --of ${{ matrix.shards }} --verify)
+          # --durations=0 into a transcript the step below uploads. This is
+          # the ONLY place per-file cost can be measured on the hardware that
+          # actually runs the suite, and measuring it anywhere else provably
+          # does not transfer: weights taken on a 36-core workstation balanced
+          # the recorded sums to 1301 equal ubuntu-seconds per shard and still
+          # produced 14:19 against 8:38 in real wall clock, because the heavy
+          # files cost relatively more on a runner. See
+          # scripts/gen_durations.py.
+          #
+          # `tee` cannot swallow a failure here: `set -o pipefail` above makes
+          # the pipeline exit non-zero when pytest does. Without it a red suite
+          # would report green, which is the worst possible bug to introduce
+          # in the name of collecting timings.
+          poetry run pytest -q -n "$workers" $files \
+            --durations=0 --durations-min=0 | tee durations.txt
+
+      # Uploaded from EVERY job, including macOS, because which combination to
+      # regenerate from is a decision made when regenerating -- ubuntu today,
+      # since it is the slowest and three of the four legs -- and having only
+      # one platform's transcripts would foreclose it. `if: always()` so a
+      # failing shard still yields the timings that might explain why.
+      #
+      # Each job runs ONE shard, so a whole suite is the union of every
+      # shard's transcript for one os+python (four on ubuntu, three on
+      # macOS). gen_durations.py takes several inputs for that reason, and
+      # .github/workflows/refresh-durations.yml is the consumer that closes
+      # the loop: weekly, it downloads the latest master run's ubuntu-3.12
+      # set, regenerates tests/durations.json and proposes the result when
+      # the balance has moved. These artifacts ARE the per-test timing on CI
+      # -- there is nothing further to instrument.
+      - name: Upload the duration transcript
+        if: always()
+        # A failed UPLOAD must not fail the job: this transcript is a
+        # diagnostic (it feeds gen_durations.py), and GitHub's artifact
+        # endpoint is reachable-or-not independently of anything in the
+        # diff. PR #246 lost a green run to
+        # "Failed to CreateArtifact: ENOTFOUND" after the work had passed,
+        # and the only remedy was a human recognising that a red check was
+        # not a real failure -- which teaches people to re-run reds instead
+        # of reading them (review 3.14.21).
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: durations-${{ matrix.os }}-${{ matrix.python-version }}-${{ matrix.shard }}
+          path: durations.txt
+          if-no-files-found: warn
+
+      # The conftest prunes at session START, so at this point the directories
+      # hold the budget plus everything this run compiled. Trim again so the
+      # saved artifact is a bounded size rather than growing by one run's
+      # worth on every merge.
+      #
+      # --include-worker-dirs is what makes that sentence true, and its
+      # absence is why it was false. Without it this pruned only the
+      # compiledir pytensor.config resolves, which under -n is the
+      # controller's -- the one directory no worker ever writes to. It was
+      # empty, the step reported success having removed nothing, and the
+      # per-worker directories that hold the entire cache were never
+      # considered. The artifact grew every merge: ubuntu 3.14 went 374 ->
+      # 494 -> 606 -> 661 -> 781 MB over five consecutive master runs, and
+      # with the generations below retained on top of that the repository's
+      # pytensor caches reached 8.05 GB of the 10 GB budget -- so GitHub was
+      # evicting least-recently-accessed, which is the scenario the restore
+      # step's comment describes as trading a 5-minute cache for a 250 MB
+      # download.
+      # SHARD 1 ONLY, and the reason is the same property that makes seeding
+      # work: the per-worker compiledirs are ~95% redundant, because most of
+      # what compiles is shared infrastructure every file's model builds
+      # rather than anything specific to a file. So shard 1's tree already
+      # serves the other shards almost completely, and storing theirs as well
+      # would multiply the cache by the shard count to buy the last few
+      # percent. They recompile that remainder each run, which is a small
+      # bounded cost against a cache budget that is not.
+      - name: Prune the compile cache before saving it
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/master'
+          && matrix.shard == 1
+        run: |
+          set -euo pipefail
+          export PYTENSOR_FLAGS="base_compiledir=$HOME/.pytensor-pytest"
+          poetry run python scripts/pytensor_cache_budget.py \
+            --max-entries 1800 --sweep-other-platforms --include-worker-dirs
+
+          # SAVE ONE CANONICAL TREE, NOT ONE PER WORKER. The worker
+          # compiledirs are ~95% redundant -- each holds ~1500 of the 1564
+          # entries a whole cold run creates, because most of what compiles is
+          # shared infrastructure every file's model builds. Storing all of
+          # them multiplied the artifact by the worker count, which is what
+          # made the cache unable to absorb more parallelism: 4 workers x 2
+          # shards would have wanted ~12 GB against GitHub's 10 GB
+          # repository-wide budget.
+          #
+          # The next run reconstitutes the others: the root conftest seeds
+          # every missing worker compiledir from the warmest one it finds,
+          # hard-linking the write-once files (.so and .cpp, 98.7% of the
+          # bytes) and copying only key.pkl, which is the single file PyTensor
+          # rewrites in place. Measured on 398 entries: 5.3 s and 7.1 MB of
+          # real disk, against 53.6 s and 218 MB for a full copy.
+          #
+          # gw0 rather than "the warmest": they are within a few percent of
+          # each other, and choose_seed_source() picks the warmest at restore
+          # time anyway, so there is nothing to gain from being clever here.
+          #
+          # The CONTROLLER's compiledir goes too, and it is not a rounding
+          # error. Under -n it is the one directory no worker ever writes to,
+          # so everything in it is stale -- yet it was being saved on every
+          # run: measured on the first master run after the prune fix, the
+          # macOS tree was 5055 entries as controller 1800 + gw0 1578 +
+          # gw1 1677. Dropping it as well as gw1 makes the artifact ~3.2x
+          # smaller rather than ~2x. PyTensor recreates the directory on
+          # import, and the conftest seeds the workers from gw0.
+          before=$(du -sm "$HOME/.pytensor-pytest" | cut -f1)
+          find "$HOME/.pytensor-pytest" -mindepth 1 -maxdepth 1 \
+            -name 'gw*' ! -name 'gw0' -exec rm -rf {} +
+          find "$HOME/.pytensor-pytest" -mindepth 1 -maxdepth 1 \
+            -name 'compiledir_*' -exec rm -rf {} +
+          after=$(du -sm "$HOME/.pytensor-pytest" | cut -f1)
+          echo "compiledir tree trimmed to one canonical worker copy:" \
+            "${before} MB -> ${after} MB"
+          ls -1 "$HOME/.pytensor-pytest"
+
+      # See the long comment on the restore step for why this is master-only.
+      - name: Save the PyTensor compile cache
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/master'
+          && matrix.shard == 1
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.pytensor-pytest
+          key: ${{ steps.compiledir-cache.outputs.cache-primary-key }}
+
+      # The restore step's key embeds github.run_id so that each master push
+      # writes a NEW entry instead of hitting an existing one and skipping the
+      # save. That is necessary -- a cache key is immutable once written -- but
+      # it has a consequence the restore-keys prefix hides: nothing ever
+      # supersedes the entry it replaces. Old generations only leave by
+      # eviction, so they accumulate. Measured 2026-08-25: FIVE generations
+      # retained per os+python, 18 entries, 8.05 GB of the repository's 10 GB
+      # budget, total usage 10.43 GB -- i.e. already evicting, and the two
+      # things eviction must not take (the 132 MB Zenodo spectra and the
+      # 115 MB ephemeris kernel) were the smallest entries in there.
+      #
+      # Only the newest is ever restored: the restore-keys prefix matches
+      # most-recent-first. So the older ones buy nothing and cost the budget.
+      # This deletes them, scoped to THIS job's os+python prefix, so the four
+      # matrix combinations running concurrently cannot interfere with each
+      # other.
+      #
+      # The prefix also spans lockfile hashes, which is intended: after a
+      # dependency bump the first master run restores the old-lock entry as a
+      # partial hit, compiles the delta, saves under the new key, and the old
+      # entry is then genuinely superseded.
+      #
+      # continue-on-error, like the issue bookkeeping in the nightly job
+      # below: cache housekeeping must never decide a suite's verdict. A
+      # transient API error here would otherwise turn a green run red.
+      - name: Drop superseded compile caches
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/master'
+          && matrix.shard == 1
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: ${{ steps.compiledir-cache.outputs.cache-primary-key }}
+          PREFIX: pytensor-compiledir-p1-${{ matrix.os }}-${{ matrix.python-version }}-
+        run: |
+          set -euo pipefail
+          keys="$RUNNER_TEMP/superseded-cache-keys.txt"
+          gh cache list --key "$PREFIX" --limit 100 --json key \
+            --jq '.[].key' > "$keys" || true
+          while read -r key; do
+            if [ -z "$key" ] || [ "$key" = "$KEEP" ]; then
+              continue
+            fi
+            echo "deleting superseded cache: $key"
+            gh cache delete "$key" || true
+          done < "$keys"
 
   # Installs WITHOUT poetry.lock, resolving dependencies fresh the way a user's
   # `pip install exozippy` does.
@@ -187,7 +557,10 @@ jobs:
     name: pytest-latest-deps
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Same suite as the matrix above, so the same 90-minute budget; a nightly
+    # cancelled at the cap would open the tracking issue below for a reason
+    # that has nothing to do with dependencies.
+    timeout-minutes: 90
 
     # Scoped to this job, not the workflow. Only this job files issues; nothing
     # here needs write access to the repository contents.
@@ -239,14 +612,29 @@ jobs:
           path: ~/.astropy/cache
           key: astropy-cache-de430
 
+      # DELIBERATELY NO PyTensor compiledir cache here, unlike the matrix job.
+      # That cache is keyed on poetry.lock as a proxy for the pytensor version,
+      # and this job's whole purpose is to install without the lock -- so the
+      # key would claim a resolution it did not get. PyTensor embeds its own
+      # version in every cache key, so the entries would simply all miss; the
+      # cost would be the download, paid for nothing. This job is nightly and
+      # not on the merge path, so its runtime is the cheapest thing here.
+
       # Saved to a file, not just echoed: the failure report below quotes it,
       # and "which versions did it actually pick" is the first question anyone
       # asks about a resolution failure.
       - name: Record what actually got resolved
         run: pip freeze | tee resolved.txt
 
+      # Same computed worker count as the matrix job -- see the comment
+      # there. No poetry in this job by design, so the script runs on the
+      # bare interpreter; it imports nothing outside the standard library
+      # precisely so it can.
       - name: Run test suite
-        run: pytest -q -n 2
+        run: |
+          set -euo pipefail
+          workers=$(python scripts/pytest_workers.py --explain)
+          pytest -q -n "$workers"
 
       # Email alone is a weak alarm for this job. A nightly that stays broken
       # for a week sends seven identical emails, which is how an alarm becomes
@@ -345,13 +733,79 @@ jobs:
   # `if: always()` is load-bearing. Without it this job is skipped when any
   # matrix combination fails, and a skipped required check reads as neutral
   # rather than failing -- the PR would look mergeable with a red matrix.
+  # LINT AND FORMATTING. Runs on everything, including pull requests.
+  #
+  # This job runs `pre-commit` ITSELF rather than a hand-written `ruff check` /
+  # `ruff format --check` pair, and that is the whole point: CI and the local
+  # hook then execute the same hooks at the same pinned rev BY CONSTRUCTION, so
+  # they cannot disagree about what "formatted" means. A second invocation here
+  # with its own ruff version would be exactly the drift the exact pin in
+  # .pre-commit-config.yaml exists to prevent.
+  #
+  # Until this job existed, NOTHING in CI ran ruff at all. Formatting and lint
+  # were enforced only by the local hook, so a contributor who had not run
+  # `pre-commit install`, or who pushed from a machine without it, was
+  # completely unchecked -- which is how unformatted code reached master
+  # (review 7.13.2).
+  #
+  # The full-suite hook is stage `pre-push`, and `pre-commit run --all-files`
+  # runs the pre-commit stage, so it is skipped here rather than running the
+  # suite a seventeenth time. The `pytest` matrix above is what tests.
+  #
+  # No poetry and no project install: pre-commit builds its own isolated
+  # environment for the ruff hooks, and the one hook that would need the
+  # project installed is not in this stage.
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # Keyed on the hook config, which is where the pinned rev lives, so
+      # bumping ruff invalidates the cache exactly when it has to.
+      - name: Cache the pre-commit hook environments
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      # The same range pyproject's dev group declares -- pre-commit's own
+      # version does not decide formatting (the pinned hook rev does), but a
+      # major bump can change how the config is read.
+      - name: Install pre-commit
+        run: python -m pip install "pre-commit>=4.6.1,<5.0.0"
+
+      # --show-diff-on-failure prints the formatter's own patch, so a red run
+      # says WHAT to change rather than only that something is wrong.
+      - name: Run the pre-commit hooks
+        run: pre-commit run --all-files --show-diff-on-failure
+
+  # THE AGGREGATING GATE. `test` is the one status check the branch ruleset
+  # requires (context "test", no bypass actors), so everything that must block
+  # a merge has to reach the merge decision THROUGH here.
+  #
+  # `lint` is in `needs` for exactly that reason: a required gate that does not
+  # check lint does not check lint (review 7.13.2, paired with 8.13.1). Adding a
+  # second required context in the ruleset would work too, but it would put half
+  # the merge policy in repository settings that no one reviews in a diff.
   test:
     name: test
     if: always()
-    needs: [pytest]
+    needs: [pytest, lint]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any required combination did not succeed
         run: |
           echo "pytest: ${{ needs.pytest.result }}"
+          echo "lint:   ${{ needs.lint.result }}"
           test "${{ needs.pytest.result }}" = "success"
+          test "${{ needs.lint.result }}" = "success"

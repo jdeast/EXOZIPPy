@@ -1,0 +1,11 @@
+Unloading tools/local-user <S>
+  ERROR: Unload of sticky module skipped
+
+Unloading uge/8.8.1 <S>
+  ERROR: Unload of sticky module skipped
+sha: 17920911  slots: 8
+host: compute-76-14
+Traceback (most recent call last):
+  File "/home/jeastman/python/EXOZIPPy/examples/validation/nlens_vbm_bench.py", line 45, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'

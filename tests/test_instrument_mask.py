@@ -161,3 +161,57 @@ def test_mixed_type_mask_list_raises(tmp_path):
     """
     with pytest.raises(ValueError, match="all booleans.*or all integers"):
         _load(tmp_path, mask=[True, 2, 3])
+
+
+# --------------------------------------------------------------------------
+# 2.5.2: an all-0/1 integer list, one per row, is ambiguous
+# --------------------------------------------------------------------------
+def test_all_zero_one_integer_mask_raises_as_ambiguous(tmp_path):
+    """
+    Given an inline mask of 5 integers, all 0 or 1, on a 5-row file,
+    When the data file is loaded,
+    Then a ValueError names the ambiguity and both explicit spellings.
+
+    The two readings are OPPOSITES: as row INDICES (what the integer branch
+    does) [1, 0, 1, 0, 1] excludes rows 0 and 1; as per-row FLAGS -- what
+    the same numbers mean in the mask-FILE form this list mirrors -- it
+    excludes rows 0, 2 and 4.  Picking either silently is the bug.
+    """
+    with pytest.raises(ValueError) as exc:
+        _load(tmp_path, mask=[1, 0, 1, 0, 1])
+
+    msg = str(exc.value)
+    assert "ambiguous" in msg
+    # both readings are spelled out, so the user can see which they meant
+    assert "[0, 1]" in msg  # as row indices
+    assert "[0, 2, 4]" in msg  # as per-row flags
+    assert "booleans" in msg
+
+
+def test_ambiguous_mask_is_accepted_as_booleans(tmp_path):
+    """
+    Given the same flags written as booleans,
+    When the data file is loaded,
+    Then they are per-row flags and the named rows are excluded -- the
+    spelling the error tells the user to use.
+    """
+    inst = _load(tmp_path, mask=[True, False, True, False, True])
+
+    assert inst.n_total_obs == 2
+    np.testing.assert_allclose(inst.time, [2.0, 4.0])
+
+
+def test_short_zero_one_integer_mask_is_still_row_indices(tmp_path):
+    """
+    Given an integer mask of 0s and 1s that is SHORTER than the file,
+    When the data file is loaded,
+    Then it is read as row indices with no complaint.
+
+    The guard is deliberately narrow: only a list whose length equals the
+    row count could be a flag vector, so `mask: [0, 1]` on a 5-row file has
+    exactly one sensible reading and keeps it.
+    """
+    inst = _load(tmp_path, mask=[0, 1])
+
+    assert inst.n_total_obs == 3
+    np.testing.assert_allclose(inst.time, [3.0, 4.0, 5.0])

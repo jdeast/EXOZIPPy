@@ -1,3 +1,4 @@
+import functools
 import warnings
 
 import astropy.units as u
@@ -6,10 +7,10 @@ import numpy as np
 import pytensor.tensor as pt
 import VBMicrolensing
 from astropy.coordinates import SkyCoord
-from pytensor.gradient import DisconnectedType
 from pytensor.graph import Apply, Op
 
 from exozippy.compat import patch_mulensmodel_method_order
+from exozippy.skyframe import parallax_factors
 
 from .physics import (
     _MM_NAN_ADVICE,
@@ -53,10 +54,16 @@ def _dev_skycoord(obs_pos_np, cache):
     satellite_skycoord with parallax(satellite=True, earth_orbital=False):
     _get_delta_satellite computes -dot(satellite_skycoord, north/east),
     which on these deviations carries ALL parallax (annual + satellite),
-    exactly matching Lens.get_magnification.
+    exactly matching MulensEvent.get_magnification.
     """
     obs_pos_2d = np.atleast_2d(obs_pos_np)
-    key = (obs_pos_2d.shape, hash(obs_pos_2d.tobytes()))
+    # Keyed on the BYTES, not on hash(bytes): a 64-bit siphash can collide,
+    # and this cache's whole reason to exist is telling apart two deviation
+    # arrays of the SAME shape (ground and satellite over one plot grid), so a
+    # collision would hand the second observer the first one's parallax
+    # deltas.  Astronomically unlikely, and free to rule out (review 2.6.4);
+    # the dict hashes the bytes for us and then compares them on a hit.
+    key = (obs_pos_2d.shape, obs_pos_2d.tobytes())
     if key not in cache:
         cache[key] = SkyCoord(
             x=obs_pos_2d[:, 0] * u.au,
@@ -67,12 +74,16 @@ def _dev_skycoord(obs_pos_np, cache):
     return cache[key]
 
 
+# Post-split parameter homes (8.6.17): the trajectory offsets live on the
+# source component, the event chain on mulensevent.  These labels only name
+# entries of the positional param vector in diagnostics; the vector layout
+# itself is unchanged.
 _BASE_LABELS = (
-    "lens.t_0",
-    "lens.u_0",
-    "lens.t_E",
-    "lens.pi_E_N",
-    "lens.pi_E_E",
+    "source.t_0",
+    "source.u_0",
+    "mulensevent.t_E",
+    "mulensevent.pi_E_N",
+    "mulensevent.pi_E_E",
 )
 
 
@@ -93,7 +104,7 @@ def _base_mm_params(p):
     return {
         "t_0": t_0,
         # Same floor, same expression as the symbolic path
-        # (Lens._get_safe_mm_params): both go through physics, so the two
+        # (MulensEvent._get_safe_mm_params): both go through physics, so the two
         # backends cannot disagree about where the model is defined.  This
         # used to be a hard-coded 1e-9 against physics.U_0_FLOOR = 1e-6, so a
         # fit visiting 1e-9 <= |u_0| < 1e-6 got a different answer depending
@@ -145,17 +156,26 @@ def _build_pspl_model(p, coords, mag_method, use_rho=False):
                 [t_0 - window, "finite_source_LD_Yoo04", t_0 + window]
             )
         else:
-            model.set_magnification_methods([0.0, "point_source"])
+            model.set_magnification_methods([-np.inf, "point_source", np.inf])
     else:
-        model.set_magnification_methods([0.0, mag_method])
+        model.set_magnification_methods([-np.inf, mag_method, np.inf])
     return model
 
 
-def _build_binary_model(p, coords, mag_method, use_rho=False):
+def _build_binary_model(
+    p, coords, mag_method, use_rho=False, orbital_motion=False, t_0_kep=None
+):
     """Construct a MulensModel for a binary lens.
 
     Param vector: [t_0, u_0, t_E, pi_E_N, pi_E_E] + optional [rho] + [s, q, alpha_deg]
+    + optional [ds_dt, dalpha_dt] (with ``orbital_motion=True``; MulensModel's
+    LINEAR lens-motion branch, both rates per year and dalpha_dt in deg/yr,
+    anchored at the ``t_0_kep`` given here -- EXOZIPPy passes t0_par, C24/5d).
     Extra trailing elements (u1) are ignored by the builder; LD is applied in perform().
+
+    Only the LINEAR branch is ever requested: MulensModel's keplerian lens
+    motion contradicts its own linear mode by a sign (conventions.md
+    section 6) and is not used as a reference for anything.
     """
     mm_params = _base_mm_params(p)
     idx = 5
@@ -163,8 +183,14 @@ def _build_binary_model(p, coords, mag_method, use_rho=False):
         mm_params["rho"] = _safe_rho(p[idx])
         idx += 1
     mm_params["s"] = float(max(float(p[idx]), S_FLOOR))
-    mm_params["q"] = clip_q_value(p[idx + 1], "lens.q")
+    # The binary companion is LENS ELEMENT 1 (element 0 is the masked
+    # primary), so the label names the element the user can address.
+    mm_params["q"] = clip_q_value(p[idx + 1], "lens.1.q")
     mm_params["alpha"] = float(p[idx + 2])
+    if orbital_motion:
+        mm_params["ds_dt"] = float(p[idx + 3])
+        mm_params["dalpha_dt"] = float(p[idx + 4])
+        mm_params["t_0_kep"] = float(t_0_kep)
 
     model = mm.Model(parameters=mm_params, coords=coords)
     # Same convention as _build_pspl_model: the satellite channel carries
@@ -183,9 +209,9 @@ def _build_binary_model(p, coords, mag_method, use_rho=False):
         # BinaryLensPointSourceMagnification, the exact binary point-source
         # solver (it reproduces VBBL at rho -> 0 to machine precision).
         method = "VBM" if use_rho else "point_source"
-        model.set_magnification_methods([0.0, method])
+        model.set_magnification_methods([-np.inf, method, np.inf])
     else:
-        model.set_magnification_methods([0.0, mag_method])
+        model.set_magnification_methods([-np.inf, mag_method, np.inf])
     return model
 
 
@@ -265,20 +291,29 @@ class _MagOpBase(Op):
         outputs[0][0] = np.asarray(A)
 
     def pullback(self, inputs, outputs, cotangents):
-        p, times, obs_pos = inputs
-        g = cotangents[0]
-        grad_op = _MagGradOp(
-            type(self)._builder,
-            self.coords,
-            self.mag_method,
-            self.use_rho,
-            self.bandpass,
+        # Deliberately loud, and deliberately the SAME refusal
+        # VBMDirectMagOp.pullback makes (review 2.6.5).  This Op used to hand
+        # back a _MagGradOp instead, which silently wired N_params+1 full
+        # MulensModel light curves per gradient evaluation -- a forward
+        # difference, so a NUTS step paid that cost for a gradient carrying
+        # O(eps) error, and nothing anywhere said so.  We do not support
+        # gradient-based samplers through the Op path (Lens.sampler_requirements
+        # already declares that), so an attempt to build one is a
+        # configuration error, not something to serve slowly and inaccurately.
+        #
+        # This is the MulensModel A/B reference backend, so the stakes are
+        # lower than VBMDirectMagOp's -- but the failure mode is worse
+        # precisely because it "works": the fit runs, burns the CPU, and
+        # returns a posterior nobody has reason to distrust.  The symbolic
+        # PSPL path (MulensEvent.get_magnification) is separate and STAYS
+        # differentiable; that is what NUTS-compatible microlensing means
+        # here.  _MagGradOp is kept as the recipe if this is ever revisited.
+        raise NotImplementedError(
+            f"{type(self).__name__} has no gradient; use the PTDE (or another "
+            "gradient-free) sampler for binary/finite-source microlensing. "
+            "Point-source PSPL takes the symbolic path, which is "
+            "differentiable."
         )
-        return [
-            grad_op(p, times, obs_pos, g),
-            DisconnectedType()(),
-            DisconnectedType()(),
-        ]
 
     # Backward compatibility with PyTensor < 3 which calls grad() instead of pullback()
     def grad(self, inputs, gradients):
@@ -306,15 +341,40 @@ class BinaryLensMagOp(_MagOpBase):
     """PyTensor Op wrapping MulensModel for binary lens (+ optional finite source).
 
     Param vector: [t_0, u_0, t_E, pi_E_N, pi_E_E] + optional [rho] + [s, q, alpha_deg]
-    + optional [u1]
+    + optional [ds_dt, dalpha_dt] (``orbital_motion=True``: MulensModel's
+    LINEAR lens-motion branch anchored at ``t_0_kep`` = EXOZIPPy's t0_par --
+    this is the A/B reference the per-epoch vbm_direct path is pinned
+    against) + optional [u1]
     """
 
     _builder = staticmethod(_build_binary_model)
 
     def __init__(
-        self, coords, mag_method="auto_vbbl", use_rho=False, bandpass=None
+        self,
+        coords,
+        mag_method="auto_vbbl",
+        use_rho=False,
+        bandpass=None,
+        orbital_motion=False,
+        t_0_kep=None,
     ):
         super().__init__(coords, mag_method, use_rho, bandpass)
+        self.orbital_motion = bool(orbital_motion)
+        self.t_0_kep = t_0_kep
+        if self.orbital_motion:
+            if t_0_kep is None:
+                raise ValueError(
+                    "BinaryLensMagOp(orbital_motion=True) needs t_0_kep "
+                    "(EXOZIPPy passes t0_par; C24/5d -- one anchor for the "
+                    "orbital and parallax terms)."
+                )
+            # functools.partial of a module-level function stays picklable
+            # (PTDE spawn / numba object-mode caching), unlike a lambda.
+            self._builder = functools.partial(
+                _build_binary_model,
+                orbital_motion=True,
+                t_0_kep=float(t_0_kep),
+            )
 
 
 class VBMDirectMagOp(Op):
@@ -341,7 +401,7 @@ class VBMDirectMagOp(Op):
 
     Param vector: [t_0, u_0, t_E, pi_E_N, pi_E_E] + optional [rho]
                   + per companion j: [s_j, q_j, alpha_j_deg]
-                  + optional [u1]
+                  + optional [u1] + optional [u2]
 
     Companion geometry convention (reduces exactly to the MulensModel /
     VBMicrolensing binary convention for one companion): alpha_j is the
@@ -350,6 +410,22 @@ class VBMDirectMagOp(Op):
     TOTAL lens mass. Internally the source moves in the trajectory frame at
     (-tau, -u) and companion j sits at s_j*(cos alpha_j, -sin alpha_j) from
     the primary, with the origin shifted to the lens center of mass.
+
+    ``n_companions = 0`` is the SINGLE-lens (ESPL) case, which exists so that
+    a finite-source point lens can carry a quadratic limb-darkening law: it is
+    the only backend here that can (MulensModel's ``set_limb_coeff_u`` and its
+    Yoo04 B0/B1 formalism are linear-only).  It is NOT the default for a
+    single lens -- see MulensEvent.get_magnification_op, which keeps MulensModel
+    there unless a second LD coefficient is actually in play, because the two
+    disagree by up to ~5 mmag in the deep finite-source regime (Yoo04's table
+    interpolation) and a silent backend flip would move existing answers.
+
+    ``quadratic_ld`` selects VBM's LDquadratic profile and reads u2 from the
+    tail of the param vector.  At u2 = 0 that profile reproduces LDlinear to
+    2.2e-16 fractional (measured over a caustic crossing at rho = 0.015), so
+    turning it on is a no-op for a linear band -- which is what makes the
+    parameter safe to key on the band's declared law rather than on a config
+    flag of its own.
     """
 
     itypes = [pt.dvector, pt.dvector, pt.dmatrix]
@@ -363,40 +439,86 @@ class VBMDirectMagOp(Op):
         bandpass=None,
         accuracy=1e-3,
         relative_accuracy=0.0,
+        quadratic_ld=False,
+        orbital_motion=False,
+        source_motion=False,
     ):
         # coords: "<ra>d <dec>d" string — same format the MulensModel Ops take.
         ra_deg, dec_deg = [float(v.rstrip("d")) for v in str(coords).split()]
-        ra = np.radians(ra_deg)
-        dec = np.radians(dec_deg)
-        # Sky-plane projections, mirroring MulensModel Coordinates:
-        # east = normalize(z x direction), north = direction x east.
-        direction = np.array(
-            [np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)]
-        )
-        east = np.cross([0.0, 0.0, 1.0], direction)
-        east /= np.linalg.norm(east)
-        self._east = east
-        self._north = np.cross(direction, east)
+        self._ra = np.radians(ra_deg)
+        self._dec = np.radians(dec_deg)
+        # One sky basis for the whole codebase (exozippy.skyframe).  This
+        # used to be built here as MulensModel Coordinates builds it --
+        # east = normalize(z x direction), north = direction x east -- which
+        # is the same basis to within 1 ulp (pinned in
+        # tests/test_skyframe.py::test_cross_product_construction_agrees).
+        # Sharing the definition is what makes "the Op path and the symbolic
+        # path see one line of sight" true by construction rather than by two
+        # copies happening to agree.
 
         self.n_companions = int(n_companions)
         self.use_rho = use_rho
         self.bandpass = (
-            bandpass  # None = no LD; str = u1 is last param element
+            bandpass  # None = no LD; str = u1 (then u2) at the param tail
         )
+        # Lens orbital motion (C24, review 8.6.8 5c): two extra dvector
+        # inputs carry the PER-EPOCH companion geometry -- s_t [r_E] and
+        # alpha_t [DEG] -- built in the graph by
+        # MulensEvent._companion_geometry_series.  The param vector keeps its
+        # static s_0/alpha_0 entries (the t0_par values; the series must
+        # equal them there), so the layout and _param_labels are unchanged.
+        self.orbital_motion = bool(orbital_motion)
+        # Source orbital motion -- xallarap (C25, review 8.6.9): two more
+        # dvector inputs carry the PER-EPOCH trajectory shift (dtau_t,
+        # du_t) built by MulensEvent._source_offset_series, added to (tau, u)
+        # after the parallax terms -- the source's own offset enters at
+        # exactly the parallax slot.  Input order when both motions are on:
+        # [p, times, obs, s_t, alpha_t, dtau_t, du_t].
+        self.source_motion = bool(source_motion)
+        if self.orbital_motion and self.n_companions != 1:
+            raise ValueError(
+                "VBMDirectMagOp(orbital_motion=True) supports exactly "
+                "one companion (Lens raises earlier; mulensing.md "
+                "'3+ lens bodies')."
+            )
+        if self.orbital_motion or self.source_motion:
+            self.itypes = [pt.dvector, pt.dvector, pt.dmatrix]
+            if self.orbital_motion:
+                self.itypes = self.itypes + [pt.dvector, pt.dvector]
+            if self.source_motion:
+                self.itypes = self.itypes + [pt.dvector, pt.dvector]
+        # u2 only means anything alongside a u1, so a quadratic law without a
+        # bandpass is a caller bug, not a silently-uniform source.
+        self.quadratic_ld = bool(quadratic_ld) and bandpass is not None
         self._accuracy = float(accuracy)
         self._relative_accuracy = float(relative_accuracy)
         # One VBM instance per Op; PTDE fork workers each inherit a private
         # copy-on-write copy, so per-instance scratch state is never shared.
         self._vbm = self._build_vbm()
         self._delta_cache = {}
-        # Warn-once flag for the non-finite guard in _compute, mirroring
-        # _MagOpBase._warned.
+        # Warn-once flags, mirroring _MagOpBase._warned.  TWO of them, because
+        # the two failure modes have different fixes and must not silence each
+        # other: `_warned` covers a non-finite parameter vector reaching
+        # _compute (the model is exploring/misconfigured upstream), while
+        # `_warned_backend` covers VBMicrolensing itself raising (a
+        # SetLensGeometry rejection, a SWIG ValueError, API drift in a new
+        # wheel).  One shared flag would let a burst of NaN proposals early on
+        # permanently suppress the report that the backend is broken.
         self._warned = False
+        self._warned_backend = False
 
     def _build_vbm(self):
         vbm = VBMicrolensing.VBMicrolensing()
         vbm.Tol = self._accuracy
         vbm.RelTol = self._relative_accuracy
+        # Profile is instance state, set once; a1/a2 are per-call and set in
+        # _magnify.  Keep it that way: SetLDprofile on every epoch would be
+        # the same shape of waste _deltas exists to avoid.
+        vbm.SetLDprofile(
+            VBMicrolensing.VBMicrolensing.LDquadratic
+            if self.quadratic_ld
+            else VBMicrolensing.VBMicrolensing.LDlinear
+        )
         if self.n_companions >= 2:
             # Multipoly beats the Nopoly default for 3 lenses; Nopoly wins
             # for 4+ (VBM docs, Bozza+2025 A&A 694, 219).  Must precede
@@ -433,13 +555,18 @@ class VBMDirectMagOp(Op):
         reused for every proposal.
         """
         dev = np.atleast_2d(obs_pos_np)
-        key = (dev.shape, hash(dev.tobytes()))
+        # Bytes, not hash(bytes) -- see _dev_skycoord (review 2.6.4).
+        key = (dev.shape, dev.tobytes())
         if key not in self._delta_cache:
-            self._delta_cache[key] = (-dev @ self._north, -dev @ self._east)
+            # MulensModel's delta convention is the NEGATED observer offset,
+            # i.e. exactly parallax_factors (see exozippy.skyframe: the same
+            # sign relation astrometryinstrument's P_E/P_N carry).
+            p_e, p_n = parallax_factors(dev, self._ra, self._dec)
+            self._delta_cache[key] = (p_n, p_e)
         return self._delta_cache[key]
 
-    def _magnify(self, companions, x, y, rho, u1):
-        """One VBM call per epoch on trajectory (x, y); binary or N-lens.
+    def _magnify(self, companions, x, y, rho, u1, u2=None):
+        """One VBM call per epoch on trajectory (x, y); single, binary or N-lens.
 
         Far-field guard: all caustics lie within ~R_inf of the center of
         mass, so a source center farther than R_inf + 2*rho is point-source
@@ -454,8 +581,35 @@ class VBMDirectMagOp(Op):
         """
         vbm = self._vbm
         vbm.a1 = 0.0 if u1 is None else u1
+        if self.quadratic_ld:
+            vbm.a2 = 0.0 if u2 is None else u2
+
+        if self.n_companions == 0:
+            # Single lens.  u is rotation-invariant, so the trajectory frame
+            # needs no alpha and (x, y) may arrive unrotated.
+            u = np.sqrt(x * x + y * y)
+            if not self.use_rho:
+                # Paczynski in closed form -- cheaper and more accurate than a
+                # VBM call, and the only reachable point-source single-lens Op
+                # case is a forced `use_op: true` (the symbolic path otherwise
+                # owns it, and stays differentiable).
+                u2sq = u * u
+                return (u2sq + 2.0) / np.sqrt(u2sq * (u2sq + 4.0))
+            # ESPLMag2 is table-backed and internally short-circuits to the
+            # point source far from the lens, so this needs no far-field guard
+            # of the kind the binary branch below does (VBM's hardcoded
+            # safedist bug is in BinaryMag2, not here).
+            return np.array(
+                [vbm.ESPLMag2(float(ui), rho) for ui in u.tolist()]
+            )
+
         if self.n_companions == 1:
             s, q, _ = companions[0]
+            # One per-epoch layout whether s is the static scalar or the
+            # orbital-motion series (review 8.6.8 5c: the fast path merges
+            # into the general layout; broadcast_to is a view, so the
+            # static case pays nothing and computes identically).
+            s_arr = np.broadcast_to(np.asarray(s, dtype=float), np.shape(x))
             mag2, mag0 = vbm.BinaryMag2, vbm.BinaryMag0
             if not self.use_rho:
                 # Point source (user's finite_source: False): Mag2's
@@ -466,17 +620,26 @@ class VBMDirectMagOp(Op):
                 # rho, since rho is otherwise a derived/sampled quantity.
                 return np.array(
                     [
-                        mag0(s, q, xi, yi)
-                        for xi, yi in zip(x.tolist(), y.tolist())
+                        mag0(si, q, xi, yi)
+                        for si, xi, yi in zip(
+                            s_arr.tolist(), x.tolist(), y.tolist()
+                        )
                     ]
                 )
-            r_inf = s + 1.0 / s + 2.0
+            r_inf = s_arr + 1.0 / s_arr + 2.0
             far = (x * x + y * y) > (r_inf + 2.0 * rho) ** 2
             return np.array(
                 [
-                    mag0(s, q, xi, yi) if isfar else mag2(s, q, xi, yi, rho)
-                    for xi, yi, isfar in zip(
-                        x.tolist(), y.tolist(), far.tolist()
+                    (
+                        mag0(si, q, xi, yi)
+                        if isfar
+                        else mag2(si, q, xi, yi, rho)
+                    )
+                    for si, xi, yi, isfar in zip(
+                        s_arr.tolist(),
+                        x.tolist(),
+                        y.tolist(),
+                        far.tolist(),
                     )
                 ]
             )
@@ -508,10 +671,38 @@ class VBMDirectMagOp(Op):
         )
 
     def perform(self, node, inputs, outputs):
-        p, times_np, obs_pos_np = inputs
+        p, times_np, obs_pos_np = inputs[:3]
+        k = 3
+        series = None
+        if self.orbital_motion:
+            series = inputs[k : k + 2]
+            k += 2
+        source_series = inputs[k : k + 2] if self.source_motion else None
         try:
-            A = self._compute(p, times_np, obs_pos_np)
-        except (ValueError, RuntimeError):
+            A = self._compute(p, times_np, obs_pos_np, series, source_series)
+        except (ValueError, RuntimeError) as exc:
+            # Invalid parameter combination -> NaN magnifications -> logp =
+            # -inf -> the proposal is rejected.  That is the intended handling
+            # of a bad proposal, and it is ALSO what a broken backend looks
+            # like, which is why this cannot be silent: a VBM-level error (a
+            # SetLensGeometry rejection, a SWIG ValueError, API drift in a new
+            # wheel) rejects every proposal forever, and the default-backend
+            # binary fit then runs to a garbage posterior with no message
+            # anywhere.  This is exactly how the point-source-binary "VBBL"
+            # bug stayed hidden, and it is what _MagOpBase.perform already
+            # guards against -- mirror it here rather than trusting that this
+            # Op's inputs are pre-validated.
+            if not self._warned_backend:
+                self._warned_backend = True
+                warnings.warn(
+                    f"{type(self).__name__}: VBMicrolensing raised "
+                    f"{type(exc).__name__}: {exc} -- returning NaN "
+                    "magnifications (logp = -inf) for this proposal. "
+                    "If this repeats for every proposal the backend is "
+                    "misconfigured, not merely exploring bad parameters.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             A = np.full(len(times_np), np.nan)
         outputs[0][0] = np.asarray(A, dtype=np.float64)
 
@@ -521,14 +712,25 @@ class VBMDirectMagOp(Op):
         just that something did."""
         labels = list(_BASE_LABELS)
         if self.use_rho:
-            labels.append("lens.rho")
+            labels.append("source.rho")
         for j in range(self.n_companions):
-            labels += [f"lens.s[{j}]", f"lens.q[{j}]", f"lens.alpha[{j}]"]
+            # The Op's companion index j is 0-based; the lens component's
+            # vector element (and the user-facing spelling) is j+1, element
+            # 0 being the masked primary.
+            labels += [
+                f"lens.{j + 1}.s",
+                f"lens.{j + 1}.q",
+                f"lens.{j + 1}.alpha",
+            ]
         if self.bandpass is not None:
             labels.append("band.u1")
+            if self.quadratic_ld:
+                labels.append("band.u2")
         return labels
 
-    def _compute(self, p, times_np, obs_pos_np):
+    def _compute(
+        self, p, times_np, obs_pos_np, series=None, source_series=None
+    ):
         # Non-finite check FIRST: it is the explicit handler for a NaN
         # parameter vector (return NaN magnifications -> logp = -inf ->
         # proposal rejected), and running it before the unpacking below means
@@ -540,6 +742,25 @@ class VBMDirectMagOp(Op):
         # once: a *misconfigured* model is non-finite on every proposal, which
         # is indistinguishable from ordinary rejection unless the first one is
         # reported.  This branch used to return NaN in complete silence.
+        #
+        # The per-epoch geometry/xallarap series get the same treatment:
+        # they are functions of the same sampled parameters, so a NaN there
+        # is a rejected proposal, not a crash.
+        all_series = list(series or []) + list(source_series or [])
+        if all_series and not all(
+            np.all(np.isfinite(np.asarray(v, dtype=float))) for v in all_series
+        ):
+            if not self._warned:
+                self._warned = True
+                warnings.warn(
+                    f"{type(self).__name__}: non-finite per-epoch orbital-"
+                    "motion geometry (s_t/alpha_t) -- returning NaN "
+                    "magnifications (logp = -inf) for this proposal.  "
+                    f"{_MM_NAN_ADVICE}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            return np.full(len(times_np), np.nan)
         bad = ~np.isfinite(np.asarray(p, dtype=float))
         if np.any(bad):
             if not self._warned:
@@ -572,12 +793,29 @@ class VBMDirectMagOp(Op):
             companions.append(
                 (
                     float(max(float(p[idx]), S_FLOOR)),
-                    clip_q_value(p[idx + 1], f"lens.q[{j}]"),
+                    clip_q_value(p[idx + 1], f"lens.{j + 1}.q"),
                     float(np.radians(float(p[idx + 2]))),
                 )
             )
             idx += 3
-        u1 = float(p[-1]) if self.bandpass is not None else None
+        # Index FORWARD from the companion block, not backward from the end.
+        # With u2 optionally following u1, `p[-1]` no longer identifies u1, and
+        # a negative index that quietly means a different parameter depending
+        # on the band's LD law is exactly the kind of layout bug _param_labels
+        # exists to make visible.
+        u1 = u2 = None
+        if self.bandpass is not None:
+            u1 = float(p[idx])
+            if self.quadratic_ld:
+                u2 = float(p[idx + 1])
+
+        if series is not None:
+            # Per-epoch geometry supersedes the scalar s_0/alpha_0 entries
+            # (which remain the t0_par anchors).  Same S_FLOOR as the scalar
+            # path; alpha arrives in degrees, like every alpha here.
+            s_t = np.maximum(np.asarray(series[0], dtype=float), S_FLOOR)
+            alpha_t = np.radians(np.asarray(series[1], dtype=float))
+            companions[0] = (s_t, companions[0][1], alpha_t)
 
         dN, dE = self._deltas(obs_pos_np)
         tau = (
@@ -586,6 +824,12 @@ class VBMDirectMagOp(Op):
             + dE * base["pi_E_E"]
         )
         u = base["u_0"] - dN * base["pi_E_E"] + dE * base["pi_E_N"]
+
+        if source_series is not None:
+            # Xallarap: the source's own per-epoch trajectory shift, at
+            # exactly the slot the parallax terms occupy (C25).
+            tau = tau + np.asarray(source_series[0], dtype=float)
+            u = u + np.asarray(source_series[1], dtype=float)
 
         if self.n_companions == 1:
             # Rotate into the lens-axis frame (MulensModel Trajectory._get_xy).
@@ -596,11 +840,13 @@ class VBMDirectMagOp(Op):
         else:
             # Trajectory frame: same configuration with the rotation applied to
             # the lens positions instead (global rotations leave A invariant).
+            # For n_companions == 0 there is no lens axis at all and only
+            # |(x, y)| is read, so the same two lines serve.
             x = -tau
             y = -u
 
         with np.errstate(invalid="ignore", divide="ignore"):
-            return self._magnify(companions, x, y, rho, u1)
+            return self._magnify(companions, x, y, rho, u1, u2)
 
     def pullback(self, inputs, outputs, cotangents):
         # Deliberately loud: this Op is only reachable from non-gradient
@@ -617,7 +863,16 @@ class VBMDirectMagOp(Op):
         return self.pullback(inputs, [], gradients)
 
     def connection_pattern(self, node):
-        return [[True], [False], [False]]
+        # The per-epoch geometry/xallarap inputs are functions of the
+        # sampled parameters, so they genuinely feed the output -- honesty
+        # here is what keeps pullback's refusal reachable (same reasoning
+        # as _MagGradOp.connection_pattern).
+        pattern = [[True], [False], [False]]
+        if self.orbital_motion:
+            pattern += [[True], [True]]
+        if self.source_motion:
+            pattern += [[True], [True]]
+        return pattern
 
 
 class _MagGradOp(Op):
@@ -683,16 +938,45 @@ class _MagGradOp(Op):
         outputs[0][0] = out
 
     def pullback(self, inputs, outputs, cotangents):
-        return [
-            DisconnectedType()(),
-            DisconnectedType()(),
-            DisconnectedType()(),
-            cotangents[0],
-        ]
+        # This Op has no second derivative, and says so rather than inventing
+        # one (review 1.6.3).  What it used to return was wrong twice over:
+        # `cotangents[0]` for the incoming-cotangent input g is n_params long
+        # while the true VJP there is TIMES-shaped (this Op computes
+        # out[i] = sum_t g[t] * D[i,t], so d out / d g is D itself), and the
+        # params input was handed a DisconnectedType while connection_pattern
+        # declared it connected.
+        #
+        # RAISE, not DisconnectedType, and the distinction matters.
+        # DisconnectedType asserts that the output does not depend on that
+        # input, and for g that assertion is FALSE -- the output is exactly
+        # linear in g.  Declaring it disconnected would return a silently
+        # ABSENT gradient where a real one exists, which is the same class of
+        # bug this comment is about, only quieter.
+        #
+        # Nothing is lost by refusing.  A second derivative built on top of a
+        # FIRST-ORDER FINITE DIFFERENCE carries O(eps) error on a quantity
+        # that is itself only O(eps) accurate, so the Hessian would be
+        # numerically meaningless even if it were implemented correctly.
+        # There is no future in which second-order support is added inside
+        # this Op rather than by rewriting the magnification in pytensor or
+        # porting a differentiable library.
+        raise NotImplementedError(
+            "_MagGradOp has no second derivative: its own output is a "
+            "forward-difference approximation, so any Hessian built on it "
+            "would be numerically meaningless.  Use a gradient-free sampler "
+            "(PTDE) for binary/finite-source microlensing."
+        )
 
     # Backward compatibility with PyTensor < 3 which calls grad() instead of pullback()
     def grad(self, inputs, gradients):
         return self.pullback(inputs, [], gradients)
 
     def connection_pattern(self, node):
+        # Honest, and honest is what makes the raise above reachable.  Both
+        # the parameter vector and the incoming cotangent g genuinely feed the
+        # output, so both are connected; declaring g disconnected -- the
+        # obvious way to "fix" the wrong VJP it used to return -- would let
+        # pytensor skip pullback entirely and hand back an absent gradient
+        # instead of the error.  times/obs_pos stay False, matching
+        # _MagOpBase: they are data, never differentiated against.
         return [[True], [False], [False], [True]]

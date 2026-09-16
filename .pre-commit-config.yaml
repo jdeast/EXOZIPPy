@@ -15,6 +15,15 @@ repos:
 # and the merge conflicts on formatting rather than on content. Pinning one
 # tool instead of three is most of the reason for consolidating.
 #
+# THIS REV IS THE ONLY AUTHORITY ON THE RUFF VERSION, which is why ruff is
+# deliberately absent from pyproject.toml and poetry.lock: a declared ruff
+# would be a second pin to keep in sync with this line by hand -- the exact
+# drift the pin exists to prevent. So `poetry run ruff` is not a supported
+# path; if it resolves at all it found a hand-installed binary at an unknown
+# version (one environment was running 0.16.1 against this 0.16.0). Run the
+# hooks, and note that CI runs THESE hooks rather than its own ruff, so the
+# two cannot disagree (the `lint` job in .github/workflows/tests.yml).
+#
 # ruff-check runs BEFORE ruff-format: the linter's import sorting (rule `I`)
 # decides which lines exist, the formatter decides how they wrap.
 #
@@ -50,9 +59,20 @@ repos:
     # ~/.cache/pre-commit/, but do not kill a run that is in progress. This is
     # a property of pre-commit itself and applies to pre-push exactly as it did
     # to pre-commit; moving the stage does not avoid it.
+    # The entry is a script rather than `poetry run pytest`, and that is not a
+    # style preference: `poetry run` CANNOT work from a git worktree, and every
+    # batch of work is developed in one. Poetry names the venv from a hash of
+    # the project path, so a worktree gets a fresh empty venv and dies on
+    # ModuleNotFoundError -- and even once pytest runs, the main venv's
+    # editable install points at the SHARED checkout's src, so the hook tests
+    # the other tree's code and passes. The script resolves the interpreter and
+    # exports PYTHONPATH itself, which makes the hook test the tree it was
+    # launched from by construction. Full reasoning is in the script's header
+    # and in docs/testing.md; the property is pinned by
+    # tests/test_pre_push_hook.py.
     -   id: pytest
         name: Run pytest (full suite)
-        entry: poetry run pytest
+        entry: scripts/pre_push_suite.sh
         language: system
         pass_filenames: false
         always_run: true

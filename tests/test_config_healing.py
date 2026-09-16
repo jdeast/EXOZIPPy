@@ -1,4 +1,6 @@
 # tests/test_config_healing.py
+import logging
+
 import numpy as np
 import pytest
 
@@ -11,18 +13,24 @@ def test_config_derives_te_from_physical_input():
     When: ConfigManager is provided topology and finalized.
     Then: It should derive t_E and inject it into user_params.
     """
-    # 1. Define the system topology so it knows what "Lens" and "Source" mean
+    # 1. Define the system topology so it knows what "Lens" and "Source" mean.
+    # Post-split shape: the event-level options live on `mulensevent:`, while
+    # `lens:`/`source:` name one physical BODY each (lens element 0 is the
+    # primary).
     system_config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}],
+        "mulensevent": [{}],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
     }
 
     user_params = {
         "star.Lens.mass": {"initval": 0.5},
         "star.Lens.distance": {"initval": 4000.0},
         "star.Source.distance": {"initval": 8000.0},
-        "lens.Lens.u_0": {"initval": 0.5},
-        "lens.Lens.t_0": {"initval": 2460000.0},
+        # t_0/u_0 are per-SOURCE trajectory offsets after the split.
+        "source.Source.u_0": {"initval": 0.5},
+        "source.Source.t_0": {"initval": 2460000.0},
         "star.Lens.pm_ra": {"initval": 5.0},  # mas/yr
         "star.Lens.pm_dec": {"initval": 0.0},
         "star.Source.pm_ra": {"initval": 0.0},
@@ -32,12 +40,13 @@ def test_config_derives_te_from_physical_input():
     cm = ConfigManager(user_params, system_config=system_config)
     cm.finalize_user_params()
 
-    # Check if t_E was derived and injected.  The engine's solution is filed
-    # under the canonical INDEX form (lens.0.t_E) -- the only spelling
+    # Check if t_E was derived and injected.  t_E is event-level after the
+    # mulensevent split, so the engine's solution is filed under the canonical
+    # INDEX form on the EVENT (mulensevent.0.t_E) -- the only spelling
     # ConfigManager.resolve reads for every element of every component.  See
     # the inject-back comment in finalize_user_params and tests/test_nsnl.py.
-    assert "lens.0.t_E" in cm.user_params
-    derived_te = cm.user_params["lens.0.t_E"]["initval"]
+    assert "mulensevent.0.t_E" in cm.user_params
+    derived_te = cm.user_params["mulensevent.0.t_E"]["initval"]
 
     # Manual check:
     # pi_rel = 1000/4000 - 1000/8000 = 0.125
@@ -102,3 +111,153 @@ def test_symbolic_time_limit_still_arms_where_sigalrm_exists():
     with pytest.raises(cfg.SymbolicTimeout):
         with cfg._sympy_time_limit(1):
             time.sleep(5)
+
+
+def test_a_symbolic_solve_restores_the_previous_sigalrm_handler():
+    """
+    Given a process-wide SIGALRM handler installed by unrelated code,
+    When a relaxation solve runs (which arms its own 2-second symbolic
+      timeout),
+    Then the previous handler is back in place afterwards.
+
+    _execute_solve used to arm SIGALRM by hand and drop the handler
+    _arm_alarm returned, so from the first symbolic solve onwards the process
+    handler WAS its local TimeoutError-raiser -- and any later code arming
+    SIGALRM got "Symbolic solver timed out!" raised at it out of a frame that
+    has nothing to do with sympy.  It now uses the _sympy_time_limit context
+    manager, which restores in its finally.
+    """
+    # ARRANGE
+    import signal
+
+    if not hasattr(signal, "SIGALRM"):  # pragma: no cover - POSIX only
+        pytest.skip("no SIGALRM on this platform")
+
+    def sentinel(signum, frame):  # pragma: no cover - never fires
+        pass
+
+    config = {"star": [{"name": "A"}]}
+    user_params = {
+        "star.A.mass": {"initval": 1.0},
+        "star.A.radius": {"initval": 1.0},
+    }
+    previous = signal.signal(signal.SIGALRM, sentinel)
+
+    # ACT
+    try:
+        cm = ConfigManager(user_params, system_config=config)
+        cm.finalize_user_params()
+        after = signal.getsignal(signal.SIGALRM)
+    finally:
+        signal.signal(signal.SIGALRM, previous)
+
+    # ASSERT
+    assert after is sentinel
+
+
+def test_a_repeated_symbolic_inversion_is_memoized(monkeypatch):
+    """
+    Given a ConfigManager that has already solved a set of relations,
+    When the relaxation engine runs again on the same manager,
+    Then sp.solve is not called a second time for the same (equation, target).
+
+    sp.solve is a pure function of the equation and the target -- it never
+    sees the resolved values -- but the engine relaxes to a fixed point, once
+    per seed, and again inside every probe_derivable snapshot, so the same
+    inversion was recomputed many times per prepare().  The only reuse before
+    this was the timeout blacklist: we remembered the failures and forgot the
+    successes.
+    """
+    # ARRANGE
+    import exozippy.config as cfg
+
+    calls = []
+    real_solve = cfg.sp.solve
+
+    def counting(*args, **kwargs):
+        calls.append(args[:2])
+        return real_solve(*args, **kwargs)
+
+    monkeypatch.setattr(cfg.sp, "solve", counting)
+    cm = ConfigManager(
+        {
+            "star.A.mass": {"initval": 1.0},
+            "star.A.radius": {"initval": 1.0},
+        },
+        system_config={"star": [{"name": "A"}]},
+    )
+
+    # ACT
+    cm.finalize_user_params()
+    first_pass = len(calls)
+    cm.finalize_user_params()
+    second_pass = len(calls) - first_pass
+
+    # ASSERT
+    assert first_pass > 0, "expected the engine to invert something"
+    assert second_pass == 0
+    assert len(cm._symbolic_solve_cache) == first_pass
+
+
+def test_the_substituted_debug_line_is_not_built_below_debug(caplog):
+    """
+    Given a solve running at INFO,
+    When the engine reaches its "Substituted:" diagnostic,
+    Then the line is not emitted -- and at DEBUG it still is.
+
+    The block walks every free symbol and runs a re.sub per resolved one
+    before handing the result to logger.debug, which then discarded it at
+    every level anybody runs a fit at.  The assertion is on the record rather
+    than on the timing, since what the gate protects is the work behind it.
+    """
+    # ARRANGE
+    user_params = {
+        "star.A.mass": {"initval": 1.0},
+        "star.A.radius": {"initval": 1.0},
+    }
+    config = {"star": [{"name": "A"}]}
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.config"):
+        ConfigManager(dict(user_params), config).finalize_user_params()
+    at_info = [r for r in caplog.records if "Substituted:" in r.getMessage()]
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="exozippy.config"):
+        ConfigManager(dict(user_params), config).finalize_user_params()
+    at_debug = [r for r in caplog.records if "Substituted:" in r.getMessage()]
+
+    # ASSERT
+    assert at_info == []
+    assert at_debug
+
+
+def test_finalize_does_not_mutate_the_callers_user_params():
+    """
+    Given a ConfigManager built with NO system_config,
+    When finalize_user_params injects solved values back,
+    Then the caller's own dict is untouched.
+
+    Review 2.1.9.  `standardize_param_names` returns a fresh dict and
+    documents non-aliasing as a contract; the no-system_config branch
+    assigned the caller's dict directly, so finalize's inject-back wrote
+    `derived: True` markers and solved values into the caller's object.  The
+    same ConfigManager built two ways behaved differently, and production
+    always passes a system_config -- so this bit tests and direct drivers,
+    which is exactly where a mutated input is hardest to notice.
+
+    Asserted on the caller's dict rather than on identity alone: `is not` is
+    necessary but a shallow copy would satisfy it while the ENTRY dicts
+    stayed shared, which is where the inject-back actually writes.
+    """
+    # ARRANGE
+    caller = {"star.0.distance": {"initval": 100.0}}
+    expected = {"star.0.distance": {"initval": 100.0}}
+
+    # ACT
+    cm = ConfigManager(caller, system_config=None)
+    cm.finalize_user_params()
+
+    # ASSERT
+    assert caller == expected
+    assert cm.user_params is not caller

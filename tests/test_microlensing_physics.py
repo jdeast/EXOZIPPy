@@ -15,7 +15,7 @@ from exozippy.components.mulensing.physics import (
 )
 from exozippy.components.parameter import Parameter
 from exozippy.config import ConfigManager
-from exozippy.constants import KAPPA
+from exozippy.constants import KAPPA, RSUN_TO_AU
 from exozippy.physics_registry import PHYSICS_REGISTRY
 from exozippy.system import System
 
@@ -39,13 +39,15 @@ def test_pspl_magnification_accuracy():
 
     config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}],
+        "mulensevent": [{}],
+        "lens": [{"body": "star.Lens", "name": "Lens"}],
+        "source": [{"body": "star.Source", "name": "Source"}],
     }
     user_params = {
-        "lens.Lens.t_0": {"initval": t0_val},
-        "lens.Lens.u_0": {"initval": u0_val},
-        "lens.Lens.pi_E_N": {"initval": 0.0, "sigma": 0.0},
-        "lens.Lens.pi_E_E": {"initval": 0.0, "sigma": 0.0},
+        "source.Source.t_0": {"initval": t0_val},
+        "source.Source.u_0": {"initval": u0_val},
+        "mulensevent.pi_E_N": {"initval": 0.0, "sigma": 0.0},
+        "mulensevent.pi_E_E": {"initval": 0.0, "sigma": 0.0},
         "star.Lens.distance": {"initval": 4000.0},
         "star.Source.distance": {"initval": 8000.0},
         "star.Lens.mass": {"initval": 0.5},
@@ -67,7 +69,7 @@ def test_pspl_magnification_accuracy():
     t_at_peak = np.array([t0_val])
 
     with model:
-        A_node = system.lens.get_magnification(
+        A_node = system.mulensevent.get_magnification(
             t_at_peak, obs_zero, system, index=0
         )
         f = pytensor.function(model.free_RVs, A_node, on_unused_input="ignore")
@@ -113,7 +115,9 @@ def test_microlensing_physics_conversions():
 
 def test_lens_parameter_unit_handling():
     """Ensure lens parameters correctly handle 'd' and 'mas' string units."""
-    p = Parameter(label="lens.t_E", unit="d", internal_unit="d", initval=50.0)
+    p = Parameter(
+        label="mulensevent.t_E", unit="d", internal_unit="d", initval=50.0
+    )
     # If the gatekeeper is working, this should stay 50.0
     # If internal_unit was accidentally '', it would have crashed or scaled.
     assert p.initval == 50.0
@@ -128,7 +132,9 @@ def test_microlensing_sympy_pytensor_equivalence():
     # 1. Define Topology
     system_config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}],
+        "mulensevent": [{}],
+        "lens": [{"body": "star.Lens", "name": "Lens"}],
+        "source": [{"body": "star.Source", "name": "Source"}],
     }
 
     user_params = {
@@ -146,14 +152,14 @@ def test_microlensing_sympy_pytensor_equivalence():
     cm.finalize_user_params()
 
     # Verify the solver completed the chain.  Derived values are injected
-    # under the canonical INDEX form (lens.0.t_E) -- the only spelling
+    # under the canonical INDEX form (mulensevent.0.t_E) -- the only spelling
     # ConfigManager.resolve reads for every element.  See the inject-back
     # comment in finalize_user_params and tests/test_nsnl.py.
-    assert "lens.0.t_E" in cm.user_params
+    assert "mulensevent.0.t_E" in cm.user_params
 
-    te_sympy = cm.user_params["lens.0.t_E"]["initval"]
-    thetaE_sympy = cm.user_params["lens.0.theta_E"]["initval"]
-    pirel_sympy = cm.user_params["lens.0.pi_rel"]["initval"]
+    te_sympy = cm.user_params["mulensevent.0.t_E"]["initval"]
+    thetaE_sympy = cm.user_params["mulensevent.0.theta_E"]["initval"]
+    pirel_sympy = cm.user_params["mulensevent.0.pi_rel"]["initval"]
 
     # 3. Feed the SAME raw inputs into the PyTensor graph
     # (Using .eval() to pull the numeric result out of the graph)
@@ -203,6 +209,65 @@ def test_calc_theta_E_negative_pi_rel_returns_tiny_positive_not_nan():
     # Positive pi_rel still works correctly
     theta_E_pos = calc_theta_E(mass, pt.as_tensor_variable(0.125)).eval()
     assert theta_E_pos > 0.0
+
+
+def test_calc_rho_uses_the_shared_theta_E_floor():
+    """
+    Given a theta_E inside the old private 1e-10 floor but above the shared
+      THETA_E_FLOOR = 1e-12,
+    When calc_rho is called,
+    Then it divides by that theta_E itself, not by 1e-10: rho used to be
+      computed against a DIFFERENT theta_E than t_E and pi_E anywhere in
+      [1e-12, 1e-10), i.e. three numbers describing one lens while disagreeing
+      about it (review 2.6.2).
+    """
+    # Arrange
+    calc_rho = PHYSICS_REGISTRY["calc_rho"]
+    radius, distance = 1.0, 1000.0
+    theta_E = 1e-11
+    theta_star_mas = (radius * RSUN_TO_AU / distance) * 1000.0
+
+    # Act
+    got = calc_rho(
+        pt.as_tensor_variable(radius),
+        pt.as_tensor_variable(distance),
+        pt.as_tensor_variable(theta_E),
+    ).eval()
+
+    # Assert
+    assert got == pytest.approx(theta_star_mas / theta_E, rel=1e-12)
+
+
+def test_calc_rho_floors_at_theta_e_floor_and_does_not_scrub_nan():
+    """
+    Given theta_E = 0 and, separately, theta_E = NaN,
+    When calc_rho is called,
+    Then zero is floored at THETA_E_FLOOR (finite, no division by zero) while
+      the NaN PROPAGATES.  A floor must never be paired with a NaN
+      substitution (the PR #142 policy): substituting turns a failed
+      computation into a healthy-looking likelihood with a zero gradient,
+      which is the failure the floor exists to prevent.
+    """
+    # Arrange
+    calc_rho = PHYSICS_REGISTRY["calc_rho"]
+    radius, distance = 1.0, 1000.0
+    theta_star_mas = (radius * RSUN_TO_AU / distance) * 1000.0
+
+    def rho_at(theta_E):
+        return calc_rho(
+            pt.as_tensor_variable(radius),
+            pt.as_tensor_variable(distance),
+            pt.as_tensor_variable(theta_E),
+        ).eval()
+
+    # Act
+    at_zero = rho_at(0.0)
+    at_nan = rho_at(np.nan)
+
+    # Assert
+    assert np.isfinite(at_zero)
+    assert at_zero == pytest.approx(theta_star_mas / THETA_E_FLOOR, rel=1e-12)
+    assert np.isnan(at_nan)
 
 
 def test_calc_theta_E_is_unchanged_in_the_physical_regime():
@@ -270,19 +335,21 @@ def test_event_rate_prior_and_gradient_are_finite_for_negative_pi_rel():
 
 def test_microlensing_contradiction_no_override(caplog):
     """
-    When all variables in a violated equation are RANK_USER, the solver must
+    When all variables in a violated equation are PRECEDENCE_USER, the solver must
     leave every user value untouched and log a debug message — not silently
     sacrifice one value to satisfy the equation.
     """
     # Given: distances that imply pi_rel ~ 0.125, but user also sets pi_rel = 0.999
     system_config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}],
+        "mulensevent": [{}],
+        "lens": [{"body": "star.Lens", "name": "Lens"}],
+        "source": [{"body": "star.Source", "name": "Source"}],
     }
     user_params = {
         "star.Lens.distance": 4000.0,
         "star.Source.distance": 8000.0,
-        "lens.Lens.pi_rel": 0.999,
+        "mulensevent.pi_rel": 0.999,
     }
 
     import logging
@@ -291,6 +358,6 @@ def test_microlensing_contradiction_no_override(caplog):
     with caplog.at_level(logging.DEBUG):
         cm.finalize_user_params()
 
-    # When all variables are RANK_USER the solver skips and logs at debug level
+    # When all variables are PRECEDENCE_USER the solver skips and logs at debug level
     assert "over-constrained" in caplog.text.lower()
     assert "leaving all user values unchanged" in caplog.text.lower()

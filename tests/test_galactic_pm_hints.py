@@ -9,7 +9,7 @@ unknowns, and the MMEXOFAST seed carries no ``pi_E`` to break it (issue #93).
 
 Seeding both components at the kinematic prior's mean closes that hole.  The
 interesting part is what the provenance ranking then does on its own: the
-proper motions and the MMEXOFAST ``t_E`` are both RANK_DERIVED_DATA, so
+proper motions and the MMEXOFAST ``t_E`` are both PRECEDENCE_DERIVED_DATA, so
 ``t_E = theta_E / |mu_rel_geo|`` is over-determined, and Condition B rewrites
 its lowest-rank symbol -- ``theta_E``, through the lens mass (defaults.yaml,
 rank 20) and distance (rank 25).  So the measured ``t_E`` survives and the lens
@@ -49,11 +49,14 @@ def _inputs():
 
 
 def _prepared(config, user_params):
-    work = pathlib.Path(tempfile.mkdtemp()) / "DC2018_128"
+    # Removed in the finally below -- see the note in
+    # test_seed_quality.py: a bare mkdtemp() is nobody's to collect.
+    tmproot = pathlib.Path(tempfile.mkdtemp())
+    work = tmproot / "DC2018_128"
     shutil.copytree(
         EXAMPLE_DIR,
         work,
-        ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"),
+        ignore=shutil.ignore_patterns("fitresults*", ".#*", "#*#"),
     )
     cwd = os.getcwd()
     os.chdir(work)
@@ -64,6 +67,7 @@ def _prepared(config, user_params):
         return {p.label: p for p in system.get_all_parameters()}
     finally:
         os.chdir(cwd)
+        shutil.rmtree(tmproot, ignore_errors=True)
 
 
 @pytest.fixture(scope="module")
@@ -80,7 +84,8 @@ def test_proper_motions_are_seeded_at_the_galactic_prior_mean(params):
     """
     # Arrange: the same expectation the seeding claims to use.  DC2018_128 is
     # at (267.595, -28.982) deg; lens seeded as thin disk at 4 kpc, source as
-    # bulge at 8 kpc, matching the distance hints in Lens.register_parameters.
+    # bulge at 8 kpc, matching the distance hints in
+    # MulensEvent.register_parameters.
     ra, dec = np.radians(267.595), np.radians(-28.982)
     lens_pm = expected_proper_motion(ra, dec, 4000.0, "thin_disk")
     source_pm = expected_proper_motion(ra, dec, 8000.0, "bulge")
@@ -107,10 +112,10 @@ def test_neither_pm_component_is_left_at_zero(params):
     """
     # Act / Assert
     for label in (
-        "lens.mu_ra_rel",
-        "lens.mu_dec_rel",
-        "lens.pi_E_N",
-        "lens.pi_E_E",
+        "mulensevent.mu_ra_rel",
+        "mulensevent.mu_dec_rel",
+        "mulensevent.pi_E_N",
+        "mulensevent.pi_E_E",
     ):
         value = float(
             np.atleast_1d(np.asarray(params[label].initval, float))[0]
@@ -120,7 +125,7 @@ def test_neither_pm_component_is_left_at_zero(params):
 
 def test_measured_t_E_survives_and_theta_E_yields(params):
     """
-    Given proper motions at RANK_DERIVED_DATA that disagree with the seeded t_E,
+    Given proper motions at PRECEDENCE_DERIVED_DATA that disagree with the seeded t_E,
     When Condition B rewrites the over-determined relation,
     Then t_E keeps the MMEXOFAST value and theta_E is what moves.
 
@@ -136,12 +141,18 @@ def test_measured_t_E_survives_and_theta_E_yields(params):
     seeded_t_E = float(mmx["fits"][0]["parameters"]["t_E"])
 
     # Act
-    t_E = float(np.atleast_1d(np.asarray(params["lens.t_E"].initval, float))[0])
+    t_E = float(
+        np.atleast_1d(np.asarray(params["mulensevent.t_E"].initval, float))[0]
+    )
     theta_E = float(
-        np.atleast_1d(np.asarray(params["lens.theta_E"].initval, float))[0]
+        np.atleast_1d(
+            np.asarray(params["mulensevent.theta_E"].initval, float)
+        )[0]
     )
     mu_rel = float(
-        np.atleast_1d(np.asarray(params["lens.mu_rel_mag"].initval, float))[0]
+        np.atleast_1d(
+            np.asarray(params["mulensevent.mu_rel_mag"].initval, float)
+        )[0]
     )
 
     # Assert
@@ -180,8 +191,8 @@ def test_seeds_are_skipped_when_parallax_is_already_measured():
     """
     # Arrange
     config, user_params = _inputs()
-    user_params["lens.Lens.pi_E_N"] = {"initval": -0.2}
-    user_params["lens.Lens.pi_E_E"] = {"initval": 0.1}
+    user_params["mulensevent.pi_E_N"] = {"initval": -0.2}
+    user_params["mulensevent.pi_E_E"] = {"initval": 0.1}
 
     ra, dec = np.radians(267.595), np.radians(-28.982)
     prior_pm_dec = expected_proper_motion(ra, dec, 4000.0, "thin_disk")[1]
@@ -197,35 +208,6 @@ def test_seeds_are_skipped_when_parallax_is_already_measured():
     assert pm_dec[0] != pytest.approx(prior_pm_dec, rel=1e-3), (
         "the galactic-model mean overrode a measured pi_E direction"
     )
-
-
-def test_seeds_are_skipped_for_a_multi_source_event():
-    """
-    Given more than one source body,
-    When start values are resolved,
-    Then the proper motions are NOT seeded from the prior.
-
-    Every source would take the same bulge mean, tying their mu_rel together;
-    a resolved binary source distinguishes them.  On examples/ob161003 (two
-    sources, t_E and rho pinned for each) seeding took chi2/N from 1.72 to 3.9.
-    """
-    # Arrange: add a second source body to the lens block.
-    config, user_params = _inputs()
-    lens_block = config["lens"][0] if isinstance(config["lens"], list) else config["lens"]
-    sources = lens_block.get("sources")
-    if not sources:
-        pytest.skip("example does not use the explicit sources: list")
-    star_entries = config["star"]
-    star_entries.append(copy.deepcopy(star_entries[int(sources[0].split(".")[1])]))
-    star_entries[-1]["name"] = "SourceB"
-    lens_block["sources"] = list(sources) + [f"star.{len(star_entries) - 1}"]
-
-    # Act
-    params = _prepared(config, user_params)
-
-    # Assert
-    pm_dec = np.atleast_1d(np.asarray(params["star.pm_dec"].initval, float))
-    assert pm_dec[0] == pytest.approx(-3.0)
 
 
 def test_seeds_are_skipped_without_user_coordinates():

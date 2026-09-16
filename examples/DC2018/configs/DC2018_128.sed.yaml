@@ -1,0 +1,8 @@
+model: NextGen
+
+# No catalog photometry: these are simulated light curves, and none is
+# needed.  With an empty filter list the SED still constrains the Source
+# through the calibrated microlensing baseline flux -- the per-lightcurve
+# zeropoint hook in mulensinstrument -- with the Roman BC grids pulled in
+# through each band block's `filter:`.
+filters: []

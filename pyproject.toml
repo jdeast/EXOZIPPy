@@ -49,9 +49,18 @@ requires-python = ">=3.12,<3.15"
 # `^1.8.1` -> >=1.8.1,<2.0.0, which is exactly what poetry was expanding them
 # to in the built metadata anyway.
 dependencies = [
-    "pytensor>=3.1.2,<3.2.0",
+    # NO upper bound, deliberately: PYMC owns pytensor's ceiling and we defer
+    # to it. Our own <3.2.0 cap tracked pymc 6.1.0's range, and when pymc 6.2.0
+    # raised its floor to pytensor>=3.2.2 the two constraints became jointly
+    # unsatisfiable for every later pymc -- so the resolver silently held the
+    # project on pymc 6.1.0, two releases behind, and `poetry update` could not
+    # move it. A second, independently-chosen ceiling has no information pymc's
+    # own does not, and can only drift out of step with it again. The nightly
+    # unlocked-resolution job in .github/workflows/tests.yml is what catches an
+    # upstream pytensor release breaking us.
+    "pytensor>=3.1.2",
     "pandas>=1.3.6,<3.0.0",
-    "arviz>=1.1.0,<2.0.0",
+    "arviz>=1.3.0,<2.0.0",
     "dm-tree>=0.1.8",
     # The upper cap is Intel-Mac only, and follows from the numba cap below
     # rather than from anything we need: numba 0.62.1 requires numpy<2.4.
@@ -68,6 +77,16 @@ dependencies = [
     # pin (see samplers/de_metropolis.py).
     "pymc>=6.0.0,<7.0.0",
     "pyyaml>=6.0.3,<7.0.0",
+    # NESTED SAMPLING BACKENDS.  Both were UNDECLARED until 2026-09-04
+    # while run.py:801 makes `method: nested` a first-class sampler and
+    # run.py:820 defaults `nested_backend` to DYNESTY -- so on a clean
+    # install the default nested path died with ModuleNotFoundError.  They
+    # are core rather than an extra for exactly that reason: an undeclared
+    # dependency behind a default is not optional.  Both were installed by
+    # hand in the dev environment (dynesty 3.1.0 / ultranest 4.5.0), which
+    # is why nothing noticed.
+    "dynesty>=3.1.0,<4.0.0",
+    "ultranest>=4.5.0,<5.0.0",
     "matplotlib>=3.11.1,<4.0.0",
     "astropy>=7.2.0,<8.0.0",
     # celerite v1 used to be pinned here. It was imported nowhere in the tree
@@ -97,7 +116,7 @@ dependencies = [
     # (exoplanet-dev/exoplanet-core#144). Lowering this floor silently breaks
     # the JAX samplers again.
     "exoplanet-core[pymc]>=0.4.0,<0.5.0",
-    "click>=8.3.3,<9.0.0",
+    "click>=8.5.0,<9.0.0",
     "h5py>=3.16.0,<4.0.0",
     # PyTensor 3 makes numba a HARD dependency (it is the "auto" linker
     # default -- see src/exozippy/__init__.py), and numba's last macOS
@@ -155,11 +174,11 @@ dependencies = [
     # one in by default (it's an optional "io" extra), but we need it to save
     # traces.
     "h5netcdf>=1.8.1,<2.0.0",
-    "lxml>=5.0",
+    "lxml>=6.1.2",
     # Parquet engine for the MIST EEP track grid (src/exozippy/models/MIST);
     # pandas.read_parquet needs one and does not ship it. Was `pyarrow =
     # "^25.0.0"` in the old [tool.poetry.dependencies] table.
-    "pyarrow>=25.0.0,<26.0.0",
+    "pyarrow>=25.0.1,<26.0.0",
 ]
 
 # NOTE: the microlensing tools (mmexofast, sfit-minimizer, emcee) used to live
@@ -187,7 +206,7 @@ dependencies = [
 [project.optional-dependencies]
 gui = [
     "fastapi>=0.141.1,<1.0.0",
-    "uvicorn[standard]>=0.52.1,<1.0.0",
+    "uvicorn[standard]>=0.52.4,<1.0.0",
     "websockets>=13.0,<16.0",
     "pywebview>=5.0,<6.0",
     "ruamel-yaml>=0.18.0,<1.0.0",
@@ -216,6 +235,9 @@ Homepage = "https://github.com/jdeast/EXOZIPPy"
 exozippy = "exozippy.cli:main"
 exozippy-modes = "exozippy.cli_modes:main"
 exozippy-gui = "exozippy.gui.app:main"
+# Example data that is NOT redistributed with EXOZIPPy (licence
+# compatibility -- see components/pharmacokinetics/fetch_theoph.py).
+exozippy-fetch-theoph = "exozippy.components.pharmacokinetics.fetch_theoph:main"
 
 # Only poetry-specific configuration belongs under [tool.poetry] now; every
 # field above is standard PEP 621 metadata that any tool can read.
@@ -229,10 +251,10 @@ version = "0.0.0"
 [tool.poetry.group.dev.dependencies]
 ipdb = ">=0.13.13,<0.14.0"
 pytest = ">=9.0.3,<10.0.0"
-pre-commit = ">=4.6.1,<5.0.0"
+pre-commit = ">=4.6.2,<5.0.0"
 ipykernel = ">=7.2.0,<8.0.0"
-scipy-stubs = ">=1.17.1.5,<2.0.0.0"
-pandas-stubs = "=3.0.3.260530,<4.0.0.0"
+scipy-stubs = ">=1.18.1.0,<2.0.0.0"
+pandas-stubs = "=3.0.5.260730"
 pytest-timeout = "^2.4.0"
 pytest-xdist = ">=3.0"
 # fastapi.testclient.TestClient is built on httpx, which fastapi does NOT pull
@@ -241,6 +263,14 @@ pytest-xdist = ">=3.0"
 # and every GUI endpoint test errored at fixture setup. Declared here so the
 # test environment is reproducible rather than lucky.
 httpx = ">=0.27,<1.0"
+
+# For scripts/find_redundant_tests.py only -- nothing in the suite imports
+# them, and no CI job runs them. Kept as dev deps rather than an extra because
+# the analysis is a periodic investigation, not part of any build: it wants a
+# whole-suite run with per-test coverage contexts (about +33% on top of the
+# suite, measured), which is not something to do on every commit.
+coverage = ">=7.16.0,<8.0"
+pytest-cov = ">=6.0,<8.0"
 
 # Microlensing tooling, git-only and therefore unpublishable as an extra (see
 # the note in [project]). optional = true keeps it out of a default
@@ -310,11 +340,16 @@ known-first-party = ["exozippy"]
 #   F701  `break` outside a loop
 #   F702  `continue` outside a loop
 #   B002  `++x`, which is two unary plusses and does nothing
+#   E722  bare `except:` -- catches KeyboardInterrupt and SystemExit too, so a
+#         Ctrl-C inside the guarded block is swallowed and the fit carries on.
+#         Zero hits as of review 2.14.1, which converted the last five to
+#         `except Exception:`; enabled so they cannot come back.
 #   PLE   pylint's error (not style) category
 #   I     import sorting -- replaces isort, and produced a zero-line diff
 #         against isort's output when adopted
 select = [
-    "E9", "F821", "F632", "F502", "F522", "F701", "F702", "B002", "PLE", "I",
+    "E9", "F821", "F632", "F502", "F522", "F701", "F702", "B002", "E722",
+    "PLE", "I",
 ]
 
 # NOT enabled, with reasons, so nobody has to re-derive these:
@@ -340,14 +375,26 @@ norecursedirs = ["exozippy", "src"]
 # same worker so module/session-scoped fixtures (many System builds) are shared,
 # not rebuilt per worker. -n is capped at 6 (not "auto") because each worker
 # peaks ~1-2 GB building a System and compiling graphs; 36 workers would OOM.
-# CI overrides this to -n 2 (see .github/workflows/tests.yml) because a GitHub
-# runner cannot afford six. Override for single-test debugging with `-n0`, e.g.
+# CI overrides this with a count computed from the runner's cores and memory
+# (scripts/pytest_workers.py, called from .github/workflows/tests.yml) rather
+# than a number written down here: a GitHub runner cannot afford six, but the
+# `-n 2` that used to be hardcoded there stayed put while the runners grew.
+# Override for single-test debugging with `-n0`, e.g.
 #   poetry run pytest tests/test_foo.py::test_bar -n0 -x
 addopts = "-n 6 --dist loadfile"
 markers = [
     "slow: tests that build a full System + compile PyTensor graphs (~30s+ each); skip with -m 'not slow'",
 ]
-timeout = 300
+# 600, not 300.  A COLD compile cache (a fresh checkout, a new worktree, or
+# CI before its cache is populated) makes a single test's gcc invocation take
+# minutes, and pytest-timeout's signal method CANNOT interrupt a process
+# blocked in a gcc subprocess -- so at 300 the cap was already unenforced for
+# exactly the tests that exceeded it.  Measured on one cold run: four tests
+# overran 300 s and passed (365, 337, 328, 316) while a fifth was killed at
+# the cap, i.e. whether a cold run went red was a coin flip rather than a
+# signal.  600 removes the flake without weakening a rail that was holding
+# nothing; see docs/testing-cache.md.
+timeout = 600
 # "signal" (SIGALRM), NOT "thread".  pytest-timeout's thread method ends in
 # os._exit(1): the xdist worker vanishes without sending workerfinished, so the
 # controller reports only "[gwN] node down: Not properly terminated".  Worse,

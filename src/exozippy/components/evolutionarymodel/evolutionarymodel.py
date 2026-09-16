@@ -341,13 +341,16 @@ class EvolutionaryModel(StellarRelation, Component):
     def _pin_unmodeled_stars(self, system):
         """Pin initfeh/eep/age on every star no instance of this component names.
 
-        ``Star.register_parameters`` materializes all three for EVERY star as
-        soon as an ``evolutionarymodel`` block exists anywhere in the config:
-        its per-star ``{"mask": ...}`` entries are the declared-but-unconsumed
-        manifest ``mask`` field (the same one that blocks orbit's ``fitvcve``
-        and per-band ``ld_law``), so the gating it expresses does not happen.
-        Left alone, a two-star system with one modeled star gives the other
-        three free, bounded parameters that no likelihood term reads.
+        ``Star.register_parameters`` masks all three by ``mist or parsec``,
+        and that mask IS consumed now (it is a real per-element role: an
+        opted-out star's track coordinates are inactive).  But ``mist:``
+        DEFAULTS TO TRUE, so every star in a config carrying an
+        ``evolutionarymodel`` block is opted in by that default -- whether or
+        not any instance of this component names it.  The mask answers "did
+        this star ask for a track"; this answers "did anything actually give
+        it one".  Left alone, a two-star system with one modeled star gives
+        the other three free, bounded parameters that no likelihood term
+        reads.
 
         The fix is ``Band._pin_unread_limb_darkening``'s: ``sigma: 0`` through
         the override channel, which layers UNDER the params file, so an

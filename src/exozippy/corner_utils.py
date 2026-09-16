@@ -6,12 +6,20 @@ flattening posterior variables into a sample matrix and rendering it.
 """
 
 import logging
-import math
 
 import matplotlib.pyplot as plt
 import numpy as np
 
+from . import reporting
+from .constants import CORNER_THIN_SEED
+
 logger = logging.getLogger(__name__)
+
+
+def _quantile_triple():
+    """``[low, 0.5, high]`` for corner's ``quantiles=``, at the reporting width."""
+    low, high = reporting.quantiles()
+    return [low, 0.5, high]
 
 
 def _flatten_arrays(items):
@@ -105,8 +113,44 @@ def collect_parameter_corner_samples(param_specs):
     return _flatten_arrays(items)
 
 
+# corner's own default bin count.  It is named here, and passed explicitly to
+# corner.corner() below, because _drop_undrawable has to reason about the bin
+# GRID corner will build -- so the two must not be allowed to drift.
+CORNER_BINS = 20
+
+
 def _label_at(labels, j):
     return labels[j] if j < len(labels) else f"column {j}"
+
+
+def histogram_grid_degenerate(lo, hi, n_edges):
+    """True when ``np.linspace(lo, hi, n_edges)`` is not a usable bin grid.
+
+    THE ONE implementation of this test.  Two callers ask it, about two
+    different grids, and they MUST agree -- one decides whether a parameter is
+    given a corner column at all, the other whether a density can be drawn for
+    it -- so the predicate lives here rather than being written twice:
+
+    * ``_drop_undrawable`` below, with ``n_edges = CORNER_BINS + 1``.  corner
+      builds every panel from ``np.linspace(lo, hi, n_bins + 1)`` and hands the
+      resulting EDGE ARRAY to np.histogram / np.histogram2d.  A repeated edge is
+      ACCEPTED there, so nothing raises; the failure is silent, most bins being
+      empty by construction and the panel a full-width spike, which reads as a
+      measured posterior of width ``hi - lo`` rather than as a parameter that
+      never moved.
+    * ``run.py``'s ``_dist_degeneracy``, with ``n_edges = _KDE_GRID_LEN + 1``
+      (513, against corner's 21).  There the consequence is harsher: arviz asks
+      np.histogram for a bin COUNT plus a range, and numpy rejects that outright
+      with "Too many bins for data range", taking the whole trace page down.
+
+    When the whole range spans fewer than ``n_edges - 1`` float64 steps the
+    linspace cannot produce ``n_edges`` distinct, strictly increasing edges, and
+    ``np.diff`` shows it as a non-positive step.  The test is therefore on
+    REPRESENTABILITY, not on smallness: a well-measured parameter with a 1e-12
+    posterior width has billions of float64 steps across it and is drawn
+    normally.
+    """
+    return bool(np.any(np.diff(np.linspace(lo, hi, n_edges)) <= 0))
 
 
 def _drop_undrawable(samples, labels, filename):
@@ -128,7 +172,9 @@ def _drop_undrawable(samples, labels, filename):
          every row;
       2. rows (draws) still carrying a non-finite value -- such a draw
          cannot be placed in any 2-D panel involving that column anyway;
-      3. columns that are constant over the surviving rows.
+      3. columns whose surviving range cannot carry corner's bin grid --
+         exactly constant, or spanning fewer float64 steps than there are
+         bins (see histogram_grid_degenerate).
 
     Dropping beats passing an artificial ``range``: corner's ``range``
     argument also sets ``force_range``, which changes the axis limits of the
@@ -163,11 +209,18 @@ def _drop_undrawable(samples, labels, filename):
     keep = []
     for j in range(samples.shape[1]):
         col = samples[:, j]
-        if col.min() == col.max():
+        lo, hi = float(col.min()), float(col.max())
+        if lo == hi:
             logger.warning(
                 f"corner plot ({filename}): omitting {labels[j]} (constant "
-                f"at {float(col.min()):.10g}); the remaining parameters are "
-                "still plotted"
+                f"at {lo:.10g}); the remaining parameters are still plotted"
+            )
+        elif histogram_grid_degenerate(lo, hi, CORNER_BINS + 1):
+            logger.warning(
+                f"corner plot ({filename}): omitting {labels[j]} (range "
+                f"{hi - lo:.3g} around {lo:.10g} spans fewer than "
+                f"{CORNER_BINS} float64 steps, so it cannot be binned); the "
+                "remaining parameters are still plotted"
             )
         else:
             keep.append(j)
@@ -190,7 +243,7 @@ def save_corner_plot(samples, labels, filename, max_samples=1000):
         return
 
     if samples.shape[0] > max_samples:
-        rng = np.random.default_rng(seed=42)
+        rng = np.random.default_rng(seed=CORNER_THIN_SEED)
         idx = rng.choice(samples.shape[0], size=max_samples, replace=False)
         idx.sort()
         samples = samples[idx]
@@ -203,14 +256,19 @@ def save_corner_plot(samples, labels, filename, max_samples=1000):
         )
         return
 
-    minrank = 0.5 - math.erf(1.0 / math.sqrt(2)) / 2.0
-    maxrank = 0.5 + math.erf(1.0 / math.sqrt(2)) / 2.0
-
     try:
         fig = corner.corner(
             samples,
             labels=labels,
-            quantiles=[minrank, 0.5, maxrank],
+            bins=CORNER_BINS,
+            # The reporting interval, from the ONE setting in reporting.py
+            # -- the same width the tables and the caption use, so a run at
+            # 95% cannot show 95% intervals in the table and 68% ones in the
+            # corner plot.  This used to recompute 0.5 -/+ erf(1/sqrt(2))/2
+            # inline (review 4.2.6), then read the SIGMA_1_* constants; the
+            # constants are still the DEFAULT, reporting.py just makes the
+            # width one question instead of a convention copied per site.
+            quantiles=_quantile_triple(),
             show_titles=True,
             title_kwargs={"fontsize": 12},
         )

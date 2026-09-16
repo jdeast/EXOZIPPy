@@ -1,0 +1,86 @@
+Loading restart data from: /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138_renorm.pkl
+  Loaded 3 fit result(s).
+
+Completed steps 
+event_search: run_ef_grid
+fit_static_point_lens: est_pl_params
+fit_static_point_lens: fit_pspl
+search_for_anomaly: compute_residuals
+search_for_anomaly: run_af_grid
+search_for_anomaly: get_anomaly_lc_params
+search_for_anomaly: classify_anomaly
+fit_binary_lens: est_binary_params
+fit_binary_lens: fit_binary_models
+
+
+Planned workflow: 
+renormalize:renormalize_datasets
+renormalize:refit_all
+check_binary_renorm:check_needs_renorm
+
+
+Running step: renormalize:renormalize_datasets
+Renormalizing using: 2L1S Close_alt static
+Anomaly window protection active: [8281.426546, 8282.078588]
+  n20260623.I.KMTA14.pys: 1 point(s) inside anomaly window are protected.
+  n20260623.I.KMTA14.pys: errfac=1.460
+Anomaly window protection active: [8281.426546, 8282.078588]
+  n20260623.I.KMTC14.pys: errfac=1.230
+Anomaly window protection active: [8281.426546, 8282.078588]
+  n20260623.I.KMTS14.pys: 1 point(s) inside anomaly window are protected.
+  n20260623.I.KMTS14.pys: errfac=1.252
+Anomaly window protection active: [8281.426546, 8282.078588]
+  n20260623.I.KMTA15.pys: 3 point(s) inside anomaly window are protected.
+  n20260623.I.KMTA15.pys: errfac=1.430
+Anomaly window protection active: [8281.426546, 8282.078588]
+  n20260623.I.KMTC15.pys: errfac=1.260
+Anomaly window protection active: [8281.426546, 8282.078588]
+  n20260623.I.KMTS15.pys: 4 point(s) inside anomaly window are protected.
+  n20260623.I.KMTS15.pys: errfac=1.342
+Step completed: renormalize:renormalize_datasets
+Restart state saved to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138_renorm.pkl.
+
+Running step: renormalize:refit_all
+Refitting all stored models...
+PSPL static: {'t_0': 8281.750005644371, 't_E': 4.5437865047002965, 'u_0': 0.5263243507852136, 'chi2': 3203.610018485666}
+    sigmas:  [0.006515750037668997, 0.08173008776157183, 0.015740034085597973, 5.041168737169052, 5.049145931823927, 5.403633254339011, 5.399250534475441, 4.896692363469582, 4.899044515268156, 6.178834089809593, 6.173105640467857, 5.364016781599335, 5.357105430462523, 6.112401852650884, 6.108103288764982]
+Loading restart data from: /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138_renorm.pkl
+  Loaded 3 fit result(s).
+
+Completed steps 
+event_search: run_ef_grid
+fit_static_point_lens: est_pl_params
+fit_static_point_lens: fit_pspl
+search_for_anomaly: compute_residuals
+search_for_anomaly: run_af_grid
+search_for_anomaly: get_anomaly_lc_params
+search_for_anomaly: classify_anomaly
+fit_binary_lens: est_binary_params
+fit_binary_lens: fit_binary_models
+renormalize: renormalize_datasets
+
+
+Planned workflow: 
+renormalize:refit_all
+check_binary_renorm:check_needs_renorm
+
+
+Running step: renormalize:refit_all
+Refitting all stored models...
+PSPL static: {'t_0': 8281.750005644371, 't_E': 4.5437865047003045, 'u_0': 0.5263243507852119, 'chi2': 3203.6100184856627}
+    sigmas:  [0.006515750037669746, 0.08173008776170318, 0.01574003408562214, 5.0411687371767275, 5.049145931831602, 5.403633254348559, 5.399250534484942, 4.896692363476985, 4.899044515275535, 6.178834089818678, 6.173105640476916, 5.3640167816079005, 5.357105430471074, 6.112401852660163, 6.10810328877424]
+2L1S Close static: {'t_0': 8281.736481786447, 'u_0': 0.5089778530288508, 't_E': 4.6312179409849135, 's': 0.6335996227704759, 'alpha': -106.41932554317259, 'rho': 0.00016265345962770324, 'q': 0.002878146503106522, 'chi2': 3050.4292516350533}
+    sigmas:  [0.007163586761635088, 0.01525785456981027, 0.0825749991078597, 3.3459232553890326, 0.008055393276973424, 0.07253659701132542, 0.7015071018143573]
+2L1S Close_alt static: {'t_0': 8281.727509131117, 'u_0': 0.5239163733929224, 't_E': 4.553839861986066, 's': 0.9099748645207979, 'alpha': -105.71390855821264, 'rho': 3.2764792515492514e-06, 'q': 0.0023682368373484507, 'chi2': 3045.5406713726093}
+    sigmas:  [0.0077958643832971575, 0.015325339382002479, 0.07998180983824943, 3.3414095640993504, 0.008569572614060616, 0.08712449702072522, 0.6367420014612932]
+Step completed: renormalize:refit_all
+Restart state saved to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138_renorm.pkl.
+
+Running step: check_binary_renorm:check_needs_renorm
+Step completed: check_binary_renorm:check_needs_renorm
+Restart state saved to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138_renorm.pkl.
+
+Saved latex results table to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138_renorm_results.tex.
+
+Saved EXOZIPPy init data to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138_renorm_exozippy_init.json.
+Saved light curve plot to /scratch/public/sao/astoneew/ob180087_obj3/test_output/ob180087_20260624170138_renorm_lc.pdf.

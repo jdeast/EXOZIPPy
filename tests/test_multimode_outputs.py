@@ -157,7 +157,7 @@ def test_emit_per_mode_outputs_writes_named_corner_files(tmp_path):
     assert rep.n_modes == 2
 
     prefix = tmp_path / "fit"
-    _emit_per_mode_outputs(_FakeSystem(), None, idata, rep, prefix)
+    _emit_per_mode_outputs(_FakeSystem(), idata, rep, prefix)
 
     expected = sorted(
         [
@@ -192,7 +192,7 @@ def test_emit_per_mode_outputs_calls_component_plot_per_mode(tmp_path):
         active_components = {"dummy": _RecordingComponent()}
 
     prefix = tmp_path / "fit"
-    _emit_per_mode_outputs(_SystemWithComponent(), None, idata, rep, prefix)
+    _emit_per_mode_outputs(_SystemWithComponent(), idata, rep, prefix)
 
     assert len(calls) == 2
     prefixes = sorted(p for p, _ in calls)

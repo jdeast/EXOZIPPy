@@ -1,6 +1,6 @@
 """Tests for the headless solve / validate API (exozippy.solve_api).
 
-The solve_api runs only lifecycle stages 1-3 (System.prepare) and reads the
+The solve_api runs only lifecycle stages 1-4 (System.prepare) and reads the
 in-memory relaxation-engine solution back out -- no PyMC model is built.  These
 tests use the RV-only KELT-4 example (examples/kelt4/kelt4_rvonly.yaml).
 
@@ -9,11 +9,13 @@ Tests follow AAA (Arrange / Act / Assert) with Given/When/Then docstrings.
 
 import copy
 import json
+import os
 from pathlib import Path
 
 import pytest
 import yaml
 
+from exozippy import solve_api
 from exozippy.solve_api import SolveResult, solve, validate
 
 EXAMPLE_DIR = Path(__file__).parent.parent / "examples" / "kelt4"
@@ -243,3 +245,118 @@ def test_solve_accepts_user_params_from_file(kelt4_inputs):
 
     # Assert
     assert result.parameters["star.A.radius"]["provenance"]["label"] == "user"
+
+
+# ---------------------------------------------------------------------------
+# workdir is threaded through, not chdir'd into  (review 2.1.5)
+# ---------------------------------------------------------------------------
+
+
+def test_solve_never_changes_the_process_working_directory(
+    kelt4_inputs, monkeypatch
+):
+    """
+    Given a solve rooted at a workdir that is not the process cwd,
+    When it runs with os.chdir booby-trapped,
+    Then it completes: nothing in stages 1-3 depends on the process cwd.
+
+    The working directory is process-GLOBAL and these endpoints run on
+    FastAPI's threadpool, so two concurrent calls with different workdirs
+    could read each other's data files -- silently, since a same-named file in
+    the other project reads perfectly well.  Paths are now resolved against
+    workdir up front instead.
+    """
+    # ARRANGE
+    config, user_params, workdir = kelt4_inputs
+
+    def no_chdir(*args, **kwargs):
+        raise AssertionError("solve_api must not chdir")
+
+    monkeypatch.setattr(solve_api.os, "chdir", no_chdir)
+    before = os.getcwd()
+
+    # ACT
+    result = solve(copy.deepcopy(config), copy.deepcopy(user_params), workdir)
+
+    # ASSERT
+    assert result.parameters
+    assert os.getcwd() == before
+
+
+def test_validate_also_runs_without_chdir(kelt4_inputs, monkeypatch):
+    """
+    Given the same booby trap,
+    When validate() runs,
+    Then it too completes -- both entry points share _prepare_system, and
+      validate is the one the GUI calls on every keystroke-scale edit.
+    """
+    # ARRANGE
+    config, user_params, workdir = kelt4_inputs
+
+    def no_chdir(*args, **kwargs):
+        raise AssertionError("solve_api must not chdir")
+
+    monkeypatch.setattr(solve_api.os, "chdir", no_chdir)
+
+    # ACT
+    diagnostics = validate(
+        copy.deepcopy(config), copy.deepcopy(user_params), workdir
+    )
+
+    # ASSERT -- a clean example produces no error diagnostics
+    assert [d for d in diagnostics if d["severity"] == "error"] == []
+
+
+def test_path_keys_are_resolved_and_keywords_are_left_alone(tmp_path):
+    """
+    Given a config mixing real relative paths with strings that merely share a
+      path key (`mmexofast: auto`, a `mask:` row-index list, an absolute path),
+    When _resolve_config_paths rewrites it against a workdir,
+    Then only the strings that name something in that workdir are joined.
+
+    A string under a path key is not always a path, so the rewrite probes.
+    That also keeps a genuinely missing file reporting the spelling the user
+    wrote, rather than an absolute path they never typed.
+    """
+    # ARRANGE
+    (tmp_path / "a.rv").write_text("1 2 3\n")
+    config = {
+        "prefix": "fitresults/run",
+        "rvinstrument": [
+            {"file": "a.rv", "mask": [0, 1]},
+            {"file": "missing.rv", "mmexofast": "auto"},
+        ],
+    }
+
+    # ACT
+    out = solve_api._resolve_config_paths(config, str(tmp_path))
+
+    # ASSERT
+    assert out["rvinstrument"][0]["file"] == str(tmp_path / "a.rv")
+    assert out["rvinstrument"][0]["mask"] == [0, 1]
+    assert out["rvinstrument"][1]["file"] == "missing.rv"
+    assert out["rvinstrument"][1]["mmexofast"] == "auto"
+    # prefix is an OUTPUT path (mulensinstrument hangs the MMEXOFAST cache off
+    # it during stage 1a), so it is joined without an existence probe.
+    assert out["prefix"] == str(tmp_path / "fitresults/run")
+
+
+def test_resolving_paths_does_not_mutate_the_callers_config(tmp_path):
+    """
+    Given a config passed to _resolve_config_paths,
+    When it returns,
+    Then the caller's dict is untouched.
+
+    The GUI holds one config document across many validates; rewriting it in
+    place would make the second call resolve already-absolute paths against
+    the workdir again the moment the workdir changed.
+    """
+    # ARRANGE
+    (tmp_path / "a.rv").write_text("1 2 3\n")
+    config = {"rvinstrument": [{"file": "a.rv"}]}
+
+    # ACT
+    solve_api._resolve_config_paths(config, str(tmp_path))
+
+    # ASSERT
+    assert config["rvinstrument"][0]["file"] == "a.rv"

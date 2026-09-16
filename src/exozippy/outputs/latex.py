@@ -1,4 +1,5 @@
 import csv
+import logging
 
 import numpy as np
 
@@ -9,6 +10,8 @@ from .texutils import (
     mode_suffix,
     mode_word,
 )
+
+logger = logging.getLogger(__name__)
 
 # The two column layouts of <prefix>_results.csv.  MODE_COLUMNS is used
 # whenever ANY row in the file needs a mode key -- a multimodal posterior,
@@ -36,6 +39,62 @@ def _instance_name(params, index):
         if p.names and index < len(p.names):
             return str(p.names[index])
     return None
+
+
+def _note_mark(n):
+    """The n'th (0-based) tablenotemark label: a, b, ... z, aa, ab, ...
+
+    Distinct note texts scale with the number of parameters -- every
+    per-element support interval a component declares through
+    ``add_prior_contribution`` is its own text -- so a big table really can
+    run past 26.  The old ``chr(ord("a") + n)`` produced "{" at n = 26, which
+    closes ``\\tablenotemark{`` early and leaves the document brace-mismatched:
+    an unreadable TeX error at the end of a long fit, from a table that is
+    otherwise entirely correct.
+
+    Bijective base 26, so the first 26 labels are unchanged and no existing
+    table is renumbered.
+    """
+    label = ""
+    n += 1
+    while n:
+        n, rem = divmod(n - 1, 26)
+        label = chr(ord("a") + rem) + label
+    return label
+
+
+def _warn_mixed_lengths(comp_label, printable, n_instances):
+    """Name the printable vectors that are shorter than the instance loop.
+
+    The instance loop below runs to the LONGEST printable vector in the
+    component, on the assumption that every vector in a component has one
+    element per instance of it.  Nothing enforces that, and when it is false
+    the short vector is asked for a row at an index it has no element for --
+    which emitted a table row citing ``\\ez<var><idx>``, a macro
+    ``to_latex_def`` never defined, i.e. an "Undefined control sequence" at
+    the end of a long fit.  (With a list-valued ``summary`` and
+    ``print_to_table`` off, the same index is an outright IndexError.)
+
+    Those rows are skipped rather than raising -- a table is written at
+    wrap-up, and losing it wholesale over a layout mismatch is worse than
+    losing the rows -- but the mismatch is a component bug, so it is named
+    here rather than papered over silently.
+    """
+    short = [
+        (p.label, _instance_count(p))
+        for p in printable
+        if 1 < _instance_count(p) < n_instances
+    ]
+    if not short:
+        return
+    longest = [p.label for p in printable if _instance_count(p) == n_instances]
+    detail = ", ".join(f"{label} ({n})" for label, n in short)
+    logger.warning(
+        f"LaTeX table ({comp_label}): printable vectors of mixed length -- "
+        f"{detail} against {n_instances} instances (e.g. {longest[0]}). "
+        "Every vector in a component is expected to carry one element per "
+        "instance; the missing rows are omitted from the table."
+    )
 
 
 def _instance_subhead(name, n_cols=4):
@@ -96,8 +155,35 @@ def _mixing_sentence(mode_report):
 
 
 def _ensure_mode_summaries(system, p, mode_report):
-    """Compute per-mode summaries for a sampled parameter if missing."""
-    if p.posterior is None or p.mode_summaries is not None:
+    """Compute per-mode summaries for a sampled parameter if missing or stale.
+
+    ``mode_summaries`` is one entry per mode, and it is cached on the
+    Parameter -- which outlives the report.  Both the GUI and
+    ``exozippy-modes`` re-report a live System, and ``distribute_posterior``
+    overwrites ``posterior`` without clearing the summaries derived from it,
+    so a second report with a DIFFERENT mode count met a list sized for the
+    first one.  Too few entries and the table cites a per-mode macro
+    ``to_latex_mode_defs`` never defined; too many and it silently reports
+    the previous report's splits under the new run's labels, which is the
+    worse half because nothing anywhere says so.
+
+    Recomputing on a length mismatch is most of the guard: the count is the
+    one property of the cache that a new report can check against ITS OWN
+    modes.  The other property is the reporting interval width
+    (``exozippy.reporting``), which a re-report may also have changed;
+    ``Parameter.mode_summaries_are_current`` asks both questions so neither
+    is rewritten here.
+
+    Since 3.14.7 ``Parameter.posterior``'s setter drops both ``summary`` and
+    ``mode_summaries`` when new draws arrive, so the ordinary re-report path
+    no longer reaches here with a stale cache.  The length check stays: it
+    costs nothing, it is the only guard for a caller that recomputes the
+    modes WITHOUT redistributing the posterior, and it is what pins the
+    property that ``mode_summaries`` is one entry per mode.
+    """
+    if p.posterior is None:
+        return
+    if p.mode_summaries_are_current(mode_report.n_modes):
         return
     labels = getattr(system, "mode_labels", None)
     if labels is None:
@@ -142,8 +228,7 @@ def build_csv_output(
         printable = [p for p in comp_params if p.print_to_table]
         for p in printable:
             n_instances = _instance_count(p)
-            if p.posterior is not None and p.summary is None:
-                p.compute_summary()
+            p.ensure_summary()
             if per_mode:
                 _ensure_mode_summaries(system, p, mode_report)
 
@@ -157,14 +242,19 @@ def build_csv_output(
                     return s_list[index] if index < len(s_list) else s_list[-1]
 
                 if p.summary is not None:
-                    med, ep, em = summ_at(p.summary).format(sigfigs=2)
+                    # format() returns (median, err_MINUS, err_PLUS) -- unpack
+                    # in that order.  Binding it as (med, ep, em) put err_minus
+                    # in the 'up_err' column and err_plus in 'low_err' for
+                    # every asymmetric posterior in every results.csv ever
+                    # written (review 1.11.4); the appends below are right.
+                    med, em, ep = summ_at(p.summary).format(sigfigs=2)
                     if mode_cols:
                         rows.append((name, "all", 1.0, "", med, ep, em))
                     else:
                         rows.append((name, med, ep, em))
                     if per_mode:
                         for k, m in enumerate(mode_report.modes):
-                            med, ep, em = summ_at(p.mode_summaries[k]).format(
+                            med, em, ep = summ_at(p.mode_summaries[k]).format(
                                 sigfigs=2
                             )
                             rows.append(
@@ -188,11 +278,17 @@ def build_csv_output(
                     else:
                         rows.append((name, val, "", ""))
 
+            # An INACTIVE element is not a parameter of its instance's
+            # parameterization (a non-MIST star's EEP), only a bookkeeping
+            # value in the vector -- so it gets no row here, in the LaTeX
+            # table, or in the startup table.
             if n_instances == 1:
-                emit(p.label, 0)
+                if p.element_is_active(0):
+                    emit(p.label, 0)
             else:
                 for i in range(n_instances):
-                    emit(p.get_display_label(i), i)
+                    if p.element_is_active(i):
+                        emit(p.get_display_label(i), i)
 
     columns = CSV_COLUMNS_MODE if mode_cols else CSV_COLUMNS_PLAIN
     with open(csv_filename, "w", newline="") as f:
@@ -273,7 +369,7 @@ def build_latex_output(
 
     def _mark_for_text(text):
         if text not in note_marks:
-            note_marks[text] = chr(ord("a") + len(note_marks))
+            note_marks[text] = _note_mark(len(note_marks))
         return note_marks[text]
 
     def _mark_for(p):
@@ -320,10 +416,9 @@ def build_latex_output(
             continue
 
         # A section title, i.e. prose -- escaped like every other non-LaTeX
-        # string that reaches the table.
-        comp_label = latex_escape(
-            getattr(comp, "label", comp.__class__.__name__)
-        )
+        # string that reaches the table.  `label` is declared on Component
+        # (and defaulted to the class name there), so no getattr guard.
+        comp_label = latex_escape(comp.label)
 
         # All \newcommand defs span every index — emit them once per parameter.
         # When multimodal, the unsuffixed def is the pooled-across-modes
@@ -339,10 +434,13 @@ def build_latex_output(
                 all_defs.append(p.to_latex_mode_defs())
 
         n_instances = max(_instance_count(p) for p in printable)
+        _warn_mixed_lengths(comp_label, printable, n_instances)
 
         if n_instances == 1:
             all_table_lines.append(rf"\sidehead{{{comp_label}:}}" + "\n")
             for p in printable:
+                if not p.element_is_active(0):
+                    continue
                 all_table_lines.append(
                     p.to_table_line(
                         note_mark=_mark_for(p), mode_suffixes=mode_suffixes
@@ -355,12 +453,21 @@ def build_latex_output(
             for i in range(n_instances):
                 name = _instance_name(printable, i) or chr(ord("A") + i)
                 n_cols = 4 if not multimodal else 3 + mode_report.n_modes
-                all_table_lines.append(_instance_subhead(name, n_cols=n_cols))
 
+                instance_lines = []
                 for p in printable:
                     p_n = _instance_count(p)
+                    # This loop runs to the LONGEST printable vector in the
+                    # component, so a shorter one simply has no element here
+                    # -- and asking it for one produced a row citing a macro
+                    # to_latex_def never emitted.  See _warn_mixed_lengths.
+                    if 1 < p_n <= i:
+                        continue
+                    # Inactive elements carry no row (see build_csv_output).
+                    if not p.element_is_active(i if p_n > 1 else 0):
+                        continue
                     if p_n > 1:
-                        all_table_lines.append(
+                        instance_lines.append(
                             p.to_table_line_at(
                                 i,
                                 note_mark=_mark_for(p),
@@ -369,12 +476,22 @@ def build_latex_output(
                         )
                     elif i == 0:
                         # Scalar param shared across instances: show once
-                        all_table_lines.append(
+                        instance_lines.append(
                             p.to_table_line(
                                 note_mark=_mark_for(p),
                                 mode_suffixes=mode_suffixes,
                             )
                         )
+
+                # The sub-head only earns its line if the instance has rows:
+                # every parameter of an instance can now be inactive (a star
+                # with no evolutionary model in a system where another star has
+                # one), and a heading over nothing reads as a missing table.
+                if instance_lines:
+                    all_table_lines.append(
+                        _instance_subhead(name, n_cols=n_cols)
+                    )
+                    all_table_lines.extend(instance_lines)
 
     if multimodal:
         # Mode weights are citable macros too, and lead the table as a row.

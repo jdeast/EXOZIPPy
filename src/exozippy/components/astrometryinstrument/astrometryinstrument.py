@@ -44,14 +44,25 @@ Per-instrument config keys:
   epoch             : reference epoch [BJD_TDB] for ra/dec/pm (default:
                       mean time of all gaia/abs observations)
   sep_unit          : rel mode separation unit (default 'mas')
-  band              : name of a band: block (filter identity for the
-                      SED-derived fluxfrac below)
-  companion_star_ndx: index of the star modeling the luminous companion.
-                      When band, companion_star_ndx, and a sed: block are
-                      all present, the photocenter flux fraction is
-                      derived from the SED (beta = F_c/(F_c+F_host) in
-                      the band) instead of being sampled; the sampled
-                      fluxfrac element is fixed (unused).
+  band              : name of a band: block (filter identity).  gaia/abs:
+                      the filter of the SED-derived fluxfrac below.  rel:
+                      the filter in which the SED weighs the two sides of
+                      each NESTED orbit's photocenter (_pair_beta).
+  companion_star_ndx: gaia/abs only -- index of the star modeling the
+                      luminous companion.  When band, companion_star_ndx,
+                      and a sed: block are all present, the photocenter
+                      flux fraction is derived from the SED
+                      (beta = F_c/(F_c+F_host) in the band) instead of
+                      being sampled; the sampled fluxfrac element is
+                      fixed (unused).  Ignored with a warning on a rel
+                      dataset, which has no per-instrument fraction.
+
+`fluxfrac` is a parameter of a gaia/abs dataset ONLY: _photocenter_terms
+is its one consumer.  On a rel dataset it is INACTIVE -- held at
+the dark-companion 0, sampled by nothing and reported nowhere -- because
+rel mode weighs each nested orbit's photocenter separately.  That is why a
+rel-only fit such as examples/kelt4 shows no companion-flux row at all
+rather than one pinned at zero (review 3.10.1).
 
 Conventions follow EXOFASTv2: omega is the argument of periastron of the
 primary's orbit (omega_*); bigomega is the position angle of the ascending
@@ -86,11 +97,17 @@ import pytensor.tensor as pt
 
 from exozippy.components.instrument import Instrument
 from exozippy.components.orbit.bodies import component_instance_names
+from exozippy.components.parameterization import (
+    merge_overrides,
+    pin_unselected,
+)
+from exozippy.constants import DAYS_PER_YEAR
 from exozippy.ephemeris import get_observer_position
+from exozippy.outputs.texutils import latex_escape
+from exozippy.skyframe import parallax_factors
 
 RAD2MAS = (1.0 * u.rad).to(u.mas).value  # 2.06264806e8
 RSUN_AU = (1.0 * u.solRad).to(u.AU).value  # 4.6505e-3
-DAYS_PER_YEAR = 365.25
 
 VALID_MODES = ("gaia", "abs", "rel")
 
@@ -199,6 +216,52 @@ class AstrometryInstrument(Instrument):
         return "astrometryinstrument"
 
     @classmethod
+    def get_utilities(cls):
+        """Declared, unavailable, and deliberately so.
+
+        Transit photometry gets a Box Least Squares search and radial
+        velocities a Lomb-Scargle one (``components/globalsearch.py``), and
+        the obvious next step would be the astrometric equivalent.  There is
+        no equivalent to reach for.  A periodogram works on ONE scalar time
+        series with a signal that is periodic in it; astrometry offers
+        neither uniformly:
+
+        - ``gaia`` mode is a one-dimensional along-scan abscissa whose
+          amplitude is modulated by the scan angle at every epoch, so the
+          orbital signal is not periodic in the observable -- the same
+          orbital phase produces different residuals at different scan
+          angles.  A period search would have to deconvolve the scan law
+          first, which is a different algorithm from a periodogram.
+        - ``abs``/``rel`` modes (ground-based, Roman) are TWO observables per
+          epoch, and the orbit is an ellipse traced in the plane rather than
+          a sinusoid in either coordinate; the natural global method there is
+          a Thiele-Innes / linear-in-the-elements grid over period, which is
+          again a different algorithm.
+
+        Both would also have to compete with the parallax and proper motion,
+        which dominate the signal and are not what the search is looking for.
+        A placeholder that named some method would be an invitation to
+        implement whichever one happened to be written down.  Leaving it
+        unavailable, with the reasoning here, is the honest state: pick the
+        method per mode when someone needs it.
+        """
+        from ...utilities.registry import UtilitySpec
+
+        return [
+            UtilitySpec(
+                name="astrometry_period_search",
+                label="Astrometric period search",
+                description=(
+                    "Global orbital-period search for astrometry (no method "
+                    "chosen; 1-D scan-angle and 2-D astrometry need "
+                    "different algorithms -- see get_utilities)."
+                ),
+                component_keys=["astrometryinstrument"],
+                available=False,
+            ),
+        ]
+
+    @classmethod
     def config_schema(cls):
         return [
             {
@@ -268,8 +331,12 @@ class AstrometryInstrument(Instrument):
                 "accepts": ["band"],
                 "required": False,
                 "doc": (
-                    "Band used to derive the SED-weighted photocenter flux "
-                    "fraction (with companion_star_ndx)."
+                    "Filter identity. gaia/abs: the band the SED-weighted "
+                    "photocenter flux fraction is computed in (with "
+                    "companion_star_ndx). rel: the band the SED weighs each "
+                    "nested orbit's photocenter in; without it a nested "
+                    "orbit with two luminous sides falls back to its "
+                    "barycenter, with a warning."
                 ),
             },
             {
@@ -278,8 +345,11 @@ class AstrometryInstrument(Instrument):
                 "accepts": ["star"],
                 "required": False,
                 "doc": (
-                    "Index or name of the companion star for the SED-derived "
-                    "photocenter flux fraction (with band)."
+                    "gaia/abs only. Index or name of the companion star for "
+                    "the SED-derived photocenter flux fraction (with band). "
+                    "Ignored with a warning in rel mode, whose photocenter "
+                    "is weighed per nested orbit instead -- a rel dataset's "
+                    "fluxfrac is inactive, not merely pinned."
                 ),
             },
             {
@@ -311,7 +381,7 @@ class AstrometryInstrument(Instrument):
         ]
 
     # ------------------------------------------------------------------
-    # Stage 1a
+    # Stage 1
     # ------------------------------------------------------------------
     def load_data(self, system):
         """Load per-instrument astrometry and precompute parallax factors."""
@@ -416,14 +486,8 @@ class AstrometryInstrument(Instrument):
                 xyz = get_observer_position(
                     t, observer_location=self.observers[i]
                 )
-                X, Y, Z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
                 # Apparent displacement of the source = parallax * (P_E, P_N)
-                d["P_E"] = X * np.sin(ra_ref) - Y * np.cos(ra_ref)
-                d["P_N"] = (
-                    X * np.cos(ra_ref) * np.sin(dec_ref)
-                    + Y * np.sin(ra_ref) * np.sin(dec_ref)
-                    - Z * np.cos(dec_ref)
-                )
+                d["P_E"], d["P_N"] = parallax_factors(xyz, ra_ref, dec_ref)
 
             self.jittervar_lower[i] = self._jitter_floor([min_err])
             self.n_total_obs += len(t)
@@ -467,26 +531,49 @@ class AstrometryInstrument(Instrument):
         )
 
     # ------------------------------------------------------------------
-    # Stage 1b
-    # ------------------------------------------------------------------
-    def build_maps(self):
-        self.star_map = np.array([c.get("star_ndx", 0) for c in self.config])
-        self.planet_map = np.array(
-            [c.get("planet_ndx", 0) for c in self.config]
-        )
-
-    # ------------------------------------------------------------------
     # Stage 2
     # ------------------------------------------------------------------
+    def build_maps(self):
+        # star_map only.  There WAS a `planet_map` here, built from the
+        # legacy `planet_ndx` key and read by nothing: rel-mode orbit
+        # resolution moved into __init__ (self.rel_orbit, which resolves
+        # `orbit:` by name or index and falls back to the named planet's
+        # orbit_ndx), and every other consumer wants the orbit, not the
+        # planet.  Stage 5 auto-converts every `*_map` attribute into an
+        # int32 shared variable, so the dead assignment cost one per fit.
+        self.star_map = np.array([c.get("star_ndx", 0) for c in self.config])
+
+    # ------------------------------------------------------------------
+    # Stage 3
+    # ------------------------------------------------------------------
     def register_parameters(self, system):
-        self.manifest = {"fluxfrac": None}
+        # `fluxfrac` is the gaia/abs PHOTOCENTER flux fraction, and it is a
+        # parameter only of a gaia/abs dataset: `_photocenter_terms` is its
+        # single consumer, and a rel-mode dataset never calls it.  A rel
+        # element is therefore INACTIVE (components/parameter.md),
+        # not merely pinned -- held at the dark-companion 0, sampled by
+        # nothing, reported nowhere.  This is what answers KELT-4's "why is
+        # the companion flux fixed to zero?" (review 3.10.1): both of its
+        # datasets are rel, so the row was a pin on a quantity that never
+        # entered its likelihood.  It is logp-neutral -- defaults.yaml
+        # already gives fluxfrac `sigma: 0.0`, so the element was fixed
+        # either way; what changes is that the tables stop reporting it.
+        #
+        # rel mode weighs its own photocenter separately and needs no
+        # per-instrument fraction: `_pair_beta` reads the SED per NESTED
+        # orbit, in the instrument's `band:`, because a rel dataset can hold
+        # more than one luminous pair (KELT-4's A-BC data see the B+C
+        # photocenter).  `band:` is meaningful there; `companion_star_ndx:`
+        # is not.
+        active = [m in ("gaia", "abs") for m in self.modes]
+        self.manifest = {"fluxfrac": {"mask": active, "inactive_value": 0.0}}
         self._register_noise(self.manifest, self.jittervar_lower)
 
-        # SED-derived fluxfrac: instruments with band + companion_star_ndx
-        # in a system with a sed: block get their photocenter flux
-        # fraction from the SED (see _sed_beta_node). Pin the sampled
-        # fluxfrac element for those files -- nothing reads it -- unless the
-        # user configured it themselves.
+        # SED-derived fluxfrac: gaia/abs instruments with band +
+        # companion_star_ndx in a system with a sed: block get their
+        # photocenter flux fraction from the SED (see _sed_beta_node). Pin
+        # the sampled fluxfrac element for those files -- nothing reads it --
+        # unless the user configured it themselves.
         #
         # This is a STRUCTURAL pin, not a start value, so it goes through the
         # manifest "overrides" channel (exactly as Instrument._register_gp
@@ -495,7 +582,7 @@ class AstrometryInstrument(Instrument):
         # from the user's own entry: it reported this component's own decision
         # back to the user as something they had written, in the provenance
         # ledger, export_solution, initval_source and the GUI alike.  The
-        # override sits below RANK_USER and is applied before the user's params
+        # override sits below PRECEDENCE_USER and is applied before the user's params
         # in resolve(), so `sigma: 0` still yields to a user's own sigma --
         # the setdefault semantics this replaces.
         #
@@ -508,6 +595,21 @@ class AstrometryInstrument(Instrument):
         self._sed_fluxfrac = [False] * self.n_elements
         if "sed" in (self.config_manager.system_config or {}):
             for i, c in enumerate(self.config):
+                if not active[i]:
+                    # A rel dataset's `companion_star_ndx:` would select a
+                    # fraction nothing reads; say so rather than building a
+                    # `fluxfrac_sed` Deterministic that enters no model.
+                    if c.get("companion_star_ndx") is not None:
+                        logger.warning(
+                            f"[{self.prefix}.{self.names[i]}] "
+                            f"companion_star_ndx is a gaia/abs key (it "
+                            f"selects the photocenter flux fraction) and "
+                            f"this dataset is mode '{self.modes[i]}'; it is "
+                            f"ignored. Relative astrometry weighs each "
+                            f"nested orbit's photocenter from the SED in "
+                            f"`band:` instead."
+                        )
+                    continue
                 if (
                     c.get("band") is None
                     or c.get("companion_star_ndx") is None
@@ -515,11 +617,19 @@ class AstrometryInstrument(Instrument):
                     continue
                 self._sed_fluxfrac[i] = True
 
-        if any(self._sed_fluxfrac):
-            # NaN leaves the other elements alone (see resolve()).
-            pin = np.full(self.n_elements, np.nan)
-            pin[np.asarray(self._sed_fluxfrac, dtype=bool)] = 0.0
-            self.manifest["fluxfrac"] = {"overrides": {"sigma": pin.tolist()}}
+        # The OPT-IN pin, through the one helper (review 3.14.11).  "Selected"
+        # is the elements that KEEP a sampled fluxfrac, i.e. everything the SED
+        # does not supply; pin_unselected writes `sigma: 0` on the rest and NaN
+        # elsewhere, which leaves those elements alone (see resolve()), and
+        # returns {} when nothing is SED-derived.  merge_overrides folds it into
+        # the entry built above without disturbing its mask/inactive_value.
+        pinned = pin_unselected(
+            self.n_elements, [not sed for sed in self._sed_fluxfrac]
+        )
+        if pinned:
+            self.manifest["fluxfrac"] = merge_overrides(
+                self.manifest["fluxfrac"], pinned["overrides"]
+            )
 
     # ------------------------------------------------------------------
     # Model pieces (PyTensor)
@@ -735,7 +845,7 @@ class AstrometryInstrument(Instrument):
         return dE, dN
 
     # ------------------------------------------------------------------
-    # Stage 6
+    # Stage 7
     # ------------------------------------------------------------------
     def build_likelihood(self, model, system):
         if not hasattr(system, "star"):
@@ -760,11 +870,16 @@ class AstrometryInstrument(Instrument):
             mode = d["mode"]
             t = d["time"]
             jv = self.jitter_variance.value[i]
-            beta = self._sed_beta_node(system, i)
-            if self._sed_fluxfrac[i]:
-                pm.Deterministic(f"{self.prefix}.{name}.fluxfrac_sed", beta)
 
             if mode in ("gaia", "abs"):
+                # Only gaia/abs has a photocenter flux fraction; on a rel
+                # dataset fluxfrac is inactive and _pair_beta does the
+                # flux weighting per nested orbit instead.
+                beta = self._sed_beta_node(system, i)
+                if self._sed_fluxfrac[i]:
+                    pm.Deterministic(
+                        f"{self.prefix}.{name}.fluxfrac_sed", beta
+                    )
                 dE, dN = self._absolute_model(system, d, t, beta)
 
             if mode == "gaia":
@@ -956,19 +1071,8 @@ class AstrometryInstrument(Instrument):
         dt_yr = (t - self.epoch) / DAYS_PER_YEAR
 
         def get(param):
-            """This star's value of ``param`` from the point, else its own
-            initval -- the same fallback _point_values uses.
-
-            A ``point.get(label, 0.0)`` here silently substituted ZERO for
-            any parameter absent from the draws, and pinned (``sigma: 0``)
-            parameters are always absent: a fit with a fixed nonzero proper
-            motion plotted a star that does not move while the likelihood
-            used the pinned value.
-            """
-            val = point.get(param.label)
-            if val is None:
-                val = param.initval
-            return np.atleast_1d(val)[s]
+            """This star's value of ``param``; see Instrument._point_value."""
+            return self._point_value(point, param, s)
 
         ra = get(star.ra)
         dec = get(star.dec)
@@ -1048,7 +1152,7 @@ class AstrometryInstrument(Instrument):
         The specs are the single description of the per-dataset plots --
         the GUI draws the same ones via plotly (see plotrender.py's module
         docstring).  plot_sky stays hand-drawn: its arrows and node
-        annotations are outside the PlotSpec vocabulary.
+        annotations are outside the Chart vocabulary.
 
         The guard below means "compile_plotters has not run yet", nothing
         more: an orbit is not required (review 2.6.3) -- compile_plotters
@@ -1074,14 +1178,14 @@ class AstrometryInstrument(Instrument):
 
     def plot_data(self, system, point=None):
         """
-        GUI plot specs for the astrometry instrument: one chart per
+        GUI charts for the astrometry instrument: one chart per
         dataset (along-scan vs time for gaia mode, sky-plane for abs/rel).
         With point=None only the observed data traces are returned (raw
         preview, usable right after load_data, before build_model); with a
         point, model traces are added via the compiled plotters.  See
-        Component.plot_data and plotspec.PlotSpec.
+        Component.plot_data and chart.Chart.
         """
-        from exozippy.plotspec import PlotSpec, Trace
+        from exozippy.chart import Chart, Trace
 
         sysname = getattr(system, "name", "")
         photo_nodes = getattr(self, "_photo_nodes", None)
@@ -1100,6 +1204,7 @@ class AstrometryInstrument(Instrument):
                 "file_tag": f"astrometry_{name}",
                 "figsize": (12, 6),
             }
+            x_inverted = False
 
             if mode == "gaia":
                 # Along-scan data; the model (when a point is given) is the
@@ -1144,6 +1249,14 @@ class AstrometryInstrument(Instrument):
                 xlabel = "Time [BJD_TDB]"
                 ylabel = "Along-scan position [mas]"
                 title = f"Epoch astrometry: {name} ({sysname})"
+                meta["caption"] = (
+                    r"Along-scan epoch astrometry of "
+                    rf"{latex_escape(sysname)} from "
+                    rf"{latex_escape(name)} (black), with the model "
+                    r"projected onto each epoch's scan angle (red): "
+                    r"proper motion, parallax and the photocenter "
+                    r"reflex motion of the star's member orbits."
+                )
 
             elif mode == "abs":
                 # Sky-plane: data minus the linear (pm+plx) model when a
@@ -1195,7 +1308,7 @@ class AstrometryInstrument(Instrument):
                                 style={"legend": True, "lw": 1},
                             )
                         )
-                meta["x_inverted"] = True  # East to the left
+                x_inverted = True  # East to the left
                 meta["aspect_equal"] = True
                 # The data trace subtracts the point's pm+plx linear terms,
                 # so live evals must re-ship it along with the model.
@@ -1203,6 +1316,14 @@ class AstrometryInstrument(Instrument):
                 xlabel = r"$\Delta\alpha^*$ [mas]"
                 ylabel = r"$\Delta\delta$ [mas]"
                 title = f"Absolute astrometry: {name} ({sysname})"
+                meta["caption"] = (
+                    r"Absolute astrometry of "
+                    rf"{latex_escape(sysname)} from "
+                    rf"{latex_escape(name)}, with proper motion and "
+                    r"parallax subtracted from the measured positions so "
+                    r"that what remains is the photocenter orbit (line). "
+                    r"East is to the LEFT and the axes are equal-scale."
+                )
 
             else:  # rel
                 traces.append(
@@ -1248,14 +1369,24 @@ class AstrometryInstrument(Instrument):
                             },
                         )
                     )
-                meta["x_inverted"] = True  # East to the left
+                x_inverted = True  # East to the left
                 meta["aspect_equal"] = True
                 xlabel = r"$\Delta\alpha^*$ [mas]"
                 ylabel = r"$\Delta\delta$ [mas]"
                 title = f"Relative astrometry: {name} ({sysname})"
+                meta["caption"] = (
+                    r"Relative astrometry of "
+                    rf"{latex_escape(sysname)} from "
+                    rf"{latex_escape(name)}: the measured separations and "
+                    r"position angles (points, PA East of North) of the "
+                    r"orbit's companion group with respect to its primary "
+                    r"group, which sits at the origin (star), with the "
+                    r"modeled relative orbit (line). East is to the LEFT "
+                    r"and the axes are equal-scale."
+                )
 
             specs.append(
-                PlotSpec(
+                Chart(
                     id=f"{self.prefix}.{name}",
                     component={"yaml_key": self.prefix, "instance": name},
                     title=title,
@@ -1263,6 +1394,7 @@ class AstrometryInstrument(Instrument):
                     ylabel=ylabel,
                     traces=traces,
                     param_deps=deps,
+                    x_inverted=x_inverted,
                     meta=meta,
                 )
             )
@@ -1310,12 +1442,7 @@ class AstrometryInstrument(Instrument):
         xyz = get_observer_position(
             t_dense, observer_location=self.observers[i]
         )
-        P_E = xyz[:, 0] * np.sin(d["ra_ref"]) - xyz[:, 1] * np.cos(d["ra_ref"])
-        P_N = (
-            xyz[:, 0] * np.cos(d["ra_ref"]) * np.sin(d["dec_ref"])
-            + xyz[:, 1] * np.sin(d["ra_ref"]) * np.sin(d["dec_ref"])
-            - xyz[:, 2] * np.cos(d["dec_ref"])
-        )
+        P_E, P_N = parallax_factors(xyz, d["ra_ref"], d["dec_ref"])
         d_dense = dict(d, P_E=P_E, P_N=P_N)
         dE_lin, dN_lin = self._linear_terms(d_dense, t_dense, point, system)
         dE_orb, dN_orb = self._eval_photo(i, t_dense, vals)

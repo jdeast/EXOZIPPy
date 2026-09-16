@@ -4,8 +4,8 @@ Reprocesses a previously saved trace (``<prefix>_trace.nc``) through the
 posterior mode-identification + reporting pipeline without re-sampling. This
 is a forensic/offline tool: it rebuilds the System from the same config and
 parameter_file YAML used for the original fit (needed for Parameter units,
-expressions, and derived-parameter posteriors -- see CLAUDE.md's six-stage
-lifecycle), loads the saved trace, runs outputs.modes.identify_modes and
+expressions, and derived-parameter posteriors -- see CLAUDE.md's seven
+lifecycle stages), loads the saved trace, runs outputs.modes.identify_modes and
 System.distribute_posterior, and rewrites <prefix>_modes.txt,
 <prefix>_definitions.tex, <prefix>_table.tex, and <prefix>_results.csv.
 
@@ -35,7 +35,7 @@ from .outputs.modes import MODE_NO_VALID_DRAWS
 from .outputs.report_pipeline import build_mode_reports
 from .system import System
 from .trace_meta import check_trace_freshness
-from .yamlio import load_yaml
+from .yamlio import load_system_config
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,9 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
     since the whole point of this command is to be able to inspect an
     already-finished trace.
     """
-    config = load_yaml(config_file)
+    # An empty or non-mapping config is refused by name here rather than
+    # crashing on `config.get("prefix", ...)` below (review 2.3.11).
+    config = load_system_config(config_file)
 
     if logger_level:
         config["logger_level"] = logger_level.upper()
@@ -126,7 +128,7 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
 
     # Build the System (needed for Parameter units/expressions and
     # derived-parameter posteriors) but never sample -- prepare() +
-    # build_model() only, matching the lifecycle documented in CLAUDE.md.
+    # build_model() only, matching CLAUDE.md's seven lifecycle stages.
     system = System(config)
     system.prepare()
     system.build_model()
@@ -160,7 +162,7 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
     )
 
     # Regenerate the modeling-draft scaffold against the rewritten table
-    # fragments.  The components' prose exists (stages 1-6 ran above); the
+    # fragments.  The components' prose exists (stages 1-7 ran above); the
     # run-level convergence paragraph does not (no live diagnostics here),
     # which the regenerated file simply omits.  Never fatal, like every
     # other output this forensic tool writes.

@@ -80,6 +80,19 @@ def _write_ptde_config(work_dir, out_prefix, *, draws=100_000):
         "min_ess": 100_000_000,  # unreachable -> never converge
         "max_rhat": 1.0000001,  # unreachable -> never converge
     }
+    # The wrap-up's invalid-draw gate (outputs/modes.check_invalid_frac) must
+    # not decide these tests. A 30-step tune with 4 chains per rung (< the
+    # n_params + 2 = 17 that DE needs to span kelt4's 15 parameters) is
+    # burn-in by construction: T=1 starts are dispersed 3 probe units from
+    # the MAP (lp 100-250 nats below it), and since 8.4.7 (#281) the hot rung
+    # is dispersed sqrt(T) wider still instead of copying T=1, so a chain that
+    # starts far out can no longer be pulled in by a swap within the window
+    # the tests sample. About one run in three then stops with a T=1 chain
+    # sitting > 50 nats below the bulk, identify_modes rejects its draws as
+    # "raw-z" invalid, the gate raises, and a LIFECYCLE test fails on the
+    # posterior's quality. force=True downgrades the gate to its warning;
+    # the draws are still written and the trace still asserted valid.
+    config["modes"] = {"force": True}
     config_name = "run_ptde.yaml"
     with open(work_dir / config_name, "w") as fh:
         yaml.safe_dump(config, fh)
@@ -93,7 +106,7 @@ def kelt4_workdir(tmp_path):
     shutil.copytree(
         EXAMPLE_DIR,
         work_dir,
-        ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"),
+        ignore=shutil.ignore_patterns("fitresults*", ".#*", "#*#"),
     )
     return work_dir
 
@@ -209,6 +222,18 @@ def test_snapshot_is_thinned_and_atomic(tmp_path):
 # so that xdist's --dist loadfile scheduler runs all three subprocess fits on
 # DIFFERENT workers instead of serializing them on this file's single worker.
 # They import the helpers/fixture below from this module (tests/ is on sys.path).
+# THE SUITE'S SINGLE MOST EXPENSIVE TEST, at ~232 s, and it sets the CI shard
+# floor: --dist loadfile pins a file to one worker, so no amount of sharding
+# finishes a shard faster than this test's serial time (~6.7 min including the
+# per-job fixed cost). Reviewed on that basis 2026-08-25 and deliberately KEPT
+# -- "expensive but worth it" (JDE).
+#
+# Do not try to make it cheaper by shrinking the sampler: the config below is
+# ALREADY 2 tune / 1 draw, so essentially all of the 232 s is fixed startup --
+# subprocess interpreter, `import exozippy`, the System build, the whitening
+# probe, gradient compiles, and writing the outputs. And the one knob that
+# would help, measure_scales, is load-bearing here for a second reason spelled
+# out below.
 @pytest.mark.slow
 @pytest.mark.timeout(900)
 def test_run_without_flag_writes_no_status(kelt4_workdir, tmp_path):

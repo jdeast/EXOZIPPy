@@ -2,7 +2,7 @@
 
 `tc` is periodic (tc and tc + P are the same solution), so `tc_init +/- P/2`
 is the right hard bound.  The trap is *which* P: the window is computed in
-stage 2 (`Orbit.register_parameters`), which runs BEFORE the relaxation
+stage 3 (`Orbit.register_parameters`), which runs BEFORE the relaxation
 engine reconciles `period:` with `logP:`.  Reading `logP`'s resolved initval
 alone therefore returned its defaults.yaml value (1.0 -> 10 d) for every fit
 that seeded `period:` instead, hard-bounding tc to +/- 5 d regardless of the

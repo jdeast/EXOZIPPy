@@ -5,8 +5,8 @@ The barrier used to be applied to ``planet.m_total``, whose physics function
 the soft bound see a *constant* on the whole ``star.mass + planet.mass < 0``
 region -- ``log(sigmoid(~0)) = -0.693`` -- so the penalty had the right sign,
 a plausible magnitude, and a gradient of exactly zero.  That is a flat
-plateau with no restoring force: precisely the pathology the log_q notes in
-CLAUDE.md warn about, and it is reachable, because a planet whose mass RV or
+plateau with no restoring force: precisely the pathology the "Planet mass
+parametrization" section of src/exozippy/components/star/star.md warns about, and it is reachable, because a planet whose mass RV or
 astrometric data constrain samples the *signed* linear mass, whose lower
 bound is -1000 Mjup (about -0.95 Msun).
 

@@ -49,11 +49,10 @@ def _config(fmt, inst_extra=None):
     entry.update(inst_extra or {})
     return {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [
+        # The event-level keys (finite_source, t0_par, mmexofast) live on
+        # `mulensevent:`; `lens:` and `source:` name one body each.
+        "mulensevent": [
             {
-                "name": "Lens",
-                "lenses": ["star.0"],
-                "sources": ["star.1"],
                 "finite_source": False,
                 "t0_par": T0,
                 # Never shell out to MMEXOFAST from a unit test; the start
@@ -61,15 +60,18 @@ def _config(fmt, inst_extra=None):
                 "mmexofast": False,
             }
         ],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
         "mulensinstrument": [entry],
     }
 
 
 def _params(extra=None):
     p = {
-        "lens.Lens.t_0": {"initval": T0},
-        "lens.Lens.u_0": {"initval": U0},
-        "lens.Lens.t_E": {"initval": TE},
+        # t_0/u_0 are per SOURCE; t_E is event-level.
+        "source.Source.t_0": {"initval": T0},
+        "source.Source.u_0": {"initval": U0},
+        "mulensevent.t_E": {"initval": TE},
         "star.radius": {"sigma": 0.0},
         "star.teff": {"sigma": 0.0},
         "star.feh": {"sigma": 0.0},
@@ -612,7 +614,7 @@ def test_aligned_plot_specs_are_finite_and_drop_non_positive_fluxes(
 def test_plot_specs_drop_non_positive_fluxes_instead_of_clamping(dia_system):
     """
     Given the difference-imaging light curve,
-    When the data-only plot specs are built,
+    When the data-only charts are built,
     Then the negative-flux epochs come back as NaN (not drawn) rather than as
     the ~75 mag spikes the old 1e-30 clamp produced, and the positive ones
     keep their magnitudes.

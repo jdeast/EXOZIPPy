@@ -19,13 +19,13 @@ import pymc as pm
 import pytest
 import xarray as xr
 
-from exozippy.samplers.ptde import (
+from exozippy.samplers.ladder import (
     _deo_pair_sequence,
     _deo_pairs,
     _record_round_trips,
     _update_ladder_barrier,
-    ptde_sample,
 )
+from exozippy.samplers.ptde import ptde_sample
 from exozippy.samplers.ptde_async import ptde_async_sample
 
 # ---------------------------------------------------------------------------

@@ -35,6 +35,11 @@ from .config import NUMERIC_KEYS
 _NUMERIC_FIELDS = NUMERIC_KEYS
 
 # Descriptive (non-numeric) fields we pass through verbatim when present.
+# "rank" keeps that spelling even though the precedence CONSTANTS were renamed
+# PRECEDENCE_* (review 3.14.14): these strings are defaults.yaml keys and are
+# emitted into the schema verbatim, so both the config key a user writes and
+# the schema field a GUI reads would break if it changed here.  config.py's
+# precedence-scale block records the boundary.
 _DESCRIPTIVE_FIELDS = (
     "unit",
     "internal_unit",
@@ -64,6 +69,15 @@ def _expression_info(raw):
 
     Returns (derived, expressions) where ``expressions`` maps each
     expression key (e.g. "default") to {"func_name", "deps"}.
+
+    ``derived`` means derived BY DEFAULT: the block carries a "default"
+    expression, the one a bare-string manifest entry selects.  A block
+    holding only mode-selected expressions (the surgical coordinate
+    swaps' ``from_mulens_*`` blocks on pm_ra/pm_dec/distance/logmass;
+    ``fitvcve``'s alternates) describes a parameter that is SAMPLED
+    unless a flag flips it, and a static schema answers for the default
+    configuration.  The expressions are still reported either way, so a
+    GUI can show what the modes would do.
     """
     expr_block = raw.get("expressions")
     if not isinstance(expr_block, dict) or not expr_block:
@@ -75,7 +89,7 @@ def _expression_info(raw):
             "func_name": cfg.get("func_name"),
             "deps": list(cfg.get("deps", []) or []),
         }
-    return True, out
+    return "default" in out, out
 
 
 def _param_schema(name, raw):
@@ -93,7 +107,7 @@ def _param_schema(name, raw):
         if field in raw:
             entry[field] = raw[field]
 
-    if derived:
+    if expressions:
         entry["expressions"] = expressions
         # Convenience: flatten the "default" dependency list to top level.
         default_expr = expressions.get("default")
@@ -102,7 +116,8 @@ def _param_schema(name, raw):
 
     # A parameter is "sampled" when it is a free parameter (no derivation),
     # is not fixed (sigma != 0), and carries the lower/upper bounds required
-    # of every sampled parameter (see CLAUDE.md).  Bounds are the marker --
+    # of every sampled parameter (rule 4 of the defaults.yaml contract in
+    # src/exozippy/components/components.md).  Bounds are the marker --
     # init_scale is only a preliminary whitening seed and is optional.
     fixed = raw.get("sigma") == 0
     entry["sampled"] = bool(
@@ -120,7 +135,8 @@ def _load_param_block(cls, yaml_key):
     """Load a component's parameter block from its defaults.yaml.
 
     A single defaults.yaml may declare several component blocks (e.g. the
-    mulensing directory declares both ``lens`` and ``mulensinstrument``), so
+    mulensing directory declares ``mulensevent``, ``lens``, ``source`` and
+    ``mulensinstrument``), so
     we index into the block matching this component's yaml_key. Returns an
     empty dict when the file or block is absent (e.g. galacticmodel, which
     declares no sampled parameters).
@@ -249,11 +265,83 @@ def component_schema(yaml_key):
     }
 
 
+# Per-key colour for the global schema below: is it a scalar option or a
+# block, what does it accept, and what does it do.  The KEY SET is not here --
+# it is system.RESERVED_CONFIG_KEYS, the one set System itself validates
+# against, so a key added there appears in the schema (and therefore in the
+# GUI's config-file detection) without a second edit.  This table only
+# annotates; a key with no entry still gets a schema row.
+_GLOBAL_KEY_INFO = {
+    "run": ("block", None, "Documentation/bookkeeping block; inert."),
+    "name": ("option", None, "Human-readable name for the fit."),
+    "parameter_file": (
+        "option",
+        None,
+        "Path to the parameter-override YAML, relative to the config.",
+    ),
+    "prefix": (
+        "option",
+        None,
+        "Output path prefix for all result files "
+        "(default 'fitresults/planet').",
+    ),
+    "logger_level": (
+        "option",
+        ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        "Logging verbosity (default 'INFO').",
+    ),
+    "sampler": (
+        "block",
+        None,  # filled from run.KNOWN_SAMPLER_KEYS below
+        "Sampler configuration block. Recognized keys are listed in "
+        "'accepts'; unrecognized keys are warned about and ignored by run.py.",
+    ),
+    # The block vocabularies below are filled from
+    # system.KNOWN_BLOCK_KEYS in _global_schema, exactly as `sampler` is
+    # filled from run.KNOWN_SAMPLER_KEYS: one owner per vocabulary.
+    "modes": (
+        "block",
+        None,
+        "Multimode reporting block (outputs/modes.py).",
+    ),
+    "mkparam": (
+        "block",
+        None,
+        "Restart-file writer block (mkparam.write_param_file).",
+    ),
+    "gui": ("block", None, "GUI status block (gui.status)."),
+    "modeling": (
+        "block",
+        None,
+        "Modeling-draft block: {compile} for <prefix>_paper.tex.",
+    ),
+    "reporting": (
+        "block",
+        None,  # filled from system.KNOWN_BLOCK_KEYS below, like the rest
+        "Reporting block: {credible_interval} is the interval width the "
+        "tables, CSV, mode report and corner plots are written at, as a "
+        "probability (0.95 for 95%). Default 0.6827, the 1-sigma astronomy "
+        "convention.",
+    ),
+}
+
+
 def _global_schema():
-    """Describe global (non-component) config keys recognized by run.py."""
-    # KNOWN_SAMPLER_KEYS is the single source of truth in run.py. Import it
-    # lazily so this module stays importable in lightweight contexts even if
-    # the heavy sampling stack is unavailable.
+    """Describe global (non-component) config keys recognized by run.py.
+
+    The key set is ``system.RESERVED_CONFIG_KEYS`` -- the same frozenset
+    System validates a config against, and the one tests/test_known_keys.py
+    already cross-checks against the source.  It used to be a third literal
+    copy of that vocabulary and had drifted to three of the ten keys, while
+    claiming to describe run.py's keys; the GUI's config-file detection reads
+    this function's keys, so its answer was short by the same seven.  The
+    remaining literal copy is the GUI's own degraded fallback, which is
+    commented as such and is only reached when introspection is unavailable.
+    """
+    # Both imports are lazy so this module stays importable in lightweight
+    # contexts even if the heavy sampling stack is unavailable -- and, for
+    # system, so introspect keeps no module-level edge into the component
+    # stack it describes.
     try:
         from .run import KNOWN_SAMPLER_KEYS
 
@@ -261,36 +349,36 @@ def _global_schema():
     except Exception:  # pragma: no cover - defensive fallback
         sampler_keys = []
 
-    return {
-        "prefix": {
-            "key": "prefix",
-            "kind": "option",
-            "accepts": None,
+    try:
+        from .system import KNOWN_BLOCK_KEYS, RESERVED_CONFIG_KEYS
+
+        keys = sorted(RESERVED_CONFIG_KEYS)
+        block_keys = {k: sorted(v) for k, v in KNOWN_BLOCK_KEYS.items()}
+    except Exception:  # pragma: no cover - defensive fallback
+        keys = sorted(_GLOBAL_KEY_INFO)
+        block_keys = {}
+
+    schema = {}
+    for key in keys:
+        kind, accepts, doc = _GLOBAL_KEY_INFO.get(
+            key, ("option", None, "Global configuration key.")
+        )
+        if key == "sampler":
+            accepts = sampler_keys
+        elif key in block_keys:
+            # system.KNOWN_BLOCK_KEYS is the one owner of these
+            # vocabularies (run.warn_unknown_block_keys warns from the same
+            # table); this used to be a second literal copy, which is how
+            # the global-key list had already drifted once.
+            accepts = block_keys[key]
+        schema[key] = {
+            "key": key,
+            "kind": kind,
+            "accepts": accepts,
             "required": False,
-            "doc": (
-                "Output path prefix for all result files "
-                "(default 'fitresults/planet')."
-            ),
-        },
-        "logger_level": {
-            "key": "logger_level",
-            "kind": "option",
-            "accepts": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-            "required": False,
-            "doc": "Logging verbosity (default 'INFO').",
-        },
-        "sampler": {
-            "key": "sampler",
-            "kind": "block",
-            "accepts": sampler_keys,
-            "required": False,
-            "doc": (
-                "Sampler configuration block. Recognized keys are listed "
-                "in 'accepts'; unrecognized keys are warned about and "
-                "ignored by run.py."
-            ),
-        },
-    }
+            "doc": doc,
+        }
+    return schema
 
 
 def full_schema():

@@ -28,7 +28,7 @@ exozippy kelt17.yaml
 ## Notes
 - The stellar radius/Teff/[Fe/H] are priored directly (no SED/MIST here); vsini
   and lambda come out of the in-transit RM signal via `svcoslam`/`svsinlam`.
-- With the standard `numpyro` NUTS config (diagonal mass, `init: adapt_diag`,
+- With the standard `numpyro` NUTS config (diagonal mass,
   `target_accept: 0.95`) the chains converge and recover a retrograde lambda
   consistent with the published value. `check_curvatures: False` is set because
   `quad_solution_vector` (limb-darkened blocked flux) has no second derivative,

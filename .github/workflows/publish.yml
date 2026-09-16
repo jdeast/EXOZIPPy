@@ -46,9 +46,18 @@ jobs:
     # This was found by dispatching publish.yml as a release rehearsal, which
     # returned `startup_failure`. It would otherwise have surfaced the first
     # time a version tag was pushed, i.e. during a real release.
+    #
+    # And then it did anyway: the v0.1.0rc2 tag push (2026-09-15) died at
+    # startup because tests.yml's pytest job had since started asking for
+    # `actions: write` (for `gh cache delete` in its housekeeping step) and
+    # nothing here granted it. This block must be the UNION of every
+    # per-job `permissions:` in tests.yml. When you add a permission to a
+    # job there, add it here too, and rehearse with a workflow_dispatch
+    # before the next tag.
     permissions:
       contents: read
       issues: write
+      actions: write
 
   build:
     runs-on: ubuntu-latest

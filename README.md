@@ -119,8 +119,13 @@ machines.
    verifies it.
 
 Native Windows would additionally need a GCC-style C++ compiler for PyTensor's
-runtime compilation (MSVC will not do), which we have never tested. See
-`notes/todo.txt` if you want to pick native Windows up -- patches welcome.
+runtime compilation (MSVC will not do), which we have never tested.
+
+Those are the headline reasons, not the whole list. If you want to pick native
+Windows up, [`docs/windows-native.md`](docs/windows-native.md) is the running
+inventory of known blockers -- each one with what breaks, why, and the minimum
+work to clear it -- so you can size the job before starting it. Patches
+welcome.
 
 #### Quickstart
 
@@ -156,7 +161,9 @@ feature:
   at 1-2 GB compiling PyTensor graphs. Measured on that machine, available
   memory bottomed out at **41 MB**: workers were killed (`[gwN] node down`),
   xdist died in its own scheduler, and one run hung for hours. Fix it with a
-  `.wslconfig` (see the runbook) or run `-n 2` as CI does.
+  `.wslconfig` (see the runbook) or lower `-n`;
+  `python scripts/pytest_workers.py --explain` prints what this machine's
+  cores and memory can actually afford, which is what CI runs.
 
 Smaller, setup-time only:
 

@@ -440,7 +440,6 @@ sampler:
   method: numpyro      # nuts, numpyro, blackjax, nutpie, ptde, ptde_async
   tune: 2000
   draws: 4000
-  init: adapt_diag
   target_accept: 0.95
   recompute_trace: True   # if False and a prefix.nc file exists, load it instead of re-sampling
 """

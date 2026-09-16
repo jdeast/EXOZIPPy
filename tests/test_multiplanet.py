@@ -169,7 +169,7 @@ def test_crossing_bound_is_added_once_ordered_inner_to_outer(
     names = [p.name for p in model.potentials if "crossing_bound" in p.name]
     assert names == ["planet.crossing_bound_c_b"]
 
-    a_init = system.planet._initial_semimajor_axes(system, system.orbit)
+    a_init = system.planet._initial_semimajor_axes()
     assert a_init[1] < a_init[0]  # c inside b
     assert np.all(np.isfinite(a_init))
 
@@ -207,7 +207,7 @@ def test_crossing_bound_is_inert_for_separated_orbits(
     system, model = two_planet_system
     f = _crossing_fn(system, model)
 
-    a_init = system.planet._initial_semimajor_axes(system, system.orbit)
+    a_init = system.planet._initial_semimajor_axes()
     a = a_init.copy()
     a[0] = a[1] * ratio  # outer 'b' pushed outside inner 'c'
 
@@ -230,7 +230,7 @@ def test_crossing_bound_pushes_the_orbits_apart(two_planet_system, ratio):
     system, model = two_planet_system
     f = _crossing_fn(system, model)
 
-    a_init = system.planet._initial_semimajor_axes(system, system.orbit)
+    a_init = system.planet._initial_semimajor_axes()
     a = a_init.copy()
     a[0] = a[1] * ratio
 
@@ -249,7 +249,7 @@ def test_crossing_bound_deepens_monotonically(two_planet_system):
     system, model = two_planet_system
     f = _crossing_fn(system, model)
 
-    a_init = system.planet._initial_semimajor_axes(system, system.orbit)
+    a_init = system.planet._initial_semimajor_axes()
     zeros = np.zeros(system.orbit.n_elements)
 
     values = []
@@ -272,7 +272,7 @@ def test_crossing_bound_responds_to_eccentricity(two_planet_system):
     system, model = two_planet_system
     f = _crossing_fn(system, model)
 
-    a_init = system.planet._initial_semimajor_axes(system, system.orbit)
+    a_init = system.planet._initial_semimajor_axes()
     a = a_init.copy()
     a[0] = a[1] * 1.5
 

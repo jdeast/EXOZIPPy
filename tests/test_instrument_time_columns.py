@@ -285,6 +285,12 @@ def test_converted_times_are_sorted_and_aligned(tmp_path):
     np.testing.assert_allclose(inst.rv / RV_FACTOR, [0.0, 1.0, 2.0], atol=1e-9)
 
 
+def _WHITEN(col):
+    """The whitening _build_block_detrend applies (review 6.5.2)."""
+    col = np.asarray(col, dtype=float)
+    return (col - np.mean(col)) / np.std(col)
+
+
 # ----------------------------------------------------------------------
 # columns
 # ----------------------------------------------------------------------
@@ -308,7 +314,7 @@ def test_columns_remap_matches_canonical_file(tmp_path):
     np.testing.assert_allclose(inst.rv / RV_FACTOR, [20.0, 10.0])
     np.testing.assert_allclose(inst.err / RV_FACTOR, [0.25, 0.5])
     assert inst.total_detrend_cols == 1
-    np.testing.assert_allclose(inst.detrend_matrix[:, 0], [8.0, 7.0])
+    np.testing.assert_allclose(inst.detrend_matrix[:, 0], _WHITEN([8.0, 7.0]))
 
 
 def test_partial_columns_defaults_unnamed_roles(tmp_path):
@@ -323,7 +329,9 @@ def test_partial_columns_defaults_unnamed_roles(tmp_path):
     np.testing.assert_allclose(inst.time, [1.0, 2.0])
     np.testing.assert_allclose(inst.rv / RV_FACTOR, [5.0, 6.0])
     assert inst.total_detrend_cols == 1
-    np.testing.assert_allclose(inst.detrend_matrix[:, 0], [42.0, 43.0])
+    np.testing.assert_allclose(
+        inst.detrend_matrix[:, 0], _WHITEN([42.0, 43.0])
+    )
 
 
 def test_columns_spec_without_detrend_disables_detrending(tmp_path):
@@ -435,7 +443,7 @@ def test_time_may_also_be_a_detrend_column(tmp_path):
     # Assert
     np.testing.assert_allclose(inst.time, [1.0, 2.0])
     assert inst.total_detrend_cols == 1
-    np.testing.assert_allclose(inst.detrend_matrix[:, 0], [1.0, 2.0])
+    np.testing.assert_allclose(inst.detrend_matrix[:, 0], _WHITEN([1.0, 2.0]))
 
 
 def test_repeated_detrend_column_raises(tmp_path):

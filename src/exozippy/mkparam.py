@@ -16,7 +16,9 @@ bounds, and are named as such.
 """
 
 import copy
+import json
 import logging
+import numbers
 import re
 from pathlib import Path
 
@@ -32,7 +34,7 @@ from exozippy.outputs.modes import (
     NoValidDrawsError,
 )
 from exozippy.samplers import convergence
-from exozippy.trace_meta import check_trace_freshness
+from exozippy.trace_meta import ROLES_ATTR, check_trace_freshness
 from exozippy.yamlio import load_yaml
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,30 @@ logger = logging.getLogger(__name__)
 
 def _load_yaml(path):
     return load_yaml(path) or {}
+
+
+def _trace_element_roles(idata):
+    """Per-element role masks stamped on the trace, or ``{}``.
+
+    Written by ``trace_meta.element_roles`` for the parameters whose vectors are
+    not uniform in a role.  A missing or unreadable attr means "every element of
+    a sampled variable is sampled", which is what every trace written before
+    per-element parameterizations meant -- so a fault here degrades to the
+    historical behavior rather than dropping entries.
+    """
+    attrs = getattr(idata, "attrs", None) or {}
+    blob = attrs.get(ROLES_ATTR)
+    if not blob:
+        return {}
+    try:
+        roles = json.loads(blob)
+    except (TypeError, ValueError):
+        logger.warning(
+            "mkparam: the trace's element-role metadata is unreadable; "
+            "treating every element of every sampled parameter as sampled."
+        )
+        return {}
+    return roles if isinstance(roles, dict) else {}
 
 
 def _get_instance_names(config, comp_key):
@@ -60,6 +86,53 @@ def _find_existing(existing_params, comp_key, idx, name, param):
     return None, None
 
 
+def _sigma_is_nonzero_number(sigma):
+    """True when ``sigma`` is a number other than zero -- i.e. a live prior.
+
+    The mu promotion below only makes sense for a NUMERIC sigma, and the
+    reason this is a predicate rather than ``float(sigma) != 0`` is that a
+    sigma need not be a number at all: ``linking.LINKABLE_FIELDS`` includes
+    it, so ``{sigma: "star.B.av_sigma"}`` is a legal params entry and
+    ``float()`` on it raises ValueError.  Under ``run_fit`` the broad catch
+    around the mkparam call turned that into a silently missing restart file
+    at the end of a multi-day fit; the standalone CLI died raw.
+
+    A linked sigma answers False and so skips the promotion, which is the
+    right answer and not merely the safe one: the link is resolved against a
+    live model, and there is nothing here that could evaluate it to decide
+    whether it is zero.  The entry itself is still copied across verbatim by
+    the constraint loop, exactly as any other stated constraint is.  ``None``
+    (no sigma) and a bool both answer False -- a bool is an int in Python,
+    but ``sigma: true`` is not a width.
+    """
+    if isinstance(sigma, bool) or not isinstance(sigma, numbers.Real):
+        return False
+    return float(sigma) != 0
+
+
+def _promoted_prior_center(initval):
+    """The mu an implicit prior center is promoted to, from ``initval``.
+
+    A prior center is one number.  A list-valued ``initval`` is a length-K
+    set of PER-SEED STARTS (P4 multi-seed), which is a statement about where
+    K chains begin and not about a prior width's center -- promoting the
+    whole list would install a list as ``mu`` and hand the next fit a
+    Gaussian potential with a vector center nobody wrote.  Take seed 0,
+    which is the canonical element everywhere else: ``run._user_initval``
+    reads a list-valued initval as ``v[0]``, and this writer's own bounds
+    already come from seed 0.
+
+    The list can only be there because a previous mkparam run emitted one
+    and the user then hand-added a sigma to that entry -- the very round
+    trip ``_apply_existing_constraints`` exists to keep honest.  An empty
+    list has no seed 0 and so nothing to promote; return None and let the
+    caller skip, rather than inventing a center.
+    """
+    if isinstance(initval, (list, tuple)):
+        return initval[0] if len(initval) else None
+    return initval
+
+
 def _apply_existing_constraints(entry, existing_entry):
     """Layer an existing params entry's constraint fields onto a fresh entry.
 
@@ -70,30 +143,40 @@ def _apply_existing_constraints(entry, existing_entry):
     point, so it must never drift toward the MAP.  That asymmetry is the
     whole job of this function.
 
-    If the original carried a Gaussian prior (sigma > 0) but no explicit mu,
-    its initval WAS the prior center (``Parameter.build_pymc`` centers the
-    potential on initval whenever mu is absent, for sampled and derived
-    parameters alike), so promote it to mu. Without the promotion the prior
-    would silently follow the MAP on every successive mkparam run.
+    If the original carried a Gaussian prior (numeric sigma > 0) but no
+    explicit mu, its initval WAS the prior center (``Parameter.build_pymc``
+    centers the potential on initval whenever mu is absent, for sampled and
+    derived parameters alike), so promote it to mu -- seed 0 of it if it is a
+    multi-seed list, see ``_promoted_prior_center``. Without the promotion
+    the prior would silently follow the MAP on every successive mkparam run.
 
     Returns ``entry`` (mutated in place) for convenience.
     """
     if not isinstance(existing_entry, dict):
         return entry
-    # Not "prior" keys: mu/sigma are a prior, lower/upper are hard bounds.
-    # Both are constraints the user stated and neither is a start value,
-    # which is the only property that matters here.
-    for constraint_key in ("mu", "sigma", "lower", "upper"):
+    # Not "prior" keys: mu/sigma are a prior, lower/upper are hard bounds,
+    # bound_scale is a soft bound's transition width.  All three are
+    # constraints the user stated, all three change the posterior
+    # (config.PHYSICS_KEYS is exactly this list plus initval's absence),
+    # and none is a start value -- which is the only property that matters
+    # here.  bound_scale earns its place for the same reason lower/upper
+    # do: dropping it silently re-stiffens a barrier the user deliberately
+    # widened.  NOTE this only reaches parameters mkparam emits at all; a
+    # DERIVED parameter (star.loggsed, the one place bound_scale is
+    # load-bearing today) is not one of them, and gets its constraints
+    # carried by the pass-through loop at the end of `write_param_file`
+    # instead -- see `_CONSTRAINT_FIELDS` there, and review 2.3.13.
+    for constraint_key in ("mu", "sigma", "lower", "upper", "bound_scale"):
         if constraint_key in existing_entry:
             entry[constraint_key] = existing_entry[constraint_key]
-    existing_sigma = existing_entry.get("sigma")
     if (
-        existing_sigma is not None
-        and float(existing_sigma) != 0
+        _sigma_is_nonzero_number(existing_entry.get("sigma"))
         and "mu" not in existing_entry
         and "initval" in existing_entry
     ):
-        entry["mu"] = existing_entry["initval"]
+        center = _promoted_prior_center(existing_entry["initval"])
+        if center is not None:
+            entry["mu"] = center
     return entry
 
 
@@ -112,12 +195,12 @@ def _normalize_key(key, config):
     return key
 
 
-def _next_versioned_path(param_path):
+def _bump_version(param_path):
     """Return the path with its version suffix incremented by one.
 
-    foo.params.yaml      → foo.params.2.yaml
-    foo.params.2.yaml    → foo.params.3.yaml
-    foo.params.12.yaml   → foo.params.13.yaml
+    foo.params.yaml      -> foo.params.2.yaml
+    foo.params.2.yaml    -> foo.params.3.yaml
+    foo.params.12.yaml   -> foo.params.13.yaml
     """
     p = Path(param_path)
     suffix = p.suffix  # ".yaml"
@@ -131,6 +214,30 @@ def _next_versioned_path(param_path):
     else:
         base, n = stem, 1
     return p.parent / f"{base}.{n + 1}{suffix}"
+
+
+def _next_versioned_path(param_path):
+    """The first UNUSED version of ``param_path``.
+
+    Auto-versioning is what makes the input file safe -- it is never written
+    over, which is why there is no backup step.  But bumping the version
+    ONCE only protects the input: two fits started from the same
+    ``foo.params.yaml`` both resolve to ``foo.params.2.yaml``, and the second
+    silently destroys the first's restart file.  That happened in practice
+    (2026-08).  The old ``backup_params`` this replaced looped; keep looping.
+
+    The loop is bounded by the filesystem rather than a counter on purpose:
+    the exit condition is "nothing is there", so a directory holding
+    versions 2..40 lands on 41 rather than refusing at some arbitrary cap.
+    It is not atomic against a second process claiming the same name between
+    the check and the write, and deliberately is not -- the realistic
+    collision is sequential runs, and a lock file would be a heavier promise
+    than the guarantee here (never destroy an existing restart file) needs.
+    """
+    candidate = _bump_version(param_path)
+    while candidate.exists():
+        candidate = _bump_version(candidate)
+    return candidate
 
 
 def _mode_seed_quotas(weights, n):
@@ -293,7 +400,205 @@ def _refuse_invalid_seed_draws(mode_status, trace_path, force=False):
     )
 
 
-def _sample_seed_draws(idata, n, exclude, rng_seed=0, mode_report=_UNSET):
+def _map_draw_from_lp(lp_values, mode_report):
+    """Pick the best VALID draw by lp, as ``(chain, draw, lp)`` or None.
+
+    Two filters, both of which ``np.argmax`` got wrong in the direction that
+    silently writes a bad restart seed:
+
+    * **NaN is not a maximum.**  ``np.argmax`` returns the index of the first
+      NaN it sees, so a single non-finite lp anywhere in the trace made that
+      draw the "MAP".  ``np.nanargmax`` ranks the finite ones instead.
+    * **A finite lp is not proof the draw is usable.**  The runaway-lp failure
+      mode produces draws whose lp is finite and enormous -- ``outputs.modes``
+      labels them -1 (numerically invalid) precisely because they win any
+      ranking by construction.  So the mode pass's own per-draw labels mask
+      the ranking here, exactly as ``_sample_seed_draws``' stratified path
+      already excludes label -1.  The MAP path was the last leak.
+
+    The all-invalid trace is refused upstream (``_refuse_invalid_seed_draws``)
+    and so cannot normally reach this; under ``mkparam: {force: true}`` it can,
+    and then there is nothing left to rank -- returning None hands the caller
+    the same honest "no rankable lp" fallback a trace with no lp at all gets,
+    rather than ``argmax``'s silent index 0.
+
+    ``mode_report`` may be None (the mode pass failed, which must never break
+    seed emission) and its labels are only trusted when their shape matches
+    lp's: a mismatch would mask the wrong draws, which is worse than not
+    masking at all.
+    """
+    ranked = np.asarray(lp_values, dtype=float)
+    labels = getattr(mode_report, "labels", None)
+    if labels is not None:
+        labels = np.asarray(labels)
+        if labels.shape == ranked.shape:
+            masked = np.where(labels < 0, np.nan, ranked)
+            n_dropped = int(
+                np.isfinite(ranked).sum() - np.isfinite(masked).sum()
+            )
+            if np.isfinite(masked).any():
+                if n_dropped:
+                    logger.info(
+                        "mkparam: excluded %d numerically invalid draw(s) from "
+                        "the MAP ranking.",
+                        n_dropped,
+                    )
+                ranked = masked
+            elif n_dropped:
+                # Every finite lp belongs to an invalid draw.  Say so and rank
+                # the finite ones anyway: the alternative is no MAP at all, and
+                # the caller's fallback (last draw of chain 0) is not obviously
+                # better than the best of a known-bad set.  Only reachable
+                # under `mkparam: {force: true}`, which already accepted that.
+                logger.warning(
+                    "mkparam: every draw with a finite lp was labelled "
+                    "numerically invalid; ranking them anyway."
+                )
+        else:
+            logger.debug(
+                "mkparam: mode labels %s do not match lp %s -- not masking "
+                "the MAP ranking.",
+                labels.shape,
+                ranked.shape,
+            )
+    if not np.isfinite(ranked).any():
+        return None
+    flat = ranked.flatten()
+    map_idx = int(np.nanargmax(flat))
+    n_draws = ranked.shape[-1] if ranked.ndim > 1 else ranked.size
+    return map_idx // n_draws, map_idx % n_draws, float(flat[map_idx])
+
+
+def _overdisperse_block(n_seeds, diag):
+    """The ``overdisperse:`` declaration, plus the ESS/Rhat record above it.
+
+    THE WRITER DECLARES IT, because the reader cannot tell the two cases apart
+    at run time (review 8.3.3): K seeds mean either "K modes I am trying",
+    each of which still wants scattering, or "K posterior draws off a finished
+    fit", which are already scattered by construction.  ``overdisperse: false``
+    is a true statement about where THESE seeds came from -- they are joint
+    draws from a sampled posterior -- and it makes every chain start exactly
+    at its round-robin seed.
+
+    It is written only for K > 1.  With a single seed the file carries the MAP
+    draw and nothing else, every chain would start at the identical point, and
+    ``_make_starts`` RAISES on exactly that: a lone MAP is not a dispersed
+    population, so `true` is the true statement there.  (The ruling says
+    "mkparam writes false"; this is that, narrowed by the ruling's own
+    single-seed raise so the default restart file cannot be born unusable.)
+
+    The min ESS / max Rhat of the fit these seeds came from go in a COMMENT,
+    not in a machine-readable key: nothing reads them, the requirement is that
+    they be RECORDED for the human, and a comment is the smaller change.  They
+    are a RECORD and deliberately NOT the gate:
+
+      * A "did it converge?" boolean would be the wrong gate, because nobody
+        reruns a well-mixed fit.  The population of fits mkparam actually
+        processes is selected for being unsatisfactory, so the flag would read
+        False almost always and `overdisperse: false` would be dead code.
+      * The two numbers gate different failures anyway.  CONVERGENCE (max
+        Rhat) asks whether these seeds come from the right distribution at
+        all.  MIXING (min ESS) asks how many EFFECTIVELY INDEPENDENT seeds
+        there are: K draws off a chain with bulk-ESS n_eff are ~n_eff
+        independent points, so the next fit's affine-hull argument applies
+        with n_eff and not with K -- forty seeds off an ESS-5 chain span at
+        most a 4-dimensional hull.
+
+    And what no local test on the seed list can detect at all: seeds drawn
+    from an unconverged or mode-stuck posterior are properly dispersed with
+    respect to what was SAMPLED, and badly under-dispersed with respect to the
+    TRUE posterior.  That is what these two numbers are here to let a human
+    notice.
+    """
+    overdisperse = n_seeds <= 1
+
+    def _num(key, fmt):
+        val = (diag or {}).get(key)
+        try:
+            val = float(val)
+        except (TypeError, ValueError):
+            return "not measurable"
+        if not np.isfinite(val):
+            return "not measurable"
+        return format(val, fmt)
+
+    lines = [
+        "#",
+        "# Mixing of the fit these seeds came from, after its burn-in of "
+        f"{(diag or {}).get('burnin', 0)} draws:",
+        f"#   min bulk-ESS   = {_num('min_ess', '.0f')}  "
+        f"({(diag or {}).get('worst_ess_var')})",
+        f"#   max split-Rhat = {_num('max_rhat', '.4f')}  "
+        f"({(diag or {}).get('worst_rhat_var')})",
+        "# Recorded, not acted on: K seeds off a chain with bulk-ESS n_eff "
+        "are only",
+        "# ~n_eff independent points, and seeds from an unconverged or "
+        "mode-stuck",
+        "# posterior are dispersed with respect to what was SAMPLED rather "
+        "than to",
+        "# the true posterior. Nothing local to this file can detect either.",
+        "#",
+    ]
+    if overdisperse:
+        lines += [
+            "# One seed only (the MAP), so the chains still have to be "
+            "scattered around",
+            "# it: every chain would otherwise start at the identical point. "
+            "Raise",
+            "# `mkparam: {n_seeds: N}` for a start set that does not need "
+            "scattering.",
+            "overdisperse: true",
+        ]
+    else:
+        lines += [
+            f"# These {n_seeds} seeds ARE posterior draws -- already spread "
+            f"across the",
+            "# posterior covariance -- so they are used exactly as written, "
+            "with no",
+            "# jitter. Set this to true to scatter the chains around them "
+            "anyway",
+            "# (an ABSENT key also means true). See samplers/samplers.md, "
+            '"Chain starts".',
+            "overdisperse: false",
+        ]
+    return "\n".join(lines) + "\n\n"
+
+
+def _burnin_diag(idata):
+    """``convergence.find_burnin`` on a trace, with mkparam's lp guard.
+
+    One owner, because two callers need the same scan: the seed pool
+    (``_sample_seed_draws`` wants its burn-in and good-chain mask) and the
+    header record (``write_param_file`` quotes its ``min_ess``/``max_rhat``).
+    It is the more expensive thing mkparam does, so it runs ONCE per call and
+    is handed down, exactly as the mode report is.
+    """
+    post = idata["posterior"]
+    var_names = convergence.default_var_names(post)
+    arrays = {v: post[v].values for v in var_names}
+    lp = None
+    ss = idata.get("sample_stats") if hasattr(idata, "get") else None
+    if ss is not None and "lp" in ss.data_vars:
+        lp = ss["lp"].values
+        if not np.isfinite(lp).any():
+            # An all-non-finite lp is a degenerate input, not a ranking:
+            # good_chain_mask's np.nanargmax raises "All-NaN slice
+            # encountered" on it, which used to abort mkparam with an
+            # opaque numpy error naming nothing.  Only reachable under
+            # `mkparam: {force: true}` (the validity gate refuses first);
+            # treat it as "no lp", which is the same degenerate-input
+            # answer find_burnin gives for a single chain.
+            logger.warning(
+                "mkparam: every lp in the trace is non-finite; treating it "
+                "as absent for the burn-in/good-chain diagnostics."
+            )
+            lp = None
+    return convergence.find_burnin(arrays, lp=lp, var_names=var_names)
+
+
+def _sample_seed_draws(
+    idata, n, exclude, rng_seed=0, mode_report=_UNSET, diag=None
+):
     """Pick ``n`` random JOINT (chain, draw) index pairs for multi-seed starts.
 
     When the trace is multimodal (outputs.modes.identify_modes finds more
@@ -320,6 +625,7 @@ def _sample_seed_draws(idata, n, exclude, rng_seed=0, mode_report=_UNSET):
     ``mode_report`` lets the caller hand in an already-computed report so
     the mode pass runs once per mkparam call rather than twice; left unset,
     this runs it itself (and swallows any failure, as it always has).
+    ``diag`` is the same arrangement for ``_burnin_diag``.
 
     NOTE this pool is NOT validity-filtered: ``find_burnin``'s good-chain
     mask is a stuck-chain detector and its burn-in is an ESS knee, neither
@@ -329,27 +635,8 @@ def _sample_seed_draws(idata, n, exclude, rng_seed=0, mode_report=_UNSET):
     here: this path would otherwise emit rejected draws as seeds.
     """
     post = idata["posterior"]
-    var_names = convergence.default_var_names(post)
-    arrays = {v: post[v].values for v in var_names}
-    lp = None
-    ss = idata.get("sample_stats") if hasattr(idata, "get") else None
-    if ss is not None and "lp" in ss.data_vars:
-        lp = ss["lp"].values
-        if not np.isfinite(lp).any():
-            # An all-non-finite lp is a degenerate input, not a ranking:
-            # good_chain_mask's np.nanargmax raises "All-NaN slice
-            # encountered" on it, which used to abort mkparam with an
-            # opaque numpy error naming nothing.  Only reachable under
-            # `mkparam: {force: true}` (the validity gate refuses first);
-            # treat it as "no lp", which is the same degenerate-input
-            # answer find_burnin gives for a single chain.
-            logger.warning(
-                "mkparam: every lp in the trace is non-finite; treating it "
-                "as absent for the burn-in/good-chain diagnostics."
-            )
-            lp = None
-
-    diag = convergence.find_burnin(arrays, lp=lp, var_names=var_names)
+    if diag is None:
+        diag = _burnin_diag(idata)
     burnin, good_mask = diag["burnin"], diag["good_mask"]
     good_chains = np.nonzero(good_mask)[0]
     n_draws = int(post.sizes["draw"])
@@ -441,9 +728,9 @@ def write_param_file(
     validity filter -- see ``_refuse_invalid_seed_draws`` for why that is a
     refusal rather than a warning, and for the ``mkparam: {force: true}``
     escape hatch.  This check covers the DEFAULT single-seed path too, and
-    has to: seed 0 is the MAP draw, and with an all-NaN lp ``np.argmax``
-    returns index 0, so the emitted "MAP" is silently the first draw of
-    chain 0.
+    has to: seed 0 is the MAP draw.  A PARTIALLY invalid trace passes that
+    gate, and seed 0 is chosen from the valid draws only -- see
+    ``_map_draw_from_lp``.
 
     Parameters
     ----------
@@ -501,7 +788,13 @@ def write_param_file(
         if param_file:
             output_path = _next_versioned_path(base_dir / param_file)
         else:
-            output_path = base_dir / f"{run_name}.params.2.yaml"
+            # Same versioning, from the name the file WOULD have had.  A
+            # config with no parameter_file (legal since 8.3.1: a blind fit
+            # can seed itself) is exactly the case where several runs share
+            # one directory, so it needs the collision loop most.
+            output_path = _next_versioned_path(
+                base_dir / f"{run_name}.params.yaml"
+            )
 
     param_file = config.get("parameter_file")
     existing_params = {}
@@ -582,23 +875,24 @@ def write_param_file(
     # posterior median for old Metropolis trace files without lp.
     ss = idata.get("sample_stats")
     has_lp = ss is not None and "lp" in ss.data_vars
+    map_pick = None
     if has_lp:
-        lp = ss["lp"]
-        flat_lp = lp.values.flatten()
-        map_idx = int(np.argmax(flat_lp))
-        n_draws = lp.sizes["draw"]
-        map_chain = map_idx // n_draws
-        map_draw = map_idx % n_draws
-        map_lp = float(flat_lp[map_idx])
+        map_pick = _map_draw_from_lp(ss["lp"].values, mode_report)
+    if map_pick is not None:
+        map_chain, map_draw, map_lp = map_pick
         logger.info(
             f"mkparam: MAP chain={map_chain} draw={map_draw} lp={map_lp:.4f}"
         )
     else:
-        # No lp → use last draw of chain 0 as a self-consistent fallback.
-        # Per-parameter medians would be inconsistent (the joint point may not
-        # exist in the posterior); any real draw is always self-consistent.
+        # No lp, or no draw with a rankable one -> use the last draw of chain 0
+        # as a self-consistent fallback.  Per-parameter medians would be
+        # inconsistent (the joint point may not exist in the posterior); any
+        # real draw is always self-consistent.
         logger.warning(
-            "mkparam: lp not in trace -- using last draw of chain 0 as fallback"
+            "mkparam: %s -- using last draw of chain 0 as fallback",
+            "lp not in trace"
+            if not has_lp
+            else "no draw in the trace has a finite, valid lp",
         )
         map_chain, map_draw, map_lp = (
             0,
@@ -618,6 +912,23 @@ def write_param_file(
     # draws from the good chains. All seeds are JOINT draws (a (chain, draw)
     # pair each), so reading every parameter at those indices yields K
     # mutually-consistent start points that span the posterior covariance.
+    # The burn-in / Rhat / ESS scan, run ONCE (it is the most expensive thing
+    # here) and used twice: to pick the seed pool, and to RECORD in the header
+    # how well mixed the fit these seeds came from actually was.
+    #
+    # Guarded, because the second use is the one that made it unconditional: a
+    # HEADER RECORD must never be able to break the file it annotates.  A
+    # degenerate trace (a single draw, or a posterior holding only `*_raw`
+    # vars) has no statistic to report, and before this the single-seed path
+    # never asked for one.  On failure the header says "not measurable" and
+    # `_sample_seed_draws` recomputes for itself, exactly as it always did --
+    # so the multi-seed path fails where it used to fail, and not here.
+    try:
+        burnin_diag = _burnin_diag(idata)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("mkparam: no burn-in statistics for the header: %s", exc)
+        burnin_diag = None
+
     seed_pairs = [(map_chain, map_draw)]
     if n_seeds > 1:
         extra, _pool_mask, _pool_burnin = _sample_seed_draws(
@@ -625,6 +936,7 @@ def write_param_file(
             n_seeds - 1,
             exclude=(map_chain, map_draw),
             mode_report=mode_report,
+            diag=burnin_diag,
         )
         seed_pairs += extra
         if len(seed_pairs) < n_seeds:
@@ -644,6 +956,16 @@ def write_param_file(
     # -> angle pass below can look the angle's existing entry up the same way.
     key_context = {}
 
+    # Per-element roles of the vectors that are not uniform in one (a component
+    # whose instances chose different parameterizations).  The raw variable's
+    # length says how MANY elements are sampled, never which, so without this
+    # a partially derived vector would get a start value written for an element
+    # whose value is an expression -- the redundant constraint the
+    # "physically sampled variables" filter above exists to prevent.  Absent on
+    # traces that predate the roles, and on every uniform model: then every
+    # element of a sampled var is sampled, exactly as before.
+    element_roles = _trace_element_roles(idata)
+
     for var_name in sampled_vars:
         comp_key, param = var_name.rsplit(".", 1)
         da = posterior[var_name]
@@ -654,8 +976,14 @@ def write_param_file(
         n_elements = seed_vals.shape[1]
 
         instance_names = _get_instance_names(config, comp_key)
+        roles = element_roles.get(var_name, {})
+        writable = roles.get("sampled")
 
         for i in range(n_elements):
+            if writable is not None and not (
+                i < len(writable) and writable[i]
+            ):
+                continue
             mv_list = [float(np.round(seed_vals[k, i], 8)) for k in range(K)]
             mv = mv_list[0]
             if instance_names:
@@ -713,8 +1041,16 @@ def write_param_file(
         # Sorted: the body deletes the x/y entries and inserts the angle in
         # their place, so a hash-ordered set intersection would shuffle the
         # written params file's key order from run to run.
-        for prefix in sorted(set(_x_keys) & set(_y_keys)):
-            x_key, y_key = _x_keys[prefix], _y_keys[prefix]
+        #
+        # `pair_prefix` is the PARAMETER-NAME stem the pair shares -- "lens",
+        # "orbit.b" -- and is emphatically not the run `prefix` bound at the
+        # top of this function from `config["prefix"]`.  It used to be spelled
+        # `prefix` and so shadowed it (review 2.3.8); nothing below the loop
+        # read the outer name, so the bug was latent rather than live, but any
+        # future line down there would have silently got "lens" where it
+        # wanted "fitresults/model".
+        for pair_prefix in sorted(set(_x_keys) & set(_y_keys)):
+            x_key, y_key = _x_keys[pair_prefix], _y_keys[pair_prefix]
             xv, yv = output[x_key]["initval"], output[y_key]["initval"]
             # initval may be a scalar (single-seed) or a length-K list
             # (multi-seed): convert every seed's (x, y) to its own angle.
@@ -736,18 +1072,41 @@ def write_param_file(
             # this the pass-through loop below would overwrite the fresh MAP
             # angle with the stale entry, breaking the restart contract.
             comp_key, idx, name = key_context.get(
-                x_key, (prefix.split(".", 1)[0], 0, None)
+                x_key, (pair_prefix.split(".", 1)[0], 0, None)
             )
             existing_key, existing_entry = _find_existing(
                 existing_params, comp_key, idx, name, angle_name
             )
             if existing_key:
                 consumed_existing.add(existing_key)
-            output[f"{prefix}.{angle_name}"] = _apply_existing_constraints(
-                angle_entry, existing_entry
+            output[f"{pair_prefix}.{angle_name}"] = (
+                _apply_existing_constraints(angle_entry, existing_entry)
             )
 
-    _CONSTRAINT_FIELDS = {"sigma", "upper", "lower"}
+    # config.PHYSICS_KEYS minus `mu`: the fields whose presence makes an
+    # entry worth keeping even though the trace says nothing about it.  `mu`
+    # is left out deliberately -- a center with no width is not a prior, and
+    # `config.validate_sigma_has_center` guards the reverse spelling -- so
+    # this is not simply PHYSICS_KEYS and must not be replaced by it.
+    #
+    # `bound_scale` is here for the same reason `lower`/`upper` are: it is a
+    # soft bound's transition width, a real posterior term the user stated,
+    # and dropping it silently re-stiffens a barrier they deliberately
+    # widened.  Review 2.3.13 is what its omission cost, and the reason it
+    # cost anything is that a DERIVED parameter never appears in
+    # `sampled_vars`: it is never consumed above, so this loop is its only
+    # path into the output file -- and a derived element is exactly where
+    # `Parameter.build_pymc` puts a barrier for `bound_scale` to tune.
+    # `examples/gj1214`'s `star.A.loggsed: {bound_scale: 25.0}` -- the one
+    # place bound_scale is load-bearing today -- therefore had no path at
+    # all, and had to be re-added by hand after every restart-file cycle.
+    #
+    # What this deliberately does NOT do is start writing derived parameters
+    # a START VALUE.  Nothing here reads the trace: the entry is passed
+    # through VERBATIM from the file the user wrote, so a derived parameter
+    # gets a restart entry only for constraints it already carried, never a
+    # MAP `initval` the model would silently override (review 2.3.17).
+    _CONSTRAINT_FIELDS = {"sigma", "upper", "lower", "bound_scale"}
 
     # Pass through existing entries not touched by the trace only if they carry
     # a constraint (prior, bound, or fixed value).  Pure initval-only entries
@@ -756,22 +1115,30 @@ def write_param_file(
     # existing file expressed them (star.0.param or star.param).
     for key, val in existing_params.items():
         if key not in consumed_existing:
-            if isinstance(val, dict) and not (_CONSTRAINT_FIELDS & val.keys()):
+            if not isinstance(val, dict):
+                # A BARE value is an initval and nothing else: `star.teff:
+                # 5800` (or a list of per-seed starts) states no constraint,
+                # so the discard policy above applies to it exactly as it
+                # does to `{initval: 5800}`.  Guarding the whole check with
+                # `isinstance(val, dict)` made the policy spelling-dependent
+                # -- the bare form fell through both branches and was
+                # re-emitted into every successive restart file forever.
+                continue
+            if not (_CONSTRAINT_FIELDS & val.keys()):
                 continue
             # For non-sampled constraint parameters (e.g. a Gaia parallax prior
-            # applied as a potential on distance), promote initval→mu so the
+            # applied as a potential on distance), promote initval->mu so the
             # prior center is explicit and cannot accidentally drift if initval
             # is ever edited.  Same logic as for sampled parameters above.
-            if isinstance(val, dict):
-                sigma = val.get("sigma")
-                if (
-                    sigma is not None
-                    and float(sigma) != 0
-                    and "mu" not in val
-                    and "initval" in val
-                ):
+            if (
+                _sigma_is_nonzero_number(val.get("sigma"))
+                and "mu" not in val
+                and "initval" in val
+            ):
+                center = _promoted_prior_center(val["initval"])
+                if center is not None:
                     val = dict(val)
-                    val["mu"] = val["initval"]
+                    val["mu"] = center
             output[_normalize_key(key, config)] = val
 
     output_path = Path(output_path)
@@ -780,6 +1147,27 @@ def write_param_file(
             f"# Generated by mkparam from {Path(str(trace_path)).name}"
             f"  (MAP lp={map_lp:.4f})\n"
         )
+        # The seed the fit actually ran with (run.py stamps it whether the
+        # user named it or it was drawn), so the run is recoverable from its
+        # own output -- the same reason this file carries start values at all.
+        # It goes in a COMMENT, not as a key: this is a params file, and
+        # `sampler:` belongs in the config, where a reader can paste it.
+        _run_seed = getattr(idata, "posterior", None)
+        _run_seed = (
+            getattr(_run_seed, "attrs", {}).get("random_seed")
+            if _run_seed is not None
+            else None
+        )
+        if _run_seed is not None:
+            f.write(
+                f"# The fit this came from ran with sampler: "
+                f"{{seed: {int(_run_seed)}}}  -- add that to the CONFIG "
+                f"(not here) to\n"
+                f"# reproduce it.  Bit-reproducible for nuts/numpyro/"
+                f"blackjax/nutpie/ptde; ptde_async\n"
+                f"# fixes the draws but not the arrival order (see "
+                f"samplers/samplers.md).\n"
+            )
         if K > 1:
             f.write(
                 f"# Multi-seed: initval is a length-{K} list of joint posterior\n"
@@ -804,6 +1192,7 @@ def write_param_file(
                 f"# describe a posterior -- do not start a production fit "
                 f"from this file.\n"
             )
+        f.write(_overdisperse_block(K, burnin_diag))
         yaml.dump(output, f, default_flow_style=False, sort_keys=True)
 
     logger.info(f"mkparam: written {output_path}")

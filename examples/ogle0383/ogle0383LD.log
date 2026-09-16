@@ -1,0 +1,173 @@
+Unloading tools/local-user <S>
+  ERROR: Unload of sticky module skipped
+
+Unloading uge/8.8.1 <S>
+  ERROR: Unload of sticky module skipped
+Modeling the following components:
+  star (2)
+  planet (1)
+  lens (1)
+  galacticmodel (1)
+  band (1)
+  mulensinstrument (6)
+Solving for starting values/scales of sampled parameters given user/data/default initialization....
+Done solving after 4 iterations.
+auto_vbbl: using VBM everywhere for source 0 (hexadecapole bracketing removed — VBM's internal C++ point-source test is faster; see hpc_optimization.txt P1)
+/home/tmcaleer/miniconda3/envs/exozippy/lib/python3.13/site-packages/pytensor/link/c/cmodule.py:2978: UserWarning: PyTensor could not link to a BLAS installation. Operations that might benefit from BLAS will be severely degraded.
+This usually happens when PyTensor is installed via pip. We recommend it be installed via conda/mamba/pixi instead.
+Alternatively, you can use an experimental backend such as Numba or JAX that perform their own BLAS optimizations, by setting `pytensor.config.mode == 'NUMBA'` or passing `mode='NUMBA'` when compiling a PyTensor function.
+For more options and details see https://pytensor.readthedocs.io/en/latest/troubleshooting.html#how-do-i-configure-test-my-blas-library
+  warnings.warn(
+-------------------------------------------------------------------------------------------------------------------------------
+--------           Starting points and penalties (Physical Space) with Sampler Curvature (Unity Space)                 --------
+--------           Ideal curvature=-1.0. Tune by changing init_scale = Scale/sqrt(abs(Curv)) in param.yaml             --------
+--------           The deviation from ideal primarily impacts tuning efficiency.                                       --------
+--------           It can easily tolerate factors of 10,000+ from ideal with a longer tuning phase.                    --------
+--------           However, the initial scale does impact the steepness of bounds on derived parameters.               --------
+--------           Scales that are too large will create softer bounds that might introduce real biases.               --------
+--------           Scales that are too small will create harder bounds that lead to divergences.                       --------
+--------           Log-Prob for parameters includes summed penalties from bounds and priors.                           --------
+-------------------------------------------------------------------------------------------------------------------------------
+                                       Parameter |           Value |      Scale |        Units |   Log-Prob | Unity Curv | Priors & Bounds (*=user) |
+-------------------------------------------------------------------------------------------------------------------------------
+                               star.Lens.logmass |     -0.50000000 |      0.001 | dex(solMass) |       0.00 |        N/A | U(-9, 2.5)
+                             star.Source.logmass |     -0.50000000 |      0.300 | dex(solMass) |       0.00 |        N/A | U(-9, 2.5)
+                                 star.Lens.pm_ra |    -20.92656545 |      3.000 |     mas / yr |       0.00 |        N/A | U(-1.00e+05, 1.00e+05)
+                               star.Source.pm_ra |     -3.00000000 |      3.000 |     mas / yr |       0.00 |        N/A | U(-1.00e+05, 1.00e+05)
+                                star.Lens.pm_dec |     -3.00000000 |      3.000 |     mas / yr |       0.00 |        N/A | U(-1.00e+05, 1.00e+05)
+                              star.Source.pm_dec |     -3.00000000 |      3.000 |     mas / yr |       0.00 |        N/A | U(-1.00e+05, 1.00e+05)
+                              star.Lens.distance |   4000.00000000 |      5.000 |           pc |       0.00 |        N/A | U(0.001, 1.00e+05)
+                            star.Source.distance |   8000.00000000 |      5.000 |           pc |       0.00 |        N/A | U(0.001, 1.00e+05)
+                                    star.Lens.rv |        0.000000 | 100000.000 |        m / s |       0.00 |        N/A | U(-3.00e+08, 3.00e+08)
+                                  star.Source.rv |        0.000000 | 100000.000 |        m / s |       0.00 |        N/A | U(-3.00e+08, 3.00e+08)
+                                  star.Lens.mass |      0.31622777 |      0.028 |      solMass |       0.00 |        N/A | U(0.1, 250)
+                                star.Source.mass |      0.31622777 |      4.939 |      solMass |       0.00 |        N/A | U(0.1, 250)
+                           planet.Companion.mass |      0.07373985 |     41.211 |  jupiterMass |       0.00 |        N/A | U(-1000, 2.60e+05)
+                                   lens.Lens.t_0 |  2.45819923e+06 |      0.002 |            d |       0.00 |        N/A | U(2.40e+06, 3.00e+06)
+                                   lens.Lens.u_0 |      0.06893062 |      0.002 |              |       0.00 |        N/A | U(-18, 18)
+                                     lens.Lens.s |      2.42030035 |      0.014 |              |       0.00 |        N/A | U(0.1, 10)
+                                lens.Lens.xalpha |      0.99948870 |  2.725e-05 |              |       0.00 |        N/A | N(0.00e+00, 1)
+                                lens.Lens.yalpha |      0.03197416 |      0.001 |              |       0.00 |        N/A | N(0.00e+00, 1)
+                                 lens.Lens.alpha |      1.83229689 |      0.049 |          deg |       0.00 |        N/A | 
+                                     lens.Lens.q |      0.00022260 |  1.384e-05 |              |       0.00 |        N/A | U(1.00e-08, 100)
+                           lens.Lens.mlens_total |      0.31629816 |      0.028 |      solMass |       0.00 |        N/A | U(0.00e+00, 500)
+                                   lens.Lens.t_E |     11.56142701 |      0.213 |            d |       0.00 |        N/A | > 0.00e+00
+                                lens.Lens.pi_E_N |        0.000000 |      0.035 |              |       0.00 |        N/A | 
+                                lens.Lens.pi_E_E |     -0.22028844 |      0.017 |              |       0.00 |        N/A | 
+                                       band.I.u1 |      0.50000000 |      0.200 |              |       0.00 |        N/A | N(0.5, 0.2)*
+             mulensinstrument.KMTA02.log_f_total |     -6.19858972 |      0.000 |              |       0.00 |        N/A | U(-100, 10)
+             mulensinstrument.KMTC02.log_f_total |     -6.19688477 |      0.000 |              |       0.00 |        N/A | U(-100, 10)
+             mulensinstrument.KMTC42.log_f_total |     -6.19776138 |      0.000 |              |       0.00 |        N/A | U(-100, 10)
+             mulensinstrument.KMTS02.log_f_total |     -6.19634350 |      0.000 |              |       0.00 |        N/A | U(-100, 10)
+             mulensinstrument.KMTS42.log_f_total |     -6.19449017 |      0.000 |              |       0.00 |        N/A | U(-100, 10)
+             mulensinstrument.KMTA42.log_f_total |     -6.19914955 |      0.000 |              |       0.00 |        N/A | U(-100, 10)
+                mulensinstrument.KMTA02.q_source |      0.09843942 |      0.050 |              |       0.00 |        N/A | U(0.00e+00, 2)
+                mulensinstrument.KMTC02.q_source |      0.10428528 |      0.050 |              |       0.00 |        N/A | U(0.00e+00, 2)
+                mulensinstrument.KMTC42.q_source |      0.09578562 |      0.050 |              |       0.00 |        N/A | U(0.00e+00, 2)
+                mulensinstrument.KMTS02.q_source |      0.10125528 |      0.050 |              |       0.00 |        N/A | U(0.00e+00, 2)
+                mulensinstrument.KMTS42.q_source |      0.10527808 |      0.050 |              |       0.00 |        N/A | U(0.00e+00, 2)
+                mulensinstrument.KMTA42.q_source |      0.09529426 |      0.050 |              |       0.00 |        N/A | U(0.00e+00, 2)
+               mulensinstrument.KMTA02.err_scale |      1.00000000 |      0.100 |              |       0.00 |        N/A | U(1.00e-06, 1.00e+06)
+               mulensinstrument.KMTC02.err_scale |      1.00000000 |      0.100 |              |       0.00 |        N/A | U(1.00e-06, 1.00e+06)
+               mulensinstrument.KMTC42.err_scale |      1.00000000 |      0.100 |              |       0.00 |        N/A | U(1.00e-06, 1.00e+06)
+               mulensinstrument.KMTS02.err_scale |      1.00000000 |      0.100 |              |       0.00 |        N/A | U(1.00e-06, 1.00e+06)
+               mulensinstrument.KMTS42.err_scale |      1.00000000 |      0.100 |              |       0.00 |        N/A | U(1.00e-06, 1.00e+06)
+               mulensinstrument.KMTA42.err_scale |      1.00000000 |      0.100 |              |       0.00 |        N/A | U(1.00e-06, 1.00e+06)
+                          mulensinstrument.model |             N/A |        N/A |          --- |    2946.48 |        N/A | Likelihood/Det.
+                      gaussian_prior.lens.xalpha |             N/A |        N/A |          --- |      -0.50 |        N/A | Likelihood/Det.
+             low_bound.mulensinstrument.f_source |             N/A |        N/A |          --- |      -4.16 |        N/A | Likelihood/Det.
+                           lens.event_rate_prior |             N/A |        N/A |          --- |       2.32 |        N/A | Likelihood/Det.
+                         galacticmodel.imf_prior |             N/A |        N/A |          --- |      -0.08 |        N/A | Likelihood/Det.
+                   galacticmodel.kinematic_prior |             N/A |        N/A |          --- |      22.09 |        N/A | Likelihood/Det.
+-------------------------------------------------------------------------------------------------------------------------------
+PTDE-async: 35 params, 70 chains/rung, gamma=0.2845
+PTDE probe: tightly-constrained params: star.logmass_raw[0]: scale=0.0149; star.logmass_raw[1]: scale=0.0844; star.pm_ra_raw[0]: scale=0.00084; star.pm_ra_raw[1]: scale=0.00084; star.pm_dec_raw[0]: scale=0.0375; star.pm_dec_raw[1]: scale=0.0424; star.distance_raw[0]: scale=0.0121; star.distance_raw[1]: scale=0.0222; star.rv_raw[0]: scale=0.0321; star.rv_raw[1]: scale=0.124; planet.mass_raw[0]: scale=6.47e-05; lens.t_0_raw[0]: scale=0.0138; lens.u_0_raw[0]: scale=0.0084; lens.s_raw[0]: scale=0.134; lens.yalpha_raw[0]: scale=0.0454; band.u1_raw[0]: scale=0.0343; mulensinstrument.log_f_total_raw[0]: scale=0.00734; mulensinstrument.log_f_total_raw[1]: scale=0.0103; mulensinstrument.log_f_total_raw[2]: scale=0.0926; mulensinstrument.log_f_total_raw[3]: scale=0.0171; mulensinstrument.log_f_total_raw[4]: scale=0.00991; mulensinstrument.log_f_total_raw[5]: scale=0.00851; mulensinstrument.q_source_raw[0]: scale=0.000851; mulensinstrument.q_source_raw[1]: scale=0.000747; mulensinstrument.q_source_raw[2]: scale=0.00354; mulensinstrument.q_source_raw[3]: scale=0.00127; mulensinstrument.q_source_raw[4]: scale=0.00117; mulensinstrument.q_source_raw[5]: scale=0.000863; mulensinstrument.err_scale_raw[0]: scale=0.00376; mulensinstrument.err_scale_raw[1]: scale=0.00261; mulensinstrument.err_scale_raw[2]: scale=0.00262; mulensinstrument.err_scale_raw[3]: scale=0.00657; mulensinstrument.err_scale_raw[4]: scale=0.00396; mulensinstrument.err_scale_raw[5]: scale=0.00342
+PTDE init: MAP lp=2787.6, n_params=35, factor=3.00
+Generating ensemble start plots...
+PTDE-async: 6 rungs x 70 chains = 420 slots, 64 cores  T=[1.0, 2.7, 7.4, 20.2, 55.1, 150.0]
+PTDE-async gamma: 0.2845 -> 0.3479 (T=1 accept=0.299, target=0.20)
+PTDE-async gamma: 0.3479 -> 0.3949 (T=1 accept=0.258, target=0.20)
+PTDE-async gamma: 0.3949 -> 0.4324 (T=1 accept=0.240, target=0.20)
+PTDE-async gamma: 0.4324 -> 0.3946 (T=1 accept=0.167, target=0.20)
+PTDE-async gamma: 0.3946 -> 0.3497 (T=1 accept=0.157, target=0.20)
+PTDE-async gamma: 0.3497 -> 0.2346 (T=1 accept=0.090, target=0.20)
+PTDE-async gamma: 0.2346 -> 0.1782 (T=1 accept=0.115, target=0.20)
+PTDE-async gamma: 0.1782 -> 0.1560 (T=1 accept=0.153, target=0.20)
+PTDE-async gamma: 0.1560 -> 0.1452 (T=1 accept=0.173, target=0.20)
+PTDE-async gamma: 0.1452 -> 0.1420 (T=1 accept=0.191, target=0.20)
+PTDE-async: 231000 evals  draws=[min=0, mean=0, max=0]/10000  accept=[0.18, 0.21, 0.22, 0.25, 0.32, 0.37]  gamma=0.1420  swap=[0.35, 0.32, 0.11, 0.19, 0.10]
+PTDE-async gamma: 0.1420 -> 0.1377 (T=1 accept=0.188, target=0.20)
+PTDE-async gamma: 0.1377 -> 0.1456 (T=1 accept=0.224, target=0.20)
+PTDE-async gamma: 0.1456 -> 0.1472 (T=1 accept=0.205, target=0.20)
+PTDE-async gamma: 0.1472 -> 0.1443 (T=1 accept=0.192, target=0.20)
+PTDE-async gamma: 0.1443 -> 0.1370 (T=1 accept=0.180, target=0.20)
+PTDE-async gamma: 0.1370 -> 0.1339 (T=1 accept=0.191, target=0.20)
+PTDE-async gamma: 0.1339 -> 0.1256 (T=1 accept=0.176, target=0.20)
+PTDE-async: 462000 evals  draws=[min=0, mean=69, max=144]/10000  accept=[0.19, 0.23, 0.22, 0.26, 0.30, 0.37]  gamma=0.1256  swap=[0.20, 0.18, 0.06, 0.09, 0.05]
+PTDE-async gamma: 0.1256 -> 0.1205 (T=1 accept=0.184, target=0.20)
+PTDE-async convergence @ min 100 draws/chain: max_rhat=4.8459  min_ess=79.5
+PTDE-async convergence @ min 111 draws/chain: max_rhat=4.7006  min_ess=77.7
+PTDE-async convergence @ min 123 draws/chain: max_rhat=4.4834  min_ess=77.6
+PTDE-async convergence @ min 137 draws/chain: max_rhat=4.3084  min_ess=78.8
+PTDE-async convergence @ min 152 draws/chain: max_rhat=4.1812  min_ess=78.5
+PTDE-async convergence @ min 169 draws/chain: max_rhat=4.1464  min_ess=78.1
+PTDE-async convergence @ min 188 draws/chain: max_rhat=4.0501  min_ess=78.0
+PTDE-async convergence @ min 209 draws/chain: max_rhat=3.8231  min_ess=78.3
+PTDE-async convergence @ min 232 draws/chain: max_rhat=3.5410  min_ess=79.1
+PTDE-async convergence @ min 258 draws/chain: max_rhat=3.3687  min_ess=78.9
+PTDE-async convergence @ min 287 draws/chain: max_rhat=3.1531  min_ess=79.9
+PTDE-async convergence @ min 319 draws/chain: max_rhat=3.0290  min_ess=80.6
+PTDE-async convergence @ min 354 draws/chain: max_rhat=2.9643  min_ess=80.8
+PTDE-async convergence @ min 393 draws/chain: max_rhat=2.8857  min_ess=81.6
+PTDE-async convergence @ min 437 draws/chain: max_rhat=2.8246  min_ess=81.9
+PTDE-async: 693000 evals  draws=[min=466, mean=597, max=704]/10000  accept=[0.18, 0.22, 0.21, 0.25, 0.28, 0.35]  gamma=0.1205  swap=[0.14, 0.12, 0.04, 0.06, 0.03]
+PTDE-async convergence @ min 486 draws/chain: max_rhat=2.7029  min_ess=82.5
+PTDE-async convergence @ min 540 draws/chain: max_rhat=2.6096  min_ess=83.9
+PTDE-async convergence @ min 600 draws/chain: max_rhat=2.5187  min_ess=84.9
+PTDE-async convergence @ min 666 draws/chain: max_rhat=2.4756  min_ess=85.1
+PTDE-async convergence @ min 740 draws/chain: max_rhat=2.4392  min_ess=85.8
+PTDE-async convergence @ min 823 draws/chain: max_rhat=2.3350  min_ess=87.2
+PTDE-async convergence @ min 914 draws/chain: max_rhat=2.2773  min_ess=88.2
+PTDE-async: 924000 evals  draws=[min=951, mean=1131, max=1240]/10000  accept=[0.17, 0.21, 0.20, 0.24, 0.25, 0.32]  gamma=0.1205  swap=[0.11, 0.09, 0.03, 0.05, 0.03]
+PTDE-async convergence @ min 1015 draws/chain: max_rhat=2.2019  min_ess=89.7
+PTDE-async convergence @ min 1128 draws/chain: max_rhat=2.0887  min_ess=92.5
+PTDE-async convergence @ min 1254 draws/chain: max_rhat=2.0511  min_ess=93.3
+PTDE-async convergence @ min 1393 draws/chain: max_rhat=2.0482  min_ess=93.5
+PTDE-async: 1155000 evals  draws=[min=1464, mean=1675, max=1794]/10000  accept=[0.16, 0.19, 0.19, 0.22, 0.22, 0.29]  gamma=0.1205  swap=[0.08, 0.07, 0.02, 0.04, 0.02]
+PTDE-async convergence @ min 1548 draws/chain: max_rhat=1.9912  min_ess=95.2
+PTDE-async convergence @ min 1720 draws/chain: max_rhat=1.9361  min_ess=97.3
+PTDE-async convergence @ min 1911 draws/chain: max_rhat=1.9035  min_ess=98.2
+PTDE-async: 1386000 evals  draws=[min=1981, mean=2223, max=2368]/10000  accept=[0.15, 0.17, 0.17, 0.20, 0.20, 0.27]  gamma=0.1205  swap=[0.07, 0.06, 0.02, 0.03, 0.02]
+PTDE-async convergence @ min 2123 draws/chain: max_rhat=1.8681  min_ess=99.6
+PTDE-async convergence @ min 2359 draws/chain: max_rhat=1.8023  min_ess=103.1
+PTDE-async: 1617000 evals  draws=[min=2518, mean=2779, max=2936]/10000  accept=[0.14, 0.16, 0.16, 0.19, 0.19, 0.25]  gamma=0.1205  swap=[0.06, 0.05, 0.02, 0.03, 0.01]
+PTDE-async convergence @ min 2621 draws/chain: max_rhat=1.7826  min_ess=104.5
+PTDE-async convergence @ min 2912 draws/chain: max_rhat=1.7818  min_ess=104.7
+PTDE-async: 1848000 evals  draws=[min=3055, mean=3337, max=3507]/10000  accept=[0.13, 0.15, 0.15, 0.17, 0.17, 0.24]  gamma=0.1205  swap=[0.05, 0.05, 0.02, 0.02, 0.01]
+PTDE-async convergence @ min 3236 draws/chain: max_rhat=1.7611  min_ess=105.5
+PTDE-async: 2079000 evals  draws=[min=3560, mean=3889, max=4052]/10000  accept=[0.12, 0.14, 0.14, 0.16, 0.16, 0.23]  gamma=0.1205  swap=[0.05, 0.04, 0.01, 0.02, 0.01]
+PTDE-async convergence @ min 3595 draws/chain: max_rhat=1.7120  min_ess=108.6
+PTDE-async convergence @ min 3995 draws/chain: max_rhat=1.6957  min_ess=109.4
+PTDE-async: 2310000 evals  draws=[min=4076, mean=4446, max=4615]/10000  accept=[0.12, 0.13, 0.13, 0.15, 0.15, 0.22]  gamma=0.1205  swap=[0.04, 0.04, 0.01, 0.02, 0.01]
+PTDE-async convergence @ min 4439 draws/chain: max_rhat=1.6919  min_ess=109.6
+PTDE-async: 2541000 evals  draws=[min=4591, mean=5003, max=5199]/10000  accept=[0.11, 0.12, 0.13, 0.14, 0.15, 0.21]  gamma=0.1205  swap=[0.04, 0.04, 0.01, 0.02, 0.01]
+PTDE-async convergence @ min 4932 draws/chain: max_rhat=1.6660  min_ess=111.9
+PTDE-async: 2772000 evals  draws=[min=5121, mean=5566, max=5797]/10000  accept=[0.11, 0.11, 0.12, 0.13, 0.14, 0.21]  gamma=0.1205  swap=[0.04, 0.03, 0.01, 0.02, 0.01]
+PTDE-async convergence @ min 5480 draws/chain: max_rhat=1.6576  min_ess=113.2
+PTDE-async: 3003000 evals  draws=[min=5661, mean=6132, max=6380]/10000  accept=[0.10, 0.11, 0.11, 0.13, 0.13, 0.20]  gamma=0.1205  swap=[0.03, 0.03, 0.01, 0.01, 0.01]
+PTDE-async convergence @ min 6089 draws/chain: max_rhat=1.6294  min_ess=115.8
+PTDE-async: 3234000 evals  draws=[min=6209, mean=6696, max=6947]/10000  accept=[0.10, 0.10, 0.11, 0.12, 0.13, 0.20]  gamma=0.1205  swap=[0.03, 0.03, 0.01, 0.01, 0.01]
+PTDE-async convergence @ min 6765 draws/chain: max_rhat=1.5820  min_ess=119.7
+PTDE-async: 3465000 evals  draws=[min=6769, mean=7260, max=7507]/10000  accept=[0.09, 0.10, 0.10, 0.12, 0.12, 0.19]  gamma=0.1205  swap=[0.03, 0.03, 0.01, 0.01, 0.01]
+PTDE-async: 3696000 evals  draws=[min=7327, mean=7823, max=8081]/10000  accept=[0.09, 0.09, 0.10, 0.11, 0.12, 0.19]  gamma=0.1205  swap=[0.03, 0.02, 0.01, 0.01, 0.01]
+PTDE-async convergence @ min 7517 draws/chain: max_rhat=1.5535  min_ess=123.1
+PTDE-async: 3927000 evals  draws=[min=7892, mean=8390, max=8665]/10000  accept=[0.09, 0.09, 0.10, 0.11, 0.11, 0.19]  gamma=0.1205  swap=[0.03, 0.02, 0.01, 0.01, 0.01]
+PTDE-async convergence @ min 8352 draws/chain: max_rhat=1.5535  min_ess=123.1
+PTDE-async: 4158000 evals  draws=[min=8457, mean=8958, max=9231]/10000  accept=[0.08, 0.08, 0.09, 0.10, 0.11, 0.18]  gamma=0.1205  swap=[0.03, 0.02, 0.01, 0.01, 0.01]
+PTDE-async: 4389000 evals  draws=[min=9023, mean=9526, max=9821]/10000  accept=[0.08, 0.08, 0.09, 0.10, 0.11, 0.18]  gamma=0.1205  swap=[0.02, 0.02, 0.01, 0.01, 0.01]
+PTDE-async convergence @ min 9281 draws/chain: max_rhat=1.5518  min_ess=122.9
+PTDE-async: 4620000 evals  draws=[min=9582, mean=9966, max=10000]/10000  accept=[0.08, 0.08, 0.09, 0.09, 0.10, 0.18]  gamma=0.1205  swap=[0.02, 0.02, 0.01, 0.01, 0.01]
+[91mPTDE-async: logp call exceeded eval_timeout=10s at rung 5 chain 27 — rejecting this proposal.
+  physical params: {'star.logmass_raw': [1315.001331176666, 34.538938422199365], 'star.pm_ra_raw': [-38.460725508360156, -10.762510456487986], 'star.pm_dec_raw': [22.963582965728634, 1.616788892263667], 'star.distance_raw': [-4474.23809124938, -1244.5958775039066], 'star.rv_raw': [-9.860313604077522, -3.421005980967957], 'planet.mass_raw': [0.14672298111198828], 'lens.t_0_raw': [-139.29134701601092], 'lens.u_0_raw': [-56.20878963878027], 'lens.s_raw': [575.5768018432241], 'lens.xalpha_raw': [4827.735110662054], 'lens.yalpha_raw': [4154.78358661405], 'band.u1_raw': [41.33157584067613], 'mulensinstrument.log_f_total_raw': [-50.914524913128865, 46.29119842678081, 8.59880792035673, -2757.4397838709615, 157.7165824115042, -72.58339921109601], 'mulensinstrument.q_source_raw': [-4.813258959044145, -1.9328955762328603, -2.332841241147788, -4.512433641170759, 22.396844230598887, -3.506582831089686], 'mulensinstrument.err_scale_raw': [35.654507849938746, 33.67498235478392, 18.010359741376057, 59.32265262642564, 75.11809919039783, 37.48387316193911], 'star.logmass': [0.3783914962252819, 2.4621950352100264], 'star.pm_ra': [-136.30866291069833, -35.287529934736085], 'star.pm_dec': [65.89073942259711, 1.850366680053412], 'star.distance': [12.292601261419946, 3599.0002165728547], 'star.rv': [-986027.8097686172, -342100.449811697], 'planet.mass': [0.0058598210826141806], 'lens.t_0': [2458198.9330202523], 'lens.u_0': [-0.021983381784725253], 'lens.s': [9.609784723897707], 'lens.xalpha': [1.1310563214646123], 'lens.yalpha': [3.5699303979471892], 'band.u1': [0.9999999999999065], 'mulensinstrument.log_f_total': [-6.213870038106734, -6.183002333290872, -6.195181906176117, -7.041172643409411, -6.147232359779892, -6.22093668207458], 'mulensinstrument.q_source': [0.007882314659420043, 0.04054789345897349, 0.02761314793476337, 0.010149641734879741, 1.9995215195437372, 0.014391618959778536], 'mulensinstrument.err_scale': [35.3543906305653, 29.005225381155842, 6.055904129940726, 376.8699579609065, 1826.208183777716, 42.45108129137746]}
+  raw params: {'star.logmass_raw': [1315.001331176666, 34.538938422199365], 'star.pm_ra_raw': [-38.460725508360156, -10.762510456487986], 'star.pm_dec_raw': [22.963582965728634, 1.616788892263667], 'star.distance_raw': [-4474.23809124938, -1244.5958775039066], 'star.rv_raw': [-9.860313604077522, -3.421005980967957], 'planet.mass_raw': [0.14672298111198828], 'lens.t_0_raw': [-139.29134701601092], 'lens.u_0_raw': [-56.20878963878027], 'lens.s_raw': [575.5768018432241], 'lens.xalpha_raw': [4827.735110662054], 'lens.yalpha_raw': [4154.78358661405], 'band.u1_raw': [41.33157584067613], 'mulensinstrument.log_f_total_raw': [-50.914524913128865, 46.29119842678081, 8.59880792035673, -2757.4397838709615, 157.7165824115042, -72.58339921109601], 'mulensinstrument.q_source_raw': [-4.813258959044145, -1.9328955762328603, -2.332841241147788, -4.512433641170759, 22.396844230598887, -3.506582831089686], 'mulensinstrument.err_scale_raw': [35.654507849938746, 33.67498235478392, 18.010359741376057, 59.32265262642564, 75.11809919039783, 37.48387316193911]}[0m
+[93mPTDE-async: recycling worker pool (1 timeout(s))[0m

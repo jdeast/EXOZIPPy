@@ -375,3 +375,247 @@ def test_doc_validate_job_lifecycle(client, rvonly_project):
 
     assert status in ("done", "error")
     assert isinstance(diagnostics, list)
+
+    # A job read to completion is retired, so the dict does not grow one entry
+    # per edit for the life of the server (review 6.12.1).
+    assert client.get(f"/api/doc/validate/{job_id}").status_code == 404
+
+
+def test_abandoned_validate_jobs_are_bounded(
+    client, rvonly_project, monkeypatch
+):
+    """
+    Given many validations started and never polled to completion,
+    When more are requested,
+    Then the oldest are evicted rather than retained forever.
+
+    Pop-on-terminal-read retires the jobs the frontend follows to completion;
+    this covers the ones it abandons (a tab unmounted, a poll loop that hit its
+    own deadline first), which nothing else would ever remove -- and each holds
+    a full diagnostics list.  The real validator is stubbed out: the point is
+    the bookkeeping, and 30 relaxation-engine solves are not.
+    """
+    import exozippy.solve_api
+    from exozippy.gui import app as gui_app
+
+    monkeypatch.setattr(exozippy.solve_api, "validate", lambda *a, **k: [])
+    monkeypatch.setattr(gui_app, "_MAX_VALIDATE_JOBS", 4)
+
+    client.post(
+        "/api/doc/open",
+        json={"config_path": str(rvonly_project / "kelt4_rvonly.yaml")},
+    )
+    first = client.post("/api/doc/validate").json()["job_id"]
+    for _ in range(6):
+        assert client.post("/api/doc/validate").status_code == 200
+
+    assert client.get(f"/api/doc/validate/{first}").status_code == 404
+
+
+# --- classification of edge-case YAML (review 1.12.6) -------------------------
+
+
+def test_empty_and_comment_only_yaml_are_selectable_as_configs(tmp_path):
+    """
+    Given a freshly created (empty or comment-only) config file,
+    When the project is listed,
+    Then it is classified as a config, not dumped in 'other'.
+
+    Both parse to ``None``, so the key-based rules had nothing to match and the
+    file landed in 'other' -- where the config picker cannot see it at all,
+    which is exactly when a user needs to select it.
+    """
+    from exozippy.gui.app import open_project
+
+    (tmp_path / "fresh.yaml").write_text("")
+    (tmp_path / "sketch.yaml").write_text("# nothing here yet\n")
+    (tmp_path / "blank.params.yaml").write_text("# no overrides yet\n")
+
+    result = open_project(str(tmp_path))
+
+    assert sorted(f["name"] for f in result["configs"]) == [
+        "fresh.yaml",
+        "sketch.yaml",
+    ]
+    assert [f["name"] for f in result["params"]] == ["blank.params.yaml"]
+
+
+def test_a_transient_introspection_failure_is_not_cached_forever(monkeypatch):
+    """
+    Given one failing call into the introspection layer,
+    When it later succeeds,
+    Then the real key set is used.
+
+    An ``@lru_cache`` froze the four-key literal fallback for the whole process
+    after a single transient import failure, and every config in every project
+    then classified as 'other' with no way back short of a restart.
+    """
+    from exozippy.gui import app as gui_app
+
+    monkeypatch.setattr(gui_app, "_CONFIG_TOP_KEYS", None)
+    real_import = __import__
+
+    def boom(name, *args, **kwargs):
+        if name.endswith("introspect"):
+            raise ImportError("transient")
+        return real_import(name, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as failing:
+        failing.setattr("builtins.__import__", boom)
+        degraded = gui_app._config_top_keys()
+
+    assert "star" not in degraded  # the literal fallback was used ...
+    assert gui_app._CONFIG_TOP_KEYS is None  # ... and NOT remembered
+    assert "star" in gui_app._config_top_keys()  # the retry recovers
+
+
+def test_a_huge_yaml_is_classified_without_being_parsed(tmp_path, monkeypatch):
+    """
+    Given a .yaml far larger than any config,
+    When the project is listed,
+    Then it is classified by name rather than parsed.
+    """
+    from exozippy.gui import app as gui_app
+
+    monkeypatch.setattr(gui_app, "_YAML_PARSE_MAX_BYTES", 64)
+    monkeypatch.setattr(gui_app, "_CLASSIFY_CACHE", {})
+    huge = tmp_path / "huge.params.yaml"
+    huge.write_text("# " + "x" * 500 + "\n")
+
+    result = gui_app.open_project(str(tmp_path))
+
+    assert [f["name"] for f in result["params"]] == ["huge.params.yaml"]
+
+
+# --- file browser confinement (review 2.12.2 / 2.12.6) ------------------------
+
+
+def test_files_browser_refuses_a_directory_outside_the_project(tmp_path):
+    """
+    Given a server whose open project is one directory,
+    When /api/files is asked for a directory outside it,
+    Then it is refused.
+
+    The root used to gate only the parent LINK, so ``GET /api/files?dir=/etc``
+    happily listed /etc and the documented sandbox was cosmetic.
+    """
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from exozippy.gui.app import create_app
+
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("x")
+
+    client = TestClient(create_app(project_dir=str(project)))
+
+    resp = client.get("/api/files", params={"dir": str(outside)})
+
+    assert resp.status_code == 400
+    assert "outside" in resp.json()["error"]
+
+
+def test_files_browser_root_follows_the_open_project(tmp_path):
+    """
+    Given a server launched on one project that then opens another,
+    When /api/files lists the new project,
+    Then it is allowed (and the old one is not).
+
+    ``root`` was a closure over the LAUNCH project that /api/project/open never
+    updated, so after a switch the browser could not navigate above the config
+    directory of the project actually open.
+    """
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from exozippy.gui.app import create_app
+
+    first = tmp_path / "first"
+    first.mkdir()
+    second = tmp_path / "second"
+    (second / "data").mkdir(parents=True)
+
+    client = TestClient(create_app(project_dir=str(first)))
+    assert (
+        client.get("/api/files", params={"dir": str(second)}).status_code
+        == 400
+    )
+
+    client.post("/api/project/open", json={"path": str(second)})
+
+    assert (
+        client.get("/api/files", params={"dir": str(second)}).status_code
+        == 200
+    )
+    assert (
+        client.get("/api/files", params={"dir": str(first)}).status_code == 400
+    )
+
+
+def test_browse_reports_an_unreadable_directory_as_a_client_error(
+    client, tmp_path
+):
+    """
+    Given a directory the server cannot read,
+    When /api/browse lists it,
+    Then it answers 400 rather than raising a bare 500.
+    """
+    import os
+
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o000)
+    try:
+        if os.access(locked, os.R_OK):  # running as root: nothing to test
+            pytest.skip("cannot make a directory unreadable as this user")
+        resp = client.get("/api/browse", params={"dir": str(locked)})
+        assert resp.status_code == 400
+        assert "error" in resp.json()
+    finally:
+        locked.chmod(0o755)
+
+
+# --- document command error mapping (review 2.12.4) ---------------------------
+
+
+def test_a_bad_path_in_a_command_is_a_400_not_a_500(client, rvonly_project):
+    """
+    Given a config-key path that indexes past a list or traverses a scalar,
+    When the command runs,
+    Then the server answers 400 and the document is unchanged.
+
+    Both raise IndexError/TypeError out of ``_set_nested``; they escaped as
+    500s, so the UI showed a generic failure for an edit the command's own
+    snapshot restore had already cleanly rolled back.
+    """
+    config_path = str(rvonly_project / "kelt4_rvonly.yaml")
+    client.post("/api/doc/open", json={"config_path": config_path})
+    before = client.get("/api/doc").json()
+
+    for path in ("star.99.teff", "prefix.nested.key"):
+        resp = client.post(
+            "/api/doc/command",
+            json={
+                "op": "set_config_key",
+                "args": {"path": path, "value": 1},
+            },
+        )
+        assert resp.status_code == 400, path
+        assert "error" in resp.json()
+
+    assert client.get("/api/doc").json()["config"] == before["config"]
+
+
+def test_the_unwired_autosave_endpoint_is_gone(client):
+    """
+    Given the removed POST /api/doc/autosave,
+    When it is called,
+    Then it does not exist.
+
+    It had no api.ts client, no test and no entry in gui.md's known-unwired
+    list; server-side autosave is invoked directly by the project-switch path.
+    """
+    assert client.post("/api/doc/autosave").status_code in (404, 405)

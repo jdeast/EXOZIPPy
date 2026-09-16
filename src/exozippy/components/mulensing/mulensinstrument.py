@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 
 import numpy as np
 
@@ -11,11 +12,13 @@ from scipy.optimize import nnls
 
 from exozippy.compat import patch_mulensmodel_method_order
 from exozippy.components.instrument import Instrument
-from exozippy.config import RANK_DERIVED_DATA
+from exozippy.config import PRECEDENCE_DERIVED_DATA
 from exozippy.ephemeris import get_observer_position
 from exozippy.outputs.prose import get_collector
+from exozippy.skyframe import observer_sky_offset
 
-from . import mmexofast_support
+from ..parameterization import pin_unselected
+from . import mmexofast_support, peakfind
 from .physics import (
     RHO_FLOOR,
     S_FLOOR,
@@ -82,6 +85,10 @@ class MulensInstrument(Instrument):
         super().__init__(config, config_manager)
         self.label = "Microlensing Data"
         self.total_detrend_cols = 0
+        # _finite_source_limb_darkening is called from both build_likelihood
+        # and compile_plotters; the notice belongs to the topology, not to the
+        # call, so it is emitted once.
+        self._warned_multiband_ld = False
 
     @property
     def prefix(self):
@@ -138,13 +145,13 @@ class MulensInstrument(Instrument):
                 "doc": "Name of the band: block associated with this light curve.",
             },
             {
-                "key": "sed_constrain_blend",
+                "key": "sed_constrains_blend",
                 "kind": "option",
                 "accepts": [True, False],
                 "required": False,
                 "doc": (
                     "When an SED is present, also tie f_blend to the "
-                    "SED-predicted flux. Default false."
+                    "SED-predicted flux. Default false. A tie is a physics LINK, not a one-way assignment: information flows toward whichever side is less constrained elsewhere (components.md, 'Config flag vocabulary')."
                 ),
             },
             {
@@ -154,7 +161,7 @@ class MulensInstrument(Instrument):
                 "required": False,
                 "doc": (
                     "Gaussian width (mag) of the SED f_blend constraint when "
-                    "sed_constrain_blend is set. Default 0.2."
+                    "sed_constrains_blend is set. Default 0.2."
                 ),
             },
             {
@@ -205,27 +212,30 @@ class MulensInstrument(Instrument):
         return flagged[0]
 
     def load_data(self, system):
-        """Stage 1a: Load photometry and pre-calculate observer positions.
+        """Stage 1: Load photometry and pre-calculate observer positions.
 
-        Single-event assumption (enforced by Lens.__init__): index 0 is the
-        only event, so the event-0 source, t0_par, and magnification are used
-        throughout.
+        Single-event assumption (enforced by MulensEvent.__init__): there is
+        one mulensevent instance, so its t0_par and magnification dispatch
+        are used throughout.
         """
         self.fs_init = []
         self.q_source_init = []
         self.q_flux_init = []  # per-instrument f_s2/f_s1 (binary source)
         blocks = self._concat_blocks()
 
-        self._n_sources = int(system.lens.n_sources)
+        # n_elements, not star_map: this is stage 1, and the source
+        # component's maps are built in stage 2 (component order within a
+        # stage is the user's config key order, so they may not exist yet).
+        self._n_sources = int(system.source.n_elements)
 
         # MMEXOFAST integration (masks + error factors + auto seeds) -- must
         # run before the file loop so excluded points never enter the arrays.
         self._resolve_mmexofast(system)
 
         # Source RA/Dec (degrees from resolve → radians for projection math).
-        # Stashed for Lens._earth_vperp_en: the mu_helio -> mu_geo conversion
-        # must project Earth's velocity with the same (ra, dec) the Skowron
-        # deltas are projected with.
+        # Stashed for MulensEvent._earth_vperp_en: the mu_helio -> mu_geo
+        # conversion must project Earth's velocity with the same (ra, dec)
+        # the Skowron deltas are projected with.
         ra_deg, dec_deg = self._resolve_source_radec_deg(system)
         ra_rad = ra_deg * np.pi / 180.0
         dec_rad = dec_deg * np.pi / 180.0
@@ -262,19 +272,30 @@ class MulensInstrument(Instrument):
 
             per_file.append((t, f, e, df))
 
+        # THE BUILT-IN PEAK FINDER (8.4.9).  Runs HERE, after pass 1, rather
+        # than beside the MMEXOFAST hook above, and the difference matters:
+        # MMEXOFAST has to run before the photometry is read because it
+        # supplies the bad-data MASK, while this needs no mask and so gets
+        # to see the data as the model will -- masked, detrended, and
+        # already converted to flux.  It also has to land BEFORE
+        # `_estimate_flux_components` in pass 2, which reads the seed t_0 /
+        # u_0 / t_E to decompose each band's flux and silently falls back to
+        # median-flux / q_source = 0.95 without them.
+        self._peak_find_seeds(system, per_file)
+
         # Geocentric reference (Skowron+2011 convention): Earth's position and
         # velocity at t_0_par define the inertial frame.  All observer positions
         # are stored as deviations from this linear Earth trajectory so that
-        # t_0/u_0 remain geocentric parameters.  Re-resolved here rather than
-        # taken from Lens.__init__: MMEXOFAST seeds arrive in stage 1a (via
-        # _resolve_mmexofast above), after the Lens snapshotted user_params,
-        # and a reference epoch far from the data makes the linear Earth
-        # extrapolation diverge (O(100) AU after ~20 yr), shearing tau/u by
-        # O(deviation x pi_E).
+        # t_0/u_0 remain geocentric parameters.  Re-resolved here rather
+        # than taken from MulensEvent.__init__: MMEXOFAST seeds arrive in
+        # stage 1 (via _resolve_mmexofast above), after MulensEvent
+        # snapshotted user_params, and a reference epoch far from the data
+        # makes the linear Earth extrapolation diverge (O(100) AU after
+        # ~20 yr), shearing tau/u by O(deviation x pi_E).
         self._t0_par = self._resolve_t0_par_final(
             system, np.concatenate([f[0] for f in per_file])
         )
-        system.lens.t0_par[0] = self._t0_par
+        system.mulensevent.t0_par[0] = self._t0_par
         self._earth_pos_ref = self.get_observer_position(
             np.array([self._t0_par]), "earth"
         )[0]  # (3,) AU
@@ -287,7 +308,8 @@ class MulensInstrument(Instrument):
         )[0]
         self._earth_vel_ref = (_ep - _em) / (2.0 * _dt)  # AU/day
 
-        # Median absolute position per instrument (used by Lens to detect parallax)
+        # Median absolute position per instrument (used by MulensEvent to
+        # detect satellite parallax when sizing the logmass scale)
         self.inst_ref_pos = []
 
         # Pass 2: observer positions, flux bootstraps, and sanity checks.
@@ -350,24 +372,24 @@ class MulensInstrument(Instrument):
     def _resolve_t0_par_final(self, system, all_times):
         """Final t0_par: the reference epoch anchoring the Skowron+2011 frame.
 
-        Lens.__init__ resolves t0_par from the lens config and user_params
-        only; MMEXOFAST seeds arrive later (stage 1a, add_seed_hints), so
+        MulensEvent.__init__ resolves t0_par from its config and
+        user_params only; MMEXOFAST seeds arrive later (stage 1), so
         the automated workflow -- whose params file deliberately omits the
         microlensing start values -- used to fall through to the 2450000.0
         default, parking the reference epoch decades before the data.
 
-        Priority: explicit lens ``t0_par`` > user ``lens.0.t_0`` initval >
-        MMEXOFAST seed t_0 > median data time.  Any of these keeps the
-        linear Earth extrapolation within the season it is a good
+        Priority: explicit mulensevent ``t0_par`` > user ``source.0.t_0``
+        initval > MMEXOFAST seed t_0 > median data time.  Any of these
+        keeps the linear Earth extrapolation within the season it is a good
         approximation for.
         """
-        lens_config = system.lens.config[0]
-        if "t0_par" in lens_config:
-            return float(lens_config["t0_par"])
+        event_config = system.mulensevent.config[0]
+        if "t0_par" in event_config:
+            return float(event_config["t0_par"])
         cm = self.config_manager
-        val = _raw_initval(cm.user_params.get("lens.0.t_0"))
+        val = _raw_initval(cm.user_params.get("source.0.t_0"))
         if val is None:
-            val = cm.seed_start_value("lens.0.t_0")
+            val = cm.seed_start_value("source.0.t_0")
         if val is not None:
             return float(val)
         t_med = float(np.median(all_times))
@@ -402,11 +424,11 @@ class MulensInstrument(Instrument):
     def _resolve_mmexofast(self, system):
         """Stage-1a half of the MMEXOFAST integration.
 
-        Three modes, keyed off the lens block's ``mmexofast`` entry:
+        Three modes, keyed off the mulensevent block's ``mmexofast`` entry:
 
         - explicit file path: the JSON's bad-data mask (``excluded_points``)
           and error factors (``errfacs``) are applied to this component's
-          files; the seed hints are pushed by Lens at stage 2 as before. An
+          files; the seed hints are pushed by MulensEvent at stage 3 as before. An
           absent file warns and skips; an unparseable one raises (see
           ``mmexofast_support.load_json``) rather than dropping the mask and
           the error factors along with the seeds.
@@ -417,37 +439,49 @@ class MulensInstrument(Instrument):
           masks and error factors are all consumed here.
         - ``false``: fully opts out.
 
-        This lives on the instrument rather than Lens because the mask must
+        This lives on the instrument rather than MulensEvent because the mask must
         exist before the photometry is read (load_data), and only this
-        component knows its files; Lens owns the stage-2 seed path for
+        component knows its files; MulensEvent owns the stage-3 seed path for
         explicit files, and both share mmexofast_support for the translation.
         """
-        lens = getattr(system, "lens", None)
-        if lens is None:
+        event = getattr(system, "mulensevent", None)
+        if event is None:
             return
-        spec = lens.config[0].get("mmexofast") if lens.config else None
+        spec = event.config[0].get("mmexofast") if event.config else None
         if spec is False:
             return
-        is_binary = lens.n_companions >= 1
-        want_rho = bool(any(lens.finite_source))
+        # Whether THIS call ends up pushing seeds.  The peak finder has to
+        # know, because `ConfigManager.add_seed_hints` ASSIGNS
+        # `seed_hint_sets` (config.py:1299) instead of appending -- so a
+        # second caller silently REPLACES the first, and MMEXOFAST's K seed
+        # sets, including its binary-lens s/q/alpha, would be thrown away
+        # for one point-lens seed.  `user_hints_sufficient` cannot stand in
+        # for this test: it inspects user_params and probe_derivable, and
+        # seed hints appear in NEITHER, so it stays False even after a
+        # successful MMEXOFAST push.
+        self._mmexofast_seeded = False
+        is_binary = event.n_companions >= 1
+        want_rho = bool(event.finite_source)
 
         if isinstance(spec, str) and spec != "auto":
             # Explicit JSON: masks + error factors, and the seed hints too.
-            # Lens re-pushes the same seeds at stage 2 (harmless, identical
+            # MulensEvent re-pushes the same seeds at stage 3 (harmless, identical
             # content); pushing them HERE as well makes them visible to this
             # component's flux bootstrap (_estimate_flux_components), which
-            # runs later in this same load_data call -- stage 2 would be too
+            # runs later in this same load_data call -- stage 3 would be too
             # late and the per-band flux decomposition would silently fall
             # back to median-flux / q_source=0.95.
             self._reject_time_spec_with_mmexofast(spec)
             data = mmexofast_support.load_json(spec)
             if data is not None:
-                mmexofast_support.push_seed_hints(
-                    data,
-                    self.config_manager,
-                    want_rho=want_rho,
-                    is_binary=is_binary,
-                    source=spec,
+                self._mmexofast_seeded = bool(
+                    mmexofast_support.push_seed_hints(
+                        data,
+                        self.config_manager,
+                        want_rho=want_rho,
+                        is_binary=is_binary,
+                        source=spec,
+                    )
                 )
         else:
             if spec != "auto" and mmexofast_support.user_hints_sufficient(
@@ -457,7 +491,7 @@ class MulensInstrument(Instrument):
             self._reject_time_spec_with_mmexofast(spec)
             prefix = system.config.get("prefix", "fitresults/planet")
             json_path = f"{prefix}_mmexofast.json"
-            options = dict(lens.config[0].get("mmexofast_options") or {})
+            options = dict(event.config[0].get("mmexofast_options") or {})
             data = mmexofast_support.run_or_load(
                 json_path,
                 self.files,
@@ -466,12 +500,14 @@ class MulensInstrument(Instrument):
                 options=options,
             )
             if data is not None:
-                mmexofast_support.push_seed_hints(
-                    data,
-                    self.config_manager,
-                    want_rho=want_rho,
-                    is_binary=is_binary,
-                    source=json_path,
+                self._mmexofast_seeded = bool(
+                    mmexofast_support.push_seed_hints(
+                        data,
+                        self.config_manager,
+                        want_rho=want_rho,
+                        is_binary=is_binary,
+                        source=json_path,
+                    )
                 )
         if data is None:
             return
@@ -496,6 +532,135 @@ class MulensInstrument(Instrument):
             rank=30,
         )
 
+    def _peak_find_seeds(self, system, per_file):
+        """Seed t_0/u_0/t_E with the built-in PSPL fit when nothing else did.
+
+        STRICTLY A FALLBACK, by default.  `peak_find` on the mulensevent
+        block takes:
+
+          - ``auto`` (default): run only when the microlensing observables
+            are still unseeded at this point -- i.e. the user named none, no
+            explicit MMEXOFAST JSON was given, and the automatic MMEXOFAST
+            path either opted out (``mmexofast: false``) or produced nothing
+            usable.  Those cases previously started t_0/u_0/t_E at
+            ``defaults.yaml``, which for a real event is a start no sampler
+            recovers from, so a fallback here can only help and cannot
+            change any fit that was already seeded.
+          - ``true``: run REGARDLESS, replacing whatever seeded the
+            observables that ranks no higher than derived-from-data.  This
+            is the mmexofast-free mode and the A/B handle for comparing the
+            two seeders on one event.
+          - ``false``: never run.
+
+        Failure is not fatal.  A seeder that raises should leave the fit in
+        exactly the state it would have been in without this module, which
+        is why the search is wrapped -- a start value moves no posterior,
+        and killing a run over one is the wrong trade.
+        """
+        event = getattr(system, "mulensevent", None)
+        if event is None or not event.config:
+            return
+        spec = event.config[0].get("peak_find", "auto")
+        if spec is False:
+            return
+        forced = spec is True
+
+        # SEEDS ALREADY EXIST -> DO NOT TOUCH THEM.  See the note in
+        # _resolve_mmexofast: add_seed_hints overwrites, so running here
+        # after a successful MMEXOFAST push would discard every solution it
+        # found and replace them with one point-lens seed.  `forced` still
+        # overrides, because replacing MMEXOFAST's seeds on purpose is the
+        # entire point of the A/B mode -- but it says so.
+        if getattr(self, "_mmexofast_seeded", False):
+            if not forced:
+                return
+            logger.warning(
+                f"[{self.prefix}] peak_find: true REPLACES the MMEXOFAST "
+                f"seeds already loaded for this fit -- add_seed_hints "
+                f"overwrites rather than appends, so its multi-seed "
+                f"solutions (and any s/q/alpha) are discarded."
+            )
+
+        # The seed paths are the POST-SPLIT spellings (`source.0.t_0`), the
+        # same ones push_seed_hints uses, so a config with no `source:`
+        # block cannot take them: _translate_and_scale resolves the index
+        # and then strict naming refuses the prefix outright.  MMEXOFAST
+        # never trips this because it only runs on configs that named
+        # nothing, but this used to, and the failure was a hard refusal
+        # mid-build rather than a skipped seed.  tests/test_seed_quality.py
+        # reaches it because its harness picks whichever example YAML glob
+        # returns first, which on the microlensing examples is often a
+        # pre-split variant.
+        if getattr(system, "source", None) is None:
+            logger.debug(
+                f"[{self.prefix}] peak finder: no 'source' component in "
+                f"this configuration, so there is nothing to seed."
+            )
+            return
+
+        # Gate on t_0 ALONE, not on the full observable set -- see
+        # peakfind.t_0_is_already_available for why user_hints_sufficient is
+        # the wrong question here (it treats a t_E legitimately derived from
+        # the galactic model's kinematics as "unseeded" and lets the finder
+        # override it).
+        if not forced and peakfind.t_0_is_already_available(
+            self.config_manager
+        ):
+            return
+
+        curves = []
+        for t, f, e, _df in per_file:
+            ok = np.isfinite(t) & np.isfinite(f) & np.isfinite(e) & (e > 0)
+            if ok.sum() >= 4:
+                curves.append((t[ok], f[ok], 1.0 / e[ok] ** 2))
+        if not curves:
+            logger.warning(
+                f"[{self.prefix}] peak finder: no usable epochs; "
+                f"t_0/u_0/t_E keep their defaults."
+            )
+            return
+
+        # Hand the search this component's OWN magnification so the seed is
+        # built with the same u_0 floor the likelihood uses.  Parallax is
+        # held at zero (delta_e = delta_n = 0), matching run_or_load's
+        # no_parallax default: a PSPL seed cannot resolve the trajectory
+        # asymmetry, so it should not claim to.
+        zeros = {}
+
+        def mag_fn(t, t_0, u_0, t_E):
+            d = zeros.get(len(t))
+            if d is None:
+                d = np.zeros_like(t)
+                zeros[len(t)] = d
+            return self._pspl_magnification(t, d, d, t_0, u_0, t_E, 0.0, 0.0)
+
+        try:
+            seed = peakfind.find_pspl_seed(curves, mag_fn=mag_fn)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"[{self.prefix}] peak finder failed "
+                f"({type(exc).__name__}: {exc}); t_0/u_0/t_E keep their "
+                f"defaults."
+            )
+            return
+        if seed is None:
+            logger.warning(
+                f"[{self.prefix}] peak finder found no PSPL solution; "
+                f"t_0/u_0/t_E keep their defaults."
+            )
+            return
+        peakfind.push_peak_find_hints(
+            seed, self.config_manager, source=self.prefix
+        )
+        get_collector(system).add(
+            "Starting values for the microlensing trajectory "
+            "($t_0$, $u_0$, $t_{\\rm E}$) were derived from a point-lens "
+            "point-source fit to the light curves.",
+            section="microlensing",
+            key=f"{self.prefix}.peakfind",
+            rank=30,
+        )
+
     def _resolve_source_radec_deg(self, system):
         """Source star's sky position in degrees.
 
@@ -504,7 +669,9 @@ class MulensInstrument(Instrument):
         coincident by construction, so params.yaml only needs to state the
         target coordinates once, on the lens.
         """
-        source_ndx = int(system.lens.source_map[0])
+        # bodies, not star_map: called from load_data (stage 1), before the
+        # source component's build_maps has necessarily run.
+        source_ndx = int(system.source.bodies[0][1])
         n_stars = system.star.n_elements
         ra_all = self.config_manager.resolve("star", "ra", shape=(n_stars,))[
             "initval"
@@ -526,7 +693,7 @@ class MulensInstrument(Instrument):
             primary_lens_idx = next(
                 (
                     idx
-                    for (ctype, idx) in system.lens.lens_bodies[0]
+                    for (ctype, idx) in system.lens.bodies
                     if ctype == "star"
                 ),
                 None,
@@ -596,22 +763,16 @@ class MulensInstrument(Instrument):
                 val = cm.seed_start_value(key)
             return default if val is None else val
 
-        t0 = _get("lens.0.t_0")
-        u0 = _get("lens.0.u_0")
-        tE = _get("lens.0.t_E")
+        t0 = _get("source.0.t_0")
+        u0 = _get("source.0.u_0")
+        tE = _get("mulensevent.0.t_E")
         if t0 is None or u0 is None:
             return
 
-        pi_E_N = _get("lens.0.pi_E_N", 0.0)
-        pi_E_E = _get("lens.0.pi_E_E", 0.0)
+        pi_E_N = _get("mulensevent.0.pi_E_N", 0.0)
+        pi_E_E = _get("mulensevent.0.pi_E_E", 0.0)
 
-        x, y, z = xyz_delta[:, 0], xyz_delta[:, 1], xyz_delta[:, 2]
-        delta_e = -x * np.sin(ra_rad) + y * np.cos(ra_rad)
-        delta_n = (
-            -x * np.cos(ra_rad) * np.sin(dec_rad)
-            - y * np.sin(ra_rad) * np.sin(dec_rad)
-            + z * np.cos(dec_rad)
-        )
+        delta_e, delta_n = observer_sky_offset(xyz_delta, ra_rad, dec_rad)
         A_traj = self._pspl_magnification(
             t, delta_e, delta_n, t0, u0, tE, pi_E_N, pi_E_E
         )
@@ -687,14 +848,17 @@ class MulensInstrument(Instrument):
         MulensModel fails — the caller then falls back to the PSPL columns.
         Parallax is intentionally ignored (flux scales only).
         """
-        s_val = _get("lens.0.s")
+        # The companion geometry is LENS ELEMENT 1 (element 0 is the masked
+        # primary; a lens.0.* read here would silently see nothing and drop
+        # every event to the degenerate PSPL columns).
+        s_val = _get("lens.1.s")
         if s_val is None:
             # MMEXOFAST seeds carry log_s (the sampled coordinate), not s.
-            log_s = _get("lens.0.log_s")
+            log_s = _get("lens.1.log_s")
             if log_s is not None:
                 s_val = 10.0 ** float(log_s)
-        q_val = _get("lens.0.q")
-        alpha = _get("lens.0.alpha")
+        q_val = _get("lens.1.q")
+        alpha = _get("lens.1.alpha")
         if s_val is None or q_val is None or alpha is None:
             return None
 
@@ -712,9 +876,11 @@ class MulensInstrument(Instrument):
 
             cols = []
             for j in range(n_src):
-                t0 = _get(f"lens.{j}.t_0")
-                u0 = _get(f"lens.{j}.u_0")
-                tE = _get(f"lens.{j}.t_E", _get("lens.0.t_E"))
+                t0 = _get(f"source.{j}.t_0")
+                u0 = _get(f"source.{j}.u_0")
+                # ONE event t_E: the per-source fallback dance dissolved
+                # with the split (design 5.2).
+                tE = _get("mulensevent.0.t_E")
                 if t0 is None or u0 is None or tE is None:
                     return None
                 params = {
@@ -725,10 +891,10 @@ class MulensInstrument(Instrument):
                     "u_0": floor_u_0_value(u0),
                     "t_E": max(float(tE), T_E_FLOOR),
                     "s": max(float(s_val), S_FLOOR),
-                    "q": clip_q_value(q_val, "lens.0.q (flux bootstrap)"),
+                    "q": clip_q_value(q_val, "lens.1.q (flux bootstrap)"),
                     "alpha": float(alpha),
                 }
-                rho = _get(f"lens.{j}.rho")
+                rho = _get(f"source.{j}.rho")
                 if rho is not None:
                     params["rho"] = max(float(rho), RHO_FLOOR)
                 model = mm.Model(params)
@@ -775,12 +941,14 @@ class MulensInstrument(Instrument):
 
         With N sources the decomposition solves the linear model
         F(t) = Σ_j f_s,j · A_j(t) + f_b via NNLS, where A_j is the PSPL
-        magnification along source j's trajectory (lens.<j>.t_0/u_0/t_E).
+        magnification along source j's trajectory (source.<j>.t_0/u_0, the
+        shared mulensevent t_E).
         The binary-lens perturbation is irrelevant here — we only need flux
         scales, not a precise model.
 
         If the user has specified f_source and/or f_blend in their params file,
-        those values are respected (they are TOTALS over sources):
+        those values are respected (they are TOTALS over sources), for any
+        number of sources:
           - both given  → skip estimation entirely, derive q from the ratio
           - f_source only → fix it and solve for f_blend via median residuals
           - f_blend only  → fix it and solve for f_source via NNLS
@@ -814,32 +982,49 @@ class MulensInstrument(Instrument):
         q_flux_user = _get_flux("q_flux")
         q_flux_fallback = q_flux_user if q_flux_user is not None else 1.0
 
-        t0 = _get("lens.0.t_0")
-        u0 = _get("lens.0.u_0")
-        tE = _get("lens.0.t_E")
-        pi_E_N = _get("lens.0.pi_E_N", 0.0)
-        pi_E_E = _get("lens.0.pi_E_E", 0.0)
+        t0 = _get("source.0.t_0")
+        u0 = _get("source.0.u_0")
+        tE = _get("mulensevent.0.t_E")
+        pi_E_N = _get("mulensevent.0.pi_E_N", 0.0)
+        pi_E_E = _get("mulensevent.0.pi_E_E", 0.0)
 
         f_source_user = _get_flux("f_source")
         f_blend_user = _get_flux("f_blend")
 
         if f_source_user is not None and f_blend_user is not None:
             f_total = f_source_user + f_blend_user
-            q_source = float(
-                np.clip(f_source_user / max(f_total, 1e-30), 0.05, 0.95)
-            )
+            if not (f_total > 0.0) or not np.isfinite(f_total):
+                # The one branch that returned the user's numbers unchecked.
+                # f_total is the light curve's BASELINE FLUX SCALE, and every
+                # consumer needs it strictly positive: log_f_total takes its
+                # log10 (NaN, which resurfaces much later as the stage-6
+                # missing-start error naming log_f_total rather than the two
+                # entries that caused it), and _scale_flux_amplitudes
+                # multiplies it into per-light-curve upper bounds (negative
+                # bounds).  A negative blend is legitimate on its own -- that
+                # is difference imaging -- but a negative TOTAL is a statement
+                # that the star is not there.  Fall back to the data, loudly,
+                # naming both entries (review 2.6.3).
+                logger.warning(
+                    f"{self.prefix}.{inst_idx}: f_source = {f_source_user!r} "
+                    f"and f_blend = {f_blend_user!r} sum to a baseline flux of "
+                    f"{f_total!r}, which is not positive.  Using the data's own "
+                    "baseline instead for the flux scale; fix the two entries "
+                    "if you meant them (a negative BLEND is fine, a negative "
+                    "total is not)."
+                )
+                return (
+                    self._baseline_flux_fallback(f_obs),
+                    0.95,
+                    q_flux_fallback,
+                )
+            q_source = float(np.clip(f_source_user / f_total, 0.05, 0.95))
             return f_total, q_source, q_flux_fallback
 
         if t0 is None or u0 is None:
             return self._baseline_flux_fallback(f_obs), 0.95, q_flux_fallback
 
-        x, y, z = xyz_au[:, 0], xyz_au[:, 1], xyz_au[:, 2]
-        delta_e = -x * np.sin(ra_rad) + y * np.cos(ra_rad)
-        delta_n = (
-            -x * np.cos(ra_rad) * np.sin(dec_rad)
-            - y * np.sin(ra_rad) * np.sin(dec_rad)
-            + z * np.cos(dec_rad)
-        )
+        delta_e, delta_n = observer_sky_offset(xyz_au, ra_rad, dec_rad)
 
         # One magnification column per source trajectory.  Prefer the full
         # binary-lens model (breaks the NNLS degeneracy between overlapping
@@ -853,12 +1038,12 @@ class MulensInstrument(Instrument):
                 )
             ]
             for j in range(1, n_src):
-                t0_j = _get(f"lens.{j}.t_0")
-                u0_j = _get(f"lens.{j}.u_0")
-                tE_j = _get(f"lens.{j}.t_E", tE)
+                t0_j = _get(f"source.{j}.t_0")
+                u0_j = _get(f"source.{j}.u_0")
+                tE_j = tE  # ONE event t_E now (the per-source fallback dance dissolved)
                 if t0_j is None or u0_j is None:
                     logger.warning(
-                        f"lens.{j}.t_0/u_0 missing — flux bootstrap treats source {j} "
+                        f"source.{j}.t_0/u_0 missing — flux bootstrap treats source {j} "
                         f"as blended into source 0."
                     )
                     continue
@@ -874,21 +1059,36 @@ class MulensInstrument(Instrument):
 
         q_flux_est = q_flux_fallback
         if len(A_cols) > 1:
-            # Multi-source NNLS: F = Σ_j f_s,j · A_j + f_b
-            X = np.column_stack(A_cols + [np.ones(len(t))])
-            sol, _ = nnls(X, F_obs)
-            f_srcs, f_blend_est = sol[:-1], sol[-1]
+            # Multi-source NNLS: F = Sum_j f_s,j * A_j + f_b
+            A_mat = np.column_stack(A_cols)
+            if f_blend_user is not None:
+                # A user-supplied blend is a STATEMENT, not a starting guess:
+                # subtract it and drop the constant column, exactly as the
+                # single-source branch below does.  This branch used to leave
+                # the ones column in and never look at f_blend_user (review
+                # 1.6.2 -- the elif that reads it is reachable only for a
+                # single column), so a 2S fit with a pinned or seeded f_blend
+                # got its log_f_total and q_source hints from an NNLS estimate
+                # that contradicted the entry the user had written.
+                f_srcs, _ = nnls(A_mat, F_obs - f_blend_user)
+                f_blend_est = f_blend_user
+            else:
+                X = np.column_stack([A_mat, np.ones(len(t))])
+                sol, _ = nnls(X, F_obs)
+                f_srcs, f_blend_est = sol[:-1], sol[-1]
             f_source_est = float(np.sum(f_srcs))
             if q_flux_user is None and f_srcs[0] > 1e-30 and len(f_srcs) > 1:
                 q_flux_est = float(np.clip(f_srcs[1] / f_srcs[0], 1e-3, 1e3))
             if f_source_user is not None and f_source_est > 1e-30:
-                # honor the user's total source flux; keep the NNLS ratio
+                # honor the user's total source flux; keep the NNLS ratio.
+                # (Unreachable with f_blend_user set -- both-user returns at
+                # the top -- but written against A_mat rather than a slice of
+                # X so it cannot silently mean the wrong columns.)
                 f_blend_est = max(
                     float(
                         np.median(
                             F_obs
-                            - X[:, :-1]
-                            @ (f_srcs * f_source_user / f_source_est)
+                            - A_mat @ (f_srcs * f_source_user / f_source_est)
                         )
                     ),
                     0.0,
@@ -949,15 +1149,15 @@ class MulensInstrument(Instrument):
         return get_observer_position(time, observer_location=observer_location)
 
     def register_parameters(self, system):
-        """Stage 2: Declare the manifest with bootstrapped fluxes."""
+        """Stage 3: Declare the manifest with bootstrapped fluxes."""
         f_total_init = np.array(self.fs_init)
         q_source_init = np.array(self.q_source_init)
 
         # Inject hints for derived f_source / f_blend so the relaxation engine
         # can resolve initial values.  Also push the data-estimated q_source and
-        # log_f_total as RANK_DERIVED_DATA hints so they override the defaults.yaml
+        # log_f_total as PRECEDENCE_DERIVED_DATA hints so they override the defaults.yaml
         # values while still yielding to any explicit user override in params.yaml
-        # (RANK_USER wins — essential when restarting a fit from a previous MAP).
+        # (PRECEDENCE_USER wins — essential when restarting a fit from a previous MAP).
         for i in range(self.n_elements):
             q = q_source_init[i]
             f_source_guess = f_total_init[i] * q
@@ -969,12 +1169,12 @@ class MulensInstrument(Instrument):
                 f"{self.prefix}.{i}.f_blend", f_blend_guess
             )
             self.config_manager.add_hint(
-                f"{self.prefix}.{i}.q_source", q, rank=RANK_DERIVED_DATA
+                f"{self.prefix}.{i}.q_source", q, rank=PRECEDENCE_DERIVED_DATA
             )
             self.config_manager.add_hint(
                 f"{self.prefix}.{i}.log_f_total",
                 float(np.log10(f_total_init[i])),
-                rank=RANK_DERIVED_DATA,
+                rank=PRECEDENCE_DERIVED_DATA,
             )
 
         self.manifest = {
@@ -1010,7 +1210,7 @@ class MulensInstrument(Instrument):
                 self.config_manager.add_hint(
                     f"{self.prefix}.{i}.q_flux",
                     float(self.q_flux_init[i]),
-                    rank=RANK_DERIVED_DATA,
+                    rank=PRECEDENCE_DERIVED_DATA,
                 )
 
         # Map each instrument to a Band instance by name.
@@ -1057,6 +1257,247 @@ class MulensInstrument(Instrument):
                 "force_node": True,
             }
 
+            # Neighbor third light, per light curve, sampled only where the
+            # blend tie is on: with the tie off f_blend is already free and
+            # this parameter is exactly degenerate with it (the light curve
+            # measures only the sum, finite-source or not).  With the tie on
+            # it converts f_blend = f_lens_pred -- an identity the DC2018
+            # Roman-fidelity sims violate in 80% of events (unrelated
+            # line-of-sight stars dominate the blend; the lens supplies a
+            # median 15% of it) -- into the correct inequality
+            # f_blend >= f_lens_pred, positivity doing the work.  upper and
+            # the selected elements' initval scale with the bootstrapped
+            # baseline flux, the same reasoning as _scale_flux_amplitudes:
+            # the file's flux zeropoint is arbitrary.  Pinned elements keep
+            # the defaults.yaml 0.0 (NaN initval = leave alone).
+            nb_selected = [
+                bool(c.get("sed_constrains_blend", False)) for c in self.config
+            ]
+            if any(nb_selected):
+                entry = pin_unselected(self.n_elements, nb_selected)
+                overrides = dict(entry.get("overrides") or {})
+                scale = np.asarray(f_total_init, dtype=float)
+                overrides["upper"] = (2.0 * scale).tolist()
+                overrides["initval"] = [
+                    (0.05 * float(sc) if sel else float("nan"))
+                    for sc, sel in zip(scale, nb_selected)
+                ]
+                entry["overrides"] = overrides
+                self.manifest["neighbor_flux"] = entry
+                # Preliminary whitening scale on the light curve's own flux
+                # scale (the defaults.yaml 0.1 is meaningless against an
+                # arbitrary flux zeropoint, and a scale >> span trips the
+                # on-the-bound nudge).  The startup probe measures the real
+                # scale; this only seeds it.
+                for i, sel in enumerate(nb_selected):
+                    if sel:
+                        self.config_manager.add_scale_hint(
+                            f"{self.prefix}.{i}.neighbor_flux",
+                            0.1 * float(scale[i]),
+                        )
+
+            self._seed_source_star_from_flux(system)
+
+    # Main-sequence dwarf locus for source seeding, from the shared
+    # Mamajek-table reader (components/star/mamajek.py).
+    _MS_LOCUS_CACHE = None
+
+    @classmethod
+    def _ms_locus(cls):
+        """(teff K, radius Rsun, mass Msun) rows, brightest first.
+
+        Backed by the shared Mamajek-table reader (components/star/
+        mamajek.py, the getstar.pro port), capped at 2.2 Msun: a bulge
+        source brighter than the dwarf-locus top is far likelier a giant
+        (or a wrong zeropoint) than an early-type dwarf, and the bright
+        guard should say so rather than seed one.
+        """
+        if cls._MS_LOCUS_CACHE is not None:
+            return cls._MS_LOCUS_CACHE
+        from exozippy.components.star.mamajek import read_mamajek
+
+        table = read_mamajek(minmass=0.078)
+        rows = [
+            (float(te), float(r), float(m))
+            for te, r, m in zip(table["Teff"], table["R_Rsun"], table["Msun"])
+            if np.isfinite(te) and np.isfinite(r) and m <= 2.2
+        ]
+        if len(rows) < 10:
+            raise RuntimeError(
+                f"dwarf locus parsed to only {len(rows)} usable rows; "
+                f"the Mamajek table or its reader changed."
+            )
+        rows.sort(key=lambda r: -r[2])  # brightest (most massive) first
+        cls._MS_LOCUS_CACHE = rows
+        return rows
+
+    def _user_or_default(self, paths, field, default):
+        """First user_params value for any spelling in ``paths``."""
+        up = self.config_manager.user_params
+        for path in paths:
+            entry = up.get(path)
+            if isinstance(entry, dict) and entry.get(field) is not None:
+                return float(entry[field])
+            if entry is not None and not isinstance(entry, dict):
+                return float(entry)
+        return default
+
+    def _seed_source_star_from_flux(self, system):
+        """Stage 3: seed the SOURCE star's stellar start from its own flux.
+
+        Without this, a microlensing-only source starts as an exact solar
+        clone (the star defaults), even though its apparent magnitude is
+        MEASURED: the bootstrapped baseline f_source through the light
+        curve's photometric zeropoint.  On DC2018 event 128 the solar-clone
+        start let the polish/sampler walk into a swapped configuration
+        (M-dwarf source, G-star lens) that the flux data disfavor.
+
+        Chain: m_source = zp_mu - 2.5*log10(f_source_init); assume the
+        source is a main-sequence dwarf at the event's source distance
+        (user initval, an existing engine hint, or 8 kpc -- microlensing
+        sources are bulge stars by construction of the event rate); scan
+        the approximate dwarf locus through the SED's own BC grid to find
+        the (teff, radius, mass) whose predicted apparent magnitude
+        matches; push PRECEDENCE_DERIVED_DATA hints (they override defaults and
+        yield to the user, like every data-derived start).
+
+        The zeropoint mu is a calibration statement whether the user wrote
+        it or defaults.yaml's 0.0 did ("flux is 10**(-0.4 m)").  When that
+        statement is wrong, the measured magnitude is absurd and the guard
+        below skips seeding with a warning -- which doubles as the alarm
+        that the zeropoint prior does not describe the file.
+
+        A source BRIGHTER than the locus top is likely a giant (common for
+        bulge sources): no seed, warned, the defaults stand.  Multi-source
+        events are skipped -- f_source is the SUM and splitting it needs
+        q_flux, which has its own hint path.
+        """
+        if getattr(self, "_n_sources", 1) > 1:
+            return
+        sed = system.sed
+        filter_keys = self._sed_filter_keys(system)
+        src = int(system.source.star_map[0])
+        src_name = system.star.names[src]
+
+        d_pc = self._user_or_default(
+            [f"star.{src}.distance", f"star.{src_name}.distance"],
+            "initval",
+            None,
+        )
+        if d_pc is None:
+            d_pc = self.config_manager.hints.get(f"star.{src}.distance")
+        if d_pc is None:
+            d_pc = 8000.0
+            logger.info(
+                f"source-flux seeding: no distance start for star "
+                f"'{src_name}'; assuming a bulge source at {d_pc:.0f} pc."
+            )
+        av = self._user_or_default(
+            [f"star.{src}.av", f"star.{src_name}.av"], "initval", 0.0
+        )
+
+        masses = []
+        for i, name in enumerate(self.names):
+            fk = filter_keys[i]
+            if fk is None:
+                continue
+            zp_mu = self._user_or_default(
+                [
+                    f"{self.prefix}.{name}.zeropoint",
+                    f"{self.prefix}.{i}.zeropoint",
+                ],
+                "mu",
+                0.0,
+            )
+            f_src = float(self.fs_init[i]) * float(self.q_source_init[i])
+            if f_src <= 0:
+                continue
+            m_meas = zp_mu - 2.5 * np.log10(f_src)
+
+            # Predicted apparent mag of each locus row through the SED's
+            # own BC grid (teff, logg, feh=0, av), at the assumed distance.
+            # ONE vectorized evaluate for the whole locus: a per-row
+            # .eval() meant 61 pytensor compiles per band per prepare, and
+            # under six xdist workers those serialized on the shared
+            # compiledir's FileLock until pytest-timeout killed the
+            # module fixture (ezsuite 15363115's deterministic errors).
+            col = sed.filter_column(fk)
+            locus = np.asarray(self._ms_locus(), dtype=float)
+            teff_v, radius_v, mass_v = locus[:, 0], locus[:, 1], locus[:, 2]
+            logg_v = 4.438 + np.log10(mass_v) - 2.0 * np.log10(radius_v)
+            coords = np.column_stack(
+                [
+                    teff_v,
+                    logg_v,
+                    np.zeros_like(teff_v),
+                    np.full_like(teff_v, av),
+                ]
+            )
+            bc_v = np.asarray(sed.bc_interpolator.evaluate(coords).eval())[
+                :, col
+            ]
+            lbol_v = radius_v**2 * (teff_v / 5772.0) ** 4
+            mbol_v = 4.74 - 2.5 * np.log10(lbol_v)
+            m_pred = mbol_v - bc_v + 5.0 * np.log10(d_pc) - 5.0
+
+            if m_meas < m_pred[0]:
+                logger.warning(
+                    f"source-flux seeding ({name}): the measured source "
+                    f"magnitude {m_meas:.2f} is BRIGHTER than the whole "
+                    f"dwarf locus ({m_pred[0]:.2f} at its top, "
+                    f"{d_pc:.0f} pc): a giant source, or a zeropoint "
+                    f"prior that does not describe this file. Not seeding "
+                    f"from this light curve."
+                )
+                continue
+            if m_meas > m_pred[-1] + 3.0:
+                logger.warning(
+                    f"source-flux seeding ({name}): measured source mag "
+                    f"{m_meas:.2f} is far fainter than the locus bottom "
+                    f"({m_pred[-1]:.2f}): a sub-stellar source makes no "
+                    f"sense, so the zeropoint prior likely does not "
+                    f"describe this file. Not seeding from this light "
+                    f"curve."
+                )
+                continue
+            if m_meas > m_pred[-1]:
+                logger.warning(
+                    f"source-flux seeding ({name}): measured source mag "
+                    f"{m_meas:.2f} is fainter than the locus bottom "
+                    f"({m_pred[-1]:.2f}); seeding at the faint end."
+                )
+                m_meas = m_pred[-1]
+            # BC wiggles can make m_pred locally non-monotonic; interp
+            # over the magnitude-sorted pairs.
+            order = np.argsort(m_pred)
+            locus_masses = np.array([r[2] for r in self._ms_locus()])
+            masses.append(
+                float(np.interp(m_meas, m_pred[order], locus_masses[order]))
+            )
+
+        if not masses:
+            return
+        mass = float(np.median(masses))
+        loci = np.array(self._ms_locus())[::-1]  # ascending mass for interp
+        teff = float(np.interp(mass, loci[:, 2], loci[:, 0]))
+        radius = float(np.interp(mass, loci[:, 2], loci[:, 1]))
+        logger.info(
+            f"source-flux seeding: star '{src_name}' starts as a "
+            f"{mass:.2f} Msun / {radius:.2f} Rsun / {teff:.0f} K dwarf "
+            f"(from f_source through the zeropoint at {d_pc:.0f} pc), "
+            f"replacing the solar-clone default."
+        )
+        for param, val in (
+            ("logmass", float(np.log10(mass))),
+            ("teff", teff),
+            ("radius", radius),
+            ("teffsed", teff),
+            ("radiussed", radius),
+        ):
+            self.config_manager.add_hint(
+                f"star.{src}.{param}", val, rank=PRECEDENCE_DERIVED_DATA
+            )
+
     # Flux-space images of the magnitude caps these amplitudes used to carry:
     # a 5 mag GP amplitude is a factor 10**(0.4*5) = 100 in flux, and a 10 mag
     # outlier scale a factor 10**(0.4*10) = 1e4.  Applied per light curve
@@ -1084,9 +1525,14 @@ class MulensInstrument(Instrument):
         The multipliers are the flux-space images of the magnitude caps these
         parameters carried before the switch (see ``_FLUX_AMPLITUDE_CAPS``).
         The ``initval`` is only a fallback -- ``Instrument._prepare_gp`` and
-        ``_prepare_robust`` push data-driven hints (median error bar, and 10x
-        that) which outrank it -- but it matters when a file has degenerate
-        errors and those hints are skipped.
+        ``_prepare_robust`` push data-driven hints (the median error bar,
+        for both) which outrank it -- but it matters when a file has
+        degenerate errors and those hints are skipped.  Likewise the
+        ``upper`` here is only the flux-scaled ceiling: for a hogg file with
+        usable errors ``_register_robust`` has already attached the 10x-
+        median-error cap as an OPTION (review 8.6.3), which replaces this
+        override's min-clip on those elements; this one stands on the
+        degenerate-error files.
         """
         scale = np.asarray(f_total_init, dtype=float)
         for param, (cap, start) in self._FLUX_AMPLITUDE_CAPS.items():
@@ -1100,6 +1546,66 @@ class MulensInstrument(Instrument):
             manifest[param] = entry
         return manifest
 
+    def _finite_source_limb_darkening(self, system):
+        """(u1, u2, bandpass) for the magnification, or (None, None, None).
+
+        ONE resolver, called by both `build_likelihood` and
+        `compile_plotters`.  It used to live inline in `build_likelihood`
+        only, so the plotters passed neither argument, `get_magnification_op`
+        computed `effective_bandpass = None`, and every plotted/GUI model
+        curve was the UNIFORM-source magnification while the likelihood fitted
+        the limb-darkened one -- a discrepancy of up to several percent, and
+        largest exactly where these plots are read (caustic crossings, the
+        finite-source peak).  A helper rather than a cached value because both
+        call sites want the live `band.u1` node; the warn-once flag is what
+        keeps the multi-band notice from being printed twice.
+
+        LD applies only when the lens is finite-source AND a Band component is
+        wired to at least one of this instrument's light curves; a uniform
+        source has no limb to darken.  Multiple distinct bands across one
+        instrument's finite-source light curves are not yet supported -- the
+        first band is used, and said so.
+
+        u2 IS THE SECOND (QUADRATIC) COEFFICIENT, and it is returned rather
+        than dropped because dropping it was a real defect: the magnification
+        used to be a function of u1 alone, so a band declaring the DEFAULT
+        `ld_law: quadratic` (Band._parse_ld_laws) had the wrong source profile
+        AND one combination of its sampled (q1, q2) constrained by nothing but
+        its prior.  Whether a given backend can honour it is not decided here
+        -- see MulensEvent._resolve_quadratic_ld, which is where the backend is
+        known and where the fallback is announced.
+
+        The guard is on the MANIFEST, not on the law: with `ld_law: linear` on
+        every band the parameter does not exist at all (Band.LD_MODE_TABLE via
+        parameterization.mode_manifest omits a parameter no instance uses), so
+        `"u2" in band.manifest` is the only safe test -- the same one
+        transit.py and rm.py use (components/sed/sed.md).
+        """
+        if not (
+            system.mulensevent.finite_source
+            and hasattr(system, "band")
+            and np.any(self.band_map >= 0)
+        ):
+            return None, None, None
+
+        unique = sorted({int(b) for b in self.band_map if b >= 0})
+        if len(unique) > 1 and not self._warned_multiband_ld:
+            self._warned_multiband_ld = True
+            logger.warning(
+                "Multiple bands for finite-source instruments; using first band's u1."
+            )
+        band_idx = unique[0]
+        u2 = (
+            system.band.u2.value[band_idx]
+            if "u2" in system.band.manifest
+            else None
+        )
+        return (
+            system.band.u1.value[band_idx],
+            u2,
+            system.band.names[band_idx],
+        )
+
     def build_likelihood(self, model, system):
 
         # 1. Constants
@@ -1112,42 +1618,23 @@ class MulensInstrument(Instrument):
         #    PSPL→symbolic (NUTS-friendly), binary/finite-source→MulensModel
         #    Op (use Metropolis).
         #
-        #    When finite source is active, pass u1 and bandpass from the connected
-        #    Band component.  Multiple distinct bands across instruments are not yet
-        #    supported for finite-source LD; the first band found is used.
-        u1 = None
-        bandpass = None
-        if (
-            system.lens.finite_source[0]
-            and hasattr(system, "band")
-            and np.any(self.band_map >= 0)
-        ):
-            band_indices = [
-                self.band_map[i]
-                for i in range(self.n_elements)
-                if self.band_map[i] >= 0
-            ]
-            unique = sorted(set(band_indices))
-            if len(unique) > 1:
-                logger.warning(
-                    "Multiple bands for finite-source instruments; using first band's u1."
-                )
-            band_idx = unique[0]
-            u1 = system.band.u1.value[band_idx]
-            bandpass = system.band.names[band_idx]
+        #    u1/u2/bandpass come from the ONE resolver compile_plotters also
+        #    calls, so the plotted curve is the curve the likelihood fits.
+        u1, u2, bandpass = self._finite_source_limb_darkening(system)
 
         # One magnification curve per source trajectory (NSNL)
         n_src = self._n_sources
         A_per_source = []
         for j in range(n_src):
-            system.lens.resolve_auto_vbbl(self.time, index=j)
+            system.mulensevent.resolve_auto_vbbl(self.time, index=j)
             A_per_source.append(
-                system.lens.get_magnification_op(
+                system.mulensevent.get_magnification_op(
                     t,
                     self.observer_pos,
                     system,
                     index=j,
                     u1=u1,
+                    u2=u2,
                     bandpass=bandpass,
                 )
             )
@@ -1191,9 +1678,9 @@ class MulensInstrument(Instrument):
 
         # Modeling-draft prose for the magnification model and the flux-space
         # likelihood, declared next to the model they describe.
-        lens = system.lens
-        if lens.uses_op(0):
-            if lens.backend == "mulensmodel":
+        event = system.mulensevent
+        if event.uses_op(0):
+            if event.backend == "mulensmodel":
                 mag_cite = (
                     r"computed with MulensModel \citep{Poleski:2019}, which "
                     r"wraps VBBinaryLensing \citep{Bozza:2010, Bozza:2018}"
@@ -1249,7 +1736,7 @@ class MulensInstrument(Instrument):
 
     def _sed_source_indices(self, system):
         """Star indices whose blended SED flux is the microlensing source."""
-        return [int(i) for i in system.lens.source_map]
+        return [int(i) for i in system.source.star_map]
 
     def _sed_filter_keys(self, system):
         """Per light curve, the BC-grid filter key, or None where absent.
@@ -1368,7 +1855,7 @@ class MulensInstrument(Instrument):
         zp is the DERIVED Parameter ``mulensinstrument.zeropoint``,
         zp_i = m_SED + 2.5*log10(f_s,i) (physics.calc_zeropoint), and its
         Gaussian prior (defaults: 0 +/- 0.2 mag) is applied by
-        Parameter.build_pymc's derived-with-sigma branch at stage 5.  This
+        Parameter.build_pymc's derived-with-sigma branch at stage 6.  This
         is the analytic marginalization of a zp nuisance tied exactly
         through the equation above; it adds no sampled dimension and leaves
         the (log_f_total, q_source) parameterization untouched.  sigma=0 is
@@ -1388,8 +1875,8 @@ class MulensInstrument(Instrument):
         against the SED-predicted blend of all source stars; a per-source
         flux-ratio (q_flux) constraint is future work.
 
-        What remains here at stage 6 is the opt-in blend tie:
-        `sed_constrain_blend: true` additionally ties f_blend to the
+        What remains here at stage 7 is the opt-in blend tie:
+        `sed_constrains_blend: true` additionally ties f_blend to the
         SED-predicted blend of the modeled non-source stars through the same
         zeropoint (Gaussian potential with `sed_blend_sigma`, default 0.2
         mag). f_blend also contains any unrelated field stars, so leave this
@@ -1404,11 +1891,11 @@ class MulensInstrument(Instrument):
         for i, name in enumerate(self.names):
             if filter_keys[i] is None:
                 continue
-            if not self.config[i].get("sed_constrain_blend", False):
+            if not self.config[i].get("sed_constrains_blend", False):
                 continue
             if not other_indices:
                 logger.warning(
-                    f"mulensinstrument {name}: sed_constrain_blend is "
+                    f"mulensinstrument {name}: sed_constrains_blend is "
                     f"set but every modeled star is a source; skipping."
                 )
                 continue
@@ -1417,10 +1904,23 @@ class MulensInstrument(Instrument):
                 other_indices, filter_keys[i], system
             )
             fb_i = pt.maximum(self.f_blend.value[i], 1e-30)
-            m_blend_inst = -2.5 * pt.log10(fb_i) + self.zeropoint.value[i]
+            # Predicted blend in the INSTRUMENT's flux system: the modeled
+            # non-source stars plus the fitted neighbor third light.  At
+            # neighbor_flux = 0 the residual is algebraically identical to
+            # the old m_blend_pred - m_blend_inst magnitude difference (same
+            # square), so a config without the neighbor term builds the same
+            # potential.  With it, positivity makes the tie one-sided: a
+            # blend BRIGHTER than the lens is absorbed by f_nb, a blend
+            # FAINTER than the lens still costs -- "the blend must contain
+            # at least the lens's light".
+            f_lens_inst = 10 ** (
+                -0.4 * (m_blend_pred - self.zeropoint.value[i])
+            )
+            f_pred = f_lens_inst + self.neighbor_flux.value[i]
+            resid = 2.5 * pt.log10(pt.maximum(f_pred, 1e-30) / fb_i)
             pm.Potential(
                 f"{self.prefix}.{name}.sed_blend_prior",
-                -0.5 * ((m_blend_pred - m_blend_inst) / blend_sigma) ** 2,
+                -0.5 * (resid / blend_sigma) ** 2,
             )
 
     def compile_plotters(self, model, system):
@@ -1432,9 +1932,20 @@ class MulensInstrument(Instrument):
         param_symbols = [p.value for p in system.plot_params]
 
         n_src = self._n_sources
+        # Same (u1, u2, bandpass) resolution build_likelihood uses -- passing
+        # neither here silently plotted the UNIFORM-source magnification for a
+        # limb-darkened fit (review 1.6.1), and passing u1 without u2 would
+        # reintroduce the same class of split for a quadratic band.
+        u1, u2, bandpass = self._finite_source_limb_darkening(system)
         A_per_source = [
-            system.lens.get_magnification_op(
-                t_input, obs_pos_input, system, index=j
+            system.mulensevent.get_magnification_op(
+                t_input,
+                obs_pos_input,
+                system,
+                index=j,
+                u1=u1,
+                u2=u2,
+                bandpass=bandpass,
             )
             for j in range(n_src)
         ]
@@ -1442,8 +1953,20 @@ class MulensInstrument(Instrument):
         fs_inst = self.f_source.value[inst_idx]
         fb_inst = self.f_blend.value[inst_idx]
 
-        # Δmag = mag(t) − mag_baseline = −2.5·log10(A_eff).
-        # Zero at baseline, negative when brighter, independent of f_total.
+        # The model in instrument inst_idx's own FLUX system -- the same
+        # expression build_likelihood scores against the data.  It stops here:
+        # the conversion to the plotted delta-magnitude is done in numpy by
+        # plot_data, through the very `_flux_to_mag` the data traces go
+        # through, so the model curve and the points it is drawn over cannot
+        # disagree about what a non-positive flux means.  This graph used to
+        # end in `-2.5*log10(maximum(A_eff, 1e-30))`, i.e. it kept the ~75 mag
+        # spike the data path had already replaced with a gap (review 1.6.4):
+        # a posterior draw with f_blend < -f_source*A is a real possibility in
+        # heavy-negative-blending difference imaging, and the honest picture of
+        # it is a break in the curve, not a spike off the bottom of the axis.
+        #
+        # The GP conditional mean is additive in this same space, which is why
+        # the "physical + GP" curve is built on it too (see plot_data).
         if n_src == 1:
             model_flux = fs_inst * A_per_source[0] + fb_inst
         else:
@@ -1453,37 +1976,16 @@ class MulensInstrument(Instrument):
                 + fs_inst * qf_inst / (1.0 + qf_inst) * A_per_source[1]
                 + fb_inst
             )
-        f_total_inst = pt.maximum(fs_inst + fb_inst, 1e-30)
-        A_eff = model_flux / f_total_inst
-        model_delta_mag = -2.5 * pt.log10(pt.maximum(A_eff, 1e-30))
 
         # Retained symbolically so plot_data can walk the graph for
         # param_deps (the evaluator skips components whose specs declare no
         # dependency on a moved slider -- empty deps would freeze the GUI's
         # microlensing charts in live mode).
-        self._delta_mag_node = model_delta_mag
+        self._model_flux_node = model_flux
 
-        self._compiled_delta_mag = pytensor.function(
-            inputs=[t_input, obs_pos_input, inst_idx] + param_symbols,
-            outputs=model_delta_mag,
-            on_unused_input="ignore",
-        )
-
-        # The same curve before the delta-mag normalization: the model flux in
-        # instrument inst_idx's own flux system.  The GP conditional mean is
-        # additive there, so this is what the "physical + GP" plot curve is
-        # built on (see plot_data).
         self._compiled_model_flux = pytensor.function(
             inputs=[t_input, obs_pos_input, inst_idx] + param_symbols,
             outputs=model_flux,
-            on_unused_input="ignore",
-        )
-
-        # Baseline flux at a given parameter point, used by plot() to normalize
-        # the data onto the same Δmag scale as the model curves.
-        self._compiled_f_total = pytensor.function(
-            inputs=[inst_idx] + param_symbols,
-            outputs=f_total_inst,
             on_unused_input="ignore",
         )
 
@@ -1507,19 +2009,16 @@ class MulensInstrument(Instrument):
     def _seed_param(self, base_param):
         """t_0/t_E seed from the solved config (for the model time grid).
 
-        Tries the numeric index form first (user-provided params), then the
-        name form (derived params stored by finalize_user_params under the
-        name key).
+        t_0 is the source component's; t_E the event's.  Index form only:
+        both forms standardize now that the instances carry real names, so
+        the pre-split name-form fallback (which existed for the borrowed-
+        name filing bug) is gone.
         """
         cm = self.config_manager
-        lens_name = (cm.system_config.get("lens") or [{}])[0].get("name", "0")
-        for key in (
-            f"lens.0.{base_param}",
-            f"lens.{lens_name}.{base_param}",
-        ):
-            d = cm.user_params.get(key)
-            if d is not None:
-                return d.get("initval") if isinstance(d, dict) else float(d)
+        owner = "source" if base_param == "t_0" else "mulensevent"
+        d = cm.user_params.get(f"{owner}.0.{base_param}")
+        if d is not None:
+            return d.get("initval") if isinstance(d, dict) else float(d)
         return None
 
     def _model_time_grid(self):
@@ -1629,7 +2128,7 @@ class MulensInstrument(Instrument):
         }
 
     def plot_data(self, system, point=None):
-        """GUI/PDF plot specs: the aligned delta-mag lightcurve, plus a zoom
+        """GUI/PDF charts: the aligned delta-mag lightcurve, plus a zoom
         copy (x_range +/-3 tE) when t_0/t_E seeds are known.
 
         The chart is drawn in magnitudes even though the fit is in flux -- that
@@ -1637,9 +2136,9 @@ class MulensInstrument(Instrument):
         general aligned) flux is not positive comes back as NaN and is simply
         not drawn.  With point=None each instrument's data are returned in its
         own system (no fitted fluxes exist to align them onto one scale).
-        See Component.plot_data and plotspec.PlotSpec.
+        See Component.plot_data and chart.Chart.
         """
-        from exozippy.plotspec import PlotSpec, Trace
+        from exozippy.chart import Chart, Trace
 
         comp_id = {"yaml_key": self.prefix, "instance": None}
         sysname = getattr(system, "name", "")
@@ -1680,15 +2179,15 @@ class MulensInstrument(Instrument):
                     )
                 )
             return [
-                PlotSpec(
+                Chart(
                     id=f"{self.prefix}.lightcurve",
                     component=comp_id,
                     title=title,
                     xlabel="Time [BJD]",
                     ylabel="mag",
                     traces=traces,
+                    y_inverted=True,
                     meta={
-                        "y_inverted": True,
                         "file_tag": "mulens",
                         "figsize": (12, 6),
                         # Same caption as the model-bearing spec below: the
@@ -1719,9 +2218,8 @@ class MulensInstrument(Instrument):
         param_values = self._point_to_plot_params(point, system)
         aln = self._flux_alignment(param_values)
         align, ref_idx = aln["align"], aln["ref_idx"]
-        fs_vec, fb_vec = aln["fs_vec"], aln["fb_vec"]
 
-        node = getattr(self, "_delta_mag_node", None)
+        node = getattr(self, "_model_flux_node", None)
         deps = self._model_trace_param_deps(node, system)
 
         traces = []
@@ -1729,9 +2227,22 @@ class MulensInstrument(Instrument):
             i = obs_to_inst[obs_loc]
             try:
                 # ref_idx: reference flux system, this observer's
-                # magnification (parallax between sites is preserved).
-                y_model = self._compiled_delta_mag(
-                    t_model, obs_model_pos[obs_loc], ref_idx, *param_values
+                # magnification (parallax between sites is preserved).  The
+                # model comes back as a FLUX and is converted here, through
+                # the same `_flux_to_mag` + `baseline_ref` the data traces use
+                # -- so a non-positive model flux becomes a NaN gap, exactly
+                # as a non-positive datum does, instead of the ~75 mag spike
+                # the old in-graph 1e-30 clamp drew (review 1.6.4).
+                y_model = (
+                    self._flux_to_mag(
+                        self._compiled_model_flux(
+                            t_model,
+                            obs_model_pos[obs_loc],
+                            ref_idx,
+                            *param_values,
+                        )
+                    )
+                    - aln["baseline_ref"]
                 )
             except Exception as e:
                 logger.warning(
@@ -1806,7 +2317,6 @@ class MulensInstrument(Instrument):
             )
 
         meta = {
-            "y_inverted": True,
             "file_tag": "mulens",
             "figsize": (12, 6),
             # The data traces are re-aligned onto the reference flux system
@@ -1821,7 +2331,7 @@ class MulensInstrument(Instrument):
             ),
         }
         specs = [
-            PlotSpec(
+            Chart(
                 id=f"{self.prefix}.lightcurve",
                 component=comp_id,
                 title=title,
@@ -1829,12 +2339,13 @@ class MulensInstrument(Instrument):
                 ylabel="mag - mag$_0$",
                 traces=traces,
                 param_deps=deps,
+                y_inverted=True,
                 meta=meta,
             )
         ]
         if t0 is not None and tE is not None:
             specs.append(
-                PlotSpec(
+                Chart(
                     id=f"{self.prefix}.lightcurve_zoom",
                     component=comp_id,
                     title=f"{title} (zoom)",
@@ -1842,10 +2353,11 @@ class MulensInstrument(Instrument):
                     ylabel="mag - mag$_0$",
                     traces=traces,
                     param_deps=deps,
+                    y_inverted=True,
+                    x_range=[t0 - 3.0 * tE, t0 + 3.0 * tE],
                     meta=dict(
                         meta,
                         file_tag="mulens_zoom",
-                        x_range=[t0 - 3.0 * tE, t0 + 3.0 * tE],
                         caption=(
                             "As the previous figure, zoomed to "
                             r"$t_0 \pm 3\,t_E$."

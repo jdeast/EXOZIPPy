@@ -4,8 +4,8 @@
 entry derived, which expressions: block does it select, and what options does
 it carry".  Three places ask, at three lifecycle stages:
 
-  graph.determine_pymc_build_order  (stage 4) -- build order
-  Component.add_parameter           (stage 5) -- what actually gets built
+  graph.determine_pymc_build_order  (build order) -- build order
+  Component.add_parameter           (stage 6) -- what actually gets built
   System.derived_params                       -- reporting / introspection
 
 They each used to answer it themselves, and they disagreed: a dict without
@@ -368,17 +368,16 @@ def unread_linear_band_system(tmp_path_factory):
 
     config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [
+        "mulensevent": [
             {
-                "name": "Lens",
-                "lens_ndx": 0,
-                "source_ndx": 1,
                 "finite_source": True,
                 "t0_par": T0,
                 "use_op": False,
                 "mmexofast": False,
             }
         ],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
         "mulensinstrument": [
             {"name": "OGLE", "file": str(path), "filter": "I", "band": "I"}
         ],
@@ -389,10 +388,10 @@ def unread_linear_band_system(tmp_path_factory):
         ],
     }
     params = {
-        "lens.Lens.t_0": {"initval": T0},
-        "lens.Lens.u_0": {"initval": U0},
-        "lens.Lens.t_E": {"initval": TE},
-        "lens.Lens.rho": {"initval": 1.0e-3},
+        "source.Source.t_0": {"initval": T0},
+        "source.Source.u_0": {"initval": U0},
+        "mulensevent.t_E": {"initval": TE},
+        "source.Source.rho": {"initval": 1.0e-3},
         "star.radius": {"sigma": 0.0},
         "star.teff": {"sigma": 0.0},
         "star.feh": {"sigma": 0.0},
@@ -477,24 +476,17 @@ def pspl_system(tmp_path_factory):
 
     config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [
-            {
-                "name": "Lens",
-                "lens_ndx": 0,
-                "source_ndx": 1,
-                "t0_par": T0,
-                "use_op": False,
-                "mmexofast": False,
-            }
-        ],
+        "mulensevent": [{"t0_par": T0, "use_op": False, "mmexofast": False}],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
         "mulensinstrument": [
             {"name": "OGLE", "file": str(path), "filter": "I"}
         ],
     }
     params = {
-        "lens.Lens.t_0": {"initval": T0},
-        "lens.Lens.u_0": {"initval": U0},
-        "lens.Lens.t_E": {"initval": TE},
+        "source.Source.t_0": {"initval": T0},
+        "source.Source.u_0": {"initval": U0},
+        "mulensevent.t_E": {"initval": TE},
     }
     for nm in ("Lens", "Source"):
         params[f"star.{nm}.ra"] = {"initval": 264.0, "sigma": 0}

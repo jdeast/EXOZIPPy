@@ -1,9 +1,9 @@
 """
-Tests for Component.plot_data (GUI PlotSpec pathway, prompt G4).
+Tests for Component.plot_data (GUI Chart pathway, prompt G4).
 
 The GUI consumes plot DATA (arrays + labels) rather than rendered
 matplotlib figures. These tests check that:
-  * each implemented component returns >= 1 PlotSpec after
+  * each implemented component returns >= 1 Chart after
     prepare()+build_model();
   * every spec is JSON-serializable (json.dumps(spec.to_json()));
   * data-only mode (point=None) works after prepare() WITHOUT
@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 import yaml
 
-from exozippy.plotspec import PlotSpec, Trace
+from exozippy.chart import Chart, Trace
 from exozippy.system import System
 
 pytestmark = pytest.mark.slow
@@ -189,7 +189,7 @@ def sed_built():
 
 def _assert_json_roundtrip(specs):
     for spec in specs:
-        assert isinstance(spec, PlotSpec)
+        assert isinstance(spec, Chart)
         payload = spec.to_json()
         text = json.dumps(payload)  # must not raise
         assert isinstance(text, str) and len(text) > 0
@@ -208,7 +208,7 @@ def test_rvinstrument_plot_data_returns_serializable_specs(rvonly_built):
     """
     Given a prepared+built RV-only kelt4 system and a start point,
     When rvinstrument.plot_data(system, point) is called,
-    Then it returns >= 1 PlotSpec and every spec is JSON-serializable.
+    Then it returns >= 1 Chart and every spec is JSON-serializable.
     """
     system, model, point = rvonly_built
 
@@ -279,7 +279,7 @@ def test_transit_plot_data_returns_serializable_specs(transit_built):
     """
     Given a prepared+built transit kelt4 system and a start point,
     When transit.plot_data(system, point) is called,
-    Then it returns >= 1 serializable PlotSpec with finite model traces.
+    Then it returns >= 1 serializable Chart with finite model traces.
     """
     system, model, point = transit_built
 
@@ -365,7 +365,7 @@ def test_sed_plot_data_returns_serializable_specs(sed_built):
     """
     Given a prepared+built rv+transit+sed kelt4 system and a start point,
     When sed.plot_data(system, point) is called,
-    Then it returns >= 1 serializable PlotSpec with finite model traces
+    Then it returns >= 1 serializable Chart with finite model traces
     matching the shared plot-object helper.
     """
     system, model, point = sed_built
@@ -516,7 +516,7 @@ def test_unphased_rv_data_uses_the_pinned_gamma(pinned_gamma_rv_system):
     When plot_data builds the unphased chart,
     Then the plotted (gamma-subtracted) data carry that pinned offset.
 
-    Regression: _instrument_gamma read the point with
+    Regression: _point_value's predecessor read the point with
     point.get(label, 0.0), and a pinned parameter is always absent from the
     draws, so the whole instrument plotted -12345 m/s away from the model
     curve while the likelihood used the real offset.
@@ -541,13 +541,13 @@ def test_unphased_rv_data_uses_the_pinned_gamma(pinned_gamma_rv_system):
 def test_gamma_helper_returns_the_pinned_value(pinned_gamma_rv_system):
     """
     Given the same pinned-gamma fit,
-    When _instrument_gamma is asked for the instrument's offset,
+    When _point_value is asked for the instrument's offset,
     Then it returns the pinned value (in internal units), not zero.
     """
     system, _, point, _, _ = pinned_gamma_rv_system
     comp = system.rvinstrument
 
-    g_ms = comp._instrument_gamma(point, 0) * comp._rv_factor()
+    g_ms = comp._point_value(point, comp.gamma, 0) * comp._rv_factor()
 
     assert g_ms == pytest.approx(_PIN["gamma"], rel=1e-9)
 
@@ -656,12 +656,12 @@ def test_baseline_helper_returns_the_pinned_value(
 ):
     """
     Given the same pinned-baseline fit,
-    When _baseline_for is asked for the instrument's baseline,
+    When _point_value is asked for the instrument's baseline,
     Then it returns the pinned raw-count value, not 1.0.
     """
     system, _, point, _, _ = pinned_baseline_transit_system
 
-    base = system.transit._baseline_for(point, 0)
+    base = system.transit._point_value(point, system.transit.baseline, 0)
 
     assert base == pytest.approx(_LC["baseline"], rel=1e-9)
 
@@ -674,7 +674,7 @@ def test_unphased_transit_model_uses_the_pinned_baseline(
     When plot_data builds the unphased chart,
     Then the plotted model curve sits at that baseline, not at 1.0.
 
-    Regression: _baseline_for read the point with
+    Regression: _point_value's predecessor read the point with
     point.get(label, 1.0), and a pinned parameter is always absent from the
     draws, so the model curve plotted at unity -- 20000 counts below the
     data the likelihood actually fit.
@@ -717,3 +717,171 @@ def test_phased_transit_data_uses_the_pinned_baseline(
     )
     # the pre-fix cleaned flux (data - 1.0) is off by the whole flux scale
     assert not np.allclose(data_trace.y, flux - 1.0, atol=1.0)
+
+
+# ---------------------------------------------------------------------------
+# 2.5.1: the phased panels must survive a point that does not carry tc/period
+# ---------------------------------------------------------------------------
+#
+# The review item claimed a pinned (sigma: 0) orbit.tc is ABSENT from the
+# point and so crashed the RV phased panel with float(None).  Re-verified
+# 2026-08-18: it is not, because `orbit.tc` and `orbit.period` are declared
+# `force_node: True`, which makes them pm.Deterministics -- present in
+# model.deterministics, in get_internal_point and in the posterior -- even
+# with every element pinned.  What the fix removes is the no-fallback read
+# itself: both panels now go through Instrument._point_value, which is the
+# same "value from the point, else the Parameter's initval" rule gamma and
+# baseline already used.  These tests pin that contract on a point with the
+# keys genuinely removed, which is the only state that could still reach it
+# (a partial point, or a build where force_node is dropped).
+
+
+def test_pinned_ephemeris_is_still_in_the_point(pinned_gamma_rv_system):
+    """
+    Given an RV fit built from a config with tc and period seeded,
+    When the plotting point is built from the model,
+    Then both are in it -- force_node makes them Deterministics, so the
+    crash the item described cannot happen through that door.
+    """
+    system, _, point, _, _ = pinned_gamma_rv_system
+
+    assert system.orbit.tc.label in point
+    assert system.orbit.period.label in point
+
+
+def test_phased_rv_panel_survives_a_point_without_tc(pinned_gamma_rv_system):
+    """
+    Given a point with orbit.tc and orbit.period removed entirely,
+    When plot_data builds the RV charts,
+    Then the phased panel is still produced, folded on the Parameters'
+    own initvals rather than crashing on float(None).
+    """
+    system, _, point, _, _ = pinned_gamma_rv_system
+    partial = {
+        k: v
+        for k, v in point.items()
+        if k not in (system.orbit.tc.label, system.orbit.period.label)
+    }
+
+    specs = system.rvinstrument.plot_data(system, partial)
+
+    phased = [s for s in specs if s.meta["phase_folded"]]
+    assert len(phased) == 1
+    assert phased[0].meta["period"] == pytest.approx(
+        float(np.atleast_1d(system.orbit.period.initval)[0]), rel=1e-9
+    )
+    assert phased[0].meta["tc"] == pytest.approx(
+        float(np.atleast_1d(system.orbit.tc.initval)[0]), rel=1e-9
+    )
+
+
+def test_point_value_falls_back_to_the_initval(pinned_gamma_rv_system):
+    """
+    Given a Parameter whose label is absent from the point,
+    When Instrument._point_value is asked for one of its elements,
+    Then it returns that element's initval, in internal units.
+    """
+    system, _, _, _, _ = pinned_gamma_rv_system
+    comp = system.rvinstrument
+
+    got = comp._point_value({}, system.orbit.tc, 0)
+
+    assert got == pytest.approx(
+        float(np.atleast_1d(system.orbit.tc.initval)[0]), rel=1e-12
+    )
+
+
+# ---------------------------------------------------------------------------
+# The phased-LC zoom reads planet.t14 through _point_value (review 2.5.4)
+#
+# The +/- t14 x_range used to be `float(np.atleast_1d(point["planet.t14"])
+# [p_idx])`, OUTSIDE the panel's try, so a scalar or short t14 in the point
+# IndexError'ed on the second planet and killed plot_data for the whole
+# component.  Synthetic light curve, no example directory needed.
+# ---------------------------------------------------------------------------
+_TWO_P1, _TWO_P2, _TWO_TC = 4.0, 11.0, 2459200.0
+
+
+@pytest.fixture(scope="module")
+def two_planet_transit(tmp_path_factory):
+    """One light curve of a star with TWO planets, built with a point."""
+    path = tmp_path_factory.mktemp("two_planet_lc") / "two.TESS.dat"
+    n = 240
+    t = np.linspace(_TWO_TC - 0.25, _TWO_TC + 0.25, n)
+    flux = 1.0 - 0.01 * (np.abs(t - _TWO_TC) < 0.05)
+    np.savetxt(path, np.column_stack([t, flux, np.full_like(t, 3.0e-4)]))
+
+    config = {
+        "run": {"name": "two_planet_lc"},
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "b"}, {"name": "c"}],
+        "orbit": [
+            {"name": "b", "primary": ["A"], "companion": ["b"]},
+            {"name": "c", "primary": ["A"], "companion": ["c"]},
+        ],
+        "band": [{"name": "TESS", "filter": "TESS"}],
+        "transit": [{"name": "TESS", "file": str(path), "band": "TESS"}],
+    }
+    params = {
+        "star.A.mass": {"initval": 1.0, "sigma": 0.05},
+        "star.A.radius": {"initval": 1.0, "sigma": 0.1},
+        "star.A.teff": {"initval": 5800, "sigma": 100},
+        "star.A.feh": {"initval": 0.0, "sigma": 0.1},
+        "orbit.b.period": {"initval": _TWO_P1},
+        "orbit.b.tc": {"initval": _TWO_TC},
+        "orbit.c.period": {"initval": _TWO_P2},
+        "orbit.c.tc": {"initval": _TWO_TC},
+    }
+    system = System(config, user_params=params)
+    system.prepare()
+    model = system.build_model()
+    with model:
+        point = system.get_internal_point(model, system.get_raw_start(model))
+    system.compile_plotter_functions(model)
+    return system, point
+
+
+def test_phased_lc_zoom_is_per_planet(two_planet_transit):
+    """
+    Given two planets whose point carries a two-element planet.t14,
+    When plot_data builds the phased panels,
+    Then each panel's x_range is +/- ITS planet's duration.
+    """
+    system, point = two_planet_transit
+    t14 = np.atleast_1d(point["planet.t14"])
+    assert t14.shape == (2,)
+
+    phased = [
+        s
+        for s in system.transit.plot_data(system, point)
+        if s.meta["phase_folded"]
+    ]
+
+    assert [s.meta["planet"] for s in phased] == ["b", "c"]
+    for p_idx, spec in enumerate(phased):
+        assert spec.x_range == pytest.approx([-t14[p_idx], t14[p_idx]])
+
+
+def test_phased_lc_panels_survive_a_scalar_t14_with_two_planets(
+    two_planet_transit,
+):
+    """
+    Given a point whose planet.t14 is a bare SCALAR (a broadcast value, as a
+    short vector in the point is),
+    When plot_data builds the phased panel for the SECOND planet,
+    Then every panel is still returned -- the read goes through _point_value,
+    which falls back to element 0 -- and the zoom uses that scalar.
+
+    Regression: `np.atleast_1d(scalar)[1]` raised IndexError outside the
+    panel's try and plot_data returned nothing for the component.
+    """
+    system, point = two_planet_transit
+    scalar_point = dict(point)
+    scalar_point["planet.t14"] = np.float64(0.1)
+
+    specs = system.transit.plot_data(system, scalar_point)
+    phased = [s for s in specs if s.meta["phase_folded"]]
+
+    assert {s.meta["planet"] for s in phased} == {"b", "c"}
+    for spec in phased:
+        assert spec.x_range == pytest.approx([-0.1, 0.1])

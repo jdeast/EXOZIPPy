@@ -73,6 +73,191 @@ def calc_K(mass, m_total, ecc, a, sini, period):
     return 2.0 * np.pi * (a * sini * (mass / m_total) * ecc_factor / period)
 
 
+# ----------------------------------------------------------------------
+# Transit and occultation durations (review 8.8.7).
+#
+# Winn (2010, "Transits and Occultations", arXiv:1001.2010) eqs 14-16, with
+# the eccentricity correction of his eq 16:
+#
+#   T_14 = (P/pi) arcsin[ sqrt((1+p)^2 - b^2) / (a/R* sin i) ] * K_e
+#   T_23 = (P/pi) arcsin[ sqrt((1-p)^2 - b^2) / (a/R* sin i) ] * K_e
+#
+# with K_e = sqrt(1-e^2)/(1 + e sin omega) at the PRIMARY transit and
+# sqrt(1-e^2)/(1 - e sin omega) at the occultation, because the planet sits
+# at r = a(1-e^2)/(1 +/- e sin omega) at the two conjunctions.  From those
+# two, EXOFASTv2's derivepars.pro convention:
+#
+#   T_FWHM = (T_14 + T_23)/2      tau = (T_14 - T_23)/2
+#
+# i.e. the half-depth duration and the ingress/egress duration.
+#
+# These moved here from `transit.py`, which built them inline as bare
+# Deterministics.  They are geometry, not photometry: every input is a
+# planet or orbit parameter, nothing about a light curve enters, and an
+# RV-only fit has just as well-defined a transit duration -- which is the
+# whole point of review 8.8.7's inference path, where a published duration
+# CONSTRAINS e and omega through a Gaussian on the derived parameter.  Having
+# them on `planet` also gives them table rows, LaTeX macros, units and a
+# user-settable prior, none of which a hand-built Deterministic has.
+#
+# Not ported: EXOFASTv2's `tt`.  The item's list names it, but its definition
+# could not be checked from this tree, and a duration reported under a name
+# whose meaning we guessed is worse than one absent -- the same discipline
+# orbit.md applies to EXOFASTv2's V_c/V_e Jacobian sign.
+#
+# The floor below is `transit.py`'s `_GEOM_EPS`, carried over unchanged: it
+# keeps the arcsin arguments strictly inside (-1, 1), where the derivative is
+# finite, and the denominators away from zero, so a leapfrog excursion cannot
+# put a NaN in the gradient.  Values at any real posterior mode are orders of
+# magnitude away from it.
+# ----------------------------------------------------------------------
+
+_GEOM_EPS = 1e-6
+
+
+def _conjunction_denominator(esinw, secondary, xp=pt):
+    """`1 + e sin omega` at the transit, `1 - e sin omega` at the eclipse."""
+    signed = -esinw if secondary else esinw
+    return xp.clip(1.0 + signed, _GEOM_EPS, np.inf)
+
+
+def contact_duration(
+    ar, cosi, sini, ecc, esinw, p, period, secondary, edge, xp=pt
+):
+    """One of Winn 2010's two arcsin durations.
+
+    `edge` is `+1` for the 1st-to-4th contact duration (radius sum, T_14) and
+    `-1` for the 2nd-to-3rd (radius difference, T_23).  `secondary` selects
+    the occultation conjunction.
+
+    Backend-agnostic through `xp=`, the `skyframe.py` idiom, and that is not
+    decoration: review 8.8.7's seed solver has to evaluate exactly the
+    duration the likelihood does, from inside the relaxation engine, where
+    there is no tensor graph.  A numpy transcription would be a second copy
+    of the physics free to drift from this one -- and the seed and the
+    likelihood disagreeing about the duration is precisely the failure the
+    seeding exists to prevent.  Only `xp.clip`, `xp.sqrt`, `xp.abs` and
+    `xp.arcsin` are used, which numpy and pytensor spell identically;
+    `pt.sqr` deliberately is not.
+    """
+    denom = _conjunction_denominator(esinw, secondary, xp=xp)
+    ecc_factor = xp.sqrt(xp.clip(1.0 - ecc * ecc, _GEOM_EPS, 1.0))
+    impact = ar * cosi * (1.0 - ecc * ecc) / denom
+    edge_sum = 1.0 + edge * p
+    radicand = xp.clip(edge_sum * edge_sum - impact * impact, 0.0, np.inf)
+    arg = xp.clip(
+        xp.sqrt(radicand) / xp.clip(xp.abs(sini * ar), _GEOM_EPS, np.inf),
+        -1.0 + _GEOM_EPS,
+        1.0 - _GEOM_EPS,
+    )
+    return (period / np.pi) * xp.arcsin(arg) * ecc_factor / denom
+
+
+def _contact_duration(ar, cosi, sini, ecc, esinw, p, period, secondary, edge):
+    return contact_duration(
+        ar, cosi, sini, ecc, esinw, p, period, secondary, edge, xp=pt
+    )
+
+
+def duration_pair(ar, cosi, sini, ecc, esinw, p, period, secondary, xp=pt):
+    """`(T_14, T_23)` at one conjunction -- the pair every duration is made of."""
+    kw = dict(secondary=secondary, xp=xp)
+    return (
+        contact_duration(
+            ar, cosi, sini, ecc, esinw, p, period, edge=1.0, **kw
+        ),
+        contact_duration(
+            ar, cosi, sini, ecc, esinw, p, period, edge=-1.0, **kw
+        ),
+    )
+
+
+@register_physics
+def calc_impact_secondary(ar, cosi, ecc, esinw):
+    """Occultation impact parameter -- `calc_b` at the other conjunction.
+
+    The planet is at `r = a(1-e^2)/(1 - e sin omega)` there, so this is
+    `calc_b` with the sign of `e sin omega` flipped.  A separate function and
+    not a flag on `calc_b`, because a manifest entry names one function and
+    the two are different parameters (`b` and `bs`).
+    """
+    return (
+        ar * cosi * (1.0 - pt.sqr(ecc)) / _conjunction_denominator(esinw, True)
+    )
+
+
+@register_physics
+def calc_t14(ar, p, cosi, sini, ecc, esinw, period):
+    """Total transit duration, 1st to 4th contact."""
+    return _contact_duration(
+        ar, cosi, sini, ecc, esinw, p, period, secondary=False, edge=1.0
+    )
+
+
+@register_physics
+def calc_t14s(ar, p, cosi, sini, ecc, esinw, period):
+    """Total occultation duration, 1st to 4th contact."""
+    return _contact_duration(
+        ar, cosi, sini, ecc, esinw, p, period, secondary=True, edge=1.0
+    )
+
+
+@register_physics
+def calc_tfwhm(ar, p, cosi, sini, ecc, esinw, period):
+    """FWHM transit duration, `(T_14 + T_23)/2`."""
+    kw = dict(secondary=False)
+    return 0.5 * (
+        _contact_duration(
+            ar, cosi, sini, ecc, esinw, p, period, edge=1.0, **kw
+        )
+        + _contact_duration(
+            ar, cosi, sini, ecc, esinw, p, period, edge=-1.0, **kw
+        )
+    )
+
+
+@register_physics
+def calc_tfwhms(ar, p, cosi, sini, ecc, esinw, period):
+    """FWHM occultation duration, `(T_{S,14} + T_{S,23})/2`."""
+    kw = dict(secondary=True)
+    return 0.5 * (
+        _contact_duration(
+            ar, cosi, sini, ecc, esinw, p, period, edge=1.0, **kw
+        )
+        + _contact_duration(
+            ar, cosi, sini, ecc, esinw, p, period, edge=-1.0, **kw
+        )
+    )
+
+
+@register_physics
+def calc_tau(ar, p, cosi, sini, ecc, esinw, period):
+    """Ingress/egress transit duration, `(T_14 - T_23)/2`."""
+    kw = dict(secondary=False)
+    return 0.5 * (
+        _contact_duration(
+            ar, cosi, sini, ecc, esinw, p, period, edge=1.0, **kw
+        )
+        - _contact_duration(
+            ar, cosi, sini, ecc, esinw, p, period, edge=-1.0, **kw
+        )
+    )
+
+
+@register_physics
+def calc_taus(ar, p, cosi, sini, ecc, esinw, period):
+    """Ingress/egress occultation duration, `(T_{S,14} - T_{S,23})/2`."""
+    kw = dict(secondary=True)
+    return 0.5 * (
+        _contact_duration(
+            ar, cosi, sini, ecc, esinw, p, period, edge=1.0, **kw
+        )
+        - _contact_duration(
+            ar, cosi, sini, ecc, esinw, p, period, edge=-1.0, **kw
+        )
+    )
+
+
 @register_physics
 def calc_max_ecc(ar, p):
     return 1.0 - 1.0 / ar - p / ar

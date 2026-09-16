@@ -2,8 +2,8 @@
 // origin so the same bundle works served by FastAPI (production) or behind the
 // Vite dev proxy.
 
-import type { PlotSpec } from "./plotspec";
-export type { PlotSpec } from "./plotspec";
+import type { Chart } from "./chart";
+export type { Chart } from "./chart";
 
 export interface FileEntry {
   name: string;
@@ -36,7 +36,15 @@ export interface DocState {
   redo_depth: number;
   undo_label: string | null;
   redo_label: string | null;
-  recovery?: Array<{ file: string; autosave: string }>;
+  // Autosave sidecars newer than their real file, reported by /api/doc/open.
+  // ConfigTab renders these as the recovery banner; the `restore_autosave`
+  // document command loads them back (undoably).
+  recovery?: Array<{
+    file: string;
+    autosave: string;
+    real_mtime?: number;
+    autosave_mtime?: number;
+  }>;
 }
 
 export interface Diagnostic {
@@ -205,7 +213,7 @@ export interface TuneStatus {
 export interface TuneResult {
   parameters: Record<string, TuneParam>;
   seeds: Array<Record<string, number>> | null;
-  plots: PlotSpec[];
+  plots: Chart[];
 }
 
 // One eval response: updated trace arrays per plot (a component's plot_data
@@ -233,9 +241,28 @@ export interface TuneHash {
   stale: boolean;
 }
 
+/**
+ * A failed API call, carrying the HTTP status alongside the server's message.
+ *
+ * The status is load-bearing for at least one caller: the Tune tab has to tell
+ * a 409 ("the evaluator is gone -- Solve again") from a transient network
+ * blip, and a bare `Error` left it unable to, so a timed-out eval ended in a
+ * silent catch and the sliders kept looking live.
+ */
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`${url}: ${resp.status} ${resp.statusText}`);
+  if (!resp.ok) {
+    throw new ApiError(`${url}: ${resp.status} ${resp.statusText}`, resp.status);
+  }
   return (await resp.json()) as T;
 }
 
@@ -245,8 +272,10 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  const data = await resp.json();
-  if (!resp.ok) throw new Error((data && data.error) || resp.statusText);
+  const data = await resp.json().catch(() => null);
+  if (!resp.ok) {
+    throw new ApiError((data && data.error) || resp.statusText, resp.status);
+  }
   return data as T;
 }
 
@@ -301,7 +330,7 @@ export const api = {
   tuneStatus: () => getJson<TuneStatus>("/api/tune/status"),
   tuneResult: () => getJson<TuneResult>("/api/tune/result"),
   // Data-only plots for the in-flight solve (drawable before "live").
-  tuneDataPlots: () => getJson<{ plots: PlotSpec[] }>("/api/tune/plots/data"),
+  tuneDataPlots: () => getJson<{ plots: Chart[] }>("/api/tune/plots/data"),
   tuneEval: (path: string, value: number) =>
     postJson<TuneEvalResult>("/api/tune/eval", { path, value }),
   tuneHash: () => getJson<TuneHash>("/api/tune/hash"),

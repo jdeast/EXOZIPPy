@@ -134,9 +134,15 @@ out_frac:
 
 out_scale:
   # Extra scatter of the background component, added in quadrature to the
-  # inlier sigma.  Overridden per component with the data's own unit; the
-  # initval and init_scale here are superseded by a data-driven hint
-  # (10 x the median error bar) whenever the component supplies one.
+  # inlier sigma.  Overridden per component with the data's own unit.  On a
+  # file with usable error bars the component supersedes three of these:
+  # initval and init_scale by a data-driven hint of 1 x the median error
+  # bar, and upper by a CAP of 10 x the median error bar (review 8.6.3:
+  # uncapped, the background component absorbed a caustic crossing on
+  # DC2018 event 128).  The cap is a modelling default -- a params-file
+  # upper tightens or loosens it -- and a posterior piled against it is
+  # reported at wrap-up.  The wide static values here are the fallback for
+  # degenerate (zero/absent) errors, where the component stands down.
   lower: 0.0
   upper: 1.0e6
   initval: 1.0

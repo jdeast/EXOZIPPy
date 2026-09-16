@@ -15,21 +15,39 @@ from pathlib import Path
 import pytest
 import yaml
 
+from exozippy.config import RESERVED_PARAM_KEYS
 from exozippy.utilities.mmexofast_to_params import mmexofast_to_params
 
 MMX_PATH = (
     Path(__file__).parent.parent / "examples" / "DC2018_128" / "mmexofast.json"
 )
 
+# The converter's output, one entry per cardinality the split separated:
+# the trajectory offsets and the source size are PER-SOURCE, the timescale
+# is EVENT-level, and the geometry is PER-COMPANION -- lens element 1,
+# because element 0 is the masked primary.  Measured against
+# examples/DC2018_128/mmexofast.json rather than assumed.
 PARAM_PATHS = [
-    "lens.Lens.t_0",
-    "lens.Lens.u_0",
-    "lens.Lens.t_E",
-    "lens.Lens.s",
-    "lens.Lens.alpha",
-    "lens.Lens.rho",
-    "lens.Lens.q",
+    "source.0.t_0",
+    "source.0.u_0",
+    "source.0.rho",
+    "mulensevent.t_E",
+    "lens.1.s",
+    "lens.1.alpha",
+    "lens.1.q",
 ]
+
+
+def _params_only(parsed):
+    """The PARAMETER entries of a converted file.
+
+    A params file may also carry reserved NON-parameter keys -- today
+    ``overdisperse:``, the converter's declaration that its seeds are single
+    optima and so still want scattering (review 8.3.3).  Filtered by
+    ``config.RESERVED_PARAM_KEYS`` rather than by name so this tracks the real
+    vocabulary instead of a copy of it.
+    """
+    return {k: v for k, v in parsed.items() if k not in RESERVED_PARAM_KEYS}
 
 
 def _write_without_sigmas(tmp_path, keep=None):
@@ -56,7 +74,7 @@ def test_sigmas_present_are_not_emitted(tmp_path):
         mmexofast_to_params(MMX_PATH, out_path=tmp_path / "out.yaml")
     )
 
-    assert sorted(parsed) == sorted(PARAM_PATHS)
+    assert sorted(_params_only(parsed)) == sorted(PARAM_PATHS)
     for path in PARAM_PATHS:
         assert "initval" in parsed[path], path
         assert "init_scale" not in parsed[path], path
@@ -72,8 +90,8 @@ def test_missing_sigmas_still_converts(tmp_path):
         mmexofast_to_params(path, out_path=tmp_path / "out.yaml")
     )
 
-    assert sorted(parsed) == sorted(PARAM_PATHS)
-    for name, entry in parsed.items():
+    assert sorted(_params_only(parsed)) == sorted(PARAM_PATHS)
+    for name, entry in _params_only(parsed).items():
         assert "initval" in entry, name
         assert "init_scale" not in entry, name
 
@@ -88,7 +106,9 @@ def test_partial_sigmas_also_not_emitted(tmp_path):
     )
 
     with_scale = {
-        name for name, entry in parsed.items() if "init_scale" in entry
+        name
+        for name, entry in _params_only(parsed).items()
+        if "init_scale" in entry
     }
     assert with_scale == set()
 
@@ -107,4 +127,80 @@ def test_output_is_valid_yaml_without_sigmas(tmp_path, solution_index):
 
     parsed = yaml.safe_load(text)
     assert parsed
-    assert all("initval" in entry for entry in parsed.values())
+    assert all("initval" in entry for entry in _params_only(parsed).values())
+
+
+# ---------------------------------------------------------------------------
+# jd_offset (review 1.6.6)
+# ---------------------------------------------------------------------------
+
+
+def _write_with_jd_offset(tmp_path, jd_offset):
+    """Copy the example file, stamping a top-level jd_offset on it."""
+    data = json.loads(MMX_PATH.read_text())
+    data["jd_offset"] = jd_offset
+    path = tmp_path / "mmexofast_jd_offset.json"
+    path.write_text(json.dumps(data))
+    return path
+
+
+@pytest.mark.parametrize("solution_index", [None, 0])
+def test_t_0_has_jd_offset_subtracted(tmp_path, solution_index):
+    """Given a newer JSON carrying jd_offset = 2450000, when it is converted,
+    then the emitted t_0 initvals are shifted back into the data's own time
+    system -- the same contract mmexofast_support.push_seed_hints keeps."""
+    jd_offset = 2450000.0
+    raw = json.loads(MMX_PATH.read_text())
+    shifted = _write_with_jd_offset(tmp_path, jd_offset)
+
+    parsed = yaml.safe_load(
+        mmexofast_to_params(
+            shifted,
+            solution_index=solution_index,
+            out_path=tmp_path / "out.yaml",
+        )
+    )
+
+    fits = (
+        raw["fits"]
+        if solution_index is None
+        else [raw["fits"][solution_index]]
+    )
+    expected = [fit["parameters"]["t_0"] - jd_offset for fit in fits]
+    got = parsed["source.0.t_0"]["initval"]
+    got = got if isinstance(got, list) else [got]
+    assert got == pytest.approx(expected, abs=1e-7)
+
+
+def test_no_jd_offset_key_leaves_t_0_alone(tmp_path):
+    """Given a pre-jd_offset JSON, when it is converted, then t_0 is emitted
+    verbatim -- the shift must not appear out of nowhere for older files."""
+    raw = json.loads(MMX_PATH.read_text())
+    assert "jd_offset" not in raw
+
+    parsed = yaml.safe_load(
+        mmexofast_to_params(MMX_PATH, out_path=tmp_path / "o.yaml")
+    )
+
+    expected = [fit["parameters"]["t_0"] for fit in raw["fits"]]
+    assert parsed["source.0.t_0"]["initval"] == pytest.approx(
+        expected, abs=1e-7
+    )
+
+
+def test_only_t_0_is_shifted(tmp_path):
+    """Given a JSON with jd_offset, when it is converted, then only the epoch
+    parameter moves -- t_E is a duration and u_0/s/q/rho/alpha are
+    dimensionless, so a shift there would be a units error."""
+    plain = yaml.safe_load(
+        mmexofast_to_params(MMX_PATH, out_path=tmp_path / "a.yaml")
+    )
+    shifted_path = _write_with_jd_offset(tmp_path, 2450000.0)
+    shifted = yaml.safe_load(
+        mmexofast_to_params(shifted_path, out_path=tmp_path / "b.yaml")
+    )
+
+    for path in PARAM_PATHS:
+        if path.endswith(".t_0"):
+            continue
+        assert shifted[path] == plain[path], path

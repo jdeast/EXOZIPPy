@@ -80,9 +80,10 @@ def test_mu_geo_sign_matches_first_principles_trajectory():
       OPPOSITE conversion sign (mu_helio + pi_rel*vperp) matches for no
       orientation convention at all.
 
-    The trajectory formula (tau_p/u_p) is copied from Lens.get_magnification
-    and is separately pinned against MulensModel; what this test adds is the
-    frame-conversion sign feeding it.
+    The trajectory formula (tau_p/u_p) is copied from
+    MulensEvent.get_magnification and is separately pinned against
+    MulensModel; what this test adds is the frame-conversion sign feeding
+    it.
     """
     # ARRANGE: sky position, anchor epoch, and the code's projections
     ra, dec = np.radians(268.0), np.radians(-28.5)
@@ -131,7 +132,7 @@ def test_mu_geo_sign_matches_first_principles_trajectory():
             th_n = th0[1] + mu_helio[1] * dt_yr - pi_rel * s_full_n
             u_truth = np.hypot(th_e, th_n) / theta_E
             for u0_sign in (+1, -1):
-                # Model: Lens.get_magnification's trajectory formula
+                # Model: MulensEvent.get_magnification's trajectory
                 tau = (t - t0) / tE
                 tau_p = tau - delta_n * piE_N - delta_e * piE_E
                 u_p = u0_sign * u0 + delta_n * piE_E - delta_e * piE_N
@@ -172,16 +173,17 @@ def test_mu_geo_sign_matches_first_principles_trajectory():
 
 def test_earth_vperp_fallback_without_mulens_data():
     """
-    Given a Lens in a system with no mulensinstrument (no t0_par anchor),
+    Given a MulensEvent in a system with no mulensinstrument (no t0_par
+      anchor),
     When _earth_vperp_en is called,
     Then it returns (0, 0) -- mu_rel_geo degrades to the heliocentric value
       instead of crashing.
     """
     from types import SimpleNamespace
 
-    from exozippy.components.mulensing.lens import Lens
+    from exozippy.components.mulensing.mulensevent import MulensEvent
 
-    mock_self = SimpleNamespace(prefix="lens")
+    mock_self = SimpleNamespace(prefix="mulensevent")
     mock_system = SimpleNamespace()  # no mulensinstrument attribute
-    v_e, v_n = Lens._earth_vperp_en(mock_self, mock_system)
+    v_e, v_n = MulensEvent._earth_vperp_en(mock_self, mock_system)
     assert v_e == 0.0 and v_n == 0.0

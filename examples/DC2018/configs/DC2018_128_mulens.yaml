@@ -1,0 +1,80 @@
+run:
+  name: "DC2018_128"
+
+# The 2018 Roman Data Challenge, event 128: a 2L1S binary lens with a
+# finite-source peak.  Truth (Answers/master_file.txt row 128):
+#   t_0 = 2458554.8869   u_0 = 0.141832   t_E = 18.2374 d
+#   s = 0.993145   q = 0.0012118   rho = 0.00606537
+#   D_lens = 7999 pc   D_source = 8143 pc   M_lens = 0.454 Msun
+#   theta_E = 0.0905 mas   |pi_E| = 0.0244   R_source = 0.961 Rsun
+#   gamma = 0 -- the simulation has NO limb darkening (all 44 events)
+#
+# alpha is deliberately absent from that list: the answer key's alpha has no
+# global mapping onto the fitted convention.  See
+# scripts/dc18_alpha_convention.py.
+#
+#   star.0   = Lens      (primary lens body, and the kinematic host)
+#   star.1   = Source
+#   planet.0 = Companion (secondary lens body)
+
+star:
+  - name: "Lens"
+  - name: "Source"
+
+planet:
+  - name: "Companion"
+
+lens:
+  - name: "Lens"
+    lenses:  ["star.0", "planet.0"]
+    sources: ["star.1"]
+    finite_source: True
+    mmexofast: "../events/128/DC2018_128_mmexofast.json"
+
+galacticmodel:
+  - name: "DC2018_128"
+    anchor_idx: 1              # the source is star.1
+
+band:
+  - name: "W149"
+    filter: "Roman/WFI.F146"
+    ld_law: "linear"
+  - name: "Z087"
+    filter: "Roman/WFI.F087"
+    ld_law: "linear"
+
+mulensinstrument:
+  - name: "Roman_W149"
+    file: "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.W149.WFIRST18.128.txt"
+    data_format: "flux"
+    observer_location: "roman_simulated_2018dc"
+    band: "W149"
+    likelihood: "hogg"
+  - name: "Roman_Z087"
+    file: "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.Z087.WFIRST18.128.txt"
+    data_format: "flux"
+    observer_location: "roman_simulated_2018dc"
+    band: "Z087"
+    likelihood: "hogg"
+
+prefix: "fitresults_mulens/DC2018_128"
+
+sampler:
+  method: "ptde_async"
+  n_temps: "auto"
+  T_max: 200
+  tune: 5000
+  draws: 50000
+  nthin: 1
+  recompute_trace: True
+  eval_timeout: 10
+
+# Degenerate events routinely leave chains split across solution branches
+# with no inter-mode mixing, so occupancy weights would reflect
+# initialization rather than posterior mass.  Bridge-sampling evidence
+# weights are the designed remedy (they fall back to occupancy, loudly, if
+# the bridge iteration does not converge).
+modes:
+  weights: "evidence"
+
+parameter_file: "DC2018_128.params.yaml"

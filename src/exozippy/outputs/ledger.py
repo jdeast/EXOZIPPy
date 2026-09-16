@@ -103,18 +103,31 @@ def build_seed_ledger(system, model, raw_starts, seed_indices, logp_fn=None):
 
         raw_scales = {}
         log_sigma_sum = 0.0
+        # ONE scratch copy of the whole center, reused for every probe.
+        # _probe_element's bracket+bisect ladder calls eval_delta dozens of
+        # times per element, and this used to rebuild the entire center dict
+        # on every one of them -- for a perturbation of a single slot.  The
+        # slot is restored after each evaluation instead, so the scratch is
+        # always the unperturbed center on entry, exactly as a fresh copy
+        # was.  (The restore is in a finally: a non-finite logp is a normal
+        # outcome here -- _probe_element reads a wall inside +/-s as
+        # past-target -- and an exception must not leave the scratch dirty
+        # for the next element.)
+        probe = {
+            k: np.array(v, dtype=float, copy=True) for k, v in center.items()
+        }
         for key, val in center.items():
             n = np.asarray(val).size
             sc = np.ones(n)
             for i in range(n):
 
                 def eval_delta(step, key=key, i=i):
-                    probe = {
-                        k: np.array(v, dtype=float, copy=True)
-                        for k, v in center.items()
-                    }
-                    probe[key].flat[i] += step
-                    return lp0 - float(logp_fn(probe))
+                    saved = probe[key].flat[i]
+                    probe[key].flat[i] = saved + step
+                    try:
+                        return lp0 - float(logp_fn(probe))
+                    finally:
+                        probe[key].flat[i] = saved
 
                 scale, _method, _g = _probe_element(eval_delta)
                 if scale is not None and np.isfinite(scale):
@@ -237,6 +250,20 @@ def match_ledger_to_modes(ledger, mode_report, match_sigma=MATCH_SIGMA):
     return ledger
 
 
+def _best_laplace_logw(ledger):
+    """Largest finite relative Laplace log-weight in ``ledger``, or None.
+
+    ``SeedRecord.laplace_logw`` carries an unknowable additive constant, so
+    it is only ever reported as a difference against this reference.  A
+    seed whose logp at the optimum was non-finite (an invalid start the
+    polish never rescued) would poison a bare ``max`` and, through it,
+    every other entry's reported gap, so those are skipped; None means no
+    seed had a usable weight and the gap is simply not reportable.
+    """
+    finite = [r.laplace_logw for r in ledger if np.isfinite(r.laplace_logw)]
+    return max(finite) if finite else None
+
+
 def rejected_records(ledger):
     return [r for r in ledger if r.matched_mode is None]
 
@@ -255,6 +282,7 @@ def ledger_to_text(ledger):
         "symmetric-curvature (Laplace) estimates at that optimum, NOT "
         "posterior draws."
     )
+    best_logw = _best_laplace_logw(ledger)
     for r in sorted(ledger, key=lambda r: r.seed_index):
         lines.append("")
         status = (
@@ -264,10 +292,21 @@ def ledger_to_text(ledger):
             else "REJECTED: no surviving posterior mode at this solution"
         )
         lines.append(f"seed {r.seed_index} ({r.source}): {status}")
+        # The Laplace log-weight gap is COMPUTED, not asserted.  This
+        # line used to read "comparable at the ~1-nat level" verbatim on
+        # every entry, which is boilerplate wherever it is not true: the
+        # ob140939 ledger printed it on a delta lp = 106 rejection.  Sign
+        # convention matches _delta_lp_cell -- 0 for the best seed,
+        # negative for anything down-weighted against it.
+        gap = ""
+        if best_logw is not None and np.isfinite(r.laplace_logw):
+            gap = (
+                "; Laplace log-weight vs best = "
+                f"{r.laplace_logw - best_logw:.2f}"
+            )
         lines.append(
             f"  lp at optimum = {r.lp_max:.2f}  (delta vs best seed = "
-            f"{r.delta_lp:.2f}; Laplace log-weight vs best is comparable "
-            "at the ~1-nat level)"
+            f"{r.delta_lp:.2f}{gap})"
         )
         if r.matched_mode is None:
             for name in sorted(r.phys):
@@ -326,11 +365,18 @@ def append_ledger_csv(ledger, csv_filename):
             f"writes {n_cols}-column rows ({', '.join(CSV_COLUMNS_MODE)}); "
             "write it with build_csv_output(..., mode_columns=True)."
         )
-    best_logw = max(r.laplace_logw for r in ledger)
+    best_logw = _best_laplace_logw(ledger)
     with open(csv_filename, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f, lineterminator="\n")
         for r in rej:
-            w = float(np.exp(r.laplace_logw - best_logw))
+            # Blank rather than "nan": with no finite reference anywhere in
+            # the ledger the ratio is not defined, and a bare max() over a
+            # non-finite entry reported every OTHER seed's weight as nan too.
+            w_cell = (
+                f"{float(np.exp(r.laplace_logw - best_logw)):.3g}"
+                if best_logw is not None and np.isfinite(r.laplace_logw)
+                else ""
+            )
             for name in sorted(r.phys):
                 vals = np.asarray(r.phys[name]).reshape(-1)
                 sigs = np.asarray(r.phys_sigma[name]).reshape(-1)
@@ -339,7 +385,7 @@ def append_ledger_csv(ledger, csv_filename):
                         [
                             name,
                             f"rejected-seed{r.seed_index}",
-                            f"{w:.3g}",
+                            w_cell,
                             "",
                             f"{vals[i]:.6g}",
                             f"{sigs[i]:.3g}",
@@ -349,6 +395,22 @@ def append_ledger_csv(ledger, csv_filename):
     logger.info(
         f"Ledger: appended {len(rej)} rejected mode(s) to {csv_filename}"
     )
+
+
+def _delta_lp_cell(delta_lp):
+    """The Delta ln P cell for one rejected seed.
+
+    ``delta_lp`` is stored as best minus this seed, i.e. non-negative, and
+    the table shows how far BELOW the best this seed sits -- so the printed
+    value is its negation.  The best seed itself has delta_lp == 0, which
+    formatted as "$-0.0$": a signed zero reads as a real (if tiny)
+    difference.  Anything that rounds to zero at this precision is printed
+    as an unsigned zero instead.
+    """
+    text = f"{-float(delta_lp):.1f}"
+    if text == "-0.0":
+        text = "0.0"
+    return f"${text}$"
 
 
 def write_rejected_latex(ledger, filename, hot_status=None):
@@ -385,8 +447,10 @@ def write_rejected_latex(ledger, filename, hot_status=None):
     lines.append(
         r"\caption{Solutions considered and rejected by the posterior. "
         r"Values are Laplace approximations at each seeded basin's "
-        r"optimum; $\Delta \ln \mathcal{L}$ is measured against the best "
-        r"seeded solution." + caveat + r"}"
+        r"optimum; $\Delta \ln \mathcal{P}$ is the log-POSTERIOR "
+        r"difference against the best seeded solution -- priors, "
+        r"potentials and reparameterization Jacobians included, not a "
+        r"likelihood ratio." + caveat + r"}"
     )
     cols = "l" + "c" * len(rej)
     lines.append(r"\begin{tabular}{" + cols + "}")
@@ -394,7 +458,9 @@ def write_rejected_latex(ledger, filename, hot_status=None):
     header = ["Parameter"] + [f"seed {r.seed_index}" for r in rej]
     lines.append(" & ".join(header) + r" \\")
     lines.append(r"\hline")
-    dl = [r"$\Delta \ln \mathcal{L}$"] + [f"$-{r.delta_lp:.1f}$" for r in rej]
+    dl = [r"$\Delta \ln \mathcal{P}$"] + [
+        _delta_lp_cell(r.delta_lp) for r in rej
+    ]
     lines.append(" & ".join(dl) + r" \\")
     names = sorted({n for r in rej for n in r.phys})
     for name in names:
@@ -431,11 +497,23 @@ def write_rejected_latex(ledger, filename, hot_status=None):
 # Hot-chain mode discovery (PTDE store_hot_chains)
 # ---------------------------------------------------------------------------
 
-# A hot draw whose UNtempered lp is within this many nats of the best lp
-# seen anywhere in the hot set is "near-viable": worth clustering as a
-# candidate mode. Matches the spirit of modes.DEFAULT_LP_EXEMPT_MARGIN --
-# a genuinely real mode more than 50 nats down carries e^-50 of the mass
-# and loses nothing by being ignored.
+# The near-viable margin is derived from the LADDER, not fixed: a basin
+# Delta nats below the best has hottest-rung occupancy e^(-Delta/T_max), so
+# anything deeper than ~HOT_HORIZON_TMAX_FACTOR x T_max was not explorable by
+# the run at all.  That depth is the run's SEARCH HORIZON, and it is reported
+# as such -- absence of a basin beyond it means "not searchable at this
+# T_max", never "considered and rejected".
+#
+# The old fixed HOT_LP_MARGIN = 50 was justified by MASS ("a mode 50 nats
+# down carries e^-50 and loses nothing by being ignored") -- true for
+# weights, wrong for the ledger's other job, REPORTING explored-and-rejected
+# solutions.  Measured on DC2018 event 128 (48 rungs, T_max = 8500): the
+# hot rungs held ~400k draws in the s <-> 1/s mirror basin, 779 nats below
+# the main mode, and the 50-nat cut silently discarded every one of them.
+HOT_HORIZON_TMAX_FACTOR = 10.0
+
+# Fallback when the hot group carries no temperature coordinate (pre-2026-08
+# traces): the old fixed margin, kept so old traces keep loading.
 HOT_LP_MARGIN = 50.0
 
 # Fewer near-viable points than this cannot support a cluster.
@@ -470,6 +548,9 @@ def run_hot_mode_discovery(system, model, idata, seed_ledger=None, **kwargs):
     Non-fatal by contract: a wrap-up diagnostic must never take down a
     finished multi-day fit, so the catch stays broad -- but the exception's
     type and message go into the status rather than only into a log line.
+
+    ``**kwargs`` reaches discover_hot_modes; ``cores=`` in particular is
+    what keeps its polish off one core (see that function's docstring).
     """
     if not hasattr(idata, "posterior_hot"):
         return seed_ledger, {
@@ -570,6 +651,26 @@ def hot_status_to_text(status):
         lines.append("survived is given by its own ledger entry.")
     else:  # unknown state -- never silently swallow it
         lines.append(f"UNKNOWN state '{state}'.")
+    if state in (HOT_NONE_FOUND, HOT_FOUND) and "margin_nats" in status:
+        # State the SEARCH HORIZON, so silence has a defined meaning: a basin
+        # deeper than the horizon was not reachable at this T_max, and its
+        # absence here is "not searched", never "considered and rejected".
+        m = float(status["margin_nats"])
+        if "t_max" in status:
+            lines.append(
+                f"search horizon: basins to Delta lp <= {m:g} nats "
+                f"({HOT_HORIZON_TMAX_FACTOR:g} x T_max = "
+                f"{float(status['t_max']):g}). Deeper basins have hottest-"
+                f"rung occupancy below e^-{HOT_HORIZON_TMAX_FACTOR:g} and "
+                "were not reachable by this run; their absence is 'not "
+                "searchable at this T_max', not 'rejected'."
+            )
+        else:
+            lines.append(
+                f"search horizon: basins to Delta lp <= {m:g} nats (fixed "
+                "fallback margin; the hot group carried no temperature "
+                "coordinate)."
+            )
     if state in (HOT_NONE_FOUND, HOT_FOUND):
         # A microlensing fit gets hot-rung retention without asking for it,
         # so say plainly that a search HAPPENED -- otherwise a reader who
@@ -600,12 +701,13 @@ def discover_hot_modes(
     model,
     hot,
     seed_ledger=None,
-    margin_nats=HOT_LP_MARGIN,
+    margin_nats=None,
     min_points=HOT_MIN_POINTS,
     max_modes=8,
     subsample=20000,
     seed=20260711,
     polish_steps=150,
+    cores=None,
     status=None,
 ):
     """Find posterior-suppressed modes in the thinned hot-rung draws.
@@ -634,6 +736,15 @@ def discover_hot_modes(
     counts) so the final report can say WHICH of the four outcomes occurred
     instead of rendering "searched and found nothing" and "never searched"
     and "crashed" identically.  See hot_status_to_text.
+
+    ``cores`` is the core grant for the candidate polish.  run.py passes the
+    grant the sampler itself used, so a user's ``sampler: cores:`` governs
+    this stage too; None means AUTO (_common.default_cores), never serial.
+    Both halves matter, and review 6.11.3 is what happens without them: this
+    call passed nothing, None meant serial, and the branch every
+    gradient-free (VBM-backed) microlensing fit takes ran on 1 core of 36
+    for 38 minutes on a SINGLE candidate, immediately after a sampling phase
+    that had been using 27.
     """
     from .modes import _dip_merge, _kmeans_bic
 
@@ -692,6 +803,26 @@ def discover_hot_modes(
             "at least one variable; no suppressed-mode search was made."
         )
         return _finish(HOT_FAILED, "no finite hot draws to cluster")
+    # Resolve the margin from the ladder unless the caller pinned one.
+    if margin_nats is None:
+        t_max = float("nan")
+        try:
+            if "temperature" in hot.coords or "temperature" in hot:
+                t_max = float(np.nanmax(np.asarray(hot["temperature"])))
+        except Exception:
+            pass
+        if np.isfinite(t_max) and t_max > 1.0:
+            margin_nats = HOT_HORIZON_TMAX_FACTOR * t_max
+            status["t_max"] = t_max
+        else:
+            margin_nats = HOT_LP_MARGIN
+            logger.warning(
+                "Hot-chain discovery: no temperature coordinate on the hot "
+                f"group; falling back to the fixed {HOT_LP_MARGIN:g}-nat "
+                "margin. Basins deeper than that will not be reported."
+            )
+    status["margin_nats"] = float(margin_nats)
+
     viable = good & (lp >= np.nanmax(lp[good]) - margin_nats)
     n_viable = int(viable.sum())
     status["n_viable"] = n_viable
@@ -708,56 +839,174 @@ def discover_hot_modes(
             f"{margin_nats:g} nats of the best (need {min_points} to "
             f"cluster)",
         )
-    Xv, lpv = X[viable], lp[viable]
-
+    # -----------------------------------------------------------------
+    # LEVEL-SET LADDER.  One clustering pass at the full horizon margin
+    # does not work, and the failure is measured, not hypothetical: on
+    # DC2018 event 128 (horizon 85,000 nats, 2.9M viable draws) the space
+    # BETWEEN the two basins fills with in-transit hot draws, the density
+    # dip vanishes, and the merge step returns a single cluster -- the
+    # mirror basin, held by ~400k stored draws, went unreported.  At
+    # intermediate margins (1000-5000 nats) the same basin separates
+    # cleanly, because the lp cut removes the bridge before it removes the
+    # basin.  So basins are found the way sublevel sets find them: cluster
+    # at an increasing ladder of margins, collect each level's cluster
+    # candidates, and let the polish + dedup collapse the duplicates (the
+    # main basin is rediscovered at every level; that is what dedup is
+    # for).  A basin is reportable if it separates at ANY level up to the
+    # horizon.
+    #
+    # Clustering is in WHITENED RAW UNITS, center-only.  The previous
+    # per-column standardization divided by the viable set's own (hot)
+    # spread, which crushes exactly the likelihood-informed directions
+    # where a second basin shows up as a large multiple of the cold sigma,
+    # and promotes diffuse prior-dominated directions to unit scale --
+    # measured on the same event, it returned two clusters BOTH in the
+    # main basin, split along the stellar/kinematic sector.
     rng = np.random.default_rng(seed)
-    if Xv.shape[0] > subsample:
-        keep = rng.choice(Xv.shape[0], size=subsample, replace=False)
-        Xv, lpv = Xv[keep], lpv[keep]
+    ladder = [
+        m
+        for m in (50.0, 250.0, 1000.0, 5000.0, 20000.0, margin_nats)
+        if m <= margin_nats
+    ]
+    if ladder[-1] != margin_nats:
+        ladder.append(margin_nats)
+    status["margin_ladder"] = list(ladder)
 
-    # Standardize for clustering (hot spreads are wide but finite).
-    mu = np.median(Xv, axis=0)
-    sig = np.maximum(np.std(Xv, axis=0), 1e-12)
-    Z = (Xv - mu) / sig
-    labels, centers = _kmeans_bic(Z, max_modes=max_modes, seed=seed)
-    # iterate the density-dip merge to a fixed point, as identify_modes does
-    while True:
-        labels, centers, changed = _dip_merge(
-            Z, labels, centers, merge_ratio=0.5
-        )
-        if not changed:
-            break
-    n_clusters = len(np.unique(labels[labels >= 0]))
-    status["n_clusters"] = int(n_clusters)
+    candidates = []  # (lp, packed raw row)
+    per_level = []
+    lp_best = np.nanmax(lp[good])
+    prev_level = 0.0
+    for level in ladder:
+        # Cluster the SHELL -- draws new at this level -- not the cumulative
+        # sublevel set.  Measured failure of the cumulative version on the
+        # DC2018-128 trace: at margin 1000 the mirror basin is 12k of 1.26M
+        # viable draws (~1%), and k-means simply never places a centroid on
+        # a small remote cluster, so every level's candidates were the main
+        # basin again.  In the 500-1000 shell the same basin is ~11% of the
+        # points and separates reliably; a basin whose depth falls between
+        # two levels ALWAYS dominates some shell, which is the whole logic
+        # of a level-set filtration.
+        v = good & (lp >= lp_best - level) & (lp < lp_best - prev_level)
+        if prev_level == 0.0:
+            # the innermost shell includes the best point itself
+            v = good & (lp >= lp_best - level)
+        prev_level = level
+        Xv, lpv = X[v], lp[v]
+        if Xv.shape[0] < min_points:
+            per_level.append((level, int(Xv.shape[0]), 0))
+            continue
+        if Xv.shape[0] > subsample:
+            keep = rng.choice(Xv.shape[0], size=subsample, replace=False)
+            Xv, lpv = Xv[keep], lpv[keep]
+        Z = Xv - np.median(Xv, axis=0)
+        labels, centers = _kmeans_bic(Z, max_modes=max_modes, seed=seed)
+        while True:
+            labels, centers, changed = _dip_merge(
+                Z, labels, centers, merge_ratio=0.5
+            )
+            if not changed:
+                break
+        ks = np.unique(labels[labels >= 0])
+        per_level.append((level, int(Xv.shape[0]), int(len(ks))))
+        for c in ks:
+            sel = labels == c
+            b_i = int(np.argmax(lpv[sel]))
+            candidates.append((float(lpv[sel][b_i]), Xv[sel][b_i]))
+
+    # Pre-dedup candidates by the MIDPOINT TEST -- topological, scale-free.
+    # Position thresholds cannot work here: under unmeasured preliminary
+    # whitening a toy's two genuine basins sat 2.2 "sigma" apart while the
+    # real run's same-basin annulus duplicates sat hundreds out, so any
+    # fixed or lp-implied radius misclassifies one of them.  The property
+    # that actually distinguishes "same basin" is concavity along the chord:
+    # within one concave basin, lp at the midpoint of two points is >= the
+    # smaller endpoint lp (a concave function on a segment attains its
+    # minimum at an endpoint); a VALLEY between two basins breaks that by
+    # construction.  One logp evaluation per pair, using the model's own lp.
+    candidates.sort(key=lambda t: -t[0])
+    logp_fn = model.compile_logp()
+
+    def _lp_of_row(row):
+        cand, ofs = {}, 0
+        for key in raw_keys:
+            n = shapes[key]
+            cand[key] = np.array(row[ofs : ofs + n], dtype=float)
+            ofs += n
+        try:
+            return float(logp_fn(cand))
+        except Exception:
+            return -np.inf
+
+    kept = []
+    for lp_c, x_c in candidates:
+        dup = False
+        for lp_k, x_k in kept:
+            lp_mid = _lp_of_row(0.5 * (x_c + x_k))
+            if lp_mid >= min(lp_c, lp_k) - 1.0:
+                dup = True  # no valley between them: same basin
+                break
+        if not dup:
+            kept.append((lp_c, x_c))
+    status["n_clusters"] = int(len(kept))
     logger.info(
-        f"Hot-chain discovery: {n_viable} near-viable draws -> "
-        f"{n_clusters} cluster(s)."
+        "Hot-chain discovery (level ladder): "
+        + "; ".join(
+            f"margin {lv:g}: {nv} viable -> {nc} cluster(s)"
+            for lv, nv, nc in per_level
+        )
+        + f" => {len(kept)} distinct candidate(s) after pre-dedup"
     )
 
     from ..polish import polish_raw_starts
 
     next_index = max((r.seed_index for r in ledger), default=-1) + 1
-    for c in np.unique(labels[labels >= 0]):
-        sel = labels == c
-        best = int(np.argmax(lpv[sel]))
-        x_best = Xv[sel][best]
-        # rebuild the raw dict for this candidate
+
+    # Rebuild raw dicts for every kept candidate, then polish them as ONE
+    # BATCH.  Polishing one candidate at a time gives each an infinite trust
+    # radius (a single seed is unconstrained by design), and a candidate
+    # from a suppressed basin defects to the dominant one during its own
+    # polish -- the mirror, 779 nats below the main mode, walked out exactly
+    # as the MMEXOFAST seeds once did, and dedup then erased the discovery.
+    # As one batch, polish_seed_starts' multi-seed trust region cages each
+    # candidate within half the distance to its nearest neighbour, which is
+    # the same contract multi-seed sampling starts get.
+    cands = []
+    for _lp_c, x_best in kept:
         cand, ofs = {}, 0
         for key in raw_keys:
             n = shapes[key]
             cand[key] = np.array(x_best[ofs : ofs + n], dtype=float)
             ofs += n
-
-        polished, _dlps, _method = polish_raw_starts(
-            model, [cand], n_steps=polish_steps
+        cands.append(cand)
+    if cands:
+        logger.info(
+            f"Hot-chain discovery: polishing {len(cands)} candidate(s) to "
+            f"their basin optima (at most {int(polish_steps)} steps each)."
         )
-        recs = build_seed_ledger(system, model, polished, [next_index])
-        rec = recs[0]
-        rec.source = "hot-chain"
+        polished_all, _dlps, _method = polish_raw_starts(
+            model,
+            cands,
+            n_steps=polish_steps,
+            # The SAME core grant run.py hands the pre-sampling polish, and
+            # for the same reason -- this call omitted it and so ran the DE
+            # engine serial on one core of the machine the sampler had just
+            # been using in full (review 6.11.3).
+            cores=cores,
+        )
+        recs_all = build_seed_ledger(
+            system,
+            model,
+            polished_all,
+            list(range(next_index, next_index + len(polished_all))),
+        )
+    else:
+        recs_all = []
 
+    for rec in recs_all:
+        rec.source = "hot-chain"
         # Dedup: an existing record already sitting in this basin (within
-        # MATCH_SIGMA of the polished point, in the new record's own
-        # widths) makes this a rediscovery, not a discovery.
+        # MATCH_SIGMA of the polished point, in the new record's own widths)
+        # makes this a rediscovery, not a discovery.
         dup = False
         for other in ledger:
             ds = []
@@ -767,37 +1016,30 @@ def discover_hot_modes(
                     other.raw_point.get(key, np.full_like(a, np.nan)),
                     dtype=float,
                 ).reshape(-1)
-                s = np.asarray(rec.raw_scales[key], dtype=float).reshape(-1)
+                sc = np.asarray(rec.raw_scales[key], dtype=float).reshape(-1)
                 if b.shape != a.shape or not np.all(np.isfinite(b)):
                     ds = []
                     break
-                ds.extend(np.abs(a - b) / np.maximum(s, 1e-300))
+                ds.extend(np.abs(a - b) / np.maximum(sc, 1e-300))
             if ds and max(ds) <= MATCH_SIGMA:
                 dup = True
                 break
         if dup:
             continue
-        ledger.append(rec)
-        next_index += 1
         logger.info(
             f"Hot-chain discovery: new basin at lp={rec.lp_max:.2f} "
             f"recorded as ledger entry {rec.seed_index} (hot-chain)."
         )
-
-    # delta_lp is relative to the best record across the WHOLE ledger.
-    if ledger:
-        best_lp = max(r.lp_max for r in ledger)
-        for r in ledger:
-            r.delta_lp = best_lp - r.lp_max
+        ledger.append(rec)
     n_new = len(ledger) - n_before
     if n_new:
         return _finish(
             HOT_FOUND,
-            f"{n_clusters} hot cluster(s) -> {n_new} new basin(s) after "
+            f"{len(kept)} hot cluster(s) -> {n_new} new basin(s) after "
             f"dedup against the existing ledger",
         )
     return _finish(
         HOT_NONE_FOUND,
-        f"{n_clusters} hot cluster(s), all of them rediscoveries of basins "
+        f"{len(kept)} hot cluster(s), all of them rediscoveries of basins "
         f"already in the ledger",
     )

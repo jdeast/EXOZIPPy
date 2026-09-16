@@ -3,10 +3,10 @@ transit:
     lower: -1000000.0
     upper: 1000000.0
     # Unity relative flux: the out-of-transit level of a normalized light
-    # curve.  This is the RANK_DEFAULT (20) floor of the provenance stack --
+    # curve.  This is the PRECEDENCE_DEFAULT (20) floor of the provenance stack --
     # Transit._hint_baseline pushes each file's median flux over it at
-    # RANK_DERIVED_DATA (60), and a user's own `transit.<name>.baseline`
-    # outranks both at RANK_USER (100).  It is what a fit resolves to when
+    # PRECEDENCE_DERIVED_DATA (60), and a user's own `transit.<name>.baseline`
+    # outranks both at PRECEDENCE_USER (100).  It is what a fit resolves to when
     # there is no data to measure a median from (the same 1.0 load_data seeds
     # baseline_init with), and it is also what makes the "pinned with no
     # value" check in Parameter.build_pymc an invariant rather than a rule
@@ -19,8 +19,12 @@ transit:
     latex: "F_0"
     description: "Relative flux baseline"
   jitter_variance:
+    # Because the light curve is normalized to ~1, a variance of 1 is a
+    # 100%-of-signal noise term, which follows our conservative uniform
+    # prior standard.  The lower bound stays a wide backstop: the binding
+    # one is per-instrument and data-derived (Instrument._jitter_floor).
     lower: -1000.0
-    upper: 100000.0
+    upper: 1.0
     initval: 0.0
     init_scale: 0.000001
     unit: ""
@@ -59,7 +63,10 @@ transit:
     unit: ""
     internal_unit: ""
   # Optional hogg-mixture outlier scatter, in relative flux (the rest of the
-  # robust-likelihood blueprint lives in components/defaults.yaml).
+  # robust-likelihood blueprint lives in components/defaults.yaml).  The
+  # component starts it at 1 x and caps it at 10 x the file's median error
+  # bar (review 8.6.3), so this wide static upper is only the fallback for a
+  # file with degenerate errors.
   out_scale:
     lower: 0.0
     upper: 1.0
@@ -68,6 +75,17 @@ transit:
     unit: ""
     internal_unit: ""
   detrend_coeffs:
+    # THE RULE (review 3.14.10): the design matrix is WHITENED at ingestion
+    # (Instrument._build_block_detrend), so it is dimensionless, and the
+    # coefficient therefore carries the units of WHATEVER THE DOT PRODUCT
+    # FEEDS -- per unit of the raw column, which no unit system can name.
+    # Here `lc_model += pt.dot(detrend, detrend_coeffs)` and lc_model is
+    # NORMALIZED FLUX, so "" is correct rather than merely unfilled: this
+    # coefficient really is dimensionless.  Audited and left alone in
+    # 2026-08; rvinstrument's identical-looking ""/"" was NOT correct (its
+    # model is in the internal solRad/d and it now reports m/s), and
+    # mulensinstrument's is in MAGNITUDES because its coefficient sits
+    # inside 10**(-0.4*...) even though that component models flux.
     initval: 0.0
     init_scale: 1.0
     lower: -1.0e6

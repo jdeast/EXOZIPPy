@@ -5,6 +5,9 @@ solar-system ephemeris (erfa, no download) and the one site-name test skips
 cleanly when astropy's site registry is not already cached.
 """
 
+import logging
+import os
+
 import numpy as np
 import pytest
 from astropy.coordinates import EarthLocation, solar_system_ephemeris
@@ -322,3 +325,102 @@ def test_site_name_matches_its_geodetic_string():
 
     # Assert
     assert np.allclose(by_name, by_geodetic, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# interpolate_ephemeris parses and fits ONCE per file version (review 6.10.1)
+# ---------------------------------------------------------------------------
+
+
+def _write_eph(path, offset=0.0):
+    """A tiny linear .eph: BJD_TDB, X, Y, Z (barycentric AU)."""
+    t = np.linspace(2458000.0, 2458100.0, 21)
+    np.savetxt(
+        path,
+        np.column_stack([t, t * 0 + 1.0 + offset, t * 0, t * 0]),
+    )
+    return t
+
+
+def test_the_same_ephemeris_is_parsed_once_however_often_it_is_used(
+    tmp_path, monkeypatch
+):
+    """
+    Given one .eph file,
+    When interpolate_ephemeris is called many times on it -- which is what
+      happens per instrument at load AND from plot_sky's 4000-point grids
+      and the mulens plotters, so a multi-draw plotting pass hit the same
+      file dozens of times,
+    Then the file is np.loadtxt'd and CubicSpline'd exactly ONCE, and every
+      call still returns the same numbers.
+    """
+    # Arrange
+    path = tmp_path / "sat.eph"
+    _write_eph(path)
+    eph._ephemeris_spline.cache_clear()
+    loads = []
+    real_loadtxt = eph.np.loadtxt
+    monkeypatch.setattr(
+        eph.np,
+        "loadtxt",
+        lambda *a, **k: (loads.append(a[0]), real_loadtxt(*a, **k))[1],
+    )
+
+    # Act
+    want = eph.interpolate_ephemeris(np.array([2458010.0]), str(path))
+    for _ in range(9):
+        got = eph.interpolate_ephemeris(np.array([2458010.0]), str(path))
+
+    # Assert
+    assert len(loads) == 1
+    np.testing.assert_array_equal(got, want)
+
+
+def test_a_regenerated_ephemeris_is_re_read_not_served_stale(
+    tmp_path, monkeypatch
+):
+    """
+    Given an .eph that is REWRITTEN under the same name in one process --
+      a get_ephemeris.py re-run from the GUI or a notebook,
+    When interpolate_ephemeris is called again,
+    Then it returns the NEW contents.  A plain path key would serve the old
+      spline forever, which is why the cache key carries (mtime_ns, size).
+    """
+    # Arrange
+    path = tmp_path / "sat.eph"
+    _write_eph(path)
+    eph._ephemeris_spline.cache_clear()
+    first = eph.interpolate_ephemeris(np.array([2458010.0]), str(path))
+
+    # Act: same path, different content (and a distinct mtime)
+    os.utime(path, (0, 0))
+    _write_eph(path, offset=5.0)
+    second = eph.interpolate_ephemeris(np.array([2458010.0]), str(path))
+
+    # Assert
+    assert first[0, 0] == pytest.approx(1.0)
+    assert second[0, 0] == pytest.approx(6.0)
+
+
+def test_the_extrapolation_warning_is_not_cached_with_the_spline(
+    tmp_path, caplog
+):
+    """
+    Given a cached spline,
+    When a LATER call asks for epochs outside the grid,
+    Then it still warns.  The check depends on the requested times, not on
+      the file, so it deliberately sits outside the memoized helper -- a
+      warning silenced by a cache hit is the failure mode this guards.
+    """
+    # Arrange
+    path = tmp_path / "sat.eph"
+    _write_eph(path)
+    eph._ephemeris_spline.cache_clear()
+    eph.interpolate_ephemeris(np.array([2458010.0]), str(path))  # warms it
+
+    # Act
+    with caplog.at_level(logging.WARNING, logger="exozippy.ephemeris"):
+        eph.interpolate_ephemeris(np.array([2459000.0]), str(path))
+
+    # Assert
+    assert "Extrapolating outside the ephemeris range" in caplog.text

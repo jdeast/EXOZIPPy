@@ -1,0 +1,23 @@
+Unloading tools/local-user <S>
+  ERROR: Unload of sticky module skipped
+
+Unloading uge/8.8.1 <S>
+  ERROR: Unload of sticky module skipped
+Parameter 'transit.jitter_variance'[0]: start value 0.0 sits on (or unrepresentably close to) its bounds [-3.5699698650232755e-08, 100000.0], where the logit transform diverges and no raw start exists; nudged inward to 6.430030134980294e-08, a move of 6.43e-08 (internal units). This is the ON-THE-BOUND case only -- a start OUTSIDE the bounds is refused outright, never clipped. Set an 'initval' further inside the bound to remove this nudge.
+Initializing NUTS using jitter+adapt_diag...
+Multiprocess sampling (4 chains in 4 jobs)
+NUTS: [planet.log_q_raw, planet.radius_raw, orbit.logP_raw, orbit.cosi_raw, orbit.tc_raw, transit.baseline_raw, transit.jitter_variance_raw]
+Sampling 4 chains for 2_000 tune and 2_000 draw iterations (8_000 + 8_000 draws total) took 282 seconds.
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+The effective sample size per chain is smaller than 100 for some parameters.  A higher number is needed for reliable rhat and ess computation. See https://arxiv.org/abs/1903.08008 for details
+{
+ "pipeline": "transit",
+ "seed": 1000,
+ "snr": 30.0,
+ "n_epochs": 100,
+ "orbit.period": -0.2631258807147695,
+ "orbit.tc": 2.4020805178016933,
+ "planet.p": 0.06275472697696236,
+ "planet.b": -0.13450131687660657,
+ "planet.t14": -0.1834328408025336
+}

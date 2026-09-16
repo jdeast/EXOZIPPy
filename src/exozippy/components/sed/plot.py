@@ -1,4 +1,6 @@
 import json
+import logging
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Literal, Sequence, Tuple
 
@@ -25,6 +27,52 @@ except NameError:
 source_code_dir = current_dir.parent.parent  # source code two directories up
 DEFAULT_FILTER_ROOT = source_code_dir / "filters"
 DEFAULT_MODEL_ROOT = source_code_dir / "models"
+
+logger = logging.getLogger(__name__)
+
+
+def _read_spectra_csv(path: Path) -> pd.DataFrame:
+    """Read a model's spectra table and parse its per-row flux arrays.
+
+    Cached (review 6.9.1). NextGen's table is ~250 MB and every row's
+    ``flux`` cell is a JSON array that has to be parsed into a numpy array;
+    the whole thing was re-read and re-parsed on EVERY Plot construction,
+    which is once per posterior-plot pass and, in the GUI's live mode,
+    once per slider move.
+
+    Keyed on the file's mtime and size as well as its path, for the same
+    reason as bc_grid._load_alias_table: a regenerated table must not be
+    served from the cache. maxsize=1 because these frames are enormous --
+    holding a second model's copy is not worth the memory.
+
+    The frame is SHARED between Plot instances; treat it as read-only.
+    """
+    path = Path(path)
+    stat = path.stat()
+    return _read_spectra_csv_cached(path, stat.st_mtime_ns, stat.st_size)
+
+
+@lru_cache(maxsize=1)
+def _read_spectra_csv_cached(
+    path: Path, _mtime_ns: int, _size: int
+) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df["flux"] = df["flux"].apply(json.loads).apply(np.array)
+    return df
+
+
+def _read_wavelength_csv(path: Path) -> pd.DataFrame:
+    """The wavelength grid beside a spectra table, cached alongside it."""
+    path = Path(path)
+    stat = path.stat()
+    return _read_wavelength_csv_cached(path, stat.st_mtime_ns, stat.st_size)
+
+
+@lru_cache(maxsize=2)
+def _read_wavelength_csv_cached(
+    path: Path, _mtime_ns: int, _size: int
+) -> pd.DataFrame:
+    return pd.read_csv(path)
 
 
 class Plot:
@@ -113,6 +161,12 @@ class Plot:
         # general information
         self.system = system
         self.draws = draws
+        # The SED's own root, so a configured `model_root:` reaches the
+        # figure too (review 1.9.5). getattr, because the plot classes are
+        # also driven from tests with a stubbed system.
+        self.model_root = Path(
+            getattr(system.sed, "model_root", DEFAULT_MODEL_ROOT)
+        )
         self.ndraws = len(draws)
         self.nstars = self.system.sed.nstars
         self.star_names = self.system.star.names
@@ -182,38 +236,46 @@ class Plot:
 
         self.sedmodel = self.system.sed.sedmodel
 
-        try:
-            df_spec = pd.read_csv(
-                DEFAULT_MODEL_ROOT
-                / f"{self.sedmodel}"
-                / "BCs"
-                / f"{self.sedmodel}.spectra.csv"
-            )
-            df_wave = pd.read_csv(
-                DEFAULT_MODEL_ROOT
-                / f"{self.sedmodel}"
-                / "BCs"
-                / f"{self.sedmodel}.wavelength.csv"
-            )
-        except:
-            print(
-                f"No spectra found for ``{self.sedmodel}`` model.\n"
-                "Defaulting to using ``NextGen`` spectra for plotting."
-            )
-            df_spec = pd.read_csv(
-                DEFAULT_MODEL_ROOT / "NextGen" / "BCs" / "NextGen.spectra.csv"
-            )
-            df_wave = pd.read_csv(
-                DEFAULT_MODEL_ROOT
-                / "NextGen"
-                / "BCs"
-                / "NextGen.wavelength.csv"
-            )
+        # self.model_root, NOT DEFAULT_MODEL_ROOT: the SED reads its BC
+        # tables under the configured `model_root:`, so the spectra behind
+        # the figure have to come from the same place (review 1.9.5).
+        spec_dir = self.model_root / self.sedmodel / "BCs"
+        spec_path = spec_dir / f"{self.sedmodel}.spectra.csv"
+        wave_path = spec_dir / f"{self.sedmodel}.wavelength.csv"
 
-        df_spec["flux"] = df_spec["flux"].apply(json.loads).apply(np.array)
+        # The fallback is deliberate -- the spectra are a ~250 MB
+        # git-ignored download and their absence must not cost a whole
+        # fit its figures -- but it is narrow now. A bare `except`
+        # swallowed a corrupt CSV, a MemoryError and a KeyboardInterrupt
+        # alike, and then reported all of them as "no spectra found".
+        if not (spec_path.is_file() and wave_path.is_file()):
+            fallback = DEFAULT_MODEL_ROOT / "NextGen" / "BCs"
+            logger.warning(
+                "No model spectra for '%s' at %s; falling back to the "
+                "packaged NextGen spectra for plotting. The FIGURE's model "
+                "curve is therefore a NextGen spectrum, while the fit's "
+                "bolometric corrections came from '%s'.",
+                self.sedmodel,
+                spec_dir,
+                self.sedmodel,
+            )
+            spec_path = fallback / "NextGen.spectra.csv"
+            wave_path = fallback / "NextGen.wavelength.csv"
+
+        df_spec = _read_spectra_csv(spec_path)
+        df_wave = _read_wavelength_csv(wave_path)
 
         self.df_spec = df_spec
         self.df_wave = df_wave
+
+    def _grid_yaml_path(self):
+        """Where this model's grid description lives, under ITS root."""
+        return (
+            self.model_root
+            / self.sedmodel
+            / "BCs"
+            / f"{self.sedmodel}.grid.yaml"
+        )
 
     def _load_model_grid_yaml(self):
         """
@@ -227,13 +289,13 @@ class Plot:
             self.grid_axes          :  Set(List)
                                         'grid' axes that the model will be interpolated on
         """
-        with open(
-            DEFAULT_MODEL_ROOT
-            / f"{self.sedmodel}"
-            / "BCs"
-            / f"{self.sedmodel}.grid.yaml",
-            "r",
-        ) as f:
+        path = self._grid_yaml_path()
+        if not path.is_file():
+            # _load_spectra_data has already fallen back to the packaged
+            # NextGen spectra in this case; use its grid description too,
+            # so the axes and the spectra being interpolated agree.
+            path = DEFAULT_MODEL_ROOT / "NextGen" / "BCs" / "NextGen.grid.yaml"
+        with open(path, "r") as f:
             self.model_grid_yaml = yaml.safe_load(f)
 
         # when dealing with the raw model spectra

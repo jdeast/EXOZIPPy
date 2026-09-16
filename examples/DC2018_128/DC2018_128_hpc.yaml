@@ -15,13 +15,13 @@ prefix: "fitresults/DC2018_128"
 # footprint via copy-on-write. If you change -pe mthread in dc128.job,
 # change cores here to match.
 
-# Roman Data Challenge 2018, LC 128.  Binary lens + finite source (2L1S).
+# Roman Data Challenge 2018, LC 128.  Binary lens, point source (2L1S).
 # MMEXOFAST solution: t_E~18.2d, s~0.98, q~0.0011, alpha~-52 deg
 #
 # system architecture:
-#   star.0 = Lens      (primary lens host)
-#   star.1 = Source    (background source)
-#   planet.0 = Companion (secondary lens body)
+#   star.Lens        = primary lens host    (lens body 0)
+#   planet.Companion = secondary lens body  (lens body 1)
+#   star.Source      = background source
 
 star:
   - name: "Lens"
@@ -30,15 +30,19 @@ star:
 planet:
   - name: "Companion"
 
+mulensevent:
+  - finite_source: False
+
 lens:
-  - name: "Lens"
-    lenses:  ["star.0", "planet.0"]
-    sources: ["star.1"]
-    finite_source: False
+  - body: star.Lens
+  - body: planet.Companion
+
+source:
+  - body: star.Source
 
 galacticmodel:
   - name: "DC2018_128"
-    anchor_idx: 1  # we anchor the galactic model to the source star, star.1
+    anchor_idx: 1  # we anchor the galactic model to the source star (star.Source)
 
 band:
   - name: "Z087"

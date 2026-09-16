@@ -46,8 +46,6 @@ class Torres(StellarRelation, Component):
       build_likelihood below; mann passes ``normalize=True``.
     """
 
-    yaml_key = "torres"
-
     @property
     def prefix(self):
         return "torres"
@@ -60,7 +58,7 @@ class Torres(StellarRelation, Component):
         ]
 
     def load_data(self, system):
-        """Stage 1a: resolve the target stars and parse the per-instance config."""
+        """Stage 1: resolve the target stars and parse the per-instance config."""
         self.star_indices = []
         self.constrain = []
         self.logm_floor = []
@@ -88,7 +86,7 @@ class Torres(StellarRelation, Component):
                 )
 
     def register_parameters(self, system):
-        """Stage 2: nothing to declare -- Torres adds only potentials.
+        """Stage 3: nothing to declare -- Torres adds only potentials.
 
         Its inputs (star.teff, star.logg, star.feh) are already on the star
         component, and the relation has no latent of its own.
@@ -120,7 +118,7 @@ class Torres(StellarRelation, Component):
         star = system.star
         smap = self.star_map_tensor
 
-        # Deferred to stage 6: the relaxation engine (stage 3) has run by now,
+        # Deferred to stage 7: the relaxation engine (stage 4) has run by now,
         # so these initvals are the ones the sampler will actually start from.
         self._warn_outside_calibration(system)
 

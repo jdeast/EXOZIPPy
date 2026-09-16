@@ -103,7 +103,11 @@ def eccentric_system(tmp_path_factory):
             orbits.period.value[0],
             planets.p.value[0],
         ]
-        + [model[f"transit.{name}"][0] for name in dets]
+        # `planet.<name>`, not `transit.<name>`: the durations moved to
+        # the planet component in review 8.8.7, where they are derived
+        # Parameters (force_node, so still Deterministics in the trace)
+        # rather than nodes transit.py builds inline.
+        + [model[f"planet.{name}"][0] for name in dets]
         + [planets.b.value[0]],
     )
     values = [float(v) for v in fn()]
@@ -119,7 +123,7 @@ def _winn_durations(g, sign):
     secondary. The (1-p)^2 arcsin quantity is Winn's t23 (the
     full-occultation duration); tfwhm = (t14+t23)/2 and
     tau = (t14-t23)/2, the EXOFASTv2 derivepars.pro convention (audit
-    finding 1.12 had transit.tfwhm reporting t23 itself)."""
+    finding 1.12 had the reported tfwhm being t23 itself)."""
     denom = 1.0 + sign * g["esinw"]
     ecc_factor = np.sqrt(1.0 - g["ecc"] ** 2)
     b = g["ar"] * g["cosi"] * (1.0 - g["ecc"] ** 2) / denom
@@ -136,7 +140,7 @@ def _winn_durations(g, sign):
 def test_primary_deterministics_match_winn2010(eccentric_system):
     """
     Given an eccentric transiting system (e=0.3, omega=60 deg),
-    When transit.b/t14/tfwhm/tau are evaluated at the initial point,
+    When planet.b/t14/tfwhm/tau are evaluated at the initial point,
     Then they match Winn 2010's PRIMARY-transit formulas -- the ones with
     the 1 + esinw denominator -- computed in numpy from the model's own
     geometry (ar, cosi, ecc, esinw, period, p).
@@ -152,7 +156,7 @@ def test_primary_deterministics_match_winn2010(eccentric_system):
 def test_secondary_deterministics_match_winn2010(eccentric_system):
     """
     Given the same eccentric system,
-    When transit.bs/t14s/tfwhms/taus are evaluated at the initial point,
+    When planet.bs/t14s/tfwhms/taus are evaluated at the initial point,
     Then they match Winn 2010's SECONDARY-eclipse formulas -- the ones
     with the 1 - esinw denominator.
     """

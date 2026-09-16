@@ -10,7 +10,8 @@ file, so an explicit user entry still frees it).
 
 The consumers, and the condition under which each reads a band's LD:
   transit           -- unconditional (any transit referencing the band)
-  mulensinstrument  -- only when lens.finite_source is on
+  mulensinstrument  -- only when mulensevent.finite_source is on (the flag
+                       moved off the `lens:` block in the 8.6.17 split)
   rvinstrument rm:  -- the `rm_band` band, or band 0 when unset
   astrometry band:  -- NOT a consumer (filter identity only, for the SED)
 """
@@ -44,11 +45,10 @@ def _write_pspl_lc(path, n=60):
 def _mulens_config(lc, bands=None, mulens_band="I", finite_source=False):
     config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [
+        # Event-level keys (finite_source, t0_par, use_op, mmexofast) live on
+        # `mulensevent:`; `lens:`/`source:` name one physical body each.
+        "mulensevent": [
             {
-                "name": "Lens",
-                "lens_ndx": 0,
-                "source_ndx": 1,
                 "finite_source": finite_source,
                 "t0_par": T0,
                 "use_op": False,
@@ -56,6 +56,8 @@ def _mulens_config(lc, bands=None, mulens_band="I", finite_source=False):
                 "mmexofast": False,
             }
         ],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
         "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],
     }
     if bands is not None:
@@ -67,9 +69,10 @@ def _mulens_config(lc, bands=None, mulens_band="I", finite_source=False):
 
 def _mulens_params(finite_source=False):
     params = {
-        "lens.Lens.t_0": {"initval": T0},
-        "lens.Lens.u_0": {"initval": U0},
-        "lens.Lens.t_E": {"initval": TE},
+        # t_0/u_0/rho are per SOURCE; t_E is event-level.
+        "source.Source.t_0": {"initval": T0},
+        "source.Source.u_0": {"initval": U0},
+        "mulensevent.t_E": {"initval": TE},
         "star.radius": {"sigma": 0.0},
         "star.teff": {"sigma": 0.0},
         "star.feh": {"sigma": 0.0},
@@ -78,7 +81,7 @@ def _mulens_params(finite_source=False):
         params[f"star.{nm}.ra"] = {"initval": 264.0, "sigma": 0}
         params[f"star.{nm}.dec"] = {"initval": -27.0, "sigma": 0}
     if finite_source:
-        params["lens.Lens.rho"] = {"initval": 1.0e-3}
+        params["source.Source.rho"] = {"initval": 1.0e-3}
     return params
 
 
@@ -185,7 +188,8 @@ def test_omission_is_logged_at_info(pspl_lc, caplog):
 # --------------------------------------------------------------------------
 def test_finite_source_frees_the_limb_darkening(pspl_lc):
     """
-    Given the same fit with lens.finite_source: true and nothing else changed,
+    Given the same fit with mulensevent.finite_source: true and nothing
+      else changed,
     When the model is built,
     Then the band's q1/q2 are free RVs again.
     """
@@ -296,6 +300,82 @@ def test_transit_band_ld_stays_free_and_an_unused_band_is_pinned(
         assert sigma[1] == 0.0
 
 
+def test_two_transits_may_use_different_limb_darkening_laws(
+    tmp_path_factory,
+):
+    """
+    Given two transits in two bands, one declaring the quadratic law and the
+      other the linear one,
+    When the model is built,
+    Then the quadratic band samples the Kipping pair while the linear band
+      samples u1 itself, u1 is derived on the quadratic band only, u2 is
+      exactly 0 on the linear band, and the start's logp and gradient are
+      finite.
+
+    This configuration used to RAISE ("all bands must use the same ld_law"),
+    because Parameter.build_pymc derived a whole vector or none of it; the
+    documented workaround was quadratic everywhere with the linear band's q2
+    pinned at 0.5, which reproduces u2 = 0 but samples uniformly in q1 rather
+    than in u1.  The per-element roles express it directly.
+    """
+    d = tmp_path_factory.mktemp("band_mixed_laws")
+    lc0 = _write_transit_lc(d / "lc0.dat")
+    lc1 = _write_transit_lc(d / "lc1.dat")
+    config = {
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "b"}],
+        "orbit": [{"name": "b"}],
+        "band": [
+            {"name": "TESS", "filter": "TESS", "ld_law": "quadratic"},
+            {"name": "V", "filter": "V", "ld_law": "linear"},
+        ],
+        "transit": [
+            {"name": "inst0", "file": lc0, "band": "TESS"},
+            {"name": "inst1", "file": lc1, "band": "V"},
+        ],
+    }
+    system, model = _build(config, _transit_params())
+
+    # Both coordinate sets are sampled, each on its own band.
+    assert _band_rv_names(model) == [
+        "band.q1_raw",
+        "band.q2_raw",
+        "band.u1_raw",
+    ]
+    assert system.band.q1.is_sampled.tolist() == [True, False]
+    assert system.band.u1.is_sampled.tolist() == [False, True]
+    assert system.band.u1.is_derived.tolist() == [True, False]
+    # The Kipping coordinates and u2 are not parameters of the linear band.
+    assert system.band.q1.is_active.tolist() == [True, False]
+    assert system.band.u2.is_active.tolist() == [True, False]
+
+    with model:
+        point = model.initial_point()
+        u2 = model.compile_fn(
+            model.replace_rvs_by_values([system.band.u2.value]),
+            inputs=model.value_vars,
+            point_fn=True,
+            on_unused_input="ignore",
+        )(point)[0]
+        logp = model.compile_logp()(point)
+        dlogp = model.compile_dlogp()(point)
+
+    assert float(np.atleast_1d(u2)[1]) == 0.0
+    assert np.isfinite(logp)
+    assert np.all(np.isfinite(dlogp))
+
+    # The roles reach a trace, so mkparam -- which has no System -- writes a
+    # start value for the LINEAR band's u1 and none for the quadratic band's
+    # (whose value is an expression).  Checked here rather than in a test of
+    # its own because the model this needs is already built.
+    from exozippy.trace_meta import element_roles
+
+    roles = element_roles(system)
+    assert roles["band.u1"]["sampled"] == [False, True]
+    assert roles["band.u1"]["derived"] == [True, False]
+    assert roles["band.u2"]["active"] == [True, False]
+
+
 # --------------------------------------------------------------------------
 # 6. The predicate itself, on stub topologies: the cases a full System build
 #    would be far too expensive to cover (RM, astrometry).
@@ -364,13 +444,77 @@ def test_point_source_mulens_band_is_not_an_ld_consumer():
     Then the band is not a consumer; turning finite_source on makes it one.
     """
     band = _band_for(["I"])
+    # finite_source is read off the one `mulensevent:` entry, not off the
+    # per-body `lens:` entries (8.6.17 split).
     point = _StubSystem(
-        lens=[{"finite_source": False}],
+        mulensevent=[{"finite_source": False}],
         mulensinstrument=[{"name": "OGLE", "band": "I"}],
     )
     finite = _StubSystem(
-        lens=[{"finite_source": True}],
+        mulensevent=[{"finite_source": True}],
         mulensinstrument=[{"name": "OGLE", "band": "I"}],
     )
     assert set(band._ld_consumer_indices(point)) == set()
     assert set(band._ld_consumer_indices(finite)) == {0}
+
+
+# --------------------------------------------------------------------------
+# 7. The linear law's u1 <= 1 validity cap (review 1.5.4), directly on the
+#    method.  The cap used to sit AFTER the "every band is read, nothing to
+#    pin" early return, so the one configuration it was written for -- a
+#    single linear band consumed by a finite-source light curve, DC2018
+#    event 128, which shipped u1 = 1.45 and 1.87 -- never received it.
+# --------------------------------------------------------------------------
+def _consumed_band(law):
+    """A one-band Band under ``law`` with its LD manifest declared and the
+    band CONSUMED (consumers={0}), i.e. nothing unread."""
+    from conftest import _DummyConfigManager
+    from exozippy.components.band.band import Band
+    from exozippy.components.parameterization import mode_manifest
+
+    band = Band(
+        [{"name": "I", "filter": "I", "ld_law": law}], _DummyConfigManager()
+    )
+    band.load_data(system=None)
+    # The manifest register_parameters writes before it pins, verbatim.
+    band.manifest = mode_manifest(
+        band.ld_laws,
+        band.LD_MODE_TABLE,
+        n_elements=band.n_elements,
+        options={"u2": {"inactive_value": 0.0}},
+        where="band.ld_law",
+    )
+    band._pin_unread_limb_darkening(system=None, consumers={0})
+    return band
+
+
+def _overrides_of(entry):
+    return entry.get("overrides", {}) if isinstance(entry, dict) else {}
+
+
+def test_linear_cap_applies_when_every_band_is_consumed():
+    """
+    Given one linear-law band that IS read (consumers={0}, so no band is
+    unread and there is nothing to pin),
+    When the unread-LD pass runs,
+    Then u1 still carries the validity cap upper=[1.0] through the
+    "overrides" channel -- the cap depends on the law, not on whether an
+    unread band happens to exist.
+    """
+    band = _consumed_band("linear")
+
+    assert band.manifest["u1"]["overrides"]["upper"] == [1.0]
+    # ... and no pin was written: the band is read.
+    assert "sigma" not in _overrides_of(band.manifest["u1"])
+
+
+def test_quadratic_band_gets_no_u1_cap():
+    """
+    Given one quadratic-law band that is read,
+    When the unread-LD pass runs,
+    Then u1 carries no upper override: u1 is DERIVED from the Kipping pair
+    there, and may legitimately exceed 1 against a negative u2.
+    """
+    band = _consumed_band("quadratic")
+
+    assert "upper" not in _overrides_of(band.manifest["u1"])

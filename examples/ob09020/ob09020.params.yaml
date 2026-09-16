@@ -1,0 +1,166 @@
+# OGLE-2009-BLG-020 / OGLE-2009-BLG-020L starting values.
+#
+# Light curve: Skowron et al. 2011, ApJ 738, 87, Table 1, "parallax + full
+#   orbit (with priors)" column.  Use the IOP version of record -- the
+#   arXiv v1 posting prints different values (see README.md).
+# Orbit: Yee et al. 2016, ApJ 821, 121, Table 7 (joint microlensing + RV).
+#
+# Skowron+2011 Appendix A is EXOZIPPy's convention (conventions.md C17),
+# so its parameters transfer unchanged.  Where a value below is NOT as
+# printed, the line says which published number it came from and how.
+#
+# These published values are not a self-consistent set -- they are
+# marginal medians, and the physical block comes from a different paper
+# than the light curve.  EXOZIPPy reports at startup which of them the
+# model could not reproduce; that report is expected here, not a fault.
+
+# Sky position (OGLE EWS).  Required: the OGLE file is HJD_UTC and the
+# HJD -> BJD_TDB conversion refuses placeholder coordinates.
+star.ra:
+    initval: 271.0874583
+    sigma: 0
+star.dec:
+    initval: -29.5190556
+    sigma: 0
+
+# --- Light curve (Skowron+2011 Table 1) -----------------------------------
+source.Source.t_0:
+    initval: 2454917.252
+
+source.Source.u_0:
+    initval: 0.0613           # positive, as printed
+
+mulensevent.t_E:
+    initval: 76.9             # d
+
+source.Source.rho:
+    initval: 0.0015078        # = t_*/t_E = 0.11595/76.9
+
+mulensevent.theta_E:
+    initval: 2.95             # mas
+
+lens.L2.q:
+    initval: 0.273
+
+mulensevent.pi_E_N:
+    initval: -0.022
+mulensevent.pi_E_E:
+    initval: 0.149
+
+# s and alpha are derived from orbit L (orbital_motion: keplerian), so the
+# published s_0 = 0.4294 and alpha_0 = 189.08 are the acceptance check,
+# not inputs.
+
+# --- Lens and source physical parameters ----------------------------------
+# Yee+2016 number the bodies opposite to Skowron: their M1 = 0.244 and
+# M2 = 0.888 are EXOZIPPy's L2 and L1.
+star.L1.mass:
+    initval: 0.888
+star.L1.distance:
+    initval: 747.0            # pc
+star.L2.distance:
+    initval: 747.0            # pc
+
+star.Source.distance:
+    initval: 8000.0           # pc
+
+# --- Lens binary orbit (Yee+2016 Table 7) ---------------------------------
+orbit.L.period:
+    initval: 276.555          # d
+
+orbit.L.tp:
+    initval: 2454758.692      # time of periastron
+
+# e = 0.265, omega_* = 331.600 deg.  Yee print omega_peri = 151.600, the
+# other end of the apsidal line; EXOFASTv2's omega_* is that plus 180.
+orbit.L.secosw:
+    initval: 0.4528268
+orbit.L.sesinw:
+    initval: -0.2448427
+
+# Yee quote the orbit in the Skowron Appendix B frame, whose third axis
+# points toward the observer (EXOZIPPy's +Z points away), so i -> 180 - i.
+orbit.L.cosi:
+    initval: 0.635054         # i = 180 - 129.424 = 50.576 deg
+
+# Yee's Omega_node = -7.767 is in that same frame, and the mapping into
+# EXOZIPPy's sky frame is bigomega = PA(binary axis at t_0,kep) -
+# Omega_frame.  PA is not published: it is phi_pi - alpha_0, and phi_pi is
+# a model output, so this seed is frame-converted against the built model
+# rather than read off the table.  The fit is extremely sharp in it --
+# +/-10 deg costs >1e6 nats -- so do not round it.
+orbit.L.bigomega:
+    initval: 340.755          # deg E of N
+
+# --- Per-instrument blending and error scaling ----------------------------
+# f_source and f_blend fit linearly against the model above, per
+# instrument; err_scale is the sqrt(chi2/N) that fit leaves.  The muFUN
+# files are raw instrumental magnitudes with an arbitrary per-site
+# zeropoint, so log_f_total cannot be defaulted.
+mulensinstrument.OGLE.q_source:
+    initval: 0.3510
+mulensinstrument.OGLE.log_f_total:
+    initval: -6.02866
+mulensinstrument.OGLE.err_scale:
+    initval: 3.6              # the out-of-event baseline value
+
+mulensinstrument.Bronberg.q_source:
+    initval: 0.3738
+mulensinstrument.Bronberg.log_f_total:
+    initval: -7.35861
+mulensinstrument.Bronberg.err_scale:
+    initval: 1.03
+
+mulensinstrument.CAO.q_source:
+    initval: 0.3566
+mulensinstrument.CAO.log_f_total:
+    initval: -7.01053
+mulensinstrument.CAO.err_scale:
+    initval: 1.97
+
+mulensinstrument.CT13_I.q_source:
+    initval: 0.3311
+mulensinstrument.CT13_I.log_f_total:
+    initval: -6.40299
+mulensinstrument.CT13_I.err_scale:
+    initval: 3.26
+
+mulensinstrument.CT13_V.q_source:
+    initval: 0.2250
+mulensinstrument.CT13_V.log_f_total:
+    initval: -6.03292
+mulensinstrument.CT13_V.err_scale:
+    initval: 1.0              # only 5 points; the fitted 0.20 is noise
+
+mulensinstrument.FarmCove.q_source:
+    initval: 0.2701
+mulensinstrument.FarmCove.log_f_total:
+    initval: -6.70539
+mulensinstrument.FarmCove.err_scale:
+    initval: 2.45
+
+mulensinstrument.Kumeu.q_source:
+    initval: 0.3162
+mulensinstrument.Kumeu.log_f_total:
+    initval: -6.76844
+mulensinstrument.Kumeu.err_scale:
+    initval: 1.39
+
+mulensinstrument.Possum.q_source:
+    initval: 0.1709
+mulensinstrument.Possum.log_f_total:
+    initval: -6.56991
+mulensinstrument.Possum.err_scale:
+    initval: 3.10
+
+mulensinstrument.VintageLane.q_source:
+    initval: 0.1872
+mulensinstrument.VintageLane.log_f_total:
+    initval: -6.75675
+mulensinstrument.VintageLane.err_scale:
+    initval: 1.31
+
+# star.Source.radius is left free: with finite_source on, rho is read but
+# the radius is not separately identifiable.  Skowron measure theta_* =
+# 4.45 +/- 0.40 uas, an ANGLE; imposing it as a radius would feed the
+# assumed source distance back in as if it were measured.

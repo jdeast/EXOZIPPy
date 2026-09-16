@@ -1,0 +1,18 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N pre246b
+#$ -o pre246b.$JOB_ID.log
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_$JOB_ID"
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy/examples/DC2018
+echo "sha: $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)"
+python -u pre246_build.py $HOME/wt_pre246

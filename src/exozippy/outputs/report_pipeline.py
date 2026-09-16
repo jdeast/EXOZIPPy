@@ -11,6 +11,7 @@ drift apart: both call sites import build_mode_reports from this module.
 import logging
 from pathlib import Path
 
+from .. import reporting
 from .latex import build_csv_output, build_latex_output
 from .modes import (
     DEFAULT_MAX_INVALID_FRAC,
@@ -25,6 +26,73 @@ from .modes import (
 from .texutils import latex_escape
 
 logger = logging.getLogger(__name__)
+
+
+def _declare_evidence_prose(system):
+    """Declare the bridge-sampling method, at the site that opts into it.
+
+    Same rule as ``add_prior_contribution``: the feature's own code path
+    emits the feature's sentence, so the draft cannot claim a method the run
+    did not use, or omit one it did.  ``prose.add`` is idempotent by key, so
+    a second report on one System replaces rather than duplicates.
+
+    Config facts only, per the prose contract -- which method was used and
+    what it does.  The lnZ values and weights are fitted numbers and belong
+    to the mode table.
+    """
+    prose = getattr(system, "prose", None)
+    if prose is None:
+        return
+    prose.add(
+        "The relative weight of each posterior mode was estimated from its "
+        "local marginal likelihood by bridge sampling "
+        r"\citep{Meng:1996}, using the optimal bridge against a "
+        "multivariate Gaussian proposal fitted to that mode's own draws in "
+        "the unconstrained sampling space. Each estimate carries a "
+        "relative mean-squared-error diagnostic "
+        r"\citep{FruhwirthSchnatter:2004}, and a mode whose diagnostic "
+        "cannot support a confident answer is refused rather than reported.",
+        section="evidence",
+        key="report_pipeline.evidence.method",
+        rank=10,
+    )
+
+
+def _declare_evidence_outcome_prose(system, applied, failed=False):
+    """Say whether the evidence weights were actually adopted.
+
+    A run diagnostic, not a fitted value -- the same category as the
+    convergence and burn-in numbers the wrap-up prose already interpolates.
+    It has to be said: the method sentence above describes an estimator that
+    is allowed to refuse, and a draft that describes bridge sampling without
+    saying the run fell back to occupancy would misreport the weights in the
+    table next to it.
+    """
+    prose = getattr(system, "prose", None)
+    if prose is None:
+        return
+    if applied:
+        text = (
+            "The bridge-sampling estimates were accepted for every mode, and "
+            "the mode weights reported here are those evidence weights."
+        )
+    elif failed:
+        text = (
+            "The evidence estimation did not complete, so the mode weights "
+            "reported here are draw-count occupancies."
+        )
+    else:
+        text = (
+            "The bridge-sampling estimate was refused for at least one mode, "
+            "so the mode weights reported here are draw-count occupancies "
+            "rather than evidence weights."
+        )
+    prose.add(
+        text,
+        section="evidence",
+        key="report_pipeline.evidence.outcome",
+        rank=20,
+    )
 
 
 def build_mode_reports(
@@ -237,6 +305,7 @@ def build_mode_reports(
         and mode_report is not None
         and mode_report.n_modes > 1
     ):
+        _declare_evidence_prose(system)
         try:
             from .evidence import (
                 apply_evidence_weighting,
@@ -258,11 +327,13 @@ def build_mode_reports(
                 [f"{w:.3f}" for w in mode_report.weights],
                 mode_report.provenance,
             )
+            _declare_evidence_outcome_prose(system, applied)
         except Exception:
             logger.warning(
                 "Evidence weighting failed; keeping occupancy weights",
                 exc_info=True,
             )
+            _declare_evidence_outcome_prose(system, False, failed=True)
 
     # Hot-chain suppressed-mode search outcome.  Written whether or not a
     # ledger exists: the states worth distinguishing most ("never searched",
@@ -323,6 +394,21 @@ def build_mode_reports(
     # populate the parameters with the posteriors
     system.distribute_posterior(idata)
 
+    # Every sampled element against a hard bound, with the component's own
+    # remedy (review 8.2.2).  Here and not in run.py's wrap-up loop because
+    # this is the first point at which every Parameter carries its
+    # posterior, and a check that reads the trace directly would have to
+    # re-derive the bounds the frozen transform already owns.
+    try:
+        from ..diagnostics import warn_posterior_near_bounds
+
+        warn_posterior_near_bounds(system)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Near-bound posterior check failed; continuing without it",
+            exc_info=True,
+        )
+
     # The ledger's rejected-seed rows are mode-keyed ('rejected-seed<k>'),
     # so the CSV must carry the mode columns even when the surviving
     # posterior is unimodal -- otherwise a 4-column header would sit over a
@@ -361,7 +447,13 @@ def build_mode_reports(
         system,
         var_filename=str(prefix) + "_definitions.tex",
         table_filename=str(prefix) + "_table.tex",
-        caption=r"Median and 68\% Confidence intervals for "
+        # The width is a run-level setting (exozippy.reporting), so the
+        # caption is GENERATED from it.  It was the literal "Median and 68\%"
+        # until 2026-09-11, which is the astronomy convention and was the only
+        # one any shipped component wanted; a caption that disagrees with the
+        # numbers beside it is the worst of the available failures.
+        caption=reporting.caption_phrase(capitalized=True)
+        + " for "
         + latex_escape(prefix.stem),
         tablecomments=table_comments,
         mode_report=mode_report,

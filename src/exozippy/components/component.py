@@ -1,11 +1,155 @@
+import weakref
 from abc import ABC, abstractmethod
 
 import numpy as np
 import pytensor.tensor as pt
 
+from ..config import NUMERIC_KEYS
 from ..manifest import interpret_manifest_entry
 from ..physics_registry import PHYSICS_REGISTRY
-from .parameter import Parameter
+from .parameter import ElementExpression, OwnPrePatchRef, Parameter
+
+
+def layer_options(cfg, options):
+    """``{**cfg, **options}`` with NaN meaning "keep the resolved element".
+
+    Manifest options are merged OVER the resolved config and win outright
+    (the "overrides" vs "options" note in config.md).  For a per-element
+    numeric option that is the wrong grain: a component that derives a bound
+    for SOME elements -- `Instrument._register_robust`'s out_scale cap, which
+    must stand down on the elements the user bounded -- cannot supply the
+    other elements' values, because it cannot see the resolved config.  So a
+    NaN in a per-element list of a NUMERIC_KEYS field keeps that element's
+    resolved value, the same convention the "overrides" channel already has
+    for its per-element lists.  A scalar option, a non-numeric option, a
+    list with no NaN or a field the config did not resolve are passed
+    through untouched, so every existing manifest option behaves as before.
+    """
+    merged = dict(cfg)
+    for key, val in options.items():
+        if (
+            key in NUMERIC_KEYS
+            and isinstance(val, (list, tuple, np.ndarray))
+            and cfg.get(key) is not None
+        ):
+            arr = np.asarray(val, dtype=float)
+            base = np.asarray(cfg[key], dtype=float)
+            if arr.shape == base.shape and np.isnan(arr).any():
+                val = np.where(np.isnan(arr), base, arr).tolist()
+        merged[key] = val
+    return merged
+
+
+def in_topology(system, name):
+    """Is component ``name`` part of this system?  Returns instance or config.
+
+    THE answer to "is component X in the topology?", which was re-derived
+    four ways -- three in ``star.py`` and two in ``orbit.py``, each with a
+    different holder chain (review 4.8.1).  They were not equivalent, and the
+    disagreements were exactly where a partial construction lives:
+
+    * ``Star.register_parameters``' local ``in_topology`` read ``system.config``
+      OR ``config_manager.system_config`` as an ``elif``, so a system carrying
+      both but whose ``config`` lacked the key never consulted the second.
+    * ``Orbit._topology`` and ``Orbit.register_parameters``' inline check
+      consulted ``config_manager.system_config`` not at all.
+    * Only ``Star._galactic_imf`` looked at ``active_components`` first, which
+      is the sole holder that carries the BUILT instance.
+
+    The chain here is the union, in the order of decreasing authority:
+
+    1. ``system.active_components[name]`` -- the built instance, populated in
+       ``System.__init__``, so it is available from stage 1 onward.
+    2. ``getattr(system, name)`` -- the same instance under its attribute,
+       which is what the mock systems in the test suite provide.
+    3. the raw config block, from ``system.config`` then
+       ``system.config_manager.system_config`` -- for a component whose
+       instance does not exist yet or at all (a premature
+       ``evolutionarymodel:`` block that no component backs still counts as
+       topology, deliberately: see ``Star.register_parameters``).
+
+    Returns the first hit, or ``None``.  Truthiness is the common use
+    (``if in_topology(system, "sed")``), and the value is there for the
+    caller that wants the instance (``Star._galactic_imf`` reads its
+    ``IMF:``).  **An empty config block is a real answer** -- ``sed: {}`` is
+    a system WITH an SED -- so this returns the block itself and callers must
+    test ``is not None``, not truthiness, when an empty block matters.  The
+    two shipped callers that care (``_galactic_imf``, ``structure_consumers``)
+    read a key off it or only need the boolean, so both are safe with either.
+
+    A module function rather than only a ``System`` method because every
+    caller is a component holding a ``system`` that may be a test double;
+    ``System.in_topology`` delegates here so there is still exactly one
+    implementation.
+    """
+    components = getattr(system, "active_components", None)
+    if isinstance(components, dict) and name in components:
+        return components[name]
+
+    inst = getattr(system, name, None)
+    if inst is not None:
+        return inst
+
+    for holder in (
+        getattr(system, "config", None),
+        getattr(
+            getattr(system, "config_manager", None), "system_config", None
+        ),
+    ):
+        if isinstance(holder, dict) and name in holder:
+            return holder[name]
+    return None
+
+
+def resolve_star_ref(ref, star_names, where):
+    """Star INDEX from a name, a ``star.<name>``/``star.<i>`` path, or an index.
+
+    The one translator behind every user-facing "index or name" star
+    reference: an instrument's or a band's ``star_ndx:``, an SED
+    ``photType`` entry, a relation component's ``star:`` key.  It existed
+    three times with three messages and, worse, was simply absent from the
+    two schemas that advertised it -- ``rvinstrument`` and ``band`` both
+    documented ``star_ndx`` as "Index or name" while every consumer called
+    ``int()`` on it, so a name crashed with a raw ValueError (review 3.5.1).
+
+    ``where`` names the offending config location in the error, since only
+    the caller knows it ("band 'I' star_ndx", "photType", "mann 'B'").
+    ``star_names`` may be empty, in which case only integers and digit
+    strings resolve -- a caller running before the star instances are known
+    still gets the historical behaviour rather than a spurious failure.
+    """
+    names = list(star_names or [])
+    n = len(names)
+
+    def _bad(reason):
+        known = f" Known stars: {names}." if names else ""
+        return ValueError(
+            f"{where}: {reason}.{known}"
+            + (f" Valid indices are 0..{n - 1}." if n else "")
+        )
+
+    # bool is an int in Python; `star_ndx: true` is a typo, not star 1.
+    if isinstance(ref, bool):
+        raise _bad(f"invalid star reference {ref!r}")
+    if isinstance(ref, (int, np.integer)):
+        idx = int(ref)
+    elif isinstance(ref, str):
+        # A path spelling ("star.B", "star.1") names the same element as the
+        # bare one; only the last segment selects.
+        key = ref.split(".")[-1]
+        if key in names:
+            idx = names.index(key)
+        else:
+            try:
+                idx = int(key)
+            except ValueError:
+                raise _bad(f"unknown star '{ref}'") from None
+    else:
+        raise _bad(f"invalid star reference {ref!r}")
+
+    if n and not 0 <= idx < n:
+        raise _bad(f"star index {idx} is out of range")
+    return idx
 
 
 class Component(ABC):
@@ -16,13 +160,13 @@ class Component(ABC):
     safely construct complex PyMC models without deadlocks. The orchestration
     happens in the following distinct lifecycle stages:
 
-    Stage 0: load_data()           - Ingests CSVs and calculates data-driven parameter estimates.
-    Stage 1: build_maps()          - Generates Numpy integer arrays linking children to parents.
-    Stage 2: register_parameters() - Declares the component's mathematical manifest.
-    Stage 3: [System-Level]        - The ConfigManager symbolically solves the universe.
-    Stage 4: build_tensor_maps()   - Auto-converts Numpy maps to PyTensor variables.
-    Stage 5: add_parameter()       - Materializes PyMC nodes safely, one at a time.
-    Stage 6: build_likelihood()    - Defines observational Likelihoods and Potentials.
+    Stage 1: load_data()           - Ingests CSVs and calculates data-driven parameter estimates.
+    Stage 2: build_maps()          - Generates Numpy integer arrays linking children to parents.
+    Stage 3: register_parameters() - Declares the component's mathematical manifest.
+    Stage 4: [System-Level]        - The ConfigManager symbolically solves the universe.
+    Stage 5: build_tensor_maps()   - Auto-converts Numpy maps to PyTensor variables.
+    Stage 6: add_parameter()       - Materializes PyMC nodes safely, one at a time.
+    Stage 7: build_likelihood()    - Defines observational Likelihoods and Potentials.
     """
 
     # Does this component's parameter space routinely carry posterior-
@@ -40,10 +184,70 @@ class Component(ABC):
     # solutions must be able to opt in without anyone editing the sampler.
     expects_suppressed_modes = False
 
+    # Which of this component's injected context deps (see `context_dep_names`)
+    # carry ONE ENTRY PER ELEMENT of the parameter they feed.  Only consulted
+    # when an expression supplies a subset of a vector's elements and its deps
+    # must therefore be sliced (see `_element_expression`): a context node is an
+    # arbitrary tensor the component built, so nothing outside the component can
+    # prove its alignment, and guessing wrong pairs the wrong instances
+    # silently.  Declaring one here is a promise, so declare only what is true:
+    # `orbit`'s per-orbit group masses are aligned; a per-observation vector is
+    # not.
+    aligned_context_deps = frozenset()
+
+    # Topic section this component owns in the modeling-draft prose
+    # (outputs/prose.py).  None -- the default -- means it writes only into
+    # the shared sections (data, noise, priors, ...).
+    #
+    # Declared here rather than inferred, for the same reason `label` is: the
+    # prose vocabulary used to be a CLOSED astronomy list, so a component from
+    # another field had nowhere of its own to stand and had to file its "what
+    # we fitted" sentence under `data`.  A topic groups sentences by subject
+    # ACROSS components (rvinstrument writes into orbits, transit into
+    # planetary), so it cannot be derived from the component list -- but its
+    # POSITION can be, and System registers topics in build-graph order so
+    # dependency order becomes the editorial order.
+    prose_topic = None
+
+    # Human-readable heading for this component's block of the results table
+    # (outputs/latex.py's \sidehead).  DECLARED here, rather than only being
+    # assigned in ten component __init__s, so a generic consumer can read
+    # `comp.label` without a getattr guard -- that guard was the tell that
+    # the attribute was not part of the contract (review 4.2.3).  A component
+    # that sets none gets its class name, filled in by __init__ below;
+    # setting it as a CLASS attribute also works and is not overwritten.
+    label = None
+
+    @classmethod
+    def normalize_config_block(cls, block):
+        """Normalize this component's raw config block BEFORE ConfigManager.
+
+        Called by ``System.__init__`` on every registered component's block,
+        in place, while the ONLY thing that exists is the parsed YAML -- no
+        ConfigManager, no component instances.  Default: do nothing.
+
+        It exists for one reason, and the reason is the standing rule that
+        internal syntax carries exactly ONE spelling: a user's
+        ``comp.<Name>.param`` can only be folded into ``comp.<i>.param`` if
+        the instance NAMES are known when ``standardize_param_names`` runs.
+        A component that DERIVES a name rather than reading it from ``name:``
+        -- Mann and Torres name each instance after the star it constrains --
+        used to do so in its own ``__init__``, which runs AFTER ConfigManager
+        was built.  So the fold could not happen and the name form survived
+        forever (review 2d-1 / 3.14.15).
+
+        Override this, not ``__init__``, for anything the KEY TRANSLATION
+        depends on.  Keep it to config normalization: there is no
+        ConfigManager to talk to and no data has been read.
+        """
+        return block
+
     def __init__(self, component_config, config_manager):
         """Standardized constructor for ALL components."""
         self.config = component_config
         self.config_manager = config_manager
+        if type(self).label is None:
+            self.label = type(self).__name__
 
         # Determine how many of this thing we are building
         self.n_elements = len(self.config)
@@ -63,6 +267,43 @@ class Component(ABC):
     def prefix(self):
         """Naming prefix for the model (e.g., 'star', 'planet', 'inst')."""
         pass
+
+    def user_wrote_field(self, param_name, field):
+        """Per element: did the USER write ``field`` for this parameter?
+
+        Read from the params-file entries the ConfigManager forwarded
+        (``user_params``), never from a resolved vector -- every parameter
+        has bounds from defaults.yaml, so a resolved value says nothing about
+        who asked for it (the same reasoning as
+        ``Parameter._user_constraint_fields``, whose three spellings this
+        checks: the 2-part broadcast, the index form and the instance-name
+        form, since a user may write any of them and
+        ``standardize_param_names`` may or may not have run).  READ-ONLY:
+        a component must never write into ``user_params`` (CLAUDE.md).
+
+        This is what lets a component derive a per-element default that
+        goes through the manifest OPTIONS channel yet still yields to the
+        params file: it leaves NaN on the elements that return True here
+        (``layer_options``).  Compare ``Orbit._user_seeded_initval``, the
+        same question asked of ``initval`` before this helper existed.
+        """
+        user = getattr(self.config_manager, "user_params", None) or {}
+        wrote = np.zeros(self.n_elements, dtype=bool)
+        if not user:
+            return wrote
+
+        def _has(key):
+            entry = user.get(key)
+            return isinstance(entry, dict) and entry.get(field) is not None
+
+        if _has(f"{self.prefix}.{param_name}"):
+            wrote[:] = True
+        for i in range(self.n_elements):
+            if _has(f"{self.prefix}.{i}.{param_name}") or _has(
+                f"{self.prefix}.{self.names[i]}.{param_name}"
+            ):
+                wrote[i] = True
+        return wrote
 
     @classmethod
     def config_schema(cls):
@@ -125,7 +366,7 @@ class Component(ABC):
 
     def load_data(self, system):
         """
-        Stage 1a: Data Ingestion.
+        Stage 1: Data Ingestion.
         Override this to load CSV files and push data-driven parameter guesses (like RV offsets)
         to the ConfigManager.
         """
@@ -133,7 +374,7 @@ class Component(ABC):
 
     def build_maps(self):
         """
-        Stage 1b: Logical Mapping.
+        Stage 2: Logical Mapping.
         Override this to define Numpy integer arrays (ending in '_map') that establish
         vectorized relationships between this component and its parents.
         """
@@ -142,15 +383,31 @@ class Component(ABC):
     @abstractmethod
     def register_parameters(self, system):
         """
-        Stage 2: The Blueprint.
+        Stage 3: The Blueprint.
         Define `self.manifest` (a dictionary) mapping parameter names to their physics
         dependencies, and push those symbols to the ConfigManager.
         """
         pass
 
+    # Attribute names holding something that BELONGS TO ONE BUILD: a
+    # pytensor node the component stashed, or a function compiled against
+    # one.  ``System.build_model`` clears every one of them before stage 5,
+    # so a second build on a live System cannot be handed the first model's
+    # graph (reviews 1.5.2, 3.14.12).  Declare the name here rather than
+    # writing another ad-hoc reset: a stage-6 cache (the SED's predicted
+    # apparent magnitudes, read while parameters are still being
+    # materialized) cannot be cleared at the top of stage 7, which is where
+    # the first round of these resets landed.
+    per_build_caches = ()
+
+    def reset_build_caches(self):
+        """Drop this component's per-build node caches.  See ``per_build_caches``."""
+        for name in self.per_build_caches:
+            setattr(self, name, None)
+
     def build_tensor_maps(self):
         """
-        Stage 4: Automatic PyTensor Conversion.
+        Stage 5: Automatic PyTensor Conversion.
         Scans the component's attributes. Any numpy array ending in '_map'
         is automatically converted to a PyTensor variable ending in '_map_tensor'.
         """
@@ -165,13 +422,132 @@ class Component(ABC):
                     )
                     setattr(self, tensor_name, tensor_var)
 
+    def finalize_reported(self, model, system, context_nodes=None):
+        """Wire and apply this component's REPORTED elements.
+
+        The second phase of the two-phase build, called by
+        ``System.build_model`` after stage 7 for every component, inside the
+        model context.  Every parameter exists by now, so the dependency of a
+        reported expression resolves to an already-built node instead of
+        recursing back into the parameter being built (see add_parameter).
+
+        Returns the number of parameters finalized; zero -- and no work at all
+        -- for a component with no reported elements, which is every component
+        that does not flip a parameterization.
+        """
+        pending = getattr(self, "_pending_reported", None)
+        if not pending:
+            return 0
+
+        context_nodes = context_nodes or {}
+        finalized = 0
+        for param_name, items in list(pending.items()):
+            param = getattr(self, param_name, None)
+            if not isinstance(param, Parameter):
+                continue
+            specs = [
+                self._element_expression(
+                    model, system, context_nodes, entry, sel, where
+                )
+                for (entry, sel, where) in items
+            ]
+            param.finalize_deferred(specs)
+            finalized += 1
+        self._pending_reported = {}
+        return finalized
+
+    @staticmethod
+    def _has_built_parameter(comp, name):
+        """Has ``comp`` already materialized ``name`` as a Parameter?
+
+        The one predicate for "this node exists, do not build it again".  It
+        must test the TYPE, not merely the attribute's presence: a component
+        class attribute or method sharing a manifest parameter's name would
+        otherwise be mistaken for the built node and either crash on
+        ``.value`` or wire the wrong thing into the graph (review 2.2.2).
+        Three of the four call sites already tested the type; the
+        external-dependency one asked ``hasattr`` alone.  There are no
+        collisions in the tree today -- which is exactly why the odd one out
+        never showed.
+        """
+        return isinstance(getattr(comp, name, None), Parameter)
+
+    @staticmethod
+    def _parameter_is_current(comp, name, model):
+        """Is ``comp.name`` a Parameter built for **this** ``model``?
+
+        The build-time predicate, and the one every "do not build it again"
+        site asks.  ``_has_built_parameter`` answers the narrower question
+        "is there a Parameter here at all", which was the whole predicate
+        until review 3.14.12: a component persists on the System, so a SECOND
+        ``system.build_model()`` found every parameter still holding the FIRST
+        model's node and handed it straight back -- the second model then
+        contained the first model's random variables and its logp compile
+        raised "Random variables detected in the logp graph".  The guard that
+        makes a recursive dependency resolve once per build was also the thing
+        that made a rebuild impossible.
+
+        The stamp is a weakref, so a discarded model is not kept alive by the
+        component that outlived it.
+
+        Absent provenance counts as CURRENT, deliberately: a component that
+        never went through ``add_parameter`` (a test double, or a Parameter
+        set by hand) has no stamp registry and no name in it, and the only
+        behaviour that may change here is the rebuild one.  A stamp naming a
+        DIFFERENT model is the sole stale verdict.
+        """
+        if not Component._has_built_parameter(comp, name):
+            return False
+        stamps = getattr(comp, "_built_for_model", None)
+        if not stamps:
+            return True
+        ref = stamps.get(name)
+        if ref is None:
+            return True
+        return ref() is model
+
+    def declared_star_names(self):
+        """Star instance names from the raw system config, or ``[]``.
+
+        Read from ``config_manager.system_config`` rather than from
+        ``system.star``, so a NAME resolves at construction and at stage 1 --
+        before the Star component exists.  Empty when the config manager has
+        no system config (a test stub), which ``resolve_star_ref`` treats as
+        "indices only".
+        """
+        cfg = getattr(self.config_manager, "system_config", None) or {}
+        entries = cfg.get("star")
+        if not isinstance(entries, list):
+            return []
+        return [
+            str(e.get("name", i))
+            for i, e in enumerate(entries)
+            if isinstance(e, dict)
+        ]
+
+    def resolve_star_ndx(self, ref, where, default=0):
+        """This component's ``star_ndx``-style reference as a star index.
+
+        ``None`` (the key absent) takes ``default``; anything else goes
+        through :func:`resolve_star_ref`, so the name form the schemas
+        advertise actually works.
+        """
+        if ref is None:
+            return int(default)
+        return resolve_star_ref(ref, self.declared_star_names(), where)
+
     def add_parameter(self, model, param_name, system, context_nodes=None):
         context_nodes = context_nodes or {}
+        # Reported selections park here until finalize_reported; keyed
+        # per parameter name, so a second build_model on one System starts clean
+        # (the GUI builds more than once).
+        if not hasattr(self, "_pending_reported"):
+            self._pending_reported = {}
 
-        # 0. Prevent double-building nodes
-        if hasattr(self, param_name) and isinstance(
-            getattr(self, param_name), Parameter
-        ):
+        # 0. Prevent double-building nodes -- within THIS build.  A node
+        # stamped for an earlier model is stale and must be rebuilt; see
+        # _parameter_is_current (review 3.14.12).
+        if self._parameter_is_current(self, param_name, model):
             return getattr(self, param_name).value
 
         if not hasattr(self, "manifest"):
@@ -184,7 +560,7 @@ class Component(ABC):
             )
 
         # manifest.py is the single interpreter of the manifest vocabulary --
-        # the same one graph.determine_pymc_build_order (stage 4) and
+        # the same one graph.determine_pymc_build_order (the build order) and
         # System.derived_params read, so the build order can never disagree
         # with what gets built.  `entry.options` is already a copy, so the
         # pops below cannot mutate the live manifest.
@@ -218,91 +594,57 @@ class Component(ABC):
         )
 
         expressions_dict = cfg.pop("expressions", {})
-        expr_cfg = entry.expression_config(
-            expressions_dict, where=f"{self.prefix}.{param_name}"
+        where = f"{self.prefix}.{param_name}"
+        n_elements = int(np.prod(shape)) if shape else 1
+        selections = entry.expression_configs(
+            expressions_dict, n_elements=n_elements, where=where
         )
         expression = None
+        element_expressions = None
 
         # --- AGNOSTIC CONDITIONAL WIRE-UP ---
-        # Only parse dependencies if an expression block actively exists for this parameter role
-        if expr_cfg is not None:
-            func_name = expr_cfg.get("func_name")
-
-            if func_name not in PHYSICS_REGISTRY:
-                raise NotImplementedError(
-                    f"[{self.prefix}.{param_name}] Function '{func_name}' not in PHYSICS_REGISTRY."
-                )
-
-            func = PHYSICS_REGISTRY[func_name]
+        # Only parse dependencies if an expression block actively exists for
+        # this parameter role.  One selection covering every element is the
+        # historical whole-vector case and keeps its own path; several
+        # selections (or one covering a subset) mean the instances chose
+        # different parameterizations, and each gets its own closure.
+        if selections:
             options.pop("deps", None)
-            dep_names = entry.dep_names(expr_cfg)
-            dep_nodes = []
-
-            for d in dep_names:
-                if d in context_nodes:
-                    dep_nodes.append(context_nodes[d])
-                elif "." in d:
-                    # Parse universal cross-component strings: "star.density[star_map]"
-                    custom_slice = None
-                    if "[" in d and d.endswith("]"):
-                        path_part, slice_part = d.split("[", 1)
-                        custom_slice = slice_part.rstrip("]")
-                        d_lookup = path_part
-                    else:
-                        d_lookup = d
-
-                    ext_comp_name, ext_param_name = d_lookup.split(".", 1)
-                    ext_comp = getattr(system, ext_comp_name, None)
-                    if not ext_comp:
-                        raise ValueError(
-                            f"[{self.prefix}.{param_name}] Component '{ext_comp_name}' is not active."
+            uniform = (
+                len(selections) == 1
+                and selections[0].mask is None
+                and not selections[0].output_only
+            )
+            built = []
+            for sel in selections:
+                if sel.output_only:
+                    # REPORTED elements defer their WHOLE wiring, not
+                    # just the patch.  Resolving their dependencies here would
+                    # recurse: the dep is a parameter that, on other elements,
+                    # is derived from this one, and this parameter is not yet
+                    # bound on the component (`setattr` happens below), so
+                    # add_parameter's already-built guard could not stop it.
+                    # Only the MASK is needed now, so build_pymc can mark the
+                    # role and hold back the Deterministic; the expression is
+                    # wired in finalize_reported, once every parameter exists.
+                    built.append(
+                        ElementExpression(
+                            mask=sel.mask, expr=None, output_only=True
                         )
-
-                    # Ensure the dependency node is built lazily on demand
-                    if not hasattr(ext_comp, ext_param_name):
-                        ext_comp.add_parameter(
-                            model, ext_param_name, system, context_nodes
-                        )
-
-                    ext_param = getattr(ext_comp, ext_param_name)
-
-                    # Dynamically slice via requested map name or component fallback name
-                    map_attr = (
-                        f"{custom_slice}_tensor"
-                        if custom_slice
-                        else f"{ext_comp_name}_map_tensor"
                     )
-                    if hasattr(self, map_attr):
-                        map_tensor = getattr(self, map_attr)
-                        dep_nodes.append(ext_param.value[map_tensor])
-                    elif custom_slice:
-                        # A dep that NAMES its map ("star.mass[lens_map]")
-                        # asked for specific elements.  Falling back to the
-                        # unsliced vector does not mean "no slice" -- where
-                        # the lengths happen to match it broadcasts silently
-                        # and pairs the wrong bodies (a different star's mass
-                        # into a lens's theta_E).  The unnamed
-                        # "{comp}_map_tensor" convenience path keeps its
-                        # fallback.
-                        raise AttributeError(
-                            f"[{self.prefix}.{param_name}] dependency '{d}' "
-                            f"names the index map '{custom_slice}', but "
-                            f"{self.prefix} has no '{map_attr}'.  Build it in "
-                            f"build_maps() (build_tensor_maps converts "
-                            f"'{custom_slice}' automatically) or drop the "
-                            f"[...] from the dep."
-                        )
-                    else:
-                        dep_nodes.append(ext_param.value)
-                else:
-                    # Local tracking recursive lookup
-                    if not hasattr(self, d) or not isinstance(
-                        getattr(self, d), Parameter
-                    ):
-                        self.add_parameter(model, d, system, context_nodes)
-                    dep_nodes.append(getattr(self, d).value)
-
-            expression = lambda: func(*dep_nodes)
+                    self._pending_reported.setdefault(param_name, []).append(
+                        (entry, sel, where)
+                    )
+                    continue
+                built.append(
+                    self._element_expression(
+                        model, system, context_nodes, entry, sel, where
+                    )
+                )
+            if uniform:
+                expression = built[0].expr
+            else:
+                element_expressions = built
 
         # 2b. Wire up user-defined parameter links (initval/mu/lower/upper
         # expressions from the params file referencing other parameters).
@@ -311,11 +653,12 @@ class Component(ABC):
         )
 
         # 3. Create Parameter Node
-        full_params = {**cfg, **options}
+        full_params = layer_options(cfg, options)
         param_obj = Parameter(
             label=f"{self.prefix}.{param_name}",
             names=names,
             expression=expression,
+            element_expressions=element_expressions,
             element_links=element_links,
             user_params=self.config_manager.user_params,
             source_file=getattr(self.config_manager, "param_file", None),
@@ -329,7 +672,257 @@ class Component(ABC):
         )
 
         setattr(self, param_name, param_obj)
+        # Stamp which model this node belongs to, so the guard above can tell
+        # "already built in this build" from "left over from the last one".
+        if model is not None:
+            if not hasattr(self, "_built_for_model"):
+                self._built_for_model = {}
+            self._built_for_model[param_name] = weakref.ref(model)
         return param_obj.build_pymc()
+
+    def _element_expression(
+        self, model, system, context_nodes, entry, sel, where
+    ):
+        """Wire ONE ``expressions:`` block into an :class:`ElementExpression`.
+
+        The whole-vector case (``sel.mask is None``, or a mask covering every
+        element) builds exactly the closure this method's predecessor built:
+        ``lambda: func(*dep_nodes)`` over the full dependency vectors.
+
+        A mask covering a SUBSET slices the dependencies down to those elements
+        first, so the instances that did not choose this parameterization never
+        enter the expression at all.  That is not an optimization: their values
+        are bookkeeping pins that the other parameterization's physics makes no
+        promise about, and an expression evaluated there can legitimately be
+        NaN (sqrt of a negative eccentricity).  Keeping them out is the only way
+        the mixed vector's gradient is guaranteed clean, since a NaN sitting in
+        a discarded slot still reaches the input's gradient as 0*NaN.
+
+        Slicing is only safe where the dependency is element-ALIGNED, so an
+        unproven alignment raises rather than guessing -- see
+        ``_resolve_dep_node``.  Whether the sliced expression really equals the
+        full one on those elements (i.e. whether the physics is elementwise at
+        all) is verified numerically at the start point, once the model exists:
+        ``System.verify_element_slices``.
+        """
+        func_name = sel.config.get("func_name")
+        if func_name not in PHYSICS_REGISTRY:
+            raise NotImplementedError(
+                f"[{where}] Function '{func_name}' not in PHYSICS_REGISTRY."
+            )
+        func = PHYSICS_REGISTRY[func_name]
+
+        n_elements = np.size(sel.mask) if sel.mask is not None else None
+        deps = [
+            self._resolve_dep_node(
+                model, system, context_nodes, d, where, n_elements
+            )
+            for d in entry.dep_names(sel.config)
+        ]
+        nodes = [node for _d, node, _aligned in deps]
+        own_refs = [n for n in nodes if isinstance(n, OwnPrePatchRef)]
+
+        def full_expr(nodes=nodes, prepatch=None):
+            resolved = [
+                prepatch[pt.as_tensor_variable(n.idx.astype("int32"))]
+                if isinstance(n, OwnPrePatchRef)
+                else n
+                for n in nodes
+            ]
+            return func(*resolved)
+
+        if own_refs:
+            full_expr._own_ref_idx = np.concatenate([r.idx for r in own_refs])
+
+        if sel.mask is None or bool(np.all(sel.mask)):
+            return ElementExpression(
+                mask=True if sel.mask is None else sel.mask,
+                expr=full_expr,
+                output_only=sel.output_only,
+            )
+
+        idx = np.nonzero(sel.mask)[0]
+        sliced = []
+        for d, node, aligned in deps:
+            if isinstance(node, OwnPrePatchRef):
+                # The sentinel's map has one entry per element of THIS
+                # parameter (enforced below via `aligned`); slice the
+                # INDEX ARRAY to the selected elements -- the tensor it
+                # points into does not exist yet.
+                if not aligned:
+                    raise ValueError(
+                        f"[{where}] same-parameter dep '{d}' must carry "
+                        f"an index map with one entry per element of "
+                        f"this parameter."
+                    )
+                sliced.append(OwnPrePatchRef(node.idx[idx]))
+                continue
+            if getattr(node, "ndim", 0) == 0:
+                sliced.append(node)  # a scalar applies to every element
+                continue
+            if not aligned:
+                raise ValueError(
+                    f"[{where}] the expression '{func_name}' supplies only "
+                    f"element(s) {idx.tolist()} of this parameter, so its "
+                    f"dependencies are sliced to those elements -- but "
+                    f"dependency '{d}' cannot be PROVEN to be element-aligned, "
+                    f"and slicing a vector that is indexed by something else "
+                    f"pairs the wrong instances silently (a different star's "
+                    f"mass into this orbit's Kepler relation). Fix: give the "
+                    f"dep an explicit index map ('{d}[<map_name>]', built in "
+                    f"build_maps with one entry per element of this "
+                    f"parameter), or -- for a dep injected as a context node "
+                    f"-- name it in the component's 'aligned_context_deps' to "
+                    f"declare that it already has one entry per element."
+                )
+            sliced.append(node[pt.as_tensor_variable(idx.astype("int32"))])
+
+        own_sliced = [s for s in sliced if isinstance(s, OwnPrePatchRef)]
+
+        def sliced_expr(sliced=sliced, prepatch=None):
+            resolved = [
+                prepatch[pt.as_tensor_variable(s.idx.astype("int32"))]
+                if isinstance(s, OwnPrePatchRef)
+                else s
+                for s in sliced
+            ]
+            return func(*resolved)
+
+        if own_sliced:
+            sliced_expr._own_ref_idx = np.concatenate(
+                [s.idx for s in own_sliced]
+            )
+
+        register = getattr(system, "register_element_slice_check", None)
+        if callable(register) and not own_refs:
+            # An own-ref expression cannot be evaluated without the
+            # parameter's own pre-patch tensor, which the slice checker
+            # does not have; correctness there is covered by the
+            # sampled-elements-only guard in build_pymc instead.
+            register(where, func_name, idx, sliced_expr, full_expr)
+        return ElementExpression(
+            mask=sel.mask,
+            expr=sliced_expr,
+            output_only=sel.output_only,
+            sliced=True,
+        )
+
+    def _resolve_dep_node(
+        self, model, system, context_nodes, d, where, n_elements=None
+    ):
+        """``(dep name, node, is_element_aligned)`` for one dependency string.
+
+        The dependency vocabulary is unchanged: a context node injected by the
+        component, a cross-component path with an optional index map
+        (``star.mass[lens_map]``), or a bare local parameter name.
+
+        ``is_element_aligned`` answers "does entry i of this node belong to
+        element i of the parameter being built?" and is only ever True when the
+        answer can be PROVEN from how the dep resolved -- a local parameter of
+        the same length, a map with one entry per element, or a context node the
+        component declared aligned.  It is False for a bare cross-component
+        vector, whose entries are indexed by the OTHER component's elements and
+        line up only by coincidence.  Only the per-element slicing path consults
+        it; the whole-vector path never slices and so never cares.
+        """
+        if d in context_nodes:
+            return (
+                d,
+                context_nodes[d],
+                d in getattr(self, "aligned_context_deps", frozenset()),
+            )
+
+        if "." not in d:
+            # Local tracking recursive lookup
+            if not self._parameter_is_current(self, d, model):
+                self.add_parameter(model, d, system, context_nodes)
+            local = getattr(self, d)
+            aligned = n_elements is not None and local._n_elements() == int(
+                n_elements
+            )
+            return d, local.value, aligned
+
+        # Parse universal cross-component strings: "star.density[star_map]"
+        custom_slice = None
+        if "[" in d and d.endswith("]"):
+            path_part, slice_part = d.split("[", 1)
+            custom_slice = slice_part.rstrip("]")
+            d_lookup = path_part
+        else:
+            d_lookup = d
+
+        ext_comp_name, ext_param_name = d_lookup.split(".", 1)
+        ext_comp = getattr(system, ext_comp_name, None)
+        if not ext_comp:
+            raise ValueError(
+                f"[{where}] Component '{ext_comp_name}' is not active."
+            )
+
+        # A dep naming the parameter BEING BUILT (fitmurel's
+        # pm[lens] <- pm[source] + mu_rel) cannot recurse into
+        # add_parameter -- the tensor does not exist yet.  Return an
+        # OwnPrePatchRef sentinel; _patch_elements substitutes the
+        # pre-patch tensor's elements at patch time, and build_pymc
+        # refuses any referenced element that is DERIVED, REPORTED or
+        # INACTIVE (sampled elements and active `sigma: 0` pins are the
+        # ones already final pre-patch -- see OwnPrePatchRef).  `where` is
+        # f"{prefix}.{param_name}" at both call sites, which is what
+        # identifies the parameter under construction.
+        building = None
+        prefix_dot = f"{self.prefix}."
+        if where.startswith(prefix_dot):
+            building = where[len(prefix_dot) :]
+        if ext_comp is self and ext_param_name == building:
+            if custom_slice is None:
+                raise ValueError(
+                    f"[{where}] same-parameter element dep '{d}' needs "
+                    f"an explicit index map ('{d}[<map_name>]', one "
+                    f"entry per element of this parameter): without "
+                    f"one there is no way to say WHICH of its own "
+                    f"elements the expression reads."
+                )
+            idx = np.asarray(getattr(self, custom_slice), dtype=int)
+            aligned = n_elements is not None and idx.size == int(n_elements)
+            return d, OwnPrePatchRef(idx), aligned
+
+        # Ensure the dependency node is built lazily on demand
+        if not self._parameter_is_current(ext_comp, ext_param_name, model):
+            ext_comp.add_parameter(
+                model, ext_param_name, system, context_nodes
+            )
+
+        ext_param = getattr(ext_comp, ext_param_name)
+
+        # Dynamically slice via requested map name or component fallback name
+        map_name = custom_slice or f"{ext_comp_name}_map"
+        map_attr = f"{map_name}_tensor"
+        if hasattr(self, map_attr):
+            map_tensor = getattr(self, map_attr)
+            raw_map = getattr(self, map_name, None)
+            aligned = (
+                n_elements is not None
+                and raw_map is not None
+                and np.size(raw_map) == int(n_elements)
+            )
+            return d, ext_param.value[map_tensor], aligned
+        if custom_slice:
+            # A dep that NAMES its map ("star.mass[lens_map]")
+            # asked for specific elements.  Falling back to the
+            # unsliced vector does not mean "no slice" -- where
+            # the lengths happen to match it broadcasts silently
+            # and pairs the wrong bodies (a different star's mass
+            # into a lens's theta_E).  The unnamed
+            # "{comp}_map_tensor" convenience path keeps its
+            # fallback.
+            raise AttributeError(
+                f"[{where}] dependency '{d}' "
+                f"names the index map '{custom_slice}', but "
+                f"{self.prefix} has no '{map_attr}'.  Build it in "
+                f"build_maps() (build_tensor_maps converts "
+                f"'{custom_slice}' automatically) or drop the "
+                f"[...] from the dep."
+            )
+        return d, ext_param.value, False
 
     def _wire_user_links(self, model, param_name, system, cfg, expression):
         """
@@ -401,10 +994,7 @@ class Component(ABC):
                             f"[{self.prefix}.{param_name}] link '{plink.expr_str}' "
                             f"references component '{dcomp}', which is not active."
                         )
-                    if not (
-                        hasattr(comp, dparam)
-                        and isinstance(getattr(comp, dparam), Parameter)
-                    ):
+                    if not self._parameter_is_current(comp, dparam, model):
                         comp.add_parameter(model, dparam, system)
                     node = getattr(comp, dparam).value
                     if getattr(node, "ndim", 0) >= 1:
@@ -450,7 +1040,7 @@ class Component(ABC):
     @abstractmethod
     def build_likelihood(self, model, system):
         """
-        Stage 6: The Objective Function.
+        Stage 7: The Objective Function.
         Construct the PyMC Likelihoods (`pm.Normal`, etc.) or custom `pm.Potential`
         penalties that constrain the model against data.
         """
@@ -476,7 +1066,7 @@ class Component(ABC):
         """
         Stage: GUI plot description (the data behind plot()).
 
-        Return a list of exozippy.plotspec.PlotSpec objects -- the arrays
+        Return a list of exozippy.chart.Chart objects -- the arrays
         and labels a browser GUI needs to draw pan/zoomable charts and
         re-render model curves when parameter sliders move. This is the
         data-only counterpart to plot(), which renders matplotlib figures.
@@ -493,7 +1083,7 @@ class Component(ABC):
             duplicated here). Requires build_model() to have run.
 
         The default returns []; components that own observational data
-        override it. See plotspec.PlotSpec for the payload contract.
+        override it. See chart.Chart for the payload contract.
         """
         return []
 
@@ -520,7 +1110,7 @@ class Component(ABC):
         """
         Sampled-parameter labels (a subset of system.plot_params) that a
         symbolic model-trace node depends on, found by walking the
-        pytensor graph. Used to populate PlotSpec.param_deps so a GUI can
+        pytensor graph. Used to populate Chart.param_deps so a GUI can
         highlight the charts a moved slider affects. Returns [] when the
         node or plot_params are unavailable (e.g. data-only mode).
         """

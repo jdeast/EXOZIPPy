@@ -1,0 +1,46 @@
+# /bin/sh
+# ----------------Parameters---------------------- #
+#$ -S /bin/sh
+#$ -pe mthread 64
+#$ -q lThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc152crd
+#$ -o dc152_coords.$JOB_ID.log
+#
+# 2.4.17's CLEAN TEST: does the observable coordinate basis buy the 30-40x
+# ESS that the 128-observable-vs-152/223 comparison suggested?
+#
+# That comparison is confounded TWICE -- different event AND different code
+# version (the 128 observable trace predates the #246 component split, which
+# is why its variables are lens.* and 152's are source.*).  This job removes
+# both: same event, same data, same params file, same sampler settings, same
+# 50,000 draws, same commit, run back to back.  The ONLY difference is
+# fitmurel/fitpirel/fitthetae on the mulensevent entry.
+#
+# The BASELINE is re-run rather than reused, because events/152/fitresults
+# was sampled 2026-09-10, before b88d791a re-centred the whitening anchor on
+# the polished start -- and start quality is exactly what is under test.
+#
+# Read the answer with:
+#   python diag_rhat_by_param.py events/152/base/DC2018_152_trace.nc \
+#                                events/152/obs/DC2018_152_trace.nc
+#
+# ----------------Modules------------------------- #
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+which python
+python -c "import subprocess; print('commit:', subprocess.run(['git','-C','$HOME/python/EXOZIPPy','rev-parse','--short','HEAD'],capture_output=True,text=True).stdout.strip())"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+
+for arm in base obs; do
+    echo "=================== ARM: $arm  $(date) ==================="
+    exozippy "events/152/$arm/DC2018_152_$arm.yaml" || echo "ARM $arm FAILED (rc=$?)"
+done
+echo "=================== DONE $(date) ==================="

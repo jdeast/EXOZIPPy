@@ -11,12 +11,13 @@ invalidates the compiled graph and forces another "Solve".
 This module supplies the millisecond half of that loop:
 
   * ``compile_evaluator(system, model) -> Evaluator`` captures the base
-    PlotSpecs (G4) and remembers which component built each one.
+    Charts (G4) and remembers which component built each one.
   * ``Evaluator.eval_plots(raw_point)`` returns, per plot, the updated
     model-trace arrays by calling each owning component's own
     ``plot_data(system, point)`` again at the new point -- the SAME code
     that built the base specs and that the CLI's matplotlib ``plot()``
-    reuses (see CLAUDE.md's "Plotting for the GUI" section) -- rather than
+    reuses (see "Plotting: one description, two renderers" in
+    ``src/exozippy/outputs/outputs.md``) -- rather than
     a second, parallel implementation. There is exactly one place that
     knows how to draw a phased light curve or an SED spectrum; a slider
     move can never drift from what a re-Solve (or the saved PDF) would
@@ -42,7 +43,7 @@ Model-role traces are always evaluated.  Data traces normally are not --
 raw observations do not move with a slider -- EXCEPT on specs whose meta
 declares ``dynamic_data``, where the plotted data ARE point-dependent
 (phase folds, RV gamma subtraction, mulens flux alignment) and are
-re-shipped too.  See exozippy.plotspec for the PlotSpec/Trace contract and
+re-shipped too.  See exozippy.chart for the Chart/Trace contract and
 Component.plot_data for how a component draws itself at an arbitrary point.
 """
 
@@ -79,7 +80,11 @@ class NeedsResolve(Exception):
 # Config keys that carry no structural meaning for the compiled graph.
 # "modeling" is output-only (the generated paper-draft scaffold): adding
 # the block or flipping its `compile` key must not stale a finished trace.
-_NON_STRUCTURAL_CONFIG_KEYS = {"run", "modeling"}
+# "reporting" is output-only too: it sets the credible-interval width the
+# tables, CSV, mode report and corner plots are written at.  Re-reporting an
+# existing trace at a different width is exactly what it is for, so it must
+# not invalidate one.
+_NON_STRUCTURAL_CONFIG_KEYS = {"run", "modeling", "reporting"}
 
 
 def _canon(value: Any) -> Any:
@@ -115,24 +120,81 @@ def _gather_files(obj: Any) -> List[str]:
     return found
 
 
+#: Per-instance config keys that do NOT affect the model, and so are the only
+#: things dropped from the structural hash.
+#:
+#: This is a DENYLIST, and the direction matters.  Nearly every key inside a
+#: component instance selects part of the model -- `light_travel_time`, `gp`,
+#: `likelihood`, `mask`, `ld_law`, `data_format`, `rm`, `exptime`, `ninterp`,
+#: `band`, `star_ndx`, the SED's `mag`/`err` photometry, all of it -- so an
+#: allowlist is a list of everything, maintained by hand, and one forgotten
+#: entry is a SILENT failure: the trace reloads under a model it was never
+#: sampled from (via `recompute_trace: false`, `exozippy-modes` or
+#: `mkparam.write_param_file`).  `light_travel_time` was exactly that, and it
+#: defaulted to ON.  A denylist fails the other way: forget an entry here and
+#: a cosmetic edit merely forces an honest re-run.
+#:
+#: Adopting it invalidated every trace on disk once, deliberately -- the
+#: payload shape changed for every config.  That is a one-time cost paid for
+#: never silently reusing foreign draws again.
+#:
+#: `file`/`files` are dropped only because `structural_payload` already hashes
+#: them under its own "files" key; `path` is NOT (nothing else captures it).
+_NON_STRUCTURAL_INSTANCE_KEYS = frozenset(
+    {
+        "plot",  # per-instrument plot styling (color/marker)
+        "label",  # display-only
+        "file",  # already hashed under payload["files"]
+        "files",
+    }
+)
+
+
+def _canon_leaf(value: Any) -> Any:
+    """Canonicalize any config leaf -- scalar, list or nested dict -- into
+    something json.dumps(sort_keys=True) renders stably."""
+    if isinstance(value, dict):
+        return {str(k): _canon_leaf(v) for k, v in sorted(value.items())}
+    if isinstance(value, (list, tuple)):
+        return [_canon_leaf(v) for v in value]
+    return _canon(value)
+
+
+def _instance_skeleton(item: dict, index: int) -> Dict[str, Any]:
+    """Structural view of one instance dict: its name plus every key that is
+    not explicitly cosmetic (see _NON_STRUCTURAL_INSTANCE_KEYS)."""
+    return {
+        "name": str(item.get("name", index)),
+        "cfg": {
+            str(k): _canon_leaf(v)
+            for k, v in sorted(item.items())
+            if k not in _NON_STRUCTURAL_INSTANCE_KEYS and k != "name"
+        },
+    }
+
+
 def _component_skeleton(config: dict) -> dict:
     """Structural view of the component set: top-level keys and, for
-    list-valued component blocks, the sorted instance names.  Numeric or
-    initval-like leaves are deliberately excluded."""
+    list-valued component blocks, the sorted instances with their
+    model-affecting config.  Only explicitly cosmetic keys are dropped."""
     skel: Dict[str, Any] = {}
     for key, block in config.items():
         if key in _NON_STRUCTURAL_CONFIG_KEYS:
             continue
         if isinstance(block, list):
-            names = sorted(
-                str(item.get("name", i))
-                for i, item in enumerate(block)
-                if isinstance(item, dict)
+            entries = sorted(
+                (
+                    _instance_skeleton(item, i)
+                    for i, item in enumerate(block)
+                    if isinstance(item, dict)
+                ),
+                key=lambda e: e["name"],
             )
-            skel[key] = names if names else len(block)
+            skel[key] = entries if entries else len(block)
         elif isinstance(block, dict):
-            # single-instance component (e.g. sed): presence is structural
-            skel[key] = True
+            # single-instance component (e.g. sed): presence is structural,
+            # and so is everything non-cosmetic it sets.
+            skel[key] = _instance_skeleton(block, 0)["cfg"] or True
         else:
             skel[key] = True
     return skel
@@ -217,7 +279,7 @@ def structural_hash(config: dict, user_params: Optional[dict] = None) -> str:
 class Evaluator:
     """Millisecond-scale forward evaluator for GUI slider updates.
 
-    Construct via :func:`compile_evaluator`.  Holds the base PlotSpecs, which
+    Construct via :func:`compile_evaluator`.  Holds the base Charts, which
     component built each one, and a single cached pytensor function mapping
     the model's raw free variables to the full internal point (free RVs +
     deterministics).  A slider move calls :meth:`set_value` to invert a
@@ -249,8 +311,8 @@ class Evaluator:
             on_unused_input="ignore",
         )
 
-        # Which component built each base PlotSpec, and the sampled-parameter
-        # labels its model traces depend on (PlotSpec.param_deps) -- so a
+        # Which component built each base Chart, and the sampled-parameter
+        # labels its model traces depend on (Chart.param_deps) -- so a
         # slider move only calls plot_data() on components it can affect.
         self._spec_owner = spec_owner
         self._comps_by_id: Dict[int, Any] = {}
@@ -468,7 +530,7 @@ class Evaluator:
 def compile_evaluator(system, model, base_raw_point=None) -> Evaluator:
     """Build an :class:`Evaluator` for a prepared+built system.
 
-    Captures the base PlotSpecs (via each component's ``plot_data`` at the
+    Captures the base Charts (via each component's ``plot_data`` at the
     base point) and remembers which component built each one, so a later
     slider move can call the right component's ``plot_data`` again.
 

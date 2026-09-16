@@ -1,0 +1,26 @@
+# /bin/sh
+# ----------------Parameters---------------------- #
+#$ -S /bin/sh
+#$ -pe mthread 64
+#$ -q mThC.q
+#$ -l mres=256G,h_data=4G,h_vmem=4G
+#$ -cwd
+#$ -j y
+#$ -N ogleLDtm
+#$ -o ogle0383LD.log
+#
+# ----------------Modules------------------------- #
+module purge
+module load tools/python/3.13
+
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+
+# 2. Source conda and activate your specific environment
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+# 3. Navigate to the code directory
+cd $HOME/python/EXOZIPPy/examples/OGLE_0383
+
+# 4. Run your python script
+exozippy OGLE_0383LD.yaml

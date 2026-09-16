@@ -579,13 +579,14 @@ def test_one_helper_exposes_the_linear_value_of_both_log_tables():
     }
 
 
-def test_prepare_robust_hints_ten_times_the_white_noise_level():
+def test_prepare_robust_hints_the_white_noise_level_and_records_the_cap():
     """
     Given a hogg file among plain files,
     When _prepare_robust indexes the data,
     Then it records that file's observation indices and pushes an out_scale
-    hint of 10 x the median error bar (in user units via user_factor) -- well
-    clear of the inlier scatter, and derived from the reported errors, not
+    hint of 1 x the median error bar (in user units via user_factor) with a
+    10 x cap recorded for stage 3 (review 8.6.3; tests/test_robust_cap.py
+    covers the cap itself) -- both derived from the reported errors, not
     from the observations' own spread.
     """
     cm = _RecordingConfigManager()
@@ -599,8 +600,9 @@ def test_prepare_robust_hints_ten_times_the_white_noise_level():
 
     assert list(inst._robust_obs_index) == [1]
     np.testing.assert_array_equal(inst._robust_obs_index[1], np.arange(5, 12))
-    assert cm.hints == {"dummy.1.out_scale": pytest.approx(60.0)}
-    assert cm.scale_hints == {"dummy.1.out_scale": pytest.approx(60.0)}
+    assert cm.hints == {"dummy.1.out_scale": pytest.approx(6.0)}
+    assert cm.scale_hints == {"dummy.1.out_scale": pytest.approx(6.0)}
+    assert inst._robust_scale_caps == {1: pytest.approx(60.0)}
 
 
 # ---------------------------------------------------------------------------
@@ -826,15 +828,14 @@ def test_rv_system_with_hogg_on_one_file_samples_only_that_file(two_rv_files):
     }
     assert "rvinstrument.model" in {v.name for v in model.observed_RVs}
 
-    # The data-driven hint seeded out_scale at 10 x the median error (3.0
-    # m/s in the fixture files), superseding the defaults.yaml start.
-    # Parameter stores initval in internal units (solRad/d), so convert.
-    import astropy.units as u
-
-    expected_internal = 30.0 * (u.m / u.s).to(u.solRad / u.d)
-    assert float(np.ravel(rv.out_scale.initval)[0]) == pytest.approx(
-        expected_internal, rel=1e-6
-    )
+    # The data-driven hint seeded out_scale at 1 x the median error (3.0
+    # m/s in the fixture files), superseding the defaults.yaml start, and
+    # capped it at 10 x (review 8.6.3).  Read back through the Parameter's
+    # own from_internal -- never a hand-written factor.
+    start = float(rv.out_scale.from_internal(rv.out_scale.initval[0], index=0))
+    upper = float(rv.out_scale.from_internal(rv.out_scale.upper[0], index=0))
+    assert start == pytest.approx(3.0, rel=1e-6)
+    assert upper == pytest.approx(30.0, rel=1e-6)
 
     point = model.initial_point()
     assert np.isfinite(model.compile_logp()(point))
@@ -934,7 +935,7 @@ def test_user_can_override_a_robust_parameter_by_instrument_name(
     instrument name,
     When the model is built,
     Then it lands on the right element of the vector -- component-supplied
-    pins are layered below RANK_USER, so the user always wins.
+    pins are layered below PRECEDENCE_USER, so the user always wins.
     """
     system, model = _rv_system(
         two_rv_files,
@@ -946,3 +947,27 @@ def test_user_can_override_a_robust_parameter_by_instrument_name(
     frac = system.rvinstrument.out_frac
     assert float(np.ravel(frac.initval)[0]) == pytest.approx(0.12)
     assert float(np.ravel(frac.sigma)[0]) == pytest.approx(0.03)
+
+
+def test_register_robust_entries_do_not_share_one_overrides_dict():
+    """
+    Given the hogg family registered on some but not all files (so a pin
+    exists),
+    When out_frac's pin list is mutated in place,
+    Then out_scale's is unchanged -- each entry is a deep copy, not the
+    shallow `dict(entry)` that shared one nested {"overrides": {"sigma":
+    [...]}} between them (review 2.5.5; the same aliasing this codebase
+    shipped in the broadcast shared-dict bug).
+    """
+    inst = _make([{"file": "a.rv", "likelihood": "hogg"}, {"file": "b.rv"}])
+    manifest = inst._register_robust({})
+
+    manifest["out_frac"]["overrides"]["sigma"][1] = 5.0
+    manifest["out_frac"]["overrides"]["extra"] = True
+
+    assert manifest["out_scale"]["overrides"]["sigma"][1] == 0.0
+    assert "extra" not in manifest["out_scale"]["overrides"]
+    assert (
+        manifest["out_frac"]["overrides"]
+        is not (manifest["out_scale"]["overrides"])
+    )

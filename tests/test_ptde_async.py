@@ -8,7 +8,10 @@ known posterior moments on a toy model, and (c) survives edge cases (single
 core, eval timeouts, rung timing) without crashing or deadlocking.
 """
 
+import logging
 import multiprocessing as mp
+import os
+import time
 
 import numpy as np
 import pymc as pm
@@ -432,3 +435,222 @@ def test_one_parameter_model_samples_end_to_end_on_the_default_population():
 
     assert idata.posterior.sizes["chain"] == MIN_DE_CHAINS
     assert idata.posterior.sizes["draw"] == 30
+
+
+# ---------------------------------------------------------------------------
+# eval_timeout enforcement while the result queue is BUSY (review 1.4.1)
+# ---------------------------------------------------------------------------
+
+
+def _one_shot_hanging_logp(hang_flag, threshold=-5.0):
+    """A logp that hangs forever on the FIRST proposal below `threshold`.
+
+    The one-shot budget is claimed with an atomic O_EXCL create, so it holds
+    across the pool recycle the timeout recovery performs -- a per-process
+    counter would be reset by the fresh fork and the slot would hang again
+    on every retry, forever.
+    """
+
+    def _logp(point):
+        x = float(np.asarray(point["x"]))
+        if x < threshold:
+            try:
+                fd = os.open(
+                    str(hang_flag), os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                )
+            except FileExistsError:
+                fd = None
+            if fd is not None:
+                os.close(fd)
+                while True:  # the unbreakable loop eval_timeout exists for
+                    time.sleep(0.05)
+        return -0.5 * x * x
+
+    return _logp
+
+
+def _logp_that_freezes_after(t_switch):
+    """Fast until `t_switch` (wall clock), then hangs forever.
+
+    Stands in for a run whose remaining evaluations have all wandered into
+    a pathological region at once: nothing completes, so nothing arrives on
+    the result queue.
+    """
+
+    def _logp(point):
+        x = float(np.asarray(point["x"]))
+        while time.time() > t_switch:
+            time.sleep(0.05)
+        return -0.5 * x * x
+
+    return _logp
+
+
+def _logp_frozen_until(t_release):
+    """Blocks until `t_release` (wall clock), then evaluates normally.
+
+    The mirror image of _logp_that_freezes_after: here the run stalls from
+    its very first submission, so nothing ever reaches the result queue and
+    the stale scan has to run from the `queue.Empty` branch.
+    """
+
+    def _logp(point):
+        while time.time() < t_release:
+            time.sleep(0.05)
+        x = float(np.asarray(point["x"]))
+        return -0.5 * x * x
+
+    return _logp
+
+
+@requires_fork
+def test_eval_timeout_writes_off_a_wholly_stalled_pool_and_resubmits(caplog):
+    """
+    Given EVERY slot frozen at once -- so the result queue really is empty
+      and the stale scan runs from the `queue.Empty` branch --
+    When eval_timeout expires,
+    Then the whole in-flight batch is written off, the pool is recycled, the
+      slots resubmit, and the run completes once the freeze lifts.
+
+    The complement of the busy-queue test below: 1.4.1 added the result-path
+    scan, and this pins that the original empty-queue path still works.  Its
+    write-off/resubmit block had no coverage at all (review 7.4.2).
+    """
+    # ARRANGE
+    if mp.cpu_count() < 2:
+        pytest.skip("eval_timeout has no effect with a single core")
+    with pm.Model() as model:
+        pm.Normal("x", mu=0.0, sigma=1.0)
+    release_at = time.time() + 1.5
+    model.compile_logp = lambda *a, **k: _logp_frozen_until(release_at)
+
+    # ACT
+    with caplog.at_level(
+        logging.WARNING, logger="exozippy.samplers.ptde_async"
+    ):
+        idata = ptde_async_sample(
+            model,
+            _MinimalSystem(),
+            draws=10,
+            tune=2,
+            n_temps=1,
+            n_chains=4,
+            cores=2,
+            initvals=[{"x": np.array(0.1 * j)} for j in range(4)],
+            seed=17,
+            log_interval=10**6,
+            eval_timeout=0.5,
+            maxtime=60.0,
+            min_ess=None,
+            max_rhat=None,
+        )
+
+    # ASSERT
+    assert "recycling worker pool" in caplog.text
+    assert idata.posterior.sizes["draw"] == 10
+
+
+@requires_fork
+def test_maxtime_is_honored_when_no_result_ever_arrives(tmp_path):
+    """
+    Given a run whose evaluations all freeze partway through, so no result
+      reaches the queue again, and NO eval_timeout (the default),
+    When maxtime expires,
+    Then the sampler stops and returns the draws it had already stored.
+
+    The main loop used to block in result_q.get(timeout=None) and test the
+    stop conditions only on the result path, so a stop request was honored
+    only if some slot happened to finish -- and if none did, the user's
+    second Ctrl+C raised out of the signal handler and threw away every
+    draw already collected (review 2.4.3).
+    """
+    # Arrange
+    if mp.cpu_count() < 2:
+        pytest.skip("needs a worker pool to freeze")
+    with pm.Model() as model:
+        pm.Normal("x", mu=0.0, sigma=1.0)
+    freeze_at = time.time() + 1.5
+    model.compile_logp = lambda *a, **k: _logp_that_freezes_after(freeze_at)
+
+    # Act
+    t0 = time.time()
+    idata = ptde_async_sample(
+        model,
+        _MinimalSystem(),
+        draws=10**7,  # never reached; maxtime is what ends this run
+        tune=2,
+        n_temps=1,
+        n_chains=4,
+        cores=2,
+        initvals=[{"x": np.array(0.1 * j)} for j in range(4)],
+        seed=7,
+        log_interval=10**7,
+        maxtime=4.0,
+        min_ess=None,
+        max_rhat=None,
+    )
+    elapsed = time.time() - t0
+
+    # Assert
+    assert idata.posterior.sizes["draw"] >= 1
+    assert elapsed < 40.0, (
+        f"the run took {elapsed:.1f}s against a 4s maxtime, i.e. it was "
+        f"still blocked waiting for a result that never came"
+    )
+
+
+@requires_fork
+def test_hung_slot_is_written_off_while_other_slots_keep_the_queue_busy(
+    tmp_path, caplog
+):
+    """
+    Given one T=1 slot whose first logp call hangs forever while every other
+      slot resolves in microseconds -- so the result queue is never empty and
+      `queue.Empty` (the only place the stale scan used to run) never fires,
+    When ptde_async_sample runs with eval_timeout well below maxtime,
+    Then the hung submission is written off on the RESULT path, its slot
+      resubmits, and every chain reaches the draw target -- instead of the
+      run stalling until maxtime with min(per_chain_draws) stuck at zero
+      (review 1.4.1).
+    """
+    # Arrange: chain 0 starts inside the hang region; the rest do not.
+    if mp.cpu_count() < 2:
+        pytest.skip("eval_timeout has no effect with a single core")
+    hang_flag = tmp_path / "hang.claimed"
+    with pm.Model() as model:
+        pm.Normal("x", mu=0.0, sigma=1.0)
+    model.compile_logp = lambda *a, **k: _one_shot_hanging_logp(hang_flag)
+    n_chains = 6
+    initvals = [{"x": np.array(-6.0)}] + [
+        {"x": np.array(0.1 * j)} for j in range(1, n_chains)
+    ]
+
+    # Act
+    t0 = time.time()
+    with caplog.at_level(logging.ERROR, logger="exozippy.samplers.ptde_async"):
+        idata = ptde_async_sample(
+            model,
+            _MinimalSystem(),
+            draws=15,
+            tune=5,
+            n_temps=1,
+            n_chains=n_chains,
+            cores=2,
+            initvals=initvals,
+            seed=5,
+            log_interval=100000,
+            eval_timeout=0.5,
+            maxtime=60.0,
+            min_ess=None,
+            max_rhat=None,
+        )
+    elapsed = time.time() - t0
+
+    # Assert
+    assert hang_flag.exists(), "the hang was never triggered; test is inert"
+    assert "logp call exceeded eval_timeout" in caplog.text
+    assert idata.posterior.sizes["draw"] == 15
+    assert elapsed < 55.0, (
+        f"the run took {elapsed:.1f}s, i.e. it stalled on the hung slot "
+        f"instead of writing it off"
+    )

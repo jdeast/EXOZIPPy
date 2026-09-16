@@ -1,0 +1,258 @@
+# The parameter system
+
+`src/exozippy/components/parameter.py`: the universal node wrapper, unit conversion, the rules about
+start values and pins, how a component-added prior gets reported, and the four per-element
+roles.
+
+Read this before changing how a Parameter is built into PyMC, before adding a unit
+conversion anywhere, and before giving a component a per-instance parameterization.
+Related: resolution of the numbers themselves is `src/exozippy/config.md`; the manifest
+vocabulary that declares roles is `src/exozippy/components/components.md`; measured scales
+are `src/exozippy/whitening.md`.
+
+## Parameter system (`parameter.py`)
+
+`Parameter` is the universal node wrapper. Key points:
+- All numeric fields (`initval`, `init_scale`, `lower`, `upper`, `mu`, `sigma`) are stored in **internal units** after `__post_init__` applies the unit conversion factor.
+- `unit` is the user-facing unit (from `defaults.yaml` or user override); `internal_unit` is the math unit.
+
+**The two conversion factors in the codebase are RECIPROCALS** -- that rule is kept in full
+in the trunk `CLAUDE.md`, because it governs anything anywhere that converts a number.
+Everything it implies:
+
+- **`Parameter.element_factor(index)` is the one owner** of the "element `index`, or element 0 when the factor vector is shorter" rule, and `to_internal`/`from_internal` are its two directional wrappers. That rule existed in six hand-written copies (two error-message helpers, `_prior_scalar`, `_own_prior_str`'s private `_scalar`, `run._element_conversion_factor`, `evaluator.set_element`), and the copies were not all equivalent.
+- **`index=` is not decoration.** `unit:` is resolved **per element** (config.py's `elem_units`), so a `unit:` override on one named instance of a vector -- `star.A.mass: {unit: jupiterMass}` with `star.B.mass` left at its default -- makes `Parameter.unit` a genuine per-element list. The un-indexed call then returns an *n*-element array for a scalar input, which is what made run.py's startup table die with "can only convert an array of size 1" **before the fit had printed its own banner**. A vector/vector length mismatch now raises inside `_directional_factor` instead of broadcasting elements into each other.
+- **`internal_to_user_scale` is the one channel for a coordinate change the unit system cannot express**, and it lives on the same factor so nothing has to hand-write it. It is an extra per-element multiplier in the **internal -> user** direction, multiplied into `_get_conversion_factors`, so `__post_init__` divides the user's `lower`/`upper`/`mu`/`sigma`/`initval` by it on the way in and `from_internal` multiplies the reported value by it on the way out -- one declaration, both directions, and `element_factor`'s per-element rule for free. It is a component's to set (a manifest option), never a user's. Its one use today is `detrend_coeffs`, whose design-matrix columns are whitened at ingestion (`src/exozippy/components/instrument.md`): the sampler gets the well-conditioned coordinate, the table reads out per raw column unit. Reach for it only where the sampled and reported coordinates genuinely differ by a fixed linear map that astropy cannot name -- a physical unit belongs in `unit:`.
+- `to_unit`, `_get_conversion_factors_old`, `Parameter.get_value`, `Component.get_parameters`, `Component._is_sampling_param` and `System.__init__`'s `entity_directory` were all dead and are gone. `to_unit` was also broken twice over (`.value` on the float `Unit.to()` returns, and `self.value` is a symbolic node at every point it could have been called).
+
+Tests: `tests/test_unit_conversion.py` (round trip, per-element factors, the reciprocal-direction contract, the ledger regression), plus `test_inspect_start.py::test_per_element_units_are_reported_per_element`.
+- `sigma = 0` → parameter is fixed, and it is the **only** way to pin an element. (A `init_scale <= 1e-12` used to pin one too — a second, undocumented spelling that contradicted "`init_scale` never affects the posterior". Removed; a non-positive `init_scale` now takes the same span-fraction fallback a missing one takes, because a zero whitening scale is a degenerate raw direction, not a pin.) `sigma > 0` → Gaussian potential applied. No sigma → uniform prior on `[lower, upper]` via logit transform.
+- **A pin must say what it pins to.** `sigma: 0` with no `initval` from *any* source **raises** (`build_pymc`, right after `is_fixed` is computed). The value of a fixed element is exactly `inits[i]` and there is no second channel for it, so `to_vec`'s `fill=0.0` used to hold such an element at 0.0 in internal units -- indistinguishable downstream from a deliberate pin at zero, and unreportable (`to_latex_def` emits no macro for a fixed element with no initval while `latex.py`'s `_value_cells` still references one, i.e. an undefined control sequence by construction). Same reasoning as `validate_sigma_has_center`: if the user is fixing a parameter they should know what they are fixing it to. **Not** the error case: a value that merely is not written in the params file -- defaults.yaml, a component `"overrides"` entry or hint, and the relaxation engine's solution all count. Two exemptions: a **derived** element (its value is the expression, so `sigma: 0` there is the separate no-op that keeps its own warning) and a **hard-linked** element (the link expression is the value). The check lives at stage 6, not stage 4, because the manifest `"overrides"` channel and the stage-1/2 data hints do not exist earlier -- an earlier check would have to guess about both. Relatedly, **every sampled parameter in the tree now carries a defaults.yaml `initval`**: `mulensing` `t_0`/`u_0` and `transit` `baseline` are data-derived and had none, and were given backstop values (2460000 d, 0.5, 1.0 relative flux) so the rule is an invariant rather than a rule with exceptions. None of those appears in any `RELATIONS` entry, so a `PRECEDENCE_DEFAULT` seed there cannot propagate into another parameter's provenance -- in particular it cannot change what `mmexofast_support.user_hints_sufficient` concludes, which keys on rank *above* `PRECEDENCE_DEFAULT`. (`mulensing` `zeropoint` was on that list too, until it became a **derived** Parameter -- see the SED hook in `src/exozippy/components/sed/sed.md`. A derived element is exempt from the rule, so its backstop `initval` was dropped and `mu` is its start, exactly as for every other Gaussian-prior parameter.)
+- **A sampled element must say where it starts.** The pin rule's sibling, immediately below it in `build_pymc` and for the same reason: `initval` is the *only* channel for a start value, so `to_vec`'s `fill=0.0` turned "nobody said" into the number 0.0 in whatever internal unit the parameter carries. For a sampled element that 0.0 is where the chains begin, the point the whitening probe measures around and what every multi-seed start is derived from -- and it is indistinguishable from a start somebody chose. Where the missing value arrives spelled `NaN` instead (`ConfigManager.resolve` writes NaN into a vector for "this element was never set") the logit branch built `log(NaN/(1-NaN))` and the fit died much later inside PyMC's initial-point check, naming a raw variable rather than the parameter. It now **raises**, per element, quoting the params file when known and the `initval_source` provenance, with advice keyed on that provenance exactly as the out-of-bounds error is. **Not** the error case -- and this is the whole reason the check is at stage 6: defaults.yaml, the params file, a component hint, the manifest `"overrides"` *and* `"options"` channels and the relaxation engine's solution have all landed in `initval` by then, and any of them counts. No exemption list is needed (contrast the pin check's two): a **derived** element is not sampled, and a **hard-linked** one is `sigma: 0` by construction (`Component._wire_user_links` only classifies an initval link as "hard" when sigma is 0), so the pin check owns it. A **soft** link does reach the check and should -- it adds a potential tying the element to an expression, but the element is still sampled and still has to start somewhere. An **unbounded** element with a `mu`/`sigma` is covered too: its raw start is `(initval - mu)/sigma`, so a missing `initval` starts the chain at 0.0 rather than at the prior centre. This error is strictly broader than the "non-finite start" check it replaced, which only looked at elements with two finite bounds.
+- The LaTeX prior macro is emitted **per element** (`\<varname><idx>prior`, mirroring the value macros), not once per parameter: elements of a vector stopped sharing a prior when the per-element `"overrides"` channel arrived (GP / robust-likelihood vectors pin the non-opted-in files with `sigma: 0`), and reading element 0 made such a vector report "Fixed" for its sampled elements.
+- Symbolic PyTensor nodes passed as `initval` are preserved as-is (no unit conversion applied).
+- Every piece of a generated LaTeX macro name has exactly one implementation, in
+  `outputs/texutils.py`; the emitter/referrer contract is in
+  `src/exozippy/outputs/outputs.md`.
+- **A value array SHORTER than the element count is legal; a LONGER one raises.** The two are not symmetric and the asymmetry is the design. Short is load-bearing: `resolve` leaves the elements nobody named as `NaN`, `to_vec` fills the tail, and that fill is exactly what `_initval_present` reads as "this element was never set" (and what the two start-value rules above then refuse). Long has no reading at all -- `to_vec` copied the first `n_elements` and dropped the rest with no message, so a mis-sized array built a model out of whichever values happened to land first, indistinguishable from one sized correctly. The user's vectors cannot reach it (`resolve` returns one entry per element, and a per-seed `initval` list collapses to seed 0 there) and neither can a component `"overrides"` array (applied element by element); the live caller is a component writing a manifest **option** -- `lower`/`upper`/`sigma` straight onto the entry, which win outright and reach `Parameter` unsized -- sized from the component's config list rather than from the parameter's own manifest `shape`. That is review 1.1.1's hazard class, and every other spelling of it raises (`ConfigManager._check_broadcast_covers_vector`, the ambiguous inline mask of 2.5.2, `manifest.normalize_selector`), so this one does too rather than inventing a third convention. `to_vec`'s `where=` argument only names the field in that error. `_initval_present` refuses the same array for the same reason: the mask mirrors `to_vec`'s broadcasting rules so it lines up element for element, and if only one of the two refused, the pair could disagree about which element is which.
+- **`cap_alarm` marks an upper bound that is a modelling cap, not a limit.** Per element (or one bool), set by a component through a manifest option and never user-facing; the hogg mixture flags `out_scale` (10x the median error) and `out_frac` (0.5) on the files that opted in (review 8.6.3). `cap_saturation(index)` is the statistic -- the fraction of posterior draws in the top 5% of `[lower, upper]`, compared in USER units through `from_internal`, `None` when unmeasurable -- and `diagnostics.cap_alarm_findings` is its one consumer at wrap-up. Same seam as `table_note`: a component annotates its Parameter, the generic layer reads the annotation, and nothing in `parameter.py` or `run.py` names the component.
+- **A one-sided zero error renders as a bare `0`,** the way the both-zero case always has. `PosteriorSummary.format` special-cased both-zero and let `em == 0` with `ep > 0` fall through to `decimals_from_sigfigs(0)` -> 0 decimal places -> `"0.0"`, which reached a published LaTeX table as `^{+0.05}_{-0.0}`. It is reachable from real draws whenever more than half a mode slice piles on one quantile edge (a mode pinned at a bound), where the 15.865% quantile and the median coincide. A rounded zero is a claim about precision and there is none to claim. Both-zero still renders `\equiv <median>` (a fixed value, not `x \pm 0`); a one-sided zero does not, because that element is not fixed.
+- **No element both uses the logit transform and reads a barrier scale**, so the preliminary barrier steepness is `gaussian_scales` outright and not a `np.where(use_logit, ...)` selection. `use_logit` is set only inside `if is_sampled[i]`, `needs_barrier`'s sampled arm is `is_sampled & ~use_logit` and its derived arm is disjoint from `is_sampled`; and even off the barrier's own elements the two arms held the same number, because `gaussian_scales` starts as a copy of `scales` and is written only in the two branches a logit element never takes. Measured on all 31 shipped configs (1771 parameters, 980 logit elements, 422 barrier elements: zero overlap, zero difference). Do not reintroduce the selection as "defensive" -- it implied a case that cannot occur (review 5.2.3); `tests/test_parameter_logic.py` pins the disjointness, so a future role change that really does put a barrier on a logit element fails where the scale would be decided.
+- `build_pymc()` uses non-centered parameterization: raw `N(0, 1)` mapped to physical space via logit or linear scale + shift.
+
+**A start value OUTSIDE its hard bounds is FATAL.** Two finite `lower`/`upper` put the element on the logit transform, whose support *is* `[lower, upper]` -- there is no raw coordinate for a value outside it. `build_pymc` used to `np.clip` such a start onto the wall behind a warning phrased for a different, benign situation, so a fit that started somewhere the user never asked for was indistinguishable from one that started where they did. It now raises, listing **every** offending element of a vector (values and bounds in the **user** unit, so the numbers match what was typed), the params file when known, and advice keyed on **where the number came from** -- `ConfigManager.initval_source` returns "user" / "data" / "solved" / "default", because telling someone to "fix the initval in your params file" for a number the relaxation engine derived sends them looking for a line that is not there.
+
+Three neighbours deliberately do **not** raise, and the distinctions are the whole design:
+
+- **Exactly ON a bound** is not the same error. The value is inside the support; it is only infinitely far away in logit space, so it *has* to move -- and a default sitting on its own bound (an angle defaulting to 0 on `[0, 360)`; `examples/wasp18`'s `band.thermal`) is common and legitimate. Those are nudged inward to `q_floor` and the warning now reports the **actual displacement** rather than the old "within 1e-6*init_scale" rule of thumb, which is wrong whenever the span dwarfs the scale: `q_floor = min(max(1e-6*whiten/span, 1e-12), 0.25)`, and on `transit.jitter_variance` (span 1e5, scale ~1e-8) the absolute `1e-12` term binds, moving `examples/gj1214`'s element 7 from 5.04e-8 to 7.54e-8 -- a 50% move in the parameter's own units, entirely inside its bounds. That nudge is pre-existing and untouched here; it is now merely honest about its size.
+- **Soft barriers** (a single finite bound, or a derived element) are penalties, not support. A start on the wrong side of one is legal and merely improbable, and the barrier's gradient is what pulls it back.
+- **Fixed elements** (`sigma: 0`) get neither the logit transform nor a barrier, so their bounds are entirely inert and nothing is clipped. A pin outside the bounds is therefore a different bug (an ignored bound, not a moved start) and is left alone deliberately -- `tests/test_bad_user_input.py` pins that so widening the check stays a conscious decision.
+
+A **missing** start gets its own error rather than being folded into the out-of-bounds one: NaN satisfies no bound either, but "you asked to start outside the bounds" is the wrong diagnosis for "nothing gave this element a start at all", and the fixes differ. That error is the "a sampled element must say where it starts" rule above, and it fires **before** this check, so nothing non-finite reaches the bounds comparison. It is reachable whenever a **free** parameter has no `initval` in its defaults.yaml and nothing else seeds it (or, for a vector, only some elements are seeded -- `resolve` leaves the rest NaN); no shipped example hits it, but two test vehicles that made the normally-derived `star.mass` free did.
+
+The multi-seed path already agreed with all of this: `raw_from_initval` raises `SeedBoundViolation` for `q < 0 or q > 1` -- and, since 2026-08, for a **non-finite** seed value too (review 2.2.1: NaN fails both comparisons, so it used to sail through and put a NaN raw coordinate in a chain start dict with nothing naming the element, which is the very failure class the start-value checks above removed for seed 0) -- and clips only inside `[0, 1]` to the same `q_floor`, and `system.get_raw_starts` skips that seed loudly. Seed 0 is the model's own start and now gets the same treatment, from `build_pymc` -- before, seed 0 was clipped while every other seed carrying the same value was skipped. Two other bound-driven moves survive and are *not* clips-from-outside: `orbit.py`'s `y_init = np.maximum(y_init, 1e-6)` (a component pre-nudging `ybigomega` off its own `lower: 0` when `bigomega` starts at exactly 0 or 180 -- the on-the-bound case, handled before `build_pymc` sees it, and silent) and `mulensinstrument`'s `np.clip(q_flux_est, 1e-3, 1e3)`, whose upper clip is exactly `q_flux`'s declared `upper`, so a flux ratio above 1000 lands the hint precisely on the wall.
+
+Tests: `tests/test_bad_user_input.py`.
+
+### `raw = 0` is the start, on the logit path only (review 4.3.1)
+
+`raw_initval` is what the polish writes and what every consumer of the start reads, and after a polish it is **zero on every logit element** -- because `Parameter.recenter_on_start` folds the displacement into the ANCHOR (`sv_logit_q_inits`) instead of carrying it as a coordinate. So `raw = 0` decodes to the polished physical value by construction, and `Model.initial_point()` needs no override: see `src/exozippy/whitening.md` for why moving the anchor is free (section C's correction cancels the raw N(0,1), so the anchor is pure parameterization) and `src/exozippy/run.md` for what that lets the sampler dispatch delete.
+
+**Gaussian-path elements keep a nonzero `raw_initval`, and that is not an oversight.** There `val = gaussian_mus + gaussian_scales * raw` with `raw ~ N(0,1)` *as the prior*, and `gaussian_mus[i] = mus[i] if has_mu else inits[i]`: for any element carrying an explicit user `mu` the center **is** the prior mean, so folding a start displacement into it would move the prior -- a change to the model, not to the coordinates. `System.recenter_whitening_anchor` hands those to `Model.set_initval` instead. The asymmetry is the same one that decides which elements `set_whitening` may rescale, and for the same reason.
+
+The **`q_floor` nudge is unchanged** by this: its threshold is a property of the bounds and the whitening scale, not of the anchor, and `build_pymc` still applies it to the start value a user or the engine supplies. What is new is that a *re-centered anchor* can land inside it, when the polish drives an element onto a wall -- that warns and is deliberately not clamped, since clamping would override an optimizer's result and move the physical start.
+
+### A value against a wall says what to do about it (`near_bound_remedy`, review 8.2.2)
+
+Two warnings fire when a bounded element sits against one of its hard bounds: the post-polish one in `recenter_on_start` (the polished start inside `q_floor` of a wall, above) and `diagnostics.warn_posterior_near_bounds` at wrap-up, called from `outputs/report_pipeline.py` right after `System.distribute_posterior` because that is the first point at which every Parameter carries its posterior. The wrap-up check reads each sampled logit element's posterior MEDIAN, converts it to internal units through `to_internal(index=i)`, and measures its position between the frozen transform's `lowers[i]` and `uppers[i]` -- in LOG space when both bounds are positive (a scale), linearly otherwise -- against `NEAR_BOUND_MARGIN` (2%). Log space is the point: `err_scale = 1` on `[0.01, 100]` is the middle of a four-decade interval, and a linear rule would call it 1% from the floor.
+
+The generic half of both messages can only say "the bound, not the value, is the thing to revisit", and for a nuisance scale that is the WRONG advice. So a component may declare **`near_bound_remedy`** in its `defaults.yaml` -- a sentence about what a value against THIS parameter's bound means and what to do -- and both warnings append it through `Parameter.remedy_suffix()`, one spelling for two call sites. It is a defaults-only field: `ConfigManager.resolve` copies it from `base` alongside `latex`/`description`, and it is deliberately not in `STRING_KEYS`, so a user cannot set it and `check_unused_yaml` will flag one who tries. The worked example is `mulensinstrument.err_scale`, whose bounds moved from `1e-6..1e6` to `0.01..100` in the same change: on DC2018-226 a point-lens fit to a wide binary inflated both bands' errors 300-460x inside the old bound and walked `u_0` to zero under the flattened likelihood (review 2.4.14). Its remedy says to rescale the supplied errors or seed a better starting model, never to widen the bound. Tests: `tests/test_near_bound_remedy.py`.
+
+### A per-element bound nobody stated is NO bound, not a NaN one
+
+`resolve` writes **NaN** into a vector for "this element was never given one", so a bound named per element -- `orbit.BC.period: {lower: 3}` on a three-orbit system -- resolves to `lowers = [nan, 3, nan]`. `build_pymc`'s soft-barrier gate was `~np.isinf(lowers)`, and `~np.isinf(nan)` is **True**, so the unnamed elements took the barrier, `soft_lower_bound(v, nan)` returned NaN, and the **whole model logp** was NaN with nothing naming the parameter. Found doing review 8.8.8(c), which asks for exactly that entry on `examples/kelt4`'s hierarchical triple: its start logp went from 82862.6 to `nan`. The gate is `np.isfinite` now, which is False for both `inf` and `NaN`.
+
+The mask is **not** enough on its own, and that is the half worth remembering: `pt.where(mask, penalty, 0.0)` discards the unselected element's VALUE but its VJP multiplies that branch by zero, so a NaN there still poisons the GRADIENT of the whole vector -- the where-trap. The bound arrays fed to `soft_lower_bound`/`soft_upper_bound` are therefore sanitized to `-inf`/`+inf` first. That is the same stand-in a genuinely unbounded element already used, and it is finite in the only sense that matters: a clipped log-sigmoid of `+inf` is exactly 0 with zero gradient. Tests: `tests/test_per_element_soft_bound.py`.
+
+### A dynamic (linked) bound plus a sigma is a TRUNCATED normal, and it is normalized
+
+Sections A/A2 of `build_pymc` add an **unnormalized** Gaussian on top of the reparameterization's exact `U(lower, upper)`, which for STATIC bounds is fine -- the truncated mass is then a constant. With a **linked** `lower`/`upper` (`linking.py`; see `src/exozippy/config.md`) it is not: the conditional prior's mass `Z = Phi(beta) - Phi(alpha)` moves with the bound-source parameter, and an unaccounted conditional mass reweights that parameter's own posterior. Section **A3** therefore adds one `trunc_norm.<label>.<i>` potential per such element (review 1.2.4; no shipped example combines the two, so this is dark today).
+
+- **The term is `+log(span) - log(Z)`, not `-log(Z)` alone.** Derivation: with `lq = c + s*raw`, the built density is `exp(-0.5 z^2) / (span * s * sqrt(2 pi))`, which integrates over `[lo, up]` to `sigma*Z/(span*s)`; dividing by that leaves the normalized truncated normal. The `+log(span)` is **not** the `-log(span)` double-count review 1.5 removed -- opposite sign, and it belongs to the Gaussian rather than to the uniform. The `sigma -> infinity` limit is the check: there `Z -> span/(sigma*sqrt(2 pi))`, the whole correction collapses to a constant and the pure-uniform case is recovered exactly. Adding `-log(Z)` alone would leave a `-log(span)` behind in that limit, i.e. reintroduce precisely the bias review 1.5 removed.
+- **`Z` is built by `_log_normal_mass` from erf/erfc with a per-side branch**, never as a difference of `Phi` CDFs -- two bounds on the same tail are `1 - eps` and `1 - eps'`, and the subtraction discards nearly every digit (the same trap `galacticmodel`'s truncated-lognormal bracket documents). Both branches are evaluated, which is safe because erf/erfc are finite everywhere, so the unselected branch cannot poison the gradient. The mass is floored at the smallest normal double before the log: such an interval already costs ~700 nats, and a floor is preferable to a `-inf` with no gradient to follow.
+- The test that matters is the property, not the formula: `test_dynamic_bound_plus_sigma_leaves_the_bound_source_unbiased` marginalizes the bounded element out by quadrature and asserts the bound source's implied marginal is flat, exactly as the sigma-free sibling test does for review 1.5.
+
+Tests: `tests/test_linked_params.py`.
+
+### A LINKED bound is not a bound, and a DERIVED element cannot take one
+
+Two different mechanisms share the params-file words `lower:`/`upper:`, and
+telling them apart is the whole of this ruling:
+
+- **`lower: 3` (a NUMBER) is a soft barrier, and a derived element gets one
+  today.** `needs_barrier = ((is_derived & ~is_reported) | (is_sampled &
+  ~use_logit)) & ~is_fixed` puts `is_derived` in the FIRST arm; the penalty is
+  `potentials.soft_lower_bound`/`soft_upper_bound`, `bound_scale` tunes its
+  steepness, and the gradient acts on the PARENTS the element is derived from
+  -- the only thing that can move a derived value. This is the right answer
+  for "keep this derived quantity above 3" and it is not going anywhere
+  (`tests/test_per_element_soft_bound.py`).
+- **`lower: <expression naming another parameter>` (a LINK) is a
+  reparameterization.** `phys_val = pt.set_subtensor(phys_val[i], lo_t +
+  span_t * q_i)`: the element's value BECOMES the image of its own logit
+  coordinate inside the linked interval, which is a hard constraint by
+  construction. Correct and desirable on a SAMPLED element.
+
+On a DERIVED element the second one has nothing to re-map: `is_sampled[i]` is
+False, `lq[i]` sits at its center, `q_i = 0.5`, and the `set_subtensor`
+discarded the expression's value in favour of the interval midpoint -- measured
+as a derived 7.77 evaluating to 6.5, and as a mixed V_c/V_e system's
+`orbit.ecc` evaluating to `+inf` (the parameter has no finite static upper), in
+both cases with no error and no warning. A hard link (an `initval` link with
+`sigma: 0`) overwrote it outright. `build_pymc` now refuses all three, **per
+element**, sharing one message (`_derived_link_error`) with the whole-vector
+refusal that has always existed -- the guards predated per-element roles and
+keyed on the whole-vector `expression` only, which is the entire bug. `mu`
+links stay legal, per element as whole-vector: a `mu` plus a `sigma` is the
+soft Gaussian channel, and it is the closest thing to a dynamic soft bound the
+code has (there is no spelling for "penalize leaving an interval whose edge is
+itself a parameter"; that absence is filed separately).
+
+The refusal is a pre-pass over both link loops rather than a check inside each,
+so nothing is partially re-mapped before the error and the element named is the
+first one the user wrote. It covers `reported` elements too, whose deferred
+patch would overwrite the link in any case.
+
+Tests: `tests/test_element_links_and_roles.py` -- the links x roles seam, in
+both directions (what raises, and that a numeric bound, a `mu` link and a link
+on the SAMPLED element of the same mixed vector all still work).
+
+### Evaluating a derived parameter over the trace
+
+`generate_posterior` walks the expression's ancestors, finds the inputs present in the posterior, compiles a pytensor function and evaluates it draw by draw. The compile is **cached per Parameter**, keyed by the tuple of input names -- the signature that decides the positional call (review 6.2.1). It used to happen on every call, and `distribute_posterior` calls it once per derived parameter and runs again for every mode report and every GUI re-solve. Nothing about a cached function goes stale: the graph is rebuilt deterministically from the same captured nodes, and every scale the model can change at runtime lives in a `pytensor.shared` the function reads by reference.
+
+**Which graph it walks is a per-element question, exactly like the roles are.** `distribute_posterior` has three outcomes for a Parameter -- its label is in the trace, or it has an expression to evaluate, or it has no posterior and the reporting layer falls back to the `initval` -- and a vector derived one element at a time (`element_expressions`) used to land in the third by construction. It has no whole-vector `expression`, and `build_pymc` creates a `pm.Deterministic` only when at least one element is **sampled** (`track_node`), so a vector every element of which is derived has neither. On the observable-coordinates arm `results.csv` printed `star.Lens.logmass` as its defaults.yaml start with two blank error cells while its value was in fact derived from `log_theta_E`/`pi_rel` (review 1.10.9). `generate_posterior` now falls back to the tensor `build_pymc` assembled into `self.value`, which *is* the whole vector's expression and is in internal units exactly like `self.expression`, so the ancestor walk above handles it unchanged (`_element_expression_value`). The fallback is deliberately scoped to the all-derived case: once an element is sampled the Deterministic exists and is the right source, and a reused trace that somehow lacks it is also missing that element's own draws, so `None` -- the fixed path -- is the honest answer rather than a vector reassembled around a hole. Tests: `tests/test_element_parameterization.py`, the four `*_all_derived_*` / `*_mixed_case_*` / `*_reports_its_posterior_in_the_csv` cases.
+
+**The sample axis is still a Python loop, and that is now a measured choice, not an oversight.** The obvious batching is `pytensor.graph.replace.vectorize_graph` over one extra leading axis; it is bit-identical, and it is a ~200x pessimization. On a 4-element derived parameter over 20 000 draws the loop costs **0.078 s** (~4 us a draw -- pytensor's call overhead is not the bottleneck the item assumed) while compiling the vectorized Blockwise graph costs **16 s warm, 112 s cold**, once per parameter. The cheaper-looking `clone_replace` with wider inputs is rejected outright by pytensor's type check (a `(?, ?)` matrix cannot stand in for a `(4,)` vector), and would only be valid for a wholly elementwise graph in any case. Re-measure those two numbers before re-attempting it.
+
+### A summary belongs to the draws it came from, and to the WIDTH it was computed at
+
+`Parameter.posterior` is a **property**, and its setter drops `summary` and `mode_summaries`. It has to: both are caches of one set of draws, and every consumer recomputes only `if p.summary is None` (`to_latex_def`, `build_csv_output`, `latex._value_cells`). `distribute_posterior` used to overwrite `posterior` and leave them alone, so a SECOND report off one live System -- `exozippy-modes`, a GUI re-solve, any script that fits and then re-reports -- published the FIRST trace's medians, silently, because a median is a plausible number whichever trace it came from (review 3.14.7; measured as two bit-identical results CSVs from two different traces). Assign through `posterior`, never to the `_posterior` slot behind it.
+
+**The width is the second half of the same rule, added 2026-09-11.** The reporting credible interval (`src/exozippy/reporting.py`) is a run-level setting, so it is process-wide, and a cached summary computed at one width is exactly as plausible at another -- an interval is a pair of numbers, and nothing downstream can tell 68% apart from 95% by looking. `Parameter._summary_ci` and `_mode_summaries_ci` record the width each cache was computed at; `summary_is_current()` and `mode_summaries_are_current(n_modes)` are the two predicates, and `ensure_summary()` is what every lazy call site asks instead of `if p.summary is None` -- that spelling is precisely the one that cannot see a width change. The `posterior` setter drops both stamps along with the summaries they belong to. **Two stamps, not one**, even though every call site today builds both caches at the same width in one pass: a shared stamp written by `compute_mode_summaries` would mark a `summary` built at the OLD width current, which is exactly the failure the fields exist to catch, and the call order is the only thing hiding it (`tests/test_reporting_interval.py::test_the_two_caches_carry_independent_width_stamps` fails if they are merged). The per-mode predicate asks BOTH questions (the 2.11.3 length check and the width), so neither is rewritten in `outputs/latex.py`. Tests: `tests/test_reporting_interval.py`.
+
+2.11.3's fix for the `mode_summaries` half -- recompute when the cached LENGTH disagrees with the new mode count -- does **not** transfer to `summary`: a single summary has no length to compare. That check survives in `_ensure_mode_summaries` anyway, as the guard for a caller that recomputes the modes without redistributing the posterior.
+
+Invalidating at the write was chosen over the other candidate, a `summary` cached property keyed on the posterior it came from. `summary is None` is the "not computed yet" sentinel three call sites branch on, and a property that computes on access is never None -- each site would change meaning, and each would have to answer for a Parameter with no posterior at all, which is the normal state of a fixed element and of every parameter before the fit. Keying on object identity also catches only an assignment (exactly what the setter catches) while missing an in-place mutation of the same array.
+
+Tests: `tests/test_second_report_staleness.py`.
+
+## Reporting component-added priors (`parameter.py`, `PriorContribution`)
+
+`get_prior_str` can only see a Parameter's **own** fields (`sigma`, `mu`, `lower`/`upper`), so a `pm.Potential` a *component* adds at stage 7 was invisible to it and the parameter was reported as whatever those fields implied -- "Uniform" for a bounded element with no sigma, which is exactly the prior such a potential replaces. `star.distance` (volume prior / galactic model), `star.logmass` (Chabrier or Salpeter IMF) and the FFP mass function were all misreported that way.
+
+A component **declares** its term next to the `pm.Potential` it is adding: `param.add_prior_contribution(latex, text=None, elements=None, supersedes_bounds=False, support_phrase="normalized on")`. `elements` is `None` (whole vector), an index list or a boolean mask -- per element because the choice genuinely is per element (`mass_function: ffp` swaps one star off the IMF). `supersedes_bounds` says the term **replaces** the implicit uniform-over-bounds rather than multiplying a prior the parameter states itself; the rendered text is then the term plus the interval it applies over (`p(d) propto d^2 on [0.001, 1.00e+05]`), so the support survives and the word "Uniform" never appears. `support_phrase` is how the table **note** joins the term to that interval: the default claims normalization, which is exactly true of the volume prior and the IMFs and exactly false of a barrier, so the SED's grid bound on `star.loggsed` passes `"whose logg support is"` instead. A superseding contribution is not always a density over the interval; do not let the note say it is. An explicit Gaussian `sigma` is **never** dropped -- a parallax measurement times the volume prior is two statements and the table makes both, joined with `x` / `\times`. A pinned element (`sigma: 0`) still reports "Fixed": the potential is a constant there. Calls are idempotent, so a second `build_model()` on one System (the GUI) cannot accumulate copies.
+
+Design points:
+- **The registration call is the seam.** `parameter.py` never learns a component's name, and no component-specific case lives in the reporting layer -- the same mechanism serves distance, both IMFs, the FFP function and anything added later. It is deliberately the same shape as `table_note` (a component annotating a Parameter for the tables), minus the tensor-graph walk: a prior contribution knows its target by name, so nothing has to be inferred from ancestors.
+- **One function serves both reports.** `run.py`'s startup audit table asks `get_prior_str(latex=False)` and `outputs/latex.py`'s `\<varname><idx>prior` macros ask `get_prior_str(latex=True)` per element; those are the only two consumers. `<prefix>_results.csv` (`build_csv_output`, `ledger.append_ledger_csv`) and `<prefix>_modes.txt` carry **no prior column at all**, so there is nothing to thread through there.
+- With no contribution declared, `get_prior_str` returns `_own_prior_str` verbatim -- the historical body, untouched -- so the composition step is inert unless something opted in.
+- A component that adds a prior and forgets to declare it is now the only way to get a wrong Prior column. Declare it in the same place you call `pm.Potential`.
+
+Tests: `tests/test_prior_reporting.py`.
+
+## Per-element parameterization: the element roles
+
+A modeling choice that differs between two instances of one component -- limb-darkening law per band, mass coordinate per planet, evolutionary track per star, eccentricity parameterization per orbit -- shows up as some ELEMENTS of a parameter vector being sampled while others are derived or absent. `Parameter.build_pymc` was uniform on that axis (`is_derived = np.full(n_elements, expr_raw is not None)`), and four shipped features paid for it: `band.ld_law` **raised** on a system mixing quadratic and linear bands, `planet.mass_parameterization` (filed for renaming to the boolean `fitlogq`, review 4.2.7) raised on explicit disagreement and silently fell back to all-`linear` on an implicit one, `star.mist`'s declared `mask` was **never read** (so a premature `evolutionarymodel:` block materialized three free likelihood-free dimensions -- review 3.8.2), and `orbit.fitvcve`'s WIP guard named the unconsumed `mask` field as its real blocker, ahead of the missing physics.
+
+Everything *else* per-element already worked and still does: per-element values/bounds/priors (orbit's `i180`, which sets `cosi`'s `lower` per orbit, is the proof), the `"overrides"` channel, and masked likelihood potentials (`relations.py`, galacticmodel's FFP split). The primitive added is the **role** of an element, interpreted in `manifest.py` and consumed in `build_pymc`:
+
+| role | value comes from | in the build DAG | potentials | in the tables |
+|------|------------------|------------------|-----------|----------|
+| `sampled` | a raw coordinate of its own (the default) | n/a | prior + logit correction | yes |
+| `derived` | an expression | yes | Gaussian on the value, soft barrier | yes |
+| `inactive` | a bookkeeping pin | no | none | **no** |
+
+**`reported` is not a fourth role; it is `derived` built late.** It was one
+until 2026-09, and the name was wrong twice over: every role in this table is
+reported (that is the last column), and the thing that actually distinguishes
+it is that **nothing in the model consumes it** -- which is why `graph.py`
+contributes no edge for it and why its expression is applied in a deferred
+pass after stage 7 rather than in build order. Both of those are mechanical
+necessities: they are what dissolves the cycle when two parameterizations
+derive each other in opposite directions (`ecc` reads `secosw` on a
+sqrt(e)cos/sin orbit while `secosw` reads `ecc` on a V_c/V_e one). The code's
+own internal name for the flag, `ElementExpression(output_only=True)`, says it
+better than "reported" does. `Parameter.is_reported` survives as the predicate
+for "this element's value is patched in late", which the reporting layer and
+`mkparam` still need.
+
+What was NOT a necessity, and was a bug, is that such an element used to get
+no potentials at all -- so a `mu`/`sigma`/`lower`/`upper` a user wrote against
+it was discarded in silence. Measured blast radius before the fix: on a
+default transiting config (`examples/hat3`) both `orbit.vcve` and
+`orbit.chord` are in this state, so `orbit.b.chord: {mu, sigma}` -- a
+transit-duration prior, the natural thing to write -- did nothing. The unit
+tests did not catch it because they assert exactly that behaviour
+(`test_element_parameterization.py` pins `reported logp == plain logp`); what
+was wrong was the DESIGN claim, restated below, that a user's constraint
+survived the flip. `build_pymc` now computes the masks for these elements with
+all the others and `finalize_deferred` builds the terms against the patched
+vector (`Parameter._add_deferred_potentials`). A linked (dynamic) bound on such
+an element is still unsupported and is skipped explicitly rather than built
+against the placeholder.
+
+Vocabulary, all on the manifest entry: **`expr_key` may be a dict** `{block: selector}` instead of a string, selecting a different `expressions:` block per element; **`output_expr_key`** takes the same shapes for `reported` elements; **`mask`** is the ACTIVITY selector, whose complement is `inactive`; **`inactive_value`** is what those elements are held at (default: whatever they resolved to). A selector is `None`, a bool, a boolean mask or an index iterable, normalized by the one `manifest.normalize_selector` -- sized against the parameter's OWN element count (its manifest `shape`), never the component's config list, which is review 1.1.1's hazard in a new place. Two expressions claiming one element raises; so does an element that is both masked out and derived.
+
+- **Building a masked-out coordinate late is what makes a flip constraint-preserving, and is the reason the mechanism exists.** A user's `orbit.b.secosw: {mu, sigma}` still means something after `fitvcve: true` only if `secosw` becomes derived rather than inactive -- and, as of 2026-09, only because the deferred pass now builds its potential; for two years the claim in this bullet was aspirational and the constraint was dropped. Rule for component authors is unchanged: **if the masked-out coordinate has a computable inverse it is derived (built late); `inactive` is only for parameters that are not part of the physics at all** (a non-MIST star's `eep`; a linear-law band's `u2`, pinned at exactly 0 via `inactive_value`).
+- **The reverse flip is what the deferred pass is for.** `ecc` reads `secosw` on the sqrt(e)cos/sin orbits while `secosw` reads `ecc` on the V_c/V_e ones: the VALUE graph is acyclic per element, but the per-parameter order `graph.py` sorts is not. `reported` selections therefore contribute no edge (graph.py skips them, and its cycle error names this design), and they are built in a second phase: `Component.add_parameter` hands over only the MASK (resolving a reported expression's deps mid-build would recurse into the parameter being built, whose `setattr` has not happened yet), `Parameter.build_pymc` marks the role and withholds the `Deterministic`, and `Component.finalize_reported` -> `Parameter.finalize_deferred` wires and applies the patch after stage 7, when every parameter exists. A Deterministic created in phase 1 would record the unpatched vector, which is why its creation waits.
+- **Nothing may CONSUME a reported element, and that is now checked.** It is the property the whole scheme rests on -- it is what makes the cycle dissolve and what makes phase 1's tensor safe for every consumer -- and breaking it is silent: the consumer reads the pre-patch placeholder, a plausible number that is not the quantity it names. `System._validate_reported_not_consumed` (after stage 3, before anything is built) refuses such a manifest, per element, so a legal mixed system still works (`ecc`'s sqrt(e) expression reads `secosw` for exactly the elements the other orbit does not report). It earned its place immediately: `orbit.tp` consumes `secosw`/`sesinw`, and so do `esinw`/`ecosw` -- all three now take `(e, omega)` expressions on a V_c/V_e orbit.
+- **A parameterization flip carries every constraint, and `inactive` is the one lossy role.** `mu`/`sigma` on an element that became `derived` is applied (`gaussian_prior_mask` includes `is_derived`, late-built elements and all), an `initval` is still a PRECEDENCE_USER assignment the relaxation engine propagates into whatever is sampled, and only `lower`/`upper` change meaning (hard logit support -> soft barrier). `build_pymc` warns per element for `inactive`, naming the dropped fields -- keyed on what the USER wrote (`_user_constraint_fields`), never on the resolved values, since nearly every parameter has bounds and many a sigma from defaults.yaml.
+- **The mixed assembly uses `pt.set_subtensor`, never a `pt.where` over the two value vectors.** An expression evaluated at an unused element's pin can legitimately be NaN (sqrt of a negative eccentricity the other parameterization never promised), and where's VJP multiplies the unselected branch by zero -- `0*NaN` poisons the gradient of the whole vector on every backend. The whole-vector paths (all elements derived by one expression, or none) are preserved exactly, so a component that does not use the vocabulary builds a **bit-identical** graph: verified as identical start logp, free-RV set and resolved parameter structure on all 19 shipped example configs.
+- **Better still, the unused elements never enter the expression.** `Component._element_expression` slices the dependencies to the mask, but only where the alignment is PROVABLE from how the dep resolved -- a local parameter of the same length, a map with one entry per element, or a context node the component lists in `aligned_context_deps`. A bare cross-component vector (`dep_nodes.append(ext_param.value)`) is indexed by the OTHER component's elements and **raises**, naming the two fixes; that is the same call it already makes for a dep naming a map the component does not have ("where the lengths happen to match it broadcasts silently and pairs the wrong bodies").
+- The alignment proof is static and cannot see whether the FUNCTION is elementwise, so both graphs are kept and compared at the start point: `System.verify_element_slices` (called at the end of `build_model`, one compile, no-op without a mixed vector) raises when a sliced expression disagrees with the unsliced one on the elements it supplies. At the start point, deliberately -- dummy inputs can agree by accident, and evaluating a random variable would draw from its prior instead of reading the start.
+- **Reporting is per element.** `Parameter` gains `element_is_derived` / `element_is_reported` / `element_is_active` beside `element_is_sampled`, and `get_prior_str` reads the derived-ness of the ELEMENT (a whole-vector `self.expression is not None` reported one instance's parameterization for all of them). `inactive` elements are suppressed from the startup table, the LaTeX table and `<prefix>_results.csv` -- an instance sub-head is emitted only if the instance has rows -- while their macros are still DEFINED, because a definition nobody cites is harmless and a citation with no definition is an "Undefined control sequence" at the end of a long fit. `System.derived_elements()` / `active_elements()` are the per-element answers `solve_api`, `config.export_solution` (which now also exports `"active"`) and the GUI's Tune tab use; `derived_params()` keeps its whole-vector meaning (every element derived), which is the conservative direction because its consumers treat "derived" as "exempt from the checks".
+- `mkparam` has no System (it reads a trace plus a config, deliberately), and a raw variable's length says how MANY elements are sampled, never which -- so `trace_meta.element_roles` stamps the non-uniform role masks into the trace attrs (`exozippy_element_roles`) and mkparam filters on them. Absent on older traces and on uniform models, where "every element of a sampled var is sampled" is exactly what it always meant.
+
+Declaring a per-instance parameterization as a mode table
+(`components/parameterization.py`) is documented in
+`src/exozippy/components/components.md`.
+
+
+Tests: `tests/test_element_parameterization.py`, `tests/test_parameterization_modes.py`.
+
+### Constraining a derived element: ONE rule, TWO fields, ONE sentence
+
+A derived element's value IS its expression, so no field the user can write
+holds it directly -- the only things that can move it are the SAMPLED
+parameters under it. `build_pymc` has said that about `sigma: 0` since long
+before per-element roles; `initval` is the same rule and was the field that
+silently cost the most (review 2.3.17: a derived `planet.mass` built at
+**1/1047** of the requested value, which accounted for essentially the whole
+12,107-nat gap of a posterior point that would not round-trip through the
+params interface). The two are not quite symmetric -- an `initval` on a
+derived element is a PRECEDENCE_USER assignment the relaxation engine
+propagates into whatever *is* sampled, and when the relations invert cleanly
+it is honored exactly (`examples/DC2018_128` pins the derived
+`lens.Companion.alpha` and the engine back-solves `xalpha`/`yalpha` =
+cos/sin of it at rank 80) -- so the *report* is what fires, not a refusal:
+`diagnostics.ModelAuditor.check_user_starts` compares every user `initval`
+against the COMPILED GRAPH and, for a derived element, returns reason
+`"derived"` carrying `requested`/`produced`/`rel` and the remedy.
+
+The sentence lives **once**, in `parameter.derived_constraint_message`, and
+both sites call it: two spellings of one rule is how these drift, and the
+generic alternative ("your value was kept, but the derivation reproduces it
+only approximately") understated the 1047x case by three orders of magnitude
+while pointing nowhere. The remedy NAMES the sampled parameters where it
+can, read off the built graph's ancestors (`_derived_sources`) rather than a
+manifest `deps` list -- a manifest states build order, the graph states what
+the value consumes. That answer is per PARAMETER, not per element: a mixed
+vector has one built tensor, and re-invoking an `ElementExpression` closure
+outside the model context to narrow it is a rebuild for a diagnostic. On all
+19 shipped examples the eleven start-value misses are all on derived
+elements, and the named parents are exactly the documented recipe (seeding
+`mulensevent.t_E`/`pi_E_*` does not place the model; pinning
+`star.pm_ra`/`pm_dec`/`distance`/`logmass` does).
+
+Tests: `tests/test_user_start_check.py`.

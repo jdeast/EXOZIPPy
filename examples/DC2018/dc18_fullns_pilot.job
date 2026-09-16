@@ -1,0 +1,27 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 64
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N fullns
+#$ -o dc18_fullns_pilot.$JOB_ID.log
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_$JOB_ID"
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy/examples/DC2018
+
+# Full-model (d=27) NS pilot: the d=7 benchmark found the solution blind at
+# ~43 core-hours; this asks whether that survives the real posterior --
+# galactic priors, Hogg mixtures, err_scale, both bands -- at d=27.
+python -u dc18_fullns_pilot.py --backend "${BACKEND:-ultranest}" --nlive 500 --ncpu 60 \
+  --config "${CFG:-DC2018_128.yaml}" \
+  --ckpt "${CKPT:-dc18_fullns_ckpt_$JOB_ID}" \
+  --out "${OUT:-dc18_fullns_pilot.$JOB_ID.json}"

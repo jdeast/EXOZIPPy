@@ -1,0 +1,23 @@
+Unloading tools/local-user <S>
+  ERROR: Unload of sticky module skipped
+
+Unloading uge/8.8.1 <S>
+  ERROR: Unload of sticky module skipped
+Initializing NUTS using jitter+adapt_diag...
+Multiprocess sampling (4 chains in 4 jobs)
+NUTS: [star.logmass_raw, star.pm_ra_raw, star.pm_dec_raw, star.distance_raw, star.rv_raw, lens.t_0_raw, lens.u_0_raw, mulensinstrument.log_f_total_raw, mulensinstrument.q_source_raw, mulensinstrument.err_scale_raw]
+Sampling 4 chains for 1_000 tune and 1_000 draw iterations (4_000 + 4_000 draws total) took 345 seconds.
+There were 65 divergences after tuning. Increase `target_accept` or reparameterize.
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+The effective sample size per chain is smaller than 100 for some parameters.  A higher number is needed for reliable rhat and ess computation. See https://arxiv.org/abs/1903.08008 for details
+{
+ "pipeline": "mulens_pspl",
+ "seed": 1008,
+ "snr": 30.0,
+ "n_epochs": 400,
+ "lens.t_0": 0.10398346635517673,
+ "lens.u_0": 1.3625888917755034,
+ "lens.t_E": -1.5990279230681193,
+ "mulensinstrument.f_source": 1.0385201099023749,
+ "mulensinstrument.f_blend": -1.0313453424880994
+}

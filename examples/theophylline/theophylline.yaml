@@ -1,0 +1,116 @@
+# Theophylline population pharmacokinetics.
+#
+# READ examples/theophylline/README.md AND
+# src/exozippy/components/pharmacokinetics/README.md FIRST.  This example
+# was written by an astrophysicist and an LLM with no domain reviewer.  It
+# demonstrates that a component from a field with no stars in it runs on
+# the same machinery as every astronomy fit; it is NOT a validated
+# pharmacokinetic analysis and must not be used as one.
+#
+# The data are not redistributed with EXOZIPPy.  Fetch them first:
+#     cd examples/theophylline && exozippy-fetch-theoph
+# then run the fit with:
+#     exozippy theophylline.yaml
+
+name: "theophylline"
+prefix: "fitresults/theoph"
+parameter_file: "theophylline.params.yaml"
+
+reporting:
+  # 95%, because that is what pharmacometrics, clinical and regulatory
+  # work report -- NOT the 1-sigma 68.3% that astronomy uses and that
+  # this code defaults to.  An exact probability, not 2 sigma (0.9545);
+  # see src/exozippy/reporting.py.  A 68% interval here would be read as
+  # a 95% one and understate the uncertainty about twofold.
+  credible_interval: 0.95
+
+# One instance per individual.  Weights (kg) and doses (mg/kg) are from
+# the dataset itself.  Names are S1..S12 rather than 1..12 because a
+# purely numeric instance name is rejected by the core (it would be
+# ambiguous with the internal subject.0 index form); the assay block's
+# subject_prefix maps the data's bare numbers onto these names.
+#
+# One boolean per coordinate basis, at most one true, none = the default:
+# `fitclv` (CL and V; NONMEM TRANS2; the default), `fitkev` (ke and V; NONMEM
+# TRANS1), or `fitclke` (both rates, V derived; R's SSfol).  The LIKELIHOOD is
+# identical in all three -- the same curve, checked to 1e-12 -- and the table
+# has the same rows either way.
+#
+# THE PRIOR IS NOT QUITE IDENTICAL, and the claim that "the posterior does not
+# move" was wrong.  Each sampled coordinate carries a prior uniform over its
+# own bounds, so the three bases are related by maps of unit determinant (all
+# three are linear in log space: log_ke = log_cl - log_v) -- flat stays flat,
+# no density is reweighted, and no Jacobian term is owed.  What differs is the
+# SUPPORT: a box in one basis is a parallelogram in another, so each admits
+# corners the others exclude.  Contrast orbit's fitvcve/fitchord, whose maps
+# are non-linear: there the component owes a Jacobian and supplies one
+# (orbit.md), which is the house convention this basis choice satisfies
+# trivially rather than escapes.
+#
+# IT IS NOT FREE OF CONSEQUENCE WITH A `population:` BLOCK, which is why every
+# subject here sets `fitclke`.  Between-subject variability is defined IN a
+# basis: a diagonal set of omegas in one basis is not diagonal in another.
+# The canonical mixed-effects fit of these data (R's nlme, via SSfol) has its
+# random effects on (lKe, lKa, lCl), so fitting in that basis is what makes
+# the comparison in the component README a comparison of the same model rather
+# than of two different ones.  A population requires one basis for all its
+# subjects and refuses a mixture, for the same reason.
+subject:
+  - {name: "S1", weight: 79.6, dose: 4.02, dose_unit: "mg/kg",
+     fitclke: true}
+  - {name: "S2", weight: 72.4, dose: 4.4, dose_unit: "mg/kg",
+     fitclke: true}
+  - {name: "S3", weight: 70.5, dose: 4.53, dose_unit: "mg/kg",
+     fitclke: true}
+  - {name: "S4", weight: 72.7, dose: 4.4, dose_unit: "mg/kg",
+     fitclke: true}
+  - {name: "S5", weight: 54.6, dose: 5.86, dose_unit: "mg/kg",
+     fitclke: true}
+  - {name: "S6", weight: 80.0, dose: 4.0, dose_unit: "mg/kg",
+     fitclke: true}
+  - {name: "S7", weight: 64.6, dose: 4.95, dose_unit: "mg/kg",
+     fitclke: true}
+  - {name: "S8", weight: 70.5, dose: 4.53, dose_unit: "mg/kg",
+     fitclke: true}
+  - {name: "S9", weight: 86.4, dose: 3.1, dose_unit: "mg/kg",
+     fitclke: true}
+  - {name: "S10", weight: 58.2, dose: 5.5, dose_unit: "mg/kg",
+     fitclke: true}
+  - {name: "S11", weight: 65.0, dose: 4.92, dose_unit: "mg/kg",
+     fitclke: true}
+  - {name: "S12", weight: 60.5, dose: 5.3, dose_unit: "mg/kg",
+     fitclke: true}
+
+# The population the twelve subjects are drawn from.  Without this block they
+# are twelve independent fits sharing an error model -- no between-subject
+# variability, no shrinkage, and nothing to compare with a published
+# population analysis.  One block, no keys needed: `variability:` defaults to
+# every coordinate the basis samples, and the allometric covariate (clearance
+# as WT^0.75, volume as WT^1) is always on, with its exponents as pinned
+# parameters a params file can free or zero.
+population:
+  - name: "adults"
+
+assay:
+  - name: "serum"
+    datafile: "theoph.csv"
+    # By header name, not index: the file ships with an 'rownames'
+    # column first, and a positional mapping is what silently reads the
+    # wrong column when a file gains or loses one.
+    columns: {subject: "Subject", time: "Time", obs: "conc"}
+    subject_prefix: "S"
+    conc_unit: "mg/L"
+    time_unit: "hr"
+
+sampler:
+  method: "nuts"
+  tune: 2000
+  draws: 2000
+  chains: 4
+  # 0.95 rather than the usual 0.9: this is a hierarchical model, and the
+  # higher acceptance target is the standard first remedy for the geometry
+  # one has.  It leaves ~0.6% divergences, which sit in the upper tail of the
+  # absorption-rate spread -- the least identified quantity in the fit -- and
+  # not at the omega -> 0 boundary a funnel would put them at.
+  target_accept: 0.95
+
