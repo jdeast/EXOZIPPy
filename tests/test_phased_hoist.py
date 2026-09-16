@@ -74,31 +74,40 @@ def test_rv_matrix_is_evaluated_once_per_orbit_plus_once_for_the_data(
 ):
     """
     Given two member orbits,
-    When plot_data builds both phased panels,
-    Then the compiled RV matrix is evaluated three times -- one model grid
-    per orbit (their time grids differ, so those cannot be shared) plus ONE
-    pass over the observed times, hoisted out of the loop.
+    When plot_data builds the unphased panel and both phased panels,
+    Then the compiled plot-grid model is evaluated three times -- once for
+    the unphased span and one period window per orbit (their time grids
+    differ, so those cannot be shared) -- and the likelihood's own model at
+    the observed times exactly ONCE, hoisted out of the per-orbit loop.
 
-    Before the hoist it was four: the data-times pass was repeated per
-    orbit, and it is the expensive one on a real data set.
+    Before the hoist the data-times pass was repeated per orbit, and it is
+    the expensive one on a real data set.  (It used to be a second plot
+    graph evaluated at the data times; it is the likelihood's node now,
+    compiled against the plot parameters -- reviews 1.5.5, 7.14.1.)
     """
     system, point = two_orbit_rv
     comp = system.rvinstrument
     assert len(comp._plot_orbit_map) == 2
 
-    calls = []
-    real = comp._compiled_rv_matrix
+    grid_calls = []
+    real_grid = comp._rv_grid_fn
     monkeypatch.setattr(
         comp,
-        "_compiled_rv_matrix",
-        lambda t, *a: (calls.append(len(t)), real(t, *a))[1],
+        "_rv_grid_fn",
+        lambda t, *a: (grid_calls.append(len(t)), real_grid(t, *a))[1],
+    )
+    data_calls = []
+    real_data = comp._rv_data_fn
+    monkeypatch.setattr(
+        comp,
+        "_rv_data_fn",
+        lambda *a: (data_calls.append(1), real_data(*a))[1],
     )
 
     comp.plot_data(system, point)
 
-    assert len(calls) == 3
-    # exactly one of them is the observed-times pass
-    assert calls.count(comp.n_total_obs) == 1
+    assert len(grid_calls) == 3
+    assert len(data_calls) == 1
 
 
 def test_rv_phased_arrays_are_unchanged_by_the_hoist(two_orbit_rv):
@@ -163,29 +172,40 @@ def test_lc_matrix_at_the_data_is_evaluated_once_per_instrument(
 ):
     """
     Given two planets on one light curve,
-    When plot_data builds both phased panels,
-    Then the smeared LC matrix is evaluated three times -- one model grid
-    per planet (different time grids) plus ONE pass over that instrument's
-    observed times, cached per instrument in the shared dict.
+    When plot_data builds the unphased panel and both phased panels,
+    Then the compiled plot-grid model is evaluated three times -- once for
+    the unphased span and one period window per planet (different time
+    grids), each serving every instrument at once -- and the likelihood's
+    own model at the observed times exactly ONCE, shared by every phased
+    panel.
 
-    Before the hoist the observed-times pass ran once per PLANET.
+    Before the hoist the observed-times pass ran once per PLANET.  (It
+    used to be a second plot graph smeared in NumPy at the data times; it
+    is the likelihood's node now -- reviews 1.5.6, 7.14.1.)
     """
     system, point = two_planet_transit
     comp = system.transit
     assert system.planet.n_elements == 2
 
-    calls = []
-    real = comp._smeared_lc_matrix
+    grid_calls = []
+    real_grid = comp._lc_grid_fn
     monkeypatch.setattr(
         comp,
-        "_smeared_lc_matrix",
-        lambda t, i, *a: (calls.append(len(t)), real(t, i, *a))[1],
+        "_lc_grid_fn",
+        lambda t, *a: (grid_calls.append(len(t)), real_grid(t, *a))[1],
+    )
+    data_calls = []
+    real_data = comp._lc_data_fn
+    monkeypatch.setattr(
+        comp,
+        "_lc_data_fn",
+        lambda *a: (data_calls.append(1), real_data(*a))[1],
     )
 
     comp.plot_data(system, point)
 
-    assert len(calls) == 3
-    assert calls.count(comp.n_total_obs) == 1
+    assert len(grid_calls) == 3
+    assert len(data_calls) == 1
 
 
 def test_lc_phased_arrays_are_unchanged_by_the_hoist(two_planet_transit):
