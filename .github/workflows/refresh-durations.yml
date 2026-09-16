@@ -1,0 +1,322 @@
+name: Refresh shard durations
+
+# WHY THIS EXISTS. tests/durations.json is the per-file weighting the CI shard
+# split packs from (scripts/pytest_shard.py). It has to be measured ON CI --
+# workstation weights balance the recorded sums perfectly and still produce a
+# 1.6x spread in real wall clock (scripts/gen_durations.py's docstring) -- and
+# every pytest job already uploads exactly that measurement as a
+# `durations-<os>-<python>-<shard>` artifact. What was missing was anyone
+# reading them back: the file went 20 days and 25 new test files without a
+# refresh, the packer charged a new 873 s file the 8 s median, and one ubuntu
+# shard ran 17 minutes against another's 11 (2026-09-14). This job closes the
+# loop so the weights cannot drift silently again: weekly, it regenerates the
+# file from the latest green master run and PROPOSES the result when the
+# balance has moved. It never commits to master itself.
+#
+# Per-test timing loggers were considered and are not needed: `--durations=0`
+# per test per shard is already recorded on every run (that is where the
+# analysis above came from). The gap was the feedback path, not the data.
+
+on:
+  # Weekly, Monday 09:00 UTC. After the nightly (07:00) so a master push that
+  # landed overnight has had its run complete, and on a weekday morning so
+  # the proposal is seen the day it is made rather than aging over a weekend.
+  schedule:
+    - cron: "0 9 * * 1"
+  # And on demand, which is how to refresh right after adding a heavy test
+  # file instead of waiting for Monday: `gh workflow run refresh-durations.yml`.
+  workflow_dispatch:
+
+# Two refreshes racing would push the same branch twice. One at a time, and
+# a dispatched run waits for a scheduled one rather than cancelling it.
+concurrency:
+  group: refresh-durations
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: refresh
+    runs-on: ubuntu-latest
+    # Downloading four ~300 KB artifacts and running two stdlib scripts; the
+    # cap is against a hung `gh` call, not real work.
+    timeout-minutes: 15
+
+    # Scoped to this job. `contents: write` pushes the proposal branch;
+    # `pull-requests: write` is what `gh pr create` needs IF the repository
+    # allows Actions to open pull requests (see the last step); `issues:
+    # write` is the fallback when it does not; `actions: read` lets `gh run
+    # download` fetch another run's artifacts.
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # The stable title the fallback step looks the tracking issue up by,
+      # defined once for the same reason the nightly job defines its own: the
+      # open and the update path must agree on it or the issue multiplies.
+      ISSUE_TITLE: "CI shard weights: tests/durations.json needs a refresh"
+      # A rebalance is MATERIAL when the predicted worst ubuntu shard improves
+      # by more than this many worker-seconds -- 240 worker-s is 60 s of wall
+      # clock on the 4-worker ubuntu runner -- or when any test file is
+      # absent from the committed weights (an absent file is charged the
+      # median, which is how the 873 s file was mis-packed). Below that a
+      # refresh is churn: heavy sampling files swing 25-39% run to run on
+      # their own.
+      MATERIAL_WORKER_SECONDS: "240"
+
+    steps:
+      # master explicitly: a workflow_dispatch from another branch's Actions
+      # tab must still regenerate the file master ships, and the proposal
+      # branch must fork from master or the PR would carry unrelated diffs.
+      - uses: actions/checkout@v7
+        with:
+          ref: master
+
+      # No poetry and no project install: gen_durations.py and pytest_shard.py
+      # import nothing outside the standard library, deliberately, so this
+      # job costs seconds rather than the minutes a dependency install takes.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # The newest master PUSH run of the Tests workflow that succeeded --
+      # not a PR run (a PR's shard split may differ from master's) and not a
+      # partial one (a red shard has no complete transcript). Its ubuntu-3.12
+      # job count is the shard count that run actually used, which is what
+      # the artifacts have to be matched against: `gh run download` with a
+      # pattern silently returns whatever subset exists, and a missing shard
+      # would make a whole shard's files look absent, which this job would
+      # then eagerly "fix".
+      - name: Find the latest green master run
+        id: run
+        run: |
+          set -euo pipefail
+          gh run list --workflow tests.yml --branch master --event push \
+            --status success --limit 1 \
+            --json databaseId,headSha,createdAt > run.json
+          run_id=$(jq -r '.[0].databaseId // empty' run.json)
+          if [ -z "$run_id" ]; then
+            echo "no successful master run of tests.yml found" >&2
+            exit 1
+          fi
+          sha=$(jq -r '.[0].headSha' run.json | cut -c1-8)
+          created=$(jq -r '.[0].createdAt' run.json)
+          shards=$(gh run view "$run_id" --json jobs \
+            --jq '[.jobs[] | select(.name | startswith("pytest (ubuntu-latest, 3.12,"))] | length')
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "created=$created" >> "$GITHUB_OUTPUT"
+          echo "shards=$shards" >> "$GITHUB_OUTPUT"
+          echo "latest green master run: $run_id ($sha, $created), $shards ubuntu-3.12 shards"
+
+      # One transcript per ubuntu-3.12 shard. The mtime is set to the RUN's
+      # date, because gen_durations.py stamps `_measured_on` from the
+      # transcript's mtime and the point of that field is judging staleness:
+      # a download's timestamp would say "measured today" about a week-old
+      # measurement.
+      - name: Download that run's ubuntu-3.12 duration transcripts
+        env:
+          RUN_ID: ${{ steps.run.outputs.run_id }}
+          SHARDS: ${{ steps.run.outputs.shards }}
+          CREATED: ${{ steps.run.outputs.created }}
+        run: |
+          set -euo pipefail
+          gh run download "$RUN_ID" -p 'durations-ubuntu-latest-3.12-*' \
+            -D "$RUNNER_TEMP/dur"
+          found=$(find "$RUNNER_TEMP/dur" -name durations.txt | wc -l)
+          if [ "$found" -ne "$SHARDS" ]; then
+            echo "expected $SHARDS transcripts, found $found -- an upload" \
+              "failed on that run; refusing to regenerate from a partial set" >&2
+            exit 1
+          fi
+          find "$RUNNER_TEMP/dur" -name durations.txt \
+            -exec touch -d "$CREATED" {} +
+
+      # Regenerate over the committed file, keeping a copy of the old one to
+      # price the change against. `_generated_from` names the run and the
+      # commit so the file's provenance survives in the file itself.
+      - name: Regenerate tests/durations.json
+        env:
+          RUN_ID: ${{ steps.run.outputs.run_id }}
+          SHA: ${{ steps.run.outputs.sha }}
+          SHARDS: ${{ steps.run.outputs.shards }}
+          CREATED: ${{ steps.run.outputs.created }}
+        run: |
+          set -euo pipefail
+          cp tests/durations.json "$RUNNER_TEMP/durations.old.json"
+          python scripts/gen_durations.py "$RUNNER_TEMP"/dur/*/durations.txt \
+            --source "CI run $RUN_ID (master $SHA, ${CREATED%%T*}), ubuntu-latest 3.12, $SHARDS shards at -n4"
+
+      # THE DECISION. `--balance-json --compare-to` packs the files by the OLD
+      # weights (the split CI has been running) and prices that packing with
+      # the NEW measurement, against the packing the new weights would give.
+      # The difference is the wall clock the stale file has been wasting. A
+      # proposal is made when that exceeds the threshold or when the old file
+      # did not know some test file at all; otherwise the file is left alone
+      # and the run's summary says why, so "no PR this week" is a recorded
+      # verdict rather than a silent skip.
+      - name: Decide whether the rebalance is material
+        id: decide
+        env:
+          SHARDS: ${{ steps.run.outputs.shards }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- tests/durations.json; then
+            echo "material=false" >> "$GITHUB_OUTPUT"
+            echo "tests/durations.json is byte-identical to the regenerated one; nothing to propose" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python scripts/pytest_shard.py --of "$SHARDS" --balance-json \
+            --compare-to "$RUNNER_TEMP/durations.old.json" > "$RUNNER_TEMP/balance.json"
+          worst=$(jq -r '.worst_shard_seconds' "$RUNNER_TEMP/balance.json")
+          stale=$(jq -r '.stale_packing_worst_shard_seconds' "$RUNNER_TEMP/balance.json")
+          stale_unknown=$(jq -r '.stale_unknown' "$RUNNER_TEMP/balance.json")
+          unknown=$(jq -r '.unknown' "$RUNNER_TEMP/balance.json")
+          improvement=$(python -c "print(round($stale - $worst, 1))")
+          material=$(python -c "print(str($improvement > $MATERIAL_WORKER_SECONDS or $stale_unknown > 0).lower())")
+          {
+            echo "### Shard weights refresh"
+            echo
+            echo "- predicted worst ubuntu shard with the committed weights, priced by the new measurement: ${stale} worker-s"
+            echo "- with the regenerated weights: ${worst} worker-s (improvement ${improvement}; threshold ${MATERIAL_WORKER_SECONDS})"
+            echo "- test files absent from the committed weights: ${stale_unknown}; from the regenerated: ${unknown}"
+            echo "- material: ${material}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "material=$material" >> "$GITHUB_OUTPUT"
+          echo "improvement=$improvement" >> "$GITHUB_OUTPUT"
+          echo "worst=$worst" >> "$GITHUB_OUTPUT"
+          echo "stale=$stale" >> "$GITHUB_OUTPUT"
+          echo "stale_unknown=$stale_unknown" >> "$GITHUB_OUTPUT"
+
+      # A branch named by the run id, force-pushed so a re-dispatch against
+      # the same run replaces rather than fails. The commit is the bot's, not
+      # a person's: nobody should be credited with numbers they did not
+      # produce, and the provenance is in the file's own header anyway.
+      - name: Push the proposal branch
+        if: steps.decide.outputs.material == 'true'
+        id: push
+        env:
+          RUN_ID: ${{ steps.run.outputs.run_id }}
+          SHA: ${{ steps.run.outputs.sha }}
+          IMPROVEMENT: ${{ steps.decide.outputs.improvement }}
+          WORST: ${{ steps.decide.outputs.worst }}
+          STALE: ${{ steps.decide.outputs.stale }}
+          STALE_UNKNOWN: ${{ steps.decide.outputs.stale_unknown }}
+        run: |
+          set -euo pipefail
+          branch="ci/refresh-durations-$RUN_ID"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add tests/durations.json
+          git commit -q -F - <<EOF
+          ci: refresh tests/durations.json from master run $RUN_ID
+
+          Regenerated by .github/workflows/refresh-durations.yml from the
+          ubuntu-latest 3.12 --durations=0 artifacts of master run $RUN_ID
+          ($SHA). Predicted worst ubuntu shard: $STALE worker-s under the
+          committed weights (priced by this measurement) -> $WORST with the
+          refreshed ones; $STALE_UNKNOWN test file(s) were absent from the
+          committed weights and charged the median.
+          EOF
+          git push --force -u origin "$branch"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "Regenerated by the weekly \`refresh-durations\` workflow from"
+            echo "the ubuntu-latest 3.12 \`--durations=0\` artifacts of master"
+            echo "run [$RUN_ID](${{ github.server_url }}/${{ github.repository }}/actions/runs/$RUN_ID) ($SHA)."
+            echo
+            echo "| | predicted worst ubuntu shard (worker-s) |"
+            echo "|---|---|"
+            echo "| committed weights, priced by this measurement | $STALE |"
+            echo "| refreshed weights | $WORST |"
+            echo
+            echo "Improvement $IMPROVEMENT worker-s (threshold $MATERIAL_WORKER_SECONDS);"
+            echo "$STALE_UNKNOWN test file(s) were absent from the committed weights."
+            echo
+            echo "Review: the only file changed is \`tests/durations.json\`; it is a"
+            echo "weighting hint and cannot change what runs (docs/testing.md,"
+            echo "\"Keeping tests/durations.json current\")."
+          } > "$RUNNER_TEMP/body.md"
+
+      # PREFERRED PATH: a pull request. This step SUCCEEDS ONLY IF the
+      # repository setting "Allow GitHub Actions to create and approve pull
+      # requests" is on (Settings > Actions > General > Workflow permissions;
+      # or `gh api -X PUT repos/{owner}/{repo}/actions/permissions/workflow
+      # -F can_approve_pull_request_reviews=true`). It was OFF when this was
+      # written (2026-09-14), so the fallback below is the live path; flip
+      # the setting and this one takes over with no other change.
+      #
+      # Two things to know about a PR opened this way even when it works: the
+      # pull_request event it raises does not start workflows (events raised
+      # by GITHUB_TOKEN never do), so the required `test` check will not
+      # appear until a human closes and reopens the PR or pushes to the
+      # branch; and continue-on-error is what makes the fallback reachable.
+      - name: Open a pull request
+        if: steps.decide.outputs.material == 'true'
+        id: pr
+        continue-on-error: true
+        env:
+          RUN_ID: ${{ steps.run.outputs.run_id }}
+          BRANCH: ${{ steps.push.outputs.branch }}
+        run: |
+          set -euo pipefail
+          gh pr create --base master --head "$BRANCH" \
+            --title "ci: refresh tests/durations.json from master run $RUN_ID" \
+            --body-file "$RUNNER_TEMP/body.md"
+
+      # FALLBACK PATH: one tracking issue, updated in place, pointing at the
+      # pushed branch with a compare link that opens the PR in one click. The
+      # branch is already on the remote, so the human's whole job is that
+      # click. Same one-issue discipline as the nightly job: a weekly issue
+      # that multiplied would become noise and then invisible.
+      - name: Or point a tracking issue at the branch
+        if: steps.decide.outputs.material == 'true' && steps.pr.outcome == 'failure'
+        env:
+          BRANCH: ${{ steps.push.outputs.branch }}
+          COMPARE_URL: ${{ github.server_url }}/${{ github.repository }}/compare/master...${{ steps.push.outputs.branch }}?expand=1
+        run: |
+          set -euo pipefail
+          {
+            echo "GitHub Actions is not permitted to open pull requests in this"
+            echo "repository, so the refreshed file was pushed to \`$BRANCH\` instead."
+            echo "Open the pull request here: $COMPARE_URL"
+            echo
+            cat "$RUNNER_TEMP/body.md"
+          } > "$RUNNER_TEMP/issue.md"
+          existing=$(gh issue list --state open --search "$ISSUE_TITLE in:title" \
+                       --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "updating issue #$existing"
+            gh issue comment "$existing" --body-file "$RUNNER_TEMP/issue.md"
+          else
+            echo "opening the tracking issue"
+            gh issue create --title "$ISSUE_TITLE" --body-file "$RUNNER_TEMP/issue.md"
+          fi
+          echo "proposal branch: $BRANCH ($COMPARE_URL)" >> "$GITHUB_STEP_SUMMARY"
+
+      # The inverse of the fallback, so the issue's state stays truthful on
+      # its own: open = a refresh is waiting to be merged, closed = the
+      # committed weights are current. Once the proposal lands (or the drift
+      # it reported is otherwise gone) the next weekly run finds nothing
+      # material and closes the issue. Cannot run while a refresh is still
+      # pending, since that run ends in the step above instead.
+      - name: Close the tracking issue when the weights are current
+        if: steps.decide.outputs.material == 'false'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          existing=$(gh issue list --state open --search "$ISSUE_TITLE in:title" \
+                       --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "closing issue #$existing"
+            gh issue close "$existing" --comment \
+              "The weekly refresh found tests/durations.json current again: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          else
+            echo "no open tracking issue to close"
+          fi
