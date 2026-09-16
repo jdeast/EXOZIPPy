@@ -39,6 +39,42 @@ _EXAMPLES = Path(__file__).parent.parent / "examples"
 _EXCLUDED: dict[str, str] = {}
 
 
+def _needs_absent_mist_grid(config) -> str:
+    """Skip reason if this config wants a MIST grid that is not on disk yet.
+
+    An `evolutionarymodel:` block interpolates a ~128 MB track grid that is
+    git-ignored and NOT shipped: `mist_grid` fetches it from Zenodo on first
+    use.  That is right for a fit and wrong for a test run -- a fresh clone
+    or a CI job would download it just to reach stage 1a, once per worker
+    tree.
+
+    So this is a conditional skip rather than an `_EXCLUDED` entry: a
+    developer who already has the grid gets the rot guard these examples
+    exist for, and everyone else gets a named skip instead of a download.
+    """
+    blocks = config.get("evolutionarymodel")
+    if not blocks:
+        return ""
+    from exozippy.components.evolutionarymodel import mist_grid
+
+    if isinstance(blocks, dict):
+        blocks = [blocks]
+    for block in blocks:
+        block = block if isinstance(block, dict) else {}
+        kwargs = {
+            k: block[k]
+            for k in ("model", "alpha", "vvcrit", "model_root")
+            if k in block
+        }
+        if not mist_grid.grid_path(**kwargs).is_file():
+            return (
+                "needs the ~128 MB MIST track grid, which is git-ignored and "
+                "fetched from Zenodo on first use; run this example once (or "
+                "call models.MIST.eep_grid.ensure_eep_grid()) to enable it"
+            )
+    return ""
+
+
 def _system_configs():
     """Every examples/*/ YAML that is a system config, as (path, id) pairs.
 
@@ -140,6 +176,10 @@ def test_shipped_example_prepares(path, rel, monkeypatch, caplog):
         )
 
     monkeypatch.chdir(path.parent)
+
+    reason = _needs_absent_mist_grid(config)
+    if reason:
+        pytest.skip(f"{rel}: {reason}")
 
     param_file = config.get("parameter_file")
     user_params = None

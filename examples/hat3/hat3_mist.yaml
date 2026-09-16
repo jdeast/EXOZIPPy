@@ -1,0 +1,59 @@
+# HAT-P-3: star-only fit with the MIST evolutionary model.
+#
+# The sibling of hat3_staronly.yaml, which fits the same star with `mist:
+# False` and no evolutionary model at all.  Diffing the two is the point:
+# everything here that is not in that file is what an evolutionary model
+# costs and buys.
+#
+# Buys: star.mass and star.radius stop needing a hand-supplied prior.  In
+# hat3_staronly.params.yaml `star.mass` carries `sigma: 0.05` under a comment
+# saying it "is only necessary because we're not fitting an evolutionary
+# model / it should be removed in a final run".  That is exactly what this
+# example does -- see hat3_mist.params.yaml.
+#
+# Costs: two new sampled dimensions per star (star.initfeh, star.eep) plus
+# star.age, and a ~128 MB MIST track grid fetched from Zenodo on first use
+# (verified and cached; see src/exozippy/models/MIST/eep_grid.py).
+
+run:
+  name: "hat3"
+
+prefix: "fitresults/HAT-P-3_mist"
+
+star:
+  - name: "A"
+    # The default is already True; spelled out because its sibling spells
+    # out `mist: False` and the contrast is the whole point of this example.
+    # It is what materializes star.initfeh / star.eep / star.age -- but only
+    # because an `evolutionarymodel:` block below actually reads them.
+    mist: True
+
+parameter_file: "hat3_mist.params.yaml"
+
+# One instance per constrained star, named by `star:`.  `constrain:` defaults
+# to all four, so it could be omitted; it is written out here to show what is
+# being tied to the tracks.  Each entry adds a Gaussian potential between the
+# sampled quantity and the MIST prediction interpolated at
+# (star.logmass, star.initfeh, star.eep), with the mass-dependent systematic
+# floor of EXOFASTv2 as sigma -- so the star has to agree with the models
+# only to within the models' own accuracy.
+evolutionarymodel:
+  - star: "A"
+    constrain: [feh, radius, teff, age]
+
+sed:
+  file: "hat3_sed.yaml"
+
+sampler:
+  # nuts rather than the numpyro its siblings use: numpyro and blackjax need
+  # jax, which is deliberately not installed on Intel macOS (see the marker
+  # comments in pyproject.toml).  Nothing about this component requires one
+  # sampler over another.
+  method: nuts   # nuts, numpyro, blackjax, nutpie, ptde, ptde_async, demc, demcz
+  tune: 500
+  draws: 1000
+  chains: 4
+  cores: 4
+  target_accept: 0.95
+  recompute_trace: True
+  profile: False

@@ -600,6 +600,12 @@ class SED(Component):
         if self.sedfile is None:
             raise ValueError(f"sed is missing the required 'file' key")
 
+        model_yaml_file = (
+            f"{self.model_root}/{self.sedmodel}/BCs/{self.sedmodel}.grid.yaml"
+        )
+        with open(model_yaml_file, "r") as f:
+            self._model_yaml = yaml.safe_load(f)
+
         self._ensure_model_data()
         self._process_SED_yaml()
 
@@ -1271,6 +1277,7 @@ class SED(Component):
         for d, draw in enumerate(plot_obj.draws):
             for nstar in range(plot_obj.nstars):
                 name = plot_obj.star_names[nstar]
+                # plot the per-star spectrum (translucent line, no marker)
                 y_spec = np.log10(
                     plot_obj.flux_model_draws[d][nstar] * wave_ang
                 )
@@ -1329,6 +1336,7 @@ class SED(Component):
             label = plot_obj.point_labels[p]
             color = id_color[label]
             marker = id_marker[label]
+            edgecolor = "#FFFFFF"
 
             ax_top.errorbar(
                 x[p : p + 1],
@@ -1341,7 +1349,16 @@ class SED(Component):
                 linestyle="None",
                 zorder=3,
             )
-            ax_top.scatter(x[p], y[p], color=color, marker=marker, zorder=3)
+            ax_top.scatter(
+                x[p],
+                y[p],
+                color=color,
+                marker=marker,
+                edgecolors=edgecolor,
+                s=85,
+                linewidths=1.5,
+                zorder=3,
+            )
 
         # ---- residuals: one per filter ROW (the actual measurement),  ----
         # ---- against its combined (blend/diff) prediction              ----
@@ -1400,7 +1417,9 @@ class SED(Component):
                     color="none",
                     marker=id_marker[name],
                     markerfacecolor=id_color[name],
-                    markeredgecolor=id_color[name],
+                    markeredgecolor="#FFFFFF",
+                    markeredgewidth=1.5,
+                    markersize=8,
                     alpha=1.0,
                 )
                 legend_handles.append((line, marker))
@@ -1455,7 +1474,9 @@ class SED(Component):
                         color="none",
                         marker=id_marker[combo],
                         markerfacecolor=id_color[combo],
-                        markeredgecolor=id_color[combo],
+                        markeredgecolor="#FFFFFF",
+                        markeredgewidth=1.5,
+                        markersize=8,
                     )
                 )
                 labels.append(combo)
@@ -1683,3 +1704,73 @@ class SED(Component):
                 },
             )
         ]
+
+    def _add_prose(self, system):
+        """Declare the modeling-draft sentences next to the terms they describe.
+
+        Not ``StellarRelation._add_relation_prose``: that sentence is built
+        around "the empirical relations of <citation>", and this is a track
+        interpolation with a systematic floor and a reparameterized age prior
+        -- three facts, not one.  The declare-at-the-implementation-site rule
+        is the same (outputs/prose.py).
+        """
+        from ...outputs.prose import get_collector, join_names
+        from ...outputs.texutils import latex_escape
+
+        prose = get_collector(system)
+        stars = [system.star.names[si] for si in self.star_indices]
+        noun = "star" if len(stars) == 1 else "stars"
+        names = join_names(latex_escape(s) for s in stars)
+        filters = join_names(latex_escape(f) for f in self.filters)
+        self.citation = self._model_yaml.get("citation", "")
+
+        prose.add(
+            f"We include observations of {noun} {names} from the following {len(self.filters)} photometric filters: {filters}. ",
+            section="data",
+            key=f"{self.prefix}.filters",
+            rank=21.0,
+        )
+
+        if "MIST" in self.sedmodel:
+            prose.add(
+                f"We model the SED of the {noun} {names} with the {self.sedmodel} "
+                rf"pre-computed bolometric correction tables \citep{{{self.citation}}}. ",
+                section="stellar",
+                key=f"{self.prefix}.sed_model",
+                rank=20.0,
+            )
+        if "NextGen" in self.sedmodel:
+            prose.add(
+                f"We model the SED of the {noun} {names} with pre-computed bolometric "
+                rf"correction tables based on the {self.sedmodel} stellar atmospheric models \citep{{{self.citation}}}, "
+                r"which used an $R_V = 3.1$ reddening law \citep{Cardelli:1989}, and "
+                r"SVO filter transmission curves (DEAL WITH CITING THIS LATER). ",
+                section="stellar",
+                key=f"{self.prefix}.sed_model",
+                rank=20.0,
+            )
+
+        prose.add(
+            "When modeling an SED, we include two additional sampled parameters for each star: "
+            r"$R_{\star, \rm SED}$ and $T_{\rm eff, SED}$, which are the stellar radius and effective "
+            "temperature as inferred from the SED. These parameters are linked to the primary stellar parameters via "
+            "a Gaussian penalty whose width is set by an estimation of the systematic uncertainty in measurements of "
+            r"effective temperature and bolometric flux, which is calculated using $R_{\star, \rm SED}$, from the SED. "
+            "By default, these systematic uncertainties are set to 0.02 and 0.024 for "
+            r"$\sigma_{T_{\rm eff, sys}}$ and $\sigma_{F_{\rm Bol, sys}}$, respectively."
+            "We also allow for the possibility that the reported errors on the photometric measurements are "
+            r"underestimated, and include a free parameter, $\sigma_{\rm SED}$ that scales the reported errors. ",
+            section="sampling",
+            key=f"{self.prefix}.floor",
+            rank=21.0,
+        )
+
+        prose.add(
+            "Because EEP is not uniformly distributed in time, we added the "
+            r"$\log|{\rm d}\,{\rm Age}/{\rm d}\,{\rm EEP}|$ Jacobian to the "
+            "log-likelihood, which makes the uniform prior on EEP a uniform "
+            "prior on stellar age. ",
+            section="priors",
+            key=f"{self.prefix}.eep_jacobian",
+            rank=30.0,
+        )

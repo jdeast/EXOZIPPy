@@ -11,6 +11,11 @@ It is deliberately a **trunk**: the commands, the architecture, the invariants t
 poetry install
 poetry update          # after git pull
 
+# Intel (x86_64) macOS ONLY: plain `poetry install` cannot succeed there.
+# This automates the one manual celerite2 step; MACOS_INTEL_INSTALL.md has
+# the why, the two documented gaps, and the same recipe by hand.
+./scripts/bootstrap_intel_mac.sh
+
 # Run all tests (runs in parallel by default: -n 6 --dist loadfile, set in
 # pyproject.toml addopts). --dist loadfile pins each file to one worker so
 # module/session-scoped fixtures are shared, not rebuilt per worker.
@@ -86,6 +91,7 @@ Each line names when to read the doc. Read it first; do not reconstruct its reas
 - Before touching the microlensing likelihood, MMEXOFAST seeding, or the lens/source body maps, read `src/exozippy/components/mulensing/mulensing.md`.
 - Before comparing a microlensing parameter to a published one, converting to or from another modelling code, or "fixing" a microlensing sign, read `src/exozippy/components/mulensing/conventions.md` -- the origins, the parallax signs, `alpha`, `q > 1`, and the mappings onto the other common literature conventions. Its paper-facing twin, carrying the same numbered claims, is `src/exozippy/latex/convention.tex`.
 - Before changing a stellar prior (IMF, the FFP mass function, distance), an empirical stellar or planetary relation, or the planet mass coordinate, read `src/exozippy/components/star/star.md`.
+- Before touching the MIST evolutionary tracks, the grid loader, the systematic floors or the EEP -> age Jacobian, read `src/exozippy/components/evolutionarymodel/evolutionarymodel.md`.
 - Before changing orbit topology, the `tc` window, or the eccentricity/inclination coordinates (`fitvcve`, `fitchord`), read `src/exozippy/components/orbit/orbit.md`.
 - Before touching limb darkening, filter identity, the bolometric-correction grid or an SED flux hook, read `src/exozippy/components/sed/sed.md`.
 - Before adding a sampler, or changing chain sizing or start populations, read `src/exozippy/samplers/samplers.md`.
