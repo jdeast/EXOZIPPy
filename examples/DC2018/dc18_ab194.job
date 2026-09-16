@@ -2,11 +2,40 @@
 # ----------------Parameters---------------------- #
 #$ -S /bin/sh
 #$ -pe mthread 32-64
-#$ -q lThC.q
+#$ -q lThM.q
+# The M queues carry a FORCED boolean complex, use_himem, so the queue
+# change alone yields "does not request 'forced' resource" and the job
+# is unschedulable.  Both lines are needed; `qsub -w v` is the check.
+#$ -l use_himem=TRUE
 #$ -cwd
 #$ -j y
 #$ -N dc194ab
 #$ -o ab194/dc18_ab194.$JOB_ID.$TASK_ID.log
+#
+# QUEUE CHOICE IS THE MEMORY FIX -- measured 2026-09-16, and it is not what
+# it looks like.  h_rss is an ACCOUNTING limit, not a memory one: execd
+# enforces it by SUMMING per-process RSS (these jobs get no memory cgroup,
+# only a freezer one), and `ps` RSS counts shared copy-on-write pages in
+# every process that maps them.  The wrap-up polish forks one worker per
+# granted slot from a parent holding the whole trace, so the trace is
+# charged once per worker while the kernel allocates it once.  Measured live
+# on event 062: SGE charging 495.8 GB while the node reported 22 GB of 503
+# used and 477 free.  It killed the job anyway.
+# THREE of the six sweep events lost finished reports to this -- 008
+# (576.1 GB), 062 (553.0 GB), 128 (579.4 GB) -- every one on a node with
+# hundreds of GB free.  062 died during "mode identification + result
+# tables", after its hot-chain discovery had already found a new basin.
+#
+# WHY MORE SLOTS CANNOT FIX IT: the charge is ~slots x 7.6 GB against a
+# ceiling of slots x 8 GB, so the ratio is ~0.95 whatever the slot count --
+# which is why all three died at 0.95-1.13x their ceiling.
+# WHY REQUESTING A BIGGER h_rss CANNOT FIX IT: on the C queue h_rss is
+# queue-FIXED (qf:h_rss=8.000G), so asking for more yields "verification: no
+# suitable queues" and the job sits in qw forever.  Verified with
+# `qsub -w v`; do not re-try it.
+# WHAT WORKS: the M (high-memory) queues offer h_rss=450G per slot with the
+# SAME h_rt=1440:15:00 and, measured, MORE free slots than the C queue
+# (4,473 against 4,200).  A drop-in.
 #
 # FOUR ARMS ON EVENT 194, one change each (JDE items 1, 3, 5, 7).
 #
