@@ -151,6 +151,9 @@ def query_id(catalog, target_id):
         return None
 
 
+from ..components.sed.extinction import av_from_band_extinction
+
+
 def schlegel_av(ra, dec):
     """Max Av upper limit from Schlegel+1998 dust map via IRSA (3.1 * E(B-V))."""
     coord = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
@@ -581,6 +584,7 @@ def mkticsed(
     kepler=False,
     dist=120.0,
     exofast=False,
+    band_extinction=None,
 ):
     """
     Query TICv8.2 and photometric catalogs to create:
@@ -597,6 +601,30 @@ def mkticsed(
         Output directory.
     dist : float
         Cone-search radius in arcseconds (default 120).
+    band_extinction : (a_band, sigma, wavelength_micron) or None
+        A MEASURED extinction in one observed band, and the band's
+        EFFECTIVE wavelength in micron.  When given, the `star.av` prior is
+        this value run backwards through the SED's own extinction law
+        (components.sed.extinction.av_from_band_extinction) and the dust-map
+        and TIC routes below are skipped.
+
+        THIS IS THE ROMAN PATH, and it exists because the TIC routes do not
+        transfer to the bulge.  There is no reliable 3-D dust map there, and
+        Schlegel's is a full-column upper limit that says little about a
+        source at 8-10 kpc inside the dust.  What a Roman bulge field DOES
+        give you is the RED CLUMP in the same images: the clump's offset
+        from its known intrinsic colour and magnitude measures the
+        extinction directly, in the observed bands, as an observable rather
+        than a model.  The DC2018 challenge ships exactly that
+        (event_info.txt: A_W149, A_Z087 per line of sight), and getting it
+        wrong is what produced review 2.9.16 -- A_W149 was written into
+        `star.av` as though a band extinction were A_V, ~3.6x too small, and
+        the SED then resolved the Teff-extinction degeneracy by inventing a
+        2634 K source at half the true angular size.
+
+        Pass the band's EFFECTIVE wavelength, not a passband integral: for
+        Roman's W149 (0.90-2.07 micron) the two conventions differ by 17%.
+
     galex, tycho, stromgren, ucac, merm, kepler : bool
         Uncomment these photometry bands in the SED file.
     """
@@ -873,15 +901,42 @@ def mkticsed(
     if w_row >= 0:
         _add_catalog_bands(sed_entries, CATALOGS["wise"], qw, w_row)
 
-    # --- 6. Extinction upper limit from Schlegel+1998 dust map ----------------
-    print("Querying Schlegel dust map ...", flush=True)
-    max_av = schlegel_av(tic_ra, tic_dec)
-    if max_av is not None and max_av > 0:
+    # --- 6. Extinction ---------------------------------------------------------
+    if band_extinction is not None:
+        a_band, sig_band, lam_um = band_extinction
+        av_val, uav = av_from_band_extinction(a_band, lam_um, sig_band)
+        yaml_data[key("av")] = {
+            "initval": round(av_val, 5),
+            "mu": round(av_val, 5),
+            "sigma": round(uav, 5),
+        }
+        notes.append(
+            f"Av = {av_val:.4f} +/- {uav:.4f} mag, from a measured "
+            f"A_band = {a_band} +/- {sig_band} at {lam_um} um inverted "
+            f"through models/extinction_law.ascii (the SAME law the BC grid "
+            f"uses, so the prior and the model agree)"
+        )
+        max_av = None
+    else:
+        print("Querying Schlegel dust map ...", flush=True)
+        max_av = schlegel_av(tic_ra, tic_dec)
+    if band_extinction is not None:
+        pass  # already set above, from the measurement
+    elif max_av is not None and max_av > 0:
         yaml_data[key("av")] = {"upper": round(max_av, 4)}
         notes.append(
             f"Av < {max_av:.4f} mag  (3.1 x E(B-V) Schlegel+1998 upper limit)"
         )
     elif np.isfinite(ebv) and np.isfinite(sebv):
+        # R_V = 3.1 BY CONVENTION, not from our own law table, and the two do
+        # not quite agree: the shipped curve gives A_V/E(B-V) ~ 3.47 if you
+        # read it as k_V/(k_B - k_V).  That reading is NOT the law's nominal
+        # R_V (R_V is defined on a reddened star's B-V, which depends on the
+        # star's spectrum), and the TIC's E(B-V) is itself derived under an
+        # assumed law, so multiplying by anything else here would trade one
+        # unstated assumption for another.  Left at 3.1 deliberately; prefer
+        # `band_extinction` when a direct band measurement exists, since that
+        # route needs no colour-excess convention at all.
         av_val = ebv * 3.1
         uav = max(0.02, sebv) * 3.1
         yaml_data[key("av")] = {
