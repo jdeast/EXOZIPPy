@@ -235,7 +235,15 @@ def grid_path(
 
     Where the file WOULD be; it may not exist yet (see
     :func:`load_mist_grid`, which fetches the published one on demand).
+
+    ``model_root=None`` means the default, not a missing argument: a YAML
+    ``model_root:`` with no value parses to None, and callers pass a config
+    block's keys straight through (see `_needs_absent_mist_grid` in
+    tests/test_examples_prepare.py), so the None arrives here rather than
+    being defaulted away.
     """
+    if model_root is None:
+        model_root = DEFAULT_MIST_MODEL_ROOT
     model_root = Path(model_root)
     if _model_version(model) == "2.5":
         fname = _published_filename(alpha, vvcrit)

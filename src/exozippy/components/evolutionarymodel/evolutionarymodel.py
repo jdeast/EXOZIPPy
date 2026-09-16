@@ -223,17 +223,25 @@ class EvolutionaryModel(StellarRelation, Component):
                 float(c.get("dragon_penalty_weight", 1.0))
             )
 
+            # `model_root:` present-but-empty is how YAML spells a key with
+            # no value, and it means "use the default" -- `.get(k, default)`
+            # would hand the None straight to Path() and die there, several
+            # frames down, on a message naming neither the key nor the block.
+            model_root = c.get("model_root")
+            if model_root is None:
+                model_root = mist_grid.DEFAULT_MIST_MODEL_ROOT
+
             grid = mist_grid.load_mist_grid(
                 model=c.get("model", "MISTv2.5"),
                 alpha=float(c.get("alpha", 0.0)),
                 vvcrit=float(c.get("vvcrit", 0.0)),
-                model_root=c.get("model_root", mist_grid.DEFAULT_MIST_MODEL_ROOT),
+                model_root=model_root,
             )
             self._grids.append(grid)
 
             # for use in prose later
-            self.model = c.get("model", "MISTv2.5") 
-            self.model_root = c.get("model_root", mist_grid.DEFAULT_MIST_MODEL_ROOT)
+            self.model = c.get("model", "MISTv2.5")
+            self.model_root = model_root
 
             import yaml
             model_yaml_file = f"{self.model_root}/{self.model}/EEPs/{self.model}.grid.yaml"
@@ -252,9 +260,11 @@ class EvolutionaryModel(StellarRelation, Component):
             # them, which is the same rule a partially-covered system gets.
             logger.warning(
                 f"[{self.prefix}] the block names no star, so no evolutionary "
-                f"model is applied. star.initfeh/eep/age are materialized by "
-                f"the block's mere presence and will be pinned. Add an entry "
-                f"like '{self.prefix}: [{{star: A}}]', or remove the block."
+                f"model is applied. Any star still opted in via 'mist:' "
+                f"(which DEFAULTS to True) has its initfeh/eep/age "
+                f"materialized by the block's mere presence, and those are "
+                f"pinned. Add an entry like '{self.prefix}: [{{star: A}}]', "
+                f"or remove the block."
             )
 
         self._pin_unmodeled_stars(system)
@@ -756,7 +766,7 @@ class EvolutionaryModel(StellarRelation, Component):
     # ------------------------------------------------------------------
     # Plotting: the Kiel diagram (logg vs Teff)
     #
-    # Described ONCE as PlotSpecs, per the plotrender contract: matplotlib
+    # Described ONCE as Charts, per the plotrender contract: matplotlib
     # draws them for the saved PDFs and the GUI draws the same specs with
     # plotly, so there is no second hand-drawn copy to keep in sync.
     # ------------------------------------------------------------------

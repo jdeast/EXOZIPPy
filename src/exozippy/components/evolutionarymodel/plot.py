@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 
 # exozippy local imports
 from exozippy.outputs.plot_helper_functions import _extend_window, _padded_range
-from exozippy.plotrender import _draw_data, _draw_model, _draw_residual, _apply_meta
+from exozippy.plotrender import _draw_data, _draw_model, _draw_residual, _apply_axes
 from exozippy.outputs.contour_plot import Contour, plot_contours
 
 
@@ -22,7 +22,7 @@ class MISTPlot:
 
     # Nominal logg axis window, chosen to exclude the giant regime for the same
     # reason.  Ascending [lo, hi]; the Kiel convention's reversal is meta's
-    # `y_inverted`, applied after the range (see plotrender._apply_meta).
+    # `y_inverted`, applied after the range (see plotrender._apply_axes).
     KIEL_LOGG_WINDOW = (3.0, 5.0)
 
     # How close to an edge counts as "near" it, as a fraction of the nominal
@@ -184,7 +184,7 @@ class MISTPlot:
         at the reported medians and not once at whichever sample happened to
         be first.
         """
-        from exozippy.plotspec import PlotSpec, Trace
+        from exozippy.chart import Chart, Trace
 
         if point is None or getattr(self.evolutionarymodel, "_compiled_kiel", None) is None:
             return []
@@ -342,16 +342,6 @@ class MISTPlot:
         meta = {
             "file_tag": "kiel",
             "figsize": (6.5, 5.5),
-            # Ascending [lo, hi]; the *_inverted keys below reverse them, so
-            # the drawn axes run Teff decreasing rightward and logg 5.0
-            # (dwarfs, bottom) to 3.0 (giants, top).
-            "y_range": list(logg_window),
-            # Both axes reversed: the Kiel-diagram convention, with Teff
-            # decreasing rightward and surface gravity increasing downward,
-            # so dwarfs sit low and giants high exactly as in an
-            # observational HR diagram.
-            "x_inverted": True,
-            "y_inverted": True,
             "caption": (
                 "Kiel diagram for the modeled star. The lines are "
                 "the MIST evolutionary tracks interpolated at the "
@@ -362,13 +352,11 @@ class MISTPlot:
                 r"$\log{g}$ predicted by the full global model."
             ),
         }
-        if x_range is not None:
-            meta["x_range"] = list(x_range)
 
         star_name = self.system.star.names[self.evolutionarymodel.star_indices[star_idx]]
 
         return [
-            PlotSpec(
+            Chart(
                 id=f"{self.evolutionarymodel.prefix}.kiel.star.{star_name}",
                 component={"yaml_key": self.evolutionarymodel.yaml_key, "instance": None},
                 title="MIST evolutionary tracks",
@@ -378,6 +366,19 @@ class MISTPlot:
                 param_deps=self.evolutionarymodel._model_trace_param_deps(
                     self.evolutionarymodel._kiel_node, self.system
                 ),
+                # Ascending [lo, hi]; the *_inverted flags reverse them, so the
+                # drawn axes run Teff decreasing rightward and logg 5.0
+                # (dwarfs, bottom) to 3.0 (giants, top).  These six fields were
+                # promoted out of `meta` (review 4.11.3): both renderers must
+                # consult them to lay an axis out at all.
+                x_range=list(x_range) if x_range is not None else None,
+                y_range=list(logg_window),
+                # Both axes reversed: the Kiel-diagram convention, with Teff
+                # decreasing rightward and surface gravity increasing downward,
+                # so dwarfs sit low and giants high exactly as in an
+                # observational HR diagram.
+                x_inverted=True,
+                y_inverted=True,
                 meta=meta,
             )
         ]
@@ -404,15 +405,18 @@ class MISTPlot:
                     exc,
                 )
     
-        # before rendering, update all the x_range values in the meta data of each PlotSpec to the final max_x_range
+        # Before rendering, widen every draw's x_range to the union computed
+        # across all of them, so the spaghetti shares one axis.  x_range is a
+        # first-class Chart field now, not a meta key (review 4.11.3).
         # Same key _plot_kiel_trace wrote to -- "start" when no posterior exists.
         max_x_range = self._plot_x_range.get("post" if self._posteriorBool else "start")
         if max_x_range is not None:
-            for spec_group in spec_groups:
-                for spec in spec_group:
-                    if "x_range" in spec.meta:
-                        x_range = _padded_range(max_x_range, self.KIEL_X_PAD_FRAC)
-                        spec.meta["x_range"] = list(x_range)
+            x_range = _padded_range(max_x_range, self.KIEL_X_PAD_FRAC)
+            if x_range is not None:
+                for spec_group in spec_groups:
+                    for spec in spec_group:
+                        if spec.x_range is not None:
+                            spec.x_range = list(x_range)
 
         return spec_groups
 
@@ -424,7 +428,7 @@ class MISTPlot:
 
         Parameters
         ----------
-        spec_groups : list[list[PlotSpec]]
+        spec_groups : list[list[Chart]]
             One ``plot_data`` result per posterior point.  The FIRST group is the
             reference: it supplies the data traces, labels, and decorations
             (matching the historical convention that data offsets/cleaning use
@@ -466,7 +470,7 @@ class MISTPlot:
                     for trace in models:
                         _draw_model(ax, trace, model_alpha)
 
-                _apply_meta(ax, meta)
+                _apply_axes(ax, spec)
                 ax.set_xlabel(spec.xlabel)
                 ax.set_ylabel(spec.ylabel)
                 ax.set_title(spec.title)

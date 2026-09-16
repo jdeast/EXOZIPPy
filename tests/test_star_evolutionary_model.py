@@ -109,7 +109,7 @@ def test_track_parameters_get_the_same_mask_as_age(model_root):
     assert manifest["eep"]["mask"] == manifest["age"]["mask"]
 
 
-def test_a_star_with_no_track_has_no_track_coordinates():
+def test_a_star_with_no_track_has_no_track_coordinates(model_root):
     """
     Given two stars, only one of which opted into an evolutionary model,
     When the model is built,
@@ -123,7 +123,9 @@ def test_a_star_with_no_track_has_no_track_coordinates():
     none of.
     """
     # Arrange
-    system = _prepared([{"name": "A"}, {"name": "B", "mist": False}])
+    system = _prepared(
+        [{"name": "A"}, {"name": "B", "mist": False}], model_root=model_root
+    )
 
     # Act
     model = system.build_model()
@@ -152,31 +154,41 @@ def test_no_star_opting_in_declares_no_track_coordinates():
     """
     stars = [{"name": "A", "mist": False}, {"name": "B", "mist": False}]
 
-    manifest = _prepared(stars).star.manifest
+    # `blocks=[]`, not the default block: with every star opted out there is
+    # no star an evolutionarymodel entry could legally name -- naming one
+    # raises, by design (EvolutionaryModel._check_star_opted_in).
+    manifest = _prepared(stars, blocks=[]).star.manifest
 
     assert not {"age", "initfeh", "eep"} & set(manifest)
 
 
-def test_a_premature_block_warns_that_nothing_reads_the_track(caplog):
+def test_a_backed_block_does_not_warn_that_nothing_reads_the_track(
+    caplog, model_root
+):
     """
-    Given an evolutionarymodel block that no component backs,
+    Given an evolutionarymodel block that a registered component DOES back,
     When the star component registers its parameters,
-    Then it warns, naming the opted-in stars.
+    Then it does not warn that nothing reads the track coordinates.
 
-    Review 3.8.2: the branch is driven by the config KEY, so it fires for a
-    premature block, and its coordinates are then sampled with nothing reading
-    them.  The unrecognized-key warning System already emits does not say that.
+    Review 3.8.2 added that warning for a PREMATURE block: the branch is
+    driven by the config KEY, so it fired before any component existed, and
+    the coordinates were then sampled with nothing reading them.  The
+    component has landed, so the warning is gated on
+    `hasattr(system, "evolutionarymodel")` and this is the live branch --
+    pinning it here is what keeps the gate from being dropped as dead code
+    and reintroducing a warning on every ordinary fit.
     """
     with caplog.at_level("WARNING", logger="exozippy"):
-        _prepared([{"name": "A"}, {"name": "B", "mist": False}])
+        _prepared(
+            [{"name": "A"}, {"name": "B", "mist": False}], model_root=model_root
+        )
 
     hits = [
         r.getMessage()
         for r in caplog.records
         if "no such component is registered" in r.getMessage()
     ]
-    assert len(hits) == 1
-    assert "A" in hits[0] and "eep" in hits[0]
+    assert hits == []
 
 
 @pytest.mark.parametrize("name", sorted(TRACK_DEFAULTS))

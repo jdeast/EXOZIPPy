@@ -1079,7 +1079,7 @@ def test_the_modeling_draft_cites_the_tracks(built):
     text = " ".join(s.text for s in prose.sentences())
 
     # Assert
-    assert "MIST evolutionary" in text
+    assert "evolutionary tracks" in text
     assert "uniform prior on stellar age" in text
     assert {"Dotter:2016", "Choi:2016"} <= set(prose.cite_keys())
 
@@ -1230,7 +1230,7 @@ def test_the_eep_seed_reads_an_interpolated_track_not_the_nearest_node(
 
 
 def _kiel_specs(system, point, star_idx=0):
-    """The Kiel PlotSpecs for one star at ``point`` (MISTPlot owns the chart)."""
+    """The Kiel Charts for one star at ``point`` (MISTPlot owns the chart)."""
     return MISTPlot(system, [point])._plot_kiel_trace(star_idx, point)
 
 
@@ -1272,9 +1272,9 @@ def test_the_kiel_diagram_draws_track_prediction_and_fit(built):
 
     # Assert
     assert [t.name for t in spec.traces] == [
-        "A MIST track",
-        "A MIST point",
-        "A fit +/- systematic",
+        "Star A MIST track",
+        "Star A MIST model point",
+        "Star A fit value",
     ]
     assert [t.kind for t in spec.traces] == ["line", "scatter", "scatter"]
     assert np.atleast_1d(spec.traces[0].x).size > 1  # a curve, not a point
@@ -1297,40 +1297,72 @@ def test_the_kiel_axes_follow_the_convention(built):
     spec = _kiel_spec(system)
 
     # Assert
-    assert spec.meta["x_inverted"] and spec.meta["y_inverted"]
+    assert spec.x_inverted and spec.y_inverted
     assert spec.meta["file_tag"] == "kiel"
-    assert "logg" in spec.ylabel or r"\log g" in spec.ylabel
+    assert "logg" in spec.ylabel or r"\log{g}" in spec.ylabel
 
 
-def test_the_fitted_point_carries_the_systematic_floor_as_error_bars(built):
+def test_the_systematic_floor_is_the_mist_marks_uncertainty(built):
     """
     Given the systematic floor is what lets the fit sit away from the track,
-    When the fitted point is drawn,
-    Then its error bars ARE that floor: the Teff bar is the fractional floor
-    times the MIST prediction, and the logg bar is the radius floor
-    propagated through logg = C + logmass - 2*log10(R), i.e. 2*f_R/ln(10).
+    When the Kiel quantities are evaluated at a point,
+    Then the floor the chart carries for the MIST mark is that floor: the
+    Teff bar is the fractional floor times the MIST prediction, and the logg
+    bar is the radius floor propagated through
+    logg = C + logmass - 2*log10(R), i.e. 2*f_R/ln(10).
 
     logg is neither a grid column nor a constrained quantity, so this
     propagation is the only thing that can put a meaningful bar on it -- and
     the mass contributes nothing, carrying no floor of its own.
+
+    Pinned at the compiled node rather than through the drawn Trace because
+    the two are deliberately separate questions: this is the floor's VALUE,
+    which exists at every point, while whether a mark draws it is the
+    posterior gate below.  The chart consumes these same two columns
+    unconditionally to size both axis windows.
     """
     # Arrange
     system, _ = built
     comp = system.active_components["evolutionarymodel"]
-    spec = _kiel_spec(system)
-    track_trace, mist_trace, fit_trace = spec.traces
+    point = {p.label: p.initval for p in system.plot_params}
+    plot = MISTPlot(system, [point])
+    kiel = np.atleast_2d(
+        comp._compiled_kiel(*comp._point_to_plot_params(point, system))
+    )
 
     logmass = float(np.atleast_1d(system.star.logmass.initval)[0])
     floor = physics.percent_error_from_logmass(logmass)
-    teff_pred = float(np.atleast_1d(mist_trace.x)[0])
+    teff_pred = float(kiel[0, plot.KIEL_INDEX["teff_mist"]])
 
     # Assert
-    assert float(np.atleast_1d(fit_trace.xerr)[0]) == pytest.approx(
+    assert float(kiel[0, plot.KIEL_INDEX["sigma_teff_mist"]]) == pytest.approx(
         floor * teff_pred, rel=1e-6
     )
-    assert float(np.atleast_1d(fit_trace.yerr)[0]) == pytest.approx(
+    assert float(kiel[0, plot.KIEL_INDEX["sigma_logg_mist"]]) == pytest.approx(
         2.0 * floor / np.log(10.0), rel=1e-6
     )
+
+
+def test_the_marks_draw_no_error_bars_without_a_posterior(built):
+    """
+    Given a chart built at a start point, before any chain exists,
+    When the two marks are drawn,
+    Then neither carries error bars.
+
+    The fit mark's bars are posterior summaries (`err_minus`/`err_plus`) and
+    simply do not exist yet.  The MIST mark's bars are the systematic floor,
+    which DOES exist here -- it is gated on the posterior anyway so that a
+    pre-flight chart shows the two marks alone rather than implying a
+    measured uncertainty it does not have.  The axis windows still account
+    for the floor, so adding the bars later cannot push a mark off-chart.
+    """
+    # Arrange / Act
+    system, _ = built
+    _track, mist_trace, fit_trace = _kiel_spec(system).traces
+
+    # Assert
+    assert mist_trace.xerr is None and mist_trace.yerr is None
+    assert fit_trace.xerr is None and fit_trace.yerr is None
 
 
 def test_the_kiel_diagram_declares_what_moves_it(built):
@@ -1504,7 +1536,7 @@ def test_the_logg_axis_is_the_nominal_window_for_a_dwarf(built):
     spec = _kiel_spec(system)
 
     # Assert
-    assert spec.meta["y_range"] == list(KIEL_LOGG_WINDOW)
+    assert spec.y_range == list(KIEL_LOGG_WINDOW)
 
 
 def test_the_logg_axis_widens_for_a_star_outside_it(model_root):
@@ -1519,7 +1551,7 @@ def test_the_logg_axis_widens_for_a_star_outside_it(model_root):
 
     # Act
     spec = _kiel_spec(system)
-    lo, hi = spec.meta["y_range"]
+    lo, hi = spec.y_range
     fit_logg = float(np.atleast_1d(spec.traces[2].y)[0])
     margin = KIEL_WINDOW_MARGIN_FRAC * (
         KIEL_LOGG_WINDOW[1] - KIEL_LOGG_WINDOW[0]
@@ -1666,18 +1698,27 @@ def test_the_teff_axis_covers_exactly_what_is_on_the_chart(built):
     spec = _kiel_spec(system)
     track, mist_point, fit_point = spec.traces
 
+    # The marks-with-error-bars extent uses the MIST mark's systematic floor,
+    # which the chart applies to the axis whether or not the bars are drawn
+    # (they are not, without a posterior -- see the two tests above).
+    comp = system.active_components["evolutionarymodel"]
+    point = {p.label: p.initval for p in system.plot_params}
+    kiel = np.atleast_2d(
+        comp._compiled_kiel(*comp._point_to_plot_params(point, system))
+    )
+    sigma_teff = abs(float(kiel[0, MISTPlot.KIEL_INDEX["sigma_teff_mist"]]))
     on_chart = np.concatenate(
         [
             np.atleast_1d(track.x),
-            np.atleast_1d(mist_point.x),
-            np.atleast_1d(fit_point.x) - np.atleast_1d(fit_point.xerr),
-            np.atleast_1d(fit_point.x) + np.atleast_1d(fit_point.xerr),
+            np.atleast_1d(fit_point.x),
+            np.atleast_1d(mist_point.x) - sigma_teff,
+            np.atleast_1d(mist_point.x) + sigma_teff,
         ]
     )
     pad = KIEL_X_PAD_FRAC * (on_chart.max() - on_chart.min())
 
     # Act
-    lo, hi = spec.meta["x_range"]
+    lo, hi = spec.x_range
 
     # Assert
     assert lo < hi
@@ -1710,9 +1751,9 @@ def test_the_teff_axis_ignores_track_rows_the_logg_window_clips_away(
 
     # Act
     spec = _kiel_spec(system)
-    lo, hi = spec.meta["x_range"]
+    lo, hi = spec.x_range
 
     # Assert -- drawn, but not on the axis
     assert 3000.0 in set(np.atleast_1d(spec.traces[0].x).tolist())
     assert lo > 3000.0
-    assert spec.meta["y_range"] == list(KIEL_LOGG_WINDOW)
+    assert spec.y_range == list(KIEL_LOGG_WINDOW)
