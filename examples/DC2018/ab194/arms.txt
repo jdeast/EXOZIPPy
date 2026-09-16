@@ -2,3 +2,8 @@ async
 sync
 tight
 u0te
+tight_sync
+u0te_sync
+rpt_async
+rpt_sync
+rpt_best
