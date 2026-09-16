@@ -1740,6 +1740,11 @@ class ConfigManager:
             "expressions": base.get("expressions", {}),
             "print_to_table": base.get("print_to_table", True),
             "debug_print": base.get("debug_print", None),
+            # Component-declared, defaults.yaml only (not a params-file key,
+            # so deliberately absent from STRING_KEYS): the sentence the
+            # near-bound warnings append when this parameter's start or
+            # posterior lands against a wall.  See parameter.md.
+            "near_bound_remedy": base.get("near_bound_remedy"),
         }
 
         # The sub-key vocabulary is declared once at module scope (see

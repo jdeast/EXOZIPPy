@@ -7,6 +7,8 @@ on by default: it must not need the flux scale to be known, and it must
 degrade to None rather than raise.
 """
 
+import logging
+
 import numpy as np
 import pytest
 
@@ -157,3 +159,77 @@ def test_add_seed_hints_overwrites_which_is_why_the_gate_exists():
         "gate in mulensinstrument was written for overwrite semantics and "
         "should be revisited"
     )
+
+
+# ---------------------------------------------------------------------------
+# The u_0 -> 0, t_E -> inf degeneracy (review 2.4.14): DC2018-001 and -226
+# ---------------------------------------------------------------------------
+
+
+class _Degenerate:
+    """A Nelder-Mead result that walked off along the degenerate direction
+    with a chi2 marginally BELOW the grid's -- the case the old `res.fun >
+    best_chi2` guard could not catch, and exactly what the two DC2018 seeds
+    looked like (u_0 = 5e-10, t_E = 4e8 d)."""
+
+    def __init__(self, t_0, chi2):
+        self.x = np.array([t_0, np.log(5e-10), np.log(4.4e8)])
+        self.fun = chi2 - 1.0
+        self.success = True
+
+
+def test_a_degenerate_refinement_is_discarded_for_the_grid_seed(
+    monkeypatch, caplog
+):
+    """
+    Given a refinement that returns u_0 = 5e-10 and t_E = 4e8 d with a
+      slightly better chi2 than the grid,
+    When find_pspl_seed runs,
+    Then the grid point is returned instead, marked not converged, and the
+      log names the degeneracy -- a seed like that costs 15 s per evaluation
+      and puts the polish in a point-lens basin for ten hours.
+    """
+    # ARRANGE
+    t, f, ivar = _curve(2458550.0, 0.15, 18.0, 1.0, 0.3)
+    real_minimize = peakfind.minimize
+
+    def fake_minimize(fun, x0, **kw):
+        grid_chi2 = fun(x0)
+        return _Degenerate(x0[0], grid_chi2)
+
+    monkeypatch.setattr(peakfind, "minimize", fake_minimize)
+
+    # ACT
+    with caplog.at_level(logging.WARNING, logger=peakfind.__name__):
+        seed = peakfind.find_pspl_seed([(t, f, ivar)])
+    monkeypatch.setattr(peakfind, "minimize", real_minimize)
+
+    # ASSERT: the grid point, not the runaway
+    assert seed["u_0"] in peakfind._U0_GRID
+    assert seed["t_E"] in peakfind._TE_GRID
+    assert seed["converged"] is False
+    assert "degeneracy" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "u_0, t_E, span, degenerate",
+    [
+        (5e-10, 4.4e8, 2000.0, True),  # DC2018-226's actual seed
+        (0.15, 18.0, 200.0, False),
+        (0.15, 500.0, 200.0, True),  # t_E longer than twice the data span
+        (20.0, 18.0, 200.0, True),  # unmagnified: no event
+        (0.15, 18.0, 0.0, False),  # no span known: only u_0 is tested
+        (np.nan, 18.0, 200.0, True),
+    ],
+)
+def test_refinement_is_degenerate_rule(u_0, t_E, span, degenerate):
+    assert peakfind.refinement_is_degenerate(u_0, t_E, span) is degenerate
+
+
+def test_a_healthy_refinement_is_kept():
+    """The guard must not fire on the recovery cases above: a clean event
+    refines to its injected geometry and reports converged."""
+    t, f, ivar = _curve(2458550.0, 0.15, 18.0, 1.0, 0.3)
+    seed = peakfind.find_pspl_seed([(t, f, ivar)])
+    assert seed["converged"] is True
+    assert abs(seed["u_0"] - 0.15) < 0.02

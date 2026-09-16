@@ -46,6 +46,20 @@ logger = logging.getLogger(__name__)
 _U0_GRID = (0.005, 0.02, 0.05, 0.15, 0.4, 0.8, 1.2)
 _TE_GRID = (3.0, 8.0, 20.0, 50.0, 120.0)
 _MAX_T0_CANDIDATES = 12
+# The PSPL refinement has a degenerate direction: u_0 -> 0 with t_E -> inf
+# keeps the peak's SHAPE while the linear flux solve absorbs the amplitude,
+# and on a low-amplitude event the chi2 surface slopes gently that way, so
+# an unbounded Nelder-Mead walks off to a source parked on the lens for the
+# whole light curve.  Two of the 44 DC2018 events (001 and 226) came back
+# with u_0 = 5e-10 and t_E = 1e7-4e8 DAYS -- a "seed" whose start logp was
+# -2.5e12 / -1.3e9, whose evaluation costs 15 s (a finite source on the
+# point-lens singularity at every epoch), and whose polish then spent ten
+# hours in a point-lens basin with the errors inflated 400x (review 2.4.14).
+# A refinement that lands outside these is thrown away in favour of the
+# grid point it started from, which is a real fit to the data.
+_U0_MIN = 1e-4  # below this the source is on the lens: no PSPL peak shape
+_U0_MAX = 10.0  # above this the magnification is unity: no event at all
+_TE_SPAN_FACTOR = 2.0  # t_E longer than twice the data span is unmeasured
 # Two t_0 candidates closer together than this descend into the same
 # minimum, so keeping both just spends the grid twice on one basin.
 _T0_SEPARATION_DAYS = 1.0
@@ -116,6 +130,17 @@ def _t0_candidates(curves):
     return picked or [float(0.5 * (t.min() + t.max()))]
 
 
+def refinement_is_degenerate(u_0, t_E, span):
+    """True when a refined (u_0, t_E) is the degenerate non-peak (see _U0_MIN)."""
+    return bool(
+        not np.isfinite(u_0)
+        or not np.isfinite(t_E)
+        or u_0 < _U0_MIN
+        or u_0 > _U0_MAX
+        or (span > 0 and t_E > _TE_SPAN_FACTOR * span)
+    )
+
+
 def find_pspl_seed(curves, mag_fn=None):
     """Fit a point-lens point-source model to ``curves``.
 
@@ -160,10 +185,35 @@ def find_pspl_seed(curves, mag_fn=None):
         method="Nelder-Mead",
         options={"maxiter": 4000, "xatol": 1e-6, "fatol": 1e-3},
     )
+    span = float(
+        max(c[0].max() for c in curves) - min(c[0].min() for c in curves)
+    )
+    ref_u0, ref_tE = float(np.exp(res.x[1])), float(np.exp(res.x[2]))
+    degenerate = refinement_is_degenerate(ref_u0, ref_tE, span)
     if not np.isfinite(res.fun) or res.fun > best_chi2:
         # The refinement made it worse (or diverged): keep the grid point.
         # Returning the refined value anyway would hand the sampler a start
         # that is demonstrably worse than one we already had.
+        t_0, u_0, t_E, chi2, ok = best[0], best[1], best[2], best_chi2, False
+    elif degenerate:
+        # A LOWER chi2 that is not a peak: see _U0_MIN above.  The grid
+        # point is kept, and the caller is told, because a seed this wrong
+        # does not fail loudly downstream -- it fails ten hours later.
+        logger.warning(
+            "Peak finder: the PSPL refinement ran into the u_0 -> 0, "
+            "t_E -> inf degeneracy (u_0 = %.3g, t_E = %.3g d against a "
+            "%.1f d data span) and is discarded; keeping the grid seed "
+            "t_0 = %.4f, u_0 = %.3g, t_E = %.3g d.  This is what a "
+            "low-amplitude or anomaly-dominated event looks like to a "
+            "point-lens fit: expect the sampler to need a companion "
+            "search, not a longer polish.",
+            ref_u0,
+            ref_tE,
+            span,
+            best[0],
+            best[1],
+            best[2],
+        )
         t_0, u_0, t_E, chi2, ok = best[0], best[1], best[2], best_chi2, False
     else:
         t_0 = float(res.x[0])

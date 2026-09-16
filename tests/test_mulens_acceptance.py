@@ -591,6 +591,31 @@ def test_ob161003_event_potentials_are_scalar_and_single():
         )
 
 
+# The stage-0 recording's err_scale bounds, named once, for the analytic
+# re-normalization in the presplit reconciliation below.
+_ERR_SCALE_PRESPLIT_BOUNDS = (1e-6, 1e6)
+
+
+def _err_scale_renormalization(system):
+    """Sum over err_scale elements of log(q(1-q)) at the CURRENT bounds
+    minus the same at the stage-0 bounds, at the built model's own start
+    values -- the exact motion the logit-uniform prior term makes when only
+    the bounds change (parameter.py, ``log_jac``)."""
+    par = system.get_parameter_lookup()["mulensinstrument.err_scale"]
+    tf = par._raw_transform
+    vals = np.atleast_1d(np.asarray(par.initval, dtype=float))
+    lo0, hi0 = _ERR_SCALE_PRESPLIT_BOUNDS
+    total = 0.0
+    for i in tf["sampled_idx"]:
+        if not tf["use_logit"][i]:
+            continue
+        v = float(vals[i] if vals.size > 1 else vals[0])
+        q_new = (v - tf["lowers"][i]) / (tf["uppers"][i] - tf["lowers"][i])
+        q_old = (v - lo0) / (hi0 - lo0)
+        total += np.log(q_new * (1.0 - q_new)) - np.log(q_old * (1.0 - q_old))
+    return float(total)
+
+
 @pytest.mark.slow
 def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     """
@@ -643,8 +668,22 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     assert not appeared, f"terms appeared: {sorted(appeared)}"
     assert not vanished, f"terms vanished: {sorted(vanished)}"
 
+    # ONE PRIOR HAS MOVED SINCE THE STAGE-0 RECORDING, AND IT RECONCILES
+    # ANALYTICALLY TOO (review 8.2.2): mulensinstrument.err_scale's bounds
+    # went from U(1e-6, 1e6) to U(0.01, 100).  Its logit-uniform term is
+    # log(q(1-q)) per element with q = (v - lower)/(upper - lower), so at
+    # the recording's own err_scale start values the term moves by exactly
+    # the sum over elements of that expression at the new bounds minus the
+    # old.  Computed from the built model's start values and the two bound
+    # pairs -- no hand-typed number -- and held to the halved terms'
+    # tolerance.  The recording's values stay untouched, as the rule for
+    # that file says.
+    renorm_name = "POT:logit_uniform_prior.mulensinstrument.err_scale"
+    expected_renorm = _err_scale_renormalization(system)
+
     unexplained = {}
     halved_seen = set()
+    renorm_seen = False
     for name, (before, after, delta) in moved.items():
         if name in _OB161003_HALVED:
             # Exactly one of the two identical per-source copies remains.
@@ -670,8 +709,18 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
             expected = _u1_span_narrowing_delta(system)
             if abs(delta - expected) <= COLLAPSE_RTOL * abs(before):
                 continue
+        if name == renorm_name and abs(delta - expected_renorm) <= max(
+            COLLAPSE_RTOL * abs(before), 1e-9
+        ):
+            renorm_seen = True
+            continue
         unexplained[name] = (before, after, delta)
     assert not unexplained, f"unexplained logp motion: {unexplained}"
+    assert renorm_seen, (
+        f"expected {renorm_name} to move by the bounds re-normalization "
+        f"({expected_renorm:+.6f} nats) and it did not: either the bounds "
+        f"went back to U(1e-6, 1e6) or the prior's form changed"
+    )
 
     # Every collapsed term must actually have moved: a halved term that
     # MATCHES the recording would mean the per-source pair is back.
