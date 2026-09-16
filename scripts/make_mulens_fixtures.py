@@ -27,10 +27,13 @@ two questions be asked separately, and they are very different questions:
 demands bit-identity of both the start and every term.  Same-machine
 reproducibility is the right bar for a same-machine tool.
 
-tests/test_mulens_acceptance.py answers question 2: it replays the STORED
-start, so both machines evaluate identical parameter values and any residual
-is the likelihood function alone.  It can therefore hold a tight tolerance
-instead of absorbing the solver's drift.
+tests/test_mulens_acceptance_a.py and _b.py answer question 2: they replay
+the STORED start, so both machines evaluate identical parameter values and
+any residual is the likelihood function alone.  They can therefore hold a
+tight tolerance instead of absorbing the solver's drift.  (Two files rather
+than one because CI's --dist loadfile pins a file to one worker; the
+partition of fixtures between them is GROUP_A / GROUP_B in
+tests/mulens_acceptance_replay.py, and a new fixture must be added there.)
 
 The first version of these fixtures conflated the two -- it compared logp at
 each machine's OWN solved start -- and macOS differed by 3.2e-05 nats
@@ -44,7 +47,7 @@ deliberate exception is tests/fixtures/mulens/presplit/ob161003.json: the
 stage-0 recording of the only example whose MODEL changed under the split
 (per-source event-level vectors collapsed), kept -- labels translated,
 values untouched -- as the reference for the analytic reconciliation test
-in tests/test_mulens_acceptance.py.  This script neither writes nor checks
+in tests/test_mulens_acceptance_b.py.  This script neither writes nor checks
 that file.  Use --only to limit a run, e.g.
 
     python scripts/make_mulens_fixtures.py --check --only ob08092 --only ob140939
@@ -72,8 +75,8 @@ from mulens_acceptance import (  # noqa: E402
 from exozippy.system import System  # noqa: E402
 
 # --check is a SAME-MACHINE tool, so it demands bit-identity.  The
-# cross-machine tolerances live in tests/test_mulens_acceptance.py, which
-# asks a different question; see the module docstring.
+# cross-machine tolerances live in tests/mulens_acceptance_replay.py, whose
+# two test files ask a different question; see the module docstring.
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))

@@ -87,49 +87,89 @@ jobs:
         # actually reaches the wall-clock target. Worker count is capped by
         # the runner: measured, ubuntu-latest reports cpus=4/memory=15.6 GB
         # and macos-latest cpus=3/memory=7.0 GB, so a single job can use at
-        # most 4 and 2 workers respectively. The suite's ~6700 worker-seconds
-        # divided by 4 is still ~22 minutes, so more machines is the only way
-        # further down.
+        # most 4 and 2 workers respectively. The suite's ~12000 ubuntu
+        # worker-seconds (2026-09-14) divided by 4 is still ~50 minutes, so
+        # more machines is the only way down -- up to a point, below.
         #
-        # FOUR, and the number is measured rather than picked. Re-projecting
-        # from the first sharded run, with both real constraints -- the ~225 s
-        # fixed cost per job, and the fact that --dist loadfile pins a whole
-        # file to one worker so a shard cannot beat its slowest file's SERIAL
-        # time:
+        # THE SHARD COUNT IS PER OS (`shards`, read by the pytest step as
+        # `--of`), and both numbers are measured rather than picked. What
+        # bounds a job's wall clock, calibrated on four master runs of
+        # 2026-09-14 (run 34888667878 and three siblings; the prediction is
+        # within 4% of every observed job):
         #
-        #   shards  jobs  wall/job  binding constraint
-        #        2     8     14.6m  spread
-        #        3    12     11.0m  spread
-        #        4    16      9.2m  spread
-        #        6    24      8.1m  slowest single file
-        #        8    32      8.1m  slowest single file
+        #   wall/job = ~100 s fixed + max(shard worker-s / workers,
+        #                                  slowest FILE in the shard, serial)
         #
-        # 4 is the last point where adding machines still helps. Past it the
-        # constraint flips to one file and 8 more jobs buy about a minute; the
-        # floor is 8.1m, set by test_rm_ltt.py at 262 s serial. Going lower
-        # means splitting slow FILES, not editing this list.
+        # The fixed cost is ~100 s (setup-python cache hit 27-36 s, poetry
+        # install 1-2 s from cache, compile-cache restore 2-3 s, collect and
+        # seed 10-15 s, upload and the loadfile tail), not the 225 s an
+        # earlier projection assumed. The second term is the one to watch:
+        # --dist loadfile pins a whole file to one worker, so a shard never
+        # beats its slowest file's SERIAL time, and once one file exceeds
+        # the per-worker share the shard count stops mattering for the job
+        # that carries it. That is exactly what happened here: the new
+        # test_mulens_acceptance.py cost 873 s serial, the per-worker share
+        # at 4 shards was ~750 s, and the projection read
         #
-        # Two shards measured 15:10-26:36 in practice, i.e. a mean right ON the
-        # 20-minute target with runner variance of +/-40% -- so about half of
-        # all runs missed it. 4 shards is chosen for MARGIN against that
-        # variance, not for the mean.
+        #   ubuntu shards  jobs/push  worst job  binding constraint
+        #              4         16      16.2m  that one file
+        #              5         20      16.2m  that one file
+        #              6         24      16.2m  that one file
+        #              8         32      16.2m  that one file
+        #
+        # -- adding machines bought NOTHING for the worst job. Splitting the
+        # file in two (test_mulens_acceptance_a.py / _b.py, ~435 s each)
+        # gives 14.2m at 4 shards with every shard equal and spread-bound
+        # again. THE RULE: below ~10 minutes the lever is splitting slow
+        # FILES, never adding jobs. tests/durations.json names the slowest
+        # ones, and the mulens split records how (a fixture-name partition in
+        # a shared helper module, no fixture setup to share).
+        #
+        # ADDING JOBS ALSO HAS A HARD CEILING. The free plan runs 20
+        # concurrent jobs and 5 macOS jobs. A push today is 12 ubuntu + 3
+        # macOS + lint + the gate + the 2 Intel-macOS probes (intel-mac.yml)
+        # = 19 jobs, 5 of them macOS -- AT the macOS cap. Before macOS went
+        # to 3 shards it was 6 macOS jobs against 5, so one macOS shard
+        # waited ~8 minutes on every push even with nothing else running,
+        # and the run's wall clock (~23 m) was set by that queue and not by
+        # any shard. Past the total cap a second wave queues behind the
+        # first, so a fifth ubuntu shard (+4 jobs = 22) would cost more in
+        # queueing than it saves in spread. Count the jobs before editing
+        # either list.
+        #
+        # WHY MACOS IS 3 AND UBUNTU 4. macOS is 3.2x faster per worker-second
+        # (3783 worker-s for the same suite against ubuntu's 11987), so three
+        # macOS shards land at ~100 + 3783/2/3 = ~730 s = 12.2 m per job with
+        # a floor file of 276 s -- under the ubuntu jobs, which they used to
+        # exceed only because of the queue. Three also puts macOS exactly at
+        # the 5-job cap counting the two Intel probes.
+        #
+        # Four ubuntu shards also buy MARGIN, which is the practical argument
+        # that has not changed since the first sharded run: two shards then
+        # measured 15:10-26:36 across eight jobs, a mean right ON the
+        # 20-minute target with +/-40% runner variance, so about half of all
+        # runs missed it. A shard count whose mean equals the target fails
+        # the target half the time.
         shard: [1, 2, 3, 4]
+        shards: [4]
         include:
-          # CONTRIBUTING documents a macOS setup, and macOS is as fast as Linux
-          # here, so it stays on the pull-request path. Every shard, so the
-          # platform is covered rather than partly covered.
+          # CONTRIBUTING documents a macOS setup, so macOS stays on the
+          # pull-request path. Every shard of ITS OWN split (`shards: 3`), so
+          # the platform is covered rather than partly covered: the three
+          # jobs together run the whole suite, packed 3 ways from the same
+          # durations file and verified by --verify like the ubuntu split.
           - os: macos-latest
             python-version: "3.12"
             shard: 1
+            shards: 3
           - os: macos-latest
             python-version: "3.12"
             shard: 2
+            shards: 3
           - os: macos-latest
             python-version: "3.12"
             shard: 3
-          - os: macos-latest
-            python-version: "3.12"
-            shard: 4
+            shards: 3
 
     steps:
       - uses: actions/checkout@v7
@@ -303,6 +343,13 @@ jobs:
       # the file list exactly. A split that silently DROPS a file leaves every
       # shard green with the coverage gone, which is the worst way for this to
       # fail, so the check runs on every job rather than living in a test only.
+      # It also reports how stale tests/durations.json is -- on stderr, on
+      # this job's summary page, and as a ::warning:: annotation when files
+      # are absent -- because a stale weighting silently unbalances the split
+      # (docs/testing.md, "Keeping tests/durations.json current").
+      #
+      # `--of` is the PER-OS shard count from the matrix, not a literal: the
+      # ubuntu and macOS splits are different sizes (see the matrix comment).
       - name: Run test suite
         env:
           EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES: "1800"
@@ -310,7 +357,7 @@ jobs:
           set -euo pipefail
           workers=$(poetry run python scripts/pytest_workers.py --explain)
           files=$(poetry run python scripts/pytest_shard.py \
-            --shard ${{ matrix.shard }} --of 4 --verify)
+            --shard ${{ matrix.shard }} --of ${{ matrix.shards }} --verify)
           # --durations=0 into a transcript the step below uploads. This is
           # the ONLY place per-file cost can be measured on the hardware that
           # actually runs the suite, and measuring it anywhere else provably
@@ -333,9 +380,14 @@ jobs:
       # one platform's transcripts would foreclose it. `if: always()` so a
       # failing shard still yields the timings that might explain why.
       #
-      # Each job runs ONE shard, so a whole suite is the union of all four
-      # transcripts for one os+python. gen_durations.py takes several inputs
-      # for that reason.
+      # Each job runs ONE shard, so a whole suite is the union of every
+      # shard's transcript for one os+python (four on ubuntu, three on
+      # macOS). gen_durations.py takes several inputs for that reason, and
+      # .github/workflows/refresh-durations.yml is the consumer that closes
+      # the loop: weekly, it downloads the latest master run's ubuntu-3.12
+      # set, regenerates tests/durations.json and proposes the result when
+      # the balance has moved. These artifacts ARE the per-test timing on CI
+      # -- there is nothing further to instrument.
       - name: Upload the duration transcript
         if: always()
         # A failed UPLOAD must not fail the job: this transcript is a
