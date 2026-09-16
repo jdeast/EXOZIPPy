@@ -81,6 +81,11 @@ from exozippy.samplers._common import (  # noqa: F401
 from exozippy.samplers._common import (  # noqa: F401
     DEFAULT_LP_ABS_MAX as _DEFAULT_LP_ABS_MAX,
 )
+from exozippy.samplers.ladder import (
+    _deo_pairs,
+    _record_round_trips,
+    _update_ladder_barrier,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,144 +103,6 @@ from exozippy.whitening import (
 from exozippy.whitening import (
     probe_step_1d as _probe_step_1d,
 )
-
-
-def _geometric_ladder(n_temps, T_max):
-    """T_k = T_max^(k/(n_temps-1)), T_0=1 (target), T_{K-1}=T_max."""
-    if n_temps == 1:
-        return np.array([1.0])
-    return T_max ** (np.arange(n_temps) / (n_temps - 1))
-
-
-def resolve_n_temps(n_temps, n_params, T_max):
-    """Resolve the sampler-config ``n_temps``, including ``"auto"``.
-
-    ``auto`` sizes the ladder a priori for adjacent-rung energy overlap on
-    a D-dimensional target: between rungs the mean logp shifts by
-    ~(D/2)*ln(r) while fluctuating ~sqrt(D/2), so geometric spacing wants
-    ln(r) ~ sqrt(2/D), i.e. n = ceil(sqrt(D/2) * ln(T_max)) rungs (floored
-    at the historical EXOFASTv2-parity 8).
-
-    THIS IS SELF-CONSISTENT WITH THE DEO CRITERION AT ITS DESIGN POINT, and
-    it is worth seeing why before concluding the formula is wrong.  The
-    communication barrier is the sum of per-pair REJECTION rates,
-    Lambda = (n-1)*rho, so ladder_health_report's requirement
-    n >= 2*Lambda + 1 = 2*(n-1)*rho + 1 holds exactly when rho = 0.5 --
-    i.e. at the 0.5 adjacent-rung swap acceptance that the overlap argument
-    above is chosen to produce.  At its design point this formula IS
-    2*Lambda+1; it is not off by a factor of two.
-
-    WHAT ACTUALLY GOES WRONG is that the achieved acceptance is not 0.5.
-    Measured on examples/DC2018 event 128 (D = 27):
-
-      T_max   n_temps   Lambda   rho   accept   needs 2L+1   round trips
-        200      20     12.02   0.633   0.367       26            61
-        200      20     11.52   0.606   0.394       25             8
-       8500      34     19.77   0.599   0.401       41             0
-
-    ~0.40 where the derivation implies 0.50, so Lambda lands 20-30% high
-    and the ladder 20-30% short.  The gap is in the D/2 Gaussian assumption
-    about how Var(logp) varies with T, which is model-specific -- so the
-    shortfall is too, and no fixed coefficient here can absorb it.  (Do not
-    "fix" this by doubling: 2*33.24+1 = 68 rungs against a measured need of
-    41 is 63% waste.)
-
-    For contrast, the SAME 20-rung ladder on the pre-parallax model had
-    Lambda = 6.01, so 20 > 2*6.01+1 = 14 was comfortably provisioned, and
-    it delivered 1427 round trips.  Nothing about the ladder changed;
-    Lambda doubled when pi_E became a real likelihood direction, and round
-    trips fell to 8.  That is the whole story of why a ladder that used to
-    work stopped working.
-
-    So Lambda is a property of the MODEL, is measured every run, and is the
-    only problem-specific number in this decision.  Keep sqrt(D/2) --
-    the dimension dependence is derived; an empirical multiplier fitted to
-    one example would not be.  The honest upgrade is to MEASURE Lambda in a
-    short pilot ladder (it is an average of swap rejection rates and
-    converges in a few hundred swap rounds) and size the real ladder at
-    2*Lambda+1; see notes/polish_todo.txt.
-    """
-    if isinstance(n_temps, str):
-        if n_temps.strip().lower() != "auto":
-            raise ValueError(
-                f"n_temps must be an integer or 'auto', got {n_temps!r}"
-            )
-        n = max(8, int(np.ceil(np.sqrt(n_params / 2.0) * np.log(T_max))))
-        logger.info(
-            f"n_temps: auto -> {n} rungs "
-            f"(D={n_params}, T_max={T_max:g}, sqrt(D/2)*ln(T_max))"
-        )
-        return n
-    return int(n_temps)
-
-
-def ladder_health_report(temperatures, n_swap_accept, n_swap_propose):
-    """Log the measured communication barrier; warn if the ladder chokes.
-
-    Lambda = sum over adjacent-rung pairs of their swap REJECTION rates --
-    the empirical global communication barrier of Syed et al. 2022 (JRSS-B).
-    Under the non-reversible DEO schedule the T_max<->T=1 round-trip rate
-    approaches 1/(2 + 2*Lambda) once n_temps is comfortably above Lambda;
-    with n_temps - 1 < ~2*Lambda the ladder itself is the mixing
-    bottleneck, and the fix is more rungs -- an EXPLICIT sampler-config
-    n_temps at the recommended value, not `n_temps: auto`, which cannot
-    know the acceptance it will actually achieve (see resolve_n_temps).
-    More draws do not help at all.
-    """
-    n_temps = len(temperatures)
-    prop = np.asarray(n_swap_propose, dtype=float)
-    if n_temps < 2 or prop.sum() <= 0:
-        return None
-    # A pair that was never PROPOSED is unmeasured, not 100%-rejecting.  The
-    # guard above is on the TOTAL, so `np.maximum(prop, 1.0)` turned every
-    # zero-proposal pair into r_k = 1, the largest barrier a link can have --
-    # inflating Lambda and firing the "communication-limited, raise n_temps"
-    # warning on a healthy ladder.  Zero proposals are routine (DEO
-    # alternates parities; the counters reset every adaptation window).
-    # Interpolate over the measured pairs, exactly as _update_ladder_barrier
-    # already does for the same reason.
-    acc = np.asarray(n_swap_accept, dtype=float)
-    measured = prop > 0
-    rej = np.zeros(prop.shape, dtype=float)
-    rej[measured] = np.clip(1.0 - acc[measured] / prop[measured], 0.0, 1.0)
-    if not measured.all():
-        pair_idx = np.arange(prop.size)
-        rej[~measured] = np.interp(
-            pair_idx[~measured], pair_idx[measured], rej[measured]
-        )
-    lam = float(np.sum(np.clip(rej, 0.0, 1.0)))
-    logger.info(
-        f"PT ladder health: communication barrier Lambda={lam:.2f} with "
-        f"n_temps={n_temps} (DEO round-trip ceiling ~ 1/(2+2*Lambda) = "
-        f"{1.0 / (2.0 + 2.0 * lam):.3f} per swap round)"
-    )
-    recommended = int(np.ceil(2.0 * lam)) + 1
-    if (n_temps - 1) < 2.0 * lam:
-        logger.warning(
-            f"PT ladder is communication-limited: n_temps={n_temps} is "
-            f"below ~2*Lambda+1 = {recommended}. Round trips between T_max "
-            f"and T=1 -- not draws -- are the mixing bottleneck; set "
-            f"n_temps: {recommended} and rerun. 'n_temps: auto' will not "
-            f"get you there: its spacing is self-consistent with this "
-            f"criterion only at 0.50 adjacent-rung swap acceptance, and the "
-            f"acceptance actually achieved here is "
-            f"{1.0 - lam / max(n_temps - 1, 1):.2f}, which is what makes "
-            f"Lambda higher than the spacing assumed. Lambda is measured, "
-            f"so this recommendation is problem-specific; the formula "
-            f"cannot be. NOTE that this criterion is NECESSARY, not "
-            f"sufficient: measured on a 27-D Gaussian, round trips collapse "
-            f"far faster than the DEO ceiling 1/(2+2*Lambda) predicts -- 4x "
-            f"below it at Lambda=1.8, 13x at 4.1, and unobservable past "
-            f"Lambda~5 at any affordable budget. DC2018 event 128 SATISFIES "
-            f"2*Lambda+1 at n_temps=48 with Lambda=19.8 and still makes zero "
-            f"round trips, so more rungs alone will not restore transport at "
-            f"high Lambda; see notes/pt_round_trip_collapse.txt. Where "
-            f"Lambda is this large, between-mode traffic has to come from "
-            f"multi-seed starts, per-mode evidence weighting or explicit "
-            f"mode jumps rather than from tempering."
-        )
-    return lam
-
 
 # OPT-IN improvement tolerance for the gradient-free polish: stop when the
 # best point found has gained less than `tol` nats over the last `tol_window`
@@ -1004,149 +871,6 @@ def polish_seed_starts(
 # ---------------------------------------------------------------------------
 
 
-def _deo_pairs(round_idx, n_temps):
-    """Adjacent rung pairs attempted simultaneously in one DEO swap round.
-
-    Even rounds (round_idx even) attempt (0,1),(2,3),(4,5),...; odd rounds
-    attempt (1,2),(3,4),(5,6),.... The pairs within a round are disjoint (no
-    rung appears twice), so all can be attempted at once, and the alternating
-    offset is what makes the index process non-reversible.
-
-    Every pair is always returned -- in particular, rung thinning must NOT
-    filter this list. Swaps only exchange already-cached (state, logp) pairs
-    and need no fresh evaluation, and because the DEO round parity is
-    deterministically coupled to the step counter, filtering by the thinning
-    activity pattern permanently removed specific pairs from the schedule
-    (e.g. rung_thin_factor=2, swap_interval=1, n_temps=8, thin_start=4 never
-    attempted (3,4) or (5,6)), disconnecting the ladder
-    (notes/code_review_20260808.txt bug 1.14).
-    """
-    start = 0 if round_idx % 2 == 0 else 1
-    return [(k, k + 1) for k in range(start, n_temps - 1, 2)]
-
-
-def _deo_pair_sequence(n_temps):
-    """Deterministic cycling order of adjacent-pair lower indices for the
-    async sampler: all even pairs (0,1),(2,3),... exhausted first, then all
-    odd pairs (1,2),(3,4),..., then repeat. Async has no synchronized rounds,
-    so it fires one swap per `swap_interval` completed evaluations and walks
-    this fixed sequence instead of drawing a random rung pair -- same DEO
-    idea (deterministic, non-reversible pair selection) adapted to event time.
-    Returns the lower rung index k of each pair (the pair is (k, k+1)).
-    """
-    even = list(range(0, n_temps - 1, 2))
-    odd = list(range(1, n_temps - 1, 2))
-    return even + odd
-
-
-def _record_round_trips(direction, round_trips, n_temps):
-    """Update per-member direction tags at the extreme rungs and count
-    completed cold -> hot -> cold round trips.
-
-    direction : list[list[int]] -- direction[k][i] in {0, +1, -1} is the last
-        extreme rung the configuration NOW occupying slot (k, i) has visited
-        (+1 = cold end / heading up, -1 = hot end / heading down, 0 = neither
-        yet). Tags travel WITH the configuration through swaps: the caller
-        swaps direction[k][i] alongside the population state and its logp, so
-        a counted round trip means one configuration was carried the full
-        length of the ladder and back -- exactly the transport that moves a
-        chain between posterior modes.
-    round_trips : list[int] -- single-element mutable counter, incremented in
-        place. Idempotent: a cold slot already tagged +1 is not recounted, so
-        the synchronous sampler can call this once per DEO round and the async
-        sampler after every swap event without double-counting.
-
-    THE round-trip metric is the direct measure of whether the ladder is
-    actually transporting mass between modes; report it next to per-rung swap
-    acceptance.
-    """
-    if n_temps < 2:
-        return
-    hot = n_temps - 1
-    n_chains = len(direction[0])
-    for i in range(n_chains):
-        # Any configuration currently at the hottest rung is now "heading
-        # down" toward the cold end.
-        direction[hot][i] = -1
-    for i in range(n_chains):
-        # A configuration back at the coldest rung that last touched the hot
-        # end has completed a full cold -> hot -> cold round trip.
-        if direction[0][i] == -1:
-            round_trips[0] += 1
-        direction[0][i] = 1
-
-
-def _update_ladder_barrier(temperatures, swap_accept, swap_propose):
-    """Re-space the temperature ladder to equalize the communication barrier
-    (Syed et al. 2022). Returns a new temperature array.
-
-    The per-pair swap REJECTION rate r_k approximates the local communication
-    barrier between rungs k and k+1; the cumulative barrier up to rung k is
-    Lambda_k = sum_{j<k} r_j, and the total barrier is Lambda_{K-1}. An
-    optimally-tuned ladder carries an equal share of the barrier on every
-    rung, so we place the interior rungs at equal barrier fractions by
-    interpolating coldness beta = 1/T against the cumulative barrier. The two
-    endpoints (T_0 = 1 target, T_{K-1} = T_max) are pinned so the ladder still
-    spans the same temperature range (EXOFASTv2 parity at the ends).
-
-    Only valid to call DURING the tuning phase -- re-spacing the ladder after
-    tuning would break invariance, the same rule the DE gamma adaptation
-    follows.
-
-    Pairs with ZERO proposals in the window carry no measurement and are
-    filled in from their measured neighbours, never scored.  The old
-    `1 - accept/max(propose, 1)` read a never-proposed pair as 0/1 = fully
-    REJECTING, r_k = 1, the largest barrier a link can have -- so an
-    unmeasured link stole ladder resolution from the links that had actually
-    been measured.  Zero proposals are routine: the DEO schedule alternates
-    even and odd pairs by round, the counters are reset every adaptation
-    window, and rung thinning lengthens the windows in which a given parity
-    never came up.  Scoring the gap 0 instead is equally wrong in the other
-    direction (it claims perfect mixing, collapsing those two rungs
-    together) and, because the gap then drops out of the total, silently
-    rescales every other pair's share.  Linear interpolation over the pair
-    index keeps the total honest and preserves the barrier PROFILE, which
-    varies smoothly along a smooth ladder; np.interp clamps at the ends, so
-    an unmeasured end pair inherits its nearest measured neighbour.  With a
-    single measured pair every r_k is that one value, the ladder is already
-    equal-share, and the update is exactly a no-op -- the right answer from
-    one datum.
-    """
-    n_temps = len(temperatures)
-    if n_temps < 3:
-        return np.asarray(temperatures, dtype=float)
-    prop = np.asarray(swap_propose, dtype=float)
-    acc = np.asarray(swap_accept, dtype=float)
-    measured = prop > 0
-    if not measured.any():
-        return np.asarray(temperatures, dtype=float)
-    r = np.zeros(prop.shape, dtype=float)
-    r[measured] = np.clip(1.0 - acc[measured] / prop[measured], 0.0, 1.0)
-    if not measured.all():
-        pair_idx = np.arange(prop.size)
-        r[~measured] = np.interp(
-            pair_idx[~measured], pair_idx[measured], r[measured]
-        )
-    # Cumulative barrier at each rung; Lambda[0] = 0, length n_temps.
-    Lambda = np.concatenate([[0.0], np.cumsum(r)])
-    total = float(Lambda[-1])
-    if total <= 0.0:
-        # Perfect mixing (or no swap data): nothing to equalize.
-        return np.asarray(temperatures, dtype=float)
-    # Lambda is monotonically non-decreasing in k (valid np.interp x); beta is
-    # monotonically decreasing in k. Guard against flat segments (r_k == 0)
-    # that would make Lambda non-strictly-increasing by nudging duplicates.
-    for k in range(1, n_temps):
-        if Lambda[k] <= Lambda[k - 1]:
-            Lambda[k] = Lambda[k - 1] + 1e-9
-    beta = 1.0 / np.asarray(temperatures, dtype=float)
-    targets = np.linspace(0.0, Lambda[-1], n_temps)
-    new_beta = np.interp(targets, Lambda, beta)
-    new_beta[0] = beta[0]  # pin target rung (T=1)
-    new_beta[-1] = beta[-1]  # pin hottest rung (T=T_max)
-    return 1.0 / new_beta
-
-
 def _active_rungs(step, n_temps, thin_start, thin_factor):
     """Rung indices that propose a DE move at this step.
 
@@ -1172,63 +896,6 @@ def _active_rungs(step, n_temps, thin_start, thin_factor):
     return [
         k for k in range(n_temps) if k < thin_start or step % thin_factor == 0
     ]
-
-
-def _convergence_check_schedule(min_draws=100, growth=0.9):
-    """Yield cumulative draw counts at which to run a convergence check.
-
-    Positions: round(min_draws / growth**j) for j=0,1,2,...
-    Default (growth=0.9): 100, 111, 123, 137, 152, ...
-    Gaps grow by ~11% each check, so we check frequently early and less often later.
-    """
-    j, prev = 0, 0
-    while True:
-        n = round(min_draws / growth**j)
-        if n > prev:
-            yield n
-            prev = n
-        j += 1
-
-
-def _safe_progress(progress_callback, state):
-    """Invoke an optional GUI progress hook without ever letting it break the run.
-
-    The callback (see exozippy.gui.status.GuiReporter.progress_callback) writes
-    monitoring artifacts to disk; a filesystem hiccup there must never abort
-    sampling, so any exception is logged and swallowed.
-    """
-    if progress_callback is None:
-        return
-    try:
-        progress_callback(state)
-    except Exception:
-        logger.warning(
-            "PTDE: progress_callback raised; continuing sampling",
-            exc_info=True,
-        )
-
-
-def _check_convergence(stored_raw, n_draws, min_ess, max_rhat, stored_lp=None):
-    """Live early-stop test on the first ``n_draws`` stored T=1 draws.
-
-    Judges convergence on the trace AFTER dropping stuck chains and trimming
-    a generous fixed burn-in (the last-half tail), so the transient can no
-    longer poison the Rhat/ESS the stop decision reads -- the reason a run
-    with a slow, likelihood-flat degenerate direction otherwise never
-    auto-stops. Rank Rhat/bulk-ESS are transform-invariant, so computing on
-    the raw draws matches the physical report. The precise (ESS-maximizing)
-    burn-in is found once at wrap-up by convergence.find_burnin; here we only
-    need the cheap pass/fail. See samplers/convergence.py.
-
-    Returns (converged, max_rhat_val, min_ess_val). None thresholds are
-    treated as "no limit" for that statistic.
-    """
-    posterior = {key: arr[:, :n_draws] for key, arr in stored_raw.items()}
-    lp = stored_lp[:, :n_draws] if stored_lp is not None else None
-    try:
-        return convergence.converged_on_tail(posterior, lp, min_ess, max_rhat)
-    except Exception:
-        return False, float("nan"), float("nan")
 
 
 def ptde_sample(
@@ -1387,22 +1054,53 @@ def ptde_sample(
     -------
     arviz.InferenceData with posterior and sample_stats["lp"] from T=1 chains.
     """
-    lp_guard = LpPlausibilityGuard(lp_plausibility_ceiling, "PTDE", logger)
-
-    de_mode_hop = _common.validate_shared_ptde_args(
-        swap_schedule, de_mode_hop, "PTDE"
+    # ONE shared prologue for both PTDE loops (_common.prepare_ptde_run).
+    # It validates, resolves the ladder and the chain count, compiles the
+    # logp and the conversions, builds the rung populations, plots the start
+    # ensemble and arms the hot recorder -- in an order that is load-bearing
+    # for the bit-identical proposal path, and which therefore must not be
+    # able to drift between the two samplers.
+    run = _common.prepare_ptde_run(
+        model,
+        system,
+        label="PTDE",
+        log=logger,
+        draws=draws,
+        tune=tune,
+        n_temps=n_temps,
+        T_max=T_max,
+        n_chains=n_chains,
+        gamma=gamma,
+        seed=seed,
+        swap_schedule=swap_schedule,
+        de_mode_hop=de_mode_hop,
+        initvals=initvals,
+        raw_starts=raw_starts,
+        seed_indices=seed_indices,
+        raw_scales=raw_scales,
+        start_dispersion=start_dispersion,
+        plot_prefix=plot_prefix,
+        lp_plausibility_ceiling=lp_plausibility_ceiling,
+        collect_rung_timing=collect_rung_timing,
+        store_hot_chains=store_hot_chains,
     )
+    # Names the step loop below reads.  Bound once here rather than threaded
+    # through as run.* so the loop body stays the diff-free part.
+    lp_guard, rng, de_mode_hop = run.lp_guard, run.rng, run.de_mode_hop
+    raw_start, model_keys, n_params = (
+        run.raw_start,
+        run.model_keys,
+        run.n_params,
+    )
+    n_temps, temperatures = run.n_temps, run.temperatures
+    logp_fn, layout, hot = run.logp_fn, run.layout, run.hot
+    n_chains, gamma = run.n_chains, run.gamma
+    chain_seed_index, rung_starts = run.chain_seed_index, run.rung_starts
+    raw_to_phys, raw_to_phys_batched = run.raw_to_phys, run.raw_to_phys_batched
+    raw_var_names, out_var_names = run.raw_var_names, run.out_var_names
 
-    rng = np.random.default_rng(seed)
-
-    # parameter bookkeeping -- before the ladder, since n_temps may be
-    # "auto" (sized from the parameter count; see resolve_n_temps).
-    raw_start = system.get_raw_start(model)
-    model_keys = list(raw_start.keys())
-    n_params = sum(v.size for v in raw_start.values())
-    n_temps = resolve_n_temps(n_temps, n_params, T_max)
-    temperatures = _geometric_ladder(n_temps, T_max)
-
+    # Rung thinning is ptde-only: it addresses the blocking that async
+    # dispatch removes outright, so there is nothing for ptde_async to share.
     _rung_thin_factor = max(1, int(rung_thin_factor))
     _rung_thin_start = (
         n_temps // 2 if rung_thin_start is None else int(rung_thin_start)
@@ -1410,97 +1108,10 @@ def ptde_sample(
     _rung_thin_start = max(1, min(_rung_thin_start, n_temps))  # never thin T=1
     if _rung_thin_factor > 1 and _rung_thin_start < n_temps:
         logger.info(
-            f"PTDE: rung thinning enabled — rungs >= {_rung_thin_start} "
+            f"PTDE: rung thinning enabled -- rungs >= {_rung_thin_start} "
             f"(of {n_temps}) propose every {_rung_thin_factor} steps"
         )
 
-    # compile logp ONCE; install in _common BEFORE forking workers so fork
-    # children inherit it (copy-on-write; see _common.set_worker_globals)
-    # PositionalLogp calls the compiled function by position instead of
-    # through pymc's dict wrapper -- same value, ~3.5x less call overhead on
-    # a 20-variable model, which at one call per proposal is the difference
-    # between 35 us and 10 us of pure plumbing per evaluation (6.4.3).
-    logp_fn = _common.PositionalLogp(model.compile_logp())
-    _common.set_worker_globals(logp_fn, collect_rung_timing)
-
-    # compile raw -> physical conversions ONCE (single-sample and batched;
-    # see _common.compile_conversions for the rationale).
-    raw_to_phys, raw_to_phys_batched, raw_var_names, out_var_names = (
-        _common.compile_conversions(model)
-    )
-
-    # 2 * n_params is the standard DE population for good mixing; the floor
-    # and the warning both live in _common.resolve_n_chains.
-    n_chains = _common.resolve_n_chains(n_chains, n_params, "PTDE", logger)
-    if gamma is None:
-        gamma = 2.38 / np.sqrt(2 * n_params)
-    logger.info(
-        f"PTDE: {n_params} params, {n_chains} chains/rung, γ={gamma:.4f}"
-    )
-
-    # initialize populations
-    t1_starts, chain_seed_index, rung_starts, _dispersions, _disp_desc = (
-        _common.build_rung_populations(
-            model,
-            system,
-            n_chains,
-            logp_fn,
-            rng,
-            raw_start,
-            temperatures,
-            start_dispersion,
-            initvals=initvals,
-            raw_starts=raw_starts,
-            seed_indices=seed_indices,
-            raw_scales=raw_scales,
-            n_params=n_params,
-            log=logger,
-        )
-    )
-
-    # ensemble start plots (T=1 starts only; raw→physical via the batched fn)
-    _common.plot_start_ensemble(
-        system,
-        t1_starts,
-        raw_to_phys_batched,
-        raw_var_names,
-        out_var_names,
-        plot_prefix,
-        logger,
-    )
-
-    # Each rung gets its OWN population, dispersed at its own temperature
-    # (review 8.4.7).  This used to replicate the T=1 population to every
-    # rung under the note "hotter chains spread quickly during tune" -- an
-    # assumption the code stated and never checked; build_rung_populations
-    # now reports each rung's spread and start logp so it can be.
-    # A rung's population is ONE (n_chains, n_raw_elements) array, not a list
-    # of dicts: the DE move is then three vector operations instead of a
-    # Python loop over the free RVs (see _common.RawLayout, which owns the
-    # packing and the proof that it is bit-identical).
-    layout = _common.RawLayout(raw_start, model_keys)
-
-    # Thinned hot-rung retention, the SAME recorder ptde_async uses.  This
-    # sampler used to warn that store_hot_chains was ignored, which made
-    # every sync run blind to posterior-suppressed modes
-    # (outputs.ledger.discover_hot_modes has nothing to read) and made a
-    # sync-vs-async comparison unequal in a way that had nothing to do with
-    # scheduling.  Nothing here is synchronous or asynchronous.
-    hot = _common.HotChainRecorder(
-        store_hot_chains,
-        system,
-        n_temps,
-        n_chains,
-        n_params,
-        model_keys,
-        raw_start,
-        raw_to_phys,
-        raw_var_names,
-        draws,
-        layout,
-        "PTDE",
-        logger,
-    )
     populations = [
         layout.pack_many([pop[i % n_chains] for i in range(n_chains)])
         for pop in rung_starts
@@ -1593,7 +1204,9 @@ def ptde_sample(
     _do_convergence = (
         min_ess is not None or max_rhat is not None
     ) and n_chains >= 2
-    _check_gen = _convergence_check_schedule() if _do_convergence else None
+    _check_gen = (
+        _common._convergence_check_schedule() if _do_convergence else None
+    )
     _next_check = next(_check_gen) if _check_gen else None
 
     def _stop_handler(sig, frame):
@@ -1990,7 +1603,7 @@ def ptde_sample(
                 and _next_check is not None
                 and actual_draws >= _next_check
             ):
-                converged, rhat_val, ess_val = _check_convergence(
+                converged, rhat_val, ess_val = _common._check_convergence(
                     stored_raw, actual_draws, min_ess, max_rhat, stored_lp
                 )
                 logger.info(
@@ -2000,19 +1613,19 @@ def ptde_sample(
                 # GUI progress hook: fires at each geometric check, so overhead
                 # stays bounded. Passes the live T=1 draw buffers by reference
                 # so a snapshot writer can downsample them itself.
-                _safe_progress(
+                _common._safe_progress(
                     progress_callback,
-                    {
-                        "n_draws": actual_draws,
-                        "n_chains": n_chains,
-                        "max_rhat": rhat_val,
-                        "min_ess": ess_val,
-                        "elapsed_s": time.time() - start_time,
-                        "stop_reason": "converged" if converged else None,
-                        "stored_raw": stored_raw,
-                        "stored_lp": stored_lp,
-                        "raw_var_names": model_keys,
-                    },
+                    _common.progress_state(
+                        actual_draws,
+                        n_chains,
+                        rhat_val,
+                        ess_val,
+                        start_time,
+                        converged,
+                        stored_raw,
+                        stored_lp,
+                        model_keys,
+                    ),
                 )
                 _next_check = next(_check_gen, None)
                 if converged:
@@ -2035,62 +1648,32 @@ def ptde_sample(
             # 2.4.1; ptde_async has done this since it was written).
             _common._shutdown_pool(pool)
 
-    # convert raw → physical for every stored draw
-    if actual_draws == 0:
-        raise RuntimeError(
-            "PTDE: sampling stopped during tune — no draws were collected"
-        )
-    if actual_draws < draws:
-        logger.info(
-            f"PTDE: early stop — {actual_draws}/{draws} draws collected"
-        )
-
-    idata = _common.assemble_inference_data(
+    # ONE shared epilogue (_common.finish_ptde_run): refuse an empty run,
+    # note an early stop, assemble the trace, attach the hot group, stamp the
+    # ladder statistics, report the hops and the ladder health.  What varies
+    # is text and counters, so those are arguments.
+    idata = _common.finish_ptde_run(
+        run,
         stored_raw,
         stored_lp,
         actual_draws,
-        n_chains,
-        raw_start,
-        raw_var_names,
-        out_var_names,
-        raw_to_phys_batched,
-        chain_seed_index,
-        "PTDE",
-        logger,
-    )
-
-    hot.attach(idata, temperatures, logger)
-
-    # Ladder communication statistics, stamped on the trace so the mode
-    # report can quote them as context (see stamp_and_log_run_summary).
-    _common.stamp_and_log_run_summary(
-        idata,
-        "PTDE",
-        logger,
-        actual_draws=actual_draws,
-        draws=draws,
-        n_accept=n_accept,
-        n_propose=n_propose,
-        n_swap_accept=n_swap_accept,
-        n_swap_propose=n_swap_propose,
-        round_trips=round_trips[0],
-        n_swap_rounds=n_swap_rounds,
-        n_temps=n_temps,
-        swap_schedule=swap_schedule,
-        rate_unit="round",
-        extras=(
-            [f"  eval_timeouts={n_eval_timeouts}"] if n_eval_timeouts else []
+        summary_kwargs=dict(
+            n_accept=n_accept,
+            n_propose=n_propose,
+            n_swap_accept=n_swap_accept,
+            n_swap_propose=n_swap_propose,
+            round_trips=round_trips[0],
+            n_swap_rounds=n_swap_rounds,
+            n_temps=n_temps,
+            swap_schedule=swap_schedule,
+            rate_unit="round",
+            extras=(
+                [f"  eval_timeouts={n_eval_timeouts}"]
+                if n_eval_timeouts
+                else []
+            ),
         ),
+        hop_counts=(n_hop_accept[0], n_hop_propose[0]),
+        rung_times=rung_times if collect_rung_timing else None,
     )
-    _common.log_mode_hop_summary(
-        "PTDE", logger, de_mode_hop, n_hop_accept[0], n_hop_propose[0]
-    )
-    # Post-tune swap counters (they are zeroed at the tune -> draw boundary;
-    # see the step loop), so this measures the FINAL ladder's communication
-    # barrier and not the ladders that preceded it.
-    ladder_health_report(temperatures, n_swap_accept, n_swap_propose)
-
-    if collect_rung_timing:
-        _common.log_rung_timing(rung_times, temperatures, "PTDE", logger)
-
     return idata

@@ -167,14 +167,41 @@ invisible if you only grep for `_common`:
   hot-rung retention (`HotChainRecorder`), the validation of the knobs
   run.py forwards to both (`validate_shared_ptde_args`), and
   the output (`assemble_inference_data`, `stamp_and_log_run_summary`).
-- **`ptde.py` itself** owns nine statistical helpers that `ptde_async`
-  imports from it directly: `_geometric_ladder`, `resolve_n_temps`,
-  `ladder_health_report`, `_deo_pair_sequence`, `_record_round_trips`,
-  `_update_ladder_barrier`, `_convergence_check_schedule`,
-  `_safe_progress`, `_check_convergence`.
+- **`ladder.py`** owns the temperature ladder: `_geometric_ladder`,
+  `resolve_n_temps`, `ladder_health_report`, `_deo_pairs`,
+  `_deo_pair_sequence`, `_record_round_trips`, `_update_ladder_barrier`.
+  These lived in `ptde.py`, and `ptde_async` imported nine names from it --
+  a second sharing channel that made `ptde.py` simultaneously a sampler and
+  the other sampler's library. **Neither sampler imports the other now.**
+  Anything one sampler needs from its sibling is a shared module that has
+  not been written yet. (`_convergence_check_schedule`, `_safe_progress` and
+  `_check_convergence` went to `_common` in the same move; none of the three
+  has anything to do with dispatch.)
 
-**What is deliberately NOT shared** is the loop itself, and everything whose
-shape follows from it: the stop/abort path (sync breaks inline, async runs a
+**The prologue and the epilogue ARE shared**, as of the same change:
+`_common.prepare_ptde_run` validates, resolves the ladder and the chain
+count, compiles the logp and the conversions, builds the rung populations,
+plots the start ensemble and arms the hot recorder; `_common.finish_ptde_run`
+refuses an empty run, notes an early stop, assembles the trace, attaches the
+hot group and emits the ladder statistics.  Neither is a loop.  The ORDER
+inside `prepare` is load-bearing -- `rng` is built and then consumed by
+`build_rung_populations`, so anything that reordered it would move every
+subsequent random number and break the bit-identical proposal path -- which
+is exactly why there must be one copy of it rather than two.  What varies
+between callers is passed in: the label, an early-stop detail string, the
+summary counters, and `notes` for async's "adapt_ladder never fired"
+warning.  `_common.progress_state` likewise owns the nine-key GUI payload
+that used to be written out verbatim in both files.
+
+A caution for whoever extends this: the shared wrap-up calls
+`ladder.ladder_health_report` through the MODULE, not a from-import, because
+`tests/test_ptde.py::test_the_wrap_up_barrier_measures_the_draw_phase_only`
+spies on it by patching that attribute.  A from-import here would silently
+stop the spy from intercepting and the test would pass while measuring
+nothing -- the vacuity shape `docs/testing.md` is about.
+
+**What is STILL deliberately not shared** is the loop itself, and everything
+whose shape follows from it: the stop/abort path (sync breaks inline, async runs a
 `_maybe_stop` closure over a category state machine), `eval_timeout`
 enforcement (sync blocks on a batch `_map_logp_timeout`, async scans
 in-flight submissions on a wall clock), the ladder- and gamma-adaptation
@@ -213,12 +240,20 @@ parametrized over `ptde_sample` and `ptde_async_sample` -- the same "one
 rule, N callers" shape `tests/test_polish.py` uses for `next_gamma`. Add the
 arm before the fix, not after.
 
-The parallel code paths most likely to drift the same way, honestly: the
-nine-key `_safe_progress` payload dict (written out verbatim in both files,
-so a new GUI snapshot key lands in one), the two `eval_timeout` mechanisms,
-the ladder-adaptation blocks (async's has already learned a windowing fix
-sync's has not), and the stop/abort wording. None is a bug today; all four
-are two copies of one intention.
+The parallel code paths most likely to drift, honestly, after the prologue,
+the epilogue and the progress payload have been folded: the two
+`eval_timeout` mechanisms, the ladder-adaptation blocks (async's has already
+learned a windowing fix sync's has not), and the stop/abort wording. None is
+a bug today; each is two copies of one intention.
+
+And one measurement worth keeping, because it predicts where the next
+duplication will come from: folding logic into `_common` does NOT
+monotonically reduce the verbatim overlap between the two files. It went
+127 -> 146 lines when `HotChainRecorder` landed and only back to ~129 after
+`prepare`/`finish`, because a shared helper needs its full argument list
+written out at each of two call sites -- the 32-line `prepare_ptde_run(...)`
+call is now the single largest duplicated block. The remedy for that one is
+a shared settings object, not another extraction.
 
 **6.4.6 is not the only instance, which is the point.** Reviews 1.4.3 and
 2.4.16 were the same shape in the argument surface rather than the storage:
