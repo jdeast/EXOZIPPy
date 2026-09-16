@@ -178,12 +178,14 @@ def write_synthetic_mist_grid(
     dEEP_dage is smallest in the middle (the "main sequence"), which is what
     the EEP -> age Jacobian is supposed to reward.
 
-    Returns the directory to pass as the component's ``model_root:``.
+    Returns the directory to pass as the component's ``model_root:`` -- the
+    ``MIST`` directory itself (``<model_root>/<model>/EEPs``), mirroring
+    ``mist_grid.DEFAULT_MIST_MODEL_ROOT``.
     """
     import pandas as pd
 
-    root = os.fspath(root)
-    eep_dir = os.path.join(root, "MIST", model, "EEPs")
+    mist_root = os.path.join(os.fspath(root), "MIST")
+    eep_dir = os.path.join(mist_root, model, "EEPs")
     os.makedirs(eep_dir, exist_ok=True)
 
     n_eep = len(eeps)
@@ -212,4 +214,9 @@ def write_synthetic_mist_grid(
     pd.DataFrame(rows).to_parquet(
         os.path.join(eep_dir, fname), engine="pyarrow", index=False
     )
-    return root
+    # The component reads <model>.grid.yaml beside the parquet for the prose
+    # citation (see models/MIST/MISTv2.5/EEPs/MISTv2.5.grid.yaml); only the
+    # keys it consumes are written.
+    with open(os.path.join(eep_dir, f"{model}.grid.yaml"), "w") as f:
+        f.write(f"model: {model}\ncitation: \"Dotter:2016, Choi:2016\"\n")
+    return mist_root

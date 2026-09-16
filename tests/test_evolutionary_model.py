@@ -19,6 +19,7 @@ first draft of this component:
 """
 
 import logging
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -30,14 +31,17 @@ from exozippy.components.evolutionarymodel.evolutionarymodel import (
     CONSTRAINABLE,
     DEEP_DAGE_MAX,
     DEEP_DAGE_MIN,
-    KIEL_EEP_WINDOW,
-    KIEL_X_PAD_FRAC,
-    KIEL_INDEX,
-    KIEL_LOGG_WINDOW,
-    KIEL_WINDOW_MARGIN_FRAC,
     EvolutionaryModel,
 )
+from exozippy.components.evolutionarymodel.plot import MISTPlot
 from exozippy.components.relations import StellarRelation
+from exozippy.outputs.plot_helper_functions import _extend_window, _padded_range
+
+KIEL_EEP_WINDOW = MISTPlot.KIEL_EEP_WINDOW
+KIEL_X_PAD_FRAC = MISTPlot.KIEL_X_PAD_FRAC
+KIEL_INDEX = MISTPlot.KIEL_INDEX
+KIEL_LOGG_WINDOW = MISTPlot.KIEL_LOGG_WINDOW
+KIEL_WINDOW_MARGIN_FRAC = MISTPlot.KIEL_WINDOW_MARGIN_FRAC
 
 EEPS = (1, 2, 3)
 
@@ -235,12 +239,11 @@ def test_a_missing_default_grid_is_fetched_from_zenodo(monkeypatch, tmp_path):
         return fetched
 
     monkeypatch.setattr(eep_grid, "ensure_eep_grid", fake_ensure)
-    monkeypatch.setattr(mist_grid, "DEFAULT_MODEL_ROOT", tmp_path / "models")
+    mist_root = tmp_path / "models" / "MIST"
+    monkeypatch.setattr(mist_grid, "DEFAULT_MIST_MODEL_ROOT", mist_root)
 
     # Act
-    path = mist_grid._resolve_grid_file(
-        "MISTv2.5", 0.0, 0.0, tmp_path / "models"
-    )
+    path = mist_grid._resolve_grid_file("MISTv2.5", 0.0, 0.0, mist_root)
 
     # Assert
     assert calls == [(0.0, 0.0)]
@@ -256,8 +259,8 @@ def test_an_existing_grid_is_not_refetched(monkeypatch, tmp_path):
     # Arrange
     from exozippy.models.MIST import eep_grid
 
-    root = tmp_path / "models"
-    here = root / "MIST" / "MISTv2.5" / "EEPs"
+    root = tmp_path / "models" / "MIST"
+    here = root / "MISTv2.5" / "EEPs"
     here.mkdir(parents=True)
     (here / "afe_p0_vvcrit0.0.grid.parquet").write_bytes(b"")
 
@@ -265,7 +268,7 @@ def test_an_existing_grid_is_not_refetched(monkeypatch, tmp_path):
         raise AssertionError("should not fetch an existing grid")
 
     monkeypatch.setattr(eep_grid, "ensure_eep_grid", explode)
-    monkeypatch.setattr(mist_grid, "DEFAULT_MODEL_ROOT", root)
+    monkeypatch.setattr(mist_grid, "DEFAULT_MIST_MODEL_ROOT", root)
 
     # Act
     path = mist_grid._resolve_grid_file("MISTv2.5", 0.0, 0.0, root)
@@ -1226,9 +1229,14 @@ def test_the_eep_seed_reads_an_interpolated_track_not_the_nearest_node(
 # ----------------------------------------------------------------------
 
 
-def _kiel_spec(system, component):
+def _kiel_specs(system, point, star_idx=0):
+    """The Kiel PlotSpecs for one star at ``point`` (MISTPlot owns the chart)."""
+    return MISTPlot(system, [point])._plot_kiel_trace(star_idx, point)
+
+
+def _kiel_spec(system):
     point = {p.label: p.initval for p in system.plot_params}
-    specs = component.plot_data(system, point)
+    specs = _kiel_specs(system, point)
     assert len(specs) == 1
     return specs[0]
 
@@ -1245,10 +1253,7 @@ def test_without_a_point_there_is_nothing_to_draw(built):
     system, _ = built
 
     # Act / Assert
-    assert (
-        system.active_components["evolutionarymodel"].plot_data(system, None)
-        == []
-    )
+    assert _kiel_specs(system, None) == []
 
 
 def test_the_kiel_diagram_draws_track_prediction_and_fit(built):
@@ -1263,7 +1268,7 @@ def test_the_kiel_diagram_draws_track_prediction_and_fit(built):
     comp = system.active_components["evolutionarymodel"]
 
     # Act
-    spec = _kiel_spec(system, comp)
+    spec = _kiel_spec(system)
 
     # Assert
     assert [t.name for t in spec.traces] == [
@@ -1289,7 +1294,7 @@ def test_the_kiel_axes_follow_the_convention(built):
     system, _ = built
 
     # Act
-    spec = _kiel_spec(system, system.active_components["evolutionarymodel"])
+    spec = _kiel_spec(system)
 
     # Assert
     assert spec.meta["x_inverted"] and spec.meta["y_inverted"]
@@ -1312,7 +1317,7 @@ def test_the_fitted_point_carries_the_systematic_floor_as_error_bars(built):
     # Arrange
     system, _ = built
     comp = system.active_components["evolutionarymodel"]
-    spec = _kiel_spec(system, comp)
+    spec = _kiel_spec(system)
     track_trace, mist_trace, fit_trace = spec.traces
 
     logmass = float(np.atleast_1d(system.star.logmass.initval)[0])
@@ -1338,7 +1343,7 @@ def test_the_kiel_diagram_declares_what_moves_it(built):
     system, _ = built
 
     # Act
-    spec = _kiel_spec(system, system.active_components["evolutionarymodel"])
+    spec = _kiel_spec(system)
 
     # Assert
     assert {"star.logmass", "star.initfeh", "star.eep"} <= set(
@@ -1361,10 +1366,16 @@ def test_the_track_stops_where_the_models_stop_being_trustworthy():
     )
     df.loc[df["EEP"] >= 3, "here_be_dragons"] = 1.0
     comp._grids = [mist_grid._assemble_grid(df)]
+    # MISTPlot reads only the component and the posterior flag off the
+    # system, and _track_curve needs neither beyond the component's grids.
+    stub_system = SimpleNamespace(
+        active_components={"evolutionarymodel": comp},
+        star=SimpleNamespace(teff=SimpleNamespace(posterior=None)),
+    )
 
     # Act -- an EEP window wide enough to keep every synthetic row, so the
     # dragon cut is the only thing under test here.
-    teff, logg = comp._track_curve(0, 0.0, 0.0, (0.0, 1.0e4))
+    teff, logg = MISTPlot(stub_system, [])._track_curve(0, 0.0, 0.0, (0.0, 1.0e4))
 
     # Assert
     assert teff.size == 2  # EEP 1 and 2 only
@@ -1406,7 +1417,7 @@ def test_a_value_comfortably_inside_the_window_leaves_it_alone():
     the framing it exists to provide.
     """
     # Act
-    lo, hi = EvolutionaryModel._extend_window((3.0, 5.0), [4.0], 0.2)
+    lo, hi = _extend_window((3.0, 5.0), [4.0], 0.2)
 
     # Assert
     assert (lo, hi) == (3.0, 5.0)
@@ -1431,7 +1442,7 @@ def test_the_window_widens_for_a_value_near_or_past_an_edge(value, expected):
     no window at all.
     """
     # Act
-    got = EvolutionaryModel._extend_window((3.0, 5.0), [value], 0.2)
+    got = _extend_window((3.0, 5.0), [value], 0.2)
 
     # Assert
     assert got == pytest.approx(expected)
@@ -1450,8 +1461,8 @@ def test_the_drawn_track_is_restricted_to_the_requested_eeps(model_root):
     _system, comp = _kiel_system(model_root)
 
     # Act
-    kept = comp._track_curve(0, 0.0, 0.0, KIEL_EEP_WINDOW)[0]
-    everything = comp._track_curve(0, 0.0, 0.0, (0.0, 1.0e4))[0]
+    kept = MISTPlot(_system, [])._track_curve(0, 0.0, 0.0, KIEL_EEP_WINDOW)[0]
+    everything = MISTPlot(_system, [])._track_curve(0, 0.0, 0.0, (0.0, 1.0e4))[0]
 
     # Assert
     assert kept.size == 3
@@ -1467,11 +1478,11 @@ def test_the_drawn_track_widens_for_a_star_past_the_eep_window(model_root):
     """
     # Arrange
     _base_system, base = _kiel_system(model_root)
-    base_spec = _kiel_spec(_base_system, base)
+    base_spec = _kiel_spec(_base_system)
     system, comp = _kiel_system(model_root, {"star.A.eep": 800.0})
 
     # Act
-    spec = _kiel_spec(system, comp)
+    spec = _kiel_spec(system)
 
     # Assert -- EEP 807 is inside 800 + margin, and was outside 630
     assert np.atleast_1d(base_spec.traces[0].x).size == 3
@@ -1490,7 +1501,7 @@ def test_the_logg_axis_is_the_nominal_window_for_a_dwarf(built):
     system, _ = built
 
     # Act
-    spec = _kiel_spec(system, system.active_components["evolutionarymodel"])
+    spec = _kiel_spec(system)
 
     # Assert
     assert spec.meta["y_range"] == list(KIEL_LOGG_WINDOW)
@@ -1507,7 +1518,7 @@ def test_the_logg_axis_widens_for_a_star_outside_it(model_root):
     system, comp = _kiel_system(model_root, {"star.A.radius": 30.0})
 
     # Act
-    spec = _kiel_spec(system, comp)
+    spec = _kiel_spec(system)
     lo, hi = spec.meta["y_range"]
     fit_logg = float(np.atleast_1d(spec.traces[2].y)[0])
     margin = KIEL_WINDOW_MARGIN_FRAC * (
@@ -1533,7 +1544,7 @@ def test_the_marks_are_drawn_once_however_many_draws_are_overlaid(built):
     system, _ = built
 
     # Act
-    spec = _kiel_spec(system, system.active_components["evolutionarymodel"])
+    spec = _kiel_spec(system)
     track, mist_point, fit_point = spec.traces
 
     # Assert
@@ -1563,15 +1574,15 @@ def test_the_marks_sit_at_the_reported_medians_not_at_the_drawn_draw(
     for param in system.plot_params:
         user = np.asarray(param.from_internal(param.initval), dtype=float)
         param.posterior = np.repeat(user[..., None], 7, axis=-1)
-    assert comp._reported_kiel(system) is not None
+    assert MISTPlot(system, [])._reported_kiel() is not None
 
     moved = dict(at_initval)
     moved["star.teff"] = np.atleast_1d(moved["star.teff"]) * 1.10
 
     # Act
-    spec = comp.plot_data(system, moved)[0]
+    spec = _kiel_specs(system, moved)[0]
     _track, mist_point, fit_point = spec.traces
-    reference = _kiel_spec(system, comp)
+    reference = _kiel_spec(system)
 
     # Assert -- the marks ignore the moved draw entirely
     assert float(np.atleast_1d(fit_point.x)[0]) == pytest.approx(
@@ -1596,7 +1607,7 @@ def test_without_a_posterior_the_marks_fall_back_to_the_drawn_point(built):
     # Arrange
     system, _ = built
     comp = system.active_components["evolutionarymodel"]
-    assert comp._reported_kiel(system) is None
+    assert MISTPlot(system, [])._reported_kiel() is None
 
     # Act
     kiel = np.atleast_2d(
@@ -1604,7 +1615,7 @@ def test_without_a_posterior_the_marks_fall_back_to_the_drawn_point(built):
             {p.label: p.initval for p in system.plot_params}, system
         ))
     )
-    spec = _kiel_spec(system, comp)
+    spec = _kiel_spec(system)
 
     # Assert
     assert float(np.atleast_1d(spec.traces[2].x)[0]) == pytest.approx(
@@ -1620,9 +1631,9 @@ def test_an_empty_set_of_values_leaves_the_axis_to_autoscale():
     an axis, which is the honest answer when there is nothing to scale to.
     """
     # Act / Assert
-    assert EvolutionaryModel._padded_range([], 0.05) is None
+    assert _padded_range([], 0.05) is None
     assert (
-        EvolutionaryModel._padded_range([np.array([np.nan, np.inf])], 0.05)
+        _padded_range([np.array([np.nan, np.inf])], 0.05)
         is None
     )
 
@@ -1635,7 +1646,7 @@ def test_a_single_point_still_gets_a_nonzero_axis_span():
     zero-width axis the renderer cannot draw.
     """
     # Act
-    lo, hi = EvolutionaryModel._padded_range([np.array([5000.0])], 0.05)
+    lo, hi = _padded_range([np.array([5000.0])], 0.05)
 
     # Assert
     assert lo < 5000.0 < hi
@@ -1652,7 +1663,7 @@ def test_the_teff_axis_covers_exactly_what_is_on_the_chart(built):
     """
     # Arrange
     system, _ = built
-    spec = _kiel_spec(system, system.active_components["evolutionarymodel"])
+    spec = _kiel_spec(system)
     track, mist_point, fit_point = spec.traces
 
     on_chart = np.concatenate(
@@ -1698,7 +1709,7 @@ def test_the_teff_axis_ignores_track_rows_the_logg_window_clips_away(
     comp._grids = [mist_grid._assemble_grid(df)]
 
     # Act
-    spec = _kiel_spec(system, comp)
+    spec = _kiel_spec(system)
     lo, hi = spec.meta["x_range"]
 
     # Assert -- drawn, but not on the axis
