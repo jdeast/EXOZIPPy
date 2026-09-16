@@ -142,6 +142,55 @@ def test_a_star_with_no_track_has_no_track_coordinates(model_root):
     assert raw["star.eep_raw"].type.shape == (1,)
 
 
+def test_a_star_no_block_names_has_no_structure_parameters(model_root):
+    """
+    Given two stars and a block naming only one, the other keeping the
+      `mist:` default of True,
+    When the model is built,
+    Then the unnamed star's radius/teff/feh are inactive -- nothing reads
+      them -- while its track coordinates are merely pinned.
+
+    `Star.structure_consumers` used to answer this from the `mist:`/`parsec:`
+    SWITCHES, which default to opted-in: that asks "did this star ask for a
+    track", not "did a block give it one", so every star in a config carrying
+    an evolutionarymodel block counted as read.  Measured before the fix, on
+    this exact topology: star B's radius/teff/feh went active and SAMPLED,
+    and its feh had a logp gradient of exactly zero -- three likelihood-free
+    dimensions on a star no block names.  The component is asked for its
+    `star_indices` now, the way mann and torres already were.
+
+    The two mechanisms are different questions and both are needed: the mask
+    answers "asked for a track" (so B's initfeh/eep/age exist and are pinned
+    by `_pin_unmodeled_stars`, leaving a user free to override), and this
+    answers "is it read" (so B's radius/teff/feh are not parameters at all).
+    """
+    # Arrange
+    system = _prepared(
+        [{"name": "A"}, {"name": "B"}], model_root=model_root
+    )
+
+    # Act
+    model = system.build_model()
+
+    # Assert -- nothing reads B's structure parameters, so it has none.
+    for name in ("radius", "teff", "feh"):
+        param = getattr(system.star, name)
+        assert param.is_active.tolist() == [True, False], name
+        assert param.is_sampled.tolist() == [True, False], name
+
+    # B asked for a track (mist defaults True), so these exist -- pinned,
+    # not sampled, and not silently deleted.
+    for name in ("initfeh", "eep", "age"):
+        param = getattr(system.star, name)
+        assert param.is_active.tolist() == [True, True], name
+        assert param.is_sampled.tolist() == [True, False], name
+
+    # Every sampled vector is star A alone.
+    raw = {v.name: v for v in model.free_RVs}
+    for name in ("star.feh_raw", "star.radius_raw", "star.eep_raw"):
+        assert raw[name].type.shape == (1,), name
+
+
 def test_no_star_opting_in_declares_no_track_coordinates():
     """
     Given an evolutionarymodel topology in which NO star opted in,
