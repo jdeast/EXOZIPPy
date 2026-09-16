@@ -15,6 +15,7 @@ from exozippy.components.relations import (
 from . import mist_grid
 from . import physics
 from .mist_grid import OUTPUT_INDEX
+from .plot import MISTPlot
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,6 @@ TRACK_PARAMS = ("initfeh", "eep", "age")
 # a defect of the table, so both clips act only where the table is wrong.
 DEEP_DAGE_MIN = 1e-14
 DEEP_DAGE_MAX = 1e3
-
 
 class EvolutionaryModel(StellarRelation, Component):
     """Tie a star's feh/radius/teff/age to the MIST evolutionary tracks.
@@ -227,9 +227,18 @@ class EvolutionaryModel(StellarRelation, Component):
                 model=c.get("model", "MISTv2.5"),
                 alpha=float(c.get("alpha", 0.0)),
                 vvcrit=float(c.get("vvcrit", 0.0)),
-                model_root=c.get("model_root", mist_grid.DEFAULT_MODEL_ROOT),
+                model_root=c.get("model_root", mist_grid.DEFAULT_MIST_MODEL_ROOT),
             )
             self._grids.append(grid)
+
+            # for use in prose later
+            self.model = c.get("model", "MISTv2.5") 
+            self.model_root = c.get("model_root", mist_grid.DEFAULT_MIST_MODEL_ROOT)
+
+            import yaml
+            model_yaml_file = f"{self.model_root}/{self.model}/EEPs/{self.model}.grid.yaml"
+            with open(model_yaml_file, "r") as f:
+                self._model_yaml = yaml.safe_load(f)
 
             star_name = system.star.names[star_idx]
             self._inject_grid_bounds(star_name, grid)
@@ -453,8 +462,17 @@ class EvolutionaryModel(StellarRelation, Component):
         chi2 += 2.0 * self.dragon_penalty_weight[i] * np.maximum(
             track[:, OUTPUT_INDEX["here_be_dragons"]], 0.0
         )
-        # penalize pre-main sequence tracks (EEP < 202) with a large chi2, so the seed is on the main sequence
-        chi2 += np.where(track[:, OUTPUT_INDEX["eep_pts"]] < 202, 30.0, 0.0)
+        # Penalize pre-main-sequence rows so the seed lands on the main
+        # sequence.  The EEP axis is NOT one of the interpolator's output
+        # columns (OUTPUT_COLUMNS is the six interpolated quantities) -- it is
+        # the grid axis the track's rows are indexed by, so it comes from
+        # grid["eep_pts"], which interpolate_track leaves untouched and so is
+        # row-aligned with `track` by construction.
+        chi2 += np.where(
+            np.asarray(grid["eep_pts"], dtype=float) < MISTPlot.KIEL_EEP_WINDOW[0],
+            30.0,
+            0.0,
+        )
         if not np.isfinite(chi2).any():
             return
         eep0 = float(grid["eep_pts"][int(np.nanargmin(chi2))])
@@ -742,7 +760,7 @@ class EvolutionaryModel(StellarRelation, Component):
     def compile_plotters(self, model, system):
         """Compile the per-instance Kiel-diagram quantities.
 
-        One node, ``(n_elements, 8)``, so a posterior draw costs one call:
+        One node, ``(n_elements, 9)``, so a posterior draw costs one call:
 
             logmass, initfeh   the track coordinates -- returned numerically
                                so plot_data can build the whole 807-point
@@ -751,6 +769,8 @@ class EvolutionaryModel(StellarRelation, Component):
             teff_mist, logg_mist    the MIST prediction at (logmass, initfeh, eep)
             teff_fit, logg_fit      what the fit actually settled on
             sigma_teff, sigma_logg  the systematic floor, as error bars
+            eep                the fitted EEP, which selects how much of the
+                               track to draw (see KIEL_EEP_WINDOW)
 
         ``logg`` is neither a grid column nor a constrained quantity: MIST
         tabulates radius, and logg follows from it and the mass, which along
@@ -765,6 +785,10 @@ class EvolutionaryModel(StellarRelation, Component):
 
         self._compiled_kiel = None
         self._kiel_node = None
+        # Invalidated with the graph it is computed from: a rebuild may have
+        # moved every parameter, and a stale cache would pin the reported
+        # point to the previous model's posterior.
+        self._reported_kiel_cache = None
         if not self.n_elements:
             # An `evolutionarymodel:` block naming no star. Same guard as
             # build_likelihood's, and needed separately because System calls
@@ -801,6 +825,7 @@ class EvolutionaryModel(StellarRelation, Component):
                 calc_logg_from_logmass(logmass, star.radius.value[smap]),
                 teff_pred * f_teff,
                 sigma_logg,
+                star.eep.value[smap],
             ],
             axis=-1,
         )
@@ -818,143 +843,17 @@ class EvolutionaryModel(StellarRelation, Component):
             )
             self._compiled_kiel = None
 
-    def _track_curve(self, i, logmass, initfeh):
-        """(teff, logg) along instance ``i``'s whole EEP track.
-
-        Rows the grid flags as unreliable (``here_be_dragons``) are cut, so
-        the drawn track stops where the models stop being trustworthy rather
-        than running out into the hydrogen-exhausted tail, where feh_mist is
-        30.0 and the tabulated ages are unresolved.  The fit is not forbidden
-        from going there -- the dragon penalty is smooth, not a wall -- this
-        is only about not drawing a curve nobody should read.
-
-        Exclude pre-main sequence and post-main sequence tracks (EEP < 202) from the drawn curve,
-        and logg > 3.0 and logg < 5.0, to avoid drawing the track in regions where the MIST models are not reliable.
-        """
-        from ...constants import LOGG_CONST
-
-        track = mist_grid.interpolate_track(self._grids[i], logmass, initfeh)
-        teff = track[:, OUTPUT_INDEX["teff_mist"]]
-        radius = track[:, OUTPUT_INDEX["radius_mist"]]
-        logg = LOGG_CONST + logmass - 2.0 * np.log10(
-            np.where(radius > 0, radius, np.nan)
-        )
-
-        keep = (
-            (track[:, OUTPUT_INDEX["here_be_dragons"]] <= 0)
-            & np.isfinite(teff)
-            & (radius > 0)
-            & (track[:, OUTPUT_INDEX["eep_pts"]] >= 202)
-            & (logg > 3.0)
-            & (logg < 5.0)
-        )
-
-        return teff[keep], logg[keep]
-
-    def plot_data(self, system, point=None):
-        """Kiel diagram: the track, the MIST point, and the fitted point.
-
-        ``point=None`` returns ``[]``, deliberately.  Every other component's
-        data-only mode previews its OBSERVATIONS; this component has none --
-        it contributes only potentials, and all three curves are model
-        quantities that do not exist until there is a parameter point to
-        evaluate them at.
-
-        We only want to plot the MIST and fit point once per star, not once per 
-        instance, and not once per trace. So we use the star_indices to get the 
-        unique stars and plot them.
-        """
-        from exozippy.plotspec import PlotSpec, Trace
-
-        if point is None or getattr(self, "_compiled_kiel", None) is None:
-            return []
-
-        kiel = np.atleast_2d(
-            self._compiled_kiel(*self._point_to_plot_params(point, system))
-        )
-
-        traces = []
-        for i in range(self.n_elements):
-            star_name = system.star.names[self.star_indices[i]]
-            logmass, initfeh = float(kiel[i, 0]), float(kiel[i, 1])
-            style = {"series_index": i}
-
-            teff_track, logg_track = self._track_curve(i, logmass, initfeh)
-            traces.append(
-                Trace(
-                    name=f"{star_name} MIST track",
-                    role="model",
-                    kind="line",
-                    x=teff_track,
-                    y=logg_track,
-                    style={**style, "lw": 1.0, "legend": True},
-                )
-            )
-            traces.append(
-                Trace(
-                    name=f"{star_name} MIST point",
-                    role="model",
-                    kind="scatter",
-                    x=np.array([kiel[i, 2]]),
-                    y=np.array([kiel[i, 3]]),
-                    node=self._kiel_node,
-                    style={**style, "marker": "s", "legend": True},
-                )
-            )
-            # role="data" so the renderers draw the error bars -- the bars
-            # ARE the systematic floor, i.e. how far the fit is free to sit
-            # from the track before the penalty bites. A fitted quantity,
-            # not an observation; no other role draws xerr/yerr.
-            traces.append(
-                Trace(
-                    name=f"{star_name} fit +/- systematic",
-                    role="data",
-                    kind="scatter",
-                    x=np.array([kiel[i, 4]]),
-                    y=np.array([kiel[i, 5]]),
-                    xerr=np.array([kiel[i, 6]]),
-                    yerr=np.array([kiel[i, 7]]),
-                    style={**style, "marker": "o"},
-                )
-            )
-
-        return [
-            PlotSpec(
-                id=f"{self.prefix}.kiel",
-                component={"yaml_key": self.yaml_key, "instance": None},
-                title="MIST evolutionary tracks",
-                xlabel=r"$T_{\rm eff}$ (K)",
-                ylabel=r"$\log g$ (cgs)",
-                traces=traces,
-                param_deps=self._model_trace_param_deps(
-                    self._kiel_node, system
-                ),
-                meta={
-                    "file_tag": "kiel",
-                    "figsize": (6.5, 5.5),
-                    # Both axes reversed: the Kiel-diagram convention, with
-                    # Teff decreasing rightward and surface gravity
-                    # increasing downward, so dwarfs sit low and giants high
-                    # exactly as in an observational HR diagram.
-                    "x_inverted": True,
-                    "y_inverted": True,
-                    "caption": (
-                        "Kiel diagram for the modeled star(s). The line is "
-                        "the MIST evolutionary track interpolated at the "
-                        "fitted initial mass and metallicity, the square is "
-                        "the model prediction at the fitted equivalent "
-                        "evolutionary point, and the circle is the fitted "
-                        r"$T_{\rm eff}$ and $\log g$ with error bars showing "
-                        "the adopted systematic floor."
-                    ),
-                },
-            )
-        ]
 
     def plot(self, system, points, filename_prefix="debug"):
-        from exozippy.plotrender import plot_via_specs
-
-        plot_via_specs(self, system, points, filename_prefix=filename_prefix)
+    
+        #  loop over stars -- one plot per star
+        for star_idx in range(self.n_elements):
+            mist_plot_obj = MISTPlot(system, points)
+            mist_plot_obj.plot_kiel_diagram(star_idx, filename_prefix=filename_prefix)
+            if mist_plot_obj._posteriorBool:
+                values = mist_plot_obj._get_posterior_compiled_values()
+                mist_plot_obj.plot_contours(values, star_idx, filename_prefix=filename_prefix)
+        
 
     def _add_prose(self, system):
         """Declare the modeling-draft sentences next to the terms they describe.
@@ -972,32 +871,38 @@ class EvolutionaryModel(StellarRelation, Component):
         stars = [system.star.names[si] for si in self.star_indices]
         noun = "star" if len(stars) == 1 else "stars"
         names = join_names(latex_escape(s) for s in stars)
+        self.citation = self._model_yaml.get("citation", "")
 
         prose.add(
-            f"We modeled the {noun} {names} with the MIST evolutionary "
-            r"tracks \citep{Dotter:2016, Choi:2016}, interpolating the grid "
-            r"in initial mass, initial metallicity, and equivalent "
-            r"evolutionary point (EEP) to predict the present-day "
-            r"metallicity, radius, effective temperature, and age.",
+            f"We modeled the {noun} {names} with the {self.model} evolutionary "
+            rf"tracks \citep{{{self.citation}}}, interpolating the grid "
+            r"in initial mass, initial [Fe/H], and equivalent "
+            r"evolutionary point (EEP) to predict the current "
+            r"[Fe/H], radius, effective temperature, and age. ",
             section="stellar",
             key=f"{self.prefix}.tracks",
             rank=20.0,
         )
         prose.add(
-            "Each predicted quantity was tied to its sampled counterpart by "
+            "By default, each predicted quantity is tied to its sampled counterpart by "
             "a Gaussian penalty whose width is the mass-dependent systematic "
-            "floor of EXOFASTv2 (about 3 per cent near 1 $M_\\odot$), so the "
-            "star is required to agree with the tracks only to within the "
-            "models' own accuracy.",
+            r"floor described in Section 2.1 of \citet{Eastman:2019}:"
+            r"\begin{equation} "
+            r"\sigma_{\rm MIST} = 0.03 - 0.025 \log{M_\star} + 0.045(\log{M_\star})^2"
+            r"\end{equation} "
+            r"This equation results in fractional errors of about 10% at 0.1 $M_\\odot$, " 
+            r"3% at 1 $M_\\odot$, and 5% at 10 $M_\\odot$"
+            f"Thus, the fitted values for the {noun} are required to "
+            "agree with the tracks only to within the models' own accuracy. ",
             section="stellar",
             key=f"{self.prefix}.floor",
             rank=21.0,
         )
         prose.add(
-            "Because EEP is not linear in time, we added the "
+            "Because EEP is not uniformly distributed in time, we added the "
             r"$\log|{\rm d}\,{\rm Age}/{\rm d}\,{\rm EEP}|$ Jacobian to the "
             "log-likelihood, which makes the uniform prior on EEP a uniform "
-            "prior on stellar age.",
+            "prior on stellar age. ",
             section="priors",
             key=f"{self.prefix}.eep_jacobian",
             rank=30.0,
