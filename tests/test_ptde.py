@@ -930,8 +930,10 @@ def test_hot_draw_storage_grows_on_the_draw_axis_and_pads_with_nan():
 def _early_stop_kwargs(sampler):
     """The common early-stop invocation for both PTDE samplers.
 
-    ptde_async also owns the hot-rung buffers; they are switched off here so
-    the measurement is of the T=1 group in both arms.
+    The hot-rung buffers are switched off in BOTH arms so the measurement is
+    of the T=1 group -- store_hot_chains used to be a ptde_async-only key and
+    needed a special case here; it is now shared
+    (samplers._common.HotChainRecorder), so both arms take the same kwargs.
     """
     kwargs = dict(
         draws=10**6,
@@ -946,8 +948,7 @@ def _early_stop_kwargs(sampler):
         min_ess=None,
         max_rhat=None,
     )
-    if sampler is ptde_async_sample:
-        kwargs["store_hot_chains"] = False
+    kwargs["store_hot_chains"] = False
     return kwargs
 
 
@@ -993,20 +994,29 @@ def test_an_early_stop_does_not_allocate_the_draws_it_never_takes(sampler):
     )
 
 
-def test_an_early_stop_does_not_allocate_the_hot_draws_it_never_takes():
+@pytest.mark.parametrize(
+    "sampler",
+    [ptde_sample, ptde_async_sample],
+    ids=["ptde", "ptde_async"],
+)
+def test_an_early_stop_does_not_allocate_the_hot_draws_it_never_takes(sampler):
     """
     Given store_hot_chains on and a huge configured draw count,
-    When the async run stops almost at once,
+    When the run stops almost at once,
     Then the (rung, chain, draw) hot buffers are chunked too.
 
     The hot group is the bigger of the two: (n_temps - 1) x n_chains x
     (draws // hot_thin).  Here 7 rungs x 4 chains x 5e5 draws x 2 variables
-    is ~224 MB that a 0.5 s run has no use for.  ptde_async only.
+    is ~224 MB that a 0.5 s run has no use for.
+
+    BOTH SAMPLERS, for the reason spelled out in the T=1 twin above: this was
+    ptde_async-only while the key was, and a storage fix to one PTDE sampler
+    is not done until the parity test covers both.
     """
     # ARRANGE / ACT
     tracemalloc.start()
     try:
-        idata = ptde_async_sample(
+        idata = sampler(
             _simple_model(),
             _MinimalSystem(),
             draws=10**6,
@@ -1032,6 +1042,103 @@ def test_an_early_stop_does_not_allocate_the_hot_draws_it_never_takes():
         f"peak {peak_mb:.0f} MB -- the full hot buffer was allocated for a "
         f"run that took {idata.posterior.sizes['draw']} draws"
     )
+
+
+@pytest.mark.parametrize(
+    "sampler",
+    [ptde_sample, ptde_async_sample],
+    ids=["ptde", "ptde_async"],
+)
+def test_both_samplers_store_the_hot_rungs_they_were_asked_for(sampler):
+    """
+    Given store_hot_chains set explicitly,
+    When either PTDE sampler runs,
+    Then a posterior_hot group is written, shaped (rungs x chains, draws),
+    carrying a per-chain temperature coordinate and finite untempered lp.
+
+    THIS IS THE ASYMMETRY ITSELF, not a guard against re-introducing it.
+    store_hot_chains was honored by ptde_async and IGNORED WITH A WARNING by
+    ptde, so a `method: ptde` fit silently had no suppressed-mode detector --
+    outputs.ledger.discover_hot_modes had nothing to read.  Nothing about
+    retaining a thinned copy of the hot rungs depends on whether proposals
+    are dispatched synchronously, which is why the recorder now lives in
+    _common and both loops call it; the only thing that differs is which
+    counter thins (per-chain iterations for async, the draw index for sync).
+    """
+    # ARRANGE / ACT
+    n_temps, n_chains = 3, 4
+    idata = sampler(
+        _simple_model(),
+        _MinimalSystem(),
+        draws=40,
+        tune=5,
+        n_temps=n_temps,
+        T_max=4.0,
+        n_chains=n_chains,
+        cores=1,
+        seed=11,
+        log_interval=10**6,
+        min_ess=None,
+        max_rhat=None,
+        store_hot_chains=2,
+    )
+
+    # ASSERT
+    assert hasattr(idata, "posterior_hot"), (
+        f"{sampler.__name__} wrote no posterior_hot group; store_hot_chains "
+        f"is shared and must be honored by both samplers"
+    )
+    hot = idata.posterior_hot
+    assert hot.sizes["chain"] == (n_temps - 1) * n_chains
+    assert hot.sizes["draw"] >= 1
+    # the hot rungs, and only the hot rungs, carry their own temperature
+    temps = np.asarray(hot["temperature"])
+    assert temps.shape == ((n_temps - 1) * n_chains,)
+    assert (temps > 1.0).all(), temps
+    # UNtempered lp: comparable to T=1 rather than divided by temperature
+    assert np.isfinite(np.asarray(hot["lp"])).all()
+
+
+@pytest.mark.parametrize(
+    "sampler",
+    [ptde_sample, ptde_async_sample],
+    ids=["ptde", "ptde_async"],
+)
+@pytest.mark.parametrize(
+    "bad",
+    [{"swap_schedule": "alternating"}, {"de_mode_hop": 1.5}],
+    ids=["swap_schedule", "de_mode_hop"],
+)
+def test_both_samplers_reject_the_same_bad_shared_knob(sampler, bad):
+    """
+    Given a knob run.py forwards to both PTDE samplers, set out of range,
+    When either sampler is called,
+    Then both raise, with the sampler named.
+
+    The useful question about a shared knob is not "is it validated" but
+    "is it validated by exactly ONE of them" (reviews 1.4.3, 2.4.16).
+    swap_schedule was checked in both -- two copies of one `if` -- while
+    de_mode_hop was checked only in ptde_async, so the same config raised
+    under one method and was accepted as a probability above 1 under the
+    other.  Both now call _common.validate_shared_ptde_args.
+    """
+    # ARRANGE / ACT / ASSERT
+    with pytest.raises(ValueError) as exc:
+        sampler(
+            _simple_model(),
+            _MinimalSystem(),
+            draws=2,
+            tune=1,
+            n_temps=2,
+            T_max=2.0,
+            n_chains=4,
+            cores=1,
+            seed=3,
+            min_ess=None,
+            max_rhat=None,
+            **bad,
+        )
+    assert list(bad)[0] in str(exc.value)
 
 
 # ---------------------------------------------------------------------------

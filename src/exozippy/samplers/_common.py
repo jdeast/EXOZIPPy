@@ -2071,6 +2071,181 @@ def grow_hot_draw_storage(stored_hot_raw, stored_hot_lp, needed, chunk=None):
     )
 
 
+def validate_shared_ptde_args(swap_schedule, de_mode_hop, label):
+    """Validate the knobs run.py forwards to BOTH PTDE loops.
+
+    The question worth asking of anything run.py hands to both samplers is
+    not "is this knob validated" but "is it validated by exactly ONE of
+    them" -- reviews 1.4.3 and 2.4.16.  It was: `swap_schedule` was checked
+    in both (two copies of one `if`), while `de_mode_hop` was checked only
+    in ptde_async, so `de_mode_hop: 1.5` raised under one method and, under
+    the other, silently became a hop probability above 1 in a sampler that
+    reads it as one.
+
+    Returns the coerced hop probability so the caller has one source for it.
+    """
+    if swap_schedule not in ("deo", "random"):
+        raise ValueError(
+            f"{label}: swap_schedule must be 'deo' or 'random', got "
+            f"{swap_schedule!r}"
+        )
+    hop = float(de_mode_hop or 0.0)
+    if not 0.0 <= hop < 1.0:
+        raise ValueError(f"{label}: de_mode_hop must be in [0, 1), got {hop}")
+    return hop
+
+
+class HotChainRecorder:
+    """Thinned hot-rung retention (``store_hot_chains``), for BOTH PTDE loops.
+
+    The pieces were already shared -- resolve_store_hot_chains,
+    hot_draw_chunk, grow_hot_draw_storage and RawLayout.store_draw all live
+    here -- but the WIRING lived in ptde_async.py, in three places: the
+    buffer allocation, the store site inside the loop, and the ~50-line
+    xarray block that attaches the ``posterior_hot`` group.  So `ptde` had
+    no way to honor the key and warned that it was ignored, which is not a
+    synchronous-versus-asynchronous difference at all: nothing about keeping
+    a thinned copy of the hot rungs depends on how proposals are scheduled.
+    The A/B on DC2018-194 is what made that concrete -- the sync arm's
+    config carried store_hot_chains, run.py forwarded it, and the sampler
+    replied "IGNORED", so the arm that converged was also the one arm with
+    no suppressed-mode detector and the comparison was not like for like.
+
+    What stays at the call site is exactly the asynchronous bit: WHICH
+    COUNTER thins.  ptde_async passes each chain's own iteration count (its
+    chains advance independently); ptde passes the step-synchronous draw
+    index.  Both mean "one hot sample per `thin`", counted in the only unit
+    each loop has.
+    """
+
+    def __init__(
+        self,
+        spec,
+        system,
+        n_temps,
+        n_chains,
+        n_params,
+        model_keys,
+        raw_start,
+        raw_to_phys,
+        raw_var_names,
+        draws,
+        layout,
+        label,
+        log,
+    ):
+        # The trace-share denominator counts PHYSICAL elements (sampled plus
+        # every Deterministic), so it has to come from a real conversion of
+        # the start point rather than from the raw count.  Computed here so
+        # neither loop carries its own copy of the expression.
+        n_out_elements = sum(
+            int(np.asarray(v).size)
+            for v in raw_to_phys(
+                *[np.asarray(raw_start[k]) for k in raw_var_names]
+            )
+        )
+        self.spec = spec
+        self.label = label
+        self.thin = resolve_store_hot_chains(
+            spec, system, n_temps, n_params, n_out_elements, label, log
+        )
+        self.n_temps = n_temps
+        self.n_chains = n_chains
+        self._layout = layout
+        self._keys = list(model_keys)
+        self._raw_start = raw_start
+        # The LOGICAL per-(rung, chain) cap the store site tests against;
+        # the allocation is only a starting capacity and grows in chunks the
+        # way the T=1 buffers do (review 6.4.6).
+        self.cap = max(1, draws // self.thin) if self.thin else 0
+        if self.thin:
+            cap0 = min(self.cap, hot_draw_chunk(n_temps - 1))
+            self.raw = {
+                k: np.zeros((n_temps - 1, n_chains, cap0) + raw_start[k].shape)
+                for k in self._keys
+            }
+            self.lp = np.full((n_temps - 1, n_chains, cap0), np.nan)
+            self.n_stored = np.zeros((n_temps - 1, n_chains), dtype=int)
+        else:
+            self.raw = self.lp = self.n_stored = None
+
+    @property
+    def enabled(self):
+        return bool(self.thin)
+
+    def maybe_store(self, rung, chain, state, lp, counter):
+        """Store one hot draw if `counter` lands on the thinning stride.
+
+        ``rung`` is the LADDER index, so rung 0 (T=1) is never stored here --
+        that is the cold group's job.  ``lp`` must be the UNtempered logp, so
+        hot values stay directly comparable to T=1; tempering belongs to the
+        acceptance rule, not to what is recorded.  Returns whether a draw
+        was written, which is what a test can assert on.
+        """
+        if not self.thin or rung < 1:
+            return False
+        if counter % self.thin:
+            return False
+        j = rung - 1
+        d = int(self.n_stored[j, chain])
+        if d >= self.cap:
+            return False
+        self.lp = grow_hot_draw_storage(self.raw, self.lp, d + 1)
+        self._layout.store_draw(self.raw, state, j, chain, d)
+        self.lp[j, chain, d] = lp
+        self.n_stored[j, chain] = d + 1
+        return True
+
+    def attach(self, idata, temperatures, log):
+        """Add the ``posterior_hot`` group to a built InferenceData."""
+        if not self.thin:
+            return idata
+        import xarray as xr
+
+        # Rectangular cut at the shortest hot chain (rungs run at slightly
+        # different speeds); rungs x chains flatten into one 'chain' dim
+        # with a per-chain temperature coordinate, which round-trips
+        # through netcdf.
+        n_hot = int(self.n_stored.min())
+        if n_hot <= 0:
+            log.warning(
+                f"{self.label}: store_hot_chains was set but no hot draws "
+                f"accumulated (draws too small for the thinning factor?)"
+            )
+            return idata
+        n_hot_chains = (self.n_temps - 1) * self.n_chains
+        data_vars = {}
+        for key in self._keys:
+            arr = self.raw[key][:, :, :n_hot].reshape(
+                (n_hot_chains, n_hot) + self._raw_start[key].shape
+            )
+            dims = ("chain", "draw") + tuple(
+                f"{key}_dim_{j}" for j in range(arr.ndim - 2)
+            )
+            data_vars[str(key)] = (dims, arr)
+        data_vars["lp"] = (
+            ("chain", "draw"),
+            self.lp[:, :, :n_hot].reshape(n_hot_chains, n_hot),
+        )
+        idata["posterior_hot"] = xr.Dataset(
+            data_vars,
+            coords={
+                "chain": np.arange(n_hot_chains),
+                "draw": np.arange(n_hot),
+                "temperature": (
+                    "chain",
+                    np.repeat(np.asarray(temperatures[1:]), self.n_chains),
+                ),
+            },
+        )
+        log.info(
+            f"{self.label}: stored {n_hot} thinned hot draws/chain from "
+            f"{self.n_temps - 1} rungs x {self.n_chains} chains "
+            f"(store_hot_chains={self.spec}, thin={self.thin})"
+        )
+        return idata
+
+
 def stamp_and_log_run_summary(
     idata,
     label,

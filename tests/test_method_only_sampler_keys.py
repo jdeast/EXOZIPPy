@@ -1,9 +1,18 @@
 """Review 2.4.2 / 2.3.6: a sampler key some method ignores must not be silent.
 
 2.4.2 landed the mechanism for the three keys it had traced:
-`store_hot_chains` is forwarded only to ptde_async and `rung_thin_factor` /
+`store_hot_chains` was forwarded only to ptde_async and `rung_thin_factor` /
 `rung_thin_start` only to ptde, but all three are in KNOWN_SAMPLER_KEYS -- so
 warn_unknown_sampler_keys says nothing and the feature simply never runs.
+
+`store_hot_chains` is no longer one of them: both PTDE loops now share
+samplers._common.HotChainRecorder, so the key is honored under either method
+and has left METHOD_ONLY_SAMPLER_KEYS.  A warning mechanism is only as good as
+the table it reads, and the right fix for "this method ignores your key" is to
+stop ignoring it where the asymmetry was never meaningful -- retention has
+nothing to do with synchronous versus asynchronous dispatch.  The two that
+remain are ptde-only for a real reason: they address blocking that async
+dispatch removes outright.
 
 2.3.6 is that finding on the full list: at least a dozen more keys are read by
 exactly one branch or family.  THE HEADLINE IS `chains`, which is forwarded to
@@ -38,8 +47,7 @@ from exozippy.run import (
 @pytest.mark.parametrize(
     "key,bad_method",
     [
-        # The three 2.4.2 originals.
-        ("store_hot_chains", "ptde"),
+        # The 2.4.2 originals that are still asymmetric.
         ("rung_thin_factor", "ptde_async"),
         ("rung_thin_start", "ptde_async"),
         # 2.3.6's headline, in both spellings of the recommended default.
@@ -54,6 +62,9 @@ from exozippy.run import (
         ("de_mode_hop", "nuts"),
         ("eval_timeout", "nuts"),
         ("swap_schedule", "nuts"),
+        # PTDE-family, not async-only: honored by both PTDE loops (see the
+        # good-method table below) and ignored by a sampler with no ladder.
+        ("store_hot_chains", "nuts"),
         ("collect_rung_timing", "nuts"),
         # nested-only knobs under the default sampler.
         ("nested_backend", "nuts"),
@@ -90,6 +101,7 @@ def test_a_key_the_chosen_method_ignores_is_reported(key, bad_method, caplog):
     "key,good_method",
     [
         ("store_hot_chains", "ptde_async"),
+        ("store_hot_chains", "ptde"),
         ("rung_thin_factor", "ptde"),
         # `chains` under every method that really forwards it.
         ("chains", "nuts"),

@@ -163,7 +163,9 @@ invisible if you only grep for `_common`:
   population (`resolve_n_chains`, `resolve_start_population`,
   `_make_starts`, `plot_start_ensemble`), the gamma rule (`next_gamma`),
   the stop handlers, `LpPlausibilityGuard`, the draw buffers
-  (`grow_draw_storage` and its hot sibling `grow_hot_draw_storage`), and
+  (`grow_draw_storage` and its hot sibling `grow_hot_draw_storage`), the
+  hot-rung retention (`HotChainRecorder`), the validation of the knobs
+  run.py forwards to both (`validate_shared_ptde_args`), and
   the output (`assemble_inference_data`, `stamp_and_log_run_summary`).
 - **`ptde.py` itself** owns nine statistical helpers that `ptde_async`
   imports from it directly: `_geometric_ladder`, `resolve_n_temps`,
@@ -178,9 +180,25 @@ enforcement (sync blocks on a batch `_map_logp_timeout`, async scans
 in-flight submissions on a wall clock), the ladder- and gamma-adaptation
 windows (sync gets its window free from `log_every`; async has to count
 proposals and freeze gamma when the first chain starts recording), the
-progress line, and the hot-rung storage, which is async-only. Folding those
-into one function would mean re-deriving the asynchrony ptde_async exists
-for -- do not try.
+progress line. Folding those into one function would mean re-deriving the
+asynchrony ptde_async exists for -- do not try.
+
+**The hot-rung storage used to be on that list, and it did not belong
+there.** `store_hot_chains` was honored by `ptde_async` and IGNORED WITH A
+WARNING by `ptde`, so a `method: ptde` fit had no suppressed-mode detector at
+all -- `outputs.ledger.discover_hot_modes` had nothing to read -- and a
+sync-vs-async comparison was unequal in a way that had nothing to do with
+scheduling. Nothing about retaining a thinned copy of the hot rungs depends
+on how proposals are dispatched. `_common.HotChainRecorder` now owns the
+buffers, the store predicate and the `posterior_hot` assembly, and BOTH loops
+call it; the key left `run.py`'s `METHOD_ONLY_SAMPLER_KEYS` asymmetry entry
+and is classified as a PTDE-family key, since a ladderless sampler still
+ignores it. What legitimately differs at the two call sites is one thing:
+WHICH COUNTER THINS -- each chain's own iteration count for async, whose
+chains advance independently, and the draw index for sync, which is
+step-synchronous. That difference IS the asynchrony; the rest was not.
+`tests/test_ptde.py::test_both_samplers_store_the_hot_rungs_they_were_asked_for`
+is parametrized over both.
 
 **The rule, which is what review 6.4.6 is about.** 6.4.5 stopped the T=1
 draw buffers being preallocated at the full configured `draws` -- ~1.6 GB of
@@ -203,10 +221,16 @@ sync's has not), and the stop/abort wording. None is a bug today; all four
 are two copies of one intention.
 
 **6.4.6 is not the only instance, which is the point.** Reviews 1.4.3 and
-2.4.16 are the same shape in the argument surface rather than the storage:
-`de_mode_hop` is validated in `ptde_async_sample` (it raises outside
+2.4.16 were the same shape in the argument surface rather than the storage:
+`de_mode_hop` was validated in `ptde_async_sample` (it raises outside
 `[0, 1)`) and NOT in `ptde_sample`, while `run.py` feeds the identical
-config value to both. So the useful question is never "is this knob
+config value to both -- so `de_mode_hop: 1.5` raised under one method and
+was accepted as a probability above 1 under the other, in a sampler that
+reads it as one. FIXED: both now call `_common.validate_shared_ptde_args`,
+which also absorbed the `swap_schedule` check that had been two copies of
+one `if`, and
+`tests/test_ptde.py::test_both_samplers_reject_the_same_bad_shared_knob` is
+parametrized over both samplers and both knobs. So the useful question is never "is this knob
 validated" -- it is **"which shared knobs does exactly one of the two
 samplers validate, and which shared buffers does exactly one of them
 manage?"** Ask it of anything `run.py` forwards to both.
