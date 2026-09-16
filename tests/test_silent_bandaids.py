@@ -275,7 +275,7 @@ def test_ladder_health_ignores_never_proposed_pairs(caplog):
     """
     # ARRANGE -- 3 pairs; the middle one has zero proposals, the two
     # measured ones reject 20% of the time.
-    from exozippy.samplers.ptde import ladder_health_report
+    from exozippy.samplers.ladder import ladder_health_report
 
     temperatures = [1.0, 2.0, 4.0, 8.0]
     n_swap_propose = np.array([100.0, 0.0, 100.0])

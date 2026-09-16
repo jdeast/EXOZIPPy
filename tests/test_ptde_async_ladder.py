@@ -18,7 +18,7 @@ import logging
 import numpy as np
 import pytest
 
-from exozippy.samplers.ptde import _update_ladder_barrier
+from exozippy.samplers.ladder import _update_ladder_barrier
 
 
 def test_respacing_moves_rungs_toward_the_high_barrier_region():

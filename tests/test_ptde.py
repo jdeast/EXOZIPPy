@@ -20,10 +20,10 @@ from exozippy.samplers._common import (
     start_spread_ratios,
     warn_if_starts_underdispersed,
 )
+from exozippy.samplers.ladder import _geometric_ladder
 from exozippy.samplers.ptde import (
     _PROBE_FLAT_SCALE,
     _active_rungs,
-    _geometric_ladder,
     _make_starts,
     _probe_scales,
     _probe_step_1d,
@@ -1508,7 +1508,7 @@ def test_resolve_n_temps_auto_scales_with_dimension():
       adjacent-rung energy-overlap rule -- and an explicit integer passes
       through untouched.
     """
-    from exozippy.samplers.ptde import resolve_n_temps
+    from exozippy.samplers.ladder import resolve_n_temps
 
     assert resolve_n_temps("auto", 5, 200.0) == 9
     assert resolve_n_temps("auto", 27, 200.0) == 20
@@ -1531,7 +1531,7 @@ def test_ladder_health_report_warns_only_when_communication_limited(caplog):
     """
     import logging
 
-    from exozippy.samplers.ptde import ladder_health_report
+    from exozippy.samplers.ladder import ladder_health_report
 
     temps = _geometric_ladder(8, 200.0)
 
@@ -1585,7 +1585,12 @@ def test_the_wrap_up_barrier_measures_the_draw_phase_only(monkeypatch):
         seen["propose"] = np.array(n_swap_propose, dtype=float)
         seen["accept"] = np.array(n_swap_accept, dtype=float)
 
-    monkeypatch.setattr("exozippy.samplers.ptde.ladder_health_report", _spy)
+    # PATCH WHERE IT IS CALLED FROM, which is now the shared wrap-up
+    # (_common.finish_ptde_run) rather than each sampler's own epilogue.  The
+    # claim under test is unchanged -- which swap counters reach the report --
+    # but the lookup goes through the ladder module, so that is what a spy
+    # has to replace.
+    monkeypatch.setattr("exozippy.samplers.ladder.ladder_health_report", _spy)
 
     # ACT
     ptde_sample(
@@ -1699,7 +1704,7 @@ def test_unmeasured_swap_pair_does_not_inflate_the_barrier():
     """
     # ARRANGE: pairs 0 and 2 measured at 20% rejection; pairs 1 and 3 never
     # proposed.
-    from exozippy.samplers.ptde import _update_ladder_barrier
+    from exozippy.samplers.ladder import _update_ladder_barrier
 
     temps = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
     accept = np.array([8.0, 0.0, 8.0, 0.0])
@@ -1723,7 +1728,7 @@ def test_unmeasured_pair_is_interpolated_from_its_measured_neighbours():
       stays honest.
     """
     # ARRANGE
-    from exozippy.samplers.ptde import _update_ladder_barrier
+    from exozippy.samplers.ladder import _update_ladder_barrier
 
     temps = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
     # measured: pair0 r=0.1, pair2 r=0.5 -> pair1 should read r=0.3, and
@@ -1751,7 +1756,7 @@ def test_ladder_update_is_a_noop_when_nothing_was_proposed():
     Then the ladder is returned unchanged rather than re-spaced against
       four fabricated full-rejection links.
     """
-    from exozippy.samplers.ptde import _update_ladder_barrier
+    from exozippy.samplers.ladder import _update_ladder_barrier
 
     temps = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
     zeros = np.zeros(4)
