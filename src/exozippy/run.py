@@ -84,6 +84,7 @@ KNOWN_SAMPLER_KEYS = {
     "seed_polish",
     "seed",
     "store_hot_chains",
+    "de_partner_snapshot",
     "start_dispersion",
 }
 
@@ -380,6 +381,10 @@ METHOD_ONLY_SAMPLER_KEYS = {
     # ... and the documented asymmetry that IS real.  These two address the
     # blocking that async dispatch removes outright, so there is nothing for
     # ptde_async to honor.
+    # ptde_async-only for a real reason, the mirror image of
+    # rung_thin_factor's: ptde's population is synchronized by construction,
+    # so there is no archive to take a snapshot OF.  See review 2.4.20.
+    "de_partner_snapshot": ("ptde_async",),
     "rung_thin_factor": ("ptde",),
     "rung_thin_start": ("ptde",),
 }
@@ -791,6 +796,9 @@ def _run_fit(config, gui, user_params=None):
     # its trace-size cost.  Passed through unresolved on purpose: the
     # component list does not exist yet at this point in run_fit.
     store_hot_chains = sampler_cfg.get("store_hot_chains", "auto")
+    # Default ON: it is a correctness fix (2.4.20), not a tuning knob.  The
+    # key exists so the old behaviour stays reachable for a head-to-head.
+    de_partner_snapshot = bool(sampler_cfg.get("de_partner_snapshot", True))
     rung_thin_factor = int(sampler_cfg.get("rung_thin_factor", 1))
     _rung_thin_start_raw = sampler_cfg.get("rung_thin_start", None)
     rung_thin_start = (
@@ -1165,6 +1173,7 @@ def _run_fit(config, gui, user_params=None):
                     draws,
                     tune,
                     seed=seed,
+                    de_partner_snapshot=de_partner_snapshot,
                     store_hot_chains=store_hot_chains,
                     n_temps=n_temps,
                     T_max=T_max,

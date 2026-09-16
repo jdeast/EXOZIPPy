@@ -1141,6 +1141,67 @@ def test_both_samplers_reject_the_same_bad_shared_knob(sampler, bad):
     assert list(bad)[0] in str(exc.value)
 
 
+def test_partners_change_the_difference_vector_but_not_the_base_or_the_stream():
+    """
+    Given a packed population and a separate partner archive,
+    When propose() is called with partners=,
+    Then the base is still pop[i], the difference comes from the archive,
+    And passing partners=pop reproduces the no-partners call BIT FOR BIT.
+
+    This is the mechanical half of review 2.4.20.  ptde_async draws DE
+    partners from whatever states are visible, and visibility is weighted by
+    evaluation speed, which correlates with position -- so the kernel
+    depends on the proposing chain's own cost and the plain Metropolis ratio
+    does not correct for it.  The fix hands propose() a snapshot archive.
+    Two properties make it safe, and both are asserted here: the BASE must
+    stay current (proposing from a stale base would be a different bug --
+    the acceptance test compares against the CURRENT lp), and the rng draw
+    sequence must not move, since tests elsewhere in this file pin the
+    proposal path as bit-identical.
+    """
+    # ARRANGE -- same construction the bit-identical test below uses
+    from exozippy.samplers._common import RawLayout
+
+    rng = np.random.default_rng(7)
+    states = [_mixed_state(rng) for _ in range(6)]
+    layout = RawLayout(states[0], list(states[0]))
+    pop = layout.pack_many(states)
+    archive = pop + 100.0  # unmistakably different states
+    i, gamma = 2, 0.5
+
+    # ACT / ASSERT -- partners=pop is exactly the old behaviour
+    a = layout.propose(np.random.default_rng(11), pop, i, gamma, jitter=0.0)
+    b = layout.propose(
+        np.random.default_rng(11), pop, i, gamma, jitter=0.0, partners=pop
+    )
+    assert np.array_equal(a, b), "partners=pop must be the identity case"
+
+    # the archive supplies the DIFFERENCE, the base stays pop[i]
+    c = layout.propose(
+        np.random.default_rng(11), pop, i, gamma, jitter=0.0, partners=archive
+    )
+    # archive = pop + const, so every difference vector is IDENTICAL to the
+    # live one -- the constant cancels -- which pins that only the
+    # difference is taken from the archive and the base is untouched.
+    assert np.allclose(c, a), (
+        "a constant-offset archive must give the same proposal: the offset "
+        "cancels in the difference and the base is pop[i], not archive[i]"
+    )
+
+    # and a genuinely different archive moves the proposal, but not the base
+    archive2 = pop[::-1].copy()
+    d = layout.propose(
+        np.random.default_rng(11), pop, i, gamma, jitter=0.0, partners=archive2
+    )
+    assert not np.allclose(d, a), "a reordered archive must change the step"
+    # and the base is STILL pop[i]: with gamma -> 0 the archive cannot
+    # matter at all, whatever it holds.
+    z = layout.propose(
+        np.random.default_rng(11), pop, i, 0.0, jitter=0.0, partners=archive2
+    )
+    assert np.allclose(z, pop[i]), "at gamma=0 the proposal must be the base"
+
+
 # ---------------------------------------------------------------------------
 # Packed populations (review 6.4.2)
 # ---------------------------------------------------------------------------

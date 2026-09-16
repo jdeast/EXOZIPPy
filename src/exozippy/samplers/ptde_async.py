@@ -118,6 +118,7 @@ def ptde_async_sample(
     collect_rung_timing=False,
     progress_callback=None,
     store_hot_chains="auto",
+    de_partner_snapshot=True,
 ):
     """
     Asynchronous Parallel Tempering + Differential Evolution sampler.
@@ -273,6 +274,32 @@ def ptde_async_sample(
     ]
     current_lp = [[None] * n_chains for _ in range(n_temps)]
     iter_count = [[0] * n_chains for _ in range(n_temps)]
+
+    # DE PARTNERS COME FROM A SNAPSHOT, NOT FROM WHATEVER IS VISIBLE NOW
+    # (review 2.4.20).  A chain here advances as fast as its likelihood
+    # evaluates, and on this Op path evaluation cost rises steeply with
+    # caustic proximity -- so a chain is slow BECAUSE of where it is, and
+    # partner states drawn "as available" are weighted toward chains in
+    # cheap regions.  That gives the proposal kernel a dependence on the
+    # proposing chain's own cost, which the plain Metropolis ratio does not
+    # correct: detailed balance breaks in a direction correlated with the
+    # physics.  Refreshing one archive per rung when the SLOWEST chain in
+    # that rung advances makes every chain propose from the SAME array, so
+    # the kernel stops knowing anything about who is asking.  This is the
+    # DEMetropolisZ construction (ter Braak & Vrugt 2008) -- difference
+    # vectors from an archive rather than from live states -- and `demcz`
+    # already ships it here.
+    # NOTE what is NOT stale: the BASE is still current_state[k][i], the
+    # point the acceptance test compares against.  Only the difference
+    # vector comes from the archive.
+    # The price is lag, and it is worst exactly where the population is not
+    # yet stationary (burn-in).  One pathologically slow chain freezes its
+    # rung's archive; that case is unbounded here by design, and a max-lag
+    # forced refresh is the obvious extension if it ever bites.
+    partner_snapshot = (
+        [pop.copy() for pop in current_state] if de_partner_snapshot else None
+    )
+    snapshot_at = [0] * n_temps
     # state_gen[k][i] counts the swaps that have replaced slot (k, i)'s
     # state. Every submission is stamped with it; a result whose stamp no
     # longer matches was proposed FROM a state that a swap has since moved
@@ -435,6 +462,7 @@ def ptde_async_sample(
             i,
             1.0 if hop else gamma_box[0],
             jitter=de_jitter,
+            partners=None if partner_snapshot is None else partner_snapshot[k],
         )
 
     def _submit(k, i):
@@ -782,6 +810,14 @@ def ptde_async_sample(
                     if k == 0:
                         lp_guard.check(i, lp)
                 iter_count[k][i] += 1
+
+                # Refresh this rung's partner archive when its SLOWEST chain
+                # advances -- one common update for every chain in the rung.
+                if partner_snapshot is not None:
+                    _rung_min = min(iter_count[k])
+                    if _rung_min > snapshot_at[k]:
+                        snapshot_at[k] = _rung_min
+                        partner_snapshot[k] = current_state[k].copy()
 
                 # Freeze gamma the moment the first T=1 chain finishes its
                 # tune phase: from here on some chain may be RECORDING, and a
