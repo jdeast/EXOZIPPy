@@ -1,5 +1,6 @@
 import numpy as np
 
+
 @staticmethod
 def _extend_window(window, values, margin):
     """``window`` widened so every finite value sits ``margin`` inside it.
@@ -18,6 +19,7 @@ def _extend_window(window, values, margin):
         hi = max(hi, float(vals.max()) + margin)
     return lo, hi
 
+
 @staticmethod
 def _padded_range(arrays, pad_frac):
     """``[min, max]`` over ``arrays``, with ``pad_frac`` breathing room.
@@ -27,9 +29,11 @@ def _padded_range(arrays, pad_frac):
     there is nothing to scale to.  A single point (zero span) is given a
     pad from its own magnitude rather than a zero-width axis.
     """
-    finite = np.concatenate(
-        [np.asarray(a, dtype=float).ravel() for a in arrays]
-    ) if arrays else np.empty(0)
+    finite = (
+        np.concatenate([np.asarray(a, dtype=float).ravel() for a in arrays])
+        if arrays
+        else np.empty(0)
+    )
     finite = finite[np.isfinite(finite)]
     if not finite.size:
         return None

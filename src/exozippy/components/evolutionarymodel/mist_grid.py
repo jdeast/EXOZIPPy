@@ -345,8 +345,7 @@ def trim_to_complete_grid(
 
     if not _check_complete_grid(df_trimmed, mass_col, feh_col):
         raise ValueError(
-            "Trimming did not result in a complete (mass, initfeh) "
-            "rectangle."
+            "Trimming did not result in a complete (mass, initfeh) rectangle."
         )
 
     return df_trimmed, {
@@ -436,7 +435,9 @@ def _first_unresolved_age_index(d_age: np.ndarray) -> int:
     return int(hits[0]) if hits.size else -1
 
 
-def _flag_from_first_unresolved_age(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
+def _flag_from_first_unresolved_age(
+    df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, int]:
     """Extend ``here_be_dragons`` over a track's whole unresolved-age tail.
 
     The grid generator flags the duplicated rows themselves, but its counter

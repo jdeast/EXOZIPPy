@@ -223,8 +223,9 @@ def write_synthetic_mist_grid(
     # citation (see models/MIST/MISTv2.5/EEPs/MISTv2.5.grid.yaml); only the
     # keys it consumes are written.
     with open(os.path.join(eep_dir, f"{model}.grid.yaml"), "w") as f:
-        f.write(f"model: {model}\ncitation: \"Dotter:2016, Choi:2016\"\n")
+        f.write(f'model: {model}\ncitation: "Dotter:2016, Choi:2016"\n')
     return mist_root
+
 
 # ---------------------------------------------------------------------------
 # Acceptance delta dump (review 3.14.20)

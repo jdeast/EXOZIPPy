@@ -35,7 +35,10 @@ from exozippy.components.evolutionarymodel.evolutionarymodel import (
 )
 from exozippy.components.evolutionarymodel.plot import MISTPlot
 from exozippy.components.relations import StellarRelation
-from exozippy.outputs.plot_helper_functions import _extend_window, _padded_range
+from exozippy.outputs.plot_helper_functions import (
+    _extend_window,
+    _padded_range,
+)
 
 KIEL_EEP_WINDOW = MISTPlot.KIEL_EEP_WINDOW
 KIEL_X_PAD_FRAC = MISTPlot.KIEL_X_PAD_FRAC
@@ -277,9 +280,7 @@ def test_an_existing_grid_is_not_refetched(monkeypatch, tmp_path):
     assert path.name == "afe_p0_vvcrit0.0.grid.parquet"
 
 
-def test_an_explicit_model_root_is_never_auto_populated(
-    monkeypatch, tmp_path
-):
+def test_an_explicit_model_root_is_never_auto_populated(monkeypatch, tmp_path):
     """
     Given a user pointing `model_root:` at a tree of their own,
     When the grid is not there,
@@ -311,10 +312,10 @@ def test_an_unpublished_model_release_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(mist_grid, "DEFAULT_MODEL_ROOT", tmp_path / "models")
 
     # Act / Assert
-    with pytest.raises(FileNotFoundError, match="only 'MISTv2.5' is published"):
-        mist_grid._resolve_grid_file(
-            "MISTv1.2", 0.0, 0.0, tmp_path / "models"
-        )
+    with pytest.raises(
+        FileNotFoundError, match="only 'MISTv2.5' is published"
+    ):
+        mist_grid._resolve_grid_file("MISTv1.2", 0.0, 0.0, tmp_path / "models")
 
 
 def test_the_v25_filename_is_not_reimplemented_here():
@@ -457,7 +458,7 @@ def test_the_flag_is_extended_across_the_generators_zero_window():
     assert out["here_be_dragons"].tolist() == [0, 0, 1, 2, 3, 4, 5]
     assert raised == 2  # the zero-window row, and the resumed count
     flags = out["here_be_dragons"].to_numpy()
-    tail = flags[np.flatnonzero(flags)[0]:]
+    tail = flags[np.flatnonzero(flags)[0] :]
     assert np.all(np.diff(tail) >= 0)
 
 
@@ -568,10 +569,14 @@ def test_eeps_past_the_supported_maximum_are_dropped():
     axis into the TPAGB regime this component does not model.
     """
     # Arrange
-    eeps = (mist_grid.MAX_VALID_EEP - 1, mist_grid.MAX_VALID_EEP,
-            mist_grid.MAX_VALID_EEP + 1)
-    df = _track_table([(1.0, 0.0), (1.0, 0.5), (2.0, 0.0), (2.0, 0.5)],
-                      eeps=eeps)
+    eeps = (
+        mist_grid.MAX_VALID_EEP - 1,
+        mist_grid.MAX_VALID_EEP,
+        mist_grid.MAX_VALID_EEP + 1,
+    )
+    df = _track_table(
+        [(1.0, 0.0), (1.0, 0.5), (2.0, 0.0), (2.0, 0.5)], eeps=eeps
+    )
 
     # Act
     grid = mist_grid._assemble_grid(df)
@@ -772,8 +777,9 @@ def test_the_component_ships_no_defaults_yaml():
     initfeh/eep block from.
     """
     # Arrange
-    import exozippy.components.evolutionarymodel as pkg
     from pathlib import Path
+
+    import exozippy.components.evolutionarymodel as pkg
 
     # Act
     here = Path(pkg.__file__).parent
@@ -793,7 +799,9 @@ def test_constrain_parsing_is_the_shared_mixin_implementation():
     comp = EvolutionaryModel([{"star": "A"}], None)
 
     # Assert
-    assert EvolutionaryModel._parse_constrain is StellarRelation._parse_constrain
+    assert (
+        EvolutionaryModel._parse_constrain is StellarRelation._parse_constrain
+    )
     assert comp.constrainable == CONSTRAINABLE
     assert comp._parse_constrain("A", None) == set(CONSTRAINABLE)
     assert comp._parse_constrain("A", "teff") == {"teff"}
@@ -1378,9 +1386,7 @@ def test_the_kiel_diagram_declares_what_moves_it(built):
     spec = _kiel_spec(system)
 
     # Assert
-    assert {"star.logmass", "star.initfeh", "star.eep"} <= set(
-        spec.param_deps
-    )
+    assert {"star.logmass", "star.initfeh", "star.eep"} <= set(spec.param_deps)
 
 
 def test_the_track_stops_where_the_models_stop_being_trustworthy():
@@ -1407,7 +1413,9 @@ def test_the_track_stops_where_the_models_stop_being_trustworthy():
 
     # Act -- an EEP window wide enough to keep every synthetic row, so the
     # dragon cut is the only thing under test here.
-    teff, logg = MISTPlot(stub_system, [])._track_curve(0, 0.0, 0.0, (0.0, 1.0e4))
+    teff, logg = MISTPlot(stub_system, [])._track_curve(
+        0, 0.0, 0.0, (0.0, 1.0e4)
+    )
 
     # Assert
     assert teff.size == 2  # EEP 1 and 2 only
@@ -1494,7 +1502,9 @@ def test_the_drawn_track_is_restricted_to_the_requested_eeps(model_root):
 
     # Act
     kept = MISTPlot(_system, [])._track_curve(0, 0.0, 0.0, KIEL_EEP_WINDOW)[0]
-    everything = MISTPlot(_system, [])._track_curve(0, 0.0, 0.0, (0.0, 1.0e4))[0]
+    everything = MISTPlot(_system, [])._track_curve(0, 0.0, 0.0, (0.0, 1.0e4))[
+        0
+    ]
 
     # Assert
     assert kept.size == 3
@@ -1643,9 +1653,11 @@ def test_without_a_posterior_the_marks_fall_back_to_the_drawn_point(built):
 
     # Act
     kiel = np.atleast_2d(
-        comp._compiled_kiel(*comp._point_to_plot_params(
-            {p.label: p.initval for p in system.plot_params}, system
-        ))
+        comp._compiled_kiel(
+            *comp._point_to_plot_params(
+                {p.label: p.initval for p in system.plot_params}, system
+            )
+        )
     )
     spec = _kiel_spec(system)
 
@@ -1664,10 +1676,7 @@ def test_an_empty_set_of_values_leaves_the_axis_to_autoscale():
     """
     # Act / Assert
     assert _padded_range([], 0.05) is None
-    assert (
-        _padded_range([np.array([np.nan, np.inf])], 0.05)
-        is None
-    )
+    assert _padded_range([np.array([np.nan, np.inf])], 0.05) is None
 
 
 def test_a_single_point_still_gets_a_nonzero_axis_span():

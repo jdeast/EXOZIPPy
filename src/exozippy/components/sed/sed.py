@@ -600,7 +600,9 @@ class SED(Component):
         if self.sedfile is None:
             raise ValueError(f"sed is missing the required 'file' key")
 
-        model_yaml_file = f"{self.model_root}/{self.sedmodel}/BCs/{self.sedmodel}.grid.yaml"
+        model_yaml_file = (
+            f"{self.model_root}/{self.sedmodel}/BCs/{self.sedmodel}.grid.yaml"
+        )
         with open(model_yaml_file, "r") as f:
             self._model_yaml = yaml.safe_load(f)
 
@@ -1347,8 +1349,16 @@ class SED(Component):
                 linestyle="None",
                 zorder=3,
             )
-            ax_top.scatter(x[p], y[p], color=color, marker=marker, edgecolors=edgecolor, 
-                           s=85, linewidths=1.5, zorder=3)
+            ax_top.scatter(
+                x[p],
+                y[p],
+                color=color,
+                marker=marker,
+                edgecolors=edgecolor,
+                s=85,
+                linewidths=1.5,
+                zorder=3,
+            )
 
         # ---- residuals: one per filter ROW (the actual measurement),  ----
         # ---- against its combined (blend/diff) prediction              ----
@@ -1408,7 +1418,7 @@ class SED(Component):
                     marker=id_marker[name],
                     markerfacecolor=id_color[name],
                     markeredgecolor="#FFFFFF",
-                    markeredgewidth = 1.5,
+                    markeredgewidth=1.5,
                     markersize=8,
                     alpha=1.0,
                 )
@@ -1739,13 +1749,13 @@ class SED(Component):
                 key=f"{self.prefix}.sed_model",
                 rank=20.0,
             )
-        
+
         prose.add(
             "When modeling an SED, we include two additional sampled parameters for each star: "
-            r"$R_{\star, \rm SED}$ and $T_{\rm eff, SED}$, which are the stellar radius and effective " 
+            r"$R_{\star, \rm SED}$ and $T_{\rm eff, SED}$, which are the stellar radius and effective "
             "temperature as inferred from the SED. These parameters are linked to the primary stellar parameters via "
             "a Gaussian penalty whose width is set by an estimation of the systematic uncertainty in measurements of "
-            r"effective temperature and bolometric flux, which is calculated using $R_{\star, \rm SED}$, from the SED. " 
+            r"effective temperature and bolometric flux, which is calculated using $R_{\star, \rm SED}$, from the SED. "
             "By default, these systematic uncertainties are set to 0.02 and 0.024 for "
             r"$\sigma_{T_{\rm eff, sys}}$ and $\sigma_{F_{\rm Bol, sys}}$, respectively."
             "We also allow for the possibility that the reported errors on the photometric measurements are "
@@ -1754,7 +1764,7 @@ class SED(Component):
             key=f"{self.prefix}.floor",
             rank=21.0,
         )
-        
+
         prose.add(
             "Because EEP is not uniformly distributed in time, we added the "
             r"$\log|{\rm d}\,{\rm Age}/{\rm d}\,{\rm EEP}|$ Jacobian to the "

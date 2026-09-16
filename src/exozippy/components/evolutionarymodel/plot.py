@@ -1,18 +1,27 @@
 # general imports
 import logging
+
 logger = logging.getLogger(__name__)
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+
+from exozippy.outputs.contour_plot import Contour, plot_contours
 
 # exozippy local imports
-from exozippy.outputs.plot_helper_functions import _extend_window, _padded_range
-from exozippy.plotrender import _draw_data, _draw_model, _draw_residual, _apply_axes
-from exozippy.outputs.contour_plot import Contour, plot_contours
+from exozippy.outputs.plot_helper_functions import (
+    _extend_window,
+    _padded_range,
+)
+from exozippy.plotrender import (
+    _apply_axes,
+    _draw_data,
+    _draw_model,
+    _draw_residual,
+)
 
 
 class MISTPlot:
-
     # The EEP window the seed search and the Kiel diagram treat as "the part of a
     # track a reader of this chart came for": 202 is MIST's zero-age main sequence
     # and 630 is well up the red giant branch.  It is a PLOTTING/SEEDING window,
@@ -64,15 +73,18 @@ class MISTPlot:
         # general information
         self.system = system
         self.points = points
-        self.evolutionarymodel = self.system.active_components["evolutionarymodel"]
+        self.evolutionarymodel = self.system.active_components[
+            "evolutionarymodel"
+        ]
         self._plot_x_range = {
             "start": None,
             "post": None,
-            }
+        }
         # Parameter.posterior is None until System.distribute_posterior attaches
         # the chain (an xarray DataArray); no posterior means this is the start.
-        self._posteriorBool = getattr(self.system.star.teff, "posterior", None) is not None
-
+        self._posteriorBool = (
+            getattr(self.system.star.teff, "posterior", None) is not None
+        )
 
     def _reported_kiel(self):
         """The Kiel quantities at the REPORTED (posterior-median) parameters.
@@ -105,24 +117,27 @@ class MISTPlot:
 
         point = {}
         for param in getattr(self.system, "plot_params", []):
-                post = getattr(param, "posterior", None)
-                if post is None:
-                    continue
-                # nanmedian over the sample axis (last) is exactly the median
-                # compute_summary reports, without requiring it to have run --
-                # param.summary is None until it does, and falling back to the
-                # raw posterior there handed every draw in as the "median".
-                arr = np.asarray(getattr(post, "values", post), dtype=float)
-                point[param.label] = param.to_internal(np.nanmedian(arr, axis=-1))
+            post = getattr(param, "posterior", None)
+            if post is None:
+                continue
+            # nanmedian over the sample axis (last) is exactly the median
+            # compute_summary reports, without requiring it to have run --
+            # param.summary is None until it does, and falling back to the
+            # raw posterior there handed every draw in as the "median".
+            arr = np.asarray(getattr(post, "values", post), dtype=float)
+            point[param.label] = param.to_internal(np.nanmedian(arr, axis=-1))
 
         if not point:
             return None
 
         self.evolutionarymodel._reported_kiel_cache = np.atleast_2d(
-            self.evolutionarymodel._compiled_kiel(*self.evolutionarymodel._point_to_plot_params(point, self.system))
+            self.evolutionarymodel._compiled_kiel(
+                *self.evolutionarymodel._point_to_plot_params(
+                    point, self.system
+                )
+            )
         )
         return self.evolutionarymodel._reported_kiel_cache
-
 
     def _track_curve(self, i, logmass, initfeh, eep_window):
         """(teff, logg) along instance ``i``'s track, over ``eep_window``.
@@ -145,6 +160,7 @@ class MISTPlot:
         curve had already been cut away.
         """
         from exozippy.constants import LOGG_CONST
+
         from .mist_grid import OUTPUT_INDEX, interpolate_track
 
         grid = self.evolutionarymodel._grids[i]
@@ -156,8 +172,10 @@ class MISTPlot:
         eep = np.asarray(grid["eep_pts"], dtype=float)
         teff = track[:, OUTPUT_INDEX["teff_mist"]]
         radius = track[:, OUTPUT_INDEX["radius_mist"]]
-        logg = LOGG_CONST + logmass - 2.0 * np.log10(
-            np.where(radius > 0, radius, np.nan)
+        logg = (
+            LOGG_CONST
+            + logmass
+            - 2.0 * np.log10(np.where(radius > 0, radius, np.nan))
         )
 
         keep = (
@@ -169,7 +187,6 @@ class MISTPlot:
         )
 
         return teff[keep], logg[keep]
-
 
     def _plot_kiel_trace(self, star_idx, point=None):
         """Kiel diagram: the track, the MIST point, and the fitted point.
@@ -186,14 +203,23 @@ class MISTPlot:
         """
         from exozippy.chart import Chart, Trace
 
-        if point is None or getattr(self.evolutionarymodel, "_compiled_kiel", None) is None:
+        if (
+            point is None
+            or getattr(self.evolutionarymodel, "_compiled_kiel", None) is None
+        ):
             return []
 
         kiel = np.atleast_2d(
-            self.evolutionarymodel._compiled_kiel(*self.evolutionarymodel._point_to_plot_params(point, self.system))
+            self.evolutionarymodel._compiled_kiel(
+                *self.evolutionarymodel._point_to_plot_params(
+                    point, self.system
+                )
+            )
         )
         marks = self._reported_kiel()
-        if marks is None or not self._posteriorBool: # marks is None when there is no posterior attached
+        if (
+            marks is None or not self._posteriorBool
+        ):  # marks is None when there is no posterior attached
             marks = kiel
 
         # One y axis, so the logg window is the union over stars.  The fit
@@ -204,7 +230,9 @@ class MISTPlot:
         )
         logg_fit = np.array([marks[star_idx, self.KIEL_INDEX["logg_fit"]]])
         logg_mist = np.array([marks[star_idx, self.KIEL_INDEX["logg_mist"]]])
-        sigma_logg_mist = np.array([np.abs(marks[star_idx, self.KIEL_INDEX["sigma_logg_mist"]])])
+        sigma_logg_mist = np.array(
+            [np.abs(marks[star_idx, self.KIEL_INDEX["sigma_logg_mist"]])]
+        )
         logg_window = _extend_window(
             self.KIEL_LOGG_WINDOW,
             np.concatenate(
@@ -224,7 +252,9 @@ class MISTPlot:
         # traces are built -- see the x_range comment below.
         teff_fit = marks[star_idx, self.KIEL_INDEX["teff_fit"]]
         teff_mist = marks[star_idx, self.KIEL_INDEX["teff_mist"]]
-        sigma_teff_mist = np.abs(marks[star_idx, self.KIEL_INDEX["sigma_teff_mist"]])
+        sigma_teff_mist = np.abs(
+            marks[star_idx, self.KIEL_INDEX["sigma_teff_mist"]]
+        )
         visible_teff = [
             teff_fit,
             teff_mist - sigma_teff_mist,
@@ -236,7 +266,7 @@ class MISTPlot:
 
         star_name = self.system.star.names[star_idx]
         # grab the logmass and initfeh for the draw
-        logmass = float(kiel[star_idx, self.KIEL_INDEX["logmass"]]) 
+        logmass = float(kiel[star_idx, self.KIEL_INDEX["logmass"]])
         initfeh = float(kiel[star_idx, self.KIEL_INDEX["initfeh"]])
 
         eep = marks[star_idx, self.KIEL_INDEX["eep"]]
@@ -262,7 +292,11 @@ class MISTPlot:
                 kind="line",
                 x=teff_track,
                 y=logg_track,
-                style={"color": self.MIST_PLOT_COLORS["mist_track"], "lw": 1.0, "legend": True},
+                style={
+                    "color": self.MIST_PLOT_COLORS["mist_track"],
+                    "lw": 1.0,
+                    "legend": True,
+                },
             )
         )
         # Both marks are role="data" so the renderers draw them ONCE,
@@ -280,24 +314,48 @@ class MISTPlot:
                 kind="scatter",
                 x=np.array(teff_mist),
                 y=np.array(logg_mist),
-                xerr=np.array(sigma_teff_mist) if self._posteriorBool else None,
-                yerr=np.array(sigma_logg_mist) if self._posteriorBool else None,
+                xerr=np.array(sigma_teff_mist)
+                if self._posteriorBool
+                else None,
+                yerr=np.array(sigma_logg_mist)
+                if self._posteriorBool
+                else None,
                 node=self.evolutionarymodel._kiel_node,
-                style={"color": self.MIST_PLOT_COLORS["mist_point"], "marker": "d", "zorder": 3},
+                style={
+                    "color": self.MIST_PLOT_COLORS["mist_point"],
+                    "marker": "d",
+                    "zorder": 3,
+                },
             )
         )
-        
+
         star = self.system.star
         # grab the error bars for the fitted point
         sigma_teff_fit = [
-            [star.teff.summary.err_minus if hasattr(star.teff.summary, "err_minus") else 0.0],
-            [star.teff.summary.err_plus if hasattr(star.teff.summary, "err_plus") else 0.0],
-            ]
+            [
+                star.teff.summary.err_minus
+                if hasattr(star.teff.summary, "err_minus")
+                else 0.0
+            ],
+            [
+                star.teff.summary.err_plus
+                if hasattr(star.teff.summary, "err_plus")
+                else 0.0
+            ],
+        ]
 
         sigma_logg_fit = [
-            [star.logg.summary.err_minus if hasattr(star.logg.summary, "err_minus") else 0.0],
-            [star.logg.summary.err_plus if hasattr(star.logg.summary, "err_plus") else 0.0],
-            ]
+            [
+                star.logg.summary.err_minus
+                if hasattr(star.logg.summary, "err_minus")
+                else 0.0
+            ],
+            [
+                star.logg.summary.err_plus
+                if hasattr(star.logg.summary, "err_plus")
+                else 0.0
+            ],
+        ]
 
         traces.append(
             Trace(
@@ -308,7 +366,11 @@ class MISTPlot:
                 y=np.array(logg_fit),
                 xerr=np.array(sigma_teff_fit) if self._posteriorBool else None,
                 yerr=np.array(sigma_logg_fit) if self._posteriorBool else None,
-                style={"color": self.MIST_PLOT_COLORS["fit_point"], "marker": "o", "zorder": 4},
+                style={
+                    "color": self.MIST_PLOT_COLORS["fit_point"],
+                    "marker": "o",
+                    "zorder": 4,
+                },
             )
         )
 
@@ -320,7 +382,9 @@ class MISTPlot:
         # more than half of a HAT-P-3 panel empty.
         # only care about high and low values of teff that are finite and on the chart
         # want to keep track and update the x_range for the plot, so we can set it in the meta data
-        max_x_range = self._plot_x_range.get("post" if self._posteriorBool else "start", None)
+        max_x_range = self._plot_x_range.get(
+            "post" if self._posteriorBool else "start", None
+        )
         visible_teff_flat = np.concatenate(
             [np.asarray(t, dtype=float).ravel() for t in visible_teff]
         )
@@ -335,7 +399,9 @@ class MISTPlot:
         else:
             # set the max_x_range to the first set of values if it is None
             max_x_range = [current_x_min, current_x_max]
-        self._plot_x_range["post" if self._posteriorBool else "start"] = max_x_range
+        self._plot_x_range["post" if self._posteriorBool else "start"] = (
+            max_x_range
+        )
 
         x_range = _padded_range(max_x_range, self.KIEL_X_PAD_FRAC)
 
@@ -353,12 +419,17 @@ class MISTPlot:
             ),
         }
 
-        star_name = self.system.star.names[self.evolutionarymodel.star_indices[star_idx]]
+        star_name = self.system.star.names[
+            self.evolutionarymodel.star_indices[star_idx]
+        ]
 
         return [
             Chart(
                 id=f"{self.evolutionarymodel.prefix}.kiel.star.{star_name}",
-                component={"yaml_key": self.evolutionarymodel.yaml_key, "instance": None},
+                component={
+                    "yaml_key": self.evolutionarymodel.yaml_key,
+                    "instance": None,
+                },
                 title="MIST evolutionary tracks",
                 xlabel=r"$T_{\rm eff}$ (K)",
                 ylabel=r"$\log{g}$ (cgs)",
@@ -390,7 +461,7 @@ class MISTPlot:
         if not self.points:
             logger.warning("No points provided for plotting.")
             return []
-    
+
         spec_groups = []
         for idx, point in enumerate(self.points):
             try:
@@ -401,15 +472,21 @@ class MISTPlot:
                 logger.warning(
                     "plot_data failed for draw %d of %s: %s",
                     idx,
-                    getattr(self.evolutionarymodel, "prefix", self.evolutionarymodel),
+                    getattr(
+                        self.evolutionarymodel,
+                        "prefix",
+                        self.evolutionarymodel,
+                    ),
                     exc,
                 )
-    
+
         # Before rendering, widen every draw's x_range to the union computed
         # across all of them, so the spaghetti shares one axis.  x_range is a
         # first-class Chart field now, not a meta key (review 4.11.3).
         # Same key _plot_kiel_trace wrote to -- "start" when no posterior exists.
-        max_x_range = self._plot_x_range.get("post" if self._posteriorBool else "start")
+        max_x_range = self._plot_x_range.get(
+            "post" if self._posteriorBool else "start"
+        )
         if max_x_range is not None:
             x_range = _padded_range(max_x_range, self.KIEL_X_PAD_FRAC)
             if x_range is not None:
@@ -419,7 +496,6 @@ class MISTPlot:
                             spec.x_range = list(x_range)
 
         return spec_groups
-
 
     # almost identical to its sister function in plotrender
     # but added changes to how legend is generated
@@ -457,7 +533,9 @@ class MISTPlot:
         written = []
         for spec in ref_specs:
             meta = spec.meta or {}
-            fig, ax = plt.subplots(figsize=tuple(meta.get("figsize") or (10, 6)))
+            fig, ax = plt.subplots(
+                figsize=tuple(meta.get("figsize") or (10, 6))
+            )
             try:
                 for trace in spec.traces:
                     if trace.role == "model":
@@ -494,7 +572,9 @@ class MISTPlot:
                     # drawn on the axes, so set_alpha on those changes the
                     # plotted lines.  leg.legend_handles are the legend's own
                     # proxy copies: raising alpha there touches only the legend.
-                    for handle, label in zip(leg.legend_handles, unique.keys()):
+                    for handle, label in zip(
+                        leg.legend_handles, unique.keys()
+                    ):
                         if "track" in label:
                             handle.set_alpha(0.8)
 
@@ -508,19 +588,19 @@ class MISTPlot:
                 plt.close(fig)
         return written
 
-
     def plot_kiel_diagram(self, star_idx, filename_prefix="debug"):
 
         spec_groups_one_star = self._get_kiel_trace_spec_groups(star_idx)
         self._kiel_render_spec_groups(spec_groups_one_star, filename_prefix)
-
 
     ################## contour plot #################
     ######## will only trigger after sampling #######
 
     def _get_posterior_compiled_values(self):
 
-        ndraws = self.system.plot_params[0].posterior.values.shape[:][-1] # should take shape (nstars, ndraws)
+        ndraws = self.system.plot_params[0].posterior.values.shape[:][
+            -1
+        ]  # should take shape (nstars, ndraws)
         post_points = []
         for i in range(ndraws):
             post_point = {}
@@ -532,12 +612,18 @@ class MISTPlot:
 
             post_points.append(post_point)
 
-        values = [np.atleast_2d(
-            self.evolutionarymodel._compiled_kiel(*self.evolutionarymodel._point_to_plot_params(p, self.system))
-        ) for p in post_points]
+        values = [
+            np.atleast_2d(
+                self.evolutionarymodel._compiled_kiel(
+                    *self.evolutionarymodel._point_to_plot_params(
+                        p, self.system
+                    )
+                )
+            )
+            for p in post_points
+        ]
 
         return values
-
 
     def plot_contours(self, values, star_idx, filename_prefix="debug"):
 
@@ -548,37 +634,70 @@ class MISTPlot:
         # summary values should take the shape of (nstars,)
         # which simplifies to a shape of () when nstars=1
         # so we need make sure the resulting value grabbed is always at least 1-d
-        sigma_teff_fit = np.max([
-            np.atleast_1d(star.teff.summary.err_minus)[star_idx], 
-            np.atleast_1d(star.teff.summary.err_plus)[star_idx]
-            ])
-        sigma_logg_fit = np.max([
-            np.atleast_1d(star.logg.summary.err_minus)[star_idx], 
-            np.atleast_1d(star.logg.summary.err_plus)[star_idx]
-            ])
+        sigma_teff_fit = np.max(
+            [
+                np.atleast_1d(star.teff.summary.err_minus)[star_idx],
+                np.atleast_1d(star.teff.summary.err_plus)[star_idx],
+            ]
+        )
+        sigma_logg_fit = np.max(
+            [
+                np.atleast_1d(star.logg.summary.err_minus)[star_idx],
+                np.atleast_1d(star.logg.summary.err_plus)[star_idx],
+            ]
+        )
 
         # global fit values
-        teff_fit = np.array([v[star_idx, self.KIEL_INDEX["teff_fit"]] for v in values]).T
-        logg_fit = np.array([v[star_idx, self.KIEL_INDEX["logg_fit"]] for v in values]).T
+        teff_fit = np.array(
+            [v[star_idx, self.KIEL_INDEX["teff_fit"]] for v in values]
+        ).T
+        logg_fit = np.array(
+            [v[star_idx, self.KIEL_INDEX["logg_fit"]] for v in values]
+        ).T
 
-        fitted_contours = Contour(x=teff_fit, y=logg_fit, 
-                                x_err=sigma_teff_fit, y_err=sigma_logg_fit, 
-                                color=self.MIST_PLOT_COLORS["fit_contour"], 
-                                label="Model Parameters")
-
+        fitted_contours = Contour(
+            x=teff_fit,
+            y=logg_fit,
+            x_err=sigma_teff_fit,
+            y_err=sigma_logg_fit,
+            color=self.MIST_PLOT_COLORS["fit_contour"],
+            label="Model Parameters",
+        )
 
         # MIST model parameters
-        sigma_teff_mist = np.max(np.abs([v[star_idx, self.KIEL_INDEX["sigma_teff_mist"]] for v in values]))
-        sigma_logg_mist = np.max(np.abs([v[star_idx, self.KIEL_INDEX["sigma_logg_mist"]] for v in values]))
+        sigma_teff_mist = np.max(
+            np.abs(
+                [
+                    v[star_idx, self.KIEL_INDEX["sigma_teff_mist"]]
+                    for v in values
+                ]
+            )
+        )
+        sigma_logg_mist = np.max(
+            np.abs(
+                [
+                    v[star_idx, self.KIEL_INDEX["sigma_logg_mist"]]
+                    for v in values
+                ]
+            )
+        )
 
         # mist values
-        teff_mist = np.array([v[star_idx, self.KIEL_INDEX["teff_mist"]] for v in values]).T
-        logg_mist = np.array([v[star_idx, self.KIEL_INDEX["logg_mist"]] for v in values]).T
+        teff_mist = np.array(
+            [v[star_idx, self.KIEL_INDEX["teff_mist"]] for v in values]
+        ).T
+        logg_mist = np.array(
+            [v[star_idx, self.KIEL_INDEX["logg_mist"]] for v in values]
+        ).T
 
-        mist_contours = Contour(x=teff_mist, y=logg_mist, 
-                                x_err=sigma_teff_mist, y_err=sigma_logg_mist, 
-                                color=self.MIST_PLOT_COLORS["mist_contour"], 
-                                label="MIST Model Parameters")
+        mist_contours = Contour(
+            x=teff_mist,
+            y=logg_mist,
+            x_err=sigma_teff_mist,
+            y_err=sigma_logg_mist,
+            color=self.MIST_PLOT_COLORS["mist_contour"],
+            label="MIST Model Parameters",
+        )
 
         written = []
 
@@ -586,7 +705,7 @@ class MISTPlot:
             fig, ax = plot_contours([mist_contours, fitted_contours])
 
             fig.tight_layout()
-            id=f"{self.evolutionarymodel.prefix}.contours.star.{star_name}"
+            id = f"{self.evolutionarymodel.prefix}.contours.star.{star_name}"
             tag = id.replace(".", "_")
             path = f"{filename_prefix}_{tag}.pdf"
             fig.savefig(path)

@@ -47,9 +47,7 @@ GRID_EEP = (1.0, 807.0)
 @pytest.fixture(scope="module")
 def model_root(tmp_path_factory):
     """A tiny MIST grid, shared by every test in this module."""
-    return write_synthetic_mist_grid(
-        tmp_path_factory.mktemp("mist_models")
-    )
+    return write_synthetic_mist_grid(tmp_path_factory.mktemp("mist_models"))
 
 
 def _config(stars, evolutionary, model_root=None, blocks=None):
@@ -66,9 +64,7 @@ def _config(stars, evolutionary, model_root=None, blocks=None):
 
 def _prepared(stars, evolutionary=True, model_root=None, blocks=None):
     """A prepared System over `stars`, optionally with the component."""
-    system = System(
-        _config(stars, evolutionary, model_root, blocks), {}
-    )
+    system = System(_config(stars, evolutionary, model_root, blocks), {})
     system.prepare()
     return system
 
@@ -165,9 +161,7 @@ def test_a_star_no_block_names_has_no_structure_parameters(model_root):
     answers "is it read" (so B's radius/teff/feh are not parameters at all).
     """
     # Arrange
-    system = _prepared(
-        [{"name": "A"}, {"name": "B"}], model_root=model_root
-    )
+    system = _prepared([{"name": "A"}, {"name": "B"}], model_root=model_root)
 
     # Act
     model = system.build_model()
@@ -229,7 +223,8 @@ def test_a_backed_block_does_not_warn_that_nothing_reads_the_track(
     """
     with caplog.at_level("WARNING", logger="exozippy"):
         _prepared(
-            [{"name": "A"}, {"name": "B", "mist": False}], model_root=model_root
+            [{"name": "A"}, {"name": "B", "mist": False}],
+            model_root=model_root,
         )
 
     hits = [
@@ -347,9 +342,7 @@ def test_a_star_no_block_names_gets_its_track_parameters_pinned(model_root):
     stars = [{"name": "A"}, {"name": "B"}]
 
     # Act
-    system = _prepared(
-        stars, model_root=model_root, blocks=[{"star": "A"}]
-    )
+    system = _prepared(stars, model_root=model_root, blocks=[{"star": "A"}])
     system.build_model()
 
     # Assert

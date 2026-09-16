@@ -12,8 +12,7 @@ from exozippy.components.relations import (
     star_schema_entry,
 )
 
-from . import mist_grid
-from . import physics
+from . import mist_grid, physics
 from .mist_grid import OUTPUT_INDEX
 from .plot import MISTPlot
 
@@ -51,6 +50,7 @@ TRACK_PARAMS = ("initfeh", "eep", "age")
 # a defect of the table, so both clips act only where the table is wrong.
 DEEP_DAGE_MIN = 1e-14
 DEEP_DAGE_MAX = 1e3
+
 
 class EvolutionaryModel(StellarRelation, Component):
     """Tie a star's feh/radius/teff/age to the MIST evolutionary tracks.
@@ -212,7 +212,9 @@ class EvolutionaryModel(StellarRelation, Component):
         for i, (c, nm) in enumerate(zip(self.config, self.names)):
             star_idx = self._resolve_star(system, nm, c.get("star"))
             self.star_indices.append(star_idx)
-            self.constrain.append(self._parse_constrain(nm, c.get("constrain")))
+            self.constrain.append(
+                self._parse_constrain(nm, c.get("constrain"))
+            )
             self._check_star_opted_in(system, nm, star_idx)
 
             self.feh_floor.append(c.get("feh_floor"))  # None -> mass-dependent
@@ -244,7 +246,10 @@ class EvolutionaryModel(StellarRelation, Component):
             self.model_root = model_root
 
             import yaml
-            model_yaml_file = f"{self.model_root}/{self.model}/EEPs/{self.model}.grid.yaml"
+
+            model_yaml_file = (
+                f"{self.model_root}/{self.model}/EEPs/{self.model}.grid.yaml"
+            )
             with open(model_yaml_file, "r") as f:
                 self._model_yaml = yaml.safe_load(f)
 
@@ -411,20 +416,20 @@ class EvolutionaryModel(StellarRelation, Component):
         the unit the grid is tabulated in.
         """
 
-        # grab the star's current logmass/initfeh initvals, 
+        # grab the star's current logmass/initfeh initvals,
         # or None if either is missing or non-finite
         def start(param):
-            cfg = self.config_manager.resolve(
-                "star", param, element=star_idx
-            )
+            cfg = self.config_manager.resolve("star", param, element=star_idx)
             val = cfg.get("initval")
             return None if val is None else float(np.atleast_1d(val)[0])
 
         logmass0 = start("logmass")
         initfeh0 = start("initfeh")
-        if logmass0 is None or initfeh0 is None or not np.isfinite(
-            [logmass0, initfeh0]
-        ).all():
+        if (
+            logmass0 is None
+            or initfeh0 is None
+            or not np.isfinite([logmass0, initfeh0]).all()
+        ):
             return
 
         # Bilinear in (logmass, initfeh) rather than snapped to the nearest
@@ -437,8 +442,8 @@ class EvolutionaryModel(StellarRelation, Component):
         # The same mass-dependent floor build_likelihood uses, in numpy and
         # straight from log10(mass) -- see physics.percent_error_from_logmass.
         percent = float(physics.percent_error_from_logmass(logmass0))
-        # keys should correspond to CONSTRAINABLE, but the dicts are keyed on the string 
-        # literals used in the config, not the CONSTRAINABLE tuple, so that the dicts 
+        # keys should correspond to CONSTRAINABLE, but the dicts are keyed on the string
+        # literals used in the config, not the CONSTRAINABLE tuple, so that the dicts
         # can be indexed by `which` in the loop below.
         observed = {
             "feh": start("feh"),
@@ -466,14 +471,18 @@ class EvolutionaryModel(StellarRelation, Component):
                 if obs is None or not np.isfinite(obs):
                     continue
                 pred = track[:, OUTPUT_INDEX[columns[which]]]
-                frac = percent if floors[which] is None else float(floors[which])
+                frac = (
+                    percent if floors[which] is None else float(floors[which])
+                )
                 # feh's floor is absolute dex; the others scale the prediction (see physics.py)
                 sigma = frac if which == "feh" else frac * np.abs(pred)
                 chi2 += np.nan_to_num(
                     ((obs - pred) / sigma) ** 2, nan=np.inf, posinf=np.inf
                 )
-        chi2 += 2.0 * self.dragon_penalty_weight[i] * np.maximum(
-            track[:, OUTPUT_INDEX["here_be_dragons"]], 0.0
+        chi2 += (
+            2.0
+            * self.dragon_penalty_weight[i]
+            * np.maximum(track[:, OUTPUT_INDEX["here_be_dragons"]], 0.0)
         )
         # Penalize pre-main-sequence rows so the seed lands on the main
         # sequence.  The EEP axis is NOT one of the interpolator's output
@@ -482,7 +491,8 @@ class EvolutionaryModel(StellarRelation, Component):
         # grid["eep_pts"], which interpolate_track leaves untouched and so is
         # row-aligned with `track` by construction.
         chi2 += np.where(
-            np.asarray(grid["eep_pts"], dtype=float) < MISTPlot.KIEL_EEP_WINDOW[0],
+            np.asarray(grid["eep_pts"], dtype=float)
+            < MISTPlot.KIEL_EEP_WINDOW[0],
             30.0,
             0.0,
         )
@@ -691,9 +701,7 @@ class EvolutionaryModel(StellarRelation, Component):
         # see DEEP_DAGE_MIN/MAX at the top of this module for why a bare
         # floor here would be an unbounded reward rather than a safety rail.
         jacobian_logp = -pt.sum(
-            pt.log(
-                pt.clip(pt.abs(deep_dage), DEEP_DAGE_MIN, DEEP_DAGE_MAX)
-            )
+            pt.log(pt.clip(pt.abs(deep_dage), DEEP_DAGE_MIN, DEEP_DAGE_MAX))
         )
         pm.Potential(f"{self.prefix}.eep_age_jacobian", jacobian_logp)
 
@@ -856,17 +864,19 @@ class EvolutionaryModel(StellarRelation, Component):
             )
             self._compiled_kiel = None
 
-
     def plot(self, system, points, filename_prefix="debug"):
-    
+
         #  loop over stars -- one plot per star
         for star_idx in range(self.n_elements):
             mist_plot_obj = MISTPlot(system, points)
-            mist_plot_obj.plot_kiel_diagram(star_idx, filename_prefix=filename_prefix)
+            mist_plot_obj.plot_kiel_diagram(
+                star_idx, filename_prefix=filename_prefix
+            )
             if mist_plot_obj._posteriorBool:
                 values = mist_plot_obj._get_posterior_compiled_values()
-                mist_plot_obj.plot_contours(values, star_idx, filename_prefix=filename_prefix)
-        
+                mist_plot_obj.plot_contours(
+                    values, star_idx, filename_prefix=filename_prefix
+                )
 
     def _add_prose(self, system):
         """Declare the modeling-draft sentences next to the terms they describe.
@@ -903,7 +913,7 @@ class EvolutionaryModel(StellarRelation, Component):
             r"\begin{equation} "
             r"\sigma_{\rm MIST} = 0.03 - 0.025 \log{M_\star} + 0.045(\log{M_\star})^2"
             r"\end{equation} "
-            r"This equation results in fractional errors of about 10% at 0.1 $M_\\odot$, " 
+            r"This equation results in fractional errors of about 10% at 0.1 $M_\\odot$, "
             r"3% at 1 $M_\\odot$, and 5% at 10 $M_\\odot$"
             f"Thus, the fitted values for the {noun} are required to "
             "agree with the tracks only to within the models' own accuracy. ",
