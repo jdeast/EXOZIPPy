@@ -4,18 +4,24 @@ band.W149.u1:
 band.Z087.u1:
   initval: 0.0
   sigma: 0
+mulensinstrument.Roman_W149.err_scale:
+  lower: 0.5
+  upper: 2.0
 mulensinstrument.Roman_W149.out_scale:
   initval: 0.03648342547543739
   upper: 0.3648342547543739
 mulensinstrument.Roman_W149.zeropoint:
   mu: 22.0
-  sigma: 0.02
+  sigma: 0.1471530431900201
+mulensinstrument.Roman_Z087.err_scale:
+  lower: 0.5
+  upper: 2.0
 mulensinstrument.Roman_Z087.out_scale:
   initval: 0.00899566754516522
   upper: 0.0899566754516522
 mulensinstrument.Roman_Z087.zeropoint:
   mu: 22.0
-  sigma: 0.02
+  sigma: 0.1471530431900201
 planet.Companion.radius:
   sigma: 0
 sed.errscale:
@@ -31,5 +37,5 @@ star.Lens.ra:
   initval: 267.673
   sigma: 0
 star.Source.av:
-  mu: 1.1
-  sigma: 0.02
+  mu: 3.696849684968496
+  sigma: 0.2321912792784754
