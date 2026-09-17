@@ -809,6 +809,45 @@ candidate and so could not fail visibly: on event 128 it printed a 2034-sigma `a
 while the fitted `alpha` (307.686) sat 0.3 degrees from the light curve's own optimum
 (308.0).
 
+### C29 -- a BAND extinction is not a number until you say which convention
+
+`A_W149 = 2.75` is not, by itself, a quantity that can be compared to ours. There are two
+inequivalent things it can mean, and for a filter as wide as Roman's W149 (`F146`, spanning
+0.896 - 2.073 micron, `WidthEff` 0.789 micron) they differ by ~15%.
+
+- **Monochromatic**: `A_band = A_V * k(lambda_band) / k(V)`, the reddening law evaluated at
+  one wavelength. Ratios between bands are then fixed, independent of `A_V`.
+- **Integrated** (what `make_bc.py` does, and what a real measurement is): redden the
+  spectrum, push it through the passband, take the magnitude difference. As `A_V` rises the
+  band's blue wing is extinguished away, the band's own effective wavelength drifts red, and
+  `dA_band/dA_V` therefore FALLS -- 0.272 near `A_V = 0` to 0.212 at `A_V = 10` for `F146`.
+  Band ratios are functions of `A_V`.
+
+**The 2018 Data Challenge is monochromatic, at each filter's `WavelengthEff`.** Measured, not
+assumed: its `A_Z087/A_W149 = 1.9236` is reproduced by the shipped law at `WavelengthEff`
+(0.86510, 1.30496 micron) to **0.1%**, and by no other wavelength definition SVO publishes --
+pivot/ref 13.3% off, phot 6.0%, cen 23.6%, mean 24.7%. Inverting the data's ratio for the
+W149 wavelength that would produce it gives 1.3130 micron, i.e. `WavelengthEff` to 0.6%. The
+population agrees: median 1.9315 over 293 events (range 1.906 - 1.947).
+
+**Consequence: no single `av` satisfies both truth bands in our model,** and the anchor choice
+is worth 15% on event 194 -- `A_W149` gives `av = 11.75`, `A_Z087` gives 10.14, the colour
+`E(Z087-W149)` gives 9.01. Anchor the COLOUR. At `av = 9.01` both bands come out -0.58 mag,
+the SAME offset, and a common-mode grey offset is degenerate with distance and radius, which
+the SED already fits; every other anchor pushes the residual into colour, where only
+`teffsed` can absorb it (+0.81 mag at the `A_W149` anchor). This is not a law error and not a
+grid error -- our law reproduces the challenge's own ratio to 0.1% -- it is the
+monochromatic-vs-integrated difference, irreducible while the data are one and the model the
+other.
+
+`F146`'s tabulated centres alone span 1.305 - 1.538 micron, an 18% spread in wavelength before
+any physics, mapping to 24% in `k/k_V`. So when comparing a published band extinction for a
+wide filter: **ask which convention, and which wavelength.** For real Roman data the
+integrated treatment is the correct one and this arithmetic does not arise; note that
+`utilities/mkticsed.py`'s clump path inverts a band extinction MONOCHROMATICALLY (via
+`components.sed.extinction.av_from_band_extinction`) and so carries this same ~15% error for
+W149-width filters -- tolerable in a prior a magnitude wide, not as a measurement.
+
 ### C23 -- the discrete degeneracies, and what they do to the signs
 
 - **`(u_0, alpha) -> -(u_0, alpha)`** is EXACT for a static binary with no parallax

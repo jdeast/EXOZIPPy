@@ -7,3 +7,7 @@ u0te_sync
 rpt_async
 rpt_sync
 rpt_best
+av_free
+av_clump
+av_band
+av_true
