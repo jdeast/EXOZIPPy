@@ -193,6 +193,22 @@ def av_from_clump_colour(a_w149, sig_w149, a_z087, sig_z087):
     frac_clump = 0.5 * (sig_w149 / a_w149 + sig_z087 / a_z087)
     sigma = av * float(np.hypot(frac_clump, LAW_FRAC_SIGMA))
 
+    # AND THE CONVENTION AMBIGUITY ITSELF, AS A WIDTH ON av.  The anchors
+    # disagree -- colour gives this av, A_W149 alone gives a larger one --
+    # and that spread IS the systematic, so half of it belongs in the prior
+    # width.  Putting it HERE rather than on the zeropoint is deliberate and
+    # measured: with `filters: []` the SED carries no photometry of its own,
+    # so the ONLY colour information in the fit is the two-band zeropoint
+    # tie, and widening both zeropoints to the grey residual would inject
+    # sqrt(2)*grey of COLOUR slack -- 0.82 mag on event 194 -- destroying the
+    # constraint the colour anchor exists to exploit.  `av` is the correctly
+    # CORRELATED nuisance: moving it reddens both bands together in the ratio
+    # the law dictates, which is mostly grey with exactly the colour term the
+    # physics implies, so it buys freedom along the reddening direction
+    # without opening the differential.
+    av_band = float(np.interp(a_w149, a146, av_pts))
+    sigma = float(np.hypot(sigma, 0.5 * abs(av_band - av)))
+
     grey = float(np.interp(av, av_pts, a146)) - a_w149
     return av, sigma, grey
 
@@ -341,20 +357,24 @@ def build(event, outdir, draws, tune, cores, t_max):
     for b, _ in BANDS:
         inst = "mulensinstrument.Roman_%s" % b
         med = median_flux_err(files[b])
-        # WIDENED TO ABSORB THE CONVENTION RESIDUAL (C29).  The simulation's
-        # own zeropoint is exact, so 0.02 was right as a statement about the
-        # instrument and wrong as an error budget: our integrated band
-        # extinction differs from the simulation's monochromatic one by a
-        # GREY offset (-0.07 mag on event 008 up to -0.58 on 194), and with
-        # the zeropoint pinned that hard the offset had nowhere to go but
-        # theta_star, biasing it LOW by exactly 10**(-0.2*grey) -- 0.97x on
-        # 008, 0.77x on 194, which is a large part of the 0.51-0.62x
-        # theta_star deficit the sweep reports.  Widening here does not
-        # remove the systematic, it stops it masquerading as a measurement.
-        params["%s.zeropoint" % inst] = {
-            "mu": 22.0,
-            "sigma": float(np.hypot(0.02, abs(av_grey))),
-        }
+        # LEFT AT THE SIMULATION'S OWN WIDTH, and that is a decision, not an
+        # oversight.  The C29 convention residual is a GREY band-extinction
+        # offset (-0.07 mag on event 008 up to -0.58 on 194) and the
+        # zeropoint is where a grey term would naturally be absorbed -- but
+        # these configs run `filters: []`, so the SED has no photometry of
+        # its own and this pair of zeropoints is the ONLY colour information
+        # in the fit.  Two independent priors of width 0.58 admit
+        # sqrt(2)*0.58 = 0.82 mag of COLOUR slack, which is an order of
+        # magnitude more than the colour signal separating plausible source
+        # temperatures; it would buy an honest error bar on theta_star by
+        # throwing away teffsed.  The format cannot express the one prior
+        # that would be right here -- a single term shared between the bands
+        # -- and building that is the engineering JDE ruled out.
+        # So the convention width goes on `av` instead (see
+        # av_from_clump_colour), which is the correctly correlated nuisance,
+        # and the leftover theta_star bias is REPORTED rather than absorbed:
+        # dc18_truth_table.py prints it beside the recovery table.
+        params["%s.zeropoint" % inst] = {"mu": 22.0, "sigma": 0.02}
         params["%s.out_scale" % inst] = {"upper": 10.0 * med, "initval": med}
         # These are SIMULATED curves with honest error bars, so err_scale is
         # a check, not a fit: 0.5-2 (JDE 2026-09-15, review 8.2.2), tighter

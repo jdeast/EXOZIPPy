@@ -12,7 +12,7 @@ mulensinstrument.Roman_W149.out_scale:
   upper: 0.3272099969357918
 mulensinstrument.Roman_W149.zeropoint:
   mu: 22.0
-  sigma: 0.4118624494682389
+  sigma: 0.02
 mulensinstrument.Roman_Z087.err_scale:
   lower: 0.5
   upper: 2.0
@@ -21,7 +21,7 @@ mulensinstrument.Roman_Z087.out_scale:
   upper: 0.014755602132185556
 mulensinstrument.Roman_Z087.zeropoint:
   mu: 22.0
-  sigma: 0.4118624494682389
+  sigma: 0.02
 planet.Companion.radius:
   sigma: 0
 sed.errscale:
@@ -38,4 +38,4 @@ star.Lens.ra:
   sigma: 0
 star.Source.av:
   mu: 7.2627951059796665
-  sigma: 0.7878396390241775
+  sigma: 1.2236057655826162
