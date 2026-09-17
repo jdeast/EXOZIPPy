@@ -217,14 +217,82 @@ def _vega_zeropoint(filt: Filter) -> float:
     return float(zp)
 
 
+#: Av axis for Galactic-bulge work, and every number in it is measured.
+#:
+#: RANGE.  The shipped axis stops at 6.0 mag, and `SED._inject_grid_bounds`
+#: makes the grid extents the SAMPLED PARAMETER'S EXACT SUPPORT through the
+#: logit transform -- so `av` cannot exceed 6 and a bulge fit is truncated
+#: rather than warned (review 2.9.16).  Inverting the DC2018 challenge's own
+#: red-clump extinctions through models/extinction_law.ascii, its 293 lines
+#: of sight need A_V from 1.69 to 19.04, median 2.62, p95 10.06: 11% are past
+#: 6.0.  The largest that is actually FITTABLE is 15.19 +/- 1.33 (event 100,
+#: the faintest sightline with a released light curve -- source fraction
+#: 0.434, baseline S/N 23, so source S/N ~10).  A_V ~ 19 appears only in the
+#: extinction table, with no light curve: at that depth a source like these
+#: sits at S/N 2-3 and carries no SED information, so the range is set by
+#: what is OBSERVABLE, not by what is tabulated.  20.0 then sits 3.6 sigma
+#: above the largest fittable value, which is the margin that keeps the
+#: posterior off the bound -- the top few magnitudes exist to prevent
+#: truncation, not because anything is measured there.
+#:
+#: SPACING.  Measured, not assumed: |d2BC/dAv2| at high Av (from the shipped
+#: tables' own 2/4/6 samples, p95 over all 660 (Teff, logg) cells) is 0.0007
+#: for 2MASS_J but 0.0389 for Gaia_G -- sixty times larger, because a wide
+#: blue passband reweights as the spectrum reddens.  Linear-interpolation
+#: error is h^2/8 times that, so in the WORST band: h=2 costs 0.019 mag,
+#: h=1 costs 0.0049, h=0.5 costs 0.0012.  The shipped 2-mag steps above
+#: Av=1 therefore already cost ~0.019 mag in Gaia_G, which is
+#: indistinguishable from today's 0.02 systematic floor and 4x over the
+#: 0.005 that Landolt-era calibration is aiming at.  h=1.0 lands exactly ON
+#: 0.005, which is no margin at all; h=0.5 is 4x under it.  Below Av=1 the
+#: curvature is HIGHER, so the shipped fine sampling there is kept as is.
+#:
+#: COST.  48 points against the shipped 13, i.e. ~3.7x the table size:
+#: 841 KB -> ~3.1 MB per feh file.  Irrelevant next to the R=150 spectra's
+#: own ~0.02 mag error, which dominates interpolation by a factor of 16 --
+#: so regenerating on the full-resolution (R~1e6) grids is what actually
+#: buys the 0.005 target, and this spacing is chosen so the axis will not be
+#: the limiting term when that happens.
+BULGE_AV_PTS = np.concatenate(
+    [
+        np.array([0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.6, 0.8]),
+        np.arange(1.0, 20.0 + 0.5, 0.5),
+    ]
+)
+
+
+def validate_av_pts(av_pts):
+    """Check and normalize an Av axis.  Module-level so it is testable.
+
+    Kept out of make_bc_tables' body deliberately: a test of the axis
+    contract should not need the 313 MB model tree or a Zenodo fetch, which
+    ensure_model_data would trigger before the body was ever reached.
+    """
+    arr = np.asarray(av_pts, float)
+    if arr.ndim != 1 or arr.size < 2 or np.any(np.diff(arr) <= 0):
+        raise ValueError(
+            "av_pts must be a strictly increasing 1-D vector; got shape "
+            f"{arr.shape}"
+            + (f" with diffs {np.diff(arr)[:5]}" if arr.size > 1 else "")
+        )
+    if arr[0] != 0.0:
+        raise ValueError(
+            "av_pts must start at 0.0 -- BC(Av=0) is the unextincted "
+            f"reference every row is differenced against; got {arr[0]}"
+        )
+    return arr
+
+
 def make_bc_tables(
     svo_filter_ids: Sequence[str],
     model: str = "NextGen",
     model_root: Path | str = DEFAULT_MODEL_ROOT,
+    av_pts: Sequence[float] | None = None,
 ) -> List[Path]:
     """
     Generate BC tables for the given SVO filter IDs (grouped per facility)
-    on exactly the (teff, logg, feh, Av) axes of the shipped tables, and
+    on the (teff, logg, feh) axes of the shipped tables and the Av axis
+    given by ``av_pts`` (default: the shipped one), and
     write them under {model_root}/{model}/BCs/{FACILITY}/feh*_afe+0.0.{FACILITY}.
 
     Returns the list of files written.
@@ -236,7 +304,11 @@ def make_bc_tables(
     teff_pts = axes["teff_pts"]
     logg_pts = axes["logg_pts"]
     feh_pts = axes["feh_pts"]
-    av_pts = axes["av_pts"]
+    # The Av axis is the one thing here that is NOT inherited from the
+    # shipped tables when the caller names it.  Passing BULGE_AV_PTS is how
+    # the 6.0 ceiling gets lifted; passing nothing reproduces the shipped
+    # axis exactly, so existing tables regenerate unchanged.
+    av_pts = validate_av_pts(axes["av_pts"] if av_pts is None else av_pts)
 
     df_spec, wave_ang = _load_spectra(model, model_root)
     tau_unit = _unit_optical_depth(wave_ang)

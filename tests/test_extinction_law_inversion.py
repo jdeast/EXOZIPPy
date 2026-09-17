@@ -83,3 +83,60 @@ def test_the_colour_excess_inversion_refuses_a_swapped_wavelength_order():
     """
     with pytest.raises(ValueError, match="SHORTER wavelength"):
         av_from_colour_excess(2.54, W149_UM, Z087_UM)
+
+
+def test_the_bulge_av_axis_reaches_past_what_the_bulge_needs():
+    """
+    Given the Av axis intended for Galactic-bulge work,
+    When it is compared with the extinction those sightlines require,
+    Then it clears the largest FITTABLE value by several sigma, and its
+    spacing keeps interpolation under the calibration target.
+
+    The shipped axis stops at 6.0 and `_inject_grid_bounds` makes the grid
+    extent the sampled parameter's exact support, so 11% of the DC2018
+    sightlines could not be represented at all -- and with the prior also
+    wrong (A_W149 written into av) the posterior sat at 4.25, comfortably
+    inside, so nothing ever complained.  Both had to be found.
+    """
+    from exozippy.components.sed.make_bc import BULGE_AV_PTS as ax
+
+    assert ax[0] == 0.0, (
+        "BC(Av=0) is the reference every row differences against"
+    )
+    assert np.all(np.diff(ax) > 0)
+    # 15.19 +/- 1.33 is the largest fittable requirement measured on DC2018
+    # (event 100); 3 sigma above it is the margin that keeps the posterior
+    # off the bound.
+    assert ax[-1] >= 15.19 + 3 * 1.33
+    # Worst-band curvature is |d2BC/dAv2| ~ 0.0389 (Gaia_G, p95 over cells);
+    # linear interpolation costs h^2/8 times that and must stay under the
+    # 0.005 mag Landolt-era target.
+    worst_curvature, target = 0.0389, 0.005
+    h = np.diff(ax).max()
+    assert h * h / 8 * worst_curvature < target, (
+        f"spacing {h} mag costs {h * h / 8 * worst_curvature:.4f} mag in the "
+        f"worst band, over the {target} target"
+    )
+
+
+def test_a_bad_av_axis_is_refused_rather_than_silently_regenerated():
+    """
+    Given an Av axis that is unsorted, too short, or does not start at zero,
+    When BC tables are asked for,
+    Then it raises.
+
+    A silently accepted bad axis would be written into the tables and then
+    become the sampled parameter's support, which is the failure this whole
+    item is about -- it must not be reachable by a typo.
+    """
+    from exozippy.components.sed.make_bc import validate_av_pts
+
+    for bad, match in (
+        ([0.0, 1.0, 0.5], "strictly increasing"),
+        ([0.0], "strictly increasing"),
+        ([0.5, 1.0, 2.0], "must start at 0.0"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            validate_av_pts(bad)
+    # and a good axis round-trips
+    assert validate_av_pts([0.0, 0.5, 1.0]).tolist() == [0.0, 0.5, 1.0]
