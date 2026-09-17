@@ -453,6 +453,17 @@ def generate_missing_facility(
     Auto-generation hook used by bc_grid.build_bc_grid when a facility's
     BC directory is missing: build tables for the requested SVO filters.
     Returns True on success.
+
+    A DEVELOPMENT CONVENIENCE, NOT THE PRODUCTION PATH.  This is affordable
+    only because the spectra it reads are plot-resolution; the
+    full-resolution atmospheres are ~250 GB and nobody should download those
+    to add one filter.  So it does not survive the move to them, and the
+    expected path for a new filter is to REQUEST it and have it generated
+    centrally and shipped (JDE 2026-09-17).  See sed.md for the hosted-service
+    alternative, which would also dissolve the large-av and Rv-axis problems.
+
+    Note it builds only the bands the caller happens to ask for, which is how
+    Roman shipped a 2-band table for years while its WFI imaging set has 8.
     """
     wanted = [s for s in svo_names if facility_from_svo_name(s) == facility]
     if not wanted:
