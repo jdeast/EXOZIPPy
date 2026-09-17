@@ -35,14 +35,19 @@ WHAT DELIBERATELY IS NOT CARRIED OVER FROM v7:
 
 THE RULES, one line each:
   ra, dec           event_info.txt columns 3-4.
-  star.Source.av    event_info.txt columns 6-7 (the red-clump A_W149 and
-                    its dispersion along that line of sight).  NOTE: this
-                    is what v7 does and it is kept for comparability, but
-                    A_W149 is not A_V -- see the caveat by AV_COLS below.
+  star.Source.av    the red-clump (A_W149, A_Z087) of event_info.txt
+                    columns 6-9, inverted for A_V through OUR OWN BC grid
+                    and anchored on the COLOUR.  v7 put A_W149 itself here,
+                    which is ~5x too small; see AV_COLS below for why the
+                    colour is the right anchor and why the two quoted
+                    dispersions are one correlated error.
   out_scale         upper = 10x the per-LC median flux error, initval = 1x,
                     in the file's flux system (review 8.6.3, RULED).
-  zeropoint         N(22.0, 0.02) -- the simulation's, identical for every
-                    event because it is the same instrument.
+  zeropoint         N(22.0, hypot(0.02, |grey|)) -- the simulation's value
+                    with the C29 convention residual added to its WIDTH, so
+                    a grey band-extinction offset is absorbed here instead
+                    of biasing theta_star.  0.07 mag on event 008 up to
+                    0.58 on 194.
   u1                pinned to 0: no limb darkening is simulated.
   everything else   defaults.yaml.
 """
@@ -72,14 +77,124 @@ DATA = os.environ.get(
 )
 BANDS = [("W149", "Roman/WFI.F146"), ("Z087", "Roman/WFI.F087")]
 
-# event_info.txt columns, 0-based: 5 = A_W149, 6 = its dispersion.
-# CAVEAT, stated so nobody has to rediscover it: the SED's parameter is
-# `av`, i.e. A_V, and A_W149 is roughly a fifth of it.  v7 nonetheless puts
-# A_W149 there, and v7 is the arm that was validated against truth, so the
-# sweep does the same rather than changing two things at once.  A shared
-# systematic across all six events is something the truth table can find;
-# six differently-extincted events cannot be compared at all.
+# event_info.txt columns, 0-based: 5 = A_W149 and 6 its dispersion,
+# 7 = A_Z087 and 8 its dispersion.
+#
+# THE OLD RULE PUT A_W149 STRAIGHT INTO `av` AND THAT WAS SIMPLY WRONG: the
+# SED's parameter is A_V, and A_W149 is roughly a fifth of it, so every
+# event ran with a prior ~5x too small.  It survived because it MASKED a
+# second defect -- the BC grid's Av axis stopped at 6.0 mag, so a correct
+# prior would have piled against a hard bound instead (7.7.3).  Both are
+# fixed now; the axis reaches 20 mag.
+#
+# WE ANCHOR THE COLOUR, NOT EITHER BAND.  Our model integrates a reddened
+# spectrum through the passband; the simulation reddened monochromatically
+# at each filter's effective wavelength (conventions.md C29, demonstrated to
+# 0.1% on the band ratio and across 293 events).  For a filter as wide as
+# W149 those differ, so NO single av reproduces both simulated band
+# extinctions in our model -- on event 194 the anchors span av = 9.01
+# (colour) to 11.75 (A_W149).  Anchoring the colour leaves both bands off
+# by the SAME amount, and a common-mode grey offset is degenerate with
+# distance and radius, which the SED already fits; anchoring either band
+# instead puts the residual in COLOUR, where only teffsed can absorb it.
+#
+# WE DO NOT ENGINEER AROUND IT, WE BUDGET FOR IT (JDE 2026-09-17: "raise
+# our zero point error and/or our av prior error to accommodate their
+# error, compute the impact, and list the systematic disagreement as a
+# caveat").  The leftover grey term is handed to the zeropoint, whose prior
+# was N(22.0, 0.02) -- two orders of magnitude too tight to absorb it, which
+# is why it was being absorbed by theta_star instead.
+#
+# THE TWO DISPERSIONS ARE ONE FRACTIONAL ERROR, FULLY CORRELATED, and
+# treating them as independent overstates the colour error by ~2.4x.
+# Measured across all six events: sigma_Z/sigma_W = 1.885-2.000 against
+# A_Z/A_W = 1.918-1.924, and sigma_W/A_W = sigma_Z/A_Z to three digits
+# (event 194: 0.1200 vs 0.1191).  So event_info quotes ONE fractional
+# uncertainty on the line-of-sight extinction, applied to both bands, and
+# the colour excess carries that same fraction rather than the quadrature
+# sum.
 AV_COLS = (5, 6)
+AZ_COLS = (7, 8)
+
+# Fractional uncertainty on the reddening LAW's shape, added in quadrature
+# to the clump's own.  The shipped extinction_law.ascii runs ~6% high of
+# CCM89 in J, H and Ks (measured, review 2.9.16), consistently enough to
+# look like a different NIR power law rather than scatter.  It also keeps
+# event 008 off a zero-width prior: both its dispersions are quoted as 0.01,
+# which rounds the correlated colour error to exactly 0.
+LAW_FRAC_SIGMA = 0.06
+
+
+def av_from_clump_colour(a_w149, sig_w149, a_z087, sig_z087):
+    """
+    Invert the clump's (A_W149, A_Z087) for `av` THROUGH OUR OWN BC GRID.
+
+    Returns (av, sigma_av, grey_residual), where grey_residual is the
+    common-mode band-extinction offset our integrated model still carries at
+    that av -- the piece the zeropoint prior has to be wide enough to absorb.
+
+    This inverts the INTEGRATED band extinction the model actually uses
+    (BC(Av=0) - BC(Av) off the shipped Roman table), NOT the monochromatic
+    law in components.sed.extinction.  Using the law here would reproduce the
+    simulation's own convention and so hide the disagreement rather than
+    budget for it (C29).
+
+    The cell is the red clump (Teff 4800 K, logg 2.5, solar feh).  That
+    choice is cheap: measured across 36 cells spanning Teff 4500-5500,
+    logg 2.0-3.0 and feh -0.5 to +0.3, the colour-anchored av has a standard
+    deviation of 0.10 and is independent of logg and feh to +/-0.01,
+    depending on Teff alone at 0.28 per 1000 K.
+    """
+    bc = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(C.__file__))),
+        "..",
+        "src",
+        "exozippy",
+        "models",
+        "NextGen",
+        "BCs",
+        "Roman",
+        "feh+0.0_afe+0.0.Roman",
+    )
+    bc = os.path.normpath(bc)
+    if not os.path.exists(bc):
+        raise SystemExit(
+            "cannot find the Roman BC table at %s; the colour-anchored av "
+            "prior needs it (regenerate with components/sed/make_bc.py)" % bc
+        )
+    header = next(ln for ln in io.open(bc) if "lgTef" in ln)
+    cols = header.lstrip("#").split()
+    tab = np.genfromtxt(bc, comments="#", skip_header=1)
+    i146 = 6 + cols[6:].index("WFI_F146")
+    i087 = 6 + cols[6:].index("WFI_F087")
+
+    lgt = tab[:, 0]
+    cell = np.isclose(
+        lgt, lgt[np.argmin(abs(lgt - np.log10(4800.0)))]
+    ) & np.isclose(tab[:, 1], 2.5)
+    sub = tab[cell]
+    sub = sub[np.argsort(sub[:, 4])]
+    av_pts = sub[:, 4]
+    a146 = sub[0, i146] - sub[:, i146]
+    a087 = sub[0, i087] - sub[:, i087]
+
+    excess = a_z087 - a_w149
+    if not a087[-1] - a146[-1] > excess:
+        raise SystemExit(
+            "colour excess %.3f exceeds the grid's reach (%.3f at av=%g); "
+            "extend the Av axis rather than extrapolating"
+            % (excess, a087[-1] - a146[-1], av_pts[-1])
+        )
+    av = float(np.interp(excess, a087 - a146, av_pts))
+
+    # ONE fractional error, fully correlated (see AV_COLS), so the colour
+    # carries the same fraction and av scales with it; the law's own shape
+    # uncertainty goes in quadrature.
+    frac_clump = 0.5 * (sig_w149 / a_w149 + sig_z087 / a_z087)
+    sigma = av * float(np.hypot(frac_clump, LAW_FRAC_SIGMA))
+
+    grey = float(np.interp(av, av_pts, a146)) - a_w149
+    return av, sigma, grey
 
 
 def event_info_row(event):
@@ -102,7 +217,12 @@ def build(event, outdir, draws, tune, cores, t_max):
     name = "DC2018_%s" % ev3
     row = event_info_row(event)
     ra, dec = float(row[2]), float(row[3])
-    av_mu, av_sd = float(row[AV_COLS[0]]), float(row[AV_COLS[1]])
+    av_mu, av_sd, av_grey = av_from_clump_colour(
+        float(row[AV_COLS[0]]),
+        float(row[AV_COLS[1]]),
+        float(row[AZ_COLS[0]]),
+        float(row[AZ_COLS[1]]),
+    )
 
     files = {
         b: os.path.join(DATA, "n20180816.%s.WFIRST18.%s.txt" % (b, ev3))
@@ -221,7 +341,20 @@ def build(event, outdir, draws, tune, cores, t_max):
     for b, _ in BANDS:
         inst = "mulensinstrument.Roman_%s" % b
         med = median_flux_err(files[b])
-        params["%s.zeropoint" % inst] = {"mu": 22.0, "sigma": 0.02}
+        # WIDENED TO ABSORB THE CONVENTION RESIDUAL (C29).  The simulation's
+        # own zeropoint is exact, so 0.02 was right as a statement about the
+        # instrument and wrong as an error budget: our integrated band
+        # extinction differs from the simulation's monochromatic one by a
+        # GREY offset (-0.07 mag on event 008 up to -0.58 on 194), and with
+        # the zeropoint pinned that hard the offset had nowhere to go but
+        # theta_star, biasing it LOW by exactly 10**(-0.2*grey) -- 0.97x on
+        # 008, 0.77x on 194, which is a large part of the 0.51-0.62x
+        # theta_star deficit the sweep reports.  Widening here does not
+        # remove the systematic, it stops it masquerading as a measurement.
+        params["%s.zeropoint" % inst] = {
+            "mu": 22.0,
+            "sigma": float(np.hypot(0.02, abs(av_grey))),
+        }
         params["%s.out_scale" % inst] = {"upper": 10.0 * med, "initval": med}
         # These are SIMULATED curves with honest error bars, so err_scale is
         # a check, not a fit: 0.5-2 (JDE 2026-09-15, review 8.2.2), tighter
@@ -241,9 +374,21 @@ def build(event, outdir, draws, tune, cores, t_max):
 
     s = json.load(io.open(seed))["fits"][0]["parameters"]
     print(
-        "%s  ra=%.4f dec=%.4f  av=%.2f+/-%.2f  seed t_0=%.3f u_0=%.4f "
+        "%s  ra=%.4f dec=%.4f  av=%.2f+/-%.2f (grey %+.2f)  "
+        "seed t_0=%.3f u_0=%.4f "
         "t_E=%.2f\n    -> %s"
-        % (name, ra, dec, av_mu, av_sd, s["t_0"], s["u_0"], s["t_E"], cfg_path)
+        % (
+            name,
+            ra,
+            dec,
+            av_mu,
+            av_sd,
+            av_grey,
+            s["t_0"],
+            s["u_0"],
+            s["t_E"],
+            cfg_path,
+        )
     )
     return cfg_path
 
