@@ -33,6 +33,25 @@ WHAT DELIBERATELY IS NOT CARRIED OVER FROM v7:
     floor potentials; v5 removed them and the lens mass went from 1.98x
     truth to 0.85x.
 
+ALSO CARRIED, ADDED 2026-09-17 ("update the sweep to follow all currently
+known best practices -- ptde, reparameterizations, data derived tight
+bounds, and the correct av prior").  Each of the four was measured on event
+194 and each was measured SEPARATELY; this is the first configuration that
+combines them, which is the one thing about it that is not yet validated.
+  * `ptde`, not `ptde_async`.  Seven runs of 194: ptde put all 78 chains in
+    the good-likelihood region 3/3, under three different configurations;
+    every ptde_async run put at most 40 there and usually under three.
+  * `fitu0te` on the source.  Best of the three ptde arms by ESS(core) --
+    30-32k against 23-25k (tight bounds) and 9.9k (control), Rhat 1.00.
+  * Data-derived tight bounds (8.2.2 path 1): t_0 to the observing span,
+    |u_0| <= 3, log_f_total to the measured baseline +/-2 dex.  Worth
+    9.9k -> 23-25k ESS on their own.  `err_scale` is NOT the tight arm's
+    [0.1, 10] but the LATER and tighter [0.5, 2.0] (JDE 2026-09-15).
+  * The colour-anchored av prior, which is what AV_COLS is about below.
+AND ONE THING NO ARM HAS HAD: all seven predate #293, so `ptde` ignored
+store_hot_chains in every sync arm -- no hot-chain mode detector.  That is
+fixed, so this sweep gets the good chains AND mode discovery together.
+
 THE RULES, one line each:
   ra, dec           event_info.txt columns 3-4.
   star.Source.av    the red-clump (A_W149, A_Z087) of event_info.txt
@@ -43,11 +62,19 @@ THE RULES, one line each:
                     dispersions are one correlated error.
   out_scale         upper = 10x the per-LC median flux error, initval = 1x,
                     in the file's flux system (review 8.6.3, RULED).
-  zeropoint         N(22.0, hypot(0.02, |grey|)) -- the simulation's value
-                    with the C29 convention residual added to its WIDTH, so
-                    a grey band-extinction offset is absorbed here instead
-                    of biasing theta_star.  0.07 mag on event 008 up to
-                    0.58 on 194.
+  zeropoint         N(22.0, 0.02) -- the simulation's, identical for every
+                    event because it is the same instrument.  Deliberately
+                    NOT widened for the C29 residual: with `filters: []`
+                    these two are the only colour information in the fit.
+                    See the comment at the zeropoint for the full reason.
+  source.t_0        the observing span of the light curves themselves.
+  source.u_0        [-3, 3]: the source was magnified.  A soft barrier
+                    rather than hard support, since fitu0te makes u_0
+                    derived.
+  log_f_total       log10(median flux of that light curve) +/- 2 dex.
+  err_scale         [0.5, 2.0] (JDE 2026-09-15, 8.2.2) -- these are
+                    simulated curves with honest error bars, so err_scale
+                    is a check, not a fit.
   u1                pinned to 0: no limb darkening is simulated.
   everything else   defaults.yaml.
 """
@@ -228,6 +255,30 @@ def median_flux_err(path):
     return float(np.median(e[np.isfinite(e) & (e > 0)]))
 
 
+def median_flux(path):
+    """Median of the flux column, in the file's own flux system."""
+    d = np.loadtxt(path)
+    f, e = d[:, 1], d[:, 2]
+    ok = np.isfinite(f) & np.isfinite(e) & (e > 0) & (f > 0)
+    return float(np.median(f[ok]))
+
+
+def observing_span(paths):
+    """(first, last) finite epoch across every light curve, in the files' JD."""
+    lo, hi = None, None
+    for path in paths:
+        d = np.loadtxt(path)
+        t, e = d[:, 0], d[:, 2]
+        t = t[np.isfinite(t) & np.isfinite(e) & (e > 0)]
+        if not len(t):
+            continue
+        lo = t.min() if lo is None else min(lo, t.min())
+        hi = t.max() if hi is None else max(hi, t.max())
+    if lo is None:
+        raise SystemExit("no finite epochs in any light curve")
+    return float(lo), float(hi)
+
+
 def build(event, outdir, draws, tune, cores, t_max):
     ev3 = "%03d" % int(event)
     name = "DC2018_%s" % ev3
@@ -282,7 +333,26 @@ def build(event, outdir, draws, tune, cores, t_max):
             }
         ],
         "lens": [{"body": "star.Lens"}, {"body": "planet.Companion"}],
-        "source": [{"body": "star.Source", "star_constrains_rho": True}],
+        "source": [
+            {
+                "body": "star.Source",
+                "star_constrains_rho": True,
+                # THE BEST-PERFORMING COORDINATE MEASURED SO FAR.  Sampling
+                # u_0*t_E instead of u_0 attacks the u_0/t_E/f_blend
+                # degeneracy that makes the heavily blended events hard, and
+                # on event 194 it was the best of the three ptde arms:
+                # ESS(core) 30-32k against 23-25k for tight bounds and 9.9k
+                # for the control, at Rhat 1.00 and 78/78 chains.
+                # NOTE this makes `u_0` a DERIVED parameter ("from_u0te",
+                # source.py), with `u0te` sampled on [-5000, 5000], so the
+                # |u_0| <= 3 bound below lands on a derived parameter and
+                # acts as a SOFT barrier rather than as hard support.  That
+                # is the intended behaviour and is why it is still worth
+                # writing: it says "this is a magnified event", which is
+                # true whichever coordinate samples it.
+                "fitu0te": True,
+            }
+        ],
         "galacticmodel": [{"name": name, "anchor_idx": 1}],
         "band": (
             [{"name": b, "filter": f, "ld_law": "linear"} for b, f in BANDS]
@@ -316,7 +386,18 @@ def build(event, outdir, draws, tune, cores, t_max):
             }
         ],
         "sampler": {
-            "method": "ptde_async",
+            # ptde, NOT ptde_async.  Measured on event 194, seven runs
+            # (notes/supercomputer_queue.txt): ptde put ALL 78 chains in the
+            # good-likelihood region three times out of three, under three
+            # different configurations (control, tight bounds, fitu0te),
+            # while every ptde_async run of the same event put at most 40
+            # there and usually fewer than three.  ESS followed: u0te_sync
+            # reached ~30,000 from 3,595 draws at 36 GB where its async twin
+            # needed 26,984 draws and 385 GB.  Those arms all predate #293,
+            # so `ptde` ignored store_hot_chains in every one of them; that
+            # is fixed, so the sweep gets the good chains AND the hot-chain
+            # mode detector, which no arm has had together.
+            "method": "ptde",
             "cores": cores,
             "n_temps": "auto",
             "T_max": t_max,
@@ -336,6 +417,8 @@ def build(event, outdir, draws, tune, cores, t_max):
         "parameter_file": os.path.join(base, "%s.params.yaml" % name),
     }
 
+    t_lo, t_hi = observing_span(files.values())
+
     params = {
         "star.Lens.ra": {"initval": ra, "sigma": 0},
         "star.Lens.dec": {"initval": dec, "sigma": 0},
@@ -353,6 +436,20 @@ def build(event, outdir, draws, tune, cores, t_max):
         # scale, so left free it samples its U(0.001, 1000) prior and
         # reports a median of ~500 that reads like a measurement.  Pin it.
         "sed.errscale": {"initval": 1.0, "sigma": 0},
+        # DATA-DERIVED TIGHT BOUNDS (8.2.2 path 1), as the ab194 `tight`
+        # arm applied them by hand.  On event 194 they took ESS(core) from
+        # 9.9k to 23-25k at Rhat 1.00 under ptde, so they are not free --
+        # they buy real mixing by keeping the hot rungs and the start
+        # dispersion out of volume the data have already excluded.
+        #
+        # t_0 CANNOT LIE OUTSIDE THE OBSERVATIONS.  A peak before the first
+        # epoch or after the last is not a detection of anything; this is
+        # the span of the light curves themselves, not a guess.
+        "source.Source.t_0": {"lower": t_lo, "upper": t_hi},
+        # |u_0| <= 3 says the source was MAGNIFIED (A - 1 < 0.7% at u_0 = 3).
+        # Under fitu0te this is a soft barrier on a derived parameter, which
+        # is the right strength for a statement this weak.
+        "source.Source.u_0": {"lower": -3.0, "upper": 3.0},
     }
     for b, _ in BANDS:
         inst = "mulensinstrument.Roman_%s" % b
@@ -376,6 +473,17 @@ def build(event, outdir, draws, tune, cores, t_max):
         # dc18_truth_table.py prints it beside the recovery table.
         params["%s.zeropoint" % inst] = {"mu": 22.0, "sigma": 0.02}
         params["%s.out_scale" % inst] = {"upper": 10.0 * med, "initval": med}
+        # THE BASELINE FLUX IS MEASURED, SO BOUND THE TOTAL FLUX BY IT.
+        # +/-2 dex around the median of this light curve's own flux column:
+        # 100x either side of the observed baseline is generous for a
+        # blended source and still excludes the decades of flux space the
+        # sampler otherwise explores.  Same rule the `tight` arm used
+        # (verified: its numbers reproduce as log10(median flux) +/- 2).
+        lf = float(np.log10(median_flux(files[b])))
+        params["%s.log_f_total" % inst] = {
+            "lower": lf - 2.0,
+            "upper": lf + 2.0,
+        }
         # These are SIMULATED curves with honest error bars, so err_scale is
         # a check, not a fit: 0.5-2 (JDE 2026-09-15, review 8.2.2), tighter
         # than defaults.yaml's 0.01-100.  On 226 the point-lens basin had

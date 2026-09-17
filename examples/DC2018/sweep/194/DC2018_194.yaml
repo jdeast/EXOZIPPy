@@ -17,6 +17,7 @@ lens:
 source:
 - body: star.Source
   star_constrains_rho: true
+  fitu0te: true
 galacticmodel:
 - name: DC2018_194
   anchor_idx: 1
@@ -58,7 +59,7 @@ mann:
   - mass
   - radius
 sampler:
-  method: ptde_async
+  method: ptde
   cores: 64
   n_temps: auto
   T_max: 200.0
