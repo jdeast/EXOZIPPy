@@ -20,16 +20,31 @@ Conventions
   calculated one), via the Filter class.
 * Extinction IS applied along the Av axis:
   tau(lam) = ext(lam)/ext(0.55um) * Av / 1.086 (models/extinction_law.ascii),
-  so BC(Av) = M_bol(unextincted) - M_X(extincted). The shipped tables
-  carry the same 13-point Av axis (0 to 6 mag) and DO vary along it --
-  an earlier version of this note claimed they did not, and that was
-  wrong. Measured at teff = 5600 K, logg = 2.5, [Fe/H] = 0, the
+  so BC(Av) = M_bol(unextincted) - M_X(extincted). The tables NOW IN THE
+  TREE carry a 13-point Av axis (0 to 6 mag) and DO vary along it.
+
+  A PREVIOUS VERSION OF THIS NOTE USED THAT FACT TO RETRACT THE ORIGINAL
+  BUG REPORT, AND THE RETRACTION WAS WRONG.  It measured tables this
+  generator had ALREADY OVERWRITTEN at the same paths -- so it measured
+  the replacement and absolved the original.  Checked against git (the
+  tables at 9be83c19, "Changed models/filters directory structure"): the
+  original NextGen/2MASS table IS flat in Av.  For one model it reads
+  BC_J = 1.7775 at every one of Av = 0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4,
+  0.6, 0.8, 1.0, 2.0 and 1.7774 at Av = 4 and 6: dBC/dAv = -0.0000 over
+  a six-magnitude axis.  The bug was real and this generator fixes it.
+  To compare against the originals, `git show 9be83c19:<path>` -- and
+  JOIN ON THE KEY, because the row order differs (the originals iterate
+  logg inside Av, these iterate Av inside logg) and a row-by-row diff
+  silently compares different models, which is worth ~1 mag of fictional
+  disagreement.
+
+  Measured at teff = 5600 K, logg = 2.5, [Fe/H] = 0, the
   least-squares dBC/dAv is -0.303 (2MASS_J), -0.126 (2MASS_Ks), -0.704
-  (Gaia_G), -0.072 (WISE_W1); no shipped column is flat in Av, in any
-  of 2MASS/GAIA/Generic/Keck/TESS/WISE. The three narrow bands there
+  (Gaia_G), -0.072 (WISE_W1); no REGENERATED column is flat in Av, in
+  any of 2MASS/GAIA/Generic/Keck/TESS/WISE. The three narrow bands there
   match -A_lam/Av from models/extinction_law.ascii at the band's
   effective wavelength (-0.305, -0.125, -0.072) to under 1%, i.e. the
-  shipped Av dependence IS this same extinction law; only Gaia_G
+  regenerated Av dependence IS this same extinction law; only Gaia_G
   departs from its single-wavelength value (-0.865), as a passband
   that wide must.
 
