@@ -572,6 +572,78 @@ def report(prefix, event, data_dir, tier="default"):
     }
 
 
+# Grey band-extinction residual per event, in magnitudes: what our INTEGRATED
+# band extinction still misses at the colour-anchored av, because the
+# simulation reddened monochromatically (conventions.md C29).  Computed in
+# dc18_sweep_config.av_from_clump_colour; hardcoded here so scoring a trace
+# never needs the BC grid.
+C29_GREY = {
+    "008": -0.0658,
+    "062": -0.4114,
+    "128": -0.3379,
+    "152": -0.1458,
+    "194": -0.5780,
+    "223": -0.2640,
+}
+
+
+def print_convention_caveat(rows):
+    """
+    Print the C29 systematic beside the recovery table.
+
+    JDE 2026-09-17 asked for the disagreement to be listed "as a caveat
+    alongside the discussion of how well we recover 'truth'".  It prints here
+    rather than only in the paper because this table IS that discussion for
+    anyone reading a scoring run, and a caveat that lives somewhere else is a
+    caveat nobody applies.
+    """
+    seen = [r["event"] for r in rows if str(r["event"]) in C29_GREY]
+    if not seen:
+        return
+    print("\n" + "=" * 104)
+    print("CAVEAT: theta_star (hence theta_E, hence lens mass) IS BIASED LOW")
+    print("        AGAINST THIS ANSWER KEY, BY CONSTRUCTION AND NOT BY ERROR.")
+    print(
+        "  This simulation reddened MONOCHROMATICALLY at each filter's effective"
+    )
+    print(
+        "  wavelength; we integrate a reddened spectrum through the passband,"
+    )
+    print(
+        "  which is what a measurement is.  For a filter as wide as W149 those"
+    )
+    print(
+        "  differ, so no single av reproduces both simulated band extinctions in"
+    )
+    print(
+        "  our model.  We anchor the colour, which leaves a GREY residual, and a"
+    )
+    print("  grey error moves only the -0.2*W149_0 term of the CSB relation:")
+    print("     %-7s %-12s %s" % ("event", "grey (mag)", "theta_star bias"))
+    for ev in sorted({str(e) for e in seen}):
+        g = C29_GREY[ev]
+        print("     %-7s %+12.2f %14.3fx" % (ev, g, 10 ** (-0.2 * -g)))
+    print(
+        "  On event 194 that is 56% of the measured deficit (fit/truth = 0.62x,"
+    )
+    print(
+        "  -0.208 dex, of which -0.116 is this).  The rest is OURS and is not"
+    )
+    print(
+        "  explained by it.  The sweep's av prior carries this spread in its"
+    )
+    print(
+        "  WIDTH, which does not remove the bias -- nothing in the fit can --"
+    )
+    print("  but keeps it from masquerading as a measurement.  The zeropoints")
+    print(
+        "  are deliberately NOT widened: with `filters: []` they are the only"
+    )
+    print("  colour information in the fit, and slackening them would trade")
+    print("  teffsed away for an honest error bar.  None of this applies to")
+    print("  real Roman data, where the integrated treatment is correct.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -653,6 +725,8 @@ def main():
                     "YES" if r["clear_winner"] else "no",
                 )
             )
+    if out:
+        print_convention_caveat(out)
     if a.json_out:
         json.dump(out, io.open(a.json_out, "w", encoding="utf-8"), indent=1)
         print("\nwrote %s" % a.json_out)

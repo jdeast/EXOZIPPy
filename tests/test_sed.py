@@ -5,12 +5,14 @@ Unit tests for the SED component:
   - sed.py      : __init__ grid-bound injection, load_data, register_parameters
 """
 
+import pathlib
 import warnings
 
 import numpy as np
 import pytensor
 import pytensor.tensor as pt
 import pytest
+import yaml
 
 import exozippy.components.sed.physics  # registers calc_absbolmag etc.
 from exozippy.components.sed.bc_grid import (
@@ -331,6 +333,47 @@ def test_peek_grid_axes_returns_all_four_axis_keys():
     # ASSERT
     for key in ("teff_pts", "logg_pts", "feh_pts", "av_pts"):
         assert key in axes, f"Missing key: {key}"
+
+
+def test_shipped_grid_yaml_axes_match_the_tables_on_disk():
+    """
+    Given the NextGen BC tree and its shipped <model>.grid.yaml,
+    When the yaml's four axes are compared to peek_grid_axes,
+    Then they should agree exactly.
+
+    THIS FAILS SILENTLY WITHOUT THE TEST, which is why it exists.  The two
+    are read by different code on different paths: the FIT path calls
+    peek_grid_axes, which derives the axes from the tables themselves
+    (df["Av"].unique()), while slice_bc and sed/plot.py call _create_AXES
+    on the yaml.  So regenerating the tables on a new axis -- as extending
+    Av to 20 mag for the galactic bulge did on 2026-09-17 -- leaves the
+    yaml describing a grid that no longer exists, and nothing complains
+    until someone slices or plots against the old extent and gets a wrong
+    answer rather than an error.
+    """
+    # ARRANGE
+    yaml_path = (
+        pathlib.Path(_MODEL_ROOT) / "NextGen" / "BCs" / "NextGen.grid.yaml"
+    )
+    with open(yaml_path) as fh:
+        declared = yaml.safe_load(fh)["grid"]
+
+    # ACT
+    actual = peek_grid_axes(model="NextGen", model_root=_MODEL_ROOT)
+
+    # ASSERT
+    for axis in ("teff", "logg", "feh", "av"):
+        np.testing.assert_allclose(
+            declared[axis],
+            actual[f"{axis}_pts"],
+            err_msg=(
+                f"{yaml_path.name} declares a {axis} axis of "
+                f"{declared[axis]} but the tables hold "
+                f"{list(actual[f'{axis}_pts'])}. Regenerate the yaml to "
+                "match the tables (the tables are authoritative; the fit "
+                "path never reads the yaml)."
+            ),
+        )
 
 
 def test_peek_grid_axes_teff_range_is_physically_plausible():

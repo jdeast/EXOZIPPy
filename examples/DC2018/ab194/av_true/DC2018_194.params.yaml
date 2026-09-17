@@ -1,0 +1,43 @@
+band.W149.u1:
+  initval: 0.0
+  sigma: 0
+band.Z087.u1:
+  initval: 0.0
+  sigma: 0
+mulensinstrument.Roman_W149.out_scale:
+  initval: 0.0138863878946184
+  upper: 0.13886387894618402
+mulensinstrument.Roman_W149.zeropoint:
+  mu: 22.0
+  sigma: 0.02
+mulensinstrument.Roman_Z087.out_scale:
+  initval: 0.0008674769020985394
+  upper: 0.008674769020985393
+mulensinstrument.Roman_Z087.zeropoint:
+  mu: 22.0
+  sigma: 0.02
+planet.Companion.radius:
+  sigma: 0
+sed.errscale:
+  initval: 1.0
+  sigma: 0
+star.Lens.dec:
+  initval: -27.937
+  sigma: 0
+star.Lens.feh:
+  mu: 0.0
+  sigma: 0.5
+star.Lens.ra:
+  initval: 267.657
+  sigma: 0
+star.Source.av:
+  # The COLOUR anchor through our own integrated BC grid, not the
+  # simulation's monochromatic A_V of 9.88.  At 9.01 both truth bands
+  # come out -0.58 mag -- the SAME offset -- and a common-mode grey
+  # offset is degenerate with distance and radius, which the SED
+  # already fits.  Anchoring A_W149 instead (11.75) misses the colour
+  # by +0.81 mag, and only teffsed can absorb that.  sigma is a model
+  # uncertainty: std 0.10 across 36 (feh, Teff, logg) cells, depending
+  # on Teff alone at 0.28/1000 K.  See code_review_20260824.txt, 7.7.3.
+  mu: 9.01
+  sigma: 0.3

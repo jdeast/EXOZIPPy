@@ -47,6 +47,19 @@ def main():
 
     cfg = yaml.safe_load(io.open(a.config, encoding="utf-8"))
 
+    # An empty or comment-only config parses to None, and every access below
+    # then dies as "'NoneType' object has no attribute 'get'" -- which names
+    # neither the file nor the problem.  Measured 2026-09-16: ab194's av_true
+    # arm was a 0-byte DC2018_194.yaml (truncated when the arm was set up),
+    # and the array task burned a 64-slot allocation to print that traceback.
+    if not isinstance(cfg, dict):
+        sys.exit(
+            "%s holds no YAML mapping (parsed as %s). An arm config that was "
+            "truncated or never written looks exactly like this; rebuild it "
+            "from a sibling arm and remember that prefix, parameter_file AND "
+            "sed.file all name the arm." % (a.config, type(cfg).__name__)
+        )
+
     bad = [
         k
         for k in _PATH_KEYS
