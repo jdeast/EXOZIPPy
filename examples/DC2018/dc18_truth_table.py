@@ -596,52 +596,64 @@ def print_convention_caveat(rows):
     rather than only in the paper because this table IS that discussion for
     anyone reading a scoring run, and a caveat that lives somewhere else is a
     caveat nobody applies.
+
+    REWRITTEN 2026-09-17 AFTER THE MEASUREMENT CONTRADICTED THE FIRST VERSION.
+    That version said theta_star is biased low by 10**(-0.2*grey) -- 0.766x on
+    event 194 -- straight from the CSB relation.  The ab194/av_true arm, the
+    first run with the colour-anchored prior, measured theta_star at 0.983x of
+    truth.  So the arithmetic was right about the CSB relation and wrong about
+    where the residual lands: theta_star is PROTECTED, because the light curve
+    pins rho * theta_E independently of the SED.  What actually absorbs the
+    grey term is teffsed, and behind it the (R_source, D_source) pair.
     """
     seen = [r["event"] for r in rows if str(r["event"]) in C29_GREY]
     if not seen:
         return
     print("\n" + "=" * 104)
-    print("CAVEAT: theta_star (hence theta_E, hence lens mass) IS BIASED LOW")
-    print("        AGAINST THIS ANSWER KEY, BY CONSTRUCTION AND NOT BY ERROR.")
     print(
-        "  This simulation reddened MONOCHROMATICALLY at each filter's effective"
+        "CAVEAT: THE SIMULATION'S EXTINCTION CONVENTION IS NOT OURS, AND THE"
+    )
+    print("        RESIDUAL LANDS ON teffsed AND (R_source, D_source).")
+    print("  This simulation reddened MONOCHROMATICALLY at each filter's")
+    print(
+        "  effective wavelength; we integrate a reddened spectrum through the"
     )
     print(
-        "  wavelength; we integrate a reddened spectrum through the passband,"
+        "  passband, which is what a measurement is.  For a filter as wide as"
     )
     print(
-        "  which is what a measurement is.  For a filter as wide as W149 those"
+        "  W149 those differ, so no single av reproduces both simulated band"
     )
-    print(
-        "  differ, so no single av reproduces both simulated band extinctions in"
-    )
-    print(
-        "  our model.  We anchor the colour, which leaves a GREY residual, and a"
-    )
-    print("  grey error moves only the -0.2*W149_0 term of the CSB relation:")
-    print("     %-7s %-12s %s" % ("event", "grey (mag)", "theta_star bias"))
+    print("  extinctions in our model.  Anchoring the colour leaves a GREY")
+    print("  residual in both bands:")
+    print("     %-7s %s" % ("event", "grey (mag)"))
     for ev in sorted({str(e) for e in seen}):
-        g = C29_GREY[ev]
-        print("     %-7s %+12.2f %14.3fx" % (ev, g, 10 ** (-0.2 * -g)))
+        print("     %-7s %+10.2f" % (ev, C29_GREY[ev]))
+    print("  MEASURED ON av_true (event 194, prior av = 9.01 +/- 0.3, ptde,")
+    print("  Rhat 1.00, ESS 23-25k, 78/78 chains):")
+    print("     theta_star  0.983x truth   <-- NOT biased; the light curve")
+    print("                                    pins rho * theta_E")
+    print("     R_source    0.403x truth   pull -5.25")
+    print("     D_source    0.410x truth   pull -5.35")
+    print("     theta_E     0.774x truth   pull -0.66  (within 1 sigma)")
+    print("  R and D slide ~2.45x IN LOCKSTEP, which is why their ratio --")
+    print("  theta_star -- survives while each is individually -5 sigma.  The")
     print(
-        "  On event 194 that is 56% of the measured deficit (fit/truth = 0.62x,"
+        "  flux the grey term over-predicts is absorbed by a source made too"
     )
     print(
-        "  -0.208 dex, of which -0.116 is this).  The rest is OURS and is not"
+        "  COOL (teffsed 3040 K here), and the distance follows the resulting"
     )
+    print("  luminosity inward.")
+    print("  DO NOT read the -5 sigma R_source/D_source pulls as 'the")
+    print("  convention explains them': that is not established.  What IS")
     print(
-        "  explained by it.  The sweep's av prior carries this spread in its"
+        "  established is that the colour-anchored prior moved theta_star from"
     )
-    print(
-        "  WIDTH, which does not remove the bias -- nothing in the fit can --"
-    )
-    print("  but keeps it from masquerading as a measurement.  The zeropoints")
-    print(
-        "  are deliberately NOT widened: with `filters: []` they are the only"
-    )
-    print("  colour information in the fit, and slackening them would trade")
-    print("  teffsed away for an honest error bar.  None of this applies to")
-    print("  real Roman data, where the integrated treatment is correct.")
+    print("  0.62x truth (the old arms, av ~ 4.25 from A_W149) to 0.983x, and")
+    print("  R_source's pull from -13.10 to -5.25.  The remainder is OURS.")
+    print("  None of this applies to real Roman data, where the integrated")
+    print("  treatment is simply the correct one.")
 
 
 def main():
