@@ -125,7 +125,21 @@ def test_the_bulge_av_axis_reaches_past_what_the_bulge_needs():
     )
     # and the extension must not have refined the shipped range: the first
     # 13 points are the shipped axis verbatim.
-    shipped = [0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.6, 0.8, 1.0, 2.0, 4.0, 6.0]
+    shipped = [
+        0.0,
+        0.05,
+        0.1,
+        0.15,
+        0.2,
+        0.3,
+        0.4,
+        0.6,
+        0.8,
+        1.0,
+        2.0,
+        4.0,
+        6.0,
+    ]
     assert ax[: len(shipped)].tolist() == shipped
     assert len(ax) == len(shipped) + 7, "extend by 8..20 step 2, nothing else"
 
