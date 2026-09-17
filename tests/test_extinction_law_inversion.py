@@ -108,15 +108,26 @@ def test_the_bulge_av_axis_reaches_past_what_the_bulge_needs():
     # (event 100); 3 sigma above it is the margin that keeps the posterior
     # off the bound.
     assert ax[-1] >= 15.19 + 3 * 1.33
-    # Worst-band curvature is |d2BC/dAv2| ~ 0.0389 (Gaia_G, p95 over cells);
-    # linear interpolation costs h^2/8 times that and must stay under the
-    # 0.005 mag Landolt-era target.
-    worst_curvature, target = 0.0389, 0.005
+    # SPACING IS SIZED BY THE BANDS THAT SURVIVE THE EXTINCTION, not by the
+    # most curved band in the table.  |d2BC/dAv2| is 0.0389 for Gaia_G, but
+    # at A_V = 15 that band carries no data: A_G = 11.6, so a bulge clump
+    # giant (m ~ 14.5 unreddened) sits at 26, past Gaia's limit.  Bessell
+    # B/V, TESS and all of 2MASS go the same way.  What survives is Roman's
+    # own bands plus deep ground IR and WISE, and the worst of those is
+    # WFI_F146 at 0.00825.  Sizing on Gaia_G instead would demand h=0.5 and
+    # nearly quadruple the grid for every user, to buy precision in a band
+    # that cannot be measured there.
+    surviving_worst, target = 0.00825, 0.005
     h = np.diff(ax).max()
-    assert h * h / 8 * worst_curvature < target, (
-        f"spacing {h} mag costs {h * h / 8 * worst_curvature:.4f} mag in the "
-        f"worst band, over the {target} target"
+    assert h * h / 8 * surviving_worst < target, (
+        f"spacing {h} mag costs {h * h / 8 * surviving_worst:.4f} mag in the "
+        f"worst band that survives high extinction, over the {target} target"
     )
+    # and the extension must not have refined the shipped range: the first
+    # 13 points are the shipped axis verbatim.
+    shipped = [0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.6, 0.8, 1.0, 2.0, 4.0, 6.0]
+    assert ax[: len(shipped)].tolist() == shipped
+    assert len(ax) == len(shipped) + 7, "extend by 8..20 step 2, nothing else"
 
 
 def test_a_bad_av_axis_is_refused_rather_than_silently_regenerated():

@@ -217,46 +217,62 @@ def _vega_zeropoint(filt: Filter) -> float:
     return float(zp)
 
 
-#: Av axis for Galactic-bulge work, and every number in it is measured.
+#: Av axis for Galactic-bulge work: the shipped axis, EXTENDED, not refined.
 #:
-#: RANGE.  The shipped axis stops at 6.0 mag, and `SED._inject_grid_bounds`
-#: makes the grid extents the SAMPLED PARAMETER'S EXACT SUPPORT through the
-#: logit transform -- so `av` cannot exceed 6 and a bulge fit is truncated
-#: rather than warned (review 2.9.16).  Inverting the DC2018 challenge's own
-#: red-clump extinctions through models/extinction_law.ascii, its 293 lines
-#: of sight need A_V from 1.69 to 19.04, median 2.62, p95 10.06: 11% are past
-#: 6.0.  The largest that is actually FITTABLE is 15.19 +/- 1.33 (event 100,
-#: the faintest sightline with a released light curve -- source fraction
-#: 0.434, baseline S/N 23, so source S/N ~10).  A_V ~ 19 appears only in the
-#: extinction table, with no light curve: at that depth a source like these
-#: sits at S/N 2-3 and carries no SED information, so the range is set by
-#: what is OBSERVABLE, not by what is tabulated.  20.0 then sits 3.6 sigma
-#: above the largest fittable value, which is the margin that keeps the
-#: posterior off the bound -- the top few magnitudes exist to prevent
-#: truncation, not because anything is measured there.
+#: WHY EXTEND.  The shipped axis stops at 6.0 mag and
+#: `SED._inject_grid_bounds` makes the grid extents the sampled parameter's
+#: EXACT SUPPORT through the logit transform -- so `av` cannot exceed 6 and a
+#: bulge fit is truncated rather than warned (review 2.9.16).  Inverting the
+#: DC2018 challenge's own red-clump extinctions through
+#: models/extinction_law.ascii, its 293 sightlines need A_V from 1.69 to
+#: 19.04 (median 2.62, p95 10.06): 11% are past 6.0.
 #:
-#: SPACING.  Measured, not assumed: |d2BC/dAv2| at high Av (from the shipped
-#: tables' own 2/4/6 samples, p95 over all 660 (Teff, logg) cells) is 0.0007
-#: for 2MASS_J but 0.0389 for Gaia_G -- sixty times larger, because a wide
-#: blue passband reweights as the spectrum reddens.  Linear-interpolation
-#: error is h^2/8 times that, so in the WORST band: h=2 costs 0.019 mag,
-#: h=1 costs 0.0049, h=0.5 costs 0.0012.  The shipped 2-mag steps above
-#: Av=1 therefore already cost ~0.019 mag in Gaia_G, which is
-#: indistinguishable from today's 0.02 systematic floor and 4x over the
-#: 0.005 that Landolt-era calibration is aiming at.  h=1.0 lands exactly ON
-#: 0.005, which is no margin at all; h=0.5 is 4x under it.  Below Av=1 the
-#: curvature is HIGHER, so the shipped fine sampling there is kept as is.
+#: HOW FAR.  Set by what is OBSERVABLE, not by what is tabulated.  The
+#: largest FITTABLE requirement is 15.19 +/- 1.33 -- event 100, the faintest
+#: sightline with a released light curve (source fraction 0.434, baseline S/N
+#: 23, so source S/N ~10).  A_V ~ 19 appears only in the extinction table,
+#: with no light curve, and at that depth a source like these sits at S/N 2-3
+#: and carries no SED information.  20.0 clears the largest fittable value by
+#: 3.6 sigma, which is the margin that keeps the posterior off the bound; the
+#: top few magnitudes exist to prevent truncation, not because anything is
+#: measured there.
 #:
-#: COST.  48 points against the shipped 13, i.e. ~3.7x the table size:
-#: 841 KB -> ~3.1 MB per feh file.  Irrelevant next to the R=150 spectra's
-#: own ~0.02 mag error, which dominates interpolation by a factor of 16 --
-#: so regenerating on the full-resolution (R~1e6) grids is what actually
-#: buys the 0.005 target, and this spacing is chosen so the axis will not be
-#: the limiting term when that happens.
+#: WHY THE EXISTING 2-MAG SPACING IS KEPT ABOVE Av=6, and this is the part
+#: that is easy to get expensively wrong.  Measured curvature |d2BC/dAv2| at
+#: high Av (p95 over all 660 (Teff, logg) cells of the shipped tables) is
+#: 0.0389 for Gaia_G against 0.0007 for 2MASS_J -- sixty times larger,
+#: because a wide blue passband reweights as the spectrum reddens.  Sizing
+#: the axis on Gaia_G would demand h=0.5 and nearly quadruple the grid FOR
+#: EVERY USER.  But at A_V = 15 there IS no Gaia measurement to interpolate:
+#: A_G is then 11.6 mag, so a bulge clump giant (M_G ~ 0, m ~ 14.5
+#: unreddened) sits at m = 26 -- five magnitudes past Gaia's limit.  The same
+#: arithmetic removes Bessell B and V, TESS (limit ~16 against m = 23.8) and
+#: all of 2MASS (limits J 15.8, H 15.1, K 14.3 against 19.1, 17.3, 16.4).
+#: What survives A_V = 15 is Roman's own two bands, deep ground-based IR of
+#: VVV class, and WISE -- and the worst curvature among THOSE is WFI_F146 at
+#: 0.00825, which needs only h < 2.20 mag to stay under 0.005.  The shipped
+#: 2-mag step therefore costs 0.0041 mag where it is used, already inside the
+#: Landolt-era target, and refining it would buy precision in bands that
+#: cannot be observed at that extinction.
+#:
+#: COST: 20 points against the shipped 13, i.e. 1.5x (841 KB -> ~1.3 MB per
+#: feh file), and only in a range that was previously unreachable.
+#:
+#: KNOWN AND DELIBERATELY NOT FIXED HERE: for a user WITH optical data at
+#: MODERATE extinction, the shipped 2-mag steps between Av = 2, 4 and 6
+#: already cost ~0.019 mag in Gaia_G -- a pre-existing limitation of the
+#: shipped grid, not of this extension.  Refining 1-6 would bloat the grid
+#: for everyone to serve that case, so it is a separate decision.
 BULGE_AV_PTS = np.concatenate(
     [
-        np.array([0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.6, 0.8]),
-        np.arange(1.0, 20.0 + 0.5, 0.5),
+        # the shipped axis, unchanged: the curvature is HIGHEST below Av=1, so
+        # its fine sampling is exactly where it is needed
+        np.array(
+            [0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.6, 0.8, 1.0, 2.0, 4.0, 6.0]
+        ),
+        # ... continued at the same 2-mag cadence to a ceiling that cannot
+        # truncate a bulge posterior
+        np.arange(8.0, 20.0 + 2.0, 2.0),
     ]
 )
 
