@@ -597,26 +597,28 @@ def print_convention_caveat(rows):
     anyone reading a scoring run, and a caveat that lives somewhere else is a
     caveat nobody applies.
 
-    THIS TEXT HAS BEEN WRONG TWICE.  Treat it as provisional and check the
-    arms before quoting it.
-      v1 predicted theta_star biased low by 10**(-0.2*grey) = 0.766x from the
-         CSB relation.  ab194/av_true measured 0.983x, so v1 was wrong.
+    THIS TEXT WAS WRONG TWICE BEFORE THE THIRD ARM LANDED.  The history is
+    kept because it is the reason to trust the CURRENT version: it is the one
+    that stopped predicting and started measuring.
+      v1 predicted theta_star biased low by 10**(-0.2*grey) = 0.766x, from
+         the CSB relation.  av_true measured 0.983x.  Wrong.
       v2 concluded theta_star is "protected" because the light curve pins
-         rho * theta_E independently of the SED.  ab194/av_clump then measured
-         theta_star at 0.738x with av = 7.18, i.e. theta_star moves strongly
-         WITH av (0.0688 dex/mag over the two arms), so v2 was wrong too --
-         `star_constrains_rho: true` means the SED constrains rho, and av
-         therefore feeds straight into theta_star.
-    v3 (this text) states only what two arms measure and names what is still
-    open.  A third arm, av_band (prior 11.65), is still sampling and will
-    either confirm the slope or break it.
+         rho * theta_E independently of the SED.  av_clump measured 0.738x at
+         av = 7.18, i.e. theta_star moves strongly WITH av.  Wrong --
+         `star_constrains_rho: true` means the SED constrains rho.
+      v3 stated the two-point slope and said the sweep's wide prior should
+         give "nearer 0.74x".  av_band supplied a third point: the slope
+         holds, but 0.74 came from av_clump's wider, lower prior and
+         overstated it (see below).
     """
     seen = [r["event"] for r in rows if str(r["event"]) in C29_GREY]
     if not seen:
         return
     print("\n" + "=" * 104)
-    print("CAVEAT: theta_star TRACKS av, SO THE av ANCHOR AND ITS WIDTH BOTH")
-    print("        MATTER -- AND R_source IS WRONG INDEPENDENTLY OF BOTH.")
+    print(
+        "CAVEAT: theta_star TRACKS av, AND CROSSES TRUTH AT THE COLOUR ANCHOR."
+    )
+    print("        R_source IS WRONG INDEPENDENTLY OF av.")
     print("  This simulation reddened MONOCHROMATICALLY at each filter's")
     print(
         "  effective wavelength; we integrate a reddened spectrum through the"
@@ -632,36 +634,59 @@ def print_convention_caveat(rows):
     print("     %-7s %s" % ("event", "grey (mag)"))
     for ev in sorted({str(e) for e in seen}):
         print("     %-7s %+10.2f" % (ev, C29_GREY[ev]))
-    print("  MEASURED, event 194, two ptde arms (Rhat 1.00, 78/78 chains):")
     print(
-        "     arm        av prior       av post   theta*/truth  R/truth  D/truth"
+        "  MEASURED on event 194 -- THREE ptde arms, Rhat 1.00, 78/78 chains,"
+    )
+    print("  differing only in the av prior:")
+    print(
+        "     arm       av prior       av post   theta*/truth  R/truth  D/truth"
     )
     print(
-        "     av_true    9.01 +/- 0.3      8.99       0.983       0.403    0.410"
+        "     av_clump  8.61 +/- 2.41     7.18      0.738       0.392    0.531"
     )
     print(
-        "     av_clump   8.61 +/- 2.41     7.18       0.738       0.392    0.531"
+        "     av_true   9.01 +/- 0.30     8.99      0.983       0.403    0.410"
     )
-    print("  THREE THINGS FOLLOW, and only these three:")
-    print("  1. theta_star TRACKS av at 0.0688 dex/mag over these two points,")
-    print("     steeper than the CSB relation's 0.042 because the colour term")
-    print("     moves too.  It is NOT independent of the SED.")
-    print("  2. PRIOR WIDTH IS AS DECISIVE AS THE ANCHOR.  Both priors come")
-    print("     from the SAME clump columns; they differ in inversion method")
-    print("     and width.  The wide one let the SED pull av down to 7.18 --")
-    print("     the data's own av preference is LOW -- and theta_star fell")
-    print("     with it.  A sweep running av = 9.01 +/- 1.83 should therefore")
-    print("     be expected nearer 0.74x than 0.983x on theta_star.")
-    print("  3. R_source IS ~0.4x TRUTH AT BOTH av VALUES (0.403, 0.392), so")
     print(
-        "     the source-radius deficit is NOT an extinction problem.  D and"
+        "     av_band  11.65 +/- 1.40     9.42      1.086       0.425    0.391"
     )
-    print("     theta_star move with av; R does not.  That residual is OURS.")
-    print("  What IS attributable to the anchor: theta_star went from 0.62x")
-    print("  truth in the old arms (av ~ 4.25, A_W149 written into av) to")
-    print("  0.983x at the colour-anchored value, and R_source's pull from")
-    print("  -13.10 to -5.25.  None of this applies to real Roman data, where")
-    print("  the integrated treatment is simply the correct one.")
+    print(
+        "  1. THE COLOUR ANCHOR IS INDEPENDENTLY CONFIRMED.  A log-linear fit"
+    )
+    print("     through those three points crosses theta_star/truth = 1 at")
+    print("     av = 9.00.  The colour anchor -- the clump's E(Z087-W149)")
+    print("     inverted through our integrated BC grid, computed with no")
+    print(
+        "     reference to any fit -- is 9.01.  Two independent routes, 0.1%."
+    )
+    print("  2. theta_star TRACKS av at 0.073 dex/mag (3-point fit), steeper")
+    print("     than the CSB relation's 0.042 because the colour term moves")
+    print("     too.  It is NOT independent of the SED.")
+    print(
+        "  3. R_source IS ~0.4x TRUTH AT EVERY av: 0.392, 0.403, 0.425 across"
+    )
+    print(
+        "     2.24 mag.  D_source and theta_star move with av; R_source does"
+    )
+    print("     not.  The source-radius deficit is NOT an extinction problem,")
+    print("     and that residual is OURS.")
+    print(
+        "  4. PRIOR WIDTH MATTERS AS MUCH AS THE ANCHOR.  Every wide prior is"
+    )
+    print(
+        "     pulled DOWN (-0.59 sigma from 8.61, -1.59 from 11.65); only the"
+    )
+    print("     tight one held (-0.07 from 9.01).  A sweep running")
+    print(
+        "     av = 9.01 +/- 1.83 -- wide on purpose, so the width carries this"
+    )
+    print("     systematic honestly -- should therefore be expected around")
+    print(
+        "     0.83-0.94x on theta_star rather than 0.98x.  That is the price"
+    )
+    print("     of an honest width, and it is a judgement call, not a defect.")
+    print("  None of this applies to real Roman data, where the integrated")
+    print("  treatment is simply the correct one.")
 
 
 def main():
