@@ -3,7 +3,7 @@
  "n_terms": 87,
  "params": "examples/KMT-2019-BLG-1806/KMT-2019-BLG-1806.params.yaml",
  "platform": {
-  "blas": "scipy-openblas",
+  "blas": "blas",
   "machine": "x86_64",
   "system": "Linux"
  },
@@ -86,7 +86,7 @@
   ]
  },
  "terms": {
-  "POT:galacticmodel.imf_prior": -1.0563830404868038,
+  "POT:galacticmodel.imf_prior": -1.0563830404868035,
   "POT:galacticmodel.kinematic_prior": 16.669804756459484,
   "POT:gaussian_prior.lens.xalpha": -0.14808517301701055,
   "POT:gaussian_prior.lens.yalpha": -0.351914826982989,
@@ -102,7 +102,7 @@
   "POT:logit_uniform_prior.sed.errscale": -6.909754279648304,
   "POT:logit_uniform_prior.source.t_0": -2.427210820458976,
   "POT:logit_uniform_prior.source.u_0": -1.3862970023104895,
-  "POT:logit_uniform_prior.star.av": -12.797195424633687,
+  "POT:logit_uniform_prior.star.av": -15.20280516916753,
   "POT:logit_uniform_prior.star.distance": -7.294551644918046,
   "POT:logit_uniform_prior.star.logmass": -1.6460156185740282,
   "POT:logit_uniform_prior.star.pm_dec": -2.77258872516003,
@@ -157,7 +157,7 @@
   "RV:lens.yalpha_raw": -0.9189385332046727,
   "RV:mulensinstrument.err_scale_raw": -2.756815599614018,
   "RV:mulensinstrument.log_f_total_raw": -2.756815599614018,
-  "RV:mulensinstrument.model": 44764.82375489826,
+  "RV:mulensinstrument.model": 44764.823754898265,
   "RV:mulensinstrument.q_source_raw": -2.756815599614018,
   "RV:planet.log_q_raw": -0.9189385332046727,
   "RV:sed.errscale_raw": -0.9189385332046727,
@@ -174,5 +174,5 @@
   "RV:star.teff_raw": -0.9189385332046727,
   "RV:star.teffsed_raw": -1.8378770664093453
  },
- "total_logp": 44339.035844491416
+ "total_logp": 44336.63023474688
 }
