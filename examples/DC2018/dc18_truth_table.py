@@ -597,94 +597,86 @@ def print_convention_caveat(rows):
     anyone reading a scoring run, and a caveat that lives somewhere else is a
     caveat nobody applies.
 
-    THIS TEXT WAS WRONG TWICE BEFORE THE THIRD ARM LANDED.  The history is
-    kept because it is the reason to trust the CURRENT version: it is the one
-    that stopped predicting and started measuring.
+    THIS TEXT HAS BEEN WRONG THREE TIMES.  The history is kept because it is
+    the reason to distrust any version of it that PREDICTS rather than
+    measures -- every prediction here has failed, and only the measurements
+    have survived.
       v1 predicted theta_star biased low by 10**(-0.2*grey) = 0.766x, from
          the CSB relation.  av_true measured 0.983x.  Wrong.
       v2 concluded theta_star is "protected" because the light curve pins
          rho * theta_E independently of the SED.  av_clump measured 0.738x at
          av = 7.18, i.e. theta_star moves strongly WITH av.  Wrong --
          `star_constrains_rho: true` means the SED constrains rho.
-      v3 stated the two-point slope and said the sweep's wide prior should
-         give "nearer 0.74x".  av_band supplied a third point: the slope
-         holds, but 0.74 came from av_clump's wider, lower prior and
-         overstated it (see below).
+      v3 fit three arms, found a crossing of theta*/truth = 1 at av = 9.007
+         against an independent colour anchor of 9.006, and called that
+         agreement "0.1%".  It also forecast 0.83-0.94x for the sweep's wide
+         prior.  The sweep measured 0.698x, and eight more runs show the
+         crossing is not determined to anything like 0.1%.  Both wrong.
+      v4 (this text) reports eleven runs on event 194, every one with its own
+         `_results.csv`, and states the crossing with the uncertainty the
+         scatter actually implies.  It forecasts nothing.
     """
     seen = [r["event"] for r in rows if str(r["event"]) in C29_GREY]
     if not seen:
         return
     print("\n" + "=" * 104)
-    print(
-        "CAVEAT: theta_star TRACKS av, AND CROSSES TRUTH AT THE COLOUR ANCHOR."
-    )
-    print("        R_source IS WRONG INDEPENDENTLY OF av.")
+    print("CAVEAT: theta_star TRACKS av.  THE CROSSING SITS AT THE COLOUR")
+    print("        ANCHOR, BUT TO ~0.5 MAG, NOT TO 0.1%.")
+    print("        R_source IS WRONG AT EVERY av.")
     print("  This simulation reddened MONOCHROMATICALLY at each filter's")
-    print(
-        "  effective wavelength; we integrate a reddened spectrum through the"
-    )
-    print(
-        "  passband, which is what a measurement is.  For a filter as wide as"
-    )
-    print(
-        "  W149 those differ, so no single av reproduces both simulated band"
-    )
-    print("  extinctions in our model.  Anchoring the colour leaves a GREY")
-    print("  residual in both bands:")
+    print("  effective wavelength; we integrate a reddened spectrum through")
+    print("  the passband, which is what a measurement is.  For a filter as")
+    print("  wide as W149 those differ, so no single av reproduces both")
+    print("  simulated band extinctions in our model.  Anchoring the colour")
+    print("  leaves a GREY residual in both bands:")
     print("     %-7s %s" % ("event", "grey (mag)"))
     for ev in sorted({str(e) for e in seen}):
         print("     %-7s %+10.2f" % (ev, C29_GREY[ev]))
-    print(
-        "  MEASURED on event 194 -- THREE ptde arms, Rhat 1.00, 78/78 chains,"
-    )
-    print("  differing only in the av prior:")
-    print(
-        "     arm       av prior       av post   theta*/truth  R/truth  D/truth"
-    )
-    print(
-        "     av_clump  8.61 +/- 2.41     7.18      0.738       0.392    0.531"
-    )
-    print(
-        "     av_true   9.01 +/- 0.30     8.99      0.983       0.403    0.410"
-    )
-    print(
-        "     av_band  11.65 +/- 1.40     9.42      1.086       0.425    0.391"
-    )
-    print(
-        "  1. THE COLOUR ANCHOR IS INDEPENDENTLY CONFIRMED.  A log-linear fit"
-    )
-    print("     through those three points crosses theta_star/truth = 1 at")
-    print("     av = 9.00.  The colour anchor -- the clump's E(Z087-W149)")
-    print("     inverted through our integrated BC grid, computed with no")
-    print(
-        "     reference to any fit -- is 9.01.  Two independent routes, 0.1%."
-    )
-    print("  2. theta_star TRACKS av at 0.073 dex/mag (3-point fit), steeper")
-    print("     than the CSB relation's 0.042 because the colour term moves")
-    print("     too.  It is NOT independent of the SED.")
-    print(
-        "  3. R_source IS ~0.4x TRUTH AT EVERY av: 0.392, 0.403, 0.425 across"
-    )
-    print(
-        "     2.24 mag.  D_source and theta_star move with av; R_source does"
-    )
-    print("     not.  The source-radius deficit is NOT an extinction problem,")
-    print("     and that residual is OURS.")
-    print(
-        "  4. PRIOR WIDTH MATTERS AS MUCH AS THE ANCHOR.  Every wide prior is"
-    )
-    print(
-        "     pulled DOWN (-0.59 sigma from 8.61, -1.59 from 11.65); only the"
-    )
-    print("     tight one held (-0.07 from 9.01).  A sweep running")
-    print(
-        "     av = 9.01 +/- 1.83 -- wide on purpose, so the width carries this"
-    )
-    print("     systematic honestly -- should therefore be expected around")
-    print(
-        "     0.83-0.94x on theta_star rather than 0.98x.  That is the price"
-    )
-    print("     of an honest width, and it is a judgement call, not a defect.")
+    print("  MEASURED on event 194 -- ELEVEN ptde runs that differ only in")
+    print("  the av prior (and, where marked, in fitu0te), each scored from")
+    print("  its own results.csv, Rhat <= 1.01, 78 chains:")
+    print("     av post  theta*/t  R/t    D/t    run (av prior)")
+    print("        4.24    0.632  0.352  0.556  sync (2.75 +/- 0.33)")
+    print("        4.26    0.634  0.356  0.562  u0te (2.75 +/- 0.33)")
+    print("        4.26    0.630  0.350  0.556  u0te_sync")
+    print("        4.27    0.651  0.357  0.548  async")
+    print("        4.27    0.633  0.356  0.563  tight_sync")
+    print("        5.26    0.686  0.348  0.507  av_free, old grid ceiling 6")
+    print("        6.80    0.760  0.350  0.461  av_free, ceiling 20")
+    print("        7.18    0.733  0.389  0.531  av_clump (8.61 +/- 2.41)")
+    print("        7.29    0.698  0.364  0.521  SWEEP (9.01 +/- 1.83, u0te)")
+    print("        8.99    0.983  0.403  0.410  av_true (9.01 +/- 0.30)")
+    print("        9.42    1.086  0.425  0.391  av_band (11.65 +/- 1.40)")
+    print("  1. THE CROSSING IS WHERE THE ANCHOR IS -- TO ~0.5 MAG, WHICH IS")
+    print("     ALL THE SCATTER ALLOWS.  Refit as runs were added it moves:")
+    print("     9.01 +/- 0.80 (v3's three arms), 9.31 +/- 2.83 (the six runs")
+    print("     with av > 5), 9.71 +/- 1.53 (all eleven).  The relation is")
+    print("     monotone but NOT log-linear -- the five runs near av = 4.25")
+    print("     sit at 0.63, where v3's line predicts 0.44 -- so a global fit")
+    print("     is the wrong estimator.  The local one: the two runs that")
+    print("     STRADDLE theta*/truth = 1 (8.99 -> 9.42) interpolate to 9.06,")
+    print("     and three runs at av = 6.8-7.3 scatter 0.037 dex at fixed av,")
+    print("     i.e. +/- 0.5 mag of crossing.  So 9.1 +/- 0.5 against an")
+    print("     independently computed anchor of 9.01.  That confirms the")
+    print("     anchor.  v3's 0.1% was a three-point coincidence.")
+    print("  2. theta_star TRACKS av: 0.075 dex/mag locally above av = 7,")
+    print("     0.038 dex/mag across the full 4.2-9.4 range, against the CSB")
+    print("     relation's 0.042.  It is NOT independent of the SED, because")
+    print("     `star_constrains_rho: true` lets the SED constrain rho.")
+    print("  3. R_source IS 0.35-0.43x TRUTH AT EVERY av, over 5.2 mag and")
+    print("     eleven runs.  D_source and theta_star move with av; R_source")
+    print("     does not.  The source-radius deficit is NOT an extinction")
+    print("     problem, and that residual is OURS.")
+    print("  4. THE HONEST WIDTH COSTS MORE THAN v3 ESTIMATED.  Every wide")
+    print("     prior is pulled DOWN, never up: -0.94 sigma from")
+    print("     9.01 +/- 1.83 (the sweep), -0.59 from 8.61 +/- 2.41, -1.59")
+    print("     from 11.65 +/- 1.40; only the tight prior held (-0.07 from")
+    print("     9.01 +/- 0.30).  The data's own av preference is LOW.  The")
+    print("     sweep therefore landed 0.698x, below v3's own 0.83-0.94x")
+    print("     forecast.  That tradeoff is JDE's call, not a defect.")
+    print("  5. fitu0te IS NOT WHY THE SWEEP SITS LOW: at av = 4.26 the u0te")
+    print("     runs give 0.634 and 0.630 against 0.632 and 0.651 for u_0,")
+    print("     under 0.5%.  The sweep is comparable to the arms.")
     print("  None of this applies to real Roman data, where the integrated")
     print("  treatment is simply the correct one.")
 
