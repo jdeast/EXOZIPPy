@@ -49,11 +49,14 @@ def _inputs():
 
 
 def _prepared(config, user_params):
-    work = pathlib.Path(tempfile.mkdtemp()) / "DC2018_128"
+    # Removed in the finally below -- see the note in
+    # test_seed_quality.py: a bare mkdtemp() is nobody's to collect.
+    tmproot = pathlib.Path(tempfile.mkdtemp())
+    work = tmproot / "DC2018_128"
     shutil.copytree(
         EXAMPLE_DIR,
         work,
-        ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"),
+        ignore=shutil.ignore_patterns("fitresults*", ".#*", "#*#"),
     )
     cwd = os.getcwd()
     os.chdir(work)
@@ -64,6 +67,7 @@ def _prepared(config, user_params):
         return {p.label: p for p in system.get_all_parameters()}
     finally:
         os.chdir(cwd)
+        shutil.rmtree(tmproot, ignore_errors=True)
 
 
 @pytest.fixture(scope="module")

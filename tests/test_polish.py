@@ -10,6 +10,7 @@ through a rescale.
 """
 
 import logging
+from pathlib import Path
 
 import numpy as np
 import pymc as pm
@@ -339,8 +340,8 @@ def test_integer_one_is_one_step_not_the_default():
     Regression (notes/code_review_20260808.txt 2.9.1): the old
     `spec in (True, "on")` test matched the integer 1, because 1 == True in
     Python, so asking for a single step silently got DEFAULT_POLISH_STEPS
-    (150).  Every small integer 2..N was honored, which is what made the
-    one-value hole invisible.
+    (then 150, now 400).  Every small integer 2..N was honored, which is
+    what made the one-value hole invisible.
     """
     assert resolve_polish_steps(1, n_seeds=1, has_seed_hints=False) == 1
     assert resolve_polish_steps(2, n_seeds=1, has_seed_hints=False) == 2
@@ -508,7 +509,8 @@ def test_an_improvement_window_would_quit_on_a_staircase_plateau():
 
 def test_lbfgs_polish_stops_on_the_gradient_not_the_cap():
     """
-    Given a smooth quadratic basin and the default 150-iteration cap,
+    Given a smooth quadratic basin and a 150-iteration cap (the shipped
+      DEFAULT_POLISH_STEPS is larger; the point is that neither is reached),
     When the L-BFGS engine polishes,
     Then it converges on the gradient tolerance in a handful of iterations
       -- the cap is a safety net, never the stopping criterion -- and
@@ -1192,6 +1194,7 @@ def test_heartbeat_fires_inside_a_sweep_not_only_between_them(caplog):
             pop_size=6,
             pool=pool,
             progress_interval_s=0.06,
+            asynchronous=False,
         )
 
     msgs = [r.getMessage() for r in caplog.records]
@@ -1243,6 +1246,7 @@ def test_a_wedged_proposal_does_not_silence_the_heartbeat(caplog):
             pop_size=4,
             pool=pool,
             progress_interval_s=0.05,
+            asynchronous=False,
             eval_timeout=0.2,
             pool_recycler=_recycler,
         )
@@ -1273,6 +1277,11 @@ def test_the_interleaved_path_returns_the_same_stream_as_map():
     configuration that keeps the single blocking pool.map even on a pool
     that could interleave -- no heartbeat and no timeout means nothing to
     interleave for.
+
+    All of this is the SYNCHRONOUS engine, selected explicitly: on a pool
+    with apply_async the default is now the asynchronous engine, whose
+    trajectory depends on arrival order by design (see the async tests
+    below).
     """
     # ARRANGE
     from exozippy.samplers.ptde import polish_seed_starts
@@ -1298,9 +1307,11 @@ def test_the_interleaved_path_returns_the_same_stream_as_map():
     a, dlp_a = _run()
     b, dlp_b = _run(pool=_SerialPool())
     async_pool = _FakeAsyncPool()
-    c, dlp_c = _run(pool=async_pool)
+    c, dlp_c = _run(pool=async_pool, asynchronous=False)
     quiet_pool = _FakeAsyncPool()
-    d, dlp_d = _run(pool=quiet_pool, progress_interval_s=None)
+    d, dlp_d = _run(
+        pool=quiet_pool, progress_interval_s=None, asynchronous=False
+    )
 
     # ASSERT
     assert async_pool.n_apply_async > 0
@@ -1309,3 +1320,475 @@ def test_the_interleaved_path_returns_the_same_stream_as_map():
         for pa, pb in zip(a, other):
             np.testing.assert_allclose(pa["x"], pb["x"])
         np.testing.assert_allclose(dlp_a, dlp_other)
+
+
+# ---------------------------------------------------------------------------
+# review 7.13.8: the stop must not amplify arithmetic noise.  A 1-ulp
+# perturbation of (lp, grad) may not move the polished start.
+# ---------------------------------------------------------------------------
+#
+# THE MECHANISM THIS GUARDS.  scipy's gtol test is `max|proj g| <= gtol` on
+# the CURRENT iterate, so it fires on the FIRST evaluation that dips under
+# the threshold.  On a ridge (kelt4 RV-only: a tc/logP degeneracy with
+# Hessian condition number 5.4e6) a loose gtol therefore stops mid-climb, on
+# a shoulder where the endpoint depends on every bit of the path -- and the
+# path differs whenever the arithmetic does, which across CI runners it
+# always does (a different OpenBLAS kernel in scipy's own L-BFGS-B
+# bookkeeping perturbs one iterate by 1 ulp at evaluation 4).  At the old
+# gtol = 0.01 that moved the polished cosi by 8.5% (16-seed full width) and
+# the polished lp by 0.24 nats, and 3 of 16 arithmetics hit the 150 cap;
+# tests/test_integration_kelt4.py went red three times on it.
+#
+# THE HARNESS.  "The same function computed by a different but equally
+# correct arithmetic" is modelled as the compiled objective times
+# (1 + s * 2**-52), s in {-1, 0, +1} a hash of (x, component, seed) -- one
+# ulp of relative error on every output, chosen independently per
+# evaluation.  Seed 0 is unperturbed.  Under the shipped constants the four
+# seeds here must land on the same optimum: this is what makes the flake
+# structurally impossible to reintroduce, because a first-dip stop fails it
+# by two orders of magnitude while a converged stop passes with 5x to spare.
+# The full 16-seed sweep and the numbers behind the bounds are in the header
+# of tests/test_integration_kelt4.py.
+
+_KELT4_DIR = Path(__file__).parent.parent / "examples" / "kelt4"
+
+# Measured 2026-09-14, 16 seeds, gtol 1e-4 / cap 400: cosi full width
+# 8.6e-4 relative (4.3e-4 absolute), polished lp full width 9.1e-7 nats,
+# 240-294 iterations.  Bounds are ~5x those widths.  The absolute cosi
+# bound also has a first-principles ceiling: cosi's Schur-complement
+# curvature is 0.0044 nats/raw^2, so the |grad| < 1e-4 stopping set spans
+# +/-0.023 raw = +/-5e-4 in cosi, and 2e-3 absolute sits above even that.
+_ULP_COSI_ATOL = 2.0e-3  # absolute, in cosi
+_ULP_LP_ATOL = 5.0e-6  # nats
+_ULP_SEEDS = (0, 1, -1, 3)
+
+
+@pytest.fixture(scope="module")
+def kelt4_rvonly_polish_inputs():
+    """The kelt4 RV-only model, its raw start and polish.py's own compiled
+    lp+grad function -- exactly what polish_raw_starts hands _lbfgs_polish_one."""
+    import os
+
+    import yaml
+
+    from exozippy.polish import _compile_logp_grad
+
+    if not _KELT4_DIR.is_dir():
+        pytest.skip("kelt4 example not present")
+    cwd = os.getcwd()
+    os.chdir(_KELT4_DIR)
+    try:
+        with open("kelt4_rvonly.yaml") as f:
+            config = yaml.safe_load(f)
+        system = System(config)
+        system.prepare()
+        model = system.build_model()
+        raw_start = system.get_raw_start(model)
+        fn = _compile_logp_grad(model)
+    finally:
+        os.chdir(cwd)
+    assert fn is not None, "kelt4 RV-only must be on the L-BFGS path"
+    cosi = next(
+        p for p in system.get_all_parameters() if p.label == "orbit.cosi"
+    )
+    return model, raw_start, fn, cosi
+
+
+def _ulp_perturbed(fn, keys, seed):
+    """`fn` with every output multiplied by (1 + s * 2**-52), s in {-1, 0, 1}
+    a deterministic hash of (x, output component, seed); seed 0 unperturbed."""
+    import hashlib
+
+    eps = 2.0**-52
+
+    def perturbed(point):
+        vals = fn(point)
+        if seed == 0:
+            return vals
+        x = np.concatenate(
+            [np.asarray(point[k], float).reshape(-1) for k in keys]
+        )
+        flat = [np.asarray(v, float) for v in vals]
+        m = sum(v.size for v in flat)
+        h = hashlib.blake2b(
+            x.tobytes() + int(seed).to_bytes(4, "little", signed=True),
+            digest_size=32,
+        ).digest()
+        r = np.frombuffer(
+            hashlib.blake2b(h, digest_size=4 * m).digest(), dtype=np.uint32
+        )
+        s = (r % 3).astype(float) - 1.0
+        out, ofs = [], 0
+        for v in flat:
+            n = v.size
+            out.append(
+                (v.reshape(-1) * (1.0 + s[ofs : ofs + n] * eps)).reshape(
+                    v.shape
+                )
+            )
+            ofs += n
+        return out
+
+    return perturbed
+
+
+def test_ulp_perturbation_does_not_move_the_polished_start(
+    kelt4_rvonly_polish_inputs,
+):
+    """
+    Given the kelt4 RV-only model and its raw start, with the compiled
+      (lp, grad) multiplied by (1 + s*2**-52) for four seeds -- one ulp of
+      arithmetic difference per evaluation, the size of a cross-runner
+      libm/BLAS-kernel difference,
+    When each is polished by _lbfgs_polish_one under the SHIPPED constants,
+    Then every seed converges (none hits DEFAULT_POLISH_STEPS) and the four
+      polished starts agree in cosi to ~5x the measured 16-seed width and
+      in lp to ~5x its width -- i.e. the stop is a converged optimum, not
+      a first dip on the ridge (review 7.13.8).
+    """
+    from exozippy.polish import DEFAULT_POLISH_STEPS, _lbfgs_polish_one
+
+    model, raw_start, fn, cosi_par = kelt4_rvonly_polish_inputs
+    keys = list(raw_start.keys())
+    shapes = [np.shape(raw_start[k]) for k in keys]
+    sizes = [int(np.asarray(raw_start[k]).size) for k in keys]
+    assert "orbit.cosi_raw" in keys
+
+    # Act
+    cosis, lps, iters, capped = [], [], [], []
+    for seed in _ULP_SEEDS:
+        best, lp0, lp_best, _n_evals, n_iter, hit_cap = _lbfgs_polish_one(
+            raw_start,
+            _ulp_perturbed(fn, keys, seed),
+            keys,
+            shapes,
+            sizes,
+            maxiter=DEFAULT_POLISH_STEPS,
+        )
+        raw = float(np.asarray(best["orbit.cosi_raw"]).reshape(-1)[0])
+        cosis.append(float(cosi_par.element_phys_from_raw(0, raw)))
+        lps.append(lp_best)
+        iters.append(n_iter)
+        capped.append(hit_cap)
+    assert lps[0] > lp0 + 100.0, "the polish did not climb; harness is broken"
+
+    # Assert: converged, not capped
+    assert not any(capped), (
+        f"seeds {[s for s, c in zip(_ULP_SEEDS, capped) if c]} hit the "
+        f"{DEFAULT_POLISH_STEPS}-iteration cap ({iters} iterations). Under the "
+        f"shipped gtol kelt4 needs 240-294; a cap-stop is an unconverged "
+        f"start whose value depends on the arithmetic that produced it."
+    )
+    # Assert: one optimum, whatever the arithmetic
+    cosi_width = max(cosis) - min(cosis)
+    assert cosi_width <= _ULP_COSI_ATOL, (
+        f"one ulp of arithmetic moved the polished cosi by {cosi_width:.3g} "
+        f"({cosis}), more than {_ULP_COSI_ATOL}: the polish is stopping on a "
+        f"first dip of |grad| below _LBFGS_GTOL mid-climb rather than at the "
+        f"basin optimum (review 7.13.8; at gtol 0.01 this width was 4.3e-2). "
+        f"Do not widen this bound -- tighten the stop."
+    )
+    lp_width = max(lps) - min(lps)
+    assert lp_width <= _ULP_LP_ATOL, (
+        f"one ulp of arithmetic moved the polished lp by {lp_width:.3g} nats "
+        f"({lps}); at a converged optimum it moves at second order (~1e-6 "
+        f"here; at the old gtol 0.01 stop it was 0.24)."
+    )
+
+
+# The asynchronous engine (review 2.4.14): ptde_async's procedure for the polish
+# ---------------------------------------------------------------------------
+
+
+class _CallbackPool:
+    """A multiprocessing.Pool stand-in on threads, with the two apply_async
+    shapes the engine uses: callbacks (the async loop) and a handle with
+    ``get(timeout)`` (the opening batch through ``_map_logp_timeout``).
+
+    ``delay(idx)`` is the wall-clock cost of submission ``idx``; ``hang``
+    names submissions that never return until ``release()`` is called.
+    ``completed`` records submission indices in the order their results
+    were delivered, which is what makes non-blocking behaviour observable.
+    """
+
+    def __init__(self, workers=2, delay=None, hang=()):
+        import concurrent.futures
+        import threading
+
+        self._ex = concurrent.futures.ThreadPoolExecutor(workers)
+        self._delay = delay or (lambda idx: 0.0)
+        self._hang = set(hang)
+        self._release = threading.Event()
+        self._lock = threading.Lock()
+        self.n_apply_async = 0
+        self.completed = []
+
+    def release(self):
+        self._release.set()
+        self._ex.shutdown(wait=False)
+
+    def apply_async(self, fn, args, callback=None, error_callback=None):
+        import multiprocessing as mp
+        import time
+
+        idx = self.n_apply_async
+        self.n_apply_async += 1
+
+        def _run():
+            if idx in self._hang:
+                self._release.wait()
+                return None
+            time.sleep(self._delay(idx))
+            try:
+                r = fn(args[0])
+            except Exception as exc:  # pragma: no cover - defensive
+                if error_callback is not None:
+                    error_callback(exc)
+                raise
+            with self._lock:
+                self.completed.append(idx)
+            if callback is not None:
+                callback(r)
+            return r
+
+        fut = self._ex.submit(_run)
+
+        class _Res:
+            def get(self, timeout=None):
+                import concurrent.futures
+
+                try:
+                    return fut.result(timeout=timeout)
+                except concurrent.futures.TimeoutError:
+                    raise mp.TimeoutError
+
+        return _Res()
+
+
+def test_async_de_polish_climbs_to_the_mode_and_reports_its_population(caplog):
+    """
+    Given a pool whose apply_async delivers results through callbacks,
+    When the DE polish runs with the default asynchronous engine,
+    Then it climbs the quadratic to its mode, spends exactly the sweep
+      budget as completed proposals, and the wrap-up says how many members
+      never moved -- the diagnostic 2.4.14 needed and could not get.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    pool = _CallbackPool(workers=3)
+    seeds = [{"x": np.array([0.0])}]
+    n_steps, pop = 40, 8
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        polished, dlps = polish_seed_starts(
+            seeds,
+            _quadratic_logp,
+            np.random.default_rng(0),
+            {"x": np.ones(1)},
+            n_steps=n_steps,
+            pop_size=pop,
+            pool=pool,
+        )
+    pool.release()
+
+    # ASSERT
+    assert abs(float(polished[0]["x"][0]) - 3.0) < 0.5
+    assert dlps[0] > 0
+    # opening batch (pop) + n_steps sweeps of pop proposals
+    assert pool.n_apply_async == pop * (n_steps + 1)
+    assert f"{n_steps} steps x {pop} pop" in caplog.text
+    assert "members never moved" in caplog.text
+    assert "(asynchronous engine)" in caplog.text
+
+
+def test_async_de_polish_does_not_wait_on_a_slow_proposal():
+    """
+    Given one proposal in the first sweep that takes far longer than the rest,
+    When the asynchronous engine runs on two workers,
+    Then many later-submitted proposals complete BEFORE it does: the slow
+      evaluation costs one worker and nothing else waits on it.
+
+    The synchronous batch engine could not do this -- a sweep is one
+    barrier, so at most the rest of that batch (pop - 1 items) can finish
+    ahead of its slowest member.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    pop, n_steps = 8, 12
+    slow = pop + 3  # a first-sweep proposal; 0..pop-1 is the opening batch
+    pool = _CallbackPool(
+        workers=2, delay=lambda idx: 0.4 if idx == slow else 0.0
+    )
+
+    # ACT
+    polish_seed_starts(
+        [{"x": np.array([0.0])}],
+        _quadratic_logp,
+        np.random.default_rng(1),
+        {"x": np.ones(1)},
+        n_steps=n_steps,
+        pop_size=pop,
+        pool=pool,
+    )
+    pool.release()
+
+    # ASSERT: the slow item was delivered long after items submitted after it
+    position = pool.completed.index(slow)
+    assert position >= 3 * pop, (position, pool.completed[: position + 1])
+
+
+def test_async_de_polish_spends_exactly_the_budget_per_seed(caplog):
+    """
+    Given two seeds and the asynchronous engine,
+    When the polish runs to its cap,
+    Then each seed reports exactly n_steps steps and the pool saw exactly
+      n_seeds * pop * (n_steps + 1) submissions: the budget is counted in
+      completed proposals and does not leak across seeds or sweeps.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    pool = _CallbackPool(workers=4)
+    seeds = [{"x": np.array([0.0])}, {"x": np.array([6.0])}]
+    n_steps, pop = 7, 8
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        polish_seed_starts(
+            seeds,
+            _quadratic_logp,
+            np.random.default_rng(3),
+            {"x": np.ones(1)},
+            n_steps=n_steps,
+            pop_size=pop,
+            pool=pool,
+        )
+    pool.release()
+
+    # ASSERT
+    assert pool.n_apply_async == len(seeds) * pop * (n_steps + 1)
+    assert caplog.text.count(f"{n_steps} steps x {pop} pop") == len(seeds)
+
+
+def test_async_de_polish_heartbeats_with_the_sweep_count(caplog):
+    """
+    Given a heartbeat interval every result crosses,
+    When the asynchronous engine runs,
+    Then progress lines carry the sweep count against the cap, elapsed and
+      an upper-bound ETA, in the same shape the synchronous engine logs.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    pool = _CallbackPool(workers=2)
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        polish_seed_starts(
+            [{"x": np.array([0.0])}],
+            _quadratic_logp,
+            np.random.default_rng(0),
+            {"x": np.ones(1)},
+            n_steps=6,
+            pop_size=8,
+            pool=pool,
+            progress_interval_s=1e-9,
+        )
+    pool.release()
+    beats = [
+        r.getMessage()
+        for r in caplog.records
+        if "PTDE seed polish: sweep" in r.getMessage()
+    ]
+
+    # ASSERT
+    assert beats
+    assert any("/6" in b for b in beats)
+    assert all("elapsed=" in b and "eta<=" in b for b in beats)
+
+
+def test_async_de_polish_eval_timeout_writes_off_and_recycles(caplog):
+    """
+    Given a proposal whose evaluation never returns and an eval_timeout,
+    When the asynchronous engine runs with a pool_recycler,
+    Then the stale submission is scored -inf and logged, the recycler is
+      called, the written-off legitimate work is resubmitted, and the polish
+      still spends its full budget and returns a finite point.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    pop, n_steps = 8, 10
+    hung = _CallbackPool(workers=2, hang={pop + 1})
+    fresh = []
+
+    def _recycle(dead):
+        assert dead is hung or dead in fresh
+        new = _CallbackPool(workers=2)
+        fresh.append(new)
+        return new
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        polished, dlps = polish_seed_starts(
+            [{"x": np.array([0.0])}],
+            _quadratic_logp,
+            np.random.default_rng(5),
+            {"x": np.ones(1)},
+            n_steps=n_steps,
+            pop_size=pop,
+            pool=hung,
+            eval_timeout=0.2,
+            pool_recycler=_recycle,
+        )
+    hung.release()
+    for p in fresh:
+        p.release()
+
+    # ASSERT
+    assert fresh, "the recycler was never called"
+    assert "exceeded eval_timeout" in caplog.text
+    assert "recycling the worker pool" in caplog.text
+    assert np.all(np.isfinite(polished[0]["x"]))
+    assert f"{n_steps} steps x {pop} pop" in caplog.text
+    assert dlps[0] > 0
+
+
+def test_polish_raw_starts_forwards_the_engine_choice(monkeypatch):
+    """
+    Given polish_raw_starts on a gradient-free model,
+    When it is called with asynchronous=False,
+    Then the DE engine receives that flag: the pipeline can ask for the
+      bit-reproducible synchronous engine without reaching into ptde.
+    """
+    # ARRANGE
+    import exozippy.polish as polish_mod
+    from exozippy.samplers import ptde as ptde_mod
+
+    seen = {}
+
+    def _spy(raw_starts, logp_fn, rng, scales, **kw):
+        seen.update(kw)
+        return list(raw_starts), [0.0 for _ in raw_starts]
+
+    monkeypatch.setattr(ptde_mod, "polish_seed_starts", _spy)
+    monkeypatch.setattr(polish_mod, "_compile_logp_grad", lambda model: None)
+
+    class _Model:
+        def compile_logp(self):
+            return _quadratic_logp
+
+    # ACT
+    polish_mod.polish_raw_starts(
+        _Model(),
+        [{"x": np.array([0.0])}],
+        n_steps=3,
+        cores=1,
+        asynchronous=False,
+    )
+
+    # ASSERT
+    assert seen["asynchronous"] is False

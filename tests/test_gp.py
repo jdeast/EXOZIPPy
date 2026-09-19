@@ -367,6 +367,37 @@ def test_register_gp_registers_both_terms_independently():
     assert sho_pin[0] == 0.0 and np.isnan(sho_pin[1])
 
 
+def test_register_gp_entries_do_not_share_one_overrides_dict():
+    """
+    Given a term registered on some but not all files (so a pin exists),
+    When one parameter's pin list is mutated in place,
+    Then its siblings are unchanged -- each entry is a deep copy (review
+    2.5.5).
+
+    `dict(entry)` was a SHALLOW copy, so gp_rot_sigma/period/log_q0/log_dq/f
+    shared one nested {"overrides": {"sigma": [...]}} object, and
+    Instrument.add_parameter already mutates a manifest entry in place
+    (detrend_coeffs).  This codebase shipped exactly that aliasing before,
+    in the broadcast shared-dict bug.
+    """
+    inst = _make([{"file": "a.rv", "gp": "rotation"}, {"file": "b.rv"}])
+    manifest = {}
+    inst._register_gp(manifest)
+
+    manifest["gp_rot_sigma"]["overrides"]["sigma"][1] = 5.0
+    manifest["gp_rot_sigma"]["overrides"]["extra"] = True
+
+    for name in gp_support.GP_TERM_PARAMS["rotation"]:
+        if name == "gp_rot_sigma":
+            continue
+        assert manifest[name]["overrides"]["sigma"][1] == 0.0, name
+        assert "extra" not in manifest[name]["overrides"], name
+    assert (
+        manifest["gp_rot_sigma"]["overrides"]
+        is not (manifest["gp_rot_period"]["overrides"])
+    )
+
+
 def test_prepare_gp_sorts_each_file_by_time_and_hints_the_white_noise_level():
     """
     Given interleaved, unsorted observations from two files (only the second
@@ -956,3 +987,114 @@ def test_user_can_override_a_gp_hyperparameter_prior(two_rv_files):
     assert period.sigma[1] == pytest.approx(0.29)
     # the untouched instrument keeps the defaults.yaml start
     assert period.initval[0] != pytest.approx(22.56)
+
+
+# ---------------------------------------------------------------------------
+# 4. The GP labels reach param_deps (review 1.12.9)
+# ---------------------------------------------------------------------------
+def test_gp_dep_labels_names_only_the_terms_that_are_on():
+    """
+    Given an instrument with a rotation GP on one file and no sho anywhere,
+    When gp_dep_labels is asked,
+    Then it returns the built Parameter labels of every ROTATION
+    hyperparameter (the label convention detrend_dep_labels uses) and none
+    of sho's; without any GP it returns [].
+    """
+    from types import SimpleNamespace
+
+    inst = _make([{"file": "a.rv", "gp": "rotation"}, {"file": "b.rv"}])
+    # Stand-ins for the Parameters add_parameter would set, sho's included
+    # (a term that is OFF must not be reported even if a stale attribute
+    # exists).
+    for kind in gp_support.GP_TERMS:
+        for name in gp_support.GP_TERM_PARAMS[kind]:
+            setattr(inst, name, SimpleNamespace(label=f"dummy.{name}"))
+
+    assert inst.gp_dep_labels() == [
+        f"dummy.{name}" for name in gp_support.GP_TERM_PARAMS["rotation"]
+    ]
+
+    assert _make([{"file": "a.rv"}]).gp_dep_labels() == []
+
+
+def _assert_gp_labels_in_every_spec(system, comp, point):
+    labels = [
+        getattr(comp, name).label
+        for kind in gp_support.GP_TERMS
+        if comp._gp_elements(kind)
+        for name in gp_support.GP_TERM_PARAMS[kind]
+    ]
+    assert labels, "fixture has no GP term on"
+
+    # The deps assertion FIRST, so that without the fix this fails on the
+    # defect (no gp_* label in param_deps) rather than on the helper's
+    # absence.
+    specs = comp.plot_data(system, point)
+    assert specs
+    for spec in specs:
+        for label in labels:
+            assert label in spec.param_deps, f"{spec.id}: {label} missing"
+    assert comp.gp_dep_labels() == labels
+
+
+@needs_celerite2_pymc
+def test_rv_gp_hyperparameters_are_param_deps(two_rv_files):
+    """
+    Given an RV system with a rotation GP on one instrument,
+    When plot_data declares its param_deps,
+    Then every gp_rot_* label is among them, on the unphased and the phased
+    chart alike -- the GP conditional mean reaches both in numpy (the
+    model+GP curve; the phased cleaning), so the graph walk cannot see it and
+    without these deps a GP slider in the GUI never re-rendered anything.
+    """
+    system, model = _rv_system(two_rv_files, "rotation")
+    with model:
+        point = system.get_internal_point(model, system.get_raw_start(model))
+    system.compile_plotter_functions(model)
+
+    _assert_gp_labels_in_every_spec(system, system.rvinstrument, point)
+
+
+@needs_celerite2_pymc
+def test_transit_gp_hyperparameters_are_param_deps(tmp_path_factory):
+    """
+    Given a transit system with an sho GP on its one light curve,
+    When plot_data declares its param_deps,
+    Then every gp_sho_* label is among them on every chart (same reasoning
+    as the RV case; transit's unphased curve carries the GP directly and its
+    phased data have it removed).
+    """
+    from exozippy.system import System
+
+    tc = 2459200.0
+    path = tmp_path_factory.mktemp("gp_lc") / "lc.TESS.dat"
+    rng = np.random.default_rng(3)
+    t = np.linspace(tc - 0.25, tc + 0.25, 200)
+    flux = 1.0 - 0.01 * (np.abs(t - tc) < 0.05) + rng.normal(0, 3e-4, t.size)
+    np.savetxt(path, np.column_stack([t, flux, np.full_like(t, 3e-4)]))
+
+    config = {
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "b"}],
+        "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
+        "band": [{"name": "TESS", "filter": "TESS"}],
+        "transit": [
+            {"name": "TESS", "file": str(path), "band": "TESS", "gp": "sho"}
+        ],
+    }
+    params = {
+        "star.A.mass": {"initval": 1.0, "sigma": 0.05},
+        "star.A.radius": {"initval": 1.0, "sigma": 0.1},
+        "star.A.teff": {"initval": 5800, "sigma": 100},
+        "star.A.feh": {"initval": 0.0, "sigma": 0.1},
+        "orbit.b.period": {"initval": 4.0},
+        "orbit.b.tc": {"initval": tc},
+    }
+    system = System(config, user_params=params)
+    system.prepare()
+    model = system.build_model()
+    with model:
+        point = system.get_internal_point(model, system.get_raw_start(model))
+    system.compile_plotter_functions(model)
+
+    _assert_gp_labels_in_every_spec(system, system.transit, point)

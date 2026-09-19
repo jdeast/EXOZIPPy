@@ -33,6 +33,8 @@ import pytensor
 import pytensor.tensor as pt
 from pytensor.graph.replace import vectorize_graph
 
+from exozippy.samplers import convergence, ladder
+
 # Force single-threaded BLAS/OMP in every forked worker.  Without this,
 # numpy (OpenBLAS/MKL) and C extensions (VBBinaryLensing) each spawn their
 # own thread pool, producing n_workers x n_blas_threads threads on a fixed
@@ -1199,14 +1201,25 @@ class RawLayout:
         for key, (a, b, sh) in zip(self.keys, self.slices):
             stored_raw[key][index] = vec[a:b].reshape(sh)
 
-    def propose(self, rng, pop, i, gamma, jitter=DE_JITTER):
+    def propose(self, rng, pop, i, gamma, jitter=DE_JITTER, partners=None):
         """The ter Braak DE-MC move of ``de_proposal``, on packed rows.
 
         ``pop`` is an (n_chains, total) array; returns a new (total,)
         vector.  Draws exactly what de_proposal draws, in the same order.
+
+        ``partners`` supplies the DIFFERENCE VECTOR's population when it is
+        not the same array the base comes from -- ptde_async's snapshot
+        archive (review 2.4.20).  The base stays ``pop[i]``, which is the
+        point whose logp the acceptance test will compare against; taking
+        the base from a stale array instead would propose from a position
+        the chain is not at.  Same rng draws either way (one ``_pick_two``
+        over an equal-length population, one ``standard_normal``), so the
+        bit stream is unchanged and ``partners=pop`` is exactly the old
+        behaviour.
         """
-        j1, j2 = _pick_two(rng, len(pop), i)
-        step = gamma * (pop[j1] - pop[j2])
+        src = pop if partners is None else partners
+        j1, j2 = _pick_two(rng, len(src), i)
+        step = gamma * (src[j1] - src[j2])
         if jitter:
             step = step + jitter * rng.standard_normal(self.total)
         return pop[i] + step
@@ -2069,6 +2082,550 @@ def grow_hot_draw_storage(stored_hot_raw, stored_hot_lp, needed, chunk=None):
     return _grow_storage(
         stored_hot_raw, stored_hot_lp, needed, chunk, axis=2, lp_fill=np.nan
     )
+
+
+# ---------------------------------------------------------------------------
+# Convergence scheduling and the progress hook
+#
+# Moved out of ptde.py, which both samplers were importing them from.  None
+# of the three has anything to do with synchronous versus asynchronous
+# dispatch: when to test for convergence, how to test it, and how to call a
+# GUI callback without letting it kill a fit.
+# ---------------------------------------------------------------------------
+
+
+def _convergence_check_schedule(min_draws=100, growth=0.9):
+    """Yield cumulative draw counts at which to run a convergence check.
+
+    Positions: round(min_draws / growth**j) for j=0,1,2,...
+    Default (growth=0.9): 100, 111, 123, 137, 152, ...
+    Gaps grow by ~11% each check, so we check frequently early and less often later.
+    """
+    j, prev = 0, 0
+    while True:
+        n = round(min_draws / growth**j)
+        if n > prev:
+            yield n
+            prev = n
+        j += 1
+
+
+def _safe_progress(progress_callback, state):
+    """Invoke an optional GUI progress hook without ever letting it break the run.
+
+    The callback (see exozippy.gui.status.GuiReporter.progress_callback) writes
+    monitoring artifacts to disk; a filesystem hiccup there must never abort
+    sampling, so any exception is logged and swallowed.
+    """
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(state)
+    except Exception:
+        logger.warning(
+            "PTDE: progress_callback raised; continuing sampling",
+            exc_info=True,
+        )
+
+
+def _check_convergence(stored_raw, n_draws, min_ess, max_rhat, stored_lp=None):
+    """Live early-stop test on the first ``n_draws`` stored T=1 draws.
+
+    Judges convergence on the trace AFTER dropping stuck chains and trimming
+    a generous fixed burn-in (the last-half tail), so the transient can no
+    longer poison the Rhat/ESS the stop decision reads -- the reason a run
+    with a slow, likelihood-flat degenerate direction otherwise never
+    auto-stops. Rank Rhat/bulk-ESS are transform-invariant, so computing on
+    the raw draws matches the physical report. The precise (ESS-maximizing)
+    burn-in is found once at wrap-up by convergence.find_burnin; here we only
+    need the cheap pass/fail. See samplers/convergence.py.
+
+    Returns (converged, max_rhat_val, min_ess_val). None thresholds are
+    treated as "no limit" for that statistic.
+    """
+    posterior = {key: arr[:, :n_draws] for key, arr in stored_raw.items()}
+    lp = stored_lp[:, :n_draws] if stored_lp is not None else None
+    try:
+        return convergence.converged_on_tail(posterior, lp, min_ess, max_rhat)
+    except Exception:
+        return False, float("nan"), float("nan")
+
+
+def validate_shared_ptde_args(swap_schedule, de_mode_hop, label):
+    """Validate the knobs run.py forwards to BOTH PTDE loops.
+
+    The question worth asking of anything run.py hands to both samplers is
+    not "is this knob validated" but "is it validated by exactly ONE of
+    them" -- reviews 1.4.3 and 2.4.16.  It was: `swap_schedule` was checked
+    in both (two copies of one `if`), while `de_mode_hop` was checked only
+    in ptde_async, so `de_mode_hop: 1.5` raised under one method and, under
+    the other, silently became a hop probability above 1 in a sampler that
+    reads it as one.
+
+    Returns the coerced hop probability so the caller has one source for it.
+    """
+    if swap_schedule not in ("deo", "random"):
+        raise ValueError(
+            f"{label}: swap_schedule must be 'deo' or 'random', got "
+            f"{swap_schedule!r}"
+        )
+    hop = float(de_mode_hop or 0.0)
+    if not 0.0 <= hop < 1.0:
+        raise ValueError(f"{label}: de_mode_hop must be in [0, 1), got {hop}")
+    return hop
+
+
+def progress_state(
+    n_draws,
+    n_chains,
+    max_rhat,
+    min_ess,
+    start_time,
+    converged,
+    stored_raw,
+    stored_lp,
+    raw_var_names,
+):
+    """The nine-key payload the GUI progress hook receives.
+
+    samplers.md lists this as one of the paths "most likely to drift": it was
+    written out verbatim in both loops, so a new key would land in one of
+    them.  The only thing that differed was the FIRST value -- sync counts
+    draws taken, async the draw index it just checked at -- so that is the
+    argument and the other eight are not.
+    """
+    return {
+        "n_draws": n_draws,
+        "n_chains": n_chains,
+        "max_rhat": max_rhat,
+        "min_ess": min_ess,
+        "elapsed_s": time.time() - start_time,
+        "stop_reason": "converged" if converged else None,
+        "stored_raw": stored_raw,
+        "stored_lp": stored_lp,
+        "raw_var_names": raw_var_names,
+    }
+
+
+class PtdeRun:
+    """Everything both PTDE loops build before their first proposal.
+
+    `samplers.md` is right that the LOOPS must stay separate -- async is
+    completion-driven (a result queue, a wall-clock stale scan, per-chain
+    counters) and sync is step-driven (a blocking batch gather, one step
+    counter) -- and folding them would re-derive the asynchrony ptde_async
+    exists for.  But "two loops" was being used to justify "two copies of
+    everything around the loops", and the measurement did not support it:
+    after the HotChainRecorder extraction the two files still shared 146
+    lines of verbatim text, and the count had gone UP, because moving logic
+    into _common costs a 12-to-16-argument call at each of two sites.
+
+    The prologue is not a loop.  It validates, resolves the ladder and the
+    chain count, compiles the logp and the conversions, builds the rung
+    populations, plots the start ensemble and arms the hot recorder -- in
+    that order, for both samplers, with the same arguments.  The only things
+    that ever differed were the label and one `gamma` log line that spelled
+    itself with a unicode gamma in one file and "gamma" in the other.
+
+    THE ORDER IS LOAD-BEARING, not stylistic.  `rng` is constructed from the
+    seed and then consumed by build_rung_populations; anything that consumed
+    it earlier, or a build_rung_populations that ran before the ladder was
+    resolved, would move every subsequent random number and break the
+    bit-identical proposal path that tests/test_ptde.py pins.  Keeping that
+    sequence in ONE function is the point: it can no longer drift between
+    the two samplers, because there is only one of it.
+    """
+
+    __slots__ = (
+        "label",
+        "log",
+        "rng",
+        "raw_start",
+        "model_keys",
+        "n_params",
+        "n_temps",
+        "temperatures",
+        "logp_fn",
+        "raw_to_phys",
+        "raw_to_phys_batched",
+        "raw_var_names",
+        "out_var_names",
+        "n_chains",
+        "gamma",
+        "t1_starts",
+        "chain_seed_index",
+        "rung_starts",
+        "layout",
+        "hot",
+        "lp_guard",
+        "de_mode_hop",
+        "draws",
+    )
+
+    def __init__(self, **kw):
+        for k in self.__slots__:
+            setattr(self, k, kw.get(k))
+
+
+def prepare_ptde_run(
+    model,
+    system,
+    *,
+    label,
+    log,
+    draws,
+    tune,
+    n_temps,
+    T_max,
+    n_chains,
+    gamma,
+    seed,
+    swap_schedule,
+    de_mode_hop,
+    initvals,
+    raw_starts,
+    seed_indices,
+    raw_scales,
+    start_dispersion,
+    plot_prefix,
+    lp_plausibility_ceiling,
+    collect_rung_timing,
+    store_hot_chains,
+):
+    """Build the shared prologue for either PTDE sampler.  See PtdeRun."""
+    de_mode_hop = validate_shared_ptde_args(swap_schedule, de_mode_hop, label)
+    lp_guard = LpPlausibilityGuard(lp_plausibility_ceiling, label, log)
+    rng = np.random.default_rng(seed)
+
+    # Parameter bookkeeping BEFORE the ladder, since n_temps may be "auto"
+    # and is sized from the parameter count (see resolve_n_temps).
+    raw_start = system.get_raw_start(model)
+    model_keys = list(raw_start.keys())
+    n_params = sum(v.size for v in raw_start.values())
+    n_temps = ladder.resolve_n_temps(n_temps, n_params, T_max)
+    temperatures = ladder._geometric_ladder(n_temps, T_max)
+
+    # Compile the logp ONCE and install it in _common BEFORE forking workers,
+    # so fork children inherit it copy-on-write (see set_worker_globals).
+    # PositionalLogp calls it by position rather than through pymc's dict
+    # wrapper: same value, ~3.5x less call overhead on a 20-variable model
+    # (review 6.4.3).
+    logp_fn = PositionalLogp(model.compile_logp())
+    set_worker_globals(logp_fn, collect_rung_timing)
+
+    raw_to_phys, raw_to_phys_batched, raw_var_names, out_var_names = (
+        compile_conversions(model)
+    )
+
+    n_chains = resolve_n_chains(n_chains, n_params, label, log)
+    if gamma is None:
+        gamma = 2.38 / np.sqrt(2 * n_params)
+    log.info(
+        f"{label}: {n_params} params, {n_chains} chains/rung, "
+        f"gamma={gamma:.4f}"
+    )
+
+    t1_starts, chain_seed_index, rung_starts, _dispersions, _disp_desc = (
+        build_rung_populations(
+            model,
+            system,
+            n_chains,
+            logp_fn,
+            rng,
+            raw_start,
+            temperatures,
+            start_dispersion,
+            initvals=initvals,
+            raw_starts=raw_starts,
+            seed_indices=seed_indices,
+            raw_scales=raw_scales,
+            n_params=n_params,
+            log=log,
+        )
+    )
+
+    plot_start_ensemble(
+        system,
+        t1_starts,
+        raw_to_phys_batched,
+        raw_var_names,
+        out_var_names,
+        plot_prefix,
+        log,
+    )
+
+    layout = RawLayout(raw_start, model_keys)
+    hot = HotChainRecorder(
+        store_hot_chains,
+        system,
+        n_temps,
+        n_chains,
+        n_params,
+        model_keys,
+        raw_start,
+        raw_to_phys,
+        raw_var_names,
+        draws,
+        layout,
+        label,
+        log,
+    )
+    return PtdeRun(
+        label=label,
+        log=log,
+        rng=rng,
+        raw_start=raw_start,
+        model_keys=model_keys,
+        n_params=n_params,
+        n_temps=n_temps,
+        temperatures=temperatures,
+        logp_fn=logp_fn,
+        raw_to_phys=raw_to_phys,
+        raw_to_phys_batched=raw_to_phys_batched,
+        raw_var_names=raw_var_names,
+        out_var_names=out_var_names,
+        n_chains=n_chains,
+        gamma=gamma,
+        t1_starts=t1_starts,
+        chain_seed_index=chain_seed_index,
+        rung_starts=rung_starts,
+        layout=layout,
+        hot=hot,
+        lp_guard=lp_guard,
+        de_mode_hop=de_mode_hop,
+        draws=draws,
+    )
+
+
+def finish_ptde_run(
+    run,
+    stored_raw,
+    stored_lp,
+    actual_draws,
+    *,
+    early_stop_detail="",
+    summary_kwargs,
+    hop_counts=(0.0, 0.0),
+    rung_times=None,
+    notes=(),
+):
+    """Build the InferenceData and emit the wrap-up logs, for either loop.
+
+    The epilogue is as shared as the prologue: refuse an empty run, say so if
+    it stopped early, assemble the trace, attach the hot group, stamp the
+    ladder statistics, report the mode hops and the ladder health.  What
+    varies is text and counters, so those are arguments: `early_stop_detail`
+    is appended to the early-stop line (async names the stop reason and the
+    furthest-ahead chain; sync has neither concept), `summary_kwargs` is
+    passed through to stamp_and_log_run_summary, and `notes` are warnings
+    emitted after the ladder report (async's "adapt_ladder never fired").
+    """
+    label, log = run.label, run.log
+    if actual_draws == 0:
+        # The phrase "no draws were collected" is the observable contract
+        # here -- tests/test_ptde.py matches on it -- so the unified message
+        # keeps it verbatim rather than paraphrasing.
+        raise RuntimeError(
+            f"{label}: sampling stopped -- no draws were collected"
+        )
+    if actual_draws < run.draws:
+        log.info(
+            f"{label}: early stop -- {actual_draws}/{run.draws} draws "
+            f"collected{early_stop_detail}"
+        )
+
+    idata = assemble_inference_data(
+        stored_raw,
+        stored_lp,
+        actual_draws,
+        run.n_chains,
+        run.raw_start,
+        run.raw_var_names,
+        run.out_var_names,
+        run.raw_to_phys_batched,
+        run.chain_seed_index,
+        label,
+        log,
+    )
+    run.hot.attach(idata, run.temperatures, log)
+
+    # Ladder communication statistics, stamped on the trace so the mode
+    # report can quote them as context.
+    stamp_and_log_run_summary(
+        idata,
+        label,
+        log,
+        actual_draws=actual_draws,
+        draws=run.draws,
+        **summary_kwargs,
+    )
+    log_mode_hop_summary(
+        label, log, run.de_mode_hop, hop_counts[0], hop_counts[1]
+    )
+    # Module-attribute lookup, not a from-import: a test that spies on the
+    # wrap-up barrier patches exozippy.samplers.ladder.ladder_health_report
+    # and has to be able to reach it here.
+    ladder.ladder_health_report(
+        run.temperatures,
+        summary_kwargs["n_swap_accept"],
+        summary_kwargs["n_swap_propose"],
+    )
+    for note in notes:
+        log.warning(note)
+    if rung_times is not None:
+        log_rung_timing(rung_times, run.temperatures, label, log)
+    return idata
+
+
+class HotChainRecorder:
+    """Thinned hot-rung retention (``store_hot_chains``), for BOTH PTDE loops.
+
+    The pieces were already shared -- resolve_store_hot_chains,
+    hot_draw_chunk, grow_hot_draw_storage and RawLayout.store_draw all live
+    here -- but the WIRING lived in ptde_async.py, in three places: the
+    buffer allocation, the store site inside the loop, and the ~50-line
+    xarray block that attaches the ``posterior_hot`` group.  So `ptde` had
+    no way to honor the key and warned that it was ignored, which is not a
+    synchronous-versus-asynchronous difference at all: nothing about keeping
+    a thinned copy of the hot rungs depends on how proposals are scheduled.
+    The A/B on DC2018-194 is what made that concrete -- the sync arm's
+    config carried store_hot_chains, run.py forwarded it, and the sampler
+    replied "IGNORED", so the arm that converged was also the one arm with
+    no suppressed-mode detector and the comparison was not like for like.
+
+    What stays at the call site is exactly the asynchronous bit: WHICH
+    COUNTER thins.  ptde_async passes each chain's own iteration count (its
+    chains advance independently); ptde passes the step-synchronous draw
+    index.  Both mean "one hot sample per `thin`", counted in the only unit
+    each loop has.
+    """
+
+    def __init__(
+        self,
+        spec,
+        system,
+        n_temps,
+        n_chains,
+        n_params,
+        model_keys,
+        raw_start,
+        raw_to_phys,
+        raw_var_names,
+        draws,
+        layout,
+        label,
+        log,
+    ):
+        # The trace-share denominator counts PHYSICAL elements (sampled plus
+        # every Deterministic), so it has to come from a real conversion of
+        # the start point rather than from the raw count.  Computed here so
+        # neither loop carries its own copy of the expression.
+        n_out_elements = sum(
+            int(np.asarray(v).size)
+            for v in raw_to_phys(
+                *[np.asarray(raw_start[k]) for k in raw_var_names]
+            )
+        )
+        self.spec = spec
+        self.label = label
+        self.thin = resolve_store_hot_chains(
+            spec, system, n_temps, n_params, n_out_elements, label, log
+        )
+        self.n_temps = n_temps
+        self.n_chains = n_chains
+        self._layout = layout
+        self._keys = list(model_keys)
+        self._raw_start = raw_start
+        # The LOGICAL per-(rung, chain) cap the store site tests against;
+        # the allocation is only a starting capacity and grows in chunks the
+        # way the T=1 buffers do (review 6.4.6).
+        self.cap = max(1, draws // self.thin) if self.thin else 0
+        if self.thin:
+            cap0 = min(self.cap, hot_draw_chunk(n_temps - 1))
+            self.raw = {
+                k: np.zeros((n_temps - 1, n_chains, cap0) + raw_start[k].shape)
+                for k in self._keys
+            }
+            self.lp = np.full((n_temps - 1, n_chains, cap0), np.nan)
+            self.n_stored = np.zeros((n_temps - 1, n_chains), dtype=int)
+        else:
+            self.raw = self.lp = self.n_stored = None
+
+    @property
+    def enabled(self):
+        return bool(self.thin)
+
+    def maybe_store(self, rung, chain, state, lp, counter):
+        """Store one hot draw if `counter` lands on the thinning stride.
+
+        ``rung`` is the LADDER index, so rung 0 (T=1) is never stored here --
+        that is the cold group's job.  ``lp`` must be the UNtempered logp, so
+        hot values stay directly comparable to T=1; tempering belongs to the
+        acceptance rule, not to what is recorded.  Returns whether a draw
+        was written, which is what a test can assert on.
+        """
+        if not self.thin or rung < 1:
+            return False
+        if counter % self.thin:
+            return False
+        j = rung - 1
+        d = int(self.n_stored[j, chain])
+        if d >= self.cap:
+            return False
+        self.lp = grow_hot_draw_storage(self.raw, self.lp, d + 1)
+        self._layout.store_draw(self.raw, state, j, chain, d)
+        self.lp[j, chain, d] = lp
+        self.n_stored[j, chain] = d + 1
+        return True
+
+    def attach(self, idata, temperatures, log):
+        """Add the ``posterior_hot`` group to a built InferenceData."""
+        if not self.thin:
+            return idata
+        import xarray as xr
+
+        # Rectangular cut at the shortest hot chain (rungs run at slightly
+        # different speeds); rungs x chains flatten into one 'chain' dim
+        # with a per-chain temperature coordinate, which round-trips
+        # through netcdf.
+        n_hot = int(self.n_stored.min())
+        if n_hot <= 0:
+            log.warning(
+                f"{self.label}: store_hot_chains was set but no hot draws "
+                f"accumulated (draws too small for the thinning factor?)"
+            )
+            return idata
+        n_hot_chains = (self.n_temps - 1) * self.n_chains
+        data_vars = {}
+        for key in self._keys:
+            arr = self.raw[key][:, :, :n_hot].reshape(
+                (n_hot_chains, n_hot) + self._raw_start[key].shape
+            )
+            dims = ("chain", "draw") + tuple(
+                f"{key}_dim_{j}" for j in range(arr.ndim - 2)
+            )
+            data_vars[str(key)] = (dims, arr)
+        data_vars["lp"] = (
+            ("chain", "draw"),
+            self.lp[:, :, :n_hot].reshape(n_hot_chains, n_hot),
+        )
+        idata["posterior_hot"] = xr.Dataset(
+            data_vars,
+            coords={
+                "chain": np.arange(n_hot_chains),
+                "draw": np.arange(n_hot),
+                "temperature": (
+                    "chain",
+                    np.repeat(np.asarray(temperatures[1:]), self.n_chains),
+                ),
+            },
+        )
+        log.info(
+            f"{self.label}: stored {n_hot} thinned hot draws/chain from "
+            f"{self.n_temps - 1} rungs x {self.n_chains} chains "
+            f"(store_hot_chains={self.spec}, thin={self.thin})"
+        )
+        return idata
 
 
 def stamp_and_log_run_summary(

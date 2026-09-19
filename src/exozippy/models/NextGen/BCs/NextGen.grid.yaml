@@ -10,7 +10,14 @@ grid:
         9400.,  9600.,  9800., 10000.]
   logg: [0. , 0.5, 1. , 1.5, 2. , 2.5, 3. , 3.5, 4. , 4.5, 5. ]
   feh: [-4. , -3.5, -3. , -2.5, -2. , -1.5, -1. , -0.5,  0. ,  0.3,  0.5]
+  # BULGE_AV_PTS: the original 13 points VERBATIM, plus 8-20 at the same
+  # 2-mag cadence the axis already used above Av = 2.  Extended, not
+  # refined, so every pre-existing row is bit-identical.  The fit path does
+  # NOT read this list -- sed.py::_inject_grid_bounds calls
+  # bc_grid.peek_grid_axes, which reads the tables themselves -- but
+  # slice_bc and sed/plot.py do, so it has to agree with them.
   av: [0.  , 0.05, 0.1 , 0.15, 0.2 , 0.3 , 0.4 , 0.6 , 0.8 , 1.  , 2.  ,
-       4.  , 6.  ]
+       4.  , 6.  , 8.  , 10.  , 12.  , 14.  , 16.  , 18.  , 20.  ]
 url: "https://svo2.cab.inta-csic.es/theory/newov2/ssap.php?model=bt-nextgen-agss2009"
 note: "url links to a raw html table of all grid values and their associated IDs that can be used for retrieval; this is for the raw spectra"
+citation: "Allard:2012, Allard:2011, Asplund:2009, Barber:2006"

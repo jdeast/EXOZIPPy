@@ -394,6 +394,21 @@ def build_mode_reports(
     # populate the parameters with the posteriors
     system.distribute_posterior(idata)
 
+    # Every sampled element against a hard bound, with the component's own
+    # remedy (review 8.2.2).  Here and not in run.py's wrap-up loop because
+    # this is the first point at which every Parameter carries its
+    # posterior, and a check that reads the trace directly would have to
+    # re-derive the bounds the frozen transform already owns.
+    try:
+        from ..diagnostics import warn_posterior_near_bounds
+
+        warn_posterior_near_bounds(system)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Near-bound posterior check failed; continuing without it",
+            exc_info=True,
+        )
+
     # The ledger's rejected-seed rows are mode-keyed ('rejected-seed<k>'),
     # so the CSV must carry the mode columns even when the surviving
     # posterior is unimodal -- otherwise a 4-column header would sit over a

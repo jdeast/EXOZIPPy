@@ -393,11 +393,14 @@ class Star(Component):
           constrained -- weakly, and then it is useful to find out how weak"
           case.
         * **evolutionarymodel** -- a track indexes (initfeh, eep) and returns
-          the present-day structure, so it reads all three of any star that
-          opted in via ``mist:``/``parsec:``.  No such component ships; the
-          branch fires on the config key, exactly as the age/initfeh/eep
-          declaration does, so a premature block does not silently deactivate
-          what it is about to want.
+          the present-day structure, so it reads all three of every star an
+          instance NAMES (``star_indices``, the mann/torres idiom).  Not the
+          ``mist:``/``parsec:`` switches: those default to opted-in, so they
+          answer "did this star ask for a track" rather than "did a block
+          give it one", and marking on them left radius/teff/feh free on
+          stars nothing reads.  Where the config names a block no component
+          backs, the switches are still the fallback, so a premature block
+          does not silently deactivate what it is about to want.
         * **mulensinstrument/lens** -- ``rho``'s deps are
           ``star.radius[source_map]``, and ONLY under ``finite_source``.
           This is review 3.8.1's actual defect: the old blanket pin fixed
@@ -434,14 +437,35 @@ class Star(Component):
             for param in self.STRUCTURE_PARAMS:
                 _mark("sed", param, all_stars)
 
-        if _in_topology("evolutionarymodel"):
-            opted = [
-                i
-                for i, (m, p) in enumerate(zip(self.mist, self.parsec))
-                if m or p
-            ]
+        # Ask the component which stars it names, exactly as mann and torres
+        # are asked below -- `star_indices` is set in load_data (stage 1), so
+        # it satisfies this method's "nothing built in stage 3" rule.
+        #
+        # `mist:` DEFAULTS TO TRUE, so the switches answer "did this star ask
+        # for a track", which is strictly weaker than "did a block give it
+        # one": every star in a config carrying an evolutionarymodel block is
+        # opted in by that default.  Marking on the switches therefore held
+        # radius/teff/feh free on stars no block names -- measured on a
+        # two-star system with a block naming only A and nothing else reading
+        # them, star B's three went active and its feh had a logp gradient of
+        # exactly zero.  `in_topology` returns the INSTANCE when a component
+        # backs the key and the raw CONFIG when nothing does, so the absent
+        # `star_indices` is what selects the premature-block fallback; an
+        # instance that names no star returns [] and correctly marks nothing.
+        evol = in_topology(system, "evolutionarymodel")
+        if evol is not None:
+            stars = getattr(evol, "star_indices", None)
+            if stars is None:
+                # A premature block: no component to ask, so keep the
+                # conservative answer rather than deactivating what the
+                # component about to land will want.
+                stars = [
+                    i
+                    for i, (m, p) in enumerate(zip(self.mist, self.parsec))
+                    if m or p
+                ]
             for param in self.STRUCTURE_PARAMS:
-                _mark("evolutionarymodel", param, opted)
+                _mark("evolutionarymodel", param, stars)
 
         event = getattr(system, "mulensevent", None)
         if event is not None and getattr(event, "finite_source", False):

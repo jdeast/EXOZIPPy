@@ -45,7 +45,7 @@ def kelt4_result(tmp_path_factory):
         work_dir,
         # ".#*"/"#*#" are emacs lock/autosave droppings; the lock is a
         # dangling symlink that would abort the copy.
-        ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"),
+        ignore=shutil.ignore_patterns("fitresults*", ".#*", "#*#"),
     )
 
     orig_cwd = os.getcwd()
@@ -123,11 +123,10 @@ def test_run_fit_kelt4_trace_has_expected_variables(kelt4_result):
 # it is a lottery: the same assertion on planet.mass has been observed at
 # 0.81, 2.870, 5.7693 (local, on plain master), 6.724 and 8.718 (CI) while
 # nothing about the fit was wrong.  It cost three separate triages.  The
-# start, by contrast, is reproducible: the polish has no RNG, so seven
-# consecutive runs on one box under the same conditions gave BIT-IDENTICAL
-# start values (what a CHANGE of conditions does to them is the next block
-# down).  See review 7.13.6 and run.md's section on Model.initial_point()
-# being the start.
+# start, by contrast, is reproducible: the polish has no RNG, so repeated
+# runs on one box under one arithmetic give BIT-IDENTICAL start values (what
+# a CHANGE of arithmetic does to them is the next block down).  See review
+# 7.13.6 and run.md's section on Model.initial_point() being the start.
 #
 # GOLDEN VALUES, ON PURPOSE.  These numbers are the whole point: an
 # intentional change to where the sampler begins (a new polish, a re-centered
@@ -135,73 +134,98 @@ def test_run_fit_kelt4_trace_has_expected_variables(kelt4_result):
 # so the move is visible in the diff and has to be justified in the commit
 # that makes it.  Review 1.3.6 was a wrong default start that survived months
 # precisely because nothing in the suite asserted where the sampler begins.
-# Recorded 2026-09-14 against 1fed94c1, i.e. after batch 4F (PR #265)
-# re-centered the whitening anchor on the polished start.
+# First recorded 2026-09-14 against 1fed94c1 (after batch 4F, PR #265,
+# re-centered the whitening anchor on the polished start); re-recorded the
+# same day when review 7.13.8 moved the polish's stop (below).
 #
-# WHY THE TOLERANCES ARE WHAT THEY ARE, AND WHY EACH QUANTITY NEEDS ITS OWN.
-# Bit-identical on ONE box, run one way, is not portable.  MEASURED on all
-# four shipped CI combinations plus the dev box run BOTH solo and inside the
-# full -n6 suite -- six environments, 2026-09-14:
+# WHY THE TOLERANCES ARE WHAT THEY ARE: THE VALUE IS POST-OPTIMIZER.
+# Everything asserted here except the build logp is the output of an
+# ITERATIVE OPTIMIZER (polish.py's L-BFGS-B, stopping on |grad|_inf <
+# polish._LBFGS_GTOL nats/unit), and an optimizer's endpoint moves with ANY
+# difference in the arithmetic that fed it, of any size.  Not load, not
+# thread count, not the pytensor cache, not PYTHONHASHSEED -- fifteen
+# same-machine runs varying all of those (load to 28.9) were bit-identical
+# (review 7.13.8).  What moved it across CI runners was a different
+# OpenBLAS kernel inside scipy's OWN L-BFGS-B bookkeeping (a different
+# runner CPU picks a different DYNAMIC_ARCH kernel; the compiled objective
+# has no BLAS op at all): that changes one iterate by ONE ULP at evaluation
+# 4, and the stop then lands somewhere else on the same basin.  Cross-
+# platform libm/compiler/SIMD differences are >= 1 ulp by construction, so
+# this cannot be removed; it can only be kept from being AMPLIFIED.
 #
-#   run              star.A.logmass  planet.b.mass  orbit.b.cosi   m sin i    start lp
-#   dev box solo       0.08057130     0.96736983     0.50545129  0.83470003  -601.1 -> 81.4
-#   dev box -n6        0.08054904     0.96234938     0.49730418  0.83491147  -601.1 -> 81.4
-#   CI ubuntu 3.12     0.08047306     0.96681714     0.50424569  0.83490484  -601.1 -> 81.4
-#   CI ubuntu 3.13     0.08047306     0.96681714     0.50424569  0.83490484  -601.1 -> 81.4
-#   CI ubuntu 3.14     0.08057639     0.96445481     0.50099724  0.83468634  -601.1 -> 81.4
-#   CI macOS 3.12      0.08073805     0.96338280     0.49789929  0.83547914  -601.1 -> 81.4
+# THE AMPLIFIER WAS THE STOP, AND IT IS FIXED (review 7.13.8, JDE
+# 2026-09-14).  At the old gtol = 0.01 the polish stopped on the FIRST
+# evaluation to dip under the threshold -- one of 177, the one before it
+# read 0.017 -- 0.507 nats below the basin optimum (81.440 against 81.947),
+# on a tc/logP ridge with Hessian condition number 5.4e6, at iteration 148
+# of a 150 cap.  On that shoulder 1 ulp of arithmetic moved cosi by 8.5%.
+# At the shipped gtol = 1e-4 (cap 400) the polish reaches the basin optimum
+# and the same perturbation moves cosi by 8.6e-4; that is the ~20x
+# tightening of every tolerance below against the first version of this
+# file, and it is why the golden values themselves changed (cosi 0.50545 ->
+# 0.50012, lp 81.4 -> 81.9).
 #
-#   full width        2.65e-4 dex    5.2e-3 rel     1.6e-2 rel   9.5e-4 rel      0
+# HOW THE TOLERANCES ARE CALIBRATED, AND THE RULE.  Never calibrate a
+# post-optimizer golden value from repeated runs of one environment: seven
+# bit-identical solo runs opened the first version of this test and proved
+# nothing, and six environments (dev box solo and under -n6, four CI
+# combinations) were a six-point SAMPLE from a distribution nobody had
+# measured -- one whose full width turned out to be 5x the six-point
+# spread.  The calibration is the ULP-PERTURBATION HARNESS instead: run
+# polish._lbfgs_polish_one from this fixture's raw start with the compiled
+# (lp, grad) multiplied by (1 + s * 2**-52), s in {-1, 0, +1} a hash of (x,
+# component, seed) -- i.e. "the same function, computed by a different but
+# equally correct arithmetic" -- for 16 seeds, and read the full width.
+# tests/test_polish.py::test_ulp_perturbation_does_not_move_the_polished_start
+# runs a 4-seed version of it on every CI run.  Measured 2026-09-14 under
+# the shipped constants (seed 0 unperturbed = the golden values):
 #
-# THREE THINGS THAT COST A RED RUN EACH, all of them the same underlying
-# fact -- the value asserted is POST-POLISH and the polish is an ITERATIVE
-# optimizer terminating on |grad| < 0.01 nats/unit, so anything that
-# perturbs the arithmetic moves where that test first passes and the run
-# lands somewhere else on the same basin floor.
+#   quantity         golden (seed 0)  16-seed full width   tolerance  headroom
+#   star.A.logmass   0.08052772       2.4e-6 dex           2.0e-5 dex   8x
+#   planet.b.mass    0.96091637       3.0e-4 rel           2.0e-3 rel   7x
+#   orbit.b.logP     0.47554391       1.1e-7 dex           2.0e-5 dex   180x
+#   orbit.b.cosi     0.50012485       8.6e-4 rel           5.0e-3 rel   6x
+#   m sin i          0.83210871       2.6e-5 rel           2.0e-4 rel   8x
+#   polished lp      81.947279        9.1e-7 nats          0.2 nats     (print)
+#   iterations       268              240-294, 0 of 16 capped
 #
-# (1) IT IS NOT float NOISE.  It is five orders of magnitude above the ~1e-9
-#     build difference of review 3.14.20, which the first version cited.
+# For comparison the SAME harness at the old gtol = 0.01 / cap 150 gives
+# 2.7e-4 dex, 2.1e-2, 3.1e-6 dex, 8.5e-2, 9.5e-3 and 0.24 nats, with 3 of
+# 16 seeds hitting the cap -- which is why the old 5e-2 cosi tolerance was
+# not loose but MARGINAL, and the old 0.2-nat logp tolerance was already
+# narrower than the distribution it sat in.  The cosi tolerance also has a
+# first-principles ceiling: with cosi's Schur-complement curvature 0.0044
+# nats/raw^2 the |grad| < 1e-4 stopping set spans +/-0.023 raw = +/-5e-4
+# in cosi, about 2e-3 relative, so 5e-3 is above the WORST case the stop
+# admits, not only 6x the sample.
 #
-# (2) IT IS NOT CROSS-MACHINE ONLY, AND IT IS NOT EVEN PER-PLATFORM
-#     DETERMINISTIC.  The same box disagrees with itself solo vs under the
-#     -n6 suite, because the polish's BLAS is multithreaded and partitions
-#     its work by machine LOAD.  And the three ubuntu Pythons agreed to the
-#     last digit on one CI run and 3.14 then diverged on the next, so
-#     "platform, not interpreter" -- which an earlier version of this
-#     comment asserted -- is WRONG: there is run-to-run variation within a
-#     platform too.  The practical rule: a golden value downstream of an
-#     optimizer cannot be calibrated from repeated runs of one condition,
-#     however many.  Seven bit-identical solo runs opened this PR and proved
-#     nothing about portability.
-#
-# (3) THE SCATTER IS NOT UNIFORM ACROSS PARAMETERS, AND THAT IS PHYSICS
-#     RATHER THAN NOISE.  Ranked by how far each moves over those six runs:
-#       start logp      0          stationary at an optimum (see below)
-#       orbit.b.logP    4.1e-7 dex pinned by the data
-#       star.A.logmass  2.7e-4 dex pinned by its Gaussian prior
-#       m sin i         9.5e-4     what the RV data actually constrains
-#       planet.b.mass   5.2e-3     m sin i / sin i, so it inherits cosi
-#       orbit.b.cosi    1.6e-2     THE FLAT DIRECTION: RVs say nothing
-#     A single tolerance across that range is either vacuous at the top or
-#     red at the bottom.  `orbit.b.cosi` therefore gets its own, and the
-#     hierarchy itself is the useful thing: if cosi ever stops being the
-#     loosest row, something has started constraining the inclination.
+# THE SCATTER IS NOT UNIFORM ACROSS PARAMETERS, AND THAT IS PHYSICS RATHER
+# THAN NOISE.  Ranked by the harness width: the start logp (stationary at
+# the optimum, second order), orbit.b.logP (pinned by the data),
+# star.A.logmass (pinned by its Gaussian prior), m sin i (what the RV data
+# actually constrains), planet.b.mass (m sin i / sin i, so it inherits cosi)
+# and orbit.b.cosi (THE FLAT DIRECTION: RVs say nothing).  A single
+# tolerance across that range is either vacuous at the top or red at the
+# bottom, so `orbit.b.cosi` gets its own, and the hierarchy itself is the
+# useful thing: if cosi ever stops being the loosest row, something has
+# started constraining the inclination.
 #
 # And the tolerance is applied in each quantity's OWN domain -- absolute in
 # dex for a dex/log quantity, relative for a linear one.  Applying a single
 # rtol to everything is what broke the first version of this test:
-# star.A.logmass is only 0.08, so 2.65e-4 of dex scatter reads as 3.3e-3
-# RELATIVE and blew an rtol of 1e-3, while the same scatter in the physical
-# mass is 6.1e-4 and would have passed.  A relative tolerance on a quantity
-# whose zero is arbitrary measures the offset, not the error.
+# star.A.logmass is only 0.08, so dex scatter reads as ~40x larger RELATIVE
+# than the same scatter in the physical mass.  A relative tolerance on a
+# quantity whose zero is arbitrary measures the offset, not the error.
 #
-# Every tolerance below is now calibrated from that six-environment table
-# with 3-11x headroom.  A real start regression is far larger: review 1.3.6
-# moved planet.mass by 8%.
-KELT4_DEX_ATOL = 3.0e-3  # dex, log/dex quantities (11x observed)
-KELT4_LINEAR_RTOL = 2.5e-2  # relative, linear quantities (4.8x observed)
-KELT4_FLAT_RTOL = 5.0e-2  # relative, the prior-dominated flat direction
-#                           (cosi; 3.1x observed)
+# A real start regression is far larger than any of these: review 1.3.6
+# moved planet.mass by 8%, and the 7.13.8 stop change itself moved cosi by
+# 1.1% -- both would have been red under the tolerances below, and the
+# second WAS the visible, justified edit this file exists to force.
+KELT4_DEX_ATOL = 2.0e-5  # dex, log/dex quantities (8x the harness width)
+KELT4_LINEAR_RTOL = 2.0e-3  # relative, linear quantities (7x)
+KELT4_FLAT_RTOL = 5.0e-3  # relative, the prior-dominated flat direction
+#                           (cosi; 6x the harness width, above the
+#                           stopping-set ceiling)
 
 # The keys are the STARTUP TABLE's per-element display labels, which are not
 # the trace's variable names (planet.b.mass here, planet.mass there).
@@ -209,13 +233,13 @@ KELT4_FLAT_RTOL = 5.0e-2  # relative, the prior-dominated flat direction
 # "flat" -> KELT4_FLAT_RTOL (a direction the data does not constrain).
 KELT4_START = {
     # label            value        units           kind
-    "star.A.logmass": (0.08057130, "dex(solMass)", "dex"),
-    "planet.b.mass": (0.96736983, "jupiterMass", "linear"),
-    "orbit.b.logP": (0.47562107, "dex(d)", "dex"),
+    "star.A.logmass": (0.08052772, "dex(solMass)", "dex"),
+    "planet.b.mass": (0.96091637, "jupiterMass", "linear"),
+    "orbit.b.logP": (0.47554391, "dex(d)", "dex"),
     # cosi is here because the mass story below turns on it: it is the one
     # parameter the RV data says nothing about, which is also why it is the
     # only "flat" row and needs its own, looser tolerance.
-    "orbit.b.cosi": (0.50545129, "", "flat"),
+    "orbit.b.cosi": (0.50012485, "", "flat"),
 }
 
 # THE PLANET MASS AND m sin i ARE TWO DIFFERENT CLAIMS, AND EACH EARNS A
@@ -243,13 +267,14 @@ KELT4_START = {
 # property of this system, not evidence that m sin i is the better statistic.
 # We report both because the field's standard is m sin i.
 #
-# WHY THE MASS STARTS ~10% ABOVE THE PUBLISHED 0.878 Mjup.  kelt4_rvonly.yaml
+# WHY THE MASS STARTS ~9% ABOVE THE PUBLISHED 0.878 Mjup.  kelt4_rvonly.yaml
 # is RV-only, so there is no inclination information.  The params file's
 # `orbit.0.cosi: 0.11996` (the published, transit-derived i = 83.1 deg) is
-# only a START, the polish is free to walk cosi, and it lands at 0.50545,
-# i = 59.6 deg.  `mass = m sin i / sin i` inherits that entirely.
+# only a START, the polish is free to walk cosi, and it lands at 0.50012,
+# i = 60.0 deg -- the basin optimum of the prior-dominated flat direction.
+# `mass = m sin i / sin i` inherits that entirely.
 #
-# WHAT WAS MEASURED.  At this start sin i = 0.862855 and m sin i = 0.834700
+# WHAT WAS MEASURED.  At this start sin i = 0.865953 and m sin i = 0.832109
 # Mjup.
 #
 # WHICH PUBLISHED NUMBER TO COMPARE AGAINST -- and there are FOUR, which is
@@ -260,72 +285,78 @@ KELT4_START = {
 #     mass    eccentric  0.878 +0.070/-0.067    circular  0.902 +0.060/-0.059
 #     m sin i eccentric  0.871 +0.069/-0.066    circular  0.896 +0.060/-0.058
 #
-# kelt4_rvonly.yaml FITS ECCENTRICITY (e = 0.0789 at this start), so the
+# kelt4_rvonly.yaml FITS ECCENTRICITY (e = 0.110 at this start), so the
 # ECCENTRIC column is the comparable one.  Against it:
 #
-#     m sin i  0.834700 vs 0.871   ->   -4.2%,  -0.55 sigma
-#     mass     0.967370 vs 0.878   ->  +10.2%,  +1.28 sigma
+#     m sin i  0.832109 vs 0.871   ->   -4.5%,  -0.59 sigma
+#     mass     0.960916 vs 0.878   ->   +9.4%,  +1.18 sigma
 #
-# So m sin i sits INSIDE the published uncertainty and the mass is 1.28
+# So m sin i sits INSIDE the published uncertainty and the mass is 1.18
 # sigma high -- the prior-domination signature this file documents, and a
-# factor 2.3 better in sigma for the quantity the RVs actually constrain.
+# factor 2 better in sigma for the quantity the RVs actually constrain.
 # The earlier reading here ("-7.5%, about as far the other way") differenced
 # against 0.902, the CIRCULAR MASS: wrong solution AND wrong quantity.  0.90
 # and 0.878 were never two sources disagreeing -- they are two solutions in
 # one paper, and a KELT-4Ab mass quoted without saying WHICH is unusable.
 #
-# The residual -4.2% needs no defect to explain it: this is a START (one
+# The residual -4.5% needs no defect to explain it: this is a START (one
 # L-BFGS local optimum, not a posterior), and the config uses two of the
 # four published RV datasets (EXPERT and FIES are commented out) with no
 # long-term trend for the BC companions.  Eccentricity is not a factor
-# either way: sqrt(1-e^2) = 0.9969, a 0.3% term.
+# either way: sqrt(1-e^2) = 0.9939, a 0.6% term.
 #
 # `orbit.sini` is a manifest parameter but appears in neither this table nor
 # the trace, so sin i is derived from cosi.  Implementing m sin i as a
 # reported parameter is review item 8.8.17 and is not this test's business.
-KELT4_START_MSINI = 0.834700  # Mjup; golden regression
+KELT4_START_MSINI = 0.832109  # Mjup; golden regression
 # AND IT IS THE TIGHTEST PARAMETER ASSERTION IN THE FILE, which is the point
-# and is measured rather than hoped for.  Over the six environments in the
-# table above, `orbit.b.cosi` moved by 1.6e-2 relative and `planet.b.mass`
-# by 5.2e-3, while the PRODUCT moved by 9.5e-4 -- because mass and sin i are
-# anti-correlated and it is m sin i that the RV data pins.  5e-3 is 5.3x
-# that, tighter than every other parameter tolerance here, and it is the
-# assertion that would notice the mass and the inclination drifting apart.
-KELT4_MSINI_RTOL = 5.0e-3
+# and is measured rather than hoped for.  Over the 16 harness arithmetics
+# in the table above, `orbit.b.cosi` moved by 8.6e-4 relative and
+# `planet.b.mass` by 3.0e-4, while the PRODUCT moved by 2.6e-5 -- because
+# mass and sin i are anti-correlated and it is m sin i that the RV data
+# pins.  2e-4 is 8x that, tighter than every other parameter tolerance here,
+# and it is the assertion that would notice the mass and the inclination
+# drifting apart.
+KELT4_MSINI_RTOL = 2.0e-4
 # Eastman+2016 (AJ 151, 45), the ECCENTRIC solution's m sin i -- the
 # quantity this config fits and the quantity the RVs constrain.  Asserted
 # against the PUBLISHED UNCERTAINTY rather than an invented percentage, so
-# the band means something: our start is 0.55 sigma low, and 1 sigma leaves
-# ~2x headroom while still catching a factor-of-two or a unit slip.
+# the band means something: our start is 0.59 sigma low, and 1 sigma leaves
+# ~1.7x headroom while still catching a factor-of-two or a unit slip.
 KELT4_PUBLISHED_MSINI = 0.871  # Mjup
 KELT4_PUBLISHED_MSINI_SIGMA = 0.066  # the lower error; we sit below
 
 # THE GOLDEN START LOGP, and why it is the more robust of the two assertions
-# (JDE, 2026-09-14).  logp is STATIONARY at an optimum, so the 6e-4 of
-# optimizer scatter above perturbs it only at SECOND order -- of order
-# delta_theta**2 times the curvature, which for this start is ~1e-4 nats,
-# below the 0.1-nat resolution the polish line prints.  Any real change, by
-# contrast, moves it by O(1) nats or more: a changed prior, a unit conversion
-# slip, a likelihood term added or lost.  That is exactly the discrimination
-# wanted, and it is why a loose tolerance here still bites.
+# (JDE, 2026-09-14).  logp is STATIONARY at an optimum, so optimizer scatter
+# perturbs it only at SECOND order -- of order delta_theta**2 times the
+# curvature -- PROVIDED THE POLISH ACTUALLY REACHES THE OPTIMUM.  Under the
+# shipped gtol = 1e-4 it does: the 16 harness arithmetics span 9e-7 nats,
+# six orders below the 0.1-nat resolution the polish line prints.  Any real
+# change, by contrast, moves it by O(1) nats or more: a changed prior, a
+# unit conversion slip, a likelihood term added or lost.  That is exactly
+# the discrimination wanted, and it is why a loose tolerance here still
+# bites.
+#
+# THE CAVEAT IS THE PROVISO, AND IT BIT ONCE.  Under the old gtol = 0.01 the
+# stop was a first dip on a ridge 0.5 nats below the optimum, where logp is
+# NOT stationary: the same harness spanned 0.24 nats there, wider than this
+# 0.2-nat tolerance, and the six environments only agreed on "81.4" because
+# they happened to sample the same half of that band.  A golden logp is the
+# sharp detector this paragraph claims only when the optimizer is stopping
+# at an optimum, which the perturbation test in tests/test_polish.py is
+# what guarantees.
 #
 # Both ends of the polish are pinned, because they fail for different
 # reasons.  The PRE-polish value is the BUILD start -- a plain evaluation with
 # no optimizer in it at all, so it carries none of the scatter above and is
 # the sharper detector of a prior/unit/likelihood change.  The POST-polish
-# value is the point the sampler actually begins from.
-#
-# AND THE PREDICTION HELD, MEASURED SIX WAYS.  Both numbers came back
-# IDENTICAL -- -601.1 and 81.4 -- on the dev box solo, the dev box under the
-# full -n6 suite, CI ubuntu 3.12, 3.13 and 3.14, and CI macOS 3.12, while on
-# those same runs `orbit.b.cosi` moved by 1.6e-2 relative.  That is the
-# stationarity argument confirmed rather than assumed, and it is why the
-# tolerance here is 0.2 nats (twice the printed resolution) against the
-# 2.5e-2 the linear values need and the 5e-2 the flat direction needs.  This
-# is the assertion that will catch a changed prior first, and by a wide
-# margin.
+# value is the point the sampler actually begins from.  The 7.13.8 stop
+# change left the build value at -601.1 and moved the polished one from
+# 81.4 to 81.9 -- the 0.507 nats the first-dip stop had been leaving on the
+# table -- which is exactly the pair of signatures expected of "same model,
+# better optimizer".
 KELT4_BUILD_LOGP = -601.1  # lp at the build start, before the polish
-KELT4_START_LOGP = 81.4  # lp at the polished start the sampler uses
+KELT4_START_LOGP = 81.9  # lp at the polished start the sampler uses
 KELT4_LOGP_ATOL = 0.2  # nats; 2x the 0.1-nat print resolution
 
 # One row of run.inspect_start's startup table, as the file log handler (always
@@ -340,7 +371,7 @@ _START_ROW = re.compile(
 )
 
 # polish.py's own summary line, the only place the run reports a TOTAL logp:
-#   ... exozippy.polish: Seed polish (L-BFGS): seed 0 lp -601.1 -> 81.4 (...)
+#   ... exozippy.polish: Seed polish (L-BFGS): seed 0 lp -601.1 -> 81.9 (...)
 _POLISH_LP = re.compile(
     r"Seed polish \(L-BFGS\): seed 0 lp\s+"
     r"(?P<before>-?[\d.]+)\s+->\s+(?P<after>-?[\d.]+)"
@@ -416,12 +447,14 @@ def test_run_fit_kelt4_start_is_physical(kelt4_result):
     start = read_start_table(log_path)
     build_lp, polished_lp = read_polish_logp(log_path)
 
-    # HOW THE TABLE ABOVE WAS MEASURED, since a future tolerance change will
-    # need the same trick: a temporary `warnings.warn` here reporting these
-    # values.  `pytest -q` prints the warnings summary, so each CI platform
-    # then reports its own numbers in a GREEN run, and the spread can be
-    # calibrated from data instead of from an argument.  The probe was
-    # removed once all six environments had reported (review 7.13.6).
+    # HOW TO RE-CALIBRATE, when a future change moves the start: run the
+    # ulp-perturbation harness described above KELT4_DEX_ATOL (16 seeds of
+    # polish._lbfgs_polish_one from this fixture's raw start, objective x
+    # (1 + s*2**-52)) and set each tolerance to ~5x the width it reports;
+    # the golden values are its unperturbed seed.  Do NOT calibrate from a
+    # `warnings.warn` probe reporting each CI platform's value -- that was
+    # the first method, it sampled six points of a distribution 5x wider
+    # than their spread, and it went red on the seventh (review 7.13.8).
 
     missing = set(KELT4_START) - set(start)
     assert not missing, (
@@ -503,8 +536,8 @@ def test_run_fit_kelt4_start_is_physical(kelt4_result):
     #     mass it IS comparable to the published value -- and it must be
     #     compared against the ECCENTRIC solution, because that is what this
     #     config fits.  Asserted against the published UNCERTAINTY rather
-    #     than an invented percentage: the start sits 0.55 sigma low, so one
-    #     sigma is a real constraint with about 2x headroom, and it still
+    #     than an invented percentage: the start sits 0.59 sigma low, so one
+    #     sigma is a real constraint with about 1.7x headroom, and it still
     #     catches a factor of two or a unit slip.
     offset = abs(msini - KELT4_PUBLISHED_MSINI)
     assert offset < KELT4_PUBLISHED_MSINI_SIGMA, (

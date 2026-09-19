@@ -133,7 +133,9 @@ def test_wired_ltt_delay_matches_a_over_c_through_real_accessors(tmp_path):
     shared-formula bug that an internal-consistency check alone would miss.
     Also confirms retarded_time is invoked exactly twice per build_model()
     FOR TRANSIT'S OWN WIRING: once from build_likelihood's group loop (one
-    oversample group here, ninterp=1) and once from compile_plotters --
+    oversample group here, ninterp=1) and once from compile_plotters -- the
+    SAME builder (Transit._lc_model) called on the data and on the plot
+    grid, so both calls carry the 3-D (n_g, k_g, 1) sub-exposure grid, and
     both paths are wired, live, not a dead branch.  (`orbit.tc_bjd`/`tp_bjd`
     -- the observed/BJD_TDB-frame conjunction/periastron report this
     orbit's mass params make available -- call retarded_time too, at `tc`
@@ -158,21 +160,23 @@ def test_wired_ltt_delay_matches_a_over_c_through_real_accessors(tmp_path):
         )
         system.prepare()
         model = system.build_model()
-        # transit.py's own wiring: one from build_likelihood's group loop
-        # (3-D t_grid, has the sub-exposure axis), one from compile_plotters
-        # (2-D, no sub-exposure axis). orbit.tc_bjd/tp_bjd's calls are 1-D
-        # (a time grid per orbit, not per observation) and excluded here.
-        transit_calls = [t_grid for t_grid, _ in calls if t_grid.ndim >= 2]
+        # transit.py's own wiring: one from build_likelihood's group loop,
+        # one from compile_plotters -- both through _lc_model's group loop,
+        # so both carry the 3-D (n_g, k_g, 1) sub-exposure grid; the plot
+        # path used to build its own 2-D graph and smear in NumPy
+        # afterwards. orbit.tc_bjd/tp_bjd's calls are 1-D (a time grid per
+        # orbit, not per observation) and excluded here.
+        transit_calls = [
+            (t_grid, delay) for t_grid, delay in calls if t_grid.ndim >= 2
+        ]
         assert len(transit_calls) == 2
+        assert [t_grid.ndim for t_grid, _ in transit_calls] == [3, 3]
 
     with model:
         point = system.get_internal_point(model, system.get_raw_start(model))
 
-    build_likelihood_calls = [
-        delay for t_grid, delay in calls if t_grid.ndim == 3
-    ]
-    assert len(build_likelihood_calls) == 1
-    delay = _eval_at_point(build_likelihood_calls[0], model, point)
+    # The first transit call is the likelihood's: stage 7 precedes the plotters.
+    delay = _eval_at_point(transit_calls[0][1], model, point)
     delay_primary = float(delay[0, 0, 0])
     delay_secondary = float(delay[1, 0, 0])
 

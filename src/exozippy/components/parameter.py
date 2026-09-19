@@ -945,6 +945,14 @@ class Parameter:
     # LaTeX/table metadata
     latex: Optional[str] = ""
     description: Optional[str] = ""
+    # The component's own sentence about what a value against this
+    # parameter's bound MEANS and what to do about it, appended to the
+    # near-bound warnings (the post-polish wall warning in
+    # recenter_on_start, and diagnostics.warn_posterior_near_bounds at
+    # wrap-up).  Declared in defaults.yaml, never by a user: the generic
+    # half of those warnings can only say "revisit the bound", and for a
+    # nuisance scale like err_scale that is the wrong advice (review 8.2.2).
+    near_bound_remedy: Optional[str] = None
     latex_prefix: str = "ez"
 
     # Runtime fields
@@ -981,6 +989,14 @@ class Parameter:
     _summary_ci: Optional[float] = field(default=None, init=False)
     _mode_summaries_ci: Optional[float] = field(default=None, init=False)
     table_note: Optional[str] = None
+    # Per element (or one bool for all): this element's UPPER bound is a
+    # modelling cap rather than a physical or validity limit -- the hogg
+    # mixture's out_scale (10x the median error) and out_frac (0.5) -- so a
+    # posterior piled against it is an alarm, not a result.  Set by a
+    # component through a manifest option (Instrument._register_robust);
+    # read at wrap-up by diagnostics.cap_alarm_findings via
+    # ``cap_saturation``.  Never user-facing.
+    cap_alarm: Any = None
     # Prior terms added from OUTSIDE this Parameter -- a component's
     # pm.Potential -- declared via add_prior_contribution so the reported
     # tables can describe them. See PriorContribution.
@@ -3434,7 +3450,7 @@ class Parameter:
                         f"rather than nudged inward, so raw = 0 still means "
                         f"the value the polish found. A start pinned on a "
                         f"wall usually means the bound, not the start, is "
-                        f"the thing to revisit."
+                        f"the thing to revisit." + self.remedy_suffix()
                     )
 
         if not moved:
@@ -3841,6 +3857,16 @@ class Parameter:
                 f"{n_val} values -- cannot convert."
             )
         return f
+
+    def remedy_suffix(self):
+        """The component's near-bound sentence, ready to append to a warning.
+
+        Empty when the component declared none, so a caller can always
+        concatenate it.  One place, so the start-time and posterior-time
+        warnings cannot phrase the same remedy two ways.
+        """
+        remedy = (self.near_bound_remedy or "").strip()
+        return f"  {remedy}" if remedy else ""
 
     def to_internal(self, val=None, index=None):
         """USER units -> INTERNAL units.
@@ -4418,6 +4444,48 @@ class Parameter:
     # ---------
     # Posterior samples
     # ---------
+    def element_cap_alarm(self, index=0):
+        """Is element ``index``'s upper bound a flagged modelling cap?"""
+        flag = self.cap_alarm
+        if flag is None:
+            return False
+        flag = np.atleast_1d(flag)
+        if flag.size == 0:
+            return False
+        return bool(flag[index] if flag.size > index else flag[0])
+
+    def cap_saturation(self, index=0, top_frac=0.05):
+        """Fraction of element ``index``'s draws in the top ``top_frac`` of
+        its ``[lower, upper]`` support -- the pile-at-cap statistic.
+
+        Everything is compared in USER units: ``posterior`` is stored that
+        way and the bounds are converted through ``from_internal`` (never a
+        hand-written factor).  Returns ``None`` when there is no posterior
+        or when the element's support is not a finite interval, so a caller
+        can tell "not measurable" from "not piled".
+        """
+        if self.posterior is None or self.lower is None or self.upper is None:
+            return None
+        arr = np.asarray(
+            getattr(self.posterior, "values", self.posterior), dtype=float
+        )
+        # az.extract places the sample axis LAST; a scalar parameter's draws
+        # arrive 1-D.
+        draws = arr[index] if arr.ndim > 1 else arr
+        draws = draws[np.isfinite(draws)]
+        if draws.size == 0:
+            return None
+        lo = float(
+            self.from_internal(np.atleast_1d(self.lower)[index], index=index)
+        )
+        hi = float(
+            self.from_internal(np.atleast_1d(self.upper)[index], index=index)
+        )
+        if not (np.isfinite(lo) and np.isfinite(hi)) or hi <= lo:
+            return None
+        threshold = hi - top_frac * (hi - lo)
+        return float(np.mean(draws >= threshold))
+
     @property
     def posterior(self):
         """The draws this Parameter was last given, in USER units.

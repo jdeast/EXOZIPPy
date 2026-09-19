@@ -4,9 +4,40 @@ from abc import ABC, abstractmethod
 import numpy as np
 import pytensor.tensor as pt
 
+from ..config import NUMERIC_KEYS
 from ..manifest import interpret_manifest_entry
 from ..physics_registry import PHYSICS_REGISTRY
 from .parameter import ElementExpression, OwnPrePatchRef, Parameter
+
+
+def layer_options(cfg, options):
+    """``{**cfg, **options}`` with NaN meaning "keep the resolved element".
+
+    Manifest options are merged OVER the resolved config and win outright
+    (the "overrides" vs "options" note in config.md).  For a per-element
+    numeric option that is the wrong grain: a component that derives a bound
+    for SOME elements -- `Instrument._register_robust`'s out_scale cap, which
+    must stand down on the elements the user bounded -- cannot supply the
+    other elements' values, because it cannot see the resolved config.  So a
+    NaN in a per-element list of a NUMERIC_KEYS field keeps that element's
+    resolved value, the same convention the "overrides" channel already has
+    for its per-element lists.  A scalar option, a non-numeric option, a
+    list with no NaN or a field the config did not resolve are passed
+    through untouched, so every existing manifest option behaves as before.
+    """
+    merged = dict(cfg)
+    for key, val in options.items():
+        if (
+            key in NUMERIC_KEYS
+            and isinstance(val, (list, tuple, np.ndarray))
+            and cfg.get(key) is not None
+        ):
+            arr = np.asarray(val, dtype=float)
+            base = np.asarray(cfg[key], dtype=float)
+            if arr.shape == base.shape and np.isnan(arr).any():
+                val = np.where(np.isnan(arr), base, arr).tolist()
+        merged[key] = val
+    return merged
 
 
 def in_topology(system, name):
@@ -236,6 +267,43 @@ class Component(ABC):
     def prefix(self):
         """Naming prefix for the model (e.g., 'star', 'planet', 'inst')."""
         pass
+
+    def user_wrote_field(self, param_name, field):
+        """Per element: did the USER write ``field`` for this parameter?
+
+        Read from the params-file entries the ConfigManager forwarded
+        (``user_params``), never from a resolved vector -- every parameter
+        has bounds from defaults.yaml, so a resolved value says nothing about
+        who asked for it (the same reasoning as
+        ``Parameter._user_constraint_fields``, whose three spellings this
+        checks: the 2-part broadcast, the index form and the instance-name
+        form, since a user may write any of them and
+        ``standardize_param_names`` may or may not have run).  READ-ONLY:
+        a component must never write into ``user_params`` (CLAUDE.md).
+
+        This is what lets a component derive a per-element default that
+        goes through the manifest OPTIONS channel yet still yields to the
+        params file: it leaves NaN on the elements that return True here
+        (``layer_options``).  Compare ``Orbit._user_seeded_initval``, the
+        same question asked of ``initval`` before this helper existed.
+        """
+        user = getattr(self.config_manager, "user_params", None) or {}
+        wrote = np.zeros(self.n_elements, dtype=bool)
+        if not user:
+            return wrote
+
+        def _has(key):
+            entry = user.get(key)
+            return isinstance(entry, dict) and entry.get(field) is not None
+
+        if _has(f"{self.prefix}.{param_name}"):
+            wrote[:] = True
+        for i in range(self.n_elements):
+            if _has(f"{self.prefix}.{i}.{param_name}") or _has(
+                f"{self.prefix}.{self.names[i]}.{param_name}"
+            ):
+                wrote[i] = True
+        return wrote
 
     @classmethod
     def config_schema(cls):
@@ -585,7 +653,7 @@ class Component(ABC):
         )
 
         # 3. Create Parameter Node
-        full_params = {**cfg, **options}
+        full_params = layer_options(cfg, options)
         param_obj = Parameter(
             label=f"{self.prefix}.{param_name}",
             names=names,

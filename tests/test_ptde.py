@@ -20,10 +20,10 @@ from exozippy.samplers._common import (
     start_spread_ratios,
     warn_if_starts_underdispersed,
 )
+from exozippy.samplers.ladder import _geometric_ladder
 from exozippy.samplers.ptde import (
     _PROBE_FLAT_SCALE,
     _active_rungs,
-    _geometric_ladder,
     _make_starts,
     _probe_scales,
     _probe_step_1d,
@@ -930,8 +930,10 @@ def test_hot_draw_storage_grows_on_the_draw_axis_and_pads_with_nan():
 def _early_stop_kwargs(sampler):
     """The common early-stop invocation for both PTDE samplers.
 
-    ptde_async also owns the hot-rung buffers; they are switched off here so
-    the measurement is of the T=1 group in both arms.
+    The hot-rung buffers are switched off in BOTH arms so the measurement is
+    of the T=1 group -- store_hot_chains used to be a ptde_async-only key and
+    needed a special case here; it is now shared
+    (samplers._common.HotChainRecorder), so both arms take the same kwargs.
     """
     kwargs = dict(
         draws=10**6,
@@ -946,8 +948,7 @@ def _early_stop_kwargs(sampler):
         min_ess=None,
         max_rhat=None,
     )
-    if sampler is ptde_async_sample:
-        kwargs["store_hot_chains"] = False
+    kwargs["store_hot_chains"] = False
     return kwargs
 
 
@@ -993,20 +994,29 @@ def test_an_early_stop_does_not_allocate_the_draws_it_never_takes(sampler):
     )
 
 
-def test_an_early_stop_does_not_allocate_the_hot_draws_it_never_takes():
+@pytest.mark.parametrize(
+    "sampler",
+    [ptde_sample, ptde_async_sample],
+    ids=["ptde", "ptde_async"],
+)
+def test_an_early_stop_does_not_allocate_the_hot_draws_it_never_takes(sampler):
     """
     Given store_hot_chains on and a huge configured draw count,
-    When the async run stops almost at once,
+    When the run stops almost at once,
     Then the (rung, chain, draw) hot buffers are chunked too.
 
     The hot group is the bigger of the two: (n_temps - 1) x n_chains x
     (draws // hot_thin).  Here 7 rungs x 4 chains x 5e5 draws x 2 variables
-    is ~224 MB that a 0.5 s run has no use for.  ptde_async only.
+    is ~224 MB that a 0.5 s run has no use for.
+
+    BOTH SAMPLERS, for the reason spelled out in the T=1 twin above: this was
+    ptde_async-only while the key was, and a storage fix to one PTDE sampler
+    is not done until the parity test covers both.
     """
     # ARRANGE / ACT
     tracemalloc.start()
     try:
-        idata = ptde_async_sample(
+        idata = sampler(
             _simple_model(),
             _MinimalSystem(),
             draws=10**6,
@@ -1032,6 +1042,164 @@ def test_an_early_stop_does_not_allocate_the_hot_draws_it_never_takes():
         f"peak {peak_mb:.0f} MB -- the full hot buffer was allocated for a "
         f"run that took {idata.posterior.sizes['draw']} draws"
     )
+
+
+@pytest.mark.parametrize(
+    "sampler",
+    [ptde_sample, ptde_async_sample],
+    ids=["ptde", "ptde_async"],
+)
+def test_both_samplers_store_the_hot_rungs_they_were_asked_for(sampler):
+    """
+    Given store_hot_chains set explicitly,
+    When either PTDE sampler runs,
+    Then a posterior_hot group is written, shaped (rungs x chains, draws),
+    carrying a per-chain temperature coordinate and finite untempered lp.
+
+    THIS IS THE ASYMMETRY ITSELF, not a guard against re-introducing it.
+    store_hot_chains was honored by ptde_async and IGNORED WITH A WARNING by
+    ptde, so a `method: ptde` fit silently had no suppressed-mode detector --
+    outputs.ledger.discover_hot_modes had nothing to read.  Nothing about
+    retaining a thinned copy of the hot rungs depends on whether proposals
+    are dispatched synchronously, which is why the recorder now lives in
+    _common and both loops call it; the only thing that differs is which
+    counter thins (per-chain iterations for async, the draw index for sync).
+    """
+    # ARRANGE / ACT
+    n_temps, n_chains = 3, 4
+    idata = sampler(
+        _simple_model(),
+        _MinimalSystem(),
+        draws=40,
+        tune=5,
+        n_temps=n_temps,
+        T_max=4.0,
+        n_chains=n_chains,
+        cores=1,
+        seed=11,
+        log_interval=10**6,
+        min_ess=None,
+        max_rhat=None,
+        store_hot_chains=2,
+    )
+
+    # ASSERT
+    assert hasattr(idata, "posterior_hot"), (
+        f"{sampler.__name__} wrote no posterior_hot group; store_hot_chains "
+        f"is shared and must be honored by both samplers"
+    )
+    hot = idata.posterior_hot
+    assert hot.sizes["chain"] == (n_temps - 1) * n_chains
+    assert hot.sizes["draw"] >= 1
+    # the hot rungs, and only the hot rungs, carry their own temperature
+    temps = np.asarray(hot["temperature"])
+    assert temps.shape == ((n_temps - 1) * n_chains,)
+    assert (temps > 1.0).all(), temps
+    # UNtempered lp: comparable to T=1 rather than divided by temperature
+    assert np.isfinite(np.asarray(hot["lp"])).all()
+
+
+@pytest.mark.parametrize(
+    "sampler",
+    [ptde_sample, ptde_async_sample],
+    ids=["ptde", "ptde_async"],
+)
+@pytest.mark.parametrize(
+    "bad",
+    [{"swap_schedule": "alternating"}, {"de_mode_hop": 1.5}],
+    ids=["swap_schedule", "de_mode_hop"],
+)
+def test_both_samplers_reject_the_same_bad_shared_knob(sampler, bad):
+    """
+    Given a knob run.py forwards to both PTDE samplers, set out of range,
+    When either sampler is called,
+    Then both raise, with the sampler named.
+
+    The useful question about a shared knob is not "is it validated" but
+    "is it validated by exactly ONE of them" (reviews 1.4.3, 2.4.16).
+    swap_schedule was checked in both -- two copies of one `if` -- while
+    de_mode_hop was checked only in ptde_async, so the same config raised
+    under one method and was accepted as a probability above 1 under the
+    other.  Both now call _common.validate_shared_ptde_args.
+    """
+    # ARRANGE / ACT / ASSERT
+    with pytest.raises(ValueError) as exc:
+        sampler(
+            _simple_model(),
+            _MinimalSystem(),
+            draws=2,
+            tune=1,
+            n_temps=2,
+            T_max=2.0,
+            n_chains=4,
+            cores=1,
+            seed=3,
+            min_ess=None,
+            max_rhat=None,
+            **bad,
+        )
+    assert list(bad)[0] in str(exc.value)
+
+
+def test_partners_change_the_difference_vector_but_not_the_base_or_the_stream():
+    """
+    Given a packed population and a separate partner archive,
+    When propose() is called with partners=,
+    Then the base is still pop[i], the difference comes from the archive,
+    And passing partners=pop reproduces the no-partners call BIT FOR BIT.
+
+    This is the mechanical half of review 2.4.20.  ptde_async draws DE
+    partners from whatever states are visible, and visibility is weighted by
+    evaluation speed, which correlates with position -- so the kernel
+    depends on the proposing chain's own cost and the plain Metropolis ratio
+    does not correct for it.  The fix hands propose() a snapshot archive.
+    Two properties make it safe, and both are asserted here: the BASE must
+    stay current (proposing from a stale base would be a different bug --
+    the acceptance test compares against the CURRENT lp), and the rng draw
+    sequence must not move, since tests elsewhere in this file pin the
+    proposal path as bit-identical.
+    """
+    # ARRANGE -- same construction the bit-identical test below uses
+    from exozippy.samplers._common import RawLayout
+
+    rng = np.random.default_rng(7)
+    states = [_mixed_state(rng) for _ in range(6)]
+    layout = RawLayout(states[0], list(states[0]))
+    pop = layout.pack_many(states)
+    archive = pop + 100.0  # unmistakably different states
+    i, gamma = 2, 0.5
+
+    # ACT / ASSERT -- partners=pop is exactly the old behaviour
+    a = layout.propose(np.random.default_rng(11), pop, i, gamma, jitter=0.0)
+    b = layout.propose(
+        np.random.default_rng(11), pop, i, gamma, jitter=0.0, partners=pop
+    )
+    assert np.array_equal(a, b), "partners=pop must be the identity case"
+
+    # the archive supplies the DIFFERENCE, the base stays pop[i]
+    c = layout.propose(
+        np.random.default_rng(11), pop, i, gamma, jitter=0.0, partners=archive
+    )
+    # archive = pop + const, so every difference vector is IDENTICAL to the
+    # live one -- the constant cancels -- which pins that only the
+    # difference is taken from the archive and the base is untouched.
+    assert np.allclose(c, a), (
+        "a constant-offset archive must give the same proposal: the offset "
+        "cancels in the difference and the base is pop[i], not archive[i]"
+    )
+
+    # and a genuinely different archive moves the proposal, but not the base
+    archive2 = pop[::-1].copy()
+    d = layout.propose(
+        np.random.default_rng(11), pop, i, gamma, jitter=0.0, partners=archive2
+    )
+    assert not np.allclose(d, a), "a reordered archive must change the step"
+    # and the base is STILL pop[i]: with gamma -> 0 the archive cannot
+    # matter at all, whatever it holds.
+    z = layout.propose(
+        np.random.default_rng(11), pop, i, 0.0, jitter=0.0, partners=archive2
+    )
+    assert np.allclose(z, pop[i]), "at gamma=0 the proposal must be the base"
 
 
 # ---------------------------------------------------------------------------
@@ -1401,7 +1569,7 @@ def test_resolve_n_temps_auto_scales_with_dimension():
       adjacent-rung energy-overlap rule -- and an explicit integer passes
       through untouched.
     """
-    from exozippy.samplers.ptde import resolve_n_temps
+    from exozippy.samplers.ladder import resolve_n_temps
 
     assert resolve_n_temps("auto", 5, 200.0) == 9
     assert resolve_n_temps("auto", 27, 200.0) == 20
@@ -1424,7 +1592,7 @@ def test_ladder_health_report_warns_only_when_communication_limited(caplog):
     """
     import logging
 
-    from exozippy.samplers.ptde import ladder_health_report
+    from exozippy.samplers.ladder import ladder_health_report
 
     temps = _geometric_ladder(8, 200.0)
 
@@ -1478,7 +1646,12 @@ def test_the_wrap_up_barrier_measures_the_draw_phase_only(monkeypatch):
         seen["propose"] = np.array(n_swap_propose, dtype=float)
         seen["accept"] = np.array(n_swap_accept, dtype=float)
 
-    monkeypatch.setattr("exozippy.samplers.ptde.ladder_health_report", _spy)
+    # PATCH WHERE IT IS CALLED FROM, which is now the shared wrap-up
+    # (_common.finish_ptde_run) rather than each sampler's own epilogue.  The
+    # claim under test is unchanged -- which swap counters reach the report --
+    # but the lookup goes through the ladder module, so that is what a spy
+    # has to replace.
+    monkeypatch.setattr("exozippy.samplers.ladder.ladder_health_report", _spy)
 
     # ACT
     ptde_sample(
@@ -1592,7 +1765,7 @@ def test_unmeasured_swap_pair_does_not_inflate_the_barrier():
     """
     # ARRANGE: pairs 0 and 2 measured at 20% rejection; pairs 1 and 3 never
     # proposed.
-    from exozippy.samplers.ptde import _update_ladder_barrier
+    from exozippy.samplers.ladder import _update_ladder_barrier
 
     temps = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
     accept = np.array([8.0, 0.0, 8.0, 0.0])
@@ -1616,7 +1789,7 @@ def test_unmeasured_pair_is_interpolated_from_its_measured_neighbours():
       stays honest.
     """
     # ARRANGE
-    from exozippy.samplers.ptde import _update_ladder_barrier
+    from exozippy.samplers.ladder import _update_ladder_barrier
 
     temps = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
     # measured: pair0 r=0.1, pair2 r=0.5 -> pair1 should read r=0.3, and
@@ -1644,7 +1817,7 @@ def test_ladder_update_is_a_noop_when_nothing_was_proposed():
     Then the ladder is returned unchanged rather than re-spaced against
       four fabricated full-rejection links.
     """
-    from exozippy.samplers.ptde import _update_ladder_barrier
+    from exozippy.samplers.ladder import _update_ladder_barrier
 
     temps = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
     zeros = np.zeros(4)

@@ -593,7 +593,10 @@ mulensinstrument:
       GP SHO-term amplitude, in FLUX in the data file's own system
       (was magnitudes before the flux-likelihood change)
   # Optional hogg-mixture outlier scatter; the rest of the robust-likelihood
-  # blueprint lives in components/defaults.yaml.
+  # blueprint lives in components/defaults.yaml.  The component starts it at
+  # 1 x and caps it at 10 x the file's median flux error (review 8.6.3), so
+  # this static upper -- and _scale_flux_amplitudes' flux-scaled one -- is
+  # only the fallback for a file with degenerate errors.
   out_scale:
     lower: 0.0
     upper: 1.0e30
@@ -661,11 +664,29 @@ mulensinstrument:
   # so to first order an existing prior still says what it said.
   # mulensinstrument has no jitter_variance (noise_model = "err_scale"), so
   # there is no additive noise term to re-unit either.
+  # BOUNDS 0.01 .. 100, not the 1e-6 .. 1e6 they were (review 8.2.2, ruled
+  # by JDE 2026-09-03 and again 2026-09-15 after DC2018-226).  A six-decade
+  # error scale lets the optimizer prefer "the data are noise" to "the model
+  # is wrong": on 226 a point-lens fit to a wide binary inflated BOTH bands'
+  # errors 300-460x and walked u_0 to zero under the flattened likelihood,
+  # paying 181k nats of misfit it could no longer feel.  Two decades either
+  # side of 1 is still far more than any real pipeline mis-states its
+  # errors by; a fit that wants more is telling you about the model or the
+  # start, and `near_bound_remedy` below is the sentence that says so when
+  # the start or the posterior lands against either wall.  EXOFASTv2 keeps
+  # its errscale within about a decade of 1 for the same reason.
   err_scale:
     initval: 1.0
     init_scale: 0.1
-    lower: 1e-6
-    upper: 1e6
+    lower: 0.01
+    upper: 100.0
+    near_bound_remedy: >-
+      An error scale against its bound means the fit is rescaling the data
+      instead of fitting them: either the supplied errors are wrong by that
+      factor (rescale them in the data file, or tighten `lower`/`upper` in
+      the params file if they are trusted) or the model is in the wrong
+      basin and needs a better starting model (a better seed, or a
+      companion search) rather than more sampling.
     unit: ""
     internal_unit: ""
     latex: "k"

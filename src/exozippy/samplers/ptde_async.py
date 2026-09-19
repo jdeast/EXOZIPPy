@@ -73,16 +73,10 @@ from exozippy.samplers._common import (
     _eval_logp,
     next_gamma,
 )
-from exozippy.samplers.ptde import (
-    _check_convergence,
-    _convergence_check_schedule,
+from exozippy.samplers.ladder import (
     _deo_pair_sequence,
-    _geometric_ladder,
     _record_round_trips,
-    _safe_progress,
     _update_ladder_barrier,
-    ladder_health_report,
-    resolve_n_temps,
 )
 
 logger = logging.getLogger(__name__)
@@ -124,6 +118,7 @@ def ptde_async_sample(
     collect_rung_timing=False,
     progress_callback=None,
     store_hot_chains="auto",
+    de_partner_snapshot=True,
 ):
     """
     Asynchronous Parallel Tempering + Differential Evolution sampler.
@@ -224,86 +219,46 @@ def ptde_async_sample(
     -------
     arviz.InferenceData with posterior and sample_stats["lp"] from T=1 chains.
     """
-    if swap_schedule not in ("deo", "random"):
-        raise ValueError(
-            f"swap_schedule must be 'deo' or 'random', got {swap_schedule!r}"
-        )
-
-    lp_guard = LpPlausibilityGuard(
-        lp_plausibility_ceiling, "PTDE-async", logger
-    )
-
-    rng = np.random.default_rng(seed)
-
-    # parameter bookkeeping -- before the ladder, since n_temps may be
-    # "auto" (sized from the parameter count; see ptde.resolve_n_temps).
-    raw_start = system.get_raw_start(model)
-    model_keys = list(raw_start.keys())
-    n_params = sum(v.size for v in raw_start.values())
-    n_temps = resolve_n_temps(n_temps, n_params, T_max)
-    temperatures = _geometric_ladder(n_temps, T_max)
-
-    # compile logp ONCE; install in _common BEFORE forking workers so fork
-    # children inherit it (copy-on-write; see _common.set_worker_globals)
-    # PositionalLogp calls the compiled function by position instead of
-    # through pymc's dict wrapper -- same value, ~3.5x less call overhead on
-    # a 20-variable model, which at one call per proposal is the difference
-    # between 35 us and 10 us of pure plumbing per evaluation (6.4.3).
-    logp_fn = _common.PositionalLogp(model.compile_logp())
-    _common.set_worker_globals(logp_fn, collect_rung_timing)
-
-    # compile raw -> physical conversions ONCE (single-sample and batched;
-    # see _common.compile_conversions for the rationale).
-    raw_to_phys, raw_to_phys_batched, raw_var_names, out_var_names = (
-        _common.compile_conversions(model)
-    )
-    # Element count of the PHYSICAL side (sampled + Deterministic), the
-    # denominator of the hot-group trace share below.  One transform
-    # evaluation at the start point; the graph is compiled either way.
-    _n_out_elements = sum(
-        int(np.asarray(v).size)
-        for v in raw_to_phys(
-            *[np.asarray(raw_start[k]) for k in raw_var_names]
-        )
-    )
-
-    n_chains = _common.resolve_n_chains(
-        n_chains, n_params, "PTDE-async", logger
-    )
-    if gamma is None:
-        gamma = 2.38 / np.sqrt(2 * n_params)
-    logger.info(
-        f"PTDE-async: {n_params} params, {n_chains} chains/rung, gamma={gamma:.4f}"
-    )
-
-    t1_starts, chain_seed_index, rung_starts, _dispersions, _disp_desc = (
-        _common.build_rung_populations(
-            model,
-            system,
-            n_chains,
-            logp_fn,
-            rng,
-            raw_start,
-            temperatures,
-            start_dispersion,
-            initvals=initvals,
-            raw_starts=raw_starts,
-            seed_indices=seed_indices,
-            raw_scales=raw_scales,
-            n_params=n_params,
-            log=logger,
-        )
-    )
-
-    _common.plot_start_ensemble(
+    # ONE shared prologue for both PTDE loops (_common.prepare_ptde_run).
+    # Identical to ptde.py's call but for the label: nothing in resolving a
+    # ladder, compiling a logp or dispersing a start population depends on
+    # whether proposals will be dispatched synchronously.
+    run = _common.prepare_ptde_run(
+        model,
         system,
-        t1_starts,
-        raw_to_phys_batched,
-        raw_var_names,
-        out_var_names,
-        plot_prefix,
-        logger,
+        label="PTDE-async",
+        log=logger,
+        draws=draws,
+        tune=tune,
+        n_temps=n_temps,
+        T_max=T_max,
+        n_chains=n_chains,
+        gamma=gamma,
+        seed=seed,
+        swap_schedule=swap_schedule,
+        de_mode_hop=de_mode_hop,
+        initvals=initvals,
+        raw_starts=raw_starts,
+        seed_indices=seed_indices,
+        raw_scales=raw_scales,
+        start_dispersion=start_dispersion,
+        plot_prefix=plot_prefix,
+        lp_plausibility_ceiling=lp_plausibility_ceiling,
+        collect_rung_timing=collect_rung_timing,
+        store_hot_chains=store_hot_chains,
     )
+    lp_guard, rng, de_mode_hop = run.lp_guard, run.rng, run.de_mode_hop
+    raw_start, model_keys, n_params = (
+        run.raw_start,
+        run.model_keys,
+        run.n_params,
+    )
+    n_temps, temperatures = run.n_temps, run.temperatures
+    logp_fn, layout, hot = run.logp_fn, run.layout, run.hot
+    n_chains, gamma = run.n_chains, run.gamma
+    chain_seed_index, rung_starts = run.chain_seed_index, run.rung_starts
+    raw_to_phys, raw_to_phys_batched = run.raw_to_phys, run.raw_to_phys_batched
+    raw_var_names, out_var_names = run.raw_var_names, run.out_var_names
 
     # Per-(rung, chain) slot state. current_lp[k][i] is None until that
     # slot's first evaluation completes -- doubles as "still initializing".
@@ -313,13 +268,38 @@ def ptde_async_sample(
     # the proof that it is bit-identical (review 6.4.2).
     # Per-rung populations, each dispersed at its own temperature (8.4.7);
     # this used to replicate T=1 to every rung.
-    layout = _common.RawLayout(raw_start, model_keys)
     current_state = [
         layout.pack_many([pop[i % n_chains] for i in range(n_chains)])
         for pop in rung_starts
     ]
     current_lp = [[None] * n_chains for _ in range(n_temps)]
     iter_count = [[0] * n_chains for _ in range(n_temps)]
+
+    # DE PARTNERS COME FROM A SNAPSHOT, NOT FROM WHATEVER IS VISIBLE NOW
+    # (review 2.4.20).  A chain here advances as fast as its likelihood
+    # evaluates, and on this Op path evaluation cost rises steeply with
+    # caustic proximity -- so a chain is slow BECAUSE of where it is, and
+    # partner states drawn "as available" are weighted toward chains in
+    # cheap regions.  That gives the proposal kernel a dependence on the
+    # proposing chain's own cost, which the plain Metropolis ratio does not
+    # correct: detailed balance breaks in a direction correlated with the
+    # physics.  Refreshing one archive per rung when the SLOWEST chain in
+    # that rung advances makes every chain propose from the SAME array, so
+    # the kernel stops knowing anything about who is asking.  This is the
+    # DEMetropolisZ construction (ter Braak & Vrugt 2008) -- difference
+    # vectors from an archive rather than from live states -- and `demcz`
+    # already ships it here.
+    # NOTE what is NOT stale: the BASE is still current_state[k][i], the
+    # point the acceptance test compares against.  Only the difference
+    # vector comes from the archive.
+    # The price is lag, and it is worst exactly where the population is not
+    # yet stationary (burn-in).  One pathologically slow chain freezes its
+    # rung's archive; that case is unbounded here by design, and a max-lag
+    # forced refresh is the obvious extension if it ever bites.
+    partner_snapshot = (
+        [pop.copy() for pop in current_state] if de_partner_snapshot else None
+    )
+    snapshot_at = [0] * n_temps
     # state_gen[k][i] counts the swaps that have replaced slot (k, i)'s
     # state. Every submission is stamped with it; a result whose stamp no
     # longer matches was proposed FROM a state that a swap has since moved
@@ -388,35 +368,6 @@ def ptde_async_sample(
     stored_lp = np.zeros((n_chains, _cap0))
     per_chain_draws = np.zeros(n_chains, dtype=int)
 
-    # Optional thinned hot-rung storage (store_hot_chains): detector data
-    # for post-hoc discovery of posterior-suppressed modes; see the
-    # parameter docstring. UNtempered logp is stored (current_lp holds the
-    # raw logp; tempering happens in the acceptance rule), so hot lp values
-    # are directly comparable to T=1.
-    hot_thin = _common.resolve_store_hot_chains(
-        store_hot_chains,
-        system,
-        n_temps,
-        n_params,
-        _n_out_elements,
-        "PTDE-async",
-        logger,
-    )
-    # hot_cap stays the LOGICAL per-(rung, chain) cap that the store site
-    # tests against; the allocation below is only the starting capacity and
-    # grows in chunks the same way the T=1 buffers do (6.4.6).
-    hot_cap = max(1, draws // hot_thin) if hot_thin else 0
-    if hot_thin:
-        _hot_cap0 = min(hot_cap, _common.hot_draw_chunk(n_temps - 1))
-        stored_hot_raw = {
-            k: np.zeros(
-                (n_temps - 1, n_chains, _hot_cap0) + raw_start[k].shape
-            )
-            for k in model_keys
-        }
-        stored_hot_lp = np.full((n_temps - 1, n_chains, _hot_cap0), np.nan)
-        per_hot_draws = np.zeros((n_temps - 1, n_chains), dtype=int)
-
     n_accept = np.zeros(n_temps)
     n_propose = np.zeros(n_temps)
     # Per-rung explored span: see _common.SpanTracker for what it is for
@@ -439,9 +390,6 @@ def ptde_async_sample(
     n_swap_propose = np.zeros(max(n_temps - 1, 1))
     n_swap_accept_cum = np.zeros(max(n_temps - 1, 1))
     n_swap_propose_cum = np.zeros(max(n_temps - 1, 1))
-    de_mode_hop = float(de_mode_hop or 0.0)
-    if not 0.0 <= de_mode_hop < 1.0:
-        raise ValueError(f"de_mode_hop must be in [0, 1), got {de_mode_hop}")
     # Per-slot flag: was the in-flight proposal a gamma=1 hop?  Set when the
     # proposal is built, read when its result is scored -- safe as plain
     # state because the parent builds and scores in one thread.
@@ -514,6 +462,7 @@ def ptde_async_sample(
             i,
             1.0 if hop else gamma_box[0],
             jitter=de_jitter,
+            partners=None if partner_snapshot is None else partner_snapshot[k],
         )
 
     def _submit(k, i):
@@ -592,7 +541,9 @@ def ptde_async_sample(
     _do_convergence = (
         min_ess is not None or max_rhat is not None
     ) and n_chains >= 2
-    _check_gen = _convergence_check_schedule() if _do_convergence else None
+    _check_gen = (
+        _common._convergence_check_schedule() if _do_convergence else None
+    )
     _next_check = [next(_check_gen)] if _check_gen else [None]
 
     stopping = [False]
@@ -623,7 +574,7 @@ def ptde_async_sample(
             and int(per_chain_draws.min()) >= _next_check[0]
         ):
             n_check = int(per_chain_draws.min())
-            converged, rhat_val, ess_val = _check_convergence(
+            converged, rhat_val, ess_val = _common._check_convergence(
                 stored_raw, n_check, min_ess, max_rhat, stored_lp
             )
             logger.info(
@@ -632,19 +583,19 @@ def ptde_async_sample(
             )
             # GUI progress hook (bounded: fires once per geometric check).
             # Passes the live T=1 draw buffers by reference for snapshotting.
-            _safe_progress(
+            _common._safe_progress(
                 progress_callback,
-                {
-                    "n_draws": n_check,
-                    "n_chains": n_chains,
-                    "max_rhat": rhat_val,
-                    "min_ess": ess_val,
-                    "elapsed_s": time.time() - start_time,
-                    "stop_reason": "converged" if converged else None,
-                    "stored_raw": stored_raw,
-                    "stored_lp": stored_lp,
-                    "raw_var_names": model_keys,
-                },
+                _common.progress_state(
+                    n_check,
+                    n_chains,
+                    rhat_val,
+                    ess_val,
+                    start_time,
+                    converged,
+                    stored_raw,
+                    stored_lp,
+                    model_keys,
+                ),
             )
             _next_check[0] = next(_check_gen, None)
             if converged:
@@ -860,6 +811,14 @@ def ptde_async_sample(
                         lp_guard.check(i, lp)
                 iter_count[k][i] += 1
 
+                # Refresh this rung's partner archive when its SLOWEST chain
+                # advances -- one common update for every chain in the rung.
+                if partner_snapshot is not None:
+                    _rung_min = min(iter_count[k])
+                    if _rung_min > snapshot_at[k]:
+                        snapshot_at[k] = _rung_min
+                        partner_snapshot[k] = current_state[k].copy()
+
                 # Freeze gamma the moment the first T=1 chain finishes its
                 # tune phase: from here on some chain may be RECORDING, and a
                 # recorded draw must come from a fixed kernel -- slower
@@ -894,23 +853,18 @@ def ptde_async_sample(
                     stored_lp[i, d] = current_lp[k][i]
                     per_chain_draws[i] = d + 1
 
-                # thinned hot-rung storage (see store_hot_chains)
-                if (
-                    hot_thin
-                    and k >= 1
-                    and iter_count[k][i] > tune
-                    and iter_count[k][i] % hot_thin == 0
-                    and per_hot_draws[k - 1, i] < hot_cap
-                ):
-                    d = per_hot_draws[k - 1, i]
-                    stored_hot_lp = _common.grow_hot_draw_storage(
-                        stored_hot_raw, stored_hot_lp, d + 1
+                # Thinned hot-rung storage (see store_hot_chains).  The
+                # thinning counter is THIS CHAIN's own iteration count,
+                # because async chains advance independently -- that is the
+                # asynchronous half; the rest is _common's.
+                if iter_count[k][i] > tune:
+                    hot.maybe_store(
+                        k,
+                        i,
+                        current_state[k][i],
+                        current_lp[k][i],
+                        iter_count[k][i],
                     )
-                    layout.store_draw(
-                        stored_hot_raw, current_state[k][i], k - 1, i, d
-                    )
-                    stored_hot_lp[k - 1, i, d] = current_lp[k][i]
-                    per_hot_draws[k - 1, i] = d + 1
 
             n_completed_total[0] += 1
 
@@ -1106,116 +1060,21 @@ def ptde_async_sample(
             _common._shutdown_pool(pool)
 
     actual_draws = int(per_chain_draws.min())
-    if actual_draws == 0:
-        raise RuntimeError(
-            "PTDE-async: sampling stopped — no draws were collected"
-        )
-    if actual_draws < draws:
-        logger.info(
-            f"PTDE-async: early stop ({stop_reason[0]}) — "
-            f"{actual_draws}/{draws} draws/chain collected "
-            f"(some chains ran ahead: max={per_chain_draws.max()})"
-        )
-
-    idata = _common.assemble_inference_data(
-        stored_raw,
-        stored_lp,
-        actual_draws,
-        n_chains,
-        raw_start,
-        raw_var_names,
-        out_var_names,
-        raw_to_phys_batched,
-        chain_seed_index,
-        "PTDE-async",
-        logger,
-    )
-
-    if hot_thin:
-        import xarray as xr
-
-        # Rectangular cut at the shortest hot chain (rungs run at slightly
-        # different speeds); rungs x chains flatten into one 'chain' dim
-        # with a per-chain temperature coordinate, which round-trips
-        # through netcdf.
-        n_hot = int(per_hot_draws.min())
-        if n_hot > 0:
-            n_hot_chains = (n_temps - 1) * n_chains
-            data_vars = {}
-            for key in model_keys:
-                arr = stored_hot_raw[key][:, :, :n_hot].reshape(
-                    (n_hot_chains, n_hot) + raw_start[key].shape
-                )
-                dims = ("chain", "draw") + tuple(
-                    f"{key}_dim_{j}" for j in range(arr.ndim - 2)
-                )
-                data_vars[str(key)] = (dims, arr)
-            data_vars["lp"] = (
-                ("chain", "draw"),
-                stored_hot_lp[:, :, :n_hot].reshape(n_hot_chains, n_hot),
-            )
-            idata["posterior_hot"] = xr.Dataset(
-                data_vars,
-                coords={
-                    "chain": np.arange(n_hot_chains),
-                    "draw": np.arange(n_hot),
-                    "temperature": (
-                        "chain",
-                        np.repeat(np.asarray(temperatures[1:]), n_chains),
-                    ),
-                },
-            )
-            logger.info(
-                f"PTDE-async: stored {n_hot} thinned hot draws/chain from "
-                f"{n_temps - 1} rungs x {n_chains} chains "
-                f"(store_hot_chains={store_hot_chains}, thin={hot_thin})"
-            )
-        else:
-            logger.warning(
-                "PTDE-async: store_hot_chains was set but no hot draws "
-                "accumulated (draws too small for the thinning factor?)"
-            )
-
-    # Ladder communication statistics, stamped on the trace so the mode
-    # report can quote them as context (see stamp_and_log_run_summary).
+    # The ladder counters below are the ADAPTATION window, deliberately: each
+    # makes a claim about the ladder that is in `temperatures` NOW.  With
+    # adapt_ladder off nothing ever clears them and the window is the whole
+    # run (there is no global tune/draw boundary here -- chains transition
+    # individually, which is why the synchronous sampler's reset-at-tune rule
+    # has no analog); with it on, the window runs from the last re-spacing,
+    # the only span over which the final ladder was the one being measured.
     _extras = []
     if n_swap_discards[0]:
         _extras.append(f"  swap_discards={n_swap_discards[0]}")
     if n_eval_timeouts[0]:
         _extras.append(f"  eval_timeouts={n_eval_timeouts[0]}")
-    # Both the stamp below and the ladder_health_report after it are fed the
-    # ADAPTATION window, deliberately: each makes a claim about the ladder
-    # that is in `temperatures` NOW.  With adapt_ladder off nothing ever
-    # clears these counters and the window is the whole run (tune+draw --
-    # there is no global tune/draw boundary here to reset on, chains
-    # transition individually, which is why the synchronous sampler's
-    # reset-at-`step == tune` rule has no analog); with it on, the window
-    # runs from the last re-spacing, which is the only span over which the
-    # final ladder was the one being measured.  Feeding either the cumulative
-    # counters instead would average over every ladder the run ever had.
-    _common.stamp_and_log_run_summary(
-        idata,
-        "PTDE-async",
-        logger,
-        actual_draws=actual_draws,
-        draws=draws,
-        n_accept=n_accept,
-        n_propose=n_propose,
-        n_swap_accept=n_swap_accept,
-        n_swap_propose=n_swap_propose,
-        round_trips=round_trips[0],
-        n_swap_rounds=n_swap_rounds[0],
-        n_temps=n_temps,
-        swap_schedule=swap_schedule,
-        rate_unit="swap",
-        extras=_extras,
-    )
-    _common.log_mode_hop_summary(
-        "PTDE-async", logger, de_mode_hop, n_hop_accept[0], n_hop_propose[0]
-    )
-    ladder_health_report(temperatures, n_swap_accept, n_swap_propose)
+    _notes = []
     if adapt_ladder and n_temps > 2 and not n_ladder_adapts[0]:
-        logger.warning(
+        _notes.append(
             "PTDE-async: adapt_ladder was requested but the ladder was never "
             f"re-spaced -- no {ladder_adapt_window}-swap-proposal window "
             "completed before the first T=1 chain left its tune phase. The "
@@ -1226,8 +1085,29 @@ def ptde_async_sample(
             "the barrier is measured from enough swaps to mean anything, so "
             "prefer the first two."
         )
-
-    if collect_rung_timing:
-        _common.log_rung_timing(rung_times, temperatures, "PTDE-async", logger)
-
+    idata = _common.finish_ptde_run(
+        run,
+        stored_raw,
+        stored_lp,
+        actual_draws,
+        early_stop_detail=(
+            f" ({stop_reason[0]}; some chains ran ahead: "
+            f"max={per_chain_draws.max()})"
+        ),
+        summary_kwargs=dict(
+            n_accept=n_accept,
+            n_propose=n_propose,
+            n_swap_accept=n_swap_accept,
+            n_swap_propose=n_swap_propose,
+            round_trips=round_trips[0],
+            n_swap_rounds=n_swap_rounds[0],
+            n_temps=n_temps,
+            swap_schedule=swap_schedule,
+            rate_unit="swap",
+            extras=_extras,
+        ),
+        hop_counts=(n_hop_accept[0], n_hop_propose[0]),
+        rung_times=rung_times if collect_rung_timing else None,
+        notes=_notes,
+    )
     return idata

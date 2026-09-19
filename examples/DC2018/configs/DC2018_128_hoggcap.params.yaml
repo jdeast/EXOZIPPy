@@ -39,9 +39,17 @@ band.Z087.u1: {initval: 0.0, sigma: 0}
 # width, not the count, and out_frac pinned near a cap is one of the
 # architecture alarms.
 # upper = 10x the median flux error IN THE MODEL'S FLUX SYSTEM (the same
-# quantity the component's own data hint uses -- its 10x-median initval of
-# 0.262/0.0421 is what these caps pin); initval = 1x the median error, an
-# explicit in-bounds user start (the component's flux-scaled 0.2*baseline
-# override and the 10x-median hint both sit at or above the cap).
+# quantity the component's own data hint uses); initval = 1x the median
+# error, an explicit in-bounds start.
+#
+# SINCE 2026-09 THIS IS THE SHIPPED DEFAULT: Instrument._prepare_robust /
+# _register_robust derive exactly these two numbers per light curve (start
+# 1x, cap 10x the median error; components/likelihood.py
+# SCALE_START_FACTOR / SCALE_CAP_FACTOR), and the wrap-up warns when the
+# posterior piles against the cap.  These two lines therefore duplicate
+# what the component now does on its own; they stay as the explicit record
+# of the measurement that set the default.  A params-file upper still wins
+# over the component's cap in either direction, so editing them here is how
+# to test a different cap.
 mulensinstrument.Roman_W149.out_scale: {upper: 0.2620, initval: 0.02620}
 mulensinstrument.Roman_Z087.out_scale: {upper: 0.04213, initval: 0.004213}

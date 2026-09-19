@@ -17,7 +17,7 @@
 %
 % THIS FILE IS ONE OF A PAIR.  Its twin,
 % src/exozippy/components/mulensing/conventions.md, is the normative
-% developer-facing list: it carries the SAME numbered claims C1-C28, and
+% developer-facing list: it carries the SAME numbered claims C1-C29, and
 % names for each one the source file that implements it and the test that
 % pins it.  A claim may be reworded in either file, but a C-number must
 % mean the same thing in both, and a claim added to one must be added to
@@ -26,7 +26,8 @@
 % A THIRD COPY LIVES OUTSIDE THIS REPOSITORY: the Conventions section of
 % paper3_microlensing.tex in the paper repo (~/old_home/papers/exozippy,
 % remote on Overleaf) carries the same C-numbers as the submitted text.
-% All three are in step through C28.  It cannot ride the same commit, so
+% In step through C28; C29 (band-extinction convention) is in this repo's
+% pair only and OWED to the paper.  It cannot ride the same commit, so
 % the rule is that a C-rule is not finished until all three carry it:
 % pull the paper repo, make the matching edit there, and name that commit
 % in this one.  The paper is not licensed to run ahead.
@@ -648,6 +649,46 @@ a search over candidate mappings that always returns its closest candidate
 and so cannot fail visibly.  The failure mode is not hypothetical: such a
 search reported a $2034\sigma$ discrepancy in $\alpha$ for one event whose
 fitted value lay $0.3^\circ$ from the light curve's own optimum.
+
+\paragraph{C29 --- a band extinction is not a number until the convention
+is stated.}  A quoted $A_{\rm W149}$ cannot be compared to a modelled one
+without saying how it was computed, because two inequivalent definitions are
+in common use and for a filter as wide as Roman's W149 ($F146$, spanning
+$0.896$--$2.073\,\mu$m with an effective width of $0.789\,\mu$m) they differ
+by ${\sim}15\%$.  The \emph{monochromatic} definition evaluates the
+reddening law at a single wavelength, $A_{\rm band} = A_V\,k(\lambda_{\rm
+band})/k(V)$, and makes ratios between bands independent of $A_V$.  The
+\emph{integrated} definition --- which is what a measurement actually is,
+and what our bolometric-correction tables compute --- reddens the spectrum
+and integrates it through the passband.  These are not the same quantity:
+as $A_V$ rises the blue wing of a wide band is extinguished away, the band's
+own effective wavelength drifts redward, and $dA_{\rm band}/dA_V$ therefore
+\emph{falls}, from $0.272$ near $A_V = 0$ to $0.212$ at $A_V = 10$ for
+$F146$.  Band ratios under the integrated definition are functions of $A_V$.
+
+The consequence for the data challenge is concrete.  Its key is
+monochromatic at each filter's effective wavelength: the ratio $A_{\rm
+Z087}/A_{\rm W149} = 1.9236$ is reproduced to $0.1\%$ by the reddening law
+evaluated at $0.86510$ and $1.30496\,\mu$m, and by no other published
+wavelength definition for these filters (the pivot wavelength is $13.3\%$
+away, the mean wavelength $24.7\%$), and the same holds across the sample
+(median $1.9315$ over 293 events).  No single $A_V$ can therefore satisfy
+both band extinctions in an integrated model, and the choice of which to
+match is worth $15\%$: anchoring $A_{\rm W149}$ gives $A_V = 11.75$,
+anchoring $A_{\rm Z087}$ gives $10.14$, and anchoring the colour excess
+$E(Z087-W149)$ gives $9.01$.  We anchor the colour.  At $A_V = 9.01$ both
+bands are reproduced $0.58$ mag faint --- the \emph{same} offset in each ---
+and a common-mode grey offset is degenerate with distance and stellar
+radius, which the spectral-energy-distribution fit already constrains; every
+other anchor instead places the residual in colour, where only the fitted
+effective temperature can absorb it ($+0.81$ mag at the $A_{\rm W149}$
+anchor).  This is neither an error in the reddening law, which reproduces
+the key's own ratio to $0.1\%$, nor in the tables: it is irreducible while
+the data follow one definition and the model the other.  For real
+observations the integrated treatment is the correct one and the ambiguity
+does not arise.  We record the general caution because $F146$'s tabulated
+central wavelengths alone span $1.305$--$1.538\,\mu$m, an $18\%$ range
+before any physics, which maps to $24\%$ in $k/k_V$.
 
 \paragraph{C23 --- the discrete degeneracies, and why signs travel in
 pairs.}  For a static binary with no parallax, $(u_0, \alpha) \rightarrow

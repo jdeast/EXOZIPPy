@@ -163,24 +163,69 @@ invisible if you only grep for `_common`:
   population (`resolve_n_chains`, `resolve_start_population`,
   `_make_starts`, `plot_start_ensemble`), the gamma rule (`next_gamma`),
   the stop handlers, `LpPlausibilityGuard`, the draw buffers
-  (`grow_draw_storage` and its hot sibling `grow_hot_draw_storage`), and
+  (`grow_draw_storage` and its hot sibling `grow_hot_draw_storage`), the
+  hot-rung retention (`HotChainRecorder`), the validation of the knobs
+  run.py forwards to both (`validate_shared_ptde_args`), and
   the output (`assemble_inference_data`, `stamp_and_log_run_summary`).
-- **`ptde.py` itself** owns nine statistical helpers that `ptde_async`
-  imports from it directly: `_geometric_ladder`, `resolve_n_temps`,
-  `ladder_health_report`, `_deo_pair_sequence`, `_record_round_trips`,
-  `_update_ladder_barrier`, `_convergence_check_schedule`,
-  `_safe_progress`, `_check_convergence`.
+- **`ladder.py`** owns the temperature ladder: `_geometric_ladder`,
+  `resolve_n_temps`, `ladder_health_report`, `_deo_pairs`,
+  `_deo_pair_sequence`, `_record_round_trips`, `_update_ladder_barrier`.
+  These lived in `ptde.py`, and `ptde_async` imported nine names from it --
+  a second sharing channel that made `ptde.py` simultaneously a sampler and
+  the other sampler's library. **Neither sampler imports the other now.**
+  Anything one sampler needs from its sibling is a shared module that has
+  not been written yet. (`_convergence_check_schedule`, `_safe_progress` and
+  `_check_convergence` went to `_common` in the same move; none of the three
+  has anything to do with dispatch.)
 
-**What is deliberately NOT shared** is the loop itself, and everything whose
-shape follows from it: the stop/abort path (sync breaks inline, async runs a
+**The prologue and the epilogue ARE shared**, as of the same change:
+`_common.prepare_ptde_run` validates, resolves the ladder and the chain
+count, compiles the logp and the conversions, builds the rung populations,
+plots the start ensemble and arms the hot recorder; `_common.finish_ptde_run`
+refuses an empty run, notes an early stop, assembles the trace, attaches the
+hot group and emits the ladder statistics.  Neither is a loop.  The ORDER
+inside `prepare` is load-bearing -- `rng` is built and then consumed by
+`build_rung_populations`, so anything that reordered it would move every
+subsequent random number and break the bit-identical proposal path -- which
+is exactly why there must be one copy of it rather than two.  What varies
+between callers is passed in: the label, an early-stop detail string, the
+summary counters, and `notes` for async's "adapt_ladder never fired"
+warning.  `_common.progress_state` likewise owns the nine-key GUI payload
+that used to be written out verbatim in both files.
+
+A caution for whoever extends this: the shared wrap-up calls
+`ladder.ladder_health_report` through the MODULE, not a from-import, because
+`tests/test_ptde.py::test_the_wrap_up_barrier_measures_the_draw_phase_only`
+spies on it by patching that attribute.  A from-import here would silently
+stop the spy from intercepting and the test would pass while measuring
+nothing -- the vacuity shape `docs/testing.md` is about.
+
+**What is STILL deliberately not shared** is the loop itself, and everything
+whose shape follows from it: the stop/abort path (sync breaks inline, async runs a
 `_maybe_stop` closure over a category state machine), `eval_timeout`
 enforcement (sync blocks on a batch `_map_logp_timeout`, async scans
 in-flight submissions on a wall clock), the ladder- and gamma-adaptation
 windows (sync gets its window free from `log_every`; async has to count
 proposals and freeze gamma when the first chain starts recording), the
-progress line, and the hot-rung storage, which is async-only. Folding those
-into one function would mean re-deriving the asynchrony ptde_async exists
-for -- do not try.
+progress line. Folding those into one function would mean re-deriving the
+asynchrony ptde_async exists for -- do not try.
+
+**The hot-rung storage used to be on that list, and it did not belong
+there.** `store_hot_chains` was honored by `ptde_async` and IGNORED WITH A
+WARNING by `ptde`, so a `method: ptde` fit had no suppressed-mode detector at
+all -- `outputs.ledger.discover_hot_modes` had nothing to read -- and a
+sync-vs-async comparison was unequal in a way that had nothing to do with
+scheduling. Nothing about retaining a thinned copy of the hot rungs depends
+on how proposals are dispatched. `_common.HotChainRecorder` now owns the
+buffers, the store predicate and the `posterior_hot` assembly, and BOTH loops
+call it; the key left `run.py`'s `METHOD_ONLY_SAMPLER_KEYS` asymmetry entry
+and is classified as a PTDE-family key, since a ladderless sampler still
+ignores it. What legitimately differs at the two call sites is one thing:
+WHICH COUNTER THINS -- each chain's own iteration count for async, whose
+chains advance independently, and the draw index for sync, which is
+step-synchronous. That difference IS the asynchrony; the rest was not.
+`tests/test_ptde.py::test_both_samplers_store_the_hot_rungs_they_were_asked_for`
+is parametrized over both.
 
 **The rule, which is what review 6.4.6 is about.** 6.4.5 stopped the T=1
 draw buffers being preallocated at the full configured `draws` -- ~1.6 GB of
@@ -195,21 +240,91 @@ parametrized over `ptde_sample` and `ptde_async_sample` -- the same "one
 rule, N callers" shape `tests/test_polish.py` uses for `next_gamma`. Add the
 arm before the fix, not after.
 
-The parallel code paths most likely to drift the same way, honestly: the
-nine-key `_safe_progress` payload dict (written out verbatim in both files,
-so a new GUI snapshot key lands in one), the two `eval_timeout` mechanisms,
-the ladder-adaptation blocks (async's has already learned a windowing fix
-sync's has not), and the stop/abort wording. None is a bug today; all four
-are two copies of one intention.
+The parallel code paths most likely to drift, honestly, after the prologue,
+the epilogue and the progress payload have been folded: the two
+`eval_timeout` mechanisms, the ladder-adaptation blocks (async's has already
+learned a windowing fix sync's has not), and the stop/abort wording. None is
+a bug today; each is two copies of one intention.
+
+And one measurement worth keeping, because it predicts where the next
+duplication will come from: folding logic into `_common` does NOT
+monotonically reduce the verbatim overlap between the two files. It went
+127 -> 146 lines when `HotChainRecorder` landed and only back to ~129 after
+`prepare`/`finish`, because a shared helper needs its full argument list
+written out at each of two call sites -- the 32-line `prepare_ptde_run(...)`
+call is now the single largest duplicated block. The remedy for that one is
+a shared settings object, not another extraction.
 
 **6.4.6 is not the only instance, which is the point.** Reviews 1.4.3 and
-2.4.16 are the same shape in the argument surface rather than the storage:
-`de_mode_hop` is validated in `ptde_async_sample` (it raises outside
+2.4.16 were the same shape in the argument surface rather than the storage:
+`de_mode_hop` was validated in `ptde_async_sample` (it raises outside
 `[0, 1)`) and NOT in `ptde_sample`, while `run.py` feeds the identical
-config value to both. So the useful question is never "is this knob
+config value to both -- so `de_mode_hop: 1.5` raised under one method and
+was accepted as a probability above 1 under the other, in a sampler that
+reads it as one. FIXED: both now call `_common.validate_shared_ptde_args`,
+which also absorbed the `swap_schedule` check that had been two copies of
+one `if`, and
+`tests/test_ptde.py::test_both_samplers_reject_the_same_bad_shared_knob` is
+parametrized over both samplers and both knobs. So the useful question is never "is this knob
 validated" -- it is **"which shared knobs does exactly one of the two
 samplers validate, and which shared buffers does exactly one of them
 manage?"** Ask it of anything `run.py` forwards to both.
+## `de_partner_snapshot`: async takes DE partners from an archive, not from
+## whatever is visible
+
+`sampler: {de_partner_snapshot: true}` is the default and is a CORRECTNESS
+setting, not a tuning one (review 2.4.20, JDE-proposed).
+
+`ptde_async` chains advance as fast as their likelihood evaluates, and on the
+microlensing Op path evaluation cost rises steeply with caustic proximity --
+that heavy tail is the whole reason async exists. So a chain is slow BECAUSE
+of where it is, and partner states taken "as available" are weighted toward
+chains in cheap regions. The proposal kernel then depends on the proposing
+chain's own cost, and the plain Metropolis ratio does not correct for it:
+detailed balance breaks in a direction that correlates with the physics.
+
+**Time-staleness by itself is NOT the argument**, and the module docstring's
+wording invites that mistake. At stationarity `x_a(t1) - x_b(t2)` is the
+difference of two draws from the same target, so the time indices do not
+enter its distribution at all. What bites is the speed-POSITION correlation
+above, and non-stationarity during burn-in, where "the chains represent the
+posterior" is exactly what is false.
+
+The fix is one archive per rung, refreshed when that rung's SLOWEST chain
+advances, so every chain proposes from the same array. This is the
+DEMetropolisZ construction (ter Braak & Vrugt 2008) -- difference vectors
+from an archive rather than live states -- and `demcz` already ships it here,
+so the validity argument is published rather than invented.
+
+Three properties to preserve if you touch this:
+
+- **The BASE stays `current_state[k][i]`.** `RawLayout.propose` returns
+  `pop[i] + gamma*(partners[j1] - partners[j2])`; only the difference comes
+  from the archive. Taking the base from the archive would propose from a
+  position the chain is not at, against an acceptance test that compares the
+  CURRENT lp.
+- **The rng stream does not move.** One `_pick_two` over an equal-length
+  population, one `standard_normal`, so `partners=pop` is bit-for-bit the old
+  behaviour -- which the tests that pin the proposal path depend on.
+  `tests/test_ptde.py::test_partners_change_the_difference_vector_but_not_the_base_or_the_stream`.
+- **The key is ptde_async-ONLY, and classified as such** in run.py's
+  `METHOD_ONLY_SAMPLER_KEYS`. It is the mirror of `rung_thin_factor`: `ptde`'s
+  population is synchronized by construction, so there is no archive to take
+  a snapshot of.
+
+What it costs is lag, worst exactly where the population is not yet
+stationary. One pathologically slow chain freezes its rung's archive; that is
+unbounded today, and a max-lag forced refresh is the obvious extension.
+
+**What the evidence does and does not say.** The testable prediction
+"stranded chains are the slow ones" FAILED on ab194: the 3 good chains had
+lag-1 lp autocorrelation 0.9998 against the 75 stranded ones' 0.9933 -- the
+stranded chains moved faster. But lp autocorrelation is movement in lp, not
+evaluation wall-time, and per-chain timing was never collected
+(`collect_rung_timing` was off). So the mechanism is UNTESTED rather than
+refuted, the fix rests on the correctness argument alone, and those numbers
+must not be cited as support for it.
+
 ## `de_mode_hop`: the counters the adapter reads must share one window
 
 ter Braak's gamma=1 mode hop (`sampler: {de_mode_hop: p}`, default 0.0 = off)
@@ -317,6 +432,72 @@ turn into a lie for a gradient-free model. That partition is review 2.3.6's
 ruling; re-opening it is its own change. What the polish gained regardless is
 the mid-batch heartbeat (see `run.md`), which needs no timeout to tell
 computing from hung.
+
+## The seed polish is asynchronous on a pool (2.4.14)
+
+`ptde.polish_seed_starts` is the DE engine behind `polish.polish_raw_starts`
+on every model whose gradient graph does not build (finite-source and
+binary-lens microlensing). It used to be a synchronous batch loop: one sweep =
+one batch of `n_seeds * pop_size` proposals, one barrier. That is the defect
+`ptde_async` was written to remove, and it was measured on DC2018-226 (32
+workers, job 46562457): each ~23 s sweep had all 32 workers busy for ~6 s and
+then drained 19, 15, 10, 8, 6, 4, 2, 1 while the batch's dearest VBM proposals
+finished -- 15.3 of 32 workers computing on average, 43% per-worker CPU over
+ten hours -- because a population that has partly migrated proposes a few
+very expensive points per sweep and the whole node waited for them.
+
+**On a real pool the polish now follows `ptde_async`'s procedure** (JDE
+2026-09-15): every (seed, member) slot keeps ONE proposal in flight, results
+are consumed in arrival order, each is accepted or rejected against its own
+member's current lp, and the slot's next proposal is drawn from the population
+as it is THEN. The budget is unchanged in meaning -- `n_steps` sweeps, counted
+as `n_steps * pop_size` completed proposals per seed -- and the gamma
+adaptation, the opt-in improvement window, the trust radius, best-visited
+tracking and the wrap-up lines are shared with the synchronous engine through
+`_accept` / `_end_of_sweep`, so the two cannot drift on the statistics.
+`eval_timeout` is enforced the async way: stale in-flight submissions are
+found on a wall clock, a stale one writes off EVERY in-flight submission (a
+pool cannot lose one worker), the pool is recycled through `pool_recycler`,
+and the written-off slots are resubmitted; a result that raced the write-off
+finds its id gone and is dropped.
+
+**What it costs is exactly what `ptde_async` costs under "Reproducibility"
+above:** the trajectory depends on arrival order, so the DE-path START of a
+pipeline run on `cores > 1` is no longer bit-identical run to run (the 44-event
+survey's 150-sweep numbers for DC2018-226 were reproduced bit for bit by the
+synchronous engine on a different node, and will not be by this one).
+`asynchronous=False` on either function restores the synchronous engine; the
+serial path and a bare-`map` pool always run it, and the L-BFGS path has no RNG
+and is untouched. Nothing in the `sampler:` vocabulary selects it yet -- that
+is a config-vocabulary decision like `eval_timeout`'s (2.3.6), and a caller
+that needs determinism has `cores: 1`.
+
+**Measured head to head on the event that motivated it** (DC2018-226, 32
+workers, five 150-sweep restart legs from the same degenerate seed, jobs
+46629651 synchronous and 46630701 asynchronous, 2026-09-15):
+
+| leg | sync s | sync sweeps/min | async s | async sweeps/min |
+|---|---|---|---|---|
+| 1 | 175 | 52 | 121 | 74 |
+| 2 | 533 | 17 | 50 | 180 |
+| 3 | 59 | 154 | 45 | 201 |
+| 4 | 103 | 87 | 38 | 236 |
+| 5 | 70 | 128 | 38 | 240 |
+| 750 sweeps | 940 | | 292 | |
+
+Same lp plateau (-185.5k on both seeds either way), 3.2x less wall clock, and
+the asynchronous rate CLIMBS as the population settles where the synchronous
+one collapses whenever a few proposals wander into the expensive region
+(legs 2 and 6 of the synchronous run: 17 and 20 sweeps/min). The expensive
+proposals are still evaluated -- asynchrony removes the idling, not the cost.
+
+The wrap-up now also reports, per seed, how many population members NEVER
+accepted a move and the population's median and max distance from the best
+point. At the fixed 2.38/sqrt(2D) step the T=1 acceptance is ~0.3%, so a
+polish that ran for thousands of sweeps can be one migrant plus 63 members
+still at their birth positions; that population proposes 70-unit throws for
+the rest of the run, and until this line existed nothing said so.
+Tests: `tests/test_polish.py`, the `_CallbackPool` block.
 
 ## Chain starts
 

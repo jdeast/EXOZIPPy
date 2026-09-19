@@ -48,7 +48,10 @@ rvinstrument:
     internal_unit: "solRad/d"
   # Optional hogg-mixture outlier scatter (components/defaults.yaml holds the
   # rest of the robust-likelihood blueprint; only the scale is
-  # instrument-specific, because "outlier scatter" is an RV here).
+  # instrument-specific, because "outlier scatter" is an RV here).  The
+  # component starts it at 1 x and caps it at 10 x the file's median error
+  # bar (review 8.6.3), so this wide static upper is only the fallback for a
+  # file with degenerate errors.
   out_scale:
     lower: 0.0
     upper: 100000.0

@@ -59,6 +59,7 @@ Gaussian-only).  Off by default everywhere: with no ``likelihood:`` key the
 model is byte-for-byte what it was before this feature existed.
 """
 
+import copy
 import logging
 
 import numpy as np
@@ -71,7 +72,7 @@ from ..physics_registry import register_physics
 from . import gp as gp_support
 from . import likelihood as robust_support
 from .component import Component
-from .parameterization import pin_unselected
+from .parameterization import merge_options, pin_unselected
 from .timesystem import TimeSystem
 
 logger = logging.getLogger(__name__)
@@ -421,6 +422,19 @@ class Instrument(TimeSystem, Component):
         # Every instrument reads its data from per-element files and tracks a
         # running observation count.
         self.files = [c.get("file") for c in self.config]
+        # The schema says `file` is required, but nothing enforced it: an
+        # entry without one reached pandas at stage 1 as `read_csv(None)`
+        # and died with "Invalid file path or buffer object type: <class
+        # 'NoneType'>", naming no instrument and no key.  Fail here, at
+        # construction, like the malformed mask:/columns: specs below do
+        # (review 2.14.3).
+        for i, f in enumerate(self.files):
+            if f is None:
+                raise ValueError(
+                    f"[{self.prefix}[{self.names[i]}]] has no 'file:' key. "
+                    f"Every {self.prefix} entry must name the data file it "
+                    f"reads."
+                )
         self.n_total_obs = 0
         # One standard deviation per global detrend column, published by
         # ConcatenatedData.finalize; None until then (and for a child that
@@ -719,9 +733,27 @@ class Instrument(TimeSystem, Component):
                 f"[{self.prefix}] _read_data roles must start with 'time'; "
                 f"got {list(roles)}."
             )
-        df = pd.read_csv(
-            self.files[i], sep=r"\s+", engine="c", header=None, comment="#"
-        )
+        # A bad path or an unreadable file used to surface as pandas' own
+        # error -- a bare FileNotFoundError, or "No columns to parse from
+        # file" -- with no instrument and no config key in it, so on a
+        # config with a dozen light curves the user had to bisect.  Re-raise
+        # with the prefix, the element name and the path, keeping the
+        # original as __cause__ (review 2.14.3).
+        path = self.files[i]
+        try:
+            df = pd.read_csv(
+                path, sep=r"\s+", engine="c", header=None, comment="#"
+            )
+        except FileNotFoundError as e:
+            raise FileNotFoundError(
+                f"[{self.prefix}[{self.names[i]}]] data file not found: "
+                f"{path!r} (the 'file:' key of this entry)."
+            ) from e
+        except (pd.errors.EmptyDataError, pd.errors.ParserError) as e:
+            raise ValueError(
+                f"[{self.prefix}[{self.names[i]}]] could not parse data "
+                f"file {path!r} (the 'file:' key of this entry): {e}"
+            ) from e
         df = self._select_columns(df, i, roles, detrend, shared_roles)
         df = self._apply_mask(df, i)
         t = self._to_bjd_tdb(df.iloc[:, 0].values.astype(float), i)
@@ -1066,7 +1098,13 @@ class Instrument(TimeSystem, Component):
                 continue
             entry = pin_unselected(self.n_elements, on)
             for param in gp_support.GP_TERM_PARAMS[kind]:
-                manifest[param] = dict(entry)
+                # deepcopy, not dict(): a shallow copy shares the nested
+                # {"overrides": {"sigma": [...]}} across every parameter of
+                # the term, and Instrument.add_parameter already mutates a
+                # manifest entry in place (detrend_coeffs).  This codebase
+                # shipped exactly that aliasing once, in the broadcast
+                # shared-dict bug (review 2.5.5).
+                manifest[param] = copy.deepcopy(entry)
         return manifest
 
     def _build_log10_deterministics(self, log_params):
@@ -1434,10 +1472,13 @@ class Instrument(TimeSystem, Component):
         self.has_robust_likelihood = any(self.likelihood_kinds)
 
         # Element index -> indices into the concatenated observation arrays
-        # (filled by _prepare_robust), the per-file symbolic outlier log-odds
-        # (filled by _add_robust_likelihoods), their lazily compiled
-        # evaluators, and the linear values of log-sampled parameters.
+        # (filled by _prepare_robust), the per-element cap on the mixture
+        # scale in its USER unit (same filler; read by _register_robust), the
+        # per-file symbolic outlier log-odds (filled by
+        # _add_robust_likelihoods), their lazily compiled evaluators, and the
+        # linear values of log-sampled parameters.
         self._robust_obs_index = {}
+        self._robust_scale_caps = {}
         self._hogg_logodds = {}
         self._hogg_prob_fns = None
         self._robust_linear = {}
@@ -1457,15 +1498,28 @@ class Instrument(TimeSystem, Component):
         Call at the end of ``load_data``, right next to ``_prepare_gp``.
         Records each opted-in element's indices into the concatenated
         observation arrays (no sort needed -- both families are per-point
-        independent), and pushes a data-driven hint for the hogg background
-        scale: ``10 x median(err)``, i.e. well clear of the inlier scatter,
-        so the two mixture components start separated and cannot swap roles
-        during tuning.  Seeding from the observations' own scatter would
-        instead measure the physical signal (the same reasoning as the GP
-        amplitude seed).
+        independent), and sizes the hogg background scale from the file's
+        median error bar: a START hint of ``SCALE_START_FACTOR x
+        median(err)`` (with a matching whitening scale hint -- the start is
+        the natural width of the parameter), and a CAP of ``SCALE_CAP_FACTOR
+        x median(err)`` recorded in ``_robust_scale_caps`` for
+        ``_register_robust`` to attach at stage 3.  Both are in the USER
+        unit ``out_scale`` is declared in (``user_factor`` converts from the
+        internal unit the caller holds the errors in).
 
-        ``user_factor`` converts the error from the internal unit the caller
-        holds it in to the user unit ``out_scale`` is declared in.
+        The start used to be 10x the median, "so the two mixture components
+        start separated and cannot swap roles during tuning".  Review 8.6.3
+        moved the cap there instead: on DC2018 event 128 the uncapped
+        out_scale ran to 300-1000x the median error and forgave 777 nats of
+        caustic-crossing residuals, inverting a 601-nat preference for the
+        light curve's own rho into +142 nats for the wrong mode; capped at
+        10x, the blind rho came back.  The ruling accepted the trade -- the
+        damage rode on the WIDTH the background component was allowed, not
+        on the count of points it claimed, and out_frac's 0.5 ceiling keeps
+        the roles apart -- so the start is now the median error itself, an
+        in-bounds value a tenth of the way to the cap.  Seeding from the
+        observations' own scatter would instead measure the physical signal
+        (the same reasoning as the GP amplitude seed).
         """
         if not self.has_robust_likelihood:
             return
@@ -1487,14 +1541,19 @@ class Instrument(TimeSystem, Component):
             scale_param = robust_support.LIKELIHOOD_SCALE_PARAM.get(kind)
             if scale_param is None:
                 continue
-            scale = 10.0 * float(np.median(err[sel])) * user_factor
-            if not np.isfinite(scale) or scale <= 0.0:
+            median_err = float(np.median(err[sel])) * user_factor
+            if not np.isfinite(median_err) or median_err <= 0.0:
                 # Degenerate (zero/absent) errors: keep the defaults.yaml
-                # start rather than pinning the logit against its bound.
+                # start and its wide static upper rather than pinning the
+                # logit against its bound.
                 continue
+            start = robust_support.SCALE_START_FACTOR * median_err
+            self._robust_scale_caps[i] = (
+                robust_support.SCALE_CAP_FACTOR * median_err
+            )
             path = f"{self.prefix}.{i}.{scale_param}"
-            self.config_manager.add_hint(path, scale)
-            self.config_manager.add_scale_hint(path, scale)
+            self.config_manager.add_hint(path, start)
+            self.config_manager.add_scale_hint(path, start)
 
     def _register_robust(self, manifest):
         """Stage 3: add this component's robust-likelihood parameters.
@@ -1504,6 +1563,27 @@ class Instrument(TimeSystem, Component):
         elements that did not opt into a family are pinned fixed
         (``sigma: 0``) through ``internal_overrides`` -- free to the sampler,
         still user-overridable.  Returns ``manifest`` for chaining.
+
+        Two more things ride on the hogg entries (review 8.6.3):
+
+        * The scale parameter's data-derived CAP (``_prepare_robust``) is
+          attached as a per-element ``upper`` through the manifest OPTIONS
+          channel, not ``"overrides"``.  Overrides combine bounds as
+          ``min(user, component)`` -- right for a validity limit (Band's
+          linear-law ``u1 <= 1``, the jitter floor), wrong here: the cap is
+          a modelling default, and the ruling is that the params file may
+          tighten OR loosen it.  Options replace the resolved value
+          outright, so the elements the user bounded (``user_wrote_field``,
+          any of the three spellings) are left NaN -- "keep the resolved
+          value", the same convention the overrides channel uses, honoured
+          by ``Component.add_parameter`` for options too -- and so are the
+          elements with degenerate errors (defaults.yaml's wide static
+          upper stands) and the ones that did not opt in.
+        * Every element that opted in is flagged ``cap_alarm`` on each
+          parameter in ``LIKELIHOOD_CAP_ALARM``: its upper bound is a cap,
+          not a physical limit, so a posterior piled against it is the
+          architecture alarm the wrap-up reports
+          (``diagnostics.cap_alarm_findings``).
         """
         if not self.has_robust_likelihood:
             return manifest
@@ -1513,8 +1593,26 @@ class Instrument(TimeSystem, Component):
             if not on:
                 continue
             entry = pin_unselected(self.n_elements, on)
+            alarm = [i in on for i in range(self.n_elements)]
             for param in robust_support.LIKELIHOOD_PARAMS[kind]:
-                manifest[param] = dict(entry)
+                # deepcopy per parameter, for the reason _register_gp gives.
+                manifest[param] = copy.deepcopy(entry)
+                if param in robust_support.LIKELIHOOD_CAP_ALARM.get(kind, ()):
+                    manifest[param] = merge_options(
+                        manifest[param], cap_alarm=list(alarm)
+                    )
+            scale_param = robust_support.LIKELIHOOD_SCALE_PARAM.get(kind)
+            if scale_param is None or not self._robust_scale_caps:
+                continue
+            user_upper = self.user_wrote_field(scale_param, "upper")
+            caps = np.full(self.n_elements, np.nan)
+            for i, cap in self._robust_scale_caps.items():
+                if i in on and not user_upper[i]:
+                    caps[i] = cap
+            if np.isfinite(caps).any():
+                manifest[scale_param] = merge_options(
+                    manifest[scale_param], upper=caps.tolist()
+                )
         return manifest
 
     def _build_robust_deterministics(self):
@@ -1800,6 +1898,32 @@ class Instrument(TimeSystem, Component):
         label = getattr(getattr(self, "detrend_coeffs", None), "label", None)
         return [label] if label else []
 
+    def gp_dep_labels(self):
+        """``param_deps`` entries for this instrument's GP hyperparameters.
+
+        The GP conditional mean reaches the panels in NUMPY too
+        (``gp_mean_at_data`` / ``gp_mean_on_grid`` are compiled celerite2
+        evaluators, not nodes of the plotted model trace), so the graph walk
+        cannot see it and, until 2026-09, no ``gp_*`` label ever reached
+        ``param_deps``: a GP hyperparameter slider in the GUI never
+        re-rendered a chart (review 1.12.9).  The eval path does ask for a
+        fresh point on every slider move -- ``param_deps`` was the only
+        blocker.  Same label convention as ``detrend_dep_labels``: the built
+        Parameter's own ``label``, for the terms actually on somewhere.
+        ``[]`` without a GP, so no chart without one changes.
+        """
+        if not getattr(self, "has_gp", False):
+            return []
+        labels = []
+        for kind in gp_support.GP_TERMS:
+            if not self._gp_elements(kind):
+                continue
+            for name in gp_support.GP_TERM_PARAMS[kind]:
+                label = getattr(getattr(self, name, None), "label", None)
+                if label:
+                    labels.append(label)
+        return labels
+
     # ------------------------------------------------------------------
     # Shared noise machinery
     # ------------------------------------------------------------------
@@ -1925,13 +2049,23 @@ class Instrument(TimeSystem, Component):
                 col = np.asarray(block[:, j], dtype=float)
                 sd = float(np.std(col))
                 if not np.isfinite(sd) or sd == 0.0:
+                    # One raise for two causes, and the message names both:
+                    # an all-NaN (or NaN-bearing) column has sd = nan and
+                    # used to read "constant (value nan)", which sends the
+                    # user hunting for a repeated value that does not exist
+                    # (review 2.14.3).
+                    why = (
+                        "constant"
+                        if np.isfinite(sd)
+                        else "non-finite (it contains NaN or inf)"
+                    )
                     raise ValueError(
                         f"[{self.prefix}[{self.names[i]}]] detrend column "
-                        f"{j} is constant (value {col.flat[0]!r}), so it "
-                        f"carries no information and is exactly degenerate "
-                        f"with this instrument's offset.  Remove the column "
-                        f"(or list only the varying ones with `columns: "
-                        f"{{detrend: [...]}}`)."
+                        f"{j} is {why} (first value {col.flat[0]!r}), so "
+                        f"it carries no information and is exactly "
+                        f"degenerate with this instrument's offset.  Remove "
+                        f"the column (or list only the varying ones with "
+                        f"`columns: {{detrend: [...]}}`)."
                     )
                 matrix[r : r + n_r, c + j] = (col - np.mean(col)) / sd
                 scales[c + j] = sd

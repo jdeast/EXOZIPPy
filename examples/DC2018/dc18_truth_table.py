@@ -40,6 +40,7 @@ import glob
 import io
 import json
 import os
+import re
 import sys
 import warnings
 
@@ -571,6 +572,90 @@ def report(prefix, event, data_dir, tier="default"):
     }
 
 
+# Grey band-extinction residual per event, in magnitudes: what our INTEGRATED
+# band extinction still misses at the colour-anchored av, because the
+# simulation reddened monochromatically (conventions.md C29).  Computed in
+# dc18_sweep_config.av_from_clump_colour; hardcoded here so scoring a trace
+# never needs the BC grid.
+C29_GREY = {
+    "008": -0.0658,
+    "062": -0.4114,
+    "128": -0.3379,
+    "152": -0.1458,
+    "194": -0.5780,
+    "223": -0.2640,
+}
+
+
+def print_convention_caveat(rows):
+    """
+    Print the C29 systematic beside the recovery table.
+
+    JDE 2026-09-17 asked for the disagreement to be listed "as a caveat
+    alongside the discussion of how well we recover 'truth'".  It prints here
+    rather than only in the paper because this table IS that discussion for
+    anyone reading a scoring run, and a caveat that lives somewhere else is a
+    caveat nobody applies.
+
+    REWRITTEN 2026-09-17 AFTER THE MEASUREMENT CONTRADICTED THE FIRST VERSION.
+    That version said theta_star is biased low by 10**(-0.2*grey) -- 0.766x on
+    event 194 -- straight from the CSB relation.  The ab194/av_true arm, the
+    first run with the colour-anchored prior, measured theta_star at 0.983x of
+    truth.  So the arithmetic was right about the CSB relation and wrong about
+    where the residual lands: theta_star is PROTECTED, because the light curve
+    pins rho * theta_E independently of the SED.  What actually absorbs the
+    grey term is teffsed, and behind it the (R_source, D_source) pair.
+    """
+    seen = [r["event"] for r in rows if str(r["event"]) in C29_GREY]
+    if not seen:
+        return
+    print("\n" + "=" * 104)
+    print(
+        "CAVEAT: THE SIMULATION'S EXTINCTION CONVENTION IS NOT OURS, AND THE"
+    )
+    print("        RESIDUAL LANDS ON teffsed AND (R_source, D_source).")
+    print("  This simulation reddened MONOCHROMATICALLY at each filter's")
+    print(
+        "  effective wavelength; we integrate a reddened spectrum through the"
+    )
+    print(
+        "  passband, which is what a measurement is.  For a filter as wide as"
+    )
+    print(
+        "  W149 those differ, so no single av reproduces both simulated band"
+    )
+    print("  extinctions in our model.  Anchoring the colour leaves a GREY")
+    print("  residual in both bands:")
+    print("     %-7s %s" % ("event", "grey (mag)"))
+    for ev in sorted({str(e) for e in seen}):
+        print("     %-7s %+10.2f" % (ev, C29_GREY[ev]))
+    print("  MEASURED ON av_true (event 194, prior av = 9.01 +/- 0.3, ptde,")
+    print("  Rhat 1.00, ESS 23-25k, 78/78 chains):")
+    print("     theta_star  0.983x truth   <-- NOT biased; the light curve")
+    print("                                    pins rho * theta_E")
+    print("     R_source    0.403x truth   pull -5.25")
+    print("     D_source    0.410x truth   pull -5.35")
+    print("     theta_E     0.774x truth   pull -0.66  (within 1 sigma)")
+    print("  R and D slide ~2.45x IN LOCKSTEP, which is why their ratio --")
+    print("  theta_star -- survives while each is individually -5 sigma.  The")
+    print(
+        "  flux the grey term over-predicts is absorbed by a source made too"
+    )
+    print(
+        "  COOL (teffsed 3040 K here), and the distance follows the resulting"
+    )
+    print("  luminosity inward.")
+    print("  DO NOT read the -5 sigma R_source/D_source pulls as 'the")
+    print("  convention explains them': that is not established.  What IS")
+    print(
+        "  established is that the colour-anchored prior moved theta_star from"
+    )
+    print("  0.62x truth (the old arms, av ~ 4.25 from A_W149) to 0.983x, and")
+    print("  R_source's pull from -13.10 to -5.25.  The remainder is OURS.")
+    print("  None of this applies to real Roman data, where the integrated")
+    print("  treatment is simply the correct one.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -581,6 +666,12 @@ def main():
     ap.add_argument("--data-dir", default=None)
     ap.add_argument("--tier", default="default", choices=sorted(TIERS))
     ap.add_argument("--json-out", default=None)
+    ap.add_argument(
+        "--event",
+        type=int,
+        default=None,
+        help="event number, when the prefix does not carry it",
+    )
     a = ap.parse_args()
     d = C.data_dir_or_raise(a.data_dir)
     out = []
@@ -592,13 +683,35 @@ def main():
                 if h.endswith("_results.csv")
                 else (h[: -len("_trace.nc")] if h.endswith("_trace.nc") else h)
             )
-            ev = None
-            for part in os.path.normpath(p).split(os.sep):
-                if part.isdigit():
-                    ev = int(part)
+            # THE EVENT NUMBER COMES FROM THE RUN PREFIX THE PIPELINE
+            # ITSELF WROTE -- `DC2018_<NNN>` -- and only then from a
+            # digits-only directory.  The old order was the reverse with a
+            # `digits[:3]` fallback, and on any layout whose directories are
+            # not bare numbers (ab194/sync/DC2018_194, the A/B arms) that
+            # fallback concatenated every digit in the basename and took the
+            # first three: "DC2018_194" -> "2018194" -> event 201.  It then
+            # printed a complete, plausible-looking table against event 201's
+            # truth, with a t_0 pull of 21,897 reading as a physics failure
+            # instead of a parse bug.  Nothing in the output said which event
+            # the truth came from, so the two rules are now cross-checked and
+            # a disagreement is LOUD rather than silent.
+            ev = a.event
             if ev is None:
-                digits = "".join(c for c in os.path.basename(p) if c.isdigit())
-                ev = int(digits[:3]) if digits else None
+                m = re.search(r"DC2018[_-]?(\d{3})", os.path.basename(p))
+                ev = int(m.group(1)) if m else None
+                dir_ev = None
+                for part in os.path.normpath(p).split(os.sep):
+                    if part.isdigit():
+                        dir_ev = int(part)
+                if ev is None:
+                    ev = dir_ev
+                elif dir_ev is not None and dir_ev != ev:
+                    print(
+                        "WARNING %s: prefix says event %d but a parent "
+                        "directory says %d -- scoring %d (the prefix is what "
+                        "the pipeline wrote); pass --event to override"
+                        % (p, ev, dir_ev, ev)
+                    )
             if ev is None:
                 print("skip %s: cannot infer the event number" % p)
                 continue
@@ -624,6 +737,8 @@ def main():
                     "YES" if r["clear_winner"] else "no",
                 )
             )
+    if out:
+        print_convention_caveat(out)
     if a.json_out:
         json.dump(out, io.open(a.json_out, "w", encoding="utf-8"), indent=1)
         print("\nwrote %s" % a.json_out)

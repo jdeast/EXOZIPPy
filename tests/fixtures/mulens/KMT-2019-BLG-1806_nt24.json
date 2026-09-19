@@ -3,7 +3,7 @@
  "n_terms": 87,
  "params": "examples/KMT-2019-BLG-1806/KMT-2019-BLG-1806.params.yaml",
  "platform": {
-  "blas": "scipy-openblas",
+  "blas": "blas",
   "machine": "x86_64",
   "system": "Linux"
  },
@@ -86,23 +86,23 @@
   ]
  },
  "terms": {
-  "POT:galacticmodel.imf_prior": -1.0563830404868038,
+  "POT:galacticmodel.imf_prior": -1.0563830404868035,
   "POT:galacticmodel.kinematic_prior": 16.669804756459484,
   "POT:gaussian_prior.lens.xalpha": -0.14808517301701055,
   "POT:gaussian_prior.lens.yalpha": -0.351914826982989,
   "POT:gaussian_prior.mulensinstrument.zeropoint": -351.5351963151095,
-  "POT:logit_uniform_prior.band.u1": -2.0596389143836564,
+  "POT:logit_uniform_prior.band.u1": -1.5606477482646683,
   "POT:logit_uniform_prior.lens.log_s": -1.3866884376580078,
   "POT:logit_uniform_prior.lens.xalpha": -1.386323978593087,
   "POT:logit_uniform_prior.lens.yalpha": -1.3863647465622844,
-  "POT:logit_uniform_prior.mulensinstrument.err_scale": -41.44653767388982,
+  "POT:logit_uniform_prior.mulensinstrument.err_scale": -13.87521254308328,
   "POT:logit_uniform_prior.mulensinstrument.log_f_total": -6.033554306691813,
   "POT:logit_uniform_prior.mulensinstrument.q_source": -9.189944508779835,
   "POT:logit_uniform_prior.planet.log_q": -1.400487547991379,
   "POT:logit_uniform_prior.sed.errscale": -6.909754279648304,
   "POT:logit_uniform_prior.source.t_0": -2.427210820458976,
   "POT:logit_uniform_prior.source.u_0": -1.3862970023104895,
-  "POT:logit_uniform_prior.star.av": -12.797195424633687,
+  "POT:logit_uniform_prior.star.av": -15.20280516916753,
   "POT:logit_uniform_prior.star.distance": -7.294551644918046,
   "POT:logit_uniform_prior.star.logmass": -1.6460156185740282,
   "POT:logit_uniform_prior.star.pm_dec": -2.77258872516003,
@@ -174,5 +174,5 @@
   "RV:star.teff_raw": -0.9189385332046727,
   "RV:star.teffsed_raw": -1.8378770664093453
  },
- "total_logp": 44310.96552819448
+ "total_logp": 44336.63023474688
 }

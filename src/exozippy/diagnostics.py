@@ -1,3 +1,4 @@
+import logging
 from typing import Dict
 
 import numpy as np
@@ -7,6 +8,8 @@ import pytensor.graph.traversal
 
 from .components.parameter import derived_constraint_message
 from .config import RESERVED_PARAM_KEYS, USER_PARAM_KEYS
+
+logger = logging.getLogger(__name__)
 
 # check_user_starts' noise floor.  A derived quantity reassembled through a
 # different float path than the seed differs in the last bits; reporting
@@ -27,6 +30,88 @@ _INERT_SUBKEYS = ("derived",)
 # What check_unused_yaml accepts.  Derived from config.py's own vocabulary,
 # never restated -- the two used to drift (see USER_PARAM_KEYS' comment).
 VALID_SUBKEYS = frozenset(USER_PARAM_KEYS) | frozenset(_INERT_SUBKEYS)
+
+# The pile-at-cap rule (review 8.6.3): an element whose upper bound is a
+# flagged modelling cap (``Parameter.cap_alarm``) is reported when MORE than
+# CAP_PILE_FRAC of its draws lie within the top CAP_TOP_FRAC of its
+# [lower, upper] range.  Half the posterior in the top twentieth of the
+# support is not a bounded parameter being sampled, it is a parameter that
+# would leave if it could.
+CAP_PILE_FRAC = 0.5
+CAP_TOP_FRAC = 0.05
+
+
+def cap_alarm_findings(system, pile_frac=CAP_PILE_FRAC, top_frac=CAP_TOP_FRAC):
+    """Every sampled element whose posterior piles against a flagged cap.
+
+    Component-agnostic and manifest-driven: the check reads nothing but
+    ``Parameter.cap_alarm`` (set by the owning component through a manifest
+    option) and the distributed posterior, so it never names a component
+    or a parameter.  Call after ``System.distribute_posterior``.  Returns a
+    list of dicts -- ``display`` (the user path, e.g.
+    ``mulensinstrument.Roman_W149.out_scale``), ``label``, ``index``,
+    ``cap`` and ``lower`` (USER units), ``unit`` and ``frac`` -- sorted by
+    label then element, for ``log_cap_alarms`` and the modeling prose.
+    """
+    findings = []
+    for p in system.get_all_parameters():
+        n = int(np.prod(p.shape)) if getattr(p, "shape", ()) else 1
+        n = max(
+            n,
+            int(np.atleast_1d(p.cap_alarm).size)
+            if p.cap_alarm is not None
+            else 1,
+        )
+        for i in range(n):
+            if not p.element_cap_alarm(i):
+                continue
+            # A pinned or derived element cannot pile anywhere; only ask
+            # once the build has written the roles (pre-build, assume free
+            # so a synthetic posterior can be audited).
+            if p._built_roles() and not p.element_is_sampled(i):
+                continue
+            frac = p.cap_saturation(i, top_frac=top_frac)
+            if frac is None or frac <= pile_frac:
+                continue
+            findings.append(
+                {
+                    "display": p.get_display_label(i),
+                    "label": p.label,
+                    "index": i,
+                    "cap": float(
+                        p.from_internal(np.atleast_1d(p.upper)[i], index=i)
+                    ),
+                    "lower": float(
+                        p.from_internal(np.atleast_1d(p.lower)[i], index=i)
+                    ),
+                    "unit": str(p.unit) if p.unit is not None else "",
+                    "frac": frac,
+                    "top_frac": top_frac,
+                }
+            )
+    return findings
+
+
+def log_cap_alarms(findings, log, top_frac=CAP_TOP_FRAC):
+    """One WARNING per finding, naming the parameter, cap and remedy."""
+    for f in findings:
+        unit = f" {f['unit']}" if f.get("unit") else ""
+        log.warning(
+            "PILED AT CAP: %s has %.0f%% of its posterior draws within the "
+            "top %.0f%% of its allowed range [%.4g, %.4g%s] -- the noise "
+            "model wants more freedom than the cap allows.  Inspect the "
+            "residuals of that data set; loosen `%s: {upper: ...}` in the "
+            "params file only if the excess is NOT a real signal the model "
+            "is missing (review 8.6.3: on DC2018 event 128 the uncapped "
+            "mixture absorbed the caustic crossing).",
+            f["display"],
+            100.0 * f["frac"],
+            100.0 * f.get("top_frac", top_frac),
+            f["lower"],
+            f["cap"],
+            unit,
+            f["display"],
+        )
 
 
 class ModelAuditor:
@@ -536,3 +621,108 @@ class ModelAuditor:
 
         findings.sort(key=lambda f: -abs(f["rel"]))
         return findings
+
+
+# ---------------------------------------------------------------------------
+# Posterior against a wall (review 8.2.2)
+# ---------------------------------------------------------------------------
+
+# How close to a bound, as a fraction of the bound-to-bound distance, counts
+# as "against the wall".  Measured in LOG space when both bounds are positive
+# -- err_scale on [0.01, 100] is four decades, and 2% of that is a factor 1.2
+# from either end -- and linearly otherwise.  A linear rule on a positive
+# scale would call err_scale = 1 "near the lower bound 0.01" on a span of
+# 100, which is the wrong reading of every scale-like parameter.
+NEAR_BOUND_MARGIN = 0.02
+
+
+def near_bound_position(value, lower, upper):
+    """Where ``value`` sits in [lower, upper]: 0.0 at lower, 1.0 at upper.
+
+    Log space when both bounds are positive (a scale), linear otherwise.
+    NaN when the interval is degenerate or the value is not finite, so a
+    caller comparing against a margin gets False rather than an exception.
+    """
+    value, lower, upper = float(value), float(lower), float(upper)
+    if not (np.isfinite(value) and np.isfinite(lower) and np.isfinite(upper)):
+        return np.nan
+    if upper <= lower:
+        return np.nan
+    if lower > 0.0 and upper > 0.0 and value > 0.0:
+        return (np.log(value) - np.log(lower)) / (
+            np.log(upper) - np.log(lower)
+        )
+    return (value - lower) / (upper - lower)
+
+
+def warn_posterior_near_bounds(system, margin=NEAR_BOUND_MARGIN, log=None):
+    """Warn, per sampled element, when the posterior median sits against a
+    hard bound -- and say what the component thinks that means.
+
+    Runs after ``System.distribute_posterior`` so every Parameter carries its
+    posterior (user units, sample axis last).  Only elements on the logit
+    transform have two finite bounds to be near; the frozen transform
+    (``_raw_transform``) is the one owner of which elements those are and of
+    their bounds in internal units, so nothing here re-derives a bound.
+
+    The generic half of the message is the same sentence the post-polish
+    wall warning uses (a value on a wall usually means the BOUND is the
+    thing to revisit); the component-specific half is
+    ``Parameter.near_bound_remedy``, declared in defaults.yaml, because for
+    a nuisance scale the generic advice is wrong -- err_scale at its upper
+    bound means the data are being rescaled instead of fitted, and the
+    remedy is the errors or the starting model, not a wider bound (review
+    8.2.2, measured on DC2018-226 where both bands sat at 300-460x).
+
+    Returns the list of hits (dicts) so a caller or a test can read them.
+    """
+    log = log or logger
+    hits = []
+    for par in system.get_all_parameters():
+        tf = getattr(par, "_raw_transform", None)
+        post = getattr(par, "posterior", None)
+        if not tf or post is None:
+            continue
+        arr = np.asarray(getattr(post, "values", post), dtype=float)
+        if arr.ndim == 0 or arr.size == 0:
+            continue
+        with np.errstate(all="ignore"):
+            med = np.atleast_1d(np.nanmedian(arr, axis=-1))
+        for i in tf["sampled_idx"]:
+            if not tf["use_logit"][i] or i >= med.size:
+                continue
+            lower, upper = tf["lowers"][i], tf["uppers"][i]
+            try:
+                v_int = float(par.to_internal(med[i], index=i))
+            except Exception:  # noqa: BLE001 -- a conversion that fails is not a wall
+                continue
+            pos = near_bound_position(v_int, lower, upper)
+            if not np.isfinite(pos) or margin < pos < 1.0 - margin:
+                continue
+            side = "lower" if pos <= margin else "upper"
+            lo_u = float(np.atleast_1d(par.from_internal(lower, index=i))[0])
+            hi_u = float(np.atleast_1d(par.from_internal(upper, index=i))[0])
+            # `unit` is an astropy Unit (or a per-element list of them) after
+            # __post_init__; rendered for the message only, never compared.
+            u = par.unit
+            if isinstance(u, (list, tuple)):
+                u = u[i] if i < len(u) else None
+            unit = "" if u is None else str(u).strip()
+            hit = {
+                "label": par.get_display_label(i),
+                "median": float(med[i]),
+                "side": side,
+                "position": float(pos),
+                "lower": lo_u,
+                "upper": hi_u,
+            }
+            hits.append(hit)
+            log.warning(
+                f"Parameter '{hit['label']}': posterior median {med[i]:.4g}"
+                f"{(' ' + unit) if unit else ''} sits against its {side} bound "
+                f"[{lo_u:.4g}, {hi_u:.4g}] ({pos:.1%} of the way across, within "
+                f"the {margin:.0%} margin). A posterior piled on a wall "
+                f"usually means the bound, not the fit, is the thing to "
+                f"revisit." + par.remedy_suffix()
+            )
+    return hits

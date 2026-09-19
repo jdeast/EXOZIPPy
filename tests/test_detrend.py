@@ -498,3 +498,19 @@ def test_a_fit_without_detrend_columns_says_nothing_extra(detrended_rv):
         assert comp.detrend_caption() == ""
     finally:
         comp.total_detrend_cols = saved
+
+
+def test_an_all_nan_detrend_column_is_refused_as_non_finite(detrended_rv):
+    """
+    Given a detrend column that is entirely NaN,
+    When the block-diagonal matrix is built,
+    Then it RAISES saying the column is NON-FINITE, not "constant (value
+    nan)" -- which sent the user hunting for a repeated value that does not
+    exist (review 2.14.3).  The constant-column raise above is the same
+    site with the other cause named.
+    """
+    system, _, _, _, _ = detrended_rv
+
+    with pytest.raises(ValueError, match=r"non-finite") as excinfo:
+        system.rvinstrument._build_block_detrend([np.full((5, 1), np.nan)], 5)
+    assert "rvinstrument[HIRES]" in str(excinfo.value)

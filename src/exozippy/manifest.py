@@ -180,8 +180,10 @@ class ManifestEntry:
     ``expr_key`` is the name of the ``expressions:`` block the entry selects,
     or ``None`` for a free parameter.  ``options`` holds everything else the
     entry carried (``shape``, ``names``, ``overrides``, ``deps``,
-    ``table_note``, ``force_node``, direct field overrides such as ``lower``
-    ...) -- never ``expr_key`` itself.
+    ``table_note``, ``force_node``, ``cap_alarm``, direct field overrides
+    such as ``lower`` ...) -- never ``expr_key`` itself.  A per-element
+    list in a direct NUMERIC field may carry NaN for "keep the resolved
+    value" (``Component.layer_options``).
 
     Three options are per-element and are read here rather than by the
     consumers, so the element roles have one interpreter:

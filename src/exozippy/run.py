@@ -29,7 +29,7 @@ from .corner_utils import (
     histogram_grid_degenerate,
     save_corner_plot,
 )
-from .diagnostics import ModelAuditor
+from .diagnostics import ModelAuditor, cap_alarm_findings, log_cap_alarms
 from .logger import fmt_duration, setup_logging
 from .mkparam import write_param_file
 from .outputs.modeling import build_modeling_output, compile_modeling_pdf
@@ -84,6 +84,7 @@ KNOWN_SAMPLER_KEYS = {
     "seed_polish",
     "seed",
     "store_hot_chains",
+    "de_partner_snapshot",
     "start_dispersion",
 }
 
@@ -309,11 +310,13 @@ def warn_maxtime_unsupported(method, maxtime):
 # says nothing, and the branch that would read it is never taken.
 #
 # That is the whole defect (reviews 2.4.2 and 2.3.6).  2.4.2 landed the
-# mechanism for the three keys it had traced -- store_hot_chains is forwarded
-# only to ptde_async, so under method: ptde the hot-chain mode discovery
-# simply never runs and the user is told nothing; rung_thin_factor /
-# rung_thin_start are the same thing mirrored, ptde-only and silently ignored
-# by ptde_async.  2.3.6 is that finding on the full list: at least a dozen
+# mechanism for the three keys it had traced.  store_hot_chains was one of
+# them -- forwarded only to ptde_async, so under method: ptde the hot-chain
+# mode discovery simply never ran and the user was told nothing.  That one is
+# now FIXED AT THE SOURCE rather than described: both loops share
+# samplers._common.HotChainRecorder, so the key is honored either way and no
+# longer appears in the table below.  rung_thin_factor / rung_thin_start
+# remain, ptde-only and correctly so.  2.3.6 is that finding on the full list: at least a dozen
 # more keys are read by exactly one branch or family.
 #
 # THE HEADLINE IS `chains`.  It is forwarded to the HMC branches and to demc /
@@ -367,8 +370,21 @@ METHOD_ONLY_SAMPLER_KEYS = {
     # Per-RUNG start dispersion (8.4.7): meaningless without a ladder, so it
     # is PTDE-only rather than an all-method key.
     "start_dispersion": _PTDE_METHODS,
-    # ... and the two documented asymmetries inside it.
-    "store_hot_chains": ("ptde_async",),
+    # store_hot_chains USED to read ("ptde_async",) here; it is now honored
+    # by BOTH PTDE loops, because retaining a thinned copy of the hot rungs
+    # has nothing to do with how proposals are scheduled
+    # (samplers._common.HotChainRecorder owns it and both call it).  It stays
+    # in this table rather than moving to ALL_METHOD: an HMC or nested run
+    # has no ladder, so there is still a method that ignores it, and the
+    # partition test is what insists the distinction be spelled out.
+    "store_hot_chains": _PTDE_METHODS,
+    # ... and the documented asymmetry that IS real.  These two address the
+    # blocking that async dispatch removes outright, so there is nothing for
+    # ptde_async to honor.
+    # ptde_async-only for a real reason, the mirror image of
+    # rung_thin_factor's: ptde's population is synchronized by construction,
+    # so there is no archive to take a snapshot OF.  See review 2.4.20.
+    "de_partner_snapshot": ("ptde_async",),
     "rung_thin_factor": ("ptde",),
     "rung_thin_start": ("ptde",),
 }
@@ -780,6 +796,9 @@ def _run_fit(config, gui, user_params=None):
     # its trace-size cost.  Passed through unresolved on purpose: the
     # component list does not exist yet at this point in run_fit.
     store_hot_chains = sampler_cfg.get("store_hot_chains", "auto")
+    # Default ON: it is a correctness fix (2.4.20), not a tuning knob.  The
+    # key exists so the old behaviour stays reachable for a head-to-head.
+    de_partner_snapshot = bool(sampler_cfg.get("de_partner_snapshot", True))
     rung_thin_factor = int(sampler_cfg.get("rung_thin_factor", 1))
     _rung_thin_start_raw = sampler_cfg.get("rung_thin_start", None)
     rung_thin_start = (
@@ -1115,6 +1134,7 @@ def _run_fit(config, gui, user_params=None):
                     draws,
                     tune,
                     seed=seed,
+                    store_hot_chains=store_hot_chains,
                     n_temps=n_temps,
                     T_max=T_max,
                     n_chains=n_chains,
@@ -1153,6 +1173,7 @@ def _run_fit(config, gui, user_params=None):
                     draws,
                     tune,
                     seed=seed,
+                    de_partner_snapshot=de_partner_snapshot,
                     store_hot_chains=store_hot_chains,
                     n_temps=n_temps,
                     T_max=T_max,
@@ -1517,6 +1538,18 @@ def _run_fit(config, gui, user_params=None):
         hot_status=hot_status,
     )
 
+    # A posterior piled against a component's modelling cap (the hogg
+    # mixture's out_scale / out_frac; review 8.6.3) is an architecture
+    # alarm, not a result: the noise model wants more freedom than the cap
+    # allows.  Manifest-driven (Parameter.cap_alarm), so nothing here names
+    # a component.  Needs the distributed posterior, hence after the mode
+    # reports; the findings also feed the modeling draft below.
+    wrapup.stage("pile-at-cap check on data-capped parameters")
+    cap_findings = []
+    with nonfatal_wrapup("pile-at-cap check"):
+        cap_findings = cap_alarm_findings(system)
+        log_cap_alarms(cap_findings, logger)
+
     # Wrapped and announced like every other wrap-up step (review 2.3.12).
     # It was the one bare call left between two guarded stages, and it is a
     # write plus an az.summary: measured on the kelt4 RV-only example, an
@@ -1606,7 +1639,7 @@ def _run_fit(config, gui, user_params=None):
     # (the unknown-key warning for this block, and for the other three, is
     # warn_unknown_config_blocks at startup -- not an inline loop here)
     try:
-        _add_wrapup_prose(system, burn_diag, mode_report)
+        _add_wrapup_prose(system, burn_diag, mode_report, cap_findings)
         # One posterior draw unlocks the model-bearing charts (phased
         # panels), whose figures otherwise never enter the draft.
         tex_path = build_modeling_output(
@@ -2275,13 +2308,20 @@ def _add_sampler_prose(system, method, swap_schedule="deo"):
         )
 
 
-def _add_wrapup_prose(system, diag, mode_report):
-    """Declare the post-fit prose: burn-in, convergence criteria, modes.
+def _add_wrapup_prose(system, diag, mode_report, cap_findings=None):
+    """Declare the post-fit prose: burn-in, convergence criteria, modes, and
+    any parameter piled against a modelling cap.
 
     These are diagnostics of the run (the convergence criteria the user
     asked the draft to record), not fitted values -- posterior numbers stay
     in the table, whose macros are the mechanism for citing them in prose.
+    The pile-at-cap sentence quotes the cap (a config-derived bound) and
+    the fraction of draws (a run diagnostic, like the burn-in fraction),
+    never a posterior value.
     """
+    from .outputs.prose import join_names
+    from .outputs.texutils import latex_escape
+
     prose = system.prose
     prose.add(
         r"The median values and 68\% confidence intervals of the "
@@ -2330,6 +2370,30 @@ def _add_wrapup_prose(system, diag, mode_report):
             section="convergence",
             key="run.convergence",
             rank=20,
+        )
+    if cap_findings:
+        # Instance names are data: escape them.  Idempotent by key, so a
+        # re-report with no finding leaves the sentence out (regenerate,
+        # never append -- outputs.md).
+        items = [
+            latex_escape(f["display"])
+            + f" ({100 * f['frac']:.0f}\\% of draws within the top "
+            f"{100 * f.get('top_frac', 0.05):.0f}\\% of its allowed range, "
+            f"whose upper bound is {f['cap']:.4g}"
+            + (" " + latex_escape(f["unit"]) if f.get("unit") else "")
+            + ")"
+            for f in cap_findings
+        ]
+        prose.add(
+            "The posterior of "
+            + join_names(items)
+            + " piled against its upper bound, which is a modelling cap "
+            "rather than a physical limit: the noise model asked for more "
+            "freedom than the cap allows, so the residuals of the affected "
+            "data should be inspected before that bound is loosened.",
+            section="convergence",
+            key="run.cap_alarm",
+            rank=30,
         )
     if mode_report is not None and getattr(mode_report, "n_modes", 1) > 1:
         # The provenance is plain text (N_eff, >=): escape it for LaTeX
