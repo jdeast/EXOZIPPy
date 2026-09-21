@@ -58,9 +58,30 @@ OBSERVABLES = [
 
 
 def _pick(ds, names):
+    """The trace column for the first candidate name that exists, as one
+    value per (chain, draw).
+
+    A per-element parameter (lens.log_s, lens.xalpha, ... on a 2-body lens)
+    carries an extra element dimension, and one element is the PINNED
+    primary (log_s[0] constant at 0).  Ravelling the whole array, as this
+    did until 2026-09-21, interleaved the pinned zeros with the free
+    element and then truncated to the other columns' length, so every
+    per-draw comparison against `s` was misaligned and half its entries
+    were the pin: expA/226 scored a "nearest 11.5 tol" with a global median
+    log_s of exactly 0.0.  Select the element that actually varies (the
+    free companion); if none varies, take the last element.
+    """
     for n in names:
         if n in ds.data_vars:
-            return n, np.asarray(ds[n]).ravel().astype(float)
+            v = ds[n]
+            extra = [d for d in v.dims if d not in ("chain", "draw")]
+            if extra:
+                dim = extra[0]
+                stds = [float(np.nanstd(np.asarray(v.isel({dim: i}))))
+                        for i in range(v.sizes[dim])]
+                i = int(np.argmax(stds)) if max(stds) > 0 else v.sizes[dim] - 1
+                v = v.isel({dim: i})
+            return n, np.asarray(v).ravel().astype(float)
     return None, None
 
 
