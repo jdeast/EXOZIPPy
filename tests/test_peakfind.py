@@ -300,7 +300,9 @@ def test_anomaly_dominated_curve_seeds_the_primary():
     curves = [(tt, flux, ivar)]
 
     first = peakfind.find_pspl_seed(curves, primary_first=False)
-    assert abs(first["t_0"] - t_anom) < 1.0, "the spike IS the strongest feature"
+    assert abs(first["t_0"] - t_anom) < 1.0, (
+        "the spike IS the strongest feature"
+    )
 
     seed = peakfind.find_pspl_seed(curves)
     assert abs(seed["t_0"] - t_0) < 0.5 * t_E
@@ -340,7 +342,9 @@ def test_feature_window_measures_the_spike_not_the_model():
     rng = np.random.default_rng(6)
     flux = 1.0 + 0.5 * np.exp(-0.5 * ((t - 50.0) / 0.5) ** 2)
     flux = flux + rng.normal(0.0, 0.01, t.size)
-    lo, hi, fwhm = peakfind.feature_window([(t, flux, np.full(t.size, 1e4))], 50.0)
+    lo, hi, fwhm = peakfind.feature_window(
+        [(t, flux, np.full(t.size, 1e4))], 50.0
+    )
     assert fwhm == pytest.approx(2.355 * 0.5, rel=0.3)
     assert lo < 50.0 - fwhm and hi > 50.0 + fwhm
     assert (hi - lo) < 6 * fwhm + 1.0

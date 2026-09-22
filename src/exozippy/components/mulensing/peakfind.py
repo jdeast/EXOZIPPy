@@ -325,7 +325,9 @@ def _refit_at_grid_u0(per_u0, curves, mag_fn, span, cadence):
         elif refinement_is_degenerate(u_0, t_E, span, cadence):
             fits.append((grid_chi2, t0g, u_0, tEg, False))
         else:
-            fits.append((float(res.fun), float(res.x[0]), u_0, t_E, bool(res.success)))
+            fits.append(
+                (float(res.fun), float(res.x[0]), u_0, t_E, bool(res.success))
+            )
     best = min(f[0] for f in fits)
     within = [f for f in fits if f[0] <= best + _WING_DEGENERACY_DCHI2]
     chi2, t_0, u_0, t_E, ok = max(within, key=lambda f: f[2])
@@ -400,7 +402,11 @@ def feature_window(curves, t_peak):
     peak = max(means.get(-1, -np.inf), means.get(0, -np.inf))
     if not np.isfinite(peak) or peak <= 0:
         half_bins = _FEATURE_MIN_HALF_BINS
-        return t_peak - half_bins * dt, t_peak + half_bins * dt, 2 * half_bins * dt
+        return (
+            t_peak - half_bins * dt,
+            t_peak + half_bins * dt,
+            2 * half_bins * dt,
+        )
     half = 0.5 * peak
 
     def walk(step):
