@@ -111,31 +111,45 @@ orbit:
         func_name: "calc_K"
         deps: ["m_companion", "m_total", "ecc", "a", "sini", "period"]
 
-  # Observed-frame (BJD_TDB) convert-back of tc/tp, when light-travel-time
-  # is active for this orbit (see Orbit._ltt_reporting_mask). tc/tp above
-  # are the TARGET-frame values the Kepler solve is evaluated against
-  # (components/ltt.py) -- correct for the model, but not the BJD_TDB
-  # timestamp an observer would see. `_ltt_delta` is a context node (the
-  # masked ltt.retarded_time delay, evaluated at tc), injected by
-  # Orbit.add_parameter -- never a manifest parameter.
+  # Observed-frame (BJD_TDB) twins of the timing quantities.  The transit and
+  # RM likelihoods evaluate the orbit at the RETARDED time (components/ltt.py),
+  # so the sampled tc -- and ts/tp derived from it -- are TARGET-frame times.
+  # These add the closed-form light-travel shift -z(t_event)*factor/c back
+  # (physics.calc_tc_bjd and friends), masked per orbit by `_ltt_mask`, a
+  # context node Orbit.add_parameter injects from Orbit._ltt_reporting_mask
+  # (1 where some consumer with light_travel_time on retards this orbit, else
+  # 0 -- then the twin equals its target-frame value exactly).  Declared
+  # whenever the orbit has masses; they are the HEADLINE rows (JDE 2026-09-21:
+  # "EXOFAST reports both BJD_TDB and the target frame and we should too. The
+  # headline number is BJD_TDB"), which is why they carry the plain T_C/T_P/T_S
+  # labels and the target-frame rows are relabeled in Orbit.register_parameters.
   tc_bjd:
     unit: "d"
     internal_unit: "d"
-    latex: "T_{C,\\rm obs}"
-    description: "Observed Conjunction Time"
+    latex: "T_C"
+    description: "Time of Conjunction (BJD_TDB)"
     expressions:
       default:
-        func_name: "calc_bjd_shift"
-        deps: [ "tc", "_ltt_delta" ]
+        func_name: "calc_tc_bjd"
+        deps: [ "tc", "a", "ecc", "sinw", "sini", "m_primary", "m_companion", "m_total", "_ltt_mask" ]
+  ts_bjd:
+    unit: "d"
+    internal_unit: "d"
+    latex: "T_S"
+    description: "Time of Eclipse (BJD_TDB)"
+    expressions:
+      default:
+        func_name: "calc_ts_bjd"
+        deps: [ "ts", "a", "ecc", "sinw", "sini", "m_primary", "m_companion", "m_total", "_ltt_mask" ]
   tp_bjd:
     unit: "d"
     internal_unit: "d"
-    latex: "T_{P,\\rm obs}"
-    description: "Observed Periastron Time"
+    latex: "T_P"
+    description: "Time of Periastron (BJD_TDB)"
     expressions:
       default:
-        func_name: "calc_bjd_shift"
-        deps: [ "tp", "_ltt_delta" ]
+        func_name: "calc_tp_bjd"
+        deps: [ "tp", "a", "ecc", "sinw", "sini", "m_primary", "m_companion", "m_total", "_ltt_mask" ]
 
   # --- Conditionally Sampled or Derived (Geometry Swap) ---
   # Sampled where the orbit uses the sqrt(e)cos/sin(omega) pair, and REPORTED

@@ -15,8 +15,6 @@ from exozippy.components.parameterization import merge_options, mode_manifest
 from exozippy.outputs.prose import get_collector, join_names
 from exozippy.potentials import soft_lower_bound, soft_upper_bound
 
-from .. import ltt
-
 # this import is required even though it's not used explicitly
 # it registers all the mathematical relations
 from . import physics
@@ -908,26 +906,45 @@ class Orbit(Component):
                 }
             )
 
-            # Observed-frame (BJD_TDB) convert-back of tc/tp -- see
-            # defaults.yaml's tc_bjd/tp_bjd and _ltt_delta_context.  Needs
-            # a/m_primary/m_companion/m_total, so it is gated the same way
-            # they are; within that, `_ltt_reporting_mask` decides PER ORBIT
-            # whether any consumer actually retards this orbit's geometry
-            # (an orbit with light_travel_time off everywhere must report
-            # tc_bjd == tc exactly, not a shifted value -- see the mask's
-            # own docstring).  Declared only where the mask is nonzero
-            # anywhere, mirroring RM's `if rm_enabled(system):` below: no
-            # manifest entry, no cost, for a system that never uses LTT.
+            # Observed-frame (BJD_TDB) twins of tc/ts/tp -- see defaults.yaml's
+            # tc_bjd/ts_bjd/tp_bjd and physics.calc_tc_bjd.  They need
+            # a/m_primary/m_companion/m_total, so they live inside this gate;
+            # within it they are declared UNCONDITIONALLY (closed form, no
+            # Kepler solve, no cost), and `_ltt_reporting_mask` decides PER
+            # ORBIT whether any consumer actually retards this orbit's
+            # geometry -- where none does the twin equals its target-frame
+            # value exactly.  JDE 2026-09-21: "EXOFAST reports both BJD_TDB
+            # and the target frame and we should too.  The headline number
+            # is BJD_TDB" -- so the twins carry the plain T_C/T_S/T_P labels
+            # and the target-frame rows are relabeled here, only when a twin
+            # exists to contrast with (a geometry-only orbit has no
+            # correction and keeps the plain label).
             self._ltt_report_mask = self._ltt_reporting_mask(system)
-            if self._ltt_report_mask.any():
-                self.manifest["tc_bjd"] = {
+            for key in self._LTT_REPORT_PARAMS:
+                self.manifest[key] = {
                     "expr_key": "default",
                     "force_node": True,
                 }
-                self.manifest["tp_bjd"] = {
-                    "expr_key": "default",
-                    "force_node": True,
-                }
+            for key, latex, desc in (
+                (
+                    "tc",
+                    r"T_{C,\rm target}",
+                    "Time of Conjunction (target frame)",
+                ),
+                ("ts", r"T_{S,\rm target}", "Time of Eclipse (target frame)"),
+                (
+                    "tp",
+                    r"T_{P,\rm target}",
+                    "Time of Periastron (target frame)",
+                ),
+            ):
+                entry = self.manifest[key]
+                if isinstance(entry, str):
+                    entry = {"expr_key": entry}
+                entry = dict(entry)
+                entry["latex"] = latex
+                entry["description"] = desc
+                self.manifest[key] = entry
 
         # Rossiter-McLaughlin: declare the spin-orbit params only when some
         # rvinstrument enables `rm:`. Samples the decorrelated
@@ -1486,7 +1503,7 @@ class Orbit(Component):
             if len(set(transit_flags)) > 1:
                 logger.warning(
                     "orbit: transit files disagree on light_travel_time; "
-                    "tc_bjd/tp_bjd treat every orbit touched by an active "
+                    "tc_bjd/ts_bjd/tp_bjd treat every orbit touched by an active "
                     "file as fully retarded, an approximation where they "
                     "mix on the same orbit's data."
                 )
@@ -1510,11 +1527,11 @@ class Orbit(Component):
     # graph.py from looking for an `orbit.p` (the group masses avoid this by
     # naming `planet.mass`, a real parameter of a real component; there is no
     # such parameter for `chord_sign` at all, and `p`/`ar` are per PLANET, so
-    # the orbit could not consume them elementwise anyway).  `_ltt_delta` is
-    # the same idiom for a different reason: it is the (masked)
-    # ltt.retarded_time delay `tc_bjd`/`tp_bjd` add back, not a manifest
-    # parameter of any component (see _ltt_delta_context).
-    context_dep_names = frozenset({"p", "ar", "chord_sign", "_ltt_delta"})
+    # the orbit could not consume them elementwise anyway).  `_ltt_mask` is
+    # the same idiom for a different reason: it is a CONFIG fact (which
+    # orbits some consumer retards, see _ltt_reporting_mask), not a
+    # parameter of any component (see _ltt_mask_context).
+    context_dep_names = frozenset({"p", "ar", "chord_sign", "_ltt_mask"})
 
     # ...and all three are built per ORBIT, so Component._element_expression
     # may slice them to a per-element mask.
@@ -1636,75 +1653,51 @@ class Orbit(Component):
             context_nodes = dict(context_nodes or {})
             for dep, node in self._chord_context(model, system).items():
                 context_nodes.setdefault(dep, node)
-        if param_name in self._LTT_REPORT_PARAMS and not context_nodes:
+        if param_name in self._LTT_REPORT_PARAMS:
             context_nodes = dict(context_nodes or {})
-            context_nodes["_ltt_delta"] = self._ltt_delta_context(
-                model, system
-            )
+            context_nodes.setdefault("_ltt_mask", self._ltt_mask_context())
         return super().add_parameter(model, param_name, system, context_nodes)
 
-    # tc_bjd/tp_bjd (defaults.yaml) both consume the one `_ltt_delta`
-    # context node -- see _ltt_delta_context and calc_bjd_shift.
-    _LTT_REPORT_PARAMS = ("tc_bjd", "tp_bjd")
+    # tc_bjd/ts_bjd/tp_bjd (defaults.yaml) all consume the one `_ltt_mask`
+    # context node -- see _ltt_mask_context and physics.calc_tc_bjd.
+    _LTT_REPORT_PARAMS = ("tc_bjd", "ts_bjd", "tp_bjd")
 
-    def _ltt_delta_context(self, model, system):
-        """The `_ltt_delta` context node `tc_bjd`/`tp_bjd` consume: the
-        light-travel delay evaluated AT `tc`, reusing `ltt.retarded_time`'s
-        own delay output (never a hardcoded number), masked per orbit by
-        `_ltt_reporting_mask` so an orbit with light_travel_time off
-        everywhere gets exactly zero -- `tc_bjd == tc`, `tp_bjd == tp`.
-
-        Factor is the OCCULTATION seam, `(m_primary - m_companion) /
-        m_total` -- matching transit.py's own `ltt_factor` (`tc`/`tp` are
-        defined by the transit/occultation geometry, not by either body's
-        own emission; see components/ltt.py's `factor` docs).  Same lazy
-        same-component build as the group masses above, so this works
-        regardless of which of tc_bjd/tp_bjd the build order reaches first.
-        """
-        for dep in (
-            "tc",
-            "tp",
-            "n",
-            "ecc",
-            "sinw",
-            "cosw",
-            "inc",
-            "a",
-            "m_primary",
-            "m_companion",
-            "m_total",
-        ):
-            if not Component._parameter_is_current(self, dep, model):
-                self.add_parameter(model, dep, system)
-
-        sin_i = pt.sin(self.inc.value)
-        factor = (
-            self.m_primary.value - self.m_companion.value
-        ) / self.m_total.value
-        _, delay = ltt.retarded_time(
-            self.tc.value,
-            self.tp.value,
-            self.n.value,
-            self.ecc.value,
-            self.sinw.value,
-            self.cosw.value,
-            sin_i,
-            self.a.value,
-            factor=factor,
-            z0=0.0,
-            circular=self._all_circular(),
-        )
-        mask = pt.as_tensor_variable(
-            getattr(
-                self, "_ltt_report_mask", np.zeros(self.n_elements)
-            ).astype("float64")
-        )
-        return delay * mask
+    def _ltt_mask_context(self):
+        """The `_ltt_mask` context node the *_bjd twins consume: the per-orbit
+        0.0/1.0 array from `_ltt_reporting_mask` (stage 3) as a constant
+        tensor.  All the physics is in physics.calc_tc_bjd and friends -- the
+        closed-form ``-z(t_event)*factor/c`` in the elements -- so unlike the
+        chord context nothing here needs a lazy same-component build."""
+        mask = getattr(self, "_ltt_report_mask", np.zeros(self.n_elements))
+        return pt.as_tensor_variable(np.asarray(mask, dtype="float64"))
 
     def build_likelihood(self, model, system):
         self._add_eccentricity_bound(system)
         self._add_vcve_terms(system)
         self._add_chord_terms(system)
+        self._add_ltt_frame_prose(system)
+
+    def _add_ltt_frame_prose(self, system):
+        """One sentence, only when some orbit is actually retarded: the
+        timing rows come in two frames, and which is which."""
+        mask = getattr(self, "_ltt_report_mask", None)
+        if mask is None or not np.any(mask):
+            return
+        collector = get_collector(system)
+        if collector is None:
+            return
+        names = [self.names[i] for i in np.flatnonzero(mask)]
+        collector.add(
+            "The light curves and Rossiter-McLaughlin data of "
+            f"{join_names(names)} were modeled at the retarded time, so "
+            "the fitted times of conjunction, eclipse and periastron are "
+            "in the target frame; the reported $T_C$, $T_S$ and $T_P$ "
+            r"add the light-travel time across the orbit back and are in "
+            r"$\rm BJD_{TDB}$ \citep{Eastman:2010}, with the target-frame "
+            "values given alongside.",
+            section="orbits",
+            key="orbit.ltt_frame",
+        )
 
     def _chord_indices(self):
         """Indices of the orbits sampling the chord (empty for every cos i

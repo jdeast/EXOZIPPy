@@ -131,16 +131,11 @@ def test_wired_ltt_delay_matches_a_over_c_through_real_accessors(tmp_path):
     the units/accessor contract end to end -- and separately is close to
     the known ~499 s/AU light time in absolute terms, guarding against a
     shared-formula bug that an internal-consistency check alone would miss.
-    Also confirms retarded_time is invoked exactly twice per build_model()
-    FOR TRANSIT'S OWN WIRING: once from build_likelihood's group loop (one
-    oversample group here, ninterp=1) and once from compile_plotters -- the
-    SAME builder (Transit._lc_model) called on the data and on the plot
-    grid, so both calls carry the 3-D (n_g, k_g, 1) sub-exposure grid, and
-    both paths are wired, live, not a dead branch.  (`orbit.tc_bjd`/`tp_bjd`
-    -- the observed/BJD_TDB-frame conjunction/periastron report this
-    orbit's mass params make available -- call retarded_time too, at `tc`
-    (1-D, per-orbit, not per-observation); filtered out below since this
-    test is specifically about transit.py's own wiring.)
+    Also confirms retarded_time is invoked exactly twice per build_model():
+    once from build_likelihood's group loop (one oversample group here,
+    ninterp=1) and once from compile_plotters -- the SAME builder
+    (Transit._lc_model) called on the data and on the plot grid, so both
+    are wired, live, not a dead branch.
     """
     lc = _write_two_row_lc(tmp_path / "lc.dat")
     real_retarded_time = ltt.retarded_time
@@ -154,29 +149,25 @@ def test_wired_ltt_delay_matches_a_over_c_through_real_accessors(tmp_path):
     with mock.patch(
         "exozippy.components.transit.transit.ltt.retarded_time",
         side_effect=_spy,
-    ):
+    ) as spy:
         system = System(
             _ltt_wiring_config(lc), user_params=_ltt_wiring_params()
         )
         system.prepare()
         model = system.build_model()
-        # transit.py's own wiring: one from build_likelihood's group loop,
-        # one from compile_plotters -- both through _lc_model's group loop,
-        # so both carry the 3-D (n_g, k_g, 1) sub-exposure grid; the plot
-        # path used to build its own 2-D graph and smear in NumPy
-        # afterwards. orbit.tc_bjd/tp_bjd's calls are 1-D (a time grid per
-        # orbit, not per observation) and excluded here.
-        transit_calls = [
-            (t_grid, delay) for t_grid, delay in calls if t_grid.ndim >= 2
-        ]
-        assert len(transit_calls) == 2
-        assert [t_grid.ndim for t_grid, _ in transit_calls] == [3, 3]
+        # One from build_likelihood (stage 7), one from compile_plotters
+        # (which build_model runs afterwards) -- both through _lc_model's
+        # group loop, so both carry the 3-D (n_g, k_g, 1) sub-exposure
+        # grid; the plot path used to build its own 2-D graph and smear
+        # in NumPy afterwards.
+        assert spy.call_count == 2
 
     with model:
         point = system.get_internal_point(model, system.get_raw_start(model))
 
-    # The first transit call is the likelihood's: stage 7 precedes the plotters.
-    delay = _eval_at_point(transit_calls[0][1], model, point)
+    assert [t_grid.ndim for t_grid, _ in calls] == [3, 3]
+    # The first call is the likelihood's: stage 7 precedes the plotters.
+    delay = _eval_at_point(calls[0][1], model, point)
     delay_primary = float(delay[0, 0, 0])
     delay_secondary = float(delay[1, 0, 0])
 
@@ -354,18 +345,10 @@ def test_mixed_group_ltt_gradient_is_finite(tmp_path):
     # circular orbit with no Kepler op to count.
     params = _ltt_wiring_params(eccentric=True)
 
-    real_retarded_time = ltt.retarded_time
-    calls = []
-
-    def _spy(*args, **kwargs):
-        result = real_retarded_time(*args, **kwargs)
-        calls.append(args[0])  # t_grid
-        return result
-
     with mock.patch(
         "exozippy.components.transit.transit.ltt.retarded_time",
-        side_effect=_spy,
-    ):
+        side_effect=ltt.retarded_time,
+    ) as spy:
         system = System(config, user_params=params)
         system.prepare()
         model = system.build_model()
@@ -374,11 +357,7 @@ def test_mixed_group_ltt_gradient_is_finite(tmp_path):
         # group actually took the "any() but not all()" branch and called
         # ltt.retarded_time at all (a bug that skipped the correction
         # entirely for a mixed group would also show 0 calls here).
-        # orbit.tc_bjd/tp_bjd's calls are 1-D (per-orbit, not per-
-        # observation) and excluded, same reasoning as
-        # test_wired_ltt_delay_matches_a_over_c_through_real_accessors.
-        transit_calls = [t_grid for t_grid in calls if t_grid.ndim >= 2]
-        assert len(transit_calls) == 2
+        assert spy.call_count == 2
 
     assert _count_kepler_solves(system.transit._model_flux_node) == 2
 

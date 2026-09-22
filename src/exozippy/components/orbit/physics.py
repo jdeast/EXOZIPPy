@@ -4,7 +4,7 @@ import numpy as np
 import pytensor.tensor as pt
 from exoplanet_core.pymc import ops
 
-from ...constants import TWOPI
+from ...constants import C_LIGHT_RSUN_PER_DAY, TWOPI
 from ...physics_registry import register_physics
 
 
@@ -601,26 +601,76 @@ def calc_ts(ecc, omega, tc, period):
     return ts_from_ecc_omega(ecc, omega, tc, period, xp=pt)
 
 
-@register_physics
-def calc_bjd_shift(value, delta):
-    """`value + delta` -- the observed-frame (BJD_TDB) convert-back for a
-    target-frame timing quantity, shared by `tc_bjd` and `tp_bjd`.
+def _ltt_shift_at_conjunction(a, ecc, sinw, sini, factor, sinwf, cosf):
+    """Observed-frame minus target-frame time of an orbital EVENT, in days:
+    ``-z(t_event) * factor / c``, closed form.
 
-    `delta` is the light-travel delay from `ltt.retarded_time`, evaluated at
-    `tc` and masked per orbit (see `Orbit._ltt_delta_context`) -- the SAME
-    delay for tc_bjd and tp_bjd, since `calc_tp`/`calc_tp_from_ecc` are
-    additive in `tc` (`tp = tc - M0/n`, with `M0` independent of `tc`), so
-    `tp + delta(tc) == (tc + delta(tc)) - M0/n` exactly: `tp_bjd` needs no
-    physics of its own beyond reusing tc_bjd's delay.  `_ltt_delta_context`
-    builds that delay fresh per consumer (the same `_chord_context` idiom
-    `p`/`ar`/`chord_sign` already use for cosi/chord) rather than caching it
-    -- the two builds are structurally identical, so pytensor's merge
-    optimizer collapses them to one Kepler solve in the compiled graph
-    (confirmed: one `Kepler` Apply node for [tc_bjd, tp_bjd] together).  All
-    the physics lives in the delay itself; this function is deliberately
-    trivial.
+    The transit and RM likelihoods evaluate the orbit at the retarded time
+    ``t_obs - delay(t_obs)`` (components/ltt.py), so a sampled ``tc`` is the
+    TARGET-frame conjunction.  The observed (BJD_TDB) conjunction is the
+    ``t_obs`` with ``t_obs - delay(t_obs) = tc``, and the retardation
+    condition ``c*delay = -z(t_obs - delay)`` then reads ``c*delay = -z(tc)``
+    EXACTLY -- no Taylor solve, no Kepler solve: at a conjunction or at
+    periastron the true anomaly is known, so ``r/a = (1 - e^2)/(1 + e cos f)``
+    and ``z = r sin(omega + f) sin i`` are closed-form in the elements.
+    ``factor`` is the occultation seam ``(m_primary - m_companion)/m_total``
+    (ltt.py's ``factor`` docs; the transit likelihood's own ``ltt_factor``),
+    and ``z`` is + toward the observer (transit.py's convention), so the
+    primary transit is observed EARLY (planet in front) and the eclipse LATE.
     """
-    return value + delta
+    r_over_a = (1.0 - pt.sqr(ecc)) / (1.0 + ecc * cosf)
+    z = a * r_over_a * sinwf * sini * factor
+    return -z / C_LIGHT_RSUN_PER_DAY
+
+
+def _ltt_factor(m_primary, m_companion, m_total):
+    return (m_primary - m_companion) / m_total
+
+
+@register_physics
+def calc_tc_bjd(
+    tc, a, ecc, sinw, sini, m_primary, m_companion, m_total, _ltt_mask
+):
+    """Observed (BJD_TDB) time of inferior conjunction: ``tc`` plus the
+    light-travel shift at ``f = pi/2 - omega`` (``sin(omega + f) = 1``,
+    ``cos f = sin omega``), masked per orbit by ``_ltt_mask`` (1 where some
+    consumer retards this orbit, 0 where none does -- then ``tc_bjd == tc``
+    exactly, the two frames coinciding).  See _ltt_shift_at_conjunction.
+    """
+    factor = _ltt_factor(m_primary, m_companion, m_total)
+    shift = _ltt_shift_at_conjunction(a, ecc, sinw, sini, factor, 1.0, sinw)
+    return tc + shift * _ltt_mask
+
+
+@register_physics
+def calc_ts_bjd(
+    ts, a, ecc, sinw, sini, m_primary, m_companion, m_total, _ltt_mask
+):
+    """Observed (BJD_TDB) time of superior conjunction (the eclipse): ``ts``
+    plus the shift at ``f = -pi/2 - omega`` (``sin(omega + f) = -1``,
+    ``cos f = -sin omega``).  Opposite sign to tc's: the planet is behind
+    the star, so the eclipse arrives LATE -- the classical ~2a/c
+    secondary-eclipse offset (Loeb 2005).  See calc_tc_bjd.
+    """
+    factor = _ltt_factor(m_primary, m_companion, m_total)
+    shift = _ltt_shift_at_conjunction(a, ecc, sinw, sini, factor, -1.0, -sinw)
+    return ts + shift * _ltt_mask
+
+
+@register_physics
+def calc_tp_bjd(
+    tp, a, ecc, sinw, sini, m_primary, m_companion, m_total, _ltt_mask
+):
+    """Observed (BJD_TDB) time of periastron: ``tp`` plus the shift at
+    ``f = 0`` (``sin(omega + f) = sin omega``, ``cos f = 1``, ``r = a(1-e)``).
+    This is the light-travel shift AT PERIASTRON (JDE 2026-09-21: "tp_bjd =
+    observed periastron time"), NOT tc's shift carried over -- the two differ
+    by up to ``2 a sin i factor / c`` on an eccentric orbit, so
+    ``tp_bjd - tc_bjd != tp - tc`` in general.  See calc_tc_bjd.
+    """
+    factor = _ltt_factor(m_primary, m_companion, m_total)
+    shift = _ltt_shift_at_conjunction(a, ecc, sinw, sini, factor, sinw, 1.0)
+    return tp + shift * _ltt_mask
 
 
 def mean_anomaly_at_true_anomaly(ecc, true_anomaly, xp=pt):

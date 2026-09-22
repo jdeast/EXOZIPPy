@@ -130,15 +130,6 @@ def test_wired_rm_ltt_delay_matches_a_over_c_through_real_accessors(tmp_path):
     m_total nodes the wiring itself used, read back independently) to
     1e-6 relative, and is close to the known ~499 s/AU light time in
     absolute terms.
-
-    `ltt.retarded_time` is patched on the shared `ltt` module, so
-    `orbit.tc_bjd`/`tp_bjd` (the observed/BJD_TDB-frame conjunction/
-    periastron report this orbit's mass params make available) call it
-    too, at `tc`.  Filtered out below by object identity (`t` is a
-    symbolic tensor at graph-build time, not a concrete array, so
-    comparing shapes is unreliable): orbit.py always passes
-    `system.orbit.tc.value` itself, so excluding calls whose `t` IS that
-    exact node leaves only the RM wiring's own call(s).
     """
     rv_file = _write_two_row_rv(tmp_path / "rv.dat")
     real_retarded_time = rm.ltt.retarded_time
@@ -146,7 +137,7 @@ def test_wired_rm_ltt_delay_matches_a_over_c_through_real_accessors(tmp_path):
 
     def _ltt_spy(*args, **kwargs):
         result = real_retarded_time(*args, **kwargs)
-        delay_calls.append((args[0], result[1]))  # (t, delay)
+        delay_calls.append(result[1])
         return result
 
     with mock.patch.object(rm.ltt, "retarded_time", side_effect=_ltt_spy):
@@ -156,16 +147,12 @@ def test_wired_rm_ltt_delay_matches_a_over_c_through_real_accessors(tmp_path):
         system.prepare()
         model = system.build_model()
 
-    tc_node = (
-        system.orbit.tc.value if "tc_bjd" in system.orbit.manifest else None
-    )
-    rm_delay_calls = [delay for t, delay in delay_calls if t is not tc_node]
-    assert len(rm_delay_calls) >= 1  # build_likelihood (+ compile_plotters)
+    assert len(delay_calls) >= 1  # build_likelihood (+ compile_plotters)
 
     with model:
         point = system.get_internal_point(model, system.get_raw_start(model))
 
-    delay = _eval_at_point(rm_delay_calls[0], model, point)
+    delay = _eval_at_point(delay_calls[0], model, point)
     delay_primary = float(delay[0])
     delay_secondary = float(delay[1])
 
