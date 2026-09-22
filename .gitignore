@@ -80,3 +80,6 @@ repo_dump.txt
 **/aastex*.cls
 **/aasjournalv*.bst
 **/references.bib
+
+# Local Claude Code settings and worktree bookkeeping
+.claude/
