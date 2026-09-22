@@ -1,0 +1,27 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 2
+#$ -q sThC.q
+#$ -cwd
+#$ -j y
+#$ -N mfact062
+#$ -o dc18_model_factors.$JOB_ID.log
+#
+# Which model term outvotes the light curve on DC2018 062: per-term logp at
+# the mode-3 draw (reference, truth-like geometry) against the deep chain-69
+# draw and the two other mode representatives.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+python dc18_model_factors.py --event 062 \
+    --run-dir $HOME/python/EXOZIPPy/examples/DC2018/sweep/062 \
+    
+echo "exit $?   $(date)"

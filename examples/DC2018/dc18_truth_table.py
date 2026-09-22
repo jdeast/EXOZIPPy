@@ -351,6 +351,48 @@ def convergence(post, tier):
     return out, bad, gate
 
 
+def pipeline_flags(prefix):
+    """The wrap-up's own header lines from `<prefix>_summary.txt`.
+
+    NOT a new diagnostic: every one of these was computed by the pipeline,
+    written to an artifact, and then read by nobody.  On DC2018 062 three
+    separate fallbacks fired -- the chain filter kept all 78 chains because
+    fewer than 3 reached the good-likelihood region, the mode weights fell
+    back to occupancy because bridge sampling refused, and the source
+    temperature sat on the BC grid's floor -- while this table printed
+    "mixing OK" and a scored row.  A verdict that cannot see the fallbacks
+    its own inputs took is not an honest verdict.
+
+    Returns a list of (tag, text).  `mode_weights` comes from
+    `<prefix>_modes.txt`, which is where that one is recorded.
+    """
+    flags = []
+    path = prefix + "_summary.txt"
+    if os.path.exists(path):
+        with io.open(path, encoding="utf-8") as fh:
+            for line in fh:
+                if not line.startswith("#"):
+                    break
+                text = line.lstrip("# ").rstrip()
+                low = text.lower()
+                if "good-likelihood region" in low:
+                    flags.append(("CHAIN FILTER FELL BACK", text))
+                elif low.startswith("bound:"):
+                    flags.append(("BOUND", text[len("BOUND:") :].strip()))
+                elif low.startswith("warning: convergence not reached"):
+                    flags.append(("NOT CONVERGED", text))
+    mpath = prefix + "_modes.txt"
+    if os.path.exists(mpath):
+        with io.open(mpath, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("weight provenance:") and (
+                    "refused" in line
+                ):
+                    flags.append(("MODE WEIGHTS", line.strip()))
+                    break
+    return flags
+
+
 def report(prefix, event, data_dir, tier="default"):
     """`prefix` is the run prefix, e.g. sweep/128/DC2018_128."""
     truth, cls = truth_for(event, data_dir)
@@ -385,6 +427,10 @@ def report(prefix, event, data_dir, tier="default"):
         print(
             "  chains=%d draws=%d" % (post.sizes["chain"], post.sizes["draw"])
         )
+
+    flags = pipeline_flags(prefix)
+    for tag, text in flags:
+        print("  !! %s: %s" % (tag, text))
 
     if post is not None:
         conv, bad, gate = convergence(post, tier)
@@ -541,10 +587,16 @@ def report(prefix, event, data_dir, tier="default"):
             }
 
     core_ok = best["core_n"] > 0 and best["core_hit"] == best["core_n"]
-    winner = bool(core_ok and mixed and have_csv)
+    # A fallback in the pipeline's own wrap-up disqualifies a CLEAR WINNER:
+    # "the truth is in one of our modes and we are well mixed" cannot be
+    # asserted over a chain filter that kept every chain because it could
+    # not find 3 good ones, or over mode weights that fell back to
+    # occupancy in a run that did not mix.
+    blocking = [t for t in (t for t, _ in flags) if t != "BOUND"]
+    winner = bool(core_ok and mixed and have_csv and not blocking)
     print(
         "\n  VERDICT: best mode %s -- core %d/%d, all %d/%d at 1 sigma; "
-        "mixing %s"
+        "mixing %s%s"
         % (
             best["mode"],
             best["core_hit"],
@@ -552,6 +604,11 @@ def report(prefix, event, data_dir, tier="default"):
             best["hit"],
             best["n"],
             "OK" if mixed else "FAILED on " + ",".join(bad),
+            # "mixing OK" over a wrap-up that fell back is the misreading
+            # this whole block exists to stop.
+            ""
+            if not blocking
+            else "  -- but " + ", ".join(sorted(set(blocking))),
         )
     )
     print("  CLEAR WINNER: %s" % winner)
@@ -561,6 +618,7 @@ def report(prefix, event, data_dir, tier="default"):
         "prefix": prefix,
         "tier": tier,
         "have_csv": have_csv,
+        "flags": [t for t, _ in flags],
         "mixed": mixed,
         "unmixed_on": bad,
         "best_mode": best["mode"],
@@ -747,12 +805,20 @@ def main():
     if out:
         print("\n" + "=" * 104)
         print(
-            "%-6s %-9s %-7s %-8s %-8s %s"
-            % ("event", "mode", "core", "all", "mixed", "CLEAR WINNER")
+            "%-6s %-9s %-7s %-8s %-8s %-13s %s"
+            % (
+                "event",
+                "mode",
+                "core",
+                "all",
+                "mixed",
+                "CLEAR WINNER",
+                "pipeline flags",
+            )
         )
         for r in out:
             print(
-                "%-6s %-9s %-7s %-8s %-8s %s"
+                "%-6s %-9s %-7s %-8s %-8s %-13s %s"
                 % (
                     r["event"],
                     r["best_mode"],
@@ -760,6 +826,7 @@ def main():
                     "%d/%d" % (r["hit"], r["n"]),
                     "yes" if r["mixed"] else "no",
                     "YES" if r["clear_winner"] else "no",
+                    ", ".join(sorted(set(r.get("flags") or []))) or "-",
                 )
             )
     if out:
