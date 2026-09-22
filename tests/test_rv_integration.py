@@ -74,7 +74,7 @@ def compiled_rv_functions():
                     orbit_comp.secosw.value,
                     orbit_comp.sesinw.value,
                 ],
-                outputs=[orbit_comp.tp.value],
+                outputs=[orbit_comp.tp_target.value],
                 on_unused_input="ignore",
             )
             rv_fn = pytensor.function(

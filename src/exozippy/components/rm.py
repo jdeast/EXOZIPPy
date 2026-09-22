@@ -407,7 +407,7 @@ def compute_rm_rv(
         light_travel_time_active = False
 
     if light_travel_time_active:
-        tp = orbit.tp.value[orbit_idx]
+        tp = orbit.tp_target.value[orbit_idx]
         n = orbit.n.value[orbit_idx]
         sinw = orbit.sinw.value[orbit_idx]
         cosw = orbit.cosw.value[orbit_idx]

@@ -106,7 +106,7 @@ class Orbit(Component):
             "sesinw": None,
             "ecc": "default",
             "omega": "default",
-            "tp": "default",
+            "tp_target": "default",
             "esinw": "default",
             "ecosw": "default",
             "vcve": {"output_expr_key": "from_ecc"},
@@ -120,7 +120,7 @@ class Orbit(Component):
             # tp must come from (e, omega) here: this orbit does not sample the
             # sqrt(e) pair, it REPORTS it, and a reported element is consumed by
             # nothing -- reading it would read its pre-patch placeholder.
-            "tp": "from_ecc",
+            "tp_target": "from_ecc",
             # ...and for the same reason: these reach e sin/cos(omega) through
             # the sqrt(e) pair, which this orbit reports rather than samples.
             "esinw": "from_ecc",
@@ -869,12 +869,22 @@ class Orbit(Component):
                 "cosw": "default",
             }
         )
-        for key in ("esinw", "ecosw", "tp"):
+        for key in ("esinw", "ecosw", "tp_target"):
             self.manifest[key] = ecc_entries[key]
         # The occultation time (review 8.8.7).  Here rather than on `planet`
         # because every input is an orbit parameter and `tc` is one of them;
-        # after `tp` because it is the other Kepler-timing output.
-        self.manifest["ts"] = {"expr_key": "default", "force_node": True}
+        # after `tp_target` because it is the other Kepler-timing output.
+        self.manifest["ts_target"] = {
+            "expr_key": "default",
+            "force_node": True,
+        }
+        # The frame twins (see defaults.yaml): `tc_target` (target-frame
+        # conjunction, the epoch every Kepler solve descends from) and the
+        # OBSERVED `ts`/`tp`.  Declared here with the `no_bodies` identity
+        # expression; the masses branch below upgrades them to the real
+        # light-travel shift once it knows the orbit has an `a`.
+        for key in self._LTT_REPORT_PARAMS:
+            self.manifest[key] = {"expr_key": "no_bodies", "force_node": True}
         for key in ("vcve", "xomega", "yomega"):
             if key in ecc_entries:
                 self.manifest[key] = ecc_entries[key]
@@ -906,45 +916,21 @@ class Orbit(Component):
                 }
             )
 
-            # Observed-frame (BJD_TDB) twins of tc/ts/tp -- see defaults.yaml's
-            # tc_bjd/ts_bjd/tp_bjd and physics.calc_tc_bjd.  They need
-            # a/m_primary/m_companion/m_total, so they live inside this gate;
-            # within it they are declared UNCONDITIONALLY (closed form, no
-            # Kepler solve, no cost), and `_ltt_reporting_mask` decides PER
-            # ORBIT whether any consumer actually retards this orbit's
-            # geometry -- where none does the twin equals its target-frame
-            # value exactly.  JDE 2026-09-21: "EXOFAST reports both BJD_TDB
-            # and the target frame and we should too.  The headline number
-            # is BJD_TDB" -- so the twins carry the plain T_C/T_S/T_P labels
-            # and the target-frame rows are relabeled here, only when a twin
-            # exists to contrast with (a geometry-only orbit has no
-            # correction and keeps the plain label).
+            # The frame twins get their real expression: the closed-form
+            # light-travel shift -z(t_event)*factor/c (physics.calc_tc_target
+            # and friends) needs a/m_primary/m_companion/m_total, so only an
+            # orbit with masses can compute it; `_ltt_reporting_mask` then
+            # decides PER ORBIT whether any consumer actually retards this
+            # orbit's geometry -- where none does the shift is zero and the
+            # twin equals its partner exactly.  JDE 2026-09-21/22: report
+            # both frames, BJD_TDB is the headline, the plain names (tc, ts,
+            # tp) are BJD_TDB and the target frame is `*_target`.
             self._ltt_report_mask = self._ltt_reporting_mask(system)
             for key in self._LTT_REPORT_PARAMS:
                 self.manifest[key] = {
                     "expr_key": "default",
                     "force_node": True,
                 }
-            for key, latex, desc in (
-                (
-                    "tc",
-                    r"T_{C,\rm target}",
-                    "Time of Conjunction (target frame)",
-                ),
-                ("ts", r"T_{S,\rm target}", "Time of Eclipse (target frame)"),
-                (
-                    "tp",
-                    r"T_{P,\rm target}",
-                    "Time of Periastron (target frame)",
-                ),
-            ):
-                entry = self.manifest[key]
-                if isinstance(entry, str):
-                    entry = {"expr_key": entry}
-                entry = dict(entry)
-                entry["latex"] = latex
-                entry["description"] = desc
-                self.manifest[key] = entry
 
         # Rossiter-McLaughlin: declare the spin-orbit params only when some
         # rvinstrument enables `rm:`. Samples the decorrelated
@@ -1461,7 +1447,7 @@ class Orbit(Component):
     def _ltt_reporting_mask(self, system):
         """Per-orbit 0.0/1.0 float array: does some consumer's model
         actually retard THIS orbit's geometry, so `tc`/`tp` need the
-        +delay convert-back (`tc_bjd`/`tp_bjd`) to read as the observed
+        light-travel shift (`tc_target`, and the observed `ts`/`tp`) to relate the observed
         (BJD_TDB) frame rather than the target frame `ltt.py` evaluates
         the Kepler solve in?
 
@@ -1503,7 +1489,7 @@ class Orbit(Component):
             if len(set(transit_flags)) > 1:
                 logger.warning(
                     "orbit: transit files disagree on light_travel_time; "
-                    "tc_bjd/ts_bjd/tp_bjd treat every orbit touched by an active "
+                    "tc_target and the observed ts/tp treat every orbit touched by an active "
                     "file as fully retarded, an approximation where they "
                     "mix on the same orbit's data."
                 )
@@ -1658,14 +1644,16 @@ class Orbit(Component):
             context_nodes.setdefault("_ltt_mask", self._ltt_mask_context())
         return super().add_parameter(model, param_name, system, context_nodes)
 
-    # tc_bjd/ts_bjd/tp_bjd (defaults.yaml) all consume the one `_ltt_mask`
-    # context node -- see _ltt_mask_context and physics.calc_tc_bjd.
-    _LTT_REPORT_PARAMS = ("tc_bjd", "ts_bjd", "tp_bjd")
+    # tc_target, and the observed ts/tp (defaults.yaml), all consume the one
+    # `_ltt_mask` context node -- see _ltt_mask_context and
+    # physics.calc_tc_target.  ts_target/tp_target need no mask: they are
+    # plain Kepler timing from tc_target.
+    _LTT_REPORT_PARAMS = ("tc_target", "ts", "tp")
 
     def _ltt_mask_context(self):
-        """The `_ltt_mask` context node the *_bjd twins consume: the per-orbit
+        """The `_ltt_mask` context node the frame twins consume: the per-orbit
         0.0/1.0 array from `_ltt_reporting_mask` (stage 3) as a constant
-        tensor.  All the physics is in physics.calc_tc_bjd and friends -- the
+        tensor.  All the physics is in physics.calc_tc_target and friends -- the
         closed-form ``-z(t_event)*factor/c`` in the elements -- so unlike the
         chord context nothing here needs a lazy same-component build."""
         mask = getattr(self, "_ltt_report_mask", np.zeros(self.n_elements))
@@ -1690,11 +1678,11 @@ class Orbit(Component):
         collector.add(
             "The light curves and Rossiter-McLaughlin data of "
             f"{join_names(names)} were modeled at the retarded time, so "
-            "the fitted times of conjunction, eclipse and periastron are "
-            "in the target frame; the reported $T_C$, $T_S$ and $T_P$ "
-            r"add the light-travel time across the orbit back and are in "
-            r"$\rm BJD_{TDB}$ \citep{Eastman:2010}, with the target-frame "
-            "values given alongside.",
+            "the reported $T_C$, $T_S$ and $T_P$ are the observed "
+            r"($\rm BJD_{TDB}$) times \citep{Eastman:2010}, and the "
+            "target-frame conjunction, eclipse and periastron times the "
+            "Keplerian model is evaluated at are given alongside "
+            "(subscript ``target'').",
             section="orbits",
             key="orbit.ltt_frame",
         )
@@ -2050,12 +2038,12 @@ class Orbit(Component):
         """
         if orbit_idx is None:
             t_grid = t[:, None]
-            tp = self.tp.value[None, :]
+            tp = self.tp_target.value[None, :]
             n = self.n.value[None, :]
             ecc = self.ecc.value[None, :]
         else:
             t_grid = t
-            tp = self.tp.value[orbit_idx]
+            tp = self.tp_target.value[orbit_idx]
             n = self.n.value[orbit_idx]
             ecc = self.ecc.value[orbit_idx]
 
@@ -2111,7 +2099,7 @@ class Orbit(Component):
         both as this method's business, never re-derive them.
         """
         t_grid = t[:, None]
-        tp = self.tp.value[orbit_map][None, :]
+        tp = self.tp_target.value[orbit_map][None, :]
         n = self.n.value[orbit_map][None, :]
         ecc = self.ecc.value[orbit_map][None, :]
         cosw = self.cosw.value[orbit_map][None, :]
@@ -2183,7 +2171,7 @@ class Orbit(Component):
         # Broadcast time and orbital parameters into (N_obs, N_planets)
         # grids; the kernel does the Kepler solve (review 6.8.2 forwarding).
         t_grid = t[:, None]
-        tp = self.tp.value[orbit_map][None, :]
+        tp = self.tp_target.value[orbit_map][None, :]
         n = self.n.value[orbit_map][None, :]
         ecc = self.ecc.value[orbit_map][None, :]
         cosw = self.cosw.value[orbit_map][None, :]
