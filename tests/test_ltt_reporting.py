@@ -132,7 +132,7 @@ def test_headline_labels_are_bjd_tdb_and_target_rows_are_relabeled(tmp_path):
     assert o.tc_bjd.latex == "T_C"
     assert o.ts_bjd.latex == "T_S"
     assert o.tp_bjd.latex == "T_P"
-    assert "BJD_TDB" in o.tc_bjd.description
+    assert "BJD_{TDB}" in o.tc_bjd.description
     assert o.tc.latex == r"T_{C,\rm target}"
     assert o.ts.latex == r"T_{S,\rm target}"
     assert o.tp.latex == r"T_{P,\rm target}"

@@ -127,7 +127,7 @@ orbit:
     unit: "d"
     internal_unit: "d"
     latex: "T_C"
-    description: "Time of Conjunction (BJD_TDB)"
+    description: "Time of Conjunction ($\\rm BJD_{TDB}$)"
     expressions:
       default:
         func_name: "calc_tc_bjd"
@@ -136,7 +136,7 @@ orbit:
     unit: "d"
     internal_unit: "d"
     latex: "T_S"
-    description: "Time of Eclipse (BJD_TDB)"
+    description: "Time of Eclipse ($\\rm BJD_{TDB}$)"
     expressions:
       default:
         func_name: "calc_ts_bjd"
@@ -145,7 +145,7 @@ orbit:
     unit: "d"
     internal_unit: "d"
     latex: "T_P"
-    description: "Time of Periastron (BJD_TDB)"
+    description: "Time of Periastron ($\\rm BJD_{TDB}$)"
     expressions:
       default:
         func_name: "calc_tp_bjd"
