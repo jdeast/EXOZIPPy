@@ -97,6 +97,28 @@ solution had been seeded and was sitting in that same run's rejected-seed
 ledger. A schedule that can silently return half the posterior is not a
 performance choice.
 
+**And a ladder on DEO can still make zero round trips, which is a different
+illness with a different answer.** The DEO criterion `n_temps >= 2*Lambda+1`
+is NECESSARY, not sufficient, and past a measured barrier of
+`LAMBDA_TRANSPORT_CEILING` (5.0, `ladder.py`) round trips stop happening at
+any affordable budget: on a 27-D Gaussian at fixed budget they go 1742, 146,
+0, 0 at Lambda 1.8, 4.1, 12.6, 14-20, i.e. 4x, 13x and >1000x below the DEO
+ceiling `1/(2+2*Lambda)`, so this is not the non-reversible regime the theory
+describes. DC2018 event 128 SATISFIED the criterion at `n_temps = 48` with
+Lambda = 19.8, after adaptation had equalized swap acceptance to
+0.504 +/- 0.019, and still made zero. The six-event DC2018 sweep sat at
+Lambda 12.2-16.9 with 0-1 round trips over 55,000 swap rounds. So
+`ladder_health_report` BRANCHES: under the ceiling it names the rung count to
+use, over it it says plainly that more rungs will not fix this and that
+between-mode traffic has to come from multi-seed starts, hot-rung
+suppressed-mode discovery (`store_hot_chains`), per-mode evidence weighting
+or explicit mode jumps -- and that the lever on Lambda itself is DIMENSION,
+not rungs. The single-message version named a rung count two sentences before
+explaining why that count would not work, and a reader acts on the number.
+Full measurement trail: `notes/pt_round_trip_collapse.txt`. Tests:
+`tests/test_ptde.py`'s two `ladder_health_report` cases, one either side of
+the ceiling.
+
 **So why keep it?** One real use, and one cheap one. The real use is as the
 CONTROL for diagnosing ladder transport: review 2.4.9 (`ptde_async`'s ladder
 does not transport) was diagnosable precisely because async-on-DEO behaves

@@ -88,6 +88,19 @@ def resolve_n_temps(n_temps, n_params, T_max):
     return int(n_temps)
 
 
+# Past this measured communication barrier, ladder round trips stop
+# happening at any budget we can afford, and the 2*Lambda+1 rung criterion
+# stops being actionable advice.  From notes/pt_round_trip_collapse.txt
+# (27-D Gaussian, fixed ~600k logp evaluations per configuration): round
+# trips go 1742 at Lambda=1.8, 146 at 4.1, and 0 at 12.6 and above -- 4x,
+# 13x and >1000x below the DEO ceiling 1/(2+2*Lambda).  So we are not in
+# the non-reversible regime the theory describes; transport is diffusive or
+# worse.  The number is where the measured series reaches zero, not a
+# theoretical threshold, and the health report branches on it so that a
+# problem past it is told the truth rather than a rung count.
+LAMBDA_TRANSPORT_CEILING = 5.0
+
+
 def ladder_health_report(temperatures, n_swap_accept, n_swap_propose):
     """Log the measured communication barrier; warn if the ladder chokes.
 
@@ -129,7 +142,33 @@ def ladder_health_report(temperatures, n_swap_accept, n_swap_propose):
         f"{1.0 / (2.0 + 2.0 * lam):.3f} per swap round)"
     )
     recommended = int(np.ceil(2.0 * lam)) + 1
-    if (n_temps - 1) < 2.0 * lam:
+    if lam > LAMBDA_TRANSPORT_CEILING:
+        # Above the ceiling the rung recommendation is not just weak, it is
+        # WRONG ADVICE: it names a number, and the reader reruns.  Measured
+        # on DC2018 event 128, which satisfied 2*Lambda+1 at n_temps=48 with
+        # Lambda=19.8 -- after the adaptation had equalized swap acceptance
+        # to 0.504 +/- 0.019 -- and still made zero round trips.  Say the
+        # thing that is true instead, and name no n_temps.
+        logger.warning(
+            f"PT ladder will NOT transport at this problem's communication "
+            f"barrier: Lambda={lam:.2f} is past ~{LAMBDA_TRANSPORT_CEILING:.0f}, "
+            f"beyond which round trips stop happening at any affordable "
+            f"budget -- measured on a 27-D Gaussian at fixed budget, round "
+            f"trips go 1742, 146, 0, 0 at Lambda 1.8, 4.1, 12.6, 14-20, i.e. "
+            f"far faster than the DEO ceiling 1/(2+2*Lambda) predicts. MORE "
+            f"RUNGS WILL NOT FIX IT: DC2018 event 128 satisfied 2*Lambda+1 "
+            f"at n_temps=48 with Lambda=19.8 and still made zero round "
+            f"trips, so do NOT rerun with n_temps={recommended} expecting "
+            f"transport (n_temps={n_temps} here). See "
+            f"notes/pt_round_trip_collapse.txt. Where Lambda is this large, "
+            f"tempering is not the transport mechanism and between-mode "
+            f"traffic has to come from multi-seed starts, hot-rung "
+            f"suppressed-mode discovery (`store_hot_chains`), per-mode "
+            f"evidence weighting or explicit mode jumps. The lever on Lambda "
+            f"itself is DIMENSION, not rungs: a lower-dimensional model that "
+            f"seeds this one attacks it at the source."
+        )
+    elif (n_temps - 1) < 2.0 * lam:
         logger.warning(
             f"PT ladder is communication-limited: n_temps={n_temps} is "
             f"below ~2*Lambda+1 = {recommended}. Round trips between T_max "
@@ -142,16 +181,9 @@ def ladder_health_report(temperatures, n_swap_accept, n_swap_propose):
             f"Lambda higher than the spacing assumed. Lambda is measured, "
             f"so this recommendation is problem-specific; the formula "
             f"cannot be. NOTE that this criterion is NECESSARY, not "
-            f"sufficient: measured on a 27-D Gaussian, round trips collapse "
-            f"far faster than the DEO ceiling 1/(2+2*Lambda) predicts -- 4x "
-            f"below it at Lambda=1.8, 13x at 4.1, and unobservable past "
-            f"Lambda~5 at any affordable budget. DC2018 event 128 SATISFIES "
-            f"2*Lambda+1 at n_temps=48 with Lambda=19.8 and still makes zero "
-            f"round trips, so more rungs alone will not restore transport at "
-            f"high Lambda; see notes/pt_round_trip_collapse.txt. Where "
-            f"Lambda is this large, between-mode traffic has to come from "
-            f"multi-seed starts, per-mode evidence weighting or explicit "
-            f"mode jumps rather than from tempering."
+            f"sufficient: round trips collapse faster than the DEO ceiling "
+            f"predicts, and past Lambda~{LAMBDA_TRANSPORT_CEILING:.0f} they "
+            f"stop entirely -- see notes/pt_round_trip_collapse.txt."
         )
     return lam
 
