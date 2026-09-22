@@ -33,16 +33,30 @@ import dc18_common as C  # noqa: E402
 
 BC = os.path.normpath(
     os.path.join(
-        HERE, "..", "..", "src", "exozippy", "models", "NextGen", "BCs",
-        "Roman", "feh+0.0_afe+0.0.Roman",
+        HERE,
+        "..",
+        "..",
+        "src",
+        "exozippy",
+        "models",
+        "NextGen",
+        "BCs",
+        "Roman",
+        "feh+0.0_afe+0.0.Roman",
     )
 )
 TSUN = 5772.0
 MBOL_SUN = 4.74
 EVENTS = ("008", "062", "128", "152", "194", "223")
 # our fitted source radius / the quoted one, from the completed sweep
-FIT_RATIO = {"008": 0.738, "062": 0.639, "128": 0.439,
-             "152": 0.374, "194": 0.364, "223": 0.672}
+FIT_RATIO = {
+    "008": 0.738,
+    "062": 0.639,
+    "128": 0.439,
+    "152": 0.374,
+    "194": 0.364,
+    "223": 0.672,
+}
 
 
 def bc_grid(logg_target=4.5):
@@ -65,7 +79,7 @@ def event_info_row(data_dir, number):
     for ln in open(path):
         f = ln.split()
         if len(f) > 8 and int(f[1]) == number:
-            return float(f[5]), float(f[7])     # A_W149, A_Z087
+            return float(f[5]), float(f[7])  # A_W149, A_Z087
     raise SystemExit(f"event {number} not in event_info.txt")
 
 
@@ -74,12 +88,18 @@ def main():
     teff, bc146, bc087, lg = bc_grid()
     # colour on the grid: M_087 - M_146 = BC_146 - BC_087
     colour = bc146 - bc087
-    print(f"BC grid: NextGen Roman, feh 0.0, Av 0, logg {lg:.1f}, "
-          f"Teff {teff.min():.0f}-{teff.max():.0f} K")
-    print(f"grid colour (Z087-W149)_0 spans {colour.min():+.3f} to {colour.max():+.3f}\n")
-    print(f"{'ev':>4}{'Rs':>7}{'Ds/kpc':>8}{'W149s':>8}{'F087s':>8}"
-          f"{'A_W':>6}{'A_Z':>6}{'(Z-W)0':>8}{'Teff':>7}"
-          f"{'W_pred':>8}{'gap':>7}{'R_phot/Rs':>11}{'R_fit/Rs':>10}")
+    print(
+        f"BC grid: NextGen Roman, feh 0.0, Av 0, logg {lg:.1f}, "
+        f"Teff {teff.min():.0f}-{teff.max():.0f} K"
+    )
+    print(
+        f"grid colour (Z087-W149)_0 spans {colour.min():+.3f} to {colour.max():+.3f}\n"
+    )
+    print(
+        f"{'ev':>4}{'Rs':>7}{'Ds/kpc':>8}{'W149s':>8}{'F087s':>8}"
+        f"{'A_W':>6}{'A_Z':>6}{'(Z-W)0':>8}{'Teff':>7}"
+        f"{'W_pred':>8}{'gap':>7}{'R_phot/Rs':>11}{'R_fit/Rs':>10}"
+    )
     out = {}
     for ev in EVENTS:
         n = int(ev)
@@ -101,18 +121,24 @@ def main():
         gap = w - w_pred
         r_ratio = 10.0 ** (-0.2 * gap)
         out[ev] = (gap, r_ratio)
-        print(f"{ev:>4}{Rs:7.3f}{Ds / 1000:8.2f}{w:8.3f}{z:8.3f}{a_w:6.2f}"
-              f"{a_z:6.2f}{col0:8.3f}{t_src:7.0f}{w_pred:8.3f}{gap:+7.3f}"
-              f"{r_ratio:11.3f}{FIT_RATIO[ev]:10.3f}")
+        print(
+            f"{ev:>4}{Rs:7.3f}{Ds / 1000:8.2f}{w:8.3f}{z:8.3f}{a_w:6.2f}"
+            f"{a_z:6.2f}{col0:8.3f}{t_src:7.0f}{w_pred:8.3f}{gap:+7.3f}"
+            f"{r_ratio:11.3f}{FIT_RATIO[ev]:10.3f}"
+        )
     if out:
         g = np.array([v[0] for v in out.values()])
         r = np.array([v[1] for v in out.values()])
         f = np.array([FIT_RATIO[k] for k in out])
-        print(f"\nmedian gap {np.median(g):+.2f} mag -> the sim's own photometry "
-              f"implies {np.median(r):.3f}x its own quoted radius")
+        print(
+            f"\nmedian gap {np.median(g):+.2f} mag -> the sim's own photometry "
+            f"implies {np.median(r):.3f}x its own quoted radius"
+        )
         print(f"our fits give a median {np.median(f):.3f}x")
-        print(f"correlation of R_phot/Rs with R_fit/Rs over {len(r)} events: "
-              f"{np.corrcoef(r, f)[0, 1]:+.3f}")
+        print(
+            f"correlation of R_phot/Rs with R_fit/Rs over {len(r)} events: "
+            f"{np.corrcoef(r, f)[0, 1]:+.3f}"
+        )
 
 
 if __name__ == "__main__":
