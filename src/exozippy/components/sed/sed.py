@@ -320,6 +320,33 @@ class SED(Component):
         for key, bounds in overrides.items():
             self.config_manager.add_override(key, **bounds)
 
+        # Remembered so the wrap-up's near-bound check can say WHICH KIND of
+        # wall these are (diagnostics.grid_bounded_paths).  A posterior
+        # against an error-scale bound is the fit telling you something; a
+        # posterior against one of THESE is the interpolator running out of
+        # grid, and the values there are the edge cell carried outward.  The
+        # override channel cannot carry the sentence itself -- it applies
+        # numeric fields only, and `near_bound_remedy` is defaults.yaml-only
+        # by design (config.py) -- so the provenance is published here
+        # instead of being written onto a parameter this component does not
+        # own.
+        self._grid_bound_paths = {
+            key: {
+                "lower": bounds["lower"],
+                "upper": bounds["upper"],
+                "source": f"{self.sedmodel} bolometric-correction grid",
+            }
+            for key, bounds in overrides.items()
+        }
+
+    def grid_bound_paths(self):
+        """{parameter path: {lower, upper, source}} for grid-extent bounds.
+
+        The hook ``diagnostics.grid_bounded_paths`` duck-types for.  Empty
+        until ``_inject_grid_bounds`` has run (no grid, no claim).
+        """
+        return dict(getattr(self, "_grid_bound_paths", {}) or {})
+
     @property
     def prefix(self):
         return "sed"
