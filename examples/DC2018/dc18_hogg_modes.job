@@ -1,0 +1,27 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 2
+#$ -q sThC.q
+#$ -cwd
+#$ -j y
+#$ -N hogg062
+#$ -o dc18_hogg_modes.$JOB_ID.log
+#
+# Score DC2018 062's reported modes under clean-Gaussian / err_scale-only /
+# each mode's own Hogg mixture.  Model build + a handful of evaluations;
+# 2 slots so the BLAS threads have room, single-threaded VBBL.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+python dc18_hogg_modes.py --event 062 \
+    --run-dir $HOME/python/EXOZIPPy/examples/DC2018/sweep/062 \
+    --modes 1,2,3,5 --common 3
+echo "exit $?   $(date)"
