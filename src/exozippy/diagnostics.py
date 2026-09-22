@@ -635,6 +635,18 @@ class ModelAuditor:
 # 100, which is the wrong reading of every scale-like parameter.
 NEAR_BOUND_MARGIN = 0.02
 
+# The MEDIAN test above misses a posterior that is sculpted by a wall without
+# being centred on it: DC2018 event 152's source teffsed had its whole lower
+# tail on the 2600 K edge of the bolometric-correction grid with a median at
+# 3163 K, so nothing warned, and the reported temperature was a distribution
+# the grid had cut in half.  An element is therefore ALSO reported when this
+# fraction of its draws lies within NEAR_BOUND_MARGIN of either bound.  It is
+# looser than the cap rule's 50% (CAP_PILE_FRAC) on purpose: that rule asks
+# "would this parameter leave if it could", which wants a majority, while
+# this one asks "is the answer shaped by the edge", which a tenth of the mass
+# already does.
+EDGE_MASS_FRAC = 0.10
+
 
 def near_bound_position(value, lower, upper):
     """Where ``value`` sits in [lower, upper]: 0.0 at lower, 1.0 at upper.
@@ -655,7 +667,57 @@ def near_bound_position(value, lower, upper):
     return (value - lower) / (upper - lower)
 
 
-def warn_posterior_near_bounds(system, margin=NEAR_BOUND_MARGIN, log=None):
+def _positions(values, lower, upper):
+    """``near_bound_position`` over an array, same log/linear rule."""
+    v = np.asarray(values, dtype=float)
+    lower, upper = float(lower), float(upper)
+    if not (np.isfinite(lower) and np.isfinite(upper)) or upper <= lower:
+        return np.full(v.shape, np.nan)
+    if lower > 0.0 and upper > 0.0:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out = (np.log(v) - np.log(lower)) / (np.log(upper) - np.log(lower))
+        return np.where(v > 0.0, out, np.nan)
+    return (v - lower) / (upper - lower)
+
+
+def grid_bounded_paths(system):
+    """{parameter path: info} for bounds that ARE a model grid's extent.
+
+    Component-agnostic by duck typing, the same way ``cap_alarm_findings``
+    stays component-agnostic through a Parameter field: any component that
+    bounds someone else's parameter by the reach of an interpolation grid
+    may declare it with a ``grid_bound_paths()`` method, and nothing here
+    knows which component that is or what the grid interpolates.
+
+    It matters because the two kinds of wall mean opposite things.  A
+    physical bound (an error scale of 100x, a negative flux) is a statement
+    about what is possible, and a posterior against it is usually the fit
+    telling you something.  A grid extent is a statement about what the
+    MODEL can evaluate: past it the interpolator has no data, and a
+    posterior against it is reporting that the grid ran out.
+    """
+    out = {}
+    for comp in getattr(system, "active_components", None) or []:
+        fn = getattr(comp, "grid_bound_paths", None)
+        if not callable(fn):
+            continue
+        try:
+            out.update(fn() or {})
+        except Exception:  # noqa: BLE001 -- a broken hook must not kill the check
+            logger.debug(
+                "grid_bound_paths() failed on %s",
+                type(comp).__name__,
+                exc_info=True,
+            )
+    return out
+
+
+def warn_posterior_near_bounds(
+    system,
+    margin=NEAR_BOUND_MARGIN,
+    log=None,
+    mass_frac=EDGE_MASS_FRAC,
+):
     """Warn, per sampled element, when the posterior median sits against a
     hard bound -- and say what the component thinks that means.
 
@@ -674,10 +736,18 @@ def warn_posterior_near_bounds(system, margin=NEAR_BOUND_MARGIN, log=None):
     remedy is the errors or the starting model, not a wider bound (review
     8.2.2, measured on DC2018-226 where both bands sat at 300-460x).
 
+    Two triggers, because a wall shapes an answer in two different ways:
+    the posterior MEDIAN against the bound (the original rule, review
+    8.2.2), or more than ``mass_frac`` of the DRAWS within ``margin`` of
+    either bound (``EDGE_MASS_FRAC``).  A bound that is a model grid's
+    extent (``grid_bounded_paths``) says so in the message, because there
+    the values on the wall are extrapolation rather than measurement.
+
     Returns the list of hits (dicts) so a caller or a test can read them.
     """
     log = log or logger
     hits = []
+    grid_paths = grid_bounded_paths(system)
     for par in system.get_all_parameters():
         tf = getattr(par, "_raw_transform", None)
         post = getattr(par, "posterior", None)
@@ -697,9 +767,33 @@ def warn_posterior_near_bounds(system, margin=NEAR_BOUND_MARGIN, log=None):
             except Exception:  # noqa: BLE001 -- a conversion that fails is not a wall
                 continue
             pos = near_bound_position(v_int, lower, upper)
-            if not np.isfinite(pos) or margin < pos < 1.0 - margin:
+            # Every draw, not just the median: the mass criterion.
+            try:
+                # `med` is taken over the LAST axis, so the element axis
+                # is the first one -- and a scalar parameter's posterior is
+                # 1-D, where arr[i] would be one draw rather than the
+                # element's draws.
+                draws_u = arr if arr.ndim == 1 else arr[i]
+                draws_int = np.asarray(
+                    par.to_internal(np.asarray(draws_u, dtype=float), index=i),
+                    dtype=float,
+                )
+            except Exception:  # noqa: BLE001 -- as above, a failed conversion is not a wall
+                draws_int = np.array([])
+            dpos = _positions(draws_int, lower, upper)
+            n_ok = int(np.isfinite(dpos).sum())
+            frac_low = float(np.nansum(dpos <= margin) / n_ok) if n_ok else 0.0
+            frac_high = (
+                float(np.nansum(dpos >= 1.0 - margin) / n_ok) if n_ok else 0.0
+            )
+            med_hit = np.isfinite(pos) and not (margin < pos < 1.0 - margin)
+            mass_hit = max(frac_low, frac_high) >= mass_frac
+            if not (med_hit or mass_hit):
                 continue
-            side = "lower" if pos <= margin else "upper"
+            if med_hit:
+                side = "lower" if pos <= margin else "upper"
+            else:
+                side = "lower" if frac_low >= frac_high else "upper"
             lo_u = float(np.atleast_1d(par.from_internal(lower, index=i))[0])
             hi_u = float(np.atleast_1d(par.from_internal(upper, index=i))[0])
             # `unit` is an astropy Unit (or a per-element list of them) after
@@ -708,6 +802,8 @@ def warn_posterior_near_bounds(system, margin=NEAR_BOUND_MARGIN, log=None):
             if isinstance(u, (list, tuple)):
                 u = u[i] if i < len(u) else None
             unit = "" if u is None else str(u).strip()
+            grid = grid_paths.get(par.label)
+            frac = frac_low if side == "lower" else frac_high
             hit = {
                 "label": par.get_display_label(i),
                 "median": float(med[i]),
@@ -715,14 +811,40 @@ def warn_posterior_near_bounds(system, margin=NEAR_BOUND_MARGIN, log=None):
                 "position": float(pos),
                 "lower": lo_u,
                 "upper": hi_u,
+                "frac": frac,
+                "trigger": "median" if med_hit else "mass",
+                "grid": (grid or {}).get("source"),
             }
             hits.append(hit)
+            if med_hit:
+                where = (
+                    f"posterior median {med[i]:.4g}"
+                    f"{(' ' + unit) if unit else ''} sits against its {side} "
+                    f"bound [{lo_u:.4g}, {hi_u:.4g}] ({pos:.1%} of the way "
+                    f"across, within the {margin:.0%} margin)"
+                )
+            else:
+                where = (
+                    f"{frac:.0%} of its posterior draws sit within the "
+                    f"{margin:.0%} margin of its {side} bound "
+                    f"[{lo_u:.4g}, {hi_u:.4g}], though the median "
+                    f"({med[i]:.4g}{(' ' + unit) if unit else ''}) does not"
+                )
+            if hit["grid"]:
+                why = (
+                    f" That bound IS the {hit['grid']}'s extent, so this is "
+                    f"the MODEL running out, not the data preferring the "
+                    f"edge: values there are the edge cell carried outward, "
+                    f"and the reported interval is cut off rather than "
+                    f"measured."
+                )
+            else:
+                why = (
+                    " A posterior piled on a wall usually means the bound, "
+                    "not the fit, is the thing to revisit."
+                )
             log.warning(
-                f"Parameter '{hit['label']}': posterior median {med[i]:.4g}"
-                f"{(' ' + unit) if unit else ''} sits against its {side} bound "
-                f"[{lo_u:.4g}, {hi_u:.4g}] ({pos:.1%} of the way across, within "
-                f"the {margin:.0%} margin). A posterior piled on a wall "
-                f"usually means the bound, not the fit, is the thing to "
-                f"revisit." + par.remedy_suffix()
+                f"Parameter '{hit['label']}': {where}.{why}"
+                + par.remedy_suffix()
             )
     return hits
