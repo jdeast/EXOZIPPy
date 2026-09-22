@@ -1,27 +1,41 @@
 """Is the simulation's released source PHOTOMETRY consistent with its own
-quoted source RADIUS and DISTANCE?
+quoted source RADIUS and DISTANCE?  IT IS -- ONCE THE MAGNITUDE SYSTEM IS
+RIGHT, WHICH IS THE POINT OF THIS SCRIPT.
 
-supercomputer_queue.txt 7.7.3 closed the GEOMETRIC leg -- 4.6503*Rs/Ds agrees
-with rhos*thetaE, and tE*murel/365.25 agrees with thetaE, on all six events --
-and left the PHOTOMETRIC leg untested.  That is the only route left by which
-the answer key itself could be at fault for our low R_source.
+supercomputer_queue.txt 7.7.3 closed the GEOMETRIC leg and left the
+PHOTOMETRIC one untested.  The first version of this script tested it in the
+wrong system and "found" the answer key 1.8-2.4 mag inconsistent with
+itself.  It is not.  THE CHALLENGE'S MAGNITUDES ARE AB AND OUR BC GRID IS
+VEGA (its header says so, and the shipped SVO filter files give
+MagSys=Vega with ZeroPoint 2294.04 Jy for F087 and 1396.74 Jy for F146,
+i.e. AB - Vega = +0.499 and +1.037).
 
-The test, per event, with no fit involved:
-  1. Deredden the released source colour with the clump's own (A_W149,
-     A_Z087) from event_info.txt.
-  2. Read the intrinsic colour off OUR BC grid (the one the fits use) to get
-     a source Teff at dwarf gravity.
-  3. Predict W149 from the quoted radius and distance: L = R^2 (T/Tsun)^4,
-     M_bol = 4.74 - 2.5 log10 L, M_146 = M_bol - BC_146, add the distance
-     modulus and A_W149 back.
-  4. Compare with the released W149s.  The gap, as a radius: the sim's own
-     photometry says the source is 10**(-0.2*gap) times the radius the sim
-     also quotes.
+The proof is the challenge's own colour-surface-brightness relation, run
+backwards on a star whose size is not in question -- the Sun.  Treated as
+Vega it over-predicts the solar angular diameter by 2.815x; treated as AB it
+lands within 1.10x across 4000-6000 K, against the relation's own 0.034 dex
+scatter.  A 2.8x error in angular size is the same 2.4 mag the "photometric
+gap" had, so the gap was the system, not the simulation.
 
-If that ratio tracks the R_source deficit our fits report, the deficit is the
-answer key's, not ours.
+With the conversion applied, the six events' released magnitudes reproduce
+their own quoted radii to 0.81-1.28x (median 0.93), and the two events whose
+dereddened colour fell off the blue end of the BC grid move onto it.
+
+WHAT THAT MEANS FOR THE FITS, and it is why this matters beyond scoring:
+these configs anchor their photometry with `mulensinstrument.zeropoint`
+N(22.0, 0.02), which is the simulation's AB zeropoint, while the SED predicts
+Vega magnitudes.  Nothing converts between them -- `magsys` exists in the SED
+component for its own `filters:` list and these runs have `filters: []`, so
+the only photometric anchor in the fit carries no system.  The source
+therefore looks 1.04 mag too faint in W149 and 0.54 mag too red, which is the
+right sign and roughly the right size for the R_source deficit every event
+shows.  The decisive test is a rerun with the zeropoint priors at
+22.0 - offset (20.963 W149, 21.501 Z087).
+
+Run with --magsys vega to reproduce the original, wrong, comparison.
 """
 
+import argparse
 import os
 import sys
 
@@ -74,6 +88,33 @@ def bc_grid(logg_target=4.5):
     return teff, tab[sel, i146][order], tab[sel, i087][order], lg
 
 
+def ab_minus_vega(filter_root, names=("Roman/WFI.F087", "Roman/WFI.F146")):
+    """AB - Vega per filter, from the shipped SVO zeropoints.
+
+    Read rather than hardcoded: the offset is a property of the filter file
+    the rest of the pipeline uses, and a table that drifts from it would be
+    exactly the kind of silent mismatch this script exists to catch.
+    """
+    import re
+
+    out = {}
+    for nm in names:
+        path = os.path.join(
+            filter_root, nm.split("/")[0], nm.split("/")[1] + ".xml"
+        )
+        text = open(path).read()
+        zp = float(
+            re.search(r'name="ZeroPoint"[^/]*value="([^"]+)"', text).group(1)
+        )
+        sysname = re.search(r'name="MagSys"[^/]*value="([^"]+)"', text).group(
+            1
+        )
+        if sysname.strip().lower() != "vega":
+            raise SystemExit(f"{nm}: expected a Vega zeropoint, got {sysname}")
+        out[nm.split(".")[-1]] = 2.5 * np.log10(3631.0 / zp)
+    return out
+
+
 def event_info_row(data_dir, number):
     path = os.path.join(data_dir, "event_info.txt")
     for ln in open(path):
@@ -84,7 +125,28 @@ def event_info_row(data_dir, number):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--magsys",
+        default="ab",
+        choices=("ab", "vega"),
+        help="the system the challenge's magnitudes are in (default ab; "
+        "'vega' reproduces the original, wrong, comparison)",
+    )
+    args = ap.parse_args()
     d = C.data_dir_or_raise(None)
+    froot = os.path.normpath(
+        os.path.join(HERE, "..", "..", "src", "exozippy", "filters")
+    )
+    off = (
+        ab_minus_vega(froot)
+        if args.magsys == "ab"
+        else {"F087": 0.0, "F146": 0.0}
+    )
+    print(
+        f"magnitudes treated as {args.magsys.upper()}; applying "
+        f"AB-Vega = {off['F087']:+.4f} (Z087), {off['F146']:+.4f} (W149)"
+    )
     teff, bc146, bc087, lg = bc_grid()
     # colour on the grid: M_087 - M_146 = BC_146 - BC_087
     colour = bc146 - bc087
@@ -106,7 +168,8 @@ def main():
         row, _ = C.load_master_row(d, n)
         a_w, a_z = event_info_row(d, n)
         Rs, Ds = float(row["Rs"]), float(row["Ds"]) * 1000.0
-        w, z = float(row["W149s"]), float(row["F087s"])
+        w = float(row["W149s"]) - off["F146"]
+        z = float(row["F087s"]) - off["F087"]
         col0 = (z - a_z) - (w - a_w)
         if not (colour.min() <= col0 <= colour.max()):
             print(f"{ev:>4}  dereddened colour {col0:+.3f} is off the grid")
