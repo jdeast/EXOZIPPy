@@ -23,6 +23,23 @@ out_frac/out_scale.  Two guards against fooling ourselves:
 
 Mode membership is by nearest reported centre in (log s, log q); the
 representative point is the highest-lp draw in that cluster.
+
+!! DO NOT QUOTE THE ABSOLUTE NUMBERS THIS PRINTS.  Measured 2026-09-22 on
+062 against the model's own decomposition (dc18_logp_terms.py, which
+reproduces the stored lp to 0.00): this file's hand-rolled `hogg_logl` does
+NOT reproduce `mulensinstrument.model.hogg.*`.  It is off by 370 nats at one
+point and 430 at another -- not even by a constant -- and it reversed the
+mode ranking, reporting that the light curve prefers the truth-like geometry
+by 57 nats where the model's own likelihood prefers the deep wrong-q basin
+by 52.  Something in the residual, the error scaling or the out_scale units
+differs from what the component builds.
+
+The three-noise-model COMPARISON is still the right shape of question; the
+answer has to come from the component's own likelihood.  A model-native
+version switches that likelihood between mixture and Gaussian at a fixed
+draw (out_frac to ~0, err_scale to 1) and re-evaluates the model term,
+instead of re-implementing it here.  Until that runs, the complicity
+question on 062 is OPEN.
 """
 
 import argparse
