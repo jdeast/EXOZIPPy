@@ -1,0 +1,47 @@
+{
+ "event": 8,
+ "class": "omcassan",
+ "truth": {
+  "t_0": 2458729.060358196,
+  "u_0": 0.891991,
+  "t_E": 26.2846,
+  "rho": 0.000547291,
+  "s": 1.92159,
+  "q": 0.000691524,
+  "alpha": 316.978
+ },
+ "rungs": [
+  {
+   "name": "FLAT",
+   "lnL": -4206371.280870454,
+   "chi2": 8412742.561740909,
+   "k": 19,
+   "trace": "events/008/ladder/FLAT/DC2018_008_trace.nc",
+   "note": "data terms only (2)"
+  },
+  {
+   "name": "PSPL",
+   "lnL": -9943396.808470892,
+   "chi2": 19886793.616941784,
+   "k": 21,
+   "trace": "events/008/ladder/1L1S/DC2018_008_trace.nc",
+   "note": "data terms only (2)"
+  },
+  {
+   "name": "FSPL",
+   "lnL": -28989.79774583945,
+   "chi2": 57979.5954916789,
+   "k": 23,
+   "trace": "events/008/ladder/1L1S_FS/DC2018_008_trace.nc",
+   "note": "data terms only (2)"
+  },
+  {
+   "name": "2L1S",
+   "lnL": -9119147.937595176,
+   "chi2": 18238295.87519035,
+   "k": 25,
+   "trace": "events/008/ladder/2L1S/DC2018_008_trace.nc",
+   "note": "data terms only (2)"
+  }
+ ]
+}

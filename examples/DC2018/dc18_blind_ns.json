@@ -1,0 +1,18 @@
+{
+  "event": 128,
+  "logz": -19382.686259716673,
+  "logzerr": 0.2766701030105777,
+  "ncall": 1521222,
+  "wall_h": 0.725,
+  "nlive": 1000,
+  "s_main": {
+    "target_log_s": -0.0106,
+    "mass_within_0.02dex": 1.0,
+    "n_samples": 34490
+  },
+  "s_mirror": {
+    "target_log_s": -0.064,
+    "mass_within_0.02dex": 0.0,
+    "n_samples": 6082
+  }
+}

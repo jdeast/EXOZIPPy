@@ -1,0 +1,62 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 32
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc128pverify
+#$ -o dc128_polish_verify.$JOB_ID.log
+#
+# Does the fixed polish (adaptive gamma + cross-seed pool) actually beat the
+# old one on the real model?  Runs the DEFAULT 150 sweeps on event 128's two
+# stale-mmx seeds -- the same configuration whose numbers we already have:
+#
+#   old (serial, gamma fixed 0.3239):  seed 0 -> 127329.9   seed 1 -> 125943.9
+#   acceptance then: 0.003-0.004 mean, 84-88% of sweeps accepting nothing
+#
+# Same seeds, same cap, so the comparison is like for like.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_pverify"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+python -u - <<'EOF'
+import os, tempfile, time
+import numpy as np, yaml
+from exozippy.system import System
+from exozippy.polish import polish_raw_starts
+
+with open("events/128/DC2018_128.yaml") as f:
+    config = yaml.safe_load(f)
+config.pop("parameter_file", None)
+config["sampler"]["recompute_trace"] = False
+with open("events/128/DC2018_128.params.yaml") as f:
+    user_params = yaml.safe_load(f)
+
+os.chdir(tempfile.mkdtemp(prefix="dc128pv_"))
+system = System(config, user_params)
+system.prepare()
+model = system.build_model()
+raw_starts, seed_idx = system.get_raw_starts(model)
+print(f"seeds: {seed_idx}", flush=True)
+
+cores = int(os.environ.get("NSLOTS", 8))
+t0 = time.time()
+polished, dlps, method = polish_raw_starts(
+    model, raw_starts, n_steps=150, seed_indices=seed_idx, cores=cores)
+dt = time.time() - t0
+
+logp = model.compile_logp()
+print(f"\nmethod={method}  cores={cores}  wall={dt/60:.1f} min")
+print(f"{'seed':>6s} {'lp after 150 sweeps':>22s} {'old (serial, fixed gamma)':>28s}")
+old = {0: 127329.9, 1: 125943.9}
+for s, p in enumerate(polished):
+    lp = float(np.asarray(logp(p)))
+    print(f"{s:>6d} {lp:22.1f} {old.get(s, float('nan')):28.1f}"
+          f"   delta={lp - old.get(s, float('nan')):+.1f}")
+EOF

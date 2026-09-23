@@ -1,0 +1,27 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N ezsuite2
+#$ -o ezsuite2.$JOB_ID.log
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+# Local scratch: ~/.pytensor is on NFS and this cluster's client drops
+# advisory locks under -n6, which fabricates failures in unrelated components.
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+cd $HOME/python/EXOZIPPy
+git log --oneline -1
+git status --porcelain -- src tests | head
+echo "############ TARGETED ############"
+python -u -m pytest -n0 -q tests/test_de_mode_hop.py \
+    tests/test_sampler_kwarg_plumbing.py \
+    tests/test_ptde_async_ladder.py tests/test_ptde_async.py \
+    tests/test_ptde_deo.py tests/test_de_metropolis.py 2>&1 | tail -15
+echo "############ FULL SUITE ############"
+python -u -m pytest -q --tb=short -rf 2>&1 | tail -40

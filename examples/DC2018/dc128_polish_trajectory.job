@@ -1,0 +1,21 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc128traj
+#$ -o dc128_polish_traj.$JOB_ID.log
+#
+# One seed per submission:  qsub -v SEED=1,NSWEEPS=15000 dc128_polish_trajectory.job
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_traj${SEED}"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+python -u dc128_polish_trajectory.py ${SEED:-1} ${NSWEEPS:-15000}

@@ -1,0 +1,28 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc18tests
+#$ -o dc18_tests.$JOB_ID.log
+#
+# Full EXOZIPPy suite plus MMEXOFAST's own unit tests, against the newly
+# editable-installed MMEXOFAST checkout (dev619, adds PR #7).
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_tests"
+
+echo "===================== MMEXOFAST unit tests ====================="
+cd $HOME/python/MMEXOFAST
+python -m pytest source/mmexofast/unit_tests -q 2>&1 | tail -25
+
+echo
+echo "===================== EXOZIPPy suite ====================="
+cd $HOME/python/EXOZIPPy
+python -m pytest -q 2>&1 | tail -40

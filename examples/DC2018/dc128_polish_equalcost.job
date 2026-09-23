@@ -1,0 +1,69 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 32
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc128peq
+#$ -o dc128_polish_equalcost.$JOB_ID.log
+#
+# The 150-sweep comparison was the WRONG comparison.  The whole point of
+# the pool is that sweeps got ~11x cheaper (2.4 min for 150 x 2 seeds on 32
+# cores, against ~27 min serial), so equal-sweeps understates the fix and
+# equal-WALL-CLOCK is the honest test.
+#
+# Old serial engine, 150 sweeps, ~27 min:  seed 0 -> 127329.9
+#                                          seed 1 -> 125943.9
+# This runs the new engine for a comparable budget, and with adaptation
+# both on and off, because the 150-sweep result suggests the two fixes
+# pull in opposite directions: a gamma tuned to 0.2 acceptance is a
+# SAMPLING criterion, and this stage is doing OPTIMIZATION, where the old
+# oversized gamma's rare-but-large accepted jumps may be what actually
+# climbed the basin.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_peq"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+python -u - <<'EOF'
+import os, tempfile, time
+import numpy as np, yaml
+from exozippy.system import System
+from exozippy.polish import polish_raw_starts
+
+with open("events/128/DC2018_128.yaml") as f:
+    config = yaml.safe_load(f)
+config.pop("parameter_file", None)
+config["sampler"]["recompute_trace"] = False
+with open("events/128/DC2018_128.params.yaml") as f:
+    user_params = yaml.safe_load(f)
+
+os.chdir(tempfile.mkdtemp(prefix="dc128peq_"))
+system = System(config, user_params)
+system.prepare()
+model = system.build_model()
+raw_starts, seed_idx = system.get_raw_starts(model)
+logp = model.compile_logp()
+cores = int(os.environ.get("NSLOTS", 8))
+
+OLD = {0: 127329.9, 1: 125943.9}       # serial, gamma fixed, 150 sweeps, ~27 min
+print(f"cores={cores}; baseline = old serial 150 sweeps: {OLD}\n", flush=True)
+
+for adapt in (True, False):
+    for n in (150, 1500):
+        t0 = time.time()
+        polished, _dlps, _m = polish_raw_starts(
+            model, [dict(s) for s in raw_starts], n_steps=n,
+            seed_indices=seed_idx, cores=cores, adapt_gamma=adapt)
+        dt = (time.time() - t0) / 60.0
+        lps = [float(np.asarray(logp(p))) for p in polished]
+        tag = "adapt" if adapt else "fixed"
+        print(f"[{tag:5s} gamma, {n:5d} sweeps, {dt:5.1f} min] "
+              + "  ".join(f"seed{s}={lp:.1f} ({lp - OLD[s]:+.1f})"
+                          for s, lp in enumerate(lps)), flush=True)
+EOF

@@ -1,0 +1,40 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q sThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc18cfgval
+#$ -o dc18_config_validate.$JOB_ID.log
+#
+# Build each of the three persistent configs (System.prepare + build_model)
+# WITHOUT sampling.  A config error costs 8 slots for a few minutes here
+# instead of 64 slots and a confusing failure in the real run.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_cfgval"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018/configs
+python -u - <<'PY'
+import traceback, yaml
+from exozippy.system import System
+for cfg in ("DC2018_128_mulens.yaml",
+            "DC2018_128_mulens+sed.yaml",
+            "DC2018_128_mulens+sed+torres+mann.yaml"):
+    print("=" * 70); print(cfg); print("=" * 70, flush=True)
+    try:
+        c = yaml.safe_load(open(cfg))
+        pf = c.pop("parameter_file")
+        up = yaml.safe_load(open(pf))
+        c["sampler"]["recompute_trace"] = False
+        s = System(c, up); s.prepare(); m = s.build_model()
+        n = sum(int(getattr(p, "n_elements", 1)) for p in s.get_all_parameters())
+        print(f"  BUILT OK -- {len(m.free_RVs)} free RVs, {n} parameter elements",
+              flush=True)
+    except Exception:
+        print("  FAILED:"); traceback.print_exc()
+PY

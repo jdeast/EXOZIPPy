@@ -1,0 +1,135 @@
+# /bin/sh
+# ----------------Parameters---------------------- #
+#$ -S /bin/sh
+#$ -pe mthread 64
+#$ -q lThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc128ladd
+#$ -o dc128_ladderfix.$JOB_ID.log
+#
+# DC2018 pipeline job (adapted from examples/DC2018_128/dc128.job).
+#
+# One SGE task = one event: MMEXOFAST init -> EXOZIPPy fit -> truth
+# comparison, all inside run_event.py.
+#
+# ---------------- Supercomputer command reference ----------------
+#
+# One-time setup (in the exozippy conda env; needs the patched MMEXOFAST,
+# see examples/DC2018/README.md):
+#   conda activate exozippy
+#   pip install git+https://github.com/jenniferyee/MMEXOFAST.git
+#   pip install git+https://github.com/jenniferyee/sfit_minimizer.git emcee
+#
+# Test with a single event first:
+#   cd ~/python/EXOZIPPy/examples/DC2018
+#   qsub -v EVENT=128 dc2018.job
+#
+# Then run all 44 events (one task per line of events.txt):
+#   qsub -t 1-44 dc2018.job
+#
+# Watch progress / results per event:
+#   qstat; tail -f dc2018.<jobid>.<taskid>.log
+#   cat events/<NNN>/status.txt          # running mmexofast / running exozippy / ok / failed
+#   cat events/<NNN>/comparison.csv      # per-event fit vs truth
+#
+# After the jobs finish, collect everything into one table
+# (one light curve per row: params, errors, truth, pulls, rhat, ess):
+#   python collect_results.py            # -> dc2018_summary.csv
+#
+# Optional overrides (qsub -v NAME=value, comma-separated for several):
+#   BANDS=Z087            fit only the sparse Z087 curve (fast; default W149,Z087)
+#   EXTRA="--quick"       any extra run_event.py flags (--quick = smoke test;
+#                         --mmx-emcee = MMEXOFAST's emcee polish, hours --
+#                         off by default, PTDE is the polish)
+#   DC18_DATA=...         data tree, if not at $HOME/python/MMEXOFAST/data/2018DataChallenge
+#
+# Re-running a task reuses the cached MMEXOFAST JSON (delete
+# events/<NNN>/DC2018_<NNN>_mmexofast.json to force a fresh init) and
+# resamples by default (add EXTRA="--no-recompute" to only redo reports).
+# ------------------------------------------------------------------
+#
+# run_event.py reads $NSLOTS for the sampler's core count, so it always
+# matches the "-pe mthread N" grant above -- change them together anyway if
+# you edit the queue request (see the oversubscription note in
+# examples/DC2018_128/DC2018_128_hpc.yaml).
+#
+# ----------------Modules------------------------- #
+module purge
+module load tools/python/3.13
+
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+
+# Source conda and activate the exozippy environment (needs mmexofast:
+#   pip install git+https://github.com/jenniferyee/MMEXOFAST.git
+#   pip install git+https://github.com/jenniferyee/sfit_minimizer.git emcee)
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+# PyTensor's C-module compile cache uses fcntl.flock() for its lock file.
+# ~/.pytensor's default location is under NFS-mounted $HOME, and this
+# cluster's NFS client doesn't honor advisory locks reliably (ENOLCK /
+# ESTALE mid-compile). Point it at the job's local-disk scratch dir instead.
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+
+which python
+
+# Navigate to the workflow directory
+cd $HOME/python/EXOZIPPy/examples/DC2018
+
+ev=128
+if [ -z "$ev" ]; then
+    echo "No event for task ${SGE_TASK_ID:-<unset>} (events.txt has $(wc -l < events.txt) lines)" >&2
+    exit 1
+fi
+
+: "${DC18_DATA:=$HOME/python/MMEXOFAST/data/2018DataChallenge}"
+export DC18_DATA
+: "${BANDS:=W149,Z087}"
+
+# ---------------------------------------------------------------------------
+# Ladder-adaptation test: a ONE-VARIABLE repeat of the run that failed.
+#
+# The reference run -- event 128, T_max=8500, n_temps=48, n_chains=54 -- was
+# correctly provisioned by the DEO criterion (measured Lambda=18.9 against the
+# 39 rungs it asks for, mean swap acceptance 0.598 at its 0.5 target) and still
+# made ZERO round trips in 21 hours, because per-pair acceptance was strongly
+# non-uniform: 0.46-0.52 cold against 0.66-0.70 hot.  A round trip must cross
+# every pair, so transport is set by the worst stretch and adding rungs
+# uniformly cannot fix it.
+#
+# --adapt-ladder was already passed to that run, and to a second one after
+# it, and it did NOTHING -- for a reason that took two multi-day runs and a
+# false diagnosis to find:
+#
+#   * run.py never forwarded adapt_ladder to ptde_async_sample at all, so the
+#     sampler used the parameter's own False default.  The knob had been inert
+#     for this sampler since it was added, and nothing said so: the key is in
+#     KNOWN_SAMPLER_KEYS so it does not warn, and the only symptom is the
+#     ABSENCE of re-spacing lines, which is also what a healthy already-
+#     equalized ladder looks like.  Fixed in #197 -- that is what makes this
+#     run the FIRST time the adaptation has ever executed.
+#   * separately, the adaptation was ungated: it zeroes the swap counters on
+#     the way out and ran per completed evaluation, so it would have re-armed
+#     on the very next proposal and measured a "barrier" from one or two
+#     swaps.  Fixed in #195, which windows the gate on
+#     ladder_adapt_window = max(200, 20*(n_temps-1)) = 940 proposals here.
+#
+# #195's own description originally blamed the zero re-spacing on the second
+# bug.  That was wrong -- the code never ran -- and is corrected in a comment
+# on that PR.  Both fixes are real; only the causal story was mistaken.
+#
+# So EVERY sampler setting below is the failing run's -- T_max=8500,
+# n_temps=48, n_chains=54 -- and the single change is that the adaptation now
+# actually runs.  The killed 7.1M-evaluation attempt provides the control:
+# swap acceptances 0.27 cold against 0.60 hot, measured with the adaptation
+# genuinely off, which is the non-uniformity re-spacing exists to remove.  What to look for in the log:
+#   * "ladder (barrier-equalized, from N swap proposals)" lines appearing at
+#     all, with N >= 940 -- their absence now warns explicitly at wrap-up;
+#   * swap(cum)=[...] flattening across rungs as the re-spacing takes hold;
+#   * round_trips leaving zero, which is the actual question.
+# ---------------------------------------------------------------------------
+echo "Running DC2018 event $ev (bands $BANDS, $NSLOTS cores)"
+python run_event.py "$ev" --bands "$BANDS" \
+    --t-max 8500 --n-temps 48 --n-chains 54 --adapt-ladder \
+    --out-dir events_ladderfix $EXTRA

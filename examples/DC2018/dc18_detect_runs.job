@@ -1,0 +1,17 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N detruns
+#$ -o dc18_detect_runs.$JOB_ID.log
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+cd $HOME/python/EXOZIPPy/examples/DC2018
+python -u dc18_detect_runs.py

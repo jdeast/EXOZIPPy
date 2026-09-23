@@ -1,0 +1,25 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 64
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N eleiact
+#$ -o pt_ele_diag.$JOB_ID.log
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_$JOB_ID"
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy/examples/DC2018
+
+# tau_V: the energy autocorrelation time of the DE kernel, per rung, with
+# swaps disabled.  This is the number that sets the exploration budget
+# (Bittner et al. 2008: n_local = tau_V ideal, tau_V/64..tau_V/8 CPU-optimal)
+# and that tells us how biased our Lambda = 19.8 estimate is.
+python -u pt_ele_diag.py --n-temps 8 --n-chains 54 --draws 4000 --cores 48

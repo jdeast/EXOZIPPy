@@ -1,0 +1,36 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N hmland
+#$ -o dc18_highmag_landscape.$JOB_ID.log
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_$JOB_ID"
+cd $HOME/python/EXOZIPPy/examples/DC2018
+
+# FULL GRID, after the pilot validated the script and measured its cost.
+#
+# 71 x 41 x 36 = 104796 nodes per event: 0.01 dex in log s over [-0.35, 0.35],
+# 0.1 dex in log q over [-5.5, -1.5], 10 deg in alpha.  The pilot ran 1188
+# nodes in ~2 min/event, so this is ~3 h/event, five events in parallel.
+#
+# The s range is CONTINUOUS through s = 1 rather than two mirrored branches --
+# events 163 and 193 are resonant (inside 1 -/+ q^(1/3) terms), where the
+# central-caustic size formula diverges and the s <-> 1/s pairing is invalid.
+#
+# The pilot already found event 258's global minimum sitting at the s -> 1/s
+# MIRROR of its truth (best s = 0.851 against truth 1.142, and 1/1.142 =
+# 0.876), which is why the analysis below must enumerate local minima rather
+# than report one best fit.
+echo "=== full landscape: 5 events, 71 x 41 x 36 ==="
+time python -u dc18_highmag_landscape.py \
+    --events 69,258,163,193,62 \
+    --n-s 71 --n-q 41 --n-alpha 36 --ncpu 5 \
+    --out dc18_highmag_landscape.npz

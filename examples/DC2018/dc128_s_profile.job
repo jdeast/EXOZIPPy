@@ -1,0 +1,23 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 2
+#$ -q sThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc128prof
+#$ -o dc128_s_profile.$JOB_ID.log
+#
+# Independent MulensModel basin comparison for DC2018 event 128.
+# Single-threaded VBBL + scipy; 2 slots only so the BLAS threads have room.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+python -u dc128_s_profile.py

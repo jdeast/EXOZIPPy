@@ -1,0 +1,33 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q sThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc18pr9
+#$ -o dc18_pr9_merge_tests.$JOB_ID.log
+#
+# Does the emcee-polish fix still hold once PR #9 (Classifier v2) is merged
+# on top of it?  Runs in a git worktree under $HOME (the scratch /tmp is
+# node-local and invisible to the compute node).  cwd is the worktree's
+# source/ dir so `python -m pytest` puts it at sys.path[0], ahead of the
+# editable install pointing at ~/python/MMEXOFAST.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+cd $HOME/python/mmx-pr9merge/source
+
+python -c "import mmexofast, os; print('testing:', os.path.dirname(mmexofast.__file__))"
+
+echo "=== the fix's own tests, under the PR9 merge ==="
+python -m pytest -p no:cacheprovider mmexofast/unit_tests/test_emcee_polish_never_worse.py \
+                 mmexofast/unit_tests/test_emcee_fit_results.py \
+                 mmexofast/unit_tests/test_fitters.py -q 2>&1 | tail -20
+
+echo
+echo "=== full MMEXOFAST suite under the merge (PR9's own state included) ==="
+python -m pytest -p no:cacheprovider mmexofast/unit_tests -q 2>&1 | tail -20

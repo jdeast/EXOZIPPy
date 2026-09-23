@@ -1,0 +1,27 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc18polish
+#$ -o dc18_polish_tests.$JOB_ID.log
+#
+# Tests for the two polish fixes (gamma adaptation + cross-seed worker
+# pool).  Persistent compile cache, so a cold pytensor build under cluster
+# load cannot masquerade as a test failure (see dc18_retest3.job).
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+export PYTENSOR_FLAGS="base_compiledir=$HOME/.pytensor_retest"
+
+cd $HOME/python/EXOZIPPy
+echo "===== polish + sampler tests ====="
+python -m pytest -n0 -v tests/test_polish.py 2>&1 | tail -45
+echo
+echo "===== whitening / runaway-logp regressions that depend on the start ====="
+python -m pytest -n0 -q tests/test_whitening.py tests/test_runaway_logp_regression.py 2>&1 | tail -15

@@ -1,0 +1,10 @@
+event,class,param,truth,exozippy,exo_err_hi,exo_err_lo,exo_pull,mmxf_sol0,mmxf_err_sol0,mmxf_pull_sol0,mmxf_sol1,mmxf_err_sol1,mmxf_pull_sol1,note
+128,omcassan,t_0,2458554.8868815,,2458554.904,0.0017,,2458554.8238334553,,,2458554.8238334553,,,
+128,omcassan,u_0,0.141832,,0.14297,0.00031,,0.13120606277363886,,,0.13120606277363886,,,
+128,omcassan,t_E,18.2374,,18.171,0.023,,19.1630701622593,,,19.1630701622593,,,
+128,omcassan,rho,0.00606537,,0.00818,0.00067,,0.007490000040076086,,,0.008904392591931045,,,
+128,omcassan,s,0.993145,,0.97569,0.00043,,0.9772600613153636,,,0.863385366920478,,,
+128,omcassan,q,0.0012118,,0.0010847,5e-06,,0.0009396590706156493,,,0.0002547434221159895,,,
+128,omcassan,alpha,,,-52.024,0.027,,-50.320595291450125,,,-50.474548801060585,,,"no global mapping from the master file's alpha convention exists (measured over all 44 events); reported for the record, not compared"
+128,omcassan,mulensinstrument.Roman_W149.err_scale,,,0.9306,0.0093,,,,,,,,
+128,omcassan,mulensinstrument.Roman_Z087.err_scale,,,1.028,0.081,,,,,,,,

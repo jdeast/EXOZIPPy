@@ -1,0 +1,55 @@
+{
+ "fits": [
+  {
+   "parameters": {
+    "t_0": 2460035.4890608946,
+    "u_0": 0.002541454243065101,
+    "t_E": 6.844900040931913,
+    "s": 1.0,
+    "q": 0.001,
+    "alpha": 0.0,
+    "rho": 0.001
+   }
+  },
+  {
+   "parameters": {
+    "t_0": 2460035.4890608946,
+    "u_0": 0.002541454243065101,
+    "t_E": 6.844900040931913,
+    "s": 1.0,
+    "q": 0.001,
+    "alpha": 90.0,
+    "rho": 0.001
+   }
+  }
+ ],
+ "errfacs": {
+  "n20180816.W149.WFIRST18.069.txt": 1.0,
+  "n20180816.Z087.WFIRST18.069.txt": 1.0
+ },
+ "mag_methods": [
+  2460021.799260813,
+  "VBBL",
+  2460049.1788609764
+ ],
+ "coords": "267.572000 -27.967400",
+ "jd_offset": 0.0,
+ "excluded_points": {
+  "n20180816.W149.WFIRST18.069.txt": {
+   "n_data": 38568,
+   "indices": [],
+   "times": []
+  },
+  "n20180816.Z087.WFIRST18.069.txt": {
+   "n_data": 870,
+   "indices": [],
+   "times": []
+  }
+ },
+ "_provenance": {
+  "writer": "examples/DC2018/dc18_seed.py (peakfind.find_pspl_seed, no MMEXOFAST)",
+  "pspl_chi2": 46885.390795069434,
+  "anomaly": null,
+  "note": "s/q/alpha are defaults.yaml generics, NOT fitted."
+ }
+}
