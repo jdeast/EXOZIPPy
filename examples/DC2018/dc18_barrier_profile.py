@@ -105,7 +105,9 @@ def main():
     prof = np.array(prof)
     lo = int(np.argmin(prof))
     for i in range(0, args.steps, max(1, args.steps // 20)):
-        bar = "#" * int(60 * (prof[i] - prof.min()) / max(float(np.ptp(prof)), 1e-9))
+        bar = "#" * int(
+            60 * (prof[i] - prof.min()) / max(float(np.ptp(prof)), 1e-9)
+        )
         print(f"  t={ts[i]:4.2f}  lp={prof[i]:12.2f}  {bar}")
     print(f"\n  valley at t={ts[lo]:.2f}, lp={prof[lo]:.2f}")
     print(f"  BARRIER from endpoint A: {prof[0] - prof[lo]:10.1f} nats")
