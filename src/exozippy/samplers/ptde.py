@@ -898,6 +898,39 @@ def _active_rungs(step, n_temps, thin_start, thin_factor):
     ]
 
 
+# Shortest window the tune-phase adaptation may use.  gamma reads one
+# window's acceptance and the ladder reads its swap rates; both are noisy
+# estimates, and a window of a few steps makes the ladder re-space on noise
+# (measured: a 15-step window took test_ptde_deo's DEO arm from hundreds of
+# round trips to zero).
+MIN_ADAPT_WINDOW = 50
+
+
+def adaptation_window(tune, log_every, min_window=MIN_ADAPT_WINDOW):
+    """Steps between tune-phase adaptation windows.
+
+    gamma and the ladder adapt during TUNE only, at these boundaries.  The
+    cadence used to be `log_every`, which is derived from tune + draws, so
+    the number of windows was 20 * tune/(tune+draws): asking for more draws
+    bought LESS step-size tuning.  A DC2018 production run (tune 5000,
+    draws 50000) got exactly ONE window -- one sqrt-damped correction,
+    gamma 0.2695 -> 0.1046 -- and then sampled 50,000 draws at 4.7%
+    acceptance against a 20% target, while the 27-D bench (tune 385, draws
+    1158) got five, reached 21%, and looked healthy.  Every short test hid
+    it.
+
+    Two guards, in this order:
+      * at most `log_every`, so a run NEVER adapts less often than it did;
+      * at least `min_window` steps, because both consumers read a window's
+        acceptance or swap rates and a few-step window is noise.  A 15-step
+        window made the ladder re-space on noise and took
+        test_ptde_deo's DEO arm from hundreds of round trips to zero.
+    """
+    if tune <= 0:
+        return log_every
+    return min(log_every, max(min_window, tune // 20))
+
+
 def ptde_sample(
     model,
     system,
@@ -1283,6 +1316,27 @@ def ptde_sample(
 
         total_steps = tune + draws
         log_every = log_interval or max(1, total_steps // 20)
+        # THE TUNING WINDOW IS NOT THE LOGGING WINDOW, and tying them made
+        # the step-size adaptation scale the wrong way with run length.
+        # gamma and the ladder adapt at these boundaries during tune ONLY,
+        # so with one shared cadence the number of adaptation windows was
+        # 20 * tune/(tune+draws): a DC2018 production run (tune 5000, draws
+        # 50000) got ONE, applied a single sqrt-damped correction
+        # (0.2695 -> 0.1046) and then sampled 50,000 draws at 4.7%
+        # acceptance against a 20% target, while every short test -- the
+        # 27-D bench at tune 385, draws 1158 -- got five windows, reached
+        # 21%, and looked fine.  Asking for more draws must not buy less
+        # tuning.  Twenty windows inside tune, whatever draws is.
+        # ...but never SHORTER than the old window either.  The first cut
+        # used tune//20 outright, and on a 300-step tune that is 15 steps
+        # per window: the swap statistics the LADDER adaptation reads are
+        # then too noisy, it re-spaces on noise, and
+        # test_ptde_deo.py::test_deo_achieves_higher_round_trip_rate_than_random
+        # went from hundreds of round trips to zero.  So: adapt at least as
+        # often as before, never less, and never on a window under
+        # MIN_ADAPT_WINDOW steps.  Short runs keep exactly their old
+        # cadence; only the long ones -- the ones that were starved -- move.
+        adapt_every = adaptation_window(tune, log_every)
 
         for step in range(total_steps):
             phase = "tune" if step < tune else "draw"
@@ -1486,7 +1540,12 @@ def ptde_sample(
                             )
 
             # 6. progress log + gamma adaptation during tune
-            if (step + 1) % log_every == 0:
+            # During tune the cadence is adapt_every (see above); the
+            # counters are reset in this same block, so one boundary has to
+            # serve both or a window's acceptance would be measured over
+            # the wrong number of steps.
+            window = adapt_every if phase == "tune" else log_every
+            if (step + 1) % window == 0:
                 ar = n_accept / np.maximum(n_propose, 1)
                 sr = n_swap_accept / np.maximum(n_swap_propose, 1)
 
