@@ -1560,7 +1560,7 @@ def _run_fit(config, gui, user_params=None):
     summary_path = Path(str(prefix) + "_summary.txt")
     with nonfatal_wrapup("convergence summary"):
         summary_path.write_text(
-            _format_summary(idata, burn_diag), encoding="utf-8"
+            _format_summary(idata, burn_diag, system), encoding="utf-8"
         )
 
     # Every plot below is wrapped, and per COMPONENT rather than per loop, so
@@ -2413,7 +2413,7 @@ def _add_wrapup_prose(system, diag, mode_report, cap_findings=None):
         )
 
 
-def _format_summary(idata, diag):
+def _format_summary(idata, diag, system=None):
     """Build the *_summary.txt body: physical params only, worst Rhat first.
 
     Drops the ``*_raw`` unconstrained duplicates (rank-identical to their
@@ -2440,6 +2440,18 @@ def _format_summary(idata, diag):
         header.append(
             "# NOTE: <3 chains reached the good-likelihood region; "
             "all chains kept (possible stuck-chain contamination)"
+        )
+    for hit in getattr(system, "_near_bound_hits", None) or []:
+        what = (
+            "median on the wall"
+            if hit.get("trigger") == "median"
+            else f"{hit.get('frac', 0.0):.0%} of draws on the wall"
+        )
+        kind = f"{hit['grid']} EXTENT" if hit.get("grid") else "bound"
+        header.append(
+            f"# BOUND: {hit['label']} against its {hit['side']} {kind} "
+            f"[{hit['lower']:.4g}, {hit['upper']:.4g}] -- {what}; the "
+            f"reported interval is cut off there, not measured"
         )
     if not diag.get("converged", False):
         header.append(

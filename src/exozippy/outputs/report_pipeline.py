@@ -402,7 +402,12 @@ def build_mode_reports(
     try:
         from ..diagnostics import warn_posterior_near_bounds
 
-        warn_posterior_near_bounds(system)
+        # Kept, not discarded: the warning goes to a log nobody re-reads
+        # (on DC2018 062 it fired correctly on a source temperature pinned
+        # to the BC grid's floor, 2.1 MB into the run log, and no artifact
+        # ever mentioned it).  run.py's summary header prints these, which
+        # is where results are actually read from.
+        system._near_bound_hits = warn_posterior_near_bounds(system)
     except Exception:  # noqa: BLE001
         logger.warning(
             "Near-bound posterior check failed; continuing without it",

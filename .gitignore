@@ -43,3 +43,43 @@ src/exozippy/components/sed/models/
 
 # scripts/dump_code.py default output (a 2+ MB collated copy of the repo).
 repo_dump.txt
+
+# ---------------------------------------------------------------------------
+# RUN ARTIFACTS.  `examples/*/fitresults/` above only ever covered the one
+# directory name the early examples used; every real run since writes its
+# output next to its config, under whatever directory the sweep chose
+# (examples/DC2018/sweep/194/, ab194/av_true/, ...).  Left untracked-but-not-
+# ignored, a single `git add -A` stages gigabytes -- one DC2018 trace is
+# 4.4 GB and one corner plot is 48 MB -- and `git status` is unreadable.
+# These are all products of a fit, reproducible from the config, the data and
+# the commit; the config and the data stay tracked.
+*_trace.nc
+*_trace_detailed.pdf
+*_corner.png
+*_corner_*.png
+*_lens_corner.png
+*_results.csv
+*_summary.txt
+*_modes.txt
+*_whitening.json
+*_paper.tex
+*_table.tex
+*_definitions.tex
+*_rejected_modes.tex
+*_mmexofast.json
+*.log
+
+# mkparam's restart file, at any depth.  The rule above it
+# (`/examples/*/*.params.*.yaml`) only matched one level down, so every
+# sweep subdirectory's copy stayed untracked-but-not-ignored.  The INPUT
+# `*.params.yaml` is deliberately NOT matched: that one is the fit's
+# definition and belongs in the repo.
+*.params.[0-9]*.yaml
+
+# The LaTeX support files the paper writer copies in beside each run.
+**/aastex*.cls
+**/aasjournalv*.bst
+**/references.bib
+
+# Local Claude Code settings and worktree bookkeeping
+.claude/
