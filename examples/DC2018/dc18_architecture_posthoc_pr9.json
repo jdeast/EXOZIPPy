@@ -1,0 +1,1096 @@
+[
+  {
+    "event": 1,
+    "status": "failed: ValueError: All-NaN slice encountered",
+    "truth_class": "dccv"
+  },
+  {
+    "event": 4,
+    "n_solutions": 8,
+    "q": [
+      0.006902985899237616,
+      0.004,
+      0.006906520943852562,
+      0.004,
+      0.003517017418043334,
+      0.004,
+      0.013661648610000209,
+      0.004
+    ],
+    "s": [
+      3.083009496403176,
+      2.6654940148854918,
+      3.0830706507735335,
+      2.6654411433730822,
+      0.3500654870725167,
+      0.3519728296762417,
+      0.3493505594430031,
+      0.3526931236444977
+    ],
+    "rho": [
+      0.0003869243328727839,
+      0.001,
+      3.913674912039627e-06,
+      0.001,
+      0.044215369388111575,
+      0.001,
+      0.08241480298958472,
+      0.001
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "bump"
+    ],
+    "seed_topologies": [
+      "CloseLower",
+      "CloseUpper",
+      "WideLower",
+      "WideUpper"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 8,
+    "status": "failed: ValueError: All-NaN slice encountered",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 12,
+    "n_solutions": 2,
+    "q": [
+      2.280799424624205e-05,
+      0.0001606251751734128
+    ],
+    "s": [
+      0.9267723909598277,
+      1.0591888094673745
+    ],
+    "rho": [
+      0.011874013172181673,
+      0.010548720417059142
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 25,
+    "n_solutions": 2,
+    "q": [
+      2.385228834527171e-05,
+      1.2988851452626447e-07
+    ],
+    "s": [
+      1.076185503396641,
+      1.0565750366158182
+    ],
+    "rho": [
+      1.711224384759077e-05,
+      0.0004249153969144122
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "caustic_crossing"
+    ],
+    "seed_topologies": [
+      "WideAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 32,
+    "n_solutions": 2,
+    "q": [
+      2.6990255591166525e-05,
+      4.6456732905442225e-05
+    ],
+    "s": [
+      0.7396085564546948,
+      0.6810284413334178
+    ],
+    "rho": [
+      0.0004251827950334224,
+      0.0141144976727336
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 40,
+    "n_solutions": 8,
+    "q": [
+      3.534423505826729e-05,
+      0.004,
+      1.7699789321468668e-05,
+      0.004,
+      0.0012863670673728764,
+      0.004,
+      0.0025068686243629656,
+      0.004
+    ],
+    "s": [
+      2.3902619717209195,
+      2.4153441799601967,
+      2.400857865404327,
+      2.4046843526924193,
+      0.4185509458274137,
+      0.4184993476303502,
+      0.41942322688239386,
+      0.4176289879815226
+    ],
+    "rho": [
+      0.012070731425951088,
+      0.001,
+      4.813771130524664e-06,
+      0.001,
+      0.017189007992000238,
+      0.001,
+      0.040330574060742065,
+      0.001
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "bump"
+    ],
+    "seed_topologies": [
+      "CloseLower",
+      "CloseUpper",
+      "WideLower",
+      "WideUpper"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 47,
+    "n_solutions": 2,
+    "q": [
+      1.0165668706889168e-05,
+      3.4843187942008675e-05
+    ],
+    "s": [
+      0.9291907582909893,
+      1.0159169616685424
+    ],
+    "rho": [
+      0.0027927636627286764,
+      0.0011129090523636568
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 50,
+    "n_solutions": 2,
+    "q": [
+      0.00020195806304563362,
+      4.841018896213591e-05
+    ],
+    "s": [
+      0.6863679506178819,
+      0.6532724334673359
+    ],
+    "rho": [
+      0.00037458237656824445,
+      0.008384176691715383
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 53,
+    "n_solutions": 2,
+    "q": [
+      0.0009834286051797583,
+      4.567509071551706e-06
+    ],
+    "s": [
+      1.8307349139891793,
+      1.9003158493583812
+    ],
+    "rho": [
+      5.842394379721548e-07,
+      0.007342543713649386
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "caustic_crossing"
+    ],
+    "seed_topologies": [
+      "WideAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 62,
+    "n_solutions": 0,
+    "q": [],
+    "s": [],
+    "rho": [],
+    "declined_binary": false,
+    "anomaly_type": [
+      "high_mag"
+    ],
+    "seed_topologies": [],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 66,
+    "n_solutions": 2,
+    "q": [
+      0.0013335507582057419,
+      0.0003001931401156217
+    ],
+    "s": [
+      0.5598986586889089,
+      1.009640075507176
+    ],
+    "rho": [
+      0.006553431934393709,
+      0.0025414145109733752
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 69,
+    "n_solutions": 0,
+    "q": [],
+    "s": [],
+    "rho": [],
+    "declined_binary": false,
+    "anomaly_type": [
+      "high_mag"
+    ],
+    "seed_topologies": [],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 74,
+    "n_solutions": 2,
+    "q": [
+      0.004295187068707698,
+      0.0015550803907046003
+    ],
+    "s": [
+      0.8608853608980709,
+      0.999384363545214
+    ],
+    "rho": [
+      0.003761674373736998,
+      0.019446893472861063
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 78,
+    "n_solutions": 2,
+    "q": [
+      1.0572806411986369e-45,
+      0.005140012001403188
+    ],
+    "s": [
+      1.1558363367362627,
+      1.0113889898851707
+    ],
+    "rho": [
+      2.217468844363016e-11,
+      0.011342371657431266
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 81,
+    "n_solutions": 8,
+    "q": [
+      0.0011204946575916826,
+      0.004,
+      0.0006057377032373067,
+      0.004,
+      0.003026937295283127,
+      0.004,
+      0.0011833248280091924,
+      0.004
+    ],
+    "s": [
+      1.1789401010413234,
+      1.3157648415825935,
+      1.2867252298003233,
+      1.2055471512925284,
+      0.7797042796521002,
+      0.8296401215807859,
+      0.8118517164984158,
+      0.7967883053295113
+    ],
+    "rho": [
+      0.1251694832323569,
+      0.001,
+      0.08475963505391482,
+      0.001,
+      0.14361038345637214,
+      0.001,
+      0.11495652325501264,
+      0.001
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "bump"
+    ],
+    "seed_topologies": [
+      "CloseLower",
+      "CloseUpper",
+      "WideLower",
+      "WideUpper"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 92,
+    "n_solutions": 2,
+    "q": [
+      5.728467031676671e-05,
+      2.9586152618303728e-05
+    ],
+    "s": [
+      0.9829364262863489,
+      0.9064261711638386
+    ],
+    "rho": [
+      0.005378009160432261,
+      0.0020514514771106888
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 95,
+    "n_solutions": 2,
+    "q": [
+      7.807817550916647e-05,
+      3.1162462224502086e-05
+    ],
+    "s": [
+      0.9623077612978992,
+      0.9423045963898923
+    ],
+    "rho": [
+      0.001469751177864708,
+      0.0029024400629863744
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 99,
+    "n_solutions": 2,
+    "q": [
+      0.002104215700096042,
+      0.0005477039579172026
+    ],
+    "s": [
+      0.309979837415279,
+      1.0182863965677573
+    ],
+    "rho": [
+      7.305841871377884e-12,
+      0.005338993650665022
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 100,
+    "n_solutions": 2,
+    "q": [
+      9.264215633798765e-05,
+      1.853273372056279e-05
+    ],
+    "s": [
+      0.9494802404980291,
+      0.9898073388281434
+    ],
+    "rho": [
+      3.7733756439206253e-06,
+      0.0011041557953901703
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 103,
+    "n_solutions": 2,
+    "q": [
+      0.00022798960446341536,
+      0.00011443705616287844
+    ],
+    "s": [
+      0.8308982972057344,
+      1.0120839313830758
+    ],
+    "rho": [
+      0.005403544741506104,
+      0.0017328590043205593
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 107,
+    "n_solutions": 8,
+    "q": [
+      8.428527232408637e-05,
+      0.004,
+      6.320993124186643e-05,
+      0.004,
+      0.0039443186404021615,
+      0.004,
+      0.0038608592429591965,
+      0.004
+    ],
+    "s": [
+      2.0627337164380073,
+      2.0672714304465503,
+      2.0578868890876296,
+      2.072140360688963,
+      0.4861831418583433,
+      0.487125092790118,
+      0.486778459973394,
+      0.486529350751636
+    ],
+    "rho": [
+      0.004510701046428715,
+      0.001,
+      0.005465844556613327,
+      0.001,
+      0.0033535394877428873,
+      0.001,
+      0.0015158225384433936,
+      0.001
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "bump"
+    ],
+    "seed_topologies": [
+      "CloseLower",
+      "CloseUpper",
+      "WideLower",
+      "WideUpper"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 124,
+    "status": "failed: ValueError: All-NaN slice encountered",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 128,
+    "n_solutions": 2,
+    "q": [
+      0.0009396590706156493,
+      0.0002547434221159895
+    ],
+    "s": [
+      0.9772600613153636,
+      0.863385366920478
+    ],
+    "rho": [
+      0.007490000040076086,
+      0.008904392591931045
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 131,
+    "n_solutions": 8,
+    "q": [
+      2.6043440902991934e-07,
+      0.004,
+      0.003915361342382498,
+      0.004,
+      7.386901492359882e-07,
+      0.004,
+      8.335653752629581e-07,
+      0.004
+    ],
+    "s": [
+      1.5405092484027958,
+      1.5144501597568647,
+      2.7502447010140108,
+      0.8482970538913717,
+      0.6487057356432974,
+      0.6649542352229626,
+      0.6460617674610682,
+      0.6676755196714715
+    ],
+    "rho": [
+      0.024986654620975376,
+      0.001,
+      5.9893058819146335e-59,
+      0.001,
+      0.024965623634170857,
+      0.001,
+      0.025052553609861233,
+      0.001
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "bump"
+    ],
+    "seed_topologies": [
+      "CloseLower",
+      "CloseUpper",
+      "WideLower",
+      "WideUpper"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 139,
+    "n_solutions": 2,
+    "q": [
+      4.7581819679438694e-05,
+      0.0009030546445171483
+    ],
+    "s": [
+      0.7050531987275923,
+      1.0157773936347803
+    ],
+    "rho": [
+      0.002434350983798662,
+      0.005397969628913115
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 152,
+    "n_solutions": 8,
+    "q": [
+      5.3396399628311e-06,
+      0.004,
+      5.233577205902539e-06,
+      0.004,
+      0.00302364651524218,
+      0.004,
+      0.0024502988330388875,
+      0.004
+    ],
+    "s": [
+      3.064592725477673,
+      3.0902554106758195,
+      3.0686572882876986,
+      3.0861622402642346,
+      0.32417908238860327,
+      0.32994319680419826,
+      0.32756404635122294,
+      0.3265336473028582
+    ],
+    "rho": [
+      8.241214863328654e-05,
+      0.001,
+      8.818539955613659e-05,
+      0.001,
+      0.03841490572049485,
+      0.001,
+      0.02901139697017221,
+      0.001
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "bump"
+    ],
+    "seed_topologies": [
+      "CloseLower",
+      "CloseUpper",
+      "WideLower",
+      "WideUpper"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 163,
+    "n_solutions": 0,
+    "q": [],
+    "s": [],
+    "rho": [],
+    "declined_binary": false,
+    "anomaly_type": [
+      "high_mag"
+    ],
+    "seed_topologies": [],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 186,
+    "n_solutions": 2,
+    "q": [
+      0.00013274063820510658,
+      2.1239738303297904e-05
+    ],
+    "s": [
+      0.733844550844346,
+      0.7445013979067818
+    ],
+    "rho": [
+      9.436163282101976e-07,
+      0.01799304610242057
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 193,
+    "n_solutions": 0,
+    "q": [],
+    "s": [],
+    "rho": [],
+    "declined_binary": false,
+    "anomaly_type": [
+      "high_mag"
+    ],
+    "seed_topologies": [],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 194,
+    "n_solutions": 8,
+    "q": [
+      4.8552614932800784e-05,
+      0.004,
+      1.401718018796425e-06,
+      0.004,
+      0.0023355366867333104,
+      0.004,
+      5.476518628151658e-05,
+      0.004
+    ],
+    "s": [
+      1.7539078042239655,
+      1.7482507257910733,
+      1.776694921703371,
+      1.725828421215641,
+      0.585231694883372,
+      0.5617825264493139,
+      0.5721100235900911,
+      0.5746673306765133
+    ],
+    "rho": [
+      0.0011824905141793313,
+      0.001,
+      1.73073084050368e-06,
+      0.001,
+      0.06532214306946198,
+      0.001,
+      0.001007904854986511,
+      0.001
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "bump"
+    ],
+    "seed_topologies": [
+      "CloseLower",
+      "CloseUpper",
+      "WideLower",
+      "WideUpper"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 199,
+    "n_solutions": 2,
+    "q": [
+      0.0003628476586955307,
+      0.00019008318538215918
+    ],
+    "s": [
+      0.7911925610328349,
+      1.028496351740861
+    ],
+    "rho": [
+      4.029712716884234e-06,
+      0.005683279938103698
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 208,
+    "status": "failed: ValueError: All-NaN slice encountered",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 214,
+    "n_solutions": 8,
+    "q": [
+      7.4322238875673856e-06,
+      0.004,
+      5.050835486632976e-05,
+      0.004,
+      3.805388448611915e-05,
+      0.004,
+      0.00021410371441035845,
+      0.004
+    ],
+    "s": [
+      1.8486100401371135,
+      1.774228716003679,
+      1.8290879226822097,
+      1.7931653132859435,
+      0.551036744349517,
+      0.5580085157168667,
+      0.5924268799988769,
+      0.5190230325479347
+    ],
+    "rho": [
+      6.070515698273627e-11,
+      0.001,
+      0.03389833651265498,
+      0.001,
+      0.017655974813403502,
+      0.001,
+      0.020810446120753317,
+      0.001
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "bump"
+    ],
+    "seed_topologies": [
+      "CloseLower",
+      "CloseUpper",
+      "WideLower",
+      "WideUpper"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 217,
+    "n_solutions": 8,
+    "q": [
+      2.6905389047755327e-08,
+      0.004,
+      1.9168133302157357e-21,
+      0.004,
+      1.284187069525378e-07,
+      0.004,
+      0.00011530085271686198,
+      0.004
+    ],
+    "s": [
+      1.2616869475462864,
+      1.258135093991926,
+      1.1730640459376385,
+      1.3531849619265546,
+      0.7912487898731182,
+      0.7990488238431066,
+      0.8897032232634894,
+      0.7106261935258315
+    ],
+    "rho": [
+      1.7627024077894781e-06,
+      0.001,
+      0.0007196528870680207,
+      0.001,
+      0.0014408711371339913,
+      0.001,
+      3.9759742626820056e-16,
+      0.001
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "bump"
+    ],
+    "seed_topologies": [
+      "CloseLower",
+      "CloseUpper",
+      "WideLower",
+      "WideUpper"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 218,
+    "n_solutions": 2,
+    "q": [
+      1.6220954846585873e-05,
+      4.340451092724592e-07
+    ],
+    "s": [
+      1.0341067243691218,
+      1.0446082033034048
+    ],
+    "rho": [
+      0.0014986450823680436,
+      0.0008115610656377429
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "caustic_crossing"
+    ],
+    "seed_topologies": [
+      "WideAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 223,
+    "n_solutions": 2,
+    "q": [
+      0.0005335083430909268,
+      0.00015327667039020885
+    ],
+    "s": [
+      0.5245679204066223,
+      1.0067049276074833
+    ],
+    "rho": [
+      1.0110648834184046e-11,
+      0.001622119609824298
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 226,
+    "n_solutions": 2,
+    "q": [
+      0.000174204868365932,
+      0.05384108682079831
+    ],
+    "s": [
+      34.382515473717405,
+      35.535166475560615
+    ],
+    "rho": [
+      0.021077471816406165,
+      4.0975134936972735
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "caustic_crossing"
+    ],
+    "seed_topologies": [
+      "WideAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 227,
+    "status": "failed: ValueError: All-NaN slice encountered",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 250,
+    "status": "failed: ValueError: All-NaN slice encountered",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 253,
+    "n_solutions": 2,
+    "q": [
+      0.00029513831512119635,
+      0.00019559583059045344
+    ],
+    "s": [
+      0.7351574358662646,
+      1.0244919852815066
+    ],
+    "rho": [
+      8.044470319741683e-06,
+      0.004799943258949415
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "dip"
+    ],
+    "seed_topologies": [
+      "CloseAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 258,
+    "n_solutions": 0,
+    "q": [],
+    "s": [],
+    "rho": [],
+    "declined_binary": false,
+    "anomaly_type": [
+      "high_mag"
+    ],
+    "seed_topologies": [],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 267,
+    "n_solutions": 2,
+    "q": [
+      0.0004740887886343043,
+      2.0364539787858834e-05
+    ],
+    "s": [
+      1.0085488403471456,
+      1.1126831528420444
+    ],
+    "rho": [
+      0.0042372121656870316,
+      0.0026917710116158545
+    ],
+    "declined_binary": false,
+    "anomaly_type": [
+      "caustic_crossing"
+    ],
+    "seed_topologies": [
+      "WideAxis"
+    ],
+    "status": "ok",
+    "truth_class": "omcassan"
+  },
+  {
+    "event": 289,
+    "status": "failed: ValueError: All-NaN slice encountered",
+    "truth_class": "omcassan"
+  }
+]

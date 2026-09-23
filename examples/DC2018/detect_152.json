@@ -1,0 +1,16 @@
+{
+ "event": 152,
+ "class": "omcassan",
+ "raw_injected_logp": 75376.86971299602,
+ "truth_best_lp": NaN,
+ "fit_best_lp": 75746.2618900079,
+ "delta_logp_truth_minus_best": null,
+ "injected": {
+  "source.Source.t_0": 2458766.344168127,
+  "source.Source.u_0": 1.26454,
+  "mulensevent.t_E": 5.19301,
+  "source.Source.rho": 0.00356195,
+  "lens.Companion.s": 2.93375,
+  "lens.Companion.q": 1.65609e-06
+ }
+}

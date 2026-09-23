@@ -1,0 +1,22 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q sThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc18emcfix
+#$ -o dc18_emcee_fix_tests.$JOB_ID.log
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+cd $HOME/python/MMEXOFAST
+echo "=== new regression test ==="
+python -m pytest source/mmexofast/unit_tests/test_emcee_polish_never_worse.py -v 2>&1 | tail -25
+echo
+echo "=== existing fitter + emcee-results tests ==="
+python -m pytest source/mmexofast/unit_tests/test_fitters.py \
+                 source/mmexofast/unit_tests/test_emcee_fit_results.py -q 2>&1 | tail -25

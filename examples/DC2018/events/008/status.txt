@@ -1,0 +1,32 @@
+failed (mmexofast)
+Traceback (most recent call last):
+  File "/home/jeastman/python/EXOZIPPy/examples/DC2018/run_event.py", line 404, in main
+    mmx_json = run_mmexofast_step(
+        data_dir,
+    ...<5 lines>...
+        emcee=args.mmx_emcee,
+    )
+  File "/home/jeastman/python/EXOZIPPy/examples/DC2018/run_event.py", line 99, in run_mmexofast_step
+    mmexofast_support.run_or_load(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        json_path,
+        ^^^^^^^^^^
+    ...<5 lines>...
+        options=options,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/jeastman/python/EXOZIPPy/src/exozippy/components/mulensing/mmexofast_support.py", line 511, in run_or_load
+    fitter.fit()
+    ~~~~~~~~~~^^
+  File "/home/jeastman/python/MMEXOFAST/source/mmexofast/mmexofast.py", line 955, in fit
+    step.run()
+    ~~~~~~~~^^
+  File "/home/jeastman/python/MMEXOFAST/source/mmexofast/workflow_step.py", line 106, in run
+    self.result = self.func()
+                  ~~~~~~~~~^^
+  File "/home/jeastman/python/MMEXOFAST/source/mmexofast/mmexofast.py", line 2184, in run_anomaly_search
+    raise NoAnomalyFoundError(
+    ...<8 lines>...
+    )
+mmexofast.gridsearches.NoAnomalyFoundError: AnomalyFinder found no fittable grid point, so no anomaly can be characterized and a binary-lens fit cannot be seeded. No grid window held a coherent deviation from the point-lens fit -- check_successive requires MORE THAN THREE consecutive points at >= 2 sigma. This is a DETECTION threshold, not a sparse-data condition: the fit did not diverge and the cadence is very unlikely to be the problem. Consider fit_type='point_lens' for this event.

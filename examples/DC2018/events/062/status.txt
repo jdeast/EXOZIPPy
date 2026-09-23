@@ -1,0 +1,28 @@
+failed
+Traceback (most recent call last):
+  File "/home/jeastman/python/EXOZIPPy/examples/DC2018/run_event.py", line 442, in main
+    run_fit(config, user_params=user_params)
+    ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jeastman/python/EXOZIPPy/src/exozippy/run.py", line 335, in run_fit
+    result = _run_fit(config, gui, user_params=user_params)
+  File "/home/jeastman/python/EXOZIPPy/src/exozippy/run.py", line 1065, in _run_fit
+    mode_report = build_mode_reports(
+        system,
+    ...<12 lines>...
+        hot_status=hot_status,
+    )
+  File "/home/jeastman/python/EXOZIPPy/src/exozippy/outputs/report_pipeline.py", line 289, in build_mode_reports
+    check_invalid_frac(
+    ~~~~~~~~~~~~~~~~~~^
+        mode_report,
+        ^^^^^^^^^^^^
+    ...<4 lines>...
+        status=mode_status,
+        ^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/jeastman/python/EXOZIPPy/src/exozippy/outputs/modes.py", line 248, in check_invalid_frac
+    raise RuntimeError(
+    ...<6 lines>...
+    )
+RuntimeError: identify_modes: 124268 draws (4.97%) rejected as numerically invalid, exceeding max_invalid_frac=1.00%. This indicates a model or sampler bug -- investigate before trusting any output. The trace (/home/jeastman/python/EXOZIPPy/examples/DC2018/events/062/fitresults/DC2018_062_trace.nc) and mode report (/home/jeastman/python/EXOZIPPy/examples/DC2018/events/062/fitresults/DC2018_062_modes.txt) have already been written. Override with config `modes: {force: true}` (or raise `modes.max_invalid_frac`) to re-process forensically.

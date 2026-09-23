@@ -1,0 +1,25 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N latentcmp
+#$ -o latentcmp.$JOB_ID.log
+#
+#   qsub dc128_latent_compare.job
+# 8.6.7(3): ESS-weighted latent comparison across DC128's healthy arms.
+# 8 slots for the memory headroom -- each trace is 1.6-1.9 GB and arviz's ESS
+# wants the (chain, draw) array resident; variables are read one at a time so
+# the peak is one array, not one trace.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_$JOB_ID"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+echo "sha: $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)"
+python -u dc128_latent_compare.py --out dc128_latent_compare.json

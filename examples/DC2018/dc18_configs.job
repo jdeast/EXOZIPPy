@@ -1,0 +1,24 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 64
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc18cfg
+#$ -o dc18_cfg.$JOB_ID.log
+#
+#   qsub -v CFG=DC2018_128_mulens+sed.yaml dc18_configs.job
+#
+# Runs one of the persistent configs in examples/DC2018/configs straight
+# through the CLI, so what is fitted is exactly the checked-in file.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_$JOB_ID"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018/configs
+echo "config: $CFG  cores: $NSLOTS"
+exozippy "$CFG"

@@ -1,0 +1,51 @@
+{
+ "event": 194,
+ "class": "omcassan",
+ "raw_injected_logp": 112884.96139082818,
+ "truth_best_lp": 114935.1155163992,
+ "fit_best_lp": 114935.25723539232,
+ "delta_logp_truth_minus_best": 0.9449752019535662,
+ "delta_chi2": 1.8899504039071324,
+ "basin_test": {
+  "t_0": {
+   "truth": 2459665.79584682,
+   "median": 2459665.897651716,
+   "sd": 0.04285191050796028,
+   "z": 2.3757376287553438,
+   "sd_over_tol": 0.8570382101592056,
+   "informative": true,
+   "stayed": true
+  },
+  "s": {
+   "truth": 0.20953646065418333,
+   "median": 0.0,
+   "sd": 0.4276972005101081,
+   "z": -0.489917774547676,
+   "sd_over_tol": 42.769720051010815,
+   "informative": false,
+   "stayed": false
+  },
+  "q": {
+   "truth": -4.1022190088232025,
+   "median": -5.433368425778456,
+   "sd": 2.152234031001475,
+   "z": -0.6184965936700872,
+   "sd_over_tol": 71.74113436671584,
+   "informative": false,
+   "stayed": false
+  }
+ },
+ "truth_is_a_basin": false,
+ "verdict": "TRUTH_NOT_RECOVERED",
+ "injected": {
+  "source.Source.t_0": 2459665.79584682,
+  "source.Source.u_0": 0.801584,
+  "mulensevent.t_E": 11.1283,
+  "source.Source.rho": 0.00109865,
+  "lens.Companion.s": 1.62008,
+  "lens.Companion.q": 7.9028e-05,
+  "star.Source.distance": 9980.0,
+  "star.Source.radiussed": 0.822,
+  "star.Source.teffsed": 4019.0
+ }
+}

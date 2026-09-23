@@ -1,0 +1,58 @@
+run:
+  name: DC2018_152
+prefix: /home/jeastman/python/EXOZIPPy/examples/DC2018/events/152/obs/DC2018_152
+star:
+- name: Lens
+- name: Source
+planet:
+- name: Companion
+mulensevent:
+- finite_source: false
+  mmexofast: /home/jeastman/python/EXOZIPPy/examples/DC2018/events/152/DC2018_152_mmexofast.json
+  fitmurel: true
+  fitpirel: true
+  fitthetae: true
+lens:
+- body: star.Lens
+- body: planet.Companion
+source:
+- body: star.Source
+galacticmodel:
+- name: DC2018_152
+  anchor_idx: 1
+band:
+- name: W149
+  filter: Roman.WFI.W149
+  ld_law: linear
+- name: Z087
+  filter: Roman.WFI.Z087
+  ld_law: linear
+mulensinstrument:
+- name: Roman_W149
+  file: /home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.W149.WFIRST18.152.txt
+  data_format: flux
+  observer_location: roman_simulated_2018dc
+  band: W149
+  likelihood: hogg
+- name: Roman_Z087
+  file: /home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.Z087.WFIRST18.152.txt
+  data_format: flux
+  observer_location: roman_simulated_2018dc
+  band: Z087
+  likelihood: hogg
+sampler:
+  method: ptde_async
+  seed_polish: auto
+  n_temps: 8
+  T_max: 200.0
+  n_chains: null
+  adapt_ladder: false
+  cores: 64
+  tune: 5000
+  draws: 50000
+  nthin: 1
+  recompute_trace: true
+  eval_timeout: 10
+modes:
+  weights: evidence
+parameter_file: /home/jeastman/python/EXOZIPPy/examples/DC2018/events/152/DC2018_152.params.yaml

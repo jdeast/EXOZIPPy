@@ -1,0 +1,11 @@
+{
+  "backend": "dynesty",
+  "logz": 86851.06887448326,
+  "logzerr": 0.6405660909908317,
+  "ncall": 2545421,
+  "n_eff": 7007,
+  "best_lp": 86876.55143048464,
+  "best_log_s": 0.0,
+  "mass_main": 0.5,
+  "mass_mirror": 0.5
+}

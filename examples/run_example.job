@@ -1,0 +1,22 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 64
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N exrun
+#$ -o exrun.$JOB_ID.log
+#
+#   qsub -v DIR=ob140939,CFG=ob140939.yaml run_example.job
+# Runs a shipped example straight through the CLI from its own directory.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_$JOB_ID"
+
+cd $HOME/python/EXOZIPPy/examples/$DIR
+echo "example: $DIR/$CFG  cores: $NSLOTS  sha: $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)"
+exozippy "$CFG"

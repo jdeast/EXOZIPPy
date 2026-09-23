@@ -1,0 +1,14 @@
+star.Lens.ra:
+  initval: 267.777
+  sigma: 0
+star.Lens.dec:
+  initval: -28.2752
+  sigma: 0
+star.Lens.teff:
+  sigma: 0.0
+star.Lens.feh:
+  sigma: 0.0
+star.Lens.radius:
+  sigma: 0.0
+planet.Companion.radius:
+  sigma: 0

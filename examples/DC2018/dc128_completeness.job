@@ -1,0 +1,21 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc128compl
+#$ -o dc128_completeness.$JOB_ID.log
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+cd $HOME/python/EXOZIPPy/examples/DC2018
+for d in events_fixedmmx events_tmax8500; do
+  echo "################ $d ################"
+  python -u dc128_search_completeness.py \
+      $d/128/fitresults/DC2018_128_trace.nc 2>&1 | grep -v -iE "^\s*$"
+  echo
+done

@@ -1,0 +1,27 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 64
+#$ -q lThC.q
+#$ -cwd
+#$ -j y
+#$ -N hmgrid2
+#$ -o dc18_highmag_grid2.$JOB_ID.log
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_$JOB_ID"
+# One BLAS thread per worker: 64 processes each spawning their own BLAS pool
+# would oversubscribe the node badly.
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy/examples/DC2018
+
+# (s, q) grid with per-node re-minimization of (t_0, u_0, t_E, alpha).
+# Parallel over NODES rather than events: 5 x 71 x 41 = 14555 independent
+# minimizations, ~166 core-hours, so a 64-core grant is ~3 h wall instead of
+# the ~33 h/event the frozen-nuisance version would have taken per core.
+python -u dc18_highmag_grid2.py --ncpu $NSLOTS --out dc18_highmag_grid2.npz

@@ -1,0 +1,67 @@
+{
+ "tag": "rwalk_nlive2700_v2",
+ "trace": "/home/jeastman/python/EXOZIPPy/examples/DC2018/dynsweep_rwalk_nlive2700_v2_trace.nc",
+ "nlive": 2700,
+ "sample": "rwalk",
+ "bound": "multi",
+ "walks": null,
+ "wall_s": 47421.2538895607,
+ "logz": 86834.90210108842,
+ "logzerr": 0.3477698231041069,
+ "ncall": 17873233,
+ "n_eff": 69168,
+ "max_abs_pull": 19.405251920088343,
+ "median_abs_pull": 5.846004571244515,
+ "n_scored": 5,
+ "params": {
+  "source.t_0": {
+   "truth": 2458554.8868815,
+   "median": 2458554.8737176647,
+   "sd": 0.0023270115410437744,
+   "pull": -5.656970343178291,
+   "scored": true
+  },
+  "source.u_0": {
+   "truth": 0.141832,
+   "median": 0.1375915642931851,
+   "sd": 0.0002185200029495738,
+   "pull": -19.405251920088343,
+   "scored": true
+  },
+  "lens.log_s": {
+   "truth": -0.0029873395180943503,
+   "median": -0.03254324466867492,
+   "sd": 0.032980273897632945,
+   "pull": -0.8961691841104403,
+   "scored": true
+  },
+  "planet.log_q": {
+   "truth": -2.916569051839489,
+   "median": -3.0016956137277115,
+   "sd": 0.007051001282476321,
+   "pull": -12.072974954604726,
+   "scored": true
+  },
+  "source.log_rho": {
+   "truth": -2.2170415125278278,
+   "median": -4.575391524753015,
+   "sd": 0.4034122764503988,
+   "pull": -5.846004571244515,
+   "scored": true
+  },
+  "mulensevent.log_theta_E": {
+   "truth": -1.0435229432844935,
+   "median": -0.27092095300108254,
+   "sd": 0.021037373023554653,
+   "pull": 36.72521228854769,
+   "scored": false
+  },
+  "mulensevent.log_pi_rel": {
+   "truth": -2.6554576394860816,
+   "median": -0.8528522549482382,
+   "sd": 0.03727003639482342,
+   "pull": 48.36607524183191,
+   "scored": false
+  }
+ }
+}
