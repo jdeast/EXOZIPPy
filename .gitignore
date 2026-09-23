@@ -102,3 +102,13 @@ ezsuite6_full.*.txt
 # writes its own (events_deo48/128/fitresults/, ...).  Same argument as the
 # run artifacts: generated from the config and the commit.
 **/fitresults/
+
+# Per-arm experiment configs in the microlensing example dirs.  They are
+# generated or hand-edited for one investigation, they predate the 8.6.17
+# mulensevent split (so they no longer prepare against the current params
+# files), and tests/test_examples_prepare.py globs examples/**/*.yaml --
+# committing them asserts they are shipped examples, and 160 of them failed
+# CI saying otherwise.  Kept on disk, out of the repo.
+examples/ob140939/ob140939_*.yaml
+examples/ob161003/ob161003_*.yaml
+examples/ob170114/ob170114_*.yaml
