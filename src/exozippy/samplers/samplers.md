@@ -97,27 +97,37 @@ solution had been seeded and was sitting in that same run's rejected-seed
 ledger. A schedule that can silently return half the posterior is not a
 performance choice.
 
-**And a ladder on DEO can still make zero round trips, which is a different
-illness with a different answer.** The DEO criterion `n_temps >= 2*Lambda+1`
-is NECESSARY, not sufficient, and past a measured barrier of
-`LAMBDA_TRANSPORT_CEILING` (5.0, `ladder.py`) round trips stop happening at
-any affordable budget: on a 27-D Gaussian at fixed budget they go 1742, 146,
-0, 0 at Lambda 1.8, 4.1, 12.6, 14-20, i.e. 4x, 13x and >1000x below the DEO
-ceiling `1/(2+2*Lambda)`, so this is not the non-reversible regime the theory
-describes. DC2018 event 128 SATISFIED the criterion at `n_temps = 48` with
-Lambda = 19.8, after adaptation had equalized swap acceptance to
-0.504 +/- 0.019, and still made zero. The six-event DC2018 sweep sat at
-Lambda 12.2-16.9 with 0-1 round trips over 55,000 swap rounds. So
-`ladder_health_report` BRANCHES: under the ceiling it names the rung count to
-use, over it it says plainly that more rungs will not fix this and that
-between-mode traffic has to come from multi-seed starts, hot-rung
-suppressed-mode discovery (`store_hot_chains`), per-mode evidence weighting
-or explicit mode jumps -- and that the lever on Lambda itself is DIMENSION,
-not rungs. The single-message version named a rung count two sentences before
-explaining why that count would not work, and a reader acts on the number.
-Full measurement trail: `notes/pt_round_trip_collapse.txt`. Tests:
-`tests/test_ptde.py`'s two `ladder_health_report` cases, one either side of
-the ceiling.
+**And a ladder on DEO can still make zero round trips -- but round trips are
+TEMPERATURE transport, and buying more of them does not buy mode mixing.**
+Two things are measured, both on the 27-D Gaussian of
+`examples/DC2018/pt_transport_bench.py`, at a FIXED ladder (`n_temps = 24`,
+`n_chains = 54`) and 2M evaluations per configuration.
+
+*Round trips are controlled by the path length.* Across `T_max` 4, 16, 50,
+200, 1000, 8500 they go 1774, 249, 58, 6, 0-1, 0, with Lambda 2.8, 5.6, 7.8,
+10.2, 12.8, 15.8. Lambda 5.6 and 7.8 transport perfectly well, so there is no
+"ceiling" in Lambda; and since a longer path at fixed rungs IS a higher
+barrier, this says "shorten the path and transport returns", not "T_max is
+causal".
+
+*But mode balance does not follow.* With the target bimodal, the cold chains'
+far-mode fraction (0.5 is correct) is 0.27-0.35 at a 24-nat barrier and
+0.05-0.09 at a 78-nat one, **at every `T_max` from 16 to 8500** -- while an
+8-nat barrier equilibrates everywhere, including at `T_max = 8500` where there
+are zero round trips, because the DE proposals cross it directly. (DC2018 062
+is the same story in production: 41,674 inter-mode transitions at `T=1` with
+zero round trips.) A low `T_max` transports and cannot cross; a high one
+crosses and cannot transport.
+
+So `ladder_health_report`'s rung recommendation is the remedy for the
+CRITERION and not for what a reader usually wants it for, and it now says so.
+Where basins are far apart the traffic comes from multi-seed starts, the
+hot-rung suppressed-mode search (`store_hot_chains`), per-mode evidence
+weighting or explicit mode jumps. **And do not shorten the ladder to buy round
+trips**: the hot-rung search's reach is `10 x T_max` (2000 nats at the default
+200, 500 at 50), and it is what found DC2018 223's truth basin. Full trail:
+`notes/pt_round_trip_collapse.txt`. Tests: `tests/test_ptde.py`'s two
+`ladder_health_report` cases.
 
 **So why keep it?** One real use, and one cheap one. The real use is as the
 CONTROL for diagnosing ladder transport: review 2.4.9 (`ptde_async`'s ladder

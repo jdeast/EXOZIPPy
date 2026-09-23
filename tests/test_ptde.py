@@ -1587,15 +1587,12 @@ def test_ladder_health_report_warns_only_when_communication_limited(caplog):
     Given end-of-run swap statistics,
     When the ladder health report runs,
     Then Lambda equals the summed adjacent-pair rejection rates, a healthy
-      ladder logs no warning, and a choked one BELOW the transport ceiling
-      warns with the ~2*Lambda+1 recommendation.
+      ladder logs no warning, a choked one warns with the ~2*Lambda+1
+      recommendation, and degenerate inputs (no swaps) return None.
     """
     import logging
 
-    from exozippy.samplers.ladder import (
-        LAMBDA_TRANSPORT_CEILING,
-        ladder_health_report,
-    )
+    from exozippy.samplers.ladder import ladder_health_report
 
     temps = _geometric_ladder(8, 200.0)
 
@@ -1604,23 +1601,20 @@ def test_ladder_health_report_warns_only_when_communication_limited(caplog):
         assert np.isclose(lam, 0.7)
         assert not caplog.records
 
-        # 0.6 rejection on each of 7 pairs -> Lambda 4.2: choked for an
-        # 8-rung ladder (4.2 > 3.5) and still under the ceiling, so more
-        # rungs remain the right advice.
-        lam = ladder_health_report(temps, np.full(7, 40.0), np.full(7, 100.0))
-        assert np.isclose(lam, 4.2)
-        assert lam < LAMBDA_TRANSPORT_CEILING
+        lam = ladder_health_report(temps, np.full(7, 20.0), np.full(7, 100.0))
+        assert np.isclose(lam, 5.6)
         assert any(
             "communication-limited" in r.message for r in caplog.records
         )
         # The warning must NAME the recommended rung count,
-        # ceil(2*Lambda)+1 = 10.  Asserted on the number rather than on a
-        # surrounding phrase: the remediation text was reworded once the
-        # measurements showed `n_temps: auto` cannot satisfy this criterion
-        # (it is self-consistent only at 0.50 swap acceptance), and a test
-        # pinned to the old wording fails on a message that is more correct.
+        # ceil(2*Lambda)+1 = 13.  Asserted on the number rather than on a
+        # surrounding phrase: the remediation text has been reworded twice
+        # (once when `n_temps: auto` was measured unable to satisfy this
+        # criterion, once when round trips were measured not to buy mode
+        # mixing), and a test pinned to wording fails on a message that is
+        # more correct.
         assert any(
-            "10" in r.message and "n_temps" in r.message
+            "13" in r.message and "n_temps" in r.message
             for r in caplog.records
         )
 
@@ -1630,49 +1624,38 @@ def test_ladder_health_report_warns_only_when_communication_limited(caplog):
     )
 
 
-def test_ladder_health_report_stops_recommending_rungs_past_the_ceiling(
-    caplog,
-):
+def test_ladder_health_warning_separates_transport_from_mode_mixing(caplog):
     """
-    Given a ladder whose measured communication barrier is past
-      LAMBDA_TRANSPORT_CEILING,
-    When the health report runs,
-    Then it does NOT offer the 2*Lambda+1 rung count as the remedy, and says
-      instead that tempering will not transport here and the traffic must
-      come from seeds, hot-rung discovery or mode jumps.
+    Given a communication-limited ladder,
+    When the health report warns,
+    Then it says round trips are TEMPERATURE transport and does not promise
+      they will fix mode mixing, and it names what does carry between-mode
+      traffic.
 
-    Why this branch exists: the single-message version named a rung count
-    and then, two sentences later, said DC2018 event 128 satisfied that very
-    criterion at n_temps=48 with Lambda=19.8 and still made zero round
-    trips.  A reader acts on the number.  The six-event DC2018 sweep sat at
-    Lambda 12.2-16.9 and the message invited a rerun we had already measured
-    to be futile (notes/pt_round_trip_collapse.txt).
+    Why: the rung count is the remedy for the criterion and NOT for the
+    thing a reader usually wants it for.  Measured on a 27-D Gaussian at a
+    fixed ladder, the cold chains' far-mode fraction is 0.27-0.35 at a
+    24-nat barrier and 0.05-0.09 at a 78-nat one at every T_max from 16 to
+    8500, while an 8-nat barrier equilibrates even at zero round trips.
+    The earlier version of this warning recommended a rung count two
+    sentences before explaining why that count would not work, and the
+    DC2018 sweep sat exactly there.
     """
     import logging
 
-    from exozippy.samplers.ladder import (
-        LAMBDA_TRANSPORT_CEILING,
-        ladder_health_report,
-    )
+    from exozippy.samplers.ladder import ladder_health_report
 
-    # 0.8 rejection on each of 7 pairs -> Lambda 5.6, past the ceiling.
     temps = _geometric_ladder(8, 200.0)
     with caplog.at_level(logging.WARNING, logger="exozippy.samplers.ptde"):
-        lam = ladder_health_report(temps, np.full(7, 20.0), np.full(7, 100.0))
+        ladder_health_report(temps, np.full(7, 20.0), np.full(7, 100.0))
 
-    assert np.isclose(lam, 5.6)
-    assert lam > LAMBDA_TRANSPORT_CEILING
-    msgs = [r.message for r in caplog.records]
-    assert len(msgs) == 1
-    assert "will NOT transport" in msgs[0]
-    assert "MORE RUNGS WILL NOT FIX IT" in msgs[0]
-    # It may mention the rung count, but only to tell the reader not to use
-    # it -- never as the remedy.
-    assert "do NOT rerun with n_temps=13" in msgs[0]
-    assert "communication-limited" not in msgs[0]
-    # and it must name what DOES carry between-mode traffic
-    assert "store_hot_chains" in msgs[0]
-    assert "DIMENSION" in msgs[0]
+    msg = [r.message for r in caplog.records]
+    assert len(msg) == 1
+    assert "TEMPERATURE" in msg[0]
+    assert "DO NOT EXPECT ROUND TRIPS TO FIX MODE MIXING" in msg[0]
+    assert "store_hot_chains" in msg[0]
+    # and the trade it must not let a reader make silently
+    assert "10*T_max" in msg[0]
 
 
 def test_the_wrap_up_barrier_measures_the_draw_phase_only(monkeypatch):

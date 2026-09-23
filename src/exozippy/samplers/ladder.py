@@ -88,19 +88,6 @@ def resolve_n_temps(n_temps, n_params, T_max):
     return int(n_temps)
 
 
-# Past this measured communication barrier, ladder round trips stop
-# happening at any budget we can afford, and the 2*Lambda+1 rung criterion
-# stops being actionable advice.  From notes/pt_round_trip_collapse.txt
-# (27-D Gaussian, fixed ~600k logp evaluations per configuration): round
-# trips go 1742 at Lambda=1.8, 146 at 4.1, and 0 at 12.6 and above -- 4x,
-# 13x and >1000x below the DEO ceiling 1/(2+2*Lambda).  So we are not in
-# the non-reversible regime the theory describes; transport is diffusive or
-# worse.  The number is where the measured series reaches zero, not a
-# theoretical threshold, and the health report branches on it so that a
-# problem past it is told the truth rather than a rung count.
-LAMBDA_TRANSPORT_CEILING = 5.0
-
-
 def ladder_health_report(temperatures, n_swap_accept, n_swap_propose):
     """Log the measured communication barrier; warn if the ladder chokes.
 
@@ -142,48 +129,32 @@ def ladder_health_report(temperatures, n_swap_accept, n_swap_propose):
         f"{1.0 / (2.0 + 2.0 * lam):.3f} per swap round)"
     )
     recommended = int(np.ceil(2.0 * lam)) + 1
-    if lam > LAMBDA_TRANSPORT_CEILING:
-        # Above the ceiling the rung recommendation is not just weak, it is
-        # WRONG ADVICE: it names a number, and the reader reruns.  Measured
-        # on DC2018 event 128, which satisfied 2*Lambda+1 at n_temps=48 with
-        # Lambda=19.8 -- after the adaptation had equalized swap acceptance
-        # to 0.504 +/- 0.019 -- and still made zero round trips.  Say the
-        # thing that is true instead, and name no n_temps.
-        logger.warning(
-            f"PT ladder will NOT transport at this problem's communication "
-            f"barrier: Lambda={lam:.2f} is past ~{LAMBDA_TRANSPORT_CEILING:.0f}, "
-            f"beyond which round trips stop happening at any affordable "
-            f"budget -- measured on a 27-D Gaussian at fixed budget, round "
-            f"trips go 1742, 146, 0, 0 at Lambda 1.8, 4.1, 12.6, 14-20, i.e. "
-            f"far faster than the DEO ceiling 1/(2+2*Lambda) predicts. MORE "
-            f"RUNGS WILL NOT FIX IT: DC2018 event 128 satisfied 2*Lambda+1 "
-            f"at n_temps=48 with Lambda=19.8 and still made zero round "
-            f"trips, so do NOT rerun with n_temps={recommended} expecting "
-            f"transport (n_temps={n_temps} here). See "
-            f"notes/pt_round_trip_collapse.txt. Where Lambda is this large, "
-            f"tempering is not the transport mechanism and between-mode "
-            f"traffic has to come from multi-seed starts, hot-rung "
-            f"suppressed-mode discovery (`store_hot_chains`), per-mode "
-            f"evidence weighting or explicit mode jumps. The lever on Lambda "
-            f"itself is DIMENSION, not rungs: a lower-dimensional model that "
-            f"seeds this one attacks it at the source."
-        )
-    elif (n_temps - 1) < 2.0 * lam:
+    if (n_temps - 1) < 2.0 * lam:
         logger.warning(
             f"PT ladder is communication-limited: n_temps={n_temps} is "
             f"below ~2*Lambda+1 = {recommended}. Round trips between T_max "
-            f"and T=1 -- not draws -- are the mixing bottleneck; set "
-            f"n_temps: {recommended} and rerun. 'n_temps: auto' will not "
-            f"get you there: its spacing is self-consistent with this "
-            f"criterion only at 0.50 adjacent-rung swap acceptance, and the "
-            f"acceptance actually achieved here is "
-            f"{1.0 - lam / max(n_temps - 1, 1):.2f}, which is what makes "
-            f"Lambda higher than the spacing assumed. Lambda is measured, "
-            f"so this recommendation is problem-specific; the formula "
-            f"cannot be. NOTE that this criterion is NECESSARY, not "
-            f"sufficient: round trips collapse faster than the DEO ceiling "
-            f"predicts, and past Lambda~{LAMBDA_TRANSPORT_CEILING:.0f} they "
-            f"stop entirely -- see notes/pt_round_trip_collapse.txt."
+            f"and T=1 -- not draws -- are the bottleneck for TEMPERATURE "
+            f"transport; set n_temps: {recommended} and rerun. "
+            f"'n_temps: auto' will not get you there: its spacing is "
+            f"self-consistent with this criterion only at 0.50 "
+            f"adjacent-rung swap acceptance, and the acceptance actually "
+            f"achieved here is {1.0 - lam / max(n_temps - 1, 1):.2f}. "
+            f"BUT DO NOT EXPECT ROUND TRIPS TO FIX MODE MIXING, which is "
+            f"usually what you wanted them for: measured on a 27-D "
+            f"Gaussian at a fixed ladder and 2M evaluations, the cold "
+            f"chains' far-mode fraction is 0.27-0.35 at a 24-nat barrier "
+            f"and 0.05-0.09 at a 78-nat one, at EVERY T_max from 16 to "
+            f"8500 -- 0.5 is correct -- while an 8-nat barrier "
+            f"equilibrates everywhere, including where there are zero "
+            f"round trips, because the proposals cross it directly. A low "
+            f"T_max transports and cannot cross; a high one crosses and "
+            f"cannot transport. Where the basins are far apart, "
+            f"between-mode traffic comes from multi-seed starts, the "
+            f"hot-rung suppressed-mode search (`store_hot_chains`), "
+            f"per-mode evidence weighting or explicit mode jumps -- and "
+            f"note that the hot-rung search's reach is 10*T_max, so "
+            f"shortening the ladder to buy round trips costs discovery "
+            f"horizon. See notes/pt_round_trip_collapse.txt."
         )
     return lam
 
