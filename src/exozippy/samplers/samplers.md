@@ -119,6 +119,16 @@ is the same story in production: 41,674 inter-mode transitions at `T=1` with
 zero round trips.) A low `T_max` transports and cannot cross; a high one
 crosses and cannot transport.
 
+**And the scanned range is the optimistic end.** Those barrier heights were
+chosen from the mode report's `delta vs best seed`, which is peak-to-PEAK --
+the gap between two optima. Measured peak-to-VALLEY on a real event
+(`examples/DC2018/dc18_barrier_profile.py`, DC2018 152, straight line between
+the two modes' best draws in raw coordinates with the whitening restored):
+two modes **4.3 nats apart peak-to-peak sit either side of a 655-nat
+valley**, a factor of 150. A straight line is one path, so 655 is an upper
+bound -- but the scan above already fails at 78, so a true barrier anywhere
+near this makes the conclusion stronger, not weaker.
+
 So `ladder_health_report`'s rung recommendation is the remedy for the
 CRITERION and not for what a reader usually wants it for, and it now says so.
 Where basins are far apart the traffic comes from multi-seed starts, the
