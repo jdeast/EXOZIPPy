@@ -37,6 +37,7 @@ from exozippy.outputs.texutils import (
     mode_suffix,
 )
 from exozippy.potentials import soft_lower_bound, soft_upper_bound
+from exozippy.units import CENTURY
 
 logger = logging.getLogger(__name__)
 
@@ -466,6 +467,9 @@ class UnitTranslator:
         u.g / u.cm**3: r"\rm g~cm$^{-3}$",
         SOLAR_DENSITY_UNIT: r"\rho_\odot",
         u.erg / u.second / u.cm**2: r"\rm erg~s$^{-1}$~cm$^{-2}$",
+        # EXOFASTv2's spelling for omegagr; `century` is EXOZIPPy's own
+        # registered unit (exozippy/units.py).
+        u.deg / CENTURY: r"{}^{\circ}/{\rm century}",
     }
 
     @classmethod

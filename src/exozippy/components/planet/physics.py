@@ -2,11 +2,16 @@ import numpy as np
 import pytensor.tensor as pt
 
 from ...constants import (
+    C_LIGHT_RSUN_PER_DAY,
     C_MPS,
     DENSITY_CONST,
+    EARTH_INSOLATION_CGS,
     KEPLER_CONST,
     LOGG_CONST,
+    SIGMA_SB_CGS,
     SOLRAD_PER_DAY_TO_MPS,
+    TWOPI,
+    G,
 )
 from ...physics_registry import register_physics
 
@@ -65,6 +70,30 @@ def calc_arstar(a, rstar):
 @register_physics
 def calc_p(radius, star_radius):
     return radius / star_radius
+
+
+@register_physics
+def calc_msini(mass, sini):
+    """Minimum mass, M_P sin i (EXOFASTv2 derivepars.pro's msini).
+
+    Internal units in and out (solMass), like `mass`; defaults.yaml converts
+    to the user's unit.  Signed like `mass`: a linear-mode planet may cross
+    zero, and so does its minimum mass.
+    """
+    return mass * sini
+
+
+@register_physics
+# Not `calc_q`: PHYSICS_REGISTRY is a flat namespace and mulensing owns that
+# name for the lens mass ratio (see components.md, "Physics registry").
+def calc_planet_mass_ratio(mass, star_mass):
+    """q = M_P / M_*, in linear form for EVERY planet (derivepars.pro's q).
+
+    The log_q mass mode samples log10 of this and reports that coordinate,
+    but a linear-mode planet has no log_q at all, so without this row the
+    mass ratio of every RV- or astrometry-measured planet went unreported.
+    """
+    return mass / star_mass
 
 
 @register_physics
@@ -261,6 +290,174 @@ def calc_taus(ar, p, cosi, sini, ecc, esinw, period):
 @register_physics
 def calc_max_ecc(ar, p):
     return 1.0 - 1.0 / ar - p / ar
+
+
+# ----------------------------------------------------------------------
+# A priori transit and eclipse probabilities (Winn 2010 eq 9; EXOFASTv2
+# derivepars.pro's pt/ptg/ps/psg).  For an isotropic orientation, the
+# probability that the planet's disk overlaps the star's at conjunction is
+#
+#   P = (R_* +/- R_P) / r_conj = (1 +/- p)/(a/R_*) * (1 +/- e sin omega)/(1 - e^2)
+#
+# with `+p` counting grazing geometries (any overlap) and `-p` only full
+# ones (non-grazing), and r_conj = a(1-e^2)/(1 +/- e sin omega) the
+# star-planet separation at the transit (+) or eclipse (-) conjunction --
+# the same two denominators the durations above use, so
+# `_conjunction_denominator` is reused for the sign.  The (1 - e^2) floor is
+# `contact_duration`'s.  These are probabilities only for ar large enough
+# that the expression stays below 1; Winn's formula is not clipped and
+# neither is this, since a value above 1 at a grazing-geometry start is a
+# legitimate readout, not a NaN.
+# ----------------------------------------------------------------------
+
+
+def _conjunction_probability(ar, p, ecc, esinw, secondary, edge):
+    """One of the four Winn 2010 eq 9 probabilities.
+
+    `edge` is `+1` for any overlap (grazing included) and `-1` for a full
+    transit; `secondary` selects the eclipse conjunction.
+    """
+    numer = _conjunction_denominator(esinw, secondary)
+    one_minus_e2 = pt.clip(1.0 - pt.sqr(ecc), _GEOM_EPS, 1.0)
+    return (1.0 + edge * p) / ar * numer / one_minus_e2
+
+
+@register_physics
+def calc_ptg(ar, p, ecc, esinw):
+    """A priori transit probability, grazing geometries included."""
+    return _conjunction_probability(
+        ar, p, ecc, esinw, secondary=False, edge=1.0
+    )
+
+
+@register_physics
+def calc_pt(ar, p, ecc, esinw):
+    """A priori non-grazing (full) transit probability."""
+    return _conjunction_probability(
+        ar, p, ecc, esinw, secondary=False, edge=-1.0
+    )
+
+
+@register_physics
+def calc_psg(ar, p, ecc, esinw):
+    """A priori eclipse probability, grazing geometries included."""
+    return _conjunction_probability(
+        ar, p, ecc, esinw, secondary=True, edge=1.0
+    )
+
+
+@register_physics
+def calc_ps(ar, p, ecc, esinw):
+    """A priori non-grazing (full) eclipse probability."""
+    return _conjunction_probability(
+        ar, p, ecc, esinw, secondary=True, edge=-1.0
+    )
+
+
+# ----------------------------------------------------------------------
+# Irradiation (EXOFASTv2 derivepars.pro's teq and fave).
+#
+#   T_eq = T_eff * sqrt(R_* / (2 a))
+#
+# is the equilibrium temperature of a zero-albedo planet that re-radiates
+# over its whole surface (f = 1, A_B = 0 in the general
+# T_eff sqrt(R_*/a) [f (1 - A_B)]^(1/4)); it is evaluated at the semi-major
+# axis, i.e. without the eccentricity average -- both as EXOFASTv2 has it.
+#
+#   <F> = sigma_sb T_eff^4 / (a/R_* (1 + e^2/2))^2
+#
+# is the time-averaged incident flux over an eccentric orbit: <a^2/r^2>
+# over time is (1 - e^2)^(-1/2), which EXOFASTv2 approximates by its
+# second-order expansion 1 + e^2/2 -- and here too the expansion is kept
+# so that the two codes report the same number.  EXOFASTv2 reports it in
+# 10^9 erg s-1 cm-2; this one reports it in units of Earth's insolation
+# (constants.EARTH_INSOLATION_CGS, 1361 W m-2), so the sigma_sb and the
+# unit both live in cgs and the ratio is dimensionless.  No conversion is
+# declared in defaults.yaml because "Earth insolation" is not an astropy
+# unit -- the physics function IS the unit.
+# ----------------------------------------------------------------------
+
+
+@register_physics
+def calc_delta(p):
+    """Geometric transit depth, (R_P/R_*)^2 -- no limb darkening.
+
+    EXOFASTv2's `delta`.  Its `depth` (the flux decrement at mid-transit
+    with the band's limb darkening) is a different quantity and is not
+    ported here: it needs a band, and a planet may transit in several.
+    """
+    return pt.sqr(p)
+
+
+# Tidal circularization timescale, Adams & Laughlin (2006) eq 2 as
+# EXOFASTv2's derivepars.pro evaluates it, with the planet's tidal quality
+# factor fixed at Q_P = 1e6:
+#
+#   tau_circ = (4 Q_P / 63) sqrt(a^3 / (G M_*)) (M_P / M_*) (a / R_P)^5
+#              (1 - e^2)^(13/2) / (1 + 6 e^2)
+#
+# sqrt(a^3 / (G M_*)) is in DAYS in the internal unit system (a in solRad,
+# M_* in solMass, G in solRad^3 solMass^-1 d^-2), so the only conversion is
+# days -> Gyr, which the physics applies because "Gyr" IS the declared unit
+# (defaults.yaml keeps user and internal unit both Gyr, like fave).  Q_P is
+# not a fitted or configurable quantity in either code: a planet's tidal Q
+# is unknown to an order of magnitude, and the reported timescale carries
+# that caveat by construction.
+TIDAL_QP = 1.0e6
+DAYS_PER_GYR = 365.25e9
+
+
+@register_physics
+def calc_tcirc(a, ar, p, mass, star_mass, ecc):
+    """Tidal circularization timescale (Gyr); signed like mass."""
+    e2 = pt.sqr(ecc)
+    tau_days = (
+        (4.0 * TIDAL_QP / 63.0)
+        * pt.sqrt(pt.power(a, 3) / (G * star_mass))
+        * (mass / star_mass)
+        * pt.power(ar / p, 5)
+        * pt.power(1.0 - e2, 6.5)
+        / (1.0 + 6.0 * e2)
+    )
+    return tau_days / DAYS_PER_GYR
+
+
+@register_physics
+def calc_omegagr(a, star_mass, period, ecc):
+    """General-relativistic apsidal precession rate, in rad/day.
+
+    omega_dot = 3 G M_* n / (a c^2 (1 - e^2)), n = 2 pi / P -- the
+    Einstein precession as derivepars.pro writes it (host mass alone in
+    the numerator; the mean motion carries the total mass through P).
+    Internal rad/day; defaults.yaml reports deg/century, EXOFASTv2's unit,
+    through the `century` unit exozippy/units.py registers with astropy.
+    Mercury: 43 arcsec/century.
+    """
+    n = TWOPI / period
+    return (
+        3.0
+        * G
+        * star_mass
+        * n
+        / (a * pt.sqr(C_LIGHT_RSUN_PER_DAY) * (1.0 - pt.sqr(ecc)))
+    )
+
+
+@register_physics
+def calc_teq(teff, ar):
+    """Equilibrium temperature (K): zero albedo, full redistribution."""
+    return teff * pt.sqrt(1.0 / (2.0 * ar))
+
+
+@register_physics
+def calc_fave(teff, ar, ecc):
+    """Time-averaged incident flux, in units of Earth's insolation."""
+    flux_cgs = (
+        SIGMA_SB_CGS
+        * pt.power(teff, 4)
+        / pt.sqr(ar * (1.0 + pt.sqr(ecc) / 2.0))
+    )
+    return flux_cgs / EARTH_INSOLATION_CGS
 
 
 # Bolometric approximation of the Doppler beaming factor (Faigler & Mazeh
