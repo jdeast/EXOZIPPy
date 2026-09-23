@@ -14,7 +14,7 @@ MMEXOFAST seeding, and the lens/source body rules).
 
 This file is the **normative** list. `src/exozippy/latex/convention.tex` is a drop-in
 section for the EXOZIPPy microlensing paper carrying the *same* claim list in the paper's
-register, with the same identifiers `C1`...`C28`. The identifiers are the anti-drift
+register, with the same identifiers `C1`...`C30`. The identifiers are the anti-drift
 device: a claim may be reworded in either file, but a `C`-number must mean the same thing
 in both, and a claim added to one must be added to the other under the same number. There
 is no generator and no test enforcing that -- keep them in one commit.
@@ -27,7 +27,8 @@ it.
 **There is a THIRD copy, and it is not in this repository.** The Conventions section of
 `paper3_microlensing.tex`, in the paper repo at `~/old_home/papers/exozippy` (whose remote
 is the Overleaf project), carries the same `C`-numbers as the submitted text. All three
-are in step through `C28`. Being a separate repository it cannot ride the same commit, so
+are in step through `C28`; `C29` and `C30` are in this repo's pair only and OWED to the
+paper. Being a separate repository it cannot ride the same commit, so
 the rule is simply that **a `C`-rule is not finished until all three carry it**: pull the
 paper repo, make the matching edit there, and name that commit in this one. The paper is
 not licensed to run ahead -- it did once, and the drift lasted exactly as long as it took
@@ -279,6 +280,56 @@ is the whole of the apparent "sign disagreement" between the two components.
 - Pinned by: `tests/test_skyframe.py::test_parallax_factors_are_the_negated_offset` (the
   exact-negative relation) and `::test_parallax_factors_match_first_principles_displacement`
   (that `parallax_factors` really is the apparent source displacement, computed in 3-D).
+
+### C30 -- the astrometric centroid shift is referenced to the SOURCE's unlensed position and points AWAY from the lens
+
+A point lens splits an unresolved source into two images on the lens-source axis. Their
+flux-weighted centroid, relative to the source's UNLENSED position (what an astrometric
+time series references, through `star.ra`/`dec`/`pm_*`/`parallax`), is
+
+    delta_theta(t) = - theta_E * dtheta(t) / (|u(t)|^2 + 2)        (N, E components, mas)
+
+with `dtheta(t)` C9's LENS-minus-SOURCE separation in Einstein units, so the shift is along
+the lens -> source axis (away from the lens), of magnitude `theta_E u/(u^2+2)`, peaking at
+`0.354 theta_E` at `u = sqrt(2)`, and decaying only as `theta_E/u` -- it has support for
+years around a `t_E`-long photometric event and belongs INSIDE the five-parameter
+astrometric model, never in an event-window add-on. `theta_E` enters as a linear
+amplitude on a shape the light curve already fixes, which is what makes it a direct
+`theta_E` measurement.
+
+Relative to the LENS the same centroid sits at `theta_E u (u^2+3)/(u^2+2)` along the same
+axis. That is what VBMicrolensing's `astrox1`/`astrox2` report (centroid from the lens, in
+Einstein radii); subtract the source position `u` and it reduces to the display above
+identically. The conversion is a convention entry, not a no-op, and the binary-frame
+origin of `astrox` is undocumented upstream (review 8.10.1 stage 2).
+
+What an instrument centroids is the SUM of the images and the blend, so the modelled
+offset from the source's unlensed track `x_s(t)` is
+
+    delta_obs(t) = [A f_s / (A f_s + f_b)] * delta_theta(t)
+                 + [  f_b / (A f_s + f_b)] * (x_b - x_s(t))
+
+`f_s`/`f_b` in the ASTROMETRIC band (taken from the `photometry:` light curve the dataset
+names, or `f_b = 0`), `x_b` the blend photocenter (`astrometryinstrument.<name>.blend_dE`,
+`blend_dN`, mas from the reference position, fixed on the sky, pinned at 0 by default).
+The first bracket is dilution -- time dependent, suppressed exactly at peak; the second is
+the blend dragging the centroid as the source brightens and fades, and in a bulge field it
+can dominate. The lens's own flux is part of `f_b` and sits at `x_s + theta_E dtheta`; it is
+NOT split out (follow-up in review 8.10.1).
+
+- Implemented in: `MulensEvent.get_centroid_shift` (the shift, from the same `(tau, beta)`
+  pair `get_magnification` builds, rotated onto `(N, E)` by C9's `tau_hat`/`beta_hat`) and
+  `AstrometryInstrument._apply_lens` (the blend weighting), added onto the C11 lines of
+  `_absolute_model` as `+ delta_E` / `+ delta_N` in mas -- the shift is itself a sky angle,
+  so it takes NO further `cos(dec)` (East on those lines is already projected).
+- Point source, single lens ONLY. The disk-averaged shift nearly vanishes at `rho ~ u` and
+  reverses sign beyond (`notes/missing_mulens_physics.txt` 3a), so a `finite_source` event
+  warns that the point-source centroid is valid only where `rho << u`; a binary lens raises
+  (no closed form; the VBM `astrox` tail is stage 2 of review 8.10.1).
+- Pinned by: `tests/test_astrometric_microlensing.py` -- the closed form against a direct
+  image solve of the lens equation, and the HANDEDNESS test (a lens passing North of the
+  source pushes the centroid South, East pushes West), which fails under a mirrored
+  `beta_hat` or a lens-toward sign.
 
 ---
 

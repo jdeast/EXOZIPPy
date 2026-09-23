@@ -296,17 +296,16 @@ class MulensInstrument(Instrument):
             system, np.concatenate([f[0] for f in per_file])
         )
         system.mulensevent.t0_par[0] = self._t0_par
-        self._earth_pos_ref = self.get_observer_position(
-            np.array([self._t0_par]), "earth"
-        )[0]  # (3,) AU
-        _dt = 0.5  # days for finite-difference velocity
-        _ep = self.get_observer_position(
-            np.array([self._t0_par + _dt]), "earth"
-        )[0]
-        _em = self.get_observer_position(
-            np.array([self._t0_par - _dt]), "earth"
-        )[0]
-        self._earth_vel_ref = (_ep - _em) / (2.0 * _dt)  # AU/day
+        # The frame anchors are the EVENT's (MulensEvent.geocentric_frame):
+        # an astrometric dataset of a lensed source builds deviations in the
+        # same frame (conventions.md C30), so there is one owner.  Kept as
+        # attributes here because MulensEvent._earth_vperp_en reads
+        # _earth_vel_ref off this instrument for the mu_helio -> mu_geo
+        # conversion.
+        self._event = system.mulensevent
+        _, self._earth_pos_ref, self._earth_vel_ref = (
+            self._event.geocentric_frame()
+        )
 
         # Median absolute position per instrument (used by MulensEvent to
         # detect satellite parallax when sizing the logmass scale)
@@ -1136,9 +1135,11 @@ class MulensInstrument(Instrument):
         For Spitzer: ≈ Spitzer − Earth vector at t_0_par (satellite parallax offset,
         ~1–2 AU).  Yee+2014 §3: "Spitzer's offset from the centre of Earth is
         treated just as any other observatory."
+
+        Delegates to ``MulensEvent.skowron_deviations`` -- the frame has one
+        owner since the astrometric centroid shift (C30) consumes it too.
         """
-        t_delta = (t - self._t0_par)[:, np.newaxis]  # (N, 1)
-        return xyz_abs - (self._earth_pos_ref + self._earth_vel_ref * t_delta)
+        return self._event.skowron_deviations(t, xyz_abs)
 
     def get_observer_position(self, time, observer_location="earth"):
         """

@@ -34,3 +34,33 @@ astrometryinstrument:
     internal_unit: ""
     latex: "\\beta"
     description: "Companion Flux Fraction"
+  # Blend photocenter offsets for a dataset that carries the astrometric
+  # microlensing centroid shift (conventions.md C30): the sky position of
+  # the blended light (everything in the aperture that is not the source,
+  # the lens included), in mas from the reference position, held FIXED on
+  # the sky.  Enter as f_b/(A f_s + f_b) * (x_b - x_s), the blend's drag on
+  # the centroid as the source brightens and fades.  Pinned at 0 by default
+  # ("blend coincident with the source at the reference epoch"): with a
+  # small blend fraction the pair is unconstrained and would wander its
+  # box.  Free them (sigma: null or a Gaussian) to fit the drag.  INACTIVE
+  # on a dataset without the lens term -- declared only when one exists.
+  blend_dE:
+    lower: -1000.0
+    upper: 1000.0
+    initval: 0.0
+    init_scale: 0.1
+    sigma: 0.0
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\Delta\\alpha^*_{b}"
+    description: "Blend photocenter offset, East"
+  blend_dN:
+    lower: -1000.0
+    upper: 1000.0
+    initval: 0.0
+    init_scale: 0.1
+    sigma: 0.0
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\Delta\\delta_{b}"
+    description: "Blend photocenter offset, North"

@@ -1523,6 +1523,22 @@ class MulensEvent(Component):
         arcsec of coordinate error -- see that method for why the freeze is
         free.
         """
+        tau_p, u_p = self.get_trajectory(times, obs_pos, system, index)
+        u2 = pt.sqr(tau_p) + pt.sqr(u_p)
+        return (u2 + 2.0) / pt.sqrt(u2 * (u2 + 4.0))
+
+    def get_trajectory(self, times, obs_pos, system, index=0):
+        """The lens-minus-source separation on C9's ``(tau_hat, beta_hat)``
+        basis, in Einstein units: ``(tau, beta)``, each ``(N,)``.
+
+        This is the pair ``get_magnification`` always built inline; it is a
+        method of its own because the astrometric centroid shift
+        (``get_centroid_shift``, conventions.md C30) needs the VECTOR, not
+        just ``|u|``.  Same inputs as ``get_magnification`` -- ``obs_pos``
+        are the Skowron+2011 geocentric deviations in AU (``skowron_deviations``).
+        The op sequence is the one the magnification always had, so the
+        refactor is bit-identical on the shipped examples.
+        """
         source_ndx = int(self.source_bodies[index][1])
         ra = system.star.ra.value[source_ndx]
         dec = system.star.dec.value[source_ndx]
@@ -1549,8 +1565,144 @@ class MulensEvent(Component):
             xal = self._source_offset_series(times, system)
             tau_p = tau_p + xal[0]
             u_p = u_p + xal[1]
+        return tau_p, u_p
+
+    def get_centroid_shift(self, times, obs_pos, system, index=0):
+        """Point-lens, point-source astrometric centroid shift (C30):
+        ``(delta_N, delta_E)`` in mas, ``(N,)`` each, referenced to the
+        source's UNLENSED position.
+
+            delta_theta = - theta_E * dtheta / (|u|^2 + 2)
+
+        with ``dtheta`` the LENS-minus-SOURCE separation of C9 (so the
+        shift points away from the lens).  ``dtheta`` is ``tau * tau_hat +
+        beta * beta_hat`` in ``(N, E)``: ``tau_hat = mu_hat_rel,geo`` (the
+        direction ``pi_E`` is derived from, and defined even when
+        ``|pi_E|`` is pinned at 0 -- the light curve fixes ``|u(t)|`` only,
+        so this term is what makes the direction observable) and
+        ``beta_hat`` is ``tau_hat`` rotated +90 degrees North through East,
+        ``(c, d) -> (-d, c)`` -- the same rotation
+        ``tests/test_skyframe.py::test_microlensing_trajectory_matches_3d_geometry``
+        pins for the trajectory itself.
+
+        ``theta_E`` enters as a LINEAR AMPLITUDE on a shape the light curve
+        already fixes, which is what makes this a direct measurement of the
+        Einstein radius, and the term decays only as ``theta_E/u``, so it
+        belongs INSIDE the full astrometric model
+        (``AstrometryInstrument._absolute_model``) rather than in an
+        event-window add-on.  Blend dilution and drag are the consumer's
+        business (they need the astrometric band's fluxes); see
+        ``AstrometryInstrument._apply_lens``.
+
+        The point-source formula is EXACT for a point lens (the lens
+        equation is a quadratic) and only safe unresolved: averaged over a
+        source disk the shift nearly vanishes at ``rho ~ u`` and reverses
+        sign beyond (notes/missing_mulens_physics.txt 3a).
+        ``check_centroid_shift_supported`` is the caller's gate.
+        """
+        tau_p, u_p = self.get_trajectory(times, obs_pos, system, index)
         u2 = pt.sqr(tau_p) + pt.sqr(u_p)
-        return (u2 + 2.0) / pt.sqrt(u2 * (u2 + 4.0))
+        mu_n = self.mu_dec_rel_geo.value[0]
+        mu_e = self.mu_ra_rel_geo.value[0]
+        mu_mag = self.mu_rel_geo_mag.value[0]  # floored at MU_REL_FLOOR
+        tau_n, tau_e = mu_n / mu_mag, mu_e / mu_mag
+        beta_n, beta_e = -tau_e, tau_n
+        dth_n = tau_p * tau_n + u_p * beta_n
+        dth_e = tau_p * tau_e + u_p * beta_e
+        scale = -self.theta_E.value[0] / (u2 + 2.0)
+        return scale * dth_n, scale * dth_e
+
+    def check_centroid_shift_supported(self, where):
+        """Gate for ``get_centroid_shift``'s consumers.
+
+        A binary (or N-body) lens has no closed-form centroid; VBM's
+        ``astrox`` accumulators are review 8.10.1's stage 2 and are not
+        wired, so that RAISES.  A finite-source single lens is allowed
+        with a warning: the point-source shift is exact for a point lens
+        and valid where ``rho << u``, and the events with a measurable
+        finite-source signal already have ``theta_E`` through ``rho`` --
+        the user, not the code, judges whether the astrometric epochs sit
+        in the unresolved regime (rope, not gates).
+        """
+        if self.n_companions >= 1:
+            raise NotImplementedError(
+                f"[{where}] astrometric microlensing (the centroid shift) "
+                f"is implemented for a single point lens only; this event "
+                f"has {self.n_companions} lens companion(s).  The binary-"
+                f"lens centroid (VBMicrolensing's astrox1/astrox2) is review "
+                f"item 8.10.1 stage 2.  Set `microlensing: false` on the "
+                f"astrometry dataset to fit it without the lens term."
+            )
+        if self.finite_source and not getattr(
+            self, "_warned_finite_source_centroid", False
+        ):
+            self._warned_finite_source_centroid = True
+            logger.warning(
+                f"[{where}] the astrometric centroid shift uses the POINT-"
+                f"SOURCE formula while this event is finite_source.  It is "
+                f"exact only where rho << u: averaged over the source disk "
+                f"the shift nearly vanishes at rho ~ u and reverses sign "
+                f"beyond, and the dilution weight uses the point-source "
+                f"magnification.  Check that the astrometric epochs are in "
+                f"the unresolved regime, or set `microlensing: false` on "
+                f"the dataset."
+            )
+
+    # ------------------------------------------------------------------
+    # The Skowron+2011 geocentric frame (conventions.md C5, C6)
+    # ------------------------------------------------------------------
+    def geocentric_frame(self):
+        """``(t0_par, earth_pos_ref, earth_vel_ref)`` -- the anchors of the
+        geocentric inertial frame: Earth's barycentric position (AU) and
+        velocity (AU/day) at ``t0_par``.
+
+        Owned by the event, because more than one consumer now builds
+        deviations in this frame (every microlensing light curve AND every
+        astrometric dataset of a lensed source), and one frame must serve
+        them all.  Read from ``self.t0_par[0]`` at CALL time, not cached
+        against a stale value: ``MulensInstrument.load_data`` re-resolves
+        ``t0_par`` at stage 1 (MMEXOFAST seeds arrive after this
+        component's ``__init__`` snapshot) and writes it back into that
+        length-1 list precisely so later readers see the final value.  The
+        velocity is a central difference over +/-0.5 d, the recipe
+        ``MulensInstrument`` used before this moved here (bit-identical).
+        """
+        from exozippy.ephemeris import get_observer_position
+
+        t0 = float(self.t0_par[0])
+        cache = getattr(self, "_geocentric_frame_cache", None)
+        if cache is not None and cache[0] == t0:
+            return cache
+        pos = get_observer_position(np.array([t0]), observer_location="earth")[
+            0
+        ]  # (3,) AU
+        _dt = 0.5  # days for finite-difference velocity
+        _ep = get_observer_position(
+            np.array([t0 + _dt]), observer_location="earth"
+        )[0]
+        _em = get_observer_position(
+            np.array([t0 - _dt]), observer_location="earth"
+        )[0]
+        vel = (_ep - _em) / (2.0 * _dt)  # AU/day
+        self._geocentric_frame_cache = (t0, pos, vel)
+        return self._geocentric_frame_cache
+
+    def skowron_deviations(self, t, xyz_abs):
+        """Absolute barycentric observer positions -> Skowron+2011 geocentric
+        deviations (AU), the ONE ``obs_pos`` both magnification backends
+        and the centroid shift consume (C6):
+
+            delta(t) = xyz_obs(t) - [xyz_earth(t0_par) + v_earth(t0_par) * (t - t0_par)]
+
+        For Earth: the small deviation from straight-line motion (annual
+        parallax).  For Spitzer: ~ the Spitzer - Earth vector at t0_par
+        (satellite parallax, ~1-2 AU).  Yee+2014 Section 3: "Spitzer's
+        offset from the centre of Earth is treated just as any other
+        observatory."
+        """
+        t0, pos, vel = self.geocentric_frame()
+        t_delta = (np.asarray(t, dtype=float) - t0)[:, np.newaxis]  # (N, 1)
+        return xyz_abs - (pos + vel * t_delta)
 
     def uses_op(self, index=0):
         """True if get_magnification_op will dispatch to the MulensModel Op.
