@@ -75,6 +75,40 @@ draws in the model plots (`run.get_draws`, unseeded so the overlay honestly
 shows spread -- see its docstring), and floating-point non-associativity
 across a different core count.
 
+## The tuning window is not the logging window (2.4.21)
+
+`gamma` and the ladder adapt during TUNE only, at window boundaries. Those
+boundaries used to BE `log_every = (tune + draws) // 20`, so the number of
+adaptation windows was `20 * tune/(tune+draws)` -- **asking for more draws
+bought less step-size tuning.**
+
+A DC2018 production run (`tune 5000, draws 50000`) got **one** window. It
+applied a single sqrt-damped correction, `gamma 0.2695 -> 0.1046`, and then
+sampled 50,000 draws at **4.7%** T=1 acceptance against a `target_accept` of
+**0.20**, with every rung at 0.030-0.050. The 27-D transport bench
+(`tune 385, draws 1158`) got five windows, reached 0.210 at `gamma 0.3239`,
+and looked perfectly healthy -- which is exactly how this survived: every
+short test gets 6-10 windows, and only production is starved.
+
+`adaptation_window(tune, log_every)` owns the cadence now: at most
+`log_every`, so no run ever adapts LESS often than it did, and at least
+`MIN_ADAPT_WINDOW` (50) steps, because both consumers read a window's
+acceptance or swap rates. That floor is load-bearing -- the first cut used
+`tune//20` outright, which is a 15-step window on a 300-step tune, and the
+ladder began re-spacing on noise:
+`test_ptde_deo.py::test_deo_achieves_higher_round_trip_rate_than_random`
+went from hundreds of round trips to zero. Production moves 1 window -> 20;
+short runs keep their old cadence exactly.
+
+**What it plausibly explains, and what is not yet measured.** A chain at 3.8%
+acceptance barely decorrelates between swap attempts, and production attempts
+one every step (`swap_interval` defaults to 1), so a replica carries a stale
+`lp` up and down the ladder -- which is the assumption DEO's transport theory
+makes and the shape of the 0-1 round trips per 55,000 swap rounds seen on
+every sweep event. Whether fixing the cadence restores transport is an
+open measurement, not a claim. Tests: `tests/test_ptde.py`'s three
+`adaptation_window` / `gamma_adapts` cases.
+
 ## `swap_schedule`: DEO, and why `random` is still here
 
 `sampler: {swap_schedule: deo}` is the default and is what you want. It is the
