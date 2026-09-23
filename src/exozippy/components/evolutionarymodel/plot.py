@@ -13,12 +13,7 @@ from exozippy.outputs.plot_helper_functions import (
     _extend_window,
     _padded_range,
 )
-from exozippy.plotrender import (
-    _apply_axes,
-    _draw_data,
-    _draw_model,
-    _draw_residual,
-)
+from exozippy.outputs.texutils import latex_escape
 
 
 class MISTPlot:
@@ -76,15 +71,42 @@ class MISTPlot:
         self.evolutionarymodel = self.system.active_components[
             "evolutionarymodel"
         ]
-        self._plot_x_range = {
-            "start": None,
-            "post": None,
-        }
         # Parameter.posterior is None until System.distribute_posterior attaches
         # the chain (an xarray DataArray); no posterior means this is the start.
         self._posteriorBool = (
             getattr(self.system.star.teff, "posterior", None) is not None
         )
+
+    # Private Chart.meta key: the on-chart Teff extent of ONE draw, which
+    # `kiel_spec_groups` unions over draws for the spaghetti axis and then
+    # strips, so it reaches neither renderer nor the draft.
+    TEFF_EXTENT = "_teff_extent"
+
+    @staticmethod
+    def _summary_at(param, index):
+        """One element's posterior summary, or None before a posterior exists.
+
+        ``Parameter.summary`` is ONE summary object for a scalar parameter
+        and a LIST of them for a vector one -- a system with more than one
+        star.  Both plots here indexed it as an object, so a two-star system
+        drew zero-length error bars on the Kiel diagram (the ``hasattr``
+        guard turned the list into 0.0) and raised in the contours (review
+        1.8.8).  This is the one reader.
+        """
+        summary = getattr(param, "summary", None)
+        if summary is None:
+            return None
+        if isinstance(summary, (list, tuple)):
+            return summary[index] if index < len(summary) else None
+        return summary
+
+    def _fit_error_bars(self, param, star_index):
+        """``(err_minus, err_plus)`` of the reported value for one star,
+        ``(0.0, 0.0)`` before a posterior (the pre-flight plot)."""
+        summary = self._summary_at(param, star_index)
+        if summary is None or not hasattr(summary, "err_minus"):
+            return 0.0, 0.0
+        return float(summary.err_minus), float(summary.err_plus)
 
     def _reported_kiel(self):
         """The Kiel quantities at the REPORTED (posterior-median) parameters.
@@ -264,7 +286,12 @@ class MISTPlot:
         # initialize the list of traces to be returned
         traces = []
 
-        star_name = self.system.star.names[star_idx]
+        # `star_idx` indexes this component's INSTANCES (the rows of the
+        # compiled Kiel node); the star it describes is star_indices[star_idx].
+        # The trace names used star_idx directly, so instance 1 tied to star
+        # "C" was labelled with star "B"'s name.
+        star_index = self.evolutionarymodel.star_indices[star_idx]
+        star_name = self.system.star.names[star_index]
         # grab the logmass and initfeh for the draw
         logmass = float(kiel[star_idx, self.KIEL_INDEX["logmass"]])
         initfeh = float(kiel[star_idx, self.KIEL_INDEX["initfeh"]])
@@ -330,31 +357,13 @@ class MISTPlot:
         )
 
         star = self.system.star
-        # grab the error bars for the fitted point
+        # The fitted point's error bars are its posterior interval, as
+        # ``(2, 1)`` arrays for errorbar's asymmetric form.
         sigma_teff_fit = [
-            [
-                star.teff.summary.err_minus
-                if hasattr(star.teff.summary, "err_minus")
-                else 0.0
-            ],
-            [
-                star.teff.summary.err_plus
-                if hasattr(star.teff.summary, "err_plus")
-                else 0.0
-            ],
+            [v] for v in self._fit_error_bars(star.teff, star_index)
         ]
-
         sigma_logg_fit = [
-            [
-                star.logg.summary.err_minus
-                if hasattr(star.logg.summary, "err_minus")
-                else 0.0
-            ],
-            [
-                star.logg.summary.err_plus
-                if hasattr(star.logg.summary, "err_plus")
-                else 0.0
-            ],
+            [v] for v in self._fit_error_bars(star.logg, star_index)
         ]
 
         traces.append(
@@ -380,37 +389,33 @@ class MISTPlot:
         # off the top of the y window and clipped away -- but matplotlib's
         # (and plotly's) autoscale still counts those points, which left
         # more than half of a HAT-P-3 panel empty.
-        # only care about high and low values of teff that are finite and on the chart
-        # want to keep track and update the x_range for the plot, so we can set it in the meta data
-        max_x_range = self._plot_x_range.get(
-            "post" if self._posteriorBool else "start", None
-        )
+        # This draw's on-chart extent, padded, is the Chart's own axis, so a
+        # single Chart (the GUI's live point, a pre-flight plot) stands
+        # alone; `kiel_spec_groups` reads the raw extent back out of meta
+        # to widen a spaghetti figure's axis to the union over draws.
         visible_teff_flat = np.concatenate(
             [np.asarray(t, dtype=float).ravel() for t in visible_teff]
         )
-        current_x_min = np.min(visible_teff_flat)
-        current_x_max = np.max(visible_teff_flat)
-        # update the max_x_range if the current values are outside of it
-        if max_x_range is not None:
-            if current_x_min < max_x_range[0]:
-                max_x_range[0] = current_x_min
-            if current_x_max > max_x_range[1]:
-                max_x_range[1] = current_x_max
-        else:
-            # set the max_x_range to the first set of values if it is None
-            max_x_range = [current_x_min, current_x_max]
-        self._plot_x_range["post" if self._posteriorBool else "start"] = (
-            max_x_range
+        finite_teff = visible_teff_flat[np.isfinite(visible_teff_flat)]
+        extent = (
+            [float(finite_teff.min()), float(finite_teff.max())]
+            if finite_teff.size
+            else None
+        )
+        x_range = (
+            _padded_range(extent, self.KIEL_X_PAD_FRAC)
+            if extent is not None
+            else None
         )
 
-        x_range = _padded_range(max_x_range, self.KIEL_X_PAD_FRAC)
-
         meta = {
-            "file_tag": "kiel",
+            # Per star, like every other component's per-instance tag: with
+            # one tag for all stars the last star's PDF overwrote the rest.
+            "file_tag": f"kiel_{star_name}",
             "figsize": (6.5, 5.5),
             "caption": (
-                "Kiel diagram for the modeled star. The lines are "
-                "the MIST evolutionary tracks interpolated at the "
+                f"Kiel diagram for star {latex_escape(star_name)}. The lines "
+                "are the MIST evolutionary tracks interpolated at the "
                 "initial mass and metallicity of each plotted "
                 "posterior draw, the diamond is the MIST model prediction "
                 "at the median equivalent evolutionary point, and "
@@ -418,10 +423,8 @@ class MISTPlot:
                 r"$\log{g}$ predicted by the full global model."
             ),
         }
-
-        star_name = self.system.star.names[
-            self.evolutionarymodel.star_indices[star_idx]
-        ]
+        if extent is not None:
+            meta[self.TEFF_EXTENT] = extent
 
         return [
             Chart(
@@ -454,18 +457,44 @@ class MISTPlot:
             )
         ]
 
-    def _get_kiel_trace_spec_groups(self, star_idx):
+    def kiel_specs(self, point):
+        """The Kiel Chart of every instance at one ``point``.
 
-        if isinstance(self.points, dict):
-            self.points = [self.points]
-        if not self.points:
+        The body of ``EvolutionaryModel.plot_data``: one Chart per instance
+        (per star), each with its own Teff axis, since the EEP window is per
+        star (evolutionarymodel.md) and one giant must not stretch a dwarf's
+        panel.  ``[]`` without a point, as the base contract says for a
+        component with no observations of its own.
+        """
+        if point is None:
+            return []
+        specs = []
+        for star_idx in range(self.evolutionarymodel.n_elements):
+            specs.extend(self._plot_kiel_trace(star_idx, point))
+        return specs
+
+    def kiel_spec_groups(self):
+        """``plot_via_specs``'s group list, plus one shared Teff axis per star.
+
+        One group per point (posterior draw), each holding every star's
+        Chart, for ``plotrender.render_spec_groups``.  That renderer lays
+        each figure out from the FIRST group's Chart, so a Teff range
+        computed from one draw would clip the other draws' tracks:
+        ``_unify_x_ranges`` widens every group's range for a Chart id to
+        the union over draws first.  A draw whose Charts fail is skipped
+        with a warning, except the first, which supplies the marks and the
+        axes -- the same tolerance as ``plot_via_specs``.
+        """
+        points = self.points
+        if isinstance(points, dict):
+            points = [points]
+        if not points:
             logger.warning("No points provided for plotting.")
             return []
-
         spec_groups = []
-        for idx, point in enumerate(self.points):
+        for idx, point in enumerate(points):
             try:
-                spec_groups.append(self._plot_kiel_trace(star_idx, point))
+                spec_groups.append(self.kiel_specs(point))
             except Exception as exc:  # noqa: BLE001 - skip a bad posterior draw
                 if idx == 0:
                     raise
@@ -479,119 +508,37 @@ class MISTPlot:
                     ),
                     exc,
                 )
-
-        # Before rendering, widen every draw's x_range to the union computed
-        # across all of them, so the spaghetti shares one axis.  x_range is a
-        # first-class Chart field now, not a meta key (review 4.11.3).
-        # Same key _plot_kiel_trace wrote to -- "start" when no posterior exists.
-        max_x_range = self._plot_x_range.get(
-            "post" if self._posteriorBool else "start"
-        )
-        if max_x_range is not None:
-            x_range = _padded_range(max_x_range, self.KIEL_X_PAD_FRAC)
-            if x_range is not None:
-                for spec_group in spec_groups:
-                    for spec in spec_group:
-                        if spec.x_range is not None:
-                            spec.x_range = list(x_range)
-
+        self._unify_x_ranges(spec_groups)
         return spec_groups
 
-    # almost identical to its sister function in plotrender
-    # but added changes to how legend is generated
-    def _kiel_render_spec_groups(self, spec_groups, filename_prefix="debug"):
-        """Render one figure per spec, overlaying model traces from every group.
+    def _unify_x_ranges(self, spec_groups):
+        """Widen each Chart id's ``x_range`` to the padded union, over
+        draws, of the on-chart Teff extents recorded in ``meta[TEFF_EXTENT]``.
 
-        Parameters
-        ----------
-        spec_groups : list[list[Chart]]
-            One ``plot_data`` result per posterior point.  The FIRST group is the
-            reference: it supplies the data traces, labels, and decorations
-            (matching the historical convention that data offsets/cleaning use
-            ``points[0]``).  Later groups contribute only their model traces.
-            The reference group is NOT privileged in the model layer: with more
-            than one group every model trace is drawn at the same spaghetti
-            alpha, the reference's included.
-        filename_prefix : str
-            Output files are ``{filename_prefix}_{file_tag}.pdf``.
+        ``_plot_kiel_trace`` already pads its OWN draw's extent into
+        ``x_range``, so a single Chart (the GUI's live point, a pre-flight
+        plot) is complete by itself; this pass is what a spaghetti figure
+        adds.  The private meta key is removed afterwards so it reaches
+        neither the GUI nor the draft.
         """
-        if not spec_groups:
-            return []
-        ref_specs = spec_groups[0]
-        # Model spaghetti from the later groups, matched to the reference spec by
-        # id (a draw whose plot_data failed simply contributes nothing).
-        extra_models = {}
-        for group in spec_groups[1:]:
+        extents = {}
+        for group in spec_groups:
             for spec in group:
-                models = [t for t in spec.traces if t.role == "model"]
-                if models:
-                    extra_models.setdefault(spec.id, []).append(models)
-
-        # One alpha for the whole figure, applied to the reference group's model
-        # traces below as well as to extra_models -- see the module docstring.
-        model_alpha = 0.8 if len(spec_groups) == 1 else 0.1
-        written = []
-        for spec in ref_specs:
-            meta = spec.meta or {}
-            fig, ax = plt.subplots(
-                figsize=tuple(meta.get("figsize") or (10, 6))
-            )
-            try:
-                for trace in spec.traces:
-                    if trace.role == "model":
-                        _draw_model(ax, trace, model_alpha)
-                    elif trace.role == "residual":
-                        _draw_residual(ax, trace)
-                    else:
-                        _draw_data(ax, trace)
-                for models in extra_models.get(spec.id, []):
-                    for trace in models:
-                        _draw_model(ax, trace, model_alpha)
-
-                _apply_axes(ax, spec)
-                ax.set_xlabel(spec.xlabel)
-                ax.set_ylabel(spec.ylabel)
-                ax.set_title(spec.title)
-                # De-duplicate by LABEL: a spaghetti figure overlays the same
-                # named model trace once per draw (50 identical "A MIST track"
-                # rows would otherwise swamp the panel), and a component may
-                # legitimately name the same series in more than one trace.
-                # First occurrence wins, so the legend keeps spec order.
-                handles, labels = ax.get_legend_handles_labels()
-                if handles:
-                    unique = {}
-                    for handle, label in zip(handles, labels):
-                        unique.setdefault(label, handle)
-                    leg = ax.legend(
-                        list(unique.values()),
-                        list(unique.keys()),
-                        loc="best",
-                        fontsize="small",
+                ext = (spec.meta or {}).get(self.TEFF_EXTENT)
+                if ext is None:
+                    continue
+                lo, hi = extents.get(spec.id, (np.inf, -np.inf))
+                extents[spec.id] = (min(lo, ext[0]), max(hi, ext[1]))
+        for group in spec_groups:
+            for spec in group:
+                if spec.meta:
+                    spec.meta.pop(self.TEFF_EXTENT, None)
+                if spec.id in extents and spec.x_range is not None:
+                    x_range = _padded_range(
+                        list(extents[spec.id]), self.KIEL_X_PAD_FRAC
                     )
-                    # get_legend_handles_labels returns the artists actually
-                    # drawn on the axes, so set_alpha on those changes the
-                    # plotted lines.  leg.legend_handles are the legend's own
-                    # proxy copies: raising alpha there touches only the legend.
-                    for handle, label in zip(
-                        leg.legend_handles, unique.keys()
-                    ):
-                        if "track" in label:
-                            handle.set_alpha(0.8)
-
-                fig.tight_layout()
-
-                tag = meta.get("file_tag") or spec.id.replace(".", "_")
-                path = f"{filename_prefix}_{tag}.pdf"
-                fig.savefig(path)
-                written.append(path)
-            finally:
-                plt.close(fig)
-        return written
-
-    def plot_kiel_diagram(self, star_idx, filename_prefix="debug"):
-
-        spec_groups_one_star = self._get_kiel_trace_spec_groups(star_idx)
-        self._kiel_render_spec_groups(spec_groups_one_star, filename_prefix)
+                    if x_range is not None:
+                        spec.x_range = list(x_range)
 
     ################## contour plot #################
     ######## will only trigger after sampling #######
@@ -628,24 +575,13 @@ class MISTPlot:
     def plot_contours(self, values, star_idx, filename_prefix="debug"):
 
         star = self.system.star
-        star_name = star.names[self.evolutionarymodel.star_indices[star_idx]]
+        star_index = self.evolutionarymodel.star_indices[star_idx]
+        star_name = star.names[star_index]
 
-        # grab the error bars for the fitted point
-        # summary values should take the shape of (nstars,)
-        # which simplifies to a shape of () when nstars=1
-        # so we need make sure the resulting value grabbed is always at least 1-d
-        sigma_teff_fit = np.max(
-            [
-                np.atleast_1d(star.teff.summary.err_minus)[star_idx],
-                np.atleast_1d(star.teff.summary.err_plus)[star_idx],
-            ]
-        )
-        sigma_logg_fit = np.max(
-            [
-                np.atleast_1d(star.logg.summary.err_minus)[star_idx],
-                np.atleast_1d(star.logg.summary.err_plus)[star_idx],
-            ]
-        )
+        # The larger side of the fitted point's posterior interval, per star
+        # (see _summary_at for why this is not `.summary.err_minus`).
+        sigma_teff_fit = max(self._fit_error_bars(star.teff, star_index))
+        sigma_logg_fit = max(self._fit_error_bars(star.logg, star_index))
 
         # global fit values
         teff_fit = np.array(

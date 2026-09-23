@@ -100,6 +100,8 @@ _TOPIC_BAND_END = SECTION_ORDER.index(TOPIC_SECTIONS[-1]) + 1
 # \cite, \citet, \citep, \citealt, \citeauthor, starred forms, and the
 # optional [pre][post] arguments; group 1 is the comma-separated key list.
 _CITE_RE = re.compile(r"\\cite[a-zA-Z]*\*?(?:\[[^\]]*\]){0,2}\{([^{}]+)\}")
+# A `%` not preceded by a backslash -- a LaTeX comment inside a sentence.
+_RAW_PERCENT = re.compile(r"(?<!\\)%")
 
 
 def extract_cite_keys(text):
@@ -270,6 +272,18 @@ class ProseCollector:
                 f"topic of its own by setting `prose_topic` on its class. "
                 f"(Raising rather than ignoring: a silently dropped sentence "
                 f"is a modeling choice the draft never mentions.)"
+            )
+        # A raw `%` is a LaTeX comment: it silently drops the rest of the
+        # line -- the sentence's own tail and whatever follows it in the
+        # paragraph -- and compiles without a warning.  The MIST floor
+        # sentence lost its "10% ... 3% ... 5%" clause and the sentence
+        # after it exactly this way (2026-09).  Same ruling as the unknown
+        # section above: raise at the declaration, where the author is.
+        if _RAW_PERCENT.search(text):
+            raise ValueError(
+                f"Prose sentence (section '{section}', key {key!r}) has an "
+                f"unescaped '%', which LaTeX reads as a comment and drops "
+                f"the rest of the line.  Write '\\%': {text!r}"
             )
         if key is None:
             key = text

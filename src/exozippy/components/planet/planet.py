@@ -228,6 +228,10 @@ class Planet(Component):
         }
         if "log_q" in mass_entries:
             self.manifest["log_q"] = mass_entries["log_q"]
+        # The linear mass ratio, whichever coordinate was sampled: a
+        # linear-mode planet has no log_q, so this is its only q.  Needs
+        # no orbit (mass and the host mass), unlike everything below.
+        self.manifest["q"] = "default"
 
         if has_orbit:
             self.manifest.update(
@@ -243,7 +247,22 @@ class Planet(Component):
                     # absent from a posterior point.
                     "b": {"expr_key": "default", "force_node": True},
                     "K": "default",
+                    "msini": "default",
                     "max_ecc": "default",
+                    # EXOFASTv2's delta, tcirc, omegagr (derivepars.pro).
+                    "delta": "default",
+                    "tcirc": "default",
+                    "omegagr": "default",
+                    # Irradiation (EXOFASTv2's teq and fave): both need
+                    # a/R*, so they exist exactly when the orbit does.
+                    "teq": "default",
+                    "fave": "default",
+                    # A priori transit/eclipse probabilities (Winn 2010
+                    # eq 9), grazing-inclusive and full-event.
+                    "ptg": "default",
+                    "pt": "default",
+                    "psg": "default",
+                    "ps": "default",
                 }
             )
             # Transit/occultation durations (review 8.8.7).  Declared

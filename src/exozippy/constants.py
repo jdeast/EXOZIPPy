@@ -44,6 +44,20 @@ ANG_TO_MICRON_CONST = u.Angstrom.to(u.micron)
 MSUN_TO_MEARTH = (1.0 * u.M_sun).to(u.M_earth).value
 RSUN_TO_REARTH = (1.0 * u.R_sun).to(u.R_earth).value
 
+# Stefan-Boltzmann constant in cgs (erg s-1 cm-2 K-4), for the incident
+# stellar flux at the planet (planet.fave): sigma_sb * teff^4 is the flux at
+# the stellar surface and (a/R*)^-2 dilutes it to the orbit.
+SIGMA_SB_CGS = const.sigma_sb.cgs.value
+# Earth's insolation, the unit planet.fave is REPORTED in: the IAU 2015
+# Resolution B3 nominal total solar irradiance, S_sun^N = 1361 W m-2, in the
+# same cgs flux unit as SIGMA_SB_CGS * teff^4.  EXOFASTv2's derivepars.pro
+# reports the same quantity in 10^9 erg s-1 cm-2; 1e9 erg s-1 cm-2 is
+# 1e6 W m-2, so EXOFASTv2's value times 1e6/1361 (~734.75) is ours.  The
+# Sun's sigma_sb * 5772^4 * (R_sun/au)^2 evaluates to 1361.16 W m-2, so
+# Earth comes out at 1.0001 -- tests/test_planet_derived_outputs.py pins
+# that.
+EARTH_INSOLATION_CGS = (1361.0 * u.W / u.m**2).to(u.erg / u.s / u.cm**2).value
+
 # --- 4. MICROLENSING CONSTANTS ---
 # Kappa: 4G / (c^2 * au) in units of mas / M_sun
 KAPPA = (
