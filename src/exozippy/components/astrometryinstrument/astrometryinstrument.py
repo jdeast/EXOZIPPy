@@ -1029,7 +1029,7 @@ class AstrometryInstrument(Instrument):
             self._compiled_elements = pytensor.function(
                 inputs=param_symbols,
                 outputs=[
-                    orb.tp.value,
+                    orb.tp_target.value,
                     orb.n.value,
                     orb.ecc.value,
                     orb.omega.value,

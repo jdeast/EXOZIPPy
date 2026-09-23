@@ -133,7 +133,7 @@ def test_derived_inputs_match_reference(parity):
     fn = _initial_point_fn(
         model,
         [
-            orbits.tp.value[0],
+            orbits.tp_target.value[0],
             orbits.n.value[0],
             orbits.ecc.value[0],
             orbits.cosw.value[0],

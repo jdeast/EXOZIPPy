@@ -1327,7 +1327,7 @@ class MulensEvent(Component):
         orbit = system.orbit
         s_t, alpha_t_rad = lens_geometry_from_orbit(
             pt.as_tensor_variable(times),
-            orbit.tp.value[j],
+            orbit.tp_target.value[j],
             orbit.n.value[j],
             orbit.ecc.value[j],
             orbit.sinw.value[j],
@@ -1368,7 +1368,7 @@ class MulensEvent(Component):
         )
         d_s = system.star.distance.value[int(self.source_bodies[0][1])]
         args = (
-            orbit.tp.value[j],
+            orbit.tp_target.value[j],
             orbit.n.value[j],
             orbit.ecc.value[j],
             orbit.sinw.value[j],

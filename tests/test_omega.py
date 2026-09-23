@@ -55,7 +55,7 @@ def compiled_tp_function():
                     orbit_comp.secosw.value,
                     orbit_comp.sesinw.value,
                 ],
-                outputs=[orbit_comp.tp.value],
+                outputs=[orbit_comp.tp_target.value],
                 on_unused_input="ignore",
             )
 
