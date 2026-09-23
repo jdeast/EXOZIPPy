@@ -1608,10 +1608,11 @@ def test_ladder_health_report_warns_only_when_communication_limited(caplog):
         )
         # The warning must NAME the recommended rung count,
         # ceil(2*Lambda)+1 = 13.  Asserted on the number rather than on a
-        # surrounding phrase: the remediation text was reworded once the
-        # measurements showed `n_temps: auto` cannot satisfy this criterion
-        # (it is self-consistent only at 0.50 swap acceptance), and a test
-        # pinned to the old wording fails on a message that is more correct.
+        # surrounding phrase: the remediation text has been reworded twice
+        # (once when `n_temps: auto` was measured unable to satisfy this
+        # criterion, once when round trips were measured not to buy mode
+        # mixing), and a test pinned to wording fails on a message that is
+        # more correct.
         assert any(
             "13" in r.message and "n_temps" in r.message
             for r in caplog.records
@@ -1621,6 +1622,40 @@ def test_ladder_health_report_warns_only_when_communication_limited(caplog):
     assert (
         ladder_health_report(np.array([1.0]), np.zeros(1), np.zeros(1)) is None
     )
+
+
+def test_ladder_health_warning_separates_transport_from_mode_mixing(caplog):
+    """
+    Given a communication-limited ladder,
+    When the health report warns,
+    Then it says round trips are TEMPERATURE transport and does not promise
+      they will fix mode mixing, and it names what does carry between-mode
+      traffic.
+
+    Why: the rung count is the remedy for the criterion and NOT for the
+    thing a reader usually wants it for.  Measured on a 27-D Gaussian at a
+    fixed ladder, the cold chains' far-mode fraction is 0.27-0.35 at a
+    24-nat barrier and 0.05-0.09 at a 78-nat one at every T_max from 16 to
+    8500, while an 8-nat barrier equilibrates even at zero round trips.
+    The earlier version of this warning recommended a rung count two
+    sentences before explaining why that count would not work, and the
+    DC2018 sweep sat exactly there.
+    """
+    import logging
+
+    from exozippy.samplers.ladder import ladder_health_report
+
+    temps = _geometric_ladder(8, 200.0)
+    with caplog.at_level(logging.WARNING, logger="exozippy.samplers.ptde"):
+        ladder_health_report(temps, np.full(7, 20.0), np.full(7, 100.0))
+
+    msg = [r.message for r in caplog.records]
+    assert len(msg) == 1
+    assert "TEMPERATURE" in msg[0]
+    assert "DO NOT EXPECT ROUND TRIPS TO FIX MODE MIXING" in msg[0]
+    assert "store_hot_chains" in msg[0]
+    # and the trade it must not let a reader make silently
+    assert "10*T_max" in msg[0]
 
 
 def test_the_wrap_up_barrier_measures_the_draw_phase_only(monkeypatch):

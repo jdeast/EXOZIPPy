@@ -131,6 +131,48 @@ solution had been seeded and was sitting in that same run's rejected-seed
 ledger. A schedule that can silently return half the posterior is not a
 performance choice.
 
+**And a ladder on DEO can still make zero round trips -- but round trips are
+TEMPERATURE transport, and buying more of them does not buy mode mixing.**
+Two things are measured, both on the 27-D Gaussian of
+`examples/DC2018/pt_transport_bench.py`, at a FIXED ladder (`n_temps = 24`,
+`n_chains = 54`) and 2M evaluations per configuration.
+
+*Round trips are controlled by the path length.* Across `T_max` 4, 16, 50,
+200, 1000, 8500 they go 1774, 249, 58, 6, 0-1, 0, with Lambda 2.8, 5.6, 7.8,
+10.2, 12.8, 15.8. Lambda 5.6 and 7.8 transport perfectly well, so there is no
+"ceiling" in Lambda; and since a longer path at fixed rungs IS a higher
+barrier, this says "shorten the path and transport returns", not "T_max is
+causal".
+
+*But mode balance does not follow.* With the target bimodal, the cold chains'
+far-mode fraction (0.5 is correct) is 0.27-0.35 at a 24-nat barrier and
+0.05-0.09 at a 78-nat one, **at every `T_max` from 16 to 8500** -- while an
+8-nat barrier equilibrates everywhere, including at `T_max = 8500` where there
+are zero round trips, because the DE proposals cross it directly. (DC2018 062
+is the same story in production: 41,674 inter-mode transitions at `T=1` with
+zero round trips.) A low `T_max` transports and cannot cross; a high one
+crosses and cannot transport.
+
+**And the scanned range is the optimistic end.** Those barrier heights were
+chosen from the mode report's `delta vs best seed`, which is peak-to-PEAK --
+the gap between two optima. Measured peak-to-VALLEY on a real event
+(`examples/DC2018/dc18_barrier_profile.py`, DC2018 152, straight line between
+the two modes' best draws in raw coordinates with the whitening restored):
+two modes **4.3 nats apart peak-to-peak sit either side of a 655-nat
+valley**, a factor of 150. A straight line is one path, so 655 is an upper
+bound -- but the scan above already fails at 78, so a true barrier anywhere
+near this makes the conclusion stronger, not weaker.
+
+So `ladder_health_report`'s rung recommendation is the remedy for the
+CRITERION and not for what a reader usually wants it for, and it now says so.
+Where basins are far apart the traffic comes from multi-seed starts, the
+hot-rung suppressed-mode search (`store_hot_chains`), per-mode evidence
+weighting or explicit mode jumps. **And do not shorten the ladder to buy round
+trips**: the hot-rung search's reach is `10 x T_max` (2000 nats at the default
+200, 500 at 50), and it is what found DC2018 223's truth basin. Full trail:
+`notes/pt_round_trip_collapse.txt`. Tests: `tests/test_ptde.py`'s two
+`ladder_health_report` cases.
+
 **So why keep it?** One real use, and one cheap one. The real use is as the
 CONTROL for diagnosing ladder transport: review 2.4.9 (`ptde_async`'s ladder
 does not transport) was diagnosable precisely because async-on-DEO behaves
