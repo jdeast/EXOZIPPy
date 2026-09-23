@@ -136,6 +136,22 @@ def test_join_names_and_plural():
     assert plural(2, "dataset") == "2 datasets"
 
 
+def test_add_rejects_an_unescaped_percent_sign():
+    """
+    Given a sentence carrying a raw `%` (a LaTeX comment: it silently drops
+      the rest of the line, which took a clause and the following sentence
+      out of the MIST paragraph in 2026-09),
+    When it is declared,
+    Then add() raises at the declaration site, naming the sentence -- and
+      the escaped `\\%` spelling is accepted.
+    """
+    c = ProseCollector()
+    with pytest.raises(ValueError, match="unescaped '%'"):
+        c.add("errors of about 10% at 0.1 solar masses.", section="stellar")
+    c.add(r"errors of about 10\% at 0.1 solar masses.", section="stellar")
+    assert len(c.sentences()) == 1
+
+
 def test_software_list_is_idempotent():
     """Given repeated add_software, When read, Then one copy each."""
     c = ProseCollector()

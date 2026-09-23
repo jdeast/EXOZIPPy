@@ -864,17 +864,40 @@ class EvolutionaryModel(StellarRelation, Component):
             )
             self._compiled_kiel = None
 
-    def plot(self, system, points, filename_prefix="debug"):
+    def plot_data(self, system, point=None):
+        """The Kiel Chart of every star at ``point`` (``[]`` without one).
 
-        #  loop over stars -- one plot per star
-        for star_idx in range(self.n_elements):
-            mist_plot_obj = MISTPlot(system, points)
-            mist_plot_obj.plot_kiel_diagram(
-                star_idx, filename_prefix=filename_prefix
-            )
-            if mist_plot_obj._posteriorBool:
-                values = mist_plot_obj._get_posterior_compiled_values()
-                mist_plot_obj.plot_contours(
+        This is the ONE description of the chart, and it is what the three
+        consumers walk: ``plot`` below (the PDFs), the GUI's Tune tab and
+        live evaluator, and ``outputs/modeling.collect_figures``, which
+        pairs each Chart's caption with its PDF.  It was deleted in the
+        2026-09 MIST rewrite (commit 9b3cb992), which is why the Kiel PDF
+        was written every fit yet never appeared in the paper draft and the
+        GUI had no Kiel diagram (review 1.8.7): both consumers ask through
+        this method and fell back to the base class's empty list.
+        """
+        return MISTPlot(system, [point]).kiel_specs(point)
+
+    def plot(self, system, points, filename_prefix="debug"):
+        """Kiel PDF(s) through the shared renderer, plus the posterior contours.
+
+        Not the ``plot_via_specs`` one-liner, for one reason: the Teff axis
+        of a spaghetti figure is the union over draws (``MISTPlot.
+        kiel_spec_groups``), which the generic per-point loop cannot know.
+        The rendering itself is ``plotrender.render_spec_groups`` -- there
+        used to be a private copy here differing only in legend handling,
+        which now lives upstream (review 4.11.7).  The contour plot is a
+        bespoke posterior-only matplotlib diagnostic, like a corner plot,
+        and is not a Chart, so it does not reach the GUI or the draft.
+        """
+        from exozippy.plotrender import render_spec_groups
+
+        plotter = MISTPlot(system, points)
+        render_spec_groups(plotter.kiel_spec_groups(), filename_prefix)
+        if plotter._posteriorBool:
+            values = plotter._get_posterior_compiled_values()
+            for star_idx in range(self.n_elements):
+                plotter.plot_contours(
                     values, star_idx, filename_prefix=filename_prefix
                 )
 
@@ -913,8 +936,11 @@ class EvolutionaryModel(StellarRelation, Component):
             r"\begin{equation} "
             r"\sigma_{\rm MIST} = 0.03 - 0.025 \log{M_\star} + 0.045(\log{M_\star})^2"
             r"\end{equation} "
-            r"This equation results in fractional errors of about 10% at 0.1 $M_\\odot$, "
-            r"3% at 1 $M_\\odot$, and 5% at 10 $M_\\odot$"
+            # `\%`, not `%`: a raw percent sign is a LaTeX comment and
+            # swallowed the rest of this paragraph; and `\odot` in a raw
+            # string takes ONE backslash (`\\odot` is a line break + "odot").
+            r"This equation results in fractional errors of about 10\% at 0.1 $M_\odot$, "
+            r"3\% at 1 $M_\odot$, and 5\% at 10 $M_\odot$. "
             f"Thus, the fitted values for the {noun} are required to "
             "agree with the tracks only to within the models' own accuracy. ",
             section="stellar",
