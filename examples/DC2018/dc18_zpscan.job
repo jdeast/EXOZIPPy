@@ -1,0 +1,42 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 64
+#$ -q lThM.q
+#$ -l mres=384G,h_data=6G,h_vmem=6G,himem
+#$ -cwd
+#$ -j y
+#$ -N zpscan194
+#$ -t 1-3
+#$ -o dc18_zpscan.$JOB_ID.$TASK_ID.log
+#
+# Where does the photometric zeropoint offset put theta_star on truth?
+# f=0 (sweep/194, the simulation's AB 22.0) gives theta*/truth = 0.698;
+# f=1 (ab194/zpvega, the full AB-Vega conversion) gives 1.338 -- it crosses,
+# so the crossing is measurable rather than extrapolated.  One parameter:
+# both bands shift by f x (AB-Vega), preserving the colour ratio, so this is
+# a straight line from the simulation's system to ours.
+#
+# Event 194 is on the STATIC list (examples/DC2018/events.txt), so nothing
+# here is confounded by the lens motion that PR #318 removed 008, 062 and
+# 128 for.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+tag=$(sed -n "${SGE_TASK_ID}p" <<'PY'
+zpf025
+zpf050
+zpf075
+PY
+)
+echo "arm $tag   commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)   $(date)"
+cfg="${TMPDIR:-/tmp}/${tag}_$$.yaml"
+python dc18_set_cores.py ab194/$tag/DC2018_194.yaml "$cfg" --cores "${NSLOTS:?NSLOTS unset}"
+exozippy "$cfg"
+echo "exit $?   $(date)"

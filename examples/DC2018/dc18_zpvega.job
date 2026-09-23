@@ -1,0 +1,35 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 64
+#$ -q lThM.q
+#$ -l mres=384G,h_data=6G,h_vmem=6G,himem
+#$ -cwd
+#$ -j y
+#$ -N zpvega194
+#$ -o dc18_zpvega.$JOB_ID.log
+#
+# THE DECISIVE TEST for issue #313: event 194 identical to its sweep arm
+# except the two zeropoint priors, moved from the simulation's AB 22.0 to
+# the Vega equivalent (22.0 - (AB-Vega) = 20.963 W149, 21.501 Z087).
+# If the magnitude system is the R_source deficit, R/truth goes from 0.364
+# to ~1 and teffsed stops running cool.  If it does not, #313 is wrong
+# about the fit even if it is right about the photometry.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+# PyTensor's compile lock uses flock(); ~/.pytensor is on NFS here and this
+# cluster's NFS client drops advisory locks mid-compile (ENOLCK/ESTALE).
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)   $(date)"
+# cores are written into a COPY in $TMPDIR, exactly as dc18_sweep.job does,
+# so the committed config keeps whatever core count it was written with.
+cfg="${TMPDIR:-/tmp}/zpvega194_$$.yaml"
+python dc18_set_cores.py ab194/zpvega/DC2018_194.yaml "$cfg" --cores "${NSLOTS:?NSLOTS unset}"
+exozippy "$cfg"
+echo "exit $?   $(date)"

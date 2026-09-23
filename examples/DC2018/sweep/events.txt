@@ -1,6 +1,19 @@
-008
-062
-128
+# The static six (JDE 2026-09-22).  008, 062 and 128 left for
+# events_moving.txt: the answer key's own planet orbit, as linear ds/dt and
+# dalpha/dt at the truth, beats the STATIC truth by 29.9, 527.8 and 6262.0
+# chi2 (PR #318), so a static 2L1S cannot fit them and nothing measured on
+# them tests our fitting.  Replaced by three static events chosen to make the
+# R_source question answerable rather than just to refill the count:
+#   047  av 2.11, Rs 0.822 (194's true radius EXACTLY), W149s 20.73 --
+#        the low-extinction, high-SNR control for 194.
+#   103  av 2.33, Rs 1.147, W149s 19.64, q 2.8e-4 -- the best-measured
+#        source in the static list; if R/truth fails here it is not SNR.
+#   069  av 9.01 (194's prior EXACTLY), Rs 0.531, W149s 24.32 -- the
+#        high-extinction replicate, so the C29 anchor has two events.
+# Tasks 1-3 are the completed keepers; 4-6 are the new ones.
 152
 194
 223
+047
+103
+069

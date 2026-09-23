@@ -1,0 +1,20 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q lThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N barrier152
+#$ -o dc18_barrier.$JOB_ID.log
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+cd $HOME/python/EXOZIPPy/examples/DC2018
+python dc18_barrier_profile.py --event 152 \
+    --run-dir $HOME/python/EXOZIPPy/examples/DC2018/sweep/152 \
+    --points 56:8540,30:11264 --steps 61
+echo "exit $?   $(date)"

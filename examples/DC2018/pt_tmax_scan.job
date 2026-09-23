@@ -1,0 +1,41 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q sThC.q
+#$ -cwd
+#$ -j y
+#$ -N tmaxscan
+#$ -o pt_tmax_scan.$JOB_ID.log
+#
+# THE CONTROLLED T_max EXPERIMENT.  notes/pt_round_trip_collapse.txt
+# concluded "round trips collapse with Lambda", but its Lambda series is
+# group (a) of pt_transport_bench.py (TRIVIAL CONTROLS, T_max 4 and 16)
+# concatenated with everything else (T_max 8500) -- Lambda and T_max are
+# confounded across it, and the dataset already holds the counterexample
+# (T_max=8500 at Lambda=3.50 makes zero; T_max=16 at Lambda=4.79 makes
+# 1308).  This scans T_max with n_temps=24 and n_chains=54 HELD, on the
+# same 27-D Gaussian, unimodal and bimodal, sync (production's sampler).
+# 2M evals per configuration, ~3x the original budget, because "at fixed
+# budget" is the other half of the question.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+only="EQUIL-swapint1,EQUIL-swapint6,EQUIL-swapint54,EQUIL-swapint216"
+: <<"PY"
+print(','.join(f'TMAX-T{t:.0f}-{k}'
+                for t in (4., 16., 50., 200., 1000., 8500.)
+                for k in ('unimodal', 'bimodal')))
+PY
+)
+python pt_transport_bench.py --only "$only" --target-evals 2000000 \
+    --cores 8 --out pt_tmax_scan.json
+echo "exit $?   $(date)"

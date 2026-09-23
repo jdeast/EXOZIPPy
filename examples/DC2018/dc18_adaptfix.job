@@ -1,0 +1,38 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 32-64
+#$ -q lThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N adaptfix194
+#$ -o dc18_adaptfix.$JOB_ID.log
+#
+# Event 194 with PR #319's adaptation-cadence fix and NOTHING else changed:
+# ab194/adaptfix carries sweep/194's config verbatim, zeropoint 22.0, so the
+# only difference from the sweep arm is that gamma now gets 20 tuning
+# windows instead of 1.
+#
+# What to read, against sweep/194:
+#   T=1 acceptance  0.047 -> should approach target_accept = 0.20
+#   per-rung accept 0.030-0.050 -> should rise likewise
+#   round trips     0 over 55,000 swap rounds -> the open question
+#   R/t 0.364, D/t 0.521, th*/t 0.698, teffsed 3100 -> does better mixing
+#                                                     move the answer?
+#
+# NOTE the editable install: this runs whatever is checked out in
+# ~/python/EXOZIPPy at import time.  Submitted with master at #319.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD) on $(git -C $HOME/python/EXOZIPPy branch --show-current)   $(date)"
+cfg="${TMPDIR:-/tmp}/adaptfix194_$$.yaml"
+python dc18_set_cores.py ab194/adaptfix/DC2018_194.yaml "$cfg" --cores "${NSLOTS:?NSLOTS unset}"
+exozippy "$cfg"
+echo "exit $?   $(date)"
