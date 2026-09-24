@@ -112,8 +112,13 @@ def test_cheb_weights_sum_to_one():
 
 
 # --------------------------------------------------------------------------
-# End-to-end: the KELT-17 DT example builds and yields a finite logp
-# (skipped if the DT FITS data are not shipped).
+# End-to-end: the fast KELT-17 DT example builds and yields a finite logp
+# (skipped if the DT FITS data are not shipped).  kelt17_fast.yaml, not
+# kelt17_dt.yaml, deliberately: the full config carries an SED whose
+# TYCHO/SLOAN BC tables are generated on first use by downloading the
+# NextGen spectra -- hundreds of MB from Zenodo inside a unit test on a
+# fresh clone, or a hard failure with no network (review on PR #323).
+# The fast config has no sed: block and exercises the same DT component.
 # --------------------------------------------------------------------------
 def test_dt_system_logp_finite():
     import os
@@ -124,9 +129,9 @@ def test_dt_system_logp_finite():
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     exdir = os.path.join(root, "examples", "kelt17")
-    cfgfile = os.path.join(exdir, "kelt17_dt.yaml")
+    cfgfile = os.path.join(exdir, "kelt17_fast.yaml")
     if not os.path.exists(cfgfile):
-        pytest.skip("kelt17 DT example not present")
+        pytest.skip("kelt17 fast DT example not present")
     with open(cfgfile) as fh:
         cfg = yaml.safe_load(fh)
     cwd = os.getcwd()

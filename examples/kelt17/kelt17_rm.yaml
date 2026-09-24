@@ -1,5 +1,5 @@
 # KELT-17 b -- full example converted 1:1 from EXOFASTv2 examples/kelt17
-# (11 ground-based transits in 7 bands + SED + parallax + TRES RVs).
+# (12 ground-based transits in 7 bands + SED + parallax + TRES RVs).
 # THIS CONFIG: everything except Doppler tomography (RM carries the
 # spin-orbit information).
 

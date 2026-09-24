@@ -1,8 +1,6 @@
 # KELT-17 b -- shared starting values for the full example, converted 1:1
 # from the EXOFASTv2 refined prior file (kelt17.priors.2). Gaussian priors
 # (sigma > 0) reproduce the EXOFASTv2 priors: vsini, vline, parallax.
-# Note: EXOFASTv2 constrained the star with MIST + SED; EXOZIPPy has no MIST
-# component, so the star relies on SED + parallax + the transit density.
 
 # ---- Star ----
 star.A.logmass:  {initval: 0.260522}

@@ -152,12 +152,32 @@ def dt_primary_star_indices(system):
             ),
             None,
         )
-        if star_idx is not None:
-            idx.add(int(star_idx))
+        if star_idx is None:
+            # Fail HERE (stage 3, with a dopptom label), not later at
+            # build time through rm_primary_star_index's "[rm] ..."
+            # message in a fit that has no rm: key (deep review finding).
+            raise ValueError(
+                f"[dopptom] orbit '{name}' has no star in its primary "
+                f"body group, so there is no transited star whose line "
+                f"profile the Doppler-tomography model can use. Put the "
+                f"transited star in the orbit's `primary:` group."
+            )
+        idx.add(int(star_idx))
     return idx
 
 
 class Dopptom(Component):
+    # Per-build node caches System.build_model clears before stage 5
+    # (see Component.per_build_caches): compiled plot functions and the
+    # symbolic nodes they were compiled against belong to ONE model; a
+    # rebuilt live System (the GUI Solve path) must never call them with
+    # the new model's plot-param values.
+    per_build_caches = (
+        "_model_nodes",
+        "_plot_fns",
+        "_subvel_nodes",
+    )
+
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Doppler Tomography"
@@ -166,6 +186,12 @@ class Dopptom(Component):
         self.band_names = [c.get("band") for c in self.config]
         self.resolutions = [c.get("resolution") for c in self.config]
         self.velbins = [c.get("velbin", "auto") for c in self.config]
+        # Light-travel-time on the occultation seam, per file, default on
+        # -- the same key, default and gating as transit.py and rm.py, so
+        # a joint transit+RM+DT fit places the occultation at ONE time.
+        self._light_travel_time_active = np.array(
+            [bool(c.get("light_travel_time", True)) for c in self.config]
+        )
         for i, (f, o) in enumerate(zip(self.files, self.orbit_names)):
             if not f or not o:
                 raise ValueError(
@@ -234,6 +260,19 @@ class Dopptom(Component):
                     "that factor; 1 disables binning."
                 ),
             },
+            {
+                "key": "light_travel_time",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Apply the light-travel-time (Roemer delay) "
+                    "correction to this dataset's exposure times on the "
+                    "occultation seam (default true) -- the same key, "
+                    "default and factor as transit's and rm's, so a "
+                    "joint fit places the occultation at one time."
+                ),
+            },
         ]
 
     # ------------------------------------------------------------------
@@ -274,10 +313,14 @@ class Dopptom(Component):
             # surface far from here as a divide-by-zero or nonsense
             # broadening.
             R = float(R)
-            if not np.isfinite(R) or R <= 0:
+            if not np.isfinite(R) or not (1e2 <= R <= 1e7):
                 raise ValueError(
                     f"[dopptom.{self.names[i]}] resolution must be a "
-                    f"finite, positive resolving power; got {R!r}."
+                    f"finite resolving power in a plausible spectrograph "
+                    f"range (1e2..1e7); got {R!r}. A filename outside "
+                    f"the nYYYYMMDD.<pl>.<inst>.<R>.fits convention can "
+                    f"parse a stray numeric token as R -- set "
+                    f"`resolution:` explicitly."
                 )
             self.resolutions[i] = R
 
@@ -289,20 +332,45 @@ class Dopptom(Component):
             vb = self.velbins[i]
             if vb is None or vb == "auto":
                 nbin = max(1, int(np.floor(indep_native / 3.0)))
+                if nbin >= vel.size:
+                    # auto self-limits: keep at least 2 bins
+                    nbin = max(1, vel.size // 2)
+                    logger.warning(
+                        f"[dopptom.{self.names[i]}] velbin auto clamped "
+                        f"to {nbin} on a {vel.size}-pixel grid."
+                    )
             else:
                 nbin = max(1, int(vb))
+                if nbin >= vel.size:
+                    # reduceat over zero edges would silently EMPTY the
+                    # cube and then crash on counts[-1] far from the
+                    # velbin: key that caused it (deep review finding).
+                    raise ValueError(
+                        f"[dopptom.{self.names[i]}] velbin={vb} on a "
+                        f"{vel.size}-pixel velocity grid -- at least 2 "
+                        f"bins must survive. Lower velbin: (or use "
+                        f"'auto')."
+                    )
             if nbin > 1:
-                nkeep = (vel.size // nbin) * nbin
-                ccf2d = (
-                    ccf2d[:, :nkeep]
-                    .reshape(ccf2d.shape[0], nkeep // nbin, nbin)
-                    .mean(axis=2)
-                )
-                vel = vel[:nkeep].reshape(nkeep // nbin, nbin).mean(axis=1)
+                # Bin edges every nbin pixels; a trailing remainder is
+                # FOLDED INTO THE LAST BIN (one slightly wider bin at one
+                # edge of the grid) rather than silently dropped from the
+                # likelihood, the rms estimate and n_tot.
+                n_bins = vel.size // nbin
+                edges = nbin * np.arange(n_bins)
+                counts = np.diff(np.append(edges, vel.size))
+                ccf2d = np.add.reduceat(ccf2d, edges, axis=1) / counts[None, :]
+                vel = np.add.reduceat(vel, edges) / counts
+                rem = int(counts[-1] - nbin)
                 logger.info(
                     f"[dopptom.{self.names[i]}] velocity grid binned x{nbin} "
-                    f"(dv {dv_native:.3f} -> "
-                    f"{dv_native * nbin:.3f} km/s; velbin: {vb})"
+                    f"(dv {dv_native:.3f} -> {dv_native * nbin:.3f} km/s; "
+                    f"velbin: {vb}"
+                    + (
+                        f"; last bin absorbs the {rem}-pixel remainder)"
+                        if rem
+                        else ")"
+                    )
                 )
 
             med = float(np.median(ccf2d))
@@ -367,86 +435,126 @@ class Dopptom(Component):
             + self._WINDOW_GAUSS_NSIGMA * sigma0 / FWHM2SIGMA
             + self._WINDOW_PAD_KMS
         )
+        self._window_half_kms[i] = float(half)
         return np.abs(self.vel[i]) <= half
 
+    # The shadow centre reaches ~1.2 * vsini during transit (subplanet
+    # |x_p| can exceed 1 at ingress/egress for a grazing chord); the
+    # post-fit check below asks whether any posterior draw needed more
+    # window than the initvals bought.
+    _SHADOW_EXCURSION = 1.2
+
+    def _check_shadow_window(self, points):
+        """Post-fit rope (CLAUDE.md rope-not-gates): the window is FIXED
+        from initvals at graph-build time, so a fit whose posterior vsini
+        grew past the headroom has its shadow silently clipped against
+        the precomputed out-of-window baseline -- warn loudly instead of
+        letting the vsini/lambda posterior lean on the window edge."""
+        if isinstance(points, dict):
+            points = [points]
+        if not points:
+            return
+        if "orbit.vsini" not in points[0] or "star.vline" not in points[0]:
+            # A point layout without the tracked nodes cannot be
+            # checked; say so instead of silently skipping (this used to
+            # be a bare return INSIDE the per-dataset loop, skipping the
+            # check for every dataset -- deep review finding).
+            logger.warning(
+                f"[{self.prefix}] shadow-window check skipped: the "
+                f"point dict carries no tracked orbit.vsini/star.vline "
+                f"nodes."
+            )
+            return
+        for i, nd in enumerate(self._model_nodes):
+            half = self._window_half_kms[i]
+            if half is None:
+                continue
+            oidx, star_idx = nd["oidx"], nd["star_idx"]
+            worst = -np.inf
+            for pnt in points:
+                vsini = float(np.atleast_1d(pnt["orbit.vsini"])[oidx]) / 1e3
+                vline = float(np.atleast_1d(pnt["star.vline"])[star_idx]) / 1e3
+                sigma = np.sqrt(vline**2 + (C_KMS / self.resolutions[i]) ** 2)
+                worst = max(
+                    worst,
+                    self._SHADOW_EXCURSION * vsini
+                    + self._WINDOW_GAUSS_NSIGMA * sigma / FWHM2SIGMA,
+                )
+            if worst > half:
+                logger.warning(
+                    f"[dopptom.{self.names[i]}] the sampled vsini/vline "
+                    f"need a shadow window of ~{worst:.1f} km/s but the "
+                    f"build-time window is {half:.1f} km/s (set from the "
+                    f"start values): the shadow is being clipped against "
+                    f"the frozen out-of-window baseline and the "
+                    f"vsini/lambda posterior may lean on the window "
+                    f"edge. Restart the fit with a start vsini near the "
+                    f"posterior value."
+                )
+
     def build_likelihood(self, model, system):
+        from .. import ltt
         from .. import rm as rm_mod
 
-        orbit, star, planet, band = (
-            system.orbit,
-            system.star,
-            system.planet,
-            system.band,
-        )
+        # band via getattr: a DT config with no band: block must reach
+        # resolve_rm_indices, whose error names the fix ("add a band:
+        # block naming the filter..."), instead of dying here on a raw
+        # AttributeError (System only setattrs configured components).
+        orbit, star, planet = system.orbit, system.star, system.planet
+        band = getattr(system, "band", None)
         cm = self.config_manager
 
-        # initval estimates for the static window (see _shadow_window)
+        # initval estimates for the static window (see _shadow_window).
+        # No try/except: these parameters are declared whenever DT is
+        # enabled, so a resolve failure is a config error to surface, not
+        # a condition to paper over with a default that would silently
+        # size the window for the wrong star (review: a 120 km/s rotator
+        # behind a swallowed resolve error would be clipped at the
+        # 50 km/s fallback's window with only a log line).
         sv_shape = (len(orbit.names),)
-        try:
-            sc = np.atleast_1d(
+        sc = np.atleast_1d(
+            cm.resolve("orbit", "svcoslam", shape=sv_shape, names=orbit.names)[
+                "initval"
+            ]
+        )
+        ss_ = np.atleast_1d(
+            cm.resolve("orbit", "svsinlam", shape=sv_shape, names=orbit.names)[
+                "initval"
+            ]
+        )
+        vsini_init_all = (sc**2 + ss_**2) / 1e3  # km/s
+        vline_init_all = (
+            np.atleast_1d(
                 cm.resolve(
-                    "orbit", "svcoslam", shape=sv_shape, names=orbit.names
+                    "star",
+                    "vline",
+                    shape=(len(star.names),),
+                    names=star.names,
                 )["initval"]
             )
-            ss_ = np.atleast_1d(
-                cm.resolve(
-                    "orbit", "svsinlam", shape=sv_shape, names=orbit.names
-                )["initval"]
-            )
-            vsini_init_all = (sc**2 + ss_**2) / 1e3  # km/s
-        except Exception as exc:
-            logger.warning(
-                f"[{self.prefix}] could not resolve svcoslam/svsinlam "
-                f"initvals ({exc}); using 50 km/s for the shadow window."
-            )
-            vsini_init_all = np.full(len(orbit.names), 50.0)
-        try:
-            vline_init_all = (
-                np.atleast_1d(
-                    cm.resolve(
-                        "star",
-                        "vline",
-                        shape=(len(star.names),),
-                        names=star.names,
-                    )["initval"]
-                )
-                / 1e3
-            )
-        except Exception as exc:
-            logger.warning(
-                f"[{self.prefix}] could not resolve vline initval ({exc}); "
-                f"using 5 km/s for the shadow window."
-            )
-            vline_init_all = np.full(len(star.names), 5.0)
-        try:
-            p_init_all = np.atleast_1d(
-                cm.resolve(
-                    "planet",
-                    "p",
-                    shape=(len(planet.names),),
-                    names=planet.names,
-                )["initval"]
-            )
-        except Exception as exc:
-            logger.warning(
-                f"[{self.prefix}] could not resolve planet p initval "
-                f"({exc}); using 0.1 for the quadrature order."
-            )
-            p_init_all = np.full(len(planet.names), 0.1)
+            / 1e3
+        )
+        p_init_all = np.atleast_1d(
+            cm.resolve(
+                "planet",
+                "p",
+                shape=(len(planet.names),),
+                names=planet.names,
+            )["initval"]
+        )
+        # retained for the post-fit window check (_check_shadow_window)
+        self._window_half_kms = [None] * self.n_elements
 
         self._model_nodes = []
         for i in range(self.n_elements):
             oidx, pidx, bidx = rm_mod.resolve_rm_indices(
                 system, self.orbit_names[i], self.band_names[i]
             )
-            star_idx = next(
-                (
-                    idx
-                    for (ctype, idx) in orbit.primary_bodies[oidx]
-                    if ctype == "star"
-                ),
-                0,
-            )
+            # The transited star, with no star-0 default: rm.py removed
+            # exactly that fallback (rm_primary_star_index's docstring),
+            # and here it would additionally read a vline element
+            # mode_manifest never declared for that star.
+            star_idx = rm_mod.rm_primary_star_index(orbit, oidx)
 
             ecc = orbit.ecc.value[oidx]
             omega = orbit.omega.value[oidx]
@@ -465,9 +573,45 @@ class Dopptom(Component):
             vsini_kms = orbit.vsini.value[oidx] / 1e3
             vline_kms = star.vline.value[star_idx] / 1e3
 
+            # Light-travel-time on the true-anomaly seam, exactly as
+            # rm.py does for the same occultation geometry (same per-file
+            # key, same OFF gating when the orbit's bodies did not
+            # resolve, same mass-DIFFERENCE factor): without it a joint
+            # transit+RM+DT fit places this dataset's occultation
+            # ~a(M1-M2)/(Mc) away from the others' and pulls tc.
+            ltt_on = bool(self._light_travel_time_active[i])
+            if ltt_on and not ltt.orbit_supports_ltt(orbit):
+                logger.warning(
+                    "[dopptom.%s] light-travel-time correction disabled "
+                    "-- the orbit does not define %s (its bodies did not "
+                    "resolve). Set light_travel_time: false on this "
+                    "dataset to silence this.",
+                    self.names[i],
+                    ", ".join(ltt.REQUIRED_ORBIT_PARAMS),
+                )
+                ltt_on = False
+            time_i = pt.as_tensor_variable(self.bjd[i])
+            if ltt_on:
+                ltt_factor = (
+                    orbit.m_primary.value[oidx] - orbit.m_companion.value[oidx]
+                ) / orbit.m_total.value[oidx]
+                time_i, _ = ltt.retarded_time(
+                    time_i,
+                    orbit.tp_target.value[oidx],
+                    orbit.n.value[oidx],
+                    ecc,
+                    orbit.sinw.value[oidx],
+                    orbit.cosw.value[oidx],
+                    pt.sin(inc),
+                    orbit.a.value[oidx],  # physical, R_sun -- NOT ar
+                    factor=ltt_factor,
+                    z0=0.0,
+                    circular=orbit._all_circular([oidx]),
+                )
+
             # geometry at the exposure midtimes (shared RM helpers);
             # orbit_idx solves Kepler for this orbit alone (review 6.8.1)
-            f = orbit.get_true_anomaly(self.bjd[i], orbit_idx=oidx)
+            f = orbit.get_true_anomaly(time_i, orbit_idx=oidx)
             x, y, z = rm_mod.rm_planet_xyz(f, ecc, omega, ar, inc, lam)
             rho = pt.sqrt(x * x + y * y)
             # shared Green's-basis LD flux (review 1.7: feeding mu-power
@@ -545,6 +689,10 @@ class Dopptom(Component):
                     # draws (plot_data), retained symbolically so
                     # param_deps can be walked from it.
                     subvel=vsini_kms * x,
+                    tfwhm=planet.tfwhm.value[pidx],
+                    t14=planet.t14.value[pidx],
+                    oidx=oidx,
+                    star_idx=star_idx,
                 )
             )
 
@@ -572,6 +720,7 @@ class Dopptom(Component):
                 nd["lam"],
                 nd["inc"],
                 nd["subvel"],
+                nd["tfwhm"],
             ]
             self._subvel_nodes.append(nd["subvel"])
             self._plot_fns.append(
@@ -624,7 +773,17 @@ class Dopptom(Component):
             fns = getattr(self, "_plot_fns", None)
             if point is not None and fns:
                 args = self._point_to_plot_params(point, system)
-                subvel = np.asarray(fns[i](*args)[-1], dtype=float)
+                # subvel is outs[-2]: tfwhm was appended AFTER it for the
+                # bespoke figure's duration markers, and grabbing [-1]
+                # here handed the model trace a 0-d duration scalar (deep
+                # review finding: matplotlib then aborts every DT plot).
+                subvel = np.asarray(fns[i](*args)[-2], dtype=float)
+                if subvel.shape != np.shape(self.bjd[i]):
+                    raise RuntimeError(
+                        f"[dopptom.{name}] plot outputs out of order: "
+                        f"expected the (n_exposure,) subplanet-velocity "
+                        f"vector, got shape {subvel.shape}."
+                    )
                 node = self._subvel_nodes[i]
                 deps = self._model_trace_param_deps(node, system)
                 traces.append(
@@ -683,16 +842,12 @@ class Dopptom(Component):
         if len(points) == 0:
             logger.warning("No points provided for DT plotting.")
             return
-        if len(points) == 1:
-            point = points[0]
-        else:  # posterior median across draws
-            point = {
-                k: np.median(
-                    [np.asarray(pnt[k], dtype=float) for pnt in points],
-                    axis=0,
-                )
-                for k in points[0]
-            }
+        # The REFERENCE draw, same convention as plot_via_specs (data and
+        # decorations from points[0]): a parameter-wise median across
+        # draws is not a point on the posterior -- in a bimodal lambda
+        # posterior the sv medians give a vsini no draw has.
+        point = points[0]
+        self._check_shadow_window(points)
         args = self._point_to_plot_params(point, system)
 
         for i, fn in enumerate(self._plot_fns):
@@ -709,9 +864,10 @@ class Dopptom(Component):
                 lam,
                 inc,
                 _subvel,
+                tfwhm,
             ) = fn(*args)
             vsini, period, tc = float(vsini), float(period), float(tc)
-            ar, p, cosi, ecc, omega, lam, inc = (
+            ar, p, cosi, ecc, omega, lam, inc, tfwhm = (
                 float(ar),
                 float(p),
                 float(cosi),
@@ -719,6 +875,7 @@ class Dopptom(Component):
                 float(omega),
                 float(lam),
                 float(inc),
+                float(tfwhm),
             )
             win = self._model_nodes[i]["win"]
             ccf, vel, bjd = self.ccf2d[i], self.vel[i], self.bjd[i]
@@ -730,25 +887,11 @@ class Dopptom(Component):
             nper = np.round((bjd.mean() - tc) / period)
             phase = (bjd - (tc + period * nper)) / period
 
-            # ingress/egress phases (EXOFASTv2 t14/t23 -> Tfwhm/2)
-            sini = np.sqrt(max(1.0 - cosi**2, 0.0))
-            esinw = ecc * np.sin(omega)
-            bp = ar * cosi * (1.0 - ecc**2) / (1.0 + esinw)
-            fac = np.sqrt(1.0 - ecc**2) / (1.0 + esinw)
-            with np.errstate(invalid="ignore"):
-                t14 = (
-                    period
-                    / np.pi
-                    * np.arcsin(np.sqrt((1.0 + p) ** 2 - bp**2) / (sini * ar))
-                    * fac
-                )
-                t23 = (
-                    period
-                    / np.pi
-                    * np.arcsin(np.sqrt((1.0 - p) ** 2 - bp**2) / (sini * ar))
-                    * fac
-                )
-            tfwhm = t14 - (t14 - t23) / 2.0
+            # ingress/egress markers at +-Tfwhm/2, read from the MODEL's
+            # own planet.tfwhm node (compiled into the plotter outputs)
+            # rather than a hand copy of the Winn 2010 formula: the model
+            # node carries the grazing-geometry handling and can never
+            # drift from the reported durations.
             egress_phase = 0.5 * tfwhm / period
 
             sigma = resid.std()
@@ -804,7 +947,13 @@ class Dopptom(Component):
             axes[3].set_yticks([])
             axes[3].set_xlabel("Fractional Variation")
             fig.tight_layout()
-            out = f"{filename_prefix}_DT_{self.names[i]}.png"
-            fig.savefig(out, dpi=130)
+            # PDF like every sibling component's saved figures (the
+            # images inside stay rasters; PDF is only the container).
+            # NOTE the modeling draft pairs figures by Chart file_tag
+            # (outputs/modeling.py collect_figures), so this bespoke
+            # image is NOT auto-collected -- the DT_trace chart is the
+            # one that reaches the draft; include this file by hand.
+            out = f"{filename_prefix}_DT_{self.names[i]}.pdf"
+            fig.savefig(out)
             plt.close(fig)
             logger.info(f"[dopptom.{self.names[i]}] wrote {out}")

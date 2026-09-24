@@ -4,7 +4,7 @@
 # plus the out-of-transit TRES RVs for the planet mass. No SED, one band,
 # circular orbit pinned (the Kepler solve is skipped structurally), so a
 # NUTS fit converges in minutes. For the full 1:1 EXOFASTv2 comparison
-# (11 transits + SED + both DT nights) see kelt17_dt.yaml / kelt17_all.yaml.
+# (12 transits + SED + both DT nights) see kelt17_dt.yaml / kelt17_all.yaml.
 
 run:
   name: "kelt17_fast"

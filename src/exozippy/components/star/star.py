@@ -10,6 +10,7 @@ from exozippy.components.parameter import sampled_bounds
 from exozippy.components.parameterization import (
     merge_options,
     merge_overrides,
+    mode_manifest,
 )
 from exozippy.constants import (
     FFP_MASS_FUNCTION_MIN_MEARTH,
@@ -1063,28 +1064,43 @@ class Star(Component):
         # Rossiter-McLaughlin: the shared line-broadening terms (macro/beta/
         # micro) live on the star; vsini + lambda live on orbit (they are
         # coupled by the sqrt(vsini)cos/sin(lambda) reparameterization).
-        from ..rm import rm_enabled
+        # Declared per ELEMENT: the Hirano kernel reads only the transited
+        # primaries of rm:-targeted orbits, and any other star would carry
+        # three likelihood-free sampled dimensions.  With every star a
+        # target (the common single-star case) mode_manifest returns the
+        # plain entries this block used to hand-write, so that graph is
+        # unchanged.
+        from ..rm import rm_primary_star_indices
 
-        if rm_enabled(system):
+        rm_stars = rm_primary_star_indices(system)
+        if rm_stars:
             self.manifest.update(
-                {"vmacro": None, "vbeta": None, "vmicro": None}
+                mode_manifest(
+                    [
+                        "rmprimary" if i in rm_stars else "plain"
+                        for i in range(self.n_elements)
+                    ],
+                    {
+                        "rmprimary": {
+                            "vmacro": None,
+                            "vbeta": None,
+                            "vmicro": None,
+                        },
+                        "plain": {},
+                    },
+                    where="star RM broadening (rm primaries)",
+                )
             )
 
         # Doppler tomography: Gaussian width of the local line profile
         # (intrinsic broadening excluding rotation; the instrumental part
         # is added from the resolving power inside the DT model).
-        # Declared per ELEMENT: each DT dataset reads only its orbit's
-        # primary star, and a star no dataset reads would carry a
-        # likelihood-free sampled vline.  With every star a DT primary
-        # (the common single-star case) mode_manifest returns the plain
-        # free entry this block used to hand-write, so that graph is
-        # unchanged.
+        # Same per-element rule as the RM terms above, over the DT
+        # primaries.
         from ..dopptom.dopptom import dt_primary_star_indices
 
         dt_stars = dt_primary_star_indices(system)
         if dt_stars:
-            from exozippy.components.parameterization import mode_manifest
-
             self.manifest.update(
                 mode_manifest(
                     [

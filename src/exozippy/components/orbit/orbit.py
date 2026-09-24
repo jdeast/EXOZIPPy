@@ -970,17 +970,24 @@ class Orbit(Component):
                         },
                         "plain": {},
                     },
-                    # force_node: the whole-vector path tracks these
-                    # derived params as Deterministics by default, and the
-                    # plot/point machinery reads vsini/lam from the point
-                    # by name -- without it the partial-active selector
-                    # path dropped the nodes and every RM plot silently
-                    # fell back to lam = 0 (caught by
-                    # test_model_builder_parity's rm_split tests).
-                    options={
-                        "vsini": {"force_node": True},
-                        "lam": {"force_node": True},
-                    },
+                    # force_node ONLY on the partial-active path: there
+                    # the selector machinery does not track a derived
+                    # parameter as a Deterministic by default, so
+                    # vsini/lam dropped out of the point dict and every
+                    # RM plot silently fell back to lam = 0 (caught by
+                    # test_model_builder_parity's rm_split tests).  On
+                    # the every-orbit-targeted path the default tracking
+                    # already builds the nodes, and forcing them there
+                    # would ADD trace data_vars master never wrote --
+                    # gated so those graphs and traces stay identical.
+                    options=(
+                        {
+                            "vsini": {"force_node": True},
+                            "lam": {"force_node": True},
+                        }
+                        if len(spin_targets) < len(self.names)
+                        else None
+                    ),
                     where="orbit spin-orbit (rm/dopptom targets)",
                 )
             )
