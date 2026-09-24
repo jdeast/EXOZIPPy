@@ -27,8 +27,9 @@ it.
 **There is a THIRD copy, and it is not in this repository.** The Conventions section of
 `paper3_microlensing.tex`, in the paper repo at `~/old_home/papers/exozippy` (whose remote
 is the Overleaf project), carries the same `C`-numbers as the submitted text. All three
-are in step through `C30` (paper commit `3476111`, 2026-09-23, which added `C29` and
-`C30` there). Being a separate repository it cannot ride the same commit, so
+are in step through `C30` (paper commits `3476111`, 2026-09-23, which added `C29` and
+`C30` there, and `7eeeb42`, 2026-09-24, which brought `C30` to stage 2). Being a separate
+repository it cannot ride the same commit, so
 the rule is simply that **a `C`-rule is not finished until all three carry it**: pull the
 paper repo, make the matching edit there, and name that commit in this one. The paper is
 not licensed to run ahead -- it did once, and the drift lasted exactly as long as it took
