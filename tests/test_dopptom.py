@@ -1,0 +1,97 @@
+"""
+Doppler Tomography component -- unit tests.
+
+The differentiable shadow kernel (components/dopptom) is validated against a
+brute-force numpy reference (fine-grid discrete convolution of the rotation
+half-ellipse with the Gaussian broadening), mirroring EXOFASTv2's
+dopptom_chi2.pro construction; plus normalization, differentiability, and an
+end-to-end finite-logp build on the KELT-17 TRES DT example (skipped if the
+example data are not present).
+"""
+import numpy as np
+import pytest
+import pytensor
+import pytensor.tensor as pt
+
+from exozippy.components.dopptom.dopptom import cheb_gauss2, dt_shadow
+
+
+def _numpy_shadow(v, center, halfwidth, sigma):
+    """Brute-force reference: half-ellipse (unit area) x Gaussian by discrete
+    convolution on a fine grid (EXOFASTv2 dopptom_chi2 construction)."""
+    dv = 0.005
+    grid = np.arange(v.min() - 8 * sigma, v.max() + 8 * sigma, dv)
+    c2 = ((grid - center) / halfwidth) ** 2
+    prof = np.where(c2 < 1, 2.0 / (np.pi * halfwidth) * np.sqrt(np.clip(1 - c2, 0, None)), 0.0)
+    kx = np.arange(-int(6 * sigma / dv), int(6 * sigma / dv) + 1) * dv
+    ker = np.exp(-0.5 * (kx / sigma) ** 2)
+    ker /= ker.sum()
+    conv = np.convolve(prof, ker, mode="same")
+    return np.interp(v, grid, conv)
+
+
+def test_shadow_matches_bruteforce_convolution():
+    """The Chebyshev-Gauss quadrature shadow equals the discrete ellipse (x)
+    Gaussian convolution to <1% of the peak, across the profile."""
+    v = np.linspace(-60.0, 60.0, 400)
+    vsini, p, sigma = 44.0, 0.096, 3.5
+    subx = np.array([-0.6, 0.0, 0.55])
+    sh = pytensor.function([], dt_shadow(v, pt.as_tensor_variable(subx), vsini, p, sigma))()
+    for i, ux in enumerate(subx):
+        ref = _numpy_shadow(v, vsini * ux, vsini * p, sigma)
+        assert np.max(np.abs(sh[i] - ref)) < 0.01 * ref.max()
+
+
+def test_shadow_unit_area():
+    """Each shadow profile integrates to 1 (analytic normalization)."""
+    v = np.linspace(-120.0, 120.0, 2401)
+    sh = pytensor.function(
+        [], dt_shadow(v, pt.as_tensor_variable(np.array([0.3])), 44.0, 0.1, 3.0)
+    )()
+    assert np.trapezoid(sh[0], v) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_shadow_differentiable():
+    """Finite gradients wrt vsini and the subplanet coordinate (NUTS needs
+    them through the quadrature)."""
+    v = np.linspace(-60.0, 60.0, 200)
+    vs = pt.dscalar("vs")
+    ux = pt.dscalar("ux")
+    sh = dt_shadow(v, pt.stack([ux]), vs, 0.096, 3.5)
+    g = pytensor.function([vs, ux], pt.grad(pt.sum(pt.sqr(sh)), [vs, ux]))
+    for vals in [(44.0, -0.5), (20.0, 0.0), (60.0, 0.9)]:
+        assert all(np.isfinite(x) for x in g(*vals))
+
+
+def test_cheb_weights_sum_to_one():
+    for n in (8, 32, 64):
+        _, w = cheb_gauss2(n)
+        assert w.sum() == pytest.approx(1.0, abs=1e-12)
+
+
+# --------------------------------------------------------------------------
+# End-to-end: the KELT-17 DT example builds and yields a finite logp
+# (skipped if the DT FITS data are not shipped).
+# --------------------------------------------------------------------------
+def test_dt_system_logp_finite():
+    import os
+    import yaml
+    from exozippy.system import System
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    exdir = os.path.join(root, "examples", "kelt17")
+    cfgfile = os.path.join(exdir, "kelt17_dt.yaml")
+    if not os.path.exists(cfgfile):
+        pytest.skip("kelt17 DT example not present")
+    with open(cfgfile) as fh:
+        cfg = yaml.safe_load(fh)
+    cwd = os.getcwd()
+    try:
+        os.chdir(exdir)
+        s = System(cfg)
+        s.prepare()
+        model = s.build_model()
+        lp = float(model.compile_logp()(model.initial_point()))
+    finally:
+        os.chdir(cwd)
+    assert np.isfinite(lp), f"DT example logp not finite: {lp}"

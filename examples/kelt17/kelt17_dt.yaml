@@ -1,0 +1,69 @@
+# KELT-17 b -- full example converted 1:1 from EXOFASTv2 examples/kelt17
+# (11 ground-based transits in 7 bands + SED + parallax + TRES RVs).
+# THIS CONFIG: everything except RM (the in-transit RV sequences are
+# dropped; Doppler tomography carries the spin-orbit information).
+
+run:
+  name: "kelt17_dt"
+
+prefix: "fitresults_dt/KELT-17b"
+
+star:
+  - name: "A"
+    mist: False
+
+sed:
+  file: "kelt17.sed.yaml"
+
+planet:
+  - name: "b"
+
+orbit:
+  - name: "b"
+    primary: ["A"]
+    companion: ["b"]
+
+transit:
+  - {name: "CROW_I", file: "n20150305.I.CROW.dat", band: "I"}
+  - {name: "KUO_I", file: "n20150312.I.KUO.dat", band: "I"}
+  - {name: "Whitin_g", file: "n20150312.Sloang.Whitin.dat", band: "Sloang"}
+  - {name: "Whitin_i", file: "n20150312.Sloani.Whitin.dat", band: "Sloani"}
+  - {name: "Pvdk_z", file: "n20150312.Sloanz.Pvdk.dat", band: "Sloanz"}
+  - {name: "KUO_V", file: "n20150312.V.KUO.dat", band: "V"}
+  - {name: "WCO_z", file: "n20151104.Sloanz.WCO.dat", band: "Sloanz"}
+  - {name: "MVRC_g", file: "n20160226.Sloang.MVRC.dat", band: "Sloang"}
+  - {name: "MVRC_i", file: "n20160226.Sloani.MVRC.dat", band: "Sloani"}
+  - {name: "PEST_B", file: "n20160306.B.PEST.dat", band: "B"}
+  - {name: "ZRO_I", file: "n20160312.I.ZRO.dat", band: "I"}
+  - {name: "MVRC_r", file: "n20160331.Sloanr.MVRC.dat", band: "Sloanr"}
+
+band:
+  - {name: "B", filter: "B"}
+  - {name: "I", filter: "I"}
+  - {name: "Sloang", filter: "Sloang"}
+  - {name: "Sloani", filter: "Sloani"}
+  - {name: "Sloanr", filter: "Sloanr"}
+  - {name: "Sloanz", filter: "Sloanz"}
+  - {name: "V", filter: "V"}
+
+rvinstrument:
+  # out-of-transit RVs only (the in-transit RM sequences are
+  # excluded; the spin-orbit information enters through the DT).
+  - name: "TRES"
+    file: "KELT-17b.TRES.rv"
+
+dopptom:
+  - {name: "T20160222", file: "n20160222.KELT-17b.TRES.44000.fits", orbit: "b", band: "V"}
+  - {name: "T20160226", file: "n20160226.KELT-17b.TRES.44000.fits", orbit: "b", band: "V"}
+
+parameter_file: "kelt17_full.params.yaml"
+
+sampler:
+  method: numpyro
+  tune: 4000
+  draws: 2000
+  chains: 4
+  cores: 4
+  jitter: True
+  target_accept: 0.9
+  recompute_trace: True

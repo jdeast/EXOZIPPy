@@ -1070,6 +1070,14 @@ class Star(Component):
                 {"vmacro": None, "vbeta": None, "vmicro": None}
             )
 
+        # Doppler tomography: Gaussian width of the local line profile
+        # (intrinsic broadening excluding rotation; the instrumental part
+        # is added from the resolving power inside the DT model).
+        from ..dopptom.dopptom import dt_enabled
+
+        if dt_enabled(system):
+            self.manifest.update({"vline": None})
+
         # Absolute astrometry (gaia/abs modes) constrains the reference
         # position and proper motion; rel-mode data are differential and
         # need only the parallax scale (distance), so those instruments do

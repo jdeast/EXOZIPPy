@@ -1,0 +1,51 @@
+# KELT-17 b -- the FAST Doppler-tomography demo.
+#
+# One high-quality transit and the SAME NIGHT's TRES DT cube (2016-02-26),
+# plus the out-of-transit TRES RVs for the planet mass. No SED, one band,
+# circular orbit pinned (the Kepler solve is skipped structurally), so a
+# NUTS fit converges in minutes. For the full 1:1 EXOFASTv2 comparison
+# (11 transits + SED + both DT nights) see kelt17_dt.yaml / kelt17_all.yaml.
+
+run:
+  name: "kelt17_fast"
+
+prefix: "fitresults_fast/KELT-17b"
+
+star:
+  - name: "A"
+    mist: False
+
+planet:
+  - name: "b"
+
+orbit:
+  - name: "b"
+    primary: ["A"]
+    companion: ["b"]
+
+transit:
+  # cols: t, flux, err, then two detrend covariates
+  - {name: "MVRC_i", file: "n20160226.Sloani.MVRC.dat", band: "Sloani"}
+
+band:
+  - {name: "Sloani", filter: "Sloani"}
+
+rvinstrument:
+  # out-of-transit RVs only; the spin-orbit information enters via the DT
+  - name: "TRES"
+    file: "KELT-17b.TRES.rv"
+
+dopptom:
+  - {name: "T20160226", file: "n20160226.KELT-17b.TRES.44000.fits", orbit: "b", band: "Sloani"}
+
+parameter_file: "kelt17_fast.params.yaml"
+
+sampler:
+  method: numpyro
+  tune: 1000
+  draws: 1000
+  chains: 4
+  cores: 4
+  jitter: True
+  target_accept: 0.9
+  recompute_trace: True

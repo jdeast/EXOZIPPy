@@ -933,12 +933,14 @@ class Orbit(Component):
                 }
 
         # Rossiter-McLaughlin: declare the spin-orbit params only when some
-        # rvinstrument enables `rm:`. Samples the decorrelated
-        # sqrt(vsini)cos/sin(lambda) pair and derives vsini/lam from them
-        # (mirrors the secosw/sesinw -> ecc/omega idiom above).
+        # rvinstrument enables `rm:` or a dopptom dataset targets this
+        # system. Samples the decorrelated sqrt(vsini)cos/sin(lambda) pair
+        # and derives vsini/lam from them (mirrors the secosw/sesinw ->
+        # ecc/omega idiom above).
+        from ..dopptom.dopptom import dt_enabled
         from ..rm import rm_enabled
 
-        if rm_enabled(system):
+        if rm_enabled(system) or dt_enabled(system):
             self.manifest.update(
                 {
                     "svcoslam": None,
