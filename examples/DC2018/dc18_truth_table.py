@@ -670,17 +670,44 @@ def print_convention_caveat(rows):
          agreement "0.1%".  It also forecast 0.83-0.94x for the sweep's wide
          prior.  The sweep measured 0.698x, and eight more runs show the
          crossing is not determined to anything like 0.1%.  Both wrong.
-      v4 (this text) reports eleven runs on event 194, every one with its own
-         `_results.csv`, and states the crossing with the uncertainty the
-         scatter actually implies.  It forecasts nothing.
+      v4 reported eleven runs on event 194, every one with its own
+         `_results.csv`, and stated the crossing with the uncertainty the
+         scatter actually implies.  It forecast nothing -- and its item 3,
+         "the source-radius deficit is NOT an extinction problem, and that
+         residual is OURS", was right for a reason it could not see.
+      v5 (this text, 2026-09-24): every one of those eleven runs, and the
+         whole sweep, evaluated the Galactic prior toward RA 180, Dec 0 --
+         the Source was never positioned and the galactic model anchors on
+         it (PR #325).  Repinning the Source alone moved 194 from D_s 0.37x
+         / R_s 0.50x to 0.95x / 0.85x (ab194/anchorfix vs ab194/zpvega).  The
+         C29 grey term is what remains, and it is now BUDGETED: one wide
+         common-mode zeropoint per event (hypot(0.02, |grey|)) with the
+         colour tied by a link, and listed here as the caveat it is.
     """
     seen = [r["event"] for r in rows if str(r["event"]) in C29_GREY]
     if not seen:
         return
     print("\n" + "=" * 104)
-    print("CAVEAT: theta_star TRACKS av.  THE CROSSING SITS AT THE COLOUR")
-    print("        ANCHOR, BUT TO ~0.5 MAG, NOT TO 0.1%.")
-    print("        R_source IS WRONG AT EVERY av.")
+    print("CAVEAT (v5, 2026-09-24): THE SIMULATION'S EXTINCTION CONVENTION")
+    print(
+        "        DIFFERS FROM OURS BY A GREY TERM PER EVENT.  IT IS BUDGETED IN"
+    )
+    print("        THE ZEROPOINT PRIOR AND LISTED HERE, NOT MATCHED.")
+    print(
+        "  Every run tabulated below predates PR #325 and evaluated the Galactic"
+    )
+    print(
+        "  prior toward RA 180, Dec 0 (an unpositioned Source, anchored on)."
+    )
+    print(
+        "  Read them as wrong-sky controls: the R_source deficit they share was"
+    )
+    print(
+        "  that, not extinction -- repinning the Source alone moved 194 from"
+    )
+    print(
+        "  D_s 0.37x / R_s 0.50x to 0.95x / 0.85x.  The 0.85x is the grey term."
+    )
     print("  This simulation reddened MONOCHROMATICALLY at each filter's")
     print("  effective wavelength; we integrate a reddened spectrum through")
     print("  the passband, which is what a measurement is.  For a filter as")
@@ -721,10 +748,11 @@ def print_convention_caveat(rows):
     print("     0.038 dex/mag across the full 4.2-9.4 range, against the CSB")
     print("     relation's 0.042.  It is NOT independent of the SED, because")
     print("     `star_constrains_rho: true` lets the SED constrain rho.")
-    print("  3. R_source IS 0.35-0.43x TRUTH AT EVERY av, over 5.2 mag and")
-    print("     eleven runs.  D_source and theta_star move with av; R_source")
-    print("     does not.  The source-radius deficit is NOT an extinction")
-    print("     problem, and that residual is OURS.")
+    print("  3. R_source WAS 0.35-0.43x TRUTH AT EVERY av over these eleven")
+    print(
+        "     runs, and did not move with av.  v4 called that residual OURS;"
+    )
+    print("     it was the (180, 0) sight line (PR #325), not extinction.")
     print("  4. THE HONEST WIDTH COSTS MORE THAN v3 ESTIMATED.  Every wide")
     print("     prior is pulled DOWN, never up: -0.94 sigma from")
     print("     9.01 +/- 1.83 (the sweep), -0.59 from 8.61 +/- 2.41, -1.59")
@@ -735,6 +763,16 @@ def print_convention_caveat(rows):
     print("  5. fitu0te IS NOT WHY THE SWEEP SITS LOW: at av = 4.26 the u0te")
     print("     runs give 0.634 and 0.630 against 0.632 and 0.651 for u_0,")
     print("     under 0.5%.  The sweep is comparable to the arms.")
+    print("  6. WHAT REMAINS after the anchor fix is the grey term itself:")
+    print(
+        "     theta_star ~0.71-0.76x and R_source ~0.85x of truth on 194, the"
+    )
+    print(
+        "     sim's monochromatic-at-lambda_eff law extincting W149 1.27x more"
+    )
+    print("     per unit colour excess than our bandpass-integrated CCM.  The")
+    print("     sweep configs now budget it as one wide common-mode zeropoint")
+    print("     (dc18_sweep_config.py); the convention is not matched.")
     print("  None of this applies to real Roman data, where the integrated")
     print("  treatment is simply the correct one.")
 

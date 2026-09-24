@@ -21,11 +21,35 @@ import pathlib
 import pytest
 import yaml
 
+from exozippy.components.galacticmodel.galacticmodel import (
+    ANCHOR_PLACEHOLDER_DEC_DEG,
+    ANCHOR_PLACEHOLDER_RA_DEG,
+)
 from exozippy.system import System
 
 EXAMPLE_DIR = pathlib.Path(__file__).parent / ".." / "examples" / "DC2018_128"
 
 pytestmark = pytest.mark.slow
+
+STAR_DEFAULTS = (
+    pathlib.Path(__file__).parent
+    / ".."
+    / "src"
+    / "exozippy"
+    / "components"
+    / "star"
+    / "defaults.yaml"
+)
+
+
+def test_the_placeholder_is_still_what_defaults_yaml_says():
+    """The refusal compares against defaults.yaml's ra/dec initvals; if those
+    move, the constants the check uses must move with them."""
+    with open(STAR_DEFAULTS) as f:
+        d = yaml.safe_load(f)
+    star = d["star"]
+    assert float(star["ra"]["initval"]) == ANCHOR_PLACEHOLDER_RA_DEG
+    assert float(star["dec"]["initval"]) == ANCHOR_PLACEHOLDER_DEC_DEG
 
 
 def _inputs():

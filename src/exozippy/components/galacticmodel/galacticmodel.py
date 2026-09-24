@@ -69,6 +69,11 @@ stays microlensing-agnostic.
 
 logger = logging.getLogger(__name__)
 
+#: defaults.yaml's ra/dec initvals (degrees): a star still sitting exactly here
+#: with no user or data provenance was never positioned.
+ANCHOR_PLACEHOLDER_RA_DEG = 180.0
+ANCHOR_PLACEHOLDER_DEC_DEG = 0.0
+
 # The frame, the line-of-sight basis and the position transform live in
 # physics.py (the numpy layer) so the start-value hints in
 # mulensing/lens.py use exactly the code this likelihood uses.
@@ -624,17 +629,31 @@ class GalacticModel(Component):
         ledger at all (tests, scripts) is left alone: the ledger is the only
         witness that distinguishes "left at the default" from "unknown".
         """
-        # getattr, not a method call: the unit tests hand this component
-        # _MockParam objects that know nothing about provenance, and "no
-        # ledger" must read as "unknown", never as "left at the default".
-        unset = [
-            name
-            for name, param in (("ra", stars.ra), ("dec", stars.dec))
-            if getattr(param, "element_initval_source", lambda i: None)(
+        # A coordinate is "unset" when the provenance ledger does not credit it
+        # to the user or to data AND its start value is still defaults.yaml's
+        # placeholder.  Both halves matter: tests position stars by writing
+        # `star.ra.initval = ...` straight past the ledger (provenance says
+        # "default", value says otherwise -- positioned), and a mock Parameter
+        # has no ledger at all (getattr, not a method call).  The placeholders
+        # are pinned by tests/test_galactic_anchor_position.py.
+        placeholder = {
+            "ra": np.radians(ANCHOR_PLACEHOLDER_RA_DEG),
+            "dec": np.radians(ANCHOR_PLACEHOLDER_DEC_DEG),
+        }
+        unset = []
+        for name, param in (("ra", stars.ra), ("dec", stars.dec)):
+            src = getattr(param, "element_initval_source", lambda i: None)(
                 self.anchor_idx
             )
-            == "default"
-        ]
+            if src in ("user", "data", "solved"):
+                continue
+            if np.isclose(
+                float(param.element_start(self.anchor_idx)),
+                placeholder[name],
+                rtol=0.0,
+                atol=1e-12,
+            ):
+                unset.append(name)
         if not unset:
             return
         names = getattr(stars, "names", None)
