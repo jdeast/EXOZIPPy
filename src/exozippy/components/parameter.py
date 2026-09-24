@@ -1337,6 +1337,20 @@ class Parameter:
                 }
         return sorted(found)
 
+    def element_initval_source(self, i):
+        """Where element ``i``'s start value came from, or None.
+
+        "user", "data", "solved" or "default" when a provenance ledger is
+        attached (``initval_source``, forwarded by Component.add_parameter
+        from ConfigManager); None when there is none -- a bare Parameter
+        built in a test or a script has no ledger, and a caller that wants
+        to REFUSE a default (GalacticModel's anchor position) must not
+        mistake "no ledger" for "left at the default".
+        """
+        if not callable(self.initval_source):
+            return None
+        return self._element_initval_source(i)
+
     def _element_initval_source(self, i):
         """Classify where element ``i``'s start came from.
 

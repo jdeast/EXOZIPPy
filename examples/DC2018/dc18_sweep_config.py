@@ -420,8 +420,17 @@ def build(event, outdir, draws, tune, cores, t_max):
     t_lo, t_hi = observing_span(files.values())
 
     params = {
+        # BOTH stars carry the event's line of sight.  The galactic model
+        # anchors on the Source (anchor_idx 1 below) and the magnification Op
+        # freezes the SOURCE's coordinates for the parallax projection, so a
+        # Source left at defaults.yaml's (180, 0) put every prior and the
+        # parallax geometry of the 2026-09 sweep at Galactic (l 276, b +60)
+        # -- the R_source/2 pull (notes 2026-09-24).  GalacticModel now
+        # refuses an unpositioned anchor; this is the position it wants.
         "star.Lens.ra": {"initval": ra, "sigma": 0},
         "star.Lens.dec": {"initval": dec, "sigma": 0},
+        "star.Source.ra": {"initval": ra, "sigma": 0},
+        "star.Source.dec": {"initval": dec, "sigma": 0},
         # Generic, NOT solar: teff and radius stay FREE (2.9.10), and feh
         # gets the broad prior JDE specified rather than a pin.
         "star.Lens.feh": {"mu": 0.0, "sigma": 0.5},
