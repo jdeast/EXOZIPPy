@@ -8,12 +8,17 @@ dopptom_chi2.pro construction; plus normalization, differentiability, and an
 end-to-end finite-logp build on the KELT-17 TRES DT example (skipped if the
 example data are not present).
 """
+
 import numpy as np
-import pytest
 import pytensor
 import pytensor.tensor as pt
+import pytest
 
-from exozippy.components.dopptom.dopptom import cheb_gauss2, dt_shadow
+from exozippy.components.dopptom.dopptom import (
+    cheb_gauss2,
+    choose_quadrature_order,
+    dt_shadow,
+)
 
 
 def _numpy_shadow(v, center, halfwidth, sigma):
@@ -22,7 +27,11 @@ def _numpy_shadow(v, center, halfwidth, sigma):
     dv = 0.005
     grid = np.arange(v.min() - 8 * sigma, v.max() + 8 * sigma, dv)
     c2 = ((grid - center) / halfwidth) ** 2
-    prof = np.where(c2 < 1, 2.0 / (np.pi * halfwidth) * np.sqrt(np.clip(1 - c2, 0, None)), 0.0)
+    prof = np.where(
+        c2 < 1,
+        2.0 / (np.pi * halfwidth) * np.sqrt(np.clip(1 - c2, 0, None)),
+        0.0,
+    )
     kx = np.arange(-int(6 * sigma / dv), int(6 * sigma / dv) + 1) * dv
     ker = np.exp(-0.5 * (kx / sigma) ** 2)
     ker /= ker.sum()
@@ -36,17 +45,50 @@ def test_shadow_matches_bruteforce_convolution():
     v = np.linspace(-60.0, 60.0, 400)
     vsini, p, sigma = 44.0, 0.096, 3.5
     subx = np.array([-0.6, 0.0, 0.55])
-    sh = pytensor.function([], dt_shadow(v, pt.as_tensor_variable(subx), vsini, p, sigma))()
+    sh = pytensor.function(
+        [], dt_shadow(v, pt.as_tensor_variable(subx), vsini, p, sigma)
+    )()
     for i, ux in enumerate(subx):
         ref = _numpy_shadow(v, vsini * ux, vsini * p, sigma)
         assert np.max(np.abs(sh[i] - ref)) < 0.01 * ref.max()
+
+
+def test_shadow_high_width_ratio_accuracy():
+    """A narrow-line fast rotator: ellipse half-width 20x the Gaussian
+    sigma (PR #323 review -- a fixed 16-node rule errs by ~half the peak
+    here).  With the order chosen by choose_quadrature_order the profile
+    matches brute force to <1% of the peak, at every strip position."""
+    v = np.linspace(-120.0, 120.0, 1200)
+    vsini, p, sigma = 100.0, 0.1, 0.5  # halfwidth/sigma = 20
+    ratio = vsini * p / sigma
+    n_gl = choose_quadrature_order(ratio)
+    assert n_gl > 16
+    subx = np.array([-0.6, 0.0, 0.55])
+    sh = pytensor.function(
+        [],
+        dt_shadow(v, pt.as_tensor_variable(subx), vsini, p, sigma, n_gl=n_gl),
+    )()
+    for i, ux in enumerate(subx):
+        ref = _numpy_shadow(v, vsini * ux, vsini * p, sigma)
+        assert np.max(np.abs(sh[i] - ref)) < 0.01 * ref.max()
+
+
+def test_choose_quadrature_order_bounds():
+    """Floor for the wide-line regime, growth with the ratio, and a cap
+    for pathological inputs."""
+    assert choose_quadrature_order(0.5) == 16
+    assert choose_quadrature_order(1.4) == 16  # the KELT-17 regime
+    n20 = choose_quadrature_order(20.0)
+    assert 60 <= n20 <= 192
+    assert choose_quadrature_order(1e6) == 192
 
 
 def test_shadow_unit_area():
     """Each shadow profile integrates to 1 (analytic normalization)."""
     v = np.linspace(-120.0, 120.0, 2401)
     sh = pytensor.function(
-        [], dt_shadow(v, pt.as_tensor_variable(np.array([0.3])), 44.0, 0.1, 3.0)
+        [],
+        dt_shadow(v, pt.as_tensor_variable(np.array([0.3])), 44.0, 0.1, 3.0),
     )()
     assert np.trapezoid(sh[0], v) == pytest.approx(1.0, abs=1e-6)
 
@@ -75,7 +117,9 @@ def test_cheb_weights_sum_to_one():
 # --------------------------------------------------------------------------
 def test_dt_system_logp_finite():
     import os
+
     import yaml
+
     from exozippy.system import System
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

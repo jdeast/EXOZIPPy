@@ -1073,10 +1073,28 @@ class Star(Component):
         # Doppler tomography: Gaussian width of the local line profile
         # (intrinsic broadening excluding rotation; the instrumental part
         # is added from the resolving power inside the DT model).
-        from ..dopptom.dopptom import dt_enabled
+        # Declared per ELEMENT: each DT dataset reads only its orbit's
+        # primary star, and a star no dataset reads would carry a
+        # likelihood-free sampled vline.  With every star a DT primary
+        # (the common single-star case) mode_manifest returns the plain
+        # free entry this block used to hand-write, so that graph is
+        # unchanged.
+        from ..dopptom.dopptom import dt_primary_star_indices
 
-        if dt_enabled(system):
-            self.manifest.update({"vline": None})
+        dt_stars = dt_primary_star_indices(system)
+        if dt_stars:
+            from exozippy.components.parameterization import mode_manifest
+
+            self.manifest.update(
+                mode_manifest(
+                    [
+                        "dtprimary" if i in dt_stars else "plain"
+                        for i in range(self.n_elements)
+                    ],
+                    {"dtprimary": {"vline": None}, "plain": {}},
+                    where="star vline (dopptom primaries)",
+                )
+            )
 
         # Absolute astrometry (gaia/abs modes) constrains the reference
         # position and proper motion; rel-mode data are differential and

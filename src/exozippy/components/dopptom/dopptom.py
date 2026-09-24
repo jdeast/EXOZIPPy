@@ -52,6 +52,7 @@ import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.components.limbdark import quad_limb_darkened_flux
+from exozippy.outputs.texutils import latex_escape
 
 C_KMS = 299792.458
 FWHM2SIGMA = 2.0 * np.sqrt(2.0 * np.log(2.0))
@@ -65,6 +66,24 @@ def cheb_gauss2(n):
     t_k = np.cos(kk * np.pi / (n + 1.0))
     w_k = (np.pi / (n + 1.0)) * np.sin(kk * np.pi / (n + 1.0)) ** 2
     return t_k, (2.0 / np.pi) * w_k
+
+
+def choose_quadrature_order(width_ratio, floor=16, cap=192):
+    """Chebyshev-Gauss order resolving a Gaussian of sigma against an
+    ellipse of half-width ``width_ratio`` sigmas.
+
+    The rule's node spacing at the strip centre is ~pi/(n+1) in t, i.e.
+    ~pi * halfwidth / (n+1) in velocity; requiring >= ~4 nodes per
+    Gaussian sigma across the ellipse (n ~ 4 * pi/4 * ratio, plus a
+    floor for the wide-line regime) keeps the quadrature error well
+    under 1% of the profile peak at every ratio the cap admits -- a
+    fixed 16 was accurate only for ratio <~ 3 and off by ~half the
+    peak at ratio ~ 20 (PR #323 review).  The cap bounds the graph
+    cost for pathological inputs; 192 nodes covers ratio ~ 60, beyond
+    any plausible spectrograph/rotator combination.
+    """
+    n = int(np.ceil(3.2 * max(float(width_ratio), 1.0))) + 8
+    return int(min(cap, max(floor, n)))
 
 
 def dt_shadow(v_kms, subx, vsini_kms, p, sigma_g_kms, n_gl=16):
@@ -105,6 +124,37 @@ def dt_orbits_in_system(system):
 
 def dt_enabled(system):
     return len(dt_orbits_in_system(system)) > 0
+
+
+def dt_primary_star_indices(system):
+    """Star indices that are the primary of a DT-targeted orbit.
+
+    Each DT dataset reads ONE star's local line width (its orbit's
+    primary), so `vline` is declared for exactly this set -- a
+    system-wide declaration would hand every other star a
+    likelihood-free sampled dimension.  Topology helper: reads the
+    config and the orbit component's construction-time body maps only,
+    so it is safe from stage 2 on.
+    """
+    orbit_comp = getattr(system, "orbit", None)
+    if orbit_comp is None:
+        return set()
+    targets = dt_orbits_in_system(system)
+    idx = set()
+    for oidx, name in enumerate(orbit_comp.names):
+        if name not in targets:
+            continue
+        star_idx = next(
+            (
+                i
+                for (ctype, i) in orbit_comp.primary_bodies[oidx]
+                if ctype == "star"
+            ),
+            None,
+        )
+        if star_idx is not None:
+            idx.add(int(star_idx))
+    return idx
 
 
 class Dopptom(Component):
@@ -218,7 +268,18 @@ class Dopptom(Component):
                         f"encode the resolving power "
                         f"(nYYYYMMDD.<pl>.<inst>.<R>.fits); set `resolution:`."
                     )
-            self.resolutions[i] = float(R)
+            # An explicit resolution: gets the same gate as the parsed
+            # path: R feeds a division (instrumental sigma = c/R) and the
+            # lnL tempering, so 0, a negative, or a non-finite value would
+            # surface far from here as a divide-by-zero or nonsense
+            # broadening.
+            R = float(R)
+            if not np.isfinite(R) or R <= 0:
+                raise ValueError(
+                    f"[dopptom.{self.names[i]}] resolution must be a "
+                    f"finite, positive resolving power; got {R!r}."
+                )
+            self.resolutions[i] = R
 
             # velocity binning (see module docstring): the grid is usually
             # supersampled ~10-30x vs the resolution element; block-average
@@ -232,9 +293,11 @@ class Dopptom(Component):
                 nbin = max(1, int(vb))
             if nbin > 1:
                 nkeep = (vel.size // nbin) * nbin
-                ccf2d = ccf2d[:, :nkeep].reshape(
-                    ccf2d.shape[0], nkeep // nbin, nbin
-                ).mean(axis=2)
+                ccf2d = (
+                    ccf2d[:, :nkeep]
+                    .reshape(ccf2d.shape[0], nkeep // nbin, nbin)
+                    .mean(axis=2)
+                )
                 vel = vel[:nkeep].reshape(nkeep // nbin, nbin).mean(axis=1)
                 logger.info(
                     f"[dopptom.{self.names[i]}] velocity grid binned x{nbin} "
@@ -355,6 +418,21 @@ class Dopptom(Component):
                 f"using 5 km/s for the shadow window."
             )
             vline_init_all = np.full(len(star.names), 5.0)
+        try:
+            p_init_all = np.atleast_1d(
+                cm.resolve(
+                    "planet",
+                    "p",
+                    shape=(len(planet.names),),
+                    names=planet.names,
+                )["initval"]
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[{self.prefix}] could not resolve planet p initval "
+                f"({exc}); using 0.1 for the quadrature order."
+            )
+            p_init_all = np.full(len(planet.names), 0.1)
 
         self._model_nodes = []
         for i in range(self.n_elements):
@@ -400,16 +478,31 @@ class Dopptom(Component):
 
             # shadow: ellipse (x) Gaussian by quadrature over the strip
             sigma_g = (
-                pt.sqrt(
-                    pt.sqr(vline_kms) + (C_KMS / self.resolutions[i]) ** 2
-                )
+                pt.sqrt(pt.sqr(vline_kms) + (C_KMS / self.resolutions[i]) ** 2)
                 / FWHM2SIGMA
             )
             win = self._shadow_window(
                 i, vsini_init_all[oidx], vline_init_all[star_idx]
             )
             v_win = self.vel[i][win]  # (nwin,)
-            shadow = dt_shadow(v_win, x, vsini_kms, p, sigma_g)
+            # Static quadrature order from the worst-case ellipse/Gaussian
+            # width ratio this dataset can reach: the instrument-only
+            # sigma floor (vline can sample toward 0) and the same vsini
+            # headroom as the window.  Graph-build-time constant, like the
+            # window itself (PR #323 review: a fixed 16 is wrong for
+            # narrow-line fast rotators).
+            sigma_floor = (C_KMS / self.resolutions[i]) / FWHM2SIGMA
+            ratio0 = (
+                self._WINDOW_VSINI_HEADROOM
+                * vsini_init_all[oidx]
+                * p_init_all[pidx]
+            ) / sigma_floor
+            n_gl_i = choose_quadrature_order(ratio0)
+            logger.info(
+                f"[dopptom.{self.names[i]}] quadrature order "
+                f"n_gl={n_gl_i} (worst-case width ratio {ratio0:.1f})"
+            )
+            shadow = dt_shadow(v_win, x, vsini_kms, p, sigma_g, n_gl=n_gl_i)
             # EXOFASTv2 normalizes the bump in v/vsini units
             # (int bump d(v/vsini) = beta), i.e. vsini times the per-km/s
             # unit-area profile dt_shadow returns.
@@ -447,17 +540,24 @@ class Dopptom(Component):
                     omega=omega,
                     lam=lam,
                     inc=inc,
+                    # The shadow's centre velocity vsini * x_p at each
+                    # exposure -- the 1D "shadow trajectory" the GUI chart
+                    # draws (plot_data), retained symbolically so
+                    # param_deps can be walked from it.
+                    subvel=vsini_kms * x,
                 )
             )
 
     # ------------------------------------------------------------------
     def compile_plotters(self, model, system):
-        """Compile per-dataset functions returning the shadow image and the
+        """Compile per-dataset functions returning the shadow image, the
+        1D shadow-trajectory velocities (plot_data's model trace), and the
         orbit scalars needed to annotate the EXOFASTv2-style figure."""
         import pytensor
 
         param_symbols = [p.value for p in system.plot_params]
         self._plot_fns = []
+        self._subvel_nodes = []
         for nd in self._model_nodes:
             outs = [
                 nd["model_win"],
@@ -471,21 +571,113 @@ class Dopptom(Component):
                 nd["omega"],
                 nd["lam"],
                 nd["inc"],
+                nd["subvel"],
             ]
+            self._subvel_nodes.append(nd["subvel"])
             self._plot_fns.append(
                 pytensor.function(
                     param_symbols, outs, on_unused_input="ignore"
                 )
             )
 
+    # ------------------------------------------------------------------
+    def _shadow_centroid_data(self, i):
+        """Per-exposure flux-weighted centroid velocity of the observed
+        line-profile residuals [km/s], NaN where an exposure carries no
+        significant shadow signal (out of transit).  Pure numpy on the
+        loaded cube: usable with point=None, before any model exists."""
+        resid = self.ccf2d[i] - self.med[i]
+        w = np.clip(resid, 0.0, None)
+        denom = w.sum(axis=1)
+        cent = np.full(denom.shape, np.nan)
+        strong = denom > 0.25 * denom.max() if denom.max() > 0 else denom > 0
+        np.divide(w @ self.vel[i], denom, out=cent, where=strong)
+        return cent
+
+    def plot_data(self, system, point=None):
+        """GUI charts: one shadow-trajectory chart per DT dataset.
+
+        The 2D phase-velocity image triple stays a bespoke matplotlib
+        figure (``plot``), as the plot contract allows for image-like
+        diagnostics; this chart is the 1D projection both renderers can
+        draw with the shared scatter/line vocabulary -- the observed
+        shadow centroid velocity per exposure against the model's
+        subplanet velocity vsini * x_p(t), the trace whose slope and
+        extent carry lambda and vsini.
+        """
+        from exozippy.chart import Chart, Trace
+
+        specs = []
+        for i in range(self.n_elements):
+            name = self.names[i]
+            traces = [
+                Trace(
+                    name=name,
+                    role="data",
+                    kind="scatter",
+                    x=self.bjd[i],
+                    y=self._shadow_centroid_data(i),
+                    style={"series_index": i},
+                )
+            ]
+            deps = []
+            fns = getattr(self, "_plot_fns", None)
+            if point is not None and fns:
+                args = self._point_to_plot_params(point, system)
+                subvel = np.asarray(fns[i](*args)[-1], dtype=float)
+                node = self._subvel_nodes[i]
+                deps = self._model_trace_param_deps(node, system)
+                traces.append(
+                    Trace(
+                        name="model",
+                        role="model",
+                        kind="line",
+                        x=self.bjd[i],
+                        y=subvel,
+                        node=node,
+                    )
+                )
+            specs.append(
+                Chart(
+                    id=f"dopptom-{name}",
+                    component={"yaml_key": "dopptom", "instance": name},
+                    title=f"Doppler shadow trajectory: {name}",
+                    xlabel="Time [BJD_TDB]",
+                    ylabel="Shadow velocity [km/s]",
+                    traces=traces,
+                    param_deps=deps,
+                    meta={
+                        "file_tag": f"DT_trace_{name}",
+                        "figsize": (12, 5),
+                        "caption": (
+                            r"Doppler-shadow trajectory of "
+                            + latex_escape(name)
+                            + r": the flux-weighted centroid velocity "
+                            r"of the observed line-profile residuals "
+                            r"per exposure (points) against the "
+                            r"model subplanet velocity "
+                            r"$v\sin{i_*}\,x_p(t)$ (line)."
+                        ),
+                    },
+                )
+            )
+        return specs
+
     def plot(self, system, points, filename_prefix="debug"):
-        """EXOFASTv2 dopptom_chi2-style figure per dataset: Data / Model /
-        Residuals as grayscale phase-velocity images with +-vsini and
-        ingress/egress markers and a 'Fractional Variation' colorbar."""
+        """The standard chart PDFs (plot_via_specs over plot_data), plus
+        the bespoke EXOFASTv2 dopptom_chi2-style figure per dataset:
+        Data / Model / Residuals as grayscale phase-velocity images with
+        +-vsini and ingress/egress markers and a 'Fractional Variation'
+        colorbar (an image plot, outside the Chart mark vocabulary, kept
+        matplotlib-only as the plot contract allows for such
+        diagnostics)."""
         import matplotlib.pyplot as plt
 
         if not getattr(self, "_plot_fns", None):
             return
+        from exozippy.plotrender import plot_via_specs
+
+        plot_via_specs(self, system, points, filename_prefix=filename_prefix)
         if isinstance(points, dict):
             points = [points]
         if len(points) == 0:
@@ -504,9 +696,20 @@ class Dopptom(Component):
         args = self._point_to_plot_params(point, system)
 
         for i, fn in enumerate(self._plot_fns):
-            (mwin, vsini, period, tc, ar, p, cosi, ecc, omega, lam, inc) = fn(
-                *args
-            )
+            (
+                mwin,
+                vsini,
+                period,
+                tc,
+                ar,
+                p,
+                cosi,
+                ecc,
+                omega,
+                lam,
+                inc,
+                _subvel,
+            ) = fn(*args)
             vsini, period, tc = float(vsini), float(period), float(tc)
             ar, p, cosi, ecc, omega, lam, inc = (
                 float(ar),
@@ -534,12 +737,14 @@ class Dopptom(Component):
             fac = np.sqrt(1.0 - ecc**2) / (1.0 + esinw)
             with np.errstate(invalid="ignore"):
                 t14 = (
-                    period / np.pi
+                    period
+                    / np.pi
                     * np.arcsin(np.sqrt((1.0 + p) ** 2 - bp**2) / (sini * ar))
                     * fac
                 )
                 t23 = (
-                    period / np.pi
+                    period
+                    / np.pi
                     * np.arcsin(np.sqrt((1.0 - p) ** 2 - bp**2) / (sini * ar))
                     * fac
                 )

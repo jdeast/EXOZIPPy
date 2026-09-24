@@ -932,22 +932,46 @@ class Orbit(Component):
                     "force_node": True,
                 }
 
-        # Rossiter-McLaughlin: declare the spin-orbit params only when some
-        # rvinstrument enables `rm:` or a dopptom dataset targets this
-        # system. Samples the decorrelated sqrt(vsini)cos/sin(lambda) pair
-        # and derives vsini/lam from them (mirrors the secosw/sesinw ->
-        # ecc/omega idiom above).
-        from ..dopptom.dopptom import dt_enabled
-        from ..rm import rm_enabled
+        # Rossiter-McLaughlin / Doppler tomography: declare the spin-orbit
+        # params only on the orbit ELEMENTS some rvinstrument `rm:` key or
+        # dopptom dataset actually targets -- a system-wide switch would
+        # hand every other orbit a likelihood-free sampled pair.  Samples
+        # the decorrelated sqrt(vsini)cos/sin(lambda) pair and derives
+        # vsini/lam from them (mirrors the secosw/sesinw -> ecc/omega
+        # idiom above).  With every orbit targeted (the common single-
+        # orbit case) mode_manifest returns exactly the plain entries this
+        # block used to hand-write, so those graphs are unchanged.
+        from ..dopptom.dopptom import dt_orbits_in_system
+        from ..rm import rm_orbits_in_system
 
-        if rm_enabled(system) or dt_enabled(system):
+        spin_targets = rm_orbits_in_system(system) | dt_orbits_in_system(
+            system
+        )
+        unknown_targets = spin_targets - set(self.names)
+        if unknown_targets:
+            raise ValueError(
+                f"[{self.prefix}] rm:/dopptom orbit reference(s) "
+                f"{sorted(unknown_targets)} name no orbit block; defined "
+                f"orbits: {list(self.names)}."
+            )
+        if spin_targets:
             self.manifest.update(
-                {
-                    "svcoslam": None,
-                    "svsinlam": None,
-                    "vsini": {"expr_key": "from_sv"},
-                    "lam": {"expr_key": "from_sv"},
-                }
+                mode_manifest(
+                    [
+                        "spinorbit" if nm in spin_targets else "plain"
+                        for nm in self.names
+                    ],
+                    {
+                        "spinorbit": {
+                            "svcoslam": None,
+                            "svsinlam": None,
+                            "vsini": "from_sv",
+                            "lam": "from_sv",
+                        },
+                        "plain": {},
+                    },
+                    where="orbit spin-orbit (rm/dopptom targets)",
+                )
             )
 
         # Astrometry constrains the longitude of the ascending node and
