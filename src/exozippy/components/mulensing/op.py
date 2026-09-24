@@ -426,6 +426,49 @@ class VBMDirectMagOp(Op):
     turning it on is a no-op for a linear band -- which is what makes the
     parameter safe to key on the band's declared law rather than on a config
     flag of its own.
+
+    ``astrometry=True`` (review 8.10.1 stage 2; conventions.md C30) adds two
+    outputs: the astrometric centroid SHIFT of the images relative to the
+    source, ``(dtau, dbeta)`` in Einstein radii on the TRAJECTORY frame's
+    ``(tau_hat, beta_hat)`` axes -- the same pair ``MulensEvent.get_trajectory``
+    is written in, so the consumer rotates them onto (N, E) exactly as it
+    does the symbolic point-lens shift.  It reads VBM's ``astrox1``/``astrox2``
+    after the magnification call that already ran (they are instance state
+    filled by every branch: PSPLMag, ESPLMag2, BinaryMag0/2, MultiMag0/2),
+    so the centroid costs no second VBM call.  Three facts about those
+    accumulators, MEASURED against the installed VBMicrolensing 5.5 and
+    pinned by tests/test_astrometric_microlensing_op.py, that this Op
+    depends on:
+
+    * ``astrox`` is the light centroid in VBM's own frame, whose ORIGIN is
+      the lens centre of mass with the primary at ``(-s q/(1+q), 0)`` and
+      the companion at ``(+s/(1+q), 0)`` -- verified against a
+      first-principles image solve (magnification AND centroid agree to
+      1e-8 under that origin and under no other).  That is the frame this
+      Op's ``(x, y)`` already live in (the binary magnification is pinned
+      against MulensModel, whose origin is the centre of mass too), and
+      the N-lens branch's explicit ``pos -= m @ pos`` shift is the same
+      convention made explicit.  So the shift is simply ``astrox - (x, y)``.
+    * A SCALAR-``u`` call (PSPLMag, ESPLMag2) writes ``astrox1`` only, as
+      the centroid's distance from the lens along the lens->source axis
+      (``u (u^2+3)/(u^2+2)`` for a point source, exactly), and leaves
+      ``astrox2`` STALE from whatever ran before on the instance.  The
+      single-lens branch therefore never reads ``astrox2``: it projects
+      ``astrox1`` radially.
+    * Setting ``vbm.astrometry`` perturbs the binary magnifications'
+      returned values in their last bit at some epochs (``BinaryMag2``:
+      4.022386258558532 vs ...53; ``BinaryMag0`` likewise on some of a
+      trajectory's epochs).  An astrometric Op is therefore a SEPARATE
+      INSTANCE from the photometric one -- the light curve keeps its
+      bit-identical A, and the astrometric consumer takes A for its
+      dilution weight from its own call.
+    * VBM's far-field point-source binary (``BinaryMag0`` at ``u >~ 10``,
+      the far-field guard's branch) carries ~1e-6 absolute error in A --
+      ~3% of the ``A - 1`` excess there -- and ~2e-5 Einstein radii in the
+      centroid, against an exact image solve that agrees with it to 1e-12
+      at ``u ~ 2``.  A VBM property, far below any astrometric precision;
+      recorded so the far-field test's tolerance is not mistaken for
+      slack in this Op.
     """
 
     itypes = [pt.dvector, pt.dvector, pt.dmatrix]
@@ -442,6 +485,7 @@ class VBMDirectMagOp(Op):
         quadratic_ld=False,
         orbital_motion=False,
         source_motion=False,
+        astrometry=False,
     ):
         # coords: "<ra>d <dec>d" string — same format the MulensModel Ops take.
         ra_deg, dec_deg = [float(v.rstrip("d")) for v in str(coords).split()]
@@ -475,6 +519,11 @@ class VBMDirectMagOp(Op):
         # exactly the parallax slot.  Input order when both motions are on:
         # [p, times, obs, s_t, alpha_t, dtau_t, du_t].
         self.source_motion = bool(source_motion)
+        # Astrometric centroid outputs (see the class docstring).  otypes is
+        # per instance so the photometric Op keeps its single output.
+        self.astrometry = bool(astrometry)
+        if self.astrometry:
+            self.otypes = [pt.dvector, pt.dvector, pt.dvector]
         if self.orbital_motion and self.n_companions != 1:
             raise ValueError(
                 "VBMDirectMagOp(orbital_motion=True) supports exactly "
@@ -511,6 +560,10 @@ class VBMDirectMagOp(Op):
         vbm = VBMicrolensing.VBMicrolensing()
         vbm.Tol = self._accuracy
         vbm.RelTol = self._relative_accuracy
+        # Fill the astrox1/astrox2 accumulators during every magnification
+        # call.  Off on a photometric Op: it moves BinaryMag2's A in the
+        # last bit (class docstring), and nothing there reads them.
+        vbm.astrometry = self.astrometry
         # Profile is instance state, set once; a1/a2 are per-call and set in
         # _magnify.  Keep it that way: SetLDprofile on every epoch would be
         # the same shape of waste _deltas exists to avoid.
@@ -544,7 +597,17 @@ class VBMDirectMagOp(Op):
         self._vbm = self._build_vbm()
 
     def infer_shape(self, node, input_shapes):
-        return [input_shapes[1]]
+        return [input_shapes[1]] * self._n_outputs
+
+    @property
+    def _n_outputs(self):
+        return 3 if self.astrometry else 1
+
+    def _nan_out(self, n):
+        """The all-NaN result for a rejected proposal, in this Op's output
+        arity: one array, or (A, dtau, dbeta)."""
+        nan = np.full(int(n), np.nan)
+        return (nan, nan.copy(), nan.copy()) if self.astrometry else nan
 
     def _deltas(self, obs_pos_np):
         """Cached parallax offsets (delta_N, delta_E) for a deviation array.
@@ -583,6 +646,7 @@ class VBMDirectMagOp(Op):
         vbm.a1 = 0.0 if u1 is None else u1
         if self.quadratic_ld:
             vbm.a2 = 0.0 if u2 is None else u2
+        astro = self.astrometry
 
         if self.n_companions == 0:
             # Single lens.  u is rotation-invariant, so the trajectory frame
@@ -594,14 +658,32 @@ class VBMDirectMagOp(Op):
                 # case is a forced `use_op: true` (the symbolic path otherwise
                 # owns it, and stays differentiable).
                 u2sq = u * u
-                return (u2sq + 2.0) / np.sqrt(u2sq * (u2sq + 4.0))
-            # ESPLMag2 is table-backed and internally short-circuits to the
-            # point source far from the lens, so this needs no far-field guard
-            # of the kind the binary branch below does (VBM's hardcoded
-            # safedist bug is in BinaryMag2, not here).
-            return np.array(
-                [vbm.ESPLMag2(float(ui), rho) for ui in u.tolist()]
-            )
+                A = (u2sq + 2.0) / np.sqrt(u2sq * (u2sq + 4.0))
+                if not astro:
+                    return A
+                # The centroid's distance from the lens, closed form (C30);
+                # projected radially below.
+                c_rad = u * (u2sq + 3.0) / (u2sq + 2.0)
+            else:
+                # ESPLMag2 is table-backed and internally short-circuits to
+                # the point source far from the lens, so this needs no
+                # far-field guard of the kind the binary branch below does
+                # (VBM's hardcoded safedist bug is in BinaryMag2, not here).
+                if not astro:
+                    return np.array(
+                        [vbm.ESPLMag2(float(ui), rho) for ui in u.tolist()]
+                    )
+                A = np.empty_like(u)
+                c_rad = np.empty_like(u)
+                for i, ui in enumerate(u.tolist()):
+                    A[i] = vbm.ESPLMag2(float(ui), rho)
+                    # astrox1 ONLY: a scalar-u call leaves astrox2 stale
+                    # (class docstring).  Disk-integrated, limb-darkened.
+                    c_rad[i] = vbm.astrox1
+            # Radial projection along lens -> source; at u == 0 exactly the
+            # centroid is the lens (symmetric images), so the ratio is 0.
+            ratio = np.divide(c_rad, u, out=np.zeros_like(u), where=u > 0.0)
+            return A, ratio * x, ratio * y
 
         if self.n_companions == 1:
             s, q, _ = companions[0]
@@ -618,9 +700,18 @@ class VBMDirectMagOp(Op):
                 # use the point-source call rather than gating on distance.
                 # Gated on the user's config flag, not the numeric value of
                 # rho, since rho is otherwise a derived/sampled quantity.
-                return np.array(
+                if not astro:
+                    return np.array(
+                        [
+                            mag0(si, q, xi, yi)
+                            for si, xi, yi in zip(
+                                s_arr.tolist(), x.tolist(), y.tolist()
+                            )
+                        ]
+                    )
+                return self._collect(
                     [
-                        mag0(si, q, xi, yi)
+                        (mag0, (si, q, xi, yi))
                         for si, xi, yi in zip(
                             s_arr.tolist(), x.tolist(), y.tolist()
                         )
@@ -628,12 +719,31 @@ class VBMDirectMagOp(Op):
                 )
             r_inf = s_arr + 1.0 / s_arr + 2.0
             far = (x * x + y * y) > (r_inf + 2.0 * rho) ** 2
-            return np.array(
+            if not astro:
+                return np.array(
+                    [
+                        (
+                            mag0(si, q, xi, yi)
+                            if isfar
+                            else mag2(si, q, xi, yi, rho)
+                        )
+                        for si, xi, yi, isfar in zip(
+                            s_arr.tolist(),
+                            x.tolist(),
+                            y.tolist(),
+                            far.tolist(),
+                        )
+                    ]
+                )
+            # Both BinaryMag0 (the far-field guard's branch) and BinaryMag2
+            # fill the astrox pair -- measured, so the guard needs no
+            # exception.
+            return self._collect(
                 [
                     (
-                        mag0(si, q, xi, yi)
+                        (mag0, (si, q, xi, yi))
                         if isfar
-                        else mag2(si, q, xi, yi, rho)
+                        else (mag2, (si, q, xi, yi, rho))
                     )
                     for si, xi, yi, isfar in zip(
                         s_arr.tolist(),
@@ -658,17 +768,46 @@ class VBMDirectMagOp(Op):
         vbm.SetLensGeometry(np.column_stack([pos, m]).ravel().tolist())
         mag2, mag0 = vbm.MultiMag2, vbm.MultiMag0
         if not self.use_rho:
-            return np.array(
-                [mag0(xi, yi) for xi, yi in zip(x.tolist(), y.tolist())]
+            if not astro:
+                return np.array(
+                    [mag0(xi, yi) for xi, yi in zip(x.tolist(), y.tolist())]
+                )
+            return self._collect(
+                [(mag0, (xi, yi)) for xi, yi in zip(x.tolist(), y.tolist())]
             )
         r_inf = max(s + 1.0 / s for (s, _, _) in companions) + 2.0
         far = (x * x + y * y) > (r_inf + 2.0 * rho) ** 2
-        return np.array(
+        if not astro:
+            return np.array(
+                [
+                    mag0(xi, yi) if isfar else mag2(xi, yi, rho)
+                    for xi, yi, isfar in zip(
+                        x.tolist(), y.tolist(), far.tolist()
+                    )
+                ]
+            )
+        return self._collect(
             [
-                mag0(xi, yi) if isfar else mag2(xi, yi, rho)
+                (mag0, (xi, yi)) if isfar else (mag2, (xi, yi, rho))
                 for xi, yi, isfar in zip(x.tolist(), y.tolist(), far.tolist())
             ]
         )
+
+    def _collect(self, calls):
+        """Run one VBM call per epoch and read the astrox pair after EACH
+        (instance state, overwritten by the next call).  Returns
+        ``(A, cx, cy)`` arrays: the magnification and the light centroid in
+        the frame the call's source coordinates were given in."""
+        vbm = self._vbm
+        n = len(calls)
+        A = np.empty(n)
+        cx = np.empty(n)
+        cy = np.empty(n)
+        for i, (fn, args) in enumerate(calls):
+            A[i] = fn(*args)
+            cx[i] = vbm.astrox1
+            cy[i] = vbm.astrox2
+        return A, cx, cy
 
     def perform(self, node, inputs, outputs):
         p, times_np, obs_pos_np = inputs[:3]
@@ -679,7 +818,7 @@ class VBMDirectMagOp(Op):
             k += 2
         source_series = inputs[k : k + 2] if self.source_motion else None
         try:
-            A = self._compute(p, times_np, obs_pos_np, series, source_series)
+            res = self._compute(p, times_np, obs_pos_np, series, source_series)
         except (ValueError, RuntimeError) as exc:
             # Invalid parameter combination -> NaN magnifications -> logp =
             # -inf -> the proposal is rejected.  That is the intended handling
@@ -703,8 +842,12 @@ class VBMDirectMagOp(Op):
                     RuntimeWarning,
                     stacklevel=2,
                 )
-            A = np.full(len(times_np), np.nan)
-        outputs[0][0] = np.asarray(A, dtype=np.float64)
+            res = self._nan_out(len(times_np))
+        if self.astrometry:
+            for k_out, arr in enumerate(res):
+                outputs[k_out][0] = np.asarray(arr, dtype=np.float64)
+        else:
+            outputs[0][0] = np.asarray(res, dtype=np.float64)
 
     def _param_labels(self):
         """Names of the entries of this Op's param vector, in order -- so the
@@ -760,7 +903,7 @@ class VBMDirectMagOp(Op):
                     RuntimeWarning,
                     stacklevel=2,
                 )
-            return np.full(len(times_np), np.nan)
+            return self._nan_out(len(times_np))
         bad = ~np.isfinite(np.asarray(p, dtype=float))
         if np.any(bad):
             if not self._warned:
@@ -780,7 +923,7 @@ class VBMDirectMagOp(Op):
                     RuntimeWarning,
                     stacklevel=2,
                 )
-            return np.full(len(times_np), np.nan)
+            return self._nan_out(len(times_np))
 
         base = _base_mm_params(p)
         idx = 5
@@ -846,7 +989,25 @@ class VBMDirectMagOp(Op):
             y = -u
 
         with np.errstate(invalid="ignore", divide="ignore"):
-            return self._magnify(companions, x, y, rho, u1, u2)
+            out = self._magnify(companions, x, y, rho, u1, u2)
+        if not self.astrometry:
+            return out
+
+        # Centroid shift = centroid - source, in the frame the source
+        # coordinates were given in (VBM's origin is the centre of mass,
+        # which is this frame's origin -- class docstring), then back onto
+        # the trajectory axes.  The source sits at (-tau, -u) in the
+        # trajectory frame, so a displacement's components there ARE its
+        # (tau_hat, beta_hat) components; the binary branch's rotation by
+        # alpha into the lens-axis frame is undone with its inverse.
+        A, cx, cy = out
+        dx, dy = cx - x, cy - y
+        if self.n_companions == 1:
+            dtau = dx * ca + dy * sa
+            dbeta = -dx * sa + dy * ca
+        else:
+            dtau, dbeta = dx, dy
+        return A, dtau, dbeta
 
     def pullback(self, inputs, outputs, cotangents):
         # Deliberately loud: this Op is only reachable from non-gradient
@@ -867,11 +1028,12 @@ class VBMDirectMagOp(Op):
         # sampled parameters, so they genuinely feed the output -- honesty
         # here is what keeps pullback's refusal reachable (same reasoning
         # as _MagGradOp.connection_pattern).
-        pattern = [[True], [False], [False]]
+        n_out = self._n_outputs
+        pattern = [[True] * n_out, [False] * n_out, [False] * n_out]
         if self.orbital_motion:
-            pattern += [[True], [True]]
+            pattern += [[True] * n_out, [True] * n_out]
         if self.source_motion:
-            pattern += [[True], [True]]
+            pattern += [[True] * n_out, [True] * n_out]
         return pattern
 
 

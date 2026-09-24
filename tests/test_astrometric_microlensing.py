@@ -463,14 +463,20 @@ def _paczynski_inverse(A):
     return float(np.sqrt(2.0 * (A / np.sqrt(A**2 - 1.0) - 1.0)))
 
 
-def test_binary_lens_raises_and_finite_source_warns(lensed_files, caplog):
+def test_binary_and_finite_source_events_build_through_the_op(
+    lensed_files, caplog
+):
     """
     Given a lensed astrometric dataset,
-    When the event has a lens companion -> NotImplementedError naming
-      stage 2 and the opt-out; when it is finite_source -> one warning
-      about the rho << u validity, and the build succeeds.
+    When the event has a lens companion, or is finite_source,
+    Then the system builds (stage 2: the centroid comes from
+      VBMicrolensing's astrox accumulators through VBMDirectMagOp), the
+      astrometric log-likelihood is finite, no point-source validity
+      warning is issued, and the event declares the gradient-free sampler
+      requirement the Op path always carried.
     """
     tmp_dir, _ = lensed_files
+    caplog.set_level(logging.WARNING)
     binary = _full_config(tmp_dir)
     binary["planet"] = [{"name": "Lb"}]
     binary["lens"].append({"body": "planet.Lb", "name": "Lb"})
@@ -478,19 +484,22 @@ def test_binary_lens_raises_and_finite_source_warns(lensed_files, caplog):
     params["planet.Lb.mass"] = {"initval": 1.0}
     params["lens.Lb.s"] = {"initval": 1.2}
     params["lens.Lb.alpha"] = {"initval": 30.0}
-    with pytest.raises(NotImplementedError, match="microlensing: false"):
-        system = System(binary, user_params=params)
-        system.prepare()
+    system, model = _build(binary, params)
+    assert system.mulensevent.uses_op()
+    assert np.isfinite(_astro_logp(model, model.initial_point()))
+    assert "nuts" in system.mulensevent.sampler_requirements().get(
+        "incompatible", set()
+    )
 
-    caplog.set_level(logging.WARNING)
     fs = _full_config(tmp_dir, event_extra={"finite_source": True})
     params = _base_params()
     params["source.Source.rho"] = {"initval": 1e-3}
-    system = System(fs, user_params=params)
-    system.prepare()
-    assert any(
+    system, model = _build(fs, params)
+    assert system.mulensevent.uses_op()
+    assert np.isfinite(_astro_logp(model, model.initial_point()))
+    assert not any(
         "POINT-SOURCE formula" in rec.getMessage() for rec in caplog.records
-    ), [r.getMessage() for r in caplog.records]
+    )
 
 
 def test_lensed_dataset_without_photometry_raises(lensed_files):
