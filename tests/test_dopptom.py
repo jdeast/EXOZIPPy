@@ -120,7 +120,8 @@ def test_cheb_weights_sum_to_one():
 # fresh clone, or a hard failure with no network (review on PR #323).
 # The fast config has no sed: block and exercises the same DT component.
 # --------------------------------------------------------------------------
-def test_dt_system_logp_finite():
+@pytest.fixture(scope="module")
+def kelt17_fast_system():
     import os
 
     import yaml
@@ -140,7 +141,56 @@ def test_dt_system_logp_finite():
         s = System(cfg)
         s.prepare()
         model = s.build_model()
-        lp = float(model.compile_logp()(model.initial_point()))
     finally:
         os.chdir(cwd)
+    return s, model
+
+
+def test_dt_system_logp_finite(kelt17_fast_system):
+    s, model = kelt17_fast_system
+    lp = float(model.compile_logp()(model.initial_point()))
     assert np.isfinite(lp), f"DT example logp not finite: {lp}"
+
+
+def test_shadow_window_check_fires_from_sampled_pair(
+    kelt17_fast_system, caplog
+):
+    """The post-fit window check must work from the SAMPLED
+    sqrt(vsini)cos/sin(lambda) pair alone: in a single-orbit fit the
+    derived orbit.vsini is not a trace variable (force_node is off on
+    the every-orbit-targeted path), and a guard on it left the check
+    dead in exactly the fits the window is sized for (review on
+    d961ec7).  A point whose sv pair implies ~3x the start vsini must
+    trigger the clipped-window warning WITHOUT any 'orbit.vsini' key;
+    one near the start values must not."""
+    import logging
+
+    s, model = kelt17_fast_system
+    dt = s.dopptom
+    half = dt._window_half_kms[0]
+    assert half is not None and np.isfinite(half)
+
+    # sv pair for ~3x the KELT-17 start vsini (44.2 -> ~133 km/s):
+    # sc^2 + ss^2 = vsini [m/s]
+    hot = {
+        "orbit.svcoslam": np.array([np.sqrt(133e3)]),
+        "orbit.svsinlam": np.array([0.0]),
+        "star.vline": np.array([5490.0]),
+    }
+    cool = {
+        "orbit.svcoslam": np.array([-90.87]),
+        "orbit.svsinlam": np.array([-189.59]),
+        "star.vline": np.array([5490.0]),
+    }
+    with caplog.at_level(logging.WARNING):
+        caplog.clear()
+        dt._check_shadow_window([cool])
+        assert not any("shadow window" in r.message for r in caplog.records)
+        assert not any("skipped" in r.message for r in caplog.records)
+        caplog.clear()
+        dt._check_shadow_window([hot])
+        assert any("shadow window" in r.message for r in caplog.records), (
+            "clipped-window warning did not fire"
+        )
+        # and the check must not have been skipped for a missing key
+        assert not any("skipped" in r.message for r in caplog.records)

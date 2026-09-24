@@ -454,15 +454,19 @@ class Dopptom(Component):
             points = [points]
         if not points:
             return
-        if "orbit.vsini" not in points[0] or "star.vline" not in points[0]:
-            # A point layout without the tracked nodes cannot be
-            # checked; say so instead of silently skipping (this used to
-            # be a bare return INSIDE the per-dataset loop, skipping the
-            # check for every dataset -- deep review finding).
+        # vsini from the SAMPLED sqrt(vsini)cos/sin(lambda) pair, which is
+        # a Deterministic in every point layout.  The derived orbit.vsini
+        # is NOT: on the every-orbit-targeted path force_node is
+        # deliberately off (trace parity with master), so no
+        # 'orbit.vsini' data_var exists and a guard on it left this check
+        # dead in every single-orbit fit -- exactly the case the window
+        # is sized for (review on d961ec7).
+        need = ("orbit.svcoslam", "orbit.svsinlam", "star.vline")
+        missing = [k for k in need if k not in points[0]]
+        if missing:
             logger.warning(
                 f"[{self.prefix}] shadow-window check skipped: the "
-                f"point dict carries no tracked orbit.vsini/star.vline "
-                f"nodes."
+                f"point dict lacks {missing}."
             )
             return
         for i, nd in enumerate(self._model_nodes):
@@ -472,7 +476,9 @@ class Dopptom(Component):
             oidx, star_idx = nd["oidx"], nd["star_idx"]
             worst = -np.inf
             for pnt in points:
-                vsini = float(np.atleast_1d(pnt["orbit.vsini"])[oidx]) / 1e3
+                sc = float(np.atleast_1d(pnt["orbit.svcoslam"])[oidx])
+                ss = float(np.atleast_1d(pnt["orbit.svsinlam"])[oidx])
+                vsini = (sc**2 + ss**2) / 1e3  # km/s (calc_vsini_from_sv)
                 vline = float(np.atleast_1d(pnt["star.vline"])[star_idx]) / 1e3
                 sigma = np.sqrt(vline**2 + (C_KMS / self.resolutions[i]) ** 2)
                 worst = max(

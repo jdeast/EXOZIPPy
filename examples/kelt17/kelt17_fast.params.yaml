@@ -1,7 +1,4 @@
 # KELT-17 b -- starting values / priors for the fast DT demo
-# (kelt17_fast.yaml). Near the EXOFASTv2 best fit. With no SED/MIST in this
-# config the stellar fundamentals carry Gaussian priors instead (the same
-# pattern as the RM demo's kelt17.params.yaml); sigma = 0 pins a value.
 
 # ---- Star (no SED/MIST here -> prior the fundamentals) ----
 star.A.radius:  {initval: 1.645, sigma: 0.06}
@@ -19,10 +16,6 @@ planet.b.p:      {initval: 0.093633}
 
 # ---- Orbit (circular, as in Zhou et al. 2016) ----
 orbit.b.logP:   {initval: 0.48857340}
-# tc at the epoch of THE fitted transit (2016-02-26), not the EXOFASTv2
-# global epoch 51 periods earlier: with a single transit the P--tc
-# correlation scales with the lever arm, and the long lever forces NUTS
-# into deep trees.  Same ephemeris, reparameterized.
 orbit.b.tc:     {initval: 2457444.833861}
 orbit.b.cosi:   {initval: 0.082732}
 orbit.b.secosw: {initval: 0.0, sigma: 0}
