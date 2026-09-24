@@ -196,7 +196,8 @@ def _parse_modes_txt(modes_txt):
     # lnZ is reported as "lnZ=92499.73+/-0.41"; a bare [-+0-9.eE]+ swallows
     # the leading "+" of the "+/-" and float() then raises on "92499.73+".
     for mm in re.finditer(
-        r"mode (\d+):\s*lnZ\s*=\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", t):
+        r"mode (\d+):\s*lnZ\s*=\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", t
+    ):
         out["lnZ"][int(mm.group(1)) - 1] = float(mm.group(2))
     return out
 
