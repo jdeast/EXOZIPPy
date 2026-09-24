@@ -1597,55 +1597,46 @@ class MulensEvent(Component):
         The point-source formula is EXACT for a point lens (the lens
         equation is a quadratic) and only safe unresolved: averaged over a
         source disk the shift nearly vanishes at ``rho ~ u`` and reverses
-        sign beyond (notes/missing_mulens_physics.txt 3a).
-        ``check_centroid_shift_supported`` is the caller's gate.
+        sign beyond (notes/missing_mulens_physics.txt 3a).  This method is
+        the SYMBOLIC path only; ``get_astrometric_terms`` is the consumer's
+        entry point and dispatches finite-source / binary / N-lens events
+        to VBMicrolensing's disk-integrated centroid (stage 2).
         """
         tau_p, u_p = self.get_trajectory(times, obs_pos, system, index)
         u2 = pt.sqr(tau_p) + pt.sqr(u_p)
-        mu_n = self.mu_dec_rel_geo.value[0]
-        mu_e = self.mu_ra_rel_geo.value[0]
-        mu_mag = self.mu_rel_geo_mag.value[0]  # floored at MU_REL_FLOOR
-        tau_n, tau_e = mu_n / mu_mag, mu_e / mu_mag
-        beta_n, beta_e = -tau_e, tau_n
-        dth_n = tau_p * tau_n + u_p * beta_n
-        dth_e = tau_p * tau_e + u_p * beta_e
         scale = -self.theta_E.value[0] / (u2 + 2.0)
-        return scale * dth_n, scale * dth_e
+        return self._shift_to_sky(tau_p, u_p, scale)
 
     def check_centroid_shift_supported(self, where):
-        """Gate for ``get_centroid_shift``'s consumers.
+        """Gate for the astrometric consumer -- now a statement of WHICH
+        path serves the event, logged, since stage 2 closed the gaps.
 
-        A binary (or N-body) lens has no closed-form centroid; VBM's
-        ``astrox`` accumulators are review 8.10.1's stage 2 and are not
-        wired, so that RAISES.  A finite-source single lens is allowed
-        with a warning: the point-source shift is exact for a point lens
-        and valid where ``rho << u``, and the events with a measurable
-        finite-source signal already have ``theta_E`` through ``rho`` --
-        the user, not the code, judges whether the astrometric epochs sit
-        in the unresolved regime (rope, not gates).
+        Point-source single lens: the symbolic closed form
+        (``get_centroid_shift``).  Finite source, binary, N-lens, or a
+        forced ``use_op``: ``VBMDirectMagOp(astrometry=True)`` through
+        ``get_astrometric_terms`` -- disk-integrated and limb-darkened, so
+        the stage-1 ``rho << u`` caveat is gone, and gradient-free like the
+        photometry it rides with.  Nothing raises here any more; the one
+        remaining refusal (a lensed dataset with no light curve) lives
+        with its reason in ``AstrometryInstrument._resolve_lens_photometry``.
         """
-        if self.n_companions >= 1:
-            raise NotImplementedError(
-                f"[{where}] astrometric microlensing (the centroid shift) "
-                f"is implemented for a single point lens only; this event "
-                f"has {self.n_companions} lens companion(s).  The binary-"
-                f"lens centroid (VBMicrolensing's astrox1/astrox2) is review "
-                f"item 8.10.1 stage 2.  Set `microlensing: false` on the "
-                f"astrometry dataset to fit it without the lens term."
+        if self.uses_op():
+            what = (
+                f"{self.n_companions + 1}-body lens"
+                if self.n_companions
+                else "single lens"
             )
-        if self.finite_source and not getattr(
-            self, "_warned_finite_source_centroid", False
-        ):
-            self._warned_finite_source_centroid = True
-            logger.warning(
-                f"[{where}] the astrometric centroid shift uses the POINT-"
-                f"SOURCE formula while this event is finite_source.  It is "
-                f"exact only where rho << u: averaged over the source disk "
-                f"the shift nearly vanishes at rho ~ u and reverses sign "
-                f"beyond, and the dilution weight uses the point-source "
-                f"magnification.  Check that the astrometric epochs are in "
-                f"the unresolved regime, or set `microlensing: false` on "
-                f"the dataset."
+            if self.finite_source:
+                what += ", finite source"
+            logger.info(
+                f"[{where}] astrometric centroid shift through "
+                f"VBMicrolensing's astrox accumulators ({what}; "
+                f"VBMDirectMagOp(astrometry=True), gradient-free)."
+            )
+        else:
+            logger.info(
+                f"[{where}] astrometric centroid shift from the symbolic "
+                f"point-lens closed form (differentiable)."
             )
 
     # ------------------------------------------------------------------
@@ -1950,34 +1941,21 @@ class MulensEvent(Component):
             # u2 is genuinely in play (_resolve_quadratic_ld), so a
             # linear-band fit keeps MulensModel and stays bit-identical --
             # see that method.
-            sp = self._get_safe_mm_params(system, index)
-            param_list = [
-                sp["t_0"],
-                sp["u_0"],
-                sp["t_E"],
-                sp["pi_E_N"],
-                sp["pi_E_E"],
-                source.rho.value[index],
-            ]
-            if effective_bandpass is not None:
-                param_list.append(u1)
-                if use_u2:
-                    param_list.append(u2)
-            mag_op = VBMDirectMagOp(
+            return self._vbm_op_call(
+                times,
+                obs_pos,
+                system,
+                index,
                 coords=coords,
-                n_companions=0,
                 use_rho=True,
-                bandpass=effective_bandpass,
-                quadratic_ld=use_u2,
-                source_motion=source_series is not None,
+                effective_bandpass=effective_bandpass,
+                use_u2=use_u2,
+                u1=u1,
+                u2=u2,
+                source_series=source_series,
+                geometry_series=None,
+                n_companions=0,
             )
-            op_inputs = [pt.stack(param_list), times_tensor, obs_tensor]
-            if source_series is not None:
-                op_inputs += [
-                    pt.as_tensor_variable(source_series[0]),
-                    pt.as_tensor_variable(source_series[1]),
-                ]
-            return mag_op(*op_inputs)
 
         # Per-epoch companion geometry (lens orbital motion, C24) -- None
         # for a static lens.
@@ -1988,52 +1966,21 @@ class MulensEvent(Component):
         )
 
         if n_lenses >= 2 and self.backend == "vbm_direct":
-            sp = self._get_safe_mm_params(system, index)
-            param_list = [
-                sp["t_0"],
-                sp["u_0"],
-                sp["t_E"],
-                sp["pi_E_N"],
-                sp["pi_E_E"],
-            ]
-            if use_rho:
-                param_list.append(source.rho.value[index])
-            for j in range(self.n_companions):
-                # Companion slot j = lens vector element j+1 (masked
-                # primary).
-                param_list.extend(
-                    [
-                        lens.s.value[j + 1],
-                        clip_q(lens.q.value[j + 1]),
-                        self._alpha_deg(system, j),
-                    ]
-                )
-            if effective_bandpass is not None:
-                param_list.append(u1)
-                if use_u2:
-                    param_list.append(u2)
-            mag_op = VBMDirectMagOp(
+            return self._vbm_op_call(
+                times,
+                obs_pos,
+                system,
+                index,
                 coords=coords,
-                n_companions=self.n_companions,
                 use_rho=use_rho,
-                bandpass=effective_bandpass,
-                quadratic_ld=use_u2,
-                orbital_motion=geometry_series is not None,
-                source_motion=source_series is not None,
+                effective_bandpass=effective_bandpass,
+                use_u2=use_u2,
+                u1=u1,
+                u2=u2,
+                source_series=source_series,
+                geometry_series=geometry_series,
+                n_companions=self.n_companions,
             )
-            if geometry_series is not None or source_series is not None:
-                op_inputs = [pt.stack(param_list), times_tensor, obs_tensor]
-                if geometry_series is not None:
-                    op_inputs += [
-                        pt.as_tensor_variable(geometry_series[0]),
-                        pt.as_tensor_variable(geometry_series[1]),
-                    ]
-                if source_series is not None:
-                    op_inputs += [
-                        pt.as_tensor_variable(source_series[0]),
-                        pt.as_tensor_variable(source_series[1]),
-                    ]
-                return mag_op(*op_inputs)
         elif n_lenses == 2:
             if lens.orbital_motion[0] == "keplerian":
                 raise NotImplementedError(
@@ -2101,6 +2048,177 @@ class MulensEvent(Component):
             )
 
         return mag_op(pt.stack(param_list), times_tensor, obs_tensor)
+
+    def _vbm_op_call(
+        self,
+        times,
+        obs_pos,
+        system,
+        index,
+        *,
+        coords,
+        use_rho,
+        effective_bandpass,
+        use_u2,
+        u1,
+        u2,
+        source_series,
+        geometry_series,
+        n_companions,
+        astrometry=False,
+    ):
+        """ONE builder of a ``VBMDirectMagOp`` call: the param vector in
+        op.py's layout, the Op with its flags, and the per-epoch series
+        inputs.  ``get_magnification_op``'s two VBM branches (ESPL,
+        binary/N-lens) and ``get_astrometric_terms`` all go through it, so
+        the astrometric Op is built from the SAME parameters as the
+        photometric one and differs only in ``astrometry=True`` (a separate
+        instance -- op.py's class docstring says why).  Returns the Op's
+        output: A, or ``(A, dtau, dbeta)`` with ``astrometry``.
+
+        ``n_companions == 0`` is the single-lens ESPL layout (no companion
+        block); otherwise every companion slot j contributes
+        ``(s, q, alpha_deg)`` from lens vector element j+1.
+        """
+        source = system.source
+        lens = system.lens
+        sp = self._get_safe_mm_params(system, index)
+        param_list = [
+            sp["t_0"],
+            sp["u_0"],
+            sp["t_E"],
+            sp["pi_E_N"],
+            sp["pi_E_E"],
+        ]
+        if use_rho:
+            param_list.append(source.rho.value[index])
+        for j in range(n_companions):
+            # Companion slot j = lens vector element j+1 (masked primary).
+            param_list.extend(
+                [
+                    lens.s.value[j + 1],
+                    clip_q(lens.q.value[j + 1]),
+                    self._alpha_deg(system, j),
+                ]
+            )
+        if effective_bandpass is not None:
+            param_list.append(u1)
+            if use_u2:
+                param_list.append(u2)
+        mag_op = VBMDirectMagOp(
+            coords=coords,
+            n_companions=n_companions,
+            use_rho=use_rho,
+            bandpass=effective_bandpass,
+            quadratic_ld=use_u2,
+            orbital_motion=geometry_series is not None,
+            source_motion=source_series is not None,
+            astrometry=astrometry,
+        )
+        op_inputs = [
+            pt.stack(param_list),
+            pt.as_tensor_variable(times),
+            pt.as_tensor_variable(obs_pos),
+        ]
+        if geometry_series is not None:
+            op_inputs += [
+                pt.as_tensor_variable(geometry_series[0]),
+                pt.as_tensor_variable(geometry_series[1]),
+            ]
+        if source_series is not None:
+            op_inputs += [
+                pt.as_tensor_variable(source_series[0]),
+                pt.as_tensor_variable(source_series[1]),
+            ]
+        return mag_op(*op_inputs)
+
+    def get_astrometric_terms(
+        self,
+        times,
+        obs_pos,
+        system,
+        index=0,
+        u1=None,
+        u2=None,
+        bandpass=None,
+    ):
+        """``(A, delta_N, delta_E)`` at ``times`` for the astrometric
+        consumer (``AstrometryInstrument._apply_lens``): the magnification
+        that weights the dilution and the centroid shift in mas (C30), from
+        ONE evaluation.
+
+        Point-source single lens (``uses_op`` False): the symbolic pair,
+        ``get_magnification`` + ``get_centroid_shift`` -- differentiable.
+
+        Everything else -- finite source, binary, N-lens, or a forced
+        ``use_op`` -- goes through ``VBMDirectMagOp(astrometry=True)``
+        (review 8.10.1 stage 2), ALWAYS VBM regardless of the photometric
+        ``backend:``: MulensModel has no centroid, and VBM's ``astrox`` is
+        the same centroid a MulensModel-backed light curve would imply
+        (C18: the trajectory conventions are identical; op.py's class
+        docstring: the origin is the centre of mass in both).  The A this
+        returns is therefore VBM's, which for a linear-LD finite-source
+        single lens differs from the MulensModel A the light curve fits by
+        up to ~5 mmag in the deep finite-source regime (mulensing.md, the
+        LD-law section) -- second order on a dilution WEIGHT, and stated
+        here so nobody hunts it as a bug.  The finite-source centroid is
+        VBM's disk-integrated, limb-darkened one, so the stage-1 "valid
+        only for rho << u" caveat does not apply on this path.  The Op has
+        no gradient (``sampler_requirements`` already says so for any
+        event on it).
+        """
+        if not self.uses_op(index):
+            A = self.get_magnification(times, obs_pos, system, index)
+            dN, dE = self.get_centroid_shift(times, obs_pos, system, index)
+            return A, dN, dE
+
+        n_lenses = len(self.lens_bodies)
+        source_ndx = int(self.source_bodies[index][1])
+        ra_deg, dec_deg = self._frozen_op_coords_deg(system, source_ndx)
+        coords = f"{ra_deg}d {dec_deg}d"
+        use_rho = self.finite_source
+        effective_bandpass = bandpass if (use_rho and u1 is not None) else None
+        use_u2 = self._resolve_quadratic_ld(u2, effective_bandpass)
+        source_series = self._source_offset_series(times, system)
+        geometry_series = (
+            self._companion_geometry_series(times, system)
+            if n_lenses >= 2
+            else None
+        )
+        A, dtau, dbeta = self._vbm_op_call(
+            times,
+            obs_pos,
+            system,
+            index,
+            coords=coords,
+            use_rho=use_rho,
+            effective_bandpass=effective_bandpass,
+            use_u2=use_u2,
+            u1=u1,
+            u2=u2,
+            source_series=source_series,
+            geometry_series=geometry_series,
+            n_companions=self.n_companions if n_lenses >= 2 else 0,
+            astrometry=True,
+        )
+        dN, dE = self._shift_to_sky(dtau, dbeta, self.theta_E.value[0])
+        return A, dN, dE
+
+    def _shift_to_sky(self, dtau, dbeta, scale):
+        """``scale * (dtau * tau_hat + dbeta * beta_hat)`` in ``(N, E)``:
+        the one rotation from the trajectory frame onto the sky that both
+        centroid paths use.  ``tau_hat = mu_hat_rel,geo`` (C9; defined even
+        with ``|pi_E|`` pinned at 0) and ``beta_hat`` is ``tau_hat``
+        rotated +90 degrees North through East, ``(c, d) -> (-d, c)``."""
+        mu_n = self.mu_dec_rel_geo.value[0]
+        mu_e = self.mu_ra_rel_geo.value[0]
+        mu_mag = self.mu_rel_geo_mag.value[0]  # floored at MU_REL_FLOOR
+        tau_n, tau_e = mu_n / mu_mag, mu_e / mu_mag
+        beta_n, beta_e = -tau_e, tau_n
+        return (
+            scale * (dtau * tau_n + dbeta * beta_n),
+            scale * (dtau * tau_e + dbeta * beta_e),
+        )
 
     # ------------------------------------------------------------------
     # Auto method brackets

@@ -85,11 +85,11 @@ with f_b/f_s from the `photometry:` light curve and x_b the blend
 photocenter: `blend_dE`/`blend_dN` (mas from the reference position,
 fixed on the sky, pinned at 0 by default -- free them to fit the drag).
 Both are INACTIVE on a dataset without the lens term, like fluxfrac on a
-rel dataset.  Point source and single lens only: MulensEvent.
-check_centroid_shift_supported raises for a binary lens (VBM's astrox
-tail is stage 2) and warns for finite_source (the disk-averaged shift
-nearly vanishes at rho ~ u and reverses beyond).  The symbolic PSPL path
-keeps this differentiable, so an astrometric PSPL fit can use NUTS.
+rel dataset.  A point-source single lens takes the symbolic closed form
+and stays differentiable (NUTS); a finite-source, binary or N-lens event
+takes VBMicrolensing's disk-integrated centroid through
+VBMDirectMagOp(astrometry=True) (MulensEvent.get_astrometric_terms,
+stage 2) -- gradient-free, like the photometry it rides with.
 
 `fluxfrac` is a parameter of a gaia/abs dataset ONLY: _photocenter_terms
 is its one consumer.  On a rel dataset it is INACTIVE -- held at
@@ -1102,10 +1102,16 @@ class AstrometryInstrument(Instrument):
             )
         event = system.mulensevent
         j = self._lens_source[i]
-        A = event.get_magnification(t, dev, system, index=j)
-        sN, sE = event.get_centroid_shift(t, dev, system, index=j)
         k = self._lens_phot[i]  # never None: _resolve_lens_photometry raises
         mi = system.mulensinstrument
+        # The astrometric band IS the photometry: light curve's band, so its
+        # limb darkening is that light curve's resolver (one resolver, the
+        # plotted-equals-fitted rule); it matters only on the finite-source
+        # Op path, where VBM integrates the centroid over the darkened disk.
+        u1, u2, bandpass = mi._finite_source_limb_darkening(system)
+        A, sN, sE = event.get_astrometric_terms(
+            t, dev, system, index=j, u1=u1, u2=u2, bandpass=bandpass
+        )
         g = mi.f_blend.value[k] / mi.f_source.value[k]  # f_b / f_s
         w_s = A / (A + g)
         w_b = g / (A + g)

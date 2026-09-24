@@ -300,8 +300,10 @@ amplitude on a shape the light curve already fixes, which is what makes it a dir
 Relative to the LENS the same centroid sits at `theta_E u (u^2+3)/(u^2+2)` along the same
 axis. That is what VBMicrolensing's `astrox1`/`astrox2` report (centroid from the lens, in
 Einstein radii); subtract the source position `u` and it reduces to the display above
-identically. The conversion is a convention entry, not a no-op, and the binary-frame
-origin of `astrox` is undocumented upstream (review 8.10.1 stage 2).
+identically. The conversion is a convention entry, not a no-op. For a binary or N-lens
+the same subtraction holds with `astrox` and the source position both in VBM's frame,
+whose origin is the lens centre of mass (C12) -- undocumented upstream, MEASURED here
+(the stage-2 bullet below).
 
 What an instrument centroids is the SUM of the images and the blend, so the modelled
 offset from the source's unlensed track `x_s(t)` is
@@ -323,10 +325,22 @@ NOT split out (follow-up in review 8.10.1).
   `AstrometryInstrument._apply_lens` (the blend weighting), added onto the C11 lines of
   `_absolute_model` as `+ delta_E` / `+ delta_N` in mas -- the shift is itself a sky angle,
   so it takes NO further `cos(dec)` (East on those lines is already projected).
-- Point source, single lens ONLY. The disk-averaged shift nearly vanishes at `rho ~ u` and
-  reverses sign beyond (`notes/missing_mulens_physics.txt` 3a), so a `finite_source` event
-  warns that the point-source centroid is valid only where `rho << u`; a binary lens raises
-  (no closed form; the VBM `astrox` tail is stage 2 of review 8.10.1).
+- Finite source, binary and N-lens events (and a forced `use_op`) take VBMicrolensing's
+  centroid instead (review 8.10.1 stage 2): `MulensEvent.get_astrometric_terms` builds
+  `VBMDirectMagOp(astrometry=True)` from the SAME parameters as the photometric Op
+  (`_vbm_op_call`, one builder) and reads `astrox1`/`astrox2` after each magnification
+  call -- disk-integrated and limb-darkened, so the point-source caveat above does not
+  apply there (the `rho ~ u` cancellation and the sign reversal are reproduced, measured
+  against a direct disk integration). The Op returns the shift on `(tau_hat, beta_hat)`
+  and `_shift_to_sky` is the ONE rotation onto `(N, E)` both paths share. Three measured
+  facts the Op depends on: VBM's `astrox` frame has its ORIGIN AT THE LENS CENTRE OF MASS
+  with the primary at `(-s q/(1+q), 0)` (pinned against a first-principles image solve,
+  magnification and centroid to 1e-8 under that origin and no other); a scalar-`u` call
+  leaves `astrox2` STALE, so the single-lens branch projects `astrox1` radially and never
+  reads it; and `vbm.astrometry = True` moves the binary magnifications' last bit at some epochs, so the
+  astrometric Op is a SEPARATE INSTANCE and the light curve stays bit-identical. Always
+  VBM, whatever the photometric `backend:` (MulensModel has no centroid; C18 makes the
+  trajectories identical). No gradient, like the photometry it rides with.
 - Pinned by: `tests/test_astrometric_microlensing.py` -- the closed form against a direct
   image solve of the lens equation, and the HANDEDNESS test (a lens passing North of the
   source pushes the centroid South, East pushes West), which fails under a mirrored
