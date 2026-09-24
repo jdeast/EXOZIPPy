@@ -1,0 +1,24 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 2
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N kinalone
+#$ -o dc18_kinalone.$JOB_ID.log
+# The galacticmodel kinematic prior alone, maximized over the velocity
+# coordinates at pinned source distances, on the model's own graph
+# (dc18_kin_alone.py) -- does the MODEL's prior prefer a near or a far 194
+# source at fixed pi_rel and mu_rel?  Arbitrates between the profiler's
+# -12 nats at 9980 and the numpy transcription's +3.
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+cd $HOME/python/EXOZIPPy/examples/DC2018
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)   $(date)"
+python dc18_kin_alone.py --event 194 --run-dir ab194/truthsrc_vega
+echo "exit $?   $(date)"

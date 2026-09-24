@@ -1,0 +1,45 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N dsprofile2
+#$ -t 1-3
+#$ -o dc18_dsprofile2.$JOB_ID.$TASK_ID.log
+#
+# Single-point runs of dc18_ds_profile.py on 194 (ab194/truthsrc_vega) that
+# print ABSOLUTE per-term logp, so three configurations can be set against
+# each other term by term:
+#   task 1  the free optimum's neighbourhood: D_s pinned at the posterior
+#           peak, 4809 pc, nothing else pinned
+#   task 2  the TRUTH configuration: D 9980, Teff 5257 (the key's K0V, from
+#           its own spectral-type code), R 0.822
+#   task 3  D 9980 with Teff 5257 and R FREE: how much of the truth's cost
+#           is the radius the key assigns, and how much the distance+Teff
+# Job 15467642 measured the truth configuration 82 nats below the free
+# optimum but printed differences only (one grid point); this fills in
+# WHICH terms.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+export OMP_NUM_THREADS=${NSLOTS:-4}
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD) on $(git -C $HOME/python/EXOZIPPy branch --show-current)   $(date)"
+
+case "$SGE_TASK_ID" in
+  1) PIN="star.distance[1]=4809"; EXTRA="" ;;
+  2) PIN="star.distance[1]=9980"; EXTRA="--extra-pin star.teff[1]=5257 --extra-pin star.radius[1]=0.822" ;;
+  3) PIN="star.distance[1]=9980"; EXTRA="--extra-pin star.teff[1]=5257" ;;
+  *) echo "bad task id $SGE_TASK_ID"; exit 1 ;;
+esac
+
+python dc18_ds_profile.py --event 194 --run-dir ab194/truthsrc_vega \
+    --pin "$PIN" --restarts 3 --maxfev 15000 $EXTRA
+echo "exit $?   $(date)"
