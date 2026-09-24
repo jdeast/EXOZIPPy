@@ -63,7 +63,9 @@ Per-instrument config keys:
   photometry        : the mulensinstrument light curve whose fitted
                       f_source/f_blend give the blend fraction in this
                       dataset's band (default: the only light curve;
-                      required when there are several; none -> no blend).
+                      required when there are several).  A lensed dataset
+                      with no light curve at all RAISES: the blend fraction
+                      and the geocentric frame anchor both come from it.
 
 Astrometric microlensing (conventions.md C30; review 8.10.1 stage 1).  A
 gaia/abs dataset of a microlensing source carries, inside the
@@ -420,7 +422,9 @@ class AstrometryInstrument(Instrument):
                     "dataset's astrometric band (the centroid dilution "
                     "A f_s/(A f_s + f_b) and the blend drag). Default: the "
                     "only light curve when there is exactly one; required "
-                    "with several; with none the blend is taken as zero."
+                    "with several. A lensed dataset with no light curve at "
+                    "all is an error (the blend fraction and the geocentric "
+                    "frame anchor both come from the photometry)."
                 ),
             },
             {
@@ -776,23 +780,32 @@ class AstrometryInstrument(Instrument):
 
     def _resolve_lens_photometry(self, system, i):
         """The mulensinstrument element supplying f_blend/f_source for
-        dataset ``i``'s blend weighting, or None (no blend, warned)."""
+        dataset ``i``'s blend weighting.
+
+        A lensed astrometric dataset REQUIRES a microlensing light curve
+        (JDE 2026-09-23: "we should raise when astrometry is fit without
+        photometry.  that can't happen").  Two reasons, both structural:
+        the blend fraction that dilutes the shift and drags the centroid
+        has no other source, and in a crowded field that term can
+        dominate; and the geocentric frame's proper-motion correction
+        (``MulensEvent._earth_vperp_en``) is anchored by the light curve's
+        ``t0_par`` and Earth velocity, without which ``mu_rel_geo`` and
+        hence the trajectory direction silently fall back to heliocentric.
+        """
         where = f"{self.prefix}.{self.names[i]}"
         mi = getattr(system, "mulensinstrument", None)
         ref = self.config[i].get("photometry")
         if mi is None:
-            if ref is not None:
-                raise ValueError(
-                    f"[{where}] photometry: {ref!r} names a light curve but "
-                    f"the system has no mulensinstrument: block."
-                )
-            logger.warning(
-                f"[{where}] no microlensing light curve to take the blend "
-                f"fraction from; the centroid shift is modeled UNDILUTED "
-                f"(f_blend = 0 in the astrometric band).  In a crowded "
-                f"field the blend term can dominate -- add the photometry."
+            raise ValueError(
+                f"[{where}] this dataset's star is a microlensing source, so "
+                f"its astrometry carries the centroid shift, and that needs "
+                f"a microlensing light curve (a mulensinstrument: block) for "
+                f"the blend fraction f_blend/f_source in the astrometric "
+                f"band and for the geocentric frame anchor.  Astrometry of a "
+                f"lensed source cannot be fit without its photometry; add "
+                f"the light curve, or set `microlensing: false` on the "
+                f"dataset to fit it as an unlensed star."
             )
-            return None
         names = list(mi.names)
         if ref is None:
             if len(names) == 1:
@@ -1071,8 +1084,8 @@ class AstrometryInstrument(Instrument):
         fades, which in a crowded bulge field can dominate.  Only the RATIO
         ``f_b/f_s`` enters, taken from the ``photometry:`` light curve's
         fitted ``f_blend``/``f_source`` (the astrometric band is that light
-        curve's band); with no light curve the blend is zero and only the
-        shift remains.  ``x_b`` is ``blend_dE``/``blend_dN`` (mas from the
+        curve's band; a lensed dataset without a light curve raised in
+        ``_resolve_lens_photometry``).  ``x_b`` is ``blend_dE``/``blend_dN`` (mas from the
         reference position, fixed on the sky -- no proper motion of its
         own).  The lens's own flux is part of ``f_b`` and sits at
         ``x_s + theta_E dtheta``; it is not split out (review 8.10.1).
@@ -1091,9 +1104,7 @@ class AstrometryInstrument(Instrument):
         j = self._lens_source[i]
         A = event.get_magnification(t, dev, system, index=j)
         sN, sE = event.get_centroid_shift(t, dev, system, index=j)
-        k = self._lens_phot[i]
-        if k is None:
-            return dE + sE, dN + sN
+        k = self._lens_phot[i]  # never None: _resolve_lens_photometry raises
         mi = system.mulensinstrument
         g = mi.f_blend.value[k] / mi.f_source.value[k]  # f_b / f_s
         w_s = A / (A + g)

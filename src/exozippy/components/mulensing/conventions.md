@@ -310,7 +310,8 @@ offset from the source's unlensed track `x_s(t)` is
                  + [  f_b / (A f_s + f_b)] * (x_b - x_s(t))
 
 `f_s`/`f_b` in the ASTROMETRIC band (taken from the `photometry:` light curve the dataset
-names, or `f_b = 0`), `x_b` the blend photocenter (`astrometryinstrument.<name>.blend_dE`,
+names; a lensed dataset with no light curve RAISES -- the blend fraction and the geocentric
+frame anchor both come from it), `x_b` the blend photocenter (`astrometryinstrument.<name>.blend_dE`,
 `blend_dN`, mas from the reference position, fixed on the sky, pinned at 0 by default).
 The first bracket is dilution -- time dependent, suppressed exactly at peak; the second is
 the blend dragging the centroid as the source brightens and fades, and in a bulge field it

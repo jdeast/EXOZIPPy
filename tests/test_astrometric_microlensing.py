@@ -413,11 +413,12 @@ def test_dilution_and_blend_drag_algebra(lensed_files):
       does what C30 says -- and the raw shift is theta_E u/(u^2+2) on the
       SAME |u| the magnification uses.
 
-    One system, not two: a system without a light curve has no t0_par
-    anchor for the geocentric proper-motion correction (MulensEvent.
-    _earth_vperp_en falls back to heliocentric, warned), so its A differs
-    at the percent level and cross-system comparison would test the wrong
-    thing.
+    One system, not two: a lensed dataset without a light curve is
+    refused outright (see test_lensed_dataset_without_photometry_raises),
+    and the reason is visible here -- without the light curve's t0_par
+    anchor the geocentric proper-motion correction (MulensEvent.
+    _earth_vperp_en) falls back to heliocentric and A differs at the
+    percent level.
     """
     tmp_dir, t = lensed_files
     system, model = _build(_full_config(tmp_dir))
@@ -490,6 +491,25 @@ def test_binary_lens_raises_and_finite_source_warns(lensed_files, caplog):
     assert any(
         "POINT-SOURCE formula" in rec.getMessage() for rec in caplog.records
     ), [r.getMessage() for r in caplog.records]
+
+
+def test_lensed_dataset_without_photometry_raises(lensed_files):
+    """
+    Given an abs dataset of the source star and a mulensevent but NO
+      microlensing light curve,
+    When the system is prepared,
+    Then it raises naming both the missing blend fraction and the opt-out:
+      astrometry of a lensed source cannot be fit without its photometry
+      (the blend fraction and the geocentric frame anchor both come from
+      the light curve).
+    """
+    tmp_dir, _ = lensed_files
+    cfg = _full_config(tmp_dir, with_photometry=False)
+    with pytest.raises(
+        ValueError, match="cannot be fit without its photometry"
+    ):
+        system = System(cfg, user_params=_base_params())
+        system.prepare()
 
 
 def test_explicit_true_on_a_non_source_star_raises(lensed_files):
