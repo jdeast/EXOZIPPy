@@ -62,11 +62,12 @@ THE RULES, one line each:
                     dispersions are one correlated error.
   out_scale         upper = 10x the per-LC median flux error, initval = 1x,
                     in the file's flux system (review 8.6.3, RULED).
-  zeropoint         N(22.0, 0.02) -- the simulation's, identical for every
-                    event because it is the same instrument.  Deliberately
-                    NOT widened for the C29 residual: with `filters: []`
-                    these two are the only colour information in the fit.
-                    See the comment at the zeropoint for the full reason.
+  zeropoint         Vega centre (22.0 minus the SVO AB-Vega offset), ONE
+                    wide common-mode grey term on the first band, hypot(0.02,
+                    |grey|), and a `mu` link plus the fixed Vega offset on the
+                    others with 0.02*sqrt(2) on the difference (2026-09-24).
+                    Was N(22.0, 0.02) in both bands -- AB centre, and no room
+                    for the C29 grey term.  See the comment at the zeropoint.
   source.t_0        the observing span of the light curves themselves.
   source.u_0        [-3, 3]: the source was magnified.  A soft barrier
                     rather than hard support, since fitu0te makes u_0
@@ -91,6 +92,8 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dc18_common as C  # noqa: E402
 
+from exozippy.components.sed.bc_grid import DEFAULT_FILTER_ROOT  # noqa: E402
+
 # $DC18_DATA, matching run_event.py's spelling.  Hardcoding this made every
 # generated config machine-locked to one home directory: 36 tracked files
 # pinned their seed JSON, both light curves, `prefix`, `sed.file` and
@@ -103,6 +106,33 @@ DATA = os.environ.get(
     "DC18_DATA", "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge"
 )
 BANDS = [("W149", "Roman/WFI.F146"), ("Z087", "Roman/WFI.F087")]
+
+# The simulation's magnitudes are AB with a zeropoint of 22.0 in both bands;
+# our SED predicts VEGA magnitudes (the BC tables' header says so).  The
+# zeropoint prior therefore has to be 22.0 - (AB - Vega) per band, read from
+# the shipped SVO filter files rather than typed in: dc18_photometric_leg.py
+# is the measurement (the Sun through the challenge's own CSB relation), and
+# a table that drifted from the filter files would be exactly the silent
+# mismatch that cost the first sweep 1.04 mag in W149.
+SIM_AB_ZEROPOINT = 22.0
+
+
+def ab_minus_vega(filter_name):
+    """AB - Vega for one SVO filter, from its shipped XML."""
+    import re
+
+    fac, fil = filter_name.split("/")
+    text = open(os.path.join(DEFAULT_FILTER_ROOT, fac, fil + ".xml")).read()
+    zp = float(
+        re.search(r'name="ZeroPoint"[^/]*value="([^"]+)"', text).group(1)
+    )
+    sysname = re.search(r'name="MagSys"[^/]*value="([^"]+)"', text).group(1)
+    if sysname.strip().lower() != "vega":
+        raise SystemExit(
+            f"{filter_name}: expected a Vega zeropoint, got {sysname}"
+        )
+    return 2.5 * np.log10(3631.0 / zp)
+
 
 # event_info.txt columns, 0-based: 5 = A_W149 and 6 its dispersion,
 # 7 = A_Z087 and 8 its dispersion.
@@ -420,8 +450,17 @@ def build(event, outdir, draws, tune, cores, t_max):
     t_lo, t_hi = observing_span(files.values())
 
     params = {
+        # BOTH stars carry the event's line of sight.  The galactic model
+        # anchors on the Source (anchor_idx 1 below) and the magnification Op
+        # freezes the SOURCE's coordinates for the parallax projection, so a
+        # Source left at defaults.yaml's (180, 0) put every prior and the
+        # parallax geometry of the 2026-09 sweep at Galactic (l 276, b +60)
+        # -- the R_source/2 pull (notes 2026-09-24).  GalacticModel now
+        # refuses an unpositioned anchor; this is the position it wants.
         "star.Lens.ra": {"initval": ra, "sigma": 0},
         "star.Lens.dec": {"initval": dec, "sigma": 0},
+        "star.Source.ra": {"initval": ra, "sigma": 0},
+        "star.Source.dec": {"initval": dec, "sigma": 0},
         # Generic, NOT solar: teff and radius stay FREE (2.9.10), and feh
         # gets the broad prior JDE specified rather than a pin.
         "star.Lens.feh": {"mu": 0.0, "sigma": 0.5},
@@ -454,24 +493,45 @@ def build(event, outdir, draws, tune, cores, t_max):
     for b, _ in BANDS:
         inst = "mulensinstrument.Roman_%s" % b
         med = median_flux_err(files[b])
-        # LEFT AT THE SIMULATION'S OWN WIDTH, and that is a decision, not an
-        # oversight.  The C29 convention residual is a GREY band-extinction
-        # offset (-0.07 mag on event 008 up to -0.58 on 194) and the
-        # zeropoint is where a grey term would naturally be absorbed -- but
-        # these configs run `filters: []`, so the SED has no photometry of
-        # its own and this pair of zeropoints is the ONLY colour information
-        # in the fit.  Two independent priors of width 0.58 admit
-        # sqrt(2)*0.58 = 0.82 mag of COLOUR slack, which is an order of
-        # magnitude more than the colour signal separating plausible source
-        # temperatures; it would buy an honest error bar on theta_star by
-        # throwing away teffsed.  The format cannot express the one prior
-        # that would be right here -- a single term shared between the bands
-        # -- and building that is the engineering JDE ruled out.
-        # So the convention width goes on `av` instead (see
-        # av_from_clump_colour), which is the correctly correlated nuisance,
-        # and the leftover theta_star bias is REPORTED rather than absorbed:
-        # dc18_truth_table.py prints it beside the recovery table.
-        params["%s.zeropoint" % inst] = {"mu": 22.0, "sigma": 0.02}
+        # THE ZEROPOINT PRIOR, 2026-09-24.  Three things at once.
+        #   (1) VEGA, not 22.0: the SED predicts Vega magnitudes and the
+        #       simulation's fluxes are AB at 22.0, so the prior centre is
+        #       22.0 - (AB - Vega) per band (20.963 W149, 21.501 Z087).  The
+        #       first sweep ran 22.0/22.0 and its sources looked 1.04 mag too
+        #       faint in W149 and 0.54 mag too red.
+        #   (2) ONE grey term, WIDE.  The C29 convention residual is a
+        #       common-mode band-extinction offset (-0.07 mag on 008 to -0.58
+        #       on 194; `av_grey`), and the zeropoint is where a grey term
+        #       belongs -- but two independent wide priors would admit
+        #       sqrt(2)*grey of COLOUR slack, and with `filters: []` this pair
+        #       of zeropoints is the only colour information in the fit.  So
+        #       the FIRST band's zeropoint carries the width, hypot(0.02,
+        #       |grey|), and every other band's zeropoint is a `mu` link to it
+        #       plus the fixed Vega offset, with the simulation's own 0.02
+        #       (x sqrt 2) on the DIFFERENCE.  That is the single shared term
+        #       an earlier note here said the format could not express; the
+        #       link machinery (config.md, "User-defined parameter links")
+        #       expresses it, and ab194/zplink built with it (link_mu potential
+        #       present, finite start logp).
+        #   (3) The convention mismatch itself stays a CAVEAT (JDE 2026-09-24:
+        #       "no heroics to match it"); the width is the budget for it, and
+        #       dc18_truth_table.py prints the caveat beside the recovery table.
+        zp_vega = SIM_AB_ZEROPOINT - ab_minus_vega(dict(BANDS)[b])
+        first_band = BANDS[0][0]
+        if b == first_band:
+            params["%s.zeropoint" % inst] = {
+                "mu": round(float(zp_vega), 4),
+                "sigma": round(float(np.hypot(0.02, abs(av_grey))), 4),
+            }
+        else:
+            zp_first = SIM_AB_ZEROPOINT - ab_minus_vega(
+                dict(BANDS)[first_band]
+            )
+            params["%s.zeropoint" % inst] = {
+                "mu": "mulensinstrument.Roman_%s.zeropoint + %.4f"
+                % (first_band, float(zp_vega - zp_first)),
+                "sigma": round(float(0.02 * np.sqrt(2.0)), 4),
+            }
         params["%s.out_scale" % inst] = {"upper": 10.0 * med, "initval": med}
         # THE BASELINE FLUX IS MEASURED, SO BOUND THE TOTAL FLUX BY IT.
         # +/-2 dex around the median of this light curve's own flux column:

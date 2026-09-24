@@ -80,3 +80,64 @@ Cross-component hooks when a `sed:` block exists: `mulensinstrument` ties each l
 
 `zeropoint` is an ordinary **derived** `Parameter` (`mulensinstrument.zeropoint`, one element per light curve, `force_node: True`), not a hand-built node: `physics.calc_zeropoint` is its expression and `Parameter.build_pymc`'s derived-with-sigma branch supplies the Gaussian. **Derived, never sampled** -- `zp = m_SED + 2.5*log10(f_source)` is determined exactly by f_source and the SED, and no data constrains it separately, so sampling it would add a dimension identified only by its own prior. Until 2026-08 it was not a Parameter at all: `_build_sed_flux_constraint` resolved the config block itself and read only `mu`/`sigma`, so a user's `initval` (and their `unit:`) were silently inert. The **node layout** changed with it and the content did not: the per-instrument `mulensinstrument.<name>.zeropoint` Deterministics became the one vector `mulensinstrument.zeropoint`, and the per-instrument `.zeropoint_prior` potentials became the one `gaussian_prior.mulensinstrument.zeropoint`. Summing N scalar potentials as one vector instead moves a start logp by ~1 ulp (measured: exactly 1 on KMT-2019-BLG-1806), and nothing else. Three deps are injected as **context nodes** by `MulensInstrument.add_parameter` (`context_dep_names`, the `Orbit` group-mass idiom): `m_source_pred` (the SED forward model, which cannot be spelled as a manifest dep), plus `zp_center`/`sed_constrained`. The mask exists because a light curve with no `band:` or whose filter is missing from the BC grid has nothing to tie to -- `calc_zeropoint` returns `zp_center` there, so its Gaussian penalty is exactly zero, reproducing the old loop's `continue`. It is a `pt.switch` on an explicit 0/1 mask and **not** a NaN test, since switch's gradient multiplies the unselected branch by zero and `0 * NaN` is NaN. `sigma: 0` still raises (in `_zeropoint_context`) rather than falling through to `build_pymc`'s generic "sigma=0 has no effect on a derived parameter" warning. Because the SED forward model is read through `predict_*` rather than declared as a dep, `SED._predicted_appmag_node` lazily materializes the star Parameters it needs (`SED._ensure_star_nodes`) -- the zeropoint expression is built at stage 6 and can get there first.
 
+
+## A runtime extinction law: the plan, and why it is blocked (2026-09-24)
+
+**What the DC2018 work showed.** The challenge reddened each band monochromatically at its
+effective wavelength with a CCM-like R_V = 3.1 law (its A_Z087/A_W149 = 1.92 for all 293 events
+is CCM at 0.87 vs 1.46 um); our tables integrate the reddened spectrum through the bandpass,
+which for a band as wide as W149 shifts the effective wavelength redward for a cool reddened
+star and lowers the extinction per unit A_V. Read off the key's own lenses (Teff, logg, R, D
+and four magnitudes all given, no free parameter -- `examples/DC2018/dc18_source_chain.py
+lens-law`), the sim's A_W149/A_F087 is 0.51 against our 0.45, i.e. 0.65 mag of grey W149
+under-extinction on event 194 at the colour-anchored `av`, and theta_star comes out 0.71-0.76x
+truth once the galactic prior is right. **Integration is the physics; the monochromatic
+treatment is the simulation's shortcut**, and it is not a better bulge law -- the real bulge
+wants R_V ~ 2.5 (Nataf+2013) and a STEEPER NIR power law (alpha ~ 2.0-2.3, Nishiyama+2009)
+than CCM's ~1.6, which is the opposite direction from the sim's greyness. Decision (JDE
+2026-09-24): no heroics to match the challenge's convention; list it as a caveat, widen the
+zeropoint prior appropriately, move on.
+
+**What real data need.** The law's shape -- R_V and the NIR slope -- has to be settable per
+sight line and eventually samplable, with a prior per field. The tables anticipate it (an `Rv`
+column with only 3.1 populated), and adding it as a table axis means one more interpolation
+dimension per band on top of (Teff, logg, feh, Av): EXOFAST's experience is that even the 4-D
+per-band interpolation got slow at 8 bands.
+
+**The alternative: interpolate the spectrum, redden it, integrate the bands at runtime.** One
+trilinear interpolation in (log Teff, logg, feh) of the spectrum (8 x N_lambda), A_lambda(A_V,
+R_V, alpha) evaluated on the wavelength grid, and the band fluxes as one fixed
+[n_band x N_lambda] matrix product. Cost is not the constraint: at N_lambda ~ 3000-5000 it is
+~1e5 flops per likelihood evaluation, nothing against a 40k-point light curve, and it scales as
+one interpolation plus n_band dot products rather than n_band separate 4-5-D interpolations.
+It is differentiable (a weighted gather and a matmul), so NUTS-able where the rest of the model
+is. It is exact in A_V and in the law -- the tables interpolate between Av nodes at 8, 10 and
+12 mag, exactly where bulge sight lines live -- and it takes any law family without
+regenerating anything. It does not cover MIST's tabular BCs, which have no spectra behind
+them; those stay tables.
+
+**Why it is not simply better: resolution.** Phoebe's tests for the BC tables showed that
+~1 mmag agreement in the integrated band flux needs the spectra at R ~ 10,000 -- hundreds of GB
+for the grid, not something a NUTS interpolator can hold in memory. That is why the BC-table
+approach was chosen: the expensive integral is done once, offline, at full resolution, and the
+runtime interpolates a smooth scalar per band. A runtime spectral path therefore has to
+demonstrate, on a subset of wide filters, that a binned grid it CAN hold (R of a few hundred,
+tens of MB) reproduces the full-resolution band integrals to the mmag level -- plausible for
+broad bands, where the integral averages over lines, and not to be assumed. If that holds, it
+is faster and more general and wins; if it needs R ~ 10,000 to hold, the tables stay and the
+law becomes an axis.
+
+**The prerequisite that blocks all of it.** The shipped BC tables -- and the spectra
+`make_bc.py` reads -- are built from the R = 150 NextGen spectra that were only ever intended
+for PLOTTING (`make_bc.py` records that they reproduce the original 2MASS/GAIA tables only to
+0.01-0.04 mag). Both routes start by rebuilding from the full-resolution spectra, which Phoebe
+holds: (i) regenerate the BC tables from them (the production path, per the note above that
+on-the-fly generation does not survive the move to 250 GB), and (ii) bin them to the candidate
+runtime resolution and run the wide-filter revalidation against (i). Until those spectra are in
+hand nothing here can be built or validated. The write-up for the plan, when the work starts:
+the wavelength grid and binning (photon-counting integration, filter edges resolved), the
+zeropoints per magnitude system from the shipped SVO files, the law family (CCM/F99 with R_V
+plus an NIR index, or an R_V-only family such as Gordon+2023) and its per-field prior, the
+validation matrix (per filter: table vs runtime at Av 0..20, R_V 3.1, then off-axis), and the
+switch that lets a DC2018 run reproduce the challenge's monochromatic convention for scoring
+only.

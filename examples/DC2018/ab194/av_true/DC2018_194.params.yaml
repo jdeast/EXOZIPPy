@@ -41,3 +41,12 @@ star.Source.av:
   # on Teff alone at 0.28/1000 K.  See code_review_20260824.txt, 7.7.3.
   mu: 9.01
   sigma: 0.3
+
+# The Source shares the event's line of sight; galacticmodel anchors on it
+# (anchor_idx 1) and the magnification Op freezes its coordinates.
+star.Source.ra:
+  initval: 267.657
+  sigma: 0
+star.Source.dec:
+  initval: -27.937
+  sigma: 0

@@ -33,3 +33,12 @@ star.Lens.ra:
 star.Source.av:
   mu: 2.75
   sigma: 0.33
+
+# The Source shares the event's line of sight; galacticmodel anchors on it
+# (anchor_idx 1) and the magnification Op freezes its coordinates.
+star.Source.ra:
+  initval: 267.657
+  sigma: 0
+star.Source.dec:
+  initval: -27.937
+  sigma: 0

@@ -24,3 +24,8 @@ planet.Companion.radius: {sigma: 0}
 # teff/logg); for a dataset generated with zero limb darkening, use zero.
 band.W149.u1: {initval: 0.0, sigma: 0}
 band.Z087.u1: {initval: 0.0, sigma: 0}
+
+# The Source shares the event's line of sight; galacticmodel anchors on it
+# (anchor_idx 1) and the magnification Op freezes its coordinates.
+star.Source.ra:  {initval: 267.595, sigma: 0}
+star.Source.dec: {initval: -28.982, sigma: 0}
