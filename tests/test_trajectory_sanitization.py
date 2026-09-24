@@ -862,6 +862,9 @@ def _symbolic_A():
     fake._get_safe_mm_params = functools.partial(
         MulensEvent._get_safe_mm_params, fake
     )
+    # ... and get_trajectory, the (tau, beta) builder get_magnification and
+    # the astrometric centroid shift (C30) share since 2026-09.
+    fake.get_trajectory = functools.partial(MulensEvent.get_trajectory, fake)
     system = fake.system
     times = pt.dvector("times")
     obs = pt.dmatrix("obs")
