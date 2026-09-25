@@ -696,6 +696,36 @@ def _sample_seed_draws(
     return pairs, good_mask, burnin
 
 
+def _normalized_like_system(config, existing_params):
+    """Normalize a config loaded from disk the way ``System.__init__`` does.
+
+    ``run.py`` hands ``write_param_file`` the LIVE System's config, which
+    ``System.__init__`` has already normalized: components rename themselves
+    from their ``body:``/``star:`` keys, so a ``lens:`` entry becomes
+    ``'Lens'``/``'Companion'`` and a ``mann:`` block takes its star's name.
+    The structural hash is stamped on the trace AFTER that (run.md: "the
+    snapshot is taken at the END of ``__init__``").
+
+    Hashing the raw YAML therefore compares a normalized stamp against
+    un-normalized names and raises ``StaleTraceError`` listing component
+    changes that never happened.  Every DC2018 config renames, so
+    ``scripts/mkparam.py`` could not write a restart file for any of them --
+    the automatic call at the end of ``run.py`` worked, and only the
+    standalone CLI was broken, which is why it went unnoticed.  run.md
+    records the recompute/stamp agreement as verified on kelt4, ob08092 and
+    ob140939; none of those rename a component.
+
+    Constructing the System is what makes the two paths agree.  ``__init__``
+    does no file I/O (that is ``prepare()``'s stage 1), so this is cheap, and
+    a config it rejects would have failed the next fit anyway.
+    """
+    from .system import System
+
+    return System(
+        copy.deepcopy(config), user_params=copy.deepcopy(existing_params)
+    ).config
+
+
 def write_param_file(
     config,
     base_dir=None,
@@ -767,7 +797,8 @@ def write_param_file(
     Path
         The path of the written file.
     """
-    if isinstance(config, (str, Path)):
+    config_from_disk = isinstance(config, (str, Path))
+    if config_from_disk:
         base_dir = Path(config).parent
         config = _load_yaml(str(config))
     else:
@@ -817,6 +848,9 @@ def write_param_file(
             # '{sigma: 0.5}' would be re-emitted into the restart file.  Fail
             # on the input: it is the actual source and the file to edit.
             validate_sigma_has_center(existing_params, source=str(param_path))
+
+    if config_from_disk:
+        config = _normalized_like_system(config, existing_params)
 
     idata = az.from_netcdf(str(trace_path))
 
