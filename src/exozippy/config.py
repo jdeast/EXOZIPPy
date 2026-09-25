@@ -1745,6 +1745,11 @@ class ConfigManager:
             # near-bound warnings append when this parameter's start or
             # posterior lands against a wall.  See parameter.md.
             "near_bound_remedy": base.get("near_bound_remedy"),
+            # Component-declared, defaults.yaml only: this parameter is
+            # defined modulo a period ({value, unit} or {param: sibling}),
+            # so its posterior is recentered about its mode before it is
+            # summarized.  Parameter validates the shape; see parameter.md.
+            "periodic": base.get("periodic"),
         }
 
         # The sub-key vocabulary is declared once at module scope (see

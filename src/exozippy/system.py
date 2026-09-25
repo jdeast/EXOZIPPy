@@ -1503,6 +1503,17 @@ class System(Component):
             if isinstance(comp, Component) and comp is not self:
                 self._set_comp_posterior(comp, posterior, param_lookup)
 
+        # Periodic parameters (defaults.yaml `periodic:`) are recentered
+        # about their mode by whole periods, so a posterior the branch cut
+        # split in two -- omega at +/-180, tp at either end of the period --
+        # is reported as the one distribution it is (EXOFASTv2's
+        # exofast_recenter).  A SECOND pass, after every Parameter has its
+        # draws, because an epoch's period is a sibling parameter's
+        # posterior median and dir() order does not put `period` first.
+        for param in param_lookup.values():
+            if param.periodic is not None:
+                param.recenter_posterior(param_lookup)
+
     def _set_comp_posterior(self, component, posterior, param_lookup):
         for attr_name in dir(component):
             attr = getattr(component, attr_name)

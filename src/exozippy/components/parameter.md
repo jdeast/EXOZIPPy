@@ -150,6 +150,74 @@ Invalidating at the write was chosen over the other candidate, a `summary` cache
 
 Tests: `tests/test_second_report_staleness.py`.
 
+### Periodic parameters are recentered about their mode before they are summarized
+
+A parameter defined modulo a period -- an angle (`omega`, `bigomega`, `lam`,
+the lens `alpha`), or the epoch of a recurring event (`tp`, `ts` and their
+target-frame twins) -- comes out of its expression on ONE fixed branch cut:
+`arctan2` puts an angle in (-180, 180], and the Tc -> Tp inversion puts a
+periastron wherever it lands within the period. A posterior that straddles
+that cut was summarized in two pieces, the median in the empty middle and the
+interval spanning the whole range -- and nothing flagged it, because a median
+near zero with a +/- 180 interval is a plausible number for a poorly
+constrained omega. The model is exactly invariant to the cut (every consumer
+sees the angle through sin/cos and the epoch through `n (t - tp)` mod 2 pi), so
+it is purely a reporting artifact. JDE, 2026-09-25: *"when deterministic
+periodic parameters (tp, omega, ts, etc) are derived, we need to make sure
+artificial boundaries don't split them and skew the reported 68% CI. In
+exofastv2, we center any periodic parameter at its mode before reporting."*
+
+**The rule is EXOFASTv2's** (`exofast_recenter.pro` for the epochs, called
+from `derivepars.pro`; `summarizepar.pro` for the angles): take the histogram
+mode (100 bins), then shift every draw by WHOLE periods into
+`[mode - P/2, mode + P/2]` (`recenter_periodic_1d`). Two properties follow
+from "whole periods" and are pinned by `tests/test_periodic_recentering.py`:
+a draw that needs no shift is returned bit-identical, so no posterior that
+never came near the cut moves at all; and the recentered draws are the same
+distribution translated piecewise, so every within-piece difference is
+preserved. Two passes rather than EXOFASTv2's one: a runaway chain can spread
+draws over hundreds of periods, where the first histogram's bins are wider
+than the period and the mode is only located to within a bin; after the first
+wrap the span is one period, the second histogram is `P/100` fine and the
+second wrap is exact.
+
+**It is declared in defaults.yaml, never by a user**, on the Parameter's
+`periodic:` key, in one of two shapes. `periodic: {value: 360.0, unit: "deg"}`
+is a constant period *with the unit it is written in* -- the parameter's own
+`unit:` is user-overridable, so the constant cannot assume it; it is converted
+through its unit to the internal unit and then through `from_internal` per
+element, so a user who relabels `omega` in radians gets 2 pi.
+`periodic: {param: "period"}` names a SIBLING parameter of the same component
+whose per-element posterior median (its start value when it has no draws) is
+the period, converted through BOTH parameters' factors and never a hand-written
+one (the two conversion factors are reciprocals; `CLAUDE.md`). The median and
+not the per-draw period, as in EXOFASTv2: the shift is then one constant per
+element, and the distribution's shape is untouched. A malformed declaration
+raises in `__post_init__`, at build and not at wrap-up.
+
+**Where it acts.** `System.distribute_posterior` makes a SECOND pass over the
+parameter lookup once every Parameter has its draws -- a sibling period has to
+exist first, and `dir()` order does not put `period` before `tp` -- and calls
+`recenter_posterior` on each periodic one. That replaces the stored `posterior`
+(same type: an xarray DataArray stays one) so every consumer -- the corner
+plots, `warn_posterior_near_bounds`, a component's own plot -- sees one
+contiguous distribution, and records the resolved period on
+`_recenter_period`. `_summarize_array(arr, period=...)` then recenters AGAIN on
+whatever it is handed, because it also summarizes subsets: one MODE's draws can
+straddle the cut on their own while the whole posterior, recentered about a
+bigger mode, does not (`compute_mode_summaries` passes the period; the test
+`test_each_mode_is_recentered_on_its_own` is that case). The `posterior`
+setter drops `_recenter_period` with the other draw-derived caches, so a
+second report cannot recenter new draws by a stale sibling median. A missing
+sibling or an element-count mismatch warns and leaves the draws alone:
+reporting the old way is wrong only when the draws straddle the cut, whereas a
+guessed period would move every reported epoch.
+
+What is NOT periodic, deliberately: `inc` (a geometric angle on [0, 180], not
+a cyclic one), `ra`/`dec` (sampled inside their own ranges), and any rate
+(`dalpha_dt`). A component adding a new angle or epoch declares it; the
+generic layer knows nothing about which parameters those are.
+
 ## Reporting component-added priors (`parameter.py`, `PriorContribution`)
 
 `get_prior_str` can only see a Parameter's **own** fields (`sigma`, `mu`, `lower`/`upper`), so a `pm.Potential` a *component* adds at stage 7 was invisible to it and the parameter was reported as whatever those fields implied -- "Uniform" for a bounded element with no sigma, which is exactly the prior such a potential replaces. `star.distance` (volume prior / galactic model), `star.logmass` (Chabrier or Salpeter IMF) and the FFP mass function were all misreported that way.

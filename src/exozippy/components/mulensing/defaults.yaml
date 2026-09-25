@@ -383,6 +383,10 @@ lens:
     internal_unit: "rad"
     latex: "\\alpha"
     description: "Source trajectory angle"
+    # Derived from (xalpha, yalpha) by arctan2, so it sits on the
+    # (-180, 180] cut; recentered about its mode before reporting
+    # (components/parameter.md, "Periodic parameters").
+    periodic: {value: 360.0, unit: "deg"}
     debug_print: true
     expressions:
       default:
