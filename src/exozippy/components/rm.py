@@ -491,3 +491,21 @@ def rm_orbits_in_system(system):
 
 def rm_enabled(system):
     return len(rm_orbits_in_system(system)) > 0
+
+
+def rm_primary_star_indices(system):
+    """Star indices that are the transited primary of an `rm:`-targeted
+    orbit (mirrors dopptom.dt_primary_star_indices).  The Hirano kernel
+    reads only these stars' vmacro/vbeta/vmicro, so they are the set the
+    star component declares those terms for -- a system-wide switch
+    would hand every other star three likelihood-free sampled
+    dimensions."""
+    orbit_comp = getattr(system, "orbit", None)
+    if orbit_comp is None:
+        return set()
+    targets = rm_orbits_in_system(system)
+    idx = set()
+    for oidx, name in enumerate(orbit_comp.names):
+        if name in targets:
+            idx.add(int(rm_primary_star_index(orbit_comp, oidx)))
+    return idx

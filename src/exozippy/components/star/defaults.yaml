@@ -358,6 +358,19 @@ star:
     internal_unit: "m/s"
     latex: "\\xi"
     description: "Microturbulent (Lorentzian) Velocity"
+  # Doppler tomography: Gaussian FWHM of the local (non-rotating) line
+  # profile, excluding the instrumental broadening (added from the
+  # resolving power R inside the DT model). Declared when a dopptom
+  # dataset is present.
+  vline:
+    lower: 0.0
+    upper: 50000.0
+    initval: 5000.0
+    init_scale: 1000.0
+    unit: "m/s"
+    internal_unit: "m/s"
+    latex: "v_{\\rm line}"
+    description: "DT Local Line Width (FWHM)"
 # The apparent/absolute Ks the Mann relations key on live on the mann
 # component (mann.appks / mann.absks), which derives them from its own
 # non-centered Ks latent rather than sampling them here.

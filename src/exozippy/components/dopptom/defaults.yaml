@@ -1,0 +1,14 @@
+dopptom:
+  # Multiplicative error scaling of the per-pixel rms estimated from the DT
+  # image (EXOFASTv2 dtscale, sampled per dataset).  The bounds are ours:
+  # EXOFASTv2 constrains dtscale only to be positive (mkss.pro gives it a
+  # scale of 100 and no bounds).
+  dtscale:
+    lower: 0.01
+    upper: 100.0
+    initval: 1.0
+    init_scale: 0.1
+    unit: ""
+    internal_unit: ""
+    latex: "\\sigma_{\\rm DT}"
+    description: "Doppler Tomography Error Scaling"

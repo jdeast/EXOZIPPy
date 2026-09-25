@@ -1,0 +1,37 @@
+# KELT-17 b -- starting values / priors for the fast DT demo
+
+# ---- Star (no SED/MIST here -> prior the fundamentals) ----
+star.A.radius:  {initval: 1.645, sigma: 0.06}
+star.A.teff:    {initval: 7454, sigma: 75}
+star.A.feh:     {initval: 0.21, sigma: 0.08}
+star.A.logmass: {initval: 0.260522}
+
+# DT local line width (EXOFASTv2 prior: 5490 +/- 480 m/s)
+star.A.vline:   {initval: 5490, sigma: 480}
+
+# ---- Planet ----
+planet.b.radius: {initval: 1.499}
+planet.b.mass:   {initval: 1.898}
+planet.b.p:      {initval: 0.093633}
+
+# ---- Orbit (circular, as in Zhou et al. 2016) ----
+orbit.b.logP:   {initval: 0.48857340}
+orbit.b.tc:     {initval: 2457444.833861}
+orbit.b.cosi:   {initval: 0.082732}
+orbit.b.secosw: {initval: 0.0, sigma: 0}
+orbit.b.sesinw: {initval: 0.0, sigma: 0}
+
+# ---- Spin-orbit via sqrt(vsini)cos/sin(lambda) [(m/s)^1/2] ----
+# -> vsini ~ 44.2 km/s, lambda ~ -115.6 deg (retrograde); Gaussian prior
+# on the DERIVED vsini reproduces EXOFASTv2's 44200 +/- 1400 m/s.
+orbit.b.svcoslam: {initval: -90.87}
+orbit.b.svsinlam: {initval: -189.59}
+orbit.b.vsini:    {initval: 44200, sigma: 1400}
+
+# ---- Limb darkening (EXOFASTv2 u1/u2 -> Kipping q1/q2 initvals) ----
+band.Sloani.q1: {initval: 0.2259}
+band.Sloani.q2: {initval: 0.2014}
+
+# ---- RVs ----
+rvinstrument.TRES.gamma:           {initval: 115.94}
+rvinstrument.TRES.jitter_variance: {initval: 8764.3, lower: 0.0}
