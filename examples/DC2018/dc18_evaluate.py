@@ -57,6 +57,8 @@ from pathlib import Path
 
 import numpy as np
 
+from exozippy.constants import DAYS_PER_YEAR, RSUN_TO_AU
+
 # ---------------------------------------------------------------- classes
 TRUTH_RECOVERED = "TRUTH_RECOVERED"
 TRUTH_UNRECOVERABLE = "TRUTH_UNRECOVERABLE"
@@ -232,6 +234,102 @@ def _n_sampled_dims(post):
     return n
 
 
+class MissingObservable(RuntimeError):
+    """An observable the score claims to cover is absent from the trace."""
+
+
+# Observables the trace does NOT store, recovered from what it does.  Every
+# relation below is QUOTED from the model's own symbolic map, not re-derived
+# -- getting one wrong produces a confident wrong pull, and the first attempt
+# at this used exp() where the model uses 10**.
+#
+#   theta_E    = 10**log_theta_E                        symbolic_physics.py
+#   mu_rel_mag = hypot(mu_ra_rel, mu_dec_rel)           symbolic_physics.py
+#   t_E        = theta_E / (mu_rel_mag/DAYS_PER_YEAR)   symbolic_physics.py
+#   u0te       = u_0 * t_E                              symbolic_physics.py
+#   rho        = (radius*RSUN_TO_AU/distance)*1000 / theta_E
+#                                                       physics.calc_rho
+#
+# Why this is needed at all: t_E and rho were NEVER scored on any DC2018 run
+# -- OBSERVABLES named `mulensevent.t_E` and `source.log_rho`, which no trace
+# has ever contained -- and `u_0` joined them the moment the sweep config set
+# `fitu0te: true`, which samples u_0*t_E instead of u_0.  Each was dropped by
+# a bare `continue`, so a run missing half its observables still printed a
+# PASS.  On the corrected 194 that hid u_0 at +7.3 sigma and t_E at -3.5.
+SOURCE_IDX = 1  # star element order is [Lens, Source]
+
+
+def _var(post, name):
+    return np.asarray(post[name]) if name in post.data_vars else None
+
+
+def _theta_E(post):
+    v = _var(post, "mulensevent.log_theta_E")
+    return None if v is None else 10.0**v
+
+
+def _t_E(post):
+    thE = _theta_E(post)
+    ra = _var(post, "mulensevent.mu_ra_rel")
+    dec = _var(post, "mulensevent.mu_dec_rel")
+    if thE is None or ra is None or dec is None:
+        return None
+    return thE / (np.hypot(ra, dec) / DAYS_PER_YEAR)
+
+
+def _u_0_from_u0te(post):
+    u0te = _var(post, "source.u0te")
+    tE = _t_E(post)
+    return None if u0te is None or tE is None else u0te / tE
+
+
+def _rho(post):
+    r = _var(post, "star.radius")
+    d = _var(post, "star.distance")
+    thE = _theta_E(post)
+    if r is None or d is None or thE is None:
+        return None
+    rho = (r[..., SOURCE_IDX] * RSUN_TO_AU / d[..., SOURCE_IDX]) * 1000.0 / thE
+    # OBSERVABLES marks rho is_log=True -- its stored spelling is `log_rho`,
+    # so the truth is log10'd and this column must be too.  Returning linear
+    # rho compared 0.0011 against log10(0.0011) and printed a -3726 sigma pull.
+    return np.log10(rho)
+
+
+DERIVERS = {"t_E": _t_E, "u_0": _u_0_from_u0te, "rho": _rho}
+
+
+def _pick_or_derive(post, key, cands, required=False):
+    """The stored name, else the deriver.
+
+    ``required=True`` RAISES instead of returning (None, None).  Scoring passes
+    it; the information table does not, because a miss there costs a reported
+    ratio rather than a verdict.
+    """
+    n, v = _pick(post, cands)
+    if n is not None:
+        return n, v
+    deriver = DERIVERS.get(key)
+    v = deriver(post) if deriver else None
+    if v is None:
+        if required:
+            # NOT a `continue`.  A silently dropped observable is a score that
+            # passes on fewer numbers than it claims -- how t_E and rho went
+            # unchecked on every DC2018 run ever scored.
+            raise MissingObservable(
+                "%s is in OBSERVABLES but this trace has none of %s and no "
+                "deriver could build it. Scoring without it would report a "
+                "verdict over fewer observables than the table names. Add "
+                "the trace's spelling to OBSERVABLES, or a DERIVERS entry."
+                % (key, list(cands))
+            )
+        return (None, None)
+    # _pick's contract is ONE VALUE PER (chain, draw), already flat; the
+    # derivers build from whole (chain, draw[, element]) arrays, so ravel to
+    # match or np.vstack silently lines up 78 chains against 3995 draws.
+    return "<derived>", np.asarray(v).ravel()
+
+
 def mode_geometry(trace, truth, modes_txt=None, idata=None):
     """Mode-aware geometry: which mode holds the truth, how well, and whether
     that mode's own dispersion is believable.
@@ -253,9 +351,7 @@ def mode_geometry(trace, truth, modes_txt=None, idata=None):
     for key, cands, _prior, is_log in OBSERVABLES:
         if key not in truth:
             continue
-        n, v = _pick(post, cands)
-        if n is None:
-            continue
+        n, v = _pick_or_derive(post, key, cands, required=True)
         t = float(truth[key])
         if key in ABS_COMPARED:
             t = abs(t)
@@ -415,7 +511,7 @@ def informative(trace, prior_widths=None, idata=None):
     post = idata.posterior
     ratios = {}
     for key, cands, _prior, _log in OBSERVABLES:
-        n, v = _pick(post, cands)
+        n, v = _pick_or_derive(post, key, cands)
         if n is None:
             continue
         v = v[np.isfinite(v)]
