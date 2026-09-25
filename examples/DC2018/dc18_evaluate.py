@@ -87,6 +87,16 @@ REMEDY = {
 # (component, parameter) whose resolved bounds give the PRIOR width for the
 # information ratio; None for a derived quantity with no bounds of its own.
 # Log coordinates are compared in log space.
+# Compared in ABSOLUTE VALUE.  (u_0, alpha) -> -(u_0, alpha) is EXACT for a
+# static binary with no parallax (conventions.md C23, Skowron Eq. A12), so the
+# truth table's trajectory-side sign is not one the fits carry and the mirror
+# pair is ONE physical solution, not two modes.  dc18_common.py has done this
+# since the comparison table existed (truth["u_0"] = abs(truth["u_0"])); the
+# mode-aware evaluator did not, and scored the sign as a pull -- on event 004
+# that put the truth in an 8% mode at 16.4 sigma when it is in the 90.6%
+# favourite at 1.04.  Taking abs of the DRAWS too is what merges the mirror.
+ABS_COMPARED = {"u_0"}
+
 OBSERVABLES = [
     # (truth key, candidate trace names, prior (component, param), log10?)
     ("t_0", ("source.t_0", "lens.t_0"), ("source", "t_0"), False),
@@ -183,7 +193,11 @@ def _parse_modes_txt(modes_txt):
     m = re.search(r"^weight provenance:\s*(.*)$", t, re.M)
     if m:
         out["provenance"] = m.group(1).strip()
-    for mm in re.finditer(r"mode (\d+):\s*lnZ\s*=\s*([-+0-9.eE]+)", t):
+    # lnZ is reported as "lnZ=92499.73+/-0.41"; a bare [-+0-9.eE]+ swallows
+    # the leading "+" of the "+/-" and float() then raises on "92499.73+".
+    for mm in re.finditer(
+        r"mode (\d+):\s*lnZ\s*=\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", t
+    ):
         out["lnZ"][int(mm.group(1)) - 1] = float(mm.group(2))
     return out
 
@@ -243,6 +257,9 @@ def mode_geometry(trace, truth, modes_txt=None, idata=None):
         if n is None:
             continue
         t = float(truth[key])
+        if key in ABS_COMPARED:
+            t = abs(t)
+            v = np.abs(v)
         if is_log:
             if t <= 0:
                 continue
