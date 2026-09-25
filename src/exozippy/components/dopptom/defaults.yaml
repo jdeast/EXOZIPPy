@@ -1,8 +1,8 @@
 dopptom:
   # Multiplicative error scaling of the per-pixel rms estimated from the DT
-  # image (EXOFASTv2 dtscale, sampled per dataset).  The bounds are ours:
-  # EXOFASTv2 constrains dtscale only to be positive (mkss.pro gives it a
-  # scale of 100 and no bounds).
+  # image (EXOFASTv2 dtscale, sampled per dataset).  The bounds are
+  # EXOFASTv2's: exofast_chi2v2.pro rejects dtscale <= 0.01 or > 100
+  # (mkss.pro itself only sets the step scale, 100).
   dtscale:
     lower: 0.01
     upper: 100.0
