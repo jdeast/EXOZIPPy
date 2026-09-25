@@ -83,6 +83,7 @@ orbit:
     internal_unit: "d"
     latex: "T_{S,\\rm target}"
     description: "Time of Eclipse (target frame)"
+    periodic: {param: "period"}
     expressions:
       default:
         func_name: "calc_ts"
@@ -96,6 +97,7 @@ orbit:
     internal_unit: "d"
     latex: "T_S"
     description: "Time of Eclipse"
+    periodic: {param: "period"}
     expressions:
       default:
         func_name: "calc_ts_observed"
@@ -297,6 +299,11 @@ orbit:
     internal_unit: "rad"
     latex: "\\omega_*"
     description: "Argument of Periastron"
+    # An angle from arctan2 sits on the (-180, 180] cut; a posterior across
+    # it is recentered about its mode before reporting (parameter.md,
+    # "Periodic parameters").  Every angle and epoch below carries the same
+    # declaration; the epochs take the orbital period from `period`.
+    periodic: {value: 360.0, unit: "deg"}
     expressions:
       default:
         func_name: "calc_omega"
@@ -336,6 +343,7 @@ orbit:
     internal_unit: "rad"
     latex: "\\Omega"
     description: "Longitude of Ascending Node"
+    periodic: {value: 360.0, unit: "deg"}
     expressions:
       default:
         func_name: "calc_bigomega"
@@ -467,6 +475,7 @@ orbit:
     internal_unit: "d"
     latex: "T_{P,\\rm target}"
     description: "Time of Periastron (target frame)"
+    periodic: {param: "period"}
     expressions:
       default:
         func_name: "calc_tp"
@@ -485,6 +494,7 @@ orbit:
     internal_unit: "d"
     latex: "T_P"
     description: "Time of Periastron"
+    periodic: {param: "period"}
     expressions:
       default:
         func_name: "calc_tp_observed"
@@ -542,6 +552,7 @@ orbit:
     internal_unit: "rad"
     latex: "\\lambda"
     description: "Projected Spin-Orbit Angle"
+    periodic: {value: 360.0, unit: "deg"}
     expressions:
       from_sv:
         func_name: "calc_lam_from_sv"
