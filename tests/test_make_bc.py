@@ -48,8 +48,10 @@ def regenerated_2mass(tmp_path_factory):
         shipped.attrs["meta"]["filters"],
     )
 
+    # overwrite: 2MASS_J is already in the table (written by another
+    # pipeline), which make_bc otherwise leaves alone.
     written = make_bc_tables(
-        ["2MASS/2MASS.J"], model="NextGen", model_root=root
+        ["2MASS/2MASS.J"], model="NextGen", model_root=root, overwrite=True
     )
 
     after = read_bc_table(written[0])

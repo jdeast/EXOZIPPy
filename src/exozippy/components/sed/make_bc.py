@@ -55,15 +55,19 @@ from typing import Dict, List, Sequence
 
 import numpy as np
 import pandas as pd
+import yaml
 
 from ...filters.filter import Filter
 from ...utilities.zenodo import fetch_assets
 from .bc_grid import (
     DEFAULT_MODEL_ROOT,
     _load_alias_table,
+    bc_nodes_to_compute,
+    bc_table_filter_columns,
     bc_table_path,
     facility_from_svo_name,
     peek_grid_axes,
+    read_bc_meta,
     resolve_filter_name,
     write_bc_table,
 )
@@ -181,7 +185,8 @@ def _unit_optical_depth(wave_ang: np.ndarray) -> np.ndarray:
 
 
 def _select_spectrum(df_spec, teff, logg, feh):
-    """Spectrum at a grid node, with the alpha fallback order."""
+    """(alpha, spectrum) at a grid node, with the alpha fallback order;
+    None when no alpha has one."""
     for alpha in ALPHA_FALLBACK:
         rows = df_spec[
             (df_spec.teff == teff)
@@ -193,7 +198,7 @@ def _select_spectrum(df_spec, teff, logg, feh):
             flux = rows.iloc[0].flux
             if isinstance(flux, str):
                 flux = np.array(json.loads(flux))
-            return flux
+            return alpha, flux
     return None
 
 
@@ -209,33 +214,47 @@ def _vega_zeropoint(filt: Filter) -> float:
     return float(zp)
 
 
+# Recorded as each column's "generator"; make_bc only ever extends the
+# columns it wrote itself (see make_bc_tables).
+GENERATOR = "components/sed/make_bc.py"
+
+
+def _target_axes(model: str, model_root: Path) -> Dict[str, np.ndarray]:
+    """The grid to build on: {model}.grid.yaml when the model has one (so a
+    column is born on the full target grid, including axis values the
+    other tables have not been extended to yet), else the grid the
+    existing tables cover."""
+    grid_yaml = Path(model_root) / model / "BCs" / f"{model}.grid.yaml"
+    if grid_yaml.is_file():
+        with open(grid_yaml, "r") as f:
+            grid = yaml.safe_load(f)["grid"]
+        return {k: np.asarray(v, dtype=float) for k, v in grid.items()}
+    return peek_grid_axes(model=model, model_root=model_root)
+
+
 def make_bc_tables(
     svo_filter_ids: Sequence[str],
     model: str = "NextGen",
     model_root: Path | str = DEFAULT_MODEL_ROOT,
+    overwrite: bool = False,
 ) -> List[Path]:
     """
-    Generate BC tables for the given SVO filter IDs (grouped per facility)
-    on exactly the (teff, logg, feh, Av) axes of the shipped tables, and
-    merge them into {model_root}/{model}/BCs/{FACILITY}.bc.parquet
-    (existing columns of that table are kept unchanged).
+    Generate BC columns for the given SVO filter IDs (grouped per facility)
+    and merge them into {model_root}/{model}/BCs/{FACILITY}.bc.parquet
+    (every other column of that table is kept unchanged).
 
-    Returns the list of tables written, one per facility.
+    Incremental: only the (node, filter) cells that are missing are
+    computed (bc_grid.bc_nodes_to_compute), on the grid of _target_axes.
+    A column that already exists and was written by a different pipeline
+    (the full-resolution generator) is left alone -- it is better than
+    anything the downsampled spectra here can produce, and extending it
+    from them would mix two pipelines in one column. `overwrite=True`
+    recomputes the requested columns in full regardless.
+
+    Returns the list of tables written, one per facility that had work.
     """
     model_root = Path(model_root)
-    ensure_model_data(model, model_root)
-
-    axes = peek_grid_axes(model=model, model_root=model_root)
-    teff_pts = axes["teff_pts"]
-    logg_pts = axes["logg_pts"]
-    feh_pts = axes["feh_pts"]
-    av_pts = axes["av_pts"]
-
-    df_spec, wave_ang = _load_spectra(model, model_root)
-    tau_unit = _unit_optical_depth(wave_ang)
-    # (n_av, n_wave) attenuation factors
-    atten = np.exp(-np.outer(av_pts, tau_unit))
-
+    axes = _target_axes(model, model_root)
     alias_df = _load_alias_table()
 
     # group by facility, keep the BC-table column names (MIST convention).
@@ -247,8 +266,44 @@ def make_bc_tables(
         col = resolve_filter_name(svo_id, alias_df, alias="MIST")
         by_facility.setdefault(fac, []).append((svo_id, col))
 
-    written: List[Path] = []
+    plan = {}
     for fac, items in by_facility.items():
+        path = bc_table_path(model_root, model, fac)
+        if path.is_file() and not overwrite:
+            fmeta = read_bc_meta(path).get("filters", {})
+            have = set(bc_table_filter_columns(path))
+            foreign = [
+                c
+                for _, c in items
+                if c in have and fmeta.get(c, {}).get("generator") != GENERATOR
+            ]
+            if foreign:
+                logger.info(
+                    f"make_bc: {foreign} in {path.name} were written by "
+                    f"another pipeline; leaving them unchanged."
+                )
+            items = [(s_, c) for s_, c in items if c not in foreign]
+        if not items:
+            continue
+        todo = bc_nodes_to_compute(
+            path,
+            axes,
+            [c for _, c in items],
+            reusable=(lambda meta: False) if overwrite else None,
+        )
+        if len(todo):
+            plan[fac] = (items, todo)
+        else:
+            logger.info(f"make_bc: {path.name} already holds {items}.")
+    if not plan:
+        return []
+
+    ensure_model_data(model, model_root)
+    df_spec, wave_ang = _load_spectra(model, model_root)
+    tau_unit = _unit_optical_depth(wave_ang)
+
+    written: List[Path] = []
+    for fac, (items, todo) in plan.items():
         # filter transmissions on the spectra grid + zeropoints
         S = []
         zps = []
@@ -264,40 +319,43 @@ def make_bc_tables(
 
         new_cols = [c for _, c in items]
         recs = []
-        for feh in feh_pts:
-            for teff in teff_pts:
-                mbol_term = SIGMA_SB * teff**4 / F0_10PC
-                for logg in logg_pts:
-                    spec = _select_spectrum(df_spec, teff, logg, feh)
-                    if spec is None:
-                        raise ValueError(
-                            f"No {model} spectrum for teff={teff}, "
-                            f"logg={logg}, feh={feh} (any alpha)."
-                        )
-                    # (n_av, n_filt) band-averaged flux densities
-                    fmean = (
-                        np.trapezoid(
-                            (atten * spec)[:, None, :]
-                            * (S * wave_ang)[None, :, :],
-                            wave_ang,
-                            axis=2,
-                        )
-                        / S_norm[None, :]
+        for (feh, teff, logg), node in todo.groupby(["feh", "teff", "logg"]):
+            found = _select_spectrum(df_spec, teff, logg, feh)
+            if found is None:
+                raise ValueError(
+                    f"No {model} spectrum for teff={teff}, "
+                    f"logg={logg}, feh={feh} (any alpha)."
+                )
+            alpha, spec = found
+            av = node["Av"].values
+            # (n_av, n_wave) attenuation factors, for the missing Av only
+            atten = np.exp(-np.outer(av, tau_unit))
+            # (n_av, n_filt) band-averaged flux densities
+            fmean = (
+                np.trapezoid(
+                    (atten * spec)[:, None, :] * (S * wave_ang)[None, :, :],
+                    wave_ang,
+                    axis=2,
+                )
+                / S_norm[None, :]
+            )
+            # BC = M_bol - M_X ; the (R/d)^2 factor cancels
+            mbol_term = SIGMA_SB * teff**4 / F0_10PC
+            bc = 2.5 * np.log10(fmean / zps[None, :] / mbol_term)
+            # NaN leaves a cell the table already holds untouched.
+            bc = np.where(node[new_cols].values, bc, np.nan)
+            for a, row in zip(av, bc):
+                recs.append(
+                    (
+                        float(teff),
+                        float(logg),
+                        float(feh),
+                        float(alpha),
+                        float(a),
+                        3.10,
+                        *row,
                     )
-                    # BC = M_bol - M_X ; the (R/d)^2 factor cancels
-                    bc = 2.5 * np.log10(fmean / zps[None, :] / mbol_term)
-                    for i_av, av in enumerate(av_pts):
-                        recs.append(
-                            (
-                                float(teff),
-                                float(logg),
-                                float(feh),
-                                0.0,
-                                float(av),
-                                3.10,
-                                *bc[i_av],
-                            )
-                        )
+                )
         df_new = pd.DataFrame(
             recs,
             columns=["teff", "logg", "feh", "alpha", "Av", "Rv"] + new_cols,
@@ -309,7 +367,7 @@ def make_bc_tables(
                 "zeropoint_Fl_Vega": float(zp),
                 "flux_weighting": "photon",
                 "spectra": f"{model}.spectra.csv (Zenodo, R=150)",
-                "generator": "components/sed/make_bc.py",
+                "generator": GENERATOR,
             }
             for (svo_id, col), zp in zip(items, zps)
         }
@@ -319,6 +377,8 @@ def make_bc_tables(
             path,
             filter_meta,
             table_meta={"model": model, "facility": fac, "mag_system": "Vega"},
+            allow_new_nodes=True,
+            replace_columns=new_cols if overwrite else (),
         )
         written.append(path)
         logger.info(f"Wrote {path}")

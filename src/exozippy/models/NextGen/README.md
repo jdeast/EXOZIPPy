@@ -37,11 +37,21 @@ SPECTRA_PROCESSED_PATH_DEFAULT = Path("/Volumes/Data/Spectra/BT-NextGen_AGSS2009
 ```
 
 > [!WARNING]
-> Reading the raw ASCII spectra is the slow part (~1 s each, so ~2 hours single-process; `n_workers` in `process_raw_spectra_for_feh` parallelizes it). Each processed file is ~0.7 GB (~8 GB total). Step 1 is resumable: an [Fe/H] whose parquet already exists is skipped.
+> Reading the raw ASCII spectra is the slow part (~1 s each, so ~2 hours single-process; `n_workers` in `process_raw_spectra_for_feh` parallelizes it). Each processed file is ~0.7 GB (~8 GB total). Step 1 is incremental (`process_missing_spectra`): for each [Fe/H] it reads only the `teff`/`logg` columns of the existing parquet and resamples only the (teff, log g) nodes it does not hold yet, so adding Teff, log g or [Fe/H] values to `NextGen.grid.yaml` costs only the new spectra. Extending A_V needs no new spectra, so step 1 is then a no-op.
 
 ## 2. Compute the BC tables (`generate_NextGen_BC_Tables.py`, step 2)
 
-`generate_bc_tables` runs `BolometricCorrection` (`bolometric_correction.py`) at every grid node for every filter set in `FILTER_SETS`, with all 13 A_V values per spectrum at once, and writes `models/NextGen/BCs/{FACILITY}.bc.parquet`. The keys of `FILTER_SETS` are facilities and must equal the SVO id prefix of their filters (that prefix is how the loader finds a filter's table). The defaults reproduce every column that shipped before this pipeline existed. To add filters, add them to `FILTER_SETS` (or pass your own dict) and re-run step 2 only; this takes minutes. Columns of an existing table that are not being regenerated are kept unchanged.
+`generate_bc_tables` runs `BolometricCorrection` (`bolometric_correction.py`) for every filter set in `FILTER_SETS` and writes `models/NextGen/BCs/{FACILITY}.bc.parquet`. The keys of `FILTER_SETS` are facilities and must equal the SVO id prefix of their filters (that prefix is how the loader finds a filter's table). The defaults reproduce every column that shipped before this pipeline existed.
+
+Step 2 is **incremental on every axis and every filter**: it first works out which (grid node, filter) cells the tables do not hold yet (`plan_bc_work`, which you can call on its own to see what a run would do), prints that plan, and computes only those cells. So:
+
+- **To add filters**, add them to their facility's list in `FILTER_SETS` (or pass your own dict) and re-run step 2. Only the new columns are computed; the facility's other columns are not touched.
+- **To extend an axis** (e.g. A_V up to 15), add the values to `NextGen.grid.yaml` and re-run step 2 (and step 1 first if the new values are Teff, log g or [Fe/H]). Only the new nodes are computed. An [Fe/H] with nothing to compute is never loaded, and at each node `BolometricCorrection` is called with only the filters and A_V values still missing there.
+- **Re-running a finished table** computes nothing.
+
+New cells are merged into the table cell by cell (`bc_grid.write_bc_table`), and each table is checkpointed after every [Fe/H], so an interrupted run resumes where it stopped. A column counts as already computed only if its metadata says this pipeline wrote it with the same spectra (`GENERATOR`, `SPECTRA_TAG`). A column written by `make_bc.py` or converted from the legacy text tables is recomputed in full, so no column mixes two pipelines. `overwrite=True` recomputes everything.
+
+A table may therefore be ragged for a while, e.g. 2MASS extended to A_V = 15 and GAIA not yet. A missing cell is stored as NaN. The fit only uses the part of the grid that **every filter it asks for** covers: the SED's A_V bound is set from that coverage (`bc_grid.peek_grid_axes(filters=...)`), so a fit using only 2MASS can reach A_V = 15 while one that also uses Gaia stops at 6.
 
 Run both steps with
 
@@ -63,6 +73,10 @@ Before this pipeline, the tables shipped as one text file per facility and [Fe/H
 
 ## Filters with no table: `components/sed/make_bc.py`
 
-A fit that asks for a filter with no column triggers `make_bc.py`, which synthesizes the column from the downsampled (R = 150) spectra on Zenodo and merges it into the facility's table. It is the fallback for users without the full-resolution spectra; its columns say so in their metadata.
+A fit that asks for a filter with no column triggers `make_bc.py`, which synthesizes the column from the downsampled (R = 150) spectra on Zenodo on the `NextGen.grid.yaml` axes and merges it into the facility's table. It is the fallback for users without the full-resolution spectra; its columns say so in their metadata. It is incremental in the same way as step 2, with one extra rule: it never writes into a column another pipeline produced, unless called with `overwrite=True` (`scripts/make_bc_tables.py --overwrite`).
+
+## Reading the tables during a fit
+
+`bc_grid.build_bc_grid` reads only what the fit needs. For each facility it reads the grid-key columns (to find the grid points), then **only the requested filter columns**, and **only the rows inside the star's `teffsed`, `feh` and `av` bounds** plus the grid point bracketing each bound. Both restrictions are passed to the parquet reader, so the other columns and rows are never read into memory. For example, an A_V upper limit of 0.09 reads A_V = 0, 0.05 and 0.1. `loggsed` is derived and only soft-bounded, so its axis is always read in full. On disk the rows are sorted with A_V outermost, so rows past an A_V limit mostly sit in row groups the reader skips entirely.
 
 [^1]: https://svo2.cab.inta-csic.es/theory/newov2/index.php?models=bt-nextgen-agss2009 (Allard et al. 2011, 2012; Asplund et al. 2009).

@@ -1,7 +1,7 @@
 run:
   name: "hat3"
 
-prefix: "fitresults/HAT-P-3b"
+prefix: "fitresults/HAT-P-3"
 
 star:
   - name: "A"
@@ -16,7 +16,7 @@ sed:
   file: "hat3_sed.yaml"
 
 sampler:
-  method: numpyro   # nuts, numpyro, blackjax, nutpie, ptde, ptde_async, demc, demcz
+  method: nuts   # nuts, numpyro, blackjax, nutpie, ptde, ptde_async, demc, demcz
   tune: 500
   draws: 1000
   chains: 4

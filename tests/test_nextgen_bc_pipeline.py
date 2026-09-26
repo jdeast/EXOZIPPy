@@ -289,3 +289,184 @@ def test_pipeline_tables_load_through_build_bc_grid(pipeline_run):
     assert out["bc_values"].shape == (2, 2, 1, 3, 2)
     np.testing.assert_array_equal(out["av_pts"], grid["av"])
     assert not np.isnan(out["bc_values"]).any()
+
+
+# ---------------------------------------------------------------------------
+# Section 4 -- incremental runs: nothing already on disk is recomputed
+# ---------------------------------------------------------------------------
+
+
+def _write_grid_yaml(root, grid):
+    with open(root / "NextGen" / "BCs" / "NextGen.grid.yaml", "w") as f:
+        yaml.safe_dump({"model": "NextGen", "grid": grid}, f)
+
+
+def _count_bc_calls(monkeypatch):
+    """Record (filters, av) of every BolometricCorrection the generator
+    constructs, still computing the real thing."""
+    calls = []
+
+    class Counting(BolometricCorrection):
+        def __init__(self, filters, star_dict, **kwargs):
+            av = list(np.atleast_1d(star_dict["av"]))
+            calls.append((list(filters), av))
+            super().__init__(filters, star_dict, **kwargs)
+
+    monkeypatch.setattr(gen, "BolometricCorrection", Counting)
+    return calls
+
+
+@pytest.fixture
+def small_run(tmp_path):
+    """Blackbody raw spectra on a 2 x 2 x 1 grid, step 1 done, and step 2
+    done for 2MASS J on Av = 0, 1 only."""
+    raw, processed, root = tmp_path / "raw", tmp_path / "proc", tmp_path / "m"
+    raw.mkdir()
+    (root / "NextGen" / "BCs").mkdir(parents=True)
+    grid = {
+        "teff": [5000.0, 6000.0],
+        "logg": [4.0, 4.5],
+        "feh": [0.0],
+        "av": [0.0, 1.0],
+    }
+    _write_grid_yaml(root, grid)
+    for teff in (5000.0, 6000.0, 7000.0):
+        for logg in grid["logg"]:
+            pt = {"teff": teff, "logg": logg, "feh": 0.0, "alpha": 0.0}
+            _write_raw_spectrum(raw / get_NextGen2009_filename(pt), teff)
+    gen.process_missing_spectra(
+        grid, raw_path=raw, processed_path=processed, n_workers=1
+    )
+    gen.generate_bc_tables(
+        filter_sets={"2MASS": ["2MASS/2MASS.J"]},
+        processed_path=processed,
+        model_root=root,
+    )
+    return root, grid, raw, processed
+
+
+def test_extending_av_computes_only_the_new_av_values(small_run, monkeypatch):
+    """
+    Given a 2MASS table computed on Av = 0, 1,
+    When the grid yaml gains Av = 3 and step 2 is re-run,
+    Then every BolometricCorrection is asked for Av = 3 alone, the Av = 0,
+    1 cells are unchanged, and the Av = 3 cells equal a direct calculation.
+    """
+    # ARRANGE
+    root, grid, _, processed = small_run
+    path = root / "NextGen" / "BCs" / "2MASS.bc.parquet"
+    before = read_bc_table(path)
+    _write_grid_yaml(root, {**grid, "av": [0.0, 1.0, 3.0]})
+    calls = _count_bc_calls(monkeypatch)
+
+    # ACT
+    gen.generate_bc_tables(
+        filter_sets={"2MASS": ["2MASS/2MASS.J"]},
+        processed_path=processed,
+        model_root=root,
+    )
+    after = read_bc_table(path)
+
+    # ASSERT
+    assert len(calls) == 4  # one per (teff, logg) node
+    assert all(av == [3.0] for _, av in calls)
+    key = ["teff", "logg", "feh", "Av"]
+    old = after.merge(before, on=key, suffixes=("", "_before"))
+    assert len(old) == len(before)
+    np.testing.assert_array_equal(old["2MASS_J"], old["2MASS_J_before"])
+    spec = gen.load_processed_spectra(0.0, processed).set_index(
+        ["teff", "logg"]
+    )
+    direct = BolometricCorrection(
+        ["2MASS/2MASS.J"],
+        {"teff": 6000.0, "logg": 4.0, "feh": 0.0, "av": 3.0},
+        spectrum=(0.0, np.asarray(spec.loc[(6000.0, 4.0), "flux"])),
+    )
+    node = (after.Av == 3.0) & (after.teff == 6000.0) & (after.logg == 4.0)
+    assert after.loc[node, "2MASS_J"].iloc[0] == pytest.approx(
+        float(direct.BC_by_av.ravel()[0]), abs=1e-12
+    )
+
+
+def test_adding_a_filter_computes_only_that_filter(small_run, monkeypatch):
+    """
+    Given a 2MASS table holding J,
+    When H is added to the facility's filter list and step 2 is re-run,
+    Then BolometricCorrection is asked for H alone, and J is unchanged.
+    """
+    # ARRANGE
+    root, _, _, processed = small_run
+    path = root / "NextGen" / "BCs" / "2MASS.bc.parquet"
+    before = read_bc_table(path).sort_values(["teff", "logg", "Av"])
+    calls = _count_bc_calls(monkeypatch)
+
+    # ACT
+    gen.generate_bc_tables(
+        filter_sets={"2MASS": ["2MASS/2MASS.J", "2MASS/2MASS.H"]},
+        processed_path=processed,
+        model_root=root,
+    )
+    after = read_bc_table(path).sort_values(["teff", "logg", "Av"])
+
+    # ASSERT
+    assert len(calls) == 4
+    assert all(filters == ["2MASS/2MASS.H"] for filters, _ in calls)
+    np.testing.assert_array_equal(
+        after["2MASS_J"].values, before["2MASS_J"].values
+    )
+    assert after["2MASS_H"].notna().all()
+
+
+def test_rerunning_a_complete_table_computes_nothing(small_run, monkeypatch):
+    """
+    Given a table already complete on the grid yaml,
+    When step 2 is re-run unchanged,
+    Then no BolometricCorrection is constructed and no spectra are loaded.
+    """
+    # ARRANGE
+    root, _, _, processed = small_run
+    calls = _count_bc_calls(monkeypatch)
+    loads = []
+    monkeypatch.setattr(
+        gen, "load_processed_spectra", lambda *a, **k: loads.append(a)
+    )
+
+    # ACT
+    out = gen.generate_bc_tables(
+        filter_sets={"2MASS": ["2MASS/2MASS.J"]},
+        processed_path=processed,
+        model_root=root,
+    )
+
+    # ASSERT
+    assert calls == [] and loads == [] and out == {}
+
+
+def test_step1_processes_only_the_missing_teff_nodes(small_run, monkeypatch):
+    """
+    Given processed spectra for teff = 5000, 6000,
+    When the grid gains teff = 7000 and step 1 is re-run,
+    Then only the two new (teff, logg) nodes are read from the raw files,
+    and the parquet then holds all six.
+    """
+    # ARRANGE
+    _, grid, raw, processed = small_run
+    read = []
+    real = gen.process_spectrum
+    monkeypatch.setattr(
+        gen, "process_spectrum", lambda p: read.append(p) or real(p)
+    )
+    grid = {**grid, "teff": [5000.0, 6000.0, 7000.0]}
+
+    # ACT
+    done = gen.process_missing_spectra(
+        grid, raw_path=raw, processed_path=processed, n_workers=1
+    )
+    df = gen.load_processed_spectra(0.0, processed)
+
+    # ASSERT
+    assert done == {0.0: 2}
+    assert len(read) == 2 and all("lte070" in p.name for p in read)
+    assert sorted(zip(df.teff, df.logg)) == [
+        (t, g) for t in grid["teff"] for g in grid["logg"]
+    ]
