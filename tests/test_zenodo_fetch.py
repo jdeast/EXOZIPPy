@@ -224,7 +224,7 @@ def test_download_stages_on_a_part_file_and_renames_only_when_intact(
     """
     Given a download in progress,
     When fetch_assets writes it,
-    Then the bytes land on <name>.part and the destination does not exist
+    Then the bytes land on a <name>.*.part file and the destination does not exist
     until size and md5 have both been verified.
 
     This is the whole point of the staging dance: urlretrieve writing
@@ -250,7 +250,8 @@ def test_download_stages_on_a_part_file_and_renames_only_when_intact(
     zenodo.fetch_assets(_fake_assets(payload), tmp_path)
 
     # ASSERT
-    assert seen["dest_arg"] == "f.csv.part"
+    assert seen["dest_arg"].startswith("f.csv.")
+    assert seen["dest_arg"].endswith(".part")
     assert seen["final_exists_during"] is False
     assert (tmp_path / "f.csv").read_bytes() == payload
     assert not list(tmp_path.glob("*.part"))
@@ -672,7 +673,11 @@ def test_an_unwritable_cache_degrades_to_a_plain_download(
     fetched = []
 
     def observant(url, dest):
-        assert Path(dest).name == "f.csv.part", "expected the legacy staging"
+        name = Path(dest).name
+        assert Path(dest).parent == tmp_path / "a", (
+            "expected the legacy staging"
+        )
+        assert name.startswith("f.csv.") and name.endswith(".part"), name
         Path(dest).write_bytes(payload)
 
     monkeypatch.setattr(zenodo, "_urlretrieve", observant)
@@ -739,6 +744,61 @@ def test_concurrent_fetches_download_once_and_never_tear_the_entry(
         "the cache lock did not serialize them"
     )
     assert not list(entry.parent.glob("*.part"))
+
+
+@requires_fork
+def test_concurrent_fetches_into_one_tree_without_the_cache(
+    tmp_path, monkeypatch
+):
+    """
+    Given four processes racing for the same asset into ONE destination
+    directory with the shared cache off (the test suite's xdist workers in a
+    fresh worktree: conftest switches the cache off for every test),
+    When they all call fetch_assets,
+    Then every process succeeds, exactly one downloads, the destination is
+    intact, and no .part or .lock-held debris is left behind.
+
+    Regression: this path staged on a FIXED <dest>.part with no lock, so the
+    first worker's replace() moved the file out from under another's stat()
+    and the pre-push suite failed with FileNotFoundError on
+    NextGen.spectra.csv.part in any fresh worktree.
+    """
+    # ARRANGE
+    payload = b"payload-bytes" * 64
+    assets = _fake_assets(payload)
+    counter = tmp_path / "downloads.log"
+    counter.write_bytes(b"")
+    dest_dir = tmp_path / "tree"
+
+    def slow_download(url, dest):
+        with open(counter, "ab") as f:  # O_APPEND: atomic for one small write
+            f.write(b"x")
+        Path(dest).write_bytes(payload[: len(payload) // 2])
+        time.sleep(0.5)  # long enough for the others to pile up
+        Path(dest).write_bytes(payload)
+
+    monkeypatch.setattr(zenodo, "_urlretrieve", slow_download)
+
+    def child():
+        zenodo.fetch_assets(assets, dest_dir)
+
+    ctx = multiprocessing.get_context("fork")
+
+    # ACT
+    procs = [ctx.Process(target=child) for _ in range(4)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(120)
+
+    # ASSERT
+    assert [p.exitcode for p in procs] == [0, 0, 0, 0]
+    assert (dest_dir / "f.csv").read_bytes() == payload
+    assert counter.stat().st_size == 1, (
+        f"{counter.stat().st_size} processes downloaded the same asset; "
+        "the destination lock did not serialize them"
+    )
+    assert not list(dest_dir.glob("*.part"))
 
 
 # --- the two wrappers -----------------------------------------------------

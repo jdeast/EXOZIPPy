@@ -112,3 +112,8 @@ ezsuite6_full.*.txt
 examples/ob140939/ob140939_*.yaml
 examples/ob161003/ob161003_*.yaml
 examples/ob170114/ob170114_*.yaml
+
+# Transient files utilities/zenodo.py stages next to a fetched asset: the
+# per-asset flock (<asset>.lock) and the in-flight download (<asset>.*.part).
+src/exozippy/**/*.lock
+src/exozippy/**/*.part
