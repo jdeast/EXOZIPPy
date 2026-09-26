@@ -1,0 +1,47 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 32-64
+#$ -q lThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N blendtie194
+#$ -t 1
+#$ -o ab194/dc18_blendtie.$JOB_ID.log
+#
+# Event 194 with the SOURCE'S COORDINATES PINNED TO THE EVENT, and nothing
+# else changed.  Every DC2018 config anchored the galactic model on the
+# Source (anchor_idx 1) but pinned only the Lens's ra/dec, so the Source sat
+# at defaults.yaml's (RA 180, Dec 0) = Galactic (l 276, b +60) and the whole
+# density/kinematic prior for both stars was evaluated up out of the plane
+# -- an exponential pull toward small distances that the D_s profile
+# (job 15467642) and the kinematic-alone maximization (15467649) measured
+# at ~-1.3 to -2.2 nats/kpc, and that a numpy transcription reproduced to
+# three decimals only with the (180, 0) sight line.  Notes 2026-09-24.
+#
+#   task 1  ab194/anchorfix     from ab194/zpvega (Vega zeropoints)
+#   task 2  ab194/anchorfix_ab  from sweep/194   (AB zeropoint 22.0)
+# Both at 5000 draws (explore tier).  Prediction: D_s 8.5-12 kpc, R_source
+# 0.6-0.7 (the extinction-law grey shortfall keeps it under 0.822), source
+# Teff 4500-5300 K, kinematic_prior no longer sloping inward.
+#
+# Editable install: runs whatever is checked out at import time.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD) on $(git -C $HOME/python/EXOZIPPy branch --show-current)   $(date)"
+case "$SGE_TASK_ID" in
+  1) ARM=blendtie ;;
+  2) ARM=anchorfix_ab ;;
+  *) echo "bad task id"; exit 1 ;;
+esac
+cfg="${TMPDIR:-/tmp}/blendtie194_${SGE_TASK_ID}_$$.yaml"
+python dc18_set_cores.py ab194/$ARM/DC2018_194.yaml "$cfg" --cores "${NSLOTS:?NSLOTS unset}"
+exozippy "$cfg"
+echo "exit $?   $(date)"

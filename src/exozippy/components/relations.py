@@ -274,7 +274,41 @@ class StellarRelation:
                 )
             )
 
-    def _add_penalty(self, which, observed, predicted, sigma, *, normalize):
+    def _photometrically_active(self, system):
+        """Per-instance mask: False for an instance whose star no photometric
+        term sees (``SED.seen_star_mask``).
+
+        Such a star's teff/feh/av/radius are pinned placeholders (see
+        ``Star.register_parameters``), so a relation evaluated on them --
+        Torres from (teff, logg, feh), Mann from a synthetic Ks that IS the
+        SED of those placeholders -- would tie the star's mass to numbers
+        nobody measured.  The instance is skipped, once, audibly.  With no
+        SED in the topology every instance is active: there is no
+        photometric machinery for the star to be excluded from.
+        """
+        from .component import in_topology
+
+        n = int(self.n_elements)
+        sed = in_topology(system, "sed")
+        seen_fn = getattr(sed, "seen_star_mask", None)
+        if not callable(seen_fn):
+            return np.ones(n, dtype=bool)
+        seen = np.asarray(seen_fn(system), dtype=bool)
+        active = seen[np.asarray(self.star_map, dtype=int)]
+        if not active.all():
+            skipped = [nm for nm, ok in zip(self.names, active) if not ok]
+            logger.warning(
+                f"[{self.prefix}] {', '.join(skipped)}: the star has no "
+                f"photometry in this topology, so its teff/feh/av/radius are "
+                f"pinned placeholders and this relation would be circular; "
+                f"skipping it. Give the star photometry (an SED row, "
+                f"sed_constrains_blend on a light curve) to constrain it."
+            )
+        return active
+
+    def _add_penalty(
+        self, which, observed, predicted, sigma, *, normalize, active=None
+    ):
         """Masked Gaussian potential tying a star quantity to a prediction.
 
         Only instances that named ``which`` in ``constrain:`` contribute; the
@@ -298,6 +332,10 @@ class StellarRelation:
         with ``normalize=False`` is a real bug, so neither is defaulted.
         """
         mask = np.array([which in c for c in self.constrain], dtype=bool)
+        if active is not None:
+            # a star no photometric term sees: the relation's inputs are
+            # pinned placeholders there, so the penalty would be circular
+            mask &= np.asarray(active, dtype=bool)
         if not mask.any():
             return
         logp = -0.5 * pt.sqr((observed - predicted) / sigma)

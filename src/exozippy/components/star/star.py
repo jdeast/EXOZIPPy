@@ -11,6 +11,7 @@ from exozippy.components.parameterization import (
     merge_options,
     merge_overrides,
     mode_manifest,
+    pin_unselected,
 )
 from exozippy.constants import (
     FFP_MASS_FUNCTION_MIN_MEARTH,
@@ -1014,6 +1015,43 @@ class Star(Component):
                     "fbolsed": "default",
                 }
             )
+            # A star NO photometric term sees -- not a microlensing source,
+            # not in an SED filter row, not under a blend tie, no transit
+            # dilution or astrometric fluxfrac -- has its SED-side
+            # parameters pinned.  Nothing reads them but the SED's floors
+            # and a synthetic-Ks Mann relation (circular), and left free
+            # their conditional widths depend on the star's mass, so
+            # marginalizing over them tilts the mass: the DC2018 sweep2
+            # lenses came out 2-5x too massive from exactly this (notes
+            # 2026-09-25).  Opt-in pin (overrides channel): a params entry
+            # with a prior still frees one.  The relation components skip
+            # these stars too (relations.StellarRelation._photometrically_active).
+            sed_comp = in_topology(system, "sed")
+            seen_fn = getattr(sed_comp, "seen_star_mask", None)
+            if callable(seen_fn):
+                seen = np.asarray(seen_fn(system), dtype=bool)
+                pin = pin_unselected(self.n_elements, seen)
+                if pin:
+                    for key in (
+                        "teff",
+                        "feh",
+                        "av",
+                        "radius",
+                        "radiussed",
+                        "teffsed",
+                    ):
+                        self.manifest[key] = merge_options(
+                            self.manifest.get(key), **pin
+                        )
+                    unseen = [nm for nm, ok in zip(self.names, seen) if not ok]
+                    logger.info(
+                        f"[{self.prefix}] no photometric term sees "
+                        f"{', '.join(unseen)}: teff/feh/av/radius/teffsed/"
+                        f"radiussed pinned (mass, distance and proper motion "
+                        f"stay). Give the star photometry (an SED row, "
+                        f"sed_constrains_blend on a light curve) or a params "
+                        f"entry with a prior to free one."
+                    )
 
         # An evolutionary model indexes a track by (initial metallicity, EEP)
         # and reads off the present-day age; all three are declared here, per

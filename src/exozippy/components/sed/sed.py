@@ -872,6 +872,100 @@ class SED(Component):
         except KeyError:
             return False
 
+    def seen_star_mask(self, system):
+        """Which stars some likelihood term actually SEES through the SED.
+
+        A star is photometrically seen when at least one of these reads its
+        SED flux:
+
+          * an SED filter row names it (``blend_matrix`` column non-zero);
+          * it is a microlensing source body -- its flux is tied to the
+            light curve's f_source through the zeropoint;
+          * a microlensing light curve carries ``sed_constrains_blend: true``,
+            which ties f_blend to every NON-source star (the blend must
+            contain at least the lens's light);
+          * a transit references a band the grid has (the dilution reads the
+            host's flux fraction against every other star -- conservatively,
+            every star);
+          * an absolute-astrometry instrument references a band (photocenter
+            fluxfrac: host and companion -- conservatively, every star).
+
+        Every other star's teff/feh/av/radius/teffsed/radiussed are
+        likelihood-free dimensions: nothing reads them but the SED's own
+        floors and a synthetic-Ks Mann relation, which is circular.  Left
+        free they are not merely wasteful -- their conditional widths depend
+        on the star's MASS (an unseen lens's Teff has 2-5x more room when the
+        lens is heavy), so marginalizing over them tilts pi_rel and the lens
+        mass: the DC2018 sweep2 lenses came out 2-5x too massive from exactly
+        this (notes 2026-09-25, "THE LENS-DISTANCE PULL").  ``Star`` pins
+        them for the unseen stars (opt-in pin, a params entry still frees
+        one) and the relation components skip them.
+
+        Reads raw configs where the parsed maps may not exist yet (this is
+        called at stage 3, and other components' build_maps ordering is not
+        guaranteed) -- the same ruling as ``Band.ld_consumers``.
+        """
+        from ..component import in_topology
+
+        star = system.star
+        n = int(star.n_elements)
+        names = list(getattr(star, "names", None) or [])
+        seen = np.zeros(n, dtype=bool)
+
+        def _cfgs(comp):
+            if comp is None:
+                return []
+            cfg = getattr(comp, "config", None)
+            if cfg is None:
+                cfg = comp
+            return [c or {} for c in (cfg if isinstance(cfg, list) else [cfg])]
+
+        def _star_index(ref):
+            if isinstance(ref, (int, np.integer)):
+                return int(ref)
+            try:
+                return int(resolve_star_ref(ref, names, "body"))
+            except Exception:  # noqa: BLE001 -- an unresolvable body is not ours to diagnose here
+                return None
+
+        # 1. SED filter rows.
+        bm = getattr(self, "blend_matrix", None)
+        if bm is not None and np.size(bm):
+            seen |= (np.asarray(bm) != 0).any(axis=0)
+
+        # 2. microlensing sources, 3. blend-tied light curves.
+        src = in_topology(system, "source")
+        src_idx = []
+        smap = getattr(src, "star_map", None)
+        if smap is not None:
+            src_idx = [int(i) for i in np.atleast_1d(smap)]
+        else:
+            for c in _cfgs(src):
+                i = _star_index(c.get("body"))
+                if i is not None:
+                    src_idx.append(i)
+        for i in src_idx:
+            if 0 <= i < n:
+                seen[i] = True
+        insts = _cfgs(in_topology(system, "mulensinstrument"))
+        if src_idx and any(
+            bool(c.get("sed_constrains_blend", False)) for c in insts
+        ):
+            for i in range(n):
+                if i not in src_idx:
+                    seen[i] = True
+
+        # 4. transit dilution, 5. absolute astrometry: conservative.
+        if in_topology(system, "band") is not None:
+            if _cfgs(in_topology(system, "transit")):
+                seen[:] = True
+            if any(
+                "band" in c
+                for c in _cfgs(in_topology(system, "astrometryinstrument"))
+            ):
+                seen[:] = True
+        return seen
+
     def predict_star_appmag(self, star_idx, filter_key, system):
         """Predicted apparent magnitude of one star in one filter (scalar node)."""
         col = self.filter_column(filter_key)
