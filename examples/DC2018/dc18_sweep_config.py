@@ -400,6 +400,16 @@ def build(event, outdir, draws, tune, cores, t_max):
                 "file": files[b],
                 "data_format": "flux",
                 "observer_location": "roman_simulated_2018dc",
+                # The blend must contain at least the lens's light.  With
+                # this set the SED's lens flux plus a fitted non-negative
+                # neighbor_flux is tied to f_blend (0.2 mag): one-sided, so
+                # unrelated field stars are absorbed and only a lens BRIGHTER
+                # than the blend costs.  Off by default (the option predates
+                # the neighbor term, 2026-08-20) and never opted in here, so
+                # the unseen lens had NO flux bound and its Teff/feh volume
+                # pulled pi_rel 0.3-0.6 dex low, M_lens 2-5x high (notes
+                # 2026-09-25, "THE LENS-DISTANCE PULL").  JDE 2026-09-26.
+                "sed_constrains_blend": True,
                 "band": b,
                 "likelihood": "hogg",
             }
