@@ -1,0 +1,39 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N pirelprof
+#$ -t 1-4
+#$ -o sweep2/dc18_pirel_profile.$JOB_ID.$TASK_ID.log
+#
+# THE LENS-DISTANCE PULL, dissected the way the source's was.  Sweep2 (fixed
+# configs) puts pi_rel LOW on every event with a pull -- 047 -3.7 sigma, 223
+# -5.5, 194 -1.8 -- so with theta_E right the lens mass comes out 2.8-5x
+# high and the lens sits at 8.5 kpc whatever the key says (047's and 223's
+# lenses are DISK stars at 8.1 and 5.9 kpc).  With fitpirel the lens
+# distance is derived, D_l = 1000/(pi_rel + 1000/D_s), so the sampled
+# coordinate log_pi_rel is the pin: dc18_ds_profile.py re-optimizes every
+# other star/event/SED/Mann parameter at each grid point and splits the
+# optimum by term.  Grid in log10(pi_rel) from -2.8 to -1.0 spans the fits
+# (-2.2..-1.7) and the truths (047 -1.82, 103 -2.16, 194 -1.30, 223 -1.67).
+#   task 1  047   task 2  223   task 3  194   task 4  103 (M_lens within 1 sigma: the control)
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+export OMP_NUM_THREADS=${NSLOTS:-4}
+cd $HOME/python/EXOZIPPy/examples/DC2018
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)   $(date)"
+case "$SGE_TASK_ID" in
+  1) EV=047 ;; 2) EV=223 ;; 3) EV=194 ;; 4) EV=103 ;; *) echo bad; exit 1 ;;
+esac
+python dc18_ds_profile.py --event $EV --run-dir sweep2/$EV \
+    --pin "mulensevent.log_pi_rel=-2.0" \
+    --grid=-2.8,-2.6,-2.4,-2.2,-2.0,-1.8,-1.6,-1.4,-1.2,-1.0 --restarts 2 --maxfev 10000 \
+    --report "star.distance,star.logmass,star.radius,star.teff,star.pm_ra,star.pm_dec,star.rv,mulensevent.log_theta_E,mulensevent.mu_ra_rel,mulensevent.mu_dec_rel,mann.absks,mann.mass_pred,mann.radius_pred,source.rho,mulensinstrument.q_source,mulensinstrument.zeropoint"
+echo "exit $?   $(date)"
