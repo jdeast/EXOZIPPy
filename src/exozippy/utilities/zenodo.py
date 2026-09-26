@@ -662,18 +662,35 @@ def fetch_assets(
             logger.info(f"Saved {filename} to {dest}")
             continue
 
-        # No usable shared cache: download straight into the destination,
-        # exactly as this function did before the cache existed.
-        if on_fetch is not None:
-            on_fetch(filename)
-
-        logger.info(f"Downloading {filename} from Zenodo...")
+        # No usable shared cache: download straight into the destination.
+        # Serialized on a lock next to `dest`, with a re-check once it is
+        # held, and staged under a per-process mkstemp name -- exactly as the
+        # cache path does. With a fixed `<dest>.part` and no lock, two
+        # processes fetching into one fresh tree (the test suite's xdist
+        # workers, whose conftest switches the cache off) wrote the same
+        # .part, and the first one's replace() pulled it out from under the
+        # other's stat(): FileNotFoundError on NextGen.spectra.csv.part.
         dest_dir.mkdir(parents=True, exist_ok=True)
-        part = dest.with_name(dest.name + ".part")
-        try:
-            _download_verified(meta, filename, part)
-            part.replace(dest)  # atomic within the same directory
-        finally:
-            part.unlink(missing_ok=True)
+        with _entry_lock(dest):
+            if dest.exists() and dest.stat().st_size == meta["size"]:
+                # Whoever held the lock fetched it for us; it was verified
+                # before the rename that made it visible.
+                continue
+
+            if on_fetch is not None:
+                on_fetch(filename)
+            logger.info(f"Downloading {filename} from Zenodo...")
+
+            fd, tmp_name = tempfile.mkstemp(
+                dir=dest_dir, prefix=dest.name + ".", suffix=".part"
+            )
+            os.close(fd)
+            part = Path(tmp_name)
+            part.unlink()  # _urlretrieve creates it; keep the name reserved
+            try:
+                _download_verified(meta, filename, part)
+                part.replace(dest)  # atomic within the same directory
+            finally:
+                part.unlink(missing_ok=True)
 
         logger.info(f"Saved {filename} to {dest}")
