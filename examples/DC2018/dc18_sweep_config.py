@@ -116,6 +116,15 @@ BANDS = [("W149", "Roman/WFI.F146"), ("Z087", "Roman/WFI.F087")]
 # mismatch that cost the first sweep 1.04 mag in W149.
 SIM_AB_ZEROPOINT = 22.0
 
+# The t_0 bound is the observing span padded by this much on each side
+# (JDE 2026-09-04; configs/DC2018_128_tightpriors.params.yaml item 3).
+T0_PAD_DAYS = 90.0
+
+
+def t0_bounds(t_lo, t_hi):
+    """The t_0 support: the observing span padded by T0_PAD_DAYS each side."""
+    return {"lower": t_lo - T0_PAD_DAYS, "upper": t_hi + T0_PAD_DAYS}
+
 
 def ab_minus_vega(filter_name):
     """AB - Vega for one SVO filter, from its shipped XML."""
@@ -491,10 +500,26 @@ def build(event, outdir, draws, tune, cores, t_max):
         # they buy real mixing by keeping the hot rungs and the start
         # dispersion out of volume the data have already excluded.
         #
-        # t_0 CANNOT LIE OUTSIDE THE OBSERVATIONS.  A peak before the first
-        # epoch or after the last is not a detection of anything; this is
-        # the span of the light curves themselves, not a guess.
-        "source.Source.t_0": {"lower": t_lo, "upper": t_hi},
+        # t_0 IS THE SPAN PADDED BY T0_PAD_DAYS EACH SIDE, which is the
+        # shipped rule (JDE 2026-09-04, asked whether to implement it
+        # generally: "the span-based rule should ship" -- span-based over
+        # peak-based because it needs only the loaded time column, which
+        # exists for every microlensing config at lifecycle stage 1).  See
+        # configs/DC2018_128_tightpriors.params.yaml item 3.
+        #
+        # This comment used to read "t_0 CANNOT LIE OUTSIDE THE
+        # OBSERVATIONS.  A peak before the first epoch or after the last is
+        # not a detection of anything", and the bound was the raw span.
+        # DC2018-107 is the counterexample: its answer-key t_0 is 7.67 d
+        # BEFORE the first epoch, so the raw span put the truth outside the
+        # parameter's own support and the fit refused to start at all
+        # (the logit transform has no raw coordinate for it).  A peak just
+        # off the window IS detectable from the wing it leaves behind; what
+        # is not detectable is a peak arbitrarily far off, which is what the
+        # pad bounds.  The other 29 static events clear the RAW span by
+        # 4.3 d (099) to 434 d, against t_0 posterior widths of 0.0003 to
+        # 0.006 d, so the pad is non-binding for every one of them.
+        "source.Source.t_0": t0_bounds(t_lo, t_hi),
         # |u_0| <= 3 says the source was MAGNIFIED (A - 1 < 0.7% at u_0 = 3).
         # Under fitu0te this is a soft barrier on a derived parameter, which
         # is the right strength for a statement this weak.
