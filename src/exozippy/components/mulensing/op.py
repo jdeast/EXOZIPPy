@@ -436,7 +436,7 @@ class VBMDirectMagOp(Op):
     after the magnification call that already ran (they are instance state
     filled by every branch: PSPLMag, ESPLMag2, BinaryMag0/2, MultiMag0/2),
     so the centroid costs no second VBM call.  Three facts about those
-    accumulators, MEASURED against the installed VBMicrolensing 5.5 and
+    accumulators, MEASURED against the installed VBMicrolensing 5.5 (re-run on 5.6) and
     pinned by tests/test_astrometric_microlensing_op.py, that this Op
     depends on:
 
@@ -639,8 +639,12 @@ class VBMDirectMagOp(Op):
         shortcut can NEVER fire for rho > sqrt(10)/2 ~ 1.6 and each call
         costs ~0.1 s even with the source thousands of Einstein radii away
         (measured on the DC2018_128 eval_timeout rejections: 870 epochs of
-        A=1 took 56 s). Fixed in our local VBMicrolensing copy, but guarded
-        here too so PyPI wheels behave and the N-lens path is covered.
+        A=1 took 56 s). Fixed upstream in 5.6 (our valboz/VBMicrolensing#72,
+        now the pyproject floor), but the guard stays: MultiMag2 still
+        carries the same safedist = 10 defect (review 8.14.3a), and on the
+        binary path it routes every far epoch to BinaryMag0 before
+        BinaryMag2's (new) shortcut is ever consulted, so the 5.5 -> 5.6
+        upgrade does not move a far-field magnification.
         """
         vbm = self._vbm
         vbm.a1 = 0.0 if u1 is None else u1
