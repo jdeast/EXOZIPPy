@@ -205,6 +205,46 @@ def _apply_axes(ax, spec):
         ax.set_aspect("equal", adjustable="datalim")
 
 
+# Legend proxies for spaghetti traces are drawn at this alpha rather than
+# the traces' own: fifty draws at alpha 0.1 read as a curve, but one legend
+# swatch at 0.1 is invisible.
+_LEGEND_MIN_ALPHA = 0.8
+
+
+def _legend(ax):
+    """One legend entry per LABEL, first occurrence winning, swatches legible.
+
+    A spaghetti figure overlays the same named model trace once per draw --
+    fifty identical "MIST track" rows would otherwise swamp the panel -- and
+    a component may legitimately name the same series in more than one
+    trace.  De-duplicating by label keeps matplotlib's handle order (lines
+    before errorbar containers), first occurrence winning.  This lived in a
+    private copy of ``render_spec_groups`` inside the evolutionarymodel
+    component until 2026-09 (review 4.11.7); it belongs to every chart.
+    """
+    handles, labels = ax.get_legend_handles_labels()
+    if not handles:
+        return None
+    unique = {}
+    for handle, label in zip(handles, labels):
+        unique.setdefault(label, handle)
+    legend = ax.legend(
+        list(unique.values()),
+        list(unique.keys()),
+        loc="best",
+        fontsize="small",
+    )
+    # legend_handles are the legend's own proxy artists, so raising their
+    # alpha changes the swatch and leaves the plotted spaghetti untouched.
+    for proxy, handle in zip(legend.legend_handles, unique.values()):
+        # An errorbar handle is a Container, not an Artist: no alpha to read,
+        # and a data swatch at the role default is legible anyway.
+        alpha = getattr(handle, "get_alpha", lambda: None)()
+        if alpha is not None and alpha < _LEGEND_MIN_ALPHA:
+            proxy.set_alpha(_LEGEND_MIN_ALPHA)
+    return legend
+
+
 def render_spec_groups(spec_groups, filename_prefix="debug"):
     """Render one figure per spec, overlaying model traces from every group.
 
@@ -256,9 +296,7 @@ def render_spec_groups(spec_groups, filename_prefix="debug"):
             ax.set_xlabel(spec.xlabel)
             ax.set_ylabel(spec.ylabel)
             ax.set_title(spec.title)
-            handles, _labels = ax.get_legend_handles_labels()
-            if handles:
-                ax.legend(loc="best", fontsize="small")
+            _legend(ax)
             fig.tight_layout()
 
             tag = meta.get("file_tag") or spec.id.replace(".", "_")

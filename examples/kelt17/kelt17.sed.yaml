@@ -1,0 +1,42 @@
+# KELT-17 broadband photometry, converted 1:1 from EXOFASTv2 kelt17.sed
+# (Tycho: Hoeg+2000; 2MASS via UCAC4: Cutri+2003; AllWISE: Cutri+2013;
+# Gaia DR2). Errors are the "used" errors from the EXOFASTv2 file.
+model: NextGen
+nstars: 1
+filters:
+    - name: "TYCHO/TYCHO.B"
+      mag: 9.595
+      err: 0.024
+    - name: "TYCHO/TYCHO.V"
+      mag: 9.271
+      err: 0.021
+    - name: "2MASS/2MASS.J"
+      mag: 8.745
+      err: 0.030
+    - name: "2MASS/2MASS.H"
+      mag: 8.697
+      err: 0.040
+    - name: "2MASS/2MASS.Ks"
+      mag: 8.646
+      err: 0.020
+    - name: "WISE/WISE.W1"
+      mag: 8.620
+      err: 0.030
+    - name: "WISE/WISE.W2"
+      mag: 8.658
+      err: 0.030
+    - name: "WISE/WISE.W3"
+      mag: 8.626
+      err: 0.030
+    - name: "WISE/WISE.W4"
+      mag: 8.315
+      err: 0.322
+    - name: "GAIA/GAIA2r.G"
+      mag: 9.209
+      err: 0.020
+    - name: "GAIA/GAIA2r.Gbp"
+      mag: 9.358
+      err: 0.020
+    - name: "GAIA/GAIA2r.Grp"
+      mag: 8.989
+      err: 0.020

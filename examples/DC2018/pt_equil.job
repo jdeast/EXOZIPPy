@@ -1,0 +1,21 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q sThC.q
+#$ -cwd
+#$ -j y
+#$ -N equilscan
+#$ -o pt_equil.$JOB_ID.log
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+cd $HOME/python/EXOZIPPy/examples/DC2018
+python pt_transport_bench.py \
+    --only "EQUIL-swapint1,EQUIL-swapint6,EQUIL-swapint54,EQUIL-swapint216" \
+    --target-evals 2000000 --cores 8 --out pt_equil.json
+echo "exit $?   $(date)"

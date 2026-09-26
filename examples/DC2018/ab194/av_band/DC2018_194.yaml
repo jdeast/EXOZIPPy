@@ -1,0 +1,73 @@
+band:
+- filter: Roman/WFI.F146
+  ld_law: linear
+  name: W149
+- filter: Roman/WFI.F087
+  ld_law: linear
+  name: Z087
+- filter: 2MASS/2MASS.Ks
+  ld_law: linear
+  name: Ks_bcgrid
+galacticmodel:
+- anchor_idx: 1
+  name: DC2018_194
+lens:
+- body: star.Lens
+- body: planet.Companion
+mann:
+- constrain:
+  - mass
+  - radius
+  ks: synthetic
+  star: Lens
+modes:
+  weights: evidence
+mulensevent:
+- finite_source: true
+  fitmurel: true
+  fitpirel: true
+  fitthetae: true
+  mmexofast: /home/jeastman/python/EXOZIPPy/examples/DC2018/events/194/DC2018_194_seed.json
+mulensinstrument:
+- band: W149
+  data_format: flux
+  file: /home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.W149.WFIRST18.194.txt
+  likelihood: hogg
+  name: Roman_W149
+  observer_location: roman_simulated_2018dc
+- band: Z087
+  data_format: flux
+  file: /home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.Z087.WFIRST18.194.txt
+  likelihood: hogg
+  name: Roman_Z087
+  observer_location: roman_simulated_2018dc
+parameter_file: /home/jeastman/python/EXOZIPPy/examples/DC2018/ab194/av_band/DC2018_194.params.yaml
+planet:
+- name: Companion
+prefix: /home/jeastman/python/EXOZIPPy/examples/DC2018/ab194/av_band/DC2018_194
+run:
+  name: DC2018_194
+sampler:
+  T_max: 200.0
+  cores: 64
+  draws: 50000
+  eval_timeout: 10
+  method: ptde
+  n_temps: auto
+  nthin: 1
+  recompute_trace: true
+  store_hot_chains: true
+  tune: 5000
+sed:
+  file: /home/jeastman/python/EXOZIPPy/examples/DC2018/ab194/av_band/DC2018_194.sed.yaml
+source:
+- body: star.Source
+  star_constrains_rho: true
+star:
+- name: Lens
+- name: Source
+torres:
+- constrain:
+  - mass
+  - radius
+  star: Source

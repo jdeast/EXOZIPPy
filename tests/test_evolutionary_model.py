@@ -19,12 +19,15 @@ first draft of this component:
 """
 
 import logging
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytensor.tensor as pt
 import pytest
+import yaml
 
 from exozippy.components.evolutionarymodel import mist_grid, physics
 from exozippy.components.evolutionarymodel.evolutionarymodel import (
@@ -1090,6 +1093,36 @@ def test_the_modeling_draft_cites_the_tracks(built):
     assert "evolutionary tracks" in text
     assert "uniform prior on stellar age" in text
     assert {"Dotter:2016", "Choi:2016"} <= set(prose.cite_keys())
+    # The floor sentence's "10% ... 3% ... 5%" clause: a raw `%` is a LaTeX
+    # comment and dropped it, and the sentence after it, from the compiled
+    # draft (2026-09); `\\odot` in a raw string was a line break + "odot".
+    assert r"10\% at 0.1 $M_\odot$" in text
+    assert r"\\odot" not in text
+    assert "10 $M_\\odot$. Thus" in text
+
+
+def test_shipped_grid_citation_keys_exist_in_references_bib():
+    """
+    Given every shipped MIST grid yaml's ``citation:`` field,
+    When its keys are split out,
+    Then each has a references.bib entry.  The synthetic-grid fixture
+      writes correct keys, so the prose cross-reference test cannot see
+      the SHIPPED files -- which said `Dotter2016, Choi2016` (no colon)
+      and put two undefined citations in every MIST paper.tex (issue #305).
+    """
+    root = Path(__file__).resolve().parents[1] / "src" / "exozippy"
+    bib = (root / "latex" / "references.bib").read_text()
+    known = set(re.findall(r"@\w+\{([^,\s]+),", bib))
+    grids = sorted((root / "models").rglob("*.grid.yaml"))
+    assert grids, "no shipped *.grid.yaml found"
+    missing = {}
+    for path in grids:
+        cite = yaml.safe_load(path.read_text()).get("citation", "")
+        for key in str(cite).split(","):
+            key = key.strip()
+            if key and key not in known:
+                missing[key] = path.name
+    assert not missing, f"grid citation keys not in references.bib: {missing}"
 
 
 def test_a_block_naming_no_star_warns_and_builds(model_root, caplog):
@@ -1306,7 +1339,9 @@ def test_the_kiel_axes_follow_the_convention(built):
 
     # Assert
     assert spec.x_inverted and spec.y_inverted
-    assert spec.meta["file_tag"] == "kiel"
+    # Per star, as every other component tags its per-instance PDFs: one
+    # "kiel" tag for all stars had the last star overwrite the others.
+    assert spec.meta["file_tag"] == "kiel_A"
     assert "logg" in spec.ylabel or r"\log{g}" in spec.ylabel
 
 
@@ -1371,6 +1406,96 @@ def test_the_marks_draw_no_error_bars_without_a_posterior(built):
     # Assert
     assert mist_trace.xerr is None and mist_trace.yerr is None
     assert fit_trace.xerr is None and fit_trace.yerr is None
+
+
+def test_plot_data_is_the_kiel_chart_the_consumers_walk(built):
+    """
+    Given the modeling draft's figure collector, the GUI's Tune tab and the
+      live evaluator all discover a component's charts through
+      ``plot_data`` (and nothing else),
+    When the component's own plot_data is called with and without a point,
+    Then it returns the Kiel Chart (one per star, with a caption and a
+      per-star file tag) at a point and nothing without one.  The method was
+      deleted in the 2026-09 rewrite while the Chart lived on inside
+      MISTPlot, so the PDF was written every fit and included in no paper
+      and the GUI had no Kiel diagram -- with no test failing (review 1.8.7).
+    """
+    system, _ = built
+    comp = system.active_components["evolutionarymodel"]
+    point = {p.label: p.initval for p in system.plot_params}
+
+    assert comp.plot_data(system, None) == []
+    specs = comp.plot_data(system, point)
+    assert [s.meta["file_tag"] for s in specs] == ["kiel_A"]
+    assert "Kiel diagram for star A" in specs[0].meta["caption"]
+    assert specs[0].meta.get(MISTPlot.TEFF_EXTENT) is not None
+    assert specs[0].x_range is not None
+
+
+def test_plot_writes_the_kiel_pdf_the_draft_then_includes(built, tmp_path):
+    """
+    Given a built system and a posterior-less (pre-flight style) point list
+      of two draws,
+    When plot() renders through the shared plotrender and collect_figures
+      walks plot_data for the figure list,
+    Then exactly one Kiel PDF per star is written under the shared naming
+      convention, its Teff axis is the union over the two draws (padded),
+      the spaghetti-only private meta key never reaches the Charts the
+      draft sees, and the draft's figure list carries the Kiel caption.
+    """
+    from exozippy.outputs.modeling import collect_figures
+
+    system, _ = built
+    comp = system.active_components["evolutionarymodel"]
+    p0 = {p.label: p.initval for p in system.plot_params}
+    p1 = {k: v for k, v in p0.items()}
+    p1["star.logmass"] = np.asarray(p0["star.logmass"], dtype=float) + 0.05
+    prefix = str(tmp_path / "fit")
+
+    comp.plot(system, [p0, p1], filename_prefix=prefix + "_mcmc")
+
+    pdfs = sorted(f.name for f in tmp_path.iterdir() if f.suffix == ".pdf")
+    assert pdfs == ["fit_mcmc_kiel_A.pdf"]
+    groups = MISTPlot(system, [p0, p1]).kiel_spec_groups()
+    (a,), (b,) = groups
+    assert a.x_range == b.x_range
+    solo_a = comp.plot_data(system, p0)[0]
+    solo_b = comp.plot_data(system, p1)[0]
+    assert a.x_range[0] <= min(solo_a.x_range[0], solo_b.x_range[0])
+    assert a.x_range[1] >= max(solo_a.x_range[1], solo_b.x_range[1])
+    assert MISTPlot.TEFF_EXTENT not in a.meta
+
+    figures = collect_figures(system, prefix, point=p0)
+    assert [(pdf, tag) for pdf, _, tag in figures] == [
+        ("fit_mcmc_kiel_A.pdf", "kiel_A")
+    ]
+    assert "Kiel diagram for star A" in figures[0][1]
+
+
+def test_fit_error_bars_read_a_vector_summary_per_star():
+    """
+    Given Parameter.summary is a LIST for a multi-star system and one
+      object for a single star (or None before a posterior),
+    When the Kiel/contour error bars are read for star index 1,
+    Then the list yields that star's own interval, the scalar yields its
+      one interval, and None yields no bars -- the two plots used to index
+      the list as an object and drew zero-length bars or raised (1.8.8).
+    """
+    plotter = MISTPlot.__new__(MISTPlot)
+    s0 = SimpleNamespace(err_minus=1.0, err_plus=2.0)
+    s1 = SimpleNamespace(err_minus=3.0, err_plus=4.0)
+    assert plotter._fit_error_bars(SimpleNamespace(summary=[s0, s1]), 1) == (
+        3.0,
+        4.0,
+    )
+    assert plotter._fit_error_bars(SimpleNamespace(summary=s0), 0) == (
+        1.0,
+        2.0,
+    )
+    assert plotter._fit_error_bars(SimpleNamespace(summary=None), 0) == (
+        0.0,
+        0.0,
+    )
 
 
 def test_the_kiel_diagram_declares_what_moves_it(built):

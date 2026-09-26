@@ -184,3 +184,127 @@ def test_resolve_carries_the_remedy_from_defaults_to_the_parameter():
 
     src = ConfigManager.resolve.__code__.co_consts
     assert "near_bound_remedy" in src
+
+
+# ---------------------------------------------------------------------------
+# The MASS trigger and grid-extent attribution (2.9.16).
+#
+# The median test alone missed the case that motivated this: DC2018 event 152
+# reported a source temperature of 3163 K whose whole lower tail sat on the
+# 2600 K edge of the bolometric-correction grid.  Nothing warned, because the
+# median was 1500 K clear of the wall, and the published interval was a
+# distribution the grid had cut in half rather than one the data measured.
+# ---------------------------------------------------------------------------
+
+
+class _GridComponent:
+    """Stands in for SED: a component that bounds someone else's parameter
+    by the reach of its interpolation grid and says so."""
+
+    SOURCE = "NextGen bolometric-correction grid"
+
+    def grid_bound_paths(self):
+        return {
+            "star.teffsed": {
+                "lower": 0.01,
+                "upper": 100.0,
+                "source": self.SOURCE,
+            }
+        }
+
+
+class _SystemWithComponents(_System):
+    def __init__(self, params, components):
+        super().__init__(params)
+        self.active_components = list(components)
+
+
+def test_a_tail_on_the_wall_is_reported_even_when_the_median_is_not(caplog):
+    """
+    Given a posterior whose median sits mid-range but a fifth of whose draws
+      lie within the near-bound margin of the lower wall,
+    When the wrap-up near-bound check runs,
+    Then it reports the element with trigger 'mass' and states the fraction,
+      because an interval cut off by a wall is not one the data measured.
+    """
+    # ARRANGE -- 20% at 0.011 (inside the 2% log-space margin of 0.01)
+    draws = np.concatenate([np.full(80, 0.011), np.full(320, 1.0)])
+    par = _built("star.teffsed", draws)
+
+    # ACT
+    with caplog.at_level(logging.WARNING, logger="exozippy.diagnostics"):
+        hits = diagnostics.warn_posterior_near_bounds(_System([par]))
+
+    # ASSERT
+    assert len(hits) == 1
+    assert hits[0]["trigger"] == "mass"
+    assert hits[0]["side"] == "lower"
+    assert hits[0]["frac"] == pytest.approx(0.2, abs=0.01)
+    assert "20% of its posterior draws" in caplog.text
+
+
+def test_a_small_tail_on_the_wall_is_not_reported(caplog):
+    """
+    Given the same shape with only 5% of the draws against the wall,
+    When the check runs,
+    Then nothing is reported: the threshold is a tenth of the mass, so an
+      ordinary tail does not raise an alarm nobody would act on.
+    """
+    # ARRANGE
+    draws = np.concatenate([np.full(20, 0.011), np.full(380, 1.0)])
+    par = _built("star.teffsed", draws)
+
+    # ACT
+    with caplog.at_level(logging.WARNING, logger="exozippy.diagnostics"):
+        hits = diagnostics.warn_posterior_near_bounds(_System([par]))
+
+    # ASSERT
+    assert hits == []
+    assert caplog.text == ""
+
+
+def test_a_grid_extent_says_the_model_ran_out_not_the_data(caplog):
+    """
+    Given a parameter whose bound a component declares to be its
+      interpolation grid's extent,
+    When a posterior piles against it,
+    Then the hit carries that provenance and the message says the MODEL ran
+      out -- the opposite reading from a physical bound, where the fit is
+      the thing telling you something.
+    """
+    # ARRANGE
+    draws = np.concatenate([np.full(80, 0.011), np.full(320, 1.0)])
+    par = _built("star.teffsed", draws)
+    system = _SystemWithComponents([par], [_GridComponent()])
+
+    # ACT
+    with caplog.at_level(logging.WARNING, logger="exozippy.diagnostics"):
+        hits = diagnostics.warn_posterior_near_bounds(system)
+
+    # ASSERT
+    assert hits[0]["grid"] == _GridComponent.SOURCE
+    assert "extent" in caplog.text
+    assert "edge cell carried outward" in caplog.text
+    assert "the bound, not the fit" not in caplog.text
+
+
+def test_grid_bounded_paths_tolerates_a_component_without_the_hook():
+    """
+    Given a system whose components mostly do not bound anything by a grid,
+    When the provenance map is built,
+    Then only the declaring component contributes and nothing raises -- the
+      hook is duck-typed, so most components simply do not have it.
+    """
+
+    # ARRANGE
+    class _Plain:
+        pass
+
+    system = _SystemWithComponents([], [_Plain(), _GridComponent()])
+
+    # ACT
+    paths = diagnostics.grid_bounded_paths(system)
+
+    # ASSERT
+    assert list(paths) == ["star.teffsed"]
+    assert diagnostics.grid_bounded_paths(_System([])) == {}

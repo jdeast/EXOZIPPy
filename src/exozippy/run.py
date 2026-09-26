@@ -84,6 +84,7 @@ KNOWN_SAMPLER_KEYS = {
     "seed_polish",
     "seed",
     "store_hot_chains",
+    "de_partner_snapshot",
     "start_dispersion",
 }
 
@@ -380,6 +381,10 @@ METHOD_ONLY_SAMPLER_KEYS = {
     # ... and the documented asymmetry that IS real.  These two address the
     # blocking that async dispatch removes outright, so there is nothing for
     # ptde_async to honor.
+    # ptde_async-only for a real reason, the mirror image of
+    # rung_thin_factor's: ptde's population is synchronized by construction,
+    # so there is no archive to take a snapshot OF.  See review 2.4.20.
+    "de_partner_snapshot": ("ptde_async",),
     "rung_thin_factor": ("ptde",),
     "rung_thin_start": ("ptde",),
 }
@@ -791,6 +796,9 @@ def _run_fit(config, gui, user_params=None):
     # its trace-size cost.  Passed through unresolved on purpose: the
     # component list does not exist yet at this point in run_fit.
     store_hot_chains = sampler_cfg.get("store_hot_chains", "auto")
+    # Default ON: it is a correctness fix (2.4.20), not a tuning knob.  The
+    # key exists so the old behaviour stays reachable for a head-to-head.
+    de_partner_snapshot = bool(sampler_cfg.get("de_partner_snapshot", True))
     rung_thin_factor = int(sampler_cfg.get("rung_thin_factor", 1))
     _rung_thin_start_raw = sampler_cfg.get("rung_thin_start", None)
     rung_thin_start = (
@@ -1165,6 +1173,7 @@ def _run_fit(config, gui, user_params=None):
                     draws,
                     tune,
                     seed=seed,
+                    de_partner_snapshot=de_partner_snapshot,
                     store_hot_chains=store_hot_chains,
                     n_temps=n_temps,
                     T_max=T_max,
@@ -1551,7 +1560,7 @@ def _run_fit(config, gui, user_params=None):
     summary_path = Path(str(prefix) + "_summary.txt")
     with nonfatal_wrapup("convergence summary"):
         summary_path.write_text(
-            _format_summary(idata, burn_diag), encoding="utf-8"
+            _format_summary(idata, burn_diag, system), encoding="utf-8"
         )
 
     # Every plot below is wrapped, and per COMPONENT rather than per loop, so
@@ -2404,7 +2413,7 @@ def _add_wrapup_prose(system, diag, mode_report, cap_findings=None):
         )
 
 
-def _format_summary(idata, diag):
+def _format_summary(idata, diag, system=None):
     """Build the *_summary.txt body: physical params only, worst Rhat first.
 
     Drops the ``*_raw`` unconstrained duplicates (rank-identical to their
@@ -2431,6 +2440,18 @@ def _format_summary(idata, diag):
         header.append(
             "# NOTE: <3 chains reached the good-likelihood region; "
             "all chains kept (possible stuck-chain contamination)"
+        )
+    for hit in getattr(system, "_near_bound_hits", None) or []:
+        what = (
+            "median on the wall"
+            if hit.get("trigger") == "median"
+            else f"{hit.get('frac', 0.0):.0%} of draws on the wall"
+        )
+        kind = f"{hit['grid']} EXTENT" if hit.get("grid") else "bound"
+        header.append(
+            f"# BOUND: {hit['label']} against its {hit['side']} {kind} "
+            f"[{hit['lower']:.4g}, {hit['upper']:.4g}] -- {what}; the "
+            f"reported interval is cut off there, not measured"
         )
     if not diag.get("converged", False):
         header.append(

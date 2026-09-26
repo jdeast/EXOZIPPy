@@ -388,6 +388,23 @@ class Band(Component):
                 self._rm_host_star(system, c.get("rm")),
             )
 
+        # Doppler tomography: the shadow amplitude is the blocked
+        # limb-darkened flux, so every dopptom dataset reads its `band:`
+        # (or band 0 when unset -- the same resolve_rm_indices default
+        # the RM path takes), for its orbit's primary star.  Without
+        # this a DT-only topology had no LD consumer at all (u1/u2 never
+        # declared, AttributeError at build) and a DT band alongside a
+        # consumed one was silently pinned at the frozen defaults.
+        for i, c in enumerate(_cfg("dopptom")):
+            name = c.get("name", i)
+            dt_band = c.get("band")
+            idx = 0 if dt_band is None else name_to_idx.get(dt_band)
+            _mark(
+                f"dopptom[{name}]",
+                idx,
+                self._rm_host_star(system, c.get("orbit")),
+            )
+
         return out
 
     @staticmethod

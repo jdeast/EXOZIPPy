@@ -37,6 +37,7 @@ from exozippy.outputs.texutils import (
     mode_suffix,
 )
 from exozippy.potentials import soft_lower_bound, soft_upper_bound
+from exozippy.units import CENTURY
 
 logger = logging.getLogger(__name__)
 
@@ -466,6 +467,9 @@ class UnitTranslator:
         u.g / u.cm**3: r"\rm g~cm$^{-3}$",
         SOLAR_DENSITY_UNIT: r"\rho_\odot",
         u.erg / u.second / u.cm**2: r"\rm erg~s$^{-1}$~cm$^{-2}$",
+        # EXOFASTv2's spelling for omegagr; `century` is EXOZIPPy's own
+        # registered unit (exozippy/units.py).
+        u.deg / CENTURY: r"{}^{\circ}/{\rm century}",
     }
 
     @classmethod
@@ -520,6 +524,115 @@ class FormattedSummary(NamedTuple):
     median: str
     err_minus: str
     err_plus: str
+
+
+# ---------------------------------------------------------------------------
+# Periodic parameters: recenter the draws about their mode before summarizing
+# ---------------------------------------------------------------------------
+#
+# A parameter defined modulo a period -- an angle (omega, Omega, lambda,
+# alpha), or an epoch of a recurring event (tp, ts) -- comes out of its
+# expression on ONE fixed branch cut: arctan2 puts an angle in (-180, 180],
+# and a periastron time lands wherever the Tc -> Tp inversion puts it.  A
+# posterior that happens to sit on that cut is reported in two pieces, half
+# at each end of the range, and its median falls in the EMPTY middle with an
+# interval spanning the whole period.  The physics is invariant to the cut
+# (every consumer sees the angle through sin/cos and the epoch through
+# n (t - tp) mod 2 pi), so it is purely a reporting artifact -- and a silent
+# one, because a median near zero with a +/- 180 interval is a plausible
+# number for a poorly constrained omega.
+#
+# EXOFASTv2 handles this in exofast_recenter.pro (times; derivepars.pro) and
+# summarizepar.pro (angles): find the histogram mode, then shift every draw by
+# whole periods into (mode - P/2, mode + P/2].  This is the same rule.  The
+# shift is by WHOLE periods, and the period is one number per element (the
+# constant 360 deg, or the median of the sibling orbital period), so the
+# recentered draws are the same distribution translated piecewise -- the
+# shape, and every within-piece difference, is preserved to the bit.
+#
+# JDE, 2026-09-25: "when deterministic periodic parameters (tp, omega, ts,
+# etc) are derived, we need to make sure artificial boundaries don't split
+# them and skew the reported 68% CI.  In exofastv2, we center any periodic
+# parameter at its mode before reporting."
+
+# EXOFASTv2's estimator: the tallest of 100 equal-width bins.
+_RECENTER_HIST_BINS = 100
+
+
+def _histogram_mode(x):
+    """Center of the tallest of ``_RECENTER_HIST_BINS`` bins over ``x``."""
+    hist, edges = np.histogram(x, bins=_RECENTER_HIST_BINS)
+    k = int(np.argmax(hist))
+    return 0.5 * (edges[k] + edges[k + 1])
+
+
+def recenter_periodic_1d(x, period, label=""):
+    """Shift ``x`` by whole periods into ``[mode - period/2, mode + period/2]``.
+
+    Two passes, not EXOFASTv2's one.  The first histogram spans whatever the
+    raw draws span; if a runaway chain put them across many periods its bins
+    are wider than the period and the mode is only located to within a bin,
+    so the first wrap may still leave the bulk straddling its own boundary.
+    After that wrap the draws span at most one period, the second histogram's
+    bins are ``period/100`` wide, and the second wrap is exact.  On the
+    ordinary case (draws already within one period) the second pass recenters
+    about the same mode and moves nothing.
+
+    Non-finite draws are left in place.  Returns ``x`` itself (not a copy)
+    when nothing can or need be done, so a caller may test identity.
+    """
+    x = np.asarray(x, dtype=float)
+    period = float(period)
+    if not np.isfinite(period) or period <= 0.0:
+        return x
+    finite = np.isfinite(x)
+    if finite.sum() < 2:
+        return x
+    xf = x[finite]
+    if xf.max() == xf.min():
+        return x
+    # EXOFASTv2's guard: a period below the value's floating-point
+    # resolution cannot be applied (a Tp in BJD with a period of nanoseconds).
+    scale = float(np.max(np.abs(xf)))
+    if scale + period / 2.0 == scale:
+        logger.warning(
+            f"{label or 'recenter_periodic'}: period {period:g} is below the "
+            f"floating-point resolution of values ~{scale:g}; the periodic "
+            "recentering is skipped."
+        )
+        return x
+    for _ in range(2):
+        mode = _histogram_mode(xf)
+        # Whole-period shifts only: a draw needing none is returned bit-exact.
+        xf = xf - np.round((xf - mode) / period) * period
+    out = x.copy()
+    out[finite] = xf
+    return out
+
+
+def recenter_periodic(arr, period, label=""):
+    """Recenter every element of ``arr`` (samples on the LAST axis) about its mode.
+
+    ``period`` is one number per element (or one for all), in the units of
+    ``arr``.  A NaN or non-positive period leaves that element untouched.
+    """
+    arr = np.asarray(arr, dtype=float)
+    if arr.ndim == 0 or arr.shape[-1] < 2:
+        return arr
+    n_elem = int(np.prod(arr.shape[:-1])) if arr.ndim > 1 else 1
+    per = np.asarray(period, dtype=float).ravel()
+    if per.size == 1:
+        per = np.repeat(per, n_elem)
+    elif per.size != n_elem:
+        raise ValueError(
+            f"{label or 'recenter_periodic'}: {per.size} periods for "
+            f"{n_elem} elements -- cannot recenter."
+        )
+    out = arr.copy()
+    flat = out.reshape(n_elem, arr.shape[-1])
+    for i in range(n_elem):
+        flat[i] = recenter_periodic_1d(flat[i], per[i], label=label)
+    return out
 
 
 @dataclass(slots=True)
@@ -989,6 +1102,23 @@ class Parameter:
     _summary_ci: Optional[float] = field(default=None, init=False)
     _mode_summaries_ci: Optional[float] = field(default=None, init=False)
     table_note: Optional[str] = None
+    # This parameter is defined modulo a period, so its posterior is
+    # recentered about its mode before it is summarized (see the module
+    # comment above `recenter_periodic` and `recenter_posterior` below).
+    # Declared in defaults.yaml, never by a user, as ONE of two dicts:
+    #   periodic: {value: 360.0, unit: "deg"}   a constant period, with the
+    #       unit it is written in (the parameter's own `unit:` is
+    #       user-overridable, so the constant cannot assume it);
+    #   periodic: {param: "period"}             a SIBLING parameter of the
+    #       same component whose per-element posterior median is the period
+    #       (an epoch of a recurring event: tp, ts).
+    # Validated in __post_init__ so a typo fails at build, not at wrap-up.
+    periodic: Any = None
+    # The resolved per-element period in USER units, set by
+    # recenter_posterior for the summaries to reuse on any SUBSET of the
+    # draws (a mode split by the cut needs its own recentering).  Dropped by
+    # the `posterior` setter with the other draw-derived caches.
+    _recenter_period: Any = field(default=None, init=False)
     # Per element (or one bool for all): this element's UPPER bound is a
     # modelling cap rather than a physical or validity limit -- the hogg
     # mixture's out_scale (10x the median error) and out_frac (0.5) -- so a
@@ -1047,6 +1177,7 @@ class Parameter:
         self.latex_varname = _latex_varname(
             self.label, prefix=self.latex_prefix
         )
+        self._validate_periodic()
 
         # --- 5. THE GATEKEEPER CONVERSION ---
         # Convert ALL numeric fields from User Units to Internal Units ONCE upon creation.
@@ -1332,6 +1463,20 @@ class Parameter:
                     f for f in ("mu", "sigma", "lower", "upper") if f in entry
                 }
         return sorted(found)
+
+    def element_initval_source(self, i):
+        """Where element ``i``'s start value came from, or None.
+
+        "user", "data", "solved" or "default" when a provenance ledger is
+        attached (``initval_source``, forwarded by Component.add_parameter
+        from ConfigManager); None when there is none -- a bare Parameter
+        built in a test or a script has no ledger, and a caller that wants
+        to REFUSE a default (GalacticModel's anchor position) must not
+        mistake "no ledger" for "left at the default".
+        """
+        if not callable(self.initval_source):
+            return None
+        return self._element_initval_source(i)
 
     def _element_initval_source(self, i):
         """Classify where element ``i``'s start came from.
@@ -4532,20 +4677,185 @@ class Parameter:
         self.mode_summaries = None
         self._summary_ci = None
         self._mode_summaries_ci = None
+        self._recenter_period = None
+
+    # ---------
+    # Periodic parameters
+    # ---------
+    def _validate_periodic(self):
+        """Reject a malformed ``periodic:`` declaration at construction."""
+        spec = self.periodic
+        if spec is None:
+            return
+        bad = ValueError(
+            f"[{self.label}] periodic: must be {{value: <number>, unit: "
+            f"<unit>}} or {{param: <sibling parameter name>}}; got {spec!r}."
+        )
+        if not isinstance(spec, dict):
+            raise bad
+        keys = set(spec)
+        if keys == {"param"}:
+            if not isinstance(spec["param"], str) or not spec["param"]:
+                raise bad
+            return
+        if keys == {"value", "unit"}:
+            try:
+                value = float(spec["value"])
+                unit = u.Unit(spec["unit"]) if spec["unit"] else None
+            except (TypeError, ValueError) as exc:
+                raise bad from exc
+            if not value > 0:
+                raise bad
+            if unit is not None:
+                try:
+                    u.Quantity(1.0, unit).to(self.internal_unit)
+                except u.UnitConversionError as exc:
+                    raise ValueError(
+                        f"[{self.label}] periodic: unit {spec['unit']!r} is "
+                        f"not convertible to the internal unit "
+                        f"{self.internal_unit!s}."
+                    ) from exc
+            return
+        raise bad
+
+    def periodic_period(self, param_lookup=None):
+        """The per-element period in USER units, or None if not periodic.
+
+        A constant is converted through its declared unit to the internal
+        unit and then through ``from_internal`` per element, so a user who
+        relabels ``omega`` in radians gets 2 pi, not 360.  A sibling's period
+        is the median of its user-unit posterior per element (its start
+        value when it has no draws), converted the same way through BOTH
+        parameters' factors -- never a hand-written factor (the two
+        conversion factors in this codebase are reciprocals; CLAUDE.md).
+
+        Returns None, with a warning, when a sibling cannot be found or its
+        element count does not match: a missing recentering reports the old
+        way, which is a wrong interval only when the draws straddle the cut,
+        whereas guessing a period would move every reported epoch.
+        """
+        spec = self.periodic
+        if spec is None:
+            return None
+        n = self._n_elements()
+        if "param" in spec:
+            if not param_lookup:
+                return None
+            prefix = self.label.rsplit(".", 1)[0]
+            sibling = param_lookup.get(f"{prefix}.{spec['param']}")
+            if sibling is None:
+                logger.warning(
+                    f"[{self.label}] periodic: sibling parameter "
+                    f"'{prefix}.{spec['param']}' not found; the posterior "
+                    "is not recentered."
+                )
+                return None
+            if sibling.posterior is not None:
+                sib = np.asarray(
+                    getattr(sibling.posterior, "values", sibling.posterior),
+                    dtype=float,
+                )
+                sib_user = np.nanmedian(sib, axis=-1) if sib.ndim > 0 else sib
+                sib_user = np.atleast_1d(sib_user).ravel()
+                sib_internal = np.array(
+                    [
+                        sibling.to_internal(sib_user[i], index=i)
+                        for i in range(sib_user.size)
+                    ],
+                    dtype=float,
+                )
+            else:
+                sib_internal = np.atleast_1d(
+                    np.asarray(sibling.initval, dtype=float)
+                ).ravel()
+            if sib_internal.size == 1 and n > 1:
+                sib_internal = np.repeat(sib_internal, n)
+            if sib_internal.size != n:
+                logger.warning(
+                    f"[{self.label}] periodic: sibling '{sibling.label}' has "
+                    f"{sib_internal.size} elements for {n}; the posterior "
+                    "is not recentered."
+                )
+                return None
+            internal = sib_internal
+        else:
+            unit = u.Unit(spec["unit"]) if spec["unit"] else None
+            value = float(spec["value"])
+            if unit is not None:
+                value = float(
+                    u.Quantity(value, unit).to(self.internal_unit).value
+                )
+            internal = np.full(n, value, dtype=float)
+        return np.array(
+            [
+                float(self.from_internal(internal[i], index=i))
+                for i in range(n)
+            ],
+            dtype=float,
+        )
+
+    def recenter_posterior(self, param_lookup=None):
+        """Recenter the stored posterior about its mode, per element.
+
+        Called by ``System.distribute_posterior`` once every Parameter has
+        its draws (a sibling period has to exist first).  Replaces
+        ``posterior`` with the recentered draws so EVERY consumer -- the
+        corner plots, the near-bound diagnostics, a component's own plot --
+        sees one contiguous distribution, and records the period so the
+        summaries can recenter any subset again.  The stored type is kept
+        (an xarray DataArray stays one).  Not periodic, or nothing to
+        recenter: no-op.
+        """
+        if self.posterior is None or self.periodic is None:
+            return
+        period = self.periodic_period(param_lookup)
+        if period is None:
+            return
+        arr = np.asarray(
+            getattr(self.posterior, "values", self.posterior), dtype=float
+        )
+        if arr.ndim == 0 or arr.shape[-1] < 2:
+            self._recenter_period = period
+            return
+        if arr.ndim > 1 and int(np.prod(arr.shape[:-1])) != period.size:
+            logger.warning(
+                f"[{self.label}] periodic: {period.size} periods for a "
+                f"posterior of shape {arr.shape}; not recentered."
+            )
+            return
+        new = recenter_periodic(arr, period, label=self.label)
+        if not np.array_equal(new, arr, equal_nan=True):
+            old = self.posterior
+            if hasattr(old, "copy") and hasattr(old, "values"):
+                self.posterior = old.copy(data=new)
+            else:
+                self.posterior = new
+        self._recenter_period = period
 
     # ---------
     # Posterior summary
     # ---------
     @staticmethod
-    def _summarize_array(arr: np.ndarray) -> Any:
+    def _summarize_array(arr: np.ndarray, period=None) -> Any:
         """Median + the reporting credible interval over the LAST axis (samples).
 
         The width is ``exozippy.reporting.get_credible_interval()`` -- one
         run-level setting shared with the corner plots and the table caption,
         defaulting to the historical 68.27% (1 sigma).  Returns a
         PosteriorSummary, or a list of them for vector parameters.
+
+        ``period`` (per element, in the units of ``arr``) marks a periodic
+        parameter: the draws are first shifted by whole periods about their
+        mode (``recenter_periodic``), so a distribution the branch cut split
+        in two is summarized as the one distribution it is.  Applied HERE and
+        not only to the stored posterior because this method also summarizes
+        subsets -- one mode's draws -- and a mode can straddle the cut on its
+        own while the whole posterior does not.
         """
         q_low, q_high = reporting.quantiles()
+        arr = np.asarray(arr, dtype=float)
+        if period is not None:
+            arr = recenter_periodic(arr, period)
 
         def get_stat(data):
             if data.size == 0 or not np.isfinite(data).any():
@@ -4592,7 +4902,7 @@ class Parameter:
         arr = np.asarray(
             getattr(self.posterior, "values", self.posterior), dtype=float
         )
-        self.summary = self._summarize_array(arr)
+        self.summary = self._summarize_array(arr, period=self._recenter_period)
         self._summary_ci = reporting.get_credible_interval()
         return self.summary
 
@@ -4654,7 +4964,9 @@ class Parameter:
             self.mode_summaries = [self._summarize_array(arr)] * n_modes
         else:
             self.mode_summaries = [
-                self._summarize_array(arr[..., labels == k])
+                self._summarize_array(
+                    arr[..., labels == k], period=self._recenter_period
+                )
                 for k in range(n_modes)
             ]
         self._mode_summaries_ci = reporting.get_credible_interval()

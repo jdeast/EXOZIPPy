@@ -14,7 +14,7 @@ MMEXOFAST seeding, and the lens/source body rules).
 
 This file is the **normative** list. `src/exozippy/latex/convention.tex` is a drop-in
 section for the EXOZIPPy microlensing paper carrying the *same* claim list in the paper's
-register, with the same identifiers `C1`...`C28`. The identifiers are the anti-drift
+register, with the same identifiers `C1`...`C30`. The identifiers are the anti-drift
 device: a claim may be reworded in either file, but a `C`-number must mean the same thing
 in both, and a claim added to one must be added to the other under the same number. There
 is no generator and no test enforcing that -- keep them in one commit.
@@ -27,7 +27,9 @@ it.
 **There is a THIRD copy, and it is not in this repository.** The Conventions section of
 `paper3_microlensing.tex`, in the paper repo at `~/old_home/papers/exozippy` (whose remote
 is the Overleaf project), carries the same `C`-numbers as the submitted text. All three
-are in step through `C28`. Being a separate repository it cannot ride the same commit, so
+are in step through `C30` (paper commits `3476111`, 2026-09-23, which added `C29` and
+`C30` there, and `7eeeb42`, 2026-09-24, which brought `C30` to stage 2). Being a separate
+repository it cannot ride the same commit, so
 the rule is simply that **a `C`-rule is not finished until all three carry it**: pull the
 paper repo, make the matching edit there, and name that commit in this one. The paper is
 not licensed to run ahead -- it did once, and the drift lasted exactly as long as it took
@@ -279,6 +281,71 @@ is the whole of the apparent "sign disagreement" between the two components.
 - Pinned by: `tests/test_skyframe.py::test_parallax_factors_are_the_negated_offset` (the
   exact-negative relation) and `::test_parallax_factors_match_first_principles_displacement`
   (that `parallax_factors` really is the apparent source displacement, computed in 3-D).
+
+### C30 -- the astrometric centroid shift is referenced to the SOURCE's unlensed position and points AWAY from the lens
+
+A point lens splits an unresolved source into two images on the lens-source axis. Their
+flux-weighted centroid, relative to the source's UNLENSED position (what an astrometric
+time series references, through `star.ra`/`dec`/`pm_*`/`parallax`), is
+
+    delta_theta(t) = - theta_E * dtheta(t) / (|u(t)|^2 + 2)        (N, E components, mas)
+
+with `dtheta(t)` C9's LENS-minus-SOURCE separation in Einstein units, so the shift is along
+the lens -> source axis (away from the lens), of magnitude `theta_E u/(u^2+2)`, peaking at
+`0.354 theta_E` at `u = sqrt(2)`, and decaying only as `theta_E/u` -- it has support for
+years around a `t_E`-long photometric event and belongs INSIDE the five-parameter
+astrometric model, never in an event-window add-on. `theta_E` enters as a linear
+amplitude on a shape the light curve already fixes, which is what makes it a direct
+`theta_E` measurement.
+
+Relative to the LENS the same centroid sits at `theta_E u (u^2+3)/(u^2+2)` along the same
+axis. That is what VBMicrolensing's `astrox1`/`astrox2` report (centroid from the lens, in
+Einstein radii); subtract the source position `u` and it reduces to the display above
+identically. The conversion is a convention entry, not a no-op. For a binary or N-lens
+the same subtraction holds with `astrox` and the source position both in VBM's frame,
+whose origin is the lens centre of mass (C12) -- undocumented upstream, MEASURED here
+(the stage-2 bullet below).
+
+What an instrument centroids is the SUM of the images and the blend, so the modelled
+offset from the source's unlensed track `x_s(t)` is
+
+    delta_obs(t) = [A f_s / (A f_s + f_b)] * delta_theta(t)
+                 + [  f_b / (A f_s + f_b)] * (x_b - x_s(t))
+
+`f_s`/`f_b` in the ASTROMETRIC band (taken from the `photometry:` light curve the dataset
+names; a lensed dataset with no light curve RAISES -- the blend fraction and the geocentric
+frame anchor both come from it), `x_b` the blend photocenter (`astrometryinstrument.<name>.blend_dE`,
+`blend_dN`, mas from the reference position, fixed on the sky, pinned at 0 by default).
+The first bracket is dilution -- time dependent, suppressed exactly at peak; the second is
+the blend dragging the centroid as the source brightens and fades, and in a bulge field it
+can dominate. The lens's own flux is part of `f_b` and sits at `x_s + theta_E dtheta`; it is
+NOT split out (follow-up in review 8.10.1).
+
+- Implemented in: `MulensEvent.get_centroid_shift` (the shift, from the same `(tau, beta)`
+  pair `get_magnification` builds, rotated onto `(N, E)` by C9's `tau_hat`/`beta_hat`) and
+  `AstrometryInstrument._apply_lens` (the blend weighting), added onto the C11 lines of
+  `_absolute_model` as `+ delta_E` / `+ delta_N` in mas -- the shift is itself a sky angle,
+  so it takes NO further `cos(dec)` (East on those lines is already projected).
+- Finite source, binary and N-lens events (and a forced `use_op`) take VBMicrolensing's
+  centroid instead (review 8.10.1 stage 2): `MulensEvent.get_astrometric_terms` builds
+  `VBMDirectMagOp(astrometry=True)` from the SAME parameters as the photometric Op
+  (`_vbm_op_call`, one builder) and reads `astrox1`/`astrox2` after each magnification
+  call -- disk-integrated and limb-darkened, so the point-source caveat above does not
+  apply there (the `rho ~ u` cancellation and the sign reversal are reproduced, measured
+  against a direct disk integration). The Op returns the shift on `(tau_hat, beta_hat)`
+  and `_shift_to_sky` is the ONE rotation onto `(N, E)` both paths share. Three measured
+  facts the Op depends on: VBM's `astrox` frame has its ORIGIN AT THE LENS CENTRE OF MASS
+  with the primary at `(-s q/(1+q), 0)` (pinned against a first-principles image solve,
+  magnification and centroid to 1e-8 under that origin and no other); a scalar-`u` call
+  leaves `astrox2` STALE, so the single-lens branch projects `astrox1` radially and never
+  reads it; and `vbm.astrometry = True` moves the binary magnifications' last bit at some epochs, so the
+  astrometric Op is a SEPARATE INSTANCE and the light curve stays bit-identical. Always
+  VBM, whatever the photometric `backend:` (MulensModel has no centroid; C18 makes the
+  trajectories identical). No gradient, like the photometry it rides with.
+- Pinned by: `tests/test_astrometric_microlensing.py` -- the closed form against a direct
+  image solve of the lens equation, and the HANDEDNESS test (a lens passing North of the
+  source pushes the centroid South, East pushes West), which fails under a mirrored
+  `beta_hat` or a lens-toward sign.
 
 ---
 
@@ -808,6 +875,45 @@ sign/offset search was deleted rather than improved, because it always returned 
 candidate and so could not fail visibly: on event 128 it printed a 2034-sigma `alpha` pull
 while the fitted `alpha` (307.686) sat 0.3 degrees from the light curve's own optimum
 (308.0).
+
+### C29 -- a BAND extinction is not a number until you say which convention
+
+`A_W149 = 2.75` is not, by itself, a quantity that can be compared to ours. There are two
+inequivalent things it can mean, and for a filter as wide as Roman's W149 (`F146`, spanning
+0.896 - 2.073 micron, `WidthEff` 0.789 micron) they differ by ~15%.
+
+- **Monochromatic**: `A_band = A_V * k(lambda_band) / k(V)`, the reddening law evaluated at
+  one wavelength. Ratios between bands are then fixed, independent of `A_V`.
+- **Integrated** (what `make_bc.py` does, and what a real measurement is): redden the
+  spectrum, push it through the passband, take the magnitude difference. As `A_V` rises the
+  band's blue wing is extinguished away, the band's own effective wavelength drifts red, and
+  `dA_band/dA_V` therefore FALLS -- 0.272 near `A_V = 0` to 0.212 at `A_V = 10` for `F146`.
+  Band ratios are functions of `A_V`.
+
+**The 2018 Data Challenge is monochromatic, at each filter's `WavelengthEff`.** Measured, not
+assumed: its `A_Z087/A_W149 = 1.9236` is reproduced by the shipped law at `WavelengthEff`
+(0.86510, 1.30496 micron) to **0.1%**, and by no other wavelength definition SVO publishes --
+pivot/ref 13.3% off, phot 6.0%, cen 23.6%, mean 24.7%. Inverting the data's ratio for the
+W149 wavelength that would produce it gives 1.3130 micron, i.e. `WavelengthEff` to 0.6%. The
+population agrees: median 1.9315 over 293 events (range 1.906 - 1.947).
+
+**Consequence: no single `av` satisfies both truth bands in our model,** and the anchor choice
+is worth 15% on event 194 -- `A_W149` gives `av = 11.75`, `A_Z087` gives 10.14, the colour
+`E(Z087-W149)` gives 9.01. Anchor the COLOUR. At `av = 9.01` both bands come out -0.58 mag,
+the SAME offset, and a common-mode grey offset is degenerate with distance and radius, which
+the SED already fits; every other anchor pushes the residual into colour, where only
+`teffsed` can absorb it (+0.81 mag at the `A_W149` anchor). This is not a law error and not a
+grid error -- our law reproduces the challenge's own ratio to 0.1% -- it is the
+monochromatic-vs-integrated difference, irreducible while the data are one and the model the
+other.
+
+`F146`'s tabulated centres alone span 1.305 - 1.538 micron, an 18% spread in wavelength before
+any physics, mapping to 24% in `k/k_V`. So when comparing a published band extinction for a
+wide filter: **ask which convention, and which wavelength.** For real Roman data the
+integrated treatment is the correct one and this arithmetic does not arise; note that
+`utilities/mkticsed.py`'s clump path inverts a band extinction MONOCHROMATICALLY (via
+`components.sed.extinction.av_from_band_extinction`) and so carries this same ~15% error for
+W149-width filters -- tolerable in a prior a magnitude wide, not as a measurement.
 
 ### C23 -- the discrete degeneracies, and what they do to the signs
 

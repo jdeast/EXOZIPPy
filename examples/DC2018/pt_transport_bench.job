@@ -1,0 +1,25 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 64
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N ptbench
+#$ -o pt_transport_bench.$JOB_ID.log
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_$JOB_ID"
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy/examples/DC2018
+
+# PT transport sweep: why zero ladder round trips on DC2018-128?
+# One factor at a time from the event-128 baseline (n_temps=48, n_chains=54,
+# swap_interval=54), on a target where transport is guaranteed possible.
+python -u pt_transport_bench.py --cores 48 --target-evals 600000 \
+    --only ELE8-swapint1,ELE8-swapint8,ELE8-swapint64,ELE8-swapint256 --out pt_transport_bench6.json

@@ -1,0 +1,28 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q sThC.q
+#$ -cwd
+#$ -j y
+#$ -N ezfail
+#$ -o ezsuite_failures.$JOB_ID.log
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_ezfail"
+cd $HOME/python/EXOZIPPy
+git log --oneline -1
+python -u -m pytest -n0 -q --tb=short \
+  tests/test_ephemeris.py::test_a_regenerated_ephemeris_is_re_read_not_served_stale \
+  tests/test_mulens_flux_likelihood.py::test_negative_flux_epochs_are_ordinary_chi2_terms \
+  tests/test_data_derived_provenance.py \
+  tests/test_microlensing_physics.py::test_microlensing_sympy_pytensor_equivalence \
+  tests/test_nsnl.py::test_total_mass_convention \
+  tests/test_sed_flux_constraints.py::test_zeropoint_sigma_zero_raises \
+  tests/test_config_healing.py::test_config_derives_te_from_physical_input \
+  tests/test_star_constrains_rho.py \
+  tests/test_neighbor_flux.py \
+  tests/test_seed_quality.py

@@ -1,0 +1,20 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N ezsuite6
+#$ -o ezsuite6.$JOB_ID.log
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+# Local scratch: ~/.pytensor is on NFS and the client drops advisory locks
+# under -n6, which fabricates unrelated failures.
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+cd $HOME/python/EXOZIPPy
+git log --oneline -1
+python -u -m pytest -q --tb=long -rEf 2>&1 > ezsuite6_full.$JOB_ID.txt; tail -60 ezsuite6_full.$JOB_ID.txt

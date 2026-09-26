@@ -116,3 +116,8 @@ mulensinstrument.Roman_Z087.out_scale: {upper: 0.04213, initval: 0.004213}
 # split blocks that route here; engine gap noted in the private notes).
 # Start at the capped-murel arm posterior, theta_E = 0.63 mas.
 mulensevent.log_theta_E: {initval: -0.2}
+
+# The Source shares the event's line of sight; galacticmodel anchors on it
+# (anchor_idx 1) and the magnification Op freezes its coordinates.
+star.Source.ra:  {initval: 267.595, sigma: 0}
+star.Source.dec: {initval: -28.982, sigma: 0}

@@ -47,6 +47,29 @@ planet:
       default:
         func_name: "calc_mass_from_log_q"
         deps: ["log_q", "star.mass"]
+  # The mass ratio in LINEAR form, for every planet (EXOFASTv2's q).  log_q
+  # above is the sampled coordinate of a log_q-mode planet only; a linear-mode
+  # planet (RV or astrometry measures its orbit) has no log_q, so this is the
+  # only place its mass ratio is reported.
+  q:
+    unit: ""
+    internal_unit: ""
+    latex: "q"
+    description: "Mass Ratio ($M_P/M_\\star$)"
+    expressions:
+      default:
+        func_name: "calc_planet_mass_ratio"
+        deps: ["mass", "star.mass"]
+  # Minimum mass (EXOFASTv2's msini); signed like mass in linear mode.
+  msini:
+    unit: "jupiterMass"
+    internal_unit: "solMass"
+    latex: "M_P\\sin{i}"
+    description: "Minimum Mass"
+    expressions:
+      default:
+        func_name: "calc_msini"
+        deps: ["mass", "orbit.sini"]
   density:
     unit: "g/cm3"
     internal_unit: "solMass/solRad3"
@@ -230,6 +253,106 @@ planet:
       default:
         func_name: "calc_max_ecc"
         deps: ["ar", "p"]
+
+  # Geometric depth (R_P/R_*)^2; EXOFASTv2's delta.  Its limb-darkened
+  # `depth` is per band and not ported (see planet/physics.py).
+  delta:
+    unit: ""
+    internal_unit: ""
+    latex: "\\delta"
+    description: "Geometric Transit Depth, $(R_P/R_*)^2$"
+    expressions:
+      default:
+        func_name: "calc_delta"
+        deps: ["p"]
+  # Adams & Laughlin 2006 eq 2 with Q_P = 1e6, as EXOFASTv2; the physics
+  # returns Gyr, so both units are Gyr (see planet/physics.py).
+  tcirc:
+    unit: "Gyr"
+    internal_unit: "Gyr"
+    latex: "\\tau_{\\rm circ}"
+    description: "Tidal Circularization Timescale"
+    expressions:
+      default:
+        func_name: "calc_tcirc"
+        deps: ["a", "ar", "p", "mass", "star.mass", "orbit.ecc"]
+  # GR apsidal precession.  Internal rad/d; reported in EXOFASTv2's
+  # deg/century -- `century` is EXOZIPPy's own registered astropy unit
+  # (exozippy/units.py), so a user may still override to arcsec/yr etc.
+  omegagr:
+    unit: "deg/century"
+    internal_unit: "rad/d"
+    latex: "\\dot{\\omega}_{\\rm GR}"
+    description: "GR Apsidal Precession Rate"
+    expressions:
+      default:
+        func_name: "calc_omegagr"
+        deps: ["a", "star.mass", "orbit.period", "orbit.ecc"]
+
+  # --- A priori transit / eclipse probabilities (Winn 2010 eq 9) ----------
+  # EXOFASTv2's pt/ptg/ps/psg; see planet/physics.py.  "G" = grazing
+  # geometries included; without it, full (non-grazing) events only.
+  ptg:
+    unit: ""
+    internal_unit: ""
+    latex: "P_{T,G}"
+    description: "A priori Transit Prob."
+    expressions:
+      default:
+        func_name: "calc_ptg"
+        deps: ["ar", "p", "orbit.ecc", "orbit.esinw"]
+  pt:
+    unit: ""
+    internal_unit: ""
+    latex: "P_T"
+    description: "A priori Non-grazing Transit Prob."
+    expressions:
+      default:
+        func_name: "calc_pt"
+        deps: ["ar", "p", "orbit.ecc", "orbit.esinw"]
+  psg:
+    unit: ""
+    internal_unit: ""
+    latex: "P_{S,G}"
+    description: "A priori Eclipse Prob."
+    expressions:
+      default:
+        func_name: "calc_psg"
+        deps: ["ar", "p", "orbit.ecc", "orbit.esinw"]
+  ps:
+    unit: ""
+    internal_unit: ""
+    latex: "P_S"
+    description: "A priori Non-grazing Eclipse Prob."
+    expressions:
+      default:
+        func_name: "calc_ps"
+        deps: ["ar", "p", "orbit.ecc", "orbit.esinw"]
+
+  # --- Irradiation (EXOFASTv2 derivepars.pro's teq and fave) --------------
+  # See planet/physics.py for the two formulas and their assumptions.
+  teq:
+    unit: "K"
+    internal_unit: "K"
+    latex: "T_{\\rm eq}"
+    description: "Equilibrium Temperature"
+    expressions:
+      default:
+        func_name: "calc_teq"
+        deps: ["star.teff", "ar"]
+  # Reported in units of Earth's insolation (1361 W m-2, IAU 2015 nominal
+  # solar irradiance), not EXOFASTv2's 10^9 erg s-1 cm-2 -- the physics
+  # function applies that scale, since it is not an astropy unit.
+  fave:
+    unit: ""
+    internal_unit: ""
+    latex: "\\langle F \\rangle"
+    description: "Time-averaged Incident Flux ($S_\\oplus$)"
+    table_note: "In units of Earth's insolation, $S_\\oplus = 1361$ W m$^{-2}$"
+    expressions:
+      default:
+        func_name: "calc_fave"
+        deps: ["star.teff", "ar", "orbit.ecc"]
 
   # PR 1.b (BEER): Doppler beaming amplitude, in ppm (EXOFASTv2's
   # ss.planet[i].beam). Off by default (pinned to 0 unless fitbeam or

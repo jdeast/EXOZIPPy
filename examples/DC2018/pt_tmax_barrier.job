@@ -1,0 +1,45 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q sThC.q
+#$ -cwd
+#$ -j y
+#$ -N tmaxbar
+#$ -o pt_tmax_barrier.$JOB_ID.log
+#
+# THE QUESTION THE FIRST SCAN CANNOT ANSWER.  pt_tmax_scan showed round
+# trips falling 1774 -> 0 from T_max 4 -> 8500 at a fixed ladder.  But its
+# bimodal target has sep=8, i.e. a midpoint barrier of sep^2/8 = 8 nats,
+# which the COLD chains cross directly: T_max=8500 gets the far-mode
+# fraction right (0.5024) with ZERO round trips.  DC2018 basins are 24-77
+# nats apart AND differ in topology, so the quantity that matters is
+# whether T=1 recovers the 50/50 split at OUR barrier heights -- and
+# lowering T_max, which buys round trips, costs the hot rung its ability to
+# cross.  That trade is what this scans.
+#
+#   sep  8 -> barrier  8 nats (the original control)
+#   sep 14 -> barrier 24.5 nats (223's truth-basin gap: 24.23)
+#   sep 25 -> barrier 78 nats (128's basin separation: 77)
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+only=$(python - <<'PY'
+print(','.join(f'TMAX-T{t:.0f}-bimodal'
+               for t in (16., 50., 200., 1000., 8500.)))
+PY
+)
+for sep in 8 14 25; do
+    echo "=== sep=$sep  (barrier $(python -c "print(f'{$sep**2/8:.1f}')") nats) ==="
+    python pt_transport_bench.py --only "$only" --target-evals 2000000 \
+        --cores 8 --sep $sep --out pt_tmax_barrier_sep$sep.json
+done
+echo "exit $?   $(date)"

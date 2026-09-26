@@ -1,6 +1,7 @@
 # DC2018: the 2018 Roman (WFIRST) Data Challenge, end to end
 
-Fits every light curve of the challenge's 44-event sample with the full
+Fits the challenge's 2L1S sample -- 30 of its 44 events, see "The static
+sweep's event list" below -- with the full
 pipeline, one cluster job per event:
 
 1. **MMEXOFAST** runs on both bands (`renormalize_errors=True`,
@@ -79,9 +80,9 @@ Test with a single event first:
     cd ~/python/EXOZIPPy/examples/DC2018
     qsub -v EVENT=128 dc2018.job
 
-then run them all (44 tasks, one per line of `events.txt`):
+then run them all (30 tasks, one per line of `events.txt`):
 
-    qsub -t 1-44 dc2018.job
+    qsub -t 1-30 dc2018.job
 
 Knobs: `qsub -v EVENT=128,BANDS=Z087,EXTRA="--quick" dc2018.job`. The
 sampler core count follows the job's `$NSLOTS`, so it always matches the
@@ -90,6 +91,36 @@ sampler core count follows the job's `$NSLOTS`, so it always matches the
 After the jobs finish:
 
     python collect_results.py            # -> dc2018_summary.csv + stdout table
+
+## The static sweep's event list (JDE 2026-09-22)
+
+`events.txt` holds the **30** events a static 2L1S model can fit honestly;
+`events_all44.txt` is the challenge's full sample and `events_moving.txt`
+the 14 removed, with the measurement behind each.
+
+Every bound planet in the answer key **orbits** (`a`, `inc`, `phase`,
+`period` columns) and the simulator moved the lens. A static binary fit
+pays for that in `s` and `q`: on event 128, whose planet turns 85 degrees
+of orbital phase across the fitted window, the static posterior landed 1.6%
+low in `s` and 11% low in `q` at 40 and 21 sigma, and the prior-free
+likelihood preferred that biased solution to the truth by 5,900 chi2 --
+while a linear-orbital-motion fit recovers `s`, `q` and `rho` to under 1%
+(`dc18_orbital_motion_signal.py` docstring, review 2.4.14). Rather than
+guess from the period, each event's signal is **measured**: chi2 at the
+key's own parameters, static versus moving at the rates the key's orbit
+predicts (the orbit reproduces the key's `s` to four digits on all 43
+planets, so the convention is exact). Above 25 -- about 5 sigma for two
+parameters -- the event leaves the static sweep. Thirteen did, from 29.9
+(008) to 9,570 (186); four sit between 10 and 25 and stay flagged (163,
+214, 218, 289); event **001 is a cataclysmic variable** and leaves on that
+ground. Event **131** stays with a different flag: its static truth fits at
+chi2/N = 1.12 and motion does not help, so something else is in that curve.
+
+These events come back when the orbital-motion rung exists (the model does:
+`orbital_motion: linear` / `keplerian` on the lens block, conventions.md
+C24). Architecture selection -- orbital motion, binary-star lenses, binary
+sources, the challenge's CV and free-floating-planet classes -- is the
+roadmap item after static 2L1S works (`notes/todo.txt`, microlensing).
 
 ## Caveats
 

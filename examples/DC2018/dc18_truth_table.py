@@ -351,6 +351,48 @@ def convergence(post, tier):
     return out, bad, gate
 
 
+def pipeline_flags(prefix):
+    """The wrap-up's own header lines from `<prefix>_summary.txt`.
+
+    NOT a new diagnostic: every one of these was computed by the pipeline,
+    written to an artifact, and then read by nobody.  On DC2018 062 three
+    separate fallbacks fired -- the chain filter kept all 78 chains because
+    fewer than 3 reached the good-likelihood region, the mode weights fell
+    back to occupancy because bridge sampling refused, and the source
+    temperature sat on the BC grid's floor -- while this table printed
+    "mixing OK" and a scored row.  A verdict that cannot see the fallbacks
+    its own inputs took is not an honest verdict.
+
+    Returns a list of (tag, text).  `mode_weights` comes from
+    `<prefix>_modes.txt`, which is where that one is recorded.
+    """
+    flags = []
+    path = prefix + "_summary.txt"
+    if os.path.exists(path):
+        with io.open(path, encoding="utf-8") as fh:
+            for line in fh:
+                if not line.startswith("#"):
+                    break
+                text = line.lstrip("# ").rstrip()
+                low = text.lower()
+                if "good-likelihood region" in low:
+                    flags.append(("CHAIN FILTER FELL BACK", text))
+                elif low.startswith("bound:"):
+                    flags.append(("BOUND", text[len("BOUND:") :].strip()))
+                elif low.startswith("warning: convergence not reached"):
+                    flags.append(("NOT CONVERGED", text))
+    mpath = prefix + "_modes.txt"
+    if os.path.exists(mpath):
+        with io.open(mpath, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("weight provenance:") and (
+                    "refused" in line
+                ):
+                    flags.append(("MODE WEIGHTS", line.strip()))
+                    break
+    return flags
+
+
 def report(prefix, event, data_dir, tier="default"):
     """`prefix` is the run prefix, e.g. sweep/128/DC2018_128."""
     truth, cls = truth_for(event, data_dir)
@@ -385,6 +427,10 @@ def report(prefix, event, data_dir, tier="default"):
         print(
             "  chains=%d draws=%d" % (post.sizes["chain"], post.sizes["draw"])
         )
+
+    flags = pipeline_flags(prefix)
+    for tag, text in flags:
+        print("  !! %s: %s" % (tag, text))
 
     if post is not None:
         conv, bad, gate = convergence(post, tier)
@@ -541,10 +587,16 @@ def report(prefix, event, data_dir, tier="default"):
             }
 
     core_ok = best["core_n"] > 0 and best["core_hit"] == best["core_n"]
-    winner = bool(core_ok and mixed and have_csv)
+    # A fallback in the pipeline's own wrap-up disqualifies a CLEAR WINNER:
+    # "the truth is in one of our modes and we are well mixed" cannot be
+    # asserted over a chain filter that kept every chain because it could
+    # not find 3 good ones, or over mode weights that fell back to
+    # occupancy in a run that did not mix.
+    blocking = [t for t in (t for t, _ in flags) if t != "BOUND"]
+    winner = bool(core_ok and mixed and have_csv and not blocking)
     print(
         "\n  VERDICT: best mode %s -- core %d/%d, all %d/%d at 1 sigma; "
-        "mixing %s"
+        "mixing %s%s"
         % (
             best["mode"],
             best["core_hit"],
@@ -552,6 +604,11 @@ def report(prefix, event, data_dir, tier="default"):
             best["hit"],
             best["n"],
             "OK" if mixed else "FAILED on " + ",".join(bad),
+            # "mixing OK" over a wrap-up that fell back is the misreading
+            # this whole block exists to stop.
+            ""
+            if not blocking
+            else "  -- but " + ", ".join(sorted(set(blocking))),
         )
     )
     print("  CLEAR WINNER: %s" % winner)
@@ -561,6 +618,7 @@ def report(prefix, event, data_dir, tier="default"):
         "prefix": prefix,
         "tier": tier,
         "have_csv": have_csv,
+        "flags": [t for t, _ in flags],
         "mixed": mixed,
         "unmixed_on": bad,
         "best_mode": best["mode"],
@@ -570,6 +628,153 @@ def report(prefix, event, data_dir, tier="default"):
         "n": best["n"],
         "clear_winner": winner,
     }
+
+
+# Grey band-extinction residual per event, in magnitudes: what our INTEGRATED
+# band extinction still misses at the colour-anchored av, because the
+# simulation reddened monochromatically (conventions.md C29).  Computed in
+# dc18_sweep_config.av_from_clump_colour; hardcoded here so scoring a trace
+# never needs the BC grid.
+C29_GREY = {
+    "008": -0.0658,
+    "062": -0.4114,
+    "128": -0.3379,
+    "152": -0.1458,
+    "194": -0.5780,
+    "223": -0.2640,
+}
+
+
+def print_convention_caveat(rows):
+    """
+    Print the C29 systematic beside the recovery table.
+
+    JDE 2026-09-17 asked for the disagreement to be listed "as a caveat
+    alongside the discussion of how well we recover 'truth'".  It prints here
+    rather than only in the paper because this table IS that discussion for
+    anyone reading a scoring run, and a caveat that lives somewhere else is a
+    caveat nobody applies.
+
+    THIS TEXT HAS BEEN WRONG THREE TIMES.  The history is kept because it is
+    the reason to distrust any version of it that PREDICTS rather than
+    measures -- every prediction here has failed, and only the measurements
+    have survived.
+      v1 predicted theta_star biased low by 10**(-0.2*grey) = 0.766x, from
+         the CSB relation.  av_true measured 0.983x.  Wrong.
+      v2 concluded theta_star is "protected" because the light curve pins
+         rho * theta_E independently of the SED.  av_clump measured 0.738x at
+         av = 7.18, i.e. theta_star moves strongly WITH av.  Wrong --
+         `star_constrains_rho: true` means the SED constrains rho.
+      v3 fit three arms, found a crossing of theta*/truth = 1 at av = 9.007
+         against an independent colour anchor of 9.006, and called that
+         agreement "0.1%".  It also forecast 0.83-0.94x for the sweep's wide
+         prior.  The sweep measured 0.698x, and eight more runs show the
+         crossing is not determined to anything like 0.1%.  Both wrong.
+      v4 reported eleven runs on event 194, every one with its own
+         `_results.csv`, and stated the crossing with the uncertainty the
+         scatter actually implies.  It forecast nothing -- and its item 3,
+         "the source-radius deficit is NOT an extinction problem, and that
+         residual is OURS", was right for a reason it could not see.
+      v5 (this text, 2026-09-24): every one of those eleven runs, and the
+         whole sweep, evaluated the Galactic prior toward RA 180, Dec 0 --
+         the Source was never positioned and the galactic model anchors on
+         it (PR #325).  Repinning the Source alone moved 194 from D_s 0.37x
+         / R_s 0.50x to 0.95x / 0.85x (ab194/anchorfix vs ab194/zpvega).  The
+         C29 grey term is what remains, and it is now BUDGETED: one wide
+         common-mode zeropoint per event (hypot(0.02, |grey|)) with the
+         colour tied by a link, and listed here as the caveat it is.
+    """
+    seen = [r["event"] for r in rows if str(r["event"]) in C29_GREY]
+    if not seen:
+        return
+    print("\n" + "=" * 104)
+    print("CAVEAT (v5, 2026-09-24): THE SIMULATION'S EXTINCTION CONVENTION")
+    print(
+        "        DIFFERS FROM OURS BY A GREY TERM PER EVENT.  IT IS BUDGETED IN"
+    )
+    print("        THE ZEROPOINT PRIOR AND LISTED HERE, NOT MATCHED.")
+    print(
+        "  Every run tabulated below predates PR #325 and evaluated the Galactic"
+    )
+    print(
+        "  prior toward RA 180, Dec 0 (an unpositioned Source, anchored on)."
+    )
+    print(
+        "  Read them as wrong-sky controls: the R_source deficit they share was"
+    )
+    print(
+        "  that, not extinction -- repinning the Source alone moved 194 from"
+    )
+    print(
+        "  D_s 0.37x / R_s 0.50x to 0.95x / 0.85x.  The 0.85x is the grey term."
+    )
+    print("  This simulation reddened MONOCHROMATICALLY at each filter's")
+    print("  effective wavelength; we integrate a reddened spectrum through")
+    print("  the passband, which is what a measurement is.  For a filter as")
+    print("  wide as W149 those differ, so no single av reproduces both")
+    print("  simulated band extinctions in our model.  Anchoring the colour")
+    print("  leaves a GREY residual in both bands:")
+    print("     %-7s %s" % ("event", "grey (mag)"))
+    for ev in sorted({str(e) for e in seen}):
+        print("     %-7s %+10.2f" % (ev, C29_GREY[ev]))
+    print("  MEASURED on event 194 -- ELEVEN ptde runs that differ only in")
+    print("  the av prior (and, where marked, in fitu0te), each scored from")
+    print("  its own results.csv, Rhat <= 1.01, 78 chains:")
+    print("     av post  theta*/t  R/t    D/t    run (av prior)")
+    print("        4.24    0.632  0.352  0.556  sync (2.75 +/- 0.33)")
+    print("        4.26    0.634  0.356  0.562  u0te (2.75 +/- 0.33)")
+    print("        4.26    0.630  0.350  0.556  u0te_sync")
+    print("        4.27    0.651  0.357  0.548  async")
+    print("        4.27    0.633  0.356  0.563  tight_sync")
+    print("        5.26    0.686  0.348  0.507  av_free, old grid ceiling 6")
+    print("        6.80    0.760  0.350  0.461  av_free, ceiling 20")
+    print("        7.18    0.733  0.389  0.531  av_clump (8.61 +/- 2.41)")
+    print("        7.29    0.698  0.364  0.521  SWEEP (9.01 +/- 1.83, u0te)")
+    print("        8.99    0.983  0.403  0.410  av_true (9.01 +/- 0.30)")
+    print("        9.42    1.086  0.425  0.391  av_band (11.65 +/- 1.40)")
+    print("  1. THE CROSSING IS WHERE THE ANCHOR IS -- TO ~0.5 MAG, WHICH IS")
+    print("     ALL THE SCATTER ALLOWS.  Refit as runs were added it moves:")
+    print("     9.01 +/- 0.80 (v3's three arms), 9.31 +/- 2.83 (the six runs")
+    print("     with av > 5), 9.71 +/- 1.53 (all eleven).  The relation is")
+    print("     monotone but NOT log-linear -- the five runs near av = 4.25")
+    print("     sit at 0.63, where v3's line predicts 0.44 -- so a global fit")
+    print("     is the wrong estimator.  The local one: the two runs that")
+    print("     STRADDLE theta*/truth = 1 (8.99 -> 9.42) interpolate to 9.06,")
+    print("     and three runs at av = 6.8-7.3 scatter 0.037 dex at fixed av,")
+    print("     i.e. +/- 0.5 mag of crossing.  So 9.1 +/- 0.5 against an")
+    print("     independently computed anchor of 9.01.  That confirms the")
+    print("     anchor.  v3's 0.1% was a three-point coincidence.")
+    print("  2. theta_star TRACKS av: 0.075 dex/mag locally above av = 7,")
+    print("     0.038 dex/mag across the full 4.2-9.4 range, against the CSB")
+    print("     relation's 0.042.  It is NOT independent of the SED, because")
+    print("     `star_constrains_rho: true` lets the SED constrain rho.")
+    print("  3. R_source WAS 0.35-0.43x TRUTH AT EVERY av over these eleven")
+    print(
+        "     runs, and did not move with av.  v4 called that residual OURS;"
+    )
+    print("     it was the (180, 0) sight line (PR #325), not extinction.")
+    print("  4. THE HONEST WIDTH COSTS MORE THAN v3 ESTIMATED.  Every wide")
+    print("     prior is pulled DOWN, never up: -0.94 sigma from")
+    print("     9.01 +/- 1.83 (the sweep), -0.59 from 8.61 +/- 2.41, -1.59")
+    print("     from 11.65 +/- 1.40; only the tight prior held (-0.07 from")
+    print("     9.01 +/- 0.30).  The data's own av preference is LOW.  The")
+    print("     sweep therefore landed 0.698x, below v3's own 0.83-0.94x")
+    print("     forecast.  That tradeoff is JDE's call, not a defect.")
+    print("  5. fitu0te IS NOT WHY THE SWEEP SITS LOW: at av = 4.26 the u0te")
+    print("     runs give 0.634 and 0.630 against 0.632 and 0.651 for u_0,")
+    print("     under 0.5%.  The sweep is comparable to the arms.")
+    print("  6. WHAT REMAINS after the anchor fix is the grey term itself:")
+    print(
+        "     theta_star ~0.71-0.76x and R_source ~0.85x of truth on 194, the"
+    )
+    print(
+        "     sim's monochromatic-at-lambda_eff law extincting W149 1.27x more"
+    )
+    print("     per unit colour excess than our bandpass-integrated CCM.  The")
+    print("     sweep configs now budget it as one wide common-mode zeropoint")
+    print("     (dc18_sweep_config.py); the convention is not matched.")
+    print("  None of this applies to real Roman data, where the integrated")
+    print("  treatment is simply the correct one.")
 
 
 def main():
@@ -638,12 +843,20 @@ def main():
     if out:
         print("\n" + "=" * 104)
         print(
-            "%-6s %-9s %-7s %-8s %-8s %s"
-            % ("event", "mode", "core", "all", "mixed", "CLEAR WINNER")
+            "%-6s %-9s %-7s %-8s %-8s %-13s %s"
+            % (
+                "event",
+                "mode",
+                "core",
+                "all",
+                "mixed",
+                "CLEAR WINNER",
+                "pipeline flags",
+            )
         )
         for r in out:
             print(
-                "%-6s %-9s %-7s %-8s %-8s %s"
+                "%-6s %-9s %-7s %-8s %-8s %-13s %s"
                 % (
                     r["event"],
                     r["best_mode"],
@@ -651,8 +864,11 @@ def main():
                     "%d/%d" % (r["hit"], r["n"]),
                     "yes" if r["mixed"] else "no",
                     "YES" if r["clear_winner"] else "no",
+                    ", ".join(sorted(set(r.get("flags") or []))) or "-",
                 )
             )
+    if out:
+        print_convention_caveat(out)
     if a.json_out:
         json.dump(out, io.open(a.json_out, "w", encoding="utf-8"), indent=1)
         print("\nwrote %s" % a.json_out)

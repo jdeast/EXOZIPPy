@@ -159,3 +159,8 @@ mulensevent.log_theta_E: {initval: -1.27}
 # inconsistent: the source stays late-type, theta_star stays ~0.7x, and
 # theta_E lands near 0.054 -- the 0.6x predicted in the config comment.
 # Either outcome is informative, and the two are cleanly distinguishable.
+
+# The Source shares the event's line of sight; galacticmodel anchors on it
+# (anchor_idx 1) and the magnification Op freezes its coordinates.
+star.Source.ra:  {initval: 267.595, sigma: 0}
+star.Source.dec: {initval: -28.982, sigma: 0}

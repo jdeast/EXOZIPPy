@@ -31,7 +31,7 @@ This is the prerequisite for the limb-darkening atmosphere prior (review 8.5.2),
 
 Everything that turns those (u1, u2) into an occultation flux goes through the one shared helper `components/limbdark.py:quad_limb_darkened_flux(b, r, u1, u2)` -- `transit.py` (likelihood and plotting) and `rm.py` (the Rossiter-McLaughlin blocked flux). Never open-code the dot product: exoplanet-core's `quad_solution_vector` returns `s` in starry's Green's basis, so the coefficients are `c0 = 1 - u1 - 1.5*u2`, `c1 = u1 + 2*u2`, `c2 = -0.25*u2` (Agol, Luger & Foreman-Mackey 2020), **not** the mu-power `[1 - u1 - u2, u1, u2]`. The naive basis is exact at `u2 = 0` and silently wrong otherwise -- rm.py carried it undetected (up to ~87% of the transit depth at u2 = 0.3, with flux > 1 near egress) precisely because every test that exercised it used u2 = 0. `transit/physics.py:calc_planet_visible` is the one deliberate exception: it occults the *planet* by the star, a uniform disk where `s0/pi` is the whole answer. Tests: `tests/test_limbdark.py` pins the helper against brute-force disk integration.
 
-The SED component supports n stars: each `.sed` filter row's `photType: {pos: [...], neg: [...]}` (with `blend:` as an alias for `pos`; entries are star names or indices) builds a +1/0/-1 blend matrix; blended rows are flux sums, `neg` makes the row a differential magnitude (`-2.5*log10(F_pos/F_neg)`). An empty `filters:` list is legal — the SED then only serves cross-component flux predictions (`predict_star_appmag`, `predict_blend_appmag`, `predict_flux_fraction`). BC tables for missing filters auto-generate from the model spectra (`components/sed/make_bc.py`, CLI `scripts/make_bc_tables.py`). The shipped tables are built from the full-resolution spectra by `models/NextGen/generate_NextGen_BC_Tables.py`; `models/NextGen/README.md` has the workflow and the table format.
+The SED component supports n stars: each `.sed` filter row's `photType: {pos: [...], neg: [...]}` (with `blend:` as an alias for `pos`; entries are star names or indices) builds a +1/0/-1 blend matrix; blended rows are flux sums, `neg` makes the row a differential magnitude (`-2.5*log10(F_pos/F_neg)`). An empty `filters:` list is legal — the SED then only serves cross-component flux predictions (`predict_star_appmag`, `predict_blend_appmag`, `predict_flux_fraction`). BC tables for missing filters auto-generate from the model spectra (`components/sed/make_bc.py`, CLI `scripts/make_bc_tables.py`) -- but see **auto-generation is a development convenience, not the production path** below. The shipped tables are built from the full-resolution spectra by `models/NextGen/generate_NextGen_BC_Tables.py`; `models/NextGen/README.md` has the workflow and the table format.
 
 **BC tables grow incrementally, and a fit reads only its own slice of them.** A NaN cell in a `{FACILITY}.bc.parquet` table means "not computed yet". `bc_grid.write_bc_table` merges cell by cell, so it never overwrites a value with a NaN, and it adds new grid nodes only when called with `allow_new_nodes=True`. `bc_grid.bc_nodes_to_compute` is the generators' shared work list, so extending the grid yaml along any axis, or adding filters to a facility, computes only the missing cells (`models/NextGen/README.md`). A table can therefore be ragged: 2MASS extended to A_V = 15 while GAIA is still at 6. Readers only ever use the **complete** part of the columns they ask for (`bc_grid.complete_axes`). That is why `_inject_grid_bounds` passes the fit's own filters (`_requested_filter_labels`: the `.sed` rows plus the band filters) to `peek_grid_axes`. Without them, a 2MASS-only fit could not reach the extended A_V values, and a fit that also uses Gaia would be bounded onto nodes where Gaia has no value. `load_data` passes the resolved `teffsed`/`feh`/`av` bounds to `build_bc_grid`. It reads only the requested filter columns and only the rows inside the bounds (plus the grid point bracketing each one), and replaces the old path of reading everything and then calling `slice_bc`. On the shipped tables the result is bit-identical to that path. If the bounds reach past what a requested filter covers, it raises rather than extrapolate. Tests: `tests/test_bc_incremental.py`, and Section 4 of `tests/test_nextgen_bc_pipeline.py`.
 
@@ -60,6 +60,22 @@ Filter profiles and stellar-model data are **package-level**, not SED-component-
 
 **`model_root:` must reach every consumer, and two of them used to ignore it.** `SED._ensure_model_data` passed `DEFAULT_MODEL_ROOT` to `make_bc.ensure_model_data`, which takes a root -- so a configured root downloaded 259 MB of spectra into a directory nothing reads and then downloaded them again. And the model's plot class was imported through the fixed dotted namespace `exozippy.models.<model>.BCs.plot`, which can only resolve inside the installed package: `sed.load_model_plot_module` keeps the dotted import for a path inside the package (so module identity matches a normal import) and spec-loads anything else, caching it in `sys.modules`. `sed.plot_class_from` then selects the one **subclass of `components.sed.plot.Plot`** defined in the module, raising on zero or several -- the old ast-parse-and-take-the-first-`ClassDef` silently instantiated a helper class defined above it. `plot.Plot` reads the spectra, the wavelength grid and the grid yaml under `self.model_root`; its fall back to the packaged NextGen spectra survives but is an explicit `is_file()` test plus a warning saying the *figure's* curve is a NextGen spectrum while the fit's BCs were not, in place of a bare `except:` + `print()`. Tests: `tests/test_sed_model_root.py`.
 
+**Auto-generation is a development convenience, not the production path.** It works because
+the grid it reads is the plot-resolution NextGen spectra. The full-resolution atmospheres are
+~250 GB, and no user should have to download those to add one filter, so on-the-fly generation
+does not survive the move to them (JDE 2026-09-17: "I don't think on the fly generation of the
+BC grids (as we once envisioned) is practical in production ... it would require the user to
+download 250 GB of high resolution models"). The machinery stays -- it is how the shipped
+tables are built, and it is genuinely useful at plot resolution -- but **the expected path for a
+new filter is to request it**, and have it generated centrally and shipped.
+
+The better answer, unexplored and possibly not permitted: a SERVICE hosted next to the models
+that computes and serves a requested BC table without the caller ever holding the underlying
+grid. That would also dissolve the large-`av` problem -- extending the Av axis would stop being
+a repository-wide regeneration and become a query -- and the Rv axis with it. Whether Harvard
+IT supports hosting such a thing is an open question and not a software one; recorded here so
+the option is not rediscovered as novel.
+
 **A band-referenced filter whose facility has no BC tables is generated, not dropped** (`SED._collect_band_filters`). `build_bc_grid` already auto-generates for a filter listed in the `.sed` file, and for a missing column inside an existing facility; the band filter with a missing facility was the one case that silently dropped the SED flux constraint it exists to carry (the mulensing zeropoint tie, the transit dilution, the astrometry fluxfrac). The cost that comes with letting it through: a band filter whose tables genuinely cannot be built now fails the fit rather than quietly weakening it -- as a `.sed` filter already does. Still skipped, with a warning that says why: a label with no SVO identity at all, neither in the alias table nor SVO-shaped (`examples/gj1214`'s `MIRILRS`), for which there is no bandpass to synthesize from. Tests: `tests/test_sed_band_filters.py`.
 
 **Filter profiles are read from the package and written to the machine cache.** `filters/filter.py` used to write its downloaded `.filter` pickles into the installed package directory -- a `PermissionError` on a read-only site-packages and source-tree litter in a dev checkout, and its `os.makedirs` was unconditional, so even READING a shipped profile created a facility directory there. Reads now try the shipped package directory first (20 profiles ship) and `filter_cache_root()` -- the `$XDG_CACHE_HOME/exozippy/filters` sibling of `utilities/zenodo.py`'s download cache, honouring the same `EXOZIPPY_CACHE_DIR` switch -- second; a download goes to the cache, falling back to the package directory when the cache is switched off (which is what "off" meant before it existed) and to a temp directory when neither is writable. The SVO zeropoints those downloads scrape are validated before they are believed: HTTP status, table count, that the rows read are LABELLED as zeropoints, that the unit cell names the expected quantity, and that each value is `--` or a finite positive float. Every failure raises, and raising is the point -- the scrape happens inside `_set_attrs`, before `_create_filter_file`, so refusing is refusing to cache a wrong number forever. Tests: `tests/test_filter_cache.py`, `tests/test_filter_svo_zeropoints.py`. `bc_grid._load_alias_table` and `plot._read_spectra_csv` are both cached on `(path, mtime, size)` -- the 250 MB spectra table was re-read and re-json-parsed (5.5 s) on every `Plot` construction; tests `tests/test_filter_alias_cache.py`, `tests/test_sed_spectra_cache.py`.
@@ -68,3 +84,64 @@ Cross-component hooks when a `sed:` block exists: `mulensinstrument` ties each l
 
 `zeropoint` is an ordinary **derived** `Parameter` (`mulensinstrument.zeropoint`, one element per light curve, `force_node: True`), not a hand-built node: `physics.calc_zeropoint` is its expression and `Parameter.build_pymc`'s derived-with-sigma branch supplies the Gaussian. **Derived, never sampled** -- `zp = m_SED + 2.5*log10(f_source)` is determined exactly by f_source and the SED, and no data constrains it separately, so sampling it would add a dimension identified only by its own prior. Until 2026-08 it was not a Parameter at all: `_build_sed_flux_constraint` resolved the config block itself and read only `mu`/`sigma`, so a user's `initval` (and their `unit:`) were silently inert. The **node layout** changed with it and the content did not: the per-instrument `mulensinstrument.<name>.zeropoint` Deterministics became the one vector `mulensinstrument.zeropoint`, and the per-instrument `.zeropoint_prior` potentials became the one `gaussian_prior.mulensinstrument.zeropoint`. Summing N scalar potentials as one vector instead moves a start logp by ~1 ulp (measured: exactly 1 on KMT-2019-BLG-1806), and nothing else. Three deps are injected as **context nodes** by `MulensInstrument.add_parameter` (`context_dep_names`, the `Orbit` group-mass idiom): `m_source_pred` (the SED forward model, which cannot be spelled as a manifest dep), plus `zp_center`/`sed_constrained`. The mask exists because a light curve with no `band:` or whose filter is missing from the BC grid has nothing to tie to -- `calc_zeropoint` returns `zp_center` there, so its Gaussian penalty is exactly zero, reproducing the old loop's `continue`. It is a `pt.switch` on an explicit 0/1 mask and **not** a NaN test, since switch's gradient multiplies the unselected branch by zero and `0 * NaN` is NaN. `sigma: 0` still raises (in `_zeropoint_context`) rather than falling through to `build_pymc`'s generic "sigma=0 has no effect on a derived parameter" warning. Because the SED forward model is read through `predict_*` rather than declared as a dep, `SED._predicted_appmag_node` lazily materializes the star Parameters it needs (`SED._ensure_star_nodes`) -- the zeropoint expression is built at stage 6 and can get there first.
 
+
+## A runtime extinction law: the plan, and why it is blocked (2026-09-24)
+
+**What the DC2018 work showed.** The challenge reddened each band monochromatically at its
+effective wavelength with a CCM-like R_V = 3.1 law (its A_Z087/A_W149 = 1.92 for all 293 events
+is CCM at 0.87 vs 1.46 um); our tables integrate the reddened spectrum through the bandpass,
+which for a band as wide as W149 shifts the effective wavelength redward for a cool reddened
+star and lowers the extinction per unit A_V. Read off the key's own lenses (Teff, logg, R, D
+and four magnitudes all given, no free parameter -- `examples/DC2018/dc18_source_chain.py
+lens-law`), the sim's A_W149/A_F087 is 0.51 against our 0.45, i.e. 0.65 mag of grey W149
+under-extinction on event 194 at the colour-anchored `av`, and theta_star comes out 0.71-0.76x
+truth once the galactic prior is right. **Integration is the physics; the monochromatic
+treatment is the simulation's shortcut**, and it is not a better bulge law -- the real bulge
+wants R_V ~ 2.5 (Nataf+2013) and a STEEPER NIR power law (alpha ~ 2.0-2.3, Nishiyama+2009)
+than CCM's ~1.6, which is the opposite direction from the sim's greyness. Decision (JDE
+2026-09-24): no heroics to match the challenge's convention; list it as a caveat, widen the
+zeropoint prior appropriately, move on.
+
+**What real data need.** The law's shape -- R_V and the NIR slope -- has to be settable per
+sight line and eventually samplable, with a prior per field. The tables anticipate it (an `Rv`
+column with only 3.1 populated), and adding it as a table axis means one more interpolation
+dimension per band on top of (Teff, logg, feh, Av): EXOFAST's experience is that even the 4-D
+per-band interpolation got slow at 8 bands.
+
+**The alternative: interpolate the spectrum, redden it, integrate the bands at runtime.** One
+trilinear interpolation in (log Teff, logg, feh) of the spectrum (8 x N_lambda), A_lambda(A_V,
+R_V, alpha) evaluated on the wavelength grid, and the band fluxes as one fixed
+[n_band x N_lambda] matrix product. Cost is not the constraint: at N_lambda ~ 3000-5000 it is
+~1e5 flops per likelihood evaluation, nothing against a 40k-point light curve, and it scales as
+one interpolation plus n_band dot products rather than n_band separate 4-5-D interpolations.
+It is differentiable (a weighted gather and a matmul), so NUTS-able where the rest of the model
+is. It is exact in A_V and in the law -- the tables interpolate between Av nodes at 8, 10 and
+12 mag, exactly where bulge sight lines live -- and it takes any law family without
+regenerating anything. It does not cover MIST's tabular BCs, which have no spectra behind
+them; those stay tables.
+
+**Why it is not simply better: resolution.** Phoebe's tests for the BC tables showed that
+~1 mmag agreement in the integrated band flux needs the spectra at R ~ 10,000 -- hundreds of GB
+for the grid, not something a NUTS interpolator can hold in memory. That is why the BC-table
+approach was chosen: the expensive integral is done once, offline, at full resolution, and the
+runtime interpolates a smooth scalar per band. A runtime spectral path therefore has to
+demonstrate, on a subset of wide filters, that a binned grid it CAN hold (R of a few hundred,
+tens of MB) reproduces the full-resolution band integrals to the mmag level -- plausible for
+broad bands, where the integral averages over lines, and not to be assumed. If that holds, it
+is faster and more general and wins; if it needs R ~ 10,000 to hold, the tables stay and the
+law becomes an axis.
+
+**The prerequisite that blocks all of it.** The shipped BC tables -- and the spectra
+`make_bc.py` reads -- are built from the R = 150 NextGen spectra that were only ever intended
+for PLOTTING (`make_bc.py` records that they reproduce the original 2MASS/GAIA tables only to
+0.01-0.04 mag). Both routes start by rebuilding from the full-resolution spectra, which Phoebe
+holds: (i) regenerate the BC tables from them (the production path, per the note above that
+on-the-fly generation does not survive the move to 250 GB), and (ii) bin them to the candidate
+runtime resolution and run the wide-filter revalidation against (i). Until those spectra are in
+hand nothing here can be built or validated. The write-up for the plan, when the work starts:
+the wavelength grid and binning (photon-counting integration, filter edges resolved), the
+zeropoints per magnitude system from the shipped SVO files, the law family (CCM/F99 with R_V
+plus an NIR index, or an R_V-only family such as Gordon+2023) and its per-field prior, the
+validation matrix (per filter: table vs runtime at Av 0..20, R_V 3.1, then off-axis), and the
+switch that lets a DC2018 run reproduce the challenge's monochromatic convention for scoring
+only.

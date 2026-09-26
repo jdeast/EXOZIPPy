@@ -183,11 +183,15 @@ def test_a_degenerate_refinement_is_discarded_for_the_grid_seed(
 ):
     """
     Given a refinement that returns u_0 = 5e-10 and t_E = 4e8 d with a
-      slightly better chi2 than the grid,
+      slightly better chi2 than the grid -- and per-u_0 refits that are just
+      as degenerate (the fake hands back t_E = 5e-10 d, shorter than the
+      cadence),
     When find_pspl_seed runs,
     Then the grid point is returned instead, marked not converged, and the
       log names the degeneracy -- a seed like that costs 15 s per evaluation
-      and puts the polish in a point-lens basin for ten hours.
+      and puts the polish in a point-lens basin for ten hours.  (When the
+      per-u_0 refits DO converge they are preferred to the grid point:
+      test_wing_only_peak_in_a_gap_is_placed_from_the_wing.)
     """
     # ARRANGE
     t, f, ivar = _curve(2458550.0, 0.15, 18.0, 1.0, 0.3)
@@ -233,3 +237,114 @@ def test_a_healthy_refinement_is_kept():
     seed = peakfind.find_pspl_seed([(t, f, ivar)])
     assert seed["converged"] is True
     assert abs(seed["u_0"] - 0.15) < 0.02
+
+
+# ---------------------------------------------------------------------------
+# Primary first (review 2.4.14, experiment A): the anomaly is masked and the
+# broader event behind it is the seed
+# ---------------------------------------------------------------------------
+
+
+def _seasons(t_0, gap_lo, gap_hi, span=200.0, n=6000):
+    """Epochs over a span with one gap -- a peak can be hidden in it."""
+    t = np.linspace(t_0 - span / 2, t_0 + span / 2, n)
+    return t[(t < gap_lo) | (t > gap_hi)]
+
+
+def _pspl_curve_on(t, t_0, u_0, t_E, f_s, f_b, noise, seed):
+    rng = np.random.default_rng(seed)
+    flux = f_s * _pspl(t, t_0, u_0, t_E) + f_b
+    err = np.full(t.size, noise * (f_s + f_b))
+    return t, flux + rng.normal(0.0, err), 1.0 / err**2
+
+
+def test_wing_only_peak_in_a_gap_is_placed_from_the_wing():
+    """DC2018-226's primary: u_0 = 1.1, t_E = 18 d, peak in a season gap so
+    only the declining wing is observed.  The free refinement walks u_0 to
+    zero (the wing fixes t_0 and t_E for ANY u_0 but not u_0 itself); the
+    per-u_0 refits must still put t_0 within a fraction of t_E of the truth
+    instead of at the season's first epoch."""
+    t_0, u_0, t_E = 2459958.95, 1.1, 18.0
+    t = _seasons(t_0, t_0 - 80.0, t_0 + 28.0, n=20000)
+    seed = peakfind.find_pspl_seed(
+        [_pspl_curve_on(t, t_0, u_0, t_E, 1.0, 1.0, 2e-2, 11)],
+        primary_first=False,
+    )
+    # Half a t_E: a wing alone leaves t_0 correlated with u_0 and t_E, and
+    # a seed this close is in the basin (experiment A's posterior on 226
+    # was +/- 3.6 d wide in t_0 from a start AT the truth).  The raw grid
+    # point the old fallback returned sat at the season's first epoch,
+    # 1.6 t_E off.
+    assert abs(seed["t_0"] - t_0) < 0.5 * t_E
+    # t_E trades against the unconstrained u_0 along the wing: a factor of
+    # two either way is the same basin.
+    assert 0.5 * t_E < seed["t_E"] < 2.0 * t_E
+    assert seed["u_0"] in peakfind._U0_GRID or seed["converged"]
+
+
+def test_anomaly_dominated_curve_seeds_the_primary():
+    """A 226-like curve: the primary's wing plus a one-day, many-sigma spike
+    68 days after t_0.  The first fit locks onto the spike; the primary-first
+    pass masks it and returns the primary, reporting the spike's window."""
+    t_0, u_0, t_E = 2459958.95, 1.1, 18.0
+    # Roman-like cadence (100 epochs/day): dense enough that a one-day spike
+    # outweighs the wing in chi2, which is what makes it the first fit.
+    t = _seasons(t_0, t_0 - 80.0, t_0 + 28.0, n=20000)
+    # 2% errors: the wing is a few sigma per epoch at the season's start,
+    # as 226's was (1.7 sigma), and the anomaly below is ~10 sigma per epoch
+    # over a day, as 226's was (9.4).
+    tt, flux, ivar = _pspl_curve_on(t, t_0, u_0, t_E, 1.0, 1.0, 2e-2, 12)
+    # the anomaly: a planetary-caustic bump, FWHM ~1 d
+    t_anom = t_0 + 68.0
+    flux = flux + 0.4 * np.exp(-0.5 * ((tt - t_anom) / 0.45) ** 2)
+    curves = [(tt, flux, ivar)]
+
+    first = peakfind.find_pspl_seed(curves, primary_first=False)
+    assert abs(first["t_0"] - t_anom) < 1.0, (
+        "the spike IS the strongest feature"
+    )
+
+    seed = peakfind.find_pspl_seed(curves)
+    assert abs(seed["t_0"] - t_0) < 0.5 * t_E
+    assert seed["anomaly"] is not None
+    lo, hi = seed["anomaly"]["window"]
+    assert lo < t_anom < hi
+    assert seed["anomaly"]["fwhm"] == pytest.approx(1.06, abs=0.5)
+
+
+def test_a_plain_event_is_unchanged_by_the_primary_first_pass():
+    """On an ordinary well-sampled PSPL the masked refit fits the same event
+    from its wings, lands inside the mask, and the first fit stands."""
+    t_0, u_0, t_E = 2458550.0, 0.15, 18.0
+    curves = [_curve(t_0, u_0, t_E, 1.0, 0.5, seed=4)]
+    a = peakfind.find_pspl_seed(curves, primary_first=False)
+    b = peakfind.find_pspl_seed(curves)
+    for k in ("t_0", "u_0", "t_E", "chi2"):
+        assert a[k] == pytest.approx(b[k], rel=1e-9)
+    assert b["anomaly"] is None
+
+
+def test_a_lone_short_event_stays_the_seed():
+    """A free-floating-planet-class spike with nothing else in the curve:
+    masking it leaves noise, the second fit is insignificant, and the spike
+    remains the seed -- the pass must not invent a primary."""
+    t_0, u_0, t_E = 2458550.0, 0.1, 0.3
+    curves = [_curve(t_0, u_0, t_E, 1.0, 0.5, n=20000, span=100.0, seed=5)]
+    seed = peakfind.find_pspl_seed(curves)
+    assert abs(seed["t_0"] - t_0) < 0.1
+    assert seed["anomaly"] is None
+
+
+def test_feature_window_measures_the_spike_not_the_model():
+    """The mask comes from the data's own FWHM, padded, and never from the
+    (possibly degenerate) model that found the feature."""
+    t = np.linspace(0.0, 100.0, 10001)  # 0.01 d cadence -> 0.1 d bins
+    rng = np.random.default_rng(6)
+    flux = 1.0 + 0.5 * np.exp(-0.5 * ((t - 50.0) / 0.5) ** 2)
+    flux = flux + rng.normal(0.0, 0.01, t.size)
+    lo, hi, fwhm = peakfind.feature_window(
+        [(t, flux, np.full(t.size, 1e4))], 50.0
+    )
+    assert fwhm == pytest.approx(2.355 * 0.5, rel=0.3)
+    assert lo < 50.0 - fwhm and hi > 50.0 + fwhm
+    assert (hi - lo) < 6 * fwhm + 1.0

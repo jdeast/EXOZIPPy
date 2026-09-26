@@ -57,6 +57,73 @@ def test_render_writes_pdf_named_by_file_tag(tmp_path):
     assert (tmp_path / "p_RV_unphased.pdf").stat().st_size > 0
 
 
+def test_legend_has_one_entry_per_label_with_legible_swatches(tmp_path):
+    """
+    Given a spaghetti figure of three draws whose model trace asks for a
+      legend entry (so the same label is drawn three times at alpha 0.1),
+    When rendered,
+    Then the legend carries each label once (matplotlib orders handles by
+      artist type, lines before errorbar containers, so the order is not
+      asserted), and the model's legend swatch is drawn at a legible alpha
+      while the plotted lines keep their spaghetti alpha.  This
+      de-duplication lived in a private copy of the renderer inside the
+      evolutionarymodel component (review 4.11.7).
+    """
+    import matplotlib.pyplot as plt
+
+    from exozippy import plotrender
+
+    x = np.linspace(0.0, 10.0, 20)
+    groups = [
+        [
+            _spec(
+                extra_traces=(
+                    Trace(
+                        name="track",
+                        role="model",
+                        kind="line",
+                        x=x,
+                        y=np.cos(x) + 0.01 * i,
+                        style={"legend": True},
+                    ),
+                )
+            )
+        ]
+        for i in range(3)
+    ]
+    captured = {}
+    original = plotrender._legend
+
+    def spy(ax):
+        legend = original(ax)
+        captured["labels"] = [t.get_text() for t in legend.get_texts()]
+        captured["proxy_alpha"] = [
+            h.get_alpha() for h in legend.legend_handles
+        ]
+        captured["line_alphas"] = sorted(
+            {
+                ln.get_alpha()
+                for ln in ax.get_lines()
+                if ln.get_label() == "track"
+            }
+        )
+        return legend
+
+    plotrender._legend = spy
+    try:
+        render_spec_groups(groups, filename_prefix=str(tmp_path / "p"))
+    finally:
+        plotrender._legend = original
+        plt.close("all")
+
+    assert sorted(captured["labels"]) == ["inst0", "track"]
+    assert captured["line_alphas"] == [pytest.approx(0.1)]
+    track_proxy_alpha = captured["proxy_alpha"][
+        captured["labels"].index("track")
+    ]
+    assert track_proxy_alpha == pytest.approx(plotrender._LEGEND_MIN_ALPHA)
+
+
 def test_render_falls_back_to_spec_id_for_filename(tmp_path):
     """Given a spec without file_tag, When rendered, Then the id (dots ->
     underscores) names the file."""

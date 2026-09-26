@@ -655,7 +655,7 @@ class Transit(Instrument):
         # 2. Orbital elements per planet. These don't depend on the
         # observation/sub-exposure grid, so they're computed once and
         # reused by every ninterp group below (see 4.).
-        tp = orbits.tp.value[planets.orbit_map][
+        tp = orbits.tp_target.value[planets.orbit_map][
             None, None, :
         ]  # (1, 1, N_planets)
         n = orbits.n.value[planets.orbit_map][None, None, :]

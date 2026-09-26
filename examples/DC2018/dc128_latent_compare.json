@@ -1,0 +1,322 @@
+{
+ "arms": {
+  "cap-only": {
+   "star.logmass[0]": {
+    "unit": "log10 Msun (lens)",
+    "mean": -0.2028891338139977,
+    "sd": 0.1690641509433599,
+    "ess": 489.3633520932436,
+    "mcse": 0.007642506320826196,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.distance[0]": {
+    "unit": "pc (lens, D_l)",
+    "mean": 3671.030621206582,
+    "sd": 1021.2427682688929,
+    "ess": 448.07678455932086,
+    "mcse": 48.24505130883483,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.distance[1]": {
+    "unit": "pc (source, D_s)",
+    "mean": 5533.2433521747225,
+    "sd": 1831.2900705439868,
+    "ess": 210.78432087272225,
+    "mcse": 126.13569055684475,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.pm_ra[0]": {
+    "unit": "mas/yr (lens)",
+    "mean": -9.702018032677572,
+    "sd": 3.619131384427055,
+    "ess": 9978.475939095983,
+    "mcse": 0.03623032603530604,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.pm_dec[0]": {
+    "unit": "mas/yr (lens)",
+    "mean": -2.2714465952111773,
+    "sd": 3.240678789753285,
+    "ess": 768.6204835486556,
+    "mcse": 0.11689071351196352,
+    "n_chain": 52,
+    "n_draw": 50000
+   }
+  },
+  "murel": {
+   "star.logmass[0]": {
+    "unit": "log10 Msun (lens)",
+    "mean": -0.5710103541645816,
+    "sd": 0.1379674743551752,
+    "ess": 7305.826642397858,
+    "mcse": 0.00161414309546658,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.distance[0]": {
+    "unit": "pc (lens, D_l)",
+    "mean": 2835.065182063968,
+    "sd": 723.9003955833198,
+    "ess": 883.0936230537608,
+    "mcse": 24.359896549149155,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.distance[1]": {
+    "unit": "pc (source, D_s)",
+    "mean": 5199.233048582171,
+    "sd": 1468.4293234094341,
+    "ess": 678.1217694326067,
+    "mcse": 56.38962483090131,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.pm_ra[0]": {
+    "unit": "mas/yr (lens)",
+    "mean": -1.4951153760797031,
+    "sd": 3.0576593620296073,
+    "ess": 8221.107802641276,
+    "mcse": 0.03372282351651202,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.pm_dec[0]": {
+    "unit": "mas/yr (lens)",
+    "mean": -8.300291841184313,
+    "sd": 7.991337184645472,
+    "ess": 8608.925922394124,
+    "mcse": 0.0861281205139108,
+    "n_chain": 52,
+    "n_draw": 50000
+   }
+  },
+  "u0te": {
+   "star.logmass[0]": {
+    "unit": "log10 Msun (lens)",
+    "mean": -0.4572133711408838,
+    "sd": 0.18885857785683607,
+    "ess": 57.39987298468988,
+    "mcse": 0.02492764489611336,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.distance[0]": {
+    "unit": "pc (lens, D_l)",
+    "mean": 3697.5071949685484,
+    "sd": 1112.0222433258916,
+    "ess": 57.34924137197121,
+    "mcse": 146.84177842646014,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.distance[1]": {
+    "unit": "pc (source, D_s)",
+    "mean": 7334.415437388217,
+    "sd": 2401.554061630181,
+    "ess": 57.08881073568685,
+    "mcse": 317.84608725759966,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.pm_ra[0]": {
+    "unit": "mas/yr (lens)",
+    "mean": -10.094131429748979,
+    "sd": 5.8657771185143615,
+    "ess": 61.35383103738696,
+    "mcse": 0.7488670361530557,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.pm_dec[0]": {
+    "unit": "mas/yr (lens)",
+    "mean": -0.2534658591177189,
+    "sd": 9.705216085165132,
+    "ess": 65.24791794831702,
+    "mcse": 1.2014947579811475,
+    "n_chain": 52,
+    "n_draw": 50000
+   }
+  },
+  "observable": {
+   "star.distance[0]": {
+    "unit": "pc (lens, D_l)",
+    "mean": 1924.2594363337757,
+    "sd": 790.1204072419266,
+    "ess": 1928.0378524467894,
+    "mcse": 17.994322546920078,
+    "n_chain": 54,
+    "n_draw": 50000
+   },
+   "star.distance[1]": {
+    "unit": "pc (source, D_s)",
+    "mean": 2080.646900597358,
+    "sd": 893.9964736429737,
+    "ess": 1954.9847819721751,
+    "mcse": 20.21920684534581,
+    "n_chain": 54,
+    "n_draw": 50000
+   },
+   "star.pm_ra[0]": {
+    "unit": "mas/yr (lens)",
+    "mean": -9.79532412701649,
+    "sd": 6.676706339609428,
+    "ess": 2796.0614042711995,
+    "mcse": 0.12626672690436488,
+    "n_chain": 54,
+    "n_draw": 50000
+   },
+   "star.pm_dec[0]": {
+    "unit": "mas/yr (lens)",
+    "mean": -4.226763246639786,
+    "sd": 7.564260783386924,
+    "ess": 3385.08379702644,
+    "mcse": 0.1300115036140756,
+    "n_chain": 54,
+    "n_draw": 50000
+   }
+  }
+ },
+ "contrast": {
+  "pirel (under-mixed)": {
+   "star.logmass[0]": {
+    "unit": "log10 Msun (lens)",
+    "mean": 0.013285238704110242,
+    "sd": 0.2013857204499362,
+    "ess": 300.50265573784117,
+    "mcse": 0.011617281575865694,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.distance[0]": {
+    "unit": "pc (lens, D_l)",
+    "mean": 2244.345479631005,
+    "sd": 884.7369230791825,
+    "ess": 8383.964482154614,
+    "mcse": 9.66249845170079,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.distance[1]": {
+    "unit": "pc (source, D_s)",
+    "mean": 2577.473844220132,
+    "sd": 1106.622891687934,
+    "ess": 8582.372326843022,
+    "mcse": 11.945270095766084,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.pm_ra[0]": {
+    "unit": "mas/yr (lens)",
+    "mean": -9.25750398665948,
+    "sd": 5.361694443230283,
+    "ess": 5073.239165103904,
+    "mcse": 0.07527649547511947,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.pm_dec[0]": {
+    "unit": "mas/yr (lens)",
+    "mean": -4.101202165970171,
+    "sd": 4.277163417702241,
+    "ess": 10082.288111675125,
+    "mcse": 0.042596733010873584,
+    "n_chain": 52,
+    "n_draw": 50000
+   }
+  },
+  "thetae (STUCK)": {
+   "star.distance[0]": {
+    "unit": "pc (lens, D_l)",
+    "mean": 1660.7510787306687,
+    "sd": 592.5047609186018,
+    "ess": 385.7782789717089,
+    "mcse": 30.166363415795068,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.distance[1]": {
+    "unit": "pc (source, D_s)",
+    "mean": 3958.6013547048847,
+    "sd": 3741.0114078747224,
+    "ess": 292.3054533046448,
+    "mcse": 218.81171682966527,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.pm_ra[0]": {
+    "unit": "mas/yr (lens)",
+    "mean": -8.059886740889484,
+    "sd": 6.508928904263572,
+    "ess": 339.8650749549505,
+    "mcse": 0.35306629385515303,
+    "n_chain": 52,
+    "n_draw": 50000
+   },
+   "star.pm_dec[0]": {
+    "unit": "mas/yr (lens)",
+    "mean": -15.839632415966163,
+    "sd": 11.044037707001648,
+    "ess": 226.04388978644707,
+    "mcse": 0.7345671364976376,
+    "n_chain": 52,
+    "n_draw": 50000
+   }
+  }
+ },
+ "consistency": {
+  "star.logmass[0]": {
+   "unit": "log10 Msun (lens)",
+   "n_arms": 3,
+   "ess_weighted_mean": -0.5548983479773818,
+   "spread": 0.36812122035058387,
+   "chi2": 2236.4601027037115,
+   "dof": 2,
+   "spread_in_posterior_sd": 2.1774055487015245,
+   "reading": "INCONSISTENT (spread = 2.18 posterior sd)"
+  },
+  "star.distance[0]": {
+   "unit": "pc (lens, D_l)",
+   "n_arms": 4,
+   "ess_weighted_mean": 2375.2652017841915,
+   "spread": 1773.2477586347727,
+   "chi2": 1786.9031374517049,
+   "dof": 3,
+   "spread_in_posterior_sd": 1.9579152128172221,
+   "reading": "INCONSISTENT (spread = 1.96 posterior sd)"
+  },
+  "star.distance[1]": {
+   "unit": "pc (source, D_s)",
+   "n_arms": 4,
+   "ess_weighted_mean": 2521.7406749560832,
+   "spread": 5253.768536790858,
+   "chi2": 3529.746689225349,
+   "dof": 3,
+   "spread_in_posterior_sd": 3.1843729175384667,
+   "reading": "INCONSISTENT (spread = 3.18 posterior sd)"
+  },
+  "star.pm_ra[0]": {
+   "unit": "mas/yr (lens)",
+   "n_arms": 4,
+   "ess_weighted_mean": -5.474902483837576,
+   "spread": 8.599016053669276,
+   "chi2": 28748.96604194514,
+   "dof": 3,
+   "spread_in_posterior_sd": 1.813199579311195,
+   "reading": "INCONSISTENT (spread = 1.81 posterior sd)"
+  },
+  "star.pm_dec[0]": {
+   "unit": "mas/yr (lens)",
+   "n_arms": 4,
+   "ess_weighted_mean": -5.732389011408012,
+   "spread": 8.046825982066593,
+   "chi2": 1920.4916486664674,
+   "dof": 3,
+   "spread_in_posterior_sd": 1.034589091155899,
+   "reading": "INCONSISTENT (spread = 1.03 posterior sd)"
+  }
+ }
+}

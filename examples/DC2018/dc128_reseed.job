@@ -1,0 +1,66 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 32
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc128reseed
+#$ -o dc128_reseed.$JOB_ID.log
+#
+# Re-run MMEXOFAST's seeding for event 128 on the CURRENT checkout, which
+# includes PR #7 (renormalization peak protection).  Everything analysed so
+# far used 0.1.dev616+g1f2fba37c, which predates it -- and our seed 0 has
+# rho = 1.2e-06, the exact symptom that fix addresses.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_reseed"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+python -u - <<'EOF'
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, ".")
+import dc18_common as dc
+from astropy.coordinates import SkyCoord
+from exozippy.components.mulensing import mmexofast_support
+import mmexofast
+from mmexofast.version import __version__ as v
+print("mmexofast", v, "from", os.path.dirname(mmexofast.__file__), flush=True)
+
+data_dir = dc.data_dir_or_raise(None)
+files = dc.light_curve_files(data_dir, 128, ("W149", "Z087"))
+ra, dec = dc.event_coords(data_dir, 128)
+coords = SkyCoord(ra, dec, unit="deg").to_string(style="hmsdms")
+out = Path("dc128_reseed_mmexofast.json")
+if out.exists():
+    out.unlink()
+mmexofast_support.run_or_load(
+    out, list(files.values()), coords=coords, fit_type="binary_lens",
+    renormalize_errors=True, no_parallax=True,
+    options={"limb_darkening_coeffs_gamma": {"W149": 0.0, "Z087": 0.0},
+             "pool": int(os.environ.get("NSLOTS", 8)),
+             "stop_before": "fit_binary_lens:fit_binary_lens_models"},
+)
+new = json.load(open(out))
+old = json.load(open("events/128/DC2018_128_mmexofast.json"))
+print("\n%-14s %9s %11s %11s %9s %9s %9s" %
+      ("seed", "s", "q", "rho", "alpha", "u_0", "t_E"))
+for tag, d in (("OLD (dev616)", old), ("NEW (dev619)", new)):
+    for i, f in enumerate(d["fits"]):
+        p = f["parameters"]
+        print("%-14s %9.5f %11.6g %11.6g %9.3f %9.5f %9.4f" %
+              (f"{tag} #{i}", p["s"], p["q"], p["rho"], p["alpha"],
+               p["u_0"], p["t_E"]))
+print("%-14s %9.5f %11.6g %11.6g %9.3f %9.5f %9.4f" %
+      ("TRUTH", 0.993145, 0.0012118, 0.00606537, 308.0, 0.141832, 18.2374))
+for tag, d in (("OLD", old), ("NEW", new)):
+    print(f"\n{tag} errfacs:", {k.split('.')[1]: round(v, 4)
+                                for k, v in d["errfacs"].items()})
+    print(f"{tag} excluded:", {k.split('.')[1]: len(v["indices"])
+                               for k, v in d["excluded_points"].items()})
+EOF

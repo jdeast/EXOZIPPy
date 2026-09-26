@@ -1,0 +1,37 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 40
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N posthocpr9
+#$ -o dc18_posthoc_pr9.$JOB_ID.log
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+
+# MMEXOFAST PR9 (Classifier v2) served from a WORKTREE, never by checking the
+# shared repo out onto that branch: the editable install points at
+# ~/python/MMEXOFAST, so switching branches there would swap code underneath
+# every other running job (the DC2018-128 ladder run, the three nested-config
+# fits, the AF-grid diagnostic).  PYTHONPATH precedes site-packages, so this
+# shadows the installed package for THIS process tree only.
+export PYTHONPATH="$HOME/python/mmx_pr9/source"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+python -c "import mmexofast, sys; print('mmexofast from:', mmexofast.__file__)"
+python -c "
+import mmexofast.classifier as c, inspect
+src = inspect.getsource(c)
+print('classifier labels present:', sorted({t for t in
+      ('close','wide','high_mag','bump','dip','caustic_crossing')
+      if repr(t) in src or '\"%s\"' % t in src}))"
+
+python -u dc18_architecture_posthoc.py \
+    --ncpu 40 \
+    --posthoc-dir posthoc_pr9 \
+    --out dc18_architecture_posthoc_pr9.json

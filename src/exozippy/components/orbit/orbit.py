@@ -106,7 +106,7 @@ class Orbit(Component):
             "sesinw": None,
             "ecc": "default",
             "omega": "default",
-            "tp": "default",
+            "tp_target": "default",
             "esinw": "default",
             "ecosw": "default",
             "vcve": {"output_expr_key": "from_ecc"},
@@ -120,7 +120,7 @@ class Orbit(Component):
             # tp must come from (e, omega) here: this orbit does not sample the
             # sqrt(e) pair, it REPORTS it, and a reported element is consumed by
             # nothing -- reading it would read its pre-patch placeholder.
-            "tp": "from_ecc",
+            "tp_target": "from_ecc",
             # ...and for the same reason: these reach e sin/cos(omega) through
             # the sqrt(e) pair, which this orbit reports rather than samples.
             "esinw": "from_ecc",
@@ -869,12 +869,22 @@ class Orbit(Component):
                 "cosw": "default",
             }
         )
-        for key in ("esinw", "ecosw", "tp"):
+        for key in ("esinw", "ecosw", "tp_target"):
             self.manifest[key] = ecc_entries[key]
         # The occultation time (review 8.8.7).  Here rather than on `planet`
         # because every input is an orbit parameter and `tc` is one of them;
-        # after `tp` because it is the other Kepler-timing output.
-        self.manifest["ts"] = {"expr_key": "default", "force_node": True}
+        # after `tp_target` because it is the other Kepler-timing output.
+        self.manifest["ts_target"] = {
+            "expr_key": "default",
+            "force_node": True,
+        }
+        # The frame twins (see defaults.yaml): `tc_target` (target-frame
+        # conjunction, the epoch every Kepler solve descends from) and the
+        # OBSERVED `ts`/`tp`.  Declared here with the `no_bodies` identity
+        # expression; the masses branch below upgrades them to the real
+        # light-travel shift once it knows the orbit has an `a`.
+        for key in self._LTT_REPORT_PARAMS:
+            self.manifest[key] = {"expr_key": "no_bodies", "force_node": True}
         for key in ("vcve", "xomega", "yomega"):
             if key in ecc_entries:
                 self.manifest[key] = ecc_entries[key]
@@ -906,20 +916,80 @@ class Orbit(Component):
                 }
             )
 
-        # Rossiter-McLaughlin: declare the spin-orbit params only when some
-        # rvinstrument enables `rm:`. Samples the decorrelated
-        # sqrt(vsini)cos/sin(lambda) pair and derives vsini/lam from them
-        # (mirrors the secosw/sesinw -> ecc/omega idiom above).
-        from ..rm import rm_enabled
-
-        if rm_enabled(system):
-            self.manifest.update(
-                {
-                    "svcoslam": None,
-                    "svsinlam": None,
-                    "vsini": {"expr_key": "from_sv"},
-                    "lam": {"expr_key": "from_sv"},
+            # The frame twins get their real expression: the closed-form
+            # light-travel shift -z(t_event)*factor/c (physics.calc_tc_target
+            # and friends) needs a/m_primary/m_companion/m_total, so only an
+            # orbit with masses can compute it; `_ltt_reporting_mask` then
+            # decides PER ORBIT whether any consumer actually retards this
+            # orbit's geometry -- where none does the shift is zero and the
+            # twin equals its partner exactly.  JDE 2026-09-21/22: report
+            # both frames, BJD_TDB is the headline, the plain names (tc, ts,
+            # tp) are BJD_TDB and the target frame is `*_target`.
+            self._ltt_report_mask = self._ltt_reporting_mask(system)
+            for key in self._LTT_REPORT_PARAMS:
+                self.manifest[key] = {
+                    "expr_key": "default",
+                    "force_node": True,
                 }
+
+        # Rossiter-McLaughlin / Doppler tomography: declare the spin-orbit
+        # params only on the orbit ELEMENTS some rvinstrument `rm:` key or
+        # dopptom dataset actually targets -- a system-wide switch would
+        # hand every other orbit a likelihood-free sampled pair.  Samples
+        # the decorrelated sqrt(vsini)cos/sin(lambda) pair and derives
+        # vsini/lam from them (mirrors the secosw/sesinw -> ecc/omega
+        # idiom above).  With every orbit targeted (the common single-
+        # orbit case) mode_manifest returns exactly the plain entries this
+        # block used to hand-write, so those graphs are unchanged.
+        from ..dopptom.dopptom import dt_orbits_in_system
+        from ..rm import rm_orbits_in_system
+
+        spin_targets = rm_orbits_in_system(system) | dt_orbits_in_system(
+            system
+        )
+        unknown_targets = spin_targets - set(self.names)
+        if unknown_targets:
+            raise ValueError(
+                f"[{self.prefix}] rm:/dopptom orbit reference(s) "
+                f"{sorted(unknown_targets)} name no orbit block; defined "
+                f"orbits: {list(self.names)}."
+            )
+        if spin_targets:
+            self.manifest.update(
+                mode_manifest(
+                    [
+                        "spinorbit" if nm in spin_targets else "plain"
+                        for nm in self.names
+                    ],
+                    {
+                        "spinorbit": {
+                            "svcoslam": None,
+                            "svsinlam": None,
+                            "vsini": "from_sv",
+                            "lam": "from_sv",
+                        },
+                        "plain": {},
+                    },
+                    # force_node ONLY on the partial-active path: there
+                    # the selector machinery does not track a derived
+                    # parameter as a Deterministic by default, so
+                    # vsini/lam dropped out of the point dict and every
+                    # RM plot silently fell back to lam = 0 (caught by
+                    # test_model_builder_parity's rm_split tests).  On
+                    # the every-orbit-targeted path the default tracking
+                    # already builds the nodes, and forcing them there
+                    # would ADD trace data_vars master never wrote --
+                    # gated so those graphs and traces stay identical.
+                    options=(
+                        {
+                            "vsini": {"force_node": True},
+                            "lam": {"force_node": True},
+                        }
+                        if len(spin_targets) < len(self.names)
+                        else None
+                    ),
+                    where="orbit spin-orbit (rm/dopptom targets)",
+                )
             )
 
         # Astrometry constrains the longitude of the ascending node and
@@ -1418,6 +1488,67 @@ class Orbit(Component):
                     )
         return True
 
+    def _ltt_reporting_mask(self, system):
+        """Per-orbit 0.0/1.0 float array: does some consumer's model
+        actually retard THIS orbit's geometry, so `tc`/`tp` need the
+        light-travel shift (`tc_target`, and the observed `ts`/`tp`) to relate the observed
+        (BJD_TDB) frame rather than the target frame `ltt.py` evaluates
+        the Kepler solve in?
+
+        Read from raw config, like `rm.rm_orbits_in_system` -- stage 3
+        makes no promise that a sibling component has run its OWN stage 3
+        yet, only that every component's `build_maps` (stage 2) has, which
+        is what `planet.orbit_map` needs.
+
+        A transit file has no per-planet selection: build_likelihood
+        models every planet (hence every orbit with one) in every active
+        file's likelihood (see transit.py), so "this orbit is retarded by
+        transit" reduces to "this orbit has >=1 planet" AND "some transit
+        file has light_travel_time on" -- the per-file default there is
+        True, matching `Transit._light_travel_time_active`.  RM is
+        per-orbit already, through its own `rm:` key.
+
+        Mixing `light_travel_time` across files for the SAME orbit is a
+        pre-existing ambiguity in the model itself (that orbit's own tc/tp
+        posterior is then pulled toward the target frame by only some of
+        its data) -- not one this mask can resolve, so it warns once and
+        treats the orbit as active (closer to correct than leaving it at
+        the target-frame value outright).
+        """
+        mask = np.zeros(self.n_elements, dtype=float)
+        cfg = getattr(system, "config", None) or {}
+
+        transit_cfg = cfg.get("transit", []) or []
+        transit_flags = [
+            bool(c.get("light_travel_time", True)) for c in transit_cfg
+        ]
+        if any(transit_flags):
+            orbit_map = getattr(
+                getattr(system, "planet", None), "orbit_map", None
+            )
+            if orbit_map is not None:
+                for o_idx in np.asarray(orbit_map, dtype=int):
+                    if 0 <= o_idx < self.n_elements:
+                        mask[o_idx] = 1.0
+            if len(set(transit_flags)) > 1:
+                logger.warning(
+                    "orbit: transit files disagree on light_travel_time; "
+                    "tc_target and the observed ts/tp treat every orbit touched by an active "
+                    "file as fully retarded, an approximation where they "
+                    "mix on the same orbit's data."
+                )
+
+        rv_cfg = cfg.get("rvinstrument", []) or []
+        name_to_idx = {n: i for i, n in enumerate(self.names)}
+        for entry in rv_cfg:
+            o_name = entry.get("rm")
+            if o_name and bool(entry.get("light_travel_time", True)):
+                o_idx = name_to_idx.get(o_name)
+                if o_idx is not None:
+                    mask[o_idx] = 1.0
+
+        return mask
+
     _GROUP_MASS_SIDE = {"m_primary": "primary", "m_companion": "companion"}
 
     # The chord expressions' deps that are NOT orbit parameters: the
@@ -1426,8 +1557,11 @@ class Orbit(Component):
     # graph.py from looking for an `orbit.p` (the group masses avoid this by
     # naming `planet.mass`, a real parameter of a real component; there is no
     # such parameter for `chord_sign` at all, and `p`/`ar` are per PLANET, so
-    # the orbit could not consume them elementwise anyway).
-    context_dep_names = frozenset({"p", "ar", "chord_sign"})
+    # the orbit could not consume them elementwise anyway).  `_ltt_mask` is
+    # the same idiom for a different reason: it is a CONFIG fact (which
+    # orbits some consumer retards, see _ltt_reporting_mask), not a
+    # parameter of any component (see _ltt_mask_context).
+    context_dep_names = frozenset({"p", "ar", "chord_sign", "_ltt_mask"})
 
     # ...and all three are built per ORBIT, so Component._element_expression
     # may slice them to a per-element mask.
@@ -1549,12 +1683,53 @@ class Orbit(Component):
             context_nodes = dict(context_nodes or {})
             for dep, node in self._chord_context(model, system).items():
                 context_nodes.setdefault(dep, node)
+        if param_name in self._LTT_REPORT_PARAMS:
+            context_nodes = dict(context_nodes or {})
+            context_nodes.setdefault("_ltt_mask", self._ltt_mask_context())
         return super().add_parameter(model, param_name, system, context_nodes)
+
+    # tc_target, and the observed ts/tp (defaults.yaml), all consume the one
+    # `_ltt_mask` context node -- see _ltt_mask_context and
+    # physics.calc_tc_target.  ts_target/tp_target need no mask: they are
+    # plain Kepler timing from tc_target.
+    _LTT_REPORT_PARAMS = ("tc_target", "ts", "tp")
+
+    def _ltt_mask_context(self):
+        """The `_ltt_mask` context node the frame twins consume: the per-orbit
+        0.0/1.0 array from `_ltt_reporting_mask` (stage 3) as a constant
+        tensor.  All the physics is in physics.calc_tc_target and friends -- the
+        closed-form ``-z(t_event)*factor/c`` in the elements -- so unlike the
+        chord context nothing here needs a lazy same-component build."""
+        mask = getattr(self, "_ltt_report_mask", np.zeros(self.n_elements))
+        return pt.as_tensor_variable(np.asarray(mask, dtype="float64"))
 
     def build_likelihood(self, model, system):
         self._add_eccentricity_bound(system)
         self._add_vcve_terms(system)
         self._add_chord_terms(system)
+        self._add_ltt_frame_prose(system)
+
+    def _add_ltt_frame_prose(self, system):
+        """One sentence, only when some orbit is actually retarded: the
+        timing rows come in two frames, and which is which."""
+        mask = getattr(self, "_ltt_report_mask", None)
+        if mask is None or not np.any(mask):
+            return
+        collector = get_collector(system)
+        if collector is None:
+            return
+        names = [self.names[i] for i in np.flatnonzero(mask)]
+        collector.add(
+            "The light curves and Rossiter-McLaughlin data of "
+            f"{join_names(names)} were modeled at the retarded time, so "
+            "the reported $T_C$, $T_S$ and $T_P$ are the observed "
+            r"($\rm BJD_{TDB}$) times \citep{Eastman:2010}, and the "
+            "target-frame conjunction, eclipse and periastron times the "
+            "Keplerian model is evaluated at are given alongside "
+            "(subscript ``target'').",
+            section="orbits",
+            key="orbit.ltt_frame",
+        )
 
     def _chord_indices(self):
         """Indices of the orbits sampling the chord (empty for every cos i
@@ -1907,12 +2082,12 @@ class Orbit(Component):
         """
         if orbit_idx is None:
             t_grid = t[:, None]
-            tp = self.tp.value[None, :]
+            tp = self.tp_target.value[None, :]
             n = self.n.value[None, :]
             ecc = self.ecc.value[None, :]
         else:
             t_grid = t
-            tp = self.tp.value[orbit_idx]
+            tp = self.tp_target.value[orbit_idx]
             n = self.n.value[orbit_idx]
             ecc = self.ecc.value[orbit_idx]
 
@@ -1968,7 +2143,7 @@ class Orbit(Component):
         both as this method's business, never re-derive them.
         """
         t_grid = t[:, None]
-        tp = self.tp.value[orbit_map][None, :]
+        tp = self.tp_target.value[orbit_map][None, :]
         n = self.n.value[orbit_map][None, :]
         ecc = self.ecc.value[orbit_map][None, :]
         cosw = self.cosw.value[orbit_map][None, :]
@@ -2040,7 +2215,7 @@ class Orbit(Component):
         # Broadcast time and orbital parameters into (N_obs, N_planets)
         # grids; the kernel does the Kepler solve (review 6.8.2 forwarding).
         t_grid = t[:, None]
-        tp = self.tp.value[orbit_map][None, :]
+        tp = self.tp_target.value[orbit_map][None, :]
         n = self.n.value[orbit_map][None, :]
         ecc = self.ecc.value[orbit_map][None, :]
         cosw = self.cosw.value[orbit_map][None, :]

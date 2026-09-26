@@ -23,6 +23,7 @@ Everything it implies:
 - **`Parameter.element_factor(index)` is the one owner** of the "element `index`, or element 0 when the factor vector is shorter" rule, and `to_internal`/`from_internal` are its two directional wrappers. That rule existed in six hand-written copies (two error-message helpers, `_prior_scalar`, `_own_prior_str`'s private `_scalar`, `run._element_conversion_factor`, `evaluator.set_element`), and the copies were not all equivalent.
 - **`index=` is not decoration.** `unit:` is resolved **per element** (config.py's `elem_units`), so a `unit:` override on one named instance of a vector -- `star.A.mass: {unit: jupiterMass}` with `star.B.mass` left at its default -- makes `Parameter.unit` a genuine per-element list. The un-indexed call then returns an *n*-element array for a scalar input, which is what made run.py's startup table die with "can only convert an array of size 1" **before the fit had printed its own banner**. A vector/vector length mismatch now raises inside `_directional_factor` instead of broadcasting elements into each other.
 - **`internal_to_user_scale` is the one channel for a coordinate change the unit system cannot express**, and it lives on the same factor so nothing has to hand-write it. It is an extra per-element multiplier in the **internal -> user** direction, multiplied into `_get_conversion_factors`, so `__post_init__` divides the user's `lower`/`upper`/`mu`/`sigma`/`initval` by it on the way in and `from_internal` multiplies the reported value by it on the way out -- one declaration, both directions, and `element_factor`'s per-element rule for free. It is a component's to set (a manifest option), never a user's. Its one use today is `detrend_coeffs`, whose design-matrix columns are whitened at ingestion (`src/exozippy/components/instrument.md`): the sampler gets the well-conditioned coordinate, the table reads out per raw column unit. Reach for it only where the sampled and reported coordinates genuinely differ by a fixed linear map that astropy cannot name -- a physical unit belongs in `unit:`.
+- **A unit astropy does not ship is defined ONCE, in `src/exozippy/units.py`, and registered globally there** (`u.def_unit` + `u.add_enabled_units`), which the package `__init__` imports before any submodule can parse a string. That makes the name legal in every place a unit string is parsed -- `config.parse_unit`, `Parameter.__post_init__`, the `UnitTranslator`, and a user's own `unit:` override -- with no other module changing. The first one is `century` (100 Julian years), so `planet.omegagr` is declared in the `deg/century` EXOFASTv2 and the precession literature use rather than per year with a "divide by 100" caveat, or as a bare `unit: ""` that loses the conversion. `UnitTranslator.SOLAR_DENSITY_UNIT` predates this and is NOT registered: it exists only as a `PRETTY_MAP` key and cannot be written in a yaml. Give a new custom unit a `PRETTY_MAP` entry too if astropy's `latex_inline` spelling of it is not the one a table should show.
 - `to_unit`, `_get_conversion_factors_old`, `Parameter.get_value`, `Component.get_parameters`, `Component._is_sampling_param` and `System.__init__`'s `entity_directory` were all dead and are gone. `to_unit` was also broken twice over (`.value` on the float `Unit.to()` returns, and `self.value` is a symbolic node at every point it could have been called).
 
 Tests: `tests/test_unit_conversion.py` (round trip, per-element factors, the reciprocal-direction contract, the ledger regression), plus `test_inspect_start.py::test_per_element_units_are_reported_per_element`.
@@ -67,6 +68,8 @@ The **`q_floor` nudge is unchanged** by this: its threshold is a property of the
 Two warnings fire when a bounded element sits against one of its hard bounds: the post-polish one in `recenter_on_start` (the polished start inside `q_floor` of a wall, above) and `diagnostics.warn_posterior_near_bounds` at wrap-up, called from `outputs/report_pipeline.py` right after `System.distribute_posterior` because that is the first point at which every Parameter carries its posterior. The wrap-up check reads each sampled logit element's posterior MEDIAN, converts it to internal units through `to_internal(index=i)`, and measures its position between the frozen transform's `lowers[i]` and `uppers[i]` -- in LOG space when both bounds are positive (a scale), linearly otherwise -- against `NEAR_BOUND_MARGIN` (2%). Log space is the point: `err_scale = 1` on `[0.01, 100]` is the middle of a four-decade interval, and a linear rule would call it 1% from the floor.
 
 The generic half of both messages can only say "the bound, not the value, is the thing to revisit", and for a nuisance scale that is the WRONG advice. So a component may declare **`near_bound_remedy`** in its `defaults.yaml` -- a sentence about what a value against THIS parameter's bound means and what to do -- and both warnings append it through `Parameter.remedy_suffix()`, one spelling for two call sites. It is a defaults-only field: `ConfigManager.resolve` copies it from `base` alongside `latex`/`description`, and it is deliberately not in `STRING_KEYS`, so a user cannot set it and `check_unused_yaml` will flag one who tries. The worked example is `mulensinstrument.err_scale`, whose bounds moved from `1e-6..1e6` to `0.01..100` in the same change: on DC2018-226 a point-lens fit to a wide binary inflated both bands' errors 300-460x inside the old bound and walked `u_0` to zero under the flattened likelihood (review 2.4.14). Its remedy says to rescale the supplied errors or seed a better starting model, never to widen the bound. Tests: `tests/test_near_bound_remedy.py`.
+
+**The median is only half of what a wall does to an answer, and the two kinds of wall mean opposite things (2.9.16).** The check therefore has a second trigger and a second sentence. *Second trigger*: an element is also reported when more than `EDGE_MASS_FRAC` (10%) of its DRAWS lie within the margin of either bound, even when the median is nowhere near it. DC2018 event 152 published a source temperature of 3163 K whose whole lower tail sat on the 2600 K edge of the bolometric-correction grid, and nothing warned, because the median was 1500 K clear -- the reported interval was a distribution the grid had cut in half. The threshold is deliberately looser than the cap rule's `CAP_PILE_FRAC` (50% in the top 5%): that rule asks "would this parameter leave if it could", which wants a majority, while this one asks "is the answer shaped by the edge", which a tenth of the mass already does. *Second sentence*: a bound that is an interpolation grid's extent is not a statement about what is possible but about what the model can evaluate, so "the bound, not the fit, is the thing to revisit" is exactly wrong there -- past the edge the interpolator has no data and the values are its edge cell carried outward. A component that bounds another component's parameter by a grid's reach declares it with a **`grid_bound_paths()`** method returning `{path: {lower, upper, source}}`; `diagnostics.grid_bounded_paths` duck-types for that hook, so nothing in diagnostics knows which component has a grid or what it interpolates. `SED._inject_grid_bounds` publishes the four it injects (`star.teffsed`, `star.loggsed`, `star.feh`, `star.av`) -- it cannot ride the override channel, which applies numeric fields only, and `near_bound_remedy` is defaults-only by design. **And the hits now leave the log**: `report_pipeline` keeps the returned list on `system._near_bound_hits` and `run.py`'s summary header prints one `# BOUND:` line each, because on DC2018 062 the warning fired correctly on a source temperature pinned to the grid floor and sat 2.1 MB into a run log that no artifact referenced.
 
 ### A per-element bound nobody stated is NO bound, not a NaN one
 
@@ -146,6 +149,74 @@ on the SAMPLED element of the same mixed vector all still work).
 Invalidating at the write was chosen over the other candidate, a `summary` cached property keyed on the posterior it came from. `summary is None` is the "not computed yet" sentinel three call sites branch on, and a property that computes on access is never None -- each site would change meaning, and each would have to answer for a Parameter with no posterior at all, which is the normal state of a fixed element and of every parameter before the fit. Keying on object identity also catches only an assignment (exactly what the setter catches) while missing an in-place mutation of the same array.
 
 Tests: `tests/test_second_report_staleness.py`.
+
+### Periodic parameters are recentered about their mode before they are summarized
+
+A parameter defined modulo a period -- an angle (`omega`, `bigomega`, `lam`,
+the lens `alpha`), or the epoch of a recurring event (`tp`, `ts` and their
+target-frame twins) -- comes out of its expression on ONE fixed branch cut:
+`arctan2` puts an angle in (-180, 180], and the Tc -> Tp inversion puts a
+periastron wherever it lands within the period. A posterior that straddles
+that cut was summarized in two pieces, the median in the empty middle and the
+interval spanning the whole range -- and nothing flagged it, because a median
+near zero with a +/- 180 interval is a plausible number for a poorly
+constrained omega. The model is exactly invariant to the cut (every consumer
+sees the angle through sin/cos and the epoch through `n (t - tp)` mod 2 pi), so
+it is purely a reporting artifact. JDE, 2026-09-25: *"when deterministic
+periodic parameters (tp, omega, ts, etc) are derived, we need to make sure
+artificial boundaries don't split them and skew the reported 68% CI. In
+exofastv2, we center any periodic parameter at its mode before reporting."*
+
+**The rule is EXOFASTv2's** (`exofast_recenter.pro` for the epochs, called
+from `derivepars.pro`; `summarizepar.pro` for the angles): take the histogram
+mode (100 bins), then shift every draw by WHOLE periods into
+`[mode - P/2, mode + P/2]` (`recenter_periodic_1d`). Two properties follow
+from "whole periods" and are pinned by `tests/test_periodic_recentering.py`:
+a draw that needs no shift is returned bit-identical, so no posterior that
+never came near the cut moves at all; and the recentered draws are the same
+distribution translated piecewise, so every within-piece difference is
+preserved. Two passes rather than EXOFASTv2's one: a runaway chain can spread
+draws over hundreds of periods, where the first histogram's bins are wider
+than the period and the mode is only located to within a bin; after the first
+wrap the span is one period, the second histogram is `P/100` fine and the
+second wrap is exact.
+
+**It is declared in defaults.yaml, never by a user**, on the Parameter's
+`periodic:` key, in one of two shapes. `periodic: {value: 360.0, unit: "deg"}`
+is a constant period *with the unit it is written in* -- the parameter's own
+`unit:` is user-overridable, so the constant cannot assume it; it is converted
+through its unit to the internal unit and then through `from_internal` per
+element, so a user who relabels `omega` in radians gets 2 pi.
+`periodic: {param: "period"}` names a SIBLING parameter of the same component
+whose per-element posterior median (its start value when it has no draws) is
+the period, converted through BOTH parameters' factors and never a hand-written
+one (the two conversion factors are reciprocals; `CLAUDE.md`). The median and
+not the per-draw period, as in EXOFASTv2: the shift is then one constant per
+element, and the distribution's shape is untouched. A malformed declaration
+raises in `__post_init__`, at build and not at wrap-up.
+
+**Where it acts.** `System.distribute_posterior` makes a SECOND pass over the
+parameter lookup once every Parameter has its draws -- a sibling period has to
+exist first, and `dir()` order does not put `period` before `tp` -- and calls
+`recenter_posterior` on each periodic one. That replaces the stored `posterior`
+(same type: an xarray DataArray stays one) so every consumer -- the corner
+plots, `warn_posterior_near_bounds`, a component's own plot -- sees one
+contiguous distribution, and records the resolved period on
+`_recenter_period`. `_summarize_array(arr, period=...)` then recenters AGAIN on
+whatever it is handed, because it also summarizes subsets: one MODE's draws can
+straddle the cut on their own while the whole posterior, recentered about a
+bigger mode, does not (`compute_mode_summaries` passes the period; the test
+`test_each_mode_is_recentered_on_its_own` is that case). The `posterior`
+setter drops `_recenter_period` with the other draw-derived caches, so a
+second report cannot recenter new draws by a stale sibling median. A missing
+sibling or an element-count mismatch warns and leaves the draws alone:
+reporting the old way is wrong only when the draws straddle the cut, whereas a
+guessed period would move every reported epoch.
+
+What is NOT periodic, deliberately: `inc` (a geometric angle on [0, 180], not
+a cyclic one), `ra`/`dec` (sampled inside their own ranges), and any rate
+(`dalpha_dt`). A component adding a new angle or epoch declares it; the
+generic layer knows nothing about which parameters those are.
 
 ## Reporting component-added priors (`parameter.py`, `PriorContribution`)
 

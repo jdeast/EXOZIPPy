@@ -1,0 +1,61 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 32-64
+#$ -q lThM.q
+# Exactly dc18_sweep.job's request.  The first attempt invented
+# `mres=384G,h_data=6G,h_vmem=6G,himem` and both tasks died at 147 s with
+# "execd enforced h_vmem limit", maxvmem 1.117T: h_vmem caps ADDRESS SPACE,
+# and a PyTensor build across 64 workers -- here two models, since the tool
+# also loads the production fit -- reserves far more of that than it ever
+# touches.  The production sweep sets no explicit cap for the same reason.
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N truthsrc
+#$ -t 1-2
+#$ -o dc18_truthsrc.$JOB_ID.$TASK_ID.log
+#
+# IS THE ANSWER KEY'S SOURCE COMPETITIVE UNDER OUR MODEL?
+#
+# On 194 the fit recovers the source FLUX to 1% (q_source vs the key's fs0,
+# fs1) and still returns half the radius, a third of the distance and a
+# source 1000 K cooler than the key's own dereddened colour implies.  At
+# fixed apparent flux those three are one degeneracy -- R*T^2/D is what the
+# flux pins -- so the question is which point on that line the model
+# prefers, and why.
+#
+# dc18_detectability injects the truth as initvals and REFITS the nuisances,
+# then reports whether each injected value STAYED.  Task 1 runs it against
+# the AB-zeropoint fit, task 2 against the Vega-zeropoint one, so the answer
+# is conditioned on the thing #313 is about.
+#
+#   stays + competitive lp  -> the truth source is fine and the sampler
+#                              never went there (a search/start problem)
+#   walks back              -> our model genuinely prefers the small, close,
+#                              cool source, and the preference is a prior or
+#                              a likelihood term we can now name
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+case "$SGE_TASK_ID" in
+  1) arm=sweep/194;        tag=truthsrc_ab   ;;
+  2) arm=ab194/zpvega;     tag=truthsrc_vega ;;
+esac
+echo "arm $arm -> $tag   $(date)"
+mkdir -p ab194/$tag
+python dc18_detectability.py --event 194 \
+    --config $arm/DC2018_194.yaml \
+    --trace  $arm/DC2018_194_trace.nc \
+    --prefix ab194/$tag/DC2018_194 \
+    --inject star.Source.distance=9980 \
+    --inject star.Source.radiussed=0.822 \
+    --inject star.Source.teffsed=4019 \
+    --draws 800 --tune 400 \
+    --out ab194/$tag/detect_194.json
+echo "exit $?   $(date)"

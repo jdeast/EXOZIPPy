@@ -1,0 +1,34 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc18retest
+#$ -o dc18_retest3.$JOB_ID.log
+#
+# Re-run the 3 EXOZIPPy failures from job 15326453 in isolation, with full
+# output (that job piped through `tail -40`, so the tracebacks were lost).
+#
+# None of the three touches mmexofast, so the dev616 -> dev619 update is an
+# unlikely cause; the more likely one is the run's own environment.  That
+# job pointed base_compiledir at a FRESH node-local dir, so every pytensor
+# module compiled from scratch, while six 64-core jobs were loading the
+# cluster -- exactly the conditions CLAUDE.md describes for a spurious
+# Timeout inside cmodule.py landing on an innocent test.  This run reuses a
+# persistent cache so that variable is removed.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+export PYTENSOR_FLAGS="base_compiledir=$HOME/.pytensor_retest"
+
+cd $HOME/python/EXOZIPPy
+python -m pytest -n0 -v --tb=long \
+    tests/test_astrometry.py::test_finite_logp_and_gradient \
+    tests/test_sed_flux_constraints.py::test_astrometry_fluxfrac_derived_from_sed \
+    tests/test_runner.py::test_run_without_flag_writes_no_status \
+    2>&1 | tail -80

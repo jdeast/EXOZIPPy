@@ -1,0 +1,17 @@
+{
+ "gate": "REFUSED",
+ "physics_holes": [
+  "star.Lens.av",
+  "star.Lens.radiussed",
+  "star.Lens.teffsed",
+  "star.Source.av",
+  "star.Source.feh",
+  "star.Source.logmass",
+  "star.Source.pm_dec",
+  "star.Source.pm_ra",
+  "star.Source.radiussed",
+  "star.Source.rv",
+  "star.Source.teff",
+  "star.Source.teffsed"
+ ]
+}

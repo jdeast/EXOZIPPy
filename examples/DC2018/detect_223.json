@@ -1,0 +1,49 @@
+{
+ "event": 223,
+ "class": "omcassan",
+ "raw_injected_logp": 99875.75844328714,
+ "truth_best_lp": 105140.05226996726,
+ "fit_best_lp": 105164.84853678141,
+ "delta_logp_truth_minus_best": -21.854454071073114,
+ "delta_chi2": -43.70890814214623,
+ "basin_test": {
+  "t_0": {
+   "truth": 2458573.122721255,
+   "median": 2458573.117241861,
+   "sd": 0.002184389120606049,
+   "z": -2.508433108773582,
+   "stayed": true
+  },
+  "u_0": {
+   "truth": -0.012831,
+   "median": -0.014454861555609821,
+   "sd": 0.0003510456013052205,
+   "z": -4.625785224404327,
+   "stayed": true
+  },
+  "s": {
+   "truth": 0.3034574197163964,
+   "median": 0.1000404990265823,
+   "sd": 0.16010468901065755,
+   "z": -1.2705244421434367,
+   "stayed": true
+  },
+  "q": {
+   "truth": -3.101947069168268,
+   "median": -3.1473171484499045,
+   "sd": 0.08598714903950654,
+   "z": -0.5276379062270264,
+   "stayed": true
+  }
+ },
+ "truth_is_a_basin": true,
+ "verdict": "BASIN_OMITTED",
+ "injected": {
+  "source.Source.t_0": 2458573.122721255,
+  "source.Source.u_0": -0.012831,
+  "mulensevent.t_E": 9.55012,
+  "source.Source.rho": 0.00185698,
+  "lens.Companion.s": 2.01121,
+  "lens.Companion.q": 0.000790775
+ }
+}

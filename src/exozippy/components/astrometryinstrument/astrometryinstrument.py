@@ -56,6 +56,40 @@ Per-instrument config keys:
                       being sampled; the sampled fluxfrac element is
                       fixed (unused).  Ignored with a warning on a rel
                       dataset, which has no per-instrument fraction.
+  microlensing      : gaia/abs only -- model the astrometric microlensing
+                      centroid shift when star_ndx is a microlensing
+                      SOURCE body (default true whenever a mulensevent:
+                      block exists; false opts out).  See below.
+  photometry        : the mulensinstrument light curve whose fitted
+                      f_source/f_blend give the blend fraction in this
+                      dataset's band (default: the only light curve;
+                      required when there are several).  A lensed dataset
+                      with no light curve at all RAISES: the blend fraction
+                      and the geocentric frame anchor both come from it.
+
+Astrometric microlensing (conventions.md C30; review 8.10.1 stage 1).  A
+gaia/abs dataset of a microlensing source carries, inside the
+five-parameter model, the point-lens centroid shift of the two images,
+delta_theta = -theta_E * dtheta/(u^2 + 2) (mas; dtheta the lens-minus-
+source separation of C9, so the shift points AWAY from the lens, peaks at
+0.354 theta_E at u = sqrt(2) and decays only as theta_E/u -- support for
+years around the event, which is why it lives here and not in an event-
+window add-on).  theta_E enters as a linear amplitude on the trajectory
+the light curve already fits, so this is a direct theta_E measurement.
+What the instrument centroids is images + blend, so the modeled offset
+from the source's own track is
+
+    [A f_s/(A f_s + f_b)] * delta_theta + [f_b/(A f_s + f_b)] * (x_b - x_s)
+
+with f_b/f_s from the `photometry:` light curve and x_b the blend
+photocenter: `blend_dE`/`blend_dN` (mas from the reference position,
+fixed on the sky, pinned at 0 by default -- free them to fit the drag).
+Both are INACTIVE on a dataset without the lens term, like fluxfrac on a
+rel dataset.  A point-source single lens takes the symbolic closed form
+and stays differentiable (NUTS); a finite-source, binary or N-lens event
+takes VBMicrolensing's disk-integrated centroid through
+VBMDirectMagOp(astrometry=True) (MulensEvent.get_astrometric_terms,
+stage 2) -- gradient-free, like the photometry it rides with.
 
 `fluxfrac` is a parameter of a gaia/abs dataset ONLY: _photocenter_terms
 is its one consumer.  On a rel dataset it is INACTIVE -- held at
@@ -360,6 +394,40 @@ class AstrometryInstrument(Instrument):
                 "doc": "Astropy unit string for rel-mode separations. Default 'mas'.",
             },
             {
+                "key": "microlensing",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "gaia/abs only. Model the astrometric microlensing "
+                    "centroid shift of this dataset's star when it is a "
+                    "microlensing source (conventions.md C30): the "
+                    "point-lens shift theta_E*u/(u^2+2) away from the lens, "
+                    "diluted by the blend and with the blend's own drag. "
+                    "Default true whenever a mulensevent: block exists and "
+                    "star_ndx is one of its source bodies; false opts out. "
+                    "Single point lens only (a binary lens raises); a "
+                    "finite_source event warns that the point-source "
+                    "formula holds only for rho << u."
+                ),
+            },
+            {
+                "key": "photometry",
+                "kind": "ref",
+                "accepts": ["mulensinstrument"],
+                "required": False,
+                "doc": (
+                    "Name or index of the mulensinstrument light curve "
+                    "whose f_source/f_blend give the blend fraction in this "
+                    "dataset's astrometric band (the centroid dilution "
+                    "A f_s/(A f_s + f_b) and the blend drag). Default: the "
+                    "only light curve when there is exactly one; required "
+                    "with several. A lensed dataset with no light curve at "
+                    "all is an error (the blend fraction and the geocentric "
+                    "frame anchor both come from the photometry)."
+                ),
+            },
+            {
                 "key": "epoch",
                 "kind": "option",
                 "accepts": None,
@@ -429,6 +497,7 @@ class AstrometryInstrument(Instrument):
 
             d = {
                 "name": self.names[i],
+                "index": i,
                 "mode": mode,
                 "time": t,
                 "star_ndx": star_ndx,
@@ -488,6 +557,11 @@ class AstrometryInstrument(Instrument):
                 )
                 # Apparent displacement of the source = parallax * (P_E, P_N)
                 d["P_E"], d["P_N"] = parallax_factors(xyz, ra_ref, dec_ref)
+                # Kept for the centroid shift of a lensed source: the
+                # trajectory wants the observer's Skowron+2011 deviations,
+                # which need t0_par and so are formed at stage 7
+                # (MulensEvent.skowron_deviations), not here.
+                d["xyz"] = xyz
 
             self.jittervar_lower[i] = self._jitter_floor([min_err])
             self.n_total_obs += len(t)
@@ -630,6 +704,130 @@ class AstrometryInstrument(Instrument):
             self.manifest["fluxfrac"] = merge_overrides(
                 self.manifest["fluxfrac"], pinned["overrides"]
             )
+
+        # Astrometric microlensing (conventions.md C30).  Resolved here,
+        # at stage 3, because it needs source.star_map (stage 2) and it
+        # declares parameters: the blend photocenter offsets, one pair per
+        # LENSED gaia/abs dataset and INACTIVE elsewhere (the fluxfrac
+        # pattern -- a parameter of a dataset that has no lens term is not
+        # part of the physics, so it is held at 0, sampled by nothing and
+        # reported nowhere).  Declared only when some dataset is lensed,
+        # so a system without a lens has no such rows at all.
+        self._resolve_lens_hook(system)
+        if any(j is not None for j in self._lens_source):
+            lensed = [j is not None for j in self._lens_source]
+            for key in ("blend_dE", "blend_dN"):
+                self.manifest[key] = {"mask": lensed, "inactive_value": 0.0}
+
+    def _resolve_lens_hook(self, system):
+        """Which datasets carry the centroid shift, of which source, with
+        which light curve's blend fraction.
+
+        Sets ``self._lens_source[i]`` (a source-component index, or None)
+        and ``self._lens_phot[i]`` (a mulensinstrument element index, or
+        None for "no blend").  The default is ON for every gaia/abs dataset
+        whose star is a microlensing source: an astrometric time series of
+        a lensed star that ignores the lens is a wrong model, the same
+        reason the SED zeropoint tie is on by default.  ``microlensing:
+        false`` opts out; ``microlensing: true`` on a dataset that cannot
+        carry the term (rel mode, no mulensevent, a star that is not a
+        source) is a configuration error and says so.
+        """
+        n = self.n_elements
+        self._lens_source = [None] * n
+        self._lens_phot = [None] * n
+        event = getattr(system, "mulensevent", None)
+        source = getattr(system, "source", None)
+        source_stars = (
+            [int(s) for s in source.star_map]
+            if source is not None and hasattr(source, "star_map")
+            else []
+        )
+        for i, c in enumerate(self.config):
+            flag = c.get("microlensing")
+            explicit_on = bool(flag)
+            if flag is not None and not flag:
+                continue
+            where = f"{self.prefix}.{self.names[i]}"
+            if self.modes[i] == "rel":
+                if explicit_on:
+                    logger.warning(
+                        f"[{where}] microlensing is a gaia/abs key (the "
+                        f"centroid shift of the lensed star's absolute "
+                        f"position); this dataset is mode 'rel' and the "
+                        f"key is ignored."
+                    )
+                continue
+            if event is None:
+                if explicit_on:
+                    raise ValueError(
+                        f"[{where}] microlensing: true but the system has "
+                        f"no mulensevent: block."
+                    )
+                continue
+            star_ndx = int(self.star_map[i])
+            if star_ndx not in source_stars:
+                if explicit_on:
+                    raise ValueError(
+                        f"[{where}] microlensing: true but star_ndx "
+                        f"{star_ndx} is not a microlensing source body "
+                        f"(source stars: {source_stars})."
+                    )
+                continue
+            event.check_centroid_shift_supported(where)
+            self._lens_source[i] = source_stars.index(star_ndx)
+            self._lens_phot[i] = self._resolve_lens_photometry(system, i)
+
+    def _resolve_lens_photometry(self, system, i):
+        """The mulensinstrument element supplying f_blend/f_source for
+        dataset ``i``'s blend weighting.
+
+        A lensed astrometric dataset REQUIRES a microlensing light curve
+        (JDE 2026-09-23: "we should raise when astrometry is fit without
+        photometry.  that can't happen").  Two reasons, both structural:
+        the blend fraction that dilutes the shift and drags the centroid
+        has no other source, and in a crowded field that term can
+        dominate; and the geocentric frame's proper-motion correction
+        (``MulensEvent._earth_vperp_en``) is anchored by the light curve's
+        ``t0_par`` and Earth velocity, without which ``mu_rel_geo`` and
+        hence the trajectory direction silently fall back to heliocentric.
+        """
+        where = f"{self.prefix}.{self.names[i]}"
+        mi = getattr(system, "mulensinstrument", None)
+        ref = self.config[i].get("photometry")
+        if mi is None:
+            raise ValueError(
+                f"[{where}] this dataset's star is a microlensing source, so "
+                f"its astrometry carries the centroid shift, and that needs "
+                f"a microlensing light curve (a mulensinstrument: block) for "
+                f"the blend fraction f_blend/f_source in the astrometric "
+                f"band and for the geocentric frame anchor.  Astrometry of a "
+                f"lensed source cannot be fit without its photometry; add "
+                f"the light curve, or set `microlensing: false` on the "
+                f"dataset to fit it as an unlensed star."
+            )
+        names = list(mi.names)
+        if ref is None:
+            if len(names) == 1:
+                return 0
+            raise ValueError(
+                f"[{where}] several microlensing light curves "
+                f"({names}); name the one whose f_source/f_blend apply in "
+                f"this dataset's band with `photometry: <name>`."
+            )
+        if isinstance(ref, int) or str(ref).isdigit():
+            k = int(ref)
+            if k >= len(names):
+                raise ValueError(
+                    f"[{where}] photometry index {k} out of range; light "
+                    f"curves are {names}."
+                )
+            return k
+        if ref in names:
+            return names.index(ref)
+        raise ValueError(
+            f"[{where}] unknown photometry {ref!r}; light curves are {names}."
+        )
 
     # ------------------------------------------------------------------
     # Model pieces (PyTensor)
@@ -815,10 +1013,27 @@ class AstrometryInstrument(Instrument):
                 dN = dN + dN2[:, 0]
         return dE, dN
 
-    def _absolute_model(self, system, d, t, beta):
-        """(dE, dN) model in mas relative to the reference position."""
+    def _absolute_model(
+        self, system, d, t, beta, P_E=None, P_N=None, dev=None
+    ):
+        """(dE, dN) model in mas relative to the reference position.
+
+        THE expression for a gaia/abs dataset, built once: the likelihood
+        passes the data times and lets the dataset's stored per-epoch
+        arrays stand (``P_E``/``P_N`` from ``d``), the plotters pass a time
+        TENSOR with matching ``P_E``/``P_N``/``dev`` tensors so the plotted
+        track is this code run on other times (the instrument.md "one
+        builder" rule; ``_rel_model`` is the template).
+
+        ``dev`` -- the observer's Skowron+2011 geocentric deviations, (N, 3)
+        AU, needed only when the dataset carries the microlensing centroid
+        shift (``_lens_source[i]`` set); the caller forms them from
+        ``d["xyz"]`` through ``MulensEvent.skowron_deviations``.
+        """
         star = system.star
         s = d["star_ndx"]
+        if P_E is None:
+            P_E, P_N = d["P_E"], d["P_N"]
         dt_yr = (t - self.epoch) / DAYS_PER_YEAR
 
         dE = (
@@ -826,12 +1041,12 @@ class AstrometryInstrument(Instrument):
             * np.cos(d["dec_ref"])
             * RAD2MAS
             + star.pm_ra.value[s] * dt_yr
-            + star.parallax.value[s] * d["P_E"]
+            + star.parallax.value[s] * P_E
         )
         dN = (
             (star.dec.value[s] - d["dec_ref"]) * RAD2MAS
             + star.pm_dec.value[s] * dt_yr
-            + star.parallax.value[s] * d["P_N"]
+            + star.parallax.value[s] * P_N
         )
 
         a_phot, omap = self._photocenter_terms(system, s, beta)
@@ -842,7 +1057,90 @@ class AstrometryInstrument(Instrument):
             dE = dE + pt.sum(dE_orb, axis=1)
             dN = dN + pt.sum(dN_orb, axis=1)
 
+        # Astrometric microlensing (C30), last: the shift and the blend
+        # drag are both referenced to the SOURCE's own track, which is what
+        # (dE, dN) is at this point.
+        i = d.get("index")
+        lens_source = getattr(self, "_lens_source", None)
+        if i is not None and lens_source and lens_source[i] is not None:
+            dE, dN = self._apply_lens(system, i, t, dev, dE, dN)
+
         return dE, dN
+
+    def _apply_lens(self, system, i, t, dev, dE, dN):
+        """Add the microlensing centroid shift to the source track (dE, dN)
+        of lensed dataset ``i`` (conventions.md C30).
+
+        The images carry ``A f_s`` at ``x_s + delta_theta``; the blend
+        carries ``f_b`` at a fixed ``x_b``.  What the instrument centroids
+        is their sum, so relative to the source's unlensed track::
+
+            x_obs = x_s + [A f_s/(A f_s + f_b)] delta_theta
+                        + [  f_b/(A f_s + f_b)] (x_b - x_s)
+
+        The first bracket is DILUTION -- time dependent, suppressed exactly
+        at peak where the shift is largest; the second is the blend
+        dragging the centroid toward itself as the source brightens and
+        fades, which in a crowded bulge field can dominate.  Only the RATIO
+        ``f_b/f_s`` enters, taken from the ``photometry:`` light curve's
+        fitted ``f_blend``/``f_source`` (the astrometric band is that light
+        curve's band; a lensed dataset without a light curve raised in
+        ``_resolve_lens_photometry``).  ``x_b`` is ``blend_dE``/``blend_dN`` (mas from the
+        reference position, fixed on the sky -- no proper motion of its
+        own).  The lens's own flux is part of ``f_b`` and sits at
+        ``x_s + theta_E dtheta``; it is not split out (review 8.10.1).
+
+        The shift is itself a sky angle, so it adds straight into dE/dN in
+        mas with NO further cos(dec): East on those lines is already
+        projected (skyframe.md; "name the quantity, not the axis").
+        """
+        if dev is None:
+            raise ValueError(
+                f"[{self.prefix}.{self.names[i]}] the centroid shift needs "
+                f"the observer's geocentric deviations (dev); the caller "
+                f"forms them with MulensEvent.skowron_deviations."
+            )
+        event = system.mulensevent
+        j = self._lens_source[i]
+        k = self._lens_phot[i]  # never None: _resolve_lens_photometry raises
+        mi = system.mulensinstrument
+        # The astrometric band IS the photometry: light curve's band, so its
+        # limb darkening is that light curve's resolver (one resolver, the
+        # plotted-equals-fitted rule); it matters only on the finite-source
+        # Op path, where VBM integrates the centroid over the darkened disk.
+        u1, u2, bandpass = mi._finite_source_limb_darkening(system)
+        A, sN, sE = event.get_astrometric_terms(
+            t, dev, system, index=j, u1=u1, u2=u2, bandpass=bandpass
+        )
+        g = mi.f_blend.value[k] / mi.f_source.value[k]  # f_b / f_s
+        w_s = A / (A + g)
+        w_b = g / (A + g)
+        return (
+            dE + w_s * sE + w_b * (self.blend_dE.value[i] - dE),
+            dN + w_s * sN + w_b * (self.blend_dN.value[i] - dN),
+        )
+
+    def _lens_ephemeris(self, system, i, t):
+        """``(P_E, P_N, dev)`` for dataset ``i``'s observer at times ``t``
+        (numpy): the parallax factors and the Skowron+2011 deviations,
+        both from the same ephemeris call, for a plot grid or the data
+        times alike."""
+        d = self.datasets[i]
+        xyz = get_observer_position(
+            np.asarray(t, dtype=float), observer_location=self.observers[i]
+        )
+        P_E, P_N = parallax_factors(xyz, d["ra_ref"], d["dec_ref"])
+        dev = system.mulensevent.skowron_deviations(t, xyz)
+        return P_E, P_N, dev
+
+    def _eval_lensed(self, system, i, t, vals):
+        """Full (dE, dN) of lensed gaia/abs dataset ``i`` at times ``t``:
+        linear terms + photocenter orbit + centroid shift, from the
+        compiled ``_absolute_model`` (``compile_plotters``)."""
+        P_E, P_N, dev = self._lens_ephemeris(system, i, t)
+        return self._compiled_lensed[i](
+            np.asarray(t, dtype=np.float64), P_E, P_N, dev, *vals
+        )
 
     # ------------------------------------------------------------------
     # Stage 7
@@ -880,7 +1178,13 @@ class AstrometryInstrument(Instrument):
                     pm.Deterministic(
                         f"{self.prefix}.{name}.fluxfrac_sed", beta
                     )
-                dE, dN = self._absolute_model(system, d, t, beta)
+                dev = None
+                lens_source = getattr(self, "_lens_source", None)
+                if lens_source and lens_source[i] is not None:
+                    # The observer's geocentric deviations (C6) at THIS
+                    # dataset's epochs, in the frame t0_par anchors.
+                    dev = system.mulensevent.skowron_deviations(t, d["xyz"])
+                dE, dN = self._absolute_model(system, d, t, beta, dev=dev)
 
             if mode == "gaia":
                 w_model = dE * d["sin_psi"] + dN * d["cos_psi"]
@@ -947,6 +1251,44 @@ class AstrometryInstrument(Instrument):
                     observed=np.zeros(len(t)),
                 )
 
+        self._add_lens_prose(system)
+
+    def _add_lens_prose(self, system):
+        """Modeling-draft sentence for the centroid shift, declared next to
+        the model it describes (outputs.md), only when a dataset carries
+        it."""
+        lensed = [
+            i
+            for i, j in enumerate(getattr(self, "_lens_source", []))
+            if j is not None
+        ]
+        if not lensed:
+            return
+        from exozippy.outputs.prose import get_collector, join_names
+
+        names = join_names([latex_escape(self.names[i]) for i in lensed])
+        text = (
+            rf"The astrometry of the lensed source ({names}) includes the "
+            r"microlensing centroid shift of the two images, "
+            r"$\delta\theta = \theta_{\rm E}\,u/(u^2+2)$ directed away from "
+            r"the lens \citep{Walker:1995, Hog:1995, Miyamoto:1995, "
+            r"Dominik:2000}, evaluated on the same lens-source trajectory "
+            r"as the photometric magnification"
+        )
+        if any(self._lens_phot[i] is not None for i in lensed):
+            text += (
+                r", diluted by the source's share of the blended flux, "
+                r"$A f_s/(A f_s + f_b)$, and including the drag of the "
+                r"blend photocenter on the centroid as the source "
+                r"brightens and fades"
+            )
+        get_collector(system).add(
+            text + ".",
+            section="microlensing",
+            key=f"{self.prefix}.centroid_shift",
+            rank=30,
+        )
+
     # ------------------------------------------------------------------
     # Plotting
     # ------------------------------------------------------------------
@@ -999,6 +1341,44 @@ class AstrometryInstrument(Instrument):
                 )
             )
 
+        # Full absolute model -- linear terms + photocenter orbit + the
+        # microlensing centroid shift -- per LENSED gaia/abs dataset, as a
+        # function of a time grid and that grid's own ephemeris quantities
+        # (P_E, P_N, Skowron deviations), so the plotted track is
+        # _absolute_model itself run on other times.  None elsewhere: the
+        # unlensed datasets keep the numpy linear terms + _compiled_photo
+        # split, which needs no ephemeris at plot time.
+        self._compiled_lensed = []
+        self._lensed_nodes = []
+        lens_source = getattr(self, "_lens_source", [None] * self.n_elements)
+        pe_input = pt.vector("P_E_input")
+        pn_input = pt.vector("P_N_input")
+        dev_input = pt.matrix("dev_input")
+        for i in range(self.n_elements):
+            if lens_source[i] is None:
+                self._compiled_lensed.append(None)
+                self._lensed_nodes.append(None)
+                continue
+            beta = self._sed_beta_node(system, i)
+            dE, dN = self._absolute_model(
+                system,
+                self.datasets[i],
+                t_input,
+                beta,
+                P_E=pe_input,
+                P_N=pn_input,
+                dev=dev_input,
+            )
+            self._lensed_nodes.append((dE, dN))
+            self._compiled_lensed.append(
+                pytensor.function(
+                    inputs=[t_input, pe_input, pn_input, dev_input]
+                    + param_symbols,
+                    outputs=[dE, dN],
+                    on_unused_input="ignore",
+                )
+            )
+
         # Relative model per rel instrument (nested photocenter terms
         # included; matches the likelihood graph exactly)
         self._compiled_rel = []
@@ -1029,7 +1409,7 @@ class AstrometryInstrument(Instrument):
             self._compiled_elements = pytensor.function(
                 inputs=param_symbols,
                 outputs=[
-                    orb.tp.value,
+                    orb.tp_target.value,
                     orb.n.value,
                     orb.ecc.value,
                     orb.omega.value,
@@ -1192,6 +1572,8 @@ class AstrometryInstrument(Instrument):
         photo_fns = getattr(self, "_compiled_photo", None)
         rel_nodes = getattr(self, "_rel_nodes", None)
         rel_fns = getattr(self, "_compiled_rel", None)
+        lensed_nodes = getattr(self, "_lensed_nodes", None)
+        lensed_fns = getattr(self, "_compiled_lensed", None)
 
         specs = []
         for i, d in enumerate(self.datasets):
@@ -1222,21 +1604,33 @@ class AstrometryInstrument(Instrument):
                     )
                 )
                 if point is not None:
-                    dE_lin, dN_lin = self._linear_terms(d, t, point, system)
                     vals = self._point_values(system, point)
-                    dE_orb, dN_orb = self._eval_photo(i, t, vals)
-                    w_model = (dE_lin + dE_orb) * d["sin_psi"] + (
-                        dN_lin + dN_orb
-                    ) * d["cos_psi"]
-                    # The model is linear terms + photocenter orbit, so the
-                    # deps are the union of both -- and with no orbit the
-                    # linear ones are all there is (see _linear_term_deps).
-                    deps = self._merge_deps(
-                        self._linear_term_deps(system),
-                        self._node_pair_deps(
-                            photo_nodes[i] if photo_nodes else None, system
-                        ),
-                    )
+                    if lensed_fns and lensed_fns[i] is not None:
+                        # Lensed source: the full compiled _absolute_model
+                        # (linear + orbit + centroid shift) at the epochs.
+                        dE_m, dN_m = self._eval_lensed(system, i, t, vals)
+                        deps = self._merge_deps(
+                            self._linear_term_deps(system),
+                            self._node_pair_deps(lensed_nodes[i], system),
+                        )
+                    else:
+                        dE_lin, dN_lin = self._linear_terms(
+                            d, t, point, system
+                        )
+                        dE_orb, dN_orb = self._eval_photo(i, t, vals)
+                        dE_m, dN_m = dE_lin + dE_orb, dN_lin + dN_orb
+                        # The model is linear terms + photocenter orbit, so
+                        # the deps are the union of both -- and with no
+                        # orbit the linear ones are all there is (see
+                        # _linear_term_deps).
+                        deps = self._merge_deps(
+                            self._linear_term_deps(system),
+                            self._node_pair_deps(
+                                photo_nodes[i] if photo_nodes else None,
+                                system,
+                            ),
+                        )
+                    w_model = dE_m * d["sin_psi"] + dN_m * d["cos_psi"]
                     traces.append(
                         Trace(
                             name="model",
@@ -1294,7 +1688,35 @@ class AstrometryInstrument(Instrument):
                             photo_nodes[i] if photo_nodes else None, system
                         ),
                     )
-                    if photo_fns and photo_fns[i] is not None:
+                    if lensed_fns and lensed_fns[i] is not None:
+                        # Lensed source: what remains after the linear
+                        # terms is the centroid shift (+ blend drag + any
+                        # photocenter orbit), drawn from the full compiled
+                        # _absolute_model minus the same linear terms on
+                        # the grid, with the grid's own ephemeris.
+                        vals = self._point_values(system, point)
+                        t_pretty = np.linspace(t.min(), t.max(), 2000)
+                        dE_f, dN_f = self._eval_lensed(
+                            system, i, t_pretty, vals
+                        )
+                        P_E, P_N, _ = self._lens_ephemeris(system, i, t_pretty)
+                        dE_l, dN_l = self._linear_terms(
+                            dict(d, P_E=P_E, P_N=P_N), t_pretty, point, system
+                        )
+                        deps = self._merge_deps(
+                            deps, self._node_pair_deps(lensed_nodes[i], system)
+                        )
+                        traces.append(
+                            Trace(
+                                name="microlensing shift (+ orbit)",
+                                role="model",
+                                kind="line",
+                                x=dE_f - dE_l,
+                                y=dN_f - dN_l,
+                                style={"legend": True, "lw": 1},
+                            )
+                        )
+                    elif photo_fns and photo_fns[i] is not None:
                         vals = self._point_values(system, point)
                         t_pretty = np.linspace(t.min(), t.max(), 2000)
                         dE_p, dN_p = self._eval_photo(i, t_pretty, vals)
@@ -1446,6 +1868,8 @@ class AstrometryInstrument(Instrument):
         d_dense = dict(d, P_E=P_E, P_N=P_N)
         dE_lin, dN_lin = self._linear_terms(d_dense, t_dense, point, system)
         dE_orb, dN_orb = self._eval_photo(i, t_dense, vals)
+        lensed_fns = getattr(self, "_compiled_lensed", None)
+        lensed = bool(lensed_fns) and lensed_fns[i] is not None
         axL.plot(
             dE_lin,
             dN_lin,
@@ -1465,12 +1889,29 @@ class AstrometryInstrument(Instrument):
                 zorder=2,
                 label="pm + parallax + orbit",
             )
+        if lensed:
+            # The full model of a lensed source: linear + orbit + the
+            # microlensing centroid shift and blend drag (C30).
+            dE_full, dN_full = self._eval_lensed(system, i, t_dense, vals)
+            axL.plot(
+                dE_full,
+                dN_full,
+                "-",
+                color="tab:green",
+                lw=0.8,
+                zorder=2,
+                label="+ microlensing centroid shift",
+            )
 
-        dE_lin_o, dN_lin_o = self._linear_terms(d, t, point, system)
-        dE_orb_o, dN_orb_o = self._eval_photo(i, t, vals)
+        if lensed:
+            dE_mod_o, dN_mod_o = self._eval_lensed(system, i, t, vals)
+        else:
+            dE_lin_o, dN_lin_o = self._linear_terms(d, t, point, system)
+            dE_orb_o, dN_orb_o = self._eval_photo(i, t, vals)
+            dE_mod_o, dN_mod_o = dE_lin_o + dE_orb_o, dN_lin_o + dN_orb_o
         axL.plot(
-            dE_lin_o + dE_orb_o,
-            dN_lin_o + dN_orb_o,
+            dE_mod_o,
+            dN_mod_o,
             "r.",
             ms=5,
             zorder=2,

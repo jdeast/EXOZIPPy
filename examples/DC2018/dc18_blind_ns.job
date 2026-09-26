@@ -1,0 +1,26 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 64
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N blindns
+#$ -o dc18_blind_ns.$JOB_ID.log
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_$JOB_ID"
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy/examples/DC2018
+
+# Blind (no mmexofast binary seed, no truth) nested sampling on event 128:
+# does an off-the-shelf gradient-free method find BOTH s <-> 1/s modes and
+# weight them by posterior MASS?  Scored against the two seeded-PTDE
+# solutions (s = 0.976, 0.863) after the fact.
+python -u dc18_blind_ns.py --event 128 --nlive 1000 --ncpu 60 \
+    --out dc18_blind_ns.json 2>&1 | grep -vE "^iter:.*logz"

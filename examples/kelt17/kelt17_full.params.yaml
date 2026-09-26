@@ -1,0 +1,57 @@
+# KELT-17 b -- shared starting values for the full example, converted 1:1
+# from the EXOFASTv2 refined prior file (kelt17.priors.2). Gaussian priors
+# (sigma > 0) reproduce the EXOFASTv2 priors: vsini, vline, parallax.
+
+# ---- Star ----
+star.A.logmass:  {initval: 0.260522}
+star.A.radius:   {initval: 1.645624}
+star.A.teff:     {initval: 7459.3}
+star.A.feh:      {initval: 0.364}
+star.A.parallax: {mu: 4.4688, sigma: 0.0582}
+star.A.av:       {initval: 0.008153, upper: 0.11687}
+
+# DT local line width (EXOFASTv2 prior: 5490 +/- 480 m/s)
+star.A.vline:    {initval: 5490, sigma: 480}
+# RM broadening terms (fixed, as in the EXOFASTv2 RM example)
+star.A.vmacro:   {initval: 4000, sigma: 0}
+star.A.vbeta:    {initval: 4000, sigma: 0}
+star.A.vmicro:   {initval: 1000, sigma: 0}
+
+# ---- Planet (from mpsun / p / rstar) ----
+planet.b.radius: {initval: 1.499}
+planet.b.mass:   {initval: 1.898}
+planet.b.p:      {initval: 0.093633}
+
+# ---- Orbit (eccentric refined solution) ----
+orbit.b.logP:    {initval: 0.48857340}
+orbit.b.tc:      {initval: 2457287.745109}
+orbit.b.cosi:    {initval: 0.082732}
+orbit.b.secosw:  {initval: 0.242320}
+orbit.b.sesinw:  {initval: -0.150860}
+# spin-orbit: vsini = 44200 m/s, lambda = -115.6 deg  (EXOFASTv2
+# lcos/lsin converted to the sqrt(vsini)cos/sin(lambda) pair); the
+# Gaussian prior on the DERIVED vsini reproduces EXOFASTv2's
+# vsini 44200 +/- 1400 m/s prior.
+orbit.b.svcoslam: {initval: -90.87}
+orbit.b.svsinlam: {initval: -189.59}
+orbit.b.vsini:    {initval: 44200, sigma: 1400}
+
+# ---- Limb darkening (EXOFASTv2 u1/u2 -> Kipping q1/q2 initvals) ----
+band.B.q1:      {initval: 0.6187}
+band.B.q2:      {initval: 0.3174}
+band.I.q1:      {initval: 0.2199}
+band.I.q2:      {initval: 0.2136}
+band.Sloang.q1: {initval: 0.5668}
+band.Sloang.q2: {initval: 0.2492}
+band.Sloani.q1: {initval: 0.2259}
+band.Sloani.q2: {initval: 0.2014}
+band.Sloanr.q1: {initval: 0.6994}
+band.Sloanr.q2: {initval: 0.2631}
+band.Sloanz.q1: {initval: 0.2888}
+band.Sloanz.q2: {initval: 0.1857}
+band.V.q1:      {initval: 0.2338}
+band.V.q2:      {initval: 0.3726}
+
+# ---- RVs ----
+rvinstrument.TRES.gamma:           {initval: 115.94}
+rvinstrument.TRES.jitter_variance: {initval: 8764.3, lower: 0.0}

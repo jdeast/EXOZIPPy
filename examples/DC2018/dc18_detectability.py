@@ -126,6 +126,44 @@ def main():
     ap.add_argument("--draws", type=int, default=800)
     ap.add_argument("--tune", type=int, default=400)
     ap.add_argument("--out", default=None)
+    # Run against ANY finished fit, not only the sweep's events/<ev> layout:
+    # the fit's own config and params file are the model (so the two lp's
+    # are comparable -- same priors, same likelihood), its trace is the
+    # production result, and --prefix is where this run writes.
+    ap.add_argument("--config", default=None, help="the production fit's YAML")
+    ap.add_argument(
+        "--params",
+        default=None,
+        help="its params file (default: the config's parameter_file)",
+    )
+    ap.add_argument(
+        "--trace",
+        default=None,
+        help="its trace.nc (default: <config prefix>_trace.nc)",
+    )
+    ap.add_argument(
+        "--prefix",
+        default=None,
+        help="where the truth-seeded short fit writes",
+    )
+    ap.add_argument(
+        "--free-rho",
+        action="store_true",
+        help="set source.star_constrains_rho: false so rho is SAMPLED rather "
+        "than derived from the stellar leg; with the truth's rho injected "
+        "this isolates whether the star (SED/distance) leg is what pulls "
+        "the trajectory off the truth (DC2018-128, 2026-09-22)",
+    )
+    ap.add_argument(
+        "--inject",
+        action="append",
+        default=[],
+        metavar="PARAMS_KEY=VALUE",
+        help="extra initval to inject, e.g. lens.Companion.alpha=308.15; the "
+        "answer key's alpha is not in our convention (conventions.md C22), "
+        "so the light curve's own optimum at the truth geometry is the "
+        "value to hand in here when the test must start AT the truth",
+    )
     args = ap.parse_args()
 
     data_dir = C.data_dir_or_raise(os.environ.get("DC18_DATA"))
@@ -143,26 +181,55 @@ def main():
     # build_config reads eleven attributes off it, and hand-stubbed classes
     # crashed both these scripts with AttributeError on args.sampler -- a
     # bug that recurs whenever that parser gains an option.
-    a = R.build_parser().parse_args([str(args.event)])
-    a.finite_source = True
-    a.fix_u1 = True
-    a.sampler = "ptde"
-    a.tune = args.tune
-    a.draws = args.draws
+    if args.config:
+        import yaml
 
-    prefix = base / "detect" / ("DC2018_%s" % ev)
-    prefix.parent.mkdir(parents=True, exist_ok=True)
-    cfg = R.build_config(
-        "DC2018_%s" % ev,
-        files,
-        prefix,
-        base / ("DC2018_%s_mmexofast.json" % ev),
-        a,
-    )
-    cfg["mulensevent"][0]["mmexofast"] = False  # TRUTH is the seed here
-    params = R.build_user_params(
-        ra, dec, fix_u1=True, bands_for_u1=list(files)
-    )
+        cfg = yaml.safe_load(open(args.config))
+        pf = args.params or cfg.get("parameter_file")
+        params = (yaml.safe_load(open(pf)) or {}) if pf else {}
+        production_trace = args.trace or (str(cfg["prefix"]) + "_trace.nc")
+        prefix = Path(args.prefix or (str(cfg["prefix"]) + "_detect"))
+        prefix.parent.mkdir(parents=True, exist_ok=True)
+        cfg["prefix"] = str(prefix)
+        cfg.pop("parameter_file", None)
+        cfg["mulensevent"][0]["mmexofast"] = False  # TRUTH is the seed here
+        cfg["mulensevent"][0]["peak_find"] = False
+        if args.free_rho:
+            for src in cfg.get("source", []):
+                src["star_constrains_rho"] = False
+            print(
+                "rho is SAMPLED in this run (star_constrains_rho: false)",
+                flush=True,
+            )
+        print(
+            "model: %s  (production trace %s)"
+            % (args.config, production_trace),
+            flush=True,
+        )
+    else:
+        a = R.build_parser().parse_args([str(args.event)])
+        a.finite_source = True
+        a.fix_u1 = True
+        a.sampler = "ptde"
+        a.tune = args.tune
+        a.draws = args.draws
+
+        prefix = base / "detect" / ("DC2018_%s" % ev)
+        prefix.parent.mkdir(parents=True, exist_ok=True)
+        cfg = R.build_config(
+            "DC2018_%s" % ev,
+            files,
+            prefix,
+            base / ("DC2018_%s_mmexofast.json" % ev),
+            a,
+        )
+        cfg["mulensevent"][0]["mmexofast"] = False  # TRUTH is the seed here
+        params = R.build_user_params(
+            ra, dec, fix_u1=True, bands_for_u1=list(files)
+        )
+        production_trace = str(
+            base / "fitresults" / ("DC2018_%s_trace.nc" % ev)
+        )
     injected = {}
     for tkey, pkey, _tvars, _is_log in INJECT:
         if tkey not in truth:
@@ -172,6 +239,10 @@ def main():
         # coordinate.  The log flag below is for reading the TRACE back.
         params[pkey] = {"initval": float(truth[tkey])}
         injected[pkey] = params[pkey]["initval"]
+    for kv in args.inject:
+        k, v = kv.split("=", 1)
+        params[k] = {"initval": float(v)}
+        injected[k] = float(v)
     print(
         "injected %d sampled observables: %s"
         % (len(injected), {k: round(v, 6) for k, v in injected.items()}),
@@ -353,7 +424,7 @@ def main():
         )
 
     # 4. what the production fit found
-    fr = base / "fitresults" / ("DC2018_%s_trace.nc" % ev)
+    fr = Path(production_trace)
     fit_best = best_lp_of(str(fr))
     print(
         "best lp the production fit found: %s"

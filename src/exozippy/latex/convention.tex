@@ -17,7 +17,7 @@
 %
 % THIS FILE IS ONE OF A PAIR.  Its twin,
 % src/exozippy/components/mulensing/conventions.md, is the normative
-% developer-facing list: it carries the SAME numbered claims C1-C28, and
+% developer-facing list: it carries the SAME numbered claims C1-C30, and
 % names for each one the source file that implements it and the test that
 % pins it.  A claim may be reworded in either file, but a C-number must
 % mean the same thing in both, and a claim added to one must be added to
@@ -26,7 +26,9 @@
 % A THIRD COPY LIVES OUTSIDE THIS REPOSITORY: the Conventions section of
 % paper3_microlensing.tex in the paper repo (~/old_home/papers/exozippy,
 % remote on Overleaf) carries the same C-numbers as the submitted text.
-% All three are in step through C28.  It cannot ride the same commit, so
+% In step through C30 (paper commits 3476111, 2026-09-23, added C29 and
+% C30 there; 7eeeb42, 2026-09-24, brought C30 to stage 2).  It cannot ride
+% the same commit, so
 % the rule is that a C-rule is not finished until all three carry it:
 % pull the paper repo, make the matching edit there, and name that commit
 % in this one.  The paper is not licensed to run ahead.
@@ -258,6 +260,58 @@ negatives, and a code that computes both --- as any code fitting
 microlensing \emph{and} astrometry must --- will appear to carry two
 incompatible sign conventions when it in fact carries one convention and two
 quantities.  We define one and negate it to obtain the other.
+
+\paragraph{C30 --- the astrometric centroid shift is referenced to the
+source's unlensed position and points away from the lens.}  A point lens
+splits an unresolved source into two images on the lens--source axis
+\citep{Walker:1995, Hog:1995, Miyamoto:1995}.  Their flux-weighted centroid,
+measured from the source's \emph{unlensed} position --- the position an
+astrometric time series references through the source's coordinates, proper
+motion and parallax --- is
+\begin{equation}
+  \delta\boldsymbol{\theta}(t) = -\,\theta_{\rm E}\,
+  \frac{\Delta\boldsymbol{\theta}(t)}{|\mathbf{u}(t)|^2 + 2},
+\end{equation}
+where $\Delta\boldsymbol{\theta}$ is the lens-minus-source separation of C9
+in units of $\theta_{\rm E}$.  The shift therefore points along the
+lens$\rightarrow$source axis, away from the lens, with magnitude
+$\theta_{\rm E}\,u/(u^2+2)$, peaking at $0.354\,\theta_{\rm E}$ at
+$u = \sqrt{2}$ and decaying only as $\theta_{\rm E}/u$; over an event the
+apparent position traces an ellipse whose size is set by $\theta_{\rm E}$
+\citep{Walker:1995, Hog:1995}.  It has support for years on either side of
+a $t_{\rm E}$-long photometric event and so belongs inside the full
+astrometric model rather than in an event-window correction; $\theta_{\rm
+E}$ enters as a linear amplitude on a shape the light curve already
+determines, which is what makes it a direct measurement of the Einstein
+radius and hence of the lens mass \citep{Miyamoto:1995, Dominik:2000}.
+Measured from the \emph{lens} the same
+centroid sits at $\theta_{\rm E}\,u\,(u^2+3)/(u^2+2)$, which is the quantity
+\texttt{VBMicrolensing} reports; subtracting the source position $u$
+recovers the expression above identically.
+
+What an instrument centroids is the sum of the images and the blend, so the
+modelled offset from the source's unlensed track $\mathbf{x}_s(t)$ is
+\begin{equation}
+  \delta\mathbf{x}_{\rm obs}(t) = \frac{A f_s}{A f_s + f_b}\,
+  \delta\boldsymbol{\theta}(t) + \frac{f_b}{A f_s + f_b}\,
+  \bigl[\mathbf{x}_b - \mathbf{x}_s(t)\bigr],
+\end{equation}
+with $f_s$ and $f_b$ the source and blend fluxes in the astrometric band and
+$\mathbf{x}_b$ the blend's photocenter, held fixed on the sky.  The first
+term is a time-dependent dilution, suppressed exactly at peak; the second is
+the blend dragging the centroid as the source brightens and fades, and in a
+crowded bulge field it can dominate.  The closed form above is the
+point-source, single-lens case; averaged over a resolved source disk the
+shift nearly vanishes at $\rho \sim u$ and reverses sign beyond, so it is
+valid where $\rho \ll u$.  For a finite source, a binary or an $N$-body
+lens we take the centroid from the same contour integration that computes
+the magnification \citep{Bozza:2018, Bozza:2025}: the light centroid of all
+the images, integrated over the limb-darkened source disk, minus the source
+position, both in the frame whose origin is the lens centre of mass (C12).
+That origin is not stated in the code's documentation; we verified it
+against a direct solution of the lens equation, which reproduces both the
+magnification and the centroid to $10^{-8}$ under that origin and under no
+other.
 
 \subsection{Binary and multiple lenses}
 \label{sec:conv:binary}
@@ -648,6 +702,46 @@ a search over candidate mappings that always returns its closest candidate
 and so cannot fail visibly.  The failure mode is not hypothetical: such a
 search reported a $2034\sigma$ discrepancy in $\alpha$ for one event whose
 fitted value lay $0.3^\circ$ from the light curve's own optimum.
+
+\paragraph{C29 --- a band extinction is not a number until the convention
+is stated.}  A quoted $A_{\rm W149}$ cannot be compared to a modelled one
+without saying how it was computed, because two inequivalent definitions are
+in common use and for a filter as wide as Roman's W149 ($F146$, spanning
+$0.896$--$2.073\,\mu$m with an effective width of $0.789\,\mu$m) they differ
+by ${\sim}15\%$.  The \emph{monochromatic} definition evaluates the
+reddening law at a single wavelength, $A_{\rm band} = A_V\,k(\lambda_{\rm
+band})/k(V)$, and makes ratios between bands independent of $A_V$.  The
+\emph{integrated} definition --- which is what a measurement actually is,
+and what our bolometric-correction tables compute --- reddens the spectrum
+and integrates it through the passband.  These are not the same quantity:
+as $A_V$ rises the blue wing of a wide band is extinguished away, the band's
+own effective wavelength drifts redward, and $dA_{\rm band}/dA_V$ therefore
+\emph{falls}, from $0.272$ near $A_V = 0$ to $0.212$ at $A_V = 10$ for
+$F146$.  Band ratios under the integrated definition are functions of $A_V$.
+
+The consequence for the data challenge is concrete.  Its key is
+monochromatic at each filter's effective wavelength: the ratio $A_{\rm
+Z087}/A_{\rm W149} = 1.9236$ is reproduced to $0.1\%$ by the reddening law
+evaluated at $0.86510$ and $1.30496\,\mu$m, and by no other published
+wavelength definition for these filters (the pivot wavelength is $13.3\%$
+away, the mean wavelength $24.7\%$), and the same holds across the sample
+(median $1.9315$ over 293 events).  No single $A_V$ can therefore satisfy
+both band extinctions in an integrated model, and the choice of which to
+match is worth $15\%$: anchoring $A_{\rm W149}$ gives $A_V = 11.75$,
+anchoring $A_{\rm Z087}$ gives $10.14$, and anchoring the colour excess
+$E(Z087-W149)$ gives $9.01$.  We anchor the colour.  At $A_V = 9.01$ both
+bands are reproduced $0.58$ mag faint --- the \emph{same} offset in each ---
+and a common-mode grey offset is degenerate with distance and stellar
+radius, which the spectral-energy-distribution fit already constrains; every
+other anchor instead places the residual in colour, where only the fitted
+effective temperature can absorb it ($+0.81$ mag at the $A_{\rm W149}$
+anchor).  This is neither an error in the reddening law, which reproduces
+the key's own ratio to $0.1\%$, nor in the tables: it is irreducible while
+the data follow one definition and the model the other.  For real
+observations the integrated treatment is the correct one and the ambiguity
+does not arise.  We record the general caution because $F146$'s tabulated
+central wavelengths alone span $1.305$--$1.538\,\mu$m, an $18\%$ range
+before any physics, which maps to $24\%$ in $k/k_V$.
 
 \paragraph{C23 --- the discrete degeneracies, and why signs travel in
 pairs.}  For a static binary with no parallax, $(u_0, \alpha) \rightarrow

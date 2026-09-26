@@ -1141,6 +1141,67 @@ def test_both_samplers_reject_the_same_bad_shared_knob(sampler, bad):
     assert list(bad)[0] in str(exc.value)
 
 
+def test_partners_change_the_difference_vector_but_not_the_base_or_the_stream():
+    """
+    Given a packed population and a separate partner archive,
+    When propose() is called with partners=,
+    Then the base is still pop[i], the difference comes from the archive,
+    And passing partners=pop reproduces the no-partners call BIT FOR BIT.
+
+    This is the mechanical half of review 2.4.20.  ptde_async draws DE
+    partners from whatever states are visible, and visibility is weighted by
+    evaluation speed, which correlates with position -- so the kernel
+    depends on the proposing chain's own cost and the plain Metropolis ratio
+    does not correct for it.  The fix hands propose() a snapshot archive.
+    Two properties make it safe, and both are asserted here: the BASE must
+    stay current (proposing from a stale base would be a different bug --
+    the acceptance test compares against the CURRENT lp), and the rng draw
+    sequence must not move, since tests elsewhere in this file pin the
+    proposal path as bit-identical.
+    """
+    # ARRANGE -- same construction the bit-identical test below uses
+    from exozippy.samplers._common import RawLayout
+
+    rng = np.random.default_rng(7)
+    states = [_mixed_state(rng) for _ in range(6)]
+    layout = RawLayout(states[0], list(states[0]))
+    pop = layout.pack_many(states)
+    archive = pop + 100.0  # unmistakably different states
+    i, gamma = 2, 0.5
+
+    # ACT / ASSERT -- partners=pop is exactly the old behaviour
+    a = layout.propose(np.random.default_rng(11), pop, i, gamma, jitter=0.0)
+    b = layout.propose(
+        np.random.default_rng(11), pop, i, gamma, jitter=0.0, partners=pop
+    )
+    assert np.array_equal(a, b), "partners=pop must be the identity case"
+
+    # the archive supplies the DIFFERENCE, the base stays pop[i]
+    c = layout.propose(
+        np.random.default_rng(11), pop, i, gamma, jitter=0.0, partners=archive
+    )
+    # archive = pop + const, so every difference vector is IDENTICAL to the
+    # live one -- the constant cancels -- which pins that only the
+    # difference is taken from the archive and the base is untouched.
+    assert np.allclose(c, a), (
+        "a constant-offset archive must give the same proposal: the offset "
+        "cancels in the difference and the base is pop[i], not archive[i]"
+    )
+
+    # and a genuinely different archive moves the proposal, but not the base
+    archive2 = pop[::-1].copy()
+    d = layout.propose(
+        np.random.default_rng(11), pop, i, gamma, jitter=0.0, partners=archive2
+    )
+    assert not np.allclose(d, a), "a reordered archive must change the step"
+    # and the base is STILL pop[i]: with gamma -> 0 the archive cannot
+    # matter at all, whatever it holds.
+    z = layout.propose(
+        np.random.default_rng(11), pop, i, 0.0, jitter=0.0, partners=archive2
+    )
+    assert np.allclose(z, pop[i]), "at gamma=0 the proposal must be the base"
+
+
 # ---------------------------------------------------------------------------
 # Packed populations (review 6.4.2)
 # ---------------------------------------------------------------------------
@@ -1547,10 +1608,11 @@ def test_ladder_health_report_warns_only_when_communication_limited(caplog):
         )
         # The warning must NAME the recommended rung count,
         # ceil(2*Lambda)+1 = 13.  Asserted on the number rather than on a
-        # surrounding phrase: the remediation text was reworded once the
-        # measurements showed `n_temps: auto` cannot satisfy this criterion
-        # (it is self-consistent only at 0.50 swap acceptance), and a test
-        # pinned to the old wording fails on a message that is more correct.
+        # surrounding phrase: the remediation text has been reworded twice
+        # (once when `n_temps: auto` was measured unable to satisfy this
+        # criterion, once when round trips were measured not to buy mode
+        # mixing), and a test pinned to wording fails on a message that is
+        # more correct.
         assert any(
             "13" in r.message and "n_temps" in r.message
             for r in caplog.records
@@ -1560,6 +1622,40 @@ def test_ladder_health_report_warns_only_when_communication_limited(caplog):
     assert (
         ladder_health_report(np.array([1.0]), np.zeros(1), np.zeros(1)) is None
     )
+
+
+def test_ladder_health_warning_separates_transport_from_mode_mixing(caplog):
+    """
+    Given a communication-limited ladder,
+    When the health report warns,
+    Then it says round trips are TEMPERATURE transport and does not promise
+      they will fix mode mixing, and it names what does carry between-mode
+      traffic.
+
+    Why: the rung count is the remedy for the criterion and NOT for the
+    thing a reader usually wants it for.  Measured on a 27-D Gaussian at a
+    fixed ladder, the cold chains' far-mode fraction is 0.27-0.35 at a
+    24-nat barrier and 0.05-0.09 at a 78-nat one at every T_max from 16 to
+    8500, while an 8-nat barrier equilibrates even at zero round trips.
+    The earlier version of this warning recommended a rung count two
+    sentences before explaining why that count would not work, and the
+    DC2018 sweep sat exactly there.
+    """
+    import logging
+
+    from exozippy.samplers.ladder import ladder_health_report
+
+    temps = _geometric_ladder(8, 200.0)
+    with caplog.at_level(logging.WARNING, logger="exozippy.samplers.ptde"):
+        ladder_health_report(temps, np.full(7, 20.0), np.full(7, 100.0))
+
+    msg = [r.message for r in caplog.records]
+    assert len(msg) == 1
+    assert "TEMPERATURE" in msg[0]
+    assert "DO NOT EXPECT ROUND TRIPS TO FIX MODE MIXING" in msg[0]
+    assert "store_hot_chains" in msg[0]
+    # and the trade it must not let a reader make silently
+    assert "10*T_max" in msg[0]
 
 
 def test_the_wrap_up_barrier_measures_the_draw_phase_only(monkeypatch):
@@ -1905,3 +2001,106 @@ def test_mode_hop_summary_is_silent_when_hops_are_off(caplog):
         )
 
     assert not [r for r in caplog.records if "DE mode hops" in r.message]
+
+
+def test_adaptation_window_does_not_shrink_when_draws_grow():
+    """
+    Given the same tune length and a growing draw phase,
+    When the tune-phase adaptation cadence is computed,
+    Then the number of windows does not fall -- asking for more draws must
+      not buy less step-size tuning.
+
+    The cadence used to BE log_every = (tune + draws)//20, and since the
+    adaptation only fires during tune the window count was
+    20 * tune/(tune+draws).  A DC2018 production run (tune 5000, draws
+    50000) got exactly ONE: one sqrt-damped correction, gamma 0.2695 ->
+    0.1046, then 50,000 draws at 4.7% acceptance against a 20% target.
+    The 27-D transport bench (tune 385, draws 1158) got five, reached 21%,
+    and looked healthy -- which is how it survived.
+    """
+    from exozippy.samplers.ptde import adaptation_window
+
+    # ARRANGE / ACT -- fixed tune, ten and a hundred times the draws
+    tune = 5000
+    counts = []
+    for draws in (5000, 50000, 500000):
+        log_every = max(1, (tune + draws) // 20)
+        counts.append(tune // adaptation_window(tune, log_every))
+
+    # ASSERT
+    assert counts[0] >= 20
+    assert min(counts) >= 20, f"window count collapsed with draws: {counts}"
+    # and the production shape specifically, which used to get one
+    assert tune // adaptation_window(5000, 2750) == 20
+
+
+def test_adaptation_window_never_adapts_less_often_or_on_noise():
+    """
+    Given short runs, where the old cadence was already frequent,
+    When the window is computed,
+    Then it is never LONGER than the old one (no run loses tuning) and
+      never shorter than MIN_ADAPT_WINDOW unless the old one already was.
+
+    The floor is not cosmetic: the first version of this fix used
+    tune//20 outright, giving a 15-step window on a 300-step tune, and the
+    ladder adaptation -- which reads the same window's swap rates -- began
+    re-spacing on noise.  test_ptde_deo's DEO arm went from hundreds of
+    round trips to zero.
+    """
+    from exozippy.samplers.ptde import MIN_ADAPT_WINDOW, adaptation_window
+
+    for tune, draws in ((300, 400), (20, 20), (385, 1158), (200, 200)):
+        log_every = max(1, (tune + draws) // 20)
+        w = adaptation_window(tune, log_every)
+        assert w <= log_every, (tune, draws, w, log_every)
+        assert w >= min(MIN_ADAPT_WINDOW, log_every), (tune, draws, w)
+
+    # tune = 0 (a pure draw run) has no tune phase to adapt in
+    assert adaptation_window(0, 137) == 137
+
+
+def test_gamma_adapts_on_a_tune_window_not_a_run_length_window(caplog):
+    """
+    Given two runs with the SAME tune length and very different draw counts,
+    When each tunes gamma,
+    Then both get the same number of adaptation windows.
+
+    Why: the cadence used to be `log_every = (tune + draws) // 20`, and the
+    adaptation only fires during tune, so the number of windows was
+    20 * tune/(tune+draws) -- asking for more draws bought LESS step-size
+    tuning.  A DC2018 production run (tune 5000, draws 50000) got exactly
+    ONE window: it applied a single sqrt-damped correction, 0.2695 ->
+    0.1046, then sampled 50,000 draws at 4.7% acceptance against a 20%
+    target.  The 27-D bench at tune 385 / draws 1158 got five, reached 21%,
+    and looked healthy -- so every short test hid it.
+    """
+    import logging
+
+    def _count_gamma_updates(tune, draws):
+        model = _simple_model()
+        with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+            caplog.clear()
+            ptde_sample(
+                model,
+                _MinimalSystem(),
+                draws=draws,
+                tune=tune,
+                n_temps=2,
+                T_max=2.0,
+                cores=1,
+                seed=42,
+            )
+        return sum("PTDE gamma:" in r.getMessage() for r in caplog.records)
+
+    # ARRANGE / ACT -- same tune, 10x the draws.  tune=1000 puts both arms
+    # above MIN_ADAPT_WINDOW, so the cadence is the tune-based one in both
+    # and the comparison is about the bug rather than about the floor.
+    short = _count_gamma_updates(tune=1000, draws=1000)
+    long_ = _count_gamma_updates(tune=1000, draws=10000)
+
+    # ASSERT: the long run must not be starved of tuning
+    assert short > 1, "the short run should get several adaptation windows"
+    assert long_ >= short - 1, (
+        f"a longer draw phase starved the tuning: {short} windows at "
+        f"draws=1000 against {long_} at draws=10000"
+    )

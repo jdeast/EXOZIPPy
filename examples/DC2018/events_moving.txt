@@ -1,0 +1,20 @@
+# DC2018 2L1S events REMOVED from the static sweep (JDE 2026-09-22): the
+# answer key's planet orbit, applied as linear ds/dt, dalpha/dt at the truth,
+# improves chi2 over the static truth by more than 25 (~5 sigma for two
+# parameters).  Measured by dc18_orbital_motion_signal.py; re-admitted when the
+# orbital-motion rung exists.  Event 001 is a cataclysmic variable (class dccv).
+# event  signal_dchi2  phase_turn_deg  P_yr    s_true   q_true
+008       29.9      6.0    26.06   1.9216   0.000692
+012     5768.4      8.9    10.78   1.0329   0.000025
+032     1231.1     22.5     3.28   0.7357   0.000031
+040      258.9    112.7     1.27   0.3931   0.000758
+050      340.6     65.3     2.55   0.5410   0.000241
+062      527.8      5.7    22.91   1.4591   0.019929
+081       77.5     28.5     6.04   1.0451   0.007219
+095       49.4     18.0     8.38   0.9472   0.000073
+100       28.8     15.8     6.09   0.9613   0.000074
+124       35.9     71.0     2.35   0.9128   0.001795
+128     6262.0     84.8     1.27   0.9931   0.001212
+186     9569.5      5.1    11.51   0.7442   0.000133
+267       86.9     10.2     6.26   1.0310   0.000367
+001   (cataclysmic variable, not a lens)

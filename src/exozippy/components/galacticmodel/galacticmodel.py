@@ -69,6 +69,11 @@ stays microlensing-agnostic.
 
 logger = logging.getLogger(__name__)
 
+#: defaults.yaml's ra/dec initvals (degrees): a star still sitting exactly here
+#: with no user or data provenance was never positioned.
+ANCHOR_PLACEHOLDER_RA_DEG = 180.0
+ANCHOR_PLACEHOLDER_DEC_DEG = 0.0
+
 # The frame, the line-of-sight basis and the position transform live in
 # physics.py (the numpy layer) so the start-value hints in
 # mulensing/lens.py use exactly the code this likelihood uses.
@@ -605,6 +610,68 @@ class GalacticModel(Component):
                     supersedes_bounds=True,
                 )
 
+    def _require_anchor_position(self, stars):
+        """Refuse to build the prior on an anchor star nobody positioned.
+
+        The whole prior -- density, d^2 volume, velocity frame, the three
+        branch Gaussians, for EVERY star -- is a function of one line of
+        sight, the anchor's.  A star left at defaults.yaml's ra/dec (180, 0)
+        is Galactic (l 276, b +60), and a sight line leaving the plane at
+        60 deg makes the density fall exponentially with distance: the
+        2026-09 DC2018 sweep ran every event that way (the configs pinned the
+        Lens's coordinates and anchored on the Source) and reported source
+        distances and radii at half their true values for a week before the
+        cause was found (notes 2026-09-24).  Nobody wants a Galactic prior
+        without saying where it is, so this is an error, not a warning.
+
+        "Set" means the provenance ledger says the start came from the user
+        or from data (a hint pushed by an instrument).  A Parameter with no
+        ledger at all (tests, scripts) is left alone: the ledger is the only
+        witness that distinguishes "left at the default" from "unknown".
+        """
+        # A coordinate is "unset" when the provenance ledger does not credit it
+        # to the user or to data AND its start value is still defaults.yaml's
+        # placeholder.  Both halves matter: tests position stars by writing
+        # `star.ra.initval = ...` straight past the ledger (provenance says
+        # "default", value says otherwise -- positioned), and a mock Parameter
+        # has no ledger at all (getattr, not a method call).  The placeholders
+        # are pinned by tests/test_galactic_anchor_position.py.
+        placeholder = {
+            "ra": np.radians(ANCHOR_PLACEHOLDER_RA_DEG),
+            "dec": np.radians(ANCHOR_PLACEHOLDER_DEC_DEG),
+        }
+        unset = []
+        for name, param in (("ra", stars.ra), ("dec", stars.dec)):
+            src = getattr(param, "element_initval_source", lambda i: None)(
+                self.anchor_idx
+            )
+            if src in ("user", "data", "solved"):
+                continue
+            if np.isclose(
+                float(param.element_start(self.anchor_idx)),
+                placeholder[name],
+                rtol=0.0,
+                atol=1e-12,
+            ):
+                unset.append(name)
+        if not unset:
+            return
+        names = getattr(stars, "names", None)
+        label = (
+            names[self.anchor_idx]
+            if names and self.anchor_idx < len(names)
+            else str(self.anchor_idx)
+        )
+        missing = " and ".join(f"star.{label}.{n}" for n in unset)
+        raise ValueError(
+            f"[{self.prefix}] the galactic model's anchor star '{label}' "
+            f"(star index {self.anchor_idx}) has no sky position: {missing} "
+            f"still at the defaults.yaml value. The whole density and "
+            f"kinematic prior is evaluated along this star's line of sight, "
+            f"so set star.{label}.ra and star.{label}.dec in the params file "
+            f"(or point 'anchor_idx' at a star that has them)."
+        )
+
     def _warn_if_anchor_coords_sampled(self, stars, ra_rad, dec_rad):
         """Warn once if the anchor star's ra/dec are SAMPLED, since the
         line-of-sight basis below is built from their start values and frozen.
@@ -654,6 +721,7 @@ class GalacticModel(Component):
         # error whenever n_blocks and n_stars disagreed and neither was 1.
         # Keeping the matrix 2-D (and the direction cosines scalar) lets it
         # broadcast over any number of stars by construction.
+        self._require_anchor_position(stars)
         ra_rad = stars.ra.element_start(self.anchor_idx)
         dec_rad = stars.dec.element_start(self.anchor_idx)
         self._warn_if_anchor_coords_sampled(stars, ra_rad, dec_rad)

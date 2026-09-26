@@ -1,0 +1,66 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N dsprofile
+#$ -t 1-5
+#$ -o dc18_dsprofile.$JOB_ID.$TASK_ID.log
+#
+# Profile the optimized logp along the SOURCE DISTANCE, term by term
+# (dc18_ds_profile.py): pin star.distance[1] on a grid, re-optimize every
+# other parameter from the nearest posterior draws, and print which named
+# terms slope with distance.  This replaces the draw-by-draw dissection in
+# the notes, whose kinematic numbers carried several nats of per-draw
+# velocity scatter.
+#
+#   task 1  194, the truth-seeded Vega-zeropoint run (ab194/truthsrc_vega)
+#   task 2  194, the sweep run (AB zeropoint 22.0)            -- same event,
+#           different photometric zero point: does the profile's SHAPE
+#           depend on it?
+#   task 3  223, the sweep run: D_s/truth 0.70, a second event
+#   task 4  194 truthsrc_vega, the same grid with the source Teff PINNED at
+#           5257 K -- the key's own spectral-type code (styp 6.0) calibrated
+#           on its 293 lenses; the class-median lens radius there is 0.822,
+#           the key's R_s exactly.  Does the profile still slope inward when
+#           the star is forced to be what the key says it is?
+#   task 5  194 truthsrc_vega at the TRUTH configuration, D = 9980, Teff =
+#           5257, R = 0.822, everything else optimized: how far below the
+#           free optimum is the truth, and which term pays for it?
+#
+# The optimizer is gradient-free (the magnification Op has none), so the
+# light-curve shape/flux/noise parameters stay at the start draw and Powell
+# runs over the star, event, SED and Mann parameters.
+#
+# Truth D_s: 194 = 9980 pc, 223 = 6718 pc.
+#
+# NOTE the editable install: this runs whatever is checked out in
+# ~/python/EXOZIPPy at import time; the commit is echoed below.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+export OMP_NUM_THREADS=${NSLOTS:-4}
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD) on $(git -C $HOME/python/EXOZIPPy branch --show-current)   $(date)"
+
+case "$SGE_TASK_ID" in
+  1) EV=194; DIR=ab194/truthsrc_vega; GRID=3500,4500,5500,6500,7500,8500,9500,9980,10500,11500 ;;
+  2) EV=194; DIR=sweep/194;           GRID=3500,4500,5500,6500,7500,8500,9500,9980,10500,11500 ;;
+  3) EV=223; DIR=sweep/223;           GRID=2500,3500,4500,5500,6718,7500,8500,9500 ;;
+  4) EV=194; DIR=ab194/truthsrc_vega; GRID=3500,4500,5500,6500,7500,8500,9500,9980,10500,11500
+     EXTRA="--extra-pin star.teff[1]=5257" ;;
+  5) EV=194; DIR=ab194/truthsrc_vega; GRID=9980
+     EXTRA="--extra-pin star.teff[1]=5257 --extra-pin star.radius[1]=0.822" ;;
+  *) echo "bad task id $SGE_TASK_ID"; exit 1 ;;
+esac
+
+python dc18_ds_profile.py --event $EV --run-dir $DIR \
+    --pin "star.distance[1]=9980" --grid "$GRID" --restarts 2 --maxfev 10000 $EXTRA
+echo "exit $?   $(date)"

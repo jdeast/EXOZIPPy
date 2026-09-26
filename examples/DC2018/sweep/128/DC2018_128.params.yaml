@@ -4,12 +4,24 @@ band.W149.u1:
 band.Z087.u1:
   initval: 0.0
   sigma: 0
+mulensinstrument.Roman_W149.err_scale:
+  lower: 0.5
+  upper: 2.0
+mulensinstrument.Roman_W149.log_f_total:
+  lower: -1.5061003999999998
+  upper: 2.4938996
 mulensinstrument.Roman_W149.out_scale:
   initval: 0.02620317530024311
   upper: 0.2620317530024311
 mulensinstrument.Roman_W149.zeropoint:
   mu: 22.0
   sigma: 0.02
+mulensinstrument.Roman_Z087.err_scale:
+  lower: 0.5
+  upper: 2.0
+mulensinstrument.Roman_Z087.log_f_total:
+  lower: -2.2058867996594014
+  upper: 1.7941132003405986
 mulensinstrument.Roman_Z087.out_scale:
   initval: 0.004212521782264211
   upper: 0.042125217822642114
@@ -21,6 +33,12 @@ planet.Companion.radius:
 sed.errscale:
   initval: 1.0
   sigma: 0
+source.Source.t_0:
+  lower: 2458346.505461
+  upper: 2460059.241444
+source.Source.u_0:
+  lower: -3.0
+  upper: 3.0
 star.Lens.dec:
   initval: -28.982
   sigma: 0
@@ -31,5 +49,14 @@ star.Lens.ra:
   initval: 267.595
   sigma: 0
 star.Source.av:
-  mu: 1.94
-  sigma: 0.26
+  mu: 6.43563673961744
+  sigma: 1.1998313404029959
+
+# The Source shares the event's line of sight; galacticmodel anchors on it
+# (anchor_idx 1) and the magnification Op freezes its coordinates.
+star.Source.ra:
+  initval: 267.595
+  sigma: 0
+star.Source.dec:
+  initval: -28.982
+  sigma: 0

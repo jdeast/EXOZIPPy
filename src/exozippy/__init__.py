@@ -58,6 +58,9 @@ if pytensor.config.floatX != "float64":
         f"[global] floatX line in your .pytensorrc."
     )
 
+# Registers EXOZIPPy's custom astropy units (`century`) before any submodule
+# parses a unit string; see units.py for why it must run from here.
+from . import units  # noqa: F401
 from ._version import __version__
 from .system import System
 

@@ -1201,14 +1201,25 @@ class RawLayout:
         for key, (a, b, sh) in zip(self.keys, self.slices):
             stored_raw[key][index] = vec[a:b].reshape(sh)
 
-    def propose(self, rng, pop, i, gamma, jitter=DE_JITTER):
+    def propose(self, rng, pop, i, gamma, jitter=DE_JITTER, partners=None):
         """The ter Braak DE-MC move of ``de_proposal``, on packed rows.
 
         ``pop`` is an (n_chains, total) array; returns a new (total,)
         vector.  Draws exactly what de_proposal draws, in the same order.
+
+        ``partners`` supplies the DIFFERENCE VECTOR's population when it is
+        not the same array the base comes from -- ptde_async's snapshot
+        archive (review 2.4.20).  The base stays ``pop[i]``, which is the
+        point whose logp the acceptance test will compare against; taking
+        the base from a stale array instead would propose from a position
+        the chain is not at.  Same rng draws either way (one ``_pick_two``
+        over an equal-length population, one ``standard_normal``), so the
+        bit stream is unchanged and ``partners=pop`` is exactly the old
+        behaviour.
         """
-        j1, j2 = _pick_two(rng, len(pop), i)
-        step = gamma * (pop[j1] - pop[j2])
+        src = pop if partners is None else partners
+        j1, j2 = _pick_two(rng, len(src), i)
+        step = gamma * (src[j1] - src[j2])
         if jitter:
             step = step + jitter * rng.standard_normal(self.total)
         return pop[i] + step

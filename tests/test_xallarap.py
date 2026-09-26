@@ -205,7 +205,7 @@ def test_shift_is_the_anchored_projected_source_orbit(xal_system):
     nodes = [
         dtau_t,
         du_t,
-        orbit.tp.value[j],
+        orbit.tp_target.value[j],
         orbit.n.value[j],
         orbit.ecc.value[j],
         pt.arctan2(orbit.sinw.value[j], orbit.cosw.value[j]),

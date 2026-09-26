@@ -36,6 +36,12 @@ orbit:
       default:
         func_name: "calc_n"
         deps: [ "period" ]
+  # The sampled conjunction time is the OBSERVED one, in BJD_TDB -- the frame
+  # every published mid-transit time is quoted in, so a literature seed or
+  # prior lands on the right quantity.  The Kepler solves run in the TARGET
+  # frame (components/ltt.py retards the observation times), and take their
+  # epoch from tc_target below, never from here.  JDE 2026-09-22: the plain
+  # names carry BJD_TDB; the target frame is `*_target`.
   tc:
     lower: 2000000.0
     upper: 3000000.0
@@ -46,21 +52,59 @@ orbit:
     latex: "T_C"
     description: "Time of Conjunction"
 
+  # TARGET-frame conjunction: tc minus the closed-form light-travel shift
+  # -z(tc)*factor/c (physics.calc_tc_target), masked per orbit by `_ltt_mask`
+  # -- a context node Orbit.add_parameter injects from
+  # Orbit._ltt_reporting_mask (1 where some consumer with light_travel_time
+  # on retards this orbit, else 0, and then tc_target == tc exactly).  The
+  # `no_bodies` block is for an orbit without masses (no `a`, so no shift
+  # anywhere in its model): the frames coincide and the row is still there.
+  tc_target:
+    unit: "d"
+    internal_unit: "d"
+    latex: "T_{C,\\rm target}"
+    description: "Time of Conjunction (target frame)"
+    expressions:
+      default:
+        func_name: "calc_tc_target"
+        deps: [ "tc", "a", "ecc", "sinw", "sini", "m_primary", "m_companion", "m_total", "_ltt_mask" ]
+      no_bodies:
+        func_name: "calc_same"
+        deps: [ "tc" ]
+
   # Time of the SECONDARY eclipse (review 8.8.7).  On `orbit` and not on
   # `planet`, unlike EXOFASTv2, because every input it has -- e, omega, tc,
   # P -- is an orbit parameter and `tc` itself lives here; the durations,
   # which need the radius ratio and a/R*, are on `planet` for the mirror
   # reason.  Derived, so a user's `mu`/`sigma` on it becomes a Gaussian on
   # the eclipse PHASE, which is the classical measurement of e cos omega.
+  ts_target:
+    unit: "d"
+    internal_unit: "d"
+    latex: "T_{S,\\rm target}"
+    description: "Time of Eclipse (target frame)"
+    periodic: {param: "period"}
+    expressions:
+      default:
+        func_name: "calc_ts"
+        deps: [ "ecc", "omega", "tc_target", "period" ]
+  # Observed (BJD_TDB) eclipse: ts_target plus the shift at superior
+  # conjunction -- opposite sign to tc's, the classical ~2a/c offset.  A
+  # user's `mu`/`sigma` on `ts` is therefore a Gaussian on the OBSERVED
+  # eclipse time, which is what a published one is.
   ts:
     unit: "d"
     internal_unit: "d"
     latex: "T_S"
     description: "Time of Eclipse"
+    periodic: {param: "period"}
     expressions:
       default:
-        func_name: "calc_ts"
-        deps: [ "ecc", "omega", "tc", "period" ]
+        func_name: "calc_ts_observed"
+        deps: [ "ts_target", "a", "ecc", "sinw", "sini", "m_primary", "m_companion", "m_total", "_ltt_mask" ]
+      no_bodies:
+        func_name: "calc_same"
+        deps: [ "ts_target" ]
 
   # --- Physical scale from the member bodies' masses ---
   m_primary:
@@ -255,6 +299,11 @@ orbit:
     internal_unit: "rad"
     latex: "\\omega_*"
     description: "Argument of Periastron"
+    # An angle from arctan2 sits on the (-180, 180] cut; a posterior across
+    # it is recentered about its mode before reporting (parameter.md,
+    # "Periodic parameters").  Every angle and epoch below carries the same
+    # declaration; the epochs take the orbital period from `period`.
+    periodic: {value: 360.0, unit: "deg"}
     expressions:
       default:
         func_name: "calc_omega"
@@ -294,6 +343,7 @@ orbit:
     internal_unit: "rad"
     latex: "\\Omega"
     description: "Longitude of Ascending Node"
+    periodic: {value: 360.0, unit: "deg"}
     expressions:
       default:
         func_name: "calc_bigomega"
@@ -418,21 +468,40 @@ orbit:
       from_ecc:
         func_name: "calc_ecosw_from_ecc"
         deps: [ "ecc", "omega" ]
-  tp:
+  # TARGET-frame periastron: the epoch every Kepler solve in the tree uses
+  # (transit, RV, RM, astrometry, the lens orbit, ltt.py itself).
+  tp_target:
     unit: "d"
     internal_unit: "d"
-    latex: "T_P"
-    description: "Time of Periastron"
+    latex: "T_{P,\\rm target}"
+    description: "Time of Periastron (target frame)"
+    periodic: {param: "period"}
     expressions:
       default:
         func_name: "calc_tp"
-        deps: [ "ecc", "sesinw", "secosw", "tc", "n" ]
+        deps: [ "ecc", "sesinw", "secosw", "tc_target", "n" ]
       # A V_c/V_e orbit does not sample secosw/sesinw -- it REPORTS them -- so
       # it cannot consume them here.  Same quantity, written in (e, omega); see
       # physics.calc_tp_from_ecc.
       from_ecc:
         func_name: "calc_tp_from_ecc"
-        deps: [ "ecc", "omega", "tc", "n" ]
+        deps: [ "ecc", "omega", "tc_target", "n" ]
+  # Observed (BJD_TDB) periastron: tp_target plus the shift AT PERIASTRON
+  # (JDE 2026-09-21: "tp_bjd = observed periastron time"), not tc's shift
+  # carried over -- see physics.calc_tp_observed.
+  tp:
+    unit: "d"
+    internal_unit: "d"
+    latex: "T_P"
+    description: "Time of Periastron"
+    periodic: {param: "period"}
+    expressions:
+      default:
+        func_name: "calc_tp_observed"
+        deps: [ "tp_target", "a", "ecc", "sinw", "sini", "m_primary", "m_companion", "m_total", "_ltt_mask" ]
+      no_bodies:
+        func_name: "calc_same"
+        deps: [ "tp_target" ]
   # ---- Rossiter-McLaughlin (spin-orbit) parameters ----------------------
   # Declared only when an rvinstrument enables `rm:` (see components/rm.py).
   # Mirrors EXOFASTv2/allesfast and this component's own secosw/sesinw ->
@@ -483,6 +552,7 @@ orbit:
     internal_unit: "rad"
     latex: "\\lambda"
     description: "Projected Spin-Orbit Angle"
+    periodic: {value: 360.0, unit: "deg"}
     expressions:
       from_sv:
         func_name: "calc_lam_from_sv"

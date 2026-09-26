@@ -1098,7 +1098,7 @@ def slice_bc(grid_dict, bc_values, **bounds):
             - ``MISTv1.2.grid.yaml`` in components.sed
     bc_values : np.ndarray, shape (len(grid_dict.get("grid")[axis]), ... , nfilters)
         Example:
-            # len(teff)=60, len(logg)=11, len(feh)=11, len(av)=13, nfilters=9
+            # len(teff)=60, len(logg)=11, len(feh)=11, len(av)=20, nfilters=9
             bc_values.shape = (60, 11, 11, 13, 9)
     **bounds : keyword arguments of the form
         param=value          # nearest single point

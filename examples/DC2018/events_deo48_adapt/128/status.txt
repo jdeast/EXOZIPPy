@@ -1,0 +1,17 @@
+failed
+Traceback (most recent call last):
+  File "/home/jeastman/python/EXOZIPPy/examples/DC2018/run_event.py", line 414, in main
+    )
+    
+  File "/home/jeastman/python/EXOZIPPy/src/exozippy/run.py", line 149, in run_fit
+    result = _run_fit(config, gui, user_params=user_params)
+  File "/home/jeastman/python/EXOZIPPy/src/exozippy/run.py", line 510, in _run_fit
+    idata = ptde_async_sample(
+        model,
+    ...<20 lines>...
+        progress_callback=gui.progress_callback,
+    )
+  File "/home/jeastman/python/EXOZIPPy/src/exozippy/samplers/ptde_async.py", line 798, in ptde_async_sample
+    f"mean={per_chain_draws.mean():.0f}, "
+    ^^^^^^^^^^^^^^^
+KeyboardInterrupt

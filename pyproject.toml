@@ -103,6 +103,13 @@ dependencies = [
     "celerite2>=0.3.3,<0.4.0",
     "corner>=2.2.3,<3.0.0",
     "mulensmodel>=3.9.0,<4.0.0",
+    # Imported DIRECTLY by components/mulensing/op.py, so declared directly
+    # rather than inherited through mulensmodel's looser >=5.3.5. The 5.6
+    # floor carries the BinaryMag2 large-source safedist fix (our upstream
+    # PR valboz/VBMicrolensing#72, review 8.14.1): before it, the point-source
+    # shortcut could never fire for q >= 0.01 and rho > ~1.6, so a far source
+    # cost ~0.1 s/call. op.py's far-field guard still covers MultiMag2 (8.14.3a).
+    "VBMicrolensing>=5.6,<6.0",
     "jplephem>=2.24,<3.0",
     "lightkurve>=2.6.0,<3.0.0",
     # 0.4.0 ships cp312/cp313/cp314 wheels (manylinux_2_28 -> glibc 2.28/el8,

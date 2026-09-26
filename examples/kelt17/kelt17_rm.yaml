@@ -1,0 +1,67 @@
+# KELT-17 b -- full example converted 1:1 from EXOFASTv2 examples/kelt17
+# (12 ground-based transits in 7 bands + SED + parallax + TRES RVs).
+# THIS CONFIG: everything except Doppler tomography (RM carries the
+# spin-orbit information).
+
+run:
+  name: "kelt17_rm"
+
+prefix: "fitresults_rm/KELT-17b"
+
+star:
+  - name: "A"
+    mist: False
+
+sed:
+  file: "kelt17.sed.yaml"
+
+planet:
+  - name: "b"
+
+orbit:
+  - name: "b"
+    primary: ["A"]
+    companion: ["b"]
+
+transit:
+  - {name: "CROW_I", file: "n20150305.I.CROW.dat", band: "I"}
+  - {name: "KUO_I", file: "n20150312.I.KUO.dat", band: "I"}
+  - {name: "Whitin_g", file: "n20150312.Sloang.Whitin.dat", band: "Sloang"}
+  - {name: "Whitin_i", file: "n20150312.Sloani.Whitin.dat", band: "Sloani"}
+  - {name: "Pvdk_z", file: "n20150312.Sloanz.Pvdk.dat", band: "Sloanz"}
+  - {name: "KUO_V", file: "n20150312.V.KUO.dat", band: "V"}
+  - {name: "WCO_z", file: "n20151104.Sloanz.WCO.dat", band: "Sloanz"}
+  - {name: "MVRC_g", file: "n20160226.Sloang.MVRC.dat", band: "Sloang"}
+  - {name: "MVRC_i", file: "n20160226.Sloani.MVRC.dat", band: "Sloani"}
+  - {name: "PEST_B", file: "n20160306.B.PEST.dat", band: "B"}
+  - {name: "ZRO_I", file: "n20160312.I.ZRO.dat", band: "I"}
+  - {name: "MVRC_r", file: "n20160331.Sloanr.MVRC.dat", band: "Sloanr"}
+
+band:
+  - {name: "B", filter: "B"}
+  - {name: "I", filter: "I"}
+  - {name: "Sloang", filter: "Sloang"}
+  - {name: "Sloani", filter: "Sloani"}
+  - {name: "Sloanr", filter: "Sloanr"}
+  - {name: "Sloanz", filter: "Sloanz"}
+  - {name: "V", filter: "V"}
+
+rvinstrument:
+  # out-of-transit orbit RVs + the two in-transit RM sequences,
+  # merged into one TRES file; `rm: b` adds the RM anomaly (it is
+  # ~0 out of transit, so the tag safely covers all points).
+  - name: "TRES"
+    file: "KELT-17.TRES.rv"
+    rm: "b"
+    rm_band: "V"
+
+parameter_file: "kelt17_full.params.yaml"
+
+sampler:
+  method: numpyro
+  tune: 2000
+  draws: 4000
+  chains: 4
+  cores: 4
+  target_accept: 0.95
+  recompute_trace: True

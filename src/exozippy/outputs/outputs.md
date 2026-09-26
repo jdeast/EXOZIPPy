@@ -86,6 +86,17 @@ reports both an estimate's precision (RSE%) and the population's spread (CV%),
 and `CSV_COLUMNS_PLAIN`/`CSV_COLUMNS_MODE` above are two fixed layouts with one
 error pair. That is a new layout, not a new value, and it has no channel yet.
 
+**A periodic parameter is recentered about its mode before the interval is
+taken.** An angle from `arctan2` or an epoch within its period can straddle
+its branch cut, and the quantiles of the split draws put the median in the
+empty middle with an interval spanning the whole range. `_summarize_array`
+takes a `period=` and shifts the draws by whole periods about their histogram
+mode first (EXOFASTv2's `exofast_recenter`), per subset, so a per-mode row is
+recentered on its own mode. The declaration (`periodic:` in defaults.yaml),
+the sibling-period spelling for `tp`/`ts`, and where `distribute_posterior`
+applies it are in `src/exozippy/components/parameter.md`, "Periodic
+parameters are recentered about their mode".
+
 ## LaTeX macro names
 
 - **Every piece of a generated LaTeX macro name has exactly one implementation, in `outputs/texutils.py`** (`DIGIT_WORDS`, `idx_to_words`, `mode_word`, `mode_suffix`) -- because the name `\<varname><idx><suffix>` is built in *two* modules: `parameter.py` **emits** the `\providecommand`, `outputs/latex.py` **refers** to it from the deluxetable body, and `run.py` reuses `mode_suffix` a third time for the per-mode plot filenames. A drift between emitter and referrer spells a macro that was never defined ("Undefined control sequence" at the end of a long fit) or, worse, one that exists and holds another parameter's value. It lives in `texutils` and not in `parameter.py` because `components -> outputs.texutils` is an existing edge (`latex_escape`) while the reverse would close an import cycle; `outputs/modes.py` re-exports `mode_suffix` so it still reads as a modes concept at its call sites. Note two deliberately different conventions for the same mode `k`: the value macros take `mode_suffix(k)` (`\ezteffmodeone`) while the mode-*weight* macros take the bare `mode_word(k)` (`\ezmodeweightone`), since `\ezmodeweight` is already a mode-specific stem. Both are 1-based labels of a 0-based index, and that `+1` lives in `mode_word` alone. `tests/test_latex_macro_xref.py` pins the cross-reference itself -- every `\ez...` the table cites must be defined by the variable file, checked statically and, where a TeX install exists, by really running `pdflatex` over the macro set.

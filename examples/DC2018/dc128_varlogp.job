@@ -1,0 +1,53 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q sThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc128var
+#$ -o dc128_varlogp.$JOB_ID.log
+#
+# The ladder formula assumes Var(logp) = D/2 (a D-dim Gaussian).  Inverting
+# the measured communication barrier says this model behaves like D_eff ~ 38,
+# i.e. Var(logp) ~ 19 against the assumed 13.5.  That is a prediction about a
+# quantity we already store, so check it directly.
+#
+# Var(lp) must be measured WITHIN chain: across chains it is inflated by
+# mode-hopping and by any residual non-convergence, neither of which is the
+# Gaussian fluctuation the formula is about.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+cd $HOME/python/EXOZIPPy/examples/DC2018
+python -u - <<'PY'
+import numpy as np, arviz as az
+D = 27
+print(f"assumed Var(logp) = D/2 = {D/2:.1f}   predicted from Lambda: ~19\n")
+for d in ("events_fixedmmx", "events_polish1200", "events"):
+    p = f"{d}/128/fitresults/DC2018_128_trace.nc"
+    try:
+        idata = az.from_netcdf(p)
+    except Exception as e:
+        print(f"{d:<20s} unreadable: {e}"); continue
+    lp = None
+    for grp in ("sample_stats", "posterior"):
+        g = getattr(idata, grp, None)
+        if g is None: continue
+        for k in ("lp", "logp", "lp_"):
+            if k in g:
+                lp = np.asarray(g[k].values, float); break
+        if lp is not None: break
+    if lp is None:
+        print(f"{d:<20s} no lp variable found"); continue
+    if lp.ndim == 1: lp = lp[None, :]
+    # burn the first half; within-chain variance only
+    half = lp.shape[1] // 2
+    v_within = float(np.mean(np.var(lp[:, half:], axis=1)))
+    v_total = float(np.var(lp[:, half:]))
+    print(f"{d:<20s} chains={lp.shape[0]:>3d} draws={lp.shape[1]:>6d}  "
+          f"Var(lp) within-chain={v_within:8.2f}  total={v_total:8.2f}  "
+          f"-> D_eff(within)={2*v_within:6.1f}")
+PY

@@ -26,16 +26,31 @@ Conventions
   calculated one), via the Filter class.
 * Extinction IS applied along the Av axis:
   tau(lam) = ext(lam)/ext(0.55um) * Av / 1.086 (models/extinction_law.ascii),
-  so BC(Av) = M_bol(unextincted) - M_X(extincted). The shipped tables
-  carry the same 13-point Av axis (0 to 6 mag) and DO vary along it --
-  an earlier version of this note claimed they did not, and that was
-  wrong. Measured at teff = 5600 K, logg = 2.5, [Fe/H] = 0, the
+  so BC(Av) = M_bol(unextincted) - M_X(extincted). The tables NOW IN THE
+  TREE carry a 13-point Av axis (0 to 6 mag) and DO vary along it.
+
+  A PREVIOUS VERSION OF THIS NOTE USED THAT FACT TO RETRACT THE ORIGINAL
+  BUG REPORT, AND THE RETRACTION WAS WRONG.  It measured tables this
+  generator had ALREADY OVERWRITTEN at the same paths -- so it measured
+  the replacement and absolved the original.  Checked against git (the
+  tables at 9be83c19, "Changed models/filters directory structure"): the
+  original NextGen/2MASS table IS flat in Av.  For one model it reads
+  BC_J = 1.7775 at every one of Av = 0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4,
+  0.6, 0.8, 1.0, 2.0 and 1.7774 at Av = 4 and 6: dBC/dAv = -0.0000 over
+  a six-magnitude axis.  The bug was real and this generator fixes it.
+  To compare against the originals, `git show 9be83c19:<path>` -- and
+  JOIN ON THE KEY, because the row order differs (the originals iterate
+  logg inside Av, these iterate Av inside logg) and a row-by-row diff
+  silently compares different models, which is worth ~1 mag of fictional
+  disagreement.
+
+  Measured at teff = 5600 K, logg = 2.5, [Fe/H] = 0, the
   least-squares dBC/dAv is -0.303 (2MASS_J), -0.126 (2MASS_Ks), -0.704
-  (Gaia_G), -0.072 (WISE_W1); no shipped column is flat in Av, in any
-  of 2MASS/GAIA/Generic/Keck/TESS/WISE. The three narrow bands there
+  (Gaia_G), -0.072 (WISE_W1); no REGENERATED column is flat in Av, in
+  any of 2MASS/GAIA/Generic/Keck/TESS/WISE. The three narrow bands there
   match -A_lam/Av from models/extinction_law.ascii at the band's
   effective wavelength (-0.305, -0.125, -0.072) to under 1%, i.e. the
-  shipped Av dependence IS this same extinction law; only Gaia_G
+  regenerated Av dependence IS this same extinction law; only Gaia_G
   departs from its single-wavelength value (-0.865), as a passband
   that wide must.
 
@@ -229,7 +244,90 @@ def _target_axes(model: str, model_root: Path) -> Dict[str, np.ndarray]:
         with open(grid_yaml, "r") as f:
             grid = yaml.safe_load(f)["grid"]
         return {k: np.asarray(v, dtype=float) for k, v in grid.items()}
-    return peek_grid_axes(model=model, model_root=model_root)
+    axes = peek_grid_axes(model=model, model_root=model_root)
+    return {k[: -len("_pts")]: v for k, v in axes.items()}
+
+
+#: Av axis for Galactic-bulge work: the shipped axis, EXTENDED, not refined.
+#:
+#: WHY EXTEND.  The shipped axis stops at 6.0 mag and
+#: `SED._inject_grid_bounds` makes the grid extents the sampled parameter's
+#: EXACT SUPPORT through the logit transform -- so `av` cannot exceed 6 and a
+#: bulge fit is truncated rather than warned (review 2.9.16).  Inverting the
+#: DC2018 challenge's own red-clump extinctions through
+#: models/extinction_law.ascii, its 293 sightlines need A_V from 1.69 to
+#: 19.04 (median 2.62, p95 10.06): 11% are past 6.0.
+#:
+#: HOW FAR.  Set by what is OBSERVABLE, not by what is tabulated.  The
+#: largest FITTABLE requirement is 15.19 +/- 1.33 -- event 100, the faintest
+#: sightline with a released light curve (source fraction 0.434, baseline S/N
+#: 23, so source S/N ~10).  A_V ~ 19 appears only in the extinction table,
+#: with no light curve, and at that depth a source like these sits at S/N 2-3
+#: and carries no SED information.  20.0 clears the largest fittable value by
+#: 3.6 sigma, which is the margin that keeps the posterior off the bound; the
+#: top few magnitudes exist to prevent truncation, not because anything is
+#: measured there.
+#:
+#: WHY THE EXISTING 2-MAG SPACING IS KEPT ABOVE Av=6, and this is the part
+#: that is easy to get expensively wrong.  Measured curvature |d2BC/dAv2| at
+#: high Av (p95 over all 660 (Teff, logg) cells of the shipped tables) is
+#: 0.0389 for Gaia_G against 0.0007 for 2MASS_J -- sixty times larger,
+#: because a wide blue passband reweights as the spectrum reddens.  Sizing
+#: the axis on Gaia_G would demand h=0.5 and nearly quadruple the grid FOR
+#: EVERY USER.  But at A_V = 15 there IS no Gaia measurement to interpolate:
+#: A_G is then 11.6 mag, so a bulge clump giant (M_G ~ 0, m ~ 14.5
+#: unreddened) sits at m = 26 -- five magnitudes past Gaia's limit.  The same
+#: arithmetic removes Bessell B and V, TESS (limit ~16 against m = 23.8) and
+#: all of 2MASS (limits J 15.8, H 15.1, K 14.3 against 19.1, 17.3, 16.4).
+#: What survives A_V = 15 is Roman's own two bands, deep ground-based IR of
+#: VVV class, and WISE -- and the worst curvature among THOSE is WFI_F146 at
+#: 0.00825, which needs only h < 2.20 mag to stay under 0.005.  The shipped
+#: 2-mag step therefore costs 0.0041 mag where it is used, already inside the
+#: Landolt-era target, and refining it would buy precision in bands that
+#: cannot be observed at that extinction.
+#:
+#: COST: 20 points against the shipped 13, i.e. 1.5x (841 KB -> ~1.3 MB per
+#: feh file), and only in a range that was previously unreachable.
+#:
+#: KNOWN AND DELIBERATELY NOT FIXED HERE: for a user WITH optical data at
+#: MODERATE extinction, the shipped 2-mag steps between Av = 2, 4 and 6
+#: already cost ~0.019 mag in Gaia_G -- a pre-existing limitation of the
+#: shipped grid, not of this extension.  Refining 1-6 would bloat the grid
+#: for everyone to serve that case, so it is a separate decision.
+BULGE_AV_PTS = np.concatenate(
+    [
+        # the shipped axis, unchanged: the curvature is HIGHEST below Av=1, so
+        # its fine sampling is exactly where it is needed
+        np.array(
+            [0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.6, 0.8, 1.0, 2.0, 4.0, 6.0]
+        ),
+        # ... continued at the same 2-mag cadence to a ceiling that cannot
+        # truncate a bulge posterior
+        np.arange(8.0, 20.0 + 2.0, 2.0),
+    ]
+)
+
+
+def validate_av_pts(av_pts):
+    """Check and normalize an Av axis.  Module-level so it is testable.
+
+    Kept out of make_bc_tables' body deliberately: a test of the axis
+    contract should not need the 313 MB model tree or a Zenodo fetch, which
+    ensure_model_data would trigger before the body was ever reached.
+    """
+    arr = np.asarray(av_pts, float)
+    if arr.ndim != 1 or arr.size < 2 or np.any(np.diff(arr) <= 0):
+        raise ValueError(
+            "av_pts must be a strictly increasing 1-D vector; got shape "
+            f"{arr.shape}"
+            + (f" with diffs {np.diff(arr)[:5]}" if arr.size > 1 else "")
+        )
+    if arr[0] != 0.0:
+        raise ValueError(
+            "av_pts must start at 0.0 -- BC(Av=0) is the unextincted "
+            f"reference every row is differenced against; got {arr[0]}"
+        )
+    return arr
 
 
 def make_bc_tables(
@@ -237,6 +335,7 @@ def make_bc_tables(
     model: str = "NextGen",
     model_root: Path | str = DEFAULT_MODEL_ROOT,
     overwrite: bool = False,
+    av_pts: Sequence[float] | None = None,
 ) -> List[Path]:
     """
     Generate BC columns for the given SVO filter IDs (grouped per facility)
@@ -251,10 +350,16 @@ def make_bc_tables(
     from them would mix two pipelines in one column. `overwrite=True`
     recomputes the requested columns in full regardless.
 
+    ``av_pts`` replaces the target grid's Av axis (validate_av_pts); e.g.
+    BULGE_AV_PTS. Only the Av values a column does not hold yet are
+    computed, so extending the axis costs only the new values.
+
     Returns the list of tables written, one per facility that had work.
     """
     model_root = Path(model_root)
     axes = _target_axes(model, model_root)
+    if av_pts is not None:
+        axes["av"] = validate_av_pts(av_pts)
     alias_df = _load_alias_table()
 
     # group by facility, keep the BC-table column names (MIST convention).
@@ -396,6 +501,17 @@ def generate_missing_facility(
     Auto-generation hook used by bc_grid.build_bc_grid when a facility's
     BC directory is missing: build tables for the requested SVO filters.
     Returns True on success.
+
+    A DEVELOPMENT CONVENIENCE, NOT THE PRODUCTION PATH.  This is affordable
+    only because the spectra it reads are plot-resolution; the
+    full-resolution atmospheres are ~250 GB and nobody should download those
+    to add one filter.  So it does not survive the move to them, and the
+    expected path for a new filter is to REQUEST it and have it generated
+    centrally and shipped (JDE 2026-09-17).  See sed.md for the hosted-service
+    alternative, which would also dissolve the large-av and Rv-axis problems.
+
+    Note it builds only the bands the caller happens to ask for, which is how
+    Roman shipped a 2-band table for years while its WFI imaging set has 8.
     """
     wanted = [s for s in svo_names if facility_from_svo_name(s) == facility]
     if not wanted:

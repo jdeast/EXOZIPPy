@@ -48,7 +48,7 @@ def _inputs():
     return config, user_params
 
 
-def _prepared(config, user_params):
+def _prepared(config, user_params, build=True):
     # Removed in the finally below -- see the note in
     # test_seed_quality.py: a bare mkdtemp() is nobody's to collect.
     tmproot = pathlib.Path(tempfile.mkdtemp())
@@ -63,8 +63,13 @@ def _prepared(config, user_params):
     try:
         system = System(copy.deepcopy(config), copy.deepcopy(user_params))
         system.prepare()
-        system.build_model()
-        return {p.label: p for p in system.get_all_parameters()}
+        if build:
+            system.build_model()
+        params = {p.label: p for p in system.get_all_parameters()}
+        # the System itself, for a test that wants to go on and build (or
+        # assert that building is refused)
+        params["__system__"] = system
+        return params
     finally:
         os.chdir(cwd)
         shutil.rmtree(tmproot, ignore_errors=True)
@@ -215,7 +220,9 @@ def test_seeds_are_skipped_without_user_coordinates():
     Given a config whose RA/Dec are left at the defaults.yaml placeholder,
     When start values are resolved,
     Then the proper motions fall back to defaults rather than being seeded off
-    a placeholder direction.
+    a placeholder direction -- and building the model is REFUSED, because a
+    galactic prior with no sky position is a prior for the wrong patch of sky
+    (the 2026-09 DC2018 sweep ran that way: notes 2026-09-24).
 
     The prior's mean is a function of direction, so seeding from a placeholder
     would be worse than not seeding.
@@ -226,9 +233,23 @@ def test_seeds_are_skipped_without_user_coordinates():
         if key.endswith(".ra") or key.endswith(".dec"):
             del user_params[key]
 
-    # Act
-    params = _prepared(config, user_params)
+    # Act: prepare only -- the seeds are decided at stage 3/4
+    params = _prepared(config, user_params, build=False)
 
     # Assert: back to the defaults.yaml value, not a galactic-model number.
-    pm_ra = np.atleast_1d(np.asarray(params["star.pm_ra"].initval, float))
+    # Parameter objects only exist once the model is built (stage 6), so
+    # read the resolved start value off the ConfigManager instead.
+    system = params["__system__"]
+    pm_ra = np.atleast_1d(
+        np.asarray(
+            system.config_manager.resolve("star", "pm_ra", shape=(2,))[
+                "initval"
+            ],
+            float,
+        )
+    )
     assert pm_ra[1] == pytest.approx(-3.0)
+
+    # And the galactic model refuses to build on the unpositioned anchor.
+    with pytest.raises(ValueError, match="has no sky position"):
+        params["__system__"].build_model()

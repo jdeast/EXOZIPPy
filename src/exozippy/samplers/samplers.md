@@ -75,6 +75,40 @@ draws in the model plots (`run.get_draws`, unseeded so the overlay honestly
 shows spread -- see its docstring), and floating-point non-associativity
 across a different core count.
 
+## The tuning window is not the logging window (2.4.21)
+
+`gamma` and the ladder adapt during TUNE only, at window boundaries. Those
+boundaries used to BE `log_every = (tune + draws) // 20`, so the number of
+adaptation windows was `20 * tune/(tune+draws)` -- **asking for more draws
+bought less step-size tuning.**
+
+A DC2018 production run (`tune 5000, draws 50000`) got **one** window. It
+applied a single sqrt-damped correction, `gamma 0.2695 -> 0.1046`, and then
+sampled 50,000 draws at **4.7%** T=1 acceptance against a `target_accept` of
+**0.20**, with every rung at 0.030-0.050. The 27-D transport bench
+(`tune 385, draws 1158`) got five windows, reached 0.210 at `gamma 0.3239`,
+and looked perfectly healthy -- which is exactly how this survived: every
+short test gets 6-10 windows, and only production is starved.
+
+`adaptation_window(tune, log_every)` owns the cadence now: at most
+`log_every`, so no run ever adapts LESS often than it did, and at least
+`MIN_ADAPT_WINDOW` (50) steps, because both consumers read a window's
+acceptance or swap rates. That floor is load-bearing -- the first cut used
+`tune//20` outright, which is a 15-step window on a 300-step tune, and the
+ladder began re-spacing on noise:
+`test_ptde_deo.py::test_deo_achieves_higher_round_trip_rate_than_random`
+went from hundreds of round trips to zero. Production moves 1 window -> 20;
+short runs keep their old cadence exactly.
+
+**What it plausibly explains, and what is not yet measured.** A chain at 3.8%
+acceptance barely decorrelates between swap attempts, and production attempts
+one every step (`swap_interval` defaults to 1), so a replica carries a stale
+`lp` up and down the ladder -- which is the assumption DEO's transport theory
+makes and the shape of the 0-1 round trips per 55,000 swap rounds seen on
+every sweep event. Whether fixing the cadence restores transport is an
+open measurement, not a claim. Tests: `tests/test_ptde.py`'s three
+`adaptation_window` / `gamma_adapts` cases.
+
 ## `swap_schedule`: DEO, and why `random` is still here
 
 `sampler: {swap_schedule: deo}` is the default and is what you want. It is the
@@ -96,6 +130,48 @@ And the failure is not merely slow. **One random arm lost a mode**: it reported
 solution had been seeded and was sitting in that same run's rejected-seed
 ledger. A schedule that can silently return half the posterior is not a
 performance choice.
+
+**And a ladder on DEO can still make zero round trips -- but round trips are
+TEMPERATURE transport, and buying more of them does not buy mode mixing.**
+Two things are measured, both on the 27-D Gaussian of
+`examples/DC2018/pt_transport_bench.py`, at a FIXED ladder (`n_temps = 24`,
+`n_chains = 54`) and 2M evaluations per configuration.
+
+*Round trips are controlled by the path length.* Across `T_max` 4, 16, 50,
+200, 1000, 8500 they go 1774, 249, 58, 6, 0-1, 0, with Lambda 2.8, 5.6, 7.8,
+10.2, 12.8, 15.8. Lambda 5.6 and 7.8 transport perfectly well, so there is no
+"ceiling" in Lambda; and since a longer path at fixed rungs IS a higher
+barrier, this says "shorten the path and transport returns", not "T_max is
+causal".
+
+*But mode balance does not follow.* With the target bimodal, the cold chains'
+far-mode fraction (0.5 is correct) is 0.27-0.35 at a 24-nat barrier and
+0.05-0.09 at a 78-nat one, **at every `T_max` from 16 to 8500** -- while an
+8-nat barrier equilibrates everywhere, including at `T_max = 8500` where there
+are zero round trips, because the DE proposals cross it directly. (DC2018 062
+is the same story in production: 41,674 inter-mode transitions at `T=1` with
+zero round trips.) A low `T_max` transports and cannot cross; a high one
+crosses and cannot transport.
+
+**And the scanned range is the optimistic end.** Those barrier heights were
+chosen from the mode report's `delta vs best seed`, which is peak-to-PEAK --
+the gap between two optima. Measured peak-to-VALLEY on a real event
+(`examples/DC2018/dc18_barrier_profile.py`, DC2018 152, straight line between
+the two modes' best draws in raw coordinates with the whitening restored):
+two modes **4.3 nats apart peak-to-peak sit either side of a 655-nat
+valley**, a factor of 150. A straight line is one path, so 655 is an upper
+bound -- but the scan above already fails at 78, so a true barrier anywhere
+near this makes the conclusion stronger, not weaker.
+
+So `ladder_health_report`'s rung recommendation is the remedy for the
+CRITERION and not for what a reader usually wants it for, and it now says so.
+Where basins are far apart the traffic comes from multi-seed starts, the
+hot-rung suppressed-mode search (`store_hot_chains`), per-mode evidence
+weighting or explicit mode jumps. **And do not shorten the ladder to buy round
+trips**: the hot-rung search's reach is `10 x T_max` (2000 nats at the default
+200, 500 at 50), and it is what found DC2018 223's truth basin. Full trail:
+`notes/pt_round_trip_collapse.txt`. Tests: `tests/test_ptde.py`'s two
+`ladder_health_report` cases.
 
 **So why keep it?** One real use, and one cheap one. The real use is as the
 CONTROL for diagnosing ladder transport: review 2.4.9 (`ptde_async`'s ladder
@@ -269,6 +345,62 @@ parametrized over both samplers and both knobs. So the useful question is never 
 validated" -- it is **"which shared knobs does exactly one of the two
 samplers validate, and which shared buffers does exactly one of them
 manage?"** Ask it of anything `run.py` forwards to both.
+## `de_partner_snapshot`: async takes DE partners from an archive, not from
+## whatever is visible
+
+`sampler: {de_partner_snapshot: true}` is the default and is a CORRECTNESS
+setting, not a tuning one (review 2.4.20, JDE-proposed).
+
+`ptde_async` chains advance as fast as their likelihood evaluates, and on the
+microlensing Op path evaluation cost rises steeply with caustic proximity --
+that heavy tail is the whole reason async exists. So a chain is slow BECAUSE
+of where it is, and partner states taken "as available" are weighted toward
+chains in cheap regions. The proposal kernel then depends on the proposing
+chain's own cost, and the plain Metropolis ratio does not correct for it:
+detailed balance breaks in a direction that correlates with the physics.
+
+**Time-staleness by itself is NOT the argument**, and the module docstring's
+wording invites that mistake. At stationarity `x_a(t1) - x_b(t2)` is the
+difference of two draws from the same target, so the time indices do not
+enter its distribution at all. What bites is the speed-POSITION correlation
+above, and non-stationarity during burn-in, where "the chains represent the
+posterior" is exactly what is false.
+
+The fix is one archive per rung, refreshed when that rung's SLOWEST chain
+advances, so every chain proposes from the same array. This is the
+DEMetropolisZ construction (ter Braak & Vrugt 2008) -- difference vectors
+from an archive rather than live states -- and `demcz` already ships it here,
+so the validity argument is published rather than invented.
+
+Three properties to preserve if you touch this:
+
+- **The BASE stays `current_state[k][i]`.** `RawLayout.propose` returns
+  `pop[i] + gamma*(partners[j1] - partners[j2])`; only the difference comes
+  from the archive. Taking the base from the archive would propose from a
+  position the chain is not at, against an acceptance test that compares the
+  CURRENT lp.
+- **The rng stream does not move.** One `_pick_two` over an equal-length
+  population, one `standard_normal`, so `partners=pop` is bit-for-bit the old
+  behaviour -- which the tests that pin the proposal path depend on.
+  `tests/test_ptde.py::test_partners_change_the_difference_vector_but_not_the_base_or_the_stream`.
+- **The key is ptde_async-ONLY, and classified as such** in run.py's
+  `METHOD_ONLY_SAMPLER_KEYS`. It is the mirror of `rung_thin_factor`: `ptde`'s
+  population is synchronized by construction, so there is no archive to take
+  a snapshot of.
+
+What it costs is lag, worst exactly where the population is not yet
+stationary. One pathologically slow chain freezes its rung's archive; that is
+unbounded today, and a max-lag forced refresh is the obvious extension.
+
+**What the evidence does and does not say.** The testable prediction
+"stranded chains are the slow ones" FAILED on ab194: the 3 good chains had
+lag-1 lp autocorrelation 0.9998 against the 75 stranded ones' 0.9933 -- the
+stranded chains moved faster. But lp autocorrelation is movement in lp, not
+evaluation wall-time, and per-chain timing was never collected
+(`collect_rung_timing` was off). So the mechanism is UNTESTED rather than
+refuted, the fix rests on the correctness argument alone, and those numbers
+must not be cited as support for it.
+
 ## `de_mode_hop`: the counters the adapter reads must share one window
 
 ter Braak's gamma=1 mode hop (`sampler: {de_mode_hop: p}`, default 0.0 = off)

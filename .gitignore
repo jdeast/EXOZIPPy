@@ -45,3 +45,72 @@ src/exozippy/components/sed/models/
 repo_dump.txt
 src/exozippy/components/sed/bc_testing.ipynb
 examples/hat3/hat3_mist.sbatch
+
+# ---------------------------------------------------------------------------
+# RUN ARTIFACTS.  `examples/*/fitresults/` above only ever covered the one
+# directory name the early examples used; every real run since writes its
+# output next to its config, under whatever directory the sweep chose
+# (examples/DC2018/sweep/194/, ab194/av_true/, ...).  Left untracked-but-not-
+# ignored, a single `git add -A` stages gigabytes -- one DC2018 trace is
+# 4.4 GB and one corner plot is 48 MB -- and `git status` is unreadable.
+# These are all products of a fit, reproducible from the config, the data and
+# the commit; the config and the data stay tracked.
+*_trace.nc
+*_trace_detailed.pdf
+*_corner.png
+*_corner_*.png
+*_lens_corner.png
+*_results.csv
+*_summary.txt
+*_modes.txt
+*_whitening.json
+*_paper.tex
+*_table.tex
+*_definitions.tex
+*_rejected_modes.tex
+*_mmexofast.json
+*.log
+
+# mkparam's restart file, at any depth.  The rule above it
+# (`/examples/*/*.params.*.yaml`) only matched one level down, so every
+# sweep subdirectory's copy stayed untracked-but-not-ignored.  The INPUT
+# `*.params.yaml` is deliberately NOT matched: that one is the fit's
+# definition and belongs in the repo.
+*.params.[0-9]*.yaml
+
+# The LaTeX support files the paper writer copies in beside each run.
+**/aastex*.cls
+**/aasjournalv*.bst
+**/references.bib
+
+# Local Claude Code settings and worktree bookkeeping
+.claude/
+
+# Nested-sampling checkpoint trees (UltraNest/dynesty): chains/*.txt,
+# results/points.hdf5, dynesty.ckpt.  1.4 GB across five of them on Hydra,
+# and every byte is reproducible from the config plus the commit -- the
+# same argument as the traces above.
+*_ckpt/
+
+# Whole-suite run captures from the HPC pre-push checks.
+ezsuite6.*.log
+ezsuite6_full.*.txt
+
+# Log variants a bisect left behind.
+*.log.pre-fix
+*.log.post-fix-run1
+
+# `examples/*/fitresults/` above matched one level only; every DC2018 arm
+# writes its own (events_deo48/128/fitresults/, ...).  Same argument as the
+# run artifacts: generated from the config and the commit.
+**/fitresults/
+
+# Per-arm experiment configs in the microlensing example dirs.  They are
+# generated or hand-edited for one investigation, they predate the 8.6.17
+# mulensevent split (so they no longer prepare against the current params
+# files), and tests/test_examples_prepare.py globs examples/**/*.yaml --
+# committing them asserts they are shipped examples, and 160 of them failed
+# CI saying otherwise.  Kept on disk, out of the repo.
+examples/ob140939/ob140939_*.yaml
+examples/ob161003/ob161003_*.yaml
+examples/ob170114/ob170114_*.yaml

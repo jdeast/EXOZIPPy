@@ -43,7 +43,12 @@ from exozippy.system import System
 _GRID = {
     "teffsed": (2600.0, 10000.0),
     "feh": (-4.0, 0.5),
-    "av": (0.0, 6.0),
+    # 0-20 since 2026-09-17: the axis was extended for Galactic-bulge work
+    # (BULGE_AV_PTS), where three of the six DC2018 sweep sightlines need
+    # more than 6 mag and _inject_grid_bounds makes the grid extent the
+    # parameter's exact support.  Asserted against the live grid below, so
+    # this constant only has to agree with the tables on disk.
+    "av": (0.0, 20.0),
 }
 
 

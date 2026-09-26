@@ -383,6 +383,10 @@ lens:
     internal_unit: "rad"
     latex: "\\alpha"
     description: "Source trajectory angle"
+    # Derived from (xalpha, yalpha) by arctan2, so it sits on the
+    # (-180, 180] cut; recentered about its mode before reporting
+    # (components/parameter.md, "Periodic parameters").
+    periodic: {value: 360.0, unit: "deg"}
     debug_print: true
     expressions:
       default:
@@ -395,7 +399,7 @@ lens:
         # context node (Lens.add_parameter), so the per-element slicing
         # passes it through.
         func_name: "calc_alpha_from_orbit"
-        deps: [ "lens_t0_par", "orbit.tp[lens_kep_orbit_map]",
+        deps: [ "lens_t0_par", "orbit.tp_target[lens_kep_orbit_map]",
                 "orbit.n[lens_kep_orbit_map]", "orbit.ecc[lens_kep_orbit_map]",
                 "orbit.sinw[lens_kep_orbit_map]", "orbit.cosw[lens_kep_orbit_map]",
                 "orbit.cosi[lens_kep_orbit_map]", "orbit.bigomega[lens_kep_orbit_map]",
@@ -506,7 +510,7 @@ lens:
         # this mode.  lens_t0_par is a scalar context node
         # (Lens.add_parameter).
         func_name: "calc_s_from_orbit"
-        deps: [ "lens_t0_par", "orbit.tp[lens_kep_orbit_map]",
+        deps: [ "lens_t0_par", "orbit.tp_target[lens_kep_orbit_map]",
                 "orbit.n[lens_kep_orbit_map]", "orbit.ecc[lens_kep_orbit_map]",
                 "orbit.sinw[lens_kep_orbit_map]", "orbit.cosw[lens_kep_orbit_map]",
                 "orbit.cosi[lens_kep_orbit_map]", "orbit.bigomega[lens_kep_orbit_map]",
