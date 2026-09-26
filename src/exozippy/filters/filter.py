@@ -155,6 +155,22 @@ def construct_wave_grid(
     )
 
 
+class _PortableUnpickler(pickle.Unpickler):
+    """Reads .filter pickles written by any supported Python.
+
+    Python 3.13 moved the pathlib classes into ``pathlib._local`` and pickles
+    a Path under that name, which 3.12 cannot import -- so a profile cached
+    or shipped from 3.13 (the Roman WFI.F087/F146 profiles were) raised
+    ModuleNotFoundError on 3.12. ``pathlib`` re-exports the same classes on
+    every version, so resolving through it works everywhere.
+    """
+
+    def find_class(self, module, name):
+        if module == "pathlib._local":
+            module = "pathlib"
+        return super().find_class(module, name)
+
+
 class Filter(BaseQuery):
     SVO_BASE_URL = "https://svo2.cab.inta-csic.es/theory/fps/"
     # Alias of the module-level constant, kept for callers that reach for it
@@ -210,6 +226,11 @@ class Filter(BaseQuery):
 
     def __getstate__(self):
         state = self.__dict__.copy()
+        # A str, not a Path: Python 3.13 moved the pathlib classes into
+        # pathlib._local and pickles them under that name, which 3.12 cannot
+        # import. _read_filter_file replaces this value on load anyway.
+        if isinstance(state.get("filterDirectory"), Path):
+            state["filterDirectory"] = str(state["filterDirectory"])
         return state
 
     def __setstate__(self, state):
@@ -519,7 +540,7 @@ class Filter(BaseQuery):
         filename_filter = self.filterName + ".filter"
         directory = self.filterDirectory
         with open(directory / filename_filter, "rb") as file:
-            state = pickle.load(file)
+            state = _PortableUnpickler(file).load()
 
         self.__setstate__(state)
         # The pickle carries the filterDirectory of the machine that WROTE

@@ -107,6 +107,18 @@ FILTER_SETS: Dict[str, List[str]] = {
     ],
     "Keck": ["Keck/NIRC2.Kp", "Keck/NIRC2.J"],
     "TESS": ["TESS/TESS.Red"],
+    # The full Roman WFI imaging set (master shipped these as a text table
+    # built by make_bc from the downsampled spectra).
+    "Roman": [
+        "Roman/WFI.F062",
+        "Roman/WFI.F087",
+        "Roman/WFI.F106",
+        "Roman/WFI.F129",
+        "Roman/WFI.F146",
+        "Roman/WFI.F158",
+        "Roman/WFI.F184",
+        "Roman/WFI.F213",
+    ],
 }
 
 
