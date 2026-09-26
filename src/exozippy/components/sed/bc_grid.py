@@ -2,28 +2,37 @@
 Bolometric Correction (BC) grid loader and pytensor interpolator.
 
 Given a set of filter names and a model name ("NextGen" in v1),
-it loads the matching per-feh BC files from the `{MODEL}/BCs/{FACILITY}/`
+it loads the matching per-facility BC tables from the `{MODEL}/BCs/`
 tree and builds a pytensor-compatible RegularGridInterpolator over
-(lgTeff, logg, feh, Av) returning a vector of BC values, one per
+(teff, logg, feh, Av) returning a vector of BC values, one per
 requested filter.
 
 File layout assumed (the NextGen tree):
     {model_root}/
         {model}/                     e.g. "NextGen"
             BCs/
-                {facility}/              e.g. "2MASS", "GAIA", "WISE"
-                    feh{+/-X.X}_afe{+/-Y.Y}.{FACILITY}
+                {model}.grid.yaml
+                {FACILITY}.bc.parquet    e.g. "2MASS.bc.parquet"
 
-Each file is whitespace-delimited with 5 header lines (`#` prefixed)
-and columns:
-    lgTef  logg  Fe_H  a_Fe  Av  Rv  <filter1> <filter2> ...
+Each table is a long-format parquet file (one row per grid node),
+written by write_bc_table below, with columns:
+    teff  logg  feh  alpha  Av  Rv  <filter1> <filter2> ...
+Filter columns are named by their MIST BC-column name (see
+resolve_filter_name). `alpha` is PROVENANCE -- the [alpha/Fe] of the
+spectrum a row was computed from (the generator falls back through
+alternate alphas when a node has no alpha = 0 spectrum) -- not a grid
+axis. df.attrs["meta"] carries the table-level metadata and, per filter
+column, its SVO id and how it was computed (see write_bc_table).
+
+The tables are produced by models/NextGen/generate_NextGen_BC_Tables.py
+(full-resolution spectra) or on demand by make_bc.py (the downsampled
+Zenodo spectra); models/NextGen/README.md describes the workflow.
 
 Grid assumptions in v1:
-  * single alpha/Fe slice (afe = 0.0) across all files
-  * single Rv slice (Rv = 3.10) across all files
-  * feh varies across files via filename parsing
-  * (lgTeff, logg, Av) grids are identical across feh files
-  * dataframe created using these files will have axes (teff, logg, feh, av)
+  * single Rv slice (Rv = 3.10) across all tables
+  * (teff, logg, feh, Av) axes are identical across facilities
+    (checked in build_bc_grid)
+  * the grid assembled from these tables has axes (teff, logg, feh, av)
 
 These assumptions hold for the NextGen tree as it currently ships.
 When MIST is added, this loader grows a `model` dispatch so each
@@ -35,7 +44,6 @@ from __future__ import annotations
 
 import itertools
 import os
-import re
 import warnings
 from functools import lru_cache
 from pathlib import Path
@@ -210,87 +218,148 @@ def facility_from_svo_name(svo_name: str) -> str:
 
 
 # -------------------------------------------------------------------
-# BC file parsing
+# BC table I/O (parquet)
 # -------------------------------------------------------------------
 
 # Default root; callers should override via the SED config when not
 # running out of the project directory.
 DEFAULT_MODEL_ROOT = source_code_dir / "models"
 
-# compile pattern for bolometric correction tables
-_FEH_FILENAME_RE = re.compile(
-    r"feh(?P<feh>[+-]\d+\.\d+)_afe(?P<alpha>[+-]\d+\.\d+)\.(?P<facility>\w+)"
-)
+# Stellar-parameter columns every BC table carries; every other column
+# is a filter column. GRID_KEY_COLS are the ones that locate a row on the
+# (teff, logg, feh, Av) grid -- alpha and Rv ride along as provenance.
+BC_PARAM_COLS = ["teff", "logg", "feh", "alpha", "Av", "Rv"]
+GRID_KEY_COLS = ["teff", "logg", "feh", "Av"]
+
+# Bumped from the text tables' "version 1" header field.
+BC_TABLE_VERSION = 2
+
+_BC_TABLE_SUFFIX = ".bc.parquet"
 
 
-def _parse_feh_from_filename(name: str) -> float:
-    m = _FEH_FILENAME_RE.match(name)
-    if not m:
-        raise ValueError(f"Cannot parse feh from BC filename: {name}")
-    return float(m.group("feh"))
+def bc_table_path(model_root: Path | str, model: str, facility: str) -> Path:
+    """Path to the BC table for one (model, facility)."""
+    return Path(model_root) / model / "BCs" / f"{facility}{_BC_TABLE_SUFFIX}"
 
 
-def _read_single_bc_file(path: Path) -> Tuple[pd.DataFrame, List[str]]:
+def bc_filter_columns(df: pd.DataFrame) -> List[str]:
+    """The filter (BC) columns of a BC table, in file order."""
+    return [c for c in df.columns if c not in BC_PARAM_COLS]
+
+
+def read_bc_table(
+    path: Path | str, columns: Sequence[str] | None = None
+) -> pd.DataFrame:
+    """Read a BC table (see write_bc_table for the format).
+
+    `columns` restricts the read to those columns -- the grid-key
+    columns alone are a cheap read, which is what peek_grid_axes uses.
+    df.attrs["meta"] holds the table metadata either way.
     """
-    Parse a single BC file. Returns (DataFrame, filter_column_names).
-
-    The header format is 4 or 5 `#` lines, the fourth/fifth of which contains the
-    column names; pandas' comment="#" skips them, so we reconstruct
-    the column names manually.
-    """
-    # Pull number of filters in file
-    # Pull the header line that starts with "# lgTef"
-    header_line = None
-    with open(path, "r") as f:
-        line_numfilters = -1
-        for l, line in enumerate(f):
-            stripped = line.lstrip("#").strip()
-            if stripped.startswith("filters"):
-                line_numfilters = l + 1
-            if l == line_numfilters:
-                numfilters = int(stripped.split()[0])
-            if stripped.startswith("lgTef"):
-                header_line = stripped
-                break
-    if header_line is None:
-        raise ValueError(f"No column header line found in {path}")
-
-    col_names = header_line.split()
-    df = pd.read_csv(
+    return pd.read_parquet(
         path,
-        sep=r"\s+",
-        engine="c",
-        comment="#",
-        header=None,
-        names=col_names,
+        engine="pyarrow",
+        columns=None if columns is None else list(columns),
     )
 
-    # make changes to the columns' name
-    df.insert(0, "teff", round(10 ** df["lgTef"]))
-    df.rename(columns={"Fe_H": "feh", "a_Fe": "alpha"}, inplace=True)
-    df.drop(columns=["lgTef"], inplace=True)
-    filter_cols = col_names[
-        -numfilters:
-    ]  # after teff, logg, feh, alpha, Av, Rv
 
-    return df, filter_cols
+def find_bc_table(model_root: Path | str, model: str, facility: str) -> Path:
+    """
+    Locate the BC table for one facility, raising the same two errors the
+    SED (and build_bc_grid's auto-generation) key on:
 
-
-def _collect_facility_files(
-    model_root: Path, model: str, facility: str
-) -> List[Path]:
-    subdir = model_root / model / "BCs"
-    if not subdir.is_dir():
+      FileNotFoundError    -- no BC tree at all for `model`
+      NotImplementedError  -- the model exists but `facility` has no table
+    """
+    model_dir = Path(model_root) / model / "BCs"
+    if not model_dir.is_dir():
         raise FileNotFoundError(
             f"Bolometric corrections not calculated for ``{model}`` model. Specify a different model."
         )
-    subdir = subdir / facility
-    if not subdir.is_dir():
+    path = bc_table_path(model_root, model, facility)
+    if not path.is_file():
         raise NotImplementedError(
             f"Bolometric corrections not calculated for ``{facility}``. Specify a different filter set.\n Future implementation will automate this step."
         )
+    return path
 
-    return sorted(subdir.glob(f"feh*_afe+0.0.{facility}"))
+
+def write_bc_table(
+    df_new: pd.DataFrame,
+    path: Path | str,
+    filter_meta: Dict[str, Dict],
+    table_meta: Dict | None = None,
+) -> pd.DataFrame:
+    """
+    Write (or merge into) a BC table.
+
+    Parameters
+    ----------
+    df_new : DataFrame
+        Columns BC_PARAM_COLS plus one column per filter (MIST BC-column
+        names), one row per (teff, logg, feh, Av) grid node.
+    path : Path
+        Destination, normally bc_table_path(model_root, model, facility).
+    filter_meta : dict
+        {filter_column: {...}} provenance for every filter column in
+        df_new -- at least "svo_id"; the generators also record the
+        zeropoint, the flux weighting and the spectra used, so a table
+        whose columns come from different pipelines says so per column.
+    table_meta : dict, optional
+        Table-level metadata (model, facility, mag_system, ...).
+
+    If `path` already exists, its filter columns that df_new does NOT
+    carry are kept unchanged (joined on GRID_KEY_COLS), together with
+    their filter_meta; columns df_new does carry are replaced. A grid
+    mismatch between the two raises rather than writing NaNs.
+
+    Returns the DataFrame written.
+    """
+    path = Path(path)
+    new_cols = bc_filter_columns(df_new)
+    missing_meta = [c for c in new_cols if c not in filter_meta]
+    if missing_meta:
+        raise ValueError(f"No filter_meta given for columns {missing_meta}.")
+
+    meta = {"version": BC_TABLE_VERSION, **(table_meta or {})}
+    filters_meta = {c: filter_meta[c] for c in new_cols}
+
+    df_out = df_new[BC_PARAM_COLS + new_cols]
+    if path.exists():
+        # Merge into the existing table WITHOUT touching its other
+        # columns (they may come from a different pipeline, e.g. the
+        # full-resolution generator vs make_bc's downsampled spectra).
+        df_old = read_bc_table(path)
+        old_meta = df_old.attrs.get("meta", {})
+        keep_old_cols = [
+            c for c in bc_filter_columns(df_old) if c not in new_cols
+        ]
+        if keep_old_cols:
+            df_out = df_out.merge(
+                df_old[GRID_KEY_COLS + keep_old_cols],
+                on=GRID_KEY_COLS,
+                how="left",
+            )
+            if df_out[keep_old_cols].isna().any().any():
+                raise ValueError(
+                    f"Grid-axis mismatch while merging new BC "
+                    f"columns into existing {path}."
+                )
+            old_filters_meta = old_meta.get("filters", {})
+            filters_meta = {
+                **{c: old_filters_meta.get(c, {}) for c in keep_old_cols},
+                **filters_meta,
+            }
+            df_out = df_out[BC_PARAM_COLS + keep_old_cols + new_cols]
+        meta = {**old_meta, **meta}
+
+    df_out = df_out.sort_values(GRID_KEY_COLS).reset_index(drop=True)
+    meta["filters"] = filters_meta
+    df_out.attrs = {"meta": meta}
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df_out.to_parquet(path, compression="snappy", index=False)
+    return df_out
 
 
 def peek_grid_axes(
@@ -304,18 +373,16 @@ def peek_grid_axes(
     with the grid extent BEFORE the full grid is loaded (i.e. during
     SED.__init__, when star.build_parameters hasn't run yet).
 
-    Assumes the grid's (teff, logg, av) axes are identical across
-    facilities and across feh files, so we only need to open one file
-    per model. The feh axis is derived from filenames under the
-    chosen facility directory.
+    Assumes the grid's axes are identical across facilities
+    (build_bc_grid checks this), so only the grid-key columns of one
+    table are read.
 
     Parameters
     ----------
     model : str
         BC model name (selects the first-level subdirectory of model_root).
     model_root : Path
-        Root directory holding the {model}/BCs/{facility}/feh*_afe*.{FAC}
-        tree.
+        Root directory holding the {model}/BCs/{FACILITY}.bc.parquet tree.
 
     Returns
     -------
@@ -330,43 +397,23 @@ def peek_grid_axes(
     if not model_dir.is_dir():
         raise FileNotFoundError(f"BC model directory not found: {model_dir}")
 
-    # Pick the first facility subdir that actually has feh*_afe*.<FAC>
-    # files. We don't care which facility; axes are identical across.
-    facility_dirs = [p for p in sorted(model_dir.iterdir()) if p.is_dir()]
-    if not facility_dirs:
+    # We don't care which facility; axes are identical across.
+    tables = sorted(model_dir.glob(f"*{_BC_TABLE_SUFFIX}"))
+    if not tables:
         raise FileNotFoundError(
-            f"No facility subdirectories under {model_dir}"
+            f"No *{_BC_TABLE_SUFFIX} BC tables found in {model_dir}"
         )
 
-    chosen_fac_dir = None
-    feh_files: List[Path] = []
-    for fac_dir in facility_dirs:
-        candidates = sorted(fac_dir.glob(f"feh*_afe+0.0.{fac_dir.name}"))
-        if candidates:
-            chosen_fac_dir = fac_dir
-            feh_files = candidates
-            break
-    if chosen_fac_dir is None:
-        raise FileNotFoundError(
-            f"No feh*_afe+0.0.<FAC> files found under any facility in "
-            f"{model_dir}"
-        )
+    df = read_bc_table(tables[0], columns=GRID_KEY_COLS)
+    return _grid_axes(df)
 
-    feh_pts = np.array(
-        sorted(_parse_feh_from_filename(p.name) for p in feh_files),
-        dtype=float,
-    )
 
-    df, _ = _read_single_bc_file(feh_files[0])
-    teff_pts = np.sort(df["teff"].unique()).astype(float)
-    logg_pts = np.sort(df["logg"].unique()).astype(float)
-    av_pts = np.sort(df["Av"].unique()).astype(float)
-
+def _grid_axes(df: pd.DataFrame) -> Dict[str, np.ndarray]:
     return {
-        "teff_pts": teff_pts,
-        "logg_pts": logg_pts,
-        "feh_pts": feh_pts,
-        "av_pts": av_pts,
+        "teff_pts": np.sort(df["teff"].unique()).astype(float),
+        "logg_pts": np.sort(df["logg"].unique()).astype(float),
+        "feh_pts": np.sort(df["feh"].unique()).astype(float),
+        "av_pts": np.sort(df["Av"].unique()).astype(float),
     }
 
 
@@ -391,8 +438,7 @@ def build_bc_grid(
     model : str
         BC model name; selects the first-level subdirectory of model_root.
     model_root : Path
-        Root directory holding the {model}/BCs/{facility}/feh*_afe*.{FACILITY}
-        tree.
+        Root directory holding the {model}/BCs/{FACILITY}.bc.parquet tree.
 
     Returns
     -------
@@ -424,43 +470,28 @@ def build_bc_grid(
     for idx, (fac, mist) in enumerate(zip(facilities, mist_names)):
         by_facility.setdefault(fac, []).append((idx, mist))
 
-    # 2. For each facility, load all feh files, keeping only the
-    # requested columns. We stash them per feh so we can later stack
-    # into one monolithic grid. Missing facilities/columns trigger
-    # one-time auto-generation from the model spectra (make_bc.py).
-    per_facility_frames: Dict[str, Dict[float, pd.DataFrame]] = {}
+    # 2. For each facility, read its table, keeping only the requested
+    # columns. Missing facilities/columns trigger one-time
+    # auto-generation from the model spectra (make_bc.py).
+    per_facility_frames: Dict[str, pd.DataFrame] = {}
     for fac, items in by_facility.items():
         fac_svo = [svo_names[idx] for idx, _ in items]
         wanted_cols = [mist for _, mist in items]
 
         try:
-            feh_files = _collect_facility_files(model_root, model, fac)
+            path = find_bc_table(model_root, model, fac)
         except (FileNotFoundError, NotImplementedError):
             from .make_bc import generate_missing_facility
 
             if not generate_missing_facility(fac, fac_svo, model, model_root):
                 raise
-            feh_files = _collect_facility_files(model_root, model, fac)
-        if not feh_files:
-            file_dir = model_root / model / "BCs" / fac
-            raise FileNotFoundError(
-                f"No BC files for facility '{fac}' under {file_dir}"
-            )
+            path = find_bc_table(model_root, model, fac)
 
-        def _read_all(files):
-            frames_ = {}
-            missing_ = set()
-            for p in files:
-                feh = _parse_feh_from_filename(p.name)
-                df, file_filters = _read_single_bc_file(p)
-                missing_ |= set(wanted_cols) - set(file_filters)
-                frames_[feh] = df
-            return frames_, missing_
-
-        raw_frames, missing = _read_all(feh_files)
+        df = read_bc_table(path)
+        missing = set(wanted_cols) - set(bc_filter_columns(df))
         if missing:
             # Facility exists but lacks some requested columns; generate
-            # the missing ones (make_bc merges into the existing files
+            # the missing ones (make_bc merges into the existing table
             # without touching the existing columns).
             from .make_bc import generate_missing_facility
 
@@ -468,9 +499,8 @@ def build_bc_grid(
                 svo_names[idx] for idx, mist in items if mist in missing
             ]
             if generate_missing_facility(fac, miss_svo, model, model_root):
-                raw_frames, missing = _read_all(
-                    _collect_facility_files(model_root, model, fac)
-                )
+                df = read_bc_table(path)
+                missing = set(wanted_cols) - set(bc_filter_columns(df))
         if missing:
             raise NotImplementedError(
                 f"Bolometric corrections unavailable for ``{sorted(missing)}`` "
@@ -484,34 +514,31 @@ def build_bc_grid(
         # df[keep] with a repeated name would return a 2-D slice for that
         # column, breaking the by-name lookup in step 4 below.
         unique_wanted_cols = list(dict.fromkeys(wanted_cols))
-
-        frames: Dict[float, pd.DataFrame] = {}
-        for feh, df in raw_frames.items():
-            keep = ["teff", "logg", "feh", "Av"] + unique_wanted_cols
-            frames[feh] = df[keep].copy()
-        per_facility_frames[fac] = frames
+        per_facility_frames[fac] = df[GRID_KEY_COLS + unique_wanted_cols]
 
     # 3. Adopt the first facility's (teff, logg, feh, Av) axes as the
-    # canonical grid. Every facility must be on that same grid -- but
-    # that is an ASSUMPTION here, not a checked precondition: no other
-    # facility's axes are ever compared against these. Step 4 places
-    # every facility's rows into the canonical axes by searchsorted, so
-    # a facility on a different grid is silently mis-binned (its row
-    # lands in the next canonical cell up) rather than rejected, or
-    # raises IndexError if its values run past the canonical maximum.
-    # The only guard is step 5's NaN check, which catches an
-    # UNDER-populated grid (a facility with fewer points leaves cells
-    # unwritten) but not a mis-binned one (a facility with the same
-    # number of points at different values fills every cell). Compare
-    # the axes here if that ever stops being good enough.
+    # canonical grid, and require every other facility to be on exactly
+    # that grid. Step 4 places rows into the canonical axes by
+    # searchsorted, so a facility on a different grid would otherwise be
+    # silently mis-binned (its row lands in the next canonical cell up)
+    # rather than rejected -- step 5's NaN check only catches an
+    # UNDER-populated grid, not a mis-binned one.
     canonical_fac = next(iter(per_facility_frames))
-    canonical_frames = per_facility_frames[canonical_fac]
-    feh_pts = np.array(sorted(canonical_frames.keys()), dtype=float)
-
-    any_frame = next(iter(canonical_frames.values()))
-    teff_pts = np.sort(any_frame["teff"].unique()).astype(float)
-    logg_pts = np.sort(any_frame["logg"].unique()).astype(float)
-    av_pts = np.sort(any_frame["Av"].unique()).astype(float)
+    axes = _grid_axes(per_facility_frames[canonical_fac])
+    for fac, df in per_facility_frames.items():
+        fac_axes = _grid_axes(df)
+        for key, pts in axes.items():
+            if not np.array_equal(fac_axes[key], pts):
+                raise ValueError(
+                    f"BC table for facility '{fac}' is on a different "
+                    f"{key[:-4]} grid than '{canonical_fac}': "
+                    f"{fac_axes[key]} vs {pts}. Regenerate it on the "
+                    f"{model}.grid.yaml axes."
+                )
+    teff_pts = axes["teff_pts"]
+    logg_pts = axes["logg_pts"]
+    feh_pts = axes["feh_pts"]
+    av_pts = axes["av_pts"]
 
     n_teff, n_logg, n_feh, n_av = (
         len(teff_pts),
@@ -527,17 +554,16 @@ def build_bc_grid(
         (n_teff, n_logg, n_feh, n_av, n_filters), np.nan, dtype=float
     )
 
-    for fac, frames in per_facility_frames.items():
+    for fac, df in per_facility_frames.items():
         items = by_facility[fac]  # [(global_idx, mist_name), ...]
-        for feh_val, df in frames.items():
-            f_idx = int(np.searchsorted(feh_pts, feh_val))
-            t_idx = np.searchsorted(teff_pts, df["teff"].values)
-            g_idx = np.searchsorted(logg_pts, df["logg"].values)
-            a_idx = np.searchsorted(av_pts, df["Av"].values)
-            for filter_idx, mist_name in items:
-                bc_values[t_idx, g_idx, f_idx, a_idx, filter_idx] = df[
-                    mist_name
-                ].values
+        t_idx = np.searchsorted(teff_pts, df["teff"].values)
+        g_idx = np.searchsorted(logg_pts, df["logg"].values)
+        f_idx = np.searchsorted(feh_pts, df["feh"].values)
+        a_idx = np.searchsorted(av_pts, df["Av"].values)
+        for filter_idx, mist_name in items:
+            bc_values[t_idx, g_idx, f_idx, a_idx, filter_idx] = df[
+                mist_name
+            ].values
 
     # 5. Sanity check for gaps. If there are NaNs, the grid is ragged
     # and the interpolator will propagate them; better to raise now.

@@ -3,10 +3,16 @@ Bolometric-correction table generator.
 
 Builds BC tables for arbitrary SVO filters by integrating the shipped
 model spectra (e.g. NextGen, R=150, on the common wavelength grid)
-through SVO filter profiles, and writes them in the same per-feh file
-format the shipped 2MASS/GAIA/WISE tables use, so bc_grid.py loads them
-transparently. This resolves the "future implementation will automate
-this step" TODO in bc_grid._collect_facility_files.
+through SVO filter profiles, and writes them into the same per-facility
+parquet tables (bc_grid.write_bc_table) the shipped 2MASS/GAIA/WISE
+tables use, so bc_grid.py loads them transparently. This resolves the
+"future implementation will automate this step" TODO in
+bc_grid.find_bc_table.
+
+The shipped tables themselves are built from the FULL-resolution spectra
+by models/NextGen/generate_NextGen_BC_Tables.py; this module is the
+on-demand fallback for a filter that has no column yet. Each column's
+filter_meta records which of the two produced it.
 
 Conventions
 -----------
@@ -55,10 +61,11 @@ from ...utilities.zenodo import fetch_assets
 from .bc_grid import (
     DEFAULT_MODEL_ROOT,
     _load_alias_table,
-    _read_single_bc_file,
+    bc_table_path,
     facility_from_svo_name,
     peek_grid_axes,
     resolve_filter_name,
+    write_bc_table,
 )
 
 logger = logging.getLogger(__name__)
@@ -210,9 +217,10 @@ def make_bc_tables(
     """
     Generate BC tables for the given SVO filter IDs (grouped per facility)
     on exactly the (teff, logg, feh, Av) axes of the shipped tables, and
-    write them under {model_root}/{model}/BCs/{FACILITY}/feh*_afe+0.0.{FACILITY}.
+    merge them into {model_root}/{model}/BCs/{FACILITY}.bc.parquet
+    (existing columns of that table are kept unchanged).
 
-    Returns the list of files written.
+    Returns the list of tables written, one per facility.
     """
     model_root = Path(model_root)
     ensure_model_data(model, model_root)
@@ -254,12 +262,9 @@ def make_bc_tables(
         # photon-weighted band normalization: int(S lambda dlam)
         S_norm = np.trapezoid(S * wave_ang, wave_ang, axis=1)
 
-        out_dir = model_root / model / "BCs" / fac
-        out_dir.mkdir(parents=True, exist_ok=True)
-
         new_cols = [c for _, c in items]
+        recs = []
         for feh in feh_pts:
-            recs = []
             for teff in teff_pts:
                 mbol_term = SIGMA_SB * teff**4 / F0_10PC
                 for logg in logg_pts:
@@ -283,59 +288,40 @@ def make_bc_tables(
                     bc = 2.5 * np.log10(fmean / zps[None, :] / mbol_term)
                     for i_av, av in enumerate(av_pts):
                         recs.append(
-                            (float(teff), float(logg), float(av), *bc[i_av])
+                            (
+                                float(teff),
+                                float(logg),
+                                float(feh),
+                                0.0,
+                                float(av),
+                                3.10,
+                                *bc[i_av],
+                            )
                         )
-            df_new = pd.DataFrame(
-                recs, columns=["teff", "logg", "Av"] + new_cols
-            )
+        df_new = pd.DataFrame(
+            recs,
+            columns=["teff", "logg", "feh", "alpha", "Av", "Rv"] + new_cols,
+        )
 
-            fname = f"feh{feh:+.1f}_afe+0.0.{fac}"
-            path = out_dir / fname
-
-            # Merge into an existing facility file WITHOUT touching its
-            # other columns (they may come from a different pipeline,
-            # e.g. the original full-resolution BC computation).
-            keep_old_cols: List[str] = []
-            if path.exists():
-                df_old, old_cols = _read_single_bc_file(path)
-                keep_old_cols = [c for c in old_cols if c not in new_cols]
-                if keep_old_cols:
-                    df_new = df_new.merge(
-                        df_old[["teff", "logg", "Av"] + keep_old_cols],
-                        on=["teff", "logg", "Av"],
-                        how="left",
-                    )
-                    if df_new[keep_old_cols].isna().any().any():
-                        raise ValueError(
-                            f"Grid-axis mismatch while merging new BC "
-                            f"columns into existing {path}."
-                        )
-
-            out_cols = keep_old_cols + new_cols
-            col_hdr = "".join(f"{c:>21s}" for c in out_cols)
-            n_spectra = len(teff_pts) * len(logg_pts)
-            with open(path, "w") as f:
-                f.write(f"# {model}\n")
-                f.write(f"# {fac} (Vega)\n")
-                f.write("#  filters spectra  num Av  num Rv version\n")
-                f.write(
-                    f"#       {len(out_cols):2d}   {n_spectra:4d}     "
-                    f"{len(av_pts):3d}       1       1\n"
-                )
-                f.write(f"# lgTef  logg  Fe_H a_Fe   Av   Rv{col_hdr}\n")
-                # plain arrays: itertuples would mangle column names that
-                # start with a digit (e.g. 2MASS_J)
-                keys = df_new[["teff", "logg", "Av"]].values
-                vals = df_new[out_cols].values
-                for (teff_r, logg_r, av_r), bcs in zip(keys, vals):
-                    bc_str = "".join(f"{b:21.4f}" for b in bcs)
-                    f.write(
-                        f"{np.log10(teff_r):.5f} {logg_r:5.2f} "
-                        f"{feh:5.2f} {0.0:4.1f} "
-                        f"{av_r:4.2f} {3.10:4.2f}{bc_str}\n"
-                    )
-            written.append(path)
-            logger.info(f"Wrote {path}")
+        filter_meta = {
+            col: {
+                "svo_id": svo_id,
+                "zeropoint_Fl_Vega": float(zp),
+                "flux_weighting": "photon",
+                "spectra": f"{model}.spectra.csv (Zenodo, R=150)",
+                "generator": "components/sed/make_bc.py",
+            }
+            for (svo_id, col), zp in zip(items, zps)
+        }
+        path = bc_table_path(model_root, model, fac)
+        write_bc_table(
+            df_new,
+            path,
+            filter_meta,
+            table_meta={"model": model, "facility": fac, "mag_system": "Vega"},
+        )
+        written.append(path)
+        logger.info(f"Wrote {path}")
 
     return written
 

@@ -2,9 +2,10 @@
 Generate bolometric-correction tables for arbitrary SVO filters.
 
 Integrates the shipped model spectra through SVO filter profiles
-(downloading/caching profiles and Vega zeropoints as needed) and writes
-per-feh BC files in the layout components/sed/bc_grid.py loads. Existing
-facility files gain new columns without their existing columns changing.
+(downloading/caching profiles and Vega zeropoints as needed) and merges
+them into the per-facility parquet tables components/sed/bc_grid.py loads.
+Existing facility tables gain new columns without their existing columns
+changing.
 
 Examples:
     poetry run python scripts/make_bc_tables.py Generic/Cousins.I

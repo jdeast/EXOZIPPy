@@ -29,10 +29,10 @@ from . import physics
 from .bc_grid import (
     DEFAULT_MODEL_ROOT,
     RegularGridInterpolator,
-    _collect_facility_files,
     _load_alias_table,
     build_bc_grid,
     facility_from_svo_name,
+    find_bc_table,
     peek_grid_axes,
     resolve_filter_name,
     slice_bc,
@@ -571,9 +571,7 @@ class SED(Component):
             svo = resolve_filter_name(name, alias_df, alias="SVO")
             facility = facility_from_svo_name(svo)
             try:
-                _collect_facility_files(
-                    self.model_root, self.sedmodel, facility
-                )
+                find_bc_table(self.model_root, self.sedmodel, facility)
             except (FileNotFoundError, NotImplementedError) as e:
                 if "/" not in svo:
                     logger.warning(

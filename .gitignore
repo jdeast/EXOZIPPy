@@ -43,3 +43,5 @@ src/exozippy/components/sed/models/
 
 # scripts/dump_code.py default output (a 2+ MB collated copy of the repo).
 repo_dump.txt
+src/exozippy/components/sed/bc_testing.ipynb
+examples/hat3/hat3_mist.sbatch
