@@ -5,20 +5,20 @@ Tests for the BC-table generator (components/sed/make_bc.py):
   - extinction is applied along the Av axis
 """
 
-import shutil
-
 import numpy as np
 import pytest
 
 from exozippy.components.sed.bc_grid import (
     DEFAULT_MODEL_ROOT,
-    _read_single_bc_file,
+    bc_filter_columns,
+    read_bc_table,
+    write_bc_table,
 )
 from exozippy.components.sed.make_bc import make_bc_tables
 
 _NEXTGEN = DEFAULT_MODEL_ROOT / "NextGen"
 _SPECTRA = _NEXTGEN / "BCs" / "NextGen.spectra.csv"
-_SHIPPED_2MASS = _NEXTGEN / "BCs" / "2MASS" / "feh+0.0_afe+0.0.2MASS"
+_SHIPPED_2MASS = _NEXTGEN / "BCs" / "2MASS.bc.parquet"
 
 pytestmark = pytest.mark.skipif(
     not _SPECTRA.exists(),
@@ -29,25 +29,33 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def regenerated_2mass(tmp_path_factory):
     """
-    Build a minimal BC root (solar-feh 2MASS file + spectra symlinks),
-    regenerate the 2MASS_J column there, and return the before/after
-    tables. Module-scoped: the spectra CSV read dominates the runtime.
+    Build a minimal BC root (the solar-feh slice of the shipped 2MASS
+    table + spectra symlinks), regenerate the 2MASS_J column there, and
+    return the before/after tables. Only the solar slice, so make_bc (which
+    works on the axes of the tables it finds) synthesizes one feh, not
+    eleven. Module-scoped: the spectra CSV read dominates the runtime.
     """
     root = tmp_path_factory.mktemp("model_root")
     model_dir = root / "NextGen"
-    (model_dir / "BCs" / "2MASS").mkdir(parents=True)
+    (model_dir / "BCs").mkdir(parents=True)
     for name in ("NextGen.spectra.csv", "NextGen.wavelength.csv"):
         (model_dir / "BCs" / name).symlink_to(_NEXTGEN / "BCs" / name)
-    shutil.copy(
-        _SHIPPED_2MASS, model_dir / "BCs" / "2MASS" / _SHIPPED_2MASS.name
+    shipped = read_bc_table(_SHIPPED_2MASS)
+    before = shipped[shipped["feh"] == 0.0]
+    write_bc_table(
+        before,
+        model_dir / "BCs" / _SHIPPED_2MASS.name,
+        shipped.attrs["meta"]["filters"],
     )
 
+    # overwrite: 2MASS_J is already in the table (written by another
+    # pipeline), which make_bc otherwise leaves alone.
     written = make_bc_tables(
-        ["2MASS/2MASS.J"], model="NextGen", model_root=root
+        ["2MASS/2MASS.J"], model="NextGen", model_root=root, overwrite=True
     )
 
-    before, cols_before = _read_single_bc_file(_SHIPPED_2MASS)
-    after, cols_after = _read_single_bc_file(written[0])
+    after = read_bc_table(written[0])
+    cols_after = bc_filter_columns(after)
     key = ["teff", "logg", "Av"]
     before = before.sort_values(key).reset_index(drop=True)
     after = after.sort_values(key).reset_index(drop=True)

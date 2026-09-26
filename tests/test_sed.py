@@ -1,6 +1,6 @@
 """
 Unit tests for the SED component:
-  - bc_grid.py  : file parsing, grid assembly, slicing, filter name resolution
+  - bc_grid.py  : BC table I/O, grid assembly, slicing, filter name resolution
   - physics.py  : registered physics functions (absbolmag, absmag, appmag, bc)
   - sed.py      : __init__ grid-bound injection, load_data, register_parameters
 """
@@ -9,6 +9,7 @@ import pathlib
 import warnings
 
 import numpy as np
+import pandas as pd
 import pytensor
 import pytensor.tensor as pt
 import pytest
@@ -16,15 +17,18 @@ import yaml
 
 import exozippy.components.sed.physics  # registers calc_absbolmag etc.
 from exozippy.components.sed.bc_grid import (
+    BC_PARAM_COLS,
     DEFAULT_MODEL_ROOT,
     RegularGridInterpolator,
-    _parse_feh_from_filename,
     _range_indices,
-    _read_single_bc_file,
+    bc_filter_columns,
     build_bc_grid,
+    find_bc_table,
     peek_grid_axes,
+    read_bc_table,
     resolve_filter_name,
     slice_bc,
+    write_bc_table,
 )
 from exozippy.physics_registry import PHYSICS_REGISTRY
 
@@ -33,9 +37,7 @@ from exozippy.physics_registry import PHYSICS_REGISTRY
 # ---------------------------------------------------------------------------
 
 _MODEL_ROOT = DEFAULT_MODEL_ROOT
-_SOLAR_FEH_2MASS_NEXTGEN = (
-    _MODEL_ROOT / "NextGen" / "BCs" / "2MASS" / "feh+0.0_afe+0.0.2MASS"
-)
+_2MASS_NEXTGEN = _MODEL_ROOT / "NextGen" / "BCs" / "2MASS.bc.parquet"
 
 
 # A minimal grid_dict mirroring what build_bc_grid / slice_bc expect.
@@ -47,88 +49,197 @@ def _make_grid_dict(axes):
 
 
 # ---------------------------------------------------------------------------
-# Section 1 — File parsing utilities
+# Section 1 — BC table I/O (parquet)
 # ---------------------------------------------------------------------------
 
 
-def test_parse_feh_from_solar_filename_returns_zero():
+def _tiny_bc_table(filter_cols, value=1.0, teffs=(5000.0, 6000.0)):
+    """A complete 2x2x2x2 (teff, logg, feh, Av) BC table."""
+    rows = [
+        (t, g, f, 0.0, a, 3.1)
+        for t in teffs
+        for g in (4.0, 4.5)
+        for f in (-0.5, 0.0)
+        for a in (0.0, 1.0)
+    ]
+    df = pd.DataFrame(rows, columns=BC_PARAM_COLS)
+    for i, col in enumerate(filter_cols):
+        df[col] = value + i
+    return df
+
+
+def test_read_bc_table_returns_dataframe_with_correct_columns():
     """
-    Given the filename 'feh+0.0_afe+0.0.2MASS',
-    When _parse_feh_from_filename is called,
-    Then the returned float should equal exactly 0.0.
-    """
-    # ARRANGE
-    filename = "feh+0.0_afe+0.0.2MASS"
-
-    # ACT
-    result = _parse_feh_from_filename(filename)
-
-    # ASSERT
-    assert result == 0.0
-
-
-def test_parse_feh_from_negative_filename_returns_correct_value():
-    """
-    Given the filename 'feh-2.5_afe+0.0.2MASS',
-    When _parse_feh_from_filename is called,
-    Then the returned float should equal -2.5.
-    """
-    # ARRANGE
-    filename = "feh-2.5_afe+0.0.2MASS"
-
-    # ACT
-    result = _parse_feh_from_filename(filename)
-
-    # ASSERT
-    assert result == -2.5
-
-
-def test_parse_feh_from_malformed_filename_raises_value_error():
-    """
-    Given a filename that does not match the expected pattern,
-    When _parse_feh_from_filename is called,
-    Then a ValueError should be raised.
-    """
-    # ARRANGE
-    bad_filename = "not_a_valid_bc_filename.2MASS"
-
-    # ACT & ASSERT
-    with pytest.raises(ValueError, match="Cannot parse feh"):
-        _parse_feh_from_filename(bad_filename)
-
-
-def test_read_single_bc_file_returns_dataframe_with_correct_columns():
-    """
-    Given the solar-metallicity 2MASS BC NextGen file on disk,
-    When _read_single_bc_file is called,
-    Then the returned DataFrame should contain 'teff', 'logg', 'feh', 'Av'
-    and the three 2MASS filter columns.
+    Given the shipped 2MASS NextGen BC table,
+    When read_bc_table is called,
+    Then the returned DataFrame should carry the stellar-parameter columns
+    and exactly the three 2MASS filter columns.
     """
     # ARRANGE / ACT
-    df, filter_cols = _read_single_bc_file(_SOLAR_FEH_2MASS_NEXTGEN)
+    df = read_bc_table(_2MASS_NEXTGEN)
 
     # ASSERT
-    assert "teff" in df.columns
-    assert "logg" in df.columns
-    assert "feh" in df.columns
-    assert "Av" in df.columns
-    assert set(filter_cols) == {"2MASS_J", "2MASS_H", "2MASS_Ks"}
+    for col in ("teff", "logg", "feh", "Av"):
+        assert col in df.columns
+    assert set(bc_filter_columns(df)) == {"2MASS_J", "2MASS_H", "2MASS_Ks"}
 
 
-def test_read_single_bc_file_teff_column_is_linear_not_log():
+def test_read_bc_table_teff_column_is_linear_not_log():
     """
-    Given the solar-metallicity 2MASS BC NextGen file on disk,
-    When _read_single_bc_file is called,
+    Given the shipped 2MASS NextGen BC table,
+    When read_bc_table is called,
     Then the 'teff' column should contain linear temperature values
     (not log10 values), so all entries should be greater than 100.
     """
     # ARRANGE / ACT
-    df, _ = _read_single_bc_file(_SOLAR_FEH_2MASS_NEXTGEN)
+    df = read_bc_table(_2MASS_NEXTGEN)
 
     # ASSERT
     assert (df["teff"] > 100).all(), (
-        "teff column contains values <= 100; looks like lgTef was not exponentiated"
+        "teff column contains values <= 100; looks like log10(teff) was stored"
     )
+
+
+def test_read_bc_table_carries_per_filter_metadata():
+    """
+    Given the shipped 2MASS NextGen BC table,
+    When read_bc_table is called,
+    Then df.attrs['meta']['filters'] should name the SVO id of every
+    filter column.
+    """
+    # ARRANGE / ACT
+    meta = read_bc_table(_2MASS_NEXTGEN).attrs["meta"]
+
+    # ASSERT
+    assert meta["filters"]["2MASS_J"]["svo_id"] == "2MASS/2MASS.J"
+    assert set(meta["filters"]) == {"2MASS_J", "2MASS_H", "2MASS_Ks"}
+
+
+def test_find_bc_table_raises_not_implemented_for_missing_facility():
+    """
+    Given the NextGen model and a facility with no BC table,
+    When find_bc_table is called,
+    Then NotImplementedError should be raised (the error the SED and the
+    auto-generator key on).
+    """
+    # ACT & ASSERT
+    with pytest.raises(NotImplementedError):
+        find_bc_table(_MODEL_ROOT, "NextGen", "NoSuchFacility")
+
+
+def test_find_bc_table_raises_file_not_found_for_missing_model():
+    """
+    Given a model name with no BC tree,
+    When find_bc_table is called,
+    Then FileNotFoundError should be raised.
+    """
+    # ACT & ASSERT
+    with pytest.raises(FileNotFoundError):
+        find_bc_table(_MODEL_ROOT, "FakeModel_XYZ", "2MASS")
+
+
+def test_write_bc_table_merge_keeps_other_columns_and_their_metadata(tmp_path):
+    """
+    Given a table with columns A and B,
+    When only B is rewritten with new values and a new column C is added,
+    Then A and its metadata are unchanged, B and C take the new values,
+    and the metadata of all three is present.
+    """
+    # ARRANGE
+    path = tmp_path / "Fac.bc.parquet"
+    write_bc_table(
+        _tiny_bc_table(["A", "B"], value=1.0),
+        path,
+        {"A": {"svo_id": "Fac/X.A"}, "B": {"svo_id": "Fac/X.B"}},
+    )
+    new = _tiny_bc_table(["B", "C"], value=10.0)
+
+    # ACT
+    write_bc_table(
+        new, path, {"B": {"svo_id": "Fac/X.B2"}, "C": {"svo_id": "Fac/X.C"}}
+    )
+    df = read_bc_table(path)
+
+    # ASSERT
+    assert (df["A"] == 1.0).all()
+    assert (df["B"] == 10.0).all()
+    assert (df["C"] == 11.0).all()
+    meta = df.attrs["meta"]["filters"]
+    assert meta["A"]["svo_id"] == "Fac/X.A"
+    assert meta["B"]["svo_id"] == "Fac/X.B2"
+    assert meta["C"]["svo_id"] == "Fac/X.C"
+
+
+def test_write_bc_table_merge_raises_on_grid_mismatch(tmp_path):
+    """
+    Given a table on one teff grid,
+    When columns computed on a different teff grid are merged into it,
+    Then a ValueError should be raised instead of writing NaNs.
+    """
+    # ARRANGE
+    path = tmp_path / "Fac.bc.parquet"
+    write_bc_table(_tiny_bc_table(["A"]), path, {"A": {"svo_id": "Fac/X.A"}})
+    shifted = _tiny_bc_table(["B"], teffs=(5000.0, 7000.0))
+
+    # ACT & ASSERT
+    with pytest.raises(ValueError, match="Grid-axis mismatch"):
+        write_bc_table(shifted, path, {"B": {"svo_id": "Fac/X.B"}})
+
+
+def test_build_bc_grid_raises_when_facilities_are_on_different_grids(tmp_path):
+    """
+    Given two facility tables whose teff axes differ but have the same
+    number of points (so the NaN check alone could not see it),
+    When build_bc_grid assembles a filter from each,
+    Then a ValueError naming the teff grid should be raised rather than
+    silently mis-binning the second facility.
+    """
+    # ARRANGE
+    bc_dir = tmp_path / "Toy" / "BCs"
+    write_bc_table(
+        _tiny_bc_table(["Fa_X"]),
+        bc_dir / "Fa.bc.parquet",
+        {"Fa_X": {"svo_id": "Fa/Fa.X"}},
+    )
+    write_bc_table(
+        _tiny_bc_table(["Fb_Y"], teffs=(5000.0, 7000.0)),
+        bc_dir / "Fb.bc.parquet",
+        {"Fb_Y": {"svo_id": "Fb/Fb.Y"}},
+    )
+
+    # ACT & ASSERT
+    with pytest.raises(ValueError, match="different teff grid"):
+        build_bc_grid(["Fa/Fa.X", "Fb/Fb.Y"], model="Toy", model_root=tmp_path)
+
+
+def test_build_bc_grid_places_values_on_the_right_nodes(tmp_path):
+    """
+    Given a toy table whose BC equals teff/1000 + logg + 10*feh + 100*Av,
+    When build_bc_grid assembles it,
+    Then every node of bc_values holds that function of its own axes
+    (a wrong axis order or a mis-binned row would break the identity).
+    """
+    # ARRANGE
+    df = _tiny_bc_table(["Fa_X"])
+    df["Fa_X"] = (
+        df["teff"] / 1000 + df["logg"] + 10 * df["feh"] + 100 * df["Av"]
+    )
+    write_bc_table(
+        df,
+        tmp_path / "Toy" / "BCs" / "Fa.bc.parquet",
+        {"Fa_X": {"svo_id": "Fa/Fa.X"}},
+    )
+
+    # ACT
+    grid = build_bc_grid(["Fa/Fa.X"], model="Toy", model_root=tmp_path)
+
+    # ASSERT
+    t, g, f, a = np.meshgrid(
+        grid["teff_pts"], grid["logg_pts"], grid["feh_pts"], grid["av_pts"],
+        indexing="ij",
+    )
+    expected = t / 1000 + g + 10 * f + 100 * a
+    np.testing.assert_allclose(grid["bc_values"][..., 0], expected)
 
 
 # ---------------------------------------------------------------------------

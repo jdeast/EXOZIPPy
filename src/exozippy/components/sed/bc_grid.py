@@ -2,28 +2,49 @@
 Bolometric Correction (BC) grid loader and pytensor interpolator.
 
 Given a set of filter names and a model name ("NextGen" in v1),
-it loads the matching per-feh BC files from the `{MODEL}/BCs/{FACILITY}/`
+it loads the matching per-facility BC tables from the `{MODEL}/BCs/`
 tree and builds a pytensor-compatible RegularGridInterpolator over
-(lgTeff, logg, feh, Av) returning a vector of BC values, one per
+(teff, logg, feh, Av) returning a vector of BC values, one per
 requested filter.
 
 File layout assumed (the NextGen tree):
     {model_root}/
         {model}/                     e.g. "NextGen"
             BCs/
-                {facility}/              e.g. "2MASS", "GAIA", "WISE"
-                    feh{+/-X.X}_afe{+/-Y.Y}.{FACILITY}
+                {model}.grid.yaml
+                {FACILITY}.bc.parquet    e.g. "2MASS.bc.parquet"
 
-Each file is whitespace-delimited with 5 header lines (`#` prefixed)
-and columns:
-    lgTef  logg  Fe_H  a_Fe  Av  Rv  <filter1> <filter2> ...
+Each table is a long-format parquet file (one row per grid node),
+written by write_bc_table below, with columns:
+    teff  logg  feh  alpha  Av  Rv  <filter1> <filter2> ...
+Filter columns are named by their MIST BC-column name (see
+resolve_filter_name). `alpha` is PROVENANCE -- the [alpha/Fe] of the
+spectrum a row was computed from (the generator falls back through
+alternate alphas when a node has no alpha = 0 spectrum) -- not a grid
+axis. df.attrs["meta"] carries the table-level metadata and, per filter
+column, its SVO id and how it was computed (see write_bc_table).
+
+The tables are produced by models/NextGen/generate_NextGen_BC_Tables.py
+(full-resolution spectra) or on demand by make_bc.py (the downsampled
+Zenodo spectra); models/NextGen/README.md describes the workflow.
+
+Tables grow incrementally. A NaN cell means "not computed yet", so a
+table may be extended along any axis (new Av values, say) for some of
+its filters before the others; write_bc_table merges cell by cell and
+bc_nodes_to_compute tells a generator which (node, filter) cells are
+still missing, so nothing already on disk is recomputed. Readers only
+ever use the complete part of the columns they ask for (complete_axes).
+
+Reads are selective: build_bc_grid reads only the requested filter
+columns, and only the rows inside the fit's parameter bounds (plus the
+bracketing grid point on each side), pushing both down to parquet.
 
 Grid assumptions in v1:
-  * single alpha/Fe slice (afe = 0.0) across all files
-  * single Rv slice (Rv = 3.10) across all files
-  * feh varies across files via filename parsing
-  * (lgTeff, logg, Av) grids are identical across feh files
-  * dataframe created using these files will have axes (teff, logg, feh, av)
+  * single Rv slice (Rv = 3.10) across all tables
+  * facilities may differ in EXTENT along an axis, but inside the span
+    they share their (teff, logg, feh, Av) points agree (checked in
+    build_bc_grid and peek_grid_axes)
+  * the grid assembled from these tables has axes (teff, logg, feh, av)
 
 These assumptions hold for the NextGen tree as it currently ships.
 When MIST is added, this loader grows a `model` dispatch so each
@@ -34,16 +55,20 @@ the same.
 from __future__ import annotations
 
 import itertools
+import json
+import logging
 import os
-import re
 import warnings
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Literal, Sequence, Tuple
+from typing import Callable, Dict, List, Literal, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import pytensor.tensor as pt
+
+logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
 # Filter name plumbing
@@ -210,92 +235,437 @@ def facility_from_svo_name(svo_name: str) -> str:
 
 
 # -------------------------------------------------------------------
-# BC file parsing
+# BC table I/O (parquet)
 # -------------------------------------------------------------------
 
 # Default root; callers should override via the SED config when not
 # running out of the project directory.
 DEFAULT_MODEL_ROOT = source_code_dir / "models"
 
-# compile pattern for bolometric correction tables
-_FEH_FILENAME_RE = re.compile(
-    r"feh(?P<feh>[+-]\d+\.\d+)_afe(?P<alpha>[+-]\d+\.\d+)\.(?P<facility>\w+)"
-)
+# Stellar-parameter columns every BC table carries; every other column
+# is a filter column. GRID_KEY_COLS are the ones that locate a row on the
+# (teff, logg, feh, Av) grid -- alpha and Rv ride along as provenance.
+BC_PARAM_COLS = ["teff", "logg", "feh", "alpha", "Av", "Rv"]
+GRID_KEY_COLS = ["teff", "logg", "feh", "Av"]
+
+# Axis name as it appears in {model}.grid.yaml and in the `bounds` /
+# `axes` dicts below -> the table column holding it.
+AXIS_COLUMNS = {"teff": "teff", "logg": "logg", "feh": "feh", "av": "Av"}
+
+# Grid keys are rounded to this many decimals before any node is matched
+# (merge, coverage, pushdown), so a node written from a yaml literal and
+# the same node parsed from a legacy text table are the same node.
+_KEY_DECIMALS = 6
+
+# Row order on disk. Av is outermost because it is the axis a fit most
+# often truncates (an Av upper limit) and the axis the grid is extended
+# along: with each Av in its own run of row groups, a pushdown filter on
+# Av skips the row groups past the limit instead of decoding them. The
+# loader places rows by value, so nothing depends on this order.
+BC_SORT_COLS = ["Av", "feh", "logg", "teff"]
+_ROW_GROUP_SIZE = 8192
+
+# Bumped from the text tables' "version 1" header field.
+BC_TABLE_VERSION = 2
+
+_BC_TABLE_SUFFIX = ".bc.parquet"
 
 
-def _parse_feh_from_filename(name: str) -> float:
-    m = _FEH_FILENAME_RE.match(name)
-    if not m:
-        raise ValueError(f"Cannot parse feh from BC filename: {name}")
-    return float(m.group("feh"))
+def bc_table_path(model_root: Path | str, model: str, facility: str) -> Path:
+    """Path to the BC table for one (model, facility)."""
+    return Path(model_root) / model / "BCs" / f"{facility}{_BC_TABLE_SUFFIX}"
 
 
-def _read_single_bc_file(path: Path) -> Tuple[pd.DataFrame, List[str]]:
+def bc_filter_columns(df: pd.DataFrame) -> List[str]:
+    """The filter (BC) columns of a BC table, in file order."""
+    return [c for c in df.columns if c not in BC_PARAM_COLS]
+
+
+def bc_table_filter_columns(path: Path | str) -> List[str]:
+    """The filter columns of a BC table on disk, read from its schema only
+    (no data is read)."""
+    return [n for n in pq.read_schema(path).names if n not in BC_PARAM_COLS]
+
+
+def read_bc_meta(path: Path | str) -> Dict:
+    """df.attrs["meta"] of a BC table on disk, read from its schema only.
+
+    pandas stores df.attrs as JSON under the PANDAS_ATTRS key of the
+    parquet schema metadata; reading the footer is enough to get it.
     """
-    Parse a single BC file. Returns (DataFrame, filter_column_names).
+    raw = (pq.read_schema(path).metadata or {}).get(b"PANDAS_ATTRS")
+    if not raw:
+        return {}
+    return json.loads(raw).get("meta", {})
 
-    The header format is 4 or 5 `#` lines, the fourth/fifth of which contains the
-    column names; pandas' comment="#" skips them, so we reconstruct
-    the column names manually.
+
+def _canonical_keys(df: pd.DataFrame) -> pd.DataFrame:
+    """Round the grid-key columns (see _KEY_DECIMALS); returns a copy."""
+    df = df.copy()
+    keys = [c for c in GRID_KEY_COLS if c in df.columns]
+    df[keys] = df[keys].astype(float).round(_KEY_DECIMALS)
+    return df
+
+
+def _pushdown_filters(where: Dict[str, Tuple[float | None, float | None]]):
+    """{axis: (lo, hi)} -> a pyarrow filter list (inclusive, with a
+    rounding tolerance so a bound that IS a grid point keeps that point)."""
+    tol = 0.5 * 10.0**-_KEY_DECIMALS
+    filters = []
+    for axis, (lo, hi) in (where or {}).items():
+        col = AXIS_COLUMNS.get(axis, axis)
+        if lo is not None:
+            filters.append((col, ">=", float(lo) - tol))
+        if hi is not None:
+            filters.append((col, "<=", float(hi) + tol))
+    return filters or None
+
+
+def read_bc_table(
+    path: Path | str,
+    columns: Sequence[str] | None = None,
+    where: Dict[str, Tuple[float | None, float | None]] | None = None,
+) -> pd.DataFrame:
+    """Read a BC table (see write_bc_table for the format).
+
+    `columns` restricts the read to those columns: parquet is columnar, so
+    the other filter columns are never read from disk. The grid-key
+    columns alone are a cheap read, which is what peek_grid_axes uses.
+
+    `where` = {axis: (lo, hi)} (axis names as in AXIS_COLUMNS, inclusive,
+    None for an open end) is pushed down to the parquet reader: row groups
+    whose statistics fall outside the range are skipped and the remaining
+    rows are filtered before they reach pandas.
+
+    df.attrs["meta"] holds the table metadata either way.
     """
-    # Pull number of filters in file
-    # Pull the header line that starts with "# lgTef"
-    header_line = None
-    with open(path, "r") as f:
-        line_numfilters = -1
-        for l, line in enumerate(f):
-            stripped = line.lstrip("#").strip()
-            if stripped.startswith("filters"):
-                line_numfilters = l + 1
-            if l == line_numfilters:
-                numfilters = int(stripped.split()[0])
-            if stripped.startswith("lgTef"):
-                header_line = stripped
-                break
-    if header_line is None:
-        raise ValueError(f"No column header line found in {path}")
-
-    col_names = header_line.split()
-    df = pd.read_csv(
+    return pd.read_parquet(
         path,
-        sep=r"\s+",
-        engine="c",
-        comment="#",
-        header=None,
-        names=col_names,
+        engine="pyarrow",
+        columns=None if columns is None else list(columns),
+        filters=_pushdown_filters(where),
     )
 
-    # make changes to the columns' name
-    df.insert(0, "teff", round(10 ** df["lgTef"]))
-    df.rename(columns={"Fe_H": "feh", "a_Fe": "alpha"}, inplace=True)
-    df.drop(columns=["lgTef"], inplace=True)
-    filter_cols = col_names[
-        -numfilters:
-    ]  # after teff, logg, feh, alpha, Av, Rv
 
-    return df, filter_cols
+def find_bc_table(model_root: Path | str, model: str, facility: str) -> Path:
+    """
+    Locate the BC table for one facility, raising the same two errors the
+    SED (and build_bc_grid's auto-generation) key on:
 
-
-def _collect_facility_files(
-    model_root: Path, model: str, facility: str
-) -> List[Path]:
-    subdir = model_root / model / "BCs"
-    if not subdir.is_dir():
+      FileNotFoundError    -- no BC tree at all for `model`
+      NotImplementedError  -- the model exists but `facility` has no table
+    """
+    model_dir = Path(model_root) / model / "BCs"
+    if not model_dir.is_dir():
         raise FileNotFoundError(
             f"Bolometric corrections not calculated for ``{model}`` model. Specify a different model."
         )
-    subdir = subdir / facility
-    if not subdir.is_dir():
+    path = bc_table_path(model_root, model, facility)
+    if not path.is_file():
         raise NotImplementedError(
             f"Bolometric corrections not calculated for ``{facility}``. Specify a different filter set.\n Future implementation will automate this step."
         )
+    return path
 
-    return sorted(subdir.glob(f"feh*_afe+0.0.{facility}"))
+
+def write_bc_table(
+    df_new: pd.DataFrame,
+    path: Path | str,
+    filter_meta: Dict[str, Dict],
+    table_meta: Dict | None = None,
+    allow_new_nodes: bool = False,
+    replace_columns: Sequence[str] = (),
+) -> pd.DataFrame:
+    """
+    Write (or merge into) a BC table.
+
+    Parameters
+    ----------
+    df_new : DataFrame
+        Columns BC_PARAM_COLS plus one column per filter (MIST BC-column
+        names), one row per (teff, logg, feh, Av) grid node. A NaN cell
+        means "not computed here" and never overwrites an existing value,
+        so a generator can hand over only the (node, filter) cells it
+        actually computed.
+    path : Path
+        Destination, normally bc_table_path(model_root, model, facility).
+    filter_meta : dict
+        {filter_column: {...}} provenance for every filter column in
+        df_new -- at least "svo_id"; the generators also record the
+        zeropoint, the flux weighting and the spectra used, so a table
+        whose columns come from different pipelines says so per column.
+    table_meta : dict, optional
+        Table-level metadata (model, facility, mag_system, ...).
+    allow_new_nodes : bool
+        Whether df_new may carry grid nodes the existing table does not
+        (e.g. new Av values after NextGen.grid.yaml was extended). The
+        generators, which build their nodes from the grid yaml, pass True.
+        Off by default so a table computed on an accidentally different
+        grid raises instead of turning the file ragged.
+    replace_columns : sequence of str
+        Columns of df_new whose EXISTING values are discarded before the
+        merge (and whose metadata is replaced), for a column being
+        recomputed from scratch by a different pipeline. A generator that
+        checkpoints part-way through such a column must pass it on its
+        first write, or the unfinished part would keep the old pipeline's
+        values under the new pipeline's metadata.
+
+    If `path` already exists the merge is cell-wise: every existing value
+    is kept unless df_new carries a non-NaN value for that (node, filter)
+    cell. Filter columns df_new does not carry are untouched, together
+    with their filter_meta. A column that df_new REPLACES in full takes
+    df_new's filter_meta; a column it only extends (new nodes, or cells
+    that were missing) keeps its old metadata, updated by df_new's.
+
+    A node that some filter column has no value at is stored as NaN; the
+    loader only ever reads the complete part of a column (complete_axes),
+    and the generators treat NaN as "still to compute".
+
+    Returns the DataFrame written.
+    """
+    path = Path(path)
+    new_cols = bc_filter_columns(df_new)
+    missing_meta = [c for c in new_cols if c not in filter_meta]
+    if missing_meta:
+        raise ValueError(f"No filter_meta given for columns {missing_meta}.")
+
+    meta = {"version": BC_TABLE_VERSION, **(table_meta or {})}
+    filters_meta = {c: filter_meta[c] for c in new_cols}
+
+    new = _canonical_keys(df_new[BC_PARAM_COLS + new_cols])
+    if new.duplicated(GRID_KEY_COLS).any():
+        raise ValueError("df_new has more than one row for a grid node.")
+    new = new.set_index(GRID_KEY_COLS)
+
+    if path.exists():
+        # Merge into the existing table WITHOUT touching the cells df_new
+        # does not compute (they may come from a different pipeline, e.g.
+        # the full-resolution generator vs make_bc's downsampled spectra).
+        df_old = _canonical_keys(read_bc_table(path))
+        old_meta = df_old.attrs.get("meta", {})
+        old_filters_meta = old_meta.get("filters", {})
+        old = df_old.set_index(GRID_KEY_COLS)
+        for c in replace_columns:
+            if c in old.columns:
+                old[c] = np.nan
+                old_filters_meta.pop(c, None)
+
+        added = new.index.difference(old.index)
+        if len(added) and not allow_new_nodes:
+            raise ValueError(
+                f"Grid-axis mismatch while merging new BC columns into "
+                f"existing {path}: {len(added)} node(s) of the new columns "
+                f"are not on the existing grid, e.g. "
+                f"{dict(zip(GRID_KEY_COLS, added[0]))}. Pass "
+                f"allow_new_nodes=True if the grid is being extended."
+            )
+
+        out = old.reindex(old.index.union(new.index))
+        for c in ["alpha", "Rv"] + new_cols:
+            incoming = new[c].reindex(out.index)
+            if c in out.columns:
+                if c in new_cols:
+                    covered = incoming.reindex(old.index).notna()
+                    replaced = (covered | old[c].isna()).all()
+                    if not replaced:
+                        filters_meta[c] = {
+                            **old_filters_meta.get(c, {}),
+                            **filters_meta[c],
+                        }
+                out[c] = incoming.combine_first(out[c])
+            else:
+                out[c] = incoming
+
+        old_cols = bc_filter_columns(df_old)
+        keep_old_cols = [c for c in old_cols if c not in new_cols]
+        filters_meta = {
+            **{c: old_filters_meta.get(c, {}) for c in keep_old_cols},
+            **filters_meta,
+        }
+        order = old_cols + [c for c in new_cols if c not in old_cols]
+        df_out = out.reset_index()[BC_PARAM_COLS + order]
+        meta = {**old_meta, **meta}
+    else:
+        df_out = new.reset_index()[BC_PARAM_COLS + new_cols]
+
+    df_out = df_out.sort_values(BC_SORT_COLS).reset_index(drop=True)
+    meta["filters"] = {c: filters_meta[c] for c in bc_filter_columns(df_out)}
+    df_out.attrs = {"meta": meta}
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df_out.to_parquet(
+        path,
+        compression="snappy",
+        index=False,
+        row_group_size=_ROW_GROUP_SIZE,
+    )
+    return df_out
+
+
+# -------------------------------------------------------------------
+# Coverage: which part of the grid a set of filter columns fills
+# -------------------------------------------------------------------
+
+
+def _axes_from_keys(keys: pd.DataFrame) -> Dict[str, np.ndarray]:
+    return {
+        f"{axis}_pts": np.sort(keys[col].unique()).astype(float)
+        for axis, col in AXIS_COLUMNS.items()
+    }
+
+
+def complete_axes(
+    df: pd.DataFrame, columns: Sequence[str]
+) -> Dict[str, np.ndarray]:
+    """
+    The largest box of grid nodes on which EVERY one of `columns` has a
+    value -- the part of a BC table a regular-grid interpolator can use.
+
+    A table is ragged when it has been extended for some filters but not
+    yet for others (new Av values computed for 2MASS_J only, say) or when
+    a generator run was interrupted. The nodes where all `columns` are
+    non-NaN are gathered per axis; if their cartesian product is not all
+    present, edge slabs are trimmed, most-incomplete first, until it is.
+    Only EDGE slabs are ever dropped, so the result is always a contiguous
+    run of each axis's points, and never below two points (an axis
+    collapsed to one point cannot be interpolated along). A hole that no
+    such trimming removes raises, because no box around it is honest.
+    Trimming that does happen is warned about: it means some filter's
+    column has gaps that its generator should fill.
+
+    Returns {teff_pts, logg_pts, feh_pts, av_pts}.
+    """
+    df = _canonical_keys(df)
+    columns = list(columns)
+    present = (
+        df[columns].notna().all(axis=1)
+        if columns
+        else pd.Series(True, index=df.index)
+    )
+    keys = df.loc[present, GRID_KEY_COLS]
+    if keys.empty:
+        raise ValueError(f"BC columns {columns} hold no values at all.")
+
+    axes = _axes_from_keys(keys)
+    names = list(axes)
+    pts = [axes[n] for n in names]
+    cube = np.zeros(tuple(len(p) for p in pts), dtype=bool)
+    idx = tuple(
+        np.searchsorted(p, keys[col].values)
+        for p, col in zip(pts, AXIS_COLUMNS.values())
+    )
+    cube[idx] = True
+
+    lo = [0] * len(pts)
+    hi = [len(p) for p in pts]
+    while True:
+        sub = cube[tuple(slice(a, b) for a, b in zip(lo, hi))]
+        if sub.all():
+            break
+        best = None
+        for ax in range(sub.ndim):
+            if sub.shape[ax] <= 2:
+                continue
+            for end, pos in ((0, 0), (1, sub.shape[ax] - 1)):
+                frac = 1.0 - np.take(sub, pos, axis=ax).mean()
+                if frac > 0 and (best is None or frac > best[0]):
+                    best = (frac, ax, end)
+        if best is None:
+            holes = np.argwhere(~sub)[:3]
+            example = [
+                {
+                    n: float(pts[k][lo[k] + i])
+                    for k, (n, i) in enumerate(zip(names, h))
+                }
+                for h in holes
+            ]
+            raise ValueError(
+                f"BC columns {columns} have {int((~sub).sum())} missing "
+                f"node(s) in the interior of their grid (no edge slab can "
+                f"be dropped around them), e.g. {example}; "
+                f"regenerate them (generate_NextGen_BC_Tables.py step 2 "
+                f"computes only the missing nodes)."
+            )
+        _, ax, end = best
+        if end == 0:
+            lo[ax] += 1
+        else:
+            hi[ax] -= 1
+
+    box = {n: p[a:b] for n, p, a, b in zip(names, pts, lo, hi)}
+    trimmed = {
+        n[:-4]: (p[0], p[-1])
+        for n, p in axes.items()
+        if len(box[n]) < len(p)
+    }
+    if trimmed:
+        logger.warning(
+            f"BC columns {columns} are only partly computed; using the "
+            f"complete part of the grid, which drops the edge(s) of "
+            f"{trimmed} -> "
+            f"{ {n[:-4]: (box[n][0], box[n][-1]) for n in box} }. Re-run "
+            f"the table generator to fill the gaps (it computes only the "
+            f"missing nodes)."
+        )
+    return box
+
+
+def _merge_axes(
+    a: Dict[str, np.ndarray],
+    b: Dict[str, np.ndarray],
+    a_name: str,
+    b_name: str,
+    model: str,
+) -> Dict[str, np.ndarray]:
+    """
+    Intersect two complete boxes. They may have different EXTENTS (one
+    facility extended to Av = 15, another still at 6), but inside the
+    span they share, their points must agree -- otherwise the two tables
+    are on different grids and placing one's rows on the other's axes
+    would silently mis-bin them.
+    """
+    out = {}
+    for key in a:
+        pa, pb = a[key], b[key]
+        lo, hi = max(pa[0], pb[0]), min(pa[-1], pb[-1])
+        ina = pa[(pa >= lo) & (pa <= hi)]
+        inb = pb[(pb >= lo) & (pb <= hi)]
+        if lo > hi or not np.array_equal(ina, inb):
+            raise ValueError(
+                f"BC table for facility '{b_name}' is on a different "
+                f"{key[:-4]} grid than '{a_name}': {pb} vs {pa}. Regenerate "
+                f"it on the {model}.grid.yaml axes."
+            )
+        out[key] = ina
+    return out
+
+
+def _filters_by_facility(
+    user_filter_names: Sequence[str],
+) -> Tuple[List[str], List[str], Dict[str, List[Tuple[int, str]]]]:
+    """Resolve filter labels -> (MIST names, SVO names, {facility:
+    [(index, MIST name), ...]})."""
+    alias_df = _load_alias_table()
+    mist_names = [
+        resolve_filter_name(n, alias_df, alias="MIST")
+        for n in user_filter_names
+    ]
+    svo_names = [
+        resolve_filter_name(n, alias_df, alias="SVO")
+        for n in user_filter_names
+    ]
+    by_facility: Dict[str, List[Tuple[int, str]]] = {}
+    for idx, (svo, mist) in enumerate(zip(svo_names, mist_names)):
+        by_facility.setdefault(facility_from_svo_name(svo), []).append(
+            (idx, mist)
+        )
+    return mist_names, svo_names, by_facility
 
 
 def peek_grid_axes(
     model: str = "NextGen",
     model_root: Path | str = DEFAULT_MODEL_ROOT,
+    filters: Sequence[str] | None = None,
 ) -> Dict[str, np.ndarray]:
     """
     Cheap axis-metadata reader for the BC grid.
@@ -304,18 +674,23 @@ def peek_grid_axes(
     with the grid extent BEFORE the full grid is loaded (i.e. during
     SED.__init__, when star.build_parameters hasn't run yet).
 
-    Assumes the grid's (teff, logg, av) axes are identical across
-    facilities and across feh files, so we only need to open one file
-    per model. The feh axis is derived from filenames under the
-    chosen facility directory.
+    Returns the part of the grid the BCs actually COVER: the intersection
+    of the complete boxes (complete_axes) of the requested filter columns,
+    so a fit is never bounded onto nodes that one of its filters has not
+    been computed at yet. Only the grid-key columns and the requested
+    filter columns are read.
 
     Parameters
     ----------
     model : str
         BC model name (selects the first-level subdirectory of model_root).
     model_root : Path
-        Root directory holding the {model}/BCs/{facility}/feh*_afe*.{FAC}
-        tree.
+        Root directory holding the {model}/BCs/{FACILITY}.bc.parquet tree.
+    filters : sequence of str, optional
+        Filter labels (any spelling resolve_filter_name accepts). Filters
+        whose table or column does not exist yet are ignored (they will be
+        generated on the grid yaml's axes). When None, or when none of
+        them exists yet, every filter column of every table counts.
 
     Returns
     -------
@@ -330,44 +705,40 @@ def peek_grid_axes(
     if not model_dir.is_dir():
         raise FileNotFoundError(f"BC model directory not found: {model_dir}")
 
-    # Pick the first facility subdir that actually has feh*_afe*.<FAC>
-    # files. We don't care which facility; axes are identical across.
-    facility_dirs = [p for p in sorted(model_dir.iterdir()) if p.is_dir()]
-    if not facility_dirs:
+    tables = sorted(model_dir.glob(f"*{_BC_TABLE_SUFFIX}"))
+    if not tables:
         raise FileNotFoundError(
-            f"No facility subdirectories under {model_dir}"
+            f"No *{_BC_TABLE_SUFFIX} BC tables found in {model_dir}"
         )
 
-    chosen_fac_dir = None
-    feh_files: List[Path] = []
-    for fac_dir in facility_dirs:
-        candidates = sorted(fac_dir.glob(f"feh*_afe+0.0.{fac_dir.name}"))
-        if candidates:
-            chosen_fac_dir = fac_dir
-            feh_files = candidates
-            break
-    if chosen_fac_dir is None:
-        raise FileNotFoundError(
-            f"No feh*_afe+0.0.<FAC> files found under any facility in "
-            f"{model_dir}"
-        )
+    wanted: Dict[Path, List[str]] = {}
+    if filters:
+        _, _, by_facility = _filters_by_facility(filters)
+        for fac, items in by_facility.items():
+            path = bc_table_path(model_root, model, fac)
+            if not path.is_file():
+                continue
+            have = set(bc_table_filter_columns(path))
+            cols = list(dict.fromkeys(m for _, m in items if m in have))
+            if cols:
+                wanted[path] = cols
+    if not wanted:
+        wanted = {p: bc_table_filter_columns(p) for p in tables}
 
-    feh_pts = np.array(
-        sorted(_parse_feh_from_filename(p.name) for p in feh_files),
-        dtype=float,
-    )
+    axes = None
+    first = None
+    for path, cols in wanted.items():
+        df = read_bc_table(path, columns=GRID_KEY_COLS + cols)
+        box = complete_axes(df, cols)
+        if axes is None:
+            axes, first = box, path.name
+        else:
+            axes = _merge_axes(axes, box, first, path.name, model)
+    return axes
 
-    df, _ = _read_single_bc_file(feh_files[0])
-    teff_pts = np.sort(df["teff"].unique()).astype(float)
-    logg_pts = np.sort(df["logg"].unique()).astype(float)
-    av_pts = np.sort(df["Av"].unique()).astype(float)
 
-    return {
-        "teff_pts": teff_pts,
-        "logg_pts": logg_pts,
-        "feh_pts": feh_pts,
-        "av_pts": av_pts,
-    }
+def _grid_axes(df: pd.DataFrame) -> Dict[str, np.ndarray]:
+    return _axes_from_keys(_canonical_keys(df))
 
 
 # -------------------------------------------------------------------
@@ -375,13 +746,50 @@ def peek_grid_axes(
 # -------------------------------------------------------------------
 
 
+def _clean_bounds(bounds) -> Dict[str, Tuple[float | None, float | None]]:
+    """Normalize {axis: (lo, hi)}: non-finite / None ends become open."""
+    out = {}
+    for axis, (lo, hi) in (bounds or {}).items():
+        if axis not in AXIS_COLUMNS:
+            raise ValueError(
+                f"Unknown BC grid axis {axis!r}. Choose from "
+                f"{list(AXIS_COLUMNS)}."
+            )
+
+        def _f(x):
+            if x is None:
+                return None
+            x = float(x)
+            return x if np.isfinite(x) else None
+
+        out[axis] = (_f(lo), _f(hi))
+    return out
+
+
+# The star Parameter each axis is sampled (or derived) as, for messages.
+_AXIS_PARAMS = {"teff": "teffsed", "logg": "loggsed", "feh": "feh", "av": "av"}
+
+
+def _bracket(pts: np.ndarray, lo, hi) -> Tuple[float, float]:
+    """The grid points that bracket [lo, hi] (see _range_indices)."""
+    idx = _range_indices(pts, lo, hi)
+    if idx.size == 0:
+        raise ValueError(
+            f"No grid points in range [{lo}, {hi}]; grid spans "
+            f"{pts[0]} - {pts[-1]}."
+        )
+    return float(pts[idx[0]]), float(pts[idx[-1]])
+
+
 def build_bc_grid(
     user_filter_names: Sequence[str],
     model: str = "NextGen",
     model_root: Path | str = DEFAULT_MODEL_ROOT,
+    bounds: Dict[str, Tuple[float | None, float | None]] | None = None,
 ) -> Dict:
     """
-    Assemble a 4D BC grid for a specific set of filters.
+    Assemble a 4D BC grid for a specific set of filters, reading only what
+    the fit needs.
 
     Parameters
     ----------
@@ -391,8 +799,24 @@ def build_bc_grid(
     model : str
         BC model name; selects the first-level subdirectory of model_root.
     model_root : Path
-        Root directory holding the {model}/BCs/{facility}/feh*_afe*.{FACILITY}
-        tree.
+        Root directory holding the {model}/BCs/{FACILITY}.bc.parquet tree.
+    bounds : dict, optional
+        {axis: (lo, hi)} with axis in "teff", "logg", "feh", "av" (None or
+        a non-finite value for an open end) -- the range the sampler can
+        reach. Only the grid points needed to cover it are read: the points
+        inside it plus the one bracketing it on each side, so an Av upper
+        limit of 0.09 reads Av = 0, 0.05, 0.1. Unbounded axes are read in
+        full.
+
+    What is read: per facility, the grid-key columns (to find the
+    bracketing points), then ONLY the requested filter columns, with the
+    bounds pushed down to the parquet reader. Every other filter column
+    and every row outside the bounds stays on disk.
+
+    The grid is the complete box (complete_axes) of the requested columns
+    inside the bounds, intersected across facilities; it must still cover
+    the bracketed bounds on every bounded axis, or this raises naming the
+    filters that have not been computed that far.
 
     Returns
     -------
@@ -408,59 +832,35 @@ def build_bc_grid(
             user_filter_names.
     """
     model_root = Path(model_root)
-    alias_df = _load_alias_table()
+    bounds = _clean_bounds(bounds)
 
     # 1. Resolve user names -> MIST column names and group by facility.
-    mist_names = [
-        resolve_filter_name(n, alias_df, alias="MIST")
-        for n in user_filter_names
-    ]
-    svo_names = [
-        resolve_filter_name(n, alias_df, alias="SVO")
-        for n in user_filter_names
-    ]
-    facilities = [facility_from_svo_name(s) for s in svo_names]
-    by_facility: Dict[str, List[Tuple[int, str]]] = {}
-    for idx, (fac, mist) in enumerate(zip(facilities, mist_names)):
-        by_facility.setdefault(fac, []).append((idx, mist))
+    mist_names, svo_names, by_facility = _filters_by_facility(
+        user_filter_names
+    )
 
-    # 2. For each facility, load all feh files, keeping only the
-    # requested columns. We stash them per feh so we can later stack
-    # into one monolithic grid. Missing facilities/columns trigger
-    # one-time auto-generation from the model spectra (make_bc.py).
-    per_facility_frames: Dict[str, Dict[float, pd.DataFrame]] = {}
+    # 2. For each facility, read its table, keeping only the requested
+    # columns and rows. Missing facilities/columns trigger one-time
+    # auto-generation from the model spectra (make_bc.py).
+    per_facility_frames: Dict[str, pd.DataFrame] = {}
+    per_facility_axes: Dict[str, Dict[str, np.ndarray]] = {}
     for fac, items in by_facility.items():
         fac_svo = [svo_names[idx] for idx, _ in items]
         wanted_cols = [mist for _, mist in items]
 
         try:
-            feh_files = _collect_facility_files(model_root, model, fac)
+            path = find_bc_table(model_root, model, fac)
         except (FileNotFoundError, NotImplementedError):
             from .make_bc import generate_missing_facility
 
             if not generate_missing_facility(fac, fac_svo, model, model_root):
                 raise
-            feh_files = _collect_facility_files(model_root, model, fac)
-        if not feh_files:
-            file_dir = model_root / model / "BCs" / fac
-            raise FileNotFoundError(
-                f"No BC files for facility '{fac}' under {file_dir}"
-            )
+            path = find_bc_table(model_root, model, fac)
 
-        def _read_all(files):
-            frames_ = {}
-            missing_ = set()
-            for p in files:
-                feh = _parse_feh_from_filename(p.name)
-                df, file_filters = _read_single_bc_file(p)
-                missing_ |= set(wanted_cols) - set(file_filters)
-                frames_[feh] = df
-            return frames_, missing_
-
-        raw_frames, missing = _read_all(feh_files)
+        missing = set(wanted_cols) - set(bc_table_filter_columns(path))
         if missing:
             # Facility exists but lacks some requested columns; generate
-            # the missing ones (make_bc merges into the existing files
+            # the missing ones (make_bc merges into the existing table
             # without touching the existing columns).
             from .make_bc import generate_missing_facility
 
@@ -468,8 +868,8 @@ def build_bc_grid(
                 svo_names[idx] for idx, mist in items if mist in missing
             ]
             if generate_missing_facility(fac, miss_svo, model, model_root):
-                raw_frames, missing = _read_all(
-                    _collect_facility_files(model_root, model, fac)
+                missing = set(wanted_cols) - set(
+                    bc_table_filter_columns(path)
                 )
         if missing:
             raise NotImplementedError(
@@ -485,33 +885,46 @@ def build_bc_grid(
         # column, breaking the by-name lookup in step 4 below.
         unique_wanted_cols = list(dict.fromkeys(wanted_cols))
 
-        frames: Dict[float, pd.DataFrame] = {}
-        for feh, df in raw_frames.items():
-            keep = ["teff", "logg", "feh", "Av"] + unique_wanted_cols
-            frames[feh] = df[keep].copy()
-        per_facility_frames[fac] = frames
+        # Bracket the bounds on this table's own points (a cheap read of
+        # the key columns), then read only those rows of only these columns.
+        where = {}
+        if bounds:
+            keys = _canonical_keys(read_bc_table(path, columns=GRID_KEY_COLS))
+            for axis, (lo, hi) in bounds.items():
+                pts = np.sort(keys[AXIS_COLUMNS[axis]].unique())
+                where[axis] = _bracket(pts, lo, hi)
+        df = _canonical_keys(
+            read_bc_table(
+                path, columns=GRID_KEY_COLS + unique_wanted_cols, where=where
+            )
+        )
+        box = complete_axes(df, unique_wanted_cols)
+        for axis, (lo, hi) in where.items():
+            pts = box[f"{axis}_pts"]
+            if pts[0] > lo or pts[-1] < hi:
+                raise ValueError(
+                    f"BC columns {unique_wanted_cols} of facility '{fac}' "
+                    f"cover {axis} = {pts[0]} - {pts[-1]}, but the fit needs "
+                    f"{lo} - {hi}. Add the missing {axis} values to "
+                    f"{model}.grid.yaml and re-run the table generator (it "
+                    f"computes only the missing nodes), or tighten the "
+                    f"star.{_AXIS_PARAMS[axis]} bounds."
+                )
+        per_facility_frames[fac] = df
+        per_facility_axes[fac] = box
 
-    # 3. Adopt the first facility's (teff, logg, feh, Av) axes as the
-    # canonical grid. Every facility must be on that same grid -- but
-    # that is an ASSUMPTION here, not a checked precondition: no other
-    # facility's axes are ever compared against these. Step 4 places
-    # every facility's rows into the canonical axes by searchsorted, so
-    # a facility on a different grid is silently mis-binned (its row
-    # lands in the next canonical cell up) rather than rejected, or
-    # raises IndexError if its values run past the canonical maximum.
-    # The only guard is step 5's NaN check, which catches an
-    # UNDER-populated grid (a facility with fewer points leaves cells
-    # unwritten) but not a mis-binned one (a facility with the same
-    # number of points at different values fills every cell). Compare
-    # the axes here if that ever stops being good enough.
-    canonical_fac = next(iter(per_facility_frames))
-    canonical_frames = per_facility_frames[canonical_fac]
-    feh_pts = np.array(sorted(canonical_frames.keys()), dtype=float)
-
-    any_frame = next(iter(canonical_frames.values()))
-    teff_pts = np.sort(any_frame["teff"].unique()).astype(float)
-    logg_pts = np.sort(any_frame["logg"].unique()).astype(float)
-    av_pts = np.sort(any_frame["Av"].unique()).astype(float)
+    # 3. Intersect the facilities' complete boxes. Extents may differ
+    # (one facility extended further than another); points inside the
+    # shared span may not -- step 4 places rows by searchsorted, so a
+    # facility on a different grid would otherwise be silently mis-binned.
+    canonical_fac = next(iter(per_facility_axes))
+    axes = per_facility_axes[canonical_fac]
+    for fac, box in per_facility_axes.items():
+        axes = _merge_axes(axes, box, canonical_fac, fac, model)
+    teff_pts = axes["teff_pts"]
+    logg_pts = axes["logg_pts"]
+    feh_pts = axes["feh_pts"]
+    av_pts = axes["av_pts"]
 
     n_teff, n_logg, n_feh, n_av = (
         len(teff_pts),
@@ -527,17 +940,20 @@ def build_bc_grid(
         (n_teff, n_logg, n_feh, n_av, n_filters), np.nan, dtype=float
     )
 
-    for fac, frames in per_facility_frames.items():
+    for fac, df in per_facility_frames.items():
+        inside = np.ones(len(df), dtype=bool)
+        for key, col in zip(axes, AXIS_COLUMNS.values()):
+            inside &= np.isin(df[col].values, axes[key])
+        df = df[inside]
         items = by_facility[fac]  # [(global_idx, mist_name), ...]
-        for feh_val, df in frames.items():
-            f_idx = int(np.searchsorted(feh_pts, feh_val))
-            t_idx = np.searchsorted(teff_pts, df["teff"].values)
-            g_idx = np.searchsorted(logg_pts, df["logg"].values)
-            a_idx = np.searchsorted(av_pts, df["Av"].values)
-            for filter_idx, mist_name in items:
-                bc_values[t_idx, g_idx, f_idx, a_idx, filter_idx] = df[
-                    mist_name
-                ].values
+        t_idx = np.searchsorted(teff_pts, df["teff"].values)
+        g_idx = np.searchsorted(logg_pts, df["logg"].values)
+        f_idx = np.searchsorted(feh_pts, df["feh"].values)
+        a_idx = np.searchsorted(av_pts, df["Av"].values)
+        for filter_idx, mist_name in items:
+            bc_values[t_idx, g_idx, f_idx, a_idx, filter_idx] = df[
+                mist_name
+            ].values
 
     # 5. Sanity check for gaps. If there are NaNs, the grid is ragged
     # and the interpolator will propagate them; better to raise now.
@@ -557,6 +973,74 @@ def build_bc_grid(
         "bc_values": bc_values,
         "filter_order": mist_names,
     }
+
+
+# -------------------------------------------------------------------
+# Incremental generation: which (node, filter) cells still need computing
+# -------------------------------------------------------------------
+
+
+def grid_nodes(axes: Dict[str, Sequence[float]]) -> pd.DataFrame:
+    """Every node of a (teff, logg, feh, av) grid, as GRID_KEY_COLS rows.
+
+    `axes` is keyed like {model}.grid.yaml's `grid:` block ("teff",
+    "logg", "feh", "av"); "*_pts" keys (peek_grid_axes) are accepted too.
+    """
+    pts = []
+    for axis in AXIS_COLUMNS:
+        vals = axes[axis] if axis in axes else axes[f"{axis}_pts"]
+        pts.append(np.asarray(vals, dtype=float))
+    mesh = np.meshgrid(*pts, indexing="ij")
+    df = pd.DataFrame(
+        {col: m.ravel() for col, m in zip(AXIS_COLUMNS.values(), mesh)}
+    )
+    return _canonical_keys(df)[GRID_KEY_COLS]
+
+
+def bc_nodes_to_compute(
+    path: Path | str,
+    axes: Dict[str, Sequence[float]],
+    columns: Sequence[str],
+    reusable: Callable[[Dict], bool] | None = None,
+) -> pd.DataFrame:
+    """
+    The work list for bringing `columns` of one BC table up to the grid
+    `axes`: the target nodes at which at least one column still needs
+    computing, with one boolean column per filter (True = compute it).
+
+    A (node, filter) cell needs computing when the table does not exist,
+    the column does not exist, the node is not in the table, or the cell
+    is NaN. `reusable(filter_meta)` can additionally reject a whole
+    existing column (e.g. one written by a different pipeline, which a
+    full-resolution run should replace rather than extend); by default
+    every existing value is kept.
+
+    Only the key columns and the existing requested columns are read.
+    """
+    columns = list(dict.fromkeys(columns))
+    target = grid_nodes(axes)
+    need = pd.DataFrame(True, index=target.index, columns=columns)
+
+    path = Path(path)
+    if path.is_file() and columns:
+        have = [c for c in columns if c in bc_table_filter_columns(path)]
+        if reusable is not None:
+            fmeta = read_bc_meta(path).get("filters", {})
+            have = [c for c in have if reusable(fmeta.get(c, {}))]
+        if have:
+            where = {
+                axis: (float(target[col].min()), float(target[col].max()))
+                for axis, col in AXIS_COLUMNS.items()
+            }
+            old = _canonical_keys(
+                read_bc_table(path, columns=GRID_KEY_COLS + have, where=where)
+            )
+            merged = target.merge(old, how="left", on=GRID_KEY_COLS)
+            for c in have:
+                need[c] = merged[c].isna().values
+
+    out = pd.concat([target, need], axis=1)
+    return out[need.any(axis=1).values].reset_index(drop=True)
 
 
 # -------------------------------------------------------------------

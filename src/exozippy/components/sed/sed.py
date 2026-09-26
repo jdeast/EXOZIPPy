@@ -29,13 +29,12 @@ from . import physics
 from .bc_grid import (
     DEFAULT_MODEL_ROOT,
     RegularGridInterpolator,
-    _collect_facility_files,
     _load_alias_table,
     build_bc_grid,
     facility_from_svo_name,
+    find_bc_table,
     peek_grid_axes,
     resolve_filter_name,
-    slice_bc,
 )
 from .physics import *
 
@@ -277,11 +276,29 @@ class SED(Component):
     #   its edge, it extrapolates off the edge cell, so what was missing
     #   was never a wall but a restoring force.
     # ------------------------------------------------------------------
+    def _requested_filter_labels(self):
+        """Every filter label this SED will ask the BC grid for: the .sed
+        file's rows and the band blocks' filters. Parsed straight from the
+        config (load_data does the full resolution later), so the bounds
+        below can reflect what THESE filters' tables cover -- a table
+        extended to larger Av for some filters but not yet for others must
+        not bound this fit onto nodes one of its filters lacks."""
+        labels = [
+            c.get("name") for c in (self.SED_yaml.get("filters") or [])
+        ]
+        system_config = getattr(self.config_manager, "system_config", None)
+        for cfg in (system_config or {}).get("band") or []:
+            if isinstance(cfg, dict):
+                labels.append(cfg.get("filter"))
+        return [lbl for lbl in labels if lbl]
+
     def _inject_grid_bounds(self):
 
         try:
             axes = peek_grid_axes(
-                model=self.sedmodel, model_root=self.model_root
+                model=self.sedmodel,
+                model_root=self.model_root,
+                filters=self._requested_filter_labels(),
             )
         except FileNotFoundError as e:
             # If the grid isn't findable at construction time,
@@ -598,9 +615,7 @@ class SED(Component):
             svo = resolve_filter_name(name, alias_df, alias="SVO")
             facility = facility_from_svo_name(svo)
             try:
-                _collect_facility_files(
-                    self.model_root, self.sedmodel, facility
-                )
+                find_bc_table(self.model_root, self.sedmodel, facility)
             except (FileNotFoundError, NotImplementedError) as e:
                 if "/" not in svo:
                     logger.warning(
@@ -659,10 +674,28 @@ class SED(Component):
                 "band block references a filter with BC tables."
             )
 
+        # The star parameter bounds, from config_manager.resolve():
+        # _inject_grid_bounds() registered the grid's coverage on the
+        # override channel during __init__, so these are already tightened
+        # to it (and to any tighter user bound). Only the grid points needed
+        # to cover them are read -- e.g. an Av upper limit of 0.09 reads
+        # Av = 0, 0.05, 0.1 -- and only this fit's filter columns. Bounds
+        # may differ per star (user overrides); keep every grid point any
+        # star can reach. loggsed is derived and only soft-bounded, so its
+        # axis is read in full: the barrier lets a draw sit past its bound.
+        bounds = {}
+        for axis, name in (("teff", "teffsed"), ("feh", "feh"), ("av", "av")):
+            cfg = self.config_manager.resolve("star", name)
+            bounds[axis] = (
+                float(np.min(cfg["lower"])),
+                float(np.max(cfg["upper"])),
+            )
+
         grid = build_bc_grid(
             user_filter_names=self.all_filters,
             model=self.sedmodel,
             model_root=self.model_root,
+            bounds=bounds,
         )
         self.bc_grid_data = grid
         self.mist_filters = grid["filter_order"]
@@ -681,56 +714,14 @@ class SED(Component):
             for key in keys:
                 self.filter_columns.setdefault(key, col)
 
-        # Build the BC interpolator now, using config_manager.resolve() for
-        # the star parameter bounds. _inject_grid_bounds() already registered
-        # the grid-axis limits on config_manager's override channel during
-        # __init__, so resolve() returns the correct tightened bounds here.
-        teff_cfg = self.config_manager.resolve("star", "teffsed")
-        feh_cfg = self.config_manager.resolve("star", "feh")
-        av_cfg = self.config_manager.resolve("star", "av")
-
-        grid_dict = {
-            "model": self.sedmodel,
-            "grid": {
-                "teff": self.bc_grid_data["teff_pts"],
-                "logg": self.bc_grid_data["logg_pts"],
-                "feh": self.bc_grid_data["feh_pts"],
-                "av": self.bc_grid_data["av_pts"],
-            },
-        }
-        # Bounds may differ per star (user overrides); keep every grid
-        # point any star can reach.
-        bc_slice, axes = slice_bc(
-            grid_dict,
-            self.bc_grid_data["bc_values"],
-            teff=(
-                float(np.min(teff_cfg["lower"])),
-                float(np.max(teff_cfg["upper"])),
-            ),
-            feh=(
-                float(np.min(feh_cfg["lower"])),
-                float(np.max(feh_cfg["upper"])),
-            ),
-            av=(
-                float(np.min(av_cfg["lower"])),
-                float(np.max(av_cfg["upper"])),
-            ),
-        )
-        axes_full = {
-            "teff": self.bc_grid_data["teff_pts"],
-            "logg": self.bc_grid_data["logg_pts"],
-            "feh": self.bc_grid_data["feh_pts"],
-            "av": self.bc_grid_data["av_pts"],
-        }
-        axes_full.update(axes)
         self.bc_interpolator = RegularGridInterpolator(
             points=[
-                axes_full["teff"],
-                axes_full["logg"],
-                axes_full["feh"],
-                axes_full["av"],
+                grid["teff_pts"],
+                grid["logg_pts"],
+                grid["feh_pts"],
+                grid["av_pts"],
             ],
-            values=bc_slice,
+            values=grid["bc_values"],
         )
 
     # ------------------------------------------------------------------
