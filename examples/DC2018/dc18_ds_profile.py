@@ -217,7 +217,9 @@ def main():
     pin_grad_fns = []
     for nm, idx, _ in pins:
         d = model.replace_rvs_by_values([model[nm]])[0]
-        scalar = d if idx is None else d[idx]
+        # a length-1 vector deterministic (mulensevent.log_pi_rel) is not a
+        # scalar cost for grad; summing is exact for 0-d and length-1 alike
+        scalar = (d if idx is None else d[idx]).sum()
         g = pytensor.grad(scalar, vv, disconnected_inputs="ignore")
         pin_grad_fns.append(pytensor.function(vv, g, on_unused_input="ignore"))
 

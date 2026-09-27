@@ -10,6 +10,7 @@ from exozippy.components.relations import (
     star_schema_entry,
 )
 
+from ..parameterization import pin_unselected
 from ..star.physics import calc_absmag
 
 # A_Ks / A_V of the SHIPPED extinction law (models/extinction_law.ascii,
@@ -150,6 +151,13 @@ class Mann(StellarRelation, Component):
     def register_parameters(self, system):
         """Stage 3: declare the Ks latent and validate the requested pathways."""
         self.manifest = {"ks_offset": None}
+        # An instance whose star no photometric term sees is skipped (see
+        # relations.StellarRelation._photometrically_active); its Ks latent
+        # would then be a free dimension nothing reads, so pin it.
+        self._active = self._photometrically_active(system)
+        pin = pin_unselected(self.n_elements, self._active)
+        if pin:
+            self.manifest["ks_offset"] = pin
 
         if any(self.ks_synthetic):
             sed = getattr(system, "sed", None)
@@ -278,6 +286,7 @@ class Mann(StellarRelation, Component):
             mass_pred,
             mass_pred * as_float_vector(self.mstar_floor),
             normalize=True,
+            active=getattr(self, "_active", None),
         )
         self._add_penalty(
             "radius",
@@ -285,6 +294,7 @@ class Mann(StellarRelation, Component):
             radius_pred,
             radius_pred * as_float_vector(self.rstar_floor),
             normalize=True,
+            active=getattr(self, "_active", None),
         )
 
         # Modeling-draft prose, next to the penalties it describes.  The
