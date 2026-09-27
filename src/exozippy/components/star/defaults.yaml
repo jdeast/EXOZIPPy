@@ -81,7 +81,7 @@ star:
     # (whitening.measure_barrier_scales); pin it with bound_scale.
     unit: "dex(cm/s2)"
     internal_unit: "dex(cm/s2)"
-    latex: "\\log{g_*}"
+    latex: "\\log{g_{*,\\rm SED}}"
     description: "Surface Gravity"
     table_note: "This value ignores the systematic error and is for reference only"
     expressions:
@@ -126,7 +126,7 @@ star:
     init_scale: 0.02
     unit: "solRad"
     internal_unit: "solRad"
-    latex: "R_*"
+    latex: "R_{*,\\rm SED}"
     description: "Stellar Radius"
     table_note: "This value ignores the systematic error and is for reference only"
   teff:
@@ -145,7 +145,7 @@ star:
     init_scale: 80.0
     unit: "K"
     internal_unit: "K"
-    latex: "T_{\\rm eff}"
+    latex: "T_{\\rm eff,SED}"
     description: "Effective Temperature"
     table_note: "This value ignores the systematic error and is for reference only"
   feh:
@@ -231,7 +231,7 @@ star:
   luminositysed:
     unit: "solLum"
     internal_unit: "solLum"
-    latex: "L_*"
+    latex: "L_{*,\\rm SED}"
     description: "Stellar Luminosity"
     expressions:
       default:
@@ -240,7 +240,7 @@ star:
   fbolsed:
     unit: "erg s-1 cm-2"
     internal_unit: "erg s-1 cm-2"
-    latex: "F_{Bol}"
+    latex: "F_{Bol,\\rm SED}"
     description: "Bolometric Flux"
     expressions:
       default:
