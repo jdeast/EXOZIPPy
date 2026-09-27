@@ -67,6 +67,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import pytensor.tensor as pt
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -593,10 +594,29 @@ def complete_axes(
             hi[ax] -= 1
 
     box = {n: p[a:b] for n, p, a, b in zip(names, pts, lo, hi)}
+    # The trim loop never takes an axis below two points, but an axis the
+    # columns filled at only ONE of the table's several points arrives here
+    # that way -- e.g. a generator run interrupted after the first [Fe/H]
+    # checkpoint of a column it is replacing. Returned, it would become a
+    # zero-width parameter bound and a one-point interpolator axis,
+    # silently. (A table whose grid has one point on an axis is a
+    # deliberate single-slice grid and is left alone.)
+    table_axes = _axes_from_keys(df[GRID_KEY_COLS])
+    thin = {
+        n[:-4]: box[n].tolist()
+        for n in box
+        if len(box[n]) < 2 <= len(table_axes[n])
+    }
+    if thin:
+        raise ValueError(
+            f"BC columns {columns} cover only one of the table's grid "
+            f"points along {thin}; an axis needs at least two to "
+            f"interpolate along. "
+            f"Re-run the table generator to fill them (it computes only "
+            f"the missing nodes)."
+        )
     trimmed = {
-        n[:-4]: (p[0], p[-1])
-        for n, p in axes.items()
-        if len(box[n]) < len(p)
+        n[:-4]: (p[0], p[-1]) for n, p in axes.items() if len(box[n]) < len(p)
     }
     if trimmed:
         logger.warning(
@@ -689,8 +709,9 @@ def peek_grid_axes(
     filters : sequence of str, optional
         Filter labels (any spelling resolve_filter_name accepts). Filters
         whose table or column does not exist yet are ignored (they will be
-        generated on the grid yaml's axes). When None, or when none of
-        them exists yet, every filter column of every table counts.
+        generated on the grid yaml's axes). When none of them exists yet,
+        the grid yaml's axes are returned. When None (or the model has no
+        grid yaml), every filter column of every table counts.
 
     Returns
     -------
@@ -722,6 +743,14 @@ def peek_grid_axes(
             cols = list(dict.fromkeys(m for _, m in items if m in have))
             if cols:
                 wanted[path] = cols
+    if filters and not wanted:
+        # None of THIS fit's filters has a column yet, so every one of them
+        # will be generated on the grid yaml's axes -- those, not whatever
+        # unrelated columns elsewhere happen to cover (one of which being
+        # incomplete must not narrow, or crash, a fit that never reads it).
+        target = grid_yaml_axes(model, model_root)
+        if target is not None:
+            return {f"{axis}_pts": pts for axis, pts in target.items()}
     if not wanted:
         wanted = {p: bc_table_filter_columns(p) for p in tables}
 
@@ -735,6 +764,19 @@ def peek_grid_axes(
         else:
             axes = _merge_axes(axes, box, first, path.name, model)
     return axes
+
+
+def grid_yaml_axes(
+    model: str, model_root: Path | str
+) -> Dict[str, np.ndarray] | None:
+    """The target grid from {model}.grid.yaml, keyed by axis ("teff",
+    "logg", "feh", "av"), or None when the model ships no grid yaml."""
+    grid_yaml = Path(model_root) / model / "BCs" / f"{model}.grid.yaml"
+    if not grid_yaml.is_file():
+        return None
+    with open(grid_yaml, "r") as f:
+        grid = yaml.safe_load(f)["grid"]
+    return {k: np.asarray(v, dtype=float) for k, v in grid.items()}
 
 
 def _grid_axes(df: pd.DataFrame) -> Dict[str, np.ndarray]:
@@ -868,9 +910,7 @@ def build_bc_grid(
                 svo_names[idx] for idx, mist in items if mist in missing
             ]
             if generate_missing_facility(fac, miss_svo, model, model_root):
-                missing = set(wanted_cols) - set(
-                    bc_table_filter_columns(path)
-                )
+                missing = set(wanted_cols) - set(bc_table_filter_columns(path))
         if missing:
             raise NotImplementedError(
                 f"Bolometric corrections unavailable for ``{sorted(missing)}`` "

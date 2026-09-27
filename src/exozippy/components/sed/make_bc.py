@@ -81,6 +81,7 @@ from .bc_grid import (
     bc_table_filter_columns,
     bc_table_path,
     facility_from_svo_name,
+    grid_yaml_axes,
     peek_grid_axes,
     read_bc_meta,
     resolve_filter_name,
@@ -239,11 +240,9 @@ def _target_axes(model: str, model_root: Path) -> Dict[str, np.ndarray]:
     column is born on the full target grid, including axis values the
     other tables have not been extended to yet), else the grid the
     existing tables cover."""
-    grid_yaml = Path(model_root) / model / "BCs" / f"{model}.grid.yaml"
-    if grid_yaml.is_file():
-        with open(grid_yaml, "r") as f:
-            grid = yaml.safe_load(f)["grid"]
-        return {k: np.asarray(v, dtype=float) for k, v in grid.items()}
+    target = grid_yaml_axes(model, model_root)
+    if target is not None:
+        return target
     axes = peek_grid_axes(model=model, model_root=model_root)
     return {k[: -len("_pts")]: v for k, v in axes.items()}
 

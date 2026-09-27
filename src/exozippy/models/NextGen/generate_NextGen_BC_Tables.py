@@ -35,10 +35,10 @@ import pandas as pd
 import yaml
 
 from exozippy.components.sed.bc_grid import (
+    _KEY_DECIMALS,
     BC_PARAM_COLS,
     DEFAULT_MODEL_ROOT,
     GRID_KEY_COLS,
-    _KEY_DECIMALS,
     _load_alias_table,
     bc_nodes_to_compute,
     bc_table_filter_columns,

@@ -102,8 +102,8 @@ def test_generated_bc_includes_extinction_along_av_axis(regenerated_2mass):
     Given a regenerated 2MASS_J column,
     When comparing BC at Av=0 and Av=6 for a solar analog,
     Then BC drops by roughly the J-band extinction A_J ~ 0.28*Av
-    (the shipped tables are flat in Av; the generator applies the
-    extinction law).
+    (the generator applies the extinction law; the shipped tables do
+    too, at dBC/dAv ~ -0.30 in J).
     """
     # ARRANGE
     _, after, _ = regenerated_2mass

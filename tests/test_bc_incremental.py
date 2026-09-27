@@ -9,6 +9,7 @@ Incremental BC tables and selective reads (components/sed/bc_grid.py):
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 from exozippy.components.sed import bc_grid
 from exozippy.components.sed.bc_grid import (
@@ -263,6 +264,71 @@ def test_complete_axes_never_collapses_a_two_point_axis():
     # ACT & ASSERT
     with pytest.raises(ValueError, match="interior"):
         complete_axes(df, ["A"])
+
+
+def test_complete_axes_raises_when_a_column_fills_one_point_of_an_axis():
+    """
+    Given a column computed at only the first [Fe/H] of the grid (a
+    generator run replacing it, interrupted after its first checkpoint),
+    When complete_axes is asked for its coverage,
+    Then it raises naming the feh axis, rather than returning a one-point
+    axis that would become a zero-width star.feh bound and a one-point
+    interpolator axis.
+    """
+    # ARRANGE
+    df = _table(["A"], av=(0.0, 1.0))
+    df.loc[df["feh"] != _FEH[0], "A"] = np.nan
+
+    # ACT & ASSERT
+    with pytest.raises(
+        ValueError, match="only one of the table.s grid points.*feh"
+    ):
+        complete_axes(df, ["A"])
+
+
+def test_peek_grid_axes_uses_the_grid_yaml_when_no_requested_filter_exists(
+    tmp_path,
+):
+    """
+    Given a model whose grid yaml spans Av 0 .. 20 and whose only table
+    holds an unrelated column with an interior hole,
+    When peek_grid_axes is asked about a filter with no column yet,
+    Then it returns the grid yaml's axes (where that filter will be
+    generated) instead of reading -- and raising on -- the unrelated one.
+    """
+    # ARRANGE
+    ax = {
+        "teff": (5000.0, 6000.0, 7000.0),
+        "logg": (4.0, 4.5, 5.0),
+        "feh": (-0.5, 0.0, 0.3),
+        "Av": (0.0, 1.0, 2.0),
+    }
+    mesh = np.meshgrid(*ax.values(), indexing="ij")
+    df = pd.DataFrame({k: m.ravel() for k, m in zip(ax, mesh)})
+    df["alpha"], df["Rv"], df["Fa_Z"] = 0.0, 3.1, 1.0
+    df.loc[
+        (df["teff"] == 6000.0)
+        & (df["logg"] == 4.5)
+        & (df["feh"] == 0.0)
+        & (df["Av"] == 1.0),
+        "Fa_Z",
+    ] = np.nan
+    bcs = tmp_path / "Toy" / "BCs"
+    write_bc_table(df, bcs / "Fa.bc.parquet", _meta(["Fa_Z"]))
+    grid = {
+        "teff": [5000.0, 6000.0, 7000.0],
+        "logg": [4.0, 4.5, 5.0],
+        "feh": [-0.5, 0.0, 0.3],
+        "av": [0.0, 1.0, 2.0, 20.0],
+    }
+    (bcs / "Toy.grid.yaml").write_text(yaml.safe_dump({"grid": grid}))
+
+    # ACT
+    axes = peek_grid_axes("Toy", tmp_path, filters=["Gb/Gb.W"])
+
+    # ASSERT
+    for axis, pts in grid.items():
+        np.testing.assert_array_equal(axes[f"{axis}_pts"], pts)
 
 
 # ---------------------------------------------------------------------------

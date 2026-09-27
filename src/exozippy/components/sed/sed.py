@@ -283,13 +283,12 @@ class SED(Component):
         below can reflect what THESE filters' tables cover -- a table
         extended to larger Av for some filters but not yet for others must
         not bound this fit onto nodes one of its filters lacks."""
-        labels = [
-            c.get("name") for c in (self.SED_yaml.get("filters") or [])
-        ]
-        system_config = getattr(self.config_manager, "system_config", None)
-        for cfg in (system_config or {}).get("band") or []:
-            if isinstance(cfg, dict):
-                labels.append(cfg.get("filter"))
+        labels = [c.get("name") for c in (self.SED_yaml.get("filters") or [])]
+        # Read exactly as _collect_band_filters does: system_config is an
+        # internal attribute and must exist; only the band block itself is
+        # legitimately optional.
+        for cfg in self.config_manager.system_config.get("band") or []:
+            labels.append(cfg.get("filter"))
         return [lbl for lbl in labels if lbl]
 
     def _inject_grid_bounds(self):

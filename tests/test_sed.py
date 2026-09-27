@@ -235,7 +235,10 @@ def test_build_bc_grid_places_values_on_the_right_nodes(tmp_path):
 
     # ASSERT
     t, g, f, a = np.meshgrid(
-        grid["teff_pts"], grid["logg_pts"], grid["feh_pts"], grid["av_pts"],
+        grid["teff_pts"],
+        grid["logg_pts"],
+        grid["feh_pts"],
+        grid["av_pts"],
         indexing="ij",
     )
     expected = t / 1000 + g + 10 * f + 100 * a
