@@ -890,16 +890,18 @@ class SED(Component):
           * an absolute-astrometry instrument references a band (photocenter
             fluxfrac: host and companion -- conservatively, every star).
 
-        Every other star's teff/feh/av/radius/teffsed/radiussed are
-        likelihood-free dimensions: nothing reads them but the SED's own
-        floors and a synthetic-Ks Mann relation, which is circular.  Left
-        free they are not merely wasteful -- their conditional widths depend
-        on the star's MASS (an unseen lens's Teff has 2-5x more room when the
-        lens is heavy), so marginalizing over them tilts pi_rel and the lens
-        mass: the DC2018 sweep2 lenses came out 2-5x too massive from exactly
-        this (notes 2026-09-25, "THE LENS-DISTANCE PULL").  ``Star`` pins
-        them for the unseen stars (opt-in pin, a params entry still frees
-        one) and the relation components skip them.
+        Every other star's SED-side parameters (av, teffsed, radiussed) are
+        read by nothing at all, and its radius/teff/feh only by whatever
+        relation or user prior names it.  ``Star`` pins the SED-side trio for
+        the unseen stars (opt-in pin, a params entry still frees one) and
+        marks this component as reading only the seen stars, so their
+        radius/teff/feh take the structural inactive tier unless a relation
+        reads them.  Why it matters: a lens no photometric term sees keeps a
+        free teff whose only constraint is a Ks tie -- Ks is a weak
+        thermometer for a hot star -- so its posterior width grows with the
+        lens mass and marginalizing over it tilts pi_rel low (the DC2018
+        sweep2 lens masses came out 2-5x high; notes 2026-09-25/27).  The
+        floors below are masked to the same stars.
 
         Reads raw configs where the parsed maps may not exist yet (this is
         called at stage 3, and other components' build_maps ordering is not
@@ -1044,16 +1046,26 @@ class SED(Component):
         # likelihood per e-fold of x, pushing teff and fbol up for no
         # physical reason. torres drops the term only because ITS sigma is a
         # constant in dex, where it is an additive constant.
+        # Masked to the stars this SED actually predicts a flux for (see
+        # `seen_star_mask`): a floor on a star nothing photometric reads
+        # would be a likelihood term tying two unconstrained quantities to
+        # each other, and it is what made `Star.structure_consumers` count
+        # the SED as reading EVERY star's radius/teff (2026-09).
+        seen_w = pt.as_tensor_variable(
+            np.asarray(self.seen_star_mask(system), dtype=float)
+        )
         self.teffsed_floor_prior = pm.Potential(
             "sed.teffsed_floor_prior",
             pt.sum(
-                self._fractional_floor_logp(teff, teffsed, self.teffsedfloor)
+                seen_w
+                * self._fractional_floor_logp(teff, teffsed, self.teffsedfloor)
             ),
         )
         self.fbolsed_floor_prior = pm.Potential(
             "sed.fbolsed_floor_prior",
             pt.sum(
-                self._fractional_floor_logp(fbol, fbolsed, self.fbolsedfloor)
+                seen_w
+                * self._fractional_floor_logp(fbol, fbolsed, self.fbolsedfloor)
             ),
         )
 

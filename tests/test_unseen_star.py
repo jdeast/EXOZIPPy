@@ -1,23 +1,32 @@
-"""A star no photometric term sees has its SED-side parameters pinned, and
-the empirical relations skip it.
+"""A star no photometric term sees: the SED reads only the stars it predicts a
+flux for, so such a star's radius/teff/feh take the structural inactive tier
+unless a relation or a user prior reads them, and its SED-side av/teffsed/
+radiussed are pinned.
 
 The shipped DC2018_128 example has two stars -- a microlensing Source whose
 flux the light curve ties through the zeropoint, and a Lens nobody
 photometers -- but no SED.  The test adds the SED machinery the DC2018
 sweep configs carry (an empty-filter `.sed` file, a 2MASS Ks band so the
 grid has the filter Mann needs, Mann on the Lens with a synthetic Ks,
-Torres on the Source), all from in-repo data.  With the blend tie off the
-Lens's teff/av/radius/teffsed/radiussed are likelihood-free, and left free
-their conditional widths depend on the lens MASS: marginalizing over them
-tilted pi_rel 0.3-0.6 dex low and the lens mass 2-5x high across the
-2026-09 sweep2 (notes 2026-09-25, "THE LENS-DISTANCE PULL").
+Torres on the Source), all from in-repo data.  Left free, the Lens's Teff
+had a conditional width that grew with the lens MASS (Ks is a weak
+thermometer for a hotter star), and marginalizing over it tilted pi_rel
+0.3-0.6 dex low and the lens mass 2-5x high across the 2026-09 sweep2
+(notes 2026-09-25/27, "THE LENS-DISTANCE PULL").  The first cut (PR #337)
+pinned radius/teff/feh too and SKIPPED the relations on the unseen star;
+that was wrong -- Mann on the lens is a chain of overlapping constraints,
+satisfied to 1.00 +/- 0.02 across sweep2 -- and is what this file now
+guards against.
 
-Three behaviours, on the real provenance ledger:
-  * default (blend tie off): the Lens's SED-side parameters are pinned, the
-    Source's are sampled, and Mann adds no potential (a synthetic Ks of
-    pinned placeholders is circular) while Torres on the seen Source does;
-  * `sed_constrains_blend: true` on the light curve makes the Lens SEEN: its
-    parameters sample and Mann's potentials come back;
+On the real provenance ledger:
+  * default (blend tie off, Mann on the Lens): the Lens's av/teffsed/
+    radiussed are pinned; radius and feh stay ACTIVE because Mann reads
+    them and Mann's potentials are present; teff is inactive because
+    nothing reads it; the Source's are all sampled;
+  * `mamajek` on the Lens gives its teff a reader: it samples, and the
+    Teff penalty is in the model;
+  * `sed_constrains_blend: true` on the light curve makes the Lens SEEN:
+    everything samples;
   * a params entry with a prior frees a pinned parameter (the pin is the
     opt-in kind, layered under the params file).
 """
@@ -32,7 +41,8 @@ import yaml
 from exozippy.system import System
 
 EXAMPLE_DIR = pathlib.Path(__file__).parent / ".." / "examples" / "DC2018_128"
-PINNED = ("teff", "av", "radius", "radiussed", "teffsed")
+SED_SIDE = ("av", "radiussed", "teffsed")
+STRUCTURE = ("radius", "teff", "feh")
 
 pytestmark = pytest.mark.slow
 
@@ -74,24 +84,54 @@ def _sampled(system, param, idx):
     return getattr(system.star, param).element_is_sampled(idx)
 
 
-def test_unseen_lens_is_pinned_and_mann_skips_it(
+def _pots(model):
+    return {p.name for p in model.potentials}
+
+
+def test_unseen_lens_keeps_what_mann_reads_and_loses_the_rest(
     monkeypatch, tmp_path, caplog
 ):
     monkeypatch.chdir(EXAMPLE_DIR)
     config, user_params = _inputs(tmp_path)
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         system, model = _build(config, user_params)
-    for p in PINNED:
+    for p in SED_SIDE:
         assert not _sampled(system, p, 0), f"Lens {p} should be pinned"
+    for p in ("radius", "feh"):
+        assert _sampled(system, p, 0), f"Lens {p} is read by Mann"
+    assert not _sampled(system, "teff", 0), "nothing reads the Lens teff"
+    for p in SED_SIDE + STRUCTURE:
         assert _sampled(system, p, 1), f"Source {p} should be sampled"
-    pots = {p.name for p in model.potentials}
-    assert not any(
-        n.startswith("mann.") and n.endswith("_prior") for n in pots
+    pots = _pots(model)
+    assert any(
+        n.startswith("mann.") and n.endswith("mass_prior") for n in pots
+    ), pots
+    assert any(
+        n.startswith("mann.") and n.endswith("radius_prior") for n in pots
     ), pots
     assert any(
         n.startswith("torres.") and n.endswith("mass_prior") for n in pots
     ), pots
-    assert any("no photometry" in r.getMessage() for r in caplog.records)
+    assert any(
+        "predicts no flux for Lens" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_mamajek_gives_the_unseen_lens_teff_a_reader(monkeypatch, tmp_path):
+    monkeypatch.chdir(EXAMPLE_DIR)
+    config, user_params = _inputs(tmp_path)
+    config["mamajek"] = [{"star": "Lens"}]
+    system, model = _build(config, user_params)
+    assert _sampled(system, "teff", 0)
+    for p in SED_SIDE:
+        assert not _sampled(system, p, 0), f"Lens {p} should still be pinned"
+    pots = _pots(model)
+    assert "mamajek.teff_prior" in pots or any(
+        n.startswith("mamajek.") and n.endswith("teff_prior") for n in pots
+    ), pots
+    assert not any(
+        n.startswith("mamajek.") and n.endswith("radius_prior") for n in pots
+    ), "radius is opt-in on mamajek"
 
 
 def test_blend_tie_makes_the_lens_seen(monkeypatch, tmp_path):
@@ -100,9 +140,9 @@ def test_blend_tie_makes_the_lens_seen(monkeypatch, tmp_path):
     for c in config["mulensinstrument"]:
         c["sed_constrains_blend"] = True
     system, model = _build(config, user_params)
-    for p in PINNED:
+    for p in SED_SIDE + STRUCTURE:
         assert _sampled(system, p, 0), f"Lens {p} should sample under the tie"
-    pots = {p.name for p in model.potentials}
+    pots = _pots(model)
     assert any(
         n.startswith("mann.") and n.endswith("mass_prior") for n in pots
     ), pots
@@ -112,7 +152,7 @@ def test_a_params_prior_frees_a_pinned_parameter(monkeypatch, tmp_path):
     monkeypatch.chdir(EXAMPLE_DIR)
     config, user_params = _inputs(tmp_path)
     user_params = copy.deepcopy(user_params)
-    user_params["star.Lens.teff"] = {"mu": 3800.0, "sigma": 300.0}
+    user_params["star.Lens.av"] = {"mu": 0.5, "sigma": 0.3}
     system, _ = _build(config, user_params)
-    assert _sampled(system, "teff", 0)
-    assert not _sampled(system, "radius", 0)
+    assert _sampled(system, "av", 0)
+    assert not _sampled(system, "teffsed", 0)

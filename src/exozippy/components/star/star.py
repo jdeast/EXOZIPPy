@@ -386,17 +386,18 @@ class Star(Component):
 
         The complete list, each entry naming the code that reads it:
 
-        * **sed** -- ``SED.build_likelihood``'s teffsed and fbolsed floor
-          potentials are ``pt.sum`` over the WHOLE star vector with no mask,
-          and fbol is ``calc_fbol(luminosity(radius, teff), distance)``, so
-          an SED reads every star's radius and teff.
-          ``_predicted_appmag_node`` reads the whole ``star.feh`` vector.
-          This is the "if the user supplies an SED they all become
-          constrained -- weakly, and then it is useful to find out how weak"
-          case.
+        * **sed** -- the stars ``SED.seen_star_mask`` names: the ones some
+          likelihood term reads a predicted flux for (SED filter rows,
+          microlensing sources through the zeropoint tie, blend-tied
+          non-sources, transit/astrometry bands).  Its teffsed and fbolsed
+          floor potentials are masked to the same stars, and fbol is
+          ``calc_fbol(luminosity(radius, teff), distance)``.  A bare
+          ``sed:`` config with no instance to ask counts every star (the
+          historical answer, and what those floors did before 2026-09).
         * **evolutionarymodel** -- a track indexes (initfeh, eep) and returns
           the present-day structure, so it reads all three of every star an
-          instance NAMES (``star_indices``, the mann/torres idiom).  Not the
+          instance NAMES (``star_indices``, the mann/torres/mamajek idiom).
+          Not the
           ``mist:``/``parsec:`` switches: those default to opted-in, so they
           answer "did this star ask for a track" rather than "did a block
           give it one", and marking on them left radius/teff/feh free on
@@ -435,9 +436,27 @@ class Star(Component):
         def _in_topology(name):
             return in_topology(system, name) is not None
 
-        if _in_topology("sed"):
+        # The SED reads the stars it actually PREDICTS a flux for (its
+        # `seen_star_mask`: filter rows, microlensing sources through the
+        # zeropoint tie, blend-tied non-sources, transit/astrometry bands),
+        # and its teffsed/fbolsed floors are masked to the same stars.  Until
+        # 2026-09 it was marked as reading every star, because those floors
+        # were an unmasked pt.sum -- so a lens no photometric term ever saw
+        # kept a free teff whose only constraint was a Ks tie, and whose
+        # posterior width therefore grew with the lens mass (notes
+        # 2026-09-25/27: the DC2018 lens masses 2-5x high from the
+        # marginalization volume).  A bare `sed:` config with no instance to
+        # ask keeps the conservative all-stars answer.
+        sed_comp = in_topology(system, "sed")
+        if sed_comp is not None:
+            seen_fn = getattr(sed_comp, "seen_star_mask", None)
+            if callable(seen_fn):
+                seen = np.asarray(seen_fn(system), dtype=bool)
+                stars = [i for i in all_stars if seen[i]]
+            else:
+                stars = list(all_stars)
             for param in self.STRUCTURE_PARAMS:
-                _mark("sed", param, all_stars)
+                _mark("sed", param, stars)
 
         # Ask the component which stars it names, exactly as mann and torres
         # are asked below -- `star_indices` is set in load_data (stage 1), so
@@ -488,6 +507,7 @@ class Star(Component):
         for name, params in (
             ("mann", ("radius", "feh")),
             ("torres", ("radius", "teff", "feh")),
+            ("mamajek", ("teff", "radius")),
         ):
             comp = getattr(system, name, None)
             if comp is None:
@@ -1015,44 +1035,35 @@ class Star(Component):
                     "fbolsed": "default",
                 }
             )
-            # A star NO photometric term sees -- not a microlensing source,
-            # not in an SED filter row, not under a blend tie, no transit
-            # dilution or astrometric fluxfrac -- has its SED-side
-            # parameters pinned.  Nothing reads them but the SED's floors
-            # and a synthetic-Ks Mann relation (circular), and left free
-            # their conditional widths depend on the star's mass, so
-            # marginalizing over them tilts the mass: the DC2018 sweep2
-            # lenses came out 2-5x too massive from exactly this (notes
-            # 2026-09-25).  Opt-in pin (overrides channel): a params entry
-            # with a prior still frees one.  The relation components skip
-            # these stars too (relations.StellarRelation._photometrically_active).
+            # The SED-side parameters of a star the SED never predicts a flux
+            # for (see `structure_consumers` and `SED.seen_star_mask`): av,
+            # teffsed and radiussed are read by nothing at all on such a
+            # star -- the SED's own floors are masked to the stars it reads
+            # -- so they are pinned through the opt-in overrides channel (a
+            # params entry with a prior still frees one).  radius, teff and
+            # feh are NOT pinned here: they take the structural inactive tier
+            # via `_apply_structure_activity`, exactly as for a star with no
+            # SED at all, and stay active wherever a relation (mann, torres,
+            # mamajek) or the user reads them.
             sed_comp = in_topology(system, "sed")
             seen_fn = getattr(sed_comp, "seen_star_mask", None)
             if callable(seen_fn):
                 seen = np.asarray(seen_fn(system), dtype=bool)
                 pin = pin_unselected(self.n_elements, seen)
                 if pin:
-                    for key in (
-                        "teff",
-                        "feh",
-                        "av",
-                        "radius",
-                        "radiussed",
-                        "teffsed",
-                    ):
+                    for key in ("av", "radiussed", "teffsed"):
                         self.manifest[key] = merge_options(
                             self.manifest.get(key), **pin
                         )
                     unseen = [nm for nm, ok in zip(self.names, seen) if not ok]
                     logger.info(
-                        f"[{self.prefix}] no photometric term sees "
-                        f"{', '.join(unseen)}: teff/feh/av/radius/teffsed/"
-                        f"radiussed pinned (mass, distance and proper motion "
-                        f"stay). Give the star photometry (an SED row, "
-                        f"sed_constrains_blend on a light curve) or a params "
-                        f"entry with a prior to free one."
+                        f"[{self.prefix}] the SED predicts no flux for "
+                        f"{', '.join(unseen)}: av/teffsed/radiussed pinned "
+                        f"(radius/teff/feh follow the structure-activity "
+                        f"rule; mass, distance and proper motion stay). An "
+                        f"SED row, sed_constrains_blend on a light curve, or "
+                        f"a params prior frees one."
                     )
-
         # An evolutionary model indexes a track by (initial metallicity, EEP)
         # and reads off the present-day age; all three are declared here, per
         # star, masked to the stars that opted into a model.  The mask is a
@@ -1208,7 +1219,7 @@ class Star(Component):
         ml_source_idx = _microlensing_only_star_indices(system)
         if ml_source_idx:
             relation_idx = set()
-            for relation in ("mann", "torres"):
+            for relation in ("mann", "torres", "mamajek"):
                 comp = getattr(system, relation, None)
                 if comp is not None:
                     relation_idx |= set(comp.star_indices)
