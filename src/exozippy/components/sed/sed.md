@@ -62,14 +62,7 @@ Filter profiles and stellar-model data are **package-level**, not SED-component-
 
 **`model_root:` must reach every consumer, and two of them used to ignore it.** `SED._ensure_model_data` passed `DEFAULT_MODEL_ROOT` to `make_bc.ensure_model_data`, which takes a root -- so a configured root downloaded 259 MB of spectra into a directory nothing reads and then downloaded them again. And the model's plot class was imported through the fixed dotted namespace `exozippy.models.<model>.BCs.plot`, which can only resolve inside the installed package: `sed.load_model_plot_module` keeps the dotted import for a path inside the package (so module identity matches a normal import) and spec-loads anything else, caching it in `sys.modules`. `sed.plot_class_from` then selects the one **subclass of `components.sed.plot.Plot`** defined in the module, raising on zero or several -- the old ast-parse-and-take-the-first-`ClassDef` silently instantiated a helper class defined above it. `plot.Plot` reads the spectra, the wavelength grid and the grid yaml under `self.model_root`; its fall back to the packaged NextGen spectra survives but is an explicit `is_file()` test plus a warning saying the *figure's* curve is a NextGen spectrum while the fit's BCs were not, in place of a bare `except:` + `print()`. Tests: `tests/test_sed_model_root.py`.
 
-**Auto-generation is a development convenience, not the production path.** It works because
-the grid it reads is the plot-resolution NextGen spectra. The full-resolution atmospheres are
-~250 GB, and no user should have to download those to add one filter, so on-the-fly generation
-does not survive the move to them (JDE 2026-09-17: "I don't think on the fly generation of the
-BC grids (as we once envisioned) is practical in production ... it would require the user to
-download 250 GB of high resolution models"). The machinery stays -- it is how the shipped
-tables are built, and it is genuinely useful at plot resolution -- but **the expected path for a
-new filter is to request it**, and have it generated centrally and shipped.
+**On-the-fly BC generation is DISABLED (2026-09-28, JDE).** `build_bc_grid` used to call `make_bc.generate_missing_facility` for a filter with no shipped column and synthesize one from the R = 150 NextGen spectra that were only ever made for plotting -- a column ~2 percent wrong, larger than most surveys' photometric errors. While the shipped tables were themselves built from those spectra that was merely a convenience; once PR #335 rebuilt them from the full-resolution spectra (and the SED's `errscale` improved markedly for it) a silently synthesized column became misleading and dangerous: it sits under the error scale and every parameter the SED touches, at an accuracy nothing in the fit reports. So a missing filter is now refused, by `bc_grid._refuse_missing`, with the request path spelled out (open an issue naming the SVO id, or add it with `models/NextGen/generate_NextGen_BC_Tables.py` from the full-resolution spectra). The full-resolution atmospheres are ~250 GB, and no user should download those to add one filter (JDE 2026-09-17), so **the expected path for a new filter is to request it** and have it generated centrally and shipped. `make_bc.py` survives only as a MANUAL development tool (`scripts/make_bc_tables.py`); its columns say in their metadata which pipeline made them. Tests: `tests/test_bc_grid_refuses_missing.py`.
 
 The better answer, unexplored and possibly not permitted: a SERVICE hosted next to the models
 that computes and serves a requested BC table without the caller ever holding the underlying
@@ -78,7 +71,7 @@ a repository-wide regeneration and become a query -- and the Rv axis with it. Wh
 IT supports hosting such a thing is an open question and not a software one; recorded here so
 the option is not rediscovered as novel.
 
-**A band-referenced filter whose facility has no BC tables is generated, not dropped** (`SED._collect_band_filters`). `build_bc_grid` already auto-generates for a filter listed in the `.sed` file, and for a missing column inside an existing facility; the band filter with a missing facility was the one case that silently dropped the SED flux constraint it exists to carry (the mulensing zeropoint tie, the transit dilution, the astrometry fluxfrac). The cost that comes with letting it through: a band filter whose tables genuinely cannot be built now fails the fit rather than quietly weakening it -- as a `.sed` filter already does. Still skipped, with a warning that says why: a label with no SVO identity at all, neither in the alias table nor SVO-shaped (`examples/gj1214`'s `MIRILRS`), for which there is no bandpass to synthesize from. Tests: `tests/test_sed_band_filters.py`.
+**A band-referenced filter whose facility has no BC tables is passed to the grid build, not dropped** (`SED._collect_band_filters`). `build_bc_grid` then refuses it with the request path, exactly as it does for a filter listed in the `.sed` file or a missing column inside an existing facility; the band filter with a missing facility was the one case that silently dropped the SED flux constraint it exists to carry (the mulensing zeropoint tie, the transit dilution, the astrometry fluxfrac). The cost that comes with letting it through: a band filter the shipped tables do not cover now fails the fit rather than quietly weakening it -- as a `.sed` filter already does. Still skipped, with a warning that says why: a label with no SVO identity at all, neither in the alias table nor SVO-shaped (`examples/gj1214`'s `MIRILRS`), for which there is no bandpass to synthesize from. Tests: `tests/test_sed_band_filters.py`.
 
 **Filter profiles are read from the package and written to the machine cache.** `filters/filter.py` used to write its downloaded `.filter` pickles into the installed package directory -- a `PermissionError` on a read-only site-packages and source-tree litter in a dev checkout, and its `os.makedirs` was unconditional, so even READING a shipped profile created a facility directory there. Reads now try the shipped package directory first (20 profiles ship) and `filter_cache_root()` -- the `$XDG_CACHE_HOME/exozippy/filters` sibling of `utilities/zenodo.py`'s download cache, honouring the same `EXOZIPPY_CACHE_DIR` switch -- second; a download goes to the cache, falling back to the package directory when the cache is switched off (which is what "off" meant before it existed) and to a temp directory when neither is writable. The SVO zeropoints those downloads scrape are validated before they are believed: HTTP status, table count, that the rows read are LABELLED as zeropoints, that the unit cell names the expected quantity, and that each value is `--` or a finite positive float. Every failure raises, and raising is the point -- the scrape happens inside `_set_attrs`, before `_create_filter_file`, so refusing is refusing to cache a wrong number forever. Tests: `tests/test_filter_cache.py`, `tests/test_filter_svo_zeropoints.py`. `bc_grid._load_alias_table` and `plot._read_spectra_csv` are both cached on `(path, mtime, size)` -- the 250 MB spectra table was re-read and re-json-parsed (5.5 s) on every `Plot` construction; tests `tests/test_filter_alias_cache.py`, `tests/test_sed_spectra_cache.py`.
 
@@ -133,14 +126,14 @@ broad bands, where the integral averages over lines, and not to be assumed. If t
 is faster and more general and wins; if it needs R ~ 10,000 to hold, the tables stay and the
 law becomes an axis.
 
-**The prerequisite that blocks all of it.** The shipped BC tables -- and the spectra
-`make_bc.py` reads -- are built from the R = 150 NextGen spectra that were only ever intended
-for PLOTTING (`make_bc.py` records that they reproduce the original 2MASS/GAIA tables only to
-0.01-0.04 mag). Both routes start by rebuilding from the full-resolution spectra, which Phoebe
-holds: (i) regenerate the BC tables from them (the production path, per the note above that
-on-the-fly generation does not survive the move to 250 GB), and (ii) bin them to the candidate
-runtime resolution and run the wide-filter revalidation against (i). Until those spectra are in
-hand nothing here can be built or validated. The write-up for the plan, when the work starts:
+**The prerequisite that blocks the runtime path.** Step (i) is DONE: PR #335 (2026-09-27)
+rebuilt the shipped BC tables from the full-resolution spectra (Av to 20, Roman at full
+resolution), and the SED's `errscale` improved markedly against the R = 150 tables -- which is
+also why on-the-fly generation from the plotting spectra is now disabled (above). What remains
+is (ii): bin the full-resolution spectra, which Phoebe holds, to the candidate runtime
+resolution and run the wide-filter revalidation against the full-resolution band integrals.
+Until those spectra are in hand for binning, nothing on the runtime path can be built or
+validated. The write-up for the plan, when the work starts:
 the wavelength grid and binning (photon-counting integration, filter edges resolved), the
 zeropoints per magnitude system from the shipped SVO files, the law family (CCM/F99 with R_V
 plus an NIR index, or an R_V-only family such as Gordon+2023) and its per-field prior, the

@@ -119,8 +119,8 @@ def test_find_bc_table_raises_not_implemented_for_missing_facility():
     """
     Given the NextGen model and a facility with no BC table,
     When find_bc_table is called,
-    Then NotImplementedError should be raised (the error the SED and the
-    auto-generator key on).
+    Then NotImplementedError should be raised (the error the SED keys on;
+    build_bc_grid re-raises it with the request path).
     """
     # ACT & ASSERT
     with pytest.raises(NotImplementedError):

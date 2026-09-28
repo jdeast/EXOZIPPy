@@ -5,9 +5,14 @@ hooks key on -- the mulensing zeropoint tie, the transit dilution, the
 astrometry fluxfrac. `_collect_band_filters` used to DROP such a filter
 whenever its facility had no BC tables yet, warning that the tables "can
 be generated with the BC table machinery" -- which is exactly what
-`build_bc_grid` does, unprompted, for a filter listed in the .sed file and
+`build_bc_grid` did, unprompted, for a filter listed in the .sed file and
 for a missing column inside a facility that does exist. The band filter
 was the one case that silently lost its constraint instead.
+
+Since 2026-09-28 `build_bc_grid` no longer generates anything: it REFUSES
+a filter the shipped tables do not cover, naming the request path.  The
+band filter is still passed through, so it is refused loudly like a .sed
+filter rather than dropped quietly -- which is what these tests check.
 """
 
 import logging
@@ -32,11 +37,11 @@ def _sed_stub(bands, tmp_path):
     return sed
 
 
-def test_a_band_filter_with_no_tables_is_passed_on_to_be_generated(tmp_path):
+def test_a_band_filter_with_no_tables_is_passed_on_to_the_grid_build(tmp_path):
     """
     Given a band naming a real SVO filter whose facility has no BC tables,
     When the band filters are collected,
-    Then it is returned, so build_bc_grid generates the tables for it.
+    Then it is returned, so build_bc_grid sees it (and refuses it loudly).
 
     Regression: it was dropped, and with it the SED flux constraint the
     band exists to carry.

@@ -10,9 +10,16 @@ tables use, so bc_grid.py loads them transparently. This resolves the
 bc_grid.find_bc_table.
 
 The shipped tables themselves are built from the FULL-resolution spectra
-by models/NextGen/generate_NextGen_BC_Tables.py; this module is the
-on-demand fallback for a filter that has no column yet. Each column's
-filter_meta records which of the two produced it.
+by models/NextGen/generate_NextGen_BC_Tables.py (PR #335).  This module
+is a MANUAL development tool (scripts/make_bc_tables.py) for a filter that
+has no column yet and no full-resolution spectra to hand; a column it
+writes is ~2 percent wrong (the R = 150 spectra were made for plotting)
+and its filter_meta says which pipeline produced it.  It is no longer
+called from a fit: the on-the-fly hook (`generate_missing_facility`, from
+bc_grid.build_bc_grid) was removed on 2026-09-28 because a table built
+silently at that accuracy sits under the SED's error scale and misleads
+everything downstream (JDE).  build_bc_grid now refuses a missing filter
+and names the request path.
 
 Conventions
 -----------
@@ -488,40 +495,3 @@ def make_bc_tables(
         logger.info(f"Wrote {path}")
 
     return written
-
-
-def generate_missing_facility(
-    facility: str,
-    svo_names: Sequence[str],
-    model: str,
-    model_root: Path | str,
-) -> bool:
-    """
-    Auto-generation hook used by bc_grid.build_bc_grid when a facility's
-    BC directory is missing: build tables for the requested SVO filters.
-    Returns True on success.
-
-    A DEVELOPMENT CONVENIENCE, NOT THE PRODUCTION PATH.  This is affordable
-    only because the spectra it reads are plot-resolution; the
-    full-resolution atmospheres are ~250 GB and nobody should download those
-    to add one filter.  So it does not survive the move to them, and the
-    expected path for a new filter is to REQUEST it and have it generated
-    centrally and shipped (JDE 2026-09-17).  See sed.md for the hosted-service
-    alternative, which would also dissolve the large-av and Rv-axis problems.
-
-    Note it builds only the bands the caller happens to ask for, which is how
-    Roman shipped a 2-band table for years while its WFI imaging set has 8.
-    """
-    wanted = [s for s in svo_names if facility_from_svo_name(s) == facility]
-    if not wanted:
-        return False
-    logger.warning(
-        f"BC tables for facility '{facility}' not found; generating them "
-        f"now from the {model} spectra for {wanted} (one-time cost)."
-    )
-    try:
-        make_bc_tables(wanted, model=model, model_root=model_root)
-        return True
-    except Exception as e:
-        logger.error(f"BC auto-generation for '{facility}' failed: {e}")
-        return False
