@@ -71,9 +71,9 @@ with $L_0 = 3.0128\times10^{28}$ W (IAU 2015), the SVO Vega $F_\lambda$ zeropoin
 
 Before this pipeline, the tables shipped as one text file per facility and [Fe/H] (`BCs/{FACILITY}/feh{+/-X.X}_afe+0.0.{FACILITY}`). `convert_legacy_BC_tables.py` converts those into the parquet format unchanged, so the package keeps working until step 2 has been run. Those text tables were photon-weighted for every filter, which is 0.07 - 0.18 mag off for the energy-counter bands (Gaia, TESS, WISE W3); regenerate them with this pipeline.
 
-## Filters with no table: `components/sed/make_bc.py`
+## Filters with no table
 
-A fit that asks for a filter with no column triggers `make_bc.py`, which synthesizes the column from the downsampled (R = 150) spectra on Zenodo on the `NextGen.grid.yaml` axes and merges it into the facility's table. It is the fallback for users without the full-resolution spectra; its columns say so in their metadata. It is incremental in the same way as step 2, with one extra rule: it never writes into a column another pipeline produced, unless called with `overwrite=True` (`scripts/make_bc_tables.py --overwrite`).
+A fit that asks for a filter with no column is REFUSED by `bc_grid.build_bc_grid`, with a message naming the request path. It used to trigger `components/sed/make_bc.py`, which synthesizes the column from the downsampled (R = 150) spectra on Zenodo; that hook was removed on 2026-09-28 because those columns are ~2 percent wrong and, once the shipped tables came from the full-resolution spectra (step 2 above), a silently synthesized one would sit under the SED's error scale unreported. `make_bc.py` remains as a manual development tool (`scripts/make_bc_tables.py`); its columns say so in their metadata, and it never writes into a column another pipeline produced unless called with `overwrite=True` (`--overwrite`). The production path for a new filter is to request it and have it generated here from the full-resolution spectra and shipped.
 
 ## Reading the tables during a fit
 

@@ -34,9 +34,24 @@ from exozippy.system import System
 _EXAMPLES = Path(__file__).parent.parent / "examples"
 
 # Relative path (POSIX, from examples/) -> reason it cannot be prepared here.
-# Empty today: every shipped config prepares. Add entries rather than
-# narrowing the glob, so an excluded example stays visible.
-_EXCLUDED: dict[str, str] = {}
+# Add entries rather than narrowing the glob, so an excluded example stays
+# visible.
+_TYCHO_REASON = (
+    "its SED lists TYCHO/TYCHO.B and TYCHO/TYCHO.V (Hoeg+2000), and the "
+    "shipped BC tables have no TYCHO facility. Until 2026-09-28 the grid "
+    "build synthesized those two columns at test time from the R = 150 "
+    "plotting spectra; that path was disabled (PR #341) because such a "
+    "column is ~2 percent wrong and now sits under an error scale "
+    "calibrated on full-resolution tables. TYCHO must be added to "
+    "generate_NextGen_BC_Tables.py's FILTER_SETS and generated from the "
+    "full-resolution spectra (requested; notes 2026-09-28). Remove this "
+    "entry when TYCHO.bc.parquet ships."
+)
+_EXCLUDED: dict[str, str] = {
+    "kelt17/kelt17_all.yaml": _TYCHO_REASON,
+    "kelt17/kelt17_dt.yaml": _TYCHO_REASON,
+    "kelt17/kelt17_rm.yaml": _TYCHO_REASON,
+}
 
 
 def _needs_absent_mist_grid(config) -> str:

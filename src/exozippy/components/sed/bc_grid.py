@@ -25,8 +25,11 @@ axis. df.attrs["meta"] carries the table-level metadata and, per filter
 column, its SVO id and how it was computed (see write_bc_table).
 
 The tables are produced by models/NextGen/generate_NextGen_BC_Tables.py
-(full-resolution spectra) or on demand by make_bc.py (the downsampled
-Zenodo spectra); models/NextGen/README.md describes the workflow.
+(full-resolution spectra); models/NextGen/README.md describes the
+workflow.  make_bc.py can synthesize a column from the downsampled Zenodo
+spectra as a MANUAL development step (scripts/make_bc_tables.py); the
+on-the-fly hook that once called it from build_bc_grid is gone
+(_refuse_missing says why).
 
 Tables grow incrementally. A NaN cell means "not computed yet", so a
 table may be extended along any axis (new Av values, say) for some of
@@ -351,7 +354,7 @@ def read_bc_table(
 def find_bc_table(model_root: Path | str, model: str, facility: str) -> Path:
     """
     Locate the BC table for one facility, raising the same two errors the
-    SED (and build_bc_grid's auto-generation) key on:
+    SED keys on:
 
       FileNotFoundError    -- no BC tree at all for `model`
       NotImplementedError  -- the model exists but `facility` has no table
@@ -823,6 +826,32 @@ def _bracket(pts: np.ndarray, lo, hi) -> Tuple[float, float]:
     return float(pts[idx[0]]), float(pts[idx[-1]])
 
 
+def _refuse_missing(facility, svo_names, model, detail):
+    """The message for a filter the shipped tables do not cover.
+
+    On-the-fly synthesis from the R = 150 plotting spectra (make_bc.py,
+    the `generate_missing_facility` hook that used to live here) was
+    DISABLED on 2026-09-28 (JDE): the shipped tables are built from the
+    full-resolution spectra (models/NextGen/generate_NextGen_BC_Tables.py,
+    PR #335), and a column synthesized from the downsampled spectra is
+    ~2 percent wrong -- larger than most surveys' photometric errors -- so
+    letting a fit build one silently would put a misleading table under the
+    SED's error scale and everything that depends on it.  A missing filter
+    is therefore refused, with the request path spelled out.
+    """
+    return (
+        f"Bolometric corrections for {list(svo_names)} ({model}, facility "
+        f"'{facility}') are not in the shipped tables: {detail} They are "
+        f"NOT generated on the fly -- the shipped tables come from the "
+        f"full-resolution spectra (models/{model}/generate_{model}_BC_Tables."
+        f"py) and a table synthesized from the downsampled plotting spectra "
+        f"would be ~2 percent wrong.  Request the filter (open an issue "
+        f"naming the SVO id) or, with the full-resolution spectra in hand, "
+        f"add it with models/{model}/generate_{model}_BC_Tables.py; "
+        f"otherwise choose a filter the tables cover."
+    )
+
+
 def build_bc_grid(
     user_filter_names: Sequence[str],
     model: str = "NextGen",
@@ -882,8 +911,8 @@ def build_bc_grid(
     )
 
     # 2. For each facility, read its table, keeping only the requested
-    # columns and rows. Missing facilities/columns trigger one-time
-    # auto-generation from the model spectra (make_bc.py).
+    # columns and rows.  A missing facility or column is an ERROR that
+    # names the fix; nothing is synthesized here (see _refuse_missing).
     per_facility_frames: Dict[str, pd.DataFrame] = {}
     per_facility_axes: Dict[str, Dict[str, np.ndarray]] = {}
     for fac, items in by_facility.items():
@@ -892,30 +921,23 @@ def build_bc_grid(
 
         try:
             path = find_bc_table(model_root, model, fac)
-        except (FileNotFoundError, NotImplementedError):
-            from .make_bc import generate_missing_facility
-
-            if not generate_missing_facility(fac, fac_svo, model, model_root):
-                raise
-            path = find_bc_table(model_root, model, fac)
+        except (FileNotFoundError, NotImplementedError) as e:
+            raise NotImplementedError(
+                _refuse_missing(fac, fac_svo, model, str(e))
+            ) from e
 
         missing = set(wanted_cols) - set(bc_table_filter_columns(path))
         if missing:
-            # Facility exists but lacks some requested columns; generate
-            # the missing ones (make_bc merges into the existing table
-            # without touching the existing columns).
-            from .make_bc import generate_missing_facility
-
             miss_svo = [
                 svo_names[idx] for idx, mist in items if mist in missing
             ]
-            if generate_missing_facility(fac, miss_svo, model, model_root):
-                missing = set(wanted_cols) - set(bc_table_filter_columns(path))
-        if missing:
             raise NotImplementedError(
-                f"Bolometric corrections unavailable for ``{sorted(missing)}`` "
-                f"and auto-generation failed; see the log above, or run "
-                f"scripts/make_bc_tables.py manually."
+                _refuse_missing(
+                    fac,
+                    miss_svo,
+                    model,
+                    f"{path.name} holds no column for {sorted(missing)}.",
+                )
             )
 
         # Dedupe: the same MIST column may be requested by more than one
