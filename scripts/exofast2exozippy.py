@@ -2,8 +2,8 @@
 """Convert an EXOFASTv2 driver .pro file into EXOZIPPy YAML inputs.
 
 Reads the IDL procedure that calls ``exofastv2, ...``, translates the call's
-keywords, the ``priorfile=`` and the ``sedfile=`` into the EXOZIPPy config
-trio, and copies the referenced data files, so that
+keywords, the ``priorfile=`` and the ``sedfile=``/``mistsedfile=`` into the
+EXOZIPPy config trio, and copies the referenced data files, so that
 
     cd examples/gj1214
     poetry run python ../../scripts/exofast2exozippy.py ~/modeling/gj1214/fitclass.pro
@@ -22,11 +22,31 @@ carried over: the emitted sampler block follows EXOZIPPy's HMC best
 practices instead of EXOFASTv2's DE-MCMC settings. Every EXOFASTv2 feature
 that has no EXOZIPPy equivalent yet produces a WARNING (collected at the
 end and embedded as comments in the generated config).
+
+Two EXOFASTv2 indexing conventions matter for the params file and are
+reproduced here exactly (see mkss.pro):
+  * transit files are numbered in sorted-filename order (variance_N, f0_N,
+    exptime[N], ninterp[N]);
+  * bands are numbered by SORTED unique band name (u1_N, u2_N), not by the
+    order the files introduce them.
+
+Relative paths are resolved against the directory the shell was in ($PWD)
+when that differs from the process cwd: ``poetry -C <project> run ...``
+chdir()s into the project first, which would otherwise send a bare
+``./fit.pro`` and the default ``-o .`` to the EXOZIPPy checkout.
+
+The path idiom of EXOFASTv2's own example drivers is evaluated:
+``path = filepath('', root_dir=getenv('EXOFAST_PATH'), subdir=[...])``,
+``path+'n*.dat'`` concatenation, ``if n_elements(x) eq 0 then x = ...``
+defaults, and arrays of globs (``tranpath=['n20*.dat']``). A prefix that
+resolves to an absolute path (the EXOFASTv2 run's own output directory) is
+reduced to its stem under ``fitresults/``.
 """
 
 import argparse
 import glob
 import math
+import os
 import re
 import shutil
 import sys
@@ -139,8 +159,78 @@ def _parse_idl_value(tok, variables):
         return math.inf
     if low in variables:
         return variables[low]
+    # String concatenation, e.g. path+'n*.dat' -- the idiom every
+    # EXOFASTv2 example driver uses to locate its data.
+    parts = _split_top_level(tok, sep="+")
+    if len(parts) > 1:
+        vals = [_eval_quiet(t, variables) for t in parts]
+        # A driver keyword left unset has no value at conversion time
+        # (_PassThrough), so it cannot be part of a path.
+        if all(
+            isinstance(v, str) and not isinstance(v, _PassThrough)
+            for v in vals
+        ):
+            return "".join(vals)
+    call = _idl_call(tok, variables)
+    if call is not None:
+        return call
     warn(f"could not evaluate IDL expression '{tok}'; keeping it as a string")
     return tok
+
+
+class _Unevaluable(Exception):
+    pass
+
+
+class _PassThrough(str):
+    """A driver keyword (``pro fit, maxsteps=maxsteps``) forwarded to
+    exofastv2 unevaluated: its name, standing in for a run-time value."""
+
+
+def _eval_quiet(tok, variables):
+    """_parse_idl_value without the warning, raising instead, so a failed
+    sub-expression aborts the enclosing one and it is warned about once."""
+    before = len(WARNINGS)
+    val = _parse_idl_value(tok, variables)
+    if len(WARNINGS) > before:
+        del WARNINGS[before:]
+        raise _Unevaluable(tok)
+    return val
+
+
+def _idl_call(tok, variables):
+    """Evaluate the IDL builtins a driver uses to build paths:
+    getenv('NAME') and filepath(name, root_dir=..., subdir=[...]).
+    Returns None for anything else (or if an argument cannot be
+    evaluated, or the environment variable is unset)."""
+    m = re.match(r"^(\w+)\s*\((.*)\)$", tok, re.S)
+    if not m:
+        return None
+    fn = m.group(1).lower()
+    pos, kw = [], {}
+    try:
+        for a in _split_top_level(m.group(2)):
+            k = re.match(r"^(\w+)\s*=(.*)$", a, re.S)
+            if k and not a.lstrip().startswith(("'", '"')):
+                kw[k.group(1).lower()] = _eval_quiet(k.group(2), variables)
+            else:
+                pos.append(_eval_quiet(a, variables))
+    except _Unevaluable:
+        return None
+    if fn == "getenv" and len(pos) == 1 and not kw:
+        val = os.environ.get(str(pos[0]))
+        if not val:
+            warn(f"environment variable {pos[0]!r} (getenv) is not set")
+            return None
+        return val
+    if fn == "filepath" and len(pos) == 1:
+        root = kw.get("root_dir", "")
+        sub = kw.get("subdir", [])
+        sub = sub if isinstance(sub, list) else [sub]
+        # IDL: filepath('', root_dir=R, subdir=[a, b]) is 'R/a/b/'.
+        path = os.path.join(str(root), *[str(x) for x in sub], str(pos[0]))
+        return path if pos[0] else path.rstrip(os.sep) + os.sep
+    return None
 
 
 def parse_pro_file(path):
@@ -150,11 +240,36 @@ def parse_pro_file(path):
     call_args = None
     for line in _logical_lines(text):
         low = line.lower()
+        if low.startswith("pro ") or low.startswith("pro\t"):
+            # The driver's own keywords (pro fit, maxsteps=maxsteps, ...)
+            # are run-time pass-throughs, not expressions to evaluate:
+            # register the variable names so a later `maxsteps=maxsteps`
+            # in the exofastv2 call keeps the name without a warning.
+            for tok in _split_top_level(line[4:])[1:]:
+                if "=" in tok:
+                    var = tok.split("=", 1)[1].strip()
+                    if re.match(r"^\w+$", var):
+                        variables[var.lower()] = _PassThrough(var)
+            continue
         if low.startswith("exofastv2"):
             rest = line[len("exofastv2") :].lstrip()
             if rest.startswith(","):
                 rest = rest[1:]
             call_args = rest
+            continue
+        # `if n_elements(x) eq 0 then x = <expr>`: the value x takes when
+        # the driver is run without that keyword, i.e. the conversion's.
+        m = re.match(
+            r"^if\s+n_elements\(\s*(\w+)\s*\)\s+eq\s+0\s+then\s+"
+            r"(\w+)\s*=\s*(.+)$",
+            line,
+            re.I,
+        )
+        if m and m.group(1).lower() == m.group(2).lower():
+            if call_args is None:
+                variables[m.group(2).lower()] = _parse_idl_value(
+                    m.group(3), variables
+                )
             continue
         m = re.match(r"^(\w+)\s*=\s*(.+)$", line)
         if m and call_args is None:
@@ -199,6 +314,10 @@ def parse_priorfile(path):
       width  < 0 or absent -> starting value only
       start (5th number) -> starting value distinct from the prior center
 
+    A name with no ``_N`` suffix is instance 0 (findvariable.pro:
+    ``if n_elements(varnames) eq 1 then varnames = [varnames,'0']``), so
+    ``variance`` is transit 0 and ``u1`` is band 0 -- never "all instances".
+
     Returns a list of dicts with keys name, index, value, width, lower,
     upper, start.
     """
@@ -217,7 +336,7 @@ def parse_priorfile(path):
         if not vals:
             warn(f"priorfile line has no value, skipped: '{raw.strip()}'")
             continue
-        index = None
+        index = 0
         m = re.match(r"^(.*)_(\d+)$", name)
         if m:
             name, index = m.group(1), int(m.group(2))
@@ -260,6 +379,8 @@ PRIOR_MAP = {
     "logg": ("star", "star.{n}.logg", 1.0),
     "rhostar": ("star", "star.{n}.density", 1.0),  # both g/cm3
     "age": ("star", "star.{n}.age", 1.0),
+    "initfeh": ("star", "star.{n}.initfeh", 1.0),
+    "eep": ("star", "star.{n}.eep", 1.0),
     "av": ("star", "star.{n}.av", 1.0),
     "distance": ("star", "star.{n}.distance", 1.0),
     "parallax": ("star", "star.{n}.parallax", 1.0),
@@ -302,10 +423,13 @@ PRIOR_MAP = {
 }
 
 # Priors EXOFASTv2 accepts but EXOZIPPy has no home for (yet).
+# Priors that only exist on a star fitted with an evolutionary model
+# (star.mist: True materializes them); dropped under /nomist.
+MIST_PRIORS = ("initfeh", "eep", "age")
+
 PRIOR_UNSUPPORTED = {
-    "initfeh": "MIST evolutionary tracks are not implemented",
-    "eep": "MIST evolutionary tracks are not implemented",
-    "alpha": "MIST alpha enhancement is not implemented",
+    "alpha": "MIST alpha enhancement is not a fitted parameter in EXOZIPPy "
+    "(evolutionarymodel 'alpha:' selects a grid instead)",
     "vsini": "map it to orbit.<planet>.vsini by hand if fitting RM",
     "reflect": "reflected-light phase curves are not implemented",
     "dilute": "explicit dilution priors are not implemented (EXOZIPPy "
@@ -361,14 +485,21 @@ def _to_svo(name, alias_df):
 
 
 def _resolve_glob(pattern, pro_dir):
-    """Expand an EXOFASTv2 path glob relative to the .pro file's directory."""
-    pattern = str(Path(pattern).expanduser())
-    if not Path(pattern).is_absolute():
-        pattern = str(pro_dir / pattern)
-    files = sorted(glob.glob(pattern))
-    if not files:
-        warn(f"no files match '{pattern}'")
-    return [Path(f) for f in files]
+    """Expand an EXOFASTv2 path glob -- or an array of them, which
+    exofastv2 also accepts (tranpath=['n20*.dat']) -- relative to the .pro
+    file's directory. Returns the matches sorted, the order exofastv2
+    numbers the files in."""
+    patterns = pattern if isinstance(pattern, list) else [pattern]
+    files = set()
+    for pat in patterns:
+        pat = str(Path(str(pat)).expanduser())
+        if not Path(pat).is_absolute():
+            pat = str(pro_dir / pat)
+        matched = glob.glob(pat)
+        if not matched:
+            warn(f"no files match '{pat}'")
+        files.update(matched)
+    return [Path(f) for f in sorted(files)]
 
 
 def _transit_meta(path):
@@ -473,6 +604,8 @@ IGNORED_KEYWORDS = {
 NOOP_KEYWORDS = {"nochord", "novcve", "noyy", "notorres", "nomistsed"}
 
 UNSUPPORTED_KEYWORDS = {
+    "fehsedfloor": "EXOZIPPy's SED reads star.feh directly -- there is no "
+    "separate SED metallicity for a floor to tie back to it",
     "fitspline": "EXOFASTv2's Kepler-spline detrending is not implemented; "
     "the closest EXOZIPPy analog is 'gp: sho' on the transit "
     "file entry (correlated-noise model) or detrend columns",
@@ -492,7 +625,6 @@ UNSUPPORTED_KEYWORDS = {
     "fitlogmp": "log-mass sampling is not a user knob in EXOZIPPy",
     "fluxfile": "EXOFASTv2 flux files are not supported; convert the "
     "photometry to a .sed.yaml by hand",
-    "mistsedfile": "MIST SED files are not supported; use sedfile",
     "dtpath": "Doppler tomography is not implemented",
     "yy": "Yonsei-Yale tracks are not implemented",
     "parsec": "PARSEC tracks are not implemented",
@@ -547,11 +679,26 @@ def convert(pro_path, outdir, base):
     if tranpath:
         for f in _resolve_glob(tranpath, pro_dir):
             name, band = _transit_meta(f)
-            if any(t["name"] == name for t in transits):
-                name = f"{name}_{len(transits)}"
             transits.append(dict(name=name, file=f, band=band))
-            if band not in bands:
-                bands.append(band)
+        # Two files from one telescope on one night (a multi-band imager
+        # such as MuSCAT2) share a <TELESCOPE>_UT<date> name: tell them
+        # apart by band, and only then by position.
+        counts = {}
+        for t in transits:
+            counts[t["name"]] = counts.get(t["name"], 0) + 1
+        for t in transits:
+            if counts[t["name"]] > 1:
+                t["name"] = f"{t['name']}_{t['band']}"
+        seen = set()
+        for i, t in enumerate(transits):
+            if t["name"] in seen:
+                t["name"] = f"{t['name']}_{i}"
+            seen.add(t["name"])
+        # exofastv2 numbers bands by SORTED unique name (mkss.pro:
+        # bands[uniq(bands, sort(bands))]), NOT by first appearance, and
+        # u1_N/u2_N index that order. IDL's sort is bytewise, as Python's
+        # is on these ASCII names, so e.g. 'Sloang' < 'TESS'.
+        bands = sorted({t["band"] for t in transits})
 
     rvs = []  # dicts: name, file(Path)
     rvpath = take("rvpath")
@@ -565,6 +712,30 @@ def convert(pro_path, outdir, base):
                 )
                 name = f"{name}_{len(rvs)}"
             rvs.append(dict(name=name, file=f))
+
+    # per-planet switches: fitrv/fittran have no per-planet equivalent (a
+    # planet is in every dataset's model); circular pins the sqrt(e) pair.
+    circular = _bool_array(take("circular"), nplanets, "circular")
+    for key, have, what in (
+        ("fitrv", rvs, "RV"),
+        ("fittran", transits, "transit"),
+    ):
+        val = take(key)
+        if val is None:
+            continue
+        flags = val if isinstance(val, list) else [val] * nplanets
+        off = [
+            planet_names[i] for i, v in enumerate(flags[:nplanets]) if not v
+        ]
+        if off and have:
+            warn(
+                f"{key}=0 for planet(s) {off}: EXOZIPPy has no per-planet "
+                f"switch, every planet enters the {what} model"
+            )
+        elif off:
+            info(f"'{key}={val}' is moot: no {what} data")
+        else:
+            info(f"'{key}={val}' is the default (all planets modeled)")
 
     # per-file cadence smearing
     exptime = take("exptime")
@@ -589,6 +760,29 @@ def convert(pro_path, outdir, base):
     # ---- SED ----------------------------------------------------------
     sed_yaml_name = None
     sedfile = take("sedfile")
+    mistsedfile = take("mistsedfile")
+    if mistsedfile:
+        if sedfile:
+            warn(
+                f"both sedfile='{sedfile}' and mistsedfile='{mistsedfile}' "
+                "given; translating sedfile only"
+            )
+        else:
+            # Same "band mag used_err [catalog_err]" layout, MIST band
+            # names (the alias table's MIST column resolves them).
+            sedfile = mistsedfile
+            info(
+                f"mistsedfile='{mistsedfile}' translated as the SED; "
+                "EXOZIPPy computes the bolometric corrections from its own "
+                "NextGen grid rather than the MIST tables"
+            )
+    # EXOFASTv2's fractional SED systematic floors map one-to-one onto
+    # the sed: block's keys (same meaning, same defaults).
+    sed_floors = {}
+    for key in ("teffsedfloor", "fbolsedfloor"):
+        val = take(key)
+        if val is not None:
+            sed_floors[key] = float(val)
     sed_lines = []
     alias_df = _load_filter_aliases()
     if sedfile:
@@ -613,12 +807,20 @@ def convert(pro_path, outdir, base):
     torres_flags = _bool_array(take("torres"), nstars, "torres")
 
     # ---- MIST / Claret defaults ----------------------------------------
-    if not take("nomist"):
-        warn(
-            "the EXOFASTv2 fit used MIST evolutionary tracks; EXOZIPPy has "
-            "no evolutionary model yet. Setting mist: False -- constrain "
-            "the star with mann/torres or explicit priors instead"
+    # exofastv2 fits every star to the MIST tracks unless /nomist (scalar
+    # or per-star). EXOZIPPy: star.mist (default True) materializes
+    # initfeh/eep/age, and an evolutionarymodel block ties feh/radius/teff/
+    # age to the tracks interpolated at (logmass, initfeh, eep).
+    mist_flags = [not v for v in _bool_array(take("nomist"), nstars, "nomist")]
+    if all(mist_flags):
+        info("MIST tracks -> star.mist: True + an evolutionarymodel block")
+    elif any(mist_flags):
+        info(
+            "per-star nomist -> mist: False on "
+            f"{[s for s, m in zip(star_names, mist_flags) if not m]}"
         )
+    else:
+        info("/nomist -> mist: False; no evolutionarymodel block")
     if not take("noclaret"):
         warn(
             "the EXOFASTv2 fit used Claret limb-darkening priors; the LD "
@@ -639,7 +841,18 @@ def convert(pro_path, outdir, base):
 
     # ---- prefix ---------------------------------------------------------
     prefix = take("prefix", f"fitresults/{base}")
-    prefix = str(prefix).rstrip(".")
+    prefix = str(Path(str(prefix).rstrip("."))).rstrip("/")
+    if Path(prefix).is_absolute():
+        # An absolute prefix is the EXOFASTv2 run's own output directory
+        # (typically a driver's `outpath` default); writing EXOZIPPy's
+        # results there would mix them into the EXOFASTv2 fit's files.
+        local = f"fitresults/{Path(prefix).name}"
+        info(
+            f"absolute prefix '{prefix}' -> '{local}' (EXOZIPPy results go "
+            "next to the converted config, not into the EXOFASTv2 fit's "
+            "directory)"
+        )
+        prefix = local
 
     # ---- priors ----------------------------------------------------------
     priorfile = take("priorfile")
@@ -681,19 +894,17 @@ def convert(pro_path, outdir, base):
                     "exists; dropped"
                 )
                 continue
-            if p["index"] is not None and p["index"] >= len(bands):
+            if p["index"] >= len(bands):
                 warn(
                     f"prior '{name}_{p['index']}' indexes past the last "
                     "band; dropped"
                 )
                 continue
-            targets = [bands[p["index"]]] if p["index"] is not None else bands
-            for b in targets:
-                ld_priors.setdefault(b, {})[name] = p
+            ld_priors.setdefault(bands[p["index"]], {})[name] = p
             continue
         # appks feeds the mann relation's Ks pathway, not a params entry
         if name == "appks":
-            idx = p["index"] or 0
+            idx = p["index"]
             if p["width"] and p["width"] > 0:
                 off = None
                 if p["start"] is not None:
@@ -708,6 +919,15 @@ def convert(pro_path, outdir, base):
         if name in PRIOR_UNSUPPORTED:
             warn(f"prior '{name}' dropped: {PRIOR_UNSUPPORTED[name]}")
             continue
+        if name in MIST_PRIORS and not all(mist_flags):
+            star_ok = p["index"] < nstars and mist_flags[p["index"]]
+            if not star_ok:
+                warn(
+                    f"prior '{name}' dropped: it only exists on a star "
+                    "fitted with MIST (mist: True), and this star has "
+                    "/nomist"
+                )
+                continue
         if re.match(r"^[cm]\d+$", name):
             warn(
                 f"detrending-coefficient prior '{name}' dropped; wire "
@@ -729,44 +949,57 @@ def convert(pro_path, outdir, base):
                 "dropped"
             )
             continue
-        if p["index"] is not None:
-            if p["index"] >= len(names):
-                warn(
-                    f"prior '{name}_{p['index']}' indexes past the last "
-                    f"{axis} instance; dropped"
-                )
-                continue
-            targets = [names[p["index"]]]
-        else:
-            targets = names  # exofastv2: unindexed applies to all instances
+        if p["index"] >= len(names):
+            warn(
+                f"prior '{name}_{p['index']}' indexes past the last "
+                f"{axis} instance; dropped"
+            )
+            continue
 
-        for n in targets:
-            path = template.format(n=n)
-            fields = {}
-            value = p["value"] * scale
-            width = None if p["width"] is None else p["width"] * abs(scale)
-            start = None if p["start"] is None else p["start"] * scale
-            if width is not None and width > 0:
-                fields["mu"] = value
-                fields["sigma"] = width
-                fields["initval"] = start if start is not None else value
-            elif width is not None and width == 0:
-                fields["initval"] = value
-                fields["sigma"] = 0.0
-            else:
-                fields["initval"] = start if start is not None else value
-            if p["lower"] is not None:
-                fields["lower"] = p["lower"] * abs(scale)
-            if p["upper"] is not None:
-                fields["upper"] = p["upper"] * abs(scale)
-            comment = None
-            if name == "mpsun":
-                comment = f"mpsun {p['value']:.10g} Msun -> {value:.10g} Mjup"
-            elif name == "omega":
-                comment = "omega converted rad -> deg"
-            param_entries.append((path, fields, comment))
+        n = names[p["index"]]
+        path = template.format(n=n)
+        fields = {}
+        value = p["value"] * scale
+        width = None if p["width"] is None else p["width"] * abs(scale)
+        start = None if p["start"] is None else p["start"] * scale
+        if width is not None and width > 0:
+            fields["mu"] = value
+            fields["sigma"] = width
+            fields["initval"] = start if start is not None else value
+        elif width is not None and width == 0:
+            fields["initval"] = value
+            fields["sigma"] = 0.0
+        else:
+            fields["initval"] = start if start is not None else value
+        if p["lower"] is not None:
+            fields["lower"] = p["lower"] * abs(scale)
+        if p["upper"] is not None:
+            fields["upper"] = p["upper"] * abs(scale)
+        comment = None
+        if name == "mpsun":
+            comment = f"mpsun {p['value']:.10g} Msun -> {value:.10g} Mjup"
+        elif name == "omega":
+            comment = "omega converted rad -> deg"
+        param_entries.append((path, fields, comment))
 
     _translate_ld_priors(ld_priors, param_entries)
+
+    # circular=[..]: a circular orbit is spelled as BOTH secosw and sesinw
+    # pinned at zero (sigma: 0, initval: 0); that supersedes any start the
+    # priorfile gave them.
+    for i, pinned in enumerate(circular):
+        if not pinned:
+            continue
+        pn = planet_names[i]
+        paths = {f"orbit.{pn}.secosw", f"orbit.{pn}.sesinw"}
+        param_entries[:] = [e for e in param_entries if e[0] not in paths]
+        comment = f"circular=1 for planet {pn}: eccentricity pinned at zero"
+        for path in sorted(paths):
+            param_entries.append(
+                (path, {"initval": 0.0, "sigma": 0.0}, comment)
+            )
+            comment = None
+        info(f"circular planet {pn} -> secosw/sesinw pinned at 0")
 
     # thermal priors imply fitthermal on that band
     for path, fields, _ in param_entries:
@@ -864,8 +1097,10 @@ def convert(pro_path, outdir, base):
         bands=bands,
         fitthermal=fitthermal,
         sed_yaml_name=sed_yaml_name,
+        sed_floors=sed_floors,
         mann_entries=mann_entries,
         torres_entries=torres_entries,
+        mist_flags=mist_flags,
         pro_path=pro_path,
     )
     (outdir / f"{base}.yaml").write_text(config_text)
@@ -1064,8 +1299,10 @@ def _emit_config(
     bands,
     fitthermal,
     sed_yaml_name,
+    sed_floors,
     mann_entries,
     torres_entries,
+    mist_flags,
     pro_path,
 ):
     L = []
@@ -1088,14 +1325,27 @@ def _emit_config(
     L.append("")
 
     L.append("star:")
-    for s in star_names:
+    for s, m in zip(star_names, mist_flags):
         L.append(f'  - name: "{s}"')
-        L.append("    mist: False")
+        L.append(f"    mist: {'True' if m else 'False'}")
     L.append("")
+
+    if any(mist_flags):
+        L.append("# MIST tracks interpolated at (logmass, initfeh, eep); each")
+        L.append("# constrained quantity gets a Gaussian potential toward the")
+        L.append("# track value with EXOFASTv2's systematic floor as sigma.")
+        L.append("evolutionarymodel:")
+        for s, m in zip(star_names, mist_flags):
+            if m:
+                L.append(f'  - star: "{s}"')
+                L.append("    constrain: [feh, radius, teff, age]")
+        L.append("")
 
     if sed_yaml_name:
         L.append("sed:")
         L.append(f'  file: "{sed_yaml_name}"')
+        for key, val in sed_floors.items():
+            L.append(f"  {key}: {_fmt(val)}")
         L.append("")
 
     for comp, entries in (("mann", mann_entries), ("torres", torres_entries)):
@@ -1172,6 +1422,27 @@ def _wrap(text, width):
     return lines
 
 
+def _shell_cwd():
+    """The directory the user's shell was in, when it is not the cwd.
+
+    ``poetry -C <project> run python ...`` chdir()s into the project before
+    the script starts, so a relative path typed at the prompt no longer
+    points where the user meant. bash leaves $PWD at the shell's directory,
+    which is the best record of the intent; None when it agrees with the
+    cwd (the normal case) or is unusable.
+    """
+    pwd = os.environ.get("PWD")
+    if not pwd:
+        return None
+    pwd = Path(pwd)
+    try:
+        if pwd.is_dir() and pwd.resolve() != Path.cwd().resolve():
+            return pwd
+    except OSError:
+        pass
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Convert an EXOFASTv2 driver .pro file into EXOZIPPy "
@@ -1196,10 +1467,22 @@ def main():
     args = parser.parse_args()
 
     pro_path = Path(args.profile).expanduser()
+    outdir = Path(args.outdir).expanduser()
+    shell_cwd = _shell_cwd()
+    if shell_cwd is not None:
+        if not pro_path.is_absolute():
+            pro_path = shell_cwd / pro_path
+        if not outdir.is_absolute():
+            outdir = shell_cwd / outdir
+        print(
+            f"note: the process cwd is {Path.cwd()} but the shell was in "
+            f"{shell_cwd} (e.g. `poetry -C ... run`); relative paths are "
+            "resolved against the shell's directory"
+        )
     if not pro_path.exists():
         sys.exit(f"ERROR: {pro_path} not found")
     base = args.name or pro_path.resolve().parent.name
-    convert(pro_path, args.outdir, base)
+    convert(pro_path, outdir, base)
 
 
 if __name__ == "__main__":
