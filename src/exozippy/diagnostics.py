@@ -380,6 +380,121 @@ class ModelAuditor:
             return (diff + 180.0) % 360.0 - 180.0
         return diff
 
+    def _user_start_targets(self):
+        """The user-set initvals the start checks judge: [(key, param,
+        element, requested_user_units)] for every numeric ``initval`` in the
+        params file that names an ACTIVE element of a built parameter.
+
+        Shared by ``check_user_starts`` (the contract) and
+        ``user_start_values`` / ``polish_moves`` (the polish's own account),
+        so the two reports agree on which keys are under test.
+        """
+        # Invert get_display_label -- the SAME mapping check_unused_yaml
+        # builds, so the two checks agree on which key names which element
+        # and all three user spellings (star.L1.mass / star.0.mass /
+        # star.mass) land on one parameter.
+        index = {}
+        for p in self.all_params:
+            n = int(np.prod(p.shape)) if p.shape != () else 1
+            for i in range(n):
+                index.setdefault(p.get_display_label(i), (p, i))
+                parts = p.label.split(".")
+                index.setdefault(f"{parts[0]}.{i}.{parts[-1]}", (p, i))
+            index.setdefault(p.label, (p, 0))
+
+        targets = []
+        for key, entry in (self.user_params or {}).items():
+            if not isinstance(entry, dict) or "initval" not in entry:
+                continue
+            requested = entry["initval"]
+            if not isinstance(
+                requested, (int, float, np.floating, np.integer)
+            ) or isinstance(requested, bool):
+                continue
+            hit = index.get(key)
+            if hit is None:
+                continue  # check_unused_yaml owns unmatched keys
+            p, i = hit
+            # An inactive element is not built, so a mismatch there is a
+            # statement about a parameterization the user did not choose.
+            # The accessor, not the raw mask: the masks start as SCALAR and
+            # only become vectors once build_pymc writes them.
+            if not p.element_is_active(i):
+                continue
+            targets.append((key, p, i, float(requested)))
+        return targets
+
+    def user_start_values(self):
+        """{params-file key: value the model PRODUCES at this auditor's
+        start, in USER units} for every user-set initval -- the same
+        targets ``check_user_starts`` judges, read off the compiled graph
+        the same way.  Taken once at the BUILD start and once at the
+        polished start, the two dicts are what ``polish_moves`` compares.
+        Empty when the compile fails, like ``values_at_start``."""
+        targets = self._user_start_targets()
+        if not targets:
+            return {}
+        produced = self.values_at_start([p for _key, p, _i, _req in targets])
+        out = {}
+        for key, p, i, _requested in targets:
+            arr = produced.get(id(p))
+            if arr is None:
+                continue
+            j = min(i, arr.size - 1)
+            out[key] = float(p.from_internal(arr[j], index=j))
+        return out
+
+    def polish_moves(self, build_values):
+        """User-set starts the SEED POLISH moved: this auditor's (polished)
+        start against ``build_values`` (``user_start_values`` taken at the
+        build start), for every key the user set.
+
+        Kept apart from ``check_user_starts`` on purpose.  That check is the
+        user-start CONTRACT -- "the derivation produces your value or says
+        why not" -- and it is judged at the build start, where the
+        relaxation engine's output is what is under test.  The polish is a
+        different actor: an optimizer that promotes the start to its basin
+        optimum and is ENTITLED to leave a seed the derivation delivered
+        exactly.  Until 2026-09-25 the contract check ran after the polish,
+        so every seed the polish moved was reported as "your value was
+        kept, but the derivation reproduces it only approximately" -- false
+        on both counts (examples/ob09020: nine err_scale/q_source seeds the
+        engine had delivered, reported as derivation misses after a DE
+        polish moved them by up to +8800%).  A move is a fact about the
+        seed's distance from THIS model's optimum, and is reported as one.
+
+        Returns [{key, requested, build, polished, rel}] sorted worst-first
+        (``rel`` relative to the build value), skipping moves inside the
+        same tolerance the contract check uses.
+        """
+        targets = self._user_start_targets()
+        if not targets or not build_values:
+            return []
+        polished = self.user_start_values()
+        moves = []
+        for key, p, _i, requested in targets:
+            before = build_values.get(key)
+            after = polished.get(key)
+            if before is None or after is None:
+                continue
+            unit = getattr(p, "unit", "")
+            diff = self._wrap_if_angle(after - before, unit)
+            denom = abs(before) if before else 1.0
+            rel = diff / denom
+            if abs(diff) <= USER_START_ATOL or abs(rel) <= USER_START_RTOL:
+                continue
+            moves.append(
+                {
+                    "key": key,
+                    "requested": requested,
+                    "build": before,
+                    "polished": after,
+                    "rel": rel,
+                }
+            )
+        moves.sort(key=lambda m: -abs(m["rel"]))
+        return moves
+
     def check_user_starts(self):
         """Every user-set initval, against what the built model PRODUCES.
 
@@ -443,40 +558,7 @@ class ModelAuditor:
                     str(p), (entry.get("message", ""), paths)
                 )
 
-        # Invert get_display_label -- the SAME mapping check_unused_yaml
-        # builds, so the two checks agree on which key names which element
-        # and all three user spellings (star.L1.mass / star.0.mass /
-        # star.mass) land on one parameter.
-        index = {}
-        for p in self.all_params:
-            n = int(np.prod(p.shape)) if p.shape != () else 1
-            for i in range(n):
-                index.setdefault(p.get_display_label(i), (p, i))
-                parts = p.label.split(".")
-                index.setdefault(f"{parts[0]}.{i}.{parts[-1]}", (p, i))
-            index.setdefault(p.label, (p, 0))
-
-        targets = []
-        for key, entry in (self.user_params or {}).items():
-            if not isinstance(entry, dict) or "initval" not in entry:
-                continue
-            requested = entry["initval"]
-            if not isinstance(
-                requested, (int, float, np.floating, np.integer)
-            ) or isinstance(requested, bool):
-                continue
-            hit = index.get(key)
-            if hit is None:
-                continue  # check_unused_yaml owns unmatched keys
-            p, i = hit
-            # An inactive element is not built, so a mismatch there is a
-            # statement about a parameterization the user did not choose.
-            # The accessor, not the raw mask: the masks start as SCALAR and
-            # only become vectors once build_pymc writes them.
-            if not p.element_is_active(i):
-                continue
-            targets.append((key, p, i, float(requested)))
-
+        targets = self._user_start_targets()
         if not targets:
             return []
 

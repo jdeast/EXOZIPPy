@@ -505,3 +505,83 @@ def test_a_sampled_parameter_is_still_reported_the_old_way(monkeypatch):
     (found,) = a.check_user_starts()
     assert found["reason"] == "approximate"
     assert "has no effect on a derived parameter" not in found["detail"]
+
+
+# ---------------------------------------------------------------------------
+# The polish's own account (2026-09-25): the contract is judged at the BUILD
+# start, and a value the seed polish moved is reported as a MOVE, not as a
+# derivation miss.
+# ---------------------------------------------------------------------------
+
+
+def test_user_start_values_reports_every_user_target_in_user_units(
+    monkeypatch,
+):
+    """
+    Given two user-set initvals, one on a unit-converted parameter,
+    When the produced values are read at this auditor's start,
+    Then every target is returned, keyed by the params-file key, in USER
+      units -- the dict the polish-move report compares.
+    """
+    p_mass = _FakeParam("planet.mass", unit="jupiterMass", factor=1000.0)
+    p_tc = _FakeParam("orbit.tc", unit="d")
+    a = _auditor(
+        [p_mass, p_tc],
+        {"planet.mass": {"initval": 2.0}, "orbit.tc": {"initval": 5.0}},
+    )
+    _with_produced(monkeypatch, [2500.0, 5.0])
+
+    values = a.user_start_values()
+
+    assert values == {"planet.mass": pytest.approx(2.5), "orbit.tc": 5.0}
+
+
+def test_polish_moves_reports_a_moved_seed_and_not_a_kept_one(monkeypatch):
+    """
+    Given the build-start values of two user seeds,
+    When the polished start has moved one of them far outside the contract
+      tolerance and left the other where the build put it,
+    Then only the moved one is reported, with the requested, build and
+      polished values and the move relative to the BUILD value -- the
+      examples/ob09020 case (err_scale seed 1.03, built at 1.03, polished
+      to 92.06), which the contract check used to report as "the
+      derivation reproduces it only approximately".
+    """
+    p_err = _FakeParam("mulensinstrument.err_scale")
+    p_tc = _FakeParam("orbit.tc", unit="d")
+    a = _auditor(
+        [p_err, p_tc],
+        {
+            "mulensinstrument.err_scale": {"initval": 1.03},
+            "orbit.tc": {"initval": 5.0},
+        },
+    )
+    build = {"mulensinstrument.err_scale": 1.03, "orbit.tc": 5.0}
+    _with_produced(monkeypatch, [92.06, 5.0])
+
+    moves = a.polish_moves(build)
+
+    assert [m["key"] for m in moves] == ["mulensinstrument.err_scale"]
+    m = moves[0]
+    assert m["requested"] == pytest.approx(1.03)
+    assert m["build"] == pytest.approx(1.03)
+    assert m["polished"] == pytest.approx(92.06)
+    assert m["rel"] == pytest.approx((92.06 - 1.03) / 1.03)
+
+
+def test_polish_moves_wraps_angles_and_is_empty_without_build_values(
+    monkeypatch,
+):
+    """
+    Given a degree-valued seed the polish moved by exactly 360,
+    When the moves are computed,
+    Then it is not a move -- and with no build values there is nothing to
+      compare, so the answer is an empty list rather than a guess.
+    """
+    p_om = _FakeParam("orbit.bigomega", unit="deg")
+    a = _auditor([p_om], {"orbit.bigomega": {"initval": 340.0}})
+    _with_produced(monkeypatch, [-20.0])
+
+    assert a.polish_moves({"orbit.bigomega": 340.0}) == []
+    assert a.polish_moves({}) == []
+    assert a.polish_moves(None) == []

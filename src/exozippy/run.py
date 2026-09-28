@@ -890,6 +890,30 @@ def _run_fit(config, gui, user_params=None):
         # start is always our initval.
         raw_start = system.get_raw_start(model)
 
+        # THE USER-START CONTRACT IS JUDGED HERE, AT THE BUILD START -- the
+        # relaxation engine's own output -- before the seed polish and the
+        # anchor re-centering move anything.  Judged after them (as it was
+        # until 2026-09-25, inside inspect_start) every value the POLISH
+        # moved came back as "your value was kept, but the derivation
+        # reproduces it only approximately", which is false on both counts:
+        # the derivation had reproduced it exactly and an optimizer then
+        # left it.  examples/ob09020 reported nine err_scale / q_source
+        # seeds it had in fact delivered, moved by up to +8800% by the DE
+        # polish, as derivation misses.  The values are ALSO recorded so
+        # inspect_start can report the polish's own moves as what they are.
+        build_auditor = ModelAuditor(
+            model, system, system.get_mcmc_init(model)
+        )
+        build_start_misses = build_auditor.check_user_starts()
+        build_start_values = build_auditor.user_start_values()
+        # The BUILD start's physical point, for the `_start` plots: the
+        # model at the seeds the user wrote (plus what the engine derived
+        # from them).  Taken here, before the polish and the re-centering,
+        # for the same reason as the audit above.  The polished start gets
+        # its own `_polished` plots below, so the two can be compared.
+        build_internal_start = system.get_internal_point(model, raw_start)
+        polished_start = False
+
         # Data-driven whitening: measure every raw element's true local
         # scale from the relaxation-engine start and rescale the model's
         # whitening in place (Parameter.set_whitening), then measure the
@@ -949,6 +973,7 @@ def _run_fit(config, gui, user_params=None):
                 )
                 system.apply_polished_starts(polished, seed_indices_pre)
                 raw_start = system.get_raw_start(model)
+                polished_start = True
 
             # Re-center the whitening anchor on the (now polished) start, so
             # raw = 0 IS the start and `model.initial_point()` is correct BY
@@ -1011,6 +1036,8 @@ def _run_fit(config, gui, user_params=None):
             system,
             transformed_inits,
             whiten_report=whiten_report,
+            build_start_misses=build_start_misses,
+            build_start_values=build_start_values,
         )
 
         # Multi-seed starts (P4): a list of raw start dicts (one per solved
@@ -1058,13 +1085,29 @@ def _run_fit(config, gui, user_params=None):
         # convert raw starting point to the internal starting point
         internal_start = system.get_internal_point(model, raw_start)
 
-        # make all the component plots
+        # Every component's plot at the BUILD start (`_start`: the model at
+        # the seeds the user wrote) and, when the seed polish ran, at the
+        # POLISHED start the sampler will begin from (`_polished`).  Two
+        # sets on purpose: the `_start` plots used to be drawn at the
+        # polished point, so a polish that had walked into another basin
+        # -- examples/ob09020's DE polish dropped the lens companion and
+        # inflated every err_scale -- was invisible, since the only picture
+        # of "the start" was the picture of where the polish ended (JDE,
+        # 2026-09-25).  With both, the seeds and what the polish made of
+        # them can be compared by eye.
         for comp in system.active_components.values():
             comp.plot(
                 system,
-                [internal_start],
+                [build_internal_start],
                 filename_prefix=str(prefix) + "_start",
             )
+        if polished_start:
+            for comp in system.active_components.values():
+                comp.plot(
+                    system,
+                    [internal_start],
+                    filename_prefix=str(prefix) + "_polished",
+                )
 
         if profile:
             func = model.logp_dlogp_function(profile=True)
@@ -1882,10 +1925,17 @@ def inspect_start(
     system,
     transformed_inits,
     whiten_report=None,
+    build_start_misses=None,
+    build_start_values=None,
 ):
     # No physical inits/scales arguments: this reads p.initval / p.init_scale
     # off the Parameters below, so the two dicts get_mcmc_init used to build
     # and hand over were never read.
+    #
+    # `build_start_misses` / `build_start_values` are the user-start audit
+    # taken at the BUILD start, before the polish (see _run_fit).  Without
+    # them (a caller that never polished) the contract is judged here, on
+    # `transformed_inits`, which is then the build start too.
     auditor = ModelAuditor(model, system, transformed_inits)
     param_logps, other_nodes = auditor.get_aggregated_logps()
 
@@ -2223,23 +2273,61 @@ def inspect_start(
     # routinely NOT self-consistent (marginal medians from one table, or
     # values taken from two papers), so this is the expected case for a
     # real fit, not an error: report it and start.
-    start_misses = auditor.check_user_starts()
+    #
+    # Judged at the BUILD start (_run_fit hands it over), never at the
+    # polished one: the contract is about the DERIVATION, and the polish is
+    # an optimizer that may leave a value the derivation delivered exactly.
+    # Its moves are the second block below, reported as moves.
+    start_misses = (
+        build_start_misses
+        if build_start_misses is not None
+        else auditor.check_user_starts()
+    )
     if start_misses:
         lines = []
         for f in start_misses:
             lines.append(
                 f"  {f['key']}: you set {f['requested']:.6g}, the model "
-                f"starts at {f['produced']:.6g} ({f['rel']:+.2%}) -- "
+                f"is built at {f['produced']:.6g} ({f['rel']:+.2%}) -- "
                 f"{f['detail']}"
             )
         logger.warning(
             "?" * 60 + "\n"
-            "WARNING: the model does not start at every value you set:\n"
+            "WARNING: the model is not built at every value you set:\n"
             + "\n".join(lines)
             + "\nThese are START values, so the fit can still move to the "
             "right answer -- but if a value above is one you meant to "
             "pin, the model is not starting where you think.\n" + "?" * 60
         )
+
+    # THE SEED POLISH'S OWN ACCOUNT.  A value the derivation delivered and
+    # the polish then moved is not a derivation miss; it is a measurement of
+    # how far the seed sits from THIS model's basin optimum.  Large moves
+    # (examples/ob09020: err_scale 1.03 -> 92, q_source 0.27 -> 1.73) say
+    # the seeds are stale or the model is not the one they were fitted
+    # with, and that is the reader's cue to refresh them -- so the report
+    # names the seed, not the derivation.
+    if build_start_values:
+        moves = auditor.polish_moves(build_start_values)
+        if moves:
+            lines = [
+                f"  {m['key']}: you set {m['requested']:.6g}, the polish "
+                f"moved the start to {m['polished']:.6g} ({m['rel']:+.2%})"
+                for m in moves
+            ]
+            logger.warning(
+                "?" * 60 + "\n"
+                f"NOTE: the seed polish moved {len(moves)} of the start "
+                "values you set (it promotes the start to its basin "
+                "optimum, and it left these seeds behind):\n"
+                + "\n".join(lines)
+                + "\nA large move means the seed is not near this model's "
+                "optimum -- a stale seed, or a different solution.  To hold "
+                "a value fixed through the polish, pin it (sigma: 0); to "
+                "keep the seeds as the start, set seed_polish: false.\n"
+                + "?"
+                * 60
+            )
 
 
 def _add_sampler_prose(system, method, swap_schedule="deo"):

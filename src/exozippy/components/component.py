@@ -1102,8 +1102,33 @@ class Component(ABC):
             val = np.asarray(point.get(p.label, p.initval), dtype=np.float64)
             if getattr(p.value, "ndim", 0) == 0:
                 values.append(float(np.squeeze(val)))
-            else:
-                values.append(np.atleast_1d(val))
+                continue
+            val = np.atleast_1d(val)
+            # No broadcasting or other repair here.  A vector input whose
+            # value does not match the shape the compiled function declared
+            # is a bookkeeping bug upstream -- a parameter listed in
+            # system.plot_params that is neither in the point nor fully
+            # described by its initval (examples/ob09020's orbit-derived
+            # `lens.s`, 2026-09) -- and the fix belongs there.  This only
+            # turns pytensor's anonymous "argument at index 11" into the
+            # parameter's name.
+            shape = getattr(getattr(p.value, "type", None), "shape", None)
+            if (
+                shape is not None
+                and all(n is not None for n in shape)
+                and tuple(val.shape) != tuple(shape)
+            ):
+                where = "the point" if p.label in point else "its initval"
+                raise ValueError(
+                    f"Plotter input '{p.label}' has declared shape "
+                    f"{tuple(shape)} but {where} supplies shape "
+                    f"{tuple(val.shape)}: it is listed in system.plot_params "
+                    f"without a value that fully describes it.  A vector with "
+                    f"derived elements is an input only when a sampled element "
+                    f"puts its Deterministic in the point "
+                    f"(System.compile_plotter_functions)."
+                )
+            values.append(val)
         return values
 
     def _model_trace_param_deps(self, node, system):

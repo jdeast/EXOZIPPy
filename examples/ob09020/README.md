@@ -14,6 +14,32 @@
 > below uses the corrected identity `gamma_perp = -dalpha/dt` (Skowron
 > Appendix A.4; their Section 3.3.1 in so many symbols:
 > `alpha(t) = alpha_0 - gamma_perp (t - t_0,par)`).
+>
+> **Out of the box this example does not yet reach its solution, and that is
+> a known, PUNTED state (JDE, 2026-09-25): it waits until the static 2L1S
+> fits are tuned.**  Measured 2026-09-25 at the build start: the orbit-derived
+> geometry is right (`s = 0.426`, `alpha = 189.08`, `q = 0.273`) and the
+> caustic-region data fit (Bronberg needs `err_scale = 1.0` after a linear
+> flux refit), but the OGLE wings do not (`err_scale = 7.2` after the same
+> refit), because the seeds mix two papers: Yee's masses and distances imply
+> `theta_E = 3.34 mas`, `t_E = 83.7 d` and `pi_E,N = -0.345`, where Skowron's
+> light-curve column prints 2.95, 76.9 and -0.022.  From that start the DE
+> seed polish (400 sweeps, +383 nats) inflates every `err_scale`, drives
+> `e -> 1` and drops the companion to ~1e-7 Msun -- a point-lens basin, not
+> the published one.  Compute is not the only blocker: one logp costs ~3 s
+> here (VBMicrolensing finite source over 2837 points), so the shipped
+> `draws: 5000` x 8 rungs is a multi-day run, and more sweeps from these
+> seeds converge on the same collapsed basin.  A single-paper seed set was
+> tried and is WORSE: with keplerian motion the caustic geometry is
+> `s(t) = a / (theta_E D_L)`-shaped, so dropping Yee's distances (and mass)
+> to let Skowron's `theta_E`/`pi_E` set the physics moves the caustic
+> (`s_0` 0.426 -> 0.386 / 0.711, `alpha` 189 -> 182 / 203 deg) and the
+> OGLE chi2/N goes from 108 to 8.4e4 / 8.6e3 on raw errors.  The hybrid
+> seeds stay; the fit does the reconciling.  Two things now guard the run:
+> `mulensinstrument.err_scale: {upper: 10}` in the params file (the
+> collapse needed 36 and 92) and a `sampler:` budget sized to ~3 days on
+> 64 cores.  The `_start` plots show the seeds and the `_polished` plots
+> show where the polish went; compare them before trusting a run.
 
 A binary-lens microlensing light curve fit jointly with radial velocities of
 the **lens primary** -- the first (and still cleanest) case where a
