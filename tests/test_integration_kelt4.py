@@ -87,6 +87,25 @@ def test_run_fit_kelt4_trace_file_written(kelt4_result):
     assert (out_dir / "KELT-4A_trace.nc").exists()
 
 
+def test_run_fit_kelt4_plots_both_the_seeds_and_the_polished_start(
+    kelt4_result,
+):
+    """
+    Given the kelt4rvonly example run with the default seed polish,
+    When run_fit reaches the pre-sampling plots,
+    Then every data component is plotted TWICE: at the build start (the
+      user's seeds, `_start`) and at the polished start the sampler begins
+      from (`_polished`) -- so a polish that walked into another basin is
+      visible, instead of the only picture of "the start" being where the
+      polish ended (JDE, 2026-09-25).
+    """
+    out_dir, _ = kelt4_result
+    start = sorted(p.name for p in out_dir.glob("KELT-4A_start_*.pdf"))
+    polished = sorted(p.name for p in out_dir.glob("KELT-4A_polished_*.pdf"))
+    assert start, "no _start plots"
+    assert [n.replace("_polished_", "_start_") for n in polished] == start
+
+
 def test_run_fit_kelt4_trace_has_expected_variables(kelt4_result):
     """
     Given the kelt4rvonly example,
