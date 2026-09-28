@@ -44,13 +44,15 @@ jobs:
     # Scoped to this job. `contents: write` pushes the proposal branch;
     # `pull-requests: write` is what `gh pr create` needs IF the repository
     # allows Actions to open pull requests (see the last step); `issues:
-    # write` is the fallback when it does not; `actions: read` lets `gh run
-    # download` fetch another run's artifacts.
+    # write` is the fallback when it does not; `actions: write` lets `gh run
+    # download` fetch another run's artifacts (read would do for that) AND
+    # lets `gh workflow run` dispatch tests.yml on the proposal branch, which
+    # is how the PR gets its CI (see "Start the suite" below).
     permissions:
       contents: write
       pull-requests: write
       issues: write
-      actions: read
+      actions: write
 
     env:
       GH_TOKEN: ${{ github.token }}
@@ -254,9 +256,11 @@ jobs:
       #
       # Two things to know about a PR opened this way even when it works: the
       # pull_request event it raises does not start workflows (events raised
-      # by GITHUB_TOKEN never do), so the required `test` check will not
-      # appear until a human closes and reopens the PR or pushes to the
-      # branch; and continue-on-error is what makes the fallback reachable.
+      # by GITHUB_TOKEN never do), so on its own the required `test` check
+      # would not appear until a human closed and reopened the PR or pushed
+      # to the branch -- which is what happened to PR #343 (2026-09-28); the
+      # last step below dispatches the suite instead.  And continue-on-error
+      # is what makes the fallback reachable.
       - name: Open a pull request
         if: steps.decide.outputs.material == 'true'
         id: pr
@@ -299,6 +303,28 @@ jobs:
             gh issue create --title "$ISSUE_TITLE" --body-file "$RUNNER_TEMP/issue.md"
           fi
           echo "proposal branch: $BRANCH ($COMPARE_URL)" >> "$GITHUB_STEP_SUMMARY"
+
+      # START THE SUITE ON THE PROPOSAL BRANCH.  Events raised by GITHUB_TOKEN
+      # never start workflows -- the push above and the pull_request event of
+      # `gh pr create` both go unheard by tests.yml -- with exactly two
+      # exceptions: workflow_dispatch and repository_dispatch.  tests.yml
+      # accepts workflow_dispatch, so dispatching it on the branch gives the
+      # PR its `test` check without a human closing and reopening it (PR
+      # #343, 2026-09-28, sat with "no checks reported" until someone did).
+      # The check runs attach to the branch's head commit, which is the PR's
+      # head, so they show on the PR and satisfy a required check by job
+      # name.  Runs on BOTH paths: a PR opened above, or a branch waiting
+      # behind the tracking issue -- either way the human should find the
+      # suite already run.  Not continue-on-error: a refused dispatch is a
+      # permissions regression worth a red job, not a silent one.
+      - name: Start the suite on the proposal branch
+        if: steps.decide.outputs.material == 'true'
+        env:
+          BRANCH: ${{ steps.push.outputs.branch }}
+        run: |
+          set -euo pipefail
+          gh workflow run tests.yml --ref "$BRANCH"
+          echo "dispatched tests.yml on $BRANCH" >> "$GITHUB_STEP_SUMMARY"
 
       # The inverse of the fallback, so the issue's state stays truthful on
       # its own: open = a refresh is waiting to be merged, closed = the
