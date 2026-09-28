@@ -885,3 +885,53 @@ def test_phased_lc_panels_survive_a_scalar_t14_with_two_planets(
     assert {s.meta["planet"] for s in phased} == {"b", "c"}
     for spec in phased:
         assert spec.x_range == pytest.approx([-0.1, 0.1])
+
+
+def test_point_to_plot_params_names_a_misshapen_input():
+    """
+    Given: a vector plotter input absent from the point whose fallback
+      initval does not have the input's declared length (the bookkeeping
+      bug behind examples/ob09020's start-plot crash: a vector listed in
+      plot_params that nothing fully describes),
+    When: the point is marshalled into the compiled function's arguments,
+    Then: it raises naming the parameter -- no broadcast, no repair -- while
+      a full-length value, a scalar input and a value taken from the point
+      pass through unchanged.
+    """
+    from types import SimpleNamespace
+
+    import pytensor.tensor as pt
+
+    from exozippy.components.component import Component
+
+    full = SimpleNamespace(
+        label="a.full",
+        value=pt.specify_shape(pt.dvector("a.full"), (2,)),
+        initval=[1.0, 2.0],
+    )
+    scal = SimpleNamespace(
+        label="a.scal", value=pt.dscalar("a.scal"), initval=2.0
+    )
+    in_point = SimpleNamespace(
+        label="a.inpt",
+        value=pt.specify_shape(pt.dvector("a.inpt"), (2,)),
+        initval=0.0,
+    )
+    point = {"a.inpt": np.array([5.0, 6.0])}
+
+    out = Component._point_to_plot_params(
+        None, point, SimpleNamespace(plot_params=[full, scal, in_point])
+    )
+    np.testing.assert_array_equal(out[0], [1.0, 2.0])
+    assert out[1] == 2.0 and isinstance(out[1], float)
+    np.testing.assert_array_equal(out[2], [5.0, 6.0])
+
+    bad = SimpleNamespace(
+        label="lens.s",
+        value=pt.specify_shape(pt.dvector("lens.s"), (2,)),
+        initval=1.0,
+    )
+    with pytest.raises(ValueError, match=r"'lens\.s'.*\(2,\).*\(1,\)"):
+        Component._point_to_plot_params(
+            None, point, SimpleNamespace(plot_params=[full, bad])
+        )

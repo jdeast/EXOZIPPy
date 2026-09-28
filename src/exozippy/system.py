@@ -1653,18 +1653,29 @@ class System(Component):
         then tells each component to compile its own plotters.
         """
         all_params = self.get_all_parameters()
-        # The compiled plotters take the NON-derived parameters as inputs.  A
-        # vector whose instances chose different parameterizations is derived on
-        # only some elements, and it belongs here: its sampled elements have no
-        # other input, and its derived ones are read from the point (which
-        # carries the whole Deterministic vector) rather than recomputed.
+        # The compiled plotters take as inputs every parameter whose value is
+        # NOT computable from the other inputs.  A vector whose instances chose
+        # different parameterizations is derived on only some elements, and it
+        # belongs here when it has a SAMPLED element: that element has no other
+        # input, and the derived ones are read from the point, which carries
+        # the whole Deterministic vector (build_pymc registers one exactly when
+        # an element is sampled).  A vector with derived elements and NO
+        # sampled one -- an inactive primary next to an orbit-derived
+        # companion, as the lens component's `s`/`alpha`/`q` are in keplerian
+        # mode -- has no Deterministic and is not in the point, so it must be
+        # left in the graph and computed there.  Listing it as an input used to
+        # feed it `p.initval` instead: a stale seed for the derived element
+        # (the plotted q was the user's seed, not the model's), and for a
+        # scalar initval a shape (1,) argument for a shape (n,) input, i.e. a
+        # TypeError from the first start-point plot (examples/ob09020).
         # (Read from the build's own role masks, not from `expression is None`:
         # a fully derived vector may be declared per element too, and then its
         # `expression` field is None while every element is derived.)
         self.plot_params = [
             p
             for p in all_params
-            if not bool(np.all(np.atleast_1d(p.is_derived)))
+            if bool(np.any(np.atleast_1d(p.is_sampled)))
+            or not bool(np.any(np.atleast_1d(p.is_derived)))
         ]
 
         # Delegate the actual compilation to the components

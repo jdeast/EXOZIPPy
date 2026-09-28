@@ -366,3 +366,48 @@ def test_the_magnification_consumes_the_moving_geometry(kep_system):
         "the magnification did not respond to the orbit: the likelihood "
         "is reading the frozen t0_par geometry, not the series"
     )
+
+
+def test_start_plot_computes_the_derived_geometry_in_graph(kep_system):
+    """
+    Given: the keplerian-mode system, whose lens s/alpha/q vectors are an
+      inactive primary next to an orbit- or mass-derived companion with NO
+      sampled element (so build_pymc registers no Deterministic and the
+      point never carries them),
+    When: the start-point plot is built the way run.py builds it,
+    Then: those vectors are not compiled-plotter inputs, the plot evaluates
+      them in the graph (the derived q/s/alpha the model uses, not the seed
+      in `initval`), and plot_data completes.
+
+    examples/ob09020 died here: `lens.s` was listed as an input, the point
+    lacked it, and the scalar `initval` fallback handed a shape (1,) array
+    to a shape (2,) input (TypeError).  `lens.q`, with a length-2 initval,
+    did not crash but plotted the USER's q seed instead of the derived one.
+    """
+    system, model = kep_system
+    lens = system.lens
+    labels = {p.label for p in system.plot_params}
+    for name in ("lens.s", "lens.alpha", "lens.q"):
+        assert name not in labels, (
+            f"{name} has derived elements and no sampled one; it must be "
+            f"computed inside the plot graph, not fed as an input"
+        )
+
+    with model:
+        raw_start = system.get_raw_start(model)
+    point = system.get_internal_point(model, raw_start)
+    inst = system.mulensinstrument
+    values = inst._point_to_plot_params(point, system)
+
+    nodes = [lens.q.value, lens.s.value, lens.alpha.value]
+    via_plot_inputs = pytensor.function(
+        [p.value for p in system.plot_params], nodes, on_unused_input="ignore"
+    )(*values)
+    truth = _eval_at_start(system, model, nodes)
+    for got, want, name in zip(via_plot_inputs, truth, ("q", "s", "alpha")):
+        np.testing.assert_allclose(
+            np.atleast_1d(got), np.atleast_1d(want), rtol=1e-9, err_msg=name
+        )
+
+    specs = inst.plot_data(system, point)
+    assert specs, "the start-point lightcurve plot produced no chart"
