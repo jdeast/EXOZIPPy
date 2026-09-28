@@ -97,6 +97,18 @@ orbit.L.bigomega:
 # instrument; err_scale is the sqrt(chi2/N) that fit leaves.  The muFUN
 # files are raw instrumental magnitudes with an arbitrary per-site
 # zeropoint, so log_f_total cannot be defaulted.
+
+# A stricter ceiling on every instrument's err_scale than the default 100
+# (JDE, 2026-09-25).  Measured 2026-09-25: from these seeds the DE seed
+# polish bought +383 nats by inflating err_scale to 36 (OGLE) and 92
+# (Bronberg) while dropping the lens companion to ~1e-7 Msun -- a
+# point-lens basin the wide ceiling made cheaper than fixing the wings.
+# Ten leaves room for the real underestimates here (the OGLE out-of-event
+# baseline needs 3.6; the seed-start wing mismatch needs ~7) and takes the
+# collapsed basin off the table.  Broadcast to all nine instruments; the
+# per-instrument entries below refine the start only.
+mulensinstrument.err_scale:
+    upper: 10.0
 mulensinstrument.OGLE.q_source:
     initval: 0.3510
 mulensinstrument.OGLE.log_f_total:

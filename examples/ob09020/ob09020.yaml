@@ -237,5 +237,13 @@ sampler:
   n_temps: 8
   T_max: 200
   tune: 0
+  # BUDGET: sized to ~3 days on 64 cores (JDE, 2026-09-25).  One logp of
+  # this model costs ~3.2 s at the solution (VBMicrolensing finite source
+  # over 2837 points, most near the caustic; cheaper away from it), so the
+  # default 2 x n_params = 116 chains/rung x 8 rungs x 5000 draws =
+  # 4.6e6 evaluations = ~2.7 days at 64 / 3.2 evaluations per second, plus
+  # ~1 h of serial scale probing and ~20 min of seed polish up front.  Fewer
+  # cores scale the wall clock in proportion: on 42 it is ~4 days.
   draws: 5000
+  cores: 64
   recompute_trace: True
