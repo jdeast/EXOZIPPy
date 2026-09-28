@@ -1,0 +1,29 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N mamajektests
+#$ -o mamajek_tests.$JOB_ID.log
+#
+# Branch mamajek-teff-tie: the full EXOZIPPy suite, then the acceptance
+# recorder's --check, so the fixtures that genuinely change (an SED plus a
+# relation on an unseen star: the KMT-2019-BLG-1806 family) are named.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_mamajek"
+
+cd $HOME/python/EXOZIPPy
+echo "branch: $(git rev-parse --abbrev-ref HEAD) $(git rev-parse --short HEAD)"
+echo "===================== targeted ====================="
+python -m pytest -q -n0 tests/test_unseen_star.py tests/test_mamajek_relation.py tests/test_mamajek.py tests/test_star_structure_activity.py tests/test_mann.py tests/test_torres.py 2>&1 | tail -40
+echo "===================== full suite ====================="
+python -m pytest -q 2>&1 | tail -60
+echo "===================== acceptance --check ====================="
+python scripts/make_mulens_fixtures.py --check 2>&1 | tail -30
+echo "exit $?"

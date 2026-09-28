@@ -3,7 +3,7 @@
  "n_terms": 87,
  "params": "examples/KMT-2019-BLG-1806/KMT-2019-BLG-1806.params.yaml",
  "platform": {
-  "blas": "scipy-openblas",
+  "blas": "blas",
   "machine": "x86_64",
   "system": "Linux"
  },
@@ -130,8 +130,8 @@
   "POT:mulensevent.source_behind_lens": -9.85967654375977e-305,
   "POT:mulensevent.theta_E_singularity": -9.85967654375977e-305,
   "POT:planet.m_pos_constraint": -2.1392547317515668e-69,
-  "POT:sed.fbolsed_floor_prior": 59.419293095000484,
-  "POT:sed.teffsed_floor_prior": -9.503380066704398,
+  "POT:sed.fbolsed_floor_prior": 31.670076839889177,
+  "POT:sed.teffsed_floor_prior": -4.7535901911063645,
   "POT:up_bound.lens.q": -9.85967654375977e-305,
   "POT:up_bound.lens.s": -9.85967654375977e-305,
   "POT:up_bound.mulensevent.mlens_total": -9.85967654375977e-305,
@@ -154,7 +154,7 @@
   "RV:lens.yalpha_raw": -0.9189385332046727,
   "RV:mulensinstrument.err_scale_raw": -2.756815599614018,
   "RV:mulensinstrument.log_f_total_raw": -2.756815599614018,
-  "RV:mulensinstrument.model": 44764.82375489826,
+  "RV:mulensinstrument.model": 44764.823754898265,
   "RV:mulensinstrument.q_source_raw": -2.756815599614018,
   "RV:planet.log_q_raw": -0.9189385332046727,
   "RV:sed.errscale_raw": -0.9189385332046727,
@@ -171,5 +171,5 @@
   "RV:star.teff_raw": -0.9189385332046727,
   "RV:star.teffsed_raw": -0.9189385332046727
  },
- "total_logp": 44355.78730569043
+ "total_logp": 44332.78787931092
 }

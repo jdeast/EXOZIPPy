@@ -434,6 +434,13 @@ def build(event, outdir, draws, tune, cores, t_max):
                 "constrain": ["mass", "radius"],
             }
         ],
+        # Nothing photometric reads the lens's Teff (the blend tie bounds its
+        # Ks from above, and Ks is a weak thermometer above ~4000 K), so left
+        # free its posterior width grew with the lens mass and the
+        # marginalization tilted pi_rel 0.3-0.6 dex low across sweep2 (notes
+        # 2026-09-25/27).  The dwarf sequence says what Teff a lens of that
+        # mass has, to 4%; radius stays Mann's.
+        "mamajek": [{"star": "Lens", "constrain": ["teff"]}],
         "sampler": {
             # ptde, NOT ptde_async.  Measured on event 194, seven runs
             # (notes/supercomputer_queue.txt): ptde put ALL 78 chains in the

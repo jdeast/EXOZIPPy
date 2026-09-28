@@ -128,7 +128,6 @@ class Torres(StellarRelation, Component):
         logg = star.logg.value[smap]
         feh = star.feh.value[smap]
 
-        active = self._photometrically_active(system)
         logm_pred = physics.calc_torres_logmass(teff, logg, feh)
         logr_pred = physics.calc_torres_logradius(teff, logg, feh)
 
@@ -149,7 +148,6 @@ class Torres(StellarRelation, Component):
             logm_pred,
             as_float_vector(self.logm_floor),
             normalize=False,
-            active=active,
         )
         self._add_penalty(
             "radius",
@@ -157,7 +155,6 @@ class Torres(StellarRelation, Component):
             logr_pred,
             as_float_vector(self.logr_floor),
             normalize=False,
-            active=active,
         )
 
         # Modeling-draft prose, next to the penalties it describes.

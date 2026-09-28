@@ -1,0 +1,1 @@
+from .mamajek import Mamajek

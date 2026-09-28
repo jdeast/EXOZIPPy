@@ -1,0 +1,37 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 32-64
+#$ -q lThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N mamajek194
+#$ -t 1
+#$ -o ab194/dc18_mamajek.$JOB_ID.log
+#
+# Event 194 as sweep3/194 (anchored sight line, Vega zeropoints with the
+# common-mode grey term, blend tie on) plus ONE block: `mamajek` on the
+# Lens, tying its Teff to its mass along the Pecaut & Mamajek dwarf sequence
+# at a 4% floor.  sweep2/sweep3 put the lens mass 2-5x high because nothing
+# photometric read the lens's Teff, so its posterior width grew with the
+# lens mass and the marginalization tilted pi_rel low while the profile
+# maximum sat at the truth (notes 2026-09-25/27).  Compare against
+# sweep3/194 (same code path, no mamajek) and ab194/mistlens (MIST on the
+# lens instead).  Prediction: lens mass within ~1.5x of truth, pi_rel
+# posterior centred on the profile maximum.
+#
+# Branch mamajek-teff-tie must be checked out: editable install.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD) on $(git -C $HOME/python/EXOZIPPy branch --show-current)   $(date)"
+cfg="${TMPDIR:-/tmp}/mamajek194_$$.yaml"
+python dc18_set_cores.py ab194/mamajek/DC2018_194.yaml "$cfg" --cores "${NSLOTS:?NSLOTS unset}"
+exozippy "$cfg"
+echo "exit $?   $(date)"
