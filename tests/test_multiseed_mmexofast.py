@@ -3,21 +3,24 @@
 
 MMEXOFAST emits multiple lightly-optimized solutions spanning the standard
 microlensing degeneracies (examples/DC2018_128/mmexofast.json).
-MulensEvent._load_mmexofast_seeds reads them and pushes each fit's
+mmexofast_support.load_json reads them and push_seed_hints pushes each fit's
 observable-space values as a per-seed hint set feeding the layer-(a)
-multi-seed relaxation engine.  Post-split target paths: the trajectory
-offsets land on source.0, the event chain on mulensevent.0, and the
-companion geometry on lens.1 (element 0 is the masked primary).
+multi-seed relaxation engine -- once, from MulensInstrument._resolve_mmexofast
+at stage 1 (MulensEvent's stage-3 re-push was deleted, reviews 1.6.15 and
+2.1.12).  Post-split target paths: the trajectory offsets land on source.0,
+the event chain on mulensevent.0, and the companion geometry on lens.1
+(element 0 is the masked primary).
 """
 
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
 import pytest
 import yaml
 
-from exozippy.components.mulensing.mulensevent import MulensEvent
+from exozippy.components.mulensing import mmexofast_support
 
 MMX_PATH = (
     Path(__file__).parent.parent / "examples" / "DC2018_128" / "mmexofast.json"
@@ -41,27 +44,22 @@ class _RecordingConfigManager:
     def add_scale_hint(self, path, scale):
         self.scale_hints[path] = scale
 
-    def add_seed_hints(self, seed_dicts):
-        self.seed_hint_sets = seed_dicts
+    def add_seed_hints(self, seed_dicts, replace=False):
+        # Mirrors ConfigManager.add_seed_hints: accumulate (review 2.1.12).
+        if replace:
+            self.seed_hint_sets = []
+        self.seed_hint_sets.extend(seed_dicts)
 
 
-def _make_binary_event(mmexofast_path, finite_source=True):
-    event_config = [
-        {
-            "finite_source": finite_source,
-            "mmexofast": str(mmexofast_path),
-        }
-    ]
-    system_config = {
-        "star": [{"name": "Lens"}, {"name": "Source"}],
-        "planet": [{"name": "Companion"}],
-        "mulensevent": event_config,
-        "lens": [{"body": "star.Lens"}, {"body": "planet.Companion"}],
-        "source": [{"body": "star.Source"}],
-    }
-    cfg_manager = _RecordingConfigManager(system_config=system_config)
-    event = MulensEvent(event_config, cfg_manager)
-    return event, cfg_manager
+def _push(path, cfg_manager):
+    """The explicit-file path of MulensInstrument._resolve_mmexofast, for a
+    binary-lens finite-source event."""
+    data = mmexofast_support.load_json(str(path))
+    if data is None:
+        return 0
+    return mmexofast_support.push_seed_hints(
+        data, cfg_manager, want_rho=True, is_binary=True, source=str(path)
+    )
 
 
 @pytest.mark.skipif(
@@ -70,15 +68,15 @@ def _make_binary_event(mmexofast_path, finite_source=True):
 def test_mmexofast_loader_pushes_two_seeds_matching_json():
     """
     Given examples/DC2018_128/mmexofast.json (2 fits),
-    When MulensEvent._load_mmexofast_seeds runs,
-    Then it pushes 2 seed hint sets whose t_0/u_0/t_E/rho/log_s/alpha/q match
+    When its seeds are pushed,
+    Then 2 seed hint sets arrive whose t_0/u_0/t_E/rho/log_s/alpha/q match
     the json values (log_s = log10(s), alpha via the identity convention).
     """
     with open(MMX_PATH) as f:
         raw = json.load(f)
 
-    event, cfg_manager = _make_binary_event(MMX_PATH)
-    event._load_mmexofast_seeds()
+    cfg_manager = _RecordingConfigManager()
+    assert _push(MMX_PATH, cfg_manager) == 2
 
     assert len(cfg_manager.seed_hint_sets) == 2
     for i, fit in enumerate(raw["fits"]):
@@ -91,23 +89,20 @@ def test_mmexofast_loader_pushes_two_seeds_matching_json():
         assert np.isclose(seed["lens.1.q"], p["q"])
         # s is sampled as log_s (P2); the loader must push log10(s), not s.
         assert np.isclose(seed["lens.1.log_s"], np.log10(p["s"]))
-        # Alpha convention: verified identity mapping (see docstring in
-        # MulensEvent._load_mmexofast_seeds and the standalone convention test below).
+        # Alpha convention: verified identity mapping (see
+        # mmexofast_support.push_seed_hints and the convention test below).
         assert np.isclose(seed["lens.1.alpha"], p["alpha"])
 
 
-@pytest.mark.skipif(
-    not MMX_PATH.exists(), reason="DC2018_128 fixture not present"
-)
 def test_mmexofast_loader_missing_file_warns_and_noops(caplog):
     """
-    Given a lens config with a nonexistent mmexofast file,
-    When _load_mmexofast_seeds runs,
-    Then it logs a warning and leaves seed_hint_sets empty rather than raising.
+    Given a nonexistent mmexofast file,
+    When it is loaded,
+    Then a warning is logged and no seed is pushed.
     """
-    event, cfg_manager = _make_binary_event("/no/such/file.json")
+    cfg_manager = _RecordingConfigManager()
     with caplog.at_level("WARNING"):
-        event._load_mmexofast_seeds()
+        assert _push("/no/such/file.json", cfg_manager) == 0
 
     assert cfg_manager.seed_hint_sets == []
     assert any("mmexofast" in rec.message.lower() for rec in caplog.records)
@@ -117,13 +112,13 @@ def test_mmexofast_loader_corrupt_file_raises_rather_than_seeding_nothing(
     tmp_path,
 ):
     """
-    Given a lens config naming an mmexofast file that exists but is
-    truncated (a job killed mid-write),
-    When _load_mmexofast_seeds runs,
-    Then it raises CorruptMMEXOFASTFileError and pushes no seeds, instead of
-    warning once and letting the fit start from defaults.yaml. A user-named
-    file is not exozippy's to regenerate -- only run_or_load's own cache is
-    (tests/test_mmexofast_support.py covers that half).
+    Given an mmexofast file that exists but is truncated (a job killed
+    mid-write),
+    When it is loaded,
+    Then CorruptMMEXOFASTFileError is raised and no seed is pushed, instead
+    of warning once and letting the fit start from defaults.yaml. A
+    user-named file is not exozippy's to regenerate -- only run_or_load's
+    own cache is (tests/test_mmexofast_support.py covers that half).
     """
     from exozippy.components.mulensing.mmexofast_support import (
         CorruptMMEXOFASTFileError,
@@ -149,34 +144,78 @@ def test_mmexofast_loader_corrupt_file_raises_rather_than_seeding_nothing(
     full = json.dumps(good, indent=4)
     bad.write_text(full[: len(full) // 2])
 
-    event, cfg_manager = _make_binary_event(bad)
+    cfg_manager = _RecordingConfigManager()
     with pytest.raises(CorruptMMEXOFASTFileError) as exc:
-        event._load_mmexofast_seeds()
+        _push(bad, cfg_manager)
 
     assert "mmexofast.json" in str(exc.value)
     assert cfg_manager.seed_hint_sets == []
 
 
-def test_mmexofast_key_absent_is_a_noop():
-    """
-    Given a mulensevent config with no 'mmexofast' key (the default, opt-in
-    feature),
-    When _load_mmexofast_seeds runs,
-    Then nothing is pushed -- the ordinary single-start path is untouched.
-    """
-    event_config = [{"finite_source": True}]
-    system_config = {
-        "star": [{"name": "Lens"}, {"name": "Source"}],
-        "planet": [{"name": "Companion"}],
-        "mulensevent": event_config,
-        "lens": [{"body": "star.Lens"}, {"body": "planet.Companion"}],
-        "source": [{"body": "star.Source"}],
-    }
-    cfg_manager = _RecordingConfigManager(system_config=system_config)
-    event = MulensEvent(event_config, cfg_manager)
-    event._load_mmexofast_seeds()
+# ---------------------------------------------------------------------------
+# End to end through prepare(): ONE push per explicit file (1.6.15 / 2.1.12)
+# ---------------------------------------------------------------------------
+def _prepare_dc2018_128(tmp_path, **event_keys):
+    """prepare() the shipped DC2018_128 example with an explicit
+    `mmexofast:` file, in a scratch copy (prepare writes under the prefix),
+    with no params file so every seed comes from the seeders."""
+    from exozippy.system import System
+    from exozippy.yamlio import load_system_config
 
-    assert cfg_manager.seed_hint_sets == []
+    src = MMX_PATH.parent
+    for name in ("DC2018_128.yaml", "mmexofast.json"):
+        shutil.copy(src / name, tmp_path / name)
+    data = "n20180816.Z087.WFIRST18.128.txt"
+    (tmp_path / data).symlink_to(src / data)
+    config = load_system_config(str(tmp_path / "DC2018_128.yaml"))
+    config.pop("parameter_file", None)
+    config["prefix"] = str(tmp_path / "fitresults" / "DC2018_128")
+    config["mulensinstrument"][0]["file"] = str(tmp_path / data)
+    config["mulensevent"][0].update(
+        {"mmexofast": str(tmp_path / "mmexofast.json"), **event_keys}
+    )
+    system = System(config, user_params={})
+    system.prepare()
+    return system.config_manager
+
+
+@pytest.mark.skipif(
+    not MMX_PATH.exists(), reason="DC2018_128 fixture not present"
+)
+def test_explicit_file_is_pushed_exactly_once_through_prepare(tmp_path):
+    """
+    Given an explicit `mmexofast:` file with 2 fits and the default
+    `peak_find: auto`,
+    When prepare() runs,
+    Then there are exactly 2 seed sets: the file's, once.  With the stage-3
+    re-push still in place, add_seed_hints' accumulation would make it 4;
+    and the peak finder, seeing an already-seeded t_0, must not add a 5th.
+    """
+    cm = _prepare_dc2018_128(tmp_path)
+    with open(MMX_PATH) as f:
+        raw = json.load(f)
+    assert len(cm.seed_hint_sets) == len(raw["fits"]) == 2
+    assert all("lens.1.q" in s for s in cm.seed_hint_sets)
+
+
+@pytest.mark.skipif(
+    not MMX_PATH.exists(), reason="DC2018_128 fixture not present"
+)
+def test_peak_find_true_replaces_an_explicit_file_through_prepare(tmp_path):
+    """
+    Given an explicit `mmexofast:` file AND `peak_find: true` (the A/B mode),
+    When prepare() runs,
+    Then the peak finder's ONE point-lens set is all that is left (review
+    1.6.15: the stage-3 re-push used to put MMEXOFAST's two sets back after
+    the finder had replaced them, so the A/B compared MMEXOFAST with itself).
+    """
+    cm = _prepare_dc2018_128(tmp_path, peak_find=True)
+    assert len(cm.seed_hint_sets) == 1
+    assert set(cm.seed_hint_sets[0]) == {
+        "source.0.t_0",
+        "source.0.u_0",
+        "mulensevent.0.t_E",
+    }
 
 
 @pytest.mark.skipif(

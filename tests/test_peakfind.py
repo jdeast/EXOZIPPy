@@ -104,8 +104,9 @@ def test_push_hints_seeds_exactly_three_paths():
     pushed = {}
 
     class FakeCM:
-        def add_seed_hints(self, sets):
+        def add_seed_hints(self, sets, replace=False):
             pushed["sets"] = sets
+            pushed["replace"] = replace
 
     n = peakfind.push_peak_find_hints(
         {
@@ -132,33 +133,67 @@ def test_push_hints_is_a_no_op_without_a_seed():
     assert peakfind.push_peak_find_hints(None, object()) == 0
 
 
-def test_add_seed_hints_overwrites_which_is_why_the_gate_exists():
-    """The reason _peak_find_seeds must not run after MMEXOFAST.
+_PSPL_CONFIG = {
+    "star": [{"name": "Lens"}, {"name": "Source"}],
+    "mulensevent": [{}],
+    "lens": [{"body": "star.Lens"}],
+    "source": [{"body": "star.Source"}],
+}
 
-    ConfigManager.add_seed_hints ASSIGNS seed_hint_sets rather than
-    appending (config.py), so two callers do not compose -- the second
-    silently discards the first.  MMEXOFAST pushes one seed set per
-    solution, including the binary-lens s/q/alpha; the peak finder pushes
-    exactly one point-lens set.  Running it second therefore threw away
-    every MMEXOFAST solution, and user_hints_sufficient could not catch it
-    because that reads user_params and probe_derivable, where seed hints
-    never appear.  This pins the overwrite so the gate is not "fixed" away
-    by someone who assumes the calls accumulate.
-    """
+
+def _real_cm():
     from exozippy.config import ConfigManager
 
-    cm = ConfigManager.__new__(ConfigManager)
-    cm.seed_hint_sets = []
-    cm._translate_and_scale = lambda path, value: (path, value)
+    return ConfigManager({}, system_config=_PSPL_CONFIG)
 
-    cm.add_seed_hints([{"a": 1.0}, {"a": 2.0}])
-    assert len(cm.seed_hint_sets) == 2
-    cm.add_seed_hints([{"a": 3.0}])
-    assert len(cm.seed_hint_sets) == 1, (
-        "add_seed_hints now appends; the peak finder's _mmexofast_seeded "
-        "gate in mulensinstrument was written for overwrite semantics and "
-        "should be revisited"
+
+def test_add_seed_hints_accumulates_across_callers():
+    """Two seeders compose (review 2.1.12).
+
+    ConfigManager.add_seed_hints used to ASSIGN seed_hint_sets, so a second
+    caller silently discarded the first -- MMEXOFAST's K solutions,
+    including a binary lens's s/q/alpha, replaced by one point-lens set.  It
+    is named and documented as an accumulator, like its siblings add_hint
+    and add_scale_hint, and now behaves as one: sets append in call order,
+    each kept whole (never merged element-wise with another caller's).
+    """
+    cm = _real_cm()
+    cm.add_seed_hints(
+        [{"source.0.t_0": 2458554.8}, {"source.0.t_0": 2458554.9}]
     )
+    cm.add_seed_hints([{"source.0.t_0": 2458555.0, "source.0.u_0": 0.1}])
+
+    assert len(cm.seed_hint_sets) == 3
+    assert [s["source.0.t_0"] for s in cm.seed_hint_sets] == pytest.approx(
+        [2458554.8, 2458554.9, 2458555.0]
+    )
+    assert "source.0.u_0" not in cm.seed_hint_sets[0]
+    assert cm.seed_hint_sets[2]["source.0.u_0"] == pytest.approx(0.1)
+
+
+def test_add_seed_hints_replace_is_the_explicit_override():
+    """`replace=True` discards what is registered: the peak_find: true A/B
+    mode, which replaces MMEXOFAST's seeds on purpose."""
+    cm = _real_cm()
+    cm.add_seed_hints(
+        [{"source.0.t_0": 2458554.8}, {"source.0.t_0": 2458554.9}]
+    )
+    cm.add_seed_hints([{"source.0.t_0": 2458555.0}], replace=True)
+    assert len(cm.seed_hint_sets) == 1
+    assert cm.seed_hint_sets[0]["source.0.t_0"] == pytest.approx(2458555.0)
+
+
+def test_a_seeded_t_0_counts_as_available_so_auto_stays_a_fallback():
+    """The second half of 2.1.12's trap: user_params and probe_derivable
+    cannot see a seed hint, so t_0_is_already_available read an MMEXOFAST
+    push as "absent".  Under accumulation that would make `peak_find: auto`
+    ADD a point-lens seed beside every MMEXOFAST solution; it must see the
+    seed via seeded_paths() and stay out."""
+    cm = _real_cm()
+    assert not peakfind.t_0_is_already_available(cm)
+    cm.add_seed_hints([{"source.0.t_0": 2458554.8}])
+    assert cm.seeded_paths() == {"source.0.t_0"}
+    assert peakfind.t_0_is_already_available(cm)
 
 
 # ---------------------------------------------------------------------------

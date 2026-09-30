@@ -427,7 +427,7 @@ class MulensInstrument(Instrument):
 
         - explicit file path: the JSON's bad-data mask (``excluded_points``)
           and error factors (``errfacs``) are applied to this component's
-          files; the seed hints are pushed by MulensEvent at stage 3 as before. An
+          files, and its seed hints are pushed here too (the only push). An
           absent file warns and skips; an unparseable one raises (see
           ``mmexofast_support.load_json``) rather than dropping the mask and
           the error factors along with the seeds.
@@ -440,8 +440,9 @@ class MulensInstrument(Instrument):
 
         This lives on the instrument rather than MulensEvent because the mask must
         exist before the photometry is read (load_data), and only this
-        component knows its files; MulensEvent owns the stage-3 seed path for
-        explicit files, and both share mmexofast_support for the translation.
+        component knows its files.  The seeds are pushed here for explicit
+        files as well: MulensEvent's stage-3 re-push is gone (reviews 1.6.15,
+        2.1.12).
         """
         event = getattr(system, "mulensevent", None)
         if event is None:
@@ -449,38 +450,29 @@ class MulensInstrument(Instrument):
         spec = event.config[0].get("mmexofast") if event.config else None
         if spec is False:
             return
-        # Whether THIS call ends up pushing seeds.  The peak finder has to
-        # know, because `ConfigManager.add_seed_hints` ASSIGNS
-        # `seed_hint_sets` (config.py:1299) instead of appending -- so a
-        # second caller silently REPLACES the first, and MMEXOFAST's K seed
-        # sets, including its binary-lens s/q/alpha, would be thrown away
-        # for one point-lens seed.  `user_hints_sufficient` cannot stand in
-        # for this test: it inspects user_params and probe_derivable, and
-        # seed hints appear in NEITHER, so it stays False even after a
-        # successful MMEXOFAST push.
-        self._mmexofast_seeded = False
         is_binary = event.n_companions >= 1
         want_rho = bool(event.finite_source)
 
         if isinstance(spec, str) and spec != "auto":
             # Explicit JSON: masks + error factors, and the seed hints too.
-            # MulensEvent re-pushes the same seeds at stage 3 (harmless, identical
-            # content); pushing them HERE as well makes them visible to this
-            # component's flux bootstrap (_estimate_flux_components), which
-            # runs later in this same load_data call -- stage 3 would be too
-            # late and the per-band flux decomposition would silently fall
-            # back to median-flux / q_source=0.95.
+            # This is the ONLY push of an explicit file's seeds.  They must
+            # land here, at stage 1, to be visible to this component's flux
+            # bootstrap (_estimate_flux_components), which runs later in this
+            # same load_data call -- stage 3 would be too late and the
+            # per-band flux decomposition would silently fall back to
+            # median-flux / q_source=0.95.  MulensEvent used to re-push the
+            # same file at stage 3; that second channel silently undid
+            # `peak_find: true` and, now that add_seed_hints accumulates,
+            # would double every seed set (reviews 1.6.15, 2.1.12).
             self._reject_time_spec_with_mmexofast(spec)
             data = mmexofast_support.load_json(spec)
             if data is not None:
-                self._mmexofast_seeded = bool(
-                    mmexofast_support.push_seed_hints(
-                        data,
-                        self.config_manager,
-                        want_rho=want_rho,
-                        is_binary=is_binary,
-                        source=spec,
-                    )
+                mmexofast_support.push_seed_hints(
+                    data,
+                    self.config_manager,
+                    want_rho=want_rho,
+                    is_binary=is_binary,
+                    source=spec,
                 )
         else:
             if spec != "auto" and mmexofast_support.user_hints_sufficient(
@@ -499,14 +491,12 @@ class MulensInstrument(Instrument):
                 options=options,
             )
             if data is not None:
-                self._mmexofast_seeded = bool(
-                    mmexofast_support.push_seed_hints(
-                        data,
-                        self.config_manager,
-                        want_rho=want_rho,
-                        is_binary=is_binary,
-                        source=json_path,
-                    )
+                mmexofast_support.push_seed_hints(
+                    data,
+                    self.config_manager,
+                    want_rho=want_rho,
+                    is_binary=is_binary,
+                    source=json_path,
                 )
         if data is None:
             return
@@ -564,20 +554,20 @@ class MulensInstrument(Instrument):
             return
         forced = spec is True
 
-        # SEEDS ALREADY EXIST -> DO NOT TOUCH THEM.  See the note in
-        # _resolve_mmexofast: add_seed_hints overwrites, so running here
-        # after a successful MMEXOFAST push would discard every solution it
-        # found and replace them with one point-lens seed.  `forced` still
-        # overrides, because replacing MMEXOFAST's seeds on purpose is the
-        # entire point of the A/B mode -- but it says so.
-        if getattr(self, "_mmexofast_seeded", False):
-            if not forced:
-                return
+        # `forced` REPLACES whatever seed sets are already registered --
+        # replacing MMEXOFAST's seeds on purpose is the entire point of the
+        # A/B mode -- and says so.  In `auto` an existing seed t_0 already
+        # answers t_0_is_already_available below, so the finder stays a
+        # strict fallback and never ADDS a point-lens seed next to
+        # MMEXOFAST's (add_seed_hints accumulates since review 2.1.12).
+        replace = False
+        if forced and self.config_manager.seed_hint_sets:
+            replace = True
             logger.warning(
-                f"[{self.prefix}] peak_find: true REPLACES the MMEXOFAST "
-                f"seeds already loaded for this fit -- add_seed_hints "
-                f"overwrites rather than appends, so its multi-seed "
-                f"solutions (and any s/q/alpha) are discarded."
+                f"[{self.prefix}] peak_find: true REPLACES the "
+                f"{len(self.config_manager.seed_hint_sets)} seed set(s) "
+                f"already loaded for this fit (e.g. MMEXOFAST's): its "
+                f"multi-seed solutions (and any s/q/alpha) are discarded."
             )
 
         # The seed paths are the POST-SPLIT spellings (`source.0.t_0`), the
@@ -649,7 +639,7 @@ class MulensInstrument(Instrument):
             )
             return
         peakfind.push_peak_find_hints(
-            seed, self.config_manager, source=self.prefix
+            seed, self.config_manager, source=self.prefix, replace=replace
         )
         get_collector(system).add(
             "Starting values for the microlensing trajectory "
