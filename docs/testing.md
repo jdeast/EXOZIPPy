@@ -415,7 +415,11 @@ another's 11:
   green master run's ubuntu-3.12 transcripts, regenerates the file, and proposes the result
   when the predicted worst shard improves by more than 60 s of wall clock or any test file
   was absent -- as a pull request if the repository lets Actions open them, otherwise as a
-  pushed branch plus a tracking issue with the one-click compare link. Independently,
+  pushed branch plus a tracking issue with the one-click compare link. Either way it then
+  dispatches `tests.yml` on the proposal branch itself (`gh workflow run tests.yml --ref`):
+  events raised by `GITHUB_TOKEN` never start workflows, `workflow_dispatch` being the
+  exception, so without that step the auto-PR sits with no checks until a human closes and
+  reopens it -- PR #343 did, on 2026-09-28. Independently,
   every pytest job's `pytest_shard.py --verify` reports the weights' age and the absent
   files on its job summary page, and shard 1 of each leg raises a `::warning::` annotation
   when any file is absent (`scripts/pytest_shard.py --balance-json` prints the same
