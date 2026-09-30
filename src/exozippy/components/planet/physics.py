@@ -143,11 +143,42 @@ def calc_K(mass, m_total, ecc, a, sini, period):
 
 _GEOM_EPS = 1e-6
 
+# Floor on the contact-duration radicand `(1 +/- p)^2 - b^2` (review 1.8.11).
+# It was 0.0, which obeys half of the house rule (floor the radicand, never
+# the result) and breaks the other half (the floor must be STRICTLY
+# POSITIVE; CLAUDE.md's where-trap invariant, reviews 1.8.2/1.8.5/1.8.10):
+# the clip's zero gradient on the clamped side times `sqrt'(0) = inf` made
+# every derived duration's gradient NaN across the grazing regime (T_23) and
+# off the disc (T_14), so a user `{mu, sigma}` on a duration -- review 8.8.7's
+# inference path -- NaN'd the whole logp gradient there.  1e-30 as for
+# CHORD_RADICAND_FLOOR: sqrt gives 1e-15, a duration of ~P * 1e-16 / (a/R*),
+# i.e. zero to working precision, and any real radicand passes the clip
+# bit-for-bit.  The value is no longer EXACTLY zero where no contact exists,
+# so a caller that needs to know whether one does asks `contact_radicand`
+# rather than testing a duration against 0.0.
+CONTACT_RADICAND_FLOOR = 1e-30
+
 
 def _conjunction_denominator(esinw, secondary, xp=pt):
     """`1 + e sin omega` at the transit, `1 - e sin omega` at the eclipse."""
     signed = -esinw if secondary else esinw
     return xp.clip(1.0 + signed, _GEOM_EPS, np.inf)
+
+
+def contact_radicand(ar, cosi, ecc, esinw, p, secondary, edge, xp=pt):
+    """``(1 + edge p)^2 - b^2`` at one conjunction, UNFLOORED.
+
+    Positive iff the contacts `edge` names exist (1st/4th for `edge = +1`,
+    2nd/3rd for `-1`).  The sibling of `chord_radicand` and
+    `vcve_discriminant`: `contact_duration` floors it at
+    CONTACT_RADICAND_FLOOR, so its duration is only ~0 where no contact
+    exists, and this is what a caller asks when it needs the honest answer
+    (the timing seed in `orbit/symbolic_physics.py`).
+    """
+    denom = _conjunction_denominator(esinw, secondary, xp=xp)
+    impact = ar * cosi * (1.0 - ecc * ecc) / denom
+    edge_sum = 1.0 + edge * p
+    return edge_sum * edge_sum - impact * impact
 
 
 def contact_duration(
@@ -171,9 +202,11 @@ def contact_duration(
     """
     denom = _conjunction_denominator(esinw, secondary, xp=xp)
     ecc_factor = xp.sqrt(xp.clip(1.0 - ecc * ecc, _GEOM_EPS, 1.0))
-    impact = ar * cosi * (1.0 - ecc * ecc) / denom
-    edge_sum = 1.0 + edge * p
-    radicand = xp.clip(edge_sum * edge_sum - impact * impact, 0.0, np.inf)
+    radicand = xp.clip(
+        contact_radicand(ar, cosi, ecc, esinw, p, secondary, edge, xp=xp),
+        CONTACT_RADICAND_FLOOR,
+        np.inf,
+    )
     arg = xp.clip(
         xp.sqrt(radicand) / xp.clip(xp.abs(sini * ar), _GEOM_EPS, np.inf),
         -1.0 + _GEOM_EPS,

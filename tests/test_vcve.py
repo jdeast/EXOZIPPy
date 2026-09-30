@@ -24,6 +24,7 @@ plausible and were wrong.
 
 import numpy as np
 import pymc as pm
+import pytensor
 import pytensor.tensor as pt
 import pytest
 
@@ -228,6 +229,109 @@ def test_the_discriminant_is_reported_unfloored_for_the_soft_bound():
 
     assert value < 0.0
     assert value == pytest.approx(1.0 - 1.9**2)
+
+
+@pytest.mark.parametrize(
+    "x,omega",
+    [
+        (1.5, 0.0),  # the measured case from review 1.8.10
+        (1.9, 0.3),  # forbidden, sin w > 0: both roots clip to zero
+        (1.2, -0.5),  # forbidden, sin w < 0: the roots meet at -B/2A > 0
+        (1.0, 0.0),  # discriminant EXACTLY 0: the double root
+        (0.9, 0.3),  # a real geometry, for contrast
+        (1.3, -1.2),  # both roots physical
+    ],
+)
+def test_both_roots_and_the_jacobian_keep_a_finite_gradient(x, omega):
+    """
+    Given V_c/V_e and omega anywhere in their bounds, including where no real
+      root exists and exactly at the double root,
+    When the GRADIENT of both roots and of the Jacobian w.r.t. (vcve, omega)
+      is taken,
+    Then every component is finite.
+
+    Review 1.8.10, the sibling of the value test above -- which passed
+    throughout, because the VALUES were finite: flooring the discriminant at
+    exactly 0.0 left ``pt.maximum``'s zero gradient on the clamped side
+    multiplying ``sqrt'(0) = inf``, so ``d e / d vcve`` and ``d e / d omega``
+    were NaN wherever ``vcve > 1/|cos omega|``.  Both mixture branches share
+    the root and one NaN poisons the whole gradient vector, so the
+    ``vcve_real_root`` soft bound had nothing to push through -- the 1.8.5
+    chord bug one function over.
+    """
+    v, w = pt.dscalar("vcve"), pt.dscalar("omega")
+    outs = []
+    for root in (physics.calc_ecc_from_vcve, physics.calc_ecc_from_vcve_lo):
+        e = root(v, w)
+        outs += pytensor.grad(e, [v, w])
+        outs += pytensor.grad(physics.vcve_log_jacobian(e, w), [v, w])
+    grads = pytensor.function([v, w], outs)(x, omega)
+
+    assert np.all(np.isfinite(grads)), f"gradient at ({x}, {omega}): {grads}"
+
+
+def test_the_discriminant_floor_is_positive_and_inert_where_roots_exist(
+    monkeypatch,
+):
+    """
+    Given the V_c/V_e discriminant's floor,
+    When it is compared against zero, and real geometries are evaluated with
+      it and with the old 0.0,
+    Then it is strictly positive, and it moves no real root or Jacobian.
+
+    Strictly positive is the fix (review 1.8.10); inert is what makes it safe
+    -- a real (vcve, omega) must come out bit-for-bit what the 0.0 floor gave,
+    so no baseline moves.  Pinned small as well: sqrt(floor) is the most a
+    root can move in the forbidden region, and it must stay under the 1e-12
+    log floors inside ``vcve_log_jacobian``.
+    """
+    assert physics.VCVE_DISCRIMINANT_FLOOR > 0.0
+    assert physics.VCVE_DISCRIMINANT_FLOOR**0.5 < 1e-12
+
+    grid = [(0.5, 1.2), (0.9, -0.4), (0.99, np.pi / 2), (1.3, -1.2)]
+
+    def evaluate():
+        out = []
+        for x, omega in grid:
+            xt = pt.as_tensor_variable(x)
+            for root in (
+                physics.calc_ecc_from_vcve,
+                physics.calc_ecc_from_vcve_lo,
+            ):
+                e = root(xt, omega)
+                out.append(_f(e)[0])
+                out.append(_f(physics.vcve_log_jacobian(e, omega))[0])
+        return out
+
+    shipped = evaluate()
+    monkeypatch.setattr(physics, "VCVE_DISCRIMINANT_FLOOR", 0.0)
+    zero_floor = evaluate()
+
+    assert shipped == zero_floor
+
+
+@pytest.mark.parametrize(
+    "fn", [physics.calc_secosw_from_ecc, physics.calc_sesinw_from_ecc]
+)
+def test_the_reported_sqrt_e_pair_has_a_finite_gradient_at_a_clipped_root(fn):
+    """
+    Given a V_c/V_e orbit whose root clips to exactly zero,
+    When the REPORTED secosw / sesinw is differentiated w.r.t. (vcve, omega),
+    Then the gradient is finite.
+
+    Review 1.8.10's rider: these took ``sqrt(max(e, 0.0))``, and a late-built
+    element takes a user ``{mu, sigma}``, so a prior on secosw put
+    ``0 * sqrt'(0) = NaN`` into the logp gradient.  They now share
+    ``ECC_FLOOR`` with every other ``sqrt(e)``.
+    """
+    v, w = pt.dscalar("vcve"), pt.dscalar("omega")
+    reported = fn(physics.calc_ecc_from_vcve(v, w), w)
+    value, *grads = pytensor.function(
+        [v, w], [reported, *pytensor.grad(reported, [v, w])]
+    )(1.5, 0.3)
+
+    assert abs(value) < 1e-14  # still a circular orbit to working precision
+    assert np.all(np.isfinite(grads)), grads
 
 
 def test_tp_from_ecc_agrees_with_the_sqrt_e_form_up_to_a_period():
