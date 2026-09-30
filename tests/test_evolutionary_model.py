@@ -34,10 +34,12 @@ from exozippy.components.evolutionarymodel.evolutionarymodel import (
     CONSTRAINABLE,
     DEEP_DAGE_MAX,
     DEEP_DAGE_MIN,
+    SEED_ZAMS_EEP,
     EvolutionaryModel,
 )
 from exozippy.components.evolutionarymodel.plot import MISTPlot
 from exozippy.components.relations import StellarRelation
+from exozippy.config import ProbedStart
 from exozippy.outputs.plot_helper_functions import (
     _extend_window,
     _padded_range,
@@ -1244,8 +1246,9 @@ def test_the_eep_seed_reads_an_interpolated_track_not_the_nearest_node(
     comp._grids = [toy_grid]
 
     starts = {"logmass": 0.5, "initfeh": 0.25, "teff": 5150.0}
-    comp.config_manager.resolve = lambda c, p, element=None: {
-        "initval": starts.get(p, 1.0)
+    comp.config_manager.probe_start = lambda paths: {
+        p: ProbedStart(p, starts.get(p.split(".")[-1], 1.0), None, 100, "user")
+        for p in paths
     }
 
     seen = {}
@@ -1263,6 +1266,104 @@ def test_the_eep_seed_reads_an_interpolated_track_not_the_nearest_node(
     # Assert: queried at the star's own coordinates, not a snapped node
     assert seen["coords"] == (0.5, 0.25)
     assert "star.A.eep" in comp.config_manager.hints
+
+
+# The synthetic grid's (conftest.write_synthetic_mist_grid) track values at
+# one node, restated so the test below has a right answer: mass 0.5 solMass,
+# initfeh 0.0, EEP 300 (frac = 0.25 along the 5-EEP track).
+_NODE_MASS, _NODE_EEP, _NODE_FRAC = 0.5, 300.0, 0.25
+_NODE_STARTS = {
+    "star.A.mass": {"initval": _NODE_MASS},
+    "star.A.initfeh": {"initval": 0.0},
+    "star.A.feh": {"initval": -0.02 * _NODE_FRAC},
+    "star.A.radius": {"initval": _NODE_MASS * (1.0 + 3.0 * _NODE_FRAC)},
+    "star.A.teff": {"initval": 6000.0 * _NODE_MASS**0.5 - 1500.0 * _NODE_FRAC},
+    "star.A.age": {"initval": (0.1 + 10.0 * _NODE_FRAC) / _NODE_MASS**2},
+}
+
+
+def test_the_eep_seed_walks_the_track_a_user_mass_implies(model_root):
+    """
+    Given a params file that seeds star.MASS (as every shipped one does, never
+      logmass) and a teff/radius/feh/age that sit exactly on that mass's
+      track at EEP 300,
+    When the system is prepared,
+    Then the EEP seed picks 300 -- WHICH EEP, pinned.
+
+    Review 1.8.6: the seed runs at stage 1, before the relaxation engine
+    turns mass into the sampled logmass, and it used to read logmass through
+    resolve(), which answered with the defaults.yaml 0.0.  It then walked the
+    1.0 solMass track and picked 807 here (measured on the pre-fix code); on
+    examples/hat3 hat3_mist it picked 348 where the right track gives 338.
+    """
+    # Arrange
+    from exozippy.system import System
+
+    config = {
+        "sampler": {"draws": 10},
+        "star": [{"name": "A"}],
+        "evolutionarymodel": [{"star": "A", "model_root": model_root}],
+    }
+
+    # Act
+    system = System(config, dict(_NODE_STARTS))
+    system.prepare()
+
+    # Assert
+    assert system.config_manager.hints["star.0.eep"] == _NODE_EEP
+
+
+def test_the_eep_seed_steers_off_the_pre_main_sequence_by_its_own_constant():
+    """
+    Given the seed's zero-age-main-sequence constant,
+    When it is compared with the Kiel plot's window,
+    Then it is its OWN name (review 1.8.6: the seed used to read
+      MISTPlot.KIEL_EEP_WINDOW[0], so a plot-window change moved a start),
+      and it is MIST's primary EEP for the ZAMS.
+    """
+    assert SEED_ZAMS_EEP == 202.0
+
+
+def test_hat3_mist_seeds_the_eep_on_its_user_mass_track(
+    monkeypatch, model_root
+):
+    """
+    Given the shipped examples/hat3 hat3_mist config (user star.mass 0.92,
+      star.A.initfeh 0.30) against the synthetic grid -- the real ~128 MB grid
+      is not in CI, so DEFAULT_MIST_MODEL_ROOT is pointed at the synthetic one,
+      which spans the star,
+    When it is prepared,
+    Then the EEP seed interpolates the track at log10(0.92), the mass the
+      user wrote, not at the defaults.yaml logmass 0.0 (review 1.8.6; with
+      the real grid that is the difference between EEP 348 and 338).
+    """
+    # Arrange
+    from exozippy.system import System
+
+    example = Path(__file__).parent.parent / "examples" / "hat3"
+    monkeypatch.chdir(example)
+    monkeypatch.setattr(mist_grid, "DEFAULT_MIST_MODEL_ROOT", model_root)
+    config = yaml.safe_load((example / "hat3_mist.yaml").read_text())
+    user_params = yaml.safe_load(
+        (example / config["parameter_file"]).read_text()
+    )
+    seen = []
+    real = mist_grid.interpolate_track
+
+    def spy(grid, logmass, initfeh):
+        seen.append((logmass, initfeh))
+        return real(grid, logmass, initfeh)
+
+    monkeypatch.setattr(mist_grid, "interpolate_track", spy)
+
+    # Act
+    System(config, user_params).prepare()
+
+    # Assert
+    assert seen, "the EEP seed never searched a track"
+    logmass, initfeh = seen[0]
+    assert logmass == pytest.approx(np.log10(0.92), rel=1e-9)
+    assert initfeh == pytest.approx(0.30)
 
 
 # ----------------------------------------------------------------------
