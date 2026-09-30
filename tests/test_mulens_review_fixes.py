@@ -11,7 +11,10 @@ import pytest
 from conftest import _DummyComponent, _DummyConfigManager, _DummySystem
 from exozippy.components.mulensing.lens import Lens
 from exozippy.components.mulensing.mulensevent import MulensEvent
-from exozippy.components.mulensing.mulensinstrument import MulensInstrument
+from exozippy.components.mulensing.mulensinstrument import (
+    MulensInstrument,
+    _BootstrapGeometry,
+)
 from exozippy.components.mulensing.op import (
     BinaryLensMagOp,
     MulensMagOp,
@@ -21,6 +24,7 @@ from exozippy.components.mulensing.op import (
     _dev_skycoord,
     _MagGradOp,
 )
+from exozippy.config import ProbedStart
 from exozippy.run import KNOWN_SAMPLER_KEYS
 
 COORDS = "270.0d -28.0d"
@@ -906,6 +910,32 @@ def test_lens_backend_defaults_to_vbm_direct_and_validates():
         _make_event(event=[{"backend": "nope"}], **binary)
 
 
+def _geometry(values, n_src=1, has_companion=False):
+    """A flux-bootstrap geometry reader whose informed starts are `values`
+    (user units, at user rank) and every other probed path not derivable --
+    what ``MulensInstrument._probe_bootstrap_geometry`` hands the bootstrap."""
+    paths = [
+        "mulensevent.0.t_E",
+        "mulensevent.0.pi_E_N",
+        "mulensevent.0.pi_E_E",
+    ]
+    for j in range(n_src):
+        paths += [f"source.{j}.t_0", f"source.{j}.u_0", f"source.{j}.rho"]
+    if has_companion:
+        paths += ["lens.1.s", "lens.1.log_s", "lens.1.q", "lens.1.alpha"]
+    unknown = set(values) - set(paths)
+    assert not unknown, f"not a probed path: {unknown}"
+    probed = {
+        p: (
+            ProbedStart(p, values[p], values[p], 100, "user")
+            if p in values
+            else ProbedStart(p, None, None, None, "not derivable")
+        )
+        for p in paths
+    }
+    return _BootstrapGeometry(probed, has_companion=has_companion)
+
+
 def _make_inst_with_q_source_data(
     n=870,
     t0=2458554.89,
@@ -923,17 +953,23 @@ def _make_inst_with_q_source_data(
     component fits in flux now), so the curve is handed over as-is.
     """
     inst = MulensInstrument.__new__(MulensInstrument)
+    inst.config = [{"file": "synthetic"}]
+    inst._n_sources = 1
     inst.config_manager = _DummyConfigManager()
+    inst.config_manager.user_params = {}
     # Post-split paths: the per-source trajectory (t_0, u_0) is on `source`,
     # the event-level scalars (t_E, pi_E_*) on the one-instance
-    # `mulensevent`.
-    inst.config_manager.user_params = {
-        "source.0.t_0": {"initval": t0},
-        "source.0.u_0": {"initval": u0},
-        "mulensevent.0.t_E": {"initval": tE},
-        "mulensevent.0.pi_E_N": {"initval": 0.0},
-        "mulensevent.0.pi_E_E": {"initval": 0.0},
-    }
+    # `mulensevent`.  The bootstrap reads them through the probed geometry
+    # (config.md, "Reading a start before stage 4"), not user_params.
+    inst.geometry = _geometry(
+        {
+            "source.0.t_0": t0,
+            "source.0.u_0": u0,
+            "mulensevent.0.t_E": tE,
+            "mulensevent.0.pi_E_N": 0.0,
+            "mulensevent.0.pi_E_E": 0.0,
+        }
+    )
 
     t = np.linspace(t0 - 40, t0 + 40, n)
     flux = np.full(n, f_baseline)
@@ -953,7 +989,7 @@ def test_q_source_estimate_pspl_broad_peak():
     inst, t, f, xyz = _make_inst_with_q_source_data(A_peak=7.0, peak_width=60)
     ra, dec = 0.0, 0.0
     _f_total, q, _q_flux = inst._estimate_flux_components(
-        t, f, xyz, ra, dec, inst_idx=0
+        t, f, xyz, ra, dec, 0, inst.geometry
     )
     assert 0.7 < q <= 1.0, f"Expected q_source near 1, got {q:.3f}"
 
@@ -976,7 +1012,7 @@ def test_flux_total_estimate_sharp_caustic_crossing():
     )
     ra, dec = 0.0, 0.0
     f_total, _q, _q_flux = inst._estimate_flux_components(
-        t, f, xyz, ra, dec, inst_idx=0
+        t, f, xyz, ra, dec, 0, inst.geometry
     )
     assert 0.5 * f_baseline < f_total < 2.0 * f_baseline, (
         f"f_total should be within 2x of the true baseline {f_baseline:.3f}; "
@@ -990,20 +1026,25 @@ def _make_2s_inst(f_blend=0.4, f_src=(0.6, 0.2), n=400):
     answer to be measured against."""
     t0a, t0b, u0, tE = 2458554.89, 2458560.0, 0.3, 18.17
     inst = MulensInstrument.__new__(MulensInstrument)
+    inst.config = [{"file": "synthetic"}]
     inst._n_sources = 2
     inst.config_manager = _DummyConfigManager()
+    inst.config_manager.user_params = {}
     # Post-split: the SECOND source track is source.1.* (a second `source:`
     # body), and t_E is one event-level scalar shared by both tracks -- the
     # pre-split lens.1.t_E entry has no successor.
-    inst.config_manager.user_params = {
-        "source.0.t_0": {"initval": t0a},
-        "source.0.u_0": {"initval": u0},
-        "source.1.t_0": {"initval": t0b},
-        "source.1.u_0": {"initval": 0.15},
-        "mulensevent.0.t_E": {"initval": tE},
-        "mulensevent.0.pi_E_N": {"initval": 0.0},
-        "mulensevent.0.pi_E_E": {"initval": 0.0},
-    }
+    inst.geometry = _geometry(
+        {
+            "source.0.t_0": t0a,
+            "source.0.u_0": u0,
+            "source.1.t_0": t0b,
+            "source.1.u_0": 0.15,
+            "mulensevent.0.t_E": tE,
+            "mulensevent.0.pi_E_N": 0.0,
+            "mulensevent.0.pi_E_E": 0.0,
+        },
+        n_src=2,
+    )
 
     t = np.linspace(t0a - 40, t0a + 40, n)
 
@@ -1038,7 +1079,7 @@ def test_multisource_bootstrap_honors_a_user_f_blend():
 
     # Act
     f_total, q_source, _q_flux = inst._estimate_flux_components(
-        t, flux, xyz, 0.0, 0.0, inst_idx=0
+        t, flux, xyz, 0.0, 0.0, 0, inst.geometry
     )
 
     # Assert
@@ -1059,7 +1100,7 @@ def test_multisource_bootstrap_without_a_user_f_blend_is_unchanged():
 
     # Act
     f_total, q_source, _q_flux = inst._estimate_flux_components(
-        t, flux, xyz, 0.0, 0.0, inst_idx=0
+        t, flux, xyz, 0.0, 0.0, 0, inst.geometry
     )
 
     # Assert
@@ -1091,7 +1132,7 @@ def test_nonpositive_user_f_total_falls_back_with_a_warning(caplog):
     # Act
     with caplog.at_level("WARNING"):
         f_total, q_source, _q_flux = inst._estimate_flux_components(
-            t, flux, xyz, 0.0, 0.0, inst_idx=0
+            t, flux, xyz, 0.0, 0.0, 0, inst.geometry
         )
 
     # Assert
@@ -1118,7 +1159,7 @@ def test_positive_user_f_total_is_still_taken_verbatim():
 
     # Act
     f_total, q_source, _q_flux = inst._estimate_flux_components(
-        t, flux, xyz, 0.0, 0.0, inst_idx=0
+        t, flux, xyz, 0.0, 0.0, 0, inst.geometry
     )
 
     # Assert
@@ -1489,21 +1530,8 @@ def test_unknown_sampler_key_is_detected(caplog):
 
 
 # ---------------------------------------------------------------------------
-# _check_data_format must see MMEXOFAST seed start values
+# _check_data_format / the flux bootstrap read the PROBED geometry
 # ---------------------------------------------------------------------------
-
-
-class _SeedOnlyConfigManager(_DummyConfigManager):
-    """ConfigManager stub carrying a trajectory only in the seed hints, as in
-    the `mmexofast: auto` workflow (user_params names no microlensing
-    parameter)."""
-
-    def __init__(self, seeds, user_params=None):
-        self.user_params = user_params or {}
-        self._seeds = seeds
-
-    def seed_start_value(self, path, seed=0):
-        return self._seeds.get(path)
 
 
 def _flux_labelled_as_magnitudes(t0=2458554.89, u0=0.14, tE=18.0, n=600):
@@ -1525,85 +1553,165 @@ def _flux_labelled_as_magnitudes(t0=2458554.89, u0=0.14, tE=18.0, n=600):
     return t, flux, err, np.zeros((n, 3))
 
 
-def _run_check(config_manager, caplog):
+def _run_check(geometry, caplog):
     inst = MulensInstrument.__new__(MulensInstrument)
-    inst.config_manager = config_manager
     t, f, e, xyz = _flux_labelled_as_magnitudes()
     with caplog.at_level(logging.WARNING):
-        inst._check_data_format(t, f, e, xyz, 0.0, 0.0, "OGLE-I")
+        inst._check_data_format(t, f, e, xyz, 0.0, 0.0, "OGLE-I", geometry)
     return caplog.text
 
 
-def test_check_data_format_uses_mmexofast_seed_start_values(caplog):
+_TRAJECTORY = {
+    "source.0.t_0": 2458554.89,
+    "source.0.u_0": 0.14,
+    "mulensevent.0.t_E": 18.0,
+}
+
+
+def test_check_data_format_warns_on_an_informed_trajectory(caplog):
     """
-    Given flux data mislabelled as magnitudes, and a trajectory known ONLY
-      from the MMEXOFAST seed hints (the automated workflow, where the user
-      typed no start values at all),
+    Given flux data mislabelled as magnitudes and an informed trajectory,
     When _check_data_format runs,
     Then it warns that the data may be in flux units.
+    """
+    assert "may be in flux units" in _run_check(_geometry(_TRAJECTORY), caplog)
 
-    The check used to read cm.user_params alone, so it returned at the very
-    first `t0 is None` in precisely the workflow it was most needed in.
+
+def test_check_data_format_sees_a_seed_only_trajectory(caplog):
+    """
+    Given flux data mislabelled as magnitudes, and a trajectory known ONLY
+      from the seed-0 hints (the automated `mmexofast: auto` workflow, where
+      the user typed no start values at all),
+    When the geometry is probed through a real ConfigManager and the check
+      runs,
+    Then it warns.  The check once read cm.user_params alone and returned at
+      the very first `t0 is None` in precisely the workflow it was most needed
+      in; the probe layers the seed-0 hints exactly as stage 4 does.
     """
     # Arrange
-    cm = _SeedOnlyConfigManager(
-        {
-            "source.0.t_0": 2458554.89,
-            "source.0.u_0": 0.14,
-            "mulensevent.0.t_E": 18.0,
-        }
-    )
+    from exozippy.config import ConfigManager
+
+    config = {
+        "star": [{"name": "Lens"}, {"name": "Source"}],
+        "mulensevent": [{}],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
+    }
+    cm = ConfigManager({}, system_config=config)
+    cm.add_seed_hints([dict(_TRAJECTORY)])
+    inst = MulensInstrument.__new__(MulensInstrument)
+    inst.config_manager = cm
+    inst._n_sources = 1
+    system = _DummySystem()
+    system.lens = _DummyComponent(1)
+    system.lens.n_companions = 0
 
     # Act
-    text = _run_check(cm, caplog)
+    geometry = inst._probe_bootstrap_geometry(system)
 
     # Assert
-    assert "may be in flux units" in text
-
-
-def test_check_data_format_user_params_still_win(caplog):
-    """
-    Given the same mislabelled data with the trajectory in user_params and a
-      deliberately wrong seed,
-    When _check_data_format runs,
-    Then it still warns (the user's values are used, the seed is only a
-      fallback).
-    """
-    # Arrange
-    cm = _SeedOnlyConfigManager(
-        {
-            "source.0.t_0": 2400000.0,
-            "source.0.u_0": 5.0,
-            "mulensevent.0.t_E": 1.0,
-        },
-        user_params={
-            "source.0.t_0": {"initval": 2458554.89},
-            "source.0.u_0": {"initval": 0.14},
-            "mulensevent.0.t_E": {"initval": 18.0},
-        },
-    )
-
-    # Act
-    text = _run_check(cm, caplog)
-
-    # Assert
-    assert "may be in flux units" in text
+    assert geometry("mulensevent.0.t_E") == pytest.approx(18.0)
+    assert "may be in flux units" in _run_check(geometry, caplog)
 
 
 def test_check_data_format_silent_without_any_trajectory(caplog):
     """
-    Given neither user params nor seed hints,
+    Given no informed trajectory at all,
     When _check_data_format runs,
     Then it returns silently (no trajectory, nothing to compare).
     """
+    assert _run_check(_geometry({}), caplog) == ""
+
+
+def test_an_underivable_t_E_skips_rather_than_inventing_30_days(caplog):
+    """
+    Given t_0 and u_0 but NO derivable t_E,
+    When the flux-direction check and the flux bootstrap run,
+    Then the check is skipped and the bootstrap takes its no-geometry branch,
+      naming t_E -- review 2.6.30(b): both used to substitute an invented
+      30 d, so they described a different event.
+    """
     # Arrange
-    cm = _SeedOnlyConfigManager({})
+    no_te = {k: v for k, v in _TRAJECTORY.items() if k != "mulensevent.0.t_E"}
+    inst, t, flux, xyz = _make_inst_with_q_source_data()
+    inst.geometry = _geometry(no_te)
 
     # Act
-    text = _run_check(cm, caplog)
+    text = _run_check(_geometry(no_te), caplog)
+    with caplog.at_level(logging.INFO):
+        f_total, q_source, _q_flux = inst._estimate_flux_components(
+            t, flux, xyz, 0.0, 0.0, 0, inst.geometry
+        )
 
     # Assert
     assert text == ""
+    assert q_source == 0.95
+    assert f_total == pytest.approx(
+        MulensInstrument._baseline_flux_fallback(flux)
+    )
+    assert "t_E has no start derivable" in caplog.text
+
+
+@pytest.mark.parametrize("tE", [None, 0.0, -18.0])
+def test_the_pspl_column_refuses_a_missing_or_nonpositive_t_E(tE):
+    """
+    Given no t_E, or a non-positive one,
+    When the bootstrap's PSPL column is asked for,
+    Then it raises instead of inventing 30 d or abs()-ing the sign away
+      (review 2.6.30(b)).
+    """
+    t = np.linspace(-10.0, 10.0, 5)
+    z = np.zeros_like(t)
+    with pytest.raises(ValueError, match="t_E"):
+        MulensInstrument._pspl_magnification(t, z, z, 0.0, 0.1, tE, 0.0, 0.0)
+
+
+def test_ob170114_bootstrap_sees_the_engine_derived_t_E_and_pi_E(monkeypatch):
+    """
+    Given examples/ob170114, whose params file derives t_E and pi_E from the
+      lens/source masses, distances and proper motions (and names neither),
+    When it is prepared,
+    Then the flux bootstrap is handed the engine's start -- t_E = 123.2 d,
+      pi_E = (0.110, 0.178) -- where it used to see t_E = None and invent
+      30 d with no parallax (review 2.6.30(b)).
+    """
+    # Arrange
+    from pathlib import Path
+
+    import yaml
+
+    from exozippy.system import System
+
+    example = Path(__file__).parent.parent / "examples" / "ob170114"
+    monkeypatch.chdir(example)
+    config = yaml.safe_load((example / "ob170114.yaml").read_text())
+    user_params = yaml.safe_load(
+        (example / config["parameter_file"]).read_text()
+    )
+    seen = []
+    real = MulensInstrument._estimate_flux_components
+
+    def spy(self, *args):
+        seen.append(args[-1])
+        return real(self, *args)
+
+    monkeypatch.setattr(MulensInstrument, "_estimate_flux_components", spy)
+
+    # Act
+    system = System(config, user_params)
+    system.prepare()
+
+    # Assert
+    assert seen, "the flux bootstrap never ran"
+    geometry = seen[0]
+    assert geometry("mulensevent.0.t_E") == pytest.approx(123.19, rel=1e-3)
+    assert geometry("mulensevent.0.pi_E_N") == pytest.approx(0.1103, rel=1e-3)
+    assert geometry("mulensevent.0.pi_E_E") == pytest.approx(0.1785, rel=1e-3)
+    # ...and it is the start stage 4 settles on, not a stage-1 artifact.
+    cm = system.config_manager
+    assert cm.resolve("mulensevent", "t_E", element=0)["initval"][
+        0
+    ] == pytest.approx(geometry("mulensevent.0.t_E"), rel=1e-9)
 
 
 # ---------------------------------------------------------------------------
