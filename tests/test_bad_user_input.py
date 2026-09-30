@@ -1431,7 +1431,8 @@ def test_a_quoted_number_is_not_a_string_error():
     """
     Given a bare value YAML happened to quote (`"5800"`),
     When the ConfigManager is constructed,
-    Then it is accepted: it is a number, spelled inconveniently.
+    Then it is accepted: it is a number, spelled inconveniently, and like
+    every bare value it is stored as `{initval: ...}` (review 1.1.7).
     """
     # ARRANGE / ACT
     cm = ConfigManager(
@@ -1439,7 +1440,7 @@ def test_a_quoted_number_is_not_a_string_error():
     )
 
     # ASSERT
-    assert cm.user_params["star.0.teff"] == "5800"
+    assert cm.user_params["star.0.teff"] == {"initval": "5800"}
 
 
 def test_a_bad_entry_dies_at_construction_not_in_finalize():

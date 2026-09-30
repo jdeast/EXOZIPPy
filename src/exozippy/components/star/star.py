@@ -13,6 +13,7 @@ from exozippy.components.parameterization import (
     mode_manifest,
     pin_unselected,
 )
+from exozippy.config import user_entry
 from exozippy.constants import (
     FFP_MASS_FUNCTION_MIN_MEARTH,
     FFP_MASS_FUNCTION_SLOPE,
@@ -261,8 +262,8 @@ class Star(Component):
             f"{self.prefix}.{i}.logmass",
             f"{self.prefix}.{self.names[i]}.logmass",
         ):
-            entry = user_params.get(key)
-            if isinstance(entry, dict) and entry.get("lower") is not None:
+            entry = user_entry(user_params, key)
+            if entry is not None and entry.get("lower") is not None:
                 return True
             if "lower" in (links.get(key) or {}):
                 return True
@@ -608,8 +609,8 @@ class Star(Component):
                 keys.append(f"{self.prefix}.{self.names[i]}.{param}")
             keys.append(f"{self.prefix}.{param}")
             for key in keys:
-                entry = params.get(key)
-                if not isinstance(entry, dict):
+                entry = user_entry(params, key)
+                if entry is None:
                     continue
                 if predicate(entry):
                     out.append(i)

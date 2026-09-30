@@ -1,6 +1,7 @@
 import numpy as np
 import sympy as sp
 
+from ...config import user_entry
 from ...constants import KEPLER_CONST
 from ..planet import physics as planet_physics
 from . import physics
@@ -340,8 +341,8 @@ def register_solvers(config_manager):
         """
         user = getattr(config_manager, "user_params", None) or {}
         for key in path_index_pairs:
-            entry = user.get(key)
-            if not isinstance(entry, dict):
+            entry = user_entry(user, key)
+            if entry is None:
                 continue
             for field in ("initval", "mu"):
                 val = entry.get(field)
