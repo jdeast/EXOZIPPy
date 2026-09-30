@@ -274,6 +274,117 @@ def test_the_numpy_and_pytensor_backends_agree(ecc, omega_deg):
     )
 
 
+# ar = 10, p = 0.1, circular: T_23's contacts vanish at cos i = 0.09 and
+# T_14's at cos i = 0.11.
+@pytest.mark.parametrize(
+    "edge,cosi",
+    [
+        (-1.0, 0.0905),  # T_23, grazing: the measured case from review 1.8.11
+        (-1.0, 0.095),  # T_23, grazing
+        (-1.0, 0.09),  # T_23 at the 2nd/3rd contact limit (float: a hair in)
+        (1.0, 0.11),  # T_14 at the 1st/4th contact limit (float: a hair in)
+        (1.0, 0.2),  # T_14, off the disc: no transit at all
+        (-1.0, 0.08),  # a real T_23, for contrast
+        (1.0, 0.05),  # a real T_14, for contrast
+    ],
+)
+def test_a_duration_keeps_a_finite_gradient_where_its_contacts_vanish(
+    edge, cosi
+):
+    """
+    Given a geometry where the duration's contacts do not exist (grazing for
+      T_23, off the disc for T_14), or exist exactly at the limit,
+    When the duration is differentiated w.r.t. cos i,
+    Then the value is zero to working precision and the gradient is finite.
+
+    Review 1.8.11: the radicand was clipped at exactly 0.0, so the clip's zero
+    gradient on the clamped side multiplied ``sqrt'(0) = inf`` and every
+    derived duration's gradient was NaN there.  The durations are derived
+    Parameters a user can put ``{mu, sigma}`` on (this file's section 4), so
+    that NaN reached the whole logp gradient.
+    """
+    c = pt.dscalar("cosi")
+    duration = pphys.contact_duration(
+        10.0, c, pt.sqrt(1.0 - c**2), 0.0, 0.0, 0.1, PERIOD, False, edge
+    )
+    value, grad = pytensor.function(
+        [c], [duration, pytensor.grad(duration, c)]
+    )(cosi)
+
+    assert np.isfinite(grad), f"d T / d cos i is {grad} at cos i = {cosi}"
+    radicand = pphys.contact_radicand(
+        10.0, cosi, 0.0, 0.0, 0.1, False, edge, xp=np
+    )
+    if radicand < -1e-12:  # strictly past the limit, not a rounding hair
+        assert 0.0 < value < 1e-14 * PERIOD
+
+
+def test_the_duration_floor_is_positive_and_inert_where_contacts_exist(
+    monkeypatch,
+):
+    """
+    Given the contact radicand's floor,
+    When it is compared against zero and every real duration is evaluated
+      with it and with the old 0.0,
+    Then it is strictly positive, and no real duration moves by a bit.
+    """
+    assert pphys.CONTACT_RADICAND_FLOOR > 0.0
+
+    cases = [
+        (edge, cosi, secondary)
+        for edge in (1.0, -1.0)
+        for cosi in (0.0, 0.03, 0.06, 0.075)
+        for secondary in (False, True)
+    ]
+    for edge, cosi, secondary in cases:  # every case really has contacts
+        assert (
+            pphys.contact_radicand(
+                10.0, cosi, 0.2, 0.1, 0.1, secondary, edge, xp=np
+            )
+            > 0.0
+        )
+
+    def durations():
+        return [
+            pphys.contact_duration(
+                10.0,
+                cosi,
+                np.sqrt(1 - cosi**2),
+                0.2,
+                0.1,
+                0.1,
+                PERIOD,
+                secondary,
+                edge,
+                xp=np,
+            )
+            for edge, cosi, secondary in cases
+        ]
+
+    shipped = durations()
+    monkeypatch.setattr(pphys, "CONTACT_RADICAND_FLOOR", 0.0)
+    zero_floor = durations()
+
+    for case, a, b in zip(cases, shipped, zero_floor):
+        assert a == b, f"the floor moved {case}: {a!r} vs {b!r}"
+
+
+def test_the_contact_radicand_is_reported_unfloored():
+    """
+    Given a geometry with no transit,
+    When the contact radicand helper is asked,
+    Then it returns the NEGATIVE value, not the floored one.
+
+    The seed solver asks this, not the duration, whether a conjunction
+    exists: the duration is floored strictly positive (review 1.8.11), so
+    testing it against 0.0 -- what the seed did -- would read a missing
+    transit as a ~1e-16-day one.
+    """
+    value = pphys.contact_radicand(10.0, 0.2, 0.0, 0.0, 0.1, False, 1.0, xp=np)
+
+    assert value == pytest.approx(1.1**2 - 2.0**2)
+
+
 # ---------------------------------------------------------------------------
 # 3. Inject and recover: the seed solver
 # ---------------------------------------------------------------------------

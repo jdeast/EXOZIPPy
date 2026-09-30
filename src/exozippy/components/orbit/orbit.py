@@ -1850,8 +1850,10 @@ class Orbit(Component):
 
         THE SHIELD is the soft half of the pair that keeps an imaginary
         eccentricity from being a wall.  `_vcve_quadratic` floors the
-        discriminant at zero (the hard half, so no NaN can ever be built), which
-        leaves that whole region flat -- so the penalty here is applied to the
+        discriminant at the strictly positive `VCVE_DISCRIMINANT_FLOOR` (the
+        hard half: a floor of exactly 0.0 left the value finite but the
+        gradient NaN across the whole region, review 1.8.10), which leaves
+        that whole region flat -- so the penalty here is applied to the
         UNFLOORED discriminant, where it has a gradient pointing back into the
         region where a real eccentricity exists.  Same argument, and the same
         `soft_lower_bound` helper, as the eccentricity bound above.

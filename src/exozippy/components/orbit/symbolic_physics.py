@@ -433,12 +433,31 @@ def register_solvers(config_manager):
                 args = (ar, cosi, sini, ecc, y_try, p_ratio, period)
                 out = []
                 for secondary in (False, True):
+                    # No 1st/4th contact means no transit (or no eclipse),
+                    # and then neither T_14 nor the FWHM exists.  Asked of
+                    # the unfloored radicand, not by testing the duration
+                    # against 0.0: contact_duration floors its radicand
+                    # strictly positive (review 1.8.11), so a missing
+                    # conjunction reads ~1e-16, not 0, and a ratio of two
+                    # such values is a number with no meaning.
+                    if (
+                        planet_physics.contact_radicand(
+                            ar,
+                            cosi,
+                            ecc,
+                            y_try,
+                            p_ratio,
+                            secondary,
+                            1.0,
+                            xp=np,
+                        )
+                        <= 0.0
+                    ):
+                        return np.nan
                     t14, t23 = planet_physics.duration_pair(
                         *args, secondary=secondary, xp=np
                     )
                     out.append(0.5 * (t14 + t23) if use_fwhm else t14)
-                if out[0] <= 0.0 or out[1] <= 0.0:
-                    return np.nan
                 return np.log(out[1] / out[0]) - np.log(ratio_obs)
 
             span = float(np.sqrt(max(_MAX_SEED_ECC**2 - x * x, 0.0)))
