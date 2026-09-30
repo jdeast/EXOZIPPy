@@ -1397,7 +1397,7 @@ class ConfigManager:
         """
         self.param_overrides.setdefault(path, {}).update(fields)
 
-    def add_seed_hints(self, seed_dicts):
+    def add_seed_hints(self, seed_dicts, replace=False):
         """Register K per-seed observable sets for multi-seed sampling (P4).
 
         `seed_dicts` is a list of length K; each entry maps a parameter path
@@ -1408,6 +1408,17 @@ class ConfigManager:
         caller) is a derivation from the data, not a user statement.  Every
         user entry therefore outranks a seed.  Paths absent from a given seed
         fall back to the base (defaults/hints/user) solution for that seed.
+
+        ACCUMULATES, like its siblings ``add_hint`` / ``add_scale_hint``: the
+        K sets are APPENDED after any already registered, in call order, so
+        two seeders (MMEXOFAST, the built-in peak finder) compose into one
+        list of alternative starts instead of the second silently discarding
+        the first (review 2.1.12).  A set is one complete start, so sets from
+        different callers are never merged element-wise, and none is dropped
+        as a duplicate -- a caller that pushes the same file twice has a
+        bookkeeping bug to fix at its source.  ``replace=True`` is the
+        explicit override: the existing sets are discarded first (the
+        ``peak_find: true`` A/B mode, which replaces MMEXOFAST on purpose).
         """
         processed = []
         for d in seed_dicts:
@@ -1416,7 +1427,21 @@ class ConfigManager:
                 tpath, ival = self._translate_and_scale(path, value)
                 pd[tpath] = ival
             processed.append(pd)
-        self.seed_hint_sets = processed
+        if replace:
+            self.seed_hint_sets = processed
+        else:
+            self.seed_hint_sets.extend(processed)
+
+    def seeded_paths(self):
+        """Index-form paths seeded by ANY registered seed set.
+
+        The "has something already seeded this?" question.  Seed hints live
+        only in ``seed_hint_sets`` -- not in ``user_params`` and not in what
+        ``probe_derivable`` sees at stage 1 -- so a check built on those two
+        alone answers False even after a successful seeder push (the second
+        half of review 2.1.12's trap).
+        """
+        return {p for s in self.seed_hint_sets for p in s}
 
     def seed_start_value(self, path, seed=0):
         """Seed-hint start value for ``path`` in USER units, or None.

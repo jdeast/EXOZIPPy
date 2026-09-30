@@ -12,16 +12,16 @@ lightly-optimized microlensing solutions spanning the standard degeneracies:
                                              "indices": [int, ...],
                                              "times": [float, ...]}}}
 
-Three consumers share this module:
+One component consumes this module, and one utility reads the same JSON:
 
-- ``MulensEvent._load_mmexofast_seeds`` (stage 3) pushes each fit as a
-  per-seed hint set when the mulensevent block names an explicit
-  ``mmexofast: <file>``.
-- ``MulensInstrument._resolve_mmexofast`` (stage 1) applies the bad-data
-  mask (``excluded_points``) and error-rescaling factors (``errfacs``) to its
-  own files, and -- when the user supplied no sufficient start values and no
-  explicit file -- runs MMEXOFAST on the raw light curves to generate all of
-  the above automatically ("data-driven hints").
+- ``MulensInstrument._resolve_mmexofast`` (stage 1) pushes each fit as a
+  per-seed hint set, and applies the bad-data mask (``excluded_points``) and
+  error-rescaling factors (``errfacs``) to its own files -- from an explicit
+  ``mmexofast: <file>`` on the mulensevent block, or, when the user supplied
+  no sufficient start values and no explicit file, by running MMEXOFAST on
+  the raw light curves ("data-driven hints").  It is the ONLY seed push:
+  ``MulensEvent`` re-pushed an explicit file at stage 3 until reviews
+  1.6.15 / 2.1.12, and ``ConfigManager.add_seed_hints`` now accumulates.
 - ``utilities/mmexofast_to_params.py`` translates the same JSON to a
   params.yaml for humans; it deliberately does not import this module so the
   CLI works without the package installed.
