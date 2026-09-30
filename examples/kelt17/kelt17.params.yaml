@@ -16,12 +16,15 @@ star.A.feh:
 star.A.vmacro:
   initval: 4000
   sigma: 0
+  citation: EXOFASTv2 RM example
 star.A.vbeta:
   initval: 4000
   sigma: 0
+  citation: EXOFASTv2 RM example
 star.A.vmicro:
   initval: 1000
   sigma: 0
+  citation: EXOFASTv2 RM example
 
 # ---- Orbit (near best fit) ----
 orbit.b.period:

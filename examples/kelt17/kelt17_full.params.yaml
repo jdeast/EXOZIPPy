@@ -10,12 +10,12 @@ star.A.feh:      {initval: 0.364}
 star.A.parallax: {mu: 4.4688, sigma: 0.0582}
 star.A.av:       {initval: 0.008153, upper: 0.11687}
 
-# DT local line width (EXOFASTv2 prior: 5490 +/- 480 m/s)
-star.A.vline:    {initval: 5490, sigma: 480}
-# RM broadening terms (fixed, as in the EXOFASTv2 RM example)
-star.A.vmacro:   {initval: 4000, sigma: 0}
-star.A.vbeta:    {initval: 4000, sigma: 0}
-star.A.vmicro:   {initval: 1000, sigma: 0}
+# DT local line width
+star.A.vline:    {initval: 5490, sigma: 480, citation: EXOFASTv2 kelt17.priors.2}
+# RM broadening terms (fixed)
+star.A.vmacro:   {initval: 4000, sigma: 0, citation: EXOFASTv2 RM example}
+star.A.vbeta:    {initval: 4000, sigma: 0, citation: EXOFASTv2 RM example}
+star.A.vmicro:   {initval: 1000, sigma: 0, citation: EXOFASTv2 RM example}
 
 # ---- Planet (from mpsun / p / rstar) ----
 planet.b.radius: {initval: 1.499}
@@ -34,7 +34,7 @@ orbit.b.sesinw:  {initval: -0.150860}
 # vsini 44200 +/- 1400 m/s prior.
 orbit.b.svcoslam: {initval: -90.87}
 orbit.b.svsinlam: {initval: -189.59}
-orbit.b.vsini:    {initval: 44200, sigma: 1400}
+orbit.b.vsini:    {initval: 44200, sigma: 1400, citation: EXOFASTv2 kelt17.priors.2}
 
 # ---- Limb darkening (EXOFASTv2 u1/u2 -> Kipping q1/q2 initvals) ----
 band.B.q1:      {initval: 0.6187}

@@ -33,7 +33,7 @@ from typing import Optional
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
-from ..config import _VALID_INSTANCE_NAME, canonical_param_key
+from ..config import _VALID_INSTANCE_NAME, CITATION_KEYS, canonical_param_key
 from ..linking import LINKABLE_FIELDS, is_link_expression
 from ..yamlio import check_yaml_booleans
 from .datafiles import named_instances
@@ -369,7 +369,11 @@ class SetParamField(Command):
             doc.params[key] = entry
         if self.value is None:
             entry.pop(self.field, None)
-            if len(entry) == 0:
+            # A citation justifies the entry's prior; left on its own it has
+            # nothing to justify (resolve() would ignore it with a warning),
+            # so blanking the last real field removes the entry with it --
+            # which is also what the UI, having no citation column, needs.
+            if set(entry) <= set(CITATION_KEYS):
                 doc.params.pop(key, None)
         else:
             entry[self.field] = doc._wrap(self.value)
@@ -519,7 +523,10 @@ class RestoreAutosave(Command):
 # linkable, so equating the two sets made ConfigTab's `bound_scale` column 400
 # on every blur. Keep them decoupled: adding a field here must not make it a
 # link target, and vice versa.
-_PARAM_FIELDS = set(LINKABLE_FIELDS) | {"bound_scale"}
+# `citation` (config.CITATION_KEYS) is settable too -- a params file may carry
+# one, and the document must be able to clear it -- but ConfigTab renders no
+# column for it yet, and it is not linkable either.
+_PARAM_FIELDS = set(LINKABLE_FIELDS) | {"bound_scale"} | set(CITATION_KEYS)
 
 _COMMANDS = {
     "set_config_key": lambda a: SetConfigKey(a["path"], a["value"]),

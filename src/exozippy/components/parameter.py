@@ -33,6 +33,7 @@ from exozippy.manifest import normalize_selector
 from exozippy.outputs.texutils import (
     DIGIT_WORDS,
     idx_to_words,
+    known_bib_keys,
     latex_escape,
     mode_suffix,
 )
@@ -40,6 +41,10 @@ from exozippy.potentials import soft_lower_bound, soft_upper_bound
 from exozippy.units import CENTURY
 
 logger = logging.getLogger(__name__)
+
+# Pass-through citations already reported, so a table regenerated at every
+# checkpoint logs each one once, not once per regeneration.
+_PASSTHROUGH_LOGGED = set()
 
 
 class SeedBoundViolation(Exception):
@@ -1102,6 +1107,11 @@ class Parameter:
     _summary_ci: Optional[float] = field(default=None, init=False)
     _mode_summaries_ci: Optional[float] = field(default=None, init=False)
     table_note: Optional[str] = None
+    # What justifies this parameter's prior, from the params file
+    # (config.CITATION_KEYS): a tuple of citations, or one tuple per element
+    # for a vector.  Rendered as a Prior-column table note by
+    # prior_cell_and_notes; never a posterior term.
+    citation: Any = ()
     # This parameter is defined modulo a period, so its posterior is
     # recentered about its mode before it is summarized (see the module
     # comment above `recenter_periodic` and `recenter_posterior` below).
@@ -4407,12 +4417,13 @@ class Parameter:
         the note mark (the caller appends it).
         """
         own, kind = self._own_prior_str(index=index, latex=True)
+        cite_notes = self._citation_notes(index, kind)
         contributions = self.prior_contributions_at(index)
         # A pinned element is a delta function; a potential evaluated on it
         # is a constant that cannot move the posterior, so "Fixed" stays the
         # honest and complete statement.
         if not contributions or kind == "fixed":
-            return own, []
+            return own, cite_notes
         supersede = any(c.supersedes_bounds for c in contributions)
         interval = self._interval_str(index, latex=True)
         notes = []
@@ -4424,9 +4435,48 @@ class Parameter:
                 # density over it, or a barrier at its edges.
                 note += f", {c.support_phrase} {interval}"
             notes.append(note)
+        notes.extend(cite_notes)
         if supersede and kind == "bounds":
             return "", notes
         return own, notes
+
+    def citation_at(self, index=0):
+        """The params-file citations for one element (a tuple)."""
+        if isinstance(self.citation, list):
+            return self.citation[index]
+        return self.citation
+
+    def _citation_notes(self, index, kind):
+        """The Prior-column note citing this element's prior, if any.
+
+        Each citation is checked against the shipped references.bib: a
+        known key is cited with ``\\citet``; anything else is passed through
+        as escaped text (and logged once), for the user to turn into a real
+        citation by hand when writing the paper -- an unknown key inside a
+        ``\\citet`` would only print "?".  Empty when the element has no
+        citation, or no prior of its own to attach it to (``kind ==
+        "none"``: a derived element with no constraint).  One note per
+        element, so identical citations on several rows share one letter.
+        """
+        items = self.citation_at(index)
+        if not items or kind == "none":
+            return []
+        known = known_bib_keys()
+        keys = [c for c in items if c in known]
+        text = [c for c in items if c not in known]
+        for c in text:
+            if c not in _PASSTHROUGH_LOGGED:
+                _PASSTHROUGH_LOGGED.add(c)
+                logger.info(
+                    f"{self.label}: citation {c!r} is not a references.bib "
+                    "key; printed as text in the table note -- replace it "
+                    "with a \\citet by hand when writing the paper."
+                )
+        parts = []
+        if keys:
+            parts.append(rf"\citet{{{','.join(keys)}}}")
+        parts.extend(latex_escape(c) for c in text)
+        return ["Prior from " + "; ".join(parts)]
 
     def to_latex_prior_def(self, mark_for=None) -> str:
         """Generate the \\providecommand(s) for the prior column value.

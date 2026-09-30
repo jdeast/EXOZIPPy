@@ -1,239 +1,210 @@
 # EXOZIPPy
 [DeepWiki](https://www.deepwiki.com/jdeast/EXOZIPPy)
 
-This will eventually be a python successor to EXOFASTv2, but it is not officially
-released yet. Many features are missing, not tested, or not functional. If you'd
-like to help with development, please contact me at jason.eastman@cfa.harvard.edu
+EXOZIPPy now has almost all features of EXOFASTv2
+implemented, plus several more that EXOFASTv2 lacks. However, it is
+not officially released yet. Some features are still missing and many
+are not thoroughly tested. Use at your own risk and verify your
+results. If you'd like to help with development, please contact me at
+jason.eastman@cfa.harvard.edu, file an issue, or submit a pull
+request.
 
 ## Installing
 
-EXOZIPPy is on PyPI. Only pre-releases exist so far, so `--pre` is required --
-without it pip reports that no matching version exists:
+These instructions are for **using** EXOZIPPy to fit your data. If you want to
+change EXOZIPPy itself, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
+They are written for Linux and Apple Silicon macOS, and need no root
+(`sudo`) access on Linux. On **Windows**, first follow
+[`WINDOWS_INSTALL.md`](WINDOWS_INSTALL.md) to set up Linux inside Windows, then
+continue here. On an **Intel Mac** (`uname -m` prints `x86_64`), follow
+[`MACOS_INTEL_INSTALL.md`](MACOS_INTEL_INSTALL.md) instead.
+
+### Step 1 -- Install Miniforge
+
+**macOS only:** first install Apple's command line tools, which provide the
+C++ compiler EXOZIPPy needs:
+
+```bash
+xcode-select --install
 ```
-pip install --pre exozippy
+
+(On Linux, conda installs the compiler in Step 2.)
+
+[Miniforge](https://github.com/conda-forge/miniforge) is a small installer for
+`conda`, which gives EXOZIPPy its own Python, compiler and libraries, separate
+from the system's. Skip this step if you already have `conda` (Miniforge,
+Miniconda or Anaconda).
+
+```bash
+curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
+bash Miniforge3-$(uname)-$(uname -m).sh
 ```
 
-All dependencies resolve from PyPI, so no compiler is required to *install* on
-the supported platforms below (a compiler and the Python headers are still
-needed at *runtime* -- see "Runtime requirements" under Supported platforms). A
-nightly CI job installs exactly this way, with no lock file, to check that a
-fresh install keeps working as upstream packages move.
+Accept the license, accept the default install location, and answer **yes**
+when it asks whether to initialize conda. Then **close and reopen your
+shell** so the `conda` command is found.
 
-### For development
+### Step 2 -- Download and install EXOZIPPy
 
-Use Poetry, which installs the pinned `poetry.lock` and so reproduces a known
-good dependency set:
+Create the environment. On **Linux** (including WSL2):
 
+```bash
+conda create -n exozippy python=3.12 pip gxx openblas
 ```
-conda create -n exozippy python=3.12
+
+On **macOS**:
+
+```bash
+conda create -n exozippy python=3.12 pip
+```
+
+EXOZIPPy compiles C code while it runs: `gxx` is the C++ compiler for that,
+and `openblas` a fast linear-algebra library it links against. Keep `pip` in
+the line too: recent conda versions no longer add it automatically, and
+without it the `pip install` below runs some other Python's pip.
+
+Then download and install EXOZIPPy into it:
+
+```bash
 conda activate exozippy
-git clone https://github.com/jdeast/EXOZIPPy.git
-cd EXOZIPPy
-poetry install --extras gui
-poetry run pre-commit install
+mkdir -p ~/python
+git clone https://github.com/jdeast/EXOZIPPy.git ~/python/EXOZIPPy
+cd ~/python/EXOZIPPy
+pip install -e .
 ```
 
-`--extras gui` is worth taking even if you never open the GUI (and you probably
-should not -- see "The GUI is experimental" below): ruamel-yaml lives in that
-extra, and without it roughly 30 tests fail at import.
+(If `git` is missing, `conda install git` provides it.) Any directory works in
+place of `~/python/EXOZIPPy`; the rest of this README assumes that one.
+`conda activate exozippy` is needed in every new shell before you use
+EXOZIPPy.
 
-See CONTRIBUTING.md for the workflow (`master` is protected; changes go through
-a pull request with a passing test suite).
+If the compiler is ever missing or broken, EXOZIPPy checks at the start of
+every fit and prints a warning naming the fix, rather than failing
+mysteriously.
 
-## Supported platforms
+(EXOZIPPy is also on PyPI, as `pip install --pre exozippy`; `--pre` is
+required because only pre-releases exist so far. That installs the program
+but not the examples below, and the helper commands in Step 5 only exist in
+releases newer than 0.1.0rc2, so the clone above is the recommended route.)
 
-Every push and pull request runs the full test suite on:
+### Step 3 -- Run an example fit to check your installation
 
-| OS | Python |
-|----|--------|
-| Linux (ubuntu-latest) | 3.12, 3.13, 3.14 |
-| macOS (arm64) | 3.12 |
-
-### Intel Macs: supported, with two gaps and an extra install step
-
-**macOS x86_64 works**, on Python **3.12 or 3.13**, and a separate CI job
-(`macos-15-intel`, nightly and on every pull request) keeps it that way. Two
-features are unavailable there, and the install needs one extra command
-before `poetry install`. Both gaps trace to a single upstream fact -- jaxlib's
-last macOS x86_64 wheel is 0.4.38 and jaxlib ships no sdist, so no newer jax
-can be installed on that hardware at all:
-
-* the `gp:` key (Gaussian-process noise) is unavailable, because celerite2's
-  PyMC backend imports jax at module scope;
-* the `numpyro` and `blackjax` samplers are unavailable. Use `nuts`, `ptde`
-  (the default) or `nutpie`, none of which touch jax.
-
-Everything else -- RV, transit, SED, astrometry, microlensing -- works
-normally. The runbook, the reasoning, and the upstream fixes that will remove
-the extra step are in
-[`MACOS_INTEL_INSTALL.md`](MACOS_INTEL_INSTALL.md). Apple Silicon Macs need
-none of this; check with `uname -m`.
-
-### Windows: supported through WSL2
-
-**Windows is supported, via WSL2** (Windows Subsystem for Linux) -- not natively.
-That is not a hedge: inside WSL2 you are running a real Linux kernel with a
-genuine Ubuntu userspace, so it *is* the Linux platform in the table above,
-`fork`-based samplers and all. A full development setup there passes **1272 of
-1272 tests**. The step-by-step runbook, verified end to end on a real machine
-(Windows 11 -> Ubuntu 26.04 -> Python 3.14 -> Poetry), is
-[`WINDOWS_INSTALL.md`](WINDOWS_INSTALL.md).
-
-#### Minimum Windows version
-
-WSL2 requires **build 19041 or newer** (Windows 10 version 2004, the May 2020
-Update) or any Windows 11. Check with `winver`, or from PowerShell:
-
-```
-[System.Environment]::OSVersion.Version
+```bash
+cd ~/python/EXOZIPPy/examples/hat3
+exozippy hat3.yaml
 ```
 
-Note: Microsoft numbers Windows 10 releases `YYMM`, so "version 2004" means
-April 2020, not the year 2004. Build numbers are less ambiguous and are what
-this document uses.
+This fits the hot Jupiter HAT-P-3b, and can take an hour or more. When it
+finishes, the new `fitresults/` subdirectory holds the outputs, all starting
+`HAT-P-3b_numpyro`: a `_summary.txt` and `_results.csv` of the fitted
+parameters, the model plots (`_mcmc_*.pdf`), a corner plot and trace plots.
+Open them with any PDF viewer, e.g. `xdg-open` on Linux, `open` on macOS, or
+`explorer.exe .` under WSL2 to browse the directory in Windows File Explorer.
 
-Builds 18362 and 18363 (versions 1903 and 1909) can also run WSL2 on x64 if
-fully patched, but `wsl --install` does not exist there and the manual setup is
-not covered here.
+### Step 4 -- Fit your own system
 
-Below that there is no way to run EXOZIPPy on Windows: native Windows cannot
-run the samplers (below), and WSL1 is a syscall translation layer rather than a
-Linux kernel. Windows 7, 8, 8.1 and early Windows 10 are therefore unsupported,
-as is any Windows 10 after its October 2025 end of support. On hardware that
-cannot take a current Windows, install Linux directly -- it is the platform
-EXOZIPPy is developed and tested on, and it will outperform a VM on old
-machines.
+Most example directories (`examples/*/`) have a `README.md` explaining what
+that fit does. Find one (or several) that match the kind of fit you are doing
+and use it as a template. Generically:
 
-**Why not natively?** Two independent reasons:
+1. Collect and format your data. Keep your fits outside the repository, e.g.
+   in `~/modeling/toi1234/`, so updating EXOZIPPy never touches them.
+2. Define the model architecture and data sources in a `toi1234.yaml` file.
+3. Define the model's starting values and priors in a `toi1234.params.yaml`
+   file. Record where each prior comes from in its `citation:` field rather
+   than in a comment, so it follows the prior into the parameter table (as a
+   table note) and into restart files:
 
-1. **The PTDE sampler cannot work.** It builds worker pools with
-   multiprocessing's `fork` start method so children inherit the compiled
-   PyTensor logp function without pickling it -- cloudpickle cannot serialize
-   one. Windows has no `fork`, only `spawn`.
-2. **The suite never finished.** It took over 90 minutes against ~16 on Linux
-   and never completed a CI run, so the job was removed rather than left
-   producing no signal. Three real Windows bugs were found and fixed along the
-   way (an unsatisfiable mkl pin, a POSIX-only `SIGALRM` in the symbolic solver,
-   and a cross-process stop signal), so basic use may well work -- but nothing
-   verifies it.
+   ```yaml
+   star.feh:
+       mu: 0.27
+       sigma: 0.08
+       citation: "email from XX 9/9/2026"     # one citation, never split
+   star.parallax:
+       mu: 7.4528
+       sigma: 0.0175
+       citation: [GaiaCollaboration:2023, ElBadry:2021]   # or a list
+   ```
 
-Native Windows would additionally need a GCC-style C++ compiler for PyTensor's
-runtime compilation (MSVC will not do), which we have never tested.
+   An entry that is a key in EXOZIPPy's `references.bib` is cited properly
+   (`\citet`); anything else is printed as written, for you to turn into a
+   citation by hand when writing the paper.
+4. Run the fit:
 
-Those are the headline reasons, not the whole list. If you want to pick native
-Windows up, [`docs/windows-native.md`](docs/windows-native.md) is the running
-inventory of known blockers -- each one with what breaks, why, and the minimum
-work to clear it -- so you can size the job before starting it. Patches
-welcome.
+   ```bash
+   conda activate exozippy
+   cd ~/modeling/toi1234
+   exozippy toi1234.yaml
+   ```
 
-#### Quickstart
+### Step 5 -- Helper commands for Step 4
 
-Open an administrator PowerShell (Start menu, type "powershell", then "Run as
-administrator") and run:
+EXOZIPPy installs three commands that do much of items 1-3 of Step 4 for you. Run each
+from the directory the fit will live in (e.g. `~/modeling/toi1234`); `--help`
+lists each one's options.
 
-```
-wsl --install
-```
+**Download TESS/Kepler/K2 light curves** (Gaia astrometry and Roman data are
+planned):
 
-**Reboot** -- the optional components only activate then, and without it
-`wsl --status` claims virtualization is disabled even when it is not. Open the
-Ubuntu app once to create a Unix user, then inside Ubuntu:
-
-```
-sudo apt update
-sudo apt install -y g++ python3-dev python3-venv
-python3 -m venv ~/exozippy-env
-source ~/exozippy-env/bin/activate
-pip install --pre exozippy
+```bash
+exozippy-getdata TOI-1234
 ```
 
-Note `python3`, not `python`: see the `PATH` note below. `python3-venv` is not
-optional -- without it `python3 -m venv` fails on `ensurepip`.
+The argument is any SIMBAD-resolvable name. Each sector is written as its own
+file (e.g. `n20190718.TESS.TESS.TOI-1234.S14.0120.SPOC.dat`).
 
-#### What WSL2 costs you
+**Build an SED file and a starting params file** from the all-sky catalogs
+(broadband photometry, parallax, extinction, and starting stellar values),
+which cover most exoplanet host stars:
 
-One thing genuinely bites, and it is a resource default rather than a missing
-feature:
-
-- **Memory.** WSL2 takes **50% of host RAM** by default. On a 16 GB laptop that
-  is ~7.6 GB, while `pyproject.toml` asks for `-n 6` test workers that each peak
-  at 1-2 GB compiling PyTensor graphs. Measured on that machine, available
-  memory bottomed out at **41 MB**: workers were killed (`[gwN] node down`),
-  xdist died in its own scheduler, and one run hung for hours. Fix it with a
-  `.wslconfig` (see the runbook) or lower `-n`;
-  `python scripts/pytest_workers.py --explain` prints what this machine's
-  cores and memory can actually afford, which is what CI runs.
-
-Smaller, setup-time only:
-
-- Windows `PATH` is appended to the Linux one, so bare `python`/`pip`/`npm`
-  resolve to *Windows* executables -- which is how `poetry install` can install
-  nothing and still exit 0.
-- There is no full systemd session, so `apt` prints harmless
-  `Failed to connect to system scope bus` warnings.
-- Keep the repo on the Linux filesystem, not `/mnt/c`, where I/O is far slower.
-
-Not limitations: `fork` works (so PTDE and its tests run), PyTensor compiles C
-at runtime, and the whole suite passes. GPU/CUDA for the JAX samplers is
-untested.
-
-The end-user path above (`pip install --pre exozippy` inside WSL) is enough to
-run fits. For a development checkout -- git clone plus Poetry plus the test
-suite -- follow [`WINDOWS_INSTALL.md`](WINDOWS_INSTALL.md), which covers the
-traps above in order.
-
-Intel macOS is untested here and needs a C++ compiler: exoplanet-core publishes
-wheels for CPython 3.12-3.14 on Linux (glibc 2.28+), Apple Silicon macOS and
-Windows, but not Intel macOS, so it builds from source there.
-
-### Runtime requirements
-
-PyTensor compiles C code at runtime, so running a fit needs a C++ compiler
-*and* the Python development headers -- even though `pip install` itself
-succeeds without them. Missing headers show up as a `CompileError` ending in
-`fatal error: Python.h: No such file or directory` the first time a model is
-built. This is common on RHEL-family systems, where the headers ship in a
-separate package from Python itself. To install both:
-
-```
-# RHEL / Rocky / Alma / CentOS / Fedora (match the -devel version to your Python)
-sudo dnf install gcc-c++ python3.12-devel
-
-# Debian / Ubuntu
-sudo apt install g++ python3.12-dev
+```bash
+exozippy-mkticsed TOI-1234
 ```
 
-macOS's Xcode Command Line Tools (`xcode-select --install`) and any conda
-Python (e.g. the Miniforge setup above) already include the headers. So if you
-lack root on a Linux box, building your environment from a conda Python
-instead of the system one sidesteps the problem entirely (conda can also
-supply the compiler itself if the box has none):
+The argument is a TIC ID or any SIMBAD-resolvable name. It writes
+`<name>.sed.yaml` and `<name>.params.yaml`, where `<name>` defaults to the
+current directory's name (`toi1234.sed.yaml` and `toi1234.params.yaml` in
+`~/modeling/toi1234`); set it with `--name`.  Note that the Gaia DR3 parallax
+is corrected with Lindegren et al. (2021)'s zero-point prescription; its
+uncertainty is inflated by El-Badry, Rix & Heintz (2021)'s magnitude-dependent
+factor (up to 1.3x near G = 13), and then has 0.01 mas added in quadrature
+for the local zero-point variations that factor leaves out; and the
+photometry carries systematic error floors. Each prior it writes carries a
+`citation:` naming its catalog and every correction applied.  These are best practice,
+but they mean the values will not exactly match what the catalogs report. The SED file also contains many commented-out bands
+that we generally do not fit, because of systematics in the source
+data or in the stellar atmosphere models; uncomment them with caution.
 
+**Convert an existing EXOFASTv2 fit:**
+
+```bash
+exozippy-exofast2exozippy ~/idl/toi1234/fittoi1234.pro
 ```
-conda create -n exozippy python=3.12
+
+This reads the EXOFASTv2 driver `.pro` file and its prior and SED files, and
+writes `<name>.yaml`, `<name>.params.yaml` and (if there is an SED)
+`<name>.sed.yaml` into the current directory, copying the data files beside
+them. `<name>` defaults to the name of the directory holding the `.pro` file
+(`toi1234` here); set it with `--name`. EXOFASTv2 features with no EXOZIPPy
+equivalent yet are listed as warnings at the end.
+
+### Step 6 -- Updating EXOZIPPy
+
+```bash
 conda activate exozippy
-pip install --pre exozippy       # or the Poetry development setup above
+cd ~/python/EXOZIPPy
+git pull
+pip install -e .
 ```
 
-If the toolchain is broken anyway (no g++, or g++ without `Python.h`),
-`exozippy` detects it at startup, prints a warning naming the fix, and falls
-back automatically to PyTensor's much slower pure-Python mode -- usable as a
-smoke test, not for a real fit. (Setting `PYTENSOR_FLAGS="cxx="` by hand is
-not enough: models with more than ~31 likelihood terms then die on numpy's
-32-operand ufunc limit; the automatic fallback also installs the graph
-rewrite that works around it.)
+Re-running `pip install -e .` picks up any new or changed dependencies and
+commands.
 
-## Running a fit
+## The GUI is experimental
 
-```
-cd examples/ob140939
-exozippy ob140939.yaml
-```
-
-### The GUI is experimental
-
-There is an optional browser GUI (installed by the `gui` extra), started with:
+There is an optional browser GUI, installed by the `gui` extra
+(`pip install -e ".[gui]"` in Step 2 above) and started with:
 
 ```
 exozippy-gui
@@ -241,7 +212,7 @@ exozippy-gui
 
 **Treat it as experimental on every platform, including Linux and macOS.** It is
 still buggy and has never been verified driving a real fit end to end, so it is
-not part of what "supported" means above -- unlike the CLI, nothing in CI
+not part of what EXOZIPPy supports -- unlike the CLI, nothing in CI
 exercises it beyond unit tests of its own modules. Use it to look around; do not
 rely on it for science.
 

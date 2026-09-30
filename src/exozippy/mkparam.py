@@ -166,7 +166,18 @@ def _apply_existing_constraints(entry, existing_entry):
     # load-bearing today) is not one of them, and gets its constraints
     # carried by the pass-through loop at the end of `write_param_file`
     # instead -- see `_CONSTRAINT_FIELDS` there, and review 2.3.13.
-    for constraint_key in ("mu", "sigma", "lower", "upper", "bound_scale"):
+    # `citation` is not a constraint, but it is what JUSTIFIES one (a
+    # catalog, or "email from XX 9/9/2026"), so it travels with them: a
+    # restart file that kept the prior and dropped its source would leave
+    # the next fit's table unable to say where the prior came from.
+    for constraint_key in (
+        "mu",
+        "sigma",
+        "lower",
+        "upper",
+        "bound_scale",
+        "citation",
+    ):
         if constraint_key in existing_entry:
             entry[constraint_key] = existing_entry[constraint_key]
     if (

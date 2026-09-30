@@ -59,8 +59,41 @@ STRING_KEYS = ("unit", "latex", "description")
 # Reporting switches; whole-parameter, not per element.
 BOOL_KEYS = ("print_to_table", "debug_print")
 
+# What justifies an entry's prior (e.g. the catalog a Gaia parallax came
+# from); per element.  Each item is a references.bib key, rendered as a
+# \citet, or any other text, passed through verbatim for the user to turn
+# into a citation by hand.  Metadata, never a posterior term, so
+# deliberately NOT in PHYSICS_KEYS: citing a prior does not modify it.
+# Parameter renders it as a Prior-column table note.
+CITATION_KEYS = ("citation",)
+
 # The union: the complete set of legal sub-keys.
-USER_PARAM_KEYS = NUMERIC_KEYS + STRING_KEYS + BOOL_KEYS
+USER_PARAM_KEYS = NUMERIC_KEYS + STRING_KEYS + BOOL_KEYS + CITATION_KEYS
+
+
+def normalize_citation(value, where):
+    """Normalize a params-file ``citation`` to a tuple of citations.
+
+    The one spelling inside the codebase is a tuple of stripped, non-empty
+    strings.  A user writes one citation as a string or several as a list;
+    a string is never split, since free text ("Smith, Jones & Lee 2023")
+    carries commas.  Anything else raises naming ``where`` (the parameter
+    path).
+    """
+    if isinstance(value, str):
+        items = [value.strip()]
+    elif isinstance(value, (list, tuple)) and all(
+        isinstance(k, str) for k in value
+    ):
+        items = [k.strip() for k in value]
+    else:
+        raise ValueError(
+            f"{where}: 'citation' must be a string or a list of strings "
+            f"(references.bib keys or free text), got {value!r}"
+        )
+    if not items or not all(items):
+        raise ValueError(f"{where}: 'citation' has an empty entry: {value!r}")
+    return tuple(items)
 
 
 class SymbolicTimeout(Exception):
@@ -1740,6 +1773,8 @@ class ConfigManager:
             "expressions": base.get("expressions", {}),
             "print_to_table": base.get("print_to_table", True),
             "debug_print": base.get("debug_print", None),
+            # Params-file only (see CITATION_KEYS); per element when a vector.
+            "citation": (),
             # Component-declared, defaults.yaml only (not a params-file key,
             # so deliberately absent from STRING_KEYS): the sentence the
             # near-bound warnings append when this parameter's start or
@@ -2100,6 +2135,33 @@ class ConfigManager:
                     for bool_key in BOOL_KEYS:
                         if bool_key in ov:
                             resolved[bool_key] = ov[bool_key]
+
+                    if "citation" in ov and not any(
+                        pk in ov for pk in physics_keys
+                    ):
+                        # A citation justifies a PRIOR; on an entry that
+                        # states none (an initval is a start value) it would
+                        # render as "Prior from ..." on the defaults' uniform,
+                        # a false statement in a published table.
+                        logger.warning(
+                            f"[{component_type}.{_eff_idx(i)}.{param_name}] "
+                            f"'citation' ignored: the entry states no prior "
+                            f"({', '.join(physics_keys)}), so there is "
+                            f"nothing for it to justify."
+                        )
+                    elif "citation" in ov:
+                        keys = normalize_citation(
+                            ov["citation"],
+                            f"{component_type}.{_eff_idx(i)}.{param_name}",
+                        )
+                        if n_elements > 1:
+                            if not isinstance(resolved["citation"], list):
+                                resolved["citation"] = [
+                                    resolved["citation"]
+                                ] * n_elements
+                            resolved["citation"][i] = keys
+                        else:
+                            resolved["citation"] = keys
 
                     # A user-supplied Gaussian prior width doubles as the
                     # best preliminary scale (user init_scale entries were

@@ -2,8 +2,8 @@
 
 **Windows is supported through WSL2, and that is the supported path.** Inside
 WSL2 you are running a real Linux kernel with a genuine Ubuntu userspace, so it
-*is* the Linux platform -- `fork`-based samplers and all. See the "Windows"
-section of `README.md` and the step-by-step runbook in `WINDOWS_INSTALL.md`.
+*is* the Linux platform -- `fork`-based samplers and all. See the step-by-step
+runbook in `WINDOWS_INSTALL.md`.
 
 This file is the other question: **what would it take to run EXOZIPPy on
 Windows natively, without WSL2?** It exists so that anyone who wants to take

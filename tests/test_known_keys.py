@@ -274,6 +274,7 @@ _SUBKEY_PROBES = {
     "description": "probe",
     "print_to_table": False,
     "debug_print": True,
+    "citation": "email from a probe 9/30/2026",
 }
 
 # Declared, legal in a params file, and deliberately NOT absorbed from a user
@@ -676,7 +677,10 @@ def test_the_three_subkey_vocabularies_share_one_owner():
 
     # ACT / ASSERT -- the union is exactly its declared parts.
     assert set(owner.USER_PARAM_KEYS) == (
-        set(owner.NUMERIC_KEYS) | set(owner.STRING_KEYS) | set(owner.BOOL_KEYS)
+        set(owner.NUMERIC_KEYS)
+        | set(owner.STRING_KEYS)
+        | set(owner.BOOL_KEYS)
+        | set(owner.CITATION_KEYS)
     )
     assert set(owner.NUMERIC_KEYS) == (
         set(owner.TUNING_KEYS) | set(owner.PHYSICS_KEYS)

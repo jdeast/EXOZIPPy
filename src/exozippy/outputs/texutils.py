@@ -23,6 +23,22 @@ Deliberately NOT escaped (these are meant to carry math/markup):
   concatenating (see report_pipeline's caption).
 """
 
+import re
+from functools import lru_cache
+from pathlib import Path
+
+# The universal bibliography shipped as package data and copied verbatim
+# next to every <prefix>_paper.tex (outputs/modeling.py).
+REFERENCES_BIB = Path(__file__).parent.parent / "latex" / "references.bib"
+
+
+@lru_cache(maxsize=1)
+def known_bib_keys():
+    """The entry keys of the shipped ``references.bib``, as a frozenset."""
+    text = REFERENCES_BIB.read_text(encoding="utf-8")
+    return frozenset(re.findall(r"^\s*@\w+\s*\{\s*([^,\s]+)\s*,", text, re.M))
+
+
 # Order matters: the backslash rule must run first, and its replacement
 # must not be re-processed by the later rules (hence the two-step dance
 # through a placeholder that contains no special character).

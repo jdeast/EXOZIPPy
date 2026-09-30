@@ -12,15 +12,19 @@
 star.G.mass:
   initval: 0.93
   sigma: 0.05
+  citation: ElBadry:2023
 star.G.radius:
   initval: 0.99
   sigma: 0.05
+  citation: ElBadry:2023
 star.G.teff:
   initval: 5850
   sigma: 50
+  citation: ElBadry:2023
 star.G.feh:
   initval: -0.2
   sigma: 0.05
+  citation: ElBadry:2023
 
 # Reference position at epoch J2016.0 (the simulated abscissae are measured
 # relative to this position; the fit recovers small offsets from it)
