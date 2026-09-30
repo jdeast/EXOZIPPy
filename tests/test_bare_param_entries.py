@@ -18,7 +18,6 @@ Tests follow AAA (Arrange / Act / Assert) with Given/When/Then docstrings.
 
 import copy
 import io
-import logging
 from pathlib import Path
 
 import numpy as np
@@ -184,25 +183,20 @@ def test_the_no_config_branch_emits_a_field_dict_too():
     assert user_params == {"star.0.teff": 5800, "star.0.mass": [0.3, 0.7]}
 
 
-def test_a_null_entry_is_dropped_with_a_warning(caplog):
+def test_a_null_entry_raises_naming_the_key():
     """
     Given `star.0.teff:` with no value (YAML null) next to a real entry,
     When a ConfigManager is built,
-    Then the null entry is gone from user_params -- it states no field, and
-    resolve()/finalize already ignored it while the key-presence checks
-    counted it -- and the user is told which line was ignored.
+    Then it raises ValueError naming the key: a null is ambiguous user input
+    (a value not written, or a line not deleted), so it is refused rather
+    than guessed to mean "no entry" (JDE 2026-09-30).
     """
     # Arrange
     user_params = {"star.0.teff": None, "star.0.mass": 1.0}
 
-    # Act
-    with caplog.at_level(logging.WARNING, logger="exozippy.config"):
-        cm = ConfigManager(user_params, system_config={"star": [{}]})
-
-    # Assert
-    assert "star.0.teff" not in cm.user_params
-    assert cm.user_params["star.0.mass"] == {"initval": 1.0}
-    assert "star.0.teff" in caplog.text
+    # Act / Assert
+    with pytest.raises(ValueError, match=r"star\.0\.teff"):
+        ConfigManager(user_params, system_config={"star": [{}]})
 
 
 def test_the_gui_document_keeps_its_bare_spelling():

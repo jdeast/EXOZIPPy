@@ -482,7 +482,7 @@ def as_field_entry(val):
 
 
 def standardize_entries(user_params):
-    """Every parameter entry as a field dict; a null entry is dropped.
+    """Every parameter entry as a field dict; a null entry RAISES.
 
     The entry-shape half of the boundary, shared by
     ``ConfigManager.standardize_param_names`` (every pass) and
@@ -492,8 +492,12 @@ def standardize_entries(user_params):
     A NULL entry (``star.0.teff:`` with nothing after it) states no field at
     all.  Every reader used to skip it -- ``resolve()`` and
     ``finalize_user_params`` both ``continue`` on ``None`` -- except the
-    key-presence checks, which counted it as a user value.  It is dropped here
-    with a warning, so it means "no entry" to every reader alike.
+    key-presence checks, which counted it as a user value.  It RAISES, naming
+    every such key (JDE 2026-09-30, review 1.1.7): it is ambiguous user input
+    -- a value the user meant to write and did not, or a line they meant to
+    delete -- not an unambiguous shortcut the boundary may translate, so
+    guessing "no entry" would be exactly the silent repair the ONE-SPELLING
+    rule forbids.
     """
     out = {}
     nulls = []
@@ -503,10 +507,10 @@ def standardize_entries(user_params):
             continue
         out[key] = as_field_entry(val)
     if nulls:
-        logger.warning(
-            f"params entries with no value were ignored: {sorted(nulls)}. "
-            f"Give each one a value (a number, a list of per-seed numbers, "
-            f"or a dict of fields), or delete the line."
+        raise ValueError(
+            f"params entries with no value: {sorted(nulls)}. Give each one a "
+            f"value (a number, a list of per-seed numbers, or a dict of "
+            f"fields), or delete the line."
         )
     return out
 
