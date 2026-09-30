@@ -142,8 +142,9 @@ def _highest_priority(values, priority):
 def build_parser():
     """Return the argparse parser for the getdata utility."""
     parser = argparse.ArgumentParser(
-        prog="getdata.py",
-        description="Downloads TESS/Kepler data and formats it for EXOFASTv2",
+        prog="exozippy-getdata",
+        description="Downloads TESS/Kepler data and formats it for "
+        "EXOZIPPy and EXOFASTv2",
     )
     parser.add_argument("id", help="SIMBAD-resolvable star name")
     parser.add_argument(

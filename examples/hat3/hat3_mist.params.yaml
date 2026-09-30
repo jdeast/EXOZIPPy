@@ -1,9 +1,10 @@
 # HAT-P-3 star-only + MIST.  Diff against hat3_staronly.params.yaml.
 
-# this is always helpful and comes from high resolution spectroscopy
+# this is always helpful
 star.feh:
     initval: 0.27
     sigma: 0.08
+    citation: high-resolution spectroscopy
 
 # NOTE the missing `sigma:`, which is the whole point of this example.
 # hat3_staronly.params.yaml pins this at 0.05 under the comment "the sigma is
@@ -44,12 +45,14 @@ star.A.initfeh:
 # star.A.age is likewise left at its defaults.yaml start (4.603 Gyr); the
 # tracks constrain it, and HAT-P-3's age is not independently known.
 
-# this comes from a galactic dust map (see scripts/mkticsed.py)
+# see scripts/mkticsed.py
 star.av:
     upper: 0.096687450
+    citation: Schlegel:1998
 
 # NOTE: the Gaia DR3 parallax uncertainty (0.0143000) has been added in
 # quadrature with 0.01 to account for remaining systematic residuals
 star.parallax:
     initval: 7.45278
     sigma: 0.01745
+    citation: GaiaCollaboration:2023

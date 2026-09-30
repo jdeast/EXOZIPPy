@@ -89,6 +89,9 @@ def register_wide_elemwise_split():
     _REWRITE_REGISTERED = True
 
 
+NO_CXX_REASON = "PyTensor has no C compiler configured (config.cxx is empty)"
+
+
 def check_c_backend():
     """Try a trivial C-backend compile; return None if it works, else the error.
 
@@ -103,7 +106,7 @@ def check_c_backend():
         # PyTensor already found no compiler at import (it warns and clears
         # cxx itself), or the user forced the Python backend via
         # PYTENSOR_FLAGS. Either way there is nothing to probe.
-        return "PyTensor has no C compiler configured (config.cxx is empty)"
+        return NO_CXX_REASON
     try:
         x = pt.dscalar("exozippy_c_backend_probe")
         probe = pytensor.function([x], x + 1.0)
@@ -127,12 +130,21 @@ def activate_python_fallback(reason):
     hint = ""
     if "Python.h" in reason:
         hint = (
-            "\nThe Python development headers are missing. To install them:\n"
+            "\nThe Python development headers are missing. Either use a conda\n"
+            "Python, which includes them (see README 'Installing'), or:\n"
             "  RHEL / Rocky / Alma / Fedora:  sudo dnf install gcc-c++ python3.X-devel\n"
             "  Debian / Ubuntu:               sudo apt install g++ python3.X-dev\n"
-            "  no root:                       use a conda Python (headers included)\n"
-            "(match the package version to your Python; see README 'Runtime\n"
-            "requirements')"
+            "(match the package version to your Python)"
+        )
+    elif reason == NO_CXX_REASON:
+        hint = (
+            "\nNo C++ compiler was found. To install one:\n"
+            "  Linux, in the activated conda environment (no root needed):\n"
+            "                                 conda install -c conda-forge gxx\n"
+            "  macOS:                         xcode-select --install\n"
+            "  or system-wide, Debian/Ubuntu: sudo apt install build-essential\n"
+            "  or system-wide, RHEL/Fedora:   sudo dnf install gcc-c++\n"
+            "(see README 'Installing')"
         )
     banner = textwrap.dedent(
         """

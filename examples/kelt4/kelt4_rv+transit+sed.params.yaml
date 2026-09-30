@@ -10,18 +10,20 @@ star.A.mass:
 star.A.teff:
   initval: 6207
 star.A.feh:
-  # Eastman+2016	
   initval: -0.116
   sigma: 0.08
+  citation: Eastman:2016
 star.A.parallax:
-  # NOTE: the Gaia DR3 parallax (4.5860000) has been corrected by subtracting -0.031176187 mas as prescribed in Lindegren+ 2021
+  # NOTE: the Gaia DR3 parallax (4.5860000) has been corrected by subtracting -0.031176187 mas
   # NOTE: the Gaia DR3 parallax uncertainty (0.0158000) has been added in quadrature with 0.01 to account for remaining systematic residuals
   mu: 4.61718
   sigma: 0.01870
+  citation: [GaiaCollaboration:2023, Lindegren:2021]
 
-# Schlegel+1998 3*E(B-V) upper limit (mkticsed.py)
+# 3*E(B-V) upper limit (mkticsed.py)
 star.A.av:
   upper: 0.0521
+  citation: Schlegel:1998
 
 # KELT-4B, KELT-4C: unresolved-companion pair at 1.6" (WDS), roughly equal
 # brightness (Fig. 8). No direct radius/teff/mass constraint -- only the

@@ -24,11 +24,13 @@
 # the physical parameters are the coordinates.
 
 star.ra:
-    initval: 260.4905833          # 17:21:57.74 (OGLE EWS)
+    initval: 260.4905833          # 17:21:57.74
     sigma: 0
+    citation: OGLE EWS
 star.dec:
     initval: -29.6236944          # -29:37:25.3
     sigma: 0
+    citation: OGLE EWS
 
 # --------------------------------------------------------------------
 # Trajectory -- Table B.1 Std 2L1S, verbatim (C18 identity)

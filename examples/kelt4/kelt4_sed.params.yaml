@@ -15,14 +15,16 @@ star.0.teff:
 star.0.feh:
   initval: -0.116
   sigma: 0.08
-# Gaia DR3 parallax distance (mkticsed.py, TIC 165297570)
+# parallax distance (mkticsed.py, TIC 165297570)
 star.A.distance:
   initval: 218.055
   mu: 218.055
   sigma: 0.889
-# Schlegel+1998 3*E(B-V) upper limit (mkticsed.py)
+  citation: GaiaCollaboration:2023
+# 3*E(B-V) upper limit (mkticsed.py)
 star.A.av:
   upper: 0.0521
+  citation: Schlegel:1998
 
 # KELT-4B, KELT-4C: unresolved-companion pair at 1.6" (WDS), roughly equal
 # brightness (Fig. 8). No direct radius/teff/mass constraint -- only the

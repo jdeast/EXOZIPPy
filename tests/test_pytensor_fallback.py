@@ -111,6 +111,25 @@ def test_activate_python_fallback_sets_config_and_warns(
     assert "python3.X-devel" in out
 
 
+def test_fallback_banner_names_a_compiler_fix_when_none_is_found(
+    restore_pytensor_config, capsys
+):
+    """Given the probe's reason when PyTensor found no C++ compiler at all,
+    when the fallback activates, then the banner names how to install one,
+    including the no-root conda route."""
+    # Arrange
+    pytensor.config.cxx = ""
+    reason = check_c_backend()
+
+    # Act
+    activate_python_fallback(reason)
+
+    # Assert
+    out = capsys.readouterr().out
+    assert "No C++ compiler was found" in out
+    assert "conda install -c conda-forge gxx" in out
+
+
 def test_ensure_usable_backend_is_silent_when_healthy(capsys):
     """Given a working C toolchain, when ensure_usable_backend runs, then it
     returns True and prints nothing."""
