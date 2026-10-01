@@ -34,6 +34,11 @@ mulensevent:
     # (mu_rel ~ 15 mas/yr) fights the light curve (~2 mas/yr); fitmurel
     # makes that fight one-dimensional.
     fitmurel: True
+    # REMOVED KEY (2026-10-01): this config raises until converted.  The
+    # JSON below exists only where the fit ran (the *_mmexofast.json
+    # caches are gitignored); run examples/DC2018/convert_mmexofast_json.py
+    # on this config there to move its seeds, mask and err_scale starts
+    # into the params file and delete this key.
     mmexofast: "../events/128/DC2018_128_mmexofast.json"
 
 lens:
