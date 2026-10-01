@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 import pytensor.tensor as pt
 
-from ..config import NUMERIC_KEYS
+from ..config import NUMERIC_KEYS, user_entry
 from ..manifest import interpret_manifest_entry
 from ..physics_registry import PHYSICS_REGISTRY
 from .parameter import ElementExpression, OwnPrePatchRef, Parameter
@@ -293,8 +293,8 @@ class Component(ABC):
             return wrote
 
         def _has(key):
-            entry = user.get(key)
-            return isinstance(entry, dict) and entry.get(field) is not None
+            entry = user_entry(user, key)
+            return entry is not None and entry.get(field) is not None
 
         if _has(f"{self.prefix}.{param_name}"):
             wrote[:] = True

@@ -88,7 +88,7 @@ from typing import Optional
 
 import numpy as np
 
-from ..config import PRECEDENCE_DERIVED_DATA
+from ..config import PRECEDENCE_DERIVED_DATA, user_entry
 
 logger = logging.getLogger(__name__)
 
@@ -642,8 +642,8 @@ def _user_named(config_manager, path):
     if len(parts) == 3:
         keys.append(f"{parts[0]}.{parts[2]}")
     for key in keys:
-        entry = config_manager.user_params.get(key)
-        if isinstance(entry, dict) and (
+        entry = user_entry(config_manager.user_params, key)
+        if entry is not None and (
             entry.get("initval") is not None or entry.get("mu") is not None
         ):
             return True

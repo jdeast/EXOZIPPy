@@ -461,6 +461,90 @@ def _reject_bare_string_values(user_params, source=None):
         )
 
 
+def as_field_entry(val):
+    """One user entry in the ONE internal spelling: a dict of fields.
+
+    A params file may write a parameter three ways -- a dict of fields, a bare
+    number (``star.0.teff: 5800``) or a bare per-seed list
+    (``star.0.teff: [5000, 6000]``) -- and the two bare forms mean exactly
+    ``{initval: <value>}``.  This is the boundary translation the ONE-SPELLING
+    rule (config.md) asks for, and it must be TOTAL: before review 1.1.7 the
+    bare shape survived standardization, and each downstream reader re-guessed
+    it differently -- ``_build_seed_overrides`` skipped it outright, so a bare
+    per-seed list silently kept only seed 0.
+
+    Always a fresh object (deepcopied), because downstream code writes through
+    these entries in place -- see ``standardize_param_names``.
+    """
+    if isinstance(val, dict):
+        return copy.deepcopy(val)
+    return {"initval": copy.deepcopy(val)}
+
+
+def standardize_entries(user_params):
+    """Every parameter entry as a field dict; a null entry RAISES.
+
+    The entry-shape half of the boundary, shared by
+    ``ConfigManager.standardize_param_names`` (every pass) and
+    ``ConfigManager.__init__``'s no-system_config branch, so both leave
+    ``user_params`` holding one shape.  Keys are not touched.
+
+    A NULL entry (``star.0.teff:`` with nothing after it) states no field at
+    all.  Every reader used to skip it -- ``resolve()`` and
+    ``finalize_user_params`` both ``continue`` on ``None`` -- except the
+    key-presence checks, which counted it as a user value.  It RAISES, naming
+    every such key (JDE 2026-09-30, review 1.1.7): it is ambiguous user input
+    -- a value the user meant to write and did not, or a line they meant to
+    delete -- not an unambiguous shortcut the boundary may translate, so
+    guessing "no entry" would be exactly the silent repair the ONE-SPELLING
+    rule forbids.
+    """
+    out = {}
+    nulls = []
+    for key, val in (user_params or {}).items():
+        if val is None:
+            nulls.append(str(key))
+            continue
+        out[key] = as_field_entry(val)
+    if nulls:
+        raise ValueError(
+            f"params entries with no value: {sorted(nulls)}. Give each one a "
+            f"value (a number, a list of per-seed numbers, or a dict of "
+            f"fields), or delete the line."
+        )
+    return out
+
+
+def user_entry(user_params, key):
+    """The standardized entry under ``key``, or None when there is none.
+
+    The one accessor for a ``ConfigManager.user_params`` entry.  After
+    construction every value there is a field dict (``standardize_entries``),
+    so a reader never has to guess the shape.  A non-dict here is an upstream
+    bookkeeping bug -- something wrote a bare value past the boundary -- and it
+    RAISES, naming the key, rather than being re-guessed (CLAUDE.md, "No
+    fallbacks for internal invariants"; review 1.1.7).
+    """
+    return require_entry(key, user_params.get(key))
+
+
+def require_entry(key, entry):
+    """``entry`` itself if it is a field dict or None; TypeError otherwise.
+
+    For a reader that already holds the value (a ``.items()`` loop); see
+    ``user_entry``.
+    """
+    if entry is None or isinstance(entry, dict):
+        return entry
+    raise TypeError(
+        f"user_params['{key}'] is a bare {type(entry).__name__} ({entry!r}), "
+        f"not a field dict. ConfigManager translates every params entry to "
+        f"{{initval: ...}} form at construction (standardize_entries), so a "
+        f"bare value here means something wrote into user_params past that "
+        f"boundary. Fix the writer; do not re-guess the shape here."
+    )
+
+
 def validate_sigma_has_center(user_params, links=None, source=None):
     """Fatal-error check: a Gaussian prior must have an explicit center.
 
@@ -486,7 +570,11 @@ def validate_sigma_has_center(user_params, links=None, source=None):
     Parameters
     ----------
     user_params : dict
-        Standardized user params.  Entries that are not dicts are skipped.
+        User params, standardized or RAW.  A bare (non-dict) entry is
+        skipped: it states an initval and nothing else, so it cannot carry a
+        sigma.  Only a raw params file can hold one -- mkparam validates the
+        file it read this way -- since ConfigManager translates every entry
+        to a field dict at construction (review 1.1.7).
     links : dict, optional
         ``{target_path: {field: ParamLink}}`` from ``extract_links``, which
         DELETES the link string from the entry -- so a linked mu/sigma is
@@ -923,7 +1011,11 @@ class ConfigManager:
             # ways behaved differently.  Production always passes a
             # system_config -- this bit tests and direct drivers, which is
             # exactly where a mutated input is hardest to see (review 2.1.9).
-            self.user_params = copy.deepcopy(user_params)
+            # standardize_entries deepcopies every entry AND translates a bare
+            # value to {initval: ...}, the same entry shape the standardizer
+            # emits (review 1.1.7): the keys here stay as the caller wrote
+            # them, but no reader downstream ever sees a bare entry.
+            self.user_params = standardize_entries(user_params)
             self._strip_user_init_scales()
 
         # Must run AFTER extract_links: that call deletes the link string from
@@ -1763,8 +1855,8 @@ class ConfigManager:
             u_str = None
             u_src = None
             for k in _lookup_keys(i):
-                entry = self.user_params.get(k)
-                if isinstance(entry, dict) and "unit" in entry:
+                entry = user_entry(self.user_params, k)
+                if entry is not None and "unit" in entry:
                     u_str = entry["unit"]
                     u_src = k
                     break
@@ -2069,19 +2161,15 @@ class ConfigManager:
             # that is where this bit.
             bound_source = {}
             for k in _element_keys(i):
-                scanned = self.user_params.get(k)
-                if isinstance(scanned, dict):
+                scanned = user_entry(self.user_params, k)
+                if scanned is not None:
                     for bkey in BOUND_KEYS:
                         if bkey in scanned:
                             bound_source[bkey] = k
 
             for k in _element_keys(i):
                 if k in self.user_params:
-                    ov = self.user_params[k]
-                    if ov is None:
-                        continue
-                    if not isinstance(ov, dict):
-                        ov = {"initval": ov}
+                    ov = user_entry(self.user_params, k)
 
                     resolved["user_modified"] = True
                     if any(pk in ov for pk in physics_keys):
@@ -2216,12 +2304,9 @@ class ConfigManager:
         u_str = None
         user_supplied = False
         # 1. Check if the user explicitly provided a unit in their config
-        if (
-            full_path
-            and full_path in self.user_params
-            and isinstance(self.user_params[full_path], dict)
-        ):
-            u_str = self.user_params[full_path].get("unit")
+        entry = user_entry(self.user_params, full_path) if full_path else None
+        if entry is not None:
+            u_str = entry.get("unit")
             user_supplied = bool(u_str)
 
         # 2. Fallback to defaults
@@ -2390,10 +2475,19 @@ class ConfigManager:
         solve's answer back in as PRECEDENCE_USER input.  Pass 2 additionally needs
         the copy per broadcast instance, so the last instance's write does not
         clobber all the others (e.g. per-source radii solved from rho).
+
+        EVERY ENTRY LEAVES AS A FIELD DICT (review 1.1.7).  A bare value
+        (`star.0.teff: 5800`, or the per-seed list `star.0.teff: [5000,
+        6000]`) is translated to `{initval: ...}` before any pass runs, via
+        `standardize_entries`, so the keys and the entry shape are both in
+        their one internal spelling on the way out and no reader downstream
+        has to re-guess either.  The user's FILE keeps its own spelling; this
+        is a translated copy.
         """
         if not user_params:
             return {}
 
+        user_params = standardize_entries(user_params)
         standardized = {}
 
         # Pass 1: resolve 3-part keys to index form.
@@ -2484,12 +2578,6 @@ class ConfigManager:
             # dict (see the aliasing fix in #76).
             standardized[canonical_param_key(key, config)] = copy.deepcopy(val)
 
-        def _as_entry(v):
-            """One user entry as a field dict; a bare scalar means `initval`."""
-            if isinstance(v, dict):
-                return copy.deepcopy(v)
-            return {"initval": copy.deepcopy(v)}
-
         # Pass 2: expand 2-part keys for list components, merging PER FIELD
         # into whatever Pass 1 already wrote for that index (review 1.1.6).
         for key, val in user_params.items():
@@ -2514,19 +2602,9 @@ class ConfigManager:
                 # This index already carries a specific entry.  The specific
                 # one wins FIELD BY FIELD; every field it does not mention is
                 # inherited from the broadcast instead of being discarded.
-                specific = standardized[indexed_key]
-                if not isinstance(val, dict) and not isinstance(
-                    specific, dict
-                ):
-                    # Two bare scalars both mean `initval`, so the specific
-                    # one is the whole entry and there is nothing to inherit.
-                    # Left as a scalar rather than promoted to a dict, so the
-                    # stored shape does not change for a case that was
-                    # already right.
-                    continue
-
-                merged = _as_entry(val)
-                overriding = _as_entry(specific)
+                # Both are field dicts already (standardize_entries above).
+                merged = copy.deepcopy(val)
+                overriding = standardized[indexed_key]
 
                 # AMBIGUOUS, so it is refused rather than guessed at: the
                 # specific entry redefines `unit` while inheriting a NUMBER
@@ -2616,17 +2694,15 @@ class ConfigManager:
 
             `probe_derivable` already falls back to `mu`, so before this the
             same input got two different answers at stage 1a and stage 4.
-            Three readers, one rule.
+            Three readers, one rule.  `data` is always a field dict: a bare
+            params value was translated to `{initval: ...}` at construction
+            (review 1.1.7), so there is no shape to guess here.
             """
-            if not isinstance(data, dict):
-                return data
             val = data.get("initval")
             return data.get("mu") if val is None else val
 
         for path, data in self.user_params.items():
-            if data is None:
-                continue
-            val = _user_start(data)
+            val = _user_start(require_entry(path, data))
             # A list-valued initval is a set of per-seed start points (P4
             # multi-seed sampling).  The base flat_params below seeds the
             # relaxation engine with seed 0; _build_seed_overrides re-injects
@@ -2673,7 +2749,7 @@ class ConfigManager:
                 logger.debug(f"Registered as leaf: {path}")
 
                 # Push the user's value into the solver's initial state
-                data = self.user_params[path]
+                data = user_entry(self.user_params, path)
                 val = _user_start(data)  # initval else mu; review 1.1.3
                 if isinstance(val, (list, tuple)):
                     val = val[0]  # seed 0; see per-seed handling below
@@ -2750,11 +2826,14 @@ class ConfigManager:
             # standardize_param_names stores entries under the index form
             # (star.0.teff) while final_path uses the name form (star.A.teff).
             # Check both so we don't create a spurious duplicate entry.
+            #
+            # Every entry is a field dict (review 1.1.7), so presence is the
+            # whole test.  It used to also require `isinstance(..., dict)`,
+            # which made a user's BARE entry look absent: it was overwritten
+            # with a fresh `{initval, derived}` instead of being updated.
             existing_key = None
             for try_key in (final_path, path):
-                if try_key in self.user_params and isinstance(
-                    self.user_params[try_key], dict
-                ):
+                if user_entry(self.user_params, try_key) is not None:
                     existing_key = try_key
                     break
 
@@ -2805,8 +2884,8 @@ class ConfigManager:
         # additionally need a numeric snapshot so the logit transform can be
         # set up (the dynamic tensor bound replaces it at runtime).
         for target, fields in self.links.items():
-            entry = self.user_params.get(target)
-            if not isinstance(entry, dict):
+            entry = user_entry(self.user_params, target)
+            if entry is None:
                 entry = {}
                 self.user_params[target] = entry
             for fld, plink in fields.items():
@@ -2867,10 +2946,13 @@ class ConfigManager:
         """
         # 1. User initval lists -> {sym_path: [internal values]}
         user_lists = {}
+        #    Every entry is a field dict, so a bare per-seed list
+        #    (`star.0.teff: [5000, 6000]`) arrives here as `{initval: [...]}`.
+        #    This loop used to `continue` past any non-dict entry, and that
+        #    bare spelling -- documented as legal -- silently kept only seed 0
+        #    (review 1.1.7).
         for path, data in self.user_params.items():
-            if not isinstance(data, dict):
-                continue
-            iv = data.get("initval")
+            iv = require_entry(path, data).get("initval")
             if not isinstance(iv, (list, tuple)):
                 continue
             sym_path = self._to_symbol_path(path, name_to_index)
@@ -2949,7 +3031,7 @@ class ConfigManager:
         """
         stripped = []
         for k, v in list(self.user_params.items()):
-            if isinstance(v, dict) and "init_scale" in v:
+            if "init_scale" in require_entry(k, v):
                 self.user_params[k] = {
                     kk: vv for kk, vv in v.items() if kk != "init_scale"
                 }
@@ -3035,8 +3117,8 @@ class ConfigManager:
                 return self._provenance_label(rank)
 
         for path in paths:
-            entry = (self.user_params or {}).get(path)
-            if isinstance(entry, dict) and entry.get("initval") is not None:
+            entry = user_entry(self.user_params, path)
+            if entry is not None and entry.get("initval") is not None:
                 return "user"
             if path in (self.links or {}) and (
                 "initval" in self.links[path] or "mu" in self.links[path]
@@ -3309,8 +3391,9 @@ class ConfigManager:
             sym = self.master_symbol_map.get(upath)
             if sym is None:
                 continue
-            val = data.get("initval") if isinstance(data, dict) else data
-            if val is None and isinstance(data, dict):
+            data = require_entry(upath, data)
+            val = data.get("initval")
+            if val is None:
                 val = data.get("mu")
             if isinstance(val, (list, tuple)):
                 val = val[0] if len(val) else None
@@ -3468,8 +3551,8 @@ class ConfigManager:
         # stripped with a warning at construction (whitening scales are
         # measured from the data instead; see exozippy/whitening.py).
         for path_str in self.master_symbol_map:
-            up = self.user_params.get(path_str)
-            if not isinstance(up, dict):
+            up = user_entry(self.user_params, path_str)
+            if up is None:
                 continue
             parts = path_str.split(".")
             c_type, p_name = parts[0], parts[-1]
@@ -4265,8 +4348,10 @@ class ConfigManager:
                     # handled state: build_pymc falls back to a fraction of
                     # the bound span, and the startup whitening probe measures
                     # the real scale from the data regardless.
-                    if target_str in resolved_scales and isinstance(
-                        self.user_params.get(target_str), dict
+                    if (
+                        target_str in resolved_scales
+                        and user_entry(self.user_params, target_str)
+                        is not None
                     ):
                         factor = self.get_conversion_factor(
                             parts[0], parts[-1], full_path=target_str

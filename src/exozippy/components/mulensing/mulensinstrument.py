@@ -12,7 +12,7 @@ from scipy.optimize import nnls
 
 from exozippy.compat import patch_mulensmodel_method_order
 from exozippy.components.instrument import Instrument
-from exozippy.config import PRECEDENCE_DERIVED_DATA
+from exozippy.config import PRECEDENCE_DERIVED_DATA, user_entry
 from exozippy.ephemeris import get_observer_position
 from exozippy.outputs.prose import get_collector
 from exozippy.skyframe import observer_sky_offset
@@ -28,14 +28,16 @@ from .physics import (
 )
 
 
-def _raw_initval(data, default=None):
-    """Read a raw ``user_params`` initval, collapsing a list (P4 multi-seed
+def _raw_initval(user_params, key, default=None):
+    """Read a ``user_params`` initval, collapsing a list (P4 multi-seed
     sampling) to its first (seed 0) entry.  Only meaningful before
     ConfigManager.finalize_user_params runs -- afterwards ``user_params``
-    already holds the resolved seed-0 scalar."""
+    already holds the resolved seed-0 scalar.  The entry is a field dict
+    (a bare params value was translated at construction, review 1.1.7)."""
+    data = user_entry(user_params, key)
     if data is None:
         return default
-    val = data.get("initval", default) if isinstance(data, dict) else data
+    val = data.get("initval", default)
     if isinstance(val, (list, tuple)):
         val = val[0] if val else default
     return val
@@ -386,7 +388,7 @@ class MulensInstrument(Instrument):
         if "t0_par" in event_config:
             return float(event_config["t0_par"])
         cm = self.config_manager
-        val = _raw_initval(cm.user_params.get("source.0.t_0"))
+        val = _raw_initval(cm.user_params, "source.0.t_0")
         if val is None:
             val = cm.seed_start_value("source.0.t_0")
         if val is not None:
@@ -747,7 +749,7 @@ class MulensInstrument(Instrument):
             # (mmexofast: auto) workflow, which is exactly the workflow
             # where the user typed the fewest start values and is therefore
             # most likely to have mislabelled a flux file as magnitudes.
-            val = _raw_initval(cm.user_params.get(key), None)
+            val = _raw_initval(cm.user_params, key)
             if val is None:
                 val = cm.seed_start_value(key)
             return default if val is None else val
@@ -958,7 +960,7 @@ class MulensInstrument(Instrument):
             # microlensing start values -- never sees a geometry here and
             # every band degrades to the median-flux / q_source=0.95 guess,
             # which badly mis-normalizes multi-band fits.
-            val = _raw_initval(cm.user_params.get(key), None)
+            val = _raw_initval(cm.user_params, key)
             if val is None:
                 val = cm.seed_start_value(key)
             return default if val is None else val
@@ -1326,11 +1328,9 @@ class MulensInstrument(Instrument):
         """First user_params value for any spelling in ``paths``."""
         up = self.config_manager.user_params
         for path in paths:
-            entry = up.get(path)
-            if isinstance(entry, dict) and entry.get(field) is not None:
+            entry = user_entry(up, path)
+            if entry is not None and entry.get(field) is not None:
                 return float(entry[field])
-            if entry is not None and not isinstance(entry, dict):
-                return float(entry)
         return default
 
     def _seed_source_star_from_flux(self, system):
@@ -2007,9 +2007,9 @@ class MulensInstrument(Instrument):
         """
         cm = self.config_manager
         owner = "source" if base_param == "t_0" else "mulensevent"
-        d = cm.user_params.get(f"{owner}.0.{base_param}")
+        d = user_entry(cm.user_params, f"{owner}.0.{base_param}")
         if d is not None:
-            return d.get("initval") if isinstance(d, dict) else float(d)
+            return d.get("initval")
         return None
 
     def _model_time_grid(self):

@@ -315,7 +315,14 @@ def extract_links(user_params, system_config):
 
     for key, entry in user_params.items():
         if not isinstance(entry, dict):
-            continue
+            # Standardized entries are all field dicts (config.py's
+            # standardize_entries, review 1.1.7); a bare value here is a
+            # bookkeeping bug upstream, not a spelling to skip.
+            raise TypeError(
+                f"extract_links: user_params['{key}'] is a bare "
+                f"{type(entry).__name__} ({entry!r}), not a field dict. Call "
+                f"it on standardized user_params only."
+            )
         for fld in LINKABLE_FIELDS:
             val = entry.get(fld)
             if not isinstance(val, str):

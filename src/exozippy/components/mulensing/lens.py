@@ -22,7 +22,7 @@ import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.components.parameterization import mode_manifest
-from exozippy.config import PRECEDENCE_DEFAULT
+from exozippy.config import PRECEDENCE_DEFAULT, user_entry
 from exozippy.outputs.prose import get_collector
 from exozippy.potentials import soft_upper_bound
 
@@ -190,14 +190,14 @@ class Lens(Component):
         up = self.config_manager.user_params
         for j in range(self.n_companions):
             elem = j + 1
-            entry = up.get(f"lens.{elem}.s")
-            if not isinstance(entry, dict):
+            entry = user_entry(up, f"lens.{elem}.s")
+            if entry is None:
                 continue
             if "lower" not in entry and "upper" not in entry:
                 continue
             log_key = f"lens.{elem}.log_s"
-            log_entry = up.get(log_key)
-            if not isinstance(log_entry, dict):
+            log_entry = user_entry(up, log_key)
+            if log_entry is None:
                 log_entry = {}
             for bound in ("lower", "upper"):
                 if bound not in entry:
@@ -353,18 +353,10 @@ class Lens(Component):
                 up = self.config_manager.user_params
                 for j in range(self.n_companions):
                     elem = j + 1
-                    ca_entry = up.get(f"lens.{elem}.xalpha") or {}
-                    sa_entry = up.get(f"lens.{elem}.yalpha") or {}
-                    ca = (
-                        ca_entry.get("initval")
-                        if isinstance(ca_entry, dict)
-                        else ca_entry
-                    )
-                    sa = (
-                        sa_entry.get("initval")
-                        if isinstance(sa_entry, dict)
-                        else sa_entry
-                    )
+                    ca_entry = user_entry(up, f"lens.{elem}.xalpha") or {}
+                    sa_entry = user_entry(up, f"lens.{elem}.yalpha") or {}
+                    ca = ca_entry.get("initval")
+                    sa = sa_entry.get("initval")
                     # List-valued initval (P4 multi-seed): use seed 0.
                     if isinstance(ca, (list, tuple)):
                         ca = ca[0] if ca else None

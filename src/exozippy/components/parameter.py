@@ -29,6 +29,7 @@ import pytensor.tensor as pt
 from astropy import units as u
 
 from exozippy import reporting
+from exozippy.config import user_entry
 from exozippy.manifest import normalize_selector
 from exozippy.outputs.texutils import (
     DIGIT_WORDS,
@@ -1467,8 +1468,8 @@ class Parameter:
             keys.insert(1, f"{comp}.{np.atleast_1d(names)[i]}.{pname}")
         found = set()
         for key in keys:
-            entry = params.get(key)
-            if isinstance(entry, Mapping):
+            entry = user_entry(params, key)
+            if entry is not None:
                 found |= {
                     f for f in ("mu", "sigma", "lower", "upper") if f in entry
                 }

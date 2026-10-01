@@ -61,7 +61,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ...config import PRECEDENCE_DERIVED_DATA
+from ...config import PRECEDENCE_DERIVED_DATA, user_entry
 
 logger = logging.getLogger(__name__)
 
@@ -170,8 +170,8 @@ def user_hints_sufficient(config_manager, is_binary, want_rho):
         required += ["lens.1.alpha", "lens.1.q"]
 
     def named(path):
-        entry = config_manager.user_params.get(path)
-        return isinstance(entry, dict) and (
+        entry = user_entry(config_manager.user_params, path)
+        return entry is not None and (
             entry.get("initval") is not None or entry.get("mu") is not None
         )
 

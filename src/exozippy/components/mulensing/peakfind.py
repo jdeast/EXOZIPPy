@@ -58,6 +58,8 @@ import logging
 import numpy as np
 from scipy.optimize import minimize
 
+from exozippy.config import user_entry
+
 logger = logging.getLogger(__name__)
 
 # Trial values for the coarse grid.  u_0 spans the high-magnification regime
@@ -546,8 +548,8 @@ def t_0_is_already_available(config_manager):
     """
     if T_0_PATH in config_manager.seeded_paths():
         return True
-    entry = config_manager.user_params.get(T_0_PATH)
-    if isinstance(entry, dict) and (
+    entry = user_entry(config_manager.user_params, T_0_PATH)
+    if entry is not None and (
         entry.get("initval") is not None or entry.get("mu") is not None
     ):
         return True

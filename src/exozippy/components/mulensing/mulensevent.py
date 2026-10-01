@@ -29,6 +29,7 @@ from exozippy.config import (
     PRECEDENCE_DERIVED_MIXED,
     PRECEDENCE_MULENS_LENS_DISTANCE,
     PRECEDENCE_MULENS_SOURCE_DISTANCE,
+    user_entry,
 )
 from exozippy.constants import DAYS_PER_YEAR
 from exozippy.corner_utils import (
@@ -226,11 +227,8 @@ class MulensEvent(Component):
         at stage 1 (MMEXOFAST seeds arrive after this snapshot)."""
         if "t0_par" in event_config:
             return float(event_config["t0_par"])
-        entry = config_manager.user_params.get("source.0.t_0")
-        if isinstance(entry, dict):
-            val = entry.get("initval")
-        else:
-            val = entry
+        entry = user_entry(config_manager.user_params, "source.0.t_0")
+        val = None if entry is None else entry.get("initval")
         # List-valued initval (P4 multi-seed sampling): t0_par is just a
         # numeric reference epoch, not a per-seed value, so use seed 0.
         if isinstance(val, (list, tuple)):
@@ -460,8 +458,8 @@ class MulensEvent(Component):
         """Best-effort mass initval (solMass) for a body at stage 3, from
         user_params mass or logmass entries; None when neither is given."""
         up = self.config_manager.user_params
-        entry = up.get(f"{comp_type}.{ndx}.mass")
-        val = entry.get("initval") if isinstance(entry, dict) else entry
+        entry = user_entry(up, f"{comp_type}.{ndx}.mass")
+        val = None if entry is None else entry.get("initval")
         if val is not None:
             # A user_params `mass` is in that BODY's own user unit, and this
             # function's contract is solMass.  `star.mass` is solMass so the
@@ -482,8 +480,8 @@ class MulensEvent(Component):
                 comp_type, "mass", full_path=f"{comp_type}.{ndx}.mass"
             )
             return float(val) * float(factor if factor else 1.0)
-        entry = up.get(f"{comp_type}.{ndx}.logmass")
-        val = entry.get("initval") if isinstance(entry, dict) else entry
+        entry = user_entry(up, f"{comp_type}.{ndx}.logmass")
+        val = None if entry is None else entry.get("initval")
         # Only `star` declares logmass, in dex(solMass), so 10** already
         # lands in the internal unit.  A component that ever declares a
         # logmass in another dex base needs the same factor treatment as
@@ -825,10 +823,8 @@ class MulensEvent(Component):
             # remaining companions' log_s from any user s initval.
             up = self.config_manager.user_params
             for j in range(1, self.n_companions):
-                entry = up.get(f"lens.{j + 1}.s")
-                s_val = (
-                    entry.get("initval") if isinstance(entry, dict) else entry
-                )
+                entry = user_entry(up, f"lens.{j + 1}.s")
+                s_val = None if entry is None else entry.get("initval")
                 if s_val is None or float(s_val) <= 0.0:
                     continue
                 self.config_manager.add_hint(

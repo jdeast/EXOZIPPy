@@ -6,6 +6,7 @@ import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.components.parameterization import mode_manifest, pin_unselected
+from exozippy.config import user_entry
 from exozippy.constants import KEPLER_CONST, MSUN_TO_MEARTH, RSUN_TO_REARTH
 from exozippy.outputs.prose import get_collector, join_names
 from exozippy.outputs.texutils import latex_escape
@@ -477,8 +478,8 @@ class Planet(Component):
                     )
                 continue
 
-            entry = up.get(mass_key)
-            if not isinstance(entry, dict):
+            entry = user_entry(up, mass_key)
+            if entry is None:
                 continue
 
             # A negative mass is unrepresentable as log_q.  Catch it here

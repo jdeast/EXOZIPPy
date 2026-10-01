@@ -17,6 +17,7 @@ import pymc as pm
 import pytensor
 from matplotlib.backends.backend_pdf import PdfPages
 
+from exozippy.config import user_entry
 from exozippy.samplers import convergence, de_metropolis
 from exozippy.samplers._common import default_cores
 from exozippy.samplers.ptde import ptde_sample
@@ -1738,13 +1739,11 @@ def _user_initval(config_manager, par, index):
 
     val = None
     for key in candidates:
-        entry = config_manager.user_params.get(
-            config_manager.canonical_key(key)
+        entry = user_entry(
+            config_manager.user_params, config_manager.canonical_key(key)
         )
         if entry is None:
             continue
-        if not isinstance(entry, dict):
-            entry = {"initval": entry}  # bare scalar, as resolve() treats it
         if "initval" not in entry:
             continue
         v = entry["initval"]
