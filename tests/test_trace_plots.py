@@ -492,3 +492,63 @@ def test_dist_degeneracy_verdicts(values, expected):
         assert reason is None
     else:
         assert reason is not None and expected in reason
+
+
+def _one_chain_within_a_few_ulp():
+    """Two chains: chain 0 moves by a single float64 step, chain 1 is healthy.
+
+    The POOLED range is wide, so a pooled-only degeneracy test passes it --
+    but the dist column draws one KDE per chain, and chain 0's range cannot
+    carry a 512-interval grid (review 7.13.9, the ob09020 wrap-up crash).
+    """
+    x = np.empty((2, 3))
+    x[0] = [5.0, np.nextafter(5.0, 6.0), 5.0]
+    x[1] = [4.0, 5.5, 6.0]
+    return x
+
+
+def test_one_degenerate_chain_is_caught_even_when_the_pool_is_fine():
+    """
+    Given a variable whose pooled draws span a wide range but one of whose
+      chains moves by a single float64 step,
+    When _dist_degeneracy inspects it,
+    Then it reports that chain -- numpy would raise "Too many bins for data
+      range" on that chain's KDE.
+    """
+    # ACT
+    reason = run_mod._dist_degeneracy(_one_chain_within_a_few_ulp())
+
+    # ASSERT
+    assert reason is not None and "chain 0" in reason
+
+
+def test_an_exactly_constant_chain_still_takes_the_normal_path():
+    """
+    Given one EXACTLY constant chain beside a healthy one,
+    When _dist_degeneracy inspects it,
+    Then it returns None: arviz draws that case itself (with a warning), so
+      it is left on the ordinary page exactly as before.
+    """
+    # ARRANGE
+    x = np.array([[5.0, 5.0, 5.0], [4.0, 5.5, 6.0]])
+
+    # ACT / ASSERT
+    assert run_mod._dist_degeneracy(x) is None
+
+
+def test_trace_pdf_survives_one_near_stuck_chain(tmp_path):
+    """
+    Given a posterior with one chain that moves by a single float64 step,
+    When the multipage trace PDF is written,
+    Then it is written (the element goes to the density-less page) instead
+      of the whole wrap-up dying in np.histogram.
+    """
+    # ARRANGE
+    idata = az.from_dict({"posterior": {"a": _one_chain_within_a_few_ulp()}})
+    out = tmp_path / "t.pdf"
+
+    # ACT
+    save_multipage_trace(idata, ["a"], str(out))
+
+    # ASSERT
+    assert out.exists()
