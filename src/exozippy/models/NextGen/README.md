@@ -41,7 +41,7 @@ SPECTRA_PROCESSED_PATH_DEFAULT = Path("/Volumes/Data/Spectra/BT-NextGen_AGSS2009
 
 ## 2. Compute the BC tables (`generate_NextGen_BC_Tables.py`, step 2)
 
-`generate_bc_tables` runs `BolometricCorrection` (`bolometric_correction.py`) for every filter set in `FILTER_SETS` and writes `models/NextGen/BCs/{FACILITY}.bc.parquet`. The keys of `FILTER_SETS` are facilities and must equal the SVO id prefix of their filters (that prefix is how the loader finds a filter's table). The defaults reproduce every column that shipped before this pipeline existed.
+`generate_bc_tables` runs `BolometricCorrection` (`bolometric_correction.py`) for every filter set in `FILTER_SETS` and writes `models/NextGen/BCs/{FACILITY}.bc.parquet`. The keys of `FILTER_SETS` are facilities and must equal the SVO id prefix of their filters (that prefix is how the loader finds a filter's table). `FILTER_SETS` lists every shipped column. Every column is Vega-referenced (`MAG_SYSTEM`, recorded as the table's `mag_system`), including the filters whose catalogs are natively AB (SLOAN, PAN-STARRS, GALEX): until the SED converts AB magnitudes (review 1.9.1), an AB-catalog magnitude in those bands must be converted to Vega before it is fitted (`filters/filter_magsys.txt` carries the per-filter offset m_AB - m_Vega in its `mag(Vega/AB)` column).
 
 Step 2 is **incremental on every axis and every filter**: it first works out which (grid node, filter) cells the tables do not hold yet (`plan_bc_work`, which you can call on its own to see what a run would do), prints that plan, and computes only those cells. So:
 

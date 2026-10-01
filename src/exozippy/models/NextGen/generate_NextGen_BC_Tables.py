@@ -90,22 +90,77 @@ MAG_SYSTEM = "Vega"
 FLUX_WEIGHTING = "detector"
 
 # Filters to compute BCs for, grouped by facility (the facility must be the
-# SVO id's prefix -- it names the output table). Defaults reproduce every
-# column of the tables that shipped before this pipeline existed.
+# SVO id's prefix -- it names the output table). This is the list of every
+# shipped column; add a filter here and re-run step 2 to ship a new one.
+#
+# Every column is VEGA-referenced (MAG_SYSTEM above), including the filters
+# whose catalogs are natively AB (SLOAN, PAN-STARRS, GALEX). The SED does not
+# yet convert an AB magnitude (review 1.9.1), so an AB-catalog magnitude in
+# one of those bands must be converted to Vega before it is fitted.
 FILTER_SETS: Dict[str, List[str]] = {
     "2MASS": ["2MASS/2MASS.J", "2MASS/2MASS.H", "2MASS/2MASS.Ks"],
-    "GAIA": ["GAIA/GAIA2r.G", "GAIA/GAIA2r.Gbp", "GAIA/GAIA2r.Grp"],
+    "GAIA": [
+        "GAIA/GAIA2r.G",
+        "GAIA/GAIA2r.Gbp",
+        "GAIA/GAIA2r.Grp",
+        "GAIA/GAIA3.G",
+        "GAIA/GAIA3.Gbp",
+        "GAIA/GAIA3.Grp",
+    ],
+    "TYCHO": [
+        # uses Grossmann et al 1995 for calibration
+        "TYCHO/TYCHO.B",
+        "TYCHO/TYCHO.V",
+        # uses Bessell 2000 for calibration
+        "TYCHO/TYCHO.B_bes",
+        "TYCHO/TYCHO.V_bes",
+        # uses Mann & von Braun 2014 for calibration
+        "TYCHO/TYCHO.B_MvB",
+        "TYCHO/TYCHO.V_MvB",
+    ],
+    "SLOAN": [
+        "SLOAN/SDSS.u",
+        "SLOAN/SDSS.g",
+        "SLOAN/SDSS.r",
+        "SLOAN/SDSS.i",
+        "SLOAN/SDSS.z",
+    ],
     "WISE": ["WISE/WISE.W1", "WISE/WISE.W2", "WISE/WISE.W3", "WISE/WISE.W4"],
+    "GALEX": [
+        "GALEX/GALEX.FUV",
+        "GALEX/GALEX.NUV",
+    ],
     "Generic": [
+        # Cousins filters
         "Generic/Cousins.I",
         "Generic/Cousins.R",
+        # Bessell filters
         "Generic/Bessell.U",
         "Generic/Bessell.B",
         "Generic/Bessell.V",
         "Generic/Bessell.R",
         "Generic/Bessell.I",
+        # Stromgren filters
+        "Generic/Stromgren.u",
+        "Generic/Stromgren.v",
+        "Generic/Stromgren.b",
+        "Generic/Stromgren.y",
+        # Johnson original generic filters
+        "Generic/Johnson.U",
+        "Generic/Johnson.B",
+        "Generic/Johnson.V",
+        "Generic/Johnson.R",
+        "Generic/Johnson.I",
+        "Generic/Johnson.J",
+        "Generic/Johnson.M",
     ],
-    "Keck": ["Keck/NIRC2.Kp", "Keck/NIRC2.J"],
+    "Keck": [
+        "Keck/NIRC2.Kp",
+        "Keck/NIRC2.J",
+        "Keck/NIRC2.Brgamma",
+        "Keck/NIRC2.H",
+        "Keck/NIRC2.Ks",
+    ],
     "TESS": ["TESS/TESS.Red"],
     # The full Roman WFI imaging set (master shipped these as a text table
     # built by make_bc from the downsampled spectra).
@@ -118,6 +173,22 @@ FILTER_SETS: Dict[str, List[str]] = {
         "Roman/WFI.F158",
         "Roman/WFI.F184",
         "Roman/WFI.F213",
+    ],
+    "Gemini": [
+        "Gemini/Zorro.EO_562",
+        "Gemini/Zorro.EO_832",
+    ],
+    "PAN-STARRS": [
+        "PAN-STARRS/PS1.g",
+        "PAN-STARRS/PS1.r",
+        "PAN-STARRS/PS1.i",
+        "PAN-STARRS/PS1.z",
+    ],
+    "Kepler": ["Kepler/Kepler.K"],
+    "Euclid": [
+        "Euclid/NISP.Y",
+        "Euclid/NISP.J",
+        "Euclid/NISP.H",
     ],
 }
 

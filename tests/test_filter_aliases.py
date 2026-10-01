@@ -237,3 +237,87 @@ def test_bare_i_band_resolves_to_cousins_in_a_prepared_system(tmp_path):
     # Assert
     assert system.band.filter_mist == ["Cousins_I"]
     assert system.band.filter_svo == ["Generic/Cousins.I"]
+
+
+# ------------------------------------------------- shipped BC table coverage
+
+
+def _shipped_bc_filters():
+    from exozippy.models.NextGen.generate_NextGen_BC_Tables import FILTER_SETS
+
+    return [(fac, svo) for fac, ids in FILTER_SETS.items() for svo in ids]
+
+
+@pytest.mark.parametrize("facility,svo", _shipped_bc_filters())
+def test_every_shipped_bc_filter_resolves_in_both_spellings(
+    alias_df, facility, svo
+):
+    """
+    Given a filter the NextGen BC generator ships (its FILTER_SETS),
+    When its SVO id ("Keck/NIRC2.H") and its bare VOID spelling ("NIRC2.H")
+    are resolved through the alias table,
+    Then both name the same SVO id and the same BC column, and that column
+    exists in the facility's shipped table.
+
+    A shipped column reachable only by its SVO id is a filter half the
+    users cannot name: before PR #349 the VOID spelling of NIRC2.Kp/J,
+    NIRC2.Brgamma, the Zorro and the Roman WFI filters all fell through
+    to a bare-name lookup and were refused as "not in the shipped tables".
+    """
+    # Arrange
+    from exozippy.components.sed.bc_grid import (
+        DEFAULT_MODEL_ROOT,
+        bc_table_filter_columns,
+        find_bc_table,
+    )
+
+    void = svo.split("/")[-1]
+    columns = bc_table_filter_columns(
+        find_bc_table(DEFAULT_MODEL_ROOT, "NextGen", facility)
+    )
+
+    # Act
+    resolved = {
+        name: (
+            resolve_filter_name(name, alias_df, alias="SVO"),
+            resolve_filter_name(name, alias_df, alias="MIST"),
+        )
+        for name in (svo, void)
+    }
+
+    # Assert
+    assert resolved[svo] == resolved[void], resolved
+    assert resolved[svo][0] == svo
+    assert resolved[svo][1] in columns, (resolved[svo][1], columns)
+
+
+def test_shipped_bc_tables_are_vega_and_match_the_generator(alias_df):
+    """
+    Given the shipped NextGen BC tables,
+    When their schema metadata is read,
+    Then every table says it is Vega-referenced, and its filter columns are
+    exactly the generator's FILTER_SETS for that facility -- so a column
+    cannot ship that nobody can regenerate, and the magnitude system the SED
+    assumes (review 1.9.1: no AB conversion yet) is the one the tables hold.
+    """
+    # Arrange
+    from exozippy.components.sed.bc_grid import (
+        DEFAULT_MODEL_ROOT,
+        bc_table_filter_columns,
+        find_bc_table,
+        read_bc_meta,
+    )
+    from exozippy.models.NextGen.generate_NextGen_BC_Tables import FILTER_SETS
+
+    for facility, ids in FILTER_SETS.items():
+        # Act
+        path = find_bc_table(DEFAULT_MODEL_ROOT, "NextGen", facility)
+        meta = read_bc_meta(path)
+        expected = {
+            resolve_filter_name(s, alias_df, alias="MIST") for s in ids
+        }
+
+        # Assert
+        assert meta["mag_system"] == "Vega", (facility, meta["mag_system"])
+        assert set(bc_table_filter_columns(path)) == expected, facility
+        assert {m["svo_id"] for m in meta["filters"].values()} == set(ids)
