@@ -201,6 +201,32 @@ pip install -e .
 Re-running `pip install -e .` picks up any new or changed dependencies and
 commands.
 
+## Data
+
+The large model data -- the MISTv2.5 evolutionary grids, the NextGen bolometric-correction
+tables and the NextGen R = 150 spectra -- is not in the package. It lives on Zenodo, in the
+EXOZIPPy community https://zenodo.org/communities/exozippy, and is downloaded and checksum-verified on first use
+(cached under `~/.cache/exozippy`, or `$EXOZIPPY_CACHE_DIR`). To pre-fetch the BC tables for
+offline use, run `exozippy-fetch-bc-tables`.
+
+## Citing EXOZIPPy
+
+Cite the software with its concept DOI,
+[10.5281/zenodo.21630654](https://doi.org/10.5281/zenodo.21630654), which always resolves to
+the latest release; for reproducibility, cite the version DOI of the release you used
+(listed on that page). GitHub's "Cite this repository" button gives the same metadata in
+BibTeX or APA form, from `CITATION.cff`.
+
+Also cite each data record your fit uses (all in the
+[EXOZIPPy Zenodo community](https://zenodo.org/communities/exozippy)):
+
+- SED fits: the NextGen bolometric-correction tables,
+  [10.5281/zenodo.23074951](https://doi.org/10.5281/zenodo.23074951)
+- MIST fits: the MISTv2.5 model grids,
+  [10.5281/zenodo.21893308](https://doi.org/10.5281/zenodo.21893308)
+- SED plots: the NextGen spectra resampled to R = 150,
+  [10.5281/zenodo.20547997](https://doi.org/10.5281/zenodo.20547997)
+
 ## The GUI is experimental
 
 There is an optional browser GUI, installed by the `gui` extra
