@@ -208,6 +208,7 @@ tables and the NextGen R = 150 spectra -- is not in the package. It lives on Zen
 EXOZIPPy community https://zenodo.org/communities/exozippy, and is downloaded and checksum-verified on first use
 (cached under `~/.cache/exozippy`, or `$EXOZIPPY_CACHE_DIR`). To pre-fetch the BC tables for
 offline use, run `exozippy-fetch-bc-tables`.
+Maintainers publishing new data versions: see [docs/zenodo.md](docs/zenodo.md).
 
 ## Citing EXOZIPPy
 
