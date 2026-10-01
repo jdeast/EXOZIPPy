@@ -1629,25 +1629,6 @@ scipy = ">=1.4.0"
 dev = ["coveralls", "dill", "h5py", "ipyparallel", "jupyter", "numpydoc", "pylint", "pytest", "pytest-cov", "pytest-xdist", "sphinx", "sphinx-rtd-theme", "tqdm"]
 
 [[package]]
-name = "emcee"
-version = "3.1.6"
-description = "The Python ensemble sampling toolkit for MCMC"
-optional = false
-python-versions = "*"
-groups = ["microlensing"]
-files = [
-    {file = "emcee-3.1.6-py2.py3-none-any.whl", hash = "sha256:f2d63752023bdccf744461450e512a5b417ae7d28f18e12acd76a33de87580cb"},
-    {file = "emcee-3.1.6.tar.gz", hash = "sha256:11af4daf6ab8f9ca69681e3c29054665db7bbd87fd4eb8e437d2c3a1248c637d"},
-]
-
-[package.dependencies]
-numpy = "*"
-
-[package.extras]
-extras = ["h5py", "scipy"]
-tests = ["coverage[toml]", "pytest", "pytest-cov"]
-
-[[package]]
 name = "execnet"
 version = "2.1.2"
 description = "execnet: rapid multi-Python deployment"
@@ -3579,22 +3560,6 @@ numpy = [
 dev = ["absl-py", "pyink", "pylint (>=2.6.0)", "pytest", "pytest-xdist"]
 
 [[package]]
-name = "mmexofast"
-version = "0.0.0"
-description = ""
-optional = false
-python-versions = "*"
-groups = ["microlensing"]
-files = []
-develop = false
-
-[package.source]
-type = "git"
-url = "https://github.com/jenniferyee/MMEXOFAST.git"
-reference = "HEAD"
-resolved_reference = "83b0d03b322dbc9afbb7b77d94cea31d9694f216"
-
-[[package]]
 name = "more-itertools"
 version = "11.1.0"
 description = "More routines for operating on iterables, beyond itertools"
@@ -4126,7 +4091,7 @@ version = "2.3.5"
 description = "Fundamental package for array computing in Python"
 optional = false
 python-versions = ">=3.11"
-groups = ["main", "dev", "microlensing"]
+groups = ["main", "dev"]
 markers = "sys_platform == \"darwin\" and platform_machine == \"x86_64\""
 files = [
     {file = "numpy-2.3.5-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:de5672f4a7b200c15a4127042170a694d4df43c992948f5e1af57f0174beed10"},
@@ -4211,7 +4176,7 @@ version = "2.4.6"
 description = "Fundamental package for array computing in Python"
 optional = false
 python-versions = ">=3.11"
-groups = ["main", "dev", "microlensing"]
+groups = ["main", "dev"]
 markers = "sys_platform != \"darwin\" or platform_machine != \"x86_64\""
 files = [
     {file = "numpy-2.4.6-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:0280e0356c0829a18d9de1cb7eee50ec22ca639878d7240307ca0943d73cd2c4"},
@@ -6383,22 +6348,6 @@ test = ["build[virtualenv] (>=1.0.3)", "filelock (>=3.4.0)", "ini2toml[lite] (>=
 type = ["importlib_metadata (>=7.0.2) ; python_version < \"3.10\"", "jaraco.develop (>=7.21) ; sys_platform != \"cygwin\"", "mypy (==1.18.*)", "pytest-mypy (>=1.0.1) ; platform_python_implementation != \"PyPy\""]
 
 [[package]]
-name = "sfit_minimizer"
-version = "0.0.0"
-description = ""
-optional = false
-python-versions = "*"
-groups = ["microlensing"]
-files = []
-develop = false
-
-[package.source]
-type = "git"
-url = "https://github.com/jenniferyee/sfit_minimizer.git"
-reference = "HEAD"
-resolved_reference = "60d7d63e209b2fd73ff41958c25aee30eb6628bc"
-
-[[package]]
 name = "six"
 version = "1.17.0"
 description = "Python 2 and 3 compatibility utilities"
@@ -7395,4 +7344,4 @@ gui = ["fastapi", "pyqt6", "pyqt6-webengine", "pywebview", "qtpy", "ruamel-yaml"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.15"
-content-hash = "716100f539ea50dc1abe44b575bb15bd1d5729bc8fca3f15fce3826f5482c1f0"
+content-hash = "b1387bd0988af5a7efb0d062f073ebf74be14e162c297a6751d82e4cf052d17e"

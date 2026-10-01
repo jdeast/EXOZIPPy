@@ -4,36 +4,24 @@ Fits the challenge's 2L1S sample -- 30 of its 44 events, see "The static
 sweep's event list" below -- with the full
 pipeline, one cluster job per event:
 
-1. **MMEXOFAST** runs on both bands (`renormalize_errors=True`,
-   `binary_lens`), cached as `events/<NNN>/DC2018_<NNN>_mmexofast.json`.
-   It always sees both bands even when EXOZIPPy later fits only one: the
-   15-min W149 cadence is what localizes the anomaly. Its solutions seed
-   the fit (multi-seed sampling), its bad-data mask (`excluded_points`)
-   drops the flagged points via the generic instrument `mask:` feature,
-   and its error factors (`errfacs`) seed each instrument's `err_scale`.
-   By default the run stops after the fast binary-parameter ESTIMATION:
-   EXOZIPPy's tempered multi-seed PTDE is itself the polish, and with
-   the renormalization peak-protection fix the raw estimator seeds land
-   in the right basin (on event 128: s = 0.977, rho = 0.0075 vs the
-   polished 0.979/0.0054 -- the once-alarming "rho collapses to ~1e-6"
-   was an artifact of outlier rejection eating the finite-source peak).
-   Pass `--mmx-emcee` (job: `EXTRA="--mmx-emcee"`) to turn MMEXOFAST's
-   hours-long emcee polish back on. (This explicit step is optional in
-   general: a config with no `mmexofast:` key whose params file lacks
-   microlensing start values is seeded by EXOZIPPy's built-in PSPL peak
-   finder, and `mmexofast: true` makes EXOZIPPy run MMEXOFAST itself --
-   MMEXOFAST never runs unless asked for, review 8.6.25.)
+1. **Seeding**: the params file `run_event.py` writes deliberately carries
+   no microlensing start values, so EXOZIPPy's built-in PSPL peak finder
+   seeds `t_0`, `u_0` and `t_E` from the light curves (primary-first: a
+   planetary anomaly does not capture the seed). `s`, `q` and `alpha` keep
+   their defaults.yaml starts -- there is deliberately no binary-lens
+   estimator anywhere; the sampler finds the companion (JDE 2026-09-17).
+   (Until 2026-10-01 this step ran MMEXOFAST on both bands and seeded the
+   fit from its JSON; that hand-off was removed -- see "MMEXOFAST JSONs ->
+   params files" below.)
 2. **EXOZIPPy** samples the 2L1S system (PTDE, EXOFASTv2-parity settings)
    and writes the usual artifacts under `events/<NNN>/fitresults/`.
    Every light curve fits with `likelihood: hogg` -- the marginalized
-   inlier/outlier mixture -- which supersedes MMEXOFAST's hard bad-data
-   mask: `excluded_points` are NOT propagated for hogg files (MMEXOFAST
-   still rejects internally to protect its own anomaly search, and its
-   errfacs still seed `err_scale`), so every point stays in the fit,
-   junk lands in the wide background component instead of dragging the
-   solution, and per-point posterior outlier probabilities are available
-   afterwards via `Instrument.outlier_prob_at_data` -- at the cost of
-   two extra parameters per curve (`out_frac`, `out_scale`).
+   inlier/outlier mixture -- instead of a hard bad-data mask: every point
+   stays in the fit, junk lands in the wide background component instead
+   of dragging the solution, and per-point posterior outlier probabilities
+   are available afterwards via `Instrument.outlier_prob_at_data` -- at the
+   cost of two extra parameters per curve (`out_frac`, `out_scale`). Each
+   curve's `err_scale` is a fitted parameter starting at 1.
 3. **Comparison** against the challenge's answer key
    (`Answers/master_file.txt`, positional lookup, t_0 origin JD 2458234)
    is written to `events/<NNN>/comparison.csv`.
@@ -48,22 +36,7 @@ pipeline, one cluster job per event:
   `event_info.txt`, `Answers/`). Default location is the MMEXOFAST source
   checkout, `~/python/MMEXOFAST/data/2018DataChallenge`; override with
   `--data-dir` or `$DC18_DATA`.
-- The `mmexofast` package in the environment (git-only, so it is not part
-  of a plain install):
-
-      poetry install --with microlensing            # dev machine
-      # or, in the cluster's conda env:
-      pip install git+https://github.com/jenniferyee/MMEXOFAST.git
-      pip install git+https://github.com/jenniferyee/sfit_minimizer.git emcee
-
-  NOTE: the automatic mask/err_scale consumption needs an MMEXOFAST recent
-  enough to write `excluded_points`/`jd_offset` in its exozippy-init JSON
-  (2026-07 or later). Older versions still work -- seeds only, no masking.
-  This workflow also relies on three 2026-07-31 MMEXOFAST performance/
-  correctness patches (fast outlier rejection, emcee pool support, and the
-  renormalize-after-anomaly-search reorder so the outlier rejection cannot
-  eat the planetary anomaly); until they are merged upstream, install
-  MMEXOFAST from the patched checkout.
+- An EXOZIPPy environment (`poetry install`); nothing else.
 
 ## Quick single-event test (local)
 
@@ -123,10 +96,54 @@ C24). Architecture selection -- orbital motion, binary-star lenses, binary
 sources, the challenge's CV and free-floating-planet classes -- is the
 roadmap item after static 2L1S works (`notes/todo.txt`, microlensing).
 
+## MMEXOFAST JSONs -> params files (2026-10-01)
+
+The `mmexofast:` (and `mmexofast_options:`) config key was removed with the
+MMEXOFAST hand-off, and a config that still names it RAISES at load time
+with the migration. `convert_mmexofast_json.py CONFIG.yaml ...` does that
+migration for an existing config and its JSON, reproducing exactly what the
+removed loader did, but as user input:
+
+- `fits` -> per-seed `initval: [...]` lists in the params file (one entry
+  per fit; `t_0` has the JSON's `jd_offset` subtracted; `s` becomes
+  `log_s`); a path the params file already starts is left alone, since a
+  user entry always outranked the seeds;
+- `excluded_points` -> the instrument entry's `mask:` (0-based row
+  indices), skipped for files with a robust `likelihood:` or their own
+  `mask:`, as before;
+- `errfacs` -> `mulensinstrument.<name>.err_scale: {initval: ...}`;
+- more than one fit -> `sampler: {seed_polish: true}` (`auto` polishes a
+  multi-seed set only when a component seeded it, and would read user
+  lists as posterior-draw restarts);
+- fit 0's `sigmas` are dropped: they only seeded the whitening probe, which
+  measures the scales itself.
+
+The `sweep/`, `sweep_v7_avW149/` and `ab194/` configs were converted, with
+start logp bit-identical to the JSON path; their seed JSONs became
+`events/<NNN>/DC2018_<NNN>_seed.params.yaml` fragments, which
+`dc18_seed.py` now writes and `dc18_sweep_config.py` merges into the params
+file it generates. Twelve configs name a `*_mmexofast.json` that exists
+only on the cluster (those caches are gitignored); they still name the key,
+carry a "REMOVED KEY" comment above it, and raise until the converter is run
+there:
+
+    configs/DC2018_128_severed_v3.yaml ... configs/DC2018_128_severed_v7.yaml
+    configs/DC2018_128_tightpriors.yaml
+    events/062/DC2018_062.yaml
+    events/152/DC2018_152.yaml
+    events/152/base/DC2018_152_base.yaml
+    events/152/obs/DC2018_152_obs.yaml
+    events/194/DC2018_194.yaml
+    events/223/DC2018_223.yaml
+
+The 22 pre-v0.1.0 configs (event options on the `lens:` block) under
+`configs/` and `events*/128/` already did not build and were left
+untouched; `configs/README.md` says how to port one.
+
 ## Caveats
 
 - **alpha**: the answer key's alpha convention differs from
-  EXOZIPPy/MMEXOFAST's (center-of-mass origin), and **no global mapping
+  EXOZIPPy's (and MulensModel's; center-of-mass origin), and **no global mapping
   between them exists** -- measured over all 44 events, see
   `ALPHA_IS_UNMAPPABLE` in `dc18_common.py` and claim C22 of
   `src/exozippy/components/mulensing/conventions.md`. The comparison

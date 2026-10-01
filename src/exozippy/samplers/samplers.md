@@ -605,8 +605,7 @@ whose seeds are ALREADY properly dispersed -- joint posterior draws off a
 finished fit, spread across its covariance by construction. So the writer says
 which. `mkparam` writes `overdisperse: false` for a multi-seed restart file (a
 true statement about the seeds' ORIGIN, not a claim that the fit converged) and
-`true` for its default single-seed one; `utilities/mmexofast_to_params` writes
-`true` (its seeds are single optima, one per solution). An **absent** key means
+`true` for its default single-seed one. An **absent** key means
 `true` -- the safe direction for a hand-written file, since over-dispersing a
 good seed set costs some burn-in while under-dispersing a bad one makes Rhat
 read ~1.00 on chains that never mixed. It is a reserved NON-parameter key and

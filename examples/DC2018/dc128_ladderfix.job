@@ -10,16 +10,12 @@
 #
 # DC2018 pipeline job (adapted from examples/DC2018_128/dc128.job).
 #
-# One SGE task = one event: MMEXOFAST init -> EXOZIPPy fit -> truth
-# comparison, all inside run_event.py.
+# One SGE task = one event: EXOZIPPy fit (seeded by the built-in peak
+# finder) -> truth comparison, all inside run_event.py.
 #
 # ---------------- Supercomputer command reference ----------------
 #
-# One-time setup (in the exozippy conda env; needs the patched MMEXOFAST,
-# see examples/DC2018/README.md):
-#   conda activate exozippy
-#   pip install git+https://github.com/jenniferyee/MMEXOFAST.git
-#   pip install git+https://github.com/jenniferyee/sfit_minimizer.git emcee
+# One-time setup: an exozippy conda env (see examples/DC2018/README.md).
 #
 # Test with a single event first:
 #   cd ~/python/EXOZIPPy/examples/DC2018
@@ -30,7 +26,7 @@
 #
 # Watch progress / results per event:
 #   qstat; tail -f dc2018.<jobid>.<taskid>.log
-#   cat events/<NNN>/status.txt          # running mmexofast / running exozippy / ok / failed
+#   cat events/<NNN>/status.txt          # running exozippy / ok / failed
 #   cat events/<NNN>/comparison.csv      # per-event fit vs truth
 #
 # After the jobs finish, collect everything into one table
@@ -39,14 +35,10 @@
 #
 # Optional overrides (qsub -v NAME=value, comma-separated for several):
 #   BANDS=Z087            fit only the sparse Z087 curve (fast; default W149,Z087)
-#   EXTRA="--quick"       any extra run_event.py flags (--quick = smoke test;
-#                         --mmx-emcee = MMEXOFAST's emcee polish, hours --
-#                         off by default, PTDE is the polish)
+#   EXTRA="--quick"       any extra run_event.py flags (--quick = smoke test)
 #   DC18_DATA=...         data tree, if not at $HOME/python/MMEXOFAST/data/2018DataChallenge
 #
-# Re-running a task reuses the cached MMEXOFAST JSON (delete
-# events/<NNN>/DC2018_<NNN>_mmexofast.json to force a fresh init) and
-# resamples by default (add EXTRA="--no-recompute" to only redo reports).
+# Re-running a task resamples by default (add EXTRA="--no-recompute" to only redo reports).
 # ------------------------------------------------------------------
 #
 # run_event.py reads $NSLOTS for the sampler's core count, so it always
@@ -60,9 +52,7 @@ module load tools/python/3.13
 
 export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
 
-# Source conda and activate the exozippy environment (needs mmexofast:
-#   pip install git+https://github.com/jenniferyee/MMEXOFAST.git
-#   pip install git+https://github.com/jenniferyee/sfit_minimizer.git emcee)
+# Source conda and activate the exozippy environment.
 source $HOME/miniconda3/etc/profile.d/conda.sh
 conda activate exozippy
 
