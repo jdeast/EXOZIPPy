@@ -1,18 +1,22 @@
-"""Our own microlensing seed finder: a PSPL peak fit, no MMEXOFAST.
+"""Our own microlensing seed finder: a PSPL peak fit, as params-file starts.
 
-WHY THIS EXISTS.  Review 8.4.9 established that EXOZIPPy HAS NO PEAK
-FINDER -- searched the tree, every branch and the full history.
-`push_seed_hints` is the only source of t_0/u_0/t_E hints, and it reads
-MMEXOFAST's JSON, so `mmexofast: false` leaves DC2018-128 starting 1,445
-days from its own peak.  That makes MMEXOFAST a hard dependency of every
-microlensing fit, which is exactly what JDE asked to remove: "seeded with
-our own peak finder and generic (defaults.yaml) values for logs and logq".
+WHY THIS EXISTS.  Review 8.4.9 established that EXOZIPPy HAD NO PEAK
+FINDER: the only source of t_0/u_0/t_E start values was an MMEXOFAST JSON,
+so without one DC2018-128 started 1,445 days from its own peak.  JDE asked
+for "our own peak finder and generic (defaults.yaml) values for logs and
+logq", and this was the sweep's.  The component now carries the same
+search (``peakfind.find_pspl_seed``) and runs it by default whenever a
+params file gives no trajectory start, so a bare `exozippy` run is seeded
+the same way.
 
-WHY IT LIVES HERE.  The seed file is just DATA: mmexofast_support.py
-documents the JSON contract (`fits` list of `parameters` dicts, plus
-`errfacs`, `mag_methods`, `coords`, `excluded_points`), and nothing checks
-who wrote it.  So this emits that same shape and the fit consumes it
-unchanged, and the sweep does not depend on MMEXOFAST.
+WHAT IT WRITES.  A params-file FRAGMENT, ``events/<NNN>/DC2018_<NNN>_seed.
+params.yaml``, that ``dc18_sweep_config.py`` merges into each generated
+params file: per-seed ``initval:`` lists, one entry per seed.  Until
+2026-10-01 it wrote the same numbers in MMEXOFAST's JSON shape for the
+config's ``mmexofast:`` key; that key is gone (JDE 2026-10-01: "that
+should be refactored to use the param file input"), and the fragment is
+exactly what ``convert_mmexofast_json.py`` produced from those JSONs, so
+every committed sweep config starts where it did.
 
 THE METHOD IS THE COMPONENT'S.  This script used to carry its own copy of
 the PSPL grid + Nelder-Mead fit, written before 8.4.9 had landed in src/.
@@ -24,24 +28,22 @@ not the event; see the peakfind module docstring, review 2.4.14) reaches
 the sweep without a second implementation.  PSPL flux is LINEAR in
 (f_source, f_blend) once the magnification is known, so the search is
 3-dimensional and takes seconds on 38,000 points; s, q and alpha are left
-at defaults.yaml's generic values (log_s = 0, i.e. s = 1) and the sampler
-is asked to find the planet itself.
+at generic values (log_s = 0, i.e. s = 1) and the sampler is asked to find
+the planet itself.
 
-WHAT IT DELIBERATELY DOES NOT DO.  It does not mask outliers
-(`excluded_points` is emitted empty), because the sweep runs the Hogg
-mixture likelihood on every light curve and a hard mask would double-count
-that job.  It does not rescale errors (`errfacs` = 1.0) for the same
-reason: err_scale is a fitted parameter.  Both keys are still written, so
-the consumer sees the shape it expects rather than a missing key.
+WHAT IT DELIBERATELY DOES NOT DO.  It does not mask outliers, because the
+sweep runs the Hogg mixture likelihood on every light curve and a hard mask
+would double-count that job.  It does not rescale errors: each
+instrument's err_scale starts at 1.0 and is a fitted parameter.
 """
 
 import argparse
 import io
-import json
 import os
 import sys
 
 import numpy as np
+import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dc18_common as C  # noqa: E402
@@ -92,6 +94,39 @@ GENERIC = [
 ]
 
 
+def seed_params(t_0, u_0, t_E, instruments, generic=GENERIC):
+    """The params-file entries for one event's seeds: one per-seed list per
+    parameter (one entry per GENERIC companion), and err_scale = 1.0 on
+    every instrument.  Paths are the sweep config's spellings."""
+    n = len(generic)
+    out = {
+        "source.Source.t_0": {"initval": [float(t_0)] * n},
+        "source.Source.u_0": {"initval": [float(u_0)] * n},
+        "mulensevent.0.t_E": {"initval": [float(t_E)] * n},
+        "source.Source.rho": {"initval": [float(g["rho"]) for g in generic]},
+        "lens.Companion.log_s": {
+            "initval": [float(np.log10(g["s"])) for g in generic]
+        },
+        "lens.Companion.alpha": {
+            "initval": [float(g["alpha"]) for g in generic]
+        },
+        "lens.Companion.q": {"initval": [float(g["q"]) for g in generic]},
+    }
+    for inst in instruments:
+        out["mulensinstrument.%s.err_scale" % inst] = {"initval": 1.0}
+    return out
+
+
+def write_seed_params(dest, params, header):
+    """Write the fragment: `header` lines as comments, then the entries."""
+    os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+    with io.open(dest, "w", encoding="utf-8") as fh:
+        for line in header:
+            fh.write(("# " + line).rstrip() + "\n")
+        fh.write("\n")
+        yaml.safe_dump(params, fh, sort_keys=False, default_flow_style=None)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("event", type=int)
@@ -116,45 +151,24 @@ def main():
     seed = find_seed(curves)
     t_0, u_0, t_E = seed["t_0"], seed["u_0"], seed["t_E"]
 
-    ra, dec = C.event_coords(d, args.event)
-    fits = [
-        {"parameters": dict(t_0=t_0, u_0=u_0, t_E=t_E, **g)} for g in GENERIC
+    params = seed_params(t_0, u_0, t_E, ["Roman_%s" % b for b in bands])
+    an = seed.get("anomaly")
+    header = [
+        "Seeds for DC2018 event %03d, written by examples/DC2018/dc18_seed.py"
+        % args.event,
+        "(peakfind.find_pspl_seed, chi2 = %.1f).  s/q/alpha/rho are generic"
+        % seed["chi2"],
+        "starts, NOT fitted.  dc18_sweep_config.py merges these into the",
+        "params file it writes.",
     ]
-
-    # mag_methods is the finite-source window: [t_start, method, t_end].
-    # +/- 2 t_E around the peak covers the caustic crossings for any s the
-    # sampler can reach, clipped to the data so the window is never empty;
-    # a masked anomaly is a caustic feature by construction, so its window
-    # is included too (226's sits at +3.8 t_E).  Only the mulensmodel
-    # backend reads this list; the default vbm_direct always runs the
-    # binary-lens solver.
-    lo = max(seed["t_span"][0], t_0 - 2.0 * t_E)
-    hi = min(seed["t_span"][1], t_0 + 2.0 * t_E)
-    if seed.get("anomaly"):
-        lo = min(lo, seed["anomaly"]["window"][0])
-        hi = max(hi, seed["anomaly"]["window"][1])
-
-    out = {
-        "fits": fits,
-        "errfacs": {n: 1.0 for n in names},
-        "mag_methods": [lo, "VBBL", hi],
-        "coords": "%.6f %.6f" % (ra, dec),
-        "jd_offset": 0.0,
-        "excluded_points": {
-            n: {"n_data": int(len(c[0])), "indices": [], "times": []}
-            for n, c in zip(names, curves)
-        },
-        "_provenance": {
-            "writer": "examples/DC2018/dc18_seed.py (peakfind.find_pspl_seed, no MMEXOFAST)",
-            "pspl_chi2": seed["chi2"],
-            "anomaly": seed.get("anomaly"),
-            "note": "s/q/alpha are defaults.yaml generics, NOT fitted.",
-        },
-    }
+    if an:
+        header.append(
+            "Anomaly masked for the primary search: t_0 = %.4f, FWHM %.2f d."
+            % (an["t_0"], an["fwhm"])
+        )
     ev3 = "%03d" % args.event
-    dest = args.out or "events/%s/DC2018_%s_seed.json" % (ev3, ev3)
-    os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
-    json.dump(out, io.open(dest, "w", encoding="utf-8"), indent=1)
+    dest = args.out or "events/%s/DC2018_%s_seed.params.yaml" % (ev3, ev3)
+    write_seed_params(dest, params, header)
     print("wrote %s" % dest, flush=True)
 
 

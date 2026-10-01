@@ -163,8 +163,6 @@ def main():
     with open(EVENT_DIR / "DC2018_128.yaml") as f:
         config = yaml.safe_load(f)
     config.pop("parameter_file", None)
-    for blk in config.get("lens", []):
-        blk["mmexofast"] = False
     config["sampler"]["recompute_trace"] = False
     os.chdir(tempfile.mkdtemp(prefix="dc128prior_"))
 

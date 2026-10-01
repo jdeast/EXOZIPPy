@@ -120,8 +120,6 @@ def main():
     with open(EVENT_DIR / "DC2018_128.yaml") as f:
         config = yaml.safe_load(f)
     config.pop("parameter_file", None)
-    for blk in config.get("lens", []):
-        blk["mmexofast"] = False  # pin truth, do not let seeds win
     config["sampler"]["recompute_trace"] = False
 
     # Every path in the dumped config is absolute, so run from scratch space

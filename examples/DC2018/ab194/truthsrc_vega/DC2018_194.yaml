@@ -10,7 +10,6 @@ mulensevent:
   fitmurel: true
   fitpirel: true
   fitthetae: true
-  mmexofast: false
   peak_find: false
 lens:
 - body: star.Lens

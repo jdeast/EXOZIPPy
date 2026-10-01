@@ -8,6 +8,11 @@ planet:
 - name: Companion
 mulensevent:
 - finite_source: false
+  # REMOVED KEY (2026-10-01): this config raises until converted.  The
+  # JSON below exists only where the fit ran (the *_mmexofast.json
+  # caches are gitignored); run examples/DC2018/convert_mmexofast_json.py
+  # on this config there to move its seeds, mask and err_scale starts
+  # into the params file and delete this key.
   mmexofast: /home/jeastman/python/EXOZIPPy/examples/DC2018/events/062/DC2018_062_mmexofast.json
 lens:
 - body: star.Lens

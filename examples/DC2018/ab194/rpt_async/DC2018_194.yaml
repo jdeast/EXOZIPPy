@@ -27,7 +27,6 @@ mulensevent:
   fitmurel: true
   fitpirel: true
   fitthetae: true
-  mmexofast: /home/jeastman/python/EXOZIPPy/examples/DC2018/events/194/DC2018_194_seed.json
 mulensinstrument:
 - band: W149
   data_format: flux
@@ -58,6 +57,7 @@ sampler:
   recompute_trace: true
   store_hot_chains: true
   tune: 5000
+  seed_polish: true
 sed:
   file: /home/jeastman/python/EXOZIPPy/examples/DC2018/ab194/rpt_async/DC2018_194.sed.yaml
 source:

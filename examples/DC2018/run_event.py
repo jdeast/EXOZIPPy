@@ -4,30 +4,25 @@
     poetry run python run_event.py 128 [options]
 
 Pipeline (one process, suitable for one cluster job):
-  1. MMEXOFAST runs on BOTH bands (renormalize_errors on, binary_lens) --
-     always both, even when exozippy later fits only one: the 15-min W149
-     cadence is what localizes the anomaly; the sparse Z087 curve alone
-     sends the binary grid search off a cliff (q -> 0). The exozippy-init
-     JSON is cached at <event_dir>/<name>_mmexofast.json (delete to
-     re-run).
-  2. EXOZIPPy fits the selected bands, seeded by that JSON via the lens
-     block's `mmexofast:` key: its solutions seed the fit (multi-seed),
-     its bad-data mask (excluded_points) drops the flagged points, and its
-     error factors seed err_scale. Sampling is PTDE by default; artifacts
-     land under <out-dir>/<NNN>/fitresults/. (Configs that skip step 1
-     still work: when a params file has no microlensing start values,
-     EXOZIPPy's data-driven-hints layer runs MMEXOFAST itself -- this
-     driver prefers the explicit two-step so the MMEXOFAST fit always
-     sees both bands.)
-  3. The posterior is compared against the challenge truth
+  1. EXOZIPPy fits the selected bands.  The params file this driver writes
+     deliberately carries NO microlensing start values, so the built-in
+     PSPL peak finder seeds t_0/u_0/t_E from the light curves and s, q and
+     alpha keep their defaults.yaml starts: no binary-lens estimator runs
+     anywhere, the sampler finds the companion (JDE 2026-09-17).  Sampling
+     is PTDE by default; artifacts land under <out-dir>/<NNN>/fitresults/.
+     (Until 2026-10-01 a step before this ran MMEXOFAST on both bands and
+     seeded the fit from its JSON; that hand-off was removed from
+     EXOZIPPy.  convert_mmexofast_json.py moves an existing JSON's seeds,
+     mask and error factors into a config's own files.)
+  2. The posterior is compared against the challenge truth
      (comparison.csv + stdout table).
 
 The generated config and params are also dumped to YAML in the event
 directory, so any event can be re-run or debugged with the plain CLI:
     cd <out-dir>/<NNN> && exozippy DC2018_<NNN>.yaml
 
-Everything is idempotent per event directory: the MMEXOFAST JSON is a
-cache, and --recompute controls whether an existing trace is resampled.
+Everything is idempotent per event directory: --recompute controls
+whether an existing trace is resampled.
 """
 
 import argparse
@@ -42,73 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dc18_common as dc
 
 
-def run_mmexofast_step(
-    data_dir, event, name, event_dir, cores=None, quick=False, emcee=False
-):
-    """Step 1: MMEXOFAST on both bands; returns the cached JSON path.
-
-    ``cores`` caps the emcee pool for the binary-lens fits -- the dominant
-    cost of the MMEXOFAST stage on DC18 cadence (40 walkers x 1000 steps x
-    a 39k-epoch binary-lens chi2 per evaluation is hours serial). On the
-    cluster this is the job's slot grant ($NSLOTS); locally it defaults to
-    a quarter of the machine.
-    """
-    import multiprocessing as mp
-
-    from astropy.coordinates import SkyCoord
-
-    from exozippy.components.mulensing import mmexofast_support
-
-    files = dc.light_curve_files(data_dir, event, ("W149", "Z087"))
-    ra, dec = dc.event_coords(data_dir, event)
-    coords = SkyCoord(ra, dec, unit="deg").to_string(style="hmsdms")
-    json_path = Path(event_dir) / f"{name}_mmexofast.json"
-    pool = int(cores) if cores else max(2, mp.cpu_count() // 4)
-    # Zero limb darkening matches MMEXOFAST's own DC18 example.
-    options = {
-        "limb_darkening_coeffs_gamma": {"W149": 0.0, "Z087": 0.0},
-        "pool": pool,
-    }
-    if not emcee:
-        # Default: stop after the binary-parameter ESTIMATION. The emcee
-        # polish (fit_binary_lens_models) costs hours on DC18 cadence -- 40
-        # walkers x 1000 steps x a 39k-epoch binary chi2, straggler-bound at
-        # the ensemble barrier -- and EXOZIPPy's tempered multi-seed PTDE is
-        # itself the polish: the seeds only have to land in the right basin.
-        # They do, now that renormalization no longer eats the peak: the
-        # once-alarming "estimator gives rho ~ 1e-6 where the polished fit
-        # gives 0.0054" was an artifact of the outlier-rejection bug clipping
-        # the finite-source peak (fixed in MMEXOFAST PR#7); on the fixed code
-        # the raw estimator's primary solution for event 128 is s = 0.977,
-        # rho = 0.0075, q = 9.4e-4 vs the polished 0.979/0.0054/1.1e-3, with
-        # the alternate-basin s = 0.86 solution second in the multi-seed
-        # list. initialize_exozippy() falls back to the estimator's raw
-        # solutions (parameters only, no sigmas -- EXOZIPPy skips the
-        # optional scale hints). Masks and error factors still come out: the
-        # renormalize stage runs before this cut.
-        options["stop_before"] = "fit_binary_lens:fit_binary_lens_models"
-    elif quick:
-        # Smoke-test emcee: upstream defaults are 40 x 1000 + 500 burn.
-        # NOTE: emcee's stretch move evaluates half the ensemble per batch,
-        # so parallelism beyond n_walkers/2 processes buys nothing.
-        options["emcee_settings"] = {
-            "n_walkers": 40,
-            "n_burn": 100,
-            "n_steps": 200,
-        }
-    mmexofast_support.run_or_load(
-        json_path,
-        list(files.values()),
-        coords=coords,
-        fit_type="binary_lens",
-        renormalize_errors=True,
-        no_parallax=True,
-        options=options,
-    )
-    return json_path
-
-
-def build_config(name, files, prefix, mmx_json, args):
+def build_config(name, files, prefix, args):
     bands = list(files)
     config = {
         "run": {"name": name},
@@ -117,15 +46,7 @@ def build_config(name, files, prefix, mmx_json, args):
         "planet": [{"name": "Companion"}],
         # Event-level keys live on the event; the lens is one entry per
         # lens BODY (primary first) and the source one per source body.
-        "mulensevent": [
-            {
-                "finite_source": bool(args.finite_source),
-                # Explicit step-1 output: seeds (stage 3, MulensEvent)
-                # + bad-data mask and error factors (stage 1,
-                # MulensInstrument).
-                "mmexofast": str(mmx_json),
-            }
-        ],
+        "mulensevent": [{"finite_source": bool(args.finite_source)}],
         "lens": [{"body": "star.Lens"}, {"body": "planet.Companion"}],
         "source": [{"body": "star.Source"}],
         "galacticmodel": [{"name": name, "anchor_idx": 1}],
@@ -144,9 +65,8 @@ def build_config(name, files, prefix, mmx_json, args):
                 "data_format": "flux",
                 "observer_location": "roman_simulated_2018dc",
                 "band": b,
-                # Hogg inlier/outlier mixture on every light curve. This
-                # supersedes MMEXOFAST's hard mask (excluded_points are not
-                # propagated for hogg files): junk lands in the wide
+                # Hogg inlier/outlier mixture on every light curve, in
+                # place of a hard bad-data mask: junk lands in the wide
                 # background component instead of dragging the fit, and the
                 # per-point outlier probabilities are auditable afterwards
                 # (Instrument.outlier_prob_at_data).
@@ -220,8 +140,8 @@ def build_user_params(ra, dec, fix_u1=False, bands_for_u1=()):
     Coordinates come from event_info.txt. The Lens's radius/teff/feh fixes
     are the same 'not constrainable without SED data' hack the DC2018_128
     example documents; the microlensing start values are deliberately
-    ABSENT so the seeds of the `mmexofast:` JSON this driver names take
-    effect (a user entry would outrank them). The Source star
+    ABSENT so the built-in peak finder seeds them from the light curves (a
+    user entry would outrank it). The Source star
     needs none of this: star.py pins its mass/teff/feh/radius/ra/dec
     automatically for any star that is purely a microlensing source (never
     also a lens body), falling back to the Lens's coordinates here.
@@ -237,8 +157,8 @@ def build_user_params(ra, dec, fix_u1=False, bands_for_u1=()):
     if fix_u1:
         # The DC2018 light curves were simulated with gamma = 0 -- NO limb
         # darkening -- in all 44 events (the master file's `gamma` column,
-        # and why run_mmexofast_step passes
-        # limb_darkening_coeffs_gamma = 0 to MMEXOFAST).  band.u1 is the
+        # and why the pre-2026-10 seeding step ran its fitter with
+        # gamma = 0).  band.u1 is the
         # linear u (op.py applies it via set_limb_coeff_u; gamma = 2u/(3-u),
         # so gamma = 0 <=> u = 0 exactly).
         #
@@ -276,8 +196,8 @@ def build_parser():
     ap.add_argument(
         "--data-dir",
         default=None,
-        help="2018DataChallenge tree (default $DC18_DATA or the MMEXOFAST "
-        "source checkout)",
+        help="2018DataChallenge tree (default $DC18_DATA or "
+        "~/python/MMEXOFAST/data/2018DataChallenge)",
     )
     ap.add_argument(
         "--out-dir",
@@ -378,17 +298,6 @@ def build_parser():
         action="store_true",
         help="Skip the fit; just rebuild comparison.csv from existing output",
     )
-    ap.add_argument(
-        "--mmx-emcee",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Run MMEXOFAST's emcee binary-lens polish (default: off -- "
-        "EXOZIPPy's tempered multi-seed PTDE is the polish, and with "
-        "the peak-protection fix the raw estimator seeds land in the "
-        "right basin; the old rho-collapse was a renormalization "
-        "clipping artifact). --mmx-emcee turns the hours-long polish "
-        "back on",
-    )
     return ap
 
 
@@ -416,28 +325,7 @@ def main(argv=None):
 
     status_file = event_dir / "status.txt"
 
-    # Step 1: MMEXOFAST on both bands (cached).
-    if not args.compare_only:
-        status_file.write_text("running mmexofast\n")
-        try:
-            mmx_json = run_mmexofast_step(
-                data_dir,
-                args.event,
-                name,
-                event_dir,
-                cores=args.cores,
-                quick=args.quick,
-                emcee=args.mmx_emcee,
-            )
-        except BaseException:
-            status_file.write_text(
-                "failed (mmexofast)\n" + traceback.format_exc()
-            )
-            raise
-    else:
-        mmx_json = event_dir / f"{name}_mmexofast.json"
-
-    config = build_config(name, files, prefix, mmx_json, args)
+    config = build_config(name, files, prefix, args)
     user_params = build_user_params(
         ra, dec, fix_u1=args.fix_u1, bands_for_u1=bands
     )
@@ -471,7 +359,7 @@ def main(argv=None):
         args.event,
         data_dir,
         results_csv,
-        mmx_json=mmx_json if Path(mmx_json).exists() else None,
+        mmx_json=None,
         out_csv=event_dir / "comparison.csv",
     )
     print()

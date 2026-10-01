@@ -138,7 +138,6 @@ def main():
         "DC2018_%s" % ev,
         files,
         prefix,
-        base / ("DC2018_%s_mmexofast.json" % ev),
         a,
     )
     # SEED AT TRUTH.  Post-#246 homes: the track is per-source, the geometry
@@ -157,7 +156,6 @@ def main():
             "lens.Companion.q": {"initval": float(truth["q"])},
         }
     )
-    cfg2["mulensevent"][0]["mmexofast"] = False  # truth IS the seed here
 
     r2 = fit(cfg2, params, "2L1S seeded at truth", args.draws, args.tune)
     rp = fit(pspl_from(cfg2), params, "PSPL", args.draws, args.tune)

@@ -69,7 +69,6 @@ def make_mulens(rng, snr, n_epochs, workdir):
                 "finite_source": False,
                 "t0_par": float(round(t0, 1)),
                 "use_op": False,
-                "mmexofast": False,
             }
         ],
         "lens": [{"body": "star.Lens"}],

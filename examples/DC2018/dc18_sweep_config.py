@@ -24,10 +24,12 @@ WHAT DELIBERATELY IS NOT CARRIED OVER FROM v7:
     polished start) landed for exactly this kind of case, so this run also
     tests it.  IF THE SWEEP FAILS ON 128, WHERE v7 SUCCEEDED, THE START IS
     THE FIRST SUSPECT.
-  * MMEXOFAST.  `mmexofast:` points at dc18_seed.py's output instead --
-    same JSON contract, a PSPL peak fit rather than a binary-lens search,
-    and s/q/alpha left at defaults.yaml generics so the sampler has to find
-    the planet on its own.
+  * MMEXOFAST.  The seeds are dc18_seed.py's params fragment instead
+    (events/<NNN>/DC2018_<NNN>_seed.params.yaml, merged into the params
+    file below) -- a PSPL peak fit rather than a binary-lens search, and
+    s/q/alpha left at generic starts so the sampler has to find the
+    planet on its own.  (The fragment replaced a seed JSON read through
+    the `mmexofast:` key, removed 2026-10-01; same numbers.)
   * The solar pins run_event.py still writes (`star.Lens.teff: sigma: 0`
     and friends).  2.9.10 showed those force the lens mass through the SED
     floor potentials; v5 removed them and the lens mass went from 1.98x
@@ -315,7 +317,7 @@ def build(event, outdir, draws, tune, cores, t_max):
         if not os.path.exists(p):
             raise SystemExit("missing light curve: %s" % p)
 
-    seed = os.path.abspath("events/%s/%s_seed.json" % (ev3, name))
+    seed = os.path.abspath("events/%s/%s_seed.params.yaml" % (ev3, name))
     if not os.path.exists(seed):
         raise SystemExit(
             "no seed for %s -- run: python dc18_seed.py %s" % (ev3, int(event))
@@ -345,7 +347,6 @@ def build(event, outdir, draws, tune, cores, t_max):
                 "fitmurel": True,
                 "fitpirel": True,
                 "fitthetae": True,
-                "mmexofast": seed,
             }
         ],
         "lens": [{"body": "star.Lens"}, {"body": "planet.Companion"}],
@@ -445,6 +446,10 @@ def build(event, outdir, draws, tune, cores, t_max):
             # for.  Explicit rather than "auto" so the sweep does not
             # silently lose mode discovery on an event where auto declines.
             "store_hot_chains": True,
+            # The seeds are SOLUTION ESTIMATES (dc18_seed.py), given as
+            # per-seed user lists: `seed_polish: auto` reads a multi-seed
+            # user set as posterior-draw restarts and would not polish it.
+            "seed_polish": True,
         },
         "modes": {"weights": "evidence"},
         "parameter_file": os.path.join(base, "%s.params.yaml" % name),
@@ -571,6 +576,13 @@ def build(event, outdir, draws, tune, cores, t_max):
         # the wall where the near-bound warning names the real remedy.
         params["%s.err_scale" % inst] = {"lower": 0.5, "upper": 2.0}
 
+    # The seeds: per-seed initval lists from dc18_seed.py, merged into the
+    # entries above (t_0/u_0 carry bounds there, err_scale too).
+    with io.open(seed, encoding="utf-8") as fh:
+        seeds = yaml.safe_load(fh)
+    for key, entry in seeds.items():
+        params.setdefault(key, {}).update(entry)
+
     io.open(cfg["parameter_file"], "w", encoding="utf-8").write(
         yaml.safe_dump(params, sort_keys=True, default_flow_style=False)
     )
@@ -579,7 +591,14 @@ def build(event, outdir, draws, tune, cores, t_max):
         yaml.safe_dump(cfg, sort_keys=False, default_flow_style=False)
     )
 
-    s = json.load(io.open(seed))["fits"][0]["parameters"]
+    s = {
+        k: seeds[path]["initval"][0]
+        for k, path in (
+            ("t_0", "source.Source.t_0"),
+            ("u_0", "source.Source.u_0"),
+            ("t_E", "mulensevent.0.t_E"),
+        )
+    }
     print(
         "%s  ra=%.4f dec=%.4f  av=%.2f+/-%.2f (grey %+.2f)  "
         "seed t_0=%.3f u_0=%.4f "

@@ -91,10 +91,6 @@ def _build(example_dir, name):
             with open(pf) as fh:
                 params = yaml.safe_load(fh) or {}
         cfg["parameter_file"] = None
-        # Never launch MMEXOFAST from a report: it wants a fitresults/ dir
-        # and this is asking about the SEEDS, not running a fit.
-        for e in cfg.get("mulensevent", []) or []:
-            e["mmexofast"] = False
 
         system = System(cfg, params)
         system.prepare()
