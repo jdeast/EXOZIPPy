@@ -42,7 +42,9 @@ repos:
 
 -   repo: local
     hooks:
-    # The full suite runs on PUSH, not on commit. It takes ~3 minutes locally
+    # A test suite runs on PUSH, not on commit -- since 2026-10-01 the FAST tier
+    # (-m "not slow"; CI runs everything and is the merge gate, see
+    # docs/testing.md "The pre-push tier"). It takes ~3 minutes locally
     # (~15 on CI), which is tolerable once per push but not once per commit --
     # paying it per commit is what discourages small commits and tempts people
     # into --no-verify, which skips the check entirely.
@@ -71,7 +73,7 @@ repos:
     # and in docs/testing.md; the property is pinned by
     # tests/test_pre_push_hook.py.
     -   id: pytest
-        name: Run pytest (full suite)
+        name: Run pytest (fast tier; EXOZIPPY_PREPUSH_FULL=1 for all)
         entry: scripts/pre_push_suite.sh
         language: system
         pass_filenames: false

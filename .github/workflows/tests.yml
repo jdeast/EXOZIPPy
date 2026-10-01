@@ -599,14 +599,42 @@ jobs:
           # at 10.68 GB of its 10 GB budget, almost all of it venvs for locks
           # that no longer exist (every lock change leaves a full set). Done by
           # ONE job only (ubuntu 3.12 shard 1) so the matrix does not race.
+          #
+          # WHAT IS STALE, exactly (checked against the cache listing
+          # 2026-10-01): setup-python restores a venv only on an EXACT key
+          # match, so (a) an entry for any OTHER lock hash can never be
+          # restored again, and (b) an entry created by a pull request's runs
+          # (ref refs/pull/N/merge) is only ever readable by that PR, so once
+          # the PR is closed it is dead too.  Everything else is kept -- the
+          # current-lock master entries, and the entries of OPEN PRs (their
+          # reruns would otherwise rebuild).  Deleted by id with the ref in
+          # hand, because two entries can share a key across refs.
           if [ "$SWEEP_VENVS" = "true" ]; then
-            gh cache list --key "setup-python-" --limit 100 --json key \
-              --jq '.[].key' | while read -r key; do
+            open_prs=" $(gh pr list --state open --limit 200 --json number \
+              --jq '[.[].number] | map(tostring) | join(" ")') "
+            gh cache list --key "setup-python-" --limit 100 \
+              --json id,key,ref --jq '.[] | "\(.id) \(.ref) \(.key)"' |
+            while read -r id ref key; do
+              [ -z "$id" ] && continue
+              stale=""
               case "$key" in
                 *"-$LOCK_HASH") ;;
-                "") ;;
-                *) echo "deleting stale venv cache: $key"; gh cache delete "$key" || true ;;
+                *) stale="lock hash is not the current poetry.lock" ;;
               esac
+              if [ -z "$stale" ]; then
+                case "$ref" in
+                  refs/pull/*/merge)
+                    n=${ref#refs/pull/}; n=${n%/merge}
+                    case "$open_prs" in
+                      *" $n "*) ;;
+                      *) stale="created by PR #$n, which is closed" ;;
+                    esac ;;
+                esac
+              fi
+              if [ -n "$stale" ]; then
+                echo "deleting venv cache $id ($ref): $stale -- $key"
+                gh cache delete "$id" || true
+              fi
             done
           fi
 
