@@ -42,9 +42,12 @@ band:
     ld_law: "linear"
 
 # SED block: even with no catalog photometry (see the .sed file), this
-# activates the source flux constraint -- each light curve's calibrated
-# baseline f_source is tied to the SED-predicted source I mag through a
-# per-lightcurve zeropoint (default prior 0 +/- 0.2 mag).
+# provides the source flux hook -- a light curve's calibrated baseline
+# f_source is tied to the SED-predicted source I mag through a
+# per-lightcurve zeropoint, but ONLY when the params file states that
+# zeropoint's prior (mu and sigma; review 2.2.21 removed the 0 +/- 0.2 mag
+# default).  As shipped no zeropoint is stated, so the source is not tied
+# and each zeropoint is only reported.
 sed:
   file: "KMT-2019-BLG-1806.sed.yaml"
 

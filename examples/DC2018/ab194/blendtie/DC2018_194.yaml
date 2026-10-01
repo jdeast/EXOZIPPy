@@ -36,6 +36,7 @@ mulensinstrument:
   data_format: flux
   observer_location: roman_simulated_2018dc
   band: W149
+  magsys: Vega  # this arm's zeropoint mu is already hand-converted to Vega (#313)
   likelihood: hogg
   sed_constrains_blend: true
 - name: Roman_Z087
@@ -43,6 +44,7 @@ mulensinstrument:
   data_format: flux
   observer_location: roman_simulated_2018dc
   band: Z087
+  magsys: Vega  # this arm's zeropoint mu is already hand-converted to Vega (#313)
   likelihood: hogg
   sed_constrains_blend: true
 prefix: /home/jeastman/python/EXOZIPPy/examples/DC2018/ab194/blendtie/DC2018_194

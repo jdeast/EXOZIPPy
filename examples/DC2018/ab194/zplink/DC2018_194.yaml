@@ -36,12 +36,14 @@ mulensinstrument:
   data_format: flux
   observer_location: roman_simulated_2018dc
   band: W149
+  magsys: Vega  # this arm's zeropoint mu is already hand-converted to Vega (#313)
   likelihood: hogg
 - name: Roman_Z087
   file: /home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.Z087.WFIRST18.194.txt
   data_format: flux
   observer_location: roman_simulated_2018dc
   band: Z087
+  magsys: Vega  # this arm's zeropoint mu is already hand-converted to Vega (#313)
   likelihood: hogg
 prefix: /home/jeastman/python/EXOZIPPy/examples/DC2018/ab194/zplink/DC2018_194
 sed:
