@@ -58,10 +58,10 @@ mulensevent:
     # pi_E and orbital-velocity parameters are quoted in.
     t0_par: 2454917.52
     # Every trajectory parameter is seeded from the published solution, so
-    # the relaxation engine can derive all of them and MMEXOFAST is not
-    # needed.  It is also not WANTED: phot.dat is survey-only photometry
-    # (see README) and the binary anomaly is under-sampled in it.
-    mmexofast: false
+    # the relaxation engine can derive all of them and the peak finder does
+    # not run.  A light-curve seed is not WANTED anyway: phot.dat is
+    # survey-only photometry (see README) and the binary anomaly is
+    # under-sampled in it.
 
 orbit:
   - name: "L"
