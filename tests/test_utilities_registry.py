@@ -269,7 +269,13 @@ def test_run_utility_unknown_name_raises(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "script", ["getdata.py", "mkticsed.py", "mmexofast_to_params.py"]
+    "script",
+    [
+        "getdata.py",
+        "mkticsed.py",
+        "mmexofast_to_params.py",
+        "exofast2exozippy.py",
+    ],
 )
 def test_script_wrapper_responds_to_help(script):
     """
@@ -288,3 +294,24 @@ def test_script_wrapper_responds_to_help(script):
     # Assert
     assert proc.returncode == 0, proc.stderr
     assert "usage" in (proc.stdout + proc.stderr).lower()
+
+
+def test_every_console_script_resolves_to_a_callable():
+    """
+    Given the [project.scripts] table in pyproject.toml,
+    When each "module:function" target is imported,
+    Then it names a callable -- so an installed command such as
+    exozippy-mkticsed cannot point at a module that moved.
+    """
+    # Arrange
+    import importlib
+    import tomllib
+
+    with open(REPO_ROOT / "pyproject.toml", "rb") as f:
+        scripts = tomllib.load(f)["project"]["scripts"]
+
+    # Act / Assert
+    for command, target in scripts.items():
+        module_name, func_name = target.split(":")
+        func = getattr(importlib.import_module(module_name), func_name)
+        assert callable(func), f"{command} -> {target} is not callable"

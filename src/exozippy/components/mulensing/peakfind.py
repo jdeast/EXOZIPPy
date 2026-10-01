@@ -58,6 +58,8 @@ import logging
 import numpy as np
 from scipy.optimize import minimize
 
+from exozippy.config import user_entry
+
 logger = logging.getLogger(__name__)
 
 # Trial values for the coarse grid.  u_0 spans the high-magnification regime
@@ -516,7 +518,7 @@ T_0_PATH = "source.0.t_0"
 
 
 def t_0_is_already_available(config_manager):
-    """True when t_0 is named outright or derivable from what is.
+    """True when t_0 is named outright, already seeded, or derivable.
 
     WHY THIS AND NOT `user_hints_sufficient`, which is the obvious choice
     and was the first one used here.  That function asks whether EVERY
@@ -536,9 +538,18 @@ def t_0_is_already_available(config_manager):
     A wrong-but-finite u_0 or t_E start is a slow fit; a wrong t_0 is not a
     fit at all.  So the finder earns its keep precisely when t_0 is absent,
     and has no business overriding a model that is already answering.
+
+    "Already seeded" is asked of ``seeded_paths()`` because neither
+    ``user_params`` nor ``probe_derivable`` can see a seed hint: without it an
+    MMEXOFAST push that seeded t_0 still read as "absent", and -- now that
+    ``add_seed_hints`` accumulates (review 2.1.12) -- the finder would ADD a
+    point-lens seed beside every MMEXOFAST solution instead of staying a
+    fallback.
     """
-    entry = config_manager.user_params.get(T_0_PATH)
-    if isinstance(entry, dict) and (
+    if T_0_PATH in config_manager.seeded_paths():
+        return True
+    entry = user_entry(config_manager.user_params, T_0_PATH)
+    if entry is not None and (
         entry.get("initval") is not None or entry.get("mu") is not None
     ):
         return True
@@ -550,7 +561,9 @@ def t_0_is_already_available(config_manager):
         return False
 
 
-def push_peak_find_hints(seed, config_manager, source="peak finder"):
+def push_peak_find_hints(
+    seed, config_manager, source="peak finder", replace=False
+):
     """Seed t_0, u_0 and t_E from ``find_pspl_seed``'s result.
 
     Only those three.  The companion geometry (log_s, alpha, q) and rho keep
@@ -558,6 +571,10 @@ def push_peak_find_hints(seed, config_manager, source="peak finder"):
     not by accident -- see the module docstring.  ``add_seed_hints`` puts it
     at PRECEDENCE_DERIVED_DATA, the same tier MMEXOFAST's seeds occupy: this
     is a derivation FROM THE DATA, so every user entry outranks it.
+
+    ``replace`` is passed through to ``add_seed_hints``: True discards the
+    seed sets already registered (the ``peak_find: true`` A/B mode), False
+    appends this one after them.
     """
     if not seed:
         return 0
@@ -568,7 +585,8 @@ def push_peak_find_hints(seed, config_manager, source="peak finder"):
                 "source.0.u_0": float(seed["u_0"]),
                 "mulensevent.0.t_E": float(seed["t_E"]),
             }
-        ]
+        ],
+        replace=replace,
     )
     logger.info(
         "Peak finder (%s): t_0 = %.4f, u_0 = %.4f, t_E = %.3f d "

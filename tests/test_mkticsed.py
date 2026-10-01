@@ -7,6 +7,7 @@ written into the .sed file, not on module internals.
 
 import numpy as np
 import pytest
+import yaml
 from astropy.table import Table
 
 from exozippy.utilities import mkticsed as mk
@@ -174,23 +175,16 @@ def _run(tmp_path, **kwargs):
         tycho=True,
         **kwargs,
     )
-    return _read_sed_rows(tmp_path / "12345678.sed")
+    return _read_sed_rows(tmp_path / f"{tmp_path.name}.sed.yaml")
 
 
 def _read_priors(path):
-    """Parse a written params YAML into {param path: {field: float}}."""
-    out = {}
-    key = None
-    for line in path.read_text().splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        if not line.startswith(" ") and line.rstrip().endswith(":"):
-            key = line.rstrip()[:-1]
-            out[key] = {}
-        elif key is not None and ":" in line:
-            field, val = line.split(":", 1)
-            out[key][field.strip()] = float(val)
-    return out
+    """Parse a written params YAML into {param path: {field: value}}.
+
+    Through the YAML loader itself, so a field that would not parse in a
+    real params file (the citation list) fails here too.
+    """
+    return yaml.safe_load(path.read_text())
 
 
 def _prior_notes(path):
@@ -353,13 +347,71 @@ def test_apass_bv_kept_when_no_tycho_source_exists(tmp_path, patched_catalogs):
 # --- 3.9: the astrometric prior belongs in parallax space ---------------------
 
 
+def _elbadry_f(g):
+    """El-Badry, Rix & Heintz 2021 Eq. 16, written out independently of
+    mkticsed so a typo in its coefficients cannot pass by agreeing with
+    itself."""
+    return (
+        0.21 * np.exp(-(((g - 12.65) / 0.90) ** 2))
+        + 1.141
+        + 0.0040 * g
+        - 0.00062 * g**2
+    )
+
+
+@pytest.mark.parametrize(
+    "gmag, expected",
+    [
+        (12.65, _elbadry_f(12.65)),  # the peak, ~1.30
+        (10.0, _elbadry_f(10.0)),
+        (18.0, _elbadry_f(18.0)),
+        (5.0, _elbadry_f(7.0)),  # held at the calibrated edge
+        (21.0, 1.0),  # the fit dips below 1 here; never shrink an error
+        (22.0, 1.0),
+    ],
+)
+def test_elbadry_inflation_follows_eq16_inside_its_range(gmag, expected):
+    """
+    Given a Gaia G magnitude,
+    When the El-Badry+2021 inflation factor is evaluated,
+    Then it matches their Eq. 16, held at the edge outside 7 < G < 21 and
+    never below 1.
+    """
+    # Act / Assert
+    assert mk.elbadry_inflation(gmag) == pytest.approx(expected, rel=1e-9)
+
+
+def test_high_ruwe_parallax_carries_an_underestimate_warning(
+    tmp_path, patched_catalogs
+):
+    """
+    Given a Gaia DR3 row with RUWE > 1.4,
+    When mkticsed writes the params file,
+    Then the header warns that the inflated uncertainty is likely still
+    too small.
+    """
+    # Arrange
+    table = _gaia_dr3_table()
+    table["RUWE"] = [2.3]
+    patched_catalogs["I/355/gaiadr3"] = table
+    priorfile = tmp_path / "p.yaml"
+
+    # Act
+    _run(tmp_path, priorfile=str(priorfile))
+    notes = " ".join(_prior_notes(priorfile))
+
+    # Assert
+    assert "RUWE = 2.30 > 1.4" in notes
+
+
 def test_gaia_parallax_written_as_a_parallax_prior(tmp_path, patched_catalogs):
     """
     Given a Gaia DR3 row with a positive parallax,
     When mkticsed writes the params file,
     Then it carries a Gaussian prior on star.<name>.parallax whose mu is
       the (zero-point-corrected) measurement in mas and whose sigma is
-      sqrt(e_Plx^2 + 0.01^2) -- and no distance prior, which was a
+      sqrt((f(G) e_Plx)^2 + 0.01^2), f the El-Badry+2021 inflation -- and
+      no distance prior, which was a
       first-order propagation of a nonlinear map (EXOFASTv2's
       mkticsed.pro writes `parallax`, never a distance prior).
     """
@@ -377,8 +429,14 @@ def test_gaia_parallax_written_as_a_parallax_prior(tmp_path, patched_catalogs):
     assert "star.Host.parallax" in priors
     assert priors["star.Host.parallax"]["mu"] == pytest.approx(4.587)
     assert priors["star.Host.parallax"]["sigma"] == pytest.approx(
-        np.sqrt(0.0143**2 + 0.01**2), abs=1e-5
+        np.hypot(_elbadry_f(10.0) * 0.0143, 0.01), abs=1e-5
     )
+    # The fixture is outside the zero-point range (Solved = 3), so the
+    # citation names the catalog and the inflation, but not Lindegren+2021.
+    assert priors["star.Host.parallax"]["citation"] == [
+        "GaiaCollaboration:2023",
+        "ElBadry:2021",
+    ]
     assert "star.Host.distance" not in priors
 
 
@@ -406,7 +464,7 @@ def test_negative_parallax_is_still_written_as_a_prior(
     # Assert
     assert priors["star.Host.parallax"]["mu"] == pytest.approx(-0.5)
     assert priors["star.Host.parallax"]["sigma"] == pytest.approx(
-        np.sqrt(0.2**2 + 0.01**2), abs=1e-5
+        np.hypot(_elbadry_f(10.0) * 0.2, 0.01), abs=1e-5
     )
     assert "star.Host.distance" not in priors
     assert "NEGATIVE" in notes
@@ -832,3 +890,113 @@ def test_the_id_cross_match_beats_the_nearer_star():
     # Assert
     assert row == 1
     assert not np.isfinite(sep)
+
+
+# --- target-name resolution ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "target", ["402026209", "TIC402026209", "TIC 402026209", " tic 402026209 "]
+)
+def test_a_tic_id_resolves_without_asking_simbad(target, monkeypatch):
+    """
+    Given a TIC ID in any of its spellings,
+    When resolve_ticid is called,
+    Then the numeric ID comes back and SIMBAD is never queried.
+    """
+
+    # Arrange
+    def no_simbad(name):
+        raise AssertionError(f"SIMBAD queried for {name!r}")
+
+    monkeypatch.setattr(mk, "simbad_ids", no_simbad)
+
+    # Act / Assert
+    assert mk.resolve_ticid(target) == "402026209"
+
+
+def test_a_star_name_resolves_to_its_tic_id_through_simbad(monkeypatch):
+    """
+    Given a name SIMBAD knows (as getdata accepts, e.g. TOI-1234),
+    When resolve_ticid is called,
+    Then the TIC ID among SIMBAD's identifiers is returned.
+    """
+    # Arrange
+    monkeypatch.setattr(
+        mk,
+        "simbad_ids",
+        lambda name: ["TOI-1234", "Gaia DR3 1", "TIC 90504905", "2MASS J1"],
+    )
+
+    # Act / Assert
+    assert mk.resolve_ticid("TOI-1234") == "90504905"
+
+
+@pytest.mark.parametrize(
+    "ids, message",
+    [
+        (["Gaia DR3 1"], "no TIC ID"),
+        (["TIC 1", "TIC 2"], "several TIC IDs"),
+    ],
+)
+def test_a_name_without_one_tic_id_exits_naming_the_target(
+    ids, message, monkeypatch
+):
+    """
+    Given a name whose SIMBAD identifiers hold zero or several TIC IDs,
+    When resolve_ticid is called,
+    Then it exits with an error naming the target rather than guessing.
+    """
+    # Arrange
+    monkeypatch.setattr(mk, "simbad_ids", lambda name: ids)
+
+    # Act
+    with pytest.raises(SystemExit) as exc:
+        mk.resolve_ticid("Some Star")
+
+    # Assert
+    assert message in str(exc.value)
+    assert "Some Star" in str(exc.value)
+
+
+# --- output file names --------------------------------------------------------
+
+
+def test_outputs_are_named_after_the_output_directory(
+    tmp_path, patched_catalogs
+):
+    """
+    Given a fit directory named like ~/modeling/toi1234,
+    When mkticsed runs there with no --name,
+    Then it writes toi1234.params.yaml and toi1234.sed.yaml (and, with
+    --exofast, toi1234.sed.txt), matching exozippy-exofast2exozippy.
+    """
+    # Arrange
+    fitdir = tmp_path / "toi1234"
+    fitdir.mkdir()
+
+    # Act
+    mk.mkticsed(ticid="12345678", outpath=str(fitdir), exofast=True)
+
+    # Assert
+    assert sorted(p.name for p in fitdir.iterdir()) == [
+        "toi1234.params.yaml",
+        "toi1234.sed.txt",
+        "toi1234.sed.yaml",
+    ]
+
+
+def test_name_overrides_the_output_file_names(tmp_path, patched_catalogs):
+    """
+    Given an explicit name,
+    When mkticsed runs,
+    Then the outputs carry that name instead of the directory's.
+    """
+    # Act
+    mk.mkticsed(ticid="12345678", outpath=str(tmp_path), name="wasp4")
+
+    # Assert
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "wasp4.params.yaml",
+        "wasp4.sed.yaml",
+    ]

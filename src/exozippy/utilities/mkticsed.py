@@ -16,15 +16,18 @@ defined by build_parser() and driven by main(argv=None); scripts/mkticsed.py
 is now a thin wrapper that calls main().
 
 Usage:
-    poetry run python scripts/mkticsed.py <TICID> [options]
+    exozippy-mkticsed <TICID or name> [options]
 
 Examples:
-    poetry run python scripts/mkticsed.py 402026209 --star-name WASP-4
-    poetry run python scripts/mkticsed.py TIC402026209 --outpath examples/wasp4
+    exozippy-mkticsed 402026209 --star-name WASP-4
+    exozippy-mkticsed TIC402026209 --outpath examples/wasp4
+    exozippy-mkticsed TOI-1234
 """
 
 import argparse
+import json
 import math
+import re
 import sys
 import warnings
 from dataclasses import dataclass
@@ -34,6 +37,7 @@ import numpy as np
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astroquery.ipac.irsa.irsa_dust import IrsaDust
+from astroquery.simbad import Simbad
 from astroquery.vizier import Vizier
 
 try:
@@ -126,6 +130,50 @@ def _nearest(table, ra, dec, racol="RAJ2000", deccol="DEJ2000"):
     return idx, seps[idx]
 
 
+def simbad_ids(name):
+    """Every SIMBAD identifier of ``name`` (e.g. "TIC 402026209")."""
+    table = Simbad.query_objectids(name)
+    if table is None:
+        return []
+    return [str(i).strip() for i in table[table.colnames[0]]]
+
+
+_TIC_ID = re.compile(r"^TIC\s*(\d+)$", re.IGNORECASE)
+
+
+def resolve_ticid(target):
+    """Return the numeric TIC ID (a str) for ``target``.
+
+    A TIC ID ("402026209", "TIC402026209", "TIC 402026209") is returned
+    as-is. Any other string is taken to be a SIMBAD-resolvable name
+    ("TOI-1234", "WASP-4") -- the same names getdata accepts -- and looked
+    up in SIMBAD's identifier list. Exits naming the target when SIMBAD
+    knows no TIC ID for it, or more than one.
+    """
+    target = str(target).strip()
+    match = _TIC_ID.match(target)
+    if match:
+        return match.group(1)
+    if target.isdigit():
+        return target
+    print(f"Resolving {target} with SIMBAD ...", flush=True)
+    tics = sorted(
+        {m.group(1) for m in map(_TIC_ID.match, simbad_ids(target)) if m}
+    )
+    if not tics:
+        sys.exit(
+            f"ERROR: SIMBAD lists no TIC ID for '{target}'; "
+            "pass the TIC ID directly"
+        )
+    if len(tics) > 1:
+        sys.exit(
+            f"ERROR: SIMBAD lists several TIC IDs for '{target}' "
+            f"({', '.join(tics)}); pass the one you want directly"
+        )
+    print(f"  {target} = TIC {tics[0]}", flush=True)
+    return tics[0]
+
+
 def query_region(catalog, ra, dec, radius_arcmin):
     """Cone-search Vizier; return first Table or None."""
     v = Vizier(columns=["**"], row_limit=-1)
@@ -152,6 +200,42 @@ def query_id(catalog, target_id):
 
 
 from ..components.sed.extinction import av_from_band_extinction
+
+# Gaia DR3 parallax-uncertainty inflation, El-Badry, Rix & Heintz 2021
+# (MNRAS 506, 2269), Eq. 16: f(G) = A exp[-(G - G0)^2 / b^2] + p0 + p1 G
+# + p2 G^2, calibrated on wide binaries with RUWE < 1.4 and zero-point-
+# corrected parallaxes, for 7 < G < 21.
+ELBADRY_A = 0.21
+ELBADRY_G0 = 12.65
+ELBADRY_B = 0.90
+ELBADRY_P = (1.141, 0.0040, -0.00062)
+ELBADRY_GRANGE = (7.0, 21.0)
+# Added in quadrature AFTER the inflation: the ~10 microarcsec local
+# zero-point variations El-Badry+2021 say their factor leaves out (a wide
+# binary's two stars share one local zero point), which "may contribute
+# significantly to the uncertainties at G < 13".
+GAIA_DR3_PLX_SYS = 0.01  # mas
+
+
+def elbadry_inflation(gmag):
+    """El-Badry, Rix & Heintz (2021) Eq. 16 inflation factor for a Gaia DR3
+    parallax uncertainty at G magnitude ``gmag``.
+
+    Two deliberate departures from the bare fit, both reported in the
+    params-file note: G is held at the edge of the calibrated range
+    (7 < G < 21) rather than extrapolated, and the factor is floored at 1,
+    so a catalog uncertainty is never shrunk (the fit dips to 0.95 by
+    G = 21).
+    """
+    g = min(max(gmag, ELBADRY_GRANGE[0]), ELBADRY_GRANGE[1])
+    p0, p1, p2 = ELBADRY_P
+    f = (
+        ELBADRY_A * math.exp(-(((g - ELBADRY_G0) / ELBADRY_B) ** 2))
+        + p0
+        + p1 * g
+        + p2 * g**2
+    )
+    return max(f, 1.0)
 
 
 def schlegel_av(ra, dec):
@@ -188,7 +272,7 @@ def _sed_entry(svo_name, mag, used_err, enabled=True, magsys="Vega"):
     }
 
 
-def _write_parallax_prior(yaml_data, notes, key, plx, uplx):
+def _write_parallax_prior(yaml_data, notes, key, plx, uplx, citation):
     """Record the astrometric measurement as a prior in PARALLAX space.
 
     The measurement is Gaussian in parallax, so that is where the prior
@@ -219,10 +303,14 @@ def _write_parallax_prior(yaml_data, notes, key, plx, uplx):
     relaxation engine declines to seed a distance from it, so ``distance``
     keeps its defaults.yaml start -- which can be a poor one, hence the
     suggested seed in the notes.
+
+    ``citation`` lists the catalog and each correction actually applied
+    (references.bib keys), for the params file's ``citation`` field.
     """
     yaml_data[key("parallax")] = {
         "mu": round(float(plx), 5),
         "sigma": round(float(uplx), 5),
+        "citation": list(citation),
     }
     if plx > 0:
         notes.append(
@@ -574,6 +662,7 @@ def mkticsed(
     ticid,
     star_name="Host",
     outpath=".",
+    name=None,
     priorfile=None,
     sedfile=None,
     galex=False,
@@ -588,17 +677,23 @@ def mkticsed(
 ):
     """
     Query TICv8.2 and photometric catalogs to create:
-      - <ticid>.params.yaml  -- EXOZIPPy stellar priors
-      - <ticid>.sed          -- photometric SED data
+      - <name>.params.yaml  -- EXOZIPPy stellar priors
+      - <name>.sed.yaml     -- photometric SED data
 
     Parameters
     ----------
     ticid : str or int
-        TIC ID (numeric portion; 'TIC' prefix accepted).
+        TIC ID (numeric portion; 'TIC' prefix accepted), or any
+        SIMBAD-resolvable name (see resolve_ticid).
     star_name : str
         Instance name for the star in params.yaml (e.g. 'Host').
     outpath : str
         Output directory.
+    name : str or None
+        Base name of the output files. None (the default) uses the output
+        directory's name, so running in ~/modeling/toi1234 writes
+        toi1234.params.yaml and toi1234.sed.yaml -- the same convention as
+        exozippy-exofast2exozippy.
     dist : float
         Cone-search radius in arcseconds (default 120).
     band_extinction : (a_band, sigma, wavelength_micron) or None
@@ -629,16 +724,16 @@ def mkticsed(
         Uncomment these photometry bands in the SED file.
     """
     outpath = Path(outpath)
-    ticid = str(ticid).strip()
-    if ticid.upper().startswith("TIC"):
-        ticid = ticid[3:].strip()
+    ticid = resolve_ticid(ticid)
+    if name is None:
+        name = outpath.resolve().name
 
     if priorfile is None:
-        priorfile = outpath / f"{ticid}.params.yaml"
+        priorfile = outpath / f"{name}.params.yaml"
     else:
         priorfile = Path(priorfile)
     if sedfile is None:
-        sedfile = outpath / f"{ticid}.sed"
+        sedfile = outpath / f"{name}.sed.yaml"
     else:
         sedfile = Path(sedfile)
 
@@ -732,6 +827,7 @@ def mkticsed(
             "initval": round(float(feh_tic), 5),
             "mu": round(float(feh_tic), 5),
             "sigma": round(ufeh, 5),
+            "citation": ["Stassun:2019"],
         }
 
     # --- 3. Gaia DR3 parallax + photometry ------------------------------------
@@ -790,7 +886,22 @@ def mkticsed(
         # No positivity gate: the prior is written in PARALLAX space, so
         # a negative measured parallax is representable (see below).
         if np.isfinite(g3_plx) and np.isfinite(g3_eplx):
-            uplx = math.sqrt(g3_eplx**2 + 0.01**2)  # 0.01 mas systematic floor
+            # The catalog, plus each correction as it is actually applied.
+            plx_citation = ["GaiaCollaboration:2023"]
+            # El-Badry+2021 inflation, then the local zero-point systematic
+            # in quadrature (see elbadry_inflation and GAIA_DR3_PLX_SYS).
+            if np.isfinite(g3_gmag):
+                f_plx = elbadry_inflation(g3_gmag)
+                inflation_msg = (
+                    f"x {f_plx:.3f} (El-Badry+2021 at G = {g3_gmag:.2f})"
+                )
+                plx_citation.append("ElBadry:2021")
+            else:
+                f_plx = 1.0
+                inflation_msg = (
+                    "NOT inflated (no Gaia G magnitude for El-Badry+2021)"
+                )
+            uplx = math.hypot(f_plx * g3_eplx, GAIA_DR3_PLX_SYS)
             zp = 0.0
             zp_msg = "raw (gaiadr3-zeropoint not installed)"
             if HAS_GAIADR3_ZPT:
@@ -829,6 +940,8 @@ def mkticsed(
                         zp_msg = (
                             f"corrected by {-zp:+.5f} mas (Lindegren+2021)"
                         )
+                        # after the catalog, before the inflation
+                        plx_citation.insert(1, "Lindegren:2021")
                     except Exception as exc:
                         # Do NOT fall through with zp = 0.  The result
                         # here is not a missing number, it is a distance
@@ -850,10 +963,21 @@ def mkticsed(
             corrected_plx = g3_plx - zp
             notes.append(
                 f"Gaia DR3 parallax {g3_plx:.5f} mas, {zp_msg}; "
-                f"uncertainty {g3_eplx:.5f} + 0.01 mas systematic = {uplx:.5f}"
+                f"uncertainty {g3_eplx:.5f} mas {inflation_msg}, plus "
+                f"{GAIA_DR3_PLX_SYS} mas local zero-point systematic in "
+                f"quadrature = {uplx:.5f} mas"
             )
+            if np.isfinite(g3_ruwe) and g3_ruwe > 1.4:
+                notes.append(
+                    f"WARNING: Gaia DR3 RUWE = {g3_ruwe:.2f} > 1.4; "
+                    "El-Badry+2021 find parallax uncertainties are "
+                    "underestimated by much more than their inflation "
+                    "factor corrects for such sources"
+                )
 
-            _write_parallax_prior(yaml_data, notes, key, corrected_plx, uplx)
+            _write_parallax_prior(
+                yaml_data, notes, key, corrected_plx, uplx, plx_citation
+            )
             gaia_dr3_done = True
 
             target_ra = _get(qgaia3, "RA_ICRS", g3row)
@@ -873,7 +997,12 @@ def mkticsed(
             "DR3 parallax unavailable; using Gaia DR2 with Lindegren+2018 correction"
         )
         _write_parallax_prior(
-            yaml_data, notes, key, dr2_fallback_plx, dr2_fallback_uplx
+            yaml_data,
+            notes,
+            key,
+            dr2_fallback_plx,
+            dr2_fallback_uplx,
+            ["GaiaCollaboration:2018", "Lindegren:2018"],
         )
 
     # --- 4. 2MASS photometry --------------------------------------------------
@@ -892,6 +1021,7 @@ def mkticsed(
                 "initval": round(kmag, 6),
                 "mu": round(kmag, 6),
                 "sigma": round(ekmag, 6),
+                "citation": ["Skrutskie:2006"],
             }
 
     # --- 5. WISE photometry ---------------------------------------------------
@@ -923,7 +1053,10 @@ def mkticsed(
     if band_extinction is not None:
         pass  # already set above, from the measurement
     elif max_av is not None and max_av > 0:
-        yaml_data[key("av")] = {"upper": round(max_av, 4)}
+        yaml_data[key("av")] = {
+            "upper": round(max_av, 4),
+            "citation": ["Schlegel:1998"],
+        }
         notes.append(
             f"Av < {max_av:.4f} mag  (3.1 x E(B-V) Schlegel+1998 upper limit)"
         )
@@ -943,6 +1076,7 @@ def mkticsed(
             "initval": round(av_val, 5),
             "mu": round(av_val, 5),
             "sigma": round(uav, 5),
+            "citation": ["Stassun:2019"],
         }
     else:
         notes.append(
@@ -1012,6 +1146,7 @@ def mkticsed(
                             "initval": round(feh_val, 5),
                             "mu": round(feh_val, 5),
                             "sigma": 0.10,
+                            "citation": ["Paunzen:2015", "Casagrande:2011"],
                         }
                         notes.append(
                             "[Fe/H] from Paunzen+2015 Stromgren via Casagrande+2011 eq. 2"
@@ -1039,6 +1174,7 @@ def mkticsed(
                             "initval": round(feh_val, 5),
                             "mu": round(feh_val, 5),
                             "sigma": 0.12,
+                            "citation": ["Paunzen:2015", "Casagrande:2011"],
                         }
                         notes.append(
                             "[Fe/H] from Paunzen+2015 Stromgren via Casagrande+2011 eq. 3"
@@ -1197,7 +1333,7 @@ def mkticsed(
     _write_sed_yaml(sedfile, sed_entries, notes=[f"TIC {ticid}"] + sed_notes)
 
     if exofast:
-        exofast_sedfile = sedfile.with_suffix(".sed.txt")
+        exofast_sedfile = outpath / f"{name}.sed.txt"
         with open(exofast_sedfile, "w") as f:
             f.write("# bandname magnitude used_errors catalog_errors\n")
             f.write(f"# TIC {ticid}\n")
@@ -1223,6 +1359,10 @@ def mkticsed(
         for ykey, fields in yaml_data.items():
             f.write(f"{ykey}:\n")
             for field, val in fields.items():
+                # A list (the citation field) as a JSON array, which is a
+                # valid YAML flow sequence -- a Python repr only happens to be.
+                if isinstance(val, (list, tuple)):
+                    val = json.dumps(list(val))
                 f.write(f"    {field}: {val}\n")
             f.write("\n")
 
@@ -1233,15 +1373,25 @@ def mkticsed(
 def build_parser():
     """Return the argparse parser for the mkticsed utility."""
     p = argparse.ArgumentParser(
-        prog="mkticsed.py",
+        prog="exozippy-mkticsed",
         description="Create EXOZIPPy params YAML and SED file from TICv8.2",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("ticid", help="TIC ID (numeric, or TIC####)")
+    p.add_argument(
+        "ticid",
+        help="TIC ID (numeric, or TIC####), or a SIMBAD-resolvable name "
+        "such as TOI-1234 or WASP-4",
+    )
     p.add_argument(
         "--star-name", default="Host", help="Star instance name in params YAML"
     )
     p.add_argument("--outpath", default=".", help="Output directory")
+    p.add_argument(
+        "--name",
+        default=None,
+        help="Base name of the output files <name>.params.yaml and "
+        "<name>.sed.yaml (default: the output directory's name)",
+    )
     p.add_argument(
         "--priorfile", default=None, help="Override params YAML path"
     )
@@ -1273,7 +1423,7 @@ def build_parser():
     p.add_argument(
         "--exofast",
         action="store_true",
-        help="Also write an EXOFASTv2-format text SED file (<ticid>.sed.txt)",
+        help="Also write an EXOFASTv2-format text SED file (<name>.sed.txt)",
     )
     return p
 
@@ -1285,6 +1435,7 @@ def main(argv=None):
         ticid=args.ticid,
         star_name=args.star_name,
         outpath=args.outpath,
+        name=args.name,
         priorfile=args.priorfile,
         sedfile=args.sedfile,
         galex=args.galex,

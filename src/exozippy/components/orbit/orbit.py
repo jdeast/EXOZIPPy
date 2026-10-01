@@ -12,6 +12,7 @@ from exoplanet_core.pymc import ops as ops
 from exozippy.components.component import Component, in_topology
 from exozippy.components.parameter import Parameter
 from exozippy.components.parameterization import merge_options, mode_manifest
+from exozippy.config import user_entry
 from exozippy.outputs.prose import get_collector, join_names
 from exozippy.potentials import soft_lower_bound, soft_upper_bound
 
@@ -179,8 +180,8 @@ class Orbit(Component):
                 f"{self.prefix}.{index}.{param}",
                 f"{self.prefix}.{param}",
             ):
-                entry = user.get(key)
-                if isinstance(entry, dict) and entry.get("sigma") == 0:
+                entry = user_entry(user, key)
+                if entry is not None and entry.get("sigma") == 0:
                     pinned.append(param)
                     break
         return pinned
@@ -726,12 +727,12 @@ class Orbit(Component):
         """
         user = getattr(self.config_manager, "user_params", None) or {}
         seeded = np.zeros(self.n_elements, dtype=bool)
-        entry = user.get(f"{self.prefix}.{param}")
-        if isinstance(entry, dict) and entry.get("initval") is not None:
+        entry = user_entry(user, f"{self.prefix}.{param}")
+        if entry is not None and entry.get("initval") is not None:
             seeded[:] = True
         for i in range(self.n_elements):
-            entry = user.get(f"{self.prefix}.{i}.{param}")
-            if isinstance(entry, dict) and entry.get("initval") is not None:
+            entry = user_entry(user, f"{self.prefix}.{i}.{param}")
+            if entry is not None and entry.get("initval") is not None:
                 seeded[i] = True
         return seeded
 
@@ -1850,8 +1851,10 @@ class Orbit(Component):
 
         THE SHIELD is the soft half of the pair that keeps an imaginary
         eccentricity from being a wall.  `_vcve_quadratic` floors the
-        discriminant at zero (the hard half, so no NaN can ever be built), which
-        leaves that whole region flat -- so the penalty here is applied to the
+        discriminant at the strictly positive `VCVE_DISCRIMINANT_FLOOR` (the
+        hard half: a floor of exactly 0.0 left the value finite but the
+        gradient NaN across the whole region, review 1.8.10), which leaves
+        that whole region flat -- so the penalty here is applied to the
         UNFLOORED discriminant, where it has a gradient pointing back into the
         region where a real eccentricity exists.  Same argument, and the same
         `soft_lower_bound` helper, as the eccentricity bound above.

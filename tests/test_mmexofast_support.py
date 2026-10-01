@@ -30,8 +30,11 @@ class _RecordingConfigManager:
     def add_scale_hint(self, path, scale):
         self.scale_hints[path] = scale
 
-    def add_seed_hints(self, seed_dicts):
-        self.seed_hint_sets = seed_dicts
+    def add_seed_hints(self, seed_dicts, replace=False):
+        # Mirrors ConfigManager.add_seed_hints: accumulate (review 2.1.12).
+        if replace:
+            self.seed_hint_sets = []
+        self.seed_hint_sets.extend(seed_dicts)
 
 
 # ---------------------------------------------------------------------------

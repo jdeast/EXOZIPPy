@@ -157,8 +157,9 @@ def _scan_resolved_subkeys():
     Structural, in three steps, so the answer follows a refactor instead of
     having to be re-typed after one:
 
-      1. find the locals resolve() binds from ``self.user_params`` -- those
-         hold ONE user override entry (``entry``, ``ov``);
+      1. find the locals resolve() binds from ``self.user_params`` (directly
+         or through ``user_entry(self.user_params, ...)``) -- those hold ONE
+         user override entry (``entry``, ``ov``);
       2. collect every sub-key tested or subscripted against them, i.e.
          ``"unit" in entry``, ``ov[key]``, ``ov.get(...)``;
       3. where the sub-key is a loop variable, resolve it back through any
@@ -182,6 +183,12 @@ def _scan_resolved_subkeys():
             ):
                 if _expr_src(sub.func.value) == "self.user_params":
                     return True
+            # `user_entry(self.user_params, k)` -- the one accessor since
+            # review 1.1.7.
+            if isinstance(sub, ast.Call) and any(
+                _expr_src(a) == "self.user_params" for a in sub.args
+            ):
+                return True
         return False
 
     entry_names = set()
@@ -274,6 +281,7 @@ _SUBKEY_PROBES = {
     "description": "probe",
     "print_to_table": False,
     "debug_print": True,
+    "citation": "email from a probe 9/30/2026",
 }
 
 # Declared, legal in a params file, and deliberately NOT absorbed from a user
@@ -676,7 +684,10 @@ def test_the_three_subkey_vocabularies_share_one_owner():
 
     # ACT / ASSERT -- the union is exactly its declared parts.
     assert set(owner.USER_PARAM_KEYS) == (
-        set(owner.NUMERIC_KEYS) | set(owner.STRING_KEYS) | set(owner.BOOL_KEYS)
+        set(owner.NUMERIC_KEYS)
+        | set(owner.STRING_KEYS)
+        | set(owner.BOOL_KEYS)
+        | set(owner.CITATION_KEYS)
     )
     assert set(owner.NUMERIC_KEYS) == (
         set(owner.TUNING_KEYS) | set(owner.PHYSICS_KEYS)

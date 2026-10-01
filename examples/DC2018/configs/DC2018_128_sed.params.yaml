@@ -37,7 +37,7 @@ mulensinstrument.Roman_Z087.zeropoint: {mu: 22.0, sigma: 0.02}
 # E(Z087-W149) = 1.79.  These are clump estimates, so they are a prior on
 # the source's extinction rather than its value, which is exactly what the
 # quoted dispersions are for.
-star.Source.av: {mu: 1.94, sigma: 0.26}
+star.Source.av: {mu: 1.94, sigma: 0.26, citation: "DC2018 event_info.txt (event 128 red-clump A_W149)"}
 
 # The Source shares the event's line of sight; galacticmodel anchors on it
 # (anchor_idx 1) and the magnification Op freezes its coordinates.

@@ -1409,8 +1409,14 @@ class Transit(Instrument):
         if shared is None:
             shared = self._phased_lc_shared(system, point)
         planets = system.planet
-        P_ref = self._point_value(point, system.orbit.period, p_idx)
-        tc_ref = self._point_value(point, system.orbit.tc, p_idx)
+        # orbit.period / orbit.tc are per-ORBIT vectors, so read them at the
+        # orbit this planet sits on, not at its planet index -- the two agree
+        # only by config-order coincidence (review 1.5.7).  orbit_map is the
+        # numpy map build_maps wrote (build_tensor_maps adds a separate
+        # *_map_tensor), and _lc_model maps period/tc the same way.
+        o_idx = int(planets.orbit_map[p_idx])
+        P_ref = self._point_value(point, system.orbit.period, o_idx)
+        tc_ref = self._point_value(point, system.orbit.tc, o_idx)
 
         t_model = np.linspace(
             tc_ref - 0.5 * P_ref, tc_ref + 0.5 * P_ref, self._PLOT_GRID_N

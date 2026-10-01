@@ -70,8 +70,8 @@ star.Source.dec:
     sigma: 0
 
 # Source proper motion measured from 4 years of OGLE-IV astrometry of the
-# baseline object: mu_S,hel(N,E) = (-0.64, -5.31) +/- 0.45 mas/yr (Yee+2015
-# Eq. 8). This is the datum behind her degeneracy-breaking argument: with
+# baseline object: mu_S,hel(N,E) = (-0.64, -5.31) +/- 0.45 mas/yr (Eq. 8 of
+# the cited paper). This is the datum behind her degeneracy-breaking argument: with
 # mu_S measured, the disk-rotation term in the galactic kinematic prior
 # predicts the lens-source relative motion direction to ~8.5 deg, which
 # excludes the u0,-,+ mode (direction ~130 deg vs expected ~54). Without it
@@ -81,10 +81,12 @@ star.Source.pm_ra:
     initval: -5.31
     mu: -5.31
     sigma: 0.45
+    citation: Yee:2015
 star.Source.pm_dec:
     initval: -0.64
     mu: -0.64
     sigma: 0.45
+    citation: Yee:2015
 
 # Yee+2015 is pure PSPL (their Eq. 4) -- no finite source, no limb darkening
 # (u0 ~ 0.9 makes them negligible). The source radius only enters rho, which

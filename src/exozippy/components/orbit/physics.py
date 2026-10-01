@@ -70,10 +70,13 @@ MAX_ECC = 0.9999
 # seed -- `secosw: 0, sesinw: 0` in a params file, which is how a user spells
 # "start circular" -- makes d(sqrt e)/de infinite, and `de/d(secosw) = 2 secosw`
 # is exactly zero there, so pytensor's chain rule multiplies inf by 0 and the
-# START GRADIENT is NaN with nothing naming the cause.  The floor goes on the
-# RADICAND and never on the result, the house rule (calc_theta_E, calc_jitter,
-# _vcve_quadratic): clamping after the root multiplies sqrt'(0) = inf by
-# pt.maximum's zero gradient on the clamped side, which is the same NaN again.
+# START GRADIENT is NaN with nothing naming the cause.  The house rule has two
+# halves (CLAUDE.md's where-trap invariant): the floor goes on the RADICAND and
+# never on the result, and it must be STRICTLY POSITIVE.  Clamping after the
+# root multiplies sqrt'(0) = inf by pt.maximum's zero gradient on the clamped
+# side, and so does flooring the radicand AT ZERO -- the same NaN both ways
+# (reviews 1.8.5 and 1.8.10 are the second half being missed; see
+# CHORD_RADICAND_FLOOR and VCVE_DISCRIMINANT_FLOOR).
 # 1e-30 leaves sqrt(e) = 1e-15, a quantization far below any eccentricity a fit
 # can distinguish, and it is inert for every e above it -- pt.maximum returns
 # its argument bit-for-bit, so no non-circular fit moves.
@@ -106,6 +109,21 @@ ECC_FLOOR = 1e-30
 # VALUE is unchanged and only its gradient becomes finite.  Verified inert for
 # real geometry: bit-identical to the 0.0 floor at chord = 0, 0.5, 1.0, 1.0759.
 CHORD_RADICAND_FLOOR = 1e-30
+
+
+# Floor on the V_c/V_e discriminant `1 - x^2 cos^2 omega` (review 1.8.10) --
+# the third member of the family above, and the 1.8.5 bug one function over
+# again.  `_vcve_quadratic` floored it at 0.0, so `d e / d vcve` and
+# `d e / d omega` were NaN wherever `vcve > 1/|cos omega|` -- a large part of
+# vcve's sampled support [0, 141.4] -- and at the double root itself
+# (discriminant exactly 0, e.g. vcve = 1 at omega = 0).  fitvcve is ON by
+# default for a transit-only orbit, and both mixture branches share the root,
+# so the `vcve_real_root` soft bound had no finite total gradient to act
+# through.  1e-30 for the same reason as the chord's: sqrt gives 1e-15, so a
+# root moves by at most ~1e-15 / A, which is below every log floor
+# `vcve_log_jacobian` applies, and pt.maximum returns any real discriminant
+# bit-for-bit.
+VCVE_DISCRIMINANT_FLOOR = 1e-30
 
 
 #: Field-by-field meaning documented in `state_vector_terms`.
@@ -278,12 +296,15 @@ def _vcve_quadratic(vcve, omega):
     ``tests/test_vcve.py`` does that over a grid rather than trusting the
     algebra.
 
-    The square root's argument is floored at zero (the HARD shield): outside
-    the real region the two roots coincide at -B/2A instead of being NaN.
-    Flooring the RADICAND rather than the result is the house rule
-    (calc_theta_E, calc_jitter): ``sqrt'(0)`` is infinite, so clamping after
-    the root multiplies that infinity by ``pt.maximum``'s zero gradient and
-    gives NaN -- the exact failure the shields exist to prevent.  The soft
+    The square root's argument is floored at ``VCVE_DISCRIMINANT_FLOOR`` (the
+    HARD shield): outside the real region the two roots coincide at
+    ``-B/2A`` (to 1e-15) instead of being NaN.  Both halves of the house rule
+    apply (calc_theta_E, calc_jitter, calc_cosi_from_chord): the floor goes on
+    the RADICAND rather than the result, and it is STRICTLY POSITIVE.
+    ``sqrt'(0)`` is infinite, so clamping after the root -- or flooring the
+    radicand at exactly 0.0, which is what this line did until review 1.8.10
+    -- multiplies that infinity by ``pt.maximum``'s zero gradient and gives
+    NaN, the exact failure the shields exist to prevent.  The soft
     shield that keeps the sampler out of the region lives in
     ``Orbit._add_vcve_shield``, on the unfloored quantity, where it has a
     gradient to offer.
@@ -292,7 +313,9 @@ def _vcve_quadratic(vcve, omega):
     sinw, cosw = pt.sin(omega), pt.cos(omega)
     a = 1.0 + x2 * pt.sqr(sinw)
     b = 2.0 * x2 * sinw
-    root = 2.0 * pt.sqrt(pt.maximum(1.0 - x2 * pt.sqr(cosw), 0.0))
+    root = 2.0 * pt.sqrt(
+        pt.maximum(1.0 - x2 * pt.sqr(cosw), VCVE_DISCRIMINANT_FLOOR)
+    )
     return a, b, root
 
 
@@ -450,14 +473,20 @@ def calc_ecosw_from_ecc(ecc, omega):
 
 @register_physics
 def calc_secosw_from_ecc(ecc, omega):
-    """sqrt(e) cos(omega) -- REPORTED on a V_c/V_e orbit (built late)."""
-    return pt.sqrt(pt.maximum(ecc, 0.0)) * pt.cos(omega)
+    """sqrt(e) cos(omega) -- REPORTED on a V_c/V_e orbit (built late).
+
+    The radicand is floored at ECC_FLOOR, not 0.0 (review 1.8.10): a V_c/V_e
+    root clips to EXACTLY zero over a large region, and a user `{mu, sigma}`
+    on secosw -- which a late-built element takes -- then put
+    ``0 * sqrt'(0) = NaN`` into the logp gradient.
+    """
+    return _sqrt_ecc(ecc) * pt.cos(omega)
 
 
 @register_physics
 def calc_sesinw_from_ecc(ecc, omega):
-    """sqrt(e) sin(omega) -- REPORTED on a V_c/V_e orbit (built late)."""
-    return pt.sqrt(pt.maximum(ecc, 0.0)) * pt.sin(omega)
+    """sqrt(e) sin(omega) -- REPORTED; floored as calc_secosw_from_ecc."""
+    return _sqrt_ecc(ecc) * pt.sin(omega)
 
 
 @register_physics
@@ -835,7 +864,8 @@ def calc_cosi_from_chord(chord, p, ar, ecc, esinw, chord_sign):
     `1 + p` gives b = 1e-15 (a central transit, to fifteen digits) rather than
     NaN, and the soft bound supplies the restoring force.  Flooring the
     RADICAND and not the result is the house rule (calc_theta_E, calc_jitter,
-    _vcve_quadratic), and the floor must be STRICTLY POSITIVE: `sqrt'(0)` is
+    _vcve_quadratic -- which floored at 0.0 too until review 1.8.10), and the
+    floor must be STRICTLY POSITIVE: `sqrt'(0)` is
     infinite, and `pt.maximum`'s zero gradient on the clamped side turns that
     into `0 * inf = NaN`.  This line floored at 0.0 until 2026-08-27 and did
     exactly that across ~46% of the chord's support -- see

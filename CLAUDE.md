@@ -8,12 +8,12 @@ It is deliberately a **trunk**: the commands, the architecture, the invariants t
 
 ```bash
 # Install / update dependencies
-poetry install
-poetry update          # after git pull
+poetry install --extras gui   # also after git pull (not `poetry update`,
+                              # which rewrites poetry.lock)
 
 # Intel (x86_64) macOS ONLY: plain `poetry install` cannot succeed there.
-# This automates the one manual celerite2 step; MACOS_INTEL_INSTALL.md has
-# the why, the two documented gaps, and the same recipe by hand.
+# This automates the one manual celerite2 step; the script's header has the
+# why, MACOS_INTEL_INSTALL.md the two gaps and the same recipe by hand.
 ./scripts/bootstrap_intel_mac.sh
 
 # Run all tests (runs in parallel by default: -n 6 --dist loadfile, set in

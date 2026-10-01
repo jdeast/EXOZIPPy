@@ -1,5 +1,5 @@
-"""scripts/exofast2exozippy.py: the EXOFASTv2 driver conventions it must
-reproduce.
+"""exozippy.utilities.exofast2exozippy: the EXOFASTv2 driver conventions it
+must reproduce.
 
 Each test converts a small synthetic driver end to end with ``convert`` and
 reads the emitted YAML back:
@@ -13,25 +13,10 @@ reads the emitted YAML back:
     absolute prefix kept out of the EXOFASTv2 fit's own directory.
 """
 
-import importlib.util
-import sys
-from pathlib import Path
-
 import pytest
 import yaml
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-_NAME = "exofast2exozippy_under_test"
-if _NAME in sys.modules:
-    e2z = sys.modules[_NAME]
-else:
-    _SPEC = importlib.util.spec_from_file_location(
-        _NAME, _REPO_ROOT / "scripts" / "exofast2exozippy.py"
-    )
-    e2z = importlib.util.module_from_spec(_SPEC)
-    sys.modules[_NAME] = e2z
-    _SPEC.loader.exec_module(e2z)
-
+from exozippy.utilities import exofast2exozippy as e2z
 
 _DRIVER = """\
 pro fit, maxsteps=maxsteps, outpath=outpath

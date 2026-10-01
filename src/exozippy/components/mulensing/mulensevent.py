@@ -29,6 +29,7 @@ from exozippy.config import (
     PRECEDENCE_DERIVED_MIXED,
     PRECEDENCE_MULENS_LENS_DISTANCE,
     PRECEDENCE_MULENS_SOURCE_DISTANCE,
+    user_entry,
 )
 from exozippy.constants import DAYS_PER_YEAR
 from exozippy.corner_utils import (
@@ -40,7 +41,6 @@ from exozippy.potentials import soft_lower_bound
 from exozippy.skyframe import observer_sky_offset, sky_basis
 
 from ..galacticmodel.physics import expected_proper_motion
-from . import mmexofast_support
 from .bodies import body_entries, resolve_orbit_ref, validate_event_config
 from .op import BinaryLensMagOp, MulensMagOp, VBMDirectMagOp
 from .physics import (
@@ -227,11 +227,8 @@ class MulensEvent(Component):
         at stage 1 (MMEXOFAST seeds arrive after this snapshot)."""
         if "t0_par" in event_config:
             return float(event_config["t0_par"])
-        entry = config_manager.user_params.get("source.0.t_0")
-        if isinstance(entry, dict):
-            val = entry.get("initval")
-        else:
-            val = entry
+        entry = user_entry(config_manager.user_params, "source.0.t_0")
+        val = None if entry is None else entry.get("initval")
         # List-valued initval (P4 multi-seed sampling): t0_par is just a
         # numeric reference epoch, not a per-seed value, so use seed 0.
         if isinstance(val, (list, tuple)):
@@ -461,8 +458,8 @@ class MulensEvent(Component):
         """Best-effort mass initval (solMass) for a body at stage 3, from
         user_params mass or logmass entries; None when neither is given."""
         up = self.config_manager.user_params
-        entry = up.get(f"{comp_type}.{ndx}.mass")
-        val = entry.get("initval") if isinstance(entry, dict) else entry
+        entry = user_entry(up, f"{comp_type}.{ndx}.mass")
+        val = None if entry is None else entry.get("initval")
         if val is not None:
             # A user_params `mass` is in that BODY's own user unit, and this
             # function's contract is solMass.  `star.mass` is solMass so the
@@ -483,8 +480,8 @@ class MulensEvent(Component):
                 comp_type, "mass", full_path=f"{comp_type}.{ndx}.mass"
             )
             return float(val) * float(factor if factor else 1.0)
-        entry = up.get(f"{comp_type}.{ndx}.logmass")
-        val = entry.get("initval") if isinstance(entry, dict) else entry
+        entry = user_entry(up, f"{comp_type}.{ndx}.logmass")
+        val = None if entry is None else entry.get("initval")
         # Only `star` declares logmass, in dex(solMass), so 10** already
         # lands in the internal unit.  A component that ever declares a
         # logmass in another dex base needs the same factor treatment as
@@ -623,54 +620,15 @@ class MulensEvent(Component):
                 self, f"companion{j}_mass_map", np.array([c_ndx], dtype=int)
             )
 
-    def _load_mmexofast_seeds(self):
-        """Read an optional MMEXOFAST solutions file and push each fit as a
-        per-seed hint set for multi-seed sampling (P4).
-
-        MMEXOFAST emits multiple lightly-optimized solutions spanning the
-        standard microlensing degeneracies.  Each fit's observable-space
-        values (t_0, u_0, t_E, s, q, alpha, rho) are seeded into the
-        relaxation engine, which back-solves the physical parameters
-        (distances/masses/PMs) exactly as a user typing them into
-        params.yaml K times would.  Enabled by a `mmexofast: <file>` key on
-        the mulensevent config block (path relative to the run cwd, same as
-        the light-curve `file:` key).
-
-        The translation itself (seed sets, scale hints, jd_offset handling,
-        alpha/log_s conventions, and the post-split target paths --
-        source.0.*, mulensevent.0.t_E, lens.1.*) lives in
-        mmexofast_support.push_seed_hints, shared with MulensInstrument's
-        stage-1a auto-initialization (which also applies the JSON's
-        bad-data mask and error factors -- masks must exist before the
-        photometry is read, which is why the instrument owns that half).
-        """
-        mmx_file = self.config[0].get("mmexofast") if self.config else None
-        # Only an explicit file path is handled here. "auto" / absent-key
-        # auto-initialization is owned by MulensInstrument (stage 1), which
-        # pushes the seed hints itself before this method ever runs; False
-        # opts out entirely.
-        if not isinstance(mmx_file, str) or mmx_file == "auto":
-            return
-        # None means the file is ABSENT (warn and run unseeded, as before);
-        # a file that exists but cannot be parsed raises out of load_json.
-        # exozippy did not write a user-named file and so cannot regenerate
-        # it -- only run_or_load's own cache has that recovery.
-        data = mmexofast_support.load_json(mmx_file)
-        if data is None:
-            logger.warning(f"No seeds loaded from '{mmx_file}'.")
-            return
-        mmexofast_support.push_seed_hints(
-            data,
-            self.config_manager,
-            want_rho=self.finite_source,
-            is_binary=self.n_companions >= 1,
-            source=mmx_file,
-        )
-
     def register_parameters(self, system):
         """Stage 3: Declare the event-level manifest and push hints."""
         self._validate_bodies(system)
-        self._load_mmexofast_seeds()
+        # No MMEXOFAST seed push here: an explicit `mmexofast: <file>` is
+        # loaded ONCE, by MulensInstrument._resolve_mmexofast at stage 1,
+        # where the seeds must land for its flux bootstrap.  The stage-3
+        # re-push this used to do silently undid `peak_find: true`, and
+        # would double every seed set now that add_seed_hints accumulates
+        # (reviews 1.6.15, 2.1.12).
 
         # fitmurel (coordinate choice, fitvcve family): sample the
         # LC-measured relative proper motion directly; the star component
@@ -865,10 +823,8 @@ class MulensEvent(Component):
             # remaining companions' log_s from any user s initval.
             up = self.config_manager.user_params
             for j in range(1, self.n_companions):
-                entry = up.get(f"lens.{j + 1}.s")
-                s_val = (
-                    entry.get("initval") if isinstance(entry, dict) else entry
-                )
+                entry = user_entry(up, f"lens.{j + 1}.s")
+                s_val = None if entry is None else entry.get("initval")
                 if s_val is None or float(s_val) <= 0.0:
                     continue
                 self.config_manager.add_hint(

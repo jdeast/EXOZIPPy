@@ -1,6 +1,5 @@
-# Coordinates from event_info.txt.
-star.Lens.ra:   {initval: 267.595, sigma: 0}
-star.Lens.dec:  {initval: -28.982, sigma: 0}
+star.Lens.ra:   {initval: 267.595, sigma: 0, citation: "DC2018 event_info.txt"}
+star.Lens.dec:  {initval: -28.982, sigma: 0, citation: "DC2018 event_info.txt"}
 
 # Not constrainable without data on the lens itself.  The Source needs none
 # of this: star.py pins mass/teff/feh/radius/ra/dec for any star that is
@@ -22,8 +21,8 @@ planet.Companion.radius: {sigma: 0}
 # tracked it monotonically, 0.0050 -> 0.0111 against a truth of 0.00607.
 # For real data, use a prior (or a Claret/LDC lookup driven by the SED's own
 # teff/logg); for a dataset generated with zero limb darkening, use zero.
-band.W149.u1: {initval: 0.0, sigma: 0}
-band.Z087.u1: {initval: 0.0, sigma: 0}
+band.W149.u1: {initval: 0.0, sigma: 0, citation: "DC2018 answer key (gamma = 0 in all 44 rows)"}
+band.Z087.u1: {initval: 0.0, sigma: 0, citation: "DC2018 answer key (gamma = 0 in all 44 rows)"}
 
 
 # --------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 > **Status: experimental.** The GUI is still buggy and has never been
 > verified driving a real fit end to end, on any platform. It is not part
-> of what the README means by a supported platform, and nothing in CI
+> of what EXOZIPPy supports, and nothing in CI
 > exercises it beyond unit tests of the modules below. Treat everything
 > here as a description of intent as much as of proven behavior.
 

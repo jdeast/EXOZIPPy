@@ -935,17 +935,18 @@ def test_a_specific_entry_about_the_SAME_field_still_wins():
     assert np.isclose(cfg["initval"][1], 9.0)
 
 
-def test_two_bare_scalars_leave_the_stored_shape_alone():
+def test_two_bare_scalars_are_stored_as_initval_entries():
     """
     Given a broadcast scalar and a specific scalar for one element,
     When the params are standardized,
-    Then the specific entry is still stored as a bare scalar.
+    Then both elements are stored as `{"initval": x}`, the specific value
+    winning on its element.
 
-    Both spellings mean `initval`, so there is nothing to inherit and the
-    entry does not need promoting to a dict.  Pinned because the merge could
-    easily have rewritten every such entry into `{"initval": x}` -- harmless
-    to `resolve()`, which accepts both, but a gratuitous change to the shape
-    of `user_params` that other readers and tests describe.
+    This used to pin the OPPOSITE -- the bare scalar left bare, to keep the
+    stored shape unchanged.  Review 1.1.7 reversed that on purpose: a bare
+    shape surviving the boundary is what let six readers re-guess it, and
+    one of them (_build_seed_overrides) drop a bare per-seed list to one
+    seed.  user_params now holds exactly one entry shape.
     """
     # ARRANGE / ACT
     cm = ConfigManager(
@@ -953,8 +954,8 @@ def test_two_bare_scalars_leave_the_stored_shape_alone():
     )
 
     # ASSERT
-    assert cm.user_params["star.0.radius"] == 3.0
-    assert cm.user_params["star.1.radius"] == 9.0
+    assert cm.user_params["star.0.radius"] == {"initval": 3.0}
+    assert cm.user_params["star.1.radius"] == {"initval": 9.0}
 
 
 def test_a_per_element_unit_over_an_inherited_broadcast_value_raises():
