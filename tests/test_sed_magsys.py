@@ -259,6 +259,33 @@ def test_a_filter_with_no_native_system_must_state_one(tmp_path):
     assert _loaded_sed(tmp_path, rows, star_names=("A", "B")).mag[0] == 1.0
 
 
+@pytest.mark.parametrize(
+    "name, column",
+    [
+        ("Roman/WFI.F146", "WFI_F146"),
+        ("Roman/WFI.F087", "WFI_F087"),
+        ("Kepler/Kepler.K", "Kepler_Kp"),
+    ],
+)
+def test_an_unresolved_native_system_must_be_stated(tmp_path, name, column):
+    """
+    Given a Roman WFI or Kepler Kp row (native system UNRESOLVED, JDE
+      2026-10-01: "Raise until we figure it out"),
+    When it states no magsys,
+    Then the SED raises naming the filter; stating one is accepted.
+    """
+    # ARRANGE
+    rows = [(name, 15.0, None, None)]
+
+    # ACT / ASSERT
+    with pytest.raises(
+        ValueError, match=f"{column} has no native.*UNRESOLVED"
+    ):
+        _loaded_sed(tmp_path, rows)
+    rows = [(name, 15.0, "AB", None)]
+    assert _loaded_sed(tmp_path, rows).mag[0] == 15.0 - _offset(column)
+
+
 # ---------------------------------------------------------------------------
 # Section 2 -- the offsets are the generator's, for the columns that ship
 # ---------------------------------------------------------------------------
@@ -318,7 +345,8 @@ def test_the_recorded_offsets_are_what_the_generator_computes():
         assert record.loc[col, "ab_minus_vega"] == pytest.approx(
             row["ab_minus_vega"], abs=1e-8
         )
-    assert fresh.loc["WFI_F087", "native_system"] == AB
+    # Roman's native system is UNRESOLVED (JDE 2026-10-01): recorded empty.
+    assert fresh.loc["WFI_F087", "native_system"] == ""
 
 
 def test_the_ab_offset_is_the_ab_magnitude_of_the_vega_zero():
@@ -350,7 +378,9 @@ def test_native_systems_agree_with_mist_where_mist_lists_the_filter():
     """
     Given MIST's filter_magsys.txt,
     When every record row MIST also lists is compared,
-    Then the native systems agree (SDSS/PS1/GALEX AB; 2MASS/Gaia/WISE Vega).
+    Then the native systems agree (SDSS/PS1/GALEX AB; 2MASS/Gaia/WISE Vega),
+      except where ours is deliberately unresolved (empty: Kepler Kp, JDE
+      2026-10-01), which the generator's cross-check also skips.
     """
     # ARRANGE
     mist = pd.read_csv(DEFAULT_FILTER_ROOT / "filter_magsys.txt", sep=r"\s+")
@@ -362,8 +392,11 @@ def test_native_systems_agree_with_mist_where_mist_lists_the_filter():
 
     # ASSERT
     assert {"SDSS_u", "PS_z", "GALEX_FUV", "2MASS_J"} <= set(both)
+    unresolved = [c for c in both if record.loc[c, "native_system"] == ""]
+    assert unresolved == ["Kepler_Kp"]
     for col in both:
-        assert record.loc[col, "native_system"] == mist[col], col
+        if col not in unresolved:
+            assert record.loc[col, "native_system"] == mist[col], col
 
 
 def test_a_record_for_a_different_zeropoint_is_refused():

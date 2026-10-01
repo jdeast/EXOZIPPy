@@ -215,14 +215,16 @@ NATIVE_SYSTEM: Dict[str, str] = {
     **{f: "Vega" for f in FILTER_SETS["Generic"]},
     **{f: "Vega" for f in FILTER_SETS["Keck"]},
     **{f: "Vega" for f in FILTER_SETS["TESS"]},  # TIC Tmag
-    # Roman's WFI zeropoints are quoted in AB.
-    **{f: "AB" for f in FILTER_SETS["Roman"]},
+    # Roman WFI and Kepler Kp: UNRESOLVED (JDE 2026-10-01: "I'm not sure
+    # about the Roman/Kepler system. Raise until we figure it out.").  Roman
+    # quotes AB zeropoints, but KIC Kp is built from SDSS-like g r i while
+    # MIST carries Kp as Vega.  No native system, so a row must state one.
+    **{f: "" for f in FILTER_SETS["Roman"]},
     # Zorro speckle photometry is a contrast between two stars, where the
     # system cancels; an absolute Zorro magnitude has no catalog to follow.
     **{f: "" for f in FILTER_SETS["Gemini"]},
     **{f: "AB" for f in FILTER_SETS["PAN-STARRS"]},  # Tonry+2012
-    # MIST (filter_magsys.txt) carries Kp as Vega.
-    **{f: "Vega" for f in FILTER_SETS["Kepler"]},
+    **{f: "" for f in FILTER_SETS["Kepler"]},  # unresolved, see Roman
     **{f: "AB" for f in FILTER_SETS["Euclid"]},
 }
 

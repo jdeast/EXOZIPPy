@@ -154,7 +154,8 @@ def native_system(filter_name, model_root, model):
     if not system:
         raise ValueError(
             f"Filter {filter_name!r} (BC column {col}) has no native "
-            f"magnitude system recorded in {path}; state it explicitly."
+            f"magnitude system recorded in {path} (none exists, or it is "
+            f"unresolved); state magsys explicitly."
         )
     return system
 
