@@ -140,7 +140,7 @@ def test_seed_hint_does_not_override_a_user_scalar_initval():
         {"source.Source.t_0": {"initval": 2455000.0}},
         system_config=_PSPL_CONFIG,
     )
-    cm.add_seed_hints([{"source.0.t_0": 2459999.0}])
+    cm.add_seed_hints([{"source.0.t_0": 2459999.0}], source="test")
     cm.finalize_user_params()
 
     assert cm._last_resolved["source.0.t_0"] == pytest.approx(2455000.0)
@@ -155,7 +155,7 @@ def test_seed_hint_beats_a_default_and_lands_at_derived_data_rank():
     user entry.
     """
     cm = ConfigManager({}, system_config=_PSPL_CONFIG)
-    cm.add_seed_hints([{"source.0.t_0": 2459999.0}])
+    cm.add_seed_hints([{"source.0.t_0": 2459999.0}], source="test")
     cm.finalize_user_params()
 
     assert cm._last_resolved["source.0.t_0"] == pytest.approx(2459999.0)
@@ -178,7 +178,7 @@ def test_seed_hint_conflicting_with_a_user_entry_is_not_over_constrained():
     cm = ConfigManager(
         {"lens.Comp.s": {"initval": 1.5}}, system_config=_BINARY_CONFIG
     )
-    cm.add_seed_hints([{"lens.1.log_s": float(np.log10(2.5))}])
+    cm.add_seed_hints([{"lens.1.log_s": float(np.log10(2.5))}], source="test")
     cm.finalize_user_params()
 
     assert not [
@@ -203,7 +203,8 @@ def test_user_initval_list_still_outranks_a_seed_hint_per_seed():
         system_config=_PSPL_CONFIG,
     )
     cm.add_seed_hints(
-        [{"source.0.t_0": 2459999.0}, {"source.0.t_0": 2459998.0}]
+        [{"source.0.t_0": 2459999.0}, {"source.0.t_0": 2459998.0}],
+        source="test",
     )
     cm.finalize_user_params()
 
@@ -221,7 +222,8 @@ def test_seed_hints_still_vary_the_start_across_seeds():
     """
     cm = ConfigManager({}, system_config=_PSPL_CONFIG)
     cm.add_seed_hints(
-        [{"source.0.t_0": 2459999.0}, {"source.0.t_0": 2459888.0}]
+        [{"source.0.t_0": 2459999.0}, {"source.0.t_0": 2459888.0}],
+        source="test",
     )
     cm.finalize_user_params()
 
@@ -252,7 +254,7 @@ def test_seed_hints_do_not_change_the_mmexofast_auto_trigger():
     before = cm.probe_derivable(paths)
 
     cm2 = ConfigManager(dict(params), system_config=_PSPL_CONFIG)
-    cm2.add_seed_hints([{"source.0.t_0": 2459999.0}])
+    cm2.add_seed_hints([{"source.0.t_0": 2459999.0}], source="test")
     after = cm2.probe_derivable(paths)
 
     assert before == set(paths)

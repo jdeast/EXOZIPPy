@@ -1580,8 +1580,8 @@ def test_check_data_format_warns_on_an_informed_trajectory(caplog):
 def test_check_data_format_sees_a_seed_only_trajectory(caplog):
     """
     Given flux data mislabelled as magnitudes, and a trajectory known ONLY
-      from the seed-0 hints (the automated `mmexofast: auto` workflow, where
-      the user typed no start values at all),
+      from the seed-0 hints (the automated workflow -- peak finder or
+      MMEXOFAST -- where the user typed no start values at all),
     When the geometry is probed through a real ConfigManager and the check
       runs,
     Then it warns.  The check once read cm.user_params alone and returned at
@@ -1598,7 +1598,7 @@ def test_check_data_format_sees_a_seed_only_trajectory(caplog):
         "source": [{"body": "star.Source"}],
     }
     cm = ConfigManager({}, system_config=config)
-    cm.add_seed_hints([dict(_TRAJECTORY)])
+    cm.add_seed_hints([dict(_TRAJECTORY)], source="test")
     inst = MulensInstrument.__new__(MulensInstrument)
     inst.config_manager = cm
     inst._n_sources = 1

@@ -1098,6 +1098,10 @@ class ConfigManager:
         # and every user entry outranks it.
         self.seed_resolved = None
         self.seed_hint_sets = []
+        # Who registered the current seed_hint_sets (add_seed_hints' required
+        # `source` label), so a second registration can name both callers
+        # when it refuses (review 2.1.25).
+        self.seed_hint_source = None
         self.scale_hints = {}  # path -> init_scale in internal units
         # path -> init_scale (internal) as the LAST relaxation solve left it:
         # defaults, component hints, user sigmas and the engine's own
@@ -1528,29 +1532,50 @@ class ConfigManager:
         """
         self.param_overrides.setdefault(path, {}).update(fields)
 
-    def add_seed_hints(self, seed_dicts, replace=False):
+    def add_seed_hints(self, seed_dicts, *, source, replace=False):
         """Register K per-seed observable sets for multi-seed sampling (P4).
 
         `seed_dicts` is a list of length K; each entry maps a parameter path
         (human-readable or index form) to a value in that parameter's user
         unit.  These feed the relaxation engine as one complete start point per
         seed (see finalize_user_params), at PRECEDENCE_DERIVED_DATA -- the same tier
-        as ``add_hint``'s default, because the MMEXOFAST loader (the primary
-        caller) is a derivation from the data, not a user statement.  Every
-        user entry therefore outranks a seed.  Paths absent from a given seed
-        fall back to the base (defaults/hints/user) solution for that seed.
+        as ``add_hint``'s default, because the seeders (MMEXOFAST, the built-in
+        peak finder) are derivations from the data, not user statements.
+        Every user entry therefore outranks a seed.  Paths absent from a given
+        seed fall back to the base (defaults/hints/user) solution for that
+        seed.
 
-        ACCUMULATES, like its siblings ``add_hint`` / ``add_scale_hint``: the
-        K sets are APPENDED after any already registered, in call order, so
-        two seeders (MMEXOFAST, the built-in peak finder) compose into one
-        list of alternative starts instead of the second silently discarding
-        the first (review 2.1.12).  A set is one complete start, so sets from
-        different callers are never merged element-wise, and none is dropped
-        as a duplicate -- a caller that pushes the same file twice has a
-        bookkeeping bug to fix at its source.  ``replace=True`` is the
-        explicit override: the existing sets are discarded first (the
-        ``peak_find: true`` A/B mode, which replaces MMEXOFAST on purpose).
+        ONE SEEDER PER FIT (review 2.1.25, JDE ruling 2026-09-30).  A second
+        registration without ``replace=True`` RAISES, naming the caller that
+        registered the existing sets and the new one.  It used to ASSIGN
+        (silently discarding the first caller's seeds, review 2.1.12) and then
+        to APPEND -- but a user per-seed ``initval: [a, b, c]`` list must match
+        the total K, and a K assembled from two unrelated seeders is a number
+        the user cannot know.  If a real two-seeder case ever appears, the
+        upgrade is to PAIR set k with set k, not to concatenate.
+        ``replace=True`` is the explicit override: the existing sets are
+        discarded (the ``peak_find: true`` A/B mode, which replaces
+        MMEXOFAST on purpose).
+
+        `source` is a REQUIRED label for the caller (e.g. the MMEXOFAST JSON
+        path, ``"peak finder (mulensinstrument)"``); it is recorded so the
+        refusal can name who got there first.
         """
+        if not source:
+            raise ValueError(
+                "add_seed_hints: `source` must name the caller registering "
+                "the seed sets."
+            )
+        if self.seed_hint_sets and not replace:
+            raise ValueError(
+                f"add_seed_hints: {source!r} tried to register "
+                f"{len(seed_dicts)} seed set(s), but {self.seed_hint_source!r} "
+                f"already registered {len(self.seed_hint_sets)}.  One seeder "
+                f"per fit (review 2.1.25): a user per-seed initval list must "
+                f"match K, and a K summed over unrelated seeders is not one "
+                f"the user can know.  Pass replace=True to discard the "
+                f"existing sets on purpose."
+            )
         processed = []
         for d in seed_dicts:
             pd = {}
@@ -1558,10 +1583,8 @@ class ConfigManager:
                 tpath, ival = self._translate_and_scale(path, value)
                 pd[tpath] = ival
             processed.append(pd)
-        if replace:
-            self.seed_hint_sets = processed
-        else:
-            self.seed_hint_sets.extend(processed)
+        self.seed_hint_sets = processed
+        self.seed_hint_source = source
 
     def seeded_paths(self):
         """Index-form paths seeded by ANY registered seed set.

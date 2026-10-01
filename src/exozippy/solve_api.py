@@ -119,7 +119,7 @@ class _WarningCollector(logging.Handler):
 #: configs and from what stages 1-4 actually open: `file`/`files` (every data
 #: component and the SED), `path` (the SED's file glob), `mask` (a flag file,
 #: when it is a string rather than a list), `mmexofast` (an explicit seed JSON,
-#: when it is a path rather than one of the `auto`/false keywords),
+#: when it is a path rather than the true/false keywords),
 #: `parameter_file` (System reads it), and `prefix` (mulensinstrument builds
 #: the MMEXOFAST cache path from it, and both reads and writes there).
 _PATH_KEYS = (
@@ -137,7 +137,7 @@ _GLOB_CHARS = "*?["
 def _joined_if_real(value, workdir):
     """``workdir/value``, but only when that names something that exists.
 
-    A string under a path key is not always a path: `mmexofast: auto` and a
+    A value under a path key is not always a path: `mmexofast: true` and a
     `mask:` given as a list of row indices share the key with real paths.
     Probing keeps those untouched, and keeps a genuinely missing file
     reporting the spelling the user wrote rather than an absolute path they

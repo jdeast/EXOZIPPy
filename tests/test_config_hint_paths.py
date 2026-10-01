@@ -143,7 +143,7 @@ def test_seed_hints_and_scale_hints_share_the_translation():
     cm = _cm()
 
     # ACT
-    cm.add_seed_hints([{"star.B.ra": 90.0}])
+    cm.add_seed_hints([{"star.B.ra": 90.0}], source="test")
     cm.add_scale_hint("star.B.ra", 90.0)
 
     # ASSERT

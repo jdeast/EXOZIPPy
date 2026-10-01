@@ -44,11 +44,12 @@ class _RecordingConfigManager:
     def add_scale_hint(self, path, scale):
         self.scale_hints[path] = scale
 
-    def add_seed_hints(self, seed_dicts, replace=False):
-        # Mirrors ConfigManager.add_seed_hints: accumulate (review 2.1.12).
-        if replace:
-            self.seed_hint_sets = []
-        self.seed_hint_sets.extend(seed_dicts)
+    def add_seed_hints(self, seed_dicts, *, source, replace=False):
+        # Mirrors ConfigManager.add_seed_hints: one seeder per fit (review
+        # 2.1.25) -- a second registration without replace=True raises.
+        if self.seed_hint_sets and not replace:
+            raise ValueError(f"second seed-set registration by {source!r}")
+        self.seed_hint_sets = list(seed_dicts)
 
 
 def _push(path, cfg_manager):
@@ -185,11 +186,11 @@ def _prepare_dc2018_128(tmp_path, **event_keys):
 def test_explicit_file_is_pushed_exactly_once_through_prepare(tmp_path):
     """
     Given an explicit `mmexofast:` file with 2 fits and the default
-    `peak_find: auto`,
+    (absent) `peak_find:`,
     When prepare() runs,
     Then there are exactly 2 seed sets: the file's, once.  With the stage-3
-    re-push still in place, add_seed_hints' accumulation would make it 4;
-    and the peak finder, seeing an already-seeded t_0, must not add a 5th.
+    re-push still in place the second registration would raise (review
+    2.1.25), and the default peak finder, one seeder per fit, stays out.
     """
     cm = _prepare_dc2018_128(tmp_path)
     with open(MMX_PATH) as f:

@@ -19,9 +19,11 @@ One component consumes this module, and one utility reads the same JSON:
   error-rescaling factors (``errfacs``) to its own files -- from an explicit
   ``mmexofast: <file>`` on the mulensevent block, or, when the user supplied
   no sufficient start values and no explicit file, by running MMEXOFAST on
-  the raw light curves ("data-driven hints").  It is the ONLY seed push:
-  ``MulensEvent`` re-pushed an explicit file at stage 3 until reviews
-  1.6.15 / 2.1.12, and ``ConfigManager.add_seed_hints`` now accumulates.
+  the raw light curves (``mmexofast: true``; MMEXOFAST never runs unasked
+  since review 8.6.25 -- the built-in peak finder is the default seeder).
+  It is the ONLY seed push: ``MulensEvent`` re-pushed an explicit file at
+  stage 3 until reviews 1.6.15 / 2.1.12, and ``ConfigManager.add_seed_hints``
+  now raises on a second registration (review 2.1.25).
 - ``utilities/mmexofast_to_params.py`` translates the same JSON to a
   params.yaml for humans; it deliberately does not import this module so the
   CLI works without the package installed.
@@ -38,7 +40,8 @@ wearing a quieter coat, so ``load_json`` distinguishes three cases and never
 collapses them:
 
 - ABSENT: ``None`` plus a warning; the caller decides (an explicit
-  ``mmexofast: <file>`` warns and skips, the auto path generates the file).
+  ``mmexofast: <file>`` raises FileNotFoundError before it gets here,
+  review 1.6.15; ``mmexofast: true`` generates its cache).
 - PRESENT and well-formed: the dict.
 - PRESENT and unreadable / unparseable / structurally wrong: raises
   ``CorruptMMEXOFASTFileError``. ``run_or_load`` catches it for its OWN
@@ -196,7 +199,7 @@ def user_hints_sufficient(config_manager, is_binary, want_rho):
     return ok
 
 
-def push_seed_hints(data, config_manager, want_rho, is_binary, source="?"):
+def push_seed_hints(data, config_manager, want_rho, is_binary, source):
     """Push every MMEXOFAST fit as a per-seed hint set (P4 multi-seed
     sampling), plus scale hints from fit 0's sigmas.
 
@@ -283,7 +286,7 @@ def push_seed_hints(data, config_manager, want_rho, is_binary, source="?"):
                 d["lens.1.q"] = float(p["q"])
         seed_sets.append(d)
 
-    config_manager.add_seed_hints(seed_sets)
+    config_manager.add_seed_hints(seed_sets, source=f"MMEXOFAST ({source})")
     logger.info(
         f"MMEXOFAST: loaded {len(seed_sets)} seed solution(s) from '{source}'."
     )
@@ -462,13 +465,12 @@ def run_or_load(
             else ""
         )
         raise ImportError(
-            preamble
-            + "MMEXOFAST auto-initialization needs the 'mmexofast' package "
+            preamble + "'mmexofast: true' needs the 'mmexofast' package "
             "(poetry install --with microlensing, or pip install "
             "git+https://github.com/jenniferyee/MMEXOFAST.git). Either "
             "install it, supply start values for the microlensing "
-            "parameters in the params file, or set 'mmexofast: false' on "
-            "the lens block to opt out."
+            "parameters in the params file, or drop the key from the "
+            "mulensevent block to seed with the built-in peak finder."
         ) from e
 
     if corrupt is not None:

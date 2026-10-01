@@ -99,7 +99,9 @@ def test_a_hint_and_a_seed_are_seen_and_a_user_entry_outranks_a_seed():
     # Arrange
     cm = _cm({"star.A.radius": {"initval": 0.85}})
     cm.add_hint("star.A.teff", 5100.0)
-    cm.add_seed_hints([{"star.A.feh": 0.2, "star.A.radius": 3.0}])
+    cm.add_seed_hints(
+        [{"star.A.feh": 0.2, "star.A.radius": 3.0}], source="test"
+    )
 
     # Act
     got = cm.probe_start(["star.0.teff", "star.0.feh", "star.0.radius"])
