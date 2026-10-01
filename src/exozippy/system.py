@@ -198,6 +198,10 @@ class System(Component):
         # register_branch_alternative / _add_branch_mixtures).  Rebuilt per
         # build_model for the same reason.
         self._branch_alternatives = []
+        # Per-combination terms and substitution sequences, set by
+        # _add_branch_mixtures and read by exozippy.branches at wrap-up.
+        self._branch_combination_terms = []
+        self._branch_combination_replacements = []
         # Record the params file ONLY when one was really read: an in-memory
         # user_params dict must not be blamed on a parameter_file the config
         # happens to name but System never opened -- and neither must a config
@@ -835,11 +839,14 @@ class System(Component):
             )
 
         pieces = []
+        combos = []
         for combo in range(n_comb):
             term = l_ref
             log_w = 0.0
+            applied = []
             for bit, branch in enumerate(branches):
                 if combo & (1 << bit):
+                    applied.append(branch["replacements"])
                     # One substitution at a time, NOT one merged dict: two
                     # branches routinely name the same node (two V_c/V_e orbits
                     # are two elements of one `ecc` vector), and merging kept
@@ -853,6 +860,16 @@ class System(Component):
                 else:
                     log_w += float(np.log1p(-branch["weight"]))
             pieces.append(term + log_w)
+            combos.append(applied)
+
+        # Kept for the REPORT (exozippy/branches.py): each draw's branch
+        # combination is drawn from exactly these per-combination terms --
+        # the ones the logaddexp below combines -- and every branch-dependent
+        # quantity is then re-evaluated under that combination's substitution
+        # sequence.  The same objects, so the report cannot drift from the
+        # likelihood it reports on.
+        self._branch_combination_terms = pieces
+        self._branch_combination_replacements = combos
 
         total = pieces[0]
         for piece in pieces[1:]:
@@ -864,6 +881,8 @@ class System(Component):
         """Constructs the PyMC probabilistic model for the entire system."""
         self._element_slice_checks = []
         self._branch_alternatives = []
+        self._branch_combination_terms = []
+        self._branch_combination_replacements = []
         with pm.Model() as model:
             # Stage 5: Automatic PyTensor Map Conversion
             # Convert logical numpy arrays into PyTensor variables for the graph
@@ -1688,6 +1707,23 @@ class System(Component):
             if bool(np.any(np.atleast_1d(p.is_sampled)))
             or not bool(np.any(np.atleast_1d(p.is_derived)))
         ]
+        # A node a branch alternative REPLACES (the V_c/V_e orbit's `ecc`) is
+        # an input too, read from the point: computed in the plot graph it is
+        # always the PRIMARY branch, while a posterior draw's value is the
+        # branch that draw was assigned (exozippy/branches.py).  A point that
+        # lacks it is refused in Component._point_to_plot_params rather than
+        # silently fed the initval.
+        branch_keys = {
+            key
+            for branch in self._branch_alternatives
+            for key in branch["replacements"]
+        }
+        self.plot_branch_labels = set()
+        for p in all_params:
+            if p.value in branch_keys:
+                self.plot_branch_labels.add(p.label)
+                if p not in self.plot_params:
+                    self.plot_params.append(p)
 
         # Delegate the actual compilation to the components
         for comp in self.active_components.values():

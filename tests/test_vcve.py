@@ -1185,3 +1185,80 @@ def test_either_half_can_be_turned_on_alone(transit_lc):
     geom_only.prepare()
     assert geom_only.orbit.ecc_modes == ["hk"]
     assert geom_only.orbit.inc_modes == ["chord"]
+
+
+def test_each_draw_reports_the_branch_it_was_assigned(vcve_transit_fit):
+    """
+    Given posterior-shaped draws of a built V_c/V_e model,
+    When the report draws each draw's branch (exozippy/branches.py),
+    Then `orbit.ecc` is that draw's assigned root -- upper or lower, never an
+      average -- every Deterministic built from it (the reported sqrt(e) pair)
+      agrees with it within the draw, and the plotters read `orbit.ecc` from
+      the point rather than recomputing the primary root.
+
+    Review 1.8.14 / JDE 2026-10-01: the trace's Deterministics are all the
+    UPPER root, which on examples/gj1214 put the reported eccentricity's 84th
+    percentile at 0.9999 while the mixture's own was 0.017.
+    """
+    import arviz as az
+
+    from exozippy.branches import resolve_branch_draws
+
+    system, model, start = vcve_transit_fit
+    rng = np.random.default_rng(5)
+    n_chains, n_draws = 2, 60
+    raw = {}
+    for rv in model.free_RVs:
+        base = np.asarray(start[model.rvs_to_values[rv].name], dtype=float)
+        vals = np.broadcast_to(base, (n_chains, n_draws) + base.shape).copy()
+        if rv.name in {
+            "orbit.vcve_raw",
+            "orbit.xomega_raw",
+            "orbit.yomega_raw",
+        }:
+            vals += rng.normal(0.0, 1.0, size=vals.shape)
+        raw[rv.name] = vals
+    idata = az.from_dict({"posterior": raw})
+    dets = pm.compute_deterministics(
+        idata.posterior.to_dataset(),
+        model=model,
+        merge_dataset=True,
+        progressbar=False,
+    )
+    idata = az.from_dict(
+        {"posterior": {k: dets[k].values for k in dets.data_vars}}
+    )
+    idata.posterior.attrs["random_seed"] = 3
+
+    regenerated = resolve_branch_draws(system, model, idata, cores=1)
+
+    post = idata.posterior
+    assert {"orbit.ecc", "orbit.secosw", "orbit.sesinw"} <= regenerated
+    x = post["orbit.vcve"].values[..., 0]
+    w = post["orbit.omega"].values[..., 0]
+    ecc = post["orbit.ecc"].values[..., 0]
+    z = idata.sample_stats["branch_combination"].values
+    hi = _f(physics.calc_ecc_from_vcve(pt.as_tensor_variable(x), w)).reshape(
+        x.shape
+    )
+    lo = _f(
+        physics.calc_ecc_from_vcve_lo(pt.as_tensor_variable(x), w)
+    ).reshape(x.shape)
+    # Both roots are exercised (15 of 120 draws take the lower one here), and
+    # a lower root that is negative by more than a few widths of the
+    # existence bound (0.0088 in e) never is: past that its weight is ~0.
+    assert 0 < np.sum(z == 1) < z.size
+    lo_unclipped = _f(
+        physics.ecc_from_vcve_unclipped(
+            pt.as_tensor_variable(x), w, upper=False
+        )
+    ).reshape(x.shape)
+    assert np.all(lo_unclipped[z == 1] > -0.03)
+    np.testing.assert_allclose(ecc, np.where(z == 1, lo, hi), atol=1e-12)
+    np.testing.assert_allclose(
+        post["orbit.secosw"].values[..., 0],
+        np.sqrt(np.maximum(ecc, physics.ECC_FLOOR)) * np.cos(w),
+        atol=1e-6,
+    )
+    assert "orbit.ecc" in system.plot_branch_labels
+    assert "orbit.ecc" in {p.label for p in system.plot_params}

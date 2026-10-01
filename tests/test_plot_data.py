@@ -920,7 +920,11 @@ def test_point_to_plot_params_names_a_misshapen_input():
     point = {"a.inpt": np.array([5.0, 6.0])}
 
     out = Component._point_to_plot_params(
-        None, point, SimpleNamespace(plot_params=[full, scal, in_point])
+        None,
+        point,
+        SimpleNamespace(
+            plot_params=[full, scal, in_point], plot_branch_labels=set()
+        ),
     )
     np.testing.assert_array_equal(out[0], [1.0, 2.0])
     assert out[1] == 2.0 and isinstance(out[1], float)
@@ -933,5 +937,17 @@ def test_point_to_plot_params_names_a_misshapen_input():
     )
     with pytest.raises(ValueError, match=r"'lens\.s'.*\(2,\).*\(1,\)"):
         Component._point_to_plot_params(
-            None, point, SimpleNamespace(plot_params=[full, bad])
+            None,
+            point,
+            SimpleNamespace(plot_params=[full, bad], plot_branch_labels=set()),
+        )
+
+    # A branch-dependent input (System.plot_branch_labels; the V_c/V_e
+    # orbit's ecc) is never fed its initval: the point must carry the value
+    # the draw was assigned (exozippy/branches.py, review 1.8.14).
+    with pytest.raises(KeyError, match=r"'a\.full'.*branch-dependent"):
+        Component._point_to_plot_params(
+            None,
+            point,
+            SimpleNamespace(plot_params=[full], plot_branch_labels={"a.full"}),
         )

@@ -376,7 +376,8 @@ def calc_ecc_from_vcve(vcve, omega):
     exists to remove.)  Where BOTH roots are physical -- ``x > 1`` with
     ``sin omega < 0`` -- this is the higher-eccentricity solution and the
     mixture carries the other one's likelihood, so the choice decides only
-    which branch the trace reports as ``orbit.ecc``.
+    how the graph is built: the REPORT draws each draw's root from the
+    mixture (exozippy/branches.py, JDE 2026-10-01).
     """
     a, b, root = _vcve_quadratic(vcve, omega)
     return pt.clip((-b + root) / (2.0 * a), 0.0, MAX_ECC)
