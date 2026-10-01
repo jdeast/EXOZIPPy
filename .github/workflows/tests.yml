@@ -223,15 +223,13 @@ jobs:
       # the old entry and still unpack it at the old location; the key has to
       # change for a new entry to be written at the new one.
       #
-      # The path names the two DOWNLOADED files, not their directory. Both
-      # land in models/NextGen/BCs/ next to 68 TRACKED BC tables, and a cache
-      # is restored after checkout and overwrites what it finds. Caching the
-      # directory would therefore let a stale entry silently revert a tracked
-      # table -- and the key, being the spectra md5, would not change when a
-      # table did, so it would never self-heal. That is not hypothetical: the
-      # "sed: fix Av bug in shipped 2MASS/WISE/GAIA BC tables" commit is
-      # exactly the change that would have been reverted under CI while
-      # passing locally.
+      # The path names the two DOWNLOADED files, not their directory. The
+      # directory also holds TRACKED files (NextGen.grid.yaml, plot.py), and a
+      # cache is restored after checkout and overwrites what it finds, so
+      # caching the directory would let a stale entry silently revert one --
+      # with a key that would not change when the tracked file did, so it
+      # would never self-heal. (The BC tables there used to be tracked too;
+      # they are now Zenodo downloads with their own cache step below.)
       #
       # The other Zenodo asset, the 128 MB MIST EEP grid (models/MIST/eep_grid
       # .py, same fetch_assets core), is deliberately not cached: the only
@@ -244,6 +242,25 @@ jobs:
             src/exozippy/models/NextGen/BCs/NextGen.spectra.csv
             src/exozippy/models/NextGen/BCs/NextGen.wavelength.csv
           key: nextgen-spectra-p2-7a2b81333f6a5bfccd4cbc07bdea6648
+
+      # The NextGen BC tables (~96 MB, 14 parquet files) are Zenodo downloads
+      # too since they left the repository (the wheel had grown past PyPI's
+      # 100 MB limit): models/NextGen/bc_tables.py pins them and fetches the
+      # ones a test reads, and tests/conftest.py fetches them all once before
+      # the suite. Cached for the same reason as the spectra.
+      #
+      # The KEY hashes bc_tables.py, the file that holds the pins, so a new
+      # version of the table set (new pins) is a new entry by construction;
+      # an edit to that file's prose costs one re-download, nothing worse.
+      # The PATH is a glob of the downloaded tables only -- every
+      # *.bc.parquet there is git-ignored, so nothing tracked can be
+      # reverted by a restore -- and, like the spectra path, has to be kept
+      # in sync with bc_tables.BC_TABLE_DIR by hand.
+      - name: Cache the Zenodo BC tables
+        uses: actions/cache@v6
+        with:
+          path: src/exozippy/models/NextGen/BCs/*.bc.parquet
+          key: nextgen-bc-tables-p1-${{ hashFiles('src/exozippy/models/NextGen/bc_tables.py') }}
 
       # The mulensing component sets astropy's solar-system ephemeris to
       # "jpl", which downloads the ~115 MB de430 kernel into ~/.astropy/cache
@@ -603,6 +620,13 @@ jobs:
             src/exozippy/models/NextGen/BCs/NextGen.spectra.csv
             src/exozippy/models/NextGen/BCs/NextGen.wavelength.csv
           key: nextgen-spectra-p2-7a2b81333f6a5bfccd4cbc07bdea6648
+
+      # Same BC-table cache as the matrix job -- see the comment there.
+      - name: Cache the Zenodo BC tables
+        uses: actions/cache@v6
+        with:
+          path: src/exozippy/models/NextGen/BCs/*.bc.parquet
+          key: nextgen-bc-tables-p1-${{ hashFiles('src/exozippy/models/NextGen/bc_tables.py') }}
 
       # Same astropy ephemeris-kernel cache as the matrix job -- see the
       # comment there.

@@ -2,14 +2,16 @@
 
 Some of the data EXOZIPPy needs is far too large to ship in the package --
 the NextGen model spectra (~250 MB) that synthesize bolometric corrections
-for filters with no precomputed BC table, and the MIST EEP track grid
-(~128 MB) the evolutionary model interpolates. Both are git-ignored, fetched
-on first use, and cached in place.
+for filters with no precomputed BC table, the precomputed NextGen BC tables
+themselves (~96 MB), and the MIST EEP track grid (~128 MB) the evolutionary
+model interpolates. All are git-ignored, fetched on first use, and cached in
+place.
 
 This module owns the mechanics; the callers own their asset tables. It lives
-under ``utilities/`` rather than inside a component because its two callers
-(``components/sed/make_bc.py`` and ``models/MIST/eep_grid.py``) sit in
-different trees and a cross-component import would be the wrong dependency.
+under ``utilities/`` rather than inside a component because its callers
+(``components/sed/make_bc.py``, ``models/NextGen/bc_tables.py`` and
+``models/MIST/eep_grid.py``) sit in different trees and a cross-component
+import would be the wrong dependency.
 Note it is deliberately NOT a registry utility: it has no ``build_parser`` /
 ``main`` pair and is never surfaced by ``Component.get_utilities()``.
 

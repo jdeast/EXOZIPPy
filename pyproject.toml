@@ -250,6 +250,10 @@ exozippy-exofast2exozippy = "exozippy.utilities.exofast2exozippy:main"
 # Example data that is NOT redistributed with EXOZIPPy (licence
 # compatibility -- see components/pharmacokinetics/fetch_theoph.py).
 exozippy-fetch-theoph = "exozippy.components.pharmacokinetics.fetch_theoph:main"
+# Pre-fetch the NextGen bolometric-correction tables, which are published on
+# Zenodo rather than shipped in the wheel (models/NextGen/bc_tables.py), so
+# SED fits can run offline afterwards.
+exozippy-fetch-bc-tables = "exozippy.models.NextGen.bc_tables:main"
 
 # Only poetry-specific configuration belongs under [tool.poetry] now; every
 # field above is standard PEP 621 metadata that any tool can read.

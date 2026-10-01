@@ -37,7 +37,12 @@ from exozippy.physics_registry import PHYSICS_REGISTRY
 # ---------------------------------------------------------------------------
 
 _MODEL_ROOT = DEFAULT_MODEL_ROOT
-_2MASS_NEXTGEN = _MODEL_ROOT / "NextGen" / "BCs" / "2MASS.bc.parquet"
+
+
+def _shipped_2mass():
+    """The published 2MASS table, fetched into the default root on first
+    use (it is not tracked: models/NextGen/bc_tables.py)."""
+    return find_bc_table(_MODEL_ROOT, "NextGen", "2MASS")
 
 
 # A minimal grid_dict mirroring what build_bc_grid / slice_bc expect.
@@ -76,7 +81,7 @@ def test_read_bc_table_returns_dataframe_with_correct_columns():
     and exactly the three 2MASS filter columns.
     """
     # ARRANGE / ACT
-    df = read_bc_table(_2MASS_NEXTGEN)
+    df = read_bc_table(_shipped_2mass())
 
     # ASSERT
     for col in ("teff", "logg", "feh", "Av"):
@@ -92,7 +97,7 @@ def test_read_bc_table_teff_column_is_linear_not_log():
     (not log10 values), so all entries should be greater than 100.
     """
     # ARRANGE / ACT
-    df = read_bc_table(_2MASS_NEXTGEN)
+    df = read_bc_table(_shipped_2mass())
 
     # ASSERT
     assert (df["teff"] > 100).all(), (
@@ -108,7 +113,7 @@ def test_read_bc_table_carries_per_filter_metadata():
     filter column.
     """
     # ARRANGE / ACT
-    meta = read_bc_table(_2MASS_NEXTGEN).attrs["meta"]
+    meta = read_bc_table(_shipped_2mass()).attrs["meta"]
 
     # ASSERT
     assert meta["filters"]["2MASS_J"]["svo_id"] == "2MASS/2MASS.J"

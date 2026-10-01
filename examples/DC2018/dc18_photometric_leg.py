@@ -45,20 +45,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import dc18_common as C  # noqa: E402
 
-BC = os.path.normpath(
-    os.path.join(
-        HERE,
-        "..",
-        "..",
-        "src",
-        "exozippy",
-        "models",
-        "NextGen",
-        "BCs",
-        "Roman",
-        "feh+0.0_afe+0.0.Roman",
-    )
-)
 TSUN = 5772.0
 MBOL_SUN = 4.74
 EVENTS = ("008", "062", "128", "152", "194", "223")
@@ -74,18 +60,18 @@ FIT_RATIO = {
 
 
 def bc_grid(logg_target=4.5):
-    header = next(ln for ln in open(BC) if "lgTef" in ln)
-    cols = header.lstrip("#").split()
-    tab = np.genfromtxt(BC, comments="#", skip_header=1)
-    i146 = 6 + cols[6:].index("WFI_F146")
-    i087 = 6 + cols[6:].index("WFI_F087")
-    av0 = np.isclose(tab[:, 4], 0.0)
-    loggs = np.unique(tab[av0, 1])
+    """Roman BCs at [Fe/H] 0, Av 0, the logg node nearest logg_target."""
+    tab = C.nextgen_bc_slice("Roman", feh=0.0)
+    av0 = tab[np.isclose(tab["Av"], 0.0)]
+    loggs = np.unique(av0["logg"])
     lg = loggs[np.argmin(abs(loggs - logg_target))]
-    sel = av0 & np.isclose(tab[:, 1], lg)
-    order = np.argsort(tab[sel, 0])
-    teff = 10.0 ** tab[sel, 0][order]
-    return teff, tab[sel, i146][order], tab[sel, i087][order], lg
+    sel = av0[np.isclose(av0["logg"], lg)].sort_values("teff")
+    return (
+        sel["teff"].to_numpy(),
+        sel["WFI_F146"].to_numpy(),
+        sel["WFI_F087"].to_numpy(),
+        lg,
+    )
 
 
 def ab_minus_vega(filter_root, names=("Roman/WFI.F087", "Roman/WFI.F146")):

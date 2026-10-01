@@ -1865,7 +1865,8 @@ class SED(Component):
         if "NextGen" in self.sedmodel:
             prose.add(
                 f"We model the SED of the {noun} {names} with pre-computed bolometric "
-                rf"correction tables based on the {self.sedmodel} stellar atmospheric models \citep{{{self.citation}}}, "
+                r"correction tables \citep{Eastman:2026bc} "
+                rf"based on the {self.sedmodel} stellar atmospheric models \citep{{{self.citation}}}, "
                 r"which used an $R_V = 3.1$ reddening law \citep{Cardelli:1989}, and "
                 r"SVO filter transmission curves (DEAL WITH CITING THIS LATER). ",
                 section="stellar",

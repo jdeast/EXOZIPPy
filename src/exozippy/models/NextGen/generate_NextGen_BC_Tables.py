@@ -43,6 +43,7 @@ from exozippy.components.sed.bc_grid import (
     bc_nodes_to_compute,
     bc_table_filter_columns,
     bc_table_path,
+    ensure_bc_tables,
     facility_from_svo_name,
     read_bc_meta,
     resolve_filter_name,
@@ -450,6 +451,17 @@ def plan_bc_work(
     grid = read_grid_yaml(model_root)
     alias_df = _load_alias_table()
     reusable = (lambda meta: False) if overwrite else _reusable
+
+    # The tables are published on Zenodo, not tracked (models/NextGen/
+    # bc_tables.py): fetch any that are absent BEFORE planning, or a fresh
+    # checkout would plan -- and then write -- a facility's table from
+    # scratch holding only the columns asked for here, dropping every other
+    # published column.  allow_local_changes: this pipeline merges into
+    # these files, so a table that already differs from the pin (an
+    # interrupted run being resumed) is its own work, not corruption.
+    ensure_bc_tables(
+        model_root, MODEL, list(filter_sets), allow_local_changes=True
+    )
 
     plan = {}
     for fac, filters in filter_sets.items():

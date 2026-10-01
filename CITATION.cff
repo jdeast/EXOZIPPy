@@ -1,0 +1,53 @@
+# Citation metadata for EXOZIPPy. GitHub's "Cite this repository" button is
+# built from this file, and Zenodo's GitHub integration takes the creators of
+# each future release's software record from it -- edit it here (authors,
+# affiliations, ORCIDs) to change both.
+cff-version: 1.2.0
+message: "If you use EXOZIPPy, please cite it using this metadata, and cite each Zenodo data record your fit uses."
+type: software
+title: "EXOZIPPy"
+license: BSD-3-Clause
+repository-code: "https://github.com/jdeast/EXOZIPPy"
+# Concept DOI of the GitHub-release software record: it always resolves to
+# the latest release. For reproducibility, cite the version DOI of the
+# release you used (v0.1.0rc2 is 10.5281/zenodo.22779459).
+doi: 10.5281/zenodo.21630654
+keywords:
+  - exofast
+  - exofastv2
+  - exoplanet
+  - transit
+  - radial velocity
+  - sed
+  - mist
+  - microlensing
+authors:
+  - family-names: Eastman
+    given-names: Jason
+    affiliation: "Harvard College Observatory"
+    orcid: "https://orcid.org/0000-0003-3773-5142"
+  - family-names: Sandhaus
+    given-names: Phoebe
+    orcid: "https://orcid.org/0000-0002-6019-4818"
+  - family-names: Tang
+    given-names: Melody
+    affiliation: "Cornell University"
+  - family-names: Wang
+    given-names: Xian-Yu
+    affiliation: "Indiana University"
+    orcid: "https://orcid.org/0000-0002-0376-6365"
+  - family-names: Poleski
+    given-names: Radek
+    affiliation: "University of Warsaw"
+    orcid: "https://orcid.org/0000-0002-9245-6368"
+  - family-names: Yee
+    given-names: Jennifer
+    orcid: "https://orcid.org/0000-0001-9481-7123"
+  - family-names: Dedrick
+    given-names: Cayla
+    affiliation: "Penn State University"
+    orcid: "https://orcid.org/0000-0001-9408-8848"
+  - family-names: Zieba
+    given-names: Sebastian
+    affiliation: "Center for Astrophysics"
+    orcid: "https://orcid.org/0000-0003-0562-6750"

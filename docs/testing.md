@@ -344,6 +344,19 @@ Two properties of the hook that this did **not** change, and that still bite:
   Do not kill a run in progress; the work is recoverable from the patch it prints under
   `~/.cache/pre-commit/`, but only by hand.
 
+## Model data from Zenodo: the spectra and the BC tables
+
+The NextGen spectra, the NextGen BC tables and the MIST EEP grid are not in the
+repository; each is fetched from Zenodo on first use (`utilities/zenodo.py`). The
+autouse `_no_shared_download_cache` fixture switches the machine cache
+(`~/.cache/exozippy/downloads`) off inside every test, so the tables a test reads must
+already be in the tree. `tests/conftest.py::_prewarm_bc_tables` puts every published BC
+table there once, before the suite (served by the machine cache when it is warm, so a
+fresh worktree costs hard links, not a download); a failure is reported as a warning and
+then re-raised by each SED test that needs a table. CI restores both the spectra and the
+tables with actions/cache (`.github/workflows/tests.yml`). Offline with a cold cache,
+run `exozippy-fetch-bc-tables` once with network first.
+
 ## Suite runtime and the pytensor compile cache
 
 The suite ran in **~16 minutes warm** on an idle 36-core box (`-n 6`, 3108 tests,

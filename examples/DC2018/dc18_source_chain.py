@@ -55,7 +55,6 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import dc18_common as C  # noqa: E402
 
-ROOT = HERE.parent.parent / "src" / "exozippy" / "models" / "NextGen" / "BCs"
 AB_MINUS_VEGA = {
     "WFI_F087": 0.4986,
     "WFI_F146": 1.0373,
@@ -96,19 +95,19 @@ def load_grid(feh="+0.0"):
     """Per band: (Av axis, one (logTeff, logg) interpolator per Av)."""
     out = {}
     for fam in ("Roman", "2MASS"):
-        p = ROOT / fam / f"feh{feh}_afe+0.0.{fam}"
-        hdr = next(ln for ln in open(p) if "lgTef" in ln).lstrip("#").split()
-        tab = np.genfromtxt(p, comments="#", skip_header=1)
-        avs = np.unique(tab[:, 4])
-        for b in hdr[6:]:
-            if b not in BANDS:
+        tab = C.nextgen_bc_slice(fam, feh=float(feh))
+        avs = np.unique(tab["Av"])
+        for b in BANDS:
+            if b not in tab.columns:
                 continue
-            j = hdr.index(b)
             fns = []
             for av in avs:
-                s = np.isclose(tab[:, 4], av)
+                s = tab[np.isclose(tab["Av"], av)]
                 fns.append(
-                    LinearNDInterpolator(tab[s][:, [0, 1]], tab[s][:, j])
+                    LinearNDInterpolator(
+                        np.column_stack([np.log10(s["teff"]), s["logg"]]),
+                        s[b].to_numpy(),
+                    )
                 )
             out[b] = (avs, fns)
     return out

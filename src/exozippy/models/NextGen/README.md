@@ -4,14 +4,13 @@ The SED component reads bolometric corrections BC_X(Teff, log g, [Fe/H], A_V) fr
 
 ```
 models/NextGen/BCs/
-    NextGen.grid.yaml          # the (teff, logg, feh, av) axes
-    2MASS.bc.parquet
+    NextGen.grid.yaml          # the (teff, logg, feh, av) axes (tracked)
+    2MASS.bc.parquet           # fetched from Zenodo on first use
     GAIA.bc.parquet
-    Generic.bc.parquet
-    Keck.bc.parquet
-    TESS.bc.parquet
-    WISE.bc.parquet
+    ...                        # one per facility; bc_tables.py lists them
 ```
+
+The tables are NOT tracked in git or shipped in the wheel: they are published on Zenodo and pinned (record id, size, md5) in `bc_tables.py`, which fetches the ones a fit reads on first use (`exozippy-fetch-bc-tables` pre-fetches all of them). After regenerating or extending tables here, publish them as a NEW VERSION of the Zenodo record and update the pins in `bc_tables.py` -- until then a fit refuses the locally changed table rather than overwriting it or silently using it (`components/sed/sed.md`).
 
 Each table is long-format, one row per grid node, with columns `teff logg feh alpha Av Rv <filter columns>`. Filter columns are named by their MIST BC-column name (e.g. `2MASS_J`, `Gaia_G_DR2Rev`). `alpha` records the $[\alpha/\text{Fe}]$ of the spectrum a row was computed from; it is provenance, not a grid axis. `df.attrs["meta"]` (preserved by `pd.read_parquet`) holds the table metadata and, per filter column, its SVO id, zeropoint, flux weighting and generator. `components/sed/bc_grid.py` owns the format (`read_bc_table`, `write_bc_table`, `bc_table_path`).
 
@@ -69,7 +68,7 @@ with $L_0 = 3.0128\times10^{28}$ W (IAU 2015), the SVO Vega $F_\lambda$ zeropoin
 
 ## Legacy text tables
 
-Before this pipeline, the tables shipped as one text file per facility and [Fe/H] (`BCs/{FACILITY}/feh{+/-X.X}_afe+0.0.{FACILITY}`). `convert_legacy_BC_tables.py` converts those into the parquet format unchanged, so the package keeps working until step 2 has been run. Those text tables were photon-weighted for every filter, which is 0.07 - 0.18 mag off for the energy-counter bands (Gaia, TESS, WISE W3); regenerate them with this pipeline.
+Before this pipeline, the tables shipped as one text file per facility and [Fe/H] (`BCs/{FACILITY}/feh{+/-X.X}_afe+0.0.{FACILITY}`), photon-weighted for every filter (0.07 - 0.18 mag off for the energy-counter bands: Gaia, TESS, WISE W3). They were converted to parquet once, superseded by step 2, and deleted together with their converter (`convert_legacy_BC_tables.py`) when the tables moved to Zenodo; both remain in git history.
 
 ## Filters with no table
 

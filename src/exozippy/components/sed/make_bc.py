@@ -87,6 +87,7 @@ from .bc_grid import (
     bc_nodes_to_compute,
     bc_table_filter_columns,
     bc_table_path,
+    ensure_bc_tables,
     facility_from_svo_name,
     grid_yaml_axes,
     peek_grid_axes,
@@ -133,7 +134,7 @@ _DOWNSAMPLING_WARNING = (
     "Bolometric corrections synthesized from them carry errors of order 2 "
     "percent -- larger than the photometric uncertainties of most modern "
     "surveys, so a BC table generated here can dominate the error budget of "
-    "any parameter that depends on it. The shipped BC tables (models/%s/BCs/) "
+    "any parameter that depends on it. The published BC tables (models/%s/BCs/) "
     "are not affected; this applies only to tables you generate yourself for "
     "filters that have none. Full-resolution spectra (~250 GB) are the "
     "intended long-term fix and are not distributed yet."
@@ -376,6 +377,13 @@ def make_bc_tables(
         fac = facility_from_svo_name(svo_id)
         col = resolve_filter_name(svo_id, alias_df, alias="MIST")
         by_facility.setdefault(fac, []).append((svo_id, col))
+
+    # Fetch absent published tables first, so a new column is merged INTO
+    # the published table rather than written as a one-column table that
+    # replaces it (see generate_NextGen_BC_Tables.plan_bc_work).
+    ensure_bc_tables(
+        model_root, model, list(by_facility), allow_local_changes=True
+    )
 
     plan = {}
     for fac, items in by_facility.items():
