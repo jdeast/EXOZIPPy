@@ -37,6 +37,7 @@ import yaml
 from exozippy.components.sed.bc_grid import (
     _KEY_DECIMALS,
     BC_PARAM_COLS,
+    DEFAULT_FILTER_ROOT,
     DEFAULT_MODEL_ROOT,
     GRID_KEY_COLS,
     _load_alias_table,
@@ -49,10 +50,12 @@ from exozippy.components.sed.bc_grid import (
     resolve_filter_name,
     write_bc_table,
 )
+from exozippy.components.sed.magsys import MAGSYS_COLUMNS, magsys_table_path
 from exozippy.filters.filter import Filter
 from exozippy.models.NextGen.bolometric_correction import (
     L0,
     BolometricCorrection,
+    _filter_set_data,
 )
 from exozippy.models.NextGen.nextgen_spectra import (
     SPECTRA_RAW_PATH_DEFAULT,
@@ -95,9 +98,10 @@ FLUX_WEIGHTING = "detector"
 # shipped column; add a filter here and re-run step 2 to ship a new one.
 #
 # Every column is VEGA-referenced (MAG_SYSTEM above), including the filters
-# whose catalogs are natively AB (SLOAN, PAN-STARRS, GALEX). The SED does not
-# yet convert an AB magnitude (review 1.9.1), so an AB-catalog magnitude in
-# one of those bands must be converted to Vega before it is fitted.
+# whose catalogs are natively AB (SLOAN, PAN-STARRS, GALEX, Euclid). The SED
+# converts an AB row onto the column's Vega system with the column's
+# m_AB - m_Vega offset, which write_magsys_table ships beside the tables
+# together with each filter's NATIVE_SYSTEM below (review 1.9.1).
 FILTER_SETS: Dict[str, List[str]] = {
     "2MASS": ["2MASS/2MASS.J", "2MASS/2MASS.H", "2MASS/2MASS.Ks"],
     "GAIA": [
@@ -191,6 +195,35 @@ FILTER_SETS: Dict[str, List[str]] = {
         "Euclid/NISP.J",
         "Euclid/NISP.H",
     ],
+}
+
+
+# The magnitude system each filter's catalogs publish in -- what an SED row
+# with no `magsys:` means (JDE ruling 2026-10-01).  Every FILTER_SETS entry
+# must have one (_check_filter_sets); "" declares that the filter has NO
+# native system, so a row in it must state one.  Where MIST's
+# filters/filter_magsys.txt lists the filter, the two must agree
+# (magsys_table raises otherwise).  SVO's own `MagSys` field is not usable
+# for this: it reads "Vega" for SDSS, PS1 and GALEX alike.
+NATIVE_SYSTEM: Dict[str, str] = {
+    **{f: "Vega" for f in FILTER_SETS["2MASS"]},  # Cohen+2003
+    **{f: "Vega" for f in FILTER_SETS["GAIA"]},  # Gaia VEGAMAG
+    **{f: "Vega" for f in FILTER_SETS["TYCHO"]},
+    **{f: "AB" for f in FILTER_SETS["SLOAN"]},  # Fukugita+1996
+    **{f: "Vega" for f in FILTER_SETS["WISE"]},  # Wright+2010
+    **{f: "AB" for f in FILTER_SETS["GALEX"]},  # Morrissey+2007
+    **{f: "Vega" for f in FILTER_SETS["Generic"]},
+    **{f: "Vega" for f in FILTER_SETS["Keck"]},
+    **{f: "Vega" for f in FILTER_SETS["TESS"]},  # TIC Tmag
+    # Roman's WFI zeropoints are quoted in AB.
+    **{f: "AB" for f in FILTER_SETS["Roman"]},
+    # Zorro speckle photometry is a contrast between two stars, where the
+    # system cancels; an absolute Zorro magnitude has no catalog to follow.
+    **{f: "" for f in FILTER_SETS["Gemini"]},
+    **{f: "AB" for f in FILTER_SETS["PAN-STARRS"]},  # Tonry+2012
+    # MIST (filter_magsys.txt) carries Kp as Vega.
+    **{f: "Vega" for f in FILTER_SETS["Kepler"]},
+    **{f: "AB" for f in FILTER_SETS["Euclid"]},
 }
 
 
@@ -631,11 +664,116 @@ def generate_bc_tables(
     if save:
         for fac in out:
             print(f"Wrote {bc_table_path(model_root, MODEL, fac)}")
+        # The offsets are a property of the columns just written (profile,
+        # weighting, zeropoint), so they are rewritten with them -- a
+        # regenerated column cannot keep a stale offset.
+        write_magsys_table(filter_sets, model_root)
     return {
         fac: pd.concat(frames, ignore_index=True)
         for fac, frames in out.items()
         if frames
     }
+
+
+# -------------------------------------------------------------------
+# The per-column magnitude-system record (review 1.9.1)
+# -------------------------------------------------------------------
+
+
+def _mist_native_systems() -> Dict[str, str]:
+    """MIST's per-filter native system (filters/filter_magsys.txt)."""
+    path = DEFAULT_FILTER_ROOT / "filter_magsys.txt"
+    df = pd.read_csv(path, sep=r"\s+")
+    return dict(zip(df["filter"], df["system"]))
+
+
+def magsys_table(
+    filter_sets: Dict[str, List[str]] = FILTER_SETS,
+) -> pd.DataFrame:
+    """
+    One row per BC column of `filter_sets`: its native magnitude system
+    (NATIVE_SYSTEM) and m_AB - m_Vega, the AB magnitude of the column's
+    Vega zero.
+
+    The offset is computed by BolometricCorrection's own filter-set data
+    (`filter_ab_minus_vega`): the same processed filter profile, the same
+    flux weighting (FLUX_WEIGHTING) and the same SVO Vega zeropoint that
+    the column's BCs are divided by, integrated against the AB reference
+    spectrum. It needs the filter profiles only, not the spectra. The
+    zeropoint and weighting are recorded with it so the SED can check the
+    record against the column's filter_meta (components/sed/magsys.py).
+
+    Raises for a filter with no NATIVE_SYSTEM entry, and for one whose
+    entry disagrees with MIST's filter_magsys.txt where MIST lists it.
+    """
+    if MAG_SYSTEM != "Vega":
+        raise RuntimeError(
+            f"magsys_table records m_AB - m_Vega for Vega-referenced columns; "
+            f"MAG_SYSTEM is {MAG_SYSTEM!r}."
+        )
+    _check_filter_sets(filter_sets)
+    mist_native = _mist_native_systems()
+    rows = []
+    for fac, filters in filter_sets.items():
+        missing = [f for f in filters if f not in NATIVE_SYSTEM]
+        if missing:
+            raise ValueError(
+                f"No NATIVE_SYSTEM entry for {missing} (facility '{fac}'). "
+                f"Declare the magnitude system its catalogs publish in "
+                f"('Vega' or 'AB'), or '' if it has none."
+            )
+        data = _filter_set_data(tuple(filters), FLUX_WEIGHTING)
+        for i, svo in enumerate(filters):
+            col = data["filters_MIST"][i]
+            native = NATIVE_SYSTEM[svo]
+            if col in mist_native and native and mist_native[col] != native:
+                raise ValueError(
+                    f"NATIVE_SYSTEM says {svo} is {native}, but MIST's "
+                    f"filter_magsys.txt lists {col} as {mist_native[col]}."
+                )
+            rows.append(
+                {
+                    "column": col,
+                    "svo_id": data["filters_SVO"][i],
+                    "native_system": native,
+                    "zeropoint_Fl_Vega": float(data["filter_zero_pts"][i]),
+                    "flux_weighting": data["filter_weightings"][i],
+                    "ab_minus_vega": float(data["filter_ab_minus_vega"][i]),
+                }
+            )
+    return pd.DataFrame(rows, columns=list(MAGSYS_COLUMNS))
+
+
+def write_magsys_table(
+    filter_sets: Dict[str, List[str]] = FILTER_SETS,
+    model_root: Path = DEFAULT_MODEL_ROOT,
+) -> Path:
+    """
+    Write (or update) the magnitude-system record beside the tables,
+    `{model_root}/NextGen/BCs/NextGen.magsys.csv`, for the columns of
+    `filter_sets`. Rows for other columns already in the file are kept, so
+    a partial regeneration updates only what it rewrote.
+    """
+    path = magsys_table_path(model_root, MODEL)
+    new = magsys_table(filter_sets)
+    if path.is_file():
+        old = pd.read_csv(path, comment="#", keep_default_na=False)
+        old = old[~old["column"].isin(new["column"])]
+        new = pd.concat([old, new], ignore_index=True)
+    new = new.sort_values("column", kind="stable").reset_index(drop=True)
+    with open(path, "w") as f:
+        f.write(
+            f"# Written by {GENERATOR} (write_magsys_table); do not edit.\n"
+            "# One row per NextGen BC column: the filter's native magnitude\n"
+            "# system ('' = none; a .sed row in it must state magsys) and\n"
+            "# ab_minus_vega = m_AB - m_Vega for the column's Vega zero,\n"
+            "# from the same profile, flux weighting and Vega zeropoint as\n"
+            "# the column's BCs (components/sed/magsys.py checks the last\n"
+            "# three against the column's filter_meta).\n"
+        )
+        new.to_csv(f, index=False, float_format="%.10g")
+    print(f"Wrote {path}")
+    return path
 
 
 # -------------------------------------------------------------------

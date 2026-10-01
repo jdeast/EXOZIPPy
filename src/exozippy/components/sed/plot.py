@@ -25,7 +25,6 @@ except NameError:
     current_dir = Path.cwd()
 
 source_code_dir = current_dir.parent.parent  # source code two directories up
-DEFAULT_FILTER_ROOT = source_code_dir / "filters"
 DEFAULT_MODEL_ROOT = source_code_dir / "models"
 
 logger = logging.getLogger(__name__)
@@ -107,11 +106,10 @@ class Plot:
         skipinitialspace=True,
     )
 
-    # read in filter magnitude systems
-    filtersys_dir = DEFAULT_FILTER_ROOT / "filter_magsys.txt"
-    filtersys_df = pd.read_csv(
-        filtersys_dir, sep="\t", comment="#", skipinitialspace=True
-    )
+    # No magnitude-system table here: the observed magnitudes are
+    # system.sed.mag, already on the BC columns' Vega system
+    # (SED._convert_to_bc_system), which is what the Vega zeropoints below
+    # turn into fluxes.
 
     filter_alias_df = _load_alias_table()
 
@@ -176,6 +174,7 @@ class Plot:
         self.nfilters = len(self.filters)
         # one observation per filter row (blended or differential mags;
         # star membership per row lives in the blend matrix)
+        # on the BC columns' Vega system: AB rows arrive converted
         self.mag_obs = self.system.sed.mag  # (nfilters,)
         self.mag_obs_err = self.system.sed.err  # (nfilters,)
         self.blend_matrix = self.system.sed.blend_matrix  # (nfilters, nstars)

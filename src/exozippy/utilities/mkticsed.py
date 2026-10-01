@@ -40,6 +40,9 @@ from astroquery.ipac.irsa.irsa_dust import IrsaDust
 from astroquery.simbad import Simbad
 from astroquery.vizier import Vizier
 
+from ..components.sed.bc_grid import DEFAULT_MODEL_ROOT
+from ..components.sed.magsys import native_system
+
 try:
     from zero_point import zpt as _gaia_zpt
 
@@ -261,14 +264,23 @@ def schlegel_av(ra, dec):
     return None
 
 
-def _sed_entry(svo_name, mag, used_err, enabled=True, magsys="Vega"):
-    """Return a SED YAML filter entry dict (or a commented-out version)."""
+def _sed_entry(svo_name, mag, used_err, enabled=True):
+    """Return a SED YAML filter entry dict (or a commented-out version).
+
+    ``magsys`` is the band's NATIVE system -- the system the catalogs this
+    utility reads publish it in (APASS g'r'i' and GALEX in AB; 2MASS, Gaia,
+    WISE, Tycho, APASS B/V, Stromgren and Mermilliod UBV in Vega) -- read
+    from the same per-filter record the SED reads for a row that states
+    none (components/sed/magsys.py:native_system), so the file and the
+    fitter cannot disagree about it.  The magnitude is written as the
+    catalog publishes it; the SED converts an AB row (review 1.9.1).
+    """
     return {
         "_enabled": enabled,
         "name": svo_name,
         "mag": round(float(mag), 6),
         "err": round(float(used_err), 6),
-        "magsys": magsys,
+        "magsys": native_system(svo_name, DEFAULT_MODEL_ROOT, "NextGen"),
     }
 
 
@@ -366,20 +378,20 @@ def _write_sed_yaml(path, sed_entries, model="NextGen", nstars=1, notes=None):
             name = e["name"]
             mag = e["mag"]
             err = e["err"]
-            msys = e.get("magsys", "Vega")
+            # Written on EVERY row, Vega included (JDE 2026-10-01): an
+            # absent key would read as a system nobody thought about.
+            msys = e["magsys"]
             if enabled:
                 f.write(f'    - name: "{name}"\n')
                 f.write(f"      mag: {mag}\n")
                 f.write(f"      err: {err}\n")
-                if msys != "Vega":
-                    f.write(f"      magsys: {msys}\n")
+                f.write(f"      magsys: {msys}\n")
                 f.write("\n")
             else:
                 f.write(f'    # - name: "{name}"\n')
                 f.write(f"    #   mag: {mag}\n")
                 f.write(f"    #   err: {err}\n")
-                if msys != "Vega":
-                    f.write(f"    #   magsys: {msys}\n")
+                f.write(f"    #   magsys: {msys}\n")
                 f.write("\n")
 
 

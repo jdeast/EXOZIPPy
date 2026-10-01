@@ -81,6 +81,12 @@ L0 = 3.0128e28  # Watts
 
 V_BAND_MICRON = 0.55
 
+# The AB system's reference spectrum: a constant F_nu of 3631 Jy (Oke &
+# Gunn 1983), in erg/s/cm^2/Hz, and c in Angstrom/s to put it in F_lambda
+# on the Angstrom wavelength grid the filter profiles use.
+AB_FNU_CGS = 3631.0e-23
+C_ANGSTROM_PER_S = const.c.to(u.Angstrom / u.s).value
+
 
 def trapezoid(x, y):
     dx = x[..., 1:] - x[..., :-1]
@@ -204,6 +210,22 @@ def _filter_set_data(filters: tuple[str, ...], weighting: str) -> dict:
         filter_wavelengths, filter_profiles
     )  # normalize the filter transmission curve
 
+    # The AB magnitude of a Vega-referenced column's zero: m_AB - m_Vega
+    # for ANY source in this band, from the same weighted profile and the
+    # same Vega zeropoint the BC uses.  A star whose band-averaged flux is
+    # <F> has m_X = -2.5 log10(<F> / ZP_X) on either system, so the offset
+    # is 2.5 log10(<F_AB> / ZP_Vega), with <F_AB> the band average of the
+    # AB reference spectrum F_nu = 3631 Jy (Oke & Gunn 1983), i.e.
+    # F_lambda = F_nu c / lambda^2, averaged exactly as the stellar flux is.
+    # The SED subtracts it from an AB magnitude (sed/magsys.py); the
+    # generator ships it per column (generate_NextGen_BC_Tables.py
+    # magsys_table), so a regenerated column cannot drift from its offset.
+    ab_flux_lambda = AB_FNU_CGS * C_ANGSTROM_PER_S / filter_wavelengths**2
+    filter_ab_minus_vega = 2.5 * np.log10(
+        trapezoid(filter_wavelengths, ab_flux_lambda * filter_profiles)
+        / filter_zero_flux
+    )
+
     # interpolate extinction function onto same wavelength scale, but in microns
     extinction_df = _read_extinction_law()
     extinction_func = interpolate.interp1d(
@@ -226,6 +248,7 @@ def _filter_set_data(filters: tuple[str, ...], weighting: str) -> dict:
         "filter_zero_pts": filter_zero_pts,
         "filter_weightings": filter_weightings,
         "filter_zero_flux": filter_zero_flux,
+        "filter_ab_minus_vega": filter_ab_minus_vega,
         "wave_mask": wave_mask,
         "V_band_extinction": V_band_extinction,
         "extinction_modeled": extinction_modeled,

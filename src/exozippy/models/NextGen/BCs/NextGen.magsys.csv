@@ -1,0 +1,76 @@
+# Written by models/NextGen/generate_NextGen_BC_Tables.py (write_magsys_table); do not edit.
+# One row per NextGen BC column: the filter's native magnitude
+# system ('' = none; a .sed row in it must state magsys) and
+# ab_minus_vega = m_AB - m_Vega for the column's Vega zero,
+# from the same profile, flux weighting and Vega zeropoint as
+# the column's BCs (components/sed/magsys.py checks the last
+# three against the column's filter_meta).
+column,svo_id,native_system,zeropoint_Fl_Vega,flux_weighting,ab_minus_vega
+2MASS_H,2MASS/2MASS.H,Vega,1.133e-10,photon,1.369826076
+2MASS_J,2MASS/2MASS.J,Vega,3.129e-10,photon,0.8877278139
+2MASS_Ks,2MASS/2MASS.Ks,Vega,4.283e-11,photon,1.836622059
+Bessell_B,Generic/Bessell.B,Vega,6.13268e-09,energy,-0.0796566383
+Bessell_I,Generic/Bessell.I,Vega,1.12588e-09,energy,0.4425623846
+Bessell_R,Generic/Bessell.R,Vega,2.17037e-09,energy,0.1852338979
+Bessell_U,Generic/Bessell.U,Vega,3.96526e-09,energy,0.8242347552
+Bessell_V,Generic/Bessell.V,Vega,3.62708e-09,energy,0.0004182290931
+Cousins_I,Generic/Cousins.I,Vega,1.19038e-09,energy,0.426277031
+Cousins_R,Generic/Cousins.R,Vega,2.23895e-09,energy,0.1812518922
+GALEX_FUV,GALEX/GALEX.FUV,AB,6.72397e-09,photon,2.092398671
+GALEX_NUV,GALEX/GALEX.NUV,AB,4.53623e-09,photon,1.640999738
+Gaia_BP_DR2Rev,GAIA/GAIA2r.Gbp,Vega,4.04405e-09,energy,0.05921101391
+Gaia_BP_EDR3,GAIA/GAIA3.Gbp,Vega,4.07852e-09,photon,0.02387960965
+Gaia_G_DR2Rev,GAIA/GAIA2r.G,Vega,2.49213e-09,energy,0.1224149529
+Gaia_G_EDR3,GAIA/GAIA3.G,Vega,2.50386e-09,photon,0.1274779283
+Gaia_RP_DR2Rev,GAIA/GAIA2r.Grp,Vega,1.28384e-09,energy,0.3768900308
+Gaia_RP_EDR3,GAIA/GAIA3.Grp,Vega,1.26902e-09,photon,0.3816142576
+Johnson_B,Generic/Johnson.B,Vega,6.72553e-09,energy,-0.188911526
+Johnson_I,Generic/Johnson.I,Vega,9.23651e-10,energy,0.491682337
+Johnson_J,Generic/Johnson.J,Vega,3.16941e-10,energy,0.8872414912
+Johnson_M,Generic/Johnson.M,Vega,1.79573e-12,energy,3.472816361
+Johnson_R,Generic/Johnson.R,Vega,1.87529e-09,energy,0.2413154777
+Johnson_U,Generic/Johnson.U,Vega,3.49719e-09,energy,1.00556407
+Johnson_V,Generic/Johnson.V,Vega,3.5833e-09,energy,0.004771870356
+Kepler_Kp,Kepler/Kepler.K,Vega,2.44611e-09,photon,0.1230688794
+NIRC2_Brgamma,Keck/NIRC2.Brgamma,Vega,4.05527e-11,photon,1.902664602
+NIRC2_H,Keck/NIRC2.H,Vega,1.1634e-10,photon,1.368438458
+NIRC2_J,Keck/NIRC2.J,Vega,2.96852e-10,photon,0.9307104364
+NIRC2_Kp,Keck/NIRC2.Kp,Vega,4.52117e-11,photon,1.822680297
+NIRC2_Ks,Keck/NIRC2.Ks,Vega,4.3277e-11,photon,1.845106033
+NISP_H,Euclid/NISP.H,AB,8.83892e-11,photon,1.492543561
+NISP_J,Euclid/NISP.J,AB,2.21424e-10,photon,1.05806911
+NISP_Y,Euclid/NISP.Y,AB,4.93818e-10,photon,0.6940204314
+PS_g,PAN-STARRS/PS1.g,AB,5.05397e-09,photon,-0.09527467073
+PS_i,PAN-STARRS/PS1.i,AB,1.35987e-09,photon,0.372969441
+PS_r,PAN-STARRS/PS1.r,AB,2.47367e-09,photon,0.1463849396
+PS_z,PAN-STARRS/PS1.z,AB,9.01194e-10,photon,0.5139241949
+SDSS_g,SLOAN/SDSS.g,AB,5.45476e-09,photon,-0.11145832
+SDSS_i,SLOAN/SDSS.i,AB,1.38589e-09,photon,0.3653951461
+SDSS_r,SLOAN/SDSS.r,AB,2.49767e-09,photon,0.1448943708
+SDSS_u,SLOAN/SDSS.u,AB,3.75079e-09,photon,0.9016908525
+SDSS_z,SLOAN/SDSS.z,AB,8.38585e-10,photon,0.5249343902
+Stromgren_b,Generic/Stromgren.b,Vega,5.78663e-09,energy,-0.1587693669
+Stromgren_u,Generic/Stromgren.u,Vega,3.2441e-09,energy,1.129348125
+Stromgren_v,Generic/Stromgren.v,Vega,7.27101e-09,energy,-0.1286593006
+Stromgren_y,Generic/Stromgren.y,Vega,3.6203e-09,energy,0.003278862325
+TESS,TESS/TESS.Red,Vega,1.33161e-09,energy,0.3493981543
+TYCHO_B_MvB,TYCHO/TYCHO.B_MvB,Vega,6.62225e-09,energy,-0.07403193001
+TYCHO_B_bes,TYCHO/TYCHO.B_bes,Vega,6.12194e-09,energy,0.01053131277
+TYCHO_V_MvB,TYCHO/TYCHO.V_MvB,Vega,3.94034e-09,energy,-0.01818892663
+TYCHO_V_bes,TYCHO/TYCHO.V_bes,Vega,3.99494e-09,energy,-0.03466119
+Tycho_B,TYCHO/TYCHO.B,Vega,6.5091e-09,energy,-0.04754893387
+Tycho_V,TYCHO/TYCHO.V,Vega,3.99504e-09,energy,-0.02396061578
+WFI_F062,Roman/WFI.F062,AB,2.40458e-09,photon,0.146002188
+WFI_F087,Roman/WFI.F087,AB,9.09464e-10,photon,0.4985672585
+WFI_F106,Roman/WFI.F106,AB,5.28175e-10,photon,0.6655175341
+WFI_F129,Roman/WFI.F129,AB,2.67219e-10,photon,0.9717775637
+WFI_F146,Roman/WFI.F146,AB,2.02559e-10,photon,1.037273958
+WFI_F158,Roman/WFI.F158,AB,1.31989e-10,photon,1.304555162
+WFI_F184,Roman/WFI.F184,AB,7.56801e-11,photon,1.571271827
+WFI_F213,Roman/WFI.F213,AB,4.49458e-11,photon,1.825649602
+WISE_W1,WISE/WISE.W1,Vega,8.1787e-12,energy,2.673408261
+WISE_W2,WISE/WISE.W2,Vega,2.415e-12,energy,3.312601925
+WISE_W3,WISE/WISE.W3,Vega,6.5151e-14,energy,5.148453267
+WISE_W4,WISE/WISE.W4,Vega,5.0901e-15,energy,6.594083817
+Zorro_EO_562,Gemini/Zorro.EO_562,,3.35363e-09,energy,0.03014914347
+Zorro_EO_832,Gemini/Zorro.EO_832,,9.89582e-10,energy,0.5034708832
