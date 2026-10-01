@@ -14,6 +14,8 @@ under ``utilities/`` rather than inside a component because its callers
 (``components/sed/make_bc.py``, ``models/NextGen/bc_tables.py`` and
 ``models/MIST/eep_grid.py``) sit in different trees and a cross-component
 import would be the wrong dependency.
+Uploading (draft, verify, pin the published record) is
+``scripts/zenodo_publish.py``; the workflow is in ``docs/zenodo.md``.
 Note it is deliberately NOT a registry utility: it has no ``build_parser`` /
 ``main`` pair and is never surfaced by ``Component.get_utilities()``.
 

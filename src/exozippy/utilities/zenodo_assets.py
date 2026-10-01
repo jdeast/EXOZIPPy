@@ -20,7 +20,8 @@ Publishing a new version of a record
 2. Update that record's ONE entry below: ``record_id``, and every changed
    file's ``size`` and ``md5`` (from ``https://zenodo.org/api/records/<id>``,
    where ``files[*].checksum`` reads ``md5:<hex>``). The concept id does not
-   change.
+   change. ``scripts/zenodo_publish.py pin --record <id> --update-registry``
+   does this step (and the upload before it; see ``docs/zenodo.md``).
 3. Run the network test, which re-reads every record's API and compares it
    with this table::
 
