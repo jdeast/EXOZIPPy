@@ -1099,6 +1099,15 @@ class Component(ABC):
         """
         values = []
         for p in system.plot_params:
+            if p.label in system.plot_branch_labels and p.label not in point:
+                raise KeyError(
+                    f"Plotter input '{p.label}' is a branch-dependent node "
+                    f"(System.register_branch_alternative) and the point has "
+                    f"no value for it; its initval is not the branch any draw "
+                    f"was assigned.  Pass a point that carries the model's "
+                    f"Deterministics (a posterior draw, or "
+                    f"System.get_internal_point)."
+                )
             val = np.asarray(point.get(p.label, p.initval), dtype=np.float64)
             if getattr(p.value, "ndim", 0) == 0:
                 values.append(float(np.squeeze(val)))

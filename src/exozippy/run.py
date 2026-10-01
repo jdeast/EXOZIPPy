@@ -25,6 +25,11 @@ from exozippy.samplers.ptde_async import ptde_async_sample
 from exozippy.system import KNOWN_BLOCK_KEYS, System
 
 from . import reporting
+from .branches import (
+    branch_summary_lines,
+    is_branch_resolved,
+    resolve_branch_draws,
+)
 from .corner_utils import (
     collect_corner_samples,
     histogram_grid_degenerate,
@@ -1509,6 +1514,36 @@ def _run_fit(config, gui, user_params=None):
             idata, system.get_parameter_lookup(), only=refolded
         )
 
+    # Branch-marginalized parameterizations (System.register_branch_
+    # alternative; today V_c/V_e): every Deterministic in the trace was
+    # evaluated on the PRIMARY branch, which is not the posterior of anything
+    # branch-dependent.  Draw each draw's branch combination from the
+    # mixture's own per-combination weights, seeded from this run's seed, and
+    # re-derive every branch-dependent quantity under it (exozippy/branches.py
+    # -- one draw per draw, NEVER an average).  Here, at the same seam as the
+    # fold and for the same reason: every consumer below -- modes, tables,
+    # plots, the restart file -- must see the same draws.  The trace on disk
+    # is rewritten with them, because mkparam and exozippy-modes read it from
+    # there.
+    if system._branch_alternatives and is_branch_resolved(idata):
+        # A reused trace: run.py rewrote it resolved when it was sampled, so
+        # its draws ARE the assigned branches (JDE 2026-10-01: the trace on
+        # disk is the branch-resolved posterior).  Read, never re-resolved.
+        logger.info(
+            "trace is already branch-resolved (sample_stats"
+            "['branch_combination']); reusing its per-draw branches."
+        )
+    elif system._branch_alternatives:
+        wrapup.stage("drawing each draw's branch combination (V_c/V_e roots)")
+        lookup = system.get_parameter_lookup()
+        rebranched = resolve_branch_draws(
+            system, model, idata, param_lookup=lookup, cores=cores
+        )
+        _convert_posterior_to_user_units(idata, lookup, only=rebranched)
+        tmp_trace = str(trace_path) + ".branches.tmp"
+        idata.to_netcdf(tmp_trace)
+        os.replace(tmp_trace, trace_path)
+
     # Post-hoc burn-in + stuck-chain trimming (samplers/convergence.py). We
     # keep the FULL, untrimmed trace on disk (idata.to_netcdf above / the
     # loaded .nc) so any reanalysis can recompute this, but every downstream
@@ -2548,6 +2583,7 @@ def _format_summary(idata, diag, system=None):
             f"Rhat<={diag.get('max_rhat_threshold')}, "
             f"ESS>={diag.get('min_ess_threshold')}"
         )
+    header += ["# " + line for line in branch_summary_lines(idata)]
     # to_string(), not str(): str(df) elides middle columns ("...") at
     # narrow terminal widths, silently dropping ess_bulk/ess_tail/r_hat --
     # the columns downstream tooling (e.g. examples/DC2018's collector)

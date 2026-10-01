@@ -125,6 +125,20 @@ CHORD_RADICAND_FLOOR = 1e-30
 # bit-for-bit.
 VCVE_DISCRIMINANT_FLOOR = 1e-30
 
+# Softening of the V_c/V_e fold factor |e + sin omega| (review 1.8.14).  The
+# exact uniform-in-e prior has an INFINITE (integrable) density in V_c/V_e on
+# the fold, where d(V_c/V_e)/de = 0 -- a coordinate singularity of V_c/V_e
+# itself, not a bug -- and prior-only NUTS chains fell into it and stayed:
+# with the exact factor and with a 1e-3 softening, 2-3 of 4 numpyro chains
+# confined to |d| < 0.05 at a single omega, r_hat 2-3.  The softened factor
+# (see vcve_branch_log_jacobian) is MASS-CONSERVING, so the marginals stay
+# flat in e and uniform in omega; what it costs is a local wiggle in the
+# e-density within a few softenings of e = -sin omega (0 on the fold itself,
+# a +9% shoulder at |e + sin omega| ~ 1.5 x this).  2e-2 measured: 3 seeds of
+# 4 x (1000 + 2000) prior-only numpyro chains with r_hat <= 1.04, where 1e-2
+# gave 1.2 on one seed.
+VCVE_FOLD_SOFTENING = 2e-2
+
 
 #: Field-by-field meaning documented in `state_vector_terms`.
 StateVectorTerms = namedtuple(
@@ -296,17 +310,34 @@ def _vcve_quadratic(vcve, omega):
     ``tests/test_vcve.py`` does that over a grid rather than trusting the
     algebra.
 
+    THE FORBIDDEN REGION IS THE MIRROR IMAGE (review 1.8.14).  Where no real
+    root exists (``d = 1 - x^2 cos^2 w < 0``) the square root is taken of
+    ``|d|``, so the two "roots" there are the reflection ``d -> -d`` of the
+    real pair: they split apart from ``-B/2A`` exactly as the real ones do,
+    instead of coinciding at it.  Bit-identical wherever ``d > 0`` (``|d| ==
+    d``).  It exists for the prior, not the likelihood: the ``vcve_real_root``
+    soft bound is symmetric about ``d = 0`` (``-log 2`` there), so it removes
+    mass from the real side of the fold and leaks the same amount onto the
+    forbidden side -- and the leak compensates the deficit, keeping the prior
+    uniform in omega, only if the forbidden side carries the mirror of the
+    real side's per-branch weights, root-existence weight included.  With
+    the roots coinciding instead, the lower branch's forbidden mirror was
+    never killed where its real twin went negative, which put a +/-2% omega
+    excess/deficit at |omega| < 5 deg (measured).  Both roots are still
+    forbidden there; the soft bound is what says so.
+
     The square root's argument is floored at ``VCVE_DISCRIMINANT_FLOOR`` (the
-    HARD shield): outside the real region the two roots coincide at
-    ``-B/2A`` (to 1e-15) instead of being NaN.  Both halves of the house rule
-    apply (calc_theta_E, calc_jitter, calc_cosi_from_chord): the floor goes on
-    the RADICAND rather than the result, and it is STRICTLY POSITIVE.
-    ``sqrt'(0)`` is infinite, so clamping after the root -- or flooring the
-    radicand at exactly 0.0, which is what this line did until review 1.8.10
-    -- multiplies that infinity by ``pt.maximum``'s zero gradient and gives
-    NaN, the exact failure the shields exist to prevent.  The soft
-    shield that keeps the sampler out of the region lives in
-    ``Orbit._add_vcve_shield``, on the unfloored quantity, where it has a
+    HARD shield), so at the double root the value is finite and so is the
+    gradient.  Both halves of the house rule apply (calc_theta_E,
+    calc_jitter, calc_cosi_from_chord): the floor goes on the RADICAND rather
+    than the result, and it is STRICTLY POSITIVE.  ``sqrt'(0)`` is infinite,
+    so clamping after the root -- or flooring the radicand at exactly 0.0,
+    which is what this line did until review 1.8.10 -- multiplies that
+    infinity by ``pt.maximum``'s zero gradient and gives NaN, the exact
+    failure the shields exist to prevent.  ``pt.abs``'s own gradient at 0 is
+    0, and the floor routes it to a constant there anyway.  The soft shield
+    that keeps the sampler out of the region lives in
+    ``Orbit._add_vcve_terms``, on the unfloored quantity, where it has a
     gradient to offer.
     """
     x2 = pt.sqr(vcve)
@@ -314,7 +345,7 @@ def _vcve_quadratic(vcve, omega):
     a = 1.0 + x2 * pt.sqr(sinw)
     b = 2.0 * x2 * sinw
     root = 2.0 * pt.sqrt(
-        pt.maximum(1.0 - x2 * pt.sqr(cosw), VCVE_DISCRIMINANT_FLOOR)
+        pt.maximum(pt.abs(1.0 - x2 * pt.sqr(cosw)), VCVE_DISCRIMINANT_FLOOR)
     )
     return a, b, root
 
@@ -345,7 +376,8 @@ def calc_ecc_from_vcve(vcve, omega):
     exists to remove.)  Where BOTH roots are physical -- ``x > 1`` with
     ``sin omega < 0`` -- this is the higher-eccentricity solution and the
     mixture carries the other one's likelihood, so the choice decides only
-    which branch the trace reports as ``orbit.ecc``.
+    how the graph is built: the REPORT draws each draw's root from the
+    mixture (exozippy/branches.py, JDE 2026-10-01).
     """
     a, b, root = _vcve_quadratic(vcve, omega)
     return pt.clip((-b + root) / (2.0 * a), 0.0, MAX_ECC)
@@ -368,10 +400,13 @@ def ecc_from_vcve_unclipped(vcve, omega, upper=True):
 
     What ``Orbit._add_eccentricity_bound`` needs (see ``ecc_from_sqrte``, same
     argument): the clipped root is flat past the collision limit, so a barrier
-    applied to it has nothing to push against.  Defaults to the upper root
-    because that is the primary branch.  The discriminant is still shielded --
-    an imaginary root has no value to bound at all, and its own soft shield
-    covers that region.
+    applied to it has nothing to push against.  The same node feeds the
+    root-EXISTENCE bound at the other end (``Orbit._add_vcve_terms``): a
+    negative root clips to ``e = 0`` and would otherwise keep its full branch
+    weight there (review 1.8.14).  Defaults to the upper root because that is
+    the primary branch.  Where no real root exists it is the mirror root (see
+    ``_vcve_quadratic``), and the ``vcve_real_root`` soft bound covers that
+    region.
     """
     a, b, root = _vcve_quadratic(vcve, omega)
     return (-b + root) / (2.0 * a) if upper else (-b - root) / (2.0 * a)
@@ -437,18 +472,89 @@ def vcve_log_jacobian(ecc, omega):
     which vanishes on a real curve through the parameter space (e = -sin w):
     there the map v(e) is stationary -- it is the fold where the two roots of
     the inversion meet -- so a narrow band of V_c/V_e covers a wide range of e
-    and the correction genuinely diverges.  It is an INTEGRABLE divergence (the
-    density goes as |v - v_fold|^(-1/2)), so the floor is a cap on a real
-    feature, not a patch over a wrong one; without it the term is +inf on that
-    curve.  It is also not a sampler trap worth softening: |e + sin w| grows as
-    sqrt(|v - v_fold|), so the reward exceeds 10 nats only within ~1e-9 of the
-    fold in V_c/V_e -- a volume no step ever lands in, and one the trajectory
-    passes straight through if it does.  Not registered as physics: it is a prior term, not a parameter's
-    value, and it is applied as a potential in Orbit.build_likelihood.
+    and the correction genuinely diverges.  On the REAL side of the fold it is
+    an integrable divergence (|e + sin w| ~ sqrt(d), d the discriminant), so
+    the floor is a cap on a real feature.
+
+    THIS FORM IS NOT WHAT THE MODEL APPLIES (review 1.8.14).  Evaluated on a
+    root the inversion SHIELDED -- clipped to e = 0 where it is negative, or
+    taken where no real root exists -- this function is not the Jacobian of
+    anything, and it put ~98% of the prior's mass on non-physical orbits:
+    -log|sin w| on a negative root clipped to zero (divergent at omega = 0,
+    180 deg), and -log|d| (NON-integrable) on the forbidden side of the fold,
+    where the old shielded roots met at -B/2A with e + sin w = sin w d / A.
+    Both were capped only by the 1e-12 floor, ~27 nats deep, and NUTS chains
+    froze on them.  `vcve_branch_log_jacobian` is the same quantity per
+    branch, written from the discriminant so it is exact where a real root
+    exists and integrable where none does.  This one is kept as the
+    reference a finite difference checks, and as the (e, omega) statement of
+    the formula.  Not registered as physics: it is a prior term, not a
+    parameter's value.
     """
     sinw = pt.sin(omega)
     return (
         pt.log(pt.maximum(pt.abs(ecc + sinw), 1e-12))
+        - 0.5 * pt.log(pt.maximum(1.0 - pt.sqr(ecc), 1e-12))
+        - 2.0 * pt.log(pt.maximum(1.0 + ecc * sinw, 1e-12))
+    )
+
+
+def vcve_branch_log_jacobian(vcve, omega, upper=True):
+    """``log|d(V_c/V_e)/de|`` on ONE branch, from (V_c/V_e, omega).  SUBTRACT it.
+
+    The quantity `vcve_log_jacobian` states in (e, omega), evaluated at the
+    branch's UNCLIPPED root (``ecc_from_vcve_unclipped``), with the fold factor
+    written from the discriminant ``d = 1 - x^2 cos^2 w``.  For a root
+    ``e = (-x^2 s +/- sqrt(d)) / A`` (``s = sin w``, ``A = 1 + x^2 s^2``),
+
+        e + s = (s A - x^2 s +/- sqrt(d)) / A = (s d +/- sqrt(d)) / A
+
+    exactly, since ``s A - x^2 s = s (1 - x^2 c^2)``.  Two reasons not to form
+    ``e + s`` by subtraction:
+
+    * it cancels catastrophically at the fold, which is where the term is
+      large; the discriminant form has no cancellation;
+    * where ``d < 0`` it takes the MIRROR roots' value (``sqrt(|d|)``, see
+      `_vcve_quadratic`), ``|+/- sqrt(|d|) + s d| / A``, which is integrable
+      (``|d|^(-1/2)`` like the real side) where the old coincident roots gave
+      ``|s d| / A`` -- a NON-integrable ``-log|d|``, capped only by the 1e-12
+      floor (review 1.8.14).
+
+    THE FOLD IS SOFTENED, mass-conservingly.  ``log|u|`` (``u = e + s``) is
+    replaced by ``1.5 log(u^2 + eps^2) - log(u^2 + 2 eps^2)``, eps =
+    ``VCVE_FOLD_SOFTENING``: the same thing for ``|u| >> eps`` (the error is
+    ``eps^2 / 2u^2``) and finite on the fold, where the exact form makes the
+    density in V_c/V_e infinite and NUTS chains sink into it (see the
+    constant).  Subtracting it multiplies the e-density by
+    ``f(u) = |u| (u^2 + 2 eps^2) / (u^2 + eps^2)^(3/2)``, which is 0 at
+    ``u = 0``, peaks at +9% near ``|u| = 1.5 eps`` and tends to 1, with
+    ``integral (f - 1) du = 0`` exactly -- the 2 is what makes it so -- so the
+    dip is paid back within a few eps and the e and omega marginals are not
+    biased.  A finite density in V_c/V_e at the fold REQUIRES the e-density
+    to vanish there (it is ``|dv/de| ~ |u|`` times it); this is the
+    softening that does it without moving mass anywhere else.
+
+    The other two factors are evaluated at the same unclipped root, so on a
+    negative root (which clips to e = 0) this is the Jacobian the map actually
+    has there, not ``-log|sin w|``; whether such a root counts at all is the
+    existence bound's business (``Orbit._add_vcve_terms``), not this one's.
+    With ``eps = 0`` it is identical to `vcve_log_jacobian` (to ~1e-15,
+    measured; not bit-identical, it is a different expression) wherever a
+    real root lies in [0, MAX_ECC]; with the shipped eps it differs from it
+    by ``eps^2 / 2u^2`` (2e-4 nats at ``|e + sin w| = 1``).
+    """
+    x2 = pt.sqr(vcve)
+    sinw = pt.sin(omega)
+    a = 1.0 + x2 * pt.sqr(sinw)
+    disc = vcve_discriminant(vcve, omega)
+    rt = pt.sqrt(pt.maximum(pt.abs(disc), VCVE_DISCRIMINANT_FLOOR))
+    signed = rt if upper else -rt
+    u2 = pt.sqr((signed + sinw * disc) / a)  # (e + sin w)^2, exactly
+    eps2 = VCVE_FOLD_SOFTENING**2
+    ecc = (-x2 * sinw + signed) / a
+    return (
+        1.5 * pt.log(u2 + eps2)
+        - pt.log(u2 + 2.0 * eps2)
         - 0.5 * pt.log(pt.maximum(1.0 - pt.sqr(ecc), 1e-12))
         - 2.0 * pt.log(pt.maximum(1.0 + ecc * sinw, 1e-12))
     )

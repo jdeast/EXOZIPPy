@@ -91,11 +91,25 @@ spelling.  Before adding a flag, pick its kind and follow that template.
   Every sampled parameter carries a prior uniform over its own bounds and
   nothing generic inserts a Jacobian, so a non-linear change of coordinates
   silently changes the prior unless the component adds the term: `orbit` adds
-  minus `vcve_log_jacobian` and minus `chord_log_jacobian` for exactly this
+  minus `vcve_branch_log_jacobian` and minus `chord_log_jacobian` for exactly this
   reason, and `orbit.md` records that the SIGN is the term and needs its own
   test, because a finite-difference check passes under either.  A flip whose
   map has unit determinant (`pharmacokinetics`'s bases, which are linear in
-  log space) owes nothing and satisfies this trivially.  Differing SUPPORT
+  log space) owes nothing and satisfies this trivially.  A coordinate that is
+  MANY-TO-ONE (V_c/V_e: two eccentricities per value) declares its other
+  branch with `System.register_branch_alternative`; the likelihood is then
+  marginalized over the branches, and at wrap-up `exozippy/branches.py` draws
+  each posterior draw's branch COMBINATION from the mixture's own
+  per-combination weights (seeded from the run's seed, stored in
+  `sample_stats["branch_combination"]`) and re-derives every Deterministic
+  that reads a replaced node under it.  One draw per draw and never a
+  responsibility-weighted average -- 50/50 on e = 0.1 and 0.6 would report
+  0.35, which neither branch supports -- and the JOINT combination, never
+  each branch from its own marginal, because shared parameters correlate
+  them (JDE 2026-10-01).  The only average reported is the expectation:
+  each branch's Rao-Blackwellized probability, in `<prefix>_summary.txt`.
+  A component declaring a branch gets all of this for free and must not
+  re-derive its own report.  Differing SUPPORT
   between two parameterizations is separate and is allowed -- `planet`'s
   `linear` mass coordinate admits a negative mass and its `log_q` one cannot.
 - **Tie toggles, `X_constrains_Y`** (`beam_constrains_mass`, `sed_constrains_blend`,
