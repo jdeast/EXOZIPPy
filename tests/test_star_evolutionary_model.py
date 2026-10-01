@@ -240,15 +240,17 @@ def test_track_parameters_resolve_to_their_defaults(name, model_root):
     """
     Given an evolutionarymodel block,
     When the model is built and the new Parameters are materialized,
-    Then each resolves to its star/defaults.yaml start, scale and unit -- the
+    Then each resolves to its star/defaults.yaml scale and unit -- the
       manifest entry and the defaults.yaml entry agree, so the component
       finds real numbers rather than a KeyError.
 
-    `eep`'s start is the defaults.yaml one only because the component's own
-    data-driven seed is a HINT, which loses to nothing here: the star's
-    teff/radius/feh/age are all at their defaults too, so any EEP the seed
-    search picks is as good as another.  Bounds are checked separately, in
-    the narrowing test below.
+    The START is deliberately not asserted.  `initfeh`'s is the defaults.yaml
+    one, but `eep`'s is NOT: the component's data-driven EEP seed is a hint,
+    and nothing here outranks it, so the start is whatever EEP the seed
+    search picks (review 1.8.6 -- this docstring used to claim the opposite).
+    WHICH EEP the seed picks is pinned in tests/test_evolutionary_model.py
+    (test_the_eep_seed_walks_the_track_a_user_mass_implies).  Bounds are
+    checked separately, in the narrowing test below.
     """
     # Arrange
     system = _prepared([{"name": "A"}], model_root=model_root)

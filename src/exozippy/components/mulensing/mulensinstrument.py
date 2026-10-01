@@ -43,6 +43,28 @@ def _raw_initval(user_params, key, default=None):
     return val
 
 
+class _BootstrapGeometry:
+    """The flux bootstrap's reader of the event geometry (see
+    ``MulensInstrument._probe_bootstrap_geometry``).
+
+    ``geometry(path, default=None)`` is the path's start in USER units when it
+    is INFORMED (``ProbedStart.informed``: it traces back to a user entry or a
+    component hint or seed), else `default`.  `probed` is the
+    ``ConfigManager.probe_start`` answer; asking for a path it does not hold
+    is a KeyError -- a bookkeeping bug in the caller, not "unknown".
+    `has_companion` says whether ``lens.1`` exists (element 0 is the masked
+    primary), i.e. whether the lens.1.* geometry was probed at all.
+    """
+
+    def __init__(self, probed, has_companion):
+        self.probed = probed
+        self.has_companion = has_companion
+
+    def __call__(self, path, default=None):
+        ps = self.probed[path]
+        return ps.user_value if ps.informed else default
+
+
 class MulensInstrument(Instrument):
     """Microlensing photometry, modeled and fit entirely in FLUX.
 
@@ -285,6 +307,12 @@ class MulensInstrument(Instrument):
         # median-flux / q_source = 0.95 without them.
         self._peak_find_seeds(system, per_file)
 
+        # The event geometry the bootstrap below reads, as the relaxation
+        # engine would start it given everything known NOW (user entries, the
+        # peak finder's / MMEXOFAST's seed 0, hints so far) -- one probe for
+        # every file.  See _probe_bootstrap_geometry.
+        geometry = self._probe_bootstrap_geometry(system)
+
         # Geocentric reference (Skowron+2011 convention): Earth's position and
         # velocity at t_0_par define the inertial frame.  All observer positions
         # are stored as deviations from this linear Earth trajectory so that
@@ -322,7 +350,7 @@ class MulensInstrument(Instrument):
             xyz_delta = self._abs_to_delta(t, xyz_abs)
 
             f_total, q_source, q_flux = self._estimate_flux_components(
-                t, f, xyz_delta, ra_rad, dec_rad, i
+                t, f, xyz_delta, ra_rad, dec_rad, i, geometry
             )
             self.fs_init.append(f_total)
             self.q_source_init.append(q_source)
@@ -336,6 +364,7 @@ class MulensInstrument(Instrument):
                 ra_rad,
                 dec_rad,
                 self.config[i].get("file", f"instrument {i}"),
+                geometry,
                 data_format=self.config[i].get("data_format", "magnitude"),
             )
 
@@ -715,6 +744,50 @@ class MulensInstrument(Instrument):
             )
             return None
 
+    def _probe_bootstrap_geometry(self, system):
+        """The flux bootstrap's event geometry, read with ``probe_start``.
+
+        Returns a ``_BootstrapGeometry``: ``geometry(path, default=None)`` is
+        the path's start in USER units (the MulensModel convention --
+        ``alpha`` in degrees) when it is INFORMED, i.e. traces back to a user
+        entry or a component hint or seed, directly or through a relation;
+        otherwise `default`.
+
+        WHY A PROBE (config.md, "Reading a start before stage 4"; review
+        2.6.30(b)).  This runs at stage 1, and the geometry it needs is often
+        not WRITTEN anywhere yet: examples/ob170114 derives t_E and pi_E from
+        the lens/source masses, distances and proper motions, and ob09020's
+        q comes from the body masses.  Reading raw ``user_params`` (plus the
+        seed-0 hints) saw ``t_E = None`` there and bootstrapped the flux
+        split on an invented 30 d with no parallax, while the engine's own
+        start was t_E = 123.2 d, pi_E = (0.110, 0.178).
+
+        Uninformed is not the same as "use the default": a defaults.yaml
+        ``t_0`` or ``u_0`` describes no event, so a bootstrap built on it
+        would be a confident wrong answer.  The pi_E default (0, 0) is what
+        the bootstrap has always assumed without parallax information, so
+        the pi_E reads keep it; every other quantity comes back None and the
+        consumers say what is missing.
+
+        One probe per ``load_data`` (the probe is a full engine solve; see
+        ``ConfigManager.probe_start`` on why it is not cached).  A companion
+        lens's geometry is probed only when the lens HAS a companion
+        (``lens.1`` -- element 0 is the masked primary).
+        """
+        paths = [
+            "mulensevent.0.t_E",
+            "mulensevent.0.pi_E_N",
+            "mulensevent.0.pi_E_E",
+        ]
+        for j in range(self._n_sources):
+            paths += [f"source.{j}.t_0", f"source.{j}.u_0", f"source.{j}.rho"]
+        if system.lens.n_companions >= 1:
+            paths += ["lens.1.s", "lens.1.log_s", "lens.1.q", "lens.1.alpha"]
+        return _BootstrapGeometry(
+            self.config_manager.probe_start(paths),
+            has_companion=system.lens.n_companions >= 1,
+        )
+
     def _check_data_format(
         self,
         t,
@@ -724,6 +797,7 @@ class MulensInstrument(Instrument):
         ra_rad,
         dec_rad,
         label,
+        geometry,
         data_format="magnitude",
     ):
         """Warn if data appears fainter at peak than at baseline.
@@ -739,29 +813,23 @@ class MulensInstrument(Instrument):
 
         Returns silently when the dataset has fewer than 3 epochs near baseline
         (e.g., Spitzer peak-only data) -- no comparison is possible there.
+
+        Also returns silently when t_0, u_0 or t_E has no informed start
+        (`geometry`, from ``_probe_bootstrap_geometry``): the check needs the
+        event's timescale to find its peak, and used to substitute an
+        invented 30 d, describing a different event (review 2.6.30(b)).
+        The seed-0 MMEXOFAST / peak-finder hints ARE informed, so the
+        automated workflow -- the one most likely to have mislabelled a flux
+        file -- still gets the check.
         """
-        cm = self.config_manager
-
-        def _get(key, default=None):
-            # User params first, then the seed-0 MMEXOFAST hints in user
-            # units -- the same fallback _estimate_flux_components uses.
-            # Without it this check silently did nothing in the automated
-            # (mmexofast: auto) workflow, which is exactly the workflow
-            # where the user typed the fewest start values and is therefore
-            # most likely to have mislabelled a flux file as magnitudes.
-            val = _raw_initval(cm.user_params, key)
-            if val is None:
-                val = cm.seed_start_value(key)
-            return default if val is None else val
-
-        t0 = _get("source.0.t_0")
-        u0 = _get("source.0.u_0")
-        tE = _get("mulensevent.0.t_E")
-        if t0 is None or u0 is None:
+        t0 = geometry("source.0.t_0")
+        u0 = geometry("source.0.u_0")
+        tE = geometry("mulensevent.0.t_E")
+        if t0 is None or u0 is None or tE is None:
             return
 
-        pi_E_N = _get("mulensevent.0.pi_E_N", 0.0)
-        pi_E_E = _get("mulensevent.0.pi_E_E", 0.0)
+        pi_E_N = geometry("mulensevent.0.pi_E_N", 0.0)
+        pi_E_E = geometry("mulensevent.0.pi_E_E", 0.0)
 
         delta_e, delta_n = observer_sky_offset(xyz_delta, ra_rad, dec_rad)
         A_traj = self._pspl_magnification(
@@ -812,8 +880,19 @@ class MulensInstrument(Instrument):
         (``u_traj = 0`` at ``t = t_0``, which NNLS has no answer for).  This
         is also the expression ``_check_flux_direction`` uses; it carried a
         verbatim second copy, unfloored, until the floors were unified.
+
+        ``tE`` is REQUIRED and must be positive.  A missing t_E used to become
+        an invented 30 d and a negative one was abs()'d, so the NNLS flux
+        split described a different event (review 2.6.30(b)); callers now
+        take their "no geometry" branch instead, and a non-positive t_E is a
+        seed bug, named here.
         """
-        tE_safe = max(abs(float(tE)), 1.0) if tE is not None else 30.0
+        if tE is None or not float(tE) > 0.0:
+            raise ValueError(
+                f"flux bootstrap: t_E = {tE!r} is not a positive timescale; "
+                f"the caller must skip the PSPL columns when t_E is unknown."
+            )
+        tE_safe = max(float(tE), 1.0)
         tau = (t - float(t0)) / tE_safe
         tau_p = tau - delta_n * float(pi_E_N) - delta_e * float(pi_E_E)
         u_p = (
@@ -825,7 +904,7 @@ class MulensInstrument(Instrument):
         return (u_traj**2 + 2.0) / (u_traj * np.sqrt(u_traj**2 + 4.0))
 
     @staticmethod
-    def _binary_magnification_columns(t, n_src, _get):
+    def _binary_magnification_columns(t, n_src, _get, label=""):
         """Per-source magnification columns using the full binary-lens model.
 
         The flux bootstrap needs magnification columns that actually
@@ -838,7 +917,17 @@ class MulensInstrument(Instrument):
         not specified (single-lens event, or missing per-source params) or
         MulensModel fails — the caller then falls back to the PSPL columns.
         Parallax is intentionally ignored (flux scales only).
+
+        `_get` is ``_probe_bootstrap_geometry``'s reader, so a q derived from
+        the body masses, or an s/alpha the engine can solve from what is
+        known at stage 1, is seen here (review 2.6.30(b)).  A companion whose
+        s/q/alpha is still not derivable -- e.g. s and alpha that only a
+        Kepler orbit component produces, which the stage-1 engine cannot yet
+        solve -- is LOGGED by name before degrading to the PSPL columns; it
+        used to degrade silently.
         """
+        if not _get.has_companion:
+            return None
         # The companion geometry is LENS ELEMENT 1 (element 0 is the masked
         # primary; a lens.0.* read here would silently see nothing and drop
         # every event to the degenerate PSPL columns).
@@ -850,7 +939,22 @@ class MulensInstrument(Instrument):
                 s_val = 10.0 ** float(log_s)
         q_val = _get("lens.1.q")
         alpha = _get("lens.1.alpha")
-        if s_val is None or q_val is None or alpha is None:
+        missing = [
+            name
+            for name, val in (
+                ("s (or log_s)", s_val),
+                ("q", q_val),
+                ("alpha", alpha),
+            )
+            if val is None
+        ]
+        if missing:
+            logger.info(
+                f"[{label}] flux bootstrap: the companion lens's "
+                f"{', '.join(missing)} has no start derivable at stage 1, so "
+                f"the flux split uses point-lens columns (degenerate for "
+                f"overlapping binary-source trajectories)."
+            )
             return None
 
         # Idempotent, and self-guarding if MulensModel is missing; op.py has
@@ -922,7 +1026,7 @@ class MulensInstrument(Instrument):
         return 1.0
 
     def _estimate_flux_components(
-        self, t, f_obs, xyz_au, ra_rad, dec_rad, inst_idx
+        self, t, f_obs, xyz_au, ra_rad, dec_rad, inst_idx, geometry
     ):
         """Estimate (f_total, q_source, q_flux) for one instrument.
 
@@ -948,36 +1052,36 @@ class MulensInstrument(Instrument):
         ``f_obs`` is the file's flux (the modeled observable), so the NNLS
         design matrix acts on it directly -- there is no magnitude round trip.
 
-        Falls back to the data median / q=0.95 when t_0 or u_0 are absent.
+        Falls back to the data median / q=0.95 when t_0, u_0 or t_E has no
+        informed start, and says which (review 2.6.30(b): a missing t_E used
+        to be an invented 30 d).  The event geometry comes from `geometry`
+        (``_probe_bootstrap_geometry``), so a start the user's entries only
+        IMPLY -- t_E from masses and distances -- is seen, as are the seed-0
+        MMEXOFAST / peak-finder hints.  The instrument's own flux entries
+        (f_source, f_blend, q_flux) are still read as written.
         """
         cm = self.config_manager
-        n_src = getattr(self, "_n_sources", 1)
+        n_src = self._n_sources
+        label = self.config[inst_idx].get("file", f"{self.prefix}.{inst_idx}")
 
-        def _get(key, default=None):
-            # User params first (they outrank everything), then the seed-0
-            # MMEXOFAST hints in user units. Without the seed fallback the
-            # automated workflow -- whose params file deliberately omits the
-            # microlensing start values -- never sees a geometry here and
-            # every band degrades to the median-flux / q_source=0.95 guess,
-            # which badly mis-normalizes multi-band fits.
+        def _get_flux(param):
+            # user_params keys are normalized to index form by
+            # standardize_param_names.  User entry first, then the seed-0
+            # hint, in user units.
+            key = f"mulensinstrument.{inst_idx}.{param}"
             val = _raw_initval(cm.user_params, key)
             if val is None:
                 val = cm.seed_start_value(key)
-            return default if val is None else val
-
-        def _get_flux(param):
-            # user_params keys are normalized to index form by standardize_param_names
-            val = _get(f"mulensinstrument.{inst_idx}.{param}")
             return float(val) if val is not None else None
 
         q_flux_user = _get_flux("q_flux")
         q_flux_fallback = q_flux_user if q_flux_user is not None else 1.0
 
-        t0 = _get("source.0.t_0")
-        u0 = _get("source.0.u_0")
-        tE = _get("mulensevent.0.t_E")
-        pi_E_N = _get("mulensevent.0.pi_E_N", 0.0)
-        pi_E_E = _get("mulensevent.0.pi_E_E", 0.0)
+        t0 = geometry("source.0.t_0")
+        u0 = geometry("source.0.u_0")
+        tE = geometry("mulensevent.0.t_E")
+        pi_E_N = geometry("mulensevent.0.pi_E_N", 0.0)
+        pi_E_E = geometry("mulensevent.0.pi_E_E", 0.0)
 
         f_source_user = _get_flux("f_source")
         f_blend_user = _get_flux("f_blend")
@@ -1012,7 +1116,18 @@ class MulensInstrument(Instrument):
             q_source = float(np.clip(f_source_user / f_total, 0.05, 0.95))
             return f_total, q_source, q_flux_fallback
 
-        if t0 is None or u0 is None:
+        missing = [
+            name
+            for name, val in (("t_0", t0), ("u_0", u0), ("t_E", tE))
+            if val is None
+        ]
+        if missing:
+            logger.info(
+                f"[{label}] flux bootstrap: {', '.join(missing)} has no start "
+                f"derivable at stage 1 (no user entry, seed or hint implies "
+                f"one), so the flux scale is the data's median and "
+                f"q_source = 0.95."
+            )
             return self._baseline_flux_fallback(f_obs), 0.95, q_flux_fallback
 
         delta_e, delta_n = observer_sky_offset(xyz_au, ra_rad, dec_rad)
@@ -1021,7 +1136,7 @@ class MulensInstrument(Instrument):
         # binary-lens model (breaks the NNLS degeneracy between overlapping
         # source trajectories); fall back to PSPL columns.  Missing per-source
         # params (j > 0) degrade gracefully to the single-source estimate.
-        A_cols = self._binary_magnification_columns(t, n_src, _get)
+        A_cols = self._binary_magnification_columns(t, n_src, geometry, label)
         if A_cols is None:
             A_cols = [
                 self._pspl_magnification(
@@ -1029,8 +1144,8 @@ class MulensInstrument(Instrument):
                 )
             ]
             for j in range(1, n_src):
-                t0_j = _get(f"source.{j}.t_0")
-                u0_j = _get(f"source.{j}.u_0")
+                t0_j = geometry(f"source.{j}.t_0")
+                u0_j = geometry(f"source.{j}.u_0")
                 tE_j = tE  # ONE event t_E now (the per-source fallback dance dissolved)
                 if t0_j is None or u0_j is None:
                     logger.warning(

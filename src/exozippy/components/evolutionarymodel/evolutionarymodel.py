@@ -51,6 +51,16 @@ TRACK_PARAMS = ("initfeh", "eep", "age")
 DEEP_DAGE_MIN = 1e-14
 DEEP_DAGE_MAX = 1e3
 
+# The EEP seed's zero-age main sequence: rows below it are pre-main-sequence
+# and pay SEED_PRE_MS_PENALTY in the seed's chi2, so a start lands on the
+# main sequence unless the data insist.  MIST's primary EEP 202 is the ZAMS
+# (Dotter 2016, Table II).  Its OWN constant, deliberately not
+# MISTPlot.KIEL_EEP_WINDOW[0], which happens to be the same number today: that
+# window is presentation, and a plot-window change must never move a start
+# (review 1.8.6).
+SEED_ZAMS_EEP = 202.0
+SEED_PRE_MS_PENALTY = 30.0
+
 
 class EvolutionaryModel(StellarRelation, Component):
     """Tie a star's feh/radius/teff/age to the MIST evolutionary tracks.
@@ -406,31 +416,37 @@ class EvolutionaryModel(StellarRelation, Component):
         explicit user initval (RANK_USER), so this never overrides one -- see
         config.py's provenance ranking.
 
-        ``resolve()`` is called with ``shape=()`` (a single coarse scalar, not
-        the full per-star vector) but with ``element=`` set so that scalar
-        targets THIS star rather than always index 0 -- see
-        ``ConfigManager.resolve``'s docstring on ``element``, and
-        ``Instrument._register_astrometric_target``'s ``resolve("star", "ra",
-        element=star_ndx)`` for the identical pattern.  The values it returns
-        are already in INTERNAL units, which for every parameter read here is
-        the unit the grid is tabulated in.
+        The starts are read with ``ConfigManager.probe_start``, NOT
+        ``resolve()`` (review 1.8.6).  This runs at stage 1, before the
+        relaxation engine turns a user ``star.mass`` -- which is what every
+        shipped params file seeds -- into the sampled ``star.logmass``, so
+        ``resolve("star", "logmass")`` answered with the defaults.yaml 0.0 and
+        the seed walked the 1.0 solMass track: on examples/hat3 hat3_mist
+        (mass 0.92) EEP 348 at a seed chi2 of 19.4 on the true track, against
+        338 at 0.16 on the right one.  The probe returns what the user's
+        entries imply now; see config.md "Reading a start before stage 4".
+        Values are INTERNAL units (``ProbedStart.value``), which for every
+        parameter read here is the unit the grid is tabulated in.
         """
+        cm = self.config_manager
+        params = ("logmass", "initfeh", "feh", "radius", "teff", "age")
+        probed = cm.probe_start([f"star.{star_idx}.{p}" for p in params])
 
-        # grab the star's current logmass/initfeh initvals,
-        # or None if either is missing or non-finite
         def start(param):
-            cfg = self.config_manager.resolve("star", param, element=star_idx)
-            val = cfg.get("initval")
-            return None if val is None else float(np.atleast_1d(val)[0])
+            return probed[f"star.{star_idx}.{param}"].value
 
+        # The track coordinates must both have a start: both carry a
+        # defaults.yaml initval, so "not derivable" here is a defaults
+        # bookkeeping bug, not a quiet reason to skip the seed.
         logmass0 = start("logmass")
         initfeh0 = start("initfeh")
-        if (
-            logmass0 is None
-            or initfeh0 is None
-            or not np.isfinite([logmass0, initfeh0]).all()
-        ):
-            return
+        for param, val in (("logmass", logmass0), ("initfeh", initfeh0)):
+            if val is None or not np.isfinite(val):
+                raise ValueError(
+                    f"[{self.prefix}] EEP seed for star '{star_name}': "
+                    f"star.{star_idx}.{param} has no finite start "
+                    f"({probed[f'star.{star_idx}.{param}']})."
+                )
 
         # Bilinear in (logmass, initfeh) rather than snapped to the nearest
         # tabulated track: neighbouring tracks differ everywhere, most of all
@@ -491,9 +507,8 @@ class EvolutionaryModel(StellarRelation, Component):
         # grid["eep_pts"], which interpolate_track leaves untouched and so is
         # row-aligned with `track` by construction.
         chi2 += np.where(
-            np.asarray(grid["eep_pts"], dtype=float)
-            < MISTPlot.KIEL_EEP_WINDOW[0],
-            30.0,
+            np.asarray(grid["eep_pts"], dtype=float) < SEED_ZAMS_EEP,
+            SEED_PRE_MS_PENALTY,
             0.0,
         )
         if not np.isfinite(chi2).any():
@@ -503,7 +518,7 @@ class EvolutionaryModel(StellarRelation, Component):
         # default (StellarRelation names an instance after its star) but an
         # explicit `name:` on the block breaks that, and the hint has to land
         # on the star's parameter either way.
-        self.config_manager.add_hint(f"star.{star_name}.eep", eep0)
+        cm.add_hint(f"star.{star_name}.eep", eep0)
 
     # ------------------------------------------------------------------
     # Stage 2

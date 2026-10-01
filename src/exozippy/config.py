@@ -1,5 +1,6 @@
 # src/exozippy/config.py
 import copy
+import dataclasses
 import importlib
 import logging
 import signal
@@ -845,6 +846,44 @@ PRECEDENCE_MULENS_SOURCE_DISTANCE = (
 DATA_PRECEDENCES = frozenset(
     {PRECEDENCE_DERIVED_DATA, PRECEDENCE_MULENS_SOURCE_DISTANCE}
 )
+
+
+@dataclasses.dataclass(frozen=True)
+class ProbedStart:
+    """One path's answer from ``ConfigManager.probe_start``.
+
+    ``value`` is in INTERNAL units (the relaxation engine's native unit, the
+    unit ``add_hint`` stores and a Parameter's ``to_internal`` produces);
+    ``user_value`` is the same number in the path's USER unit (honoring a
+    user ``unit:`` override), converted by ``ConfigManager.from_internal``.
+    Pick the one your consumer is written in -- never convert by hand.
+
+    ``rank`` is the engine's provenance rank for the value and ``source`` its
+    coarse label (``ConfigManager._provenance_label``).  A path the engine
+    genuinely cannot reach -- no user entry, no hint, no defaults.yaml
+    ``initval``, and no relation that solves it from those -- comes back with
+    ``value``/``user_value``/``rank`` all None and ``source`` ==
+    ``"not derivable"``; it is an answer, not an error.
+    """
+
+    path: str
+    value: float | None
+    user_value: float | None
+    rank: int | None
+    source: str
+
+    @property
+    def derivable(self):
+        """True when the engine produced ANY start, a defaults.yaml one included."""
+        return self.value is not None
+
+    @property
+    def informed(self):
+        """True when the start traces back to a user entry or a component
+        hint, directly or through a relation -- the ``probe_derivable`` test
+        (rank above PRECEDENCE_DEFAULT).  A bare defaults.yaml value is
+        derivable but NOT informed."""
+        return self.rank is not None and self.rank > PRECEDENCE_DEFAULT
 
 
 """ 
@@ -3385,27 +3424,134 @@ class ConfigManager:
         Called at stage 1 (before most hints exist), so a False here means
         "not derivable *yet*"; callers that must decide early -- notably the
         MMEXOFAST trigger -- get the conservative answer.
-        """
-        flat = {}
-        for upath, data in self.user_params.items():
-            sym = self.master_symbol_map.get(upath)
-            if sym is None:
-                continue
-            data = require_entry(upath, data)
-            val = data.get("initval")
-            if val is None:
-                val = data.get("mu")
-            if isinstance(val, (list, tuple)):
-                val = val[0] if len(val) else None
-            if val is None:
-                continue
-            c_type, p_name = upath.split(".")[0], upath.split(".")[-1]
-            factor = (
-                self.get_conversion_factor(c_type, p_name, full_path=upath)
-                or 1.0
-            )
-            flat[str(sym)] = float(val) * factor
 
+        An engine failure RAISES (review 2.1.17).  It used to be swallowed as
+        "not derivable", which flipped the MMEXOFAST trigger on an engine or
+        bookkeeping bug; the probe solves a subset of stage 4's inputs, so a
+        failure here is never an expected outcome of knowing less.
+        """
+        _, ranks = self._probe_solve(paths, tolerance)
+        return {p for p in paths if ranks.get(p, 0) > PRECEDENCE_DEFAULT}
+
+    def probe_start(self, paths, tolerance=1e-3):
+        """The start value the relaxation engine would give each of `paths`
+        from what is known NOW, with its provenance -- read-only.
+
+        THE READER TO USE AT STAGES 1-3 (config.md, "Reading a start before
+        stage 4").  ``resolve()`` and raw ``user_params`` show only what was
+        WRITTEN for a path; a start the user's entries imply through a
+        relation (``star.mass: 0.92`` -> ``star.logmass``; masses, distances
+        and proper motions -> ``mulensevent.t_E``) does not exist until
+        ``finalize_user_params`` runs the engine at stage 4, so an earlier
+        reader silently sees the defaults.yaml value, or nothing.  This runs
+        the same engine on the same snapshot ``probe_derivable`` uses and
+        returns the solved values instead of discarding them.
+
+        Inputs are the user entries (seed 0 of an ``initval`` list), every
+        hint pushed so far, and seed 0 of ``seed_hint_sets`` -- what stage 4's
+        seed-0 solve layers.  THE LIMIT: it sees only hints pushed so far.  A
+        hint a later component pushes, or the caller's own, can still move the
+        stage-4 start; the answer is "the start given everything known now",
+        which is the most a stage 1-3 reader can have.
+
+        Args:
+            paths: canonical INDEX-form paths (``star.0.logmass``,
+                ``mulensevent.0.t_E``).  A name-form or 2-part path is a
+                caller bug and raises ``ValueError``; a path naming no
+                parameter the defaults declare raises ``KeyError``.  A
+                parameter no relation mentions is answered as a leaf (its
+                start is whatever resolve() and the hints give it, at the
+                provenance they carry), which is what stage 4 does with it.
+
+        Returns:
+            ``{path: ProbedStart}`` -- ``value`` in INTERNAL units,
+            ``user_value`` in the path's USER units, ``rank``/``source`` the
+            provenance.  A path the engine cannot reach at all comes back with
+            ``source == "not derivable"`` and None values (see
+            ``ProbedStart``); a reader must handle that case explicitly.
+
+        Raises:
+            RuntimeError: the engine itself failed; names the paths.  Never
+                swallowed -- see ``probe_derivable`` (review 2.1.17).
+
+        Not cached.  The inputs (user_params, hints and their ranks, seed
+        hints, overrides, links, the symbol map) are all mutable and are read
+        by ``resolve()`` deep inside the solve, so no cheap key is safe from
+        going stale; a caller instead asks for every path it needs in ONE
+        call (the EEP seed once per star, the flux bootstrap once per
+        load_data).
+        """
+        paths = list(paths)
+        for p in paths:
+            parts = p.split(".")
+            if len(parts) != 3 or not parts[1].isdigit():
+                raise ValueError(
+                    f"probe_start: '{p}' is not a canonical index-form path "
+                    f"(<component>.<index>.<param>)."
+                )
+            c_type, p_name = parts[0], parts[2]
+            if (
+                p not in self.master_symbol_map
+                and p_name not in self.base_defaults.get(c_type, {})
+            ):
+                raise KeyError(
+                    f"probe_start: '{p}' names no parameter -- it is not an "
+                    f"engine symbol and {c_type}/defaults.yaml declares no "
+                    f"'{p_name}'."
+                )
+        sets = self.seed_hint_sets or []
+        resolved, ranks = self._probe_solve(
+            paths, tolerance, seed_hints=dict(sets[0]) if sets else None
+        )
+        out = {}
+        for p in paths:
+            if p not in resolved:
+                out[p] = ProbedStart(p, None, None, None, "not derivable")
+                continue
+            val = float(resolved[p])
+            rank = ranks[p]
+            out[p] = ProbedStart(
+                p,
+                val,
+                self.from_internal(p, val),
+                rank,
+                self._provenance_label(rank),
+            )
+        return out
+
+    def from_internal(self, path, value):
+        """Convert an INTERNAL-unit value of `path` to its USER unit.
+
+        The ConfigManager-side twin of ``Parameter.from_internal``.
+        ``get_conversion_factor`` is the user -> internal multiplier (the
+        RECIPROCAL of Parameter's factor; CLAUDE.md invariants), so this
+        divides by it.  `path` is the canonical index form, which is where a
+        user ``unit:`` override lives after standardize_param_names.
+        """
+        parts = path.split(".")
+        factor = self.get_conversion_factor(
+            parts[0], parts[-1], full_path=path
+        )
+        return float(value) / factor
+
+    def _probe_solve(self, paths, tolerance, seed_hints=None):
+        """Run the engine on a snapshot and roll every mutation back.
+
+        The ONE snapshot/rollback shared by ``probe_derivable`` and
+        ``probe_start``.  Returns ``(resolved, provenance)`` -- the engine's
+        {internal_path: internal value} and {internal_path: rank} -- as copies
+        that outlive the rollback.
+
+        A requested path that is not an engine symbol is registered as a LEAF
+        for the duration of the probe, as finalize_user_params' "fallback to
+        leafs" pass does for a user entry, so it enters the default-armor pass
+        and a user entry on it keeps PRECEDENCE_USER.  The symbol map is
+        restored afterwards.
+
+        An exception from the engine is re-raised naming `paths`; see
+        ``probe_derivable``'s docstring for why it is never swallowed.
+        """
+        saved_symbols = dict(self.master_symbol_map)
         # The engine writes back init_scale into user_params, appends
         # diagnostics, blacklists any inversion whose sp.solve hits the 2 s
         # alarm, and refreshes the export snapshots.  None of that may leak
@@ -3421,19 +3567,51 @@ class ConfigManager:
         prev_level = logger.level
         try:
             logger.setLevel(logging.WARNING)
-            self.resolve_and_validate_parameters(flat, tolerance)
-            ranks = dict(self._last_provenance)
-        except Exception as e:
-            # A probe must never break a run that would otherwise work; the
-            # caller's fallback is simply "not derivable".
-            logger.debug(f"Derivability probe failed ({e}); assuming unknown.")
-            ranks = {}
+            for p in paths:
+                if p not in self.master_symbol_map:
+                    self.master_symbol_map[p] = sp.Symbol(p)
+
+            flat = {}
+            for upath, data in self.user_params.items():
+                sym = self.master_symbol_map.get(upath)
+                if sym is None:
+                    continue
+                data = require_entry(upath, data)
+                val = data.get("initval")
+                if val is None:
+                    val = data.get("mu")
+                if isinstance(val, (list, tuple)):
+                    val = val[0] if len(val) else None
+                if val is None:
+                    continue
+                c_type, p_name = upath.split(".")[0], upath.split(".")[-1]
+                factor = (
+                    self.get_conversion_factor(c_type, p_name, full_path=upath)
+                    or 1.0
+                )
+                flat[str(sym)] = float(val) * factor
+
+            try:
+                resolved = self.resolve_and_validate_parameters(
+                    flat, tolerance, seed_hints=seed_hints
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"The relaxation engine failed while probing the start of "
+                    f"{sorted(paths)} ({type(e).__name__}: {e}). The probe "
+                    f"solves a subset of stage 4's inputs, so this is an "
+                    f"engine or bookkeeping bug, not a missing input."
+                ) from e
+            return (
+                {str(k): v for k, v in resolved.items()},
+                dict(self._last_provenance),
+            )
         finally:
             logger.setLevel(prev_level)
             for attr, value in saved.items():
                 setattr(self, attr, value)
-
-        return {p for p in paths if ranks.get(p, 0) > PRECEDENCE_DEFAULT}
+            self.master_symbol_map.clear()
+            self.master_symbol_map.update(saved_symbols)
 
     def resolve_and_validate_parameters(
         self, user_provided_params, tolerance=1e-3, seed_hints=None
