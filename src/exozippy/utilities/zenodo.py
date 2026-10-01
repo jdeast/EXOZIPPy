@@ -277,21 +277,6 @@ def _entry_lock(entry: Path) -> Iterator[None]:
                 os.close(fd)
 
 
-def shared_cache_has(filename: str, meta: Mapping[str, object]) -> bool:
-    """Whether the machine cache holds an entry for this asset.
-
-    Existence only, keyed by the pinned md5 -- the full verification still
-    happens when ``fetch_assets`` links it. For a caller that must know in
-    advance whether a fetch can be served WITHOUT the network (the BC
-    tables before their record is published: models/NextGen/bc_tables.py).
-    False when the cache is switched off or unusable.
-    """
-    cache = _cache_dir()
-    if cache is None:
-        return False
-    return _entry_path(cache, filename, meta).is_file()
-
-
 def _entry_is_intact(entry: Path, meta: Mapping[str, object]) -> bool:
     """Full size+md5 verification of a shared-cache entry.
 

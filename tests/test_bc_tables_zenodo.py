@@ -3,12 +3,12 @@
 models/NextGen/bc_tables.py owns the pinned manifest and the fetch;
 components/sed/bc_grid.ensure_bc_tables is the hook every table reader
 calls.  Nothing here touches the network: zenodo._urlretrieve is replaced
-by a fake, and the manifest by a one-file fake (the real record id is
-checked by the first test only).
+by a fake, and the manifest by a one-file fake -- except for the two
+tests that check the real pinned record (its file list, and one real
+download of the smallest table), which skip only if Zenodo is unreachable.
 """
 
 import hashlib
-import os
 import urllib.error
 
 import pytest
@@ -49,26 +49,81 @@ def _serving(calls, payload=_PAYLOAD):
 def test_the_bc_table_record_is_pinned():
     """
     Given the pinned manifest,
-    When its Zenodo record id is checked,
-    Then it is filled in.
-
-    This is the merge gate for the BC-tables-to-Zenodo move: the record is
-    created by hand (JDE), so the code went in with ZENODO_RECORD = None and
-    the pins of the upload bundle.  It FAILS on CI while that is so (and the
-    SED tests there fail too, having nothing to download); locally it skips,
-    so the pre-push suite can run against tables pre-populated from the
-    bundle.  Once the record is pinned this is a plain passing check.
+    When its Zenodo record ids are checked,
+    Then both the version record and its concept record are filled in, and
+    a table's URL is that record's file URL.
     """
-    if bc_tables.is_pinned():
-        assert bc_tables.ZENODO_CONCEPT_RECORD is not None
-        return
-    message = (
-        "models/NextGen/bc_tables.py: ZENODO_RECORD is still TODO -- publish "
-        "the BC tables on Zenodo and pin the record id before merging."
+    assert isinstance(bc_tables.ZENODO_RECORD, int)
+    assert isinstance(bc_tables.ZENODO_CONCEPT_RECORD, int)
+    url = bc_tables._assets(["TESS.bc.parquet"])["TESS.bc.parquet"]["url"]
+    assert url == (
+        f"https://zenodo.org/records/{bc_tables.ZENODO_RECORD}/files/"
+        f"TESS.bc.parquet"
     )
-    if os.environ.get("CI"):
-        pytest.fail(message)
-    pytest.skip(message)
+
+
+def _zenodo_record_or_skip():
+    """The pinned record's API JSON, or skip if Zenodo cannot be reached.
+
+    Only a TRANSPORT failure skips (no network, DNS, a 5xx): an HTTP 4xx
+    means the pinned record id is wrong, which is exactly what this is for,
+    so it fails.
+    """
+    import json
+    import urllib.request
+
+    url = f"https://zenodo.org/api/records/{bc_tables.ZENODO_RECORD}"
+    try:
+        with urllib.request.urlopen(url, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as e:
+        if e.code < 500:
+            raise
+        pytest.skip(f"Zenodo unavailable ({e}); cannot check the record")
+    except (urllib.error.URLError, TimeoutError) as e:
+        pytest.skip(f"no network ({e}); cannot reach the pinned record")
+
+
+def test_the_pins_match_the_published_record():
+    """
+    Given the pinned record, read from Zenodo's own API,
+    When its files are compared with the manifest,
+    Then they are the same files with the same sizes and md5s, no more and
+    no fewer -- so a re-uploaded or added file is caught here, not in a fit.
+    """
+    record = _zenodo_record_or_skip()
+    published = {
+        f["key"]: {"size": f["size"], "md5": f["checksum"].split(":", 1)[1]}
+        for f in record["files"]
+    }
+    assert int(record["conceptrecid"]) == bc_tables.ZENODO_CONCEPT_RECORD
+    assert published == bc_tables._BC_TABLE_FILES
+
+
+def test_a_table_really_downloads_from_the_pinned_record(
+    monkeypatch, tmp_path
+):
+    """
+    Given the real pinned record and an empty destination and machine cache,
+    When the smallest published table is ensured,
+    Then it is downloaded through utilities/zenodo, lands with the pinned
+    md5, and is published into the machine cache -- the path every fresh
+    install takes.  (~1.4 MB; skipped only if Zenodo cannot be reached.)
+    """
+    _zenodo_record_or_skip()
+    name = min(
+        bc_tables._BC_TABLE_FILES,
+        key=lambda n: bc_tables._BC_TABLE_FILES[n]["size"],
+    )
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("EXOZIPPY_CACHE_DIR", str(cache))
+    monkeypatch.setattr(bc_tables, "_verified", set())
+
+    (path,) = bc_tables.ensure_tables([name], dest_dir=tmp_path / "BCs")
+
+    md5 = bc_tables._BC_TABLE_FILES[name]["md5"]
+    assert hashlib.md5(path.read_bytes()).hexdigest() == md5
+    assert (cache / "downloads" / f"{md5}-{name}").is_file()
 
 
 def test_every_pin_is_a_bc_table_with_a_size_and_an_md5():
@@ -160,34 +215,18 @@ def test_a_locally_changed_table_raises_and_is_not_overwritten(
     assert calls == []
 
 
-def test_an_unpinned_record_cannot_download(fake_manifest, monkeypatch):
-    """
-    Given the record id still TODO and an absent table not in the cache,
-    When it is asked for,
-    Then it raises saying the record is not published -- without trying a
-    download from a URL that does not exist.
-    """
-    calls = []
-    monkeypatch.setattr(zenodo, "_urlretrieve", _serving(calls))
-    monkeypatch.setattr(bc_tables, "ZENODO_RECORD", None)
-
-    with pytest.raises(RuntimeError, match="not published yet"):
-        bc_tables.ensure_tables([_NAME])
-    assert calls == []
-
-
-def test_an_unpinned_table_is_served_from_the_machine_cache(
+def test_a_cached_table_is_linked_without_a_download(
     fake_manifest, monkeypatch, tmp_path
 ):
     """
-    Given the record id still TODO but the machine cache pre-populated with
-    the exact file (<md5>-<name>, as utilities/zenodo keys it),
+    Given the machine cache holding the exact file (<md5>-<name>, as
+    utilities/zenodo keys it) and an empty destination,
     When the table is asked for,
-    Then it is linked into place with no download.
+    Then it is linked into place with no download -- how every checkout on
+    a machine after the first gets its tables.
     """
     calls = []
     monkeypatch.setattr(zenodo, "_urlretrieve", _serving(calls))
-    monkeypatch.setattr(bc_tables, "ZENODO_RECORD", None)
     cache = tmp_path / "cache"
     monkeypatch.setenv("EXOZIPPY_CACHE_DIR", str(cache))
     (cache / "downloads").mkdir(parents=True)

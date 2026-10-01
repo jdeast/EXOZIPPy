@@ -75,22 +75,17 @@ BC_TABLE_DIR = current_dir / "BCs"
 
 # Zenodo record of the PUBLISHED VERSION these pins describe, and the
 # concept record that groups every version (the DOI to cite for "the NextGen
-# BC tables" without naming a version).
-#
-# TODO(JDE): not published yet. Create the record, upload the files listed
-# in _BC_TABLE_FILES, publish, and paste the two ids here. Until then a
-# table that is not already on disk (or in the machine cache) cannot be
-# fetched, and tests/test_bc_tables_zenodo.py::
-# test_the_bc_table_record_is_pinned fails on CI so this cannot merge
-# unpinned.
-ZENODO_RECORD: int | None = None
-ZENODO_CONCEPT_RECORD: int | None = None
+# BC tables" without naming a version: 10.5281/zenodo.23074950). Version 1,
+# published by JDE 2026-10-01 (DOI 10.5281/zenodo.23074951, CC-BY-4.0).
+# Browse every EXOZIPPy data record at https://zenodo.org/communities/exozippy
+# -- for humans only; the code pins record ids and md5s, never the community.
+ZENODO_RECORD = 23074951
+ZENODO_CONCEPT_RECORD = 23074950
 
-# size and md5 of every published table. They pin the CONTENT, independent
-# of the record: these are the files in the upload bundle, byte for byte
-# (generated at commit d9929630, "Added BCs calculated for more filters",
-# PR #349). Once the record exists, cross-check them against
-# https://zenodo.org/api/records/<ZENODO_RECORD>.
+# size and md5 of every published table, from the record's own API
+# (https://zenodo.org/api/records/23074951, files[*].size / checksum). They
+# pin the CONTENT: the tables generated at commit d9929630 ("Added BCs
+# calculated for more filters", PR #349).
 _BC_TABLE_FILES = {
     "2MASS.bc.parquet": {
         "size": 4253006,
@@ -158,38 +153,22 @@ FETCH_COMMAND = "exozippy-fetch-bc-tables"
 _verified: set[tuple[str, int, int, int]] = set()
 
 
-def is_pinned() -> bool:
-    """True once the Zenodo record id has been filled in."""
-    return ZENODO_RECORD is not None
-
-
 def published_tables() -> List[str]:
     """Filenames of every published table, sorted."""
     return sorted(_BC_TABLE_FILES)
 
 
 def record_url() -> str:
-    """Human-facing URL of the pinned record (or the TODO marker)."""
-    if not is_pinned():
-        return "(the Zenodo record is not published yet: ZENODO_RECORD is TODO in models/NextGen/bc_tables.py)"
+    """Human-facing URL of the pinned record."""
     return f"https://zenodo.org/records/{ZENODO_RECORD}"
 
 
 def _assets(filenames: Iterable[str]) -> dict:
-    """{filename: {"url", "size", "md5"}} for fetch_assets.
-
-    Unpinned, the url is a placeholder that is never requested: ensure_tables
-    only hands fetch_assets an unpinned file the machine cache already holds,
-    and the cache path never touches the url when it is warm.
-    """
+    """{filename: {"url", "size", "md5"}} for fetch_assets."""
     out = {}
     for name in filenames:
         meta = dict(_BC_TABLE_FILES[name])
-        meta["url"] = (
-            f"https://zenodo.org/records/{ZENODO_RECORD}/files/{name}"
-            if is_pinned()
-            else f"unpinned:{name}"
-        )
+        meta["url"] = f"{record_url()}/files/{name}"
         out[name] = meta
     return out
 
@@ -261,9 +240,8 @@ def ensure_tables(
     ------
     RuntimeError
         A present table differs from the pin (see the module docstring), or
-        an absent one could not be fetched -- no network, Zenodo down, or
-        the record not published yet. The message names the file(s), the
-        record and how to pre-fetch.
+        an absent one could not be fetched (no network, Zenodo down). The
+        message names the file(s), the record and how to pre-fetch.
     """
     dest_dir = BC_TABLE_DIR if dest_dir is None else Path(dest_dir)
     names = published_tables() if filenames is None else list(filenames)
@@ -285,21 +263,6 @@ def ensure_tables(
 
     if missing:
         assets = _assets(missing)
-        if not is_pinned():
-            # No url to download from yet. The machine cache may still hold
-            # the files (pre-populated from the upload bundle); anything it
-            # does not hold cannot be had at all.
-            unserved = [
-                n for n in missing if not zenodo.shared_cache_has(n, assets[n])
-            ]
-            if unserved:
-                raise RuntimeError(
-                    f"BC table(s) {unserved} are not in {dest_dir} and "
-                    f"cannot be fetched: {record_url()}. Until it is, "
-                    f"place the exact files (pinned size and md5 in "
-                    f"_BC_TABLE_FILES) in {dest_dir}, or in the machine "
-                    f"cache as <md5>-<filename>."
-                )
         try:
             zenodo.fetch_assets(assets, dest_dir)
         except (RuntimeError, urllib.error.URLError, OSError) as e:
