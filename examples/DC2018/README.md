@@ -19,9 +19,10 @@ pipeline, one cluster job per event:
    was an artifact of outlier rejection eating the finite-source peak).
    Pass `--mmx-emcee` (job: `EXTRA="--mmx-emcee"`) to turn MMEXOFAST's
    hours-long emcee polish back on. (This explicit step is optional in
-   general: a config whose params file lacks microlensing start values
-   triggers the same MMEXOFAST run automatically inside EXOZIPPy's
-   data-driven-hints layer.)
+   general: a config with no `mmexofast:` key whose params file lacks
+   microlensing start values is seeded by EXOZIPPy's built-in PSPL peak
+   finder, and `mmexofast: true` makes EXOZIPPy run MMEXOFAST itself --
+   MMEXOFAST never runs unless asked for, review 8.6.25.)
 2. **EXOZIPPy** samples the 2L1S system (PTDE, EXOFASTv2-parity settings)
    and writes the usual artifacts under `events/<NNN>/fitresults/`.
    Every light curve fits with `likelihood: hogg` -- the marginalized

@@ -104,8 +104,9 @@ def test_push_hints_seeds_exactly_three_paths():
     pushed = {}
 
     class FakeCM:
-        def add_seed_hints(self, sets, replace=False):
+        def add_seed_hints(self, sets, *, source, replace=False):
             pushed["sets"] = sets
+            pushed["source"] = source
             pushed["replace"] = replace
 
     n = peakfind.push_peak_find_hints(
@@ -116,8 +117,10 @@ def test_push_hints_seeds_exactly_three_paths():
             "chi2": 1.0,
             "n_points": 10,
             "converged": True,
+            "fixed": [],
         },
         FakeCM(),
+        source="test",
     )
     assert n == 1
     assert pushed["sets"] == [
@@ -127,10 +130,37 @@ def test_push_hints_seeds_exactly_three_paths():
             "mulensevent.0.t_E": 20.0,
         }
     ]
+    assert "peak finder" in pushed["source"]
+
+
+def test_push_hints_never_pushes_a_held_value():
+    """A value the finder HELD (review 8.6.25 part 2: an informed t_0) is
+    not pushed at all -- the user's entry already supplies it, and a seed
+    beside it would only be outranked noise."""
+    pushed = {}
+
+    class FakeCM:
+        def add_seed_hints(self, sets, *, source, replace=False):
+            pushed["sets"] = sets
+
+    peakfind.push_peak_find_hints(
+        {
+            "t_0": 1.0,
+            "u_0": 0.2,
+            "t_E": 20.0,
+            "chi2": 1.0,
+            "n_points": 10,
+            "converged": True,
+            "fixed": ["t_0"],
+        },
+        FakeCM(),
+        source="test",
+    )
+    assert pushed["sets"] == [{"source.0.u_0": 0.2, "mulensevent.0.t_E": 20.0}]
 
 
 def test_push_hints_is_a_no_op_without_a_seed():
-    assert peakfind.push_peak_find_hints(None, object()) == 0
+    assert peakfind.push_peak_find_hints(None, object(), source="x") == 0
 
 
 _PSPL_CONFIG = {
@@ -147,28 +177,39 @@ def _real_cm():
     return ConfigManager({}, system_config=_PSPL_CONFIG)
 
 
-def test_add_seed_hints_accumulates_across_callers():
-    """Two seeders compose (review 2.1.12).
+def test_a_second_seed_set_registration_raises_naming_both_callers():
+    """One seeder per fit (review 2.1.25, JDE ruling 2026-09-30).
 
-    ConfigManager.add_seed_hints used to ASSIGN seed_hint_sets, so a second
-    caller silently discarded the first -- MMEXOFAST's K solutions,
-    including a binary lens's s/q/alpha, replaced by one point-lens set.  It
-    is named and documented as an accumulator, like its siblings add_hint
-    and add_scale_hint, and now behaves as one: sets append in call order,
-    each kept whole (never merged element-wise with another caller's).
+    add_seed_hints ASSIGNED until 2.1.12 (a second caller silently discarded
+    the first), then APPENDED -- but a user per-seed initval list must match
+    K, and a K summed over two unrelated seeders is one the user cannot
+    know.  A second registration without replace=True now raises, naming
+    the caller that got there first and the new one.
     """
     cm = _real_cm()
     cm.add_seed_hints(
-        [{"source.0.t_0": 2458554.8}, {"source.0.t_0": 2458554.9}]
+        [{"source.0.t_0": 2458554.8}, {"source.0.t_0": 2458554.9}],
+        source="MMEXOFAST (fits.json)",
     )
-    cm.add_seed_hints([{"source.0.t_0": 2458555.0, "source.0.u_0": 0.1}])
+    with pytest.raises(ValueError) as exc:
+        cm.add_seed_hints(
+            [{"source.0.t_0": 2458555.0, "source.0.u_0": 0.1}],
+            source="peak finder (mulensinstrument)",
+        )
+    msg = str(exc.value)
+    assert "MMEXOFAST (fits.json)" in msg
+    assert "peak finder (mulensinstrument)" in msg
+    # nothing was half-applied
+    assert len(cm.seed_hint_sets) == 2
+    assert cm.seed_hint_source == "MMEXOFAST (fits.json)"
 
-    assert len(cm.seed_hint_sets) == 3
-    assert [s["source.0.t_0"] for s in cm.seed_hint_sets] == pytest.approx(
-        [2458554.8, 2458554.9, 2458555.0]
-    )
-    assert "source.0.u_0" not in cm.seed_hint_sets[0]
-    assert cm.seed_hint_sets[2]["source.0.u_0"] == pytest.approx(0.1)
+
+def test_add_seed_hints_requires_a_source_label():
+    cm = _real_cm()
+    with pytest.raises(TypeError):
+        cm.add_seed_hints([{"source.0.t_0": 2458554.8}])
+    with pytest.raises(ValueError, match="source"):
+        cm.add_seed_hints([{"source.0.t_0": 2458554.8}], source="")
 
 
 def test_add_seed_hints_replace_is_the_explicit_override():
@@ -176,24 +217,140 @@ def test_add_seed_hints_replace_is_the_explicit_override():
     mode, which replaces MMEXOFAST's seeds on purpose."""
     cm = _real_cm()
     cm.add_seed_hints(
-        [{"source.0.t_0": 2458554.8}, {"source.0.t_0": 2458554.9}]
+        [{"source.0.t_0": 2458554.8}, {"source.0.t_0": 2458554.9}],
+        source="first",
     )
-    cm.add_seed_hints([{"source.0.t_0": 2458555.0}], replace=True)
+    cm.add_seed_hints(
+        [{"source.0.t_0": 2458555.0}], source="second", replace=True
+    )
     assert len(cm.seed_hint_sets) == 1
     assert cm.seed_hint_sets[0]["source.0.t_0"] == pytest.approx(2458555.0)
+    assert cm.seed_hint_source == "second"
 
 
-def test_a_seeded_t_0_counts_as_available_so_auto_stays_a_fallback():
-    """The second half of 2.1.12's trap: user_params and probe_derivable
-    cannot see a seed hint, so t_0_is_already_available read an MMEXOFAST
-    push as "absent".  Under accumulation that would make `peak_find: auto`
-    ADD a point-lens seed beside every MMEXOFAST solution; it must see the
-    seed via seeded_paths() and stay out."""
+# ---------------------------------------------------------------------------
+# plan_peak_find: what the default has to find (review 8.6.25)
+# ---------------------------------------------------------------------------
+
+
+def test_plan_with_nothing_informed_is_the_full_search():
+    assert peakfind.plan_peak_find(_real_cm()) == {}
+
+
+def test_plan_holds_an_informed_t_0_and_fits_the_rest():
+    from exozippy.config import ConfigManager
+
+    cm = ConfigManager(
+        {"source.0.t_0": {"initval": 2458554.8}},
+        system_config=_PSPL_CONFIG,
+    )
+    assert peakfind.plan_peak_find(cm) == {"t_0": pytest.approx(2458554.8)}
+
+
+def test_plan_holds_a_user_t_E_without_a_t_0():
+    """JDE 2026-10-01: a t_E the user supplies is respected even when t_0 is
+    not -- it is held, and only t_0/u_0 are found."""
+    from exozippy.config import ConfigManager
+
+    cm = ConfigManager(
+        {"mulensevent.0.t_E": {"initval": 18.2}},
+        system_config=_PSPL_CONFIG,
+    )
+    assert peakfind.plan_peak_find(cm) == {"t_E": pytest.approx(18.2)}
+
+
+def test_held_t_E_stays_exactly_and_t_0_u_0_are_found():
+    t_0, u_0, t_E = 2458550.0, 0.15, 18.0
+    curves = [_curve(t_0, u_0, t_E, 1.0, 0.5, seed=10)]
+    held = 1.1 * t_E
+    seed = peakfind.find_pspl_seed(curves, fixed={"t_E": held})
+    assert seed["t_E"] == held
+    assert seed["fixed"] == ["t_E"]
+    assert abs(seed["t_0"] - t_0) < 0.05 * t_E
+    assert seed["u_0"] == pytest.approx(u_0, rel=0.25)
+
+
+def test_plan_holds_a_t_E_the_kinematics_derive():
+    """An informed t_E is HELD even when no params entry names it: here the
+    engine derives it as theta_E / mu_rel, the kinematic chain.  Refitting
+    it is what the old t_0-only gate existed to prevent
+    (tests/test_seed_quality.py's multi-source case); u_0, uninformed, is
+    the only thing left to find."""
+    from exozippy.config import ConfigManager
+
+    cm = ConfigManager(
+        {
+            "source.0.t_0": {"initval": 2458554.8},
+            "mulensevent.0.theta_E": {"initval": 0.5},
+            "mulensevent.0.mu_rel_mag": {"initval": 10.0},
+        },
+        system_config=_PSPL_CONFIG,
+    )
+    plan = peakfind.plan_peak_find(cm)
+    assert set(plan) == {"t_0", "t_E"}
+    assert plan["t_0"] == pytest.approx(2458554.8)
+    assert plan["t_E"] == pytest.approx(0.5 / (10.0 / 365.25), rel=1e-3)
+
+
+def test_plan_sees_a_seeded_t_0():
+    """seed 0 of a registered set is informed, so a seeded geometry needs
+    nothing (the caller does not even ask while sets exist, but the plan
+    must agree)."""
     cm = _real_cm()
-    assert not peakfind.t_0_is_already_available(cm)
-    cm.add_seed_hints([{"source.0.t_0": 2458554.8}])
-    assert cm.seeded_paths() == {"source.0.t_0"}
-    assert peakfind.t_0_is_already_available(cm)
+    cm.add_seed_hints(
+        [
+            {
+                "source.0.t_0": 2458554.8,
+                "source.0.u_0": 0.1,
+                "mulensevent.0.t_E": 20.0,
+            }
+        ],
+        source="test",
+    )
+    assert peakfind.plan_peak_find(cm) is None
+
+
+def test_held_t_0_stays_exactly_and_u_0_t_E_are_found():
+    """find_pspl_seed(fixed={"t_0": ...}) never moves t_0, and still finds
+    u_0 and t_E around it."""
+    t_0, u_0, t_E = 2458550.0, 0.15, 18.0
+    curves = [_curve(t_0, u_0, t_E, 1.0, 0.5, seed=8)]
+    held = t_0 + 0.3  # a user t_0 a little off the data's best
+    seed = peakfind.find_pspl_seed(curves, fixed={"t_0": held})
+    assert seed["t_0"] == held
+    assert seed["fixed"] == ["t_0"]
+    assert seed["u_0"] == pytest.approx(u_0, rel=0.2)
+    assert seed["t_E"] == pytest.approx(t_E, rel=0.2)
+    assert seed["anomaly"] is None
+
+
+def test_held_t_0_and_t_E_fit_u_0_alone():
+    t_0, u_0, t_E = 2458550.0, 0.15, 18.0
+    curves = [_curve(t_0, u_0, t_E, 1.0, 0.5, seed=9)]
+    seed = peakfind.find_pspl_seed(curves, fixed={"t_0": t_0, "t_E": t_E})
+    assert (seed["t_0"], seed["t_E"]) == (t_0, t_E)
+    assert seed["fixed"] == ["t_0", "t_E"]
+    assert seed["u_0"] == pytest.approx(u_0, rel=0.05)
+
+
+def test_nothing_held_is_the_original_search_bit_for_bit():
+    """fixed=None / {} must be the 8.4.9 search exactly -- every shipped
+    seed depends on it."""
+    curves = [_curve(2458550.0, 0.15, 18.0, 1.0, 0.5, seed=4)]
+    a = peakfind.find_pspl_seed(curves)
+    b = peakfind.find_pspl_seed(curves, fixed={})
+    for k in ("t_0", "u_0", "t_E", "chi2"):
+        assert a[k] == b[k]
+
+
+def test_holding_everything_or_an_unknown_name_raises():
+    curves = [_curve(2458550.0, 0.15, 18.0, 1.0, 0.5, seed=4)]
+    with pytest.raises(ValueError, match="nothing to fit"):
+        peakfind.find_pspl_seed(
+            curves, fixed={"t_0": 1.0, "u_0": 0.1, "t_E": 10.0}
+        )
+    with pytest.raises(ValueError, match="rho"):
+        peakfind.find_pspl_seed(curves, fixed={"rho": 1e-3})
 
 
 # ---------------------------------------------------------------------------

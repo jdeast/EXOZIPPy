@@ -119,7 +119,9 @@ def test_seed_hints_and_user_list_both_present_prefer_user_list():
 
     cm = ConfigManager(user_params, system_config=system_config)
     # Component-style seed hint disagreeing with the user's list.
-    cm.add_seed_hints([{"star.Lens.mass": 0.9}, {"star.Lens.mass": 0.95}])
+    cm.add_seed_hints(
+        [{"star.Lens.mass": 0.9}, {"star.Lens.mass": 0.95}], source="test"
+    )
     cm.finalize_user_params()
 
     assert cm.seed_resolved is not None

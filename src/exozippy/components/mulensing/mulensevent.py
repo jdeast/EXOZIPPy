@@ -338,31 +338,37 @@ class MulensEvent(Component):
                 "accepts": "*.json",
                 "required": False,
                 "doc": (
-                    "MMEXOFAST integration: a fit-results JSON path provides "
-                    "seed initvals/scales for the microlensing parameters "
-                    "plus the bad-data mask and error factors; 'auto' forces "
-                    "an MMEXOFAST run on the raw light curves (cached at "
-                    "<prefix>_mmexofast.json); false disables the automatic "
-                    "run that otherwise happens when the params file lacks "
-                    "start values for the microlensing parameters."
+                    "MMEXOFAST integration, OFF unless asked for (the "
+                    "built-in peak finder is the default seeder). A "
+                    "fit-results JSON path provides seed initvals/scales "
+                    "for the microlensing parameters plus the bad-data mask "
+                    "and error factors (a missing file raises); true runs "
+                    "MMEXOFAST on the raw light curves when the params file "
+                    "lacks start values for the microlensing parameters "
+                    "(cached at <prefix>_mmexofast.json) and consumes the "
+                    "same; false or absent never runs it. 'auto' is no "
+                    "longer accepted."
                 ),
             },
             {
                 "key": "peak_find",
                 "kind": "option",
-                "accepts": "auto | true | false",
+                "accepts": [True, False],
                 "required": False,
                 "doc": (
-                    "Built-in point-lens peak finder for t_0, u_0 and t_E. "
-                    "'auto' (default) runs it only when those three are "
-                    "still unseeded -- no user values, no MMEXOFAST -- "
-                    "where they would otherwise start at defaults.yaml; "
-                    "true always runs it, which is the MMEXOFAST-free mode; "
-                    "false never does. It fits a PSPL model to the light "
-                    "curves with the source and blend fluxes profiled out "
-                    "analytically, and seeds only those three: s, alpha, q "
-                    "and rho keep their defaults and the sampler finds the "
-                    "anomaly itself."
+                    "Built-in point-lens peak finder for t_0, u_0 and t_E, "
+                    "the DEFAULT seeder. Absent (default): runs when no "
+                    "MMEXOFAST seeds were loaded and one of the three has "
+                    "no start from the params file (directly or derived); "
+                    "it holds every given value and fits only the "
+                    "missing ones. true always "
+                    "runs it on all three, replacing MMEXOFAST's seeds (the "
+                    "A/B mode); false never does. It fits a PSPL model to "
+                    "the light curves with the source and blend fluxes "
+                    "profiled out analytically, and seeds only those three: "
+                    "s, alpha, q and rho keep their defaults and the "
+                    "sampler finds the anomaly itself. 'auto' is no longer "
+                    "accepted (omit the key)."
                 ),
             },
             {

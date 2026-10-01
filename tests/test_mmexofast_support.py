@@ -30,11 +30,12 @@ class _RecordingConfigManager:
     def add_scale_hint(self, path, scale):
         self.scale_hints[path] = scale
 
-    def add_seed_hints(self, seed_dicts, replace=False):
-        # Mirrors ConfigManager.add_seed_hints: accumulate (review 2.1.12).
-        if replace:
-            self.seed_hint_sets = []
-        self.seed_hint_sets.extend(seed_dicts)
+    def add_seed_hints(self, seed_dicts, *, source, replace=False):
+        # Mirrors ConfigManager.add_seed_hints: one seeder per fit (review
+        # 2.1.25) -- a second registration without replace=True raises.
+        if self.seed_hint_sets and not replace:
+            raise ValueError(f"second seed-set registration by {source!r}")
+        self.seed_hint_sets = list(seed_dicts)
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +299,9 @@ def test_seed_hints_subtract_jd_offset_from_t_0_only():
         "jd_offset": 2450000.0,
     }
     cm = _RecordingConfigManager()
-    n = mmx.push_seed_hints(data, cm, want_rho=False, is_binary=False)
+    n = mmx.push_seed_hints(
+        data, cm, want_rho=False, is_binary=False, source="test"
+    )
     assert n == 1
     seed = cm.seed_hint_sets[0]
     assert np.isclose(seed["source.0.t_0"], 8554.9)
@@ -315,7 +318,9 @@ def test_seed_hints_no_jd_offset_key_is_zero_shift():
         "fits": [{"parameters": {"t_0": 2458554.9, "u_0": 0.14, "t_E": 18.2}}]
     }
     cm = _RecordingConfigManager()
-    mmx.push_seed_hints(data, cm, want_rho=False, is_binary=False)
+    mmx.push_seed_hints(
+        data, cm, want_rho=False, is_binary=False, source="test"
+    )
     assert np.isclose(cm.seed_hint_sets[0]["source.0.t_0"], 2458554.9)
 
 
@@ -705,7 +710,9 @@ def test_seed_hints_warn_when_a_fit_lacks_required_observables(caplog):
     cm = _RecordingConfigManager()
 
     with caplog.at_level("WARNING"):
-        n = mmx.push_seed_hints(data, cm, want_rho=True, is_binary=True)
+        n = mmx.push_seed_hints(
+            data, cm, want_rho=True, is_binary=True, source="test"
+        )
 
     assert n == 1
     seed = cm.seed_hint_sets[0]
@@ -743,7 +750,8 @@ def test_seed_start_value_returns_user_units():
                 "lens.1.q": 9.26e-4,
             },
             {"lens.1.alpha": -50.47},
-        ]
+        ],
+        source="test",
     )
 
     stored = cm.seed_hint_sets[0]["lens.1.alpha"]

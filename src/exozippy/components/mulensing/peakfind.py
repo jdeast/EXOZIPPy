@@ -58,8 +58,6 @@ import logging
 import numpy as np
 from scipy.optimize import minimize
 
-from exozippy.config import user_entry
-
 logger = logging.getLogger(__name__)
 
 # Trial values for the coarse grid.  u_0 spans the high-magnification regime
@@ -210,17 +208,61 @@ def _paczynski(t, t_0, u_0, t_E):
     return (u2 + 2.0) / np.sqrt(u2 * (u2 + 4.0))
 
 
-def _fit_pspl(curves, mag_fn):
-    """One grid + Nelder-Mead PSPL fit to ``curves`` (see find_pspl_seed)."""
+_GEOMETRY = ("t_0", "u_0", "t_E")
+
+
+def _pack(theta, free):
+    """The optimizer's coordinates for the FREE subset of (t_0, u_0, t_E):
+    t_0 as is, u_0 and t_E in log so a simplex cannot step either one
+    negative."""
+    vals = dict(zip(_GEOMETRY, theta))
+    return [vals[k] if k == "t_0" else np.log(vals[k]) for k in free]
+
+
+def _unpack(p, free, fixed):
+    """Full (t_0, u_0, t_E) from the optimizer's coordinates plus `fixed`."""
+    vals = dict(fixed)
+    for k, v in zip(free, p):
+        vals[k] = v if k == "t_0" else np.exp(v)
+    return tuple(vals[k] for k in _GEOMETRY)
+
+
+def _fit_pspl(curves, mag_fn, fixed=None):
+    """One grid + Nelder-Mead PSPL fit to ``curves`` (see find_pspl_seed).
+
+    ``fixed`` maps any of t_0/u_0/t_E to a value HELD through the grid and
+    the refinement (review 8.6.25: a t_0 the user gave, with u_0/t_E still
+    to find).  Its grid axis collapses to that one value and the refinement
+    runs over the remaining coordinates only; the degenerate-refinement
+    guards below see the full geometry, fixed values included.  With
+    nothing fixed every step is the original three-coordinate search.
+    """
+    fixed = dict(fixed or {})
+    unknown = set(fixed) - set(_GEOMETRY)
+    if unknown:
+        raise ValueError(
+            f"peak finder: cannot hold {sorted(unknown)} -- only "
+            f"{list(_GEOMETRY)} are fit."
+        )
+    free = [k for k in _GEOMETRY if k not in fixed]
+    if not free:
+        raise ValueError(
+            "peak finder: t_0, u_0 and t_E are all held -- there is "
+            "nothing to fit; the caller should not have run it."
+        )
     curves = [c for c in curves if len(c[0]) >= 4]
     if not curves:
         return None
 
+    t0_grid = [fixed["t_0"]] if "t_0" in fixed else _t0_candidates(curves)
+    u0_grid = (fixed["u_0"],) if "u_0" in fixed else _U0_GRID
+    tE_grid = (fixed["t_E"],) if "t_E" in fixed else _TE_GRID
+
     best_chi2, best = np.inf, None
-    per_u0 = {u_0: (np.inf, None) for u_0 in _U0_GRID}
-    for t_0 in _t0_candidates(curves):
-        for u_0 in _U0_GRID:
-            for t_E in _TE_GRID:
+    per_u0 = {u_0: (np.inf, None) for u_0 in u0_grid}
+    for t_0 in t0_grid:
+        for u_0 in u0_grid:
+            for t_E in tE_grid:
                 chi2 = _total_chi2((t_0, u_0, t_E), curves, mag_fn)
                 if chi2 < best_chi2:
                     best_chi2, best = chi2, (t_0, u_0, t_E)
@@ -231,13 +273,14 @@ def _fit_pspl(curves, mag_fn):
 
     # Refine in log(u_0) and log(t_E) so the optimizer cannot step either
     # one negative -- both are positive by definition and a Nelder-Mead
-    # simplex has no way to know that in the raw coordinates.
+    # simplex has no way to know that in the raw coordinates.  Only the
+    # FREE coordinates are refined (_pack / _unpack).
     def wrapped(p):
-        return _total_chi2((p[0], np.exp(p[1]), np.exp(p[2])), curves, mag_fn)
+        return _total_chi2(_unpack(p, free, fixed), curves, mag_fn)
 
     res = minimize(
         wrapped,
-        [best[0], np.log(best[1]), np.log(best[2])],
+        _pack(best, free),
         method="Nelder-Mead",
         options={"maxiter": 4000, "xatol": 1e-6, "fatol": 1e-3},
     )
@@ -246,7 +289,7 @@ def _fit_pspl(curves, mag_fn):
     )
     dense_t = np.sort(max(curves, key=lambda c: len(c[0]))[0])
     cadence = float(np.median(np.diff(dense_t))) if dense_t.size > 1 else 0.0
-    ref_u0, ref_tE = float(np.exp(res.x[1])), float(np.exp(res.x[2]))
+    ref_t0, ref_u0, ref_tE = (float(v) for v in _unpack(res.x, free, fixed))
     degenerate = refinement_is_degenerate(ref_u0, ref_tE, span, cadence)
     if not np.isfinite(res.fun) or res.fun > best_chi2:
         # The refinement made it worse (or diverged): keep the grid point.
@@ -264,7 +307,7 @@ def _fit_pspl(curves, mag_fn):
         # this wrong does not fail loudly downstream -- it fails ten hours
         # later.
         t_0, u_0, t_E, chi2, ok = _refit_at_grid_u0(
-            per_u0, curves, mag_fn, span, cadence
+            per_u0, curves, mag_fn, span, cadence, fixed
         )
         logger.warning(
             "Peak finder: the PSPL refinement ran into the u_0 -> 0, "
@@ -285,9 +328,7 @@ def _fit_pspl(curves, mag_fn):
             _WING_DEGENERACY_DCHI2,
         )
     else:
-        t_0 = float(res.x[0])
-        u_0 = float(np.exp(res.x[1]))
-        t_E = float(np.exp(res.x[2]))
+        t_0, u_0, t_E = ref_t0, ref_u0, ref_tE
         chi2 = float(res.fun)
         ok = bool(res.success)
     return {
@@ -297,39 +338,46 @@ def _fit_pspl(curves, mag_fn):
         "chi2": float(chi2),
         "n_points": int(sum(len(c[0]) for c in curves)),
         "converged": ok,
+        "fixed": sorted(fixed),
     }
 
 
-def _refit_at_grid_u0(per_u0, curves, mag_fn, span, cadence):
+def _refit_at_grid_u0(per_u0, curves, mag_fn, span, cadence, fixed):
     """(t_0, t_E) refit at each grid u_0; the fallback for a degenerate
     free refinement.  Returns (t_0, u_0, t_E, chi2, converged).  A refit
     that is itself degenerate, or worse than its grid point, contributes
     the grid point, so when nothing refines the result is the best grid
-    point exactly as before."""
+    point exactly as before.  A HELD t_0 or t_E (``fixed``) stays held; a
+    held u_0 makes ``per_u0`` that one value, so the "grid" is one refit;
+    with both t_0 and t_E held there is nothing to refit and each grid
+    point stands."""
+    free = [k for k in ("t_0", "t_E") if k not in fixed]
     fits = []
     for u_0, (grid_chi2, start) in per_u0.items():
         if start is None or not np.isfinite(grid_chi2):
             continue
         t0g, tEg = start
+        if not free:
+            fits.append((grid_chi2, t0g, u_0, tEg, False))
+            continue
+        held = dict(fixed, u_0=u_0)
 
-        def wrapped(p, u_0=u_0):
-            return _total_chi2((p[0], u_0, np.exp(p[1])), curves, mag_fn)
+        def wrapped(p, held=held):
+            return _total_chi2(_unpack(p, free, held), curves, mag_fn)
 
         res = minimize(
             wrapped,
-            [t0g, np.log(tEg)],
+            _pack((t0g, u_0, tEg), free),
             method="Nelder-Mead",
             options={"maxiter": 4000, "xatol": 1e-6, "fatol": 1e-3},
         )
-        t_E = float(np.exp(res.x[1]))
+        t_0, _, t_E = (float(v) for v in _unpack(res.x, free, held))
         if not np.isfinite(res.fun) or res.fun > grid_chi2:
             fits.append((grid_chi2, t0g, u_0, tEg, False))
         elif refinement_is_degenerate(u_0, t_E, span, cadence):
             fits.append((grid_chi2, t0g, u_0, tEg, False))
         else:
-            fits.append(
-                (float(res.fun), float(res.x[0]), u_0, t_E, bool(res.success))
-            )
+            fits.append((float(res.fun), t_0, u_0, t_E, bool(res.success)))
     best = min(f[0] for f in fits)
     within = [f for f in fits if f[0] <= best + _WING_DEGENERACY_DCHI2]
     chi2, t_0, u_0, t_E, ok = max(within, key=lambda f: f[2])
@@ -439,7 +487,7 @@ def _mask_window(curves, lo, hi):
     return out
 
 
-def find_pspl_seed(curves, mag_fn=None, primary_first=True):
+def find_pspl_seed(curves, mag_fn=None, primary_first=True, fixed=None):
     """Fit a point-lens point-source model to ``curves``.
 
     ``curves`` is a list of ``(time, flux, inverse_variance)`` arrays, all
@@ -456,22 +504,29 @@ def find_pspl_seed(curves, mag_fn=None, primary_first=True):
     seed with the first's window under ``"anomaly"``.  Otherwise the first
     fit is returned unchanged and ``"anomaly"`` is None.
 
-    Returns a dict with t_0, u_0, t_E, chi2, n_points, converged and
+    ``fixed`` maps any of t_0/u_0/t_E to a value HELD at it (review 8.6.25,
+    part 2: a t_0 the user gave, with u_0 and t_E still to find); the
+    returned dict echoes the held values and lists their names under
+    ``"fixed"``, so the caller pushes only the rest.  A held t_0 skips the
+    primary-first pass -- the primary's epoch is then KNOWN, and the pass
+    exists only to find it.
+
+    Returns a dict with t_0, u_0, t_E, chi2, n_points, converged, fixed and
     anomaly, or None when there is nothing fittable.
     """
     if mag_fn is None:
         mag_fn = _paczynski
-    first = _fit_pspl(curves, mag_fn)
+    first = _fit_pspl(curves, mag_fn, fixed)
     if first is None:
         return None
     first["anomaly"] = None
-    if not primary_first:
+    if not primary_first or (fixed and "t_0" in fixed):
         return first
 
     usable = [c for c in curves if len(c[0]) >= 4]
     lo, hi, fwhm_1 = feature_window(usable, first["t_0"])
     masked = _mask_window(usable, lo, hi)
-    second = _fit_pspl(masked, mag_fn) if masked else None
+    second = _fit_pspl(masked, mag_fn, fixed) if masked else None
     if second is None or lo <= second["t_0"] <= hi:
         # The rest of the curve fits the same feature from its wings: one
         # event, and the first fit is it.
@@ -514,57 +569,67 @@ def find_pspl_seed(curves, mag_fn=None, primary_first=True):
     return second
 
 
-T_0_PATH = "source.0.t_0"
+# The finder's three observables and the post-split paths it seeds (the
+# same spellings push_seed_hints uses).
+GEOMETRY_PATHS = {
+    "t_0": "source.0.t_0",
+    "u_0": "source.0.u_0",
+    "t_E": "mulensevent.0.t_E",
+}
 
 
-def t_0_is_already_available(config_manager):
-    """True when t_0 is named outright, already seeded, or derivable.
+def plan_peak_find(config_manager):
+    """What the ``peak_find`` default has to find, read with ``probe_start``.
 
-    WHY THIS AND NOT `user_hints_sufficient`, which is the obvious choice
-    and was the first one used here.  That function asks whether EVERY
-    observable this topology needs is available -- t_0, u_0, t_E, plus rho
-    and s/alpha/q where they apply -- which is far too strong a trigger for
-    a peak finder.  A config that names t_0 and u_0 and legitimately DERIVES
-    t_E from the galactic model's kinematics fails it, because t_E comes
-    from theta_E and mu_rel and mu_rel comes from the proper motions.  The
-    peak finder then fired and supplied a PSPL t_E in place of the
-    kinematic one -- which is exactly what tests/test_seed_quality.py's
-    multi-source case measures, and it changed that measurement
-    (chi2/N 6.94 with the galactic seed).
+    Returns None when t_0, u_0 and t_E all already have an INFORMED start
+    (``ProbedStart.informed``: a user entry or a component hint or seed,
+    directly or through a relation -- a defaults.yaml value is not) and
+    there is nothing to do.  Otherwise returns the dict of values to HOLD
+    (user units) while the finder fits the rest:
 
-    t_0 is the right question because t_0 is the only one whose default is
-    UNRECOVERABLE: on DC2018-128 `defaults.yaml` puts it 1,445 days from the
-    event's own peak, where the likelihood is flat and no sampler returns.
-    A wrong-but-finite u_0 or t_E start is a slow fit; a wrong t_0 is not a
-    fit at all.  So the finder earns its keep precisely when t_0 is absent,
-    and has no business overriding a model that is already answering.
+      * nothing informed -> ``{}``: the full three-coordinate search, and
+        all three are pushed (8.4.9).  t_0 is the one whose default is
+        UNRECOVERABLE: on DC2018-128 ``defaults.yaml`` puts it 1,445 days
+        from the event's own peak, where the likelihood is flat and no
+        sampler returns.
+      * anything informed -> exactly the informed ones (review 8.6.25 part
+        2; JDE 2026-10-01: "when the user supplies [t_E], it should respect
+        it").  The finder holds them, fits only what is missing and pushes
+        only that.  An informed t_0 used to skip the finder entirely and
+        leave u_0/t_E at defaults.yaml; an informed t_E with no t_0 used to
+        be refit and replaced.
 
-    "Already seeded" is asked of ``seeded_paths()`` because neither
-    ``user_params`` nor ``probe_derivable`` can see a seed hint: without it an
-    MMEXOFAST push that seeded t_0 still read as "absent", and -- now that
-    ``add_seed_hints`` accumulates (review 2.1.12) -- the finder would ADD a
-    point-lens seed beside every MMEXOFAST solution instead of staying a
-    fallback.
+    WHY ``informed`` AND NOT ``user_hints_sufficient``.  That asks whether
+    EVERY observable the topology needs is available -- t_0, u_0, t_E, plus
+    rho and s/alpha/q where they apply -- which is the wrong question for a
+    PSPL seeder.  And an informed u_0 or t_E is HELD, never refit: a t_E
+    the galactic model's kinematics derive (theta_E / mu_rel from the
+    user's masses, distances and proper motions) is informed through a
+    relation, and the finder must not override it -- that is exactly what
+    tests/test_seed_quality.py's multi-source case measures (chi2/N 6.94
+    with the galactic seed).
+
+    The probe sees seed 0 of any seed set already registered, but the
+    caller does not get this far when one is: one seeder per fit (review
+    2.1.25).  An engine failure RAISES (``probe_start``); the old t_0-only
+    gate swallowed it as "t_0 not available", which silently turned the
+    finder on over an engine or bookkeeping bug.
     """
-    if T_0_PATH in config_manager.seeded_paths():
-        return True
-    entry = user_entry(config_manager.user_params, T_0_PATH)
-    if entry is not None and (
-        entry.get("initval") is not None or entry.get("mu") is not None
-    ):
-        return True
-    try:
-        return T_0_PATH in config_manager.probe_derivable([T_0_PATH])
-    except Exception:  # noqa: BLE001
-        # A probe that cannot run is not evidence that t_0 is available, and
-        # guessing "available" here would silently disable the finder.
-        return False
+    probed = config_manager.probe_start(list(GEOMETRY_PATHS.values()))
+    informed = {
+        name: probed[path].user_value
+        for name, path in GEOMETRY_PATHS.items()
+        if probed[path].informed
+    }
+    if len(informed) == len(GEOMETRY_PATHS):
+        return None
+    return informed
 
 
-def push_peak_find_hints(
-    seed, config_manager, source="peak finder", replace=False
-):
-    """Seed t_0, u_0 and t_E from ``find_pspl_seed``'s result.
+def push_peak_find_hints(seed, config_manager, source, replace=False):
+    """Seed t_0, u_0 and t_E from ``find_pspl_seed``'s result -- minus any
+    the finder HELD (``seed["fixed"]``), which already had an informed
+    start and are not pushed at all.
 
     Only those three.  The companion geometry (log_s, alpha, q) and rho keep
     their ``defaults.yaml`` starts, so this is a PARTIAL seed by design and
@@ -572,25 +637,29 @@ def push_peak_find_hints(
     at PRECEDENCE_DERIVED_DATA, the same tier MMEXOFAST's seeds occupy: this
     is a derivation FROM THE DATA, so every user entry outranks it.
 
-    ``replace`` is passed through to ``add_seed_hints``: True discards the
-    seed sets already registered (the ``peak_find: true`` A/B mode), False
-    appends this one after them.
+    ``source`` names the caller for ``add_seed_hints``' one-seeder check.
+    ``replace`` is passed through: True discards the seed sets already
+    registered (the ``peak_find: true`` A/B mode); False with sets already
+    registered raises there (review 2.1.25).
     """
     if not seed:
         return 0
+    pushed = {
+        path: float(seed[name])
+        for name, path in GEOMETRY_PATHS.items()
+        if name not in seed["fixed"]
+    }
     config_manager.add_seed_hints(
-        [
-            {
-                "source.0.t_0": float(seed["t_0"]),
-                "source.0.u_0": float(seed["u_0"]),
-                "mulensevent.0.t_E": float(seed["t_E"]),
-            }
-        ],
-        replace=replace,
+        [pushed], source=f"peak finder ({source})", replace=replace
+    )
+    held = (
+        f"; held at the informed start: {', '.join(seed['fixed'])}"
+        if seed["fixed"]
+        else ""
     )
     logger.info(
         "Peak finder (%s): t_0 = %.4f, u_0 = %.4f, t_E = %.3f d "
-        "from %d epochs (chi2 = %.1f%s).  s, alpha, q and rho keep their "
+        "from %d epochs (chi2 = %.1f%s%s).  s, alpha, q and rho keep their "
         "defaults; the sampler finds the anomaly.",
         source,
         seed["t_0"],
@@ -599,6 +668,7 @@ def push_peak_find_hints(
         seed["n_points"],
         seed["chi2"],
         "" if seed["converged"] else ", NOT converged",
+        held,
     )
     anomaly = seed.get("anomaly")
     if anomaly:

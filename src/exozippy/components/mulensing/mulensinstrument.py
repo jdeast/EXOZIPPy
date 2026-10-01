@@ -454,20 +454,32 @@ class MulensInstrument(Instrument):
     def _resolve_mmexofast(self, system):
         """Stage-1a half of the MMEXOFAST integration.
 
-        Three modes, keyed off the mulensevent block's ``mmexofast`` entry:
+        MMEXOFAST runs ONLY WHEN ASKED FOR (review 8.6.25, JDE 2026-09-30:
+        the built-in peak finder is the default seeder).  The mulensevent
+        block's ``mmexofast`` entry takes:
 
-        - explicit file path: the JSON's bad-data mask (``excluded_points``)
-          and error factors (``errfacs``) are applied to this component's
-          files, and its seed hints are pushed here too (the only push). An
-          absent file warns and skips; an unparseable one raises (see
-          ``mmexofast_support.load_json``) rather than dropping the mask and
-          the error factors along with the seeds.
-        - absent (default) or ``auto``: when the params file lacks start
-          values for the microlensing parameters (or always, for ``auto``),
-          MMEXOFAST is run on the raw light curves -- renormalize_errors on,
-          output cached at ``<prefix>_mmexofast.json`` -- and its seeds,
-          masks and error factors are all consumed here.
-        - ``false``: fully opts out.
+        - a JSON path: the JSON's bad-data mask (``excluded_points``) and
+          error factors (``errfacs``) are applied to this component's files,
+          and its seed hints are pushed here too (the only push).  A path
+          that does not exist RAISES FileNotFoundError naming it (review
+          1.6.15: it used to warn and run unseeded); an unparseable file
+          raises too (``mmexofast_support.load_json``).
+        - ``true``: MMEXOFAST is this fit's seeder.  When the params file
+          lacks start values the relaxation engine can derive
+          (``mmexofast_support.user_hints_sufficient``), it is run on the raw
+          light curves -- renormalize_errors on, output cached at
+          ``<prefix>_mmexofast.json`` -- and its seeds, masks and error
+          factors are consumed exactly as for a path.  This is precisely
+          what an ABSENT key did before 8.6.25; the sufficiency gate stays so
+          a complete mkparam restart file does not re-run MMEXOFAST on every
+          iteration (mulensing.md).
+        - absent or ``false``: MMEXOFAST never runs.  When the starts are
+          insufficient the peak finder seeds them (``_peak_find_seeds``).
+
+        ``auto`` (the old "run regardless of the starts" spelling) RAISES,
+        naming the new spellings: an n-way choice is spelled with booleans,
+        not an enum, and a third value meaning "true, but ungated" is not
+        worth a spelling (pass a JSON path to force a particular file).
 
         This lives on the instrument rather than MulensEvent because the mask must
         exist before the photometry is read (load_data), and only this
@@ -479,12 +491,25 @@ class MulensInstrument(Instrument):
         if event is None:
             return
         spec = event.config[0].get("mmexofast") if event.config else None
-        if spec is False:
+        if spec is None or spec is False:
             return
+        if spec == "auto":
+            raise ValueError(
+                f"[{self.prefix}] mmexofast: auto is no longer a spelling "
+                f"(review 8.6.25).  Use `mmexofast: true` to run MMEXOFAST "
+                f"on the light curves, a JSON path to load its output, or "
+                f"omit the key (or `false`) to let the built-in peak finder "
+                f"seed t_0/u_0/t_E when the params file does not."
+            )
+        if not (spec is True or isinstance(spec, str)):
+            raise ValueError(
+                f"[{self.prefix}] mmexofast: {spec!r} is not a spelling: "
+                f"use true (run MMEXOFAST), false (never), or a JSON path."
+            )
         is_binary = event.n_companions >= 1
         want_rho = bool(event.finite_source)
 
-        if isinstance(spec, str) and spec != "auto":
+        if isinstance(spec, str):
             # Explicit JSON: masks + error factors, and the seed hints too.
             # This is the ONLY push of an explicit file's seeds.  They must
             # land here, at stage 1, to be visible to this component's flux
@@ -493,20 +518,31 @@ class MulensInstrument(Instrument):
             # per-band flux decomposition would silently fall back to
             # median-flux / q_source=0.95.  MulensEvent used to re-push the
             # same file at stage 3; that second channel silently undid
-            # `peak_find: true` and, now that add_seed_hints accumulates,
-            # would double every seed set (reviews 1.6.15, 2.1.12).
+            # `peak_find: true` and would now raise as a second seed-set
+            # registration (reviews 1.6.15, 2.1.12, 2.1.25).
             self._reject_time_spec_with_mmexofast(spec)
-            data = mmexofast_support.load_json(spec)
-            if data is not None:
-                mmexofast_support.push_seed_hints(
-                    data,
-                    self.config_manager,
-                    want_rho=want_rho,
-                    is_binary=is_binary,
-                    source=spec,
+            if not Path(spec).exists():
+                # A user-NAMED file is not ours to regenerate, and running
+                # unseeded instead hides a typo behind a start no sampler
+                # recovers from (review 1.6.15).  Only `true`'s cache below
+                # may legitimately be absent.
+                raise FileNotFoundError(
+                    f"[{self.prefix}] mmexofast: {spec!r} does not exist "
+                    f"(resolved against the working directory: "
+                    f"{Path(spec).absolute()}).  Fix the path, use "
+                    f"`mmexofast: true` to generate it, or drop the key to "
+                    f"seed with the built-in peak finder."
                 )
+            data = mmexofast_support.load_json(spec)
+            mmexofast_support.push_seed_hints(
+                data,
+                self.config_manager,
+                want_rho=want_rho,
+                is_binary=is_binary,
+                source=spec,
+            )
         else:
-            if spec != "auto" and mmexofast_support.user_hints_sufficient(
+            if mmexofast_support.user_hints_sufficient(
                 self.config_manager, is_binary, want_rho
             ):
                 return
@@ -555,22 +591,27 @@ class MulensInstrument(Instrument):
     def _peak_find_seeds(self, system, per_file):
         """Seed t_0/u_0/t_E with the built-in PSPL fit when nothing else did.
 
-        STRICTLY A FALLBACK, by default.  `peak_find` on the mulensevent
-        block takes:
+        THE DEFAULT SEEDER (review 8.6.25, JDE 2026-09-30); MMEXOFAST runs
+        only when asked for (``_resolve_mmexofast``).  `peak_find` on the
+        mulensevent block takes:
 
-          - ``auto`` (default): run only when the microlensing observables
-            are still unseeded at this point -- i.e. the user named none, no
-            explicit MMEXOFAST JSON was given, and the automatic MMEXOFAST
-            path either opted out (``mmexofast: false``) or produced nothing
-            usable.  Those cases previously started t_0/u_0/t_E at
+          - absent (default): run when another seeder has not already
+            registered seed sets (one seeder per fit, review 2.1.25) and
+            ``peakfind.plan_peak_find`` says a start is missing.  It HOLDS
+            every informed one of t_0/u_0/t_E and fits and pushes only the
+            rest -- so a t_E the user gives or the galactic kinematics
+            derive is never overridden.  Without it those starts sat at
             ``defaults.yaml``, which for a real event is a start no sampler
-            recovers from, so a fallback here can only help and cannot
-            change any fit that was already seeded.
-          - ``true``: run REGARDLESS, replacing whatever seeded the
-            observables that ranks no higher than derived-from-data.  This
-            is the mmexofast-free mode and the A/B handle for comparing the
-            two seeders on one event.
+            recovers from.
+          - ``true``: run REGARDLESS, fitting all three and replacing any
+            seed sets already registered (MMEXOFAST's).  This is the A/B
+            handle for comparing the two seeders on one event; a user entry
+            still outranks every seed.
           - ``false``: never run.
+
+        ``auto`` (the old spelling of the default) RAISES: the default is
+        the absent key, and an n-way choice is spelled with booleans, not an
+        enum (the same ruling ``mmexofast:`` follows).
 
         Failure is not fatal.  A seeder that raises should leave the fit in
         exactly the state it would have been in without this module, which
@@ -580,19 +621,37 @@ class MulensInstrument(Instrument):
         event = getattr(system, "mulensevent", None)
         if event is None or not event.config:
             return
-        spec = event.config[0].get("peak_find", "auto")
+        spec = event.config[0].get("peak_find")
+        if spec == "auto":
+            raise ValueError(
+                f"[{self.prefix}] peak_find: auto is no longer a spelling "
+                f"(review 8.6.25): omit the key for the default (find what "
+                f"the params file does not give), or use true (always, "
+                f"replacing MMEXOFAST's seeds) or false (never)."
+            )
+        if spec not in (None, True, False):
+            raise ValueError(
+                f"[{self.prefix}] peak_find: {spec!r} is not a spelling: "
+                f"omit the key for the default, or use true or false."
+            )
         if spec is False:
             return
         forced = spec is True
 
-        # `forced` REPLACES whatever seed sets are already registered --
-        # replacing MMEXOFAST's seeds on purpose is the entire point of the
-        # A/B mode -- and says so.  In `auto` an existing seed t_0 already
-        # answers t_0_is_already_available below, so the finder stays a
-        # strict fallback and never ADDS a point-lens seed next to
-        # MMEXOFAST's (add_seed_hints accumulates since review 2.1.12).
+        # One seeder per fit (review 2.1.25): add_seed_hints raises on a
+        # second registration.  By default an existing seeder (an MMEXOFAST
+        # JSON or run) owns the fit and the finder stays out; `forced`
+        # REPLACES its sets -- replacing MMEXOFAST's seeds on purpose is the
+        # entire point of the A/B mode -- and says so.
         replace = False
-        if forced and self.config_manager.seed_hint_sets:
+        if self.config_manager.seed_hint_sets:
+            if not forced:
+                logger.debug(
+                    f"[{self.prefix}] peak finder: "
+                    f"{self.config_manager.seed_hint_source!r} already "
+                    f"seeded this fit; not running."
+                )
+                return
             replace = True
             logger.warning(
                 f"[{self.prefix}] peak_find: true REPLACES the "
@@ -618,15 +677,15 @@ class MulensInstrument(Instrument):
             )
             return
 
-        # Gate on t_0 ALONE, not on the full observable set -- see
-        # peakfind.t_0_is_already_available for why user_hints_sufficient is
-        # the wrong question here (it treats a t_E legitimately derived from
-        # the galactic model's kinematics as "unseeded" and lets the finder
-        # override it).
-        if not forced and peakfind.t_0_is_already_available(
-            self.config_manager
-        ):
-            return
+        # What is missing, from the engine-implied starts: see
+        # peakfind.plan_peak_find for why this is not user_hints_sufficient,
+        # and why an informed u_0 / t_E (e.g. a t_E the galactic kinematics
+        # derive) is HELD rather than refit.  `forced` fits all three.
+        fixed = {}
+        if not forced:
+            fixed = peakfind.plan_peak_find(self.config_manager)
+            if fixed is None:
+                return
 
         curves = []
         for t, f, e, _df in per_file:
@@ -655,7 +714,7 @@ class MulensInstrument(Instrument):
             return self._pspl_magnification(t, d, d, t_0, u_0, t_E, 0.0, 0.0)
 
         try:
-            seed = peakfind.find_pspl_seed(curves, mag_fn=mag_fn)
+            seed = peakfind.find_pspl_seed(curves, mag_fn=mag_fn, fixed=fixed)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 f"[{self.prefix}] peak finder failed "
@@ -675,7 +734,11 @@ class MulensInstrument(Instrument):
         get_collector(system).add(
             "Starting values for the microlensing trajectory "
             "($t_0$, $u_0$, $t_{\\rm E}$) were derived from a point-lens "
-            "point-source fit to the light curves.",
+            "point-source fit to the light curves."
+            if not seed["fixed"]
+            else "Starting values for the microlensing trajectory "
+            "parameters not given by the user were derived from a "
+            "point-lens point-source fit to the light curves.",
             section="microlensing",
             key=f"{self.prefix}.peakfind",
             rank=30,

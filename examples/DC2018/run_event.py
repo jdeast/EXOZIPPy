@@ -220,7 +220,8 @@ def build_user_params(ra, dec, fix_u1=False, bands_for_u1=()):
     Coordinates come from event_info.txt. The Lens's radius/teff/feh fixes
     are the same 'not constrainable without SED data' hack the DC2018_128
     example documents; the microlensing start values are deliberately
-    ABSENT so the MMEXOFAST auto-initialization triggers. The Source star
+    ABSENT so the seeds of the `mmexofast:` JSON this driver names take
+    effect (a user entry would outrank them). The Source star
     needs none of this: star.py pins its mass/teff/feh/radius/ra/dec
     automatically for any star that is purely a microlensing source (never
     also a lens body), falling back to the Lens's coordinates here.
