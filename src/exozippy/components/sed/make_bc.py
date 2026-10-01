@@ -80,6 +80,7 @@ import pandas as pd
 import yaml
 
 from ...filters.filter import Filter
+from ...utilities import zenodo_assets
 from ...utilities.zenodo import fetch_assets
 from .bc_grid import (
     DEFAULT_MODEL_ROOT,
@@ -108,23 +109,10 @@ V_BAND_MICRON = 0.55
 # spectrum (mirrors models/NextGen/BCs/plot.py ALPHA_GRID_PTS).
 ALPHA_FALLBACK = (0.0, 0.2, -0.2, 0.4, 0.6)
 
-# size and md5 come from the Zenodo record's own API
-# (https://zenodo.org/api/records/20547997). They pin the content, so a
-# re-uploaded or truncated file is caught rather than silently used.
-_MODEL_DATA = {
-    "NextGen": {
-        "NextGen.spectra.csv": {
-            "url": "https://zenodo.org/records/20547997/files/NextGen.spectra.csv?download=1",
-            "size": 259149813,
-            "md5": "7a2b81333f6a5bfccd4cbc07bdea6648",
-        },
-        "NextGen.wavelength.csv": {
-            "url": "https://zenodo.org/records/20547997/files/NextGen.wavelength.csv?download=1",
-            "size": 60943,
-            "md5": "29ae520da3a5b7b3c407688abba7abf2",
-        },
-    }
-}
+# The NextGen spectra on Zenodo, keyed by model name. The record id, sizes
+# and md5s live in utilities/zenodo_assets.py with every other Zenodo pin
+# (review 4.9.2); this table only says which record belongs to which model.
+_MODEL_DATA = {"NextGen": zenodo_assets.assets("nextgen_spectra")}
 
 # Emitted once per process, the first time a spectra grid is actually fetched.
 # Warning (not info) on purpose: anyone generating their own BC table is doing
@@ -152,8 +140,9 @@ def ensure_model_data(model: str, model_root: Path | str = DEFAULT_MODEL_ROOT):
     use and cached alongside the model's BC tables. See _DOWNSAMPLING_WARNING
     for their accuracy.
 
-    This is the NextGen-specific half of the fetch: it owns the _MODEL_DATA
-    URL table and the downsampling warning. The mechanics -- retries, the
+    This is the NextGen-specific half of the fetch: it maps the model to its
+    Zenodo record (pinned in utilities.zenodo_assets) and owns the
+    downsampling warning. The mechanics -- retries, the
     .part-then-rename, the size/md5 checks -- live in
     utilities.zenodo.fetch_assets, which the MIST EEP grid also calls.
     """

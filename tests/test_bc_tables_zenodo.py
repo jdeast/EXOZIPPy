@@ -1,11 +1,13 @@
 """The NextGen BC tables are fetched from Zenodo, pinned, and never re-shipped.
 
-models/NextGen/bc_tables.py owns the pinned manifest and the fetch;
+models/NextGen/bc_tables.py owns the fetch;
 components/sed/bc_grid.ensure_bc_tables is the hook every table reader
 calls.  Nothing here touches the network: zenodo._urlretrieve is replaced
-by a fake, and the manifest by a one-file fake -- except for the two
-tests that check the real pinned record (its file list, and one real
-download of the smallest table), which skip only if Zenodo is unreachable.
+by a fake, and the manifest by a one-file fake -- except for the one
+real download of the smallest table from the pinned record, which skips
+only if Zenodo is unreachable.  The pins themselves live in
+utilities/zenodo_assets.py; tests/test_zenodo_assets.py checks them
+against the live record's file list.
 """
 
 import hashlib
@@ -84,22 +86,7 @@ def _zenodo_record_or_skip():
         pytest.skip(f"no network ({e}); cannot reach the pinned record")
 
 
-def test_the_pins_match_the_published_record():
-    """
-    Given the pinned record, read from Zenodo's own API,
-    When its files are compared with the manifest,
-    Then they are the same files with the same sizes and md5s, no more and
-    no fewer -- so a re-uploaded or added file is caught here, not in a fit.
-    """
-    record = _zenodo_record_or_skip()
-    published = {
-        f["key"]: {"size": f["size"], "md5": f["checksum"].split(":", 1)[1]}
-        for f in record["files"]
-    }
-    assert int(record["conceptrecid"]) == bc_tables.ZENODO_CONCEPT_RECORD
-    assert published == bc_tables._BC_TABLE_FILES
-
-
+@pytest.mark.network
 def test_a_table_really_downloads_from_the_pinned_record(
     monkeypatch, tmp_path
 ):

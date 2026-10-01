@@ -23,7 +23,7 @@ examples/*/fitresults/
 src/exozippy/models/NextGen/BCs/NextGen.spectra.csv
 src/exozippy/models/NextGen/BCs/NextGen.wavelength.csv
 # The NextGen BC tables are published on Zenodo and fetched on first use
-# (models/NextGen/bc_tables.py pins them). Ignored so they can never be
+# (utilities/zenodo_assets.py pins them). Ignored so they can never be
 # re-added -- they took the wheel past PyPI's 100 MB limit (PR #349) -- and
 # so poetry, which builds from what git does not ignore, leaves them out of
 # the wheel even when they are present in the tree. Includes the '.part'

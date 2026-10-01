@@ -288,6 +288,35 @@ their logp terms, and `examples/ob09020` shipped from 2026-09-07 to 09-25 with a
 TypeError in its first start-point plot (the orbit-derived lens geometry listed
 as a compiled-plotter input) that no test reached.
 
+## Network tests and the Zenodo pins
+
+Download tests monkeypatch the transport (`tests/test_zenodo_fetch.py`,
+`tests/test_mist_eep_download.py`, most of `tests/test_bc_tables_zenodo.py`).
+The few that read a real Zenodo record are marked `network`; they run in the
+ordinary suite and on CI, and **skip only on a transport failure** (no
+network, DNS, a 5xx). An HTTP 4xx fails, because it means a pinned record id
+is wrong. Deselect them with `-m "not network"` on a machine without
+network.
+
+`tests/test_zenodo_assets.py::test_the_pins_match_the_live_zenodo_record`
+re-reads `https://zenodo.org/api/records/<id>` for every record in
+`src/exozippy/utilities/zenodo_assets.py` -- the ONE table of every Zenodo
+record, file, size and md5 the code downloads (review 4.9.2) -- and asserts
+the record id, concept id, DOIs and the full file list with every size and
+md5 match. **To publish a new version of a record:** upload it on Zenodo as
+a new version of the same record, update that record's ONE entry in
+`zenodo_assets.py` (the new `record_id`, and the size and md5 of every
+changed file), and run the network test:
+
+```bash
+pytest tests/test_zenodo_assets.py -n0
+```
+
+The offline tests in the same file guard the rest: the registry is
+internally consistent, every consumer reads its pins from it, the migrated
+pins are bit-identical to the literals they replaced, and no other module
+under `src/` spells out a Zenodo record id or a pinned md5.
+
 ## The pre-push hook, and why it does not say `poetry run pytest`
 
 The full suite runs on push, wired in `.pre-commit-config.yaml` (install both hook

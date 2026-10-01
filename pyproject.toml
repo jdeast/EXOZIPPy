@@ -400,6 +400,7 @@ norecursedirs = ["exozippy", "src"]
 addopts = "-n 6 --dist loadfile"
 markers = [
     "slow: tests that build a full System + compile PyTensor graphs (~30s+ each); skip with -m 'not slow'",
+    "network: tests that read a live remote service (Zenodo); they skip only when it is unreachable. Deselect with -m 'not network'",
 ]
 # 600, not 300.  A COLD compile cache (a fresh checkout, a new worktree, or
 # CI before its cache is populated) makes a single test's gcc invocation take
