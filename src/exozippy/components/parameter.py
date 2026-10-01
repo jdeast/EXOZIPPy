@@ -1108,6 +1108,11 @@ class Parameter:
     _summary_ci: Optional[float] = field(default=None, init=False)
     _mode_summaries_ci: Optional[float] = field(default=None, init=False)
     table_note: Optional[str] = None
+    # A component-declared qualifier the startup table prints after the
+    # unit, one string per element ("" for none) or one for all: the
+    # mulensing zeropoint's magnitude system, "mag (AB)" (issue #313).  A
+    # manifest option, never a params-file key; display only.
+    unit_qualifier: Any = None
     # What justifies this parameter's prior, from the params file
     # (config.CITATION_KEYS): a tuple of citations, or one tuple per element
     # for a vector.  Rendered as a Prior-column table note by
@@ -4163,11 +4168,27 @@ class Parameter:
     def get_unit_str(self, index=0):
         u_list = np.atleast_1d(self.unit)
         u_obj = u_list[index] if index < len(u_list) else u_list[0]
-        return (
+        text = (
             u_obj.to_string()
             if u_obj and u_obj.to_string() != "dimensionless"
             else ""
         )
+        if self.unit_qualifier is None:
+            return text
+        q_list = (
+            [self.unit_qualifier]
+            if isinstance(self.unit_qualifier, str)
+            else list(self.unit_qualifier)
+        )
+        if len(q_list) not in (1, self._n_elements()):
+            raise ValueError(
+                f"Parameter '{self.label}': unit_qualifier has {len(q_list)} "
+                f"entries for {self._n_elements()} elements."
+            )
+        qual = q_list[index] if len(q_list) > 1 else q_list[0]
+        if not qual:
+            return text
+        return f"{text} ({qual})" if text else f"({qual})"
 
     # ------------------------------------------------------------------
     # Component-declared prior contributions (see PriorContribution).

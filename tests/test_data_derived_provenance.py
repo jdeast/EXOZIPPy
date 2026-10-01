@@ -280,21 +280,18 @@ def test_zeropoint_is_a_derived_parameter(kmt_default):
     assert not any("zeropoint" in n for n in free)
 
 
-def test_zeropoint_initval_defaults_to_mu(kmt_default):
+def test_zeropoint_has_no_default_prior(kmt_default):
     """
-    Given no user entry, so mu comes from defaults.yaml (0 +/- 0.2 mag),
+    Given no user entry,
     When the resolved config is read,
-    Then the prior center is 0 -- the value the Gaussian is applied against
-    by Parameter.build_pymc's derived-with-sigma branch.
+    Then the zeropoint carries NO prior: defaults.yaml supplies no mu/sigma
+    since review 2.2.21 (it used to supply 0 +/- 0.2 mag), so the tie is
+    the user's to state.
     """
     system, _ = kmt_default
-    inst = system.mulensinstrument
-    assert np.atleast_1d(inst.zeropoint.mu) == pytest.approx(
-        np.zeros(inst.n_elements)
-    )
-    assert np.atleast_1d(inst.zeropoint.sigma) == pytest.approx(
-        np.full(inst.n_elements, 0.2)
-    )
+    zp = system.mulensinstrument.zeropoint
+    for field in (zp.mu, zp.sigma):
+        assert field is None or np.all(np.isnan(np.atleast_1d(field)))
 
 
 def test_zeropoint_honours_a_user_mu_as_its_start_and_center():
@@ -317,21 +314,18 @@ def test_zeropoint_honours_a_user_mu_as_its_start_and_center():
     assert np.atleast_1d(zp.initval)[i] == pytest.approx(21.0)
 
 
-def test_zeropoint_honours_an_explicit_user_initval():
+def test_zeropoint_refuses_an_explicit_user_initval():
     """
     Given a params file that gives zeropoint an explicit initval,
-    When the model is built,
-    Then the Parameter carries it.  Before, nothing read this key: the
-    constraint was built from mu/sigma alone, so an initval in a params file
-    was silently inert -- exactly the "special case that ignores initval"
-    this change removes.
+    When the system is prepared,
+    Then it raises (review 2.2.21): the zeropoint is DERIVED, so a start
+    value on it is a number the model never uses.  Before 2.2.21 the
+    Parameter carried it and nothing read it; the user means a prior, and
+    must say how much they trust it.  tests/test_zeropoint_magsys.py has the
+    bare-value spelling.
     """
-    system, _ = _build_kmt(
-        {"mulensinstrument.KMTC04.zeropoint": {"initval": 17.5}}
-    )
-    zp = system.mulensinstrument.zeropoint
-    i = list(system.mulensinstrument.names).index("KMTC04")
-    assert np.atleast_1d(zp.initval)[i] == pytest.approx(17.5)
+    with pytest.raises(ValueError, match="initval"):
+        _build_kmt({"mulensinstrument.KMTC04.zeropoint": {"initval": 17.5}})
 
 
 def test_zeropoint_units_go_through_the_generic_conversion():
