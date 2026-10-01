@@ -587,15 +587,17 @@ def plan_peak_find(config_manager):
     there is nothing to do.  Otherwise returns the dict of values to HOLD
     (user units) while the finder fits the rest:
 
-      * t_0 not informed -> ``{}``: the full three-coordinate search, and
+      * nothing informed -> ``{}``: the full three-coordinate search, and
         all three are pushed (8.4.9).  t_0 is the one whose default is
         UNRECOVERABLE: on DC2018-128 ``defaults.yaml`` puts it 1,445 days
         from the event's own peak, where the likelihood is flat and no
         sampler returns.
-      * t_0 informed, u_0 and/or t_E not -> the informed ones, t_0 always
-        among them (review 8.6.25 part 2).  The finder fits only what is
-        missing around the informed t_0 and pushes only that.  This used
-        to skip the finder entirely and leave u_0/t_E at defaults.yaml.
+      * anything informed -> exactly the informed ones (review 8.6.25 part
+        2; JDE 2026-10-01: "when the user supplies [t_E], it should respect
+        it").  The finder holds them, fits only what is missing and pushes
+        only that.  An informed t_0 used to skip the finder entirely and
+        leave u_0/t_E at defaults.yaml; an informed t_E with no t_0 used to
+        be refit and replaced.
 
     WHY ``informed`` AND NOT ``user_hints_sufficient``.  That asks whether
     EVERY observable the topology needs is available -- t_0, u_0, t_E, plus
@@ -619,8 +621,6 @@ def plan_peak_find(config_manager):
         for name, path in GEOMETRY_PATHS.items()
         if probed[path].informed
     }
-    if "t_0" not in informed:
-        return {}
     if len(informed) == len(GEOMETRY_PATHS):
         return None
     return informed

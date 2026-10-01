@@ -247,6 +247,29 @@ def test_plan_holds_an_informed_t_0_and_fits_the_rest():
     assert peakfind.plan_peak_find(cm) == {"t_0": pytest.approx(2458554.8)}
 
 
+def test_plan_holds_a_user_t_E_without_a_t_0():
+    """JDE 2026-10-01: a t_E the user supplies is respected even when t_0 is
+    not -- it is held, and only t_0/u_0 are found."""
+    from exozippy.config import ConfigManager
+
+    cm = ConfigManager(
+        {"mulensevent.0.t_E": {"initval": 18.2}},
+        system_config=_PSPL_CONFIG,
+    )
+    assert peakfind.plan_peak_find(cm) == {"t_E": pytest.approx(18.2)}
+
+
+def test_held_t_E_stays_exactly_and_t_0_u_0_are_found():
+    t_0, u_0, t_E = 2458550.0, 0.15, 18.0
+    curves = [_curve(t_0, u_0, t_E, 1.0, 0.5, seed=10)]
+    held = 1.1 * t_E
+    seed = peakfind.find_pspl_seed(curves, fixed={"t_E": held})
+    assert seed["t_E"] == held
+    assert seed["fixed"] == ["t_E"]
+    assert abs(seed["t_0"] - t_0) < 0.05 * t_E
+    assert seed["u_0"] == pytest.approx(u_0, rel=0.25)
+
+
 def test_plan_holds_a_t_E_the_kinematics_derive():
     """An informed t_E is HELD even when no params entry names it: here the
     engine derives it as theta_E / mu_rel, the kinematic chain.  Refitting

@@ -597,10 +597,9 @@ class MulensInstrument(Instrument):
 
           - absent (default): run when another seeder has not already
             registered seed sets (one seeder per fit, review 2.1.25) and
-            ``peakfind.plan_peak_find`` says a start is missing.  With no
-            informed t_0 it fits all three; with an informed t_0 and an
-            uninformed u_0 and/or t_E it HOLDS every informed one and fits
-            and pushes only the rest -- so a t_E the galactic kinematics
+            ``peakfind.plan_peak_find`` says a start is missing.  It HOLDS
+            every informed one of t_0/u_0/t_E and fits and pushes only the
+            rest -- so a t_E the user gives or the galactic kinematics
             derive is never overridden.  Without it those starts sat at
             ``defaults.yaml``, which for a real event is a start no sampler
             recovers from.
