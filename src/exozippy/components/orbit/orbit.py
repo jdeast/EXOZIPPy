@@ -539,15 +539,17 @@ class Orbit(Component):
             {
                 "key": "fitvcve",
                 "kind": "option",
-                "accepts": [False],
+                "accepts": [True, False],
                 "required": False,
                 "doc": (
-                    "WIP -- 'fitvcve: true' RAISES NotImplementedError.  It "
-                    "would parametrize eccentricity via V_c/V_e instead of "
-                    "sqrt(e)cos(omega)/sqrt(e)sin(omega), but the from_vcve "
-                    "physics functions are undefined.  The per-orbit switch "
-                    "itself is no longer a blocker: element roles are per "
-                    "instance now."
+                    "Sample V_c/V_e and the direction of omega instead of "
+                    "sqrt(e)cos(omega)/sqrt(e)sin(omega) (Eastman 2024), "
+                    "with the likelihood marginalized over both roots of the "
+                    "inversion and a Jacobian keeping the prior uniform in e "
+                    "and omega.  Default: on for an orbit that only transits "
+                    "measure (together with fitchord), off otherwise.  "
+                    "'fitvcve: false' also turns fitchord off unless fitchord "
+                    "is set explicitly."
                 ),
             },
         ]
@@ -1836,18 +1838,28 @@ class Orbit(Component):
         return [i for i, m in enumerate(modes) if m == "vcve"]
 
     def _add_vcve_terms(self, system):
-        """The two terms a V_c/V_e orbit owes: the Jacobian and the shield.
+        """The terms a V_c/V_e orbit owes: Jacobian, root existence, shield.
 
         THE JACOBIAN keeps the prior uniform in eccentricity.  A uniform step
         in V_c/V_e "imposes a non-physical prior that strongly biases e toward
         high eccentricities" (Eastman 2024, section 3), so the likelihood
-        carries `log|de/d(V_c/V_e)|` -- MINUS what `physics.vcve_log_jacobian`
-        returns; see the sign comment below, which is the difference between
-        removing that bias and doubling it.  Applied per orbit, from the
-        `ecc`/`omega` NODES, which is what makes the branch mixture replicate it
-        per branch automatically: each root then carries its own weight, and
+        carries `log|de/d(V_c/V_e)|` -- MINUS what
+        `physics.vcve_branch_log_jacobian` returns; see the sign comment below,
+        which is the difference between removing that bias and doubling it.
+        Applied per orbit and per BRANCH: the lower root substitutes its own
+        entry of the Jacobian vector, so each root carries its own weight, and
         that is exactly right, because the Jacobian differs between the two
         roots.
+
+        THE EXISTENCE WEIGHT (review 1.8.14) is a soft lower bound at 0 on
+        each branch's unclipped root.  The mixture sums the branches' weights,
+        so a branch with no physical orbit behind it must weigh ~0 -- not the
+        0.5/|dv/de| it kept on its clipped e = 0, which with the Jacobian and
+        the shield below was a prior 1.4% physical, 35.7% at e = 0 and 62.9%
+        on the forbidden side of the fold (NUTS chains froze on both).  With
+        it, the implied prior over the whole (V_c/V_e, omega) plane is flat in
+        e and uniform in omega to the quadrature's resolution
+        (tests/test_vcve.py, "the implied prior over the whole plane").
 
         THE SHIELD is the soft half of the pair that keeps an imaginary
         eccentricity from being a wall.  `_vcve_quadratic` floors the
@@ -1857,7 +1869,14 @@ class Orbit(Component):
         that whole region flat -- so the penalty here is applied to the
         UNFLOORED discriminant, where it has a gradient pointing back into the
         region where a real eccentricity exists.  Same argument, and the same
-        `soft_lower_bound` helper, as the eccentricity bound above.
+        `soft_lower_bound` helper, as the eccentricity bound above.  It is
+        still load-bearing next to the existence weight: with sin(omega) < 0
+        the forbidden side's (mirror) roots are POSITIVE, so only this term
+        says no orbit is there.  Being a log-sigmoid it is -log 2 at d = 0, so
+        it takes mass off the real side of the fold and leaks the same amount
+        onto the forbidden side (1.3% of the prior, measured); the mirror
+        continuation in `_vcve_quadratic` is what makes the two cancel, so
+        omega stays uniform.
 
         The chord half's own independent Jacobian (`|d(chord)/d(cos i)|`) lands
         with the chord half; the paper's eq 6 is the joint determinant of the
@@ -1875,56 +1894,89 @@ class Orbit(Component):
             return
 
         take = np.asarray(idx, dtype="int32")
-        ecc = self.ecc.value[take]
         omega = self.omega.value[take]
         vcve = self.vcve.value[take]
+        # The unclipped root vector `_add_eccentricity_bound` built and the
+        # collision bound reads (build_likelihood runs that first).  One node
+        # for every V_c/V_e orbit; a missing entry is a bookkeeping bug.
+        unclipped = getattr(self, "_vcve_unclipped_nodes", None)
+        missing = [i for i in idx if i not in (unclipped or {})]
+        if missing:
+            raise RuntimeError(
+                f"[orbit] {self.prefix}: no unclipped V_c/V_e root node for "
+                f"orbit(s) {[self.names[i] for i in missing]}; "
+                "_add_eccentricity_bound must build it before _add_vcve_terms."
+            )
+        e_unclipped = unclipped[idx[0]]
 
         # MINUS the derivative, and the sign is the term.  V_c/V_e is the
         # sampled coordinate, so the eccentricity it derives inherits the
         # density p(e) ~ |d(V_c/V_e)/de|, which diverges as e -> 1 -- the bias
         # the paper reports.  Flattening it means adding log|de/d(V_c/V_e)|,
-        # i.e. subtracting what vcve_log_jacobian returns.  Adding it would
-        # double the bias, and no check of the derivative's MAGNITUDE can tell
-        # the two apart, so the direction is pinned by measuring the implied
-        # prior on e for flatness (tests/test_vcve.py).
+        # i.e. subtracting what vcve_branch_log_jacobian returns.  Adding it
+        # would double the bias, and no check of the derivative's MAGNITUDE can
+        # tell the two apart, so the direction is pinned by measuring the
+        # implied prior on e for flatness (tests/test_vcve.py).
+        #
+        # Built from (vcve, omega) per branch, NOT from the clipped `ecc` node
+        # (review 1.8.14): on a root the inversion shielded, |e + sin w| of
+        # the clipped value is not the map's derivative, and the two places
+        # that happens -- a negative root clipped to 0, and the forbidden side
+        # of the fold -- carried ~98% of the prior's mass.  `jac` is the
+        # UPPER branch's vector; the lower branch substitutes its own entry
+        # below, exactly as it substitutes its `ecc`.
+        jac = physics.vcve_branch_log_jacobian(vcve, omega, upper=True)
+        pm.Potential(f"{self.prefix}.vcve_jacobian", -pt.sum(jac))
+        # The root-EXISTENCE weight (review 1.8.14): a branch whose root is
+        # negative has no orbit behind it -- `calc_ecc_from_vcve*` clip it to
+        # e = 0, where it used to keep its full weight 0.5/|dv/de| and pile
+        # 36% of the prior onto e = 0 (divergent at omega = 0, 180 deg).  The
+        # soft bound on the UNCLIPPED root is that weight with a gradient,
+        # and reading the same node the collision bound reads is what makes
+        # the mixture substitute it per branch.  scale = 0.88 for the
+        # collision bound's own reason: 500 nats per unit e, so the two ends
+        # of the eccentricity range are equally sharp.  Where no real root
+        # exists the root is the mirror one (physics._vcve_quadratic), so this
+        # also kills the mirror of a negative root -- which is what keeps the
+        # real-root shield's leak and its deficit equal, i.e. omega uniform.
         pm.Potential(
-            f"{self.prefix}.vcve_jacobian",
-            -pt.sum(physics.vcve_log_jacobian(ecc, omega)),
+            f"{self.prefix}.vcve_root_exists",
+            pt.sum(soft_lower_bound(e_unclipped[take], 0.0, scale=0.88)),
         )
         # Declare the OTHER root, so the likelihood is marginalized over both
         # instead of one being chosen (System.register_branch_alternative).  One
         # declaration per V_c/V_e orbit: two orbits are four combinations, which
-        # is why the mixture warns past two.  Substituting BOTH the clipped
-        # `ecc` node and the unclipped one the collision barrier reads is what
-        # makes that barrier a per-branch weight rather than a term evaluated
-        # only at the primary root.
-        register = getattr(system, "register_branch_alternative", None)
-        if callable(register):
-            unclipped = getattr(self, "_vcve_unclipped_nodes", {})
-            for i in idx:
-                alt_ecc = pt.set_subtensor(
+        # is why the mixture warns past two.  Substituting the clipped `ecc`
+        # node, the unclipped one the collision and existence bounds read, and
+        # the Jacobian vector is what makes all three a per-branch weight
+        # rather than a term evaluated only at the primary root.
+        for j, i in enumerate(idx):
+            replacements = {
+                self.ecc.value: pt.set_subtensor(
                     self.ecc.value[i],
                     physics.calc_ecc_from_vcve_lo(
                         self.vcve.value[i], self.omega.value[i]
                     ),
-                )
-                replacements = {self.ecc.value: alt_ecc}
-                node = unclipped.get(i)
-                if node is not None:
-                    alt_unclipped = pt.set_subtensor(
-                        node[i],
-                        physics.ecc_from_vcve_unclipped(
-                            self.vcve.value[i],
-                            self.omega.value[i],
-                            upper=False,
-                        ),
-                    )
-                    replacements[node] = alt_unclipped
-                name = self.names[i] if i < len(self.names) else str(i)
-                register(
-                    f"{self.prefix}.{name}: lower V_c/V_e root",
-                    replacements,
-                )
+                ),
+                e_unclipped: pt.set_subtensor(
+                    e_unclipped[i],
+                    physics.ecc_from_vcve_unclipped(
+                        self.vcve.value[i],
+                        self.omega.value[i],
+                        upper=False,
+                    ),
+                ),
+                jac: pt.set_subtensor(
+                    jac[j],
+                    physics.vcve_branch_log_jacobian(
+                        self.vcve.value[i], self.omega.value[i], upper=False
+                    ),
+                ),
+            }
+            system.register_branch_alternative(
+                f"{self.prefix}.{self.names[i]}: lower V_c/V_e root",
+                replacements,
+            )
         # scale = 1.0 because the discriminant 1 - (V_c/V_e)^2 cos^2 omega is
         # dimensionless and at most 1 by construction, so the default 1%
         # softness is a 0.01-wide transition: ~440 nats per unit, the same

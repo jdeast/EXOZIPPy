@@ -326,9 +326,13 @@ def test_the_reported_sqrt_e_pair_has_a_finite_gradient_at_a_clipped_root(fn):
     """
     v, w = pt.dscalar("vcve"), pt.dscalar("omega")
     reported = fn(physics.calc_ecc_from_vcve(v, w), w)
+    # 1 < V_c/V_e < 1/|cos omega| with sin omega > 0: a real discriminant
+    # (0.70) and BOTH roots negative, so the upper one clips to zero.  (The
+    # forbidden region no longer clips there: its roots are the mirror pair,
+    # review 1.8.14.)
     value, *grads = pytensor.function(
         [v, w], [reported, *pytensor.grad(reported, [v, w])]
-    )(1.5, 0.3)
+    )(1.5, 1.2)
 
     assert abs(value) < 1e-14  # still a circular orbit to working precision
     assert np.all(np.isfinite(grads)), grads
@@ -786,7 +790,316 @@ def test_the_jacobian_potential_carries_the_reciprocal_sign(vcve_transit_fit):
         )[0]
     )
 
-    assert term == pytest.approx(expected, rel=1e-9)
+    # The model applies the fold-softened branch form (review 1.8.14), which
+    # differs from the exact (e, omega) form by eps^2 / 2u^2, u = e + sin w;
+    # a stray sign would be off by twice the term itself.
+    u = ecc + np.sin(omega)
+    eps = physics.VCVE_FOLD_SOFTENING
+    # A flipped sign moves the term by 2|expected|; the tolerance must be far
+    # smaller than that for this to pin anything.
+    assert 2.0 * abs(expected) > 10.0 * eps**2 / u**2
+    assert term == pytest.approx(expected, abs=eps**2 / u**2)
+
+
+def _compiled_vcve_prior(system, model):
+    """The model's own V_c/V_e prior terms, per branch, as f(x[], omega[]).
+
+    Every potential that shapes the implied prior on (e, omega) -- the
+    Jacobian, the root-existence weight, the real-root shield and the
+    collision bound -- read from the BUILT model, with the lower branch made
+    by the model's own declared branch substitution (exactly what
+    System._add_branch_mixtures applies), everything else held at the raw
+    start.  Returns per point (lp_upper, lp_lower, e_upper, e_lower).
+    """
+    from pytensor.graph.replace import graph_replace, vectorize_graph
+
+    terms = {
+        "orbit.vcve_jacobian",
+        "orbit.vcve_root_exists",
+        "orbit.vcve_real_root",
+        "orbit.e_collision_bound",
+    }
+    pots = [p for p in model.potentials if p.name in terms]
+    assert {p.name for p in pots} == terms
+    orb = system.orbit
+    lp_hi = pt.add(*[pt.sum(p) for p in pots])
+    e_hi = orb.ecc.value[0]
+    (branch,) = system._branch_alternatives
+    lp_lo, e_lo = graph_replace([lp_hi, e_hi], branch["replacements"])
+    v_in, w_in = pt.dvector("v_in"), pt.dvector("w_in")
+    outs = graph_replace(
+        [lp_hi, lp_lo, e_hi, e_lo],
+        {orb.vcve.value: v_in, orb.omega.value: w_in},
+    )
+    outs = model.replace_rvs_by_values(outs)
+    start = system.get_raw_start(model)
+    outs = graph_replace(
+        outs,
+        {
+            v: pt.constant(np.asarray(start[v.name], dtype=v.dtype))
+            for v in model.value_vars
+        },
+        strict=False,
+    )
+    vb, wb = pt.dmatrix("vb"), pt.dmatrix("wb")
+    fn = pytensor.function(
+        [vb, wb],
+        vectorize_graph(outs, {v_in: vb, w_in: wb}),
+        on_unused_input="ignore",
+    )
+
+    def f(x, w):
+        x = np.asarray(x, dtype=float).reshape(-1, 1)
+        w = np.broadcast_to(np.asarray(w, dtype=float), x.shape)
+        return [np.asarray(o, dtype=float).ravel() for o in fn(x, w)]
+
+    return f
+
+
+def _implied_prior_over_the_plane(f, vmax, n_omega=180, n_e=800, n_t=400):
+    """Quadrature of the mixed prior over the whole (V_c/V_e, omega) plane.
+
+    V_c/V_e is uniform on [0, vmax] and omega uniform (the direction-vector
+    trick), so the prior mass of a point on branch k is
+    ``0.5 exp(lp_k) dx``.  Each region is integrated in its natural
+    coordinate so the integrable singularities are resolved:
+
+    * where a real root exists, by that root ``e`` itself on (-1, 1) -- each
+      e is one (x, branch) pair, x = eq 4 and the branch upper iff
+      e > -sin omega -- with ``dx = |dx/de| de`` from the forward relation in
+      numpy, independent of the code under test.  Negative e is a root the
+      model clips to zero: region "e < 0";
+    * past the fold (no real root), by ``x = x_fold sqrt(1 + t^2)``, which
+      absorbs the |d|^(-1/2) of the mirrored Jacobian: region "forbidden".
+
+    Returns (omega, reported e, mass, region) with region 0 physical,
+    1 negative root, 2 forbidden.
+    """
+    omegas = np.linspace(-np.pi, np.pi, n_omega, endpoint=False)
+    omegas += np.pi / n_omega
+    edges = np.linspace(-1.0, 1.0, n_e + 1)
+    e_mid, de = 0.5 * (edges[1:] + edges[:-1]), edges[1] - edges[0]
+    t_mid = (np.arange(n_t) + 0.5) / n_t
+    rows = []
+    for w in omegas:
+        s = np.sin(w)
+        x = vcve_forward(e_mid, w)
+        ok = x <= vmax
+        dxde = np.abs(
+            (e_mid + s) / (np.sqrt(1.0 - e_mid**2) * (1.0 + e_mid * s) ** 2)
+        )
+        lp_hi, lp_lo, e_hi, e_lo = f(x[ok], w)
+        upper = (e_mid > -s)[ok]
+        mass = 0.5 * np.exp(np.where(upper, lp_hi, lp_lo)) * dxde[ok] * de
+        rows.append(
+            (
+                np.full(mass.size, w),
+                np.where(upper, e_hi, e_lo),
+                mass,
+                (e_mid[ok] < 0).astype(int),
+            )
+        )
+        x_fold = 1.0 / abs(np.cos(w))
+        if x_fold < vmax:
+            t_max = min(np.sqrt((vmax / x_fold) ** 2 - 1.0), 1.0)
+            t = t_mid * t_max
+            xx = x_fold * np.sqrt(1.0 + t**2)
+            dx = x_fold * t / np.sqrt(1.0 + t**2) * (t_max / n_t)
+            lp_hi, lp_lo, e_hi, e_lo = f(xx, w)
+            for lp, e in ((lp_hi, e_hi), (lp_lo, e_lo)):
+                rows.append(
+                    (
+                        np.full(xx.size, w),
+                        e,
+                        0.5 * np.exp(lp) * dx,
+                        np.full(xx.size, 2),
+                    )
+                )
+    return [np.concatenate(z) for z in zip(*rows)]
+
+
+def test_the_implied_prior_over_the_whole_plane_is_flat_in_e_and_omega(
+    vcve_transit_fit,
+):
+    """
+    Given a built V_c/V_e model,
+    When its compiled prior terms (Jacobian, root existence, real-root shield,
+      collision bound, mixed over both branches) are integrated over the WHOLE
+      (V_c/V_e, omega) plane,
+    Then the implied prior is flat in e and uniform in omega, and almost no
+      mass sits on a clipped e = 0 root or where no real root exists.
+
+    That is the reparameterization's whole purpose (Eastman 2024: a prior
+    uniform in e and omega), and review 1.8.14 found it held only on the one
+    slice the test above checks -- one omega, the upper root, the real region.
+    Over the plane the prior was 1.4% physical, 35.7% on negative roots
+    clipped to e = 0 (weight 0.5/|sin omega|, divergent at omega = 0, 180
+    deg) and 62.9% on the forbidden side of the fold (a non-integrable
+    -log|d|), both capped ~27 nats deep by a log floor; NUTS chains froze on
+    them.  Before the fix this test fails every assertion below.
+
+    Tolerances: 2% per 0.05 bin in e and per 10 deg bin in omega, against a
+    measured 0.1% and 0.4% (the residual is the soft bounds' O(softness)
+    redistribution at e = 0); the forbidden share is the real-root shield's
+    leak (1.3% measured; P(e = 0) 0.17%), which the mirror continuation makes cancel its own
+    deficit on the real side, so it is a softness, not a bias.
+    """
+    system, model, _start = vcve_transit_fit
+    f = _compiled_vcve_prior(system, model)
+    omega, ecc, mass, region = _implied_prior_over_the_plane(f, vmax=141.5)
+    total = mass.sum()
+
+    assert mass[ecc <= 0.0].sum() / total < 0.005  # P(e = 0)
+    assert mass[region == 2].sum() / total < 0.02  # P(no real root)
+    assert mass[region == 0].sum() / total > 0.97  # physical
+
+    # Flat in e, up to just below the collision bound (whatever this
+    # planet's is; it is omega-independent, so it cuts e, not omega).
+    e_hist, _ = np.histogram(ecc, np.linspace(0.0, 0.5, 11), weights=mass)
+    e_hist /= e_hist.mean()
+    assert np.abs(e_hist - 1.0).max() < 0.02, np.round(e_hist, 4)
+
+    w_hist, _ = np.histogram(
+        omega, np.linspace(-np.pi, np.pi, 37), weights=mass
+    )
+    w_hist /= w_hist.mean()
+    assert np.abs(w_hist - 1.0).max() < 0.02, np.round(w_hist, 4)
+
+
+@pytest.mark.parametrize(
+    "x,omega",
+    [(0.5, 1.2), (0.9, -0.4), (0.99, np.pi / 2), (1.3, -1.2), (1.05, -0.3)],
+)
+def test_the_branch_jacobian_is_the_e_form_wherever_a_root_exists(
+    x, omega, monkeypatch
+):
+    """
+    Given a geometry where a branch has a real root in [0, MAX_ECC),
+    When the discriminant-form Jacobian is compared to the (e, omega) form at
+      that root,
+    Then they agree to working precision with the fold softening off, and to
+      its stated eps^2 / 2u^2 with it on.
+
+    The model applies `vcve_branch_log_jacobian` (review 1.8.14); the
+    finite-difference and flatness tests above pin `vcve_log_jacobian`.  This
+    is the bridge: the rewrite changes nothing where the old form was right,
+    and the softening is as small as it claims away from the fold.
+    """
+    xt = pt.as_tensor_variable(x)
+    eps = physics.VCVE_FOLD_SOFTENING
+    for upper, root in (
+        (True, physics.calc_ecc_from_vcve),
+        (False, physics.calc_ecc_from_vcve_lo),
+    ):
+        e = _f(root(xt, omega))[0]
+        if not 0.0 < e < MAX_ECC:
+            continue
+        u = e + np.sin(omega)
+        old = _f(physics.vcve_log_jacobian(pt.as_tensor_variable(e), omega))
+        soft = _f(physics.vcve_branch_log_jacobian(xt, omega, upper=upper))
+        assert soft[0] == pytest.approx(old[0], abs=0.6 * eps**2 / u**2)
+        monkeypatch.setattr(physics, "VCVE_FOLD_SOFTENING", 0.0)
+        exact = _f(physics.vcve_branch_log_jacobian(xt, omega, upper=upper))
+        monkeypatch.setattr(physics, "VCVE_FOLD_SOFTENING", eps)
+        assert exact[0] == pytest.approx(old[0], abs=1e-12)
+
+
+def test_the_fold_softening_conserves_mass():
+    """
+    Given the fold softening's factor on the e-density,
+      f(u) = |u| (u^2 + 2 eps^2) / (u^2 + eps^2)^(3/2),  u = e + sin omega,
+    When it is integrated against the exact density (f = 1),
+    Then it removes no mass: the dip at the fold is paid back by the shoulder
+      within a few eps, so the e and omega marginals stay unbiased.
+
+    The integral is done on the closed form; that the function really uses it
+    is pinned on the fold itself, where the form is log(eps) - log 2 plus the
+    two smooth factors.
+    """
+    eps = physics.VCVE_FOLD_SOFTENING
+    u = np.linspace(-200 * eps, 200 * eps, 400_001)
+    u = u[u != 0.0]
+    # The expression the function uses in place of log|u|.
+    log_fold = 1.5 * np.log(u**2 + eps**2) - np.log(u**2 + 2 * eps**2)
+    f = np.abs(u) / np.exp(log_fold)
+    du = u[1] - u[0]
+    deficit = np.sum(1.0 - f) * du
+    # The +/-200 eps window truncates a 1 - f ~ eps^2 / 2u^2 tail worth
+    # eps / 200; a plain sqrt(u^2 + eps^2) would lose 2 eps.
+    assert abs(deficit) < 1e-2 * eps
+    assert f.max() < 1.1
+    # ...and the function really uses that expression: on the fold it equals
+    # log(eps) - log 2 plus the two smooth factors.
+    w = -0.3
+    x_fold = 1.0 / np.cos(w)
+    jac = _f(
+        physics.vcve_branch_log_jacobian(pt.as_tensor_variable(x_fold), w)
+    )
+    e = -np.sin(w)
+    smooth = -0.5 * np.log(1 - e**2) - 2 * np.log(1 + e * np.sin(w))
+    assert jac[0] == pytest.approx(
+        np.log(eps) - np.log(2.0) + smooth, abs=1e-6
+    )
+
+
+@pytest.mark.parametrize(
+    "x,omega",
+    [
+        (1.0 / np.cos(-0.3) * (1 + 1e-9), -0.3),  # just past the fold
+        (1.0 / np.cos(-0.3), -0.3),  # on it
+        (1.9, 0.3),  # forbidden, sin w > 0
+        (1.5, 1e-10),  # forbidden, omega ~ 0
+        (0.99, 1e-10),  # negative lower root, omega ~ 0
+        (1.0, 0.0),  # the double root
+    ],
+)
+def test_the_branch_jacobian_is_finite_with_a_finite_gradient(x, omega):
+    """
+    Given geometries on, near and past the fold, and negative roots at
+      omega ~ 0 -- the two places review 1.8.14's spikes lived,
+    When both branches' Jacobians are evaluated and differentiated,
+    Then values and gradients are finite, and no value reaches the 1e-12 log
+      floor's ~27-nat cap that the old form hit there.
+    """
+    v, w = pt.dscalar("vcve"), pt.dscalar("omega")
+    outs = []
+    for upper in (True, False):
+        jac = physics.vcve_branch_log_jacobian(v, w, upper=upper)
+        outs += [jac, *pytensor.grad(jac, [v, w])]
+    vals = pytensor.function([v, w], outs)(x, omega)
+
+    assert np.all(np.isfinite(vals)), vals
+    # -jac is the reward; the old form reached +27.6 at these points.
+    if not (x == 1.0 / np.cos(-0.3) or (x, omega) == (1.0, 0.0)):
+        assert min(vals[0], vals[3]) > -20.0, vals
+
+
+def test_the_mirror_continuation_is_bit_identical_where_roots_exist(
+    monkeypatch,
+):
+    """
+    Given real geometries,
+    When the roots are computed with sqrt(|d|) (the mirror continuation,
+      review 1.8.14) and with the plain floored sqrt(d),
+    Then they are bit-identical -- the change is confined to d < 0.
+    """
+    grid = [(0.5, 1.2), (0.9, -0.4), (0.99, np.pi / 2), (1.3, -1.2)]
+
+    def evaluate():
+        return [
+            _f(root(pt.as_tensor_variable(x), w))[0]
+            for x, w in grid
+            for root in (
+                physics.calc_ecc_from_vcve,
+                physics.calc_ecc_from_vcve_lo,
+            )
+        ]
+
+    shipped = evaluate()
+    monkeypatch.setattr(physics.pt, "abs", lambda z: z)
+    plain = evaluate()
+
+    assert shipped == plain
 
 
 def test_an_ecc_omega_seed_reaches_vcve(transit_lc):

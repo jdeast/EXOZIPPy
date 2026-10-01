@@ -147,3 +147,57 @@ def test_soft_bounds_never_plateau_or_underflow():
         assert np.isfinite(value), f"penalty not finite at deficit {deficit}"
         assert value == pytest.approx(-steepness * deficit, rel=1e-9)
         assert gradient == pytest.approx(steepness, rel=1e-9)
+
+
+@pytest.mark.parametrize("bound", [soft_lower_bound, soft_upper_bound])
+def test_soft_bounds_keep_a_finite_jax_gradient_far_past_the_threshold(bound):
+    """
+    Given a bound violated by far more than 700 nats,
+    When the penalty is differentiated the way numpyro does it (jax.grad of
+      PyMC's jaxified logp),
+    Then the penalty is still linear and the gradient is the finite steepness.
+
+    PyTensor's JAX softplus is a jnp.where cascade whose unselected exp(-z)
+    branch overflows for a log-sigmoid argument below ~-709; jax.grad then
+    multiplies inf by zero and the gradient is NaN, while the C backend --
+    and pytensor's own symbolic gradient compiled to JAX -- are fine.  It hid
+    until review 1.8.14, where the V_c/V_e real-root shield (440 nats per
+    unit) crossed it past a discriminant of -1.6, most of vcve's support, and
+    prior-only numpyro chains froze there.  Before the fix this test fails at
+    every deficit past 1.6.
+    """
+    jax = pytest.importorskip("jax")
+    import pymc as pm
+    from pymc.sampling.jax import get_jaxified_logp
+
+    sign = 1.0 if bound is soft_lower_bound else -1.0
+    with pm.Model() as model:
+        x = pm.Flat("x")
+        pm.Potential("bound", bound(x, threshold=0.0, scale=1.0))
+    logp = get_jaxified_logp(model)
+    grad = jax.grad(logp)
+    steepness = 4.4 / 0.01
+    for deficit in (1.0, 1.7, 2.0, 16.0, 1e4):
+        point = [np.array(-sign * deficit)]
+        assert float(logp(point)) == pytest.approx(
+            -steepness * deficit, rel=1e-9
+        )
+        assert float(grad(point)[0]) == pytest.approx(
+            sign * steepness, rel=1e-9
+        )
+
+
+def test_soft_bounds_are_the_plain_log_sigmoid_short_of_700_nats():
+    """
+    Given a bound inside, at, or up to 700 nats past its threshold,
+    When it is evaluated,
+    Then it equals log(sigmoid(arg)) exactly -- the far-tail fix above adds
+      exactly 0.0 there, so no shipped start logp moves.
+    """
+    x = pt.dscalar("x")
+    fn = pytensor.function([x], soft_lower_bound(x, threshold=0.0, scale=1.0))
+    ref = pytensor.function(
+        [x], pt.log(pt.sigmoid(pt.minimum(x * 440.0, 700.0)))
+    )
+    for val in (-1.59, -0.3, -0.01, 0.0, 0.004, 0.05, 3.0):
+        assert float(fn(val)) == float(ref(val))

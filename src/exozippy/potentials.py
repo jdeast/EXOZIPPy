@@ -16,6 +16,8 @@ exp(arg) branch that is never *selected* when arg > 18, but JAX still
 differentiates through it in the backward pass, giving exp(820)=inf and
 then 0*inf=NaN.  Capping at 700 keeps exp(arg) finite everywhere (exp(700)
 ~ 1e304), so the unselected branch contributes 0, not NaN, to every VJP.
+The FORBIDDEN side has the mirror-image trap once the argument passes -709
+(review 1.8.14); `_log_sigmoid` handles it without capping the penalty.
 """
 
 import numpy as np
@@ -29,6 +31,31 @@ def _steepness(scale, softness):
     # (the barrier scales are measured at startup and set in place); it
     # accepts plain numpy input just the same.
     return 4.4 / (pt.maximum(scale, 1e-12) * softness)
+
+
+def _log_sigmoid(arg):
+    """``log(sigmoid(arg))`` with a finite gradient on BOTH sides, under JAX.
+
+    PyTensor rewrites ``log(sigmoid(z))`` to ``-softplus(-z)``, and its JAX
+    softplus is a ``jnp.where`` cascade whose unselected ``exp(-z)`` branch
+    overflows once ``z < -709``: the value stays right (the linear branch is
+    selected) but the VJP multiplies that ``inf`` by zero and the gradient is
+    NaN.  ``_MAX_ARG`` bounds the allowed side only, so the FORBIDDEN side
+    hit this as soon as a bound was violated by more than 700 nats -- for the
+    V_c/V_e real-root shield (440 nats per unit discriminant) everywhere past
+    ``d = -1.6``, most of vcve's support, where prior-only numpyro chains sat
+    still with NaN gradients (review 1.8.14).  The C backend never showed it.
+
+    The fix keeps the penalty linear and the slope exact without clipping it
+    flat: the sigmoid is evaluated at ``max(arg, -_MAX_ARG)``, and the
+    remainder ``min(arg + _MAX_ARG, 0)`` is added back, where
+    ``log sigmoid(-700) == -700`` to float precision.  For
+    ``arg >= -_MAX_ARG`` the added term is exactly 0.0, so every value on
+    that side is bit-identical to the plain form.
+    """
+    return pt.log(pt.sigmoid(pt.maximum(arg, -_MAX_ARG))) + pt.minimum(
+        arg + _MAX_ARG, 0.0
+    )
 
 
 def soft_lower_bound(val, threshold, scale, softness=0.01):
@@ -50,7 +77,7 @@ def soft_lower_bound(val, threshold, scale, softness=0.01):
       - The transition width is softness * scale, independently of threshold.
     """
     arg = pt.minimum((val - threshold) * _steepness(scale, softness), _MAX_ARG)
-    return pt.log(pt.sigmoid(arg))
+    return _log_sigmoid(arg)
 
 
 def soft_upper_bound(val, threshold, scale, softness=0.01):
@@ -59,4 +86,4 @@ def soft_upper_bound(val, threshold, scale, softness=0.01):
     Same `scale`/`softness` semantics as soft_lower_bound (see that docstring).
     """
     arg = pt.minimum((threshold - val) * _steepness(scale, softness), _MAX_ARG)
-    return pt.log(pt.sigmoid(arg))
+    return _log_sigmoid(arg)

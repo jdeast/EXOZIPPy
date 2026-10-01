@@ -91,7 +91,7 @@ spelling.  Before adding a flag, pick its kind and follow that template.
   Every sampled parameter carries a prior uniform over its own bounds and
   nothing generic inserts a Jacobian, so a non-linear change of coordinates
   silently changes the prior unless the component adds the term: `orbit` adds
-  minus `vcve_log_jacobian` and minus `chord_log_jacobian` for exactly this
+  minus `vcve_branch_log_jacobian` and minus `chord_log_jacobian` for exactly this
   reason, and `orbit.md` records that the SIGN is the term and needs its own
   test, because a finite-difference check passes under either.  A flip whose
   map has unit determinant (`pharmacokinetics`'s bases, which are linear in
