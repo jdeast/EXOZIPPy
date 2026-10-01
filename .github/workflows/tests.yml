@@ -424,6 +424,29 @@ jobs:
           path: durations.txt
           if-no-files-found: warn
 
+      # The per-test time budget (docs/testing.md, "Per-test time budget"):
+      # every test phase over 60 s and every file over 300 worker-seconds in
+      # THIS shard's transcript is listed on the job summary, and -- on the
+      # ubuntu 3.12 leg only, so a run carries one set of annotations rather
+      # than four near-identical ones -- raised as a ::warning:: on the pull
+      # request. A warning, never a failure, and continue-on-error for the
+      # same reason as the upload above: runner speed and the compile cache
+      # move these numbers by more than any diff does, so a red here would
+      # teach people to re-run instead of read. Each file runs in exactly one
+      # shard (--verify above), so the file totals are complete per job.
+      - name: Check the per-test time budget
+        if: always()
+        continue-on-error: true
+        run: |
+          annotate=""
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ] && \
+             [ "${{ matrix.python-version }}" = "3.12" ]; then
+            annotate="--annotate"
+          fi
+          poetry run python scripts/check_test_budget.py durations.txt \
+            $annotate \
+            --title "Test time budget, shard ${{ matrix.shard }}/${{ matrix.shards }}"
+
       # The conftest prunes at session START, so at this point the shared
       # tree holds the budget plus everything this run compiled and promoted
       # at exit. Trim again so the saved artifact is a bounded size rather
