@@ -90,8 +90,13 @@ MAG_SYSTEM = "Vega"
 FLUX_WEIGHTING = "detector"
 
 # Filters to compute BCs for, grouped by facility (the facility must be the
-# SVO id's prefix -- it names the output table). Defaults reproduce every
-# column of the tables that shipped before this pipeline existed.
+# SVO id's prefix -- it names the output table). This is the list of every
+# shipped column; add a filter here and re-run step 2 to ship a new one.
+#
+# Every column is VEGA-referenced (MAG_SYSTEM above), including the filters
+# whose catalogs are natively AB (SLOAN, PAN-STARRS, GALEX). The SED does not
+# yet convert an AB magnitude (review 1.9.1), so an AB-catalog magnitude in
+# one of those bands must be converted to Vega before it is fitted.
 FILTER_SETS: Dict[str, List[str]] = {
     "2MASS": ["2MASS/2MASS.J", "2MASS/2MASS.H", "2MASS/2MASS.Ks"],
     "GAIA": [
@@ -102,7 +107,7 @@ FILTER_SETS: Dict[str, List[str]] = {
         "GAIA/GAIA3.Gbp",
         "GAIA/GAIA3.Grp",
     ],
-    "TYCHO":[
+    "TYCHO": [
         # uses Grossmann et al 1995 for calibration
         "TYCHO/TYCHO.B",
         "TYCHO/TYCHO.V",
@@ -113,7 +118,7 @@ FILTER_SETS: Dict[str, List[str]] = {
         "TYCHO/TYCHO.B_MvB",
         "TYCHO/TYCHO.V_MvB",
     ],
-    "SLOAN":[
+    "SLOAN": [
         "SLOAN/SDSS.u",
         "SLOAN/SDSS.g",
         "SLOAN/SDSS.r",
@@ -150,7 +155,7 @@ FILTER_SETS: Dict[str, List[str]] = {
         "Generic/Johnson.M",
     ],
     "Keck": [
-        "Keck/NIRC2.Kp", 
+        "Keck/NIRC2.Kp",
         "Keck/NIRC2.J",
         "Keck/NIRC2.Brgamma",
         "Keck/NIRC2.H",
@@ -184,7 +189,7 @@ FILTER_SETS: Dict[str, List[str]] = {
         "Euclid/NISP.Y",
         "Euclid/NISP.J",
         "Euclid/NISP.H",
-    ]
+    ],
 }
 
 
@@ -649,5 +654,5 @@ def __main_step2_generate_bc_tables__():
 
 # depending on what you want to run, you can comment out either step
 if __name__ == "__main__":
-    #__main_step1_process_raw_spectra__()
+    __main_step1_process_raw_spectra__()
     __main_step2_generate_bc_tables__()

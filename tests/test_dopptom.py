@@ -114,11 +114,12 @@ def test_cheb_weights_sum_to_one():
 # --------------------------------------------------------------------------
 # End-to-end: the fast KELT-17 DT example builds and yields a finite logp
 # (skipped if the DT FITS data are not shipped).  kelt17_fast.yaml, not
-# kelt17_dt.yaml, deliberately: the full config carries an SED whose
-# TYCHO/SLOAN BC tables are generated on first use by downloading the
-# NextGen spectra -- hundreds of MB from Zenodo inside a unit test on a
-# fresh clone, or a hard failure with no network (review on PR #323).
-# The fast config has no sed: block and exercises the same DT component.
+# kelt17_dt.yaml, deliberately: the full config also carries an SED (its
+# TYCHO/SLOAN BC tables ship since PR #349; before that they were generated
+# on first use from downloaded NextGen spectra, review on PR #323), which
+# this DT test does not need.  The fast config has no sed: block and
+# exercises the same DT component; tests/test_examples_prepare.py covers
+# the full configs' preparation.
 # --------------------------------------------------------------------------
 @pytest.fixture(scope="module")
 def kelt17_fast_system():
