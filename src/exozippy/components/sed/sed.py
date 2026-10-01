@@ -34,7 +34,16 @@ from .bc_grid import (
     facility_from_svo_name,
     find_bc_table,
     peek_grid_axes,
+    read_bc_meta,
     resolve_filter_name,
+)
+from .magsys import (
+    AB,
+    VEGA,
+    check_record_matches_column,
+    magsys_table_path,
+    parse_magsys,
+    read_magsys_table,
 )
 from .physics import *
 
@@ -450,13 +459,30 @@ class SED(Component):
 
         # per filter information
         self.filters = [c.get("name") for c in filter_dict]
-        self.magsys = [c.get("magsys", "Vega") for c in filter_dict]
         self.photType_unprocessed = [c.get("photType") for c in filter_dict]
+
+        # The row's magnitude system AS STATED, translated to the one
+        # internal spelling at this boundary (None = not stated; an unknown
+        # spelling raises naming the row).  The system each row is actually
+        # in -- the stated one, else the filter's native one -- is resolved
+        # against the BC columns' record in _convert_to_bc_system, once the
+        # grid has named each row's column.
+        self._magsys_stated = [
+            parse_magsys(
+                c.get("magsys"),
+                f"{self.sedfile}, filter row {i} ({c.get('name')!r})",
+            )
+            for i, c in enumerate(filter_dict)
+        ]
 
         # One observation per filter row (a row may be the blended or
         # differential magnitude of several stars; which stars is encoded
         # in photType and resolved into self.blend_matrix by load_data).
-        self.mag = np.array([c.get("mag") for c in filter_dict], dtype=float)
+        # mag_reported is the file's number in the row's own system; the
+        # fitted (and plotted) self.mag is set by _convert_to_bc_system.
+        self.mag_reported = np.array(
+            [c.get("mag") for c in filter_dict], dtype=float
+        )
         self.err = np.array([c.get("err") for c in filter_dict], dtype=float)
 
     @staticmethod
@@ -698,6 +724,7 @@ class SED(Component):
         )
         self.bc_grid_data = grid
         self.mist_filters = grid["filter_order"]
+        self._convert_to_bc_system()
 
         # Column lookup by user-facing name, MIST name, or SVO name so
         # other components can ask for a filter in whatever convention
@@ -722,6 +749,99 @@ class SED(Component):
             ],
             values=grid["bc_values"],
         )
+
+    # ------------------------------------------------------------------
+    # The ONE place a row's magnitude system is applied (review 1.9.1).
+    #
+    # Every BC column is referenced to its table's `mag_system` (Vega for
+    # all of NextGen), so an AB magnitude is moved onto it before anything
+    # reads self.mag: the likelihood, plot(), plot_data() and the residual
+    # panel all read the converted number, so the figure shows what is
+    # fitted.  Only the magnitude CENTRE moves; an additive offset leaves
+    # the error unchanged.  A differential row (photType neg) is
+    # -2.5 log10(F_pos/F_neg) in one band, where the offset cancels
+    # exactly, so it is not shifted -- but its system is still resolved,
+    # so a misspelled or unrecordable system still raises.
+    # ------------------------------------------------------------------
+    def _convert_to_bc_system(self):
+        self.magsys = []
+        self.ab_minus_vega = np.zeros(self.nfilters)
+        if self.nfilters == 0:
+            # Band filters only: no photometry row has a system to apply.
+            self.mag = self.mag_reported
+            return
+        record = read_magsys_table(self.model_root, self.sedmodel)
+        record_path = magsys_table_path(self.model_root, self.sedmodel)
+        alias_df = _load_alias_table()
+        table_meta = {}  # facility -> read_bc_meta of its table
+
+        has_neg = (self.blend_matrix < 0).any(axis=1)
+        for i in range(self.nfilters):
+            name = self.filters[i]
+            col = self.mist_filters[i]
+            where = f"{self.sedfile}, filter row {i} ({name!r}, column {col})"
+            if col not in record.index:
+                raise ValueError(
+                    f"{where}: BC column {col} has no magnitude-system "
+                    f"record in {record_path}. Re-run write_magsys_table "
+                    f"in models/NextGen/generate_NextGen_BC_Tables.py for "
+                    f"its facility."
+                )
+            rec = record.loc[col]
+
+            svo = resolve_filter_name(name, alias_df, alias="SVO")
+            fac = facility_from_svo_name(svo)
+            if fac not in table_meta:
+                table_meta[fac] = read_bc_meta(
+                    find_bc_table(self.model_root, self.sedmodel, fac)
+                )
+            meta = table_meta[fac]
+            if meta.get("mag_system") != VEGA:
+                raise ValueError(
+                    f"{where}: the {fac} BC table's mag_system is "
+                    f"{meta.get('mag_system')!r}; the AB conversion "
+                    f"(m_AB - m_Vega per column) needs a Vega-referenced "
+                    f"column."
+                )
+            if col not in meta.get("filters", {}):
+                raise ValueError(
+                    f"{where}: the {fac} BC table carries no filter_meta "
+                    f"for column {col}, so its magnitude-system record "
+                    f"cannot be checked against it."
+                )
+            check_record_matches_column(
+                rec, col, meta["filters"][col], record_path
+            )
+
+            system = self._magsys_stated[i]
+            if system is None:
+                # Unstated means the filter's native system (JDE
+                # 2026-10-01); a filter with none recorded must state it.
+                system = rec["native_system"]
+                if not system:
+                    raise ValueError(
+                        f"{where}: the row states no magsys and {col} has "
+                        f"no native magnitude system ({record_path}: none "
+                        f"exists for it, or it is UNRESOLVED -- Roman WFI and "
+                        f"Kepler Kp, JDE 2026-10-01). "
+                        f"State it with `magsys: Vega` or `magsys: AB` "
+                        f"(for a differential row either gives the same "
+                        f"fit: the system cancels)."
+                    )
+            self.magsys.append(system)
+            if system == AB and not has_neg[i]:
+                self.ab_minus_vega[i] = float(rec["ab_minus_vega"])
+
+        # What the likelihood fits and the figures plot: the row's
+        # magnitude on its column's Vega system.
+        self.mag = self.mag_reported - self.ab_minus_vega
+        converted = np.flatnonzero(self.ab_minus_vega)
+        for i in converted:
+            logger.info(
+                f"SED: {self.filters[i]} is AB; fitting "
+                f"{self.mag_reported[i]:.4f} - {self.ab_minus_vega[i]:.4f} "
+                f"= {self.mag[i]:.4f} (Vega)."
+            )
 
     # ------------------------------------------------------------------
     # 3) build_maps — the star axis is handled by blend_matrix; nothing
@@ -1024,6 +1144,7 @@ class SED(Component):
                 sigma=sigma,
                 observed=mag_data,
             )
+            self._add_magsys_prose(system)
 
         # These link the SED-derived teff/fbol to the star's own, with a user
         # settable FRACTIONAL error floor -- so sigma is a function of a
@@ -1665,7 +1786,8 @@ class SED(Component):
                     component={"yaml_key": self.prefix, "instance": None},
                     title="SED Photometry (observed)",
                     xlabel="Wavelength [micron]",
-                    ylabel="Apparent Magnitude",
+                    # self.mag: AB rows already converted (the fitted values)
+                    ylabel="Apparent Magnitude (Vega)",
                     traces=traces,
                     param_deps=[],
                     x_log=True,
@@ -1822,11 +1944,47 @@ class SED(Component):
                         "the quoted magnitude uncertainty; curves are the "
                         "extinguished model spectra at the plotted draw, "
                         "one per star, scaled to Earth by the stellar "
-                        "radius and distance."
+                        "radius and distance. Magnitudes are on the Vega "
+                        "system the bolometric corrections are referenced "
+                        "to, and are converted to flux with its zero points"
+                        + (
+                            "; AB photometry is plotted after the same "
+                            "per-filter conversion that is fitted."
+                            if np.any(self.ab_minus_vega)
+                            else "."
+                        )
                     ),
                 },
             )
         ]
+
+    def _add_magsys_prose(self, system):
+        """The AB-conversion sentence, declared where the conversion is fitted.
+
+        Only when a row is actually shifted (an AB row that is not
+        differential): an all-Vega SED does nothing worth a sentence, and
+        its draft is unchanged.
+        """
+        from ...outputs.prose import join_names
+        from ...outputs.texutils import latex_escape
+
+        converted = np.flatnonzero(self.ab_minus_vega)
+        if converted.size == 0:
+            return
+        names = dict.fromkeys(self.filters[i] for i in converted)
+        bands = join_names(latex_escape(n) for n in names)
+        get_collector(system).add(
+            "The bolometric corrections are referenced to the Vega "
+            "magnitude system, so the photometry reported on the AB system "
+            r"\citep{Oke:1983} (" + bands + ") is converted to Vega before "
+            "it is fitted, with a per-filter offset $m_{\\rm AB} - "
+            "m_{\\rm Vega}$ computed from the same filter transmission "
+            "curve, flux weighting and Vega zero point as that filter's "
+            "bolometric corrections. ",
+            section="data",
+            key=f"{self.prefix}.magsys",
+            rank=21.5,
+        )
 
     def _add_prose(self, system):
         """Declare the modeling-draft sentences next to the terms they describe.

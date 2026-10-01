@@ -1000,3 +1000,54 @@ def test_name_overrides_the_output_file_names(tmp_path, patched_catalogs):
         "wasp4.params.yaml",
         "wasp4.sed.yaml",
     ]
+
+
+# --- 1.9.1: every row carries its catalog's TRUE magnitude system -------------
+
+# The catalogs mkticsed reads, by the system they publish in: APASS g'r'i'
+# (UCAC4) and GALEX are AB; everything else is Vega.
+_AB_ROWS = {
+    "SLOAN/SDSS.g",
+    "SLOAN/SDSS.r",
+    "SLOAN/SDSS.i",
+    "GALEX/GALEX.FUV",
+    "GALEX/GALEX.NUV",
+}
+
+
+def test_every_written_row_states_its_native_magnitude_system(
+    tmp_path, patched_catalogs
+):
+    """
+    Given every catalog returning photometry (GALEX and Mermilliod enabled),
+    When mkticsed writes the SED,
+    Then EVERY row -- live and commented-out, Vega included -- carries an
+      explicit magsys, AB for the APASS g'r'i' and GALEX rows and Vega for
+      the rest (JDE 2026-10-01: an absent key reads as unconsidered).
+
+    Pre-fix every row was tagged Vega, and the tag was suppressed when it
+    was Vega -- so the AB rows were written AS Vega.
+    """
+    # Arrange
+    patched_catalogs.update(_all_catalogs(err=0.05))
+
+    # Act
+    mk.mkticsed(
+        ticid="12345678",
+        star_name="Host",
+        outpath=str(tmp_path),
+        ucac=True,
+        tycho=True,
+        merm=True,
+        galex=True,
+    )
+    path = tmp_path / f"{tmp_path.name}.sed.yaml"
+    live = yaml.safe_load(path.read_text())["filters"]
+
+    # Assert
+    assert {r["name"] for r in live} >= _AB_ROWS
+    for r in live:
+        expected = "AB" if r["name"] in _AB_ROWS else "Vega"
+        assert r["magsys"] == expected, r["name"]
+    text = path.read_text()
+    assert text.count("# - name:") == text.count("#   magsys:")
