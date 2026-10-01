@@ -47,19 +47,24 @@ every message the script prints is passed through a redactor.
 3. **Review and publish** the draft at the URL the script prints. (`--publish`
    exists but requires typing the exact title at a terminal; prefer the web
    page, where the metadata can be read before the DOI is minted.)
-4. **Pin**: `python scripts/zenodo_publish.py pin --record <new id>
-   [--bundle grid/]` reads the PUBLISHED record's public API (no token) and
-   prints the asset entry (`{filename: {url, size, md5}}`, the shape
-   `fetch_assets` takes). With `--bundle` it also checks the record against
-   the local files.
-5. **PR**: paste the entry into the asset table that downloads it
-   (`_EEP_GRID_ASSETS` in `models/MIST/eep_grid.py`, `_MODEL_DATA` in
-   `components/sed/make_bc.py`; for `_BC_TABLE_FILES` in
-   `models/NextGen/bc_tables.py`, which builds its urls from
-   `ZENODO_RECORD`, update that id and copy only the sizes and md5s) and
-   open a PR. A new record id means
-   every pinned url in that table changes; a new version of the same record
-   gets a NEW id, so the old pins keep working until the PR lands.
+4. **Pin**: every pin lives in ONE place,
+   `src/exozippy/utilities/zenodo_assets.py` (`RECORDS`: one `ZenodoRecord`
+   entry per dataset, keyed by name, every version of a dataset sharing one
+   concept record; the loaders derive their urls from it).
+   `python scripts/zenodo_publish.py pin --record <new id> [--bundle grid/]`
+   reads the PUBLISHED record's public API (no token), finds the entry with
+   the same concept record, and prints it with the new `record_id`, title,
+   creators and every file's size and md5 (`citation_key` is carried over).
+   Add `--update-registry` to rewrite that ONE entry in place -- the new text
+   is read back and checked against the record before the file is replaced
+   -- or paste the printed entry by hand. A first version of a new dataset
+   needs `--name <key>` and is appended. With `--bundle` it also checks the
+   record against the local files.
+5. **Test and PR**: run `pytest tests/test_zenodo_assets.py -n0`, which
+   re-reads every registered record's API and compares it with the table,
+   then open a PR. A new version gets a NEW record id, so the old pins keep
+   working until the PR lands, and every cache is keyed by size and md5, so
+   the old version's cached copies are simply never matched again.
 
 Tests: `tests/test_zenodo_publish.py` drives every subcommand against a fake
 in-process Zenodo; nothing in the suite talks to zenodo.org.

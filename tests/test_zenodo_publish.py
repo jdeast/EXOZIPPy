@@ -73,7 +73,7 @@ class FakeZenodo:
         self.server.server_close()
 
     # state helpers
-    def new_dep(self, metadata, files=None, published=False):
+    def new_dep(self, metadata, files=None, published=False, concept=None):
         dep_id = self.next_id
         self.next_id += 1
         bucket = f"b{dep_id}"
@@ -84,6 +84,7 @@ class FakeZenodo:
             "bucket": bucket,
             "fids": {name: self._fid() for name in self.buckets[bucket]},
             "published": published,
+            "concept": dep_id + 500_000 if concept is None else concept,
         }
         return dep_id
 
@@ -122,6 +123,7 @@ class FakeZenodo:
         d = self.deps[dep_id]
         return {
             "id": dep_id,
+            "conceptrecid": str(d["concept"]),
             "metadata": d["metadata"],
             "files": [
                 {"key": n, "size": len(b), "checksum": "md5:" + _md5(b)}
@@ -326,10 +328,7 @@ def test_new_version_replaces_and_verifies(fake, token_file, bundle, capsys):
     assert f"grid.parquet 300000 {_md5(b'x' * 300_000)}" in manifest
     assert "DRAFT READY (not published)" in out
     assert f"https://zenodo.org/uploads/{draft}" in out
-    assert (
-        f'"url": "https://zenodo.org/records/{draft}/files/grid.parquet"'
-        in out
-    )
+    assert f"pin --record {draft}" in out
     assert fake.published == []
     assert all(a == f"Bearer {TOKEN}" for m, p, a in fake.log)
     _assert_auth_only_in_headers(fake)
@@ -639,28 +638,189 @@ def test_publish_with_typed_title(
     assert fake.published == [draft]
 
 
-def test_pin_reads_published_record_without_token(fake, bundle, capsys):
-    """
-    Given a published record,
-    When pin runs with no token file at all,
-    Then it prints a registry entry with each file's url, size and md5,
-    excluding MANIFEST.txt, and sends no Authorization header.
-    """
+@pytest.fixture
+def registry(tmp_path):
+    """A scratch copy of the shipped zenodo_assets.py."""
+    p = tmp_path / "zenodo_assets.py"
+    p.write_text(zp.DEFAULT_REGISTRY.read_text())
+    return p
+
+
+def _mist_version(fake, bundle):
+    """Publish a fake new version of the shipped mist_eep_grids record."""
+    shipped = zp.load_registry(zp.DEFAULT_REGISTRY).RECORDS["mist_eep_grids"]
     data = (bundle / "grid.parquet").read_bytes()
-    rec = fake.new_dep(
-        METADATA, {"grid.parquet": data, "MANIFEST.txt": b"m"}, published=True
+    meta = dict(
+        METADATA,
+        title=shipped.title,
+        creators=[{"name": c} for c in shipped.creators],
     )
+    rec = fake.new_dep(
+        meta,
+        {"grid.parquet": data, "MANIFEST.txt": b"m\n"},
+        published=True,
+        concept=shipped.concept_record_id,
+    )
+    return rec, data, shipped
+
+
+def test_render_round_trips_the_shipped_registry():
+    """
+    Given the shipped zenodo_assets.py,
+    When every entry is re-rendered from its own values,
+    Then each rendering is byte-identical to the source text -- so
+    --update-registry writes ruff-formatted code and an unchanged record
+    produces no diff.
+    """
+    text = zp.DEFAULT_REGISTRY.read_text()
+    reg = zp.load_registry(zp.DEFAULT_REGISTRY)
+    assert reg.RECORDS, "registry is empty; the round trip tests nothing"
+    for key, r in reg.RECORDS.items():
+        entry = zp.render_record(
+            key,
+            r.record_id,
+            r.concept_record_id,
+            r.title,
+            r.creators,
+            r.citation_key,
+            {n: {"size": f.size, "md5": f.md5} for n, f in r.files.items()},
+        )
+        start, end = zp._entry_span(text, key)
+        assert text[start:end] == entry, key
+
+
+def test_pin_prints_registry_entry_without_token(
+    fake, bundle, registry, capsys
+):
+    """
+    Given a published new version of a dataset already in the registry,
+    When pin runs with no token file at all,
+    Then it prints that entry in ZenodoRecord shape with the new record id,
+    every file's size and md5 (MANIFEST.txt included -- the registry pins
+    the whole record), sends no Authorization header, and leaves the
+    registry file alone.
+    """
+    rec, data, shipped = _mist_version(fake, bundle)
+    before = registry.read_text()
     rc, out, err = _run(
-        capsys, "pin", "--record", str(rec), "--token-file", "/nonexistent"
+        capsys,
+        "pin",
+        "--record",
+        str(rec),
+        "--token-file",
+        "/nonexistent",
+        "--registry",
+        str(registry),
     )
     assert rc == 0, err
-    assert (
-        f'"url": "https://zenodo.org/records/{rec}/files/grid.parquet"' in out
-    )
-    assert f'"size": {len(data)},' in out
-    assert f'"md5": "{_md5(data)}",' in out
-    assert "MANIFEST.txt" not in out.split("{", 1)[1]
+    assert '"mist_eep_grids": ZenodoRecord(' in out
+    assert f"record_id={rec}," in out
+    assert f"concept_record_id={shipped.concept_record_id}," in out
+    assert f'"grid.parquet": (\n{" " * 24}{len(data)},' in out
+    assert f'"{_md5(data)}",' in out
+    assert '"MANIFEST.txt": (' in out
     assert all(a is None for _, _, a in fake.log)
+    assert registry.read_text() == before
+
+
+def test_pin_update_registry_rewrites_one_entry(
+    fake, bundle, registry, capsys
+):
+    """
+    Given a published new version of mist_eep_grids,
+    When pin runs with --update-registry,
+    Then ONLY that entry changes, the file still imports, and it reads
+    back as the published record (id, concept, citation key kept, files).
+    """
+    rec, data, shipped = _mist_version(fake, bundle)
+    old = zp.load_registry(registry)
+    rc, _, err = _run(
+        capsys,
+        "pin",
+        "--record",
+        str(rec),
+        "--registry",
+        str(registry),
+        "--update-registry",
+    )
+    assert rc == 0, err
+    new = zp.load_registry(registry)
+    got = new.RECORDS["mist_eep_grids"]
+    assert got.record_id == rec
+    assert got.concept_record_id == shipped.concept_record_id
+    assert got.citation_key == shipped.citation_key
+    assert {n: (f.size, f.md5) for n, f in got.files.items()} == {
+        "grid.parquet": (len(data), _md5(data)),
+        "MANIFEST.txt": (2, _md5(b"m\n")),
+    }
+
+    # Two loads are two dataclass types, so compare field values.
+    def fields(r):
+        files = {n: (f.size, f.md5) for n, f in r.files.items()}
+        return (
+            r.record_id,
+            r.concept_record_id,
+            r.title,
+            r.creators,
+            r.citation_key,
+            files,
+        )
+
+    assert set(new.RECORDS) == set(old.RECORDS)
+    for key in old.RECORDS:
+        if key != "mist_eep_grids":
+            assert fields(new.RECORDS[key]) == fields(old.RECORDS[key]), key
+    assert not list(registry.parent.glob(".*.pin-tmp*"))
+
+
+def test_pin_new_dataset_needs_name(fake, bundle, registry, capsys):
+    """
+    Given a published record whose concept is not in the registry,
+    When pin runs without --name it fails naming the flag; with --name and
+    --update-registry it appends a new entry.
+    """
+    rec = fake.new_dep(
+        METADATA, {"grid.parquet": b"abc"}, published=True, concept=777
+    )
+    rc, _, err = _run(
+        capsys, "pin", "--record", str(rec), "--registry", str(registry)
+    )
+    assert rc == 1 and "--name" in err
+    rc, _, err = _run(
+        capsys,
+        "pin",
+        "--record",
+        str(rec),
+        "--registry",
+        str(registry),
+        "--name",
+        "test_grid",
+        "--update-registry",
+    )
+    assert rc == 0, err
+    got = zp.load_registry(registry).RECORDS["test_grid"]
+    assert (got.record_id, got.concept_record_id) == (rec, 777)
+    assert got.creators == ("Eastman, Jason",)
+    assert got.citation_key is None
+
+
+def test_pin_name_conflict_refused(fake, bundle, registry, capsys):
+    """--name naming a different dataset's entry is refused, file intact."""
+    rec, _, _ = _mist_version(fake, bundle)
+    before = registry.read_text()
+    rc, _, err = _run(
+        capsys,
+        "pin",
+        "--record",
+        str(rec),
+        "--registry",
+        str(registry),
+        "--name",
+        "nextgen_spectra",
+        "--update-registry",
+    )
+    assert rc == 1 and "mist_eep_grids" in err
+    assert registry.read_text() == before
 
 
 def test_pin_rejects_draft(fake, capsys):
