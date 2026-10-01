@@ -1262,3 +1262,51 @@ def test_each_draw_reports_the_branch_it_was_assigned(vcve_transit_fit):
     )
     assert "orbit.ecc" in system.plot_branch_labels
     assert "orbit.ecc" in {p.label for p in system.plot_params}
+
+
+def _vcve_warnings(caplog, config):
+    import logging
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        System(config, user_params=dict(_TRANSIT_PARAMS)).prepare()
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "samples V_c/V_e" in r.getMessage()
+    ]
+
+
+def test_vcve_warns_where_an_occultation_or_rvs_measure_e_omega(
+    transit_lc, rv_data, caplog
+):
+    """
+    Given an orbit sampling V_c/V_e,
+    When the fit also contains a dataset that measures (e, omega) directly --
+      a light curve whose band fits the occultation, or an RV curve --
+    Then ONE warning names the orbit and that dataset and recommends
+      'fitvcve: false'; a transit-only fit (the default's own case) gets none.
+
+    JDE 2026-10-01 (review 1.8.14): examples/gj1214 forced to fitvcve mixed
+    slowly (r_hat 1.3 on omega) because its JWST eclipse pins e cos omega,
+    and the transit-only default cannot know a priori that the light curve
+    covers the occultation.
+    """
+    # The default's own case: transit-only, nothing else measures e.
+    assert _vcve_warnings(caplog, _transit_config(transit_lc, None)) == []
+
+    occultation = _transit_config(transit_lc, None)
+    occultation["band"][0]["fitthermal"] = True
+    (msg,) = _vcve_warnings(caplog, occultation)
+    assert "orbit 'b'" in msg and "transit 'inst0'" in msg
+    assert "fitvcve: false" in msg
+
+    with_rv = _transit_config(transit_lc, True)
+    with_rv["rvinstrument"] = [{"name": "harps", "file": rv_data}]
+    (msg,) = _vcve_warnings(caplog, with_rv)
+    assert "rvinstrument 'harps'" in msg
+
+    # ...and nothing when the orbit is not on V_c/V_e.
+    with_rv_hk = _transit_config(transit_lc, False)
+    with_rv_hk["rvinstrument"] = [{"name": "harps", "file": rv_data}]
+    assert _vcve_warnings(caplog, with_rv_hk) == []

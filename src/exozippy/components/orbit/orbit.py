@@ -293,6 +293,95 @@ class Orbit(Component):
             ", ".join(flipped),
         )
 
+    def _e_omega_datasets(self, system):
+        """Per orbit: the datasets that measure (e, omega) more directly than
+        a transit duration does.  {orbit index: [dataset description, ...]}.
+
+        Two kinds.  An RV or astrometric amplitude (the same
+        `amplitude_constrained_orbits` predicate the transit-only default
+        asks, so the two can never disagree), which measures e cos/sin omega
+        through the shape of the curve.  And an OCCULTATION: a transit file
+        whose band fits a planetary emission (`fitthermal`/`fitreflect`)
+        models the secondary eclipse, whose timing measures e cos omega and
+        whose duration e sin omega directly.  Every transit light curve
+        models every planet, so that dataset names every orbit with a
+        planet.  Whether the file really COVERS the eclipse cannot be known
+        before the fit (JDE 2026-10-01), which is why this is a warning and
+        not a default.
+        """
+        components = getattr(system, "active_components", None) or {}
+        out = {i: [] for i in range(self.n_elements)}
+        rv = components.get("rvinstrument")
+        if rv is not None:
+            for k, s in enumerate(rv.star_ndx):
+                for o, _ in self.star_membership(s):
+                    out[o].append(f"rvinstrument '{rv.names[k]}'")
+        ast = components.get("astrometryinstrument")
+        if ast is not None:
+            ast_orbits = amplitude_constrained_orbits(system, self)
+            if rv is not None:
+                rv_orbits = {
+                    o for s in rv.star_ndx for o, _ in self.star_membership(s)
+                }
+                ast_orbits -= rv_orbits
+            for o in ast_orbits:
+                out[o].append(
+                    "astrometryinstrument "
+                    + ", ".join(f"'{n}'" for n in ast.names)
+                )
+        transit = components.get("transit")
+        band = components.get("band")
+        if transit is not None and band is not None:
+            emitting = {
+                name
+                for name, th, rf in zip(
+                    band.names, band.fitthermal, band.fitreflect
+                )
+                if th or rf
+            }
+            occ = [
+                f"transit '{n}' (band '{b}' fits the occultation)"
+                for n, b in zip(transit.names, transit.band_names)
+                if b in emitting
+            ]
+            for i in range(self.n_elements):
+                if any(t == "planet" for t, _ in self.companion_bodies[i]):
+                    out[i].extend(occ)
+        return out
+
+    def _warn_vcve_where_e_is_measured(self, system):
+        """WARN when an orbit samples V_c/V_e but other data measure e/omega.
+
+        V_c/V_e is the right coordinate when a transit DURATION is what
+        constrains the eccentricity (Eastman 2024).  When an occultation's
+        timing or an RV curve measures e cos omega / e sin omega directly,
+        V_c/V_e is the wrong one: the posterior is a narrow ridge in
+        (V_c/V_e, omega) and the sampler mixes slowly along it --
+        examples/gj1214 with `fitvcve: true` (its JWST eclipse pins e cos w)
+        reached r_hat 1.3 on omega at 4 x (400 + 400) where sqrt(e)cos/sin
+        omega converges in 3 minutes (review 1.8.14, JDE 2026-10-01).  The
+        transit-only default already stays off for RV/astrometry; it cannot
+        see an occultation a priori, so this says so, once, naming the data.
+        """
+        if system is None:
+            return
+        datasets = self._e_omega_datasets(system)
+        for i in range(self.n_elements):
+            if not self.fitvcve[i] or not datasets[i]:
+                continue
+            logger.warning(
+                "[%s] orbit '%s' samples V_c/V_e (fitvcve), but %s also "
+                "measure(s) its eccentricity and argument of periastron "
+                "directly.  V_c/V_e is the parameterization for a transit "
+                "duration alone; with these data sqrt(e)cos(omega)/"
+                "sqrt(e)sin(omega) is the better one -- set 'fitvcve: false' "
+                "on the orbit (it mixes slowly along the (V_c/V_e, omega) "
+                "ridge otherwise).",
+                self.prefix,
+                self.names[i],
+                "; ".join(datasets[i]),
+            )
+
     def _parse_inc_parameterization(self, system=None):
         """Read `fitchord:` into per-orbit mode names.
 
@@ -828,6 +917,7 @@ class Orbit(Component):
         self._parse_ecc_parameterization(system)
         self._reject_wip_parameterizations()
         self._log_parameterization_choices(system)
+        self._warn_vcve_where_e_is_measured(system)
 
         # The eccentricity parameterization, per orbit (see ECC_MODE_TABLE).
         # An all-`hk` system -- every shipped example -- gets exactly the
