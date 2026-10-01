@@ -335,8 +335,10 @@ def test_name_borrowed_from_another_component_is_accepted():
         "star": [{"name": "A"}],
         "mann": [{"star": "A", "constrain": ["mass"], "ks": 8.782}],
     }
+    # `lower`, not `initval`: ks_offset is a structural start since review
+    # 2.2.21 (an initval on it raises); the spelling under test is the same.
     cm = ConfigManager(
-        {"mann.A.ks_offset": {"initval": 0.1}}, system_config=config
+        {"mann.A.ks_offset": {"lower": -5.0}}, system_config=config
     )
 
     assert "mann.A.ks_offset" in cm.user_params

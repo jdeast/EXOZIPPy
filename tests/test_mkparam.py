@@ -1228,3 +1228,37 @@ def test_output_version_loops_when_the_config_names_no_parameter_file(
 
     assert out.name == "kelt4.params.3.yaml"
     assert already_there.read_text() == "# an earlier run's restart file\n"
+
+
+def test_a_structural_start_is_not_written(tmp_path):
+    """
+    Given a trace that samples mann's ks_offset (defaults.yaml
+      `structural_start: true`, review 2.2.21) alongside an ordinary
+      parameter,
+    When mkparam runs,
+    Then no ks_offset entry is written -- a params-file initval on it would
+      make the restart file fail the next fit's ConfigManager -- while the
+      ordinary parameter still gets its MAP.
+    """
+    import yaml
+
+    trace = _make_idata(
+        {"mann.ks_offset": 0.37, "star.mass": 0.95}, tmpdir=tmp_path
+    )
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": None,
+        "star": [{"name": "Host"}],
+        "mann": [{"name": "Host", "star": "Host", "ks": 8.0, "ks_err": 0.02}],
+    }
+
+    out = write_param_file(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    result = yaml.safe_load(open(out))
+    assert not any(k.endswith("ks_offset") for k in result), result
+    assert result["star.Host.mass"]["initval"] == pytest.approx(0.95)
