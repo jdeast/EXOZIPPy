@@ -18,7 +18,7 @@ star.A.parallax:
   # NOTE: the Gaia DR3 parallax uncertainty (0.0158000) has been added in quadrature with 0.01 to account for remaining systematic residuals
   mu: 4.61718
   sigma: 0.01870
-  citation: [GaiaCollaboration:2023, Lindegren:2021]
+  citation: [GaiaCollaboration:2016, GaiaCollaboration:2023, Lindegren:2021]
 
 # 3*E(B-V) upper limit (mkticsed.py)
 star.A.av:

@@ -24,15 +24,26 @@ star:
 planet:
   - name: "Companion"
 
-lens:
-  - name: "Lens"
-    lenses:  ["star.0", "planet.0"]
-    sources: ["star.1"]
-    finite_source: True
+# Ported to the post-8.6.17 split (mulensevent / lens / source);
+# key homes per components/mulensing/bodies.py.
+mulensevent:
+  - finite_source: True
     # A/B arm vs the cap-only run: ONE variable -- fitpirel
     # (sample log_pi_rel, derive the lens distance).
     fitpirel: True
+    # REMOVED KEY (2026-10-01): this config raises until converted.  The
+    # JSON below exists only where the fit ran (the *_mmexofast.json
+    # caches are gitignored); run examples/DC2018/convert_mmexofast_json.py
+    # on this config there to move its seeds, mask and err_scale starts
+    # into the params file and delete this key.
     mmexofast: "../events/128/DC2018_128_mmexofast.json"
+
+lens:
+  - body: star.Lens
+  - body: planet.Companion
+
+source:
+  - body: star.Source
 
 galacticmodel:
   - name: "DC2018_128"

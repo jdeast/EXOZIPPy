@@ -48,7 +48,7 @@ orbit:
     # `fitvcve: false` here to fit the conventional coordinates on the same
     # data.
 
-parameter_file: "hat3.params.yaml"
+parameter_file: "hat3_transitonly.params.yaml"
 
 torres:
   - star: "A"

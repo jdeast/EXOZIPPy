@@ -34,7 +34,7 @@ star.A.av:
 star.A.parallax:
   mu: 8.0994
   sigma: 0.03344
-  citation: GaiaCollaboration:2018
+  citation: [GaiaCollaboration:2016, GaiaCollaboration:2018]
 
 # Rp/Rstar ~ 0.1 (wasp18.priors.2's p_0) at Rstar ~ 1.34 Rsun -> ~1.34 Rjup.
 planet.b.radius:

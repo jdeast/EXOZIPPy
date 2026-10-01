@@ -432,8 +432,10 @@ def test_gaia_parallax_written_as_a_parallax_prior(tmp_path, patched_catalogs):
         np.hypot(_elbadry_f(10.0) * 0.0143, 0.01), abs=1e-5
     )
     # The fixture is outside the zero-point range (Solved = 3), so the
-    # citation names the catalog and the inflation, but not Lindegren+2021.
+    # citation names the catalog (mission + DR3 papers, as Gaia's credit
+    # instructions require) and the inflation, but not Lindegren+2021.
     assert priors["star.Host.parallax"]["citation"] == [
+        "GaiaCollaboration:2016",
         "GaiaCollaboration:2023",
         "ElBadry:2021",
     ]

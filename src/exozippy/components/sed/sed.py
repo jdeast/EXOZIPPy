@@ -822,8 +822,8 @@ class SED(Component):
                     raise ValueError(
                         f"{where}: the row states no magsys and {col} has "
                         f"no native magnitude system ({record_path}: none "
-                        f"exists for it, or it is UNRESOLVED -- Roman WFI and "
-                        f"Kepler Kp, JDE 2026-10-01). "
+                        f"exists for it, or it is UNRESOLVED -- Kepler Kp, "
+                        f"JDE 2026-10-01). "
                         f"State it with `magsys: Vega` or `magsys: AB` "
                         f"(for a differential row either gives the same "
                         f"fit: the system cancels)."

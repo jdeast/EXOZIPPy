@@ -1,5 +1,6 @@
-star.Lens.ra:   {initval: 267.595, sigma: 0, citation: "DC2018 event_info.txt"}
-star.Lens.dec:  {initval: -28.982, sigma: 0, citation: "DC2018 event_info.txt"}
+# Coordinates from event_info.txt.
+star.Lens.ra:   {initval: 267.595, sigma: 0}
+star.Lens.dec:  {initval: -28.982, sigma: 0}
 
 # Not constrainable without data on the lens itself.  The Source needs none
 # of this: star.py pins mass/teff/feh/radius/ra/dec for any star that is

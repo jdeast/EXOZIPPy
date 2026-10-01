@@ -15,6 +15,10 @@ Everything else (RV, transit, SED, astrometry, microlensing) works
 normally. The cause is upstream: no current version of jax can be
 installed on Intel macOS.
 
+The Intel-Mac CI job installs these same steps with pip into a python.org
+Python rather than a conda one; the conda route below has not yet been run
+on a real Intel Mac (see "How well tested this recipe is" in the README).
+
 ## Step 1 -- Follow the README's Step 1
 
 Do Step 1 of "Installing" in [`README.md`](README.md) (the Xcode command
@@ -56,21 +60,8 @@ cd ~/python/EXOZIPPy
 pip install -e .
 ```
 
-Then continue from Step 4 of "Installing" in [`README.md`](README.md).
-
-The README's Step 3 example uses the `numpyro` sampler, which is
-unavailable here. Run a copy of it with the default sampler instead
-(copying keeps the repository unmodified, so `git pull` stays clean):
-
-```bash
-mkdir -p ~/modeling
-cp -r ~/python/EXOZIPPy/examples/hat3 ~/modeling/hat3
-cd ~/modeling/hat3
-sed -i '' 's/method: numpyro/method: ptde/' hat3.yaml
-exozippy hat3.yaml
-```
-
-What to expect from the fit is described in the README's Step 3.
+Then continue from Step 3 of "Installing" in [`README.md`](README.md):
+its example fit uses the `nutpie` sampler, which works here unchanged.
 
 If you will be developing EXOZIPPy rather than only running fits,
 [`CONTRIBUTING.md`](CONTRIBUTING.md) covers the Intel Mac differences for

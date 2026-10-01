@@ -1,7 +1,13 @@
 run:
   name: "hat3"
 
-prefix: "fitresults/HAT-P-3b_numpyro"
+# The README's install check: an RV + transit + SED fit that exercises
+# every stage (data loading, model build, sampling, plots, tables, the paper
+# draft) on every supported platform.  It is a SMOKE TEST, not a converged
+# fit: the sampler below runs only 100 + 100 steps, from start values that
+# are already a converged solution (hat3.params.yaml).  See `sampler:` for
+# publication-quality settings.
+prefix: "fitresults/HAT-P-3b"
 
 star:
   - name: "A"
@@ -53,9 +59,19 @@ band:
     filter: "TESS"
 
 sampler:
-  method: numpyro   # nuts, numpyro, blackjax, nutpie, ptde, ptde_async, demc, demcz
-  tune: 500
-  draws: 1000
+  # nutpie needs no jax, so this runs on Intel Macs too (numpyro/blackjax do
+  # not).  Others: nuts, numpyro, blackjax, ptde, ptde_async, demc, demcz.
+  #
+  # SMOKE TEST: 100 + 100 steps, ~27 min on a 36-core Linux box (PyMC nuts:
+  # ~31 min).  Enough to exercise everything and, starting from the converged
+  # solution in hat3.params.yaml, to land on the same answer -- but not a
+  # converged fit.  For publication quality use tune: 1000, draws: 2000:
+  # 500 + 1000 gave R-hat 1.008 but a minimum ESS of only 518 in 2.3 h with
+  # nutpie (PyMC nuts: 783 in 4.8 h), so expect ~4-5 h; the run's
+  # convergence summary says whether it reached R-hat <= 1.01, ESS >= 1000.
+  method: nutpie
+  tune: 100
+  draws: 100
   chains: 4
   cores: 4
   target_accept: 0.95

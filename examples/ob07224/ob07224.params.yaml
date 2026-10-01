@@ -14,7 +14,7 @@
 # (mulensevent.<param>).
 
 # --------------------------------------------------------------------
-# Sky position (18:05:41.05  -28:45:36.2; the Letter
+# Sky position (OGLE EWS params.dat: 18:05:41.05  -28:45:36.2; the Letter
 # rounds this to 18:05:41 -28:45:36).  Required, not optional: every file
 # here is HJD_UTC and the HJD -> BJD_TDB conversion refuses defaults.yaml
 # placeholder coordinates.  It also sets the galactic model's line of
@@ -23,11 +23,9 @@
 star.ra:
     initval: 271.4210417
     sigma: 0
-    citation: OGLE EWS params.dat
 star.dec:
     initval: -28.7600556
     sigma: 0
-    citation: OGLE EWS params.dat
 
 # --------------------------------------------------------------------
 # The trajectory

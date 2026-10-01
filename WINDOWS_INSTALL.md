@@ -86,7 +86,9 @@ total inside Ubuntu with `free -h`.
 
 From here on everything happens inside the Ubuntu shell, exactly as on
 any Linux machine: follow "Installing" in [`README.md`](README.md),
-starting at "Install Miniforge".
+starting at "Install Miniforge". (That conda recipe has passed the test
+suite on Linux but not yet on a real WSL2 machine; see "How well tested
+this recipe is" there.)
 
 Two WSL-specific habits:
 

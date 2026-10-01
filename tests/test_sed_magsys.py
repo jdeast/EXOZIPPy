@@ -259,18 +259,11 @@ def test_a_filter_with_no_native_system_must_state_one(tmp_path):
     assert _loaded_sed(tmp_path, rows, star_names=("A", "B")).mag[0] == 1.0
 
 
-@pytest.mark.parametrize(
-    "name, column",
-    [
-        ("Roman/WFI.F146", "WFI_F146"),
-        ("Roman/WFI.F087", "WFI_F087"),
-        ("Kepler/Kepler.K", "Kepler_Kp"),
-    ],
-)
+@pytest.mark.parametrize("name, column", [("Kepler/Kepler.K", "Kepler_Kp")])
 def test_an_unresolved_native_system_must_be_stated(tmp_path, name, column):
     """
-    Given a Roman WFI or Kepler Kp row (native system UNRESOLVED, JDE
-      2026-10-01: "Raise until we figure it out"),
+    Given a Kepler Kp row (native system UNRESOLVED, JDE 2026-10-01:
+      "Raise until we figure it out"),
     When it states no magsys,
     Then the SED raises naming the filter; stating one is accepted.
     """
@@ -284,6 +277,31 @@ def test_an_unresolved_native_system_must_be_stated(tmp_path, name, column):
         _loaded_sed(tmp_path, rows)
     rows = [(name, 15.0, "AB", None)]
     assert _loaded_sed(tmp_path, rows).mag[0] == 15.0 - _offset(column)
+
+
+@pytest.mark.parametrize(
+    "name, column",
+    [("Roman/WFI.F146", "WFI_F146"), ("Roman/WFI.F087", "WFI_F087")],
+)
+def test_an_unstated_roman_row_is_fitted_as_ab(tmp_path, name, column):
+    """
+    Given a Roman WFI row that states no magsys (Roman photometry is AB,
+      per an email from Alison Duck, 2026-10-01),
+    When the SED loads it,
+    Then it is converted from AB onto the Vega BC system, exactly as an
+      explicit `magsys: AB` row is.
+    """
+    # ARRANGE
+    unstated = [(name, 15.0, None, None)]
+    stated = [(name, 15.0, "AB", None)]
+
+    # ACT
+    mag_unstated = _loaded_sed(tmp_path, unstated).mag[0]
+    mag_stated = _loaded_sed(tmp_path, stated).mag[0]
+
+    # ASSERT
+    assert mag_unstated == 15.0 - _offset(column)
+    assert mag_unstated == mag_stated
 
 
 # ---------------------------------------------------------------------------
@@ -345,8 +363,8 @@ def test_the_recorded_offsets_are_what_the_generator_computes():
         assert record.loc[col, "ab_minus_vega"] == pytest.approx(
             row["ab_minus_vega"], abs=1e-8
         )
-    # Roman's native system is UNRESOLVED (JDE 2026-10-01): recorded empty.
-    assert fresh.loc["WFI_F087", "native_system"] == ""
+    # Roman is AB-native (email from Alison Duck, 2026-10-01).
+    assert fresh.loc["WFI_F087", "native_system"] == "AB"
 
 
 def test_the_ab_offset_is_the_ab_magnitude_of_the_vega_zero():

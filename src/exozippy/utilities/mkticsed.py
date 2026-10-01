@@ -898,8 +898,9 @@ def mkticsed(
         # No positivity gate: the prior is written in PARALLAX space, so
         # a negative measured parallax is representable (see below).
         if np.isfinite(g3_plx) and np.isfinite(g3_eplx):
-            # The catalog, plus each correction as it is actually applied.
-            plx_citation = ["GaiaCollaboration:2023"]
+            # The catalog -- Gaia's credit instructions require the mission
+            # paper AND the DR3 summary -- plus each correction as applied.
+            plx_citation = ["GaiaCollaboration:2016", "GaiaCollaboration:2023"]
             # El-Badry+2021 inflation, then the local zero-point systematic
             # in quadrature (see elbadry_inflation and GAIA_DR3_PLX_SYS).
             if np.isfinite(g3_gmag):
@@ -952,8 +953,8 @@ def mkticsed(
                         zp_msg = (
                             f"corrected by {-zp:+.5f} mas (Lindegren+2021)"
                         )
-                        # after the catalog, before the inflation
-                        plx_citation.insert(1, "Lindegren:2021")
+                        # after the two catalog papers, before the inflation
+                        plx_citation.insert(2, "Lindegren:2021")
                     except Exception as exc:
                         # Do NOT fall through with zp = 0.  The result
                         # here is not a missing number, it is a distance
@@ -1014,7 +1015,11 @@ def mkticsed(
             key,
             dr2_fallback_plx,
             dr2_fallback_uplx,
-            ["GaiaCollaboration:2018", "Lindegren:2018"],
+            [
+                "GaiaCollaboration:2016",
+                "GaiaCollaboration:2018",
+                "Lindegren:2018",
+            ],
         )
 
     # --- 4. 2MASS photometry --------------------------------------------------

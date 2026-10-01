@@ -75,6 +75,27 @@ def _needs_absent_mist_grid(config) -> str:
     return ""
 
 
+def _awaits_mmexofast_conversion(config) -> str:
+    """Skip reason if this config still carries the removed `mmexofast:` key.
+
+    MMEXOFAST was stripped (PR #361) and the key now raises at the boundary.
+    A DC2018 config that carried it cannot simply drop it: its seeds, mask
+    and err_scale starts live in a gitignored *_mmexofast.json cache, and
+    examples/DC2018/convert_mmexofast_json.py moves them into the params file
+    -- which only works where that JSON exists. Such configs are marked
+    "REMOVED KEY" in place until converted there; this is the named skip
+    for them, and it lifts by itself the moment a config is converted.
+    """
+    for entry in config.get("mulensevent") or []:
+        if isinstance(entry, dict) and "mmexofast" in entry:
+            return (
+                "still carries the removed `mmexofast:` key (PR #361); run "
+                "examples/DC2018/convert_mmexofast_json.py on it where its "
+                "*_mmexofast.json exists"
+            )
+    return ""
+
+
 def _system_configs():
     """Every examples/*/ YAML that is a system config, as (path, id) pairs.
 
@@ -87,7 +108,13 @@ def _system_configs():
     out = []
     if not _EXAMPLES.is_dir():
         return out
-    for path in sorted(_EXAMPLES.glob("*/*.yaml")):
+    # `*/configs/` too: examples/DC2018/configs holds a dozen runnable configs
+    # that this glob used to miss, and all twelve that still used the
+    # pre-v0.1.0 `lens: {lenses:, sources:}` block rotted unnoticed.
+    paths = set(_EXAMPLES.glob("*/*.yaml")) | set(
+        _EXAMPLES.glob("*/configs/*.yaml")
+    )
+    for path in sorted(paths):
         try:
             doc = yaml.safe_load(path.read_text())
         except yaml.YAMLError:
@@ -177,7 +204,9 @@ def test_shipped_example_prepares(path, rel, monkeypatch, caplog):
 
     monkeypatch.chdir(path.parent)
 
-    reason = _needs_absent_mist_grid(config)
+    reason = _needs_absent_mist_grid(config) or _awaits_mmexofast_conversion(
+        config
+    )
     if reason:
         pytest.skip(f"{rel}: {reason}")
 
