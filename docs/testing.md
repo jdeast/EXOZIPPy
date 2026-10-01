@@ -275,14 +275,20 @@ check and an IDENTITY between a derived value and its parents all survive
 
 `tests/test_integration_ob09020.py` is the microlensing twin of the kelt4 test
 (PTDE on a two-rung ladder, `seed_polish: false`, `measure_scales: false`,
-three draws, on a COPY whose large photometry files keep every 10th data row
+three draws, on a COPY whose large photometry files keep every 40th data row
 -- one logp of the full VBMicrolensing finite-source model costs ~3 s, and
 every scale probe, whitening's or PTDE's own, is a serial loop of tens of
 evaluations per raw element, so at full size the probe alone is an hour; the
 config itself is untouched) and asserts
 exactly that class of quantity: the trace and start-plot files, the posterior
-variable names, and -- with the polish off -- the user-start contract on the
-seeds the relaxation engine reproduces exactly. It exists because the shipped
+variable names, the NUMERICAL validity of every draw (finite raw values and
+lp, lp inside the runaway ceiling), and -- with the polish off -- the
+user-start contract on the seeds the relaxation engine reproduces exactly.
+The wrap-up's invalid-draw gate is forced there (`modes: {force: true}`,
+test-local), because on a few dozen untuned draws its 1% threshold fails on
+any single rejection and one of its four reasons, `raw-z`, is a z-score
+against the trace's own median/MAD -- a property of the sample size (review
+7.13.9); the three numerical reasons are asserted directly instead. It exists because the shipped
 microlensing examples were otherwise only `prepare()`-tested or replayed for
 their logp terms, and `examples/ob09020` shipped from 2026-09-07 to 09-25 with a
 TypeError in its first start-point plot (the orbit-derived lens geometry listed
