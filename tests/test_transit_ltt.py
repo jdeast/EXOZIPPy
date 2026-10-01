@@ -314,6 +314,7 @@ def _mixed_group_config(lc0, lc1):
     }
 
 
+@pytest.mark.slow
 def test_mixed_group_ltt_gradient_is_finite(tmp_path):
     """
     Given two transit files in the SAME oversample group (both ninterp=1,

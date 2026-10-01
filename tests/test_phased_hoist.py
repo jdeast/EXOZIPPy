@@ -17,6 +17,8 @@ import pytest
 
 from exozippy.system import System
 
+pytestmark = pytest.mark.slow
+
 _P1, _P2 = 4.0, 11.0
 _TC = 2459200.0
 

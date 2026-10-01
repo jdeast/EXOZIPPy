@@ -199,6 +199,7 @@ def _ld_fields(system):
     return out
 
 
+@pytest.mark.slow
 def test_limb_darkening_priors_do_not_depend_on_the_filter(tmp_path):
     """
     Given two otherwise identical transit systems whose band names the

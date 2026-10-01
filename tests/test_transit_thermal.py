@@ -505,6 +505,7 @@ def test_thermal_on_primary_transit_is_still_a_dip_below_baseline(
     assert mid_transit < baseline
 
 
+@pytest.mark.slow
 def test_thermal_eclipse_is_exposure_smeared(tmp_path_factory):
     """
     Given fitthermal on (5000 ppm, fixed) AND exposure smearing

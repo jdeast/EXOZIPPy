@@ -26,6 +26,8 @@ import yaml
 
 from exozippy.system import System
 
+pytestmark = pytest.mark.slow
+
 _KMT_DIR = Path(__file__).parent.parent / "examples" / "KMT-2019-BLG-1806"
 
 

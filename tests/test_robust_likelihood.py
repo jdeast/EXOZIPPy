@@ -802,6 +802,7 @@ def test_rv_system_without_likelihood_samples_no_robust_parameters(
     )
 
 
+@pytest.mark.slow
 def test_rv_system_with_hogg_on_one_file_samples_only_that_file(two_rv_files):
     """
     Given a two-instrument RV system where only the first file asks for the
@@ -870,6 +871,7 @@ def test_rv_system_with_studentt_reports_nu_and_stays_finite(two_rv_files):
     assert np.all(np.isfinite(np.atleast_1d(grads)))
 
 
+@pytest.mark.slow
 def test_outlier_prob_at_data_flags_a_planted_outlier(tmp_path):
     """
     Given a hogg fit whose first file is pure noise plus one corrupted point,

@@ -171,6 +171,7 @@ def test_rho_pred_reports_the_chain(kmt_severed):
     assert np.isclose(rho_pred2, rho_pred, rtol=1e-12)
 
 
+@pytest.mark.slow
 def test_soft_tie_composes_with_link_machinery():
     """
     Given star_constrains_rho: false plus a params-file mu link from rho to

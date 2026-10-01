@@ -329,6 +329,7 @@ def _q_by_kind(lc, companions):
     return out
 
 
+@pytest.mark.slow
 def test_a_mixed_type_lens_builds_and_pairs_each_body_correctly(
     triple_lens_lc,
 ):
@@ -380,6 +381,7 @@ def test_a_mixed_type_lens_builds_and_pairs_each_body_correctly(
     )
 
 
+@pytest.mark.slow
 def test_a_mixed_type_lens_seeds_what_it_builds(triple_lens_lc):
     """
     Given a mixed-type lens,

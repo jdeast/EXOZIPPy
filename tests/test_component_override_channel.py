@@ -327,6 +327,7 @@ def test_fluxfrac_pin_is_not_attributed_to_the_user(pinned_fluxfrac_system):
     ) != ("user")
 
 
+@pytest.mark.slow
 def test_fluxfrac_pin_still_fixes_the_parameter(pinned_fluxfrac_system):
     """
     Given the same system,

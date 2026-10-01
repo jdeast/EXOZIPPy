@@ -294,6 +294,7 @@ def test_barrier_grows_as_the_fit_leaves_the_grid(hat3_star_only):
     assert off_grid[-1] < -1.0
 
 
+@pytest.mark.slow
 def test_gradient_is_finite_on_and_off_grid(hat3_star_only):
     """
     Given the hat3 star-only example,

@@ -92,6 +92,7 @@ def test_build_likelihood_drops_a_stale_dilution_node(lc_path):
     assert model is not None
 
 
+@pytest.mark.slow
 def test_a_second_build_on_one_system_scores_the_same(lc_path):
     """
     Given a prepared System already built once,

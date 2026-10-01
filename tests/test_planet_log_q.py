@@ -304,6 +304,7 @@ def lens_system():
     return _build()
 
 
+@pytest.mark.slow
 def test_two_planets_may_use_different_mass_coordinates():
     """
     Given a binary lens whose companion planet must use the ratio coordinate,

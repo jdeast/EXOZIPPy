@@ -94,7 +94,10 @@ pip or Poetry install can), fits are slower but correct. Fix it with
 
 - **On commit:** ruff sorts imports and formats your staged files. If it
   changes anything the commit aborts; `git add` the result and commit again.
-- **On push:** the full test suite (~20 minutes). A failure aborts the push.
+- **On push:** the FAST test tier (`-m "not slow"`, a few minutes). A failure
+  aborts the push. CI runs the whole suite on the pull request and is required
+  before merge; `EXOZIPPY_PREPUSH_FULL=1 git push` runs everything locally. See
+  `docs/testing.md`, "The pre-push tier".
 
 If you installed the hooks before the push hook existed, run
 `poetry run pre-commit install` again; without it the push hook never runs.

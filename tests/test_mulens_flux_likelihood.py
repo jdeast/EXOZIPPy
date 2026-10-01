@@ -28,6 +28,8 @@ import pytest
 
 from exozippy.system import System
 
+pytestmark = pytest.mark.slow
+
 # d mag / d ln flux; sigma_mag = K * sigma_flux / flux.
 K = 2.5 / np.log(10.0)
 

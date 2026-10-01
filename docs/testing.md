@@ -325,8 +325,9 @@ under `src/` spells out a Zenodo record id or a pinned md5.
 
 ## The pre-push hook, and why it does not say `poetry run pytest`
 
-The full suite runs on push, wired in `.pre-commit-config.yaml` (install both hook
-types with `poetry run pre-commit install`). The entry is
+A suite runs on push, wired in `.pre-commit-config.yaml` (install both hook
+types with `poetry run pre-commit install`) -- since 2026-10-01 the FAST tier by
+default, see "The pre-push tier" below. The entry is
 `scripts/pre_push_suite.sh` rather than `poetry run pytest`, because that spelling
 **cannot work from a git worktree** -- and essentially all work here is developed in
 one, so it was on the path of every push. Two failures, one of them silent:
@@ -378,6 +379,37 @@ Two properties of the hook that this did **not** change, and that still bite:
 - `pre-commit` stashes unstaged changes while hooks run and restores them afterwards.
   Do not kill a run in progress; the work is recoverable from the patch it prints under
   `~/.cache/pre-commit/`, but only by hand.
+
+
+### The pre-push tier: fast locally, everything in CI
+
+**The hook runs `-m "not slow"`; CI runs every test; CI is the merge gate.**
+(JDE 2026-10-01.) The repository ruleset "master: require green tests" requires a
+pull request and the `test` check -- the aggregator over lint and every pytest
+shard -- before anything reaches `master`, so a regression in a slow test cannot
+merge. What the fast tier gives up is only *where you hear about it first*: a slow
+test that breaks is reported by CI on the PR, about 25 minutes later, instead of
+blocking the push.
+
+Why not keep the full suite in the hook: with several sessions working the repo,
+one 30-minute suite per push serialized behind the per-machine lock (above) was the
+throughput bottleneck -- pushes waited one to two hours for their turn on
+2026-09-30/10-01. The fast tier is measured at a few minutes at `-n6`.
+
+**What `slow` means.** `@pytest.mark.slow` (registered in `pyproject.toml`) marks
+end-to-end fits, sampling-heavy tests, and builds or compiles that cost more than
+~15 s on this box. It was applied from measured `--durations` of two full runs
+(every call phase or module fixture over 15 s; a module fixture marks the whole
+module, since its tests share it). When a new test is that slow, mark it -- the CI
+time-budget check (`scripts/check_test_budget.py`, above) lists anything over 60 s
+on the job summary, which is the cue.
+
+**Overrides.** `EXOZIPPY_PREPUSH_FULL=1 git push` runs the full suite locally, as
+the hook did before. Arguments given to `scripts/pre_push_suite.sh` are passed to
+pytest after the tier's `-m`, so an explicit `-m` of your own wins. Tests:
+`tests/test_pre_push_hook.py` (default tier, the override, and that `slow` is
+registered -- an unregistered marker only warns, so a typo would silently move a
+slow test into the fast tier).
 
 ## Model data from Zenodo: the spectra and the BC tables
 

@@ -71,6 +71,8 @@ import pytest
 
 from exozippy import run as run_module
 
+pytestmark = pytest.mark.slow
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUN_PY = REPO_ROOT / "src" / "exozippy" / "run.py"
 

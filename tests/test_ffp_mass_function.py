@@ -641,6 +641,7 @@ def test_ffp_star_is_exempt_from_the_salpeter_floor(caplog):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 def test_end_to_end_mixed_system_builds_with_the_right_prior_on_each_star():
     """
     Given a full System with a stellar source and an FFP lens,

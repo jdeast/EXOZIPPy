@@ -115,6 +115,7 @@ def test_missing_band_reference_raises(tmp_path_factory):
         system.prepare()
 
 
+@pytest.mark.slow
 def test_model_logp_is_finite(transit_system):
     """
     Given the built transit model with band-based limb darkening,

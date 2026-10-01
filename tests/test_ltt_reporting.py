@@ -190,6 +190,7 @@ def test_mixed_files_warn_once_and_treat_the_orbit_as_retarded(
     assert _shift(o, model, point, "tc", "tc_target")[0] < 0
 
 
+@pytest.mark.slow
 def test_rm_alone_retards_the_orbit_it_names(tmp_path):
     rv = _write_two_row_rv(tmp_path / "rv.dat")
     system, model, point = _build(_rm_wiring_config(rv), _rm_wiring_params())

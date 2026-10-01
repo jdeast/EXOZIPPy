@@ -48,6 +48,7 @@ def _prepared(user_params, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 def test_a_bare_per_seed_list_solves_one_start_per_seed(monkeypatch):
     """
     Given kelt4_rvonly with the documented bare per-seed list

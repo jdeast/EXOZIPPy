@@ -20,6 +20,8 @@ from exozippy.config import ConfigManager
 from exozippy.constants import KEPLER_CONST
 from exozippy.system import System
 
+pytestmark = pytest.mark.slow
+
 MJUP_PER_MSUN = (1.0 * u.solMass).to(u.jupiterMass).value
 
 M_A, M_B, M_C = 1.2, 0.8, 0.7

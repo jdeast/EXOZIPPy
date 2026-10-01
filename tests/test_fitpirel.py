@@ -79,6 +79,7 @@ def test_off_is_the_physical_parameterization():
     assert not any("fitpirel_jacobian" in p.name for p in model.potentials)
 
 
+@pytest.mark.slow
 def test_swapped_roles_identity_and_jacobian(swapped):
     system, model = swapped
     assert "mulensevent.log_pi_rel_raw" in [v.name for v in model.value_vars]

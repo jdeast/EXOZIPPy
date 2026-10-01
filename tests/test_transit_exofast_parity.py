@@ -32,11 +32,14 @@ _FIXTURE_PATH = os.path.join(
     os.path.dirname(__file__), "fixtures", "exofast_tran_parity.json"
 )
 
-pytestmark = pytest.mark.skipif(
-    not os.path.exists(_FIXTURE_PATH),
-    reason="exofast_tran reference fixture missing "
-    "(run scripts/make_exofast_tran_reference.py)",
-)
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.skipif(
+        not os.path.exists(_FIXTURE_PATH),
+        reason="exofast_tran reference fixture missing "
+        "(run scripts/make_exofast_tran_reference.py)",
+    ),
+]
 
 ATOL = 1e-8
 

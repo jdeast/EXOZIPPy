@@ -298,6 +298,7 @@ def test_transit_band_ld_stays_free_and_an_unused_band_is_pinned(
         assert sigma[1] == 0.0
 
 
+@pytest.mark.slow
 def test_two_transits_may_use_different_limb_darkening_laws(
     tmp_path_factory,
 ):

@@ -230,6 +230,7 @@ def test_the_pad_is_the_mutual_hill_radius_not_the_sum_of_the_two_own_ones():
     assert r_mutual < own_pads
 
 
+@pytest.mark.slow
 def test_min_hill_separation_tightens_the_threshold():
     """
     Given a pair that is comfortably separated at the default 1 mutual

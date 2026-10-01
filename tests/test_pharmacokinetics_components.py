@@ -372,6 +372,7 @@ def test_a_missing_datafile_raises_pointing_at_the_fetcher(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 def test_the_model_builds_with_a_finite_logp_and_gradient(prepared):
     """Given a prepared system, When built, Then logp and dlogp are finite.
 
@@ -648,6 +649,7 @@ def test_auc_is_spelled_so_it_never_consumes_the_reported_clearance(
     np.testing.assert_allclose(auc, dose / clearance, rtol=1e-12)
 
 
+@pytest.mark.slow
 def test_a_prior_on_a_late_built_element_is_applied(synth_csv, tmp_path):
     """Given a CL prior in the (ke, V) basis, Then it is a real logp term.
 

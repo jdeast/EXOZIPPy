@@ -30,6 +30,8 @@ import pytest
 from exozippy.components.orbit import physics
 from exozippy.system import System
 
+pytestmark = pytest.mark.slow
+
 
 def _f(node):
     return np.atleast_1d(np.asarray(node.eval(), dtype=float))

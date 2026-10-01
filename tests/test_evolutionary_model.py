@@ -1324,6 +1324,7 @@ def test_the_eep_seed_steers_off_the_pre_main_sequence_by_its_own_constant():
     assert SEED_ZAMS_EEP == 202.0
 
 
+@pytest.mark.slow
 def test_hat3_mist_seeds_the_eep_on_its_user_mass_track(
     monkeypatch, model_root
 ):

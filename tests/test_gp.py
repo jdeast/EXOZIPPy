@@ -827,6 +827,7 @@ def test_rv_system_without_gp_samples_no_gp_parameters(two_rv_files):
 
 
 @needs_celerite2_pymc
+@pytest.mark.slow
 def test_rv_system_with_gp_on_one_file_samples_only_that_file(two_rv_files):
     """
     Given a two-instrument RV system where only the first file asks for a
@@ -1056,6 +1057,7 @@ def test_rv_gp_hyperparameters_are_param_deps(two_rv_files):
 
 
 @needs_celerite2_pymc
+@pytest.mark.slow
 def test_transit_gp_hyperparameters_are_param_deps(tmp_path_factory):
     """
     Given a transit system with an sho GP on its one light curve,

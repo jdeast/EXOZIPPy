@@ -52,6 +52,7 @@ def _logp(**extra):
     )
 
 
+@pytest.mark.slow
 def test_a_bound_on_one_element_of_a_derived_vector_keeps_logp_finite():
     """
     Given a soft `lower` on ONE orbit's derived period and none on the
@@ -72,6 +73,7 @@ def test_a_bound_on_one_element_of_a_derived_vector_keeps_logp_finite():
     assert np.isfinite(grads).all()
 
 
+@pytest.mark.slow
 def test_it_agrees_with_the_all_elements_bounded_case():
     """
     Given the same system with the bound on BOTH elements, satisfied by a
@@ -95,6 +97,7 @@ def test_it_agrees_with_the_all_elements_bounded_case():
     assert one_logp == pytest.approx(none_logp, rel=1e-12)
 
 
+@pytest.mark.slow
 def test_an_active_per_element_bound_still_bites():
     """
     Given a `lower` that the element's start VIOLATES,

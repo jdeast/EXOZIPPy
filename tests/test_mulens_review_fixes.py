@@ -1666,6 +1666,7 @@ def test_the_pspl_column_refuses_a_missing_or_nonpositive_t_E(tE):
         MulensInstrument._pspl_magnification(t, z, z, 0.0, 0.1, tE, 0.0, 0.0)
 
 
+@pytest.mark.slow
 def test_ob170114_bootstrap_sees_the_engine_derived_t_E_and_pi_E(monkeypatch):
     """
     Given examples/ob170114, whose params file derives t_E and pi_E from the

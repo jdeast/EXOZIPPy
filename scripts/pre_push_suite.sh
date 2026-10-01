@@ -110,6 +110,25 @@ if [ -n "$discarded" ]; then
     echo "pre-push: discarded inherited PYTHONPATH ($discarded)"
 fi
 
+# THE FAST TIER BY DEFAULT (JDE 2026-10-01). The hook runs `-m "not slow"`:
+# everything except the end-to-end fits and the heavy builds/compiles marked
+# `@pytest.mark.slow` (see docs/testing.md, "The pre-push tier"). CI runs the
+# WHOLE suite on every push, and CI is the merge gate: the repository ruleset
+# "master: require green tests" requires a pull request and the `test` check
+# for master, so a slow-tier regression cannot merge -- the hook only stops
+# being where you hear about it first. EXOZIPPY_PREPUSH_FULL=1 runs the full
+# suite locally, as the hook did before. Arguments passed to this script are
+# forwarded to pytest unchanged and come AFTER the marker filter, so an
+# explicit `-m` of your own wins (pytest takes the last -m).
+if [ -n "${EXOZIPPY_PREPUSH_FULL:-}" ]; then
+    tier=()
+    echo "pre-push: tier           FULL suite (EXOZIPPY_PREPUSH_FULL is set)"
+else
+    tier=(-m "not slow")
+    echo "pre-push: tier           fast (-m \"not slow\"); CI runs the full suite." \
+        "EXOZIPPY_PREPUSH_FULL=1 runs everything here"
+fi
+
 if [ -n "${EXOZIPPY_PREPUSH_DRYRUN:-}" ]; then
     echo "pre-push: dry run, not running the suite"
     exit 0
@@ -147,4 +166,4 @@ if [ -z "${EXOZIPPY_PREPUSH_NOWAIT:-}" ]; then
 fi
 
 cd "$root"
-exec "$py" -m pytest "$@"
+exec "$py" -m pytest "${tier[@]}" "$@"

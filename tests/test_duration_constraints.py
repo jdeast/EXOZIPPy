@@ -528,6 +528,7 @@ def test_an_explicit_eccentricity_still_wins():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 def test_a_gaussian_on_the_eclipse_time_reaches_the_eccentricity_gradient():
     """
     Given a Gaussian prior on the eclipse time,
