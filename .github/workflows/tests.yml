@@ -198,9 +198,9 @@ jobs:
       # `HTTPError: HTTP Error 504: Gateway Time-out` in tests that had nothing
       # to do with their diffs.
       #
-      # The key embeds the md5 already pinned in make_bc._MODEL_DATA, so it is
-      # correct by construction: change the data, change the key. Keep it in
-      # sync if that pin ever moves.
+      # The key embeds the md5 pinned in utilities/zenodo_assets.py (record
+      # "nextgen_spectra"), so it is correct by construction: change the
+      # data, change the key. Keep it in sync if that pin ever moves.
       #
       # The PATH is NOT correct by construction, and has to be kept in sync by
       # hand with bc_grid.DEFAULT_MODEL_ROOT (= src/exozippy/models). It was
@@ -245,13 +245,15 @@ jobs:
 
       # The NextGen BC tables (~96 MB, 14 parquet files) are Zenodo downloads
       # too since they left the repository (the wheel had grown past PyPI's
-      # 100 MB limit): models/NextGen/bc_tables.py pins them and fetches the
+      # 100 MB limit): utilities/zenodo_assets.py pins them and
+      # models/NextGen/bc_tables.py fetches the
       # ones a test reads, and tests/conftest.py fetches them all once before
       # the suite. Cached for the same reason as the spectra.
       #
-      # The KEY hashes bc_tables.py, the file that holds the pins, so a new
-      # version of the table set (new pins) is a new entry by construction;
-      # an edit to that file's prose costs one re-download, nothing worse.
+      # The KEY hashes utilities/zenodo_assets.py, the file that holds the
+      # pins (review 4.9.2), so a new version of the table set (new pins)
+      # is a new entry by construction; an edit to any other record's pins
+      # or to that file's prose costs one re-download, nothing worse.
       # The PATH is a glob of the downloaded tables only -- every
       # *.bc.parquet there is git-ignored, so nothing tracked can be
       # reverted by a restore -- and, like the spectra path, has to be kept
@@ -260,7 +262,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: src/exozippy/models/NextGen/BCs/*.bc.parquet
-          key: nextgen-bc-tables-p1-${{ hashFiles('src/exozippy/models/NextGen/bc_tables.py') }}
+          key: nextgen-bc-tables-p1-${{ hashFiles('src/exozippy/utilities/zenodo_assets.py') }}
 
       # The mulensing component sets astropy's solar-system ephemeris to
       # "jpl", which downloads the ~115 MB de430 kernel into ~/.astropy/cache
@@ -626,7 +628,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: src/exozippy/models/NextGen/BCs/*.bc.parquet
-          key: nextgen-bc-tables-p1-${{ hashFiles('src/exozippy/models/NextGen/bc_tables.py') }}
+          key: nextgen-bc-tables-p1-${{ hashFiles('src/exozippy/utilities/zenodo_assets.py') }}
 
       # Same astropy ephemeris-kernel cache as the matrix job -- see the
       # comment there.

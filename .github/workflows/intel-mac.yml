@@ -119,7 +119,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: src/exozippy/models/NextGen/BCs/*.bc.parquet
-          key: nextgen-bc-tables-p1-${{ hashFiles('src/exozippy/models/NextGen/bc_tables.py') }}
+          key: nextgen-bc-tables-p1-${{ hashFiles('src/exozippy/utilities/zenodo_assets.py') }}
 
       - name: Cache the astropy ephemeris kernel
         uses: actions/cache@v6

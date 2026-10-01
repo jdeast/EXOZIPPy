@@ -14,8 +14,8 @@ downloaded by importing this module.
 
 The parquet is git-ignored, cached in place at
 ``models/MIST/MISTv{version}/EEPs/``, and pinned by size and md5 from the
-Zenodo record's API, so a truncated or re-uploaded file is caught rather
-than silently used. See :mod:`exozippy.utilities.zenodo` for the mechanics.
+Zenodo record's API (in :mod:`exozippy.utilities.zenodo_assets`), so a
+truncated or re-uploaded file is caught rather than silently used. See :mod:`exozippy.utilities.zenodo` for the mechanics.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ import logging
 from pathlib import Path
 from typing import Sequence
 
+from ...utilities import zenodo_assets
 from ...utilities.zenodo import fetch_assets
 
 logger = logging.getLogger(__name__)
@@ -41,19 +42,10 @@ EEP_GRID_DIR = current_dir / "MISTv2.5" / "EEPs"
 # generate_MIST_EEP_Tables._generate_alpha_vvcrit_filename_parts builds, so
 # a grid produced locally and one fetched from Zenodo are interchangeable.
 #
-# size and md5 come from the Zenodo record's own API
-# (https://zenodo.org/api/records/21893308). They pin the content, so a
-# re-uploaded or truncated file is caught rather than silently used.
-_EEP_GRID_ASSETS = {
-    "afe_p0_vvcrit0.0.grid.parquet": {
-        "url": (
-            "https://zenodo.org/records/21893308/files/"
-            "afe_p0_vvcrit0.0.grid.parquet"
-        ),
-        "size": 127992558,
-        "md5": "30545e0087ddd7dd79e87f294f4d8d58",
-    },
-}
+# The record id, sizes and md5s live in utilities/zenodo_assets.py with every
+# other Zenodo pin (review 4.9.2). They pin the content, so a re-uploaded or
+# truncated file is caught rather than silently used.
+_EEP_GRID_ASSETS = zenodo_assets.assets("mist_eep_grids")
 
 
 def eep_grid_filename(alpha: float = 0.0, vvcrit: float = 0.0) -> str:

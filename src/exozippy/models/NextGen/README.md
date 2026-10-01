@@ -10,7 +10,7 @@ models/NextGen/BCs/
     ...                        # one per facility; bc_tables.py lists them
 ```
 
-The tables are NOT tracked in git or shipped in the wheel: they are published on Zenodo and pinned (record id, size, md5) in `bc_tables.py`, which fetches the ones a fit reads on first use (`exozippy-fetch-bc-tables` pre-fetches all of them). After regenerating or extending tables here, publish them as a NEW VERSION of the Zenodo record and update the pins in `bc_tables.py` -- until then a fit refuses the locally changed table rather than overwriting it or silently using it (`components/sed/sed.md`).
+The tables are NOT tracked in git or shipped in the wheel: they are published on Zenodo and pinned (record id, size, md5) in `utilities/zenodo_assets.py` (record `nextgen_bc_tables`); `bc_tables.py` fetches the ones a fit reads on first use (`exozippy-fetch-bc-tables` pre-fetches all of them). After regenerating or extending tables here, publish them as a NEW VERSION of the Zenodo record and update the pins in `utilities/zenodo_assets.py` -- until then a fit refuses the locally changed table rather than overwriting it or silently using it (`components/sed/sed.md`).
 
 Each table is long-format, one row per grid node, with columns `teff logg feh alpha Av Rv <filter columns>`. Filter columns are named by their MIST BC-column name (e.g. `2MASS_J`, `Gaia_G_DR2Rev`). `alpha` records the $[\alpha/\text{Fe}]$ of the spectrum a row was computed from; it is provenance, not a grid axis. `df.attrs["meta"]` (preserved by `pd.read_parquet`) holds the table metadata and, per filter column, its SVO id, zeropoint, flux weighting and generator. `components/sed/bc_grid.py` owns the format (`read_bc_table`, `write_bc_table`, `bc_table_path`).
 

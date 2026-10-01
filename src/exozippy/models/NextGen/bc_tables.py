@@ -12,21 +12,23 @@ instead and fetched on first use -- exactly like the NextGen spectra
 eep_grid.py``), through the same ``utilities/zenodo.fetch_assets`` core and
 the same machine-level cache behind it.
 
-This module is the ONE place the published set is pinned. Nothing here runs
-at import; ``bc_grid.find_bc_table`` / ``bc_grid.peek_grid_axes`` call
-``ensure_tables`` for the facilities a fit actually asks for, so a 2MASS +
-Gaia fit fetches two tables, not fourteen. ``fetch_all`` (CLI:
+This module owns the fetch of the published set; the pins themselves (record
+id, concept record, every table's size and md5) live in
+``utilities/zenodo_assets.py`` as record ``nextgen_bc_tables``, with every
+other Zenodo pin (review 4.9.2). Nothing here downloads at import;
+``bc_grid.find_bc_table`` / ``bc_grid.peek_grid_axes`` call ``ensure_tables``
+for the facilities a fit actually asks for, so a 2MASS + Gaia fit fetches
+two tables, not fourteen. ``fetch_all`` (CLI:
 ``exozippy-fetch-bc-tables``) pre-fetches the whole set, for a machine that
 will run offline.
 
 PUBLISHING A NEW VERSION of the table set (new filters, a longer Av axis,
-the HPC full-resolution rebuild of review 2.9.13) is a matter of this file
-alone: upload the new tables as a new VERSION of the same Zenodo concept
-record, then set ``ZENODO_RECORD`` to the new version's record id and
-replace ``_BC_TABLE_FILES`` with the new sizes and md5s (the md5s come from
-``https://zenodo.org/api/records/<id>``; the record's ``files[*].checksum``
-is ``md5:<hex>``). Every cache is keyed by md5, so the old version's cached
-copies are simply never matched again.
+the HPC full-resolution rebuild of review 2.9.13) touches no code here:
+upload the new tables as a new VERSION of the same Zenodo concept record,
+then update the ``nextgen_bc_tables`` entry in ``utilities/zenodo_assets.py``
+and run its network test (that module's docstring has the steps). Every
+cache is keyed by md5, so the old version's cached copies are simply never
+matched again.
 
 Integrity, and why it is STRICTER than the other two assets
 -------------------------------------------------------------
@@ -59,7 +61,7 @@ import urllib.error
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
-from ...utilities import zenodo
+from ...utilities import zenodo, zenodo_assets
 
 logger = logging.getLogger(__name__)
 
@@ -73,76 +75,16 @@ except NameError:  # pragma: no cover - interactive use only
 # stay tracked). The tables themselves are git-ignored there.
 BC_TABLE_DIR = current_dir / "BCs"
 
-# Zenodo record of the PUBLISHED VERSION these pins describe, and the
-# concept record that groups every version (the DOI to cite for "the NextGen
-# BC tables" without naming a version: 10.5281/zenodo.23074950). Version 1,
-# published by JDE 2026-10-01 (DOI 10.5281/zenodo.23074951, CC-BY-4.0).
-# Browse every EXOZIPPy data record at https://zenodo.org/communities/exozippy
-# -- for humans only; the code pins record ids and md5s, never the community.
-ZENODO_RECORD = 23074951
-ZENODO_CONCEPT_RECORD = 23074950
-
-# size and md5 of every published table, from the record's own API
-# (https://zenodo.org/api/records/23074951, files[*].size / checksum). They
-# pin the CONTENT: the tables generated at commit d9929630 ("Added BCs
-# calculated for more filters", PR #349).
+# The published record (utilities/zenodo_assets.py, "nextgen_bc_tables").
+# Module-level copies so the fetch below reads -- and tests substitute -- one
+# name each: the VERSION the pins describe, the concept record grouping every
+# version, and each table's size and md5.
+_RECORD = zenodo_assets.record("nextgen_bc_tables")
+ZENODO_RECORD = _RECORD.record_id
+ZENODO_CONCEPT_RECORD = _RECORD.concept_record_id
 _BC_TABLE_FILES = {
-    "2MASS.bc.parquet": {
-        "size": 4253006,
-        "md5": "41ff8f2f6e9a1b88f3f085f128dfcc2a",
-    },
-    "Euclid.bc.parquet": {
-        "size": 4252914,
-        "md5": "44925baf29ad0d1d4d3cedd4d45abc07",
-    },
-    "GAIA.bc.parquet": {
-        "size": 8464605,
-        "md5": "073dcf7acbd6195478954cc13a9fd742",
-    },
-    "GALEX.bc.parquet": {
-        "size": 2849599,
-        "md5": "e5f774a917144a0c942ea65e2a613b11",
-    },
-    "Gemini.bc.parquet": {
-        "size": 2849819,
-        "md5": "73e689d4edafe76052f29f16e5ee9d52",
-    },
-    "Generic.bc.parquet": {
-        "size": 25307518,
-        "md5": "4e067a46d646edd2991141f5a3cdd728",
-    },
-    "Keck.bc.parquet": {
-        "size": 7060295,
-        "md5": "7b0be59aef0304dcc68b03a7831b7b85",
-    },
-    "Kepler.bc.parquet": {
-        "size": 1445932,
-        "md5": "9b21575a77dd737b6f0fa4d43c00b52d",
-    },
-    "PAN-STARRS.bc.parquet": {
-        "size": 5656266,
-        "md5": "8f5d5a4c24ad21a93028b52e4414e1ab",
-    },
-    "Roman.bc.parquet": {
-        "size": 11270909,
-        "md5": "5e431ef09b0a65a4471f6598f7f7cdae",
-    },
-    "SLOAN.bc.parquet": {
-        "size": 7059882,
-        "md5": "95c997b768f763faf51ed41305ff2dcb",
-    },
-    "TESS.bc.parquet": {
-        "size": 1445767,
-        "md5": "af9cabbe4018da49e57ccf88c48072ca",
-    },
-    "TYCHO.bc.parquet": {
-        "size": 8464106,
-        "md5": "6cbe366d4c185da85d9ab399d609b517",
-    },
-    "WISE.bc.parquet": {
-        "size": 5656474,
-        "md5": "7738d148d3dd9e0a37c84720d3737614",
-    },
+    name: {"size": pin.size, "md5": pin.md5}
+    for name, pin in _RECORD.files.items()
 }
 
 FETCH_COMMAND = "exozippy-fetch-bc-tables"
@@ -208,7 +150,7 @@ def _check_present(path: Path, name: str) -> None:
             f"It is NOT overwritten, because that may be hours of "
             f"generation work. Either publish it as a new version of the "
             f"Zenodo record and update the pins in "
-            f"models/NextGen/bc_tables.py, or move it aside and re-run to "
+            f"utilities/zenodo_assets.py, or move it aside and re-run to "
             f"fetch the published table. To fit against a modified table "
             f"deliberately, copy the NextGen/ tree elsewhere and point the "
             f"SED's `model_root:` at the copy (an explicit root is used as "

@@ -7,7 +7,9 @@ themselves (~96 MB), and the MIST EEP track grid (~128 MB) the evolutionary
 model interpolates. All are git-ignored, fetched on first use, and cached in
 place.
 
-This module owns the mechanics; the callers own their asset tables. It lives
+This module owns the mechanics; the pins (every record id, file, size and
+md5) live in ``utilities/zenodo_assets.py``, and each caller asks it for the
+files it needs (review 4.9.2). It lives
 under ``utilities/`` rather than inside a component because its callers
 (``components/sed/make_bc.py``, ``models/NextGen/bc_tables.py`` and
 ``models/MIST/eep_grid.py``) sit in different trees and a cross-component
@@ -621,6 +623,8 @@ def fetch_assets(
         md5 must come from the Zenodo record's own API
         (``https://zenodo.org/api/records/<id>``); they pin the content, so a
         re-uploaded or truncated file is caught rather than silently used.
+        For a Zenodo asset, build it with ``zenodo_assets.assets(<record>)``
+        rather than writing the pins out by hand.
     dest_dir
         Destination directory -- unchanged by the shared cache, which sits
         behind this function and only changes where the bytes come from.
