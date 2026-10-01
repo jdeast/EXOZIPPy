@@ -42,6 +42,11 @@ at creation) degrades to newest-first rather than to arbitrary order.
 
 Concurrency
 -----------
+For the test suite's own cache, see "Per-RUN compiledirs" below (review
+2.13.5): every run compiles in a private tree, and the one shared tree is
+touched only under ``base/.lock``, so the assumption in the next paragraph
+holds there by construction.
+
 This prunes without taking PyTensor's compile lock, so it assumes no other
 process is walking the same compiledir at the same time. The test suite
 calls it from ``pytest_configure`` on the xdist CONTROLLER, before any
@@ -59,10 +64,23 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import secrets
 import shutil
+import socket
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    # No flock: the per-run layout below cannot lock the shared tree, so the
+    # root conftest leaves the suite's compiledir unmanaged there (see
+    # docs/testing-cache.md). Nothing else in this module needs it.
+    fcntl = None
 
 # PyTensor names a compiled module "<something>.so" (or ".pyd" on Windows);
 # see cmodule.module_name_from_dir, which this mirrors. An entry carrying a
@@ -619,6 +637,451 @@ def summarize_tree(
     return head + " (" + detail + ")"
 
 
+# ---------------------------------------------------------------------------
+# Per-RUN compiledirs: two concurrent suites never share a live tree
+# ---------------------------------------------------------------------------
+# Review 2.13.5.  The layout above gave every xdist worker ``base/gwN`` -- the
+# worker id and nothing else -- so two suites started on one machine against
+# one shared base (the whole point of sharing it: a fresh worktree starts
+# warm) both put their gw0 on ``base/gw0``.  Each controller then pruned the
+# tree at startup, and the prune treats an entry with no ``key.pkl`` as broken
+# -- which is exactly what an entry the OTHER suite is compiling right now
+# looks like, because PyTensor writes ``key.pkl`` last.  So each suite
+# deleted the other's in-flight compiles, and the victim failed three ways,
+# all naming a ``compiledir_*/tmp...`` path: the link step ("cannot open
+# output file"), the import of the .so ("dlimport"), and the import of the
+# tmp module itself (``ModuleNotFoundError: No module named 'tmp...'``).
+# The sweep's own docstring stated the precondition the layout broke: "only
+# safe on a base_compiledir owned by one purpose".
+#
+# The layout that replaces it:
+#
+#     base/shared/compiledir_<platform>/          <- the warm tree; NO process
+#                                                    ever compiles in it
+#     base/runs/<token>/compiledir_<platform>/    <- a -n0 run's private tree
+#     base/runs/<token>/gwN/compiledir_<platform>/ <- worker N of that run
+#     base/runs/<token>/alive.lock                <- flock'd for the run's life
+#     base/.lock                                  <- guards base/shared
+#
+# A run seeds its private trees from the shared one at startup (hard links,
+# key.pkl copied, exactly as above), compiles only into its own trees, and at
+# exit MOVES the entries it created into the shared tree.  Every touch of the
+# shared tree happens under ``base/.lock``: seeding under a SHARED flock,
+# promotion, pruning and the platform sweep under an EXCLUSIVE one.
+#
+# Why that makes the prune safe even while other runs are live, which is a
+# stronger property than "prune only when alone": no live PyTensor process
+# ever opens the shared tree.  A run's .so files are hard links, so deleting
+# the shared name leaves the run's own link -- the inode -- intact, and its
+# key.pkl is a private copy.  The only readers of the shared tree are other
+# runs' seeding passes, and those hold the shared lock.  Requiring "no other
+# live run" on top would only starve the budget on a busy box.
+#
+# Why promotion is atomic per entry: it is one ``os.rename`` of the entry
+# DIRECTORY, on one filesystem by construction (both live under base), so the
+# shared tree holds either the whole entry or nothing.  It runs after every
+# worker has exited, and it moves only entries whose ``key.pkl`` is present
+# and ends in pickle's STOP opcode -- PyTensor writes key.pkl after the .so is
+# built and imported, so a key.pkl is the commit marker, and the STOP check
+# rejects one truncated by a worker killed mid-write (Ctrl-C).
+#
+# Liveness, for reaping the run directory a crashed run left behind: the
+# owner holds an exclusive flock on ``alive.lock`` for its whole life, and the
+# kernel drops it when the process dies however it dies.  So "can I take that
+# lock?" is a liveness test that survives PID reuse.  The token records host
+# and pid as well, and a directory whose host is not this one is NEVER reaped:
+# on a base shared over NFS a remote run's liveness cannot be checked from
+# here.
+_SHARED_DIR = "shared"
+_RUNS_DIR = "runs"
+_BASE_LOCK = ".lock"
+_ALIVE_LOCK = "alive.lock"
+# A run directory is created under this prefix and renamed into place once
+# its alive.lock is held, so no reaper ever sees a run directory whose owner
+# has not yet locked it.
+_CREATING_PREFIX = "."
+# pickle's STOP opcode: the last byte of every complete pickle, any protocol.
+_PICKLE_STOP = b"."
+
+
+def shared_compiledir(base: Path, platform_name: str) -> Path:
+    """The shared warm tree for this platform under the suite's base."""
+    return base / _SHARED_DIR / platform_name
+
+
+def new_run_token(host: str | None = None, pid: int | None = None) -> str:
+    """``<random>-<pid>-<host>``: unique per run, and parseable for liveness.
+
+    Host LAST, because a hostname may itself contain ``-``; the random part
+    is hex and the pid is digits, so a two-way split from the left is exact.
+    """
+    host = socket.gethostname() if host is None else host
+    pid = os.getpid() if pid is None else pid
+    return f"{secrets.token_hex(4)}-{pid}-{host}"
+
+
+def parse_run_token(name: str) -> tuple[int, str]:
+    """``(pid, host)`` from a run directory name. Raises on anything else.
+
+    Raising, not skipping: ``base/runs`` is written only by this module, so a
+    name it cannot parse is something else's directory sitting where the
+    suite reaps, and guessing whether it may be deleted is the wrong call.
+    """
+    parts = name.lstrip(_CREATING_PREFIX).split("-", 2)
+    if len(parts) != 3 or not parts[1].isdigit() or not parts[2]:
+        raise ValueError(
+            f"{name!r} under the suite's runs/ directory is not a run "
+            "directory this suite created (expected <hex>-<pid>-<host>); "
+            "remove it by hand"
+        )
+    return int(parts[1]), parts[2]
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def run_state(run_dir: Path, host: str | None = None) -> str:
+    """``"live"``, ``"dead"`` or ``"remote"`` for one run directory."""
+    host = socket.gethostname() if host is None else host
+    pid, owner_host = parse_run_token(run_dir.name)
+    if owner_host != host:
+        return "remote"
+    if run_dir.name.startswith(_CREATING_PREFIX):
+        # Its owner has not locked alive.lock yet (or died before it could),
+        # so the pid is the only evidence there is.
+        return "live" if _pid_alive(pid) else "dead"
+    try:
+        fd = os.open(run_dir / _ALIVE_LOCK, os.O_RDWR)
+    except FileNotFoundError as exc:
+        # create_run_dir locks alive.lock BEFORE renaming the directory into
+        # place, so a published run directory always has one.
+        raise RuntimeError(
+            f"run directory {run_dir} has no {_ALIVE_LOCK}; it was not made "
+            "by create_run_dir -- remove it by hand"
+        ) from exc
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return "live"
+    finally:
+        os.close(fd)
+    return "dead"
+
+
+@dataclass
+class RunDir:
+    """One suite run's private compiledir root, alive while ``alive_fd`` is."""
+
+    path: Path
+    alive_fd: int
+
+    def trees(self, platform_name: str) -> list[Path]:
+        """Every private compiledir this run could have written."""
+        trees = [self.path / platform_name]
+        trees += sorted(self.path.glob(f"gw*/{platform_name}"))
+        return trees
+
+    def close(self) -> None:
+        if self.alive_fd >= 0:
+            os.close(self.alive_fd)  # drops the flock
+            self.alive_fd = -1
+
+
+def create_run_dir(base: Path, token: str | None = None) -> RunDir:
+    """Create ``base/runs/<token>`` and hold its liveness lock.
+
+    Built under a dot-prefixed name and renamed into place only once
+    alive.lock is flock'd, so a concurrent reaper never sees a published run
+    directory it could mistake for a dead one.
+    """
+    token = new_run_token() if token is None else token
+    runs = base / _RUNS_DIR
+    runs.mkdir(parents=True, exist_ok=True)
+    creating = runs / (_CREATING_PREFIX + token)
+    final = runs / token
+    creating.mkdir()
+    fd = os.open(creating / _ALIVE_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.write(fd, f"{socket.gethostname()} {os.getpid()}\n".encode())
+    os.rename(creating, final)
+    return RunDir(final, fd)
+
+
+class BaseLock:
+    """``flock`` on ``base/.lock``, polled so a wait has a deadline.
+
+    ``acquire`` returns False rather than raising when the deadline passes:
+    every caller's response to contention is to SKIP its step (prune,
+    seed, promote), which is always the benign direction -- a run that does
+    not seed starts colder, a prune that does not run leaves the budget
+    unenforced once, a promotion that does not run loses one run's delta.
+    None of them can delete anything a live run needs.
+    """
+
+    def __init__(self, base: Path):
+        self.path = base / _BASE_LOCK
+        self.fd = -1
+
+    def acquire(
+        self, exclusive: bool, timeout: float, poll: float = 0.25
+    ) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(self.fd, mode | fcntl.LOCK_NB)
+                return True
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    self.release()
+                    return False
+                time.sleep(poll)
+
+    def release(self) -> None:
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
+
+@dataclass
+class ReapStats:
+    reaped: list[str] = field(default_factory=list)
+    live: list[str] = field(default_factory=list)
+    remote: list[str] = field(default_factory=list)
+
+
+def reap_dead_runs(
+    base: Path, keep: Path | None = None, host: str | None = None
+) -> ReapStats:
+    """Remove the run directories of runs that died without cleaning up.
+
+    Call with the EXCLUSIVE base lock held, so two reapers never race on one
+    directory.  ``keep`` is the caller's own run directory.
+    """
+    stats = ReapStats()
+    runs = base / _RUNS_DIR
+    if not runs.is_dir():
+        return stats
+    for run_dir in sorted(runs.iterdir()):
+        if keep is not None and run_dir == keep:
+            continue
+        state = run_state(run_dir, host=host)
+        if state == "dead":
+            _rmtree(run_dir)
+            stats.reaped.append(run_dir.name)
+        elif state == "live":
+            stats.live.append(run_dir.name)
+        else:
+            stats.remote.append(run_dir.name)
+    return stats
+
+
+def choose_run_seed_source(
+    base: Path, platform_name: str, cold_fraction: float = 0.25
+) -> Path | None:
+    """The tree a new run seeds from: the shared one, unless it is still cold.
+
+    The pre-2.13.5 trees (``base/compiledir_*`` and ``base/gwN/``) are read
+    as seed sources only while the shared tree holds less than
+    ``cold_fraction`` of the warmest of them -- i.e. on the first run after
+    the layout changed, or the first CI run restoring an old-layout cache.
+    That run promotes everything it seeded into the shared tree, and from
+    then on the shared tree wins.  Picking the warmest by raw count every
+    time would keep choosing a frozen legacy tree that sits a few entries
+    above the budget the shared tree is pruned to, and re-promote the same
+    evicted entries on every run.
+
+    The legacy trees are never pruned or deleted here: a checkout that
+    predates this layout may still be running its suite in them.
+    """
+    shared = shared_compiledir(base, platform_name)
+    shared_count = len(_entry_names(shared))
+    legacy = [base / platform_name]
+    legacy += [d for _, d in worker_compiledirs(base, base / platform_name)]
+    best, best_count = None, 0
+    for candidate in legacy:
+        count = len(_entry_names(candidate))
+        if count > best_count:
+            best, best_count = candidate, count
+    if shared_count and shared_count >= cold_fraction * best_count:
+        return shared
+    return best
+
+
+def seed_run(
+    run: RunDir, source: Path, platform_name: str, n_workers: int
+) -> SeedStats:
+    """Seed every private tree this run will use, in parallel.
+
+    One target per worker (``gw0``..``gw<n-1>``), or the run's own tree for a
+    -n0 run.  Threads, because each pass is a few thousand link/copy
+    syscalls and the GIL is released across them; measured on this box a
+    2036-entry seed is ~1.6 s against a warm page cache and ~30 s against a
+    cold one, and only the first pass pays the cold reads.
+    """
+    if n_workers > 0:
+        labels = [f"gw{i}" for i in range(n_workers)]
+        targets = [run.path / label / platform_name for label in labels]
+    else:
+        labels = ["run"]
+        targets = [run.path / platform_name]
+    stats = SeedStats()
+    with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+        results = list(pool.map(lambda t: seed_compiledir(source, t), targets))
+    for label, (entries, linked, copied, fallbacks) in zip(
+        labels, results, strict=True
+    ):
+        if linked + copied == 0:
+            stats.skipped_dirs.append(label)
+            continue
+        stats.seeded_dirs.append(label)
+        stats.entries += entries
+        stats.linked += linked
+        stats.copied += copied
+        stats.link_fallbacks += fallbacks
+    return stats
+
+
+def _entry_complete(entry: Path) -> bool:
+    """A cache entry PyTensor finished: a module, and a whole key.pkl."""
+    try:
+        files = os.listdir(entry)
+    except OSError:
+        return False
+    if "key.pkl" not in files or not _module_present(files):
+        return False
+    try:
+        with open(entry / "key.pkl", "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                return False
+            handle.seek(-1, os.SEEK_END)
+            return handle.read(1) == _PICKLE_STOP
+    except OSError:
+        return False
+
+
+@dataclass
+class PromoteStats:
+    promoted: int = 0
+    already_shared: int = 0
+    incomplete: int = 0
+
+    def summary(self, shared: Path) -> str:
+        return (
+            f"promoted {self.promoted} new compiledir entries into {shared} "
+            f"({self.already_shared} already there, {self.incomplete} "
+            "incomplete and dropped)"
+        )
+
+
+def promote_run(run: RunDir, shared: Path, platform_name: str) -> PromoteStats:
+    """Move every entry this run created into the shared tree.
+
+    Call with the EXCLUSIVE base lock held and after every process of the
+    run has stopped compiling.  An entry whose name the shared tree already
+    has was seeded from it (or promoted by a sibling worker of this run) and
+    is left behind to be deleted with the run directory.
+    """
+    stats = PromoteStats()
+    shared.mkdir(parents=True, exist_ok=True)
+    for tree in run.trees(platform_name):
+        for name in sorted(_entry_names(tree)):
+            target = shared / name
+            if target.exists():
+                stats.already_shared += 1
+                continue
+            entry = tree / name
+            if not _entry_complete(entry):
+                stats.incomplete += 1
+                continue
+            os.rename(entry, target)
+            stats.promoted += 1
+    return stats
+
+
+def remove_run_dir(run: RunDir) -> None:
+    """Delete a finished run's directory (its lock must already be closed)."""
+    if run.alive_fd >= 0:
+        raise RuntimeError(
+            f"refusing to delete {run.path} while this process still holds "
+            "its liveness lock"
+        )
+    _rmtree(run.path)
+
+
+def enforce_shared_budget(
+    base: Path, platform_name: str, max_entries: int, dry_run: bool = False
+) -> PruneStats:
+    """Bound the shared tree and sweep stranded platforms beside it.
+
+    Call with the EXCLUSIVE base lock held.  The sweep is safe here, unlike
+    on the legacy layout, because ``base/shared`` is owned by one purpose by
+    construction: nothing but this module writes in it, and nothing compiles
+    in it.
+    """
+    return enforce_budget(
+        base / _SHARED_DIR,
+        shared_compiledir(base, platform_name),
+        max_entries,
+        sweep_platforms=True,
+        dry_run=dry_run,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Naming the race when it fires anyway (review 2.13.5)
+# ---------------------------------------------------------------------------
+# All three recorded spellings -- "cannot open output file" at link time,
+# "dlimport" on the .so, ``ModuleNotFoundError: No module named 'tmp...'`` on
+# the module -- carry the deleted DIRECTORY and share no other wording, so the
+# match is on the path.
+RACE_SIGNATURE = re.compile(r"compiledir_[^\s/'\"]*/tmp")
+RACE_MESSAGE = (
+    "{n} failure(s)/error(s) name a compiledir_*/tmp path: the signature of "
+    "review 2.13.5, a PyTensor cache entry deleted under a live run (another "
+    "suite sharing this compiledir, or a pre-2.13.5 checkout running beside "
+    "this one). Triage by error class: compile/import errors on that path are "
+    "environmental; an assertion on a number still has to be explained."
+)
+
+
+def compiledir_race_hits(reports) -> list[str]:
+    """Node ids of the failed/errored reports that carry the race signature."""
+    return [
+        report.nodeid
+        for report in reports
+        if RACE_SIGNATURE.search(report.longreprtext)
+    ]
+
+
+def report_compiledir_race(terminalreporter) -> None:
+    """``pytest_terminal_summary`` body: one line when the race fired.
+
+    It only NAMES the failures -- no retry, no skip, no softening -- and it
+    repeats the triage rule because the rule is the point: of three failures
+    in one recorded run, two were this race and the third was a real
+    regression.
+    """
+    reports = []
+    for key in ("failed", "error"):
+        reports += terminalreporter.stats.get(key, [])
+    hits = compiledir_race_hits(reports)
+    if hits:
+        terminalreporter.write_line(
+            RACE_MESSAGE.format(n=len(hits)), yellow=True, bold=True
+        )
+
+
 def _resolve_compiledir(args: argparse.Namespace) -> tuple[Path, Path]:
     """Ask PyTensor where its compiledir is, unless told explicitly.
 
@@ -635,6 +1098,34 @@ def _resolve_compiledir(args: argparse.Namespace) -> tuple[Path, Path]:
     return Path(pytensor.config.base_compiledir), Path(
         pytensor.config.compiledir
     )
+
+
+def _main_suite_base(base: Path, max_entries: int, dry_run: bool) -> int:
+    import pytensor
+
+    platform_name = Path(pytensor.config.compiledir).name
+    prefix = "[dry run] " if dry_run else ""
+    lock = BaseLock(base)
+    if not lock.acquire(exclusive=True, timeout=120.0):
+        print(f"{base}/{_BASE_LOCK} is held by a running suite; nothing done")
+        return 1
+    try:
+        if dry_run:
+            reaped = ReapStats()
+        else:
+            reaped = reap_dead_runs(base)
+        stats = enforce_shared_budget(
+            base, platform_name, max_entries, dry_run=dry_run
+        )
+    finally:
+        lock.release()
+    shared = shared_compiledir(base, platform_name)
+    print(prefix + stats.summary(shared, max_entries))
+    print(
+        f"{prefix}runs: {len(reaped.reaped)} dead reaped, {len(reaped.live)} "
+        f"live, {len(reaped.remote)} on other hosts (never touched)"
+    )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -680,11 +1171,27 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--suite-base",
+        help=(
+            "the test suite's compiledir BASE (EXOZIPPY_TEST_COMPILEDIR, "
+            "default ~/.pytensor-pytest). Under its .lock, reap dead runs' "
+            "directories, prune base/shared to --max-entries and sweep "
+            "stranded platform trees inside it -- what every suite run does "
+            "at startup (review 2.13.5). Ignores --compiledir, "
+            "--include-worker-dirs and --sweep-other-platforms."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="report what would be removed, remove nothing",
     )
     args = parser.parse_args(argv)
+
+    if args.suite_base:
+        return _main_suite_base(
+            Path(args.suite_base).expanduser(), args.max_entries, args.dry_run
+        )
 
     base, compiledir = _resolve_compiledir(args)
     prefix = "[dry run] " if args.dry_run else ""

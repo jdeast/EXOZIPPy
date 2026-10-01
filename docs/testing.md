@@ -322,7 +322,19 @@ Two rejected alternatives, so they are not re-proposed:
 
 Knobs: `EXOZIPPY_VENV_PYTHON` names the interpreter explicitly and skips the poetry
 lookup (for a conda or hand-built environment, or CI); `EXOZIPPY_PREPUSH_DRYRUN=1`
-prints the resolution and exits without running the suite.
+prints the resolution and exits without running the suite; `EXOZIPPY_PREPUSH_NOWAIT=1`
+skips the wait described next.
+
+**One pre-push suite at a time per machine.** The hook takes an `flock` on
+`/tmp/exozippy-prepush-<uid>.lock` before running pytest, so a second push on the same
+machine WAITS -- printing a line every minute, never failing -- until the first suite
+finishes. That is throughput, not correctness: two full suites at once measured 37
+minutes against 8 for one. Correctness no longer depends on it, because since review
+2.13.5 every pytest run compiles in its own directory (`docs/testing-cache.md`,
+"Concurrent suites"), so a targeted `pytest` run beside a pre-push suite is safe too.
+If a run nonetheless fails on a `compiledir_*/tmp...` path, the terminal summary says so
+in one line: triage by error class -- compile/import errors on that path are
+environmental, an assertion on a number still has to be explained.
 
 Two properties of the hook that this did **not** change, and that still bite:
 

@@ -42,7 +42,8 @@
 # forwarded to pytest. Set EXOZIPPY_PREPUSH_DRYRUN=1 to print what it resolved
 # and exit without running the suite (this is what tests/test_pre_push_hook.py
 # exercises). Set EXOZIPPY_VENV_PYTHON to name the interpreter explicitly and
-# skip the poetry lookup.
+# skip the poetry lookup. Set EXOZIPPY_PREPUSH_NOWAIT=1 to skip waiting for
+# another pre-push suite on this machine (see the end of this script).
 
 set -euo pipefail
 
@@ -112,6 +113,37 @@ fi
 if [ -n "${EXOZIPPY_PREPUSH_DRYRUN:-}" ]; then
     echo "pre-push: dry run, not running the suite"
     exit 0
+fi
+
+# ONE PRE-PUSH SUITE AT A TIME PER MACHINE. Not for correctness -- since
+# review 2.13.5 every run compiles in its own directory, so two concurrent
+# suites no longer corrupt each other -- but for throughput: two full suites
+# at once took 37 minutes against 8 for one, on a box that runs one fine.
+# So a second push WAITS (with a line every minute, never a failure) for the
+# first one's suite to finish. The lock is a file in /tmp, i.e. per MACHINE
+# and per user: a home directory shared over NFS would serialize pushes on
+# different machines, which buys nothing. flock(1) is util-linux; where it
+# is absent (stock macOS) the hook says so and runs unserialized.
+# EXOZIPPY_PREPUSH_NOWAIT=1 skips the wait.
+if [ -z "${EXOZIPPY_PREPUSH_NOWAIT:-}" ]; then
+    if command -v flock >/dev/null 2>&1; then
+        lockfile="/tmp/exozippy-prepush-$(id -u).lock"
+        # fd 9 stays open across the exec below, so the lock is held for the
+        # life of the suite and released by the kernel however it ends.
+        exec 9>>"$lockfile"
+        waited=0
+        until flock -n 9; do
+            if [ $((waited % 60)) -eq 0 ]; then
+                echo "pre-push: another pre-push suite holds $lockfile;" \
+                    "waiting (${waited} s so far; EXOZIPPY_PREPUSH_NOWAIT=1 skips)"
+            fi
+            sleep 5
+            waited=$((waited + 5))
+        done
+    else
+        echo "pre-push: no flock(1) here, so this suite is not serialized" \
+            "against other pre-push suites on this machine"
+    fi
 fi
 
 cd "$root"

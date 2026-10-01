@@ -54,22 +54,24 @@ Never `rm -rf` the `tmp*/` subdirectories individually thinking they are
 scratch; they **are** the cached modules. Deleting the whole compiledir is
 safe but costs a full cold recompile (see the numbers below).
 
-To reclaim space by hand:
+To reclaim space by hand on the suite's own cache:
 
 ```bash
 # What would go, without touching anything.
 poetry run python scripts/pytensor_cache_budget.py \
-    --max-entries 2000 --include-worker-dirs --dry-run
+    --suite-base ~/.pytensor-pytest --max-entries 2000 --dry-run
 
-# Do it. Defaults to whatever pytensor.config resolves, so PYTENSOR_FLAGS
-# is honoured; --compiledir names one explicitly.
+# Do it: reap dead runs' directories, bound base/shared, sweep stranded
+# platform trees -- under the same base/.lock the suite takes.
 poetry run python scripts/pytensor_cache_budget.py \
-    --max-entries 2000 --include-worker-dirs
+    --suite-base ~/.pytensor-pytest --max-entries 2000
 ```
 
-`--include-worker-dirs` is not optional housekeeping on the suite's own
-cache: without it the command reports success having pruned the one
-directory the workers never read. `--max-entries` is per compiledir.
+`--suite-base` is the mode for the suite's cache since review 2.13.5 (the
+per-run layout, below). The older `--include-worker-dirs` mode still prunes
+the pre-2.13.5 `gw*/` trees, and is for any other compiledir; without it that
+command reports success having pruned the one directory the workers never
+read. `--max-entries` is per compiledir.
 
 It evicts least-recently-used on the `atime` of `key.pkl` -- the same stat
 field PyTensor's own `last_access_time()` reads -- and also removes broken
@@ -95,8 +97,13 @@ ahead of the import.
    lock, and is the only moment at which the per-worker trees below can be
    pruned at all (a worker cannot prune the ModuleCache it is holding).
 
-   "Every compiledir in the tree", plural, is the correction. Point 4 below
-   gives each xdist worker its own base, so the layout is
+   **Superseded in its layout by point 6** (review 2.13.5): the budget now
+   bounds the one shared tree, `base/shared/compiledir_<platform>`, which
+   every run seeds from. The history below is kept because it is why the
+   budget's denominator is one compiledir.
+
+   "Every compiledir in the tree", plural, was the correction. Point 4 below
+   gave each xdist worker its own base, so the layout WAS
 
    ```
    ~/.pytensor-pytest/compiledir_<platform>/      <- -n0 runs only
@@ -124,7 +131,8 @@ ahead of the import.
    long the walk takes it can no longer fail a test. That is the actual fix
    for the red test; bounding the count is what makes it fast.
 4. **Each xdist worker gets its OWN `base_compiledir`**, `gw0/`, `gw1/`, ...
-   one level below the base, keyed off `PYTEST_XDIST_WORKER`.
+   keyed off `PYTEST_XDIST_WORKER` -- since point 6, one level below the
+   RUN's directory rather than below the base.
 
    PyTensor serializes ALL compilation behind one lock per compiledir, and
    `compile__timeout=600` is exactly pytest-timeout's own ceiling -- so on a
@@ -134,8 +142,9 @@ ahead of the import.
    paid in parallel instead of in a queue -- and duplicated DISK, which is
    why the budget in point 2 is per compiledir and why it has to be walked
    over these directories explicitly. It was not, until 2026-08-25.
-5. **A missing worker compiledir is SEEDED from the warmest one**, on the
-   controller in `pytest_configure`, right after the prune.
+5. **A worker compiledir is SEEDED from a warm one**, on the controller in
+   `pytest_configure`, right after the prune. Since point 6 every run's trees
+   start empty, so this happens on EVERY run, from `base/shared`.
 
    How redundant these directories are is the point. Measured: each of
    `gw0`-`gw5` held **1455-1562** entries against the **1564** a whole cold
@@ -173,7 +182,156 @@ ahead of the import.
      deliberately, because there it needs an upper bound.
 
    Do not try hard-linking `key.pkl` to save the last 1.3%: one worker's
-   append would land in every other worker's cache at once.
+   append would land in every other worker's cache at once. (The same holds
+   for a hand-made `cp -al` of the whole cache: it links `key.pkl` too, so a
+   run against the copy can rewrite the original's.)
+6. **Every run compiles in its OWN directory**, `base/runs/<token>/`, and
+   only promotes into the shared tree at exit. See the next section.
+
+## Concurrent suites: one private tree per run (review 2.13.5)
+
+### The race this replaced
+
+Points 4 and 5 suffixed the worker id and nothing else, so two suites
+started on one machine against the shared base -- an agent's targeted
+`pytest -n 3` beside a pre-push full suite, two pushes a minute apart --
+BOTH put their `gw0` on `base/gw0`. Each controller pruned the tree at
+startup, and the prune removes an entry with no `key.pkl` as broken, which is
+exactly what an entry the OTHER suite is still compiling looks like: PyTensor
+writes `key.pkl` last. So each suite deleted the other's in-flight compiles.
+The sweep's own docstring stated the precondition the layout broke -- "only
+safe on a base_compiledir owned by one purpose" -- and the two decisions
+(share the cache; sweep it as if owned) were each right and made in
+different PRs.
+
+The victim fails on a `compiledir_*/tmp...` path, in at least four
+spellings: the link step (`/bin/ld: cannot open output file`), the import of
+the `.so` (`dlimport`), the import of the module
+(`ModuleNotFoundError: No module named 'tmp...'`, `cmodule.py:335`), and
+`FileNotFoundError: .../tmp.../__init__.py` (seen in this item's
+reproduction). It fired at least five times in September 2026, the last as
+26 failed + 11 errors.
+
+Reproduced on master with two `pytest -n 3` runs of `test_vcve.py
+test_orbit_crossing.py test_node_degeneracy.py`, 30 s apart, on one base
+copied from the warm cache, with `EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES=1500`
+so that the startup prune scans (as it does whenever a tree is over budget):
+two tries, two reproductions -- 1 failed + 4 errors (`FileNotFoundError` on
+`gw0/` and `gw2/` `compiledir_*/tmp.../__init__.py`), then 1 failed
+(`/bin/ld: cannot open output file .../gw0/compiledir_*/tmp...`). The same
+experiment on the per-run layout: 108 + 108 passed, `runs/` empty afterwards.
+
+### The layout
+
+```
+base/shared/compiledir_<platform>/            <- the warm tree; nothing compiles here
+base/runs/<token>/compiledir_<platform>/      <- a -n0 run's private tree
+base/runs/<token>/gwN/compiledir_<platform>/  <- worker N of that run
+base/runs/<token>/alive.lock                  <- flock'd by the run for its whole life
+base/.lock                                    <- guards base/shared
+```
+
+- The root conftest creates the run directory at IMPORT, in the xdist
+  controller (or the single `-n0` process), and hands it to the workers in
+  `_EXOZIPPY_TEST_RUN_DIR`. A worker that finds that variable unset raises:
+  its controller did not run the root conftest, and guessing a layout is how
+  the race would come back.
+- `pytest_configure` (controller): under an EXCLUSIVE `flock` on
+  `base/.lock`, reap dead runs' directories and prune `base/shared` to the
+  budget (plus the platform sweep inside `base/shared`); then, under a SHARED
+  flock, seed every tree this run will use from `base/shared` -- hard links,
+  `key.pkl` copied, one thread per tree.
+- At exit -- an `atexit` handler registered at import, i.e. before
+  pytensor's own, so it runs AFTER pytensor's ModuleCache exit hook and
+  after xdist has stopped the workers -- under the EXCLUSIVE flock,
+  `os.rename` each entry the run created into `base/shared`, then delete the
+  run directory.
+
+### Why it is safe, point by point
+
+- **A prune can never reach a live run.** No live PyTensor process ever
+  opens `base/shared`; a run's `.so` files are hard links (deleting the
+  shared name leaves the inode the run holds) and its `key.pkl` is a private
+  copy. The only readers of the shared tree are seeding passes, and they hold
+  the shared lock. That is a stronger property than the "prune only when no
+  other run is live" first proposed for this item, and it is why the prune
+  does NOT wait for other runs to finish: on a box that routinely has a suite
+  live, that rule would starve the budget.
+- **Promotion is atomic per entry.** It is one `rename` of the entry
+  DIRECTORY on one filesystem (both live under the base), so the shared tree
+  holds the whole entry or none of it. It moves only entries whose `key.pkl`
+  exists and ends in pickle's STOP opcode: PyTensor writes `key.pkl` after the
+  `.so` is built and imported, so `key.pkl` is the commit marker, and the STOP
+  check rejects one truncated by a worker killed mid-write. An entry whose
+  name the shared tree already has was seeded from it and is left to be
+  deleted. Two runs compiling the same graph promote two entries with one
+  module hash; PyTensor's `refresh()` uses the first and ignores the second,
+  and the LRU prune retires it.
+- **Contention skips; it never waits forever and never proceeds unlocked.**
+  The prune waits 120 s for the exclusive lock, seeding 600 s for the shared
+  one, promotion 600 s; past that the step is SKIPPED with a line saying so
+  (the budget unenforced once, a cold start, one run's delta not promoted).
+  All three are the benign direction.
+- **Liveness survives PID reuse.** The run holds an exclusive flock on its
+  `alive.lock`, which the kernel drops when the process dies however it
+  dies, so "can I take that lock?" is the test. A run directory is built
+  under a dot-prefixed name and renamed into place once that lock is held,
+  so a reaper never mistakes a starting run for a dead one; a dot-named
+  directory is judged by its pid. A directory under `runs/` whose name is not
+  a run token raises, naming it: nothing but this code writes there.
+- **A run on another host is never reaped.** The token records the host;
+  on a base shared over NFS a remote run's liveness cannot be checked from
+  here, so its directory is left alone (delete it by hand if that host is
+  gone). Sharing a base across hosts at all relies on NFS propagating
+  `flock`; the cluster jobs use per-job local scratch instead, which is the
+  recommendation.
+
+### What it costs
+
+- **Seeding on every run.** Measured on this box (`/pool/radish1`, ext4) for
+  one 2036-entry tree: **~1.6 s** with the page cache warm, **~30 s** cold.
+  The cold part is reading the 2036 `key.pkl` files, which the old layout's
+  startup walk paid anyway on each worker's own tree (the walk now reads the
+  fresh, hot copies). A `cp -al` of the same cold tree, which reads no data,
+  took 10 s. The trees are seeded in parallel, so only one pays the cold
+  reads. In a whole run: seeding three 2000-entry worker trees took
+  **3.6-4.1 s**, and the warm `pytest -n 3` subset above took **113.3-114.2 s**
+  wall on the per-run layout against **113.6-115.8 s** on the old one
+  (2026-09-30, load ~9).
+- **Inodes, for the length of a run.** Each seeded entry costs ~4 inodes
+  (directory, `key.pkl` copy, `__pycache__/`, `.pyc`; the hard links are
+  free) per worker, removed at exit, or by the next run's reap after a crash.
+  On an inode-quota'd home that is the per-worker cost the old layout paid
+  permanently, now paid only while a run is live.
+- **The legacy trees are left alone.** A checkout that predates this layout
+  still compiles in `base/gwN` and `base/compiledir_*`, so nothing here
+  prunes or deletes them; they serve as the seed source only while
+  `base/shared` is cold (`choose_run_seed_source`), i.e. on the first run
+  after the change. Once no pre-2.13.5 checkout runs the suite on a machine,
+  delete them by hand:
+
+  ```bash
+  find ~/.pytensor-pytest -mindepth 1 -maxdepth 1 \
+      \( -name 'gw*' -o -name 'compiledir_*' \) -exec rm -rf {} +
+  ```
+
+### When it is OFF
+
+The run is UNMANAGED -- the old layout, no seeding, no budget, and the race
+possible again -- in two cases, each announced by a `RuntimeWarning`:
+`PYTENSOR_FLAGS` names a `base_compiledir` itself (that base wins and the
+suite does not presume to manage it), or the platform has no `fcntl.flock`
+(Windows, which is not a supported test platform). `EXOZIPPY_TEST_COMPILEDIR=`
+(empty) opts out of all of it, as before.
+
+### If it fires anyway
+
+The root conftest's `pytest_terminal_summary` scans the failed and errored
+reports for a `compiledir_*/tmp` path and prints ONE line naming this item and
+the triage rule. It does not retry or soften anything. The triage rule is the
+point, learned when one run had three failures and only two were this race:
+**compile and import errors on that path are environmental; an assertion on a
+number still has to be explained.**
 
 ### The cache is dense in INODES, not in bytes
 
@@ -200,7 +358,8 @@ you see that error, look at the `files` column and not the `space` column.
 Seeding (point 5) helps here but does not solve it: hard links share the `.so`
 and `.cpp` and add no inodes, but each seeded entry still needs its own
 directory, `key.pkl`, `__pycache__/` and `.pyc`. Roughly 4 inodes instead of 6
--- a third off, not a fix.
+-- a third off, not a fix. Since point 6 those per-worker copies exist only
+while a run is live; the permanent cost is the one shared tree.
 
 **The fix is to put the cache on a filesystem that does not charge you for
 inodes**, which is a per-machine setting rather than anything this repository
@@ -220,22 +379,22 @@ Point 1 says the cache lives under `$HOME` so every worktree shares one warm
 copy. A local scratch path satisfies that too -- the thing being avoided was an
 IN-REPO path, which would make every new worktree pay a full cold compile.
 
-To reclaim inodes in a hurry, delete whole worker directories rather than
-hunting entries; the seeding rebuilds them from whichever one you keep:
-
-```bash
-# Keep gw0 and gw1 as seed sources, drop the rest.
-find ~/.pytensor-pytest -mindepth 1 -maxdepth 1 -name 'gw*' \
-    ! -name 'gw0' ! -name 'gw1' -exec rm -rf {} +
-```
+To reclaim inodes in a hurry, delete the pre-2.13.5 trees (`gw*` and the
+top-level `compiledir_*`; the command is under point 6's "What it costs")
+once nothing on the machine still runs an older checkout, and let
+`--suite-base` above reap any dead run directories. The shared tree is the
+only one a current run needs.
 
 Escape hatches:
 
 | variable | effect |
 |---|---|
-| `EXOZIPPY_TEST_COMPILEDIR=/some/path` | put the suite's cache somewhere else |
+| `EXOZIPPY_TEST_COMPILEDIR=/some/path` | put the suite's cache somewhere else (the base: `shared/`, `runs/` and `.lock` live under it) |
 | `EXOZIPPY_TEST_COMPILEDIR=` (empty) | opt out; use whatever PyTensor would pick |
-| `EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES=N` | change the per-compiledir budget (CI uses 1800) |
+| `EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES=N` | change the budget of the shared tree (CI uses 1800) |
+| `PYTENSOR_FLAGS=base_compiledir=...` | that base wins, and the run is UNMANAGED (warned): no run dir, seeding or budget |
+| `_EXOZIPPY_TEST_RUN_DIR` | INTERNAL: the controller's run directory, handed to its xdist workers; never set it |
+| `EXOZIPPY_PREPUSH_NOWAIT=1` | the pre-push hook does not wait for another pre-push suite on this machine |
 
 The prune itself is guarded by a cheap pre-check, and that is load-bearing
 rather than an optimization: its per-entry pass opens a directory and stats
@@ -383,9 +542,15 @@ sum `sizeInBytes`; anything approaching 10 GB means eviction is live.
 
 Two changes that only make sense together.
 
-**The saved artifact holds ONE worker tree.** Before saving, the job deletes
-every `gw*` but `gw0` **and the controller's own `compiledir_*`**, so the
-archive no longer multiplies by the worker count. The next run reconstitutes
+**The saved artifact holds ONE tree** -- since review 2.13.5, `base/shared`,
+which the run has just promoted its new entries into. Before saving, the job
+runs `pytensor_cache_budget.py --suite-base` (reap, prune to 1800, sweep) and
+deletes everything else under the base: `runs/`, and any pre-2.13.5 `gw*` or
+top-level `compiledir_*` restored from an old-layout cache, which the first
+run after the change seeds from and promotes into `shared/`. Before 2.13.5
+the same step kept `gw0` and deleted every other `gw*` **and the controller's
+own `compiledir_*`**, so the archive no longer multiplied by the worker
+count. The next run reconstitutes
 the rest by seeding (policy point 5), which is why this is safe rather than
 merely smaller. Without it the cache could not absorb more parallelism: 4
 workers x 2 shards would have wanted ~12 GB against the 10 GB repository
