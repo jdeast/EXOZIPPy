@@ -36,8 +36,6 @@ def _triple_lens_config(lc):
             {
                 "finite_source": False,
                 "t0_par": T0,
-                # Never shell out to MMEXOFAST from a unit test.
-                "mmexofast": False,
             }
         ],
         "lens": [
@@ -282,9 +280,7 @@ def _mixed_config(lc, companions):
 
     cfg = {
         "star": stars,
-        "mulensevent": [
-            {"finite_source": False, "t0_par": T0, "mmexofast": False}
-        ],
+        "mulensevent": [{"finite_source": False, "t0_par": T0}],
         "lens": lens_entries,
         "source": [{"body": "star.Source"}],
         "mulensinstrument": [{"name": "OGLE", "file": lc}],

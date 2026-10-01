@@ -1,0 +1,22 @@
+# Seeds for DC2018 event 008, written by examples/DC2018/dc18_seed.py
+# (PSPL peak fit, chi2 = 40116.0).  s/q/alpha/rho are generic starts, NOT
+# fitted.  dc18_sweep_config.py merges these into the params file it
+# writes.  Converted 2026-10-01 from the DC2018_008_seed.json this script
+# used to write (same numbers, bit for bit).
+
+source.Source.t_0:
+  initval: [2458729.043212867, 2458729.043212867]
+source.Source.u_0:
+  initval: [1.471711404371654, 1.471711404371654]
+mulensevent.0.t_E:
+  initval: [18.552936250600226, 18.552936250600226]
+source.Source.rho:
+  initval: [0.001, 0.001]
+lens.Companion.log_s:
+  initval: [0.0, 0.0]
+lens.Companion.alpha:
+  initval: [0.0, 90.0]
+lens.Companion.q:
+  initval: [0.001, 0.001]
+mulensinstrument.Roman_W149.err_scale: {initval: 1.0}
+mulensinstrument.Roman_Z087.err_scale: {initval: 1.0}

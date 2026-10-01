@@ -966,7 +966,8 @@ def discover_hot_modes(
     # radius (a single seed is unconstrained by design), and a candidate
     # from a suppressed basin defects to the dominant one during its own
     # polish -- the mirror, 779 nats below the main mode, walked out exactly
-    # as the MMEXOFAST seeds once did, and dedup then erased the discovery.
+    # as the DC2018-128 solution seeds once did, and dedup then erased the
+    # discovery.
     # As one batch, polish_seed_starts' multi-seed trust region cages each
     # candidate within half the distance to its nearest neighbour, which is
     # the same contract multi-seed sampling starts get.

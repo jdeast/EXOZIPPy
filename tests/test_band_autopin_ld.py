@@ -45,15 +45,13 @@ def _write_pspl_lc(path, n=60):
 def _mulens_config(lc, bands=None, mulens_band="I", finite_source=False):
     config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        # Event-level keys (finite_source, t0_par, use_op, mmexofast) live on
+        # Event-level keys (finite_source, t0_par, use_op) live on
         # `mulensevent:`; `lens:`/`source:` name one physical body each.
         "mulensevent": [
             {
                 "finite_source": finite_source,
                 "t0_par": T0,
                 "use_op": False,
-                # Never shell out to MMEXOFAST from a unit test.
-                "mmexofast": False,
             }
         ],
         "lens": [{"body": "star.Lens"}],

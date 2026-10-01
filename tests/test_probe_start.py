@@ -172,7 +172,7 @@ def test_an_engine_failure_raises_naming_the_path(monkeypatch):
     When starts are probed,
     Then the failure RAISES naming the probed path, and the state is still
       rolled back -- never swallowed as "not derivable" (review 2.1.17; the
-      old probe_derivable did exactly that, flipping the MMEXOFAST trigger).
+      old probe_derivable did exactly that, flipping a seeder's trigger).
     """
     # Arrange
     cm = _cm({"star.A.mass": {"initval": 0.92}})

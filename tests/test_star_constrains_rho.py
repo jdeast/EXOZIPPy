@@ -34,7 +34,7 @@ _WORKDIR = None
 def _kmt_workdir():
     """A private copy of the example dir for THIS test module.
 
-    Six xdist workers otherwise read and write (fitresults, mmexofast
+    Six xdist workers otherwise read and write (fitresults
     cache, whitening state) one shared examples/KMT-2019-BLG-1806
     concurrently -- the ezsuite-15362719 interference cluster.
     """
@@ -180,7 +180,7 @@ def test_soft_tie_composes_with_link_machinery():
     on rho - rho_pred, and the start logp is finite -- the severed pair plus
     the existing link machinery IS the soft (dual-constraint) tie, no new
     code.  The initval stays NUMERIC: an initval link would replace the rho
-    seed and can trip the MMEXOFAST sufficiency probe into an auto-run.
+    seed.
     """
     system, model = _load_kmt(
         sever=True,

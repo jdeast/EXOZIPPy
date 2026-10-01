@@ -43,7 +43,6 @@ star:
 mulensevent:
   - finite_source: true
     t0_par: 2454917.52
-    mmexofast: false
 
 lens:
   - body: star.L1
@@ -62,9 +61,10 @@ source:
 # conventions.md C24's keplerian mode.  The light curve then measures
 # bigomega and sign(cos i), which the RVs cannot (see the orbit block).
 # Every trajectory parameter is seeded from the published solution, so
-# the relaxation engine can derive all of them and MMEXOFAST is not
-# needed.  It is also not WANTED: phot.dat is survey-only photometry
-# (see README) and the binary anomaly is under-sampled in it.
+# the relaxation engine can derive all of them and the peak finder does
+# not run.  A light-curve seed is not WANTED anyway: phot.dat is
+# survey-only photometry (see README) and the binary anomaly is
+# under-sampled in it.
 
 
 orbit:

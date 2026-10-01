@@ -189,7 +189,7 @@ def test_a_second_seed_set_registration_raises_naming_both_callers():
     cm = _real_cm()
     cm.add_seed_hints(
         [{"source.0.t_0": 2458554.8}, {"source.0.t_0": 2458554.9}],
-        source="MMEXOFAST (fits.json)",
+        source="seeder A (fits.json)",
     )
     with pytest.raises(ValueError) as exc:
         cm.add_seed_hints(
@@ -197,11 +197,11 @@ def test_a_second_seed_set_registration_raises_naming_both_callers():
             source="peak finder (mulensinstrument)",
         )
     msg = str(exc.value)
-    assert "MMEXOFAST (fits.json)" in msg
+    assert "seeder A (fits.json)" in msg
     assert "peak finder (mulensinstrument)" in msg
     # nothing was half-applied
     assert len(cm.seed_hint_sets) == 2
-    assert cm.seed_hint_source == "MMEXOFAST (fits.json)"
+    assert cm.seed_hint_source == "seeder A (fits.json)"
 
 
 def test_add_seed_hints_requires_a_source_label():
@@ -213,8 +213,8 @@ def test_add_seed_hints_requires_a_source_label():
 
 
 def test_add_seed_hints_replace_is_the_explicit_override():
-    """`replace=True` discards what is registered: the peak_find: true A/B
-    mode, which replaces MMEXOFAST's seeds on purpose."""
+    """`replace=True` discards what is registered: what `peak_find: true`
+    asks for when another seeder got there first."""
     cm = _real_cm()
     cm.add_seed_hints(
         [{"source.0.t_0": 2458554.8}, {"source.0.t_0": 2458554.9}],

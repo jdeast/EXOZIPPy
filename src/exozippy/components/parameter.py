@@ -2045,7 +2045,7 @@ class Parameter:
             # nothing said so.  `_user_constraint_fields` excludes `initval`
             # on the grounds that a start cannot move a posterior -- true of
             # an ACTIVE element, and precisely why the loss goes unnoticed
-            # here.  Measured on the mulensevent split: an MMEXOFAST seed set
+            # here.  Measured on the mulensevent split: a seed set
             # put log10(s) and alpha on the masked primary and produced no
             # diagnostic of any kind, while the design's stated mitigation
             # was "grep the run log for DROPPED".

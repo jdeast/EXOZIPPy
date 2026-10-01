@@ -37,7 +37,8 @@ they document exactly what produced the traces the 8.6.7 conclusions rest
 on -- and they are cheap to port when one is next needed:
 
   * event-shared keys (`finite_source`, `t0_par`, `fitmurel`, `fitpirel`,
-    `fitthetae`, `mmexofast`) move to a `mulensevent:` block;
+    `fitthetae`) move to a `mulensevent:` block (a `mmexofast:` key
+    is gone: run `../convert_mmexofast_json.py` on the ported config);
   * each lens body gets its own `lens: - body: star.X` entry, and
     `orbital_motion`/`orbit` go on the COMPANION's entry;
   * each source gets `source: - body: star.Y`, carrying `fitu0te` and

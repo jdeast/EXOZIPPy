@@ -62,8 +62,8 @@ mulensevent:
     t0_par: 2457933.5
     source_orbital_motion: keplerian
     source_orbit: "S"
-    mmexofast: false             # every start value is seeded from the
-                                 # published solution below
+    # every start value is seeded from the published solution, so the
+    # peak finder does not run
 
 galacticmodel:
   - name: "OB170114"

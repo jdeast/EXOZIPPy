@@ -738,7 +738,7 @@ def resolve_store_hot_chains(
     """Resolve ``store_hot_chains`` to a thinning factor (0 = off).
 
     Vocabulary, matching the rest of the sampler block ('auto' as in
-    `seed_polish`, `n_temps` and `mmexofast`): ``True``/'on' -> the default
+    `seed_polish` and `n_temps`): ``True``/'on' -> the default
     thinning, ``False``/None/'off' -> off, an int -> that thinning factor,
     and 'auto' (the default) -> decided by TOPOLOGY.
 

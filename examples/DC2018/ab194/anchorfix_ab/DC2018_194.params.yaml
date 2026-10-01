@@ -7,6 +7,7 @@ band.Z087.u1:
 mulensinstrument.Roman_W149.err_scale:
   lower: 0.5
   upper: 2.0
+  initval: 1.0
 mulensinstrument.Roman_W149.log_f_total:
   lower: -2.1222092000000004
   upper: 1.8777907999999996
@@ -19,6 +20,7 @@ mulensinstrument.Roman_W149.zeropoint:
 mulensinstrument.Roman_Z087.err_scale:
   lower: 0.5
   upper: 2.0
+  initval: 1.0
 mulensinstrument.Roman_Z087.log_f_total:
   lower: -3.3546268
   upper: 0.6453732000000001
@@ -36,9 +38,11 @@ sed.errscale:
 source.Source.t_0:
   lower: 2458346.505461
   upper: 2460059.241444
+  initval: [2459665.810178794, 2459665.810178794]
 source.Source.u_0:
   lower: -3.0
   upper: 3.0
+  initval: [0.9458918362192739, 0.9458918362192739]
 star.Lens.dec:
   initval: -27.937
   sigma: 0
@@ -57,3 +61,13 @@ star.Source.ra:
 star.Source.dec:
   initval: -27.937
   sigma: 0
+mulensevent.0.t_E:
+  initval: [10.142163188597143, 10.142163188597143]
+source.Source.rho:
+  initval: [0.001, 0.001]
+lens.Companion.log_s:
+  initval: [0.0, 0.0]
+lens.Companion.alpha:
+  initval: [0.0, 90.0]
+lens.Companion.q:
+  initval: [0.001, 0.001]

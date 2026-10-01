@@ -310,7 +310,7 @@ def test_validate_also_runs_without_chdir(kelt4_inputs, monkeypatch):
 def test_path_keys_are_resolved_and_keywords_are_left_alone(tmp_path):
     """
     Given a config mixing real relative paths with strings that merely share a
-      path key (`mmexofast: auto`, a `mask:` row-index list, an absolute path),
+      path key (a `mask:` row-index list, an absolute path),
     When _resolve_config_paths rewrites it against a workdir,
     Then only the strings that name something in that workdir are joined.
 
@@ -324,7 +324,7 @@ def test_path_keys_are_resolved_and_keywords_are_left_alone(tmp_path):
         "prefix": "fitresults/run",
         "rvinstrument": [
             {"file": "a.rv", "mask": [0, 1]},
-            {"file": "missing.rv", "mmexofast": "auto"},
+            {"file": "missing.rv"},
         ],
     }
 
@@ -335,9 +335,7 @@ def test_path_keys_are_resolved_and_keywords_are_left_alone(tmp_path):
     assert out["rvinstrument"][0]["file"] == str(tmp_path / "a.rv")
     assert out["rvinstrument"][0]["mask"] == [0, 1]
     assert out["rvinstrument"][1]["file"] == "missing.rv"
-    assert out["rvinstrument"][1]["mmexofast"] == "auto"
-    # prefix is an OUTPUT path (mulensinstrument hangs the MMEXOFAST cache off
-    # it during stage 1a), so it is joined without an existence probe.
+    # prefix is an OUTPUT path, so it is joined without an existence probe.
     assert out["prefix"] == str(tmp_path / "fitresults/run")
 
 

@@ -1091,10 +1091,10 @@ class ConfigManager:
         # points (list of {internal_path: internal_value} dicts) after
         # finalize_user_params runs the relaxation engine once per seed; it
         # stays None for the ordinary single-start case (K == 1).  seed_hint_sets
-        # is a per-seed observable channel that components (e.g. the MMEXOFAST
-        # loader) push into; it feeds the relaxation engine at PRECEDENCE_DERIVED_DATA
-        # -- MMEXOFAST is a (very fancy) derivation FROM THE DATA, not a user
-        # statement, so it sits in the same tier as any other data-driven hint
+        # is a per-seed observable channel that components (the microlensing
+        # peak finder) push into; it feeds the relaxation engine at
+        # PRECEDENCE_DERIVED_DATA -- a seeder is a derivation FROM THE DATA, not
+        # a user statement, so it sits in the same tier as any other data-driven hint
         # and every user entry outranks it.
         self.seed_resolved = None
         self.seed_hint_sets = []
@@ -1539,8 +1539,8 @@ class ConfigManager:
         (human-readable or index form) to a value in that parameter's user
         unit.  These feed the relaxation engine as one complete start point per
         seed (see finalize_user_params), at PRECEDENCE_DERIVED_DATA -- the same tier
-        as ``add_hint``'s default, because the seeders (MMEXOFAST, the built-in
-        peak finder) are derivations from the data, not user statements.
+        as ``add_hint``'s default, because a seeder (the built-in peak
+        finder) is a derivation from the data, not a user statement.
         Every user entry therefore outranks a seed.  Paths absent from a given
         seed fall back to the base (defaults/hints/user) solution for that
         seed.
@@ -1554,11 +1554,11 @@ class ConfigManager:
         the user cannot know.  If a real two-seeder case ever appears, the
         upgrade is to PAIR set k with set k, not to concatenate.
         ``replace=True`` is the explicit override: the existing sets are
-        discarded (the ``peak_find: true`` A/B mode, which replaces
-        MMEXOFAST on purpose).
+        discarded (``peak_find: true`` asks for it; with one seeder in the
+        tree no live call replaces anything).
 
-        `source` is a REQUIRED label for the caller (e.g. the MMEXOFAST JSON
-        path, ``"peak finder (mulensinstrument)"``); it is recorded so the
+        `source` is a REQUIRED label for the caller (e.g.
+        ``"peak finder (mulensinstrument)"``); it is recorded so the
         refusal can name who got there first.
         """
         if not source:
@@ -2829,7 +2829,7 @@ class ConfigManager:
 
         # --- MULTI-SEED SOLVE (P4) ---
         # Build the K per-seed override sets in their two provenance channels
-        # (user initval lists at PRECEDENCE_USER, component/MMEXOFAST seed hints at
+        # (user initval lists at PRECEDENCE_USER, component seed hints at
         # PRECEDENCE_DERIVED_DATA; both fall back to the shared base_flat for any
         # path they do not touch), then run the relaxation engine once per
         # seed inside this single prepare() call so every seed shares one symbol
@@ -2989,7 +2989,7 @@ class ConfigManager:
           1. User initval lists in params.yaml (`initval: [v0, v1, ...]`) --
              PRECEDENCE_USER, merged into the engine's user_provided_params.
           2. Component seed hints (config_manager.seed_hint_sets), e.g. the
-             MMEXOFAST loader -- PRECEDENCE_DERIVED_DATA, passed to the engine as
+             peak finder -- PRECEDENCE_DERIVED_DATA, passed to the engine as
              `seed_hints` and layered in with the other data-driven hints.
 
         Merging them into one PRECEDENCE_USER dict (as this did until the 2.1.2
@@ -3445,11 +3445,11 @@ class ConfigManager:
         relation.
 
         Called at stage 1 (before most hints exist), so a False here means
-        "not derivable *yet*"; callers that must decide early -- notably the
-        MMEXOFAST trigger -- get the conservative answer.
+        "not derivable *yet*"; callers that must decide early -- notably
+        globalsearch's seed gate -- get the conservative answer.
 
         An engine failure RAISES (review 2.1.17).  It used to be swallowed as
-        "not derivable", which flipped the MMEXOFAST trigger on an engine or
+        "not derivable", which flipped a seeder's trigger on an engine or
         bookkeeping bug; the probe solves a subset of stage 4's inputs, so a
         failure here is never an expected outcome of knowing less.
         """
@@ -3713,7 +3713,7 @@ class ConfigManager:
                 )
 
         # 1.5b LAYER IN THIS SEED'S HINT SET (PRECEDENCE_DERIVED_DATA)
-        # Same tier as the component hints above: an MMEXOFAST solution is a
+        # Same tier as the component hints above: a seeder's solution is a
         # derivation from the data, not a user statement.  The guard is `<=`
         # rather than `<` so a seed WINS a tie with an ordinary component
         # hint -- a per-seed fit of the actual light curve is strictly more

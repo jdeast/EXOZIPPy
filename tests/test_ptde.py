@@ -1730,7 +1730,7 @@ def _quad_logp_factory(center):
 def test_polish_seed_starts_climbs_to_basin_optimum():
     """
     Given a seed displaced ~5 sigma from its basin's optimum (a rough
-      solution estimate, like an unpolished MMEXOFAST fit),
+      solution estimate, like an unpolished external fit),
     When polish_seed_starts runs a T=1 DE polish,
     Then the returned start's logp improves by nearly the full deficit and
       the reported per-seed dlp matches.

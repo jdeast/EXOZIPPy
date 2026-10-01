@@ -7,8 +7,9 @@ what the searches seed, when they run, or how a component pushes a start value t
 stage-2 consumer has to see.
 
 Related: `src/exozippy/config.md` (hints, overrides, provenance ranks and the relaxation
-engine), the MMEXOFAST integration this copies end to end
-(`components/mulensing/mmexofast_support.py`), and the `Instrument` family
+engine), the microlensing peak finder that shares its gate
+(`components/mulensing/peakfind.py`; the pattern was first written for the
+MMEXOFAST hand-off, removed 2026-10-01), and the `Instrument` family
 (`components/instrument.py`).
 
 ## What it is for
@@ -55,7 +56,7 @@ Not seeded, each for a reason:
 
 ## Whether the search runs at all
 
-Derivability, never a literal-key scan -- the MMEXOFAST rule, for the same reason.
+Derivability, never a literal-key scan -- the microlensing seeders' rule, for the same reason.
 `orbit.period` is a *derived* parameter (`10**logP`), so a restart file written by `mkparam`
 never names it, and a scan would re-run the search on every second-iteration fit.
 `starts_satisfied` therefore asks `ConfigManager.probe_derivable`, which runs the relaxation
@@ -63,7 +64,7 @@ engine on a snapshot and rolls every mutation back, and tests on **provenance ab
 `PRECEDENCE_DEFAULT`**. A group whose alternatives are all literally named short-circuits the
 probe, so the ordinary hand-written params file pays nothing.
 
-Two refinements of the MMEXOFAST pattern:
+Two refinements of that pattern:
 
 - **Only the missing quantities are seeded.** A params file that gives the period but not
   the epoch keeps its period and gains an epoch. That is what removes every precedence
@@ -77,7 +78,7 @@ Two refinements of the MMEXOFAST pattern:
 
 `global_search:` on the **orbit** block is the switch: absent (default) runs the search only
 when something is missing, `true` forces it, `false` opts out. It lives on the orbit block
-for the same reason `mmexofast:` lives on the lens block -- that is the thing being seeded;
+for the same reason `peak_find:` lives on the mulensevent block -- that is the thing being seeded;
 the instrument running the search only borrows the switch, and `Orbit` itself never reads
 it.
 
@@ -91,8 +92,8 @@ race against orbit's -- `System.prepare` walks `active_components` in config key
 and if orbit went first, the searched epoch would land outside a window built around the
 defaults.yaml 2460000, which `Parameter.build_pymc` correctly treats as fatal. Every
 component's stage 1a precedes every component's stage 2, so stage 1a is the only placement
-that is right for both orderings. MMEXOFAST pushes at stage 1a for the same class of reason
-(its own flux bootstrap, later in the same `load_data`).
+that is right for both orderings. The microlensing peak finder pushes at stage 1a for the same
+class of reason (its own flux bootstrap, later in the same `load_data`).
 
 ## Two channels for one number
 

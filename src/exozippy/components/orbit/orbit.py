@@ -640,7 +640,7 @@ class Orbit(Component):
                 # Read by Transit/RVInstrument through
                 # components/globalsearch.search_mode; it lives on the orbit
                 # block because that is the thing being seeded, exactly as
-                # 'mmexofast:' lives on the lens block.  The orbit component
+                # 'peak_find:' lives on the mulensevent block.  The orbit component
                 # itself never reads it.
                 "key": "global_search",
                 "kind": "option",

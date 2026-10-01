@@ -23,8 +23,7 @@ mulensevent:
     #mag_method: "auto_vbbl"  # default for binary+finite_source
     t0_par: 2458715.481879152         # approximate t_0 from MMEXOFAST
     # As in KMT-2019-BLG-1806.yaml: the shared params file supplies the
-    # whole published solution, so MMEXOFAST is not needed.
-    mmexofast: false
+    # whole published solution, so the peak finder does not run.
 
 lens:
   - body: star.Lens

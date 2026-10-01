@@ -48,7 +48,7 @@ can generally construct any model containing arbitrary components.
 #                     astrometryinstrument's sky-plot title.
 #   parameter_file -- System.__init__, mkparam.write_param_file, gui.document.
 #   prefix         -- run.py, cli_modes.py, mkparam.py, gui/status.py,
-#                     gui/runner.py, mulensinstrument's mmexofast cache path.
+#                     gui/runner.py.
 #   logger_level   -- run.py, cli.py, cli_modes.py.
 #   sampler        -- run.py (see run.KNOWN_SAMPLER_KEYS for its own block).
 #   modes          -- run.py.

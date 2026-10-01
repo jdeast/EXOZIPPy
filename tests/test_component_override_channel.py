@@ -372,7 +372,7 @@ def test_a_user_sigma_beats_the_fluxfrac_pin(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# The MMEXOFAST run/skip decision
+# The derivability probe
 # ---------------------------------------------------------------------------
 
 
@@ -382,8 +382,8 @@ def test_neither_injection_can_reach_probe_derivable(tmp_path):
     When probe_derivable builds its `flat` from user_params,
     Then the grid bounds contribute nothing to it either before or after the
     move -- they carry no initval and no mu, which is what probe_derivable
-    reads.  So the MMEXOFAST run/skip decision (user_hints_sufficient, which
-    tests provenance strictly above PRECEDENCE_DEFAULT) is untouched by this change.
+    reads.  So a seeder's run/skip decision (which tests provenance
+    strictly above PRECEDENCE_DEFAULT) is untouched by this change.
     """
     system = System(_sed_config(tmp_path), {})
     cm = system.config_manager

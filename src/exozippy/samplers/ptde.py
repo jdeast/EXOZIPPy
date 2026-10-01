@@ -201,8 +201,8 @@ def polish_seed_starts(
     -- see the POLISH_TOL_NATS comment for the measurement that says why a
     best-lp window cannot be trusted on this engine.
 
-    Rationale: an unpolished solution-estimate seed (e.g. a raw MMEXOFAST
-    fit) can start hundreds of nats below its own basin's optimum, and
+    Rationale: an unpolished solution-estimate seed (e.g. an external
+    fitter's solution) can start hundreds of nats below its own basin's optimum, and
     chains rationally defect to whichever basin LOOKS best at
     initialization -- on DC2018 event 128, 26 of 27 chains abandoned the
     true branch (ultimately 500 nats better once refined) because its seed
@@ -352,7 +352,7 @@ def polish_seed_starts(
     # basin-agnostic optimizer: nothing ties a seed to the basin it was
     # provided to represent, and a seed far below its own optimum will walk
     # wherever the surface leads.  Measured on DC2018 event 128: the two
-    # MMEXOFAST seeds (s = 0.977 and its s <-> 1/s mirror at 0.863) BOTH
+    # solution seeds (s = 0.977 and its s <-> 1/s mirror at 0.863) BOTH
     # polished across s = 1 onto nearby shoulders, so the mirror basin
     # entered sampling unrepresented -- and, for the record, NOT through
     # cross-seed proposals: difference vectors always came from the seed's

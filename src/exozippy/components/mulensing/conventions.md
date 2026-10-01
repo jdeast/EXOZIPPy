@@ -8,7 +8,7 @@ Read this before comparing an EXOZIPPy microlensing parameter to a published one
 "fixing" a sign, and before writing a converter between EXOZIPPy and any other modelling
 code. Related: `src/exozippy/skyframe.md` (the frame itself, and the one owner of the
 projection onto it), `src/exozippy/components/mulensing/mulensing.md` (the flux likelihood,
-MMEXOFAST seeding, and the lens/source body rules).
+the seeding, and the lens/source body rules).
 
 ## The three artifacts, and which one is normative
 
@@ -128,18 +128,19 @@ arrowheads):
 Every epoch entering the microlensing model -- data times, `t_0`, `t0_par` -- is BJD_TDB.
 Files in another time system are converted at load by the shared `Instrument._read_data`
 machinery (`time_scale:`, `time_frame:`, `time_offset:`); see
-`src/exozippy/components/instrument.md`. Microlensing has one extra rule:
-`MulensInstrument._reject_time_spec_with_mmexofast` hard-errors when a time spec and an
-active MMEXOFAST seeding run are combined, because MMEXOFAST reads the raw files itself
-and would see the unconverted times.
+`src/exozippy/components/instrument.md`. (Microlensing used to carry one extra rule: the
+MMEXOFAST hand-off, which read the raw files itself, refused to combine with a time spec.
+The hand-off was removed 2026-10-01; the peak finder reads the CONVERTED times, so the rule
+went with it. `examples/DC2018/convert_mmexofast_json.py` keeps the refusal for the JSONs
+it converts.)
 
 ### C5 -- the geocentric frame, anchored at `t0_par`
 
 Parameters live in the Skowron+2011 geocentric inertial frame: the frame moving with
 Earth's **position and velocity** at the fiducial epoch `t0_par`. `t0_par` is a
 configuration choice, never a fitted parameter. `MulensInstrument._resolve_t0_par_final`
-picks it in the order explicit `mulensevent: t0_par:` > user `source.0.t_0` initval > MMEXOFAST seed
-`t_0` > median data time.
+picks it in the order explicit `mulensevent: t0_par:` > user `source.0.t_0` initval > seed-0
+`t_0` (the peak finder's) > median data time.
 
 `t_E` and the DIRECTION of `pi_E` are geocentric quantities and therefore depend on
 `t0_par`; `|pi_E|`, `theta_E`, `s`, `q` and `rho` do not. The star components' `pm_ra` /

@@ -365,7 +365,6 @@ def _om_system(tmp_path, orbital_motion="linear", backend="vbm_direct"):
                 "finite_source": True,
                 "backend": backend,
                 "t0_par": _T0_PAR,
-                "mmexofast": False,
             }
         ],
         "lens": [

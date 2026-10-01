@@ -1061,7 +1061,7 @@ def test_a_non_canonical_seed_hint_is_refused_too():
 
     Three channels reach this step and all three are checked. A guard that
     covered only `hints` would leave the seed path -- the one carrying
-    MMEXOFAST solutions, i.e. the least hand-written of the three -- open.
+    seeder solutions, i.e. the least hand-written of the three -- open.
     """
     # ARRANGE
     cm = ConfigManager({}, system_config=SYSTEM)

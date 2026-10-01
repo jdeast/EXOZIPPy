@@ -5,11 +5,12 @@ the relaxation engine let ONE of them absorb whatever the seeded ``t_E``
 implied, leaving the other at the default.  That made the direction of relative
 proper motion arbitrary: the pair
 ``mu_rel_mag**2 = mu_ra_rel**2 + mu_dec_rel**2`` is one equation in two
-unknowns, and the MMEXOFAST seed carries no ``pi_E`` to break it (issue #93).
+unknowns, and the seeded light-curve solution carries no ``pi_E`` to break
+it (issue #93).
 
 Seeding both components at the kinematic prior's mean closes that hole.  The
 interesting part is what the provenance ranking then does on its own: the
-proper motions and the MMEXOFAST ``t_E`` are both PRECEDENCE_DERIVED_DATA, so
+proper motions and the seeded ``t_E`` are both PRECEDENCE_DERIVED_DATA, so
 ``t_E = theta_E / |mu_rel_geo|`` is over-determined, and Condition B rewrites
 its lowest-rank symbol -- ``theta_E``, through the lens mass (defaults.yaml,
 rank 20) and distance (rank 25).  So the measured ``t_E`` survives and the lens
@@ -132,18 +133,16 @@ def test_measured_t_E_survives_and_theta_E_yields(params):
     """
     Given proper motions at PRECEDENCE_DERIVED_DATA that disagree with the seeded t_E,
     When Condition B rewrites the over-determined relation,
-    Then t_E keeps the MMEXOFAST value and theta_E is what moves.
+    Then t_E keeps the params file's value and theta_E is what moves.
 
     This is the load-bearing assertion: it is the difference between "the
     provenance ranking sorts this out" and "the measured timescale silently got
     overwritten by a prior".
     """
-    # Arrange: t_E as MMEXOFAST measured it, in days.
-    import json
-
-    with open(EXAMPLE_DIR / "mmexofast.json") as f:
-        mmx = json.load(f)
-    seeded_t_E = float(mmx["fits"][0]["parameters"]["t_E"])
+    # Arrange: t_E as the light-curve fit measured it, in days (seed 0
+    # of the shipped params file).
+    with open(EXAMPLE_DIR / "DC2018_128.params.yaml") as f:
+        seeded_t_E = float(yaml.safe_load(f)["mulensevent.t_E"]["initval"][0])
 
     # Act
     t_E = float(
@@ -162,7 +161,7 @@ def test_measured_t_E_survives_and_theta_E_yields(params):
 
     # Assert
     assert t_E == pytest.approx(seeded_t_E, rel=1e-6), (
-        "t_E moved off the MMEXOFAST seed; the proper-motion hints are "
+        "t_E moved off its measured start; the proper-motion hints are "
         "outranking a measured quantity."
     )
     # theta_E is the symbol that absorbed the difference, so it must be

@@ -41,7 +41,7 @@ def _system(tmp_path, params):
     lc = _write_lc(tmp_path / "lc.dat")
     config = {
         "star": [{"name": "L1"}, {"name": "Source"}],
-        "mulensevent": [{"name": "EV", "mmexofast": False}],
+        "mulensevent": [{"name": "EV"}],
         "lens": [{"body": "star.L1"}],
         "source": [{"body": "star.Source"}],
         "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],

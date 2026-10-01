@@ -69,7 +69,7 @@ RUNGS = [
 ]
 
 
-def flat_via_model(event, files, mmx, outdir, tune, draws):
+def flat_via_model(event, files, outdir, tune, draws):
     """The NO-EVENT rung, evaluated through the SAME likelihood as the rest.
 
     An analytic constant-flux chi2 is NOT comparable to the fitted rungs and
@@ -87,9 +87,8 @@ def flat_via_model(event, files, mmx, outdir, tune, draws):
     pinned trajectory parameters.
     """
     cfg, trace = make_config(
-        event, files, mmx, False, False, outdir, tune, draws, tag="FLAT"
+        event, files, False, False, outdir, tune, draws, tag="FLAT"
     )
-    cfg["mulensevent"][0]["mmexofast"] = False  # nothing to seed
     extra = {
         "source.Source.u_0": {"initval": 10.0, "sigma": 0},
         "source.Source.t_0": {"initval": 2459000.0, "sigma": 0},
@@ -197,7 +196,7 @@ def n_free(trace):
     return n or None
 
 
-def make_config(event, files, mmx, binary, fs, outdir, tune, draws, tag=None):
+def make_config(event, files, binary, fs, outdir, tune, draws, tag=None):
     a = R.build_parser().parse_args([str(event)])
     a.finite_source = bool(fs)
     a.fix_u1 = True
@@ -210,7 +209,7 @@ def make_config(event, files, mmx, binary, fs, outdir, tune, draws, tag=None):
     tag = tag or "%s%s" % ("2L1S" if binary else "1L1S", "_FS" if fs else "")
     prefix = Path(outdir) / tag / ("DC2018_%03d" % event)
     prefix.parent.mkdir(parents=True, exist_ok=True)
-    cfg = R.build_config("DC2018_%03d" % event, files, prefix, mmx, a)
+    cfg = R.build_config("DC2018_%03d" % event, files, prefix, a)
     if not binary:
         # A point lens is ONE lens body and no planet.  The 8.6.17 split
         # makes this a config edit rather than a code path.
@@ -246,7 +245,6 @@ def main():
     ra, dec = C.event_coords(data_dir, args.event)
     ev = "%03d" % args.event
     base = Path("events") / ev
-    mmx = base / ("DC2018_%s_mmexofast.json" % ev)
     outdir = base / "ladder"
     print(
         "event %d (class %s)  bands %s" % (args.event, cls, list(files)),
@@ -254,8 +252,8 @@ def main():
     )
     print("truth: %s" % {k: round(v, 6) for k, v in truth.items()}, flush=True)
     print(
-        "seeds: %s (truth-independent -- push_seed_hints drops whatever a "
-        "rung's topology does not want)" % mmx,
+        "seeds: the built-in peak finder (t_0/u_0/t_E; truth-independent; "
+        "s/q/alpha at their defaults on the binary rungs)",
         flush=True,
     )
 
@@ -271,7 +269,7 @@ def main():
     for name, binary, fs in want:
         if name == "FLAT":
             cfg, trace, extra = flat_via_model(
-                args.event, files, mmx, outdir, args.tune, args.draws
+                args.event, files, outdir, args.tune, args.draws
             )
             rung_params = dict(params)
             rung_params.update(extra)
@@ -279,7 +277,6 @@ def main():
             cfg, trace = make_config(
                 args.event,
                 files,
-                mmx,
                 binary,
                 fs,
                 outdir,

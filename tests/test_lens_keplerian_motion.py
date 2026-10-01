@@ -65,7 +65,6 @@ def _kep_system(tmp_path, cosi=0.5):
             {
                 "finite_source": True,
                 "t0_par": _T0_PAR,
-                "mmexofast": False,
             }
         ],
         "lens": [

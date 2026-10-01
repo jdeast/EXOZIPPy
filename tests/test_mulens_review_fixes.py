@@ -1457,7 +1457,7 @@ def test_t0_par_explicit_config_wins():
 
 def test_t0_par_user_t0_beats_seed():
     """
-    Given both a user source.0.t_0 initval and an MMEXOFAST seed,
+    Given both a user source.0.t_0 initval and a seed,
     When the final t0_par is resolved,
     Then the user's value wins (seeds sit below PRECEDENCE_USER).
     """
@@ -1469,10 +1469,10 @@ def test_t0_par_user_t0_beats_seed():
     assert inst._resolve_t0_par_final(system, times) == 2458800.0
 
 
-def test_t0_par_uses_mmexofast_seed():
+def test_t0_par_uses_the_seed():
     """
-    Given no explicit t0_par and no user t_0 (the automated MMEXOFAST
-      workflow deliberately omits the microlensing start values),
+    Given no explicit t0_par and no user t_0 (the peak-finder workflow:
+      the params file omits the microlensing start values),
     When the final t0_par is resolved after the seeds arrived,
     Then the seed t_0 is used -- NOT the 2450000.0 construction-time default
       that parked the Skowron reference epoch ~8300 days before the data
@@ -1580,8 +1580,8 @@ def test_check_data_format_warns_on_an_informed_trajectory(caplog):
 def test_check_data_format_sees_a_seed_only_trajectory(caplog):
     """
     Given flux data mislabelled as magnitudes, and a trajectory known ONLY
-      from the seed-0 hints (the automated workflow -- peak finder or
-      MMEXOFAST -- where the user typed no start values at all),
+      from the seed-0 hints (the automated workflow -- the peak finder --
+      where the user typed no start values at all),
     When the geometry is probed through a real ConfigManager and the check
       runs,
     Then it warns.  The check once read cm.user_params alone and returned at

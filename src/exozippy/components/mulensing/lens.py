@@ -97,7 +97,7 @@ class Lens(Component):
             raise ValueError(
                 "lens: the config must also declare a 'mulensevent:' block "
                 "carrying the event options (finite_source, t0_par, "
-                "backend, mag_method, use_op, mmexofast, fit* flags, "
+                "backend, mag_method, use_op, peak_find, fit* flags, "
                 "source_orbital_motion).  Pre-v0.1.0 configs put those on "
                 "the lens block; the lens block is now one entry per lens "
                 "BODY (body: star.<name>)."

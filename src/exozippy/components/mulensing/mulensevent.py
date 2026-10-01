@@ -12,7 +12,7 @@ This component also owns everything event-scoped that is not a parameter:
 the magnification dispatcher (`get_magnification`/`get_magnification_op`,
 one call per source trajectory over the shared lens bodies), the event-level
 config keys (finite_source, t0_par, backend, mag_method, use_op, the fit*
-coordinate flags, mmexofast, source_orbital_motion), the event potentials
+coordinate flags, peak_find, source_orbital_motion), the event potentials
 (event rate, singularity guards, source-behind-lens, the fitpirel
 Jacobian), the seeding hints, and the sampler-compatibility declaration.
 """
@@ -135,7 +135,7 @@ class MulensEvent(Component):
         self.finite_source = bool(ev.get("finite_source", False))
 
         # Preliminary t0_par; MulensInstrument re-resolves the final value
-        # at stage 1 (MMEXOFAST seeds arrive after this snapshot) and writes
+        # at stage 1 (the peak finder's seeds arrive after this snapshot) and writes
         # it back into t0_par[0] -- a length-1 list precisely so that write
         # is visible to every later reader of the same object.
         self.t0_par = [self._resolve_t0_par(ev, config_manager)]
@@ -224,7 +224,7 @@ class MulensEvent(Component):
     def _resolve_t0_par(self, event_config, config_manager):
         """t0_par from the mulensevent block, the source.0.t_0 seed, or the
         historical fallback.  MulensInstrument re-resolves the final value
-        at stage 1 (MMEXOFAST seeds arrive after this snapshot)."""
+        at stage 1 (the peak finder's seeds arrive after this snapshot)."""
         if "t0_par" in event_config:
             return float(event_config["t0_par"])
         entry = user_entry(config_manager.user_params, "source.0.t_0")
@@ -238,31 +238,6 @@ class MulensEvent(Component):
     @property
     def prefix(self):
         return "mulensevent"
-
-    @classmethod
-    def get_utilities(cls):
-        from ...utilities import mmexofast_to_params
-        from ...utilities.registry import (
-            UtilitySpec,
-            argparse_subprocess_runner,
-        )
-
-        return [
-            UtilitySpec(
-                name="mmexofast_to_params",
-                label="MMEXOFAST -> params.yaml",
-                description=(
-                    "Convert an MMEXOFAST fit-results JSON into an EXOZIPPy "
-                    "params.yaml seeding the microlensing parameters."
-                ),
-                component_keys=["mulensevent"],
-                available=True,
-                build_parser=mmexofast_to_params.build_parser,
-                run=argparse_subprocess_runner(
-                    "exozippy.utilities.mmexofast_to_params"
-                ),
-            ),
-        ]
 
     @classmethod
     def config_schema(cls):
@@ -282,7 +257,7 @@ class MulensEvent(Component):
                 "doc": (
                     "Fiducial epoch anchoring the geocentric frame "
                     "(Skowron+2011). Defaults to the source.0.t_0 start, "
-                    "an MMEXOFAST seed, or the median data time."
+                    "the peak finder's t_0, or the median data time."
                 ),
             },
             {
@@ -333,54 +308,23 @@ class MulensEvent(Component):
                 ),
             },
             {
-                "key": "mmexofast",
-                "kind": "datafile",
-                "accepts": "*.json",
-                "required": False,
-                "doc": (
-                    "MMEXOFAST integration, OFF unless asked for (the "
-                    "built-in peak finder is the default seeder). A "
-                    "fit-results JSON path provides seed initvals/scales "
-                    "for the microlensing parameters plus the bad-data mask "
-                    "and error factors (a missing file raises); true runs "
-                    "MMEXOFAST on the raw light curves when the params file "
-                    "lacks start values for the microlensing parameters "
-                    "(cached at <prefix>_mmexofast.json) and consumes the "
-                    "same; false or absent never runs it. 'auto' is no "
-                    "longer accepted."
-                ),
-            },
-            {
                 "key": "peak_find",
                 "kind": "option",
                 "accepts": [True, False],
                 "required": False,
                 "doc": (
                     "Built-in point-lens peak finder for t_0, u_0 and t_E, "
-                    "the DEFAULT seeder. Absent (default): runs when no "
-                    "MMEXOFAST seeds were loaded and one of the three has "
-                    "no start from the params file (directly or derived); "
-                    "it holds every given value and fits only the "
-                    "missing ones. true always "
-                    "runs it on all three, replacing MMEXOFAST's seeds (the "
-                    "A/B mode); false never does. It fits a PSPL model to "
+                    "the DEFAULT seeder. Absent (default): runs when one "
+                    "of the three has no start from the params file "
+                    "(directly or derived); it holds every given value and "
+                    "fits only the missing ones. true always runs it on all "
+                    "three; false never "
+                    "does. It fits a PSPL model to "
                     "the light curves with the source and blend fluxes "
                     "profiled out analytically, and seeds only those three: "
                     "s, alpha, q and rho keep their defaults and the "
                     "sampler finds the anomaly itself. 'auto' is no longer "
                     "accepted (omit the key)."
-                ),
-            },
-            {
-                "key": "mmexofast_options",
-                "kind": "option",
-                "accepts": None,
-                "required": False,
-                "doc": (
-                    "Extra MMEXOFASTFitter keyword arguments for the "
-                    "automatic run (e.g. {no_parallax: false, "
-                    "limb_darkening_coeffs_gamma: {W149: 0.3}}), forwarded "
-                    "verbatim."
                 ),
             },
             {
@@ -629,12 +573,11 @@ class MulensEvent(Component):
     def register_parameters(self, system):
         """Stage 3: Declare the event-level manifest and push hints."""
         self._validate_bodies(system)
-        # No MMEXOFAST seed push here: an explicit `mmexofast: <file>` is
-        # loaded ONCE, by MulensInstrument._resolve_mmexofast at stage 1,
-        # where the seeds must land for its flux bootstrap.  The stage-3
-        # re-push this used to do silently undid `peak_find: true`, and
-        # would double every seed set now that add_seed_hints accumulates
-        # (reviews 1.6.15, 2.1.12).
+        # No seed push here: the one seeder (the peak finder) runs in
+        # MulensInstrument.load_data at stage 1, where the seeds must land
+        # for its flux bootstrap.  A stage-3 re-push of a seed file once
+        # lived here and silently undid `peak_find: true` (reviews 1.6.15,
+        # 2.1.12); add_seed_hints now raises on a second registration.
 
         # fitmurel (coordinate choice, fitvcve family): sample the
         # LC-measured relative proper motion directly; the star component
@@ -650,7 +593,7 @@ class MulensEvent(Component):
             # the engine's default-armor would seed mu_rel = 0 into every
             # config and break the t_E derivation chain), with a
             # preliminary 1 mas/yr whitening scale.  The engine's mu_rel
-            # relation upgrades the start from any pm/mmexofast seeds.
+            # relation upgrades the start from any pm/t_E seeds.
             return {"overrides": {"initval": [0.0]}}
 
         if fitmurel:
@@ -1036,7 +979,7 @@ class MulensEvent(Component):
         the same way an RV offset is derived from the data, so it belongs
         in that tier and must yield to anything in params.yaml.
 
-        It ties with the MMEXOFAST seeds (also PRECEDENCE_DERIVED_DATA),
+        It ties with the peak finder's seeds (also PRECEDENCE_DERIVED_DATA),
         which is the point.  Both proper-motion components are now pinned,
         so ``mu_rel`` has a magnitude AND a direction, and the engine no
         longer has to invert
@@ -1510,8 +1453,8 @@ class MulensEvent(Component):
         p = self._get_safe_mm_params(system, index)
         # MulensModel convention: delta_tau = -delta_N*pi_E_N -
         # delta_E*pi_E_E (negative on both N and E, matching Skowron+2011
-        # via MulensModel's sign choice).  MMEXOFAST calls MulensModel, so
-        # published pi_E values are calibrated to this convention.
+        # via MulensModel's sign choice).  Published pi_E values from
+        # MulensModel-based fitters are calibrated to this convention.
         tau_p = (
             (times - p["t_0"]) / p["t_E"]
             - delta_n * p["pi_E_N"]
@@ -1614,7 +1557,7 @@ class MulensEvent(Component):
         astrometric dataset of a lensed source), and one frame must serve
         them all.  Read from ``self.t0_par[0]`` at CALL time, not cached
         against a stale value: ``MulensInstrument.load_data`` re-resolves
-        ``t0_par`` at stage 1 (MMEXOFAST seeds arrive after this
+        ``t0_par`` at stage 1 (the peak finder's seeds arrive after this
         component's ``__init__`` snapshot) and writes it back into that
         length-1 list precisely so later readers see the final value.  The
         velocity is a central difference over +/-0.5 d, the recipe

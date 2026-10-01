@@ -948,7 +948,7 @@ def _run_fit(config, gui, user_params=None):
         # ~1000x tight from a start ~5900 nats low and diverged on 86% of
         # its draws), freezes the barrier steepness against dishonest unit
         # steps, and starts every sampler outside the typical set.  'auto'
-        # (default) polishes the canonical single start and MMEXOFAST seed
+        # (default) polishes the canonical single start and component seed
         # sets, never multi-seed posterior-draw restart sets (already at
         # equilibrium; polishing would collapse their overdispersion);
         # on/off/int override (int = step count).  L-BFGS on logp+grad

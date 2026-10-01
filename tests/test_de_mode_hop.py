@@ -165,7 +165,8 @@ def test_hops_reach_the_other_basin_where_the_scaled_gamma_cannot():
     basins the population ALREADY OCCUPIES, because the difference vector is
     drawn from the population.  It is a mixing accelerator for known modes,
     not a mode DISCOVERER.  That is exactly the right tool for our case --
-    MMEXOFAST seeds both members of the s <-> 1/s pair, and the mode weights
+    the DC2018-128 seeds are both members of the s <-> 1/s pair, and the
+    mode weights
     were reported UNRELIABLE (N_eff = 19, 2/10 chains never switching) --
     but it will not find an unseeded third basin.
     """

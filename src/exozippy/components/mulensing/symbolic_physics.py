@@ -219,8 +219,9 @@ RELATIONS = [
     # velocity are resolved at stage 1 -- after these relations are
     # constructed -- so the engine seeds through the heliocentric value.
     # Starts land a few percent off for large-pi_rel events; the samplers
-    # absorb that.  (MMEXOFAST t_E seeds are geocentric, so the back-solved
-    # pms are helio-approximate too.)
+    # absorb that.  (Light-curve t_E seeds -- the peak finder's, or a
+    # published one -- are geocentric, so the back-solved pms are
+    # helio-approximate too.)
     sp.Eq(t_E, theta_E / (mu_rel_mag / DAYS_PER_YEAR)),
     # Relative Motion Magnitude
     sp.Eq(mu_rel_mag**2, mu_ra_rel**2 + mu_dec_rel**2),
@@ -249,7 +250,7 @@ RELATIONS = [
     # rho reparameterization, active only when the lens severs the
     # stellar tie (`star_constrains_rho: false`)
     # (log_rho mapped in get_symbol_map there; inert otherwise).  Lets a
-    # user or MMEXOFAST rho seed back-solve to a log_rho start.
+    # user rho start back-solve to a log_rho start.
     sp.Eq(rho, 10**log_rho),
     # pi_rel reparameterization, active only for `fitpirel: true` lenses
     # (swap 2); inert otherwise.  Lets the distance-derived pi_rel seed

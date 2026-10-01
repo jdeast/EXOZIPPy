@@ -373,7 +373,6 @@ def unread_linear_band_system(tmp_path_factory):
                 "finite_source": True,
                 "t0_par": T0,
                 "use_op": False,
-                "mmexofast": False,
             }
         ],
         "lens": [{"body": "star.Lens"}],
@@ -476,7 +475,7 @@ def pspl_system(tmp_path_factory):
 
     config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "mulensevent": [{"t0_par": T0, "use_op": False, "mmexofast": False}],
+        "mulensevent": [{"t0_par": T0, "use_op": False}],
         "lens": [{"body": "star.Lens"}],
         "source": [{"body": "star.Source"}],
         "mulensinstrument": [

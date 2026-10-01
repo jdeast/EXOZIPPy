@@ -188,23 +188,6 @@ dependencies = [
     "pyarrow>=25.0.1,<26.0.0",
 ]
 
-# NOTE: the microlensing tools (mmexofast, sfit-minimizer, emcee) used to live
-# here as an optional extra. They are now a poetry GROUP -- see
-# [tool.poetry.group.microlensing] near the bottom -- because PyPI REJECTS any
-# distribution whose metadata carries a direct URL reference (PEP 440), and
-# being behind an optional extra does not exempt them. Two `pkg @ git+https://`
-# entries in Requires-Dist are a hard 400 at upload time; `twine check` does
-# NOT catch it, since that rule is enforced server-side only.
-#
-# Groups are a build-time/dev concept and never reach the published metadata,
-# so `poetry install --with microlensing` still works from a git clone while
-# `pip install exozippy` stays publishable. Nothing in the tree imports any of
-# the three (the mmexofast integration parses its JSON output, it does not
-# import the package), so this costs end users nothing.
-#
-# When mmexofast and sfit-minimizer are on PyPI, move them back up here as a
-# real optional extra with normal version constraints.
-
 # Optional: GUI extra (pip install exozippy[gui] / poetry install --extras gui).
 # A real extra, NOT a dev group, so `pip install exozippy[gui]` pulls them in
 # for end users. The plain CLI and `import exozippy` must keep working without
@@ -287,18 +270,6 @@ httpx = ">=0.27,<1.0"
 # suite, measured), which is not something to do on every commit.
 coverage = ">=7.16.0,<8.0"
 pytest-cov = ">=6.0,<8.0"
-
-# Microlensing tooling, git-only and therefore unpublishable as an extra (see
-# the note in [project]). optional = true keeps it out of a default
-# `poetry install`, exactly as the old extra did.
-#   poetry install --with microlensing
-[tool.poetry.group.microlensing]
-optional = true
-
-[tool.poetry.group.microlensing.dependencies]
-mmexofast = { git = "https://github.com/jenniferyee/MMEXOFAST.git" }
-sfit-minimizer = { git = "https://github.com/jenniferyee/sfit_minimizer.git" }
-emcee = "^3.1.6"
 
 [build-system]
 requires = ["poetry-core>=2.0.0", "poetry-dynamic-versioning>=1.4.0,<2.0.0"]

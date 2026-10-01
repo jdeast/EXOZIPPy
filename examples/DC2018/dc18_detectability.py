@@ -192,8 +192,7 @@ def main():
         prefix.parent.mkdir(parents=True, exist_ok=True)
         cfg["prefix"] = str(prefix)
         cfg.pop("parameter_file", None)
-        cfg["mulensevent"][0]["mmexofast"] = False  # TRUTH is the seed here
-        cfg["mulensevent"][0]["peak_find"] = False
+        cfg["mulensevent"][0]["peak_find"] = False  # TRUTH is the seed here
         if args.free_rho:
             for src in cfg.get("source", []):
                 src["star_constrains_rho"] = False
@@ -220,10 +219,9 @@ def main():
             "DC2018_%s" % ev,
             files,
             prefix,
-            base / ("DC2018_%s_mmexofast.json" % ev),
             a,
         )
-        cfg["mulensevent"][0]["mmexofast"] = False  # TRUTH is the seed here
+        cfg["mulensevent"][0]["peak_find"] = False  # TRUTH is the seed here
         params = R.build_user_params(
             ra, dec, fix_u1=True, bands_for_u1=list(files)
         )

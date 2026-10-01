@@ -567,7 +567,8 @@ class Instrument(TimeSystem, Component):
 
         - a path to a whitespace/newline-delimited file with ONE NUMERIC flag
           per data row: nonzero means EXCLUDE that row.  This is the shape a
-          bad-data flag vector (e.g. from MMEXOFAST) saves to naturally.  The
+          bad-data flag vector (e.g. from an external fitter) saves to
+          naturally.  The
           file is read with ``np.loadtxt(dtype=float)``, so ``true``/``false``
           word literals are NOT accepted there -- write 1/0, or use the
           boolean-list form below, which is the YAML spelling of the same
