@@ -27,6 +27,8 @@ from exozippy.components.orbit.orbit import Orbit
 from exozippy.config import ConfigManager
 from exozippy.system import System
 
+pytestmark = pytest.mark.slow
+
 RAD2MAS = 180.0 / np.pi * 3600e3
 RSUN_AU = 0.004650467260962157
 

@@ -46,6 +46,8 @@ import yaml
 
 from exozippy.system import System
 
+pytestmark = pytest.mark.slow
+
 _TC = 2459634.3
 _PERIOD = 2.99
 _EXAMPLES = os.path.join(

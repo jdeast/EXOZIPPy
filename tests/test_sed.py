@@ -1062,6 +1062,7 @@ def _stub_system(star_names=("A",)):
     return SimpleNamespace(star=star)
 
 
+@pytest.mark.slow
 def test_sed_load_data_populates_filters_and_bc_grid(minimal_sed_file):
     """
     Given a SED component initialised with a three-filter .sed YAML,

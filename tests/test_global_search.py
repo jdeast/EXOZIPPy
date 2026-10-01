@@ -376,6 +376,7 @@ def test_blind_rv_fit_seeds_period_epoch_and_semi_amplitude(tmp_path):
     )
 
 
+@pytest.mark.slow
 def test_the_seeded_start_beats_the_unseeded_one(tmp_path):
     """Given the same RV data with and without the global search,
     when both models are built,

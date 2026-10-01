@@ -198,6 +198,7 @@ def test_matches_allesfast_reference():
 # 4. End-to-end: the KELT-17 example (transit + RV with rm:) builds and yields
 #    a finite initial logp (skipped only if the example files are absent).
 # --------------------------------------------------------------------------
+@pytest.mark.slow
 def test_rm_system_logp_finite():
     """The KELT-17 RM example (examples/kelt17) -- a transiting planet with
     two in-transit RV sequences tagged `rm: b` -- builds end to end and yields
@@ -226,6 +227,7 @@ def test_rm_system_logp_finite():
     assert np.isfinite(lp), f"RM example logp not finite: {lp}"
 
 
+@pytest.mark.slow
 def test_rm_system_with_linear_ld_builds():
     """Given the KELT-17 RM example with every band on `ld_law: linear` (so
     Band's manifest has no u2 at all), When the model is built, Then it builds
@@ -467,6 +469,7 @@ def test_rm_is_evaluated_only_on_its_own_instrument_rows(
     )
 
 
+@pytest.mark.slow
 def test_rm_two_instrument_logp_and_gradient_finite_on_both_backends(
     kelt17_two_instrument,
 ):

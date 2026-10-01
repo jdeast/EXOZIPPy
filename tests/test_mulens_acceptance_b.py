@@ -70,6 +70,7 @@ COLLAPSE_RTOL = 1e-9
 
 
 @pytest.mark.parametrize("name", sorted(UNMARKED))
+@pytest.mark.slow
 def test_the_decomposition_reconciles(name):
     """
     Given a shipped microlensing example,

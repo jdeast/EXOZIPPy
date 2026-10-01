@@ -94,6 +94,7 @@ def test_off_is_the_physical_parameterization(physical):
         assert system.star.pm_dec.element_is_sampled(i)
 
 
+@pytest.mark.slow
 def test_swapped_roles_and_assembly(swapped):
     """With the flag: mu_*_rel sampled; the LENS star's pm derived and
     equal to pm_source + mu_rel in the assembled tensors; finite logp."""

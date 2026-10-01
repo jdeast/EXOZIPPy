@@ -115,6 +115,7 @@ def _build_with_spy(config, params):
     return system, model, point, calls
 
 
+@pytest.mark.slow
 def test_wired_rm_ltt_delay_matches_a_over_c_through_real_accessors(tmp_path):
     """
     Given an RM-enabled system (star mass ~1 Msun, star RADIUS deliberately

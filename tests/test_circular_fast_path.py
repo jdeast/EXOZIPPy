@@ -171,6 +171,7 @@ def test_the_fast_path_removes_the_kepler_op_from_the_graph():
 
 
 @pytest.mark.parametrize("pinned", [True, False])
+@pytest.mark.slow
 def test_the_model_builds_and_scores_either_way(pinned):
     """
     Given a circular (pinned) or an eccentric (free) orbit,

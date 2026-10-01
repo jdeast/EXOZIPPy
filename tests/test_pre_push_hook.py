@@ -59,7 +59,7 @@ def _git(cwd, *args):
     )
 
 
-def _run_script(cwd):
+def _run_script(cwd, extra_env=None):
     """Run the hook script in dry-run mode from cwd; return its stdout.
 
     EXOZIPPY_VENV_PYTHON short-circuits the poetry lookup: this test is about
@@ -73,6 +73,7 @@ def _run_script(cwd):
     # A deliberately hostile inherited value: the empty entry is what puts the
     # current directory on sys.path, and it is present in real shells here.
     env["PYTHONPATH"] = ":/nonexistent/inherited"
+    env.update(extra_env or {})
     done = subprocess.run(
         [str(SCRIPT)], cwd=str(cwd), env=env, capture_output=True, text=True
     )
@@ -236,3 +237,63 @@ def test_the_hook_entry_points_at_this_script():
     # Act / Assert
     assert "entry: scripts/pre_push_suite.sh" in config
     assert "entry: poetry run pytest" not in config
+
+
+def _tier_line(stdout):
+    """The single tier line the script prints before the dry-run exit."""
+    lines = [
+        ln for ln in stdout.splitlines() if ln.startswith("pre-push: tier")
+    ]
+    assert len(lines) == 1, stdout
+    return lines[0]
+
+
+def test_the_hook_runs_the_fast_tier_by_default(repo_with_worktree):
+    """
+    Given a push with no tier override,
+    When the hook resolves what to run,
+    Then it runs `-m "not slow"` and says that CI runs the full suite -- CI is
+      the merge gate (the master ruleset requires the `test` check).
+    """
+    # ARRANGE
+    _, linked = repo_with_worktree
+
+    # ACT
+    line = _tier_line(_run_script(linked))
+
+    # ASSERT
+    assert 'fast (-m "not slow")' in line
+    assert "CI runs the full suite" in line
+
+
+def test_exozippy_prepush_full_runs_everything(repo_with_worktree):
+    """
+    Given EXOZIPPY_PREPUSH_FULL=1,
+    When the hook resolves what to run,
+    Then it runs the whole suite with no marker filter, as it did before the
+      fast tier existed.
+    """
+    # ARRANGE
+    _, linked = repo_with_worktree
+
+    # ACT
+    line = _tier_line(_run_script(linked, {"EXOZIPPY_PREPUSH_FULL": "1"}))
+
+    # ASSERT
+    assert "FULL suite" in line
+
+
+def test_the_slow_marker_is_registered():
+    """
+    Given the fast tier deselects `slow`,
+    When pytest's marker registry is read from pyproject.toml,
+    Then `slow` is registered -- an unregistered marker would only warn, and a
+      typo in it would silently put a slow test in the fast tier.
+    """
+    # ARRANGE
+    pyproject = (
+        Path(__file__).resolve().parents[1] / "pyproject.toml"
+    ).read_text()
+
+    # ASSERT
+    assert '"slow:' in pyproject

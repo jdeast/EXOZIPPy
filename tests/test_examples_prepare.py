@@ -183,6 +183,7 @@ def _unshipped_data(config, directory):
 @pytest.mark.parametrize(
     "path,rel", _CONFIGS, ids=[rel for _, rel in _CONFIGS]
 )
+@pytest.mark.slow
 def test_shipped_example_prepares(path, rel, monkeypatch, caplog):
     """Given a shipped example config and its parameter file, when
     System.prepare() runs from the example's own directory, then it

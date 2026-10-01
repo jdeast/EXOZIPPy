@@ -74,6 +74,7 @@ def test_off_is_the_physical_parameterization():
     assert entry.get("expr_key") == "default"
 
 
+@pytest.mark.slow
 def test_swapped_roles_identity_no_jacobian():
     system, model = _build(fitthetae=True)
     assert "mulensevent.log_theta_E_raw" in [v.name for v in model.value_vars]
@@ -110,6 +111,7 @@ def test_linear_mass_companion_guard(caplog):
     )
 
 
+@pytest.mark.slow
 def test_all_three_swaps_compose_into_observable_coordinates():
     """fitmurel + fitpirel + fitthetae + star_constrains_rho: false is the
     observable-coordinates parameterization of notes/

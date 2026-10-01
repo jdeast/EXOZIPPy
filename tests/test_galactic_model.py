@@ -1009,6 +1009,7 @@ def test_floor_applies_to_every_star_the_imf_prior_sums_over():
     assert np.allclose(lower, _HBL_DEX)
 
 
+@pytest.mark.slow
 def test_salpeter_model_builds_with_finite_logp_and_gradient():
     """
     Given a full System whose galacticmodel selects Salpeter,

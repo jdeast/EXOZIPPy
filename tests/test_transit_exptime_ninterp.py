@@ -195,6 +195,7 @@ def test_invalid_smearing_config_warns_and_falls_back(
     assert sorted(groups_by_width[3]) == list(inst3_rows)
 
 
+@pytest.mark.slow
 def test_long_exptime_with_ninterp_smooths_ingress_egress(tmp_path_factory):
     """
     Given two otherwise-identical systems -- one with ninterp=1, one with a

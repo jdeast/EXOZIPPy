@@ -59,12 +59,12 @@ To reclaim space by hand on the suite's own cache:
 ```bash
 # What would go, without touching anything.
 poetry run python scripts/pytensor_cache_budget.py \
-    --suite-base ~/.pytensor-pytest --max-entries 2000 --dry-run
+    --suite-base ~/.pytensor-pytest --max-entries 4000 --dry-run
 
 # Do it: reap dead runs' directories, bound base/shared, sweep stranded
 # platform trees -- under the same base/.lock the suite takes.
 poetry run python scripts/pytensor_cache_budget.py \
-    --suite-base ~/.pytensor-pytest --max-entries 2000
+    --suite-base ~/.pytensor-pytest --max-entries 4000
 ```
 
 `--suite-base` is the mode for the suite's cache since review 2.13.5 (the
@@ -91,7 +91,7 @@ ahead of the import.
    It lives under `$HOME` rather than in the checkout on purpose: every
    worktree of this repo then shares one **warm** cache, where an in-repo
    path would make each new agent worktree pay a full cold compile.
-2. **Every compiledir in the tree is bounded at 2000 entries**, pruned LRU on
+2. **Every compiledir in the tree is bounded at 4000 entries** (2000 until 2026-10-01, when one full run was measured adding 905-1885 new entries -- a cap below one run's needs evicts warm entries every run), pruned LRU on
    the xdist controller in `pytest_configure`, before any worker exists --
    which is also what makes the prune safe without taking PyTensor's compile
    lock, and is the only moment at which the per-worker trees below can be
@@ -391,7 +391,7 @@ Escape hatches:
 |---|---|
 | `EXOZIPPY_TEST_COMPILEDIR=/some/path` | put the suite's cache somewhere else (the base: `shared/`, `runs/` and `.lock` live under it) |
 | `EXOZIPPY_TEST_COMPILEDIR=` (empty) | opt out; use whatever PyTensor would pick |
-| `EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES=N` | change the budget of the shared tree (CI uses 1800) |
+| `EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES=N` | change the budget of the shared tree (CI uses 4000, per shard) |
 | `PYTENSOR_FLAGS=base_compiledir=...` | that base wins, and the run is UNMANAGED (warned): no run dir, seeding or budget |
 | `_EXOZIPPY_TEST_RUN_DIR` | INTERNAL: the controller's run directory, handed to its xdist workers; never set it |
 | `EXOZIPPY_PREPUSH_NOWAIT=1` | the pre-push hook does not wait for another pre-push suite on this machine |
@@ -544,7 +544,7 @@ Two changes that only make sense together.
 
 **The saved artifact holds ONE tree** -- since review 2.13.5, `base/shared`,
 which the run has just promoted its new entries into. Before saving, the job
-runs `pytensor_cache_budget.py --suite-base` (reap, prune to 1800, sweep) and
+runs `pytensor_cache_budget.py --suite-base` (reap, prune to 4000, sweep) and
 deletes everything else under the base: `runs/`, and any pre-2.13.5 `gw*` or
 top-level `compiledir_*` restored from an old-layout cache, which the first
 run after the change seeds from and promotes into `shared/`. Before 2.13.5

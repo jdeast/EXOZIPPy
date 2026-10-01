@@ -26,6 +26,8 @@ from exozippy.polish import (
 )
 from exozippy.system import System
 
+pytestmark = pytest.mark.slow
+
 # ---------------------------------------------------------------------------
 # resolve_polish_steps: the seed-provenance gate
 # ---------------------------------------------------------------------------

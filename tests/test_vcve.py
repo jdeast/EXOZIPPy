@@ -31,6 +31,8 @@ import pytest
 from exozippy.components.orbit import physics
 from exozippy.system import System
 
+pytestmark = pytest.mark.slow
+
 MAX_ECC = physics.MAX_ECC
 
 

@@ -102,7 +102,7 @@ _BUDGET_ENV = "EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES"
 # which under -n is the one directory no worker ever reads. It therefore
 # bounded nothing: the controller sat at 2280 entries and never hit 3000,
 # while the six directories that do get read grew without any bound at all.
-_DEFAULT_MAX_ENTRIES = 2000
+_DEFAULT_MAX_ENTRIES = 4000
 
 
 _raw_compiledir = os.environ.get(_COMPILEDIR_ENV)

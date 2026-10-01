@@ -326,10 +326,18 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ~/.pytensor-pytest
-          key: pytensor-compiledir-p1-${{ matrix.os }}-${{ matrix.python-version }}-${{ hashFiles('poetry.lock') }}-${{ github.run_id }}
+          # PER SHARD since 2026-10-01 (JDE: "Increase the cache"): shard 1's
+          # tree turned out NOT to serve the other shards -- band, vcve and
+          # rossiter compiled cold on every run of shards 2-4 (220 s cold vs
+          # 27 s warm for one vcve test). A shard restores its own newest tree
+          # first, then any shard's for this os + python, so a new shard or a
+          # lock bump still starts mostly warm. p2 retires the p1 entries
+          # (deleted below). ~85 MB a tree, so 15 trees is ~1.3 GB.
+          key: pytensor-compiledir-p2-${{ matrix.os }}-${{ matrix.python-version }}-s${{ matrix.shard }}-${{ hashFiles('poetry.lock') }}-${{ github.run_id }}
           restore-keys: |
-            pytensor-compiledir-p1-${{ matrix.os }}-${{ matrix.python-version }}-${{ hashFiles('poetry.lock') }}-
-            pytensor-compiledir-p1-${{ matrix.os }}-${{ matrix.python-version }}-
+            pytensor-compiledir-p2-${{ matrix.os }}-${{ matrix.python-version }}-s${{ matrix.shard }}-${{ hashFiles('poetry.lock') }}-
+            pytensor-compiledir-p2-${{ matrix.os }}-${{ matrix.python-version }}-s${{ matrix.shard }}-
+            pytensor-compiledir-p2-${{ matrix.os }}-${{ matrix.python-version }}-
 
       # The worker count is COMPUTED, not written down here, and the reason
       # is that the number this replaced went stale without anyone noticing.
@@ -371,7 +379,7 @@ jobs:
       # ubuntu and macOS splits are different sizes (see the matrix comment).
       - name: Run test suite
         env:
-          EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES: "1800"
+          EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES: "4000"
         run: |
           set -euo pipefail
           workers=$(poetry run python scripts/pytest_workers.py --explain)
@@ -465,18 +473,18 @@ jobs:
       # evicting least-recently-accessed, which is the scenario the restore
       # step's comment describes as trading a 5-minute cache for a 250 MB
       # download.
-      # SHARD 1 ONLY, and the reason is the same property that makes seeding
-      # work: the per-worker compiledirs are ~95% redundant, because most of
-      # what compiles is shared infrastructure every file's model builds
-      # rather than anything specific to a file. So shard 1's tree already
-      # serves the other shards almost completely, and storing theirs as well
-      # would multiply the cache by the shard count to buy the last few
-      # percent. They recompile that remainder each run, which is a small
-      # bounded cost against a cache budget that is not.
+      # EVERY SHARD saves its own tree (since 2026-10-01). This used to be
+      # shard 1 only, on the reasoning that the worker trees are ~95%
+      # redundant so shard 1's tree serves the rest. Measured, that was
+      # wrong where it matters: the expensive graphs are the file-specific
+      # ones (band's mixed-law model, vcve's two-branch mixture, rossiter),
+      # and shards 2-4 compiled them cold on every run -- 220 s cold vs 27 s
+      # warm for one vcve test. A tree is ~85 MB compressed, so all 15 cost
+      # ~1.3 GB, paid for many times over by the stale-venv sweep in the
+      # "Drop superseded compile caches" step below.
       - name: Prune the compile cache before saving it
         if: >-
           github.event_name == 'push' && github.ref == 'refs/heads/master'
-          && matrix.shard == 1
         run: |
           set -euo pipefail
           # PER-RUN LAYOUT (review 2.13.5, docs/testing-cache.md): the suite
@@ -490,7 +498,7 @@ jobs:
           # top-level compiledir_* it creates instead is deleted below.
           export PYTENSOR_FLAGS="base_compiledir=$RUNNER_TEMP/pytensor-cli"
           poetry run python scripts/pytensor_cache_budget.py \
-            --suite-base "$HOME/.pytensor-pytest" --max-entries 1800
+            --suite-base "$HOME/.pytensor-pytest" --max-entries 4000
 
           # SAVE ONE CANONICAL TREE, NOT ONE PER WORKER. The worker
           # compiledirs are ~95% redundant -- each holds ~1500 of the 1564
@@ -525,7 +533,6 @@ jobs:
       - name: Save the PyTensor compile cache
         if: >-
           github.event_name == 'push' && github.ref == 'refs/heads/master'
-          && matrix.shard == 1
         uses: actions/cache/save@v6
         with:
           path: ~/.pytensor-pytest
@@ -559,12 +566,14 @@ jobs:
       - name: Drop superseded compile caches
         if: >-
           github.event_name == 'push' && github.ref == 'refs/heads/master'
-          && matrix.shard == 1
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           KEEP: ${{ steps.compiledir-cache.outputs.cache-primary-key }}
-          PREFIX: pytensor-compiledir-p1-${{ matrix.os }}-${{ matrix.python-version }}-
+          PREFIX: pytensor-compiledir-p2-${{ matrix.os }}-${{ matrix.python-version }}-s${{ matrix.shard }}-
+          LEGACY_PREFIX: pytensor-compiledir-p1-${{ matrix.os }}-${{ matrix.python-version }}-
+          LOCK_HASH: ${{ hashFiles('poetry.lock') }}
+          SWEEP_VENVS: ${{ matrix.shard == 1 && matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12' }}
         run: |
           set -euo pipefail
           keys="$RUNNER_TEMP/superseded-cache-keys.txt"
@@ -577,6 +586,57 @@ jobs:
             echo "deleting superseded cache: $key"
             gh cache delete "$key" || true
           done < "$keys"
+
+          # The pre-2026-10-01 single-tree caches (p1): superseded outright.
+          gh cache list --key "$LEGACY_PREFIX" --limit 100 --json key \
+            --jq '.[].key' | while read -r key; do
+            [ -n "$key" ] && { echo "deleting legacy p1 cache: $key"; gh cache delete "$key" || true; }
+          done
+
+          # STALE POETRY VENVS. actions/setup-python's `cache: poetry` keys
+          # each venv by the poetry.lock hash, ~650 MB apiece, and nothing ever
+          # deletes the old-lock ones: measured 2026-10-01, the repository sat
+          # at 10.68 GB of its 10 GB budget, almost all of it venvs for locks
+          # that no longer exist (every lock change leaves a full set). Done by
+          # ONE job only (ubuntu 3.12 shard 1) so the matrix does not race.
+          #
+          # WHAT IS STALE, exactly (checked against the cache listing
+          # 2026-10-01): setup-python restores a venv only on an EXACT key
+          # match, so (a) an entry for any OTHER lock hash can never be
+          # restored again, and (b) an entry created by a pull request's runs
+          # (ref refs/pull/N/merge) is only ever readable by that PR, so once
+          # the PR is closed it is dead too.  Everything else is kept -- the
+          # current-lock master entries, and the entries of OPEN PRs (their
+          # reruns would otherwise rebuild).  Deleted by id with the ref in
+          # hand, because two entries can share a key across refs.
+          if [ "$SWEEP_VENVS" = "true" ]; then
+            open_prs=" $(gh pr list --state open --limit 200 --json number \
+              --jq '[.[].number] | map(tostring) | join(" ")') "
+            gh cache list --key "setup-python-" --limit 100 \
+              --json id,key,ref --jq '.[] | "\(.id) \(.ref) \(.key)"' |
+            while read -r id ref key; do
+              [ -z "$id" ] && continue
+              stale=""
+              case "$key" in
+                *"-$LOCK_HASH") ;;
+                *) stale="lock hash is not the current poetry.lock" ;;
+              esac
+              if [ -z "$stale" ]; then
+                case "$ref" in
+                  refs/pull/*/merge)
+                    n=${ref#refs/pull/}; n=${n%/merge}
+                    case "$open_prs" in
+                      *" $n "*) ;;
+                      *) stale="created by PR #$n, which is closed" ;;
+                    esac ;;
+                esac
+              fi
+              if [ -n "$stale" ]; then
+                echo "deleting venv cache $id ($ref): $stale -- $key"
+                gh cache delete "$id" || true
+              fi
+            done
+          fi
 
   # Installs WITHOUT poetry.lock, resolving dependencies fresh the way a user's
   # `pip install exozippy` does.
