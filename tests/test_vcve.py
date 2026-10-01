@@ -1264,6 +1264,42 @@ def test_each_draw_reports_the_branch_it_was_assigned(vcve_transit_fit):
     assert "orbit.ecc" in {p.label for p in system.plot_params}
 
 
+@pytest.mark.parametrize("flag", ["fitthermal", "fitreflect"])
+def test_a_fitted_occultation_turns_the_transit_only_default_off(
+    transit_lc, flag
+):
+    """
+    Given a transit-only orbit whose band fits the planet's emission (so the
+    light curve models the secondary eclipse),
+    When the parameterization defaults are resolved,
+    Then it samples sqrt(e)cos/sin omega and cos i, exactly as an RV curve
+      would make it -- one default rule, two triggers (JDE 2026-10-01) --
+      while an explicit `fitvcve: true` is still honored.
+
+    The occultation's timing measures e cos omega directly, which makes
+    V_c/V_e the wrong coordinate (examples/gj1214 forced onto it mixed
+    slowly, r_hat 1.3 on omega).
+    """
+    default = _transit_config(transit_lc, None)
+    default["band"][0][flag] = True
+    system = System(default, user_params=dict(_TRANSIT_PARAMS))
+    system.prepare()
+    assert system.orbit.ecc_modes == ["hk"]
+    assert system.orbit.inc_modes == ["cosi"]
+
+    plain = System(
+        _transit_config(transit_lc, None), user_params=dict(_TRANSIT_PARAMS)
+    )
+    plain.prepare()
+    assert plain.orbit.ecc_modes == ["vcve"]  # the default's own case
+
+    forced = _transit_config(transit_lc, True)
+    forced["band"][0][flag] = True
+    system = System(forced, user_params=dict(_TRANSIT_PARAMS))
+    system.prepare()
+    assert system.orbit.ecc_modes == ["vcve"]
+
+
 def _vcve_warnings(caplog, config):
     import logging
 
@@ -1295,7 +1331,14 @@ def test_vcve_warns_where_an_occultation_or_rvs_measure_e_omega(
     # The default's own case: transit-only, nothing else measures e.
     assert _vcve_warnings(caplog, _transit_config(transit_lc, None)) == []
 
+    # A fitted occultation is the second trigger of the SAME default rule as
+    # RVs: the default stays on sqrt(e) coordinates, so nothing to warn.
     occultation = _transit_config(transit_lc, None)
+    occultation["band"][0]["fitthermal"] = True
+    assert _vcve_warnings(caplog, occultation) == []
+
+    # An explicit fitvcve: true there is honored, and warned about.
+    occultation = _transit_config(transit_lc, True)
     occultation["band"][0]["fitthermal"] = True
     (msg,) = _vcve_warnings(caplog, occultation)
     assert "orbit 'b'" in msg and "transit 'inst0'" in msg

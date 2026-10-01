@@ -67,6 +67,42 @@ def amplitude_constrained_orbits(system, orbit):
     return constrained
 
 
+def occultation_datasets(system, orbit):
+    """Per orbit: the light curves that model its planet's OCCULTATION.
+
+    The explicit switch is the BAND's `fitthermal:` / `fitreflect:` -- it
+    gives the planet a free emission, so every transit file in that band
+    fits the secondary eclipse, whose timing measures e cos omega and whose
+    duration e sin omega.  Every transit light curve models every planet
+    (the assumption `Orbit._transit_only` already makes), so such a file
+    names every orbit with a planet in its companion group.
+
+    Returns {orbit index: [dataset description, ...]} (empty lists where
+    none).  A module function beside `amplitude_constrained_orbits` for the
+    same reason that one is: it is a fact about the (system, orbit) pair.
+    """
+    components = getattr(system, "active_components", None) or {}
+    out = {i: [] for i in range(orbit.n_elements)}
+    transit = components.get("transit")
+    band = components.get("band")
+    if transit is None or band is None:
+        return out
+    emitting = {
+        name
+        for name, th, rf in zip(band.names, band.fitthermal, band.fitreflect)
+        if th or rf
+    }
+    occ = [
+        f"transit '{n}' (band '{b}' fits the occultation)"
+        for n, b in zip(transit.names, transit.band_names)
+        if b in emitting
+    ]
+    for i in range(orbit.n_elements):
+        if any(t == "planet" for t, _ in orbit.companion_bodies[i]):
+            out[i] = list(occ)
+    return out
+
+
 class Orbit(Component):
     """
     Two-body Keplerian orbit between a primary and a companion body group
@@ -241,7 +277,16 @@ class Orbit(Component):
         """
         if in_topology(system, "transit") is None:
             return [False] * self.n_elements
-        constrained = amplitude_constrained_orbits(system, self)
+        # ONE rule, two triggers: an orbit something other than a transit
+        # duration measures (e, omega) of keeps the conventional coordinates.
+        # An RV/astrometric amplitude is the first; a fitted OCCULTATION (the
+        # band's fitthermal/fitreflect) is the second, because its timing
+        # pins e cos omega directly (JDE 2026-10-01: examples/gj1214 forced
+        # onto V_c/V_e mixed slowly along the ridge that makes).
+        constrained = set(amplitude_constrained_orbits(system, self))
+        constrained |= {
+            i for i, ds in occultation_datasets(system, self).items() if ds
+        }
         return [i not in constrained for i in range(self.n_elements)]
 
     def _chord_planet_indices(self):
@@ -329,24 +374,8 @@ class Orbit(Component):
                     "astrometryinstrument "
                     + ", ".join(f"'{n}'" for n in ast.names)
                 )
-        transit = components.get("transit")
-        band = components.get("band")
-        if transit is not None and band is not None:
-            emitting = {
-                name
-                for name, th, rf in zip(
-                    band.names, band.fitthermal, band.fitreflect
-                )
-                if th or rf
-            }
-            occ = [
-                f"transit '{n}' (band '{b}' fits the occultation)"
-                for n, b in zip(transit.names, transit.band_names)
-                if b in emitting
-            ]
-            for i in range(self.n_elements):
-                if any(t == "planet" for t, _ in self.companion_bodies[i]):
-                    out[i].extend(occ)
+        for i, ds in occultation_datasets(system, self).items():
+            out[i].extend(ds)
         return out
 
     def _warn_vcve_where_e_is_measured(self, system):
@@ -360,8 +389,9 @@ class Orbit(Component):
         examples/gj1214 with `fitvcve: true` (its JWST eclipse pins e cos w)
         reached r_hat 1.3 on omega at 4 x (400 + 400) where sqrt(e)cos/sin
         omega converges in 3 minutes (review 1.8.14, JDE 2026-10-01).  The
-        transit-only default already stays off for RV/astrometry; it cannot
-        see an occultation a priori, so this says so, once, naming the data.
+        same datasets keep the transit-only DEFAULT off (`_transit_only`), so
+        this fires only for an explicit `fitvcve: true`, which is honored --
+        once per orbit, naming the data.
         """
         if system is None:
             return

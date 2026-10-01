@@ -220,3 +220,40 @@ def test_several_branches_are_drawn_jointly_not_independently():
     # Independent draws from those marginals: mispaired ~ 2 p (1 - p).
     mispaired = 2 * p_one * (1 - p_two)
     assert mispaired > 0.4
+
+
+def test_a_resolved_trace_round_trips_through_netcdf_unresolved_twice(
+    tmp_path,
+):
+    """
+    Given a trace resolved and written to disk (what run.py does: the trace
+      on disk IS the branch-resolved posterior, JDE 2026-10-01),
+    When it is read back, as `recompute_trace: false` does,
+    Then it is recognized as resolved, its branch draws and Deterministics
+      are exactly what was written, and resolving it again RAISES rather than
+      re-drawing branches on draws that are no longer the primary branch.
+    """
+    from exozippy.branches import is_branch_resolved
+
+    system, model = _toy_system()
+    idata = _toy_idata(_exact_x_draws(2, 500, seed=4))
+    assert not is_branch_resolved(idata)
+    resolve_branch_draws(system, model, idata, cores=1)
+    path = tmp_path / "trace.nc"
+    idata.to_netcdf(str(path))
+
+    reloaded = az.from_netcdf(str(path))
+
+    assert is_branch_resolved(reloaded)
+    np.testing.assert_array_equal(
+        reloaded.sample_stats["branch_combination"].values,
+        idata.sample_stats["branch_combination"].values,
+    )
+    np.testing.assert_array_equal(
+        reloaded.posterior["d"].values, idata.posterior["d"].values
+    )
+    attrs = reloaded.sample_stats["branch_combination"].attrs
+    assert attrs["branch_labels"] == "toy"
+    assert branch_summary_lines(reloaded) == branch_summary_lines(idata)
+    with pytest.raises(RuntimeError, match="already branch-resolved"):
+        resolve_branch_draws(system, model, reloaded, cores=1)

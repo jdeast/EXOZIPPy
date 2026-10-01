@@ -25,7 +25,11 @@ from exozippy.samplers.ptde_async import ptde_async_sample
 from exozippy.system import KNOWN_BLOCK_KEYS, System
 
 from . import reporting
-from .branches import branch_summary_lines, resolve_branch_draws
+from .branches import (
+    branch_summary_lines,
+    is_branch_resolved,
+    resolve_branch_draws,
+)
 from .corner_utils import (
     collect_corner_samples,
     histogram_grid_degenerate,
@@ -1521,7 +1525,15 @@ def _run_fit(config, gui, user_params=None):
     # plots, the restart file -- must see the same draws.  The trace on disk
     # is rewritten with them, because mkparam and exozippy-modes read it from
     # there.
-    if system._branch_alternatives:
+    if system._branch_alternatives and is_branch_resolved(idata):
+        # A reused trace: run.py rewrote it resolved when it was sampled, so
+        # its draws ARE the assigned branches (JDE 2026-10-01: the trace on
+        # disk is the branch-resolved posterior).  Read, never re-resolved.
+        logger.info(
+            "trace is already branch-resolved (sample_stats"
+            "['branch_combination']); reusing its per-draw branches."
+        )
+    elif system._branch_alternatives:
         wrapup.stage("drawing each draw's branch combination (V_c/V_e roots)")
         lookup = system.get_parameter_lookup()
         rebranched = resolve_branch_draws(

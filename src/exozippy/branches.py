@@ -183,6 +183,18 @@ def branch_probabilities(prob, n_branches):
     ]
 
 
+def is_branch_resolved(idata):
+    """True when this trace's draws are already branch-resolved.
+
+    `resolve_branch_draws` stamps `sample_stats["branch_combination"]`, and
+    run.py rewrites the trace on disk with it, so a REUSED trace
+    (`recompute_trace: false`) arrives resolved: its Deterministics are the
+    assigned branches and must be read as they are, not resolved again.
+    """
+    ss = idata.get("sample_stats")
+    return ss is not None and "branch_combination" in ss
+
+
 def resolve_branch_draws(system, model, idata, param_lookup=None, cores=None):
     """Draw each posterior draw's branch combination and re-derive, in place.
 
@@ -193,6 +205,16 @@ def resolve_branch_draws(system, model, idata, param_lookup=None, cores=None):
     """
     if not system._branch_alternatives:
         return set()
+    if is_branch_resolved(idata):
+        # Its Deterministics are no longer the primary branch, so resolving
+        # again would treat assigned branches as if they were the as-built
+        # ones.  The caller asks is_branch_resolved first; reaching here is a
+        # bookkeeping bug.
+        raise RuntimeError(
+            "[branches] this trace is already branch-resolved "
+            "(sample_stats['branch_combination'] exists); it must not be "
+            "resolved twice."
+        )
     posterior = idata.posterior
     seed = posterior.attrs.get("random_seed")
     if seed is None:
