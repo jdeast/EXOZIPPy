@@ -2795,7 +2795,8 @@ def _dist_degeneracy(values):
     corner's 20-bin grid instead of arviz's 512.  The two must agree, so there
     is one implementation.
     """
-    x = np.asarray(values, dtype=float).ravel()
+    arr = np.asarray(values, dtype=float)
+    x = arr.ravel()
     x = x[np.isfinite(x)]
     if x.size == 0:
         return "no finite draws"
@@ -2807,6 +2808,27 @@ def _dist_degeneracy(values):
             f"range {hi - lo:.3g} around {lo:.10g} spans fewer than "
             f"{_KDE_GRID_LEN} float64 steps"
         )
+    # The dist column draws one KDE PER CHAIN (plot_trace_dist overlays the
+    # chains), so the pooled test above is not enough: one chain spanning a
+    # nonzero range narrower than the grid -- a single near-stuck chain, or a
+    # per-mode subset with a couple of draws in it -- makes numpy raise "Too
+    # many bins for data range" even though the pooled range is fine (it took
+    # down the ob09020 integration wrap-up, review 7.13.9).  An EXACTLY
+    # constant chain is not tested here: arviz handles that one itself (with a
+    # warning) and draws the remaining chains, as it always has.
+    if arr.ndim >= 2:
+        for c, chain in enumerate(arr.reshape(arr.shape[0], -1)):
+            cx = chain[np.isfinite(chain)]
+            if cx.size == 0:
+                continue
+            clo, chi = float(cx.min()), float(cx.max())
+            if clo != chi and histogram_grid_degenerate(
+                clo, chi, _KDE_GRID_LEN + 1
+            ):
+                return (
+                    f"chain {c} spans {chi - clo:.3g} around {clo:.10g}, "
+                    f"fewer than {_KDE_GRID_LEN} float64 steps"
+                )
     return None
 
 
