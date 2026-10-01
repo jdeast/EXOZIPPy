@@ -209,6 +209,63 @@ def test_rung_zero_is_the_returned_t1_population():
         np.testing.assert_array_equal(a["a"], b["a"])
 
 
+def test_the_scale_probe_runs_once_per_run_not_once_per_rung(monkeypatch):
+    """
+    Given a four-rung ladder and no measured whitening scales (the
+    ``measure_scales: false`` path, where PTDE probes for itself),
+    When the per-rung populations are built,
+    Then the probe runs exactly ONCE, and every rung's population is
+    bit-identical to what a fresh probe per rung produced.
+
+    The probe is a deterministic function of (seed 0, logp_fn) -- it draws
+    no random numbers and knows no temperature -- so a per-rung re-probe
+    re-derived the same scales at n_elements x O(10) serial logp calls per
+    rung.  On the ob09020 integration test (58 raw elements, two rungs) the
+    second probe was a large share of the fixture's cost.
+    """
+    from exozippy.samplers import _common
+    from exozippy.whitening import probe_scales
+
+    def _populations():
+        return build_rung_populations(
+            None,
+            None,
+            6,
+            _quad_logp,
+            np.random.default_rng(23),
+            _seed(),
+            temperatures=LADDER,
+            dispersion_spec=None,
+            raw_starts=[_seed()],
+            seed_indices=[0],
+        )[2]
+
+    calls = []
+
+    def _counting_probe(*args, **kwargs):
+        calls.append(1)
+        return probe_scales(*args, **kwargs)
+
+    monkeypatch.setattr(_common, "_probe_scales", _counting_probe)
+    shared = _populations()
+    assert len(calls) == 1
+
+    # The pre-change behaviour, reproduced: a fresh probe on every rung.
+    make_starts = _common._make_starts
+
+    def _no_cache(*args, **kwargs):
+        kwargs.pop("probe_cache")
+        return make_starts(*args, **kwargs)
+
+    monkeypatch.setattr(_common, "_make_starts", _no_cache)
+    per_rung = _populations()
+    assert len(calls) == 1 + len(LADDER)
+
+    for pop_a, pop_b in zip(shared, per_rung, strict=True):
+        for a, b in zip(pop_a, pop_b, strict=True):
+            np.testing.assert_array_equal(a["a"], b["a"])
+
+
 # ---------------------------------------------------------------------------
 # Clauses 6 and 7: the two ways a bad spec must fail loudly.
 # ---------------------------------------------------------------------------

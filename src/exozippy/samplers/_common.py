@@ -1412,6 +1412,7 @@ def _make_starts(
     overdisperse=None,
     dispersion=None,
     label="PTDE init",
+    probe_cache=None,
 ):
     """Generate n_chains starting points near one or more seeds (P4).
 
@@ -1455,6 +1456,15 @@ def _make_starts(
     absent (measure_scales: false, or standalone use), the probe runs as
     before.
 
+    ``probe_cache`` (optional, a dict) lets several calls around the SAME
+    seed share one probe: an empty dict is filled with this call's
+    ``(map_lp, scales)``, a filled one is used instead of probing.
+    build_rung_populations passes one per run, because the probe is a
+    deterministic function of (seed 0, logp_fn) -- no RNG, no temperature --
+    and re-running it per rung re-derived the identical scales at
+    n_elements x O(10) serial logp calls each: on the ob09020 integration
+    test (58 raw elements, 2 rungs) that was half of the fixture's cost.
+
     Returns (starts, chain_seed_index) where chain_seed_index[j] is the original
     seed index that chain j was drawn from (for trace-attr provenance).
     """
@@ -1492,10 +1502,14 @@ def _make_starts(
             ).reshape(np.shape(v))
             for k, v in raw_starts[0].items()
         }
+    elif probe_cache:
+        map_lp, scales = probe_cache["map_lp"], probe_cache["scales"]
     else:
         # Probe scales once from seed 0 (the canonical MAP-ish start); the same
         # per-parameter jitter scale is reused around every seed.
         map_lp, scales = _probe_scales(raw_starts[0], logp_fn)
+        if probe_cache is not None:
+            probe_cache["map_lp"], probe_cache["scales"] = map_lp, scales
     n_params = sum(v.size for v in raw_starts[0].values())
     # ``dispersion`` is the ABSOLUTE per-rung value from
     # resolve_start_dispersion (review 8.4.7).  None keeps the pre-8.4.7
@@ -1779,6 +1793,10 @@ def build_rung_populations(
     )
 
     populations = []
+    # Every rung disperses around the same seed 0 with the same logp_fn, so
+    # the scale probe (when raw_scales was not handed in) is measured ONCE
+    # and shared; see _make_starts' probe_cache.
+    probe_cache = {}
     for k in range(n_rungs):
         starts, idx = _make_starts(
             n_chains,
@@ -1791,6 +1809,7 @@ def build_rung_populations(
             overdisperse=overdisperse,
             dispersion=float(dispersions[k]),
             label="PTDE init" if k == 0 else f"PTDE init rung {k}",
+            probe_cache=probe_cache,
         )
         populations.append(starts)
         if k == 0:

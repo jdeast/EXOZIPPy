@@ -583,6 +583,20 @@ the maximum retention `max(1, ...)` used to produce (1.4.2). An unrecognized
 STRING still raises -- a misspelled opt-in is how a mode search silently stops
 running.
 
+**The start-dispersion probe runs ONCE per run, not once per rung.** With
+`measure_scales: false` there are no whitening scales to hand PTDE, so
+`_make_starts` probes the start itself (`whitening.probe_scales`, a serial
+loop of ~18 logp calls per raw element). `build_rung_populations` called it
+once per rung and each call re-derived identical scales: the probe is a
+deterministic function of (seed 0, logp_fn), with no RNG and no temperature.
+It now probes on the first rung and shares the result (`probe_cache`), which
+leaves every population bit-identical (`tests/test_start_dispersion.py`
+pins both the call count and the populations). Measured on the ob09020
+integration test, 58 raw elements at 0.37 s per logp: 6.6 minutes per
+probe, two of them 800 s of that fixture's 992 s locally -- and an
+eight-rung run with `measure_scales: false` paid it eight times. (The default,
+measured whitening, hands PTDE its scales and never probed per rung.)
+
 `_make_starts` measures the population it built against the probe scales and
 warns when the between-chain spread is under 1.0x of them
 (`warn_if_starts_underdispersed`). Rhat's between-chain term only means

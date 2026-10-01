@@ -405,8 +405,37 @@ def _kelt17_two_instrument_system(tmp_path, n_rm=40):
     return system, model, n_rm, len(rv) - n_rm
 
 
+@pytest.fixture(scope="module")
+def kelt17_two_instrument(tmp_path_factory):
+    """ONE build of the two-instrument RM system, shared by the two tests
+    below (--dist loadfile keeps this file on one worker, so the module
+    scope is shared rather than rebuilt).  The build runs with a spy on the
+    shared kernel entry point installed, so the row-indexing test can read
+    which times compute_rm_rv was handed; the spy is removed before the
+    model is returned and only records, so the logp/gradient test compiles
+    exactly the graph an unspied build produces.
+
+    Returns (system, model, n_rm, n_other, seen).
+    """
+    from exozippy.components import rm as rm_module
+
+    seen = []
+    original = rm_module.compute_rm_rv
+
+    def _spy(system, time, *args, **kwargs):
+        seen.append(time)
+        return original(system, time, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(rm_module, "compute_rm_rv", _spy)
+        system, model, n_rm, n_other = _kelt17_two_instrument_system(
+            tmp_path_factory.mktemp("kelt17_two_instrument")
+        )
+    return system, model, n_rm, n_other, seen
+
+
 def test_rm_is_evaluated_only_on_its_own_instrument_rows(
-    tmp_path, monkeypatch
+    kelt17_two_instrument,
 ):
     """
     Given: two RV instruments, only one of them tagged `rm: b`
@@ -418,20 +447,9 @@ def test_rm_is_evaluated_only_on_its_own_instrument_rows(
     83% wasted work on this split (the H2011 kernel is a 201 x 64 quadrature
     per row).
     """
-    # Arrange: spy on the shared kernel entry point
-    from exozippy.components import rm as rm_module
-
-    seen = []
-    original = rm_module.compute_rm_rv
-
-    def _spy(system, time, *args, **kwargs):
-        seen.append(time)
-        return original(system, time, *args, **kwargs)
-
-    monkeypatch.setattr(rm_module, "compute_rm_rv", _spy)
-
-    # Act
-    _system, _model, n_rm, n_other = _kelt17_two_instrument_system(tmp_path)
+    # Arrange / Act: the fixture built the system with a spy on the shared
+    # kernel entry point.
+    _system, _model, n_rm, n_other, seen = kelt17_two_instrument
 
     # Assert: the build_likelihood call (the one with a concrete length) sees
     # only the RM instrument's rows.  The plotting call takes a symbolic grid.
@@ -449,7 +467,9 @@ def test_rm_is_evaluated_only_on_its_own_instrument_rows(
     )
 
 
-def test_rm_two_instrument_logp_and_gradient_finite_on_both_backends(tmp_path):
+def test_rm_two_instrument_logp_and_gradient_finite_on_both_backends(
+    kelt17_two_instrument,
+):
     """
     Given: the same two-instrument RM system
     When: logp and dlogp are evaluated on the C backend and on JAX
@@ -460,7 +480,7 @@ def test_rm_two_instrument_logp_and_gradient_finite_on_both_backends(tmp_path):
     nuts_sampler="numpyro" (the standing house rule).
     """
     # Arrange
-    _system, model, _n_rm, _n_other = _kelt17_two_instrument_system(tmp_path)
+    _system, model, _n_rm, _n_other, _seen = kelt17_two_instrument
     point = model.initial_point()
 
     # Act

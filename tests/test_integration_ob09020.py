@@ -18,10 +18,22 @@ that broke), the galactic model and two RV instruments.
 Budget: seed_polish off, a two-rung PTDE ladder, three draws.  Per
 docs/testing.md ("A sampler budget too small to adapt cannot test a
 posterior") nothing here asserts a posterior quantity -- files, variable
-names, and the START are what this budget determines.  With the polish off
-the start is the relaxation engine's, i.e. the user's own seeds wherever the
-engine reproduces them exactly, so the start assertions are the user-start
-contract (PR #252), not golden values.
+names, the numerical validity of every draw, and the START are what this
+budget determines.  With the polish off the start is the relaxation
+engine's, i.e. the user's own seeds wherever the engine reproduces them
+exactly, so the start assertions are the user-start contract (PR #252), not
+golden values.
+
+WHERE THE TIME WENT (measured 2026-10-01; CI ubuntu 3.12 billed this
+fixture 1329 s, the slowest file in the suite and so the --dist loadfile
+floor of any shard that drew it).  Almost all of it was PTDE's own scale
+probe: with measure_scales off PTDE probes the start itself, a serial loop
+of ~18 logp calls per raw element (~1060 calls for 58 elements), and it ran
+once PER RUNG, re-deriving identical scales -- fixed in
+samplers/_common.build_rung_populations, which now probes once.  Locally one
+probe was 6.6 min at 0.37 s per logp with every 10th row kept; at every 40th
+row a logp is 0.16 s.  Build, start plots, the ~100 sampling evaluations and
+the wrap-up are the rest.
 
 Marked 'slow'; excluded from fast CI with ``pytest -m "not slow"``.
 """
@@ -53,7 +65,14 @@ _NAME = "OGLE-2009-BLG-020"
 # CAO's `mask: [0]` (a row INDEX, on-disk order) still names the failed
 # measurement it was written for.  Files under _THIN_MIN_ROWS rows (CT13_I,
 # CT13_V, FarmCove, Possum) are left whole.
-_THIN_EVERY = 10
+#
+# 40, not 10 (2026-10-01): measured 0.373 s -> 0.159 s per logp, and the
+# probe is ~1060 of them.  Nothing asserted below reads the data density:
+# the start table is the relaxation engine's seeds, the plots and variable
+# names are topology, and the validity check is per draw.  Past ~40 the
+# untouched small files and the fixed per-call overhead dominate, so a
+# sparser thinning buys little.
+_THIN_EVERY = 40
 _THIN_MIN_ROWS = 100
 
 
@@ -120,6 +139,24 @@ def ob09020_result(tmp_path_factory):
             "measure_scales": False,
             "recompute_trace": True,
         }
+        # The wrap-up's invalid-draw gate must not decide this test: at this
+        # size it cannot mean what it means on a real fit (review 7.13.9,
+        # seen twice on CI: 5 of 12 draws "invalid" against the 1% default,
+        # which on a few dozen draws fails on ANY rejected draw).  The gate
+        # pools four reasons.  Three are numerical -- a non-finite raw
+        # value, a non-finite lp, an lp past the runaway ceiling -- and the
+        # fourth, "raw-z", is a robust z-score against the median/MAD of the
+        # trace itself, which on a few dozen draws straight out of a
+        # population dispersed 3 probe-sigma around the start (tune 0) flags
+        # whichever chains landed in the tail: a statement about the sample
+        # size, not a fault.  Which class fired on CI was not captured.
+        # So the gate is forced (tests/test_runner.py's PTDE config does the
+        # same, for the same reason) and the three NUMERICAL classes are
+        # asserted directly on the trace by
+        # test_run_fit_ob09020_draws_are_numerically_valid, which names the
+        # offending variable if one fires.  Test-local: the shipped config
+        # and the production default are untouched.
+        config["modes"] = {"force": True}
 
         run_fit(config)
     finally:
@@ -162,6 +199,47 @@ def test_run_fit_ob09020_trace_file_written(ob09020_result):
     assert (out_dir / f"{_NAME}_trace.nc").exists()
     log_text = (out_dir / f"{_NAME}.log").read_text()
     assert "Traceback" not in log_text, log_text[-3000:]
+
+
+def test_run_fit_ob09020_draws_are_numerically_valid(ob09020_result):
+    """
+    Given the ob09020 example with a minimal PTDE budget (the invalid-draw
+      gate forced, see the fixture),
+    When the trace is read back,
+    Then every sampled raw coordinate of every draw is finite, and every
+      draw's lp is finite and inside the runaway-lp ceiling -- no draw would
+      be rejected for a NUMERICAL reason (nonfinite-raw, nonfinite-lp,
+      lp-ceiling) -- and if the run logged the forced gate's warning, those
+      three reasons are absent from it.  Only the sample-size-dependent
+      "raw-z" class is left to the forced gate.
+    """
+    from exozippy.outputs.modes import DEFAULT_LP_ABS_MAX
+
+    out_dir, _ = ob09020_result
+    idata = az.from_netcdf(str(out_dir / f"{_NAME}_trace.nc"))
+
+    raw_vars = sorted(
+        v for v in idata.posterior.data_vars if str(v).endswith("_raw")
+    )
+    # Guard against vacuity: the finiteness check is over these.
+    assert len(raw_vars) >= 10, raw_vars
+    n_draws = idata.posterior.sizes["chain"] * idata.posterior.sizes["draw"]
+    assert n_draws > 0
+    for v in raw_vars:
+        vals = np.asarray(idata.posterior[v].values, dtype=float)
+        assert np.all(np.isfinite(vals)), f"non-finite draw of {v}"
+
+    lp = np.asarray(idata.sample_stats["lp"].values, dtype=float)
+    assert lp.size == n_draws
+    assert np.all(np.isfinite(lp)), lp
+    assert np.all(np.abs(lp) <= DEFAULT_LP_ABS_MAX), lp
+
+    log_text = (out_dir / f"{_NAME}.log").read_text()
+    for m in re.finditer(
+        r"numerically invalid.*reasons=(\{[^}]*\})", log_text
+    ):
+        for numerical in ("nonfinite-raw", "nonfinite-lp", "lp-ceiling"):
+            assert numerical not in m.group(1), m.group(0)
 
 
 def test_run_fit_ob09020_start_plots_written(ob09020_result):

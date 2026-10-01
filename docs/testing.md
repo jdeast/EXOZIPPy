@@ -275,14 +275,20 @@ check and an IDENTITY between a derived value and its parents all survive
 
 `tests/test_integration_ob09020.py` is the microlensing twin of the kelt4 test
 (PTDE on a two-rung ladder, `seed_polish: false`, `measure_scales: false`,
-three draws, on a COPY whose large photometry files keep every 10th data row
+three draws, on a COPY whose large photometry files keep every 40th data row
 -- one logp of the full VBMicrolensing finite-source model costs ~3 s, and
 every scale probe, whitening's or PTDE's own, is a serial loop of tens of
 evaluations per raw element, so at full size the probe alone is an hour; the
 config itself is untouched) and asserts
 exactly that class of quantity: the trace and start-plot files, the posterior
-variable names, and -- with the polish off -- the user-start contract on the
-seeds the relaxation engine reproduces exactly. It exists because the shipped
+variable names, the NUMERICAL validity of every draw (finite raw values and
+lp, lp inside the runaway ceiling), and -- with the polish off -- the
+user-start contract on the seeds the relaxation engine reproduces exactly.
+The wrap-up's invalid-draw gate is forced there (`modes: {force: true}`,
+test-local), because on a few dozen untuned draws its 1% threshold fails on
+any single rejection and one of its four reasons, `raw-z`, is a z-score
+against the trace's own median/MAD -- a property of the sample size (review
+7.13.9); the three numerical reasons are asserted directly instead. It exists because the shipped
 microlensing examples were otherwise only `prepare()`-tested or replayed for
 their logp terms, and `examples/ob09020` shipped from 2026-09-07 to 09-25 with a
 TypeError in its first start-point plot (the orbit-derived lens geometry listed
@@ -479,6 +485,66 @@ another's 11:
   when any file is absent (`scripts/pytest_shard.py --balance-json` prints the same
   numbers for a human). There is no per-test timing logger to add: the artifacts ARE the
   per-test timing on the hardware that runs the suite.
+
+### Per-test time budget
+
+**60 s per test phase (setup / call / teardown), 300 worker-seconds per
+file**, checked on every CI job by `scripts/check_test_budget.py` from the
+`--durations=0` transcript that job already writes. Over-budget phases and
+files are listed on the job summary page of every job and raised as
+`::warning::` annotations on the pull request from the ubuntu 3.12 leg only
+(one set per run, not four). It is a WARNING, never a failure: runner speed
+varies by +/-40% job to job and a cold compile cache can triple a build-only
+test, so a red here would fire for reasons that are not in the diff and teach
+people to re-run instead of read. The point is that a slow test shows up on
+the pull request that made it slow, instead of weeks later in a durations
+refresh.
+
+Why these two numbers. A job's wall clock is `~100 s fixed + max(shard
+worker-seconds / workers, slowest FILE serial)` (`docs/testing-cache.md`),
+and `--dist loadfile` runs a whole file on one worker -- so the slowest file
+is a FLOOR under every job that draws it, whatever the shard count.
+`test_integration_ob09020.py` was that floor on 2026-10-01 at 1329 s; at 4
+shards x 4 workers the per-worker share of ~18700 worker-seconds is ~1170 s,
+so one file of that size sets the job by itself. 300 s is roughly a quarter
+of that share: a file past it is on its way to setting the floor and should
+be split or trimmed. 60 s per phase is where a structure test that samples,
+or a fit fixture whose budget nobody re-checked, usually shows up first.
+
+**What the over-budget list mostly is, and why it is not all actionable from
+a test.** Profiled 2026-10-01 (a phase timer over `prepare`, `build_model`,
+`compile_logp`/`compile_dlogp` and gcc): the heavy build-and-evaluate tests
+are C-COMPILE-bound on CI, not test-bound. `test_band_autopin_ld`'s mixed-law
+test costs 296 s locally with its graph cold and 32-76 s warm;
+`test_vcve.py::test_each_vcve_orbit_adds_one_branch[modes0-2-True]` (413 s on
+CI) is 220 s cold and 27 s warm, ~90% of it gcc on the two-branch mixture's
+logp+dlogp, which is twice a plain model's graph; `test_rossiter.py` is 684 s
+on CI and 106 s warm. Only shard 1's compiledir is saved
+(`docs/testing-cache.md`), so a graph that lives in shards 2-4 is compiled
+cold on every run. Those tests already do no sampling; what would cut them
+is a cache that holds their graphs, which is a cache-budget decision, not a
+test change. Compiling logp and dlogp in ONE function was measured and does
+not help (vcve: 184 s cold, 23 s warm, against 19 s warm separately).
+
+Real findings from the same pass, fixed in the PR that added the check:
+
+| test | before (CI / local) | after (local) | what it was |
+|---|---|---|---|
+| `test_integration_ob09020.py` (fixture) | 1329 s / 992 s | 283 s | PTDE probed the start once PER RUNG (two ~400 s probes, identical); now once. Photometry thinned 40x instead of 10x (0.37 -> 0.16 s per logp) |
+| `test_robust_likelihood.py::test_outlier_prob_at_data_flags_a_planted_outlier` | 352 s / 203 s | 4.5 s | 193 s of sympy: a pinned mass against a live K hint made the engine solve the K relation for `ecc`; seeding e = 0 skips it |
+
+Deliberately left over budget, so a later sweep does not re-litigate them:
+`test_runner.py::test_run_without_flag_writes_no_status` (JDE-kept, below),
+the two GUI lifecycle tests (`test_runner_lifecycle.py`,
+`test_run_endpoints.py`: a real subprocess fit that must reach 100 draws, so
+the budget is the run, not the assertion), and `test_integration_kelt4.py`'s
+fixture (`tune: 2, draws: 1, chains: 1` already; the time is the polish, the
+NUTS compile and a 24 s wrap-up).
+
+```bash
+python scripts/check_test_budget.py durations.txt            # summary only
+python scripts/check_test_budget.py /tmp/dur/*/durations.txt --annotate
+```
 
 ### Looking for tests to cut: `scripts/find_redundant_tests.py`
 

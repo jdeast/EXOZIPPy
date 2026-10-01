@@ -904,9 +904,19 @@ def test_outlier_prob_at_data_flags_a_planted_outlier(tmp_path):
         # outlier-polluted mean -- +7.5 m/s here -- which is exactly the kind
         # of pull the mixture exists to undo during sampling, but this test
         # evaluates at the start point.)
+        #
+        # The circular-orbit seed is not physics, it is cost (measured
+        # 2026-10-01: prepare() 57 s -> 2.3 s, CI 352 s for the whole test).
+        # With the mass pinned and the data-derived K hint still live, the
+        # relaxation engine reconciles the two by solving the K relation for
+        # orbit.ecc symbolically (41 s) and then the V_c/V_e relation for
+        # omega (13 s).  Seeding e = 0 resolves ecc first, so neither solve
+        # is attempted; a flat curve does not depend on e anyway.
         extra_params={
             "planet.b.mass": {"initval": 1e-5, "sigma": 0},
             "rvinstrument.A_inst.gamma": {"initval": 0.0},
+            "orbit.b.secosw": {"initval": 0.0},
+            "orbit.b.sesinw": {"initval": 0.0},
         },
     )
     rv_comp = system.rvinstrument
