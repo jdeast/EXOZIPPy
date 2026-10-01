@@ -405,10 +405,10 @@ jobs:
           path: durations.txt
           if-no-files-found: warn
 
-      # The conftest prunes at session START, so at this point the directories
-      # hold the budget plus everything this run compiled. Trim again so the
-      # saved artifact is a bounded size rather than growing by one run's
-      # worth on every merge.
+      # The conftest prunes at session START, so at this point the shared
+      # tree holds the budget plus everything this run compiled and promoted
+      # at exit. Trim again so the saved artifact is a bounded size rather
+      # than growing by one run's worth on every merge.
       #
       # --include-worker-dirs is what makes that sentence true, and its
       # absence is why it was false. Without it this pruned only the
@@ -437,9 +437,18 @@ jobs:
           && matrix.shard == 1
         run: |
           set -euo pipefail
-          export PYTENSOR_FLAGS="base_compiledir=$HOME/.pytensor-pytest"
+          # PER-RUN LAYOUT (review 2.13.5, docs/testing-cache.md): the suite
+          # compiles in base/runs/<token>/ and, at exit, moves what it
+          # compiled into base/shared -- so by now base/shared is the ONE
+          # canonical tree, and it is all this job saves. --suite-base takes
+          # the suite's own base/.lock, reaps any dead run directory, prunes
+          # base/shared to the budget and sweeps stranded platform trees
+          # (a runner kernel bump) inside it. PYTENSOR_FLAGS is only there so
+          # the script's pytensor import does not create ~/.pytensor; the
+          # top-level compiledir_* it creates instead is deleted below.
+          export PYTENSOR_FLAGS="base_compiledir=$RUNNER_TEMP/pytensor-cli"
           poetry run python scripts/pytensor_cache_budget.py \
-            --max-entries 1800 --sweep-other-platforms --include-worker-dirs
+            --suite-base "$HOME/.pytensor-pytest" --max-entries 1800
 
           # SAVE ONE CANONICAL TREE, NOT ONE PER WORKER. The worker
           # compiledirs are ~95% redundant -- each holds ~1500 of the 1564
@@ -450,34 +459,25 @@ jobs:
           # shards would have wanted ~12 GB against GitHub's 10 GB
           # repository-wide budget.
           #
-          # The next run reconstitutes the others: the root conftest seeds
-          # every missing worker compiledir from the warmest one it finds,
-          # hard-linking the write-once files (.so and .cpp, 98.7% of the
-          # bytes) and copying only key.pkl, which is the single file PyTensor
-          # rewrites in place. Measured on 398 entries: 5.3 s and 7.1 MB of
-          # real disk, against 53.6 s and 218 MB for a full copy.
+          # The next run reconstitutes the worker trees: the root conftest
+          # seeds every worker of a run from base/shared, hard-linking the
+          # write-once files (.so and .cpp, 98.7% of the bytes) and copying
+          # only key.pkl, which is the single file PyTensor rewrites in place.
           #
-          # gw0 rather than "the warmest": they are within a few percent of
-          # each other, and choose_seed_source() picks the warmest at restore
-          # time anyway, so there is nothing to gain from being clever here.
-          #
-          # The CONTROLLER's compiledir goes too, and it is not a rounding
-          # error. Under -n it is the one directory no worker ever writes to,
-          # so everything in it is stale -- yet it was being saved on every
-          # run: measured on the first master run after the prune fix, the
-          # macOS tree was 5055 entries as controller 1800 + gw0 1578 +
-          # gw1 1677. Dropping it as well as gw1 makes the artifact ~3.2x
-          # smaller rather than ~2x. PyTensor recreates the directory on
-          # import, and the conftest seeds the workers from gw0.
+          # Everything else under the base goes: runs/ (empty after a clean
+          # exit), and the PRE-2.13.5 trees (gw* and the top-level
+          # compiledir_*) that a cache saved before the layout change still
+          # carries. The first run after the change seeded its workers from
+          # that old gw0 (choose_run_seed_source) and promoted it all into
+          # base/shared, so nothing is lost by dropping them -- and keeping
+          # them would save two copies of the same tree.
           before=$(du -sm "$HOME/.pytensor-pytest" | cut -f1)
           find "$HOME/.pytensor-pytest" -mindepth 1 -maxdepth 1 \
-            -name 'gw*' ! -name 'gw0' -exec rm -rf {} +
-          find "$HOME/.pytensor-pytest" -mindepth 1 -maxdepth 1 \
-            -name 'compiledir_*' -exec rm -rf {} +
+            ! -name 'shared' ! -name '.lock' -exec rm -rf {} +
           after=$(du -sm "$HOME/.pytensor-pytest" | cut -f1)
-          echo "compiledir tree trimmed to one canonical worker copy:" \
+          echo "compiledir tree trimmed to the one shared tree:" \
             "${before} MB -> ${after} MB"
-          ls -1 "$HOME/.pytensor-pytest"
+          ls -1A "$HOME/.pytensor-pytest" "$HOME/.pytensor-pytest/shared"
 
       # See the long comment on the restore step for why this is master-only.
       - name: Save the PyTensor compile cache

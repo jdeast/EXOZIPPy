@@ -7,13 +7,16 @@ libraries below read their environment once, when they first load, so setting
 these variables here is early enough and setting them later would be a no-op.
 
 Two unrelated concerns live here for that one reason. Thread pinning comes
-first because it has to; the PyTensor compile cache follows.
+first because it has to; the PyTensor compile cache follows, with the hook
+that names the compiledir race (review 2.13.5) at the very end.
 """
 
+import atexit
 import importlib.util
 import os
 import shlex
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -68,8 +71,8 @@ for _var in (
 #      warm cache, which is the case that hurts most here -- a fresh worktree
 #      would otherwise pay a full cold compile.
 #
-#   2. That directory is bounded by ENTRY COUNT, pruned least-recently-used on
-#      the controller before any worker starts (see pytest_configure below).
+#   2. Its shared tree is bounded by ENTRY COUNT, pruned least-recently-used
+#      at session start, under a lock (see _start_run below).
 #      Count, because the walk is linear in it. Not bytes, and above all not
 #      AGE: ``pytensor-cache cleanup`` only deletes entries untouched for 31
 #      days, and on a repo whose suite runs daily nothing ever is -- the
@@ -82,10 +85,10 @@ for _var in (
 _COMPILEDIR_ENV = "EXOZIPPY_TEST_COMPILEDIR"
 _BUDGET_ENV = "EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES"
 
-# PER COMPILEDIR, not a total across the tree -- see the per-worker section
-# below, and enforce_budget_tree's docstring for why that is the right
-# denominator (each worker walks only its own directory, so one directory's
-# entry count is what the startup walk is linear in).
+# Applied to the SHARED tree (base/shared/compiledir_*), the one tree every
+# run seeds its workers from (see "One private compiledir root PER RUN"
+# below). Each worker walks its own seeded copy, so the shared tree's entry
+# count is what every worker's startup walk is linear in.
 #
 # The number is sized against ONE run's per-worker working set. A full run
 # creates 1564 distinct entries, and measurement shows a worker's own
@@ -93,15 +96,14 @@ _BUDGET_ENV = "EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES"
 # because most of what gets compiled is shared infrastructure that every
 # file's model builds, not something specific to the files that worker drew.
 # So the budget has to clear ~1600 or a run would evict entries it still
-# needs, and there is no point going far above it: the headroom that 3000
-# used to buy ("several worktrees") is not available at this denominator,
-# because with W workers the tree now holds up to (W + 1) x this.
+# needs, and there is no point going far above it.
 #
 # 3000 was the old value and it was applied to the CONTROLLER's compiledir,
 # which under -n is the one directory no worker ever reads. It therefore
 # bounded nothing: the controller sat at 2280 entries and never hit 3000,
 # while the six directories that do get read grew without any bound at all.
 _DEFAULT_MAX_ENTRIES = 2000
+
 
 _raw_compiledir = os.environ.get(_COMPILEDIR_ENV)
 if _raw_compiledir is None:
@@ -110,6 +112,110 @@ elif _raw_compiledir.strip() == "":
     _BASE_COMPILEDIR = None
 else:
     _BASE_COMPILEDIR = Path(_raw_compiledir).expanduser()
+
+
+def _load_budget_module():
+    """Import scripts/pytensor_cache_budget.py by path.
+
+    By path, and not by putting scripts/ on sys.path: that directory holds
+    ``getdata.py``, ``mkparam.py`` and ``mkticsed.py``, whose names would then
+    become importable top-level modules and shadow nothing today but are one
+    rename away from shadowing something. Loading the single file we want
+    keeps the blast radius at that file.
+    """
+    name = "_pytensor_cache_budget"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = Path(__file__).parent / "scripts" / "pytensor_cache_budget.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise ImportError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    # Registered BEFORE exec_module, per the importlib docs: @dataclass
+    # resolves cls.__module__ through sys.modules while the class body is
+    # being processed, and raises AttributeError on None if it is missing.
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+# ---------------------------------------------------------------------------
+# One private compiledir root PER RUN (review 2.13.5)
+# ---------------------------------------------------------------------------
+# The base above is SHARED -- across worktrees, deliberately, so a fresh
+# worktree starts warm -- and until 2026-09-30 every run's xdist workers
+# compiled straight into ``base/gwN``. Two suites started on one machine
+# (an agent's targeted run beside a pre-push full suite, two pushes a minute
+# apart) therefore shared gw0..gwN, and each controller's startup prune
+# deleted the other's in-flight compiles: an entry PyTensor is still
+# building has no key.pkl yet, which is exactly what the prune calls broken.
+# The victims failed on a ``compiledir_*/tmp...`` path in one of three
+# spellings -- "cannot open output file", "dlimport", or
+# ``ModuleNotFoundError: No module named 'tmp...'`` -- and looked like a dozen
+# real failures (26 failed + 11 errors on 2026-09-30).
+#
+# Now each run (the xdist CONTROLLER, or the single -n0 process) creates
+# ``base/runs/<token>/`` at import, compiles only there -- ``<token>/gwN`` per
+# worker, ``<token>`` itself for -n0 -- seeds it from ``base/shared`` by hard
+# link in pytest_configure, and at exit moves what it compiled back into
+# ``base/shared`` and deletes itself. Nothing ever compiles in the shared
+# tree, so pruning it cannot reach a live run. The mechanics, the locking
+# and the liveness rule are in pytensor_cache_budget.py ("Per-RUN
+# compiledirs") and docs/testing-cache.md.
+#
+# The run directory reaches the workers through this variable, which the
+# controller ALWAYS sets when it manages the cache -- to the run directory,
+# or to "unmanaged" when it deliberately does not (an explicit
+# base_compiledir in PYTENSOR_FLAGS, or no flock on this platform). A worker
+# that finds it unset has a controller that did not run this file, which no
+# correct setup produces, so that raises rather than guessing a layout.
+_RUN_DIR_ENV = "_EXOZIPPY_TEST_RUN_DIR"
+_UNMANAGED = "unmanaged"
+
+_worker = os.environ.get("PYTEST_XDIST_WORKER")
+_RUN = None  # the controller's RunDir handle
+_RUN_DIR = None  # this run's private root, in the controller and the workers
+_unmanaged_reason = None
+
+
+def _user_sets_base_compiledir(flags):
+    return any(
+        part.strip().startswith("base_compiledir=")
+        for part in flags.split(",")
+    )
+
+
+if _BASE_COMPILEDIR is not None:
+    if _worker:
+        _from_controller = os.environ.get(_RUN_DIR_ENV)
+        if _from_controller is None:
+            raise RuntimeError(
+                f"xdist worker {_worker} found no {_RUN_DIR_ENV} in its "
+                "environment: the controller did not run the root conftest, "
+                "so this worker cannot know which per-run compiledir is its "
+                "own (review 2.13.5)"
+            )
+        if _from_controller != _UNMANAGED:
+            _RUN_DIR = Path(_from_controller)
+    else:
+        _budget = _load_budget_module()
+        if _user_sets_base_compiledir(os.environ.get("PYTENSOR_FLAGS", "")):
+            _unmanaged_reason = "PYTENSOR_FLAGS sets base_compiledir itself"
+        elif _budget.fcntl is None:  # pragma: no cover - Windows
+            _unmanaged_reason = "this platform has no fcntl.flock"
+        else:
+            _RUN = _budget.create_run_dir(_BASE_COMPILEDIR)
+            _RUN_DIR = _RUN.path
+        os.environ[_RUN_DIR_ENV] = str(_RUN_DIR) if _RUN_DIR else _UNMANAGED
+        if _unmanaged_reason:
+            warnings.warn(
+                f"the suite's compiledir {_BASE_COMPILEDIR} is UNMANAGED "
+                f"because {_unmanaged_reason}: no per-run directory, no "
+                "seeding, no budget, and two concurrent suites on that base "
+                "can corrupt each other (review 2.13.5)",
+                RuntimeWarning,
+                stacklevel=1,
+            )
 
 if _BASE_COMPILEDIR is not None:
     if "pytensor" in sys.modules:
@@ -128,11 +234,13 @@ if _BASE_COMPILEDIR is not None:
         # Ours goes FIRST and any pre-existing flags are appended, because
         # parse_config_string() builds a dict left to right, so a duplicate
         # key later in the string wins. A developer who exported their own
-        # base_compiledir therefore still gets it.
+        # base_compiledir therefore still gets it (and the run is then
+        # unmanaged, above).
         _existing = os.environ.get("PYTENSOR_FLAGS", "")
+        _target = _BASE_COMPILEDIR if _RUN_DIR is None else _RUN_DIR
         _ours = ",".join(
             [
-                f"base_compiledir={shlex.quote(str(_BASE_COMPILEDIR))}",
+                f"base_compiledir={shlex.quote(str(_target))}",
                 # PyTensor serializes ALL compilation behind one lock per
                 # compiledir, so under -n 6 the six workers queue for it. Its
                 # default acquire timeout is 120 s (compile__wait * 24), and
@@ -158,9 +266,31 @@ if _BASE_COMPILEDIR is not None:
                 "compile__timeout=600",
             ]
         )
-        os.environ["PYTENSOR_FLAGS"] = ",".join(
-            p for p in (_ours, _existing) if p
-        )
+        _flags = ",".join(p for p in (_ours, _existing) if p)
+        if _worker:
+            # Per-xdist-worker: see the next section. APPENDED, as the
+            # rightmost base_compiledir, and that position is load-bearing:
+            # a worker INHERITS the controller's PYTENSOR_FLAGS, which already
+            # names the run directory, so anything earlier in the string
+            # loses to it. Putting the worker's directory first instead sent
+            # every worker of a run into ONE unseeded tree, ``<run>/
+            # compiledir_*``: the run stayed correct and recompiled every
+            # graph it needed on every run, which is how it was caught (a
+            # warm subset 3x slower, 273 entries "promoted" per run that were
+            # all duplicates by module hash).
+            if _RUN_DIR is not None:
+                _worker_base = _RUN_DIR / _worker
+            else:
+                # UNMANAGED run: the pre-2.13.5 suffix on whatever base won.
+                _base = None
+                for _part in _flags.split(","):
+                    if _part.strip().startswith("base_compiledir="):
+                        _base = _part.split("=", 1)[1].strip().strip("'\"")
+                _worker_base = Path(_base) / _worker
+            _flags = ",".join(
+                [_flags, "base_compiledir=" + shlex.quote(str(_worker_base))]
+            )
+        os.environ["PYTENSOR_FLAGS"] = _flags
 
 # ---------------------------------------------------------------------------
 # Per-xdist-worker compiledir
@@ -175,69 +305,29 @@ if _BASE_COMPILEDIR is not None:
 # the largest compile at the wrong moment died -- first the KMT provenance
 # fixtures behind a 122-compile seeding storm (fixed at the source), then the
 # kelt4 hierarchical logp, the suite's biggest single compile, which passes
-# alone in ~143 s.  A worker suffix on the FINAL winning base_compiledir
-# removes the shared lock entirely; the price is duplicated compiles of
-# common ops across workers, paid in parallel instead of in a queue.
-# Appended as the rightmost flag, so it wins whatever base won above
-# (parse_config_string builds its dict left to right).
+# alone in ~143 s.  A worker suffix (``<run>/gwN``) removes the shared lock
+# entirely; the price is duplicated compiles of common ops across workers,
+# paid in parallel instead of in a queue.
 #
-# The OTHER price, which went unpaid for weeks: these directories are not
-# where pytensor.config points in the controller, so the budget below has to
-# be walked over them explicitly. It was not, and they grew without bound --
-# locally to six directories of ~1500 entries each, and in CI to a saved
-# cache artifact that got bigger on every master merge until the
-# repository-wide 10 GB budget started evicting the Zenodo and ephemeris
-# caches that the suite cannot cheaply re-download. _prune_compiledir now
-# covers the whole tree; do not "simplify" it back to pytensor.config's
-# single directory.
-_worker = os.environ.get("PYTEST_XDIST_WORKER")
-if _worker and "pytensor" not in sys.modules:
-    _flags = os.environ.get("PYTENSOR_FLAGS", "")
-    _base = None
-    for _part in _flags.split(","):
-        if _part.strip().startswith("base_compiledir="):
-            _base = _part.split("=", 1)[1].strip().strip("'\"")
-    if _base:
-        os.environ["PYTENSOR_FLAGS"] = ",".join(
-            part
-            for part in (
-                _flags,
-                "base_compiledir=" + shlex.quote(str(Path(_base) / _worker)),
-            )
-            if part
-        )
-
-
-def _load_budget_module():
-    """Import scripts/pytensor_cache_budget.py by path.
-
-    By path, and not by putting scripts/ on sys.path: that directory holds
-    ``getdata.py``, ``mkparam.py`` and ``mkticsed.py``, whose names would then
-    become importable top-level modules and shadow nothing today but are one
-    rename away from shadowing something. Loading the single file we want
-    keeps the blast radius at that file.
-    """
-    name = "_pytensor_cache_budget"
-    if name in sys.modules:
-        return sys.modules[name]
-    path = Path(__file__).parent / "scripts" / "pytensor_cache_budget.py"
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:  # pragma: no cover - defensive
-        return None
-    module = importlib.util.module_from_spec(spec)
-    # Registered BEFORE exec_module, per the importlib docs: @dataclass
-    # resolves cls.__module__ through sys.modules while the class body is
-    # being processed, and raises AttributeError on None if it is missing.
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+# The OTHER price: duplicated entries. Each worker tree is seeded from the
+# shared one at startup and promotes only what it newly compiled, so the
+# duplicates live only for one run and the shared tree holds one copy.
 
 
 # Filled in by pytest_configure on the controller and read back by
-# pytest_report_header. A module global rather than an attribute stapled onto
-# ``config``: the controller is a single process, and pytest's Config is not
-# ours to grow attributes on.
-_compiledir_summary = None
+# pytest_report_header and the exit hook. Module globals rather than
+# attributes stapled onto ``config``: the controller is a single process, and
+# pytest's Config is not ours to grow attributes on.
+_compiledir_summary = []
+_PLATFORM_NAME = None
+
+# How long a run waits for base/.lock before SKIPPING the step instead.
+# Exclusive holders (another run's prune or promotion) hold it for seconds;
+# a shared holder is a seeding pass, ~2-30 s. Skipping is always benign --
+# see BaseLock.
+_PRUNE_LOCK_TIMEOUT = 120.0
+_SEED_LOCK_TIMEOUT = 600.0
+_PROMOTE_LOCK_TIMEOUT = 600.0
 
 
 def _xdist_worker(config):
@@ -248,87 +338,127 @@ def _xdist_active(config):
     return bool(config.getoption("numprocesses", 0) or 0)
 
 
-def _prune_compiledir(config):
-    """Bound the suite's compiledirs. Controller only, before workers exist.
+def _start_run(config):
+    """Reap dead runs, bound the shared tree, seed this run. Controller only.
 
-    Doing it here rather than in a fixture is what makes the prune safe
-    without taking PyTensor's compile lock: ``pytest_configure`` on the
-    controller runs before xdist spawns a single worker, so nothing else is
-    walking the directories yet. It is also the only moment at which the
-    per-worker trees can be pruned at all -- a worker cannot prune its own,
-    because by the time it runs it is already holding the ModuleCache it
-    would be deleting under itself.
+    Before any worker exists, because a worker cannot seed its own
+    compiledir: by the time its pytest_configure runs it is about to build
+    the ModuleCache it would be seeding.
 
-    EVERY compiledir in the tree, not just the one pytensor.config resolves.
-    That distinction is the whole point: this process is the controller, so
-    what it resolves is ``base/compiledir_<platform>``, and under -n that is
-    the one directory none of the workers ever opens. See
-    enforce_budget_tree.
+    PRUNE FIRST, THEN SEED, and the order is load-bearing: pruning brings
+    the seed source down to the budget, so a freshly seeded worker starts
+    inside it instead of immediately over it.
     """
+    global _PLATFORM_NAME
+    module = _load_budget_module()
+    import pytensor  # noqa: PLC0415 -- must follow the PYTENSOR_FLAGS write above
+
+    # The NAME only. PyTensor derives it from the platform, the processor, the
+    # Python version and the bit width; the base it sits under is ours.
+    _PLATFORM_NAME = Path(pytensor.config.compiledir).name
     budget = int(os.environ.get(_BUDGET_ENV, _DEFAULT_MAX_ENTRIES))
-    module = _load_budget_module()
-    if module is None:  # pragma: no cover - defensive
-        return None
-    import pytensor  # noqa: PLC0415 -- must follow the PYTENSOR_FLAGS write above
+    base = _BASE_COMPILEDIR
+    shared = module.shared_compiledir(base, _PLATFORM_NAME)
 
-    results = module.enforce_budget_tree(
-        Path(pytensor.config.base_compiledir),
-        Path(pytensor.config.compiledir),
-        budget,
-        # Safe here and only here: this base_compiledir belongs to the test
-        # suite alone, so a sibling compiledir_* tree is a stranded kernel or
-        # Python version that nothing will ever read again.
-        sweep_platforms=True,
-    )
-    return module.summarize_tree(results, budget)
+    lock = module.BaseLock(base)
+    if lock.acquire(exclusive=True, timeout=_PRUNE_LOCK_TIMEOUT):
+        try:
+            reaped = module.reap_dead_runs(base, keep=_RUN.path)
+            pruned = module.enforce_shared_budget(base, _PLATFORM_NAME, budget)
+        finally:
+            lock.release()
+        _compiledir_summary.append(
+            module.summarize_tree([(shared, pruned)], budget)
+        )
+        _compiledir_summary.append(
+            f"pytensor run dir {_RUN.path}: {len(reaped.live)} other live "
+            f"run(s), {len(reaped.remote)} on other hosts (never touched), "
+            f"{len(reaped.reaped)} dead run dir(s) reaped"
+        )
+    else:
+        _compiledir_summary.append(
+            f"pytensor compiledir budget NOT enforced this run: {base}/.lock "
+            f"was held for more than {_PRUNE_LOCK_TIMEOUT:.0f} s (review "
+            "2.13.5; skipping is the benign direction)"
+        )
 
-
-def _seed_worker_compiledirs(config):
-    """Give every worker this run will start a warm compiledir.
-
-    Controller only, before any worker exists -- same placement and same
-    reason as _prune_compiledir, and for seeding it is not merely convenient
-    but necessary: a worker cannot seed its own compiledir, because by the
-    time it runs it is already holding the ModuleCache it would be seeding.
-
-    This exists because the per-worker compiledirs are ~95% redundant copies
-    of one another (each holds ~1500 of the 1564 entries a whole cold run
-    creates -- most of what compiles is shared infrastructure every file's
-    model builds). Without it, raising -n makes the NEW workers compile every
-    graph from scratch: measured when CI went from -n2 to -n4, ubuntu 3.12
-    went 43:21 -> 52:24 purely because gw2 and gw3 started empty. It also
-    lets CI store ONE canonical tree instead of one per worker, which is what
-    keeps the saved cache under GitHub's 10 GB repository budget as the worker
-    count and the shard count grow.
-
-    See seed_worker_compiledirs for the hard-link/copy split and the measured
-    costs.
-    """
-    module = _load_budget_module()
-    if module is None:  # pragma: no cover - defensive
-        return None
     n_workers = int(config.getoption("numprocesses", 0) or 0)
-    if n_workers <= 0:
-        # -n0: this process IS the worker and uses the controller compiledir,
-        # which is the seed source rather than a seed target.
-        return None
-    import pytensor  # noqa: PLC0415 -- must follow the PYTENSOR_FLAGS write above
-
-    stats = module.seed_worker_compiledirs(
-        Path(pytensor.config.base_compiledir),
-        Path(pytensor.config.compiledir),
-        n_workers,
-    )
+    started = time.monotonic()
+    if not lock.acquire(exclusive=False, timeout=_SEED_LOCK_TIMEOUT):
+        print(
+            f"pytensor compiledir: {base}/.lock held for more than "
+            f"{_SEED_LOCK_TIMEOUT:.0f} s; this run starts COLD rather than "
+            "wait longer",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    try:
+        source = module.choose_run_seed_source(base, _PLATFORM_NAME)
+        if source is None:
+            # A genuinely first-ever run: nothing warm to copy from.
+            return
+        stats = module.seed_run(_RUN, source, _PLATFORM_NAME, n_workers)
+    finally:
+        lock.release()
     summary = stats.summary()
     if summary:
         # stderr rather than pytest_report_header, and CI is the reason: it
         # runs `pytest -q`, which suppresses the header entirely -- and
         # seeding is the step most worth seeing there, being where a restored
-        # single-tree cache gets fanned back out, and where a cross-device
-        # hard-link fallback would show up as a sudden multi-minute startup.
-        # It prints only when a seed actually happened, so the steady state is
-        # silent rather than one more line of noise.
-        print(summary, file=sys.stderr, flush=True)
+        # cache gets fanned back out, and where a cross-device hard-link
+        # fallback would show up as a sudden multi-minute startup.
+        print(
+            f"{summary}; from {source} in {time.monotonic() - started:.1f} s",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _finish_run():
+    """Promote this run's new entries into the shared tree, then delete it.
+
+    An ``atexit`` handler, registered below at import -- i.e. BEFORE pytensor
+    is imported -- and that ordering is the reason it is not
+    pytest_unconfigure: atexit runs handlers last-registered-first, so this
+    runs AFTER PyTensor's own ModuleCache exit hook (clear_old /
+    clear_unversioned on the compiledir), which would otherwise walk a
+    directory this has just moved away. It also runs after xdist has torn
+    its workers down, on a normal exit and after Ctrl-C alike. A run killed
+    outright never gets here; the next run's reap removes its directory.
+    """
+    global _RUN
+    if _RUN is None:
+        return
+    module = _load_budget_module()
+    run = _RUN
+    _RUN = None
+    try:
+        if _PLATFORM_NAME is not None:
+            shared = module.shared_compiledir(_BASE_COMPILEDIR, _PLATFORM_NAME)
+            lock = module.BaseLock(_BASE_COMPILEDIR)
+            if lock.acquire(exclusive=True, timeout=_PROMOTE_LOCK_TIMEOUT):
+                try:
+                    stats = module.promote_run(run, shared, _PLATFORM_NAME)
+                finally:
+                    lock.release()
+                if stats.promoted or stats.incomplete:
+                    print(stats.summary(shared), file=sys.stderr, flush=True)
+            else:
+                print(
+                    f"pytensor compiledir: {_BASE_COMPILEDIR}/.lock held for "
+                    f"more than {_PROMOTE_LOCK_TIMEOUT:.0f} s; this run's new "
+                    "entries are NOT promoted to the shared tree",
+                    file=sys.stderr,
+                    flush=True,
+                )
+    finally:
+        run.close()
+        module.remove_run_dir(run)
+
+
+if _RUN is not None:
+    atexit.register(_finish_run)
 
 
 def _warm_module_cache():
@@ -340,7 +470,7 @@ def _warm_module_cache():
     which is exactly how a 300 s timeout landed on an unrelated vcve test.
     """
     try:
-        import pytensor  # noqa: PLC0415 -- see _prune_compiledir
+        import pytensor  # noqa: PLC0415 -- see _start_run
         from pytensor.link.c.cmodule import get_module_cache  # noqa: PLC0415
 
         get_module_cache(pytensor.config.compiledir)
@@ -355,24 +485,17 @@ def _warm_module_cache():
 
 
 def pytest_configure(config):
-    global _compiledir_summary
-
     if _BASE_COMPILEDIR is None:
         return
 
     if _xdist_worker(config):
         # Every worker builds its own ModuleCache, so every worker has to warm
-        # its own. They contend on the compile lock doing it, which is why
-        # bounding the entry count matters as much as moving the cost.
+        # its own. Each walks only its own seeded tree.
         _warm_module_cache()
         return
 
-    # PRUNE FIRST, THEN SEED, and the order is load-bearing: pruning picks the
-    # seed source down to the budget, so a freshly seeded worker starts inside
-    # the budget instead of immediately over it. Seeding first would copy
-    # entries that the very next prune would evict.
-    _compiledir_summary = _prune_compiledir(config)
-    _seed_worker_compiledirs(config)
+    if _RUN is not None:
+        _start_run(config)
     if not _xdist_active(config):
         # -n0: this process runs the tests itself, so it is also the one that
         # needs the cache warm.
@@ -380,4 +503,19 @@ def pytest_configure(config):
 
 
 def pytest_report_header(config):
-    return [_compiledir_summary] if _compiledir_summary else []
+    return list(_compiledir_summary)
+
+
+# ---------------------------------------------------------------------------
+# Name the compiledir race when it fires anyway (review 2.13.5)
+# ---------------------------------------------------------------------------
+# The per-run layout above removes the race between two suites that BOTH run
+# this conftest. It cannot protect a suite from a checkout that predates it,
+# from an unmanaged base (see _unmanaged_reason), or from anything else that
+# deletes a live compiledir. When that happens the cost is not the red run --
+# it is that a phantom red is indistinguishable from a real one. So say what
+# it is; report_compiledir_race has the signature and the triage rule.
+
+
+def pytest_terminal_summary(terminalreporter):
+    _load_budget_module().report_compiledir_race(terminalreporter)
