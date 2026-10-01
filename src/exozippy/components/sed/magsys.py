@@ -12,7 +12,8 @@ Three things live here, and nowhere else:
 
 * the ONE internal spelling of a magnitude system (``VEGA``, ``AB``) and the
   boundary translation from a .sed file's spelling (``parse_magsys``,
-  case-insensitive, unknown spellings raise naming the row);
+  case-SENSITIVE: a case variant raises with a "did you mean" hint, as does
+  any unknown spelling, naming the row);
 * the per-column record the BC generator writes beside its tables
   (``{model}.magsys.csv``: the column's native system and its m_AB - m_Vega
   offset, computed from the same filter profile, flux weighting and Vega
@@ -44,8 +45,9 @@ VEGA = "Vega"
 AB = "AB"
 MAG_SYSTEMS = (VEGA, AB)
 
-# Boundary translation: a .sed file may write a system in any case.
-_USER_SPELLINGS = {name.lower(): name for name in MAG_SYSTEMS}
+# Case variants, used ONLY to suggest the right spelling in the error: the
+# boundary is case-sensitive (JDE 2026-10-01: "g is different than G").
+_CASE_HINTS = {name.lower(): name for name in MAG_SYSTEMS}
 
 MAGSYS_COLUMNS = (
     "column",
@@ -61,19 +63,22 @@ def parse_magsys(value, where):
     """A .sed row's ``magsys`` in the internal spelling, or None if unstated.
 
     ``where`` names the row (file, index, filter) for the error message.
-    Case-insensitive at this boundary only; everything past it compares
-    against ``VEGA`` / ``AB`` exactly.
+    CASE-SENSITIVE (JDE 2026-10-01): only the exact spellings ``"Vega"``
+    and ``"AB"`` are accepted.  A case variant raises with a "did you mean"
+    hint -- suggesting is fine, accepting is not, because user-facing
+    names are case-sensitive throughout (SDSS g is not Gaia G).
     """
     if value is None:
         return None
-    key = str(value).strip().lower()
-    if key not in _USER_SPELLINGS:
-        raise ValueError(
-            f"{where}: unknown magnitude system magsys: {value!r}. "
-            f"Supported: {', '.join(MAG_SYSTEMS)} (any case); omit the key "
-            f"to mean the filter's native system."
-        )
-    return _USER_SPELLINGS[key]
+    if value in MAG_SYSTEMS:
+        return value
+    hint = _CASE_HINTS.get(str(value).strip().lower())
+    did_you_mean = f" Did you mean {hint!r}?" if hint else ""
+    raise ValueError(
+        f"{where}: unknown magnitude system magsys: {value!r}.{did_you_mean} "
+        f"Supported, case-sensitive: {', '.join(repr(m) for m in MAG_SYSTEMS)}; "
+        f"omit the key to mean the filter's native system."
+    )
 
 
 def magsys_table_path(model_root, model):

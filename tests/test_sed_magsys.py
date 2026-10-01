@@ -179,18 +179,54 @@ def test_a_differential_ab_row_is_not_shifted(tmp_path):
     assert sed.mag[0] == 1.5
 
 
-@pytest.mark.parametrize("spelling", ["ab", "Ab", " AB ", "vega", "VEGA"])
-def test_the_boundary_accepts_any_case(spelling):
+@pytest.mark.parametrize("spelling", ["AB", "Vega"])
+def test_the_exact_spellings_are_accepted(spelling):
     """
-    Given a user spelling of a supported system in any case,
+    Given the exact spelling of a supported system,
     When it is parsed at the .sed boundary,
-    Then it becomes the one internal spelling.
+    Then it is returned unchanged as the internal spelling.
     """
     # ACT / ASSERT
-    assert parse_magsys(spelling, "row") in (AB, VEGA)
-    assert parse_magsys(spelling, "row") == (
-        AB if spelling.strip().lower() == "ab" else VEGA
-    )
+    assert parse_magsys(spelling, "row") == {"AB": AB, "Vega": VEGA}[spelling]
+
+
+@pytest.mark.parametrize(
+    "spelling, hint",
+    [
+        ("ab", "AB"),
+        ("Ab", "AB"),
+        (" AB ", "AB"),
+        ("vega", "Vega"),
+        ("VEGA", "Vega"),
+    ],
+)
+def test_a_case_variant_raises_with_a_hint(spelling, hint):
+    """
+    Given a case (or whitespace) variant of a supported system,
+    When it is parsed at the .sed boundary,
+    Then it RAISES, suggesting the exact spelling -- user-facing names are
+      case-sensitive (JDE 2026-10-01: "g is different than G"); suggesting
+      is fine, accepting is not.
+    """
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match=f"Did you mean '{hint}'"):
+        parse_magsys(spelling, "row 0")
+
+
+def test_a_lowercase_ab_row_raises_naming_the_row(tmp_path):
+    """
+    Given a .sed row written `magsys: ab`,
+    When the SED reads the file,
+    Then it raises naming the row and filter, with the "did you mean" hint.
+    """
+    # ARRANGE
+    rows = [("SLOAN/SDSS.g", 12.0, "ab", None)]
+
+    # ACT / ASSERT
+    with pytest.raises(
+        ValueError, match=r"filter row 0 .*SDSS\.g.*Did you mean 'AB'"
+    ):
+        _loaded_sed(tmp_path, rows)
 
 
 def test_an_unknown_system_raises_naming_the_row(tmp_path):
