@@ -18,7 +18,7 @@ from exozippy.outputs.prose import get_collector
 from exozippy.skyframe import observer_sky_offset
 
 from ..parameterization import pin_unselected
-from . import mmexofast_support, peakfind
+from . import peakfind
 from .physics import (
     RHO_FLOOR,
     S_FLOOR,
@@ -252,10 +252,6 @@ class MulensInstrument(Instrument):
         # stage is the user's config key order, so they may not exist yet).
         self._n_sources = int(system.source.n_elements)
 
-        # MMEXOFAST integration (masks + error factors + auto seeds) -- must
-        # run before the file loop so excluded points never enter the arrays.
-        self._resolve_mmexofast(system)
-
         # Source RA/Dec (degrees from resolve → radians for projection math).
         # Stashed for MulensEvent._earth_vperp_en: the mu_helio -> mu_geo
         # conversion must project Earth's velocity with the same (ra, dec)
@@ -296,12 +292,9 @@ class MulensInstrument(Instrument):
 
             per_file.append((t, f, e, df))
 
-        # THE BUILT-IN PEAK FINDER (8.4.9).  Runs HERE, after pass 1, rather
-        # than beside the MMEXOFAST hook above, and the difference matters:
-        # MMEXOFAST has to run before the photometry is read because it
-        # supplies the bad-data MASK, while this needs no mask and so gets
-        # to see the data as the model will -- masked, detrended, and
-        # already converted to flux.  It also has to land BEFORE
+        # THE BUILT-IN PEAK FINDER (8.4.9).  Runs HERE, after pass 1, so it
+        # sees the data as the model will -- masked, detrended, and already
+        # converted to flux.  It also has to land BEFORE
         # `_estimate_flux_components` in pass 2, which reads the seed t_0 /
         # u_0 / t_E to decompose each band's flux and silently falls back to
         # median-flux / q_source = 0.95 without them.
@@ -309,7 +302,7 @@ class MulensInstrument(Instrument):
 
         # The event geometry the bootstrap below reads, as the relaxation
         # engine would start it given everything known NOW (user entries, the
-        # peak finder's / MMEXOFAST's seed 0, hints so far) -- one probe for
+        # peak finder's seed 0, hints so far) -- one probe for
         # every file.  See _probe_bootstrap_geometry.
         geometry = self._probe_bootstrap_geometry(system)
 
@@ -317,9 +310,9 @@ class MulensInstrument(Instrument):
         # velocity at t_0_par define the inertial frame.  All observer positions
         # are stored as deviations from this linear Earth trajectory so that
         # t_0/u_0 remain geocentric parameters.  Re-resolved here rather
-        # than taken from MulensEvent.__init__: MMEXOFAST seeds arrive in
-        # stage 1 (via _resolve_mmexofast above), after MulensEvent
-        # snapshotted user_params, and a reference epoch far from the data
+        # than taken from MulensEvent.__init__: the peak finder's seeds
+        # arrive in stage 1 (just above), after MulensEvent snapshotted
+        # user_params, and a reference epoch far from the data
         # makes the linear Earth extrapolation diverge (O(100) AU after
         # ~20 yr), shearing tau/u by O(deviation x pi_E).
         self._t0_par = self._resolve_t0_par_final(
@@ -403,13 +396,13 @@ class MulensInstrument(Instrument):
         """Final t0_par: the reference epoch anchoring the Skowron+2011 frame.
 
         MulensEvent.__init__ resolves t0_par from its config and
-        user_params only; MMEXOFAST seeds arrive later (stage 1), so
-        the automated workflow -- whose params file deliberately omits the
-        microlensing start values -- used to fall through to the 2450000.0
-        default, parking the reference epoch decades before the data.
+        user_params only; seed hints (the peak finder's) arrive later
+        (stage 1), so a params file that omits the microlensing start
+        values used to fall through to the 2450000.0 default, parking the
+        reference epoch decades before the data.
 
         Priority: explicit mulensevent ``t0_par`` > user ``source.0.t_0``
-        initval > MMEXOFAST seed t_0 > median data time.  Any of these
+        initval > seed-0 t_0 > median data time.  Any of these
         keeps the linear Earth extrapolation within the season it is a good
         approximation for.
         """
@@ -424,175 +417,17 @@ class MulensInstrument(Instrument):
             return float(val)
         t_med = float(np.median(all_times))
         logger.info(
-            f"[{self.prefix}] No t0_par, lens t_0, or MMEXOFAST seed found; "
+            f"[{self.prefix}] No t0_par, lens t_0, or seed t_0 found; "
             f"anchoring the parallax reference epoch at the median data "
             f"time ({t_med:.2f})."
         )
         return t_med
 
-    def _reject_time_spec_with_mmexofast(self, spec):
-        """Refuse to mix MMEXOFAST seeding with a per-file time system.
-
-        MMEXOFAST reads the raw data files itself, so its t_0 seeds (and
-        the JSON's excluded_points/errfacs) are expressed in the files' own
-        raw time system.  With a time_offset or a time_scale/time_frame
-        conversion active, the model's times differ from the raw ones and
-        the seeds would start the fit in the wrong time system -- an error
-        that converges to a wrong answer rather than crashing.  Refuse
-        loudly instead.
-        """
-        if self.has_nontrivial_time_spec:
-            raise ValueError(
-                f"[{self.prefix}] time_offset/time_scale/time_frame cannot "
-                f"be combined with MMEXOFAST seeding (mmexofast: {spec!r}): "
-                f"MMEXOFAST reads the raw files, so its t_0 seeds would be "
-                f"in the raw time system, not the converted one. Either "
-                f"pre-convert the data files, or set mmexofast: false and "
-                f"provide start values for the microlensing observables."
-            )
-
-    def _resolve_mmexofast(self, system):
-        """Stage-1a half of the MMEXOFAST integration.
-
-        MMEXOFAST runs ONLY WHEN ASKED FOR (review 8.6.25, JDE 2026-09-30:
-        the built-in peak finder is the default seeder).  The mulensevent
-        block's ``mmexofast`` entry takes:
-
-        - a JSON path: the JSON's bad-data mask (``excluded_points``) and
-          error factors (``errfacs``) are applied to this component's files,
-          and its seed hints are pushed here too (the only push).  A path
-          that does not exist RAISES FileNotFoundError naming it (review
-          1.6.15: it used to warn and run unseeded); an unparseable file
-          raises too (``mmexofast_support.load_json``).
-        - ``true``: MMEXOFAST is this fit's seeder.  When the params file
-          lacks start values the relaxation engine can derive
-          (``mmexofast_support.user_hints_sufficient``), it is run on the raw
-          light curves -- renormalize_errors on, output cached at
-          ``<prefix>_mmexofast.json`` -- and its seeds, masks and error
-          factors are consumed exactly as for a path.  This is precisely
-          what an ABSENT key did before 8.6.25; the sufficiency gate stays so
-          a complete mkparam restart file does not re-run MMEXOFAST on every
-          iteration (mulensing.md).
-        - absent or ``false``: MMEXOFAST never runs.  When the starts are
-          insufficient the peak finder seeds them (``_peak_find_seeds``).
-
-        ``auto`` (the old "run regardless of the starts" spelling) RAISES,
-        naming the new spellings: an n-way choice is spelled with booleans,
-        not an enum, and a third value meaning "true, but ungated" is not
-        worth a spelling (pass a JSON path to force a particular file).
-
-        This lives on the instrument rather than MulensEvent because the mask must
-        exist before the photometry is read (load_data), and only this
-        component knows its files.  The seeds are pushed here for explicit
-        files as well: MulensEvent's stage-3 re-push is gone (reviews 1.6.15,
-        2.1.12).
-        """
-        event = getattr(system, "mulensevent", None)
-        if event is None:
-            return
-        spec = event.config[0].get("mmexofast") if event.config else None
-        if spec is None or spec is False:
-            return
-        if spec == "auto":
-            raise ValueError(
-                f"[{self.prefix}] mmexofast: auto is no longer a spelling "
-                f"(review 8.6.25).  Use `mmexofast: true` to run MMEXOFAST "
-                f"on the light curves, a JSON path to load its output, or "
-                f"omit the key (or `false`) to let the built-in peak finder "
-                f"seed t_0/u_0/t_E when the params file does not."
-            )
-        if not (spec is True or isinstance(spec, str)):
-            raise ValueError(
-                f"[{self.prefix}] mmexofast: {spec!r} is not a spelling: "
-                f"use true (run MMEXOFAST), false (never), or a JSON path."
-            )
-        is_binary = event.n_companions >= 1
-        want_rho = bool(event.finite_source)
-
-        if isinstance(spec, str):
-            # Explicit JSON: masks + error factors, and the seed hints too.
-            # This is the ONLY push of an explicit file's seeds.  They must
-            # land here, at stage 1, to be visible to this component's flux
-            # bootstrap (_estimate_flux_components), which runs later in this
-            # same load_data call -- stage 3 would be too late and the
-            # per-band flux decomposition would silently fall back to
-            # median-flux / q_source=0.95.  MulensEvent used to re-push the
-            # same file at stage 3; that second channel silently undid
-            # `peak_find: true` and would now raise as a second seed-set
-            # registration (reviews 1.6.15, 2.1.12, 2.1.25).
-            self._reject_time_spec_with_mmexofast(spec)
-            if not Path(spec).exists():
-                # A user-NAMED file is not ours to regenerate, and running
-                # unseeded instead hides a typo behind a start no sampler
-                # recovers from (review 1.6.15).  Only `true`'s cache below
-                # may legitimately be absent.
-                raise FileNotFoundError(
-                    f"[{self.prefix}] mmexofast: {spec!r} does not exist "
-                    f"(resolved against the working directory: "
-                    f"{Path(spec).absolute()}).  Fix the path, use "
-                    f"`mmexofast: true` to generate it, or drop the key to "
-                    f"seed with the built-in peak finder."
-                )
-            data = mmexofast_support.load_json(spec)
-            mmexofast_support.push_seed_hints(
-                data,
-                self.config_manager,
-                want_rho=want_rho,
-                is_binary=is_binary,
-                source=spec,
-            )
-        else:
-            if mmexofast_support.user_hints_sufficient(
-                self.config_manager, is_binary, want_rho
-            ):
-                return
-            self._reject_time_spec_with_mmexofast(spec)
-            prefix = system.config.get("prefix", "fitresults/planet")
-            json_path = f"{prefix}_mmexofast.json"
-            options = dict(event.config[0].get("mmexofast_options") or {})
-            data = mmexofast_support.run_or_load(
-                json_path,
-                self.files,
-                coords=self._mmexofast_coords(system),
-                fit_type="binary_lens" if is_binary else "point_lens",
-                options=options,
-            )
-            if data is not None:
-                mmexofast_support.push_seed_hints(
-                    data,
-                    self.config_manager,
-                    want_rho=want_rho,
-                    is_binary=is_binary,
-                    source=json_path,
-                )
-        if data is None:
-            return
-        mmexofast_support.apply_excluded_points(
-            data,
-            self.files,
-            self.mask_specs,
-            self.prefix,
-            robust_kinds=self.likelihood_kinds,
-        )
-        mmexofast_support.push_errfac_hints(
-            data, self.files, self.prefix, self.config_manager
-        )
-        # Start values move no posterior, but the error renormalization and
-        # any bad-data mask do -- so the draft must say where they came from.
-        get_collector(system).add(
-            "Starting values, per-instrument error renormalization "
-            "factors, and bad-data masks for the microlensing light "
-            "curves were derived with MMEXOFAST (in preparation).",
-            section="microlensing",
-            key=f"{self.prefix}.mmexofast",
-            rank=30,
-        )
-
     def _peak_find_seeds(self, system, per_file):
         """Seed t_0/u_0/t_E with the built-in PSPL fit when nothing else did.
 
-        THE DEFAULT SEEDER (review 8.6.25, JDE 2026-09-30); MMEXOFAST runs
-        only when asked for (``_resolve_mmexofast``).  `peak_find` on the
+        THE microlensing seeder (review 8.6.25, JDE 2026-09-30; the only
+        one since 2026-10-01).  `peak_find` on the
         mulensevent block takes:
 
           - absent (default): run when another seeder has not already
@@ -603,15 +438,14 @@ class MulensInstrument(Instrument):
             derive is never overridden.  Without it those starts sat at
             ``defaults.yaml``, which for a real event is a start no sampler
             recovers from.
-          - ``true``: run REGARDLESS, fitting all three and replacing any
-            seed sets already registered (MMEXOFAST's).  This is the A/B
-            handle for comparing the two seeders on one event; a user entry
-            still outranks every seed.
+          - ``true``: run REGARDLESS, fitting all three (and replacing any
+            seed sets another seeder registered -- none does today); a user
+            entry still outranks every seed.
           - ``false``: never run.
 
         ``auto`` (the old spelling of the default) RAISES: the default is
         the absent key, and an n-way choice is spelled with booleans, not an
-        enum (the same ruling ``mmexofast:`` follows).
+        enum.
 
         Failure is not fatal.  A seeder that raises should leave the fit in
         exactly the state it would have been in without this module, which
@@ -626,8 +460,8 @@ class MulensInstrument(Instrument):
             raise ValueError(
                 f"[{self.prefix}] peak_find: auto is no longer a spelling "
                 f"(review 8.6.25): omit the key for the default (find what "
-                f"the params file does not give), or use true (always, "
-                f"replacing MMEXOFAST's seeds) or false (never)."
+                f"the params file does not give), or use true (always) or "
+                f"false (never)."
             )
         if spec not in (None, True, False):
             raise ValueError(
@@ -639,10 +473,10 @@ class MulensInstrument(Instrument):
         forced = spec is True
 
         # One seeder per fit (review 2.1.25): add_seed_hints raises on a
-        # second registration.  By default an existing seeder (an MMEXOFAST
-        # JSON or run) owns the fit and the finder stays out; `forced`
-        # REPLACES its sets -- replacing MMEXOFAST's seeds on purpose is the
-        # entire point of the A/B mode -- and says so.
+        # second registration.  By default an existing seeder owns the fit
+        # and the finder stays out; `forced` REPLACES its sets, and says so.
+        # No other seeder registers sets today, so this is the
+        # generic rule rather than a live case.
         replace = False
         if self.config_manager.seed_hint_sets:
             if not forced:
@@ -656,16 +490,15 @@ class MulensInstrument(Instrument):
             logger.warning(
                 f"[{self.prefix}] peak_find: true REPLACES the "
                 f"{len(self.config_manager.seed_hint_sets)} seed set(s) "
-                f"already loaded for this fit (e.g. MMEXOFAST's): its "
-                f"multi-seed solutions (and any s/q/alpha) are discarded."
+                f"already loaded for this fit: its multi-seed solutions "
+                f"(and any s/q/alpha) are discarded."
             )
 
         # The seed paths are the POST-SPLIT spellings (`source.0.t_0`), the
-        # same ones push_seed_hints uses, so a config with no `source:`
-        # block cannot take them: _translate_and_scale resolves the index
-        # and then strict naming refuses the prefix outright.  MMEXOFAST
-        # never trips this because it only runs on configs that named
-        # nothing, but this used to, and the failure was a hard refusal
+        # ones the params file's index form uses, so a config with no
+        # `source:` block cannot take them: _translate_and_scale resolves
+        # the index and then strict naming refuses the prefix outright.
+        # This used to be reached, and the failure was a hard refusal
         # mid-build rather than a skipped seed.  tests/test_seed_quality.py
         # reaches it because its harness picks whichever example YAML glob
         # returns first, which on the microlensing examples is often a
@@ -786,27 +619,6 @@ class MulensInstrument(Instrument):
 
         return float(ra_all[ndx]), float(dec_all[ndx])
 
-    def _mmexofast_coords(self, system):
-        """Source-star coordinates as an 'hh:mm:ss dd:mm:ss' string, or None.
-
-        Same resolve pathway load_data itself uses for the projection math;
-        harmless under no_parallax (the default for the automatic run) but
-        required if the user opts parallax back in via mmexofast_options.
-        """
-        try:
-            from astropy.coordinates import SkyCoord
-
-            ra_deg, dec_deg = self._resolve_source_radec_deg(system)
-            return SkyCoord(ra_deg, dec_deg, unit="deg").to_string(
-                style="hmsdms"
-            )
-        except Exception as e:
-            logger.warning(
-                f"Could not resolve source coordinates for MMEXOFAST: {e}; "
-                f"running without coords."
-            )
-            return None
-
     def _probe_bootstrap_geometry(self, system):
         """The flux bootstrap's event geometry, read with ``probe_start``.
 
@@ -881,7 +693,7 @@ class MulensInstrument(Instrument):
         (`geometry`, from ``_probe_bootstrap_geometry``): the check needs the
         event's timescale to find its peak, and used to substitute an
         invented 30 d, describing a different event (review 2.6.30(b)).
-        The seed-0 MMEXOFAST / peak-finder hints ARE informed, so the
+        The seed-0 peak-finder hints ARE informed, so the
         automated workflow -- the one most likely to have mislabelled a flux
         file -- still gets the check.
         """
@@ -996,7 +808,7 @@ class MulensInstrument(Instrument):
         # every event to the degenerate PSPL columns).
         s_val = _get("lens.1.s")
         if s_val is None:
-            # MMEXOFAST seeds carry log_s (the sampled coordinate), not s.
+            # A seed carries log_s (the sampled coordinate), not s.
             log_s = _get("lens.1.log_s")
             if log_s is not None:
                 s_val = 10.0 ** float(log_s)
@@ -1120,7 +932,7 @@ class MulensInstrument(Instrument):
         to be an invented 30 d).  The event geometry comes from `geometry`
         (``_probe_bootstrap_geometry``), so a start the user's entries only
         IMPLY -- t_E from masses and distances -- is seen, as are the seed-0
-        MMEXOFAST / peak-finder hints.  The instrument's own flux entries
+        peak-finder hints.  The instrument's own flux entries
         (f_source, f_blend, q_flux) are still read as written.
         """
         cm = self.config_manager

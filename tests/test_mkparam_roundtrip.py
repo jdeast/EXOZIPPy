@@ -45,7 +45,6 @@ import xarray as xr
 import yaml
 
 from exozippy import diagnostics, trace_meta
-from exozippy.components.mulensing import mmexofast_support
 from exozippy.mkparam import _get_instance_names, write_param_file
 from exozippy.system import System
 
@@ -70,7 +69,7 @@ def _build(work, config_name=None):
     """Build the example in `work`, returning (system, model, config).
 
     `config_name` defaults to this module's ob161003 config; it is a
-    parameter so `test_mmexofast_restart_sufficiency.py` can reuse this and
+    parameter so `test_restart_sufficiency.py` can reuse this and
     the trace fabrication below to write a REAL restart file for whichever
     example it is pinning.
     """
@@ -312,57 +311,43 @@ def test_the_direction_pair_is_written_as_an_angle(roundtrip):
 
 
 @pytest.mark.parametrize("spelling", ["prepared", "raw"])
-def test_the_restart_file_needs_no_mmexofast_rerun(roundtrip, spelling):
+def test_the_restart_file_needs_no_reseeding(roundtrip, spelling):
     """The gate that regressed last time the spellings moved.
 
-    `push_seed_hints` and `user_hints_sufficient` drifted apart once already:
-    the probe reported "insufficient" on a perfectly good restart file, an
-    expensive MMEXOFAST run followed, and its output was then discarded.
-
-    ASKED AT THE REAL CALL SITE, which the first version of this test got
-    wrong.  It called `prepare()` and THEN `user_hints_sufficient`, by which
-    point `register_parameters` has pushed the hints and the answer is True
-    for essentially any input.  The probe actually runs at STAGE 1, inside
-    `MulensInstrument.load_data` -> `_resolve_mmexofast`, before those hints
-    exist -- mulensing.md: "a False means 'not derivable *yet*'".  So the
-    honest question is whether BUILDING launches MMEXOFAST, and the
-    after-the-fact version passed while a real second-iteration fit of
-    DC2018_128 re-ran it and crashed (review 8.6.22,
-    tests/test_mmexofast_restart_sufficiency.py).
+    ASKED AT THE REAL CALL SITE.  The seeder (the peak finder) decides at
+    STAGE 1, inside `MulensInstrument.load_data`, before most hints exist,
+    so the honest question is whether BUILDING from the restart file starts
+    its search.  An after-the-fact probe once passed while a real
+    second-iteration fit of DC2018_128 re-seeded and crashed (review 8.6.22,
+    tests/test_restart_sufficiency.py).
     """
+    from exozippy.components.mulensing import peakfind
+
     work = roundtrip["work"]
     config = yaml.safe_load(open(os.path.join(work, CONFIG)))
     config["parameter_file"] = None
 
-    class _Triggered(Exception):
+    class _Triggered(BaseException):
+        # BaseException: _peak_find_seeds catches every Exception.
         pass
 
-    class _Watch(logging.Handler):
-        def emit(self, record):
-            if "no sufficient user start values" in record.getMessage():
-                # Abort at the decision point: letting the fit start would
-                # cost minutes and prove nothing extra.
-                raise _Triggered()
+    def _trip(*args, **kwargs):
+        raise _Triggered()
 
-    handler = _Watch()
-    root = logging.getLogger()
-    root.addHandler(handler)
-    previous = root.level
-    root.setLevel(logging.INFO)
-
+    real = peakfind.find_pspl_seed
+    peakfind.find_pspl_seed = _trip
     cwd = os.getcwd()
     try:
         os.chdir(work)
         System(config, copy.deepcopy(roundtrip["written"][spelling])).prepare()
     except _Triggered:
         raise AssertionError(
-            "building from the restart file launched MMEXOFAST: the file "
-            "mkparam just wrote is not sufficient to restart from"
+            "building from the restart file started the peak finder: the "
+            "file mkparam just wrote is not sufficient to restart from"
         )
     finally:
+        peakfind.find_pspl_seed = real
         os.chdir(cwd)
-        root.removeHandler(handler)
-        root.setLevel(previous)
 
 
 @pytest.mark.parametrize("spelling", ["prepared", "raw"])

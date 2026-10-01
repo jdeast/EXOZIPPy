@@ -49,15 +49,12 @@ def _config(fmt, inst_extra=None):
     entry.update(inst_extra or {})
     return {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        # The event-level keys (finite_source, t0_par, mmexofast) live on
+        # The event-level keys (finite_source, t0_par) live on
         # `mulensevent:`; `lens:` and `source:` name one body each.
         "mulensevent": [
             {
                 "finite_source": False,
                 "t0_par": T0,
-                # Never shell out to MMEXOFAST from a unit test; the start
-                # values below are all the bootstrap needs.
-                "mmexofast": False,
             }
         ],
         "lens": [{"body": "star.Lens"}],

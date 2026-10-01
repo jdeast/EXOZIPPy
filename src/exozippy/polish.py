@@ -75,7 +75,7 @@ The cap always remains, so nothing can polish forever.
 
 Seed-provenance gate (resolve_polish_steps): 'auto' polishes SOLUTION
 ESTIMATES -- the single canonical start (user/literature initvals, the
-relaxation engine's solution) and MMEXOFAST seed sets -- but never a
+relaxation engine's solution) and component seed sets -- but never a
 multi-seed set WITHOUT seed hints, which is a posterior-draw restart
 (mkparam stratified draws): those are already at equilibrium, and polishing
 K draws per basin would collapse them onto K copies of the basin optimum,
@@ -165,7 +165,7 @@ def resolve_polish_steps(spec, n_seeds, has_seed_hints):
 
     'auto' (default): DEFAULT_POLISH_STEPS when the starts are solution
     estimates -- a single canonical start (n_seeds == 1) or component-pushed
-    seed hints (MMEXOFAST) -- and 0 for a multi-seed set without hints
+    seed hints (the peak finder) -- and 0 for a multi-seed set without hints
     (posterior-draw restarts; see module docstring).  True/'on' and
     False/None/'off' force it; an int gives the cap directly (`seed_polish: N`
     = "at most N steps", not "exactly N" -- both engines stop on their own

@@ -82,7 +82,7 @@ def _mulens_config(**event_extra):
     return {
         "name": "astromulens",
         "star": _STARS_CONFIG,
-        "mulensevent": [{"mmexofast": False, **event_extra}],
+        "mulensevent": [{**event_extra}],
         "lens": [{"body": "star.Lens", "name": "Lens"}],
         "source": [{"body": "star.Source", "name": "Source"}],
     }

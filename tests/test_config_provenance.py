@@ -8,7 +8,7 @@ or where a user's entry vanished without a diagnostic:
 
   2.1.1  the standalone orbit.m_total solver overwrote an explicit user value
          every iteration, DOWNGRADING its provenance to PRECEDENCE_DERIVED_MIXED.
-  2.1.2  MMEXOFAST seed hints entered at PRECEDENCE_USER, so a seed clobbered a
+  2.1.2  seed hints entered at PRECEDENCE_USER, so a seed clobbered a
          user's scalar initval and a seed disagreeing with a genuine user
          entry tripped the "over-constrained" contradiction clause.
   2.1.3  a 3-part key with a typo'd INSTANCE name was kept as an inert leaf
@@ -130,7 +130,7 @@ def test_standalone_solver_still_fires_without_a_user_value():
 
 def test_seed_hint_does_not_override_a_user_scalar_initval():
     """
-    Given a user scalar initval for source.Source.t_0 and an MMEXOFAST seed
+    Given a user scalar initval for source.Source.t_0 and a seed
     hint naming a very different t_0,
     When the engine solves,
     Then the USER's value is the start and keeps PRECEDENCE_USER: a seed is a
@@ -164,7 +164,7 @@ def test_seed_hint_beats_a_default_and_lands_at_derived_data_rank():
 
 def test_seed_hint_conflicting_with_a_user_entry_is_not_over_constrained():
     """
-    Given a user lens.Comp.s and an MMEXOFAST seed for lens.1.log_s that
+    Given a user lens.Comp.s and a seed for lens.1.log_s that
     disagrees (they are two coordinates for one fact, tied by s = 10**log_s),
     When the engine runs,
     Then no "over-constrained" contradiction is raised: the seed is not a
@@ -215,7 +215,7 @@ def test_user_initval_list_still_outranks_a_seed_hint_per_seed():
 
 def test_seed_hints_still_vary_the_start_across_seeds():
     """
-    Given seed hints only (the ordinary MMEXOFAST case: no user entry),
+    Given seed hints only (the ordinary seeder case: no user entry),
     When the K seeds are solved,
     Then each seed lands on its own hint value -- the demotion to
     PRECEDENCE_DERIVED_DATA must not collapse the seeds onto one start.
@@ -232,15 +232,15 @@ def test_seed_hints_still_vary_the_start_across_seeds():
     assert cm.seed_resolved[1]["source.0.t_0"] == pytest.approx(2459888.0)
 
 
-def test_seed_hints_do_not_change_the_mmexofast_auto_trigger():
+def test_seed_hints_do_not_change_the_derivability_probe():
     """
     Given a params file whose entries make the microlensing observables
     derivable,
-    When probe_derivable is asked (the MMEXOFAST auto-trigger's question),
+    When probe_derivable is asked (a seeder gate's question),
     Then the answer is unchanged by the presence of seed hints: the probe
     reads user_params only, and its test is provenance > PRECEDENCE_DEFAULT, which
-    PRECEDENCE_DERIVED_DATA (60) satisfies anyway.  Getting this wrong re-runs the
-    fitter on every restart.
+    PRECEDENCE_DERIVED_DATA (60) satisfies anyway.  Getting this wrong re-runs a
+    seeder on every restart.
     """
     # t_0/u_0 are per-source; t_E is event-level (one instance).
     params = {

@@ -8,7 +8,7 @@ it, through a reserved non-parameter key `overdisperse:` in the params file.
 
 One test per clause of the ruling:
 
-  1. mmexofast_to_params writes `overdisperse: true`  (single optima).
+  1. (retired with the converter that wrote `overdisperse: true`.)
   2. mkparam writes `overdisperse: false` for a multi-seed file, and records
      the min ESS / max Rhat it observed.
   3. An ABSENT key means True.
@@ -362,44 +362,6 @@ def test_two_tier_warning_fires_from_make_starts(caplog):
         )
     assert "overdisperse" in caplog.text
     assert "1e8" in caplog.text
-
-
-# ---------------------------------------------------------------------------
-# Clause 1: the MMEXOFAST converter declares True.
-# ---------------------------------------------------------------------------
-
-
-def test_mmexofast_converter_declares_overdisperse_true(tmp_path):
-    """
-    Given an MMEXOFAST JSON with two solutions,
-    When it is converted to a params file,
-    Then the file declares `overdisperse: true`: those seeds are single
-      optima, one per solution, not draws from any posterior, so the chains
-      still have to be scattered around them.
-    """
-    import json
-
-    from exozippy.utilities.mmexofast_to_params import mmexofast_to_params
-
-    src = tmp_path / "mm.json"
-    fit = {
-        "parameters": {
-            "t_0": 2455000.1,
-            "u_0": 0.2,
-            "t_E": 30.0,
-            "s": 1.1,
-            "alpha": 45.0,
-            "rho": 0.0,
-            "q": 1e-3,
-        }
-    }
-    src.write_text(json.dumps({"fits": [fit, fit]}))
-    out = tmp_path / "mm.params.yaml"
-    mmexofast_to_params(str(src), out_path=str(out))
-
-    text = out.read_text()
-    assert "overdisperse: true" in text
-    assert yaml.safe_load(text)["overdisperse"] is True
 
 
 # ---------------------------------------------------------------------------

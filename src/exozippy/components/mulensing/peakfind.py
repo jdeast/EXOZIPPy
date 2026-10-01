@@ -1,12 +1,14 @@
 """Built-in PSPL peak finder: t_0, u_0 and t_E from the light curves alone.
 
-WHY THIS EXISTS.  Until this module, ``push_seed_hints`` was the ONLY source
-of t_0/u_0/t_E start values, and it reads MMEXOFAST's JSON.  So
-``mmexofast: false`` left those three at their ``defaults.yaml`` values --
+WHY THIS EXISTS.  Until this module, the ONLY source of t_0/u_0/t_E start
+values was an external fitter's (MMEXOFAST's) output JSON.  A fit without
+one left those three at their ``defaults.yaml`` values --
 on DC2018 event 128 that is a start 1,445 days from the event's own peak,
 which no sampler recovers from -- and MMEXOFAST was therefore a hard
 dependency of every microlensing fit rather than an optional accelerator
-(review 8.4.9).
+(review 8.4.9).  That hand-off was removed from EXOZIPPy on 2026-10-01;
+this is now the only microlensing seeder, and the measurements below
+against MMEXOFAST are the record of why it is enough.
 
 WHY IT IS CHEAP, which is the part that makes it worth having at all.  PSPL
 flux is LINEAR in the two flux parameters once the magnification is known:
@@ -634,7 +636,7 @@ def push_peak_find_hints(seed, config_manager, source, replace=False):
     Only those three.  The companion geometry (log_s, alpha, q) and rho keep
     their ``defaults.yaml`` starts, so this is a PARTIAL seed by design and
     not by accident -- see the module docstring.  ``add_seed_hints`` puts it
-    at PRECEDENCE_DERIVED_DATA, the same tier MMEXOFAST's seeds occupy: this
+    at PRECEDENCE_DERIVED_DATA, the tier of every data-derived hint: this
     is a derivation FROM THE DATA, so every user entry outranks it.
 
     ``source`` names the caller for ``add_seed_hints``' one-seeder check.

@@ -1,7 +1,7 @@
 """Multi-seed polish must preserve basin coverage.
 
 The polish is a basin-agnostic optimizer, and nothing used to tie a seed to
-the basin it was provided to represent: on DC2018 event 128 the two MMEXOFAST
+the basin it was provided to represent: on DC2018 event 128 the two solution
 seeds (s = 0.977 and its s <-> 1/s mirror at 0.863) BOTH polished across
 s = 1 onto nearby shoulders, so the mirror entered sampling unrepresented
 and the run's mode report was blind to it.  For the record, the cause was

@@ -16,7 +16,7 @@ import pytest
 
 from exozippy.components.component import Component
 from exozippy.components.transit.transit import Transit
-from exozippy.utilities import getdata, mkticsed, mmexofast_to_params, registry
+from exozippy.utilities import getdata, mkticsed, registry
 from exozippy.utilities.registry import (
     UtilitySpec,
     parser_to_schema,
@@ -32,7 +32,7 @@ SCRIPTS = REPO_ROOT / "scripts"
 
 def test_parser_to_schema_is_json_serializable_for_all_real_parsers():
     """
-    Given the three real utility argparse parsers,
+    Given the real utility argparse parsers,
     When each is converted with parser_to_schema,
     Then the result survives json.dumps unchanged.
     """
@@ -40,7 +40,6 @@ def test_parser_to_schema_is_json_serializable_for_all_real_parsers():
     parsers = [
         getdata.build_parser(),
         mkticsed.build_parser(),
-        mmexofast_to_params.build_parser(),
     ]
 
     # Act / Assert
@@ -90,32 +89,6 @@ def test_getdata_schema_marks_positional_required_and_flags_boolean():
     assert by_name["--depth"]["type"] == "float"
 
 
-def test_mmexofast_schema_exposes_json_and_options():
-    """
-    Given mmexofast_to_params's parser,
-    When converted to a schema,
-    Then the positional 'json' and options
-      '--source-name'/'--companion-name'/'--out' appear.
-
-    The single '--lens-name' of the pre-split converter became one option per
-    body list: t_0/u_0/rho are filed under `source.<source-name>` and the
-    companion geometry under `lens.<companion-name>`.
-    """
-    # Act
-    names = {
-        e["name"] for e in parser_to_schema(mmexofast_to_params.build_parser())
-    }
-
-    # Assert
-    assert "json" in names
-    assert "--source-name" in names
-    assert "--companion-name" in names
-    assert "--out" in names
-
-
-# --- component-declared utilities ---------------------------------------------
-
-
 def test_transit_declares_getdata_and_bls():
     """
     Given the transit component,
@@ -160,14 +133,10 @@ def test_all_utilities_gathers_expected_names():
         "getdata",
         "bls",
         "mkticsed",
-        "mmexofast_to_params",
         "lomb_scargle",
     ):
         assert name in utils, name
     assert utils["mkticsed"].component_keys == ["sed"]
-    # The MMEXOFAST converter is declared by the EVENT component after the
-    # mulensevent/lens/source split (the seeding is event-scoped).
-    assert utils["mmexofast_to_params"].component_keys == ["mulensevent"]
 
 
 def test_utility_to_schema_round_trips_through_json():
@@ -273,7 +242,6 @@ def test_run_utility_unknown_name_raises(tmp_path):
     [
         "getdata.py",
         "mkticsed.py",
-        "mmexofast_to_params.py",
         "exofast2exozippy.py",
     ],
 )

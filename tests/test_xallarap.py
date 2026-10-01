@@ -85,7 +85,6 @@ def _xal_system(tmp_path, finite_source=False, binary_lens=False):
                 "source_orbital_motion": "keplerian",
                 "source_orbit": "S",
                 "t0_par": _T0_PAR,
-                "mmexofast": False,
             }
         ],
         "lens": lens_bodies,

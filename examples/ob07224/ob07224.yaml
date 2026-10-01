@@ -50,10 +50,9 @@ mulensevent:
     # night wide), but it must sit at the peak, not decades away.
     t0_par: 2454233.667
     # Every trajectory parameter is seeded from Gould+2009, so the
-    # relaxation engine can derive all of them.  MMEXOFAST is not needed and
-    # is not wanted: it would fit a PSPL start to a light curve whose peak
-    # is entirely finite-source.
-    mmexofast: false
+    # relaxation engine can derive all of them and the peak finder does
+    # not run -- a PSPL start would be wrong here anyway: the light
+    # curve's peak is entirely finite-source.
 
 galacticmodel:
   - name: "OB07224"

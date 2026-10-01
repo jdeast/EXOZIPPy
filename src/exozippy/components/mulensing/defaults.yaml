@@ -221,7 +221,7 @@ mulensevent:
 
 source:
   # t_0 and u_0 are DATA-DERIVED: their real start comes from the NNLS/grid
-  # bootstrap or from MMEXOFAST seeds, both of which enter at
+  # bootstrap or from the peak finder's seeds, both of which enter at
   # PRECEDENCE_DERIVED_DATA (60) and so beat these PRECEDENCE_DEFAULT (20)
   # values in every topology that supplies one.  The static numbers are a
   # backstop for the case where nothing does -- every sampled parameter must
@@ -229,7 +229,7 @@ source:
   # (see the "pinned with no value" check in Parameter.build_pymc).  Neither
   # symbol appears in any RELATION, so a defaults seed here cannot propagate
   # into another parameter's provenance and cannot change what
-  # mmexofast_support.user_hints_sufficient concludes.
+  # peakfind.plan_peak_find concludes.
   t_0:
     unit: "d"
     lower: 2400000
@@ -470,8 +470,7 @@ lens:
   # log10 of the projected separation is the SAMPLED coordinate (s below is
   # derived as 10**log_s).  Sampling in log_s makes the close/wide
   # degeneracy an exact reflection log_s -> -log_s with |J| = 1, which the
-  # mode-jump proposals / folded likelihood rely on, and matches
-  # MMEXOFAST's base-10 log_s sigma convention.  Base: log10.
+  # mode-jump proposals / folded likelihood rely on.  Base: log10.
   log_s:
     # log10 of the s bounds below: [0.1, 10] -> [-1, 1].  Symmetric about 0
     # so the close/wide reflection maps the domain onto itself.

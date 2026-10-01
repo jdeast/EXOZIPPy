@@ -17,8 +17,8 @@ The bounds below are deliberately loose (a generous ceiling per example, not the
 measured value to 4 decimals): they are here to catch a regression of that
 magnitude, not to freeze the seeding.  Tighten only with a reason.
 
-Note chi2/N > 1 at the seed is expected and is not a defect: MMEXOFAST fits with
-pi_E = 0, so its seeded t_E/u_0/t_0 describe a no-parallax model while this one
+Note chi2/N > 1 at the seed is expected and is not a defect: a PSPL seed fits
+with pi_E = 0, so its seeded t_E/u_0/t_0 describe a no-parallax model while this one
 applies a derived pi_E, and the published configs leave the lens mass, distance
 and proper motion open for the engine to fill.
 """

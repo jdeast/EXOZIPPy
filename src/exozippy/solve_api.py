@@ -118,16 +118,13 @@ class _WarningCollector(logging.Handler):
 #: _resolve_config_paths rewrites against workdir.  Derived from the shipped
 #: configs and from what stages 1-4 actually open: `file`/`files` (every data
 #: component and the SED), `path` (the SED's file glob), `mask` (a flag file,
-#: when it is a string rather than a list), `mmexofast` (an explicit seed JSON,
-#: when it is a path rather than the true/false keywords),
-#: `parameter_file` (System reads it), and `prefix` (mulensinstrument builds
-#: the MMEXOFAST cache path from it, and both reads and writes there).
+#: when it is a string rather than a list), `parameter_file` (System reads
+#: it), and `prefix` (an output path; see _resolve_config_paths).
 _PATH_KEYS = (
     "file",
     "files",
     "path",
     "mask",
-    "mmexofast",
     "parameter_file",
 )
 
@@ -137,8 +134,8 @@ _GLOB_CHARS = "*?["
 def _joined_if_real(value, workdir):
     """``workdir/value``, but only when that names something that exists.
 
-    A value under a path key is not always a path: `mmexofast: true` and a
-    `mask:` given as a list of row indices share the key with real paths.
+    A value under a path key is not always a path: a `mask:` given as a
+    list of row indices shares the key with real paths.
     Probing keeps those untouched, and keeps a genuinely missing file
     reporting the spelling the user wrote rather than an absolute path they
     never typed.  A glob is probed by its directory, since the pattern itself
@@ -171,9 +168,8 @@ def _resolve_config_paths(config, workdir):
     reading whatever the server's cwd happens to hold; add the key.
 
     `prefix` is handled separately: it is an OUTPUT path, so it need not exist
-    yet, but mulensinstrument reads and writes the MMEXOFAST cache next to it
-    during stage 1a and that must land in the project directory exactly as it
-    did under chdir.
+    yet, but anything stages 1-3 write next to it must land in the project
+    directory exactly as it did under chdir.
     """
     import copy
 

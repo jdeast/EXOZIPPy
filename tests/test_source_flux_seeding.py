@@ -33,7 +33,7 @@ _WORKDIR = None
 def _kmt_workdir():
     """A private copy of the example dir for THIS test module.
 
-    Six xdist workers otherwise read and write (fitresults, mmexofast
+    Six xdist workers otherwise read and write (fitresults
     cache, whitening state) one shared examples/KMT-2019-BLG-1806
     concurrently -- the ezsuite-15362719 interference cluster.
     """

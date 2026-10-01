@@ -181,7 +181,7 @@ def test_every_schema_key_still_builds():
             "backend": "vbm_direct",
             "mag_method": "auto_vbbl",
             "use_op": False,
-            "mmexofast": False,
+            "peak_find": False,
             "fitmurel": False,
             "fitpirel": False,
             "fitthetae": False,

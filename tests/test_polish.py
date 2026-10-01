@@ -34,7 +34,7 @@ from exozippy.system import System
 def test_gate_auto_polishes_single_start_and_hint_sets_only():
     """
     Given the default 'auto' setting,
-    When the seeds are a single canonical start or MMEXOFAST hint sets,
+    When the seeds are a single canonical start or component hint sets,
     Then polish runs; a multi-seed set WITHOUT hints (posterior-draw
       restart) is never polished -- polishing K draws per basin would
       collapse the restart's overdispersion.

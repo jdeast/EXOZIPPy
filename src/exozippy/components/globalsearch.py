@@ -15,8 +15,9 @@ reference implementations of both algorithms; nothing here reimplements the
 periodogram, only the grid limits, the detection thresholds and the
 translation into EXOZIPPy parameters.
 
-The pattern copied end to end is MMEXOFAST's (``mulensing/
-mmexofast_support.py``), which solves the same problem for microlensing:
+The pattern copied end to end is the microlensing seeder's (first
+written for an external-fitter hand-off, since removed; the built-in peak
+finder, ``mulensing/peakfind.py``, carries it now):
 
 - **Ask whether seeding is needed by DERIVABILITY, not by presence.**
   ``ConfigManager.probe_derivable`` runs the relaxation engine on a snapshot
@@ -45,8 +46,9 @@ key order -- and if orbit went first the searched epoch would land outside a
 window built around the defaults.yaml 2460000, which ``Parameter.build_pymc``
 correctly treats as fatal.  Every component's stage 1a precedes every
 component's stage 2, so stage 1a is the only placement that is right for
-both orderings.  MMEXOFAST pushes at stage 1a for the same class of reason
-(its own flux bootstrap, later in the same ``load_data``).
+both orderings.  The microlensing peak finder pushes at stage 1a for the
+same class of reason (its own flux bootstrap, later in the same
+``load_data``).
 
 The seed goes through ONE channel (:func:`seed_start`):
 ``ConfigManager.add_hint`` at ``PRECEDENCE_DERIVED_DATA``.  That is the ranked
@@ -709,7 +711,7 @@ def search_mode(system):
     ``False`` opts out entirely; ``True`` forces the search even when the
     starts are already derivable; absent (the default) runs it only when
     something is missing.  It lives on the orbit block for the same reason
-    ``mmexofast:`` lives on the mulensevent block: that is the thing being seeded,
+    ``peak_find:`` lives on the mulensevent block: that is the thing being seeded,
     and the instrument that runs the search only borrows the switch.
     Returns one of ``"off"``, ``"force"``, ``"auto"``.
     """

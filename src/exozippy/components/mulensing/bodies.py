@@ -40,8 +40,6 @@ EVENT_KEYS = frozenset(
         "backend",
         "mag_method",
         "use_op",
-        "mmexofast",
-        "mmexofast_options",
         "peak_find",
         "fitmurel",
         "fitpirel",
@@ -75,6 +73,33 @@ for _k in ("lens_ndx", "source_ndx", "lenses", "sources"):
     )
 
 
+# Keys that WERE config keys and are gone.  Refused with their own message
+# rather than the generic one: a config that names one was written for a
+# feature that no longer exists, and the user needs to know what replaced it,
+# not that the key is "unknown".  MMEXOFAST was stripped from the package
+# (JDE 2026-10-01); its JSON supplied start values, a bad-data mask and
+# error-scale starts, all of which are ordinary user input now.
+_MMEXOFAST_REMOVED = (
+    "MMEXOFAST support was removed from EXOZIPPy (2026-10-01), and with it "
+    "the 'mmexofast:' and 'mmexofast_options:' keys.  Delete the key.  The "
+    "built-in peak finder seeds t_0/u_0/t_E whenever the params file does "
+    "not; everything an MMEXOFAST JSON used to supply goes in the user's "
+    "own files instead: start values as params-file `initval:` entries (a "
+    "list, one entry per seed, for several solutions -- "
+    "`source.<name>.t_0: {initval: [t1, t2]}`, plus `sampler: "
+    "{seed_polish: true}` so a list of solutions is polished as the JSON's "
+    "were), its excluded_points as the "
+    "instrument entry's `mask:` (0-based row indices), and its errfacs as "
+    "`mulensinstrument.<name>.err_scale: {initval: ...}`.  "
+    "examples/DC2018/convert_mmexofast_json.py does that conversion for an "
+    "existing config and JSON."
+)
+REMOVED_KEYS = {
+    "mmexofast": _MMEXOFAST_REMOVED,
+    "mmexofast_options": _MMEXOFAST_REMOVED,
+}
+
+
 def reject_unknown_keys(entry, allowed, where):
     """Refuse any key outside ``allowed``, saying where each one lives now.
 
@@ -86,6 +111,9 @@ def reject_unknown_keys(entry, allowed, where):
     unknown = sorted(set(entry or {}) - set(allowed))
     if not unknown:
         return
+    removed = [k for k in unknown if k in REMOVED_KEYS]
+    if removed:
+        raise ValueError(f"{where}: {removed} -- " + REMOVED_KEYS[removed[0]])
     lines = []
     for k in unknown:
         home = _KEY_HOME.get(k)
@@ -189,7 +217,7 @@ def body_entries(block, comp_key, system_config):
                 f"  {comp_key}:\n"
                 f"    - body: star.Lens\n"
                 f"Event-level options (finite_source, t0_par, backend, "
-                f"mag_method, use_op, mmexofast, fit* flags, "
+                f"mag_method, use_op, peak_find, fit* flags, "
                 f"source_orbital_motion) live on the `mulensevent:` block."
                 f"{hint}"
             )
