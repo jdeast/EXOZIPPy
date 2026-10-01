@@ -1971,12 +1971,17 @@ def assemble_inference_data(
     posterior_dict = {}
     for name in out_var_names:
         arr = np.concatenate(out_chunks[name], axis=0)  # (n_total, ...)
-        arr = arr.reshape((n_chains, actual_draws) + arr.shape[1:])
-        # old per-sample path ran every value through atleast_1d then squeezed
-        # a trailing dim-1 for scalar params -- match that convention here.
-        if arr.ndim > 2 and arr.shape[-1] == 1:
-            arr = arr.squeeze(-1)
-        posterior_dict[name] = arr
+        # The batched converter already returns each variable at (n_total,) +
+        # its own model shape, so keep that shape exactly -- no squeeze.  A
+        # trailing length-1 dim here is a real one-element vector (a lone
+        # star's teffsed), and PyMC-built traces keep it (`<var>_dim_0: 1`).
+        # The squeeze that used to be here dated from a per-sample path that
+        # padded scalars to (1,); on this path it could only flatten those
+        # vectors, so PTDE traces disagreed in shape with every other
+        # sampler's and NextGen's SED plot indexed a scalar per star.
+        posterior_dict[name] = arr.reshape(
+            (n_chains, actual_draws) + arr.shape[1:]
+        )
 
     idata = az.from_dict(
         {

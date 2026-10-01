@@ -20,6 +20,14 @@ They are written for Linux and Apple Silicon macOS, and need no root
 continue here. On an **Intel Mac** (`uname -m` prints `x86_64`), follow
 [`MACOS_INTEL_INSTALL.md`](MACOS_INTEL_INSTALL.md) instead.
 
+**How well tested this recipe is.** The conda environment below (Miniforge,
+with conda's own compiler and OpenBLAS) has passed the full test suite on
+Linux, but has not yet been run on a real WSL2 or macOS machine. The CI
+machines do not use it: they test Linux, Apple Silicon and Intel macOS with a
+python.org Python, the machine's own compiler, and the pinned development
+install ([`CONTRIBUTING.md`](CONTRIBUTING.md)). If this recipe fails on your
+machine, please open an issue.
+
 ### Step 1 -- Install Miniforge
 
 **macOS only:** first install Apple's command line tools, which provide the
@@ -95,10 +103,17 @@ cd ~/python/EXOZIPPy/examples/hat3
 exozippy hat3.yaml
 ```
 
-This fits the hot Jupiter HAT-P-3b, and can take an hour or more. When it
-finishes, the new `fitresults/` subdirectory holds the outputs, all starting
-`HAT-P-3b_numpyro`: a `_summary.txt` and `_results.csv` of the fitted
-parameters, the model plots (`_mcmc_*.pdf`), a corner plot and trace plots.
+This fits the hot Jupiter HAT-P-3b (RVs, four TESS sectors and the SED) as a
+**smoke test**: a short run (100 + 100 sampler steps, about half an hour on
+a fast machine, longer on a laptop) that exercises every stage of a fit and,
+since it starts from an already-converged solution, lands on the same
+answer -- but is not itself a converged fit. Its `sampler:` block says what
+publication-quality settings to use instead. The first run needs network
+access: it downloads the model tables it uses (see [Data](#data)). When it finishes, the new
+`fitresults/` subdirectory holds the outputs, all starting `HAT-P-3b`: a
+`_summary.txt` and `_results.csv` of the fitted parameters, the model plots
+(`_mcmc_*.pdf`), a corner plot, trace plots, and `_paper.pdf`, a draft of the
+modeling section with its citations.
 Open them with any PDF viewer, e.g. `xdg-open` on Linux, `open` on macOS, or
 `explorer.exe .` under WSL2 to browse the directory in Windows File Explorer.
 
@@ -124,7 +139,7 @@ and use it as a template. Generically:
    star.parallax:
        mu: 7.4528
        sigma: 0.0175
-       citation: [GaiaCollaboration:2023, ElBadry:2021]   # or a list
+       citation: [GaiaCollaboration:2016, GaiaCollaboration:2023, ElBadry:2021]   # or a list
    ```
 
    An entry that is a key in EXOZIPPy's `references.bib` is cited properly

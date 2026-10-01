@@ -14,16 +14,14 @@
 # than the light curve.  EXOZIPPy reports at startup which of them the
 # model could not reproduce; that report is expected here, not a fault.
 
-# Sky position.  Required: the OGLE file is HJD_UTC and the
+# Sky position (OGLE EWS).  Required: the OGLE file is HJD_UTC and the
 # HJD -> BJD_TDB conversion refuses placeholder coordinates.
 star.ra:
     initval: 271.0874583
     sigma: 0
-    citation: OGLE EWS
 star.dec:
     initval: -29.5190556
     sigma: 0
-    citation: OGLE EWS
 
 # --- Light curve (Skowron+2011 Table 1) -----------------------------------
 source.Source.t_0:

@@ -63,6 +63,12 @@ type Selection =
 // once already (`bound_scale` was rendered here and 400'd on every blur).
 const PARAM_FIELDS = ["initval", "lower", "upper", "sigma", "mu", "bound_scale"];
 
+// What justifies the entry's prior (config.CITATION_KEYS). Text, so its cell
+// never goes through `coerce` ("2016" must stay a string). One citation is a
+// string and is edited here; a list is shown read-only, since splitting a text
+// box into items would mean parsing a string -- edit a list in the params file.
+const CITATION_FIELD = "citation";
+
 // Whether a form value and the document's current value are the SAME edit.
 //
 // Every field below commits onBlur, and onBlur fires on a plain click-through
@@ -563,6 +569,7 @@ function InstanceForm({
                   <th key={f}>{f}</th>
                 ))}
                 <th>unit</th>
+                <th>{CITATION_FIELD}</th>
               </tr>
             </thead>
             <tbody>
@@ -600,6 +607,36 @@ function InstanceForm({
                       </td>
                     ))}
                     <td className="field-unit muted">{p.unit || ""}</td>
+                    <td>
+                      {Array.isArray(entry[CITATION_FIELD]) ? (
+                        <span
+                          className="muted"
+                          title="A list of citations -- edit it in the params file"
+                        >
+                          {(entry[CITATION_FIELD] as unknown[]).join("; ")}
+                        </span>
+                      ) : (
+                        <input
+                          className="citation-input"
+                          defaultValue={entry[CITATION_FIELD] ?? ""}
+                          placeholder="source of the prior"
+                          key={`${paramPath}.${CITATION_FIELD}.${JSON.stringify(entry[CITATION_FIELD])}`}
+                          onBlur={(e) => {
+                            const raw = e.target.value.trim();
+                            const value = raw === "" ? null : raw;
+                            if (unchanged(value, entry[CITATION_FIELD])) return;
+                            run({
+                              op: "set_param_field",
+                              args: {
+                                path: paramPath,
+                                field: CITATION_FIELD,
+                                value,
+                              },
+                            });
+                          }}
+                        />
+                      )}
+                    </td>
                     {diags.length > 0 && (
                       <td className="inline-diag danger">{diags[0].message}</td>
                     )}

@@ -20,7 +20,7 @@ star.A.distance:
   initval: 218.055
   mu: 218.055
   sigma: 0.889
-  citation: GaiaCollaboration:2023
+  citation: [GaiaCollaboration:2016, GaiaCollaboration:2023]
 # 3*E(B-V) upper limit (mkticsed.py)
 star.A.av:
   upper: 0.0521

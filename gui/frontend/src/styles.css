@@ -445,6 +445,9 @@ button.save-btn:disabled {
 .num-input {
   width: 88px;
 }
+.citation-input {
+  width: 180px;
+}
 .datafile-field {
   display: flex;
   gap: 4px;

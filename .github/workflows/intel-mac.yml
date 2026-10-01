@@ -274,7 +274,8 @@ jobs:
             tests/test_config_healing.py \
             tests/test_known_keys.py \
             tests/test_negative_jitter.py \
-            tests/test_gp.py
+            tests/test_gp.py \
+            tests/test_nutpie_smoke.py
 
       - name: Run the full suite
         if: ${{ inputs.run_full_suite }}

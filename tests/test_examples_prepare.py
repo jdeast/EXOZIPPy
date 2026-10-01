@@ -87,7 +87,13 @@ def _system_configs():
     out = []
     if not _EXAMPLES.is_dir():
         return out
-    for path in sorted(_EXAMPLES.glob("*/*.yaml")):
+    # `*/configs/` too: examples/DC2018/configs holds a dozen runnable configs
+    # that this glob used to miss, and all twelve that still used the
+    # pre-v0.1.0 `lens: {lenses:, sources:}` block rotted unnoticed.
+    paths = set(_EXAMPLES.glob("*/*.yaml")) | set(
+        _EXAMPLES.glob("*/configs/*.yaml")
+    )
+    for path in sorted(paths):
         try:
             doc = yaml.safe_load(path.read_text())
         except yaml.YAMLError:

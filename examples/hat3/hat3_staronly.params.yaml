@@ -27,4 +27,4 @@ star.av:
 star.parallax:
     initval: 7.45278
     sigma: 0.01745
-    citation: GaiaCollaboration:2023
+    citation: [GaiaCollaboration:2016, GaiaCollaboration:2023]
