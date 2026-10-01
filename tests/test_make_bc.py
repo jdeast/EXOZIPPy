@@ -11,6 +11,7 @@ import pytest
 from exozippy.components.sed.bc_grid import (
     DEFAULT_MODEL_ROOT,
     bc_filter_columns,
+    find_bc_table,
     read_bc_table,
     write_bc_table,
 )
@@ -40,7 +41,11 @@ def regenerated_2mass(tmp_path_factory):
     (model_dir / "BCs").mkdir(parents=True)
     for name in ("NextGen.spectra.csv", "NextGen.wavelength.csv"):
         (model_dir / "BCs" / name).symlink_to(_NEXTGEN / "BCs" / name)
-    shipped = read_bc_table(_SHIPPED_2MASS)
+    # find_bc_table, not the bare path: the published table is fetched
+    # into the default root on first use (models/NextGen/bc_tables.py).
+    shipped = read_bc_table(
+        find_bc_table(DEFAULT_MODEL_ROOT, "NextGen", "2MASS")
+    )
     before = shipped[shipped["feh"] == 0.0]
     write_bc_table(
         before,

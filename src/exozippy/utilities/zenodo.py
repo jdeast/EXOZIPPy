@@ -2,14 +2,16 @@
 
 Some of the data EXOZIPPy needs is far too large to ship in the package --
 the NextGen model spectra (~250 MB) that synthesize bolometric corrections
-for filters with no precomputed BC table, and the MIST EEP track grid
-(~128 MB) the evolutionary model interpolates. Both are git-ignored, fetched
-on first use, and cached in place.
+for filters with no precomputed BC table, the precomputed NextGen BC tables
+themselves (~96 MB), and the MIST EEP track grid (~128 MB) the evolutionary
+model interpolates. All are git-ignored, fetched on first use, and cached in
+place.
 
 This module owns the mechanics; the callers own their asset tables. It lives
-under ``utilities/`` rather than inside a component because its two callers
-(``components/sed/make_bc.py`` and ``models/MIST/eep_grid.py``) sit in
-different trees and a cross-component import would be the wrong dependency.
+under ``utilities/`` rather than inside a component because its callers
+(``components/sed/make_bc.py``, ``models/NextGen/bc_tables.py`` and
+``models/MIST/eep_grid.py``) sit in different trees and a cross-component
+import would be the wrong dependency.
 Note it is deliberately NOT a registry utility: it has no ``build_parser`` /
 ``main`` pair and is never surfaced by ``Component.get_utilities()``.
 
@@ -273,6 +275,21 @@ def _entry_lock(entry: Path) -> Iterator[None]:
                 fcntl.flock(fd, fcntl.LOCK_UN)
             with contextlib.suppress(OSError):
                 os.close(fd)
+
+
+def shared_cache_has(filename: str, meta: Mapping[str, object]) -> bool:
+    """Whether the machine cache holds an entry for this asset.
+
+    Existence only, keyed by the pinned md5 -- the full verification still
+    happens when ``fetch_assets`` links it. For a caller that must know in
+    advance whether a fetch can be served WITHOUT the network (the BC
+    tables before their record is published: models/NextGen/bc_tables.py).
+    False when the cache is switched off or unusable.
+    """
+    cache = _cache_dir()
+    if cache is None:
+        return False
+    return _entry_path(cache, filename, meta).is_file()
 
 
 def _entry_is_intact(entry: Path, meta: Mapping[str, object]) -> bool:

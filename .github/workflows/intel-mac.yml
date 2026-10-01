@@ -114,6 +114,13 @@ jobs:
             src/exozippy/models/NextGen/BCs/NextGen.wavelength.csv
           key: nextgen-spectra-p2-7a2b81333f6a5bfccd4cbc07bdea6648
 
+      # Same BC-table cache as tests.yml, same key -- see the comment there.
+      - name: Cache the Zenodo BC tables
+        uses: actions/cache@v6
+        with:
+          path: src/exozippy/models/NextGen/BCs/*.bc.parquet
+          key: nextgen-bc-tables-p1-${{ hashFiles('src/exozippy/models/NextGen/bc_tables.py') }}
+
       - name: Cache the astropy ephemeris kernel
         uses: actions/cache@v6
         with:

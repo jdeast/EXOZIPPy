@@ -243,6 +243,38 @@ def write_synthetic_mist_grid(
 _DELTA_DIR_ENV = "EXOZIPPY_DELTA_DIR"
 
 
+def _prewarm_bc_tables(config):
+    """Put the published NextGen BC tables in the package tree, once.
+
+    They are not tracked (models/NextGen/bc_tables.py fetches them on first
+    use), and `_no_shared_download_cache` switches the machine cache off for
+    every TEST -- so without this a fresh worktree would download ~96 MB
+    from Zenodo inside the first SED test, and a Zenodo outage would fail
+    the pre-push suite (review 2.13.4).  Run here, before any test and with
+    the real environment, the fetch is served by the machine cache when it
+    is warm (hard links, no network) and is a stat per table when the tree
+    already has them (CI restores them with actions/cache).
+
+    Controller only, before xdist spawns its workers, so they all find the
+    files in place.  A failure is REPORTED, not raised: the suite also holds
+    hundreds of tests that never read a table, and each SED test that does
+    re-raises the loader's own error (file, record, how to pre-fetch) when
+    it gets there.
+    """
+    from exozippy.models.NextGen import bc_tables
+
+    try:
+        bc_tables.fetch_all()
+    except RuntimeError as e:
+        import warnings
+
+        warnings.warn(
+            f"The NextGen BC tables could not be put in place before the "
+            f"suite; every test that reads one will fail with the reason: {e}",
+            stacklevel=1,
+        )
+
+
 def pytest_configure(config):
     """Point the acceptance dump at a fresh directory (controller only).
 
@@ -252,6 +284,7 @@ def pytest_configure(config):
     """
     if hasattr(config, "workerinput"):
         return  # an xdist worker; the controller has already done this
+    _prewarm_bc_tables(config)
     directory = os.environ.get(_DELTA_DIR_ENV)
     if not directory:
         directory = os.path.join(

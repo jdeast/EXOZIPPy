@@ -41,6 +41,34 @@ DC18_TIME_ORIGIN = 2458234.0
 
 PARAMS = ["t_0", "u_0", "t_E", "rho", "s", "q", "alpha"]
 
+
+def nextgen_bc_slice(facility, feh=0.0):
+    """The published NextGen BC table of one facility at one [Fe/H].
+
+    The SAME table the SED fits read (bc_grid.find_bc_table, which fetches
+    it from Zenodo on first use -- models/NextGen/bc_tables.py), not the
+    per-[Fe/H] legacy text files these scripts used to parse: those were
+    deleted when the tables moved to Zenodo, and they were the
+    photon-weighted pre-#335 tables, so reading them had already drifted
+    from what the model uses.  One row per (teff, logg, Av) node; teff is
+    LINEAR (the text files carried log10 teff), filter columns are MIST
+    names (WFI_F146, 2MASS_J, ...).
+    """
+    from exozippy.components.sed.bc_grid import (
+        DEFAULT_MODEL_ROOT,
+        find_bc_table,
+        read_bc_table,
+    )
+
+    df = read_bc_table(find_bc_table(DEFAULT_MODEL_ROOT, "NextGen", facility))
+    out = df[np.isclose(df["feh"], float(feh))].reset_index(drop=True)
+    if out.empty:
+        raise ValueError(
+            f"the NextGen {facility} BC table has no [Fe/H] = {feh} rows"
+        )
+    return out
+
+
 # results.csv parname -> comparison param.  No longer one component:
 # the trajectory offsets and source size are per-SOURCE, the timescale
 # is EVENT-level, and the geometry is per-COMPANION (named by the lens

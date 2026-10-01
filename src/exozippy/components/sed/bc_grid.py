@@ -280,6 +280,50 @@ def bc_table_path(model_root: Path | str, model: str, facility: str) -> Path:
     return Path(model_root) / model / "BCs" / f"{facility}{_BC_TABLE_SUFFIX}"
 
 
+def ensure_bc_tables(
+    model_root: Path | str,
+    model: str,
+    facilities: Sequence[str] | None = None,
+    allow_local_changes: bool = False,
+) -> None:
+    """Fetch the PUBLISHED tables for these facilities if they are not on disk.
+
+    The NextGen tables are not shipped in the package: they are published
+    on Zenodo and pinned by size and md5 in models/NextGen/bc_tables.py,
+    which fetches them on first use (through utilities/zenodo, the same
+    machinery and machine cache as the spectra and the MIST EEP grid).
+    Every reader of a table here calls this first, for exactly the
+    facilities it is about to read; `facilities=None` means every published
+    table (a reader that globs the directory).
+
+    A no-op unless `model_root` is the DEFAULT root -- an explicit
+    `model_root:` is the caller's own tree, used as given and never fetched
+    into (the rule mist_grid._resolve_grid_file applies to the MIST grids)
+    -- and for facilities that have no published table (the reader then
+    raises its own "not calculated" error, as before). A table that cannot
+    be fetched, or that differs from the pin, raises RuntimeError naming the
+    file; see bc_tables.ensure_tables. `allow_local_changes` is for the
+    generators, which merge new cells into these files.
+    """
+    if model != "NextGen" or Path(model_root) != Path(DEFAULT_MODEL_ROOT):
+        return
+    from ...models.NextGen import bc_tables
+
+    published = set(bc_tables.published_tables())
+    if facilities is None:
+        names = sorted(published)
+    else:
+        names = [
+            name
+            for name in dict.fromkeys(
+                f"{fac}{_BC_TABLE_SUFFIX}" for fac in facilities
+            )
+            if name in published
+        ]
+    if names:
+        bc_tables.ensure_tables(names, allow_local_changes=allow_local_changes)
+
+
 def bc_filter_columns(df: pd.DataFrame) -> List[str]:
     """The filter (BC) columns of a BC table, in file order."""
     return [c for c in df.columns if c not in BC_PARAM_COLS]
@@ -364,6 +408,7 @@ def find_bc_table(model_root: Path | str, model: str, facility: str) -> Path:
         raise FileNotFoundError(
             f"Bolometric corrections not calculated for ``{model}`` model. Specify a different model."
         )
+    ensure_bc_tables(model_root, model, [facility])
     path = bc_table_path(model_root, model, facility)
     if not path.is_file():
         raise NotImplementedError(
@@ -728,6 +773,14 @@ def peek_grid_axes(
     model_dir = model_root / model / "BCs"
     if not model_dir.is_dir():
         raise FileNotFoundError(f"BC model directory not found: {model_dir}")
+
+    # The requested facilities' published tables, or all of them when the
+    # glob below is what decides which tables count.
+    if filters:
+        _, _, requested = _filters_by_facility(filters)
+        ensure_bc_tables(model_root, model, list(requested))
+    else:
+        ensure_bc_tables(model_root, model)
 
     tables = sorted(model_dir.glob(f"*{_BC_TABLE_SUFFIX}"))
     if not tables:

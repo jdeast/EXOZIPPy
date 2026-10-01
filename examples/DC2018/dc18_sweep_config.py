@@ -211,38 +211,15 @@ def av_from_clump_colour(a_w149, sig_w149, a_z087, sig_z087):
     deviation of 0.10 and is independent of logg and feh to +/-0.01,
     depending on Teff alone at 0.28 per 1000 K.
     """
-    bc = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(C.__file__))),
-        "..",
-        "src",
-        "exozippy",
-        "models",
-        "NextGen",
-        "BCs",
-        "Roman",
-        "feh+0.0_afe+0.0.Roman",
-    )
-    bc = os.path.normpath(bc)
-    if not os.path.exists(bc):
-        raise SystemExit(
-            "cannot find the Roman BC table at %s; the colour-anchored av "
-            "prior needs it (regenerate with components/sed/make_bc.py)" % bc
-        )
-    header = next(ln for ln in io.open(bc) if "lgTef" in ln)
-    cols = header.lstrip("#").split()
-    tab = np.genfromtxt(bc, comments="#", skip_header=1)
-    i146 = 6 + cols[6:].index("WFI_F146")
-    i087 = 6 + cols[6:].index("WFI_F087")
-
-    lgt = tab[:, 0]
+    tab = C.nextgen_bc_slice("Roman", feh=0.0)
+    teffs = np.unique(tab["teff"])
     cell = np.isclose(
-        lgt, lgt[np.argmin(abs(lgt - np.log10(4800.0)))]
-    ) & np.isclose(tab[:, 1], 2.5)
-    sub = tab[cell]
-    sub = sub[np.argsort(sub[:, 4])]
-    av_pts = sub[:, 4]
-    a146 = sub[0, i146] - sub[:, i146]
-    a087 = sub[0, i087] - sub[:, i087]
+        tab["teff"], teffs[np.argmin(abs(np.log10(teffs) - np.log10(4800.0)))]
+    ) & np.isclose(tab["logg"], 2.5)
+    sub = tab[cell].sort_values("Av")
+    av_pts = sub["Av"].to_numpy()
+    a146 = sub["WFI_F146"].iloc[0] - sub["WFI_F146"].to_numpy()
+    a087 = sub["WFI_F087"].iloc[0] - sub["WFI_F087"].to_numpy()
 
     excess = a_z087 - a_w149
     if not a087[-1] - a146[-1] > excess:
