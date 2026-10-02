@@ -3,21 +3,16 @@
 The direction latents' N(0, 1) priors (orbit xomega/yomega and
 xbigomega/ybigomega, lens xalpha/yalpha) make their angles uniform, and
 mann's ks_offset N(0, 1) IS the Ks-uncertainty prior; a user mu/sigma on
-them -- and an initval on ks_offset -- is refused at ConfigManager
-construction.  The flags are declarative (defaults.yaml
-``structural_prior`` / ``structural_start``); see components/parameter.md,
-"Structural priors".
+them is refused at ConfigManager construction, while an initval stays open
+(JDE 2026-10-01).  The flag is declarative (defaults.yaml
+``structural_prior``); see components/parameter.md, "Structural priors".
 """
 
 import copy
 
 import pytest
 
-from exozippy.config import (
-    ConfigManager,
-    load_base_defaults,
-    structural_closed_fields,
-)
+from exozippy.config import ConfigManager, structural_closed_fields
 
 _LENS_CFG = {
     "star": [{"name": "Lens"}, {"name": "Companion"}, {"name": "Source"}],
@@ -43,15 +38,13 @@ _MANN_CFG = {
         ("lens.Companion.yalpha", "sigma", _LENS_CFG, "lens.<name>.alpha"),
         ("mann.A.ks_offset", "mu", _MANN_CFG, "ks_err"),
         ("mann.A.ks_offset", "sigma", _MANN_CFG, "ks_err"),
-        ("mann.A.ks_offset", "initval", _MANN_CFG, "ks_err"),
     ],
 )
 def test_structural_field_raises_naming_the_physical_quantity(
     key, field, cfg, physical
 ):
     """
-    Given a user mu or sigma on a structural N(0, 1) prior (or an initval on
-    mann's ks_offset),
+    Given a user mu or sigma on a structural N(0, 1) prior,
     When the ConfigManager is built,
     Then it raises naming the parameter and the field, and points at the
     physical quantity to constrain instead.
@@ -106,9 +99,9 @@ def test_the_flags_are_declared_in_defaults_yaml_not_in_code():
     Given the merged defaults.yaml tree,
     When the structural flags are read,
     Then exactly the RULED set carries them (the six direction latents and
-    ks_offset), eta_* is untouched, and ks_offset alone closes initval.
+    ks_offset), each closing mu/sigma only, and eta_* is untouched.
     """
-    defaults = load_base_defaults()
+    defaults = ConfigManager({}).base_defaults
     found = {}
     for comp, block in defaults.items():
         if not isinstance(block, dict):
@@ -128,5 +121,22 @@ def test_the_flags_are_declared_in_defaults_yaml_not_in_code():
         "orbit.ybigomega": direction,
         "lens.xalpha": direction,
         "lens.yalpha": direction,
-        "mann.ks_offset": ("mu", "sigma", "initval"),
+        "mann.ks_offset": direction,
     }
+
+
+def test_ks_offset_initval_is_accepted_and_is_the_start():
+    """
+    Given a params-file initval on mann's ks_offset (a restart file's MAP,
+    or an EXOFASTv2 appks start converted to an offset),
+    When the ConfigManager is built and the parameter resolved,
+    Then it is accepted and is the parameter's start (JDE 2026-10-01:
+    "Losing the start bothers me"), while the structural N(0, 1) stays.
+    """
+    cm = ConfigManager(
+        {"mann.A.ks_offset": {"initval": -0.146}},
+        system_config=copy.deepcopy(_MANN_CFG),
+    )
+    cfg = cm.resolve("mann", "ks_offset", shape=(1,), names=["A"])
+    assert float(cfg["initval"][0]) == pytest.approx(-0.146)
+    assert float(cfg["mu"][0]) == 0.0 and float(cfg["sigma"][0]) == 1.0

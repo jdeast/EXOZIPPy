@@ -1042,14 +1042,13 @@ def convert(pro_path, outdir, base):
             entry["ks"] = ks
             entry["ks_err"] = ks_err
             if off is not None and abs(off) > 1e-12:
-                # ks_offset is a STRUCTURAL start (review 2.2.21): a params
-                # initval on it raises, so the EXOFASTv2 appks start is not
-                # carried.  It starts at 0, i.e. appks = ks.
-                warn(
-                    f"mann relation for star {sname}: the EXOFASTv2 appks "
-                    f"start ({off:+.3f} ks_err from its center) is not "
-                    f"carried -- mann.ks_offset refuses an initval; it "
-                    f"starts at appks = ks"
+                param_entries.append(
+                    (
+                        f"mann.{sname}.ks_offset",
+                        {"initval": off},
+                        "start value of the appks prior, as a non-centered "
+                        "offset from its center in units of ks_err",
+                    )
                 )
         mann_entries.append(entry)
 

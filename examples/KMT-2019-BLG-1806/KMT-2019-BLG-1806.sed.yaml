@@ -3,8 +3,8 @@ model: NextGen
 # No catalog photometry yet: with an empty filter list, the SED
 # component can still constrain the Source star through the calibrated
 # microlensing baseline flux (the per-lightcurve zeropoint hook in
-# mulensinstrument, active once a zeropoint prior is stated -- the I-band
-# BC grid is pulled in via the band block's filter).
+# mulensinstrument, with the zeropoint prior in the params file -- the
+# I-band BC grid is pulled in via the band block's filter).
 #
 # To add catalog photometry of the (blended) baseline object, list
 # filter rows with a photType saying which stars contribute, e.g.:

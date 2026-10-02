@@ -618,39 +618,29 @@ def validate_sigma_has_center(user_params, links=None, source=None):
         )
 
 
-# defaults.yaml-only declarations that a parameter's prior (and, for some,
-# its start) is STRUCTURAL -- part of the parameterization, not a statement a
-# user may replace (review 2.2.21, JDE 2026-09-30).  Booleans, per the
-# exclusive-booleans rule; the fields each one closes to the params file:
+# defaults.yaml-only declaration that a parameter's prior is STRUCTURAL --
+# part of the parameterization, not a statement a user may replace (review
+# 2.2.21, JDE 2026-09-30).  `structural_prior: true` closes these fields to
+# the params file.  The N(0, 1) on a direction latent (orbit xomega/yomega and
+# xbigomega/ybigomega, lens xalpha/yalpha) is what makes the angle
+# arctan2(y, x) uniform; on mann's non-centered ks_offset it IS the
+# Ks-uncertainty prior.  Re-centering or re-widening it changes the meaning of
+# the parameterization, not a prior.  An initval stays open on every one of
+# them (JDE 2026-10-01 on ks_offset: "Losing the start bothers me").
 #
-#   structural_prior: true   -> mu, sigma
-#       The N(0, 1) on a direction latent (orbit xomega/yomega and
-#       xbigomega/ybigomega, lens xalpha/yalpha) is what makes the angle
-#       arctan2(y, x) uniform; on mann's non-centered ks_offset it IS the
-#       Ks-uncertainty prior.  Re-centering or re-widening it changes the
-#       meaning of the parameterization, not a prior.
-#   structural_start: true   -> initval
-#       A start on a latent whose value is meaningless on its own (mann's
-#       ks_offset: the start of the Ks it offsets is the Ks itself).
-#
-# A parameter carrying either also declares `structural_remedy:`, the
+# A parameter carrying the flag also declares `structural_remedy:`, the
 # sentence the refusal ends with -- which PHYSICAL quantity to constrain
 # instead.  Enforced in exactly one place, `validate_structural_fields`, at
 # ConfigManager construction; documented in components/parameter.md.
-STRUCTURAL_FIELDS = {
-    "structural_prior": ("mu", "sigma"),
-    "structural_start": ("initval",),
-}
+STRUCTURAL_PRIOR_FIELDS = ("mu", "sigma")
 
 
 def structural_closed_fields(base_defaults, comp, param):
-    """The params-file fields ``STRUCTURAL_FIELDS`` closes on ``comp.param``,
-    and its ``structural_remedy`` sentence (or None).
+    """The params-file fields closed on ``comp.param`` by a defaults.yaml
+    ``structural_prior: true``, and its ``structural_remedy`` (or None).
 
     ``base_defaults`` is the merged defaults.yaml tree; the component's own
     block is layered over a root-level entry exactly as ``resolve()`` does.
-    The one lookup, shared by the construction-time refusal and mkparam
-    (which must not write a refused field into a restart file).
     """
     spec = dict(base_defaults.get(param) or {})
     comp_block = base_defaults.get(comp)
@@ -658,45 +648,23 @@ def structural_closed_fields(base_defaults, comp, param):
         comp_block.get(param), dict
     ):
         spec.update(comp_block[param])
-    closed = []
-    for flag, fields in STRUCTURAL_FIELDS.items():
-        if spec.get(flag) is True:
-            closed.extend(fields)
-    return tuple(closed), spec.get("structural_remedy")
-
-
-def load_base_defaults():
-    """Every component's defaults.yaml, merged the way ConfigManager merges
-    them (sorted walk, nested last-writer-wins), for a reader that has no
-    ConfigManager -- mkparam writes a restart file from a trace and a config
-    alone."""
-    components_dir = Path(__file__).parent / "components"
-    out = {}
-
-    def _merge(base, overrides):
-        for k, v in overrides.items():
-            if isinstance(v, dict) and isinstance(base.get(k), dict):
-                _merge(base[k], v)
-            else:
-                base[k] = v
-
-    for defaults_file in sorted(components_dir.rglob("defaults.yaml")):
-        with open(defaults_file, "r") as f:
-            _merge(out, yaml.safe_load(f) or {})
-    return out
+    closed = (
+        STRUCTURAL_PRIOR_FIELDS if spec.get("structural_prior") is True else ()
+    )
+    return closed, spec.get("structural_remedy")
 
 
 def validate_structural_fields(
     user_params, base_defaults, links=None, source=None
 ):
-    """Fatal-error check: no user field on a STRUCTURAL prior or start.
+    """Fatal-error check: no user mu/sigma on a STRUCTURAL prior.
 
     ``base_defaults`` is the merged defaults.yaml tree (component blocks plus
     root-level parameters, as ``ConfigManager`` loads it).  Every params
     entry is matched to its parameter by its first segment (the component)
     and its last (the parameter) -- the same reading every one of the three
     spellings shares -- and refused when the parameter's defaults declare a
-    ``STRUCTURAL_FIELDS`` flag closing a field the entry states, numerically
+    ``structural_prior`` flag and the entry states mu or sigma, numerically
     or as a link (``extract_links`` deletes a linked field from the entry,
     so ``links`` is read too).  All offenders are named at once.
     """
@@ -727,10 +695,9 @@ def validate_structural_fields(
                 line += f" -- {remedy}"
             lines.append(line)
         raise ValueError(
-            f"Structural prior{where}: these parameters' priors (or starts) "
-            f"are part of their parameterization, not a statement a params "
-            f"file may replace, so these fields are refused:\n"
-            + "\n".join(lines)
+            f"Structural prior{where}: these parameters' priors are part "
+            f"of their parameterization, not a statement a params file may "
+            f"replace, so these fields are refused:\n" + "\n".join(lines)
         )
 
 

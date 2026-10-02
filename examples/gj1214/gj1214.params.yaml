@@ -69,6 +69,10 @@ band.MIRILRS.q1:
 band.MIRILRS.q2:
   initval: 0.24511917601638786
 
+# start value of the appks prior, as a non-centered offset from its center in units of ks_err
+mann.A.ks_offset:
+  initval: -0.14583661367844059
+
 # GJ 1214 is an M dwarf: this mass and radius give logg = 5.022, just past
 # the 5.0 ceiling of the NextGen bolometric-correction grid's logg axis.
 # (The grid's other three axes -- teff, [Fe/H], Av -- are all comfortably

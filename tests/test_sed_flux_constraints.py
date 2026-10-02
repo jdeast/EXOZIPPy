@@ -32,13 +32,17 @@ _KMT_DIR = Path(__file__).parent.parent / "examples" / "KMT-2019-BLG-1806"
 
 # The tie the KMT example used to get from defaults.yaml.  Since review
 # 2.2.21 the zeropoint carries no default mu/sigma -- the user states the
-# calibration and how much they trust it -- so these tests state it.
+# calibration and how much they trust it -- and the shipped params now
+# state 0 +/- 0.07 per site; these tests pin their own 0 +/- 0.2.
 _ZP_TIE = {"mu": 0.0, "sigma": 0.2}
 
 
 def _with_zp_tie(user_params):
-    """The KMT params plus the 0 +/- 0.2 mag broadcast zeropoint tie."""
-    user_params = dict(user_params)
+    """The KMT params with the 0 +/- 0.2 mag broadcast zeropoint tie in
+    place of the shipped per-site priors (these tests pin the sigma)."""
+    user_params = {
+        k: v for k, v in user_params.items() if ".zeropoint" not in k
+    }
     user_params["mulensinstrument.zeropoint"] = dict(_ZP_TIE)
     return user_params
 

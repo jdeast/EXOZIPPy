@@ -59,12 +59,16 @@ star.Source.feh:
 planet.Companion.radius:
     sigma: 0
 
-# The Source's radius and teff are free.  No zeropoint prior is stated
-# here, so the sed: block does NOT tie the source to the light curves'
-# baseline flux (review 2.2.21: the tie is the user's to state, as
-# mulensinstrument.<name>.zeropoint: {mu, sigma}); the absolute flux scale
-# would come from that prior, not the data.  Seeded near a bulge turnoff
-# star, which is what I_source ~ 18.9 at ~8 kpc implies.
+# Zang et al. 2023, AJ 165, 103 (arXiv:2210.12344), Sec. 3 and Table 10:
+# KMT I magnitudes calibrated to standard I with the OGLE-III catalog
+# (Szymanski et al. 2011), so flux = 10**(-0.4 I) (zeropoint 0);
+# I_S = 21.35 +/- 0.07.
+mulensinstrument.KMTC04.zeropoint: {mu: 0.0, sigma: 0.07}
+mulensinstrument.KMTS04.zeropoint: {mu: 0.0, sigma: 0.07}
+mulensinstrument.KMTA04.zeropoint: {mu: 0.0, sigma: 0.07}
+
+# Seeded near a bulge turnoff star, which is what I_source ~ 18.9 at
+# ~8 kpc implies.
 star.Source.radius:
     initval: 1.2
 star.Source.teff:

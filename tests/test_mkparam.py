@@ -1230,17 +1230,17 @@ def test_output_version_loops_when_the_config_names_no_parameter_file(
     assert already_there.read_text() == "# an earlier run's restart file\n"
 
 
-def test_a_structural_start_is_not_written(tmp_path):
+def test_a_structural_prior_parameter_round_trips_its_initval(tmp_path):
     """
-    Given a trace that samples mann's ks_offset (defaults.yaml
-      `structural_start: true`, review 2.2.21) alongside an ordinary
-      parameter,
-    When mkparam runs,
-    Then no ks_offset entry is written -- a params-file initval on it would
-      make the restart file fail the next fit's ConfigManager -- while the
-      ordinary parameter still gets its MAP.
+    Given a trace that samples mann's ks_offset (a defaults.yaml
+      `structural_prior`, review 2.2.21),
+    When mkparam runs and the restart file is read back by a ConfigManager,
+    Then the MAP offset is written as its initval and accepted: only a
+      user mu/sigma is structural there (JDE 2026-10-01 kept the start).
     """
     import yaml
+
+    from exozippy.config import ConfigManager
 
     trace = _make_idata(
         {"mann.ks_offset": 0.37, "star.mass": 0.95}, tmpdir=tmp_path
@@ -1260,5 +1260,6 @@ def test_a_structural_start_is_not_written(tmp_path):
     )
 
     result = yaml.safe_load(open(out))
-    assert not any(k.endswith("ks_offset") for k in result), result
-    assert result["star.Host.mass"]["initval"] == pytest.approx(0.95)
+    assert result["mann.Host.ks_offset"]["initval"] == pytest.approx(0.37)
+    assert "mu" not in result["mann.Host.ks_offset"]
+    ConfigManager(result, system_config=config)

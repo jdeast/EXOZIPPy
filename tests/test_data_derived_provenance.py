@@ -235,6 +235,11 @@ def _kmt_inputs():
         user_params = yaml.safe_load(f)
     for k in ("run", "prefix", "parameter_file", "sampler"):
         config.pop(k, None)
+    # The shipped per-site zeropoint priors are removed so each test states
+    # the zeropoint entry it is about (none, for the default).
+    user_params = {
+        k: v for k, v in user_params.items() if ".zeropoint" not in k
+    }
     return config, user_params
 
 

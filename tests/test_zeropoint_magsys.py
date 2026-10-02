@@ -39,6 +39,13 @@ def _kmt_inputs():
         user_params = yaml.safe_load(f)
     for k in ("run", "prefix", "parameter_file", "sampler"):
         config.pop(k, None)
+    # The shipped per-site zeropoint priors and magsys are removed, so each
+    # test states the tie and the system it is about.
+    user_params = {
+        k: v for k, v in user_params.items() if ".zeropoint" not in k
+    }
+    for entry in config["mulensinstrument"]:
+        entry.pop("magsys", None)
     return config, user_params
 
 
@@ -210,7 +217,7 @@ def test_the_tie_and_its_ab_conversion_are_declared_in_the_draft(
 
 def test_an_untied_fit_declares_no_tie_sentence():
     """
-    Given the KMT example as shipped (no zeropoint stated, so no tie),
+    Given the KMT example with no zeropoint stated (so no tie),
     When the model is built,
     Then the draft carries no zeropoint-tie sentence.
     """
@@ -293,7 +300,7 @@ def test_filter_with_no_native_system_and_none_stated_raises(monkeypatch):
 
 def test_no_stated_zeropoint_means_no_tie():
     """
-    Given the KMT example as shipped (no zeropoint entry),
+    Given the KMT example with no zeropoint entry,
     When the model is built,
     Then there is no zeropoint prior at all -- defaults.yaml supplies no
     mu/sigma -- while the zeropoint is still REPORTED as derived.
@@ -357,3 +364,36 @@ def test_bare_zeropoint_value_raises_through_the_params_boundary():
             system.prepare()
     finally:
         os.chdir(cwd)
+
+
+def test_shipped_kmt_params_state_the_published_calibration():
+    """
+    Given the KMT example exactly as shipped,
+    When it is prepared,
+    Then every light curve is tied, in Vega, at the published OGLE-III
+    calibration (Zang et al. 2023: zeropoint 0, sigma 0.07 = their I_S
+    uncertainty) -- review 2.2.21 has the params file state it.
+    """
+    if not _KMT_DIR.is_dir():
+        pytest.skip("KMT-2019-BLG-1806 example not present")
+    with open(_KMT_DIR / "KMT-2019-BLG-1806.yaml") as f:
+        config = yaml.safe_load(f)
+    with open(_KMT_DIR / config["parameter_file"]) as f:
+        user_params = yaml.safe_load(f)
+    for k in ("run", "prefix", "parameter_file", "sampler"):
+        config.pop(k, None)
+    cwd = os.getcwd()
+    os.chdir(_KMT_DIR)
+    try:
+        system = System(config, user_params=user_params)
+        system.prepare()
+    finally:
+        os.chdir(cwd)
+    mi = system.mulensinstrument
+    assert np.all(mi._zp_tied)
+    assert mi.zp_magsys == ["Vega"] * 3
+    cfg = system.config_manager.resolve(
+        "mulensinstrument", "zeropoint", shape=(3,), names=mi.names
+    )
+    np.testing.assert_array_equal(cfg["mu"], 0.0)
+    np.testing.assert_array_equal(cfg["sigma"], 0.07)

@@ -26,11 +26,7 @@ import arviz as az
 import numpy as np
 import yaml
 
-from exozippy.config import (
-    load_base_defaults,
-    structural_closed_fields,
-    validate_sigma_has_center,
-)
+from exozippy.config import validate_sigma_has_center
 from exozippy.outputs.modes import (
     MODE_FAILED,
     MODE_NO_VALID_DRAWS,
@@ -1015,24 +1011,8 @@ def write_param_file(
     # element of a sampled var is sampled, exactly as before.
     element_roles = _trace_element_roles(idata)
 
-    # A STRUCTURAL START (defaults.yaml `structural_start: true`, review
-    # 2.2.21 -- mann's ks_offset) refuses a params-file initval, so writing
-    # its MAP here would make the restart file fail the next fit.  Not
-    # written: the next fit starts it at its defaults.yaml value, which
-    # moves that one coordinate of the restart start off the MAP.
-    base_defaults = load_base_defaults()
-
     for var_name in sampled_vars:
         comp_key, param = var_name.rsplit(".", 1)
-        closed, _remedy = structural_closed_fields(
-            base_defaults, comp_key.split(".")[0], param
-        )
-        if "initval" in closed:
-            logger.info(
-                f"mkparam: {var_name} is a structural start (defaults.yaml "
-                f"structural_start); no initval written."
-            )
-            continue
         da = posterior[var_name]
         # (K, n_elements) joint values across the seed draws.
         seed_vals = np.stack(

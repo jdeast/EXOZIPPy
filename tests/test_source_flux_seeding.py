@@ -68,6 +68,11 @@ def _prepare_kmt(extra_params=None, drop_params=()):
             config = yaml.safe_load(f)
         with open(config["parameter_file"]) as f:
             user_params = yaml.safe_load(f)
+        # The shipped per-site zeropoint priors are removed: each test states
+        # the tie it is about (or none).
+        user_params = {
+            k: v for k, v in user_params.items() if ".zeropoint" not in k
+        }
         for k in ("run", "prefix", "parameter_file", "sampler"):
             config.pop(k, None)
         for k in drop_params:
@@ -134,8 +139,8 @@ def test_user_start_outranks_the_seed():
 
 def test_no_stated_zeropoint_does_not_seed():
     """
-    Given the shipped KMT config as written -- no zeropoint entry, so no
-    tie (review 2.2.21) --
+    Given the KMT config with no zeropoint entry, so no tie (review
+    2.2.21) --
     When the system is prepared,
     Then no source-flux seed is written: with no calibration statement the
     baseline flux says nothing about the source's magnitude.  (The SAME
