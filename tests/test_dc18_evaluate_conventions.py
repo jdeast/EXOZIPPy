@@ -6,7 +6,6 @@ on 11 of the 30 static events (every one whose truth u_0 is negative).
 """
 
 import importlib
-import re
 import sys
 from pathlib import Path
 
@@ -47,27 +46,35 @@ def test_lnz_parser_keeps_the_value_off_the_error_bar(dc18, tmp_path):
 
 def test_u_0_is_compared_in_absolute_value(dc18):
     """(u_0, alpha) -> -(u_0, alpha) is EXACT for a static binary with no
-    parallax (conventions.md C23), so the truth table's trajectory-side sign
-    is not one the fits carry.  dc18_common has folded it since the comparison
-    table existed; dc18_evaluate did not, and scored the sign as a pull.
+    parallax (conventions.md C23), so the mode-aware evaluator merges the
+    mirror pair by folding u_0.  It did not until 2026-09-24, and scored the
+    sign as a pull.
     """
     ev, common = dc18
-    assert "u_0" in ev.ABS_COMPARED
+    assert ev.ABS_COMPARED == {"u_0"}
 
 
-def test_the_two_dc2018_scorers_fold_the_same_keys(dc18):
-    """The divergence itself, which is what actually went wrong: two scorers
-    for the same truth table disagreed about a convention for months.
+@pytest.mark.parametrize("u0_truth", [0.1418, -0.1418])
+@pytest.mark.parametrize("u0_fit", [0.1401, -0.1401])
+def test_the_two_dc2018_scorers_agree_on_the_u_0_mirror(
+    dc18, u0_truth, u0_fit
+):
+    """The divergence that actually went wrong on 2026-09-24: two scorers for
+    the same truth table disagreed about the mirror for months.
 
-    Per docs/testing.md rule 3, this asserts the scan FIRED -- a guard that
-    reads another module's source goes vacuous the moment that module spells
-    the rule differently, and would then pass while watching nothing.
+    dc18_common now compares u_0 SIGNED in the fit's branch
+    (mirror_branch_truth; the key's sign maps by the identity, C22) while
+    dc18_evaluate folds |u_0|.  For u_0 the two must give the same residual
+    on every sign combination, and dc18_common must REPORT a mirrored
+    comparison, not hide it.
     """
     ev, common = dc18
-    src = Path(common.__file__).read_text()
-    folded = set(re.findall(r'truth\["(\w+)"\]\s*=\s*abs\(', src))
-    assert folded, (
-        "found no `truth[...] = abs(...)` in dc18_common; the rule moved or "
-        "was respelled, so this guard is watching nothing -- re-derive it"
+    u0_t, alpha_t, mirrored = common.mirror_branch_truth(
+        u0_truth, 300.0, u0_fit
     )
-    assert folded == ev.ABS_COMPARED
+    assert abs(u0_fit - u0_t) == pytest.approx(
+        abs(abs(u0_fit) - abs(u0_truth))
+    )
+    assert u0_t * u0_fit > 0
+    assert mirrored == (u0_fit * u0_truth < 0)
+    assert alpha_t == pytest.approx(60.0 if mirrored else 300.0)

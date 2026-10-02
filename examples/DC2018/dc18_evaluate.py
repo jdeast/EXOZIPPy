@@ -91,12 +91,18 @@ REMEDY = {
 # Log coordinates are compared in log space.
 # Compared in ABSOLUTE VALUE.  (u_0, alpha) -> -(u_0, alpha) is EXACT for a
 # static binary with no parallax (conventions.md C23, Skowron Eq. A12), so the
-# truth table's trajectory-side sign is not one the fits carry and the mirror
-# pair is ONE physical solution, not two modes.  dc18_common.py has done this
-# since the comparison table existed (truth["u_0"] = abs(truth["u_0"])); the
-# mode-aware evaluator did not, and scored the sign as a pull -- on event 004
-# that put the truth in an 8% mode at 16.4 sigma when it is in the 90.6%
-# favourite at 1.04.  Taking abs of the DRAWS too is what merges the mirror.
+# mirror pair is ONE physical solution, not two modes, and nothing in these
+# data can say which branch the key's sign names.  The key's u_0 maps onto
+# ours by the identity, sign included (C22); folding is about the MIRROR, not
+# about a convention.  dc18_common.compare_event scores each fit in its own
+# branch (mirror_branch_truth), which for u_0 is numerically this same
+# |u_0| comparison; the mode-aware evaluator did not fold at all until
+# 2026-09-24, and scored the sign as a pull -- on event 004 that put the truth
+# in an 8% mode at 16.4 sigma when it is in the 90.6% favourite at 1.04.
+# Taking abs of the DRAWS too is what merges the mirror.  alpha is not an
+# observable here yet: scoring it needs the same per-draw mirror fold
+# (alpha -> -alpha where u_0 flips) and a decision about the short-period
+# orbits (dc18_common.SHORT_PERIOD_YR) before it may vote in a PASS.
 ABS_COMPARED = {"u_0"}
 
 OBSERVABLES = [

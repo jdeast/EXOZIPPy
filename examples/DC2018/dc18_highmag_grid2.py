@@ -4,11 +4,13 @@ The first attempt gridded (s, q, alpha) with t_0/u_0/t_E FROZEN at the
 point-lens fit, and it could not see the true basin at all: the truth ranked
 35th-144th among local minima.  Two defects, both in the measurement:
 
-1. It scored "chi2 at truth" using the DC2018 truth ALPHA, which this project
-   established over all 44 events is unmappable to our convention (see
-   dc18_common.ALPHA_IS_UNMAPPABLE).  Best-fit alphas came out 288/330/316/
-   112/356 deg against truth 320/259.5/71.25/29.33/299.33 with no consistent
-   offset, so that metric carried no information.
+1. It scored "chi2 at truth" using the DC2018 truth ALPHA AS WRITTEN in the
+   key, which is not in our convention: it maps by the per-event node-line
+   rule dc18_common.key_alpha_to_exozippy (conventions.md C22, found
+   2026-10-02; until then the key was wrongly recorded as unmappable).
+   Best-fit alphas came out 288/330/316/112/356 deg against raw key values
+   320/259.5/71.25/29.33/299.33 with no consistent offset, so that metric
+   carried no information.
 2. Freezing the nuisance parameters costs THOUSANDS of chi2 on these events.
    Event 163's point-lens fit is off by 2% in u_0 and 1.7% in t_E, and that
    alone accounts for ~11565 chi2 over its 38568 points.  For a sharply peaked
