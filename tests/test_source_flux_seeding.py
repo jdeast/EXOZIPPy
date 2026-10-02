@@ -7,12 +7,13 @@ magnitude is MEASURED: bootstrapped f_source through the zeropoint prior's
 mu.  On DC2018 event 128 that placeholder start let the polish walk into a
 swapped source/lens configuration.
 
-The zeropoint mu is a calibration statement whether the user wrote it or
-defaults.yaml's 0.0 did.  The KMT example's files are calibrated
-magnitudes (flux = 10**(-0.4 m)), so the DEFAULT mu = 0.0 is correct there
-and the shipped config seeds; a wrong mu drives the measured magnitude off
-the dwarf locus in one direction or the other and the guards skip seeding
-with a warning that doubles as the miscalibration alarm.
+The zeropoint mu is the USER's calibration statement: since review 2.2.21
+defaults.yaml carries none, and a light curve seeds only when its zeropoint
+is tied (mu AND sigma stated).  The KMT example's files are calibrated
+magnitudes (flux = 10**(-0.4 m)), so a stated mu = 0.0 is correct there
+(``_ZP_TIE`` below) and the config seeds; a wrong mu drives the measured
+magnitude off the dwarf locus in one direction or the other and the guards
+skip seeding with a warning that doubles as the miscalibration alarm.
 """
 
 import logging
@@ -28,6 +29,13 @@ _KMT_DIR = Path(__file__).parent.parent / "examples" / "KMT-2019-BLG-1806"
 
 
 _WORKDIR = None
+
+# The calibration the KMT files are in, stated: until review 2.2.21 this was
+# the defaults.yaml zeropoint prior.
+_ZP_TIE = {
+    f"mulensinstrument.{n}.zeropoint": {"mu": 0.0, "sigma": 0.2}
+    for n in ("KMTC04", "KMTS04", "KMTA04")
+}
 
 
 def _kmt_workdir():
@@ -47,7 +55,7 @@ def _kmt_workdir():
     return _WORKDIR
 
 
-def _prepare_kmt(extra_params=None, drop_params=()):
+def _prepare_kmt(extra_params=None):
     import os
 
     if not _KMT_DIR.is_dir():
@@ -60,10 +68,13 @@ def _prepare_kmt(extra_params=None, drop_params=()):
             config = yaml.safe_load(f)
         with open(config["parameter_file"]) as f:
             user_params = yaml.safe_load(f)
+        # The shipped per-site zeropoint priors are removed: each test states
+        # the tie it is about (or none).
+        user_params = {
+            k: v for k, v in user_params.items() if ".zeropoint" not in k
+        }
         for k in ("run", "prefix", "parameter_file", "sampler"):
             config.pop(k, None)
-        for k in drop_params:
-            user_params.pop(k, None)
         if extra_params:
             user_params.update(extra_params)
         system = System(config, user_params=user_params)
@@ -75,21 +86,16 @@ def _prepare_kmt(extra_params=None, drop_params=()):
 
 def test_shipped_config_seeds_a_late_type_dwarf():
     """
-    Given the shipped KMT config (calibrated magnitude files, default
-    zeropoint mu = 0.0 correct),
+    Given the shipped KMT config (calibrated magnitude files) with its
+    zeropoint stated as 0 +/- 0.2 mag,
     When the system is prepared,
-    Then the source (m_I ~ 21.3 at the 8 kpc bulge seed -> M_I ~ 6.8) is
-    seeded as a K/M dwarf: the teff/radius hints exist (only this seeding
-    writes them), logmass moved off mulensevent.py's -0.5 placeholder, and the
-    resolved start carries the seed.
-
-    The shipped params file's own Source teff/radius starts are dropped
-    here: user entries outrank data hints by design (verified in this
-    test's counterpart below), and this test is about the hint path.
+    Then the source (m_I ~ 21.3 at the 8 kpc bulge seed, through the params
+    file's published A_I = 1.40 -> M_I ~ 5.4) is seeded as a K dwarf: the
+    teff/radius hints exist (only this seeding writes them), logmass moved
+    off mulensevent.py's -0.5 placeholder, and the resolved start carries
+    the seed.
     """
-    system = _prepare_kmt(
-        drop_params=("star.Source.radius", "star.Source.teff")
-    )
+    system = _prepare_kmt(extra_params=_ZP_TIE)
     cm = system.config_manager
     src = int(system.mulensevent.source_map[0])
     for param in ("logmass", "teff", "radius", "teffsed", "radiussed"):
@@ -109,18 +115,41 @@ def test_shipped_config_seeds_a_late_type_dwarf():
 
 def test_user_start_outranks_the_seed():
     """
-    Given the shipped config, whose params file explicitly starts the
-    Source at a bulge turnoff (teff 5800, radius 1.2),
+    Given the shipped config plus an explicit user start for the Source at
+    a bulge turnoff (teff 5800, radius 1.2),
     When the system is prepared,
     Then the hint is still computed but the USER start wins the resolve --
     data hints yield to explicit user values by design.
     """
-    system = _prepare_kmt()
+    system = _prepare_kmt(
+        extra_params={
+            **_ZP_TIE,
+            "star.Source.teff": {"initval": 5800},
+            "star.Source.radius": {"initval": 1.2},
+        }
+    )
     cm = system.config_manager
     src = int(system.mulensevent.source_map[0])
     assert f"star.{src}.teffsed" in cm.hints  # seed computed...
     resolved = cm.user_params[f"star.{src}.teff"]
     assert np.isclose(float(resolved["initval"]), 5800.0)  # ...user won
+
+
+def test_no_stated_zeropoint_does_not_seed():
+    """
+    Given the KMT config with no zeropoint entry, so no tie (review
+    2.2.21) --
+    When the system is prepared,
+    Then no source-flux seed is written: with no calibration statement the
+    baseline flux says nothing about the source's magnitude.  (The SAME
+    config with the tie stated seeds, test_shipped_config_seeds_a_late_type_
+    dwarf, so this is the stated tie's doing and not a broken seeder.)
+    """
+    system = _prepare_kmt()
+    cm = system.config_manager
+    src = int(system.mulensevent.source_map[0])
+    for param in ("teff", "radius", "teffsed", "radiussed"):
+        assert f"star.{src}.{param}" not in cm.hints, param
 
 
 def test_faint_miscalibration_guard(caplog):

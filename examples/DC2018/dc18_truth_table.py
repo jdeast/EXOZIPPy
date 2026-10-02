@@ -80,6 +80,14 @@ ROWS = [
     # geometry".
     ("s or 1/s", "s_branch", "lens.Companion.s", True),
     ("q", "q", "lens.Companion.q", True),
+    # alpha in OUR convention (dc18_common.key_alpha_to_exozippy, C22),
+    # scored in the mode's own u_0 branch: a mode in the key's no-parallax
+    # mirror branch is compared against the mirror image and says so.
+    # Not CORE (yet): on the short-period orbits the simulator's lens
+    # orbital motion moves alpha by degrees over the event, which a static
+    # fit cannot follow, and a CORE row would fail those fits for a
+    # physics difference rather than a fitting one.
+    ("alpha", "alpha_exz", "lens.Companion.alpha", False),
     ("theta_E", "thE", "mulensevent.theta_E", False),
     ("mu_rel", "murel", "mulensevent.mu_rel_mag", False),
     ("pi_rel", "pi_rel", "mulensevent.pi_rel", False),
@@ -89,9 +97,6 @@ ROWS = [
     ("D_source", "Ds", "star.Source.distance", False),
     ("R_source", "Rs", "star.Source.radius", False),
 ]
-# alpha is deliberately absent: dc18_common's header documents the
-# origin/handedness mismatch between the challenge's convention and ours,
-# and a pull computed across that would be a fabricated number.
 
 # Mixing gates.  "strict" is what a published fit should clear; "explore"
 # is for iterating -- JDE, 2026-09-14: "our rhat<1.01, ess>1000 might be too
@@ -113,6 +118,11 @@ def truth_for(event, data_dir):
     return {
         "t0_bjd": t["t_0"],
         "u0_abs": abs(g("u0")),
+        "u0_signed": g("u0"),
+        "alpha_exz": float(
+            C.key_alpha_to_exozippy(g("alpha"), g("phase"), g("inc"))
+        ),
+        "period_yr": g("period"),
         "tE": g("tE"),
         "rhos": g("rhos"),
         "s": g("s"),
@@ -553,6 +563,21 @@ def report(prefix, event, data_dir, tier="default"):
                 prov = rprov.get(name, "trace")
             if label == "|u_0|":
                 val = abs(val)
+            if label == "alpha":
+                u0c = table.get("source.u_0", {}) if have_csv else {}
+                u0c = u0c.get(m) or u0c.get("all")
+                _, tv, mirrored = C.mirror_branch_truth(
+                    truth["u0_signed"], tv, None if u0c is None else u0c[1]
+                )
+                if mirrored:
+                    branch = " (u_0 mirror tie, C23)"
+                if truth["period_yr"] < C.SHORT_PERIOD_YR:
+                    branch += (
+                        " (P %.2f yr: lens orbital motion)"
+                        % (truth["period_yr"])
+                    )
+                # Put the fitted value on the truth's side of the wrap.
+                val = tv - float(C.wrap180(tv - val))
             if label == "s or 1/s":
                 alt = 1.0 / tv if tv else tv
                 if abs(np.log(max(val, 1e-30) / alt)) < abs(

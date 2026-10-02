@@ -208,6 +208,10 @@ class SED(Component):
         # the plot compiler, and the cross-component predict_* API.
         self._m_pred_matrix = None
 
+        # facility -> read_bc_meta of its BC table, filled lazily by
+        # _column_magsys (one read per facility per instance).
+        self._bc_table_meta = {}
+
         # Grid-axis caches, filled by _inject_grid_bounds below, which
         # puts ALL FOUR of the BC grid's axes onto star Parameters
         # through the override channel: teffsed, feh and av are sampled,
@@ -770,67 +774,24 @@ class SED(Component):
             # Band filters only: no photometry row has a system to apply.
             self.mag = self.mag_reported
             return
-        record = read_magsys_table(self.model_root, self.sedmodel)
-        record_path = magsys_table_path(self.model_root, self.sedmodel)
-        alias_df = _load_alias_table()
-        table_meta = {}  # facility -> read_bc_meta of its table
 
         has_neg = (self.blend_matrix < 0).any(axis=1)
         for i in range(self.nfilters):
             name = self.filters[i]
             col = self.mist_filters[i]
             where = f"{self.sedfile}, filter row {i} ({name!r}, column {col})"
-            if col not in record.index:
-                raise ValueError(
-                    f"{where}: BC column {col} has no magnitude-system "
-                    f"record in {record_path}. Re-run write_magsys_table "
-                    f"in models/NextGen/generate_NextGen_BC_Tables.py for "
-                    f"its facility."
-                )
-            rec = record.loc[col]
-
-            svo = resolve_filter_name(name, alias_df, alias="SVO")
-            fac = facility_from_svo_name(svo)
-            if fac not in table_meta:
-                table_meta[fac] = read_bc_meta(
-                    find_bc_table(self.model_root, self.sedmodel, fac)
-                )
-            meta = table_meta[fac]
-            if meta.get("mag_system") != VEGA:
-                raise ValueError(
-                    f"{where}: the {fac} BC table's mag_system is "
-                    f"{meta.get('mag_system')!r}; the AB conversion "
-                    f"(m_AB - m_Vega per column) needs a Vega-referenced "
-                    f"column."
-                )
-            if col not in meta.get("filters", {}):
-                raise ValueError(
-                    f"{where}: the {fac} BC table carries no filter_meta "
-                    f"for column {col}, so its magnitude-system record "
-                    f"cannot be checked against it."
-                )
-            check_record_matches_column(
-                rec, col, meta["filters"][col], record_path
+            system, offset = self._column_magsys(
+                i,
+                self._magsys_stated[i],
+                where,
+                differential_note=(
+                    " (for a differential row either gives the same "
+                    "fit: the system cancels)"
+                ),
             )
-
-            system = self._magsys_stated[i]
-            if system is None:
-                # Unstated means the filter's native system (JDE
-                # 2026-10-01); a filter with none recorded must state it.
-                system = rec["native_system"]
-                if not system:
-                    raise ValueError(
-                        f"{where}: the row states no magsys and {col} has "
-                        f"no native magnitude system ({record_path}: none "
-                        f"exists for it, or it is UNRESOLVED -- Kepler Kp, "
-                        f"JDE 2026-10-01). "
-                        f"State it with `magsys: Vega` or `magsys: AB` "
-                        f"(for a differential row either gives the same "
-                        f"fit: the system cancels)."
-                    )
             self.magsys.append(system)
             if system == AB and not has_neg[i]:
-                self.ab_minus_vega[i] = float(rec["ab_minus_vega"])
+                self.ab_minus_vega[i] = offset
 
         # What the likelihood fits and the figures plot: the row's
         # magnitude on its column's Vega system.
@@ -842,6 +803,91 @@ class SED(Component):
                 f"{self.mag_reported[i]:.4f} - {self.ab_minus_vega[i]:.4f} "
                 f"= {self.mag[i]:.4f} (Vega)."
             )
+
+    def _column_magsys(self, col_idx, stated, where, differential_note=""):
+        """(system, m_AB - m_Vega) for grid column ``col_idx``.
+
+        The ONE resolution of a magnitude in one BC column, shared by the
+        SED's own rows (``_convert_to_bc_system``) and by every
+        cross-component consumer of an ABSOLUTE predicted magnitude
+        (``filter_magsys``; the mulensing zeropoint, issue #313).
+        ``stated`` is the already-parsed internal spelling or None; None
+        means the filter's NATIVE system (JDE 2026-10-01), and a filter
+        with none recorded raises naming ``where``.  The column's record
+        is checked against the table's own ``filter_meta`` first, so an
+        offset cannot outlive the column it was computed for.  The offset
+        is returned whatever the system; the caller applies it only to an
+        AB magnitude.
+        """
+        record = read_magsys_table(self.model_root, self.sedmodel)
+        record_path = magsys_table_path(self.model_root, self.sedmodel)
+        name = self.all_filters[col_idx]
+        col = self.mist_filters[col_idx]
+        if col not in record.index:
+            raise ValueError(
+                f"{where}: BC column {col} has no magnitude-system "
+                f"record in {record_path}. Re-run write_magsys_table "
+                f"in models/NextGen/generate_NextGen_BC_Tables.py for "
+                f"its facility."
+            )
+        rec = record.loc[col]
+
+        svo = resolve_filter_name(name, _load_alias_table(), alias="SVO")
+        fac = facility_from_svo_name(svo)
+        table_meta = self._bc_table_meta
+        if fac not in table_meta:
+            table_meta[fac] = read_bc_meta(
+                find_bc_table(self.model_root, self.sedmodel, fac)
+            )
+        meta = table_meta[fac]
+        if meta.get("mag_system") != VEGA:
+            raise ValueError(
+                f"{where}: the {fac} BC table's mag_system is "
+                f"{meta.get('mag_system')!r}; the AB conversion "
+                f"(m_AB - m_Vega per column) needs a Vega-referenced "
+                f"column."
+            )
+        if col not in meta.get("filters", {}):
+            raise ValueError(
+                f"{where}: the {fac} BC table carries no filter_meta "
+                f"for column {col}, so its magnitude-system record "
+                f"cannot be checked against it."
+            )
+        check_record_matches_column(
+            rec, col, meta["filters"][col], record_path
+        )
+
+        system = stated
+        if system is None:
+            # Unstated means the filter's native system (JDE
+            # 2026-10-01); a filter with none recorded must state it.
+            system = rec["native_system"]
+            if not system:
+                raise ValueError(
+                    f"{where}: no magsys is stated and {col} has "
+                    f"no native magnitude system ({record_path}: none "
+                    f"exists for it, or it is UNRESOLVED -- Kepler Kp, "
+                    f"JDE 2026-10-01). "
+                    f"State it with `magsys: Vega` or `magsys: AB`"
+                    f"{differential_note}."
+                )
+        return system, float(rec["ab_minus_vega"])
+
+    def filter_magsys(self, filter_key, stated, where):
+        """(system, m_AB - m_Vega) of a magnitude in one grid filter.
+
+        For a cross-component consumer that compares an ABSOLUTE magnitude
+        in its own system against this SED's Vega-referenced prediction
+        (``predict_*_appmag`` always return the BC column's system, Vega).
+        ``stated`` is a ``magsys.parse_magsys`` result (None = the filter's
+        native system).  The offset is m_AB - m_Vega, whatever the system;
+        a caller holding an AB magnitude subtracts it to reach Vega, and
+        one holding Vega ignores it.  Same resolution, checks and errors as
+        an SED row (``_column_magsys``).
+        """
+        return self._column_magsys(
+            self.filter_column(filter_key), stated, where
+        )
 
     # ------------------------------------------------------------------
     # 3) build_maps — the star axis is handled by blend_matrix; nothing

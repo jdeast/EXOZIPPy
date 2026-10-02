@@ -10,7 +10,8 @@ why they are separate.
 Read this before touching how data files are read or how an observation likelihood is
 built. Related: `src/exozippy/components/components.md` (the component contract),
 `src/exozippy/components/mulensing/mulensing.md` (the one child whose likelihood lives in
-flux).
+flux, and whose per-file `magsys:` is the magnitude system of that light curve's SED
+zeropoint, not anything about how the file is read -- issue #313).
 
 ## The Instrument base and the shared file reader
 

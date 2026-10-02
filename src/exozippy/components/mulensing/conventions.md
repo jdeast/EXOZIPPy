@@ -28,7 +28,8 @@ it.
 `paper3_microlensing.tex`, in the paper repo at `~/old_home/papers/exozippy` (whose remote
 is the Overleaf project), carries the same `C`-numbers as the submitted text. All three
 are in step through `C30` (paper commits `3476111`, 2026-09-23, which added `C29` and
-`C30` there, and `7eeeb42`, 2026-09-24, which brought `C30` to stage 2). Being a separate
+`C30` there, `7eeeb42`, 2026-09-24, which brought `C30` to stage 2, and `eaa5936`,
+2026-10-02, which corrected `C21`/`C22` with this file's 3.6.5 edit). Being a separate
 repository it cannot ride the same commit, so
 the rule is simply that **a `C`-rule is not finished until all three carry it**: pull the
 paper repo, make the matching edit there, and name that commit in this one. The paper is
@@ -828,8 +829,27 @@ offset -- the conversion depends on `phi_pi`, i.e. on the fit.
 ### C21 -- papers that measure `alpha` to the SOURCE trajectory
 
 Measuring the angle to the direction the SOURCE moves, rather than to the lens's motion
-relative to the source, flips it by 180 degrees. Composing that with the opposite `u_0` sign
-branch (C23) gives the reflection-plus-shift `alpha -> 180 - alpha`.
+relative to the source, shifts it by 180 degrees: `alpha -> alpha + 180`. Measuring it in
+the opposite rotation sense is a reflection, `alpha -> -alpha`. The two compose to
+`alpha -> 180 - alpha`. None of the three touches `u_0`.
+
+Two papers measured, each by the eight-combination scan below run through the shipped
+`VBMDirectMagOp` AND MulensModel (the two agree to <= 4 chi2; private notes repo,
+`alpha_conventions.txt` secs 1-3, 2026-10-02):
+
+- **Zang et al. (2023)**, KMT-2019-BLG-1806: `alpha_EXOZIPPy = alpha_paper + 180`, `u_0`
+  and `pi_E` kept. Their Outer `u_0 > 0` solution (`alpha = 2.151 rad = 123.24 deg`) maps to
+  `303.24 deg` with `u_0 > 0`, chi2 2316.6 on the shipped 2441 points; `180 - alpha` with
+  `u_0` kept costs +933.8.
+- **Jung et al. (2017)**, OGLE-2016-BLG-1003: `alpha_EXOZIPPy = 180 - alpha_paper`, `u_0`
+  kept (chi2 7222.3 on 4300 points); Zang's rule costs +42,197.
+
+So these two KMTNet-era papers differ by the rotation sense, and **neither paper's rule may
+be applied to the other's**. Note that `(-u_0, 180 - alpha)` -- a source-trajectory shift
+composed with the opposite `u_0` branch of C23 -- is NOT Jung's mapping: it is the exact
+mirror of `(u_0, alpha + 180)`, i.e. the plain shift, and on OGLE-2016-BLG-1003 it is the
++42,197 row. Jung's `180 - alpha` keeps `u_0`; it is a different sense of rotation
+(equivalently, the opposite `u_0`-sign convention).
 
 `examples/ob161003` is the shipped worked example. Jung et al. (2017) report
 `alpha = 48.243 deg` for OGLE-2016-BLG-1003; the params file carries `alpha = 131.757 deg`
@@ -843,15 +863,41 @@ that negative `u_0` be reserved for solutions including parallax.
 convention, established empirically for that event, and must not be applied blind to
 another paper. The reliable procedure is the one the example used: scan the eight
 `(+/-u_0) x (alpha, -alpha, 180 +/- alpha)` combinations at the published values of
-everything else and keep the one the light curve prefers.
+everything else and keep the one the light curve prefers. With measurable parallax, flip
+`pi_E_perp` together with `u_0` when testing the mirror branch (C23's ecliptic degeneracy),
+or the mirror is scored against the wrong parallax and looks worse than it is.
 
-### C22 -- the 2018 Roman (WFIRST) Data Challenge answer key has NO mappable `alpha`
+### C22 -- the 2018 Roman Data Challenge answer key measures `alpha` from the orbit's line of nodes
 
-**Resolved; do not reopen.** The master file's `alpha` cannot be mapped onto the fitted
-convention by any global transformation. This was measured, not assumed: for each of the 44
-events, `alpha` was scanned in the MulensModel convention at the truth values of `t_0`,
-`u_0`, `t_E`, `rho`, `s` and `q` with the fluxes fit linearly, giving the `alpha` the light
-curve itself prefers, and every candidate transformation scattered like noise against it --
+The master file's `alpha` maps onto ours by an **event-dependent** rule, and its `u_0` by
+the identity, sign included:
+
+    alpha_EXOZIPPy = alpha_key + 180 - theta_axis                (mod 360; u_0 kept)
+    theta_axis     = atan2(sin(phase) cos(inc), cos(phase))
+
+with `phase` and `inc` the master file's columns of those names. The key measures the
+SOURCE's direction of motion (the C21 `+180`) against the planet orbit's **line of nodes**,
+not against the binary axis -- a C20-class fixed-frame angle whose reference direction is
+the node line rather than North. `theta_axis` is the projected planet's angle from that line
+at `t_0`, the same projection that reproduces the key's `s` (event 4: `a = 49.2 AU`,
+`r_E = 2.154 AU`, `phase = 270.63`, `inc = 83.80` give `s = 0.1086 a / r_E = 2.482` against
+the key's 2.48124). The node angle `Omega` is not needed: `alpha_key` and `theta_axis` share
+the node line, so it cancels.
+
+**Measured** (`scripts/dc18_alpha_convention.py`, 36 events, 2026-10-02; private notes repo,
+`alpha_conventions.txt` sec 4): at the key's own `t_0`, signed `u_0`, `t_E`, `rho`, `s` and
+`q`, with the fluxes fit linearly, the `alpha` the light curve itself prefers matches the
+rule on **19/19 events with chi2 contrast >= 1000, to a median 0.10 deg and a maximum 1.53
+deg** (circular `R = 1.000` on the 17 such events of the original 30, mean 179.95 deg for
+`fit - key + theta_axis`). The only residuals above 1 deg are the shortest periods -- event
+40 (`P = 1.27 yr`, -30.6 deg), 208 (1.51 yr, +4.2), 32 (3.28 yr, +2.2), 128 (1.27 yr, -1.5):
+the simulator moves the lens (85 deg of orbital phase over `+/- 3 t_E` on event 128), the
+key's `alpha` is the `t_0` geometry, and a static fit finds the anomaly-epoch compromise.
+Events whose anomaly does not pin `alpha` (contrast < 20 chi2) scatter, as they must.
+
+**Why it was first recorded as unmappable** (this claim as written 2026-08-18): only
+GLOBAL transformations were tested against the same per-event scan, and every one
+scattered --
 
 | hypothesis | circular `R` (1.0 = it IS the rule) |
 |---|---|
@@ -860,22 +906,22 @@ curve itself prefers, and every candidate transformation scattered like noise ag
 | either, with the galactic -> equatorial PA removed | 0.11 - 0.19 |
 | either, with `PA(mu_rel)` removed (a position-angle `alpha`, C20) | 0.03 - 0.19 |
 
-Restricting to the twelve events where the anomaly pins `alpha` hardest does not help
-(`R = 0.22 / 0.41`, against `~0.29` expected from twelve random angles), so this is a
-property of the answer key, not of a weak constraint or of the wrong sign branch. The
-identity mapping DOES hold between MMEXOFAST and EXOZIPPy; it is the challenge's truth
-table that stands apart from both.
+-- because `theta_axis` is different for every event. It remains the best example of why
+the C21 procedure is "scan, do not assume": the transformation here is not even a constant.
 
-Consequences, already implemented in `examples/DC2018/dc18_common.py`
-(`ALPHA_IS_UNMAPPABLE`): the comparison table reports the fitted `alpha` with **no truth
-value and no pull**, and `u_0` is compared in absolute value (the truth table carries a
-trajectory-side sign the fits do not, and with `|pi_E| ~ 0.02` these events have negligible
-parallax, so the sign is degenerate with `alpha`'s anyway -- event 128 shows
-`(+0.1418, 308.15)` and `(-0.1418, 51.85)` giving identical chi2 to every digit). The old
-sign/offset search was deleted rather than improved, because it always returned its closest
-candidate and so could not fail visibly: on event 128 it printed a 2034-sigma `alpha` pull
-while the fitted `alpha` (307.686) sat 0.3 degrees from the light curve's own optimum
-(308.0).
+`u_0` maps by the identity. The `|u_0|` comparison the tooling used was only ever about the
+no-parallax mirror `(u_0, alpha) -> -(u_0, alpha)` (C23), which is exact for these
+`|pi_E| ~ 0.02` events (event 128: `(+0.1418, 308.15)` and `(-0.1418, 51.85)` give identical
+chi2 to every digit). That mirror, and only that, stays unidentifiable: a fit in the
+key's mirror branch is the same physical solution, and is reported as a tie, not a miss.
+
+Implemented in `examples/DC2018/dc18_common.py`: `key_alpha_to_exozippy` (the rule, with the
+measurement in its docstring), `mirror_branch_truth` (scores each fit against the key in the
+fit's own `u_0` branch and returns a flag the comparison prints), and `compare_event`, which
+reports `alpha` with a truth value and a circular pull again and flags an orbit shorter than
+`SHORT_PERIOD_YR = 2` years. Pinned by `tests/test_dc18_alpha_mapping.py`. The old
+sign/offset search stays deleted: it always returned its closest candidate and so could not
+fail visibly (on event 128 it printed a 2034-sigma pull against an unmapped truth).
 
 ### C29 -- a BAND extinction is not a number until you say which convention
 
@@ -969,3 +1015,21 @@ W149-width filters -- tolerable in a prior a magnitude wide, not as a measuremen
   respectively" and every use (B8, B15-B17, and `cos i = R_33` in B27) requires the
   standard z-x-z Euler composition.  A typographic swap with no propagated consequence in
   the paper -- recorded so nobody transcribes B9 literally.
+- **C22 as first written (2026-08-18) was WRONG, and C21 mis-explained ob161003**
+  (corrected 2026-10-02, review item 3.6.5; measurement in the private notes repo,
+  `alpha_conventions.txt`). C22 concluded "no mapping exists" from global offsets alone
+  (`R <= 0.19`); the key's `alpha` is mappable by the per-event node-line rule now in C22,
+  19/19 strong events to a median 0.10 deg. C21 explained ob161003's `180 - alpha` as the
+  source-trajectory shift "composed with the opposite `u_0` branch (C23)" -- but that
+  composition is `(-u_0, 180 - alpha)`, the mirror of the plain shift, and on ob161003 it is
+  the +42,197 chi2 row; the measured mapping keeps `u_0` and differs from Zang et al.
+  (2023)'s by the rotation sense. `latex/convention.tex` and paper3 carried the same text
+  and were corrected with it. The C22 rule is a TRUTH-SIDE conversion: it uses the key's
+  own `phase` and `inc` and is never applied to a posterior. The key's `alpha` is not
+  measurable from a static or linear-motion light curve, which constrains only the
+  trajectory angle to the instantaneous binary axis (our `alpha` = MulensModel's =
+  MMEXOFAST's); the phase/inclination term is invisible to such a fit and becomes (weakly)
+  constrained only under `orbital_motion: keplerian`, where `alpha(t)` is derived from the
+  orbit. The > 1 deg short-period residuals are the axis rotating during the event: a
+  static fit's `alpha` sits at an effective mean axis while the key quotes the phase at a
+  reference epoch.

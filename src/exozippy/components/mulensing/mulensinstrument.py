@@ -18,6 +18,7 @@ from exozippy.outputs.prose import get_collector
 from exozippy.skyframe import observer_sky_offset
 
 from ..parameterization import pin_unselected
+from ..sed.magsys import AB, parse_magsys
 from . import peakfind
 from .physics import (
     RHO_FLOOR,
@@ -101,9 +102,12 @@ class MulensInstrument(Instrument):
     # Deps of the derived `zeropoint` that are injected as context nodes by
     # add_parameter below rather than resolved as manifest parameters, so
     # graph.py leaves them out of the build-order graph.
-    context_dep_names = frozenset(
-        {"m_source_pred", "zp_center", "sed_constrained"}
-    )
+    context_dep_names = frozenset({"m_source_pred"})
+
+    # ...built with one entry per light curve, so Component._element_expression
+    # may slice it to the elements that have an SED prediction (the rest of
+    # the zeropoint vector is INACTIVE -- see register_parameters).
+    aligned_context_deps = frozenset({"m_source_pred"})
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
@@ -113,6 +117,16 @@ class MulensInstrument(Instrument):
         # and compile_plotters; the notice belongs to the topology, not to the
         # call, so it is emitted once.
         self._warned_multiband_ld = False
+        # Each light curve's zeropoint magnitude system AS STATED, in the one
+        # internal spelling (None = unstated = the band filter's native
+        # system), translated at this boundary by the SAME parser the SED's
+        # rows use: exact "Vega"/"AB", a case variant raises with a "did you
+        # mean" (issue #313).  Resolved against the BC column record in
+        # _resolve_zeropoint_systems once the SED grid exists.
+        self._zp_magsys_stated = [
+            parse_magsys(c.get("magsys"), f"mulensinstrument {name!r}")
+            for name, c in zip(self.names, self.config)
+        ]
 
     @property
     def prefix(self):
@@ -167,6 +181,22 @@ class MulensInstrument(Instrument):
                 "accepts": ["band"],
                 "required": False,
                 "doc": "Name of the band: block associated with this light curve.",
+            },
+            {
+                "key": "magsys",
+                "kind": "option",
+                "accepts": ["Vega", "AB"],
+                "required": False,
+                "doc": (
+                    "Magnitude system of this light curve's zeropoint "
+                    "(issue #313): exactly 'Vega' or 'AB', case-sensitive. "
+                    "Omit it to mean the native system of the band's filter "
+                    "(Roman WFI is AB, Cousins/Bessell/2MASS are Vega), the "
+                    "same rule as an SED row; a filter with no recorded "
+                    "native system must state it. The SED predicts Vega "
+                    "magnitudes, so an AB zeropoint is compared through the "
+                    "filter's m_AB - m_Vega."
+                ),
             },
             {
                 "key": "sed_constrains_blend",
@@ -1234,11 +1264,33 @@ class MulensInstrument(Instrument):
         # sampled), and this one is worth reporting -- it is the calibration
         # of the light curve, and it was a named Deterministic before it
         # became a Parameter.
+        #
+        # A light curve with no SED prediction (no band:, or a band filter
+        # the grid lacks) has no zeropoint at all: its element is INACTIVE
+        # (held at a bookkeeping 0.0, reported nowhere) rather than
+        # reporting a number nobody computed.  Until review 2.2.21 it
+        # reported the prior center, i.e. the defaults.yaml 0.0 for a config
+        # that stated none.
         if hasattr(system, "sed"):
-            self.manifest["zeropoint"] = {
-                "expr_key": "default",
-                "force_node": True,
-            }
+            filter_keys = self._sed_filter_keys(system)
+            has_pred = np.array([fk is not None for fk in filter_keys])
+            self._resolve_zeropoint_systems(system)
+            self._zp_tied = self._check_zeropoint_entries(has_pred)
+            qualifier = [m or "" for m in self.zp_magsys]
+            if np.all(has_pred):
+                self.manifest["zeropoint"] = {
+                    "expr_key": "default",
+                    "force_node": True,
+                    "unit_qualifier": qualifier,
+                }
+            elif np.any(has_pred):
+                self.manifest["zeropoint"] = {
+                    "expr_key": {"default": has_pred.copy()},
+                    "mask": has_pred.copy(),
+                    "inactive_value": 0.0,
+                    "force_node": True,
+                    "unit_qualifier": qualifier,
+                }
 
             # Neighbor third light, per light curve, sampled only where the
             # blend tie is on: with the tie off f_blend is already free and
@@ -1333,7 +1385,9 @@ class MulensInstrument(Instrument):
         start let the polish/sampler walk into a swapped configuration
         (M-dwarf source, G-star lens) that the flux data disfavor.
 
-        Chain: m_source = zp_mu - 2.5*log10(f_source_init); assume the
+        Chain: m_source = zp_mu - 2.5*log10(f_source_init), moved onto the
+        BC grid's Vega system (minus m_AB - m_Vega on an AB light curve,
+        issue #313 -- the same offset the zeropoint tie applies); assume the
         source is a main-sequence dwarf at the event's source distance
         (user initval, an existing engine hint, or 8 kpc -- microlensing
         sources are bulge stars by construction of the event rate); scan
@@ -1342,11 +1396,15 @@ class MulensInstrument(Instrument):
         matches; push PRECEDENCE_DERIVED_DATA hints (they override defaults and
         yield to the user, like every data-derived start).
 
-        The zeropoint mu is a calibration statement whether the user wrote
-        it or defaults.yaml's 0.0 did ("flux is 10**(-0.4 m)").  When that
-        statement is wrong, the measured magnitude is absurd and the guard
-        below skips seeding with a warning -- which doubles as the alarm
-        that the zeropoint prior does not describe the file.
+        Only a light curve whose zeropoint the USER tied (mu AND sigma,
+        ``_check_zeropoint_entries``) seeds: the zeropoint mu is the user's
+        calibration statement, and with none there is no measured source
+        magnitude to seed from.  (Until review 2.2.21 defaults.yaml's 0.0
+        +/- 0.2 stood in for one.)  A linked mu has no number at stage 3 and
+        does not seed either.  When the statement is wrong, the measured
+        magnitude is absurd and the guard below skips seeding with a
+        warning -- which doubles as the alarm that the zeropoint prior does
+        not describe the file.
 
         A source BRIGHTER than the locus top is likely a giant (common for
         bulge sources): no seed, warned, the defaults stand.  Multi-source
@@ -1380,7 +1438,7 @@ class MulensInstrument(Instrument):
         masses = []
         for i, name in enumerate(self.names):
             fk = filter_keys[i]
-            if fk is None:
+            if fk is None or not self._zp_tied[i]:
                 continue
             zp_mu = self._user_or_default(
                 [
@@ -1388,12 +1446,17 @@ class MulensInstrument(Instrument):
                     f"{self.prefix}.{i}.zeropoint",
                 ],
                 "mu",
-                0.0,
+                None,
             )
+            if zp_mu is None:
+                continue  # a linked mu: no number before the model exists
             f_src = float(self.fs_init[i]) * float(self.q_source_init[i])
             if f_src <= 0:
                 continue
-            m_meas = zp_mu - 2.5 * np.log10(f_src)
+            # On the BC grid's (Vega) system, which m_pred below is in.
+            m_meas = (
+                zp_mu - 2.5 * np.log10(f_src) - float(self.zp_ab_minus_vega[i])
+            )
 
             # Predicted apparent mag of each locus row through the SED's
             # own BC grid (teff, logg, feh=0, av), at the assumed distance.
@@ -1754,23 +1817,173 @@ class MulensInstrument(Instrument):
         self._sed_filter_key_cache = keys
         return keys
 
+    def _resolve_zeropoint_systems(self, system):
+        """Stage 3: each light curve's zeropoint magnitude system (#313).
+
+        The SED predicts magnitudes on its BC columns' system (Vega), while
+        a zeropoint is a calibration statement in whatever system the
+        photometry was calibrated in -- the DC2018 challenge's 22.0 is AB.
+        Sets ``self.zp_magsys`` (the resolved internal spelling per light
+        curve, None where nothing resolves it) and ``self.zp_ab_minus_vega``
+        (m_AB - m_Vega of the band's BC column on an AB light curve, 0.0
+        otherwise).  The offset is applied in exactly one place,
+        ``_predicted_mag_on_zp_system``.
+
+        Resolution is the SED's own (``SED.filter_magsys``, the 1.9.1
+        helper): a stated system is used as stated, an unstated one is the
+        band filter's NATIVE system from the BC column record, and a filter
+        with no recorded native system raises naming the light curve.  A
+        light curve with no SED prediction has no zeropoint, so its stated
+        system (if any) is kept for the log and nothing is resolved.
+        """
+        sed = system.sed
+        filter_keys = self._sed_filter_keys(system)
+        self.zp_magsys = []
+        self.zp_ab_minus_vega = np.zeros(self.n_elements)
+        for i, name in enumerate(self.names):
+            stated = self._zp_magsys_stated[i]
+            fk = filter_keys[i]
+            if fk is None:
+                self.zp_magsys.append(stated)
+                continue
+            where = f"mulensinstrument {name!r} (band filter {fk!r})"
+            mag_system, offset = sed.filter_magsys(fk, stated, where)
+            self.zp_magsys.append(mag_system)
+            if mag_system == AB:
+                self.zp_ab_minus_vega[i] = offset
+            how = (
+                "stated"
+                if stated is not None
+                else "the filter's native system"
+            )
+            logger.info(
+                f"mulensinstrument {name}: zeropoint magnitude system "
+                f"{mag_system} ({how}; the SED predicts Vega, so "
+                + (
+                    f"m_AB - m_Vega = {offset:+.4f} is added to the "
+                    f"prediction before it meets the zeropoint)."
+                    if mag_system == AB
+                    else "no conversion)."
+                )
+            )
+
+    def _user_states(self, field):
+        """Per light curve: did the USER state zeropoint ``field``?
+
+        A number (``Component.user_wrote_field``, all three spellings) or a
+        link expression -- ``extract_links`` deletes a linked field from
+        ``user_params``, so a linked ``mu`` is visible only in
+        ``config_manager.links``.  READ-ONLY on both.
+        """
+        stated = self.user_wrote_field("zeropoint", field)
+        links = self.config_manager.links
+        for i, name in enumerate(self.names):
+            for key in (
+                f"{self.prefix}.zeropoint",
+                f"{self.prefix}.{i}.zeropoint",
+                f"{self.prefix}.{name}.zeropoint",
+            ):
+                if field in links.get(key, {}):
+                    stated[i] = True
+        return stated
+
+    def _check_zeropoint_entries(self, has_pred):
+        """Stage 3: the zeropoint tie is the USER's statement, or nothing.
+
+        Review 2.2.21 (JDE 2026-09-30): "the user should specify a zero
+        point and how much they trust it, we shouldn't decide that for
+        them".  defaults.yaml carries NO mu/sigma, so the SED tie on a light
+        curve applies exactly when the user states BOTH:
+
+        * ``initval`` RAISES: the zeropoint is DERIVED (m_SED +
+          2.5 log10 f_source), so a start value on it is a number the
+          model never uses -- the user means a prior and must say how much
+          they trust it.  This is also the bare ``zeropoint: x`` spelling,
+          which the params boundary translates to ``{initval: x}``.
+        * ``mu`` without ``sigma`` WARNS: a center with no width applies no
+          tie, so it does nothing (``sigma`` without ``mu`` is already
+          refused by ``config.validate_sigma_has_center``).
+        * ``sigma: 0`` still raises, in ``_zeropoint_context``.
+
+        Returns the per-light-curve tie mask (prediction AND mu AND sigma),
+        which ``_seed_source_star_from_flux`` reads: a zeropoint nobody
+        stated says nothing about the source's magnitude.
+        """
+        wrote_init = self.user_wrote_field("zeropoint", "initval")
+        if np.any(wrote_init):
+            bad = [n for n, w in zip(self.names, wrote_init) if w]
+            raise ValueError(
+                f"mulensinstrument zeropoint for {bad} is given an initval "
+                f"(or a bare value). The zeropoint is DERIVED -- "
+                f"m_SED + 2.5*log10(f_source) -- so a start value on it does "
+                f"nothing. To tie a light curve's source flux to the SED, "
+                f"state the calibration AND how much you trust it: "
+                f"`mulensinstrument.<name>.zeropoint: {{mu: <zp>, sigma: "
+                f"<mag>}}` (and `magsys:` on the light curve if it is not "
+                f"the band filter's native system)."
+            )
+        has_mu = self._user_states("mu")
+        has_sigma = self._user_states("sigma")
+        for i, name in enumerate(self.names):
+            if has_mu[i] and not has_sigma[i]:
+                logger.warning(
+                    f"mulensinstrument.{name}.zeropoint has a mu but no "
+                    f"sigma: a zeropoint center with no width applies no SED "
+                    f"tie, so it DOES NOTHING. Give a sigma (how much you "
+                    f"trust the calibration, in mag) to tie f_source to the "
+                    f"SED-predicted source magnitude."
+                )
+        tied = np.asarray(has_pred, dtype=bool) & has_mu & has_sigma
+        for i, name in enumerate(self.names):
+            if has_pred[i] and not tied[i]:
+                logger.info(
+                    f"mulensinstrument {name}: no zeropoint prior stated "
+                    f"(mu and sigma), so f_source is NOT tied to the SED; "
+                    f"the zeropoint is reported as derived "
+                    f"({self.zp_magsys[i]})."
+                )
+        return tied
+
+    def _predicted_mag_on_zp_system(self, star_indices, i, system):
+        """SED-predicted magnitude of ``star_indices`` on light curve ``i``'s
+        ZEROPOINT system.
+
+        The ONE place the zeropoint's magnitude system is applied (issue
+        #313): ``predict_blend_appmag`` returns the BC column's system
+        (Vega), and a zeropoint in AB needs the AB magnitude, m_Vega +
+        (m_AB - m_Vega).  Both consumers -- the derived zeropoint
+        (``_zeropoint_context``) and the blend tie, which compares a
+        prediction against that zeropoint -- read it here, so the two
+        cannot disagree.  An exact 0.0 on a Vega light curve leaves the
+        graph's value bit-identical.
+        """
+        m = system.sed.predict_blend_appmag(
+            star_indices, self._sed_filter_keys(system)[i], system
+        )
+        offset = float(self.zp_ab_minus_vega[i])
+        return m + offset if offset else m
+
     def add_parameter(self, model, param_name, system, context_nodes=None):
         """Inject the SED context nodes the derived zeropoint needs.
 
         ``m_source_pred`` (the SED-predicted source magnitude in each light
-        curve's own band) is a cross-component forward-model node, not a
-        manifest parameter, so the generic dep parser cannot reach it -- the
-        same situation ``Orbit.add_parameter`` handles for its group masses.
-        ``zp_center``/``sed_constrained`` carry the resolved prior center and
-        the per-element on/off mask (see physics.calc_zeropoint).
+        curve's own band, on its zeropoint's magnitude system) is a
+        cross-component forward-model node, not a manifest parameter, so the
+        generic dep parser cannot reach it -- the same situation
+        ``Orbit.add_parameter`` handles for its group masses.
         """
         if param_name == "zeropoint" and not context_nodes:
             context_nodes = self._zeropoint_context(system)
         return super().add_parameter(model, param_name, system, context_nodes)
 
     def _zeropoint_context(self, system):
-        """Context nodes for the derived ``zeropoint`` expression."""
-        sed = system.sed
+        """Context nodes for the derived ``zeropoint`` expression.
+
+        ``m_source_pred`` is one entry per light curve (aligned, so the
+        expression may be sliced to the elements with a prediction); an
+        element with none is INACTIVE and its entry is a finite placeholder
+        the sliced expression never reads.
+        """
         source_indices = self._sed_source_indices(system)
         filter_keys = self._sed_filter_keys(system)
 
@@ -1780,18 +1993,16 @@ class MulensInstrument(Instrument):
             shape=(self.n_elements,),
             names=self.names,
         )
-        zp_mu = np.atleast_1d(np.asarray(zp_cfg.get("mu"), dtype=float))
-        zp_sigma = np.atleast_1d(np.asarray(zp_cfg.get("sigma"), dtype=float))
+        zp_sigma = zp_cfg.get("sigma")
+        zp_sigma = (
+            np.full(self.n_elements, np.nan)
+            if zp_sigma is None
+            else np.atleast_1d(np.asarray(zp_sigma, dtype=float))
+        )
 
         m_pred = []
-        mask = np.zeros(self.n_elements, dtype=float)
         for i, name in enumerate(self.names):
             if filter_keys[i] is None:
-                # No SED prediction to tie to.  calc_zeropoint reports
-                # zp_center for this element, so the entry here is only a
-                # placeholder that must stay finite (it is still evaluated,
-                # just not selected, and switch's gradient would carry a NaN
-                # through the zero it multiplies by).
                 m_pred.append(pt.constant(0.0))
                 continue
             if zp_sigma[i] == 0:
@@ -1807,17 +2018,10 @@ class MulensInstrument(Instrument):
                     f"(e.g. 0.01)."
                 )
             m_pred.append(
-                sed.predict_blend_appmag(
-                    source_indices, filter_keys[i], system
-                )
+                self._predicted_mag_on_zp_system(source_indices, i, system)
             )
-            mask[i] = 1.0
 
-        return {
-            "m_source_pred": pt.stack(m_pred),
-            "zp_center": pt.as_tensor_variable(zp_mu),
-            "sed_constrained": pt.as_tensor_variable(mask),
-        }
+        return {"m_source_pred": pt.stack(m_pred)}
 
     def _build_sed_flux_constraint(self, model, system):
         """
@@ -1834,9 +2038,12 @@ class MulensInstrument(Instrument):
             m_SED = -2.5*log10(f_source) + zp
 
         zp is the DERIVED Parameter ``mulensinstrument.zeropoint``,
-        zp_i = m_SED + 2.5*log10(f_s,i) (physics.calc_zeropoint), and its
-        Gaussian prior (defaults: 0 +/- 0.2 mag) is applied by
-        Parameter.build_pymc's derived-with-sigma branch at stage 6.  This
+        zp_i = m_SED + 2.5*log10(f_s,i) (physics.calc_zeropoint), with m_SED
+        on the light curve's zeropoint magnitude system (``magsys:``, issue
+        #313), and the USER's Gaussian prior on it -- there is no default
+        (review 2.2.21); without both mu and sigma there is no tie -- is
+        applied by Parameter.build_pymc's derived-with-sigma branch at
+        stage 6.  This
         is the analytic marginalization of a zp nuisance tied exactly
         through the equation above; it adds no sampled dimension and leaves
         the (log_f_total, q_source) parameterization untouched.  sigma=0 is
@@ -1863,11 +2070,11 @@ class MulensInstrument(Instrument):
         mag). f_blend also contains any unrelated field stars, so leave this
         off unless the blend is understood.
         """
-        sed = system.sed
         source_indices = self._sed_source_indices(system)
         n_stars = system.star.n_elements
         other_indices = [i for i in range(n_stars) if i not in source_indices]
         filter_keys = self._sed_filter_keys(system)
+        self._add_zeropoint_prose(system)
 
         for i, name in enumerate(self.names):
             if filter_keys[i] is None:
@@ -1881,8 +2088,8 @@ class MulensInstrument(Instrument):
                 )
                 continue
             blend_sigma = float(self.config[i].get("sed_blend_sigma", 0.2))
-            m_blend_pred = sed.predict_blend_appmag(
-                other_indices, filter_keys[i], system
+            m_blend_pred = self._predicted_mag_on_zp_system(
+                other_indices, i, system
             )
             fb_i = pt.maximum(self.f_blend.value[i], 1e-30)
             # Predicted blend in the INSTRUMENT's flux system: the modeled
@@ -1903,6 +2110,47 @@ class MulensInstrument(Instrument):
                 f"{self.prefix}.{name}.sed_blend_prior",
                 -0.5 * (resid / blend_sigma) ** 2,
             )
+
+    def _add_zeropoint_prose(self, system):
+        """The SED-tie sentence, declared where the tie is built.
+
+        Only for the light curves the USER tied (mu and sigma stated,
+        review 2.2.21) -- an untied zeropoint is a reported number, not a
+        modeling choice -- and the AB clause only when one of them is AB
+        (issue #313), so a Vega-only fit's draft carries no conversion
+        sentence it did not use.
+        """
+        from ...outputs.prose import join_names
+        from ...outputs.texutils import latex_escape
+
+        tied = [i for i in range(self.n_elements) if self._zp_tied[i]]
+        if not tied:
+            return
+        names = join_names(latex_escape(self.names[i]) for i in tied)
+        text = (
+            "The baseline source flux $F_S$ of each light curve with a "
+            "stated photometric zeropoint prior (" + names + ") is tied to "
+            "the SED-predicted source magnitude in its band through that "
+            "zeropoint $z$, $m_{\\rm SED} = z - 2.5\\log_{10} F_S$, with "
+            "the Gaussian prior on $z$ listed in the parameter table."
+        )
+        ab = [i for i in tied if self.zp_magsys[i] == AB]
+        if ab:
+            ab_names = join_names(latex_escape(self.names[i]) for i in ab)
+            text += (
+                " The zeropoints of " + ab_names + " are on the AB system "
+                r"\citep{Oke:1983}, so the Vega-referenced SED prediction is "
+                "converted with a per-filter $m_{\\rm AB} - m_{\\rm Vega}$ "
+                "computed from the same filter transmission curve, flux "
+                "weighting and Vega zero point as that filter's bolometric "
+                "corrections."
+            )
+        get_collector(system).add(
+            text,
+            section="microlensing",
+            key=f"{self.prefix}.zeropoint_tie",
+            rank=25,
+        )
 
     def compile_plotters(self, model, system):
         """Compile fast PyTensor functions for the lightcurve."""

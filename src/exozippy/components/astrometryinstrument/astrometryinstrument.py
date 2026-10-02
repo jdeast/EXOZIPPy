@@ -727,8 +727,9 @@ class AstrometryInstrument(Instrument):
         and ``self._lens_phot[i]`` (a mulensinstrument element index, or
         None for "no blend").  The default is ON for every gaia/abs dataset
         whose star is a microlensing source: an astrometric time series of
-        a lensed star that ignores the lens is a wrong model, the same
-        reason the SED zeropoint tie is on by default.  ``microlensing:
+        a lensed star that ignores the lens is a wrong model.  (This used
+        to cite the SED zeropoint tie as being on by default too; since
+        review 2.2.21 that tie is the user's to state.)  ``microlensing:
         false`` opts out; ``microlensing: true`` on a dataset that cannot
         carry the term (rel mode, no mulensevent, a star that is not a
         source) is a configuration error and says so.

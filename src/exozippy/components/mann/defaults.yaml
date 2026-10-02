@@ -20,3 +20,10 @@ mann:
     internal_unit: ""
     latex: "\\delta_{K_s}"
     description: "Ks offset from its source, in units of the Ks uncertainty"
+    # STRUCTURAL (review 2.2.21, JDE 2026-09-30): the N(0, 1) IS the Ks
+    # uncertainty prior (it reproduces EXOFASTv2's ((appks - synk)/0.02)^2),
+    # so a user mu/sigma is refused; the Ks and its error are the mann
+    # block's `ks:`/`ks_err:`.  An initval stays legal (a restart file, an
+    # EXOFASTv2 appks start converted to an offset; JDE 2026-10-01).
+    structural_prior: true
+    structural_remedy: "state the Ks and how much you trust it on the mann block instead (ks: <mag> with ks_err:, or ks: synthetic with ks_err:)"

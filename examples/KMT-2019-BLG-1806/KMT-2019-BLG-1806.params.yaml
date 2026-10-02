@@ -1,6 +1,12 @@
-# Seeded from MMEXOFAST solution 0 (0-indexed)
-# Source: examples/DC2018_128/mmexofast.json
-# n_solutions in file: 2
+# KMT-2019-BLG-1806 / OGLE-2019-BLG-1250, Zang et al. 2023, AJ 165, 103
+# (arXiv:2210.12344).
+#
+# The event starts (t_0, u_0, t_E, s, alpha, q) are MMEXOFAST solution 0
+# of KMT-2019-BLG-1806-r_exozippy_init.json in this directory, fit to
+# these KMTNet files, with their values unchanged. Compare Zang+2023
+# Table 4, "Outer": t_E ~ 135 d, s = 1.034, log q = -4.72, alpha = 2.15 rad
+# (u_0 > 0) in their convention. The coordinates, zeropoints and source
+# extinction are from Zang+2023 and cited where they appear below.
 #
 # Only initvals are used: MMEXOFAST uncertainties are not mapped to
 # sigma (a Gaussian prior would double-count the data), and whitening
@@ -21,11 +27,13 @@ lens.Companion.s:
     initval: 1.046765512297066
 
 # alpha: relaxation engine propagates the initval to xalpha/yalpha.
+# That file's value unchanged; Zang+2023's alpha = ours - 180 deg, u_0 kept
+# (their Outer 2.15 rad = 123.24 deg -> 303.24 = -56.76 deg here).
 lens.Companion.alpha:
-    initval: 57.02894037839297
+    initval: -57.02894037839297
 
-# rho is not seeded: it is derived from the source radius below, which is
-# what this file pins.
+# rho is not seeded: it is derived from the source radius, which the
+# source-flux seed supplies (see star.Source.av below).
 
 # q = M_companion / M_primary.  EXOZIPPy's relaxation engine propagates
 # this through the symbolic relation  q * M_primary = M_companion
@@ -33,42 +41,39 @@ lens.Companion.alpha:
 lens.Companion.q:
     initval: 2.5493624633395966e-05
 
+# Zang et al. 2023, AJ 165, 103 (arXiv:2210.12344), Table 1:
+# RA, Dec (J2000) = 18:02:09.01, -29:24:53.60; (l, b) = (+1.41, -3.35).
 star.Lens.ra:
-    initval: 266.62325
+    initval: 270.53754
     sigma: 0
 star.Lens.dec:
-    initval: -24.27227
+    initval: -29.41489
     sigma: 0
 star.Source.ra:
-    initval: 266.62325
+    initval: 270.53754
     sigma: 0
 star.Source.dec:
-    initval: -24.27227
+    initval: -29.41489
     sigma: 0
 
 # these shouldn't be fit for such models (on the to do list)
 # but as a temporary hack, we're just going to fix them at their arbitrary starting values
-star.Lens.radius:
-    sigma: 0.0
-star.Lens.teff:
-    sigma: 0.0
-star.Lens.feh:
-    sigma: 0.0
 star.Source.feh:
     sigma: 0.0
 planet.Companion.radius:
     sigma: 0
 
-# The Source's radius and teff are free: the sed: block ties the
-# SED-predicted source I mag to each light curve's baseline source flux
-# through per-lightcurve zeropoints. Note the absolute flux scale comes
-# from the zeropoint PRIOR (0 +/- 0.2 mag per site), not the data -- the
-# light curves only constrain the site-to-site relative calibration, so
-# the source posteriors below are prior-anchored at the ~0.1 mag level.
-# Real catalog photometry in the .sed file would break that degeneracy.
-# Seeded near a bulge turnoff star, which is what I_source ~ 18.9 at
-# ~8 kpc implies.
-star.Source.radius:
-    initval: 1.2
-star.Source.teff:
-    initval: 5800
+# Zang et al. 2023, AJ 165, 103 (arXiv:2210.12344), Sec. 3 and Table 10:
+# KMT I magnitudes calibrated to standard I with the OGLE-III catalog
+# (Szymanski et al. 2011), so flux = 10**(-0.4 I) (zeropoint 0);
+# I_S = 21.35 +/- 0.07.
+mulensinstrument.KMTC04.zeropoint: {mu: 0.0, sigma: 0.07}
+mulensinstrument.KMTS04.zeropoint: {mu: 0.0, sigma: 0.07}
+mulensinstrument.KMTA04.zeropoint: {mu: 0.0, sigma: 0.07}
+
+# Zang et al. 2023, Table 10: A_I = I_cl - I_cl,0 = 15.79 - 14.39 = 1.40,
+# which is A_V = 2.25 through this fit's own Cousins-I BC grid. The source
+# teff/radius/mass start is seeded from its measured flux at this extinction
+# (I_S = 21.35, (V-I)_S,0 = 0.76, theta_* = 0.345 uas in the same table).
+star.Source.av:
+    initval: 2.25

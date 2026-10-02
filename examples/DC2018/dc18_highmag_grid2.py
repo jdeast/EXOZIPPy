@@ -4,11 +4,13 @@ The first attempt gridded (s, q, alpha) with t_0/u_0/t_E FROZEN at the
 point-lens fit, and it could not see the true basin at all: the truth ranked
 35th-144th among local minima.  Two defects, both in the measurement:
 
-1. It scored "chi2 at truth" using the DC2018 truth ALPHA, which this project
-   established over all 44 events is unmappable to our convention (see
-   dc18_common.ALPHA_IS_UNMAPPABLE).  Best-fit alphas came out 288/330/316/
-   112/356 deg against truth 320/259.5/71.25/29.33/299.33 with no consistent
-   offset, so that metric carried no information.
+1. It scored "chi2 at truth" using the DC2018 truth ALPHA AS WRITTEN in the
+   key, which is not in our convention: it maps by the per-event node-line
+   rule dc18_common.key_alpha_to_exozippy (conventions.md C22, found
+   2026-10-02; until then the key was wrongly recorded as unmappable).
+   Best-fit alphas came out 288/330/316/112/356 deg against raw key values
+   320/259.5/71.25/29.33/299.33 with no consistent offset, so that metric
+   carried no information.
 2. Freezing the nuisance parameters costs THOUSANDS of chi2 on these events.
    Event 163's point-lens fit is off by 2% in u_0 and 1.7% in t_E, and that
    alone accounts for ~11565 chi2 over its 38568 points.  For a sharply peaked
@@ -35,6 +37,7 @@ import argparse
 import multiprocessing as mp
 import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -131,6 +134,19 @@ def main():
         "--ncpu", type=int, default=int(os.environ.get("NSLOTS", 0)) or 8
     )
     ap.add_argument("--out", default="dc18_highmag_grid2.npz")
+    ap.add_argument(
+        "--maxtime",
+        type=float,
+        default=None,
+        help=(
+            "seconds; stop accepting results after this and write what is "
+            "finished.  Size it UNDER the scheduler's walltime so the .npz "
+            "always lands -- run 49432738 did 3000 of 11644 nodes in 24 h, "
+            "hit the wall, and lost ALL of it because the only write is at "
+            "the end.  Unfinished nodes stay inf/nan and are skipped by the "
+            "summary, so a partial grid is still a usable grid."
+        ),
+    )
     args = ap.parse_args()
 
     events = [int(e) for e in args.events.split(",") if e.strip()]
@@ -155,19 +171,42 @@ def main():
     chi2 = {ev: np.full((args.n_s, args.n_q), np.inf) for ev in events}
     alpha = {ev: np.full((args.n_s, args.n_q), np.nan) for ev in events}
     done = 0
+    t_start = time.time()
+    stopped_early = False
     with mp.Pool(args.ncpu) as pool:
-        for ev, i, j, c, a in pool.imap_unordered(_node, tasks, chunksize=4):
+        it = pool.imap_unordered(_node, tasks, chunksize=4)
+        for ev, i, j, c, a in it:
             chi2[ev][i, j] = c
             alpha[ev][i, j] = a
             done += 1
             if done % 500 == 0:
                 print(f"  {done}/{len(tasks)} nodes", flush=True)
+            if args.maxtime and (time.time() - t_start) > args.maxtime:
+                stopped_early = True
+                print(
+                    f"  MAXTIME {args.maxtime:.0f}s reached at {done}/"
+                    f"{len(tasks)} nodes -- terminating the pool and writing "
+                    f"the partial grid.",
+                    flush=True,
+                )
+                pool.terminate()
+                break
 
     payload = {"log_s": log_s, "log_q": log_q}
     d = dc.data_dir_or_raise(None)
     for ev in events:
         c = chi2[ev]
         truth, _ = dc.load_truth(d, ev)
+        n_fin = int(np.isfinite(c).sum())
+        if n_fin == 0:
+            # A maxtime stop can leave a whole event untouched; nanargmin on
+            # an all-inf array returns index 0 without raising, which would
+            # report a confident best-fit at the grid corner.
+            print(f"\n===== event {ev} =====")
+            print("    NO FINISHED NODES -- skipped (maxtime stop)")
+            payload[f"ev{ev}_chi2"] = c
+            payload[f"ev{ev}_alpha"] = alpha[ev]
+            continue
         bi, bj = np.unravel_index(np.nanargmin(c), c.shape)
         s_b, q_b = 10.0 ** log_s[bi], 10.0 ** log_q[bj]
         s_t, q_t = float(truth["s"]), float(truth["q"])
@@ -176,6 +215,8 @@ def main():
         d_direct = abs(np.log10(s_b / s_t))
         d_mirror = abs(np.log10(s_b * s_t))
         print(f"\n===== event {ev} =====")
+        if n_fin < c.size:
+            print(f"    PARTIAL: {n_fin}/{c.size} nodes finished")
         print(
             f"    best: s={s_b:.4f} q={q_b:.3g} alpha={alpha[ev][bi, bj]:.1f}"
             f"  chi2={c[bi, bj]:.1f}"
@@ -189,8 +230,15 @@ def main():
         payload[f"ev{ev}_chi2"] = c
         payload[f"ev{ev}_alpha"] = alpha[ev]
         payload[f"ev{ev}_truth"] = np.array([s_t, q_t])
+    payload["n_done"] = np.array([done])
+    payload["n_tasks"] = np.array([len(tasks)])
+    payload["complete"] = np.array([not stopped_early])
     np.savez_compressed(args.out, **payload)
-    print(f"\nwrote {args.out}", flush=True)
+    print(
+        f"\nwrote {args.out} ({done}/{len(tasks)} nodes"
+        f"{', PARTIAL' if stopped_early else ''})",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

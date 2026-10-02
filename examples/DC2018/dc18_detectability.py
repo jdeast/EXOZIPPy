@@ -160,9 +160,11 @@ def main():
         default=[],
         metavar="PARAMS_KEY=VALUE",
         help="extra initval to inject, e.g. lens.Companion.alpha=308.15; the "
-        "answer key's alpha is not in our convention (conventions.md C22), "
-        "so the light curve's own optimum at the truth geometry is the "
-        "value to hand in here when the test must start AT the truth",
+        "answer key's alpha maps onto ours by dc18_common."
+        "key_alpha_to_exozippy (conventions.md C22), but on a short-period "
+        "orbit the light curve's own optimum at the truth geometry differs "
+        "from it, and that optimum is the value to hand in here when the "
+        "test must start AT the truth",
     )
     args = ap.parse_args()
 
