@@ -223,7 +223,10 @@ data, the same structural model, the same priors, in a model written directly
 against `numpyro` -- no EXOZIPPy component machinery, a different sampler, and
 deliberately the TEXTBOOK forward model, `D*ka/(V*(ka-ke)) * (exp(-ke t) -
 exp(-ka t))`, so the reference shares no algebra with the implementation it
-checks.
+checks. The script is `examples/theophylline/numpyro_reference.py`, kept
+because a reference nobody can re-run is an assertion. It needs `numpyro`
+(not an EXOZIPPy dependency; `pip install numpyro`) and the fetched
+`theoph.csv`.
 
 Conditioned on the direct mode (see below), every population parameter:
 
