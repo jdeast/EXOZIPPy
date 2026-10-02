@@ -1024,4 +1024,12 @@ W149-width filters -- tolerable in a prior a magnitude wide, not as a measuremen
   composition is `(-u_0, 180 - alpha)`, the mirror of the plain shift, and on ob161003 it is
   the +42,197 chi2 row; the measured mapping keeps `u_0` and differs from Zang et al.
   (2023)'s by the rotation sense. `latex/convention.tex` and paper3 carried the same text
-  and were corrected with it.
+  and were corrected with it. The C22 rule is a TRUTH-SIDE conversion: it uses the key's
+  own `phase` and `inc` and is never applied to a posterior. The key's `alpha` is not
+  measurable from a static or linear-motion light curve, which constrains only the
+  trajectory angle to the instantaneous binary axis (our `alpha` = MulensModel's =
+  MMEXOFAST's); the phase/inclination term is invisible to such a fit and becomes (weakly)
+  constrained only under `orbital_motion: keplerian`, where `alpha(t)` is derived from the
+  orbit. The > 1 deg short-period residuals are the axis rotating during the event: a
+  static fit's `alpha` sits at an effective mean axis while the key quotes the phase at a
+  reference epoch.

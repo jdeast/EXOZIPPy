@@ -380,6 +380,18 @@ def key_alpha_to_exozippy(alpha_key, phase, inc):
     the shortest periods (event 40, P = 1.27 yr: -30.6 deg; 208, 1.51 yr:
     +4.2; 32, 3.28 yr: +2.2; 128, 1.27 yr: -1.5) -- the simulator's lens
     orbital motion, which a static fit cannot follow (SHORT_PERIOD_YR).
+
+    TRUTH-SIDE ONLY.  This uses the truth table's own phase and inc to
+    express the key's alpha in our convention; it is never applied to a
+    posterior.  The key's alpha is NOT measurable from a static or linear-
+    motion light curve, which constrains only the trajectory angle to the
+    instantaneous binary axis (our alpha, = MulensModel's = MMEXOFAST's);
+    the phase/inc term is invisible to such a fit, and is (weakly)
+    constrained only under `orbital_motion: keplerian`, where alpha(t) is
+    derived from the orbit.  The > 1 deg short-period residuals are that
+    axis rotating during the event: a static fit's alpha sits at an
+    effective mean axis, while the key quotes the phase at a reference
+    epoch.
     """
     ph = np.radians(np.asarray(phase, dtype=float))
     inc_r = np.radians(np.asarray(inc, dtype=float))
