@@ -200,8 +200,10 @@ def plan(cfg_path, prefix):
     if not isinstance(data, dict) or "fits" not in data:
         raise Unconvertible(f"{json_path}: not an MMEXOFAST JSON (no 'fits').")
     fits = data["fits"] or []
-    if not fits:
-        raise Unconvertible(f"{json_path}: 'fits' is empty; nothing to seed.")
+    # An EMPTY `fits` is a real case, not a malformed file: MMEXOFAST found
+    # no solution for DC2018 062 (dc18_seed.py's peak finder did), and the
+    # removed loader then seeded nothing but still applied the JSON's
+    # excluded_points and errfacs.  Convert those, seed nothing, and say so.
 
     pf = cfg.get("parameter_file")
     if pf is None:
@@ -235,7 +237,12 @@ def plan(cfg_path, prefix):
     names = {"source": src_names, "lens": lens_names, "mulensevent": [None]}
 
     param_edits, skipped, notes = {}, [], []
-    for key, comp, i, param, fn in rows:
+    if not fits:
+        notes.append(
+            "JSON 'fits' is empty (MMEXOFAST produced no solution): no "
+            "seeds written; the peak finder seeds t_0/u_0/t_E as before"
+        )
+    for key, comp, i, param, fn in rows if fits else []:
         name = names[comp][i] if i < len(names[comp]) else None
         spell = _spellings(comp, i, name, param)
         if comp == "lens" and param == "log_s":
@@ -298,7 +305,7 @@ def plan(cfg_path, prefix):
             continue
         param_edits[_target_key(params, spell)] = fac
 
-    if fits[0].get("sigmas") or {}:
+    if fits and (fits[0].get("sigmas") or {}):
         notes.append(
             "fit 0 sigmas dropped (init_scale hints; the whitening probe "
             "measures scales)"

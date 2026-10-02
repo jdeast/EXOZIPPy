@@ -18,58 +18,51 @@ run:
 #   planet.0 = Companion (secondary lens body)
 
 star:
-  - name: "Lens"
-  - name: "Source"
+- name: "Lens"
+- name: "Source"
 
 planet:
-  - name: "Companion"
+- name: "Companion"
 
 # Ported to the post-8.6.17 split (mulensevent / lens / source);
 # key homes per components/mulensing/bodies.py.
 mulensevent:
-  - finite_source: True
+- finite_source: true
     # A/B arm vs the cap-only run: ONE variable -- fitpirel
     # (sample log_pi_rel, derive the lens distance).
-    fitpirel: True
-    # REMOVED KEY (2026-10-01): this config raises until converted.  The
-    # JSON below exists only where the fit ran (the *_mmexofast.json
-    # caches are gitignored); run examples/DC2018/convert_mmexofast_json.py
-    # on this config there to move its seeds, mask and err_scale starts
-    # into the params file and delete this key.
-    mmexofast: "../events/128/DC2018_128_mmexofast.json"
-
+  fitpirel: true
 lens:
-  - body: star.Lens
-  - body: planet.Companion
+- body: star.Lens
+- body: planet.Companion
 
 source:
-  - body: star.Source
+- body: star.Source
 
 galacticmodel:
-  - name: "DC2018_128"
-    anchor_idx: 1              # the source is star.1
+- name: "DC2018_128"
+  anchor_idx: 1                # the source is star.1
 
 band:
-  - name: "W149"
-    filter: "Roman/WFI.F146"
-    ld_law: "linear"
-  - name: "Z087"
-    filter: "Roman/WFI.F087"
-    ld_law: "linear"
+- name: "W149"
+  filter: "Roman/WFI.F146"
+  ld_law: "linear"
+- name: "Z087"
+  filter: "Roman/WFI.F087"
+  ld_law: "linear"
 
 mulensinstrument:
-  - name: "Roman_W149"
-    file: "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.W149.WFIRST18.128.txt"
-    data_format: "flux"
-    observer_location: "roman_simulated_2018dc"
-    band: "W149"
-    likelihood: "hogg"
-  - name: "Roman_Z087"
-    file: "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.Z087.WFIRST18.128.txt"
-    data_format: "flux"
-    observer_location: "roman_simulated_2018dc"
-    band: "Z087"
-    likelihood: "hogg"
+- name: "Roman_W149"
+  file: "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.W149.WFIRST18.128.txt"
+  data_format: "flux"
+  observer_location: "roman_simulated_2018dc"
+  band: "W149"
+  likelihood: "hogg"
+- name: "Roman_Z087"
+  file: "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.Z087.WFIRST18.128.txt"
+  data_format: "flux"
+  observer_location: "roman_simulated_2018dc"
+  band: "Z087"
+  likelihood: "hogg"
 
 prefix: "fitresults_mulens_hoggcap_pirel/DC2018_128"
 
@@ -80,7 +73,7 @@ sampler:
   tune: 5000
   draws: 50000
   nthin: 1
-  recompute_trace: True
+  recompute_trace: true
   eval_timeout: 10
 
 # Degenerate events routinely leave chains split across solution branches
@@ -88,6 +81,7 @@ sampler:
 # initialization rather than posterior mass.  Bridge-sampling evidence
 # weights are the designed remedy (they fall back to occupancy, loudly, if
 # the bridge iteration does not converge).
+  seed_polish: true
 modes:
   weights: "evidence"
 

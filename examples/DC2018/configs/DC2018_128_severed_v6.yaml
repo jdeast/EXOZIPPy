@@ -18,35 +18,28 @@ run:
 #   planet.0 = Companion (secondary lens body)
 
 star:
-  - name: "Lens"
-  - name: "Source"
+- name: "Lens"
+- name: "Source"
 
 planet:
-  - name: "Companion"
+- name: "Companion"
 
 # PORTED to the post-8.6.17 component split (PR #246).  Event-shared
 # quantities and the coordinate-swap flags -> `mulensevent`; one `lens:`
 # entry per lens BODY; the source's own track and its tie toggle ->
 # `source:`.  Key homes per components/mulensing/bodies.py.
 mulensevent:
-  - finite_source: true
-    fitmurel: true
-    fitpirel: true
-    fitthetae: true
-    # REMOVED KEY (2026-10-01): this config raises until converted.  The
-    # JSON below exists only where the fit ran (the *_mmexofast.json
-    # caches are gitignored); run examples/DC2018/convert_mmexofast_json.py
-    # on this config there to move its seeds, mask and err_scale starts
-    # into the params file and delete this key.
-    mmexofast: "../events/128/DC2018_128_mmexofast.json"
-
+- finite_source: true
+  fitmurel: true
+  fitpirel: true
+  fitthetae: true
 lens:
-  - body: star.Lens
-  - body: planet.Companion
+- body: star.Lens
+- body: planet.Companion
 
 source:
-  - body: star.Source
-    star_constrains_rho: false
+- body: star.Source
+  star_constrains_rho: false
 
 # Sever rho from the stellar chain: rho is sampled (log_rho) from the
 # finite-source signal alone; the chain's theta_star/theta_E is
@@ -61,16 +54,16 @@ source:
 
 
 galacticmodel:
-  - name: "DC2018_128"
-    anchor_idx: 1              # the source is star.1
+- name: "DC2018_128"
+  anchor_idx: 1                # the source is star.1
 
 band:
-  - name: "W149"
-    filter: "Roman/WFI.F146"
-    ld_law: "linear"
-  - name: "Z087"
-    filter: "Roman/WFI.F087"
-    ld_law: "linear"
+- name: "W149"
+  filter: "Roman/WFI.F146"
+  ld_law: "linear"
+- name: "Z087"
+  filter: "Roman/WFI.F087"
+  ld_law: "linear"
   # Not observed -- declared so 2MASS Ks enters the SED's BC grid, which is
   # what `mann: {ks: synthetic}` needs to synthesize the lens's individual
   # Ks.  The alternative the error message offers, a filter row in the .sed
@@ -78,23 +71,23 @@ band:
   # becomes NaN and propagates into the likelihood).  No instrument
   # references this band, so its limb-darkening parameters are simply
   # pinned as unread.
-  - name: "Ks_bcgrid"
-    filter: "2MASS/2MASS.Ks"
-    ld_law: "linear"
+- name: "Ks_bcgrid"
+  filter: "2MASS/2MASS.Ks"
+  ld_law: "linear"
 
 mulensinstrument:
-  - name: "Roman_W149"
-    file: "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.W149.WFIRST18.128.txt"
-    data_format: "flux"
-    observer_location: "roman_simulated_2018dc"
-    band: "W149"
-    likelihood: "hogg"
-  - name: "Roman_Z087"
-    file: "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.Z087.WFIRST18.128.txt"
-    data_format: "flux"
-    observer_location: "roman_simulated_2018dc"
-    band: "Z087"
-    likelihood: "hogg"
+- name: "Roman_W149"
+  file: "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.W149.WFIRST18.128.txt"
+  data_format: "flux"
+  observer_location: "roman_simulated_2018dc"
+  band: "W149"
+  likelihood: "hogg"
+- name: "Roman_Z087"
+  file: "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.Z087.WFIRST18.128.txt"
+  data_format: "flux"
+  observer_location: "roman_simulated_2018dc"
+  band: "Z087"
+  likelihood: "hogg"
 
 prefix: "fitresults_severed_v6/DC2018_128"
 
@@ -109,8 +102,8 @@ sed:
 # log10(M) and log10(R) from teff/logg/feh, adds no new parameters, and its
 # scatter is in dex.
 torres:
-  - star: "Source"
-    constrain: [mass, radius]
+- star: "Source"
+  constrain: [mass, radius]
 
 # The LENS is in the range Mann+2015/2019 is calibrated for (0.075-0.7
 # solMass; truth here 0.454).  `ks: synthetic` takes its INDIVIDUAL Ks from
@@ -129,9 +122,9 @@ torres:
 # WARNINGS only, so a lens above 0.7 solMass still gets the potential
 # applied.  Read the warning before trusting a lens mass.
 mann:
-  - star: "Lens"
-    ks: synthetic
-    constrain: [mass, radius]
+- star: "Lens"
+  ks: synthetic
+  constrain: [mass, radius]
 
 sampler:
   method: "ptde_async"
@@ -147,7 +140,7 @@ sampler:
   tune: 5000
   draws: 50000
   nthin: 1
-  recompute_trace: True
+  recompute_trace: true
   eval_timeout: 10
 
 # Degenerate events routinely leave chains split across solution branches
@@ -155,6 +148,7 @@ sampler:
 # initialization rather than posterior mass.  Bridge-sampling evidence
 # weights are the designed remedy (they fall back to occupancy, loudly, if
 # the bridge iteration does not converge).
+  seed_polish: true
 modes:
   weights: "evidence"
 
