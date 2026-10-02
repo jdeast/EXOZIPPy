@@ -1,6 +1,12 @@
-# Seeded from MMEXOFAST solution 0 (0-indexed)
-# Source: examples/DC2018_128/mmexofast.json
-# n_solutions in file: 2
+# KMT-2019-BLG-1806 / OGLE-2019-BLG-1250, Zang et al. 2023, AJ 165, 103
+# (arXiv:2210.12344).
+#
+# The event starts (t_0, u_0, t_E, s, alpha, q) are MMEXOFAST solution 0
+# of KMT-2019-BLG-1806-r_exozippy_init.json in this directory, fit to
+# these KMTNet files; alpha is the negative of that file's -57.03. Compare
+# Zang+2023 Table 4, "Outer": t_E ~ 135 d, s = 1.034, log q = -4.72,
+# alpha = 2.15 rad (u_0 > 0) in their convention. The coordinates, zeropoints and source extinction
+# are from Zang+2023 and cited where they appear below.
 #
 # Only initvals are used: MMEXOFAST uncertainties are not mapped to
 # sigma (a Gaussian prior would double-count the data), and whitening
@@ -50,12 +56,6 @@ star.Source.dec:
 
 # these shouldn't be fit for such models (on the to do list)
 # but as a temporary hack, we're just going to fix them at their arbitrary starting values
-star.Lens.radius:
-    sigma: 0.0
-star.Lens.teff:
-    sigma: 0.0
-star.Lens.feh:
-    sigma: 0.0
 star.Source.feh:
     sigma: 0.0
 planet.Companion.radius:
