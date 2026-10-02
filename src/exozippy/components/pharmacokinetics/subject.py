@@ -254,9 +254,9 @@ class Subject(Component):
     # two spellings for one idea.  The cost is real and is paid here -- three
     # alternatives cannot be encoded in booleans without an illegal
     # combination, so `_parse_basis` has to reject "more than one true"
-    # explicitly, which an enum would have made unrepresentable.  See
-    # notes/code_review_20260824.txt item 4.2.7 for the same ruling applied to
-    # planet.mass_parameterization.
+    # explicitly, which an enum would have made unrepresentable.  The same
+    # ruling applies to planet.mass_parameterization (review 4.2.7; see
+    # components.md's flag vocabulary).
     BASIS_FLAGS = {
         "fitclv": "cl_v",
         "fitkev": "ke_v",

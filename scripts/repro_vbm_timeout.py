@@ -257,8 +257,7 @@ def main():
                 f"timeout in isolation. This event likely reflects worker-pool "
                 f"contention at the time (another proposal's genuinely expensive "
                 f"near-zone finite-source call sharing the box), not an intrinsic "
-                f"cost of THIS parameter set -- see the near-zone cost distribution "
-                f"discussion in vbm_fix.txt."
+                f"cost of THIS parameter set."
             )
 
         if args.epochs:

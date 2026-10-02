@@ -773,7 +773,7 @@ def discover_hot_modes(
     if lp.size == 0:
         # An empty group is what a mis-sliced posterior_hot looks like (the
         # burn-in/stuck-chain trim used to index it by T=1 chains and draws
-        # -- notes/code_review_20260808.txt 2.9.2).  Report it as a FAILED
+        # -- review 2.9.2, #104).  Report it as a FAILED
         # search, never as "searched and found nothing".
         logger.warning(
             "Hot-chain discovery: the posterior_hot group holds no draws; "

@@ -223,7 +223,7 @@ per-band `u1` would need a per-band magnification.  Measured cost on this
 example's 839 caustic-crossing Bronberg epochs: 6.5 mmag max between I and R
 and 17 mmag between I and V, against a 26 mmag median error -- cheap here
 (the V band is five points), not cheap for an event with dense simultaneous
-V and I coverage.  Scoped in `notes/orbital_motion_and_nbody.txt` section 4a.
+V and I coverage.
 
 **Orbital motion of the lens binary: `orbital_motion: keplerian` is ON**
 -- the RV-constrained orbit drives `s(t)`/`alpha(t)` with no new free
@@ -267,8 +267,8 @@ traps this measurement stepped in so the next reader does not have to:
   the chi2 baselines by ~10% here.  The table above, at the IOP values,
   supersedes both.
 
-The design -- source orbital motion, real `gamma_dot`/`gamma_ddot`, and the
-eventual N-body backend -- is in `notes/orbital_motion_and_nbody.txt`.
+Still to come: source orbital motion, real `gamma_dot`/`gamma_ddot`, and an
+eventual N-body backend.
 
 ## Starting values
 

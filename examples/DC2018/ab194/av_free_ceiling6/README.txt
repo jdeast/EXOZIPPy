@@ -4,8 +4,8 @@ this run IS the measurement that the ceiling was binding.
 
   star.Source.av = 5.26 +0.33 -0.40     (bound: [0, 6])
 
-The colour-anchored truth for this event is 9.01 (see code_review_20260824.txt,
-7.7.3, and conventions.md C29), so this posterior is not a measurement of the
+The colour-anchored truth for this event is 9.01 (see conventions.md C29 and
+review 7.7.3), so this posterior is not a measurement of the
 extinction -- it is the grid running out, 2.3 sigma from a hard bound it
 cannot cross, with no warning printed.  That missing warning is the open
 sub-item of 2.9.16.

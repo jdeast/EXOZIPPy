@@ -881,9 +881,8 @@ def _active_rungs(step, n_temps, thin_start, thin_factor):
     rung that skipped its own DE move this step can still participate in
     a swap using its last-computed logp.
 
-    Rationale (the slow-evaluation tail measured at the top of
-    notes/hpc_optimization.txt; its P12, cited here until 2026-08, has
-    since been pruned from that note): PTDE's per-step wall time is
+    Rationale (the measured slow-evaluation tail; see ptde_async.py's
+    module docstring): PTDE's per-step wall time is
     gated by the SLOWEST of all n_temps*n_chains proposals. Hot rungs
     (large T) explore a heavily flattened target and routinely draw
     parameter combinations that are individually expensive to evaluate but
@@ -1045,11 +1044,8 @@ def ptde_sample(
                Default False (zero overhead when off). This is the
                measurement the sampler's optimization work is argued from --
                it is what localized the slow-evaluation tail to the top two
-               rungs of DC2018_128 (see the per-rung timing table at the top
-               of notes/hpc_optimization.txt, and the 6.4.x block of
-               notes/code_review_20260814.txt, which supersedes the P13 this
-               line used to cite; P13 itself has since been pruned from that
-               note).
+               rungs of DC2018_128 (see ptde_async.py's module
+               docstring).
     seed : int | None
     log_interval : int | None — steps between progress log lines (None → 5%)
     plot_prefix : str | None  — if set, generate ensemble-start plots at this path prefix

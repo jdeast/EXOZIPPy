@@ -173,7 +173,7 @@ def resolve_polish_steps(spec, n_seeds, has_seed_hints):
 
     The bool test comes FIRST and by isinstance.  `spec in (True, "on")`
     matched the integer 1 (1 == True in Python), so `seed_polish: 1` asked
-    for one step and got 150 (notes/code_review_20260808.txt 2.9.1).  The
+    for one step and got 150 (review 2.9.1, #104).  The
     symmetric `0 == False` match was harmless -- 0 steps IS off -- and stays
     harmless here: 0 now falls through to the int path and returns 0.
     """

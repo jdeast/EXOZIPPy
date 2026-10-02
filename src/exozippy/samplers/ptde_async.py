@@ -13,7 +13,7 @@ because every chain's next DE proposal needs its rung-mates' CURRENT states,
 and "current" is only well-defined once the whole step resolves. Production
 runs on examples/DC2018_128 show this stalls the entire sampler behind a rare
 but expensive near-caustic evaluation concentrated in the hottest 1-2 rungs
-(the per-rung timing table at the top of notes/hpc_optimization.txt:
+(measured per rung:
 0.09%/0.7% of rung 6/7 calls exceed 0.1 s, and with 320 proposals/step the
 odds NONE of them land in that tail across a whole run are essentially zero).
 This module removes that
@@ -304,7 +304,7 @@ def ptde_async_sample(
     # state. Every submission is stamped with it; a result whose stamp no
     # longer matches was proposed FROM a state that a swap has since moved
     # elsewhere, so accept/rejecting it would compare apples to oranges
-    # (the detailed-balance violation of code_review_20260808.txt 1.15a).
+    # (the detailed-balance violation of review 1.15a, fixed in #71).
     # Such results are discarded and the slot resubmits from its new state.
     state_gen = [[0] * n_chains for _ in range(n_temps)]
 
@@ -438,7 +438,7 @@ def ptde_async_sample(
     # whose sub_id is no longer here was written off by the eval-timeout
     # recovery below; if it arrives anyway (it raced the write-off through
     # the queue) it is dropped on the floor, so one submission can never be
-    # double-processed (code_review_20260808.txt 1.15b).
+    # double-processed (review 1.15b, #71).
     in_flight_meta = {}
     in_flight = [0]
     _sub_seq = [0]

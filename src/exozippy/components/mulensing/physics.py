@@ -219,8 +219,7 @@ def source_offset_from_orbit(
 ):
     """``(sigma_N, sigma_E)``: the luminous source's own sky offset from its
     barycenter, in Einstein radii, driven by a Keplerian orbit -- the
-    xallarap primitive (C25; review 8.6.9; notes/orbital_motion_and_nbody
-    1b).
+    xallarap primitive (C25; review 8.6.9).
 
     ``a1`` is the SOURCE's barycentric semi-major axis [R_sun]
     (= a * m_companion / m_total for the orbit's primary body), projected
@@ -747,6 +746,5 @@ def calc_rho_from_log(log_rho):
 @register_physics
 def calc_s(log_s):
     # Projected binary separation from the sampled log10(s).  Sampling log_s
-    # makes close/wide an exact reflection log_s -> -log_s (|J| = 1); see
-    # notes/multimode_implementation.txt P2.
+    # makes close/wide an exact reflection log_s -> -log_s (|J| = 1).
     return pt.power(10.0, log_s)

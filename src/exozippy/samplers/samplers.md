@@ -169,8 +169,7 @@ Where basins are far apart the traffic comes from multi-seed starts, the
 hot-rung suppressed-mode search (`store_hot_chains`), per-mode evidence
 weighting or explicit mode jumps. **And do not shorten the ladder to buy round
 trips**: the hot-rung search's reach is `10 x T_max` (2000 nats at the default
-200, 500 at 50), and it is what found DC2018 223's truth basin. Full trail:
-`notes/pt_round_trip_collapse.txt`. Tests: `tests/test_ptde.py`'s two
+200, 500 at 50), and it is what found DC2018 223's truth basin. Tests: `tests/test_ptde.py`'s two
 `ladder_health_report` cases.
 
 **So why keep it?** One real use, and one cheap one. The real use is as the

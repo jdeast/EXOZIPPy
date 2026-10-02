@@ -12,7 +12,7 @@ Modeling the following components:
   mulensinstrument (6)
 Solving for starting values/scales of sampled parameters given user/data/default initialization....
 Done solving after 4 iterations.
-auto_vbbl: using VBM everywhere for source 0 (hexadecapole bracketing removed — VBM's internal C++ point-source test is faster; see hpc_optimization.txt P1)
+auto_vbbl: using VBM everywhere for source 0 (hexadecapole bracketing removed — VBM's internal C++ point-source test is faster)
 /home/tmcaleer/miniconda3/envs/exozippy/lib/python3.13/site-packages/pytensor/link/c/cmodule.py:2978: UserWarning: PyTensor could not link to a BLAS installation. Operations that might benefit from BLAS will be severely degraded.
 This usually happens when PyTensor is installed via pip. We recommend it be installed via conda/mamba/pixi instead.
 Alternatively, you can use an experimental backend such as Numba or JAX that perform their own BLAS optimizations, by setting `pytensor.config.mode == 'NUMBA'` or passing `mode='NUMBA'` when compiling a PyTensor function.

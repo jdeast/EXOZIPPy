@@ -1,6 +1,6 @@
 """
 Validate the direct-VBMicrolensing magnification Op against the
-MulensModel-backed Op (hpc_optimization.txt P2).
+MulensModel-backed Op.
 
 The direct path re-derives everything MulensModel does per call (parallax
 projection, trajectory rotation, VBM dispatch), so any convention drift —

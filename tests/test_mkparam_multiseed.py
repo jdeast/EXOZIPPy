@@ -1,4 +1,4 @@
-"""Tests for mkparam's multi-seed emission (notes/todo.txt #3).
+"""Tests for mkparam's multi-seed emission.
 
 With n_seeds > 1, mkparam writes list-valued initvals -- K mutually-consistent
 JOINT posterior draws -- that the next run consumes as P4 multi-seed starts, so

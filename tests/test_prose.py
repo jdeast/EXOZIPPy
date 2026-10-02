@@ -1,6 +1,6 @@
 """Tests for the modeling-prose collector, writer, and citation library.
 
-Three layers, mirroring the feature (see notes/modeling_prose.txt):
+Three layers, mirroring the feature (see outputs/outputs.md, #153):
 
 * the collector (``outputs/prose.py``): idempotency, ordering, section
   validation, citation extraction;

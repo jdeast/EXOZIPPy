@@ -13,8 +13,8 @@ without importing it, so this workflow needs only the data tree, not an
 MMEXOFAST source checkout on sys.path. The DC18 time origin is JD 2458234.0:
 master-file t0 is relative to it, the light curves are full BJD.
 
-Alpha and u_0 conventions (conventions.md C22, measured 2026-10-02 in the
-private notes repo's alpha_conventions.txt sec 4): the master file's alpha
+Alpha and u_0 conventions (conventions.md C22, measured 2026-10-02; tables
+in docs/alpha_conventions.md sec 4): the master file's alpha
 maps onto EXOZIPPy's (= MulensModel's = MMEXOFAST's) by an EVENT-DEPENDENT
 rule -- see key_alpha_to_exozippy below -- and u_0 by the identity, sign
 included.  compare_event therefore reports a truth and a pull for both.  The
@@ -373,7 +373,7 @@ def key_alpha_to_exozippy(alpha_key, phase, inc):
     recorded as unmappable.
 
     MEASURED, not assumed (scripts/dc18_alpha_convention.py on 36 events,
-    2026-10-02; notes/alpha_conventions.txt sec 4 in the private notes repo):
+    2026-10-02; the per-event table is docs/alpha_conventions.md sec 4):
     at the key's own t_0, signed u_0, t_E, rho, s and q, the light curve's
     preferred alpha matches this on all 19 events with chi2 contrast >= 1000
     to a median 0.10 deg, max 1.53 deg.  The only residuals above 1 deg are

@@ -760,7 +760,7 @@ def write_param_file(
     a length-K list of mutually-consistent JOINT posterior draws (seed 0 = the
     MAP; seeds 1..K-1 = random post-burn-in draws from the good chains), which
     the next run consumes as P4 multi-seed starts so its walkers begin already
-    spread across the posterior covariance (notes/todo.txt #3). Bounds stay
+    spread across the posterior covariance. Bounds stay
     scalar (from seed 0), matching config._build_seed_overrides.  No
     ``init_scale`` is written: whitening scales are measured from the data at
     startup and the key would be warn-ignored.

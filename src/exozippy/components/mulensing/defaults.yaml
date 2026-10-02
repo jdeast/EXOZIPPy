@@ -350,8 +350,7 @@ lens:
   q:
     # Lower bound sits 10x below the most optimistic Roman detection floor
     # (~Moon mass, q ~ 1e-7 at 0.3 Msun); below it the companion is pure
-    # nuisance volume with a likelihood flat in (s, alpha, q).  See
-    # vbm_fix.txt section 6.
+    # nuisance volume with a likelihood flat in (s, alpha, q).
     lower: 1e-8
     upper: 100.0  # q > 1 is legal (companion more massive than the "primary"); MulensModel supports it
     unit: ""
@@ -489,7 +488,7 @@ lens:
     # Derived from log_s (s = 10**log_s).  The bounds here mirror log_s's
     # [-1, 1] domain ([0.1, 10]) and leave >~2x margin beyond every
     # published solution while keeping tempering chains out of VBM's
-    # expensive corners (see vbm_fix.txt section 6).  Events genuinely
+    # expensive corners.  Events genuinely
     # needing s > 10 should override log_s (or lens.<companion>.s,
     # auto-translated) in their params file.
     lower: 0.1

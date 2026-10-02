@@ -114,8 +114,7 @@ def test_linear_mass_companion_guard(caplog):
 @pytest.mark.slow
 def test_all_three_swaps_compose_into_observable_coordinates():
     """fitmurel + fitpirel + fitthetae + star_constrains_rho: false is the
-    observable-coordinates parameterization of notes/
-    observable_coordinates.txt: the sampled microlensing coordinates ARE
+    observable-coordinates parameterization (#200, #201): the sampled microlensing coordinates ARE
     the observable set, the whole lens-star physical state is derived,
     and every physical prior evaluates on the derived point."""
     import os

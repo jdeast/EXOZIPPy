@@ -468,8 +468,8 @@ class Instrument(TimeSystem, Component):
 
         Populates ``self.plot_color[i]`` / ``self.plot_marker[i]`` (each None
         when unset).  These are user overrides for the categorical data-series
-        style; the theme supplies the default by series index (see
-        ``notes/gui_todo.txt`` precedence: user > theme).  A GUI can later
+        style; the theme supplies the default by series index (precedence:
+        user > theme).  A GUI can later
         expose a picker that writes this same key via the ruamel round-trip.
         """
         self.plot_color = []

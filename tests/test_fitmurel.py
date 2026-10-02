@@ -2,7 +2,7 @@
 Tests for `fitmurel: true` (mulensevent block): sample the LC-measured
 relative proper motion, derive the lens star's pm = pm_source + mu_rel.
 
-The first surgical coordinate swap (notes/observable_coordinates.txt):
+The first surgical coordinate swap (#200):
 |J| = 1, so the joint density over the physical variables is unchanged --
 only the sampled axes move.  Deriving the LENS element is load-bearing
 (the source pm carries the tight bulge prior; deriving the source would

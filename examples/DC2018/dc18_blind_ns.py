@@ -4,7 +4,7 @@ THE QUESTION.  Can an off-the-shelf gradient-free method blindly (no MMEXOFAST
 binary seed, no truth) find BOTH members of event 128's s <-> 1/s pair and
 weight them by posterior MASS (volume included), at a cost comparable to a
 PTDE run?  PT round-trip transport collapses at Lambda ~ 19 (measured; see
-notes/pt_round_trip_collapse.txt), so the weights from cold-chain occupancy
+src/exozippy/samplers/samplers.md), so the weights from cold-chain occupancy
 are initialization artifacts.  Nested sampling needs no transport: it sweeps
 one population from prior to posterior, discovers clusters on the way, and a
 mode's weight is the sum of the posterior weights of its samples -- mass, not
