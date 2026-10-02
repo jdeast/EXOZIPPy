@@ -24,8 +24,8 @@ lens.Companion.s:
 lens.Companion.alpha:
     initval: 57.02894037839297
 
-# rho is not seeded: it is derived from the source radius below, which is
-# what this file pins.
+# rho is not seeded: it is derived from the source radius, which the
+# source-flux seed supplies (see star.Source.av below).
 
 # q = M_companion / M_primary.  EXOZIPPy's relaxation engine propagates
 # this through the symbolic relation  q * M_primary = M_companion
@@ -69,9 +69,9 @@ mulensinstrument.KMTC04.zeropoint: {mu: 0.0, sigma: 0.07}
 mulensinstrument.KMTS04.zeropoint: {mu: 0.0, sigma: 0.07}
 mulensinstrument.KMTA04.zeropoint: {mu: 0.0, sigma: 0.07}
 
-# Seeded near a bulge turnoff star, which is what I_source ~ 18.9 at
-# ~8 kpc implies.
-star.Source.radius:
-    initval: 1.2
-star.Source.teff:
-    initval: 5800
+# Zang et al. 2023, Table 10: A_I = I_cl - I_cl,0 = 15.79 - 14.39 = 1.40,
+# which is A_V = 2.25 through this fit's own Cousins-I BC grid. The source
+# teff/radius/mass start is seeded from its measured flux at this extinction
+# (I_S = 21.35, (V-I)_S,0 = 0.76, theta_* = 0.345 uas in the same table).
+star.Source.av:
+    initval: 2.25

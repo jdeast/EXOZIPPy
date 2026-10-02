@@ -55,7 +55,7 @@ def _kmt_workdir():
     return _WORKDIR
 
 
-def _prepare_kmt(extra_params=None, drop_params=()):
+def _prepare_kmt(extra_params=None):
     import os
 
     if not _KMT_DIR.is_dir():
@@ -75,8 +75,6 @@ def _prepare_kmt(extra_params=None, drop_params=()):
         }
         for k in ("run", "prefix", "parameter_file", "sampler"):
             config.pop(k, None)
-        for k in drop_params:
-            user_params.pop(k, None)
         if extra_params:
             user_params.update(extra_params)
         system = System(config, user_params=user_params)
@@ -91,19 +89,13 @@ def test_shipped_config_seeds_a_late_type_dwarf():
     Given the shipped KMT config (calibrated magnitude files) with its
     zeropoint stated as 0 +/- 0.2 mag,
     When the system is prepared,
-    Then the source (m_I ~ 21.3 at the 8 kpc bulge seed -> M_I ~ 6.8) is
-    seeded as a K/M dwarf: the teff/radius hints exist (only this seeding
-    writes them), logmass moved off mulensevent.py's -0.5 placeholder, and the
-    resolved start carries the seed.
-
-    The shipped params file's own Source teff/radius starts are dropped
-    here: user entries outrank data hints by design (verified in this
-    test's counterpart below), and this test is about the hint path.
+    Then the source (m_I ~ 21.3 at the 8 kpc bulge seed, through the params
+    file's published A_I = 1.40 -> M_I ~ 5.4) is seeded as a K dwarf: the
+    teff/radius hints exist (only this seeding writes them), logmass moved
+    off mulensevent.py's -0.5 placeholder, and the resolved start carries
+    the seed.
     """
-    system = _prepare_kmt(
-        extra_params=_ZP_TIE,
-        drop_params=("star.Source.radius", "star.Source.teff"),
-    )
+    system = _prepare_kmt(extra_params=_ZP_TIE)
     cm = system.config_manager
     src = int(system.mulensevent.source_map[0])
     for param in ("logmass", "teff", "radius", "teffsed", "radiussed"):
@@ -123,13 +115,19 @@ def test_shipped_config_seeds_a_late_type_dwarf():
 
 def test_user_start_outranks_the_seed():
     """
-    Given the shipped config, whose params file explicitly starts the
-    Source at a bulge turnoff (teff 5800, radius 1.2),
+    Given the shipped config plus an explicit user start for the Source at
+    a bulge turnoff (teff 5800, radius 1.2),
     When the system is prepared,
     Then the hint is still computed but the USER start wins the resolve --
     data hints yield to explicit user values by design.
     """
-    system = _prepare_kmt(extra_params=_ZP_TIE)
+    system = _prepare_kmt(
+        extra_params={
+            **_ZP_TIE,
+            "star.Source.teff": {"initval": 5800},
+            "star.Source.radius": {"initval": 1.2},
+        }
+    )
     cm = system.config_manager
     src = int(system.mulensevent.source_map[0])
     assert f"star.{src}.teffsed" in cm.hints  # seed computed...
@@ -147,9 +145,7 @@ def test_no_stated_zeropoint_does_not_seed():
     config with the tie stated seeds, test_shipped_config_seeds_a_late_type_
     dwarf, so this is the stated tie's doing and not a broken seeder.)
     """
-    system = _prepare_kmt(
-        drop_params=("star.Source.radius", "star.Source.teff")
-    )
+    system = _prepare_kmt()
     cm = system.config_manager
     src = int(system.mulensevent.source_map[0])
     for param in ("teff", "radius", "teffsed", "radiussed"):
