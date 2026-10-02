@@ -18,11 +18,11 @@ run:
 #   planet.0 = Companion (secondary lens body)
 
 star:
-  - name: "Lens"
-  - name: "Source"
+- name: "Lens"
+- name: "Source"
 
 planet:
-  - name: "Companion"
+- name: "Companion"
 
 # PORTED to the post-8.6.17 component split (PR #246, merged 2026-09-09).
 # Shared event quantities (t_E, theta_E, pi_E, mu_rel) and the
@@ -31,23 +31,16 @@ planet:
 # `star_constrains_rho` tie toggle live on `source:`.
 # src/exozippy/components/mulensing/source.py is the authority.
 mulensevent:
-  - finite_source: True
-    fitmurel: True
-    fitpirel: True
-    fitthetae: True
-    # REMOVED KEY (2026-10-01): this config raises until converted.  The
-    # JSON below exists only where the fit ran (the *_mmexofast.json
-    # caches are gitignored); run examples/DC2018/convert_mmexofast_json.py
-    # on this config there to move its seeds, mask and err_scale starts
-    # into the params file and delete this key.
-    mmexofast: "../events/128/DC2018_128_mmexofast.json"
-
+- finite_source: true
+  fitmurel: true
+  fitpirel: true
+  fitthetae: true
 lens:
-  - body: star.Lens
-  - body: planet.Companion
+- body: star.Lens
+- body: planet.Companion
 
 source:
-  - body: star.Source
+- body: star.Source
     # RE-LINKED for v7, and this is the whole point of the arm.
     #
     # WHY THE SEVERING IS BEING UNDONE.  v3-v6 established that DC128's
@@ -93,19 +86,19 @@ source:
     # rho and the stellar chain, so it belongs on the source entry --
     # source.py, "per-instance flags on the component that owns the
     # coordinate is the established idiom".
-    star_constrains_rho: True
+  star_constrains_rho: true
 
 galacticmodel:
-  - name: "DC2018_128"
-    anchor_idx: 1              # the source is star.1
+- name: "DC2018_128"
+  anchor_idx: 1                # the source is star.1
 
 band:
-  - name: "W149"
-    filter: "Roman/WFI.F146"
-    ld_law: "linear"
-  - name: "Z087"
-    filter: "Roman/WFI.F087"
-    ld_law: "linear"
+- name: "W149"
+  filter: "Roman/WFI.F146"
+  ld_law: "linear"
+- name: "Z087"
+  filter: "Roman/WFI.F087"
+  ld_law: "linear"
   # Not observed -- declared so 2MASS Ks enters the SED's BC grid, which is
   # what `mann: {ks: synthetic}` needs to synthesize the lens's individual
   # Ks.  The alternative the error message offers, a filter row in the .sed
@@ -113,9 +106,9 @@ band:
   # becomes NaN and propagates into the likelihood).  No instrument
   # references this band, so its limb-darkening parameters are simply
   # pinned as unread.
-  - name: "Ks_bcgrid"
-    filter: "2MASS/2MASS.Ks"
-    ld_law: "linear"
+- name: "Ks_bcgrid"
+  filter: "2MASS/2MASS.Ks"
+  ld_law: "linear"
 
 mulensinstrument:
   - name: "Roman_W149"
@@ -146,8 +139,8 @@ sed:
 # log10(M) and log10(R) from teff/logg/feh, adds no new parameters, and its
 # scatter is in dex.
 torres:
-  - star: "Source"
-    constrain: [mass, radius]
+- star: "Source"
+  constrain: [mass, radius]
 
 # The LENS is in the range Mann+2015/2019 is calibrated for (0.075-0.7
 # solMass; truth here 0.454).  `ks: synthetic` takes its INDIVIDUAL Ks from
@@ -166,9 +159,9 @@ torres:
 # WARNINGS only, so a lens above 0.7 solMass still gets the potential
 # applied.  Read the warning before trusting a lens mass.
 mann:
-  - star: "Lens"
-    ks: synthetic
-    constrain: [mass, radius]
+- star: "Lens"
+  ks: synthetic
+  constrain: [mass, radius]
 
 sampler:
   method: "ptde_async"
@@ -184,7 +177,7 @@ sampler:
   tune: 5000
   draws: 50000
   nthin: 1
-  recompute_trace: True
+  recompute_trace: true
   eval_timeout: 10
 
 # Degenerate events routinely leave chains split across solution branches
@@ -192,6 +185,7 @@ sampler:
 # initialization rather than posterior mass.  Bridge-sampling evidence
 # weights are the designed remedy (they fall back to occupancy, loudly, if
 # the bridge iteration does not converge).
+  seed_polish: true
 modes:
   weights: "evidence"
 

@@ -21,3 +21,7 @@ star.Source.ra:
 star.Source.dec:
   initval: -29.8747
   sigma: 0
+mulensinstrument.Roman_W149.err_scale:
+  initval: 1.0020964998011392
+mulensinstrument.Roman_Z087.err_scale:
+  initval: 1.0240474910432493
