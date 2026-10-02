@@ -14,8 +14,8 @@ so the point count is never the blocker; the sole discriminator between event
 So the question is whether those events contain FOUR CONSECUTIVE 2-sigma
 residuals anywhere.  That is measurable directly from the data and the
 point-lens fit, with no reference to the truth table -- in particular no
-reference to alpha, whose DC2018 convention this project has established is
-unmappable to ours.
+reference to alpha, whose DC2018 mapping onto ours is event-dependent
+(conventions.md C22).
 
 The longest run in the FULL residual series is an UPPER BOUND on the longest
 run in any window: a window is a contiguous time interval, so a run inside one

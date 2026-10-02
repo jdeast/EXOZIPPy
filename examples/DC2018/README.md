@@ -142,19 +142,25 @@ untouched; `configs/README.md` says how to port one.
 
 ## Caveats
 
-- **alpha**: the answer key's alpha convention differs from
-  EXOZIPPy's (and MulensModel's; center-of-mass origin), and **no global mapping
-  between them exists** -- measured over all 44 events, see
-  `ALPHA_IS_UNMAPPABLE` in `dc18_common.py` and claim C22 of
-  `src/exozippy/components/mulensing/conventions.md`. The comparison
-  therefore reports the fitted alpha with NO truth value and NO pull. (The
-  old sign/offset search was deleted: it always returned its closest
-  candidate, so an unmappable truth came back as a confident number -- on
-  event 128 a 2034-sigma pull on an alpha that sat 0.3 deg from the light
-  curve's own optimum.)
-- **u_0** is compared in absolute value (the truth carries a
-  trajectory-side sign the fits do not, and with parallax negligible that
-  sign is degenerate with alpha's anyway).
+- **alpha**: the answer key measures alpha to the SOURCE's motion from the
+  planet orbit's LINE OF NODES, so it maps onto EXOZIPPy's (= MulensModel's =
+  MMEXOFAST's) by a per-event rule,
+  `alpha_EXZ = alpha_key + 180 - atan2(sin(phase) cos(inc), cos(phase))`
+  (`key_alpha_to_exozippy` in `dc18_common.py`; claim C22 of
+  `src/exozippy/components/mulensing/conventions.md`). Measured 2026-10-02:
+  19/19 events whose anomaly pins alpha (chi2 contrast >= 1000) match the
+  light curve's own alpha to a median 0.10 deg, max 1.53 deg. The comparison
+  reports a truth and a circular pull. Orbits shorter than 2 yr are FLAGGED:
+  the simulator moves the lens, the key's alpha is the t_0 geometry, and a
+  static fit sits a few degrees off it (event 128: -1.7 deg, which at a
+  0.03 deg error bar is a ~50-sigma pull that is physics, not a fitting
+  failure). Until 2026-10-02 the key was recorded as unmappable, because
+  only global offsets had been tested; the old sign/offset search stays
+  deleted (it always returned its closest candidate).
+- **u_0** is compared SIGNED: the key's sign maps by the identity. The only
+  ambiguity is the exact no-parallax mirror (u_0, alpha) -> -(u_0, alpha)
+  (C23): a fit in the key's mirror branch is scored against the mirror
+  image and its u_0/alpha rows say "mirror tie" -- reported, not folded.
 - Event 1 is a cataclysmic variable, not a lensing event; expect the 2L1S
   fit to fail or diverge on it (the collector will show it as such).
 - Each event directory gets a dumped `DC2018_<NNN>.yaml` +

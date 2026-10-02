@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
-"""Is the 2018 Roman Data Challenge answer key's alpha convertible to ours?
+"""Measure the 2018 Roman Data Challenge answer key's alpha convention.
 
-Answer, measured over all 44 events: NO.  This script is the measurement,
-kept because the conclusion is a negative one and negatives rot -- the next
-person to notice a 2000-sigma alpha pull should be able to re-run this in an
+Answer (2026-10-02, 36 events): the key's alpha IS mappable, by a rule that
+differs from event to event --
+
+    alpha_EXZ  = alpha_key + 180 - theta_axis                 (u_0 kept)
+    theta_axis = atan2(sin(phase) cos(inc), cos(phase))
+
+-- because the key measures the SOURCE's direction of motion from the planet
+orbit's LINE OF NODES, and theta_axis is the projected planet's angle from
+that line at t_0 (conventions.md C22; dc18_common.key_alpha_to_exozippy).
+This script is the measurement, kept because the conclusion was once the
+opposite and the next person to doubt it should be able to re-run it in an
 hour rather than re-derive it.
 
     poetry run python scripts/dc18_alpha_convention.py
 
 WHAT IT DOES.  For every 2L1S event it holds the answer key's own t_0, u_0,
 t_E, rho, s and q fixed, scans alpha over [0, 360) in MulensModel's
-convention (which is EXOZIPPy's -- see components/mulensing/op.py, and
-mmexofast_support maps MMEXOFAST's alpha to ours by the identity), fits the
-source fluxes linearly at each step, and takes the alpha the light curve
-itself prefers.  It then asks whether ANY global transformation carries the
-master file's alpha onto that.
+convention (which is EXOZIPPy's and MMEXOFAST's -- conventions.md C18,
+re-measured end to end 2026-10-02), fits the source fluxes linearly at each
+step, and takes the alpha the light curve itself prefers.  It then tests
+the node-line rule above, and the GLOBAL transformations that were tested
+first, against that.
 
 WHY THE u_0 SIGN IS TAKEN FROM THE MASTER FILE AND NOT SCANNED.  These
 events have |pi_E| ~ 0.02, so parallax is negligible, and without it
@@ -22,43 +30,34 @@ events have |pi_E| ~ 0.02, so parallax is negligible, and without it
 curve: event 128 gives byte-identical chi2 at (+0.1418, 308.15) and
 (-0.1418, 51.85).  Scanning both signs therefore adds no information and
 actively hurts -- `min` picks arbitrarily between two exactly tied minima,
-so the recovered alpha flips between branches at random and washes out any
-constant that might be there.  An earlier version of this script did scan
-both signs and produced a strictly noisier answer.  Alpha is only ever
-determined up to that reflection, which is why the reflected hypothesis is
-tested explicitly below rather than by flipping u_0.
+so the recovered alpha flips between branches at random.  Holding the key's
+sign is also what the rule needs: it maps u_0 by the identity.
 
-THE RESULT (44 events; circular concentration R, where 1.0 would mean "this
-IS the rule" and ~0.15 is what 44 random angles give):
+THE RESULT.  The node-line rule: 19/19 events with chi2 contrast >= 1000
+match it to a median 0.10 deg, max 1.53 deg (circular R = 1.000 on the 17
+such events of the original 30, mean 179.95 deg for fit - key + theta_axis).
+The residuals above 1 deg are the SHORTEST periods (event 40, P = 1.27 yr:
+-30.6 deg; 208, 1.51 yr: +4.2; 32, 3.28 yr: +2.2; 128, 1.27 yr: -1.5): the
+simulator moves the lens, the key's alpha is the t_0 geometry, and this
+static scan finds the anomaly-epoch compromise.  Events whose anomaly does
+not pin alpha (contrast < 20) scatter, as they must.
+
+The global hypotheses, which is all the first version of this script tested
+(and why the key was recorded as unmappable 2026-08-18 -> 2026-10-02):
 
     fit - alpha_key                                       R = 0.09
     fit + alpha_key   (a reflection)                      R = 0.10
     either, with the galactic->equatorial PA removed      R = 0.11 - 0.19
     either, with PA(mu_rel) removed                       R = 0.03 - 0.19
 
-That last one was the best physical guess: that the key's alpha is a sky
-POSITION ANGLE of the binary axis (which is how BAGLE defines its alpha)
-rather than an angle relative to the source trajectory, in which case the
-two differ by the position angle of the relative proper motion -- and that
-IS computable from the key's own galactic-frame proper motions.  It does
-not concentrate either.
+They scatter because theta_axis is different for every event.  The old
+guess recorded here -- that a node angle Omega would be needed to reach a
+sky angle -- was wrong: alpha_key and theta_axis are both measured from the
+node line, so Omega cancels.
 
-Restricting to the twelve events where the anomaly pins alpha hardest does
-not help: R = 0.22 and 0.41, against ~0.29 expected from twelve random
-angles.  So this is a property of the answer key, not of a weak constraint
-or of the wrong sign branch.
-
-CONSEQUENCE, already applied in examples/DC2018/dc18_common.py: alpha is
-reported with NO truth value and NO pull.  The sign/+-180 search that used
-to map it could not fail visibly -- it always returned its nearest
-candidate, so an unmappable truth came back as a confident number.  On
-event 128 it printed a 2034-sigma pull while the fitted alpha sat 0.3 deg
-from the light curve's own optimum.
-
-A plausible explanation, unconfirmed: the key carries a, inc, phase and
-period -- a full orbit -- but no node angle, so if alpha is defined in the
-orbital frame there is no way to reach a sky angle without Omega.  Matt
-Penny (who generated the simulations) has been asked.
+CONSEQUENCE, applied in examples/DC2018/dc18_common.py: compare_event maps
+the key's alpha by the rule and reports a circular pull, flagging orbits
+shorter than dc18_common.SHORT_PERIOD_YR.
 """
 
 import argparse
@@ -198,6 +197,8 @@ def one_event(event):
         master, _ = dc.load_master_row(DATA, event)
         pg, pe = pa_mu_rel(master, ra, dec)
         n = sum(len(d.time) for d in datasets)
+        phase, inc = float(master["phase"]), float(master["inc"])
+        predicted = float(dc.key_alpha_to_exozippy(truth["alpha"], phase, inc))
         return dict(
             event=event,
             cls=cls,
@@ -206,6 +207,13 @@ def one_event(event):
             alpha_fit=best,
             offset=float(wrap(best - truth["alpha"])),
             offset_reflected=float(wrap(best + truth["alpha"])),
+            # The node-line rule (conventions.md C22): fit - predicted
+            # concentrates at 0 where the anomaly pins alpha.
+            phase=phase,
+            inc=inc,
+            period=float(master["period"]),
+            alpha_predicted=predicted,
+            residual_node_rule=float(wrap(best - predicted)),
             # How sharply the light curve pins alpha at all: a weak anomaly
             # leaves the whole grid within a few chi2 and its "best alpha"
             # is noise that must not be allowed to vote.
@@ -325,6 +333,12 @@ def main(argv=None):
         pgn = np.array([r["pa_gal_north"] for r in sub])
         pmg = np.array([r["pa_murel_gal"] for r in sub])
         pme = np.array([r["pa_murel_eq"] for r in sub])
+        node = np.array([r["residual_node_rule"] for r in sub])
+        report("fit - node-line rule  (C22)", node)
+        print(
+            f"  {'':36s} |fit - rule| median {np.median(np.abs(node)):.2f}"
+            f"  max {np.abs(node).max():.2f} deg"
+        )
         report("fit - master", off)
         report("fit + master  (reflection)", refl)
         report("fit - master -/+ PA(gal north)", wrap(off - pgn))
@@ -335,9 +349,10 @@ def main(argv=None):
             report("fit - master - PA_eq(mu_rel)", wrap(off - pme))
             report("fit + master - PA_eq(mu_rel)", wrap(refl - pme))
 
-    print("\n  R near 1 (scatter << 20 deg) would identify the convention.")
-    print("  Nothing concentrates, at any contrast cut -- which is why")
-    print("  dc18_common reports alpha with no truth and no pull.")
+    print("\n  R near 1 (scatter << 20 deg) identifies the convention.  The")
+    print("  node-line rule concentrates at 0 once alpha is pinned; no global")
+    print("  offset does.  Residuals > 1 deg on a strong event should be the")
+    print("  short-period orbits (lens orbital motion), nothing else.")
 
     out = Path(args.out)
     json.dump(rows, open(out, "w"), indent=2)

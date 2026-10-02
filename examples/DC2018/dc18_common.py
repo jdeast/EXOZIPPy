@@ -13,15 +13,15 @@ without importing it, so this workflow needs only the data tree, not an
 MMEXOFAST source checkout on sys.path. The DC18 time origin is JD 2458234.0:
 master-file t0 is relative to it, the light curves are full BJD.
 
-Alpha conventions: the master file's alpha is NOT in EXOZIPPy's convention
-(EXOZIPPy measures alpha from the binary axis with the center of mass at the
-origin; the identity mapping holds between MMEXOFAST and EXOZIPPy, but not
-between either and the challenge's truth table). No mapping between them
-exists either -- see ALPHA_IS_UNMAPPABLE below for the measurement -- so
-alpha is reported WITHOUT a truth value and without a pull. u_0 is compared
-in absolute value for a related reason (the truth table's u_0 carries a
-trajectory-side sign the fits do not, and with parallax negligible the sign
-is degenerate with alpha's anyway).
+Alpha and u_0 conventions (conventions.md C22, measured 2026-10-02 in the
+private notes repo's alpha_conventions.txt sec 4): the master file's alpha
+maps onto EXOZIPPy's (= MulensModel's = MMEXOFAST's) by an EVENT-DEPENDENT
+rule -- see key_alpha_to_exozippy below -- and u_0 by the identity, sign
+included.  compare_event therefore reports a truth and a pull for both.  The
+one thing these no-parallax events cannot identify is the exact mirror
+(u_0, alpha) -> -(u_0, alpha) (C23): a fit in the mirror branch is scored
+against the key's mirror image and the row SAYS so, rather than being
+folded into |u_0| silently.
 """
 
 import csv
@@ -177,8 +177,10 @@ def load_truth(data_dir, event):
     the challenge's event class scraped from the master-file row ('cassan'
     for the 2L1S planet sample, 'cv' for cataclysmic variables, ...).
 
-    NOTE the alpha returned here is the master file's own value, which is
-    NOT convertible to the fitted convention -- see ALPHA_IS_UNMAPPABLE.
+    NOTE the alpha returned here is the master file's OWN value (alpha_key),
+    measured from the planet orbit's line of nodes; key_alpha_to_exozippy
+    maps it onto the fitted convention.  compare_event applies the mapping;
+    the scan scripts that need the raw key value read it from here.
     """
     row, class_label = load_master_row(data_dir, event)
     truth = {
@@ -347,49 +349,84 @@ def read_mmexofast_solutions(json_path):
 # ---------------------------------------------------------------------------
 
 
-# The master file's alpha has NO GLOBAL MAPPING onto the fitted convention.
-# Measured, not assumed (scripts/dc18_alpha_convention.py): for each
-# of the 44 events, alpha was scanned in MulensModel's convention at the
-# truth values of t_0, u_0, t_E, rho, s and q with the fluxes fit linearly,
-# giving the alpha the light curve itself prefers.  Against that reference
-# every candidate transformation scatters like noise --
-#
-#   hypothesis                              circular R (1.0 = it IS the rule)
-#   fit - alpha_DC                                    0.09
-#   fit + alpha_DC  (reflection)                      0.10
-#   either, with the galactic->equatorial PA removed  0.11 - 0.19
-#   either, with PA(mu_rel) removed (a sky position   0.03 - 0.19
-#     angle, which is how BAGLE defines its alpha)
-#
-# -- and restricting to the twelve events where the anomaly pins alpha
-# hardest does not help (R = 0.22 / 0.41, against ~0.29 expected from 12
-# random angles).  So this is a property of the answer key, not of a weak
-# constraint or of the wrong sign branch.
-#
-# The old sign/+-180 search is therefore DELETED rather than improved.  It
-# could not fail visibly: it always returned its closest candidate, so an
-# unmappable truth came back as a confident number, and the resulting pull
-# was reported alongside real ones.  On event 128 it printed a 2034-sigma
-# alpha pull while EXOZIPPy's fitted alpha (307.686) sat 0.3 deg from the
-# light curve's own optimum (308.0) -- a fabricated failure on a parameter
-# that was right.
-#
-# Note the two conventions really are only determined up to a reflection
-# here: with pi_E ~ 0.02 these events have negligible parallax, and without
-# it (u_0, alpha) -> (-u_0, -alpha) is an exact mirror symmetry of the
-# light curve.  Event 128 shows it exactly -- (+0.1418, 308.15) and
-# (-0.1418, 51.85) give identical chi2 to every digit.
-ALPHA_IS_UNMAPPABLE = (
-    "no global mapping from the master file's alpha convention exists "
-    "(measured over all 44 events); reported for the record, not compared"
+# Orbital periods below this make the static 2L1S comparison of alpha
+# unreliable: the simulator moves the lens, the key's alpha is the t_0
+# geometry, and a static fit finds the anomaly-epoch compromise (C22).
+SHORT_PERIOD_YR = 2.0
+
+
+def key_alpha_to_exozippy(alpha_key, phase, inc):
+    """The DC2018 answer key's alpha in EXOZIPPy's convention, in [0, 360).
+
+        alpha_EXZ  = alpha_key + 180 - theta_axis           (u_0 kept)
+        theta_axis = atan2(sin(phase) cos(inc), cos(phase))
+
+    All angles in degrees; `phase` and `inc` are the master file's columns of
+    those names.  The key measures the SOURCE's direction of motion (the +180
+    of conventions.md C21) against the planet orbit's LINE OF NODES, not
+    against the binary axis; theta_axis is the projected planet's angle from
+    that line at t_0 -- the same projection that reproduces the key's s
+    (event 4: 0.1086 a / r_E = 2.482 vs the key's 2.48124).  The node angle
+    is not needed: alpha_key and theta_axis share the node line, so it
+    cancels.  That theta_axis differs per event is why every GLOBAL offset
+    tested before 2026-10-02 scattered (R <= 0.19) and the key was wrongly
+    recorded as unmappable.
+
+    MEASURED, not assumed (scripts/dc18_alpha_convention.py on 36 events,
+    2026-10-02; notes/alpha_conventions.txt sec 4 in the private notes repo):
+    at the key's own t_0, signed u_0, t_E, rho, s and q, the light curve's
+    preferred alpha matches this on all 19 events with chi2 contrast >= 1000
+    to a median 0.10 deg, max 1.53 deg.  The only residuals above 1 deg are
+    the shortest periods (event 40, P = 1.27 yr: -30.6 deg; 208, 1.51 yr:
+    +4.2; 32, 3.28 yr: +2.2; 128, 1.27 yr: -1.5) -- the simulator's lens
+    orbital motion, which a static fit cannot follow (SHORT_PERIOD_YR).
+    """
+    ph = np.radians(np.asarray(phase, dtype=float))
+    inc_r = np.radians(np.asarray(inc, dtype=float))
+    theta_axis = np.degrees(np.arctan2(np.sin(ph) * np.cos(inc_r), np.cos(ph)))
+    return (np.asarray(alpha_key, dtype=float) + 180.0 - theta_axis) % 360.0
+
+
+def wrap180(x):
+    """An angle difference in degrees, wrapped onto [-180, 180)."""
+    return (np.asarray(x, dtype=float) + 180.0) % 360.0 - 180.0
+
+
+def mirror_branch_truth(u_0_truth, alpha_truth, u_0_fit):
+    """(u_0, alpha, mirrored) of the truth in the FIT's u_0 branch.
+
+    (u_0, alpha) -> -(u_0, alpha) is an exact symmetry of a static binary
+    without parallax (conventions.md C23, Skowron Eq. A12), and these
+    events have |pi_E| ~ 0.02, so a fit in the opposite u_0 branch from the
+    key is the same physical solution, not a miss -- and nothing in the
+    data can say which branch is "right".  It is scored against the key's
+    mirror image, and `mirrored` is returned so the caller REPORTS the tie
+    instead of hiding it in an absolute value.  With no fitted u_0 the
+    key's own branch is kept.
+    """
+    if u_0_fit is None or u_0_truth is None or u_0_fit * u_0_truth >= 0:
+        return u_0_truth, alpha_truth, False
+    alpha_m = None if alpha_truth is None else float((-alpha_truth) % 360.0)
+    return -u_0_truth, alpha_m, True
+
+
+MIRROR_NOTE = (
+    "fit is in the key's no-parallax mirror branch, (u_0, alpha) -> "
+    "-(u_0, alpha): an exact tie (C23), scored against the mirror image"
 )
 
 
-def sigma_pull(truth_val, fit_val, err_hi, err_lo):
-    """(truth - fit) / one-sided sigma, or None when not computable."""
+def sigma_pull(truth_val, fit_val, err_hi, err_lo, angle=False):
+    """(truth - fit) / one-sided sigma, or None when not computable.
+
+    angle=True wraps the difference onto [-180, 180) degrees first, so an
+    alpha reported as -52 compares correctly against a truth of 309.
+    """
     if truth_val is None or fit_val is None:
         return None
     diff = truth_val - fit_val
+    if angle:
+        diff = float(wrap180(diff))
     err = err_hi if diff >= 0 else err_lo
     if err is None or abs(err) == 0 or not np.isfinite(err):
         return None
@@ -400,11 +437,16 @@ def compare_event(event, data_dir, results_csv, mmx_json=None, out_csv=None):
     """Build the per-event truth/MMEXOFAST/EXOZIPPy comparison table.
 
     Returns a list of row dicts (one per parameter) and writes them as CSV
-    when out_csv is given. Convention handling: u_0 is compared as |u_0|;
-    alpha carries no truth and no pull at all (see ALPHA_IS_UNMAPPABLE) --
-    its fitted value is still reported so the row is not silently missing.
+    when out_csv is given. Convention handling (conventions.md C22): alpha's
+    truth is the key's value mapped by key_alpha_to_exozippy and its pull is
+    taken on the circle; u_0 is compared SIGNED.  Each solution (EXOZIPPy's
+    and every MMEXOFAST one) whose u_0 sign is opposite the key's is scored
+    against the key's exact no-parallax mirror (mirror_branch_truth) and the
+    u_0 and alpha rows' notes say so.  An orbit shorter than SHORT_PERIOD_YR
+    flags the alpha row: the static fit cannot match the key's t_0 geometry.
     """
     truth, class_label = load_truth(data_dir, event)
+    master, _ = load_master_row(data_dir, event)
     exo, err_scales = read_results_csv(results_csv)
     mmx_sols = (
         read_mmexofast_solutions(mmx_json)
@@ -413,32 +455,60 @@ def compare_event(event, data_dir, results_csv, mmx_json=None, out_csv=None):
     )
 
     truth = dict(truth)
-    notes = {p: "" for p in PARAMS}
-    truth["u_0"] = abs(truth["u_0"])
-    # Keep the master file's raw alpha out of the truth column entirely: a
-    # number there is a claim that it is comparable, and it is not.
-    notes["alpha"] = ALPHA_IS_UNMAPPABLE
-    truth["alpha"] = None
+    notes = {p: [] for p in PARAMS}
+    if np.isfinite(truth["alpha"]):
+        truth["alpha"] = float(
+            key_alpha_to_exozippy(
+                truth["alpha"], float(master["phase"]), float(master["inc"])
+            )
+        )
+        period = float(master["period"])
+        if period < SHORT_PERIOD_YR:
+            notes["alpha"].append(
+                f"P = {period:.2f} yr < {SHORT_PERIOD_YR:g} yr: lens orbital "
+                "motion moves alpha over the event; a static fit cannot "
+                "match the key's t_0 geometry (C22)"
+            )
+    else:
+        truth["alpha"] = None
+
+    def _branch(u_0_fit, who):
+        u0, al, mirrored = mirror_branch_truth(
+            truth["u_0"], truth["alpha"], u_0_fit
+        )
+        if mirrored:
+            for p in ("u_0", "alpha"):
+                notes[p].append(f"{who}: {MIRROR_NOTE}")
+        return {"u_0": u0, "alpha": al}
+
+    exo_truth = dict(truth, **_branch(exo.get("u_0", (None,))[0], "exozippy"))
+    mmx_truth = [
+        dict(truth, **_branch(sol.get("u_0", (None,))[0], f"mmxf_sol{k}"))
+        for k, sol in enumerate(mmx_sols)
+    ]
 
     rows = []
     for p in PARAMS:
         val, hi, lo = exo.get(p, (None, None, None))
+        ang = p == "alpha"
         row = {
             "event": event,
             "class": class_label,
             "param": p,
-            "truth": truth.get(p),
+            "truth": exo_truth.get(p),
             "exozippy": val,
             "exo_err_hi": hi,
             "exo_err_lo": lo,
-            "exo_pull": sigma_pull(truth.get(p), val, hi, lo),
+            "exo_pull": sigma_pull(exo_truth.get(p), val, hi, lo, angle=ang),
         }
         for k, sol in enumerate(mmx_sols):
             v, sig = sol.get(p, (None, None))
             row[f"mmxf_sol{k}"] = v
             row[f"mmxf_err_sol{k}"] = sig
-            row[f"mmxf_pull_sol{k}"] = sigma_pull(truth.get(p), v, sig, sig)
-        row["note"] = notes[p]
+            row[f"mmxf_pull_sol{k}"] = sigma_pull(
+                mmx_truth[k].get(p), v, sig, sig, angle=ang
+            )
+        row["note"] = "; ".join(notes[p])
         rows.append(row)
 
     for name, (val, hi, lo) in sorted(err_scales.items()):

@@ -664,44 +664,79 @@ which end of the axis the other code's position angle refers to; a
 secondary-to-primary convention adds a further $180^\circ$.
 
 \paragraph{C21 --- papers whose $\alpha$ is measured to the source
-trajectory.}  As noted in C15 this is a $180^\circ$ shift, and composed with
-the opposite $u_0$ branch (C23) it appears as the reflection-plus-shift
-$\alpha \rightarrow 180^\circ - \alpha$.  Our fit to OGLE-2016-BLG-1003 is
-the worked example: \citet{Jung:2017} report $\alpha = 48.243^\circ$, and the
-value that reproduces their light curve in our convention is
-$131.757^\circ = 180^\circ - 48.243^\circ$ with $u_0 > 0$ (its mirror partner,
-$u_0 < 0$ with $\alpha = 228.243^\circ$, is the same physical solution by C23).
-We stress that this is a fact about one paper's convention, established for
-that event by a $\chi^2$ scan and not by assumption.  \emph{There is no
-general rule.}  The reliable procedure when adopting a published solution is
-to evaluate the eight combinations $(\pm u_0) \times (\alpha, -\alpha,
-180^\circ \pm \alpha)$ at the published values of everything else and keep
-the one the light curve prefers; seven of the eight are typically
-catastrophic, and the exercise costs seconds.
+trajectory.}  As noted in C15, measuring $\alpha$ to the direction in which
+the source moves is a $180^\circ$ shift, $\alpha \rightarrow \alpha +
+180^\circ$.  Measuring it in the opposite sense of rotation is a reflection,
+$\alpha \rightarrow -\alpha$, and the two compose to $\alpha \rightarrow
+180^\circ - \alpha$; none of the three changes $u_0$.  Both occur in the
+literature, and we have measured one of each with the procedure described
+below, through our own magnification code and through
+\texttt{MulensModel}, which agree to within $4$ in $\chi^2$.  For
+KMT-2019-BLG-1806, $\alpha_{\rm here} = \alpha + 180^\circ$ with $u_0$ and
+$\vec{\pi}_{\rm E}$ as published by \citet{Zang:2023}: their outer $u_0 > 0$
+solution, $\alpha = 2.151$\,rad, becomes $303.24^\circ$ and reproduces the
+2441 KMTNet points with $\chi^2 = 2316.6$, while $180^\circ - \alpha$ with
+$u_0$ kept costs $\Delta\chi^2 = 933.8$.  For OGLE-2016-BLG-1003, the
+value that reproduces the light curve of \citet{Jung:2017} is instead
+$180^\circ - \alpha$ with $u_0$ kept: they report $\alpha = 48.243^\circ$,
+and $131.757^\circ$ with $u_0 > 0$ gives $\chi^2 = 7222.3$ on 4300 points,
+while the rule that is correct for \citeauthor{Zang:2023} costs
+$\Delta\chi^2 = 42{,}197$ here (its mirror partner, $u_0 < 0$ with $\alpha =
+228.243^\circ$, is the same physical solution by C23).  The two papers
+therefore differ by the sense of rotation, and neither paper's rule may be
+applied to the other's.  Note that the source-trajectory shift composed with
+the opposite $u_0$ branch, $(-u_0, 180^\circ - \alpha)$, is \emph{not} the
+second mapping: it is the exact mirror of $(u_0, \alpha + 180^\circ)$, and
+on OGLE-2016-BLG-1003 it is the catastrophic row.  We stress that each
+mapping is a fact about one paper's convention, established for that event
+by a $\chi^2$ scan and not by assumption.  \emph{There is no general rule.}
+The reliable procedure when adopting a published solution is to evaluate
+the eight combinations $(\pm u_0) \times (\alpha, -\alpha, 180^\circ \pm
+\alpha)$ at the published values of everything else and keep the one the
+light curve prefers; seven of the eight are typically catastrophic, and the
+exercise costs seconds.  With measurable parallax, $\pi_{{\rm E},\perp}$
+must be flipped together with $u_0$ when the mirror branch is tested (C23).
 
-\paragraph{C22 --- when no mapping exists.}  It is worth recording that the
-procedure above can legitimately return nothing.  The answer key of the 2018
-Roman (\textit{WFIRST}) microlensing data challenge carries an $\alpha$ for
-each of the 44 events in its sample, and we were unable to map it onto the
-fitted convention by \emph{any} global transformation.  We tested this
-rather than assumed it: for each event we scanned $\alpha$ at the answer
-key's own values of $t_0$, $u_0$, $t_{\rm E}$, $\rho$, $s$ and $q$, fitting
-the fluxes linearly, to obtain the $\alpha$ the simulated light curve itself
-prefers.  Against that reference, every candidate transformation --- the
-difference, the reflection, either with the Galactic-to-equatorial position
-angle removed, and either with ${\rm PA}(\mu_{\rm rel})$ removed, i.e.\ the
-hypothesis that the key uses a position-angle $\alpha$ in the sense of C20
---- scatters like noise, with circular concentrations $R \le 0.19$ where
-$R = 1$ would mean the transformation \emph{is} the rule.  Restricting to
-the twelve events whose anomaly constrains $\alpha$ most sharply does not
-help ($R = 0.22$ and $0.41$, against $R \approx 0.29$ expected from twelve
-random angles), so this is a property of the key rather than of a weak
-constraint or of the wrong degeneracy branch.  We therefore report $\alpha$
-for those events without a truth value and without a pull, in preference to
-a search over candidate mappings that always returns its closest candidate
-and so cannot fail visibly.  The failure mode is not hypothetical: such a
-search reported a $2034\sigma$ discrepancy in $\alpha$ for one event whose
-fitted value lay $0.3^\circ$ from the light curve's own optimum.
+\paragraph{C22 --- a mapping that is not a constant.}  The answer key of
+the 2018 Roman (\textit{WFIRST}) microlensing data challenge
+\citep{Penny:2019} is the best example we know of why the procedure above
+must be a scan rather than an assumption.  For each event we scanned
+$\alpha$ at the key's own values of $t_0$, $u_0$, $t_{\rm E}$, $\rho$, $s$
+and $q$, fitting the fluxes linearly, to obtain the $\alpha$ the simulated
+light curve itself prefers.  No \emph{global} transformation reproduces it:
+the difference, the reflection, either with the Galactic-to-equatorial
+position angle removed, and either with ${\rm PA}(\mu_{\rm rel})$ removed
+(a position-angle $\alpha$ in the sense of C20) all scatter like noise, with
+circular concentrations $R \le 0.19$ where $R = 1$ would mean the
+transformation \emph{is} the rule.  The key's $\alpha$ is nonetheless
+mappable, by a rule that differs from event to event:
+\begin{equation}
+  \alpha_{\rm here} = \alpha_{\rm key} + 180^\circ - \theta_{\rm axis},
+  \qquad
+  \theta_{\rm axis} = \mathrm{atan2}\left(\sin\phi\,\cos i,\ \cos\phi\right),
+  \label{eq:dc18alpha}
+\end{equation}
+with $u_0$ unchanged, sign included, where $\phi$ and $i$ are the key's
+orbital phase and inclination of the planet.  The key measures the
+direction of the \emph{source's} motion (the $180^\circ$ of C21) from the
+line of nodes of the planet's orbit rather than from the binary axis, and
+$\theta_{\rm axis}$ is the angle of the projected planet from that line at
+$t_0$ --- the same projection that reproduces the key's own $s$.  The node
+angle itself is not needed, because $\alpha_{\rm key}$ and $\theta_{\rm
+axis}$ are measured from the same line.  On all 19 events whose anomaly
+constrains $\alpha$ by $\Delta\chi^2 \ge 1000$ the rule matches the light
+curve's own $\alpha$ to a median of $0.10^\circ$ and at most $1.53^\circ$.
+The only residuals above $1^\circ$ are on the shortest orbital periods
+($1.3$--$3.3$\,yr), where the simulated lens orbits appreciably during the
+event: the key's $\alpha$ is the geometry at $t_0$, and a static model finds
+a compromise over the anomaly.  What these events cannot identify is only
+what no event without parallax can, the exact mirror $(u_0, \alpha)
+\rightarrow -(u_0, \alpha)$ of C23; a fit in the key's mirror branch is the
+same solution, and we report it as a tie rather than as a discrepancy.
+The episode is also a caution about comparison tooling: before the rule was
+found, a search over candidate global mappings that always returned its
+closest candidate reported a $2034\sigma$ discrepancy in $\alpha$ for an
+event whose fitted value lay $0.3^\circ$ from the light curve's own optimum.
 
 \paragraph{C29 --- a band extinction is not a number until the convention
 is stated.}  A quoted $A_{\rm W149}$ cannot be compared to a modelled one
@@ -770,9 +805,9 @@ Source system & $q$ & $\alpha$ & $u_0$, $\vec{\pi}_{\rm E}$ \\
 \texttt{MulensModel} (C18)                    & identity & identity                        & identity \\
 Primary/secondary labels exchanged (C19)      & $1/q$    & $\alpha + 180^\circ$            & identity \\
 $\alpha$ a sky position angle (C20)           & ---      & $\phi_\pi - \mathrm{PA_{axis}}$ & --- \\
-$\alpha$ to the source trajectory (C21)       & ---      & $\alpha + 180^\circ$            & --- \\
-\quad composed with the $u_0$ branch          & ---      & $180^\circ - \alpha$            & $-u_0$ \\
-2018 Roman data challenge key (C22)           & identity & \textit{none exists}            & $|u_0|$ only \\
+$\alpha$ to the source trajectory (C21), e.g.\ \citet{Zang:2023} & --- & $\alpha + 180^\circ$ & $u_0$ kept \\
+\quad opposite sense, e.g.\ \citet{Jung:2017} & ---      & $180^\circ - \alpha$            & $u_0$ kept \\
+2018 Roman data challenge key (C22)           & identity & $\alpha + 180^\circ - \theta_{\rm axis}(\phi, i)$ & identity \\
 \hline
 \end{tabular}
 \end{table*}

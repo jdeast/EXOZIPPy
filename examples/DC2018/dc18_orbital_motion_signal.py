@@ -27,7 +27,8 @@ events).  The projected separation of a circular orbit is
 the convention is exact -- and its derivatives at t_0 give ds/dt and
 dalpha/dt (128: -2.25/yr and 284 deg/yr against -2.32 and -293 fitted).
 chi2 is then evaluated at the key's own (t_0, u_0, t_E, rho, s, q) with
-alpha scanned (its convention is not ours, conventions.md C22), once static
+alpha scanned (the scan needs no convention; conventions.md C22 maps the
+key's), once static
 and once moving at those rates, both signs of both rates tried (the phase
 and alpha sense are conventions the key does not state).  static - moving
 is the orbital-motion signal the data carry.  Above 25 (about 5 sigma for
