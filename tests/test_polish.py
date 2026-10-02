@@ -339,7 +339,7 @@ def test_integer_one_is_one_step_not_the_default():
     When resolve_polish_steps maps it,
     Then the cap is 1 step.
 
-    Regression (notes/code_review_20260808.txt 2.9.1): the old
+    Regression (review 2.9.1, #104): the old
     `spec in (True, "on")` test matched the integer 1, because 1 == True in
     Python, so asking for a single step silently got DEFAULT_POLISH_STEPS
     (then 150, now 400).  Every small integer 2..N was honored, which is

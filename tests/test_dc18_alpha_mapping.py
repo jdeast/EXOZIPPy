@@ -2,13 +2,12 @@
 
     alpha_EXZ = alpha_key + 180 - atan2(sin(phase) cos(inc), cos(phase))
 
-The pairs below are copied from the 2026-10-02 measurement (the private notes
-repo's alpha_conventions.txt sec 4, scan JSON alpha_conventions/
-dc18_alpha.json + dc18_alpha_extra.json, produced by
+The pairs below are copied from the 2026-10-02 measurement
+(docs/alpha_conventions.md sec 4, produced by
 scripts/dc18_alpha_convention.py): the key's alpha, phase and inc for one
 event, and the alpha the light curve itself prefers at the key's other
 parameters (MulensModel, which is EXOZIPPy's convention, C18).  Copied, not
-read, so the test needs neither the notes repo nor the DC2018 data tree.
+read, so the test does not need the DC2018 data tree.
 """
 
 import importlib

@@ -202,8 +202,8 @@ def test_both_roots_and_the_jacobian_stay_finite(x, omega):
     When the roots and the Jacobian are evaluated,
     Then every value is finite.
 
-    "It must be impossible to draw a NaN likelihood" is the design requirement
-    (notes/todo.txt); the paper's answer -- reject -- is a wall with no gradient
+    "It must be impossible to draw a NaN likelihood" is the design requirement;
+    the paper's answer -- reject -- is a wall with no gradient
     and a NaN in the JAX backward pass.
     """
     xt = pt.as_tensor_variable(x)

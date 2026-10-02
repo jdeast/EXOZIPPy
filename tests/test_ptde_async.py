@@ -1,4 +1,4 @@
-"""Tests for the asynchronous PTDE sampler (ptde_async.py, hpc_optimization.txt PROMPT 13).
+"""Tests for the asynchronous PTDE sampler (ptde_async.py).
 
 Mirrors tests/test_ptde.py's structure and toy model so the two samplers'
 behavior can be compared directly. ptde_async is the recommended default for
@@ -288,7 +288,7 @@ def test_ptde_async_warns_once_when_t1_lp_exceeds_plausibility_ceiling(
     Then a single loud warning is logged (not one per evaluation) naming the
       offending chain and lp -- the same runaway-lp early-detection guard
       the synchronous sampler has (the two used to drift here: sync had the
-      check, async silently lacked it; code_review_20260808.txt 1.15/sec 4).
+      check, async silently lacked it; review 1.15, fixed in #71).
     """
     model = _simple_model()
     system = _MinimalSystem()
@@ -324,7 +324,7 @@ def test_ptde_async_freezes_gamma_when_first_chain_starts_recording(caplog):
     When the first T=1 chain finishes its tune phase,
     Then gamma is frozen (logged once) so recorded draws never come from a
       kernel that slower chains' tune-phase proposals are still mutating
-      (code_review_20260808.txt 1.15c).
+      (review 1.15c, #71).
     """
     model = _simple_model()
     system = _MinimalSystem()
@@ -361,7 +361,7 @@ def test_pick_two_raises_a_clear_error_below_three_chains():
     When a DE proposal tries to pick two OTHER members,
     Then it raises with a message naming n_chains and the minimum.
 
-    Regression (notes/code_review_20260808.txt 2.9.4): this died inside
+    Regression (review 2.9.4, #104): this died inside
     numpy as "Cannot take a larger sample than population when replace is
     False", which says nothing about n_chains.
     """

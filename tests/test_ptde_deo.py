@@ -168,7 +168,7 @@ def test_deo_pairs_ignore_rung_thinning():
       permanently disconnect the ladder because the DEO round parity is
       deterministically coupled to the step counter (e.g. thin_factor=2,
       swap_interval=1, n_temps=8, thin_start=4 never attempted (3,4) or
-      (5,6)) -- notes/code_review_20260808.txt bug 1.14.
+      (5,6)) -- review bug 1.14, fixed in #71.
     """
     import inspect
 

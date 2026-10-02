@@ -6,7 +6,7 @@ exozippy.samplers.ptde (synchronous) and exozippy.samplers.ptde_async
 worker-pool plumbing, compiled raw -> physical conversion, start-population
 generation, signal handling, posterior assembly, and diagnostics. That
 machinery lives here exactly once so the two samplers cannot drift apart
-again (they did -- see notes/code_review_20260808.txt section 4: the sync
+again (they did -- fixed in #71: the sync
 sampler grew the lp-plausibility guard while async had neither the parameter
 nor the check, and log_interval silently meant different things in the two).
 
@@ -488,7 +488,7 @@ DE_JITTER = 1e-4
 # A DE proposal for member i is x_i + gamma*(x_j1 - x_j2) with j1 != j2 != i,
 # so it needs two OTHER members: n = 2 has only one other and _pick_two used
 # to die inside numpy with "Cannot take a larger sample than population when
-# replace is False" (notes/code_review_20260808.txt 2.9.4).  n = 2 is not a
+# replace is False" (review 2.9.4, #104).  n = 2 is not a
 # perverse setting -- it is what the DEFAULT n_chains = 2 * n_params produces
 # for a one-parameter model.  n = 3 is the smallest population that can move
 # at all, but the two others are then FORCED, so every proposal for member i
@@ -755,7 +755,7 @@ def resolve_store_hot_chains(
     ``isinstance(spec, bool)`` comes first deliberately: ``spec is True``
     already guarded the ``store_hot_chains: 1`` case here, but the same
     ``1 == True`` collision cost `seed_polish` a whole value
-    (notes/code_review_20260808.txt 2.9.1), so the guard is now explicit
+    (review 2.9.1, #104), so the guard is now explicit
     rather than incidental.
 
     An int <= 0 is OFF, the same as ``false``, and not the ``max(1, ...)``
@@ -1352,8 +1352,7 @@ def compile_conversions(model):
     likelihood), so it vectorizes cleanly and cuts what was a
     Python-level per-sample loop (dominant cost: interpreter + pytensor
     call overhead, not the underlying math) down to a handful of batched
-    calls. (Measured under notes/hpc_optimization.txt's PROMPT 7, which
-    has since been pruned from that note.)
+    calls.
 
     Returns (raw_to_phys, raw_to_phys_batched, raw_var_names, out_var_names).
     """

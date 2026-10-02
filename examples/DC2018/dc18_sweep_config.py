@@ -420,8 +420,8 @@ def build(event, outdir, draws, tune, cores, t_max):
         # mass has, to 4%; radius stays Mann's.
         "mamajek": [{"star": "Lens", "constrain": ["teff"]}],
         "sampler": {
-            # ptde, NOT ptde_async.  Measured on event 194, seven runs
-            # (notes/supercomputer_queue.txt): ptde put ALL 78 chains in the
+            # ptde, NOT ptde_async.  Measured on event 194, seven runs:
+            # ptde put ALL 78 chains in the
             # good-likelihood region three times out of three, under three
             # different configurations (control, tight bounds, fitu0te),
             # while every ptde_async run of the same event put at most 40

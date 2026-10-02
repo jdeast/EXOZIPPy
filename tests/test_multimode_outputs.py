@@ -1,6 +1,5 @@
 """
-Tests for the interim per-mode output loop (run.py, notes/multimode_
-implementation.txt P7): loop the existing single-posterior corner/component
+Tests for the interim per-mode output loop (run.py): loop the existing single-posterior corner/component
 plot calls once per detected mode, restricted to that mode's draws.
 
 Per-mode LaTeX columns and CSV rows already exist (outputs/latex.py's

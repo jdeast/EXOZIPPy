@@ -3,7 +3,7 @@
 Limb darkening is physically a property of a (star, band) pair, but the
 coefficients live on the band instance alone, so two hosts sharing one band
 instance silently share their limb darkening.  The LOCKED design
-(notes/ld_atm_prior.txt) keeps the parameters per band INSTANCE and makes
+(components/sed/sed.md) keeps the parameters per band INSTANCE and makes
 the pairing explicit instead: every LD consumer registers the star it reads
 the limb darkening of, `star_ndx:` on the band block stays the single
 source of truth, and it is now validated against (or derived from) those

@@ -91,8 +91,8 @@ def build_config(name, files, prefix, args):
             ),
             # T_max sets what barrier the ladder can cross: the hottest rung
             # sees a barrier of B/T_max nats, so crossing needs that down to
-            # a few.  Event 128's measured close/wide barrier is 42563 nats
-            # (notes/dc2018_event128_basin.txt), i.e. 213 nats even at the
+            # a few.  Event 128's measured close/wide barrier is 42563 nats,
+            # i.e. 213 nats even at the
             # default T_max=200 -- unreachable -- while T_max=8500 brings it
             # to 5.  With `n_temps: auto` the rung count follows
             # sqrt(D/2)*ln(T_max), so that costs 34 rungs against 20, not a

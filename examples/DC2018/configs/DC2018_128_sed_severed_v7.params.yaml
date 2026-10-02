@@ -113,8 +113,8 @@ mulensinstrument.Roman_Z087.out_scale: {upper: 0.04213, initval: 0.004213}
 # THETA_E START, RE-DERIVED FOR v7.  The engine still cannot back-solve a
 # log_theta_E start in the SED + all-swaps combination (it can in the bare
 # config, via the mmexofast rho seed and the theta_star chain -- the
-# radius/radiussed split blocks that route here; engine gap noted in the
-# private notes), so an explicit initval is still required.
+# radius/radiussed split blocks that route here; an engine gap), so an
+# explicit initval is still required.
 #
 # BUT -0.2 (theta_E = 0.63 mas) IS THE WRONG BASIN'S VALUE and must not be
 # carried into the relinked arm.  With star_constrains_rho: True the derived
@@ -134,7 +134,7 @@ mulensevent.log_theta_E: {initval: -1.27}
 
 
 # --- v7 ONLY: A NOTE ON WHAT THIS ARM ALSO TESTS -------------------------
-# notes/observable_coordinates.txt:571-585 records a conclusion worth
+# The severed-v3 analysis recorded a conclusion worth
 # re-examining rather than inheriting: that DC2018-128 is INTERNALLY
 # INCONSISTENT -- "the source's own SED flux forces a late-type source; the
 # truth table's G/K source contradicts the sim's own photometry" -- with

@@ -94,7 +94,7 @@ These events come back when the orbital-motion rung exists (the model does:
 `orbital_motion: linear` / `keplerian` on the lens block, conventions.md
 C24). Architecture selection -- orbital motion, binary-star lenses, binary
 sources, the challenge's CV and free-floating-planet classes -- is the
-roadmap item after static 2L1S works (`notes/todo.txt`, microlensing).
+roadmap item after static 2L1S works.
 
 ## MMEXOFAST JSONs -> params files (2026-10-01)
 

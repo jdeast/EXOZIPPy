@@ -397,7 +397,7 @@ class VBMDirectMagOp(Op):
     Magnification method selection is not needed: VBM's BinaryMag2/MultiMag2
     perform the quadrupole safety test internally in C++ and short-circuit to
     point-source when safe, which benchmarks faster than any python-level
-    bracketing (see hpc_optimization.txt).
+    bracketing.
 
     Param vector: [t_0, u_0, t_E, pi_E_N, pi_E_E] + optional [rho]
                   + per companion j: [s_j, q_j, alpha_j_deg]

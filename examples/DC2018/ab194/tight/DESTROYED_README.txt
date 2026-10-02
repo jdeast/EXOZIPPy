@@ -10,7 +10,7 @@ specifically to PRESERVE its trace for forensics was therefore wasted.
 Lost: DC2018_194_trace.nc (2.71 GB, 30,896 draws/chain, the graceful-stop
 trace), plus this arm's results.csv, summary.txt, modes.txt and log.
 
-Surviving record of what it said, quoted in notes/supercomputer_queue.txt:
+Surviving record of what it said:
   score        core 6/7, all 11/15, mixing OK (truth table tier 'default')
   chains kept  78, WITH the "<3 chains reached the good-likelihood region;
                all chains kept (possible stuck-chain contamination)" note

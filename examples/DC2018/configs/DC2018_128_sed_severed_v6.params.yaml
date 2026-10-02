@@ -113,12 +113,12 @@ mulensinstrument.Roman_Z087.out_scale: {upper: 0.04213, initval: 0.004213}
 # severed_v3: the engine cannot back-solve a log_theta_E start in the
 # SED + all-swaps combination (it can in the bare config, via the
 # mmexofast rho seed and the theta_star chain -- the radius/radiussed
-# split blocks that route here; engine gap noted in the private notes).
+# split blocks that route here; an engine gap).
 # Start at the capped-murel arm posterior, theta_E = 0.63 mas.
 mulensevent.log_theta_E: {initval: -0.2}
 
 # --- v6 ONLY: CAP sed.errscale -----------------------------------------
-# observable_coordinates.txt:578-583 found sed.errscale = 509 in severed-v3:
+# The severed-v3 arm found sed.errscale = 509:
 # the SED inflated its own photometric errors 500x, which NULLIFIES the very
 # constraint the SED was attached to provide.  That is the THIRD instance of
 # one pattern (mulensinstrument.err_scale, the Hogg out_scale, now this one):

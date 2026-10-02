@@ -437,7 +437,7 @@ class Band(Component):
         Limb darkening is physically a property of a (star, band) pair, but
         the parameters live on the band instance alone, so two hosts sharing
         one band instance silently share their limb darkening.  The LOCKED
-        design (notes/ld_atm_prior.txt) keeps the parameters per band
+        design (components/sed/sed.md) keeps the parameters per band
         INSTANCE -- named blocks referencing a filter string are already
         legal, ``band: {I_A: {filter: I}, I_B: {filter: I}}`` -- and makes
         the pairing explicit instead: every consumer registers the star it

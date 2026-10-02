@@ -223,8 +223,7 @@ data, the same structural model, the same priors, in a model written directly
 against `numpyro` -- no EXOZIPPy component machinery, a different sampler, and
 deliberately the TEXTBOOK forward model, `D*ka/(V*(ka-ke)) * (exp(-ke t) -
 exp(-ka t))`, so the reference shares no algebra with the implementation it
-checks. The script is `notes/theoph_numpyro_reference.py` (private notes
-repository), kept because a reference nobody can re-run is an assertion.
+checks.
 
 Conditioned on the direct mode (see below), every population parameter:
 
@@ -293,8 +292,8 @@ never a modelling choice.
 ## Status
 
 P0, P1, P3, P4 and P5 are implemented; P2 is not started. P1 and P4 are
-validated against R (see above). The design is in `notes/pharmacokinetics.txt`
-(private notes repository). Phases:
+validated against R (see above). The design record is `pharmacokinetics.md`.
+Phases:
 
 | Phase | Scope | State |
 |-------|-------|-------|

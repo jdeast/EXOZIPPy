@@ -1,6 +1,6 @@
 """Tests for the shared Instrument base class (components/instrument.py).
 
-These cover the behavior-preserving extraction from notes/instrument_todo.txt:
+These cover the behavior-preserving extraction of the shared base:
 the two noise parameterizations (additive jitter_variance vs multiplicative
 err_scale), the optional detrend block-diagonal builder, the shared jitter
 floor, the optional per-instrument plot styling, and the factory's skipping of

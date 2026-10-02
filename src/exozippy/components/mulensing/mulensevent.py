@@ -174,7 +174,7 @@ class MulensEvent(Component):
                     "source_orbital_motion: linear is deliberately not "
                     "offered: a linear source drift is exactly degenerate "
                     "with (t_E, t_0, u_0, alpha) in the light curve alone "
-                    "(notes/orbital_motion_and_nbody.txt section 2).  Use "
+                    "(conventions.md C25).  Use "
                     "'keplerian', or wait for the per-star proper-motion "
                     "predicate that would make a linear mode meaningful."
                 )
@@ -1502,7 +1502,8 @@ class MulensEvent(Component):
         The point-source formula is EXACT for a point lens (the lens
         equation is a quadratic) and only safe unresolved: averaged over a
         source disk the shift nearly vanishes at ``rho ~ u`` and reverses
-        sign beyond (notes/missing_mulens_physics.txt 3a).  This method is
+        sign beyond (mulensing.md, "The point-lens shift, exactly").  This
+        method is
         the SYMBOLIC path only; ``get_astrometric_terms`` is the consumer's
         entry point and dispatches finite-source / binary / N-lens events
         to VBMicrolensing's disk-integrated centroid (stage 2).
@@ -2140,8 +2141,7 @@ class MulensEvent(Component):
         short-circuits to point-source when safe.  Measured on DC2018_128:
         hexadecapole 32.9 ms vs VBM-everywhere 7.7 ms per 870-point call,
         at equal or better accuracy -- so the bracket machinery optimized
-        for the wrong cost model and was removed (see hpc_optimization.txt,
-        P1).
+        for the wrong cost model and was removed.
 
         Single-lens events are left untouched: 'auto_vbbl' is resolved
         inside the PSPL model builder (point_source + finite-source

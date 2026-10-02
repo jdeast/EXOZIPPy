@@ -6,7 +6,7 @@ profile likelihood found the full solution -- including the s <-> 1/s
 geometry -- from generic priors at ~43 core-hours, where the PTDE run that
 was seeded AT the solution cost ~1,100 core-hours and delivered mode weights
 its own report flagged as initialization artifacts (PT round-trip transport
-collapses for Lambda >~ 5; notes/pt_round_trip_collapse.txt).  Nested
+collapses for Lambda >~ 5; see samplers.md).  Nested
 sampling needs no temperature transport: it sweeps one live-point population
 from the prior to the posterior, discovers basins as clusters on the way,
 weights them by MASS (volume included, not peak height), and its dead points

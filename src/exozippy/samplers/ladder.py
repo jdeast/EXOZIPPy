@@ -72,7 +72,7 @@ def resolve_n_temps(n_temps, n_params, T_max):
     one example would not be.  The honest upgrade is to MEASURE Lambda in a
     short pilot ladder (it is an average of swap rejection rates and
     converges in a few hundred swap rounds) and size the real ladder at
-    2*Lambda+1; see notes/polish_todo.txt.
+    2*Lambda+1.
     """
     if isinstance(n_temps, str):
         if n_temps.strip().lower() != "auto":
@@ -154,7 +154,7 @@ def ladder_health_report(temperatures, n_swap_accept, n_swap_propose):
             f"per-mode evidence weighting or explicit mode jumps -- and "
             f"note that the hot-rung search's reach is 10*T_max, so "
             f"shortening the ladder to buy round trips costs discovery "
-            f"horizon. See notes/pt_round_trip_collapse.txt."
+            f"horizon. See samplers.md."
         )
     return lam
 
@@ -174,7 +174,7 @@ def _deo_pairs(round_idx, n_temps):
     activity pattern permanently removed specific pairs from the schedule
     (e.g. rung_thin_factor=2, swap_interval=1, n_temps=8, thin_start=4 never
     attempted (3,4) or (5,6)), disconnecting the ladder
-    (notes/code_review_20260808.txt bug 1.14).
+    (review bug 1.14, fixed in #71).
     """
     start = 0 if round_idx % 2 == 0 else 1
     return [(k, k + 1) for k in range(start, n_temps - 1, 2)]

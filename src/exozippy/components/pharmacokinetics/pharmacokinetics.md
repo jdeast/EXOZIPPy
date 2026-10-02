@@ -118,7 +118,7 @@ stronger one: a reader who meets `fitvcve` in an orbit block and an enum here
 has to learn two spellings for one idea. `components.md`'s flag vocabulary now
 states the ruling, and `planet.mass_parameterization` -- the one enum in the
 tree that really is a coordinate choice -- is filed for renaming to `fitlogq`
-(`notes/code_review_20260824.txt` 4.2.7). (The design note called for
+(review 4.2.7). (The design note called for
 `pk_trans:`; the "named after the coordinate" half was right.)
 
 `Subject.COORD_MODE_TABLE` is the whole implementation -- a `mode_manifest`

@@ -1,4 +1,4 @@
-"""Tests for the log_s reparameterization (notes/multimode_implementation.txt P2).
+"""Tests for the log_s reparameterization.
 
 s (projected binary separation) is now derived from a sampled log10(s), so the
 close/wide degeneracy is an exact reflection log_s -> -log_s.  These tests
