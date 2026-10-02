@@ -4,7 +4,7 @@ run:
 prefix: "fitresults/KMT-2019-BLG-1806_nt24"
 
 # Binary lens + finite source (2L1S).
-# MMEXOFAST solution: t_E~118d, s~1.05, q~2.5e-5, alpha~57 deg
+# MMEXOFAST solution: t_E~118d, s~1.05, q~2.5e-5, alpha~-57 deg
 #
 # system architecture:
 #   star.Lens        = primary lens host    (lens body 0)
