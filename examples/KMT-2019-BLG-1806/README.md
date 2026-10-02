@@ -4,6 +4,13 @@ Published as KMT-2019-BLG-1806/OGLE-2019-BLG-1250 in Zang et al. 2023, AJ
 165, 103 (arXiv:2210.12344). (This README used to cite arXiv:2102.01806,
 which is KMT-2019-BLG-0797.)
 
+Coordinates: RA, Dec (J2000) = 18:02:09.01, -29:24:53.60 (270.53754,
+-29.41489 deg; l, b = +1.41, -3.35), Zang et al. 2023 Table 1, matching
+the KMTNet and OGLE (OGLE-2019-BLG-1250) alert pages. (Until 2026-10 the
+params file carried 17:46:29.58, -24:16:20.17 -- OGLE-2017-BLG-1806, a
+different event in the same table.) They set the line of sight for the
+annual-parallax projection of Earth's orbit and the galactic-model priors.
+
 The `sed:` block (with an empty `filters:` list) exercises the pure
 f_source constraint mode: the SED-predicted source I magnitude is tied to
 each light curve's baseline source flux through a per-lightcurve zeropoint.

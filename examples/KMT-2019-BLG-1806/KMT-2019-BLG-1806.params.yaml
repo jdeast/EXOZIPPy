@@ -33,17 +33,19 @@ lens.Companion.alpha:
 lens.Companion.q:
     initval: 2.5493624633395966e-05
 
+# Zang et al. 2023, AJ 165, 103 (arXiv:2210.12344), Table 1:
+# RA, Dec (J2000) = 18:02:09.01, -29:24:53.60; (l, b) = (+1.41, -3.35).
 star.Lens.ra:
-    initval: 266.62325
+    initval: 270.53754
     sigma: 0
 star.Lens.dec:
-    initval: -24.27227
+    initval: -29.41489
     sigma: 0
 star.Source.ra:
-    initval: 266.62325
+    initval: 270.53754
     sigma: 0
 star.Source.dec:
-    initval: -24.27227
+    initval: -29.41489
     sigma: 0
 
 # these shouldn't be fit for such models (on the to do list)
