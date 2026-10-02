@@ -665,28 +665,26 @@ def calc_f_blend(log_f_total, q_source):
 
 
 @register_physics
-def calc_zeropoint(m_source_pred, zp_center, sed_constrained, f_source):
+def calc_zeropoint(m_source_pred, f_source):
     """Photometric zeropoint of one light curve's own flux system.
 
     ``zp = m_SED + 2.5*log10(f_source)`` -- the offset between the SED's
-    calibrated source magnitude and the instrumental one, which is what the
-    ``zeropoint`` Gaussian prior constrains (see
-    ``MulensInstrument._build_sed_flux_constraint``).
+    calibrated source magnitude and the instrumental one, which is what a
+    user's ``zeropoint`` Gaussian prior constrains (see
+    ``MulensInstrument._build_sed_flux_constraint``).  ``m_source_pred`` is
+    already on the zeropoint's magnitude system (issue #313:
+    ``MulensInstrument._predicted_mag_on_zp_system``).
 
     The flux floor mirrors the one the hand-built node carried: f_source's
     own lower bound is 0, and log10(0) is -inf.
 
-    ``sed_constrained`` is a 0/1 constant, zero for a light curve with no
-    band reference or whose band filter is missing from the SED's BC grid.
-    Such an element has no SED prediction to tie to, so it reports
-    ``zp_center`` (the resolved prior center) and its Gaussian penalty is
-    then exactly zero -- the same "no constraint" the hand-built loop
-    expressed by skipping the element.  It is a ``switch`` on an explicit
-    0/1 mask, not a NaN test: switch's gradient multiplies the unselected
-    branch by zero, and 0 * NaN is NaN.
+    A light curve with no SED prediction (no band reference, or a band
+    filter missing from the BC grid) is not handed to this expression: its
+    zeropoint element is INACTIVE.  It used to be, behind a ``pt.switch``
+    onto the prior center -- which, once defaults.yaml stopped supplying a
+    center (review 2.2.21), would have reported a number nobody stated.
     """
-    zp = m_source_pred + 2.5 * pt.log10(pt.maximum(f_source, 1e-30))
-    return pt.switch(sed_constrained, zp, zp_center)
+    return m_source_pred + 2.5 * pt.log10(pt.maximum(f_source, 1e-30))
 
 
 @register_physics

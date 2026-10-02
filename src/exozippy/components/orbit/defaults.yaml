@@ -259,6 +259,10 @@ orbit:
     internal_unit: ""
     latex: "\\omega_x"
     description: "x of omega direction"
+    # The N(0, 1) above is STRUCTURAL (review 2.2.21): with its partner's it
+    # makes the angle arctan2(y, x) uniform, so a user mu/sigma is refused.
+    structural_prior: true
+    structural_remedy: "constrain the physical angle orbit.<name>.omega instead"
     # rank 5, for the reason vcve's rank says: the direction vector must
     # absorb its bridge to omega, never rewrite it.
     rank: 5
@@ -273,6 +277,10 @@ orbit:
     internal_unit: ""
     latex: "\\omega_y"
     description: "y of omega direction"
+    # The N(0, 1) above is STRUCTURAL (review 2.2.21): with its partner's it
+    # makes the angle arctan2(y, x) uniform, so a user mu/sigma is refused.
+    structural_prior: true
+    structural_remedy: "constrain the physical angle orbit.<name>.omega instead"
     # rank 5, for the reason vcve's rank says: the direction vector must
     # absorb its bridge to omega, never rewrite it.
     rank: 5
@@ -327,6 +335,10 @@ orbit:
     internal_unit: ""
     latex: "\\Omega_x"
     description: "x-component of ascending node direction"
+    # The N(0, 1) above is STRUCTURAL (review 2.2.21): with its partner's it
+    # makes the angle arctan2(y, x) uniform, so a user mu/sigma is refused.
+    structural_prior: true
+    structural_remedy: "constrain the physical angle orbit.<name>.bigomega instead"
   ybigomega:
     lower: -100.0
     upper: 100.0
@@ -338,6 +350,10 @@ orbit:
     internal_unit: ""
     latex: "\\Omega_y"
     description: "y-component of ascending node direction"
+    # The N(0, 1) above is STRUCTURAL (review 2.2.21): with its partner's it
+    # makes the angle arctan2(y, x) uniform, so a user mu/sigma is refused.
+    structural_prior: true
+    structural_remedy: "constrain the physical angle orbit.<name>.bigomega instead"
   bigomega:
     unit: "deg"
     internal_unit: "rad"

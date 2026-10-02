@@ -618,6 +618,89 @@ def validate_sigma_has_center(user_params, links=None, source=None):
         )
 
 
+# defaults.yaml-only declaration that a parameter's prior is STRUCTURAL --
+# part of the parameterization, not a statement a user may replace (review
+# 2.2.21, JDE 2026-09-30).  `structural_prior: true` closes these fields to
+# the params file.  The N(0, 1) on a direction latent (orbit xomega/yomega and
+# xbigomega/ybigomega, lens xalpha/yalpha) is what makes the angle
+# arctan2(y, x) uniform; on mann's non-centered ks_offset it IS the
+# Ks-uncertainty prior.  Re-centering or re-widening it changes the meaning of
+# the parameterization, not a prior.  An initval stays open on every one of
+# them (JDE 2026-10-01 on ks_offset: "Losing the start bothers me").
+#
+# A parameter carrying the flag also declares `structural_remedy:`, the
+# sentence the refusal ends with -- which PHYSICAL quantity to constrain
+# instead.  Enforced in exactly one place, `validate_structural_fields`, at
+# ConfigManager construction; documented in components/parameter.md.
+STRUCTURAL_PRIOR_FIELDS = ("mu", "sigma")
+
+
+def structural_closed_fields(base_defaults, comp, param):
+    """The params-file fields closed on ``comp.param`` by a defaults.yaml
+    ``structural_prior: true``, and its ``structural_remedy`` (or None).
+
+    ``base_defaults`` is the merged defaults.yaml tree; the component's own
+    block is layered over a root-level entry exactly as ``resolve()`` does.
+    """
+    spec = dict(base_defaults.get(param) or {})
+    comp_block = base_defaults.get(comp)
+    if isinstance(comp_block, dict) and isinstance(
+        comp_block.get(param), dict
+    ):
+        spec.update(comp_block[param])
+    closed = (
+        STRUCTURAL_PRIOR_FIELDS if spec.get("structural_prior") is True else ()
+    )
+    return closed, spec.get("structural_remedy")
+
+
+def validate_structural_fields(
+    user_params, base_defaults, links=None, source=None
+):
+    """Fatal-error check: no user mu/sigma on a STRUCTURAL prior.
+
+    ``base_defaults`` is the merged defaults.yaml tree (component blocks plus
+    root-level parameters, as ``ConfigManager`` loads it).  Every params
+    entry is matched to its parameter by its first segment (the component)
+    and its last (the parameter) -- the same reading every one of the three
+    spellings shares -- and refused when the parameter's defaults declare a
+    ``structural_prior`` flag and the entry states mu or sigma, numerically
+    or as a link (``extract_links`` deletes a linked field from the entry,
+    so ``links`` is read too).  All offenders are named at once.
+    """
+    links = links or {}
+    offenders = []
+    for key in sorted(set(user_params or {}) | set(links)):
+        parts = key.split(".")
+        if len(parts) < 2:
+            continue
+        closed, remedy = structural_closed_fields(
+            base_defaults, parts[0], parts[-1]
+        )
+        if not closed:
+            continue
+        entry = (user_params or {}).get(key) or {}
+        stated = set(entry if isinstance(entry, dict) else ()) | set(
+            links.get(key, {})
+        )
+        hit = [f for f in closed if f in stated]
+        if hit:
+            offenders.append((key, hit, remedy))
+    if offenders:
+        where = f" in {source}" if source else ""
+        lines = []
+        for key, hit, remedy in offenders:
+            line = f"  {key}: {', '.join(hit)}"
+            if remedy:
+                line += f" -- {remedy}"
+            lines.append(line)
+        raise ValueError(
+            f"Structural prior{where}: these parameters' priors are part "
+            f"of their parameterization, not a statement a params file may "
+            f"replace, so these fields are refused:\n" + "\n".join(lines)
+        )
+
+
 def _raise_duplicate_spelling(key_a, key_b, element, source=None):
     """Refuse a config that names one element under two spellings.
 
@@ -1265,6 +1348,17 @@ class ConfigManager:
             with open(defaults_file, "r") as f:
                 comp_defaults = yaml.safe_load(f) or {}
                 self._deep_merge(self.base_defaults, comp_defaults)
+
+        # Needs the defaults (a parameter declares its own structural flags)
+        # and the user's entries as WRITTEN: finalize_user_params injects the
+        # engine's solved starts back into user_params later, so this is the
+        # last point at which every initval there is the user's.
+        validate_structural_fields(
+            self.user_params,
+            self.base_defaults,
+            self.links,
+            self.param_file,
+        )
 
         # Add this inside ConfigManager.__init__ after filling all_relations
         for rel in self.all_relations:

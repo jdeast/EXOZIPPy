@@ -36,12 +36,14 @@ mulensinstrument:
   data_format: flux
   observer_location: roman_simulated_2018dc
   band: W149
+  magsys: AB  # the challenge's zeropoint 22.0 is AB (#313, dc18_photometric_leg.py)
   likelihood: hogg
 - name: Roman_Z087
   file: /home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.Z087.WFIRST18.152.txt
   data_format: flux
   observer_location: roman_simulated_2018dc
   band: Z087
+  magsys: AB  # the challenge's zeropoint 22.0 is AB (#313, dc18_photometric_leg.py)
   likelihood: hogg
 prefix: /home/jeastman/python/EXOZIPPy/examples/DC2018/sweep/152/DC2018_152
 sed:

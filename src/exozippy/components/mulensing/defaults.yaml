@@ -527,6 +527,10 @@ lens:
     internal_unit: ""
     latex: "x_{\\alpha}"
     description: "x-component of $\\alpha$"
+    # The N(0, 1) above is STRUCTURAL (review 2.2.21): with its partner's it
+    # makes the angle arctan2(y, x) uniform, so a user mu/sigma is refused.
+    structural_prior: true
+    structural_remedy: "constrain the physical angle lens.<name>.alpha instead"
   yalpha:
     lower: -100.0
     upper: 100.0
@@ -538,6 +542,10 @@ lens:
     internal_unit: ""
     latex: "y_{\\alpha}"
     description: "y-component of $\\alpha$"
+    # The N(0, 1) above is STRUCTURAL (review 2.2.21): with its partner's it
+    # makes the angle arctan2(y, x) uniform, so a user mu/sigma is refused.
+    structural_prior: true
+    structural_remedy: "constrain the physical angle lens.<name>.alpha instead"
 mulensinstrument:
   # Optional detrending coefficients, one per extra data column per
   # instrument (see rvinstrument/transit for the same block-diagonal scheme).
@@ -734,19 +742,27 @@ mulensinstrument:
     # parameter carries an initval", and that check (pinned-with-no-value, in
     # Parameter.build_pymc) exempts derived elements outright -- so the
     # reason for it is gone, and a second number duplicating mu is one more
-    # thing to keep in sync.  `mu` is the start, through resolve()'s ordinary
-    # "user gave mu but no initval" rule, exactly as for every other
-    # Gaussian-prior parameter.
-    mu: 0.0
-    sigma: 0.2
+    # thing to keep in sync.
+    #
+    # NO default mu or sigma (review 2.2.21, JDE 2026-09-30: "the user should
+    # specify a zero point and how much they trust it, we shouldn't decide
+    # that for them").  The SED tie on a light curve applies only when the
+    # user states BOTH; mu alone warns that it does nothing, an initval (or a
+    # bare `zeropoint: x`) raises, sigma 0 raises
+    # (MulensInstrument._check_zeropoint_entries / _zeropoint_context).
+    # Until then this block carried mu 0.0 / sigma 0.2, so every mulens+SED
+    # fit was tied to "the file's flux is 10**(-0.4 m) in calibrated mag"
+    # whether or not anyone had said so.  The zeropoint's magnitude system is
+    # the light curve's `magsys:` (default: the band filter's native system,
+    # issue #313).
     unit: "mag"
     internal_unit: "mag"
     latex: "ZP"
     description: "photometric zeropoint"
     expressions:
       default:
-        # m_source_pred / zp_center / sed_constrained are context nodes
-        # injected by MulensInstrument.add_parameter (see
-        # context_dep_names); only f_source is a manifest dependency.
+        # m_source_pred is a context node injected by
+        # MulensInstrument.add_parameter (see context_dep_names); only
+        # f_source is a manifest dependency.
         func_name: "calc_zeropoint"
-        deps: ["m_source_pred", "zp_center", "sed_constrained", "f_source"]
+        deps: ["m_source_pred", "f_source"]

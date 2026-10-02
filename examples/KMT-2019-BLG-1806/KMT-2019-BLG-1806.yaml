@@ -43,8 +43,8 @@ band:
 
 # SED block: even with no catalog photometry (see the .sed file), this
 # activates the source flux constraint -- each light curve's calibrated
-# baseline f_source is tied to the SED-predicted source I mag through a
-# per-lightcurve zeropoint (default prior 0 +/- 0.2 mag).
+# baseline f_source is tied to the SED-predicted source I mag through the
+# per-lightcurve zeropoint prior stated in the params file.
 sed:
   file: "KMT-2019-BLG-1806.sed.yaml"
 
@@ -52,14 +52,17 @@ mulensinstrument:
   - name: "KMTC04" #telescope name
     file: "n20260624.I.KMTC04.pys"
     band: "I"
+    magsys: Vega  # OGLE-III-calibrated standard I (Zang et al. 2023)
 
   - name: "KMTS04" #telescope name
     file: "n20260624.I.KMTS04.pys"
     band: "I"
+    magsys: Vega  # OGLE-III-calibrated standard I (Zang et al. 2023)
 
   - name: "KMTA04" #telescope name
     file: "n20260624.I.KMTA04.pys"
     band: "I"
+    magsys: Vega  # OGLE-III-calibrated standard I (Zang et al. 2023)
 
 parameter_file: "KMT-2019-BLG-1806.params.yaml"
 

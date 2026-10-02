@@ -64,7 +64,7 @@ Conventions
 Accuracy caveat: the shipped R=150 spectra reproduce the original
 2MASS/GAIA BC tables only to ~0.01-0.04 mag (those were evidently
 computed from full-resolution spectra). Fine for broad-band flux
-constraints (e.g. the mulensing zeropoint prior is 0.2 mag); revisit if
+constraints (e.g. a 0.2 mag mulensing zeropoint prior); revisit if
 percent-level absolute calibration is needed.
 """
 

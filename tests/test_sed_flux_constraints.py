@@ -30,6 +30,22 @@ pytestmark = pytest.mark.slow
 
 _KMT_DIR = Path(__file__).parent.parent / "examples" / "KMT-2019-BLG-1806"
 
+# The tie the KMT example used to get from defaults.yaml.  Since review
+# 2.2.21 the zeropoint carries no default mu/sigma -- the user states the
+# calibration and how much they trust it -- and the shipped params now
+# state 0 +/- 0.07 per site; these tests pin their own 0 +/- 0.2.
+_ZP_TIE = {"mu": 0.0, "sigma": 0.2}
+
+
+def _with_zp_tie(user_params):
+    """The KMT params with the 0 +/- 0.2 mag broadcast zeropoint tie in
+    place of the shipped per-site priors (these tests pin the sigma)."""
+    user_params = {
+        k: v for k, v in user_params.items() if ".zeropoint" not in k
+    }
+    user_params["mulensinstrument.zeropoint"] = dict(_ZP_TIE)
+    return user_params
+
 
 # ---------------------------------------------------------------------------
 # Mulensing zeropoint (stage 6)
@@ -52,7 +68,7 @@ def kmt_system(monkeypatch_module_cwd=None):
         with open("KMT-2019-BLG-1806.yaml") as f:
             config = yaml.safe_load(f)
         with open(config["parameter_file"]) as f:
-            user_params = yaml.safe_load(f)
+            user_params = _with_zp_tie(yaml.safe_load(f))
         for k in ("run", "prefix", "parameter_file", "sampler"):
             config.pop(k, None)
 
@@ -138,7 +154,7 @@ def test_zeropoint_value_matches_manual_computation(kmt_system):
 
 def test_zeropoint_prior_penalty_scales_with_sigma(kmt_system):
     """
-    Given the default 0 +/- 0.2 mag zeropoint prior,
+    Given a stated 0 +/- 0.2 mag zeropoint prior,
     When the zeropoint prior potential is evaluated at the initial point,
     Then it equals the sum over light curves of -0.5*(zp_i/0.2)^2 -- the
     same per-light-curve penalty the three separate potentials carried.
@@ -205,7 +221,7 @@ def test_zeropoint_is_unchanged_by_a_flux_format_light_curve(
         with open("KMT-2019-BLG-1806.yaml") as f:
             config = yaml.safe_load(f)
         with open(config["parameter_file"]) as f:
-            user_params = yaml.safe_load(f)
+            user_params = _with_zp_tie(yaml.safe_load(f))
         for k in ("run", "prefix", "parameter_file", "sampler"):
             config.pop(k, None)
 
@@ -256,11 +272,11 @@ def test_zeropoint_sigma_zero_raises():
         with open("KMT-2019-BLG-1806.yaml") as f:
             config = yaml.safe_load(f)
         with open(config["parameter_file"]) as f:
-            user_params = yaml.safe_load(f)
+            user_params = _with_zp_tie(yaml.safe_load(f))
         for k in ("run", "prefix", "parameter_file", "sampler"):
             config.pop(k, None)
         user_params["mulensinstrument.KMTC04.zeropoint"] = {
-            "initval": 0.0,
+            "mu": 0.0,
             "sigma": 0.0,
         }
 
