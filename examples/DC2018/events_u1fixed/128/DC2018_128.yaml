@@ -1,3 +1,6 @@
+# Ported 2026-10-04 from the pre-v0.1.0 `lens: {lenses:, sources:}` block to the
+# mulensevent / lens / source split (as PR #363 did for configs/), so this run
+# record builds again; key homes per components/mulensing/bodies.py.
 run:
   name: DC2018_128
 prefix: /home/jeastman/python/EXOZIPPy/examples/DC2018/events_u1fixed/128/fitresults/DC2018_128
@@ -6,15 +9,13 @@ star:
 - name: Source
 planet:
 - name: Companion
+mulensevent:
+- finite_source: true
 lens:
-- name: Lens
-  lenses:
-  - star.0
-  - planet.0
-  sources:
-  - star.1
-  finite_source: true
-  mmexofast: /home/jeastman/python/EXOZIPPy/examples/DC2018/events_u1fixed/128/DC2018_128_mmexofast.json
+- body: star.Lens
+- body: planet.Companion
+source:
+- body: star.Source
 galacticmodel:
 - name: DC2018_128
   anchor_idx: 1
@@ -43,7 +44,7 @@ sampler:
   seed_polish: auto
   n_temps: 8
   T_max: 200.0
-  n_chains: null
+  n_chains:
   adapt_ladder: false
   cores: 64
   tune: 5000
