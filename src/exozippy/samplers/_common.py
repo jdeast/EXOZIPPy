@@ -2430,6 +2430,7 @@ def finish_ptde_run(
     summary_kwargs,
     hop_counts=(0.0, 0.0),
     rung_times=None,
+    rung_step_times=None,
     notes=(),
 ):
     """Build the InferenceData and emit the wrap-up logs, for either loop.
@@ -2496,7 +2497,13 @@ def finish_ptde_run(
     for note in notes:
         log.warning(note)
     if rung_times is not None:
-        log_rung_timing(rung_times, run.temperatures, label, log)
+        log_rung_timing(
+            rung_times,
+            run.temperatures,
+            label,
+            log,
+            step_times=rung_step_times,
+        )
     return idata
 
 
@@ -2740,18 +2747,61 @@ def log_mode_hop_summary(label, log, de_mode_hop, n_hop_accept, n_hop_propose):
     )
 
 
-def log_rung_timing(rung_times, temperatures, label, log):
-    """Per-rung logp wall-time summary (collect_rung_timing diagnostic)."""
+def log_rung_timing(rung_times, temperatures, label, log, step_times=None):
+    """Per-rung logp wall-time summary (collect_rung_timing diagnostic).
+
+    ``step_times`` (sync loop only): one ``(elapsed[], rung[])`` pair per
+    gather, i.e. per step.  From it come the two numbers the July 2026
+    table lacked (TASK 8 / review 2.4.9): the fraction of steps that hold at
+    least one call over 0.5 s, and the mean and P90 of (slowest call in the
+    step) / (median call in the step) -- sync's gather blocks on the
+    slowest proposal, so that ratio IS the cost of synchrony.  Every
+    per-call time is also written, with its step and rung, to
+    ``<label>_rung_times.npz`` in the working directory (the run's own
+    directory) so the tail can be re-cut offline.
+    """
     log.info(f"{label} per-rung logp timing (seconds):")
     for k, times in enumerate(rung_times):
         if not times:
             log.info(f"  rung {k} (T={temperatures[k]:.1f}): no calls")
             continue
         arr = np.asarray(times)
-        n_slow = int((arr > 0.1).sum())
         log.info(
             f"  rung {k} (T={temperatures[k]:.1f}): n={len(arr)}  "
             f"median={np.median(arr):.3f}  mean={arr.mean():.3f}  "
-            f"p90={np.percentile(arr, 90):.3f}  max={arr.max():.3f}  "
-            f"n_slow(>0.1s)={n_slow}"
+            f"p90={np.percentile(arr, 90):.3f}  "
+            f"p99={np.percentile(arr, 99):.3f}  max={arr.max():.3f}  "
+            f"n_slow(>0.1s)={int((arr > 0.1).sum())}  "
+            f"n_slow(>1s)={int((arr > 1.0).sum())}"
         )
+    if not step_times:
+        return
+    slowest = np.array([e.max() for e, _ in step_times if len(e)])
+    median = np.array([np.median(e) for e, _ in step_times if len(e)])
+    ratio = slowest / np.maximum(median, 1e-9)
+    frac_05 = float(np.mean(slowest > 0.5))
+    frac_1 = float(np.mean(slowest > 1.0))
+    log.info(
+        f"{label} per-step (gather) timing over {len(slowest)} steps: "
+        f"fraction of steps with a call > 0.5 s = {frac_05:.4f}, "
+        f"> 1 s = {frac_1:.4f}; slowest/median call ratio mean = "
+        f"{ratio.mean():.1f}, p90 = {np.percentile(ratio, 90):.1f}, "
+        f"max = {ratio.max():.1f}; slowest call per step median = "
+        f"{np.median(slowest):.3f} s, p90 = {np.percentile(slowest, 90):.3f} s"
+    )
+    try:
+        step_idx = np.concatenate(
+            [np.full(len(e), i) for i, (e, _) in enumerate(step_times)]
+        )
+        np.savez(
+            f"{label.lower()}_rung_times.npz",
+            elapsed=np.concatenate([e for e, _ in step_times]),
+            rung=np.concatenate([r for _, r in step_times]),
+            step=step_idx,
+            temperatures=np.asarray(temperatures),
+        )
+        log.info(
+            f"{label} per-call timings written to {label.lower()}_rung_times.npz"
+        )
+    except Exception as exc:  # noqa: BLE001  a diagnostic must not kill a run
+        log.warning(f"{label}: could not write the rung-timing table: {exc}")

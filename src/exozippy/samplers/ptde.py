@@ -1039,8 +1039,14 @@ def ptde_sample(
                None -> n_temps // 2. Clamped to >= 1: the T=1 rung (index 0,
                the only one whose draws are kept) is never thinned.
     collect_rung_timing : bool  — diagnostic: record per-call wall time and
-               attribute it to a rung, logging a summary
-               (count/median/mean/p90/max per rung) when sampling finishes.
+               attribute it to a rung, logging a summary (count, median,
+               mean, p90, p99, max, counts over 0.1 s and 1 s per rung,
+               and -- sync loop only, where a gather IS a step -- the
+               fraction of steps holding a call over 0.5 s and the
+               slowest/median call ratio per step, which is what synchrony
+               costs) when sampling finishes, and writing every per-call
+               time with its step and rung to <label>_rung_times.npz in the
+               working directory.
                Default False (zero overhead when off). This is the
                measurement the sampler's optimization work is argued from --
                it is what localized the slow-evaluation tail to the top two
@@ -1168,6 +1174,12 @@ def ptde_sample(
     rung_times = [
         [] for _ in range(n_temps)
     ]  # per-rung wall times (collect_rung_timing only)
+    # One entry per GATHER (i.e. per step): (elapsed[], rung[]) for every
+    # proposal evaluated in that gather.  Sync pays the slowest call in each
+    # gather, so the per-step slowest/median ratio is the cost of synchrony
+    # -- the number TASK 8 / review 2.4.9 asks for, which the flat per-rung
+    # lists above cannot give.
+    rung_step_times = []
 
     def _eval_logps_safe(proposals, step_label, index_labels=None, rungs=None):
         """Evaluate logps for `proposals`, honoring eval_timeout if set.
@@ -1195,6 +1207,9 @@ def ptde_sample(
                 if rungs is not None:
                     for r, k in zip(raw, rungs):
                         rung_times[k].append(r[1])
+                    rung_step_times.append(
+                        (np.array([r[1] for r in raw]), np.array(rungs))
+                    )
                 return lps
             return raw
 
@@ -1227,6 +1242,9 @@ def ptde_sample(
             if rungs is not None:
                 for r, k in zip(lps, rungs):
                     rung_times[k].append(r[1])
+                rung_step_times.append(
+                    (np.array([r[1] for r in lps]), np.array(rungs))
+                )
             return [r[0] for r in lps]
         return lps
 
@@ -1730,5 +1748,6 @@ def ptde_sample(
         ),
         hop_counts=(n_hop_accept[0], n_hop_propose[0]),
         rung_times=rung_times if collect_rung_timing else None,
+        rung_step_times=rung_step_times if collect_rung_timing else None,
     )
     return idata
