@@ -1,11 +1,19 @@
 """
 Asynchronous (non-blocking) Parallel Tempering + Differential Evolution sampler.
 
-The production default for Op-based (non-differentiable) models (YAML:
-sampler.method: "ptde_async"). Kept as a separate sampler module so the
-synchronous PTDE in ptde.py -- the reference implementation with fully
-up-to-date DE partner states -- stays available for A/B validation. The
-non-sampling scaffolding both share lives in exozippy.samplers._common.
+NOT THE DEFAULT since 2026-10-04 (review 2.4.9, TASK 8): the synchronous
+loop in ptde.py is recommended for Op-based models.  The straggler tail
+described under MOTIVATION below was measured again on the same model at
+current master and is gone (0 of 115,488 calls over 0.1 s; the slowest
+call in a step is ~2x the median at ~2 ms), and head to head on
+DC2018_128 this loop gave 5-14x LESS ESS per reserved core-second than
+ptde.py, exactly one temperature round trip per run at every draw count
+(sync 2-7), and 11-28 thousand discarded swaps.  It is kept for A/B
+validation and for a model whose evaluation time is MEASURED heavy-tailed
+(sampler.collect_rung_timing) -- select it explicitly with
+sampler.method: "ptde_async".  The MOTIVATION paragraph is the historical
+record of why it was written.  The non-sampling scaffolding both loops
+share lives in exozippy.samplers._common.
 
 MOTIVATION: ptde.py's synchronous design must wait for the SLOWEST of all
 n_temps*n_chains proposals before ANY chain can advance to its next step,
@@ -248,6 +256,20 @@ def ptde_async_sample(
         store_hot_chains=store_hot_chains,
     )
     lp_guard, rng, de_mode_hop = run.lp_guard, run.rng, run.de_mode_hop
+    if swap_schedule == "deo":
+        # Review 2.4.9 (c): this loop must not accept a DEO schedule
+        # silently.  Its event-time cycling over adjacent pairs is the
+        # ASYNC ANALOG of DEO, not DEO: measured on DC2018_128 (TASK 8) it
+        # completes one temperature round trip per run at 5,000 and at
+        # 20,000 draws where the synchronous loop completes 2-7, so the
+        # non-reversible transport DEO promises is not delivered.
+        logger.warning(
+            "PTDE-async: swap_schedule 'deo' is the asynchronous ANALOG of "
+            "DEO and does not deliver DEO's temperature transport -- "
+            "measured one round trip per run on DC2018_128 against 2-7 for "
+            "the synchronous loop (review 2.4.9). For DEO transport use "
+            "sampler.method: ptde, the recommended default."
+        )
     raw_start, model_keys, n_params = (
         run.raw_start,
         run.model_keys,

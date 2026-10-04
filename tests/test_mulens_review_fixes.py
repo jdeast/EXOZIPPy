@@ -1397,20 +1397,20 @@ def test_binary_lens_requires_ptde_and_rejects_gradient_samplers():
 
     assert "incompatible" in reqs
     assert {"nuts", "numpyro", "blackjax"} <= reqs["incompatible"]
-    assert reqs.get("recommended") == "ptde_async"
+    assert reqs.get("recommended") == "ptde"
 
 
 def test_pspl_finite_source_requires_ptde():
     """
     Given a PSPL lens with finite_source: True (also uses the MulensModel Op),
     When sampler_requirements is called,
-    Then gradient-based samplers are marked incompatible and 'ptde_async'
-      is recommended.
+    Then gradient-based samplers are marked incompatible and 'ptde' (the
+      synchronous loop; review 2.4.9) is recommended.
     """
     event = _make_event(n_star=2, event=[{"finite_source": True}])
     reqs = event.sampler_requirements()
     assert "nuts" in reqs.get("incompatible", set())
-    assert reqs.get("recommended") == "ptde_async"
+    assert reqs.get("recommended") == "ptde"
 
 
 # ---------------------------------------------------------------------------

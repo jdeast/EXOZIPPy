@@ -1,7 +1,7 @@
 """Tests for the asynchronous PTDE sampler (ptde_async.py).
 
 Mirrors tests/test_ptde.py's structure and toy model so the two samplers'
-behavior can be compared directly. ptde_async is the recommended default for
+behavior can be compared directly. ptde_async was the recommended default (until 2026-10-04, review 2.4.9) for
 Op-based models (see its module docstring for the stale-DE-partner caveat);
 these tests validate that it (a) produces well-formed output, (b) recovers
 known posterior moments on a toy model, and (c) survives edge cases (single

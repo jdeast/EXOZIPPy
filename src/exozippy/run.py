@@ -856,7 +856,7 @@ def _run_fit(config, gui, user_params=None):
     if method is None:
         method = sorted(_recommended)[0] if _recommended else "nuts"
     elif method.lower() in _incompatible:
-        rec_str = sorted(_recommended)[0] if _recommended else "ptde_async"
+        rec_str = sorted(_recommended)[0] if _recommended else "ptde"
         reason_str = (
             "; ".join(_reasons) if _reasons else "incompatible with this model"
         )
