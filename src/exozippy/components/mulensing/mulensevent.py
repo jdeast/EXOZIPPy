@@ -1622,10 +1622,18 @@ class MulensEvent(Component):
 
         Binary/finite-source lenses use the MulensModel Op, which is not
         differentiable.  Gradient-based samplers (NUTS, numpyro, blackjax)
-        will produce invalid results; PTDE is required.  The asynchronous
-        dispatch loop (ptde_async) is recommended: near-caustic evaluations
-        concentrate in the hot rungs and stall the synchronous sampler's
-        every step behind the slowest proposal (samplers/ptde_async.py).
+        will produce invalid results; PTDE is required.  The SYNCHRONOUS
+        loop (ptde) is recommended -- since 2026-10-04 (review 2.4.9, TASK
+        8).  ptde_async was recommended while near-caustic evaluations
+        concentrated in the hot rungs and stalled every synchronous step
+        behind the slowest proposal; the far-field guard and the vbm_direct
+        backend removed that tail (DC2018_128, the model that motivated it:
+        0 of 115,488 calls over 0.1 s, slowest/median call per step 1.7),
+        and head to head on the same model sync gives 5-14x the ESS per
+        reserved core-second, every chain in the good-likelihood region,
+        and 2-7 temperature round trips where async makes one and discards
+        tens of thousands of swaps (samplers/samplers.md, "The recommended
+        default is ptde").
 
         PSPL lenses use a symbolic PyTensor formula and are
         NUTS-compatible, so no constraints are returned.
@@ -1633,7 +1641,7 @@ class MulensEvent(Component):
         if self.uses_op():
             return {
                 "incompatible": {"nuts", "numpyro", "blackjax"},
-                "recommended": "ptde_async",
+                "recommended": "ptde",
                 "reason": (
                     "binary/finite-source microlensing uses the MulensModel "
                     "Op, which is not differentiable -- gradient-based "

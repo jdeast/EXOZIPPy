@@ -17,7 +17,7 @@ dispatch removes outright.
 2.3.6 is that finding on the full list: at least a dozen more keys are read by
 exactly one branch or family.  THE HEADLINE IS `chains`, which is forwarded to
 the HMC branches and to demc/demcz and to nothing else -- so under
-method: ptde / ptde_async, the recommended default for every microlensing fit,
+method: ptde / ptde_async (ptde the recommended default for every microlensing fit,
 a user's `sampler: {chains: 16}` was silently ignored and the samplers sized
 their population from the parameter count instead.  Measured end to end on
 examples/kelt4 RV-only, 2026-09-11: `chains: 5` gave 5 chains under

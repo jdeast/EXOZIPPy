@@ -43,12 +43,19 @@ copy-on-write, avoiding the picklability constraint that blocks cloudpickle
 (PyMC's multiprocessing backend) from serializing PyTensor compiled functions.
 
 This is the SYNCHRONOUS dispatch loop: every chain advances in lockstep, so
-each step waits for the slowest of all n_temps*n_chains evaluations. The
-asynchronous variant (exozippy.samplers.ptde_async, sampler.method:
-"ptde_async") removes that barrier and is the recommended default for
-Op-based models; this module remains the reference implementation (fully
-up-to-date DE partner states) for A/B validation. The non-sampling
-scaffolding both share lives in exozippy.samplers._common.
+each step waits for the slowest of all n_temps*n_chains evaluations.  It is
+the RECOMMENDED DEFAULT for Op-based models (since 2026-10-04; review 2.4.9,
+TASK 8): the heavy-tailed VBM evaluation that the asynchronous variant
+(exozippy.samplers.ptde_async, sampler.method: "ptde_async") was written
+to sidestep no longer exists at current master -- on DC2018_128 the slowest
+call in a step is ~2x the median at ~2 ms -- and head to head on that
+model the synchronous loop gives 5-14x the ESS per reserved core-second
+with every chain in the good-likelihood region and real temperature round
+trips.  The reference implementation (fully up-to-date DE partner states)
+is therefore also the production one; ptde_async stays for A/B
+validation and for a model whose evaluation time is measured to be
+heavy-tailed (sampler.collect_rung_timing).  The non-sampling scaffolding
+both share lives in exozippy.samplers._common.
 
 Returns arviz.InferenceData compatible with the EXOZIPPy pipeline.
 """

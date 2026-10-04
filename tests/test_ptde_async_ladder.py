@@ -1,7 +1,7 @@
 """ptde_async can re-shape its ladder, not just lengthen it.
 
 `_update_ladder_barrier` (Syed et al. 2022) lived only in the SYNCHRONOUS
-sampler, and even there defaulted off -- so `ptde_async`, the recommended
+sampler, and even there defaulted off -- so `ptde_async`, then the recommended
 default for Op-based models, could not reshape its ladder at all.
 
 That is not academic.  On examples/DC2018 event 128 at T_max=8500 with a

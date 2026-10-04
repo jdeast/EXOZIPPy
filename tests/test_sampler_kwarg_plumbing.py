@@ -2,7 +2,7 @@
 
 `adapt_ladder` was forwarded to `ptde_sample` and NOT to `ptde_async_sample`,
 which accepts it.  So `adapt_ladder: true` in a config was silently inert for
-ptde_async -- the recommended sampler for Op-based (microlensing) models, and
+ptde_async -- the recommended sampler for Op-based (microlensing) models until 2026-10-04 (review 2.4.9), and
 the one the DC2018 fits actually use.  The knob had never once been reachable
 from a config, and nothing said so: no warning, no error, and the sampler
 simply took the parameter's own `False` default.
