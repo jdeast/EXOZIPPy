@@ -21,3 +21,21 @@ star.Source.ra:
 star.Source.dec:
   initval: -28.982
   sigma: 0
+source.Source.t_0:
+  initval: [2458554.848530676, 2458554.9017988956]
+source.Source.u_0:
+  initval: [0.10942390953990634, 0.13989653315265102]
+mulensevent.0.t_E:
+  initval: [19.548172398577975, 18.44663911641528]
+source.Source.rho:
+  initval: [0.013369917068518505, 0.006748411133032847]
+lens.Companion.log_s:
+  initval: [-0.05738554264127195, -0.009697543526107143]
+lens.Companion.alpha:
+  initval: [-46.45931675216467, -52.070143582304205]
+lens.Companion.q:
+  initval: [0.0012090039090616133, 0.0010450387181342774]
+mulensinstrument.Roman_W149.err_scale:
+  initval: 1.1572828624601696
+mulensinstrument.Roman_Z087.err_scale:
+  initval: 1.1250691305325033
