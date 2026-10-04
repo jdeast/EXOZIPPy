@@ -1,8 +1,8 @@
 # Everything in DC2018_128.params.yaml, PLUS the photometric zeropoint.
-star.Lens.ra:   {initval: 267.595, sigma: 0}
-star.Lens.dec:  {initval: -28.982, sigma: 0}
-star.Lens.teff:   {sigma: 0.0}
-star.Lens.feh:    {sigma: 0.0}
+star.Lens.ra: {initval: 267.595, sigma: 0}
+star.Lens.dec: {initval: -28.982, sigma: 0}
+star.Lens.teff: {sigma: 0.0}
+star.Lens.feh: {sigma: 0.0}
 star.Lens.radius: {sigma: 0.0}
 planet.Companion.radius: {sigma: 0}
 band.W149.u1: {initval: 0.0, sigma: 0}
@@ -70,5 +70,23 @@ mulensevent.log_theta_E: {initval: -0.2}
 
 # The Source shares the event's line of sight; galacticmodel anchors on it
 # (anchor_idx 1) and the magnification Op freezes its coordinates.
-star.Source.ra:  {initval: 267.595, sigma: 0}
+star.Source.ra: {initval: 267.595, sigma: 0}
 star.Source.dec: {initval: -28.982, sigma: 0}
+source.Source.t_0:
+  initval: [2458554.8238334553, 2458554.8238334553]
+source.Source.u_0:
+  initval: [0.13120606277363886, 0.13120606277363886]
+mulensevent.0.t_E:
+  initval: [19.1630701622593, 19.1630701622593]
+source.Source.rho:
+  initval: [1.212872626449141e-06, 0.008904392591931045]
+lens.Companion.log_s:
+  initval: [-0.06597063046646891, -0.007814535410238415]
+lens.Companion.alpha:
+  initval: [-50.36627971968676, -50.474548801060585]
+lens.Companion.q:
+  initval: [0.0009259770843883544, 0.0002547434221159895]
+mulensinstrument.Roman_W149.err_scale:
+  initval: 1.1572828624601683
+mulensinstrument.Roman_Z087.err_scale:
+  initval: 1.1250691305325033
