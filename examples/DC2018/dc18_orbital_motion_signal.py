@@ -14,7 +14,7 @@ prior-free likelihood preferred that biased solution over the truth by
 and rho to < 1% and dalpha/dt to 4% of the orbit's 360/P (review 2.4.14,
 2026-09-22).  JDE's ruling: the STATIC sweep is restricted to events where
 a static model is adequate, measured here, and the orbital-motion rung is a
-roadmap item (notes/todo.txt) after static 2L1S works.
+roadmap item after static 2L1S works.
 
 THE MEASUREMENT, optimizer-free so it cannot fall into a wrong basin (the
 Nelder-Mead version of this did, on 107 and 186, and timed out on 12

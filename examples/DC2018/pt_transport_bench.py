@@ -368,8 +368,8 @@ def _configs():
     # ran, and the reason its Lambda story does not hold.  Group (a) above
     # is labelled TRIVIAL CONTROLS and runs T_max 4 and 16; every other
     # configuration in this file runs the default T_max = 8500.  The
-    # "round trips collapse with Lambda" table in
-    # notes/pt_round_trip_collapse.txt is those two groups concatenated, so
+    # "round trips collapse with Lambda" table first drawn from it
+    # (corrected in samplers.md) is those two groups concatenated, so
     # Lambda and T_max are perfectly confounded across it -- and the data
     # already contains the counterexample: T_max=8500 with Lambda=3.50 made
     # ZERO round trips while T_max=16 with Lambda=4.14-4.79 made 90-1824.

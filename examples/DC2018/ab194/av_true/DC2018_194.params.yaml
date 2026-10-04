@@ -38,7 +38,7 @@ star.Source.av:
   # already fits.  Anchoring A_W149 instead (11.75) misses the colour
   # by +0.81 mag, and only teffsed can absorb that.  sigma is a model
   # uncertainty: std 0.10 across 36 (feh, Teff, logg) cells, depending
-  # on Teff alone at 0.28/1000 K.  See code_review_20260824.txt, 7.7.3.
+  # on Teff alone at 0.28/1000 K.  See conventions.md C29.
   mu: 9.01
   sigma: 0.3
 

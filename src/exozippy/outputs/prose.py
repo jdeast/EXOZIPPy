@@ -8,7 +8,7 @@ anywhere: the value of the file is that every citation relevant to how the
 fit was actually done lands in one place, with enough connective prose to
 seed a paper's modeling section.
 
-Two rules keep the prose honest (see notes/modeling_prose.txt):
+Two rules keep the prose honest (see outputs.md):
 
 - **Declare at the implementation site.**  A sentence is emitted by the
   code path that implements the feature it describes -- the same rule as

@@ -2,7 +2,7 @@
 quoted source RADIUS and DISTANCE?  IT IS -- ONCE THE MAGNITUDE SYSTEM IS
 RIGHT, WHICH IS THE POINT OF THIS SCRIPT.
 
-supercomputer_queue.txt 7.7.3 closed the GEOMETRIC leg and left the
+Review 7.7.3 closed the GEOMETRIC leg and left the
 PHOTOMETRIC one untested.  The first version of this script tested it in the
 wrong system and "found" the answer key 1.8-2.4 mag inconsistent with
 itself.  It is not.  THE CHALLENGE'S MAGNITUDES ARE AB AND OUR BC GRID IS

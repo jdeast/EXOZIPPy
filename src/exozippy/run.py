@@ -1208,9 +1208,8 @@ def _run_fit(config, gui, user_params=None):
                     progress_callback=gui.progress_callback,
                 )
             elif method == "ptde_async":
-                # The non-blocking PTDE dispatch loop (see samplers.md; the
-                # hpc_optimization.txt prompt it used to cite was pruned
-                # PROMPT 13) -- the recommended default for Op-based models;
+                # The non-blocking PTDE dispatch loop (see samplers.md)
+                # -- the recommended default for Op-based models;
                 # see exozippy/samplers/ptde_async.py's module docstring for
                 # the stale-DE-partner caveat and how swaps stay rigorous.
                 # rung_thin_factor/rung_thin_start are ptde-only (thinning
@@ -1549,7 +1548,7 @@ def _run_fit(config, gui, user_params=None):
     # loaded .nc) so any reanalysis can recompute this, but every downstream
     # report -- mode ID, medians/CIs, corner, trace plots -- runs on the
     # trimmed view so the initial transient never biases the science. This is
-    # the fix for the DC2018_128 pathology (notes/todo.txt): the reported
+    # the fix for the DC2018_128 pathology: the reported
     # summary previously discarded zero burn-in even though a likelihood-flat
     # degenerate direction drifted for ~half the run.
     # Hot-chain mode discovery (store_hot_chains): cluster the thinned
@@ -1686,9 +1685,8 @@ def _run_fit(config, gui, user_params=None):
             comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
 
     # Multimodal posteriors: re-emit the same corner + component plots once
-    # per mode, restricted to that mode's draws (interim solution -- see
-    # notes/multimode_implementation.txt P7; a recolored/stratified single
-    # figure is deferred). Per-mode LaTeX columns and CSV rows are already
+    # per mode, restricted to that mode's draws (interim solution; a
+    # recolored/stratified single figure is deferred). Per-mode LaTeX columns and CSV rows are already
     # produced above via mode_report=mode_report; this loop only covers the
     # plot outputs, which have no such mechanism. Single-mode runs take this
     # branch never, so they emit zero new files.

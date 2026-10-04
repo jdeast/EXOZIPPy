@@ -2,9 +2,9 @@
 # SLURM counterpart to dc18_sweep.job, which is SGE.  Every .job file in
 # this repo is Grid Engine; this is the same run for an sbatch cluster, and
 # is kept beside it deliberately so users on either scheduler have a
-# working example rather than a translation exercise.  The SGE-to-SLURM
-# mapping, the measured memory figures behind --mem, and a first-hour
-# checklist for a new machine are in notes/cannon.txt.
+# working example rather than a translation exercise.  The partition
+# choice and the measured memory figures behind --mem are recorded in the
+# comments below.
 #
 #   sbatch --array=1-6 dc18_sweep.sbatch
 #

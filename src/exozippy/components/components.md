@@ -143,7 +143,7 @@ state impossible.  That is a real trade and it was made deliberately, not
 overlooked.  `band.ld_law` is NOT a counterexample: `quadratic` vs `linear` is
 a different model (different parameter count), not a coordinate choice.
 `planet.mass_parameterization` IS drift and is filed for renaming to
-`fitlogq` (`notes/code_review_20260824.txt` item 4.2.7).
+`fitlogq` (review 4.2.7).
 
 ## Adding a new component
 

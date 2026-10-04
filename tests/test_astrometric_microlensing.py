@@ -46,8 +46,8 @@ def test_point_lens_centroid_closed_form_matches_image_solve():
     Then centroid - source == u/(u^2 + 2) (C30) and centroid - lens ==
       u (u^2 + 3)/(u^2 + 2) (VBM's astrox), and the peak of the shift sits
       at u = sqrt(2) with 0.3536.  The direct centroid-minus-source is a
-      catastrophic cancellation at small u (notes/missing_mulens_physics.txt
-      3a), so the shift is compared at 1e-10 from u = 0.05 up; the
+      catastrophic cancellation at small u (mulensing.md, "The point-lens
+      shift, exactly"), so the shift is compared at 1e-10 from u = 0.05 up; the
       centroid itself at 1e-12.
     """
     u = np.concatenate([np.logspace(np.log10(0.05), 1, 200), [np.sqrt(2.0)]])

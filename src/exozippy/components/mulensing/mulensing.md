@@ -49,7 +49,7 @@ Not an aspiration -- two structural rules, each of which was violated (review 1.
 
 `Band`'s default law is **quadratic** (`band.py`, `c.get("ld_law", "quadratic")`), and until 2026-08 only `u1` reached the magnification -- `vbm.a1` on the VBM path, `set_limb_coeff_u` on the MulensModel one. On a band whose limb darkening ONLY microlensing reads that had two costs, and the second is the one that makes it a defect rather than an approximation: the source profile was a linear law standing in for a quadratic one, **and** the magnification was a function of `u1` alone, so exactly one combination of the sampled Kipping pair `(q1, q2)` was likelihood-free -- sampled, reported, and constrained by nothing but its prior. It is not caught by the unread-LD autopin, which pins a band *nothing* reads (`components/sed/sed.md`); mulensinstrument is a registered consumer whenever `finite_source` is on. Every shipped example hid it by writing `ld_law: "linear"` by hand, which is the correct workaround and is exactly why the default was a trap for the next user.
 
-- **The measured cost is NOT in the light curve, it is in `u1`.** On `examples/ob09020`, refitting `u1` absorbs the quadratic profile to 0.1-1.3 mmag rms against 3-26 mmag errors -- so it does not measurably bias `rho` there. What it does is bias the fitted `u1` by **+0.14 (22-30%), constant across a factor of 33 in `rho`**. Harmless while `u1` is a free nuisance; a real bias the moment any physical LD prior is imposed on it, which is why this had to land before `notes/ld_atm_prior.txt`. The FSPL case is much larger than the binary central-caustic case -- 14-21 mmag at `u_0 <~ rho`, where the profile shapes the peak directly.
+- **The measured cost is NOT in the light curve, it is in `u1`.** On `examples/ob09020`, refitting `u1` absorbs the quadratic profile to 0.1-1.3 mmag rms against 3-26 mmag errors -- so it does not measurably bias `rho` there. What it does is bias the fitted `u1` by **+0.14 (22-30%), constant across a factor of 33 in `rho`**. Harmless while `u1` is a free nuisance; a real bias the moment any physical LD prior is imposed on it, which is why this had to land before the atmosphere-model LD prior (`ld_atm_prior`, designed, not implemented). The FSPL case is much larger than the binary central-caustic case -- 14-21 mmag at `u_0 <~ rho`, where the profile shapes the peak directly.
 - **Turning the quadratic profile on is a no-op at `u2 = 0`**, measured: VBM's `LDquadratic` reproduces `LDlinear` to 2.2e-16 fractional. That is what makes it safe to key on the band's declared law with no config flag of its own -- an existing linear-band fit cannot move.
 - **Guard on the manifest, not the law.** `"u2" in band.manifest` is the test, because with every band linear the parameter does not exist at all (`Band.LD_MODE_TABLE` via `parameterization.mode_manifest` omits a parameter no instance uses). Same test `transit.py` and `rm.py` use.
 - **Index the param vector FORWARD.** `_compute` read `u1` as `p[-1]`; with `u2` optionally following, that index silently means a different parameter depending on the band's law. It now counts forward from the companion block, and `_param_labels` names `band.u2` so the non-finite guard can too.
@@ -93,7 +93,7 @@ The conventions -- the source's offset entering at exactly the parallax slot, C7
 
 ## Astrometric microlensing -- the centroid shift (`astrometryinstrument` <- `MulensEvent.get_centroid_shift`)
 
-The convention -- referenced to the SOURCE's unlensed position, pointing AWAY from the lens, VBM's `astrox` being the same centroid measured from the lens, and the blend dilution/drag -- is conventions.md **C30**; the design record (amplitudes, the finite-source cancellation table, why it belongs inside the full astrometric model, Roman's arithmetic) is `notes/missing_mulens_physics.txt` section 3 and review 8.10.1. What lives where in the code:
+The convention -- referenced to the SOURCE's unlensed position, pointing AWAY from the lens, VBM's `astrox` being the same centroid measured from the lens, and the blend dilution/drag -- is conventions.md **C30**; the point-lens amplitude and the finite-source cancellation are recorded below ("The point-lens shift, exactly"); stages 1 and 2 landed in #324 and #327 (review 8.10.1). What lives where in the code:
 
 - **One trajectory, two consumers.** `MulensEvent.get_trajectory(times, obs_pos, system, index)` returns the `(tau, beta)` pair `get_magnification` always built inline (same op sequence, bit-identical); `get_centroid_shift` rotates it onto `(N, E)` with C9's `tau_hat = mu_hat_rel,geo` and `beta_hat = tau_hat` rotated +90 degrees North through East, and scales by `-theta_E/(u^2+2)`. The direction comes from `mu_ra_rel_geo`/`mu_dec_rel_geo`, not from `pi_E`: the light curve fixes only `|u(t)|`, and a fit with `|pi_E|` pinned at zero still has a trajectory direction -- this term is what makes it observable.
 - **The frame has one owner.** `MulensEvent.geocentric_frame()` holds the Skowron+2011 anchors (Earth's position and velocity at `t0_par`, C5) and `skowron_deviations(t, xyz_abs)` builds the C6 deviations; `MulensInstrument._abs_to_delta` delegates to it, and so does `AstrometryInstrument` for its own epochs and observer. `t0_par` is read from `t0_par[0]` at call time because `MulensInstrument.load_data` re-resolves it at stage 1 -- the frame must not be cached against the `__init__` snapshot.
@@ -103,6 +103,24 @@ The convention -- referenced to the SOURCE's unlensed position, pointing AWAY fr
 - **Not split out (follow-ups, review 8.10.1):** the lens's own flux inside `f_b` sits at `x_s + theta_E dtheta` and would need the SED-predicted lens flux (`sed_constrains_blend` has it); a blend with its own proper motion; the relative-astrometry (`rel`) modes, whose reference stars have partially absorbed the signal.
 
 Tests: `tests/test_astrometric_microlensing.py` (closed form vs a direct image solve; the handedness test; the dilution/drag algebra; theta_E is consumed by the astrometric likelihood and not by an opted-out dataset; binary raises, finite source warns; a self-consistent synthetic recovery with finite gradient).
+
+### The point-lens shift, exactly -- and why a resolved source breaks it
+
+A point lens splits a point source into two images on the lens-source axis, at `y_+- = (u +- sqrt(u^2+4))/2` (units of theta_E, from the lens) with `A_+- = (u^2+2)/(2 u sqrt(u^2+4)) +- 1/2`. Summing `A_+- y_+-`, the flux-weighted centroid relative to the LENS is `theta_c = theta_E u (u^2+3)/(u^2+2)` (VBM's `astrox`), and relative to the source's UNLENSED position -- what an astrometric time series references -- the shift is `delta_theta = theta_E u/(u^2+2)` along the lens->source axis, peaking at `u = sqrt(2)` with `sqrt(2)/4 theta_E = 0.354 theta_E`. It is exact because the point-lens lens equation is a quadratic (the same reason Paczynski's `A(u)` is exact): a direct image solve agrees to 1e-14 - 1e-16 relative across `u = 1e-2` to 10, the residual growing only where `centroid - u` is a catastrophic cancellation in the DIRECT computation.
+
+The point-source assumption is not safe on a resolved source. Averaging the exact per-element shift over a uniform disk of radius `rho`:
+
+| `u_0` | `rho` | point source | finite (uniform) | frac. error |
+|---|---|---|---|---|
+| 0.100 | 0.01 | 0.0497512 | 0.0493780 | 7.5e-03 |
+| 0.100 | 0.10 | 0.0497512 | 0.0001805 | 1.0e+00 |
+| 0.100 | 0.50 | 0.0497512 | -0.0230882 | 1.5e+00 |
+| 1.414 | 0.10 | 0.3535534 | 0.3525205 | 2.9e-03 |
+| 1.414 | 0.50 | 0.3535534 | 0.3266657 | 7.6e-02 |
+| 1.414 | 1.00 | 0.3535534 | 0.2295702 | 3.5e-01 |
+| 3.000 | 1.00 | 0.2727273 | 0.2629292 | 3.6e-02 |
+
+With the lens inside the source disk (`u_0 = 0.1`, `rho = 0.1`) the shift nearly VANISHES (99.6% cancellation: elements on opposite sides of the lens are deflected in opposite directions), and at `rho = 0.5` it REVERSES SIGN. So the closed form on a resolved source can get the DIRECTION wrong, which is why finite-source events dispatch to VBM's disk-integrated centroid. The two theta_E routes complement each other: finite-source events already have theta_E from `rho`, and the astrometric route earns its keep on the events that do not, which are exactly those where the point-source formula is valid.
 
 ## Three or more lens bodies: the engine's relations are binary-only
 

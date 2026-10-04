@@ -543,8 +543,8 @@ projected through the SAME kernel and Thiele-Innes owner as everything else, sca
 orientation and the companion mass (through the barycentric scale) are the physical
 coordinates, which is Mroz et al. (2026)'s "ET" philosophy expressed through the component
 graph rather than bolted on.  A LINEAR source drift is deliberately not offered: it is
-EXACTLY degenerate with `(t_E, t_0, u_0, alpha)` in the light curve alone
-(notes/orbital_motion_and_nbody.txt section 2); it becomes meaningful only where an
+EXACTLY degenerate with `(t_E, t_0, u_0, alpha)` in the light curve alone;
+it becomes meaningful only where an
 external dataset constrains the source's proper motion over a baseline `>> t_E`.
 
 A xallarap orbit measures `bigomega` (the track's sky orientation enters the trajectory)
@@ -834,8 +834,8 @@ the opposite rotation sense is a reflection, `alpha -> -alpha`. The two compose 
 `alpha -> 180 - alpha`. None of the three touches `u_0`.
 
 Two papers measured, each by the eight-combination scan below run through the shipped
-`VBMDirectMagOp` AND MulensModel (the two agree to <= 4 chi2; private notes repo,
-`alpha_conventions.txt` secs 1-3, 2026-10-02):
+`VBMDirectMagOp` AND MulensModel (the two agree to <= 4 chi2; tables in
+`docs/alpha_conventions.md` secs 1-3, 2026-10-02):
 
 - **Zang et al. (2023)**, KMT-2019-BLG-1806: `alpha_EXOZIPPy = alpha_paper + 180`, `u_0`
   and `pi_E` kept. Their Outer `u_0 > 0` solution (`alpha = 2.151 rad = 123.24 deg`) maps to
@@ -884,8 +884,8 @@ at `t_0`, the same projection that reproduces the key's `s` (event 4: `a = 49.2 
 the key's 2.48124). The node angle `Omega` is not needed: `alpha_key` and `theta_axis` share
 the node line, so it cancels.
 
-**Measured** (`scripts/dc18_alpha_convention.py`, 36 events, 2026-10-02; private notes repo,
-`alpha_conventions.txt` sec 4): at the key's own `t_0`, signed `u_0`, `t_E`, `rho`, `s` and
+**Measured** (`scripts/dc18_alpha_convention.py`, 36 events, 2026-10-02;
+per-event table in `docs/alpha_conventions.md` sec 4): at the key's own `t_0`, signed `u_0`, `t_E`, `rho`, `s` and
 `q`, with the fluxes fit linearly, the `alpha` the light curve itself prefers matches the
 rule on **19/19 events with chi2 contrast >= 1000, to a median 0.10 deg and a maximum 1.53
 deg** (circular `R = 1.000` on the 17 such events of the original 30, mean 179.95 deg for
@@ -997,8 +997,7 @@ W149-width filters -- tolerable in a prior a magnitude wide, not as a measuremen
   is Yee et al. **2015**, ApJ 802, 76 -- cited by the year of its 2014 arXiv posting
   (arXiv:1410.5429). The bib key added for this document is `Yee:2015`.
 - **MulensModel 3.11.0's KEPLERIAN lens orbital motion contradicts its own linear mode**
-  (found 2026-08-27, measured on the installed package; reproduction in the private notes
-  repo, `mm_keplerian_sign_check.py`).  With `dalpha_dt = +40 deg/yr`, the linear branch of
+  (found 2026-08-27, measured on the installed package).  With `dalpha_dt = +40 deg/yr`, the linear branch of
   `ModelParameters.get_alpha` returns `d(alpha)/dt = +40` at `t_0_kep` (definitional,
   correct) while every keplerian variant returns `-40` -- the composition
   `alpha + atan2(y, x)` should be `alpha - atan2(y, x)` by C24's
@@ -1016,8 +1015,8 @@ W149-width filters -- tolerable in a prior a magnitude wide, not as a measuremen
   standard z-x-z Euler composition.  A typographic swap with no propagated consequence in
   the paper -- recorded so nobody transcribes B9 literally.
 - **C22 as first written (2026-08-18) was WRONG, and C21 mis-explained ob161003**
-  (corrected 2026-10-02, review item 3.6.5; measurement in the private notes repo,
-  `alpha_conventions.txt`). C22 concluded "no mapping exists" from global offsets alone
+  (corrected 2026-10-02 in #372, review item 3.6.5; measurement in
+  `docs/alpha_conventions.md`). C22 concluded "no mapping exists" from global offsets alone
   (`R <= 0.19`); the key's `alpha` is mappable by the per-event node-line rule now in C22,
   19/19 strong events to a median 0.10 deg. C21 explained ob161003's `180 - alpha` as the
   source-trajectory shift "composed with the opposite `u_0` branch (C23)" -- but that

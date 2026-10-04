@@ -276,7 +276,7 @@ def find_burnin(posterior, lp=None, var_names=None):
 # indexed by the SAME axes as `posterior`.
 #
 # `posterior_hot` (ptde_async store_hot_chains) is the counter-example that
-# motivated this (notes/code_review_20260808.txt 2.9.2): its chain axis is
+# motivated this (review 2.9.2, #104): its chain axis is
 # (n_temps-1) x n_chains hot-rung chains, and its draw axis is its own thinned
 # one, so slicing it by T=1 good-chain indices and a T=1 burn-in silently
 # returned a handful of arbitrary hot chains with their heads cut off.  It is

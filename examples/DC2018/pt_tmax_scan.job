@@ -7,7 +7,7 @@
 #$ -N tmaxscan
 #$ -o pt_tmax_scan.$JOB_ID.log
 #
-# THE CONTROLLED T_max EXPERIMENT.  notes/pt_round_trip_collapse.txt
+# THE CONTROLLED T_max EXPERIMENT.  An earlier round-trip analysis
 # concluded "round trips collapse with Lambda", but its Lambda series is
 # group (a) of pt_transport_bench.py (TRIVIAL CONTROLS, T_max 4 and 16)
 # concatenated with everything else (T_max 8500) -- Lambda and T_max are

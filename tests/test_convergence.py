@@ -3,7 +3,7 @@
 
 The pathology these guard against: a run whose reported statistics discard
 zero burn-in even though a slow, likelihood-flat degenerate direction drifts
-for a large fraction of the trace (DC2018_128; see notes/todo.txt). Detection
+for a large fraction of the trace (DC2018_128). Detection
 must happen in parameter space (rank Rhat/bulk-ESS), the burn-in must land at
 the ESS knee, and stuck chains must be dropped before any statistic.
 """
@@ -211,7 +211,7 @@ def test_analyze_idata_leaves_posterior_hot_bit_identical():
     When analyze_idata trims stuck chains and burn-in,
     Then posterior_hot comes out IDENTICAL to what went in.
 
-    Regression (notes/code_review_20260808.txt 2.9.2): the trim isel'd
+    Regression (review 2.9.2, #104): the trim isel'd
     EVERY group with chain/draw dims, so posterior_hot -- whose chain axis
     is (n_temps-1) x n_chains hot-rung chains and whose draw axis is its own
     thinned one -- was sliced by T=1 good-chain indices and a T=1 burn-in.

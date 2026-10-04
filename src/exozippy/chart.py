@@ -102,8 +102,8 @@ class Trace:
         Style identity + optional overrides for this series: ``series_index``
         (drives categorical color), ``legend`` to force a legend entry on a
         non-data trace, ``lw`` line width, and optional ``color`` / ``marker``
-        user overrides (see ``Instrument._data_trace_style`` and
-        ``notes/gui_todo.txt``).  ``role`` still implies everything derivable
+        user overrides (see ``Instrument._data_trace_style``; precedence
+        user > theme).  ``role`` still implies everything derivable
         (data = markers, model = line); this carries only identity/overrides.
         Serialized by ``to_json`` when present.
     alpha : float, optional

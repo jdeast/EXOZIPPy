@@ -1792,7 +1792,7 @@ def test_unmeasured_swap_pair_does_not_inflate_the_barrier():
     Then the ladder is unchanged -- a uniform barrier is already
       equal-share, so the only honest update is none.
 
-    Regression (notes/code_review_20260808.txt 2.9.3): the old
+    Regression (review 2.9.3, #104): the old
     `1 - accept/max(propose, 1)` read a never-proposed pair as 0/1 = fully
     REJECTING, r = 1, the largest barrier a link can carry, so an
     unmeasured link stole ladder resolution from the links that had
