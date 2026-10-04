@@ -62,13 +62,13 @@ band:
 
 mulensinstrument:
 - name: "Roman_W149"
-  file: "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.W149.WFIRST18.128.txt"
+  file: "../../DC2018_128/n20180816.W149.WFIRST18.128.txt"  # the shipped copy (identical to the challenge release)
   data_format: "flux"
   observer_location: "roman_simulated_2018dc"
   band: "W149"
   likelihood: "hogg"
 - name: "Roman_Z087"
-  file: "/home/jeastman/python/MMEXOFAST/data/2018DataChallenge/n20180816.Z087.WFIRST18.128.txt"
+  file: "../../DC2018_128/n20180816.Z087.WFIRST18.128.txt"  # the shipped copy (identical to the challenge release)
   data_format: "flux"
   observer_location: "roman_simulated_2018dc"
   band: "Z087"

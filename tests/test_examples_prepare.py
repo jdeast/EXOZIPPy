@@ -110,7 +110,11 @@ def _system_configs():
         return out
     # `*/configs/` too: examples/DC2018/configs holds a dozen runnable configs
     # that this glob used to miss, and all twelve that still used the
-    # pre-v0.1.0 `lens: {lenses:, sources:}` block rotted unnoticed.
+    # pre-v0.1.0 `lens: {lenses:, sources:}` block rotted unnoticed.  They
+    # became runnable off the cluster only when PR #374 pointed their light
+    # curves at the shipped examples/DC2018_128 copies (identical to the
+    # challenge release): until then every one named a hydra-only absolute
+    # path and was reached by this glob only through the mmexofast skip.
     paths = set(_EXAMPLES.glob("*/*.yaml")) | set(
         _EXAMPLES.glob("*/configs/*.yaml")
     )
