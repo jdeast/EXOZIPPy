@@ -9,6 +9,16 @@ in numpy, and its columns join that file's block of the ordinary detrend
 design matrix (``Instrument._build_block_detrend``), whose coefficients are
 already sampled, whitened and plotted.
 
+Provenance: ``keplerspline`` is Andrew Vanderburg's (Vanderburg & Johnson
+2014), MIT licensed -- the IDL original at
+https://github.com/avanderburg/keplerspline, which EXOFASTv2 bundles, and
+his Python version at https://github.com/avanderburg/keplersplinev2.  Its
+B-spline machinery (``bspline_bkpts.pro``, ``bspline_iterfit.pro``) is the
+SDSS idlutils library's (pydl.pydlutils.bspline in Python).  This module is
+an independent re-implementation, checked against a vendored copy of
+keplersplinev2 in ``tests/third_party`` (``tests/test_transit_fitspline.py``:
+the fitted curves agree to rounding).
+
 What is ported, from EXOFASTv2's ``keplerspline/keplerspline.pro`` and
 ``bspline_bkpts.pro``:
 
