@@ -88,6 +88,94 @@ logger = logging.getLogger(__name__)
 _JITTER_EPS = 1e-30
 
 
+# ---------------------------------------------------------------------------
+# How a detrending child's likelihood combines its model with the fitted
+# trend, and how the plots invert that combination onto the DATA.
+#
+# The forward map (symbolic, the likelihood's mu) and its inverse (numpy, the
+# plotted points) live side by side here, keyed by the child's declared
+# ``DETREND_SPACE``, so a child cannot score one expression and plot another:
+# ``Instrument._detrended_model`` is the only place a likelihood meets its
+# trend term, and ``Instrument.detrend_corrected`` the only place a plot
+# removes it.  ``term`` is ``X @ c`` -- the WHITENED design matrix times the
+# sampled coefficients (``_build_block_detrend``), the same number in both.
+# Reviews 1.5.1 (rv/transit plotted the raw data) and 1.6.7 (mulens scored
+# the trend and plotted neither it nor its removal); JDE 2026-10-05.
+# ---------------------------------------------------------------------------
+def _detrend_additive_combine(model, term):
+    return model + term
+
+
+def _detrend_additive_invert(y, err, term):
+    return y - term, err
+
+
+def _detrend_additive_invert_signal(signal, term):
+    return signal
+
+
+def _detrend_magnitude_factor(term, xp):
+    # 10**(-0.4 * term): a magnitude-space trend applied to a FLUX model.
+    return xp.power(10.0, -0.4 * term)
+
+
+def _detrend_magnitude_combine(model, term):
+    return model * _detrend_magnitude_factor(term, pt)
+
+
+def _detrend_magnitude_invert(y, err, term):
+    # The likelihood scores y against m * f with error err, i.e. y / f
+    # against m with error err / f -- exactly, not to first order.
+    f = _detrend_magnitude_factor(np.asarray(term, dtype=float), np)
+    return y / f, err / f
+
+
+def _detrend_magnitude_invert_signal(signal, term):
+    # A signal fitted to the RESIDUAL r = y - m * f (the GP conditional mean)
+    # appears in the corrected data y / f = m + r / f divided by that
+    # datum's own f.
+    return signal / _detrend_magnitude_factor(
+        np.asarray(term, dtype=float), np
+    )
+
+
+DETREND_SPACES = {
+    # rvinstrument, transit: the trend is added to the model in the
+    # observable's own units.
+    "additive": {
+        "combine": _detrend_additive_combine,
+        "invert": _detrend_additive_invert,
+        "invert_signal": _detrend_additive_invert_signal,
+        # The corrected data are m + r, so m + gp on ANY time grid is the
+        # exact companion of the corrected points.
+        "grid_exact": True,
+        "caption": (
+            " The fitted linear trend against the data file's detrend "
+            "columns has been subtracted from the plotted points; the model "
+            "curve is evaluated on a smooth time grid and so cannot carry a "
+            "per-observation term."
+        ),
+    },
+    # mulensinstrument: magnitude-space coefficients on a flux model, i.e.
+    # the trend MULTIPLIES the model flux by 10**(-0.4 * X.c).
+    "magnitude": {
+        "combine": _detrend_magnitude_combine,
+        "invert": _detrend_magnitude_invert,
+        "invert_signal": _detrend_magnitude_invert_signal,
+        # The corrected data are m + r / f with a per-observation f, so the
+        # exact companion m + gp / f exists only AT the data epochs.
+        "grid_exact": False,
+        "caption": (
+            " The fitted linear magnitude trend against the data file's "
+            "detrend columns has been divided out of the plotted fluxes and "
+            "their error bars (it multiplies the model flux in the "
+            "likelihood); the model curve is evaluated on a smooth time grid "
+            "and so cannot carry a per-observation term."
+        ),
+    },
+}
+
+
 @register_physics
 def calc_jitter(jitter_variance):
     """Reported jitter: the SIGNED square root of ``jitter_variance``.
@@ -417,6 +505,16 @@ class Instrument(TimeSystem, Component):
     # opt out for the same reason they opt out of GPs).
     supports_robust_likelihood = True
 
+    # How this child's likelihood applies its fitted detrend term: a key of
+    # DETREND_SPACES ("additive" or "magnitude"), or None for a child that
+    # reads no detrend columns.  Declaring it is what lets a child read them
+    # at all (_read_data raises otherwise), and a child that declares it must
+    # build its likelihood mu through _detrended_model
+    # (add_observation_likelihood raises otherwise) -- so the forward map the
+    # sampler scores and the inverse the plots apply to the data are the one
+    # pair in DETREND_SPACES, never a child's own spelling (review 1.6.7).
+    DETREND_SPACE = None
+
     def __init__(self, component_config, config_manager):
         super().__init__(component_config, config_manager)
         # Every instrument reads its data from per-element files and tracks a
@@ -733,6 +831,14 @@ class Instrument(TimeSystem, Component):
             raise ValueError(
                 f"[{self.prefix}] _read_data roles must start with 'time'; "
                 f"got {list(roles)}."
+            )
+        if detrend and self.DETREND_SPACE not in DETREND_SPACES:
+            raise TypeError(
+                f"[{self.prefix}] reads detrend columns but declares "
+                f"DETREND_SPACE={self.DETREND_SPACE!r}; it must name one of "
+                f"{sorted(DETREND_SPACES)} so its likelihood and its plots "
+                f"apply the fitted trend the same way (components/"
+                f"instrument.md, 'One detrend mechanism')."
             )
         # A bad path or an unreadable file used to surface as pandas' own
         # error -- a bare FileNotFoundError, or "No columns to parse from
@@ -1295,7 +1401,23 @@ class Instrument(TimeSystem, Component):
         modeling-draft prose for exactly the likelihood it is building
         (data set inventory, noise model, GP kernels, robust families) --
         the declare-at-site rule with a single site per child.
+
+        A child that declares ``DETREND_SPACE`` must pass the very node
+        ``_detrended_model`` returned this build as ``mu``: that is what
+        makes its likelihood's trend and its plots' correction the same pair
+        (review 1.6.7).  Anything else RAISES, naming the component.
         """
+        if self.DETREND_SPACE is not None and mu is not getattr(
+            self, "_likelihood_mu_node", None
+        ):
+            raise RuntimeError(
+                f"[{self.prefix}] declares DETREND_SPACE="
+                f"{self.DETREND_SPACE!r} but its likelihood mu is not the "
+                f"node Instrument._detrended_model built.  Every detrending "
+                f"child applies its trend there and nowhere else, so the "
+                f"plots can invert exactly what the likelihood scored "
+                f"(components/instrument.md, 'One detrend mechanism')."
+            )
         if system is not None:
             self._add_observation_prose(system)
         if not (self.has_gp or self.has_robust_likelihood):
@@ -1836,54 +1958,129 @@ class Instrument(TimeSystem, Component):
             return vals
         return float(vals[index] if index < vals.size else vals[0])
 
+    def _detrended_model(self, model, data_name):
+        """Stage 7: the likelihood's mu -- ``model`` with the fitted trend.
+
+        THE one place a detrending child's model meets its detrend term:
+        ``build_likelihood`` hands in its detrend-FREE model at the data
+        (``(n_total_obs,)``, every other term already in) and passes what
+        comes back to ``add_observation_likelihood`` as ``mu``, which checks
+        that it did.  How the two combine is the child's declared
+        ``DETREND_SPACE`` (``DETREND_SPACES``: additive for rv/transit,
+        ``* 10**(-0.4 X.c)`` for mulens), and ``detrend_corrected`` applies
+        the inverse of the SAME entry to the plotted data -- so a child
+        cannot score one expression and plot another (review 1.6.7, after
+        1.5.1 fixed only the additive children by hand).
+
+        ``data_name`` is the ``pm.Data`` name of the design matrix (one per
+        component, e.g. ``"rv_detrend"``).  Without detrend columns ``model``
+        comes back untouched.  Both nodes are retained:
+        ``_detrend_free_node`` is the model the plots draw and compare the
+        corrected data against, ``_likelihood_mu_node`` what is scored.
+        """
+        if self.DETREND_SPACE not in DETREND_SPACES:
+            raise TypeError(
+                f"[{self.prefix}] _detrended_model needs DETREND_SPACE to "
+                f"name one of {sorted(DETREND_SPACES)}; got "
+                f"{self.DETREND_SPACE!r}."
+            )
+        self._detrend_free_node = model
+        if self.total_detrend_cols > 0:
+            detrend = pm.Data(data_name, self.detrend_matrix)
+            term = pt.dot(detrend, self.detrend_coeffs.value)
+            model = DETREND_SPACES[self.DETREND_SPACE]["combine"](model, term)
+        self._likelihood_mu_node = model
+        return model
+
     def detrend_at_data(self, point):
-        """Fitted detrend model at every observation, in internal units.
+        """Fitted detrend TERM at every observation, ``X @ c``, internal.
 
         ``(n_total_obs,)``, all zeros when this instrument declared no
-        detrend columns or when there is no point.  The plotted DATA are
-        corrected by this (EXOFASTv2's convention): the trend is a
-        per-observation quantity built from the file's own extra columns,
-        so a pretty-grid model curve cannot carry it, and without the
-        correction every panel of a detrending fit showed a systematic
-        data-vs-model mismatch equal to the whole fitted trend, reading as
-        unmodeled residual structure.
+        detrend columns or when there is no point.  It is the ``term``
+        ``_detrended_model`` hands its ``DETREND_SPACES`` entry, i.e. the
+        WHITENED design matrix times the sampled coefficients (see
+        ``_build_block_detrend``) -- the same matrix object the likelihood's
+        ``pm.Data`` wraps, so no un-whitening is needed here.
 
-        The value is in the same additive space as the likelihood's own
-        ``pt.dot(detrend, detrend_coeffs)`` term, i.e. the WHITENED design
-        matrix times the sampled coefficients (see ``_build_block_detrend``)
-        -- so it is exactly the term the model added, with no un-whitening
-        needed here.
-
-        ADDITIVE, which is what ``rvinstrument`` and ``transit`` want and
-        what a caller must not assume: ``mulensinstrument``'s coefficients
-        are magnitude-space and enter its flux model MULTIPLICATIVELY, as
-        ``10**(-0.4 * X.c)``.  A mulens plot path wants that factor, not
-        this sum, and dividing the plotted flux by it is the correction --
-        not subtracting.
+        It is the TERM, not the correction: how it comes off the data
+        depends on the child's space (subtracted for rv/transit, divided out
+        as ``10**(-0.4 * term)`` for mulens).  A plot path wants
+        ``detrend_corrected``, which applies the right inverse.
         """
         if point is None or getattr(self, "total_detrend_cols", 0) == 0:
             return np.zeros(self.n_total_obs)
         coeffs = self._point_value(point, self.detrend_coeffs)
         return np.asarray(self.detrend_matrix @ coeffs, dtype=float)
 
+    def detrend_corrected(self, y, err, point):
+        """``(y, err)`` with the fitted trend removed, as the plots show them.
+
+        ``y`` and ``err`` are full-length ``(n_total_obs,)`` arrays in the
+        likelihood's observable space (internal units).  The plotted DATA are
+        corrected rather than the model curve (EXOFASTv2's convention, and
+        forced: the trend is a per-observation quantity built from the
+        file's own extra columns, so a smooth-grid model curve cannot carry
+        it).  The inverse is the ``DETREND_SPACES`` entry whose forward map
+        built the likelihood's mu, so a datum the model fits exactly lands
+        exactly on the detrend-free model (``tests/test_detrend.py::
+        test_every_detrending_child_inverts_its_own_likelihood``).
+
+        Without detrend columns, or without a point, ``(y, err)`` come back
+        as given -- so no plot without detrending changes.
+        """
+        if point is None or getattr(self, "total_detrend_cols", 0) == 0:
+            return y, err
+        term = self.detrend_at_data(point)
+        return DETREND_SPACES[self.DETREND_SPACE]["invert"](y, err, term)
+
+    def detrend_corrected_signal(self, signal, point):
+        """An additive signal fitted to the likelihood's RESIDUAL, mapped
+        into the space of the corrected plotted data.
+
+        ``signal`` is ``(n_total_obs,)`` at the data epochs -- in practice
+        the GP conditional mean, which celerite2 conditions on
+        ``r = y - mu``.  The corrected data are ``invert(y)``; the exact
+        model companion of those points is the detrend-free model plus
+        ``invert_signal(signal)``: the signal itself for an additive space
+        (``y - X.c = m + r``), and ``signal / f`` for the magnitude space
+        (``y / f = m + r / f``).  Unchanged without detrend columns or a
+        point, so a GP fit without detrending plots exactly what it did.
+        """
+        if point is None or getattr(self, "total_detrend_cols", 0) == 0:
+            return signal
+        term = self.detrend_at_data(point)
+        return DETREND_SPACES[self.DETREND_SPACE]["invert_signal"](
+            signal, term
+        )
+
+    def detrend_grid_exact(self, i):
+        """Whether file ``i``'s corrected data have an exact companion on a
+        smooth time grid.
+
+        True without detrend columns on that file, and for an additive
+        space (corrected data ``m + r``: ``m + gp`` on any grid is exact).
+        False for a file with columns in the magnitude space, whose
+        corrected data are ``m + r / f`` with a per-observation ``f`` no
+        grid can carry -- a plot then draws its model+GP companion at the
+        data epochs (``detrend_corrected_signal``).
+        """
+        if self.n_detrend_per_inst[i] == 0:
+            return True
+        return DETREND_SPACES[self.DETREND_SPACE]["grid_exact"]
+
     def detrend_caption(self):
         """The sentence a detrending fit's figure captions owe the reader.
 
         Empty without detrend columns, so no shipped caption changes unless
-        the fit really does subtract a trend from the plotted points -- which
-        the reader has to be told, since those are then not the raw data
-        (see ``detrend_at_data`` for why the correction goes on the data
-        rather than on the model curve).  It is `meta["caption"]` LaTeX,
-        which is verbatim, so it carries no escaping.
+        the fit really does correct the plotted points -- which the reader
+        has to be told, since those are then not the raw data (see
+        ``detrend_corrected``).  The wording is the space's own (subtracted
+        vs divided out).  It is `meta["caption"]` LaTeX, which is verbatim,
+        so it carries no escaping.
         """
         if getattr(self, "total_detrend_cols", 0) == 0:
             return ""
-        return (
-            " The fitted linear trend against the data file's detrend "
-            "columns has been subtracted from the plotted points; the model "
-            "curve is evaluated on a smooth time grid and so cannot carry a "
-            "per-observation term."
-        )
+        return DETREND_SPACES[self.DETREND_SPACE]["caption"]
 
     def detrend_dep_labels(self):
         """``param_deps`` entry for the detrend coefficients, or ``[]``.

@@ -16,6 +16,8 @@ from exozippy.outputs.texutils import latex_escape
 
 class RVInstrument(Instrument):
     prose_noun = "radial velocity"
+    # The fitted trend is ADDED to the model (Instrument.DETREND_SPACE).
+    DETREND_SPACE = "additive"
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
@@ -571,10 +573,10 @@ class RVInstrument(Instrument):
         self._rv_model_data_node = rv_model
         self._rv_matrix_data_node = rv_matrix
 
-        # detrending
-        if self.total_detrend_cols > 0:
-            detrend = pm.Data("rv_detrend", self.detrend_matrix)
-            rv_model += pt.dot(detrend, self.detrend_coeffs.value)
+        # Detrending: the shared base mechanism (additive here) -- the one
+        # place the likelihood meets the trend, inverted onto the plotted
+        # data by detrend_corrected (Instrument._detrended_model).
+        rv_model = self._detrended_model(rv_model, "rv_detrend")
 
         # 2. Define the Likelihood.  Total variance = data_error^2 + jitter^2
         # (shared base helper).  The shared dispatcher writes the plain Normal
@@ -872,21 +874,29 @@ class RVInstrument(Instrument):
         it is not a safe one.
         """
         param_values = self._point_to_plot_params(point, system)
+        # The fitted detrend model comes off the DATA through the shared
+        # base inverse of the likelihood's own combination
+        # (Instrument.detrend_corrected); unchanged without detrend columns.
+        rv_corrected, err_corrected = self.detrend_corrected(
+            self.rv, self.err, point
+        )
         return {
             "param_values": param_values,
             # The likelihood's own per-orbit matrix at the observations
             # (see compile_plotters): an RM file's anomaly in its orbit's
             # column on its rows only.
             "data_rv_matrix": np.asarray(self._rv_data_fn(*param_values)),
+            "rv_corrected": rv_corrected,
+            "err_corrected": err_corrected,
             # Phasing data that still contains the correlated (e.g. rotation)
             # signal just smears the panel, so the GP conditional mean comes
-            # out of the data along with the other orbits' signal -- as does
-            # the fitted detrend model, which the likelihood adds per
-            # observation (build_likelihood's pt.dot) but no model curve on a
-            # pretty grid can carry.  Both are zeros when the feature is off,
-            # so this is a no-op then.
-            "extra_signals": self.gp_mean_at_data(system, point)
-            + self.detrend_at_data(point),
+            # out of the data along with the other orbits' signal.  Zeros
+            # when no file has a GP, so this is a no-op then.
+            # Mapped into the corrected-data space by the same base
+            # mechanism (identity for this additive space).
+            "extra_signals": self.detrend_corrected_signal(
+                self.gp_mean_at_data(system, point), point
+            ),
         }
 
     def _phased_arrays(self, system, point, col, o_idx, shared=None):
@@ -945,6 +955,9 @@ class RVInstrument(Instrument):
             "y_model": y_orbit[sort_m] * factor,
             "extra_models": extra_models,
             "other_signals": other_signals + shared["extra_signals"],
+            # The detrend-corrected data and errors the cleaning starts from.
+            "rv_corrected": shared["rv_corrected"],
+            "err_corrected": shared["err_corrected"],
         }
 
     def plot(self, system, points, filename_prefix="debug"):
@@ -1036,9 +1049,12 @@ class RVInstrument(Instrument):
                     )
                 )
         # The fitted trend is per observation, so it comes off the DATA
-        # rather than going onto the model curve (Instrument.detrend_at_data);
-        # zeros without detrend columns.
-        detrend = self.detrend_at_data(point)
+        # rather than going onto the model curve, through the base inverse of
+        # the likelihood's own combination (Instrument.detrend_corrected);
+        # the raw data without detrend columns.
+        rv_corrected, err_corrected = self.detrend_corrected(
+            self.rv, self.err, point
+        )
         for i in range(self.n_elements):
             mask = self.inst_map == i
             # gamma offset only when a point supplies it; raw data otherwise
@@ -1053,8 +1069,8 @@ class RVInstrument(Instrument):
                     role="data",
                     kind="scatter",
                     x=self.time[mask],
-                    y=(self.rv[mask] - g - detrend[mask]) * factor,
-                    yerr=self.err[mask] * factor,
+                    y=(rv_corrected[mask] - g) * factor,
+                    yerr=err_corrected[mask] * factor,
                     style=self._data_trace_style(i),
                 )
             )
@@ -1145,7 +1161,9 @@ class RVInstrument(Instrument):
                     mask = self.inst_map == i
                     g = self._point_value(point, self.gamma, i)
                     cleaned = (
-                        self.rv[mask] - g - prep["other_signals"][mask]
+                        prep["rv_corrected"][mask]
+                        - g
+                        - prep["other_signals"][mask]
                     ) * factor
                     data_phases = np.mod(
                         (self.time[mask] - tc_ref) / P_ref + 0.25, 1.0
@@ -1157,7 +1175,7 @@ class RVInstrument(Instrument):
                             kind="scatter",
                             x=data_phases,
                             y=cleaned,
-                            yerr=self.err[mask] * factor,
+                            yerr=prep["err_corrected"][mask] * factor,
                             style=self._data_trace_style(i),
                         )
                     )

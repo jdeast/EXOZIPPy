@@ -98,6 +98,9 @@ class MulensInstrument(Instrument):
     # Multiplicative per-instrument error scale (not additive jitter).
     noise_model = "err_scale"
     prose_noun = "microlensing photometry"
+    # Magnitude-space detrend coefficients MULTIPLY the flux model by
+    # 10**(-0.4 X.c) (Instrument.DETREND_SPACE).
+    DETREND_SPACE = "magnitude"
 
     # Deps of the derived `zeropoint` that are injected as context nodes by
     # add_parameter below rather than resolved as manifest parameters, so
@@ -1650,31 +1653,45 @@ class MulensInstrument(Instrument):
             system.band.names[band_idx],
         )
 
-    def build_likelihood(self, model, system):
+    def _model_flux(self, system, t, obs_pos, inst, resolve_times=None):
+        """The ONE detrend-free flux-model expression, in each row's own
+        instrument flux system.
 
-        # 1. Constants
-        t = pm.Data("mu_time", self.time)
-        obs_flux = pm.Data("mu_obs_flux", self.flux)
-        obs_err = pm.Data("mu_obs_err", self.err)
+        Both ``build_likelihood`` (the data's times, observer positions and
+        ``inst_map_tensor``) and ``compile_plotters`` (a symbolic grid, its
+        observer positions and one scalar instrument index) call it, so the
+        plotted curve for instrument ``i`` IS instrument ``i``'s likelihood
+        expression run on other times -- its own f_source / f_blend and, for
+        a binary source, its own ``q_flux`` (review 1.6.11: the plot used to
+        evaluate every observer group at the reference instrument, so a 2S
+        fit's curve carried the reference's colour while each instrument's
+        data carried its own).  The detrend term is NOT here: the likelihood
+        applies it through ``Instrument._detrended_model`` and the plots take
+        it off the data (``detrend_corrected``), instrument.md.
 
-        # 2. Magnification — both symbolic and Op paths take Skowron+2011
-        #    geocentric deviations (AU).  get_magnification_op dispatches:
-        #    PSPL→symbolic (NUTS-friendly), binary/finite-source→MulensModel
-        #    Op (use Metropolis).
-        #
-        #    u1/u2/bandpass come from the ONE resolver compile_plotters also
-        #    calls, so the plotted curve is the curve the likelihood fits.
+        Magnification: both the symbolic and Op paths take Skowron+2011
+        geocentric deviations (AU); ``get_magnification_op`` dispatches.
+        u1/u2/bandpass come from the one LD resolver.  ``resolve_times`` is
+        the likelihood's: it lets ``resolve_auto_vbbl`` size the backend on
+        the data before each source's Op is built (the plot grid reuses that
+        decision).
+
+        Flux: F = sum_j f_s,j A_j + f_b, with f_s,1 = f_s/(1+q_F) and
+        f_s,2 = f_s q_F/(1+q_F) (q_F per instrument -- sources differ in
+        colour).  No clamp: the model flux may legitimately be <= 0
+        (f_blend may be negative, difference-imaging data live around zero),
+        and the likelihood is Gaussian in flux, so nothing takes a log.
+        """
         u1, u2, bandpass = self._finite_source_limb_darkening(system)
-
-        # One magnification curve per source trajectory (NSNL)
         n_src = self._n_sources
         A_per_source = []
         for j in range(n_src):
-            system.mulensevent.resolve_auto_vbbl(self.time, index=j)
+            if resolve_times is not None:
+                system.mulensevent.resolve_auto_vbbl(resolve_times, index=j)
             A_per_source.append(
                 system.mulensevent.get_magnification_op(
                     t,
-                    self.observer_pos,
+                    obs_pos,
                     system,
                     index=j,
                     u1=u1,
@@ -1683,36 +1700,43 @@ class MulensInstrument(Instrument):
                 )
             )
 
-        # 3. Flux Model: F = Σ_j f_s,j·A_j + f_b, with f_s,1 = f_s/(1+q_F),
-        #    f_s,2 = f_s·q_F/(1+q_F) (q_F per instrument — sources differ in color)
-        fs = self.f_source.value[self.inst_map_tensor]
-        fb = self.f_blend.value[self.inst_map_tensor]
-
+        fs = self.f_source.value[inst]
+        fb = self.f_blend.value[inst]
         if n_src == 1:
-            model_flux = fs * A_per_source[0] + fb
-        else:
-            qf = self.q_flux.value[self.inst_map_tensor]
-            qf_safe = pt.maximum(qf, 0.0)
-            model_flux = (
-                fs / (1.0 + qf_safe) * A_per_source[0]
-                + fs * qf_safe / (1.0 + qf_safe) * A_per_source[1]
-                + fb
-            )
+            return fs * A_per_source[0] + fb
+        qf_safe = pt.maximum(self.q_flux.value[inst], 0.0)
+        return (
+            fs / (1.0 + qf_safe) * A_per_source[0]
+            + fs * qf_safe / (1.0 + qf_safe) * A_per_source[1]
+            + fb
+        )
 
-        # No clamp: model_flux may legitimately be <= 0 (f_blend is allowed to
-        # be negative, and difference-imaging data live around zero).  The
-        # likelihood is Gaussian in flux, so nothing here takes a logarithm.
+    def build_likelihood(self, model, system):
 
-        # Optional detrending against extra data columns.  The coefficients are
-        # magnitude-space (airmass, seeing, ...), so they enter multiplicatively
-        # in flux -- algebraically the same model as the additive magnitude
-        # detrending used before, and well defined for negative fluxes.
-        # Block-diagonal, so coefficients never mix across instruments.
-        if self.total_detrend_cols > 0:
-            detrend = pm.Data("mu_detrend", self.detrend_matrix)
-            model_flux = model_flux * pt.power(
-                10.0, -0.4 * pt.dot(detrend, self.detrend_coeffs.value)
-            )
+        # 1. Constants
+        t = pm.Data("mu_time", self.time)
+        obs_flux = pm.Data("mu_obs_flux", self.flux)
+        obs_err = pm.Data("mu_obs_err", self.err)
+
+        # 2-3. The one flux-model expression (see _model_flux), on the data's
+        # own times, observer positions and per-row instruments.
+        model_flux = self._model_flux(
+            system,
+            t,
+            self.observer_pos,
+            self.inst_map_tensor,
+            resolve_times=self.time,
+        )
+
+        # Optional detrending against extra data columns, through the shared
+        # base mechanism: the coefficients are magnitude-space (airmass,
+        # seeing, ...), so DETREND_SPACE = "magnitude" multiplies the flux by
+        # 10**(-0.4 X.c) -- the same model as the additive magnitude
+        # detrending used before, and well defined for negative fluxes -- and
+        # the plots divide the same factor out of the data
+        # (Instrument.detrend_corrected).  Block-diagonal, so coefficients
+        # never mix across instruments.
+        model_flux = self._detrended_model(model_flux, "mu_detrend")
 
         # 4. Error scaling & Likelihood (shared base helper: err * err_scale).
         # The shared dispatcher is the plain Normal unless a light curve asked
@@ -2160,30 +2184,11 @@ class MulensInstrument(Instrument):
 
         param_symbols = [p.value for p in system.plot_params]
 
-        n_src = self._n_sources
-        # Same (u1, u2, bandpass) resolution build_likelihood uses -- passing
-        # neither here silently plotted the UNIFORM-source magnification for a
-        # limb-darkened fit (review 1.6.1), and passing u1 without u2 would
-        # reintroduce the same class of split for a quadratic band.
-        u1, u2, bandpass = self._finite_source_limb_darkening(system)
-        A_per_source = [
-            system.mulensevent.get_magnification_op(
-                t_input,
-                obs_pos_input,
-                system,
-                index=j,
-                u1=u1,
-                u2=u2,
-                bandpass=bandpass,
-            )
-            for j in range(n_src)
-        ]
-
-        fs_inst = self.f_source.value[inst_idx]
-        fb_inst = self.f_blend.value[inst_idx]
-
-        # The model in instrument inst_idx's own FLUX system -- the same
-        # expression build_likelihood scores against the data.  It stops here:
+        # The model in instrument inst_idx's own FLUX system -- the very
+        # builder build_likelihood scores against the data (_model_flux), so
+        # the (u1, u2, bandpass) resolution (review 1.6.1: the plot once drew
+        # the UNIFORM-source magnification for a limb-darkened fit) and the
+        # per-instrument q_flux (1.6.11) cannot split.  It stops here:
         # the conversion to the plotted delta-magnitude is done in numpy by
         # plot_data, through the very `_flux_to_mag` the data traces go
         # through, so the model curve and the points it is drawn over cannot
@@ -2195,16 +2200,10 @@ class MulensInstrument(Instrument):
         # it is a break in the curve, not a spike off the bottom of the axis.
         #
         # The GP conditional mean is additive in this same space, which is why
-        # the "physical + GP" curve is built on it too (see plot_data).
-        if n_src == 1:
-            model_flux = fs_inst * A_per_source[0] + fb_inst
-        else:
-            qf_inst = pt.maximum(self.q_flux.value[inst_idx], 0.0)
-            model_flux = (
-                fs_inst / (1.0 + qf_inst) * A_per_source[0]
-                + fs_inst * qf_inst / (1.0 + qf_inst) * A_per_source[1]
-                + fb_inst
-            )
+        # the "physical + GP" curve is built on it too (see plot_data).  The
+        # detrend term is not: it is per observation, and plot_data divides
+        # it out of the data instead (Instrument.detrend_corrected).
+        model_flux = self._model_flux(system, t_input, obs_pos_input, inst_idx)
 
         # Retained symbolically so plot_data can walk the graph for
         # param_deps (the evaluator skips components whose specs declare no
@@ -2285,6 +2284,63 @@ class MulensInstrument(Instrument):
         }
         return unique_observers, obs_to_inst, inst_obs_loc
 
+    def _plot_model_layout(self, t_model):
+        """Which instruments' OWN model curves the chart draws.
+
+        ``[(i, name, grid_mask), ...]``: instrument ``i``'s likelihood
+        expression (``_model_flux`` at ``inst=i``, with its own observer
+        positions) is evaluated on ``t_model[grid_mask]`` and mapped onto
+        the reference flux system by the SAME affine map as ``i``'s data
+        (``_flux_alignment``'s ``align``).  So every plotted curve is the
+        model some instrument's data are scored against, drawn exactly
+        where those data are drawn -- never one instrument's model under
+        another's data (review 1.6.11).
+
+        Single source: after alignment instrument ``i``'s model is
+        ``f_s,ref * A(t; observer) + f_b,ref`` whatever ``i`` is, so ONE
+        curve per observer location represents all of them (the reference
+        instrument where it sits at that location, else the first one
+        there), over the whole grid -- the curves every shipped single-
+        source chart has always drawn, under the same names.
+
+        Binary source: ``q_flux`` is per instrument BY DESIGN (the sources
+        differ in colour), so after alignment each instrument's curve is
+        ``f_s,ref * A_eff,i(t) + f_b,ref`` with its own blend of the two
+        source magnifications.  The reference instrument draws the chart's
+        ``model`` over the whole grid; every other instrument draws
+        ``<name> model`` over its own data span only (as RV's per-instrument
+        curves do), so a seven-instrument chart is not seven full curves.
+        The layout depends only on the config and the data, never on the
+        point, so a live GUI eval keeps the same trace names.
+        """
+        ref_idx = self._reference_index()
+        unique_observers, obs_to_inst, inst_obs_loc = self._observer_groups()
+        full = np.ones(t_model.shape, dtype=bool)
+        if self._n_sources == 1:
+            layout = []
+            for obs_loc in unique_observers:
+                i = (
+                    ref_idx
+                    if inst_obs_loc[ref_idx] == obs_loc
+                    else obs_to_inst[obs_loc]
+                )
+                name = (
+                    f"model ({obs_loc})"
+                    if len(unique_observers) > 1
+                    else "model"
+                )
+                layout.append((i, name, full))
+            return layout
+        layout = [(ref_idx, "model", full)]
+        for i in range(self.n_elements):
+            if i == ref_idx:
+                continue
+            t_i = self.time[self.inst_map == i]
+            span = (t_model >= t_i.min()) & (t_model <= t_i.max())
+            if np.any(span):
+                layout.append((i, f"{self.names[i]} model", span))
+        return layout
+
     @staticmethod
     def _flux_to_mag(f):
         """Magnitudes of a flux array; NaN where the flux is not positive.
@@ -2312,8 +2368,10 @@ class MulensInstrument(Instrument):
         re-inject it into the reference system (f_source_ref, f_blend_ref):
           A_obs = (F_i - f_blend_i) / f_source_i
           F_aln = f_source_ref * A_obs + f_blend_ref
-        so all data lands on the reference scale, matching the model (also
-        drawn in the reference system).  Using the plotted point's fitted
+        so all data lands on the reference scale.  The model curves go
+        through the SAME map: each is some instrument i's own model flux,
+        aligned with i's own (f_source_i, f_blend_i) exactly as i's data are
+        (``_plot_model_layout``).  Using the plotted point's fitted
         fluxes keeps the alignment tied to the model rather than a stage-1
         estimate.
 
@@ -2433,7 +2491,7 @@ class MulensInstrument(Instrument):
             ]
 
         t_model, t0, tE = self._model_time_grid()
-        unique_observers, obs_to_inst, inst_obs_loc = self._observer_groups()
+        unique_observers, _, inst_obs_loc = self._observer_groups()
         # Skowron geocentric deviations for each unique observer over the
         # model grid -- the single obs_pos convention both the symbolic PSPL
         # path and the MulensModel/VBM Ops consume.
@@ -2446,48 +2504,52 @@ class MulensInstrument(Instrument):
         }
         param_values = self._point_to_plot_params(point, system)
         aln = self._flux_alignment(param_values)
-        align, ref_idx = aln["align"], aln["ref_idx"]
+        align = aln["align"]
 
         node = getattr(self, "_model_flux_node", None)
+        # The detrend correction and the GP conditional mean reach the chart
+        # in NUMPY (detrend_corrected / gp_mean_on_grid), so the graph walk
+        # cannot see their parameters; without these a GUI slider on either
+        # would never refresh the chart.
         deps = self._model_trace_param_deps(node, system)
+        deps = deps + [
+            lbl
+            for lbl in self.detrend_dep_labels() + self.gp_dep_labels()
+            if lbl not in deps
+        ]
 
         traces = []
-        for obs_loc in unique_observers:
-            i = obs_to_inst[obs_loc]
+        for i, name, grid_mask in self._plot_model_layout(t_model):
+            obs_loc = inst_obs_loc[i]
+            t_i = t_model[grid_mask]
             try:
-                # ref_idx: reference flux system, this observer's
-                # magnification (parallax between sites is preserved).  The
-                # model comes back as a FLUX and is converted here, through
-                # the same `_flux_to_mag` + `baseline_ref` the data traces use
-                # -- so a non-positive model flux becomes a NaN gap, exactly
-                # as a non-positive datum does, instead of the ~75 mag spike
-                # the old in-graph 1e-30 clamp drew (review 1.6.4).
-                y_model = (
-                    self._flux_to_mag(
-                        self._compiled_model_flux(
-                            t_model,
-                            obs_model_pos[obs_loc],
-                            ref_idx,
-                            *param_values,
-                        )
-                    )
-                    - aln["baseline_ref"]
+                # Instrument i's own likelihood expression (its f_source,
+                # f_blend and q_flux; its observer's magnification, so
+                # parallax between sites is preserved), mapped onto the
+                # reference flux system by the same `align` as i's data.  The
+                # model comes back as a FLUX and is converted through the same
+                # `_flux_to_mag` + `baseline_ref` the data traces use -- so a
+                # non-positive model flux becomes a NaN gap, exactly as a
+                # non-positive datum does, instead of the ~75 mag spike the
+                # old in-graph 1e-30 clamp drew (review 1.6.4).
+                y_model = align(
+                    self._compiled_model_flux(
+                        t_i,
+                        obs_model_pos[obs_loc][grid_mask],
+                        i,
+                        *param_values,
+                    ),
+                    i,
                 )
             except Exception as e:
-                logger.warning(
-                    f"Model eval failed for observer '{obs_loc}': {e}"
-                )
+                logger.warning(f"Model eval failed for '{name}': {e}")
                 continue
             traces.append(
                 Trace(
-                    name=(
-                        f"model ({obs_loc})"
-                        if len(unique_observers) > 1
-                        else "model"
-                    ),
+                    name=name,
                     role="model",
                     kind="line",
-                    x=t_model,
+                    x=t_i,
                     y=y_model,
                     node=node,
                     style={"series_index": int(i)},
@@ -2498,15 +2560,36 @@ class MulensInstrument(Instrument):
         # The GP is additive in that instrument's own FLUX (that is the space
         # celerite2 conditioned in), so it is added to the model flux there and
         # the sum is then mapped onto the reference flux system.
-        for i in sorted(getattr(self, "_gp_pred_on_grid", {})):
-            obs_pretty = obs_model_pos.get(inst_obs_loc[i])
-            if obs_pretty is None:
-                continue
+        #
+        # A light curve with detrend columns is the exception: celerite2
+        # conditioned on r = y - m*f, the plotted points are y/f = m + r/f,
+        # and the exact companion m + gp/f needs each datum's own f, which a
+        # smooth grid cannot carry.  So for such a file the curve is drawn AT
+        # ITS DATA EPOCHS, through the base mechanism
+        # (Instrument.detrend_grid_exact / detrend_corrected_signal) -- every
+        # plotted quantity stays exactly what the likelihood scored.
+        gp_files = sorted(getattr(self, "_gp_pred_on_grid", {}))
+        gp_at_data = None
+        if any(not self.detrend_grid_exact(i) for i in gp_files):
+            gp_at_data = self.detrend_corrected_signal(
+                self.gp_mean_at_data(system, point), point
+            )
+        for i in gp_files:
             try:
-                flux_i = self._compiled_model_flux(
-                    t_model, obs_pretty, i, *param_values
-                )
-                gp_i = self.gp_mean_on_grid(system, point, i, t_model)
+                if self.detrend_grid_exact(i):
+                    obs_pretty = obs_model_pos[inst_obs_loc[i]]
+                    t_gp = t_model
+                    flux_i = self._compiled_model_flux(
+                        t_model, obs_pretty, i, *param_values
+                    )
+                    gp_i = self.gp_mean_on_grid(system, point, i, t_model)
+                else:
+                    rows = self.rows(i)
+                    t_gp = self.time[rows]
+                    flux_i = self._compiled_model_flux(
+                        t_gp, self.observer_pos[rows], i, *param_values
+                    )
+                    gp_i = gp_at_data[rows]
                 y_gp = align(np.asarray(flux_i, dtype=float) + gp_i, i)
             except Exception as e:
                 logger.warning(
@@ -2518,16 +2601,24 @@ class MulensInstrument(Instrument):
                     name=f"{self.names[i]} model+GP",
                     role="model",
                     kind="line",
-                    x=t_model,
+                    x=t_gp,
                     y=y_gp,
                     style={"series_index": int(i), "lw": 1.0},
                 )
             )
 
+        # The fitted detrend trend is per observation, so it comes off the
+        # DATA -- divided out of the fluxes and their errors, the base
+        # inverse of the factor the likelihood multiplied the model by
+        # (Instrument.detrend_corrected) -- in each instrument's own flux
+        # system, before the alignment.  The raw data without detrend columns.
+        flux_corrected, err_corrected = self.detrend_corrected(
+            self.flux, self.err, point
+        )
         for i in range(self.n_elements):
             mask = self.inst_map == i
-            flux_i = self.flux[mask]
-            err_i = self.err[mask]
+            flux_i = flux_corrected[mask]
+            err_i = err_corrected[mask]
             delta_mag = align(flux_i, i)
             # Brighter (flux + err) -> smaller aligned mag (lower error bar).
             # NaN wherever the aligned flux is not positive.
@@ -2557,6 +2648,14 @@ class MulensInstrument(Instrument):
                 "All instruments are aligned onto the reference "
                 "instrument's flux system and shown in magnitudes; "
                 "non-positive aligned fluxes are not drawn."
+                + (
+                    " The two sources' flux ratio is fitted per instrument, "
+                    "so each instrument's own model is drawn over its data "
+                    "in that instrument's colour."
+                    if self._n_sources > 1
+                    else ""
+                )
+                + self.detrend_caption()
             ),
         }
         specs = [

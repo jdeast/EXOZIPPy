@@ -19,6 +19,8 @@ from . import physics, spline
 
 class Transit(Instrument):
     prose_noun = "transit photometry"
+    # The fitted trend is ADDED to the model (Instrument.DETREND_SPACE).
+    DETREND_SPACE = "additive"
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
@@ -1249,9 +1251,10 @@ class Transit(Instrument):
         self._lc_physical_node = lc_model
         self._lc_planet_terms_node = planet_terms
 
-        if self.total_detrend_cols > 0:
-            detrend = pm.Data("transit_detrend", self.detrend_matrix)
-            lc_model += pt.dot(detrend, self.detrend_coeffs.value)
+        # Detrending: the shared base mechanism (additive here) -- the one
+        # place the likelihood meets the trend, inverted onto the plotted
+        # data by detrend_corrected (Instrument._detrended_model).
+        lc_model = self._detrended_model(lc_model, "transit_detrend")
 
         # Full per-observation model prediction (baseline + detrend +
         # exposure-averaged transit decrement).
@@ -1543,14 +1546,25 @@ class Transit(Instrument):
         """
         param_values = self._point_to_plot_params(point, system)
         _, data_terms = self._eval_lc_data(param_values)
+        # The fitted trend is a per-observation term no pretty-grid curve
+        # carries, so it comes off the data through the shared base inverse
+        # of the likelihood's own combination (Instrument.detrend_corrected);
+        # unchanged without detrend columns.
+        flux_corrected, err_corrected = self.detrend_corrected(
+            self.flux, self.err, point
+        )
         return {
             "param_values": param_values,
+            "flux_corrected": flux_corrected,
+            "err_corrected": err_corrected,
             # Removed from the phased data along with the other planets':
-            # the correlated component would smear the fold, and the fitted
-            # trend is a per-observation term no pretty-grid curve carries.
-            # Both are zeros when the feature is off.
-            "extra_signals": self.gp_mean_at_data(system, point)
-            + self.detrend_at_data(point),
+            # the correlated component would smear the fold.  Zeros when no
+            # file has a GP.
+            # Mapped into the corrected-data space by the same base
+            # mechanism (identity for this additive space).
+            "extra_signals": self.detrend_corrected_signal(
+                self.gp_mean_at_data(system, point), point
+            ),
             # (N_obs, N_planets): each planet's term at every observation,
             # from the likelihood's own node.
             "data_terms": data_terms,
@@ -1610,7 +1624,7 @@ class Transit(Instrument):
 
         baseline = self._point_value(point, self.baseline, i)
         cleaned_flux = (
-            self.flux[rows]
+            shared["flux_corrected"][rows]
             - baseline
             - other_terms
             - shared["extra_signals"][rows]
@@ -1624,6 +1638,7 @@ class Transit(Instrument):
             "y_model": y_planet[sort_m],
             "x_data": data_phases * P_ref,
             "y_data": cleaned_flux,
+            "yerr_data": shared["err_corrected"][rows],
         }
 
     def plot(self, system, points, filename_prefix="debug"):
@@ -1676,9 +1691,12 @@ class Transit(Instrument):
 
         # ---- Unphased: flux vs time, per instrument -------------------
         # The fitted trend is per observation, so it comes off the DATA
-        # rather than going onto the model curve; zeros without detrend
-        # columns (Instrument.detrend_at_data).
-        detrend = self.detrend_at_data(point)
+        # rather than going onto the model curve, through the base inverse of
+        # the likelihood's own combination (Instrument.detrend_corrected);
+        # the raw data without detrend columns.
+        flux_corrected, err_corrected = self.detrend_corrected(
+            self.flux, self.err, point
+        )
         # Every instrument's curve comes from ONE evaluation of the compiled
         # grid layout.  A failed model eval keeps the data-only panels
         # (matching the per-point tolerance of the old hand-drawn loop).
@@ -1711,8 +1729,8 @@ class Transit(Instrument):
                     role="data",
                     kind="scatter",
                     x=self.time[mask],
-                    y=self.flux[mask] - detrend[mask],
-                    yerr=self.err[mask],
+                    y=flux_corrected[mask],
+                    yerr=err_corrected[mask],
                     # Black-dot default (the historical PDF look); a user
                     # plot: color/marker still wins via _data_trace_style.
                     style={
@@ -1787,7 +1805,7 @@ class Transit(Instrument):
                             kind="scatter",
                             x=prep["x_data"],
                             y=prep["y_data"],
-                            yerr=self.err[mask],
+                            yerr=prep["yerr_data"],
                             style={
                                 "color": "k",
                                 "marker": ".",

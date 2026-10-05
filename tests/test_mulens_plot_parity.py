@@ -184,3 +184,149 @@ def test_plot_curve_is_nan_not_a_75_mag_spike(finite_source_system):
     assert np.any(np.isnan(model_y))
     finite = model_y[np.isfinite(model_y)]
     assert finite.size == 0 or np.max(np.abs(finite)) < 60.0
+
+
+# ---------------------------------------------------------------------------
+# Review 1.6.11: a binary-source chart drew ONE model curve, evaluated at the
+# reference instrument, under every instrument's data -- but q_flux (the two
+# sources' flux ratio) is per instrument BY DESIGN, so each instrument's data
+# carry their own chromatic mix and a perfect fit showed false residuals.
+# The plotted model for each instrument is now that instrument's own
+# likelihood expression (MulensInstrument._model_flux at inst=i).
+# ---------------------------------------------------------------------------
+
+_Q_FLUX = {"OGLE": 0.2, "MOA": 2.0}
+_T0_B, _U0_B = 2460030.0, 0.3
+
+
+def _write_two_source_lc(path, q_flux, n=90):
+    """Noiseless binary-source PSPL light curve (magnitudes) with this
+    instrument's own flux ratio q_flux = f_s,2 / f_s,1."""
+    from test_band_autopin_ld import T0, TE, U0
+
+    t = np.linspace(T0 - 2 * TE, T0 + 2 * TE, n)
+
+    def pspl(t0, u0):
+        u = np.sqrt(u0**2 + ((t - t0) / TE) ** 2)
+        return (u**2 + 2.0) / (u * np.sqrt(u**2 + 4.0))
+
+    flux = (pspl(T0, U0) + q_flux * pspl(_T0_B, _U0_B)) / (1.0 + q_flux)
+    mag = 18.0 - 2.5 * np.log10(flux)
+    np.savetxt(path, np.column_stack([t, mag, np.full(n, 0.01)]))
+    return str(path)
+
+
+@pytest.fixture(scope="module")
+def two_source_two_instrument(tmp_path_factory):
+    """A binary-source point-lens fit with two light curves whose q_flux
+    differ by a factor of ten."""
+    from test_band_autopin_ld import T0, TE, U0
+
+    tmp = tmp_path_factory.mktemp("mulens_2s")
+    files = {
+        name: _write_two_source_lc(tmp / f"{name}.dat", q)
+        for name, q in _Q_FLUX.items()
+    }
+    config = {
+        "star": [{"name": "Lens"}, {"name": "SourceA"}, {"name": "SourceB"}],
+        "mulensevent": [
+            {"finite_source": False, "t0_par": T0, "use_op": False}
+        ],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.SourceA"}, {"body": "star.SourceB"}],
+        "mulensinstrument": [
+            {"name": name, "file": files[name]} for name in _Q_FLUX
+        ],
+    }
+    params = {
+        "source.SourceA.t_0": {"initval": T0},
+        "source.SourceA.u_0": {"initval": U0},
+        "source.SourceB.t_0": {"initval": _T0_B},
+        "source.SourceB.u_0": {"initval": _U0_B},
+        "mulensevent.t_E": {"initval": TE},
+        "star.radius": {"sigma": 0.0},
+        "star.teff": {"sigma": 0.0},
+        "star.feh": {"sigma": 0.0},
+    }
+    for name, q in _Q_FLUX.items():
+        params[f"mulensinstrument.{name}.q_flux"] = {"initval": q}
+    for nm in ("Lens", "SourceA", "SourceB"):
+        params[f"star.{nm}.ra"] = {"initval": 264.0, "sigma": 0}
+        params[f"star.{nm}.dec"] = {"initval": -27.0, "sigma": 0}
+    system = System(config, user_params=params)
+    system.prepare()
+    model = system.build_model()
+    with model:
+        point = system.get_internal_point(model, system.get_raw_start(model))
+    system.compile_plotter_functions(model)
+    return system, point
+
+
+def test_each_instruments_plotted_model_is_its_likelihood_model_at_the_data(
+    two_source_two_instrument,
+):
+    """
+    Given a binary-source fit whose two instruments have different q_flux,
+    When each instrument's plotted model (the compiled plot function at
+    that instrument's index) is evaluated at its own observation times and
+    observer positions,
+    Then it equals the likelihood's own detrend-free model on that
+    instrument's rows, to floating-point precision.
+    """
+    system, point = two_source_two_instrument
+    inst = system.mulensinstrument
+    values = inst._point_to_plot_params(point, system)
+    fn = pytensor.function(
+        [p.value for p in system.plot_params],
+        inst._detrend_free_node,
+        on_unused_input="ignore",
+    )
+    at_data = np.asarray(fn(*values), dtype=float)
+    q = [inst._point_value(point, inst.q_flux, i) for i in range(2)]
+    assert abs(q[0] - q[1]) > 1.0  # the instruments really differ
+
+    for i in range(inst.n_elements):
+        rows = inst.rows(i)
+        plotted = np.asarray(
+            inst._compiled_model_flux(
+                inst.time[rows], inst.observer_pos[rows], i, *values
+            ),
+            dtype=float,
+        )
+        np.testing.assert_allclose(plotted, at_data[rows], rtol=1e-12)
+
+
+def test_each_instrument_draws_its_own_binary_source_curve(
+    two_source_two_instrument,
+):
+    """
+    Given the same fit,
+    When plot_data builds the chart,
+    Then the reference instrument draws `model` and the other instrument
+    draws `MOA model` over its own data span, each its OWN model aligned
+    by the same map as its data -- and the MOA curve is measurably NOT the
+    reference instrument's curve, which is what the chart used to draw
+    under every instrument's data (review 1.6.11).  The caption says so.
+    """
+    system, point = two_source_two_instrument
+    inst = system.mulensinstrument
+    values = inst._point_to_plot_params(point, system)
+    aln = inst._flux_alignment(values)
+
+    specs = inst.plot_data(system, point)
+    models = {t.name: t for t in specs[0].traces if t.role == "model"}
+    assert sorted(models) == ["MOA model", "model"]
+    assert "flux ratio is fitted per instrument" in specs[0].meta["caption"]
+
+    for name, i in (("model", 0), ("MOA model", 1)):
+        tr = models[name]
+        t = np.asarray(tr.x, dtype=float)
+        obs = inst._abs_to_delta(t, inst.get_observer_position(t))
+        own = aln["align"](inst._compiled_model_flux(t, obs, i, *values), i)
+        np.testing.assert_allclose(tr.y, own, rtol=1e-12)
+
+    tr = models["MOA model"]
+    t = np.asarray(tr.x, dtype=float)
+    obs = inst._abs_to_delta(t, inst.get_observer_position(t))
+    ref_curve = aln["align"](inst._compiled_model_flux(t, obs, 0, *values), 0)
+    assert np.nanmax(np.abs(np.asarray(tr.y) - ref_curve)) > 1e-2
