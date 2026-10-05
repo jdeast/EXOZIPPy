@@ -146,6 +146,27 @@ The why is a type erasure. `lens_map` / `source_map` carry only an **index**; th
 Planet-as-lens was **not** implemented, deliberately. A planet body has no `distance` or proper motion of its own, and `galacticmodel.build_likelihood` reads `system.star` only -- so a free-floating planet declared as a `planet` would lose both the galactic density prior and the kinematic prior, leaving the lens distance unidentifiable. The supported recipe is therefore a `star` block with a low `star.<name>.logmass` **and** `mass_function: ffp` (next section). Both halves are needed: a star block alone still draws the stellar IMF, which is what the guard's error message now says.
 
 
+## Choosing a coordinate set: the swaps are conditioning, not correctness (review 8.6.7)
+
+The coordinate swaps -- `fitmurel` (sample the relative proper motion), `fitpirel` (`log_pi_rel`), `fitthetae` (`log_theta_E`), `fitu0te` (`u_0 * t_E`, per source), plus `log_s` and the `star_constrains_rho` severance -- change WHERE the sampler walks, never the model: each carries its exact change-of-variables Jacobian. Which set to use was measured, not argued. A/B on DC2018 event 128 (2026-08-27; every arm with the capped Hogg mixture of review 8.6.3, against a cap-only baseline):
+
+| arm | rho | mixing of the latent block | verdict |
+|---|---|---|---|
+| cap-only baseline | 0.00713(20) | -- | healthy |
+| `fitmurel` only | 0.00713(20) | logmass ESS 7306 | healthy (best) |
+| `fitu0te` only | 0.00713(20) | unimodal, global | healthy |
+| all swaps together | 0.00713(20) | latent ESS 1200-7300 | healthy |
+| `fitpirel` only | 0.00713(20) | logmass ESS 300 | under-mixed |
+| `fitthetae` only | -- | 30 of 52 chains frozen | stuck |
+
+Three conclusions, each of which looks like a judgment call and is not:
+
+1. **The Hogg cap alone recovers rho.** The swaps are conditioning, not correctness: no arm moved rho, and a fit that is wrong without a swap is wrong for another reason.
+2. **The swaps interact non-additively, and a single swap can hurt.** Sampling `log_theta_E` alone turns the mass-parallax ridge into a `log_theta_E`-`log_mu_rel` ridge; only composing it with `fitmurel` relieves it. So: **use the full swap set together, or `fitmurel` alone. NEVER `fitpirel` alone or `fitthetae` alone.** A log-polar `mu_rel` coordinate was not needed and is not implemented.
+3. **Healthy arms still disagree on the prior-dominated latent block** (lens and source masses and distances) by 1.0-3.2 posterior widths -- on event 128, D_l spans 1924-3698 pc and D_s 2081-7334 pc across healthy arms. A sweep that reports latent masses or distances must fix one parameterization and say which, or report the spread as a systematic. The observables (`t_E`, `rho`, `pi_E`, `theta_E` where the SED ties it) agree.
+
+The severance question was settled the same way. Severing `star_constrains_rho` hands `mu_rel` to the galactic kinematic prior, and event 128's true `mu_rel` (1.814 mas/yr) is atypically slow against a prior that prefers ~11, so every severed arm put `theta_E` 6.6x high. Relinked, with the source `teff`/`radius` free and `feh ~ N(0, 0.5)`, the fit gives `mu_rel` 1.469 [1.158, 1.758] against the truth 1.814, `theta_E` 0.0733 against 0.0905, and `rho` unchanged at 0.00708. The 601-nat backward tie that had motivated severing was a stiff solar pin on the source star, not the tie itself. Keep the link; do not sever to escape a tension without first checking what is pinned.
+
 ## The event's derived observables are in the trace, and a point source still reports rho (review 2.6.14)
 
 `t_E`, `theta_E`, `pi_rel`, `mu_rel_mag`, `pi_E_N`/`pi_E_E` and the lens masses are pure expressions of the sampled physical state. They are now `pm.Deterministic`s (the general "every reported derived parameter is a node" rule in `src/exozippy/components/parameter.md`), so the trace `run.py` writes before wrap-up carries them, in every coordinate configuration (default, `fitmurel`, `fitpirel`, `fitthetae`, `fitu0te`): a wrap-up that dies -- three OOM kills on one model -- now costs formatting, not physics. `MulensEvent.plot_corner` still reads `Parameter.posterior`, which is now the trace's copy.
