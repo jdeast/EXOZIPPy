@@ -261,13 +261,18 @@ def test_ptde_rung_thinning_runs_end_to_end():
     assert idata.posterior.sizes["chain"] == 4
 
 
-def test_ptde_collect_rung_timing_runs_end_to_end(caplog):
+def test_ptde_collect_rung_timing_runs_end_to_end(
+    caplog, tmp_path, monkeypatch
+):
     """
     Given collect_rung_timing=True on a multi-temp model,
     When ptde_sample runs,
     Then it completes normally and logs a per-rung timing summary line
       for every rung.
     """
+    # The sampler writes <label>_rung_times.npz into the cwd (by design,
+    # beside the run's own outputs); keep it out of the checkout.
+    monkeypatch.chdir(tmp_path)
     model = _simple_model()
     system = _MinimalSystem()
     with caplog.at_level("INFO", logger="exozippy.samplers.ptde"):
@@ -284,6 +289,7 @@ def test_ptde_collect_rung_timing_runs_end_to_end(caplog):
             log_interval=100,
             collect_rung_timing=True,
         )
+    assert list(tmp_path.glob("*_rung_times.npz"))
     assert idata.posterior.sizes["draw"] == 20
     messages = "\n".join(r.message for r in caplog.records)
     assert "PTDE per-rung logp timing" in messages
