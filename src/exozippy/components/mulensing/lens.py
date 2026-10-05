@@ -46,6 +46,13 @@ class Lens(Component):
           - body: planet.b           # companion (planet or star), may carry
             orbital_motion: linear   #   its own orbital-motion keys
 
+    Any number of lens bodies: the default ``backend: vbm_direct`` is
+    N-body (VBMicrolensing MultiMag2); only ``backend: mulensmodel`` caps
+    the lens at a binary (MulensEvent.get_magnification_op raises), and the
+    relaxation engine's companion relations are binary-only, so a 3+ body
+    lens needs explicit body masses (mulensing.md, "Three or more lens
+    bodies").
+
     In the params file, address a companion's geometry by the body's
     instance name (``lens.b.log_s``) or by element index (``lens.1.log_s``
     -- element 0 is the primary, so the FIRST companion is element 1).  A
