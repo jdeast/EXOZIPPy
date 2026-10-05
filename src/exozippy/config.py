@@ -2053,6 +2053,12 @@ class ConfigManager:
             # near-bound warnings append when this parameter's start or
             # posterior lands against a wall.  See parameter.md.
             "near_bound_remedy": base.get("near_bound_remedy"),
+            # Component-declared, defaults.yaml only, the start-time twin of
+            # near_bound_remedy: the sentence check_user_starts appends when
+            # a user initval on this parameter is not what the model is
+            # built at -- how to SEED it instead (review 8.6.15).  See
+            # parameter.md.
+            "seed_remedy": base.get("seed_remedy"),
             # Component-declared, defaults.yaml only: this parameter is
             # defined modulo a period ({value, unit} or {param: sibling}),
             # so its posterior is recentered about its mode before it is

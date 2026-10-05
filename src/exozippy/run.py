@@ -2317,12 +2317,20 @@ def inspect_start(
     )
     if start_misses:
         lines = []
+        # The component's own seeding recipe (Parameter.seed_remedy, review
+        # 8.6.15), once per distinct sentence, naming the keys it answers:
+        # mulensevent.t_E, pi_E_N and pi_E_E share one and miss together.
+        remedies = {}
         for f in start_misses:
             lines.append(
                 f"  {f['key']}: you set {f['requested']:.6g}, the model "
                 f"is built at {f['produced']:.6g} ({f['rel']:+.2%}) -- "
                 f"{f['detail']}"
             )
+            if f["remedy"]:
+                remedies.setdefault(f["remedy"], []).append(f["key"])
+        for remedy, keys in remedies.items():
+            lines.append(f"  For {', '.join(keys)}: {remedy}")
         logger.warning(
             "?" * 60 + "\n"
             "WARNING: the model is not built at every value you set:\n"

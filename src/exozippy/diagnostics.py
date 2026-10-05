@@ -527,7 +527,9 @@ class ModelAuditor:
         under test) -- both look right while the model starts elsewhere.
 
         Returns a list of dicts sorted worst-first, empty when the model
-        delivers everything asked of it.
+        delivers everything asked of it.  Each carries ``remedy``: the
+        component's own seeding sentence for that parameter
+        (``Parameter.seed_remedy``, review 8.6.15), "" when it declared none.
         """
         cm = getattr(self.system, "config_manager", None)
         ledger = dict(getattr(cm, "_last_resolved", None) or {})
@@ -700,6 +702,27 @@ class ModelAuditor:
                         ),
                     }
                 )
+
+        # THE COMPONENT'S OWN SEEDING ADVICE (review 8.6.15).  Everything
+        # above is generic and can only say WHAT moved and which class of
+        # reason; for some parameters the component knows the recipe that
+        # works, and the generic remedy is actively misleading there.  The
+        # worked example: re-seeding mulensevent.t_E / pi_E_* alongside the
+        # proper-motion, mass and distance seeds of examples/ob170114 with
+        # the source proper motion left unseeded builds the model at
+        # t_E = 202.65 (seed 173) and phi_pi = 1.1 deg (37.25): the engine
+        # reconciled the over-determined chain by moving the unseeded source
+        # pm, and "fix the sampled parameter(s) it is derived from" lists
+        # five parameters without saying that the fix is to seed ALL the
+        # leaves and drop these seeds.  Appended to every reason, since the
+        # recipe is the same whichever way the miss arose.  Carried as its
+        # own field rather than glued onto `detail`: one recipe typically
+        # answers several keys (t_E, pi_E_N and pi_E_E miss together), and
+        # run.inspect_start prints each distinct one ONCE under the list
+        # instead of three copies of a paragraph.
+        param_of = {key: p for key, p, _i, _req in targets}
+        for f in findings:
+            f["remedy"] = param_of[f["key"]].seed_remedy_suffix().strip()
 
         findings.sort(key=lambda f: -abs(f["rel"]))
         return findings
