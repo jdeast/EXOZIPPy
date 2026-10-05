@@ -349,8 +349,8 @@ class MulensInstrument(Instrument):
         # sees the data as the model will -- masked, detrended, and already
         # converted to flux.  It also has to land BEFORE
         # `_estimate_flux_components` in pass 2, which reads the seed t_0 /
-        # u_0 / t_E to decompose each band's flux and silently falls back to
-        # median-flux / q_source = 0.95 without them.
+        # u_0 / t_E to decompose each band's flux and falls back to the
+        # median flux and the declared q_source start without them.
         self._peak_find_seeds(system, per_file)
 
         # The event geometry the bootstrap below reads, as the relaxation
@@ -939,6 +939,62 @@ class MulensInstrument(Instrument):
             return mad
         return 1.0
 
+    def _q_source_declared(self, inst_idx):
+        """(start, lower, upper) of ``q_source`` for one light curve.
+
+        Read through ``ConfigManager.resolve`` -- defaults.yaml under any
+        user entry for this element -- so the bootstrap's clip is the
+        parameter's real support and its fallback start is the declared one.
+        Never hand-copy these numbers here: the old [0.05, 0.95] clip and
+        0.95 fallback were exactly such copies, and the clip was tighter than
+        the declared [0, 2] (review 2.6.23).
+        """
+        cfg = self.config_manager.resolve(
+            self.prefix, "q_source", element=inst_idx, names=self.names
+        )
+        return tuple(
+            float(np.asarray(cfg[field], dtype=float).reshape(-1)[0])
+            for field in ("initval", "lower", "upper")
+        )
+
+    @staticmethod
+    def _clip_q_source(q, lower, upper, what):
+        """``q`` as a float, clipped to the declared [lower, upper] -- loudly.
+
+        A start outside two finite bounds is fatal at build (parameter.py),
+        so the hint has to land inside; but a clip that moves it means the
+        start no longer reproduces the split that ``what`` describes, and
+        the user is told.  Inside the bounds the value passes untouched.
+        """
+        q = float(q)
+        if lower <= q <= upper:
+            return q
+        clipped = float(np.clip(q, lower, upper))
+        logger.warning(
+            f"{what} give a source fraction q_source = {q:.6g}, outside its "
+            f"declared bounds [{lower:g}, {upper:g}]; starting q_source at "
+            f"{clipped:g} instead.  If the split is real, the q_source "
+            f"bounds are too tight for this light curve."
+        )
+        return clipped
+
+    @staticmethod
+    def _nnls_free_blend(A, F):
+        """Least squares for F = A @ f_s + f_b with f_s >= 0 and f_b FREE.
+
+        The blend is split into two non-negative parts, f_b = b_plus -
+        b_minus, so one NNLS call leaves it unconstrained while the source
+        columns keep their sign constraint (review 2.6.23: the old design
+        put a plain ones column under NNLS, forcing f_b >= 0, while the flux
+        likelihood and defaults.yaml treat a negative blend as first class).
+        When the best blend is positive the -1 column never enters the
+        active set, so the solve is the old one.  Returns (f_s, f_b).
+        """
+        ones = np.ones(len(F))
+        X = np.column_stack([A, ones, -ones])
+        sol, _ = nnls(X, F)
+        return sol[:-2], float(sol[-2] - sol[-1])
+
     def _estimate_flux_components(
         self, t, f_obs, xyz_au, ra_rad, dec_rad, inst_idx, geometry
     ):
@@ -949,26 +1005,45 @@ class MulensInstrument(Instrument):
         q_flux   = f_s,2 / f_s,1 (binary source; 1.0 for single source)
 
         With N sources the decomposition solves the linear model
-        F(t) = Σ_j f_s,j · A_j(t) + f_b via NNLS, where A_j is the PSPL
+        F(t) = sum_j f_s,j * A_j(t) + f_b by least squares with every
+        f_s,j >= 0 and f_b FREE (``_nnls_free_blend``), where A_j is the PSPL
         magnification along source j's trajectory (source.<j>.t_0/u_0, the
         shared mulensevent t_E).
         The binary-lens perturbation is irrelevant here — we only need flux
         scales, not a precise model.
 
+        A NEGATIVE BLEND IS FIRST CLASS (review 2.6.23): difference imaging
+        and over-subtracted crowded fields produce one, the flux likelihood
+        models it, and defaults.yaml bounds f_blend to [-1000, 1000] and
+        q_source to [0, 2] (q_source > 1 IS a negative blend).  So nothing
+        here clamps f_b at zero, and q_source is clipped only to its DECLARED
+        bounds (``_q_source_declared``, read through ``resolve`` so a user
+        bound counts too), never to an invented [0.05, 0.95].
+
         If the user has specified f_source and/or f_blend in their params file,
         those values are respected (they are TOTALS over sources), for any
         number of sources:
-          - both given  → skip estimation entirely, derive q from the ratio
+          - both given  -> skip estimation entirely, derive q from the ratio,
+            unclipped (review 2.6.10: a stated 0.99 used to become 0.95)
           - f_source only → fix it and solve for f_blend via median residuals
           - f_blend only  → fix it and solve for f_source via NNLS
-          - neither       → solve everything via NNLS
+          - neither       -> solve everything (sources >= 0, blend free)
 
-        ``f_obs`` is the file's flux (the modeled observable), so the NNLS
+        ``f_obs`` is the file's flux (the modeled observable), so the
         design matrix acts on it directly -- there is no magnitude round trip.
 
-        Falls back to the data median / q=0.95 when t_0, u_0 or t_E has no
-        informed start, and says which (review 2.6.30(b): a missing t_E used
-        to be an invented 30 d).  The event geometry comes from `geometry`
+        Falls back to the data median and the DECLARED q_source start when
+        t_0, u_0 or t_E has no informed start, and says which (review
+        2.6.30(b): a missing t_E used to be an invented 30 d).  When the
+        free-blend solve finds source light but a non-positive TOTAL (a
+        light curve with no baseline coverage leaves the blend unconstrained),
+        it WARNS naming the file and re-solves with the blend held >= 0.  When
+        no positive source flux survives, it WARNS naming the file and takes
+        the data median and the configured q_source start -- that usually
+        means the seeded geometry does not describe this band, a signal the
+        old code discarded by returning q_source 0.95 without a word.
+
+        The event geometry comes from `geometry`
         (``_probe_bootstrap_geometry``), so a start the user's entries only
         IMPLY -- t_E from masses and distances -- is seen, as are the seed-0
         peak-finder hints.  The instrument's own flux entries
@@ -977,6 +1052,7 @@ class MulensInstrument(Instrument):
         cm = self.config_manager
         n_src = self._n_sources
         label = self.config[inst_idx].get("file", f"{self.prefix}.{inst_idx}")
+        q_start, q_lower, q_upper = self._q_source_declared(inst_idx)
 
         def _get_flux(param):
             # user_params keys are normalized to index form by
@@ -1024,10 +1100,21 @@ class MulensInstrument(Instrument):
                 )
                 return (
                     self._baseline_flux_fallback(f_obs),
-                    0.95,
+                    q_start,
                     q_flux_fallback,
                 )
-            q_source = float(np.clip(f_source_user / f_total, 0.05, 0.95))
+            # A ratio of two user STATEMENTS is not clipped to a comfortable
+            # range (review 2.6.10: a stated 0.99 became a 0.95 start, and no
+            # engine relation back-solves instrument fluxes, so nothing put
+            # it back).  Only the declared support binds -- a start outside
+            # it is fatal at build -- and that clip says so.
+            q_source = self._clip_q_source(
+                f_source_user / f_total,
+                q_lower,
+                q_upper,
+                f"{self.prefix}.{inst_idx}: f_source = {f_source_user!r} and "
+                f"f_blend = {f_blend_user!r}",
+            )
             return f_total, q_source, q_flux_fallback
 
         missing = [
@@ -1040,9 +1127,13 @@ class MulensInstrument(Instrument):
                 f"[{label}] flux bootstrap: {', '.join(missing)} has no start "
                 f"derivable at stage 1 (no user entry, seed or hint implies "
                 f"one), so the flux scale is the data's median and "
-                f"q_source = 0.95."
+                f"q_source takes its declared start, {q_start:g}."
             )
-            return self._baseline_flux_fallback(f_obs), 0.95, q_flux_fallback
+            return (
+                self._baseline_flux_fallback(f_obs),
+                q_start,
+                q_flux_fallback,
+            )
 
         delta_e, delta_n = observer_sky_offset(xyz_au, ra_rad, dec_rad)
 
@@ -1077,66 +1168,134 @@ class MulensInstrument(Instrument):
         # The observable already IS the flux the linear model predicts.
         F_obs = np.asarray(f_obs, dtype=float)
 
-        q_flux_est = q_flux_fallback
-        if len(A_cols) > 1:
-            # Multi-source NNLS: F = Sum_j f_s,j * A_j + f_b
-            A_mat = np.column_stack(A_cols)
-            if f_blend_user is not None:
-                # A user-supplied blend is a STATEMENT, not a starting guess:
-                # subtract it and drop the constant column, exactly as the
-                # single-source branch below does.  This branch used to leave
-                # the ones column in and never look at f_blend_user (review
-                # 1.6.2 -- the elif that reads it is reachable only for a
-                # single column), so a 2S fit with a pinned or seeded f_blend
-                # got its log_f_total and q_source hints from an NNLS estimate
-                # that contradicted the entry the user had written.
-                f_srcs, _ = nnls(A_mat, F_obs - f_blend_user)
-                f_blend_est = f_blend_user
-            else:
-                X = np.column_stack([A_mat, np.ones(len(t))])
-                sol, _ = nnls(X, F_obs)
-                f_srcs, f_blend_est = sol[:-1], sol[-1]
-            f_source_est = float(np.sum(f_srcs))
-            if q_flux_user is None and f_srcs[0] > 1e-30 and len(f_srcs) > 1:
-                q_flux_est = float(np.clip(f_srcs[1] / f_srcs[0], 1e-3, 1e3))
-            if f_source_user is not None and f_source_est > 1e-30:
-                # honor the user's total source flux; keep the NNLS ratio.
-                # (Unreachable with f_blend_user set -- both-user returns at
-                # the top -- but written against A_mat rather than a slice of
-                # X so it cannot silently mean the wrong columns.)
-                f_blend_est = max(
-                    float(
+        def _decompose(free_blend):
+            """(f_source, f_blend, q_flux) from the data; every source flux
+            >= 0 and, with ``free_blend``, the blend unconstrained -- else
+            held >= 0 (the second pass below)."""
+            q_flux_est = q_flux_fallback
+            if len(A_cols) > 1:
+                # Multi-source: F = Sum_j f_s,j * A_j + f_b, every f_s,j >= 0
+                # (the sign constraint is what breaks the degeneracy between
+                # overlapping source trajectories).
+                A_mat = np.column_stack(A_cols)
+                if f_blend_user is not None:
+                    # A user-supplied blend is a STATEMENT, not a starting
+                    # guess: subtract it and drop the constant column, exactly
+                    # as the single-source branch below does.  This branch
+                    # used to leave the ones column in and never look at
+                    # f_blend_user (review 1.6.2 -- the elif that reads it is
+                    # reachable only for a single column), so a 2S fit with a
+                    # pinned or seeded f_blend got its log_f_total and
+                    # q_source hints from an NNLS estimate that contradicted
+                    # the entry the user had written.
+                    f_srcs, _ = nnls(A_mat, F_obs - f_blend_user)
+                    f_blend_est = f_blend_user
+                elif free_blend:
+                    f_srcs, f_blend_est = self._nnls_free_blend(A_mat, F_obs)
+                else:
+                    X = np.column_stack([A_mat, np.ones(len(t))])
+                    sol, _ = nnls(X, F_obs)
+                    f_srcs, f_blend_est = sol[:-1], sol[-1]
+                f_source_est = float(np.sum(f_srcs))
+                if q_flux_user is None and f_srcs[0] > 1e-30:
+                    q_flux_est = float(
+                        np.clip(f_srcs[1] / f_srcs[0], 1e-3, 1e3)
+                    )
+                if f_source_user is not None and f_source_est > 0.0:
+                    # honor the user's total source flux; keep the solved
+                    # ratio.  (Unreachable with f_blend_user set -- both-user
+                    # returns at the top -- but written against A_mat rather
+                    # than a slice of X so it cannot silently mean the wrong
+                    # columns.)
+                    f_blend_est = float(
                         np.median(
                             F_obs
                             - A_mat @ (f_srcs * f_source_user / f_source_est)
                         )
-                    ),
-                    0.0,
-                )
+                    )
+                    if not free_blend:
+                        f_blend_est = max(f_blend_est, 0.0)
+                    f_source_est = f_source_user
+            elif f_source_user is not None:
+                f_blend_est = float(np.median(F_obs - f_source_user * A_traj))
+                if not free_blend:
+                    f_blend_est = max(f_blend_est, 0.0)
                 f_source_est = f_source_user
-        elif f_source_user is not None:
-            f_blend_est = max(
-                float(np.median(F_obs - f_source_user * A_traj)), 0.0
-            )
-            f_source_est = f_source_user
-        elif f_blend_user is not None:
-            (f_source_est,), _ = nnls(
-                A_traj.reshape(-1, 1), F_obs - f_blend_user
-            )
-            f_blend_est = f_blend_user
-        else:
-            X = np.column_stack([A_traj, np.ones(len(A_traj))])
-            (f_source_est, f_blend_est), _ = nnls(X, F_obs)
+            elif f_blend_user is not None:
+                (f_source_est,), _ = nnls(
+                    A_traj.reshape(-1, 1), F_obs - f_blend_user
+                )
+                f_blend_est = f_blend_user
+            elif free_blend:
+                (f_source_est,), f_blend_est = self._nnls_free_blend(
+                    A_traj.reshape(-1, 1), F_obs
+                )
+            else:
+                X = np.column_stack([A_traj, np.ones(len(A_traj))])
+                (f_source_est, f_blend_est), _ = nnls(X, F_obs)
+            return float(f_source_est), float(f_blend_est), q_flux_est
 
+        # PASS 1: the blend free -- a negative blend is first class (review
+        # 2.6.23; the solve used to force f_blend >= 0).
+        f_source_est, f_blend_est, q_flux_est = _decompose(free_blend=True)
         f_total = f_source_est + f_blend_est
-        if f_total < 1e-30 or f_source_est < 1e-30:
+
+        # PASS 2, only when pass 1 found source light but a non-positive
+        # TOTAL, which cannot be a flux scale (log_f_total takes its log10).
+        # That is what light curves with no baseline coverage do -- follow-up
+        # data taken only over the peak (ob09020's and ob07224's, A >= 14
+        # throughout): the constant column is then nearly degenerate with
+        # the magnification and the free blend extrapolates to a large
+        # negative number.  Re-solve with the blend held >= 0, loudly.  The
+        # data's median would be the wrong substitute there: it is the
+        # MAGNIFIED flux, an order of magnitude above the baseline.  A user
+        # f_blend is a statement and is never re-solved.
+        if f_source_est > 0.0 and not f_total > 0.0 and f_blend_user is None:
+            logger.warning(
+                f"[{label}] flux bootstrap: with the blend free, this light "
+                f"curve gives f_source = {f_source_est:.4g} and f_blend = "
+                f"{f_blend_est:.4g}, a non-positive baseline flux "
+                f"({f_total:.4g}) -- the data do not constrain the blend "
+                f"(no baseline coverage?).  Starting from the split with the "
+                f"blend held >= 0 instead; give f_blend for this file if you "
+                f"know it."
+            )
+            f_source_est, f_blend_est, q_flux_est = _decompose(
+                free_blend=False
+            )
+            f_total = f_source_est + f_blend_est
+
+        if not (f_source_est > 0.0 and f_total > 0.0):
+            # The data (user input), not an internal invariant: warn and take
+            # q_source's configured start, never a silent substitute (review
+            # 2.6.23 -- this returned q_source 0.95 without a word).  No
+            # positive source flux means the seeded magnification does not
+            # describe this light curve.
+            logger.warning(
+                f"[{label}] flux bootstrap: fitting the seeded magnification "
+                f"(t_0={t0!r}, u_0={u0!r}, t_E={tE!r}) to this light curve "
+                f"gives f_source = {f_source_est:.4g}, f_blend = "
+                f"{f_blend_est:.4g} (total {f_total:.4g}); a usable split "
+                f"needs a positive source flux and a positive total.  The "
+                f"seeded geometry probably does not describe this file.  "
+                f"Starting from the data's baseline flux and q_source's "
+                f"configured start ({q_start:g}: your entry, else "
+                f"defaults.yaml) instead; check the seed or give "
+                f"f_source/f_blend for this file."
+            )
             return (
                 self._baseline_flux_fallback(f_obs),
-                0.95,
+                q_start,
                 q_flux_est,
             )
 
-        q_source = float(np.clip(f_source_est / f_total, 0.05, 0.95))
+        q_source = self._clip_q_source(
+            f_source_est / f_total,
+            q_lower,
+            q_upper,
+            f"[{label}] flux bootstrap: f_source = {f_source_est:.4g} and "
+            f"f_blend = {f_blend_est:.4g}",
+        )
         logger.debug(
             f"NNLS flux decomp: f_source={f_source_est:.3e}, f_blend={f_blend_est:.3e}"
             f" → q_source={q_source:.4f}, q_flux={q_flux_est:.4f}"

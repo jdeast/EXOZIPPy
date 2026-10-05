@@ -24,7 +24,7 @@ from exozippy.components.mulensing.op import (
     _dev_skycoord,
     _MagGradOp,
 )
-from exozippy.config import ProbedStart
+from exozippy.config import ConfigManager, ProbedStart
 from exozippy.run import KNOWN_SAMPLER_KEYS
 
 COORDS = "270.0d -28.0d"
@@ -936,6 +936,33 @@ def _geometry(values, n_src=1, has_companion=False):
     return _BootstrapGeometry(probed, has_companion=has_companion)
 
 
+class _FluxBootstrapConfigManager(_DummyConfigManager):
+    """The stub plus a REAL ``resolve``: the flux bootstrap reads q_source's
+    declared start and bounds through it (review 2.6.23), and a stub that
+    hand-copied those numbers would test the copy, not defaults.yaml.  The
+    resolver sees the stub's own user_params, so a test can widen a bound."""
+
+    def __init__(self):
+        self.user_params = {}
+        self.hints = {}
+
+    def add_hint(self, path, value, rank=None):
+        self.hints[path] = (value, rank)
+
+    def resolve(self, *args, **kwargs):
+        return ConfigManager(dict(self.user_params)).resolve(*args, **kwargs)
+
+
+def _flux_bootstrap_inst(n_sources=1):
+    """A bare MulensInstrument with just what _estimate_flux_components reads."""
+    inst = MulensInstrument.__new__(MulensInstrument)
+    inst.config = [{"file": "synthetic"}]
+    inst.names = ["0"]
+    inst._n_sources = n_sources
+    inst.config_manager = _FluxBootstrapConfigManager()
+    return inst
+
+
 def _make_inst_with_q_source_data(
     n=870,
     t0=2458554.89,
@@ -952,11 +979,7 @@ def _make_inst_with_q_source_data(
     a sharp caustic crossing.  The bootstrap consumes flux directly (the whole
     component fits in flux now), so the curve is handed over as-is.
     """
-    inst = MulensInstrument.__new__(MulensInstrument)
-    inst.config = [{"file": "synthetic"}]
-    inst._n_sources = 1
-    inst.config_manager = _DummyConfigManager()
-    inst.config_manager.user_params = {}
+    inst = _flux_bootstrap_inst()
     # Post-split paths: the per-source trajectory (t_0, u_0) is on `source`,
     # the event-level scalars (t_E, pi_E_*) on the one-instance
     # `mulensevent`.  The bootstrap reads them through the probed geometry
@@ -980,18 +1003,204 @@ def _make_inst_with_q_source_data(
     return inst, t, flux, xyz
 
 
+def _pspl(t, t0, u0, tE):
+    tau = (t - t0) / tE
+    u = np.sqrt(u0**2 + tau**2)
+    return (u**2 + 2.0) / (u * np.sqrt(u**2 + 4.0))
+
+
+def _pspl_inst(f_source, f_blend):
+    """The single-source stub, with an EXACT PSPL light curve
+    f_source * A(t) + f_blend along the stub's own seeded trajectory."""
+    inst, t, _flux, xyz = _make_inst_with_q_source_data()
+    flux = f_source * _pspl(t, 2458554.89, 0.143, 18.17) + f_blend
+    return inst, t, flux, xyz
+
+
 def test_q_source_estimate_pspl_broad_peak():
     """
-    Given a PSPL-like light curve with a broad, well-sampled peak,
+    Given an unblended PSPL light curve,
     When _estimate_flux_components runs,
-    Then q_source is close to 1 (no blending, source is fully dominant).
+    Then q_source is 1 -- the true split, not the old [0.05, 0.95] clip's
+      0.95 (review 2.6.23).
     """
-    inst, t, f, xyz = _make_inst_with_q_source_data(A_peak=7.0, peak_width=60)
-    ra, dec = 0.0, 0.0
-    _f_total, q, _q_flux = inst._estimate_flux_components(
-        t, f, xyz, ra, dec, 0, inst.geometry
+    inst, t, f, xyz = _pspl_inst(f_source=0.62, f_blend=0.0)
+    f_total, q, _q_flux = inst._estimate_flux_components(
+        t, f, xyz, 0.0, 0.0, 0, inst.geometry
     )
-    assert 0.7 < q <= 1.0, f"Expected q_source near 1, got {q:.3f}"
+    assert f_total == pytest.approx(0.62, rel=1e-9)
+    assert q == pytest.approx(1.0, abs=1e-9)
+
+
+def test_bootstrap_recovers_a_negative_blend():
+    """
+    Given a PSPL light curve with a NEGATIVE blend (difference imaging,
+      over-subtracted crowding),
+    When the flux bootstrap runs,
+    Then it recovers that blend and the q_source > 1 it implies -- the solve
+      used to force f_blend >= 0 (NNLS on the ones column) and clip q_source
+      to 0.95, while the flux likelihood and defaults.yaml treat a negative
+      blend as first class (review 2.6.23).
+    """
+    # Arrange
+    f_source, f_blend = 1.0, -0.3
+    inst, t, flux, xyz = _pspl_inst(f_source, f_blend)
+
+    # Act
+    f_total, q_source, _q_flux = inst._estimate_flux_components(
+        t, flux, xyz, 0.0, 0.0, 0, inst.geometry
+    )
+
+    # Assert
+    assert f_total == pytest.approx(f_source + f_blend, rel=1e-9)
+    assert q_source == pytest.approx(f_source / (f_source + f_blend), rel=1e-9)
+    assert f_total * (1.0 - q_source) == pytest.approx(f_blend, rel=1e-9)
+
+
+def test_multisource_bootstrap_recovers_a_negative_blend():
+    """
+    Given a two-source light curve with a negative blend,
+    When the flux bootstrap runs,
+    Then both source fluxes stay non-negative and the blend comes out
+      negative, as it is (review 2.6.23).
+    """
+    f_blend, f_src = -0.2, (0.6, 0.2)
+    inst, t, flux, xyz = _make_2s_inst(f_blend=f_blend, f_src=f_src)
+
+    f_total, q_source, _q_flux = inst._estimate_flux_components(
+        t, flux, xyz, 0.0, 0.0, 0, inst.geometry
+    )
+
+    assert f_total == pytest.approx(sum(f_src) + f_blend, rel=1e-6)
+    assert f_total * (1.0 - q_source) == pytest.approx(f_blend, rel=1e-5)
+
+
+def test_bootstrap_q_source_clips_only_to_the_declared_bounds(caplog):
+    """
+    Given a light curve whose free-blend split implies q_source = 1/0.7,
+      inside the defaults.yaml bounds,
+    When the flux bootstrap runs, once at the defaults.yaml bounds and once
+      under a user's tighter upper bound of 1.2,
+    Then the first passes the split through untouched, and the second -- the
+      bound read through resolve, not a hand copy -- clips to 1.2 with a
+      warning (a start outside two finite bounds is fatal at build).
+    """
+    # Arrange
+    inst, t, flux, xyz = _pspl_inst(f_source=1.0, f_blend=-0.3)
+
+    # Act
+    _f, q_default, _qf = inst._estimate_flux_components(
+        t, flux, xyz, 0.0, 0.0, 0, inst.geometry
+    )
+    inst.config_manager.user_params["mulensinstrument.0.q_source"] = {
+        "upper": 1.2
+    }
+    with caplog.at_level("WARNING"):
+        _f, q_tight, _qf = inst._estimate_flux_components(
+            t, flux, xyz, 0.0, 0.0, 0, inst.geometry
+        )
+
+    # Assert
+    assert q_default == pytest.approx(1.0 / 0.7, rel=1e-9)
+    assert q_tight == 1.2
+    assert "outside its declared bounds [0, 1.2]" in caplog.text
+
+
+def test_bootstrap_without_a_positive_source_flux_warns_naming_the_file(
+    caplog,
+):
+    """
+    Given a light curve that DIMS where the seeded magnification peaks (the
+      seeded geometry does not describe this band),
+    When the flux bootstrap runs,
+    Then it warns naming the file and takes the DECLARED q_source start --
+      it used to return q_source 0.95 without a word (review 2.6.23).
+    """
+    # Arrange
+    inst, t, flux, xyz = _pspl_inst(f_source=-0.3, f_blend=1.0)
+    declared_start = inst._q_source_declared(0)[0]
+
+    # Act
+    with caplog.at_level("WARNING"):
+        f_total, q_source, _q_flux = inst._estimate_flux_components(
+            t, flux, xyz, 0.0, 0.0, 0, inst.geometry
+        )
+
+    # Assert
+    assert q_source == declared_start
+    assert f_total == pytest.approx(
+        MulensInstrument._baseline_flux_fallback(flux)
+    )
+    assert "[synthetic] flux bootstrap" in caplog.text
+    assert "f_source = 0" in caplog.text
+
+
+def test_peak_only_light_curve_re_solves_with_the_blend_held_nonnegative(
+    caplog,
+):
+    """
+    Given a light curve with NO baseline coverage (every epoch magnified
+      >= 4x) whose free-blend split has a non-positive total,
+    When the flux bootstrap runs,
+    Then it warns naming the file and re-solves with the blend held >= 0,
+      rather than taking the data median -- for peak-only data that is the
+      MAGNIFIED flux, an order of magnitude above the baseline (ob09020's
+      and ob07224's follow-up files).
+    """
+    # Arrange -- keep only the epochs within the A >= 4 core.
+    inst, t, _flux, xyz = _make_inst_with_q_source_data()
+    A = _pspl(t, 2458554.89, 0.143, 18.17)
+    core = A >= 4.0
+    t, xyz, A = t[core], xyz[core], A[core]
+    flux = 1.0 * A - 1.5  # free split: f_s = 1, f_b = -1.5, total -0.5
+
+    # Act
+    with caplog.at_level("WARNING"):
+        f_total, q_source, _q_flux = inst._estimate_flux_components(
+            t, flux, xyz, 0.0, 0.0, 0, inst.geometry
+        )
+
+    # Assert
+    assert "[synthetic] flux bootstrap: with the blend free" in caplog.text
+    assert q_source == pytest.approx(1.0)  # the blend sits at its floor, 0
+    assert 0.0 < f_total < np.median(flux) / 5.0
+
+
+def test_user_f_source_and_f_blend_reach_the_q_source_hint_unclipped():
+    """
+    Given explicit f_source = 0.99 and f_blend = 0.01 entries,
+    When the bootstrap runs and register_parameters pushes its hints,
+    Then the q_source hint is 0.99 -- a ratio of two user statements was
+      clipped to [0.05, 0.95], so the stated 0.99 started at 0.95 and no
+      engine relation back-solves instrument fluxes to put it back
+      (review 2.6.10).
+    """
+    # Arrange
+    inst, t, flux, xyz = _make_inst_with_q_source_data()
+    inst.config_manager.user_params["mulensinstrument.0.f_source"] = {
+        "initval": 0.99
+    }
+    inst.config_manager.user_params["mulensinstrument.0.f_blend"] = {
+        "initval": 0.01
+    }
+    inst.n_elements = 1
+    inst._load_gp_config()
+    inst._load_likelihood_config()
+    inst.total_detrend_cols = 0
+
+    # Act
+    f_total, q_source, _q_flux = inst._estimate_flux_components(
+        t, flux, xyz, 0.0, 0.0, 0, inst.geometry
+    )
+    inst.fs_init = [f_total]
+    inst.q_source_init = [q_source]
+    inst.register_parameters(_DummySystem())
+
+    # Assert
+    hint, _rank = inst.config_manager.hints["mulensinstrument.0.q_source"]
+    assert hint == pytest.approx(0.99, rel=1e-12)
+    f_blend_hint, _ = inst.config_manager.hints["mulensinstrument.0.f_blend"]
+    assert f_blend_hint == pytest.approx(0.01, rel=1e-9)
 
 
 def test_flux_total_estimate_sharp_caustic_crossing():
@@ -1025,11 +1234,7 @@ def _make_2s_inst(f_blend=0.4, f_src=(0.6, 0.2), n=400):
     f_src[0]*A_0 + f_src[1]*A_1 + f_blend, so the bootstrap has a right
     answer to be measured against."""
     t0a, t0b, u0, tE = 2458554.89, 2458560.0, 0.3, 18.17
-    inst = MulensInstrument.__new__(MulensInstrument)
-    inst.config = [{"file": "synthetic"}]
-    inst._n_sources = 2
-    inst.config_manager = _DummyConfigManager()
-    inst.config_manager.user_params = {}
+    inst = _flux_bootstrap_inst(n_sources=2)
     # Post-split: the SECOND source track is source.1.* (a second `source:`
     # body), and t_E is one event-level scalar shared by both tracks -- the
     # pre-split lens.1.t_E entry has no successor.
@@ -1648,7 +1853,7 @@ def test_an_underivable_t_E_skips_rather_than_inventing_30_days(caplog):
 
     # Assert
     assert text == ""
-    assert q_source == 0.95
+    assert q_source == inst._q_source_declared(0)[0]
     assert f_total == pytest.approx(
         MulensInstrument._baseline_flux_fallback(flux)
     )
