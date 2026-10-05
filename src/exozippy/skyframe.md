@@ -9,8 +9,7 @@ call sites disagree about a convention.
 
 For the *microlensing* consequences of this frame -- the trajectory and parallax signs
 written out, `alpha`'s frame, `q > 1`, and the mappings onto other codes' and papers'
-conventions -- see `src/exozippy/components/mulensing/conventions.md`, whose paper-facing
-twin is `src/exozippy/latex/convention.tex`.
+conventions -- see `src/exozippy/components/mulensing/conventions.md`.
 
 ## The sky-plane frame (`skyframe.py`)
 
