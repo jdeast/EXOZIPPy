@@ -757,18 +757,33 @@ def convert(pro_path, outdir, base):
             t[key] = v
 
     # per-file Kepler-spline detrending (mkss.pro: a scalar applies to every
-    # transit, an array is per transit in the sorted-filename order above)
+    # transit, an array is per transit in the sorted-filename order above).
+    # A value we cannot read RAISES rather than warns: an unresolved
+    # fitspline=dofit would otherwise become the truthy string 'dofit' and
+    # turn the spline on everywhere, and the user meant *something* -- they
+    # should fix the driver before hours of fitting a model they did not ask
+    # for.
     for key in ("fitspline", "splinespace"):
         val = take(key)
         if val is None:
             continue
         vals = val if isinstance(val, list) else [val] * len(transits)
         if len(vals) != len(transits):
-            warn(
-                f"{key} has {len(vals)} entries for {len(transits)} "
-                "transit files; ignored"
+            raise ValueError(
+                f"{key}={val!r} has {len(vals)} entries for "
+                f"{len(transits)} transit files; give one value per "
+                "transit file (sorted-filename order) or a scalar"
             )
-            continue
+        for v in vals:
+            # bool is an int subclass, so /fitspline (1 or True) passes;
+            # a string here is an IDL expression the converter could not
+            # evaluate (or a driver keyword unset at conversion time).
+            if isinstance(v, str) or not isinstance(v, (int, float)):
+                raise ValueError(
+                    f"{key}={val!r}: cannot convert {v!r} to a number. "
+                    "Set it to a literal value in the driver (e.g. "
+                    f"{key}=1 or {key}=[0,1,0]) and convert again"
+                )
         for t, v in zip(transits, vals):
             if key == "fitspline":
                 t[key] = bool(v)

@@ -272,3 +272,34 @@ def test_splinespace_without_fitspline_is_moot(tmp_path, monkeypatch):
         "fitspline" in t or "splinespace" in t for t in config["transit"]
     )
     assert any("splinespace=0.5" in i and "moot" in i for i in infos)
+
+
+@pytest.mark.parametrize(
+    "extra, key",
+    [
+        ("fitspline=dofit", "fitspline"),
+        ("fitspline=[0,dofit,0]", "fitspline"),
+        ("/fitspline, splinespace=ss", "splinespace"),
+    ],
+)
+def test_unevaluable_fitspline_value_raises(tmp_path, monkeypatch, extra, key):
+    """
+    Given a fitspline or splinespace the converter cannot evaluate (an
+    undefined IDL variable, kept as a string),
+    When the driver is converted,
+    Then the conversion raises naming the keyword, instead of a truthy
+    string silently turning the spline on (fitspline) or a bare float()
+    ValueError (splinespace).
+    """
+    with pytest.raises(ValueError, match=rf"^{key}="):
+        _convert(tmp_path, monkeypatch, _driver_with(extra))
+
+
+def test_fitspline_length_mismatch_raises(tmp_path, monkeypatch):
+    """
+    Given fitspline=[0,1] for three transit files,
+    When the driver is converted,
+    Then the conversion raises naming the keyword and both counts.
+    """
+    with pytest.raises(ValueError, match=r"fitspline=.*2 entries for 3"):
+        _convert(tmp_path, monkeypatch, _driver_with("fitspline=[0,1]"))
