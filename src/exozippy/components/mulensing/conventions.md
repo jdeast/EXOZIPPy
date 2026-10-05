@@ -10,31 +10,28 @@ code. Related: `src/exozippy/skyframe.md` (the frame itself, and the one owner o
 projection onto it), `src/exozippy/components/mulensing/mulensing.md` (the flux likelihood,
 the seeding, and the lens/source body rules).
 
-## The three artifacts, and which one is normative
+## The two artifacts, and which one is normative
 
-This file is the **normative** list. `src/exozippy/latex/convention.tex` is a drop-in
-section for the EXOZIPPy microlensing paper carrying the *same* claim list in the paper's
-register, with the same identifiers `C1`...`C30`. The identifiers are the anti-drift
-device: a claim may be reworded in either file, but a `C`-number must mean the same thing
-in both, and a claim added to one must be added to the other under the same number. There
-is no generator and no test enforcing that -- keep them in one commit.
+This file is the **normative** list. The Conventions section of `paper3_microlensing.tex`,
+in the paper repo at `~/old_home/papers/exozippy` (whose remote is the Overleaf project),
+carries the *same* claim list in the paper's register, with the same identifiers
+`C1`...`C30`. The identifiers are the anti-drift device: a claim may be reworded in
+either place, but a `C`-number must mean the same thing in both, and a claim added to one
+must be added to the other under the same number. There is no generator and no test
+enforcing that.
 
-The split of labour is: **this file names the code**, `convention.tex` names the
+The split of labour is: **this file names the code**, the paper names the
 **literature**. Nothing in the paper section should assert a convention that is not a
 `C`-number here, and nothing here should be a bare claim without a file or a test beside
 it.
 
-**There is a THIRD copy, and it is not in this repository.** The Conventions section of
-`paper3_microlensing.tex`, in the paper repo at `~/old_home/papers/exozippy` (whose remote
-is the Overleaf project), carries the same `C`-numbers as the submitted text. All three
-are in step through `C30` (paper commits `3476111`, 2026-09-23, which added `C29` and
-`C30` there, `7eeeb42`, 2026-09-24, which brought `C30` to stage 2, and `eaa5936`,
-2026-10-02, which corrected `C21`/`C22` with this file's 3.6.5 edit). Being a separate
-repository it cannot ride the same commit, so
-the rule is simply that **a `C`-rule is not finished until all three carry it**: pull the
-paper repo, make the matching edit there, and name that commit in this one. The paper is
-not licensed to run ahead -- it did once, and the drift lasted exactly as long as it took
-somebody to notice.
+Being a separate repository, the paper cannot ride the same commit, so the rule is simply
+that **a `C`-rule is not finished until both carry it**: pull the paper repo, make the
+matching edit there, and name that commit in this one. Both are in step through `C30`
+(paper commits `3476111`, 2026-09-23, which added `C29` and `C30`, `7eeeb42`, 2026-09-24,
+which brought `C30` to stage 2, and `eaa5936`, 2026-10-02, which corrected `C21`/`C22`
+with this file's 3.6.5 edit). The paper is not licensed to run ahead -- it did once, and
+the drift lasted exactly as long as it took somebody to notice.
 
 ## Notation used below
 
@@ -1022,8 +1019,8 @@ W149-width filters -- tolerable in a prior a magnitude wide, not as a measuremen
   source-trajectory shift "composed with the opposite `u_0` branch (C23)" -- but that
   composition is `(-u_0, 180 - alpha)`, the mirror of the plain shift, and on ob161003 it is
   the +42,197 chi2 row; the measured mapping keeps `u_0` and differs from Zang et al.
-  (2023)'s by the rotation sense. `latex/convention.tex` and paper3 carried the same text
-  and were corrected with it. The C22 rule is a TRUTH-SIDE conversion: it uses the key's
+  (2023)'s by the rotation sense. paper3 carried the same text and was
+  corrected with it. The C22 rule is a TRUTH-SIDE conversion: it uses the key's
   own `phase` and `inc` and is never applied to a posterior. The key's `alpha` is not
   measurable from a static or linear-motion light curve, which constrains only the
   trajectory angle to the instantaneous binary axis (our `alpha` = MulensModel's =
