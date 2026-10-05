@@ -1,4 +1,4 @@
-"""Small microlensing robustness fixes (reviews 2.6.7, 2.6.8, 2.6.9).
+"""Small microlensing robustness fixes (reviews 2.6.7, 2.6.8, 2.6.9, 4.6.4).
 
 Each test builds the synthetic system in tests/mulens_synthetic.py with the
 topology its item needs.
@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from mulens_synthetic import build, mulens_config, mulens_params, write_flat_lc
 
+from exozippy.diagnostics import ModelAuditor
 from exozippy.system import System
 
 # ---------------------------------------------------------------------------
@@ -122,7 +123,9 @@ def test_u_0_floor_warning_ignores_a_derived_u_0(mixed_fitu0te, caplog):
 
 
 # ---------------------------------------------------------------------------
-# 2.6.9: backend: mulensmodel's auto_vbbl bracket covers the plot grid.
+# 2.6.9 (backend: mulensmodel's auto_vbbl bracket covers the plot grid) and
+# 4.6.4(c) (a companion's geometry is addressable by the body's name), on
+# one binary-lens build.
 # ---------------------------------------------------------------------------
 
 
@@ -165,3 +168,20 @@ def test_auto_vbbl_bracket_covers_the_plot_grid(binary_mulensmodel):
             np.min(t),
             np.max(t),
         )
+
+
+@pytest.mark.slow
+def test_a_companion_is_addressable_by_its_body_name(binary_mulensmodel):
+    """
+    Given: lens.C.log_s set in the params file, C being the companion
+      body's star name (lens element 1),
+    When: the model is built,
+    Then: the value lands on element 1 and the unused-yaml audit does not
+      call the key unmatched -- companions are addressable by name exactly
+      as sources are (review 4.6.4(c); the instance naming of the 8.6.17
+      split delivers it).
+    """
+    system, model, _ = binary_mulensmodel
+    assert np.isclose(np.atleast_1d(system.lens.log_s.initval)[1], 0.1)
+    unused = ModelAuditor(model, system, {}).check_unused_yaml()
+    assert not [k for k in unused if str(k).startswith("lens.")], unused
