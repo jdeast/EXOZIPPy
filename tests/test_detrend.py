@@ -21,6 +21,11 @@ none at all while adding its term to a model in the internal solRad/d, so an
 RV detrend coefficient was reported 8052.0833x too small and in the wrong
 unit.  The rule, and the fact that the three declaring components correctly
 disagree with each other, are pinned at the bottom of this file.
+
+1.6.7 -- mulensinstrument scored its (multiplicative) trend and plotted
+neither it nor its removal.  The fix is architectural: one Instrument-base
+mechanism (DETREND_SPACES / _detrended_model / detrend_corrected), and a
+parity test that runs over every detrending child.  Last section.
 """
 
 import numpy as np
@@ -514,3 +519,275 @@ def test_an_all_nan_detrend_column_is_refused_as_non_finite(detrended_rv):
     with pytest.raises(ValueError, match=r"non-finite") as excinfo:
         system.rvinstrument._build_block_detrend([np.full((5, 1), np.nan)], 5)
     assert "rvinstrument[HIRES]" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# 1.6.7: ONE detrend mechanism, owned by the Instrument base
+#
+# mulensinstrument scored 10**(-0.4 * X.c) in its likelihood while neither
+# its plotted model nor its plotted data carried it -- the 1.5.1 symptom,
+# because 1.5.1 had fixed rv/transit by hand.  Now every detrending child
+# declares a DETREND_SPACE, builds its likelihood mu through
+# Instrument._detrended_model, and its plots remove the trend through
+# Instrument.detrend_corrected -- the forward map and its inverse from the
+# same DETREND_SPACES entry.  The generic test below runs over EVERY
+# Instrument child that declares a space, so a new one is covered (or the
+# coverage test fails until it is).
+# ---------------------------------------------------------------------------
+
+_MU_T0 = 2460025.0
+_MU_TE = 30.0
+_MU_U0 = 0.1
+_MU_COEFF = 0.3  # mag per raw column unit -- a 0.024 mag rms trend
+
+
+def _write_mulens_detrend_lc(path, n=80):
+    """PSPL light curve in magnitudes plus one airmass-like detrend column
+    with a large nonzero mean, the trend injected IN MAGNITUDES."""
+    t = np.linspace(_MU_T0 - 2 * _MU_TE, _MU_T0 + 2 * _MU_TE, n)
+    u = np.sqrt(_MU_U0**2 + ((t - _MU_T0) / _MU_TE) ** 2)
+    amp = (u**2 + 2.0) / (u * np.sqrt(u**2 + 4.0))
+    x = _X_MEAN + _X_AMP * np.sin(2 * np.pi * np.arange(n) / 13.0)
+    mag = 18.0 - 2.5 * np.log10(amp) + _MU_COEFF * (x - _X_MEAN)
+    np.savetxt(path, np.column_stack([t, mag, np.full(n, 0.01), x]))
+    return x
+
+
+@pytest.fixture(scope="module")
+def detrended_mulens(tmp_path_factory):
+    """Built one-instrument PSPL microlensing system with a single detrend
+    column -- the mulens twin of ``detrended_rv``.  The coefficient is
+    PINNED (in mag per raw column unit) so its value is known exactly."""
+    path = tmp_path_factory.mktemp("detrend_mu") / "lc.dat"
+    x = _write_mulens_detrend_lc(path)
+    config = {
+        "run": {"name": "detrend_mu"},
+        "star": [{"name": "Lens"}, {"name": "Source"}],
+        "mulensevent": [
+            {"finite_source": False, "t0_par": _MU_T0, "use_op": False}
+        ],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
+        "mulensinstrument": [{"name": "OGLE", "file": str(path)}],
+    }
+    user_params = {
+        "source.Source.t_0": {"initval": _MU_T0},
+        "source.Source.u_0": {"initval": _MU_U0},
+        "mulensevent.t_E": {"initval": _MU_TE},
+        "star.radius": {"sigma": 0.0},
+        "star.teff": {"sigma": 0.0},
+        "star.feh": {"sigma": 0.0},
+        "mulensinstrument.detrend_coeffs": {
+            "initval": _MU_COEFF,
+            "sigma": 0,
+        },
+    }
+    for nm in ("Lens", "Source"):
+        user_params[f"star.{nm}.ra"] = {"initval": 264.0, "sigma": 0}
+        user_params[f"star.{nm}.dec"] = {"initval": -27.0, "sigma": 0}
+
+    system = System(config, user_params=user_params)
+    system.prepare()
+    model = system.build_model()
+    with model:
+        point = system.get_internal_point(model, system.get_raw_start(model))
+    system.compile_plotter_functions(model)
+    return system, point, x
+
+
+def test_unphased_mulens_data_are_detrend_corrected(detrended_mulens):
+    """
+    Given a microlensing fit with an active detrend column,
+    When plot_data builds the light-curve chart,
+    Then the plotted points are the fluxes with the fitted factor
+    10**(-0.4 * X.c) DIVIDED out (the inverse of what the likelihood
+    multiplied the model by), aligned and shown in magnitudes as before.
+
+    Regression (review 1.6.7): the raw fluxes were aligned and plotted,
+    so the whole fitted trend read as residual structure -- the 1.5.1
+    symptom, on the one child 1.5.1's fix never reached.
+    """
+    system, point, _ = detrended_mulens
+    comp = system.mulensinstrument
+
+    specs = comp.plot_data(system, point)
+    data_trace = [t for t in specs[0].traces if t.role == "data"][0]
+
+    aln = comp._flux_alignment(comp._point_to_plot_params(point, system))
+    factor = 10.0 ** (-0.4 * comp.detrend_at_data(point))
+    assert np.ptp(factor) > 1e-3  # the trend is live
+    np.testing.assert_allclose(
+        data_trace.y, aln["align"](comp.flux / factor, 0), atol=1e-12
+    )
+    # the pre-fix value, explicitly excluded
+    assert not np.allclose(data_trace.y, aln["align"](comp.flux, 0), atol=1e-3)
+    # the error bars are divided by the same factor
+    lo = data_trace.y - aln["align"]((comp.flux + comp.err) / factor, 0)
+    np.testing.assert_allclose(data_trace.yerr[0], lo, atol=1e-12)
+
+
+def test_corrected_mulens_data_carry_no_trend(detrended_mulens):
+    """
+    Given data generated as an exact PSPL times a magnitude trend, and a
+    fit pinned at the injected trend coefficient,
+    When the corrected plotted points are compared with the plotted model
+    at the data times,
+    Then what is left is free of the detrend column: the correction removes
+    the very trend the likelihood fitted, not an additive approximation of
+    it.
+    """
+    system, point, x = detrended_mulens
+    comp = system.mulensinstrument
+    flux_c, _ = comp.detrend_corrected(comp.flux, comp.err, point)
+    # The corrected magnitudes minus the noiseless PSPL are a constant
+    # (the flux zero point), with no residual correlation with x.
+    t = comp.time
+    u = np.sqrt(_MU_U0**2 + ((t - _MU_T0) / _MU_TE) ** 2)
+    amp = (u**2 + 2.0) / (u * np.sqrt(u**2 + 4.0))
+    resid = -2.5 * np.log10(flux_c) - (18.0 - 2.5 * np.log10(amp))
+    assert np.ptp(resid) < 1e-9
+    raw = -2.5 * np.log10(comp.flux) - (18.0 - 2.5 * np.log10(amp))
+    assert abs(np.corrcoef(raw, x)[0, 1]) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_a_mulens_detrending_fit_says_so_and_depends_on_the_coefficients(
+    detrended_mulens,
+):
+    """
+    Given the same fit,
+    When plot_data builds its specs,
+    Then every caption says the trend was DIVIDED out (the multiplicative
+    wording, not the additive "subtracted"), and the coefficient label is a
+    param_dep -- the correction is numpy, invisible to the graph walk.
+    """
+    system, point, _ = detrended_mulens
+    comp = system.mulensinstrument
+    label = comp.detrend_coeffs.label
+    specs = comp.plot_data(system, point)
+    assert len(specs) == 2
+    assert "divided out" in specs[0].meta["caption"]
+    assert "detrend columns" in specs[0].meta["caption"]
+    for spec in specs:
+        assert label in spec.param_deps
+    assert specs[0].meta["dynamic_data"] is True
+
+
+_DETRENDING_FIXTURES = {
+    "RVInstrument": ("detrended_rv", "rv"),
+    "Transit": ("detrended_transit", "flux"),
+    "MulensInstrument": ("detrended_mulens", "flux"),
+}
+
+
+def _eval_plot_node(system, node, point, comp):
+    """``node`` compiled against ``system.plot_params`` (the plotters'
+    inputs) at ``point``."""
+    import pytensor
+
+    fn = pytensor.function(
+        [p.value for p in system.plot_params], node, on_unused_input="ignore"
+    )
+    return np.asarray(
+        fn(*comp._point_to_plot_params(point, system)), dtype=float
+    )
+
+
+def test_every_detrending_child_is_covered():
+    """
+    Given every discoverable Instrument child,
+    When the ones that declare a DETREND_SPACE are listed,
+    Then each has a fixture in ``_DETRENDING_FIXTURES`` -- so the parity
+    test below runs over a new detrending child automatically, or this
+    test fails until someone gives it one.
+    """
+    from exozippy.components.factory import discover_components
+    from exozippy.components.instrument import DETREND_SPACES, Instrument
+
+    detrending = {
+        cls.__name__: cls.DETREND_SPACE
+        for cls in discover_components().values()
+        if issubclass(cls, Instrument) and cls.DETREND_SPACE is not None
+    }
+    assert set(detrending) == set(_DETRENDING_FIXTURES)
+    assert set(detrending.values()) <= set(DETREND_SPACES)
+
+
+@pytest.mark.parametrize("cls_name", sorted(_DETRENDING_FIXTURES))
+def test_every_detrending_child_inverts_its_own_likelihood(cls_name, request):
+    """
+    Given a built fit of a detrending Instrument child with a live trend,
+    When the likelihood's own mu (the node add_observation_likelihood was
+    handed -- it raises on any other) and its detrend-free model are
+    evaluated at the point, and the plots' correction is applied,
+    Then (1) a datum the likelihood fits EXACTLY (y = mu) is plotted
+    exactly ON the detrend-free model the plots draw, and (2) for the real
+    data, every plotted residual in units of its plotted error bar equals
+    the likelihood's own normalized residual (y - mu) / err.
+
+    This is the architecture of review 1.6.7: one forward map and its
+    inverse, never a child's own spelling of either.
+    """
+    fixture, observable = _DETRENDING_FIXTURES[cls_name]
+    system, point = request.getfixturevalue(fixture)[:2]
+    comp = next(
+        c
+        for c in system.active_components.values()
+        if type(c).__name__ == cls_name
+    )
+    assert comp.total_detrend_cols > 0
+    assert np.ptp(comp.detrend_at_data(point)) > 0.0
+
+    mu = _eval_plot_node(system, comp._likelihood_mu_node, point, comp)
+    free = _eval_plot_node(system, comp._detrend_free_node, point, comp)
+    # the trend is live in the likelihood (relative: mulens fluxes are ~1e-8)
+    assert np.max(np.abs(mu - free) / np.abs(free)) > 1e-4
+
+    # (1) a perfect fit plots on the model
+    y_c, _ = comp.detrend_corrected(mu, comp.err, point)
+    np.testing.assert_allclose(
+        y_c, free, rtol=1e-12, atol=1e-12 * np.max(np.abs(free))
+    )
+
+    # (2) the plotted normalized residuals are the likelihood's
+    y = getattr(comp, observable)
+    y_c, err_c = comp.detrend_corrected(y, comp.err, point)
+    np.testing.assert_allclose(
+        (y_c - free) / err_c, (y - mu) / comp.err, rtol=1e-9, atol=1e-9
+    )
+
+
+def test_a_child_that_skips_the_shared_mechanism_is_refused(detrended_rv):
+    """
+    Given a detrending child,
+    When its likelihood is handed a mu that did NOT come from
+    Instrument._detrended_model (a child spelling its own trend),
+    Then add_observation_likelihood raises naming the component -- the
+    drift 1.6.7 found is unrepresentable rather than merely tested for.
+    """
+    import pymc as pm
+    import pytensor.tensor as pt
+
+    comp = detrended_rv[0].rvinstrument
+    with pm.Model():
+        with pytest.raises(RuntimeError, match=r"rvinstrument.*_detrended"):
+            comp.add_observation_likelihood(
+                "x", mu=pt.zeros(3), sigma=1.0, observed=np.zeros(3)
+            )
+
+
+def test_reading_detrend_columns_needs_a_declared_space(detrended_rv):
+    """
+    Given an Instrument child that declares no DETREND_SPACE,
+    When it asks the shared reader for detrend columns,
+    Then the read raises -- a child cannot acquire detrend columns without
+    saying how its likelihood applies them.
+    """
+    comp = detrended_rv[0].rvinstrument
+    saved = type(comp).DETREND_SPACE
+    try:
+        comp.DETREND_SPACE = None
+        with pytest.raises(TypeError, match=r"DETREND_SPACE"):
+            comp._read_data(0, roles=("time", "rv", "err"), detrend=True)
+    finally:
+        del comp.DETREND_SPACE
+    assert comp.DETREND_SPACE == saved
