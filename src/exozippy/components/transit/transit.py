@@ -1560,7 +1560,11 @@ class Transit(Instrument):
             # Removed from the phased data along with the other planets':
             # the correlated component would smear the fold.  Zeros when no
             # file has a GP.
-            "extra_signals": self.gp_mean_at_data(system, point),
+            # Mapped into the corrected-data space by the same base
+            # mechanism (identity for this additive space).
+            "extra_signals": self.detrend_corrected_signal(
+                self.gp_mean_at_data(system, point), point
+            ),
             # (N_obs, N_planets): each planet's term at every observation,
             # from the likelihood's own node.
             "data_terms": data_terms,

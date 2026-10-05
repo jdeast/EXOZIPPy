@@ -110,6 +110,10 @@ def _detrend_additive_invert(y, err, term):
     return y - term, err
 
 
+def _detrend_additive_invert_signal(signal, term):
+    return signal
+
+
 def _detrend_magnitude_factor(term, xp):
     # 10**(-0.4 * term): a magnitude-space trend applied to a FLUX model.
     return xp.power(10.0, -0.4 * term)
@@ -126,12 +130,25 @@ def _detrend_magnitude_invert(y, err, term):
     return y / f, err / f
 
 
+def _detrend_magnitude_invert_signal(signal, term):
+    # A signal fitted to the RESIDUAL r = y - m * f (the GP conditional mean)
+    # appears in the corrected data y / f = m + r / f divided by that
+    # datum's own f.
+    return signal / _detrend_magnitude_factor(
+        np.asarray(term, dtype=float), np
+    )
+
+
 DETREND_SPACES = {
     # rvinstrument, transit: the trend is added to the model in the
     # observable's own units.
     "additive": {
         "combine": _detrend_additive_combine,
         "invert": _detrend_additive_invert,
+        "invert_signal": _detrend_additive_invert_signal,
+        # The corrected data are m + r, so m + gp on ANY time grid is the
+        # exact companion of the corrected points.
+        "grid_exact": True,
         "caption": (
             " The fitted linear trend against the data file's detrend "
             "columns has been subtracted from the plotted points; the model "
@@ -144,6 +161,10 @@ DETREND_SPACES = {
     "magnitude": {
         "combine": _detrend_magnitude_combine,
         "invert": _detrend_magnitude_invert,
+        "invert_signal": _detrend_magnitude_invert_signal,
+        # The corrected data are m + r / f with a per-observation f, so the
+        # exact companion m + gp / f exists only AT the data epochs.
+        "grid_exact": False,
         "caption": (
             " The fitted linear magnitude trend against the data file's "
             "detrend columns has been divided out of the plotted fluxes and "
@@ -2011,6 +2032,41 @@ class Instrument(TimeSystem, Component):
             return y, err
         term = self.detrend_at_data(point)
         return DETREND_SPACES[self.DETREND_SPACE]["invert"](y, err, term)
+
+    def detrend_corrected_signal(self, signal, point):
+        """An additive signal fitted to the likelihood's RESIDUAL, mapped
+        into the space of the corrected plotted data.
+
+        ``signal`` is ``(n_total_obs,)`` at the data epochs -- in practice
+        the GP conditional mean, which celerite2 conditions on
+        ``r = y - mu``.  The corrected data are ``invert(y)``; the exact
+        model companion of those points is the detrend-free model plus
+        ``invert_signal(signal)``: the signal itself for an additive space
+        (``y - X.c = m + r``), and ``signal / f`` for the magnitude space
+        (``y / f = m + r / f``).  Unchanged without detrend columns or a
+        point, so a GP fit without detrending plots exactly what it did.
+        """
+        if point is None or getattr(self, "total_detrend_cols", 0) == 0:
+            return signal
+        term = self.detrend_at_data(point)
+        return DETREND_SPACES[self.DETREND_SPACE]["invert_signal"](
+            signal, term
+        )
+
+    def detrend_grid_exact(self, i):
+        """Whether file ``i``'s corrected data have an exact companion on a
+        smooth time grid.
+
+        True without detrend columns on that file, and for an additive
+        space (corrected data ``m + r``: ``m + gp`` on any grid is exact).
+        False for a file with columns in the magnitude space, whose
+        corrected data are ``m + r / f`` with a per-observation ``f`` no
+        grid can carry -- a plot then draws its model+GP companion at the
+        data epochs (``detrend_corrected_signal``).
+        """
+        if self.n_detrend_per_inst[i] == 0:
+            return True
+        return DETREND_SPACES[self.DETREND_SPACE]["grid_exact"]
 
     def detrend_caption(self):
         """The sentence a detrending fit's figure captions owe the reader.

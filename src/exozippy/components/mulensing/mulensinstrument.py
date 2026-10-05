@@ -2560,15 +2560,36 @@ class MulensInstrument(Instrument):
         # The GP is additive in that instrument's own FLUX (that is the space
         # celerite2 conditioned in), so it is added to the model flux there and
         # the sum is then mapped onto the reference flux system.
-        for i in sorted(getattr(self, "_gp_pred_on_grid", {})):
-            obs_pretty = obs_model_pos.get(inst_obs_loc[i])
-            if obs_pretty is None:
-                continue
+        #
+        # A light curve with detrend columns is the exception: celerite2
+        # conditioned on r = y - m*f, the plotted points are y/f = m + r/f,
+        # and the exact companion m + gp/f needs each datum's own f, which a
+        # smooth grid cannot carry.  So for such a file the curve is drawn AT
+        # ITS DATA EPOCHS, through the base mechanism
+        # (Instrument.detrend_grid_exact / detrend_corrected_signal) -- every
+        # plotted quantity stays exactly what the likelihood scored.
+        gp_files = sorted(getattr(self, "_gp_pred_on_grid", {}))
+        gp_at_data = None
+        if any(not self.detrend_grid_exact(i) for i in gp_files):
+            gp_at_data = self.detrend_corrected_signal(
+                self.gp_mean_at_data(system, point), point
+            )
+        for i in gp_files:
             try:
-                flux_i = self._compiled_model_flux(
-                    t_model, obs_pretty, i, *param_values
-                )
-                gp_i = self.gp_mean_on_grid(system, point, i, t_model)
+                if self.detrend_grid_exact(i):
+                    obs_pretty = obs_model_pos[inst_obs_loc[i]]
+                    t_gp = t_model
+                    flux_i = self._compiled_model_flux(
+                        t_model, obs_pretty, i, *param_values
+                    )
+                    gp_i = self.gp_mean_on_grid(system, point, i, t_model)
+                else:
+                    rows = self.rows(i)
+                    t_gp = self.time[rows]
+                    flux_i = self._compiled_model_flux(
+                        t_gp, self.observer_pos[rows], i, *param_values
+                    )
+                    gp_i = gp_at_data[rows]
                 y_gp = align(np.asarray(flux_i, dtype=float) + gp_i, i)
             except Exception as e:
                 logger.warning(
@@ -2580,7 +2601,7 @@ class MulensInstrument(Instrument):
                     name=f"{self.names[i]} model+GP",
                     role="model",
                     kind="line",
-                    x=t_model,
+                    x=t_gp,
                     y=y_gp,
                     style={"series_index": int(i), "lw": 1.0},
                 )

@@ -755,6 +755,24 @@ def test_every_detrending_child_inverts_its_own_likelihood(cls_name, request):
         (y_c - free) / err_c, (y - mu) / comp.err, rtol=1e-9, atol=1e-9
     )
 
+    # (3) a signal fitted to the likelihood's RESIDUAL (what celerite2's GP
+    # mean is) keeps that property once mapped by detrend_corrected_signal:
+    # the plotted (y_c - free - s_c) / err_c is the likelihood's
+    # (y - mu - s) / err.  Identity for additive spaces, / f for magnitude.
+    s = 0.3 * (y - mu) * np.sin(np.arange(y.size))
+    s_c = comp.detrend_corrected_signal(s, point)
+    np.testing.assert_allclose(
+        (y_c - free - s_c) / err_c,
+        (y - mu - s) / comp.err,
+        rtol=1e-9,
+        atol=1e-9,
+    )
+    if comp.DETREND_SPACE == "additive":
+        np.testing.assert_array_equal(s_c, s)
+        assert comp.detrend_grid_exact(0)
+    else:
+        assert not comp.detrend_grid_exact(0)
+
 
 def test_a_child_that_skips_the_shared_mechanism_is_refused(detrended_rv):
     """
@@ -791,3 +809,88 @@ def test_reading_detrend_columns_needs_a_declared_space(detrended_rv):
     finally:
         del comp.DETREND_SPACE
     assert comp.DETREND_SPACE == saved
+
+
+try:
+    import celerite2.pymc  # noqa: F401
+
+    _HAS_CELERITE2_PYMC = True
+except ImportError:  # pragma: no cover - platform dependent
+    _HAS_CELERITE2_PYMC = False
+
+
+@pytest.fixture(scope="module")
+def detrended_mulens_gp(tmp_path_factory):
+    """The mulens detrend fixture with a GP on the light curve."""
+    if not _HAS_CELERITE2_PYMC:
+        pytest.skip("celerite2's PyMC backend is unimportable here")
+    path = tmp_path_factory.mktemp("detrend_mu_gp") / "lc.dat"
+    _write_mulens_detrend_lc(path)
+    config = {
+        "run": {"name": "detrend_mu_gp"},
+        "star": [{"name": "Lens"}, {"name": "Source"}],
+        "mulensevent": [
+            {"finite_source": False, "t0_par": _MU_T0, "use_op": False}
+        ],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
+        "mulensinstrument": [{"name": "OGLE", "file": str(path), "gp": "sho"}],
+    }
+    user_params = {
+        "source.Source.t_0": {"initval": _MU_T0},
+        "source.Source.u_0": {"initval": _MU_U0},
+        "mulensevent.t_E": {"initval": _MU_TE},
+        "star.radius": {"sigma": 0.0},
+        "star.teff": {"sigma": 0.0},
+        "star.feh": {"sigma": 0.0},
+        "mulensinstrument.detrend_coeffs": {
+            "initval": _MU_COEFF,
+            "sigma": 0,
+        },
+    }
+    for nm in ("Lens", "Source"):
+        user_params[f"star.{nm}.ra"] = {"initval": 264.0, "sigma": 0}
+        user_params[f"star.{nm}.dec"] = {"initval": -27.0, "sigma": 0}
+    system = System(config, user_params=user_params)
+    system.prepare()
+    model = system.build_model()
+    with model:
+        point = system.get_internal_point(model, system.get_raw_start(model))
+    system.compile_plotter_functions(model)
+    return system, point
+
+
+def test_mulens_model_plus_gp_is_exact_on_a_detrended_curve(
+    detrended_mulens_gp,
+):
+    """
+    Given a microlensing light curve with BOTH a GP and a (multiplicative)
+    detrend trend,
+    When plot_data draws that file's model+GP companion,
+    Then it is drawn at the DATA epochs and equals, aligned, the
+    likelihood's own (mu + gp) / f -- i.e. m + gp / f, the exact companion
+    of the corrected points y / f = m + r / f, where celerite2 conditioned
+    the GP on r = y - mu.  The old grid curve m + gp was first-order only
+    (JDE 2026-10-05: "let's make the plots exact").
+    """
+    system, point = detrended_mulens_gp
+    comp = system.mulensinstrument
+    assert not comp.detrend_grid_exact(0)
+
+    vals = comp._point_to_plot_params(point, system)
+    mu = _eval_plot_node(system, comp._likelihood_mu_node, point, comp)
+    free = _eval_plot_node(system, comp._detrend_free_node, point, comp)
+    gp = comp.gp_mean_at_data(system, point)
+    f = 10.0 ** (-0.4 * comp.detrend_at_data(point))
+    aln = comp._flux_alignment(vals)
+
+    specs = comp.plot_data(system, point)
+    tr = next(t for t in specs[0].traces if t.name == "OGLE model+GP")
+    np.testing.assert_array_equal(tr.x, comp.time)
+    np.testing.assert_allclose(
+        tr.y, aln["align"]((mu + gp) / f, 0), rtol=1e-12, atol=0
+    )
+    # ... and it is measurably NOT the first-order m + gp
+    assert np.max(np.abs(gp)) > 0.0
+    old = aln["align"](free + gp, 0)
+    assert np.max(np.abs(np.asarray(tr.y) - old)) > 1e-9

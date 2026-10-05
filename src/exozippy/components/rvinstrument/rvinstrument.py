@@ -892,7 +892,11 @@ class RVInstrument(Instrument):
             # signal just smears the panel, so the GP conditional mean comes
             # out of the data along with the other orbits' signal.  Zeros
             # when no file has a GP, so this is a no-op then.
-            "extra_signals": self.gp_mean_at_data(system, point),
+            # Mapped into the corrected-data space by the same base
+            # mechanism (identity for this additive space).
+            "extra_signals": self.detrend_corrected_signal(
+                self.gp_mean_at_data(system, point), point
+            ),
         }
 
     def _phased_arrays(self, system, point, col, o_idx, shared=None):
