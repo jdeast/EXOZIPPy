@@ -674,7 +674,7 @@ def _slower_than(seconds):
 @requires_fork
 @pytest.mark.parametrize("collect_rung_timing", [False, True])
 def test_sync_eval_timeout_rejects_the_proposal_and_recycles(
-    caplog, collect_rung_timing
+    caplog, collect_rung_timing, tmp_path, monkeypatch
 ):
     """
     Given a logp slower than eval_timeout on EVERY call,
@@ -694,6 +694,8 @@ def test_sync_eval_timeout_rejects_the_proposal_and_recycles(
     when the run ends, and they ignore SIGTERM (_worker_init), so a
     close()+join() at wrap-up would hang here (review 2.4.1).
     """
+    # collect_rung_timing writes <label>_rung_times.npz into the cwd.
+    monkeypatch.chdir(tmp_path)
     # ARRANGE
     if mp.cpu_count() < 2:
         pytest.skip("eval_timeout has no effect with a single core")
