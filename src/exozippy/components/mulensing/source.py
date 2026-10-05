@@ -180,6 +180,24 @@ class Source(Component):
                     out["rho_pred"] = "default"
                 else:
                     out["rho"] = "default"
+            else:
+                # Point source: rho never enters the magnification, but
+                # theta_star/theta_E is still DETERMINED by the source star's
+                # radius and distance and the event's theta_E, so it is
+                # reported (JDE 2026-09-14, review 2.6.14) -- which also gives
+                # a point-source fit and a finite-source one a common column.
+                # REPORTED, not derived: nothing may consume it, and a
+                # reported element takes only the constraints the USER wrote
+                # (parameter.md), so the defaults.yaml soft upper barrier on
+                # rho -- a statement about finite-source magnification --
+                # never becomes a logp term on a model rho is not part of.
+                # report_only keeps it out of the trace enumerations (the
+                # burn-in scan, the global corner) a point-source fit always
+                # had.
+                out["rho"] = {
+                    "output_expr_key": "default",
+                    "report_only": True,
+                }
             return out
 
         table = {

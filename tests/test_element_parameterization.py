@@ -1225,23 +1225,26 @@ def _all_derived_pair():
     return model, driver, derived
 
 
-def test_an_all_derived_element_expression_vector_has_no_deterministic():
+def test_an_all_derived_element_expression_vector_is_a_report_only_node():
     """
     Given a vector every element of which comes from an element expression,
     When it is built,
-    Then no node carries its label -- build_pymc tracks a Deterministic only
-      when something is sampled -- and it has no whole-vector `expression`
-      either.
+    Then a Deterministic carries its label as a REPORT-ONLY side output
+      (review 2.6.14: every reported derived quantity is in the trace), its
+      `value` stays the bare tensor its consumers read, and it has no
+      whole-vector `expression`.
 
-    Both halves matter: this parameter is invisible to the trace AND to the
-    `expression is not None` test the reporting layer used, which is why its
-    value used to be read off the initval.  Pinned so a future change that
-    starts tracking a node here does not silently make the next two tests
-    vacuous.
+    Until 2.6.14 no node carried the label (build_pymc tracked one only when
+    something was sampled), which is why its value used to be read off the
+    initval.  The next two tests hand generate_posterior a bundle WITHOUT
+    the label, so they still exercise the expression fallback -- the path a
+    trace written before 2.6.14 takes.
     """
     model, _driver, derived = _all_derived_pair()
 
-    assert derived.label not in [v.name for v in model.deterministics]
+    assert derived.label in [v.name for v in model.deterministics]
+    assert derived.report_only_node
+    assert derived.value not in model.deterministics
     assert derived.expression is None
     assert derived.element_expressions
     assert not np.any(derived.is_sampled)

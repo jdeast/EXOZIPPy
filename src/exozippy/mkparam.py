@@ -34,7 +34,11 @@ from exozippy.outputs.modes import (
     NoValidDrawsError,
 )
 from exozippy.samplers import convergence
-from exozippy.trace_meta import ROLES_ATTR, check_trace_freshness
+from exozippy.trace_meta import (
+    ROLES_ATTR,
+    check_trace_freshness,
+    report_only_vars,
+)
 from exozippy.yamlio import load_yaml
 
 logger = logging.getLogger(__name__)
@@ -585,7 +589,10 @@ def _burnin_diag(idata):
     is handed down, exactly as the mode report is.
     """
     post = idata["posterior"]
-    var_names = convergence.default_var_names(post)
+    # The same variable set run.py's wrap-up scan uses (review 2.6.14).
+    var_names = convergence.default_var_names(
+        post, exclude=report_only_vars(idata)
+    )
     arrays = {v: post[v].values for v in var_names}
     lp = None
     ss = idata.get("sample_stats") if hasattr(idata, "get") else None
