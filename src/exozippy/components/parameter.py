@@ -1072,6 +1072,16 @@ class Parameter:
     # half of those warnings can only say "revisit the bound", and for a
     # nuisance scale like err_scale that is the wrong advice (review 8.2.2).
     near_bound_remedy: Optional[str] = None
+    # Its start-time twin: the component's sentence about how a value on
+    # this parameter has to be SEEDED, appended by
+    # diagnostics.ModelAuditor.check_user_starts when a user initval here
+    # is not what the model is built at.  Declared in defaults.yaml, never
+    # by a user.  The worked example is mulensevent.t_E / pi_E_N / pi_E_E:
+    # derived from the mass/distance/proper-motion chain, so a seed on them
+    # alongside the leaf seeds is reconciled by moving whichever leaves were
+    # left unseeded, and the generic "fix the sampled parameter(s)" names
+    # five parameters without saying which recipe works (review 8.6.15).
+    seed_remedy: Optional[str] = None
     latex_prefix: str = "ez"
 
     # Runtime fields
@@ -4027,6 +4037,13 @@ class Parameter:
         warnings cannot phrase the same remedy two ways.
         """
         remedy = (self.near_bound_remedy or "").strip()
+        return f"  {remedy}" if remedy else ""
+
+    def seed_remedy_suffix(self):
+        """The component's seeding sentence, ready to append to a start
+        warning; empty when the component declared none (``remedy_suffix``'s
+        start-time twin, review 8.6.15)."""
+        remedy = (self.seed_remedy or "").strip()
         return f"  {remedy}" if remedy else ""
 
     def to_internal(self, val=None, index=None):

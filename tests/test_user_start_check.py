@@ -41,8 +41,10 @@ class _FakeParam:
         derived=False,
         sampled=True,
         value=None,
+        seed_remedy=None,
     ):
         self.label = label
+        self.seed_remedy = seed_remedy
         self.names = names or []
         self.unit = unit
         self._factor = factor  # internal = user * factor
@@ -74,6 +76,13 @@ class _FakeParam:
 
     def from_internal(self, val, index=None):
         return float(val) / self._factor
+
+    def seed_remedy_suffix(self):
+        # The real Parameter's method, not a restatement: the fake carries
+        # the field and borrows the formatting.
+        from exozippy.components.parameter import Parameter
+
+        return Parameter.seed_remedy_suffix(self)
 
 
 class _FakeModel:
@@ -585,3 +594,102 @@ def test_polish_moves_wraps_angles_and_is_empty_without_build_values(
     assert a.polish_moves({"orbit.bigomega": 340.0}) == []
     assert a.polish_moves({}) == []
     assert a.polish_moves(None) == []
+
+
+# ---------------------------------------------------------------------------
+# The component's own seeding recipe (review 8.6.15).
+# ---------------------------------------------------------------------------
+
+
+def test_a_miss_carries_the_components_seed_remedy(monkeypatch):
+    """
+    Given two derived parameters that miss their seeds, one whose component
+      declared a ``seed_remedy`` and one that declared none,
+    When the check runs,
+    Then each finding carries ``remedy``: the declared sentence (stripped)
+      on the first and "" on the second -- and the generic ``detail`` is
+      left as it was, since run.inspect_start prints a shared recipe once
+      under the list rather than once per key.
+
+    THE CASE: examples/ob170114 with its source proper-motion seeds removed
+    and t_E / pi_E re-seeded at the published 173 d / (0.167, 0.127).  The
+    engine reconciled the over-determined chain by moving the unseeded
+    source pm and the model was built at t_E = 202.65 d, phi_pi = 1.1 deg
+    (published 37.25).  The generic remedy named five sampled parameters;
+    the one that works -- seed all four pm leaves and DROP these seeds --
+    is something only the component knows.
+    """
+    t_e = _FakeParam(
+        "mulensevent.t_E", unit="d", derived=True, seed_remedy="  Do X.  "
+    )
+    other = _FakeParam("planet.mass", unit="jupiterMass", derived=True)
+    a = _auditor(
+        [t_e, other],
+        {
+            "mulensevent.t_E": {"initval": 173.0},
+            "planet.mass": {"initval": 1.0},
+        },
+    )
+    _with_produced(monkeypatch, [202.65, 0.001])
+
+    found = {f["key"]: f for f in a.check_user_starts()}
+
+    assert found["mulensevent.t_E"]["remedy"] == "Do X."
+    assert "Do X." not in found["mulensevent.t_E"]["detail"]
+    assert found["mulensevent.t_E"]["reason"] == "derived"
+    assert found["planet.mass"]["remedy"] == ""
+
+
+def test_the_mulens_t_E_and_pi_E_seed_remedy_names_the_recipe():
+    """
+    Given the mulensing defaults,
+    When t_E, pi_E_N and pi_E_E are read,
+    Then all three declare ONE seed_remedy (the YAML anchor), and it names
+      the recipe -- seed all four proper-motion leaves with the masses and
+      distances, DROP the t_E / pi_E seeds -- and the reason the pi_E
+      magnitude is not a datum to seed.
+
+    Drift guard on the sentence that answers review 8.6.15: rewording it
+    is fine, losing the recipe is the regression.
+    """
+    from pathlib import Path
+
+    import yaml
+
+    import exozippy
+
+    path = (
+        Path(exozippy.__file__).parent
+        / "components"
+        / "mulensing"
+        / "defaults.yaml"
+    )
+    event = yaml.safe_load(path.read_text())["mulensevent"]
+    remedies = {
+        k: event[k]["seed_remedy"] for k in ("t_E", "pi_E_N", "pi_E_E")
+    }
+    assert len(set(remedies.values())) == 1, remedies
+    text = " ".join(remedies["t_E"].split())
+    assert "all four proper-motion leaves" in text
+    assert "DROP the t_E and pi_E seeds" in text
+    assert "masses and distances" in text
+    assert "|pi_E| is not an independent datum" in text
+
+
+def test_resolve_carries_the_seed_remedy_from_defaults_to_the_parameter():
+    """
+    Given ConfigManager.resolve, the seam every defaults.yaml field crosses
+      on its way to a Parameter,
+    When its code is inspected,
+    Then it reads ``seed_remedy`` (a defaults-only field, like
+      near_bound_remedy) and Parameter accepts it -- and it is NOT a
+      params-file key, so a user who writes one is told it matched nothing.
+    """
+    from exozippy.components.parameter import Parameter
+    from exozippy.config import USER_PARAM_KEYS, ConfigManager
+
+    assert "seed_remedy" in ConfigManager.resolve.__code__.co_consts
+    assert "seed_remedy" not in USER_PARAM_KEYS
+    par = Parameter(label="a.b.c", initval=1.0, seed_remedy="  Seed Y.  ")
+    assert par.seed_remedy_suffix() == "  Seed Y."
+    assert Parameter(label="a.b.d", initval=1.0).seed_remedy_suffix() == ""

@@ -21,6 +21,28 @@ mulensevent:
       default:
         func_name: "calc_t_E"
         deps: [ "theta_E", "mu_rel_geo_mag" ]
+    # check_user_starts appends this when a user t_E / pi_E seed is not what
+    # the model is built at (review 8.6.15).  ONE text for all three, shared
+    # by the YAML anchor, because the recipe is one recipe.  Measured on
+    # examples/ob170114 with the source pm seeds removed and t_E / pi_E
+    # re-seeded at the published 173 d / (0.167, 0.127): the engine moved
+    # the unseeded source pm and the model was built at t_E = 202.65 d,
+    # phi_pi = 1.1 deg (published 37.25) -- silently, before this sentence.
+    seed_remedy: &pi_E_seed_remedy >-
+      t_E and pi_E are DERIVED from the lens and source masses, distances
+      and proper motions (t_E = theta_E/mu_rel_geo; pi_E = pi_rel/theta_E
+      along mu_rel_geo), so a seed on them can only be back-solved into
+      whichever of those leaves you left unseeded -- typically a source
+      proper motion, which rotates the parallax direction phi_pi and
+      changes t_E.  The recipe that works: seed pm_ra and pm_dec of the
+      lens host AND of the source (all four proper-motion leaves, plus a
+      binary source's companion) together with the masses and distances,
+      and DROP the t_E and pi_E seeds; they then derive to the values the
+      leaves imply.  |pi_E| is not an independent datum here
+      (it is pi_rel/theta_E, fixed by the masses and distances); only its
+      direction is, and that lives in the relative proper motion.
+      examples/ob170114/ob170114.params.yaml converts a published t_E and
+      pi_E into leaf seeds this way.
   pi_E_N:
     initval: 0.0
     unit: ""
@@ -32,6 +54,7 @@ mulensevent:
       default:
         func_name: "calc_pi_E_N"
         deps: [ "pi_rel", "theta_E", "mu_dec_rel_geo", "mu_rel_geo_mag" ]
+    seed_remedy: *pi_E_seed_remedy
   pi_E_E:
     initval: 0.0
     unit: ""
@@ -43,6 +66,7 @@ mulensevent:
       default:
         func_name: "calc_pi_E_E"
         deps: [ "pi_rel", "theta_E", "mu_ra_rel_geo", "mu_rel_geo_mag" ]
+    seed_remedy: *pi_E_seed_remedy
   # NOTE on lens_map: it names the primary lens body by INDEX only, and it
   # serves two different roles -- the lensing MASS (star.mass[lens_map],
   # theta_E below) and the KINEMATIC HOST (star.distance/pm_ra/pm_dec
