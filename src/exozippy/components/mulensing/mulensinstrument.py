@@ -275,6 +275,26 @@ class MulensInstrument(Instrument):
         one mulensevent instance, so its t0_par and magnification dispatch
         are used throughout.
         """
+        # A light curve is meaningless without the event it is a light
+        # curve OF (review 2.6.7).  MulensEvent.__init__ already refuses an
+        # event without 'lens:'/'source:', so the three blocks are checked
+        # here together: every reader below may then dereference them
+        # outright, and a config missing one gets a config error naming it
+        # instead of an AttributeError deep in stage 1.
+        missing = [
+            k
+            for k in ("mulensevent", "lens", "source")
+            if k not in system.active_components
+        ]
+        if missing:
+            raise ValueError(
+                f"[{self.prefix}] microlensing photometry needs the "
+                f"{' and '.join(repr(k) for k in missing)} block(s), and the "
+                f"config declares none: add a single mulensevent block plus "
+                f"lens: [{{body: star.Lens}}] and source: "
+                f"[{{body: star.Source}}] (one entry per body)."
+            )
+
         self.fs_init = []
         self.q_source_init = []
         self.q_flux_init = []  # per-instrument f_s2/f_s1 (binary source)
@@ -485,10 +505,9 @@ class MulensInstrument(Instrument):
         is why the search is wrapped -- a start value moves no posterior,
         and killing a run over one is the wrong trade.
         """
-        event = getattr(system, "mulensevent", None)
-        if event is None or not event.config:
-            return
-        spec = event.config[0].get("peak_find")
+        # load_data has already refused a config without the event block,
+        # and MulensEvent.__init__ one with an empty block.
+        spec = system.mulensevent.config[0].get("peak_find")
         if spec == "auto":
             raise ValueError(
                 f"[{self.prefix}] peak_find: auto is no longer a spelling "
@@ -526,22 +545,6 @@ class MulensInstrument(Instrument):
                 f"already loaded for this fit: its multi-seed solutions "
                 f"(and any s/q/alpha) are discarded."
             )
-
-        # The seed paths are the POST-SPLIT spellings (`source.0.t_0`), the
-        # ones the params file's index form uses, so a config with no
-        # `source:` block cannot take them: _translate_and_scale resolves
-        # the index and then strict naming refuses the prefix outright.
-        # This used to be reached, and the failure was a hard refusal
-        # mid-build rather than a skipped seed.  tests/test_seed_quality.py
-        # reaches it because its harness picks whichever example YAML glob
-        # returns first, which on the microlensing examples is often a
-        # pre-split variant.
-        if getattr(system, "source", None) is None:
-            logger.debug(
-                f"[{self.prefix}] peak finder: no 'source' component in "
-                f"this configuration, so there is nothing to seed."
-            )
-            return
 
         # What is missing, from the engine-implied starts: see
         # peakfind.plan_peak_find for why this is not user_hints_sufficient,
@@ -639,16 +642,19 @@ class MulensInstrument(Instrument):
 
         ndx = source_ndx
         if not user_set_source:
-            primary_lens_idx = next(
-                (
-                    idx
-                    for (ctype, idx) in system.lens.bodies
-                    if ctype == "star"
-                ),
-                None,
-            )
-            if primary_lens_idx is not None:
-                ndx = primary_lens_idx
+            # The PRIMARY lens body (entry 0), never "the first star among
+            # the lens bodies": MulensEvent._validate_bodies (stage 3)
+            # refuses a non-star primary, but this runs in stage 1, so the
+            # same rule is enforced here rather than silently borrowing a
+            # star COMPANION's coordinates.
+            p_type, p_ndx = system.lens.bodies[0]
+            if p_type != "star":
+                raise ValueError(
+                    f"[{self.prefix}] the primary lens body (lens entry 0) "
+                    f"is '{p_type}.{p_ndx}', but it must be a star "
+                    f"(see MulensEvent._validate_bodies)."
+                )
+            ndx = int(p_ndx)
 
         return float(ra_all[ndx]), float(dec_all[ndx])
 
@@ -1212,7 +1218,8 @@ class MulensInstrument(Instrument):
 
         # Binary source: one flux ratio q_flux = f_s2/f_s1 per instrument
         # (sources have different colors, so the ratio is chromatic).
-        n_sources = getattr(self, "_n_sources", 1)
+        # _n_sources is set at the top of load_data (stage 1), before this.
+        n_sources = self._n_sources
         if n_sources > 1:
             if n_sources > 2:
                 raise NotImplementedError(
@@ -1414,7 +1421,7 @@ class MulensInstrument(Instrument):
         events are skipped -- f_source is the SUM and splitting it needs
         q_flux, which has its own hint path.
         """
-        if getattr(self, "_n_sources", 1) > 1:
+        if self._n_sources > 1:
             return
         sed = system.sed
         filter_keys = self._sed_filter_keys(system)
@@ -1653,7 +1660,7 @@ class MulensInstrument(Instrument):
             system.band.names[band_idx],
         )
 
-    def _model_flux(self, system, t, obs_pos, inst, resolve_times=None):
+    def _model_flux(self, system, t, obs_pos, inst, resolve_method=False):
         """The ONE detrend-free flux-model expression, in each row's own
         instrument flux system.
 
@@ -1671,10 +1678,10 @@ class MulensInstrument(Instrument):
 
         Magnification: both the symbolic and Op paths take Skowron+2011
         geocentric deviations (AU); ``get_magnification_op`` dispatches.
-        u1/u2/bandpass come from the one LD resolver.  ``resolve_times`` is
-        the likelihood's: it lets ``resolve_auto_vbbl`` size the backend on
-        the data before each source's Op is built (the plot grid reuses that
-        decision).
+        u1/u2/bandpass come from the one LD resolver.  ``resolve_method`` is
+        the likelihood's: it lets ``resolve_auto_vbbl`` fix the backend's
+        method list before each source's Op is built (the plot grid reuses
+        that decision; the bracket spans the whole time axis, review 2.6.9).
 
         Flux: F = sum_j f_s,j A_j + f_b, with f_s,1 = f_s/(1+q_F) and
         f_s,2 = f_s q_F/(1+q_F) (q_F per instrument -- sources differ in
@@ -1686,8 +1693,8 @@ class MulensInstrument(Instrument):
         n_src = self._n_sources
         A_per_source = []
         for j in range(n_src):
-            if resolve_times is not None:
-                system.mulensevent.resolve_auto_vbbl(resolve_times, index=j)
+            if resolve_method:
+                system.mulensevent.resolve_auto_vbbl(index=j)
             A_per_source.append(
                 system.mulensevent.get_magnification_op(
                     t,
@@ -1725,7 +1732,7 @@ class MulensInstrument(Instrument):
             t,
             self.observer_pos,
             self.inst_map_tensor,
-            resolve_times=self.time,
+            resolve_method=True,
         )
 
         # Optional detrending against extra data columns, through the shared
@@ -2568,7 +2575,8 @@ class MulensInstrument(Instrument):
         # ITS DATA EPOCHS, through the base mechanism
         # (Instrument.detrend_grid_exact / detrend_corrected_signal) -- every
         # plotted quantity stays exactly what the likelihood scored.
-        gp_files = sorted(getattr(self, "_gp_pred_on_grid", {}))
+        # _gp_pred_on_grid is set in Instrument.__init__ (review 2.6.7).
+        gp_files = sorted(self._gp_pred_on_grid)
         gp_at_data = None
         if any(not self.detrend_grid_exact(i) for i in gp_files):
             gp_at_data = self.detrend_corrected_signal(

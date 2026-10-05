@@ -1196,10 +1196,13 @@ def test_log_f_total_bootstrap_yields_to_user_params():
     # __init__ is bypassed above, so stand in for the state
     # register_parameters reads from it: the base's GP and robust-likelihood
     # configs (no file sets gp: or likelihood:, so both register nothing) and
-    # the detrend column count (no extra data columns here).
+    # the detrend column count (no extra data columns here), and the source
+    # count load_data sets at stage 1 (review 2.6.7 removed the
+    # getattr(..., 1) default that used to stand in for it silently).
     inst._load_gp_config()
     inst._load_likelihood_config()
     inst.total_detrend_cols = 0
+    inst._n_sources = 1
 
     # Act
     inst.register_parameters(_DummySystem())

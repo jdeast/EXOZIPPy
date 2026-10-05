@@ -2143,7 +2143,7 @@ class MulensEvent(Component):
     # Auto method brackets
     # ------------------------------------------------------------------
 
-    def resolve_auto_vbbl(self, times_np, index=0):
+    def resolve_auto_vbbl(self, index=0):
         """Replace 'auto_vbbl' with a concrete method list for multi-body
         lenses.
 
@@ -2163,16 +2163,26 @@ class MulensEvent(Component):
 
         Only the mulensmodel backend consumes the resulting method list;
         the default vbm_direct backend always calls BinaryMag2/MultiMag2.
+
+        The bracket is the WHOLE time axis (review 2.6.9).  It used to be
+        the data span +/- 1 d, but the same method list serves every
+        epoch the event is ever evaluated at -- the plot grid
+        (t_0 +/- 5 t_E, MulensInstrument._model_time_grid) and the GUI's
+        grids included -- and outside the bracket MulensModel falls back
+        to its default point-source method, so a finite-source plotted
+        curve silently changed convention beyond the data.  Padding to
+        "the union of the data and plot spans" would still miss any grid
+        chosen later; with no bracket left to compute, nothing can
+        outrun it.  Nothing is spent on it either: BinaryMag2 runs its own
+        quadrupole test and short-circuits to point source where that is
+        safe, which is the "VBM everywhere" cost model above.  The data
+        epochs are inside both brackets, so the likelihood is unchanged.
         """
         if self.mag_method[index] != "auto_vbbl":
             return
         if len(self.lens_bodies) < 2:
             return
-
-        t_lo = float(np.min(times_np))
-        t_hi = float(np.max(times_np))
-        method = "VBM"
-        self.mag_method[index] = [t_lo - 1.0, method, t_hi + 1.0]
+        self.mag_method[index] = [-np.inf, "VBM", np.inf]
 
     def compile_plotters(self, model, system):
         pass

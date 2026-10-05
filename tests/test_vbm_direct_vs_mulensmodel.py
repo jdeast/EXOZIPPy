@@ -89,8 +89,29 @@ def _compile(op):
     return pytensor.function([p, t, o], op(p, t, o))
 
 
-def _draw(rng, scale=1.0):
-    p = dict(_MAP)
+# A STELLAR-binary, caustic-CROSSING geometry (review 7.6.3).  The DC128
+# draws above are planetary (q ~ 1e-3, u_0 >> the central caustic), where the
+# finite-source correction sits below the 1e-8 parity tolerance everywhere:
+# both backends are effectively point source there, so the finite-source + LD
+# comparison could not see a backend that skipped the finite-source
+# computation outright (review 1.6.13 passed it for months).  At q ~ 0.3,
+# s ~ 1 the resonant caustic spans ~1 theta_E and u_0 = 0.05 drives the
+# source straight through it: measured, the finite-source curve departs from
+# the point-source one by >= 87% at its worst epoch on every draw, and the two
+# backends agree to ~1e-11.
+_STELLAR_CAUSTIC = dict(
+    _MAP,
+    u_0=0.05,
+    t_E=30.0,
+    rho=0.005,
+    s=1.0,
+    q=0.3,
+    alpha=45.0,
+)
+
+
+def _draw(rng, scale=1.0, center=_MAP):
+    p = dict(center)
     p["t_0"] += rng.normal(0, 0.05) * scale
     p["u_0"] *= 1 + rng.normal(0, 0.05) * scale
     p["t_E"] *= 1 + rng.normal(0, 0.05) * scale
@@ -103,16 +124,30 @@ def _draw(rng, scale=1.0):
     return np.array([p[k] for k in _ORDER])
 
 
-def test_vbm_direct_matches_mulensmodel_binary_with_parallax_and_ld():
+@pytest.mark.parametrize(
+    "geometry, center, n, span, min_fs_signal",
+    [
+        ("planetary", _MAP, 400, 150.0, None),
+        ("stellar_caustic", _STELLAR_CAUSTIC, 600, 20.0, 0.1),
+    ],
+)
+def test_vbm_direct_matches_mulensmodel_binary_with_parallax_and_ld(
+    geometry, center, n, span, min_fs_signal
+):
     """
     Given a binary lens + finite source + LD + satellite parallax and random
-      parameter draws around the DC128 MAP,
+      parameter draws around a planetary (DC128 MAP) or a stellar-binary,
+      caustic-crossing center,
     When both the MulensModel Op (VBM everywhere) and the direct-VBM Op are
       evaluated,
     Then magnifications agree per-point to rtol 1e-8 (identical VBM kernel,
-      only the trajectory plumbing differs).
+      only the trajectory plumbing differs) -- and, on the stellar case, the
+      finite-source signal (the largest departure from the point-source
+      curve) is demonstrably NONZERO on every draw, so the comparison would
+      fail were either backend silently point source (review 7.6.3).  The
+      planetary case asserts no such floor: its signal is below 1e-8.
     """
-    times, obs = _times_and_obs()
+    times, obs = _times_and_obs(n=n, span=span)
     f_mm = _compile(
         BinaryLensMagOp(
             coords=_COORDS,
@@ -126,15 +161,29 @@ def test_vbm_direct_matches_mulensmodel_binary_with_parallax_and_ld():
             coords=_COORDS, n_companions=1, use_rho=True, bandpass="Z087"
         )
     )
+    f_ps = _compile(
+        VBMDirectMagOp(coords=_COORDS, n_companions=1, use_rho=False)
+    )
 
     rng = np.random.default_rng(42)
     worst = 0.0
+    fs_signal = np.inf
     for _ in range(25):
-        p = _draw(rng)
+        p = _draw(rng, center=center)
         A_mm = f_mm(p, times, obs)
         A_dir = f_dir(p, times, obs)
         worst = max(worst, np.max(np.abs(A_mm - A_dir) / np.abs(A_mm)))
-    assert worst < 1e-8, f"direct path deviates from MulensModel: {worst:.2e}"
+        A_ps = f_ps(p[_POINT_SOURCE_INDEX], times, obs)
+        fs_signal = min(fs_signal, np.max(np.abs(A_mm - A_ps) / A_mm))
+    assert worst < 1e-8, (
+        f"{geometry}: direct path deviates from MulensModel: {worst:.2e}"
+    )
+    if min_fs_signal is not None:
+        assert fs_signal > min_fs_signal, (
+            f"{geometry}: finite source changed the magnification by only "
+            f"{fs_signal:.2e} on some draw -- the geometry no longer "
+            "crosses a caustic, and the parity assertion has no teeth"
+        )
 
 
 @pytest.mark.parametrize(

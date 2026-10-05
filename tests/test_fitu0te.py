@@ -107,3 +107,79 @@ def test_swapped_identity_and_fd_jacobian():
     assert np.isclose(np.exp(jac_val), fd, rtol=1e-6), (np.exp(jac_val), fd)
 
     assert np.isfinite(float(model.compile_logp()(point)))
+
+
+# ---------------------------------------------------------------------------
+# Review 1.6.8: the Jacobian on a MULTI-source event.  Pre-split the
+# potential covered source slot 0 only (-log t_E[0]) while the swap applied
+# per source, so a 2-source fit was misweighted by a factor t_E.  Post-split
+# t_E is the EVENT's one scalar and Source.build_likelihood applies
+# -n_u0te * log(t_E): one -log t_E per OPTED-IN track.  Pinned here by the
+# finite-difference determinant of the (u0te_j -> u_0_j) map, for both
+# sources opted in and for a mixed pair.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module", params=["both", "mixed"])
+def two_source_fitu0te(request, tmp_path_factory):
+    from mulens_synthetic import (
+        build,
+        mulens_config,
+        mulens_params,
+        write_flat_lc,
+    )
+
+    lc = write_flat_lc(tmp_path_factory.mktemp("u0te2s") / "lc.dat")
+    second = {"fitu0te": True} if request.param == "both" else {}
+    config = mulens_config(
+        lc, sources=(("S1", {"fitu0te": True}), ("S2", second))
+    )
+    system, model = build(config, mulens_params(config))
+    return request.param, system, model
+
+
+@pytest.mark.slow
+def test_two_source_fd_jacobian(two_source_fitu0te):
+    """
+    Given: a 2-source event with fitu0te on BOTH sources, or on source 0
+      only,
+    When: the model is built,
+    Then: exp(fitu0te_jacobian) equals the finite-difference |det| of the
+      map from the OPTED-IN u0te elements to their u_0 elements -- 1/t_E
+      per opted-in source, (1/t_E)**2 with both.  The pre-split single-slot
+      term gave 1/t_E for "both", off by a factor t_E.
+    """
+    kind, system, model = two_source_fitu0te
+    opted = [0, 1] if kind == "both" else [0]
+    point = model.initial_point()
+
+    jac_pot = [p for p in model.potentials if "fitu0te_jacobian" in p.name]
+    assert len(jac_pot) == 1
+    jac_val = float(np.squeeze(_eval(model, jac_pot[0], point)))
+
+    def at(j, delta):
+        pt2 = dict(point)
+        raw = np.array(point["source.u0te_raw"], dtype=float).copy()
+        raw[j] += delta
+        pt2["source.u0te_raw"] = raw
+        u = np.atleast_1d(_eval(model, system.source.u_0.value, pt2))
+        w = np.atleast_1d(_eval(model, system.source.u0te.value, pt2))
+        return u[opted], w[opted]
+
+    eps = 1e-4
+    jac = np.zeros((len(opted), len(opted)))
+    for col, j in enumerate(opted):
+        u_hi, w_hi = at(j, eps)
+        u_lo, w_lo = at(j, -eps)
+        jac[:, col] = (u_hi - u_lo) / (w_hi[col] - w_lo[col])
+    fd = abs(np.linalg.det(jac))
+    assert np.isclose(np.exp(jac_val), fd, rtol=1e-6), (
+        kind,
+        np.exp(jac_val),
+        fd,
+    )
+
+    t_E = np.atleast_1d(_eval(model, system.mulensevent.t_E.value, point))
+    assert t_E.size == 1  # ONE event-level t_E shared by both tracks
+    assert np.isclose(jac_val, -len(opted) * np.log(t_E[0]), rtol=1e-12)
+    assert np.isfinite(float(model.compile_logp()(point)))
