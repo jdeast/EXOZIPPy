@@ -1660,7 +1660,7 @@ class MulensInstrument(Instrument):
             system.band.names[band_idx],
         )
 
-    def _model_flux(self, system, t, obs_pos, inst, resolve_times=None):
+    def _model_flux(self, system, t, obs_pos, inst, resolve_method=False):
         """The ONE detrend-free flux-model expression, in each row's own
         instrument flux system.
 
@@ -1678,10 +1678,10 @@ class MulensInstrument(Instrument):
 
         Magnification: both the symbolic and Op paths take Skowron+2011
         geocentric deviations (AU); ``get_magnification_op`` dispatches.
-        u1/u2/bandpass come from the one LD resolver.  ``resolve_times`` is
-        the likelihood's: it lets ``resolve_auto_vbbl`` size the backend on
-        the data before each source's Op is built (the plot grid reuses that
-        decision).
+        u1/u2/bandpass come from the one LD resolver.  ``resolve_method`` is
+        the likelihood's: it lets ``resolve_auto_vbbl`` fix the backend's
+        method list before each source's Op is built (the plot grid reuses
+        that decision; the bracket spans the whole time axis, review 2.6.9).
 
         Flux: F = sum_j f_s,j A_j + f_b, with f_s,1 = f_s/(1+q_F) and
         f_s,2 = f_s q_F/(1+q_F) (q_F per instrument -- sources differ in
@@ -1693,8 +1693,8 @@ class MulensInstrument(Instrument):
         n_src = self._n_sources
         A_per_source = []
         for j in range(n_src):
-            if resolve_times is not None:
-                system.mulensevent.resolve_auto_vbbl(resolve_times, index=j)
+            if resolve_method:
+                system.mulensevent.resolve_auto_vbbl(index=j)
             A_per_source.append(
                 system.mulensevent.get_magnification_op(
                     t,
@@ -1732,7 +1732,7 @@ class MulensInstrument(Instrument):
             t,
             self.observer_pos,
             self.inst_map_tensor,
-            resolve_times=self.time,
+            resolve_method=True,
         )
 
         # Optional detrending against extra data columns, through the shared

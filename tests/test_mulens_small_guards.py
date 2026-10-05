@@ -1,4 +1,4 @@
-"""Small microlensing robustness fixes (reviews 2.6.7, 2.6.8).
+"""Small microlensing robustness fixes (reviews 2.6.7, 2.6.8, 2.6.9).
 
 Each test builds the synthetic system in tests/mulens_synthetic.py with the
 topology its item needs.
@@ -119,3 +119,49 @@ def test_u_0_floor_warning_ignores_a_derived_u_0(mixed_fitu0te, caplog):
         assert "floor on |u_0|" in caplog.text
     finally:
         src.u_0.initval = u_0
+
+
+# ---------------------------------------------------------------------------
+# 2.6.9: backend: mulensmodel's auto_vbbl bracket covers the plot grid.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def binary_mulensmodel(tmp_path_factory):
+    lc = write_flat_lc(tmp_path_factory.mktemp("binary") / "lc.dat")
+    config = mulens_config(
+        lc, lenses=("L1", "C"), event={"backend": "mulensmodel"}
+    )
+    params = mulens_params(config, {"lens.C.log_s": {"initval": 0.1}})
+    system, model = build(config, params)
+    return system, model, params
+
+
+@pytest.mark.slow
+def test_auto_vbbl_bracket_covers_the_plot_grid(binary_mulensmodel):
+    """
+    Given: a binary lens on backend: mulensmodel with the default
+      mag_method (auto_vbbl),
+    When: the model is built,
+    Then: the resolved method list brackets EVERY epoch the event may be
+      evaluated at -- the data, the plot grid (t_0 +/- 5 t_E) and epochs far
+      outside both.  The plot grid used to outrun the data-span +/- 1 d
+      bracket, so MulensModel drew the plotted curve beyond the data with
+      its default point-source method.
+    """
+    system, _, _ = binary_mulensmodel
+    inst = system.mulensinstrument
+    method = system.mulensevent.mag_method[0]
+    assert method[1] == "VBM", method
+    t_model, _, _ = inst._model_time_grid()
+    # The plot grid here happens to sit inside the data (the flat curve
+    # seeds a short t_E), so also demand a grid far outside it: the bracket
+    # must not depend on which grid a caller -- a plot, the GUI -- picks.
+    # The old data-span +/- 1 d bracket fails this one.
+    t_far = np.array([np.min(inst.time) - 1000.0, np.max(inst.time) + 1000.0])
+    for t in (inst.time, t_model, t_far):
+        assert method[0] < np.min(t) and np.max(t) < method[2], (
+            method,
+            np.min(t),
+            np.max(t),
+        )
