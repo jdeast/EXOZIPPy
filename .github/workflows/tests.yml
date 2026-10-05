@@ -688,11 +688,12 @@ jobs:
       # user installing from PyPI would. The test harness is installed
       # separately and unpinned -- it lives in poetry's dev GROUP, which never
       # reaches published metadata, so `pip install .[gui]` cannot bring it in.
+      # (pydl: the vendored keplersplinev2 reference in tests/third_party.)
       - name: Install with a fresh resolution
         run: |
           python -m pip install --upgrade pip
           pip install ".[gui]"
-          pip install pytest pytest-timeout pytest-xdist httpx
+          pip install pytest pytest-timeout pytest-xdist httpx pydl
 
       # Same Zenodo spectra cache as the other jobs -- see the comment there,
       # including why this path has to be kept in sync with

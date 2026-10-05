@@ -256,6 +256,9 @@ scipy-stubs = ">=1.18.1.0,<2.0.0.0"
 pandas-stubs = "=3.0.5.260730"
 pytest-timeout = "^2.4.0"
 pytest-xdist = ">=3.0"
+# pydl.pydlutils.bspline is what the vendored reference
+# tests/third_party/keplersplinev2.py fits its spline with; test-only.
+pydl = ">=1.0.1,<2.0.0"
 # fastapi.testclient.TestClient is built on httpx, which fastapi does NOT pull
 # in (it lives behind fastapi[standard]). It used to be present only by
 # accident, as a transitive dep of something else; a `poetry sync` removed it
@@ -300,6 +303,10 @@ pattern = "^v(?P<base>\\d+\\.\\d+\\.\\d+)(?P<stage>[a-zA-Z]+)?(?P<revision>\\d+)
 # 79 matches the width this codebase's comments and docstrings already wrap
 # at, so prose and code agree, and it matches exoplanet-core's config.
 line-length = 79
+# Third-party code vendored verbatim for the test suite (tests/third_party:
+# each file's header names its upstream commit); reformatting it would make
+# re-vendoring a diff against our own edits.
+extend-exclude = ["tests/third_party"]
 
 [tool.ruff.lint.isort]
 # DO NOT set force-sort-within-sections or anything that hoists imports above

@@ -133,6 +133,74 @@ def test_gap_equal_to_splinespace_does_not_split():
     assert len(spline.split_segments(t, 0.7499)) == 2
 
 
+def _noisy_wobble(t, seed):
+    rng = np.random.default_rng(seed)
+    return (
+        1.0
+        + 1e-3 * np.sin(2.0 * np.pi * t / 1.3)
+        + 1e-4 * rng.standard_normal(t.size)
+    )
+
+
+@pytest.mark.parametrize(
+    "span, splinespace, n_coeffs",
+    [
+        (_SPAN, 0.75, 5),  # MIRILRS
+        (3.0, 0.75, 7),  # exact multiple: long(4.0) + 1 -> 5 breakpoints
+        (0.1, 0.75, 4),  # shorter than the spacing: one cubic
+        (13.0, 0.75, 20),  # a TESS orbit
+        (5.3, 0.5, 13),
+    ],
+)
+def test_fit_matches_vanderburg_keplersplinev2(span, splinespace, n_coeffs):
+    """
+    Given a noisy low-frequency wobble on one gap-free segment,
+    When it is least-squares fit with this basis and with Vanderburg's own
+    Python keplerspline (tests/third_party/keplersplinev2.py, pydl's
+    bspline.iterfit) at maxiter=1 -- one pass, no outlier clipping,
+    Then the two fitted curves agree to rounding: the same knots, so the
+    same spline space, built independently of this port.
+    """
+    from third_party import keplersplinev2
+
+    t = np.linspace(0.0, span, 500)
+    f = _noisy_wobble(t, seed=1)
+    basis = spline.spline_basis(t, splinespace)
+    assert basis.shape[1] == n_coeffs
+    coeffs, *_ = np.linalg.lstsq(basis, f, rcond=None)
+    theirs = keplersplinev2.kepler_spline(
+        t, f, bkspace=splinespace, maxiter=1
+    )[0]
+    np.testing.assert_allclose(basis @ coeffs, theirs, rtol=0, atol=1e-12)
+
+
+def test_gapped_fit_matches_vanderburg_keplersplinev2():
+    """
+    Given two chunks separated by a gap wider than splinespace,
+    When they are fit with this basis and with keplersplinev2's split() +
+    kepler_spline(maxiter=1) per chunk (gap_width = splinespace, as
+    EXOFASTv2 uses ndays for both),
+    Then both find 2 segments and the fitted curves agree to rounding.
+    """
+    from third_party import keplersplinev2
+
+    t = np.concatenate(
+        [np.linspace(0.0, 1.6, 300), np.linspace(3.0, 4.9, 350)]
+    )
+    f = _noisy_wobble(t, seed=2)
+    basis = spline.spline_basis(t, 0.75)
+    coeffs, *_ = np.linalg.lstsq(basis, f, rcond=None)
+    chunks_t, chunks_f = keplersplinev2.split(t, f, gap_width=0.75)
+    assert len(chunks_t) == len(spline.split_segments(t, 0.75)) == 2
+    theirs = np.concatenate(
+        [
+            keplersplinev2.kepler_spline(a, b, bkspace=0.75, maxiter=1)[0]
+            for a, b in zip(chunks_t, chunks_f)
+        ]
+    )
+    np.testing.assert_allclose(basis @ coeffs, theirs, rtol=0, atol=1e-12)
+
+
 def test_zero_span_segment_raises_naming_the_file():
     """
     Given a point isolated from the rest by a gap wider than splinespace,
