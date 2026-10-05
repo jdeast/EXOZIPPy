@@ -1,11 +1,12 @@
-"""Small microlensing robustness fixes (review 2.6.7).
+"""Small microlensing robustness fixes (reviews 2.6.7, 2.6.8).
 
 Each test builds the synthetic system in tests/mulens_synthetic.py with the
 topology its item needs.
 """
 
+import numpy as np
 import pytest
-from mulens_synthetic import mulens_config, mulens_params, write_flat_lc
+from mulens_synthetic import build, mulens_config, mulens_params, write_flat_lc
 
 from exozippy.system import System
 
@@ -38,3 +39,83 @@ def test_mulens_photometry_without_an_event_names_the_missing_blocks(
     msg = str(err.value)
     for block in ("'mulensevent'", "'lens'", "'source'"):
         assert block in msg, msg
+
+
+# ---------------------------------------------------------------------------
+# 2.6.8: _validate_pspl_start checks SAMPLED elements only -- under fitu0te
+# the derived u_0 is skipped and u0te is checked instead.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def mixed_fitu0te(tmp_path_factory):
+    """Two sources: S1 samples u0te (u_0 derived), S2 samples u_0."""
+    lc = write_flat_lc(tmp_path_factory.mktemp("mixed") / "lc.dat")
+    config = mulens_config(lc, sources=(("S1", {"fitu0te": True}), ("S2", {})))
+    return build(config, mulens_params(config))
+
+
+@pytest.mark.slow
+def test_pspl_start_check_skips_a_derived_u_0_and_checks_u0te(
+    mixed_fitu0te,
+):
+    """
+    Given: a built 2-source system, source 0 under fitu0te (u_0 derived from
+      the sampled u0te) and source 1 plain (u_0 sampled; its u0te element
+      INACTIVE, pinned at 0),
+    When: each start is forced to NaN in turn and _validate_pspl_start runs,
+    Then: a NaN in the DERIVED u_0 (bookkeeping) or the INACTIVE u0te passes;
+      a NaN in the sampled u_0 or the sampled u0te raises naming it.  Before
+      2.6.8 the derived u_0's NaN raised and the u0te was never checked.
+    """
+    # Arrange
+    system, _ = mixed_fitu0te
+    src = system.source
+    assert src.u_0.element_is_derived(0) and not src.u_0.element_is_derived(1)
+    assert src.u0te.element_is_active(0) and not src.u0te.element_is_active(1)
+    u_0, u0te = src.u_0.initval, src.u0te.initval
+    nan = float("nan")
+    try:
+        # Act / Assert: bookkeeping NaNs are not starts.
+        src.u_0.initval = np.array([nan, 0.3])
+        src.u0te.initval = np.array([5.0, nan])
+        src._validate_pspl_start()
+
+        # The sampled u_0 (source 1) is a start.
+        src.u_0.initval = np.array([0.3, nan])
+        with pytest.raises(ValueError, match=r"source\.u_0"):
+            src._validate_pspl_start()
+
+        # The sampled u0te (source 0) is a start.
+        src.u_0.initval = np.array([nan, 0.3])
+        src.u0te.initval = np.array([nan, 0.0])
+        with pytest.raises(ValueError, match=r"source\.u0te"):
+            src._validate_pspl_start()
+    finally:
+        src.u_0.initval, src.u0te.initval = u_0, u0te
+
+
+@pytest.mark.slow
+def test_u_0_floor_warning_ignores_a_derived_u_0(mixed_fitu0te, caplog):
+    """
+    Given: the same mixed system, with the DERIVED u_0 (source 0) at 0 --
+      a value the fit never starts at (it starts at u0te/t_E),
+    When: _validate_pspl_start runs,
+    Then: no floor warning: it would name a start the fit does not use.
+      A sampled u_0 at 0 still warns.
+    """
+    system, _ = mixed_fitu0te
+    src = system.source
+    u_0 = src.u_0.initval
+    try:
+        src.u_0.initval = np.array([0.0, 0.3])
+        caplog.clear()
+        src._validate_pspl_start()
+        assert "floor on |u_0|" not in caplog.text
+
+        src.u_0.initval = np.array([0.3, 0.0])
+        caplog.clear()
+        src._validate_pspl_start()
+        assert "floor on |u_0|" in caplog.text
+    finally:
+        src.u_0.initval = u_0

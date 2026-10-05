@@ -244,11 +244,18 @@ class Source(Component):
         inputs at build time, not a mid-graph assert that would kill a run
         over a proposal the sampler already rejects on its own.
 
-        **Only t_0 and u_0 are checked, and that is deliberate.**  They are
-        the two trajectory parameters that are sampled here, so their
-        ``initval`` IS the start: raw = 0 maps to it through the logit
-        transform.  The other four quantities
-        ``MulensEvent._get_safe_mm_params`` handles -- t_E, theta_E, pi_E_N and
+        **Only the SAMPLED elements of t_0, u_0 and u0te are checked, and
+        that is deliberate.**  For a sampled element the ``initval`` IS the
+        start: raw = 0 maps to it through the logit transform.  Under
+        ``fitu0te`` a source's u_0 is DERIVED (u0te/t_E) and its u0te is
+        the sampled coordinate, so the check moves to u0te for that element
+        and the derived u_0 is skipped (review 2.6.8; the same
+        element_is_derived split :meth:`Lens._validate_q_start` makes) --
+        a NaN in that u_0's bookkeeping initval says nothing about the fit,
+        and the floor warning would name a start the fit does not use.
+
+        The other four quantities ``MulensEvent._get_safe_mm_params``
+        handles -- t_E, theta_E, pi_E_N and
         pi_E_E, all on mulensevent post-split -- are DERIVED, and for a
         derived parameter ``initval`` is the relaxation engine's own
         bookkeeping, not the value the model starts at; the graph
@@ -272,16 +279,36 @@ class Source(Component):
         U_0_FLOOR)`` return 0 and left the peak magnification singular).
         ``physics.apply_u_0_floor`` now sends it to ``+U_0_FLOOR``; the
         warning names the value it will actually start at.  t_0 gets no
-        range check -- it carries two finite hard bounds of its own.
+        range check -- it carries two finite hard bounds of its own -- and
+        neither does u0te: the u_0 it implies divides by a DERIVED t_E.
         """
-        sampled = {
-            "t_0": self._start_values("t_0"),
-            "u_0": self._start_values("u_0"),
-        }
+        # Per ELEMENT, not per vector: fitu0te is a per-source flag, so on a
+        # mixed vector some u_0 elements are sampled and others derived
+        # (review 2.6.8).  The _validate_q_start split, by role: a DERIVED
+        # element's initval is engine bookkeeping and is skipped; under
+        # fitu0te the coordinate that IS sampled, u0te, is checked instead.
+        # INACTIVE elements (u0te on a plain source, pinned at 0) are
+        # bookkeeping too.  manifest membership, not getattr: u0te exists
+        # only when some source opts in.
+        names = ["t_0", "u_0"] + (["u0te"] if "u0te" in self.manifest else [])
+        sampled = {}
+        for name in names:
+            vals = self._start_values(name)
+            if vals is None:
+                continue
+            par = getattr(self, name)
+            keep = np.array(
+                [
+                    par.element_is_active(j) and not par.element_is_derived(j)
+                    for j in range(vals.size)
+                ],
+                dtype=bool,
+            )
+            sampled[name] = vals[keep]
         nan_named = [
             f"{self.prefix}.{n} = {v.tolist()}"
             for n, v in sampled.items()
-            if v is not None and np.any(np.isnan(v))
+            if np.any(np.isnan(v))
         ]
         if nan_named:
             raise ValueError(
@@ -289,7 +316,7 @@ class Source(Component):
                 f"number: {'; '.join(nan_named)}.  {_MM_NAN_ADVICE}"
             )
 
-        u_0 = sampled["u_0"]
+        u_0 = sampled.get("u_0")
         if u_0 is not None and np.any(np.abs(u_0) < U_0_FLOOR):
             small = u_0[np.abs(u_0) < U_0_FLOOR]
             floored = [floor_u_0_value(v) for v in small]
