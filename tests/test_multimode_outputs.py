@@ -67,6 +67,10 @@ class _FakeSystem:
     def get_parameter_lookup(self):
         return {}
 
+    def report_only_labels(self):
+        # No report-only Deterministics (review 2.6.14) in this stand-in.
+        return []
+
 
 # ----------------------------------------------------------------------
 # get_draws(mode=...)
