@@ -41,6 +41,11 @@ def converted(tmp_path, monkeypatch):
     """Convert _DRIVER: three transits (two bands on one FLWO night, listed
     by globs in reverse date order), one RV file and a MIST sed file, all
     under $E2Z_TEST_ROOT/data. Returns (config, params, warnings, infos)."""
+    return _convert(tmp_path, monkeypatch, _DRIVER)
+
+
+def _convert(tmp_path, monkeypatch, driver):
+    """Convert ``driver`` against _DRIVER's data files and priors."""
     data = tmp_path / "data"
     data.mkdir()
     for name in (
@@ -51,7 +56,7 @@ def converted(tmp_path, monkeypatch):
         (data / name).write_text("2458484.5 1.0 0.001\n")
     (data / "HIRES.rv").write_text("2458484.5 0.0 5.0\n")
     (data / "star.sed").write_text("J2M 10.0 0.02 0.02\n")
-    (tmp_path / "fit.pro").write_text(_DRIVER)
+    (tmp_path / "fit.pro").write_text(driver)
     (tmp_path / "fit.priors").write_text(_PRIORS)
     monkeypatch.setenv("E2Z_TEST_ROOT", str(tmp_path))
     monkeypatch.setattr(e2z, "WARNINGS", [])
@@ -203,3 +208,98 @@ def test_an_unset_driver_keyword_is_never_concatenated_into_a_path():
     assert val == "outpath+'run.'"
     assert "could not evaluate" in e2z.WARNINGS[-1]
     del e2z.WARNINGS[before:]
+
+
+def _driver_with(extra):
+    """_DRIVER with ``extra`` keywords appended to the exofastv2 call."""
+    tail = "fehsedfloor=0.08, maxsteps=maxsteps"
+    assert _DRIVER.count(tail) == 1
+    return _DRIVER.replace(tail, f"{tail}, {extra}")
+
+
+def test_fitspline_array_is_per_transit_in_sorted_filename_order(
+    tmp_path, monkeypatch
+):
+    """
+    Given fitspline=[0,1,0] and splinespace=0.5 (mkss.pro: per-transit
+    arrays, in the sorted-filename order the transits are numbered in),
+    When the driver is converted,
+    Then only the second file in sorted order (n20190101.Sloanz) gets
+    fitspline: true and splinespace: 0.5, and fitspline is no longer
+    reported as untranslated.
+    """
+    # ARRANGE / ACT
+    config, _, warnings, _ = _convert(
+        tmp_path,
+        monkeypatch,
+        _driver_with("fitspline=[0,1,0], splinespace=0.5"),
+    )
+
+    # ASSERT
+    by_file = {t["file"]: t for t in config["transit"]}
+    assert by_file["n20190101.Sloanz.FLWO.dat"]["fitspline"] is True
+    assert by_file["n20190101.Sloanz.FLWO.dat"]["splinespace"] == 0.5
+    for name in ("n20190101.Sloang.FLWO.dat", "n20200101.TESS.TESS.dat"):
+        assert "fitspline" not in by_file[name]
+        assert "splinespace" not in by_file[name]
+    assert not any("fitspline" in w or "splinespace" in w for w in warnings)
+
+
+def test_fitspline_flag_applies_to_every_transit(tmp_path, monkeypatch):
+    """
+    Given the scalar flag /fitspline and no splinespace,
+    When the driver is converted,
+    Then every transit gets fitspline: true and no splinespace key (the
+    component's default is EXOFASTv2's 0.75 d).
+    """
+    config, _, _, _ = _convert(
+        tmp_path, monkeypatch, _driver_with("/fitspline")
+    )
+    assert [t.get("fitspline") for t in config["transit"]] == [True] * 3
+    assert not any("splinespace" in t for t in config["transit"])
+
+
+def test_splinespace_without_fitspline_is_moot(tmp_path, monkeypatch):
+    """
+    Given splinespace=0.5 but no fitspline,
+    When the driver is converted,
+    Then no transit gets either key and the conversion says it was moot.
+    """
+    config, _, _, infos = _convert(
+        tmp_path, monkeypatch, _driver_with("splinespace=0.5")
+    )
+    assert not any(
+        "fitspline" in t or "splinespace" in t for t in config["transit"]
+    )
+    assert any("splinespace=0.5" in i and "moot" in i for i in infos)
+
+
+@pytest.mark.parametrize(
+    "extra, key",
+    [
+        ("fitspline=dofit", "fitspline"),
+        ("fitspline=[0,dofit,0]", "fitspline"),
+        ("/fitspline, splinespace=ss", "splinespace"),
+    ],
+)
+def test_unevaluable_fitspline_value_raises(tmp_path, monkeypatch, extra, key):
+    """
+    Given a fitspline or splinespace the converter cannot evaluate (an
+    undefined IDL variable, kept as a string),
+    When the driver is converted,
+    Then the conversion raises naming the keyword, instead of a truthy
+    string silently turning the spline on (fitspline) or a bare float()
+    ValueError (splinespace).
+    """
+    with pytest.raises(ValueError, match=rf"^{key}="):
+        _convert(tmp_path, monkeypatch, _driver_with(extra))
+
+
+def test_fitspline_length_mismatch_raises(tmp_path, monkeypatch):
+    """
+    Given fitspline=[0,1] for three transit files,
+    When the driver is converted,
+    Then the conversion raises naming the keyword and both counts.
+    """
+    with pytest.raises(ValueError, match=r"fitspline=.*2 entries for 3"):
+        _convert(tmp_path, monkeypatch, _driver_with("fitspline=[0,1]"))

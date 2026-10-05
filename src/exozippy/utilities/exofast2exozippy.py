@@ -609,10 +609,6 @@ NOOP_KEYWORDS = {"nochord", "novcve", "noyy", "notorres", "nomistsed"}
 UNSUPPORTED_KEYWORDS = {
     "fehsedfloor": "EXOZIPPy's SED reads star.feh directly -- there is no "
     "separate SED metallicity for a floor to tie back to it",
-    "fitspline": "EXOFASTv2's Kepler-spline detrending is not implemented; "
-    "the closest EXOZIPPy analog is 'gp: sho' on the transit "
-    "file entry (correlated-noise model) or detrend columns",
-    "splinespace": "see fitspline",
     "fitreflect": "reflected-light phase curves are not implemented",
     "fitdilute": "explicit dilution fitting is not implemented (EXOZIPPy "
     "dilutes transits automatically from the SED when several "
@@ -759,6 +755,44 @@ def convert(pro_path, outdir, base):
             continue
         for t, v in zip(transits, vals):
             t[key] = v
+
+    # per-file Kepler-spline detrending (mkss.pro: a scalar applies to every
+    # transit, an array is per transit in the sorted-filename order above).
+    # A value we cannot read RAISES rather than warns: an unresolved
+    # fitspline=dofit would otherwise become the truthy string 'dofit' and
+    # turn the spline on everywhere, and the user meant *something* -- they
+    # should fix the driver before hours of fitting a model they did not ask
+    # for.
+    for key in ("fitspline", "splinespace"):
+        val = take(key)
+        if val is None:
+            continue
+        vals = val if isinstance(val, list) else [val] * len(transits)
+        if len(vals) != len(transits):
+            raise ValueError(
+                f"{key}={val!r} has {len(vals)} entries for "
+                f"{len(transits)} transit files; give one value per "
+                "transit file (sorted-filename order) or a scalar"
+            )
+        for v in vals:
+            # bool is an int subclass, so /fitspline (1 or True) passes;
+            # a string here is an IDL expression the converter could not
+            # evaluate (or a driver keyword unset at conversion time).
+            if isinstance(v, str) or not isinstance(v, (int, float)):
+                raise ValueError(
+                    f"{key}={val!r}: cannot convert {v!r} to a number. "
+                    "Set it to a literal value in the driver (e.g. "
+                    f"{key}=1 or {key}=[0,1,0]) and convert again"
+                )
+        for t, v in zip(transits, vals):
+            if key == "fitspline":
+                t[key] = bool(v)
+            elif t.get("fitspline"):
+                t[key] = float(v)
+        if key == "splinespace" and not any(
+            t.get("fitspline") for t in transits
+        ):
+            info(f"'splinespace={val}' is moot: no transit sets fitspline")
 
     # ---- SED ----------------------------------------------------------
     sed_yaml_name = None
@@ -1388,6 +1422,10 @@ def _emit_config(
                 L.append(f"    exptime: {t['exptime']} # minutes")
             if "ninterp" in t:
                 L.append(f"    ninterp: {int(t['ninterp'])}")
+            if t.get("fitspline"):
+                L.append("    fitspline: true")
+            if "splinespace" in t:
+                L.append(f"    splinespace: {t['splinespace']:g} # days")
         L.append("")
 
     if bands:
