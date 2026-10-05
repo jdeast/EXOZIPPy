@@ -45,7 +45,12 @@ Mechanics (all generic -- nothing here knows what a source is):
 Output per grid point: total logp, the three groups (data likelihood /
 physics priors and barriers / whitening bookkeeping), every physics term
 that moves by more than 0.05 nats across the grid, and the physical values
-of the deterministics named in --report at the optimum.
+of the deterministics named in --report at the optimum.  When the model
+carries a lens angle, also the alpha radius r = hypot(xalpha, yalpha) at
+each optimum and the total AT r = 1: the pair's N(0, 1) priors are flat in
+alpha and Gaussian in r, r is a flat direction for the data, and Powell
+leaves it anywhere, so the raw totals differ by sum (r^2 - 1)/2 of phantom
+prior (44 nats between two 062 optima).  Read the r = 1 rows.
 """
 
 import argparse
@@ -424,6 +429,36 @@ def main():
         f"{'  minus reference (first grid point)':<44}"
         + "".join(f"{r[2] - ref[2]:+12.2f}" for r in results)
     )
+    # The lens angle alpha is carried by the unbounded pair (xalpha, yalpha)
+    # through arctan2, each with an N(0, 1) prior: flat in alpha, Gaussian
+    # in the RADIUS r = hypot(x, y), which nothing else reads.  r is a flat
+    # direction for the data, so Powell leaves it wherever its path went
+    # and the pair's -r^2/2 lands in the total as a phantom prior (44 nats
+    # on DC2018 062, 2026-10-05).  Since no other term depends on r, the
+    # exact comparison is at a common radius: add sum_i (r_i^2 - 1)/2 per
+    # optimum, which is the total every point would have at r = 1.
+    if "lens.xalpha" in det_names and "lens.yalpha" in det_names:
+        radii = [
+            np.hypot(r[4]["lens.xalpha"], r[4]["lens.yalpha"]) for r in results
+        ]
+        corr = [float(np.sum((rr**2 - 1.0) / 2.0)) for rr in radii]
+        print(
+            f"{'  lens alpha radius r (per lens element)':<44}"
+            + "".join(
+                f"{' '.join(f'{v:.2f}' for v in rr):>12}" for rr in radii
+            )
+        )
+        print(
+            f"{'TOTAL at unit alpha radius (r = 1)':<44}"
+            + "".join(f"{r[2] + c:12.2f}" for r, c in zip(results, corr))
+        )
+        print(
+            f"{'  minus reference, at r = 1':<44}"
+            + "".join(
+                f"{(r[2] + c) - (ref[2] + corr[0]):+12.2f}"
+                for r, c in zip(results, corr)
+            )
+        )
     # The first column is the ABSOLUTE value at the first grid point, the
     # rest are differences against it -- so a single-point run (e.g. a
     # truth configuration) can be set against another run's numbers.
