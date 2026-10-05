@@ -14,7 +14,7 @@ from exozippy.outputs.texutils import latex_escape
 
 from .. import ltt
 from ..orbit import physics as orbit_physics
-from . import physics
+from . import physics, spline
 
 
 class Transit(Instrument):
@@ -49,6 +49,53 @@ class Transit(Instrument):
         self._light_travel_time_active = np.array(
             [bool(c.get("light_travel_time", True)) for c in self.config]
         )
+        self._load_spline_config()
+
+    def _load_spline_config(self):
+        """Read the per-file ``fitspline:`` / ``splinespace:`` keys (at
+        construction).
+
+        EXOFASTv2's per-transit FITSPLINE / SPLINESPACE (mkss.pro):
+        ``fitspline`` co-fits a fixed-knot cubic B-spline in time with the
+        transit model, ``splinespace`` is its breakpoint spacing in days
+        (default 0.75).  Populates ``self.fitspline[i]`` (bool) and
+        ``self.splinespace[i]`` (float, days).  Absent everywhere, no file
+        gains a spline column and the model is byte-for-byte what it was
+        before this feature existed.
+
+        Both keys are validated strictly: ``fitspline: 1`` (EXOFASTv2's
+        0/1 spelling) and a non-positive or non-numeric ``splinespace``
+        raise, because either silently changes the model if guessed at.
+        A ``splinespace`` on a file without ``fitspline: true`` does nothing
+        and warns.
+        """
+        self.fitspline = []
+        self.splinespace = []
+        for i, c in enumerate(self.config):
+            label = f"{self.prefix}[{self.names[i]}]"
+            fit = c.get("fitspline", False)
+            if not isinstance(fit, (bool, np.bool_)):
+                raise ValueError(
+                    f"[{label}] fitspline must be true or false; got {fit!r}."
+                )
+            space = c.get("splinespace", spline.DEFAULT_SPLINESPACE)
+            if (
+                isinstance(space, (bool, np.bool_))
+                or not isinstance(space, (int, float, np.integer, np.floating))
+                or not np.isfinite(space)
+                or space <= 0
+            ):
+                raise ValueError(
+                    f"[{label}] splinespace must be a positive number of "
+                    f"days (the spline breakpoint spacing); got {space!r}."
+                )
+            if "splinespace" in c and not fit:
+                logger.warning(
+                    f"[{label}] splinespace is set but fitspline is not "
+                    f"true; no spline is fit, so splinespace is ignored."
+                )
+            self.fitspline.append(bool(fit))
+            self.splinespace.append(float(space))
 
     def _ltt_active(self, orbits):
         """Per-file light-travel-time flags, forced off when the orbit
@@ -151,6 +198,29 @@ class Transit(Instrument):
             cls._plot_style_config_schema(),
             cls._gp_config_schema(),
             cls._likelihood_config_schema(),
+            {
+                "key": "fitspline",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Co-fit a fixed-knot cubic B-spline in time with the "
+                    "transit model (EXOFASTv2's FITSPLINE, Vanderburg's "
+                    "keplerspline): its coefficients join this file's "
+                    "detrend coefficients. Default false."
+                ),
+            },
+            {
+                "key": "splinespace",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Spline breakpoint spacing in days (default 0.75, "
+                    "EXOFASTv2's SPLINESPACE). Gaps wider than this start a "
+                    "new spline segment. Used only with fitspline: true."
+                ),
+            },
         ]
 
     def load_data(self, system):
@@ -214,12 +284,20 @@ class Transit(Instrument):
             self.baseline_init[i] = np.median(df.iloc[:, 1].values)
             self.jittervar_lower[i] = self._jitter_floor(df.iloc[:, 2].values)
 
+            # fitspline: the spline columns join this file's detrend block;
+            # without it the accumulator reads the block off df exactly as
+            # before (the backward-compatible path, untouched).
+            detrend = None
+            if self.fitspline[i]:
+                detrend = self._spline_columns(i, df)
+
             blocks.add(
                 i,
                 time=df.iloc[:, 0].values,
                 obs=df.iloc[:, 1].values,
                 err=df.iloc[:, 2].values,
                 df=df,
+                detrend=detrend,
             )
 
         # Shared accumulator: concatenation (time/flux/err), inst_map, the
@@ -236,6 +314,56 @@ class Transit(Instrument):
         # window at stage 2 from whatever start it can see).
         self.bls_signal = None
         self._seed_from_bls(system)
+
+    def _spline_columns(self, i, df):
+        """File ``i``'s detrend block with its spline columns appended.
+
+        ``df`` is ``_read_data``'s frame: time, flux, err, then any detrend
+        columns.  Returns ``(n_obs, n_user + n_spline - 1)``: the user's
+        columns as read, then the cubic B-spline basis
+        (``spline.spline_basis``) with its LAST column dropped.
+
+        Why one column is dropped, and why it is not the baseline instead:
+        the basis sums to 1 at every point, so the full basis plus the
+        file's ``baseline`` is exactly singular.  ``_build_block_detrend``
+        then mean-subtracts every column, which removes the constant
+        direction from each one -- and moves the degeneracy INSIDE the
+        spline block (the whitened columns satisfy sum_k sd_k * W_k = 0).
+        Pinning the baseline would therefore leave the block singular;
+        dropping one column does not, and span{1, W_1..W_{K-1}} is exactly
+        span{B_1..B_K}: EXOFASTv2's spline space, with ``baseline`` as its
+        constant, matching EXOFASTv2 still fitting F0 alongside the spline.
+
+        The combined design [1 | user columns | spline] must then have full
+        column rank, and that is CHECKED here rather than assumed: a user
+        detrend column that is linear (or up to cubic) in time lies inside
+        the spline's span and is exactly as degenerate.  Rank is invariant
+        under the whitening once the constant column is included, so the
+        raw columns are checked.
+        """
+        label = f"{self.prefix}[{self.names[i]}]"
+        time = df.iloc[:, 0].values.astype(float)
+        user = df.iloc[:, 3:].values.astype(float)
+        basis = spline.spline_basis(time, self.splinespace[i], label=label)[
+            :, :-1
+        ]
+        block = np.column_stack([user, basis])
+
+        design = np.column_stack([np.ones(len(time)), block])
+        rank = np.linalg.matrix_rank(design)
+        if rank < design.shape[1]:
+            raise ValueError(
+                f"[{label}] fitspline: the baseline, the {user.shape[1]} "
+                f"detrend column(s) and the {basis.shape[1]} spline "
+                f"column(s) are degenerate (rank {rank} of "
+                f"{design.shape[1]}).  A detrend column that is a "
+                f"polynomial in time up to cubic -- e.g. the time column "
+                f"itself -- is already inside the spline's span; remove it "
+                f"(or list only the others with `columns: {{detrend: "
+                f"[...]}}`), or there are too few points per spline segment "
+                f"for splinespace={self.splinespace[i]!r} d."
+            )
+        return block
 
     def _seed_from_bls(self, system):
         """Seed orbital period, conjunction epoch and radius ratio from BLS.
@@ -1166,6 +1294,36 @@ class Transit(Instrument):
                 key=f"{self.prefix}.phase_curve",
                 rank=22,
             )
+        spline_files = [i for i in range(self.n_elements) if self.fitspline[i]]
+        if spline_files:
+            from exozippy.outputs.prose import join_names
+
+            spaces = sorted({self.splinespace[i] for i in spline_files})
+            spacing = (
+                f"{spaces[0]:g}~d"
+                if len(spaces) == 1
+                else "per-file spacings of "
+                + join_names([f"{v:g}~d" for v in spaces])
+            )
+            get_collector(system).add(
+                "We detrended the "
+                + join_names(
+                    [latex_escape(self.names[i]) for i in spline_files]
+                )
+                + (
+                    " light curve"
+                    if len(spline_files) == 1
+                    else " light curves"
+                )
+                + r" with a cubic B-spline in time \citep{Vanderburg:2014}, "
+                + f"with breakpoints every {spacing}, "
+                + "fit simultaneously with the transit model: the spline "
+                + "coefficients were sampled jointly with the other "
+                + "parameters.",
+                section="planetary",
+                key=f"{self.prefix}.fitspline",
+                rank=23,
+            )
         get_collector(system).add(
             r"We modeled each transit with the analytic quadratic "
             r"limb-darkening light curve of \citet{Agol:2020}, as "
@@ -1185,6 +1343,23 @@ class Transit(Instrument):
                 key=f"{self.prefix}.ld_param",
                 rank=21,
             )
+
+    def detrend_caption(self):
+        """The base caption, plus the spline when a file sets fitspline.
+
+        The spline columns are detrend columns, so ``detrend_at_data``
+        already subtracts the fitted spline from the plotted points; the
+        caption has to say so, since "linear trend against the detrend
+        columns" alone would misdescribe a file with no columns of its own.
+        Unchanged when no file sets fitspline.
+        """
+        base = super().detrend_caption()
+        if not any(self.fitspline):
+            return base
+        return base + (
+            " For a light curve with fitspline, that trend includes the "
+            "co-fit cubic B-spline in time."
+        )
 
     # Points per instrument on a plotted model grid.  One size for the
     # unphased span and the phased period window, so the two panels share

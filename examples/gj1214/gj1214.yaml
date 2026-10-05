@@ -2,9 +2,6 @@
 #
 # Conversion warnings (features of the EXOFASTv2 fit that did not translate):
 #   - could not evaluate IDL expression 'nthread'; keeping it as a string
-#   - 'fitspline' not translated: EXOFASTv2's Kepler-spline detrending is not
-#     implemented; the closest EXOZIPPy analog is 'gp: sho' on the transit
-#     file entry (correlated-noise model) or detrend columns
 
 run:
   name: "gj1214"
@@ -58,7 +55,9 @@ transit:
   - name: "MIRILRS"
     file: "n20220720.MIRILRS.JWST.GJ1214.EUREKA.dat"
     band: "MIRILRS"
-    fitspline: true # TODO...
+    # EXOFASTv2's FITSPLINE: a cubic B-spline in time co-fit with the
+    # transit, breakpoints every splinespace (default 0.75 d).
+    fitspline: true
 
 rvinstrument:
   - name: "HARPS_Post"

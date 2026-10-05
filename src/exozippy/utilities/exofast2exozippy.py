@@ -609,10 +609,6 @@ NOOP_KEYWORDS = {"nochord", "novcve", "noyy", "notorres", "nomistsed"}
 UNSUPPORTED_KEYWORDS = {
     "fehsedfloor": "EXOZIPPy's SED reads star.feh directly -- there is no "
     "separate SED metallicity for a floor to tie back to it",
-    "fitspline": "EXOFASTv2's Kepler-spline detrending is not implemented; "
-    "the closest EXOZIPPy analog is 'gp: sho' on the transit "
-    "file entry (correlated-noise model) or detrend columns",
-    "splinespace": "see fitspline",
     "fitreflect": "reflected-light phase curves are not implemented",
     "fitdilute": "explicit dilution fitting is not implemented (EXOZIPPy "
     "dilutes transits automatically from the SED when several "
@@ -759,6 +755,29 @@ def convert(pro_path, outdir, base):
             continue
         for t, v in zip(transits, vals):
             t[key] = v
+
+    # per-file Kepler-spline detrending (mkss.pro: a scalar applies to every
+    # transit, an array is per transit in the sorted-filename order above)
+    for key in ("fitspline", "splinespace"):
+        val = take(key)
+        if val is None:
+            continue
+        vals = val if isinstance(val, list) else [val] * len(transits)
+        if len(vals) != len(transits):
+            warn(
+                f"{key} has {len(vals)} entries for {len(transits)} "
+                "transit files; ignored"
+            )
+            continue
+        for t, v in zip(transits, vals):
+            if key == "fitspline":
+                t[key] = bool(v)
+            elif t.get("fitspline"):
+                t[key] = float(v)
+        if key == "splinespace" and not any(
+            t.get("fitspline") for t in transits
+        ):
+            info(f"'splinespace={val}' is moot: no transit sets fitspline")
 
     # ---- SED ----------------------------------------------------------
     sed_yaml_name = None
@@ -1388,6 +1407,10 @@ def _emit_config(
                 L.append(f"    exptime: {t['exptime']} # minutes")
             if "ninterp" in t:
                 L.append(f"    ninterp: {int(t['ninterp'])}")
+            if t.get("fitspline"):
+                L.append("    fitspline: true")
+            if "splinespace" in t:
+                L.append(f"    splinespace: {t['splinespace']:g} # days")
         L.append("")
 
     if bands:
