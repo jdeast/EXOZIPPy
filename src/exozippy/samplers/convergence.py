@@ -58,8 +58,13 @@ _MIN_DRAWS_PER_CHAIN = 16
 _MIN_GOOD_CHAINS = 3
 
 
-def default_var_names(posterior):
+def default_var_names(posterior, exclude=()):
     """Physical, non-index variables worth judging convergence on.
+
+    ``exclude`` names variables to leave out: the REPORT-ONLY
+    Deterministics (review 2.6.14, ``System.report_only_labels`` /
+    ``trace_meta.report_only_vars``), which are in the trace so a dead
+    wrap-up cannot lose them, not so they move the burn-in this scan picks.
 
     Drops the integer ``mode`` label (not a sampled parameter) and any
     ``*_raw`` unconstrained variable that ALSO has a physical partner in the
@@ -72,8 +77,9 @@ def default_var_names(posterior):
     names = list(getattr(posterior, "data_vars", posterior))
     present = set(names)
     out = []
+    exclude = set(exclude)
     for v in names:
-        if v == "mode":
+        if v == "mode" or v in exclude:
             continue
         if v.endswith("_raw") and v[: -len("_raw")] in present:
             continue
@@ -352,7 +358,9 @@ def trim_groups(idata, good_idx, burnin):
     return trimmed
 
 
-def analyze_idata(idata, min_ess=None, max_rhat=None, var_names=None):
+def analyze_idata(
+    idata, min_ess=None, max_rhat=None, var_names=None, exclude=()
+):
     """Find burn-in + stuck chains on an InferenceData and return a trimmed view.
 
     Convenience wrapper for the reporting path: reads the physical posterior
@@ -365,7 +373,7 @@ def analyze_idata(idata, min_ess=None, max_rhat=None, var_names=None):
     see that constant for why this is an allow-list.
     """
     posterior = idata.posterior
-    var_names = var_names or default_var_names(posterior)
+    var_names = var_names or default_var_names(posterior, exclude=exclude)
     arrays = {v: posterior[v].values for v in var_names}
 
     lp = None

@@ -1563,6 +1563,22 @@ class System(Component):
             elif isinstance(attr, Component) and attr is not component:
                 self._set_comp_posterior(attr, posterior, param_lookup)
 
+    def report_only_labels(self):
+        """Labels of the Deterministics that exist only for trace durability.
+
+        ``Parameter.report_only_node`` (review 2.6.14): a reported derived
+        quantity is a node so the trace written before wrap-up carries it,
+        but the consumers that enumerate the trace -- the burn-in/convergence
+        scan, the global corner, the trace plots, the summary, the plotting
+        draws -- leave these out and so see the variable set they always
+        did.  Sorted, so the stamp written into the trace is deterministic.
+        """
+        return sorted(
+            label
+            for label, p in self.get_parameter_lookup().items()
+            if p.report_only_node
+        )
+
     def get_parameter_lookup(self):
         """
         Recursively finds all Parameter objects in the system and

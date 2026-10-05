@@ -1585,8 +1585,12 @@ def _run_fit(config, gui, user_params=None):
     )
 
     wrapup.stage("burn-in + stuck-chain analysis")
+    # The REPORT-ONLY Deterministics (review 2.6.14) are in the trace so a
+    # dead wrap-up cannot lose them; every consumer below that enumerates
+    # the trace leaves them out and so sees the variable set it always did.
+    report_only = set(system.report_only_labels())
     idata, burn_diag = convergence.analyze_idata(
-        idata, min_ess=min_ess, max_rhat=max_rhat
+        idata, min_ess=min_ess, max_rhat=max_rhat, exclude=report_only
     )
     convergence.log_convergence(burn_diag, logger)
 
@@ -1638,7 +1642,8 @@ def _run_fit(config, gui, user_params=None):
     summary_path = Path(str(prefix) + "_summary.txt")
     with nonfatal_wrapup("convergence summary"):
         summary_path.write_text(
-            _format_summary(idata, burn_diag, system), encoding="utf-8"
+            _format_summary(idata, burn_diag, system, exclude=report_only),
+            encoding="utf-8",
         )
 
     # Every plot below is wrapped, and per COMPONENT rather than per loop, so
@@ -1650,7 +1655,7 @@ def _run_fit(config, gui, user_params=None):
         f"per-component)"
     )
     with nonfatal_wrapup("corner plot"):
-        make_corner(idata, str(prefix) + "_corner.png")
+        make_corner(idata, str(prefix) + "_corner.png", exclude=report_only)
 
     # Component-specific corner plots (e.g. mulensing geometry). Unlike
     # comp.plot(), which also runs pre-flight on a single point, this only
@@ -1664,7 +1669,9 @@ def _run_fit(config, gui, user_params=None):
     with nonfatal_wrapup("detailed trace plot"):
         all_params = system.get_all_parameters()
         plot_vars = [
-            p.label for p in all_params if p.label in idata["posterior"]
+            p.label
+            for p in all_params
+            if p.label in idata["posterior"] and p.label not in report_only
         ]
         save_multipage_trace(
             idata, plot_vars, str(prefix) + "_trace_detailed.pdf", model=model
@@ -1679,7 +1686,11 @@ def _run_fit(config, gui, user_params=None):
         f"posterior plots for {len(system.active_components)} component(s)"
     )
     with nonfatal_wrapup("posterior draw extraction"):
-        draws = get_draws(idata, param_lookup=system.get_parameter_lookup())
+        draws = get_draws(
+            idata,
+            param_lookup=system.get_parameter_lookup(),
+            exclude=report_only,
+        )
     for comp in system.active_components.values():
         with nonfatal_wrapup(f"posterior plots for {comp.label}"):
             comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
@@ -2533,7 +2544,7 @@ def _add_wrapup_prose(system, diag, mode_report, cap_findings=None):
         )
 
 
-def _format_summary(idata, diag, system=None):
+def _format_summary(idata, diag, system=None, exclude=()):
     """Build the *_summary.txt body: physical params only, worst Rhat first.
 
     Drops the ``*_raw`` unconstrained duplicates (rank-identical to their
@@ -2545,7 +2556,9 @@ def _format_summary(idata, diag, system=None):
     """
     post = idata.posterior
     var_names = [
-        v for v in post.data_vars if not v.endswith("_raw") and v != "mode"
+        v
+        for v in post.data_vars
+        if not v.endswith("_raw") and v != "mode" and v not in exclude
     ]
     df = az.summary(idata, var_names=var_names)
     if "r_hat" in df.columns:
@@ -2589,7 +2602,7 @@ def _format_summary(idata, diag, system=None):
     return "\n".join(header) + "\n" + df.to_string() + "\n"
 
 
-def make_corner(idata, filename, max_samples=1000):
+def make_corner(idata, filename, max_samples=1000, exclude=()):
     """Corner-plot every physical variable in a trace's posterior group.
 
     Takes no `model` (review 5.3.3b): it selects its variables by NAME off
@@ -2597,12 +2610,20 @@ def make_corner(idata, filename, max_samples=1000):
     duplicates and the mode label -- so it never needed one, and the argument
     it used to accept made the call sites look like they were plotting from a
     model they were not.
+
+    ``exclude`` names variables to leave out: run.py passes
+    ``System.report_only_labels()`` (review 2.6.14), so the corner shows the
+    variables it always did while the trace also carries every reported
+    derived quantity.
     """
     all_vars = list(idata["posterior"].data_vars)
     physical_vars = [
         v
         for v in all_vars
-        if "_raw" not in v and "_interval" not in v and v != "mode"
+        if "_raw" not in v
+        and "_interval" not in v
+        and v != "mode"
+        and v not in exclude
     ]
     var_specs = [(v, None) for v in physical_vars]
     samples, labels = collect_corner_samples(idata, var_specs)
@@ -3280,7 +3301,7 @@ def _convert_posterior_to_user_units(idata, param_lookup, only=None):
         idata.posterior[var_name] = idata.posterior[var_name] * factor
 
 
-def get_draws(idata, n_draws=50, param_lookup=None, mode=None):
+def get_draws(idata, n_draws=50, param_lookup=None, mode=None, exclude=()):
     """
     Extracts a random subset of draws from the posterior for plotting.
 
@@ -3304,6 +3325,10 @@ def get_draws(idata, n_draws=50, param_lookup=None, mode=None):
     thinning IS seeded (``constants.CORNER_THIN_SEED``) because a corner plot
     is a figure that goes in a paper and must redraw identically, and
     ``sampler: {seed:}``, which fixes the chains themselves.
+
+    ``exclude`` names posterior variables to leave out of each point: run.py
+    passes ``System.report_only_labels()`` (review 2.6.14), so the plotting
+    points carry exactly the keys they did before those nodes existed.
     """
     # 1. Flatten chains/draws into a single 'sample' dimension
     post = az.extract(idata, combined=True, keep_dataset=True)
@@ -3334,7 +3359,7 @@ def get_draws(idata, n_draws=50, param_lookup=None, mode=None):
     for idx in indices:
         point = {}
         for var in post.data_vars:
-            if var == "mode":
+            if var == "mode" or var in exclude:
                 continue
             val = post[var].isel(sample=idx).values
             if (
@@ -3395,17 +3420,22 @@ def _emit_per_mode_outputs(system, idata, mode_report, prefix):
     """
     prefix = str(prefix)
     param_lookup = system.get_parameter_lookup()
+    report_only = set(system.report_only_labels())
     for k, m in enumerate(mode_report.modes):
         suffix = mode_suffix(k)
         t0 = time.time()
 
         idata_k = _idata_for_mode(idata, k)
-        make_corner(idata_k, f"{prefix}_corner_{suffix}.png")
+        make_corner(
+            idata_k, f"{prefix}_corner_{suffix}.png", exclude=report_only
+        )
 
         # Same draw-count knob as the combined-posterior plots (get_draws'
         # n_draws default) -- no extra stratification needed here since each
         # mode draws from its own full, already-labeled set of samples.
-        draws_k = get_draws(idata, param_lookup=param_lookup, mode=k)
+        draws_k = get_draws(
+            idata, param_lookup=param_lookup, mode=k, exclude=report_only
+        )
         for comp in system.active_components.values():
             comp.plot(
                 system, draws_k, filename_prefix=f"{prefix}_mcmc_{suffix}"

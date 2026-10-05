@@ -960,6 +960,11 @@ class Parameter:
     # update (set_barrier_scales).
     bound_scale: Optional[Number] = None
     force_node: bool = False
+    # Manifest option: this derived parameter's node is a REPORTING addition
+    # (review 2.6.14), so it is report-only (see `report_only_node`) even
+    # where it is built by a role that always gets a node -- a point-source
+    # event's REPORTED rho.  Component-set, never a user's.
+    report_only: bool = False
     names: Optional[Sequence[str]] = None
     # ACTIVITY selector (manifest `mask`): which elements are parameters of
     # their instance's parameterization at all.  Elements outside it are
@@ -1035,6 +1040,13 @@ class Parameter:
     # created until finalize_deferred has patched the value.  See build_pymc
     # section A.
     _deferred_potentials: Optional[dict] = field(default=None, init=False)
+    # True when build_pymc made this parameter's Deterministic ONLY so the
+    # early-saved trace carries a reported derived quantity (review 2.6.14),
+    # as opposed to a node the parameter always had (something sampled, a
+    # force_node, a link, a deferred reported role).  The wrap-up consumers
+    # that enumerate the trace read it -- via System.report_only_labels and
+    # the trace stamp -- to leave such nodes out of what they always saw.
+    report_only_node: bool = field(default=False, init=False)
     # generate_posterior's compiled evaluators, keyed by the tuple of input
     # names it found in the posterior.  Compiling is the expensive half of
     # evaluating a derived parameter over a trace, and distribute_posterior is
@@ -1754,6 +1766,28 @@ class Parameter:
         if self.mask is None:
             return np.zeros(int(n_elements), dtype=bool)
         return ~normalize_selector(self.mask, n_elements, self.label)
+
+    def _reported_derived_needs_node(self, is_derived, is_inactive, value):
+        """Does this derived parameter need a Deterministic so the trace keeps it?
+
+        Yes when it is REPORTED (``print_to_table``), at least one ACTIVE
+        element is derived, and the value actually depends on a free random
+        variable of the model being built -- a derived quantity of pinned
+        inputs is a constant, and a node for it would only put a column of
+        identical numbers in the trace.  See build_pymc section 6 and
+        review 2.6.14.
+        """
+        if not self.print_to_table:
+            return False
+        if not np.any(np.asarray(is_derived) & ~np.asarray(is_inactive)):
+            return False
+        free = set(pm.modelcontext(None).free_RVs)
+        if not free:
+            return False
+        ancestors = pytensor.graph.traversal.ancestors(
+            [pt.as_tensor_variable(value)]
+        )
+        return any(v in free for v in ancestors)
 
     def build_pymc(self, ndx=0, expression=None):
         """
@@ -2596,6 +2630,28 @@ class Parameter:
 
         # 6. ASSIGN TO SELF.VALUE
         track_node = bool(np.any(is_sampled)) or self.force_node or bool(links)
+        # A REPORTED derived quantity is a node too, so the trace the run
+        # writes BEFORE wrap-up carries it (review 2.6.14).  Until then a
+        # pure expression (mulens t_E/theta_E/pi_rel/mu_rel_mag, a planet's
+        # teq, a star's luminosity ...) existed only as the Parameter.posterior
+        # that distribute_posterior -> generate_posterior rebuilt at REPORT
+        # time, so a wrap-up that died -- three OOM kills on one microlensing
+        # model -- lost exactly the quantities the fit exists to measure while
+        # the sampled draws it was told to protect survived.  Such a node is
+        # flagged `report_only_node`: it exists for durability, and the
+        # wrap-up consumers that enumerate the trace (the convergence /
+        # burn-in scan, the global corner, the trace plots, the summary, the
+        # plotting draws) leave it out, so they see the variable set they
+        # always did.  Not for a value that depends on no free RV (a derived
+        # quantity of pinned inputs is a constant, which generate_posterior
+        # reports as one), not for print_to_table: false (not reported), and
+        # not for a vector every element of which is inactive.
+        report_only = False
+        if not track_node and self._reported_derived_needs_node(
+            is_derived, is_inactive, phys_val
+        ):
+            track_node = True
+            report_only = True
 
         if actual_shape == ():
             val_to_save = phys_val if expr_raw is not None else phys_val[0]
@@ -2615,6 +2671,13 @@ class Parameter:
             for mask, expr, output_only, sliced in expr_specs
             if output_only
         ]
+        # Reset on every build (the GUI builds one System more than once).  A
+        # deferred parameter's node is finalize_deferred's, which every
+        # REPORTED role always had, so it is report-only only when the
+        # component declares it so (`report_only`, the point-source rho).
+        self.report_only_node = bool(report_only and not deferred) or bool(
+            self.report_only
+        )
         if deferred:
             # `expr` is None for the ordinary path: Component.add_parameter
             # hands over the mask now and the wiring later (see
@@ -2626,6 +2689,16 @@ class Parameter:
                 "specs": deferred,
                 "shape": actual_shape,
             }
+            self.value = val_to_save
+        elif report_only:
+            # A SIDE output: registered so the trace records it, while every
+            # consumer keeps reading the bare tensor.  Handing consumers the
+            # Deterministic instead puts its view_op into their graphs, which
+            # left the start logp bit-identical but moved the dlogp of
+            # examples/hat3 (transit-only) by ~1e-13 relative on two
+            # elements -- enough to change a NUTS trajectory.  As a side
+            # output the logp/dlogp graphs are exactly master's.
+            pm.Deterministic(self.label, val_to_save)
             self.value = val_to_save
         elif track_node:
             self.value = pm.Deterministic(self.label, val_to_save)

@@ -77,6 +77,13 @@ DIRTY_ATTR = "exozippy_git_dirty"
 # which is what it always meant.
 ROLES_ATTR = "exozippy_element_roles"
 
+# The posterior variables that are Deterministics ONLY so the trace carries a
+# reported derived quantity through a wrap-up that dies (review 2.6.14;
+# Parameter.report_only_node).  Read by mkparam's burn-in scan, which has no
+# System, so it leaves them out exactly as run.py's does.  Absent on every
+# trace written before those nodes existed -- which therefore has none of them.
+REPORT_ONLY_ATTR = "exozippy_report_only_vars"
+
 # Which unit system the posterior's sampled variables are stored in.  run.py
 # runs _convert_posterior_to_user_units on the way to netCDF, so every trace
 # this code writes says "user" -- but a trace written before that conversion
@@ -290,6 +297,32 @@ def element_roles(system) -> Dict[str, Dict[str, List[bool]]]:
     return out
 
 
+def report_only_vars(idata) -> frozenset:
+    """The trace's report-only Deterministics (see ``REPORT_ONLY_ATTR``).
+
+    Empty for a trace with no stamp: every trace written before review
+    2.6.14 has none of these nodes, so "absent" is the truth about it, not a
+    default.  A stamp that does not parse is this code's own output gone
+    wrong, and raises rather than silently re-admitting the nodes.
+    """
+    blob = _attrs(idata).get(REPORT_ONLY_ATTR)
+    if blob is None:
+        return frozenset()
+    try:
+        names = json.loads(blob)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"trace attr {REPORT_ONLY_ATTR!r} is not a JSON list of variable "
+            f"names: {blob!r}"
+        ) from exc
+    if not isinstance(names, list):
+        raise ValueError(
+            f"trace attr {REPORT_ONLY_ATTR!r} is not a JSON list of variable "
+            f"names: {blob!r}"
+        )
+    return frozenset(str(n) for n in names)
+
+
 def stamp_structural_metadata(idata, source) -> None:
     """Record the structural fingerprint + code provenance in root attrs.
 
@@ -309,6 +342,9 @@ def stamp_structural_metadata(idata, source) -> None:
         attrs[ROLES_ATTR] = json.dumps(roles, sort_keys=True)
     else:
         attrs.pop(ROLES_ATTR, None)
+    report_only = getattr(source, "report_only_labels", None)
+    if callable(report_only):
+        attrs[REPORT_ONLY_ATTR] = json.dumps(list(report_only()))
     blob = json.dumps(payload, sort_keys=True, default=str)
     if len(blob) <= _MAX_PAYLOAD_CHARS:
         attrs[PAYLOAD_ATTR] = blob

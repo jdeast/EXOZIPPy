@@ -1090,7 +1090,12 @@ class MulensEvent(Component):
             "t_0": source.t_0,
             "u_0": source.u_0,
             "t_E": self.t_E,
-            "rho": getattr(source, "rho", None),
+            # rho only where it shapes the light curve: a point-source event
+            # REPORTS rho (Source.register_parameters), but its geometry
+            # corner stays the one it always was.
+            "rho": getattr(source, "rho", None)
+            if self.finite_source
+            else None,
             "s": getattr(lens, "s", None),
             "q": getattr(lens, "q", None),
             "alpha": getattr(lens, "alpha", None),
