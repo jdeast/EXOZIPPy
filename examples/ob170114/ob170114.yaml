@@ -99,7 +99,7 @@ mulensinstrument:
 parameter_file: "ob170114.params.yaml"
 
 sampler:
-  name: "ptde_async"             # binary lens + finite source = the VBM Op
+  method: ptde          # synchronous PTDE, the recommended default since PR #376; was spelled `name:`, which run.py does not read (review 2.14.7)
                                  # path, gradient-free
   draws: 2000
   tune: 2000

@@ -1,0 +1,37 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 32-64
+#$ -q lThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N loggwide047
+#$ -o ab047/dc18_loggwide.$JOB_ID.log
+#
+# DIAGNOSTIC ARM (2026-09-30): sweep4/047 with ONE params entry added,
+# star.Lens.loggsed: {bound_scale: 44}.  The NextGen BC grid stops at
+# logg 5.0 and the SED soft-bounds loggsed to it with a barrier measured
+# at 1% of the posterior width -- a wall.  A 0.133 solMass dwarf (047's
+# true lens) has logg 5.13, a 0.086 one (069) 5.25: every dwarf below
+# ~0.19 solMass is off the grid.  sweep4/047's lens logg posterior piles
+# at the wall (53% of draws above 4.9, mass 0.236 in [4.9,5.0)) and the
+# 047 profile's fall from log pi_rel -2.0 to -1.7 is prior-driven with the
+# data flat.  bound_scale 44 -> transition 0.44 dex, 10 nats/dex, so the
+# true lens is admitted at ~1.3 nats with the Ks BC extrapolated 0.13 dex
+# off the edge cell (dBC/dlogg is small there; see notes).  If M_l drops
+# from 0.28 toward 0.13 the wall is the mechanism and the fix is a BC
+# grid to logg 5.5 (Phoebe's pipeline), not this knob.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)   $(date)"
+cfg="${TMPDIR:-/tmp}/loggwide047_$$.yaml"
+python dc18_set_cores.py ab047/loggwide/DC2018_047.yaml "$cfg" --cores "${NSLOTS:?NSLOTS unset}"
+exozippy "$cfg"
+echo "exit $?   $(date)"

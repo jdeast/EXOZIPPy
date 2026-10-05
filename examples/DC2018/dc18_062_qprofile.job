@@ -1,0 +1,42 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N q062prof
+#$ -o sweep5/dc18_062_qprofile.$JOB_ID.log
+#
+# TASK 11's last piece: re-measure 062's wrong-q preference AFTER the
+# zeropoint fix.  Pre-fix (sweep/062, 2026-09-22, dc18_logp_terms.py): the
+# model's own likelihood preferred chain 69's wrong-q basin (q 8.1e-4) over
+# the truth-like geometry (s 1.454, q near 0.0199) by 52 nats (W149 +25.8,
+# Z087 +26.2), and the priors by another 53.  The corrected run sweep5/062
+# has NO draw near the true geometry (0 of 410,000 within 0.05 dex in s and
+# 0.3 dex in q; 58 near its close mirror s 0.685), so a draw-vs-draw split
+# is impossible: PROFILE instead -- pin (log_s, log_q) and re-optimize every
+# other parameter (--vary "."), then read the data group at each geometry.
+#   A/B  truth q (0.0199) at the wide (s 1.459) and close (0.685) solutions
+#   C    the run's own mode 1 (s 0.73, q 0.0038)
+# data(A or B) - data(C) is the post-fix analogue of the -52 nats.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_q062"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)   $(date)"
+REP="lens.log_s,planet.log_q,source.u_0,mulensevent.t_E,source.rho,lens.xalpha,lens.yalpha,mulensevent.log_theta_E,mulensevent.log_pi_rel,star.distance,star.radius,star.teff,mulensinstrument.q_source,mulensinstrument.zeropoint"
+echo "===================== A/B: truth q, wide and close s ====================="
+python dc18_ds_profile.py --event 062 --run-dir sweep5/062 \
+    --pin "lens.log_s[1]=0.1641" --grid=0.1641,-0.1641 --extra-pin "planet.log_q[0]=-1.7007" \
+    --restarts 2 --maxfev 20000 --vary "." --report "$REP"
+echo "===================== C: the run's mode 1 (s 0.73, q 0.0038) ====================="
+python dc18_ds_profile.py --event 062 --run-dir sweep5/062 \
+    --pin "lens.log_s[1]=-0.1367" --extra-pin "planet.log_q[0]=-2.4202" \
+    --restarts 2 --maxfev 20000 --vary "." --report "$REP"
+echo "exit $?   $(date)"

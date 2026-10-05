@@ -1,0 +1,37 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 32-64
+#$ -q lThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N task8_sync_r2b
+#$ -o task8/sync_r2b/task8_sync_r2b.$JOB_ID.log
+#
+# TASK 8 (review 2.4.9, JDE 2026-09-12; "do it" 2026-10-04): does ptde_async
+# still earn the recommended default on the model that motivated it?
+# Vehicle: the shipped examples/DC2018_128 (Z087, binary lens, finite source,
+# two converted seeds), n_temps 8, T_max 200, seed 20261004, cores from NSLOTS.
+#   timing    : ptde, 200 tune + 200 draws, collect_rung_timing -- Part A,
+#               the VBM straggler tail per rung and per step (matched to the
+#               2026-07 table in notes/hpc_optimization.txt)
+#   sync_r2b, async_r2b: seed 20261005 (the r2 arms re-used r1's seed, and the sync loop is deterministic, so sync_r1 == sync_r2 bit for bit); sync_long, async_long: 20000 draws for the draws-to-convergence metric
+#   sync_r*   : ptde       5000 + 5000, store_hot_chains   -- Part B
+#   async_r*  : ptde_async 5000 + 5000, store_hot_chains   -- Part B
+# Each arm has its own prefix (TASK 2's repeats shared one and overwrote).
+# Branch rung-timing-per-step (per-step timing in the sync diagnostic).
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018/task8/sync_r2b
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD) on $(git -C $HOME/python/EXOZIPPy branch --show-current)   $(date)   slots $NSLOTS"
+cfg="${TMPDIR:-/tmp}/task8_sync_r2b_$$.yaml"
+python ../../dc18_set_cores.py DC2018_128.yaml "$cfg" --cores "${NSLOTS:?NSLOTS unset}"
+/usr/bin/time -v exozippy "$cfg" 2> task8_sync_r2b_time.txt
+echo "exit $?   $(date)"
+tail -20 task8_sync_r2b_time.txt | grep -E "Elapsed|Maximum resident|User time|System time"

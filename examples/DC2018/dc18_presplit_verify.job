@@ -1,0 +1,28 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N presplit
+#$ -o task10_old.$JOB_ID.log
+#
+# TASK 10 leftover: the 10 pre-split event-128 run records, ported to the mulensevent/lens/source split and converted -- do they build, and what is their start logp (master code).
+# on the pre-#361 tree (5679d1a7, worktree ~/wt_pre361, first on PYTHONPATH)
+# reading the UNCONVERTED configs in the main checkout (their mmexofast:
+# keys, JSONs and params as they stand).  Must finish before the converter
+# rewrites those configs and params.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_task10"
+WT=$HOME/wt_pre361
+export PYTHONPATH=
+cd $HOME/python/EXOZIPPy/examples/DC2018
+echo "old tree $(git -C $WT rev-parse --short HEAD); main tree $(git rev-parse --short HEAD) $(git branch --show-current)   $(date)"
+python dc18_start_logp.py --scripts $HOME/python/EXOZIPPy/scripts --out task10/presplit /home/jeastman/python/EXOZIPPy/examples/DC2018/events/128/DC2018_128.yaml /home/jeastman/python/EXOZIPPy/examples/DC2018/events/128.prev-2026-08-10/DC2018_128.yaml /home/jeastman/python/EXOZIPPy/examples/DC2018/events_deo48/128/DC2018_128.yaml /home/jeastman/python/EXOZIPPy/examples/DC2018/events_deo48_adapt/128/DC2018_128.yaml /home/jeastman/python/EXOZIPPy/examples/DC2018/events_fixedmmx/128/DC2018_128.yaml /home/jeastman/python/EXOZIPPy/examples/DC2018/events_ladderfix/128/DC2018_128.yaml /home/jeastman/python/EXOZIPPy/examples/DC2018/events_mmxemcee/128/DC2018_128.yaml /home/jeastman/python/EXOZIPPy/examples/DC2018/events_polish1200/128/DC2018_128.yaml /home/jeastman/python/EXOZIPPy/examples/DC2018/events_tmax8500/128/DC2018_128.yaml /home/jeastman/python/EXOZIPPy/examples/DC2018/events_u1fixed/128/DC2018_128.yaml 
+echo "exit $?   $(date)"

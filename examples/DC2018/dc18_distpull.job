@@ -1,0 +1,28 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q lThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N muscan
+#$ -o dc18_muscan.$JOB_ID.log
+#
+# WHAT PULLS THE SOURCE IN?  Both points are draws from the SAME
+# truth-seeded run (ab194/truthsrc_vega), so one whitening decodes both:
+#   chain 68 draw   0: D_source 10169, R 0.691  (essentially the truth it
+#                      was seeded at)   lp 114902.87
+#   chain 36 draw 539: D_source  4809, R 0.388  (where it settled)
+#                                       lp 114935.12
+# 32.25 nats separate them.  The per-term split names what pays for it.
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+cd $HOME/python/EXOZIPPy/examples/DC2018
+python dc18_logp_terms.py --event 194 \
+    --run-dir $HOME/python/EXOZIPPy/examples/DC2018/ab194/truthsrc_vega \
+    --points 17:681,48:501,5:443,49:625,48:133,16:105,49:547,28:439,19:313,14:632 --top 12
+echo "exit $?   $(date)"

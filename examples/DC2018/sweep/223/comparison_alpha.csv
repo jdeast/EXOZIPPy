@@ -1,0 +1,10 @@
+event,class,param,truth,exozippy,exo_err_hi,exo_err_lo,exo_pull,note
+223,omcassan,t_0,2458573.122721255,2458573.12667,0.00061,0.00081,-4.874994219453247,
+223,omcassan,u_0,0.012831,0.01141,0.00013,0.00015,10.930769230769235,"exozippy: fit is in the key's no-parallax mirror branch, (u_0, alpha) -> -(u_0, alpha): an exact tie (C23), scored against the mirror image"
+223,omcassan,t_E,9.55012,9.57,0.036,0.04,-0.4970000000000141,
+223,omcassan,rho,0.00185698,0.00143,0.0004,0.0003,1.06745,
+223,omcassan,s,2.01121,0.132,0.018,0.012,104.40055555555557,
+223,omcassan,q,0.000790775,0.046,0.014,0.014,-3.229230357142857,
+223,omcassan,alpha,293.6986618955668,168.3,1.7,1.2,73.7639187620981,"exozippy: fit is in the key's no-parallax mirror branch, (u_0, alpha) -> -(u_0, alpha): an exact tie (C23), scored against the mirror image"
+223,omcassan,mulensinstrument.Roman_W149.err_scale,,1.0041,0.0053,0.0075,,
+223,omcassan,mulensinstrument.Roman_Z087.err_scale,,0.978,0.028,0.026,,

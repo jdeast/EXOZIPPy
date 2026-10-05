@@ -40,7 +40,7 @@ mulensinstrument:
   band: Z087
   likelihood: hogg
 sampler:
-  method: ptde_async
+  method: ptde          # synchronous PTDE, the recommended default since PR #376 (review 2.4.9): the VBM straggler tail that justified ptde_async is gone
   seed_polish: auto
   n_temps: 8
   T_max: 200.0

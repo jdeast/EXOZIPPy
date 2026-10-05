@@ -53,7 +53,7 @@ cd examples/ob170114 && poetry run exozippy ob170114.yaml
 ```
 
 Binary lens + finite source means the VBMicrolensing Op path (no
-gradient), so the sampler is `ptde_async`.
+gradient), so the sampler is the synchronous `ptde` (the recommended default since PR #376).
 
 ## Data
 

@@ -1,0 +1,41 @@
+run:
+  name: DC2018_128
+prefix: /home/jeastman/python/EXOZIPPy/examples/DC2018/task8/async_r2/DC2018_128
+star:
+- name: Lens
+- name: Source
+planet:
+- name: Companion
+mulensevent:
+- finite_source: false
+lens:
+- body: star.Lens
+- body: planet.Companion
+source:
+- body: star.Source
+galacticmodel:
+- name: DC2018_128
+  anchor_idx: 1
+band:
+- name: Z087
+  filter: Roman.WFI.Z087
+  ld_law: linear
+mulensinstrument:
+- name: Roman_Z087
+  file: /home/jeastman/python/EXOZIPPy/examples/DC2018_128/n20180816.Z087.WFIRST18.128.txt
+  data_format: flux
+  observer_location: roman_simulated_2018dc
+  band: Z087
+parameter_file: /home/jeastman/python/EXOZIPPy/examples/DC2018/task8/async_r2/DC2018_128.params.yaml
+sampler:
+  method: ptde_async
+  n_temps: 8
+  T_max: 200
+  tune: 5000
+  draws: 5000
+  nthin: 1
+  recompute_trace: true
+  eval_timeout: 10
+  store_hot_chains: true
+  seed: 20261004
+  cores: 64

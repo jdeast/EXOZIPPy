@@ -1,0 +1,21 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N task10tests2
+#$ -o task10_tests2.$JOB_ID.log
+# TASK 10 step 4: rot guard again after repointing the configs at the shipped event-128 light curves.
+# converter's own tests, on branch dc18-mmexofast-convert.
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_task10t"
+cd $HOME/python/EXOZIPPy
+echo "branch $(git branch --show-current) $(git rev-parse --short HEAD)"
+python -m pytest -q -n0 -p no:cacheprovider tests/test_examples_prepare.py -k "DC2018" 2>&1 | tail -15
+ls tests/test_convert_mmexofast*.py tests/test_mmexofast*.py 2>/dev/null && python -m pytest -q -n0 -p no:cacheprovider tests/test_convert_mmexofast*.py 2>&1 | tail -5
+echo "exit $?"

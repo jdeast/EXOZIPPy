@@ -56,7 +56,7 @@ sampler:
   # across seeds -- nuts would start every chain at seed 0. PTDE's
   # tempering also lets chains cross between the degenerate basins;
   # outputs/modes.py then reports each mode separately.
-  method: ptde_async
+  method: ptde          # synchronous PTDE, the recommended default since PR #376 (review 2.4.9): the VBM straggler tail that justified ptde_async is gone
   # PTDE: no separate tuning phase needed -- the seeds are polished to
   # their basin optima before sampling and burn-in is trimmed at wrap-up
   # (convergence.find_burnin); long draws instead, for round trips

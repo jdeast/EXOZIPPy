@@ -214,7 +214,7 @@ parameter_file: "ob07224.params.yaml"
 sampler:
   # finite_source => the MulensModel Op path, which has no gradient
   # (components/mulensing/mulensing.md), so NUTS is not available.
-  method: ptde_async
+  method: ptde          # synchronous PTDE, the recommended default since PR #376 (review 2.4.9): the VBM straggler tail that justified ptde_async is gone
   n_temps: 8
   T_max: 200
   tune: 0
