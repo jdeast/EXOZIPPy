@@ -5158,17 +5158,27 @@ class Parameter:
             getattr(self.posterior, "values", self.posterior), dtype=float
         )
         labels = np.asarray(mode_labels)
-        if arr.ndim == 0 or arr.shape[-1] != labels.size:
-            # Constant over the trace (e.g. generate_posterior's fixed branch
-            # returns the bare value with no sample axis): identical in every
-            # mode.
-            self.mode_summaries = [self._summarize_array(arr)] * n_modes
-        else:
+        if arr.ndim > 0 and arr.shape[-1] == labels.size:
             self.mode_summaries = [
                 self._summarize_array(
                     arr[..., labels == k], period=self._recenter_period
                 )
                 for k in range(n_modes)
             ]
+        elif arr.ndim == 0 or arr.shape[-1] == 1:
+            # Constant over the trace -- generate_posterior's fixed branch
+            # returns the bare value (ndim 0) or, for a vector, elements x 1
+            # -- so it is identical in every mode.
+            self.mode_summaries = [self._summarize_array(arr)] * n_modes
+        else:
+            # distribute_posterior drops the -1 draws from the posterior AND
+            # the labels together, so a sampled posterior always carries one
+            # draw per label.  Any other count is a stale or foreign
+            # posterior; summarizing it pooled under every mode published the
+            # all-draws numbers as each mode's (review 2.2.17).
+            raise ValueError(
+                f"{self.label}: posterior has {arr.shape[-1]} samples but "
+                f"{labels.size} mode labels"
+            )
         self._mode_summaries_ci = reporting.get_credible_interval()
         return self.mode_summaries
