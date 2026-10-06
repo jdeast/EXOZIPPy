@@ -82,6 +82,8 @@ def test_near_bound_position_degenerate_inputs_are_nan_not_errors():
 class _System:
     def __init__(self, params):
         self._params = params
+        # A real System always carries this {name: component} dict.
+        self.active_components = {}
 
     def get_all_parameters(self):
         return list(self._params)
@@ -216,7 +218,12 @@ class _GridComponent:
 class _SystemWithComponents(_System):
     def __init__(self, params, components):
         super().__init__(params)
-        self.active_components = list(components)
+        # A DICT, exactly as System.__init__ builds it: a list here is what
+        # let the real path (which iterated the dict's keys) pass this test
+        # while returning {} on every real run (review 1.3.8).
+        self.active_components = {
+            f"comp{i}": comp for i, comp in enumerate(components)
+        }
 
 
 def test_a_tail_on_the_wall_is_reported_even_when_the_median_is_not(caplog):
@@ -308,3 +315,60 @@ def test_grid_bounded_paths_tolerates_a_component_without_the_hook():
     # ASSERT
     assert list(paths) == ["star.teffsed"]
     assert diagnostics.grid_bounded_paths(_System([])) == {}
+
+
+def test_a_hook_that_raises_is_not_swallowed():
+    """
+    Given a component whose grid_bound_paths() hook raises,
+    When the provenance map is built,
+    Then the error propagates: a broken hook is a bug in that component,
+      and swallowing it would silently turn a grid wall back into the
+      "revisit the bound" advice parameter.md says is wrong for one.
+    """
+
+    # ARRANGE
+    class _Broken:
+        def grid_bound_paths(self):
+            raise RuntimeError("broken hook")
+
+    system = _SystemWithComponents([], [_Broken()])
+
+    # ACT / ASSERT
+    with pytest.raises(RuntimeError, match="broken hook"):
+        diagnostics.grid_bounded_paths(system)
+
+
+def test_grid_bounded_paths_reads_a_real_system(tmp_path):
+    """
+    Given a REAL System with an sed block (whose components live in the
+      {name: component} dict System.__init__ builds),
+    When the grid-extent provenance map is built,
+    Then it carries the SED's grid bounds -- review 1.3.8: iterating the
+      dict yielded component NAMES, so this was {} on every real run and
+      the grid-extent wording never reached a user.
+    """
+    from exozippy.system import System
+
+    # ARRANGE
+    sed_file = tmp_path / "empty.sed"
+    sed_file.write_text("model: NextGen\nfilters: []\n")
+    config = {
+        "star": [{"name": "A", "mist": False}],
+        "sed": {"file": str(sed_file)},
+    }
+    system = System(config, {})
+
+    # ACT
+    paths = diagnostics.grid_bounded_paths(system)
+
+    # ASSERT
+    assert paths == system.sed.grid_bound_paths()
+    assert set(paths) == {
+        "star.teffsed",
+        "star.loggsed",
+        "star.feh",
+        "star.av",
+    }
+    assert (
+        paths["star.teffsed"]["source"] == "NextGen bolometric-correction grid"
+    )

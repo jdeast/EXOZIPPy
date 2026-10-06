@@ -234,6 +234,10 @@ class SED(Component):
         # barrier supplies the restoring force that keeps the sampler
         # from living out there, which a NaN or a -inf wall could not.
         self.grid_axes = [None]
+        # {parameter path: {lower, upper, source}} for the bounds that
+        # ARE the grid's extent; published by grid_bound_paths().  Empty
+        # until _inject_grid_bounds fills it (no grid, no claim).
+        self._grid_bound_paths = {}
         self._inject_grid_bounds()
 
     # ------------------------------------------------------------------
@@ -374,7 +378,7 @@ class SED(Component):
         The hook ``diagnostics.grid_bounded_paths`` duck-types for.  Empty
         until ``_inject_grid_bounds`` has run (no grid, no claim).
         """
-        return dict(getattr(self, "_grid_bound_paths", {}) or {})
+        return dict(self._grid_bound_paths)
 
     @property
     def prefix(self):
