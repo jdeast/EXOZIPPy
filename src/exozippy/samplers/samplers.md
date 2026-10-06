@@ -541,6 +541,13 @@ changed is that it is no longer silent:
   population away from the NaN region). The polish raises likewise on a NaN at
   a seed (member 0 is the unjittered seed; a NaN there would freeze the
   population, since nothing beats NaN in a Metropolis test).
+- **Nested sampling** floors to `-1e300` only for a genuine `-inf` (ultranest
+  asserts finite logl, and `-1e300` is dynesty's own "no likelihood"
+  sentinel). A NaN or an exception is logged at ERROR once per worker, counted
+  in shared counters created before the fork, floored, and stamped as
+  `nested_n_nan` / `nested_n_logp_exceptions`; `+inf` raises. NS is shelved, so
+  a NaN is counted rather than killing a multi-day run -- but it can no longer
+  drop a region from the posterior, logZ and the mode masses unannounced.
 
 Tests: `tests/test_nan_logp.py`.
 

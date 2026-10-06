@@ -18,10 +18,11 @@ import logging
 
 import numpy as np
 import pymc as pm
+import pytensor.tensor as pt
 import pytest
 
 from conftest import requires_fork
-from exozippy.samplers import _common
+from exozippy.samplers import _common, nested
 from exozippy.samplers._common import _make_starts
 from exozippy.samplers.ptde import polish_seed_starts, ptde_sample
 from exozippy.samplers.ptde_async import ptde_async_sample
@@ -289,3 +290,96 @@ def test_polish_counts_nan_and_raises_on_nan_seed(caplog):
             np.random.default_rng(0),
             **kw,
         )
+
+
+# ---------------------------------------------------------------------------
+# Nested sampling (2.4.22)
+# ---------------------------------------------------------------------------
+
+
+def _nested_model(loglike):
+    """Exozippy-style build: x_raw ~ N(0,1), x logit-bounded on [0, 10], the
+    logit correction that makes the prior uniform, plus `loglike(x)`."""
+    with pm.Model() as model:
+        raw = pm.Normal("x_raw", 0.0, 1.0, shape=1)
+        q = pm.math.sigmoid(raw)
+        x = pm.Deterministic("x", 10.0 * q)
+        pm.Potential(
+            "logit_correction",
+            pt.sum(pt.log(q) + pt.log(1 - q))
+            + 0.5 * pt.sum(raw**2)
+            + 0.5 * np.log(2 * np.pi),
+        )
+        pm.Potential("loglike", loglike(x))
+    return model
+
+
+def _install_nested(logp_fn):
+    model = _nested_model(lambda x: 0.0 * x[0])
+    bridge = nested.UnitCubeBridge(model)
+    _common.reset_logp_reports()
+    nested._NB.update(
+        bridge=bridge, logp_fn=logp_fn, pool=None, counts=nested._new_counts()
+    )
+
+
+def test_nested_loglike_tells_nan_exception_and_bound_apart(caplog):
+    """
+    Given logps that return NaN, raise, return -inf and return +inf,
+    When the nested likelihood scores them,
+    Then NaN and the exception are floored but COUNTED and logged at ERROR
+      (once each), -inf is floored silently (it is zero density), and +inf
+      raises (it is not a density at all).
+    """
+    u = np.array([0.5])
+    try:
+        with caplog.at_level(logging.ERROR):
+            _install_nested(lambda p: np.nan)
+            assert nested._loglike_u(u) == nested._LOGL_FLOOR
+            assert nested._loglike_u(u) == nested._LOGL_FLOOR
+            assert nested._NB["counts"][nested._N_NAN] == 2
+
+            def boom(p):
+                raise RuntimeError("magnification backend failed")
+
+            _install_nested(boom)
+            assert nested._loglike_u(u) == nested._LOGL_FLOOR
+            assert nested._NB["counts"][nested._N_EXC] == 1
+
+            _install_nested(lambda p: -np.inf)
+            assert nested._loglike_u(u) == nested._LOGL_FLOOR
+            assert list(nested._NB["counts"]) == [0, 0]
+
+            _install_nested(lambda p: np.inf)
+            with pytest.raises(FloatingPointError, match=r"\+inf"):
+                nested._loglike_u(u)
+    finally:
+        nested._NB.clear()
+
+    msgs = [r.message for r in caplog.records]
+    assert len([m for m in msgs if NAN_LINE in m]) == 1
+    assert len([m for m in msgs if "raised RuntimeError" in m]) == 1
+
+
+def test_nested_sample_stamps_nonzero_nested_n_nan(caplog):
+    """
+    Given a model whose likelihood is NaN on a sub-box of [0, 10],
+    When nested sampling runs,
+    Then the trace carries a nonzero nested_n_nan and the run says so at
+      ERROR, rather than silently dropping the box from logZ.
+    """
+    pytest.importorskip("dynesty")
+    model = _nested_model(
+        lambda x: pt.switch(
+            pt.and_(x[0] > 6.0, x[0] < 8.0),
+            np.nan,
+            -0.5 * ((x[0] - 3.0) / 0.5) ** 2,
+        )
+    )
+    with caplog.at_level(logging.ERROR):
+        idata = nested.nested_sample(
+            model, None, nlive=50, dlogz=1.0, cores=1, seed=2
+        )
+    assert idata.posterior.attrs["nested_n_nan"] > 0
+    assert idata.posterior.attrs["nested_n_logp_exceptions"] == 0
+    assert any("returned NaN" in r.message for r in caplog.records)

@@ -286,18 +286,70 @@ def _identity_transform(u):
     return np.asarray(u, dtype=float)
 
 
+# The log-likelihood both backends are handed for a point with ZERO
+# posterior density.  Finite, not -inf, because the backends require it:
+# ultranest ASSERTS `np.isfinite(logl).all()` on every batch (its
+# integrator, "returned non-finite number") and would abort the run on the
+# first prior-wall hit, and dynesty's own "no likelihood" sentinel is this
+# same value (dynesty.utils._LOWL_VAL, substituted for non-finite live-point
+# logl).  So both backends read -1e300 as zero density.  It is the encoding of -inf and of NOTHING else: a NaN or an exception is a model
+# bug and is reported and counted below before it is floored (review
+# 2.4.22).
+_LOGL_FLOOR = -1e300
+
+# Index into the shared _NB["counts"] array (see _new_counts).
+_N_NAN = 0
+_N_EXC = 1
+
+
+def _new_counts():
+    """Shared counters for the likelihood's failures, created in the parent
+    BEFORE the pool forks so every worker increments the same memory --
+    the parent then reads the totals for the trace attrs.  A worker's log
+    says only its FIRST failure; these say how many there were."""
+    return mp.Array("q", 2)
+
+
+def _bump(idx):
+    counts = _NB["counts"]
+    with counts.get_lock():
+        counts[idx] += 1
+
+
 def _loglike_u(u):
     """u-space posterior kernel density (module-level: pool workers call it
-    with the bridge + compiled logp inherited through fork)."""
+    with the bridge + compiled logp inherited through fork).
+
+    -inf (a hard bound) -> _LOGL_FLOOR, silently: that IS zero density.  An
+    exception or a NaN is a model bug: it is logged at ERROR once per worker
+    (exceptions once per type, through the same helper the PT samplers use),
+    counted in the shared counters, and only then floored -- NS is shelved,
+    so a multi-day run is not killed for it, but it can no longer exclude a
+    region from the posterior AND from logZ and the mode masses with nothing
+    in the log (review 2.4.22).  +inf is not a density at all and raises.
+    """
     bridge = _NB["bridge"]
     logp_fn = _NB["logp_fn"]
     raw = bridge.raw_from_u(u)
+    point = bridge.point_from_raw(raw)
     try:
-        lp = float(logp_fn(bridge.point_from_raw(raw)))
-    except Exception:
-        return -1e300
-    if not np.isfinite(lp):
-        return -1e300
+        lp = float(logp_fn(point))
+    except Exception as exc:
+        _common._report_logp_exception(exc, point)
+        _bump(_N_EXC)
+        return _LOGL_FLOOR
+    if np.isnan(lp):
+        _common._report_logp_nan(point)
+        _bump(_N_NAN)
+        return _LOGL_FLOOR
+    if lp == np.inf:
+        raise FloatingPointError(
+            f"nested: the model's logp is +inf at raw point "
+            f"{_common.format_raw_proposal(point)} -- not a density; the "
+            "evidence integral is meaningless past this point"
+        )
+    if lp == -np.inf:
+        return _LOGL_FLOOR
     return lp + bridge.log_jac(u)
 
 
@@ -414,7 +466,10 @@ def nested_sample(
     bridge = UnitCubeBridge(model, sampled_masks=sampled_masks)
     bridge.verify()
     logp_fn = model.compile_logp()
-    _NB.update(bridge=bridge, logp_fn=logp_fn, pool=None)
+    # Fresh counters and a fresh "already reported" state BEFORE the fork,
+    # so the workers inherit both (see _new_counts / reset_logp_reports).
+    _common.reset_logp_reports()
+    _NB.update(bridge=bridge, logp_fn=logp_fn, pool=None, counts=_new_counts())
 
     actual = _resolve_nested_cores(cores)
     pool = mp.Pool(actual) if actual > 1 else None
@@ -550,10 +605,22 @@ def nested_sample(
         _NB["pool"] = None
 
     wall = time.time() - t0
+    n_nan = int(_NB["counts"][_N_NAN])
+    n_exc = int(_NB["counts"][_N_EXC])
     logger.info(
         f"nested[{backend}]: logZ = {logz:.2f} +/- {logzerr:.2f}  "
         f"ncall={ncall}  wall={wall / 3600:.2f} h"
+        + (f"  nan_logp={n_nan}" if n_nan else "")
+        + (f"  logp_exceptions={n_exc}" if n_exc else "")
     )
+    if n_nan or n_exc:
+        logger.error(
+            f"nested[{backend}]: {n_nan} logp evaluation(s) returned NaN and "
+            f"{n_exc} raised; all were scored as zero likelihood, so those "
+            f"regions are missing from the posterior, from logZ and from "
+            f"the mode masses.  This is a model bug, not a bound (each "
+            f"worker logged its first occurrence above)."
+        )
 
     # TRUTH-FREE PEAK-MISS DIAGNOSTIC.  For any d-dimensional posterior with
     # a quadratic peak, max(logl) stands ~ H + d/2 above logZ (H = the
@@ -619,6 +686,9 @@ def nested_sample(
     idata.posterior.attrs["nested_ncall"] = ncall
     idata.posterior.attrs["nested_nlive"] = int(nlive)
     idata.posterior.attrs["nested_n_eff"] = n_eff
+    # Stamped always, zero included (review 2.4.22).
+    idata.posterior.attrs["nested_n_nan"] = n_nan
+    idata.posterior.attrs["nested_n_logp_exceptions"] = n_exc
 
     # The full weighted run, for mass-accurate mode reporting and the
     # rejected-mode ledger (dead points ARE the explored-and-rejected set).
