@@ -70,12 +70,41 @@ jobs:
       MATERIAL_WORKER_SECONDS: "240"
 
     steps:
+      # THE PROPOSAL'S IDENTITY: a GitHub App, not GITHUB_TOKEN.  Two things
+      # go wrong when github-actions[bot] pushes the branch and opens the PR
+      # (PR #386, 2026-10-05): events raised by GITHUB_TOKEN start no
+      # workflows, so the PR's own `pull_request` run never happens; and
+      # master's ruleset (`require_extra_approval_for_unattributed_changes`)
+      # holds a bot-pushed PR for an approving review.  An App installation
+      # token raises ordinary events, so the PR gets its CI like any other.
+      #
+      # Configure once: create a GitHub App owned by jdeast with repository
+      # permissions Contents: read & write and Pull requests: read & write
+      # (no webhook), install it on this repository only, then store its
+      # Client ID as the repository VARIABLE DURATIONS_APP_CLIENT_ID and a
+      # generated private key as the repository SECRET
+      # DURATIONS_APP_PRIVATE_KEY.  Until both exist this step is skipped and
+      # every later step falls back to GITHUB_TOKEN (and to dispatching the
+      # suite by hand, below), which is how the job ran before.
+      - name: Mint the App token
+        id: app
+        if: vars.DURATIONS_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.DURATIONS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DURATIONS_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
       # master explicitly: a workflow_dispatch from another branch's Actions
       # tab must still regenerate the file master ships, and the proposal
       # branch must fork from master or the PR would carry unrelated diffs.
+      # The checkout's credentials are what `git push` uses, so this is where
+      # the App token decides who pushes the branch.
       - uses: actions/checkout@v7
         with:
           ref: master
+          token: ${{ steps.app.outputs.token || github.token }}
 
       # No poetry and no project install: gen_durations.py and pytest_shard.py
       # import nothing outside the standard library, deliberately, so this
@@ -195,9 +224,12 @@ jobs:
           echo "stale_unknown=$stale_unknown" >> "$GITHUB_OUTPUT"
 
       # A branch named by the run id, force-pushed so a re-dispatch against
-      # the same run replaces rather than fails. The commit is the bot's, not
+      # the same run replaces rather than fails. The commit is a bot's, not
       # a person's: nobody should be credited with numbers they did not
-      # produce, and the provenance is in the file's own header anyway.
+      # produce, and the provenance is in the file's own header anyway.  With
+      # the App configured it is the App's bot account (the noreply address
+      # GitHub attributes to it: <user id>+<slug>[bot]); otherwise
+      # github-actions[bot].
       - name: Push the proposal branch
         if: steps.decide.outputs.material == 'true'
         id: push
@@ -208,11 +240,19 @@ jobs:
           WORST: ${{ steps.decide.outputs.worst }}
           STALE: ${{ steps.decide.outputs.stale }}
           STALE_UNKNOWN: ${{ steps.decide.outputs.stale_unknown }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
         run: |
           set -euo pipefail
           branch="ci/refresh-durations-$RUN_ID"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -n "$APP_SLUG" ]; then
+            bot_id=$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)
+            git config user.name "${APP_SLUG}[bot]"
+            git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          fi
           git checkout -b "$branch"
           git add tests/durations.json
           git commit -q -F - <<EOF
@@ -246,21 +286,16 @@ jobs:
             echo "\"Keeping tests/durations.json current\")."
           } > "$RUNNER_TEMP/body.md"
 
-      # PREFERRED PATH: a pull request. This step SUCCEEDS ONLY IF the
-      # repository setting "Allow GitHub Actions to create and approve pull
-      # requests" is on (Settings > Actions > General > Workflow permissions;
-      # or `gh api -X PUT repos/{owner}/{repo}/actions/permissions/workflow
-      # -F can_approve_pull_request_reviews=true`). It was OFF when this was
-      # written (2026-09-14), so the fallback below is the live path; flip
-      # the setting and this one takes over with no other change.
-      #
-      # Two things to know about a PR opened this way even when it works: the
-      # pull_request event it raises does not start workflows (events raised
-      # by GITHUB_TOKEN never do), so on its own the required `test` check
-      # would not appear until a human closed and reopened the PR or pushed
-      # to the branch -- which is what happened to PR #343 (2026-09-28); the
-      # last step below dispatches the suite instead.  And continue-on-error
-      # is what makes the fallback reachable.
+      # PREFERRED PATH: a pull request. Opened with the App token it always
+      # works, and its pull_request event starts tests.yml like any PR's.
+      # Without the App it falls back to GITHUB_TOKEN, which SUCCEEDS ONLY IF
+      # the repository setting "Allow GitHub Actions to create and approve
+      # pull requests" is on (Settings > Actions > General > Workflow
+      # permissions), and whose pull_request event starts nothing (events
+      # raised by GITHUB_TOKEN never do -- PR #343, 2026-09-28, sat with "no
+      # checks reported"), so the last step below dispatches the suite
+      # instead.  continue-on-error is what makes the issue fallback
+      # reachable.
       - name: Open a pull request
         if: steps.decide.outputs.material == 'true'
         id: pr
@@ -268,6 +303,7 @@ jobs:
         env:
           RUN_ID: ${{ steps.run.outputs.run_id }}
           BRANCH: ${{ steps.push.outputs.branch }}
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
         run: |
           set -euo pipefail
           gh pr create --base master --head "$BRANCH" \
@@ -304,7 +340,10 @@ jobs:
           fi
           echo "proposal branch: $BRANCH ($COMPARE_URL)" >> "$GITHUB_STEP_SUMMARY"
 
-      # START THE SUITE ON THE PROPOSAL BRANCH.  Events raised by GITHUB_TOKEN
+      # START THE SUITE ON THE PROPOSAL BRANCH -- only without the App.  An
+      # App-opened PR already started tests.yml through its pull_request
+      # event, and a dispatch on top would run the whole suite twice.
+      # Without the App: events raised by GITHUB_TOKEN
       # never start workflows -- the push above and the pull_request event of
       # `gh pr create` both go unheard by tests.yml -- with exactly two
       # exceptions: workflow_dispatch and repository_dispatch.  tests.yml
@@ -318,7 +357,7 @@ jobs:
       # suite already run.  Not continue-on-error: a refused dispatch is a
       # permissions regression worth a red job, not a silent one.
       - name: Start the suite on the proposal branch
-        if: steps.decide.outputs.material == 'true'
+        if: steps.decide.outputs.material == 'true' && (steps.app.outputs.token == '' || steps.pr.outcome == 'failure')
         env:
           BRANCH: ${{ steps.push.outputs.branch }}
         run: |
