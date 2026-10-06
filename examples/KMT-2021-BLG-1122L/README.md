@@ -182,7 +182,15 @@ s in [0.4, 2.3] (published 1.386 and 1.601, both near the Einstein ring),
 which keeps every failing geometry out of the kernel; for LensC the bound
 goes on `log_s` directly (slot-1 relations are absent, 8.6.13).
 
-Acceptance fit: job 15506232 on the PR branch (64 cores, `n_temps: auto`,
-no seed polish, bounded separations), started 2026-10-06.  RESULTS:
+**The bounded launch hung too** (job 15506232), in the serial start
+scoring: "PTDE init rung 9" at 09:40 and nothing after, 95 minutes of one
+core on a single VBM call reached by the auto start dispersion (factor 9
+at that rung) in some parameter the stress test did not scan.  Rungs 1-8
+at factors 3-7 had scored ~2000 proposals without one.  So the config
+also sets `start_dispersion: 3.0`: every rung starts at the T=1
+dispersion that those rungs proved.
+
+Acceptance fit: job 15506690 (64 cores, `n_temps: auto`, no seed polish,
+bounded separations, start dispersion 3.0), started 2026-10-06.  RESULTS:
 (filled in when it lands -- posterior vs Table 2 through the mappings
 above, and the lens masses under the IMF and galactic priors).
