@@ -716,14 +716,30 @@ def _write_fit_inputs(tmp_path):
 
 def _write_stamped_trace(prefix, config, params, rng):
     """A synthetic trace over the config's real free_RV names, stamped with
-    the fingerprint of (config, params)."""
+    the fingerprint of (config, params).
+
+    It carries the model's Deterministics too, computed from the raw draws,
+    exactly as every trace a fit saves does: exozippy-modes now runs the real
+    wrap-up (review 1.3.9), whose convergence summary reads the physical
+    variables, and a raw-only trace is not something any fit writes."""
+    import pymc as pm
+
     system = System(copy.deepcopy(config), user_params=copy.deepcopy(params))
     system.prepare()
     model = system.build_model()
+    start = model.initial_point()
     names = [v.name for v in model.free_RVs]
-    posterior = {n: rng.normal(0, 1, (2, 60)) for n in names}
+    posterior = {
+        n: rng.normal(0, 1, (2, 60) + np.shape(start[n])) for n in names
+    }
     lp = rng.normal(100.0, 1.0, (2, 60))
     idata = az.from_dict({"posterior": posterior, "sample_stats": {"lp": lp}})
+    idata["posterior"] = pm.compute_deterministics(
+        idata.posterior.to_dataset(),
+        model=model,
+        merge_dataset=True,
+        progressbar=False,
+    )
     stamp_structural_metadata(idata, _FakeSystem(config, params))
     trace_path = str(prefix) + "_trace.nc"
     idata.to_netcdf(trace_path)

@@ -2647,6 +2647,15 @@ def _format_summary(idata, diag, system=None, exclude=()):
         for v in post.data_vars
         if not v.endswith("_raw") and v != "mode" and v not in exclude
     ]
+    if not var_names:
+        # Every saved trace carries the physical Deterministics beside the
+        # raw draws; az.summary on an empty selection dies inside arviz with
+        # an anonymous "'NoneType' object is not iterable".
+        raise ValueError(
+            f"_format_summary: the posterior holds no physical variables to "
+            f"summarize (only {sorted(post.data_vars)}); a trace written by a "
+            f"fit always carries the model's Deterministics"
+        )
     df = az.summary(idata, var_names=var_names)
     if "r_hat" in df.columns:
         df = df.sort_values("r_hat", ascending=False)
