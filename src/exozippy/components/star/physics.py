@@ -1,3 +1,4 @@
+import numpy as np
 import pytensor.tensor as pt
 
 from ...constants import (
@@ -76,6 +77,71 @@ def calc_pm_from_murel(pm_source, mu_rel_component):
     # pre-patch tensor of the very parameter being built -- see
     # OwnPrePatchRef in components/parameter.py.
     return pm_source + mu_rel_component
+
+
+# --- Proper motion relative to Sgr A* (mulensing/conventions.md C31) -----
+#
+# Sgr A*'s apparent (reflex) proper motion, Galactic components, mas/yr:
+# mu_l* = mu_l cos(b) = -6.411 +/- 0.008 along the plane and
+# mu_b = -0.219 +/- 0.007 toward the North Galactic Pole (Reid & Brunthaler
+# 2020, ApJ 892, 39, abstract; references.bib key ReidBrunthaler:2020).
+SGRA_PM_L_COSB = np.float64(-6.411)
+SGRA_PM_B = np.float64(-0.219)
+
+# ICRS position of the North Galactic Pole: astropy's Galactic frame,
+# SkyCoord(l=0, b=90, frame="galactic").icrs.  Hard-coded so the conversion
+# is a closed form the pytensor graph can carry; tests/test_star_pm_sgra.py
+# checks the whole conversion against astropy at several sky positions.
+NGP_RA_RAD = np.radians(192.85947789477606)
+NGP_DEC_RAD = np.radians(27.128252414968028)
+
+# Strictly positive floor on the cos^2(b) radicand (CLAUDE.md: a floor of 0
+# rebuilds the 0*inf gradient).  It binds only within ~1e-10 rad of a
+# Galactic pole, where the local Galactic axes are undefined anyway.
+_COSB2_FLOOR = np.float64(1e-20)
+
+
+def sgra_pm_equatorial(ra, dec, xp=pt):
+    """Sgr A*'s proper motion resolved on the LOCAL equatorial axes at
+    (ra, dec): returns ``(pm_ra_cosdec, pm_dec)`` in mas/yr.
+
+    The (mu_l*, mu_b) vector above is rotated by the position angle between
+    Galactic and equatorial north at the star's position (the standard
+    rotation, e.g. Poleski 2013, arXiv:1306.2945):
+
+        C1 = sin(dec_G) cos(dec) - cos(dec_G) sin(dec) cos(ra - ra_G)
+        C2 = cos(dec_G) sin(ra - ra_G),   cos(b) = sqrt(C1^2 + C2^2)
+        pm_ra*  = (C1 mu_l* - C2 mu_b) / cos(b)
+        pm_dec  = (C2 mu_l* + C1 mu_b) / cos(b)
+
+    ra, dec in RADIANS (star.ra/dec's internal unit).  ``xp`` is the array
+    module: pytensor (the model graph) or numpy (start values, tests).
+    """
+    d_ra = ra - NGP_RA_RAD
+    c1 = np.sin(NGP_DEC_RAD) * xp.cos(dec) - np.cos(NGP_DEC_RAD) * xp.sin(
+        dec
+    ) * xp.cos(d_ra)
+    c2 = np.cos(NGP_DEC_RAD) * xp.sin(d_ra)
+    cosb = xp.sqrt(xp.maximum(c1 * c1 + c2 * c2, _COSB2_FLOOR))
+    pm_ra_cosdec = (c1 * SGRA_PM_L_COSB - c2 * SGRA_PM_B) / cosb
+    pm_dec = (c2 * SGRA_PM_L_COSB + c1 * SGRA_PM_B) / cosb
+    return pm_ra_cosdec, pm_dec
+
+
+@register_physics
+def calc_pm_ra_sgra(pm_ra, ra, dec):
+    # star.pm_ra_sgra: the star's absolute (ICRS) pm_ra*cos(dec) minus Sgr
+    # A*'s, both resolved on the local axes at the star's own position.  A
+    # pure translation of pm_ra at fixed (ra, dec); the full map
+    # (pm, ra, dec) -> (pm_sgra, ra, dec) is unit-triangular, so |J| = 1
+    # even with ra/dec sampled and a mu/sigma on it needs no Jacobian (C31).
+    return pm_ra - sgra_pm_equatorial(ra, dec)[0]
+
+
+@register_physics
+def calc_pm_dec_sgra(pm_dec, ra, dec):
+    # pm_dec twin of calc_pm_ra_sgra.
+    return pm_dec - sgra_pm_equatorial(ra, dec)[1]
 
 
 @register_physics

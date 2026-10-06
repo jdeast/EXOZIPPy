@@ -15,7 +15,7 @@ the seeding, and the lens/source body rules).
 This file is the **normative** list. The Conventions section of `paper3_microlensing.tex`,
 in the paper repo at `~/old_home/papers/exozippy` (whose remote is the Overleaf project),
 carries the *same* claim list in the paper's register, with the same identifiers
-`C1`...`C30`. The identifiers are the anti-drift device: a claim may be reworded in
+`C1`...`C31`. The identifiers are the anti-drift device: a claim may be reworded in
 either place, but a `C`-number must mean the same thing in both, and a claim added to one
 must be added to the other under the same number. There is no generator and no test
 enforcing that.
@@ -30,7 +30,8 @@ that **a `C`-rule is not finished until both carry it**: pull the paper repo, ma
 matching edit there, and name that commit in this one. Both are in step through `C30`
 (paper commits `3476111`, 2026-09-23, which added `C29` and `C30`, `7eeeb42`, 2026-09-24,
 which brought `C30` to stage 2, and `eaa5936`, 2026-10-02, which corrected `C21`/`C22`
-with this file's 3.6.5 edit). The paper is not licensed to run ahead -- it did once, and
+with this file's 3.6.5 edit). `C31` was added here on 2026-10-06; its paper commit is
+`PAPER-COMMIT-TBD`. The paper is not licensed to run ahead -- it did once, and
 the drift lasted exactly as long as it took somebody to notice.
 
 ## Notation used below
@@ -177,6 +178,64 @@ Earth's is small (annual parallax). Rows of zeros mean no parallax.
 - Implemented in: `mulensing/symbolic_physics.py` `RELATIONS`.
 - This is Skowron+2011 Section A.6's rule verbatim: "all relative motion conventions are defined by
   the motion of the lens (with the source thought of as fixed)".
+
+### C31 -- `star.pm_ra`/`pm_dec` are ABSOLUTE; a bulge-relative proper motion goes on `pm_ra_sgra`/`pm_dec_sgra`
+
+    pm_ra   = mu_alpha* = mu_alpha cos(dec)   absolute, ICRS, heliocentric   (mas/yr)
+    pm_dec  = mu_delta                        absolute, ICRS, heliocentric   (mas/yr)
+    pm_ra_sgra  = pm_ra  - mu_SgrA*,E(ra, dec)                               (mas/yr)
+    pm_dec_sgra = pm_dec - mu_SgrA*,N(ra, dec)                               (mas/yr)
+
+    mu_SgrA* = (mu_l*, mu_b) = (-6.411 +/- 0.008, -0.219 +/- 0.007) mas/yr   (Reid & Brunthaler 2020)
+
+The sampled `star.pm_ra`/`pm_dec` -- the inputs to C7's `mu_rel`, the Galactic kinematic
+prior and absolute astrometry -- are **absolute** proper motions, the quantity Gaia and Roman
+measure. `pm_ra_sgra`/`pm_dec_sgra` are the **same star's proper motion relative to Sgr
+A\***: its absolute pm minus Sgr A\*'s apparent (reflex) motion, the Galactic vector above
+resolved on the local East/North axes at **that star's own** `ra`/`dec` (at
+OGLE-2014-BLG-0939, `(E, N) = (-3.116, -5.607)` mas/yr). Both are derived and reported on
+every microlensing or Galactic-model topology, so every fit reports both frames.
+
+**A proper motion quoted in a microlensing paper is usually NOT absolute.** OGLE and KMT
+source proper motions come from relative astrometry and are relative to the mean motion of
+the field stars (bulge, often the red clump); "heliocentric" (`mu_hel`) in that literature
+means *not geocentric* (C5), not absolute. Such a prior belongs on `pm_ra_sgra`/
+`pm_dec_sgra`; an absolute one (Gaia, Roman) on `pm_ra`/`pm_dec`. Writing a bulge-relative
+value on the absolute pair is off by Sgr A\*'s ~6.4 mas/yr. Measured on
+`examples/ob140939`: Yee et al. (2015) Eq. 8, `(N, E) = (-0.64, -5.31) +/- 0.45`, is
+bulge-relative (her Eq. 9 reproduces her 53.9 deg only that way; Gaia DR3
+4118632779506798848 at the event, minus the median of the surrounding field giants, gives
+`(E, N) ~ (-4.65..-5.06, -0.84..-1.30)`, within ~1 sigma of hers), and its absolute
+equivalent is `(pm_ra, pm_dec) = (-8.43, -6.25)`, against Gaia's absolute
+`(-7.560 +/- 0.088, -5.883 +/- 0.051)`.
+
+**Sgr A\* is the closest well-defined stand-in for "the field mean", not the same thing.**
+The mean motion of the field stars differs from Sgr A\*'s by the bulge's net streaming
+along that sight line: ~0.5 - 1 mas/yr in general, **0.7 mas/yr measured** at
+OGLE-2014-BLG-0939 (field-giant mean `(E, N) ~ (-2.8, -5.0)` vs Sgr A\* `(-3.1, -5.6)`).
+For a science fit, **add that zero-point term in quadrature** to the published sigma (e.g.
+`sqrt(0.45^2 + 0.7^2) = 0.83`). `examples/ob140939` deliberately keeps Yee's 0.45 alone,
+because it reproduces her analysis as a validation.
+
+- No Jacobian: at fixed position the map is a pure translation of the sampled pm, and the
+  full map `(pm_ra, pm_dec, ra, dec) -> (pm_ra_sgra, pm_dec_sgra, ra, dec)` is
+  unit-triangular, so `|J| = 1` even where `ra`/`dec` are sampled (absolute astrometry).
+  A `mu`/`sigma` on the derived parameter is `Parameter.build_pymc`'s ordinary
+  derived-element Gaussian potential (section 7A), and with the sampled pm's logit-uniform
+  support the prior is proper. A `mu` there also STARTS the sampled absolute pm at the
+  converted value (`Star._seed_pm_from_sgra_prior`, a `PRECEDENCE_DERIVED_USER` hint; a
+  user entry on `pm_ra`/`pm_dec` itself wins).
+- The local rotation of `(mu_l*, mu_b)` is exact for any position; the frame is only
+  *meaningful* toward the inner Galaxy, which is why the pair is declared only where a
+  `mulensevent` or `galacticmodel` block exists.
+- Implemented in: `components/star/physics.py` `sgra_pm_equatorial`, `calc_pm_ra_sgra`,
+  `calc_pm_dec_sgra` (constants `SGRA_PM_L_COSB`, `SGRA_PM_B`); declared in
+  `Star.register_parameters`; `star/defaults.yaml` `pm_ra_sgra`/`pm_dec_sgra`. See also
+  `components/star/star.md`.
+- Pinned by: `tests/test_star_pm_sgra.py` -- the rotation against astropy at the
+  ob140939 field and six other positions (`1e-6` mas/yr), Sgr A\*'s own motion -> 0, Yee's
+  value -> `(-8.43, -6.25)`, and the model logp differing by exactly the Gaussian on the
+  derived parameter.
 
 ---
 

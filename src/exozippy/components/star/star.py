@@ -13,7 +13,7 @@ from exozippy.components.parameterization import (
     mode_manifest,
     pin_unselected,
 )
-from exozippy.config import user_entry
+from exozippy.config import PRECEDENCE_DERIVED_USER, user_entry
 from exozippy.constants import (
     FFP_MASS_FUNCTION_MIN_MEARTH,
     FFP_MASS_FUNCTION_SLOPE,
@@ -942,6 +942,98 @@ class Star(Component):
         self.murel_traj_map = np.zeros(n, dtype=int)
         return {"expr_key": {"from_mulens_murel": [int(l_idx)]}}
 
+    def _seed_pm_from_sgra_prior(self):
+        """Start the ABSOLUTE pm where the user stated it relative to Sgr A*.
+
+        A mu (or initval) on star.<i>.pm_ra_sgra/pm_dec_sgra is a statement
+        about a DERIVED quantity, and nothing in the relaxation engine
+        inverts it (the relation is trigonometric in ra/dec, and adding it
+        to symbolic_physics would register phantom pm/ra/dec symbols for
+        every star in every config).  Left alone, the sampled pm_ra/pm_dec
+        start at defaults.yaml's -3 mas/yr: ~12 sigma off Yee+2015's prior
+        on examples/ob140939, i.e. the user would have to hand-convert the
+        start -- the very frame conversion this parameter exists to do.
+
+        So the component pushes the inverse as a start hint, pm = pm_sgra +
+        pm_SgrA*(ra, dec), at PRECEDENCE_DERIVED_USER: derived from the
+        user's own numbers, below anything the user writes on pm_ra/pm_dec
+        themselves (that element is skipped), above the galactic model's
+        PRECEDENCE_DERIVED_DATA seed.  A start value only; the prior is the
+        Gaussian potential on the derived parameter.  Skipped for an element
+        whose pm is itself derived (the fitmurel lens), which has no start
+        of its own.
+        """
+        cm = self.config_manager
+        derived_pm = set()
+        entry = self.manifest.get("pm_ra")
+        if isinstance(entry, dict):
+            for sel in (entry.get("expr_key") or {}).values():
+                derived_pm |= set(int(j) for j in sel)
+
+        wanted = {}
+        for i in range(self.n_elements):
+            if i in derived_pm:
+                continue
+            for comp in ("ra", "dec"):
+                sg = cm.resolve(self.prefix, f"pm_{comp}_sgra", element=i)
+                if not sg["user_modified"]:
+                    continue
+                # resolve(shape=()) returns each numeric field as a
+                # one-element array; resolve() already starts a mu-only
+                # entry at its mu, so initval is the user's center either
+                # way (seed 0 of an initval list).
+                center = sg["initval"]
+                if center is None or np.size(center) != 1:
+                    raise RuntimeError(
+                        f"[{self.prefix}] resolve() returned initval "
+                        f"{center!r} for {self.prefix}.{i}.pm_{comp}_sgra; "
+                        f"expected one value."
+                    )
+                center = float(np.ravel(center)[0])
+                if not np.isfinite(center):
+                    continue
+                own = cm.resolve(self.prefix, f"pm_{comp}", element=i)
+                if own["user_modified"]:
+                    continue
+                for r, name in ((sg, f"pm_{comp}_sgra"), (own, f"pm_{comp}")):
+                    if r["unit"] != r["internal_unit"]:
+                        raise ValueError(
+                            f"[{self.prefix}] {self.prefix}.{self.names[i]}."
+                            f"{name} has unit '{r['unit']}'; seeding the "
+                            f"absolute pm from a pm_*_sgra prior supports "
+                            f"only '{r['internal_unit']}'.  Write the prior "
+                            f"in mas/yr, or give pm_{comp} an initval."
+                        )
+                wanted.setdefault(i, {})[comp] = center
+        if not wanted:
+            return
+
+        paths = [
+            f"{self.prefix}.{i}.{c}" for i in wanted for c in ("ra", "dec")
+        ]
+        starts = cm.probe_start(paths)
+        for i, comps in wanted.items():
+            ra = starts[f"{self.prefix}.{i}.ra"].value
+            dec = starts[f"{self.prefix}.{i}.dec"].value
+            if ra is None or dec is None:
+                raise RuntimeError(
+                    f"[{self.prefix}] {self.prefix}.{self.names[i]} has a "
+                    f"pm_*_sgra entry but no derivable ra/dec start; the "
+                    f"Sgr A* frame needs the star's position."
+                )
+            offset = dict(
+                zip(
+                    ("ra", "dec"),
+                    physics.sgra_pm_equatorial(float(ra), float(dec), xp=np),
+                )
+            )
+            for comp, center in comps.items():
+                cm.add_hint(
+                    f"{self.prefix}.{i}.pm_{comp}",
+                    center + float(offset[comp]),
+                    rank=PRECEDENCE_DERIVED_USER,
+                )
+
     def _distance_manifest_entry(self, system):
         """distance entry: sampled everywhere, except that a single-source
         lens with `fitpirel: true` flips its PRIMARY lens star's element to
@@ -1233,6 +1325,22 @@ class Star(Component):
             )
         elif astrom_modes:
             self.manifest.setdefault("distance", None)
+
+        # The proper motion relative to Sgr A* (mulensing/conventions.md
+        # C31): derived from the absolute pm and the star's position, so a
+        # pm quoted against the bulge (OGLE/KMT relative astrometry) is
+        # written on THIS parameter and never silently read as absolute, and
+        # results report both frames.  Declared only where the frame means
+        # something -- a microlensing event or a Galactic model, i.e. a
+        # line of sight toward the Galaxy -- not for every Gaia-astrometry
+        # star, where it would be a reported number with no use.
+        if "pm_ra" in self.manifest and (
+            in_system("mulensevent") or in_system("galacticmodel")
+        ):
+            self.manifest.update(
+                {"pm_ra_sgra": "default", "pm_dec_sgra": "default"}
+            )
+            self._seed_pm_from_sgra_prior()
 
         if in_system("galacticmodel"):
             self.manifest["rv"] = None

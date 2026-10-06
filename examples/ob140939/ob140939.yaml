@@ -68,10 +68,14 @@ sampler:
   # ladder froze below T ~ 75 and the mode weights were initialization
   # artifacts. At 24 rungs (measured Lambda = 9.4; use > 2*Lambda+1
   # with margin) swap acceptance is 50-65%, round trips flow, and the
-  # per-rung basin-occupancy profile is smooth equilibrium from T=200
-  # (50/50) to T=1 (~98/2) -- the mode weights become a real posterior
-  # statement (u0,-,- ~ 98%, agreeing with the ledger's Laplace
-  # estimate and Yee+2015's proper-motion argument).
+  # per-rung basin-occupancy profile is smooth equilibrium down to T=1 --
+  # the mode weights become a real posterior statement.  Converged, with
+  # the source pm prior in its correct Sgr-A*-relative frame
+  # (src/exozippy/components/mulensing/conventions.md C31), the split is
+  # ~91/9: u0,-,- ~91%, the solution Yee+2015's proper-motion argument
+  # prefers, with a lens at ~3.3 kpc and ~0.24 Msun (hers: 3.1 +/- 0.4
+  # kpc, 0.23 +/- 0.07).  An earlier "~98/2" here was a stuck-ladder
+  # artifact, not a posterior.
   n_temps: 24
   # Keep thinned hot-rung draws: they detect posterior-suppressed modes
   # (occupancy ~exp(-dlp/T)) for the seeded-solution ledger, so solutions
