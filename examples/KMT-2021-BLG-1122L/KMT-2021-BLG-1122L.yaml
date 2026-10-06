@@ -1,0 +1,93 @@
+run:
+  name: "KMT-2021-BLG-1122L"
+
+prefix: "fitresults/KMT-2021-BLG-1122L"
+
+# KMT-2021-BLG-1122L: the first microlensing TRIPLE STELLAR system
+# (Han et al. 2023, A&A 672, A8; arXiv:2302.05613).  3L1S: a 0.47 Msun
+# primary with two M-dwarf companions near its Einstein ring, finite
+# source.  This is the triple-lens validation vehicle (review 7.6.4): the
+# engine's companion relations are binary-only (mulensing.md, "Three or
+# more lens bodies"), so a 3-body lens REQUIRES explicit per-body masses
+# in the params file, and q is DERIVED from them at runtime.
+#
+# system architecture:
+#   star.Lens    = M1, the primary lens         (lens body 0)
+#   star.LensB   = M2, companion at (s2, alpha)  (lens body 1)
+#   star.LensC   = M3, companion at (s3, psi)    (lens body 2)
+#   star.Source  = the background source (a K subgiant, Sect. 4)
+
+star:
+  - name: "Lens"
+  - name: "LensB"
+  - name: "LensC"
+  - name: "Source"
+
+mulensevent:
+  - finite_source: True
+    t0_par: 2459370.226          # Table 2 t_0 (HJD' 9370.226 + 2450000)
+    # The params file supplies the whole published solution, so the peak
+    # finder has nothing to seed and does not run.
+
+lens:
+  - body: star.Lens
+  - body: star.LensB
+  - body: star.LensC
+
+source:
+  - body: star.Source
+
+galacticmodel:
+  - name: "KMT-2021-BLG-1122L"
+    anchor_idx: 3              # anchor on the source (star.Source)
+
+band:
+  - name: "I"
+    filter: "Generic/Cousins.I"
+    ld_law: "linear"
+
+# No catalog photometry: the empty-filter SED block still ties each light
+# curve's calibrated baseline f_source to the SED-predicted source I mag
+# through the per-lightcurve zeropoint prior in the params file.
+sed:
+  file: "KMT-2021-BLG-1122L.sed.yaml"
+
+# KMTNet pySIS I-band light curves (field BLG14, 1 hr cadence), from the
+# KMTNet event page -- see prepare_data.py for the download and the
+# three-column conversion.  Han+2023 fit these three I-band data sets.
+mulensinstrument:
+  - name: "KMTC14"
+    file: "n20210603.I.KMTC14.pys"
+    band: "I"
+    magsys: Vega   # pySIS instrumental I, KMT system (see the zeropoint prior)
+
+  - name: "KMTS14"
+    file: "n20210603.I.KMTS14.pys"
+    band: "I"
+    magsys: Vega
+
+  - name: "KMTA14"
+    file: "n20210603.I.KMTA14.pys"
+    band: "I"
+    magsys: Vega
+
+parameter_file: "KMT-2021-BLG-1122L.params.yaml"
+
+sampler:
+  method: ptde          # synchronous PTDE, the recommended default (PR #376); the triple-lens VBM Op has no gradient
+  n_temps: auto
+  T_max: 200
+  tune: 5000
+  draws: 20000
+  nthin: 1
+  recompute_trace: True
+  eval_timeout: 10
+  store_hot_chains: True
+  # The DE seed polish has NO eval_timeout (run.md: a config-vocabulary
+  # ruling), and VBM's three-body MultiMag2 aborts its worker ("double free
+  # or corruption") on a small fraction of DE-style proposals: the first
+  # acceptance fit (job 15506216) hung forever at 60/64 proposals back with
+  # zero CPU.  The sampling phase scores a dead worker's call -inf after
+  # eval_timeout and recycles the pool, so skip the polish and let PTDE do
+  # that work.
+  seed_polish: false

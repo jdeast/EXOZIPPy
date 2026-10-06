@@ -1,0 +1,21 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N kmt1122mirror5
+#$ -o check_mirror5.$JOB_ID.log
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_kmt1122"
+cd $HOME/python/EXOZIPPy/examples/KMT-2021-BLG-1122L
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)   $(date)"
+for order in winner mirror; do
+  python -u check_mirror5.py $order 2>&1 | grep "^PROBE\|Traceback\|Error"
+done
+echo "exit $?   $(date)"
