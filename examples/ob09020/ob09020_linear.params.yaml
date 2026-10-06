@@ -1,0 +1,224 @@
+# OGLE-2009-BLG-020 -- LINEAR orbital motion (the ds_dt / dalpha_dt path).
+#
+# Light curve: Skowron et al. 2011, ApJ 738, 87, Table 1, the
+#   "parallax + 2 par. motion" column -- their OWN linear-orbital-motion
+#   fit to this event, chi2 352.70/359 against 370.29/361 static.  The
+#   sibling ob09020.params.yaml uses the "full orbit (with priors)" column
+#   instead, because that config solves a Kepler orbit.  Use the IOP
+#   version of record -- the arXiv v1 posting prints different values.
+#
+# Skowron+2011 Appendix A is EXOZIPPy's convention (conventions.md C17),
+# so the trajectory parameters transfer unchanged.  The two ORBITAL-MOTION
+# parameters do not transfer verbatim and are converted below; the
+# arithmetic is written out so it can be checked.
+#
+# The physical block (masses, distances) is carried over from the sibling
+# unchanged: it is the same lens system, and Skowron's linear column does
+# not print one.
+
+# Sky position (OGLE EWS).  Required: the OGLE file is HJD_UTC and the
+# HJD -> BJD_TDB conversion refuses placeholder coordinates.
+star.ra:
+    initval: 271.0874583
+    sigma: 0
+star.dec:
+    initval: -29.5190556
+    sigma: 0
+
+# --- Light curve ----------------------------------------------------------
+# EDITION WARNING, and it is the reason this block is not simply Table 1's
+# linear column.  Skowron+2011's arXiv v1 posting prints DIFFERENT values
+# from the IOP version of record, and this repository uses IOP (see
+# ob09020.params.yaml and the README).  The arXiv PDF is what is reachable
+# here, so its linear column cannot be trusted for any quantity the two
+# editions disagree on -- measured: seeding the arXiv linear column's
+# u_0 = 0.0601 instead of the IOP 0.0613 moves the start logp by 158,686
+# nats, from +31,268 to -127,419, on a 2% change.
+#
+# The split below is therefore by WHAT DETERMINES EACH VALUE, and it was
+# settled by measurement, not taste:
+#
+#   u_0, t_E, rho, pi_E come from the sibling's IOP set, because the
+#   physical block (masses, distances, proper motions) determines them and
+#   that block is shared.  Taking them from the arXiv linear column instead
+#   fights it: u_0 alone costs 158,686 nats.
+#
+#   s_0, alpha_0, q and the two rates come from Table 1's linear column,
+#   because they are ONE geometric set -- s_0 is defined at t0_par under a
+#   particular orbital-motion model, so the full-orbit s_0 does not belong
+#   with linear rates.  Measured: swapping in the full-orbit s_0 = 0.4294
+#   and alpha_0 = 189.08 costs ~100,000 nats.
+#
+# Mixed provenance is deliberate and is the best start available here
+# (+33,250, against the keplerian sibling's +36,500 on the same data).
+source.Source.t_0:
+    initval: 2454917.253
+
+source.Source.u_0:
+    initval: 0.0613           # positive, as printed; see the A16 note below
+
+mulensevent.t_E:
+    initval: 76.9             # d
+
+source.Source.rho:
+    initval: 0.0015078        # = t_*/t_E = 0.11595/76.9
+
+mulensevent.theta_E:
+    initval: 2.95             # mas
+
+lens.L2.q:
+    initval: 0.272
+
+mulensevent.pi_E_N:
+    initval: -0.022
+mulensevent.pi_E_E:
+    initval: 0.149
+
+# s and alpha ARE inputs here, unlike the keplerian sibling where they are
+# derived from orbit L.  These are the values that file names as its
+# acceptance check: the published s_0 and alpha_0.
+lens.L2.s:
+    initval: 0.4261
+lens.L2.alpha:
+    initval: 189.07           # deg
+
+# --- Orbital motion: Skowron's gammas, CONVERTED --------------------------
+# Skowron+2011 parameterize the sky-projected motion as
+#
+#     s(t)     = s_0 (1 + gamma_par  (t - t0_par))
+#     alpha(t) = alpha_0 - gamma_perp (t - t0_par)
+#
+# and their Table 1 "parallax + 2 par. motion" column gives
+# gamma_par = 0.12 +0.08/-0.04 /yr and gamma_perp = 2.78 +0.41/-0.47 /yr.
+# EXOZIPPy's two parameters are NOT those:
+#
+#   ds_dt is a RATE, not a fractional one -- Einstein radii of the TOTAL
+#   mass per Julian year (C13/C24, defaults.yaml) -- so it carries the s_0
+#   factor that gamma_par divides out:
+#
+#       ds_dt = gamma_par * s_0 = 0.12 * 0.4261 = 0.051132 r_E/yr
+#
+#   dalpha_dt is the NEGATIVE of gamma_perp (conventions.md C24, Skowron
+#   Appendix A.4 verbatim), and its USER unit is deg/yr while gamma_perp is
+#   quoted in rad/yr:
+#
+#       dalpha_dt = -gamma_perp = -2.78 rad/yr
+#                 = -2.78 * 180/pi = -159.28 deg/yr
+#
+# Both conversions were checked by measurement rather than trusted, because
+# each is silent if wrong -- every variant below still builds a perfectly
+# well-behaved light curve, just not this event's:
+#
+#     as written  (-159.28 deg/yr)   logp -127,419   <- best
+#     rates zeroed (static)          logp -238,715
+#     sign flipped (+159.28)         logp -400,108
+#     rad mistaken for deg (-2.78)   logp -241,877
+#
+# i.e. the sign, the unit and the s_0 factor are each confirmed, and the
+# linear rates are worth ~111,000 nats over a static model at this start.
+#
+# The A16 mirror flips (u_0, alpha, pi_E_perp, dalpha_dt) TOGETHER, so
+# dalpha_dt's sign is tied to u_0 being positive above -- one choice, not
+# two.  Table 1's note says every column is the positive-u_0 solution.
+lens.L2.ds_dt:
+    initval: 0.051132           # r_E/yr
+lens.L2.dalpha_dt:
+    initval: -159.28          # deg/yr
+
+# --- Lens and source physical parameters ----------------------------------
+# Yee+2016 number the bodies opposite to Skowron: their M1 = 0.244 and
+# M2 = 0.888 are EXOZIPPy's L2 and L1.
+star.L1.mass:
+    initval: 0.888
+star.L1.distance:
+    initval: 747.0            # pc
+star.L2.distance:
+    initval: 747.0            # pc
+
+star.Source.distance:
+    initval: 8000.0           # pc
+
+# --- Per-instrument blending and error scaling ----------------------------
+# f_source and f_blend fit linearly against the model above, per
+# instrument; err_scale is the sqrt(chi2/N) that fit leaves.  The muFUN
+# files are raw instrumental magnitudes with an arbitrary per-site
+# zeropoint, so log_f_total cannot be defaulted.
+
+# A stricter ceiling on every instrument's err_scale than the default 100
+# (JDE, 2026-09-25).  Measured 2026-09-25: from these seeds the DE seed
+# polish bought +383 nats by inflating err_scale to 36 (OGLE) and 92
+# (Bronberg) while dropping the lens companion to ~1e-7 Msun -- a
+# point-lens basin the wide ceiling made cheaper than fixing the wings.
+# Ten leaves room for the real underestimates here (the OGLE out-of-event
+# baseline needs 3.6; the seed-start wing mismatch needs ~7) and takes the
+# collapsed basin off the table.  Broadcast to all nine instruments; the
+# per-instrument entries below refine the start only.
+mulensinstrument.err_scale:
+    upper: 10.0
+mulensinstrument.OGLE.q_source:
+    initval: 0.3510
+mulensinstrument.OGLE.log_f_total:
+    initval: -6.02866
+mulensinstrument.OGLE.err_scale:
+    initval: 3.6              # the out-of-event baseline value
+
+mulensinstrument.Bronberg.q_source:
+    initval: 0.3738
+mulensinstrument.Bronberg.log_f_total:
+    initval: -7.35861
+mulensinstrument.Bronberg.err_scale:
+    initval: 1.03
+
+mulensinstrument.CAO.q_source:
+    initval: 0.3566
+mulensinstrument.CAO.log_f_total:
+    initval: -7.01053
+mulensinstrument.CAO.err_scale:
+    initval: 1.97
+
+mulensinstrument.CT13_I.q_source:
+    initval: 0.3311
+mulensinstrument.CT13_I.log_f_total:
+    initval: -6.40299
+mulensinstrument.CT13_I.err_scale:
+    initval: 3.26
+
+mulensinstrument.CT13_V.q_source:
+    initval: 0.2250
+mulensinstrument.CT13_V.log_f_total:
+    initval: -6.03292
+mulensinstrument.CT13_V.err_scale:
+    initval: 1.0              # only 5 points; the fitted 0.20 is noise
+
+mulensinstrument.FarmCove.q_source:
+    initval: 0.2701
+mulensinstrument.FarmCove.log_f_total:
+    initval: -6.70539
+mulensinstrument.FarmCove.err_scale:
+    initval: 2.45
+
+mulensinstrument.Kumeu.q_source:
+    initval: 0.3162
+mulensinstrument.Kumeu.log_f_total:
+    initval: -6.76844
+mulensinstrument.Kumeu.err_scale:
+    initval: 1.39
+
+mulensinstrument.Possum.q_source:
+    initval: 0.1709
+mulensinstrument.Possum.log_f_total:
+    initval: -6.56991
+mulensinstrument.Possum.err_scale:
+    initval: 3.10
+
+mulensinstrument.VintageLane.q_source:
+    initval: 0.1872
+mulensinstrument.VintageLane.log_f_total:
+    initval: -6.75675
+mulensinstrument.VintageLane.err_scale:
+    initval: 1.31
+
+# star.Source.radius is left free: with finite_source on, rho is read but
+# the radius is not separately identifiable.  Skowron measure theta_* =
+# 4.45 +/- 0.40 uas, an ANGLE; imposing it as a radius would feed the
+# assumed source distance back in as if it were measured.
