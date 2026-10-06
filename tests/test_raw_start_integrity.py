@@ -198,3 +198,135 @@ def test_get_raw_start_raises_on_a_mis_sized_or_missing_raw_initval(
     assert "System.get_raw_start[toy.x_raw] raw_initval" in msg
     assert "'toy.x'" in msg
     assert fragment in msg
+
+
+# ---------------------------------------------------------------------------
+# System.apply_polished_starts (2.3.23)
+# ---------------------------------------------------------------------------
+
+
+def test_apply_polished_starts_adopts_every_seed_on_correct_code():
+    """
+    Given polished starts for seeds 0 and 2 of the right size, and a
+      seed_resolved entry for seed 2,
+    When apply_polished_starts adopts them,
+    Then seed 0 lands in raw_initval and seed 2 in seed_resolved[2] (the
+      non-vacuity check for the raising tests below).
+    """
+    # ARRANGE
+    model, p = _toy_vector_model()
+    seed_resolved = [{}, {}, {}]
+    stub = _StubSystem([p], seed_resolved=seed_resolved)
+    polished = [
+        {"toy.x_raw": np.array([0.1, 0.2])},
+        {"toy.x_raw": np.array([0.3, 0.4])},
+    ]
+
+    # ACT
+    System.apply_polished_starts(stub, polished, [0, 2])
+
+    # ASSERT
+    np.testing.assert_array_equal(p.raw_initval, [0.1, 0.2])
+    phys = p.phys_from_raw(np.array([0.3, 0.4]))
+    assert seed_resolved[2] == {
+        "toy.0.x": pytest.approx(phys[0]),
+        "toy.2.x": pytest.approx(phys[2]),
+    }
+
+
+def test_apply_polished_starts_raises_on_a_key_with_no_parameter():
+    """
+    Given a polished start whose raw key matches no Parameter,
+    When apply_polished_starts adopts it,
+    Then KeyError names the key instead of the polish being dropped.
+    """
+    # ARRANGE
+    _, p = _toy_vector_model()
+    polished = [{"toy.nope_raw": np.zeros(2)}]
+
+    # ACT / ASSERT
+    with pytest.raises(KeyError, match="raw variable 'toy.nope_raw' has no"):
+        System.apply_polished_starts(_StubSystem([p]), polished, [0])
+
+
+def test_apply_polished_starts_raises_on_a_parameter_with_no_raw_transform():
+    """
+    Given a polished start for a Parameter that has no raw transform,
+    When apply_polished_starts adopts it,
+    Then ValueError names the key, the seed and the parameter.
+    """
+    # ARRANGE
+    p = Parameter(label="toy.y", initval=1.0, lower=0.0, upper=2.0)
+    polished = [{"toy.y_raw": np.zeros(1)}]
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError) as exc:
+        System.apply_polished_starts(_StubSystem([p]), polished, [0])
+    msg = str(exc.value)
+    assert "System.apply_polished_starts[toy.y_raw, seed 0]" in msg
+    assert "'toy.y' has no raw transform" in msg
+
+
+@pytest.mark.parametrize("seed_index", [0, 2])
+def test_apply_polished_starts_raises_on_a_mis_sized_polished_start(
+    seed_index,
+):
+    """
+    Given a polished start of the wrong size, for seed 0 or a later seed,
+    When apply_polished_starts adopts it,
+    Then ValueError names the key, the seed and both sizes, instead of the
+      UNPOLISHED start silently surviving for that parameter.
+    """
+    # ARRANGE
+    _, p = _toy_vector_model()
+    raw_before = np.array(p.raw_initval, copy=True)
+    seed_resolved = [{}, {}, {}]
+    polished = [{"toy.x_raw": np.zeros(2)}] if seed_index else []
+    polished.append({"toy.x_raw": np.zeros(3)})
+    seed_indices = [0, seed_index] if seed_index else [0]
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError) as exc:
+        System.apply_polished_starts(
+            _StubSystem([p], seed_resolved=seed_resolved),
+            polished,
+            seed_indices,
+        )
+    msg = str(exc.value)
+    assert f"System.apply_polished_starts[toy.x_raw, seed {seed_index}]" in msg
+    assert "'toy.x'" in msg
+    assert "raw vector has 3 entries but its raw variable has 2" in msg
+    if not seed_index:
+        np.testing.assert_array_equal(p.raw_initval, raw_before)
+
+
+@pytest.mark.parametrize(
+    "seed_resolved",
+    [None, [{}, {}], [{}, {}, None]],
+    ids=["no-seed-list", "short-seed-list", "none-entry"],
+)
+def test_apply_polished_starts_raises_on_a_seed_with_no_seed_resolved_entry(
+    seed_resolved,
+):
+    """
+    Given a polished start for seed 2 and a seed_resolved that is absent,
+      too short, or holds None at index 2,
+    When apply_polished_starts adopts it,
+    Then ValueError names the key and the seed instead of the polished
+      seed being discarded.
+    """
+    # ARRANGE
+    _, p = _toy_vector_model()
+    polished = [
+        {"toy.x_raw": np.zeros(2)},
+        {"toy.x_raw": np.array([0.3, 0.4])},
+    ]
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError) as exc:
+        System.apply_polished_starts(
+            _StubSystem([p], seed_resolved=seed_resolved), polished, [0, 2]
+        )
+    msg = str(exc.value)
+    assert "System.apply_polished_starts[toy.x_raw, seed 2]" in msg
+    assert "has no config_manager.seed_resolved entry" in msg

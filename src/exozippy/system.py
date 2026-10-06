@@ -1265,24 +1265,31 @@ class System(Component):
         config_manager.seed_resolved as physical (internal-unit) values, so
         get_raw_starts re-derives them through the frozen transform in
         whatever raw coordinates are current.
+
+        ``polished_raws`` come from ``polish_raw_starts`` over the dicts
+        ``get_raw_starts`` just built -- same keys, same sizes -- and
+        ``seed_resolved`` holds an entry for every seed index it emitted.
+        So a raw key with no Parameter (KeyError), a Parameter with no raw
+        transform or a mis-sized polished vector (ValueError, through
+        ``Parameter.check_raw_size``), and a seed k > 0 with no
+        ``seed_resolved`` entry (ValueError) are upstream bugs and raise,
+        naming the key, the seed and the sizes.  Each used to ``continue``,
+        so the log reported the polish's lp gain while the sampled start
+        and the startup table kept the UNPOLISHED value (review 2.3.23).
         """
         lookup = {p.label: p for p in self.get_all_parameters()}
-        seed_resolved = getattr(self.config_manager, "seed_resolved", None)
+        seed_resolved = self.config_manager.seed_resolved
 
         for s, raw in enumerate(polished_raws):
+            k = seed_indices[s]
             for key, vec in raw.items():
-                name = key[: -len("_raw")] if key.endswith("_raw") else key
-                par = lookup.get(name)
-                tf = (
-                    getattr(par, "_raw_transform", None)
-                    if par is not None
-                    else None
+                par = _parameter_for_raw_key(key, lookup)
+                new_raw = par.check_raw_size(
+                    vec,
+                    f"System.apply_polished_starts[{key}, seed {k}] "
+                    f"polished start",
                 )
-                if tf is None:
-                    continue
-                new_raw = np.asarray(vec, dtype=float).reshape(-1)
-                if new_raw.size != len(tf["sampled_idx"]):
-                    continue
+                tf = par._raw_transform
                 phys = np.asarray(par.phys_from_raw(new_raw), dtype=float)
 
                 if s == 0:
@@ -1307,13 +1314,17 @@ class System(Component):
                         float(iv[0]) if par.shape in ((), None) else iv
                     )
                 else:
-                    k = seed_indices[s]
-                    if (
-                        not seed_resolved
-                        or k >= len(seed_resolved)
-                        or seed_resolved[k] is None
-                    ):
-                        continue
+                    n_resolved = (
+                        0 if seed_resolved is None else len(seed_resolved)
+                    )
+                    if k >= n_resolved or seed_resolved[k] is None:
+                        raise ValueError(
+                            f"System.apply_polished_starts[{key}, seed {k}]: "
+                            f"polished start for seed {k} has no "
+                            f"config_manager.seed_resolved entry to write "
+                            f"into ({n_resolved} seed solutions held); "
+                            f"get_raw_starts only emits seeds that have one"
+                        )
                     comp_type = par.label.split(".")[0]
                     param_name = par.label.split(".", 1)[1]
                     for i in tf["sampled_idx"]:
