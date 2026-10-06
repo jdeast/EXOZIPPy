@@ -1,0 +1,118 @@
+run:
+  name: "kb180087_obj3"
+
+prefix: "fitresults/kb180087_obj3"
+
+# KMT-2018-BLG-0087, object 3 of A. Stoneew's event list ("obj3" enumerates
+# that list -- it is NOT a solution index; the two competing solutions are
+# named Close and Close_alt below and in the params file).
+#
+# Binary lens, point source (2L1S), six KMTNet I-band light curves from two
+# fields (BLG14, BLG15) at three sites (CTIO, SAAO, SSO).
+#
+# MMEXOFAST solution, run 20260624170138 (renormalized):
+#   Close_alt : t_E ~ 4.55 d, s ~ 0.910, q ~ 2.37e-3, alpha ~ -105.7 deg
+#   Close     : t_E ~ 4.63 d, s ~ 0.634, q ~ 2.88e-3, alpha ~ -106.4 deg
+# Close_alt is preferred by delta chi2 = 4.9 over 3094 points.  Both are
+# seeded; see kb180087_obj3.params.yaml and the README.
+#
+# system architecture:
+#   star.Lens        = primary lens host    (lens body 0)
+#   planet.Companion = secondary lens body  (lens body 1)
+#   star.Source      = background source
+
+star:
+  - name: "Lens"
+  - name: "Source"
+
+planet:
+  - name: "Companion"
+
+mulensevent:
+  # POINT SOURCE.  The MMEXOFAST fit did carry rho and used VBBL across the
+  # anomaly, but rho is not measured by these data: its marginal sigma is
+  # 3.3 dex in BOTH solutions (log_rho = -6.12 -3.41/+3.28 for Close,
+  # -6.47 -3.34/+3.34 for Close_alt), i.e. the posterior fills the prior and
+  # both point estimates sit near the floor.  Fitting a finite source here
+  # would add an unconstrained dimension rather than measure anything, so
+  # this ships as the point-source model that the data actually support --
+  # the same choice DC2018_128 makes, and for the same reason.  Set
+  # finite_source: True to reinstate it; the rho seed in the params file is
+  # kept and stays meaningful either way (see the note there).
+  - finite_source: False
+    t0_par: 2458281.7275        # Close_alt t_0; no parallax was fit
+
+lens:
+  - body: star.Lens
+  - body: planet.Companion
+
+source:
+  - body: star.Source
+
+galacticmodel:
+  - name: "kb180087_obj3"
+    anchor_idx: 1              # anchor on the source (star.Source)
+
+band:
+  - name: "I"
+    filter: "Generic/Cousins.I"
+    ld_law: "linear"
+
+# All six files are KMTNet pySIS output: three whitespace columns,
+# HJD-2450000 / I mag / mag err, already sorted.  time_offset restores full
+# Julian Dates (the loader rejects times below 2e6 for any later conversion,
+# and every initval in the params file is a full JD).  No time_frame/
+# time_scale conversion is requested: the published solution is quoted in
+# the files' own time system, so converting here would silently move t_0
+# away from the value being reproduced.  ob09020 reads its .rv files the
+# same way.
+mulensinstrument:
+  - name: "KMTC14"
+    file: "L_data/n20260623.I.KMTC14.pys"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    band: "I"
+
+  - name: "KMTS14"
+    file: "L_data/n20260623.I.KMTS14.pys"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    band: "I"
+
+  - name: "KMTA14"
+    file: "L_data/n20260623.I.KMTA14.pys"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    band: "I"
+
+  - name: "KMTC15"
+    file: "L_data/n20260623.I.KMTC15.pys"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    band: "I"
+
+  - name: "KMTS15"
+    file: "L_data/n20260623.I.KMTS15.pys"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    band: "I"
+
+  - name: "KMTA15"
+    file: "L_data/n20260623.I.KMTA15.pys"
+    columns: {time: 0, mag: 1, err: 2}
+    time_offset: 2450000.0
+    band: "I"
+
+parameter_file: "kb180087_obj3.params.yaml"
+
+sampler:
+  method: ptde_async      # Differential Evolution + Parallel Tempering
+  n_temps: 8              # temperature rungs (EXOFASTv2 parity)
+  T_max: 200              # hottest temperature (EXOFASTv2 parity)
+  # n_chains: defaults to 2*n_params
+  # cores: defaults to 75% of physical cores
+  tune: 5000
+  draws: 50000
+  nthin: 1
+  recompute_trace: True
+  eval_timeout: 10        # VBMicrolensing can hang for some (s, q)
