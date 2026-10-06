@@ -1,0 +1,35 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 16
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N vbmfix
+#$ -o vbmfix_results/vbm_fix_test.$JOB_ID.log
+# Build the fixed VBMicrolensing (jdeast:fix-multilens-heap-corruption,
+# upstream PR valboz/VBMicrolensing#74) into a scratch venv on top of the
+# exozippy conda env, then rerun the 24-case reproducer and the
+# 6000-proposal stress test under both methods against it.  The shared
+# env is untouched (review 2.6.35; JDE's call).
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+P=$HOME/.conda/envs/exozippy/bin
+V=$HOME/vbm_fix_venv
+export CC=$P/x86_64-conda-linux-gnu-gcc CXX=$P/x86_64-conda-linux-gnu-g++
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_vbmfix"
+# Work in a copy so the original-kernel reproducer JSONs and journals are not overwritten.
+cd $HOME/python/EXOZIPPy/examples/KMT-2021-BLG-1122L/vbmfix_results
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)   vbm_fix $(git -C $HOME/vbm_fix log --oneline -1 | cut -c1-60)   $(date)"
+$V/bin/pip install --no-build-isolation --no-deps -v $HOME/vbm_fix 2>&1 | grep -i "error\|Successfully\|warning: .*g++" | tail -5
+$V/bin/python -c "import VBMicrolensing, inspect; print('VBM', getattr(VBMicrolensing, '__version__', '?'), inspect.getfile(VBMicrolensing))"
+echo "=== reproducer (24 cases)"
+$V/bin/python -u vbm_reproducer.py 2>&1 | grep "^case\|^VBM"
+echo "=== stress test, Multipoly"
+$V/bin/python -u check_vbm_crash.py 6000 1 16 Multipoly 2>&1 | grep -v "DEBUG\|Warning\|warn"
+echo "=== stress test, Nopoly"
+$V/bin/python -u check_vbm_crash.py 6000 1 16 Nopoly 2>&1 | grep -v "DEBUG\|Warning\|warn"
+echo "exit $?   $(date)"

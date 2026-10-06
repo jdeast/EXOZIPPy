@@ -1,0 +1,51 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 32-64
+#$ -q lThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N kmt1122fixfit
+#$ -o fitresults_vbmfix/KMT-2021-BLG-1122L.$JOB_ID.log
+#
+# Review 7.6.4: the triple-lens acceptance fit UNDER THE FIXED VBM KERNEL
+# (valboz/VBMicrolensing#74 built into ~/vbm_fix_venv, review 2.6.35); the
+# shared env still has pip VBM 5.5.  Otherwise (Han+2023 3L1S), started at
+# the convention-scan winner in the params file.  Targets: Table 2's
+# (s_2, q_2, alpha, s_3, q_3, psi, rho, t_E) through the mappings in the
+# README, and the physical lens masses under the IMF + galactic priors.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_kmt1122"
+
+cd $HOME/python/EXOZIPPy/examples/KMT-2021-BLG-1122L
+mkdir -p fitresults_vbmfix
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD) on $(git -C $HOME/python/EXOZIPPy branch --show-current)   $(date)   slots $NSLOTS"
+# The shipped config keeps RELATIVE paths (run.py resolves them against the
+# working directory), so the cores-set copy lives in fitresults/ and the fit
+# runs from here; dc18_set_cores.py refuses relative paths by design.
+cfg="fitresults_vbmfix/KMT-2021-BLG-1122L.cores${NSLOTS:?NSLOTS unset}.yaml"
+python - "$cfg" "$NSLOTS" <<'PY'
+import sys, yaml
+cfg, n = sys.argv[1], int(sys.argv[2])
+d = yaml.safe_load(open("KMT-2021-BLG-1122L.yaml"))
+d.setdefault("sampler", {})["cores"] = n
+d["prefix"] = "fitresults_vbmfix/KMT-2021-BLG-1122L"
+# The crash workarounds of the shipped config are for the UNFIXED kernel
+# (T_max 20, start_dispersion 3.0): under the fixed one the full ladder
+# and the auto dispersion come back.  seed_polish stays off (the polish
+# has no timeout and the fixed Multipoly still has a ~1.7e-4 tail of
+# multi-minute calls), and the s bounds stay (a physical prior here).
+d["sampler"]["T_max"] = 200
+d["sampler"].pop("start_dispersion", None)
+print("vbmfix overrides: T_max 200, start_dispersion auto")
+yaml.safe_dump(d, open(cfg, "w"), sort_keys=False)
+print(f"wrote {cfg} with sampler.cores = {n}")
+PY
+/usr/bin/time -v $HOME/vbm_fix_venv/bin/python -c "import sys; from exozippy.cli import main; sys.exit(main())" "$cfg" 2> fitresults_vbmfix/time.txt
+echo "exit $?   $(date)"
+grep -E "Elapsed|Maximum resident" fitresults_vbmfix/time.txt

@@ -198,8 +198,22 @@ clock.  So the config sets `T_max: 20`: the ladder stops where the hangs
 start, and the start is the scan winner, so deep tempering is not what
 this fit needs.
 
-Acceptance fit: job 15507120 (64 cores, `n_temps: auto`, T_max 20, no seed
-polish, bounded separations, start dispersion 3.0), started 2026-10-06.
-RESULTS:
+**T_max 20 did not help** (job 15507120): 10 timeouts in the first 29
+steps, spread over rungs 4-13, so the hang is not a hot-rung phenomenon
+but the kernel's retry bug firing on ordinary proposals at any
+temperature; stopped.  **The fit is blocked on the kernel fix** -- and the
+fix exists: the Radish agent root-caused both bugs and opened
+valboz/VBMicrolensing#74 (a `flagbad` never reset after a retry, and
+stale pairing indices in the image ordering).  Built from that branch
+into a scratch venv (`vbm_fix_test.job`, VBMicrolensing 5.6), the 24
+reproducers all pass and the 6000-proposal stress test shows 0 crashes
+under either method, one multi-minute call per 6000 (rejected by the
+sampler's eval timeout).  Results in `vbmfix_results/`.
+
+Acceptance fit: job 15507641 under the fixed kernel
+(`KMT-2021-BLG-1122L_vbmfix.job`: the venv's python, T_max 200 and the
+auto start dispersion restored, no seed polish, bounded separations),
+started 2026-10-06.  The shipped config keeps the T_max 20 /
+start_dispersion 3.0 workarounds until the fix is released.  RESULTS:
 (filled in when it lands -- posterior vs Table 2 through the mappings
 above, and the lens masses under the IMF and galactic priors).
