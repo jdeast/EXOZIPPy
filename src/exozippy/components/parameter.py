@@ -3935,6 +3935,45 @@ class Parameter:
             tf["gaussian_scales"][index], 1e-30
         )
 
+    def check_raw_size(self, vec, where):
+        """Check a raw-space vector against this Parameter's raw variable.
+
+        The raw-start size invariant (review 2.14.15): a Parameter's
+        ``<label>_raw`` variable, its ``raw_initval`` and every raw start a
+        caller builds for it hold exactly ``len(_raw_transform
+        ["sampled_idx"])`` entries -- one per sampled element -- because
+        ``build_pymc`` sets all three in the same call.  A mismatch, a
+        ``None`` vector, or a Parameter with no raw transform at all is an
+        upstream bookkeeping bug (a polish never written back, a label /
+        raw-name mismatch), so this RAISES rather than zeroing, padding or
+        skipping: those repairs made every consumer of the start agree on
+        the same wrong start, which no equality test can see.
+
+        ``where`` names the call site (and the raw key, the seed, ...) for
+        the message.  Returns ``vec`` as a flat float64 array.
+        """
+        tf = self._raw_transform
+        if tf is None:
+            raise ValueError(
+                f"{where}: Parameter '{self.label}' has no raw transform "
+                f"(no sampled element, or build_pymc has not run), so it "
+                f"has no raw variable to hold a raw vector"
+            )
+        n_raw = len(tf["sampled_idx"])
+        if vec is None:
+            raise ValueError(
+                f"{where}: Parameter '{self.label}' raw vector is None; its "
+                f"raw variable has {n_raw} entries (one per sampled element)"
+            )
+        flat = np.asarray(vec, dtype=float).reshape(-1)
+        if flat.size != n_raw:
+            raise ValueError(
+                f"{where}: Parameter '{self.label}' raw vector has "
+                f"{flat.size} entries but its raw variable has {n_raw} "
+                f"(one per sampled element)"
+            )
+        return flat
+
     def _require_raw_transform(self, index):
         tf = getattr(self, "_raw_transform", None)
         if tf is None or index not in set(tf["sampled_idx"]):
