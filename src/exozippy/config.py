@@ -365,8 +365,10 @@ def _reject_list_valued_fields(user_params, source=None):
 #: Value contract, one entry per key:
 #:   overdisperse -- bool.  Do these seeds still want scattering before the
 #:     chains start?  An ABSENT key means True (the safe direction for a
-#:     hand-written file).  Read by samplers/_common.py's ``_make_starts``;
-#:     the reasoning is in samplers/samplers.md, "Chain starts".
+#:     hand-written file).  Read by samplers/_common.py's ``_make_starts``
+#:     and by polish.resolve_polish_steps (a declared posterior-draw set is
+#:     never auto-polished, review 2.4.14 (d)); the reasoning is in
+#:     samplers/samplers.md, "Chain starts".
 RESERVED_PARAM_KEYS = frozenset({"overdisperse"})
 
 

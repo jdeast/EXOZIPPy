@@ -617,6 +617,121 @@ still at their birth positions; that population proposes 70-unit throws for
 the rest of the run, and until this line existed nothing said so.
 Tests: `tests/test_polish.py`, the `_CallbackPool` block.
 
+## The DE seed polish runs in rounds, with a rate stop (2.4.14)
+
+JDE ruling 2026-09-14, three parts: raise the cap; CPU-days are the accepted
+price (EXOFASTv2 precedent); iterate polish -> re-whiten -> polish
+automatically. What landed, in `polish.py` and `ptde.polish_seed_starts`:
+
+- **The cap is per engine.** `seed_polish: auto`/`on` resolves to
+  `polish.ENGINE_DEFAULT`: `DEFAULT_POLISH_STEPS = 400` L-BFGS iterations
+  (unchanged) or `DEFAULT_DE_POLISH_SWEEPS = 1000` DE sweeps PER ROUND. An
+  integer `seed_polish: N` is the per-round cap on either.
+- **A rate stop inside a round.** A seed leaves its round when its best point
+  gained less than `polish_tol_nats(D) = max(1, D/2)` nats over the last
+  `ptde.POLISH_TOL_WINDOW = 400` sweeps, and the wrap-up line says "stopped
+  on rate" or "stopped on cap". D/2 is the depth of a D-dim posterior's
+  typical set below its maximum: a smaller gain is invisible to the sampler.
+- **Rounds** (`polish.polish_rounds`, called by `run.py`). After round 1 the
+  model is re-centered and re-whitened at the polished point
+  (`measure_and_whiten`, the same probe run.py runs next), every seed is
+  re-derived in the new coordinates, and a FRESH population polishes again.
+  The loop ends when a whole round gains less than `polish_tol_nats(D)` on
+  every seed, or at `POLISH_MAX_ROUNDS = 8`. With re-whitening on, round 2
+  always runs: round 1 drew its proposals in PRELIMINARY units. With
+  `measure_scales: false` later rounds are plain restarts. The L-BFGS engine
+  runs exactly one round, so every differentiable model's start is
+  bit-identical to the single-polish pipeline. run.py still re-centers and
+  probes once more after the last round, and persists that.
+
+**Why a window is safe now when it was not before.** The best-lp history is
+a staircase of exactly-flat plateaus, and no threshold separates "converged"
+from "has not jumped yet" (the short-window table on
+`ptde.POLISH_TOL_WINDOW`). Two things changed. First, a stop no longer ends
+the polish: it ends a ROUND, and the next one restarts from the best point
+with a fresh population in measured coordinates, so a stop on a flat step
+costs a probe and a restart, not start quality. Second, the window outlasts
+every flat run of a LIVE population. On the two DC2018_128 seeds run to
+15000 sweeps (`examples/DC2018/dc128_polish_traj_seed{0,1}.csv`):
+
+| | seed 0 | seed 1 |
+|---|---|---|
+| longest flat run, first 1000 sweeps | 168 | 228 |
+| share of the 15000-sweep gain in the first 1000 | 80% (3910 nats) | 74% (5010) |
+| flat runs after sweep 1000 | 647-3328 | 323-8222 |
+| sweeps accepting nothing, first 250 / after 2000 | 21% / 80-85% | 14% / 85-90% |
+| first W=400 stop, tol 1 / 13.5 / 50 nats | 1493 / 1493 / 1493 | 1989 / 1989 / 1989 |
+
+So the long plateaus belong to a FROZEN population (the fixed 2.38/sqrt(2D)
+step at T=1), the threshold does not move the stop (the window length does),
+and a restart is what pays: 150-sweep restart legs reached the DC2018-226
+plateau ~40x faster in wall clock than one long polish.
+
+**Measured on the new code** (4 workers, the box shared with other agents;
+`old` = one 400-sweep DE polish, the previous run.py; `new` = polish_rounds;
+lp after the final re-center + probe, which both arms share):
+
+| example (D, seeds) | old: polished lp, wall | new: polished lp, rounds, wall | new - old |
+|---|---|---|---|
+| DC2018_128 (18, 2; polish forced -- `auto` skips this 2-seed file) | 3374.8 / 3304.5, 19 s | 3414.8 / 3413.3, 3 rounds, 68 s | +40.0 / +108.9 |
+| DC2018-226 (25, 1; peak-finder seed) | 43439.8, 326 s | 44180.3, 6 rounds, 4563 s | +740.5 |
+| ob140939 (17, 4; L-BFGS) | bit-identical, every seed | one round | 0 |
+
+On DC2018-226 the rounds gained 21088, 134, 453, 76, 54 and 7.6 nats; rounds
+3 and 4 ran to their 1000-sweep cap and the others stopped on rate. The
+re-whitened rounds accept 6-20% of proposals where round 1 accepts 1-3%:
+measured scales are what the fixed 2.38/sqrt(2D) step was sized for. The
+price is the one the ruling accepted -- 14x the wall clock here.
+
+**Round 2+ trust regions are rebuilt per round, not carried over.** Each
+round's multi-seed trust region (half the distance to the nearest other
+seed) comes from that round's own starts, so the per-round guarantee -- no
+seed crosses the midpoint toward a neighbour -- is unchanged. Carrying round
+1's region forward (centred on the original seeds, re-expressed in the
+re-whitened coordinates) was tried and measured wrong: the re-whitening
+rescales every axis by a different factor, a Euclidean ball is not invariant
+under that, and on DC2018_128 the polished seeds sat OUTSIDE their carried
+regions, so round 2 refused 6030 / 6795 Metropolis-accepted proposals --
+every one. Cumulative drift is reported instead: after each later round
+`polish._warn_if_seeds_converged` compares the seeds' separation with their
+ORIGINAL separation, both in the current coordinates, and warns below 1/4.
+Every round polishes every seed (a seed polished alone would get an infinite
+radius).
+
+**Progress line.** Each heartbeat now reports the proposals each seed
+ACCEPTED since the previous line and an ETA from the CURRENT sweep rate
+("eta<=4.5 min (73.4 sweeps/min) ... accepted since last line=[164/1837]"),
+and the wrap-up line the run's acceptance. "Flat plateau, still accepting"
+and "accepting nothing" (84-88% of sweeps on ob09020) used to look the same.
+
+**The seed-provenance gate reads `overdisperse:`.** `resolve_polish_steps`
+takes the params file's declaration (`System.overdisperse`) as a REQUIRED
+argument: `auto` never polishes a set declared `overdisperse: false`
+(posterior draws, what mkparam writes for K > 1), even when a component also
+pushed seed hints, which used to switch the polish back on and collapse the
+draws. Forcing it (`on`/an integer) is honored and warned about.
+
+Tests: `tests/test_polish.py` (the "Review 2.4.14" block).
+
+## A slow sampler step alarms while it runs (2.4.14 e)
+
+`examples/ob09020`'s 2000-sweep arm spent 98,756 s on ONE synchronous PTDE
+step with no `eval_timeout` message, and nothing said so until it ended --
+nor whether the time went inside the parallel logp batch (at ~10 s per
+evaluation and 928 proposals it cannot all have). `ptde_sample` now brackets
+every step with `_common.StepAlarm`: a watchdog thread that, once the open
+step has run longer than `max(STEP_ALARM_MIN_S = 600 s, STEP_ALARM_FACTOR =
+20 x the median completed step)`, logs a WARNING naming the step, the phase
+it is in NOW ("build proposals", "eval (parallel logp batch)", "rest
+(accept/swap, storage, adaptation, convergence check)") and the time spent in
+each so far, repeating at 2x, 4x ... and closing with the full split when the
+step ends. Diagnostic only: it reads clocks and logs. The pool is forked
+before the thread starts; only a timeout's `recycle_pool` forks with it
+running, which Python 3.12 flags with a DeprecationWarning and which is safe
+here (the thread holds no lock across a log call; logging re-initializes its
+locks at fork). ptde_async has no step to time -- its per-evaluation stall
+is `eval_timeout`'s job. Tests: `tests/test_step_alarm.py`.
+
 ## Chain starts
 
 `store_hot_chains` (ptde_async only) takes `auto` / true / false / an integer

@@ -442,6 +442,181 @@ def _map_logp(pool, proposals):
     return pool.map(_eval_logp, proposals)
 
 
+# ---------------------------------------------------------------------------
+# Per-STEP wall-clock alarm (review 2.4.14 (e))
+# ---------------------------------------------------------------------------
+
+# A step is "slow" once it has run longer than BOTH of these: the absolute
+# floor keeps a fast model's ordinary jitter quiet, the factor keeps an
+# expensive model's ordinary step quiet.  examples/ob09020's 2000-sweep arm
+# spent 98,756 s on ONE synchronous PTDE step with no eval_timeout message at
+# all -- at ~10 s per evaluation and 928 proposals that cannot all have been
+# inside logp -- and nothing said so until the step ended a day later.
+STEP_ALARM_MIN_S = 600.0
+STEP_ALARM_FACTOR = 20.0
+# How often the watchdog thread looks.  Alarms then repeat at doubling
+# elapsed time (1x, 2x, 4x ... the threshold), so a wedged step produces a
+# handful of lines, not one per poll.
+STEP_ALARM_POLL_S = 5.0
+
+
+class StepAlarm:
+    """Wall-clock alarm for one sampler step, raised WHILE the step runs.
+
+    A step is split into named phases (``begin`` opens a step in its first
+    phase, ``phase`` moves to the next, ``end`` closes it).  A daemon thread
+    watches the open step: once it has run longer than
+    ``max(min_s, factor * median completed step)`` it logs a WARNING naming
+    the step, the phase it is in NOW and how long each phase has taken so
+    far, then again at 2x, 4x ... that threshold.  When a step that alarmed
+    finally ends, one more line gives its complete phase split.  The split is
+    the point: "inside the parallel logp batch" and "outside it" (building
+    proposals, accept/reject, storage, adaptation, convergence checks) are
+    different bugs, and the 98,756 s ob09020 step could not tell them apart.
+
+    Purely diagnostic: it reads clocks and logs, and touches no sampler
+    state.  ``close()`` stops the thread (idempotent); the owner calls it in
+    a ``finally``.
+    """
+
+    def __init__(
+        self,
+        label,
+        log,
+        *,
+        min_s=STEP_ALARM_MIN_S,
+        factor=STEP_ALARM_FACTOR,
+        poll_s=STEP_ALARM_POLL_S,
+        history=200,
+    ):
+        self.label = label
+        self.log = log
+        self.min_s = float(min_s)
+        self.factor = float(factor)
+        self.poll_s = float(poll_s)
+        self._history = []
+        self._history_len = int(history)
+        self._lock = threading.Lock()
+        self._step = None
+        self._t_step = None
+        self._phase = None
+        self._t_phase = None
+        self._phases = {}
+        self._next_alarm = None
+        self._alarmed = False
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._watch, name=f"{label} step alarm", daemon=True
+        )
+        self._thread.start()
+
+    def threshold(self):
+        """Seconds a step may run before it alarms."""
+        with self._lock:
+            hist = list(self._history)
+        med = float(np.median(hist)) if hist else 0.0
+        return max(self.min_s, self.factor * med)
+
+    def begin(self, step, phase):
+        """Open step ``step`` in ``phase`` (closing any step still open)."""
+        if self._step is not None:
+            self.end()
+        now = time.monotonic()
+        thr = self.threshold()
+        with self._lock:
+            self._step = step
+            self._t_step = now
+            self._phase = phase
+            self._t_phase = now
+            self._phases = {}
+            self._next_alarm = thr
+            self._alarmed = False
+
+    def phase(self, phase):
+        """Move the open step into ``phase``."""
+        now = time.monotonic()
+        with self._lock:
+            if self._step is None:
+                return
+            self._phases[self._phase] = (
+                self._phases.get(self._phase, 0.0) + now - self._t_phase
+            )
+            self._phase = phase
+            self._t_phase = now
+
+    def end(self):
+        """Close the open step; report its split if it alarmed."""
+        now = time.monotonic()
+        with self._lock:
+            if self._step is None:
+                return
+            self._phases[self._phase] = (
+                self._phases.get(self._phase, 0.0) + now - self._t_phase
+            )
+            total = now - self._t_step
+            step, phases, alarmed = (
+                self._step,
+                dict(self._phases),
+                self._alarmed,
+            )
+            self._step = None
+            self._history.append(total)
+            if len(self._history) > self._history_len:
+                self._history.pop(0)
+        if alarmed:
+            self.log.warning(
+                f"{self.label}: slow step {step} finished after "
+                f"{total:.0f} s -- " + self._split(phases, total) + "."
+            )
+
+    def close(self):
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=2.0 * self.poll_s)
+
+    @staticmethod
+    def _split(phases, total):
+        return ", ".join(
+            f"{name} {sec:.0f} s ({100.0 * sec / total:.0f}%)"
+            if total > 0
+            else f"{name} {sec:.0f} s"
+            for name, sec in phases.items()
+        )
+
+    def check(self, now=None):
+        """One watchdog look (the thread calls this; tests call it directly).
+
+        Returns True when it logged an alarm.
+        """
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            if self._step is None:
+                return False
+            elapsed = now - self._t_step
+            if elapsed < self._next_alarm:
+                return False
+            phases = dict(self._phases)
+            phases[self._phase] = (
+                phases.get(self._phase, 0.0) + now - self._t_phase
+            )
+            step, cur = self._step, self._phase
+            thr = self._next_alarm
+            self._next_alarm = 2.0 * elapsed
+            self._alarmed = True
+            hist = list(self._history)
+        med = f"{np.median(hist):.1f} s" if hist else "none completed yet"
+        self.log.warning(
+            f"{self.label}: step {step} has been running {elapsed:.0f} s "
+            f"(alarm at {thr:.0f} s; median step {med}) and is IN "
+            f"'{cur}' now -- so far " + self._split(phases, elapsed) + "."
+        )
+        return True
+
+    def _watch(self):
+        while not self._stop.wait(self.poll_s):
+            self.check()
+
+
 def _map_logp_timeout(
     pool, proposals, timeout, *, fn=None, poll=None, on_poll=None
 ):

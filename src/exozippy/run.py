@@ -43,7 +43,7 @@ from .outputs.ledger import ledger_from_json, ledger_to_json
 from .outputs.modeling import build_modeling_output, compile_modeling_pdf
 from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix
 from .outputs.report_pipeline import build_mode_reports
-from .polish import polish_raw_starts, resolve_polish_steps
+from .polish import polish_rounds, resolve_polish_steps
 from .trace_meta import (
     POSTERIOR_UNITS,
     POSTERIOR_UNITS_UNFINISHED,
@@ -996,28 +996,34 @@ def _run_fit(config, gui, user_params=None):
         # otherwise.  Skipped when reusing an existing trace (nothing will
         # be sampled).  This supersedes the PTDE-internal seed polish,
         # which ran after the probe and only under PTDE.
+        #
+        # On the gradient-free (DE) engine the polish runs in ROUNDS --
+        # polish, re-whiten at the polished point, polish again with a fresh
+        # population -- until a round stops paying (polish.polish_rounds,
+        # review 2.4.14).  The L-BFGS engine runs once, as before.
         if not reusing_trace:
-            raw_starts_pre, seed_indices_pre = system.get_raw_starts(model)
+            raw_starts_pre, _seed_indices_pre = system.get_raw_starts(model)
             polish_steps = resolve_polish_steps(
                 sampler_cfg.get("seed_polish", "auto"),
                 n_seeds=len(raw_starts_pre),
-                has_seed_hints=bool(
-                    getattr(system.config_manager, "seed_hint_sets", None)
-                ),
+                has_seed_hints=bool(system.config_manager.seed_hint_sets),
+                overdisperse=system.overdisperse,
             )
             if polish_steps:
-                polished, _dlps, _pmethod = polish_raw_starts(
+                polish_rounds(
+                    system,
                     model,
-                    raw_starts_pre,
                     n_steps=polish_steps,
-                    seed_indices=seed_indices_pre,
                     # Same core grant the sampler is about to use: the DE
                     # engine ran serial here while every one of them sat
                     # idle, which on a 64-core microlensing job was the
                     # whole polish stage at 1/64 throughput.
                     cores=cores,
+                    # Re-whitening between rounds is a probe; a run that
+                    # asked for none (`measure_scales: false`) gets plain
+                    # restarts instead.
+                    rewhiten=measure_scales,
                 )
-                system.apply_polished_starts(polished, seed_indices_pre)
                 raw_start = system.get_raw_start(model)
                 polished_start = True
 
