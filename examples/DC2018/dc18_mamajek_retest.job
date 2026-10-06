@@ -1,0 +1,29 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N mamajekretest
+#$ -o mamajek_retest.$JOB_ID.log
+#
+# Branch mamajek-teff-tie, second pass: re-record the three KMT-2019-BLG-1806
+# fixtures (the SED floors are now masked to the seen star, so the two floor
+# potentials halve -- a genuine change), then rerun the 44 tests the first
+# pass failed with one-line tracebacks so each reason is visible.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_mamajek"
+
+cd $HOME/python/EXOZIPPy
+echo "branch: $(git rev-parse --abbrev-ref HEAD) $(git rev-parse --short HEAD)"
+echo "===================== re-record KMT fixtures ====================="
+python scripts/make_mulens_fixtures.py --only KMT-2019-BLG-1806 --only KMT-2019-BLG-1806_nt24 --only KMT-2019-BLG-1806_nt8long 2>&1 | tail -8
+git status --short tests/fixtures/mulens/
+echo "===================== acceptance A + failed tests, one-line tracebacks ====================="
+python -m pytest -q -n0 --tb=line tests/test_mulens_acceptance_a.py tests/test_set_initval_contract.py "tests/test_examples_prepare.py" 2>&1 | grep -v "^  /" | tail -80
+echo "exit $?"

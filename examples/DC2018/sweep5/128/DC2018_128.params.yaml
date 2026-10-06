@@ -1,0 +1,87 @@
+band.W149.u1:
+  initval: 0.0
+  sigma: 0
+band.Z087.u1:
+  initval: 0.0
+  sigma: 0
+lens.Companion.alpha:
+  initval:
+  - 0.0
+  - 90.0
+lens.Companion.log_s:
+  initval:
+  - 0.0
+  - 0.0
+lens.Companion.q:
+  initval:
+  - 0.001
+  - 0.001
+mulensevent.0.t_E:
+  initval:
+  - 19.163158375014007
+  - 19.163158375014007
+mulensinstrument.Roman_W149.err_scale:
+  initval: 1.0
+  lower: 0.5
+  upper: 2.0
+mulensinstrument.Roman_W149.log_f_total:
+  lower: -1.5061003999999998
+  upper: 2.4938996
+mulensinstrument.Roman_W149.out_scale:
+  initval: 0.02620317530024311
+  upper: 0.2620317530024311
+mulensinstrument.Roman_W149.zeropoint:
+  mu: 20.9627
+  sigma: 0.3395
+mulensinstrument.Roman_Z087.err_scale:
+  initval: 1.0
+  lower: 0.5
+  upper: 2.0
+mulensinstrument.Roman_Z087.log_f_total:
+  lower: -2.2058867996594014
+  upper: 1.7941132003405986
+mulensinstrument.Roman_Z087.out_scale:
+  initval: 0.004212521782264211
+  upper: 0.042125217822642114
+mulensinstrument.Roman_Z087.zeropoint:
+  mu: mulensinstrument.Roman_W149.zeropoint + 0.5387
+  sigma: 0.0283
+planet.Companion.radius:
+  sigma: 0
+sed.errscale:
+  initval: 1.0
+  sigma: 0
+source.Source.rho:
+  initval:
+  - 0.001
+  - 0.001
+source.Source.t_0:
+  initval:
+  - 2458554.823829841
+  - 2458554.823829841
+  lower: 2458256.505461
+  upper: 2460149.241444
+source.Source.u_0:
+  initval:
+  - 0.13120504756411433
+  - 0.13120504756411433
+  lower: -3.0
+  upper: 3.0
+star.Lens.dec:
+  initval: -28.982
+  sigma: 0
+star.Lens.feh:
+  mu: 0.0
+  sigma: 0.5
+star.Lens.ra:
+  initval: 267.595
+  sigma: 0
+star.Source.av:
+  mu: 6.437570730221307
+  sigma: 1.201763199391076
+star.Source.dec:
+  initval: -28.982
+  sigma: 0
+star.Source.ra:
+  initval: 267.595
+  sigma: 0

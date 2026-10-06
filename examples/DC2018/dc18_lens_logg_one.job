@@ -1,0 +1,18 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N lensloggw
+#$ -o ab047/dc18_lens_logg_wide.$JOB_ID.log
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+cd $HOME/python/EXOZIPPy/examples/DC2018
+python dc18_lens_logg.py ab047/loggwide:047 sweep4/047:047
+python dc18_pirel_marginal.py --event 047 --run-dir ab047/loggwide --truth -1.8196
+echo "exit $?"

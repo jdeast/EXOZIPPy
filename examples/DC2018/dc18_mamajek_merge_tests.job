@@ -1,0 +1,35 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N mamajekmerge
+#$ -o mamajek_merge.$JOB_ID.log
+#
+# Branch mamajek-teff-tie after merging origin/master (#335 parquet BC
+# tables, #338, #339), in the worktree ~/wt_mamajek so the running 194 arm's
+# checkout is untouched.  The worktree's src goes FIRST on PYTHONPATH to
+# shadow the editable install.  Re-record the three KMT fixtures on the
+# merged code, then the targeted tests and the acceptance --check.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_mamajek_merge"
+
+WT=$HOME/wt_mamajek
+cd $WT
+export PYTHONPATH="$WT/src"
+echo "worktree $(git rev-parse --short HEAD); imports from $(python -c 'import exozippy; print(exozippy.__file__)')"
+echo "===================== re-record KMT fixtures ====================="
+python scripts/make_mulens_fixtures.py --only KMT-2019-BLG-1806 --only KMT-2019-BLG-1806_nt24 --only KMT-2019-BLG-1806_nt8long 2>&1 | tail -6
+git status --short tests/fixtures/mulens/
+git diff tests/fixtures/mulens/KMT-2019-BLG-1806.json | grep "^[-+] "
+echo "===================== targeted ====================="
+python -m pytest -q -n0 -p no:cacheprovider tests/test_unseen_star.py tests/test_mamajek_relation.py tests/test_mamajek.py tests/test_star_structure_activity.py tests/test_mann.py tests/test_torres.py tests/test_mulens_acceptance_a.py tests/test_mulens_acceptance_b.py 2>&1 | tail -15
+echo "===================== acceptance --check ====================="
+python scripts/make_mulens_fixtures.py --check 2>&1 | grep -E "DIFFERS|MISSING|ok$|failures|term " | head -30
+echo "exit $?"

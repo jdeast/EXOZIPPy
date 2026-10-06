@@ -53,7 +53,7 @@ parameter_file: "OGLE_0383.paramsLD.yaml"
 #parameter_file: "OGLE_0383.params.2.yaml"
 
 sampler:
-  method: ptde_async
+  method: ptde          # synchronous PTDE, the recommended default since PR #376 (review 2.4.9): the VBM straggler tail that justified ptde_async is gone
   n_temps: 6
   T_max: 150
   # n_chains: defaults to 2*n_params

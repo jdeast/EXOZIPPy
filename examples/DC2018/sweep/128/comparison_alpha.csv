@@ -1,0 +1,10 @@
+event,class,param,truth,exozippy,exo_err_hi,exo_err_lo,exo_pull,note
+128,omcassan,t_0,2458554.8868815,2458554.8932,0.0028,0.0022,-2.8720453635535454,
+128,omcassan,u_0,0.141832,0.14172,0.00031,0.0004,0.36129032258064836,
+128,omcassan,t_E,18.2374,18.19,0.025,0.024,1.8959999999999866,
+128,omcassan,rho,0.00606537,0.00114,0.00055,0.00038,8.955218181818182,
+128,omcassan,s,0.993145,0.97717,0.0004,0.00034,39.9374999999999,
+128,omcassan,q,0.0012118,0.0010688,6e-06,5.6e-06,23.833333333333353,
+128,omcassan,alpha,309.68433661740505,-51.976,0.032,0.034,51.885519293907834,P = 1.27 yr < 2 yr: lens orbital motion moves alpha over the event; a static fit cannot match the key's t_0 geometry (C22)
+128,omcassan,mulensinstrument.Roman_W149.err_scale,,0.9999,0.0039,0.0038,,
+128,omcassan,mulensinstrument.Roman_Z087.err_scale,,1.066,0.025,0.025,,

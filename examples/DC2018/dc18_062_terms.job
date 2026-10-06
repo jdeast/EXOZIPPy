@@ -1,0 +1,24 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N q062terms
+#$ -o sweep5/dc18_062_terms.$JOB_ID.log
+# Which priors hold 062 in the wrong-q basin after the zeropoint fix: the
+# term-by-term logp at the saved geometry-profile optima (truth wide = ref;
+# mode 1; truth close).
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_q062t"
+cd $HOME/python/EXOZIPPy/examples/DC2018
+python dc18_terms_at_x.py --event 062 --run-dir sweep5/062 \
+  sweep5/062/DC2018_062_dsprofile_lens_log_s_1__0.1641.npz \
+  sweep5/062/DC2018_062_dsprofile_lens_log_s_1__-0.1367.npz \
+  sweep5/062/DC2018_062_dsprofile_lens_log_s_1__-0.1641.npz --top 40
+echo "exit $?"

@@ -1,0 +1,33 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N nutpiecheck
+#$ -o nutpie_check.$JOB_ID.log
+#
+# Is test_nutpie_consumes_the_models_own_start_and_ignores_init_mean failing
+# because of branch mamajek-teff-tie, or already on master in this env
+# (nutpie 0.16.11, pymc 6.1.0 here; the test cites pymc 6.3.2)?  Run it on
+# the branch, then on a master worktree put FIRST on PYTHONPATH so the
+# editable install is shadowed.
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_nutpie"
+
+cd $HOME/python/EXOZIPPy
+echo "===================== branch $(git rev-parse --abbrev-ref HEAD) ====================="
+python -m pytest -q -n0 --tb=short "tests/test_set_initval_contract.py::test_nutpie_consumes_the_models_own_start_and_ignores_init_mean" 2>&1 | tail -40
+WT=${TMPDIR:-/tmp}/exozippy_master_wt
+git worktree add -f "$WT" master >/dev/null 2>&1
+cd "$WT"
+echo "===================== master worktree $(git rev-parse --short HEAD) ====================="
+PYTHONPATH="$WT/src" python -c "import exozippy, sys; print('imports from', exozippy.__file__)"
+PYTHONPATH="$WT/src" python -m pytest -q -n0 --tb=short -p no:cacheprovider "tests/test_set_initval_contract.py::test_nutpie_consumes_the_models_own_start_and_ignores_init_mean" 2>&1 | tail -40
+cd $HOME/python/EXOZIPPy && git worktree remove --force "$WT"
+echo "exit $?"

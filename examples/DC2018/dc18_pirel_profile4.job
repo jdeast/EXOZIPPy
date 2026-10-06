@@ -1,0 +1,40 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N pirelprof4
+#$ -o sweep4/dc18_pirel_profile4.$JOB_ID.log
+#
+# 047 on sweep4 (mamajek on the Lens): profile vs marginal along log pi_rel
+# (JDE 2026-09-30).  Sweep4 put 047's lens at 2.1x truth with theta_E right
+# and BOTH distances at truth within 1 sigma: pi_rel = 1/D_l - 1/D_s is
+# their difference, so the question is whether the model's MAXIMUM wants
+# the true pi_rel (-1.82) and the marginal sits at -2.2 through a leftover
+# volume term, or whether the maximum itself sits there -- in which case
+# the bulge-bulge prior in the pi_rel direction is what to look at.
+#   step 1: the marginal density of log_pi_rel from the trace, at the grid
+#   step 2: the profile -- pin log_pi_rel, re-optimize EVERYTHING else
+#           (--vary "."), term by term.  Grid -2.8..-1.0, finer around the
+#           posterior (-2.2) and the truth (-1.82).
+
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_prof4"
+
+cd $HOME/python/EXOZIPPy/examples/DC2018
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)   $(date)"
+GRID=-2.8,-2.6,-2.4,-2.2,-2.0,-1.9,-1.8,-1.7,-1.6,-1.4,-1.2,-1.0
+echo "===================== marginal ====================="
+python dc18_pirel_marginal.py --event 047 --run-dir sweep4/047 --grid=$GRID --truth -1.8196
+echo "===================== profile ====================="
+python dc18_ds_profile.py --event 047 --run-dir sweep4/047 \
+    --pin "mulensevent.log_pi_rel=-2.0" \
+    --grid=$GRID --restarts 2 --maxfev 20000 --vary "." \
+    --report "star.distance,star.logmass,star.radius,star.teff,star.pm_ra,star.pm_dec,star.rv,mulensevent.log_theta_E,mulensevent.mu_ra_rel,mulensevent.mu_dec_rel,mulensevent.mu_rel_mag,mann.absks,mann.mass_pred,mann.radius_pred,mamajek.teff_pred,source.rho,mulensinstrument.q_source,mulensinstrument.zeropoint"
+echo "exit $?   $(date)"

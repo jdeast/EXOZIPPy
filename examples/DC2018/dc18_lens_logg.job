@@ -1,0 +1,16 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 2
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N lenslogg
+#$ -o sweep4/dc18_lens_logg.$JOB_ID.log
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+cd $HOME/python/EXOZIPPy/examples/DC2018
+python dc18_lens_logg.py sweep4/047:047 sweep4/069:069 sweep4/223:223 sweep4/103:103 sweep4/194:194 sweep4/152:152 sweep3/047:047 sweep3/069:069
+echo "exit $?"

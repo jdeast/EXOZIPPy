@@ -57,7 +57,7 @@ parameter_file: "DC2018_128.params.yaml"
 #parameter_file: "DC2018_128.params.2.yaml"
 
 sampler:
-  method: ptde_async      # Differential Evolution + Parallel Tempering (async worker pool)
+  method: ptde          # synchronous PTDE, the recommended default since PR #376 (review 2.4.9): the VBM straggler tail that justified ptde_async is gone
   n_temps: 8              # temperature rungs (EXOFASTv2 parity)
   T_max: 200              # hottest temperature (EXOFASTv2 parity)
   # n_chains: defaults to 2*n_params

@@ -9,7 +9,7 @@
 >
 > Known open items:
 >
-> * The sampler path (`ptde_async`, forced by `finite_source`) is untested on
+> * The sampler path (`ptde`, forced by `finite_source`) is untested on
 >   this event. It is the same path `examples/ob09020` uses.
 > * **`pi_E` -- the quantity this example exists to demonstrate -- is not
 >   recoverable from the shipped data.** The two light curves that cover the
@@ -146,7 +146,7 @@ Two consequences:
 
 * The event goes on the MulensModel Op path
   (`finite_source_LD_Yoo04` inside `+/- 5*rho*t_E` of `t_0`, point source
-  outside). That path has no gradient, so the sampler is `ptde_async` and
+  outside). That path has no gradient, so the sampler is the synchronous `ptde` (the recommended default since PR #376) and
   NUTS is unavailable -- `Lens.sampler_requirements()` will say so if you try.
 * Limb darkening lives *inside* the magnification, and one magnification curve
   is computed per source over every instrument's concatenated times, so a
