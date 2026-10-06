@@ -190,7 +190,16 @@ at factors 3-7 had scored ~2000 proposals without one.  So the config
 also sets `start_dispersion: 3.0`: every rung starts at the T=1
 dispersion that those rungs proved.
 
-Acceptance fit: job 15506690 (64 cores, `n_temps: auto`, no seed polish,
-bounded separations, start dispersion 3.0), started 2026-10-06.  RESULTS:
+**The T_max 200 ladder lives in the kernel's failure tail** (job 15506690):
+with the init fixed the fit sampled, and in its first 70 steps hit a hung
+VBM call 34 times, all on rungs 15-24 of 25 (T above ~25), each costing
+the 10 s `eval_timeout` plus a pool recycle -- two thirds of the wall
+clock.  So the config sets `T_max: 20`: the ladder stops where the hangs
+start, and the start is the scan winner, so deep tempering is not what
+this fit needs.
+
+Acceptance fit: job 15507120 (64 cores, `n_temps: auto`, T_max 20, no seed
+polish, bounded separations, start dispersion 3.0), started 2026-10-06.
+RESULTS:
 (filled in when it lands -- posterior vs Table 2 through the mappings
 above, and the lens masses under the IMF and galactic priors).
