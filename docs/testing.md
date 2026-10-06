@@ -506,12 +506,16 @@ another's 11:
   runs weekly (and on `gh workflow run refresh-durations.yml`): it downloads the latest
   green master run's ubuntu-3.12 transcripts, regenerates the file, and proposes the result
   when the predicted worst shard improves by more than 60 s of wall clock or any test file
-  was absent -- as a pull request if the repository lets Actions open them, otherwise as a
-  pushed branch plus a tracking issue with the one-click compare link. Either way it then
-  dispatches `tests.yml` on the proposal branch itself (`gh workflow run tests.yml --ref`):
-  events raised by `GITHUB_TOKEN` never start workflows, `workflow_dispatch` being the
-  exception, so without that step the auto-PR sits with no checks until a human closes and
-  reopens it -- PR #343 did, on 2026-09-28. Independently,
+  was absent. It pushes and opens the pull request as a GitHub App (variable
+  `DURATIONS_APP_CLIENT_ID`, secret `DURATIONS_APP_PRIVATE_KEY`; setup in the workflow's
+  first step), whose pull_request event starts `tests.yml` like any PR's. Without the App
+  it falls back to `GITHUB_TOKEN`: a pull request if the repository lets Actions open them,
+  otherwise a pushed branch plus a tracking issue with the one-click compare link, and it
+  then dispatches `tests.yml` on the proposal branch itself (`gh workflow run tests.yml
+  --ref`), because events raised by `GITHUB_TOKEN` never start workflows -- PR #343 sat with
+  no checks until a human closed and reopened it (2026-09-28). A `GITHUB_TOKEN` PR is also
+  held by master's ruleset for an approving review (unattributed changes; PR #386,
+  2026-10-05). Independently,
   every pytest job's `pytest_shard.py --verify` reports the weights' age and the absent
   files on its job summary page, and shard 1 of each leg raises a `::warning::` annotation
   when any file is absent (`scripts/pytest_shard.py --balance-json` prints the same
