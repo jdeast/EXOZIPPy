@@ -168,7 +168,12 @@ DE-style proposals around the start, each in a journaling child process):
 4 glibc aborts ("double free or corruption", "corrupted size vs.
 prev_size"), 2 segfaults and 5 hangs (no return in 120 s; typical calls
 take milliseconds).  Every one of the 11 has a companion at s < 0.2 or
-s > 2.4, and all 11 evaluate cleanly under Nopoly.  The sampler's start
+s > 2.4, and all 11 evaluate cleanly under Nopoly -- but Nopoly is no
+escape: the same 6000 proposals under Nopoly fail 13 times (12 segfaults,
+1 hang), all clean under Multipoly, and 12 of the 13 sit inside
+s in [0.4, 2.3] on both companions, where Multipoly failed 0 of 3075.
+The two failure sets are disjoint; the reproducers are in
+`check_vbm_crash_{Multipoly,Nopoly}_1.json`.  The sampler's start
 population is scored serially in the main process with no timeout (review
 2.6.36), so during that phase one such call kills or freezes the fit; the
 second launch (job 15506222) spent 45 minutes there on one core before it
