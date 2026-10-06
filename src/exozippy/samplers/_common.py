@@ -102,6 +102,7 @@ def set_worker_globals(logp_fn, collect_timing=False):
     global _PTDE_LOGP_FN, _PTDE_COLLECT_TIMING
     _PTDE_LOGP_FN = logp_fn
     _PTDE_COLLECT_TIMING = collect_timing
+    reset_logp_reports()
 
 
 class PositionalLogp:
@@ -175,6 +176,39 @@ class PositionalLogp:
 # not emit one log line per proposal.  Per worker process, by construction.
 _LOGP_EXC_SEEN = set()
 
+# Whether this worker has already reported a NaN logp (review 2.4.23).  A
+# one-element list so the reset below can clear it without a `global`.
+_LOGP_NAN_SEEN = [False]
+
+
+def reset_logp_reports():
+    """Forget which logp failures this process has already reported.
+
+    Called by set_worker_globals, i.e. in the PARENT before each pool is
+    forked, so every run's workers start with a clean slate and report their
+    own first failure.  Without it a serial run (the parent IS the worker)
+    or a second sampler in the same process would inherit the previous run's
+    "already said that" state and stay silent about its own failures.
+    """
+    _LOGP_EXC_SEEN.clear()
+    _LOGP_NAN_SEEN[0] = False
+
+
+def format_raw_proposal(proposal):
+    """Short RAW-space rendering of a proposal dict, for a failure log line.
+
+    RAW values: a worker has no raw_to_phys map (that lives on the parent,
+    which is what describe_proposal needs), and a diagnostic that cannot be
+    produced is worth less than one in the wrong coordinates.
+    """
+    try:
+        return ", ".join(
+            f"{k}={np.asarray(v).ravel()[:4]}"
+            for k, v in sorted(proposal.items())
+        )
+    except Exception:  # pragma: no cover - diagnostics must not raise
+        return "<unprintable proposal>"
+
 
 def _report_logp_exception(exc, proposal):
     """Log the first occurrence of each logp exception type in this worker.
@@ -196,17 +230,7 @@ def _report_logp_exception(exc, proposal):
     if key in _LOGP_EXC_SEEN:
         return
     _LOGP_EXC_SEEN.add(key)
-    try:
-        # RAW-space values: the worker has no raw_to_phys map (that lives on
-        # the parent, which is what describe_proposal needs), and a
-        # diagnostic that cannot be produced is worth less than one in the
-        # wrong coordinates.
-        where = ", ".join(
-            f"{k}={np.asarray(v).ravel()[:4]}"
-            for k, v in sorted(proposal.items())
-        )
-    except Exception:  # pragma: no cover - diagnostics must not raise
-        where = "<unprintable proposal>"
+    where = format_raw_proposal(proposal)
     logger.error(
         f"logp evaluation raised {key}: {exc}.  The proposal is being "
         f"REJECTED (logp = -inf), i.e. treated as zero posterior density, "
@@ -217,12 +241,44 @@ def _report_logp_exception(exc, proposal):
     )
 
 
+def _report_logp_nan(proposal):
+    """Log the first NaN logp this worker sees (review 2.4.23).
+
+    A NaN is NOT a hard bound.  -inf is legal -- a proposal outside a prior
+    wall -- and the samplers reject it for free.  A NaN is a model bug: the
+    0*inf / where-trap class (CLAUDE.md), an unguarded sqrt or log, a
+    backend returning garbage.  Every consumer tests `np.isfinite`, so a NaN
+    is rejected exactly like -inf, and before this it was absorbed into the
+    acceptance rate with no log line, no counter and no trace attr -- the
+    same silent truncation _report_logp_exception was written to end, by
+    the one route it did not cover.  The value is still returned as NaN (not
+    rewritten to -inf) so the PARENT can count it: a worker's log is per
+    process and says only its first occurrence, while the parent's count
+    (`n_nan_logp`) reaches the run summary and the trace attrs.  Passing
+    NaN on changes no accept/reject decision and draws no random number
+    (every Metropolis test short-circuits on `np.isfinite` first).
+    """
+    if _LOGP_NAN_SEEN[0]:
+        return
+    _LOGP_NAN_SEEN[0] = True
+    logger.error(
+        f"logp evaluation returned NaN.  A NaN is a model bug (a 0*inf or "
+        f"where-trap, an unguarded sqrt/log), not a bound: the proposal is "
+        f"REJECTED like -inf, so this region is excluded from the posterior "
+        f"rather than explored.  First NaN in this worker; further NaNs are "
+        f"counted (n_nan_logp in the run summary) but not logged.  "
+        f"Proposal: {format_raw_proposal(proposal)}"
+    )
+
+
 def _eval_logp(proposal):
     """Worker: evaluate logp for one raw-space proposal dict.
 
     Returns a bare float normally. When _PTDE_COLLECT_TIMING is set, returns
     (lp, elapsed_seconds) instead (diagnostic mode; see the comment above
-    _PTDE_COLLECT_TIMING).
+    _PTDE_COLLECT_TIMING).  A NaN is reported (first per worker) and passed
+    back AS NaN so the parent can count it (count_nan_logps); an exception
+    is reported and becomes -inf.
     """
     if _PTDE_COLLECT_TIMING:
         t0 = time.perf_counter()
@@ -231,12 +287,22 @@ def _eval_logp(proposal):
         except Exception as exc:
             _report_logp_exception(exc, proposal)
             lp = -np.inf
+        if np.isnan(lp):
+            _report_logp_nan(proposal)
         return lp, time.perf_counter() - t0
     try:
-        return float(_PTDE_LOGP_FN(proposal))
+        lp = float(_PTDE_LOGP_FN(proposal))
     except Exception as exc:
         _report_logp_exception(exc, proposal)
         return -np.inf
+    if np.isnan(lp):
+        _report_logp_nan(proposal)
+    return lp
+
+
+def count_nan_logps(lps):
+    """Number of NaN entries in a batch of bare-float logps (parent side)."""
+    return int(np.count_nonzero(np.isnan(np.asarray(lps, dtype=float))))
 
 
 # ---------------------------------------------------------------------------
@@ -1437,7 +1503,10 @@ def _make_starts(
     factor = min(sqrt(500/n_params), 3), accept any finite logp (no proximity
     threshold), and apply exponential decay only when proposals hit hard prior
     boundaries (lp=-inf).  Raises RuntimeError if a chain cannot be initialized
-    within max_iter retries.
+    within max_iter retries, and ValueError if the logp is NaN AT a seed it
+    evaluates exactly (review 2.4.23: a NaN is a model bug, not a bound, so
+    it is not jittered away); NaN jitter draws are redrawn like bound hits
+    but counted separately and reported at ERROR.
 
     The scatter is delegated to `system.jitter_raw_start` when the system
     provides it, which draws in physical space from a Gaussian truncated to
@@ -1548,6 +1617,14 @@ def _make_starts(
     # chains always get the factor-scaled jitter.
     max_exact = max(1, n_chains // 2)
     n_exact = 0
+    # Rejected jitter draws, by CAUSE (review 2.4.23): -inf is a hard bound
+    # and the retry loop exists for it; NaN is a model bug that the same
+    # loop used to absorb silently, shaping the START population away from
+    # the NaN region with nothing in the log.  Counting either draws no
+    # random number, so a model that never NaNs builds the same starts.
+    n_bound_hits = 0
+    n_nan_hits = 0
+    first_nan = None
     if overdisperse:
         if K > max_exact:
             logger.info(
@@ -1573,6 +1650,19 @@ def _make_starts(
         # every chain does.
         if not overdisperse or (s not in seed_seen and n_exact < max_exact):
             lp0 = float(logp_fn(center))
+            if np.isnan(lp0):
+                # A seed is a point the user or the relaxation engine
+                # CLAIMS is a valid start.  -inf there is a seed outside the
+                # support, which jittering can repair; NaN is the model
+                # failing to evaluate at the claimed start, and jittering
+                # away from it would hide exactly the bug a NaN reports.
+                raise ValueError(
+                    f"{label}: the model's logp is NaN at seed "
+                    f"{seed_indices[s]} exactly (not -inf: this is not a "
+                    f"bound hit but a model that cannot evaluate its own "
+                    f"start -- a 0*inf / where-trap or an unguarded "
+                    f"sqrt/log).  Raw seed: {format_raw_proposal(center)}"
+                )
             if np.isfinite(lp0):
                 starts.append({k: v.copy() for k, v in center.items()})
                 chain_seed_index.append(seed_indices[s])
@@ -1597,6 +1687,12 @@ def _make_starts(
                     for k, v in center.items()
                 }
             lp = float(logp_fn(prop))
+            if np.isnan(lp):
+                n_nan_hits += 1
+                if first_nan is None:
+                    first_nan = prop
+            elif not np.isfinite(lp):
+                n_bound_hits += 1
             if np.isfinite(lp):
                 starts.append(prop)
                 chain_seed_index.append(seed_indices[s])
@@ -1613,10 +1709,29 @@ def _make_starts(
                 )
         else:
             raise RuntimeError(
-                f"PTDE chain {j} initialization failed after {max_iter} retries. "
-                f"Check initval/bounds in your params.yaml -- a parameter may be "
-                f"starting outside its prior bounds."
+                f"PTDE chain {j} initialization failed after {max_iter} retries "
+                f"({n_bound_hits} jitter draws so far hit -inf, {n_nan_hits} "
+                f"returned NaN).  Check initval/bounds in your params.yaml -- a "
+                f"parameter may be starting outside its prior bounds"
+                + (
+                    "; the NaNs are a model bug, not a bound."
+                    if n_nan_hits
+                    else "."
+                )
             )
+    if n_nan_hits:
+        logger.error(
+            f"{label}: {n_nan_hits} jitter draw(s) returned a NaN logp and "
+            f"were redrawn ({n_bound_hits} others hit -inf, i.e. a hard "
+            f"bound).  A NaN is a model bug, not a bound, and redrawing "
+            f"shaped the start population away from that region.  First "
+            f"NaN draw (raw): {format_raw_proposal(first_nan)}"
+        )
+    elif n_bound_hits:
+        logger.debug(
+            f"{label}: {n_bound_hits} jitter draw(s) hit -inf (hard bound) "
+            f"and were redrawn; no NaN."
+        )
     # Over-dispersion is what makes Rhat mean anything; measure it once, on
     # the population that will actually run (review 2.4.5).
     warn_if_starts_underdispersed(starts, scales, label, logger)
@@ -2674,6 +2789,7 @@ def stamp_and_log_run_summary(
     n_temps,
     swap_schedule,
     rate_unit,
+    n_nan_logp,
     extras=(),
 ):
     """Stamp the ladder round-trip attrs and log the one-line run summary.
@@ -2698,6 +2814,20 @@ def stamp_and_log_run_summary(
     """
     idata.posterior.attrs["ptde_ladder_round_trips"] = int(round_trips)
     idata.posterior.attrs["ptde_swap_rounds"] = int(n_swap_rounds)
+    # NaN logps returned over the whole run, every rung, tune included
+    # (review 2.4.23).  Stamped ALWAYS, zero included, so a trace says "this
+    # run saw no NaN" rather than leaving the reader to infer it from an
+    # absent key.  Not in the acceptance rate's denominator any differently
+    # from before: a NaN is still a rejected proposal.
+    idata.posterior.attrs["n_nan_logp"] = int(n_nan_logp)
+    if n_nan_logp:
+        extras = [*extras, f"  nan_logp={int(n_nan_logp)}"]
+        log.error(
+            f"{label}: {int(n_nan_logp)} logp evaluation(s) returned NaN and "
+            f"were rejected as if outside the support.  A NaN is a model "
+            f"bug, not a bound: the posterior is truncated wherever it "
+            f"occurs.  Each worker logged its first NaN proposal above."
+        )
 
     ar_T1 = float(n_accept[0] / max(n_propose[0], 1))
     sr_all = np.asarray(n_swap_accept) / np.maximum(n_swap_propose, 1)

@@ -512,6 +512,45 @@ ruling; re-opening it is its own change. What the polish gained regardless is
 the mid-batch heartbeat (see `run.md`), which needs no timeout to tell
 computing from hung.
 
+## A NaN logp is a model bug, not a rejection (2.4.23, 2.4.22)
+
+`-inf` is legal -- a proposal past a hard prior wall -- and every sampler
+rejects it for free. NaN is the 0*inf / where-trap class (CLAUDE.md). Every
+in-house acceptance test reads `np.isfinite(lp)` first, so a NaN is still
+REJECTED exactly like `-inf` (and, because that test short-circuits, draws no
+random number: a model that never NaNs runs bit-identically to before). What
+changed is that it is no longer silent:
+
+- **`_common._eval_logp` passes NaN back AS NaN** and logs the first one per
+  worker at ERROR with the raw proposal (`_report_logp_nan`, beside
+  `_report_logp_exception`). It is deliberately NOT rewritten to `-inf` in the
+  worker: a worker's log says only its first occurrence, so the COUNT has to
+  be taken in the parent, which can only count what it can see.
+- **Both PTDE loops count in the parent** and stamp `n_nan_logp` on
+  `posterior.attrs` -- ALWAYS, zero included, so a trace says "no NaN" rather
+  than leaving it to be inferred from an absent key -- and add `nan_logp=N`
+  plus an ERROR to the run summary when it is nonzero. The polish counts too
+  and reports at ERROR at its wrap-up. The "already reported" state is reset by
+  `set_worker_globals`, i.e. before every fork, so each run's workers report
+  their own first NaN.
+- **`_make_starts` raises ValueError on a NaN at a seed it evaluates
+  exactly**, naming the seed: `-inf` there is a seed outside the support, which
+  jitter repairs, but NaN is the model failing at its own claimed start, and
+  jittering away would hide the bug. NaN jitter draws are redrawn like bound
+  hits but counted separately and reported at ERROR (they shape the start
+  population away from the NaN region). The polish raises likewise on a NaN at
+  a seed (member 0 is the unjittered seed; a NaN there would freeze the
+  population, since nothing beats NaN in a Metropolis test).
+- **Nested sampling** floors to `-1e300` only for a genuine `-inf` (ultranest
+  asserts finite logl, and `-1e300` is dynesty's own "no likelihood"
+  sentinel). A NaN or an exception is logged at ERROR once per worker, counted
+  in shared counters created before the fork, floored, and stamped as
+  `nested_n_nan` / `nested_n_logp_exceptions`; `+inf` raises. NS is shelved, so
+  a NaN is counted rather than killing a multi-day run -- but it can no longer
+  drop a region from the posterior, logZ and the mode masses unannounced.
+
+Tests: `tests/test_nan_logp.py`.
+
 ## The seed polish is asynchronous on a pool (2.4.14)
 
 `ptde.polish_seed_starts` is the DE engine behind `polish.polish_raw_starts`

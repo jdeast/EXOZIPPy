@@ -387,6 +387,10 @@ def polish_seed_starts(
 
     n_seeds = len(raw_starts)
     n_timeouts = 0
+    # NaN logps the polish saw (review 2.4.23), counted HERE in the parent
+    # for both engines: the workers log their first one, but only the
+    # parent sees them all.
+    n_nan = [0]
 
     # Bound late, not captured: a timeout recycles `pool` into a NEW object
     # and the old one is dead, so `_map = pool.map` would keep calling the
@@ -553,6 +557,18 @@ def polish_seed_starts(
     )
     for s, center in enumerate(raw_starts):
         lps = np.array(flat_lps[s * pop_size : (s + 1) * pop_size])
+        if np.isnan(lps[0]):
+            # Member 0 IS the seed, unjittered.  A NaN there is the model
+            # failing at its own claimed start (not a bound); it would also
+            # become every re-centered member's lp below and freeze the
+            # population, since no Metropolis test against NaN passes.
+            raise ValueError(
+                f"PTDE seed polish: the model's logp is NaN at seed {s} "
+                f"exactly (not -inf: a model bug such as a 0*inf / "
+                f"where-trap, not a bound hit).  Raw seed: "
+                f"{_common.format_raw_proposal(center)}"
+            )
+        n_nan[0] += _common.count_nan_logps(lps)
         # Non-finite members re-center (a jitter may cross a hard bound).
         for i in np.nonzero(~np.isfinite(lps))[0]:
             pops[s][i] = {
@@ -593,6 +609,8 @@ def polish_seed_starts(
         """One Metropolis test for member i of seed s; shared by both engines."""
         st = states[s]
         st["n_prop"] += 1
+        if np.isnan(lp):
+            n_nan[0] += 1
         if np.isfinite(lp) and np.log(rng.random()) < lp - st["lps"][i]:
             if _dist(prop, origins[s]) > radii[s]:
                 n_trust_rej[s] += 1
@@ -802,6 +820,14 @@ def polish_seed_starts(
             f"cannot move a population -- but that part of the surface went "
             f"unexplored, and a hang this repeatable is worth reproducing "
             f"offline."
+        )
+
+    if n_nan[0]:
+        logger.error(
+            f"PTDE seed polish: {n_nan[0]} logp evaluation(s) returned NaN "
+            f"and were rejected as if outside the support.  A NaN is a model "
+            f"bug, not a bound; the polish could not explore that region "
+            f"(each pool worker logged its first NaN proposal)."
         )
 
     polished, dlps = [], []
@@ -1178,6 +1204,7 @@ def ptde_sample(
     actual_draws = 0
     start_time = time.time()
     n_eval_timeouts = 0  # incremented by _eval_logps_safe (nonlocal)
+    n_nan_logp = 0  # NaN logps returned (review 2.4.23); ditto
     rung_times = [
         [] for _ in range(n_temps)
     ]  # per-rung wall times (collect_rung_timing only)
@@ -1206,7 +1233,7 @@ def ptde_sample(
             length/order as `proposals`. When collect_rung_timing is set,
             per-call wall times are attributed to these rungs.
         """
-        nonlocal pool, n_eval_timeouts
+        nonlocal pool, n_eval_timeouts, n_nan_logp
         if eval_timeout is None:
             raw = _map_logp(pool, proposals)
             if collect_rung_timing:
@@ -1217,7 +1244,9 @@ def ptde_sample(
                     rung_step_times.append(
                         (np.array([r[1] for r in raw]), np.array(rungs))
                     )
+                n_nan_logp += _common.count_nan_logps(lps)
                 return lps
+            n_nan_logp += _common.count_nan_logps(raw)
             return raw
 
         lps, timed_out = _map_logp_timeout(pool, proposals, eval_timeout)
@@ -1252,7 +1281,8 @@ def ptde_sample(
                 rung_step_times.append(
                     (np.array([r[1] for r in lps]), np.array(rungs))
                 )
-            return [r[0] for r in lps]
+            lps = [r[0] for r in lps]
+        n_nan_logp += _common.count_nan_logps(lps)
         return lps
 
     _do_convergence = (
@@ -1747,6 +1777,7 @@ def ptde_sample(
             n_temps=n_temps,
             swap_schedule=swap_schedule,
             rate_unit="round",
+            n_nan_logp=n_nan_logp,
             extras=(
                 [f"  eval_timeouts={n_eval_timeouts}"]
                 if n_eval_timeouts

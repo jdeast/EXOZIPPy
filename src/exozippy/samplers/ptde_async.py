@@ -420,6 +420,7 @@ def ptde_async_sample(
     n_hop_accept = [0]
     n_ladder_adapts = [0]  # re-spacing MEASUREMENTS, moved or not
     n_eval_timeouts = [0]
+    n_nan_logp = [0]  # NaN logps returned, every rung (review 2.4.23)
     n_swap_discards = [0]  # in-flight proposals invalidated by a swap
     rung_times = [[] for _ in range(n_temps)]
 
@@ -793,6 +794,10 @@ def ptde_async_sample(
                 rung_times[k].append(elapsed)
             else:
                 lp = result
+            # Counted on arrival, before the swap-discard test: a discarded
+            # evaluation still ran the model, and its NaN is still a bug.
+            if np.isnan(lp):
+                n_nan_logp[0] += 1
 
             if gen_at_submit != state_gen[k][i]:
                 # A swap replaced this slot's state while the proposal was in
@@ -1126,6 +1131,7 @@ def ptde_async_sample(
             n_temps=n_temps,
             swap_schedule=swap_schedule,
             rate_unit="swap",
+            n_nan_logp=n_nan_logp[0],
             extras=_extras,
         ),
         hop_counts=(n_hop_accept[0], n_hop_propose[0]),
