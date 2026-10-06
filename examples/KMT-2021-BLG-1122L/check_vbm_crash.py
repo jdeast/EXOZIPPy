@@ -230,6 +230,8 @@ if __name__ == "__main__":
         )
     else:
         n, seed, workers = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
-        crashes = parent(n, seed, "Multipoly", workers)
+        method = sys.argv[4] if len(sys.argv) > 4 else "Multipoly"
+        other = "Nopoly" if method == "Multipoly" else "Multipoly"
+        crashes = parent(n, seed, method, workers)
         if crashes:
-            retry_under(crashes, seed, "Nopoly")
+            retry_under(crashes, seed, other)

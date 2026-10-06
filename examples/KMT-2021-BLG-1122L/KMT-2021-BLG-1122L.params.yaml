@@ -98,8 +98,20 @@ star.Source.radius:
 # alpha for M3: the M1->M3 axis is rotated by psi from the M1->M2 axis.
 # The scan selects alpha_3 = alpha_2 + psi = 48.68 + 79.24 = 127.92 deg
 # (psi counter-clockwise in the same sense as alpha).
+# BOUNDS on both separations, s in [0.4, 2.3] (published 1.386 +/- 0.027
+# and 1.601 +/- 0.043, both companions near the Einstein ring): VBM's
+# three-body MultiMag2 aborts, segfaults or hangs on ~1.8e-3 of DE-style
+# proposals (check_vbm_crash.py, 11 of 6000), EVERY one of them with a
+# companion at s < 0.2 or s > 2.4, and the sampler's start population is
+# scored serially with no timeout (review 2.6.36), where one such call
+# kills or freezes the fit.  A bounded log_s never reaches the kernel.
+# For LensC (slot 1) the bound goes on log_s itself: the s <-> log_s
+# relation exists for slot 0 only, so an `s:` bound there would be
+# dropped silently (8.6.13).
 lens.LensB.s:
     initval: 1.386
+    lower: 0.4
+    upper: 2.3
 lens.LensB.alpha:
     initval: 48.68
 # LensC is companion SLOT 1: the engine's s <-> log_s and alpha <->
@@ -111,6 +123,8 @@ lens.LensB.alpha:
 # 8.6.13 (per-companion relations) is what would let `s:`/`alpha:` work.
 lens.LensC.log_s:
     initval: 0.204391       # log10(1.601)
+    lower: -0.397940       # log10(0.4)
+    upper: 0.361728        # log10(2.3)
 lens.LensC.xalpha:
     initval: -0.614493      # cos(127.92 deg)
 lens.LensC.yalpha:
