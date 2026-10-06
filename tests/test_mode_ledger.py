@@ -565,3 +565,65 @@ def test_no_ledger_round_trips_as_none_and_a_foreign_blob_raises():
     assert ledger_from_json(ledger_to_json(None)) is None
     with pytest.raises(ValueError, match="SeedRecord fields"):
         ledger_from_json('[{"seed_index": 0}]')
+
+
+def test_matching_without_a_mode_report_raises():
+    """
+    Given a seed ledger and NO mode report,
+    When the seeds are matched,
+    Then it raises instead of returning every seed unmatched -- which is
+      exactly how a REJECTED seed is reported (review 1.11.5).
+    """
+    with pytest.raises(ValueError, match="no mode report"):
+        match_ledger_to_modes(_one_rejected_ledger(), None)
+
+
+def test_no_mode_report_leaves_the_seeds_unclassified(tmp_path):
+    """
+    Given a multi-seed ledger and a trace whose draws are ALL invalid,
+      forced through the gate (the one path that reaches the tables with no
+      mode report),
+    When build_mode_reports runs,
+    Then the modes file says the seeds were NOT classified, and nothing
+      publishes them as rejected: no rejected-modes table, no rejected-seed
+      CSV rows (review 1.11.5).
+    """
+    import arviz as az
+
+    from exozippy.outputs.report_pipeline import build_mode_reports
+
+    class _System:
+        name = "toy"
+
+        def get_all_components(self):
+            return []
+
+        def distribute_posterior(self, idata):
+            pass
+
+    idata = az.from_dict(
+        {
+            "posterior": {"toy.x_raw": np.zeros((2, 50))},
+            "sample_stats": {"lp": np.full((2, 50), np.nan)},
+        }
+    )
+    prefix = tmp_path / "unclassified"
+
+    report = build_mode_reports(
+        _System(),
+        idata,
+        str(prefix),
+        raise_on_invalid=True,
+        force=True,
+        seed_ledger=_one_rejected_ledger(),
+    )
+
+    assert report is None
+    text = (tmp_path / "unclassified_modes.txt").read_text()
+    assert "NOT classified" in text
+    assert "REJECTED" not in text
+    assert not (tmp_path / "unclassified_rejected_modes.tex").exists()
+    assert (
+        "rejected-seed"
+        not in (tmp_path / "unclassified_results.csv").read_text()
+    )

@@ -1221,15 +1221,16 @@ def test_pipeline_reports_all_invalid_without_raising_for_forensics(
     assert r"100.00\%" in template
 
 
-def test_pipeline_unchanged_when_the_mode_pass_fails_for_another_reason(
-    tmp_path, monkeypatch
-):
+def test_a_mode_pass_crash_propagates_from_the_pipeline(tmp_path, monkeypatch):
     """
     Given a mode pass that fails for a reason unrelated to draw validity,
-    When build_mode_reports runs with raise_on_invalid=True,
-    Then it warns, returns None, and writes the combined-posterior tables
-      exactly as before -- no raise, and no <prefix>_modes.txt invented
-      for a state that carries no evidence about the draws.
+    When build_mode_reports runs,
+    Then the error PROPAGATES and no table is written (review 2.11.8).
+
+    It used to be caught and the tables then described the POOLED posterior
+    of a possibly multimodal fit with no caveat anywhere.  This runs after
+    the trace is saved, so the recovery is the code fix plus a
+    `recompute_trace: false` rerun (review 2.14.12).
     """
     import exozippy.outputs.report_pipeline as rp
 
@@ -1237,26 +1238,53 @@ def test_pipeline_unchanged_when_the_mode_pass_fails_for_another_reason(
         raise RuntimeError("clustering exploded")
 
     monkeypatch.setattr(rp, "identify_modes", _boom)
-
     rng = np.random.default_rng(4)
     idata = _make_idata({"a_raw": rng.normal(0, 1, N)}, rng.normal(0, 1, N))
     prefix = tmp_path / "innocent"
-    status = {}
+    system = _PipelineStubSystem()
+
+    with pytest.raises(RuntimeError, match="clustering exploded"):
+        build_mode_reports(
+            system,
+            idata,
+            str(prefix),
+            trace_path=str(prefix) + "_trace.nc",
+            raise_on_invalid=True,
+        )
+
+    assert system.distributed == 0
+    assert not (tmp_path / "innocent_results.csv").exists()
+    assert not (tmp_path / "innocent_definitions.tex").exists()
+
+
+def test_stale_mode_labels_are_dropped_before_distribution(tmp_path):
+    """
+    Given a trace carrying posterior['mode'] from an EARLIER mode pass, and
+      a pass that attaches none of its own (every draw invalid, forced
+      through the gate),
+    When build_mode_reports distributes the posterior,
+    Then the stale labels are gone -- distribute_posterior never applies a
+      different pass's labels to these tables (review 2.11.8).
+    """
+    rng = np.random.default_rng(5)
+    idata = _all_lp_nan_idata(rng)
+    idata.posterior["mode"] = idata.posterior["a_raw"].astype(int) * 0
+    seen = {}
+
+    class _Recorder(_PipelineStubSystem):
+        def distribute_posterior(self, idata):
+            seen["has_mode"] = "mode" in idata.posterior.data_vars
 
     report = build_mode_reports(
-        _PipelineStubSystem(),
+        _Recorder(),
         idata,
-        str(prefix),
-        trace_path=str(prefix) + "_trace.nc",
+        str(tmp_path / "stale"),
         raise_on_invalid=True,
-        mode_status=status,
+        force=True,
     )
 
     assert report is None
-    assert status["state"] == MODE_FAILED
-    assert not (tmp_path / "innocent_modes.txt").exists()
-    assert (tmp_path / "innocent_results.csv").exists()
-    assert (tmp_path / "innocent_definitions.tex").exists()
+    assert seen == {"has_mode": False}
 
 
 def test_pipeline_status_records_a_healthy_mode_pass(tmp_path):

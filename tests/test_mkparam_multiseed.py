@@ -414,45 +414,35 @@ def test_mkparam_force_emits_seeds_and_stamps_the_file(tmp_path, n_seeds):
     assert "source.SourceA.t_0" in params  # seeds were in fact emitted
 
 
-def test_an_ordinary_mode_pass_failure_still_falls_back_unchanged(
-    tmp_path, monkeypatch
-):
+def test_an_ordinary_mode_pass_failure_raises(tmp_path, monkeypatch):
     """
     Given a HEALTHY trace and a mode pass that crashes for an unrelated
       reason,
     When mkparam runs,
-    Then it still emits seeds, byte-identically to the no-crash run.
-
-    The broad "never let mode analysis break seed emission" catch is right
-    and must keep working; only the all-draws-invalid case is carved out of
-    it.
+    Then it RAISES (review 2.3.34, ruled by 2.14.12) -- it used to fall
+      back to unstratified seeds and an unmasked MAP, which can launder a
+      multimodal posterior into one basin and let a runaway draw win
+      seed 0.  The restart file is written after the trace is saved, so the
+      recovery is the fix plus a `recompute_trace: false` rerun.
     """
     import exozippy.outputs.modes as modes_mod
 
     trace_path = _make_trace(tmp_path)
-    control = tmp_path / "control.params.yaml"
-    write_param_file(
-        _config(),
-        base_dir=tmp_path,
-        trace_path=trace_path,
-        output_path=control,
-        n_seeds=4,
-    )
 
     def boom(*args, **kwargs):
         raise RuntimeError("synthetic mode-pass crash")
 
     monkeypatch.setattr(modes_mod, "identify_modes", boom)
     crashed = tmp_path / "crashed.params.yaml"
-    write_param_file(
-        _config(),
-        base_dir=tmp_path,
-        trace_path=trace_path,
-        output_path=crashed,
-        n_seeds=4,
-    )
-
-    assert crashed.read_text() == control.read_text()
+    with pytest.raises(RuntimeError, match="synthetic mode-pass crash"):
+        write_param_file(
+            _config(),
+            base_dir=tmp_path,
+            trace_path=trace_path,
+            output_path=crashed,
+            n_seeds=4,
+        )
+    assert not crashed.exists()
 
 
 def test_a_partially_invalid_trace_is_left_alone(tmp_path):
@@ -563,18 +553,33 @@ def test_map_seed_skips_a_finite_but_invalid_runaway_draw(tmp_path):
     assert seed0 != pytest.approx(2000.0 + t0_raw[1, 3], abs=1e-6)
 
 
-def test_map_ranking_ignores_labels_whose_shape_disagrees_with_lp():
+def test_map_ranking_raises_on_labels_whose_shape_disagrees_with_lp():
     """
     Given a mode report whose labels do not match lp's shape,
     When the MAP is picked,
-    Then the labels are ignored rather than masking the wrong draws.
+    Then it raises naming both shapes (review 2.3.20): identify_modes labels
+      the very (chain, draw) grid whose lp is ranked, so a mismatch is a
+      bug, and ranking UNMASKED let a runaway-lp draw become seed 0.
     """
     from exozippy.mkparam import _map_draw_from_lp
 
     lp = np.array([[1.0, 5.0], [2.0, 3.0]])
     report = type("R", (), {"labels": np.array([-1, -1, -1])})()
 
-    assert _map_draw_from_lp(lp, report) == (0, 1, 5.0)
+    with pytest.raises(ValueError, match=r"\(3,\).*\(2, 2\)"):
+        _map_draw_from_lp(lp, report, {"state": "ok"})
+
+
+def test_map_ranking_never_ranks_unmasked_without_a_report():
+    """
+    Given no mode report for any reason but NO VALID DRAWS,
+    When the MAP is picked,
+    Then it raises rather than ranking every draw (review 2.3.20).
+    """
+    from exozippy.mkparam import _map_draw_from_lp
+
+    with pytest.raises(RuntimeError, match="no mode report"):
+        _map_draw_from_lp(np.zeros((2, 3)), None, {"state": "failed"})
 
 
 def test_map_ranking_returns_none_when_nothing_is_rankable():
@@ -585,5 +590,8 @@ def test_map_ranking_returns_none_when_nothing_is_rankable():
       np.argmax's silent index 0.
     """
     from exozippy.mkparam import _map_draw_from_lp
+    from exozippy.outputs.modes import MODE_NO_VALID_DRAWS
 
-    assert _map_draw_from_lp(np.full((2, 3), np.nan), None) is None
+    # The only None report left: every draw rejected, forced past the gate.
+    status = {"state": MODE_NO_VALID_DRAWS}
+    assert _map_draw_from_lp(np.full((2, 3), np.nan), None, status) is None
