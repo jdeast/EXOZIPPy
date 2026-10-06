@@ -504,3 +504,64 @@ def test_a_non_finite_laplace_weight_is_omitted_not_printed_as_nan(tmp_path):
     assert rows, "the rejected seeds should still be reported"
     weight_col = MODE_COLUMNS.index("weight")
     assert all(r[weight_col] == "" for r in rows)
+
+
+def test_the_ledger_round_trips_through_the_trace_attr_exactly(tmp_path):
+    """
+    Given a measured seed ledger,
+    When it is stamped on a trace as JSON, written to netCDF and read back
+      (what a `recompute_trace: false` rerun does -- review 2.14.12
+      prerequisite 2: that run skips the polish and cannot re-measure),
+    Then every record comes back field for field, arrays with their shape
+      and dtype, and its rendered text is identical.
+    """
+    import arviz as az
+
+    from exozippy.outputs.ledger import ledger_from_json, ledger_to_json
+    from exozippy.trace_meta import SEED_LEDGER_ATTR
+
+    # ARRANGE
+    model, p = _two_basin_model()
+    seeds = [
+        {"toy.x_raw": np.asarray(p.raw_from_initval(np.array([2.0])))},
+        {"toy.x_raw": np.asarray(p.raw_from_initval(np.array([7.0])))},
+    ]
+    ledger = build_seed_ledger(_StubSystem([p]), model, seeds, [0, 1])
+    idata = az.from_dict({"posterior": {"toy.x_raw": np.zeros((2, 5))}})
+    idata.attrs[SEED_LEDGER_ATTR] = ledger_to_json(ledger)
+    path = tmp_path / "trace.nc"
+    idata.to_netcdf(str(path))
+
+    # ACT
+    back = ledger_from_json(az.from_netcdf(str(path)).attrs[SEED_LEDGER_ATTR])
+
+    # ASSERT
+    assert len(back) == len(ledger)
+    for a, b in zip(ledger, back):
+        for name in ("seed_index", "matched_mode", "source"):
+            assert getattr(a, name) == getattr(b, name)
+        for name in ("lp_max", "delta_lp", "laplace_logw", "match_distance"):
+            np.testing.assert_array_equal(getattr(a, name), getattr(b, name))
+        for name in ("raw_point", "raw_scales", "phys", "phys_sigma"):
+            da, db = getattr(a, name), getattr(b, name)
+            assert da.keys() == db.keys()
+            for k in da:
+                assert np.shape(da[k]) == np.shape(db[k])
+                assert np.asarray(da[k]).dtype == np.asarray(db[k]).dtype
+                np.testing.assert_array_equal(da[k], db[k])
+        assert a.sampled_idx == b.sampled_idx
+    assert ledger_to_text(back) == ledger_to_text(ledger)
+
+
+def test_no_ledger_round_trips_as_none_and_a_foreign_blob_raises():
+    """
+    Given "no ledger was built" and a blob this code did not write,
+    When each is decoded,
+    Then the first is None, and the second raises naming the fields --
+      never a partially filled ledger.
+    """
+    from exozippy.outputs.ledger import ledger_from_json, ledger_to_json
+
+    assert ledger_from_json(ledger_to_json(None)) is None
+    with pytest.raises(ValueError, match="SeedRecord fields"):
+        ledger_from_json('[{"seed_index": 0}]')
