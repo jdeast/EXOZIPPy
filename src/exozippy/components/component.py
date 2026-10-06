@@ -389,6 +389,24 @@ class Component(ABC):
         """
         pass
 
+    def revise_after_starts(self, system):
+        """After stage 4: revise the topology once the starts are known.
+
+        A few decisions depend on a START VALUE that exists only after the
+        relaxation engine has run -- the SED cannot know whether a star's
+        data-derived temperature lies inside its bolometric-correction grid
+        until the engine has solved it (review 2.9.15).  Such a component
+        overrides this to make the decision, record it on itself, and return
+        one ``(message, param_paths)`` pair per revision.  ``System.prepare``
+        then runs stage 3 and stage 4 ONCE more for every component, so
+        every reader of the decision (manifests, masks, hints) sees it, and
+        reports each revision loudly and as a solve diagnostic.
+
+        Called exactly once per ``prepare()``; a component that revised must
+        return ``[]`` if asked again.  The default revises nothing.
+        """
+        return []
+
     # Attribute names holding something that BELONGS TO ONE BUILD: a
     # pytensor node the component stashed, or a function compiled against
     # one.  ``System.build_model`` clears every one of them before stage 5,

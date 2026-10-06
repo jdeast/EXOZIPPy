@@ -1113,12 +1113,24 @@ def test_sed_register_parameters_creates_errscale_parameter(minimal_sed_file):
     """
     import pymc as pm
 
-    sed, _ = _make_sed(minimal_sed_file)
+    from exozippy.system import System
+
+    # A real System: register_parameters reads the topology (which stars a
+    # photometric row names, review 2.9.11), so it needs one.
+    system = System(
+        {
+            "star": [{"name": "A", "mist": False}],
+            "sed": {"file": minimal_sed_file, "model_root": str(_MODEL_ROOT)},
+        },
+        {},
+    )
+    system.prepare()
+    sed = system.sed
 
     # ACT
-    sed.register_parameters(system=None)
+    sed.register_parameters(system)
     with pm.Model() as model:
-        sed.add_parameter(model, "errscale", system=None)
+        sed.add_parameter(model, "errscale", system)
 
     # ASSERT
     assert hasattr(sed, "errscale"), (

@@ -131,7 +131,15 @@ def _minimal_sed(tmp_path):
     sed_file.write_text(_MINIMAL_SED_YAML)
     cm = ConfigManager({})
     config = {"file": str(sed_file), "model_root": str(DEFAULT_MODEL_ROOT)}
-    return SED(config, cm), cm
+    sed = SED(config, cm)
+    # _declare_grid_support skips stars whose SED flux nothing reads (their
+    # barrier is lifted, review 2.9.11).  The stand-in system below has no
+    # topology to ask, so every star counts as read -- as the .sed row
+    # makes it in a real one-star system.
+    sed.seen_star_mask = lambda system: np.ones(
+        len(system.star.names), dtype=bool
+    )
+    return sed, cm
 
 
 def _fake_system(loggsed, logmass_init, radiussed_init, star_names=("A",)):

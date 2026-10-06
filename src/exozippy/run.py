@@ -6,6 +6,7 @@ import logging
 import multiprocessing as mp
 import os
 import signal
+import textwrap
 import time
 import traceback
 from pathlib import Path
@@ -2059,6 +2060,15 @@ def inspect_start(
             "Log-Prob for parameters includes summed penalties from bounds and priors."
         )
     )
+    # A component revised the topology once the starts were known (review
+    # 2.9.15: the SED severed a star no grid can host), so the parameter set
+    # below is NOT the one the config describes.  Said in the table's own
+    # caption, where nobody reading the table can miss it.
+    for message, _paths in system.topology_revisions:
+        for line in textwrap.wrap(
+            f"TOPOLOGY REVISED: {message}", max(table_width - 13, 40)
+        ):
+            logger.warning(_banner(line))
     logger.info("-" * table_width)
     logger.info(header)
     logger.info("-" * table_width)

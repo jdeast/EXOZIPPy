@@ -211,6 +211,10 @@ class System(Component):
         # (see register_element_slice_check / verify_element_slices).  Rebuilt
         # per build_model, so a second build on one System cannot accumulate.
         self._element_slice_checks = []
+        # (message, param_paths) per topology revision a component made once
+        # the starts were known (Component.revise_after_starts); filled by
+        # prepare().  Read by the startup table.
+        self.topology_revisions = []
         # Many-to-one parameterizations' alternative branches, declared during
         # stage 7 and marginalized over at the end of it (see
         # register_branch_alternative / _add_branch_mixtures).  Rebuilt per
@@ -371,8 +375,39 @@ class System(Component):
         # built (see _validate_reported_not_consumed).
         self._validate_reported_not_consumed()
 
-        # Stage 4: RECONCILIATION (The Solver)
+        # Stage 4: RECONCILIATION (The Solver).  The snapshot is what a
+        # second solve must start from: finalize_user_params injects its
+        # solved starts back into user_params, so it is not re-entrant
+        # (ConfigManager.snapshot_solve_inputs).
+        solve_inputs = self.config_manager.snapshot_solve_inputs()
         self.config_manager.finalize_user_params()
+
+        # After stage 4: TOPOLOGY REVISIONS that depend on a solved start
+        # (Component.revise_after_starts; today only the SED's no-grid
+        # fallback, review 2.9.15).  Every component is asked -- a list, not
+        # a short-circuiting any(), so none is skipped -- and if any revised,
+        # stages 3 and 4 run once more against the revised topology, from
+        # the pre-solve inputs, so every manifest, mask and hint that read
+        # the decision agrees with it.  A revision is never silent: each one
+        # is logged as a warning and recorded as a solve diagnostic.
+        self.topology_revisions = [
+            rev
+            for comp in self.active_components.values()
+            for rev in comp.revise_after_starts(self)
+        ]
+        if self.topology_revisions:
+            self.config_manager.restore_solve_inputs(solve_inputs)
+            for comp in self.active_components.values():
+                comp.register_parameters(self)
+            self._validate_reported_not_consumed()
+            self.config_manager.finalize_user_params()
+            for message, paths in self.topology_revisions:
+                logger.warning(
+                    f"TOPOLOGY REVISED after the start solve: {message}"
+                )
+                self.config_manager.record_diagnostic(
+                    "warning", message, paths
+                )
 
     def _validate_reported_not_consumed(self):
         """Refuse a manifest where something CONSUMES a reported element.

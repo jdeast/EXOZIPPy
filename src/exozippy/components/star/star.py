@@ -580,8 +580,38 @@ class Star(Component):
 
         return self._user_entry_stars(param, is_constrained)
 
-    def _user_pinned_stars(self, param):
-        """Stars whose ``param`` the user pinned outright (``sigma: 0``)."""
+    def _unread_loggsed_bounds(self, unread):
+        """Manifest options lifting the BC grid's loggsed barrier on the
+        stars whose SED flux nothing reads.
+
+        ``SED._inject_grid_bounds`` bounds ``star.loggsed`` for EVERY star
+        (a 2-part override: the grid is the same for all), and loggsed is
+        derived, so the bound becomes a soft barrier on logmass and
+        radiussed.  On a star the SED never reads that barrier constrains
+        the star's MASS against a grid nothing evaluates for it: with
+        radiussed pinned at an M-dwarf lens's radius, logg passes the
+        NextGen ceiling of 5.0 below ~0.2 Msun and the barrier pushes the
+        lens mass (review 2.9.11's inventory).  So those elements get
+        infinite bounds -- a manifest OPTION, which replaces the resolved
+        bound, with NaN ("keep the resolved element", ``layer_options``)
+        on every read star and wherever the user wrote the bound
+        themselves.
+        """
+        out = {}
+        for field, inf in (("lower", -np.inf), ("upper", np.inf)):
+            wrote = self.user_wrote_field("loggsed", field)
+            out[field] = [
+                inf if (i in unread and not wrote[i]) else np.nan
+                for i in range(self.n_elements)
+            ]
+        return out
+
+    def user_pinned_stars(self, param):
+        """Stars whose ``param`` the user pinned outright (``sigma: 0``).
+
+        Public because ``SED.data_free_inventory`` counts the free
+        photometric coordinates with it (review 2.9.11).
+        """
 
         def is_pin(entry):
             sigma = entry.get("sigma")
@@ -593,7 +623,7 @@ class Star(Component):
         """Stars whose most specific params-file entry satisfies ``predicate``.
 
         The one lookup behind ``_user_prior_stars`` and
-        ``_user_pinned_stars``, so the two cannot disagree about which entry
+        ``user_pinned_stars``, so the two cannot disagree about which entry
         they are reading.  Most specific spelling wins, as everywhere else,
         which is why this stops at the first hit rather than unioning the
         three (contrast ``Parameter._user_constraint_fields``, whose union is
@@ -692,7 +722,7 @@ class Star(Component):
         # radius themselves.  Telling them it is degenerate and offering to
         # let them constrain it is exactly the "warning people learn to
         # ignore" this codebase avoids elsewhere.
-        others |= set(self._user_pinned_stars("radius"))
+        others |= set(self.user_pinned_stars("radius"))
         degenerate = sorted(radius_readers - others)
         if not degenerate:
             return
@@ -1036,34 +1066,42 @@ class Star(Component):
                     "fbolsed": "default",
                 }
             )
-            # The SED-side parameters of a star the SED never predicts a flux
-            # for (see `structure_consumers` and `SED.seen_star_mask`): av,
-            # teffsed and radiussed are read by nothing at all on such a
-            # star -- the SED's own floors are masked to the stars it reads
-            # -- so they are pinned through the opt-in overrides channel (a
-            # params entry with a prior still frees one).  radius, teff and
-            # feh are NOT pinned here: they take the structural inactive tier
-            # via `_apply_structure_activity`, exactly as for a star with no
-            # SED at all, and stay active wherever a relation (mann, torres,
+            # The SED-side parameters of a star whose SED flux nothing reads
+            # (see `structure_consumers` and `SED.data_free_inventory`):
+            # the SED's STAR_KNOBS (av, teffsed, radiussed) are read by
+            # nothing at all on such a star -- the SED's own floors are
+            # masked to the stars it reads -- so they are pinned through the
+            # opt-in overrides channel (a params entry with a prior still
+            # frees one).  radius, teff and feh are NOT pinned here: they
+            # take the structural inactive tier via
+            # `_apply_structure_activity`, exactly as for a star with no SED
+            # at all, and stay active wherever a relation (mann, torres,
             # mamajek) or the user reads them.
             sed_comp = in_topology(system, "sed")
-            seen_fn = getattr(sed_comp, "seen_star_mask", None)
-            if callable(seen_fn):
-                seen = np.asarray(seen_fn(system), dtype=bool)
-                pin = pin_unselected(self.n_elements, seen)
-                if pin:
-                    for key in ("av", "radiussed", "teffsed"):
+            inventory_fn = getattr(sed_comp, "data_free_inventory", None)
+            if callable(inventory_fn):
+                inv = inventory_fn(system)
+                unread = list(inv.unread_stars)
+                if unread:
+                    seen = [i not in unread for i in range(self.n_elements)]
+                    pin = pin_unselected(self.n_elements, seen)
+                    for key in inv.star_knobs:
                         self.manifest[key] = merge_options(
                             self.manifest.get(key), **pin
                         )
-                    unseen = [nm for nm, ok in zip(self.names, seen) if not ok]
+                    self.manifest["loggsed"] = merge_options(
+                        self.manifest["loggsed"],
+                        **self._unread_loggsed_bounds(unread),
+                    )
+                    names = ", ".join(self.names[i] for i in unread)
                     logger.info(
-                        f"[{self.prefix}] the SED predicts no flux for "
-                        f"{', '.join(unseen)}: av/teffsed/radiussed pinned "
-                        f"(radius/teff/feh follow the structure-activity "
-                        f"rule; mass, distance and proper motion stay). An "
-                        f"SED row, sed_constrains_blend on a light curve, or "
-                        f"a params prior frees one."
+                        f"[{self.prefix}] nothing reads the SED flux of "
+                        f"{names}: {'/'.join(inv.star_knobs)} pinned and "
+                        f"the BC grid's loggsed barrier lifted (radius/teff/"
+                        f"feh follow the structure-activity rule; mass, "
+                        f"distance and proper motion stay). An SED row, a "
+                        f"stated zeropoint tie or sed_constrains_blend on a "
+                        f"light curve, or a params prior frees one."
                     )
         # An evolutionary model indexes a track by (initial metallicity, EEP)
         # and reads off the present-day age; all three are declared here, per

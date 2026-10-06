@@ -42,6 +42,7 @@ class _Sys:
         self.config_manager = config_manager
         self.user_params = config_manager.user_params
         self._params = params
+        self.topology_revisions = []  # set by System.prepare
 
     def get_all_parameters(self):
         return self._params

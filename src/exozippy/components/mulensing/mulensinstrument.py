@@ -1396,29 +1396,18 @@ class MulensInstrument(Instrument):
                 )
 
         # Map each instrument to a Band instance by name.
-        band_names = [c.get("band", None) for c in self.config]
+        self.band_map = self._band_indices(system)
         if hasattr(system, "band"):
-            name_to_idx = {name: i for i, name in enumerate(system.band.names)}
-            self.band_map = np.array(
-                [
-                    (
-                        name_to_idx[n]
-                        if (n is not None and n in name_to_idx)
-                        else -1
-                    )
-                    for n in band_names
-                ],
-                dtype=int,
-            )
+            band_names = [c.get("band", None) for c in self.config]
             missing = [
-                n for n in band_names if n is not None and n not in name_to_idx
+                n
+                for n in band_names
+                if n is not None and n not in system.band.names
             ]
             for n in missing:
                 logger.warning(
                     f"Instrument references unknown band '{n}'; LD will be skipped."
                 )
-        else:
-            self.band_map = np.full(self.n_elements, -1, dtype=int)
 
         # SED-tied photometric zeropoint, one per light curve.  Declared only
         # where there is an SED to tie to; it is DERIVED (see the defaults.yaml
@@ -1441,10 +1430,9 @@ class MulensInstrument(Instrument):
         # reported the prior center, i.e. the defaults.yaml 0.0 for a config
         # that stated none.
         if hasattr(system, "sed"):
-            filter_keys = self._sed_filter_keys(system)
-            has_pred = np.array([fk is not None for fk in filter_keys])
+            has_pred = self.sed_prediction_mask(system)
             self._resolve_zeropoint_systems(system)
-            self._zp_tied = self._check_zeropoint_entries(has_pred)
+            self._zp_tied = self._check_zeropoint_entries(system)
             qualifier = [m or "" for m in self.zp_magsys]
             if np.all(has_pred):
                 self.manifest["zeropoint"] = {
@@ -1987,8 +1975,9 @@ class MulensInstrument(Instrument):
             return cached
         sed = system.sed
         keys = [None] * self.n_elements
+        band_map = self._band_indices(system)
         for i, name in enumerate(self.names):
-            band_idx = int(self.band_map[i])
+            band_idx = int(band_map[i])
             if band_idx < 0:
                 logger.info(
                     f"mulensinstrument {name}: no band reference; skipping "
@@ -2006,6 +1995,59 @@ class MulensInstrument(Instrument):
             keys[i] = filter_key
         self._sed_filter_key_cache = keys
         return keys
+
+    def _band_indices(self, system):
+        """Per light curve, the index of its ``band:`` block, -1 where none.
+
+        A pure function of the raw config and the Band component's names
+        (set in its ``__init__``), so it is safe at any stage: the SED asks
+        through ``sed_tie_mask`` while the STAR registers (stage 3), and
+        component order within stage 3 is not guaranteed -- this
+        component's ``band_map`` may not exist yet.
+        """
+        if not hasattr(system, "band"):
+            return np.full(self.n_elements, -1, dtype=int)
+        name_to_idx = {name: i for i, name in enumerate(system.band.names)}
+        return np.array(
+            [name_to_idx.get(c.get("band"), -1) for c in self.config],
+            dtype=int,
+        )
+
+    def sed_prediction_mask(self, system):
+        """Per light curve: does the SED predict a magnitude in its band?
+
+        True where the light curve names a ``band:`` whose filter is in the
+        SED's BC grid AND the SED can predict the source at all -- not when
+        a source star was severed by the no-grid fallback
+        (``SED.revise_after_starts``, review 2.9.15).  These are the
+        elements whose zeropoint exists.
+        """
+        hostable = system.sed.can_predict(self._sed_source_indices(system))
+        return np.array(
+            [
+                hostable and fk is not None
+                for fk in self._sed_filter_keys(system)
+            ],
+            dtype=bool,
+        )
+
+    def sed_tie_mask(self, system):
+        """Per light curve: is f_source TIED to the SED-predicted source
+        magnitude?
+
+        The zeropoint tie applies exactly where there is a prediction AND
+        the user stated the calibration with both ``mu`` and ``sigma``
+        (review 2.2.21: no default).  Where it does not, nothing in the
+        likelihood reads the source's predicted flux through this light
+        curve -- the zeropoint is only reported -- which is what
+        ``SED.photometric_readers`` needs to know (review 2.9.11).
+        Read-only and stage-safe (see ``_band_indices``).
+        """
+        return (
+            self.sed_prediction_mask(system)
+            & self._user_states("mu")
+            & self._user_states("sigma")
+        )
 
     def _resolve_zeropoint_systems(self, system):
         """Stage 3: each light curve's zeropoint magnitude system (#313).
@@ -2077,7 +2119,7 @@ class MulensInstrument(Instrument):
                     stated[i] = True
         return stated
 
-    def _check_zeropoint_entries(self, has_pred):
+    def _check_zeropoint_entries(self, system):
         """Stage 3: the zeropoint tie is the USER's statement, or nothing.
 
         Review 2.2.21 (JDE 2026-09-30): "the user should specify a zero
@@ -2095,9 +2137,9 @@ class MulensInstrument(Instrument):
           refused by ``config.validate_sigma_has_center``).
         * ``sigma: 0`` still raises, in ``_zeropoint_context``.
 
-        Returns the per-light-curve tie mask (prediction AND mu AND sigma),
-        which ``_seed_source_star_from_flux`` reads: a zeropoint nobody
-        stated says nothing about the source's magnitude.
+        Returns the per-light-curve tie mask (prediction AND mu AND sigma,
+        ``sed_tie_mask``), which ``_seed_source_star_from_flux`` reads: a
+        zeropoint nobody stated says nothing about the source's magnitude.
         """
         wrote_init = self.user_wrote_field("zeropoint", "initval")
         if np.any(wrote_init):
@@ -2123,7 +2165,8 @@ class MulensInstrument(Instrument):
                     f"trust the calibration, in mag) to tie f_source to the "
                     f"SED-predicted source magnitude."
                 )
-        tied = np.asarray(has_pred, dtype=bool) & has_mu & has_sigma
+        has_pred = self.sed_prediction_mask(system)
+        tied = self.sed_tie_mask(system)
         for i, name in enumerate(self.names):
             if has_pred[i] and not tied[i]:
                 logger.info(
@@ -2175,7 +2218,7 @@ class MulensInstrument(Instrument):
         the sliced expression never reads.
         """
         source_indices = self._sed_source_indices(system)
-        filter_keys = self._sed_filter_keys(system)
+        has_pred = self.sed_prediction_mask(system)
 
         zp_cfg = self.config_manager.resolve(
             self.prefix,
@@ -2192,7 +2235,7 @@ class MulensInstrument(Instrument):
 
         m_pred = []
         for i, name in enumerate(self.names):
-            if filter_keys[i] is None:
+            if not has_pred[i]:
                 m_pred.append(pt.constant(0.0))
                 continue
             if zp_sigma[i] == 0:
@@ -2263,11 +2306,11 @@ class MulensInstrument(Instrument):
         source_indices = self._sed_source_indices(system)
         n_stars = system.star.n_elements
         other_indices = [i for i in range(n_stars) if i not in source_indices]
-        filter_keys = self._sed_filter_keys(system)
+        has_pred = self.sed_prediction_mask(system)
         self._add_zeropoint_prose(system)
 
         for i, name in enumerate(self.names):
-            if filter_keys[i] is None:
+            if not has_pred[i]:
                 continue
             if not self.config[i].get("sed_constrains_blend", False):
                 continue
@@ -2276,6 +2319,11 @@ class MulensInstrument(Instrument):
                     f"mulensinstrument {name}: sed_constrains_blend is "
                     f"set but every modeled star is a source; skipping."
                 )
+                continue
+            if not system.sed.can_predict(other_indices):
+                # A non-source star the no-grid fallback severed (review
+                # 2.9.15): no prediction for the blend, so no tie.  The
+                # SED's own revision message says so at startup.
                 continue
             blend_sigma = float(self.config[i].get("sed_blend_sigma", 0.2))
             m_blend_pred = self._predicted_mag_on_zp_system(

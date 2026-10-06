@@ -3,6 +3,7 @@ import importlib.util
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import astropy.units as u
@@ -16,7 +17,11 @@ import yaml
 from matplotlib.legend_handler import HandlerTuple
 from matplotlib.lines import Line2D
 
-from exozippy.components.component import Component, resolve_star_ref
+from exozippy.components.component import (
+    Component,
+    in_topology,
+    resolve_star_ref,
+)
 from exozippy.components.parameter import Parameter
 from exozippy.constants import ANG_TO_MICRON_CONST, LOGG_CONST
 from exozippy.outputs.prose import get_collector
@@ -48,6 +53,70 @@ from .magsys import (
 from .physics import *
 
 logger = logging.getLogger(__name__)
+
+#: The label every SED photometry row registers under (``photometric_readers``).
+SED_ROW = "sed photometry"
+
+
+@dataclass(frozen=True)
+class SEDReader:
+    """One likelihood term that reads star ``star``'s SED-predicted flux."""
+
+    label: str
+    star: int
+
+
+@dataclass(frozen=True)
+class DataFreeInventory:
+    """What this SED's data can and cannot constrain (reviews 2.9.11/2.9.15).
+
+    Derived from the topology by ``SED.data_free_inventory`` -- from who
+    READS each star's predicted flux, not from a hand-kept list of
+    configurations -- so the errscale pin, the unseen-star pins and the
+    no-grid fallback all ask one question and cannot disagree.
+
+    ``n_rows``       usable photometric rows (the ``.sed`` file's filters).
+    ``n_free``       free SED parameters those rows must determine: errscale
+                     plus, per star a row names, its free photometric
+                     coordinates (``SED.PHOTOMETRIC_DOF``).
+    ``readers``      star index -> labels of the terms that read its flux.
+    ``severed``      stars no BC grid can host, cut from the SED (2.9.15).
+    ``star_knobs``   the star parameters that exist only as inputs to the
+                     SED forward model (``SED.STAR_KNOBS``).
+    """
+
+    n_rows: int
+    n_free: int
+    readers: dict
+    severed: tuple
+    star_knobs: tuple
+
+    @property
+    def pin_errscale(self):
+        """Too few rows to fit an error scale beside the stars (JDE
+        2026-09-10: "if we only have two (or 1?) band and we're fitting an
+        errscale, we don't have enough dof ... pin errscale to 1")."""
+        return self.n_rows < self.n_free
+
+    @property
+    def unread_stars(self):
+        """Stars whose SED flux no likelihood term reads."""
+        return tuple(i for i, labels in self.readers.items() if not labels)
+
+    @property
+    def data_free(self):
+        """{parameter path: element indices} of SED knobs NO data reads.
+
+        ``sed.errscale`` with no photometric row (nothing reads it at all),
+        and each ``STAR_KNOBS`` parameter on every unread star.  A star's
+        radius/teff/feh are not listed: they stay wherever a relation, a
+        track or a user prior reads them, which is ``Star``'s
+        structure-activity rule to decide.
+        """
+        out = {"sed.errscale": (0,) if self.n_rows == 0 else ()}
+        for knob in self.star_knobs:
+            out[f"star.{knob}"] = self.unread_stars
+        return out
 
 
 def load_model_plot_module(plot_path: Path, model: str):
@@ -238,6 +307,11 @@ class SED(Component):
         # ARE the grid's extent; published by grid_bound_paths().  Empty
         # until _inject_grid_bounds fills it (no grid, no claim).
         self._grid_bound_paths = {}
+        # Stars no BC grid can host, cut from the SED by the no-grid
+        # fallback (revise_after_starts, review 2.9.15).  Empty unless the
+        # fallback fired; every reader of a predicted flux asks
+        # can_predict() rather than this set.
+        self.severed_stars = frozenset()
         self._inject_grid_bounds()
 
     # ------------------------------------------------------------------
@@ -454,6 +528,35 @@ class SED(Component):
     def register_parameters(self, system):
         # in future could foresee doing per facility error scaling
         self.manifest = {"errscale": None}
+
+        # errscale multiplies the photometric errors, so it is identified
+        # only by the residual scatter of rows the stars' own parameters
+        # have not absorbed.  With fewer rows than free SED parameters there
+        # is no such scatter -- and with none at all (`filters: []`, the
+        # DC2018 sweep shape) nothing reads errscale and it sampled its
+        # U(0.001, 1000) prior: the "500x errscale inflation" once read off
+        # those fits was this (review 2.9.11).  So it is pinned at 1.0
+        # through the overrides channel, which layers UNDER the params file:
+        # a user who states errscale still wins.
+        inv = self.data_free_inventory(system)
+        if inv.pin_errscale:
+            self.manifest["errscale"] = {
+                "overrides": {"sigma": [0.0], "initval": [1.0]}
+            }
+            why = (
+                "no photometric rows, so nothing reads it"
+                if inv.n_rows == 0
+                else f"{inv.n_rows} photometric row(s) against {inv.n_free} "
+                f"free SED parameters (errscale + "
+                f"{inv.n_free - 1} stellar), so the rows leave no residual "
+                f"scatter to measure it from"
+            )
+            log = logger.info if inv.n_rows == 0 else logger.warning
+            log(
+                f"[{self.prefix}] errscale pinned at 1.0: {why}. Give "
+                f"'sed.errscale' a prior or bounds in the params file to fit "
+                f"it anyway."
+            )
 
     # ------------------------------------------------------------------
     # 2) load_data — parse .sed file and build one BC interpolator
@@ -1032,47 +1135,72 @@ class SED(Component):
         except KeyError:
             return False
 
-    def seen_star_mask(self, system):
-        """Which stars some likelihood term actually SEES through the SED.
+    # The star parameters that exist ONLY as inputs to this component's
+    # forward model: Star declares them inside its `sed` branch and nothing
+    # else reads them, so on a star whose SED flux nothing reads they are
+    # read by nothing at all (Star pins them there).  The rest of what the
+    # forward model reads (_STAR_NODE_DEPS) has other readers: feh is
+    # Star's structure-activity question, distance and logmass belong to
+    # the galactic model, the IMF and the kinematics.
+    STAR_KNOBS = ("av", "radiussed", "teffsed")
 
-        A star is photometrically seen when at least one of these reads its
-        SED flux:
+    # Per star, what a set of photometric rows has to determine before an
+    # error scale can be measured from what is left: the BC grid's three
+    # SAMPLED axes (the three _inject_grid_bounds bounds hard) and one flux
+    # scale (radiussed -- distance is exactly degenerate with it in the
+    # photometry, so the two count once).  loggsed is derived, and logmass
+    # reaches the magnitudes only through it, where the BCs barely move.
+    PHOTOMETRIC_DOF = ("teffsed", "feh", "av", "radiussed")
+
+    def photometric_readers(self, system):
+        """Every likelihood term that reads a star's SED-predicted flux.
+
+        THE single readership predicate for this component, in the shape of
+        ``Star.structure_consumers`` and ``Band.ld_consumers``: one list of
+        ``SEDReader(label, star)``, from which ``seen_star_mask`` and
+        ``data_free_inventory`` are both derived.  A star is read when:
 
           * an SED filter row names it (``blend_matrix`` column non-zero);
-          * it is a microlensing source body -- its flux is tied to the
-            light curve's f_source through the zeropoint;
-          * a microlensing light curve carries ``sed_constrains_blend: true``,
-            which ties f_blend to every NON-source star (the blend must
-            contain at least the lens's light);
-          * a transit references a band the grid has (the dilution reads the
-            host's flux fraction against every other star -- conservatively,
-            every star);
+          * a microlensing light curve TIES its source flux to the SED --
+            a prediction in its band AND a user-stated zeropoint ``mu`` and
+            ``sigma`` (``MulensInstrument.sed_tie_mask``).  With no stated
+            tie the zeropoint is only reported, so nothing reads the
+            source's flux through it (review 2.9.11; until then every
+            source counted as read);
+          * a light curve with a prediction carries
+            ``sed_constrains_blend: true``: f_blend is tied to the
+            non-source stars' predicted flux through the zeropoint, which
+            reads the source's too -- so every star;
+          * a transit references a band (the dilution reads the host's flux
+            fraction against every other star -- conservatively, every
+            star);
           * an absolute-astrometry instrument references a band (photocenter
             fluxfrac: host and companion -- conservatively, every star).
 
-        Every other star's SED-side parameters (av, teffsed, radiussed) are
-        read by nothing at all, and its radius/teff/feh only by whatever
-        relation or user prior names it.  ``Star`` pins the SED-side trio for
-        the unseen stars (opt-in pin, a params entry still frees one) and
-        marks this component as reading only the seen stars, so their
-        radius/teff/feh take the structural inactive tier unless a relation
-        reads them.  Why it matters: a lens no photometric term sees keeps a
-        free teff whose only constraint is a Ks tie -- Ks is a weak
-        thermometer for a hot star -- so its posterior width grows with the
-        lens mass and marginalizing over it tilts pi_rel low (the DC2018
-        sweep2 lens masses came out 2-5x high; notes 2026-09-25/27).  The
-        floors below are masked to the same stars.
+        Why it matters: a lens no photometric term sees keeps a free teff
+        whose only constraint is a Ks tie -- Ks is a weak thermometer for a
+        hot star -- so its posterior width grows with the lens mass and
+        marginalizing over it tilts pi_rel low (the DC2018 sweep2 lens
+        masses came out 2-5x high; star.md, "Photometrically unseen
+        stars").
 
         Reads raw configs where the parsed maps may not exist yet (this is
         called at stage 3, and other components' build_maps ordering is not
-        guaranteed) -- the same ruling as ``Band.ld_consumers``.
+        guaranteed) -- the same ruling as ``Band.ld_consumers``.  A
+        ``mulensinstrument`` block no component backs (a premature block)
+        is answered conservatively: its source read, its blend tie as
+        configured.
         """
-        from ..component import in_topology
-
         star = system.star
         n = int(star.n_elements)
         names = list(getattr(star, "names", None) or [])
-        seen = np.zeros(n, dtype=bool)
+        out = []
+
+        def _mark(label, stars):
+            for i in stars:
+                i = int(i)
+                if 0 <= i < n:
+                    out.append(SEDReader(label, i))
 
         def _cfgs(comp):
             if comp is None:
@@ -1090,12 +1218,12 @@ class SED(Component):
             except Exception:  # noqa: BLE001 -- an unresolvable body is not ours to diagnose here
                 return None
 
-        # 1. SED filter rows.
-        bm = getattr(self, "blend_matrix", None)
-        if bm is not None and np.size(bm):
-            seen |= (np.asarray(bm) != 0).any(axis=0)
+        # 1. SED filter rows (blend_matrix is built in load_data, stage 1).
+        bm = np.asarray(self.blend_matrix)
+        if bm.size:
+            _mark(SED_ROW, np.nonzero((bm != 0).any(axis=0))[0])
 
-        # 2. microlensing sources, 3. blend-tied light curves.
+        # 2. microlensing source ties, 3. blend-tied light curves.
         src = in_topology(system, "source")
         src_idx = []
         smap = getattr(src, "star_map", None)
@@ -1106,27 +1234,248 @@ class SED(Component):
                 i = _star_index(c.get("body"))
                 if i is not None:
                     src_idx.append(i)
-        for i in src_idx:
-            if 0 <= i < n:
-                seen[i] = True
-        insts = _cfgs(in_topology(system, "mulensinstrument"))
-        if src_idx and any(
-            bool(c.get("sed_constrains_blend", False)) for c in insts
-        ):
-            for i in range(n):
-                if i not in src_idx:
-                    seen[i] = True
+        mi = in_topology(system, "mulensinstrument")
+        if isinstance(mi, Component):
+            tied = mi.sed_tie_mask(system)
+            pred = mi.sed_prediction_mask(system)
+            # A severed star (revise_after_starts) has no prediction, so a
+            # tie that needs one is dropped: the zeropoint where a SOURCE is
+            # severed (sed_prediction_mask already says so), the blend tie
+            # where a NON-source is.
+            others = [i for i in range(n) if i not in src_idx]
+            blend_ok = self.can_predict(others)
+            for i, (c, lc) in enumerate(zip(mi.config, mi.names)):
+                if tied[i]:
+                    _mark(f"zeropoint tie ({lc})", src_idx)
+                if (
+                    pred[i]
+                    and blend_ok
+                    and src_idx
+                    and c.get("sed_constrains_blend", False)
+                ):
+                    _mark(f"blend tie ({lc})", range(n))
+        elif mi is not None:
+            _mark("mulensinstrument", src_idx)
+            if src_idx and any(
+                bool(c.get("sed_constrains_blend", False)) for c in _cfgs(mi)
+            ):
+                _mark("blend tie", range(n))
 
         # 4. transit dilution, 5. absolute astrometry: conservative.
         if in_topology(system, "band") is not None:
             if _cfgs(in_topology(system, "transit")):
-                seen[:] = True
+                _mark("transit dilution", range(n))
             if any(
                 "band" in c
                 for c in _cfgs(in_topology(system, "astrometryinstrument"))
             ):
-                seen[:] = True
+                _mark("astrometric fluxfrac", range(n))
+        return out
+
+    def seen_star_mask(self, system):
+        """Which stars some likelihood term actually SEES through the SED.
+
+        True where ``photometric_readers`` names the star.  Every other
+        star's SED-side parameters (``STAR_KNOBS``) are read by nothing at
+        all, and its radius/teff/feh only by whatever relation or user prior
+        names it.  ``Star`` pins the SED-side knobs for the unseen stars
+        (opt-in pin, a params entry still frees one) and marks this
+        component as reading only the seen stars, so their radius/teff/feh
+        take the structural inactive tier unless a relation reads them.
+        The floors below are masked to the same stars.
+        """
+        seen = np.zeros(int(system.star.n_elements), dtype=bool)
+        for r in self.photometric_readers(system):
+            seen[r.star] = True
         return seen
+
+    def data_free_inventory(self, system):
+        """The SED knobs no data constrains, derived from the topology.
+
+        One answer shared by every consumer (reviews 2.9.11, 2.9.15):
+        ``register_parameters`` pins errscale from it, ``Star`` pins the
+        ``STAR_KNOBS`` of the unread stars and lets their structure fall to
+        the inactive tier, and the no-grid fallback severs a star by
+        removing it from the readers -- after which the same inventory says
+        what severing left unconstrained.  See ``DataFreeInventory``.
+
+        ``n_free`` counts, for each star a photometric row names, the
+        ``PHOTOMETRIC_DOF`` coordinates the user has not pinned
+        (``sigma: 0``), plus errscale itself.  A coordinate with a prior
+        still counts: the rule is JDE's "fewer usable photometric rows than
+        free SED parameters", not an information count.
+        """
+        readers = self.photometric_readers(system)
+        n = int(system.star.n_elements)
+        read_by = {i: [] for i in range(n)}
+        for r in readers:
+            if r.label not in read_by[r.star]:
+                read_by[r.star].append(r.label)
+        row_stars = sorted({r.star for r in readers if r.label == SED_ROW})
+        pinned = {
+            p: set(system.star.user_pinned_stars(p))
+            for p in self.PHOTOMETRIC_DOF
+        }
+        n_free = 1 + sum(
+            1
+            for s in row_stars
+            for p in self.PHOTOMETRIC_DOF
+            if s not in pinned[p]
+        )
+        return DataFreeInventory(
+            n_rows=int(self.nfilters),
+            n_free=n_free,
+            readers={i: tuple(v) for i, v in read_by.items()},
+            severed=tuple(sorted(self.severed_stars)),
+            star_knobs=self.STAR_KNOBS,
+        )
+
+    def can_predict(self, star_indices):
+        """Can this SED predict the (blended) flux of ``star_indices``?
+
+        False when any of them was severed by the no-grid fallback
+        (``revise_after_starts``): its bolometric corrections would be the
+        grid's edge cell extrapolated, and no grid hosts it.
+        """
+        return not (set(int(i) for i in star_indices) & self.severed_stars)
+
+    # The BC grid's SAMPLED axes: two finite grid-extent bounds put each on
+    # the logit transform, so the grid box IS its support and a start outside
+    # it has no raw coordinate (Parameter.build_pymc refuses it).  loggsed,
+    # the fourth axis, is derived and only soft-bounded, so an off-grid
+    # loggsed start is a warning (_declare_grid_support), not a reason to
+    # sever.
+    _SAMPLED_GRID_AXES = ("teffsed", "feh", "av")
+
+    # Readers whose link to a star the fallback may cut: a cross-component
+    # TIE (one prior term each), not the SED's own photometry.
+    _SEVERABLE_READERS = ("zeropoint tie", "blend tie")
+
+    def revise_after_starts(self, system):
+        """The no-grid fallback (review 2.9.15): SEVER a star no BC grid
+        can host, and drop what severing leaves unconstrained.
+
+        Runs after stage 4, the first point at which a data-derived start
+        exists (Component.revise_after_starts).  A star the SED reads whose
+        solved start lies outside the grid box on a sampled axis
+        (``_SAMPLED_GRID_AXES``) has no raw coordinate on that axis, so the
+        build would refuse it.  JDE's ruling on 2.9.13 stands -- "raising is
+        the right move when we try to include the SED but we have no grid for
+        it" -- so where SED PHOTOMETRY (or a transit dilution or astrometric
+        fluxfrac) reads the star, nothing is severed and the build raises as
+        before.  Where the star is read only through a cross-component TIE
+        (the microlensing zeropoint and blend ties, ``_SEVERABLE_READERS``),
+        the SED is not what the fit is about, and the fallback applies:
+
+          * the star joins ``severed_stars``; ``can_predict`` then refuses
+            it, so the ties that need its flux are dropped -- a severed
+            SOURCE has no zeropoint tie on any light curve (its zeropoint
+            element is inactive, the user's prior on it unused), a severed
+            non-source no blend tie;
+          * what that leaves unread is exactly ``data_free_inventory``'s
+            answer, so the second registration pass pins its ``STAR_KNOBS``
+            (Star's unread-star pin, which also lifts its loggsed barrier)
+            and lets radius/teff/feh fall to the inactive tier unless a
+            relation, a track or a user prior reads them -- the light
+            curve's own constraints (rho, and through star_constrains_rho
+            the source radius) are untouched.
+
+        Returns one (message, param_paths) per severed star; System.prepare
+        re-runs stages 3-4 and logs and records each.  Loud by design: the
+        fitted parameter set no longer matches the config the user wrote,
+        and a sweep where some events severed is not one population unless
+        it says so.  The ``.sed`` model is the long-term answer (a grid that
+        reaches the star, review 2.9.14).
+        """
+        if self.severed_stars or not self._grid_bound_paths:
+            return []
+        star = system.star
+        n = int(star.n_elements)
+        cm = self.config_manager
+        inv = self.data_free_inventory(system)
+        off = {}
+        for param in self._SAMPLED_GRID_AXES:
+            cfg = cm.resolve("star", param, shape=(n,), names=star.names)
+            init = np.asarray(cfg["initval"], dtype=float)
+            lo = np.asarray(cfg["lower"], dtype=float)
+            hi = np.asarray(cfg["upper"], dtype=float)
+            sig = cfg.get("sigma")
+            fixed = (
+                np.zeros(n, dtype=bool)
+                if sig is None
+                else np.asarray(sig, dtype=float) == 0.0
+            )
+            for i in range(n):
+                # An unread star's knobs are pinned and a pinned element is
+                # never bound-checked: it cannot raise, so it needs nothing.
+                if not inv.readers[i] or fixed[i] or lo[i] <= init[i] <= hi[i]:
+                    continue
+                off.setdefault(i, []).append(
+                    f"{param} = {init[i]:.6g} (start from "
+                    f"{cm.initval_source('star', param, element=i)}) is "
+                    f"outside the grid's [{lo[i]:.6g}, {hi[i]:.6g}]"
+                )
+        if not off:
+            return []
+
+        severed = []
+        for i, why in sorted(off.items()):
+            readers = inv.readers[i]
+            fixed_by = [
+                r for r in readers if not r.startswith(self._SEVERABLE_READERS)
+            ]
+            if fixed_by:
+                logger.warning(
+                    f"[{self.prefix}] star '{star.names[i]}': "
+                    f"{'; '.join(why)} of the {self.sedmodel} bolometric-"
+                    f"correction grid, and it is read by "
+                    f"{', '.join(fixed_by)} -- the SED itself, so the "
+                    f"no-grid fallback does NOT apply and the build will "
+                    f"refuse the start (review 2.9.13: raising is right when "
+                    f"the SED is included but no grid covers the star)."
+                )
+                continue
+            severed.append((i, why, readers))
+        if not severed:
+            return []
+
+        self.severed_stars = frozenset(i for i, _, _ in severed)
+        after = self.data_free_inventory(system)
+        knob_paths = [
+            f"star.{star.names[j]}.{knob}"
+            for knob in after.star_knobs
+            for j in after.data_free[f"star.{knob}"]
+        ]
+        out = []
+        for i, why, readers in severed:
+            name = star.names[i]
+            newly_unread = [
+                star.names[j]
+                for j in after.unread_stars
+                if j != i and inv.readers[j]
+            ]
+            msg = (
+                f"SED link SEVERED for star '{name}' (review 2.9.15): "
+                f"{'; '.join(why)} of the {self.sedmodel} bolometric-"
+                f"correction grid, so no grid can host it. It was read only "
+                f"through {', '.join(readers)}; those ties are DROPPED, and "
+                f"what that leaves unconstrained is no longer fitted: "
+                f"{'/'.join(after.star_knobs)} pinned"
+                + (
+                    f" (also on {', '.join(newly_unread)}, read only through "
+                    f"a dropped tie)"
+                    if newly_unread
+                    else ""
+                )
+                + ", radius/teff/feh inactive unless a relation, a track or "
+                f"a user prior reads them. The fitted parameter set no "
+                f"longer matches the config; a sweep in which some events "
+                f"severed is not one population unless it says so. A BC "
+                f"grid that reaches this star (the .sed file's 'model:') "
+                f"restores the link."
+            )
+            out.append((msg, knob_paths))
+        return out
 
     def predict_star_appmag(self, star_idx, filter_key, system):
         """Predicted apparent magnitude of one star in one filter (scalar node)."""
@@ -1231,6 +1580,7 @@ class SED(Component):
         )
 
         self._declare_grid_support(system)
+        self._add_data_free_prose(system)
 
     # ------------------------------------------------------------------
     # The BC grid's support, as the reports see it.
@@ -1318,8 +1668,12 @@ class SED(Component):
                 dtype=float,
             )
         )
+        # A star whose SED flux nothing reads has no barrier (Star lifts it,
+        # `_unread_loggsed_bounds`) and no bolometric correction anyone
+        # uses, so its position against the grid means nothing.
+        seen = self.seen_star_mask(system)
         for i, val in enumerate(start):
-            if not np.isfinite(val) or lo <= val <= hi:
+            if not np.isfinite(val) or lo <= val <= hi or not seen[i]:
                 continue
             label = names[i] if i < len(names) else str(i)
             scale = scales[i] if i < scales.size else scales[0]
@@ -2035,6 +2389,46 @@ class SED(Component):
             key=f"{self.prefix}.magsys",
             rank=21.5,
         )
+
+    def _add_data_free_prose(self, system):
+        """The draft says when the SED fitted less than its config asked.
+
+        Two cases, both decided by ``data_free_inventory``: an errscale
+        pinned because the photometry could not measure it (only when there
+        IS photometry -- with none there is no SED fit to describe), and a
+        star severed by the no-grid fallback (review 2.9.15), which a paper
+        must state: its fitted parameter set differs from the config's.
+        """
+        from ...outputs.prose import join_names
+        from ...outputs.texutils import latex_escape
+
+        inv = self.data_free_inventory(system)
+        prose = get_collector(system)
+        if inv.pin_errscale and inv.n_rows > 0:
+            prose.add(
+                f"With only {inv.n_rows} photometric measurements against "
+                f"{inv.n_free} free SED parameters, the photometry cannot "
+                r"measure an error scaling, so $\sigma_{\rm SED}$ is fixed "
+                "at 1. ",
+                section="sampling",
+                key=f"{self.prefix}.errscale_pinned",
+                rank=21.5,
+            )
+        if inv.severed:
+            names = join_names(
+                latex_escape(system.star.names[i]) for i in inv.severed
+            )
+            prose.add(
+                f"The starting temperature of {names} lies outside the "
+                f"{latex_escape(self.sedmodel)} bolometric-correction grid, "
+                "so no grid can predict its flux: its link to the SED (the "
+                "photometric zeropoint and blend ties) is severed, and the "
+                "SED-side parameters it leaves unconstrained are fixed rather "
+                "than fitted. ",
+                section="stellar",
+                key=f"{self.prefix}.severed",
+                rank=20.5,
+            )
 
     def _add_prose(self, system):
         """Declare the modeling-draft sentences next to the terms they describe.
