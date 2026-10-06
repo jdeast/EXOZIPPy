@@ -572,12 +572,25 @@ class Instrument(TimeSystem, Component):
         """
         self.plot_color = []
         self.plot_marker = []
+        # The optional display name (`label:`), None when unset.  Display
+        # only, like `plot:`: evaluator._NON_STRUCTURAL_INSTANCE_KEYS keeps it
+        # out of the structural hash, so adding one never stales a trace.
+        self.plot_label = []
         for c in self.config:
             style = c.get("plot") or {}
             if not isinstance(style, dict):
                 style = {}
             self.plot_color.append(style.get("color"))
             self.plot_marker.append(style.get("marker"))
+            label = c.get("label")
+            self.plot_label.append(None if label is None else str(label))
+
+    def display_label(self, i):
+        """Instrument ``i``'s name for a reader: its ``label:``, else its
+        ``name:``.  Read by the system summary figure
+        (``outputs/summary_plot.py``)."""
+        label = self.plot_label[i]
+        return self.names[i] if label is None else label
 
     def _data_trace_style(self, i):
         """Style override dict for instrument ``i``'s data trace.
@@ -610,6 +623,23 @@ class Instrument(TimeSystem, Component):
                 "Optional per-instrument plot styling: a mapping with "
                 "'color' and/or 'marker' overriding the theme default for "
                 "this data series (e.g. {color: '#1f77b4', marker: 's'})."
+            ),
+        }
+
+    @staticmethod
+    def _label_config_schema():
+        """The shared ``label`` config-schema entry (per-instrument display
+        name); children append it beside ``_plot_style_config_schema``."""
+        return {
+            "key": "label",
+            "kind": "option",
+            "accepts": None,
+            "required": False,
+            "doc": (
+                "Optional display name for this file in figures (e.g. "
+                '"MuSCAT2 ($i\'$)"); mathtext is rendered.  Defaults to '
+                "'name'.  Display only: changing it does not invalidate a "
+                "saved trace."
             ),
         }
 

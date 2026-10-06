@@ -62,7 +62,7 @@ def _array_to_list(arr, round_to=_FLOAT_ROUND):
 def _jsonify(obj):
     """Recursively coerce numpy scalars/arrays inside meta dicts to JSON.
 
-    A :class:`Trace` inside ``meta`` (the O-C series of ``meta["residuals"]``)
+    A :class:`Trace` inside ``meta`` (the O-C traces of ``meta["residuals"]``)
     serializes through its own ``to_json``, so it reaches the GUI in exactly
     the shape a chart's top-level traces do.
     """
@@ -181,10 +181,10 @@ class Chart:
         Free-form ANNOTATIONS, and nothing a renderer needs to lay out an
         axis: ``caption`` (the LaTeX figure caption the generated paper
         draft, ``outputs/modeling.py``, pairs with this chart's saved PDF),
-        ``residuals`` (the chart's O-C at the plotted point, drawn as a
-        sub-panel by the system summary figure,
-        ``outputs/summary_plot.py``: ``{"ylabel": str, "traces":
-        [Trace(role="residual"), ...]}``), ``phase_folded``, ``file_tag``,
+        ``residuals`` (the chart's O-C at the plotted point, a list of
+        ``Trace(role="residual")`` in the chart's own x and y units, drawn
+        as a sub-panel by the system summary figure,
+        ``outputs/summary_plot.py``), ``phase_folded``, ``file_tag``,
         ``md5``, ``url``, ``size``, ``dynamic_data``.
 
         THE SIX AXIS-GEOMETRY FIELDS ABOVE USED TO LIVE HERE (review

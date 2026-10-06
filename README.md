@@ -161,9 +161,11 @@ and use it as a template. Generically:
    exozippy-summary toi1234.yaml
    ```
 
-   It writes `<prefix>_mcmc_summary.pdf` beside the fit's other outputs;
-   `--help` lists the options, including relabelling instruments and binning
-   or grouping the transits.
+   It writes `<prefix>_mcmc_summary.pdf` beside the fit's other outputs.
+   Each instrument is shown by its name, or by an optional `label:` on its
+   entry in `toi1234.yaml` (e.g. `label: "MuSCAT2 ($i'$)"`; changing it does
+   not require refitting), and TESS sectors are grouped by cadence. `--help`
+   lists the other options, such as binning the transits.
 
 ### Step 5 -- Helper commands for Step 4
 

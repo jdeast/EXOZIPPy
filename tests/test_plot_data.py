@@ -960,7 +960,7 @@ def test_point_to_plot_params_names_a_misshapen_input():
 
 
 def _residual_traces(spec):
-    return {t.name: t for t in spec.meta["residuals"]["traces"]}
+    return {t.name: t for t in spec.meta["residuals"]}
 
 
 def test_rv_residual_is_data_minus_the_likelihood_model(rvonly_built):
@@ -980,7 +980,6 @@ def test_rv_residual_is_data_minus_the_likelihood_model(rvonly_built):
     residuals = _residual_traces(unphased)
     params = rv._point_to_plot_params(point, system)
 
-    assert unphased.meta["residuals"]["ylabel"] == "O-C [m/s]"
     for data in (t for t in unphased.traces if t.role == "data"):
         oc = residuals[data.name]
         np.testing.assert_array_equal(oc.x, data.x)
@@ -1035,28 +1034,41 @@ def test_rv_charts_carry_no_residuals_without_a_point(rvonly_prepared):
         assert "residuals" not in spec.meta
 
 
-def test_sed_residual_plus_prediction_is_the_observed_magnitude(sed_built):
+def test_sed_residual_is_log_data_minus_log_model_per_point(sed_built):
     """
     Given the three-star kelt4 SED build at its start point,
-    When the SED chart's O-C (one trace per star identity) is added back to
-      the compiled blended/differential magnitude prediction,
-    Then it gives every observed magnitude, at its filter's wavelength, with
-      the quoted error -- one residual per filter row.
+    When each plotted point's O-C (in the chart's own unit, dex of
+      lambda*F_lambda) is subtracted from its data point,
+    Then what is left is log10 of the MODEL flux of that point's stars in
+      that filter -- built here from the per-star predicted magnitudes and
+      the filter's zero point, not from the combined prediction the
+      component uses -- and each residual carries its point's error bars.
     """
     system, model, point = sed_built
     sed = system.sed
     spec = [s for s in sed.plot_data(system, point) if s.id == "sed.sed"][0]
-    traces = spec.meta["residuals"]["traces"]
-    assert spec.meta["residuals"]["ylabel"] == "O-C [mag]"
+    residuals = _residual_traces(spec)
+    data = {t.name: t for t in spec.traces if t.role == "data"}
     _assert_json_roundtrip([spec])
 
-    pred = np.asarray(
-        sed._compiled_combined_mag(*sed._point_to_plot_params(point, system))
-    )
-    wave = sed._filter_wave_eff_micron()
-    got = np.concatenate([np.column_stack([t.x, t.y, t.yerr]) for t in traces])
-    want = np.column_stack([wave, sed.mag - pred, sed.err])
-    assert got.shape == want.shape
-    order_got = np.lexsort(got[:, ::-1].T)
-    order_want = np.lexsort(want[:, ::-1].T)
-    np.testing.assert_allclose(got[order_got], want[order_want], rtol=1e-9)
+    plot_obj = sed._make_plot_obj(system, [point])
+    m_star = np.asarray(
+        sed._compiled_mag_predictors(*sed._point_to_plot_params(point, system))
+    )  # (nstars, nfilters)
+    labels = np.asarray(plot_obj.point_labels)
+    assert set(residuals) == set(data) == set(labels)
+    for combo in plot_obj.unique_combos:
+        points = np.flatnonzero(labels == combo)
+        model_log = []
+        for p in points:
+            row, side = plot_obj.point_row[p], plot_obj.point_side[p]
+            stars = plot_obj.blend_matrix[row] == side
+            zp = plot_obj.filter_params[plot_obj.filters[row]]["zp"]
+            flux = zp * np.sum(10 ** (-0.4 * m_star[stars, row]))
+            model_log.append(np.log10(flux * plot_obj.wave_filter[p]))
+        oc, obs = residuals[combo], data[combo]
+        np.testing.assert_array_equal(oc.x, obs.x)
+        np.testing.assert_allclose(
+            np.asarray(obs.y) - np.asarray(oc.y), model_log, rtol=1e-9
+        )
+        np.testing.assert_array_equal(oc.yerr, obs.yerr)

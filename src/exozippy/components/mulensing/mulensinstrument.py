@@ -330,6 +330,7 @@ class MulensInstrument(Instrument):
             ),
             *cls._time_config_schema(),
             cls._plot_style_config_schema(),
+            cls._label_config_schema(),
             cls._gp_config_schema(),
             cls._likelihood_config_schema(),
         ]

@@ -242,6 +242,141 @@ def test_an_unknown_instrument_name_raises_with_a_suggestion():
         sp._check_names("labels", {"TESS_s16": "x"}, ["TESS_S16", "HIRES"])
 
 
+def _transits(rows, stated=True):
+    """A transit component stand-in: (name, band, exptime_min, label), each
+    file's config stating its exptime unless ``stated`` is False."""
+    return SimpleNamespace(
+        names=[r[0] for r in rows],
+        band_names=[r[1] for r in rows],
+        exptime_min=[r[2] for r in rows],
+        plot_label=[r[3] for r in rows],
+        config=[{"exptime": r[2]} if stated else {} for r in rows],
+    )
+
+
+_BANDS = SimpleNamespace(
+    names=["TESS", "Sloang", "Kepler"],
+    filter_names=["TESS", "Sloang", "Kepler"],
+)
+
+
+def test_tess_files_are_grouped_by_cadence_and_nothing_else_is():
+    """
+    Given TOI-5432's transits -- two 10-min and two 2-min TESS sectors, and
+      ground-based files of which two share a filter and exposure time --
+      with no labels in the config,
+    When the default grouping is formed,
+    Then each TESS cadence is one row, labelled with its cadence in
+      seconds, and every ground-based file is left on its own row.
+    """
+    transit = _transits(
+        [
+            ("TESS_UT20210916", "TESS", 10.0, None),
+            ("TESS_UT20211107", "TESS", 10.0, None),
+            ("Acton-Sky-Portal_UT20221219", "Sloang", 1.0, None),
+            ("LO_OSC_UT20221222", "Kepler", 1.0, None),
+            ("TESS_UT20231016", "TESS", 2.0, None),
+            ("LCO-McD-0m35_UT20231019", "Sloang", 1.0, None),
+            ("TESS_UT20231112", "TESS", 2.0, None),
+        ]
+    )
+
+    groups = sp.tess_cadence_groups(transit, _BANDS)
+
+    assert groups == {
+        "TESS 600 s": ["TESS_UT20210916", "TESS_UT20211107"],
+        "TESS 120 s": ["TESS_UT20231016", "TESS_UT20231112"],
+    }
+
+
+def test_a_tess_group_takes_its_members_common_label():
+    """
+    Given TESS sectors all labelled "TESS" at two cadences, and a 200 s
+      sector labelled "TESS FFI",
+    When the default grouping is formed,
+    Then the label two cadences share gets the cadence appended so the rows
+      stay distinct, while the label only one cadence uses is kept as is.
+    """
+    transit = _transits(
+        [
+            ("S43", "TESS", 10.0, "TESS"),
+            ("S45", "TESS", 10.0, "TESS"),
+            ("S71", "TESS", 2.0, "TESS"),
+            ("S98", "TESS", 200.0 / 60.0, "TESS FFI"),
+        ]
+    )
+
+    groups = sp.tess_cadence_groups(transit, _BANDS)
+
+    assert groups == {
+        "TESS 600 s": ["S43", "S45"],
+        "TESS 120 s": ["S71"],
+        "TESS FFI": ["S98"],
+    }
+
+
+def test_a_tess_group_with_no_stated_exptime_is_not_given_a_cadence():
+    """
+    Given two TESS sectors whose config sets no exptime (so the fit uses
+      the inert 1-minute default, which is not their cadence),
+    When the default grouping is formed,
+    Then they share one row labelled just "TESS", not "TESS 60 s".
+    """
+    transit = _transits(
+        [("S16", "TESS", 1.0, None), ("S22", "TESS", 1.0, None)],
+        stated=False,
+    )
+
+    assert sp.tess_cadence_groups(transit, _BANDS) == {"TESS": ["S16", "S22"]}
+
+
+def test_sed_in_flux_converts_the_points_and_their_oc_together():
+    """
+    Given an SED chart in log10(lambda F_lambda) whose O-C is in dex,
+    When sed_in_flux converts it for the summary panel,
+    Then the points become fluxes on a log axis with their error bars
+      converted on each side, and each O-C becomes the flux difference it
+      encodes (observed minus model) with its point's error bars.
+    """
+    from exozippy.chart import Chart, Trace
+
+    y = np.array([-10.0, -11.0])
+    err = np.array([[0.1, 0.2], [0.1, 0.2]])
+    oc_dex = np.array([0.05, -0.02])
+    chart = Chart(
+        id="sed.sed",
+        component={"yaml_key": "sed", "instance": None},
+        title="SED",
+        xlabel="Wavelength [micron]",
+        ylabel="log10(lambda F_lambda [erg/s/cm2])",
+        traces=[
+            Trace("Star A", "model", "line", [0.5, 2.0], [-9.0, -12.0]),
+            Trace("A", "data", "scatter", [0.6, 1.2], y, yerr=err),
+        ],
+        y_range=[-13.0, -9.0],
+        meta={
+            "residuals": [
+                Trace("A", "residual", "scatter", [0.6, 1.2], oc_dex, err)
+            ]
+        },
+    )
+
+    flux = sp.sed_in_flux(chart)
+
+    data = [t for t in flux.traces if t.role == "data"][0]
+    (oc,) = flux.meta["residuals"]
+    np.testing.assert_allclose(data.y, 10**y)
+    np.testing.assert_allclose(data.yerr[0], 10**y - 10 ** (y - err[0]))
+    np.testing.assert_allclose(oc.y, 10**y - 10 ** (y - oc_dex))
+    np.testing.assert_allclose(oc.yerr, data.yerr)
+    assert flux.y_log and flux.ylabel == sp.SED_YLABEL
+    np.testing.assert_allclose(flux.y_range, [1e-13, 1e-9])
+
+    chart.meta["residuals"][0].name = "B"
+    with pytest.raises(ValueError, match="'B'"):
+        sp.sed_in_flux(chart)
+
+
 def test_cli_refuses_an_unknown_options_key(tmp_path):
     """
     Given an --options file with a misspelled keyword,
@@ -286,7 +421,13 @@ def _kelt4_config():
         ],
         "band": [{"name": "TESS", "filter": "TESS"}],
         "rvinstrument": [
-            {"name": "HIRES", "file": "KELT-4b.HIRES.rv"},
+            # A display label in the config (display only: it does not
+            # enter the trace's structural hash).
+            {
+                "name": "HIRES",
+                "file": "KELT-4b.HIRES.rv",
+                "label": "Keck/HIRES",
+            },
             {"name": "TRES", "file": "KELT-4b.TRES.rv"},
         ],
         "parameter_file": "summary_test.params.yaml",
@@ -417,12 +558,14 @@ def test_best_fit_point_is_the_best_reported_draw_in_internal_units(
 @pytest.mark.slow
 def test_summary_figure_draws_one_panel_per_chart_kind(kelt4_posterior):
     """
-    Given the fit at its best-fit point,
-    When summary_figure draws it with instrument labels and a binned transit,
+    Given the fit at its best-fit point, with a `label:` on HIRES in the
+      config and no labels or groups passed in,
+    When summary_figure draws it with a binned transit,
     Then the page has the transit stack, the RVs against time and the
       folded RVs (each of the last two with an O-C axis), the header lines
-      it was given, the transit labelled as asked, and the folded panel's
-      legend carrying the relabelled instruments.
+      it was given, the TESS sector on its cadence row "TESS 120 s", and the
+      folded panel's legend showing HIRES by its configured label and TRES
+      by its name.
     """
     system, _, point, _ = kelt4_posterior
     header = sp.planet_header_lines(system)
@@ -432,7 +575,6 @@ def test_summary_figure_draws_one_panel_per_chart_kind(kelt4_posterior):
         point,
         title="KELT-4A",
         header_lines=header,
-        labels={"TESS_S48": "TESS S48", "HIRES": "Keck/HIRES"},
         transit_bin=10,
     )
     try:
@@ -450,12 +592,12 @@ def test_summary_figure_draws_one_panel_per_chart_kind(kelt4_posterior):
         plt.close(fig)
 
     assert len(axes) == 5
-    assert ylabels.count("O-C [m/s]") == 2
+    assert ylabels.count(sp.OC_YLABEL) == 2
     assert texts[0] == "KELT-4A" and texts[1:] == header
     assert len(header) == 1
     for symbol in ("$P = ", "$R_P = ", "$M_P = ", "$e = "):
         assert symbol in header[0]
-    assert "TESS S48" in [t.get_text() for t in transit_ax.texts]
+    assert [t.get_text() for t in transit_ax.texts] == ["TESS 120 s"]
     assert {"Keck/HIRES", "TRES"} <= set(legend_texts)
 
 
@@ -511,8 +653,8 @@ def test_cli_writes_the_figure_with_an_options_file(kelt4_fit, tmp_path):
         yaml.safe_dump(
             {
                 "title": "overridden by the flag",
-                "labels": {"HIRES": "Keck/HIRES"},
-                "transit_bin": {"TESS_S48": 10},
+                "labels": {"TRES": "Tillinghast/TRES"},
+                "transit_bin": {"TESS 120 s": 10},
                 "figsize": [17, 14],
             }
         )

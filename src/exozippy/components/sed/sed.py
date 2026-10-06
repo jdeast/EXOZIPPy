@@ -1865,40 +1865,6 @@ class SED(Component):
                     sub_combos.append((label, combo_idx))
         return sub_combos
 
-    @staticmethod
-    def _residual_rows(plot_obj, combined_pred):
-        """The O-C of every filter ROW, the one implementation of it.
-
-        One residual per row -- the actual measurement -- against its
-        combined (blend/diff) prediction ``combined_pred`` (``(nfilters,)``
-        apparent magnitudes).  Returns ``(wave_micron, residual_mag,
-        err_mag, labels)``, where ``labels[row]`` is the identity of the
-        row's pos-side point, whose color/marker its residual borrows.
-        Shared by plot() (the residual subplot, at the median prediction
-        over its draws) and plot_data() (``meta["residuals"]``, at the one
-        plotted point), so the PDF and the chart cannot disagree on an O-C.
-        """
-        wave_row = (
-            np.array(
-                [
-                    plot_obj.filter_params[f]["wave_eff"]
-                    for f in plot_obj.filters
-                ]
-            )
-            * ANG_TO_MICRON_CONST
-        )
-        labels = []
-        for row in range(plot_obj.nfilters):
-            p = np.where(
-                (plot_obj.point_row == row) & (plot_obj.point_side == 1)
-            )[0][0]
-            labels.append(plot_obj.point_labels[p])
-        residual = np.asarray(plot_obj.mag_obs, dtype=float) - np.asarray(
-            combined_pred, dtype=float
-        )
-        err = np.asarray(plot_obj.mag_obs_err, dtype=float)
-        return wave_row, residual, err, labels
-
     # ------------------------------------------------------------------
     # 7) plot — observed mag vs predicted mag per filter, per SED.
     #
@@ -2044,18 +2010,32 @@ class SED(Component):
 
         # ---- residuals: one per filter ROW (the actual measurement),  ----
         # ---- against its combined (blend/diff) prediction              ----
-        wave_row, residual, residual_err, row_labels = self._residual_rows(
-            plot_obj, combined_pred_med
+        wave_row = (
+            np.array(
+                [
+                    plot_obj.filter_params[f]["wave_eff"]
+                    for f in plot_obj.filters
+                ]
+            )
+            * ANG_TO_MICRON_CONST
         )
         for row in range(plot_obj.nfilters):
-            label = row_labels[row]
+            # use the pos-side point's color/marker for this row's residual
+            p = np.where(
+                (plot_obj.point_row == row) & (plot_obj.point_side == 1)
+            )[0][0]
+            label = plot_obj.point_labels[p]
+            color = id_color[label]
+            marker = id_marker[label]
+
+            residual = plot_obj.mag_obs[row] - combined_pred_med[row]
             ax_bot.errorbar(
                 wave_row[row],
-                residual[row],
-                yerr=residual_err[row],
+                residual,
+                yerr=plot_obj.mag_obs_err[row],
                 capsize=3,
-                fmt=id_marker[label],
-                color=id_color[label],
+                fmt=marker,
+                color=color,
                 alpha=alpha_res,
             )
 
@@ -2312,8 +2292,21 @@ class SED(Component):
         y_lim = _log10(plot_obj.f_limits_from_err * plot_obj.wave_filter)
         yerr = np.vstack([log_yobs - y_lim[0], y_lim[1] - log_yobs])
         point_labels = np.asarray(plot_obj.point_labels)
+
+        # The O-C of every plotted point, in the chart's own unit (dex of
+        # lambda*F_lambda): log10(observed) - log10(model) for that point's
+        # star combination.  Each point's flux is its filter row's magnitude
+        # through the zero point -- a differential row's side anchored on the
+        # model flux of the OTHER side (_calc_obs_flux_from_obs_mag) -- so the
+        # flux ratio is set by the row's magnitude residual alone:
+        # -0.4 * side * (m_obs - m_pred), with m_pred the row's combined
+        # (blended or differential) prediction at this point.
+        row_oc = plot_obj.mag_obs - plot_obj.combined_pred_draws[0]
+        point_oc = -0.4 * plot_obj.point_side * row_oc[plot_obj.point_row]
+        residual_traces = []
         for combo in plot_obj.unique_combos:
             mask = point_labels == combo
+            style = {"color": id_color[combo], "marker": id_marker[combo]}
             traces.append(
                 Trace(
                     name=combo,
@@ -2323,10 +2316,21 @@ class SED(Component):
                     y=log_yobs[mask],
                     yerr=yerr[:, mask],
                     xerr=xerr_obs[:, mask],
-                    style={
-                        "color": id_color[combo],
-                        "marker": id_marker[combo],
-                    },
+                    style=style,
+                )
+            )
+            # Same name, points and error bars as the data trace above, so a
+            # renderer can pair the two.
+            residual_traces.append(
+                Trace(
+                    name=combo,
+                    role="residual",
+                    kind="scatter",
+                    x=wave_obs[mask],
+                    y=point_oc[mask],
+                    yerr=yerr[:, mask],
+                    xerr=xerr_obs[:, mask],
+                    style=dict(style),
                 )
             )
 
@@ -2334,31 +2338,6 @@ class SED(Component):
         # the model spectra tail off to ~1e-78 at the far UV/IR edges, so letting
         # the axis autorange to those would squash the interesting region.
         plot_obj._get_ylim()
-
-        # The O-C per filter row in magnitudes, through the residual helper
-        # plot() draws its residual subplot with; one trace per identity so
-        # each keeps its photometry's color/marker, at plot()'s opacity.
-        wave_row, residual, residual_err, row_labels = self._residual_rows(
-            plot_obj, plot_obj.combined_pred_draws[0]
-        )
-        residual_traces = []
-        for combo in dict.fromkeys(row_labels):
-            rows = np.array([label == combo for label in row_labels])
-            residual_traces.append(
-                Trace(
-                    name=combo,
-                    role="residual",
-                    kind="scatter",
-                    x=wave_row[rows],
-                    y=residual[rows],
-                    yerr=residual_err[rows],
-                    style={
-                        "color": id_color[combo],
-                        "marker": id_marker[combo],
-                    },
-                    alpha=1.0 if plot_obj.nstars == 1 else 0.5,
-                )
-            )
 
         return [
             Chart(
@@ -2403,10 +2382,7 @@ class SED(Component):
                             else "."
                         )
                     ),
-                    "residuals": {
-                        "ylabel": "O-C [mag]",
-                        "traces": residual_traces,
-                    },
+                    "residuals": residual_traces,
                 },
             )
         ]

@@ -14,10 +14,12 @@ THIS MODULE ADDS NO PHYSICS.  It is a third renderer of the components' Charts
 every curve and point is what ``Component.plot_data(system, point)`` returned,
 and every O-C is the component's own ``meta["residuals"]`` -- data minus the
 likelihood's model at the observations, which only the component can
-evaluate.  What it owns is the layout: which charts make a panel, stacking
-the transits with offsets (in hours, optionally binned), a BJD offset on the
-RV time axis, and the header.  A new panel kind is a new component chart, not
-new arithmetic here.
+evaluate, given in the chart's own units.  What it owns is the presentation:
+which charts make a panel, stacking the transits with offsets (in hours,
+TESS files grouped by cadence, optionally binned), each instrument's display
+name (its ``label:`` in the config), a BJD offset on the RV time axis, the
+SED in lambda*F_lambda rather than the chart's log10 of it, and the header.
+A new panel kind is a new component chart, not new arithmetic here.
 
 THE POINT IS THE BEST-FIT DRAW OF THE REPORTED POSTERIOR.  ``reported_posterior``
 reproduces what ``run.py`` reports from -- burn-in and stuck chains trimmed
@@ -60,6 +62,19 @@ HEADER_PARAMETERS = (
 
 #: The run.py default, for a config that names no prefix.
 DEFAULT_PREFIX = "fitresults/planet"
+
+#: A band whose filter is this one is TESS: its files are grouped onto one
+#: row per exposure time (cadence) by default.  Filter names are
+#: case-sensitive, as everywhere in EXOZIPPy.
+TESS_FILTER = "TESS"
+
+#: The SED panel's axes.  It is drawn as lambda*F_lambda on a log axis (the
+#: chart carries log10 of it, which keeps its JSON payload at normal scale).
+SED_XLABEL = r"Wavelength [$\mu$m]"
+SED_YLABEL = r"$\lambda F_\lambda$ [erg s$^{-1}$ cm$^{-2}$]"
+
+#: Every O-C axis is in the units of the panel above it, so it names none.
+OC_YLABEL = "O-C"
 
 #: Subtracted from a BJD time axis: the largest of these that every time on
 #: the axis exceeds -- TESS's BTJD zero point, else the older 2450000
@@ -378,30 +393,79 @@ def _check_names(what, names, known):
         )
 
 
-def _transit_rows(stack, labels, groups, bins, system):
-    """The rows of one transit stack: ``[(key, label, charts, bin_minutes,
-    color)]`` in config order, a group placed where its first member is."""
+def tess_cadence_groups(transit, band):
+    """The default ``transit_groups``: the TESS files, one group per cadence.
+
+    A file is TESS when its band's filter is ``TESS_FILTER``; files with the
+    same exposure time (``exptime:``, rounded to the second) share a row,
+    the sectors of one cadence being one instrument setup with one model
+    curve.  Every other file keeps its own row: ground-based follow-up from
+    different telescopes or nights stays apart even when filter and
+    exposure time agree.  A group is labelled with its members' common
+    ``label:`` when they share one that no other cadence uses, and
+    otherwise ``"<label or TESS> <seconds> s"``, e.g. ``"TESS 120 s"`` --
+    the cadence only when every member's config states its ``exptime:``.
+    Without one the fit uses the inert 1-minute default (no smearing),
+    which is not the data's cadence, so such a row is just ``"TESS"``.
+
+    ``transit`` and ``band`` are the fit's components (names, band names,
+    ``exptime_min``, ``plot_label`` and the per-file ``config``; band names
+    and ``filter_names``).  Returns ``{label: [transit names]}`` in config
+    order.
+    """
+    by_cadence = {}
+    for i, name in enumerate(transit.names):
+        b = band.names.index(transit.band_names[i])
+        if band.filter_names[b] != TESS_FILTER:
+            continue
+        seconds = int(round(60.0 * float(transit.exptime_min[i])))
+        by_cadence.setdefault(seconds, []).append(i)
+
+    common = {}
+    for seconds, members in by_cadence.items():
+        labels = {transit.plot_label[i] for i in members}
+        one = len(labels) == 1 and None not in labels
+        common[seconds] = labels.pop() if one else None
+    groups = {}
+    for seconds, members in by_cadence.items():
+        base = common[seconds]
+        stated = all("exptime" in transit.config[i] for i in members)
+        if base is not None and list(common.values()).count(base) == 1:
+            label = base
+        elif stated:
+            label = f"{base or 'TESS'} {seconds} s"
+        else:
+            label = base or "TESS"
+        groups[label] = [transit.names[i] for i in members]
+    return groups
+
+
+def _transit_rows(stack, display, groups, bins, colors):
+    """The rows of one transit stack, ``[(bin key, label, charts,
+    bin_minutes, color)]`` in config order, a group placed where its first
+    member is.  ``display`` maps a file to its label, ``groups`` a group
+    label to its files, ``colors`` a file to its user ``plot: color`` (or
+    None); ``bins`` is None, minutes, or ``{group label or file: minutes}``.
+    """
     member_of = {m: g for g, members in groups.items() for m in members}
     rows, seen = [], {}
     for chart in stack:
         inst = chart.meta["instrument"]
-        key = member_of.get(inst, inst)
+        key = (
+            ("group", member_of[inst]) if inst in member_of else ("file", inst)
+        )
         if key in seen:
             rows[seen[key]][2].append(chart)
             continue
         seen[key] = len(rows)
-        label = key if inst in member_of else labels.get(inst, inst)
-        if isinstance(bins, dict):
-            minutes = bins.get(key)
-        else:
-            minutes = bins
-        rows.append([key, label, [chart], minutes, None])
-    transit = getattr(system, TRANSIT_KEY)
+        name = key[1]
+        label = name if key[0] == "group" else display[inst]
+        minutes = bins.get(name) if isinstance(bins, dict) else bins
+        rows.append([name, label, [chart], minutes, None])
     for k, row in enumerate(rows):
         # A user's per-instrument plot: color (the first member's) wins;
         # otherwise the theme palette by row, so neighbors differ.
-        first = row[2][0].meta["instrument"]
-        user = transit.plot_color[transit.names.index(first)]
+        user = colors[row[2][0].meta["instrument"]]
         row[4] = user or plot_theme.PALETTE[k % len(plot_theme.PALETTE)]
     return [tuple(r) for r in rows]
 
@@ -559,13 +623,9 @@ def _prepared(chart, labels, time_offset=False):
         offset = next((o for o in BJD_OFFSETS if x_min > o), 0)
     meta = dict(chart.meta or {})
     if "residuals" in meta:
-        meta["residuals"] = {
-            "ylabel": meta["residuals"]["ylabel"],
-            "traces": [
-                _shifted(t, offset, labels)
-                for t in meta["residuals"]["traces"]
-            ],
-        }
+        meta["residuals"] = [
+            _shifted(t, offset, labels) for t in meta["residuals"]
+        ]
     return dataclasses.replace(
         chart,
         traces=[_shifted(t, offset, labels) for t in chart.traces],
@@ -574,6 +634,68 @@ def _prepared(chart, labels, time_offset=False):
         if chart.x_range is None
         else [float(v) - offset for v in chart.x_range],
         meta=meta,
+    )
+
+
+def _log_errors_to_linear(y, yerr):
+    """``(2, N)`` linear error bars for points at ``10**y`` whose errors are
+    ``yerr`` in dex (symmetric ``(N,)`` or asymmetric ``(2, N)``)."""
+    e = np.asarray(yerr, dtype=float)
+    lo, hi = (e[0], e[1]) if e.ndim == 2 else (e, e)
+    return np.vstack([10**y - 10 ** (y - lo), 10 ** (y + hi) - 10**y])
+
+
+def sed_in_flux(chart):
+    """The SED chart as lambda*F_lambda on a log axis, O-C converted with it.
+
+    The chart carries log10(lambda*F_lambda) on a linear axis -- the log is
+    taken component-side so its JSON payload stays at normal scale -- and
+    its ``meta["residuals"]`` in that unit (dex).  The summary draws the
+    flux itself, so every trace becomes ``10**y`` (error bars converted on
+    each side), and each residual becomes the flux difference it encodes,
+    ``F_obs - F_model = 10**y_obs - 10**(y_obs - oc)``, carrying its point's
+    linear error bars.  A residual is paired with the data trace of the same
+    name, point for point (the SED component builds them that way); anything
+    else is a chart this function does not know how to convert, and raises.
+    """
+
+    def linear(trace):
+        y = np.asarray(trace.y, dtype=float)
+        yerr = (
+            None
+            if trace.yerr is None
+            else _log_errors_to_linear(y, trace.yerr)
+        )
+        return dataclasses.replace(trace, y=10**y, yerr=yerr)
+
+    data = {t.name: t for t in chart.traces if t.role == "data"}
+    residuals = []
+    for oc in (chart.meta or {}).get("residuals", []):
+        obs = data.get(oc.name)
+        if obs is None or not np.array_equal(
+            np.asarray(obs.x, dtype=float), np.asarray(oc.x, dtype=float)
+        ):
+            raise ValueError(
+                f"summary plot: SED residual trace {oc.name!r} has no data "
+                f"trace with the same points in chart {chart.id!r}."
+            )
+        y_obs = np.asarray(obs.y, dtype=float)
+        residuals.append(
+            dataclasses.replace(
+                oc,
+                y=10**y_obs - 10 ** (y_obs - np.asarray(oc.y, dtype=float)),
+                yerr=_log_errors_to_linear(y_obs, obs.yerr),
+            )
+        )
+    lo, hi = chart.y_range
+    return dataclasses.replace(
+        chart,
+        traces=[linear(t) for t in chart.traces],
+        y_range=[10.0**lo, 10.0**hi],
+        y_log=True,
+        xlabel=SED_XLABEL,
+        ylabel=SED_YLABEL,
+        meta={**(chart.meta or {}), "residuals": residuals},
     )
 
 
@@ -612,7 +734,8 @@ def _draw_main(ax, chart, legend, models_under):
 
 def _draw_chart_panel(fig, cell, chart, legend, models_under=False):
     """One chart in one grid cell, with an O-C sub-panel when the chart
-    declares ``meta["residuals"]``."""
+    declares ``meta["residuals"]`` -- in the chart's own units, so the O-C
+    axis is in the units of the panel above it."""
     residuals = (chart.meta or {}).get("residuals")
     if residuals is None:
         ax = fig.add_subplot(cell)
@@ -624,13 +747,15 @@ def _draw_chart_panel(fig, cell, chart, legend, models_under=False):
     ax_oc = fig.add_subplot(sub[1], sharex=ax)
     _draw_main(ax, chart, legend, models_under)
     ax.set_xlabel("")
-    for trace in residuals["traces"]:
+    for trace in residuals:
         _draw_data(ax_oc, trace)
     ax_oc.axhline(0.0, color="0.4", ls="--", lw=1.0, zorder=0)
     if chart.x_log:
         ax_oc.set_xscale("log")
     ax_oc.set_xlabel(chart.xlabel)
-    ax_oc.set_ylabel(residuals["ylabel"])
+    ax_oc.set_ylabel(OC_YLABEL)
+    # A flux O-C (~1e-12) is written with a x10^n offset, not "1e-12".
+    ax_oc.yaxis.get_major_formatter().set_useMathText(True)
     for a in (ax, ax_oc):
         _style(a)
     ax.tick_params(labelbottom=False)
@@ -668,18 +793,22 @@ def summary_figure(
         Lines under the title -- ``planet_header_lines(system)`` once a
         posterior is distributed.  Mathtext is rendered.
     labels : dict, optional
-        Display name per instrument (transit or RV), keyed by the name in the
-        config, e.g. ``{"TCS_MuSCAT2_UT20251116_9": "MuSCAT2 ($i'$)"}``.
-        Unknown names raise.
+        Display names that override the fit's own, keyed by instrument name
+        (transit or RV).  Not needed: by default each instrument is shown by
+        its ``label:`` in the config, else its ``name:``.  Unknown names
+        raise.
     transit_groups : dict, optional
-        ``{display label: [transit names]}``: files drawn on ONE row of the
-        stack, each with its own model curve (identical curves overlap) --
-        e.g. several TESS sectors at one cadence.  A name in two groups, or
-        not a transit of this fit, raises.
+        ``{row label: [transit names]}``: files drawn on ONE row of the
+        stack, each with its own model curve (identical curves overlap).
+        Default: ``tess_cadence_groups`` -- the TESS files, one row per
+        exposure time, every other file on its own row.  Passing a dict
+        replaces that rule (``{}`` puts every file on its own row).  A name
+        in two groups, or not a transit of this fit, raises.
     transit_bin : float or dict, optional
         Bin the phased transit points to this many minutes, drawn over the
         unbinned points.  A number bins every row; a dict bins only the rows
-        it names, keyed by transit name or, for a grouped row, group label.
+        it names, keyed by transit name or, for a grouped row, its label
+        (e.g. ``{"TESS 120 s": 10}``).
     transit_spacing : float, optional
         Vertical offset between stacked transits, in normalized flux.
         Default: the deepest transit plus four times the typical scatter.
@@ -689,7 +818,6 @@ def summary_figure(
     import matplotlib.pyplot as plt
 
     labels = dict(labels or {})
-    groups = {str(g): list(m) for g, m in (transit_groups or {}).items()}
 
     charts = _collect_charts(system, point)
     panels = _panels(charts)
@@ -699,18 +827,26 @@ def summary_figure(
             "RVs, an SED or a Kiel diagram)."
         )
 
-    transit_names = (
-        list(getattr(system, TRANSIT_KEY).names)
-        if any(p.kind == "transit" for p in panels)
-        else []
-    )
-    rv_names = [
-        t.name
-        for p in panels
-        if p.kind == "rv_time"
-        for t in _role(p.charts[0], "data")
-    ]
+    # Each instrument's display name: an override, else its `label:`, else
+    # its `name:` (Instrument.display_label).
+    transit = getattr(system, TRANSIT_KEY, None)
+    rv = getattr(system, RV_KEY, None)
+    has_transits = any(p.kind == "transit" for p in panels)
+    has_rvs = any(p.kind in ("rv_time", "rv_phase") for p in panels)
+    transit_names = list(transit.names) if has_transits else []
+    rv_names = list(rv.names) if has_rvs else []
     _check_names("labels", labels, transit_names + rv_names)
+    display = {}
+    for comp, names in ((transit, transit_names), (rv, rv_names)):
+        for i, name in enumerate(names):
+            display[name] = labels.get(name, comp.display_label(i))
+
+    if transit_groups is None:
+        groups = (
+            tess_cadence_groups(transit, system.band) if has_transits else {}
+        )
+    else:
+        groups = {str(g): list(m) for g, m in transit_groups.items()}
     grouped = [m for members in groups.values() for m in members]
     _check_names("transit_groups", grouped, transit_names)
     twice = sorted({m for m in grouped if grouped.count(m) > 1})
@@ -781,24 +917,25 @@ def summary_figure(
                 cell = grid[row : row + panel.rows, col]
                 if panel.kind == "transit":
                     ax = fig.add_subplot(cell)
+                    colors = dict(zip(transit.names, transit.plot_color))
                     rows = _transit_rows(
-                        panel.charts, labels, groups, transit_bin, system
+                        panel.charts, display, groups, transit_bin, colors
                     )
                     _draw_transit_stack(ax, rows, transit_spacing)
                     _style(ax)
                 elif panel.kind == "rv_time":
                     chart = _prepared(
-                        panel.charts[0], labels, time_offset=True
+                        panel.charts[0], display, time_offset=True
                     )
                     _draw_chart_panel(
                         fig, cell, chart, legend=False, models_under=True
                     )
                 elif panel.kind == "rv_phase":
-                    chart = _prepared(panel.charts[0], labels)
+                    chart = _prepared(panel.charts[0], display)
                     axes = _draw_chart_panel(fig, cell, chart, legend=True)
                     axes[0].set_xlim(0.0, 1.0)
                 elif panel.kind == "sed":
-                    chart = panel.charts[0]
+                    chart = sed_in_flux(panel.charts[0])
                     # One star's spectrum and photometry need no key; several
                     # stars' identities do.
                     n_ids = len(_role(chart, "data"))
@@ -836,19 +973,13 @@ def create_summary_plot(
     follows its extension) and returns its path.  The remaining keywords are
     ``summary_figure``'s; ``title`` defaults to the config's ``run: name:``.
 
-    Example::
+    Everything else comes from the fit: each instrument is shown by its
+    ``label:`` in the config (else its name), and the TESS files are grouped
+    by cadence.  Example::
 
         from exozippy.outputs.summary_plot import create_summary_plot
 
-        create_summary_plot(
-            "toi5432.yaml",
-            title="TOI-5432",
-            transit_groups={
-                "TESS 600 s": ["TESS_UT20210916", "TESS_UT20211107"],
-                "TESS 120 s": ["TESS_UT20231016", "TESS_UT20231112"],
-            },
-            transit_bin={"TESS 120 s": 10},
-        )
+        create_summary_plot("toi5432.yaml", transit_bin={"TESS 120 s": 10})
     """
     import arviz as az
     import matplotlib.pyplot as plt

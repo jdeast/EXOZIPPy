@@ -153,6 +153,7 @@ class RVInstrument(Instrument):
             cls._columns_config_schema(("time", "rv", "err")),
             *cls._time_config_schema(),
             cls._plot_style_config_schema(),
+            cls._label_config_schema(),
             cls._gp_config_schema(),
             cls._likelihood_config_schema(),
         ]
@@ -1301,7 +1302,8 @@ class RVInstrument(Instrument):
         return specs
 
     def _residuals_meta(self, point, shared, x):
-        """The O-C at the observations, as a chart's ``meta["residuals"]``.
+        """The O-C at the observations, as a chart's ``meta["residuals"]``:
+        one residual Trace per instrument, in m/s like the chart's data.
 
         Data minus the likelihood's own model at the observed times: the
         detrend-corrected RVs less gamma, every member orbit's term (the
@@ -1339,4 +1341,4 @@ class RVInstrument(Instrument):
                     style=self._data_trace_style(i),
                 )
             )
-        return {"ylabel": "O-C [m/s]", "traces": traces}
+        return traces

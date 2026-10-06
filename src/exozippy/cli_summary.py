@@ -6,17 +6,16 @@ e -- from the config it ran with and its saved ``<prefix>_trace.nc``, without
 re-sampling.  The figure is ``outputs/summary_plot.create_summary_plot``; this
 is its command line.
 
-The keywords that are mappings (``labels``, ``transit_groups``, a per-row
-``transit_bin``) are awkward as flags, so they come from an ``--options`` YAML
-file whose keys are ``create_summary_plot``'s, e.g.::
+Nothing beyond the config is needed: the title is its ``run: name:``, each
+instrument is shown by its ``label:`` (else its ``name:``), and the TESS files
+are grouped by cadence.  To override any of that without editing the config,
+an optional ``--options`` YAML file takes ``create_summary_plot``'s keywords
+(the mappings are awkward as flags), e.g.::
 
-    title: "TOI-5432"
     labels:
       TCS_MuSCAT2_UT20251116_9: "MuSCAT2 ($i'$)"
-    transit_groups:
-      "TESS 600 s": [TESS_UT20210916, TESS_UT20211107]
     transit_bin:
-      "TESS 600 s": 10
+      "TESS 120 s": 10
 
 A flag given on the command line wins over the same key in the file.
 
