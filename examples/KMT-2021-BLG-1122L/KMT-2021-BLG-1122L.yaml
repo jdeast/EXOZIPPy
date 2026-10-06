@@ -83,3 +83,11 @@ sampler:
   recompute_trace: True
   eval_timeout: 10
   store_hot_chains: True
+  # The DE seed polish has NO eval_timeout (run.md: a config-vocabulary
+  # ruling), and VBM's three-body MultiMag2 aborts its worker ("double free
+  # or corruption") on a small fraction of DE-style proposals: the first
+  # acceptance fit (job 15506216) hung forever at 60/64 proposals back with
+  # zero CPU.  The sampling phase scores a dead worker's call -inf after
+  # eval_timeout and recycles the pool, so skip the polish and let PTDE do
+  # that work.
+  seed_polish: false

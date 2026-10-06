@@ -151,7 +151,18 @@ darkening law, NextGen SED on the source with the pure f_source constraint
 (empty `filters:` list, as in KMT-2019-BLG-1806), wide zeropoint priors
 (the pySIS magnitudes are instrumental).
 
-Acceptance fit: job 15506216 on commit a05449bf (64 cores, `n_temps: auto`),
-started 2026-10-06.  RESULTS: (filled in when it lands -- posterior vs
-Table 2 through the mappings above, and the lens masses under the IMF and
-galactic priors).
+**The first launch hung** (job 15506216, 64 cores): the DE seed polish
+stopped at "sweep 400/400 IN PROGRESS (60/64 proposals back)" with the
+job's CPU time frozen, and stderr carried three `double free or corruption
+(!prev)` aborts from VBMicrolensing's three-body MultiMag2.  A worker that
+aborts takes its proposal with it, and the polish has no `eval_timeout`
+by design (run.md), so it waited forever (review 2.6.35).  The sampling
+phase scores a lost call -inf after `eval_timeout` and recycles the pool,
+so the shipped config sets `seed_polish: false` and lets PTDE do the
+polishing.  `check_vbm_crash.py` measures the abort rate and names the
+proposals that trigger it, in child processes that journal each proposal.
+
+Acceptance fit: job 15506222 on the PR branch (64 cores, `n_temps: auto`,
+no seed polish), started 2026-10-06.  RESULTS: (filled in when it lands --
+posterior vs Table 2 through the mappings above, and the lens masses under
+the IMF and galactic priors).
