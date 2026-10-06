@@ -296,7 +296,6 @@ def test_every_example_directory_has_a_config():
         "validation",
         # README only -- no data and no config committed yet.
         "KMT-2021-BLG-1122L",
-        "ob161045",
     }
     covered = {rel.split("/")[0] for _, rel in _CONFIGS}
 
