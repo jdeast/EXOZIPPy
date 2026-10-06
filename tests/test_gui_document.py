@@ -862,3 +862,127 @@ def test_restore_autosave_without_a_sidecar_raises(project):
 
     with pytest.raises(ValueError, match="no autosaved edits"):
         doc.execute(command_from_json({"op": "restore_autosave", "args": {}}))
+
+
+# --- bare-value params entries ------------------------------------------------
+#
+# `star.A.teff: 5800` and `star.A.teff: [5000, 6000]` are legal user spellings
+# that MEAN `{initval: <value>}` (config.as_field_entry). A field edit used to
+# treat them as "no entry" and replace them, deleting the user's start value.
+
+
+def _one_star(tmp_path, params_text):
+    """A one-star project (A) with a hand-written params file."""
+    config_path = tmp_path / "sys.yaml"
+    config_path.write_text(
+        "star:\n  - name: A\nparameter_file: p.params.yaml\n"
+    )
+    (tmp_path / "p.params.yaml").write_text(params_text)
+    return ProjectDocument.open(config_path)
+
+
+def test_field_edit_keeps_a_bare_number_as_the_initval(tmp_path):
+    """
+    Given a params entry spelled as a bare number with a comment,
+    When another field of it is edited,
+    Then the number survives as `initval`, the comment stays on the key's
+      line, and the key keeps its position.
+    """
+    # Arrange
+    doc = _one_star(
+        tmp_path,
+        "star.A.feh: 0.1\nstar.A.teff: 5800  # mine\nstar.A.logg: 4.4\n",
+    )
+
+    # Act
+    doc.execute(SetParamField("star.A.teff", "sigma", 100))
+
+    # Assert
+    lines = _norm(doc.params_text())
+    assert lines[0] == "star.A.feh: 0.1"
+    assert lines[1].startswith("star.A.teff:") and lines[1].endswith("# mine")
+    assert lines[2:5] == [
+        "  initval: 5800",
+        "  sigma: 100",
+        "star.A.logg: 4.4",
+    ]
+    assert doc.params_text().count("# mine") == 1
+    assert yaml.safe_load(doc.params_text())["star.A.teff"] == {
+        "initval": 5800,
+        "sigma": 100,
+    }
+
+
+def test_field_edit_keeps_a_bare_per_seed_list_as_the_initval(tmp_path):
+    """
+    Given a params entry spelled as a bare per-seed list with a comment,
+    When another field of it is edited,
+    Then the list survives as `initval` and the comment is written once.
+
+    A ruamel list carries its own copy of the line's comment; moving it under
+    `initval:` must not print that comment twice.
+    """
+    # Arrange
+    doc = _one_star(tmp_path, "star.A.teff: [5000, 6000]  # seeds\n")
+
+    # Act
+    doc.execute(SetParamField("star.A.teff", "sigma", 100))
+
+    # Assert
+    text = doc.params_text()
+    assert text.count("# seeds") == 1
+    assert _norm(text)[0].endswith("# seeds")
+    assert yaml.safe_load(text)["star.A.teff"] == {
+        "initval": [5000, 6000],
+        "sigma": 100,
+    }
+
+
+def test_field_edit_is_undoable_back_to_the_bare_spelling(tmp_path):
+    """Given a bare entry edited once, When undone, Then the file is
+    byte-identical to the original bare spelling."""
+    original = "star.A.teff: 5800  # mine\n"
+    doc = _one_star(tmp_path, original)
+    doc.execute(SetParamField("star.A.teff", "sigma", 100))
+
+    doc.undo()
+
+    assert doc.params_text() == original
+
+
+def test_field_edit_refuses_a_bare_string(tmp_path):
+    """
+    Given a bare-string entry (the refused bare link spelling),
+    When a field of it is edited,
+    Then the edit raises the ConfigManager error and changes nothing.
+    """
+    original = "star.A.teff: star.B.teff\n"
+    doc = _one_star(tmp_path, original)
+
+    with pytest.raises(ValueError, match="NON-NUMERIC PARAMETER VALUE"):
+        doc.execute(SetParamField("star.A.teff", "sigma", 100))
+
+    assert doc.params_text() == original
+    assert doc.undo_stack == []
+
+
+def test_to_json_hands_the_editor_bare_entries_as_field_maps(tmp_path):
+    """
+    Given bare-number and bare-list entries,
+    When the document is serialized for the frontend,
+    Then each is the field map it means, so ConfigTab shows the initval --
+      while the file itself is not rewritten.
+    """
+    original = (
+        "star.A.teff: 5800  # mine\n"
+        "star.A.feh: [0.1, 0.2]\n"
+        "star.A.logg:\n  initval: 4.4\n"
+    )
+    doc = _one_star(tmp_path, original)
+
+    blob = doc.to_json()
+
+    assert blob["params"]["star.A.teff"] == {"initval": 5800}
+    assert blob["params"]["star.A.feh"] == {"initval": [0.1, 0.2]}
+    assert blob["params"]["star.A.logg"] == {"initval": 4.4}
+    assert doc.params_text() == original

@@ -33,7 +33,13 @@ from typing import Optional
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
-from ..config import _VALID_INSTANCE_NAME, CITATION_KEYS, canonical_param_key
+from ..config import (
+    _VALID_INSTANCE_NAME,
+    CITATION_KEYS,
+    _reject_bare_string_values,
+    as_field_entry,
+    canonical_param_key,
+)
 from ..linking import LINKABLE_FIELDS, is_link_expression
 from ..yamlio import check_yaml_booleans
 from .datafiles import named_instances
@@ -363,10 +369,7 @@ class SetParamField(Command):
         # Update the entry the file already has for this element, under
         # whatever spelling the user chose -- never append a second one.
         key = doc.param_key_for(self.path)
-        entry = doc.params.get(key)
-        if not isinstance(entry, dict):
-            entry = CommentedMap()
-            doc.params[key] = entry
+        entry = doc.field_entry(key)
         if self.value is None:
             entry.pop(self.field, None)
             # A citation justifies the entry's prior; left on its own it has
@@ -695,6 +698,53 @@ class ProjectDocument:
                 return key
         return path
 
+    def field_entry(self, key):
+        """The params entry under ``key`` as an editable field map, in place.
+
+        A params file may spell an entry three ways -- a dict of fields, a
+        bare number (``star.A.teff: 5800``) or a bare per-seed list -- and the
+        two bare forms MEAN ``{initval: <value>}`` (``config.as_field_entry``,
+        the ConfigManager boundary's one translator, review 1.1.7). A field
+        edit therefore has to start from that meaning, not from "no entry":
+        treating the bare value as absent replaced it, deleting the user's
+        start value with no message (review 1.12.10).
+
+        The bare value is converted to the dict spelling HERE, at the edit,
+        and not on load, so an entry the user never touches keeps its own
+        spelling byte for byte. Assigning to the existing key keeps its
+        position and the comment on its line (ruamel holds that comment on
+        the parent map). A list also carries a COPY of that line's
+        comment on itself, which would print it twice once the list moves
+        under ``initval:``; that duplicate is dropped.
+
+        A bare STRING is refused exactly as ``ConfigManager`` refuses it
+        (``config._reject_bare_string_values``): it cannot say whether a link
+        is hard, soft or a seed, so no field can be written onto it. A NULL
+        or missing entry states no field, so the edit starts a new map.
+        """
+        entry = self.params.get(key)
+        if isinstance(entry, dict):
+            return entry
+        if entry is None:
+            entry = CommentedMap()
+            self.params[key] = entry
+            return entry
+        _reject_bare_string_values({key: entry}, source=self.params_path)
+        field_map = CommentedMap(as_field_entry(entry))
+        initval = field_map["initval"]
+        line_comment = self.params.ca.items.get(key)
+        if (
+            isinstance(initval, CommentedSeq)
+            and initval.ca.comment
+            and line_comment is not None
+            and line_comment[2] is not None
+            and initval.ca.comment[0] is not None
+            and initval.ca.comment[0].value == line_comment[2].value
+        ):
+            initval.ca.comment = None
+        self.params[key] = field_map
+        return field_map
+
     def _instance_indices(self, comp_type):
         """``(names_by_index, index_by_name)`` for a list component.
 
@@ -983,7 +1033,19 @@ class ProjectDocument:
     def to_json(self):
         return {
             "config": _jsonable(self.config),
-            "params": _jsonable(self.params),
+            # Every entry in the field-map spelling the editor reads: a bare
+            # number or per-seed list is shown as the initval it means
+            # (review 1.12.10). A null entry stays null (it states no field);
+            # a bare string is not a legal entry and is passed through as
+            # written rather than displayed as a seed.
+            "params": {
+                str(k): (
+                    _jsonable(v)
+                    if v is None or isinstance(v, (dict, str))
+                    else as_field_entry(_jsonable(v))
+                )
+                for k, v in self.params.items()
+            },
             "config_path": str(self.config_path) if self.config_path else None,
             "params_path": str(self.params_path) if self.params_path else None,
             "dirty": self.dirty,
