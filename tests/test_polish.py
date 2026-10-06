@@ -21,6 +21,7 @@ from pytensor.graph.op import Op
 from exozippy.components.parameter import Parameter
 from exozippy.polish import (
     DEFAULT_POLISH_STEPS,
+    ENGINE_DEFAULT,
     polish_raw_starts,
     resolve_polish_steps,
 )
@@ -42,14 +43,23 @@ def test_gate_auto_polishes_single_start_and_hint_sets_only():
       collapse the restart's overdispersion.
     """
     assert (
-        resolve_polish_steps("auto", n_seeds=1, has_seed_hints=False)
-        == DEFAULT_POLISH_STEPS
+        resolve_polish_steps(
+            "auto", n_seeds=1, has_seed_hints=False, overdisperse=True
+        )
+        is ENGINE_DEFAULT
     )
     assert (
-        resolve_polish_steps("auto", n_seeds=3, has_seed_hints=True)
-        == DEFAULT_POLISH_STEPS
+        resolve_polish_steps(
+            "auto", n_seeds=3, has_seed_hints=True, overdisperse=True
+        )
+        is ENGINE_DEFAULT
     )
-    assert resolve_polish_steps("auto", n_seeds=3, has_seed_hints=False) == 0
+    assert (
+        resolve_polish_steps(
+            "auto", n_seeds=3, has_seed_hints=False, overdisperse=True
+        )
+        == 0
+    )
 
 
 def test_gate_overrides():
@@ -59,12 +69,61 @@ def test_gate_overrides():
     Then they override the provenance logic entirely.
     """
     assert (
-        resolve_polish_steps("on", n_seeds=5, has_seed_hints=False)
-        == DEFAULT_POLISH_STEPS
+        resolve_polish_steps(
+            "on", n_seeds=5, has_seed_hints=False, overdisperse=True
+        )
+        is ENGINE_DEFAULT
     )
-    assert resolve_polish_steps(False, n_seeds=1, has_seed_hints=True) == 0
-    assert resolve_polish_steps("off", n_seeds=1, has_seed_hints=True) == 0
-    assert resolve_polish_steps(42, n_seeds=1, has_seed_hints=False) == 42
+    assert (
+        resolve_polish_steps(
+            False, n_seeds=1, has_seed_hints=True, overdisperse=True
+        )
+        == 0
+    )
+    assert (
+        resolve_polish_steps(
+            "off", n_seeds=1, has_seed_hints=True, overdisperse=True
+        )
+        == 0
+    )
+    assert (
+        resolve_polish_steps(
+            42, n_seeds=1, has_seed_hints=False, overdisperse=True
+        )
+        == 42
+    )
+
+
+def test_gate_auto_never_polishes_declared_posterior_draws(caplog):
+    """
+    Given a params file declaring `overdisperse: false` (its seeds ARE
+      posterior draws -- what mkparam writes for K > 1),
+    When the seed set also carries component seed hints,
+    Then 'auto' does not polish it, and a FORCED polish is honored but
+      warned about.
+
+    Regression (review 2.4.14 (d)): resolve_polish_steps could not see the
+    declaration, so seed hints pushed on top of a mkparam restart switched
+    the polish back on and drove every draw to its basin optimum,
+    collapsing the restart's spread.
+    """
+    # ACT + ASSERT: the declaration outranks the hints
+    assert (
+        resolve_polish_steps(
+            "auto", n_seeds=3, has_seed_hints=True, overdisperse=False
+        )
+        == 0
+    )
+    # ...and a forced polish still runs, loudly
+    with caplog.at_level(logging.WARNING, logger="exozippy.polish"):
+        cap = resolve_polish_steps(
+            "on", n_seeds=3, has_seed_hints=True, overdisperse=False
+        )
+    assert cap is ENGINE_DEFAULT
+    assert "overdisperse: false" in caplog.text
+    # The declaration is required, never defaulted.
+    with pytest.raises(TypeError):
+        resolve_polish_steps("auto", n_seeds=3, has_seed_hints=True)
 
 
 # ---------------------------------------------------------------------------
@@ -345,12 +404,24 @@ def test_integer_one_is_one_step_not_the_default():
     (then 150, now 400).  Every small integer 2..N was honored, which is
     what made the one-value hole invisible.
     """
-    assert resolve_polish_steps(1, n_seeds=1, has_seed_hints=False) == 1
-    assert resolve_polish_steps(2, n_seeds=1, has_seed_hints=False) == 2
+    assert (
+        resolve_polish_steps(
+            1, n_seeds=1, has_seed_hints=False, overdisperse=True
+        )
+        == 1
+    )
+    assert (
+        resolve_polish_steps(
+            2, n_seeds=1, has_seed_hints=False, overdisperse=True
+        )
+        == 2
+    )
     # True must still mean "the default cap", not "1 step".
     assert (
-        resolve_polish_steps(True, n_seeds=1, has_seed_hints=False)
-        == DEFAULT_POLISH_STEPS
+        resolve_polish_steps(
+            True, n_seeds=1, has_seed_hints=False, overdisperse=True
+        )
+        is ENGINE_DEFAULT
     )
 
 
@@ -361,9 +432,24 @@ def test_integer_zero_is_off_and_stays_off():
     Then it is 0 -- the symmetric `0 == False` collision was harmless
       (0 steps IS off) and must stay harmless after the bool fix.
     """
-    assert resolve_polish_steps(0, n_seeds=1, has_seed_hints=False) == 0
-    assert resolve_polish_steps(False, n_seeds=1, has_seed_hints=False) == 0
-    assert resolve_polish_steps(None, n_seeds=1, has_seed_hints=False) == 0
+    assert (
+        resolve_polish_steps(
+            0, n_seeds=1, has_seed_hints=False, overdisperse=True
+        )
+        == 0
+    )
+    assert (
+        resolve_polish_steps(
+            False, n_seeds=1, has_seed_hints=False, overdisperse=True
+        )
+        == 0
+    )
+    assert (
+        resolve_polish_steps(
+            None, n_seeds=1, has_seed_hints=False, overdisperse=True
+        )
+        == 0
+    )
 
 
 def test_de_polish_step_count_is_a_cap_honored_exactly_at_one():
@@ -408,7 +494,7 @@ def test_de_polish_default_is_the_step_cap_not_an_improvement_window():
       is the cap, deliberately.
 
     Why (measured on examples/DC2018_128, tabulated on
-    ptde.POLISH_TOL_NATS): the best-lp history of a T=1 Metropolis
+    ptde.POLISH_TOL_WINDOW): the best-lp history of a T=1 Metropolis
     population is a STAIRCASE of exactly-flat plateaus, so a best-lp
     improvement window fires on a plateau and misses the next jump -- 38 to
     137 nats short there, by the SAME amount at tol = 0.05, 0.5 and 2.0,
@@ -446,14 +532,14 @@ def test_de_polish_improvement_window_is_available_as_an_opt_in():
     Given a caller who opts in with tol/tol_window on a smooth surface,
     When the DE polish runs from a start already at its optimum,
     Then it stops one window past the window length instead of burning the
-      whole cap -- the machinery works; only the DEFAULT is off.
+      whole cap -- the machinery works.  polish_seed_starts' own default is
+      off; the pipeline (polish_raw_starts) turns it on with a 400-sweep
+      window, which is what test_pipeline_de_polish_stops_on_rate pins.
     """
     # ARRANGE
-    from exozippy.samplers.ptde import (
-        POLISH_TOL_NATS,
-        POLISH_TOL_WINDOW,
-        polish_seed_starts,
-    )
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    window = 10
 
     calls = []
 
@@ -471,12 +557,13 @@ def test_de_polish_improvement_window_is_available_as_an_opt_in():
         {"x": np.ones(1)},
         n_steps=150,
         pop_size=pop,
-        tol=POLISH_TOL_NATS,
+        tol=0.05,
+        tol_window=window,
     )
 
     # ASSERT
     sweeps = (len(calls) - pop) / pop
-    assert sweeps == POLISH_TOL_WINDOW + 1
+    assert sweeps == window + 1
     assert dlps[0] >= 0.0
 
 
@@ -487,9 +574,12 @@ def test_an_improvement_window_would_quit_on_a_staircase_plateau():
     When an improvement window of any tolerance is applied to it,
     Then it stops on the first plateau and misses every later jump.
 
-    This is the measurement that keeps the DE tolerance OFF by default,
-    kept as an executable statement so nobody turns it on by analogy with
-    the L-BFGS path's gradient tolerance.  Note the verdict does not move
+    This is the measurement that keeps SHORT windows off the DE engine,
+    kept as an executable statement so nobody shortens the pipeline's
+    400-sweep window by analogy with the L-BFGS path's gradient tolerance:
+    a window stop is only safe because polish_rounds restarts a stopped
+    seed with a fresh population, and because 400 sweeps outlasts every
+    flat run a LIVE population showed (ptde.POLISH_TOL_WINDOW).  Note the verdict does not move
     with the tolerance: the plateaus are EXACTLY flat.
     """
     # ARRANGE: a plateau, a jump, a longer plateau, a bigger jump
@@ -1794,3 +1884,323 @@ def test_polish_raw_starts_forwards_the_engine_choice(monkeypatch):
 
     # ASSERT
     assert seen["asynchronous"] is False
+
+
+# ---------------------------------------------------------------------------
+# Review 2.4.14: the DE cap, the rate stop, the progress line, the rounds
+# ---------------------------------------------------------------------------
+
+
+def _nograd_model():
+    with pm.Model() as model:
+        x = pm.Flat("x")
+        pm.Potential("like", _NoGradSquare()(x))
+    return model
+
+
+def test_pipeline_de_polish_runs_the_raised_cap_without_a_window():
+    """
+    Given the gradient-free engine through polish_raw_starts with the
+      default (engine) cap and the improvement window switched off,
+    When it polishes,
+    Then it runs exactly DEFAULT_DE_POLISH_SWEEPS sweeps: 'auto' resolves to
+      the DE engine's own 10^3 cap (JDE ruling 2026-09-14, "raise the cap"),
+      not the L-BFGS engine's 400.
+    """
+    # ARRANGE
+    from exozippy.polish import DEFAULT_DE_POLISH_SWEEPS
+
+    model = _nograd_model()
+    calls = []
+    lp = model.compile_logp()
+
+    def counting(p):
+        calls.append(1)
+        return lp(p)
+
+    # ACT
+    polish_raw_starts(
+        model,
+        [{"x": np.array(0.0)}],
+        logp_fn=counting,
+        cores=1,
+        tol=None,
+    )
+
+    # ASSERT: pop 8 (D = 1) seeding evaluations + 8 per sweep
+    assert DEFAULT_DE_POLISH_SWEEPS == 1000
+    assert len(calls) == 8 + DEFAULT_DE_POLISH_SWEEPS * 8
+
+
+def test_pipeline_de_polish_stops_on_rate(caplog):
+    """
+    Given a start already at its optimum on the gradient-free engine,
+    When polish_raw_starts runs with its DEFAULT stopping rule,
+    Then the seed stops one 400-sweep window in ("stopped on rate"), not at
+      the 1000-sweep cap -- and says which stop fired.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import POLISH_TOL_WINDOW
+
+    model = _nograd_model()
+    calls = []
+    lp = model.compile_logp()
+
+    def counting(p):
+        calls.append(1)
+        return lp(p)
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        polish_raw_starts(
+            model, [{"x": np.array(3.0)}], logp_fn=counting, cores=1
+        )
+
+    # ASSERT
+    assert POLISH_TOL_WINDOW == 400
+    assert (len(calls) - 8) / 8 == POLISH_TOL_WINDOW + 1
+    assert "stopped on rate" in caplog.text
+
+
+def test_polish_tol_is_half_the_dimension_with_a_one_nat_floor():
+    """
+    Given models of 1, 2 and 54 sampled dimensions,
+    When polish_tol_nats sizes the improvement threshold,
+    Then it is max(1, D/2): the depth of a D-dim posterior's typical set
+      below its maximum, the smallest gain the sampler could notice.
+    """
+    from exozippy.polish import polish_tol_nats
+
+    assert polish_tol_nats(1) == 1.0
+    assert polish_tol_nats(2) == 1.0
+    assert polish_tol_nats(54) == 27.0
+
+
+def test_polish_progress_line_reports_acceptance_and_current_rate(caplog):
+    """
+    Given the DE polish with a heartbeat on every opportunity,
+    When it runs,
+    Then each progress line reports the proposals ACCEPTED since the last
+      line per seed and an eta from the CURRENT sweep rate -- so "flat
+      plateau, still accepting" and "accepting nothing" are told apart
+      (review 2.4.14 (c)).
+    """
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        polish_seed_starts(
+            [{"x": np.array([0.0])}, {"x": np.array([6.0])}],
+            lambda p: float(-0.5 * np.sum((p["x"] - 3.0) ** 2)),
+            np.random.default_rng(0),
+            {"x": np.ones(1)},
+            n_steps=5,
+            pop_size=8,
+            progress_interval_s=1e-9,
+            trust_fraction=None,
+        )
+
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if "accepted since last line=[" in r.getMessage()
+    ]
+    assert lines, caplog.text
+    import re
+
+    m = re.search(
+        r"accepted since last line=\[(\d+)/(\d+), (\d+)/(\d+)\]", lines[-1]
+    )
+    assert m, lines[-1]
+    assert int(m.group(1)) <= int(m.group(2))
+    assert "sweeps/min" in caplog.text
+    assert "accepted" in caplog.text and "proposals, gamma" in caplog.text
+
+
+class _RoundsSystem:
+    """A System reduced to what polish_rounds touches, with the REAL
+    System methods bound to it (so the seed bookkeeping under test is the
+    production code, not a re-implementation)."""
+
+    get_raw_start = System.get_raw_start
+    get_raw_starts = System.get_raw_starts
+    apply_polished_starts = System.apply_polished_starts
+    recenter_whitening_anchor = System.recenter_whitening_anchor
+    _seed_initvals_for = System._seed_initvals_for
+
+    def __init__(self, params, seed_resolved=None):
+        self._params = params
+
+        class _CM:
+            pass
+
+        self.config_manager = _CM()
+        self.config_manager.seed_resolved = seed_resolved
+
+    def get_all_parameters(self):
+        return self._params
+
+
+class _NoGradPeak(Op):
+    """-((x - 7.5) / 0.05)^2 / 2 with NO gradient: a narrow peak far from
+    the start in preliminary units, so round 1 (preliminary scale ~ the
+    bound span) and the re-whitened rounds see very different proposal
+    sizes."""
+
+    itypes = [pt.dvector]
+    otypes = [pt.dscalar]
+
+    def perform(self, node, inputs, outputs):
+        (x,) = inputs
+        outputs[0][0] = np.asarray(-0.5 * np.sum(((x - 7.5) / 0.05) ** 2))
+
+
+def _rounds_model(initval=2.0):
+    p = Parameter(label="toy.x", initval=initval, lower=0.0, upper=10.0)
+    with pm.Model() as model:
+        xv = p.build_pymc()
+        pm.Potential("like", _NoGradPeak()(pt.reshape(xv, (1,))))
+    return model, p
+
+
+def test_polish_rounds_lbfgs_is_one_round_and_unchanged():
+    """
+    Given a DIFFERENTIABLE model (the L-BFGS engine),
+    When polish_rounds runs,
+    Then it is exactly one polish_raw_starts + apply -- the pipeline
+      before review 2.4.14 (run.py re-centers next, as it always did) -- so
+      every model with a gradient keeps a bit-identical start.
+    """
+    # ARRANGE: two identical copies, one through each path
+    model_a, p_a = _toy_param_model()
+    model_b, p_b = _toy_param_model()
+    from exozippy.polish import polish_rounds
+
+    # ACT
+    summary = polish_rounds(
+        _RoundsSystem([p_a]), model_a, cores=1, rewhiten=True
+    )
+    sys_b = _RoundsSystem([p_b])
+    raws, idx = sys_b.get_raw_starts(model_b)
+    polished, _d, _m = polish_raw_starts(model_b, raws, seed_indices=idx)
+    sys_b.apply_polished_starts(polished, idx)
+
+    # ASSERT
+    assert summary["method"] == "lbfgs"
+    assert len(summary["rounds"]) == 1
+    np.testing.assert_array_equal(p_a.raw_initval, p_b.raw_initval)
+    assert p_a.initval == p_b.initval
+
+
+def test_polish_rounds_rewhitens_and_polishes_again_on_the_de_engine(caplog):
+    """
+    Given a gradient-free model and re-whitening on,
+    When polish_rounds runs,
+    Then round 2 runs even if round 1 gained little (round 1 drew its
+      proposals in PRELIMINARY units), the loop ends on a round that gains
+      less than the threshold, and the final start is at least as good as
+      round 1's -- JDE's ruling 2026-09-14 part 3, polish -> re-whiten ->
+      polish.
+    """
+    from exozippy.polish import polish_rounds
+
+    model, p = _rounds_model()
+    system = _RoundsSystem([p])
+    lp = model.compile_logp()
+    lp_start = float(lp(system.get_raw_start(model)))
+
+    with caplog.at_level(logging.INFO, logger="exozippy.polish"):
+        summary = polish_rounds(
+            system, model, cores=1, rewhiten=True, rng=np.random.default_rng(1)
+        )
+
+    lp_end = float(lp(system.get_raw_start(model)))
+    gains = [r[0] for r in summary["rounds"]]
+    assert summary["method"] == "de"
+    assert len(gains) >= 2
+    assert "Seed polish round 2" in caplog.text
+    assert summary["stop"] == "converged"
+    assert gains[-1] < 1.0  # polish_tol_nats(1)
+    assert lp_end == pytest.approx(lp_start + sum(gains), abs=1e-6)
+    assert p.initval == pytest.approx(7.5, abs=0.05)
+
+
+def test_polish_rounds_without_rewhitening_stops_after_a_round_that_gains_nothing():
+    """
+    Given a gradient-free model whose start is already at its optimum and
+      re-whitening OFF (`measure_scales: false`),
+    When polish_rounds runs,
+    Then there is exactly one round: nothing forces a second one, and the
+      first gained less than the threshold.
+    """
+    from exozippy.polish import polish_rounds
+
+    model, p = _rounds_model(initval=7.5)
+    summary = polish_rounds(_RoundsSystem([p]), model, cores=1, rewhiten=False)
+    assert len(summary["rounds"]) == 1
+    assert summary["stop"] == "converged"
+
+
+def test_polish_rounds_polishes_every_seed_in_every_round(monkeypatch):
+    """
+    Given two seeds on a gradient-free model,
+    When polish_rounds runs more than one round,
+    Then every round polishes BOTH seeds, never a subset: the multi-seed
+      trust region is built from the seeds in the call, so a seed polished
+      alone would get an infinite one and could walk into its neighbour's
+      basin.
+    """
+    import exozippy.polish as polish_mod
+
+    model, p = _rounds_model(initval=2.0)
+    seed_resolved = [{"toy.0.x": 2.0}, {"toy.0.x": 9.0}]
+    system = _RoundsSystem([p], seed_resolved=seed_resolved)
+    calls = []
+    real = polish_mod.polish_raw_starts
+
+    def spy(model, raw_starts, **kw):
+        calls.append(list(kw.get("seed_indices")))
+        return real(model, raw_starts, **kw)
+
+    monkeypatch.setattr(polish_mod, "polish_raw_starts", spy)
+
+    polish_mod.polish_rounds(
+        system, model, cores=1, rewhiten=True, max_rounds=3
+    )
+
+    assert len(calls) >= 2
+    assert all(c == [0, 1] for c in calls)
+
+
+def test_seeds_walked_together_across_rounds_are_warned_about(caplog):
+    """
+    Given two seeds that started far apart and, after some rounds, sit
+      almost on top of each other,
+    When the across-round coverage check runs,
+    Then it warns, measuring both separations in the CURRENT coordinates --
+      the per-round trust region cannot see drift that accumulates across
+      re-whitenings.
+    """
+    from exozippy.polish import (
+        _seed_physical,
+        _warn_if_seeds_converged,
+    )
+
+    model, p = _rounds_model(initval=2.0)
+    seed_resolved = [{"toy.0.x": 2.0}, {"toy.0.x": 9.0}]
+    system = _RoundsSystem([p], seed_resolved=seed_resolved)
+    lookup = {p.label: p}
+    raws, idx = system.get_raw_starts(model)
+    origins = [_seed_physical(lookup, r) for r in raws]
+    # Both seeds now polished onto the same peak.
+    system.apply_polished_starts(
+        [
+            {"toy.x_raw": np.asarray(p.raw_from_initval(np.array([7.49])))},
+            {"toy.x_raw": np.asarray(p.raw_from_initval(np.array([7.51])))},
+        ],
+        idx,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="exozippy.polish"):
+        _warn_if_seeds_converged(system, model, lookup, origins, 3)
+
+    assert "after round 3, seeds 0 and 1" in caplog.text

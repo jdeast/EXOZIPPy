@@ -69,6 +69,7 @@ import numpy as np
 import pymc as pm
 import pytest
 
+from exozippy import polish as polish_module
 from exozippy import run as run_module
 
 pytestmark = pytest.mark.slow
@@ -460,7 +461,9 @@ def nuts_dispatch(tmp_path_factory):
 
     orig_cwd = os.getcwd()
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(run_module, "polish_raw_starts", stub_polish)
+        # run.py polishes through polish.polish_rounds, which looks its
+        # engine up in the polish module -- so that is where the stub goes.
+        mp.setattr(polish_module, "polish_raw_starts", stub_polish)
         mp.setattr(System, "get_mcmc_init", spy_get_mcmc_init)
         mp.setattr(System, "recenter_whitening_anchor", spy_recenter)
         mp.setattr(pm, "sample", stub_sample)

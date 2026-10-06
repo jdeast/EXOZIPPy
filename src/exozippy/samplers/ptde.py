@@ -111,18 +111,22 @@ from exozippy.whitening import (
     probe_step_1d as _probe_step_1d,
 )
 
-# OPT-IN improvement tolerance for the gradient-free polish: stop when the
-# best point found has gained less than `tol` nats over the last `tol_window`
-# sweeps.  DEFAULT OFF (tol=None), and that default is measured, not timid.
+# IMPROVEMENT WINDOW for the gradient-free polish: a seed stops when its best
+# point has gained less than `tol` nats over the last `tol_window` sweeps.
+# polish_seed_starts' own default is still OFF (tol=None: run the cap).  The
+# PIPELINE turns it on -- polish.polish_raw_starts passes
+# tol = polish.polish_tol_nats(D) over POLISH_TOL_WINDOW sweeps (review
+# 2.4.14, JDE ruling 2026-09-14) -- and this note is why that is safe there
+# when it was not before.
 #
-# The L-BFGS engine stops on its GRADIENT NORM by default (polish.py
-# _LBFGS_GTOL) -- an actual statement about the local surface.  No such
-# quantity exists here; this engine is gradient-free by construction.  The
-# only observable is the best-lp history, and on a real binary-lens surface
-# that history is a STAIRCASE: exactly-flat plateaus punctuated by jumps,
-# because best_lp is the running maximum of a T=1 Metropolis population that
-# spends many sweeps before one member escapes to a better region.  Measured
-# on examples/DC2018_128 (2 seeds, 300 sweeps, pop 38):
+# The L-BFGS engine stops on its GRADIENT NORM (polish.py _LBFGS_GTOL) -- an
+# actual statement about the local surface.  No such quantity exists here;
+# this engine is gradient-free by construction.  The only observable is the
+# best-lp history, and on a real binary-lens surface that history is a
+# STAIRCASE: exactly-flat plateaus punctuated by jumps, because best_lp is the
+# running maximum of a T=1 Metropolis population that spends many sweeps
+# before one member escapes to a better region.  Measured on
+# examples/DC2018_128 (2 seeds, 300 sweeps, pop 38), SHORT windows:
 #
 #   window  seed 0 stops at   nats missed    seed 1 stops at   nats missed
 #     10        sweep 11          73.2          sweep 20          136.5
@@ -130,21 +134,40 @@ from exozippy.whitening import (
 #     30        sweep 46          38.8          sweep 40          136.5
 #     50        sweep 66          38.8          sweep 158          11.3
 #
-# and the shortfall is IDENTICAL for tol = 0.05, 0.5 and 2.0 nats, which is
-# the proof: the plateaus are exactly flat, so no threshold separates "has
-# converged" from "has not jumped yet".  Widening the window only delays the
-# same mistake.  A rule that costs 38-137 nats of start quality to save
-# sweeps is the opposite of the point -- the polish exists because a start
-# far below its basin optimum poisons the whitening probe (polish.py).
+# and the shortfall is IDENTICAL for tol = 0.05, 0.5 and 2.0 nats: the
+# plateaus are exactly flat, so no threshold separates "has converged" from
+# "has not jumped yet".  That is still true at any window length, and it is
+# why the threshold below is not tuned against it.
 #
-# So this engine's default stopping criterion stays the step CAP.  These
-# constants are the values used when a caller does opt in (tol=..., e.g. for
-# a surface known to be smooth, or a re-polish of an already-polished point).
+# Two things make a window usable anyway, and both are measured:
+#
+# 1. A stop no longer ENDS the polish.  The pipeline runs it in ROUNDS
+#    (polish.polish_rounds): a seed that stops is re-whitened at its best
+#    point and re-polished by a FRESH population, and the loop ends only when
+#    a WHOLE round gains less than the tolerance.  A stop on a flat step
+#    costs one probe and a restart, not start quality.
+# 2. The window is long enough that a LIVE population does not trip it.  The
+#    same two DC2018_128 seeds run to 15000 sweeps (pop 54; the trajectories
+#    are examples/DC2018/dc128_polish_traj_seed{0,1}.csv): the longest flat
+#    run in a fresh population's first 1000 sweeps is 168 / 228 sweeps, and
+#    those 1000 sweeps bring 80% / 74% of the 15000-sweep gain (3910 of 4910,
+#    5010 of 6816 nats).  The long plateaus -- 647 to 8222 sweeps -- all come
+#    later, from a population that has FROZEN: the share of sweeps accepting
+#    nothing climbs from 14-21% in the first 250 to 80-90% after sweep
+#    ~2000.  A 400-sweep window (the ruling's ">= 400-sweep windows";
+#    W = 400 is 1.75x the longest live flat run) therefore fires on the
+#    frozen population, which is exactly where a restart pays: the 14000
+#    sweeps after the first 1000 bought 1000 / 1806 more nats at 14x the
+#    cost, while 150-sweep restart legs re-jittered at each leg's best reached
+#    the DC2018-226 plateau ~40x faster in wall clock than one long polish.
+#    Measured on those histories, the window's first stop is the SAME sweep
+#    for tol = 1, 13.5 (D/2) and 50 nats at W = 400 (1493 and 1989): the
+#    threshold does not matter, the window length does.
+#
 # ABSOLUTE nats, never relative to |lp|: logp carries an arbitrary additive
 # normalization, so a relative threshold means something different for every
 # model -- the trap documented on polish._LBFGS_FTOL.
-POLISH_TOL_NATS = 0.05
-POLISH_TOL_WINDOW = 10
+POLISH_TOL_WINDOW = 400
 
 
 # Acceptance the polish adapts gamma toward, and how many proposals it
@@ -203,10 +226,13 @@ def polish_seed_starts(
     difference-vector proposals, the same move the sampler itself uses), and
     return the best-lp point visited as the new seed.
 
-    Stopping: ``n_steps`` sweeps.  An improvement tolerance is available
-    (``tol`` nats over the last ``tol_window`` sweeps) but is OFF by default
-    -- see the POLISH_TOL_NATS comment for the measurement that says why a
-    best-lp window cannot be trusted on this engine.
+    Stopping: ``n_steps`` sweeps, or -- when ``tol`` is given -- a seed whose
+    best point gained less than ``tol`` nats over its last ``tol_window``
+    sweeps.  This function's own default is the cap (``tol=None``); the
+    pipeline's caller, polish.polish_raw_starts, turns the window on and runs
+    the polish in rounds -- see the POLISH_TOL_WINDOW comment for the
+    measurement behind both.  The wrap-up line names which stop fired
+    ("stopped on rate" / "stopped on cap").
 
     Rationale: an unpolished solution-estimate seed (e.g. an external
     fitter's solution) can start hundreds of nats below its own basin's optimum, and
@@ -236,7 +262,7 @@ def polish_seed_starts(
     The reason is that 0.2 target acceptance is a SAMPLING criterion and
     this stage is OPTIMIZING.  The oversized fixed step lands few proposals
     but the ones it lands are large, and those rare jumps are what climb
-    the basin -- exactly the staircase POLISH_TOL_NATS documents.  Tuning
+    the basin -- exactly the staircase POLISH_TOL_WINDOW documents.  Tuning
     to 0.2 trades a few big productive leaps for many small well-behaved
     ones: better mixing, worse hill-climbing.  Leave this off unless you
     have measured otherwise on YOUR model.
@@ -455,6 +481,10 @@ def polish_seed_starts(
 
     t_start = time.monotonic()
     t_last_log = t_start
+    # The previous progress line's sweep count, clock and per-seed
+    # acceptance totals: the next line reports the CURRENT rate and what
+    # was accepted in between.  Filled once the populations are scored.
+    beat = {"t": t_start, "done": 0.0, "acc": [], "prop": []}
 
     def _heartbeat(n_swept, n_live=None, partial=None):
         """One progress line, RATE-LIMITED to `progress_interval_s`.
@@ -488,8 +518,6 @@ def polish_seed_starts(
                 f"elapsed={fmt_duration(elapsed)}"
             )
             return
-        # The ETA is an UPPER bound and labelled as one: the cap is what it
-        # extrapolates to, and an opted-in tolerance can end the run earlier.
         if partial is None:
             n_done = float(n_swept)
             where = f"sweep {n_swept}/{int(n_steps)}"
@@ -500,17 +528,42 @@ def polish_seed_starts(
                 f"sweep {n_swept + 1}/{int(n_steps)} IN PROGRESS "
                 f"({k}/{m} proposals back)"
             )
-        eta = (
-            fmt_duration(elapsed / n_done * (int(n_steps) - n_done))
-            if n_done > 0
-            else "?"
+        # The ETA comes from the CURRENT rate -- the sweeps completed since
+        # the previous line over the time since it -- not from the history
+        # average.  On DC2018-226 the sweep rate fell 66/min -> 2.6/min as the
+        # population migrated into the expensive region, and the average
+        # understated the remaining time 3x (review 2.4.14).  It is an UPPER
+        # bound and labelled as one: the cap is what it extrapolates to, and
+        # the improvement window can end a seed earlier.  A beat with no sweep
+        # progress since the last one says so rather than inventing a rate.
+        d_done = n_done - beat["done"]
+        d_t = now - beat["t"]
+        if d_done > 0 and d_t > 0:
+            rate = d_done / d_t
+            eta = fmt_duration((int(n_steps) - n_done) / rate)
+            rate_txt = f"{60.0 * rate:.3g} sweeps/min"
+        else:
+            eta = "?"
+            rate_txt = "no sweep completed since the last line"
+        # Accepted proposals since the previous line, per seed.  "A flat
+        # plateau, still accepting" (the population is moving and may yet
+        # jump) and "accepting nothing" (a frozen population, 84-88% of
+        # sweeps on ob09020) are different states that the dlp column alone
+        # cannot tell apart.
+        acc = ", ".join(
+            f"{st['n_acc_tot'] - a0}/{st['n_prop_tot'] - p0}"
+            for st, a0, p0 in zip(states, beat["acc"], beat["prop"])
         )
+        beat["t"], beat["done"] = now, n_done
+        beat["acc"] = [st["n_acc_tot"] for st in states]
+        beat["prop"] = [st["n_prop_tot"] for st in states]
         gains = ", ".join(f"{st['best_lp'] - st['lp0']:+.1f}" for st in states)
         logger.info(
             f"PTDE seed polish: {where}  "
             f"elapsed={fmt_duration(elapsed)}  "
-            f"eta<={eta}  "
-            f"dlp=[{gains}]  ({n_live} seed(s) still running)"
+            f"eta<={eta} ({rate_txt})  "
+            f"dlp=[{gains}]  accepted since last line=[{acc}]  "
+            f"({n_live} seed(s) still running)"
         )
 
     # --- build every seed's population, then score them all in one batch ---
@@ -586,6 +639,10 @@ def polish_seed_starts(
                 "gamma": float(gamma),
                 "n_acc": 0,
                 "n_prop": 0,
+                # Run totals for the progress line; n_acc / n_prop above are
+                # reset by every gamma adaptation window.
+                "n_acc_tot": 0,
+                "n_prop_tot": 0,
                 "n_acc_member": np.zeros(pop_size, dtype=int),
                 "n_done": 0,  # completed proposals (async budget)
                 "history": [],
@@ -594,6 +651,8 @@ def polish_seed_starts(
                 "stop": "cap",
             }
         )
+    beat["acc"] = [0] * n_seeds
+    beat["prop"] = [0] * n_seeds
 
     def _propose(s, i):
         pop, g = pops[s], states[s]["gamma"]
@@ -609,6 +668,7 @@ def polish_seed_starts(
         """One Metropolis test for member i of seed s; shared by both engines."""
         st = states[s]
         st["n_prop"] += 1
+        st["n_prop_tot"] += 1
         if np.isnan(lp):
             n_nan[0] += 1
         if np.isfinite(lp) and np.log(rng.random()) < lp - st["lps"][i]:
@@ -617,6 +677,7 @@ def polish_seed_starts(
                 return
             pops[s][i], st["lps"][i] = prop, lp
             st["n_acc"] += 1
+            st["n_acc_tot"] += 1
             st["n_acc_member"][i] += 1
             if lp > st["best_lp"]:
                 st["best_lp"] = lp
@@ -834,15 +895,21 @@ def polish_seed_starts(
     for s, st in enumerate(states):
         polished.append(st["best"])
         dlps.append(st["best_lp"] - st["lp0"])
+        # "on rate" and "on cap" in so many words: the two stops mean
+        # different things to whoever reads the log (a seed still climbing
+        # at its cap is a candidate for another round; one that stopped on
+        # rate ran a whole window without gaining).
         reason = (
-            f"converged: < {tol} nats over {tol_window} sweeps"
+            f"stopped on rate: gained < {tol:.3g} nats over the last "
+            f"{tol_window} sweeps"
             if st["stop"] == "tol"
-            else f"hit the {int(n_steps)}-step cap"
+            else f"stopped on cap: ran all {int(n_steps)} sweeps"
         )
         logger.info(
             f"PTDE seed polish: seed {s} lp {st['lp0']:.1f} -> "
             f"{st['best_lp']:.1f} (dlp=+{st['best_lp'] - st['lp0']:.1f}, "
-            f"{st['steps']} steps x {pop_size} pop, gamma "
+            f"{st['steps']} steps x {pop_size} pop, accepted "
+            f"{st['n_acc_tot']}/{st['n_prop_tot']} proposals, gamma "
             f"{gamma:.4f}->{st['gamma']:.4f}, {reason})"
         )
         # Where the population ENDED, not only its best member.  At the
@@ -1304,6 +1371,10 @@ def ptde_sample(
         )
 
     _sig_token = _common.install_stop_handlers(_stop_handler)
+    # Per-step wall-clock alarm (review 2.4.14 (e)): a step that runs far
+    # longer than its peers says so WHILE it runs, and which phase it is in
+    # -- the parallel logp batch ("eval") or the serial work around it.
+    step_alarm = _common.StepAlarm("PTDE", logger)
     try:
         # initial logp evaluations
         flat_starts = [
@@ -1393,6 +1464,7 @@ def ptde_sample(
             phase = "tune" if step < tune else "draw"
             draw_idx = step - tune
             _t0 = time.time()
+            step_alarm.begin(step + 1, "build proposals")
 
             # Acceptance/swap counters restart at the tune -> draw boundary,
             # UNCONDITIONALLY.  They are diagnostics -- nothing statistical
@@ -1442,6 +1514,7 @@ def ptde_sample(
                     props_hop.append(hop)
                     prop_map.append((k, i))
             _t_build = time.time()
+            step_alarm.phase("eval (parallel logp batch)")
 
             # 2. evaluate all logps in parallel
             prop_labels = [f"rung {k} chain {i}" for k, i in prop_map]
@@ -1452,6 +1525,9 @@ def ptde_sample(
                 rungs=[k for k, i in prop_map],
             )
             _t_eval = time.time()
+            step_alarm.phase(
+                "rest (accept/swap, storage, adaptation, convergence check)"
+            )
 
             # 3. Metropolis accept/reject at effective temperature T_k
             for idx, (k, i) in enumerate(prop_map):
@@ -1743,6 +1819,8 @@ def ptde_sample(
                     break
 
     finally:
+        step_alarm.end()
+        step_alarm.close()
         _common.restore_stop_handlers(_sig_token)
         if pool is not None:
             # _shutdown_pool, not close()+join(): close() waits for every

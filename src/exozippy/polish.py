@@ -31,10 +31,11 @@ Two engines, dispatched on gradient availability:
   the gradient graph cannot be built or is non-finite at the start -- e.g.
   the binary-lens magnification Op has no analytic gradient.
 
-Stopping: `seed_polish: N` (default DEFAULT_POLISH_STEPS) is a step CAP, not
-a target -- "at most N".  The two engines stop differently, because they see
-different information and the differentiable one's criterion has no
-counterpart on the other path:
+Stopping: `seed_polish: N` (default: each engine's own cap,
+DEFAULT_POLISH_STEPS L-BFGS iterations or DEFAULT_DE_POLISH_SWEEPS DE sweeps
+per round) is a step CAP, not a target -- "at most N".  The two engines stop
+differently, because they see different information and the differentiable
+one's criterion has no counterpart on the other path:
 
 - L-BFGS-B stops on the GRADIENT NORM (_LBFGS_GTOL, nats per raw unit) with
   maxiter as its safety net.  That is a real statement about the local
@@ -63,15 +64,21 @@ counterpart on the other path:
 - The gradient-free DE polish (samplers.ptde.polish_seed_starts) has no
   gradient by construction -- it exists because the binary-lens
   magnification Op has none -- and its only observable, the best-lp history,
-  is a STAIRCASE of exactly-flat plateaus.  A best-lp improvement window
-  therefore cannot separate "converged" from "has not jumped yet": on
-  examples/DC2018_128 it stops 38-137 nats short, by the SAME amount for
-  tol = 0.05, 0.5 and 2.0 nats.  The measurement is tabulated on
-  ptde.POLISH_TOL_NATS.  That engine's default stopping criterion is
-  therefore the step cap; the tolerance is an opt-in
-  (polish_raw_starts(tol=...)) for a surface known to be smooth.
+  is a STAIRCASE of exactly-flat plateaus, so no improvement threshold
+  separates "converged" from "has not jumped yet" (ptde.POLISH_TOL_WINDOW
+  has the measurements).  It is therefore run in ROUNDS (polish_rounds,
+  review 2.4.14, JDE ruling 2026-09-14): each round runs at most
+  DEFAULT_DE_POLISH_SWEEPS sweeps and a seed leaves it early when its best
+  point gains less than polish_tol_nats(D) over the last
+  ptde.POLISH_TOL_WINDOW = 400 sweeps ("stopped on rate"); between rounds
+  the model is re-whitened at the polished point and the next round starts
+  a FRESH population there.  The loop ends when a whole round gains less
+  than polish_tol_nats(D), or at POLISH_MAX_ROUNDS.  A stop on a flat step
+  is therefore cheap -- one probe and a restart -- and the last word belongs
+  to a fresh population in measured coordinates, never to a stale one.
 
-The cap always remains, so nothing can polish forever.
+The caps always remain (per round and on the number of rounds), so nothing
+can polish forever.
 
 Seed-provenance gate (resolve_polish_steps): 'auto' polishes SOLUTION
 ESTIMATES -- the single canonical start (user/literature initvals, the
@@ -79,7 +86,11 @@ relaxation engine's solution) and component seed sets -- but never a
 multi-seed set WITHOUT seed hints, which is a posterior-draw restart
 (mkparam stratified draws): those are already at equilibrium, and polishing
 K draws per basin would collapse them onto K copies of the basin optimum,
-destroying the restart's overdispersion.
+destroying the restart's overdispersion.  Nor, since review 2.4.14 (d), a
+params file that DECLARES its seeds to be posterior draws
+(`overdisperse: false`, which mkparam writes for K > 1): the declaration is
+the writer's statement, and seed hints pushed by a component on top of such
+a file used to switch the polish back on and collapse the draws.
 """
 
 import logging
@@ -89,11 +100,61 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Step CAP on the polish -- "at most this many" -- not a target.  On the
-# L-BFGS path the gradient tolerance usually ends it first; on the
-# gradient-free path the cap IS the criterion (see "Stopping" in the module
-# docstring for the measurement behind both statements).
+# Step CAP on the L-BFGS polish -- "at most this many" iterations -- not a
+# target: the gradient tolerance usually ends it first (see "Stopping" in the
+# module docstring for the measurement).
 DEFAULT_POLISH_STEPS = 400
+
+# Per-ROUND sweep cap on the gradient-free DE polish (review 2.4.14, JDE
+# ruling 2026-09-14: "raise the cap").  Order 10^3, not 10^4, because that is
+# where a fresh population does its work: on examples/DC2018_128's two seeds
+# run to 15000 sweeps, the first 1000 brought 80% / 74% of the total gain and
+# the next 14000 the rest, at 14x the cost, from a population that had
+# frozen (80-90% of its sweeps accepting nothing).  More sweeps than that go
+# to a NEW round -- re-whitened, re-populated -- instead (polish_rounds).
+DEFAULT_DE_POLISH_SWEEPS = 1000
+
+# Cap on the number of DE polish rounds.  With the per-round cap this bounds
+# the polish at 8000 sweeps; the accepted price (JDE 2026-09-14: CPU-days, on
+# EXOFASTv2 precedent) is the wall clock, not the bound.
+POLISH_MAX_ROUNDS = 8
+
+
+class _EngineDefaultCap:
+    """Sentinel step cap: "the dispatched engine's own default".
+
+    The two engines have different caps (DEFAULT_POLISH_STEPS iterations for
+    L-BFGS, DEFAULT_DE_POLISH_SWEEPS sweeps per round for DE), and which one
+    runs is only known once the gradient graph has been tried -- so
+    resolve_polish_steps cannot return a number for 'auto'/'on'.  Truthy, so
+    `if polish_steps:` still reads "polish".
+    """
+
+    def __repr__(self):
+        return "ENGINE_DEFAULT"
+
+
+ENGINE_DEFAULT = _EngineDefaultCap()
+
+
+def polish_tol_nats(n_params):
+    """The DE polish's improvement threshold, in nats, for a D-dim model.
+
+    max(1, D/2): a T=1 posterior's typical set lies ~D/2 nats below its
+    maximum (the mean of chi2_D / 2), so a polish gain smaller than that
+    moves the start by less than the depth the sampler will spread its chains
+    over anyway -- it is invisible to everything downstream.  Used twice, for
+    the same reason: as the in-round window threshold (a seed that gains less
+    than this over ptde.POLISH_TOL_WINDOW sweeps stops) and as the round
+    threshold (a round that gains less than this ends the loop).  The floor
+    keeps a 1-parameter model from stopping on a half-nat jitter.  ABSOLUTE
+    nats; see _LBFGS_FTOL for why never relative to |lp|.  Measured on the
+    DC2018_128 histories the window's stop does not depend on the threshold
+    (tol 1, 13.5 = D/2 and 50 nats stop on the same sweep): the staircase
+    makes the window LENGTH the operative choice.
+    """
+    return max(1.0, 0.5 * float(n_params))
+
 
 # L-BFGS stopping: terminate on the GRADIENT (plus the maxiter cap),
 # never on per-iteration improvement. scipy's `ftol` fires on the FIRST
@@ -160,16 +221,25 @@ _NONFINITE_PENALTY = 1e15
 _UNSET = object()
 
 
-def resolve_polish_steps(spec, n_seeds, has_seed_hints):
+def resolve_polish_steps(spec, n_seeds, has_seed_hints, *, overdisperse):
     """Map the sampler-config `seed_polish` value to a step CAP.
 
-    'auto' (default): DEFAULT_POLISH_STEPS when the starts are solution
-    estimates -- a single canonical start (n_seeds == 1) or component-pushed
-    seed hints (the peak finder) -- and 0 for a multi-seed set without hints
-    (posterior-draw restarts; see module docstring).  True/'on' and
-    False/None/'off' force it; an int gives the cap directly (`seed_polish: N`
-    = "at most N steps", not "exactly N" -- both engines stop on their own
-    tolerance first; see "Stopping" in the module docstring).
+    'auto' (default): ENGINE_DEFAULT (the dispatched engine's own cap) when
+    the starts are solution estimates -- a single canonical start
+    (n_seeds == 1) or component-pushed seed hints (the peak finder) -- and 0
+    for a multi-seed set without hints (posterior-draw restarts; see module
+    docstring), and 0 whenever the params file declares
+    `overdisperse: false` (``overdisperse``, System.overdisperse): the
+    writer's statement that its seeds ARE posterior draws outranks seed
+    hints a component pushed on top of them (review 2.4.14 (d)).
+    True/'on' and False/None/'off' force it; an int gives the cap directly
+    (`seed_polish: N` = "at most N steps" -- per ROUND on the DE engine --
+    not "exactly N"; both engines stop on their own criterion first; see
+    "Stopping" in the module docstring).  Forcing a polish onto a declared
+    posterior-draw set is honored but warned about.
+
+    ``overdisperse`` is REQUIRED: it was the missing input (2.4.14 (d)), and
+    a default would let the next call site forget it the same way.
 
     The bool test comes FIRST and by isinstance.  `spec in (True, "on")`
     matched the integer 1 (1 == True in Python), so `seed_polish: 1` asked
@@ -177,21 +247,34 @@ def resolve_polish_steps(spec, n_seeds, has_seed_hints):
     symmetric `0 == False` match was harmless -- 0 steps IS off -- and stays
     harmless here: 0 now falls through to the int path and returns 0.
     """
+    if not isinstance(overdisperse, bool):
+        raise TypeError(
+            f"resolve_polish_steps: overdisperse must be the params file's "
+            f"boolean declaration (System.overdisperse), got {overdisperse!r}"
+        )
     if isinstance(spec, bool):
-        return DEFAULT_POLISH_STEPS if spec else 0
-    if spec is None:
-        return 0
-    if isinstance(spec, str):
-        key = spec.lower()
-        if key == "auto":
-            return (
-                DEFAULT_POLISH_STEPS if (n_seeds == 1 or has_seed_hints) else 0
-            )
-        if key == "on":
-            return DEFAULT_POLISH_STEPS
-        if key == "off":
+        cap = ENGINE_DEFAULT if spec else 0
+    elif spec is None:
+        cap = 0
+    elif isinstance(spec, str) and spec.lower() == "auto":
+        if not overdisperse:
             return 0
-    return max(0, int(spec))
+        return ENGINE_DEFAULT if (n_seeds == 1 or has_seed_hints) else 0
+    elif isinstance(spec, str) and spec.lower() == "on":
+        cap = ENGINE_DEFAULT
+    elif isinstance(spec, str) and spec.lower() == "off":
+        cap = 0
+    else:
+        cap = max(0, int(spec))
+    if cap and not overdisperse and n_seeds > 1:
+        logger.warning(
+            f"seed_polish: {spec!r} forces the polish onto {n_seeds} seeds "
+            f"the params file declares to be posterior draws "
+            f"(`overdisperse: false`).  Each will be driven to its basin "
+            f"optimum, which collapses the draws' spread; set "
+            f"`seed_polish: auto` to keep them as written."
+        )
+    return cap
 
 
 def _compile_logp_grad(model):
@@ -288,7 +371,7 @@ def _lbfgs_polish_one(center, fn_lp_grad, keys, shapes, sizes, maxiter):
 def polish_raw_starts(
     model,
     raw_starts,
-    n_steps=DEFAULT_POLISH_STEPS,
+    n_steps=ENGINE_DEFAULT,
     seed_indices=None,
     logp_fn=None,
     rng=None,
@@ -298,6 +381,7 @@ def polish_raw_starts(
     adapt_gamma=_UNSET,
     eval_timeout=None,
     asynchronous=True,
+    engine=None,
 ):
     """Polish each raw start toward its own basin's optimum.
 
@@ -307,11 +391,20 @@ def polish_raw_starts(
     = one preliminary whitening scale, DE's population self-adapts from
     there).
 
-    ``n_steps`` is the safety CAP for either engine; each stops on its own
-    tolerance first (see "Stopping" in the module docstring).  ``tol`` /
-    ``tol_window`` override the DE engine's tolerance (``tol=None`` restores
-    a fixed ``n_steps`` sweeps); they do not reach the L-BFGS path, which
-    stops on _LBFGS_GTOL.
+    ``n_steps`` is the safety CAP for either engine (ENGINE_DEFAULT: the
+    dispatched engine's own, DEFAULT_POLISH_STEPS iterations or
+    DEFAULT_DE_POLISH_SWEEPS sweeps); each stops on its own criterion first
+    (see "Stopping" in the module docstring).  On the DE engine that
+    criterion is the improvement window, ON by default here:
+    ``polish_tol_nats(D)`` nats over the last ptde.POLISH_TOL_WINDOW sweeps.
+    ``tol`` / ``tol_window`` override it (``tol=None`` restores a fixed
+    ``n_steps`` sweeps); they do not reach the L-BFGS path, which stops on
+    _LBFGS_GTOL.  This is ONE round; polish_rounds is the pipeline's loop.
+
+    ``engine`` (None = dispatch on the gradient, as above) may be ``"de"`` to
+    skip the gradient attempt -- what polish_rounds passes for its later
+    rounds, where round 1 has already found the graph has no usable
+    gradient.
 
     ``cores`` is the DE engine's worker grant; None means AUTO (the same
     rule a sampler uses when nothing names one), and ``cores=1`` is how a
@@ -348,7 +441,19 @@ def polish_raw_starts(
     shapes = [np.shape(raw_starts[0][k]) for k in keys]
     sizes = [int(np.asarray(raw_starts[0][k]).size) for k in keys]
 
-    fn_lp_grad = _compile_logp_grad(model)
+    if engine not in (None, "de"):
+        raise ValueError(
+            f"polish_raw_starts: engine={engine!r}; expected None (dispatch "
+            f"on the gradient) or 'de'"
+        )
+    lbfgs_cap = (
+        DEFAULT_POLISH_STEPS if n_steps is ENGINE_DEFAULT else int(n_steps)
+    )
+    de_cap = (
+        DEFAULT_DE_POLISH_SWEEPS if n_steps is ENGINE_DEFAULT else int(n_steps)
+    )
+
+    fn_lp_grad = None if engine == "de" else _compile_logp_grad(model)
     if fn_lp_grad is not None:
         vals = fn_lp_grad(raw_starts[0])
         grad_finite = np.all(
@@ -365,12 +470,12 @@ def polish_raw_starts(
         polished, dlps = [], []
         for s, center in enumerate(raw_starts):
             best, lp0, lp_best, n_evals, n_iter, hit_cap = _lbfgs_polish_one(
-                center, fn_lp_grad, keys, shapes, sizes, maxiter=n_steps
+                center, fn_lp_grad, keys, shapes, sizes, maxiter=lbfgs_cap
             )
             polished.append(best)
             dlps.append(lp_best - lp0)
             reason = (
-                f"hit the {int(n_steps)}-iteration cap"
+                f"hit the {lbfgs_cap}-iteration cap"
                 if hit_cap
                 else f"converged: |grad| < {_LBFGS_GTOL} nats/unit"
             )
@@ -392,7 +497,10 @@ def polish_raw_starts(
     scales = {
         k: np.ones(np.shape(raw_starts[0][k]), dtype=float) for k in keys
     }
-    de_kwargs = {}
+    # The improvement window is ON by default on this path (the module
+    # docstring's "Stopping"; ptde.POLISH_TOL_WINDOW has the measurements).
+    n_params = int(sum(sizes))
+    de_kwargs = {"tol": polish_tol_nats(n_params)}
     if tol is not _UNSET:
         de_kwargs["tol"] = tol
     if tol_window is not _UNSET:
@@ -415,7 +523,7 @@ def polish_raw_starts(
         logger.info(
             f"Seed polish: DE engine on {n_proc} worker process(es), "
             f"proposals pooled across all {len(raw_starts)} seed(s), "
-            f"at most {int(n_steps)} sweeps."
+            f"at most {de_cap} sweeps."
         )
     else:
         # The serial case is ANNOUNCED, not silent.  "gradient graph
@@ -429,7 +537,7 @@ def polish_raw_starts(
         logger.info(
             f"Seed polish: DE engine running SERIAL on one core "
             f"(cores={cores!r}), {len(raw_starts)} seed(s), at most "
-            f"{int(n_steps)} sweeps; this gradient-free branch is far more "
+            f"{de_cap} sweeps; this gradient-free branch is far more "
             f"expensive than L-BFGS."
         )
     _common.warn_serial_eval_timeout(
@@ -456,7 +564,7 @@ def polish_raw_starts(
             _common._eval_logp if pool is not None else logp_fn,
             rng,
             scales,
-            n_steps=n_steps,
+            n_steps=de_cap,
             pool=pool,
             eval_timeout=eval_timeout,
             pool_recycler=_recycle if pool is not None else None,
@@ -471,6 +579,253 @@ def polish_raw_starts(
             # has SIGTERM-ignoring workers on top of that (review 2.4.1).
             _common._shutdown_pool(pool)
     return polished, dlps, "de"
+
+
+def _seed_physical(lookup, raw):
+    """{raw key: full physical element vector} for one raw start dict, under
+    the CURRENT whitening (Parameter.phys_from_raw)."""
+    from .system import _parameter_for_raw_key
+
+    return {
+        key: np.asarray(
+            _parameter_for_raw_key(key, lookup).phys_from_raw(vec),
+            dtype=float,
+        )
+        for key, vec in raw.items()
+    }
+
+
+def _seed_raw(lookup, phys, template):
+    """Inverse of _seed_physical under the CURRENT whitening: the raw start
+    dict (shaped like ``template``) of a physical point."""
+    from .system import _parameter_for_raw_key
+
+    return {
+        key: np.asarray(
+            _parameter_for_raw_key(key, lookup).raw_from_initval(phys[key]),
+            dtype=float,
+        ).reshape(np.shape(template[key]))
+        for key in template
+    }
+
+
+def _raw_distance(a, b):
+    return float(
+        np.sqrt(
+            sum(np.sum((np.asarray(a[k]) - np.asarray(b[k])) ** 2) for k in a)
+        )
+    )
+
+
+def _warn_if_seeds_converged(system, model, lookup, origins_phys, r):
+    """Across-round basin-coverage check for a multi-seed set.
+
+    Each round's trust region (ptde.polish_seed_starts) is built from that
+    round's own starts, so it guarantees per round that no seed crosses the
+    midpoint toward a neighbour -- but across rounds the midpoints move,
+    and the re-whitening rescales every axis by a different factor, so a
+    region carried over from round 1 is not a region in round 2's
+    coordinates at all.  Measured: carrying round 1's region forward
+    (centred on the ORIGINAL seeds, half the ORIGINAL separation, re-expressed
+    in the re-whitened coordinates) put DC2018_128's polished seeds OUTSIDE
+    their own regions, and round 2 refused 6030 / 6795 Metropolis-accepted
+    proposals -- all of them.  So the protection stays per round, and this
+    check makes the cumulative drift VISIBLE instead: it compares the seeds'
+    separation now with their original separation, both measured in the
+    current coordinates, and warns past the same 1/4 the per-round check
+    uses.
+    """
+    raws, idx = system.get_raw_starts(model)
+    orig = [_seed_raw(lookup, ph, raws[0]) for ph in origins_phys]
+    for a in range(len(raws)):
+        for b in range(a + 1, len(raws)):
+            d0 = _raw_distance(orig[a], orig[b])
+            d1 = _raw_distance(raws[a], raws[b])
+            if d0 > 0 and d1 < 0.25 * d0:
+                logger.warning(
+                    f"Seed polish: after round {r}, seeds {idx[a]} and "
+                    f"{idx[b]} are {d1:.1f} scale units apart against "
+                    f"{d0:.1f} originally (both measured in the current "
+                    f"coordinates) -- the rounds have walked them toward "
+                    f"one basin; the sampler may start these chains in what "
+                    f"is effectively one basin."
+                )
+
+
+def polish_rounds(
+    system,
+    model,
+    n_steps=ENGINE_DEFAULT,
+    *,
+    cores,
+    rewhiten,
+    max_rounds=POLISH_MAX_ROUNDS,
+    tol=None,
+    rng=None,
+):
+    """The pipeline's seed polish: polish, re-whiten, polish again, until a
+    round stops paying (review 2.4.14, JDE ruling 2026-09-14 part 3).
+
+    Round 1 is exactly one polish_raw_starts over the starts get_raw_starts
+    builds, adopted with apply_polished_starts -- what run.py did before.
+    On the L-BFGS engine that is also the LAST round: it stops on the
+    gradient, which is a statement about the surface, and re-running it
+    from its own optimum is out of this item's scope.  So every model with a
+    gradient keeps a bit-identical start.
+
+    On the DE engine the loop continues, because a DE round ends for reasons
+    that are NOT statements about the surface: the population freezes (the
+    fixed 2.38/sqrt(2D) step accepts ~0.3% at T=1, and 80-90% of sweeps
+    accept nothing after ~1000 on DC2018_128), and -- in round 1 -- every
+    proposal is drawn in PRELIMINARY whitening units, because the probe has
+    not measured anything yet.  JDE: "The probe measures scales AT the start
+    and DE proposals are drawn in those units, so a bad start hobbles the
+    optimizer meant to escape it."  Each later round therefore:
+
+      1. re-centers the whitening anchor on the polished start
+         (recenter_whitening_anchor) and re-whitens there
+         (whitening.measure_and_whiten -- the same probe run.py runs next,
+         in the same order; skipped when ``rewhiten`` is False, i.e.
+         `measure_scales: false`, which asks for no probe);
+      2. re-derives every seed in the new raw coordinates (get_raw_starts);
+      3. polishes EVERY seed with a FRESH population jittered at one (now
+         measured) unit around it.  Every seed, not only the ones still
+         climbing: the multi-seed trust region is built from the seeds in
+         the call, and a lone seed would get an infinite one;
+      4. adopts the result, as round 1 did.
+
+    The anchor is NOT re-centered after the last round: run.py does that
+    next, unconditionally, on every path, and owns it.
+
+    Stopping: when no seed's round gained ``tol`` nats (default
+    polish_tol_nats(D)), or after ``max_rounds`` rounds.  When re-whitening
+    is on, round 2 always runs: round 1's gain in preliminary units is not
+    evidence about the measured surface (on the 30-event static DC2018 sweep
+    the 400-sweep polish bought EXACTLY 0.0 nats on seed 0 in 26/30 events).
+    Gains are comparable across rounds because each round's is measured
+    from that round's own start, AFTER the re-whitening: the whitening is a
+    reparameterization (whitening.md), and the only thing the probe moves
+    in logp is the soft-bound barrier steepness, which is therefore never
+    counted as a polish gain.
+
+    The final whitening is NOT measured here: run.py's prepare_whitening
+    probes once more at the final point and persists it, exactly as on
+    every other path.
+
+    ``n_steps`` is the per-ROUND cap (resolve_polish_steps' value); ``cores``
+    the DE engine's worker grant.  Returns a summary dict: ``method``,
+    ``rounds`` (one {seed index: gain} dict per round), ``stop``
+    ("lbfgs", "converged" or "round cap") and ``wall_s``.
+    """
+    import time
+
+    from .whitening import measure_and_whiten
+
+    t0 = time.monotonic()
+    raw_starts, seed_indices = system.get_raw_starts(model)
+    logp_fn = model.compile_logp()
+    if rng is None:
+        rng = np.random.default_rng(0)
+    n_params = int(sum(np.asarray(v).size for v in raw_starts[0].values()))
+    if tol is None:
+        tol = polish_tol_nats(n_params)
+    lookup = {p.label: p for p in system.get_all_parameters()}
+    # The ORIGINAL seeds, physically, for the across-round coverage check.
+    origins_phys = (
+        [_seed_physical(lookup, r) for r in raw_starts]
+        if len(raw_starts) > 1
+        else None
+    )
+
+    polished, dlps, method = polish_raw_starts(
+        model,
+        raw_starts,
+        n_steps=n_steps,
+        seed_indices=seed_indices,
+        logp_fn=logp_fn,
+        rng=rng,
+        cores=cores,
+    )
+    system.apply_polished_starts(polished, seed_indices)
+    rounds = [dict(zip(seed_indices, (float(d) for d in dlps)))]
+    summary = {"method": method, "rounds": rounds, "stop": "lbfgs"}
+    if method != "de":
+        summary["wall_s"] = time.monotonic() - t0
+        return summary
+
+    def _wants_another():
+        if rewhiten and len(rounds) == 1:
+            return True
+        return any(d >= tol for d in rounds[-1].values())
+
+    while _wants_another() and len(rounds) < int(max_rounds):
+        r = len(rounds) + 1
+        forced = rewhiten and r == 2
+        climbing = [k for k, d in rounds[-1].items() if d >= tol]
+        why = (
+            "round 2 always runs when re-whitening: round 1 drew its "
+            "proposals in preliminary units"
+            if forced
+            else f"seed(s) {climbing} gained >= {tol:.3g} nats last round"
+        )
+        how = (
+            "re-whitening at the polished point"
+            if rewhiten
+            else "restarting at the polished point (measure_scales is off, "
+            "so no re-whitening)"
+        )
+        logger.info(f"Seed polish round {r}/{int(max_rounds)}: {how}; {why}.")
+        # Re-center first, exactly as run.py orders it before its own probe:
+        # the probe measures around the anchor, which must be the start.
+        system.recenter_whitening_anchor(model)
+        if rewhiten:
+            measure_and_whiten(
+                system, model, system.get_raw_start(model), logp_fn
+            )
+        raw_all, idx_all = system.get_raw_starts(model)
+        if list(idx_all) != list(seed_indices):
+            raise RuntimeError(
+                f"polish_rounds: round {r} re-derived seed indices "
+                f"{list(idx_all)} where round 1 had {list(seed_indices)}; "
+                f"apply_polished_starts writes every seed back, so the set "
+                f"cannot change between rounds"
+            )
+        polished, dlps, _m = polish_raw_starts(
+            model,
+            raw_all,
+            n_steps=n_steps,
+            seed_indices=seed_indices,
+            logp_fn=logp_fn,
+            rng=rng,
+            cores=cores,
+            engine="de",
+        )
+        system.apply_polished_starts(polished, seed_indices)
+        rounds.append(dict(zip(seed_indices, (float(d) for d in dlps))))
+        if origins_phys is not None:
+            _warn_if_seeds_converged(system, model, lookup, origins_phys, r)
+
+    stop = "round cap" if _wants_another() else "converged"
+    summary["stop"] = stop
+    summary["wall_s"] = time.monotonic() - t0
+    per_seed = "; ".join(
+        f"seed {k}: +{sum(rd[k] for rd in rounds):.1f} ("
+        + " + ".join(f"{rd[k]:.1f}" for rd in rounds)
+        + ")"
+        for k in seed_indices
+    )
+    logger.info(
+        f"Seed polish: {len(rounds)} DE round(s) in "
+        f"{summary['wall_s']:.0f} s; gain per seed (per round): {per_seed}.  "
+        + (
+            f"Stopped: the last round gained < {tol:.3g} nats on every seed."
+            if stop == "converged"
+            else f"Stopped at the {int(max_rounds)}-round cap with a seed "
+            f"still gaining >= {tol:.3g} nats per round -- the start may "
+            f"still be below its basin optimum."
+        )
+    )
+    return summary
 
 
 def _resolve_polish_cores(cores, n_seeds):

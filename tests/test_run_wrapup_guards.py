@@ -277,7 +277,11 @@ def test_every_pm_sample_call_is_sigterm_wrapped():
 # someone who asked for 4 on a shared machine.  Pinned across the whole
 # package rather than at the two known sites, so a THIRD caller cannot
 # reintroduce it.
-CORE_GRANTING_CALLS = ("polish_raw_starts", "run_hot_mode_discovery")
+CORE_GRANTING_CALLS = (
+    "polish_raw_starts",
+    "polish_rounds",
+    "run_hot_mode_discovery",
+)
 
 
 def _package_source_files():
