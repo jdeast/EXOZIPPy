@@ -1,0 +1,52 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 16
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N vbmfixinst2
+#$ -o vbmfix_results/vbm_fix_install2.$JOB_ID.log
+# Second attempt at the shared-env install (JDE's ruling 2026-10-06).  The
+# first found that the env's python resolves VBMicrolensing (and pymc,
+# exozippy's deps) from the USER site, ~/.local/lib/python3.13/site-packages,
+# which shadows the conda env's site-packages -- so the wheel goes there
+# (pip install --user).  The marker heredoc is quoted this time.
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+P=$HOME/.conda/envs/exozippy/bin
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_vbmfixinst2"
+cd $HOME/python/EXOZIPPy/examples/KMT-2021-BLG-1122L/vbmfix_results
+SHA=$(git -C $HOME/vbm_fix rev-parse HEAD)
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)   vbm_fix $SHA   $(date)"
+WHL=$(ls wheel/*.whl | head -1); echo "wheel $WHL"
+echo "before: $($P/python -c 'import VBMicrolensing as v, inspect; print(getattr(v, "__version__", "?"), inspect.getfile(v))')"
+$P/pip install --user --no-deps --force-reinstall "$WHL" 2>&1 | grep -i "error\|Successfully" | tail -2
+echo "after: $($P/python -c 'import VBMicrolensing as v, inspect; print(getattr(v, "__version__", "?"), inspect.getfile(v))')"
+SITE=$($P/python -c 'import site; print(site.getusersitepackages())')
+for M in $SITE/VBMICROLENSING_FIX_COMMIT.txt $HOME/.conda/envs/exozippy/VBMICROLENSING_FIX_COMMIT.txt; do
+cat > $M <<'MARK'
+VBMicrolensing here is NOT the PyPI 5.6 wheel: it is jdeast/VBMicrolensing
+branch fix-multilens-heap-corruption (upstream dev 5.6 + the three-line
+MultiMag crash fix + MultiMagSafe; valboz/VBMicrolensing#74), installed into
+the USER site-packages (~/.local/lib/python3.13/site-packages, which the
+exozippy conda env's python resolves FIRST) per JDE's ruling of 2026-10-06
+(review 2.6.35).  The package reports version 5.6, so a "poetry install",
+"pip install VBMicrolensing" or an env rebuild will silently replace it with
+the crashing wheel: reinstall from ~/vbm_fix (pip wheel --no-build-isolation
+with the env's conda-forge gcc 14, then pip install --user --no-deps
+--force-reinstall) and re-verify with
+examples/KMT-2021-BLG-1122L/vbm_reproducer.py.
+MARK
+echo "commit: $SHA   installed: $(date)" >> $M
+echo "marker: $M"
+done
+cd verify_sharedenv
+echo "=== reproducer under the shared env (24 cases; only non-ok listed)"
+$P/python -u vbm_reproducer.py 2>&1 | grep "^case\|^VBM" | grep -v ": ok"
+echo "=== stress test under the shared env, Multipoly"
+$P/python -u check_vbm_crash.py 6000 1 16 Multipoly 2>&1 | grep -v "DEBUG\|Warning\|warn"
+echo "exit $?   $(date)"

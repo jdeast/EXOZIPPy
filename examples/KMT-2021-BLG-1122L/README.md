@@ -213,7 +213,13 @@ sampler's eval timeout).  Results in `vbmfix_results/`.
 Acceptance fit: job 15507641 under the fixed kernel
 (`KMT-2021-BLG-1122L_vbmfix.job`: the venv's python, T_max 200 and the
 auto start dispersion restored, no seed polish, bounded separations),
-started 2026-10-06.  The shipped config keeps the T_max 20 /
-start_dispersion 3.0 workarounds until the fix is released.  RESULTS:
+started 2026-10-06.  The fix is also INSTALLED in Hydra's shared exozippy
+env (JDE's ruling, `vbm_fix_install2.job`: a wheel built from the fork
+with the env's conda-forge g++ 14 into the user site-packages that the
+env's python resolves first; markers named VBMICROLENSING_FIX_COMMIT.txt
+record the commit, because the package still reports 5.6 and any
+reinstall would silently restore the crashing wheel).  The shipped
+config keeps the T_max 20 / start_dispersion 3.0 workarounds until the
+fix is released upstream.  RESULTS:
 (filled in when it lands -- posterior vs Table 2 through the mappings
 above, and the lens masses under the IMF and galactic priors).
