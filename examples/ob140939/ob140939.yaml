@@ -63,13 +63,25 @@ sampler:
   # between the four degenerate basins.
   tune: 0
   draws: 50000
+  # Run all 50000 draws: the default min_ess/max_rhat early stop passed at
+  # ~4000 draws (2026-10-06) while the whole DE ensemble was still drifting
+  # along the lens distance-mass ridge -- R-hat across chains that share one
+  # population cannot see a collective drift -- leaving the lens at 2.8 kpc
+  # against the converged 3.3-3.6.
+  max_rhat: null
+  min_ess: null
   # Densified tempering ladder, validated empirically: auto (17 rungs)
   # left adjacent-swap acceptance at 5-7% and 3 round trips -- the
   # ladder froze below T ~ 75 and the mode weights were initialization
   # artifacts. At 24 rungs (measured Lambda = 9.4; use > 2*Lambda+1
   # with margin) swap acceptance is 50-65%, round trips flow, and the
-  # per-rung basin-occupancy profile is smooth equilibrium down to T=1 --
-  # the mode weights become a real posterior statement.  Converged, with
+  # per-rung basin-occupancy profile is smooth.  A smooth profile proves
+  # TRANSPORT along the ladder, not correct T=1 weights: on 2026-08-08 it
+  # looked exactly like this while every chain sat in one basin (zero T=1
+  # mode changes on a replay; the ladder funnels descending replicas).  The
+  # weights are trusted only because the T=1 chains themselves switch
+  # basins -- check modes.txt's 'mode changes' count, never the profile.
+  # Converged (all 50000 draws: max_rhat/min_ess early stop off), with
   # the source pm prior in its correct Sgr-A*-relative frame
   # (src/exozippy/components/mulensing/conventions.md C31), the split is
   # ~91/9: u0,-,- ~91%, the solution Yee+2015's proper-motion argument
