@@ -39,7 +39,7 @@ downstream consumer (distribute_posterior, tables, plots) can filter on it.
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import Any, List, NamedTuple, Optional
 
 import numpy as np
 
@@ -93,6 +93,23 @@ _INVALID_REASONS = ("nonfinite-raw", "nonfinite-lp", "lp-ceiling", "raw-z")
 # uncertainty, and nothing is substituted or suppressed -- the project warns
 # rather than blocks.  N_eff = 30 puts sigma_w at ~0.09 for w = 0.5.
 DEFAULT_MIN_WEIGHT_ESS = 30.0
+
+# Number of contiguous draw blocks for the population batch-means estimate
+# of a mode weight's error (see population_weight_error).
+DEFAULT_WEIGHT_BATCHES = 10
+
+# Resolution limits of the population error estimate (review 1.11.3).  Below
+# DEFAULT_MIN_WEIGHT_NPOP population correlation times per run, or with the
+# batch-means sigma still growing by more than DEFAULT_MAX_BATCH_GROWTH from
+# 4*B to B batches, the run has not resolved the slowest drift of the mode
+# fraction: the quoted error then rests on the batch-means extrapolation and
+# is approximate.  Calibrated on synthetic coupled populations
+# (tests/test_mode_weight_error.py): the plain population estimates cover
+# nominally at n_pop >= ~50, and the growth ratio exceeds 1.5 in <= 5% of
+# resolved runs but in 50-90% of unresolved ones.  ADVISORY ONLY, like
+# DEFAULT_MIN_WEIGHT_ESS: a warning and a report note, never a gate.
+DEFAULT_MIN_WEIGHT_NPOP = 50.0
+DEFAULT_MAX_BATCH_GROWTH = 1.5
 
 
 # Outcome vocabulary for one mode-identification attempt, following the
@@ -341,8 +358,27 @@ class ModeInfo:
     # problem to ladder tuning or to the bridge proposal).
     occ_weight: float = float("nan")
     occ_weight_err: float = float("nan")
-    weight_ess: float = float("nan")  # effective draws behind occ_weight
-    weight_iact: float = float("nan")  # IACT of this mode's indicator series
+    # Effective independent draws behind occ_weight_err, i.e.
+    # w(1-w)/occ_weight_err**2, whichever estimate set the error.
+    weight_ess: float = float("nan")
+    # IACT of this mode's indicator series with the chains treated as
+    # independent (weight_ess_chain = draws / weight_iact).
+    weight_iact: float = float("nan")
+    # The error estimates occ_weight_err is the largest of (review 1.11.3):
+    # per-chain (chains independent, the pre-1.11.3 quote) and the three
+    # population estimates (population_weight_error).  Kept side by side
+    # so the report can say which one set the error and by how much.
+    weight_ess_chain: float = float("nan")
+    weight_err_chain: float = float("nan")
+    weight_err_pop: float = float("nan")
+    weight_err_batch: float = float("nan")
+    weight_err_scaled: float = float("nan")
+    weight_err_source: str = ""
+    weight_n_pop: float = float("nan")  # run length / population IACT
+    weight_batch_growth: float = float("nan")
+    # True when the run has not resolved the population's slowest drift
+    # (n_pop or batch_growth beyond their limits): the error is approximate.
+    weight_err_unresolved: bool = False
     # Optional evidence-weighting fields (populated by
     # outputs.evidence.apply_evidence_weighting when modes: {weights: evidence}
     # is requested and every mode's bridge estimate is trustworthy).
@@ -480,9 +516,35 @@ class ModeReport:
                 lines.append(
                     f"    occupancy weight "
                     f"{_fmt_pm(m.occ_weight, m.occ_weight_err)} "
-                    f"from N_eff = {m.weight_ess:.1f} independent draws "
-                    f"(IACT {m.weight_iact:.1f}){extra}"
+                    f"from N_eff = {m.weight_ess:.1f} independent draws{extra}"
                 )
+                if m.weight_err_source:
+                    flag = (
+                        " (run does not resolve the drift -- see notes)"
+                        if m.weight_err_unresolved
+                        else ""
+                    )
+                    lines.append(
+                        f"    error set by: {m.weight_err_source}{flag}"
+                    )
+                    lines.append(
+                        f"      per-chain IACT, chains as independent: "
+                        f"+/- {m.weight_err_chain:.4f} (N_eff "
+                        f"{m.weight_ess_chain:.1f}, IACT {m.weight_iact:.1f})"
+                    )
+                    lines.append(
+                        f"      population IACT: +/- {m.weight_err_pop:.4f} "
+                        f"(run = {m.weight_n_pop:.1f} population "
+                        f"correlation times)"
+                    )
+                    lines.append(
+                        f"      population batch means: "
+                        f"+/- {m.weight_err_batch:.4f}; extrapolated to the "
+                        f"run: +/- {m.weight_err_scaled:.4f} (growth "
+                        f"{4 * DEFAULT_WEIGHT_BATCHES} -> "
+                        f"{DEFAULT_WEIGHT_BATCHES} batches "
+                        f"x{m.weight_batch_growth:.2f}, ~1 when resolved)"
+                    )
             lines.append(f"  n_draws  = {m.n_draws}")
             lines.append(
                 f"  lp med/max = {m.lp_med:.2f} / {m.lp_max:.2f}"
@@ -966,6 +1028,213 @@ def weight_ess(labels_2d, mode):
     return n_total / tau, tau
 
 
+class PopulationWeightError(NamedTuple):
+    """What ``population_weight_error`` measured; see its docstring."""
+
+    sigma_iact: float  # 1-sigma from the population series' IACT
+    sigma_batch: float  # 1-sigma from plain batch means over draw blocks
+    sigma_scaled: float  # 1-sigma from batch means extrapolated to the run
+    tau_pop: float  # IACT of the population series, in draws
+    n_pop: float  # run length in population correlation times
+    batch_growth: float  # sigma_batch(B) / sigma_batch(4B); ~1 once resolved
+
+
+def _batch_sigma(z, n_batches):
+    """Batch-means 1-sigma of mean(z) over ``n_batches`` contiguous blocks."""
+    means = np.array([b.mean() for b in np.array_split(z, n_batches)])
+    return float(np.sqrt(means.var(ddof=1) / n_batches))
+
+
+def population_weight_error(labels_2d, mode, n_batches=None):
+    """1-sigma on ``mode``'s occupancy weight from the POPULATION series.
+
+    WHY.  ``weight_ess`` treats the chains as independent: it pools their
+    within-chain autocorrelation and compares their means.  A population
+    sampler's chains are not independent -- differential-evolution proposals
+    are built from the other chains, and a tempering swap moves a state from
+    one rung into another -- and the dependence takes a form that estimator
+    cannot see.  Individual chains exchange mode labels quickly (one chain
+    leaves mode A while another enters it), so every per-chain indicator
+    decorrelates in a few draws, while the FRACTION of the population in mode
+    A drifts slowly as one collective variable.  That common-mode drift is
+    shared by every chain, so it does not separate the chain means (the
+    between-chain term is blind to it), and inside one chain it is a small
+    tail under a large fast-decaying spike (Geyer's truncation discards it).
+    Measured on ob140939 (sync ptde, 34 chains, 3995 draws): the per-chain
+    indicator's autocorrelation is 0.05 at lag 10 and ~0 by lag 20, while
+    the population fraction's sits at ~0.28 from lag 2 to lag 100 and is
+    still 0.18 at lag 200; on a 50000-draw ptde_async trace it is still
+    0.15 at lag 5000 -- review 1.11.3, where the quoted errors were 8-23x
+    below the run-to-run scatter.  Counting mode SWITCHES does not help
+    either: the ob140939 runs log thousands of them, and a switch that one
+    chain makes while another switches back carries no information about
+    the fraction.
+
+    WHAT.  Stop pretending the chains are independent: the whole population
+    is ONE Markov chain and the occupancy weight is the time average of one
+    scalar functional of it, the per-draw population count in ``mode``.
+    Three estimates of that average's variance:
+
+    * ``sigma_iact`` -- the single-series IACT (``outputs.autocorr.iact``,
+      Geyer initial positive/monotone) of the population series;
+    * ``sigma_batch`` -- plain batch means over ``n_batches`` contiguous
+      draw blocks (default ``DEFAULT_WEIGHT_BATCHES``);
+    * ``sigma_scaled`` -- batch means EXTRAPOLATED to the whole run.  Both
+      estimates above are calibrated only when the run spans many
+      correlation times of the population fraction, and on ob140939 it does
+      not (the fraction drifts on ~1e4 draws).  The variance of a block
+      mean scales as ``b**-alpha`` with block length ``b``: ``alpha = 1``
+      once blocks are longer than the correlation time, ``alpha = 0`` while
+      every block still sits inside one slow excursion.  ``alpha`` is
+      measured between ``n_batches`` and ``4 * n_batches`` blocks (from
+      ``batch_growth``, the sigma ratio ``4**((1 - alpha)/2)``, clipped to
+      [0, 1]) and carried one more step, from block length ``T/n_batches``
+      to the run length ``T``.  When the run is resolved ``alpha ~ 1`` and
+      it reduces to ``sigma_batch``.  NaN below two draws per fine batch.
+      It is NOT a guaranteed bound: a drift slower than the whole run
+      leaves no trace at the scales where ``alpha`` is measured.  On the
+      two ob140939 traces on disk (review 1.11.3) it brings the quoted
+      error to within 1.3-3x of the segment-to-segment scatter, from 2-5x
+      for the per-chain estimate.
+
+    ``n_pop`` (the run length in population correlation times) and
+    ``batch_growth`` (~1 resolved, ->2 unresolved) say whether the run
+    resolved the drift; ``identify_modes`` quotes the largest of these and
+    the per-chain estimate, and warns when the run did not.  Coverage on
+    synthetic populations is in ``tests/test_mode_weight_error.py``.
+
+    The series is written in ratio-estimator form,
+    ``z_t = (s_t - w n_t) / n_bar`` with ``s_t`` the number of chains in
+    ``mode`` at draw ``t`` and ``n_t`` the number with an assigned label, so
+    unassigned (-1) draws drop out exactly as they do from the weight
+    itself.
+    """
+    if n_batches is None:
+        n_batches = DEFAULT_WEIGHT_BATCHES
+    labels_2d = np.atleast_2d(np.asarray(labels_2d))
+    n_t = (labels_2d >= 0).sum(axis=0).astype(float)
+    s_t = (labels_2d == mode).sum(axis=0).astype(float)
+    keep = n_t > 0
+    n_t, s_t = n_t[keep], s_t[keep]
+    n_steps = n_t.size
+    if n_steps == 0:
+        raise ValueError(
+            f"population_weight_error: mode {mode} has no assigned draws "
+            f"in any column of a {labels_2d.shape} label array"
+        )
+    w = s_t.sum() / n_t.sum()
+    z = (s_t - w * n_t) / (n_t.sum() / n_steps)
+    tau_pop = iact(z)
+    sigma_iact = float(np.sqrt(float(z.var()) * tau_pop / n_steps))
+    sigma_batch = float("nan")
+    sigma_scaled = float("nan")
+    batch_growth = float("nan")
+    if n_steps >= 2 * n_batches:
+        sigma_batch = _batch_sigma(z, n_batches)
+    if n_steps >= 2 * 4 * n_batches:
+        fine = _batch_sigma(z, 4 * n_batches)
+        if fine > 0:
+            batch_growth = sigma_batch / fine
+            alpha = 1.0 - 2.0 * np.log(batch_growth) / np.log(4.0)
+            alpha = min(max(alpha, 0.0), 1.0)
+            # sigma_batch = sd(block means)/sqrt(B); the run's mean is one
+            # block B times longer, so its variance is sd**2 * B**-alpha.
+            sigma_scaled = float(
+                sigma_batch * np.sqrt(n_batches) * n_batches ** (-alpha / 2)
+            )
+        else:
+            # A population count that never moves at the fine scale: every
+            # chain kept its mode, and the per-chain estimate (between-chain
+            # scatter) is the one that speaks to it.
+            sigma_scaled = 0.0
+    return PopulationWeightError(
+        sigma_iact=sigma_iact,
+        sigma_batch=sigma_batch,
+        sigma_scaled=sigma_scaled,
+        tau_pop=float(tau_pop),
+        n_pop=float(n_steps / tau_pop),
+        batch_growth=batch_growth,
+    )
+
+
+class OccupancyWeightError(NamedTuple):
+    """The quoted occupancy-weight error and the estimates behind it."""
+
+    weight: float  # occupancy weight over assigned draws
+    sigma: float  # the quoted 1-sigma: the largest finite estimate
+    source: str  # which estimate set ``sigma``
+    n_eff: float  # w(1-w)/sigma**2: independent draws behind the quote
+    sigma_chain: float  # per-chain IACT estimate (chains as independent)
+    n_eff_chain: float
+    tau_chain: float
+    pop: PopulationWeightError
+    unresolved: bool  # the run does not resolve the population drift
+
+
+def occupancy_weight_error(labels_2d, mode):
+    """1-sigma on ``mode``'s occupancy weight, as identify_modes quotes it.
+
+    The weight is a mean of the mode indicator, so its variance is
+    w(1-w)/N_eff with N_eff = N/IACT -- governed by the number of
+    independent mode changes, NOT by the number of draws.  Four estimates,
+    and the LARGEST finite one is quoted (review 1.11.3):
+
+    * per-chain IACT (``weight_ess``) -- sees chains stuck in different
+      modes through the between-chain scatter, but treats the chains as
+      independent (the only estimate before 1.11.3);
+    * the three population estimates of ``population_weight_error`` -- see
+      the collective drift of the mode fraction that coupled chains share,
+      which the per-chain estimate is blind to and which understated the
+      ob140939 weight errors 8-23x.
+
+    ``unresolved`` is set when the run spans fewer than
+    ``DEFAULT_MIN_WEIGHT_NPOP`` population correlation times or the
+    batch-means error is still growing by more than
+    ``DEFAULT_MAX_BATCH_GROWTH``: the quote is then approximate.
+    """
+    labels_2d = np.atleast_2d(np.asarray(labels_2d))
+    n_assigned = int((labels_2d >= 0).sum())
+    if n_assigned == 0:
+        raise ValueError(
+            f"occupancy_weight_error: no assigned draws in a "
+            f"{labels_2d.shape} label array (mode {mode})"
+        )
+    w = float((labels_2d == mode).sum() / n_assigned)
+    n_eff_chain, tau_chain = weight_ess(labels_2d, mode)
+    sigma_chain = float(np.sqrt(w * (1.0 - w) / max(n_eff_chain, 1.0)))
+    pop = population_weight_error(labels_2d, mode)
+    candidates = {
+        "per-chain IACT": sigma_chain,
+        "population IACT": pop.sigma_iact,
+        "population batch means": pop.sigma_batch,
+        "population batch means extrapolated to the run": pop.sigma_scaled,
+    }
+    source = max(
+        (k for k, v in candidates.items() if np.isfinite(v)),
+        key=lambda k: candidates[k],
+    )
+    sigma = float(candidates[source])
+    n_eff = w * (1.0 - w) / sigma**2 if sigma > 0 else float(n_eff_chain)
+    unresolved = bool(
+        pop.n_pop < DEFAULT_MIN_WEIGHT_NPOP
+        or (
+            np.isfinite(pop.batch_growth)
+            and pop.batch_growth > DEFAULT_MAX_BATCH_GROWTH
+        )
+    )
+    return OccupancyWeightError(
+        weight=w,
+        sigma=sigma,
+        source=source,
+        n_eff=float(n_eff),
+        sigma_chain=sigma_chain,
+        n_eff_chain=float(n_eff_chain),
+        tau_chain=float(tau_chain),
+        pop=pop,
+        unresolved=unresolved,
+    )
+
+
 def markov_indicator_iact(labels_2d, mode):
     """IACT of the mode indicator under a two-state Markov approximation.
 
@@ -1268,17 +1537,16 @@ def identify_modes(
             center_scale_raw[name] = float(
                 1.4826 * np.median(np.abs(col - np.median(col)))
             )
-        # Occupancy weight uncertainty.  The weight is a mean of the mode
-        # indicator, so its variance is w(1-w)/N_eff with N_eff = N/IACT --
-        # governed by the number of independent mode transitions, NOT by the
-        # number of draws.
+        # Occupancy weight uncertainty: see occupancy_weight_error.  A lone
+        # mode's weight is exactly 1 by construction and carries no error.
         w_m = float(w_assigned[m])
-        n_eff, tau_m = weight_ess(labels_2d, m)
-        sigma_w = (
-            float(np.sqrt(w_m * (1.0 - w_m) / max(n_eff, 1.0)))
-            if n_modes > 1
-            else 0.0
-        )
+        occ = occupancy_weight_error(labels_2d, m)
+        if n_modes > 1:
+            sigma_w, n_eff, source = occ.sigma, occ.n_eff, occ.source
+            unresolved = occ.unresolved
+        else:
+            sigma_w, n_eff, source = 0.0, occ.n_eff_chain, ""
+            unresolved = False
         modes.append(
             ModeInfo(
                 index=m,
@@ -1296,7 +1564,16 @@ def identify_modes(
                 occ_weight=w_m,
                 occ_weight_err=sigma_w,
                 weight_ess=float(n_eff),
-                weight_iact=float(tau_m),
+                weight_iact=occ.tau_chain,
+                weight_ess_chain=occ.n_eff_chain,
+                weight_err_chain=occ.sigma_chain,
+                weight_err_pop=occ.pop.sigma_iact,
+                weight_err_batch=occ.pop.sigma_batch,
+                weight_err_scaled=occ.pop.sigma_scaled,
+                weight_err_source=source,
+                weight_n_pop=occ.pop.n_pop,
+                weight_batch_growth=occ.pop.batch_growth,
+                weight_err_unresolved=unresolved,
             )
         )
 
@@ -1367,6 +1644,41 @@ def identify_modes(
                 f"temperature ladder, or per-mode evidence weighting "
                 f"(modes: {{weights: evidence}}) would tighten them."
             )
+        # Resolution check on the error bar itself (review 1.11.3).  Warn
+        # only -- convergence gates stay on sampled parameters.
+        unresolved = [m_ for m_ in modes if m_.weight_err_unresolved]
+        if unresolved:
+            worst = max(unresolved, key=lambda m_: m_.occ_weight_err)
+            why = []
+            if worst.weight_n_pop < DEFAULT_MIN_WEIGHT_NPOP:
+                why.append(
+                    f"the run spans {worst.weight_n_pop:.0f} population "
+                    f"correlation times, want >= "
+                    f"{DEFAULT_MIN_WEIGHT_NPOP:.0f}"
+                )
+            if (
+                np.isfinite(worst.weight_batch_growth)
+                and worst.weight_batch_growth > DEFAULT_MAX_BATCH_GROWTH
+            ):
+                why.append(
+                    f"the batch-means error still grows "
+                    f"x{worst.weight_batch_growth:.2f} from "
+                    f"{4 * DEFAULT_WEIGHT_BATCHES} to "
+                    f"{DEFAULT_WEIGHT_BATCHES} batches, ~1 once resolved"
+                )
+            msg = (
+                f"mode-weight error is APPROXIMATE: the fraction of the "
+                f"population in each mode drifts on a timescale this run "
+                f"does not resolve (mode {worst.index + 1}: "
+                f"{_fmt_pm(worst.occ_weight, worst.occ_weight_err)}; "
+                f"{'; '.join(why)}). The quoted error carries the "
+                f"batch-means scaling out to the run length, but no "
+                f"estimate from one run can see a drift slower than the "
+                f"run; independent repeats can scatter by more. A longer "
+                f"run, or the scatter of independent repeats, settles it."
+            )
+            notes.append(msg)
+            logger.warning("identify_modes: %s", msg)
 
     report = ModeReport(
         labels=labels_2d,
