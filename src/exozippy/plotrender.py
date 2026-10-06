@@ -253,35 +253,6 @@ def _legend(ax):
     return legend
 
 
-def draw_chart(ax, spec, extra_models=(), model_alpha=0.8, legend=True):
-    """Draw one Chart into an existing Axes: traces, geometry, axis labels.
-
-    The body of ``render_spec_groups``' per-spec loop, public so a renderer
-    that composes several charts into one figure (the system summary,
-    ``outputs/summary_plot.py``) draws each panel exactly as its own PDF
-    draws it, rather than keeping a second copy of the role encodings.
-    ``extra_models`` is a list of model-trace lists (the later draws'
-    spaghetti); ``model_alpha`` applies to every model trace, see the module
-    docstring.  The title is the caller's: a panel of a composite figure
-    does not repeat it.  Returns the legend, or None.
-    """
-    for trace in spec.traces:
-        if trace.role == "model":
-            _draw_model(ax, trace, model_alpha)
-        elif trace.role == "residual":
-            _draw_residual(ax, trace)
-        else:
-            _draw_data(ax, trace)
-    for models in extra_models:
-        for trace in models:
-            _draw_model(ax, trace, model_alpha)
-
-    _apply_axes(ax, spec)
-    ax.set_xlabel(spec.xlabel)
-    ax.set_ylabel(spec.ylabel)
-    return _legend(ax) if legend else None
-
-
 def render_spec_groups(spec_groups, filename_prefix="debug"):
     """Render one figure per spec, overlaying model traces from every group.
 
@@ -318,13 +289,22 @@ def render_spec_groups(spec_groups, filename_prefix="debug"):
         meta = spec.meta or {}
         fig, ax = plt.subplots(figsize=tuple(meta.get("figsize") or (10, 6)))
         try:
-            draw_chart(
-                ax,
-                spec,
-                extra_models=extra_models.get(spec.id, []),
-                model_alpha=model_alpha,
-            )
+            for trace in spec.traces:
+                if trace.role == "model":
+                    _draw_model(ax, trace, model_alpha)
+                elif trace.role == "residual":
+                    _draw_residual(ax, trace)
+                else:
+                    _draw_data(ax, trace)
+            for models in extra_models.get(spec.id, []):
+                for trace in models:
+                    _draw_model(ax, trace, model_alpha)
+
+            _apply_axes(ax, spec)
+            ax.set_xlabel(spec.xlabel)
+            ax.set_ylabel(spec.ylabel)
             ax.set_title(spec.title)
+            _legend(ax)
             fig.tight_layout()
 
             tag = meta.get("file_tag") or spec.id.replace(".", "_")

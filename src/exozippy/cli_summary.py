@@ -1,10 +1,12 @@
 """Console entry point: exozippy-summary <config.yaml>
 
-Draws a finished fit's one-page summary figure -- transits, RVs, SED and Kiel
-diagram at the best-fit draw, under a header of each planet's P, R_P, M_P and
-e -- from the config it ran with and its saved ``<prefix>_trace.nc``, without
-re-sampling.  The figure is ``outputs/summary_plot.create_summary_plot``; this
-is its command line.
+Redraws a finished fit's one-page summary figure -- transits, RVs, SED and
+Kiel diagram at the best-fit draw, under a header of each planet's P, R_P,
+M_P and e -- from the config it ran with and its saved ``<prefix>_trace.nc``,
+without re-sampling.  Every fit already writes the figure at wrap-up; this is
+for redrawing it, e.g. after editing the display-only ``label:`` keys.  The
+figure is ``outputs/summary_plot.create_summary_plot``; this is its command
+line.
 
 Nothing beyond the config is needed: the title is its ``run: name:``, each
 instrument is shown by its ``label:`` (else its ``name:``), and the TESS files
@@ -103,7 +105,7 @@ def _read_options(path):
     help="Console logging level.",
 )
 def main(config_file, output, title, transit_bin, options_file, logger_level):
-    """Draw the one-page summary figure of a finished fit.
+    """Redraw the one-page summary figure of a finished fit.
 
     CONFIG_FILE is the same system YAML passed to `exozippy`; its `prefix:`
     locates the saved trace (<prefix>_trace.nc), and the figure is written

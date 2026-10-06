@@ -377,6 +377,139 @@ def test_sed_in_flux_converts_the_points_and_their_oc_together():
         sp.sed_in_flux(chart)
 
 
+def test_smooth_is_the_pipeline_boxcar_and_leaves_gaps_alone():
+    """
+    Given a spectrum with a NaN in it,
+    When it is smoothed with a 9-point boxcar,
+    Then away from the edges and the gap every point is the plain 9-point
+      running mean (np.convolve with ones(9)/9, the pipeline's smooth), the
+      NaN stays NaN without spreading, and a window below 3 is a no-op.
+    """
+    rng = np.random.default_rng(1)
+    y = rng.normal(size=60)
+    plain = np.convolve(y, np.ones(9) / 9, mode="same")
+    y_gap = y.copy()
+    y_gap[40] = np.nan
+
+    smooth = sp._smooth(y_gap, 9)
+
+    np.testing.assert_allclose(smooth[4:35], plain[4:35])
+    assert np.isnan(smooth[40]) and np.isfinite(smooth[36:40]).all()
+    np.testing.assert_array_equal(sp._smooth(y, 1), y)
+
+
+def _phased_chart(depth, x_range=(-0.1, 0.1)):
+    from exozippy.chart import Chart, Trace
+
+    x = np.linspace(-0.1, 0.1, 200)
+    model = np.where(np.abs(x) < 0.04, -depth, 0.0)
+    return Chart(
+        id="transit.phased.T.b",
+        component={"yaml_key": "transit", "instance": "T"},
+        title="",
+        xlabel="",
+        ylabel="",
+        traces=[
+            Trace("model", "model", "line", x, model),
+            Trace("T", "data", "scatter", x, model + 1e-4, yerr=x * 0),
+        ],
+        x_range=list(x_range),
+        meta={"instrument": "T", "planet": "b", "phase_folded": True},
+    )
+
+
+def test_transit_stack_limits_are_symmetric_about_the_stack():
+    """
+    Given two stacked rows 0.02 apart with a 0.01-deep transit,
+    When the stack is drawn,
+    Then the margin above the first row's baseline equals the margin below
+      the bottom of the last row's transit (half a row each), and the
+      x-axis is the chart's window in hours.
+    """
+    rows = [
+        ("A", "A", [_phased_chart(0.01)], None, "#009B77"),
+        ("B", "B", [_phased_chart(0.01)], None, "#821EA6"),
+    ]
+    fig, ax = plt.subplots()
+    try:
+        sp._draw_transit_stack(ax, rows, spacing=0.02)
+        bottom, top = ax.get_ylim()
+        xlim = ax.get_xlim()
+    finally:
+        plt.close(fig)
+
+    assert top - 1.0 == pytest.approx(0.01)
+    assert (1.0 - 0.02 - 0.01) - bottom == pytest.approx(top - 1.0)
+    np.testing.assert_allclose(xlim, [-2.4, 2.4])
+
+
+def test_sed_panel_spans_the_photometry_and_marks_the_model():
+    """
+    Given an SED chart (already in flux) whose bandpasses run from 0.4 to
+      15 micron,
+    When the SED panel is drawn,
+    Then its wavelength axis spans the bandpasses padded by _SED_X_PAD, not
+      the model grid's 0.05-30 micron, its axes carry the compact labels,
+      and each model photometry point sits at the observed flux less its
+      O-C.
+    """
+    from exozippy.chart import Chart, Trace
+
+    x = np.array([0.5, 12.0])
+    xerr = np.array([[0.1, 4.0], [0.1, 3.0]])
+    y = np.array([1e-10, 1e-12])
+    yerr = np.array([[1e-12, 1e-14], [1e-12, 1e-14]])
+    chart = Chart(
+        id="sed.sed",
+        component={"yaml_key": "sed", "instance": None},
+        title="",
+        xlabel=sp.SED_XLABEL,
+        ylabel=sp.SED_YLABEL,
+        traces=[
+            Trace("Star A", "model", "line", [0.05, 30.0], [1e-11, 1e-13]),
+            Trace("A", "data", "scatter", x, y, yerr=yerr, xerr=xerr),
+        ],
+        x_log=True,
+        y_log=True,
+        x_range=[0.05, 30.0],
+        y_range=[1e-15, 1e-9],
+        meta={
+            "residuals": [
+                Trace("A", "residual", "scatter", x, y * 0.1, yerr, xerr)
+            ]
+        },
+    )
+    fig = plt.figure()
+    try:
+        sp._draw_sed(fig, fig.add_gridspec(1, 1)[0, 0], chart)
+        ax, ax_oc = fig.get_axes()
+        xlim = ax.get_xlim()
+        model = [ln for ln in ax.get_lines() if ln.get_label() == "Model"]
+        model_y = model[0].get_ydata()
+        labels = (ax.get_ylabel(), ax_oc.get_ylabel(), ax_oc.get_xlabel())
+    finally:
+        plt.close(fig)
+
+    np.testing.assert_allclose(xlim, [0.4 / 1.5, 15.0 * 1.5])
+    np.testing.assert_allclose(model_y, y * 0.9)
+    assert labels == (sp.SED_YLABEL, sp.OC_YLABEL, sp.SED_XLABEL)
+
+
+def test_a_fit_with_nothing_to_draw_raises_its_own_error():
+    """
+    Given a system none of whose components makes a summary panel (as a
+      microlensing fit's do not),
+    When the summary figure is asked for,
+    Then it raises NoSummaryPanels -- a ValueError of its own class, which
+      the live fit's wrap-up catches to skip the figure quietly.
+    """
+    system = SimpleNamespace(active_components={})
+
+    with pytest.raises(sp.NoSummaryPanels):
+        sp.summary_figure(system, {})
+    assert issubclass(sp.NoSummaryPanels, ValueError)
+
+
 def test_cli_refuses_an_unknown_options_key(tmp_path):
     """
     Given an --options file with a misspelled keyword,
@@ -490,6 +623,11 @@ def kelt4_fit(tmp_path_factory):
         run_fit(config)
     finally:
         os.chdir(cwd)
+    # Kept aside before any test redraws the default file, so the wrap-up
+    # test below sees what the fit itself wrote.
+    wrapup = work_dir / "fitresults" / "KELT-4A_mcmc_summary.pdf"
+    if wrapup.exists():
+        shutil.copy(wrapup, work_dir / "summary_written_by_the_fit.pdf")
     return config_path
 
 
@@ -511,6 +649,19 @@ def kelt4_posterior(kelt4_fit):
     finally:
         os.chdir(cwd)
     return system, posterior, point, where
+
+
+@pytest.mark.slow
+def test_every_fit_writes_its_summary_figure_at_wrapup(kelt4_fit):
+    """
+    Given a fit run through run_fit,
+    When its wrap-up finishes,
+    Then <prefix>_mcmc_summary.pdf is among its outputs, with no call to
+      create_summary_plot.
+    """
+    written = kelt4_fit.parent / "summary_written_by_the_fit.pdf"
+
+    assert written.exists() and written.stat().st_size > 0
 
 
 @pytest.mark.slow
@@ -593,12 +744,15 @@ def test_summary_figure_draws_one_panel_per_chart_kind(kelt4_posterior):
 
     assert len(axes) == 5
     assert ylabels.count(sp.OC_YLABEL) == 2
+    rv_axes = [ax for ax in axes if ax.get_ylabel() == sp.RV_YLABEL]
+    assert len(rv_axes) == 2
+    assert rv_axes[0].get_ylim() == rv_axes[1].get_ylim()
     assert texts[0] == "KELT-4A" and texts[1:] == header
     assert len(header) == 1
     for symbol in ("$P = ", "$R_P = ", "$M_P = ", "$e = "):
         assert symbol in header[0]
     assert [t.get_text() for t in transit_ax.texts] == ["TESS 120 s"]
-    assert {"Keck/HIRES", "TRES"} <= set(legend_texts)
+    assert {"Keck/HIRES", "TRES", "Model"} <= set(legend_texts)
 
 
 @pytest.mark.slow

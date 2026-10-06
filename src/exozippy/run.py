@@ -1799,6 +1799,29 @@ def _wrap_up(
     for comp in system.active_components.values():
         comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
 
+    # The one-page system figure (outputs/summary_plot.py) at the best-fit
+    # draw of the posterior the tables above were built from -- `idata` is
+    # already trimmed, mode-labelled and distributed onto the Parameters.
+    # A fit with nothing it draws (no transit, RV, SED or evolutionary
+    # model) gets none, and says so at INFO rather than warning every run.
+    # `exozippy-summary <config>` redraws it from the saved trace.
+    wrapup.stage("one-page summary figure")
+    with nonfatal_wrapup("summary figure"):
+        from .outputs.summary_plot import NoSummaryPanels, write_summary_plot
+
+        try:
+            write_summary_plot(
+                system,
+                idata,
+                f"{prefix}_mcmc_summary.pdf",
+                title=(config.get("run") or {}).get("name"),
+            )
+        except NoSummaryPanels:
+            logger.info(
+                "No summary figure: this fit has no transit, RV, SED or "
+                "evolutionary-model chart to draw."
+            )
+
     # Multimodal posteriors: re-emit the same corner + component plots once
     # per mode, restricted to that mode's draws (interim solution; a
     # recolored/stratified single figure is deferred). Per-mode LaTeX columns and CSV rows are already
