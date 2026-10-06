@@ -82,6 +82,22 @@ push it into one of these contracts instead.
   spellings are matched; a 2-part broadcast entry is a coarser statement that
   a specific entry legitimately refines.
 
+  **A bare entry is an `initval`, not an absent entry** (review 1.12.10).
+  `star.A.teff: 5800` and `star.A.teff: [5000, 6000]` are legal user spellings
+  meaning `{initval: <value>}` (`config.as_field_entry`, the ConfigManager
+  boundary's one translator). `SetParamField` used to treat any non-dict entry
+  as missing and replace it, so setting `sigma` deleted the user's start value
+  with no message. `ProjectDocument.field_entry` now converts the bare value
+  to the dict spelling AT THE EDIT -- never on load, so untouched entries keep
+  their own spelling byte for byte -- in place, keeping the key's position and
+  its line comment (a ruamel list carries a duplicate of that comment, which
+  is dropped so it is printed once). A bare STRING is refused with
+  `config._reject_bare_string_values`' own error, as the fit refuses it.
+  `to_json` hands the frontend every bare number or list in the field-map
+  form, so `ConfigTab` shows it as the initval without a TS-side translator.
+  `_copy_param_keys` copies a bare entry verbatim, which is already correct:
+  the clone's entry means the same thing.
+
   **`DeleteInstance` and `DuplicateInstance` are spelling-aware too, and for a
   sharper reason: the INDEX form does not survive a change to the instance
   list.** `star.A.teff` follows its star wherever the list moves it;
