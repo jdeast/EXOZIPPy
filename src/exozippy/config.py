@@ -3261,6 +3261,13 @@ class ConfigManager:
                 f"startup; remove init_scale from your params file."
             )
 
+    def record_diagnostic(self, severity, message, param_paths):
+        """Public face of ``_record_diagnostic`` for a caller outside the
+        solve -- ``System.prepare``'s topology revisions (review 2.9.15),
+        recorded AFTER the last ``finalize_user_params``, which resets the
+        list."""
+        self._record_diagnostic(severity, message, param_paths)
+
     def _record_diagnostic(self, severity, message, param_paths):
         """Append a structured diagnostic (deduped) for the solve/validate API.
 
@@ -3584,6 +3591,37 @@ class ConfigManager:
     # real solve repeats the same inversions at stage 3).  Contrast the
     # blacklist, which IS rolled back precisely because it is input-dependent:
     # a 2 s timeout under the probe's inputs says nothing about stage 3's.
+
+    def snapshot_solve_inputs(self):
+        """What a SECOND ``finalize_user_params`` must start from.
+
+        ``finalize_user_params`` is not re-entrant: it injects the engine's
+        solved starts back into ``user_params``, so a second call would read
+        every solved start as one the user WROTE -- PRECEDENCE_USER in the
+        ledger, "user" in ``initval_source``, and in every stage-3 reader of
+        ``user_params``.  ``System.prepare`` takes this snapshot before the
+        first solve and hands it to ``restore_solve_inputs`` before a
+        topology revision's second one (review 2.9.15).  Same attributes the
+        probe rolls back, plus the multi-seed result and the symbol map.
+        Hints are deliberately NOT included: they are component inputs, which
+        the second registration pass re-pushes (or, for a tie the revision
+        dropped, keeps from the first -- a measurement does not stop being
+        one because a prior that used it was cut).
+        """
+        saved = {
+            attr: copy.deepcopy(getattr(self, attr))
+            for attr in self._PROBE_SNAPSHOT_ATTRS + ("seed_resolved",)
+        }
+        return saved, dict(self.master_symbol_map)
+
+    def restore_solve_inputs(self, snapshot):
+        """Undo everything ``finalize_user_params`` wrote since
+        ``snapshot_solve_inputs``.  See there."""
+        saved, symbols = snapshot
+        for attr, value in saved.items():
+            setattr(self, attr, copy.deepcopy(value))
+        self.master_symbol_map.clear()
+        self.master_symbol_map.update(symbols)
 
     def probe_derivable(self, paths, tolerance=1e-3):
         """Which of `paths` the relaxation engine can pin down from what is

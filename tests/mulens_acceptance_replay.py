@@ -56,6 +56,12 @@ the post-split masked-primary assembly, amplified through the binary-lens
 caustic to <=1.4e-12 relative in A(t) -- the reassociation class the
 design already accepts for VBM examples, and far inside TERM_RTOL.
 
+The three KMT-2019-BLG-1806 fixtures were re-recorded for review 2.9.11
+(row-less SED: errscale pinned), every move explained: +7.8287 nats total =
+`logit_uniform_prior.sed.errscale` (-6.9098) and `RV:sed.errscale_raw`
+(-0.9189) leaving, and `low_bound.star.loggsed` halving at the 1e-304 level
+(the unread lens's barrier lifted).  Every other term is bit-identical.
+
 ob161003 (2S2L) is the ONE example whose model changes BY CONSTRUCTION
 (review R1): its per-source event-level vectors collapse to scalars.  Its
 replay fixture is re-recorded post-split; the stage-0 recording is kept at

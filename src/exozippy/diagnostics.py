@@ -802,18 +802,17 @@ def grid_bounded_paths(system):
     posterior against it is reporting that the grid ran out.
     """
     out = {}
-    for comp in getattr(system, "active_components", None) or []:
+    # active_components is a {name: component} DICT (System.__init__).
+    # Iterating the dict itself yielded the NAMES, none of which has the
+    # hook, so this returned {} on every real run and the grid-extent
+    # wording below never fired (review 1.3.8).  A hook that raises is a
+    # bug in that component and propagates: swallowing it would silently
+    # turn a grid wall back into "revisit the bound".
+    for comp in system.active_components.values():
         fn = getattr(comp, "grid_bound_paths", None)
-        if not callable(fn):
+        if fn is None:
             continue
-        try:
-            out.update(fn() or {})
-        except Exception:  # noqa: BLE001 -- a broken hook must not kill the check
-            logger.debug(
-                "grid_bound_paths() failed on %s",
-                type(comp).__name__,
-                exc_info=True,
-            )
+        out.update(fn())
     return out
 
 

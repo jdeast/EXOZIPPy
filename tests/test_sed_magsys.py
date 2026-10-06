@@ -453,6 +453,8 @@ def _likelihood_observed(sed, monkeypatch):
     )
     monkeypatch.setattr(sed, "seen_star_mask", lambda system: [True])
     monkeypatch.setattr(sed, "_declare_grid_support", lambda system: None)
+    # The data-free prose reads the topology this stub system does not have.
+    monkeypatch.setattr(sed, "_add_data_free_prose", lambda system: None)
     sed.errscale = SimpleNamespace(value=1.0)
     val = SimpleNamespace(value=pt.ones(1))
     star = SimpleNamespace(teff=val, teffsed=val, fbol=val, fbolsed=val)
