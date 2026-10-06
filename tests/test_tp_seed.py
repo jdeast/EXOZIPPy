@@ -18,7 +18,7 @@ import pytensor.tensor as pt
 import pytest
 
 from exozippy.components.orbit import Orbit, physics
-from exozippy.config import ConfigManager
+from exozippy.config import PRECEDENCE_DERIVED_MIXED, ConfigManager
 from exozippy.system import System
 
 TP = 2455000.0
@@ -211,3 +211,55 @@ def test_the_solved_tc_lands_inside_its_own_window():
     system.prepare()
     model = system.build_model()
     assert np.isfinite(model.compile_logp()(model.initial_point()))
+
+
+# ---------------------------------------------------------------------------
+# 4. A tp whose tc lands NEAR the backstop (review 1.1.9)
+# ---------------------------------------------------------------------------
+
+# examples/ob170114's periastron.  Its tc is ~1875 d from the 2460000.0
+# backstop -- 7.6e-4 RELATIVE, inside the engine's old 1e-3 relative change
+# band, so the solve was discarded and the backstop's rank promoted to
+# "solved".  Every tp-seeded orbit with tc in ~2457540-2462460 was refused at
+# build; TP above sits outside that band, which is why sections 2-3 passed.
+TP_IN_BAND = 2457930.059
+
+
+def _quadrant_params(omega_deg, ecc):
+    omega = np.radians(omega_deg)
+    return {
+        "orbit.b.period": {"initval": PERIOD},
+        "orbit.b.secosw": {"initval": np.sqrt(ecc) * np.cos(omega)},
+        "orbit.b.sesinw": {"initval": np.sqrt(ecc) * np.sin(omega)},
+        "orbit.b.tp": {"initval": TP_IN_BAND},
+    }
+
+
+@pytest.mark.parametrize("omega_deg", [45.0, 135.0, 225.0, 315.0])
+def test_a_tp_near_the_backstop_round_trips_into_an_in_window_tc(omega_deg):
+    """
+    Given a tp seed whose conjunction lies ~1875 d from the tc backstop,
+      with omega in each quadrant,
+    When the model is built,
+    Then tc is the conjunction tp implies (modulo the period, which is all
+      tp determines), held at the solver's rank -- and the model BUILDS,
+      i.e. the solved tc lies inside the window stage 3 centred on the same
+      conjunction.  Before the fix the backstop 2460000 was kept and
+      `build_pymc` refused it as outside its bounds.
+    """
+    ecc = 0.3
+    system = System(dict(_CONFIG), _quadrant_params(omega_deg, ecc))
+    system.prepare()
+    cm = system.config_manager
+    got = cm._last_resolved["orbit.0.tc"]
+
+    want = float(
+        physics.tc_from_tp(TP_IN_BAND, ecc, np.radians(omega_deg), PERIOD)
+    )
+    offset = (got - want) % PERIOD
+    assert min(offset, PERIOD - offset) == pytest.approx(0.0, abs=1e-6)
+    assert abs(got - TP_IN_BAND) < PERIOD
+    assert cm._last_provenance["orbit.0.tc"] == PRECEDENCE_DERIVED_MIXED
+
+    model = system.build_model()
+    assert np.isfinite(model.compile_logp()(system.get_raw_start(model)))
