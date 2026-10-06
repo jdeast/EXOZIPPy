@@ -19,7 +19,7 @@ from exozippy.potentials import soft_lower_bound, soft_upper_bound
 # this import is required even though it's not used explicitly
 # it registers all the mathematical relations
 from . import physics
-from .bodies import parse_orbit_bodies
+from .bodies import component_instance_names, parse_orbit_bodies
 
 
 def amplitude_constrained_orbits(system, orbit):
@@ -114,6 +114,15 @@ class Orbit(Component):
     reads the same star.mass/planet.mass nodes.  Each group is treated as a
     point mass at its barycenter (standard hierarchical approximation).
     """
+
+    # Stage-6 nodes stashed for stage 7 (see Component.per_build_caches):
+    # cleared at the top of every build, so a REBUILD can never hand stage 7
+    # the previous model's chord geometry or unclipped V_c/V_e root.  Being
+    # None at stage 7 on an orbit that needs one is a bookkeeping bug and
+    # raises (review 2.8.6).
+    per_build_caches = ("_chord_geometry", "_vcve_unclipped_nodes")
+    _chord_geometry = None
+    _vcve_unclipped_nodes = None
 
     def __init__(self, config, config_manager):
         # 1. Initialize the base Component
@@ -289,22 +298,42 @@ class Orbit(Component):
         }
         return [i not in constrained for i in range(self.n_elements)]
 
+    def _companion_planets(self, i):
+        """The planet indices in orbit `i`'s companion group that EXIST.
+
+        Existence is checked against the planet blocks the system config
+        declares, because `parse_orbit_bodies`' implicit pairing names
+        `planet.i` for an orbit no planet points at whether or not there is
+        such a planet (review 2.8.8).  An explicit group naming a missing
+        planet raises in `_validate_bodies`; the implicit one only disables the
+        orbit's masses -- and before review 2.8.6 it also handed `fitchord` a
+        planet that did not exist, so the chord was built from the all-zero
+        `p`/`ar` placeholders of `_chord_context` and its Jacobian and
+        geometry bound were evaluated on them, with no error.
+        """
+        sys_cfg = getattr(self.config_manager, "system_config", None) or {}
+        n_planets = len(component_instance_names(sys_cfg, "planet"))
+        return [
+            idx
+            for (t, idx) in self.companion_bodies[i]
+            if t == "planet" and idx < n_planets
+        ]
+
     def _chord_planet_indices(self):
         """Per orbit: the index of its one transiting planet, or -1.
 
         A chord is `sqrt((1 + p)^2 - b^2)`, so it needs a radius ratio -- one
         radius ratio.  An orbit whose companion group holds no planet (a
-        stellar binary) has none, and one holding SEVERAL has no single answer:
-        two planets sharing an orbit have two different chords, and asking
-        which one `orbit.chord` means is a question with no correct answer.
-        Both are `nochord`, and `_parse_inc_parameterization` refuses an
-        explicit `fitchord: true` on them rather than picking a planet.
+        stellar binary, or an implicit orbit no planet block points at) has
+        none, and one holding SEVERAL has no single answer: two planets sharing
+        an orbit have two different chords, and asking which one `orbit.chord`
+        means is a question with no correct answer.  Both are `nochord`, and
+        `_parse_inc_parameterization` refuses an explicit `fitchord: true` on
+        them rather than picking a planet.
         """
         out = []
         for i in range(self.n_elements):
-            planets = [
-                idx for (t, idx) in self.companion_bodies[i] if t == "planet"
-            ]
+            planets = self._companion_planets(i)
             out.append(planets[0] if len(planets) == 1 else -1)
         return out
 
@@ -453,18 +482,21 @@ class Orbit(Component):
                 continue
             if self._chord_planet[i] < 0:
                 if bool((self.config[i] or {}).get("fitchord", False)):
-                    n_planets = sum(
-                        1
-                        for (t, _) in self.companion_bodies[i]
-                        if t == "planet"
-                    )
+                    n_planets = len(self._companion_planets(i))
                     raise ValueError(
                         f"[{self.prefix}.{name}] 'fitchord: true' needs "
                         f"exactly one planet on the orbit -- the chord is "
                         f"sqrt((1 + R_P/R_*)^2 - b^2), so it is defined by a "
                         f"radius ratio -- and this orbit's companion group "
-                        f"holds {n_planets}.  Sample 'cosi' here (drop the "
-                        f"key), or split the bodies onto their own orbits."
+                        f"holds {n_planets}"
+                        + (
+                            " (no planet block's orbit_ndx points at it)"
+                            if n_planets == 0
+                            and "companion" not in (self.config[i] or {})
+                            else ""
+                        )
+                        + ".  Sample 'cosi' here (drop the key), or split "
+                        "the bodies onto their own orbits."
                     )
                 self.inc_modes.append("nochord")
             else:
@@ -1170,14 +1202,15 @@ class Orbit(Component):
         # to [-1, 1] because astrometry MEASURES the sign, which is the one
         # thing a chord cannot express -- so where both are asked for, the
         # chord orbit keeps the +1 branch and says so.
-        own_i180 = np.atleast_1d(getattr(self, "i180", False)).astype(bool)
-        if own_i180.size != self.n_elements:
-            own_i180 = np.zeros(self.n_elements, dtype=bool)
+        # One entry per orbit block by construction (__init__), so read
+        # directly: a length mismatch here used to be papered over with
+        # all-False, silently flipping a chord orbit's cos i sign (2.8.6).
+        own_i180 = np.asarray(self.i180, dtype=bool)
         self._chord_sign = np.where(own_i180, -1.0, 1.0)
         if has_astrometry:
             chord_orbits = [
-                self.names[i] if i < len(self.names) else str(i)
-                for i, m in enumerate(getattr(self, "inc_modes", []))
+                self.names[i]
+                for i, m in enumerate(self.inc_modes)
                 if m == "chord"
             ]
             if chord_orbits:
@@ -1710,37 +1743,60 @@ class Orbit(Component):
         planet's numbers rather than NaN is deliberate -- a NaN would ride
         through `pt.set_subtensor`'s unselected half into the gradient.
         """
-        # `system` is None in standalone use -- a bare Orbit built by a test
-        # harness, which every geometry test does -- and `cosi` is exactly the
-        # parameter those build.  There is nothing to read and nothing that
-        # needs it (a standalone orbit is never in chord mode, so no expression
-        # these feed is selected), but the dep parser still wants the names.
-        planet = None
-        if system is not None:
-            planet = getattr(system, "active_components", {}).get("planet")
-        idx = np.asarray(getattr(self, "_chord_planet", []), dtype=int)
-        if idx.size != self.n_elements:
-            idx = np.full(self.n_elements, -1, dtype=int)
-        sign = np.asarray(
-            getattr(self, "_chord_sign", np.ones(self.n_elements)),
-            dtype=float,
-        )
-        if sign.size != self.n_elements:
-            sign = np.ones(self.n_elements)
+        # `_chord_planet`, `_chord_sign` and `inc_modes` are written by
+        # register_parameters (stage 3), which add_parameter already requires
+        # (no manifest otherwise): read directly, never defaulted (review
+        # 2.8.6 -- a defaulted mode list here is how a chord orbit could reach
+        # stage 7 with a placeholder geometry).
+        idx = np.asarray(self._chord_planet, dtype=int)
+        sign = np.asarray(self._chord_sign, dtype=float)
+        if idx.size != self.n_elements or sign.size != self.n_elements:
+            raise RuntimeError(
+                f"[{self.prefix}] chord bookkeeping is {idx.size} planet "
+                f"index(es) and {sign.size} sign(s) for {self.n_elements} "
+                f"orbit(s) {list(self.names)}; register_parameters writes "
+                f"both, one per orbit."
+            )
 
         ctx = {"chord_sign": pt.as_tensor_variable(sign)}
         # Stashed for _add_chord_terms, which needs the same two vectors to
         # build the Jacobian and the geometry bound at stage 7 and must not
         # build a SECOND copy of them: the barrier has to restrain the very
-        # node the model was built from.
+        # node the model was built from.  A per-build cache (see
+        # per_build_caches): a REBUILD must never hand stage 7 the previous
+        # model's geometry.
         self._chord_geometry = ctx
-        if planet is None or planet.n_elements == 0:
-            # No planet component at all: only reachable with `chord` absent
-            # from the manifest (every orbit is `nochord`), so these are
-            # placeholders that keep the dep parser happy.
+        # The orbits whose expressions READ the planet geometry: a `chord`
+        # orbit derives cos i from it and a `cosi` orbit reports its chord
+        # from it.  Only `nochord` orbits read nothing -- and stage 3 makes an
+        # orbit `nochord` exactly when it has no single EXISTING planet
+        # (`_chord_planet_indices`), so a reader with no planet behind it is a
+        # bookkeeping bug, not a configuration.
+        readers = [i for i, m in enumerate(self.inc_modes) if m != "nochord"]
+        if not readers:
+            # Every orbit is `nochord` -- a planet-free system, or a bare
+            # Orbit in a test harness (system None): `chord` is not in the
+            # manifest and `cosi` is sampled, so nothing evaluates these.
+            # They exist only because the dep parser wants the names.
             ctx["p"] = pt.zeros((self.n_elements,))
             ctx["ar"] = pt.zeros((self.n_elements,))
             return ctx
+
+        planet = (
+            None if system is None else system.active_components.get("planet")
+        )
+        n_planets = 0 if planet is None else planet.n_elements
+        stray = [i for i in readers if not 0 <= idx[i] < n_planets]
+        if stray:
+            raise RuntimeError(
+                f"[{self.prefix}] orbit(s) "
+                f"{[self.names[i] for i in stray]} are in "
+                f"{[self.inc_modes[i] for i in stray]} mode, which reads the "
+                f"transiting planet's p and a/R*, but name planet index(es) "
+                f"{[int(idx[i]) for i in stray]} and the system has "
+                f"{n_planets} planet(s).  Stage 3 makes an orbit with no "
+                f"existing planet `nochord`."
+            )
 
         safe = np.where(idx < 0, 0, idx).astype("int32")
         take = pt.as_tensor_variable(safe)
@@ -1857,8 +1913,7 @@ class Orbit(Component):
     def _chord_indices(self):
         """Indices of the orbits sampling the chord (empty for every cos i
         system)."""
-        modes = list(getattr(self, "inc_modes", []))
-        return [i for i, m in enumerate(modes) if m == "chord"]
+        return [i for i, m in enumerate(self.inc_modes) if m == "chord"]
 
     def _add_chord_terms(self, system):
         """The two terms a chord orbit owes: the Jacobian and the shield.
@@ -1896,15 +1951,21 @@ class Orbit(Component):
         idx = self._chord_indices()
         if not idx:
             return
-        if not (
-            isinstance(getattr(self, "chord", None), Parameter)
-            and isinstance(getattr(self, "ecc", None), Parameter)
-            and isinstance(getattr(self, "esinw", None), Parameter)
-        ):
-            return
-        geom = getattr(self, "_chord_geometry", None)
+        # Every `chord` orbit has all three in its manifest (INC_MODE_TABLE;
+        # ecc/esinw on every orbit) and stage 6 builds every manifest entry,
+        # and building `chord` or `cosi` stashes the geometry -- so a miss
+        # here is a bookkeeping bug.  It used to RETURN, which would drop the
+        # Jacobian (a non-isotropic cos i prior) and the geometry bound with
+        # no error (review 2.8.6).
+        self._require_built(("chord", "ecc", "esinw"), idx, "fitchord")
+        geom = self._chord_geometry
         if geom is None:
-            return
+            raise RuntimeError(
+                f"[{self.prefix}] fitchord orbit(s) "
+                f"{[self.names[i] for i in idx]} reached stage 7 with no "
+                f"planet geometry for this build: _chord_context must run "
+                f"when stage 6 builds 'chord'/'cosi'."
+            )
 
         take = np.asarray(idx, dtype="int32")
         chord = self.chord.value[take]
@@ -1932,7 +1993,7 @@ class Orbit(Component):
             ),
         )
 
-        names = [self.names[i] if i < len(self.names) else str(i) for i in idx]
+        names = [self.names[i] for i in idx]
         self.chord.add_prior_contribution(
             latex=r"$\propto |\partial \cos{i} / \partial \rm chord|$",
             text="uniform in cos i (Jacobian applied)",
@@ -1954,8 +2015,7 @@ class Orbit(Component):
 
     def _vcve_indices(self):
         """Indices of the orbits sampling V_c/V_e (empty for every hk system)."""
-        modes = list(getattr(self, "ecc_modes", []))
-        return [i for i, m in enumerate(modes) if m == "vcve"]
+        return [i for i, m in enumerate(self.ecc_modes) if m == "vcve"]
 
     def _add_vcve_terms(self, system):
         """The terms a V_c/V_e orbit owes: Jacobian, root existence, shield.
@@ -2006,12 +2066,12 @@ class Orbit(Component):
         idx = self._vcve_indices()
         if not idx:
             return
-        if not (
-            isinstance(getattr(self, "vcve", None), Parameter)
-            and isinstance(getattr(self, "ecc", None), Parameter)
-            and isinstance(getattr(self, "omega", None), Parameter)
-        ):
-            return
+        # ECC_MODE_TABLE puts all three in every `vcve` orbit's manifest and
+        # stage 6 builds every manifest entry, so a miss is a bookkeeping bug.
+        # It used to RETURN, dropping the Jacobian (e biased high -- the
+        # paper's own finding), the root mixture and both shields with no
+        # error (review 2.8.6).
+        self._require_built(("vcve", "ecc", "omega"), idx, "fitvcve")
 
         take = np.asarray(idx, dtype="int32")
         omega = self.omega.value[take]
@@ -2019,7 +2079,7 @@ class Orbit(Component):
         # The unclipped root vector `_add_eccentricity_bound` built and the
         # collision bound reads (build_likelihood runs that first).  One node
         # for every V_c/V_e orbit; a missing entry is a bookkeeping bug.
-        unclipped = getattr(self, "_vcve_unclipped_nodes", None)
+        unclipped = self._vcve_unclipped_nodes
         missing = [i for i in idx if i not in (unclipped or {})]
         if missing:
             raise RuntimeError(
@@ -2114,7 +2174,7 @@ class Orbit(Component):
         # REPLACES what the sampled bounds imply, so the tables must say so
         # rather than reporting "Uniform" on vcve (see "Reporting
         # component-added priors").
-        names = [self.names[i] if i < len(self.names) else str(i) for i in idx]
+        names = [self.names[i] for i in idx]
         self.vcve.add_prior_contribution(
             latex=r"$\propto |\partial e / \partial (V_c/V_e)|$",
             text="uniform in e (Jacobian applied)",
@@ -2163,14 +2223,23 @@ class Orbit(Component):
         the barrier this replaces (and Planet's mass barrier).
         """
         e_unclipped = self._unclipped_ecc()
-        if e_unclipped is None:
-            return
 
         threshold = pt.as_tensor_variable(
             np.full(self.n_elements, physics.MAX_ECC)
         )
+        # A planet-free system (a stellar binary) legitimately has no planet
+        # component; one that HAS planets alongside an orbit always declares
+        # `max_ecc` (Planet.register_parameters, `has_orbit`), so it is read
+        # directly -- a probe here would silently drop the collision limit.
         planets = system.active_components.get("planet")
-        if isinstance(getattr(planets, "max_ecc", None), Parameter):
+        if planets is not None:
+            if not isinstance(getattr(planets, "max_ecc", None), Parameter):
+                raise RuntimeError(
+                    f"[{self.prefix}] the collision bound needs planet."
+                    f"max_ecc, which stage 6 did not build although the "
+                    f"system has an orbit; Planet declares it whenever one "
+                    f"exists."
+                )
             for p, o in enumerate(np.atleast_1d(planets.orbit_map)):
                 o = int(o)
                 threshold = pt.set_subtensor(
@@ -2184,7 +2253,7 @@ class Orbit(Component):
         )
 
     def _unclipped_ecc(self):
-        """The unclipped eccentricity of every orbit, or None if unavailable.
+        """The unclipped eccentricity of every orbit.
 
         What a soft bound must see: `calc_ecc` (and `calc_ecc_from_vcve`) clip
         at MAX_ECC, and a flat penalty has no gradient for NUTS to follow.
@@ -2193,42 +2262,35 @@ class Orbit(Component):
         V_c/V_e root on a V_c/V_e one.  A vector of both is assembled here, so
         the collision bound above stays one potential over all orbits whatever
         each of them samples.
+
+        Never None (review 2.8.6).  Both modes of ECC_MODE_TABLE name
+        secosw/sesinw AND vcve/omega -- sampled, derived or reported -- so all
+        four are built by stage 7 on every orbit, an all-circular system
+        included (a circular orbit PINS the sqrt(e) pair; it is still built).
+        This used to return None with a DEBUG line when a node was missing,
+        and `_add_eccentricity_bound` then added no collision bound at all.
         """
-        vcve_mask = np.atleast_1d(
-            np.asarray(getattr(self, "ecc_modes", []), dtype=object) == "vcve"
-        )
+        vcve_mask = np.asarray(self.ecc_modes, dtype=object) == "vcve"
         if vcve_mask.size != self.n_elements:
-            vcve_mask = np.zeros(self.n_elements, dtype=bool)
-
-        hk = None
-        secosw = getattr(self, "secosw", None)
-        sesinw = getattr(self, "sesinw", None)
-        if isinstance(secosw, Parameter) and isinstance(sesinw, Parameter):
-            hk = physics.ecc_from_sqrte(secosw.value, sesinw.value)
-
-        vcve = getattr(self, "vcve", None)
-        omega = getattr(self, "omega", None)
-        vc = None
-        if isinstance(vcve, Parameter) and isinstance(omega, Parameter):
-            vc = physics.ecc_from_vcve_unclipped(vcve.value, omega.value)
-
-        if not vcve_mask.any():
-            if hk is None:
-                logger.debug(
-                    "[orbit] secosw/sesinw are not built; skipping the "
-                    "eccentricity bound."
-                )
-            return hk
-        if vc is None:
-            logger.debug(
-                "[orbit] vcve/omega are not built; skipping the eccentricity "
-                "bound."
+            raise RuntimeError(
+                f"[{self.prefix}] {vcve_mask.size} eccentricity mode(s) "
+                f"{list(self.ecc_modes)} for {self.n_elements} orbit(s) "
+                f"{list(self.names)}; _parse_ecc_parameterization writes one "
+                f"per orbit block."
             )
-            return None
-        if hk is None or bool(vcve_mask.all()):
-            self._vcve_unclipped_nodes = {
-                int(i): vc for i in np.nonzero(vcve_mask)[0]
-            }
+        hk_idx = [int(i) for i in np.nonzero(~vcve_mask)[0]]
+        vc_idx = [int(i) for i in np.nonzero(vcve_mask)[0]]
+        if hk_idx:
+            self._require_built(
+                ("secosw", "sesinw"), hk_idx, "the collision bound"
+            )
+            hk = physics.ecc_from_sqrte(self.secosw.value, self.sesinw.value)
+            if not vc_idx:
+                return hk
+        self._require_built(("vcve", "omega"), vc_idx, "fitvcve")
+        vc = physics.ecc_from_vcve_unclipped(self.vcve.value, self.omega.value)
+        if not hk_idx:
+            self._vcve_unclipped_nodes = {i: vc for i in vc_idx}
             return vc
         # The elements this REPLACES are exactly the ones whose secosw/sesinw
         # are reported, i.e. whose `hk` entries are phase-1 placeholders at this
@@ -2239,10 +2301,32 @@ class Orbit(Component):
         # discarded branch's value never enters the graph, since where's VJP
         # multiplies it by zero and 0*NaN poisons the whole vector's gradient
         # (see Parameter._patch_elements).
-        idx = np.nonzero(vcve_mask)[0].astype("int32")
+        idx = np.asarray(vc_idx, dtype="int32")
         mixed = pt.set_subtensor(hk[idx], vc[idx])
-        self._vcve_unclipped_nodes = {int(i): mixed for i in idx}
+        self._vcve_unclipped_nodes = {i: mixed for i in vc_idx}
         return mixed
+
+    def _require_built(self, params, orbits, needed_by):
+        """Raise unless every one of `params` is a Parameter at stage 7.
+
+        Not a probe with a fallback: the manifest declares each of these on the
+        orbits that reach here and stage 6 builds every manifest entry, so a
+        miss is an internal bookkeeping bug -- named, with the orbits and what
+        needed the node (review 2.8.6).
+        """
+        missing = [
+            p
+            for p in params
+            if not isinstance(getattr(self, p, None), Parameter)
+        ]
+        if missing:
+            raise RuntimeError(
+                f"[{self.prefix}] {needed_by} on orbit(s) "
+                f"{[self.names[i] for i in orbits]} needs {missing}, which "
+                f"stage 6 did not build.  Every orbit's manifest declares "
+                f"them (ECC_MODE_TABLE / INC_MODE_TABLE), so this is a "
+                f"bookkeeping bug, not a configuration."
+            )
 
     def get_true_anomaly(self, t, orbit_idx=None):
         """True anomaly f at times `t`.
