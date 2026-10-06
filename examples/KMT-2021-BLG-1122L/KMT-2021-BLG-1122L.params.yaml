@@ -1,0 +1,179 @@
+# KMT-2021-BLG-1122L, Han et al. 2023, A&A 672, A8 (arXiv:2302.05613).
+#
+# TABLE OF RECORD: Table 2 of arXiv:2302.05613v1 (11 Feb 2023), "Lensing
+# parameters of the best-fit 3L1S solution", chi2/dof = 1399.8/1425.  The
+# A&A version of record (672, A8, 2023) could not be fetched from this
+# machine (HTTP 403); the 3.6.4 version-skew check against it is STILL
+# OWED -- compare every number below with the journal Table 2 before
+# quoting a recovery.  HJD' = HJD - 2450000.
+#
+#   t_0 (HJD')   9370.226 +/- 0.061     s_2   1.386 +/- 0.027
+#   u_0          0.126 +/- 0.008        q_2   0.526 +/- 0.039
+#   t_E (days)   14.74 +/- 0.93         alpha 2.292 +/- 0.013 rad
+#   rho (1e-3)   2.50 +/- 0.21          s_3   1.601 +/- 0.043
+#                                       q_3   0.241 +/- 0.027
+#                                       psi   1.383 +/- 0.010 rad
+#
+# Only initvals are used: the published uncertainties are not mapped to
+# sigma (a Gaussian prior would double-count the data), and whitening
+# scales are measured from the data at startup.
+
+# t_0 and u_0 are NOT the published values: Han's origin is the "effective
+# position" of the M1-M2 pair (the binary-lens centre of magnification,
+# the primary displaced by q_2/((1+q_2) s_2) toward M2), while EXOZIPPy's
+# origin is the centre of mass of ALL the lens bodies (conventions.md C13;
+# op.py `pos -= m @ pos`).  The translation between the two origins,
+# D = COM - EFF in the trajectory frame, moves the closest approach by
+# t_0' = t_0 - D_tau t_E and u_0' = u_0 + D_u.  With the geometry below
+# D = (-0.0260, -0.2953): t_0 shifts by +0.383 d and u_0 moves from
+# -0.126 to -0.421.  Without this translation the best of the 16 angle
+# conventions is 93,000 nats worse than with it (README, scan 2026-10-06).
+source.Source.t_0:
+    initval: 2459370.609
+
+# The sign is FLIPPED relative to the paper (C23 mirror): the scan found
+# the published light curve only with u_0 < 0 under the 180 - alpha rule
+# below, and the exact mirror (+u_0, alpha -> -alpha for both companions)
+# is the same light curve (check_mirror.py), so the sign is a convention
+# choice, not a measurement.
+source.Source.u_0:
+    initval: -0.4213
+
+# t_E is DERIVED from the lens masses, distances and proper motions, and a
+# bare `mulensevent.t_E: initval` does not survive the relaxation engine
+# when the proper-motion leaves carry the galactic model's own hints: the
+# 2026-10-06 scan started at t_E = 36.3 d (mu_rel 4.87 mas/yr, the prior
+# mean) with the published 14.74 silently dropped.  So, per review 8.6.15's
+# recipe, the LEAVES are seeded and t_E is not: masses and distances below
+# give theta_E = 0.50 mas, and the proper motions below give |mu_rel| =
+# 12.39 mas/yr, hence t_E = theta_E / mu_rel = 14.74 d.  The direction of
+# mu_rel on the sky is unconstrained without a parallax measurement (the
+# light curve only sees it relative to the lens axis, through alpha), so
+# the lens's pm is placed 12.39 mas/yr east of a bulge-typical source pm.
+star.Source.pm_ra:
+    initval: -3.0
+star.Source.pm_dec:
+    initval: -5.4
+star.Lens.pm_ra:
+    initval: 9.39
+star.Lens.pm_dec:
+    initval: -5.4
+# The companions share the primary's motion and distance (one system).
+# Review 2.6.32: the model still samples a companion body's distance / pm
+# / rv as free prior-only nuisances, so seed them equal to the primary's.
+star.LensB.pm_ra:
+    initval: 9.39
+star.LensB.pm_dec:
+    initval: -5.4
+star.LensC.pm_ra:
+    initval: 9.39
+star.LensC.pm_dec:
+    initval: -5.4
+
+# rho is not seeded directly: it derives from the source radius and
+# theta_E.  The source-flux seed alone gave rho = 1.9e-3 (scan 2026-10-06),
+# so the radius is seeded from the paper's theta_* = 1.26 uas at the
+# 8.68 kpc above: R = 2.35 Rsun (a K subgiant), rho = 2.5e-3 as published.
+star.Source.radius:
+    initval: 2.35
+
+# ---- the lens geometry: two companions of the primary ---------------------
+# Han's (s, q, alpha) are relative to M1 (the primary) for M2, and
+# (s_3, q_3, psi) for M3, with psi "the orientation angle of M3 as
+# measured from the M1-M2 axis with a center at the position of M1".
+# EXOZIPPy (conventions.md, "N-body lens"): every companion carries its
+# own alpha_j = angle from the primary->companion_j axis to tau_hat (the
+# LENS's motion relative to the source), measured CCW, with the companion
+# placed at s_j (cos alpha_j, -sin alpha_j) in the trajectory frame.
+#
+# alpha for M2: Han measures alpha between the SOURCE trajectory and the
+# M1-M2 axis.  The 2026-10-06 start-state scan (check_start.py: 32
+# combinations of alpha rule x u_0 sign x psi sense x origin shift,
+# scored by the data logp on the shipped light curves) selects
+#     alpha_EXOZIPPy = 180 deg - alpha_Han      (Jung+2017's sense, NOT
+#                                               the alpha + 180 of Zang+2023)
+# with u_0 < 0: 2.292 rad = 131.32 deg -> 48.68 deg.  The runner-up
+# convention is 12,770 nats worse; the winner itself starts at chi2 =
+# 95,000 on 2434 points (a discriminator, not a fit; README).
+# alpha for M3: the M1->M3 axis is rotated by psi from the M1->M2 axis.
+# The scan selects alpha_3 = alpha_2 + psi = 48.68 + 79.24 = 127.92 deg
+# (psi counter-clockwise in the same sense as alpha).
+lens.LensB.s:
+    initval: 1.386
+lens.LensB.alpha:
+    initval: 48.68
+# LensC is companion SLOT 1: the engine's s <-> log_s and alpha <->
+# (xalpha, yalpha) relations exist for slot 0 only (mulensing.md, "Three
+# or more lens bodies"), so an `s:` or `alpha:` initval here would NOT reach
+# the sampled coordinates and LensC would start at the defaults (s = 1,
+# alpha = 0).  The 2026-10-06 scan found exactly that: every combination
+# gave the same total.  Seed the sampled coordinates themselves.  Review
+# 8.6.13 (per-companion relations) is what would let `s:`/`alpha:` work.
+lens.LensC.log_s:
+    initval: 0.204391       # log10(1.601)
+lens.LensC.xalpha:
+    initval: -0.614493      # cos(127.92 deg)
+lens.LensC.yalpha:
+    initval: 0.788923       # sin(127.92 deg)
+
+# ---- explicit body masses (REQUIRED for 3+ lens bodies) -------------------
+# q_j = M_j / M_1 is DERIVED from the masses at runtime (the engine's
+# q <-> companion-mass relation exists for companion slot 0 only, and a
+# user lens.<j>.q for j >= 1 cannot back-propagate, mulensing.md).  The
+# masses are set so the derived q's reproduce Table 2 exactly:
+#   M_1 = 0.47 (Bayesian median, Eq. 10), M_2 = 0.526 M_1, M_3 = 0.241 M_1.
+star.Lens.mass:
+    initval: 0.47
+star.LensB.mass:
+    initval: 0.24722
+star.LensC.mass:
+    initval: 0.11327
+
+# ---- distances (Sect. 5): D_L = 6.57 kpc (Eq. 13).  D_S is set to 8.68
+# kpc (inside the Fig. 7 posterior, which peaks near 8.5) so that with the
+# masses above theta_E = sqrt(kappa M_tot pi_rel) = 0.50 mas exactly as
+# published (pi_rel = 1/6.57 - 1/8.68 = 0.0370 mas).
+star.Lens.distance:
+    initval: 6570
+star.LensB.distance:
+    initval: 6570
+star.LensC.distance:
+    initval: 6570
+star.Source.distance:
+    initval: 8680
+
+# Coordinates (J2000) from the KMTNet event page: 17:35:51.10 -28:26:47.22
+# ((l, b) = (-0.720, 2.076), Sect. 2).  Pinned on every star.
+star.Lens.ra:    {initval: 263.96292, sigma: 0}
+star.Lens.dec:   {initval: -28.44645, sigma: 0}
+star.LensB.ra:   {initval: 263.96292, sigma: 0}
+star.LensB.dec:  {initval: -28.44645, sigma: 0}
+star.LensC.ra:   {initval: 263.96292, sigma: 0}
+star.LensC.dec:  {initval: -28.44645, sigma: 0}
+star.Source.ra:  {initval: 263.96292, sigma: 0}
+star.Source.dec: {initval: -28.44645, sigma: 0}
+
+# As in KMT-2019-BLG-1806: hold the source metallicity (nothing reads it
+# beyond the SED, and there is no spectrum).
+star.Source.feh:
+    sigma: 0.0
+
+# ---- photometric zeropoints -------------------------------------------
+# The pySIS magnitudes are the KMT instrumental system.  Han+2023 Sect. 4
+# calibrate through the red giant clump: instrumental (V-I, I)_RGC =
+# (3.669, 18.025) against the intrinsic (1.060, 14.377) with A_I = 3.3, so
+# the instrumental I sits ~0.35 mag FAINTER than calibrated I -- but that
+# is the pyDIA system, not pySIS, and the two differ by an unknown
+# constant.  So the prior is centred on no offset and left wide; the
+# light curves themselves pin the site-to-site offsets.
+mulensinstrument.KMTC14.zeropoint: {mu: 0.0, sigma: 0.5}
+mulensinstrument.KMTS14.zeropoint: {mu: 0.0, sigma: 0.5}
+mulensinstrument.KMTA14.zeropoint: {mu: 0.0, sigma: 0.5}
+
+# Han+2023 Sect. 4: A_I = 3.3 toward the field.  Through this fit's own
+# Cousins-I BC grid (A_I/A_V ~ 0.62 at this reddening) that is A_V ~ 5.3.
+# The source teff/radius/mass start is seeded from its baseline flux at
+# this extinction; the dereddened source is (V-I, I)_0 = (0.892, 17.432),
+# a K subgiant with theta_* = 1.26 +/- 0.11 uas.
+star.Source.av:
+    initval: 5.3
