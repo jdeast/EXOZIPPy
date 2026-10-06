@@ -76,7 +76,15 @@ parameter_file: "KMT-2021-BLG-1122L.params.yaml"
 sampler:
   method: ptde          # synchronous PTDE, the recommended default (PR #376); the triple-lens VBM Op has no gradient
   n_temps: auto
-  T_max: 200
+  # T_max 20, not the usual 200: at T_max 200 (25 rungs) the fourth launch
+  # (job 15506690) hit a hung VBM call in 34 of its first 70 steps, all on
+  # rungs 15-24 (T >~ 25), each costing the 10 s eval_timeout plus a pool
+  # recycle -- the hangs cost more than the sampling.  The hottest rungs
+  # roam the three-body geometry into the kernel's failure tail (review
+  # 2.6.35); a ladder that stops at T = 20 stays out of it.  The start is
+  # the convention-scan winner, so deep tempering is not what this fit
+  # needs.
+  T_max: 20
   tune: 5000
   draws: 20000
   nthin: 1
@@ -91,3 +99,11 @@ sampler:
   # eval_timeout and recycles the pool, so skip the polish and let PTDE do
   # that work.
   seed_polish: false
+  # Every rung's start population is a copy of the T=1 one at the T=1
+  # dispersion (3 probe-scales) rather than the auto 3*sqrt(T): the start
+  # population is scored serially in the main process with no timeout
+  # (review 2.6.36), and the auto dispersion at T >= 10 jittered the
+  # three-body geometry into a VBM call that never returned -- the third
+  # launch (job 15506232) sat 95 minutes at one core after "PTDE init rung
+  # 9".  Rungs 1-8 at factors 3-7 scored ~2000 proposals without one.
+  start_dispersion: 3.0

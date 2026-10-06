@@ -182,7 +182,44 @@ s in [0.4, 2.3] (published 1.386 and 1.601, both near the Einstein ring),
 which keeps every failing geometry out of the kernel; for LensC the bound
 goes on `log_s` directly (slot-1 relations are absent, 8.6.13).
 
-Acceptance fit: job 15506232 on the PR branch (64 cores, `n_temps: auto`,
-no seed polish, bounded separations), started 2026-10-06.  RESULTS:
+**The bounded launch hung too** (job 15506232), in the serial start
+scoring: "PTDE init rung 9" at 09:40 and nothing after, 95 minutes of one
+core on a single VBM call reached by the auto start dispersion (factor 9
+at that rung) in some parameter the stress test did not scan.  Rungs 1-8
+at factors 3-7 had scored ~2000 proposals without one.  So the config
+also sets `start_dispersion: 3.0`: every rung starts at the T=1
+dispersion that those rungs proved.
+
+**The T_max 200 ladder lives in the kernel's failure tail** (job 15506690):
+with the init fixed the fit sampled, and in its first 70 steps hit a hung
+VBM call 34 times, all on rungs 15-24 of 25 (T above ~25), each costing
+the 10 s `eval_timeout` plus a pool recycle -- two thirds of the wall
+clock.  So the config sets `T_max: 20`: the ladder stops where the hangs
+start, and the start is the scan winner, so deep tempering is not what
+this fit needs.
+
+**T_max 20 did not help** (job 15507120): 10 timeouts in the first 29
+steps, spread over rungs 4-13, so the hang is not a hot-rung phenomenon
+but the kernel's retry bug firing on ordinary proposals at any
+temperature; stopped.  **The fit is blocked on the kernel fix** -- and the
+fix exists: the Radish agent root-caused both bugs and opened
+valboz/VBMicrolensing#74 (a `flagbad` never reset after a retry, and
+stale pairing indices in the image ordering).  Built from that branch
+into a scratch venv (`vbm_fix_test.job`, VBMicrolensing 5.6), the 24
+reproducers all pass and the 6000-proposal stress test shows 0 crashes
+under either method, one multi-minute call per 6000 (rejected by the
+sampler's eval timeout).  Results in `vbmfix_results/`.
+
+Acceptance fit: job 15507641 under the fixed kernel
+(`KMT-2021-BLG-1122L_vbmfix.job`: the venv's python, T_max 200 and the
+auto start dispersion restored, no seed polish, bounded separations),
+started 2026-10-06.  The fix is also INSTALLED in Hydra's shared exozippy
+env (JDE's ruling, `vbm_fix_install2.job`: a wheel built from the fork
+with the env's conda-forge g++ 14 into the user site-packages that the
+env's python resolves first; markers named VBMICROLENSING_FIX_COMMIT.txt
+record the commit, because the package still reports 5.6 and any
+reinstall would silently restore the crashing wheel).  The shipped
+config keeps the T_max 20 / start_dispersion 3.0 workarounds until the
+fix is released upstream.  RESULTS:
 (filled in when it lands -- posterior vs Table 2 through the mappings
 above, and the lens masses under the IMF and galactic priors).
