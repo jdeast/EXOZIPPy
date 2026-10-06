@@ -239,7 +239,18 @@ def build_csv_output(
                     s_list = (
                         summary if isinstance(summary, list) else [summary]
                     )
-                    return s_list[index] if index < len(s_list) else s_list[-1]
+                    # One summary per element (_summarize_array over the
+                    # element axis); the only legitimate short list is the
+                    # single summary of a 1-element parameter, where index
+                    # is always 0.  Anything else is a posterior/shape
+                    # mismatch, and printing the last element's numbers
+                    # under the missing names hid it (review 2.11.7).
+                    if index >= len(s_list):
+                        raise ValueError(
+                            f"{p.label}: summary has {len(s_list)} elements "
+                            f"but the parameter has {n_instances}"
+                        )
+                    return s_list[index]
 
                 if p.summary is not None:
                     # format() returns (median, err_MINUS, err_PLUS) -- unpack
