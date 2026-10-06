@@ -1,14 +1,14 @@
 """
-Tests for the exozippy-modes CLI (cli_modes.py) and the shared reporting
-pipeline it uses (outputs/report_pipeline.py).
+Tests for the exozippy-modes CLI (cli_modes.py) and the reporting pipeline
+(outputs/report_pipeline.py).
 
 exozippy-modes reprocesses a previously saved trace (<prefix>_trace.nc)
-through outputs.modes.identify_modes and System.distribute_posterior without
-re-sampling, rewriting <prefix>_modes.txt/_definitions.tex/_table.tex/
-_results.csv and persisting the mode labels back into the trace file. It
-must use the exact same identify_modes -> distribute_posterior -> LaTeX/CSV
-pipeline that run.run_fit() uses on a live fit (outputs.report_pipeline.
-build_mode_reports), so the two call sites cannot drift apart.
+without re-sampling by running the fit itself with `sampler:
+{recompute_trace: false}` (review 1.3.9): the whole live wrap-up, through
+run._wrap_up, so it cannot drift from a live fit.  It used to call
+build_mode_reports directly and skipped the degeneracy fold and the burn-in
+trim.  The end-to-end equality with a live fit's reports is
+tests/test_wrapup_resume.py; the CLI's own contract is pinned here.
 """
 
 import csv
@@ -110,105 +110,79 @@ def _write_synthetic_trace(prefix, rng, w2=0.3, sep=10.0):
 # ----------------------------------------------------------------------
 
 
-def test_cli_reproduces_pipeline_outputs(tmp_path):
+def _invoke_capturing_run_fit(monkeypatch, args):
+    """Run the CLI with run.run_fit replaced by a recorder."""
+    seen = {}
+
+    def _fake_run_fit(config, user_params=None):
+        seen["config"] = config
+
+    monkeypatch.setattr(run_module, "run_fit", _fake_run_fit)
+    result = CliRunner().invoke(cli_modes.main, args)
+    return result, seen
+
+
+def test_cli_runs_the_live_fit_with_recompute_trace_false(
+    tmp_path, monkeypatch
+):
     """
-    Given a saved trace with two well-separated modes (70/30) mixed within
-      every chain,
+    Given a config whose saved trace exists,
     When `exozippy-modes config.yaml` runs,
-    Then it exits cleanly, writes the modes/definitions/template/results
-      files, and rewrites the trace with a 'mode' posterior variable whose
-      labels recover the true mode assignment.
+    Then it hands the config to run.run_fit -- the live path -- with
+      `sampler: {recompute_trace: false}`, and changes nothing else (no
+      modes.force unless asked).
     """
     rng = np.random.default_rng(42)
     config_path, prefix = _write_config(tmp_path)
-    trace_path, truth = _write_synthetic_trace(prefix, rng)
+    _write_synthetic_trace(prefix, rng)
+    with open(config_path) as f:
+        on_disk = yaml.safe_load(f)
 
-    runner = CliRunner()
-    result = runner.invoke(cli_modes.main, [str(config_path)])
+    result, seen = _invoke_capturing_run_fit(monkeypatch, [str(config_path)])
 
-    assert result.exit_code == 0, result.output + "\n" + repr(result.exception)
-
-    for suffix in (
-        "_modes.txt",
-        "_definitions.tex",
-        "_table.tex",
-        "_results.csv",
-    ):
-        p = tmp_path / (prefix.name + suffix)
-        assert p.exists(), f"{p} was not written"
-        assert p.stat().st_size > 0
-
-    reloaded = az.from_netcdf(trace_path)
-    assert "mode" in reloaded.posterior
-    da = reloaded.posterior["mode"]
-    assert da.dims == ("chain", "draw")
-    assert da.attrs["n_modes"] == 2
-
-    found = da.values.ravel()
-    truth_flat = truth.ravel()
-    ok = found >= 0
-    assert ((found[ok] == 1) == (truth_flat[ok] == 1)).mean() > 0.95
+    assert result.exit_code == 0, result.output + repr(result.exception)
+    config = seen["config"]
+    assert config["sampler"]["recompute_trace"] is False
+    assert "force" not in (config.get("modes") or {})
+    expected = dict(on_disk)
+    expected["sampler"] = dict(on_disk.get("sampler") or {})
+    expected["sampler"]["recompute_trace"] = False
+    assert config == expected
 
 
-def test_cli_persisted_labels_idempotent(tmp_path):
+def test_cli_force_sets_modes_force(tmp_path, monkeypatch):
     """
-    Given a saved trace already reprocessed once by the CLI (mode labels
-      persisted to the trace file),
-    When the CLI runs again on the same trace,
-    Then it completes and reproduces identical mode labels (identify_modes
-      is deterministic under its default seed).
+    Given --force,
+    When the CLI runs,
+    Then the run gets `modes: {force: true}` -- the live fit's own
+      override of the invalid-draw gate, not a CLI-only behaviour.
     """
     rng = np.random.default_rng(7)
     config_path, prefix = _write_config(tmp_path)
-    trace_path, _ = _write_synthetic_trace(prefix, rng)
+    _write_synthetic_trace(prefix, rng)
 
-    runner = CliRunner()
-    r1 = runner.invoke(cli_modes.main, [str(config_path)])
-    assert r1.exit_code == 0, r1.output
-    labels_1 = az.from_netcdf(trace_path).posterior["mode"].values.copy()
-
-    r2 = runner.invoke(cli_modes.main, [str(config_path)])
-    assert r2.exit_code == 0, r2.output
-    labels_2 = az.from_netcdf(trace_path).posterior["mode"].values.copy()
-
-    np.testing.assert_array_equal(labels_1, labels_2)
-
-
-def test_cli_min_weight_flag_drops_minor_mode(tmp_path):
-    """
-    Given the same two-mode (70/30) trace,
-    When the CLI runs with --min-weight above the minor mode's fraction,
-    Then only the dominant mode survives (n_modes == 1 in the rewritten
-      trace attrs).
-    """
-    rng = np.random.default_rng(99)
-    config_path, prefix = _write_config(tmp_path)
-    trace_path, _ = _write_synthetic_trace(prefix, rng)
-
-    runner = CliRunner()
-    result = runner.invoke(
-        cli_modes.main, [str(config_path), "--min-weight", "0.5"]
+    result, seen = _invoke_capturing_run_fit(
+        monkeypatch, [str(config_path), "--force"]
     )
 
-    assert result.exit_code == 0, result.output
-    reloaded = az.from_netcdf(trace_path)
-    assert reloaded.posterior["mode"].attrs["n_modes"] == 1
+    assert result.exit_code == 0, result.output + repr(result.exception)
+    assert seen["config"]["modes"]["force"] is True
 
 
-def test_cli_missing_trace_reports_error(tmp_path):
+def test_cli_missing_trace_reports_error(tmp_path, monkeypatch):
     """
     Given a config whose trace file was never generated,
     When the CLI runs,
-    Then it fails loudly (non-zero exit / FileNotFoundError) rather than
-      silently producing empty or bogus reports.
+    Then it fails loudly (FileNotFoundError) and never reaches run_fit --
+      `recompute_trace: false` with no trace on disk would SAMPLE.
     """
     config_path, prefix = _write_config(tmp_path)
 
-    runner = CliRunner()
-    result = runner.invoke(cli_modes.main, [str(config_path)])
+    result, seen = _invoke_capturing_run_fit(monkeypatch, [str(config_path)])
 
     assert result.exit_code != 0
     assert isinstance(result.exception, FileNotFoundError)
+    assert seen == {}
 
 
 # ----------------------------------------------------------------------
@@ -361,16 +335,32 @@ def test_underscored_prefix_produces_a_compilable_caption(tmp_path):
     assert proc.returncode == 0, proc.stdout[-2000:]
 
 
-def test_run_and_cli_share_the_same_pipeline_function():
+def test_run_uses_the_pipeline_and_the_cli_uses_run():
     """
-    Given run.py's live-fit path and cli_modes.py's saved-trace path,
-    When each module is imported,
-    Then both reference the identical build_mode_reports function object
-      from outputs.report_pipeline -- proving the refactor removed the
-      duplicated identify_modes/distribute_posterior/build_latex_output/
-      build_csv_output block rather than merely copying it.
+    Given run.py's live wrap-up and cli_modes.py's reprocessing path,
+    When each module is read,
+    Then run.py calls outputs.report_pipeline.build_mode_reports and the
+      CLI calls nothing but run.run_fit -- one wrap-up, two entry points
+      (review 1.3.9).  The CLI used to call build_mode_reports itself and
+      so skipped the fold and the burn-in trim a live fit runs first.
     """
+    import ast
+    import inspect
+
     from exozippy.outputs.report_pipeline import build_mode_reports
 
     assert run_module.build_mode_reports is build_mode_reports
-    assert cli_modes.build_mode_reports is build_mode_reports
+    assert not hasattr(cli_modes, "build_mode_reports")
+    tree = ast.parse(inspect.getsource(cli_modes))
+    called = {
+        getattr(n.func, "id", getattr(n.func, "attr", None))
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+    }
+    assert "run_fit" in called
+    assert not called & {
+        "build_mode_reports",
+        "identify_modes",
+        "distribute_posterior",
+        "build_model",
+    }

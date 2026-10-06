@@ -2,10 +2,9 @@
 posterior distribution -> LaTeX/CSV table generation.
 
 This is the block that used to live inline in run.run_fit() right after
-sampling finished. It is now a single function so that run.py (the live
-fitting path) and the exozippy-modes CLI (exozippy/cli_modes.py, which
-reprocesses a previously saved trace file without re-sampling) can never
-drift apart: both call sites import build_mode_reports from this module.
+sampling finished.  Its one production caller is run._wrap_up; the
+exozippy-modes CLI reprocesses a saved trace by running that same wrap-up
+(`recompute_trace: false`, review 1.3.9), not by calling this directly.
 """
 
 import logging

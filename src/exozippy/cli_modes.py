@@ -1,91 +1,50 @@
 """Console entry point: exozippy-modes <config.yaml>
 
-Reprocesses a previously saved trace (``<prefix>_trace.nc``) through the
-posterior mode-identification + reporting pipeline without re-sampling. This
-is a forensic/offline tool: it rebuilds the System from the same config and
-parameter_file YAML used for the original fit (needed for Parameter units,
-expressions, and derived-parameter posteriors -- see CLAUDE.md's seven
-lifecycle stages), loads the saved trace, runs outputs.modes.identify_modes and
-System.distribute_posterior, and rewrites <prefix>_modes.txt,
-<prefix>_definitions.tex, <prefix>_table.tex, and <prefix>_results.csv.
+Reprocesses a previously saved trace (``<prefix>_trace.nc``) WITHOUT
+re-sampling, by running the fit itself with ``sampler: {recompute_trace:
+false}`` (review 1.3.9).  That IS the supported reprocessing path under the
+three-phase ruling (review 2.14.12, JDE 2026-09-25): it reloads the trace,
+checks it against the model this config builds, finishes it if its run
+died before the post-save step, and then runs the whole live wrap-up --
+the degeneracy fold, branch resolution, the burn-in / stuck-chain trim,
+mode identification, tables, plots, the modeling draft and the restart
+file -- through ``run._wrap_up``, the code a live fit runs.
 
-It shares the exact identify_modes -> distribute_posterior -> LaTeX/CSV
-pipeline with run.run_fit() via outputs.report_pipeline.build_mode_reports,
-so this CLI can never drift from what a live fit produces.
+This CLI used to be a second, partial copy of that wrap-up: it called
+``report_pipeline.build_mode_reports`` directly and so skipped the fold and
+the burn-in trim, and its tables included the transient and both node
+labels while its docstring claimed it "can never drift from what a live fit
+produces".  A thin wrapper over the live path cannot drift.
 
-It also persists the mode labels back into the trace file itself (atomic
-write via a temp file + rename in the same directory, so a reader that has
-the old file open never sees a partial write), so a single .nc file ends up
-carrying the full multimodal solution.
+Differences from typing the same thing yourself are deliberately few:
 
-identify_modes is deterministic under its default seed (20260711), so
-re-running this CLI on the same trace file with the same options reproduces
-identical mode labels and reports -- it is idempotent.
+* it refuses outright when no trace exists (``recompute_trace: false``
+  with no trace on disk would SAMPLE), and
+* its options set the matching ``modes:`` keys for this run only
+  (``--force`` is ``modes: {force: true}``: emit the reports from a trace
+  past the invalid-draw gate, for forensics).
+
+It no longer "always completes": a trace past the invalid-draw gate raises
+exactly as a live fit does unless ``--force``, and a wrap-up failure raises
+-- after which the same command reruns from the same saved trace.
 """
 
-import logging
-import os
+import copy
 from pathlib import Path
 
-import arviz as az
 import click
 
-from .logger import setup_logging
-from .outputs.modes import MODE_NO_VALID_DRAWS
-from .outputs.report_pipeline import build_mode_reports
-from .system import System
-from .trace_meta import check_trace_freshness
 from .yamlio import load_system_config
-
-logger = logging.getLogger(__name__)
-
-
-def _persist_trace(idata, trace_path):
-    """Atomically rewrite trace_path with idata (mode labels attached).
-
-    Writes to a temp file in the same directory first, then renames over
-    the original -- a reader with the old file open, or a crash mid-write,
-    never sees a partially-written trace.
-    """
-    trace_path = Path(trace_path)
-    tmp_path = trace_path.with_name(trace_path.name + ".tmp")
-    idata.to_netcdf(str(tmp_path))
-    os.replace(str(tmp_path), str(trace_path))
 
 
 @click.command()
 @click.argument("config_file")
 @click.option(
-    "--min-weight",
-    type=float,
-    default=None,
-    help="Modes below this fraction of valid draws are dropped "
-    "and their draws left unassigned "
-    "(identify_modes default: 0.005).",
-)
-@click.option(
-    "--max-modes",
-    type=int,
-    default=None,
-    help="Upper limit for the BIC mode-count scan "
-    "(identify_modes default: 8).",
-)
-@click.option(
-    "--feature-vars",
-    default=None,
-    help="Comma-separated posterior variable names to cluster on "
-    "(identify_modes default: every '*_raw' unconstrained "
-    "sampled variable in the trace).",
-)
-@click.option(
-    "--seed",
-    type=int,
-    default=None,
-    help="Random seed for k-means clustering (identify_modes "
-    "default: 20260711). identify_modes is deterministic "
-    "for a fixed seed, so re-running this CLI on the same "
-    "trace file with the same seed reproduces identical "
-    "mode labels and reports every time.",
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Write the reports even from a trace past the invalid-draw gate "
+    "(sets modes: {force: true} for this run).",
 )
 @click.option(
     "--logger-level",
@@ -93,31 +52,22 @@ def _persist_trace(idata, trace_path):
     type=click.Choice(["DEBUG", "INFO", "WARNING"], case_sensitive=False),
     help="Logging level (overrides logger_level in config file).",
 )
-def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
-    """Reprocess a saved trace through posterior mode identification.
+def main(config_file, force, logger_level):
+    """Re-run a fit's whole wrap-up from its saved trace, without sampling.
 
     CONFIG_FILE is the same system YAML passed to `exozippy`; its `prefix:`
-    key locates the previously saved trace (<prefix>_trace.nc). Rewrites
-    <prefix>_modes.txt, <prefix>_definitions.tex, <prefix>_table.tex,
-    <prefix>_results.csv, and the trace file itself (with
-    idata.posterior['mode'] attached) -- without re-running the sampler.
-
-    This tool always completes: unlike a live fit, mode-identification
-    problems here (a high invalid-draw fraction, or unreliable mode
-    weights) are reported as a prominent warning banner, not a fatal error,
-    since the whole point of this command is to be able to inspect an
-    already-finished trace.
+    key locates the saved trace (<prefix>_trace.nc).  Equivalent to running
+    `exozippy CONFIG_FILE` with `sampler: {recompute_trace: false}`.
     """
-    # An empty or non-mapping config is refused by name here rather than
-    # crashing on `config.get("prefix", ...)` below (review 2.3.11).
-    config = load_system_config(config_file)
+    from .run import run_fit
+
+    # An empty or non-mapping config is refused by name (review 2.3.11).
+    config = copy.deepcopy(load_system_config(config_file))
 
     if logger_level:
         config["logger_level"] = logger_level.upper()
 
     prefix = Path(config.get("prefix", "fitresults/planet"))
-    setup_logging(prefix, config.get("logger_level", "INFO"))
-
     trace_path = Path(str(prefix) + "_trace.nc")
     if not trace_path.exists():
         raise FileNotFoundError(
@@ -126,102 +76,13 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
             f"`exozippy {config_file}` first."
         )
 
-    # Build the System (needed for Parameter units/expressions and
-    # derived-parameter posteriors) but never sample -- prepare() +
-    # build_model() only, matching CLAUDE.md's seven lifecycle stages.
-    system = System(config)
-    system.prepare()
-    system.build_model()
+    config["sampler"] = dict(config.get("sampler") or {})
+    config["sampler"]["recompute_trace"] = False
+    if force:
+        config["modes"] = dict(config.get("modes") or {})
+        config["modes"]["force"] = True
 
-    idata = az.from_netcdf(str(trace_path))
-
-    # This CLI rewrites the published tables from the loaded draws, so the
-    # trace must belong to the model this config builds. A structural
-    # mismatch raises here exactly as it does in run.py: mode-identification
-    # problems are recoverable and only warn (see below), but draws sampled
-    # from a different model are not something this tool can reprocess.
-    check_trace_freshness(idata, system, trace_path)
-
-    feature_var_list = feature_vars.split(",") if feature_vars else None
-
-    # This is a forensic tool for reprocessing a saved trace, so it must
-    # always complete: a high invalid-draw fraction is reported below as a
-    # loud warning banner, not the raise build_mode_reports does for a live
-    # fit (raise_on_invalid=True there).
-    mode_status = {}
-    mode_report = build_mode_reports(
-        system,
-        idata,
-        prefix,
-        min_weight=min_weight,
-        max_modes=max_modes,
-        feature_vars=feature_var_list,
-        seed=seed,
-        raise_on_invalid=False,
-        mode_status=mode_status,
-    )
-
-    # Regenerate the modeling-draft scaffold against the rewritten table
-    # fragments.  The components' prose exists (stages 1-7 ran above); the
-    # run-level convergence paragraph does not (no live diagnostics here),
-    # which the regenerated file simply omits.  Never fatal, like every
-    # other output this forensic tool writes.
-    try:
-        from .outputs.modeling import build_modeling_output
-
-        build_modeling_output(system, prefix)
-    except Exception:
-        logger.warning(
-            "modeling-draft regeneration failed (non-fatal)", exc_info=True
-        )
-
-    if mode_status.get("state") == MODE_NO_VALID_DRAWS:
-        # A live fit refuses outright here (check_invalid_frac); this tool
-        # completes by contract, so the banner has to carry what the raise
-        # would have said -- "the tables were written" is not the headline,
-        # "they describe draws that were all rejected" is.
-        logger.warning(
-            "!" * 60 + "\n"
-            f"NO VALID DRAWS: all {mode_status.get('n_invalid', 0)} draws "
-            f"({mode_status.get('invalid_frac', 0.0):.2%}) in this trace "
-            "were rejected as numerically invalid "
-            f"(reasons={mode_status.get('reasons')}). The tables written "
-            "below describe REJECTED draws and no summary of them is "
-            f"meaningful. See {prefix}_modes.txt. This is a model or "
-            "sampler bug: fix it and re-fit; there is nothing here to "
-            "reprocess.\n" + "!" * 60
-        )
-    elif mode_report is None:
-        logger.warning(
-            "!" * 60 + "\n"
-            "MODE IDENTIFICATION FAILED: wrote combined-posterior tables "
-            f"only. See the warning above and {prefix}_modes.txt (if "
-            "present) for details.\n" + "!" * 60
-        )
-    else:
-        n_total = mode_report.labels.size
-        invalid_frac = mode_report.n_invalid / n_total if n_total else 0.0
-        loud = (not mode_report.weights_reliable) or invalid_frac > 0.05
-        if loud:
-            logger.warning(
-                "!" * 60 + "\n"
-                f"MODE REPORT FLAGGED: {mode_report.n_modes} mode(s), "
-                f"{mode_report.n_invalid}/{n_total} draws ({invalid_frac:.1%}) "
-                "rejected as invalid, weights "
-                f"{'validated' if mode_report.weights_reliable else 'UNRELIABLE'}. "
-                f"See {prefix}_modes.txt before trusting these tables.\n"
-                + "!"
-                * 60
-            )
-        else:
-            logger.info(
-                f"Mode report: {mode_report.n_modes} mode(s), "
-                f"{mode_report.n_invalid}/{n_total} draws rejected as "
-                f"invalid; see {prefix}_modes.txt"
-            )
-
-    _persist_trace(idata, trace_path)
-    logger.info(f"Rewrote {trace_path} with posterior mode labels attached.")
+    run_fit(config)
 
 
 if __name__ == "__main__":

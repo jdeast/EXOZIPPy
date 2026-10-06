@@ -1190,10 +1190,10 @@ def test_pipeline_reports_all_invalid_without_raising_for_forensics(
     tmp_path,
 ):
     """
-    Given the same all-invalid trace and the forensic reprocessing path
-      (raise_on_invalid=False, what exozippy-modes uses),
+    Given the same all-invalid trace and a caller that reports invalid
+      draws itself (raise_on_invalid=False),
     When build_mode_reports runs,
-    Then it completes as that tool's contract requires, but records the
+    Then it completes, but records the
       all-invalid state in the status dict and writes a <prefix>_modes.txt
       that says so -- the tables it goes on to write are never the only
       thing on disk describing this trace.
