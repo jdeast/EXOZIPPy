@@ -79,11 +79,12 @@ lens.b.q:
 orbit.S.period:
     initval: 221.5                # +55/-39 d (xi_P)
 # tp = 2457930.059 from nu(t0par) = xi_u - xi_omega = 28.8 deg with
-# e = 0.615 (the C25 anomaly chain).  Seeded through tc rather than tp:
+# e = 0.615 (the C25 anomaly chain).  Seeded through the equivalent tc:
 # tc = tp + M_c(e, omega) P/(2 pi) = 2458125.06 (the conjunction one
-# period forward -- the tc hard window is built with the wrapped-positive
-# M_c, and a tp seed's solved tc landed on the OTHER wrap of the same
-# conjunction, outside its own window; that wrap seam is filed for review).
+# period forward).  An `orbit.S.tp: 2457930.059` seed solves the same tc
+# (2458125.076) and builds; before review 1.1.9 the engine discarded that
+# solve as within 1e-3 RELATIVE of the 2460000 backstop and kept the
+# backstop, outside the tc window.
 orbit.S.tc:
     initval: 2458125.06
 # e = 0.615 +0.015/-0.018, omega_* = 207.3 deg:

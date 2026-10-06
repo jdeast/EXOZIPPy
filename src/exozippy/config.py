@@ -1002,32 +1002,88 @@ The logic of the config manager is independent of any specific components.
 """
 
 
+# How far a re-solved value must move, IN UNITS OF THE SYMBOL'S init_scale,
+# before the relaxation engine treats it as a change (review 1.1.9, JDE ruling
+# 2026-10-06: "the best tolerance should be scaled by init_scale, if
+# present").  init_scale is the engine's own statement of what a meaningful
+# step in that parameter is -- but only a GUESS, made before the whitening
+# probe measures the real one, and the two sides of a wrong guess are not
+# symmetric here.  Too SMALL costs extra engine iterations; too LARGE
+# silently discards a real solve, which is 1.1.9's own failure.  So the
+# number errs small.  Measured when this landed (probe at the engine start,
+# 20 shipped examples, 392 sampled elements): preliminary/measured runs
+# from 4.5e-6 to 1.6e4, median 3.4, 19 elements above 1e3 -- so at 1e-5 even
+# the worst guess puts the threshold at ~0.16 of the true scale, and the
+# median one at ~3e-5.  The floor is round-off: on the hardest case, an
+# absolute epoch (orbit.tc: init_scale 0.001 d -> 1e-8 d), that is still ~20
+# ulps of 2.46e6.  And nothing shipped sits near it: the smallest nonzero
+# move the engine judged against a scale, on any example, was 0.035
+# init_scales, so every value from 1e-3 down to here decides identically.
+# The old test was RELATIVE to the value's MAGNITUDE, which has no meaning
+# for a quantity with an arbitrary zero: at 1e-3 it was ~2460 d on a BJD, so
+# a tp-implied tc solved anywhere within ~7 yr of the 2460000 backstop was
+# discarded.
+CHANGE_TOL_IN_SCALES = 1e-5
+
+
+def _value_moved(new_val, old_val, scale, rel_tolerance, path):
+    """Has `path` moved from `old_val` to `new_val` by a meaningful amount?
+
+    Measured in the symbol's preliminary init_scale (`scale`, INTERNAL units,
+    as the engine holds it in `resolved_scales`) whenever one exists:
+    ``|new - old| >= CHANGE_TOL_IN_SCALES * scale``.  A symbol with NO
+    init_scale at any source (defaults.yaml, a component scale hint, a user
+    sigma, the engine's own Jacobian propagation) keeps the old test RELATIVE
+    to the magnitude at `rel_tolerance`, logged at DEBUG with the symbol's
+    name so the set stays visible; it is not a silent substitute -- every
+    such symbol in the shipped examples was measured when this landed (see
+    config.md, "When a re-solved value counts as a change").
+    """
+    if scale is not None and np.isfinite(scale) and scale > 0:
+        return abs(new_val - old_val) >= CHANGE_TOL_IN_SCALES * scale
+    # Lazy %-formatting: the convergence check calls this for every symbol
+    # on every pass, so an f-string here would be built and thrown away
+    # at any level anybody runs a fit at.
+    logger.debug(
+        "%s: no init_scale, change test is relative at %g",
+        path,
+        rel_tolerance,
+    )
+    ref = max(abs(new_val), abs(old_val), 1e-9)
+    return abs(new_val - old_val) / ref >= rel_tolerance
+
+
 def _meaningful_change(
     new_val,
     old_val,
     new_rank,
     old_rank,
     tolerance,
-    provenance,
+    scale,
     target_str,
 ):
     """Return True iff _execute_solve should apply this update and signal progress.
 
-    Propagates a rank improvement silently (updates provenance but returns False)
-    when the value itself hasn't changed.  Returning False when the value is
-    unchanged prevents the relaxation loop from running to max_iter on systems
-    that have converged but still have two competing derivation paths for the
-    same variable.
+    Two rules (review 1.1.9):
+
+    * A STRICTLY HIGHER-RANKED answer always replaces the value, however
+      close it is.  The old code instead kept the old value and promoted ITS
+      rank to the new one ("propagate rank silently") -- certifying as
+      "solved" a number the solver never produced.  On a tp-seeded orbit
+      that was the defaults.yaml tc backstop, held at PRECEDENCE_DERIVED_MIXED
+      and reported "solved" while 1875 d away from the tc the solver
+      returned.  Terminates: once applied, the path holds `new_rank`, so the
+      same answer is no longer strictly higher.
+    * Otherwise the value must have MOVED, in units of its init_scale
+      (`_value_moved`).  Returning False for an unmoved value is what stops
+      the loop running to max_iter when two equal-rank derivation paths
+      agree to within the tolerance.
     """
     if old_val is None:
-        return True  # Condition A: variable was previously unknown — always an update
-    ref = max(abs(new_val), abs(old_val), 1e-9)
-    if abs(new_val - old_val) / ref >= tolerance:
-        return True  # value changed meaningfully
-    # Value unchanged; propagate rank silently if it improved
+        return True  # Condition A: variable was previously unknown -- always an update
     if new_rank > old_rank:
-        provenance[target_str] = new_rank
-    return False
+        return True
+    return _value_moved(new_val, old_val, scale, tolerance, target_str)
 
 
 def _element_flag(table, key, element, fallback, absent):
@@ -3916,7 +3972,7 @@ class ConfigManager:
             )
 
             self._run_standalone_solvers(
-                resolved, provenance, tolerance, pinned_vars
+                resolved, provenance, resolved_scales, tolerance, pinned_vars
             )
 
             for eq in self.all_relations:
@@ -3934,14 +3990,17 @@ class ConfigManager:
             # This correctly handles intra-iteration oscillation (two equations fighting
             # over the same variable within one pass): individual updates may fire on
             # each equation, but if the net state is unchanged the loop should stop.
+            # The SAME change test the updates use (_value_moved, in units of
+            # init_scale): a relative test here would call a solved epoch
+            # "unchanged" and stop the loop before anything downstream of it
+            # re-fired (review 1.1.9).
             net_changed = False
             for k, v in resolved.items():
                 old = resolved_snapshot.get(k)
                 if old is None:
                     net_changed = True
                     break
-                ref = max(abs(v), abs(old), 1e-9)
-                if abs(v - old) / ref >= tolerance:
+                if _value_moved(v, old, resolved_scales.get(k), tolerance, k):
                     net_changed = True
                     break
             if not net_changed and provenance != provenance_snapshot:
@@ -4016,7 +4075,12 @@ class ConfigManager:
         return resolved
 
     def _run_standalone_solvers(
-        self, resolved, provenance, tolerance, pinned_vars=None
+        self,
+        resolved,
+        provenance,
+        resolved_scales,
+        tolerance,
+        pinned_vars=None,
     ):
         """
         Run standalone-registered custom solvers once per relaxation
@@ -4028,8 +4092,8 @@ class ConfigManager:
         "Always win" has to be enforced here, not just asserted: unlike the
         equation path (``_attempt_solve``), which picks the LOWEST-ranked
         symbol of a violated relation, a standalone solver writes its target
-        unconditionally.  ``_meaningful_change`` compares values, not ranks,
-        so before the guard below an explicit ``orbit.b.m_total`` in
+        unconditionally.  ``_meaningful_change`` never REFUSES a write on
+        rank (it only waves a strictly higher one through), so before the guard below an explicit ``orbit.b.m_total`` in
         params.yaml (PRECEDENCE_USER) was overwritten every iteration by the body
         mass sum and its provenance DOWNGRADED to PRECEDENCE_DERIVED_MIXED --
         exactly the inversion the ranking system exists to prevent.  A path
@@ -4078,7 +4142,7 @@ class ConfigManager:
                     PRECEDENCE_DERIVED_MIXED,
                     provenance.get(path, 0),
                     tolerance,
-                    provenance,
+                    resolved_scales.get(path),
                     path,
                 ):
                     continue
@@ -4128,7 +4192,7 @@ class ConfigManager:
                 PRECEDENCE_USER,
                 provenance.get(target, 0),
                 tolerance,
-                provenance,
+                resolved_scales.get(target),
                 target,
             ):
                 resolved[target] = val
@@ -4338,7 +4402,7 @@ class ConfigManager:
                     new_rank,
                     provenance.get(target_str, 0),
                     tolerance,
-                    provenance,
+                    resolved_scales.get(target_str),
                     target_str,
                 ):
                     return False
@@ -4541,7 +4605,7 @@ class ConfigManager:
                 new_rank,
                 provenance.get(target_str, 0),
                 tolerance,
-                provenance,
+                resolved_scales.get(target_str),
                 target_str,
             ):
                 return False
