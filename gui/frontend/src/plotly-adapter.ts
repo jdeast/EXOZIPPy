@@ -4,10 +4,13 @@
 // for the saved PDFs. The two must stay visually equivalent: when you extend
 // the meta or style vocabulary in one, mirror it in the other.
 //
-// One meta key is deliberately ignored by BOTH renderers: meta.caption is
+// Two meta keys are deliberately ignored by BOTH renderers: meta.caption is
 // the LaTeX figure caption for the generated paper draft
 // (src/exozippy/outputs/modeling.py, the specs' third consumer). If the
 // GUI ever surfaces it (e.g. as a card subtitle), strip the LaTeX first.
+// meta.residuals is the chart's O-C ({ylabel, traces: role "residual"}),
+// drawn as a sub-panel by the system summary figure
+// (src/exozippy/outputs/summary_plot.py); a GUI O-C panel would read it.
 //
 // Plots render on WHITE cards (matching the saved figures), even though the
 // surrounding UI is dark -- every color here is chosen for a white background.

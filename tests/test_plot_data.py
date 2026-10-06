@@ -951,3 +951,112 @@ def test_point_to_plot_params_names_a_misshapen_input():
             point,
             SimpleNamespace(plot_params=[full], plot_branch_labels={"a.full"}),
         )
+
+
+# ---------------------------------------------------------------------------
+# meta["residuals"]: the O-C a component declares on its charts (consumed by
+# the system summary figure, outputs/summary_plot.py)
+# ---------------------------------------------------------------------------
+
+
+def _residual_traces(spec):
+    return {t.name: t for t in spec.meta["residuals"]["traces"]}
+
+
+def test_rv_residual_is_data_minus_the_likelihood_model(rvonly_built):
+    """
+    Given the built RV-only system at its start point,
+    When the unphased RV chart's O-C is subtracted from its data trace,
+    Then what is left is the likelihood's model at each observed time --
+      the compiled RV model evaluated there through the separate
+      _rv_at_times path -- so the O-C is data minus model, not data minus
+      an interpolated curve.
+    """
+    system, model, point = rvonly_built
+    rv = system.rvinstrument
+    unphased = [
+        s for s in rv.plot_data(system, point) if not s.meta["phase_folded"]
+    ][0]
+    residuals = _residual_traces(unphased)
+    params = rv._point_to_plot_params(point, system)
+
+    assert unphased.meta["residuals"]["ylabel"] == "O-C [m/s]"
+    for data in (t for t in unphased.traces if t.role == "data"):
+        oc = residuals[data.name]
+        np.testing.assert_array_equal(oc.x, data.x)
+        model_at_obs, _ = rv._rv_at_times(
+            params, rv.names.index(data.name), data.x
+        )
+        np.testing.assert_allclose(
+            np.asarray(data.y) - np.asarray(oc.y),
+            model_at_obs * rv._rv_factor(),
+            rtol=1e-9,
+            atol=1e-9,
+        )
+        np.testing.assert_allclose(oc.yerr, data.yerr)
+
+
+def test_rv_residuals_agree_across_panels(rvonly_built):
+    """
+    Given the built RV-only system,
+    When the O-C of the unphased chart and of each phased chart are compared,
+    Then they are the same numbers (only x differs, the time vs that orbit's
+      phase, which matches the phased data trace's x), and on a phased panel
+      they equal the data minus the plotted orbit curve to the curve's
+      interpolation accuracy.
+    """
+    system, model, point = rvonly_built
+    specs = system.rvinstrument.plot_data(system, point)
+    unphased = [s for s in specs if not s.meta["phase_folded"]][0]
+    phased = [s for s in specs if s.meta["phase_folded"]]
+    assert phased
+
+    reference = _residual_traces(unphased)
+    for spec in phased:
+        curve = [t for t in spec.traces if t.role == "model"][0]
+        for data in (t for t in spec.traces if t.role == "data"):
+            oc = _residual_traces(spec)[data.name]
+            np.testing.assert_array_equal(oc.y, reference[data.name].y)
+            np.testing.assert_array_equal(oc.x, data.x)
+            on_curve = np.interp(data.x, curve.x, curve.y, period=1.0)
+            np.testing.assert_allclose(
+                np.asarray(data.y) - on_curve, oc.y, atol=1e-2
+            )
+
+
+def test_rv_charts_carry_no_residuals_without_a_point(rvonly_prepared):
+    """
+    Given a prepared, unbuilt RV-only system (data-only regime),
+    When plot_data runs without a point,
+    Then no chart declares an O-C: there is no model to subtract.
+    """
+    system = rvonly_prepared
+    for spec in system.rvinstrument.plot_data(system, point=None):
+        assert "residuals" not in spec.meta
+
+
+def test_sed_residual_plus_prediction_is_the_observed_magnitude(sed_built):
+    """
+    Given the three-star kelt4 SED build at its start point,
+    When the SED chart's O-C (one trace per star identity) is added back to
+      the compiled blended/differential magnitude prediction,
+    Then it gives every observed magnitude, at its filter's wavelength, with
+      the quoted error -- one residual per filter row.
+    """
+    system, model, point = sed_built
+    sed = system.sed
+    spec = [s for s in sed.plot_data(system, point) if s.id == "sed.sed"][0]
+    traces = spec.meta["residuals"]["traces"]
+    assert spec.meta["residuals"]["ylabel"] == "O-C [mag]"
+    _assert_json_roundtrip([spec])
+
+    pred = np.asarray(
+        sed._compiled_combined_mag(*sed._point_to_plot_params(point, system))
+    )
+    wave = sed._filter_wave_eff_micron()
+    got = np.concatenate([np.column_stack([t.x, t.y, t.yerr]) for t in traces])
+    want = np.column_stack([wave, sed.mag - pred, sed.err])
+    assert got.shape == want.shape
+    order_got = np.lexsort(got[:, ::-1].T)
+    order_want = np.lexsort(want[:, ::-1].T)
+    np.testing.assert_allclose(got[order_got], want[order_want], rtol=1e-9)

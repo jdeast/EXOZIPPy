@@ -1154,6 +1154,29 @@ class RVInstrument(Instrument):
             model_deps = model_deps + [
                 lbl for lbl in numpy_deps if lbl not in model_deps
             ]
+        # Once per (instrument, point), not once per orbit (6.5.1): the
+        # phased panels and the O-C of every panel read the same arrays.
+        omap = getattr(self, "_plot_orbit_map", None)
+        phased_shared = (
+            self._phased_shared(system, point)
+            if point is not None and omap is not None
+            else None
+        )
+        unphased_meta = {
+            "phase_folded": False,
+            "file_tag": "RV_unphased",
+            "figsize": (12, 6),
+            "dynamic_data": True,
+            "caption": (
+                "Radial velocities with the best-fit model "
+                "(red); posterior draws are overplotted with "
+                "low opacity." + self.detrend_caption()
+            ),
+        }
+        if phased_shared is not None:
+            unphased_meta["residuals"] = self._residuals_meta(
+                point, phased_shared, self.time
+            )
         specs.append(
             Chart(
                 id=f"{self.prefix}.unphased",
@@ -1163,23 +1186,12 @@ class RVInstrument(Instrument):
                 ylabel="Relative RV [m/s]",
                 traces=traces,
                 param_deps=model_deps,
-                meta={
-                    "phase_folded": False,
-                    "file_tag": "RV_unphased",
-                    "figsize": (12, 6),
-                    "dynamic_data": True,
-                    "caption": (
-                        "Radial velocities with the best-fit model "
-                        "(red); posterior draws are overplotted with "
-                        "low opacity." + self.detrend_caption()
-                    ),
-                },
+                meta=unphased_meta,
             )
         )
 
         # ---- Phased: one chart per member orbit (needs a model) -------
-        omap = getattr(self, "_plot_orbit_map", None)
-        if point is not None and omap is not None:
+        if phased_shared is not None:
             deps = self._model_trace_param_deps(
                 getattr(self, "_rv_matrix_node", None), system
             )
@@ -1189,8 +1201,6 @@ class RVInstrument(Instrument):
             # dynamic_data below and the explicit deps the graph walk cannot
             # see.
             deps = deps + [lbl for lbl in numpy_deps if lbl not in deps]
-            # Once per (instrument, point), not once per orbit (6.5.1).
-            shared = self._phased_shared(system, point)
             for col, o_idx in enumerate(omap):
                 if system.orbit.is_taylor[o_idx]:
                     # No period to fold on: a Taylor orbit's trend is drawn
@@ -1198,7 +1208,7 @@ class RVInstrument(Instrument):
                     # one as an "other orbit" (its column is in the matrix).
                     continue
                 prep = self._phased_arrays(
-                    system, point, col, o_idx, shared=shared
+                    system, point, col, o_idx, shared=phased_shared
                 )
                 P_ref, tc_ref = prep["P_ref"], prep["tc_ref"]
                 otraces = [
@@ -1277,8 +1287,56 @@ class RVInstrument(Instrument):
                             ),
                             "hline_y": 0.0,
                             "dynamic_data": True,
+                            "residuals": self._residuals_meta(
+                                point,
+                                phased_shared,
+                                np.mod(
+                                    (self.time - tc_ref) / P_ref + 0.25, 1.0
+                                ),
+                            ),
                         },
                     )
                 )
 
         return specs
+
+    def _residuals_meta(self, point, shared, x):
+        """The O-C at the observations, as a chart's ``meta["residuals"]``.
+
+        Data minus the likelihood's own model at the observed times: the
+        detrend-corrected RVs less gamma, every member orbit's term (the
+        ``_rv_data_fn`` matrix, i.e. the node ``build_likelihood`` scored,
+        so an RM file's anomaly is in it on that file's rows only) and any
+        GP conditional mean.  The numbers are the same on every panel and
+        only ``x`` differs -- the observed time on the unphased chart, the
+        orbit's phase on a phased one -- and on a phased panel they are
+        exactly its data minus its plotted orbit curve, since both of those
+        come out of the same matrix.  The error bars are the quoted ones, as
+        on the data traces.
+
+        ``shared`` is this point's ``_phased_shared`` dict; ``x`` is
+        per-observation (``(N_obs,)``) and is split by instrument here.
+        """
+        from exozippy.chart import Trace
+
+        factor = self._rv_factor()
+        model = (
+            np.sum(shared["data_rv_matrix"], axis=1) + shared["extra_signals"]
+        )
+        traces = []
+        for i in range(self.n_elements):
+            mask = self.inst_map == i
+            g = self._point_value(point, self.gamma, i)
+            traces.append(
+                Trace(
+                    name=self.names[i],
+                    role="residual",
+                    kind="scatter",
+                    x=x[mask],
+                    y=(shared["rv_corrected"][mask] - g - model[mask])
+                    * factor,
+                    yerr=shared["err_corrected"][mask] * factor,
+                    style=self._data_trace_style(i),
+                )
+            )
+        return {"ylabel": "O-C [m/s]", "traces": traces}

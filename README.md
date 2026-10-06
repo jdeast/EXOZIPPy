@@ -153,6 +153,18 @@ and use it as a template. Generically:
    exozippy toi1234.yaml
    ```
 
+5. Draw the one-page summary figure (transits, RVs, SED and Kiel diagram at
+   the best-fit draw, with each planet's P, R_P, M_P and e) from the finished
+   fit, without re-sampling:
+
+   ```bash
+   exozippy-summary toi1234.yaml
+   ```
+
+   It writes `<prefix>_mcmc_summary.pdf` beside the fit's other outputs;
+   `--help` lists the options, including relabelling instruments and binning
+   or grouping the transits.
+
 ### Step 5 -- Helper commands for Step 4
 
 EXOZIPPy installs three commands that do much of items 1-3 of Step 4 for you. Run each

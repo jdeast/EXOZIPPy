@@ -51,6 +51,12 @@ Chart ``meta`` presentation keys (all optional):
   caption built from the spec title.  It is emitted verbatim into
   ``\\caption{...}``, so escape any non-LaTeX pieces (instrument names!)
   with ``latex_escape`` when composing it.
+* ``residuals``  -- the chart's O-C at the plotted point, ``{"ylabel": str,
+  "traces": [Trace(role="residual"), ...]}``, declared by the component
+  that owns the model (it alone can evaluate the likelihood's model at the
+  observations).  Like ``caption`` it is drawn by NEITHER renderer: its
+  consumer is the system summary figure (``outputs/summary_plot.py``),
+  which gives each chart that carries one an O-C sub-panel.
 
 Axis GEOMETRY is no longer here: ``x_range``/``y_range``, ``x_log``/``y_log``
 and ``x_inverted``/``y_inverted`` are first-class ``Chart`` attributes (review
@@ -245,6 +251,35 @@ def _legend(ax):
     return legend
 
 
+def draw_chart(ax, spec, extra_models=(), model_alpha=0.8, legend=True):
+    """Draw one Chart into an existing Axes: traces, geometry, axis labels.
+
+    The body of ``render_spec_groups``' per-spec loop, public so a renderer
+    that composes several charts into one figure (the system summary,
+    ``outputs/summary_plot.py``) draws each panel exactly as its own PDF
+    draws it, rather than keeping a second copy of the role encodings.
+    ``extra_models`` is a list of model-trace lists (the later draws'
+    spaghetti); ``model_alpha`` applies to every model trace, see the module
+    docstring.  The title is the caller's: a panel of a composite figure
+    does not repeat it.  Returns the legend, or None.
+    """
+    for trace in spec.traces:
+        if trace.role == "model":
+            _draw_model(ax, trace, model_alpha)
+        elif trace.role == "residual":
+            _draw_residual(ax, trace)
+        else:
+            _draw_data(ax, trace)
+    for models in extra_models:
+        for trace in models:
+            _draw_model(ax, trace, model_alpha)
+
+    _apply_axes(ax, spec)
+    ax.set_xlabel(spec.xlabel)
+    ax.set_ylabel(spec.ylabel)
+    return _legend(ax) if legend else None
+
+
 def render_spec_groups(spec_groups, filename_prefix="debug"):
     """Render one figure per spec, overlaying model traces from every group.
 
@@ -281,22 +316,13 @@ def render_spec_groups(spec_groups, filename_prefix="debug"):
         meta = spec.meta or {}
         fig, ax = plt.subplots(figsize=tuple(meta.get("figsize") or (10, 6)))
         try:
-            for trace in spec.traces:
-                if trace.role == "model":
-                    _draw_model(ax, trace, model_alpha)
-                elif trace.role == "residual":
-                    _draw_residual(ax, trace)
-                else:
-                    _draw_data(ax, trace)
-            for models in extra_models.get(spec.id, []):
-                for trace in models:
-                    _draw_model(ax, trace, model_alpha)
-
-            _apply_axes(ax, spec)
-            ax.set_xlabel(spec.xlabel)
-            ax.set_ylabel(spec.ylabel)
+            draw_chart(
+                ax,
+                spec,
+                extra_models=extra_models.get(spec.id, []),
+                model_alpha=model_alpha,
+            )
             ax.set_title(spec.title)
-            _legend(ax)
             fig.tight_layout()
 
             tag = meta.get("file_tag") or spec.id.replace(".", "_")
