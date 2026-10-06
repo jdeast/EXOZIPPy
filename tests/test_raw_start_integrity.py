@@ -18,6 +18,7 @@ import pymc as pm
 import pytest
 
 from exozippy.components.parameter import Parameter
+from exozippy.system import System
 
 
 def _toy_vector_model():
@@ -109,3 +110,91 @@ def test_check_raw_size_raises_without_a_raw_transform():
         ValueError, match=r"site: Parameter 'toy.y' has no raw transform"
     ):
         p.check_raw_size(np.zeros(1), "site")
+
+
+# ---------------------------------------------------------------------------
+# System.get_raw_start (2.3.22)
+# ---------------------------------------------------------------------------
+
+
+class _StubSystem:
+    """Duck-typed stand-in for System: parameter lookup + seed storage."""
+
+    def __init__(self, params, seed_resolved=None):
+        self._params = params
+
+        class _CM:
+            pass
+
+        self.config_manager = _CM()
+        self.config_manager.seed_resolved = seed_resolved
+
+    def get_all_parameters(self):
+        return self._params
+
+
+def test_get_raw_start_reads_raw_initval_on_correct_code():
+    """
+    Given a built parameter with a displaced raw_initval,
+    When get_raw_start builds the start,
+    Then the start holds raw_initval for that raw variable (the non-vacuity
+      check for the raising tests below).
+    """
+    # ARRANGE
+    model, p = _toy_vector_model()
+    p.raw_initval = np.array([0.25, -0.5])
+
+    # ACT
+    start = System.get_raw_start(_StubSystem([p]), model)
+
+    # ASSERT
+    np.testing.assert_array_equal(start["toy.x_raw"], [0.25, -0.5])
+
+
+def test_get_raw_start_raises_on_a_raw_variable_with_no_parameter():
+    """
+    Given a model whose free variable 'toy.x_raw' has no Parameter in the
+      system (a label / raw-name mismatch),
+    When get_raw_start builds the start,
+    Then KeyError names the raw variable, instead of the start silently
+      becoming raw = 0 for it.
+    """
+    # ARRANGE
+    model, _ = _toy_vector_model()
+    other = Parameter(label="toy.other", initval=1.0, lower=0.0, upper=2.0)
+
+    # ACT / ASSERT
+    with pytest.raises(
+        KeyError, match=r"raw variable 'toy.x_raw' has no Parameter"
+    ):
+        System.get_raw_start(_StubSystem([other]), model)
+
+
+@pytest.mark.parametrize(
+    "bad, fragment",
+    [
+        (np.zeros(3), "raw vector has 3 entries but its raw variable has 2"),
+        (None, "raw vector is None"),
+    ],
+)
+def test_get_raw_start_raises_on_a_mis_sized_or_missing_raw_initval(
+    bad, fragment
+):
+    """
+    Given a built parameter whose raw_initval was overwritten with the
+      wrong size, or erased,
+    When get_raw_start builds the start,
+    Then ValueError names the raw key, the parameter and the sizes, instead
+      of the start silently becoming raw = 0 for it.
+    """
+    # ARRANGE
+    model, p = _toy_vector_model()
+    p.raw_initval = bad
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError) as exc:
+        System.get_raw_start(_StubSystem([p]), model)
+    msg = str(exc.value)
+    assert "System.get_raw_start[toy.x_raw] raw_initval" in msg
+    assert "'toy.x'" in msg
+    assert fragment in msg

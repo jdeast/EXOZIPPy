@@ -118,6 +118,24 @@ KNOWN_BLOCK_KEYS = {
 }
 
 
+def _parameter_for_raw_key(key, lookup):
+    """The Parameter owning raw variable ``key`` (``<label>_raw``).
+
+    ``lookup`` maps label -> Parameter.  Every free variable in a built
+    model is a Parameter's ``<label>_raw`` (components add only observed
+    likelihood terms and potentials), so a key with no Parameter is a
+    label / raw-name mismatch: raise naming it rather than skip it.
+    """
+    name = key[: -len("_raw")] if key.endswith("_raw") else key
+    if name not in lookup:
+        raise KeyError(
+            f"raw variable '{key}' has no Parameter labelled '{name}': "
+            f"every free variable in the model must be a Parameter's "
+            f"'<label>_raw'"
+        )
+    return lookup[name]
+
+
 class System(Component):
     def __init__(self, config, user_params=None):
         self.config = config
@@ -1055,23 +1073,25 @@ class System(Component):
         PTDE, the seed ledger and the jitter all want the start keyed by raw
         variable and want it without a model context.  A mismatch between
         the two is a bug, and ``tests/test_nuts_start.py`` pins the equality.
+
+        Every key of ``model.initial_point()`` is a ``<label>_raw`` variable
+        ``Parameter.build_pymc`` created in the same call that set that
+        Parameter's ``raw_initval``, one entry per sampled element.  So a key
+        with no Parameter raises KeyError and a missing or mis-sized
+        ``raw_initval`` raises ValueError (``Parameter.check_raw_size``,
+        review 2.14.15).  Both used to become ``raw = 0`` silently, and every
+        consumer of the start then agreed on the wrong start (review 2.3.22).
         """
         raw_start = model.initial_point()
         lookup = {p.label: p for p in self.get_all_parameters()}
         for key in raw_start:
-            name = key[: -len("_raw")] if key.endswith("_raw") else key
-            par = lookup.get(name)
-            raw_init = (
-                getattr(par, "raw_initval", None) if par is not None else None
+            par = _parameter_for_raw_key(key, lookup)
+            where = f"System.get_raw_start[{key}]"
+            par.check_raw_size(raw_start[key], f"{where} model variable")
+            raw_init = par.check_raw_size(
+                par.raw_initval, f"{where} raw_initval"
             )
-            if raw_init is not None and np.size(raw_init) == np.size(
-                raw_start[key]
-            ):
-                raw_start[key] = np.asarray(raw_init, dtype=float).reshape(
-                    np.shape(raw_start[key])
-                )
-            else:
-                raw_start[key] = np.zeros_like(raw_start[key])
+            raw_start[key] = raw_init.reshape(np.shape(raw_start[key]))
         return raw_start
 
     def jitter_raw_start(self, center, raw_scales, factor, rng):
