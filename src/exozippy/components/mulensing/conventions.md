@@ -27,11 +27,10 @@ it.
 
 Being a separate repository, the paper cannot ride the same commit, so the rule is simply
 that **a `C`-rule is not finished until both carry it**: pull the paper repo, make the
-matching edit there, and name that commit in this one. Both are in step through `C30`
+matching edit there, and name that commit in this one. Both are in step through `C31`
 (paper commits `3476111`, 2026-09-23, which added `C29` and `C30`, `7eeeb42`, 2026-09-24,
-which brought `C30` to stage 2, and `eaa5936`, 2026-10-02, which corrected `C21`/`C22`
-with this file's 3.6.5 edit). `C31` was added here on 2026-10-06; its paper commit is
-`PAPER-COMMIT-TBD`. The paper is not licensed to run ahead -- it did once, and
+which brought `C30` to stage 2, `eaa5936`, 2026-10-02, which corrected `C21`/`C22`
+with this file's 3.6.5 edit, and `a7745ed`, 2026-10-06, which added `C31`). The paper is not licensed to run ahead -- it did once, and
 the drift lasted exactly as long as it took somebody to notice.
 
 ## Notation used below
