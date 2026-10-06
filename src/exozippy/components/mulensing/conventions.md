@@ -256,8 +256,9 @@ and is not true of `tau` under either reading. Quote one of the two displays abo
 - Byte-for-byte the same as MulensModel `Trajectory._project_delta`
   (`delta_tau = dN*pi_E_N + dE*pi_E_E`, `delta_beta = -dN*pi_E_E + dE*pi_E_N`) with
   MulensModel's `_get_delta_annual` / `_get_delta_satellite`, both of which negate the
-  observer position on projection. MMEXOFAST calls MulensModel, so published `pi_E_N`,
-  `pi_E_E` values are calibrated to this convention and drop straight in.
+  observer position on projection. Solutions from MMEXOFAST, which calls MulensModel (the
+  DC2018 and KMT-2019-BLG-1806 configs were converted from its JSONs; EXOZIPPy no longer
+  calls it), therefore carry `pi_E_N`, `pi_E_E` in this convention and drop straight in.
 - Pinned by: `tests/test_pspl_symbolic_vs_op.py` (all three tests) and
   `tests/test_vbm_direct_vs_mulensmodel.py`.
 - The stakes are not academic. Earth's annual deviation is `~0.003 AU`, so a sign error
