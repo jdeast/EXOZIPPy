@@ -13,10 +13,14 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+HANG_S = (
+    120.0  # a three-body call not back in two minutes is hung (typical: ms)
+)
 COORDS = "263.96292 -28.44645"
 T0, U0, TE, RHO = 2459370.609, -0.4213, 14.74, 0.0025
 S2, Q2, A2 = 1.386, 0.526, 48.68
@@ -79,7 +83,7 @@ def child(start, stop, seed, journal, method):
     props = proposals(stop, seed)
     with open(journal, "a") as j:
         for i in range(start, stop):
-            j.write(f"START {i}\n")
+            j.write(f"START {i} {time.time():.1f}\n")
             j.flush()
             A = f(np.array(props[i]), t, obs)
             j.write(f"DONE {i} {np.nanmax(A):.4g} {int(np.isnan(A).sum())}\n")
@@ -98,7 +102,7 @@ def parent(n, seed, method, workers):
     def run_range(lo, hi):
         start = lo
         while start < hi:
-            r = subprocess.run(
+            proc = subprocess.Popen(
                 [
                     sys.executable,
                     __file__,
@@ -109,10 +113,27 @@ def parent(n, seed, method, workers):
                     journal,
                     method,
                 ],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
             )
-            if r.returncode == 0:
+            hung = None
+            while proc.poll() is None:
+                time.sleep(2.0)
+                started, done = {}, set()
+                for ln in open(journal):
+                    w = ln.split()
+                    if w[0] == "START" and start <= int(w[1]) < hi:
+                        started[int(w[1])] = float(w[2])
+                    elif w[0] == "DONE":
+                        done.add(int(w[1]))
+                live = [(i, t) for i, t in started.items() if i not in done]
+                if live and time.time() - max(t for _, t in live) > HANG_S:
+                    hung = max(i for i, _ in live)
+                    proc.kill()
+                    break
+            _, stderr = proc.communicate()
+            if proc.returncode == 0:
                 return
             lines = [ln for ln in open(journal) if ln.startswith("START")]
             mine = [
@@ -120,18 +141,18 @@ def parent(n, seed, method, workers):
                 for ln in lines
                 if start <= int(ln.split()[1]) < hi
             ]
-            err = (r.stderr.strip().splitlines() or ["?"])[-1][:160]
+            err = (stderr.strip().splitlines() or ["?"])[-1][:160]
+            if hung is not None:
+                err = f"HANG > {HANG_S:.0f} s (killed)"
             if not mine or max(mine) < start:
-                # The child died before evaluating anything: not a VBM
-                # crash but a setup failure.  Say so once and give up on
-                # this range rather than looping over it.
                 print(
                     f"child for [{start}, {hi}) failed before its first proposal: {err}",
                     flush=True,
                 )
                 return
             last = max(mine)
-            crashes.append((last, r.returncode, err))
+            crashes.append((last, proc.returncode, err))
+            print(f"   #{last}: {err}", flush=True)
             start = last + 1
 
     chunk = int(np.ceil(n / workers))
@@ -169,28 +190,32 @@ def parent(n, seed, method, workers):
 
 
 def retry_under(crashes, seed, method):
-    """Re-evaluate the crashing proposals under another method, each in its own child."""
+    """Re-evaluate the crashing / hanging proposals under another method,
+    each in its own child with the same hang budget."""
     n_ok = 0
     for idx, _, _ in crashes:
         journal = os.path.join(HERE, f"check_vbm_crash_retry_{method}.journal")
-        r = subprocess.run(
-            [
-                sys.executable,
-                __file__,
-                "child",
-                str(idx),
-                str(idx + 1),
-                str(seed),
-                journal,
-                method,
-            ],
-            capture_output=True,
-            text=True,
-        )
-        n_ok += r.returncode == 0
-        print(
-            f"   retry #{idx} under {method}: {'ok' if r.returncode == 0 else 'CRASHED rc=' + str(r.returncode)}"
-        )
+        cmd = [
+            sys.executable,
+            __file__,
+            "child",
+            str(idx),
+            str(idx + 1),
+            str(seed),
+            journal,
+            method,
+        ]
+        try:
+            r = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=HANG_S
+            )
+            verdict = (
+                "ok" if r.returncode == 0 else f"CRASHED rc={r.returncode}"
+            )
+            n_ok += r.returncode == 0
+        except subprocess.TimeoutExpired:
+            verdict = "HANG (killed)"
+        print(f"   retry #{idx} under {method}: {verdict}", flush=True)
     print(f"[{method}] retried {len(crashes)} crashers: {n_ok} survive")
 
 
