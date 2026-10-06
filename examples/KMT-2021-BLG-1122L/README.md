@@ -162,7 +162,22 @@ so the shipped config sets `seed_polish: false` and lets PTDE do the
 polishing.  `check_vbm_crash.py` measures the abort rate and names the
 proposals that trigger it, in child processes that journal each proposal.
 
-Acceptance fit: job 15506222 on the PR branch (64 cores, `n_temps: auto`,
-no seed polish), started 2026-10-06.  RESULTS: (filled in when it lands --
-posterior vs Table 2 through the mappings above, and the lens masses under
-the IMF and galactic priors).
+**The kernel fails on ~1.8e-3 of proposals** (`check_vbm_crash.py`, 6000
+DE-style proposals around the start, each in a journaling child process):
+11 failures under Multipoly, the method op.py selects for three bodies --
+4 glibc aborts ("double free or corruption", "corrupted size vs.
+prev_size"), 2 segfaults and 5 hangs (no return in 120 s; typical calls
+take milliseconds).  Every one of the 11 has a companion at s < 0.2 or
+s > 2.4, and all 11 evaluate cleanly under Nopoly.  The sampler's start
+population is scored serially in the main process with no timeout (review
+2.6.36), so during that phase one such call kills or freezes the fit; the
+second launch (job 15506222) spent 45 minutes there on one core before it
+was stopped.  The params file therefore bounds both separations to
+s in [0.4, 2.3] (published 1.386 and 1.601, both near the Einstein ring),
+which keeps every failing geometry out of the kernel; for LensC the bound
+goes on `log_s` directly (slot-1 relations are absent, 8.6.13).
+
+Acceptance fit: job 15506232 on the PR branch (64 cores, `n_temps: auto`,
+no seed polish, bounded separations), started 2026-10-06.  RESULTS:
+(filled in when it lands -- posterior vs Table 2 through the mappings
+above, and the lens masses under the IMF and galactic priors).
