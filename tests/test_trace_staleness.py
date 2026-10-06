@@ -967,3 +967,117 @@ def test_file_paths_are_not_double_hashed_in_the_instance_config():
 
     assert "file" not in entry["cfg"]
     assert "a.dat" in structural_payload(_LTT_BASE)["files"]
+
+
+# ---------------------------------------------------------------------------
+# The UNFINISHED stamp (review 2.14.12): a trace saved straight from the
+# sampler whose post-save step (lp, user units) never ran
+# ---------------------------------------------------------------------------
+
+
+def _unfinished_idata(system):
+    from exozippy.trace_meta import (
+        POSTERIOR_UNITS_UNFINISHED,
+        apply_metadata,
+        structural_metadata,
+    )
+
+    idata = _idata()
+    stamp = structural_metadata(system)
+    stamp[UNITS_ATTR] = POSTERIOR_UNITS_UNFINISHED
+    apply_metadata(idata, stamp)
+    return idata
+
+
+def test_an_unfinished_trace_is_refused_by_every_ordinary_reader():
+    """
+    Given a trace stamped internal-unfinished (its run died after the save,
+      before lp and the user-unit conversion),
+    When an ordinary reader (mkparam, exozippy-modes) checks it,
+    Then it raises UnfinishedTraceError naming the recompute_trace: false
+      remedy -- it never reports or seeds from internal-unit draws.
+    """
+    from exozippy.trace_meta import UnfinishedTraceError
+
+    system = _FakeSystem(_CONFIG, _PARAMS)
+    idata = _unfinished_idata(system)
+
+    with pytest.raises(UnfinishedTraceError) as err:
+        check_trace_freshness(idata, system, "fit_trace.nc")
+
+    assert "fit_trace.nc" in str(err.value)
+    assert "recompute_trace: false" in str(err.value)
+
+
+def test_the_reuse_path_may_read_an_unfinished_trace(caplog):
+    """
+    Given the same unfinished trace,
+    When run.py's reuse path checks it (allow_unfinished=True),
+    Then it passes silently: that path finishes the trace itself, and the
+      stamp says exactly what the draws are, so there is nothing to warn
+      about.
+    """
+    system = _FakeSystem(_CONFIG, _PARAMS)
+    idata = _unfinished_idata(system)
+
+    with caplog.at_level(logging.WARNING, logger="exozippy.trace_meta"):
+        result = check_trace_freshness(
+            idata, system, "fit_trace.nc", allow_unfinished=True
+        )
+
+    assert result == "match"
+    assert caplog.text == ""
+
+
+def test_the_prebuilt_stamp_is_the_stamp():
+    """
+    Given a System,
+    When its metadata is built with structural_metadata and applied, versus
+      stamped directly,
+    Then the two traces carry identical root attrs -- run.py builds the
+      stamp before sampling and only applies it after, and that split must
+      not change what the trace says.
+    """
+    from exozippy.trace_meta import apply_metadata, structural_metadata
+
+    system = _FakeSystem(_CONFIG, _PARAMS)
+    a, b = _idata(), _idata()
+    stamp_structural_metadata(a, system)
+    apply_metadata(b, structural_metadata(system))
+
+    assert dict(a.attrs) == dict(b.attrs)
+
+
+@pytest.mark.parametrize(
+    "block, before, after",
+    [
+        ("sampler", {"recompute_trace": True}, {"recompute_trace": False}),
+        ("sampler", {"method": "nuts", "draws": 10}, {"method": "demc"}),
+        ("modes", {}, {"force": True, "max_invalid_frac": 0.5}),
+        ("mkparam", {"n_seeds": 1}, {"n_seeds": 8, "force": True}),
+        ("gui", {}, {"snapshot": True}),
+    ],
+)
+def test_run_control_blocks_do_not_stale_a_trace(block, before, after):
+    """
+    Given a trace stamped under one run-control setting,
+    When the config changes only that setting,
+    Then the trace still matches.
+
+    `sampler: {recompute_trace: false}` is the key the three-phase ruling
+    (review 2.14.12) tells a user to flip to resume after a wrap-up failure;
+    it used to change the structural hash, so the resume raised
+    StaleTraceError against its own trace.  None of these blocks changes the
+    model the draws decode through.
+    """
+    old = copy.deepcopy(_CONFIG)
+    old[block] = before
+    new = copy.deepcopy(_CONFIG)
+    new[block] = after
+    idata = _idata()
+    stamp_structural_metadata(idata, _FakeSystem(old, _PARAMS))
+
+    assert (
+        check_trace_freshness(idata, _FakeSystem(new, _PARAMS), "t.nc")
+        == "match"
+    )

@@ -84,7 +84,25 @@ class NeedsResolve(Exception):
 # tables, CSV, mode report and corner plots are written at.  Re-reporting an
 # existing trace at a different width is exactly what it is for, so it must
 # not invalidate one.
-_NON_STRUCTURAL_CONFIG_KEYS = {"run", "modeling", "reporting"}
+# "sampler", "modes", "mkparam" and "gui" are RUN CONTROL, not model: how
+# the draws were (or will be) taken, how a finished trace is reported, how
+# the restart file is written, whether GUI status files are emitted.  None
+# of them changes the compiled graph the draws decode through.  They used to
+# be hashed as if they were components, and that made the documented resume
+# path impossible: `sampler: {recompute_trace: false}` -- the one key the
+# three-phase ruling (review 2.14.12) tells a user to flip after a wrap-up
+# failure -- changed the hash, so the rerun raised StaleTraceError against
+# its own trace.  Excluding them re-hashed every trace written with one of
+# these blocks once (each then needs `recompute_trace: true` one last time).
+_NON_STRUCTURAL_CONFIG_KEYS = {
+    "run",
+    "modeling",
+    "reporting",
+    "sampler",
+    "modes",
+    "mkparam",
+    "gui",
+}
 
 
 def _canon(value: Any) -> Any:

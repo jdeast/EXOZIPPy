@@ -1,22 +1,21 @@
-"""run.py's two "do not lose the fit" guards, and the calls each must cover.
+"""run.py's "do not lose the fit" guards, under the three-phase ruling.
 
 * ``sigterm_as_interrupt`` (review 3.3.1) around every direct ``pm.sample``,
   so a scheduler SIGTERM keeps a partial trace.
-* ``nonfatal_wrapup`` (review 2.3.1) around every wrap-up plot, below.
+* The three-phase contract (review 2.14.12, JDE 2026-09-25): "everything
+  between sampling and saving the trace shouldn't raise, but after we save
+  the trace, we should be able to restart with recompute_trace=False to
+  resume after a raise."  So the SAMPLING -> SAVE window
+  (``_save_sampled_trace``) holds only work that cannot fail, and the
+  wrap-up after the save (``_wrap_up``) swallows NOTHING: a failure is
+  recorded in the artifacts (``_record_wrapup_failure``) and re-raised.
+  This file used to pin the opposite -- ``nonfatal_wrapup`` around every
+  wrap-up plot -- which the ruling retired.
 
-Both are pinned by locating the calls in the source rather than by running a
-fit: reproducing either failure for real means a full sample-plus-wrap-up,
-minutes per case, and what the items are about is purely which calls sit
-inside the guard.
-
-Wrap-up steps must not be able to kill a finished fit (review 2.3.1).
-
-Everything after ``pm.sample`` returns is a REPORT on a fit that already
-finished.  The plotting block between the tables and ``write_param_file`` was
-the one stretch of bare calls in an otherwise wrapped wrap-up, so a crash
-there -- a degenerate-KDE failure inside ``save_multipage_trace`` is the one
-seen in practice, and any short or stopped run can provoke it -- skipped the
-restart file and the final paper.tex regeneration of a multi-day fit.
+The structural guards read the source rather than running a fit: reaching
+the save or a wrap-up stage for real costs a full sample-plus-wrap-up.  The
+end-to-end resume (a post-save raise, then a ``recompute_trace: false``
+rerun reproducing an uninterrupted fit) is tests/test_wrapup_resume.py.
 """
 
 import ast
@@ -27,103 +26,191 @@ from pathlib import Path
 import pytest
 
 from exozippy import run as run_module
-from exozippy.run import nonfatal_wrapup
-
-# The calls the review item names.  Each must sit inside a nonfatal_wrapup
-# block within _run_fit's wrap-up; a bare one is the regression.
-GUARDED_WRAPUP_CALLS = (
-    "make_corner",
-    "plot_corner",
-    "save_multipage_trace",
-    "get_draws",
-    # The convergence-summary write (review 2.3.12).  It was the one bare
-    # call left between two guarded stages, and it is a disk write plus an
-    # az.summary: measured on the kelt4 RV-only example, an OSError raised
-    # here cost the trace plots, the corner plot, the compiled paper.pdf
-    # AND the restart file -- every artifact after it.
-    "_format_summary",
-)
 
 
-def test_a_crashing_wrapup_step_warns_and_continues(caplog):
-    """
-    Given a wrap-up step that raises,
-    When it runs inside nonfatal_wrapup,
-    Then the exception is swallowed, and the log names the step and keeps the
-      traceback (which is what reaches the GUI's status.json).
-    """
-    # ARRANGE / ACT
-    with caplog.at_level(logging.WARNING):
-        with nonfatal_wrapup("detailed trace plot"):
-            raise ValueError("degenerate KDE")
-
-    # ASSERT -- reaching here at all is the swallow
-    assert "detailed trace plot" in caplog.text
-    assert "non-fatal" in caplog.text
-    assert "degenerate KDE" in caplog.text  # exc_info=True kept the traceback
-
-
-def test_a_clean_wrapup_step_logs_nothing(caplog):
-    """
-    Given a wrap-up step that succeeds,
-    When it runs inside nonfatal_wrapup,
-    Then nothing is logged -- the guard is inert on the happy path.
-    """
-    with caplog.at_level(logging.WARNING):
-        with nonfatal_wrapup("corner plot"):
-            pass
-
-    assert caplog.text == ""
-
-
-def test_an_interrupt_is_not_swallowed():
-    """
-    Given a user interrupting wrap-up,
-    When the interrupt is raised inside nonfatal_wrapup,
-    Then it propagates.
-
-    KeyboardInterrupt and SystemExit are not Exception subclasses: somebody
-    pressing Ctrl+C during wrap-up wants it to stop, and a guard that ate the
-    interrupt would make the remaining steps un-interruptible one by one.
-    """
-    with pytest.raises(KeyboardInterrupt):
-        with nonfatal_wrapup("corner plot"):
-            raise KeyboardInterrupt
-
-
-def _wrapup_call_guard_states(func_name):
-    """(call name, is-inside-a-nonfatal_wrapup) for every named call in ``func``.
-
-    Read from the source rather than by running a fit: reproducing the failure
-    for real means a full sample-plus-wrap-up, minutes per case, and what the
-    item is about is purely which calls sit inside the guard.
-    """
+def _function_node(name):
     tree = ast.parse(Path(inspect.getfile(run_module)).read_text())
-    func = next(
+    return next(
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == func_name
+        if isinstance(node, ast.FunctionDef) and node.name == name
     )
 
-    found = []
 
-    def walk(node, inside):
-        if isinstance(node, ast.With):
-            inside = inside or any(
-                isinstance(item.context_expr, ast.Call)
-                and getattr(item.context_expr.func, "id", None)
-                == "nonfatal_wrapup"
-                for item in node.items
-            )
+def _called_names(func):
+    names = set()
+    for node in ast.walk(func):
         if isinstance(node, ast.Call):
-            name = getattr(node.func, "id", getattr(node.func, "attr", None))
-            if name in GUARDED_WRAPUP_CALLS:
-                found.append((name, inside))
-        for child in ast.iter_child_nodes(node):
-            walk(child, inside)
+            f = node.func
+            names.add(getattr(f, "id", getattr(f, "attr", None)))
+    return names
 
-    walk(func, False)
-    return found
+
+# What may run between the sampler returning and the trace being on disk:
+# bookkeeping that cannot fail by construction, the write itself, and the
+# last-record dump on a failed write (which re-raises).
+SAVE_WINDOW_ALLOWED = {
+    "sel",
+    "slice",
+    "int",
+    "str",
+    "_sanitize_netcdf_attrs",
+    "apply_metadata",
+    "_write_trace_atomic",
+    "critical",
+    "open",
+    "dump",
+}
+
+
+def test_the_save_window_runs_only_what_cannot_fail():
+    """
+    Given the SAMPLING -> SAVE window (_save_sampled_trace),
+    When every call in it is read from the source,
+    Then each is on the allowlist -- in particular lp computation, the
+      unit conversion and the stamp BUILD are not there (they can fail, and
+      a raise here loses the trace; review 2.14.12 prerequisite 1).
+    """
+    called = _called_names(_function_node("_save_sampled_trace"))
+
+    assert called - SAVE_WINDOW_ALLOWED == set(), (
+        f"call(s) in the sampling->save window that can fail: "
+        f"{sorted(called - SAVE_WINDOW_ALLOWED)}"
+    )
+    assert "_write_trace_atomic" in called
+
+
+def test_run_fit_does_no_post_processing_before_the_save():
+    """
+    Given _run_fit,
+    When its calls are read from the source,
+    Then it computes no lp, converts no units and writes no netCDF itself:
+      those live in _save_sampled_trace (the write) and _finish_saved_trace
+      (lp + units, AFTER the save).  This is where they used to sit, between
+      pm.sample and idata.to_netcdf, and _ensure_lp's swallowed failure
+      shipped a trace without lp (review 2.3.21).
+    """
+    called = _called_names(_function_node("_run_fit"))
+
+    for name in (
+        "_ensure_lp",
+        "_compute_lp_from_model",
+        "_convert_posterior_to_user_units",
+        "to_netcdf",
+        "stamp_structural_metadata",
+    ):
+        assert name not in called, f"_run_fit calls {name} directly"
+    assert "_save_sampled_trace" in called
+    assert "structural_metadata" in called  # built BEFORE sampling
+
+
+def test_nothing_after_the_save_swallows_an_exception():
+    """
+    Given the post-save code (_wrap_up and _finish_saved_trace),
+    When it is read from the source,
+    Then it holds no except clause at all, and nonfatal_wrapup is gone --
+      a post-save failure is a code bug, recovered by the fix plus a
+      `recompute_trace: false` rerun (review 2.14.12).
+    """
+    assert not hasattr(run_module, "nonfatal_wrapup")
+    for name in ("_wrap_up", "_finish_saved_trace"):
+        handlers = [
+            node
+            for node in ast.walk(_function_node(name))
+            if isinstance(node, ast.ExceptHandler)
+        ]
+        assert not handlers, (
+            f"{name} has {len(handlers)} except clause(s) at line(s) "
+            f"{[h.lineno for h in handlers]}"
+        )
+
+
+def test_the_wrapup_runs_under_the_failure_recorder_and_reraises():
+    """
+    Given _run_fit's call to _wrap_up,
+    When its enclosing try is read from the source,
+    Then the handler records the failure and re-raises with a bare `raise`
+      (the ORIGINAL exception, not a replacement).
+    """
+    func = _function_node("_run_fit")
+    tries = [
+        node
+        for node in ast.walk(func)
+        if isinstance(node, ast.Try)
+        and "_wrap_up" in _called_names(ast.Module(node.body, []))
+    ]
+    assert len(tries) == 1
+    (handler,) = tries[0].handlers
+    assert "_record_wrapup_failure" in _called_names(
+        ast.Module(handler.body, [])
+    )
+    assert isinstance(handler.body[-1], ast.Raise)
+    assert handler.body[-1].exc is None
+
+
+def test_a_wrapup_failure_is_stated_where_the_user_looks(tmp_path, caplog):
+    """
+    Given a wrap-up stage that raised,
+    When the failure is recorded,
+    Then the summary file opens with the note (stage, saved trace, the
+      recompute_trace: false remedy, and that NO restart file was written),
+      any summary already there is kept below it, the log has it at ERROR,
+      and the exception carries it as a note -- which is what reaches the
+      traceback run_fit writes into the GUI's status.json.
+    """
+    prefix = tmp_path / "fit"
+    summary = Path(str(prefix) + "_summary.txt")
+    summary.write_text("old summary body\n", encoding="utf-8")
+    exc = ValueError("degenerate KDE")
+
+    with caplog.at_level(logging.ERROR, logger="exozippy.run"):
+        run_module._record_wrapup_failure(
+            exc, "detailed trace plots", prefix, str(prefix) + "_trace.nc"
+        )
+
+    text = summary.read_text(encoding="utf-8")
+    assert text.index("WRAP-UP FAILED") < text.index("old summary body")
+    for needle in (
+        "detailed trace plots",
+        "fit_trace.nc",
+        "recompute_trace: false",
+        "NO restart parameter",
+        "degenerate KDE",
+    ):
+        assert needle in text, needle
+    assert "WRAP-UP FAILED" in caplog.text
+    assert any("WRAP-UP FAILED" in n for n in exc.__notes__)
+
+
+def test_the_status_file_carries_the_wrapup_failure(tmp_path, monkeypatch):
+    """
+    Given a fit whose wrap-up fails with GUI status output on,
+    When run_fit records the terminal state,
+    Then status.json's error holds the wrap-up note, not only the bare
+      traceback (review 2.14.12 prerequisite 4).
+    """
+    import json
+
+    prefix = tmp_path / "fit"
+
+    def _fake_run_fit(cfg, gui, user_params=None):
+        gui.phase("writing")
+        exc = RuntimeError("mode pass bug")
+        run_module._record_wrapup_failure(
+            exc, "mode identification", prefix, str(prefix) + "_trace.nc"
+        )
+        raise exc
+
+    monkeypatch.setattr(run_module, "_run_fit", _fake_run_fit)
+
+    with pytest.raises(RuntimeError, match="mode pass bug"):
+        run_module.run_fit({"prefix": str(prefix), "gui": {"snapshot": True}})
+
+    status = json.loads(
+        Path(str(prefix) + "_gui_status.json").read_text(encoding="utf-8")
+    )
+    assert status["phase"] == "error"
+    assert "WRAP-UP FAILED at stage 'mode identification'" in status["error"]
 
 
 def test_every_pm_sample_call_is_sigterm_wrapped():
@@ -174,23 +261,6 @@ def test_every_pm_sample_call_is_sigterm_wrapped():
         f"{found.count(False)} of {len(found)} pm.sample calls in _run_fit "
         "are not wrapped in sigterm_as_interrupt -- a scheduler SIGTERM "
         "there kills the fit with no partial trace"
-    )
-
-
-def test_every_named_wrapup_call_is_guarded():
-    """
-    Given _run_fit's wrap-up,
-    When each of the review item's plotting calls is located in the source,
-    Then every occurrence has a `with nonfatal_wrapup(...)` ancestor -- and
-      all four are actually present, so a rename cannot vacuously pass.
-    """
-    states = _wrapup_call_guard_states("_run_fit")
-
-    assert {name for name, _ in states} == set(GUARDED_WRAPUP_CALLS)
-    unguarded = sorted({name for name, inside in states if not inside})
-    assert not unguarded, (
-        f"unguarded wrap-up call(s) in _run_fit: {unguarded} -- a crash there "
-        "skips the restart file and the final paper.tex of a finished fit"
     )
 
 
@@ -312,12 +382,12 @@ def test_the_convergence_summary_announces_itself():
     not, so the log jumped from "mode identification" to "corner plots"
     across a step that does its own az.summary (review 2.3.12).  Read from
     the source for the reason the whole file gives: reaching this line for
-    real costs a full sample-plus-wrap-up, and what the item is about is
-    which calls are announced and guarded.
+    real costs a full sample-plus-wrap-up.  The stage label is also what a
+    failure is reported against (WrapupProgress.current).
     """
-    labels = _wrapup_stage_labels()
+    labels = _wrapup_stage_labels("_wrap_up")
 
-    assert labels, "no wrapup.stage calls found in _run_fit"
+    assert labels, "no wrapup.stage calls found in _wrap_up"
     assert any("convergence summary" in label for label in labels), labels
 
 

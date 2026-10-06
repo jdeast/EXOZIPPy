@@ -38,11 +38,20 @@ from .corner_utils import (
 from .diagnostics import ModelAuditor, cap_alarm_findings, log_cap_alarms
 from .logger import fmt_duration, setup_logging
 from .mkparam import write_param_file
+from .outputs.ledger import ledger_from_json, ledger_to_json
 from .outputs.modeling import build_modeling_output, compile_modeling_pdf
 from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix
 from .outputs.report_pipeline import build_mode_reports
 from .polish import polish_raw_starts, resolve_polish_steps
-from .trace_meta import check_trace_freshness, stamp_structural_metadata
+from .trace_meta import (
+    POSTERIOR_UNITS,
+    POSTERIOR_UNITS_UNFINISHED,
+    SEED_LEDGER_ATTR,
+    UNITS_ATTR,
+    apply_metadata,
+    check_trace_freshness,
+    structural_metadata,
+)
 from .whitening import prepare_whitening
 
 logger = logging.getLogger(__name__)
@@ -129,36 +138,6 @@ def sigterm_as_interrupt():
         signal.signal(signal.SIGTERM, old_sigterm)
 
 
-@contextlib.contextmanager
-def nonfatal_wrapup(what):
-    """Run one wrap-up step; a crash inside it warns instead of aborting.
-
-    Everything after ``pm.sample`` returns is a REPORT on a fit that already
-    finished, and the fit's irreplaceable artifacts -- the trace, the mode
-    report, the restart file -- are cheap to lose and expensive to recreate.
-    The plotting block between the tables and ``write_param_file`` was the
-    one stretch of bare calls in an otherwise wrapped wrap-up, so a
-    degenerate-KDE crash inside ``save_multipage_trace`` (which any short or
-    stopped run can provoke) skipped the restart file and the final
-    paper.tex regeneration of a multi-day fit.
-
-    Deliberately a broad ``except``: the point is that no diagnostic, from
-    any component, may kill a finished fit, and enumerating the exception
-    types a third-party plotting stack can raise is exactly the list that
-    goes stale.  ``exc_info=True`` keeps the traceback in the log (and so in
-    the GUI's status.json) rather than reducing the failure to one line --
-    the alternative, and the reason this is warn-and-continue rather than
-    swallow, is a wrap-up that silently produces fewer files than it should.
-
-    KeyboardInterrupt and SystemExit are NOT caught (they are not
-    ``Exception``): a user interrupting wrap-up wants it to stop.
-    """
-    try:
-        yield
-    except Exception:
-        logger.warning("%s failed (non-fatal)", what, exc_info=True)
-
-
 class WrapupProgress:
     """Announce each wrap-up stage as it starts (review 2.3.5).
 
@@ -186,8 +165,12 @@ class WrapupProgress:
 
     def __init__(self):
         self.t0 = time.time()
+        # The stage running now: what a wrap-up failure is reported against
+        # (_record_wrapup_failure), so "wrap-up failed" always says WHERE.
+        self.current = "start of wrap-up"
 
     def stage(self, what):
+        self.current = what
         logger.info(
             f"Wrap-up (t+{fmt_duration(time.time() - self.t0)}): {what}"
         )
@@ -195,6 +178,61 @@ class WrapupProgress:
     def done(self):
         logger.info(
             f"Wrap-up complete in {fmt_duration(time.time() - self.t0)}."
+        )
+
+
+def _wrapup_failure_note(stage, prefix, trace_path):
+    """The one-paragraph statement a failed wrap-up leaves behind."""
+    return (
+        f"WRAP-UP FAILED at stage '{stage}'. The trace at {trace_path} was "
+        f"saved before wrap-up started and is intact. Fix the cause (the "
+        f"error above) and rerun this fit with 'sampler: {{recompute_trace: "
+        f"false}}' to finish the whole wrap-up from the saved trace without "
+        f"re-sampling. Outputs from the stages that did not run are MISSING "
+        f"or from an EARLIER run, and this run wrote NO restart parameter "
+        f"file: any *.params.N.yaml beside the config predates it."
+    )
+
+
+def _record_wrapup_failure(exc, stage, prefix, trace_path):
+    """Mark a failed wrap-up in every artifact a user reads (review 2.14.12).
+
+    Under the three-phase ruling (JDE 2026-09-25) a wrap-up failure RAISES
+    -- the trace is on disk and `recompute_trace: false` resumes -- so the
+    failure has to be stated where the user looks, not only in a traceback
+    that scrolls past: the log (ERROR), ``<prefix>_summary.txt`` (the note
+    goes on top, above any summary an earlier stage of this run or an
+    earlier run wrote) and, through ``exc.add_note``, the traceback that
+    ``run_fit`` records in the GUI's status.json.  The note also says that
+    no restart file was written, because the newest ``*.params.N.yaml`` on
+    disk would otherwise read as this run's.
+
+    Never raises past the original: a failure while recording is logged and
+    the ORIGINAL exception is what propagates (the caller re-raises it).
+    """
+    note = _wrapup_failure_note(stage, prefix, trace_path)
+    exc.add_note(note)
+    logger.error(note)
+    summary_path = Path(str(prefix) + "_summary.txt")
+    try:
+        previous = (
+            summary_path.read_text(encoding="utf-8")
+            if summary_path.exists()
+            else ""
+        )
+        banner = "!" * 70
+        summary_path.write_text(
+            f"{banner}\n{note}\nError: {type(exc).__name__}: {exc}\n"
+            f"{banner}\n\n{previous}",
+            encoding="utf-8",
+        )
+    except OSError:
+        # The original failure is what the caller re-raises; a disk that
+        # refuses this write must not replace it.
+        logger.error(
+            "could not record the wrap-up failure in %s",
+            summary_path,
+            exc_info=True,
         )
 
 
@@ -497,8 +535,9 @@ def resolve_cores_setting(raw):
     Failing fast is right HERE and warn-and-continue is right THERE, and the
     difference is positional rather than a disagreement: this parse runs
     before any work exists to lose, whereas ``_resolve_polish_cores`` can be
-    reached from a wrap-up stage, where no diagnostic may kill a finished fit
-    (``nonfatal_wrapup``).  What the two must not do is disagree about what
+    reached from a wrap-up stage and sanitizes the same user spelling there
+    (a user-input quality-of-life translation, not an internal fallback).
+    What the two must not do is disagree about what
     the key MEANS -- that is how one rule came to have two behaviors (review
     6.11.3) -- so both messages say that an ABSENT cores is the automatic
     grant and that ``cores: 1`` is how to ask for serial.
@@ -1128,8 +1167,25 @@ def _run_fit(config, gui, user_params=None):
             # belonged here. Unlike the whitening reload above, which can
             # honestly re-measure on a mismatch, there is no load-time repair
             # for foreign draws: a mismatch raises (trace_meta).
-            check_trace_freshness(idata, system, trace_path)
+            # allow_unfinished: this is the one reader that may load a trace
+            # whose post-save step never ran -- it finishes it below, in
+            # _finish_saved_trace, through the code a live fit uses.
+            check_trace_freshness(
+                idata, system, trace_path, allow_unfinished=True
+            )
+            # The seed ledger the original run measured before sampling
+            # travels with the trace; this run skipped the polish, so it
+            # cannot measure one of its own (review 2.14.12 prereq. 2).
+            seed_ledger = _seed_ledger_from_trace(idata, trace_path)
         else:
+            # Everything the saved trace is stamped with, built BEFORE
+            # sampling: it reads the System, not the draws, and building it
+            # can fail -- which is allowed here and not between the sampler
+            # and the save (review 2.14.12; see _save_sampled_trace).
+            trace_stamp = structural_metadata(system)
+            trace_stamp[UNITS_ATTR] = POSTERIOR_UNITS_UNFINISHED
+            trace_stamp[SEED_LEDGER_ATTR] = ledger_to_json(seed_ledger)
+
             # do the sampling and save the results
             gui.phase("sampling")
             if method in ("numpyro", "blackjax", "nutpie"):
@@ -1458,36 +1514,22 @@ def _run_fit(config, gui, user_params=None):
                         return_inferencedata=True,
                         callback=nuts_callback,
                     )
-            if nthin > 1:
-                idata = idata.sel(draw=slice(None, None, nthin))
-            # Record the storage thinning on the trace.  Consecutive stored
-            # draws that are really nthin sampler steps apart make mode
-            # changes look more independent than they are, so outputs.modes
-            # must be told rather than left to assume 1 (see
-            # ModeReport.thin_factor / thin_known).
-            idata.posterior.attrs["nthin"] = int(nthin)
-            # The seed the run ACTUALLY used, whether the user named it or it
-            # was drawn.  mkparam reads it back out for the restart file's
-            # header, so a fit's exact state stays recoverable from its own
-            # output -- the same philosophy as the start values it writes.
-            idata.posterior.attrs["random_seed"] = int(seed)
-            # Ensure lp is in sample_stats; compute and persist if missing,
-            # so the archived trace carries it and no later reader (modes,
-            # mkparam, the plotters) has to recompute it.
-            _ensure_lp(idata, model, cores=cores)
-            # Convert sampled variables to user-facing units before archiving.
-            # This makes the trace file, trace plots, ArviZ summary, and
-            # mkparam output all use the same units the user specified.
-            _convert_posterior_to_user_units(
-                idata, system.get_parameter_lookup()
+            # SAMPLING -> SAVE (review 2.14.12, JDE ruling 2026-09-25): the
+            # one window where a raise loses an irreplaceable trace, so only
+            # work that cannot fail by construction runs here.  lp, the
+            # user-unit conversion and every report happen AFTER the save,
+            # where a raise is recoverable with `recompute_trace: false`.
+            idata = _save_sampled_trace(
+                idata, trace_path, nthin=nthin, seed=seed, stamp=trace_stamp
             )
-            _sanitize_netcdf_attrs(idata)
-            # Stamp the structural fingerprint of the config + params that
-            # produced these draws, so any later reload can verify it.
-            stamp_structural_metadata(idata, system)
-            idata.to_netcdf(trace_path)
 
-    # Sampling is done; the rest is post-processing + report/plot output.
+    # Sampling is done (or the trace was reloaded); the rest is post-
+    # processing + report/plot output, from a trace that is already on disk.
+    # AFTER the save, a raise is the rule (review 2.14.12, JDE ruling
+    # 2026-09-25): an internal failure here is a code bug, and the recovery is
+    # the code fix plus a `recompute_trace: false` rerun, which reruns this
+    # whole wrap-up from the saved trace through the same code.  The one thing
+    # a failure must also do is SAY so in the artifacts a user reads.
     gui.phase("writing")
     wrapup = WrapupProgress()
     logger.info(
@@ -1495,6 +1537,57 @@ def _run_fit(config, gui, user_params=None):
         f"file). The trace is already saved to {trace_path}, so an "
         f"interrupt here costs only what is not yet written."
     )
+    try:
+        _wrap_up(
+            config,
+            user_params,
+            system,
+            model,
+            idata,
+            prefix,
+            trace_path,
+            seed_ledger,
+            wrapup,
+            cores=cores,
+            modes_cfg=modes_cfg,
+            min_ess=min_ess,
+            max_rhat=max_rhat,
+        )
+    except Exception as exc:
+        _record_wrapup_failure(exc, wrapup.current, prefix, trace_path)
+        raise
+
+
+def _wrap_up(
+    config,
+    user_params,
+    system,
+    model,
+    idata,
+    prefix,
+    trace_path,
+    seed_ledger,
+    wrapup,
+    *,
+    cores,
+    modes_cfg,
+    min_ess,
+    max_rhat,
+):
+    """Everything after the trace is on disk: finish it, then report.
+
+    Shared by a fresh fit and a `recompute_trace: false` rerun, which is the
+    point -- the rerun that resumes after a wrap-up failure IS this code.
+    Nothing here swallows an exception (review 2.14.12): a failure
+    propagates to ``_run_fit``, which records it in the artifacts and
+    re-raises.
+    """
+    # The post-save half of the save path: lp from the model and the
+    # user-unit conversion, then the trace is rewritten finished.  A fresh
+    # trace always needs it; a reused one only when the run that wrote it
+    # died before this point (it is then stamped POSTERIOR_UNITS_UNFINISHED).
+    wrapup.stage("finishing the saved trace (lp, user units)")
+    _finish_saved_trace(idata, model, system, trace_path, cores=cores)
 
     # Collapse any exact label degeneracy a component declares (review
     # 1.8.3's ascending node is the one case today).  HERE, and exactly once:
@@ -1562,9 +1655,10 @@ def _run_fit(config, gui, user_params=None):
     # (what a non-microlensing topology gets by default) and "the search
     # crashed" used to be indistinguishable in every output the user reads,
     # which turns a silent failure into false assurance that a candidate
-    # mode was considered.  The catch stays broad and stays
-    # NON-FATAL -- a wrap-up diagnostic must not kill a finished multi-day
-    # fit -- but the exception type and message now reach the report.
+    # mode was considered.  The broad catch INSIDE run_hot_mode_discovery
+    # predates review 2.14.12's three-phase ruling (post-save failures
+    # raise) and is retired separately; meanwhile the exception type and
+    # message reach the report.
     from .outputs.ledger import run_hot_mode_discovery
 
     wrapup.stage(
@@ -1627,73 +1721,54 @@ def _run_fit(config, gui, user_params=None):
     # a component.  Needs the distributed posterior, hence after the mode
     # reports; the findings also feed the modeling draft below.
     wrapup.stage("pile-at-cap check on data-capped parameters")
-    cap_findings = []
-    with nonfatal_wrapup("pile-at-cap check"):
-        cap_findings = cap_alarm_findings(system)
-        log_cap_alarms(cap_findings, logger)
+    cap_findings = cap_alarm_findings(system)
+    log_cap_alarms(cap_findings, logger)
 
-    # Wrapped and announced like every other wrap-up step (review 2.3.12).
-    # It was the one bare call left between two guarded stages, and it is a
-    # write plus an az.summary: measured on the kelt4 RV-only example, an
-    # OSError raised here took out the trace plots, the corner plot, the
-    # compiled paper.pdf AND the restart file -- every artifact after it --
-    # and returned a non-zero exit for a fit that had finished sampling.
+    # Announced like every other wrap-up step (review 2.3.12).
     wrapup.stage("convergence summary")
     summary_path = Path(str(prefix) + "_summary.txt")
-    with nonfatal_wrapup("convergence summary"):
-        summary_path.write_text(
-            _format_summary(idata, burn_diag, system, exclude=report_only),
-            encoding="utf-8",
-        )
+    summary_path.write_text(
+        _format_summary(idata, burn_diag, system, exclude=report_only),
+        encoding="utf-8",
+    )
 
-    # Every plot below is wrapped, and per COMPONENT rather than per loop, so
-    # one component's broken diagnostic costs its own figure and nothing else
-    # -- neither its siblings' figures nor, further down, the restart file.
     # make a corner plot of fitted parameters (similar to EXOFASTv2 covar plot)
     wrapup.stage(
         f"corner plots (1 global + up to {len(system.active_components)} "
         f"per-component)"
     )
-    with nonfatal_wrapup("corner plot"):
-        make_corner(idata, str(prefix) + "_corner.png", exclude=report_only)
+    make_corner(idata, str(prefix) + "_corner.png", exclude=report_only)
 
     # Component-specific corner plots (e.g. mulensing geometry). Unlike
     # comp.plot(), which also runs pre-flight on a single point, this only
     # runs here, once, when the full posterior (idata) actually exists.
     for comp in system.active_components.values():
-        with nonfatal_wrapup(f"corner plot for {comp.label}"):
-            comp.plot_corner(idata, filename_prefix=str(prefix))
+        comp.plot_corner(idata, filename_prefix=str(prefix))
 
     # Save a 1D trace plot (similar to EXOFASTv2 chain file)
     wrapup.stage("detailed trace plots")
-    with nonfatal_wrapup("detailed trace plot"):
-        all_params = system.get_all_parameters()
-        plot_vars = [
-            p.label
-            for p in all_params
-            if p.label in idata["posterior"] and p.label not in report_only
-        ]
-        save_multipage_trace(
-            idata, plot_vars, str(prefix) + "_trace_detailed.pdf", model=model
-        )
+    all_params = system.get_all_parameters()
+    plot_vars = [
+        p.label
+        for p in all_params
+        if p.label in idata["posterior"] and p.label not in report_only
+    ]
+    save_multipage_trace(
+        idata, plot_vars, str(prefix) + "_trace_detailed.pdf", model=model
+    )
 
-    # Generate final plots.  `draws` outlives this block -- the modeling
-    # draft reads draws[0] for its model-bearing figures -- so it is seeded
-    # empty first: a get_draws failure must degrade the draft to its
-    # data-only specs, not NameError past the wrap.
-    draws = []
+    # Generate final plots.  The modeling draft below reads draws[0] for its
+    # model-bearing figures.
     wrapup.stage(
         f"posterior plots for {len(system.active_components)} component(s)"
     )
-    with nonfatal_wrapup("posterior draw extraction"):
-        draws = get_draws(
-            idata,
-            param_lookup=system.get_parameter_lookup(),
-            exclude=report_only,
-        )
+    draws = get_draws(
+        idata,
+        param_lookup=system.get_parameter_lookup(),
+        exclude=report_only,
+    )
     for comp in system.active_components.values():
-        with nonfatal_wrapup(f"posterior plots for {comp.label}"):
-            comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
+        comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
 
     # Multimodal posteriors: re-emit the same corner + component plots once
     # per mode, restricted to that mode's draws (interim solution; a
@@ -1705,20 +1780,15 @@ def _run_fit(config, gui, user_params=None):
         wrapup.stage(
             f"per-mode outputs for {mode_report.n_modes} identified modes"
         )
-        try:
-            _emit_per_mode_outputs(system, idata, mode_report, prefix)
-        except Exception:
-            logger.warning(
-                "Per-mode output generation failed; the combined "
-                "posterior outputs above are unaffected",
-                exc_info=True,
-            )
+        _emit_per_mode_outputs(system, idata, mode_report, prefix)
 
     # Final modeling-draft checkpoint: the table fragments and posterior
     # plots now exist on disk and the convergence/mode facts are known, so
     # regenerate <prefix>_paper.tex with its Results sections and
     # (config `modeling: {compile: false}` to opt out) compile the draft
-    # PDF.  Compile failure or missing TeX never fails the fit.
+    # PDF.  A failing or missing TeX toolchain is an ENVIRONMENT condition
+    # that compile_modeling_pdf reports and absorbs itself (the .tex sources
+    # are the deliverable); anything else here is a code bug and raises.
     modeling_cfg = config.get("modeling", {}) or {}
     wrapup.stage(
         "modeling draft (paper.tex)"
@@ -1726,37 +1796,27 @@ def _run_fit(config, gui, user_params=None):
     )
     # (the unknown-key warning for this block, and for the other three, is
     # warn_unknown_config_blocks at startup -- not an inline loop here)
-    try:
-        _add_wrapup_prose(system, burn_diag, mode_report, cap_findings)
-        # One posterior draw unlocks the model-bearing charts (phased
-        # panels), whose figures otherwise never enter the draft.
-        tex_path = build_modeling_output(
-            system, prefix, point=draws[0] if draws else None
-        )
-        if modeling_cfg.get("compile", True):
-            compile_modeling_pdf(tex_path)
-    except Exception:
-        logger.warning(
-            "modeling-draft generation failed (non-fatal)", exc_info=True
-        )
+    _add_wrapup_prose(system, burn_diag, mode_report, cap_findings)
+    # One posterior draw unlocks the model-bearing charts (phased
+    # panels), whose figures otherwise never enter the draft.
+    tex_path = build_modeling_output(
+        system, prefix, point=draws[0] if draws else None
+    )
+    if modeling_cfg.get("compile", True):
+        compile_modeling_pdf(tex_path)
 
     wrapup.stage("restart parameter file (mkparam)")
-    try:
-        # mkparam re-derives the structural fingerprint from this config and
-        # the params, not from the live System; measured to reproduce the
-        # System snapshot exactly (see the note at the check inside
-        # mkparam.write_param_file).  The params half has to be handed over
-        # when run_fit was called with an in-memory dict: the file at
-        # config['parameter_file'] is then not what was fitted (it may be
-        # stale, or absent), and write_param_file would merge ITS priors and
-        # bounds into the restart file.  Left None for a file-driven run, so
-        # that path still reads the file itself and its error messages still
-        # name it.
-        write_param_file(
-            config, trace_path=trace_path, user_params=user_params
-        )
-    except Exception:
-        logger.exception("mkparam failed (non-fatal)")
+    # mkparam re-derives the structural fingerprint from this config and
+    # the params, not from the live System; measured to reproduce the
+    # System snapshot exactly (see the note at the check inside
+    # mkparam.write_param_file).  The params half has to be handed over
+    # when run_fit was called with an in-memory dict: the file at
+    # config['parameter_file'] is then not what was fitted (it may be
+    # stale, or absent), and write_param_file would merge ITS priors and
+    # bounds into the restart file.  Left None for a file-driven run, so
+    # that path still reads the file itself and its error messages still
+    # name it.
+    write_param_file(config, trace_path=trace_path, user_params=user_params)
 
     wrapup.done()
 
@@ -2645,6 +2705,115 @@ _LP_FN = None
 _LP_POINT_MAP = None
 
 
+def _write_trace_atomic(idata, trace_path):
+    """Write ``idata`` to ``trace_path`` via a temp file + rename.
+
+    A reader with the old file open, or a crash mid-write, never sees a
+    partially written trace; an earlier trace at the path survives a failed
+    write intact.
+    """
+    tmp = str(trace_path) + ".tmp"
+    idata.to_netcdf(tmp)
+    os.replace(tmp, str(trace_path))
+
+
+def _save_sampled_trace(idata, trace_path, *, nthin, seed, stamp):
+    """The SAMPLING -> SAVE window: write the draws, nothing that can fail.
+
+    Review 2.14.12 (JDE ruling 2026-09-25): "everything between sampling and
+    saving the trace shouldn't raise".  So this does only bookkeeping that
+    cannot fail by construction -- storage thinning, two scalar attrs, the
+    dict-to-JSON attr flattening netCDF needs, and the stamp built BEFORE
+    sampling -- and writes the draws exactly as the sampler returned them:
+    internal units, lp only where the sampler wrote it, stamped
+    ``POSTERIOR_UNITS_UNFINISHED``.  Computing lp from the model and the
+    user-unit conversion used to run here and could fail (a swallowed lp
+    failure shipped a trace without lp; review 2.3.21); they are the first
+    post-save stage now (``_finish_saved_trace``), where a raise costs
+    nothing a `recompute_trace: false` rerun cannot redo.
+
+    The write itself can still fail (a full disk).  Then the draws are
+    pickled beside the trace as a last record and the ORIGINAL error
+    propagates -- this never continues past an unsaved trace.
+    """
+    if nthin > 1:
+        idata = idata.sel(draw=slice(None, None, nthin))
+    # Record the storage thinning on the trace.  Consecutive stored draws
+    # that are really nthin sampler steps apart make mode changes look more
+    # independent than they are, so outputs.modes must be told rather than
+    # left to assume 1 (see ModeReport.thin_factor / thin_known).
+    idata.posterior.attrs["nthin"] = int(nthin)
+    # The seed the run ACTUALLY used, whether the user named it or it was
+    # drawn.  mkparam reads it back out for the restart file's header, so a
+    # fit's exact state stays recoverable from its own output.
+    idata.posterior.attrs["random_seed"] = int(seed)
+    _sanitize_netcdf_attrs(idata)
+    apply_metadata(idata, stamp)
+    try:
+        _write_trace_atomic(idata, trace_path)
+    except BaseException:
+        dump = str(trace_path) + ".unsaved.pkl"
+        logger.critical(
+            "COULD NOT WRITE THE TRACE to %s; pickling the draws to %s as a "
+            "last record before re-raising",
+            trace_path,
+            dump,
+            exc_info=True,
+        )
+        import pickle
+
+        with open(dump, "wb") as fh:
+            pickle.dump(idata, fh)
+        raise
+    return idata
+
+
+def _finish_saved_trace(idata, model, system, trace_path, cores=None):
+    """The post-save half of the save path; returns whether it ran.
+
+    A trace stamped ``POSTERIOR_UNITS_UNFINISHED`` (a fresh one, or one
+    whose run died here) gets lp computed from the model where the sampler
+    wrote none, its posterior converted to user units, the units stamp set
+    to ``POSTERIOR_UNITS``, and is rewritten.  Any other trace -- finished,
+    or written before the unfinished stamp existed -- is left alone.  A
+    failure RAISES: the draws are already on disk, and a `recompute_trace:
+    false` rerun lands back here.
+    """
+    if idata.attrs.get(UNITS_ATTR) != POSTERIOR_UNITS_UNFINISHED:
+        return False
+    # Ensure lp is in sample_stats; computed and persisted once, so no later
+    # reader (modes, mkparam, the plotters) has to recompute it.
+    _ensure_lp(idata, model, cores=cores, trace_path=trace_path)
+    # Convert sampled variables to user-facing units before archiving, so
+    # the trace file, trace plots, ArviZ summary and mkparam output all use
+    # the units the user specified.
+    _convert_posterior_to_user_units(idata, system.get_parameter_lookup())
+    idata.attrs[UNITS_ATTR] = POSTERIOR_UNITS
+    _write_trace_atomic(idata, trace_path)
+    return True
+
+
+def _seed_ledger_from_trace(idata, trace_path):
+    """The seed ledger a REUSED trace's original run measured, or None.
+
+    Stamped by the fresh save path (trace_meta.SEED_LEDGER_ATTR).  A trace
+    written before the ledger was persisted carries no attr; its seeds were
+    never recorded anywhere a rerun can read, so the report has none -- and
+    says so here rather than letting "no rejected seeds" read as a finding.
+    """
+    blob = idata.attrs.get(SEED_LEDGER_ATTR)
+    if blob is None:
+        logger.warning(
+            "%s carries no persisted seed ledger (it predates the ledger "
+            "travelling with the trace), so this rerun cannot report which "
+            "seeds the posterior rejected; a multi-seed fit's rejected-seed "
+            "records are simply absent from these reports, NOT empty.",
+            trace_path,
+        )
+        return None
+    return ledger_from_json(blob)
+
+
 def _lp_eval_chain(args):
     """Evaluate logp for every draw in one chain (runs in a forked child)."""
     chain_data, chain_idx, n_draws = args
@@ -2658,7 +2827,7 @@ def _lp_eval_chain(args):
     return chain_idx, lp_chain
 
 
-def _ensure_lp(idata, model=None, cores=None):
+def _ensure_lp(idata, model=None, cores=None, trace_path=None):
     """Make sure ``idata.sample_stats["lp"]`` exists; return whether it does.
 
     NUTS writes lp itself; the Metropolis/DE families and PTDE do not, so it
@@ -2678,6 +2847,11 @@ def _ensure_lp(idata, model=None, cores=None):
 
     ``model=None`` means "report, do not compute": the plotting path can be
     handed a trace with no model, and there is nothing to fall back to.
+    With a model, lp is either computed or the failure RAISES (review
+    2.3.21): model and trace come from the same run, so a failure is a bug,
+    and the old swallow shipped a trace without lp that mkparam then seeded
+    from the last draw of chain 0.  It runs after the trace is saved
+    (``_finish_saved_trace``), so the raise costs nothing.
     """
     ss = getattr(idata, "sample_stats", None)
     if ss is not None and "lp" in ss.data_vars:
@@ -2686,9 +2860,9 @@ def _ensure_lp(idata, model=None, cores=None):
         return False
 
     logger.info("lp is not in the trace -- computing it from the model")
-    lp_vals = _compute_lp_from_model(model, idata, cores=cores)
-    if lp_vals is None:
-        return False
+    lp_vals = _compute_lp_from_model(
+        model, idata, cores=cores, trace_path=trace_path
+    )
 
     import xarray as xr
 
@@ -2705,14 +2879,21 @@ def _ensure_lp(idata, model=None, cores=None):
     return True
 
 
-def _compute_lp_from_model(model, idata, cores=None):
+def _compute_lp_from_model(model, idata, cores=None, trace_path=None):
     """Compute log posterior at each draw by evaluating the compiled model logp.
 
     Used when the sampler (Metropolis) doesn't write lp to sample_stats.
     Chains are processed in parallel via fork so the PyTensor compiled function
     is inherited without pickling (numpy chain data is all that's sent over IPC).
-    Returns an (n_chains, n_draws) float64 array, or None on failure.
+    Returns an (n_chains, n_draws) float64 array.
+
+    RAISES RuntimeError naming the trace and the cause on any failure
+    (review 2.3.21): a free RV with no value variable, a trace holding none
+    of the model's free RVs, or an evaluation error.  The model and trace
+    come from one run, so each is a bookkeeping bug, never a state to
+    report around.
     """
+    where = trace_path if trace_path is not None else "the in-memory trace"
     try:
         n_chains = idata.posterior.sizes["chain"]
         n_draws = idata.posterior.sizes["draw"]
@@ -2727,15 +2908,18 @@ def _compute_lp_from_model(model, idata, cores=None):
         for rv in model.free_RVs:
             vv = model.rvs_to_values.get(rv)
             if vv is None:
-                continue
+                raise RuntimeError(
+                    f"free RV {rv.name!r} has no value variable in the model"
+                )
             if rv.name in idata.posterior.data_vars:
                 point_map[rv.name] = vv.name
 
         if not point_map:
-            logger.warning(
-                "_compute_lp_from_model: no unconstrained vars found in trace"
+            raise RuntimeError(
+                f"none of the model's free RVs "
+                f"{sorted(rv.name for rv in model.free_RVs)} is in the "
+                f"trace's posterior"
             )
-            return None
 
         logger.info(
             f"Computing lp for {n_chains}×{n_draws} draws "
@@ -2795,9 +2979,11 @@ def _compute_lp_from_model(model, idata, cores=None):
 
         return lp_vals
 
-    except Exception as e:
-        logger.warning(f"Could not compute lp from model: {e}")
-        return None
+    except Exception as exc:
+        raise RuntimeError(
+            f"could not compute lp from the model for {where}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def _chunk_by_rows(specs, rows_per_page):
@@ -3270,7 +3456,10 @@ def _sanitize_netcdf_attrs(idata):
             continue
         for k, v in list(ds.attrs.items()):
             if isinstance(v, dict):
-                ds.attrs[k] = json.dumps(v)
+                # default=str: this runs between the sampler and the save
+                # (_save_sampled_trace), where nothing may raise, and a
+                # sampler's metadata dict may hold a value json cannot encode.
+                ds.attrs[k] = json.dumps(v, default=str)
 
 
 def _convert_posterior_to_user_units(idata, param_lookup, only=None):

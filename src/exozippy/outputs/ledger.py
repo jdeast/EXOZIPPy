@@ -81,6 +81,97 @@ def _flat_names(key, size):
     return [f"{key}[{j}]" for j in range(size)]
 
 
+# The SeedRecord fields that hold {name: array} dicts.  The ledger travels
+# with the trace (trace_meta.SEED_LEDGER_ATTR) so a `recompute_trace: false`
+# rerun reports the seeds the original run measured (review 2.14.12
+# prerequisite 2); these are the fields whose arrays must survive JSON with
+# their shape and dtype.
+_ARRAY_DICT_FIELDS = (
+    "raw_point",
+    "raw_scales",
+    "phys",
+    "phys_sigma",
+    "sampled_idx",
+)
+_SCALAR_FIELDS = (
+    "seed_index",
+    "lp_max",
+    "delta_lp",
+    "laplace_logw",
+    "matched_mode",
+    "match_distance",
+    "source",
+)
+
+
+def ledger_to_json(ledger):
+    """Serialize a seed ledger (list of SeedRecord, or None) to JSON text.
+
+    Arrays keep their exact shape and dtype (``{"shape", "dtype", "data"}``),
+    so ``ledger_from_json`` hands back records that compare equal element
+    for element.  NaN / inf round-trip through Python's JSON dialect.
+    """
+    import json
+
+    if ledger is None:
+        return "null"
+    out = []
+    for rec in ledger:
+        entry = {name: getattr(rec, name) for name in _SCALAR_FIELDS}
+        for name in _ARRAY_DICT_FIELDS:
+            entry[name] = {
+                key: {
+                    "shape": list(np.shape(val)),
+                    "dtype": str(np.asarray(val).dtype),
+                    "data": np.asarray(val).reshape(-1).tolist(),
+                }
+                for key, val in getattr(rec, name).items()
+            }
+        out.append(entry)
+    return json.dumps(out)
+
+
+def ledger_from_json(blob):
+    """Inverse of ``ledger_to_json``: a list of SeedRecord, or None.
+
+    The blob is this code's own output stamped on the trace, so anything
+    that does not parse into exactly the SeedRecord fields raises naming the
+    field -- it is never patched into a partial ledger.
+    """
+    import json
+
+    data = json.loads(blob)
+    if data is None:
+        return None
+    if not isinstance(data, list):
+        raise ValueError(
+            f"seed ledger JSON is a {type(data).__name__}, not a list of "
+            f"records"
+        )
+    records = []
+    for i, entry in enumerate(data):
+        expected = set(_SCALAR_FIELDS) | set(_ARRAY_DICT_FIELDS)
+        if set(entry) != expected:
+            raise ValueError(
+                f"seed ledger record {i}: fields {sorted(entry)} are not the "
+                f"SeedRecord fields {sorted(expected)}"
+            )
+        kwargs = {name: entry[name] for name in _SCALAR_FIELDS}
+        for name in _ARRAY_DICT_FIELDS:
+            kwargs[name] = {
+                key: np.asarray(arr["data"], dtype=arr["dtype"]).reshape(
+                    arr["shape"]
+                )
+                for key, arr in entry[name].items()
+            }
+        # build_seed_ledger stores the element indices as a plain list.
+        kwargs["sampled_idx"] = {
+            key: val.tolist() for key, val in kwargs["sampled_idx"].items()
+        }
+        records.append(SeedRecord(**kwargs))
+    return records
+
+
 def build_seed_ledger(system, model, raw_starts, seed_indices, logp_fn=None):
     """Measure a Laplace record for every (polished) seed start.
 

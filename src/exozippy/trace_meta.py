@@ -93,6 +93,26 @@ REPORT_ONLY_ATTR = "exozippy_report_only_vars"
 # is what makes the difference statable at all.
 UNITS_ATTR = "exozippy_posterior_units"
 POSTERIOR_UNITS = "user"
+# The stamp a FRESH trace is first written with (review 2.14.12, JDE ruling
+# 2026-09-25).  run.py writes the draws to disk the moment sampling returns,
+# BEFORE any post-processing -- computing lp from the model and converting to
+# user units are steps that can fail, and nothing that can fail may stand
+# between the sampler and the save, because a raise there loses the trace.
+# The post-save step (run._finish_saved_trace) then computes lp, converts,
+# restamps POSTERIOR_UNITS and rewrites the file.  A trace still carrying
+# this stamp is one whose post-processing did not finish: it is recognized,
+# never guessed at, and only the run.py reuse path (`recompute_trace: false`)
+# may read it, because that path finishes it through the same code.
+POSTERIOR_UNITS_UNFINISHED = "internal-unfinished"
+
+# The pre-sampling seed ledger (outputs/ledger.py build_seed_ledger), as JSON.
+# Measured while the polished seeds exist, which a REUSED trace's run never
+# rebuilds (the polish is skipped there), so it has to travel with the draws
+# or a `recompute_trace: false` rerun would report "no rejected seeds" for a
+# fit that had some (review 2.14.12 prerequisite 2).  "null" means no ledger
+# was built (single seed, or `modes: {ledger: false}`); an ABSENT attr means
+# the trace predates the persistence.
+SEED_LEDGER_ATTR = "exozippy_seed_ledger"
 
 # The payload is a debugging aid, not the check itself; a pathological
 # config (thousands of per-parameter entries) should not bloat the trace
@@ -105,6 +125,10 @@ _BANNER = "!" * 70
 
 class StaleTraceError(RuntimeError):
     """A saved trace was sampled under a structurally different model."""
+
+
+class UnfinishedTraceError(RuntimeError):
+    """A saved trace's post-save processing (lp, user units) never finished."""
 
 
 def _attrs(idata) -> Dict[str, Any]:
@@ -323,41 +347,63 @@ def report_only_vars(idata) -> frozenset:
     return frozenset(str(n) for n in names)
 
 
-def stamp_structural_metadata(idata, source) -> None:
-    """Record the structural fingerprint + code provenance in root attrs.
+def structural_metadata(source) -> Dict[str, Any]:
+    """The root attrs :func:`stamp_structural_metadata` writes, as a dict.
 
-    ``source`` is a System (or a ``(hash, payload)`` pair).  Called
-    immediately before the trace is written to netCDF, so every trace this
-    code writes can be checked when it is read back.
+    ``source`` is a System (or a ``(hash, payload)`` pair).  A value of None
+    means "remove this attr" (an optional attr that does not apply).
+
+    Split out so run.py can build the whole stamp BEFORE sampling and only
+    apply it to the draws afterwards: everything here reads the System, not
+    the draws, and computing it can fail (a payload, a role mask, the source
+    provenance), which is allowed before sampling and not between the
+    sampler and the save (review 2.14.12).
     """
     fingerprint, payload = _fingerprint_of(source)
-    attrs = _attrs(idata)
-    attrs[HASH_ATTR] = fingerprint
-    # The save path converts the posterior to user units immediately before
-    # this call, so the stamp is a statement of fact about the array being
-    # written -- not a promise about a future format.
-    attrs[UNITS_ATTR] = POSTERIOR_UNITS
+    out: Dict[str, Any] = {HASH_ATTR: fingerprint}
+    out[UNITS_ATTR] = POSTERIOR_UNITS
     roles = element_roles(source)
-    if roles:
-        attrs[ROLES_ATTR] = json.dumps(roles, sort_keys=True)
-    else:
-        attrs.pop(ROLES_ATTR, None)
+    out[ROLES_ATTR] = json.dumps(roles, sort_keys=True) if roles else None
     report_only = getattr(source, "report_only_labels", None)
     if callable(report_only):
-        attrs[REPORT_ONLY_ATTR] = json.dumps(list(report_only()))
+        out[REPORT_ONLY_ATTR] = json.dumps(list(report_only()))
     blob = json.dumps(payload, sort_keys=True, default=str)
-    if len(blob) <= _MAX_PAYLOAD_CHARS:
-        attrs[PAYLOAD_ATTR] = blob
-    else:
-        attrs.pop(PAYLOAD_ATTR, None)
+    out[PAYLOAD_ATTR] = blob if len(blob) <= _MAX_PAYLOAD_CHARS else None
 
     # Diagnostic context for a future mismatch; never compared on load.
     prov = code_provenance()
-    attrs[VERSION_ATTR] = str(prov["version"])
+    out[VERSION_ATTR] = str(prov["version"])
     if prov["commit"]:
-        attrs[COMMIT_ATTR] = prov["commit"]
-        attrs[DESCRIBE_ATTR] = prov["describe"] or ""
-        attrs[DIRTY_ATTR] = "true" if prov["dirty"] else "false"
+        out[COMMIT_ATTR] = prov["commit"]
+        out[DESCRIBE_ATTR] = prov["describe"] or ""
+        out[DIRTY_ATTR] = "true" if prov["dirty"] else "false"
+    return out
+
+
+def apply_metadata(idata, metadata: Dict[str, Any]) -> None:
+    """Write a :func:`structural_metadata` dict onto ``idata``'s root attrs.
+
+    Pure dict bookkeeping that cannot fail on a well-formed dict, which is
+    what lets run.py call it between the sampler and the save.
+    """
+    attrs = _attrs(idata)
+    for key, value in metadata.items():
+        if value is None:
+            attrs.pop(key, None)
+        else:
+            attrs[key] = value
+
+
+def stamp_structural_metadata(idata, source) -> None:
+    """Record the structural fingerprint + code provenance in root attrs.
+
+    ``source`` is a System (or a ``(hash, payload)`` pair).  Stamps the
+    posterior as USER units: run.py's save path builds the same dict with
+    :func:`structural_metadata` before sampling and stamps
+    ``POSTERIOR_UNITS_UNFINISHED`` instead until its post-save step has
+    converted the draws.
+    """
+    apply_metadata(idata, structural_metadata(source))
 
 
 def _diff_mapping(old: dict, new: dict, label: str) -> List[str]:
@@ -445,6 +491,11 @@ def check_posterior_units(attrs, trace_path) -> str:
     stamped = attrs.get(UNITS_ATTR)
     if stamped == POSTERIOR_UNITS:
         return POSTERIOR_UNITS
+    if stamped == POSTERIOR_UNITS_UNFINISHED:
+        # Known and exact (internal units, lp possibly absent), so no
+        # warning here: check_trace_freshness refuses it unless the caller
+        # is the one path that finishes it.
+        return POSTERIOR_UNITS_UNFINISHED
     if stamped:
         logger.warning(
             f"{_BANNER}\n"
@@ -471,7 +522,9 @@ def check_posterior_units(attrs, trace_path) -> str:
     return "unverifiable"
 
 
-def check_trace_freshness(idata, source, trace_path) -> str:
+def check_trace_freshness(
+    idata, source, trace_path, allow_unfinished=False
+) -> str:
     """Verify a reloaded trace was sampled from this model.
 
     ``source`` is a System (or a ``(hash, payload)`` pair).  Returns
@@ -486,11 +539,31 @@ def check_trace_freshness(idata, source, trace_path) -> str:
     a different question from whether they came from this model, it can only
     ever warn, and every reload should ask it -- which is what makes this
     single choke point the right place for it.
+
+    The one units verdict that DOES raise is an UNFINISHED trace
+    (``POSTERIOR_UNITS_UNFINISHED``): the draws were saved but the post-save
+    step that computes lp and converts to user units never completed.  That
+    is not a guess about units -- the stamp says exactly what the draws are
+    -- and only run.py's ``recompute_trace: false`` path, which finishes the
+    trace through the same code a live fit uses, may read it
+    (``allow_unfinished=True``).  Every other reader raises
+    :class:`UnfinishedTraceError` naming that remedy, rather than reporting
+    or seeding from internal-unit draws.
     """
     fingerprint, payload = _fingerprint_of(source)
     attrs = _attrs(idata)
     stored = attrs.get(HASH_ATTR)
-    check_posterior_units(attrs, trace_path)
+    units = check_posterior_units(attrs, trace_path)
+    if units == POSTERIOR_UNITS_UNFINISHED and not allow_unfinished:
+        raise UnfinishedTraceError(
+            f"{trace_path} was saved straight from the sampler, but its "
+            f"post-save processing (lp from the model, conversion to user "
+            f"units) never finished -- the run that wrote it raised during "
+            f"wrap-up. Its posterior is still in INTERNAL units. Finish it "
+            f"by rerunning the fit with 'sampler: {{recompute_trace: "
+            f"false}}' (no re-sampling): that path completes the trace and "
+            f"the whole wrap-up through the code a live fit uses."
+        )
 
     if not stored:
         logger.warning(
