@@ -288,9 +288,16 @@ def match_ledger_to_modes(ledger, mode_report, match_sigma=MATCH_SIGMA):
     by the seed's own measured width along that element.  A record whose
     nearest mode center is farther than ``match_sigma`` is left unmatched
     (matched_mode = None): considered and rejected by the posterior.
+
+    Raises with no mode report (review 1.11.5): "unmatched" is exactly how a
+    rejected seed is reported, so returning the ledger untouched published
+    every seed -- including the one the posterior sits in -- as rejected.
+    The caller skips classification and says so instead.
     """
-    if mode_report is None or not getattr(mode_report, "modes", None):
-        return ledger
+    if mode_report is None:
+        raise ValueError(
+            "match_ledger_to_modes: no mode report -- cannot classify seeds"
+        )
     for rec in ledger:
         best_mode, best_d = None, np.inf
         # element name -> (value, scale) in the current raw coordinates

@@ -15,7 +15,6 @@ from .. import reporting
 from .latex import build_csv_output, build_latex_output
 from .modes import (
     DEFAULT_MAX_INVALID_FRAC,
-    MODE_FAILED,
     MODE_NO_VALID_DRAWS,
     MODE_OK,
     NoValidDrawsError,
@@ -118,13 +117,14 @@ def build_mode_reports(
     Writes ``<prefix>_modes.txt``, ``<prefix>_definitions.tex``,
     ``<prefix>_table.tex``, and ``<prefix>_results.csv``.
 
-    Mode identification is wrapped in a broad try/except: a broken mode
-    pass must never take down the rest of a fit's outputs, so a failure
-    here is logged as a warning and the tables fall back to describing the
-    combined (unimodal) posterior.  The one carve-out is
-    ``NoValidDrawsError`` -- every draw rejected by the numerical-validity
-    filter -- which is not a broken mode pass but a broken trace, and is
-    routed to ``check_invalid_frac`` instead of being absorbed.
+    A mode-pass failure PROPAGATES (review 2.11.8).  It used to be caught
+    and logged, and the tables then described the POOLED posterior of a
+    possibly multimodal fit with no caveat in any artifact.  This runs after
+    the trace is saved, so under the three-phase ruling (review 2.14.12) the
+    recovery is the code fix plus a `recompute_trace: false` rerun.  The one
+    designed failure is ``NoValidDrawsError`` -- every draw rejected by the
+    numerical-validity filter -- which is not a broken mode pass but a
+    broken trace, and is routed to ``check_invalid_frac``.
 
     Parameters
     ----------
@@ -151,10 +151,9 @@ def build_mode_reports(
     max_invalid_frac, force : passed through to check_invalid_frac.
     raise_on_invalid : bool
         Live fits (run.py) must not silently emit final tables from a
-        numerically broken run, so this defaults to True. The forensic
-        exozippy-modes CLI reprocesses a saved trace and always completes,
-        so it passes False and reports invalid-draw problems as a warning
-        banner of its own instead.
+        numerically broken run, so this defaults to True; the override is
+        `modes: {force: true}`.  A caller passing False reports
+        invalid-draw problems itself.
     evidence_weights : bool
         Opt-in per-mode evidence weighting (bridge sampling, a fallback /
         cross-check path -- see outputs.evidence). On success it replaces
@@ -182,17 +181,16 @@ def build_mode_reports(
         pass -- a ``state`` from the outputs.modes MODE_* vocabulary plus
         the invalid-draw bookkeeping -- following the status-dict pattern
         of outputs/ledger.py's hot-chain search and outputs/evidence.py's
-        per-mode results.  It is what lets a caller tell a returned None
-        that means "the draws are unusable" (MODE_NO_VALID_DRAWS) from one
-        that means "the mode pass could not tell you anything"
-        (MODE_FAILED); the validity gate below reads exactly that
-        distinction.  A fresh dict is used when none is passed.
+        per-mode results.  A returned None always means "the draws are
+        unusable" (MODE_NO_VALID_DRAWS): any other mode-pass failure
+        raises (review 2.11.8), so MODE_FAILED is no longer produced here.
+        A fresh dict is used when none is passed.
 
     Returns
     -------
-    outputs.modes.ModeReport, or None if mode identification failed or
-    found no valid draws (see the warning logged in that case, and
-    ``mode_status`` for which of the two it was).
+    outputs.modes.ModeReport, or None when the mode pass found NO VALID
+    DRAWS (``mode_status['state'] == MODE_NO_VALID_DRAWS``), which reaches
+    the tables only past the invalid-draw gate (``force``).
     """
     prefix = Path(prefix)
     mode_kwargs = {}
@@ -207,13 +205,22 @@ def build_mode_reports(
 
     # Identify posterior modes and label every draw: idata gains an integer
     # posterior['mode'] variable (-1 = invalid/unassigned) that
-    # distribute_posterior and the table builders below key off of.  Mode
-    # detection must never take down a finished fit's outputs, hence the
-    # broad catch.
+    # distribute_posterior and the table builders below key off of.
     mode_report = None
     modes_path = None
     if mode_status is None:
         mode_status = {}
+    # A trace can arrive carrying labels from an EARLIER mode pass (one
+    # persisted by an old exozippy-modes run).  They describe a different
+    # pass, and distribute_posterior would apply them if this pass does not
+    # attach its own (the no-valid-draws path): drop them first, so the only
+    # labels anything below can see are this pass's (review 2.11.8).
+    if "mode" in idata.posterior.data_vars:
+        logger.info(
+            "Dropping the trace's stale posterior['mode'] labels from an "
+            "earlier mode pass; this pass relabels every draw."
+        )
+        del idata.posterior["mode"]
     try:
         mode_report = identify_modes(idata, **mode_kwargs)
         mode_status.update(
@@ -270,15 +277,6 @@ def build_mode_reports(
                 "failure is reported here and by the check below",
                 exc_info=True,
             )
-    except Exception as exc:
-        # Any other mode-pass failure says nothing about whether the draws
-        # are usable, so it stays a warning and the gate below stays quiet.
-        mode_status.update(state=MODE_FAILED, detail=repr(exc))
-        logger.warning(
-            "Mode identification failed; reporting the combined "
-            "posterior only",
-            exc_info=True,
-        )
 
     if raise_on_invalid:
         # The trace and mode report are already written at this point, so
@@ -358,7 +356,28 @@ def build_mode_reports(
     # mode or mark it rejected, and report the rejected ones -- the
     # "considered and rejected" record that pure T=1 occupancy loses.
     # Appended AFTER any evidence-weighting rewrite of the mode report.
-    if seed_ledger:
+    if seed_ledger and mode_report is None:
+        # No mode report means there is nothing to classify the seeds
+        # AGAINST (review 1.11.5): with no surviving modes every seed would
+        # read "REJECTED", in the modes file, the rejected-modes table and
+        # the CSV -- the false statement the ledger exists to prevent.  The
+        # only way here is MODE_NO_VALID_DRAWS past the gate (`force`).
+        if modes_path is None:
+            modes_path = Path(str(prefix) + "_modes.txt")
+        with open(modes_path, "a", encoding="utf-8") as f:
+            f.write(
+                f"\nSeeded-solution ledger: {len(seed_ledger)} seed(s) NOT "
+                f"classified -- mode identification produced no report "
+                f"({mode_status.get('state')}), so no seed can be said to "
+                f"have survived or been rejected.\n"
+            )
+        logger.warning(
+            "Seed ledger: %d seed(s) NOT classified (no mode report: %s); "
+            "no rejected-seed rows are written.",
+            len(seed_ledger),
+            mode_status.get("state"),
+        )
+    elif seed_ledger:
         try:
             from .ledger import (
                 ledger_to_text,
@@ -420,7 +439,7 @@ def build_mode_reports(
     # mix of 4- and 7-column rows.  Decided with the same predicate
     # append_ledger_csv uses, so the two can never disagree.
     ledger_rows = False
-    if seed_ledger:
+    if seed_ledger and mode_report is not None:
         from .ledger import rejected_records
 
         ledger_rows = bool(rejected_records(seed_ledger))

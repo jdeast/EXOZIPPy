@@ -28,7 +28,6 @@ import yaml
 
 from exozippy.config import validate_sigma_has_center
 from exozippy.outputs.modes import (
-    MODE_FAILED,
     MODE_NO_VALID_DRAWS,
     MODE_OK,
     NoValidDrawsError,
@@ -297,16 +296,17 @@ def _identify_modes(idata, mode_status):
     * ``MODE_NO_VALID_DRAWS`` -- EVERY draw failed the numerical-validity
       filter.  That is a statement about the DRAWS, and mkparam's output
       seeds the NEXT fit, so it must not be turned into seed values.
-    * ``MODE_FAILED`` -- the mode pass could not tell us anything, for a
-      reason that says nothing about the draws (an unclusterable trace, a
-      crash, an ImportError).  Seed emission carries on unstratified, as it
-      always has: a broken mode pass must never break seed emission.
+    Any OTHER failure RAISES (review 2.3.34, ruled by 2.14.12).  The
+    restart file is written after the trace is saved, so a mode-pass crash
+    -- a bug in code that runs on a trace this code wrote -- is recovered by
+    the fix plus a `recompute_trace: false` rerun.  It used to fall back to
+    unstratified seeds and an UNMASKED MAP, which can launder a multimodal
+    posterior into one basin and let a runaway-lp draw become seed 0
+    (2.3.20).  There is deliberately no `mkparam: {force: true}` escape: a
+    crash is a code bug, not a data condition.
 
     ``identify_modes`` itself is looked up per call rather than bound at
-    import time (the MODE_* vocabulary and the exception class are imported
-    at module level, so this cannot fail): it keeps the function
-    monkeypatchable in tests, which is how the "an ordinary mode-pass
-    failure still falls back" guarantee is pinned.
+    import time: it keeps the function monkeypatchable in tests.
     """
     from exozippy.outputs.modes import identify_modes
 
@@ -325,13 +325,6 @@ def _identify_modes(idata, mode_status):
             reasons=exc.reason_counts,
             per_chain_invalid=exc.per_chain_invalid,
             detail=str(exc),
-        )
-        return None
-    except Exception as exc:  # never let mode analysis break seed emission
-        mode_status.update(state=MODE_FAILED, detail=repr(exc))
-        logger.warning(
-            f"mkparam: mode identification failed ({exc}); falling back to "
-            f"unstratified seed draws."
         )
         return None
 
@@ -415,7 +408,7 @@ def _refuse_invalid_seed_draws(mode_status, trace_path, force=False):
     )
 
 
-def _map_draw_from_lp(lp_values, mode_report):
+def _map_draw_from_lp(lp_values, mode_report, mode_status):
     """Pick the best VALID draw by lp, as ``(chain, draw, lp)`` or None.
 
     Two filters, both of which ``np.argmax`` got wrong in the direction that
@@ -431,53 +424,49 @@ def _map_draw_from_lp(lp_values, mode_report):
       the ranking here, exactly as ``_sample_seed_draws``' stratified path
       already excludes label -1.  The MAP path was the last leak.
 
-    The all-invalid trace is refused upstream (``_refuse_invalid_seed_draws``)
-    and so cannot normally reach this; under ``mkparam: {force: true}`` it can,
-    and then there is nothing left to rank -- returning None hands the caller
-    the same honest "no rankable lp" fallback a trace with no lp at all gets,
-    rather than ``argmax``'s silent index 0.
-
-    ``mode_report`` may be None (the mode pass failed, which must never break
-    seed emission) and its labels are only trusted when their shape matches
-    lp's: a mismatch would mask the wrong draws, which is worse than not
-    masking at all.
+    The ranking is NEVER unmasked (review 2.3.20).  ``mode_report`` is None
+    only when every draw was rejected (``MODE_NO_VALID_DRAWS``), which
+    ``_refuse_invalid_seed_draws`` refuses upstream unless ``mkparam: {force:
+    true}`` -- and then there is no valid draw to rank, so this returns None
+    and the caller takes the same honest "no rankable lp" fallback a trace
+    with no lp at all gets, rather than ``argmax``'s silent index 0.  Any
+    other None, a label grid whose shape differs from lp's (identify_modes
+    labels the very (chain, draw) grid whose lp is ranked), or valid labels
+    on no finite lp, is a bookkeeping bug and raises naming it.
     """
     ranked = np.asarray(lp_values, dtype=float)
-    labels = getattr(mode_report, "labels", None)
-    if labels is not None:
-        labels = np.asarray(labels)
-        if labels.shape == ranked.shape:
-            masked = np.where(labels < 0, np.nan, ranked)
-            n_dropped = int(
-                np.isfinite(ranked).sum() - np.isfinite(masked).sum()
+    if mode_report is None:
+        if mode_status.get("state") != MODE_NO_VALID_DRAWS:
+            raise RuntimeError(
+                f"mkparam: no mode report to mask the MAP ranking with, and "
+                f"the mode pass did not report NO VALID DRAWS (state "
+                f"{mode_status.get('state')!r})"
             )
-            if np.isfinite(masked).any():
-                if n_dropped:
-                    logger.info(
-                        "mkparam: excluded %d numerically invalid draw(s) from "
-                        "the MAP ranking.",
-                        n_dropped,
-                    )
-                ranked = masked
-            elif n_dropped:
-                # Every finite lp belongs to an invalid draw.  Say so and rank
-                # the finite ones anyway: the alternative is no MAP at all, and
-                # the caller's fallback (last draw of chain 0) is not obviously
-                # better than the best of a known-bad set.  Only reachable
-                # under `mkparam: {force: true}`, which already accepted that.
-                logger.warning(
-                    "mkparam: every draw with a finite lp was labelled "
-                    "numerically invalid; ranking them anyway."
-                )
-        else:
-            logger.debug(
-                "mkparam: mode labels %s do not match lp %s -- not masking "
-                "the MAP ranking.",
-                labels.shape,
-                ranked.shape,
-            )
-    if not np.isfinite(ranked).any():
+        logger.warning(
+            "mkparam: every draw was rejected as numerically invalid, so no "
+            "draw is rankable for the MAP."
+        )
         return None
+    labels = np.asarray(mode_report.labels)
+    if labels.shape != ranked.shape:
+        raise ValueError(
+            f"mkparam: mode labels of shape {labels.shape} do not match the "
+            f"lp being ranked, of shape {ranked.shape}"
+        )
+    masked = np.where(labels < 0, np.nan, ranked)
+    if not np.isfinite(masked).any():
+        raise RuntimeError(
+            f"mkparam: the mode pass labelled {int((labels >= 0).sum())} "
+            f"draw(s) valid, but none of them has a finite lp"
+        )
+    n_dropped = int(np.isfinite(ranked).sum() - np.isfinite(masked).sum())
+    if n_dropped:
+        logger.info(
+            "mkparam: excluded %d numerically invalid draw(s) from the MAP "
+            "ranking.",
+            n_dropped,
+        )
+    ranked = masked
     flat = ranked.flatten()
     map_idx = int(np.nanargmax(flat))
     n_draws = ranked.shape[-1] if ranked.ndim > 1 else ranked.size
@@ -642,7 +631,7 @@ def _sample_seed_draws(
 
     ``mode_report`` lets the caller hand in an already-computed report so
     the mode pass runs once per mkparam call rather than twice; left unset,
-    this runs it itself (and swallows any failure, as it always has).
+    this runs it itself.
     ``diag`` is the same arrangement for ``_burnin_diag``.
 
     NOTE this pool is NOT validity-filtered: ``find_burnin``'s good-chain
@@ -662,10 +651,9 @@ def _sample_seed_draws(
     draw_lo = min(burnin, max(0, n_draws - 1))
 
     # ---- mode-stratified path -------------------------------------------
-    # A mode-pass failure must never break seed emission (_identify_modes
-    # keeps the broad catch that guarantees it); the ONE outcome that is not
-    # a mode-pass failure but a broken trace -- every draw invalid -- is
-    # refused by the caller before this function is reached.
+    # A mode-pass crash raises (_identify_modes; review 2.3.34); the one
+    # outcome that is not a crash but a broken trace -- every draw invalid --
+    # is refused by the caller before this function is reached.
     if mode_report is _UNSET:
         mode_report = _identify_modes(idata, {})
     labels = None
@@ -929,7 +917,7 @@ def write_param_file(
     has_lp = ss is not None and "lp" in ss.data_vars
     map_pick = None
     if has_lp:
-        map_pick = _map_draw_from_lp(ss["lp"].values, mode_report)
+        map_pick = _map_draw_from_lp(ss["lp"].values, mode_report, mode_status)
     if map_pick is not None:
         map_chain, map_draw, map_lp = map_pick
         logger.info(
