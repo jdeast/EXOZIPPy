@@ -1,0 +1,28 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N priorctrl
+#$ -o sweep4/dc18_prior_percentile_ctrl.$JOB_ID.log
+# 7.7.3 (1) / 2.6.37 controls (b) and (c): the full prior with the lens's
+# [Fe/H] pinned at 0, and with Mann's synthetic Ks replaced by a wide
+# observed one (ks 30 +/- 5 mag: no information).
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_priorctrl"
+export OMP_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy/examples/DC2018
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)   $(date)"
+for ev in 047 069; do
+  echo "=== (b) feh pinned, event $ev"
+  python -u dc18_prior_percentile.py --event $((10#$ev)) --run-dir sweep4/$ev --tag _fehpin --params-json '{"star.Lens.feh": {"initval": 0.0, "sigma": 0}}' 2>&1 | grep -v "DEBUG\|Warning\|warn\|^\["
+  echo "=== (c) observed Ks 30 +/- 5, event $ev"
+  python -u dc18_prior_percentile.py --event $((10#$ev)) --run-dir sweep4/$ev --tag _obsks --config-json '{"mann": [{"star": "Lens", "ks": 30.0, "ks_err": 5.0, "constrain": ["mass", "radius"]}]}' 2>&1 | grep -v "DEBUG\|Warning\|warn\|^\["
+done
+echo "exit $?   $(date)"

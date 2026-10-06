@@ -99,7 +99,7 @@ def read_results_all(path):
     return out
 
 
-def build(run_dir):
+def build(run_dir, config_json=None, params_json=None):
     import pytensor
 
     from exozippy.system import System
@@ -123,6 +123,14 @@ def build(run_dir):
         for k in ("mmexofast", "mmexofast_options"):
             ev.pop(k, None)
     user_params = yaml.safe_load(open(config["parameter_file"]))
+    if config_json:
+        for k, v in config_json.items():
+            print(f"   control: config[{k!r}] <- {v!r}")
+            config[k] = v
+    if params_json:
+        for k, v in params_json.items():
+            print(f"   control: params[{k!r}] <- {v!r}")
+            user_params[k] = v
     system = System(config, user_params=user_params)
     system.prepare()
     model = system.build_model()
@@ -165,6 +173,18 @@ def main():
         "term that is not data or data-derived, see DATA_MARKERS)",
     )
     ap.add_argument("--tag", default="", help="suffix for the output files")
+    ap.add_argument(
+        "--config-json",
+        default=None,
+        help="JSON object merged over the config's top-level keys (a control "
+        "that swaps a component block, e.g. mann with an observed Ks)",
+    )
+    ap.add_argument(
+        "--params-json",
+        default=None,
+        help="JSON object merged into the params file (a control that pins "
+        "a parameter, e.g. star.Lens.feh with sigma 0)",
+    )
     a = ap.parse_args()
     global KEEP_REGEX
     if a.keep:
@@ -187,7 +207,11 @@ def main():
     csvs = [f for f in os.listdir(run_dir) if f.endswith("_results.csv")]
     post = read_results_all(os.path.join(run_dir, csvs[0])) if csvs else {}
 
-    system, model, vv, f, g, kept, dropped = build(run_dir)
+    system, model, vv, f, g, kept, dropped = build(
+        run_dir,
+        config_json=json.loads(a.config_json) if a.config_json else None,
+        params_json=json.loads(a.params_json) if a.params_json else None,
+    )
     print(
         f"event {a.event} ({cls}): prior terms KEPT ({len(kept)}): "
         + ", ".join(sorted(r.name for r in kept))
