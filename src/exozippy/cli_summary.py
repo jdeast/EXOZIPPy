@@ -41,6 +41,7 @@ OPTION_KEYS = (
     "transit_bin",
     "transit_spacing",
     "figsize",
+    "rv_break_days",
 )
 
 

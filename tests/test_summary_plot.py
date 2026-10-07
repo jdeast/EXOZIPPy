@@ -12,6 +12,7 @@ pinned in tests/test_plot_data.py.
 They follow AAA with Given/When/Then docstrings.
 """
 
+import dataclasses
 import os
 import shutil
 from pathlib import Path
@@ -449,6 +450,43 @@ def test_transit_stack_limits_are_symmetric_about_the_stack():
     np.testing.assert_allclose(xlim, [-2.4, 2.4])
 
 
+def test_each_transit_label_sits_just_above_its_own_row():
+    """
+    Given two rows 0.02 apart with a 0.01-deep transit, the first
+      scattered by +-0.0005 about its model and the second by +-0.003,
+    When the stack is drawn,
+    Then each label is anchored at the left, _LABEL_SIGMAS times its row's
+      robust scatter above that row's baseline -- 2 x 1.4826 x 0.0005 for
+      the first -- but no more than _LABEL_MAX_GAP of the 0.01 gap to the
+      row above, where the noisier second row's is capped.
+    """
+    from exozippy.chart import Trace
+
+    def noisy(chart, amplitude):
+        model = sp._one(chart, "model")
+        wiggle = amplitude * np.where(np.arange(np.size(model.y)) % 2, 1, -1)
+        data = Trace(
+            "T", "data", "scatter", model.x, np.asarray(model.y) + wiggle
+        )
+        return dataclasses.replace(chart, traces=[model, data])
+
+    rows = [
+        ("A", "A", [noisy(_phased_chart(0.01), 0.0005)], None, "#009B77"),
+        ("B", "B", [noisy(_phased_chart(0.01), 0.003)], None, "#821EA6"),
+    ]
+    fig, ax = plt.subplots()
+    try:
+        sp._draw_transit_stack(ax, rows, spacing=0.02)
+        anchors = {t.get_text(): t.xy for t in ax.texts}
+        left = ax.get_xlim()[0]
+    finally:
+        plt.close(fig)
+
+    assert anchors["A"][1] == pytest.approx(1.0 + 2.0 * 1.4826 * 0.0005)
+    assert anchors["B"][1] == pytest.approx(0.98 + sp._LABEL_MAX_GAP * 0.01)
+    assert anchors["A"][0] == pytest.approx(left + 0.02 * 4.8)
+
+
 def test_posterior_draws_share_one_alpha_with_the_reference_curve():
     """
     Given one transit row grouping two files whose model curves are
@@ -462,8 +500,6 @@ def test_posterior_draws_share_one_alpha_with_the_reference_curve():
       it, while the draw repeating the reference is kept, as plotrender
       keeps every draw.
     """
-    import dataclasses
-
     from exozippy.chart import Trace
 
     first = _phased_chart(0.01)
@@ -517,6 +553,117 @@ def _rv_chart(n=50):
     )
 
 
+def test_time_segments_split_at_gaps_longer_than_the_threshold():
+    """
+    Given observations with gaps of 101, 35 and 60 days,
+    When they are split at gaps over 50 days, and then with no threshold,
+    Then the 101- and 60-day gaps break the axis and the 35-day one does
+      not; with no threshold there is one piece.
+    """
+    times = [4017.0, 4118.0, 4130.0, 4165.0, 4200.0, 4260.0, 4261.0]
+
+    assert sp.time_segments(times, 50.0) == [
+        (4017.0, 4017.0),
+        (4118.0, 4200.0),
+        (4260.0, 4261.0),
+    ]
+    assert sp.time_segments(times, None) == [(4017.0, 4261.0)]
+
+
+def test_piece_ticks_stay_clear_of_the_breaks():
+    """
+    Given a wide piece (4113-4222, 5.5 in) and a narrow one (4013-4021,
+      0.8 in) of a broken axis,
+    When their ticks are chosen, trimming the edges that face a break,
+    Then the wide piece's ticks are round and none lies within
+      _BREAK_EDGE_IN of its trimmed left edge, and the narrow piece gets
+      one round tick inside its trimmed window.
+    """
+    wide = sp.piece_ticks(4113.0, 4222.0, 5.5, True, False)
+    narrow = sp.piece_ticks(4013.0, 4021.0, 0.8, False, True)
+
+    per_in = (4222.0 - 4113.0) / 5.5
+    assert len(wide) >= 3
+    assert min(wide) >= 4113.0 + sp._BREAK_EDGE_IN * per_in
+    assert all(t % 10 == 0 for t in wide)
+    per_in = 8.0 / 0.8
+    assert narrow == [4015.0]
+    assert narrow[0] <= 4021.0 - sp._BREAK_EDGE_IN * per_in
+
+
+def _rv_time_chart():
+    """An RV-against-time chart: two seasons 100 days apart, with O-C."""
+    from exozippy.chart import Chart, Trace
+
+    times = np.array([10.0, 12.0, 15.0, 115.0, 118.0, 130.0])
+    model_x = np.linspace(0.0, 140.0, 2000)
+    data = Trace(
+        "HIRES",
+        "data",
+        "scatter",
+        times,
+        np.zeros(6),
+        yerr=np.ones(6),
+        style={"series_index": 0},
+    )
+    oc = dataclasses.replace(data, role="residual", y=np.ones(6))
+    return Chart(
+        id="rvinstrument.unphased",
+        component={"yaml_key": "rvinstrument", "instance": None},
+        title="",
+        xlabel="Time [BJD - 2457000]",
+        ylabel="RV",
+        traces=[
+            Trace("Model", "model", "line", model_x, np.sin(model_x)),
+            data,
+        ],
+        meta={"residuals": [oc]},
+    )
+
+
+def test_a_long_gap_breaks_the_rv_time_axis_and_its_oc():
+    """
+    Given an RV-against-time chart with two seasons 100 days apart,
+    When the panel is drawn with breaks at 50 days, and again with none,
+    Then it has two panel and two O-C pieces, each framing its own season;
+      the facing spines are hidden, only the first piece carries the y
+      labels, and one x label is left; without breaks it is one piece.
+    """
+    chart = _rv_time_chart()
+
+    fig = plt.figure(figsize=(8, 6))
+    try:
+        axes, oc_axes = sp._draw_rv(
+            fig, fig.add_gridspec(1, 1)[0, 0], chart, {0: "b"}, False, (), 50
+        )
+        xlims = [ax.get_xlim() for ax in axes]
+        ylabels = [ax.get_ylabel() for ax in axes + oc_axes]
+        xlabels = [ax.get_xlabel() for ax in axes + oc_axes]
+        facing = (
+            axes[0].spines["right"].get_visible(),
+            axes[1].spines["left"].get_visible(),
+            oc_axes[0].spines["right"].get_visible(),
+            oc_axes[1].spines["left"].get_visible(),
+        )
+    finally:
+        plt.close(fig)
+    fig = plt.figure(figsize=(8, 6))
+    try:
+        unbroken = sp._draw_rv(
+            fig, fig.add_gridspec(1, 1)[0, 0], chart, {0: "b"}, False, (), None
+        )
+    finally:
+        plt.close(fig)
+
+    assert (len(axes), len(oc_axes)) == (2, 2)
+    assert xlims[0][0] < 10.0 and 15.0 < xlims[0][1] < 115.0
+    assert 15.0 < xlims[1][0] < 115.0 and xlims[1][1] > 130.0
+    assert facing == (False, False, False, False)
+    assert ylabels == [sp.RV_YLABEL, "", sp.OC_YLABEL, ""]
+    assert [x for x in xlabels if x] == ["Time [BJD - 2457000]"]
+    assert [len(a) for a in unbroken] == [1, 1]
+
+
 def test_rv_draws_are_faint_but_their_legend_swatch_is_not():
     """
     Given a folded RV chart and two other posterior draws' model curves,
@@ -535,7 +682,7 @@ def test_rv_draws_are_faint_but_their_legend_swatch_is_not():
     ]
     fig = plt.figure()
     try:
-        ax, _ = sp._draw_rv(
+        (ax,), _ = sp._draw_rv(
             fig, fig.add_gridspec(1, 1)[0, 0], chart, {0: "b"}, True, draws
         )
         curves = [
@@ -562,8 +709,6 @@ def test_draw_model_traces_gathers_panel_models_and_skips_a_bad_draw(caplog):
       good draws, the other chart nothing, and the bad draw is skipped with
       a warning -- plotrender.plot_via_specs's tolerance.
     """
-    import dataclasses
-
     chart = _rv_chart()
     other = dataclasses.replace(chart, id="rvinstrument.unphased")
 
@@ -588,15 +733,19 @@ def test_draw_model_traces_gathers_panel_models_and_skips_a_bad_draw(caplog):
     assert "plot_data failed for draw 1" in caplog.text
 
 
-def test_the_kiel_panel_is_not_drawn_with_posterior_draws():
+def test_the_kiel_and_rv_time_panels_are_not_drawn_with_posterior_draws():
     """
-    Given an RV panel and a Kiel panel, and two posterior draws,
+    Given a folded RV panel, an RV-against-time panel and a Kiel panel, and
+      two posterior draws,
     When the draws' model traces are gathered,
-    Then only the RV chart gets them, and the evolutionary model is never
-      evaluated at a draw -- the Kiel diagram keeps the reference point's
-      one track, its contours showing the posterior.
+    Then only the folded RV chart gets them, and the evolutionary model is
+      never evaluated at a draw -- the Kiel diagram keeps the reference
+      point's one track, its contours showing the posterior, and the RVs
+      against time the reference point's one curve, legible over many
+      orbits.
     """
     rv_chart = _rv_chart()
+    time_chart = _rv_time_chart()
     kiel_chart = _kiel_chart()
     calls = []
 
@@ -607,12 +756,13 @@ def test_the_kiel_panel_is_not_drawn_with_posterior_draws():
     system = SimpleNamespace(
         active_components={
             "rvinstrument": SimpleNamespace(
-                plot_data=lambda system, point: [rv_chart]
+                plot_data=lambda system, point: [time_chart, rv_chart]
             ),
             "evolutionarymodel": SimpleNamespace(plot_data=kiel_plot_data),
         }
     )
     panels = [
+        sp._Panel("rv_time", [time_chart], 1),
         sp._Panel("rv_phase", [rv_chart], 1),
         sp._Panel("kiel", [kiel_chart], 1),
     ]
@@ -1006,8 +1156,9 @@ def test_summary_figure_draws_one_panel_per_chart_kind(kelt4_posterior):
       folded RVs (each of the last two with an O-C axis), the header lines
       it was given, the TESS sector on its cadence row "TESS 120 s", the
       folded panel's legend showing HIRES by its configured label and TRES
-      by its name, and on every model-bearing axis the median draw's
-      curve and one per extra draw, all at one faint alpha.
+      by its name; the transit and folded RV curves are the median draw's
+      and one per extra draw, all at one faint alpha, while the RVs
+      against time show the median draw's curve alone, at full weight.
     """
     from exozippy.run import get_draws
 
@@ -1039,15 +1190,27 @@ def test_summary_figure_draws_one_panel_per_chart_kind(kelt4_posterior):
             if ax.get_legend() is not None
             for t in ax.get_legend().get_texts()
         ]
-        faint = [
-            sum(ln.get_alpha() == sp._DRAWS_ALPHA for ln in ax.get_lines())
+        # Model curves are the solid lines; points and break marks have no
+        # line style.  Transit, then the first RV time piece, then folded.
+        curves = [
+            [ln.get_alpha() for ln in ax.get_lines() if ln.get_ls() == "-"]
             for ax in axes
             if ax.get_ylabel() in (sp.RV_YLABEL, "Normalized Flux + Constant")
         ]
     finally:
         plt.close(fig)
 
-    assert len(axes) == 5
+    # The RV time axis is broken at the >50-day gaps in the HIRES and TRES
+    # seasons: two axes (panel and O-C) per piece.
+    (rv_time,) = [
+        c
+        for c in sp._collect_charts(system, point)
+        if c.id.startswith("rvinstrument") and not c.meta.get("phase_folded")
+    ]
+    times = np.concatenate([np.ravel(t.x) for t in sp._role(rv_time, "data")])
+    pieces = len(sp.time_segments(times, sp.RV_BREAK_DAYS))
+    assert pieces > 1
+    assert len(axes) == 3 + 2 * pieces
     assert ylabels.count(sp.OC_YLABEL) == 2
     rv_axes = [ax for ax in axes if ax.get_ylabel() == sp.RV_YLABEL]
     assert len(rv_axes) == 2
@@ -1058,7 +1221,8 @@ def test_summary_figure_draws_one_panel_per_chart_kind(kelt4_posterior):
         assert symbol in header[0]
     assert [t.get_text() for t in transit_ax.texts] == ["TESS 120 s"]
     assert {"Keck/HIRES", "TRES", "Model"} <= set(legend_texts)
-    assert faint == [1 + len(draws)] * 3
+    spaghetti = [sp._DRAWS_ALPHA] * (1 + len(draws))
+    assert curves == [spaghetti, [sp._RV_TIME_MODEL["alpha"]], spaghetti]
 
 
 @pytest.mark.slow

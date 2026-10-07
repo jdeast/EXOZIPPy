@@ -19,8 +19,9 @@ likelihood's model at the observations, which only the component can
 evaluate, given in the chart's own units.  What it owns is the presentation:
 which charts make a panel, stacking the transits with offsets (in hours,
 TESS files grouped by cadence, optionally binned), each instrument's display
-name (its ``label:`` in the config), a BJD offset on the RV time axis, the
-SED in lambda*F_lambda rather than the chart's log10 of it, and the header.
+name (its ``label:`` in the config), a BJD offset on the RV time axis and
+a break in it at every gap of over ``RV_BREAK_DAYS``, the SED in
+lambda*F_lambda rather than the chart's log10 of it, and the header.
 It draws in its own style, that of the one-page EXOFASTv2-era figures it
 replaces (``PALETTE`` and the style constants below), not the role encodings
 the per-component PDFs and the GUI share.  A new panel kind is a new
@@ -38,8 +39,9 @@ cleaning, every O-C, the SED's model photometry, and the Kiel track, window
 and ages are its.  The other model curves are EXOZIPPy's spaghetti: the
 median draw's and those of other posterior draws (``run.get_draws``, the
 same 50 the component PDFs drew when the fit writes the figure), all at one
-low alpha, none darker; the Kiel diagram shows its posterior as contours
-instead.  The header and the Kiel diagram quote the medians and
+low alpha, none darker.  The RVs against time show the median draw's curve
+alone, legible over many orbits, and the Kiel diagram shows its posterior
+as contours instead.  The header and the Kiel diagram quote the medians and
 credible intervals of that same posterior, at the run's credible-interval
 width.
 """
@@ -100,6 +102,10 @@ OC_YLABEL = "O-C"
 #: matplotlib offset.  A time axis already offset by its data is untouched.
 BJD_OFFSETS = (2457000, 2450000)
 
+#: The RV time axis is broken wherever consecutive observations are more
+#: than this many days apart (``summary_figure(rv_break_days=)``).
+RV_BREAK_DAYS = 50.0
+
 # Page geometry.  A transit stack is two grid rows tall, every other panel
 # one; a panel with an O-C gives it a quarter of its height.
 _TRANSIT_ROWS = 2
@@ -107,6 +113,29 @@ _PANEL_ROWS = 1
 _ROW_HEIGHT_IN = 6.0
 _COLUMN_WIDTH_IN = 8.5
 _OC_HEIGHT_RATIOS = (3, 1)
+# A broken RV time axis: each piece padded by this fraction of the time the
+# pieces cover (at least _BREAK_MIN_PAD_DAYS), as wide as its padded span
+# but never narrower than _BREAK_MIN_WIDTH of the whole, and the pieces
+# _BREAK_WSPACE apart.  Its x ticks are about _BREAK_TICK_IN apart, none
+# within _BREAK_EDGE_IN of an edge facing another piece, where its label
+# would run into the neighbor's.
+_BREAK_PAD_FRAC = 0.04
+_BREAK_MIN_PAD_DAYS = 1.0
+_BREAK_MIN_WIDTH = 0.12
+_BREAK_WSPACE = 0.06
+_BREAK_TICK_IN = 0.9
+_BREAK_EDGE_IN = 0.3
+# The diagonal marks on the facing edges of two pieces.
+_BREAK_MARK = {
+    "marker": [(-0.5, -1.0), (0.5, 1.0)],
+    "markersize": 12,
+    "ls": "none",
+    "color": "k",
+    "mec": "k",
+    "mew": 1.5,
+    "clip_on": False,
+    "zorder": 20,
+}
 # An O-C axis's x10^n multiplier: its right end, in axes fraction, and how
 # far (points) it is dropped from matplotlib's place above the axes -- both
 # clear of the spines' inward ticks.
@@ -171,12 +200,18 @@ _TRANSIT_MODEL = {"color": "k", "lw": 3.0}
 # The automatic offset between rows: the deepest transit plus this many
 # times the typical (median over rows) scatter of the points drawn.
 _SPACING_SIGMAS = 4.0
-# RVs: the folded model dark grey; against time, where over many orbits it
-# is a band rather than a curve, hairline black beneath the points.
+# Each row's label sits at the left, this many times the row's own scatter
+# above its baseline (plus a few points of padding), but no more than this
+# fraction of the way to the row above.
+_LABEL_SIGMAS = 2.0
+_LABEL_MAX_GAP = 0.2
+_LABEL_PAD_PT = 2.0
+# RVs: the folded model dark grey; against time, where it runs over many
+# orbits, a thin dark line beneath the points.
 _RV_MARKERSIZE = 6.0
 _CAPSIZE = 4
 _RV_MODEL = {"color": "k", "lw": 2.0, "alpha": 0.7}
-_RV_TIME_MODEL = {"color": "k", "lw": 0.15, "alpha": 1.0}
+_RV_TIME_MODEL = {"color": "k", "lw": 0.6, "alpha": 0.8}
 _MODEL_LABEL = "Model"
 # Model curves follow EXOZIPPy's own posterior plots (plotrender's rule):
 # with other posterior draws, EVERY model curve -- the median draw's
@@ -184,11 +219,13 @@ _MODEL_LABEL = "Model"
 # draw is "the" fit; a lone point's curves keep the weights above.  The
 # SED's spectra take the SED component's own spaghetti alpha.  A legend
 # swatch is raised to a legible alpha, as plotrender's
-# _LEGEND_MIN_ALPHA does.  The Kiel diagram is the exception: its contours
-# show the posterior, and its one track, the median draw's, carries the
-# reference ages, which fifty overlapping tracks would leave on no track
-# the eye can follow.
-_PANELS_WITH_DRAWS = frozenset({"transit", "rv_time", "rv_phase", "sed"})
+# _LEGEND_MIN_ALPHA does.  Two panels are exceptions and draw the median
+# draw alone.  The Kiel diagram's contours show the posterior, and its one
+# track carries the reference ages, which fifty overlapping tracks would
+# leave on no track the eye can follow.  The RVs against time span many
+# orbits, where fifty faint curves blur into a grey band; the folded panel
+# shows their spread.
+_PANELS_WITH_DRAWS = frozenset({"transit", "rv_phase", "sed"})
 _N_DRAWS = 50
 _DRAWS_ALPHA = 0.1
 _SED_DRAWS_ALPHA = 0.15
@@ -699,8 +736,10 @@ def _transit_row_arrays(row):
 
 
 def _auto_spacing(arrays):
-    """The deepest transit plus ``_SPACING_SIGMAS`` times the median, over
-    rows, of the scatter of the points each row draws (its bins if binned)."""
+    """``(spacing, depth, sigmas)``: the automatic row spacing -- the
+    deepest transit plus ``_SPACING_SIGMAS`` times the median of
+    ``sigmas`` -- that depth, and each row's scatter about its model, of
+    the points it draws most prominently (its bins if binned)."""
     depth, sigmas = 0.0, []
     for members in arrays:
         row_sigmas = []
@@ -709,7 +748,8 @@ def _auto_spacing(arrays):
             bx, by = binned if binned is not None else (x, y)
             row_sigmas.append(_robust_sigma(by - np.interp(bx, xm, ym)))
         sigmas.append(max(row_sigmas))
-    return depth + _SPACING_SIGMAS * float(np.median(sigmas)), depth
+    spacing = depth + _SPACING_SIGMAS * float(np.median(sigmas))
+    return spacing, depth, sigmas
 
 
 def _row_model_curves(row, members, draw_models):
@@ -754,7 +794,7 @@ def _draw_transit_stack(ax, rows, spacing, draw_models=None):
     draw_models = draw_models or {}
     alpha = _DRAWS_ALPHA if draw_models else None
     arrays = [_transit_row_arrays(row) for row in rows]
-    auto, depth = _auto_spacing(arrays)
+    auto, depth, sigmas = _auto_spacing(arrays)
     spacing = auto if spacing is None else float(spacing)
 
     x_range = rows[0][2][0].x_range
@@ -797,11 +837,15 @@ def _draw_transit_stack(ax, rows, spacing, draw_models=None):
         ax.set_xlim(24.0 * x_range[0], 24.0 * x_range[1])
     lo, hi = ax.get_xlim()
     gap = spacing - depth
-    for k, row in enumerate(rows):
-        ax.text(
-            lo + 0.02 * (hi - lo),
-            1.0 - k * spacing + 0.35 * gap,
+    for k, (row, sigma) in enumerate(zip(rows, sigmas)):
+        # Just above the row's own points, never past _LABEL_MAX_GAP of the
+        # way to the row above, so it reads as this row's.
+        lift = min(_LABEL_SIGMAS * sigma, _LABEL_MAX_GAP * gap)
+        ax.annotate(
             row[1],
+            (lo + 0.02 * (hi - lo), 1.0 - k * spacing + lift),
+            xytext=(0.0, _LABEL_PAD_PT),
+            textcoords="offset points",
             fontsize=_FONT_RC["legend.fontsize"],
             va="bottom",
             zorder=5,
@@ -1027,8 +1071,128 @@ def _legend(ax, **kwargs):
             proxy.set_alpha(_LEGEND_ALPHA)
 
 
-def _draw_rv(fig, cell, chart, colors, phased, draw_models=()):
-    """An RV panel and its O-C; returns ``(ax, ax_oc)``.
+def time_segments(times, max_gap):
+    """``[(first, last), ...]``: the observation ``times`` split wherever
+    consecutive ones are more than ``max_gap`` days apart -- the pieces of
+    a broken time axis.  ``max_gap=None`` never splits."""
+    t = np.unique(np.asarray(times, dtype=float))
+    t = t[np.isfinite(t)]
+    if t.size == 0:
+        return []
+    if max_gap is None:
+        return [(float(t[0]), float(t[-1]))]
+    cuts = np.flatnonzero(np.diff(t) > max_gap) + 1
+    return [(float(p[0]), float(p[-1])) for p in np.split(t, cuts)]
+
+
+def _segment_limits(segments):
+    """Each piece's x limits, all padded alike, and its width ratio: its
+    padded span, floored at ``_BREAK_MIN_WIDTH`` of the whole so a lone
+    observation still has an axis to sit on."""
+    covered = sum(hi - lo for lo, hi in segments)
+    pad = max(_BREAK_PAD_FRAC * covered, _BREAK_MIN_PAD_DAYS)
+    limits = [(lo - pad, hi + pad) for lo, hi in segments]
+    spans = np.array([hi - lo for lo, hi in limits])
+    return limits, np.maximum(spans, _BREAK_MIN_WIDTH * spans.sum())
+
+
+def _broken_axes(fig, cell, with_oc, widths):
+    """``[(ax, ax_oc), ...]``: one column per piece of a broken x axis in
+    one grid cell, ``widths`` apart in ratio; every panel shares the first
+    one's y axis, and each O-C its panel's x axis."""
+    sub = cell.subgridspec(
+        2 if with_oc else 1,
+        len(widths),
+        width_ratios=list(widths),
+        height_ratios=_OC_HEIGHT_RATIOS if with_oc else None,
+        hspace=0.0,
+        wspace=_BREAK_WSPACE,
+    )
+    columns = []
+    for i in range(len(widths)):
+        first = columns[0] if columns else (None, None)
+        ax = fig.add_subplot(sub[0, i], sharey=first[0])
+        ax_oc = (
+            fig.add_subplot(sub[1, i], sharex=ax, sharey=first[1])
+            if with_oc
+            else None
+        )
+        columns.append((ax, ax_oc))
+    return columns
+
+
+def piece_ticks(lo, hi, width_in, trim_left, trim_right):
+    """Round x ticks for one piece ``(lo, hi)`` of a broken axis,
+    ``width_in`` inches wide: as many as fit ``_BREAK_TICK_IN`` apart, none
+    within ``_BREAK_EDGE_IN`` of an edge marked to be trimmed (one facing
+    another piece), and never none -- a piece too narrow for those gets the
+    roundest value near its middle."""
+    from matplotlib.ticker import MaxNLocator
+
+    per_in = (hi - lo) / width_in
+    keep_lo = lo + (_BREAK_EDGE_IN * per_in if trim_left else 0.0)
+    keep_hi = hi - (_BREAK_EDGE_IN * per_in if trim_right else 0.0)
+    if keep_lo >= keep_hi:
+        keep_lo, keep_hi = lo, hi
+    nbins = max(1, int(width_in / _BREAK_TICK_IN))
+    ticks = MaxNLocator(nbins=nbins, steps=[1, 2, 2.5, 5, 10]).tick_values(
+        lo, hi
+    )
+    ticks = [float(t) for t in ticks if keep_lo <= t <= keep_hi]
+    if ticks:
+        return ticks
+    center = 0.5 * (keep_lo + keep_hi)
+    exponent = int(np.floor(np.log10(hi - lo)))
+    for e in range(exponent, exponent - 6, -1):
+        for mantissa in (5.0, 2.0, 1.0):
+            step = mantissa * 10.0**e
+            tick = round(center / step) * step
+            if keep_lo <= tick <= keep_hi:
+                return [float(tick)]
+    return [center]
+
+
+def _join_broken(columns, limits):
+    """Make ``columns`` (``_broken_axes``, each already finished) read as
+    one broken axis: each piece at its ``limits`` with ``piece_ticks``, the
+    facing spines and their ticks removed and marked with diagonals, the y
+    labels on the first piece only, and one x label, centered under the
+    whole."""
+    from matplotlib.ticker import FixedLocator
+
+    last = len(columns) - 1
+    for i, ((ax, ax_oc), lim) in enumerate(zip(columns, limits)):
+        ax.set_xlim(*lim)
+        width_in = ax.get_position().width * ax.figure.get_figwidth()
+        ax.xaxis.set_major_locator(
+            FixedLocator(piece_ticks(*lim, width_in, i > 0, i < last))
+        )
+        for a in (ax, ax_oc):
+            if a is None:
+                continue
+            if i > 0:
+                a.spines["left"].set_visible(False)
+                a.tick_params(which="both", left=False, labelleft=False)
+                a.set_ylabel("")
+                a.plot([0, 0], [0, 1], transform=a.transAxes, **_BREAK_MARK)
+            if i < last:
+                a.spines["right"].set_visible(False)
+                a.tick_params(which="both", right=False)
+                a.plot([1, 1], [0, 1], transform=a.transAxes, **_BREAK_MARK)
+    bottom = [ax_oc if ax_oc is not None else ax for ax, ax_oc in columns]
+    for a in bottom[1:]:
+        a.set_xlabel("")
+    left, right = bottom[0].get_position(), bottom[-1].get_position()
+    bottom[0].xaxis.label.set_x(
+        ((left.x0 + right.x1) / 2.0 - left.x0) / left.width
+    )
+
+
+def _draw_rv(
+    fig, cell, chart, colors, phased, draw_models=(), break_days=None
+):
+    """An RV panel and its O-C; returns ``(axes, oc_axes)``, lists of the
+    panel's axes and of its O-C's (empty without one).
 
     ``colors`` maps an instrument's index (its traces' ``series_index``) to
     its color.  A model curve that belongs to one instrument (its own RM or
@@ -1036,50 +1200,73 @@ def _draw_rv(fig, cell, chart, colors, phased, draw_models=()):
     folded or the against-time model style.  ``draw_models`` are the other
     posterior draws' model traces for this chart (``_draw_model_traces``):
     with them, every curve, the reference point's included, is drawn at
-    ``_DRAWS_ALPHA``.
+    ``_DRAWS_ALPHA``.  Against time, the axis is broken wherever the
+    observations are more than ``break_days`` apart (``time_segments``):
+    one column of axes per piece, everything drawn in each and clipped to
+    it, so a season-long gap takes no room on the page.
     """
     residuals = (chart.meta or {}).get("residuals")
-    ax, ax_oc = _axes(fig, cell, residuals is not None)
+    with_oc = residuals is not None
+    data = _role(chart, "data")
+    segments = (
+        []
+        if phased
+        else time_segments(
+            np.concatenate([np.ravel(t.x) for t in data] or [[]]),
+            break_days,
+        )
+    )
+    if len(segments) > 1:
+        limits, widths = _segment_limits(segments)
+        columns = _broken_axes(fig, cell, with_oc, widths)
+    else:
+        columns = [_axes(fig, cell, with_oc)]
     style = _RV_MODEL if phased else _RV_TIME_MODEL
     alpha = _DRAWS_ALPHA if draw_models else style["alpha"]
-    for traces in [_role(chart, "model"), *draw_models]:
-        for trace in traces:
-            owner = (trace.style or {}).get("series_index")
-            ax.plot(
-                np.asarray(trace.x, dtype=float),
-                np.asarray(trace.y, dtype=float),
-                color=style["color"] if owner is None else colors[owner],
-                lw=style["lw"],
-                alpha=alpha,
-                zorder=2 if phased else 0,
-                label=_MODEL_LABEL if owner is None else trace.name,
+    for ax, ax_oc in columns:
+        for traces in [_role(chart, "model"), *draw_models]:
+            for trace in traces:
+                owner = (trace.style or {}).get("series_index")
+                ax.plot(
+                    np.asarray(trace.x, dtype=float),
+                    np.asarray(trace.y, dtype=float),
+                    color=style["color"] if owner is None else colors[owner],
+                    lw=style["lw"],
+                    alpha=alpha,
+                    zorder=2 if phased else 0,
+                    label=_MODEL_LABEL if owner is None else trace.name,
+                )
+        for trace in data:
+            style_i = trace.style or {}
+            _errorbar(
+                ax,
+                trace,
+                colors[style_i["series_index"]],
+                style_i.get("marker") or "o",
+                _RV_MARKERSIZE,
+                label=trace.name,
             )
-    for trace in _role(chart, "data"):
-        style_i = trace.style or {}
-        _errorbar(
-            ax,
-            trace,
-            colors[style_i["series_index"]],
-            style_i.get("marker") or "o",
-            _RV_MARKERSIZE,
-            label=trace.name,
-        )
-    for trace in residuals or []:
-        style_i = trace.style or {}
-        _errorbar(
-            ax_oc,
-            trace,
-            colors[style_i["series_index"]],
-            style_i.get("marker") or "o",
-            _RV_MARKERSIZE,
-        )
-    _geometry(ax, chart)
-    ax.set_ylabel(RV_YLABEL)
-    if phased:
-        ax.set_xlim(0.0, 1.0)
-        _legend(ax, loc="upper right")
-    _finish(ax, ax_oc)
-    return ax, ax_oc
+        for trace in residuals or []:
+            style_i = trace.style or {}
+            _errorbar(
+                ax_oc,
+                trace,
+                colors[style_i["series_index"]],
+                style_i.get("marker") or "o",
+                _RV_MARKERSIZE,
+            )
+        _geometry(ax, chart)
+        ax.set_ylabel(RV_YLABEL)
+        if phased:
+            ax.set_xlim(0.0, 1.0)
+            _legend(ax, loc="upper right")
+        _finish(ax, ax_oc)
+    if len(columns) > 1:
+        _join_broken(columns, limits)
+    return (
+        [ax for ax, _ in columns],
+        [ax_oc for _, ax_oc in columns if ax_oc is not None],
+    )
 
 
 def _smooth(y, window):
@@ -1401,6 +1588,7 @@ def summary_figure(
     transit_bin=None,
     transit_spacing=None,
     figsize=None,
+    rv_break_days=RV_BREAK_DAYS,
     draws=(),
 ):
     """Draw the summary figure for ``system`` at ``point``; return the Figure.
@@ -1439,12 +1627,16 @@ def summary_figure(
         Default: the deepest transit plus four times the typical scatter.
     figsize : (float, float), optional
         Inches.  Default scales with the number of panels.
+    rv_break_days : float or None
+        Break the RV time axis (and its O-C) wherever consecutive
+        observations are more than this many days apart; None never
+        breaks it.  Default ``RV_BREAK_DAYS`` (50).
     draws : sequence of dict, optional
         Other posterior draws, as plotting points (``run.get_draws``).  The
-        transit, RV and SED model curves are drawn at ``point`` and at each
-        of these, all at one low alpha, as EXOZIPPy's own posterior plots
-        draw them; the data, its cleaning, the O-C and the Kiel track stay
-        ``point``'s.  Without any, ``point``'s curves are drawn alone at
+        transit, folded RV and SED model curves are drawn at ``point`` and
+        at each of these, all at one low alpha, as EXOZIPPy's own posterior
+        plots draw them; the data, its cleaning, the O-C, the RV curve
+        against time and the Kiel track stay ``point``'s.  Without any, ``point``'s curves are drawn alone at
         full weight.
     """
     import matplotlib.pyplot as plt
@@ -1501,6 +1693,11 @@ def summary_figure(
         raise ValueError(
             f"transit_spacing must be positive, got {transit_spacing}."
         )
+    if rv_break_days is not None and not rv_break_days > 0:
+        raise ValueError(
+            f"rv_break_days must be positive days or None, got "
+            f"{rv_break_days}."
+        )
 
     placed, ncols, nrows = _place(panels)
     header = list(header_lines)
@@ -1552,7 +1749,7 @@ def summary_figure(
                 for i in range(len(rv_names))
             }
             draw_models = _draw_model_traces(system, panels, draws)
-            rv_axes = []
+            rv_axes, rv_oc_axes = [], []
             # Each star's posterior (Teff, logg) for its Kiel contours; none
             # before a posterior is distributed.
             kiel_samples = (
@@ -1579,16 +1776,17 @@ def summary_figure(
                         [_shifted(t, offset, display) for t in traces]
                         for traces in draw_models.get(chart.id, ())
                     ]
-                    rv_axes.append(
-                        _draw_rv(
-                            fig,
-                            cell,
-                            _prepared(chart, display, offset),
-                            rv_colors,
-                            phased,
-                            extra,
-                        )
+                    axes, oc_axes = _draw_rv(
+                        fig,
+                        cell,
+                        _prepared(chart, display, offset),
+                        rv_colors,
+                        phased,
+                        extra,
+                        rv_break_days,
                     )
+                    rv_axes += axes
+                    rv_oc_axes += oc_axes
                 elif panel.kind == "sed":
                     chart = panel.charts[0]
                     _draw_sed(
@@ -1611,8 +1809,8 @@ def summary_figure(
                         _reported_star(system, name),
                     )
             # Every RV panel on one scale, and every RV O-C on another.
-            _share_ylims([pair[0] for pair in rv_axes])
-            _share_ylims([pair[1] for pair in rv_axes if pair[1] is not None])
+            _share_ylims(rv_axes)
+            _share_ylims(rv_oc_axes)
         except BaseException:
             plt.close(fig)
             raise
@@ -1680,6 +1878,7 @@ def create_summary_plot(
     transit_bin=None,
     transit_spacing=None,
     figsize=None,
+    rv_break_days=RV_BREAK_DAYS,
 ):
     """Draw a finished fit's summary figure from its config and saved trace.
 
@@ -1747,5 +1946,6 @@ def create_summary_plot(
             transit_bin=transit_bin,
             transit_spacing=transit_spacing,
             figsize=figsize,
+            rv_break_days=rv_break_days,
         )
     return out
