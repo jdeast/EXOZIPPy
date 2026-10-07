@@ -37,14 +37,21 @@ band:
 
 mulensinstrument:
   - name: "OGLE4"
-    file: "n20100310.I.OGLE.OB140939.dat"
-    zero_point: ""
+    # Yee et al.'s published FLUXES, read as given (no magnitude round trip).
+    # Flux system: 1 unit = I 22 (calibrated OGLE-IV I; baseline 437.3 ->
+    # I = 15.40).  Nothing here reads that -- with no SED there is no
+    # zeropoint tie -- but an SED fit would state it in the params file as
+    # mulensinstrument.OGLE4.zeropoint: {mu: 22.0, sigma: <trust>}.
+    file: "n20100310.I.OGLE.OB140939.flux.dat"
+    data_format: flux
     observer_location: "earth" # earth, spitzer, kepler, roman, a site name (CTIO), "lon_deg,lat_deg[,height_m]" (lon FIRST), or filename of horizons ephemeris to interpolate
     band: "OGLE_I"
     reference: true # peg all plotted data + model curves to this instrument's f_source/f_blend (defaults to the first instrument)
   - name: "Spitzer"
-    file: "n20140605.L.Spitzer.OB140939.dat"
-    zero_point: ""
+    # Yee et al.'s published Spitzer [3.6] fluxes; their zero point is not
+    # established here, so do not tie this light curve to an SED without it.
+    file: "n20140605.L.Spitzer.OB140939.flux.dat"
+    data_format: flux
     observer_location: "spitzer"
     band: "Spitzer_36"
 

@@ -4,11 +4,11 @@ This is a PSPL event seen from two distinct locations (Earth and Spitzer). It is
 
 Note the Spitzer data has no baseline observations, which makes its peak magnification uncertain.
 
-## The magnitude zero points of the data files are arbitrary
+## The data are Yee et al.'s published fluxes
 
-The `.dat` files were converted from Yee et al.'s flux files (not shipped) with an arbitrary zero point of 25.0. Those OGLE fluxes are on a scale where 1 flux unit is I = 22, so the shipped `n20100310.I.OGLE.OB140939.dat` is **3.00 mag fainter than calibrated OGLE-IV I**: its baseline reads 18.40, while the calibrated baseline is 22 − 2.5 log₁₀(437.3) = 15.40. That matches Yee et al.'s baseline of 11.0 flux units on their I = 18 scale, and Gaia DR3 RP = 15.62 for the source. The Spitzer file went through the same zp 25; its calibrated zero point is not established here.
+Both light curves are read as fluxes (`data_format: flux`), exactly as published, with no conversion to magnitudes. The OGLE fluxes are on a scale where 1 flux unit is I = 22 (calibrated OGLE-IV I): the baseline of 437.3 units is I = 15.40, matching Yee et al.'s baseline of 11.0 flux units on their I = 18 scale and Gaia DR3 RP = 15.62 for the source. The Spitzer fluxes' zero point is not established here.
 
-This is harmless as shipped, because each light curve's source and blend fluxes are free. It matters as soon as a light curve is tied to an SED or given a stated zeropoint (`zero_point`, `magsys`): correct the OGLE file by −3.00 mag first.
+Nothing in this fit reads a zero point, because there is no SED and therefore no zeropoint tie. A fit that adds one states the calibration in the params file, `mulensinstrument.OGLE4.zeropoint: {mu: 22.0, sigma: <how much you trust it>}`, and leaves the Spitzer light curve untied unless its zero point is known. (Earlier versions shipped `.dat` magnitude files converted with an arbitrary zero point of 25, 3.00 mag fainter than calibrated, with errors rounded to 0.001 mag.)
 
 ## The source proper motion is in the bulge frame
 
