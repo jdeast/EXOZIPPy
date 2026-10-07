@@ -989,7 +989,7 @@ def resolve_store_hot_chains(
     the only detector for a basin the T=1 posterior abandons
     (outputs.ledger.discover_hot_modes), and they cost real trace size, so
     the default follows the topology the way `chen` and
-    `mass_parameterization` do on the planet component: resolved from the
+    `fitlogq`/`fitmsini` do on the planet component: resolved from the
     built system, overridable per fit, and never silent -- the decision and
     its price are logged where it is made.
 

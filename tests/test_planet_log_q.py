@@ -24,15 +24,36 @@ from exozippy.system import System
 # 1. The per-planet default decision (no model build)
 # ---------------------------------------------------------------------------
 class _FakeOrbit:
-    def __init__(self, memberships, bodies):
+    """Just enough Orbit for the mass-coordinate decision: membership and
+    bodies (the amplitude predicate), plus what
+    `inclination_constrained_orbits` and the fitchord check read."""
+
+    prefix = "orbit"
+
+    def __init__(self, memberships, bodies, inc_modes=None):
         self._memberships = memberships
         self._bodies = bodies
+        self.n_elements = max(bodies) + 1
+        self.names = [str(i) for i in range(self.n_elements)]
+        self._inc_modes = inc_modes or ["cosi"] * self.n_elements
 
     def star_membership(self, star_idx):
         return self._memberships.get(int(star_idx), [])
 
     def bodies(self, i):
         return self._bodies.get(int(i), [])
+
+    def inclination_modes(self, system):
+        return list(self._inc_modes)
+
+    def _lens_keplerian_orbits(self, system):
+        return set()
+
+    def _lens_xallarap_orbits(self, system):
+        return set()
+
+    def _user_pinned(self, index, params):
+        return []
 
 
 class _FakeRV:
@@ -68,29 +89,33 @@ _ONE_PLANET_ORBIT = _FakeOrbit(
 )
 
 
-def _mode(planet_cfg, user_params=None, **comps):
-    comp = Planet(planet_cfg, config_manager=_FakeConfigManager(user_params))
-    comp._resolve_mass_parameterization(_FakeSystem(**comps))
-    return comp.mass_parameterization
-
-
 def _modes(planet_cfg, user_params=None, **comps):
-    """The PER-PLANET coordinates (the whole-component answer is _mode)."""
+    """The PER-PLANET coordinates."""
     comp = Planet(planet_cfg, config_manager=_FakeConfigManager(user_params))
+    comp.build_maps()
     comp._resolve_mass_parameterization(_FakeSystem(**comps))
     return comp.mass_parameterizations
 
 
+def _mode(planet_cfg, user_params=None, **comps):
+    """The one planet's coordinate."""
+    (mode,) = _modes(planet_cfg, user_params, **comps)
+    return mode
+
+
 def test_rv_planet_defaults_to_linear():
     """
-    Given RV data measuring the planet's orbit,
+    Given RV data measuring the planet's orbit, and a transit measuring its
+      inclination,
     When the mass coordinate is resolved,
-    Then it stays linear so the amplitude can flip sign.
+    Then it stays linear so the amplitude can flip sign.  (RVs ALONE give
+      `msini` -- tests/test_fitmsini.py.)
     """
     assert (
         _mode(
             [{"name": "b"}],
             rvinstrument=_FakeRV([0]),
+            transit=object(),
             orbit=_ONE_PLANET_ORBIT,
         )
         == "linear"
@@ -128,10 +153,10 @@ def test_lens_body_defaults_to_log_q_even_with_rv():
 
 
 def test_per_planet_override_wins():
-    """A mass_parameterization key beats the topology default either way."""
+    """fitlogq/fitmsini beat the topology default either way."""
     assert (
         _mode(
-            [{"name": "b", "mass_parameterization": "log_q"}],
+            [{"name": "b", "fitlogq": True}],
             rvinstrument=_FakeRV([0]),
             orbit=_ONE_PLANET_ORBIT,
         )
@@ -139,7 +164,7 @@ def test_per_planet_override_wins():
     )
     assert (
         _mode(
-            [{"name": "b", "mass_parameterization": "linear"}],
+            [{"name": "b", "fitlogq": False, "fitmsini": False}],
             lens=_FakeLens([("star", 0), ("planet", 0)]),
         )
         == "linear"
@@ -147,8 +172,8 @@ def test_per_planet_override_wins():
 
 
 def test_bad_override_raises():
-    with pytest.raises(ValueError, match="must be 'linear' or 'log_q'"):
-        _mode([{"name": "b", "mass_parameterization": "logq"}])
+    with pytest.raises(ValueError, match="'fitlogq:' must be true or false"):
+        _mode([{"name": "b", "fitlogq": "yes"}])
 
 
 _TWO_PLANET_ORBITS = _FakeOrbit(
@@ -173,6 +198,7 @@ def test_a_mixed_topology_gives_each_planet_its_own_coordinate(caplog):
         modes = _modes(
             [{"name": "b"}, {"name": "c", "orbit_ndx": 1}],
             rvinstrument=_FakeRV([0]),
+            transit=object(),
             orbit=_TWO_PLANET_ORBITS,
         )
 
@@ -188,15 +214,16 @@ def test_an_explicit_per_planet_mix_is_honored():
     Then each gets what it asked for.
 
     An explicit disagreement used to RAISE ("All planets must share one
-    'mass_parameterization'"), for the structural reason that is now gone.
+    'mass_parameterization'" -- the enum fitlogq/fitmsini replaced), for the
+    structural reason that is now gone.
     """
     modes = _modes(
         [
-            {"name": "b", "mass_parameterization": "linear"},
+            {"name": "b", "fitlogq": False, "fitmsini": False},
             {
                 "name": "c",
                 "orbit_ndx": 1,
-                "mass_parameterization": "log_q",
+                "fitlogq": True,
             },
         ],
         orbit=_TWO_PLANET_ORBITS,
@@ -246,6 +273,7 @@ def test_stale_log_q_in_linear_mode_raises():
             [{"name": "b"}],
             user_params=up,
             rvinstrument=_FakeRV([0]),
+            transit=object(),
             orbit=_ONE_PLANET_ORBIT,
         )
 
@@ -315,7 +343,7 @@ def test_two_planets_may_use_different_mass_coordinates():
       the linear planet, and the start's logp and gradient are finite.
 
     This configuration used to RAISE ("All planets must share one
-    'mass_parameterization'").  The lens body cannot take a linear mass at all
+    'mass_parameterization'", the enum fitlogq/fitmsini replaced).  The lens body cannot take a linear mass at all
     (the magnification clips q to [1e-9, 100], so q <= 0 is meaningless), so
     before per-element roles the only way to have both planets was to give the
     second one a coordinate its own topology argues against.
@@ -323,7 +351,7 @@ def test_two_planets_may_use_different_mass_coordinates():
     config = _binary_config()
     config["planet"] = [
         {"name": "b"},
-        {"name": "c", "mass_parameterization": "linear"},
+        {"name": "c", "fitlogq": False, "fitmsini": False},
     ]
     system = System(config, user_params=_binary_params())
     system.prepare()
@@ -356,7 +384,7 @@ def test_lens_planet_samples_log_q_and_derives_mass(lens_system):
     assert "planet.log_q_raw" in free_names
     assert "planet.mass_raw" not in free_names
 
-    assert system.planet.mass_parameterization == "log_q"
+    assert system.planet.mass_parameterizations == ["log_q"]
     assert system.planet.manifest["log_q"] is None
     assert system.planet.manifest["mass"]["expr_key"] == "default"
 
@@ -388,8 +416,8 @@ def test_a_mass_seed_reaches_whichever_coordinate_each_planet_samples():
     config = {
         "star": [{"name": "A", "mist": False}],
         "planet": [
-            {"name": "b", "mass_parameterization": "log_q"},
-            {"name": "c", "mass_parameterization": "linear"},
+            {"name": "b", "fitlogq": True},
+            {"name": "c", "fitlogq": False, "fitmsini": False},
         ],
     }
     system = System(
@@ -477,9 +505,9 @@ def test_logp_is_finite_at_the_start(lens_system):
 
 
 def test_override_keeps_the_linear_mass_sampled():
-    """mass_parameterization: linear on a lens body forces the old
+    """fitlogq: false (and fitmsini: false) on a lens body forces the old
     coordinate, negative lower bound and all."""
-    system, model = _build({"mass_parameterization": "linear"})
+    system, model = _build({"fitlogq": False, "fitmsini": False})
 
     free_names = [v.name for v in model.free_RVs]
     assert "planet.mass_raw" in free_names
@@ -496,7 +524,7 @@ def test_log_q_relation_is_inert_in_linear_mode():
     rank), so the mass keeps the value the user asked for.
     """
     system, _ = _build(
-        {"mass_parameterization": "linear"},
+        {"fitlogq": False, "fitmsini": False},
         extra_params={"planet.b.mass": {"initval": 2.5}},
     )
 
@@ -536,13 +564,13 @@ def test_export_reports_the_real_derivation_not_the_yaml_block():
     linear-mode mass would be reported derived and skipped by the solve API's
     bounds check.
     """
-    system, _ = _build({"mass_parameterization": "linear"})
+    system, _ = _build({"fitlogq": False, "fitmsini": False})
     export = system.config_manager.export_solution(
         derived_params=system.derived_params()
     )
     assert export["parameters"]["planet.b.mass"]["derived"] is False
 
-    system, _ = _build({"mass_parameterization": "log_q"})
+    system, _ = _build({"fitlogq": True})
     export = system.config_manager.export_solution(
         derived_params=system.derived_params()
     )

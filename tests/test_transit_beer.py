@@ -44,7 +44,11 @@ def _make_band(config):
 
 
 def _make_planet(config):
-    return Planet(config, _DummyConfigManager())
+    # Stage 2 before stage 3, as System.prepare runs them: the mass
+    # coordinate's resolution reads orbit_map.
+    planet = Planet(config, _DummyConfigManager())
+    planet.build_maps()
+    return planet
 
 
 # ---------------------------------------------------------------------------

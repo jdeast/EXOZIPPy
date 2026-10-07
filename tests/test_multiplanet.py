@@ -71,12 +71,16 @@ def rv_file(tmp_path_factory):
 def two_planet_system(rv_file):
     """A star with two planets on two orbits, measured by one RV data set.
 
-    RV data put both planets on the mass-constrained side, so the mass is
-    sampled in 'linear' mode -- the mode in which the m_pos_constraint
-    plateau of item 2.4.2 is reachable.
+    RV data put both planets on the mass-constrained side.  RVs ALONE
+    default to the (m sin i, cos i) coordinate (fitmsini, review 2.14.9), so
+    both planets ask for the signed linear mass explicitly -- the mode in
+    which the m_pos_constraint plateau of item 2.4.2 is reachable.
     """
     return _build(
-        planets=[{"name": "b"}, {"name": "c", "orbit_ndx": 1}],
+        planets=[
+            {"name": "b", "fitmsini": False},
+            {"name": "c", "orbit_ndx": 1, "fitmsini": False},
+        ],
         orbits=[
             {"name": "b", "primary": ["A"], "companion": ["b"]},
             {"name": "c", "primary": ["A"], "companion": ["c"]},
@@ -146,10 +150,14 @@ def test_two_planet_start_is_finite(two_planet_system):
 
 
 def test_two_planet_mass_mode_is_linear(two_planet_system):
-    """RV data measure both orbits, so the signed linear mass is sampled --
-    which is what makes the m_pos_constraint region below reachable."""
+    """RV data measure both orbits and the fixture turns the msini default
+    off, so the signed linear mass is sampled -- which is what makes the
+    m_pos_constraint region below reachable."""
     system, _ = two_planet_system
-    assert system.planet.mass_parameterization == "linear"
+    assert (
+        system.planet.mass_parameterizations
+        == ["linear"] * system.planet.n_elements
+    )
 
 
 # ---------------------------------------------------------------------------

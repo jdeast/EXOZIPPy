@@ -49,21 +49,98 @@ def amplitude_constrained_orbits(system, orbit):
     if rv is not None:
         for s in set(rv.star_ndx):
             constrained.update(o for o, _ in orbit.star_membership(s))
+    constrained |= _astrometric_orbits(system, orbit)
+    return constrained
+
+
+def _astrometric_orbits(system, orbit):
+    """Orbits whose sky motion an astrometric dataset measures.
+
+    The astrometric half of `amplitude_constrained_orbits`, split out because
+    `inclination_constrained_orbits` asks the same question: a sky-projected
+    orbit measures the inclination as well as the amplitude, so both
+    predicates must name the same orbits.
+    """
+    components = getattr(system, "active_components", None) or {}
+    out = set()
     ast = components.get("astrometryinstrument")
-    if ast is not None:
-        for i, mode in enumerate(ast.modes):
-            if mode == "rel":
-                if ast.rel_orbit[i] is not None:
-                    constrained.add(ast.rel_orbit[i])
-            else:
-                # gaia/abs photocenter wobble sums the orbits whose primary
-                # group contains the target star.
-                s = int(ast.config[i].get("star_ndx", 0))
-                constrained.update(
-                    o
-                    for o, role in orbit.star_membership(s)
-                    if role == "primary"
-                )
+    if ast is None:
+        return out
+    for i, mode in enumerate(ast.modes):
+        if mode == "rel":
+            if ast.rel_orbit[i] is not None:
+                out.add(ast.rel_orbit[i])
+        else:
+            # gaia/abs photocenter wobble sums the orbits whose primary
+            # group contains the target star.
+            s = int(ast.config[i].get("star_ndx", 0))
+            out.update(
+                o for o, role in orbit.star_membership(s) if role == "primary"
+            )
+    return out
+
+
+def inclination_constrained_orbits(system, orbit):
+    """Orbits whose INCLINATION some dataset measures.
+
+    The sibling of `amplitude_constrained_orbits`, and asked by one caller for
+    one reason: `Planet._resolve_mass_parameterization` samples
+    `(m sin i, cos i)` by default (`fitmsini`, review 2.14.9) exactly where
+    the mass is measured but the inclination is not -- an RV-only orbit,
+    where the data constrain `m sin i` and the mass is `m sin i / sin i`
+    under the isotropic prior.  A module function beside the amplitude
+    predicate so the two answers are kept together and cannot drift.
+
+    What measures an inclination:
+
+    * **a transit light curve** -- every transit file models every planet
+      (the assumption `Orbit._transit_only` and `Planet._resolve_chen` make),
+      so any `transit:` block names every orbit with a planet among its
+      bodies.  This also covers the photometric phase-curve terms (thermal,
+      reflection, ellipsoidal, beaming), which live in the transit model;
+      `beam_constrains_mass` ties the beaming amplitude to `K`, i.e. to
+      `m sin i`, so it adds nothing about `i` by itself.
+    * **a Rossiter-McLaughlin (`rvinstrument` `rm:`) or Doppler-tomography
+      (`dopptom` `orbit:`) dataset** -- both model the transit chord, which
+      fixes the impact parameter;
+    * **astrometry** of any mode (gaia/abs/rel) -- a sky-projected orbit;
+    * **microlensing**: a lens companion's `orbital_motion: keplerian` and
+      the event's `source_orbital_motion: keplerian` (xallarap) both consume
+      the orbit's sky geometry per epoch;
+    * **the user**: `sigma: 0` on the orbit's `cosi` or `inc` states the
+      inclination outright (`Orbit._user_pinned`, the pin `fitchord`'s
+      default already defers to).  `examples/hd80606` pins its published
+      transit inclination this way; sampling m sin i there would only
+      rescale the mass by a constant.
+
+    Returns a set of orbit indices.
+    """
+    from ..dopptom.dopptom import dt_orbits_in_system
+    from ..rm import rm_orbits_in_system
+
+    constrained = set()
+    if in_topology(system, "transit") is not None:
+        constrained.update(
+            i
+            for i in range(orbit.n_elements)
+            if any(t == "planet" for t, _ in orbit.bodies(i))
+        )
+    names = list(orbit.names)
+    for ref in rm_orbits_in_system(system) | dt_orbits_in_system(system):
+        if ref not in names:
+            raise ValueError(
+                f"[{orbit.prefix}] rm:/dopptom orbit reference {ref!r} names "
+                f"no orbit block; defined orbits: {names}."
+            )
+        constrained.add(names.index(ref))
+    constrained |= _astrometric_orbits(system, orbit)
+    constrained |= orbit._lens_keplerian_orbits(system)
+    constrained |= orbit._lens_xallarap_orbits(system)
+    constrained.update(
+        i
+        for i in range(orbit.n_elements)
+        if orbit._user_pinned(i, ("cosi", "inc"))
+    )
     return constrained
 
 
@@ -231,7 +308,7 @@ class Orbit(Component):
                     break
         return pinned
 
-    def _pin_blocks_default(self, index, switch):
+    def _pin_blocks_default(self, index, switch, log=True):
         """True if a pin means this orbit must keep the conventional
         coordinates.
 
@@ -255,6 +332,8 @@ class Orbit(Component):
         pinned = self._user_pinned(index, self._PIN_BLOCKS_DEFAULT[switch])
         if not pinned:
             return False
+        if not log:
+            return True
         name = self.names[index] if index < len(self.names) else index
         logger.info(
             "[%s.%s] keeping the conventional coordinates: %s %s pinned "
@@ -465,6 +544,16 @@ class Orbit(Component):
         data, and gating it would be a gate where a warning belongs.
         """
         self._chord_planet = self._chord_planet_indices()
+        self.inc_modes = self._inc_modes_for(self.fitchord, system)
+
+    def _inc_modes_for(self, fitchord, system):
+        """Per-orbit inclination mode names for the given `fitchord` list.
+
+        The body of `_parse_inc_parameterization`, side-effect free so that
+        `inclination_modes` can answer the same question for another
+        component without touching this one's state.
+        """
+        chord_planet = self._chord_planet_indices()
         # in_topology, not a bare active_components lookup: this file asked
         # the same question three ways and they disagreed about whether a
         # config-only system counts (review 4.8.1).  It does -- the local
@@ -472,15 +561,15 @@ class Orbit(Component):
         # DEFAULT must not depend on whether the component happens to be
         # built yet.
         has_transit = in_topology(system, "transit") is not None
-        self.inc_modes = []
-        for i, on in enumerate(self.fitchord):
+        modes = []
+        for i, on in enumerate(fitchord):
             name = self.names[i] if i < len(self.names) else i
-            if self._chord_planet[i] >= 0 and not (on or has_transit):
+            if chord_planet[i] >= 0 and not (on or has_transit):
                 # A real planet, but nothing that could see a transit and no
                 # request to sample it: the chord is arithmetic, not a result.
-                self.inc_modes.append("nochord")
+                modes.append("nochord")
                 continue
-            if self._chord_planet[i] < 0:
+            if chord_planet[i] < 0:
                 if bool((self.config[i] or {}).get("fitchord", False)):
                     n_planets = len(self._companion_planets(i))
                     raise ValueError(
@@ -498,9 +587,25 @@ class Orbit(Component):
                         + ".  Sample 'cosi' here (drop the key), or split "
                         "the bodies onto their own orbits."
                     )
-                self.inc_modes.append("nochord")
+                modes.append("nochord")
             else:
-                self.inc_modes.append("chord" if on else "cosi")
+                modes.append("chord" if on else "cosi")
+        return modes
+
+    def inclination_modes(self, system):
+        """Per orbit, the inclination mode stage 3 resolves (`cosi`, `chord`
+        or `nochord`), computed without side effects.
+
+        For a component that has to know the answer at ITS stage 3, which may
+        run before this orbit's (stage 3 follows the user's config key
+        order): `Planet._resolve_mass_parameterization` refuses `fitmsini` on
+        a chord orbit, where `m = msini / sin i` and `cos i(chord, a/R*)`
+        would derive each other.  The same two functions this orbit's own
+        stage 3 calls, on the same inputs, so the two answers cannot differ;
+        only the logging is suppressed (the orbit logs its own choice once).
+        """
+        _, fitchord = self._resolve_switches(system, log=False)
+        return self._inc_modes_for(fitchord, system)
 
     def _parse_ecc_parameterization(self, system=None):
         """Read `fitvcve:`/`fitchord:` into per-orbit mode lists.
@@ -526,33 +631,42 @@ class Orbit(Component):
         that decides.  Everything before it is a placeholder, and nothing
         reads the modes in between.
         """
+        self.fitvcve, self.fitchord = self._resolve_switches(system)
+        self.ecc_modes = ["vcve" if on else "hk" for on in self.fitvcve]
+
+    def _resolve_switches(self, system, log=True):
+        """``(fitvcve, fitchord)`` per orbit -- the body of
+        `_parse_ecc_parameterization`, side-effect free apart from the
+        `_pin_blocks_default` log line (suppressed with ``log=False``)."""
         default_on = (
             self._transit_only(system)
             if system is not None
             else [False] * self.n_elements
         )
-        self.fitvcve = []
+        fitvcve = []
         for i, c in enumerate(self.config):
             asked = c.get("fitvcve")
             if asked is not None:
-                self.fitvcve.append(bool(asked))
+                fitvcve.append(bool(asked))
                 continue
-            on = default_on[i] and not self._pin_blocks_default(i, "fitvcve")
-            self.fitvcve.append(on)
-        self.fitchord = []
+            on = default_on[i] and not self._pin_blocks_default(
+                i, "fitvcve", log=log
+            )
+            fitvcve.append(on)
+        fitchord = []
         for i, c in enumerate(self.config):
             asked = c.get("fitchord")
             if asked is not None:
-                self.fitchord.append(bool(asked))
+                fitchord.append(bool(asked))
                 continue
             # Follows fitvcve, which is what "unless separately set" means --
             # and is subject to its own pin check, since a fixed inclination is
             # a decision the chord would drop just as surely.
-            on = self.fitvcve[i] and not self._pin_blocks_default(
-                i, "fitchord"
+            on = fitvcve[i] and not self._pin_blocks_default(
+                i, "fitchord", log=log
             )
-            self.fitchord.append(on)
-        self.ecc_modes = ["vcve" if on else "hk" for on in self.fitvcve]
+            fitchord.append(on)
+        return fitvcve, fitchord
 
     # ------------------------------------------------------------------
     # WIP parameterizations (review 5.11)

@@ -625,16 +625,19 @@ class MulensEvent(Component):
                 if c_type != "planet":
                     reason = f"the companion is a '{c_type}', not a planet"
                 else:
-                    mp = "log_q"
                     comp = getattr(system, "planet", None)
                     if comp is not None:
-                        mp = comp.config[c_idx].get(
-                            "mass_parameterization", "log_q"
+                        from ..planet.planet import (
+                            lens_companion_samples_log_q,
                         )
-                    if mp != "log_q":
-                        reason = (
-                            "the companion samples a linear mass, not log_q"
-                        )
+
+                        if not lens_companion_samples_log_q(
+                            comp.config[c_idx], f"planet.{comp.names[c_idx]}"
+                        ):
+                            reason = (
+                                "the companion samples a linear mass or "
+                                "m sin i, not log_q"
+                            )
             if reason is not None:
                 logger.warning(
                     f"mulensevent: fitthetae is set but {reason}; ignoring it."

@@ -20,7 +20,7 @@ run:
 #             measurably wrong from transits alone.  secosw/sesinw/cosi are
 #             still REPORTED, so the table rows are the same ones hat3.yaml
 #             produces and either file can be read against the other.
-#   planet.b  mass_parameterization -> log_q, since no signed observable
+#   planet.b  samples log_q (fitlogq), since no signed observable
 #             (an RV or astrometric amplitude) constrains the mass here, and
 #             the Chen & Kipping (2017) mass-radius relation turns on to
 #             supply it.  Both are the pre-existing defaults for this

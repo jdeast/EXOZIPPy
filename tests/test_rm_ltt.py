@@ -66,7 +66,7 @@ def _rm_wiring_params():
         "orbit.0.secosw": {"initval": 0.0, "sigma": 0.0},  # circular, omega=0
         "orbit.0.sesinw": {"initval": 0.0, "sigma": 0.0},
         "planet.0.radius": {"initval": 1.0},
-        # RM makes this planet RV-mass-constrained, so mass_parameterization
+        # RM makes this planet RV-mass-constrained, so its mass coordinate
         # defaults to linear (not log_q, unlike the transit-only wiring
         # test) -- pin planet.mass directly, near enough to 0 Mjup that the
         # barycentric factor m_primary/m_total stays ~1 to high precision

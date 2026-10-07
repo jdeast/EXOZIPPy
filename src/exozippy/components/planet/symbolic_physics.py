@@ -22,6 +22,8 @@ density = sp.symbols("density", real=True)
 
 # Log parameters
 log_q = sp.symbols("log_q", real=True)
+# Minimum mass, the fitmsini coordinate (review 2.14.9)
+msini = sp.symbols("msini", real=True)
 ecc = sp.symbols("ecc", real=True)
 
 K, sini, period = sp.symbols("K sini period", real=True)
@@ -43,6 +45,7 @@ def get_symbol_map(config, system_config):
     return {
         "mass": "mass",
         "log_q": "log_q",
+        "msini": "msini",
         "radius": "radius",
         "density": "density",
         "logg": "logg",
@@ -75,6 +78,13 @@ RELATIONS = [
     # carries the lowest rank in this relation (planet/defaults.yaml) it always
     # absorbs the residual, so the relation cannot perturb mass or star_mass.
     sp.Eq(mass, (10**log_q) * star_mass),
+    # Minimum mass.  In msini mode (fitmsini, review 2.14.9) this back-solves a
+    # user's planet.<i>.mass initval -- or the K -> mass solver's result --
+    # into an msini start, exactly as the log_q relation above does for
+    # log_q.  msini carries rank 5 (planet/defaults.yaml), below mass's 10 and
+    # sini's default, so it is always the symbol Condition B rewrites: where
+    # msini is only reported the relation cannot move mass or cos i.
+    sp.Eq(msini, mass * sini),
     # Bulk Density (rho \propto M / R^3)
     sp.Eq(density, mass / (radius**THREE)),
     # Radius ratio

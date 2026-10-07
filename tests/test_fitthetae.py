@@ -52,7 +52,7 @@ def _build(fitthetae, planet_linear=False, prepare_only=False):
         if fitthetae:
             config["mulensevent"][0]["fitthetae"] = True
         if planet_linear:
-            config["planet"][0]["mass_parameterization"] = "linear"
+            config["planet"][0]["fitlogq"] = False
         system = System(config, user_params=user_params)
         system.prepare()
         model = None if prepare_only else system.build_model()

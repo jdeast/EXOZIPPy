@@ -320,7 +320,9 @@ def test_a_non_positive_planet_mass_keeps_the_gradient_finite(mass):
         params[f"planet.{nm}.radius"] = {"initval": 1.0}
     params["planet.b.mass"] = {"initval": mass}
 
-    system = System(_config(2, b={"mass_parameterization": "linear"}), params)
+    system = System(
+        _config(2, b={"fitlogq": False, "fitmsini": False}), params
+    )
     system.prepare()
     model = system.build_model()
 

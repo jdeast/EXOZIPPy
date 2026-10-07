@@ -1095,11 +1095,13 @@ class Star(Component):
             if c_type != "planet":
                 return None
             comp = getattr(system, "planet", None)
-            mp = "log_q"
             if comp is not None:
-                mp = comp.config[c_idx].get("mass_parameterization", "log_q")
-            if mp != "log_q":
-                return None
+                from ..planet.planet import lens_companion_samples_log_q
+
+                if not lens_companion_samples_log_q(
+                    comp.config[c_idx], f"planet.{comp.names[c_idx]}"
+                ):
+                    return None
             self.murel_companion_map = np.full(n, int(c_idx), dtype=int)
             return {"expr_key": {"from_mulens_thetae_binary": [int(l_idx)]}}
         return {"expr_key": {"from_mulens_thetae": [int(l_idx)]}}

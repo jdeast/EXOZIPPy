@@ -204,7 +204,7 @@ def dc2018_128_system(tmp_path_factory):
         # tests (the unclipped raw**2 in the logit-uniform prior correction)
         # lives in Parameter.build_pymc and is the same either way.
         for entry in config.get("planet", []):
-            entry.setdefault("mass_parameterization", "linear")
+            entry.setdefault("fitlogq", False)
 
         system = System(config, user_params)
         system.prepare()

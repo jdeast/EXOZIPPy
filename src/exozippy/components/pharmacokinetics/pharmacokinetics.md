@@ -117,8 +117,8 @@ error that an enum would have made unnecessary. That argument lost to a
 stronger one: a reader who meets `fitvcve` in an orbit block and an enum here
 has to learn two spellings for one idea. `components.md`'s flag vocabulary now
 states the ruling, and `planet.mass_parameterization` -- the one enum in the
-tree that really is a coordinate choice -- is filed for renaming to `fitlogq`
-(review 4.2.7). (The design note called for
+tree that really was a coordinate choice -- has since become the exclusive
+booleans `fitlogq`/`fitmsini` (reviews 4.2.7 and 2.14.9). (The design note called for
 `pk_trans:`; the "named after the coordinate" half was right.)
 
 `Subject.COORD_MODE_TABLE` is the whole implementation -- a `mode_manifest`
@@ -145,8 +145,9 @@ nothing, because they are related by UNIT-DETERMINANT LINEAR maps in log
 space (`log_ke = log_cl - log_v`): flat stays flat, no density is reweighted.
 What differs is the SUPPORT -- a box in one basis is a parallelogram in
 another, so each admits corners the others exclude. (`planet`'s
-`mass_parameterization` has the same character: `linear` admits a negative
-mass and `log_q` cannot represent one.)
+mass coordinates have the same character: `linear` admits a negative mass and
+`fitlogq` cannot represent one -- while `fitmsini`, a NON-linear change of
+variables, does owe a Jacobian, and adds it.)
 
 **Measured, 2026-09-11, and the first answer was wrong.** Fitting the twelve
 Theophylline subjects with no population in `cl_v` and in `ke_v`: `CL/F` and

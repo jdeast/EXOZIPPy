@@ -99,7 +99,7 @@ def build_and_measure(label, overrides, good_raw):
         with open("DC2018_128.params.yaml") as f:
             user_params = yaml.safe_load(f)
         for entry in config.get("planet", []):
-            entry.setdefault("mass_parameterization", "linear")
+            entry.setdefault("fitlogq", False)
         user_params.update(overrides)
 
         system = System(config, user_params)

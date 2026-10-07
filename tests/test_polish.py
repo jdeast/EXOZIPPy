@@ -1472,6 +1472,18 @@ def kelt4_rvonly_polish_inputs():
     try:
         with open("kelt4_rvonly.yaml") as f:
             config = yaml.safe_load(f)
+
+        # This harness measures the polish STOP on the linear-mass optimum,
+        # on purpose (review 2.14.9).  kelt4_rvonly now defaults to
+        # fitmsini, and in (m sin i, cos i) coordinates the polish -- a MAP
+        # in the sampled coordinates, where the 1/sin i Jacobian and the
+        # Chen & Kipping normalization both favor |cos i| -> 1 -- walks
+        # cos i to ~0.99994 (mass ~84 Mjup), a corner where one ulp of
+        # arithmetic moves the polished lp by ~0.5 nats (this test, run
+        # there).  The stop rule is calibrated on the well-conditioned
+        # linear optimum, so this fixture pins that coordinate.  The msini
+        # default itself is covered by tests/test_fitmsini.py.
+        config["planet"][0]["fitmsini"] = False
         system = System(config)
         system.prepare()
         model = system.build_model()

@@ -5,14 +5,21 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
-from exozippy.components.parameterization import mode_manifest, pin_unselected
+from exozippy.components.parameterization import (
+    merge_overrides,
+    mode_manifest,
+    pin_unselected,
+)
 from exozippy.config import user_entry
 from exozippy.constants import KEPLER_CONST, MSUN_TO_MEARTH, RSUN_TO_REARTH
 from exozippy.outputs.prose import get_collector, join_names
 from exozippy.outputs.texutils import latex_escape
 from exozippy.potentials import soft_lower_bound
 
-from ..orbit.orbit import amplitude_constrained_orbits
+from ..orbit.orbit import (
+    amplitude_constrained_orbits,
+    inclination_constrained_orbits,
+)
 from . import physics
 
 
@@ -32,6 +39,86 @@ def _has_positive_sigma(param):
 logger = logging.getLogger(__name__)
 
 
+# The mass coordinate is an n-way choice spelled as one BOOLEAN per
+# alternative, at most one true (components.md "Config flag vocabulary"; JDE
+# 2026-09-12, "consistency is important").  Neither set is the signed linear
+# mass.  Each flag is tri-state at the config layer, exactly as orbit's
+# fitvcve is: unset -> the topology default
+# (Planet._resolve_mass_parameterization), true/false -> honored.
+# {flag: MASS_MODE_TABLE key}.
+MASS_FLAGS = {"fitlogq": "log_q", "fitmsini": "msini"}
+
+
+def _mass_parameterization_removed(value):
+    translation = {
+        "log_q": "'fitlogq: true'",
+        "linear": "'fitlogq: false' and 'fitmsini: false'",
+    }.get(value)
+    which = (
+        f"For 'mass_parameterization: {value}' write {translation}.  "
+        if translation is not None
+        else ""
+    )
+    return (
+        "'mass_parameterization:' was replaced by per-planet booleans "
+        "(review 2.14.9; one boolean per coordinate, at most one true): "
+        "'fitlogq: true' samples log10(m_planet/m_host), 'fitmsini: true' "
+        "samples (m sin i, cos i), and neither samples the signed linear "
+        "mass.  Each defaults per planet from the data topology when left "
+        f"out.  {which}Delete the 'mass_parameterization:' key."
+    )
+
+
+# Keys that WERE planet config keys and are gone, refused with their own
+# message (the mulensing bodies.REMOVED_KEYS pattern): a config naming one was
+# written for a spelling that no longer exists, and the user needs the
+# replacement, not silence.  {key: message(value)}.
+REMOVED_KEYS = {"mass_parameterization": _mass_parameterization_removed}
+
+
+def parse_mass_flags(entry, where):
+    """``{flag: True | False | None}`` for one planet config entry.
+
+    The one reader of `MASS_FLAGS`, so every consumer (the planet's own
+    resolution, and the microlensing readers that need to know whether a lens
+    companion samples log_q before the planet has resolved) agrees on the
+    spelling, on the retired key and on the "more than one true" refusal.
+    """
+    entry = entry or {}
+    for key, message in REMOVED_KEYS.items():
+        if key in entry:
+            raise ValueError(f"[{where}] {message(entry[key])}")
+    flags = {}
+    for flag in MASS_FLAGS:
+        raw = entry.get(flag)
+        if raw is not None and not isinstance(raw, bool):
+            raise ValueError(
+                f"[{where}] '{flag}:' must be true or false, got {raw!r}."
+            )
+        flags[flag] = raw
+    on = [f for f, v in flags.items() if v]
+    if len(on) > 1:
+        raise ValueError(
+            f"[{where}] {' and '.join(on)} are both true, and they name "
+            "different mass coordinates -- a planet is sampled in one.  Set "
+            "at most one (leave both out for the topology default; set both "
+            "false for the signed linear mass)."
+        )
+    return flags
+
+
+def lens_companion_samples_log_q(entry, where):
+    """Does a microlensing lens-companion planet sample log_q?
+
+    A lens body defaults to log_q (Planet._resolve_mass_parameterization), so
+    it does unless its entry turns log_q off or asks for msini.  For the
+    star/mulensevent readers that decide at THEIR stage 3, which may run
+    before the planet's.
+    """
+    flags = parse_mass_flags(entry, where)
+    return not (flags["fitlogq"] is False or flags["fitmsini"])
+
+
 class Planet(Component):
     # The two mass coordinates, as a parameterization mode table (see
     # components/parameterization.py).  `linear` samples planet.mass itself over
@@ -40,17 +127,37 @@ class Planet(Component):
     # marginal detection -- while `log_q` samples log10(m_p / m_host) and derives
     # the mass from it.  Planets may differ: log_q is not a parameter of a linear
     # planet at all, and vice versa.
+    #
+    # The third, `msini` (fitmsini, review 2.14.9), samples the minimum mass
+    # m sin i and derives mass = msini / sin i -- what an RV-only orbit
+    # measures, so the (mass, cos i) banana becomes a well-conditioned
+    # (msini, cos i) pair; Planet.build_likelihood adds the -log sin i
+    # Jacobian that keeps the prior uniform in (mass, cos i).  Everywhere else
+    # msini is REPORTED (derived, built late, consumed by nothing): that is
+    # what lets mass read msini on one planet while msini reads mass on
+    # another without a per-parameter cycle (parameter.md, the element roles).
     MASS_MODE_TABLE = {
-        "linear": {"mass": None},
+        "linear": {"mass": None, "msini": {"output_expr_key": "default"}},
         "log_q": {
             "mass": {"expr_key": "default", "force_node": True},
             "log_q": None,
+            "msini": {"output_expr_key": "default"},
+        },
+        "msini": {
+            "mass": {"expr_key": "from_msini", "force_node": True},
+            "msini": None,
         },
     }
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Planet Parameters"
+        # The mass-coordinate booleans, validated at the config boundary (a
+        # retired 'mass_parameterization:' raises here, with its migration).
+        self.mass_flags = [
+            parse_mass_flags(c, f"{self.prefix}.{nm}")
+            for c, nm in zip(self.config, self.names)
+        ]
         # BEER (PR 1.b): Doppler beaming amplitude. Per-planet, not
         # per-band (EXOFASTv2 declares it ss.planet[i].beam, unlike
         # thermal/reflect/ellipsoidal which are ss.band[i].*).
@@ -161,19 +268,40 @@ class Planet(Component):
                 ),
             },
             {
-                "key": "mass_parameterization",
+                "key": "fitlogq",
                 "kind": "option",
-                "accepts": ["linear", "log_q"],
+                "accepts": [True, False],
                 "required": False,
                 "doc": (
-                    "Sampled mass coordinate. 'linear' samples planet.mass "
-                    "itself, with a negative lower bound so an RV or "
-                    "astrometric amplitude can flip sign (avoids the "
-                    "Lucy-Sweeney positive-definite bias). 'log_q' samples "
-                    "log10(m_planet / m_host) and derives the mass. Default: "
-                    "'linear' when RV or astrometric data measure this "
-                    "planet's orbit, 'log_q' otherwise (including every "
-                    "microlensing lens body, where q <= 0 is meaningless)."
+                    "Sample log10(m_planet / m_host) and derive the mass "
+                    "(the prior is then uniform in log q). Default: on when "
+                    "no RV or astrometric data measure this planet's orbit, "
+                    "including every microlensing lens body, where q <= 0 "
+                    "is meaningless. At most one of fitlogq/fitmsini may be "
+                    "true; with neither, planet.mass itself is sampled, with "
+                    "a negative lower bound so an RV or astrometric "
+                    "amplitude can flip sign (avoids the Lucy-Sweeney "
+                    "positive-definite bias)."
+                ),
+            },
+            {
+                "key": "fitmsini",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Sample the minimum mass m sin i (with the orbit's "
+                    "cos i) and derive mass = msini / sin i, with the "
+                    "Jacobian that keeps the prior uniform in mass and "
+                    "cos i -- the same posterior as sampling the mass, in "
+                    "the coordinates an RV curve measures. Default: on when "
+                    "RVs measure this planet's mass and nothing (transit, "
+                    "RM, Doppler tomography, astrometry, keplerian lens or "
+                    "source orbital motion) measures its orbit's "
+                    "inclination, unless planet.mass is pinned (sigma: 0). "
+                    "Cannot be combined with the orbit's fitchord (cos i "
+                    "would then depend on the mass); independent of "
+                    "fitvcve. At most one of fitlogq/fitmsini may be true."
                 ),
             },
             {
@@ -204,16 +332,28 @@ class Planet(Component):
         self._resolve_mass_parameterization(system)
 
         # The mass coordinate, per planet: a `log_q` planet derives its mass
-        # from log10(m_p/m_host) and a `linear` one samples the (signed) mass
-        # itself, and `log_q` is not a parameter of a linear planet at all.  A
-        # system where every planet agrees expands to exactly the manifest this
-        # used to write by hand.
+        # from log10(m_p/m_host), an `msini` one from m sin i and the orbit's
+        # cos i, and a `linear` one samples the (signed) mass itself; `log_q`
+        # is not a parameter of a non-log_q planet at all.  msini needs an
+        # orbit (sin i), so without one the table carries no msini, exactly
+        # as the hand-written manifest declared it only under has_orbit.
+        table = self.MASS_MODE_TABLE
+        if not has_orbit:
+            table = {
+                mode: {k: v for k, v in spec.items() if k != "msini"}
+                for mode, spec in table.items()
+                if mode != "msini"
+            }
         mass_entries = mode_manifest(
             self.mass_parameterizations,
-            self.MASS_MODE_TABLE,
+            table,
             n_elements=self.n_elements,
-            where=f"{self.prefix}.mass_parameterization",
+            where=f"{self.prefix}.fitlogq/fitmsini",
         )
+        if "msini" in mass_entries:
+            mass_entries["msini"] = self._msini_bounds_override(
+                mass_entries["msini"]
+            )
 
         # Insertion order is load-bearing, so it is preserved exactly: graph.py
         # registers the build-order nodes in manifest order, and that order is
@@ -248,7 +388,9 @@ class Planet(Component):
                     # absent from a posterior point.
                     "b": {"expr_key": "default", "force_node": True},
                     "K": "default",
-                    "msini": "default",
+                    # Sampled on an msini-mode planet, reported elsewhere
+                    # (MASS_MODE_TABLE); same manifest position as ever.
+                    "msini": mass_entries["msini"],
                     "max_ecc": "default",
                     # EXOFASTv2's delta, tcirc, omegagr (derivepars.pro).
                     "delta": "default",
@@ -381,11 +523,27 @@ class Planet(Component):
         to quote -- it measured a local block at the start point).  Removing
         the unreachable-but-samplable negative region is the other half.
 
-        Default: 'linear' iff the planet is mass-constrained by RV or
-        astrometry AND is not a microlensing lens body; 'log_q' otherwise.  A
-        per-planet ``mass_parameterization:`` key overrides.
+        'msini' (review 2.14.9) is for the planet whose mass RVs measure and
+        whose inclination nothing does: the data constrain m sin i, so the
+        (mass, cos i) posterior is a banana whose tail (P(M > X) ~ (2/pi)
+        msini/X) a sampler in those coordinates under-explores.  Sampling
+        (msini, cos i) with the -log sin i Jacobian is the same posterior in
+        coordinates the data measure (star.md, "Planet mass parametrization").
+
+        Default, per planet, in order: 'log_q' for a microlensing lens body
+        or where no RV/astrometry measures the orbit; 'msini' where the orbit's
+        inclination is unmeasured (`inclination_constrained_orbits`), the orbit
+        does not sample the transit chord, and the user did not pin
+        planet.mass; 'linear' otherwise.  ``fitlogq:`` / ``fitmsini:`` on the
+        planet override it: true selects that coordinate, false rules it out.
         """
         mass_sides = self._mass_constrained(system)
+        orbit = system.active_components.get("orbit")
+        if orbit is not None:
+            inc_constrained = inclination_constrained_orbits(system, orbit)
+            inc_modes = orbit.inclination_modes(system)
+        else:
+            inc_constrained, inc_modes = set(), []
 
         # The lens component is one instance per lens BODY (8.6.17 split);
         # its `bodies` list is [(comp_type, index), ...], primary first.
@@ -396,32 +554,85 @@ class Planet(Component):
             else set()
         )
 
+        # ANY chord orbit rules msini out for EVERY planet, not just the
+        # planets on that orbit.  The build graph orders PARAMETERS, not
+        # elements: a chord orbit's cos i element reads planet.ar (through
+        # a/R* -> m_total -> planet.mass), so orbit.cosi as a whole depends on
+        # planet.mass -- and an msini planet's mass reads orbit.cosi.  The
+        # value graph is acyclic per element and the parameter graph is not
+        # (measured: two RV orbits, one fitvcve -> fitchord, recursed in
+        # Component.add_parameter).
+        chord_orbits = [
+            orbit.names[i] for i, m in enumerate(inc_modes) if m == "chord"
+        ]
+
         modes, reasons = [], []
-        for p, (c, nm) in enumerate(zip(self.config, self.names)):
-            is_lens_body = ("planet", p) in lens_bodies
-            user = c.get("mass_parameterization")
-            if user is not None:
-                if user not in ("linear", "log_q"):
+        for p, (flags, nm) in enumerate(zip(self.mass_flags, self.names)):
+            o = int(self.orbit_map[p])
+            has_orbit = orbit is not None
+            chord = bool(chord_orbits)
+
+            if flags["fitlogq"]:
+                modes.append("log_q")
+                reasons.append("fitlogq: true")
+                continue
+            if flags["fitmsini"]:
+                if not has_orbit:
                     raise ValueError(
-                        f"planet '{nm}': 'mass_parameterization:' must be "
-                        f"'linear' or 'log_q', got {user!r}."
+                        f"[{self.prefix}.{nm}] 'fitmsini: true' needs an "
+                        "orbit: the mass is m sin i / sin i, and sin i is the "
+                        "orbit's.  Add the orbit, or drop the key."
                     )
-                modes.append(user)
-                reasons.append("set on the planet")
+                if chord:
+                    raise ValueError(
+                        f"[{self.prefix}.{nm}] 'fitmsini: true' cannot be "
+                        f"combined with the transit chord, which orbit(s) "
+                        f"{chord_orbits} sample (fitchord, explicit or its "
+                        "default, which follows fitvcve): the chord derives "
+                        "cos i from a/R*, which depends on the planet mass, "
+                        "while fitmsini derives the mass from cos i -- a "
+                        "dependency cycle (the build orders the cos i and "
+                        "mass VECTORS, so this holds across orbits too).  "
+                        "Set 'fitchord: false' on those orbits, or drop "
+                        "'fitmsini'."
+                    )
+                modes.append("msini")
+                reasons.append("fitmsini: true")
                 continue
 
-            # A lens body outranks the RV/astrometry signal: microlensing
-            # hard-forbids q <= 0, so a signed mass there is unusable no
-            # matter what else measures the orbit.
-            if is_lens_body:
-                modes.append("log_q")
-                reasons.append("it is a microlensing lens body")
-            elif mass_sides[p]:
-                modes.append("linear")
-                reasons.append("RV/astrometry data measure its orbit")
+            # The topology default.  A lens body outranks the RV/astrometry
+            # signal: microlensing hard-forbids q <= 0, so a signed mass there
+            # is unusable no matter what else measures the orbit.
+            if ("planet", p) in lens_bodies:
+                mode, why = "log_q", "it is a microlensing lens body"
+            elif not mass_sides[p]:
+                mode, why = "log_q", "no signed observable constrains its mass"
+            elif not has_orbit or o in inc_constrained:
+                mode, why = "linear", "RV/astrometry data measure its orbit"
+            elif chord:
+                mode, why = (
+                    "linear",
+                    "RVs measure its mass, but an orbit samples the chord",
+                )
+            elif self._user_pinned_mass(p):
+                mode, why = (
+                    "linear",
+                    "RVs measure its mass and planet.mass is pinned "
+                    "(sigma: 0), which m sin i coordinates would drop",
+                )
             else:
-                modes.append("log_q")
-                reasons.append("no signed observable constrains its mass")
+                mode, why = (
+                    "msini",
+                    "RVs measure m sin i and nothing measures the inclination",
+                )
+            # An explicit false rules its coordinate out of the default; the
+            # signed linear mass is what is left.
+            if mode == "log_q" and flags["fitlogq"] is False:
+                mode, why = "linear", "fitlogq: false"
+            elif mode == "msini" and flags["fitmsini"] is False:
+                mode, why = "linear", "fitmsini: false"
+            modes.append(mode)
+            reasons.append(why)
 
         # Per planet, and mixing is fine: roles are per element (see the
         # manifest vocabulary), so one planet can derive its mass from log_q
@@ -433,20 +644,63 @@ class Planet(Component):
             f"'{nm}' -> {m} ({r})"
             for nm, m, r in zip(self.names, modes, reasons)
         )
-        if any(m == "log_q" for m in modes):
+        if any(m != "linear" for m in modes):
             logger.info(
-                f"sampling log10(m_planet/m_host) where it applies: {detail} "
-                "(override per planet with 'mass_parameterization: linear')."
+                f"[{self.prefix}] mass coordinate per planet: {detail} "
+                "(override per planet with 'fitlogq:' / 'fitmsini:'; both "
+                "false samples the signed linear mass)."
             )
 
         self.mass_parameterizations = modes
-        # The whole-component answer, kept for the readers that only need to
-        # know whether ANY planet uses the ratio coordinate; per-planet callers
-        # read `mass_parameterizations`.
-        self.mass_parameterization = (
-            "log_q" if modes and all(m == "log_q" for m in modes) else "linear"
-        )
         self._reconcile_mass_user_params()
+
+    def _user_pinned_mass(self, index):
+        """Did the user pin planet `index`'s mass (sigma: 0)?
+
+        A coordinate that is ON BY DEFAULT must not throw away a constraint
+        the user wrote, and `sigma: 0` on an element the flip makes DERIVED
+        is dropped (with a warning) -- the orbit's `_pin_blocks_default` rule,
+        for the same reason.  Read in the two spellings that survive
+        `standardize_param_names` (indexed, and the broadcast that covers
+        every element), as `Orbit._user_pinned` does.
+        """
+        up = self.config_manager.user_params
+        for key in (f"{self.prefix}.{index}.mass", f"{self.prefix}.mass"):
+            entry = user_entry(up, key)
+            if entry is not None and entry.get("sigma") == 0:
+                return True
+        return False
+
+    def _msini_bounds_override(self, entry):
+        """Give the SAMPLED msini elements planet.mass's hard bounds.
+
+        msini carries no lower/upper in defaults.yaml on purpose: a derived or
+        reported element with a numeric bound gets a soft barrier, which would
+        add a potential to every linear/log_q planet.  The sampled elements
+        take mass's bounds instead, per element through the manifest
+        "overrides" channel (NaN leaves an element alone), so a user's own
+        msini bound still layers on top.  |m sin i| <= |m|, so the mass range
+        is the natural support; the mass itself keeps its bounds as soft
+        barriers on the derived value, as in log_q mode.
+        """
+        sampled = np.array(
+            [m == "msini" for m in self.mass_parameterizations], dtype=bool
+        )
+        if not sampled.any():
+            return entry
+        base = self.config_manager.base_defaults["planet"]
+        mass_def, msini_def = base["mass"], base["msini"]
+        if mass_def["unit"] != msini_def["unit"]:
+            raise ValueError(
+                "planet/defaults.yaml: msini takes planet.mass's bounds, so "
+                f"the two must share a unit; mass is in {mass_def['unit']!r} "
+                f"and msini in {msini_def['unit']!r}."
+            )
+        lower = np.where(sampled, float(mass_def["lower"]), np.nan)
+        upper = np.where(sampled, float(mass_def["upper"]), np.nan)
+        return merge_overrides(
+            entry, {"lower": lower.tolist(), "upper": upper.tolist()}
+        )
 
     def _reconcile_mass_user_params(self):
         """Move a user's ``sigma: 0`` from planet.mass onto log_q, and reject
@@ -465,16 +719,17 @@ class Planet(Component):
             mass_key, log_q_key = f"planet.{i}.mass", f"planet.{i}.log_q"
 
             # Per planet, because the coordinate is: a stale log_q entry is
-            # only stale for the planets that sample a linear mass.
-            if self.mass_parameterizations[i] == "linear":
+            # only stale for the planets that do not sample log_q.
+            mode = self.mass_parameterizations[i]
+            if mode != "log_q":
                 if log_q_key in up:
                     raise ValueError(
                         f"'{log_q_key}' is set but planet '{self.names[i]}' "
-                        "samples a linear mass. This usually means a params "
+                        f"samples {'a linear mass' if mode == 'linear' else 'm sin i'}"
+                        ", which has no log_q. This usually means a params "
                         "file written by mkparam for a log_q fit is being "
                         "reused after the data topology changed. Remove the "
-                        "entry, or set 'mass_parameterization: log_q' on "
-                        "that planet."
+                        "entry, or set 'fitlogq: true' on that planet."
                     )
                 continue
 
@@ -492,8 +747,8 @@ class Planet(Component):
                     f"planet '{self.names[i]}' samples log10(m_p/m_host), "
                     "which cannot represent it. A negative mass only makes "
                     "sense where an RV or astrometric amplitude can flip "
-                    "sign; set 'mass_parameterization: linear' on every "
-                    "planet if that is what you want."
+                    "sign; set 'fitlogq: false' on the planet if that is "
+                    "what you want."
                 )
 
             if entry.get("sigma") is None:
@@ -638,6 +893,7 @@ class Planet(Component):
             return
 
         orbits = system.orbit
+        self._add_msini_jacobian(system, orbits)
         self._add_duration_prose(system, orbits)
         # The eccentricity barrier used to live here, on
         # orbits.ecc.value[self.orbit_map] -- i.e. on the node calc_ecc
@@ -650,6 +906,67 @@ class Planet(Component):
 
         if self.n_elements >= 2:
             self._add_crossing_potential(system, orbits)
+
+    def _msini_indices(self):
+        """Indices of the planets sampling m sin i (empty for most systems)."""
+        return [
+            i
+            for i, m in enumerate(self.mass_parameterizations)
+            if m == "msini"
+        ]
+
+    def _add_msini_jacobian(self, system, orbits):
+        """The Jacobian an `msini` planet owes (review 2.14.9).
+
+        Sampling `msini` instead of `mass` at fixed cos i is the change of
+        variables `mass = msini / sin i`, `|d mass / d msini| = 1 / sin i`.
+        The `linear` coordinate's prior is uniform in (mass, cos i); in
+        (msini, cos i) that same prior is `1 / sin i`, so this ADDS
+        `-log sin i` and the switch is answer-preserving -- the same
+        posterior, sampled in the coordinates an RV curve measures.  Without
+        it the prior would be uniform in m sin i, i.e. `p(mass | i) ~ sin i`,
+        which down-weights exactly the low-inclination, high-mass tail the
+        coordinate change exists to sample.  The direction is checked as a
+        property (the implied prior on (mass, cos i) is flat), not argued:
+        `tests/test_fitmsini.py`.
+
+        The radicand `1 - cos^2 i` is floored STRICTLY POSITIVE inside
+        `physics.msini_log_jacobian`, as it is in the mass expression -- see
+        `physics.SINI_RADICAND_FLOOR` and the CLAUDE.md where-trap rule.
+        """
+        idx = self._msini_indices()
+        if not idx:
+            return
+        take = np.asarray(idx, dtype="int32")
+        cosi = orbits.cosi.value[self.orbit_map][take]
+        # MINUS log sin i -- see the docstring for why the sign is the term.
+        pm.Potential(
+            f"{self.prefix}.msini_jacobian",
+            -pt.sum(physics.msini_log_jacobian(cosi)),
+        )
+
+        names = [self.names[i] for i in idx]
+        self.msini.add_prior_contribution(
+            latex=r"$\propto 1/\sin{i}$",
+            text="uniform in mass and cos i (1/sin i Jacobian applied)",
+            elements=idx,
+            supersedes_bounds=True,
+            support_phrase="whose m sin i support is",
+        )
+        collector = get_collector(system)
+        if collector is not None:
+            noun = "planet" if len(names) == 1 else "planets"
+            collector.add(
+                "The radial velocities constrain the minimum mass "
+                r"$M_P\sin{i}$ but not the inclination, so for "
+                f"{noun} "
+                + join_names(latex_escape(n) for n in names)
+                + r" we sampled $M_P\sin{i}$ and $\cos{i}$ and derived "
+                r"$M_P$, multiplied by $1/\sin{i}$ so that the prior "
+                r"remains uniform in $M_P$ and $\cos{i}$.",
+                section="planetary",
+                key=f"{self.prefix}.msini",
+            )
 
     def _initial_semimajor_axes(self):
         """Per-planet starting semi-major axis, solRad, or NaN.
