@@ -116,6 +116,11 @@ def _base_mm_params(p):
     }
 
 
+# A source radius above this many Einstein radii is not a finite-source
+# event but a collapsed theta_E (see VBMDirectMagOp._compute).
+RHO_CEILING = 1e3
+
+
 def _safe_rho(value):
     """Floor the source radius at physics.RHO_FLOOR.
 
@@ -935,6 +940,35 @@ class VBMDirectMagOp(Op):
         if self.use_rho:
             rho = _safe_rho(p[idx])
             idx += 1
+        # A DEGENERATE event is finite and still unevaluable.  When a proposal
+        # puts the source closer than the lens, physics.calc_theta_E floors
+        # theta_E at 1e-12 mas, so t_E = theta_E/mu_rel is ~1e-14 d and
+        # rho = theta_*/theta_E is ~1e9: every number is finite, the check
+        # above passes, and VBM is handed tau ~ 1e14 and a source disk a
+        # billion Einstein radii wide.  It computes for MINUTES on that
+        # (measured: all 63 calls a KMT-2021-BLG-1122L fit rejected at
+        # eval_timeout 300 s were exactly this, on every rung including
+        # T = 1), and the soft source_behind_lens bound rejects the point
+        # afterwards anyway.  Decide here, before the kernel, in the same
+        # NaN -> -inf contract as the non-finite case.  T_E_FLOOR is the
+        # floor the flux bootstrap already applies; RHO_CEILING is far above
+        # any physical finite-source event (rho ~ 1 is a source as large as
+        # the Einstein ring) and far below the degenerate 1e9.
+        if base["t_E"] < T_E_FLOOR or rho > RHO_CEILING:
+            if not self._warned:
+                self._warned = True
+                warnings.warn(
+                    f"{type(self).__name__}: degenerate event (t_E = "
+                    f"{base['t_E']!r} d, rho = {rho!r}) -- theta_E has "
+                    "collapsed (the source at or inside the lens distance); "
+                    "returning NaN magnifications (logp = -inf) for this "
+                    "proposal without calling the kernel.  If this repeats "
+                    "for every proposal the model is misconfigured, not "
+                    f"merely exploring bad parameters.  {_MM_NAN_ADVICE}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            return self._nan_out(len(times_np))
         companions = []
         for j in range(self.n_companions):
             companions.append(

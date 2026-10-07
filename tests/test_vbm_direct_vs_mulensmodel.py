@@ -8,6 +8,8 @@ pi_E signs, alpha sense, frame origin — shows up here as a magnification
 mismatch far above floating-point noise.
 """
 
+import warnings
+
 import numpy as np
 import pytensor
 import pytensor.tensor as pt
@@ -329,6 +331,44 @@ def test_vbm_direct_point_source_is_finite_near_and_far():
     A = f(p, times, obs)
     assert np.all(np.isfinite(A)), "point-source path produced NaN"
     assert np.all(A >= 1.0 - 1e-6)
+
+
+def test_vbm_direct_degenerate_event_is_rejected_without_the_kernel():
+    """
+    Given a FINITE parameter vector whose theta_E has collapsed -- the
+      source at or inside the lens distance, so t_E ~ 1e-14 d and
+      rho ~ 1e9 (what physics.calc_theta_E's floor produces) --
+    When the direct Op is evaluated,
+    Then every output is NaN (a rejected proposal) and it returns at once,
+      instead of handing VBM tau ~ 1e14 and a billion-Einstein-radius
+      source and computing for minutes (every one of the 63 calls a
+      KMT-2021-BLG-1122L fit rejected at eval_timeout 300 s was this).
+    """
+    import time
+
+    times, obs = _times_and_obs(n=200)
+    f = _compile(
+        VBMDirectMagOp(
+            coords=_COORDS, n_companions=2, use_rho=True, bandpass="Z087"
+        )
+    )
+    p = np.concatenate(
+        [np.array([_MAP[k] for k in _ORDER[:-1]]), [1.6, 0.25, 128.0], [0.5]]
+    )
+    p[2] = 1e-14  # t_E
+    p[5] = 1.5e9  # rho
+    t0 = time.time()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        out = f(p, times, obs)
+    assert np.all(np.isnan(out))
+    assert time.time() - t0 < 5.0
+    # and a healthy triple at the same geometry still evaluates
+    p[2], p[5] = 14.74, 0.0025
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        A = f(p, times, obs)
+    assert np.all(np.isfinite(A)) and np.all(A >= 1.0)
 
 
 def test_vbm_direct_nan_params_yield_nan():
