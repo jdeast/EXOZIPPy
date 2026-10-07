@@ -84,6 +84,14 @@ ROLES_ATTR = "exozippy_element_roles"
 # trace written before those nodes existed -- which therefore has none of them.
 REPORT_ONLY_ATTR = "exozippy_report_only_vars"
 
+# {sampled variable: derived variable} for the SAMPLED parameters a restart
+# file writes as a derived sibling instead (defaults.yaml `restart_as:`;
+# orbit.tc_sampled -> orbit.tc, the conjunction at the user's epoch).  Read
+# by mkparam, which has no System.  Absent on a trace with no such
+# parameter, and on every trace written before they existed -- which has no
+# such variable to alias, so "absent" is the truth about it.
+RESTART_AS_ATTR = "exozippy_restart_as"
+
 # Which unit system the posterior's sampled variables are stored in.  run.py
 # runs _convert_posterior_to_user_units on the way to netCDF, so every trace
 # this code writes says "user" -- but a trace written before that conversion
@@ -347,6 +355,30 @@ def report_only_vars(idata) -> frozenset:
     return frozenset(str(n) for n in names)
 
 
+def restart_aliases(idata) -> Dict[str, str]:
+    """The trace's ``{sampled: derived}`` restart aliases (``RESTART_AS_ATTR``).
+
+    Empty for a trace with no stamp (see the attr's comment).  A stamp that
+    does not parse is this code's own output gone wrong, and raises.
+    """
+    blob = _attrs(idata).get(RESTART_AS_ATTR)
+    if blob is None:
+        return {}
+    try:
+        aliases = json.loads(blob)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"trace attr {RESTART_AS_ATTR!r} is not a JSON object of "
+            f"variable names: {blob!r}"
+        ) from exc
+    if not isinstance(aliases, dict):
+        raise ValueError(
+            f"trace attr {RESTART_AS_ATTR!r} is not a JSON object of "
+            f"variable names: {blob!r}"
+        )
+    return {str(k): str(v) for k, v in aliases.items()}
+
+
 def structural_metadata(source) -> Dict[str, Any]:
     """The root attrs :func:`stamp_structural_metadata` writes, as a dict.
 
@@ -367,6 +399,10 @@ def structural_metadata(source) -> Dict[str, Any]:
     report_only = getattr(source, "report_only_labels", None)
     if callable(report_only):
         out[REPORT_ONLY_ATTR] = json.dumps(list(report_only()))
+        aliases = source.restart_aliases()
+        out[RESTART_AS_ATTR] = (
+            json.dumps(aliases, sort_keys=True) if aliases else None
+        )
     blob = json.dumps(payload, sort_keys=True, default=str)
     out[PAYLOAD_ATTR] = blob if len(blob) <= _MAX_PAYLOAD_CHARS else None
 
@@ -610,3 +646,30 @@ def check_trace_freshness(
         f"config (or revert the config/parameter-file edits listed above to "
         f"match the trace).\n{_BANNER}"
     )
+
+
+def check_trace_coordinates(idata, model, trace_path) -> None:
+    """Refuse a reloaded trace that lacks one of this model's SAMPLED variables.
+
+    The structural hash covers the config and the params file, never the
+    code, so newer code can choose different sampled coordinates for the same
+    files -- the one case so far is the conjunction sampled near the data
+    (orbit.md, "tc is SAMPLED near the data"), which turns an orbit's sampled
+    ``orbit.tc`` into ``orbit.tc_sampled``.  Such a trace has nothing to
+    decode this model's raw draws from, and every later step would fail far
+    from the cause (or worse, regenerate the deterministics from start
+    values).  Raised here, naming what is missing and the remedy.
+    """
+    have = set(idata.posterior.data_vars)
+    missing = sorted(rv.name for rv in model.free_RVs if rv.name not in have)
+    if missing:
+        raise StaleTraceError(
+            f"{_BANNER}\n"
+            f"STALE TRACE: {trace_path} has no draws of {missing}, which "
+            f"this model SAMPLES. It was written by code that sampled "
+            f"different coordinates for the same config and params file "
+            f"(e.g. an orbit's conjunction, now sampled near the data's time "
+            f"center as `tc_sampled`).\n"
+            f"REMEDY: re-sample with 'sampler: {{recompute_trace: true}}'."
+            f"\n{_BANNER}"
+        )

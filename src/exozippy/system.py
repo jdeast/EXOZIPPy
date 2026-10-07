@@ -1599,6 +1599,14 @@ class System(Component):
             if param.periodic is not None:
                 param.recenter_posterior(param_lookup)
 
+        # Epochs reported at the epoch least correlated with their period
+        # (defaults.yaml `optimal_epoch:`; orbit.t0, EXOFASTv2's T_0).  After
+        # every Parameter has its draws for the same reason as the pass
+        # above: the period is a sibling's posterior.
+        for param in param_lookup.values():
+            if param.optimal_epoch is not None:
+                param.shift_to_optimal_epoch(param_lookup)
+
     def _set_comp_posterior(self, component, posterior, param_lookup):
         for attr_name in dir(component):
             attr = getattr(component, attr_name)
@@ -1644,6 +1652,22 @@ class System(Component):
             for label, p in self.get_parameter_lookup().items()
             if p.report_only_node
         )
+
+    def restart_aliases(self):
+        """``{sampled label: derived label}`` for every built Parameter whose
+        defaults.yaml declares ``restart_as:`` (``orbit.tc_sampled`` ->
+        ``orbit.tc``).  Stamped on the trace (``trace_meta.RESTART_AS_ATTR``)
+        for mkparam, which writes the restart file's start value under the
+        derived name -- what a user writes, and what the next fit re-reads to
+        choose the same sampled epoch (run.md).  Sorted for a deterministic
+        stamp.
+        """
+        out = {}
+        for label, p in sorted(self.get_parameter_lookup().items()):
+            if p.restart_as is not None:
+                prefix = label.rsplit(".", 1)[0]
+                out[label] = f"{prefix}.{p.restart_as}"
+        return out
 
     def get_parameter_lookup(self):
         """

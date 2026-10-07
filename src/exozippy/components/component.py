@@ -407,6 +407,42 @@ class Component(ABC):
         """
         return []
 
+    def epochs_constraining(self, system, orbit):
+        """Stage 3: the observation epochs this component's data put on an orbit.
+
+        Returns ``{orbit element index: [(times, weights), ...]}`` -- one
+        ``(times, weights)`` pair per dataset, times in the orbit's time
+        system (BJD_TDB days), weights the RELATIVE information of each epoch
+        WITHIN that dataset, normalized to a mean of 1 so every dataset counts
+        by its number of epochs (errors in different datasets need not share
+        a unit, so they are never compared across datasets).  An orbit no
+        dataset of this component constrains is simply absent.
+
+        The consumer is ``Orbit``'s sampled-epoch choice (``orbit.md``, "tc is
+        SAMPLED near the data"), which needs the time center of the data on
+        each orbit before the relaxation engine runs.  Which orbit a dataset
+        constrains is read from the same membership maps
+        ``orbit.amplitude_constrained_orbits`` uses.  The default -- a
+        component with no time-stamped data on any orbit -- returns ``{}``.
+
+        A component that returns epochs also states how SHARPLY each of them
+        times the orbit, as the class attribute ``epoch_timing_rank``: an
+        eclipse (a transit, a Doppler shadow) times a conjunction to minutes,
+        while a smooth curve (RVs, astrometry) times its phase to a fraction
+        of the period -- orders of magnitude less information per epoch.
+        Where an orbit has epochs of several ranks only the highest rank's
+        set its time center, because an equal-weight mean across them would
+        let a long baseline of RVs drag the center periods away from the
+        eclipses that actually fix the epoch (measured: `examples/kelt17`'s
+        fast config, two transits and twelve RVs).
+        """
+        return {}
+
+    # See `epochs_constraining`: how sharply this component's epochs time an
+    # orbit, compared across components (higher is sharper).  1 is a smooth
+    # curve's phase (RVs, astrometry); 2 an eclipse's timing.
+    epoch_timing_rank = 1
+
     # Attribute names holding something that BELONGS TO ONE BUILD: a
     # pytensor node the component stashed, or a function compiled against
     # one.  ``System.build_model`` clears every one of them before stage 5,

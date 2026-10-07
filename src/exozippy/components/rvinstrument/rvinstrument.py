@@ -200,6 +200,20 @@ class RVInstrument(Instrument):
         self.ls_signal = None
         self._seed_from_lombscargle(system)
 
+    def epochs_constraining(self, system, orbit):
+        """Each RV file's epochs on every orbit its star is a body of.
+
+        The same membership ``orbit.amplitude_constrained_orbits`` reads:
+        the observed star's Doppler signal is the sum over every orbit
+        containing it (``Orbit.star_membership``), primary or companion side.
+        """
+        out = {}
+        for i, s in enumerate(self.star_ndx):
+            epochs = self.dataset_epochs(i)
+            for o, _role in orbit.star_membership(s):
+                out.setdefault(int(o), []).append(epochs)
+        return out
+
     def _seed_from_lombscargle(self, system):
         """Seed orbital period and conjunction epoch from a Lomb-Scargle peak.
 

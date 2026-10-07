@@ -231,6 +231,31 @@ a cyclic one), `ra`/`dec` (sampled inside their own ranges), and any rate
 (`dalpha_dt`). A component adding a new angle or epoch declares it; the
 generic layer knows nothing about which parameters those are.
 
+### An epoch can be reported at the epoch least correlated with its period (`optimal_epoch:`)
+
+The sibling of `periodic:`, and also declared in defaults.yaml only:
+`optimal_epoch: {param: "period"}` says the parameter is an EPOCH of an event
+repeating with that sibling's period, and that its REPORTED posterior is the
+one at the integer epoch minimizing `|corr(T + E P, P)|` -- EXOFASTv2's `T_0`
+(`derivepars.pro`). `orbit.t0` is the one user (review 2.14.9;
+`components/orbit/orbit.md`, "tc is SAMPLED near the data").
+`shift_to_optimal_epoch` runs in a THIRD pass of
+`System.distribute_posterior`, after the periodic recentering, on the
+burn-in-trimmed valid draws: `E = round(-cov(T, P)/var(P))`, the closed form
+of EXOFASTv2's scan (the docstring has the algebra), and every draw moves by
+`E` of its OWN period, so the shifted posterior is exact per draw rather than
+a translated median. Once for the whole posterior, so every mode is quoted at
+the same epoch; both posteriors are converted to internal units through each
+Parameter's own `to_internal`, never a hand-written factor. A period with no
+spread moves nothing, and a missing or mis-shaped sibling posterior raises,
+naming it -- unlike `periodic:`, whose fallback is reporting the old way, a
+guessed shift here would move the reported epoch. The integer it chose is on
+`optimal_epoch_shift` and in the log.
+
+`restart_as: "<sibling>"` is the third declaration of this kind: a SAMPLED
+parameter whose start value the restart file writes under a DERIVED sibling's
+name (`orbit.tc_sampled` -> `tc`). See `src/exozippy/run.md`.
+
 ## Structural priors: a prior that is part of the parameterization (review 2.2.21)
 
 Some N(0, 1) priors are not statements about the world but part of how a quantity is coordinatized, and a user `mu`/`sigma` on them does not "tighten a prior" -- it changes what the coordinates mean. Fields merge one at a time (`resolve()`), so before this ruling a user `mu` on such a parameter silently inherited the defaults.yaml `sigma: 1.0` and re-centered the structure. Two cases, both ruled by JDE (2026-09-30):

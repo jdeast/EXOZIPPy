@@ -50,6 +50,7 @@ from .trace_meta import (
     SEED_LEDGER_ATTR,
     UNITS_ATTR,
     apply_metadata,
+    check_trace_coordinates,
     check_trace_freshness,
     structural_metadata,
 )
@@ -1183,6 +1184,11 @@ def _run_fit(config, gui, user_params=None):
             check_trace_freshness(
                 idata, system, trace_path, allow_unfinished=True
             )
+            # ...and drawn in THIS model's sampled coordinates: the hash
+            # covers the config and params, not the code, and newer code can
+            # sample different coordinates for the same files (an orbit's
+            # conjunction near the data, orbit.md).
+            check_trace_coordinates(idata, model, trace_path)
             # The seed ledger the original run measured before sampling
             # travels with the trace; this run skipped the polish, so it
             # cannot measure one of its own (review 2.14.12 prereq. 2).

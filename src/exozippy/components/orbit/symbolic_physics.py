@@ -47,6 +47,10 @@ def get_symbol_map(config, system_config):
         "inc": "inc",
         "sini": "sini",
         "tc": "tc",
+        # The conjunction SAMPLED near the data when the user's epoch is far
+        # from it (Orbit.tc_epoch); seeded by a stage-3 hint and in no
+        # relation, but mapped so each orbit has its own leaf symbol.
+        "tc_sampled": "tc_sampled",
         # `tp` appears in no relation -- sympy hangs on the Kepler equation,
         # which is exactly why the tc solver below is a one-way channel -- but
         # it MUST be mapped anyway (review 8.1.1).  A mapped path becomes a

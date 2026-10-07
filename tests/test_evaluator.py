@@ -264,11 +264,15 @@ def test_tc_shift_reships_refolded_phased_data(rvonly_evaluator):
 
     period0, _ = _period_and_logP(system, model, base_raw)
     ip = system.get_internal_point(model, base_raw)
-    tc0 = float(np.atleast_1d(ip[system.orbit.tc.label])[0])
-    shifted_raw = ev.set_value("orbit.b.tc", tc0 + 0.25 * period0, base_raw)
-    shifted = ev.eval_plots(
-        shifted_raw, changed_label=ev.label_for_path("orbit.b.tc")
-    )
+    # The SAMPLED conjunction is the slider: kelt4's TESS-era seed is far
+    # from its RVs, so this fixture samples `tc_sampled` and derives `tc`
+    # (orbit.md, "tc is SAMPLED near the data").
+    tc_name = system.orbit._sampled_tc_name(0)
+    tc_param = getattr(system.orbit, tc_name)
+    tc0 = float(np.atleast_1d(ip[tc_param.label])[0])
+    path = f"orbit.b.{tc_name}"
+    shifted_raw = ev.set_value(path, tc0 + 0.25 * period0, base_raw)
+    shifted = ev.eval_plots(shifted_raw, changed_label=ev.label_for_path(path))
 
     # tc reaches the phased spec through param_deps (not skipped) ...
     assert pid in shifted

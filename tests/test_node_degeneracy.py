@@ -243,6 +243,10 @@ def _antipodal_point(system, point):
     """
     orbit = system.orbit
     out = {k: np.array(v) for k, v in point.items()}
+    # The SAMPLED conjunction (orbit.md, "tc is SAMPLED near the data"):
+    # `tc` here, whose seed lies inside its data's span, and `tc_sampled`
+    # on an orbit seeded outside it (tests/test_tc_epoch.py).
+    tc_param = getattr(orbit, orbit._sampled_tc_name(0))
     phys = {
         name: getattr(orbit, name).element_phys_from_raw(
             0, _element_raw(getattr(orbit, name), point, 0)
@@ -252,10 +256,12 @@ def _antipodal_point(system, point):
             "ybigomega",
             "secosw",
             "sesinw",
-            "tc",
             "logP",
         )
     }
+    phys["tc"] = tc_param.element_phys_from_raw(
+        0, _element_raw(tc_param, point, 0)
+    )
     ecc = phys["secosw"] ** 2 + phys["sesinw"] ** 2
     omega = np.arctan2(phys["sesinw"], phys["secosw"])
     period = 10.0 ** phys["logP"]
@@ -267,7 +273,7 @@ def _antipodal_point(system, point):
         * period
         / (2.0 * np.pi)
     )
-    tf = orbit.tc._raw_transform
+    tf = tc_param._raw_transform
     lo, up = float(tf["lowers"][0]), float(tf["uppers"][0])
     tc_new = lo + np.mod(phys["tc"] + delta - lo, up - lo)
 
@@ -277,7 +283,7 @@ def _antipodal_point(system, point):
             param, out, 0, param.element_raw_from_phys(0, -phys[name])
         )
     _set_element_raw(
-        orbit.tc, out, 0, orbit.tc.element_raw_from_phys(0, tc_new)
+        tc_param, out, 0, tc_param.element_raw_from_phys(0, tc_new)
     )
     return out
 
@@ -354,9 +360,17 @@ def test_the_fold_maps_the_partner_back(astrometry_only):
     system, model = astrometry_only
     point = model.initial_point()
     partner = _antipodal_point(system, point)
+    tc_name = system.orbit._sampled_tc_name(0)
     names = [
         f"{system.orbit.prefix}.{n}_raw"
-        for n in ("xbigomega", "ybigomega", "secosw", "sesinw", "tc", "logP")
+        for n in (
+            "xbigomega",
+            "ybigomega",
+            "secosw",
+            "sesinw",
+            tc_name,
+            "logP",
+        )
     ]
     posterior = xr.Dataset(
         {

@@ -1450,8 +1450,16 @@ _KELT4_DIR = Path(__file__).parent.parent / "examples" / "kelt4"
 # bound also has a first-principles ceiling: cosi's Schur-complement
 # curvature is 0.0044 nats/raw^2, so the |grad| < 1e-4 stopping set spans
 # +/-0.023 raw = +/-5e-4 in cosi, and 2e-3 absolute sits above even that.
+#
+# Re-measured 2026-10-07 after review 2.14.9 moved this config's sampled
+# conjunction ~1164 periods to its RVs (`orbit.tc_sampled`; orbit.md):
+# 16 seeds, lp full width 5.2e-6 nats, cosi 7.2e-4 absolute, 167-297
+# iterations.  The lp stopping set is wider in the new coordinates (the
+# |grad| < 1e-4 criterion is in raw units, and the raw axes changed), so
+# its bound is again ~5x the width -- still four orders of magnitude below
+# the 0.24 nats of the first-dip stop this test exists to catch.
 _ULP_COSI_ATOL = 2.0e-3  # absolute, in cosi
-_ULP_LP_ATOL = 5.0e-6  # nats
+_ULP_LP_ATOL = 2.5e-5  # nats
 _ULP_SEEDS = (0, 1, -1, 3)
 
 
@@ -1595,7 +1603,7 @@ def test_ulp_perturbation_does_not_move_the_polished_start(
     lp_width = max(lps) - min(lps)
     assert lp_width <= _ULP_LP_ATOL, (
         f"one ulp of arithmetic moved the polished lp by {lp_width:.3g} nats "
-        f"({lps}); at a converged optimum it moves at second order (~1e-6 "
+        f"({lps}); at a converged optimum it moves at second order (~5e-6 "
         f"here; at the old gtol 0.01 stop it was 0.24)."
     )
 
