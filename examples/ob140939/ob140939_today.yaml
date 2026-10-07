@@ -1,0 +1,127 @@
+# OGLE-2014-BLG-0939 with everything available TODAY (best practice).
+# ob140939.yaml is the validation: it reproduces Yee et al. (2015) with only
+# the inputs they used.  This config differs from it in three ways, all in
+# ob140939_today.params.yaml / ob140939_today.sed.yaml:
+#   1. the source proper motion is Gaia DR3's ABSOLUTE measurement, not
+#      Yee's bulge-relative OGLE value;
+#   2. a source SED (Gaia G + 2MASS JHKs, fetched with mkticsed and vetted
+#      for the crowded bulge) ties the OGLE source flux to the source star
+#      through the calibrated OGLE zero point;
+#   3. Yee's independently measured instrumental (I - [3.6]) source colour
+#      ties the Spitzer source flux to OGLE's (Spitzer has no absolute zero
+#      point and the BC grid no IRAC column, so it cannot be SED-tied).
+run:
+  name: "OB140939_today"
+
+prefix: "fitresults/OB140939_today"
+logger_level: INFO   # DEBUG, INFO, or WARNING
+
+# 1. Define the physical bodies!
+star:
+  - name: "Lens"
+  - name: "Source"
+
+# 2. The microlensing event: one entry per physical body on the lens: and
+# source: lists (body: <component>.<name>), event-level options on
+# mulensevent:.
+lens:
+  - body: star.Lens
+
+source:
+  - body: star.Source
+
+mulensevent:
+  - finite_source: False
+    #mag_method: "auto_vbbl" # default = auto_vbbl, but accepts anything MuLensModel does: point_source, point_source_approx, vbbl, adaptive_contour, hexadecapole, quadrupole, ray_shooting
+    t0_par: 2456836.22
+
+galacticmodel:
+  - name: "OB140939"
+    anchor_idx: 1 # in mulensing, we anchor to the source by convention
+
+band:
+  - name: "OGLE_I"
+    # The BC grid has Cousins I, not an OGLE-IV column; OGLE-IV I is
+    # calibrated onto (and close to) Cousins I.
+    filter: "Generic/Cousins.I"
+    ld_law: "linear"
+  - name: "Spitzer_36"
+    filter: "Spitzer.IRAC.36"
+    ld_law: "linear"
+
+mulensinstrument:
+  - name: "OGLE4"
+    # Yee et al.'s published FLUXES, read as given (no magnitude round trip).
+    # Flux system: 1 unit = I 22 (calibrated OGLE-IV I, Vega; baseline
+    # 437.3 -> I = 15.40); the zero point is stated in the params file.
+    file: "n20100310.I.OGLE.OB140939.flux.dat"
+    data_format: flux
+    observer_location: "earth" # earth, spitzer, kepler, roman, a site name (CTIO), "lon_deg,lat_deg[,height_m]" (lon FIRST), or filename of horizons ephemeris to interpolate
+    band: "OGLE_I"
+    magsys: Vega
+    reference: true # peg all plotted data + model curves to this instrument's f_source/f_blend (defaults to the first instrument)
+  - name: "Spitzer"
+    # Yee et al.'s published Spitzer [3.6] fluxes, on the same instrumental
+    # scale as the OGLE file (1 unit = "22"), but with no absolute zero
+    # point: NOT SED-tied.  Yee's colour prior ties its source flux instead.
+    file: "n20140605.L.Spitzer.OB140939.flux.dat"
+    data_format: flux
+    observer_location: "spitzer"
+    band: "Spitzer_36"
+
+# Source SED: catalog photometry of the baseline object (= source).
+sed:
+  file: "ob140939_today.sed.yaml"
+
+parameter_file: "ob140939_today.params.yaml"
+
+sampler:
+  # ptde_async: the params file seeds all FOUR Yee+2015 degenerate
+  # solutions (initval lists), and only PTDE round-robins its chains
+  # across seeds -- nuts would start every chain at seed 0. PTDE's
+  # tempering also lets chains cross between the degenerate basins;
+  # outputs/modes.py then reports each mode separately.
+  method: ptde          # synchronous PTDE, the recommended default since PR #376 (review 2.4.9): the VBM straggler tail that justified ptde_async is gone
+  # PTDE: no separate tuning phase needed -- the seeds are polished to
+  # their basin optima before sampling and burn-in is trimmed at wrap-up
+  # (convergence.find_burnin); long draws instead, for round trips
+  # between the four degenerate basins.
+  tune: 0
+  draws: 50000
+  # Run all 50000 draws: the default min_ess/max_rhat early stop passed at
+  # ~4000 draws (2026-10-06) while the whole DE ensemble was still drifting
+  # along the lens distance-mass ridge -- R-hat across chains that share one
+  # population cannot see a collective drift -- leaving the lens at 2.8 kpc
+  # against the converged 3.3-3.6.
+  max_rhat: null
+  min_ess: null
+  # Densified tempering ladder, validated empirically: auto (17 rungs)
+  # left adjacent-swap acceptance at 5-7% and 3 round trips -- the
+  # ladder froze below T ~ 75 and the mode weights were initialization
+  # artifacts. At 24 rungs (measured Lambda = 9.4; use > 2*Lambda+1
+  # with margin) swap acceptance is 50-65%, round trips flow, and the
+  # per-rung basin-occupancy profile is smooth.  A smooth profile proves
+  # TRANSPORT along the ladder, not correct T=1 weights: on 2026-08-08 it
+  # looked exactly like this while every chain sat in one basin (zero T=1
+  # mode changes on a replay; the ladder funnels descending replicas).  The
+  # weights are trusted only because the T=1 chains themselves switch
+  # basins -- check modes.txt's 'mode changes' count, never the profile.
+  # This config, converged (2026-10-07, all 50000 draws): u0,-,- 86%
+  # (validation config: about 90%, 89-94% across repeats -- the same
+  # preference within the repeat scatter), lens 3.5 +/- 0.4 kpc and
+  # 0.22 +/- 0.04 Msun; Yee's dchi2 = 8 and 17 solutions rejected; the
+  # source a reddened bulge K giant (Teff ~4300 K, R ~19 Rsun, ~9 kpc).
+  n_temps: 24
+  # Keep thinned hot-rung draws: they detect posterior-suppressed modes
+  # (occupancy ~exp(-dlp/T)) for the seeded-solution ledger, so solutions
+  # nobody seeded still show up as "considered and rejected".  Left explicit
+  # for documentation only -- 'auto' (the default) already turns this on for
+  # a microlensing topology.  Costs ~37% of the trace file here.
+  store_hot_chains: true
+  recompute_trace: True
+  # The seeds are literature solution estimates, not posterior draws,
+  # so force the pre-whitening polish, which 'auto' skips for hint-less
+  # multi-seed sets.  Quoted: bare `on` is a boolean to PyYAML (YAML 1.1) and
+  # the string "on" to the GUI's ruamel loader (YAML 1.2); both resolve to the
+  # same default step cap here, but only the quoted form says so unambiguously.
+  seed_polish: "on"

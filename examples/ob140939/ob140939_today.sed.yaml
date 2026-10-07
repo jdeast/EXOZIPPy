@@ -1,0 +1,63 @@
+# From mkticsed (TIC 169097367 = Gaia DR3 4118632779506798848, 0.44"):
+#   python -m exozippy.utilities.mkticsed TIC169097367 --star-name Source --name ob140939_today
+# (SIMBAD gives no TIC ID for the event name), vetted by hand for the
+# crowded bulge -- mkticsed does not judge crowding.
+# Gaia DR3 RUWE = 0.9930
+#
+# Every row is the SOURCE alone (photType pos: [Source]): the baseline
+# object is the source (Yee+2015: blending consistent with zero; the free
+# OGLE blend is fit separately in the light curve) and the lens (~0.2 Msun
+# M dwarf at ~3.4 kpc) is negligible in every band here.
+
+model: NextGen
+filters:
+    # DR3 G on the DR3 passband.  err 0.02: the 0.003 formal error is not
+    # realistic in a crowded bulge field.
+    - name: "GAIA/GAIA3.G"
+      mag: 16.786394
+      err: 0.02
+      magsys: Vega
+      photType:
+        pos: [Source]
+
+    # Gaia BP/RP dropped: phot_bp_rp_excess_factor = 1.45, crowding-contaminated.
+    # - name: "GAIA/GAIA3.Gbp"
+    #   mag: 18.096233
+    #   err: 0.02
+    #   magsys: Vega
+    # - name: "GAIA/GAIA3.Grp"
+    #   mag: 15.61981
+    #   err: 0.02
+    #   magsys: Vega
+
+    # 2MASS 17471226-2122582 (0.47"), Qflg AAA; VVV DR2 at 0.42" agrees.
+    - name: "2MASS/2MASS.J"
+      mag: 13.739
+      err: 0.082
+      magsys: Vega
+      photType:
+        pos: [Source]
+
+    - name: "2MASS/2MASS.H"
+      mag: 12.886
+      err: 0.083
+      magsys: Vega
+      photType:
+        pos: [Source]
+
+    - name: "2MASS/2MASS.Ks"
+      mag: 12.566
+      err: 0.068
+      magsys: Vega
+      photType:
+        pos: [Source]
+
+    # WISE W1/W2 dropped: the AllWISE source is 2.7" off in a ~6" beam -- blended.
+    # - name: "WISE/WISE.W1"
+    #   mag: 11.784
+    #   err: 0.04
+    #   magsys: Vega
+    # - name: "WISE/WISE.W2"
+    #   mag: 12.056
+    #   err: 0.047
+    #   magsys: Vega

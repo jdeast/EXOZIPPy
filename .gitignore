@@ -123,6 +123,10 @@ ezsuite6_full.*.txt
 # committing them asserts they are shipped examples, and 160 of them failed
 # CI saying otherwise.  Kept on disk, out of the repo.
 examples/ob140939/ob140939_*.yaml
+# ...except the shipped best-practice variant beside the Yee+2015 validation.
+!examples/ob140939/ob140939_today.yaml
+!examples/ob140939/ob140939_today.params.yaml
+!examples/ob140939/ob140939_today.sed.yaml
 examples/ob161003/ob161003_*.yaml
 examples/ob170114/ob170114_*.yaml
 
