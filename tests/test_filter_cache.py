@@ -7,10 +7,13 @@ already on disk or monkeypatches the download.
 import os
 import pickle
 
+import pytest
+
 from exozippy.filters import filter as filter_module
 from exozippy.filters.filter import (
     DEFAULT_FILTER_DIR,
     Filter,
+    _PortableUnpickler,
     _writable_filter_root,
     filter_cache_root,
 )
@@ -175,3 +178,75 @@ def test_str_does_not_raise():
     # ASSERT
     assert "2MASS.J" in text
     assert str(DEFAULT_FILTER_DIR / "2MASS") in text
+
+
+_GAIA_DR3_IDS = ("GAIA/GAIA3.G", "GAIA/GAIA3.Gbp", "GAIA/GAIA3.Grp")
+
+
+@pytest.mark.parametrize("filter_id", _GAIA_DR3_IDS)
+def test_the_gaia_dr3_profiles_ship_and_load_without_the_network(
+    filter_id, tmp_path, monkeypatch
+):
+    """
+    Given the Gaia DR3 curves mkticsed writes its Gaia rows against,
+    When Filter is constructed for one with downloads refused,
+    Then it is read from the package directory, nothing is created in the
+      cache or the package, and it carries a transmission curve.
+    """
+    # ARRANGE
+    monkeypatch.setenv("EXOZIPPY_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(Filter, "_download_filter", _refuse_to_download)
+    before = sorted((DEFAULT_FILTER_DIR / "GAIA").iterdir())
+
+    # ACT
+    filt = Filter(filter_id)
+
+    # ASSERT
+    assert filt.filterDirectory == DEFAULT_FILTER_DIR / "GAIA"
+    assert filt.filterID == filter_id
+    wave, trans = filt.ProcessedFilterCurve
+    assert len(wave) == len(trans) > 0
+    assert not (tmp_path / "cache").exists()
+    assert sorted((DEFAULT_FILTER_DIR / "GAIA").iterdir()) == before
+
+
+@pytest.mark.parametrize("filter_id", _GAIA_DR3_IDS)
+def test_the_shipped_gaia_dr3_pickles_carry_no_machine_baggage(filter_id):
+    """
+    Given a shipped Gaia DR3 .filter pickle,
+    When it is unpickled raw,
+    Then it holds no requests.Session and no filterDirectory of the machine
+      that wrote it, so the file is the same wherever it is installed.
+    """
+    # ARRANGE
+    path = DEFAULT_FILTER_DIR / "GAIA" / (filter_id.split("/")[1] + ".filter")
+
+    # ACT
+    with open(path, "rb") as fh:
+        state = _PortableUnpickler(fh).load()
+
+    # ASSERT
+    assert "_session" not in state
+    assert state["filterDirectory"] is None
+    assert b"requests" not in path.read_bytes()
+
+
+def test_a_written_filter_file_drops_the_session_and_directory():
+    """
+    Given a loaded Filter,
+    When the state a .filter file stores is taken,
+    Then the session and the writer's directory are gone from it, while
+      __getstate__ (which copy/deepcopy also use) still keeps both.
+    """
+    # ARRANGE
+    filt = Filter(_SHIPPED_ID)
+
+    # ACT
+    file_state = filt._file_state()
+    full_state = filt.__getstate__()
+
+    # ASSERT
+    assert "_session" not in file_state
+    assert file_state["filterDirectory"] is None
+    assert "_session" in full_state
+    assert full_state["filterDirectory"] == str(DEFAULT_FILTER_DIR / "2MASS")
