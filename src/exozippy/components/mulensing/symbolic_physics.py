@@ -1,6 +1,7 @@
 import sympy as sp
 
 from ...constants import DAYS_PER_YEAR, KAPPA, RSUN_TO_AU
+from ..orbit.bodies import component_instance_names, orbit_types
 
 # 1. Define all possible symbols
 # These MUST match the strings produced by ConfigManager.finalize_user_params
@@ -124,10 +125,24 @@ def get_symbol_map(event_cfg, system_config):
     # In keplerian orbital-motion mode NONE of the geometry symbols
     # (alpha's arctan2 pair, s <-> log_s) map: the geometry is derived
     # from the referenced orbit and no sampled coordinate exists for the
-    # engine to seed (conventions.md C24).  The key lives on the COMPANION
-    # entries now.
+    # engine to seed (conventions.md C24).  A companion is in that mode
+    # when its `orbit:` names an orbit of type keplerian (the default).
+    orbit_names = component_instance_names(system_config, "orbit")
+    types = orbit_types(system_config)
+
+    def _type_of(ref):
+        if isinstance(ref, int) or str(ref).isdigit():
+            idx = int(ref)
+        elif ref in orbit_names:
+            idx = orbit_names.index(ref)
+        else:
+            return None  # resolve_orbit_ref raises on it at construction
+        return types[idx] if idx < len(types) else "keplerian"
+
     keplerian = any(
-        isinstance(e, dict) and e.get("orbital_motion") == "keplerian"
+        isinstance(e, dict)
+        and e.get("orbit") is not None
+        and _type_of(e["orbit"]) == "keplerian"
         for e in lens_block[1:]
     )
 

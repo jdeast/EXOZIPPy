@@ -47,7 +47,7 @@ mulensevent.pi_E_N:
 mulensevent.pi_E_E:
     initval: 0.149
 
-# s and alpha are derived from orbit L (orbital_motion: keplerian), so the
+# s and alpha are derived from orbit L (the lens companion's `orbit: L`, keplerian), so the
 # published s_0 = 0.4294 and alpha_0 = 189.08 are the acceptance check,
 # not inputs.
 

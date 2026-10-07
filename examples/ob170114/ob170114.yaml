@@ -1,6 +1,6 @@
 # OGLE-2017-BLG-0114: a planetary binary lens WITH SOURCE ORBITAL MOTION
-# (xallarap) -- the shipped worked example of `source_orbital_motion:
-# keplerian` (conventions.md C25; review 8.6.9).
+# (xallarap) -- the shipped worked example of a source moving on a
+# keplerian orbit, `source_orbit:` (conventions.md C25; review 8.6.9).
 #
 # references:
 #   * Mroz, M. J., et al. 2026 (arXiv:2606.20555) -- the comprehensive
@@ -38,7 +38,7 @@ star:
 planet:
   - name: "b"
 
-# The SOURCE binary's orbit.  The mulensevent's source_orbital_motion
+# The SOURCE binary's orbit.  The mulensevent's source_orbit:
 # consumes it: the luminous source's barycentric track, in Einstein units
 # a_1/(D_S * theta_E), enters the trajectory at the parallax slot (C25).
 orbit:
@@ -60,8 +60,7 @@ mulensevent:
     # anchor (their t_0,par = t_0,xi; our 5d one-anchor rule is the same
     # convention).
     t0_par: 2457933.5
-    source_orbital_motion: keplerian
-    source_orbit: "S"
+    source_orbit: "S"           # a keplerian orbit: the source moves on it
     # every start value is seeded from the published solution, so the
     # peak finder does not run
 

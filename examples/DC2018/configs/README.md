@@ -40,7 +40,7 @@ on -- and they are cheap to port when one is next needed:
     `fitthetae`) move to a `mulensevent:` block (a `mmexofast:` key
     is gone: run `../convert_mmexofast_json.py` on the ported config);
   * each lens body gets its own `lens: - body: star.X` entry, and
-    `orbital_motion`/`orbit` go on the COMPANION's entry;
+    `orbit` goes on the COMPANION's entry (the orbit's `type:` sets the motion);
   * each source gets `source: - body: star.Y`, carrying `fitu0te` and
     `star_constrains_rho`;
   * params keys move by role: `t_0`/`u_0`/`rho` to `source.<Src>.*`,

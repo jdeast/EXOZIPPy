@@ -11,7 +11,11 @@ from exoplanet_core.pymc import ops as ops
 
 from exozippy.components.component import Component, in_topology
 from exozippy.components.parameter import Parameter
-from exozippy.components.parameterization import merge_options, mode_manifest
+from exozippy.components.parameterization import (
+    merge_options,
+    mode_manifest,
+    restrict_active,
+)
 from exozippy.config import user_entry
 from exozippy.outputs.prose import get_collector, join_names
 from exozippy.potentials import soft_lower_bound, soft_upper_bound
@@ -19,7 +23,13 @@ from exozippy.potentials import soft_lower_bound, soft_upper_bound
 # this import is required even though it's not used explicitly
 # it registers all the mathematical relations
 from . import physics
-from .bodies import component_instance_names, parse_orbit_bodies
+from .bodies import TAYLOR_TYPES, component_instance_names, parse_orbit_bodies
+
+# Every legal `type:` of an orbit block.  `keplerian` is the default; the
+# Taylor types are the low-order expansions of an orbit too long to resolve
+# (orbit.md "Taylor orbits"); `nbody` is reserved for the integrator backend
+# review 8.8.15 describes and is refused until it exists.
+ORBIT_TYPES = ("keplerian",) + TAYLOR_TYPES + ("nbody",)
 
 
 def amplitude_constrained_orbits(system, orbit):
@@ -207,6 +217,7 @@ class Orbit(Component):
         super().__init__(config, config_manager)
         self.label = "Orbital Parameters"
 
+        self.types = self._parse_types()
         self.primary_bodies, self.companion_bodies = parse_orbit_bodies(
             self.config, getattr(config_manager, "system_config", None)
         )
@@ -214,6 +225,64 @@ class Orbit(Component):
         self._parse_ecc_parameterization()
 
         self._reject_wip_parameterizations()
+
+    # Orbit-block keys that only mean something for a Keplerian orbit.  On a
+    # Taylor orbit they would be silently inert, so they raise instead.
+    _KEPLERIAN_ONLY_KEYS = ("fitvcve", "fitchord", "i180", "global_search")
+
+    def _parse_types(self):
+        """Read and validate each orbit block's `type:` (default keplerian).
+
+        A Taylor orbit (`linear`, `quadratic`) is a different MODEL, not a
+        coordinate choice -- it has a different parameter set -- so `type:`
+        is a value, the way `band.ld_law` is, rather than a fit<x> boolean
+        (components.md "Config flag vocabulary").  `epoch:` is the Taylor
+        expansion's reference time and means nothing on a Keplerian orbit,
+        whose epoch is `tc`; the Keplerian-only switches mean nothing on a
+        Taylor one.  Either way round the key would be silently inert, so
+        both raise.
+        """
+        types = []
+        for i, c in enumerate(self.config):
+            c = c or {}
+            name = c.get("name", str(i))
+            t = c.get("type", "keplerian")
+            if t not in ORBIT_TYPES:
+                raise ValueError(
+                    f"[{self.prefix}.{name}] type: {t!r} is not an orbit "
+                    f"type; expected one of {list(ORBIT_TYPES)} (default "
+                    f"keplerian).  Orbit types are case-sensitive."
+                )
+            if t == "nbody":
+                raise NotImplementedError(
+                    f"[{self.prefix}.{name}] type: nbody is reserved for an "
+                    f"N-body integrator backend that does not exist yet "
+                    f"(review 8.8.15).  Use keplerian, or linear/quadratic "
+                    f"for an orbit too long for the data to resolve."
+                )
+            if t in TAYLOR_TYPES:
+                bad = [k for k in self._KEPLERIAN_ONLY_KEYS if k in c]
+                if bad:
+                    raise ValueError(
+                        f"[{self.prefix}.{name}] {bad} only apply to a "
+                        f"Keplerian orbit; a type: {t} orbit has no "
+                        f"eccentricity, inclination or period to set them "
+                        f"on.  Remove them."
+                    )
+            elif "epoch" in c:
+                raise ValueError(
+                    f"[{self.prefix}.{name}] 'epoch:' is the reference epoch "
+                    f"of a Taylor orbit (type: linear or quadratic); a "
+                    f"Keplerian orbit's epoch is its tc.  Remove the key or "
+                    f"set the orbit's type."
+                )
+            types.append(t)
+        return types
+
+    @property
+    def is_taylor(self):
+        """Per orbit: is this a Taylor orbit (type linear or quadratic)?"""
+        return np.array([t in TAYLOR_TYPES for t in self.types], dtype=bool)
 
     # The two eccentricity parameterizations, as a mode table (see
     # components/parameterization.py).  `hk` samples the sqrt(e)cos/sin(omega)
@@ -643,6 +712,12 @@ class Orbit(Component):
             if system is not None
             else [False] * self.n_elements
         )
+        # A Taylor orbit has no eccentricity at all: its (inactive) Keplerian
+        # entries stay on the plain sqrt(e) mode, so no V_c/V_e Jacobian or
+        # root mixture is ever built for it.
+        default_on = [
+            on and not taylor for on, taylor in zip(default_on, self.is_taylor)
+        ]
         fitvcve = []
         for i, c in enumerate(self.config):
             asked = c.get("fitvcve")
@@ -749,6 +824,36 @@ class Orbit(Component):
     def config_schema(cls):
         return [
             {
+                "key": "type",
+                "kind": "option",
+                "accepts": list(ORBIT_TYPES),
+                "required": False,
+                "doc": (
+                    "What kind of orbit this is.  'keplerian' (default): a "
+                    "two-body Keplerian arc.  'linear' / 'quadratic': an "
+                    "orbit too long for the data to resolve, written as the "
+                    "first (second) time derivatives of what its consumers "
+                    "measure about 'epoch:' -- the primary star's RV slope "
+                    "gammadot (and curvature gammaddot), or a lens "
+                    "companion's ds_dt/dalpha_dt -- with no period, "
+                    "eccentricity, mass or K.  Needs an explicit 'primary:'; "
+                    "'companion:' may be omitted for an unseen body.  "
+                    "'nbody' is reserved and not implemented."
+                ),
+            },
+            {
+                "key": "epoch",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Taylor orbits only: the BJD_TDB the expansion is "
+                    "about.  Default: the midpoint of the primary star's RV "
+                    "span (EXOFASTv2's RVEPOCH); a lens-read orbit is always "
+                    "anchored at the event's t0_par."
+                ),
+            },
+            {
                 "key": "primary",
                 "kind": "ref",
                 "accepts": ["star", "planet"],
@@ -828,13 +933,29 @@ class Orbit(Component):
 
     def star_membership(self, star_idx):
         """
-        Orbits containing star star_idx, as [(orbit_index, role), ...] with
-        role 'primary' or 'companion'.  Used by instruments to decide which
-        orbits move (or blend with) a given star.
+        KEPLERIAN orbits containing star star_idx, as [(orbit_index, role),
+        ...] with role 'primary' or 'companion'.  Used by instruments to
+        decide which orbits move (or blend with) a given star.
+
+        Taylor orbits are deliberately NOT here: every caller of this
+        projects Keplerian elements, which a Taylor orbit does not have.  A
+        consumer that can use one asks `taylor_membership`, and one that
+        cannot is refused at stage 3 by `_taylor_consumers` -- never left to
+        drop the orbit in silence.
         """
+        return self._membership(star_idx, taylor=False)
+
+    def taylor_membership(self, star_idx):
+        """`star_membership`'s twin over the TAYLOR orbits."""
+        return self._membership(star_idx, taylor=True)
+
+    def _membership(self, star_idx, taylor):
         out = []
         key = ("star", int(star_idx))
+        is_taylor = self.is_taylor
         for i in range(self.n_elements):
+            if bool(is_taylor[i]) != taylor:
+                continue
             if key in self.primary_bodies[i]:
                 out.append((i, "primary"))
             elif key in self.companion_bodies[i]:
@@ -1175,6 +1296,11 @@ class Orbit(Component):
         """Stage 3: Calculate window constraints and declare the manifest."""
         shape = (self.n_elements,)
 
+        # Taylor orbits first: which consumer reads each one decides its
+        # parameters, and an unsupported consumer must fail before anything
+        # is built against an orbit it cannot read.
+        self._taylor_consumer_map = self._taylor_consumers(system)
+
         # 1. Peer into the config (Pre-flight windows)
         # tc is periodic (tc and tc + P are the same solution), so one full
         # period is the right hard window -- but it must be centred on the tc
@@ -1381,6 +1507,18 @@ class Orbit(Component):
         spin_targets = rm_orbits_in_system(system) | dt_orbits_in_system(
             system
         )
+        taylor_targets = sorted(
+            nm
+            for nm in spin_targets
+            if nm in self.names and self.is_taylor[list(self.names).index(nm)]
+        )
+        if taylor_targets:
+            raise NotImplementedError(
+                f"[{self.prefix}] rm:/dopptom name Taylor orbit(s) "
+                f"{taylor_targets}; the Rossiter-McLaughlin and Doppler "
+                f"tomography models need a transit geometry, which a "
+                f"type: linear/quadratic orbit does not have."
+            )
         unknown_targets = spin_targets - set(self.names)
         if unknown_targets:
             raise ValueError(
@@ -1504,19 +1642,303 @@ class Orbit(Component):
                     "i > 90 deg" if own_i180.any() else "i < 90 deg",
                 )
 
-    def _lens_orbit_refs(self, system, comp_name, idx_attr, mode_key, ref_key):
-        """Orbit indices the ``comp_name`` microlensing component references
-        through ``ref_key`` when its ``mode_key`` is 'keplerian' (empty set
-        when none).
+        # Taylor orbits (type: linear | quadratic).  Every Keplerian entry
+        # above is INACTIVE on them -- not derived from anything, not
+        # reported: a Taylor orbit must self-declare that it has no period,
+        # eccentricity, mass or K (review 8.8.14, "inactive must never be
+        # reported") -- and the Taylor coefficients its consumers read are
+        # active on them alone.  A system with no Taylor orbit takes neither
+        # branch, so its manifest is exactly what it always was.
+        if self.is_taylor.any():
+            keplerian = ~self.is_taylor
+            if not keplerian.any():
+                # Nothing Keplerian at all (an RV trend alone): a parameter
+                # no instance has is not a parameter of this system, so it
+                # is omitted rather than declared wholly inactive -- the
+                # rule mode_manifest applies, and the reason every
+                # Keplerian consumer below has nothing to read.
+                self.manifest = {}
+            for key in list(self.manifest):
+                self.manifest[key] = restrict_active(
+                    self.manifest[key], keplerian, self.n_elements
+                )
+            self.taylor_epoch = self._taylor_epochs(
+                system, self._taylor_consumer_map
+            )
+            self.manifest.update(
+                self._taylor_manifest(self._taylor_consumer_map)
+            )
+            self._hint_rv_trends(system, self._taylor_consumer_map)
+        else:
+            self.taylor_epoch = np.full(self.n_elements, np.nan)
 
-        Post-split homes (8.6.17): the keplerian LENS motion keys
-        (``orbital_motion``/``orbit``) live on the lens component's
-        COMPANION entries; the xallarap keys
-        (``source_orbital_motion``/``source_orbit``) live on the single
-        ``mulensevent:`` block.  Reads the component INSTANCE when it exists
-        (its resolved ``idx_attr``) and falls back to the raw config block
-        -- register_parameters runs per component and the microlensing
-        components may not be constructed yet in a partial harness.
+    # Which Taylor coefficients each consumer reads, per orbit type.  A
+    # coefficient is active on an orbit exactly where some consumer of that
+    # orbit reads it, the way bigomega exists only where astrometry does.
+    TAYLOR_COEFFS = {
+        "rv": {
+            "linear": ("gammadot",),
+            "quadratic": ("gammadot", "gammaddot"),
+        },
+        "lens": {"linear": ("ds_dt", "dalpha_dt")},
+    }
+
+    def _taylor_consumers(self, system):
+        """{taylor orbit index: set of consumer kinds} -- "rv" and/or "lens".
+
+        RAISES, naming the orbit, for every consumer that would otherwise
+        read a Taylor orbit as if it were Keplerian or drop it in silence:
+        astrometry, transits (a planet whose orbit_ndx points at one),
+        Rossiter-McLaughlin/Doppler tomography (refused where the spin
+        targets are read), xallarap, an RV star in the COMPANION group (its
+        trend is the primary's scaled by a mass ratio no Taylor orbit has),
+        and a quadratic lens orbit (the magnification backends take first
+        derivatives only).  A Taylor orbit that NOTHING reads raises too: its
+        coefficients would be free dimensions no likelihood term constrains.
+        """
+        consumers = {int(o): set() for o in np.nonzero(self.is_taylor)[0]}
+        if not consumers:
+            return consumers
+        components = getattr(system, "active_components", None) or {}
+
+        def name(o):
+            return self.names[o]
+
+        rv = components.get("rvinstrument")
+        if rv is not None:
+            for s in sorted(set(rv.star_ndx)):
+                for o, role in self.taylor_membership(s):
+                    if role != "primary":
+                        raise NotImplementedError(
+                            f"[{self.prefix}.{name(o)}] the RV star (star "
+                            f"{s}) is in this Taylor orbit's COMPANION "
+                            f"group.  Its trend would be the primary's "
+                            f"scaled by -m_primary/m_companion, a mass ratio "
+                            f"a type: {self.types[o]} orbit does not have; "
+                            f"put the observed star in the primary group."
+                        )
+                    consumers[o].add("rv")
+
+        for o in self._lens_taylor_orbits(system):
+            if self.types[o] not in self.TAYLOR_COEFFS["lens"]:
+                raise NotImplementedError(
+                    f"[{self.prefix}.{name(o)}] a lens companion moves on "
+                    f"this type: {self.types[o]} orbit, but the "
+                    f"magnification backends take first derivatives only "
+                    f"(ds_dt, dalpha_dt; conventions.md C24).  Use type: "
+                    f"linear, or keplerian."
+                )
+            consumers[o].add("lens")
+
+        for o in self._lens_xallarap_orbits(system):
+            if o in consumers:
+                raise NotImplementedError(
+                    f"[{self.prefix}.{name(o)}] the event's source_orbit is "
+                    f"a type: {self.types[o]} orbit; linear xallarap is "
+                    f"deliberately not supported (conventions.md C25, "
+                    f"review 8.6.9) -- a linear source drift is absorbed by "
+                    f"t_E/t_0/u_0/alpha.  Use a keplerian source orbit."
+                )
+
+        planet_cfgs = (
+            getattr(self.config_manager, "system_config", None) or {}
+        ).get("planet") or []
+        if not isinstance(planet_cfgs, list):
+            planet_cfgs = [planet_cfgs]
+        for j, pc in enumerate(planet_cfgs):
+            o = int((pc or {}).get("orbit_ndx", 0))
+            if o in consumers:
+                raise ValueError(
+                    f"[{self.prefix}.{name(o)}] planet "
+                    f"{(pc or {}).get('name', j)!r} has orbit_ndx {o}, a "
+                    f"type: {self.types[o]} orbit.  A planet's transit and "
+                    f"derived geometry need a Keplerian orbit; point its "
+                    f"orbit_ndx at one."
+                )
+
+        ast = components.get("astrometryinstrument")
+        if ast is not None:
+            touched = set()
+            for i, mode in enumerate(ast.modes):
+                if mode == "rel":
+                    o = ast.rel_orbit[i]
+                    if o is None:
+                        continue
+                    if o in consumers:
+                        touched.add(o)
+                    group = self.primary_bodies[o] + self.companion_bodies[o]
+                    stars = {idx for t, idx in group if t == "star"}
+                else:
+                    stars = {int(ast.config[i].get("star_ndx", 0))}
+                for t in consumers:
+                    if stars & {
+                        idx for ty, idx in self.bodies(t) if ty == "star"
+                    }:
+                        touched.add(t)
+            if touched:
+                raise NotImplementedError(
+                    f"[{self.prefix}] astrometry measures a star on Taylor "
+                    f"orbit(s) {[name(o) for o in sorted(touched)]}; the "
+                    f"sky-plane Taylor terms are not implemented for "
+                    f"astrometryinstrument yet (review 8.8.14)."
+                )
+
+        unread = [name(o) for o, c in consumers.items() if not c]
+        if unread:
+            raise ValueError(
+                f"[{self.prefix}] nothing in the model reads Taylor orbit(s) "
+                f"{unread}: a type: linear/quadratic orbit is measured by "
+                f"the RVs of a star in its PRIMARY group, or by a lens "
+                f"companion whose `orbit:` names it.  Its coefficients would "
+                f"be free dimensions no likelihood term constrains."
+            )
+        return consumers
+
+    def _taylor_epochs(self, system, consumers):
+        """Per orbit: the Taylor expansion's reference epoch (BJD_TDB), NaN
+        on a Keplerian orbit.
+
+        A lens-read orbit is anchored at the event's t0_par -- the epoch the
+        parallax and the lens rates already share (C24), and the reason the
+        two effects compose -- so an `epoch:` there must be t0_par or
+        absent.  Otherwise `epoch:` if given, else EXOFASTv2's RVEPOCH
+        default (mkss.pro): the midpoint of the observed span, (min + max)/2
+        over every RV of a star in the orbit's primary group.
+        """
+        epochs = np.full(self.n_elements, np.nan)
+        rv = (getattr(system, "active_components", None) or {}).get(
+            "rvinstrument"
+        )
+        for o, kinds in consumers.items():
+            user = (self.config[o] or {}).get("epoch")
+            if "lens" in kinds:
+                t0_par = float(system.mulensevent.t0_par[0])
+                if user is not None and float(user) != t0_par:
+                    raise ValueError(
+                        f"[{self.prefix}.{self.names[o]}] epoch: {user} "
+                        f"differs from the event's t0_par {t0_par}.  A lens "
+                        f"orbit's rates are anchored at t0_par (C24); set "
+                        f"t0_par on the mulensevent block instead, or drop "
+                        f"'epoch:'."
+                    )
+                epochs[o] = t0_par
+            elif user is not None:
+                epochs[o] = float(user)
+            else:
+                stars = {
+                    idx for t, idx in self.primary_bodies[o] if t == "star"
+                }
+                times = np.concatenate(
+                    [
+                        np.asarray(rv.time[rv.rows(i)], dtype=float)
+                        for i in range(rv.n_elements)
+                        if rv.star_ndx[i] in stars
+                    ]
+                )
+                epochs[o] = 0.5 * (times.min() + times.max())
+                logger.info(
+                    "[%s] Taylor orbit '%s': reference epoch %.6f BJD_TDB, "
+                    "the midpoint of its RVs (set 'epoch:' to choose "
+                    "another).",
+                    self.prefix,
+                    self.names[o],
+                    epochs[o],
+                )
+        return epochs
+
+    def _hint_rv_trends(self, system, consumers):
+        """Seed each RV-read Taylor orbit's coefficients from the data.
+
+        EXOFASTv2's start (mkss.pro): a polynomial of the orbit's order fit
+        to the velocities about the reference epoch, each instrument's own
+        mean removed first (the offsets BETWEEN instruments are not a
+        trend).  A ranked data hint, so a user's `initval` still wins.  The
+        Keplerian signal is in the fit too; this is a start value, and the
+        sampler does the rest.
+        """
+        rv_read = [o for o, kinds in consumers.items() if "rv" in kinds]
+        if not rv_read:
+            return  # only lens-read Taylor orbits: no RVs to seed from
+        rv = system.rvinstrument
+        to_ms = float((u.solRad / u.d).to(u.m / u.s))
+        gammas = np.asarray(rv.gamma_init, dtype=float)
+        for o in rv_read:
+            stars = {idx for t, idx in self.primary_bodies[o] if t == "star"}
+            rows = np.isin(
+                rv.inst_map,
+                [i for i in range(rv.n_elements) if rv.star_ndx[i] in stars],
+            )
+            dt = np.asarray(rv.time, dtype=float)[rows] - self.taylor_epoch[o]
+            resid = (rv.rv * to_ms - gammas[rv.inst_map])[rows]
+            order = 2 if self.types[o] == "quadratic" else 1
+            if dt.size <= order or np.ptp(dt) == 0.0:
+                continue  # too few epochs to say anything: keep the default
+            coeffs = np.polyfit(dt, resid, order)  # highest power first
+            self.config_manager.add_hint(
+                f"{self.prefix}.{o}.gammadot", float(coeffs[-2])
+            )
+            if order == 2:
+                # polyfit's coefficient of dt**2 is HALF the derivative.
+                self.config_manager.add_hint(
+                    f"{self.prefix}.{o}.gammaddot", float(2.0 * coeffs[0])
+                )
+
+    def _taylor_manifest(self, consumers):
+        """Manifest entries for the Taylor coefficients, each active exactly
+        on the Taylor orbits some consumer reads it on."""
+        masks = {}
+        for o, kinds in consumers.items():
+            for kind in kinds:
+                for coeff in self.TAYLOR_COEFFS[kind].get(self.types[o], ()):
+                    masks.setdefault(
+                        coeff, np.zeros(self.n_elements, dtype=bool)
+                    )[o] = True
+        out = {}
+        for coeff in ("gammadot", "gammaddot", "ds_dt", "dalpha_dt"):
+            if coeff not in masks:
+                continue
+            mask = masks[coeff]
+            entry = {}
+            if not mask.all():
+                entry = {"mask": mask, "inactive_value": 0.0}
+            if coeff in ("gammadot", "gammaddot"):
+                epochs = ", ".join(
+                    (f"{self.names[o]}: " if mask.sum() > 1 else "")
+                    + f"{self.taylor_epoch[o]:.6f}"
+                    for o in np.nonzero(mask)[0]
+                )
+                entry["table_note"] = (
+                    r"Reference epoch $t_{\rm ref}$ = " + epochs + r" \bjdtdb"
+                )
+            out[coeff] = entry or None
+        return out
+
+    def taylor_radial_velocity(self, t, orbit_idx):
+        """The line-of-sight velocity trend of Taylor orbit ``orbit_idx``'s
+        PRIMARY group on times ``t``, in the internal RV unit (solRad/d):
+        ``gammadot (t - epoch) [+ gammaddot (t - epoch)**2 / 2]``.
+
+        No constant term: a velocity offset at the epoch is exactly
+        degenerate with each instrument's gamma, which already carries it.
+        """
+        o = int(orbit_idx)
+        if not self.is_taylor[o]:
+            raise ValueError(
+                f"[{self.prefix}.{self.names[o]}] taylor_radial_velocity on "
+                f"a {self.types[o]} orbit; it has no Taylor coefficients."
+            )
+        dt = t - float(self.taylor_epoch[o])
+        v = self.gammadot.value[o] * dt
+        if self.types[o] == "quadratic":
+            v = v + 0.5 * self.gammaddot.value[o] * dt**2
+        return v
+
+    def _lens_orbit_refs(self, system, comp_name, idx_attr, ref_key):
+        """Orbit indices the ``comp_name`` microlensing component references
+        through ``ref_key`` -- of ANY orbit type; the callers filter by
+        `self.types`.  Reads the built component's resolved ``idx_attr``
+        when there is one, else the raw config blocks (the components may
+        not be constructed yet in a partial harness).
         """
         comp = in_topology(system, comp_name)
         if comp is None:
@@ -1527,7 +1949,7 @@ class Orbit(Component):
         blocks = comp if isinstance(comp, list) else [comp]
         out = set()
         for b in blocks:
-            if isinstance(b, dict) and b.get(mode_key) == "keplerian":
+            if isinstance(b, dict):
                 ref = b.get(ref_key)
                 if isinstance(ref, int) or str(ref).isdigit():
                     out.add(int(ref))
@@ -1535,22 +1957,35 @@ class Orbit(Component):
                     out.add(list(self.names).index(ref))
         return out
 
-    def _lens_keplerian_orbits(self, system):
-        """Orbits a lens COMPANION entry drives via ``orbital_motion:
-        keplerian`` (+ ``orbit:``, C24)."""
+    def _lens_companion_orbits(self, system):
+        """Orbits a lens COMPANION entry moves on (its ``orbit:`` key)."""
         return self._lens_orbit_refs(
-            system, "lens", "kep_orbit_idx", "orbital_motion", "orbit"
+            system, "lens", "motion_orbit_idx", "orbit"
         )
 
+    def _lens_keplerian_orbits(self, system):
+        """Keplerian orbits a lens companion's geometry is DERIVED from
+        (C24's keplerian mode)."""
+        return {
+            o
+            for o in self._lens_companion_orbits(system)
+            if self.types[o] == "keplerian"
+        }
+
+    def _lens_taylor_orbits(self, system):
+        """Taylor orbits a lens companion's rates are read from (C24's
+        linear mode)."""
+        return {
+            o
+            for o in self._lens_companion_orbits(system)
+            if self.types[o] in TAYLOR_TYPES
+        }
+
     def _lens_xallarap_orbits(self, system):
-        """Orbits the event's SOURCE moves on (``source_orbital_motion:
-        keplerian`` + ``source_orbit:`` on the mulensevent block, C25)."""
+        """Orbits the event's SOURCE moves on (``source_orbit:`` on the
+        mulensevent block, C25)."""
         return self._lens_orbit_refs(
-            system,
-            "mulensevent",
-            "xal_orbit_idx",
-            "source_orbital_motion",
-            "source_orbit",
+            system, "mulensevent", "xal_orbit_idx", "source_orbit"
         )
 
     def _node_degenerate_orbits(self, system):
@@ -2013,8 +2448,21 @@ class Orbit(Component):
 
     # ...and these are built per ORBIT, so Component._element_expression may
     # slice them to a per-element mask (`tc` is derived on the shifted orbits
-    # only).
-    aligned_context_deps = frozenset({"p", "ar", "chord_sign", "_tc_epoch"})
+    # only).  The group masses (W @ mass, one row per orbit) and `_ltt_mask`
+    # are per orbit too, which a Taylor orbit's restriction of every
+    # Keplerian entry needs: those expressions are then sliced to the
+    # Keplerian orbits.
+    aligned_context_deps = frozenset(
+        {
+            "p",
+            "ar",
+            "chord_sign",
+            "_tc_epoch",
+            "star.mass",
+            "planet.mass",
+            "_ltt_mask",
+        }
+    )
 
     # Parameters whose expressions consume the transiting planet's geometry.
     _CHORD_PARAMS = ("cosi", "chord")
@@ -2189,6 +2637,11 @@ class Orbit(Component):
         return pt.as_tensor_variable(np.asarray(mask, dtype="float64"))
 
     def build_likelihood(self, model, system):
+        if self.is_taylor.all():
+            # Only Taylor orbits: no eccentricity, chord or retarded
+            # geometry exists to bound or describe (their manifest has none
+            # of those parameters -- register_parameters).
+            return
         self._add_eccentricity_bound(system)
         self._add_vcve_terms(system)
         self._add_chord_terms(system)
@@ -2553,6 +3006,14 @@ class Orbit(Component):
                     pt.minimum(threshold[o], planets.max_ecc.value[p]),
                 )
 
+        if self.is_taylor.any():
+            # A Taylor orbit has no eccentricity: its secosw/sesinw are
+            # inactive bookkeeping pins and must not enter a potential.
+            kep = pt.as_tensor_variable(
+                np.nonzero(~self.is_taylor)[0].astype("int32")
+            )
+            e_unclipped = e_unclipped[kep]
+            threshold = threshold[kep]
         pm.Potential(
             f"{self.prefix}.e_collision_bound",
             soft_upper_bound(e_unclipped, threshold, scale=0.88),

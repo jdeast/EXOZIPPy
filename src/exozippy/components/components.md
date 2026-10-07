@@ -141,7 +141,9 @@ make the illegal combinations REPRESENTABLE, so the parser owes an explicit
 "more than one is set" error naming the flags -- an enum would have made that
 state impossible.  That is a real trade and it was made deliberately, not
 overlooked.  `band.ld_law` is NOT a counterexample: `quadratic` vs `linear` is
-a different model (different parameter count), not a coordinate choice.
+a different model (different parameter count), not a coordinate choice --
+and neither is `orbit.type` (`keplerian` / `linear` / `quadratic`), which
+chooses between a Keplerian and a Taylor orbit.
 `planet.mass_parameterization` WAS drift and is gone: it became the
 exclusive pair `fitlogq` / `fitmsini` when the third coordinate arrived
 (reviews 4.2.7 and 2.14.9), and the old key raises with its migration.

@@ -429,46 +429,11 @@ lens:
                 "orbit.a[lens_kep_orbit_map]", "mulensevent.theta_E[event_map]",
                 "star.distance[primary_lens_map]",
                 "mulensevent.pi_E_N[event_map]", "mulensevent.pi_E_E[event_map]" ]
-  # Lens orbital motion, linear mode (conventions.md C24; review 8.6.8).
-  # Declared only on a companion whose entry sets `orbital_motion: linear`;
-  # absent otherwise, and the geometry is static exactly as before.  Both
-  # rates are anchored at t0_par -- the same fiducial epoch the parallax
-  # uses, which is what makes the two effects composable (C24 / Skowron
-  # Eq. A17).
-  ds_dt:
-    # Rate of change of the projected separation, Einstein radii (of the
-    # TOTAL mass, C13) per Julian year.  gamma_par = ds_dt / s_0.
-    # Bounds are rope, not gates: |gamma| ~ 0.25-0.6 /yr is typical for a
-    # bound binary (Skowron A19), so +/-20 r_E/yr is far outside anything
-    # physical while keeping the boundary away from the sampler; the
-    # physics lives in the soft beta < 1 potential (lens.beta).
-    initval: 0.0
-    lower: -20.0
-    upper: 20.0
-    init_scale: 0.05
-    unit: ""
-    internal_unit: ""
-    latex: "\\dot{s}"
-    description: "Binary separation rate of change"
-    debug_print: true
-  dalpha_dt:
-    # Rate of change of the trajectory angle alpha, rad/yr internally and
-    # deg/yr for the user -- the identity mapping to MulensModel's
-    # dalpha_dt (C18/C24).  Skowron's gamma_perp = -dalpha_dt (their
-    # Appendix A.4).  NEVER quote its sign without sign(u_0): the A16
-    # mirror reverses (u_0, alpha, pi_E_perp, dalpha_dt) together.
-    # Bounds (USER units, deg/yr): +/-1146 deg/yr = +/-20 rad/yr (~3
-    # rotations/yr), far beyond any bound orbit a microlensing arc can
-    # see; the beta < 1 potential is the physics.
-    initval: 0.0
-    lower: -1146.0
-    upper: 1146.0
-    init_scale: 3.0
-    unit: "deg/yr"
-    internal_unit: "rad/yr"
-    latex: "\\dot{\\alpha}"
-    description: "Trajectory angle rate of change"
-    debug_print: true
+  # Lens orbital motion, linear mode (conventions.md C24; review 8.6.8):
+  # the RATES ds_dt / dalpha_dt are parameters of the companion's
+  # `type: linear` ORBIT (orbit/defaults.yaml), anchored at t0_par.  Only
+  # the bound-orbit diagnostic beta below stays here, because it needs the
+  # event's Einstein-radius scale.
   beta:
     # E_kin,perp / E_pot,perp (Skowron Eq. A19 / Batista+2011): the ratio of
     # projected kinetic to potential energy implied by the SKY-PLANE rates
@@ -488,7 +453,9 @@ lens:
       default:
         func_name: "calc_beta"
         deps: [ "mulensevent.pi_rel[event_map]",
-                "mulensevent.theta_E[event_map]", "s", "ds_dt", "dalpha_dt",
+                "mulensevent.theta_E[event_map]", "s",
+                "orbit.ds_dt[lens_motion_orbit_map]",
+                "orbit.dalpha_dt[lens_motion_orbit_map]",
                 "star.distance[primary_source_map]" ]
   # log10 of the projected separation is the SAMPLED coordinate (s below is
   # derived as 10**log_s).  Sampling in log_s makes the close/wide

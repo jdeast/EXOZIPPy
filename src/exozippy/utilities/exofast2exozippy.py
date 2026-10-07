@@ -308,6 +308,35 @@ def _prior_float(tok):
     return float(t)
 
 
+def _reindex_from_section(p, axis, transits, bands, rvs):
+    """Point prior ``p`` at the instance its section header names.
+
+    Returns False when the prior must be DROPPED (its header names a
+    dataset this conversion does not have), True otherwise, re-pointing
+    ``p["index"]`` in place -- loudly -- where the header and the ``_N``
+    index disagree.  See ``_section_index``.
+    """
+    idx = _section_index(p, axis, transits, bands, rvs)
+    if idx is None:
+        return True
+    label = f"{p['name']}_{p['index']}"
+    if idx < 0:
+        warn(
+            f"prior '{label}' sits under '# {p['section']}', which names no "
+            f"{axis} of this conversion (the priorfile was written for "
+            "another set of data files); dropped"
+        )
+        return False
+    if idx != p["index"]:
+        info(
+            f"prior '{label}' re-pointed to {axis} {idx} by its "
+            f"'# {p['section']}' header (the _N index was written for "
+            "another set of data files)"
+        )
+        p["index"] = idx
+    return True
+
+
 def parse_priorfile(path):
     """Parse an EXOFASTv2 prior file.
 
@@ -321,11 +350,22 @@ def parse_priorfile(path):
     ``if n_elements(varnames) eq 1 then varnames = [varnames,'0']``), so
     ``variance`` is transit 0 and ``u1`` is band 0 -- never "all instances".
 
+    A whole-line comment is kept as the SECTION of the priors after it:
+    EXOFASTv2's own ``<prefix>priors.final`` (mkprior.pro) heads each
+    instance's block with its label (``# TRES``, ``# i'``, ``# KeplerCam UT
+    2022-04-28 (i')``), which names the instance independently of the
+    ``_N`` index -- see ``_section_index``.
+
     Returns a list of dicts with keys name, index, value, width, lower,
-    upper, start.
+    upper, start, section.
     """
     priors = []
+    section = None
     for raw in Path(path).read_text().splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("#"):
+            section = stripped[1:].strip() or None
+            continue
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
@@ -358,9 +398,69 @@ def parse_priorfile(path):
                 lower=lower,
                 upper=upper,
                 start=start,
+                section=section,
             )
         )
     return priors
+
+
+# EXOFASTv2's band labels (mkss.pro allowedbands -> prettybands), which head
+# each band's block in a priors.final.
+_EXOFAST_PRETTY_BANDS = {
+    "Sloanu": "u'",
+    "Sloang": "g'",
+    "Sloanr": "r'",
+    "Sloani": "i'",
+    "Sloanz": "z'",
+    "Spit36": "$3.6\\mu m$",
+    "Spit45": "$4.5\\mu m$",
+    "Spit58": "$5.8\\mu m$",
+    "Spit80": "$8.0\\mu m$",
+}
+
+# readtran.pro's transit label: '<TELESCOPE> UT <YYYY-MM-DD> (<band>)'.
+_TRANSIT_LABEL = re.compile(r"^(\S+) UT (\d{4})-(\d{2})-(\d{2}) \((.+)\)$")
+
+
+def _section_index(p, axis, transits, bands, rvs):
+    """The instance a prior's SECTION header names, or None if it names none.
+
+    EXOFASTv2 numbers transits by sorted filename and bands by sorted name
+    (see the module docstring), so a ``_N`` index is only meaningful for the
+    file set it was written against.  A priors.final from a run on a
+    DIFFERENT set of files -- common, since the driver keeps evolving after
+    the run -- silently re-points every transit and band prior at the wrong
+    instance.  Its section headers do not drift, so where one parses as a
+    label of this prior's axis it decides.  Returns -1 when the header IS
+    such a label but names no instance of this conversion (a dataset not in
+    this fit).
+    """
+    sec = p.get("section")
+    if not sec:
+        return None
+    if axis == "transit":
+        m = _TRANSIT_LABEL.match(sec)
+        if not m:
+            return None
+        tel, date = m.group(1), m.group(2) + m.group(3) + m.group(4)
+        for i, t in enumerate(transits):
+            if t.get("telescope") == tel and t.get("date") == date:
+                return i
+        return -1
+    if axis == "band":
+        for i, b in enumerate(bands):
+            if sec in (b, _EXOFAST_PRETTY_BANDS.get(b)):
+                return i
+        known = set(_EXOFAST_PRETTY_BANDS.values()) | set(
+            _EXOFAST_PRETTY_BANDS
+        )
+        return -1 if sec in known else None
+    if axis == "telescope":
+        for i, r in enumerate(rvs):
+            if sec == r["name"]:
+                return i
+        return None
+    return None
 
 
 # ----------------------------------------------------------------------
@@ -423,6 +523,11 @@ PRIOR_MAP = {
     "gamma": ("telescope", "rvinstrument.{n}.gamma", 1.0),
     "jittervar": ("telescope", "rvinstrument.{n}.jitter_variance", 1.0),
     "jitter": ("telescope", "rvinstrument.{n}.jitter", 1.0),
+    # --- RV trend (/fitslope, /fitquad -> a Taylor orbit) ---
+    "slope": ("trend", "orbit.{n}.gammadot", 1.0),
+    # EXOFASTv2's QUAD is the coefficient of (t - RVEPOCH)**2; gammaddot is
+    # the second DERIVATIVE, twice that.
+    "quad": ("trend", "orbit.{n}.gammaddot", 2.0),
 }
 
 # Priors EXOFASTv2 accepts but EXOZIPPy has no home for (yet).
@@ -440,8 +545,6 @@ PRIOR_UNSUPPORTED = {
     "ttv": "per-transit TTVs are not implemented",
     "tiv": "per-transit inclination variations are not implemented",
     "tdeltav": "per-transit depth variations are not implemented",
-    "slope": "RV slope (fitslope) is not implemented",
-    "quad": "RV quadratic trend (fitquad) is not implemented",
     "chord": "the chord parameterization is not used; set orbit cosi/b",
     "sign": "the vcve sign parameter is not used",
     "logk": "put a prior on orbit.<planet>.K instead",
@@ -619,8 +722,6 @@ UNSUPPORTED_KEYWORDS = {
     "ttvs": "per-transit TTVs are not implemented",
     "tivs": "per-transit inclination variations are not implemented",
     "tdvs": "per-transit depth variations are not implemented",
-    "fitslope": "RV slopes are not implemented",
-    "fitquad": "RV quadratic trends are not implemented",
     "fitlogmp": "log-mass sampling is not a user knob in EXOZIPPy",
     "fluxfile": "EXOFASTv2 flux files are not supported; convert the "
     "photometry to a .sed.yaml by hand",
@@ -652,7 +753,7 @@ def _bool_array(val, n, keyword):
     return flags
 
 
-def convert(pro_path, outdir, base):
+def convert(pro_path, outdir, base, priorfile_override=None):
     pro_path = Path(pro_path).expanduser().resolve()
     pro_dir = pro_path.parent
     outdir = Path(outdir).resolve()
@@ -678,7 +779,16 @@ def convert(pro_path, outdir, base):
     if tranpath:
         for f in _resolve_glob(tranpath, pro_dir):
             name, band = _transit_meta(f)
-            transits.append(dict(name=name, file=f, band=band))
+            parts = f.name.split(".")
+            transits.append(
+                dict(
+                    name=name,
+                    file=f,
+                    band=band,
+                    telescope=parts[2] if len(parts) >= 4 else None,
+                    date=parts[0][1:] if len(parts) >= 4 else None,
+                )
+            )
         # Two files from one telescope on one night (a multi-band imager
         # such as MuSCAT2) share a <TELESCOPE>_UT<date> name: tell them
         # apart by band, and only then by position.
@@ -711,6 +821,31 @@ def convert(pro_path, outdir, base):
                 )
                 name = f"{name}_{len(rvs)}"
             rvs.append(dict(name=name, file=f))
+
+    # /fitslope, /fitquad: EXOFASTv2's RV trend is the reflex of a companion
+    # too long-period to resolve, which EXOZIPPy writes as what it is -- a
+    # Taylor orbit (type: linear / quadratic) whose primary is the observed
+    # star.  RVEPOCH is its epoch (EXOFASTv2's default, the midpoint of the
+    # RV span, is also EXOZIPPy's, so it is written only when given).
+    fitslope = bool(take("fitslope"))
+    fitquad = bool(take("fitquad"))
+    rvepoch = take("rvepoch")
+    trend = None
+    if fitslope or fitquad:
+        if not rvs:
+            info("'/fitslope'/'/fitquad' are moot: no RV data")
+        else:
+            trend = dict(
+                name="trend",
+                type="quadratic" if fitquad else "linear",
+                epoch=None if rvepoch is None else float(rvepoch),
+            )
+            info(
+                f"/fit{'quad' if fitquad else 'slope'} -> orbit 'trend' "
+                f"(type: {trend['type']}), primary {star_names[0]}"
+            )
+    elif rvepoch is not None:
+        info(f"'rvepoch={rvepoch}' is moot without /fitslope or /fitquad")
 
     # per-planet switches: fitrv/fittran have no per-planet equivalent (a
     # planet is in every dataset's model); circular pins the sqrt(e) pair.
@@ -893,6 +1028,13 @@ def convert(pro_path, outdir, base):
 
     # ---- priors ----------------------------------------------------------
     priorfile = take("priorfile")
+    if priorfile_override is not None:
+        if priorfile:
+            info(
+                f"priorfile='{priorfile}' from the driver replaced by "
+                f"--priorfile {priorfile_override}"
+            )
+        priorfile = str(Path(priorfile_override).expanduser().resolve())
     priors = []
     if priorfile:
         prior_src = (
@@ -912,6 +1054,7 @@ def convert(pro_path, outdir, base):
         "transit": [t["name"] for t in transits],
         "telescope": [r["name"] for r in rvs],
         "sed": [None],
+        "trend": [trend["name"]] if trend else [],
     }
 
     param_entries = []  # (path, fields, comment)
@@ -930,6 +1073,8 @@ def convert(pro_path, outdir, base):
                     f"prior '{name}' needs a band instance but none "
                     "exists; dropped"
                 )
+                continue
+            if not _reindex_from_section(p, "band", transits, bands, rvs):
                 continue
             if p["index"] >= len(bands):
                 warn(
@@ -966,10 +1111,20 @@ def convert(pro_path, outdir, base):
                 )
                 continue
         if re.match(r"^[cm]\d+$", name):
-            warn(
-                f"detrending-coefficient prior '{name}' dropped; wire "
-                "detrend columns on the instrument entry instead"
+            # The columns themselves ARE detrended: a transit file's
+            # columns past the error are additive detrend columns by
+            # default, as in EXOFASTv2.  Only this prior on the coefficient
+            # is lost -- harmless for a start value, a real loss for a
+            # Gaussian.
+            msg = (
+                f"detrending-coefficient prior '{name}_{p['index']}' "
+                "dropped (the file's extra columns are still detrended; "
+                "only this value on the coefficient is not carried over)"
             )
+            if p["width"] is not None and p["width"] >= 0:
+                warn(msg)
+            else:
+                info(msg + " -- it was a start value only")
             continue
         if name not in PRIOR_MAP:
             warn(
@@ -979,6 +1134,8 @@ def convert(pro_path, outdir, base):
             continue
 
         axis, template, scale = PRIOR_MAP[name]
+        if not _reindex_from_section(p, axis, transits, bands, rvs):
+            continue
         names = axis_names[axis]
         if not names:
             warn(
@@ -1139,13 +1296,14 @@ def convert(pro_path, outdir, base):
         torres_entries=torres_entries,
         mist_flags=mist_flags,
         pro_path=pro_path,
+        trend=trend,
     )
     (outdir / f"{base}.yaml").write_text(config_text)
 
     if param_entries:
         header = [
             f"Generated by exozippy-exofast2exozippy from "
-            f"{priorfile} (via {pro_path.name})",
+            f"{Path(str(priorfile)).name} (via {pro_path.name})",
             "EXOFASTv2 semantics: width>0 -> Gaussian prior (mu/sigma), "
             "width=0 -> fixed (sigma: 0),",
             "no width -> starting value only; a 5th column overrides the "
@@ -1341,9 +1499,13 @@ def _emit_config(
     torres_entries,
     mist_flags,
     pro_path,
+    trend=None,
 ):
     L = []
-    L.append(f"# Generated by exozippy-exofast2exozippy from {pro_path}")
+    # File NAMES, as the params and sed headers already write them: the
+    # generated files are often shipped, and an absolute path is the
+    # converting machine's layout, not provenance anyone else can follow.
+    L.append(f"# Generated by exozippy-exofast2exozippy from {pro_path.name}")
     if WARNINGS:
         L.append("#")
         L.append(
@@ -1401,8 +1563,11 @@ def _emit_config(
         L.append("")
 
     L.append("planet:")
-    for p in planet_names:
+    for i, p in enumerate(planet_names):
         L.append(f'  - name: "{p}"')
+        if len(planet_names) > 1:
+            # Without it every planet would read orbit 0's geometry.
+            L.append(f"    orbit_ndx: {i}")
     L.append("")
 
     L.append("orbit:")
@@ -1410,6 +1575,25 @@ def _emit_config(
         L.append(f'  - name: "{p}"')
         L.append(f'    primary: ["{star_names[0]}"]')
         L.append(f'    companion: ["{p}"]')
+    if trend:
+        L.append(
+            f"  # EXOFASTv2's /fit{'quad' if trend['type'] == 'quadratic' else 'slope'}: "
+            "the reflex of a companion too long-period"
+        )
+        L.append(
+            "  # to resolve, as a Taylor orbit: orbit.trend.gammadot is the "
+            "RV slope"
+        )
+        if trend["type"] == "quadratic":
+            L.append(
+                "  # and orbit.trend.gammaddot its curvature (TWICE "
+                "EXOFASTv2's QUAD)."
+            )
+        L.append(f'  - name: "{trend["name"]}"')
+        L.append(f"    type: {trend['type']}")
+        L.append(f'    primary: ["{star_names[0]}"]')
+        if trend["epoch"] is not None:
+            L.append(f"    epoch: {trend['epoch']!r}   # EXOFASTv2's RVEPOCH")
     L.append("")
 
     if transits:
@@ -1500,6 +1684,14 @@ def main(argv=None):
         "-o", "--outdir", default=".", help="output directory (default: cwd)"
     )
     parser.add_argument(
+        "--priorfile",
+        default=None,
+        help="use this EXOFASTv2 prior file instead of the driver's "
+        "priorfile= (e.g. the run's <prefix>priors.final; its section "
+        "headers re-point priors written for a different set of data "
+        "files)",
+    )
+    parser.add_argument(
         "--name",
         default=None,
         help="base name for the generated YAML files "
@@ -1524,7 +1716,14 @@ def main(argv=None):
     if not pro_path.exists():
         sys.exit(f"ERROR: {pro_path} not found")
     base = args.name or pro_path.resolve().parent.name
-    convert(pro_path, outdir, base)
+    priorfile = args.priorfile
+    if priorfile is not None:
+        priorfile = Path(priorfile).expanduser()
+        if shell_cwd is not None and not priorfile.is_absolute():
+            priorfile = shell_cwd / priorfile
+        if not priorfile.exists():
+            sys.exit(f"ERROR: --priorfile {priorfile} not found")
+    convert(pro_path, outdir, base, priorfile_override=priorfile)
 
 
 if __name__ == "__main__":

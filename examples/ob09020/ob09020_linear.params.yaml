@@ -120,9 +120,9 @@ lens.L2.alpha:
 # The A16 mirror flips (u_0, alpha, pi_E_perp, dalpha_dt) TOGETHER, so
 # dalpha_dt's sign is tied to u_0 being positive above -- one choice, not
 # two.  Table 1's note says every column is the positive-u_0 solution.
-lens.L2.ds_dt:
+orbit.L.ds_dt:
     initval: 0.051132           # r_E/yr
-lens.L2.dalpha_dt:
+orbit.L.dalpha_dt:
     initval: -159.28          # deg/yr
 
 # --- Lens and source physical parameters ----------------------------------

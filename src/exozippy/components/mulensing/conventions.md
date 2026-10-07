@@ -559,7 +559,9 @@ axis is the ONLY thing that measures `sign(cos i)` here; Skowron Section 5.2:
 sign is pinned by a synthetic orbit with KNOWN inclination rather than by a chi2
 improvement.
 
-- Implemented in: `Lens` (config keys `orbital_motion: linear|keplerian`, `orbit:`),
+- Implemented in: `Lens` (config key `orbit:` on the companion's entry; the referenced
+  orbit's `type: linear|keplerian` selects the mode, and a linear orbit owns the rates as
+  `orbit.<name>.ds_dt` / `orbit.<name>.dalpha_dt`),
   `mulensing/physics.py`, `op.VBMDirectMagOp` (per-epoch `s_t`/`alpha_t` inputs).
 - Pinned by: `tests/test_lens_orbital_motion.py` -- the known-inclination sign test, the
   MulensModel linear-motion parity test, and the A16 mirror test.
@@ -626,8 +628,8 @@ direction is `tau_hat`; operationally:
 A published `xi_*` solution therefore drops into an EXOZIPPy config through these six
 lines; `examples/ob170114` is the shipped worked case (Mroz et al. 2026 Table B.1).
 
-- Implemented in: `Lens._source_offset_series` (config keys
-  `source_orbital_motion: keplerian`, `source_orbit:`),
+- Implemented in: `Lens._source_offset_series` (config key `source_orbit:`, naming a
+  `type: keplerian` orbit),
   `mulensing/physics.source_offset_from_orbit` / `xallarap_trajectory_shift`,
   `Lens.get_magnification` (symbolic) and `op.VBMDirectMagOp(source_motion=True)`.
 - Pinned by: `tests/test_xallarap.py` -- the C9 reconstruction with a displaced
@@ -1084,7 +1086,7 @@ W149-width filters -- tolerable in a prior a magnitude wide, not as a measuremen
   measurable from a static or linear-motion light curve, which constrains only the
   trajectory angle to the instantaneous binary axis (our `alpha` = MulensModel's =
   MMEXOFAST's); the phase/inclination term is invisible to such a fit and becomes (weakly)
-  constrained only under `orbital_motion: keplerian`, where `alpha(t)` is derived from the
-  orbit. The > 1 deg short-period residuals are the axis rotating during the event: a
+  constrained only when the lens companion moves on a keplerian orbit, where `alpha(t)` is
+  derived from the orbit. The > 1 deg short-period residuals are the axis rotating during the event: a
   static fit's `alpha` sits at an effective mean axis while the key quotes the phase at a
   reference epoch.

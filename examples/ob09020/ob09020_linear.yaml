@@ -14,22 +14,23 @@ logger_level: INFO
 #     EXOZIPPy follows verbatim (see components/mulensing/conventions.md,
 #     C17), so its parameters transfer with no transformation at all.
 #
-# THE LINEAR ORBITAL-MOTION VARIANT.  ob09020.yaml fits the SAME event with
-# orbital_motion: keplerian, where an RV-constrained orbit drives
-# s(t)/alpha(t) with no new free parameters.  This config instead uses the
-# first-order expansion that most of the microlensing literature uses,
+# THE LINEAR ORBITAL-MOTION VARIANT.  ob09020.yaml fits the SAME event on a
+# keplerian orbit, where the RV-constrained orbit drives s(t)/alpha(t) with
+# no new free parameters.  This config instead puts the lens binary on a
+# `type: linear` orbit -- the first-order expansion that most of the
+# microlensing literature uses,
 #
 #     s(t)     = s_0 (1 + gamma_par  (t - t0_par))
 #     alpha(t) = alpha_0 - gamma_perp (t - t0_par)
 #
-# carried by two free parameters on the companion's lens entry, ds_dt and
-# dalpha_dt (conventions.md C24).  Nothing else in the project exercises
-# that path, which is why this exists.
+# carried by the linear orbit's two free parameters, orbit.L.ds_dt and
+# orbit.L.dalpha_dt (conventions.md C24), anchored at t0_par.  Nothing else
+# in the project exercises that path, which is why this exists.
 #
-# THE RVs ARE DROPPED DELIBERATELY, and the orbit: block with them.  Linear
-# rates are sky-projected and cannot be compared with a radial velocity
-# without the full Kepler solve, so keeping the RVs here would constrain an
-# orbit this model does not have.  Photometry only.
+# THE RVs ARE DROPPED DELIBERATELY.  The linear orbit's rates are
+# sky-projected and cannot be compared with a radial velocity without the
+# full Kepler solve: an RV file of L1 here would give the same orbit an
+# independent slope (orbit.L.gammadot), tied to nothing.  Photometry only.
 #
 # Fitting a linear approximation to a system whose motion is MEASURABLY
 # Keplerian is the point, not a compromise: Skowron+2011 fit both to this
@@ -58,10 +59,20 @@ lens:
     # Orbital motion is the COMPANION's geometry, so its keys live on the
     # companion's entry, never the primary's.
   - body: star.L2
-    # LINEAR orbital motion: the sky-projected motion is a first-order
-    # expansion about t0_par, ds_dt and dalpha_dt, with no orbit: block and
-    # no Kepler solve.  conventions.md C24.
-    orbital_motion: linear
+    # LINEAR orbital motion: the companion moves on orbit L, whose
+    # `type: linear` makes the sky-projected motion a first-order expansion
+    # about t0_par (orbit.L.ds_dt, orbit.L.dalpha_dt) with no Kepler solve.
+    # conventions.md C24.
+    orbit: "L"
+
+# The lens binary's orbit, as a Taylor orbit: no period, eccentricity or
+# mass of its own -- just the rates the lens geometry reads.  Its epoch is
+# the event's t0_par by construction.
+orbit:
+  - name: "L"
+    type: linear
+    primary:   ["L1"]
+    companion: ["L2"]
 
 source:
   - body: star.Source

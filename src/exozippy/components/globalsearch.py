@@ -760,15 +760,19 @@ def sole_orbit_index(system, context):
     orbit = getattr(system, "orbit", None)
     if orbit is None:
         return None
-    if orbit.n_elements != 1:
+    # Only a KEPLERIAN orbit has a period to find: a Taylor orbit (type:
+    # linear | quadratic, an RV trend) is invisible to a periodogram, so one
+    # planet plus a trend is still the single-orbit case.
+    keplerian = [int(i) for i in np.nonzero(~orbit.is_taylor)[0]]
+    if len(keplerian) != 1:
         logger.warning(
             "[%s] the global period search is skipped: this system has %d "
-            "orbits, and a periodogram peak carries no statement about WHICH "
-            "orbit it belongs to. Supply start values for the orbital "
-            "periods and conjunction times in the params file (the "
+            "Keplerian orbits, and a periodogram peak carries no statement "
+            "about WHICH orbit it belongs to. Supply start values for the "
+            "orbital periods and conjunction times in the params file (the "
             "standalone BLS/Lomb-Scargle utilities will report the peaks).",
             context,
-            orbit.n_elements,
+            len(keplerian),
         )
         return None
-    return 0
+    return keplerian[0]

@@ -619,3 +619,75 @@ orbit:
       from_sv:
         func_name: "calc_lam_from_sv"
         deps: ["svcoslam", "svsinlam"]
+
+  # --- Taylor orbits (type: linear | quadratic) ---
+  # A Taylor orbit is an orbit too long for the data to resolve, written as
+  # the low-order time derivatives of what each consumer measures, about the
+  # orbit's reference epoch (Orbit.taylor_epoch; orbit.md "Taylor orbits").
+  # Every Keplerian element above is INACTIVE on such an orbit -- it has no
+  # period, mass or K to report -- and each parameter below is active only
+  # where some consumer actually reads it.
+  gammadot:
+    # The primary group's radial ACCELERATION: the first derivative of its
+    # line-of-sight velocity at the epoch, added to the RV model as
+    # gammadot * (t - epoch).  EXOFASTv2's SLOPE.  Read by rvinstrument for
+    # a star in this orbit's PRIMARY group.  Bounds are rope, not gates:
+    # +/-1e5 m/s/d is EXOFASTv2's own sanity limit.
+    initval: 0.0
+    lower: -100000.0
+    upper: 100000.0
+    init_scale: 0.1
+    unit: "m/(s d)"
+    internal_unit: "solRad/d2"
+    latex: "\\dot{\\gamma}"
+    description: "RV slope"
+  gammaddot:
+    # The SECOND derivative of the primary's line-of-sight velocity at the
+    # epoch, added as 0.5 * gammaddot * (t - epoch)**2 (type: quadratic
+    # only).  A derivative, NOT EXOFASTv2's QUAD, which is the coefficient
+    # of (t - epoch)**2 and so is gammaddot / 2.
+    initval: 0.0
+    lower: -100000.0
+    upper: 100000.0
+    init_scale: 0.01
+    unit: "m/(s d2)"
+    internal_unit: "solRad/d3"
+    latex: "\\ddot{\\gamma}"
+    description: "RV curvature"
+  ds_dt:
+    # Rate of change of the projected separation of a microlensing lens
+    # binary, Einstein radii (of the TOTAL mass, C13) per Julian year, at
+    # t0_par.  gamma_par = ds_dt / s_0.  Read by a lens companion whose
+    # `orbit:` names this orbit (conventions.md C24; it lived on the lens
+    # until the orbit types were unified).
+    # Bounds are rope, not gates: |gamma| ~ 0.25-0.6 /yr is typical for a
+    # bound binary (Skowron A19), so +/-20 r_E/yr is far outside anything
+    # physical while keeping the boundary away from the sampler; the
+    # physics lives in the soft beta < 1 potential (lens.beta).
+    initval: 0.0
+    lower: -20.0
+    upper: 20.0
+    init_scale: 0.05
+    unit: ""
+    internal_unit: ""
+    latex: "\\dot{s}"
+    description: "Binary separation rate of change"
+    debug_print: true
+  dalpha_dt:
+    # Rate of change of the microlensing trajectory angle alpha at t0_par,
+    # rad/yr internally and deg/yr for the user -- the identity mapping to
+    # MulensModel's dalpha_dt (C18/C24).  Skowron's gamma_perp = -dalpha_dt
+    # (their Appendix A.4).  NEVER quote its sign without sign(u_0): the
+    # A16 mirror reverses (u_0, alpha, pi_E_perp, dalpha_dt) together.
+    # Bounds (USER units, deg/yr): +/-1146 deg/yr = +/-20 rad/yr (~3
+    # rotations/yr), far beyond any bound orbit a microlensing arc can
+    # see; the beta < 1 potential is the physics.
+    initval: 0.0
+    lower: -1146.0
+    upper: 1146.0
+    init_scale: 3.0
+    unit: "deg/yr"
+    internal_unit: "rad/yr"
+    latex: "\\dot{\\alpha}"
+    description: "Trajectory angle rate of change"
+    debug_print: true

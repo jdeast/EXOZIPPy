@@ -1,7 +1,8 @@
 # OGLE-2009-BLG-020: binary lens + the spectroscopic orbit of its lens
 
 > **WORK IN PROGRESS -- the model is now the full joint one**
-> (`orbital_motion: keplerian`: the RV-constrained orbit drives
+> (the lens companion's `orbit: L`, a keplerian orbit: the RV-constrained
+> orbit drives
 > `s(t)/alpha(t)` with no new free parameters), **but the acceptance FIT of
 > review item 8.6.8 -- recovering Yee+2016's joint solution -- has not run
 > yet.**  What IS verified, at the start point (2026-08-27): the derived
@@ -198,7 +199,7 @@ and the light curve's mass ratio are automatically consistent.
 `rvinstrument`'s `star_ndx: 0` makes the RV model the sum of `orbit.K` over
 every orbit L1 belongs to.
 
-With `orbital_motion: keplerian` on the lens block, orbit `L` also drives
+With the lens companion's `orbit: L` (a keplerian orbit), orbit `L` also drives
 the binary geometry: `s(t) = |delta(t)|` and `alpha(t) = phi_pi - PA(axis)`
 per epoch (conventions.md C24), in Einstein units `a/(D_L theta_E)`.  No
 `i180` hand-holding remains: the sky rotation sense of the binary axis in
@@ -225,7 +226,7 @@ and 17 mmag between I and V, against a 26 mmag median error -- cheap here
 (the V band is five points), not cheap for an event with dense simultaneous
 V and I coverage.
 
-**Orbital motion of the lens binary: `orbital_motion: keplerian` is ON**
+**Orbital motion of the lens binary is ON (`orbit: L`, keplerian)**
 -- the RV-constrained orbit drives `s(t)`/`alpha(t)` with no new free
 parameters (review 8.6.8 5a/5b), which is Skowron+2011's proposed
 over-constraint test on the event they proposed it for.  The start state
@@ -267,7 +268,8 @@ traps this measurement stepped in so the next reader does not have to:
   the chi2 baselines by ~10% here.  The table above, at the IOP values,
   supersedes both.
 
-Still to come: source orbital motion, real `gamma_dot`/`gamma_ddot`, and an
+Still to come: source orbital motion, an RV trend tied to the lens orbit (a Taylor
+orbit's `gammadot` is independent of its `ds_dt`/`dalpha_dt` today), and an
 eventual N-body backend.
 
 ## Starting values

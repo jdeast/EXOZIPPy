@@ -95,19 +95,17 @@ def test_per_source_flags_on_the_mulensevent_block_are_refused():
 
 def test_companion_keys_on_a_source_entry_are_refused():
     """
-    Given orbital_motion/orbit on a source entry,
+    Given `orbit:` on a source entry,
     When the source block is parsed,
     Then the refusal points at the lens companion entry (the per-companion
-      home) -- xallarap spells it source_orbital_motion on mulensevent.
+      home) -- xallarap spells it source_orbit on mulensevent.
     """
-    cfg = _system_config(
-        source=[{"body": "star.Source", "orbital_motion": "linear"}]
-    )
+    cfg = _system_config(source=[{"body": "star.Source", "orbit": "S"}])
     with pytest.raises(ValueError) as exc:
         Source(cfg["source"], _DummyConfigManager(cfg))
     msg = str(exc.value)
     assert "source.0" in msg
-    assert "orbital_motion" in msg
+    assert "orbit" in msg
     assert "'lens:' entry" in msg
 
 
@@ -189,7 +187,7 @@ def test_every_schema_key_still_builds():
     ]
     lens = [
         {"body": "star.Lens"},
-        {"body": "planet.b", "orbital_motion": "linear"},
+        {"body": "planet.b", "orbit": "b"},
     ]
     source = [
         {
@@ -199,6 +197,14 @@ def test_every_schema_key_still_builds():
         }
     ]
     cfg = _system_config(event=event, lens=lens, source=source)
+    cfg["orbit"] = [
+        {
+            "name": "b",
+            "type": "linear",
+            "primary": ["Lens"],
+            "companion": ["b"],
+        }
+    ]
     cm = _DummyConfigManager(cfg)
     MulensEvent(event, cm)
     Lens(lens, cm)
