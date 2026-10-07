@@ -88,6 +88,51 @@ class MulensInstrument(Instrument):
       at the OBSERVED flux (so sigma stays a fixed constant, not a function of
       the model).  The resulting posterior differs from the old magnitude-space
       one only at O(sigma_m) -- ~1% for 0.01 mag photometry.
+    - ``dia`` (native difference-imaging output, e.g. KMTNet pySIS): a
+      DIFFERENCE flux, which is NOT the modeled observable.  See below.
+
+    ``data_format: dia`` and why it needs five columns
+    --------------------------------------------------
+    Difference imaging reports ``dflux``, the flux relative to a reference
+    image, with the source's own reference flux subtracted away.  The model
+    is ``F = f_s*A + f_b`` in TOTAL flux, and a difference curve cannot be
+    written that way: its baseline sits at zero, so ``f_total = f_s + f_b``
+    is ~0 while ``f_s`` is large, which drives ``q_source = f_s/f_total``
+    far outside its ``[0, 2]`` bound.  (That bound is correct -- it says the
+    blend is at most as negative as the total flux -- and must not be
+    widened to accommodate a difference curve.)
+
+    The missing piece is the reference flux, and a native pySIS file
+    carries it implicitly.  Its five columns are
+    ``time dflux dflux_err mag mag_err``, where ``mag`` is the TOTAL
+    brightness, so the two are related by
+
+        mag = zp - 2.5*log10(ref - dflux)
+
+    which determines ``ref`` and ``zp`` exactly (verified on MulensModel's
+    native KB180003 set: ``ref = 1584.9`` at ``zp = 28.000`` for all three
+    sites, residual rms 2.8e-5 mag).  The total flux is then
+    ``F = ref - dflux``.  Note the subtraction: in the pySIS files seen
+    here, ``dflux`` grows MORE NEGATIVE as the star brightens.  That is
+    taken as the pipeline's convention on the strength of one independently
+    sourced set (MulensModel's KB180003) -- corroboration, not a survey --
+    so a file that disagrees is not impossible.  The solved reference is
+    checked against the mag column either way, which is what actually
+    guards this.
+
+    A three-column difference file therefore cannot be read as ``dia``: the
+    reference flux is simply absent, and no choice of it is derivable from
+    the data.  That is an error rather than a guess, because every available
+    fallback silently changes the science -- offsetting to zero blending,
+    for instance, IMPOSES a blending fraction and corrupts any ``theta_E``
+    or lens mass derived from the source flux.  Supply the native file, or
+    give ``reference_flux``/``reference_mag`` explicitly.
+
+    ``reference_flux`` (file units) or ``reference_mag`` (with ``zp``, or
+    with the file's own zeropoint once recovered) override the solved value
+    and let a three-column file be read.  The recovered ``zp`` is also what
+    ties this light curve's flux system to a magnitude, which is what an
+    ``sed:`` block needs.
 
     ``f_source``/``f_blend``/``log_f_total`` are unchanged: they live in the
     file's own flux system, which for a magnitude file is the system in which
@@ -155,14 +200,57 @@ class MulensInstrument(Instrument):
             {
                 "key": "data_format",
                 "kind": "option",
-                "accepts": ["magnitude", "flux"],
+                "accepts": ["magnitude", "flux", "dia"],
                 "required": False,
                 "doc": (
                     "Photometry format of the data FILE. Default 'magnitude'. "
                     "The fit is always done in flux; magnitude files are "
                     "converted at load (F = 10**(-0.4 m), sigma_F = "
                     "ln(10)/2.5 * F * sigma_m). With 'flux', non-positive "
-                    "fluxes are kept as-is -- nothing is clamped."
+                    "fluxes are kept as-is -- nothing is clamped. With "
+                    "'dia' the file is native difference-imaging output "
+                    "(e.g. KMTNet pySIS) and MUST carry five columns -- "
+                    "time, dflux, dflux_err, mag, mag_err -- from which the "
+                    "reference flux is solved and the total flux "
+                    "reconstructed as ref - dflux. A three-column "
+                    "difference file raises, because the reference flux is "
+                    "absent and guessing it changes the science; supply "
+                    "reference_flux or reference_mag to read one anyway."
+                ),
+            },
+            {
+                "key": "reference_flux",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "data_format: dia only. The difference-imaging reference "
+                    "flux in the FILE's own flux units. Overrides the value "
+                    "solved from the mag column, and lets a file without one "
+                    "be read. Total flux is reconstructed as ref - dflux."
+                ),
+            },
+            {
+                "key": "reference_mag",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "data_format: dia only. The reference magnitude, as an "
+                    "alternative spelling of reference_flux; converted with "
+                    "this file's zeropoint (zp, default 28.0 -- the pySIS "
+                    "convention) as ref = 10**(-0.4*(reference_mag - zp))."
+                ),
+            },
+            {
+                "key": "zp",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "data_format: dia only. Zeropoint used with "
+                    "reference_mag, and the fallback when the mag column is "
+                    "absent. Default 28.0, the pySIS convention."
                 ),
             },
             {
@@ -297,6 +385,10 @@ class MulensInstrument(Instrument):
 
         self.fs_init = []
         self.q_source_init = []
+        # data_format: dia only -- the zeropoint recovered per light curve
+        # alongside its reference flux.  It is what ties this curve's flux
+        # system to a magnitude, which is what an sed: block needs.
+        self._dia_zp = {}
         self.q_flux_init = []  # per-instrument f_s2/f_s1 (binary source)
         blocks = self._concat_blocks()
 
@@ -320,21 +412,40 @@ class MulensInstrument(Instrument):
         per_file = []
         for i in range(self.n_elements):
             fmt = self.config[i].get("data_format", "magnitude")
+            if fmt == "dia":
+                # Native difference imaging: five columns, and the mag
+                # column is not optional -- it is the only thing that
+                # carries the reference flux.  Validated before the read so
+                # the message names the real problem rather than surfacing
+                # as a column-selection IndexError.
+                self._require_dia_columns(i)
+                roles = ("time", "dflux", "err", "mag", "mag_err")
+            else:
+                roles = ("time", "flux" if fmt == "flux" else "mag", "err")
             # Shared reader: columns:, mask:, time_* conversion, then sort
             # before the observer positions are computed from t, so the
             # ephemeris rows stay aligned with the photometry.
-            df = self._read_data(
-                i,
-                roles=("time", "flux" if fmt == "flux" else "mag", "err"),
-                detrend=True,
-            )
+            df = self._read_data(i, roles=roles, detrend=True)
             t, f, e = (
                 df.iloc[:, 0].values.astype(float),
                 df.iloc[:, 1].values.astype(float),
                 df.iloc[:, 2].values.astype(float),
             )
 
-            if fmt != "flux":
+            if fmt == "dia":
+                # dflux -> TOTAL flux.  F = ref - dflux (pySIS dflux grows
+                # more negative as the star brightens).  The error is
+                # unchanged: the reference is a constant offset, so
+                # sigma_F = sigma_dflux exactly, with no propagation.
+                ref, zp = self._dia_reference(
+                    i,
+                    dflux=f,
+                    mag=df.iloc[:, 3].values.astype(float),
+                )
+                self._dia_zp[self.names[i]] = zp
+                f = ref - f
+
+            if fmt not in ("flux", "dia"):
                 # Magnitudes -> flux.  Exact for the value; the error is the
                 # first-order propagation evaluated at the OBSERVED flux, so
                 # sigma stays a data constant (using the model flux instead
@@ -701,6 +812,156 @@ class MulensInstrument(Instrument):
             self.config_manager.probe_start(paths),
             has_companion=system.lens.n_companions >= 1,
         )
+
+    # ------------------------------------------------------------------
+    # data_format: dia -- native difference imaging
+    # ------------------------------------------------------------------
+    def _require_dia_columns(self, i):
+        """Raise unless file ``i`` carries the five native pySIS columns.
+
+        This is the guard the whole format rests on.  A difference flux is
+        not the modeled observable, and the ONLY thing that turns it into
+        one is the reference flux, which a native file carries implicitly
+        through its ``mag`` column.  A three-column difference file does not
+        contain it and nothing in the data can recover it, so reading one
+        would mean choosing a reference -- and every choice silently changes
+        the science (offsetting to zero blending imposes a blending
+        fraction, which corrupts any theta_E or lens mass derived from the
+        source flux).  So this raises rather than guessing, and names the
+        two ways out.
+        """
+        label = self.names[i]
+        n_user = 0
+        spec = (self.config[i] or {}).get("columns")
+        if isinstance(spec, dict):
+            n_user = len(spec)
+        if n_user >= 4:
+            # An explicit columns: map naming mag is enough; trust it.
+            return
+        if self._reference_flux_override(i) is not None:
+            # An explicit reference makes the mag column unnecessary.
+            return
+        import pandas as pd
+
+        head = pd.read_csv(
+            self.files[i],
+            sep=r"\s+",
+            engine="c",
+            header=None,
+            comment="#",
+            nrows=1,
+        )
+        if head.shape[1] < 5:
+            raise ValueError(
+                f"[{self.prefix}:{label}] data_format: dia needs the five "
+                f"native pySIS columns (time, dflux, dflux_err, mag, "
+                f"mag_err) but '{self.files[i]}' has {head.shape[1]}. A "
+                f"difference flux is not the modeled observable: the total "
+                f"flux is ref - dflux, and the reference flux is carried "
+                f"ONLY by the mag column (mag = zp - 2.5*log10(ref - "
+                f"dflux)). It cannot be recovered from a three-column file, "
+                f"and guessing it changes the science -- offsetting to zero "
+                f"blending, for instance, imposes a blending fraction and "
+                f"corrupts any theta_E or lens mass taken from the source "
+                f"flux. Supply the native five-column file, or set "
+                f"reference_flux (file units) or reference_mag on this "
+                f"instrument."
+            )
+
+    def _reference_flux_override(self, i):
+        """``reference_flux``/``reference_mag`` for file ``i``, or None."""
+        c = self.config[i] or {}
+        if c.get("reference_flux") is not None:
+            return float(c["reference_flux"])
+        if c.get("reference_mag") is not None:
+            zp = float(c.get("zp", 28.0))
+            return 10.0 ** (-0.4 * (float(c["reference_mag"]) - zp))
+        return None
+
+    def _dia_reference(self, i, dflux, mag):
+        """(reference flux, zeropoint) for a native difference-imaging file.
+
+        ``mag`` is the total brightness and ``dflux`` the difference flux of
+        the same epoch, so
+
+            mag = zp - 2.5*log10(ref - dflux)
+
+        holds exactly and determines both unknowns.  Solved by least squares
+        in magnitudes over the epochs with finite, usable values.  On
+        MulensModel's native KB180003 set this returns ref = 1584.9 at
+        zp = 28.000 for all three sites with a residual rms of 2.8e-5 mag.
+
+        An explicit ``reference_flux``/``reference_mag`` short-circuits the
+        solve; the zeropoint then comes from ``zp:`` (default 28.0, the
+        pySIS convention).
+        """
+        import numpy as np
+        from scipy.optimize import curve_fit
+
+        label = self.names[i]
+        override = self._reference_flux_override(i)
+        if override is not None:
+            return override, float((self.config[i] or {}).get("zp", 28.0))
+
+        ok = np.isfinite(dflux) & np.isfinite(mag)
+        if ok.sum() < 3:
+            raise ValueError(
+                f"[{self.prefix}:{label}] data_format: dia could not solve "
+                f"for the reference flux: only {int(ok.sum())} epochs have "
+                f"both a finite dflux and a finite mag. Set reference_flux "
+                f"or reference_mag explicitly."
+            )
+        x, y = dflux[ok], mag[ok]
+
+        def model(d, zp, ref):
+            return zp - 2.5 * np.log10(np.maximum(ref - d, 1e-12))
+
+        # ref must exceed max(dflux) for every epoch to have positive total
+        # flux; start just above it, with the pySIS zeropoint.
+        p0 = [28.0, float(np.max(x)) + max(1.0, float(np.ptp(x)) * 0.01)]
+        try:
+            (zp, ref), _ = curve_fit(model, x, y, p0=p0, maxfev=20000)
+        except Exception as exc:
+            raise ValueError(
+                f"[{self.prefix}:{label}] data_format: dia could not solve "
+                f"mag = zp - 2.5*log10(ref - dflux) for the reference flux "
+                f"({type(exc).__name__}: {exc}). Set reference_flux or "
+                f"reference_mag explicitly."
+            ) from exc
+
+        resid = float(np.std(y - model(x, zp, ref)))
+        if not np.isfinite(ref) or ref <= float(np.max(x)):
+            raise ValueError(
+                f"[{self.prefix}:{label}] data_format: dia solved an "
+                f"unusable reference flux ({ref!r}): it must exceed the "
+                f"largest dflux ({float(np.max(x)):.6g}) so that every "
+                f"epoch's total flux ref - dflux is positive. Set "
+                f"reference_flux or reference_mag explicitly."
+            )
+        if resid > 0.05:
+            logger.warning(
+                "[%s:%s] data_format: dia -- the mag and dflux columns do "
+                "not follow mag = zp - 2.5*log10(ref - dflux) tightly "
+                "(residual rms %.3g mag). The recovered reference flux "
+                "%.6g at zp %.4f may be wrong; check the file's column "
+                "order, or set reference_flux explicitly.",
+                self.prefix,
+                label,
+                resid,
+                ref,
+                zp,
+            )
+        else:
+            logger.info(
+                "[%s:%s] data_format: dia -- reference flux %.6g at "
+                "zp %.4f (residual rms %.3g mag); total flux = ref - dflux.",
+                self.prefix,
+                label,
+                ref,
+                zp,
+                resid,
+            )
+        return float(ref), float(zp)
 
     def _check_data_format(
         self,

@@ -1,0 +1,125 @@
+# Seeded from the MMEXOFAST run 20260624170138, renormalized.
+# Source: examples/kb180087_obj3/test_output/
+#             ob180087_20260624170138_renorm_exozippy_init.json
+#         (the same numbers are tabulated in the sibling *_renorm_results.tex)
+# n_solutions in file: 2
+#
+# Only initvals are used: MMEXOFAST uncertainties are not mapped to sigma (a
+# Gaussian prior would double-count the data), and whitening scales are
+# measured from the data by EXOZIPPy at startup.
+#
+# initval is list-valued: one mutually-consistent start point per solution
+# (P4 multi-seed sampling -- see config.py's finalize_user_params).  Bounds
+# are NOT per-seed and always come from the first (seed 0) solution.
+#
+# SEED ORDER IS [Close_alt, Close], which REVERSES the JSON's fits[] order.
+# The JSON lists Close first, but Close_alt is the preferred solution
+# (chi2 3045.54 against 3050.43 on 3094 points, so delta chi2 = 4.9), and
+# since seed 0 alone sets the bounds it is the one that should anchor them.
+#
+# CONVENTIONS, checked against components/mulensing/conventions.md rather
+# than assumed, because both of these are documented traps:
+#   - alpha transfers with NO 180 deg shift.  MMEXOFAST calls MulensModel,
+#     and C18 states MulensModel's alpha is identical to ours -- the
+#     "shifted by 180 deg" note in MulensModel's own Trajectory docstring
+#     does not hold, and conventions.md records it as checked against
+#     Skowron+2011 A.4/A.6 and verified numerically.
+#   - q is NOT inverted.  C14's inversion (and its accompanying 180 deg
+#     alpha shift) applies only when the lighter body is listed first here.
+#     q = 2.4e-3 << 1 with star.Lens first, so the heavier body already
+#     leads the lens block and the published value transfers as is.
+# Times are full Julian Dates: the light curves are HJD-2450000 and the
+# system yaml restores the offset with time_offset: 2450000.0, so every
+# t_0 below is the JSON's value plus 2450000.
+
+source.Source.t_0:
+    initval: [2458281.727509131, 2458281.736481786]
+
+source.Source.u_0:
+    initval: [0.5239163733929224, 0.5089778530288508]
+
+# t_E is derived in EXOZIPPy from stellar masses/distances/proper motions.
+# Provided here as an initval hint to seed the relaxation engine.
+mulensevent.t_E:
+    initval: [4.553839861986066, 4.6312179409849135]
+
+lens.Companion.s:
+    initval: [0.9099748645207979, 0.6335996227704759]
+
+# alpha: relaxation engine propagates the initval to xalpha/yalpha.
+lens.Companion.alpha:
+    initval: [-105.71390855821264, -106.41932554317259]
+
+# finite_source is False in the system yaml, so rho is not a model parameter
+# -- but this seed is not dead: the relaxation engine back-solves it through
+# rho = theta_star/theta_E into the stellar chain, so it informs the starting
+# theta_E and through it t_E (the same role it plays in DC2018_128).
+#
+# Do not read these two values as a measurement.  rho is UNCONSTRAINED by
+# these data: log_rho carries a marginal sigma of 3.3 dex in both solutions,
+# so the posterior fills its prior and both numbers sit near the floor.  They
+# are start values, not results, and the ~1.7 dex gap between them says
+# nothing about the two solutions differing.
+source.Source.rho:
+    initval: [3.2764792515492514e-06, 1.6265345962770324e-04]
+
+# q = M_companion / M_primary.  EXOZIPPy's relaxation engine propagates this
+# through the symbolic relation  q * M_primary = M_companion  to set the
+# companion's mass initval automatically.
+lens.Companion.q:
+    initval: [0.0023682368373484507, 0.002878146503106522]
+
+# KMT-2018-BLG-0087 at 17:37:18.48 -27:49:55.42 (J2000), which astropy puts
+# at galactic (l, b) = (359.97, +2.14) -- a normal bulge sightline, which is
+# the sanity check that matters here.  These are NOT cosmetic: galacticmodel
+# anchors on the source, so they set the line of sight and therefore the
+# distance and density priors for the whole stellar chain.
+#
+# Provenance: the coordinate string is not in the JSON (whose only keys are
+# fits/errfacs/mag_methods) and is not derivable from the KMT field numbers
+# (BLG14/BLG15 give a field centre, not the event).  It was read out of the
+# MMEXOFAST ModelConfig carried by the committed restart pickles, where the
+# identical string appears in all five (test_output/*.pkl and
+# pkl_xtra/*.pkl).
+star.Lens.ra:
+    initval: 264.32700
+    sigma: 0
+star.Lens.dec:
+    initval: -27.83206
+    sigma: 0
+star.Source.ra:
+    initval: 264.32700
+    sigma: 0
+star.Source.dec:
+    initval: -27.83206
+    sigma: 0
+
+# Per-dataset error renormalization from the JSON's "errfacs", mapped
+# one-to-one onto err_scale (sigma = err * err_scale; the parameter's own
+# default initval is 1.0, so these are the factors verbatim).  This is the
+# mapping push_errfac_hints performs when MMEXOFAST seeding is live; seeding
+# is off here, so they are written out.
+#
+# They are initvals, NOT pins: err_scale stays free, as it is in every other
+# shipped fit.  MMEXOFAST derived them on the Close_alt model with the
+# anomaly-window points protected, which is why one set serves both seeds.
+mulensinstrument.KMTC14.err_scale:
+    initval: 1.2302719500353114
+mulensinstrument.KMTS14.err_scale:
+    initval: 1.2519329092717233
+mulensinstrument.KMTA14.err_scale:
+    initval: 1.4597862194798024
+mulensinstrument.KMTC15.err_scale:
+    initval: 1.2598875494102528
+mulensinstrument.KMTS15.err_scale:
+    initval: 1.3421992348036338
+mulensinstrument.KMTA15.err_scale:
+    initval: 1.4299771868295128
+
+# Point-source fit with no SED, no evolutionary model and no empirical
+# relation, so nothing reads the lens/source radius, teff or feh and
+# Star.structure_consumers deactivates them (review 3.8.1) -- they do not
+# need pinning by hand here.  Adding an sed: block makes them free and
+# constrained again with no edit to this file.
+planet.Companion.radius:
+    sigma: 0
