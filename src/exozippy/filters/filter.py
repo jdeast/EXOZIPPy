@@ -249,7 +249,7 @@ class Filter(BaseQuery):
     def _check_if_filter_saved(self, filterDir=None, overwrite=False):
         """Load this filter from the first place it is found, else fetch it.
 
-        Read order is the shipped package directory first (20 profiles ship
+        Read order is the shipped package directory first (25 profiles ship
         with EXOZIPPy) and the machine-level cache second; a fetch is written
         to the cache. Writing into the package directory -- what this did
         until 2026-08 -- is a PermissionError on a read-only site-packages
@@ -526,10 +526,26 @@ class Filter(BaseQuery):
 
         return
 
+    def _file_state(self):
+        """The state a .filter file stores: nothing tied to the writing machine.
+
+        __getstate__ (which copy/deepcopy also use, so it keeps everything)
+        carries the writer's absolute filterDirectory and its live
+        requests.Session. Neither belongs in a file that may ship in the
+        package: _read_filter_file restores filterDirectory from where the
+        file was actually found, and __init__ has already made a fresh
+        session before the file is read. The profiles shipped before this
+        (all but GAIA/GAIA3.*) still carry both; reading them is unaffected.
+        """
+        state = self.__getstate__()
+        del state["_session"]
+        state["filterDirectory"] = None
+        return state
+
     def _create_filter_file(self):
 
         filename_filter = self.filterName + ".filter"
-        state = self.__getstate__()
+        state = self._file_state()
         with open(self.filterDirectory / filename_filter, "wb") as file:
             pickle.dump(state, file, protocol=pickle.HIGHEST_PROTOCOL)
 

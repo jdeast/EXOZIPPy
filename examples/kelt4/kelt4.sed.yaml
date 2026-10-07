@@ -6,25 +6,25 @@
 #   consistent with RUWE = 1.0230 (not elevated) -- pos: [A].
 # 2MASS (~2-4") and WISE (~6") cannot resolve a 1.6" pair -- genuinely
 #   A+B+C blended, so they keep the default photType (blend of all stars).
-# Gaia DR3 photometry used with GAIA/GAIA2r filter curves (DR2); differences are <1 mmag for typical stars
+# Gaia DR3 photometry (TIC165297570.sed: Gaia_*_EDR3), with the GAIA/GAIA3 (DR3) filter curves
 # GALEX: atmospheric models are unreliable in the UV
 
 model: NextGen
 nstars: 3   # A, B, C
 filters:
-    - name: "GAIA/GAIA2r.G"
+    - name: "GAIA/GAIA3.G"
       mag: 9.965562
       err: 0.02
       photType:
         pos: [A]
 
-    - name: "GAIA/GAIA2r.Gbp"
+    - name: "GAIA/GAIA3.Gbp"
       mag: 10.165902
       err: 0.02
       photType:
         pos: [A]
 
-    - name: "GAIA/GAIA2r.Grp"
+    - name: "GAIA/GAIA3.Grp"
       mag: 9.514663
       err: 0.02
       photType:

@@ -10,6 +10,13 @@ import pytest
 import yaml
 from astropy.table import Table
 
+from exozippy.components.sed.bc_grid import (
+    DEFAULT_MODEL_ROOT,
+    _load_alias_table,
+    find_bc_table,
+    read_bc_table,
+    resolve_filter_name,
+)
 from exozippy.utilities import mkticsed as mk
 
 # --- synthetic catalogs -------------------------------------------------------
@@ -656,9 +663,9 @@ def _all_catalogs(err=1e-6):
 
 # band -> the error floor its catalog imposes, in magnitudes.
 EXPECTED_FLOORS = {
-    "GAIA/GAIA2r.G": 0.02,
-    "GAIA/GAIA2r.Gbp": 0.02,
-    "GAIA/GAIA2r.Grp": 0.02,
+    "GAIA/GAIA3.G": 0.02,
+    "GAIA/GAIA3.Gbp": 0.02,
+    "GAIA/GAIA3.Grp": 0.02,
     "2MASS/2MASS.J": 0.02,
     "2MASS/2MASS.H": 0.02,
     "2MASS/2MASS.Ks": 0.02,
@@ -749,8 +756,8 @@ def test_ucac_errors_are_hundredths_of_a_magnitude(tmp_path, patched_catalogs):
     "band,err,kept",
     [
         # Gaia, 2MASS and WISE reject an error of 1 mag or more.
-        ("GAIA/GAIA2r.G", 0.999, True),
-        ("GAIA/GAIA2r.G", 1.0, False),
+        ("GAIA/GAIA3.G", 0.999, True),
+        ("GAIA/GAIA3.G", 1.0, False),
         ("2MASS/2MASS.J", 0.999, True),
         ("2MASS/2MASS.J", 1.0, False),
         ("WISE/WISE.W1", 0.999, True),
@@ -771,7 +778,7 @@ def test_the_implausible_error_gate_is_per_catalog(
     # Arrange
     catalogs = _all_catalogs()
     col = {
-        "GAIA/GAIA2r.G": ("I/355/gaiadr3", "e_Gmag"),
+        "GAIA/GAIA3.G": ("I/355/gaiadr3", "e_Gmag"),
         "2MASS/2MASS.J": ("II/246/out", "e_Jmag"),
         "WISE/WISE.W1": ("II/328/allwise", "e_W1mag"),
         "TYCHO/TYCHO.B": ("I/259/TYC2", "e_BTmag"),
@@ -805,9 +812,9 @@ def test_gaia_rejects_its_minus_nine_magnitude_sentinel(
     rows = _run(tmp_path, priorfile=str(tmp_path / "p.yaml"))
 
     # Assert
-    assert "GAIA/GAIA2r.Gbp" not in rows
-    assert "GAIA/GAIA2r.G" in rows
-    assert "GAIA/GAIA2r.Grp" in rows
+    assert "GAIA/GAIA3.Gbp" not in rows
+    assert "GAIA/GAIA3.G" in rows
+    assert "GAIA/GAIA3.Grp" in rows
 
 
 @pytest.mark.parametrize(
@@ -1053,3 +1060,91 @@ def test_every_written_row_states_its_native_magnitude_system(
         assert r["magsys"] == expected, r["name"]
     text = path.read_text()
     assert text.count("# - name:") == text.count("#   magsys:")
+
+
+# --- Gaia DR3 photometry must be written with the DR3 filter curves ----------
+
+_GAIA_DR3_ROWS = {
+    "GAIA/GAIA3.G": 10.0,
+    "GAIA/GAIA3.Gbp": 10.4,
+    "GAIA/GAIA3.Grp": 9.5,
+}
+
+
+def _mist_column(svo_id):
+    """The BC-grid column an SVO filter id resolves to (filternames.txt)."""
+    return resolve_filter_name(svo_id, _load_alias_table(), "MIST")
+
+
+def test_gaia_dr3_photometry_is_written_with_the_dr3_filter_curves(
+    tmp_path, patched_catalogs
+):
+    """
+    Given a Gaia DR3 match with G, BP and RP,
+    When mkticsed writes the SED,
+    Then the three magnitudes are written against the DR3 curves
+      (GAIA/GAIA3.*, BC columns Gaia_*_EDR3), no row names a DR2 curve
+      (GAIA/GAIA2r.*), and the header makes no "<1 mmag" claim.
+
+    Pre-fix the DR3 magnitudes were written against GAIA/GAIA2r.*, with a
+    header note that the curves agree to <1 mmag; in the shipped BC grid
+    they differ by 0.03-0.07 mag in G at A_V = 6 (the test below).
+    """
+    # Arrange
+    patched_catalogs["I/355/gaiadr3"] = _gaia_dr3_table()
+
+    # Act
+    rows = _run(tmp_path, priorfile=str(tmp_path / "p.yaml"))
+    text = (tmp_path / f"{tmp_path.name}.sed.yaml").read_text()
+
+    # Assert
+    for band, mag in _GAIA_DR3_ROWS.items():
+        assert rows[band][0] == pytest.approx(mag), band
+        assert _mist_column(band).endswith("_EDR3")
+    assert "GAIA2r" not in text
+    assert "mmag" not in text
+
+
+def test_bc_grid_distinguishes_the_dr2_and_dr3_gaia_curves_when_reddened():
+    """
+    Given the shipped NextGen GAIA BC table,
+    When the DR3 (GAIA/GAIA3.*) and DR2 (GAIA/GAIA2r.*) columns are compared
+      for solar-metallicity FGK dwarfs,
+    Then they differ by several hundredths of a magnitude in G for a
+      reddened star (A_V = 6) -- the two curves are NOT interchangeable, and
+      a DR3 magnitude written against a DR2 curve is biased.
+
+    Guards the claim mkticsed used to make ("<1 mmag for typical stars"):
+    it holds only for G of an unreddened star.
+    """
+    # Arrange
+    path = find_bc_table(DEFAULT_MODEL_ROOT, "NextGen", "GAIA")
+    cols = {
+        b: (
+            _mist_column(f"GAIA/GAIA3.{b}"),
+            _mist_column(f"GAIA/GAIA2r.{b}"),
+        )
+        for b in ("G", "Gbp", "Grp")
+    }
+    df = read_bc_table(
+        path,
+        columns=["teff", "logg", "feh", "alpha", "Av"]
+        + [c for pair in cols.values() for c in pair],
+        where={"feh": (0.0, 0.0), "logg": (4.5, 4.5)},
+    )
+    df = df[(df["alpha"] == 0.0) & df["teff"].between(4000.0, 6500.0)]
+
+    def delta(band, av):
+        sel = df[df["Av"] == av]
+        assert len(sel) > 0, f"no A_V = {av} nodes"
+        dr3, dr2 = cols[band]
+        return (sel[dr3] - sel[dr2]).abs()
+
+    # Act / Assert
+    # Unreddened G: the old claim holds, to ~2 mmag ...
+    assert delta("G", 0.0).max() < 0.003
+    # ... but reddened G does not: > 0.03 mag across FGK at A_V = 6,
+    assert delta("G", 6.0).min() > 0.03
+    # and BP and RP differ by > 0.01 mag there too.
+    assert delta("Gbp", 6.0).min() > 0.01
+    assert delta("Grp", 6.0).min() > 0.01
