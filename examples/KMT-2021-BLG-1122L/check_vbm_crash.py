@@ -18,9 +18,8 @@ import time
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-HANG_S = (
-    120.0  # a three-body call not back in two minutes is hung (typical: ms)
-)
+HANG_S = 900.0  # let a slow call finish: the fixed kernel's tail is minutes
+SLOW_S = 60.0  # harvest threshold for the slow tail (review 2.6.12)
 COORDS = "263.96292 -28.44645"
 T0, U0, TE, RHO = 2459370.609, -0.4213, 14.74, 0.0025
 S2, Q2, A2 = 1.386, 0.526, 48.68
@@ -85,8 +84,12 @@ def child(start, stop, seed, journal, method):
         for i in range(start, stop):
             j.write(f"START {i} {time.time():.1f}\n")
             j.flush()
+            t_call = time.time()
             A = f(np.array(props[i]), t, obs)
-            j.write(f"DONE {i} {np.nanmax(A):.4g} {int(np.isnan(A).sum())}\n")
+            dt = time.time() - t_call
+            j.write(
+                f"DONE {i} {np.nanmax(A):.4g} {int(np.isnan(A).sum())} {dt:.3f}\n"
+            )
             j.flush()
 
 
@@ -164,6 +167,21 @@ def parent(n, seed, method, workers):
             )
         )
     done = sum(1 for ln in open(journal) if ln.startswith("DONE"))
+    # Per-call wall times from the journal: every proposal over SLOW_S is a
+    # harvest case for the kernel's slow tail (review 2.6.12).
+    times = {}
+    for ln in open(journal):
+        w = ln.split()
+        if w[0] == "DONE" and len(w) >= 5:
+            times[int(w[1])] = float(w[4])
+    slow = sorted((i, dt) for i, dt in times.items() if dt > SLOW_S)
+    if times:
+        arr = np.array(list(times.values()))
+        print(
+            f"[{method}] per-call wall time: median {np.median(arr):.3f} s, "
+            f"p99 {np.percentile(arr, 99):.2f} s, max {arr.max():.1f} s; "
+            f"{len(slow)} over {SLOW_S:.0f} s"
+        )
     props = proposals(n, seed)
     print(
         f"[{method}] {n} proposals, {done} completed, {len(crashes)} crashed  (rate {len(crashes) / n:.2e})"
@@ -178,6 +196,10 @@ def parent(n, seed, method, workers):
         {
             "method": method,
             "n": n,
+            "slow_s": SLOW_S,
+            "slow": [
+                {"idx": i, "seconds": dt, "p": props[i]} for i, dt in slow
+            ],
             "crashes": [
                 {"idx": i, "rc": rc, "err": e, "p": props[i]}
                 for i, rc, e in crashes
