@@ -257,3 +257,37 @@ def test_the_resumed_restart_file_matches(resumed):
         assert (work_a / name).read_text(encoding="utf-8") == (
             work_b / name
         ).read_text(encoding="utf-8")
+
+
+def test_exozippy_modes_reproduces_the_live_wrapup(resumed, tmp_path):
+    """
+    Given the clean fit (A) -- whose trace carries the DE-MC burn-in
+      transient that the live wrap-up trims --
+    When `exozippy-modes` reprocesses a copy of it,
+    Then its tables, CSV and mode report are identical to the live fit's
+      (review 1.3.9): the CLI runs the live wrap-up, fold and burn-in trim
+      included, instead of a partial copy of it.
+    """
+    from click.testing import CliRunner
+
+    from exozippy import cli_modes
+
+    work_a, _ = resumed
+    copy = tmp_path / "kelt4"
+    shutil.copytree(work_a, copy)
+    with open(copy / "cli.yaml", "w") as f:
+        # sort_keys=False: block order is the table's row order
+        yaml.safe_dump(_config(copy, recompute=True), f, sort_keys=False)
+
+    cwd = os.getcwd()
+    os.chdir(copy)
+    try:
+        result = CliRunner().invoke(cli_modes.main, ["cli.yaml"])
+    finally:
+        os.chdir(cwd)
+
+    assert result.exit_code == 0, repr(result.exception)
+    for name in ("_results.csv", "_table.tex", "_modes.txt"):
+        assert (copy / (PREFIX + name)).read_text(encoding="utf-8") == (
+            work_a / (PREFIX + name)
+        ).read_text(encoding="utf-8"), name

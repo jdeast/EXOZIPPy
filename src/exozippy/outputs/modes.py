@@ -259,8 +259,8 @@ def check_invalid_frac(
             f"reasons={reason_counts}, per-chain invalid counts={per_chain}."
             + _invalid_reason_hint(reason_counts)
             + where
-            + " Re-run `exozippy-modes <config>` to inspect the trace "
-            "without raising." + override
+            + " Re-run `exozippy-modes --force <config>` to inspect the "
+            "trace without raising." + override
         )
     raise RuntimeError(
         f"identify_modes: {n_invalid} draws "
@@ -309,8 +309,8 @@ def mode_status_to_text(status):
         "",
         "This is a model or sampler bug, not a reporting problem. A live",
         "fit refuses to write final tables in this state; this file was",
-        "written by a forensic re-processing run (exozippy-modes) or by a",
-        "run with `modes: {force: true}` set.",
+        "written by a run with `modes: {force: true}` set (or",
+        "`exozippy-modes --force`, which sets it).",
         "",
     ]
     return "\n".join(lines)
