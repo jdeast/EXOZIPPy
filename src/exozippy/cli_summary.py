@@ -1,9 +1,9 @@
 """Console entry point: exozippy-summary <config.yaml>
 
 Redraws a finished fit's one-page summary figure -- transits, RVs, SED and
-Kiel diagram at the best-fit draw, under a header of each planet's P, R_P,
-M_P and e -- from the config it ran with and its saved ``<prefix>_trace.nc``,
-without re-sampling.  Every fit already writes the figure at wrap-up; this is
+Kiel diagram at the median draw with 50 posterior draws' model curves
+overlaid, under a header of each planet's P, R_P, M_P and e -- from the
+config it ran with and its saved ``<prefix>_trace.nc``, without re-sampling.  Every fit already writes the figure at wrap-up; this is
 for redrawing it, e.g. after editing the display-only ``label:`` keys.  The
 figure is ``outputs/summary_plot.create_summary_plot``; this is its command
 line.

@@ -1799,11 +1799,12 @@ def _wrap_up(
     for comp in system.active_components.values():
         comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
 
-    # The one-page system figure (outputs/summary_plot.py) at the best-fit
+    # The one-page system figure (outputs/summary_plot.py) at the median
     # draw of the posterior the tables above were built from -- `idata` is
-    # already trimmed, mode-labelled and distributed onto the Parameters.
-    # A fit with nothing it draws (no transit, RV, SED or evolutionary
-    # model) gets none, and says so at INFO rather than warning every run.
+    # already trimmed, mode-labelled and distributed onto the Parameters --
+    # with the same `draws` overlaid as the component PDFs above.  A fit
+    # with nothing it draws (no transit, RV, SED or evolutionary model)
+    # gets none, and says so at INFO rather than warning every run.
     # `exozippy-summary <config>` redraws it from the saved trace.
     wrapup.stage("one-page summary figure")
     with nonfatal_wrapup("summary figure"):
@@ -1815,6 +1816,7 @@ def _wrap_up(
                 idata,
                 f"{prefix}_mcmc_summary.pdf",
                 title=(config.get("run") or {}).get("name"),
+                draws=draws,
             )
         except NoSummaryPanels:
             logger.info(

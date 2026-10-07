@@ -26,14 +26,22 @@ replaces (``PALETTE`` and the style constants below), not the role encodings
 the per-component PDFs and the GUI share.  A new panel kind is a new
 component chart, not new arithmetic here.
 
-THE POINT IS THE BEST-FIT DRAW OF THE REPORTED POSTERIOR.  ``reported_posterior``
-reproduces what ``run.py`` reports from -- burn-in and stuck chains trimmed
-(``convergence.analyze_idata``), draws the mode pass rejects as numerically
-invalid labelled -1 -- and ``best_fit_point`` takes the highest-lp valid draw
-of that: one joint draw, never a vector of per-parameter medians, which need
-not be a point the posterior contains (mkparam seeds from the MAP for the
-same reason).  The header quotes the medians and credible intervals of that
-same posterior, at the run's credible-interval width.
+THE REFERENCE POINT IS THE MEDIAN DRAW OF THE REPORTED POSTERIOR.
+``reported_posterior`` reproduces what ``run.py`` reports from -- burn-in and
+stuck chains trimmed (``convergence.analyze_idata``), draws the mode pass
+rejects as numerically invalid labelled -1 -- and ``median_draw_point`` takes
+the valid draw nearest its median: one joint draw, never a vector of
+per-parameter medians, which need not be a point the posterior contains, and
+a typical draw rather than the highest-lp one (see that function for why).
+It plays the part ``points[0]`` plays for ``plotrender``: the data and its
+cleaning, every O-C, the SED's model photometry, and the Kiel track, window
+and ages are its.  The other model curves are EXOZIPPy's spaghetti: the
+median draw's and those of other posterior draws (``run.get_draws``, the
+same 50 the component PDFs drew when the fit writes the figure), all at one
+low alpha, none darker; the Kiel diagram shows its posterior as contours
+instead.  The header and the Kiel diagram quote the medians and
+credible intervals of that same posterior, at the run's credible-interval
+width.
 """
 
 import contextlib
@@ -99,6 +107,11 @@ _PANEL_ROWS = 1
 _ROW_HEIGHT_IN = 6.0
 _COLUMN_WIDTH_IN = 8.5
 _OC_HEIGHT_RATIOS = (3, 1)
+# An O-C axis's x10^n multiplier: its right end, in axes fraction, and how
+# far (points) it is dropped from matplotlib's place above the axes -- both
+# clear of the spines' inward ticks.
+_OC_OFFSET_X = 0.98
+_OC_OFFSET_DROP_PT = 10.0
 _TITLE_HEIGHT_IN = 0.55
 _LINE_HEIGHT_IN = 0.38
 
@@ -165,6 +178,21 @@ _CAPSIZE = 4
 _RV_MODEL = {"color": "k", "lw": 2.0, "alpha": 0.7}
 _RV_TIME_MODEL = {"color": "k", "lw": 0.15, "alpha": 1.0}
 _MODEL_LABEL = "Model"
+# Model curves follow EXOZIPPy's own posterior plots (plotrender's rule):
+# with other posterior draws, EVERY model curve -- the median draw's
+# included -- is drawn at one low alpha and none is darker, since no one
+# draw is "the" fit; a lone point's curves keep the weights above.  The
+# SED's spectra take the SED component's own spaghetti alpha.  A legend
+# swatch is raised to a legible alpha, as plotrender's
+# _LEGEND_MIN_ALPHA does.  The Kiel diagram is the exception: its contours
+# show the posterior, and its one track, the median draw's, carries the
+# reference ages, which fifty overlapping tracks would leave on no track
+# the eye can follow.
+_PANELS_WITH_DRAWS = frozenset({"transit", "rv_time", "rv_phase", "sed"})
+_N_DRAWS = 50
+_DRAWS_ALPHA = 0.1
+_SED_DRAWS_ALPHA = 0.15
+_LEGEND_ALPHA = 0.8
 # SED: the model spectra are smoothed with a boxcar of this many points;
 # the axes span the bandpasses and the photometry, padded by these factors.
 _SED_MARKERSIZE = 8.0
@@ -211,7 +239,7 @@ def reported_posterior(system, idata):
     trimming: ``convergence.analyze_idata`` drops burn-in and stuck chains,
     and ``identify_modes`` labels the draws it rejects as numerically
     invalid -1, which ``distribute_posterior`` then leaves out of every
-    summary and ``best_fit_point`` out of the ranking.  A mode pass that
+    summary and ``median_draw_point`` out of its choice.  A mode pass that
     finds NO valid draw raises (a figure of rejected draws is meaningless);
     any other mode-pass failure is the one ``report_pipeline`` tolerates --
     the tables then describe the combined posterior -- and is tolerated here
@@ -239,7 +267,7 @@ def reported_posterior(system, idata):
         if report.n_modes > 1:
             logger.warning(
                 f"summary plot: the posterior has {report.n_modes} modes.  "
-                "The panels are drawn at the best-fit draw, which lies in "
+                "The panels are drawn at the median draw, which lies in "
                 "one of them, and the header quotes the COMBINED posterior; "
                 "the per-mode values are in the results table."
             )
@@ -247,40 +275,61 @@ def reported_posterior(system, idata):
     return trimmed
 
 
-def best_fit_point(system, idata):
-    """The highest-lp valid draw of ``idata``, as a plotting point.
+def median_draw_point(system, idata):
+    """The valid draw of ``idata`` nearest its posterior median, as a
+    plotting point.
 
-    Returns ``(point, (chain, draw), lp)``.  ``point`` maps every posterior
-    variable but ``mode`` and the report-only Deterministics to its value at
-    that draw, in INTERNAL units -- the form ``Component.plot_data`` takes,
-    built the way ``run.get_draws`` builds its spaghetti draws, but through
-    ``Parameter.to_internal`` since a single draw is the element vector the
-    owner's conversion expects.
+    Returns ``(point, (chain, draw), distance)``.  Nearest in the SAMPLED
+    coordinates -- every ``*_raw`` variable, the unconstrained space the
+    sampler moves in -- with each element centered on its median and scaled
+    by its posterior standard deviation; ``distance`` is the chosen draw's
+    root-sum-square of those.  One joint draw, so every curve on the page
+    comes from a point the posterior contains (a vector of per-parameter
+    medians need not be one), and a TYPICAL draw, agreeing with the medians
+    the header and the Kiel diagram quote.
 
-    A draw labelled -1 by the mode pass is never chosen: the runaway-lp
-    failure produces finite, enormous lp values that win any ranking by
-    construction (mkparam's ``_map_draw_from_lp`` masks them for the same
-    reason).  A trace with no ``sample_stats["lp"]`` has no best fit and
-    raises rather than guessing one.
+    It is deliberately not the highest-lp draw.  With dozens of parameters,
+    the best-scoring of thousands of draws is picked out by noise in the
+    photometry's thousands of terms, and can sit well out in the parameters
+    the eye checks: measured on a TOI-7475 fit (16000 draws), the highest-lp
+    draw had its period 2.4 sigma off and both RV jitters inflated to
+    150-190 m/s, and its RV chi-square on the quoted errors was 303 against
+    a median of 19 over 200 random draws -- a phased RV curve visibly off
+    the data that every random draw fits.
+
+    ``point`` maps every posterior variable but ``mode`` and the report-only
+    Deterministics to its value at that draw, in INTERNAL units -- the form
+    ``Component.plot_data`` takes, built the way ``run.get_draws`` builds
+    its spaghetti draws, but through ``Parameter.to_internal`` since a
+    single draw is the element vector the owner's conversion expects.  Draws
+    the mode pass labelled -1 (numerically invalid) are never chosen, and do
+    not enter the median.
     """
-    stats = idata.get("sample_stats")
-    if stats is None or "lp" not in stats.data_vars:
-        raise ValueError(
-            "The trace has no sample_stats['lp'], so it has no best-fit draw "
-            "to plot.  Re-run the fit with a current EXOZIPPy, which stores "
-            "lp for every sampler."
-        )
-    lp = np.asarray(stats["lp"].values, dtype=float)
     posterior = idata.posterior
-    if "mode" in posterior:
-        labels = np.asarray(posterior["mode"].values)
-        lp = np.where(labels < 0, np.nan, lp)
-    if not np.isfinite(lp).any():
+    raw = [v for v in posterior.data_vars if v.endswith("_raw")]
+    if not raw:
         raise ValueError(
-            "No valid draw in the trace has a finite lp, so there is no "
-            "best-fit draw to plot."
+            "The trace has no sampled (*_raw) variables to find its median "
+            "draw in."
         )
-    chain, draw = np.unravel_index(int(np.nanargmax(lp)), lp.shape)
+    shape = (posterior.sizes["chain"], posterior.sizes["draw"])
+    valid = np.ones(shape, dtype=bool)
+    if "mode" in posterior:
+        valid = np.asarray(posterior["mode"].values) >= 0
+    if not valid.any():
+        raise ValueError("No valid draw in the trace to plot.")
+
+    distance2 = np.zeros(shape)
+    for var in raw:
+        values = np.asarray(posterior[var].values, dtype=float)
+        values = values.reshape(shape + (-1,))
+        median = np.median(values[valid], axis=0)
+        scale = np.std(values[valid], axis=0)
+        moving = scale > 0  # a pinned element has no width to scale by
+        z = (values[..., moving] - median[moving]) / scale[moving]
+        distance2 += np.sum(z**2, axis=-1)
+    distance2 = np.where(valid, distance2, np.inf)
+    chain, draw = np.unravel_index(int(np.argmin(distance2)), shape)
 
     lookup = system.get_parameter_lookup()
     skip = set(system.report_only_labels()) | {"mode"}
@@ -292,7 +341,11 @@ def best_fit_point(system, idata):
         if var in lookup and not var.endswith("_raw"):
             val = lookup[var].to_internal(val)
         point[var] = val
-    return point, (int(chain), int(draw)), float(lp[chain, draw])
+    return (
+        point,
+        (int(chain), int(draw)),
+        float(np.sqrt(distance2[chain, draw])),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +453,46 @@ def _collect_charts(system, point):
     for comp in system.active_components.values():
         charts.extend(comp.plot_data(system, point))
     return charts
+
+
+def _draw_model_traces(system, panels, draws):
+    """``{chart id: [model traces of one draw, ...]}``: the model curves of
+    every chart a panel draws, at each of ``draws``.
+
+    The spaghetti ``plotrender.render_spec_groups`` overlays, gathered the
+    same way: each draw's ``plot_data``, matched to the panel's chart by id,
+    model traces only (the data and its cleaning are the reference point's).
+    A draw whose ``plot_data`` raises is skipped with a warning, as
+    ``plotrender.plot_via_specs`` skips it.  Only the panels in
+    ``_PANELS_WITH_DRAWS`` are gathered for, so no other component is
+    evaluated at the draws.
+    """
+    panels = [p for p in panels if p.kind in _PANELS_WITH_DRAWS]
+    wanted = {chart.id for panel in panels for chart in panel.charts}
+    keys = {
+        chart.component.get("yaml_key")
+        for panel in panels
+        for chart in panel.charts
+    }
+    components = [system.active_components[key] for key in sorted(keys)]
+    models = {}
+    for idx, extra in enumerate(draws):
+        for comp in components:
+            try:
+                charts = comp.plot_data(system, extra)
+            except Exception as exc:  # noqa: BLE001 - skip a bad posterior draw
+                logger.warning(
+                    "summary plot: plot_data failed for draw %d of %s: %s",
+                    idx,
+                    getattr(comp, "prefix", comp),
+                    exc,
+                )
+                continue
+            for chart in charts:
+                traces = _role(chart, "model")
+                if chart.id in wanted and traces:
+                    models.setdefault(chart.id, []).append(traces)
+    return models
 
 
 def _panels(charts):
@@ -619,13 +712,47 @@ def _auto_spacing(arrays):
     return depth + _SPACING_SIGMAS * float(np.median(sigmas)), depth
 
 
-def _draw_transit_stack(ax, rows, spacing):
+def _row_model_curves(row, members, draw_models):
+    """Every model curve of one stack row, ``(x hours, y)``: the members'
+    at the reference point, then at each draw (``draw_models``, by chart
+    id).  Within one draw, a curve repeated exactly -- grouped TESS files
+    share their model -- is kept once, so overlapping files do not darken
+    it; a draw repeating another draw is kept, as every draw is in
+    ``plotrender``.
+    """
+    per_draw = {}
+    for chart, (_, _, _, xm, ym) in zip(row[2], members):
+        per_draw.setdefault(0, []).append((xm, ym))
+        for k, traces in enumerate(draw_models.get(chart.id, ()), start=1):
+            per_draw.setdefault(k, []).extend(
+                (
+                    24.0 * np.asarray(trace.x, dtype=float),
+                    np.asarray(trace.y, dtype=float),
+                )
+                for trace in traces
+            )
+    curves = []
+    for candidates in per_draw.values():
+        seen = set()
+        for x, y in candidates:
+            key = (x.tobytes(), y.tobytes())
+            if key not in seen:
+                seen.add(key)
+                curves.append((x, y))
+    return curves
+
+
+def _draw_transit_stack(ax, rows, spacing, draw_models=None):
     """Draw the rows of one stack, ``spacing`` apart (None: automatic).
 
-    The vertical limits are symmetric about the stack: the same margin,
-    half a row, above the first row's baseline as below the bottom of the
-    last row's transit.
+    ``draw_models`` (``_draw_model_traces``) are the other posterior draws'
+    model curves: with any, every curve in the stack is drawn at
+    ``_DRAWS_ALPHA``, the reference point's included.  The vertical limits
+    are symmetric about the stack: the same margin, half a row, above the
+    first row's baseline as below the bottom of the last row's transit.
     """
+    draw_models = draw_models or {}
+    alpha = _DRAWS_ALPHA if draw_models else None
     arrays = [_transit_row_arrays(row) for row in rows]
     auto, depth = _auto_spacing(arrays)
     spacing = auto if spacing is None else float(spacing)
@@ -634,6 +761,10 @@ def _draw_transit_stack(ax, rows, spacing):
     for k, (row, members) in enumerate(zip(rows, arrays)):
         offset = 1.0 - k * spacing
         color = row[4]
+        for xm, ym in _row_model_curves(row, members, draw_models):
+            ax.plot(
+                xm, ym + offset, "-", alpha=alpha, zorder=3, **_TRANSIT_MODEL
+            )
         for x, y, binned, xm, ym in members:
             ax.plot(
                 x,
@@ -661,7 +792,6 @@ def _draw_transit_stack(ax, rows, spacing):
                     alpha=_BIN_ALPHA,
                     zorder=2,
                 )
-            ax.plot(xm, ym + offset, "-", zorder=3, **_TRANSIT_MODEL)
 
     if x_range is not None:
         ax.set_xlim(24.0 * x_range[0], 24.0 * x_range[1])
@@ -702,15 +832,16 @@ def _offset_label(label, offset):
     return label[:-1] + text + "]" if label.endswith("]") else label + text
 
 
-def _prepared(chart, labels, time_offset=False):
-    """The chart with instrument names relabelled and, for a time axis whose
-    every value is past one of ``BJD_OFFSETS``, the largest such subtracted."""
-    offset = 0
-    if time_offset:
-        x_min = min(
-            float(np.min(t.x)) for t in chart.traces if np.size(t.x) > 0
-        )
-        offset = next((o for o in BJD_OFFSETS if x_min > o), 0)
+def _bjd_offset(chart):
+    """The largest of ``BJD_OFFSETS`` that every x of the chart is past; 0
+    for none (an axis its data already offsets)."""
+    x_min = min(float(np.min(t.x)) for t in chart.traces if np.size(t.x) > 0)
+    return next((o for o in BJD_OFFSETS if x_min > o), 0)
+
+
+def _prepared(chart, labels, offset=0):
+    """The chart with instrument names relabelled and ``offset`` (a
+    ``_bjd_offset``) subtracted from its x axis."""
     meta = dict(chart.meta or {})
     if "residuals" in meta:
         meta["residuals"] = [
@@ -735,6 +866,14 @@ def _log_errors_to_linear(y, yerr):
     return np.vstack([10**y - 10 ** (y - lo), 10 ** (y + hi) - 10**y])
 
 
+def trace_in_flux(trace):
+    """An SED chart trace (log10 of lambda*F_lambda, errors in dex) at
+    ``10**y``, its error bars converted on each side."""
+    y = np.asarray(trace.y, dtype=float)
+    yerr = None if trace.yerr is None else _log_errors_to_linear(y, trace.yerr)
+    return dataclasses.replace(trace, y=10**y, yerr=yerr)
+
+
 def sed_in_flux(chart):
     """The SED chart as lambda*F_lambda on a log axis, O-C converted with it.
 
@@ -748,15 +887,6 @@ def sed_in_flux(chart):
     name, point for point (the SED component builds them that way); anything
     else is a chart this function does not know how to convert, and raises.
     """
-
-    def linear(trace):
-        y = np.asarray(trace.y, dtype=float)
-        yerr = (
-            None
-            if trace.yerr is None
-            else _log_errors_to_linear(y, trace.yerr)
-        )
-        return dataclasses.replace(trace, y=10**y, yerr=yerr)
 
     data = {t.name: t for t in chart.traces if t.role == "data"}
     residuals = []
@@ -780,7 +910,7 @@ def sed_in_flux(chart):
     lo, hi = chart.y_range
     return dataclasses.replace(
         chart,
-        traces=[linear(t) for t in chart.traces],
+        traces=[trace_in_flux(t) for t in chart.traces],
         y_range=[10.0**lo, 10.0**hi],
         y_log=True,
         xlabel=SED_XLABEL,
@@ -831,16 +961,30 @@ def _axes(fig, cell, with_oc):
 def _finish(ax, ax_oc):
     """Ticks on both axes; the O-C axis takes the x label and a zero line,
     and is in the units of the panel above it, so it names none."""
+    from matplotlib.transforms import ScaledTranslation
+
     _ticks(ax)
     if ax_oc is None:
         return
     ax_oc.axhline(0.0, zorder=0, **_ZERO_LINE)
     ax_oc.set_xlabel(ax.get_xlabel())
     ax_oc.set_ylabel(OC_YLABEL)
-    # A flux O-C (~1e-12) is written with a x10^n offset, not "1e-12", at
-    # the right, clear of the left-hand tick labels of the panel above.
+    # A flux O-C (~1e-12) is written with a x10^n offset, not "1e-12", in
+    # the O-C axes' top right corner: clear of the left-hand tick labels,
+    # and of the panel above, which it would sit on where matplotlib puts
+    # it (standing on the axes, re-anchored there at every draw -- hence a
+    # shift of its transform, not of its position).
     ax_oc.yaxis.get_major_formatter().set_useMathText(True)
     ax_oc.yaxis.set_offset_position("right")
+    offset = ax_oc.yaxis.get_offset_text()
+    offset.set_verticalalignment("top")
+    offset.set_x(_OC_OFFSET_X)
+    offset.set_transform(
+        offset.get_transform()
+        + ScaledTranslation(
+            0.0, -_OC_OFFSET_DROP_PT / 72.0, ax_oc.figure.dpi_scale_trans
+        )
+    )
     ax.set_xlabel("")
     ax.tick_params(labelbottom=False)
     _ticks(ax_oc)
@@ -867,36 +1011,49 @@ def _errorbar(ax, trace, color, marker, ms, label=None, zorder=10):
 
 
 def _legend(ax, **kwargs):
-    """One entry per label, first occurrence winning."""
+    """One entry per label, first occurrence winning; a swatch fainter than
+    ``_LEGEND_ALPHA`` (a model curve among posterior draws) is raised to it,
+    leaving the plotted curves untouched, as ``plotrender._legend`` does."""
     unique = {}
     for handle, label in zip(*ax.get_legend_handles_labels()):
         unique.setdefault(label, handle)
-    if unique:
-        ax.legend(list(unique.values()), list(unique.keys()), **kwargs)
+    if not unique:
+        return
+    legend = ax.legend(list(unique.values()), list(unique.keys()), **kwargs)
+    for proxy, handle in zip(legend.legend_handles, unique.values()):
+        # An errorbar handle is a Container, with no alpha to read.
+        alpha = getattr(handle, "get_alpha", lambda: None)()
+        if alpha is not None and alpha < _LEGEND_ALPHA:
+            proxy.set_alpha(_LEGEND_ALPHA)
 
 
-def _draw_rv(fig, cell, chart, colors, phased):
+def _draw_rv(fig, cell, chart, colors, phased, draw_models=()):
     """An RV panel and its O-C; returns ``(ax, ax_oc)``.
 
     ``colors`` maps an instrument's index (its traces' ``series_index``) to
     its color.  A model curve that belongs to one instrument (its own RM or
     GP) takes that instrument's color; the shared model is drawn in the
-    folded or the against-time model style.
+    folded or the against-time model style.  ``draw_models`` are the other
+    posterior draws' model traces for this chart (``_draw_model_traces``):
+    with them, every curve, the reference point's included, is drawn at
+    ``_DRAWS_ALPHA``.
     """
     residuals = (chart.meta or {}).get("residuals")
     ax, ax_oc = _axes(fig, cell, residuals is not None)
     style = _RV_MODEL if phased else _RV_TIME_MODEL
-    for trace in _role(chart, "model"):
-        owner = (trace.style or {}).get("series_index")
-        ax.plot(
-            np.asarray(trace.x, dtype=float),
-            np.asarray(trace.y, dtype=float),
-            color=style["color"] if owner is None else colors[owner],
-            lw=style["lw"],
-            alpha=style["alpha"],
-            zorder=2 if phased else 0,
-            label=_MODEL_LABEL if owner is None else trace.name,
-        )
+    alpha = _DRAWS_ALPHA if draw_models else style["alpha"]
+    for traces in [_role(chart, "model"), *draw_models]:
+        for trace in traces:
+            owner = (trace.style or {}).get("series_index")
+            ax.plot(
+                np.asarray(trace.x, dtype=float),
+                np.asarray(trace.y, dtype=float),
+                color=style["color"] if owner is None else colors[owner],
+                lw=style["lw"],
+                alpha=alpha,
+                zorder=2 if phased else 0,
+                label=_MODEL_LABEL if owner is None else trace.name,
+            )
     for trace in _role(chart, "data"):
         style_i = trace.style or {}
         _errorbar(
@@ -941,15 +1098,17 @@ def _smooth(y, window):
     return np.where(good, out, np.nan)
 
 
-def _draw_sed(fig, cell, chart):
+def _draw_sed(fig, cell, chart, draw_models=()):
     """The SED panel and its O-C, ``chart`` already in flux (``sed_in_flux``).
 
     Each star (or measured combination) takes one color for its photometry
     and its spectrum; the spectra are smoothed (``_SED_SMOOTH``) and drawn
     beneath, and the model's photometry -- the observed flux less its O-C --
-    is a black point on each.  The axes span the bandpasses and the
-    photometry rather than the whole model grid, so the dead blue end of the
-    spectrum stays off the page.
+    is a black point on each.  ``draw_models`` are the other posterior
+    draws' spectra, also in flux: with them, every spectrum, the reference
+    point's included, is drawn at ``_SED_DRAWS_ALPHA``.  The flux axis spans
+    the photometry; the wavelength axis spans the bandpasses, widened to
+    wherever a spectrum lies within the flux axis.
     """
     residuals = (chart.meta or {}).get("residuals") or []
     ax, ax_oc = _axes(fig, cell, bool(residuals))
@@ -957,18 +1116,29 @@ def _draw_sed(fig, cell, chart):
     colors = {}
     for trace in data:
         colors[trace.name] = PALETTE[-(len(colors) + 1) % len(PALETTE)]
-    for trace in _role(chart, "model"):
-        name = trace.name
-        identity = name[len("Star ") :] if name.startswith("Star ") else name
-        if identity not in colors:
-            colors[identity] = PALETTE[-(len(colors) + 1) % len(PALETTE)]
-        ax.plot(
-            np.asarray(trace.x, dtype=float),
-            _smooth(trace.y, _SED_SMOOTH),
-            color=colors[identity],
-            lw=_SED_SPECTRUM_LW,
-            zorder=0,
-        )
+    alpha = _SED_DRAWS_ALPHA if draw_models else None
+    spectra = []
+    for traces in [_role(chart, "model"), *draw_models]:
+        for trace in traces:
+            name = trace.name
+            identity = (
+                name[len("Star ") :] if name.startswith("Star ") else name
+            )
+            if identity not in colors:
+                colors[identity] = PALETTE[-(len(colors) + 1) % len(PALETTE)]
+            spectra.append(
+                (
+                    np.asarray(trace.x, dtype=float),
+                    _smooth(trace.y, _SED_SMOOTH),
+                )
+            )
+            ax.plot(
+                *spectra[-1],
+                color=colors[identity],
+                lw=_SED_SPECTRUM_LW,
+                alpha=alpha,
+                zorder=0,
+            )
     single = len(data) == 1
     by_name = {t.name: t for t in data}
     for trace in data:
@@ -996,16 +1166,26 @@ def _draw_sed(fig, cell, chart):
         _errorbar(ax_oc, oc, colors[oc.name], ".", _SED_MARKERSIZE)
 
     _geometry(ax, chart)
-    x = np.concatenate([np.asarray(t.x, float) for t in data])
-    xerr = np.hstack([np.asarray(t.xerr, float).reshape(2, -1) for t in data])
-    ax.set_xlim(
-        np.min(x - xerr[0]) / _SED_X_PAD, np.max(x + xerr[1]) * _SED_X_PAD
-    )
     y = np.concatenate([np.asarray(t.y, float) for t in data])
     yerr = np.hstack([np.asarray(t.yerr, float).reshape(2, -1) for t in data])
     span = np.concatenate([y - yerr[0], y + yerr[1]])
     span = span[np.isfinite(span) & (span > 0)]
-    ax.set_ylim(np.min(span) / _SED_Y_PAD, np.max(span) * _SED_Y_PAD)
+    y_lo, y_hi = np.min(span) / _SED_Y_PAD, np.max(span) * _SED_Y_PAD
+    ax.set_ylim(y_lo, y_hi)
+    # The wavelength axis: the bandpasses, widened to every stretch of a
+    # model spectrum that lies within the flux axis, so no part of the
+    # atmosphere the y range shows is cut off at the sides.  The flux axis
+    # is the photometry's and does not move.
+    x = np.concatenate([np.asarray(t.x, float) for t in data])
+    xerr = np.hstack([np.asarray(t.xerr, float).reshape(2, -1) for t in data])
+    x_lo = np.min(x - xerr[0]) / _SED_X_PAD
+    x_hi = np.max(x + xerr[1]) * _SED_X_PAD
+    for wave, flux in spectra:
+        shown = np.isfinite(flux) & (flux >= y_lo) & (wave > 0)
+        if shown.any():
+            x_lo = min(x_lo, float(wave[shown].min()))
+            x_hi = max(x_hi, float(wave[shown].max()))
+    ax.set_xlim(x_lo, x_hi)
     _legend(ax, loc="upper right")
     _finish(ax, ax_oc)
 
@@ -1111,10 +1291,10 @@ def _main_sequence(chart):
 def _draw_kiel(fig, cell, chart, samples=None, star=None):
     """The Kiel diagram.
 
-    The track heavy blue, with ``_KIEL_N_AGES`` reference ages marked along
-    its main sequence; the star a red cross at ``star`` -- ``((teff,
-    minus, plus), (logg, minus, plus))``, the reported medians and their
-    errors -- or, without one, at the chart's fitted point; and, with
+    The reference point's track heavy blue, with ``_KIEL_N_AGES`` reference
+    ages marked along its main sequence; the star a red cross at ``star`` --
+    ``((teff, minus, plus), (logg, minus, plus))``, the reported medians and
+    their errors -- or, without one, at the chart's fitted point; and, with
     ``samples`` (this star's ``posterior_kiel_samples``), the 1- and 2-sigma
     contours of MIST and of the global fit, the only legend entries.  The
     window frames the main sequence up to the turnoff, and always the star
@@ -1221,11 +1401,13 @@ def summary_figure(
     transit_bin=None,
     transit_spacing=None,
     figsize=None,
+    draws=(),
 ):
     """Draw the summary figure for ``system`` at ``point``; return the Figure.
 
     ``system`` must be built and ``point`` a plotting point (internal units,
-    e.g. from ``best_fit_point``).  The caller owns the figure: save it, then
+    e.g. from ``median_draw_point``): the reference, whose data, cleaning
+    and O-C every panel draws.  The caller owns the figure: save it, then
     ``plt.close`` it.
 
     Parameters
@@ -1257,6 +1439,13 @@ def summary_figure(
         Default: the deepest transit plus four times the typical scatter.
     figsize : (float, float), optional
         Inches.  Default scales with the number of panels.
+    draws : sequence of dict, optional
+        Other posterior draws, as plotting points (``run.get_draws``).  The
+        transit, RV and SED model curves are drawn at ``point`` and at each
+        of these, all at one low alpha, as EXOZIPPy's own posterior plots
+        draw them; the data, its cleaning, the O-C and the Kiel track stay
+        ``point``'s.  Without any, ``point``'s curves are drawn alone at
+        full weight.
     """
     import matplotlib.pyplot as plt
 
@@ -1362,6 +1551,7 @@ def summary_figure(
                 i: rv.plot_color[i] or PALETTE[-(i + 1) % len(PALETTE)]
                 for i in range(len(rv_names))
             }
+            draw_models = _draw_model_traces(system, panels, draws)
             rv_axes = []
             # Each star's posterior (Teff, logg) for its Kiel contours; none
             # before a posterior is distributed.
@@ -1380,17 +1570,36 @@ def summary_figure(
                     rows = _transit_rows(
                         panel.charts, display, groups, transit_bin, colors
                     )
-                    _draw_transit_stack(ax, rows, transit_spacing)
+                    _draw_transit_stack(ax, rows, transit_spacing, draw_models)
                 elif panel.kind in ("rv_time", "rv_phase"):
                     phased = panel.kind == "rv_phase"
-                    chart = _prepared(
-                        panel.charts[0], display, time_offset=not phased
-                    )
+                    chart = panel.charts[0]
+                    offset = 0 if phased else _bjd_offset(chart)
+                    extra = [
+                        [_shifted(t, offset, display) for t in traces]
+                        for traces in draw_models.get(chart.id, ())
+                    ]
                     rv_axes.append(
-                        _draw_rv(fig, cell, chart, rv_colors, phased)
+                        _draw_rv(
+                            fig,
+                            cell,
+                            _prepared(chart, display, offset),
+                            rv_colors,
+                            phased,
+                            extra,
+                        )
                     )
                 elif panel.kind == "sed":
-                    _draw_sed(fig, cell, sed_in_flux(panel.charts[0]))
+                    chart = panel.charts[0]
+                    _draw_sed(
+                        fig,
+                        cell,
+                        sed_in_flux(chart),
+                        [
+                            [trace_in_flux(t) for t in traces]
+                            for traces in draw_models.get(chart.id, ())
+                        ],
+                    )
                 else:
                     chart = panel.charts[0]
                     name = chart.meta["star"]
@@ -1410,29 +1619,45 @@ def summary_figure(
     return fig
 
 
-def write_summary_plot(system, posterior, path, *, title=None, **kwargs):
-    """Draw the summary figure at the best-fit draw of ``posterior`` and save
+def write_summary_plot(
+    system, posterior, path, *, title=None, draws=None, **kwargs
+):
+    """Draw the summary figure at the median draw of ``posterior`` and save
     it to ``path`` (the format follows its extension); returns ``path``.
 
     ``posterior`` is the REPORTED posterior, already distributed onto
     ``system`` -- what ``reported_posterior`` returns, and what run.py's
     wrap-up holds after its result tables, which is why both the live fit
-    and ``create_summary_plot`` come through here.  The other keywords are
-    ``summary_figure``'s.  Raises ``NoSummaryPanels`` for a fit with nothing
-    to draw.
+    and ``create_summary_plot`` come through here.  ``draws`` are the
+    posterior draws whose model curves are overlaid (``summary_figure``):
+    run.py passes the ones its component PDFs drew; None takes
+    ``_N_DRAWS`` of ``posterior`` with ``run.get_draws``.  The other
+    keywords are ``summary_figure``'s.  Raises ``NoSummaryPanels`` for a
+    fit with nothing to draw.
     """
     import matplotlib.pyplot as plt
 
-    point, (chain, draw), lp = best_fit_point(system, posterior)
+    point, (chain, draw), distance = median_draw_point(system, posterior)
     logger.info(
-        f"summary plot: best-fit draw chain {chain}, draw {draw} of the "
-        f"post-burn-in trace (lp = {lp:.2f})."
+        f"summary plot: median draw chain {chain}, draw {draw} of the "
+        f"post-burn-in trace ({distance:.1f} posterior widths from the "
+        "median, summed in quadrature over the sampled coordinates)."
     )
+    if draws is None:
+        from ..run import get_draws
+
+        draws = get_draws(
+            posterior,
+            n_draws=_N_DRAWS,
+            param_lookup=system.get_parameter_lookup(),
+            exclude=set(system.report_only_labels()),
+        )
     fig = summary_figure(
         system,
         point,
         title=title,
         header_lines=planet_header_lines(system),
+        draws=draws,
         **kwargs,
     )
     try:

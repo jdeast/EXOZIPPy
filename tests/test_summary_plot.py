@@ -4,7 +4,7 @@ console script (cli_summary.py).
 
 The figure is a third renderer of the components' Charts: it adds no
 physics, so what is tested here is what it OWNS -- the header's number
-formatting, the choice of the best-fit draw, the page layout, the name
+formatting, the choice of the median draw, the page layout, the name
 checks on its keywords, and the end-to-end path from a real trace on disk.
 The O-C it draws is the components' meta["residuals"], whose numbers are
 pinned in tests/test_plot_data.py.
@@ -99,7 +99,7 @@ def test_format_value_collapses_equal_errors_and_marks_fixed_values():
 
 
 # ---------------------------------------------------------------------------
-# The best-fit draw
+# The median draw
 # ---------------------------------------------------------------------------
 
 
@@ -123,59 +123,65 @@ def _stub_system():
     )
 
 
-def _stub_idata(lp, mode=None):
-    lp = np.asarray(lp, dtype=float)
-    period = np.arange(lp.size, dtype=float).reshape(lp.shape) + 10.0
+def _stub_idata(log_p_raw, mode=None):
+    log_p_raw = np.asarray(log_p_raw, dtype=float)
+    period = np.arange(log_p_raw.size, dtype=float).reshape(log_p_raw.shape)
     posterior = {
-        "orbit.period": period,
-        "orbit.logP_raw": period * 100.0,
+        "orbit.period": period + 10.0,
+        "orbit.logP_raw": log_p_raw,
+        # A pinned coordinate: no width, so it cannot be scaled by one.
+        "orbit.tc_raw": np.full(log_p_raw.shape, 3.0),
         "planet.t14": period * 0.0,
     }
     if mode is not None:
         posterior["mode"] = np.asarray(mode)
-    return az.from_dict({"posterior": posterior, "sample_stats": {"lp": lp}})
+    return az.from_dict({"posterior": posterior})
 
 
-def test_best_fit_point_skips_a_draw_the_mode_pass_rejected():
+def test_median_draw_is_the_valid_draw_nearest_the_median():
     """
-    Given a trace whose highest lp belongs to a draw labelled -1 (the
-      runaway-lp failure: a finite, enormous lp on a numerically invalid
-      draw),
-    When best_fit_point picks the draw,
-    Then it takes the best VALID draw, converts its physical values to
-      internal units, passes the *_raw variable through untouched, and leaves
-      out the mode label and the report-only Deterministics.
+    Given draws whose valid ones have their median exactly at draw (1, 0),
+      an invalid draw (mode -1) that would tie for nearest if it counted,
+      and a pinned (zero-width) coordinate,
+    When median_draw_point picks the draw,
+    Then it takes (1, 0) at distance 0 -- the invalid draw enters neither
+      the median nor the choice, the pinned coordinate is skipped rather
+      than divided by -- converts physical values to internal units, passes
+      *_raw through, and leaves out the mode label and report-only
+      Deterministics.
     """
     idata = _stub_idata(
-        lp=[[0.0, 5.0, 3.0], [1e6, 4.0, 1.0]],
-        mode=[[0, 0, 0], [-1, 0, 0]],
+        log_p_raw=[[0.0, -2.0, -1.0, 1.0, 2.0], [0.05, -1.5, -0.5, 0.5, 1.5]],
+        mode=[[-1, 0, 0, 0, 0], [0, 0, 0, 0, 0]],
     )
 
-    point, (chain, draw), lp = sp.best_fit_point(_stub_system(), idata)
+    point, (chain, draw), distance = sp.median_draw_point(
+        _stub_system(), idata
+    )
 
-    assert (chain, draw) == (0, 1)
-    assert lp == 5.0
-    period = idata.posterior["orbit.period"].values[0, 1]
+    assert (chain, draw) == (1, 0)
+    assert distance == pytest.approx(0.0)
+    period = idata.posterior["orbit.period"].values[1, 0]
     assert point["orbit.period"] == pytest.approx(period / 2.0)
-    assert point["orbit.logP_raw"] == pytest.approx(period * 100.0)
+    assert point["orbit.logP_raw"] == pytest.approx(0.05)
     assert "mode" not in point
     assert "planet.t14" not in point
 
 
-def test_best_fit_point_refuses_a_trace_with_no_rankable_draw():
+def test_median_draw_refuses_a_trace_with_nothing_to_choose():
     """
-    Given a trace with no sample_stats lp, and one whose every draw was
-      rejected by the mode pass,
-    When best_fit_point is asked for the best-fit draw,
+    Given a trace with no sampled (*_raw) variables, and one whose every
+      draw was rejected by the mode pass,
+    When median_draw_point is asked for the draw,
     Then it raises rather than guessing one.
     """
-    no_lp = az.from_dict({"posterior": {"orbit.period": np.ones((1, 3))}})
-    with pytest.raises(ValueError, match="no sample_stats"):
-        sp.best_fit_point(_stub_system(), no_lp)
+    no_raw = az.from_dict({"posterior": {"orbit.period": np.ones((1, 3))}})
+    with pytest.raises(ValueError, match="no sampled"):
+        sp.median_draw_point(_stub_system(), no_raw)
 
-    rejected = _stub_idata(lp=[[1.0, 2.0]], mode=[[-1, -1]])
+    rejected = _stub_idata(log_p_raw=[[1.0, 2.0]], mode=[[-1, -1]])
     with pytest.raises(ValueError, match="No valid draw"):
-        sp.best_fit_point(_stub_system(), rejected)
+        sp.median_draw_point(_stub_system(), rejected)
 
 
 # ---------------------------------------------------------------------------
@@ -443,15 +449,192 @@ def test_transit_stack_limits_are_symmetric_about_the_stack():
     np.testing.assert_allclose(xlim, [-2.4, 2.4])
 
 
+def test_posterior_draws_share_one_alpha_with_the_reference_curve():
+    """
+    Given one transit row grouping two files whose model curves are
+      identical at every point, and two other posterior draws for each --
+      the first of them identical to the reference point,
+    When the stack is drawn without and then with the draws,
+    Then alone the reference curve is drawn once, at full weight; with
+      them, the reference and each draw are drawn once apiece, all at
+      _DRAWS_ALPHA (as EXOZIPPy's own plots draw spaghetti): the files'
+      repeat within a draw is left out so overlapping files do not darken
+      it, while the draw repeating the reference is kept, as plotrender
+      keeps every draw.
+    """
+    import dataclasses
+
+    from exozippy.chart import Trace
+
+    first = _phased_chart(0.01)
+    second = dataclasses.replace(first, id="transit.phased.T2.b")
+    reference = sp._one(first, "model")
+    extra = [
+        [Trace("model", "model", "line", reference.x, reference.y)],
+        [Trace("model", "model", "line", reference.x, reference.y * 0.9)],
+    ]
+    draws = {first.id: extra, second.id: extra}
+    rows = [("TESS", "TESS", [first, second], None, "#009B77")]
+
+    alphas = []
+    for draw_models in (None, draws):
+        fig, ax = plt.subplots()
+        try:
+            sp._draw_transit_stack(ax, rows, 0.02, draw_models)
+            alphas.append(
+                [ln.get_alpha() for ln in ax.get_lines() if ln.get_ls() == "-"]
+            )
+        finally:
+            plt.close(fig)
+
+    assert alphas == [[None], [sp._DRAWS_ALPHA] * 3]
+
+
+def _rv_chart(n=50):
+    from exozippy.chart import Chart, Trace
+
+    x = np.linspace(0.0, 1.0, n)
+    data_x = np.array([0.1, 0.5, 0.9])
+    return Chart(
+        id="rvinstrument.phased.b",
+        component={"yaml_key": "rvinstrument", "instance": None},
+        title="",
+        xlabel="Phase",
+        ylabel="RV",
+        traces=[
+            Trace("Model", "model", "line", x, 50.0 * np.sin(2 * np.pi * x)),
+            Trace(
+                "HIRES",
+                "data",
+                "scatter",
+                data_x,
+                np.zeros(3),
+                yerr=np.ones(3),
+                style={"series_index": 0},
+            ),
+        ],
+        meta={"phase_folded": True},
+    )
+
+
+def test_rv_draws_are_faint_but_their_legend_swatch_is_not():
+    """
+    Given a folded RV chart and two other posterior draws' model curves,
+    When the RV panel is drawn with them,
+    Then all three curves are at _DRAWS_ALPHA, and the legend's "Model"
+      swatch is raised to _LEGEND_ALPHA -- the plotted curves untouched --
+      as plotrender's legend does.
+    """
+    from exozippy.chart import Trace
+
+    chart = _rv_chart()
+    x = np.linspace(0.0, 1.0, 50)
+    draws = [
+        [Trace("Model", "model", "line", x, a * np.sin(2 * np.pi * x))]
+        for a in (45.0, 55.0)
+    ]
+    fig = plt.figure()
+    try:
+        ax, _ = sp._draw_rv(
+            fig, fig.add_gridspec(1, 1)[0, 0], chart, {0: "b"}, True, draws
+        )
+        curves = [
+            ln.get_alpha() for ln in ax.get_lines() if ln.get_ls() == "-"
+        ]
+        legend = ax.get_legend()
+        swatch = {
+            t.get_text(): h
+            for t, h in zip(legend.get_texts(), legend.legend_handles)
+        }["Model"]
+    finally:
+        plt.close(fig)
+
+    assert curves == [sp._DRAWS_ALPHA] * 3
+    assert swatch.get_alpha() == sp._LEGEND_ALPHA
+
+
+def test_draw_model_traces_gathers_panel_models_and_skips_a_bad_draw(caplog):
+    """
+    Given a component whose plot_data raises at one of three draws, and a
+      panel drawing one of its two charts,
+    When the draws' model traces are gathered,
+    Then the panel's chart gets the model traces (not the data) of the two
+      good draws, the other chart nothing, and the bad draw is skipped with
+      a warning -- plotrender.plot_via_specs's tolerance.
+    """
+    import dataclasses
+
+    chart = _rv_chart()
+    other = dataclasses.replace(chart, id="rvinstrument.unphased")
+
+    def plot_data(system, point):
+        if point["bad"]:
+            raise RuntimeError("non-finite draw")
+        return [chart, other]
+
+    component = SimpleNamespace(plot_data=plot_data, prefix="rvinstrument")
+    system = SimpleNamespace(active_components={"rvinstrument": component})
+    panels = [sp._Panel("rv_phase", [chart], 1)]
+    draws = [{"bad": False}, {"bad": True}, {"bad": False}]
+
+    with caplog.at_level("WARNING", logger=sp.logger.name):
+        models = sp._draw_model_traces(system, panels, draws)
+
+    assert list(models) == [chart.id]
+    assert [[t.role for t in traces] for traces in models[chart.id]] == [
+        ["model"],
+        ["model"],
+    ]
+    assert "plot_data failed for draw 1" in caplog.text
+
+
+def test_the_kiel_panel_is_not_drawn_with_posterior_draws():
+    """
+    Given an RV panel and a Kiel panel, and two posterior draws,
+    When the draws' model traces are gathered,
+    Then only the RV chart gets them, and the evolutionary model is never
+      evaluated at a draw -- the Kiel diagram keeps the reference point's
+      one track, its contours showing the posterior.
+    """
+    rv_chart = _rv_chart()
+    kiel_chart = _kiel_chart()
+    calls = []
+
+    def kiel_plot_data(system, point):
+        calls.append(point)
+        return [kiel_chart]
+
+    system = SimpleNamespace(
+        active_components={
+            "rvinstrument": SimpleNamespace(
+                plot_data=lambda system, point: [rv_chart]
+            ),
+            "evolutionarymodel": SimpleNamespace(plot_data=kiel_plot_data),
+        }
+    )
+    panels = [
+        sp._Panel("rv_phase", [rv_chart], 1),
+        sp._Panel("kiel", [kiel_chart], 1),
+    ]
+
+    models = sp._draw_model_traces(system, panels, [{}, {}])
+
+    assert list(models) == [rv_chart.id]
+    assert len(models[rv_chart.id]) == 2
+    assert calls == []
+
+
 def test_sed_panel_spans_the_photometry_and_marks_the_model():
     """
     Given an SED chart (already in flux) whose bandpasses run from 0.4 to
       15 micron,
     When the SED panel is drawn,
-    Then its wavelength axis spans the bandpasses padded by _SED_X_PAD, not
-      the model grid's 0.05-30 micron, its axes carry the compact labels,
-      and each model photometry point sits at the observed flux less its
-      O-C.
+    Then the flux axis spans the photometry padded by _SED_Y_PAD; the
+      wavelength axis spans the bandpasses padded by _SED_X_PAD, widened to
+      the model spectrum where it lies within that flux axis (0.05 micron)
+      but not where it lies below it (30 micron); the axes carry the
+      compact labels; and each model photometry point sits at the observed
+      flux less its O-C.
     """
     from exozippy.chart import Chart, Trace
 
@@ -483,14 +666,16 @@ def test_sed_panel_spans_the_photometry_and_marks_the_model():
     try:
         sp._draw_sed(fig, fig.add_gridspec(1, 1)[0, 0], chart)
         ax, ax_oc = fig.get_axes()
-        xlim = ax.get_xlim()
+        xlim, ylim = ax.get_xlim(), ax.get_ylim()
         model = [ln for ln in ax.get_lines() if ln.get_label() == "Model"]
         model_y = model[0].get_ydata()
         labels = (ax.get_ylabel(), ax_oc.get_ylabel(), ax_oc.get_xlabel())
     finally:
         plt.close(fig)
 
-    np.testing.assert_allclose(xlim, [0.4 / 1.5, 15.0 * 1.5])
+    y_lo = (1e-12 - 1e-14) / 2.0
+    np.testing.assert_allclose(ylim, [y_lo, (1e-10 + 1e-12) * 2.0])
+    np.testing.assert_allclose(xlim, [0.05, 15.0 * 1.5])
     np.testing.assert_allclose(model_y, y * 0.9)
     assert labels == (sp.SED_YLABEL, sp.OC_YLABEL, sp.SED_XLABEL)
 
@@ -739,7 +924,7 @@ def kelt4_fit(tmp_path_factory):
 @pytest.fixture(scope="module")
 def kelt4_posterior(kelt4_fit):
     """The kelt4 fit's System, rebuilt, with its reported posterior and
-    best-fit point."""
+    median-draw point."""
     from exozippy.system import System
 
     cwd = os.getcwd()
@@ -750,7 +935,7 @@ def kelt4_posterior(kelt4_fit):
         system.build_model()
         idata = az.from_netcdf("fitresults/KELT-4A_trace.nc")
         posterior = sp.reported_posterior(system, idata)
-        point, where, lp = sp.best_fit_point(system, posterior)
+        point, where, _distance = sp.median_draw_point(system, posterior)
     finally:
         os.chdir(cwd)
     return system, posterior, point, where
@@ -787,21 +972,20 @@ def test_create_summary_plot_writes_the_default_file(kelt4_fit):
 
 
 @pytest.mark.slow
-def test_best_fit_point_is_the_best_reported_draw_in_internal_units(
+def test_median_draw_point_is_a_valid_draw_in_internal_units(
     kelt4_posterior,
 ):
     """
     Given the fit's reported (post-burn-in) posterior,
-    When best_fit_point picks the draw,
-    Then it is the highest-lp draw of that posterior, and its physical
-      values convert back through the Parameters to exactly the trace's
-      user-unit values at that draw.
+    When median_draw_point picks the draw,
+    Then it is a valid draw of that posterior, and its physical values
+      convert back through the Parameters to exactly the trace's user-unit
+      values at that draw.
     """
     system, posterior, point, (chain, draw) = kelt4_posterior
-    lp = posterior.sample_stats["lp"].values
     labels = posterior.posterior["mode"].values
 
-    assert lp[chain, draw] == np.max(np.where(labels < 0, -np.inf, lp))
+    assert labels[chain, draw] >= 0
     lookup = system.get_parameter_lookup()
     for label in ("orbit.period", "planet.mass", "rvinstrument.gamma"):
         np.testing.assert_allclose(
@@ -814,17 +998,27 @@ def test_best_fit_point_is_the_best_reported_draw_in_internal_units(
 @pytest.mark.slow
 def test_summary_figure_draws_one_panel_per_chart_kind(kelt4_posterior):
     """
-    Given the fit at its best-fit point, with a `label:` on HIRES in the
+    Given the fit at its median draw, with a `label:` on HIRES in the
       config and no labels or groups passed in,
-    When summary_figure draws it with a binned transit,
+    When summary_figure draws it with a binned transit and three other
+      posterior draws,
     Then the page has the transit stack, the RVs against time and the
       folded RVs (each of the last two with an O-C axis), the header lines
-      it was given, the TESS sector on its cadence row "TESS 120 s", and the
+      it was given, the TESS sector on its cadence row "TESS 120 s", the
       folded panel's legend showing HIRES by its configured label and TRES
-      by its name.
+      by its name, and on every model-bearing axis the median draw's
+      curve and one per extra draw, all at one faint alpha.
     """
-    system, _, point, _ = kelt4_posterior
+    from exozippy.run import get_draws
+
+    system, posterior, point, _ = kelt4_posterior
     header = sp.planet_header_lines(system)
+    draws = get_draws(
+        posterior,
+        n_draws=3,
+        param_lookup=system.get_parameter_lookup(),
+        exclude=set(system.report_only_labels()),
+    )
 
     fig = sp.summary_figure(
         system,
@@ -832,6 +1026,7 @@ def test_summary_figure_draws_one_panel_per_chart_kind(kelt4_posterior):
         title="KELT-4A",
         header_lines=header,
         transit_bin=10,
+        draws=draws,
     )
     try:
         texts = [t.get_text() for t in fig.texts]
@@ -843,6 +1038,11 @@ def test_summary_figure_draws_one_panel_per_chart_kind(kelt4_posterior):
             for ax in axes
             if ax.get_legend() is not None
             for t in ax.get_legend().get_texts()
+        ]
+        faint = [
+            sum(ln.get_alpha() == sp._DRAWS_ALPHA for ln in ax.get_lines())
+            for ax in axes
+            if ax.get_ylabel() in (sp.RV_YLABEL, "Normalized Flux + Constant")
         ]
     finally:
         plt.close(fig)
@@ -858,6 +1058,7 @@ def test_summary_figure_draws_one_panel_per_chart_kind(kelt4_posterior):
         assert symbol in header[0]
     assert [t.get_text() for t in transit_ax.texts] == ["TESS 120 s"]
     assert {"Keck/HIRES", "TRES", "Model"} <= set(legend_texts)
+    assert faint == [1 + len(draws)] * 3
 
 
 @pytest.mark.slow
