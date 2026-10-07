@@ -46,6 +46,52 @@ def calc_mass_from_log_q(log_q, star_mass):
     return pt.power(10.0, log_q) * star_mass
 
 
+# Floor on the radicand 1 - cos^2 i of the `fitmsini` coordinate change
+# (review 2.14.9).  The CLAUDE.md where-trap rule, and the orbit family's
+# ECC_FLOOR / CHORD_RADICAND_FLOOR: the floor goes on the RADICAND, never on
+# sin i afterwards, and it must be STRICTLY POSITIVE -- `pt.maximum(x, 0.0)`
+# has zero gradient on the clamped side while sqrt'(0) and log'(0) are
+# infinite, so a zero floor would rebuild the 0 * inf it exists to prevent.
+# cos i is logit-bounded to (-1, 1) and never reaches +/-1 exactly, but
+# 1 - cos^2 i rounds to 0.0 in float64 once |cos i| > 1 - 1.1e-16, which the
+# logit tail does reach.  1e-30 gives sin i = 1e-15 there: a finite (huge)
+# mass that the soft barrier on planet.mass's bounds pulls back, and a finite
+# Jacobian.  pt.maximum returns any real radicand bit-for-bit, so no
+# inclination a fit can resolve is moved.
+SINI_RADICAND_FLOOR = 1e-30
+
+
+def _sini_radicand(cosi):
+    """``1 - cos^2 i``, floored at `SINI_RADICAND_FLOOR`."""
+    return pt.maximum(1.0 - pt.sqr(cosi), SINI_RADICAND_FLOOR)
+
+
+@register_physics
+def calc_mass_from_msini(msini, cosi):
+    """Planet mass from the sampled minimum mass and the orbit's cos i.
+
+    The `fitmsini` coordinate (review 2.14.9): an RV-only orbit measures
+    `m sin i`, so that is what is sampled, and the mass is `msini / sin i`.
+    Never divides by an unfloored sin i -- see SINI_RADICAND_FLOOR.  Internal
+    units in and out (solMass), signed like `msini` (a linear-mass planet may
+    cross zero, and so may its minimum mass).
+    """
+    return msini / pt.sqrt(_sini_radicand(cosi))
+
+
+def msini_log_jacobian(cosi):
+    """``log sin i`` -- what sampling `(msini, cos i)` costs the mass prior.
+
+    `mass = msini / sin i` at fixed cos i, so `|d mass / d msini| = 1/sin i`
+    and a density flat in `(mass, cos i)` is `1/sin i` in `(msini, cos i)`.
+    `Planet.build_likelihood` therefore ADDS `-log sin i` (i.e. subtracts
+    what this returns) to keep the prior uniform in linear mass and in cos i
+    -- the prior a `linear` planet has, so the switch moves no posterior.
+    Same floored radicand as `calc_mass_from_msini`.
+    """
+    return 0.5 * pt.log(_sini_radicand(cosi))
+
+
 @register_physics
 def calc_m_total(planet_mass, star_mass):
     return pt.maximum(star_mass + planet_mass, 1e-9)

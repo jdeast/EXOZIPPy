@@ -54,6 +54,19 @@ def kelt4_result(tmp_path_factory):
         with open("kelt4_rvonly.yaml") as f:
             config = yaml.safe_load(f)
 
+        # The golden START below is the linear-mass optimum, and stays so on
+        # purpose (review 2.14.9).  kelt4_rvonly now defaults to fitmsini, and
+        # in (m sin i, cos i) coordinates the polish -- a MAP in the sampled
+        # coordinates, where the 1/sin i Jacobian and the Chen & Kipping
+        # normalization both favor |cos i| -> 1 -- walks cos i to ~0.99994
+        # (mass ~84 Mjup), a corner where one ulp of arithmetic moves the
+        # polished lp by ~0.5 nats (measured with the 4-seed harness in
+        # tests/test_polish.py).  A golden value there would be a platform
+        # coin flip, so this fixture pins the coordinate the tolerances were
+        # calibrated for.  The msini default itself is covered by
+        # tests/test_fitmsini.py.
+        config["planet"][0]["fitmsini"] = False
+
         config["prefix"] = str(out_dir / "KELT-4A")
         config["sampler"] = {
             "method": "nuts",

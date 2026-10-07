@@ -255,7 +255,8 @@ class Subject(Component):
     # alternatives cannot be encoded in booleans without an illegal
     # combination, so `_parse_basis` has to reject "more than one true"
     # explicitly, which an enum would have made unrepresentable.  The same
-    # ruling applies to planet.mass_parameterization (review 4.2.7; see
+    # ruling replaced planet.mass_parameterization with fitlogq/fitmsini
+    # (reviews 4.2.7 and 2.14.9; see
     # components.md's flag vocabulary).
     BASIS_FLAGS = {
         "fitclv": "cl_v",

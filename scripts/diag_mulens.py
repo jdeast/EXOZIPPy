@@ -119,7 +119,7 @@ def main():
         # The pinned draws were recorded under linear planet mass; a lens body
         # now defaults to log_q, and the raw values do not carry across.
         for entry in config.get("planet", []):
-            entry.setdefault("mass_parameterization", "linear")
+            entry.setdefault("fitlogq", False)
 
         system = System(config, user_params)
         system.prepare()

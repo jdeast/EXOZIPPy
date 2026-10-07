@@ -29,9 +29,10 @@ _PERIOD = 17.0
 def rv_system(tmp_path_factory):
     """One star, one planet, one RV data set.
 
-    RV data put the planet on the mass-constrained side, so the mass is
-    sampled in 'linear' mode -- the mode in which the region below zero is
-    reachable at all.
+    RV data put the planet on the mass-constrained side.  RVs ALONE default
+    to the (m sin i, cos i) coordinate (fitmsini, review 2.14.9), so the
+    planet asks for the signed linear mass explicitly -- the mode this file
+    is about, in which the region below zero is sampled directly.
     """
     rng = np.random.default_rng(11)
     t = np.sort(rng.uniform(2455000.0, 2455400.0, 40))
@@ -41,7 +42,7 @@ def rv_system(tmp_path_factory):
 
     config = {
         "star": [{"name": "A", "mist": False}],
-        "planet": [{"name": "b"}],
+        "planet": [{"name": "b", "fitmsini": False}],
         "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
         "rvinstrument": [{"name": "HIRES", "file": str(path)}],
     }
@@ -87,10 +88,14 @@ def _at(barrier, m_total, m_star=1.0):
 
 
 def test_mass_mode_is_linear(rv_system):
-    """RV data measure the orbit, so the signed linear mass is sampled --
-    which is what makes the region below zero reachable."""
+    """RV data measure the orbit and the fixture turns the msini default
+    off, so the signed linear mass is sampled -- which is what makes the
+    region below zero reachable."""
     system, _ = rv_system
-    assert system.planet.mass_parameterization == "linear"
+    assert (
+        system.planet.mass_parameterizations
+        == ["linear"] * system.planet.n_elements
+    )
     assert np.min(np.atleast_1d(system.planet.mass.lower)) < -0.9
 
 

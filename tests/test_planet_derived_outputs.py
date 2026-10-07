@@ -384,7 +384,15 @@ def test_orbit_outputs_are_declared_only_with_an_orbit(earth_system):
         "omegagr",
     )
     for name in orbit_only + ("q",):
-        assert system.planet.manifest[name] == "default"
+        if name == "msini":
+            # REPORTED wherever it is not sampled (Planet.MASS_MODE_TABLE),
+            # so a planet sampling msini can share the vector.
+            entry = system.planet.manifest[name]
+            assert list(entry) == ["output_expr_key"]
+            assert list(entry["output_expr_key"]) == ["default"]
+            assert bool(np.all(entry["output_expr_key"]["default"]))
+        else:
+            assert system.planet.manifest[name] == "default"
         assert ("planet", name) in system.derived_params()
 
     orbitless = System(
@@ -411,7 +419,7 @@ def test_linear_mode_planet_still_reports_q():
     system = System(
         {
             "star": [{"name": "A", "mist": False}],
-            "planet": [{"name": "b", "mass_parameterization": "linear"}],
+            "planet": [{"name": "b", "fitlogq": False, "fitmsini": False}],
         },
         user_params={
             k: v for k, v in _params().items() if not k.startswith("orbit.")

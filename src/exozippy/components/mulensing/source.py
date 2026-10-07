@@ -11,7 +11,7 @@ is on `mulensevent`.
 Per-instance flags (the coordinate choice `fitu0te` and the tie toggle
 `star_constrains_rho`) live on each source entry: per-instance flags on the
 component that owns the coordinate is the established idiom (planet
-`mass_parameterization`, orbit `fitvcve`).
+`fitlogq`/`fitmsini`, orbit `fitvcve`).
 """
 
 import logging

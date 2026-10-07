@@ -39,14 +39,20 @@ planet:
     latex: "M_P"
     description: "planet mass"
     rank: 10 # rank < 20 makes this the first to be overwritten if we have a constraint from somewhere else (e.g., K estimate)
-    # Used only in log_q mode (manifest entry "mass": {"expr_key": "default"});
-    # in linear mode the manifest declares mass free and this block is unused.
+    # `default` is used only in log_q mode and `from_msini` only in msini mode
+    # (fitmsini, review 2.14.9); in linear mode the manifest declares mass free
+    # and neither block is used (Planet.MASS_MODE_TABLE).
     # The lower/upper above are hard logit bounds when sampled and soft
-    # barriers when derived -- in log_q mode the hard range comes from log_q.
+    # barriers when derived -- in log_q mode the hard range comes from log_q,
+    # in msini mode from msini (which takes these same bounds through the
+    # manifest "overrides" channel, see Planet._msini_bounds_override).
     expressions:
       default:
         func_name: "calc_mass_from_log_q"
         deps: ["log_q", "star.mass"]
+      from_msini:
+        func_name: "calc_mass_from_msini"
+        deps: ["msini", "orbit.cosi"]
   # The mass ratio in LINEAR form, for every planet (EXOFASTv2's q).  log_q
   # above is the sampled coordinate of a log_q-mode planet only; a linear-mode
   # planet (RV or astrometry measures its orbit) has no log_q, so this is the
@@ -61,7 +67,25 @@ planet:
         func_name: "calc_planet_mass_ratio"
         deps: ["mass", "star.mass"]
   # Minimum mass (EXOFASTv2's msini); signed like mass in linear mode.
+  # SAMPLED where `fitmsini` is on (the default for a planet whose mass RVs
+  # measure and whose inclination nothing does -- review 2.14.9), REPORTED
+  # from mass x sin i everywhere else (Planet.MASS_MODE_TABLE).
   msini:
+    # Only the sampled (msini-mode) elements use these.  NO lower/upper here:
+    # a derived or reported element with a numeric bound gets a soft barrier,
+    # which would add a potential to every linear/log_q planet.  The sampled
+    # elements take planet.mass's bounds through the manifest "overrides"
+    # channel instead (Planet._msini_bounds_override).
+    initval: 1.0
+    # Same as mass's: at the sin i ~ 1 start the two coordinates coincide.
+    init_scale: 0.1
+    # rank 5 (below mass's 10) is load-bearing, exactly as log_q's is: the
+    # relaxation engine's Condition B rewrites the LOWEST-rank symbol of a
+    # violated relation, so msini always absorbs Eq(msini, mass * sini) --
+    # which back-solves a user planet.<i>.mass (or the K -> mass solver's
+    # result) into an msini start, and keeps the relation from moving mass
+    # or cos i where msini is merely reported.
+    rank: 5
     unit: "jupiterMass"
     internal_unit: "solMass"
     latex: "M_P\\sin{i}"

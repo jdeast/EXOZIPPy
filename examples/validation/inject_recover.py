@@ -141,7 +141,7 @@ def make_rv(rng, snr, n_epochs, workdir):
     config = {
         "star": [{"name": "Host"}],
         "planet": [
-            {"name": "b", "star_ndx": 0, "mass_parameterization": "linear"}
+            {"name": "b", "star_ndx": 0, "fitlogq": False, "fitmsini": False}
         ],
         "orbit": [
             {"name": "b", "planet_ndx": 0, "star_ndx": 0, "circular": True}

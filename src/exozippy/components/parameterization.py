@@ -3,7 +3,7 @@
 ``manifest.py`` interprets the per-element vocabulary (see its ``ROLE_*``
 constants) and ``Parameter.build_pymc`` consumes it.  What a component actually
 has in hand at stage 3 is different and always the same shape: a per-instance
-CHOICE read from its own config (``ld_law`` per band, ``mass_parameterization``
+CHOICE read from its own config (``ld_law`` per band, ``fitlogq``/``fitmsini``
 per planet, ``mist``/``parsec`` per star, ``fitvcve`` per orbit), plus a
 statement of which parameters each choice uses and how.  Turning that into
 masks is mechanical, and writing it out per component is how four

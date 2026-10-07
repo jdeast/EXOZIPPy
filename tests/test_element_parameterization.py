@@ -4,7 +4,7 @@
 (``np.full(n_elements, expr_raw is not None)``), so every modeling choice that
 is really per instance had to be uniform across a component.  Four shipped
 features paid for it: ``band.ld_law`` raised on a system mixing quadratic and
-linear bands, ``planet.mass_parameterization`` raised on explicit disagreement
+linear bands, ``planet.mass_parameterization`` (now fitlogq/fitmsini) raised on explicit disagreement
 and silently fell back to all-linear on an implicit one, ``star.mist``'s
 ``mask`` was declared and never read (so a premature ``evolutionarymodel:``
 block materialized three free likelihood-free dimensions), and

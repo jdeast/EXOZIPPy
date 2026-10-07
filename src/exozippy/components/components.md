@@ -142,8 +142,9 @@ make the illegal combinations REPRESENTABLE, so the parser owes an explicit
 state impossible.  That is a real trade and it was made deliberately, not
 overlooked.  `band.ld_law` is NOT a counterexample: `quadratic` vs `linear` is
 a different model (different parameter count), not a coordinate choice.
-`planet.mass_parameterization` IS drift and is filed for renaming to
-`fitlogq` (review 4.2.7).
+`planet.mass_parameterization` WAS drift and is gone: it became the
+exclusive pair `fitlogq` / `fitmsini` when the third coordinate arrived
+(reviews 4.2.7 and 2.14.9), and the old key raises with its migration.
 
 ## Adding a new component
 
