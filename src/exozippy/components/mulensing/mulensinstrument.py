@@ -941,13 +941,21 @@ class MulensInstrument(Instrument):
                 "(residual rms %.3g mag). The recovered reference flux "
                 "%.6g at zp %.4f may be wrong; check the file's column "
                 "order, or set reference_flux explicitly.",
-                self.prefix, label, resid, ref, zp,
+                self.prefix,
+                label,
+                resid,
+                ref,
+                zp,
             )
         else:
             logger.info(
                 "[%s:%s] data_format: dia -- reference flux %.6g at "
                 "zp %.4f (residual rms %.3g mag); total flux = ref - dflux.",
-                self.prefix, label, ref, zp, resid,
+                self.prefix,
+                label,
+                ref,
+                zp,
+                resid,
             )
         return float(ref), float(zp)
 

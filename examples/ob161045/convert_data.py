@@ -106,9 +106,27 @@ REFERENCE_FLUX = {
 #   sign -1 for KMT: pySIS difference flux is negative for brightening.
 #   sign +1 for Auckland: microFUN photometry is already positive.
 FILES = [
-    ("n20160221.I.KMTC.OB161045.txt", "KMTC.I.OB161045.dat", "KMTC", -1.0, 1e4),
-    ("n20160222.I.KMTS.OB161045.txt", "KMTS.I.OB161045.dat", "KMTS", -1.0, 1e4),
-    ("n20160221.I.KMTA.OB161045.txt", "KMTA.I.OB161045.dat", "KMTA", -1.0, 1e4),
+    (
+        "n20160221.I.KMTC.OB161045.txt",
+        "KMTC.I.OB161045.dat",
+        "KMTC",
+        -1.0,
+        1e4,
+    ),
+    (
+        "n20160222.I.KMTS.OB161045.txt",
+        "KMTS.I.OB161045.dat",
+        "KMTS",
+        -1.0,
+        1e4,
+    ),
+    (
+        "n20160221.I.KMTA.OB161045.txt",
+        "KMTA.I.OB161045.dat",
+        "KMTA",
+        -1.0,
+        1e4,
+    ),
     (
         "n20160619.R.Auckland.OB161045.txt",
         "Auckland.R.OB161045.dat",
@@ -142,8 +160,11 @@ def _magnification(t):
 
     model = mm.Model(PUBLISHED)
     model.set_magnification_methods(
-        [PUBLISHED["t_0"] - 1.0, "finite_source_uniform_Gould94",
-         PUBLISHED["t_0"] + 1.0]
+        [
+            PUBLISHED["t_0"] - 1.0,
+            "finite_source_uniform_Gould94",
+            PUBLISHED["t_0"] + 1.0,
+        ]
     )
     return model.get_magnification(t)
 
@@ -183,8 +204,12 @@ def main():
             np.column_stack([t, f, e]),
             fmt=["%.6f", "%.8f", "%.8f"],
             header=HEADER.format(
-                site=site, src=src, sign=sign, div=div,
-                offset_note=note, warning=warning,
+                site=site,
+                src=src,
+                sign=sign,
+                div=div,
+                offset_note=note,
+                warning=warning,
             ),
         )
         print("%-30s -> %-26s N=%4d  %s" % (src, out, len(t), note))
