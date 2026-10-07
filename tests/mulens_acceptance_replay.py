@@ -62,6 +62,31 @@ The three KMT-2019-BLG-1806 fixtures were re-recorded for review 2.9.11
 (-0.9189) leaving, and `low_bound.star.loggsed` halving at the 1e-304 level
 (the unread lens's barrier lifted).  Every other term is bit-identical.
 
+The ob140939 fixture was re-recorded for the proper-motion frame fix
+(mulensing/conventions.md C31, 2026-10-06): Yee+2015's bulge-relative
+source pm prior moved from the absolute star.Source.pm_ra/pm_dec to the
+derived Sgr-A*-relative pm_ra_sgra/pm_dec_sgra, so the source's absolute
+pm start moved from (-5.31, -0.64) to (-8.43, -6.25) mas/yr.  Every move
+explained: `gaussian_prior.star.pm_ra/pm_dec` (~1e-22, at their centres)
+renamed to `gaussian_prior.star.pm_ra_sgra/pm_dec_sgra` (~1e-23, at
+theirs); `galacticmodel.kinematic_prior` 10.7117 -> 9.0135 (-1.6982), the
+Galactic prior at the corrected absolute source pm; the pm logit-uniform
+terms at the 1e-8 level and the data term at 2e-14 relative (the moved
+start, reassociated).  Every other term is bit-identical.
+Then re-recorded again the same day when the example switched from
+magnitude files (converted by an untracked script with an ARBITRARY zero
+point of 25) to Yee et al.'s published FLUX files, read with
+`data_format: flux`.  The old files' fluxes were the published ones times
+1e-10 exactly, so: `RV:mulensinstrument.model` 10371.3729 -> -1509.9662
+(-11881.34 = -N ln(1e10) for N = 516 points, -11881.40, plus +0.06 from the
+old files' 0.001-mag rounding) -- a constant normalization, posterior
+unchanged; `logit_uniform_prior.mulensinstrument.log_f_total` -4.0174 ->
+-5.4976 (log_f_total moved from -7.36 to +2.64 inside the same bounds; the
+implied prior is still exactly uniform); `low_bound.mulensinstrument.
+f_source` -1.3863 -> ~1e-304 (at ~1e-8 fluxes the source flux sat inside
+its lower-bound barrier's transition width and paid log(1/4); at the
+published scale the barrier is inert).  Every other term is bit-identical.
+
 ob161003 (2S2L) is the ONE example whose model changes BY CONSTRUCTION
 (review R1): its per-source event-level vectors collapse to scalars.  Its
 replay fixture is re-recorded post-split; the stage-0 recording is kept at

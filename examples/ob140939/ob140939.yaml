@@ -37,14 +37,21 @@ band:
 
 mulensinstrument:
   - name: "OGLE4"
-    file: "n20100310.I.OGLE.OB140939.dat"
-    zero_point: ""
+    # Yee et al.'s published FLUXES, read as given (no magnitude round trip).
+    # Flux system: 1 unit = I 22 (calibrated OGLE-IV I; baseline 437.3 ->
+    # I = 15.40).  Nothing here reads that -- with no SED there is no
+    # zeropoint tie -- but an SED fit would state it in the params file as
+    # mulensinstrument.OGLE4.zeropoint: {mu: 22.0, sigma: <trust>}.
+    file: "n20100310.I.OGLE.OB140939.flux.dat"
+    data_format: flux
     observer_location: "earth" # earth, spitzer, kepler, roman, a site name (CTIO), "lon_deg,lat_deg[,height_m]" (lon FIRST), or filename of horizons ephemeris to interpolate
     band: "OGLE_I"
     reference: true # peg all plotted data + model curves to this instrument's f_source/f_blend (defaults to the first instrument)
   - name: "Spitzer"
-    file: "n20140605.L.Spitzer.OB140939.dat"
-    zero_point: ""
+    # Yee et al.'s published Spitzer [3.6] fluxes; their zero point is not
+    # established here, so do not tie this light curve to an SED without it.
+    file: "n20140605.L.Spitzer.OB140939.flux.dat"
+    data_format: flux
     observer_location: "spitzer"
     band: "Spitzer_36"
 
@@ -63,15 +70,31 @@ sampler:
   # between the four degenerate basins.
   tune: 0
   draws: 50000
+  # Run all 50000 draws: the default min_ess/max_rhat early stop passed at
+  # ~4000 draws (2026-10-06) while the whole DE ensemble was still drifting
+  # along the lens distance-mass ridge -- R-hat across chains that share one
+  # population cannot see a collective drift -- leaving the lens at 2.8 kpc
+  # against the converged 3.3-3.6.
+  max_rhat: null
+  min_ess: null
   # Densified tempering ladder, validated empirically: auto (17 rungs)
   # left adjacent-swap acceptance at 5-7% and 3 round trips -- the
   # ladder froze below T ~ 75 and the mode weights were initialization
   # artifacts. At 24 rungs (measured Lambda = 9.4; use > 2*Lambda+1
   # with margin) swap acceptance is 50-65%, round trips flow, and the
-  # per-rung basin-occupancy profile is smooth equilibrium from T=200
-  # (50/50) to T=1 (~98/2) -- the mode weights become a real posterior
-  # statement (u0,-,- ~ 98%, agreeing with the ledger's Laplace
-  # estimate and Yee+2015's proper-motion argument).
+  # per-rung basin-occupancy profile is smooth.  A smooth profile proves
+  # TRANSPORT along the ladder, not correct T=1 weights: on 2026-08-08 it
+  # looked exactly like this while every chain sat in one basin (zero T=1
+  # mode changes on a replay; the ladder funnels descending replicas).  The
+  # weights are trusted only because the T=1 chains themselves switch
+  # basins -- check modes.txt's 'mode changes' count, never the profile.
+  # Converged (all 50000 draws: max_rhat/min_ess early stop off), with
+  # the source pm prior in its correct Sgr-A*-relative frame
+  # (src/exozippy/components/mulensing/conventions.md C31), the split is
+  # ~91/9: u0,-,- ~91%, the solution Yee+2015's proper-motion argument
+  # prefers, with a lens at ~3.3 kpc and ~0.24 Msun (hers: 3.1 +/- 0.4
+  # kpc, 0.23 +/- 0.07).  An earlier "~98/2" here was a stuck-ladder
+  # artifact, not a posterior.
   n_temps: 24
   # Keep thinned hot-rung draws: they detect posterior-suppressed modes
   # (occupancy ~exp(-dlp/T)) for the seeded-solution ledger, so solutions

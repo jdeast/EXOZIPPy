@@ -66,6 +66,10 @@ Every pinned logp for a topology with a star and no galacticmodel moves by exact
 
 Tests: `tests/test_distance_volume_prior.py`.
 
+## Proper-motion frames: absolute `pm_ra`/`pm_dec`, Sgr-A*-relative `pm_ra_sgra`/`pm_dec_sgra`
+
+`star.pm_ra` (`mu_alpha cos(dec)`) and `star.pm_dec` are **absolute** ICRS proper motions -- what Gaia and Roman measure, and what the Galactic kinematic prior and `mu_rel` read. On a microlensing or Galactic-model topology the star also carries the derived, reported pair `pm_ra_sgra`/`pm_dec_sgra`: the same motion **relative to Sgr A\***, i.e. minus Sgr A\*'s apparent motion (Reid & Brunthaler 2020) resolved on the local axes at that star's own position. A proper motion quoted from OGLE/KMT relative astrometry (relative to the field or red-clump mean; "heliocentric" there means only not-geocentric) is a prior on the `_sgra` pair, never on the absolute one; and since the field mean is not Sgr A\* (0.5 - 1 mas/yr, 0.7 measured at OGLE-2014-BLG-0939), add that zero point to sigma in quadrature. A `mu` on the `_sgra` pair also starts the sampled absolute pm at the converted value (`Star._seed_pm_from_sgra_prior`). The normative statement, the numbers, the Jacobian argument and the tests are `src/exozippy/components/mulensing/conventions.md` **C31**; tests: `tests/test_star_pm_sgra.py`.
+
 ## Which stellar structure parameters a topology actually has
 
 `star.radius`, `star.teff` and `star.feh` are declared for every star unconditionally, because the reporting chain every star carries (`logg`, `density`, `luminosity`, `fbol`) names them in its own `deps`. Whether anything in the **likelihood** reads them is a property of the topology, and in a point-source microlensing fit with no SED, no evolutionary model and no empirical relation the answer is *nothing at all*. Left free they refill their prior; pinned they change nothing. So they are neither: `Star._apply_structure_activity` declares them **inactive** per star (no raw coordinate, no potential, no table row) wherever nothing reads them, driven by the one predicate `Star.structure_consumers`.

@@ -290,6 +290,31 @@ star:
       from_mulens_murel:
         func_name: "calc_pm_from_murel"
         deps: [ "star.pm_dec[murel_source_map]", "mulensevent.mu_dec_rel[murel_traj_map]" ]
+  # Proper motion RELATIVE TO SGR A* (mulensing/conventions.md C31): the
+  # absolute pm_ra/pm_dec minus Sgr A*'s (Reid & Brunthaler 2020) resolved
+  # on the local axes at this star's ra/dec.  Derived and reported; put a
+  # mu/sigma HERE for a pm quoted relative to the bulge/red clump/field
+  # (OGLE, KMT), and on pm_ra/pm_dec for an absolute one (Gaia, Roman).  No
+  # bounds and no sigma on purpose: on a derived parameter either would
+  # become a live potential (Parameter.build_pymc, section 7).
+  pm_ra_sgra:
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\mu_{\\alpha*,{\\rm Sgr\\,A*}}"
+    description: "Proper Motion (RA) relative to Sgr A*"
+    expressions:
+      default:
+        func_name: "calc_pm_ra_sgra"
+        deps: [ "pm_ra", "ra", "dec" ]
+  pm_dec_sgra:
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\mu_{\\delta,{\\rm Sgr\\,A*}}"
+    description: "Proper Motion (Dec) relative to Sgr A*"
+    expressions:
+      default:
+        func_name: "calc_pm_dec_sgra"
+        deps: [ "pm_dec", "ra", "dec" ]
   ra:
     initval: 180.0
     init_scale: 20e-6

@@ -77,16 +77,42 @@ star.Source.dec:
 # excludes the u0,-,+ mode (direction ~130 deg vs expected ~54). Without it
 # the source pm marginalizes over the ~2.6 mas/yr bulge dispersion and the
 # prior discriminates between the ecliptic-degenerate modes by only ~1 nat.
-star.Source.pm_ra:
-    initval: -5.31
+#
+# FRAME (src/exozippy/components/mulensing/conventions.md C31): that value
+# is OGLE RELATIVE astrometry -- the source's motion relative to the mean
+# of the field (bulge) stars; "hel" in
+# her notation means not-geocentric, NOT absolute.  So it goes on the
+# Sgr-A*-relative pm_*_sgra parameters, never on the absolute (ICRS)
+# star.Source.pm_ra/pm_dec.  Her own Eq. 9 reproduces her 53.9 deg only for a
+# bulge-relative mu_S.  Absolute, this is (pm_ra, pm_dec) ~ (-8.43, -6.25).
+# sigma is HER 0.45, deliberately: this example reproduces Yee+2015 as a
+# validation.  It does NOT add the ~0.7 mas/yr zero-point term C31
+# recommends in quadrature (field-mean vs Sgr A*: measured 0.7 here) --
+# include it, sigma ~0.83, for a science fit that trusts the frame no more
+# than it should.
+star.Source.pm_ra_sgra:
     mu: -5.31
     sigma: 0.45
     citation: Yee:2015
-star.Source.pm_dec:
-    initval: -0.64
+star.Source.pm_dec_sgra:
     mu: -0.64
     sigma: 0.45
     citation: Yee:2015
+#
+# The more precise, ABSOLUTE alternative -- use it INSTEAD of the two
+# entries above, not as well: Gaia DR3 4118632779506798848 (0.32" from the
+# event, G = 16.79, RUWE 0.99; consistent with her baseline I ~ 15.4).  Its
+# offset from the median of the surrounding field giants, (E, N) ~ (-4.9,
+# -1.1) mas/yr, matches Yee's relative value within ~1 sigma, which is the
+# evidence that hers is field-relative.
+#star.Source.pm_ra:
+#    mu: -7.560
+#    sigma: 0.088
+#    citation: GaiaCollaboration:2023
+#star.Source.pm_dec:
+#    mu: -5.883
+#    sigma: 0.051
+#    citation: GaiaCollaboration:2023
 
 # Yee+2015 is pure PSPL (their Eq. 4) -- no finite source, no limb darkening
 # (u0 ~ 0.9 makes them negligible). The source radius only enters rho, which
