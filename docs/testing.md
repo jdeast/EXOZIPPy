@@ -161,7 +161,8 @@ first dip mid-climb on kelt4's tc/logP ridge (Hessian condition number
 below the basin optimum, and on that shoulder one ulp moved `cosi` by 8.5%
 and the polished logp by 0.24 nats -- more than the test's own 0.2-nat logp
 tolerance, which the six observed environments passed only by chance. The
-shipped `gtol = 1e-4` (cap 400) stops at the optimum, where the same
+shipped `gtol = 1e-4` (then under a 400-iteration cap, removed on
+2026-10-07; the driver's 400-step rate window cannot fire first) stops at the optimum, where the same
 perturbation moves `cosi` by 8.6e-4; the numbers are in the header of
 `tests/test_integration_kelt4.py` and on `polish._LBFGS_GTOL`.
 

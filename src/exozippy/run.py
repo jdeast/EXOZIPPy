@@ -43,7 +43,12 @@ from .outputs.ledger import ledger_from_json, ledger_to_json
 from .outputs.modeling import build_modeling_output, compile_modeling_pdf
 from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix
 from .outputs.report_pipeline import build_mode_reports
-from .polish import polish_rounds, resolve_polish_steps
+from .polish import (
+    DEFAULT_POLISH_TIMEOUT_S,
+    polish_rounds,
+    resolve_polish_steps,
+    resolve_polish_timeout,
+)
 from .trace_meta import (
     POSTERIOR_UNITS,
     POSTERIOR_UNITS_UNFINISHED,
@@ -98,6 +103,7 @@ KNOWN_SAMPLER_KEYS = {
     "collect_rung_timing",
     "swap_schedule",
     "seed_polish",
+    "polish_timeout",
     "seed",
     "store_hot_chains",
     "de_partner_snapshot",
@@ -386,7 +392,7 @@ def warn_maxtime_unsupported(method, maxtime):
 #   * `maxtime` -- has its own channel (warn_maxtime_unsupported above),
 #     which names the per-sampler reason rather than a consumer list;
 #   * `seed`, `nthin`, `measure_scales`, `profile`, `recompute_trace`,
-#     `seed_polish`, `method` -- read on every path.
+#     `seed_polish`, `polish_timeout`, `method` -- read on every path.
 METHOD_ONLY_SAMPLER_KEYS = {
     # Chain geometry.  `chains` is the headline above; tune/draws are the
     # same shape against `nested`, whose length comes from its own stopping
@@ -450,6 +456,7 @@ ALL_METHOD_SAMPLER_KEYS = {
     "cores",
     "seed",
     "seed_polish",
+    "polish_timeout",
     "nthin",
     "measure_scales",
     "profile",
@@ -1000,10 +1007,12 @@ def _run_fit(config, gui, user_params=None):
         # be sampled).  This supersedes the PTDE-internal seed polish,
         # which ran after the probe and only under PTDE.
         #
-        # On the gradient-free (DE) engine the polish runs in ROUNDS --
-        # polish, re-whiten at the polished point, polish again with a fresh
-        # population -- until a round stops paying (polish.polish_rounds,
-        # review 2.4.14).  The L-BFGS engine runs once, as before.
+        # On both engines the polish runs in ROUNDS -- polish, re-whiten at
+        # the polished point, polish again -- until a round stops paying
+        # (polish.polish_rounds; review 2.4.14 for DE, and since 2026-10-07
+        # the same driver for L-BFGS).  `polish_timeout` (seconds, default
+        # polish.DEFAULT_POLISH_TIMEOUT_S, null = none) bounds the whole
+        # polish's wall clock and stops it when spent.
         if not reusing_trace:
             raw_starts_pre, _seed_indices_pre = system.get_raw_starts(model)
             polish_steps = resolve_polish_steps(
@@ -1011,6 +1020,9 @@ def _run_fit(config, gui, user_params=None):
                 n_seeds=len(raw_starts_pre),
                 has_seed_hints=bool(system.config_manager.seed_hint_sets),
                 overdisperse=system.overdisperse,
+            )
+            polish_timeout = resolve_polish_timeout(
+                sampler_cfg.get("polish_timeout", DEFAULT_POLISH_TIMEOUT_S)
             )
             if polish_steps:
                 polish_rounds(
@@ -1026,6 +1038,7 @@ def _run_fit(config, gui, user_params=None):
                     # asked for none (`measure_scales: false`) gets plain
                     # restarts instead.
                     rewhiten=measure_scales,
+                    timeout_s=polish_timeout,
                 )
                 raw_start = system.get_raw_start(model)
                 polished_start = True

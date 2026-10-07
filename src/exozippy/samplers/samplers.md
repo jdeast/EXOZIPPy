@@ -624,9 +624,10 @@ price (EXOFASTv2 precedent); iterate polish -> re-whiten -> polish
 automatically. What landed, in `polish.py` and `ptde.polish_seed_starts`:
 
 - **The cap is per engine.** `seed_polish: auto`/`on` resolves to
-  `polish.ENGINE_DEFAULT`: `DEFAULT_POLISH_STEPS = 400` L-BFGS iterations
-  (unchanged) or `DEFAULT_DE_POLISH_SWEEPS = 1000` DE sweeps PER ROUND. An
-  integer `seed_polish: N` is the per-round cap on either.
+  `polish.ENGINE_DEFAULT`: `DEFAULT_DE_POLISH_SWEEPS = 1000` DE sweeps PER
+  ROUND (the L-BFGS engine's 400-iteration cap of the time was removed on
+  2026-10-07; see the next section). An integer `seed_polish: N` is the
+  per-round cap on either.
 - **A rate stop inside a round.** A seed leaves its round when its best point
   gained less than `polish_tol_nats(D) = max(1, D/2)` nats over the last
   `ptde.POLISH_TOL_WINDOW = 400` sweeps, and the wrap-up line says "stopped
@@ -639,10 +640,10 @@ automatically. What landed, in `polish.py` and `ptde.polish_seed_starts`:
   The loop ends when a whole round gains less than `polish_tol_nats(D)` on
   every seed, or at `POLISH_MAX_ROUNDS = 8`. With re-whitening on, round 2
   always runs: round 1 drew its proposals in PRELIMINARY units. With
-  `measure_scales: false` later rounds are plain restarts. The L-BFGS engine
-  runs exactly one round, so every differentiable model's start is
-  bit-identical to the single-polish pipeline. run.py still re-centers and
-  probes once more after the last round, and persists that.
+  `measure_scales: false` later rounds are plain restarts. (The L-BFGS
+  engine then ran exactly one round; since 2026-10-07 it runs these same
+  rounds -- next section.) run.py still re-centers and probes once more
+  after the last round, and persists that.
 
 **Why a window is safe now when it was not before.** The best-lp history is
 a staircase of exactly-flat plateaus, and no threshold separates "converged"
@@ -675,7 +676,7 @@ lp after the final re-center + probe, which both arms share):
 |---|---|---|---|
 | DC2018_128 (18, 2; polish forced -- `auto` skips this 2-seed file) | 3374.8 / 3304.5, 19 s | 3414.8 / 3413.3, 3 rounds, 68 s | +40.0 / +108.9 |
 | DC2018-226 (25, 1; peak-finder seed) | 43439.8, 326 s | 44180.3, 6 rounds, 4563 s | +740.5 |
-| ob140939 (17, 4; L-BFGS) | bit-identical, every seed | one round | 0 |
+| ob140939 (17, 4; L-BFGS) | bit-identical, every seed | one round (then; see next section) | 0 |
 
 On DC2018-226 the rounds gained 21088, 134, 453, 76, 54 and 7.6 nats; rounds
 3 and 4 ran to their 1000-sweep cap and the others stopped on rate. The
@@ -712,6 +713,116 @@ pushed seed hints, which used to switch the polish back on and collapse the
 draws. Forcing it (`on`/an integer) is honored and warned about.
 
 Tests: `tests/test_polish.py` (the "Review 2.4.14" block).
+
+## The seed polish: one driver, two engines (2026-10-07)
+
+JDE: "Can we have the same code path only differing in the optimizer call to
+prevent this kind of drift?" The drift: 2.4.14 gave the DE polish rounds, a
+rate stop, a raised cap and a progress line, and left L-BFGS as "one round,
+as before" with a hard 400-iteration cap and no rate stop or timeout. On
+`examples/ob140939` (L-BFGS, 17 raw coordinates, the four literature seeds)
+every seed stopped on that cap, 2.4 / 2.6 / 4.5 / 6.7 nats below the
+optimum an independent L-BFGS-B run reaches from the same start (13000-29000
+iterations), so the whitening was measured at an unconverged point and the
+sampler started biased.
+
+**What is shared now** (`polish.py`). `polish_rounds` runs the same loop for
+both engines -- polish, re-center + re-whiten, polish, until a round gains
+less than `polish_tol_nats(D)` on every seed, at most `POLISH_MAX_ROUNDS` --
+and every round's stopping rule is ONE object, `PolishMonitor`: a per-round
+cap (`seed_polish: N`; default none for L-BFGS, 1000 sweeps for DE), the
+rate stop (gain < `polish_tol_nats(D)` over the last `POLISH_TOL_WINDOW =
+400` steps), and a wall-clock budget for the whole polish
+(`sampler: polish_timeout:`, below). The monitor also owns the progress line
+and the stop reasons, which appear in each round's per-seed line ("Seed
+polish (L-BFGS|DE): seed k lp a -> b (dlp=..., N iterations|sweeps, <reason>)")
+and in the wrap-up ("last round <reason>"):
+
+| reason | who decides |
+|---|---|
+| `converged: \|grad\| < 0.0001 nats/unit` | the engine (L-BFGS-B's projected-gradient test) |
+| `stopped on rate: gained < T nats over the last 400 <unit>` | the driver |
+| `stopped on cap: ran all N <unit>` | the driver |
+| `stopped on timeout: the polish's S s wall-clock budget ran out` | the driver |
+| `stopped by the optimizer: <scipy message>` | the engine (an L-BFGS-B exit that is none of the above, e.g. a failed line search) |
+
+**The interface.** An engine is handed the round's seeds and the monitor; it
+calls `monitor.begin(s, lp0)`, advances seed `s`, reports every step's best
+lp to `monitor.step(s, lp)` and stops that seed the moment it returns True,
+and reports its own convergence with `monitor.finish(s, "converged", why)`.
+`polish._Engine` names what else differs -- the step unit and the default
+cap -- and nothing more. The L-BFGS engine is ONE scipy run per seed per
+round, stopped through its per-iteration callback (StopIteration), so the
+quasi-Newton curvature memory is kept for the whole round; chunked restarts
+would have thrown it away at every chunk boundary. scipy's own `maxiter` /
+`maxfun` are out of reach; the driver owns the cap. The DE engine
+(`ptde.polish_seed_starts`) reports each completed sweep from its
+`_end_of_sweep`, in both the synchronous and the asynchronous loop.
+`tests/test_polish.py::test_both_real_engines_report_every_step_to_one_shared_monitor`
+fails if either engine stops reporting -- e.g. a private L-BFGS loop with its
+own `maxiter` comes back.
+
+**Why 400 steps for L-BFGS too.** Measured on ob140939's round 1 (preliminary
+whitening, threshold 8.5 nats): windows of 10 / 25 / 50 / 100 iterations fire
+13-110 iterations in, during the climb's slow first bend, 4.8-13 nats short
+with up to ~3400 still to climb; 200 and 400 fire on the crawl along the
+flat direction. A window cannot fire before step 401, so a model whose
+gradient test converges sooner (kelt4: 240-294 iterations) never meets it.
+
+**Why rounds help L-BFGS.** The crawl is a scaling problem: the preliminary
+whitening leaves a flat, badly scaled direction. Re-whitening at round 1's
+point measures it, and round 2 climbs it in measured units. ob140939, serial,
+2026-10-07 (lp in each run's own final coordinates):
+
+| seed | start lp | old: 1 round, cap 400 | new: 2 rounds | left on the table after the new polish (independent L-BFGS-B to convergence from its point) |
+|---|---|---|---|---|
+| 0 | -1549.5 | -1207.4 (2.4 short) | -1204.98 (342.1 + 2.4) | 0.000 nats |
+| 1 | -1538.4 | -1200.5 (2.6 short) | -1197.83 (338.0 + 2.6) | 0.000 |
+| 2 | -4677.9 | -1215.4 (4.5 short) | -1211.03 (3462.5 + 4.4) | 0.10 |
+| 3 | -4535.5 | -1221.5 (6.7 short) | -1215.07 (3314.0 + 6.4) | 0.31 |
+
+Round 1 stops on rate at 410-472 iterations, round 2 at 397-401 (seed 1 on
+the gradient), and round 2's gains (2.4-6.4) are under 8.5 nats, so the loop
+ends. Wall clock 9 s -> 16 s (the second round plus one extra probe).
+
+**The DE path is bit-identical.** `examples/DC2018_128` (gradient-free, 2
+seeds) through `polish_rounds(cores=1, rng=default_rng(0))` -- the
+synchronous engine, deterministic -- gives the same three rounds (0.0 /
+2237.48, 37.14 / 123.70, 1.69 / 0.77 nats), the same final lps
+(3413.5968077 / 3415.9667505) and a byte-identical sha256 of the final raw
+starts on origin/master and on this branch: the rate test, the cap and the
+sweep order are unchanged, only where they are evaluated moved.
+
+**Recorded starts that did not move.** The microlensing replay fixtures
+(`tests/fixtures/mulens/*.json`) store the relaxation-engine start BEFORE
+any polish, so they cannot move (`scripts/make_mulens_fixtures.py --check
+--only ob140939 --only ob08092`: ok). `tests/test_integration_kelt4.py`'s
+golden start is unchanged to every printed digit: that fixture runs with
+`measure_scales: false`, round 1 is the same scipy run (the callback does
+not change L-BFGS-B's iterates) and stops on the gradient at 237 iterations,
+and round 2 -- a plain restart there -- converges at its first test (0
+iterations). Its log parser now reads the build lp from the first round and
+the polished lp from the last.
+
+**`sampler: polish_timeout:`** (seconds; default
+`polish.DEFAULT_POLISH_TIMEOUT_S` = 86400, `null` = no budget). The
+wall-clock budget for the WHOLE polish, every round and seed. It STOPS the
+polish, it is not an alarm: each running seed ends its round "stopped on
+timeout" with its best point so far, no further round starts, and the
+wrap-up says the start may still be below its basin optimum. Checked at
+step boundaries (one L-BFGS iteration, one DE sweep), never mid-evaluation
+-- that is `eval_timeout`'s job, a different knob. 24 h because the slowest
+polish measured end to end (DC2018-226's six DE rounds, 4563 s on 4
+workers, table above) is far inside it, and the ruling that made the rounds
+automatic accepted CPU-days: a budget that cut a measured run short would
+change the DE defaults' meaning. 0, a negative number, a bool or a string
+raise. It is an ALL-METHOD key (the polish runs before every sampler). The
+hot-mode polish in `outputs/ledger.py` runs one round through the same
+driver without a budget.
+
+Tests: `tests/test_polish.py`, the "ONE driver, two engines" block (every
+stop reason, the round loop and the timeout on a scripted fake engine, both
+real engines through one monitor, the spent budget on both).
 
 ## A slow sampler step alarms while it runs (2.4.14 e)
 
