@@ -8,8 +8,14 @@ Analogous to EXOFASTv2's mkticsed.pro -- queries TICv8.2 and associated catalogs
 Band names use the SVO Filter Profile Service standard (FACILITY/INSTRUMENT.FILTER).
 The SED file is an EXOZIPPy YAML (not the EXOFASTv2 text table format).
 
-Gaia DR3 photometry is used with Gaia DR2 filter curves (GAIA/GAIA2r.*) because
-the NextGen BC grid ships only DR2 curves; the two are nearly identical.
+Gaia DR3 photometry is written against the DR3 filter curves (GAIA/GAIA3.*,
+Riello+2021), the curves its magnitudes were calibrated on. The DR2 curves
+(GAIA/GAIA2r.*) are NOT interchangeable. Measured in the shipped NextGen BC
+grid ([Fe/H] = 0, log g = 4.5, 4000-6500 K), BC(GAIA3) - BC(GAIA2r) is
+<= 2 mmag in G only for unreddened stars; it reaches 0.002-0.016 mag at
+A_V = 2 and 0.03-0.07 mag at A_V = 6 (0.09-0.14 mag for 3000-3500 K), and
+BP/RP differ by up to 0.016 mag unreddened and 0.02-0.025 mag at A_V = 6.
+mkticsed writes no DR2 photometry (DR2 is queried for the parallax only).
 
 This is the importable home of the former scripts/mkticsed.py. The CLI is
 defined by build_parser() and driven by main(argv=None); scripts/mkticsed.py
@@ -459,8 +465,10 @@ class Catalog:
 
 
 CATALOGS = {
-    # Gaia DR3 photometry is written against the DR2 filter curves: the
-    # NextGen BC grid ships only those, and they agree to <1 mmag.
+    # Gaia DR3 photometry is written against the DR3 filter curves
+    # (GAIA/GAIA3.*; BC columns Gaia_*_EDR3). Each magnitude must use the
+    # curve of its own data release: the DR2 curves differ by up to several
+    # hundredths of a magnitude for reddened stars (module docstring).
     "gaia3": Catalog(
         vizier="I/355/gaiadr3",
         label="Gaia DR3",
@@ -471,9 +479,9 @@ CATALOGS = {
         max_err=1.0,
         min_mag=-9.0,  # Gaia writes -99 for an absent band
         bands=(
-            Band("GAIA/GAIA2r.G", "Gmag", "e_Gmag", 0.02),
-            Band("GAIA/GAIA2r.Gbp", "BPmag", "e_BPmag", 0.02),
-            Band("GAIA/GAIA2r.Grp", "RPmag", "e_RPmag", 0.02),
+            Band("GAIA/GAIA3.G", "Gmag", "e_Gmag", 0.02),
+            Band("GAIA/GAIA3.Gbp", "BPmag", "e_BPmag", 0.02),
+            Band("GAIA/GAIA3.Grp", "RPmag", "e_RPmag", 0.02),
         ),
     ),
     # Parallax only -- the DR3 photometry above supersedes DR2's.
@@ -998,10 +1006,8 @@ def mkticsed(
             target_pmra = _get(qgaia3, "pmRA", g3row)
             target_pmdec = _get(qgaia3, "pmDE", g3row)
 
-        # Gaia DR3 photometry with DR2 filter curves (nearest available BC grid)
         sed_notes.append(
-            "Gaia DR3 photometry used with GAIA/GAIA2r filter curves (DR2); "
-            "differences are <1 mmag for typical stars"
+            "Gaia DR3 photometry, with the GAIA/GAIA3 (DR3) filter curves"
         )
         _add_catalog_bands(sed_entries, CATALOGS["gaia3"], qgaia3, g3row)
 
