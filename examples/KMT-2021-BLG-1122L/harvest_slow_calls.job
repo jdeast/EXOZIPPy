@@ -1,0 +1,20 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N kmt1122harv
+#$ -o vbmfix_results/harvest_slow_calls.$JOB_ID.log
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_kmt1122harv"
+cd $HOME/python/EXOZIPPy/examples/KMT-2021-BLG-1122L
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)   $(date)"
+cp fitresults_vbmfix/KMT-2021-BLG-1122L.15512768.log vbmfix_results/fit_15512768_snapshot.log
+python -u harvest_slow_calls.py vbmfix_results/fit_15512768_snapshot.log fitresults_vbmfix/KMT-2021-BLG-1122L_whitening.json vbmfix_results/slow_calls_from_fit_15512768.json 2>&1 | grep -v "DEBUG\|Warning\|warn\|^\["
+echo "exit $?   $(date)"
