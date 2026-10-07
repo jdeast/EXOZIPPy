@@ -45,7 +45,19 @@ d["prefix"] = "fitresults_vbmfix/KMT-2021-BLG-1122L"
 # Multipoly keeps a ~1.7e-4 tail of multi-minute calls); the s bounds stay
 # (a physical prior here).
 d["sampler"]["T_max"] = 200
-print("vbmfix overrides: T_max 200 (start_dispersion 3.0 kept)")
+# The SYNCHRONOUS engine waits for every proposal of a step: under the fixed
+# kernel the sixth launch (job 15511416) saw 649 ten-second eval_timeouts
+# in its first 173 steps on EVERY rung (3.75 per step, 1.7e-3 per call --
+# the fixed Multipoly's slow-but-finite 20-100 s calls, ten times the
+# > 120 s tail the stress test counted) and 122 pool recycles, 37 s per
+# step, a ten-day run.  ptde_async exists for exactly a straggler tail (a
+# slow call costs one worker, not the step; samplers.md), so this fit uses
+# it, with eval_timeout raised to 300 s so a slow call finishes instead of
+# killing the pool.  The sync default's premise (the VBM tail is gone) is
+# a binary-lens measurement; it does not hold for three bodies.
+d["sampler"]["method"] = "ptde_async"
+d["sampler"]["eval_timeout"] = 300
+print("vbmfix overrides: T_max 200, start_dispersion 3.0 kept, method ptde_async, eval_timeout 300")
 yaml.safe_dump(d, open(cfg, "w"), sort_keys=False)
 print(f"wrote {cfg} with sampler.cores = {n}")
 PY
