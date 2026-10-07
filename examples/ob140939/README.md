@@ -14,3 +14,14 @@ Nothing in this fit reads a zero point, because there is no SED and therefore no
 
 Yee et al.'s source proper motion (their Eq. 8) is OGLE relative astrometry, measured against the field's bulge stars, so the prior sits on `star.Source.pm_ra_sgra`/`pm_dec_sgra`. The comments in `ob140939.params.yaml` and conventions rule C31 give the evidence, and the absolute Gaia DR3 alternative.
 
+## Two analyses: Yee et al.'s inputs, and today's
+
+- **`ob140939.yaml` is the validation.** It reproduces Yee et al. (2015) using only the inputs they used: the OGLE and Spitzer light curves and their bulge-relative source proper motion. It recovers their preferred solution, Δu₀,−,−, at about 90% of the posterior (89–94% across independent repeats). Their Δχ² = 8 and 17 solutions are rejected, and the lens comes out at ~0.23 M☉ and ~3.3 kpc (theirs: 0.23 ± 0.07 M☉, 3.1 ± 0.4 kpc).
+- **`ob140939_today.yaml` is the best-practice analysis with everything available today:**
+  - **Proper motion:** the source's absolute proper motion from Gaia DR3 (4118632779506798848) instead of the OGLE relative one.
+  - **Source SED:** Gaia G and 2MASS JHKs, fetched with `mkticsed` (TIC 169097367) and vetted for crowding. Gaia BP/RP are dropped for their excess factor and WISE for its 6″ beam. The SED is tied to the OGLE light curve through the calibrated zero point (22.0 ± 0.2; the width covers a 0.16 mag SED-vs-OGLE I-band systematic).
+  - **Extinction:** an A_V prior from the VVV red-clump map (Surot et al. 2020) instead of the Schlegel cap.
+  - **Colour:** Yee et al.'s independently measured instrumental (I − [3.6]) source colour ties the Spitzer source flux to OGLE's.
+
+  It gives Δu₀,−,− at 86%, which is the same preference within the repeat scatter, and a lens at 0.22 ± 0.04 M☉ and 3.5 ± 0.4 kpc. The source is a reddened bulge K giant (Teff ~4300 K, ~19 R☉, ~9 kpc).
+

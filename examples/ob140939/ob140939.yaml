@@ -91,10 +91,10 @@ sampler:
   # Converged (all 50000 draws: max_rhat/min_ess early stop off), with
   # the source pm prior in its correct Sgr-A*-relative frame
   # (src/exozippy/components/mulensing/conventions.md C31), the split is
-  # ~91/9: u0,-,- ~91%, the solution Yee+2015's proper-motion argument
-  # prefers, with a lens at ~3.3 kpc and ~0.24 Msun (hers: 3.1 +/- 0.4
-  # kpc, 0.23 +/- 0.07).  An earlier "~98/2" here was a stuck-ladder
-  # artifact, not a posterior.
+  # about 90/10 (89-94% across independent repeats): u0,-,- is the
+  # solution Yee+2015's proper-motion argument prefers, with a lens at
+  # ~3.3 kpc and ~0.23 Msun (hers: 3.1 +/- 0.4 kpc, 0.23 +/- 0.07).
+  # An earlier "~98/2" here was a stuck-ladder artifact, not a posterior.
   n_temps: 24
   # Keep thinned hot-rung draws: they detect posterior-suppressed modes
   # (occupancy ~exp(-dlp/T)) for the seeded-solution ledger, so solutions
