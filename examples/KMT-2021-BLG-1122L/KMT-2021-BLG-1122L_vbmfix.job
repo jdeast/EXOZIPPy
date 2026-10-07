@@ -57,6 +57,10 @@ d["sampler"]["T_max"] = 200
 # a binary-lens measurement; it does not hold for three bodies.
 d["sampler"]["method"] = "ptde_async"
 d["sampler"]["eval_timeout"] = 300
+# Without log_interval the async engine prints progress every
+# n_slots*(tune+draws)/20 evaluations -- 2.6 million here, so the seventh
+# launch ran 4.5 h in silence.  50 sweeps = 105,000 evaluations.
+d["sampler"]["log_interval"] = 50
 print("vbmfix overrides: T_max 200, start_dispersion 3.0 kept, method ptde_async, eval_timeout 300")
 yaml.safe_dump(d, open(cfg, "w"), sort_keys=False)
 print(f"wrote {cfg} with sampler.cores = {n}")
