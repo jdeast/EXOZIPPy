@@ -5,18 +5,20 @@ The four `n20*.OB161045.txt` files are copied verbatim from MMEXOFAST
 They need three fixes before EXOZIPPy can read them, and only the third is
 an approximation.
 
-1. THE KMT FLUX SIGN IS NATIVE, NOT A MISTAKE
----------------------------------------------
-KMTNet pySIS reports a DIFFERENCE flux that becomes MORE NEGATIVE as the
-star brightens.  That is the pipeline's own convention, not something done
-to these files: MulensModel ships an independently sourced native KMT set
+1. THE KMT FLUX SIGN LOOKS NATIVE, NOT LIKE A MISTAKE
+-----------------------------------------------------
+These files report a DIFFERENCE flux that becomes MORE NEGATIVE as the star
+brightens.  That is probably the pipeline's own convention rather than
+something done to them, on ONE piece of corroborating evidence: MulensModel
+ships an independently sourced KMT set for a DIFFERENT event
 (`data/photometry_files/KB180003/*.pysis`, five columns
 `HJD' dflux dflux_err mag mag_err`) whose brightest epoch, at mag 11.579,
-carries dflux = -3,699,974.  Both events also share a baseline dflux near
--337, which is the pipeline's zero offset.
+carries dflux = -3,699,974, and both sets share a baseline dflux near -337.
 
-So the sign is flipped here only to put brightening in the positive
-direction that EXOZIPPy expects.  Nothing is being corrected.
+One event is not a survey of KMT's output, so read "native" as the best
+available reading rather than as established.  The sign flip does not rest
+on it in any case: at sign +1 the fitted source flux comes out NEGATIVE,
+which is unphysical whatever the pipeline's convention turns out to be.
 
 2. THE SCALE
 ------------
@@ -53,10 +55,11 @@ exactly from a native KMT file, because `mag` and `dflux` together solve
     mag = zp - 2.5*log10(ref - dflux)
 
 for `ref` (verified on KB180003: ref = 1584.9 at zp = 28.000 for all three
-sites, residual rms 2.8e-5 mag).  But these files are a three-column
-reprocessing with the `mag` column stripped, so the information is gone,
-and the constant is event-specific -- KB180003's reference happens to sit
-at exactly mag 20.000, while OB161045 needs roughly 17,500.
+sites, residual rms 2.8e-5 mag).  These files carry three columns and no
+`mag` column, so that information is absent from them -- whether it was
+ever present and removed, or never written, is not known here.  Nor can the
+constant be borrowed: it is event-specific, and KB180003's reference
+happens to sit at exactly mag 20.000 while OB161045 needs roughly 17,500.
 
 So each curve is instead OFFSET TO ZERO BLENDING: the linear flux problem
 is solved at the published trajectory, and -f_blend is added, which places

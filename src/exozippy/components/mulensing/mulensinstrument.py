@@ -112,9 +112,13 @@ class MulensInstrument(Instrument):
     which determines ``ref`` and ``zp`` exactly (verified on MulensModel's
     native KB180003 set: ``ref = 1584.9`` at ``zp = 28.000`` for all three
     sites, residual rms 2.8e-5 mag).  The total flux is then
-    ``F = ref - dflux``.  Note the subtraction: pySIS ``dflux`` grows MORE
-    NEGATIVE as the star brightens, which is the pipeline's own convention,
-    not a defect.
+    ``F = ref - dflux``.  Note the subtraction: in the pySIS files seen
+    here, ``dflux`` grows MORE NEGATIVE as the star brightens.  That is
+    taken as the pipeline's convention on the strength of one independently
+    sourced set (MulensModel's KB180003) -- corroboration, not a survey --
+    so a file that disagrees is not impossible.  The solved reference is
+    checked against the mag column either way, which is what actually
+    guards this.
 
     A three-column difference file therefore cannot be read as ``dia``: the
     reference flux is simply absent, and no choice of it is derivable from

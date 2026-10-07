@@ -92,10 +92,11 @@ for `ref`. Verified on MulensModel's native KB180003 set -- all three
 sites return `ref = 1584.9` at `zp = 28.000` with a residual rms of
 2.8e-5 mag.
 
-**These files cannot supply it.** They are a three-column reprocessing with
-the `mag` column stripped, so the information is gone, and the constant is
-event-specific (KB180003's reference sits at exactly mag 20.000, while
-OB161045 needs roughly 17,500).
+**These files cannot supply it.** They carry three columns and no `mag`
+column, so that information is absent from them -- whether it was ever
+present and removed, or never written, is not known here. Nor can the
+constant be borrowed: it is event-specific (KB180003's reference sits at
+exactly mag 20.000, while OB161045 needs roughly 17,500).
 
 ### What was done instead, and what it costs
 
@@ -120,14 +121,21 @@ carry the same assumption.
 
 ### A note for native support
 
-KMT ships difference flux as a matter of course, so a `data_format:`
-that reads it natively -- converting to total flux on read, with an
-optional reference flux or magnitude to tie it to the SED constraint --
-would be worth having. It was deliberately NOT built around these files,
-because they are already reprocessed (three columns, full JD) and so are a
-poor specification of the native format. MulensModel's
-`data/photometry_files/KB180003/*.pysis` is the native article and is the
-better fixture.
+A `data_format:` that reads difference flux natively -- converting to total
+flux on read, with an optional reference flux or magnitude to tie it to the
+SED constraint -- is worth having, and now exists as `data_format: dia`.
+
+How common that five-column layout actually is, though, is NOT established
+here. The only specimen in reach is MulensModel's KB180003, and this
+repository's other KMT files (`kb180087_obj3/L_data/*.pys` and
+`KMT-2019-BLG-1806/*.pys`) are three-column MAGNITUDE files, not difference
+flux at all. KMT photometry therefore arrives in at least three shapes, and
+`dia` should be read as a format that is SUPPORTED when supplied, not one
+that can be assumed.
+
+It was deliberately not built around the files in this directory, which are
+three-column and so specify nothing about the native layout; KB180003 is
+the only specimen in reach and is what the tests use.
 
 ## Data
 
@@ -141,15 +149,16 @@ it.
 `convert_data.py` generates the `*.dat` files the config reads. It fixes
 two things, both established by measurement rather than assumed:
 
-- **The KMT flux sign, which is NATIVE and not a defect.** KMTNet pySIS
-  reports a difference flux that grows MORE NEGATIVE as the star
-  brightens. That is the pipeline's convention, confirmed against
-  MulensModel's independently sourced native set
-  (`data/photometry_files/KB180003/*.pysis`), whose brightest epoch, at
-  mag 11.579, carries `dflux = -3,699,974`; both events also share a
-  baseline `dflux` near -337, the pipeline's zero offset. The sign is
-  flipped here only to put brightening in the positive direction EXOZIPPy
-  expects. Auckland's microFUN photometry is already positive.
+- **The KMT flux sign, which looks native rather than like a defect.**
+  These files report a difference flux that grows MORE NEGATIVE as the star
+  brightens. One independent set points the same way -- MulensModel's
+  KB180003 (`data/photometry_files/KB180003/*.pysis`), whose brightest
+  epoch at mag 11.579 carries `dflux = -3,699,974`, and both sets share a
+  baseline `dflux` near -337. That is corroboration from a single event,
+  not a survey of KMT's output, so it is the likely reading rather than a
+  settled one. The flip does not depend on it: at sign +1 the fitted source
+  flux is NEGATIVE, which is unphysical either way. Auckland's microFUN
+  photometry is already positive.
 - **The scale.** Raw DIA counts put `f_source` at ~1.8e4, against
   `f_source`'s default bound of [0, 1000] -- a start 150,000 nats inside
   the wall. The files are divided by a round power of ten (1e4 for KMT, 1e2
