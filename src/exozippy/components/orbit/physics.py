@@ -774,6 +774,32 @@ def calc_same(value):
 
 
 @register_physics
+def calc_tc_from_sampled(tc_sampled, period, _tc_epoch):
+    """The conjunction at the USER's epoch from the one SAMPLED near the data.
+
+    ``tc_sampled`` is the conjunction ``_tc_epoch`` (an integer per orbit,
+    fixed at stage 3) whole periods after the user's seed, chosen so it lies
+    near the time center of the data (``Orbit._sampling_epochs``); this
+    walks it back, so the period's uncertainty propagates into ``tc`` exactly
+    as it does into any conjunction quoted away from the data.  orbit.md, "tc
+    is SAMPLED near the data".
+    """
+    return tc_sampled - _tc_epoch * period
+
+
+@register_physics
+def calc_t0(tc, period, _tc_epoch):
+    """The conjunction at the SAMPLED epoch, ``tc + _tc_epoch * period``.
+
+    The node ``orbit.t0`` is built from.  Its REPORTED value is moved after
+    sampling to the epoch that minimizes its covariance with the period
+    (``Parameter.shift_to_optimal_epoch``, EXOFASTv2's T_0); this is only the
+    starting epoch of that search, which is why it is the sampled one.
+    """
+    return tc + _tc_epoch * period
+
+
+@register_physics
 def calc_tc_target(
     tc, a, ecc, sinw, sini, m_primary, m_companion, m_total, _ltt_mask
 ):

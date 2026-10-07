@@ -356,6 +356,24 @@ class MulensInstrument(Instrument):
             )
         return flagged[0]
 
+    def epochs_constraining(self, system, orbit):
+        """Every light curve's epochs on the orbits the event's geometry
+        consumes: a lens orbit under `orbital_motion: keplerian` and a
+        source orbit under xallarap (`Orbit._lens_keplerian_orbits` /
+        `_lens_xallarap_orbits`, the predicates that decide those orbits'
+        sky coordinates).  The default timing rank: the light curve times
+        such an orbit through the binary's rotation across the event, not
+        through an eclipse."""
+        targets = orbit._lens_keplerian_orbits(
+            system
+        ) | orbit._lens_xallarap_orbits(system)
+        out = {}
+        for i in range(self.n_elements):
+            epochs = self.dataset_epochs(i)
+            for o in sorted(targets):
+                out.setdefault(int(o), []).append(epochs)
+        return out
+
     def load_data(self, system):
         """Stage 1: Load photometry and pre-calculate observer positions.
 

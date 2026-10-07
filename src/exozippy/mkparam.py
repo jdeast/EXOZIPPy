@@ -37,6 +37,7 @@ from exozippy.trace_meta import (
     ROLES_ATTR,
     check_trace_freshness,
     report_only_vars,
+    restart_aliases,
 )
 from exozippy.yamlio import load_yaml
 
@@ -1006,9 +1007,27 @@ def write_param_file(
     # element of a sampled var is sampled, exactly as before.
     element_roles = _trace_element_roles(idata)
 
+    # A sampled parameter whose start a restart file writes under a DERIVED
+    # sibling's name (defaults.yaml `restart_as:`).  The one case is
+    # orbit.tc_sampled, the conjunction sampled near the data when the
+    # user's epoch is far from it: the file gets `tc` at the user's epoch --
+    # what the user wrote -- so the next fit re-reads the same epoch,
+    # chooses the same sampled one, and reports the same `tc` (run.md).  The
+    # elements written are still the SAMPLED ones of the aliased variable.
+    aliases = restart_aliases(idata)
+
     for var_name in sampled_vars:
         comp_key, param = var_name.rsplit(".", 1)
-        da = posterior[var_name]
+        source_name = aliases.get(var_name, var_name)
+        if source_name != var_name:
+            if source_name not in posterior.data_vars:
+                raise ValueError(
+                    f"mkparam: {var_name!r} is written to the restart file "
+                    f"as {source_name!r} (trace attr restart_as), but the "
+                    f"trace holds no {source_name!r}."
+                )
+            param = source_name.rsplit(".", 1)[1]
+        da = posterior[source_name]
         # (K, n_elements) joint values across the seed draws.
         seed_vals = np.stack(
             [np.atleast_1d(da.values[c, d]) for (c, d) in seed_pairs]

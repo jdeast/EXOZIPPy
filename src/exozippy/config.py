@@ -2122,6 +2122,18 @@ class ConfigManager:
             # so its posterior is recentered about its mode before it is
             # summarized.  Parameter validates the shape; see parameter.md.
             "periodic": base.get("periodic"),
+            # Component-declared, defaults.yaml only: this parameter is an
+            # EPOCH of an event repeating with a sibling parameter's period,
+            # and its reported posterior is moved by the whole number of
+            # periods that minimizes its covariance with that period
+            # (EXOFASTv2's T_0).  See parameter.md.
+            "optimal_epoch": base.get("optimal_epoch"),
+            # Component-declared, defaults.yaml only: the restart file
+            # (mkparam) writes this SAMPLED parameter's start value as the
+            # named derived sibling instead, because the sibling is what a
+            # user writes and what the next fit must re-read to mean the same
+            # thing (orbit.tc_sampled -> tc).  See run.md.
+            "restart_as": base.get("restart_as"),
         }
 
         # The sub-key vocabulary is declared once at module scope (see

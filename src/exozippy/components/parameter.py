@@ -1152,6 +1152,20 @@ class Parameter:
     #       (an epoch of a recurring event: tp, ts).
     # Validated in __post_init__ so a typo fails at build, not at wrap-up.
     periodic: Any = None
+    # This parameter is an EPOCH of an event that repeats with a sibling
+    # parameter's period, and it is REPORTED at the epoch that minimizes its
+    # covariance with that period (EXOFASTv2's T_0; see
+    # `shift_to_optimal_epoch`).  Declared in defaults.yaml, never by a user,
+    # as `optimal_epoch: {param: "<sibling>"}`; validated in __post_init__.
+    optimal_epoch: Any = None
+    # The whole number of periods `shift_to_optimal_epoch` moved each
+    # element's draws by (None until it has run).  Read by the log line and
+    # the tests; the reported posterior already carries the shift.
+    optimal_epoch_shift: Any = field(default=None, init=False)
+    # The DERIVED sibling a restart file writes this SAMPLED parameter's
+    # start value as (mkparam; `orbit.tc_sampled` -> `tc`).  Declared in
+    # defaults.yaml, never by a user.  See run.md.
+    restart_as: Optional[str] = None
     # The resolved per-element period in USER units, set by
     # recenter_posterior for the summaries to reuse on any SUBSET of the
     # draws (a mode split by the cut needs its own recentering).  Dropped by
@@ -1216,6 +1230,7 @@ class Parameter:
             self.label, prefix=self.latex_prefix
         )
         self._validate_periodic()
+        self._validate_optimal_epoch()
 
         # --- 5. THE GATEKEEPER CONVERSION ---
         # Convert ALL numeric fields from User Units to Internal Units ONCE upon creation.
@@ -4918,6 +4933,110 @@ class Parameter:
                     ) from exc
             return
         raise bad
+
+    def _validate_optimal_epoch(self):
+        """Reject a malformed ``optimal_epoch:`` declaration at construction."""
+        spec = self.optimal_epoch
+        if spec is None:
+            return
+        if (
+            not isinstance(spec, dict)
+            or set(spec) != {"param"}
+            or not isinstance(spec["param"], str)
+            or not spec["param"]
+        ):
+            raise ValueError(
+                f"[{self.label}] optimal_epoch: must be {{param: <sibling "
+                f"period parameter name>}}; got {spec!r}."
+            )
+
+    def shift_to_optimal_epoch(self, param_lookup):
+        """Move the stored posterior to the epoch least correlated with the period.
+
+        An epoch ``T`` of an event repeating with period ``P`` can be quoted
+        at any ``T + E P``; its uncertainty and its covariance with ``P``
+        depend on which.  EXOFASTv2 reports the conjunction at the integer
+        epoch that minimizes ``|corr(T + E P, P)|`` (``derivepars.pro``,
+        "find the ideal Tc that minimizes the Tc uncertainty and the
+        covariance between Tc and Period": it scans every integer epoch
+        across the data span, on the burn-in-trimmed good chains).  That
+        scan has a closed form.  With ``c = cov(T, P)``, ``v = var(P)`` and
+        ``D = var(T) v - c^2 >= 0``, ``corr(T + E P, P) = u / sqrt(u^2 + D)``
+        with ``u = c + E v``, which is monotonic in ``u`` -- so the integer
+        minimizing ``|corr|`` is the one nearest ``E* = -c / v``, where the
+        covariance vanishes.  Here ``E = round(E*)``, unrestricted: EXOFASTv2
+        clips its scan to one epoch beyond the data, which binds only when
+        something other than the data (a prior far from it) dominates.
+
+        Called by ``System.distribute_posterior`` after every Parameter has
+        its draws -- burn-in-trimmed, invalid draws dropped, the same draws
+        EXOFASTv2's scan reads -- and once for the whole posterior, so every
+        mode is quoted at the SAME epoch.  Each draw moves by the same
+        integer number of its OWN period, so the shift is exact per draw,
+        not a shift of the median.  A period with no spread (pinned) leaves
+        every epoch equally good and moves nothing.  Records
+        ``optimal_epoch_shift``.
+        """
+        if self.optimal_epoch is None or self.posterior is None:
+            return
+        prefix = self.label.rsplit(".", 1)[0]
+        sib_label = f"{prefix}.{self.optimal_epoch['param']}"
+        sibling = param_lookup.get(sib_label)
+        if sibling is None or sibling.posterior is None:
+            raise ValueError(
+                f"[{self.label}] optimal_epoch: sibling period parameter "
+                f"'{sib_label}' has no posterior to measure the covariance "
+                f"against."
+            )
+        arr = np.asarray(
+            getattr(self.posterior, "values", self.posterior), dtype=float
+        )
+        per = np.asarray(
+            getattr(sibling.posterior, "values", sibling.posterior),
+            dtype=float,
+        )
+        if arr.shape != per.shape:
+            raise ValueError(
+                f"[{self.label}] optimal_epoch: posterior shape {arr.shape} "
+                f"does not match its period '{sib_label}' {per.shape}; the "
+                f"two must be draw-aligned."
+            )
+        if arr.ndim == 0 or arr.shape[-1] < 2:
+            return
+        flat = arr.reshape(-1, arr.shape[-1]).copy()
+        pflat = per.reshape(-1, per.shape[-1])
+        shifts = np.zeros(flat.shape[0], dtype=int)
+        for i in range(flat.shape[0]):
+            idx = i if arr.ndim > 1 else None
+            t_int = np.asarray(self.to_internal(flat[i], index=idx), float)
+            p_int = np.asarray(sibling.to_internal(pflat[i], index=idx), float)
+            ok = np.isfinite(t_int) & np.isfinite(p_int)
+            if ok.sum() < 2:
+                continue
+            dp = p_int[ok] - p_int[ok].mean()
+            v = float(np.mean(dp * dp))
+            if not v > 0.0:
+                continue
+            c = float(np.mean((t_int[ok] - t_int[ok].mean()) * dp))
+            shifts[i] = int(np.round(-c / v))
+            if shifts[i] != 0:
+                flat[i] = np.asarray(
+                    self.from_internal(t_int + shifts[i] * p_int, index=idx),
+                    dtype=float,
+                )
+        self.optimal_epoch_shift = shifts
+        if np.any(shifts != 0):
+            new = flat.reshape(arr.shape)
+            old = self.posterior
+            if hasattr(old, "copy") and hasattr(old, "values"):
+                self.posterior = old.copy(data=new)
+            else:
+                self.posterior = new
+        logger.info(
+            f"[{self.label}] reported at the epoch least correlated with "
+            f"'{sib_label}': {shifts.tolist()} period(s) from the sampled "
+            f"epoch."
+        )
 
     def periodic_period(self, param_lookup=None):
         """The per-element period in USER units, or None if not periodic.

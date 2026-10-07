@@ -367,6 +367,28 @@ class Transit(Instrument):
             )
         return block
 
+    # An eclipse times its conjunction (Component.epochs_constraining).
+    epoch_timing_rank = 2
+
+    def epochs_constraining(self, system, orbit):
+        """Every light curve's epochs on every orbit with a planet companion.
+
+        Every transit file models every planet (the assumption
+        ``Orbit._transit_only`` and ``orbit.occultation_datasets`` make), so
+        each file times each orbit whose companion group holds one.
+        """
+        planet_orbits = [
+            i
+            for i in range(orbit.n_elements)
+            if any(t == "planet" for t, _ in orbit.companion_bodies[i])
+        ]
+        out = {}
+        for i in range(self.n_elements):
+            epochs = self.dataset_epochs(i)
+            for o in planet_orbits:
+                out.setdefault(int(o), []).append(epochs)
+        return out
+
     def _seed_from_bls(self, system):
         """Seed orbital period, conjunction epoch and radius ratio from BLS.
 

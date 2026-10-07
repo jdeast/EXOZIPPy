@@ -392,12 +392,20 @@ def test_two_planet_ellipsoidal_terms_telescope_exactly(tmp_path_factory):
 # ---------------------------------------------------------------------------
 
 
-def _kelt17_split(tmp_path, n_rm=40, dense=False):
+def _kelt17_split(tmp_path, n_rm=40, dense=False, tc_epoch=None):
     """The KELT-17 example with its RV file split across two instruments
     (only TRES_RM tagged `rm: b`), a detrend column appended to both, and
     a second (non-transiting, RM-free) orbit c.  ``dense`` replaces the
     times with a dense in-transit grid (TRES_RM) and a dense full-orbit
-    grid (TRES_ORB) so a sibling likelihood exists on a plot grid."""
+    grid (TRES_ORB) so a sibling likelihood exists on a plot grid.
+
+    ``tc_epoch`` forces the orbits' SAMPLED conjunction epochs (orbit.md,
+    "tc is SAMPLED near the data").  The dense sibling's data have a
+    different time center, so left alone it samples a conjunction a few
+    periods from the main system's -- and one parameter vector would then
+    name two different conjunctions, equal only to the rounding of
+    ``tc_sampled - N P``.  The sibling exists to evaluate THIS system's
+    point, so it takes this system's epochs."""
     exdir = os.path.join(_EXAMPLES, "kelt17")
     if not os.path.exists(os.path.join(exdir, "kelt17.yaml")):
         pytest.skip("kelt17 example not present")
@@ -446,7 +454,21 @@ def _kelt17_split(tmp_path, n_rm=40, dense=False):
     cwd = os.getcwd()
     try:
         os.chdir(work)
-        system, model, point = _build(cfg, params)
+        if tc_epoch is None:
+            system, model, point = _build(cfg, params)
+        else:
+            from unittest import mock
+
+            from exozippy.components.orbit import Orbit
+
+            real = Orbit._sampling_epochs
+
+            def forced(self, system, tc_seed, period):
+                _, centers = real(self, system, tc_seed, period)
+                return np.array(tc_epoch, dtype=int), centers
+
+            with mock.patch.object(Orbit, "_sampling_epochs", forced):
+                system, model, point = _build(cfg, params)
     finally:
         os.chdir(cwd)
     return system, model, point
@@ -455,7 +477,11 @@ def _kelt17_split(tmp_path, n_rm=40, dense=False):
 @pytest.fixture(scope="module")
 def rm_split(tmp_path_factory):
     system, model, point = _kelt17_split(tmp_path_factory.mktemp("rm_split"))
-    dense = _kelt17_split(tmp_path_factory.mktemp("rm_dense"), dense=True)
+    dense = _kelt17_split(
+        tmp_path_factory.mktemp("rm_dense"),
+        dense=True,
+        tc_epoch=system.orbit.tc_epoch,
+    )
     rv = system.rvinstrument
     assert rv.rm_orbit == ["b", None]
     assert len(rv._plot_orbit_map) == 2

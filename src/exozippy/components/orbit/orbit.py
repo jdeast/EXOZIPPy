@@ -1061,6 +1061,116 @@ class Orbit(Component):
         implied = physics.tc_from_tp(tp, ecc0, w0, self._seeded_period(shape))
         return np.where(use_tp, implied, tc)
 
+    # Which conjunction the sampler moves, per orbit (orbit.md, "tc is
+    # SAMPLED near the data").  `user`: the one the user's seed names, which
+    # is already within half a period of the data's time center -- exactly
+    # the graph every orbit had before (JDE 2026-10-07).  `shifted`: the
+    # conjunction `tc_epoch` whole periods later, near the data, with `tc` at
+    # the user's epoch derived from it.
+    EPOCH_MODE_TABLE = {
+        "user": {"tc": None},
+        "shifted": {
+            "tc_sampled": None,
+            "tc": {"expr_key": "from_sampled", "force_node": True},
+        },
+    }
+
+    def _user_fixes_tc_support(self):
+        """Per orbit: did the user pin, bound or link `tc` itself?
+
+        Each of those is a statement about the SAMPLED coordinate -- `sigma:
+        0` holds it, `lower`/`upper` are its hard support, a link ties its
+        value -- and each would silently lose its meaning on a derived `tc`
+        (a pin on a derived element is dropped, a bound becomes a soft
+        barrier, a link refuses an expression).  Such an orbit keeps the
+        user's epoch as the sampled one.  A Gaussian `mu`/`sigma` is not in
+        this list: it means the same thing on the derived `tc`.
+        """
+        user = getattr(self.config_manager, "user_params", None) or {}
+        fixed = np.zeros(self.n_elements, dtype=bool)
+        for i in range(self.n_elements):
+            for key in (f"{self.prefix}.{i}.tc", f"{self.prefix}.tc"):
+                entry = user_entry(user, key)
+                if entry is None:
+                    continue
+                if (
+                    entry.get("sigma") == 0
+                    or entry.get("lower") is not None
+                    or entry.get("upper") is not None
+                ):
+                    fixed[i] = True
+        for per_elem in self.config_manager.get_element_links(
+            self.prefix, "tc"
+        ).values():
+            for i in per_elem:
+                fixed[int(i)] = True
+        return fixed
+
+    def _sampling_epochs(self, system, tc_seed, period):
+        """Per orbit: how many whole periods to move the seeded `tc` to
+        reach the data, and the data's time center.
+
+        The center is the weighted mean of the epochs the components' data
+        put on the orbit (`Component.epochs_constraining`, built on the same
+        membership maps as `amplitude_constrained_orbits`) -- those of the
+        SHARPEST timing rank present only (`epoch_timing_rank`: eclipses over
+        RVs and astrometry).  A seed outside the span of those epochs (by
+        more than half a period) is shifted by `round((center - tc_seed) /
+        period)`, so the sampled conjunction lies within half a period of
+        the center, where `tc` and the period are far less correlated than
+        at the seed.  Zero for a seed inside the span (the optimal epoch is
+        inside it too, and the center is no better a guess than the user's
+        own), for an orbit no dataset times (nothing to be near) and for one
+        whose `tc` the user pinned, bounded or linked
+        (`_user_fixes_tc_support`).
+
+        Returns ``(epochs, centers)``: an int array and a float array (NaN
+        where no data), one entry per orbit.
+        """
+        n = self.n_elements
+        times = [[] for _ in range(n)]
+        weights = [[] for _ in range(n)]
+        ranks = np.full(n, -np.inf)
+        components = getattr(system, "active_components", None) or {}
+        for comp in components.values():
+            rank = comp.epoch_timing_rank
+            for o, pairs in comp.epochs_constraining(system, self).items():
+                if rank < ranks[o]:
+                    continue
+                if rank > ranks[o]:
+                    ranks[o] = rank
+                    times[o], weights[o] = [], []
+                for t, w in pairs:
+                    times[o].append(np.asarray(t, dtype=float))
+                    weights[o].append(np.asarray(w, dtype=float))
+        centers = np.full(n, np.nan)
+        spans = np.full((n, 2), np.nan)
+        for o in range(n):
+            if times[o]:
+                t = np.concatenate(times[o])
+                w = np.concatenate(weights[o])
+                centers[o] = float(np.sum(w * t) / np.sum(w))
+                spans[o] = (float(t.min()), float(t.max()))
+        epochs = np.zeros(n, dtype=int)
+        fixed = self._user_fixes_tc_support()
+        for o in range(n):
+            if np.isnan(centers[o]) or fixed[o]:
+                continue
+            # A seed INSIDE the span of the epochs that time the orbit (to
+            # within half a period) stays where the user put it: the optimal
+            # epoch lies inside that span too, and the equal-weight center
+            # is only a guess at it -- measured, a worse one than an in-span
+            # seed on examples/kelt17 (corr(tc, P) -0.70 at the center
+            # against -0.41 at the seed) and examples/gj1214 (-0.20 against
+            # -0.06).  Only a seed OUTSIDE the span, beyond the optimum by
+            # construction, is moved -- to the center, which for a seed far
+            # outside (kelt4's TESS-era seed on its RVs) is far closer.
+            half = 0.5 * period[o]
+            if spans[o, 0] - half <= tc_seed[o] <= spans[o, 1] + half:
+                continue
+            epochs[o] = int(np.round((centers[o] - tc_seed[o]) / period[o]))
+        return epochs, centers
+
     def register_parameters(self, system):
         """Stage 3: Calculate window constraints and declare the manifest."""
         shape = (self.n_elements,)
@@ -1072,18 +1182,69 @@ class Orbit(Component):
         # seeded, in every legal spelling of each.  See _seeded_tc (which
         # covers a `tp:` seed) and _seeded_period.
         tc_init = self._seeded_tc(shape)
-        half_period = self._seeded_period(shape) / 2.0
+        period_init = self._seeded_period(shape)
+        half_period = period_init / 2.0
+
+        # WHICH conjunction is sampled (JDE 2026-10-07): the one nearest the
+        # data's time center, `tc_epoch` whole periods from the user's seed.
+        # An orbit already within half a period of it (tc_epoch == 0) keeps
+        # exactly the manifest it always had; a shifted one samples
+        # `tc_sampled` in the same one-period window around the moved seed,
+        # and derives `tc` at the user's epoch from it.  orbit.md, "tc is
+        # SAMPLED near the data".
+        self.tc_epoch, self.data_time_center = self._sampling_epochs(
+            system, tc_init, period_init
+        )
+        shifted = self.tc_epoch != 0
+        tc_sampled_init = tc_init + self.tc_epoch * period_init
+        self.epoch_modes = ["shifted" if s else "user" for s in shifted]
+        epoch_entries = mode_manifest(
+            self.epoch_modes,
+            self.EPOCH_MODE_TABLE,
+            n_elements=self.n_elements,
+            options={
+                # -inf/+inf on a DERIVED element: no barrier (a bound nobody
+                # stated is no bound), where NaN would fall through to the
+                # defaults.yaml range and add one.
+                "tc": {
+                    "force_node": True,
+                    "lower": np.where(shifted, -np.inf, tc_init - half_period),
+                    "upper": np.where(shifted, np.inf, tc_init + half_period),
+                },
+                "tc_sampled": {
+                    "lower": tc_sampled_init - half_period,
+                    "upper": tc_sampled_init + half_period,
+                },
+            },
+            where=f"{self.prefix} sampled epoch",
+        )
+        for i in np.flatnonzero(shifted):
+            # The start of the moved conjunction: the same physical orbit as
+            # the seed (tc_sampled - tc_epoch * P == tc_seed at the seeded
+            # P), so the build start is the model the user seeded.
+            self.config_manager.add_hint(
+                f"{self.prefix}.{i}.tc_sampled", float(tc_sampled_init[i])
+            )
+            logger.info(
+                "[%s.%s] tc is sampled %d period(s) from the seeded epoch, "
+                "at %.6f (the data's time center is %.6f); tc is reported "
+                "at the seeded epoch and t0 at the epoch the posterior "
+                "prefers.",
+                self.prefix,
+                self.names[i],
+                int(self.tc_epoch[i]),
+                float(tc_sampled_init[i]),
+                float(self.data_time_center[i]),
+            )
 
         self.manifest = {
             "logP": None,
             "period": {"force_node": True, "expr_key": "default"},
             "n": "default",
-            "tc": {
-                "force_node": True,
-                "lower": tc_init - half_period,
-                "upper": tc_init + half_period,
-            },
         }
+        if "tc_sampled" in epoch_entries:
+            self.manifest["tc_sampled"] = epoch_entries["tc_sampled"]
+        self.manifest["tc"] = epoch_entries["tc"]
 
         # Re-read the switches, NOW with the system: this is the pass that
         # decides, because the transit-only default is a question about the
@@ -1154,6 +1315,10 @@ class Orbit(Component):
         # light-travel shift once it knows the orbit has an `a`.
         for key in self._LTT_REPORT_PARAMS:
             self.manifest[key] = {"expr_key": "no_bodies", "force_node": True}
+        # EXOFASTv2's T_0, the conjunction at the epoch least correlated with
+        # the period: built at the SAMPLED epoch, moved after sampling to the
+        # one the posterior prefers (defaults.yaml `optimal_epoch:`).
+        self.manifest["t0"] = "default"
         for key in ("vcve", "xomega", "yomega"):
             if key in ecc_entries:
                 self.manifest[key] = ecc_entries[key]
@@ -1554,15 +1719,20 @@ class Orbit(Component):
 
         moved = False
         for i in np.where(degenerate)[0]:
+            # The conjunction that moves is the SAMPLED one: `tc` itself on
+            # an orbit sampled at the user's epoch, `tc_sampled` on one
+            # sampled nearer the data (tc_epoch != 0; `tc` is then derived
+            # and regenerated with every other Deterministic).
+            tc_name = self._sampled_tc_name(i)
             params = {}
             skip = None
-            for name in self._FOLD_FLIP + ("tc", "logP"):
+            for name in self._FOLD_FLIP + (tc_name, "logP"):
                 param = getattr(self, name, None)
                 key = f"{self.prefix}.{name}_raw"
                 if param is None or key not in posterior:
                     skip = name
                     break
-                params[name] = (param, key)
+                params["tc" if name == tc_name else name] = (param, key)
             if skip is not None:
                 logger.warning(
                     "[%s.%s] the ascending-node fold needs %s to be sampled; "
@@ -1677,6 +1847,10 @@ class Orbit(Component):
                     100.0 * float(flip.mean()),
                 )
         return moved
+
+    def _sampled_tc_name(self, index):
+        """The parameter holding orbit `index`'s SAMPLED conjunction."""
+        return "tc_sampled" if self.tc_epoch[index] != 0 else "tc"
 
     @staticmethod
     def _raw_slot(param, index):
@@ -1830,12 +2004,17 @@ class Orbit(Component):
     # the orbit could not consume them elementwise anyway).  `_ltt_mask` is
     # the same idiom for a different reason: it is a CONFIG fact (which
     # orbits some consumer retards, see _ltt_reporting_mask), not a
-    # parameter of any component (see _ltt_mask_context).
-    context_dep_names = frozenset({"p", "ar", "chord_sign", "_ltt_mask"})
+    # parameter of any component (see _ltt_mask_context).  `_tc_epoch` is a
+    # config fact too: the integer number of periods between the user's
+    # conjunction and the sampled one, fixed at stage 3 (_sampling_epochs).
+    context_dep_names = frozenset(
+        {"p", "ar", "chord_sign", "_ltt_mask", "_tc_epoch"}
+    )
 
-    # ...and all three are built per ORBIT, so Component._element_expression
-    # may slice them to a per-element mask.
-    aligned_context_deps = frozenset({"p", "ar", "chord_sign"})
+    # ...and these are built per ORBIT, so Component._element_expression may
+    # slice them to a per-element mask (`tc` is derived on the shifted orbits
+    # only).
+    aligned_context_deps = frozenset({"p", "ar", "chord_sign", "_tc_epoch"})
 
     # Parameters whose expressions consume the transiting planet's geometry.
     _CHORD_PARAMS = ("cosi", "chord")
@@ -1979,7 +2158,20 @@ class Orbit(Component):
         if param_name in self._LTT_REPORT_PARAMS:
             context_nodes = dict(context_nodes or {})
             context_nodes.setdefault("_ltt_mask", self._ltt_mask_context())
+        if param_name in self._EPOCH_PARAMS:
+            context_nodes = dict(context_nodes or {})
+            context_nodes.setdefault(
+                "_tc_epoch",
+                pt.as_tensor_variable(
+                    np.asarray(self.tc_epoch, dtype="float64")
+                ),
+            )
         return super().add_parameter(model, param_name, system, context_nodes)
+
+    # The two expressions that read `_tc_epoch`: `tc` derived from the
+    # sampled conjunction (calc_tc_from_sampled) and `t0` built at the
+    # sampled epoch (calc_t0).
+    _EPOCH_PARAMS = ("tc", "t0")
 
     # tc_target, and the observed ts/tp (defaults.yaml), all consume the one
     # `_ltt_mask` context node -- see _ltt_mask_context and

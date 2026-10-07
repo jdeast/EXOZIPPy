@@ -267,7 +267,11 @@ KELT4_START = {
     # label            value        units           kind
     "star.A.logmass": (0.08052772, "dex(solMass)", "dex"),
     "planet.b.mass": (0.96091637, "jupiterMass", "linear"),
-    "orbit.b.logP": (0.47554391, "dex(d)", "dex"),
+    # 0.47554391 until review 2.14.9: tc's one-period window at the TESS-era
+    # seed epoch, ~1164 periods from these RVs, was truncating the period
+    # (tc and P are 0.99 correlated there); with the conjunction sampled
+    # near the RVs the polished period is 2.98873 d, not 2.98912 d.
+    "orbit.b.logP": (0.47548642, "dex(d)", "dex"),
     # cosi is here because the mass story below turns on it: it is the one
     # parameter the RV data says nothing about, which is also why it is the
     # only "flat" row and needs its own, looser tolerance.
@@ -340,7 +344,9 @@ KELT4_START = {
 # `orbit.sini` is a manifest parameter but appears in neither this table nor
 # the trace, so sin i is derived from cosi.  Implementing m sin i as a
 # reported parameter is review item 8.8.17 and is not this test's business.
-KELT4_START_MSINI = 0.832109  # Mjup; golden regression
+# 0.832109 until review 2.14.9, which moved the polished start with the
+# un-truncated period (see orbit.b.logP in KELT4_START).
+KELT4_START_MSINI = 0.833317  # Mjup; golden regression
 # AND IT IS THE TIGHTEST PARAMETER ASSERTION IN THE FILE, which is the point
 # and is measured rather than hoped for.  Over the 16 harness arithmetics
 # in the table above, `orbit.b.cosi` moved by 8.6e-4 relative and
@@ -387,8 +393,17 @@ KELT4_PUBLISHED_MSINI_SIGMA = 0.066  # the lower error; we sit below
 # 81.4 to 81.9 -- the 0.507 nats the first-dip stop had been leaving on the
 # table -- which is exactly the pair of signatures expected of "same model,
 # better optimizer".
+#
+# Review 2.14.9 moved the polished value again, 81.9 -> 82.3, with the build
+# value unchanged: this config's TESS-era tc seed is ~1164 periods from its
+# RVs, so the conjunction is now SAMPLED near them (`orbit.tc_sampled`;
+# orbit.md) -- the same model, in a different raw coordinate.  lp here is
+# the raw-space density, which carries the logit window's Jacobian, and on
+# `tc` at the user's epoch that Jacobian was NOT flat across the posterior
+# (tc's ~1 d width against its +/-1.49 d window); on `tc_sampled` (0.11 d
+# wide) it is.  So the optimum of the raw-space density moved, by 0.4 nats.
 KELT4_BUILD_LOGP = -601.1  # lp at the build start, before the polish
-KELT4_START_LOGP = 81.9  # lp at the polished start the sampler uses
+KELT4_START_LOGP = 82.3  # lp at the polished start the sampler uses
 KELT4_LOGP_ATOL = 0.2  # nats; 2x the 0.1-nat print resolution
 
 # One row of run.inspect_start's startup table, as the file log handler (always

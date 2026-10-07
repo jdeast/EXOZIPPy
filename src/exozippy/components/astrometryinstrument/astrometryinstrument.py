@@ -620,6 +620,33 @@ class AstrometryInstrument(Instrument):
     # ------------------------------------------------------------------
     # Stage 3
     # ------------------------------------------------------------------
+    def epochs_constraining(self, system, orbit):
+        """Each dataset's epochs on the orbits it measures.
+
+        The membership ``orbit.amplitude_constrained_orbits`` reads: a rel
+        dataset times the orbit it names; a gaia/abs photocenter wobble sums
+        the orbits whose PRIMARY group contains the target star.  Every
+        epoch weighs the same (see ``Instrument.dataset_epochs``).
+        """
+        out = {}
+        for i, mode in enumerate(self.modes):
+            t = np.asarray(self.datasets[i]["time"], dtype=float)
+            epochs = (t, np.ones_like(t))
+            if mode == "rel":
+                targets = (
+                    [] if self.rel_orbit[i] is None else [self.rel_orbit[i]]
+                )
+            else:
+                s = int(self.config[i].get("star_ndx", 0))
+                targets = [
+                    o
+                    for o, role in orbit.star_membership(s)
+                    if role == "primary"
+                ]
+            for o in targets:
+                out.setdefault(int(o), []).append(epochs)
+        return out
+
     def register_parameters(self, system):
         # `fluxfrac` is the gaia/abs PHOTOCENTER flux fraction, and it is a
         # parameter only of a gaia/abs dataset: `_photocenter_terms` is its

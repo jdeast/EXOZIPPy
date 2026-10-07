@@ -42,6 +42,14 @@ orbit:
   # frame (components/ltt.py retards the observation times), and take their
   # epoch from tc_target below, never from here.  JDE 2026-09-22: the plain
   # names carry BJD_TDB; the target frame is `*_target`.
+  #
+  # `tc` is the conjunction at the USER's epoch -- the one their seed (or
+  # prior) names.  It is SAMPLED directly when that epoch already lies within
+  # half a period of the data's time center, and otherwise DERIVED from
+  # `tc_sampled`, the same conjunction a whole number of periods later, near
+  # the data, where it is nearly uncorrelated with the period (JDE
+  # 2026-10-07; orbit.md, "tc is SAMPLED near the data").  debug_print
+  # because the startup table should show it in both roles.
   tc:
     lower: 2000000.0
     upper: 3000000.0
@@ -51,6 +59,44 @@ orbit:
     internal_unit: "d"
     latex: "T_C"
     description: "Time of Conjunction"
+    debug_print: true
+    expressions:
+      from_sampled:
+        func_name: "calc_tc_from_sampled"
+        deps: [ "tc_sampled", "period", "_tc_epoch" ]
+  # The conjunction the sampler actually moves on an orbit whose user epoch
+  # is far from the data: `_tc_epoch` (Orbit.tc_epoch) whole periods after
+  # the user's, so within half a period of the data's time center.  INTERNAL:
+  # not reported (the user-epoch `tc` and the optimal-epoch `t0` are), and a
+  # restart file writes it back as `tc` at the user's epoch (`restart_as`),
+  # so the next fit chooses the same sampled epoch and means the same thing.
+  tc_sampled:
+    lower: 2000000.0
+    upper: 3000000.0
+    initval: 2460000.0
+    init_scale: 0.001
+    unit: "d"
+    internal_unit: "d"
+    latex: "T_{C,\\rm sampled}"
+    description: "Time of Conjunction (sampled epoch)"
+    print_to_table: false
+    restart_as: "tc"
+  # EXOFASTv2's T_0: the conjunction at the integer epoch that minimizes its
+  # covariance with the period, so its uncertainty is the smallest any
+  # epoch's is.  The node is the conjunction at the SAMPLED epoch; the
+  # reported posterior is shifted after sampling by the whole number of
+  # periods the draws themselves prefer (`optimal_epoch`;
+  # Parameter.shift_to_optimal_epoch, which cites derivepars.pro).
+  t0:
+    unit: "d"
+    internal_unit: "d"
+    latex: "T_0"
+    description: "Optimal Time of Conjunction"
+    optimal_epoch: {param: "period"}
+    expressions:
+      default:
+        func_name: "calc_t0"
+        deps: [ "tc", "period", "_tc_epoch" ]
 
   # TARGET-frame conjunction: tc minus the closed-form light-travel shift
   # -z(tc)*factor/c (physics.calc_tc_target), masked per orbit by `_ltt_mask`

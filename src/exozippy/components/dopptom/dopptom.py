@@ -276,6 +276,28 @@ class Dopptom(Component):
         ]
 
     # ------------------------------------------------------------------
+    # The Doppler shadow is an eclipse: it times its conjunction
+    # (Component.epochs_constraining).
+    epoch_timing_rank = 2
+
+    def epochs_constraining(self, system, orbit):
+        """Each line-profile cube's epochs on the orbit its `orbit:` names.
+
+        Every epoch weighs the same (see ``Instrument.dataset_epochs``).
+        """
+        out = {}
+        for i, name in enumerate(self.orbit_names):
+            if name not in orbit.names:
+                raise ValueError(
+                    f"[dopptom.{self.names[i]}] orbit: {name!r} names no "
+                    f"orbit block; defined orbits: {list(orbit.names)}."
+                )
+            t = np.asarray(self.bjd[i], dtype=float)
+            out.setdefault(orbit.names.index(name), []).append(
+                (t, np.ones_like(t))
+            )
+        return out
+
     def load_data(self, system):
         """Stage 1a: read the DT FITS cubes and derive data-driven scales."""
         from astropy.io import fits
