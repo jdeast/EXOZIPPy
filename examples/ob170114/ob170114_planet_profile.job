@@ -1,0 +1,21 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N ob170114prof
+#$ -o fitresults_auto/ob170114_planet_profile.$JOB_ID.log
+# Review 8.6.9 (1): the published planet basin's optimum vs the planet-less one.
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_ob170114prof"
+export OMP_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy/examples/ob170114
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)   $(date)"
+python -u ob170114_planet_profile.py 8000 2>&1 | grep -v "DEBUG\|Warning\|warn\|^\["
+echo "exit $?   $(date)"
