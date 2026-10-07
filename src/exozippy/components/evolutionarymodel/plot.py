@@ -23,6 +23,11 @@ class MISTPlot:
     # never a bound -- the fit is free to sit anywhere the grid covers, and where
     # it does the window is widened rather than hiding the star it describes.
     KIEL_EEP_WINDOW = (202.0, 630.0)
+    # MIST's primary EEPs bounding the main sequence: the zero-age main
+    # sequence (202) and the terminal-age main sequence (454, core hydrogen
+    # exhaustion -- the turnoff).  Declared on the Kiel chart (meta["track"])
+    # so a renderer can frame the main sequence without knowing MIST.
+    MAIN_SEQUENCE_EEPS = (202.0, 454.0)
 
     # Nominal logg axis window, chosen to exclude the giant regime for the same
     # reason.  Ascending [lo, hi]; the Kiel convention's reversal is meta's
@@ -161,8 +166,9 @@ class MISTPlot:
         )
         return self.evolutionarymodel._reported_kiel_cache
 
-    def _track_curve(self, i, logmass, initfeh, eep_window):
-        """(teff, logg) along instance ``i``'s track, over ``eep_window``.
+    def _track_rows(self, i, logmass, initfeh, eep_window):
+        """Instance ``i``'s track over ``eep_window``: ``{"teff", "logg",
+        "eep", "age"}`` arrays, row-aligned, age in Gyr.
 
         Rows the grid flags as unreliable (``here_be_dragons``) are cut, so
         the drawn track stops where the models stop being trustworthy rather
@@ -208,7 +214,18 @@ class MISTPlot:
             & (eep <= eep_window[1])
         )
 
-        return teff[keep], logg[keep]
+        return {
+            "teff": teff[keep],
+            "logg": logg[keep],
+            "eep": eep[keep],
+            "age": track[:, OUTPUT_INDEX["age_mist_gyr"]][keep],
+        }
+
+    def _track_curve(self, i, logmass, initfeh, eep_window):
+        """(teff, logg) along instance ``i``'s track, over ``eep_window``
+        (``_track_rows`` without the EEP and age)."""
+        rows = self._track_rows(i, logmass, initfeh, eep_window)
+        return rows["teff"], rows["logg"]
 
     def _plot_kiel_trace(self, star_idx, point=None):
         """Kiel diagram: the track, the MIST point, and the fitted point.
@@ -302,9 +319,8 @@ class MISTPlot:
             [eep],
             eep_margin,
         )
-        teff_track, logg_track = self._track_curve(
-            star_idx, logmass, initfeh, eep_window
-        )
+        track_rows = self._track_rows(star_idx, logmass, initfeh, eep_window)
+        teff_track, logg_track = track_rows["teff"], track_rows["logg"]
         # Only the part of the arc inside the logg window: the rest is
         # drawn but clipped away, and letting it set the axis is what
         # made the panel mostly whitespace.
@@ -409,6 +425,18 @@ class MISTPlot:
         )
 
         meta = {
+            # Which star this chart is (the system summary figure pairs it
+            # with that star's posterior contours).
+            "star": star_name,
+            # The drawn track's EEP and age (Gyr), row-aligned with the track
+            # trace, and the EEPs bounding the main sequence: what a renderer
+            # needs to frame the main sequence and mark reference ages
+            # without knowing MIST (the system summary figure does both).
+            "track": {
+                "eep": track_rows["eep"],
+                "age": track_rows["age"],
+                "main_sequence_eeps": list(self.MAIN_SEQUENCE_EEPS),
+            },
             # Per star, like every other component's per-instance tag: with
             # one tag for all stars the last star's PDF overwrote the rest.
             "file_tag": f"kiel_{star_name}",
@@ -543,13 +571,21 @@ class MISTPlot:
     ################## contour plot #################
     ######## will only trigger after sampling #######
 
-    def _get_posterior_compiled_values(self):
+    def _get_posterior_compiled_values(self, max_draws=None):
+        """The compiled Kiel node at every distributed posterior draw -- or,
+        with ``max_draws``, at that many evenly spaced ones (a contour does
+        not need tens of thousands of draws, and each is a compiled call)."""
 
         ndraws = self.system.plot_params[0].posterior.values.shape[:][
             -1
         ]  # should take shape (nstars, ndraws)
+        draws = range(ndraws)
+        if max_draws is not None and ndraws > max_draws:
+            draws = np.unique(
+                np.linspace(0, ndraws - 1, int(max_draws)).astype(int)
+            )
         post_points = []
-        for i in range(ndraws):
+        for i in draws:
             post_point = {}
             for param in getattr(self.system, "plot_params", []):
                 post = getattr(param, "posterior", None)

@@ -5,11 +5,27 @@ from matplotlib.colors import to_rgba
 
 
 class Contour:
-    def __init__(self, x, y, x_err, y_err, **kwargs):
+    def __init__(
+        self,
+        x,
+        y,
+        x_err,
+        y_err,
+        bw_method=0.7,
+        probs=(0.997, 0.95, 0.68),
+        **kwargs,
+    ):
+        """``bw_method`` is ``scipy.stats.gaussian_kde``'s (a factor, or
+        "scott"/"silverman"); ``probs`` are the enclosed probabilities to
+        contour, largest first, so ``levels`` comes out in the increasing
+        density order ``contour`` wants.  The defaults are the evolutionary
+        model's own contour plot, which they leave unchanged."""
         self.x = x
         self.y = y
         self.x_err = x_err
         self.y_err = y_err
+        self.bw_method = bw_method
+        self.probs = tuple(probs)
 
         for key, value in kwargs.items():
             setattr(self, key, value)
@@ -53,7 +69,7 @@ class Contour:
         ##### 2. Fit a Kernel Density Estimation (KDE)
         # global fit values
         values = np.vstack([self.x, self.y])
-        kernel = stats.gaussian_kde(values, bw_method=0.7)
+        kernel = stats.gaussian_kde(values, bw_method=self.bw_method)
         Z = np.reshape(kernel(positions).T, X.shape)
 
         ###### 3. Calculate contour levels corresponding to specific confidence intervals
@@ -62,11 +78,12 @@ class Contour:
         z_sorted = np.sort(Z.ravel())
         z_cumulative = np.cumsum(z_sorted) / np.sum(z_sorted)
 
-        # Find the density thresholds for 68% and 95% confidence regions
-        level_68 = z_sorted[np.searchsorted(z_cumulative, 1.0 - 0.68)]
-        level_95 = z_sorted[np.searchsorted(z_cumulative, 1.0 - 0.95)]
-        level_99 = z_sorted[np.searchsorted(z_cumulative, 1.0 - 0.997)]
-        levels = [level_99, level_95, level_68]
+        # The density threshold enclosing each probability (the highest-
+        # density region), widest first.
+        levels = [
+            z_sorted[np.searchsorted(z_cumulative, 1.0 - p)]
+            for p in self.probs
+        ]
 
         return X, Y, Z, levels
 

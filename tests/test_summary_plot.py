@@ -510,6 +510,111 @@ def test_a_fit_with_nothing_to_draw_raises_its_own_error():
     assert issubclass(sp.NoSummaryPanels, ValueError)
 
 
+def _kiel_chart():
+    """A Kiel chart whose track runs from EEP 150 to 600, cooling and
+    dropping in gravity with age; the main sequence is EEP 202-454."""
+    from exozippy.chart import Chart, Trace
+
+    eep = np.linspace(150.0, 600.0, 451)
+    teff = 4900.0 + 1.2 * (eep - 150.0)
+    logg = 4.7 - 0.0015 * (eep - 150.0)
+    age = 0.02 * (eep - 150.0)
+    return Chart(
+        id="evolutionarymodel.kiel.star.A",
+        component={"yaml_key": "evolutionarymodel", "instance": None},
+        title="",
+        xlabel="Teff",
+        ylabel="logg",
+        traces=[
+            Trace("Star A MIST track", "model", "line", teff, logg),
+            Trace(
+                "Star A MIST model point", "data", "scatter", [5300.0], [4.5]
+            ),
+            Trace("Star A fit value", "data", "scatter", [5200.0], [4.55]),
+        ],
+        x_range=[4000.0, 7000.0],
+        y_range=[3.0, 5.0],
+        x_inverted=True,
+        y_inverted=True,
+        meta={
+            "star": "A",
+            "track": {
+                "eep": eep,
+                "age": age,
+                "main_sequence_eeps": [202.0, 454.0],
+            },
+        },
+    )
+
+
+def test_the_kiel_panel_frames_the_main_sequence_star_and_contours():
+    """
+    Given a Kiel chart, contour samples clustered about 5200 K and 4.55, and
+      the star's reported median 5210 K and 4.56 with asymmetric errors,
+    When the Kiel panel is drawn,
+    Then the reversed axes span the main sequence up to the turnoff (EEP
+      202-454), the star and the contours, padded; the star is a red cross
+      at its reported median with those errors; the MIST model point is not
+      drawn; three reference ages are labelled along the main sequence; and
+      the legend holds only the two contour entries.
+    """
+    from matplotlib.contour import ContourSet
+
+    rng = np.random.default_rng(5)
+    teff = rng.normal(5200.0, 40.0, 1500)
+    logg = rng.normal(4.55, 0.015, 1500)
+    samples = {"fit": (teff, logg), "mist": (teff + 20.0, logg - 0.01)}
+    star = ((5210.0, 50.0, 70.0), (4.56, 0.02, 0.03))
+    fig = plt.figure()
+    try:
+        sp._draw_kiel(
+            fig, fig.add_gridspec(1, 1)[0, 0], _kiel_chart(), samples, star
+        )
+        (ax,) = fig.get_axes()
+        contours = [c for c in ax.get_children() if isinstance(c, ContourSet)]
+        legend = [t.get_text() for t in ax.get_legend().get_texts()]
+        ages = [t.get_text() for t in ax.texts]
+        (left, right), (bottom, top) = ax.get_xlim(), ax.get_ylim()
+        (cross,) = ax.containers
+        # The horizontal bar: from median - minus to median + plus.
+        xbar = cross.lines[2][0].get_segments()[0]
+        markers = [ln for ln in ax.get_lines() if ln.get_marker() == "D"]
+    finally:
+        plt.close(fig)
+
+    # Main sequence: EEP 202 -> Teff 4962.4, logg 4.622; EEP 454 -> 5264.8,
+    # 4.244; padded by 6% of the span either way.
+    ms_lo_t, ms_hi_t = 4900.0 + 1.2 * 52.0, 4900.0 + 1.2 * 304.0
+    ms_lo_g, ms_hi_g = 4.7 - 0.0015 * 304.0, 4.7 - 0.0015 * 52.0
+    assert left > ms_hi_t and right < ms_lo_t
+    assert bottom > ms_hi_g and top < ms_lo_g
+    assert left > 5210.0 + 70.0 and bottom > 4.56 + 0.03
+    np.testing.assert_allclose(xbar, [[5160.0, 4.56], [5280.0, 4.56]])
+    assert markers == []
+    assert len(contours) == 2
+    assert legend == [
+        r"MIST ($1\sigma$, $2\sigma$)",
+        r"Global fit ($1\sigma$, $2\sigma$)",
+    ]
+    # Main-sequence ages run 0.02 * (202 - 150) = 1.04 to 6.08 Gyr; the
+    # quarter points 2.30, 3.56 and 4.82 round to 2, 4 and 5.
+    assert ages == ["2 Gyr", "4 Gyr", "5 Gyr"]
+
+
+def test_reference_ages_are_round_and_spread_through_the_span():
+    """
+    Given main-sequence age spans from tens of Myr to past the age of the
+      universe,
+    When three reference ages are chosen,
+    Then they sit near the quarter points, rounded to one significant figure
+      unless that would merge two of them, and an empty span has none.
+    """
+    assert sp.reference_ages(0.04, 13.8) == [3.0, 7.0, 10.0]
+    assert sp.reference_ages(0.02, 1.2) == [0.3, 0.6, 0.9]
+    assert sp.reference_ages(1.0, 1.4) == [1.1, 1.2, 1.3]
+    assert sp.reference_ages(2.0, 2.0) == []
+
+
 def test_cli_refuses_an_unknown_options_key(tmp_path):
     """
     Given an --options file with a misspelled keyword,

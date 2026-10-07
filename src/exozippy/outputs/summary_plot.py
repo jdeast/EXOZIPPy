@@ -172,10 +172,29 @@ _SED_SPECTRUM_LW = 1.0
 _SED_SMOOTH = 9
 _SED_X_PAD = 1.5
 _SED_Y_PAD = 2.0
-# Kiel diagram: the track heavy blue, the fit a red cross.
+# Kiel diagram: the track heavy blue with three reference ages, the star a
+# red cross at its reported median Teff and logg with their reported
+# (asymmetric) errors, and the 1- and 2-sigma contours (highest-density
+# regions enclosing 68.27% and 95.45% of the posterior draws) of MIST's
+# prediction in black and of the global fit in green.  Only the contours
+# have legend entries.
 _KIEL_TRACK = {"color": "b", "lw": 3.0}
-_KIEL_MODEL_POINT = {"color": "b", "marker": "D", "ms": 7}
 _KIEL_FIT = {"ecolor": "r", "elinewidth": 2.0, "capsize": 3}
+_KIEL_CONTOUR_PROBS = (0.9545, 0.6827)
+_KIEL_CONTOURS = (
+    ("mist", "k", "MIST"),
+    ("fit", "g", "Global fit"),
+)
+_KIEL_CONTOUR_LW = 1.5
+# The window frames the track's main sequence (zero age to turnoff, the EEPs
+# the chart declares), the star (median and error bars) and the 2-sigma
+# contours, padded by this fraction of its span on each side.
+_KIEL_PAD_FRAC = 0.06
+# Reference ages: this many, round, along the main sequence up to the
+# turnoff or the age of the universe, whichever is younger.
+_KIEL_N_AGES = 3
+_AGE_UNIVERSE_GYR = 13.8
+_KIEL_AGE_MARK = {"color": "b", "marker": "o", "ms": 6}
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +336,17 @@ def format_value(summary, sigfigs=2):
     return rf"{med_s}^{{+{hi_s}}}_{{-{lo_s}}}"
 
 
+def reported_summary(param, index):
+    """Element ``index``'s PosteriorSummary -- the median and credible
+    interval the results table and ``<prefix>_results.csv`` report -- or None
+    when ``param`` has no posterior (before one is distributed)."""
+    if param is None or param.posterior is None:
+        return None
+    param.ensure_summary()
+    summary = param.summary
+    return summary[index] if isinstance(summary, list) else summary
+
+
 def planet_header_lines(system):
     """One header line per planet: P, R_P, M_P and e from the posterior.
 
@@ -337,15 +367,10 @@ def planet_header_lines(system):
         parts = []
         for label, owner in HEADER_PARAMETERS:
             param = lookup.get(label)
-            if param is None or param.posterior is None:
-                continue
-            param.ensure_summary()
             index = o_idx if owner == "orbit" else p_idx
-            summ = (
-                param.summary[index]
-                if isinstance(param.summary, list)
-                else param.summary
-            )
+            summ = reported_summary(param, index)
+            if summ is None:
+                continue
             value = format_value(summ)
             if value is None:
                 continue
@@ -985,61 +1010,190 @@ def _draw_sed(fig, cell, chart):
     _finish(ax, ax_oc)
 
 
-def _draw_kiel(fig, cell, chart):
-    """The Kiel diagram: tracks heavy blue, the MIST model point a blue
-    diamond, the fit a red cross (its error bars alone), by the evolutionary
-    model's trace names; any other trace keeps its own color."""
+def _kiel_contours(ax, samples):
+    """Draw the 1- and 2-sigma contours of each sample set in ``samples``
+    (``{"fit"|"mist": (teff, logg)}``, ``posterior_kiel_samples``), returning
+    the Teff and logg extent of the drawn lines.  A Gaussian KDE (Scott's
+    bandwidth) of the draws, contoured at the densities enclosing
+    ``_KIEL_CONTOUR_PROBS`` of it: the shared ``contour_plot.Contour``."""
+    from matplotlib.lines import Line2D
+
+    from .contour_plot import Contour
+
+    extent = []
+    for kind, color, label in _KIEL_CONTOURS:
+        teff, logg = (np.asarray(a, dtype=float) for a in samples[kind])
+        contour = Contour(
+            teff,
+            logg,
+            x_err=np.std(teff),
+            y_err=np.std(logg),
+            bw_method="scott",
+            probs=_KIEL_CONTOUR_PROBS,
+        )
+        drawn = ax.contour(
+            contour.X,
+            contour.Y,
+            contour.Z,
+            levels=contour.levels,
+            colors=color,
+            linewidths=_KIEL_CONTOUR_LW,
+            zorder=6,
+        )
+        ax.add_line(
+            Line2D(
+                [],
+                [],
+                color=color,
+                lw=_KIEL_CONTOUR_LW,
+                label=rf"{label} ($1\sigma$, $2\sigma$)",
+            )
+        )
+        # What was drawn, the 2-sigma line included: the KDE's region
+        # reaches past the draws' own central 95%, so the window has to
+        # follow the lines rather than the draws.
+        vertices = np.concatenate(
+            [
+                poly
+                for path in drawn.get_paths()
+                for poly in path.to_polygons(closed_only=False)
+            ]
+        )
+        extent.append(
+            (
+                vertices[:, 0].min(),
+                vertices[:, 0].max(),
+                vertices[:, 1].min(),
+                vertices[:, 1].max(),
+            )
+        )
+    lo_t, hi_t, lo_g, hi_g = zip(*extent)
+    return min(lo_t), max(hi_t), min(lo_g), max(hi_g)
+
+
+def reference_ages(age_lo, age_hi, n=_KIEL_N_AGES):
+    """``n`` round ages (Gyr) spread through ``(age_lo, age_hi)``.
+
+    The ages at 1/(n+1), 2/(n+1), ... of the span, each rounded to one
+    significant figure -- two, then three, when rounding would merge two of
+    them or push one out of the span.  Returns ``[]`` for an empty span.
+    """
+    if not age_hi > age_lo:
+        return []
+    fractions = np.arange(1, n + 1) / (n + 1)
+    targets = age_lo + fractions * (age_hi - age_lo)
+    for digits in (1, 2, 3):
+        ages = [float(f"{t:.{digits}g}") for t in targets]
+        if len(set(ages)) == n and all(age_lo < a < age_hi for a in ages):
+            return ages
+    return [float(t) for t in targets]
+
+
+def _main_sequence(chart):
+    """The drawn track's main-sequence rows ``(teff, logg, age)``, ordered
+    by age, from the chart's ``meta["track"]``; None without any."""
+    track = (chart.meta or {}).get("track")
+    models = _role(chart, "model")
+    if track is None or not models:
+        return None
+    eep = np.asarray(track["eep"], dtype=float)
+    zams, tams = track["main_sequence_eeps"]
+    rows = (eep >= zams) & (eep <= tams)
+    if not rows.any():
+        return None
+    teff = np.asarray(models[0].x, dtype=float)[rows]
+    logg = np.asarray(models[0].y, dtype=float)[rows]
+    age = np.asarray(track["age"], dtype=float)[rows]
+    order = np.argsort(age)
+    return teff[order], logg[order], age[order]
+
+
+def _draw_kiel(fig, cell, chart, samples=None, star=None):
+    """The Kiel diagram.
+
+    The track heavy blue, with ``_KIEL_N_AGES`` reference ages marked along
+    its main sequence; the star a red cross at ``star`` -- ``((teff,
+    minus, plus), (logg, minus, plus))``, the reported medians and their
+    errors -- or, without one, at the chart's fitted point; and, with
+    ``samples`` (this star's ``posterior_kiel_samples``), the 1- and 2-sigma
+    contours of MIST and of the global fit, the only legend entries.  The
+    window frames the main sequence up to the turnoff, and always the star
+    and the contours.
+    """
     ax = fig.add_subplot(cell)
     for trace in _role(chart, "model"):
         ax.plot(
             np.asarray(trace.x, dtype=float),
             np.asarray(trace.y, dtype=float),
             zorder=7,
-            label=trace.name,
             **_KIEL_TRACK,
         )
-    for trace in _role(chart, "data"):
-        x = np.asarray(trace.x, dtype=float)
-        y = np.asarray(trace.y, dtype=float)
-        xerr = None if trace.xerr is None else np.asarray(trace.xerr, float)
-        yerr = None if trace.yerr is None else np.asarray(trace.yerr, float)
-        if trace.name.endswith("fit value"):
-            ax.errorbar(
-                x,
-                y,
-                xerr=xerr,
-                yerr=yerr,
-                fmt="none",
-                zorder=9,
-                label=trace.name,
-                **_KIEL_FIT,
-            )
-        elif trace.name.endswith("MIST model point"):
-            ax.errorbar(
-                x,
-                y,
-                xerr=xerr,
-                yerr=yerr,
-                fmt=_KIEL_MODEL_POINT["marker"],
-                ms=_KIEL_MODEL_POINT["ms"],
-                color=_KIEL_MODEL_POINT["color"],
-                mec="k",
-                mew=_EDGE_WIDTH,
-                zorder=8,
-                label=trace.name,
-            )
-        else:
-            _errorbar(
-                ax,
-                trace,
-                (trace.style or {}).get("color", "k"),
-                (trace.style or {}).get("marker") or "o",
-                _RV_MARKERSIZE,
-                label=trace.name,
-            )
+    if star is None:
+        (fit,) = [t for t in chart.traces if t.name.endswith("fit value")]
+        teff, logg = float(np.ravel(fit.x)[0]), float(np.ravel(fit.y)[0])
+        star = ((teff, 0.0, 0.0), (logg, 0.0, 0.0))
+    (teff, t_lo, t_hi), (logg, g_lo, g_hi) = star
+    ax.errorbar(
+        [teff],
+        [logg],
+        xerr=[[t_lo], [t_hi]],
+        yerr=[[g_lo], [g_hi]],
+        fmt="none",
+        zorder=9,
+        **_KIEL_FIT,
+    )
     _geometry(ax, chart)
+
+    boxes = [(teff - t_lo, teff + t_hi, logg - g_lo, logg + g_hi)]
+    if samples:
+        boxes.append(_kiel_contours(ax, samples))
+    main_sequence = _main_sequence(chart)
+    if main_sequence is not None:
+        ms_teff, ms_logg, ms_age = main_sequence
+        boxes.append(
+            (ms_teff.min(), ms_teff.max(), ms_logg.min(), ms_logg.max())
+        )
+        last = min(ms_age[-1], _AGE_UNIVERSE_GYR)
+        for age in reference_ages(ms_age[0], last):
+            x = np.interp(age, ms_age, ms_teff)
+            y = np.interp(age, ms_age, ms_logg)
+            ax.plot(x, y, ls="none", zorder=8, **_KIEL_AGE_MARK)
+            ax.annotate(
+                f"{age:g} Gyr",
+                (x, y),
+                xytext=(7, -3),
+                textcoords="offset points",
+                color=_KIEL_AGE_MARK["color"],
+                fontweight="bold",
+                fontsize=_TICK_LABELSIZE - 2,
+                zorder=10,
+            )
+    lo_t, hi_t, lo_g, hi_g = (
+        f(v) for f, v in zip((min, max, min, max), zip(*boxes))
+    )
+    pad_t = _KIEL_PAD_FRAC * (hi_t - lo_t)
+    pad_g = _KIEL_PAD_FRAC * (hi_g - lo_g)
+    # Both axes run reversed (Kiel convention): hot on the left, low
+    # gravity at the top.
+    ax.set_xlim(hi_t + pad_t, lo_t - pad_t)
+    ax.set_ylim(hi_g + pad_g, lo_g - pad_g)
     _legend(ax, loc="best", fontsize="small")
     _finish(ax, None)
+
+
+def _reported_star(system, name):
+    """``((teff, minus, plus), (logg, minus, plus))`` for star ``name``: the
+    medians and errors the results table reports.  None before a posterior
+    is distributed."""
+    index = system.star.names.index(name)
+    teff = reported_summary(system.star.teff, index)
+    logg = reported_summary(system.star.logg, index)
+    if teff is None or logg is None:
+        return None
+    return tuple(
+        (float(s.median), abs(float(s.err_minus)), abs(float(s.err_plus)))
+        for s in (teff, logg)
+    )
 
 
 def _share_ylims(axes):
@@ -1209,6 +1363,15 @@ def summary_figure(
                 for i in range(len(rv_names))
             }
             rv_axes = []
+            # Each star's posterior (Teff, logg) for its Kiel contours; none
+            # before a posterior is distributed.
+            kiel_samples = (
+                system.active_components[KIEL_KEY].posterior_kiel_samples(
+                    system
+                )
+                if any(p.kind == "kiel" for p in panels)
+                else {}
+            )
             for panel, col, row in placed:
                 cell = grid[row : row + panel.rows, col]
                 if panel.kind == "transit":
@@ -1229,7 +1392,15 @@ def summary_figure(
                 elif panel.kind == "sed":
                     _draw_sed(fig, cell, sed_in_flux(panel.charts[0]))
                 else:
-                    _draw_kiel(fig, cell, panel.charts[0])
+                    chart = panel.charts[0]
+                    name = chart.meta["star"]
+                    _draw_kiel(
+                        fig,
+                        cell,
+                        chart,
+                        kiel_samples.get(name),
+                        _reported_star(system, name),
+                    )
             # Every RV panel on one scale, and every RV O-C on another.
             _share_ylims([pair[0] for pair in rv_axes])
             _share_ylims([pair[1] for pair in rv_axes if pair[1] is not None])
