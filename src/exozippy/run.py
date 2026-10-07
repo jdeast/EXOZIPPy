@@ -1804,25 +1804,20 @@ def _wrap_up(
     # already trimmed, mode-labelled and distributed onto the Parameters --
     # with the same `draws` overlaid as the component PDFs above.  A fit
     # with nothing it draws (no transit, RV, SED or evolutionary model)
-    # gets none, and says so at INFO rather than warning every run.
-    # `exozippy-summary <config>` redraws it from the saved trace.
+    # gets none: write_summary_plot says so at INFO and returns.  Like every
+    # post-save stage it raises on any other failure, and a
+    # `recompute_trace: false` rerun (or `exozippy-summary <config>`)
+    # redraws it from the saved trace.
     wrapup.stage("one-page summary figure")
-    with nonfatal_wrapup("summary figure"):
-        from .outputs.summary_plot import NoSummaryPanels, write_summary_plot
+    from .outputs.summary_plot import write_summary_plot
 
-        try:
-            write_summary_plot(
-                system,
-                idata,
-                f"{prefix}_mcmc_summary.pdf",
-                title=(config.get("run") or {}).get("name"),
-                draws=draws,
-            )
-        except NoSummaryPanels:
-            logger.info(
-                "No summary figure: this fit has no transit, RV, SED or "
-                "evolutionary-model chart to draw."
-            )
+    write_summary_plot(
+        system,
+        idata,
+        f"{prefix}_mcmc_summary.pdf",
+        title=(config.get("run") or {}).get("name"),
+        draws=draws,
+    )
 
     # Multimodal posteriors: re-emit the same corner + component plots once
     # per mode, restricted to that mode's draws (interim solution; a

@@ -835,14 +835,38 @@ def test_a_fit_with_nothing_to_draw_raises_its_own_error():
     Given a system none of whose components makes a summary panel (as a
       microlensing fit's do not),
     When the summary figure is asked for,
-    Then it raises NoSummaryPanels -- a ValueError of its own class, which
-      the live fit's wrap-up catches to skip the figure quietly.
+    Then it raises NoSummaryPanels, a ValueError of its own class.
     """
     system = SimpleNamespace(active_components={})
 
     with pytest.raises(sp.NoSummaryPanels):
         sp.summary_figure(system, {})
     assert issubclass(sp.NoSummaryPanels, ValueError)
+
+
+def test_the_wrapup_writer_skips_a_fit_with_nothing_to_draw(
+    tmp_path, monkeypatch, caplog
+):
+    """
+    Given a fit none of whose components makes a summary panel,
+    When write_summary_plot is called, as run.py's wrap-up calls it for
+      every fit,
+    Then it writes nothing, returns None and says why at INFO, without
+      raising -- the wrap-up catches nothing, so a microlensing fit must
+      not fail there.
+    """
+    monkeypatch.setattr(
+        sp, "median_draw_point", lambda system, posterior: ({}, (0, 0), 0.0)
+    )
+    system = SimpleNamespace(active_components={})
+    out = tmp_path / "fit_mcmc_summary.pdf"
+
+    with caplog.at_level("INFO", logger=sp.logger.name):
+        written = sp.write_summary_plot(system, None, out)
+
+    assert written is None
+    assert not out.exists()
+    assert "no transit, RV, SED or evolutionary-model chart" in caplog.text
 
 
 def _kiel_chart():

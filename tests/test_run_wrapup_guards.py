@@ -397,11 +397,12 @@ def test_the_convergence_summary_announces_itself():
 
 def test_the_summary_figure_announces_itself():
     """
-    Given _run_fit's wrap-up,
+    Given the wrap-up (_wrap_up),
     When its wrapup.stage labels are read out of the source,
-    Then the one-page summary figure has one, like every neighbouring stage.
+    Then the one-page summary figure has one, like every neighbouring stage
+      -- the label a failure there is reported against.
     """
-    labels = _wrapup_stage_labels()
+    labels = _wrapup_stage_labels("_wrap_up")
 
     assert any("summary figure" in label for label in labels), labels
 

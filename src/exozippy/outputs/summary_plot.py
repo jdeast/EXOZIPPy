@@ -78,9 +78,11 @@ DEFAULT_PREFIX = "fitresults/planet"
 
 class NoSummaryPanels(ValueError):
     """The fit has no chart a summary panel is made of (no transit, RV, SED
-    or evolutionary model -- a microlensing fit, say).  Its own class so the
-    live fit's wrap-up can skip the figure quietly, while an explicit
-    ``create_summary_plot`` still fails loudly."""
+    or evolutionary model -- a microlensing fit, say).  ``summary_figure``
+    and an explicit ``create_summary_plot`` raise it.  ``write_summary_plot``
+    instead returns None for such a fit, so the live fit's wrap-up, which
+    catches nothing (run.md, "A fit has three phases"), skips the figure
+    with an INFO line."""
 
 
 #: A band whose filter is this one is TESS: its files are grouped onto one
@@ -532,6 +534,19 @@ def _draw_model_traces(system, panels, draws):
     return models
 
 
+def _panel_kind(chart):
+    """The kind of summary panel ``chart`` is drawn on -- "transit" (a
+    phase-folded transit), "rv_time", "rv_phase", "sed" or "kiel" -- or
+    None for a chart no panel draws."""
+    key = chart.component.get("yaml_key")
+    folded = bool((chart.meta or {}).get("phase_folded"))
+    if key == TRANSIT_KEY:
+        return "transit" if folded else None
+    if key == RV_KEY:
+        return "rv_phase" if folded else "rv_time"
+    return {SED_KEY: "sed", KIEL_KEY: "kiel"}.get(key)
+
+
 def _panels(charts):
     """Sort the charts into panels, in reading order.
 
@@ -543,19 +558,19 @@ def _panels(charts):
     """
     stacks = {}
     rv_time, rv_phase, sed, kiel, unused = [], [], [], [], []
+    by_kind = {
+        "rv_time": rv_time,
+        "rv_phase": rv_phase,
+        "sed": sed,
+        "kiel": kiel,
+    }
     for chart in charts:
-        key = chart.component.get("yaml_key")
-        meta = chart.meta or {}
-        if key == TRANSIT_KEY:
-            if meta.get("phase_folded"):
-                stacks.setdefault(meta["planet"], []).append(chart)
-        elif key == RV_KEY:
-            (rv_phase if meta.get("phase_folded") else rv_time).append(chart)
-        elif key == SED_KEY:
-            sed.append(chart)
-        elif key == KIEL_KEY:
-            kiel.append(chart)
-        else:
+        kind = _panel_kind(chart)
+        if kind == "transit":
+            stacks.setdefault(chart.meta["planet"], []).append(chart)
+        elif kind is not None:
+            by_kind[kind].append(chart)
+        elif chart.component.get("yaml_key") != TRANSIT_KEY:
             unused.append(chart.id)
     if unused:
         logger.info(
@@ -1821,7 +1836,8 @@ def write_summary_plot(
     system, posterior, path, *, title=None, draws=None, **kwargs
 ):
     """Draw the summary figure at the median draw of ``posterior`` and save
-    it to ``path`` (the format follows its extension); returns ``path``.
+    it to ``path`` (the format follows its extension); returns ``path``, or
+    None, writing nothing, for a fit with no chart to draw.
 
     ``posterior`` is the REPORTED posterior, already distributed onto
     ``system`` -- what ``reported_posterior`` returns, and what run.py's
@@ -1830,12 +1846,22 @@ def write_summary_plot(
     posterior draws whose model curves are overlaid (``summary_figure``):
     run.py passes the ones its component PDFs drew; None takes
     ``_N_DRAWS`` of ``posterior`` with ``run.get_draws``.  The other
-    keywords are ``summary_figure``'s.  Raises ``NoSummaryPanels`` for a
-    fit with nothing to draw.
+    keywords are ``summary_figure``'s.
+
+    A fit with nothing to draw (no transit, RV, SED or evolutionary model)
+    is skipped with an INFO line rather than raising: run.py's wrap-up
+    calls this for every fit and catches nothing, so a microlensing fit
+    must not fail there.  Anything else that goes wrong raises.
     """
     import matplotlib.pyplot as plt
 
     point, (chain, draw), distance = median_draw_point(system, posterior)
+    if not any(_panel_kind(c) for c in _collect_charts(system, point)):
+        logger.info(
+            "summary plot: none written -- this fit has no transit, RV, SED "
+            "or evolutionary-model chart to draw."
+        )
+        return None
     logger.info(
         f"summary plot: median draw chain {chain}, draw {draw} of the "
         f"post-burn-in trace ({distance:.1f} posterior widths from the "
@@ -1936,7 +1962,7 @@ def create_summary_plot(
             title = (config.get("run") or {}).get("name")
         if out is None:
             out = Path(f"{prefix}_mcmc_summary.pdf").resolve()
-        write_summary_plot(
+        written = write_summary_plot(
             system,
             posterior,
             out,
@@ -1947,5 +1973,10 @@ def create_summary_plot(
             transit_spacing=transit_spacing,
             figsize=figsize,
             rv_break_days=rv_break_days,
+        )
+    if written is None:
+        raise NoSummaryPanels(
+            f"{config_path.name}: this fit has no transit, RV, SED or "
+            "evolutionary-model chart, so there is no summary figure to draw."
         )
     return out
