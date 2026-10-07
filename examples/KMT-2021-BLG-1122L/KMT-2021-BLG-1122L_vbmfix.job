@@ -35,14 +35,33 @@ cfg, n = sys.argv[1], int(sys.argv[2])
 d = yaml.safe_load(open("KMT-2021-BLG-1122L.yaml"))
 d.setdefault("sampler", {})["cores"] = n
 d["prefix"] = "fitresults_vbmfix/KMT-2021-BLG-1122L"
-# The crash workarounds of the shipped config are for the UNFIXED kernel
-# (T_max 20, start_dispersion 3.0): under the fixed one the full ladder
-# and the auto dispersion come back.  seed_polish stays off (the polish
-# has no timeout and the fixed Multipoly still has a ~1.7e-4 tail of
-# multi-minute calls), and the s bounds stay (a physical prior here).
+# The T_max 20 workaround of the shipped config is for the UNFIXED kernel:
+# under the fixed one the full ladder comes back.  start_dispersion 3.0
+# STAYS: with the auto 3*sqrt(T) the serial, untimed start scoring (review
+# 2.6.36) took an hour per rung from rung 5 on even with the fixed kernel
+# (job 15507641: rung 10 after 5h40 on one core, no hangs), while at 3.0
+# the whole init takes minutes; the hot rungs disperse during tuning
+# anyway.  seed_polish stays off (the polish has no timeout and the fixed
+# Multipoly keeps a ~1.7e-4 tail of multi-minute calls); the s bounds stay
+# (a physical prior here).
 d["sampler"]["T_max"] = 200
-d["sampler"].pop("start_dispersion", None)
-print("vbmfix overrides: T_max 200, start_dispersion auto")
+# The SYNCHRONOUS engine waits for every proposal of a step: under the fixed
+# kernel the sixth launch (job 15511416) saw 649 ten-second eval_timeouts
+# in its first 173 steps on EVERY rung (3.75 per step, 1.7e-3 per call --
+# the fixed Multipoly's slow-but-finite 20-100 s calls, ten times the
+# > 120 s tail the stress test counted) and 122 pool recycles, 37 s per
+# step, a ten-day run.  ptde_async exists for exactly a straggler tail (a
+# slow call costs one worker, not the step; samplers.md), so this fit uses
+# it, with eval_timeout raised to 300 s so a slow call finishes instead of
+# killing the pool.  The sync default's premise (the VBM tail is gone) is
+# a binary-lens measurement; it does not hold for three bodies.
+d["sampler"]["method"] = "ptde_async"
+d["sampler"]["eval_timeout"] = 300
+# Without log_interval the async engine prints progress every
+# n_slots*(tune+draws)/20 evaluations -- 2.6 million here, so the seventh
+# launch ran 4.5 h in silence.  50 sweeps = 105,000 evaluations.
+d["sampler"]["log_interval"] = 50
+print("vbmfix overrides: T_max 200, start_dispersion 3.0 kept, method ptde_async, eval_timeout 300")
 yaml.safe_dump(d, open(cfg, "w"), sort_keys=False)
 print(f"wrote {cfg} with sampler.cores = {n}")
 PY
