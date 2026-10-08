@@ -4,7 +4,7 @@ The planet's derived outputs ported from EXOFASTv2's derivepars.pro in
 probabilities pt/ptg/ps/psg, delta, tcirc and omegagr.
 
     T_eq = T_eff sqrt(R_*/(2a))
-    <F>  = sigma_sb T_eff^4 / (a/R_* (1 + e^2/2))^2
+    <F>  = sigma_sb T_eff^4 (R_*/a)^2 / sqrt(1 - e^2)
     P    = (1 +/- p)/(a/R_*) (1 +/- e sin omega)/(1 - e^2)   (Winn 2010 eq 9)
 
 EXOFASTv2 reports <F> in 10^9 erg s-1 cm-2; EXOZIPPy reports it in units
@@ -59,15 +59,15 @@ def test_fave_matches_exofastv2_formula_and_unit():
     """
     Given an eccentric hot Jupiter,
     When calc_fave is evaluated,
-    Then it equals derivepars.pro's
-      sigmab teff^4 / (ar (1 + e^2/2))^2 / 1d9  [10^9 erg s-1 cm-2]
+    Then it equals derivepars.pro's (as corrected 2026-10)
+      sigmab teff^4 / ar^2 / sqrt(1 - e^2) / 1d9  [10^9 erg s-1 cm-2]
       rescaled by 1e6/1361 to Earth units (EXOFASTv2's sigmab is CODATA
       2014, ours CODATA 2018; they agree to 1.3e-6).
     """
     teff, ar, ecc = 6200.0, 7.5, ECC
     _, fave = _physics_fn()(teff, ar, ecc)
     exofast_1e9_cgs = (
-        5.670367e-5 * teff**4 / (ar * (1.0 + ecc**2 / 2.0)) ** 2 / 1e9
+        5.670367e-5 * teff**4 / ar**2 / np.sqrt(1.0 - ecc**2) / 1e9
     )
     assert float(fave) == pytest.approx(
         exofast_1e9_cgs * 1e6 / 1361.0, rel=1e-5
@@ -77,20 +77,34 @@ def test_fave_matches_exofastv2_formula_and_unit():
     assert EARTH_INSOLATION_CGS == pytest.approx(1.361e6, rel=1e-12)
 
 
-def test_fave_eccentricity_factor_is_second_order_expansion():
+def _time_averaged_inverse_square(ecc, n=20000):
+    """<(a/r)^2> over time, by a uniform grid in mean anomaly."""
+    mean_anom = (np.arange(n) + 0.5) * 2.0 * np.pi / n
+    ecc_anom = mean_anom.copy()
+    for _ in range(100):
+        ecc_anom -= (ecc_anom - ecc * np.sin(ecc_anom) - mean_anom) / (
+            1.0 - ecc * np.cos(ecc_anom)
+        )
+    return np.mean((1.0 - ecc * np.cos(ecc_anom)) ** -2)
+
+
+@pytest.mark.parametrize("ecc", [0.1, ECC, 0.5, 0.92])
+def test_fave_is_the_time_average_of_the_flux(ecc):
     """
     Given a fixed T_eff and a/R_*,
-    When e goes from 0 to 0.3,
-    Then <F> drops by exactly (1 + e^2/2)^-2 -- EXOFASTv2's second-order
-      expansion of the exact <(a/r)^2> = (1-e^2)^-1/2, kept so the two
-      codes report the same number -- while T_eq, evaluated at the
-      semi-major axis, does not move.
+    When e goes from 0 to e,
+    Then <F> grows by the time average of (a/r)^2 over the orbit,
+      computed independently by solving Kepler's equation on a uniform
+      mean-anomaly grid -- NOT by the flux at the time-averaged
+      separation, (1 + e^2/2)^-2, which EXOFASTv2 reported until 2026-10
+      and which is low by 5.2x at e = 0.92 -- while T_eq, evaluated at
+      the semi-major axis, does not move.
     """
     fn = _physics_fn()
     teq0, fave0 = fn(TEFF_SUN, 10.0, 0.0)
-    teq1, fave1 = fn(TEFF_SUN, 10.0, ECC)
+    teq1, fave1 = fn(TEFF_SUN, 10.0, ecc)
     assert float(fave1 / fave0) == pytest.approx(
-        (1.0 + ECC**2 / 2.0) ** -2, rel=1e-12
+        _time_averaged_inverse_square(ecc), rel=1e-9
     )
     assert float(teq1) == float(teq0)
 
@@ -190,7 +204,7 @@ def test_system_teq_fave_follow_the_model_geometry(earth_system):
     Then they are the formulas evaluated on the MODEL's own teff, a/R_*
       and e (so star.teff really is routed to the planet through
       star_map, and orbit.ecc through orbit_map), and fave sits at
-      (1 + e^2/2)^-2 of an Earth.
+      (1 - e^2)^-1/2 of an Earth.
     """
     _, v = earth_system
     assert v["ar"] == pytest.approx(AR_EARTH, rel=1e-3)
@@ -201,11 +215,12 @@ def test_system_teq_fave_follow_the_model_geometry(earth_system):
     expected = (
         SIGMA_SB_CGS
         * v["teff"] ** 4
-        / (v["ar"] * (1.0 + v["ecc"] ** 2 / 2.0)) ** 2
+        / v["ar"] ** 2
+        / np.sqrt(1.0 - v["ecc"] ** 2)
         / EARTH_INSOLATION_CGS
     )
     assert v["fave"] == pytest.approx(expected, rel=1e-10)
-    assert v["fave"] == pytest.approx((1.0 + ECC**2 / 2.0) ** -2, rel=1e-3)
+    assert v["fave"] == pytest.approx((1.0 - ECC**2) ** -0.5, rel=1e-3)
 
 
 def test_msini_and_q_follow_the_model_masses(earth_system):

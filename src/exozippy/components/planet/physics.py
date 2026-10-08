@@ -443,12 +443,15 @@ def calc_ps(ar, p, ecc, esinw):
 # T_eff sqrt(R_*/a) [f (1 - A_B)]^(1/4)); it is evaluated at the semi-major
 # axis, i.e. without the eccentricity average -- both as EXOFASTv2 has it.
 #
-#   <F> = sigma_sb T_eff^4 / (a/R_* (1 + e^2/2))^2
+#   <F> = sigma_sb T_eff^4 (R_*/a)^2 / sqrt(1 - e^2)
 #
-# is the time-averaged incident flux over an eccentric orbit: <a^2/r^2>
-# over time is (1 - e^2)^(-1/2), which EXOFASTv2 approximates by its
-# second-order expansion 1 + e^2/2 -- and here too the expansion is kept
-# so that the two codes report the same number.  EXOFASTv2 reports it in
+# is the time-averaged incident flux over an eccentric orbit: by Kepler's
+# second law (r^2 dnu/dt = 2 pi a b / P) the time average of (a/r)^2 is
+# exactly (1 - e^2)^(-1/2), so the average flux RISES with e.  Do not
+# "restore" the 1/(1 + e^2/2)^2 that EXOFASTv2's derivepars.pro carried
+# until 2026-10: that is the flux at the time-averaged separation
+# a (1 + e^2/2), which falls with e, is wrong already at O(e^2) and is
+# low by 1.46x at e = 0.5 and 5.2x at e = 0.92.  EXOFASTv2 reports it in
 # 10^9 erg s-1 cm-2; this one reports it in units of Earth's insolation
 # (constants.EARTH_INSOLATION_CGS, 1361 W m-2), so the sigma_sb and the
 # unit both live in cgs and the ratio is dimensionless.  No conversion is
@@ -534,7 +537,8 @@ def calc_fave(teff, ar, ecc):
     flux_cgs = (
         SIGMA_SB_CGS
         * pt.power(teff, 4)
-        / pt.sqr(ar * (1.0 + pt.sqr(ecc) / 2.0))
+        / pt.sqr(ar)
+        / pt.sqrt(1.0 - pt.sqr(ecc))
     )
     return flux_cgs / EARTH_INSOLATION_CGS
 
