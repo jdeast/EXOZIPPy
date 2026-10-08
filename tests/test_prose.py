@@ -187,7 +187,8 @@ def test_references_bib_parses_and_has_unique_keys():
 def test_every_cite_key_in_source_exists_in_references_bib():
     """
     Given every \\cite*{...} in the shipped source (prose sentences,
-      table_notes, PriorContribution strings, docstrings),
+      table_notes -- in .py and in defaults.yaml -- PriorContribution
+      strings, docstrings),
     When the keys are collected,
     Then each has an entry in references.bib -- add the entry in the same
       commit as the sentence, or the generated draft cites a reference
@@ -201,7 +202,8 @@ def test_every_cite_key_in_source_exists_in_references_bib():
     # with no such filter.
     key_re = re.compile(r"^[A-Za-z][A-Za-z0-9:_-]*$")
     missing = {}
-    for path in SRC.rglob("*.py"):
+    sources = [*SRC.rglob("*.py"), *SRC.rglob("defaults.yaml")]
+    for path in sources:
         for m in CITE_RE.finditer(path.read_text()):
             for key in m.group(1).split(","):
                 key = key.strip()

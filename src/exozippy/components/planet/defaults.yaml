@@ -372,7 +372,7 @@ planet:
     internal_unit: ""
     latex: "\\langle F \\rangle"
     description: "Time-averaged Incident Flux ($S_\\oplus$)"
-    table_note: "In units of Earth's insolation, $S_\\oplus = 1361$ W m$^{-2}$"
+    table_note: "Time average over the orbit, $\\sigma_B T_{\\rm eff}^4 (R_*/a)^2 / \\sqrt{1-e^2}$ \\citep{Williams:2002}, in units of Earth's insolation, $S_\\oplus = 1361$ W m$^{-2}$"
     expressions:
       default:
         func_name: "calc_fave"
