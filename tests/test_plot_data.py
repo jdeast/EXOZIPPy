@@ -223,7 +223,8 @@ def test_rvinstrument_model_trace_matches_shared_helper(rvonly_built):
     Given the built RV-only system,
     When the unphased model trace from plot_data is compared to the arrays
     the shared _eval_unphased_model helper feeds the legacy plot() path,
-    Then the y-values are finite and identical.
+    Then the y-values are identical, and finite but for the one NaN that
+      breaks the curve at each gap between observing seasons.
     """
     system, model, point = rvonly_built
     rv = system.rvinstrument
@@ -233,8 +234,114 @@ def test_rvinstrument_model_trace_matches_shared_helper(rvonly_built):
     model_trace = [t for t in unphased.traces if t.role == "model"][0]
 
     _, y_expected = rv._eval_unphased_model(system, point)
-    assert np.all(np.isfinite(model_trace.y))
+    n_gaps = int(np.sum(np.diff(np.sort(rv.time)) > rv._PLOT_GAP_DAYS))
+    assert np.sum(~np.isfinite(model_trace.y)) == n_gaps
     np.testing.assert_allclose(model_trace.y, y_expected)
+
+
+def _bare_rv():
+    from exozippy.components.rvinstrument.rvinstrument import RVInstrument
+
+    return object.__new__(RVInstrument)
+
+
+def test_unphased_rv_grid_samples_each_season_densely():
+    """
+    Given RVs in two 100-day seasons 900 days apart and a 3-day planet,
+    When the unphased model grid is laid out,
+    Then it covers each season from its first to its last observation,
+      reaching half of _PLOT_GAP_DAYS into the gap between them but not
+      before the first or past the last observation, at least
+      _PLOT_SAMPLES_PER_ORBIT points per period in each, and the second
+      season starts at the returned break.  One linspace over the 1100 days
+      gave ~5 points per orbit.
+    """
+    rv = _bare_rv()
+    times = np.r_[np.linspace(0.0, 100.0, 40), np.linspace(1000.0, 1100.0, 40)]
+    half = 0.5 * rv._PLOT_GAP_DAYS
+
+    t, breaks = rv._unphased_grid(times, 3.0)
+
+    first, second = t[: breaks[0]], t[breaks[0] :]
+    assert (first[0], first[-1]) == (0.0, 100.0 + half)
+    assert (second[0], second[-1]) == (1000.0 - half, 1100.0)
+    spacing = 3.0 / rv._PLOT_SAMPLES_PER_ORBIT
+    assert np.all(np.diff(first) <= spacing)
+    assert np.all(np.diff(second) <= spacing)
+    assert np.all(np.diff(t) > 0)
+
+
+def test_a_one_observation_season_still_has_a_curve():
+    """
+    Given a season of a single observation between two others,
+    When the unphased model grid is laid out,
+    Then that season's grid spans half a gap threshold on each side of the
+      observation, not one repeated time with no curve to draw.
+    """
+    rv = _bare_rv()
+    times = np.r_[
+        np.linspace(0.0, 10.0, 5), 500.0, np.linspace(900.0, 910.0, 5)
+    ]
+    half = 0.5 * rv._PLOT_GAP_DAYS
+
+    t, breaks = rv._unphased_grid(times, 3.0)
+
+    lone = t[breaks[0] : breaks[1]]
+    assert (lone[0], lone[-1]) == (500.0 - half, 500.0 + half)
+    assert lone.size > rv._PLOT_SAMPLES_PER_ORBIT
+
+
+def test_unphased_rv_grid_is_capped_and_never_sparser_than_before():
+    """
+    Given one continuous season,
+    When the grid is laid out for a period too short to sample in budget,
+      and for no Keplerian period at all (Taylor orbits only),
+    Then the first holds _PLOT_GRID_MAX points at most, the second the
+      _PLOT_GRID_N it always had, and neither has a break.
+    """
+    rv = _bare_rv()
+    times = np.linspace(0.0, 2000.0, 300)
+
+    capped, b1 = rv._unphased_grid(times, 0.01)
+    plain, b2 = rv._unphased_grid(times, None)
+
+    assert capped.size <= rv._PLOT_GRID_MAX
+    assert plain.size == rv._PLOT_GRID_N
+    assert b1.size == b2.size == 0
+
+
+def test_with_gaps_breaks_the_curve_between_seasons():
+    """
+    Given a grid of two seasons and its break index,
+    When the curve is given its gaps,
+    Then one NaN point sits between the seasons and nothing else changes.
+    """
+    rv = _bare_rv()
+    t = np.array([0.0, 1.0, 10.0, 11.0])
+    y = np.array([1.0, 2.0, 3.0, 4.0])
+
+    t_out, y_out = rv._with_gaps(t, y, np.array([2]))
+
+    np.testing.assert_array_equal(t_out, [0.0, 1.0, 5.5, 10.0, 11.0])
+    np.testing.assert_array_equal(y_out, [1.0, 2.0, np.nan, 3.0, 4.0])
+
+
+def test_unphased_rv_curve_is_the_likelihood_model_on_its_grid(rvonly_built):
+    """
+    Given the built RV-only system,
+    When the unphased model curve is evaluated through the chunked layout,
+    Then at every grid time it equals the reference instrument's model
+      there as _rv_at_times evaluates it -- the chunks stitch back exactly.
+    """
+    system, model, point = rvonly_built
+    rv = system.rvinstrument
+    shared = rv._unphased_shared(system, point)
+
+    expected, _ = rv._rv_at_times(
+        shared["param_values"], rv._rv_layout[0], shared["t"][0]
+    )
+
+    np.testing.assert_allclose(shared["full"][0], expected, rtol=1e-12)
 
 
 def test_rvinstrument_param_deps_are_populated(rvonly_built):

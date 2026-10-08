@@ -672,6 +672,15 @@ class RVInstrument(Instrument):
     # Points per block on a plotted model grid; one size for the unphased
     # span and the phased period window so both share one compiled layout.
     _PLOT_GRID_N = 2000
+    # The unphased model curves (_unphased_grid): sampled only where there
+    # are data -- the observations split into seasons at gaps longer than
+    # _PLOT_GAP_DAYS, the curve broken (NaN) between them -- at least
+    # _PLOT_SAMPLES_PER_ORBIT points per shortest Keplerian period, never
+    # sparser than _PLOT_GRID_N spread over the seasons, and at most
+    # _PLOT_GRID_MAX points in all (one compiled call per _PLOT_GRID_N).
+    _PLOT_GAP_DAYS = 50.0
+    _PLOT_SAMPLES_PER_ORBIT = 50
+    _PLOT_GRID_MAX = 25 * _PLOT_GRID_N
 
     def _rm_signature(self, i):
         """What makes file ``i``'s RV model differ from another file's:
@@ -787,18 +796,64 @@ class RVInstrument(Instrument):
             return gamma.element_factor(0)
         return (u.solRad / u.d).to(u.m / u.s)
 
-    def _unphased_grid(self):
-        """Smooth 64-bit time grid spanning the data (for model curves)."""
-        return np.linspace(
-            self.time.min(), self.time.max(), self._PLOT_GRID_N
-        ).astype(np.float64)
+    def _shortest_period(self, system, point):
+        """The shortest period (days) of this star's Keplerian member
+        orbits at ``point``, or None when it has only Taylor orbits."""
+        periods = [
+            float(self._point_value(point, system.orbit.period, int(o)))
+            for o in self._plot_orbit_map
+            if not system.orbit.is_taylor[int(o)]
+        ]
+        return min(periods) if periods else None
 
-    def _instrument_grid(self, i):
-        """Smooth time grid over instrument ``i``'s own data span."""
-        t_i = self.time[self.rows(i)]
-        return np.linspace(t_i.min(), t_i.max(), self._PLOT_GRID_N).astype(
-            np.float64
+    def _unphased_grid(self, times, p_min):
+        """A 64-bit model-curve grid over the seasons of ``times``.
+
+        Returns ``(t, breaks)``: ``t`` ascending, one ``linspace`` per
+        season (``times`` split at gaps over ``_PLOT_GAP_DAYS``), each
+        spanning that season's first to last observation and reaching half
+        of ``_PLOT_GAP_DAYS`` into each neighboring gap -- so a season of
+        one observation still has a curve, and a renderer that pads its
+        axes around a season finds the model there -- but never before the
+        first or after the last observation, where the curve always ended;
+        ``breaks`` the indices in ``t`` where a new season starts, for
+        ``_with_gaps``.
+        Each season gets its share of ``_PLOT_GRID_N`` by length, raised to
+        ``_PLOT_SAMPLES_PER_ORBIT`` points per ``p_min`` (None: no raise),
+        and the total is held to ``_PLOT_GRID_MAX``.  One grid over the
+        whole span put ~5 points in each orbit of a 3-day planet observed
+        for 1100 days, a curve that missed the data its O-C fits.
+        """
+        t_obs = np.sort(np.asarray(times, dtype=np.float64))
+        cuts = np.flatnonzero(np.diff(t_obs) > self._PLOT_GAP_DAYS)
+        starts = np.r_[t_obs[0], t_obs[cuts + 1]]
+        ends = np.r_[t_obs[cuts], t_obs[-1]]
+        # Gaps are longer than _PLOT_GAP_DAYS, so half of it on each side
+        # of a gap never makes two seasons overlap.
+        starts[1:] -= 0.5 * self._PLOT_GAP_DAYS
+        ends[:-1] += 0.5 * self._PLOT_GAP_DAYS
+        spans = ends - starts
+        total = float(spans.sum())
+        share = self._PLOT_GRID_N * (spans / total if total > 0 else 1.0)
+        n = np.ceil(share)
+        if p_min is not None:
+            n = np.maximum(
+                n, np.ceil(spans * self._PLOT_SAMPLES_PER_ORBIT / p_min) + 1
+            )
+        if n.sum() > self._PLOT_GRID_MAX:
+            n = np.floor(n * self._PLOT_GRID_MAX / n.sum())
+        n = np.maximum(n, 2).astype(int)
+        t = np.concatenate(
+            [np.linspace(a, b, k) for a, b, k in zip(starts, ends, n)]
         )
+        return t, np.cumsum(n)[:-1]
+
+    @staticmethod
+    def _with_gaps(t, y, breaks):
+        """``(t, y)`` with a NaN point between seasons (``breaks`` from
+        ``_unphased_grid``), so a drawn curve does not join them."""
+        t_mid = 0.5 * (t[breaks - 1] + t[breaks])
+        return np.insert(t, breaks, t_mid), np.insert(y, breaks, np.nan)
 
     def _eval_rv_grid(self, t_blocks, param_values):
         """Evaluate the plotted model on one grid per layout block.
@@ -822,6 +877,35 @@ class RVInstrument(Instrument):
         full = np.asarray(full).reshape(len(self._rv_layout), n_grid)
         matrix = np.asarray(matrix).reshape(len(self._rv_layout), n_grid, -1)
         return full, matrix
+
+    def _eval_rv_blocks(self, t_blocks, param_values):
+        """``_eval_rv_grid`` for blocks of ANY length: the layout is fed in
+        lockstep chunks of ``_PLOT_GRID_N`` (a block shorter than the
+        chunk padded with its last time) and each block's results stitched
+        back.  Returns ``(full, matrix)``, lists with one array per block,
+        ``(len(t_blocks[k]),)`` and ``(len(t_blocks[k]), n_member_orbits)``.
+        """
+        n_grid = self._PLOT_GRID_N
+        blocks = [np.asarray(t, dtype=np.float64) for t in t_blocks]
+        n_chunks = max(-(-b.size // n_grid) for b in blocks)
+        fulls = [[] for _ in blocks]
+        mats = [[] for _ in blocks]
+        for c in range(n_chunks):
+            chunk_blocks = []
+            for b in blocks:
+                piece = b[c * n_grid : (c + 1) * n_grid]
+                padded = np.full(n_grid, b[-1])
+                padded[: piece.size] = piece
+                chunk_blocks.append(padded)
+            full, matrix = self._eval_rv_grid(chunk_blocks, param_values)
+            for k, b in enumerate(blocks):
+                m = min(n_grid, max(b.size - c * n_grid, 0))
+                fulls[k].append(full[k][:m])
+                mats[k].append(matrix[k][:m])
+        return (
+            [np.concatenate(f) for f in fulls],
+            [np.concatenate(m) for m in mats],
+        )
 
     def _rv_at_times(self, param_values, i, t):
         """Instrument ``i``'s plotted (gamma-free) model at arbitrary times.
@@ -859,11 +943,19 @@ class RVInstrument(Instrument):
         span.  ``_eval_unphased_model``, ``_eval_unphased_rm_models`` and
         ``_eval_unphased_gp_models`` all read from it."""
         param_values = self._point_to_plot_params(point, system)
-        t_blocks = [self._unphased_grid()] + [
-            self._instrument_grid(i) for i in self._rv_layout[1:]
+        p_min = self._shortest_period(system, point)
+        grids = [self._unphased_grid(self.time, p_min)] + [
+            self._unphased_grid(self.time[self.rows(i)], p_min)
+            for i in self._rv_layout[1:]
         ]
-        full, _ = self._eval_rv_grid(t_blocks, param_values)
-        return {"param_values": param_values, "t": t_blocks, "full": full}
+        t_blocks = [t for t, _ in grids]
+        full, _ = self._eval_rv_blocks(t_blocks, param_values)
+        return {
+            "param_values": param_values,
+            "t": t_blocks,
+            "breaks": [b for _, b in grids],
+            "full": full,
+        }
 
     def _eval_unphased_model(self, system, point, shared=None):
         """Summed RV model on the pretty grid, returned in m/s.
@@ -874,7 +966,11 @@ class RVInstrument(Instrument):
         """
         if shared is None:
             shared = self._unphased_shared(system, point)
-        return shared["t"][0], shared["full"][0] * self._rv_factor()
+        return self._with_gaps(
+            shared["t"][0],
+            shared["full"][0] * self._rv_factor(),
+            shared["breaks"][0],
+        )
 
     def _eval_unphased_rm_models(self, system, point, shared=None):
         """Physical curves for the instruments whose model differs from the
@@ -891,7 +987,16 @@ class RVInstrument(Instrument):
         for k, i in enumerate(self._rv_layout):
             if k == 0 or self._rm_signature(i) == ref_sig:
                 continue
-            out.append((i, shared["t"][k], shared["full"][k] * factor))
+            out.append(
+                (
+                    i,
+                    *self._with_gaps(
+                        shared["t"][k],
+                        shared["full"][k] * factor,
+                        shared["breaks"][k],
+                    ),
+                )
+            )
         return out
 
     def _eval_unphased_gp_models(self, system, point, shared=None):
@@ -917,7 +1022,16 @@ class RVInstrument(Instrument):
                 continue
             t_i = shared["t"][k]
             y_gp = self.gp_mean_on_grid(system, point, i, t_i)
-            out.append((i, t_i, (shared["full"][k] + y_gp) * factor))
+            out.append(
+                (
+                    i,
+                    *self._with_gaps(
+                        t_i,
+                        (shared["full"][k] + y_gp) * factor,
+                        shared["breaks"][k],
+                    ),
+                )
+            )
         return out
 
     def _phased_shared(self, system, point):
