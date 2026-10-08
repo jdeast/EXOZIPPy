@@ -51,6 +51,14 @@ Chart ``meta`` presentation keys (all optional):
   caption built from the spec title.  It is emitted verbatim into
   ``\\caption{...}``, so escape any non-LaTeX pieces (instrument names!)
   with ``latex_escape`` when composing it.
+* ``residuals``  -- the chart's O-C at the plotted point: a list of
+  ``Trace(role="residual")`` in the chart's OWN x and y units (m/s on an
+  RV chart, dex on the SED's log10 lambda*F_lambda), declared by the
+  component that owns the model (it alone can evaluate the likelihood's
+  model at the observations).  Like ``caption`` it is drawn by NEITHER
+  renderer: its consumer is the system summary figure
+  (``outputs/summary_plot.py``), which gives each chart that carries one an
+  O-C sub-panel.
 
 Axis GEOMETRY is no longer here: ``x_range``/``y_range``, ``x_log``/``y_log``
 and ``x_inverted``/``y_inverted`` are first-class ``Chart`` attributes (review

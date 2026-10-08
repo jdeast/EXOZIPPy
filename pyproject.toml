@@ -224,6 +224,7 @@ Homepage = "https://github.com/jdeast/EXOZIPPy"
 [project.scripts]
 exozippy = "exozippy.cli:main"
 exozippy-modes = "exozippy.cli_modes:main"
+exozippy-summary = "exozippy.cli_summary:main"
 exozippy-gui = "exozippy.gui.app:main"
 # Input-preparation helpers (scripts/*.py are thin wrappers around the same
 # main()s, kept for the historical `python scripts/X.py` spelling).

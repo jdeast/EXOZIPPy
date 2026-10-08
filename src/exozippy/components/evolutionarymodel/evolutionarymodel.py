@@ -893,6 +893,40 @@ class EvolutionaryModel(StellarRelation, Component):
         """
         return MISTPlot(system, [point]).kiel_specs(point)
 
+    def posterior_kiel_samples(self, system, max_draws=2000):
+        """Each star's (Teff, logg) at the distributed posterior's draws.
+
+        ``{star name: {"fit": (teff, logg), "mist": (teff, logg)}}``: the
+        global fit's values, and MIST's prediction at the draw's mass,
+        initial [Fe/H] and EEP -- the compiled Kiel node, evaluated at up to
+        ``max_draws`` evenly spaced draws, the same per-draw values this
+        component's contour plot uses.  Read by the system summary figure
+        for its Kiel-diagram contours; raises before a posterior is
+        distributed (``System.distribute_posterior``), since the summary
+        only ever asks for it after.
+        """
+        plotter = MISTPlot(system, [])
+        if not plotter._posteriorBool:
+            raise RuntimeError(
+                f"[{self.prefix}] posterior_kiel_samples: no posterior has "
+                "been distributed onto the Parameters yet "
+                "(System.distribute_posterior)."
+            )
+        values = np.stack(
+            plotter._get_posterior_compiled_values(max_draws=max_draws)
+        )  # (draws, instances, columns)
+        col = MISTPlot.KIEL_INDEX
+        samples = {}
+        for k, star_index in enumerate(self.star_indices):
+            samples[system.star.names[star_index]] = {
+                kind: (
+                    values[:, k, col[f"teff_{kind}"]],
+                    values[:, k, col[f"logg_{kind}"]],
+                )
+                for kind in ("fit", "mist")
+            }
+        return samples
+
     def plot(self, system, points, filename_prefix="debug"):
         """Kiel PDF(s) through the shared renderer, plus the posterior contours.
 

@@ -153,6 +153,20 @@ and use it as a template. Generically:
    exozippy toi1234.yaml
    ```
 
+5. The finished fit includes `<prefix>_mcmc_summary.pdf`, a one-page summary
+   figure (transits, RVs, SED and Kiel diagram at the best-fit draw, with
+   each planet's P, R_P, M_P and e). Each instrument is shown by its name, or
+   by an optional `label:` on its entry in `toi1234.yaml` (e.g.
+   `label: "MuSCAT2 ($i'$)"`), and TESS sectors are grouped by cadence.
+   Labels are display-only, so after changing them redraw the figure from
+   the saved trace instead of refitting:
+
+   ```bash
+   exozippy-summary toi1234.yaml
+   ```
+
+   `--help` lists the other options, such as binning the transits.
+
 ### Step 5 -- Helper commands for Step 4
 
 EXOZIPPy installs three commands that do much of items 1-3 of Step 4 for you. Run each

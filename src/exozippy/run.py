@@ -1625,15 +1625,7 @@ def _wrap_up(
     # consumer is how the convergence check, the mode reporter and the seed
     # ledger come to disagree about how many solutions a chain found.
     wrapup.stage("collapsing declared label degeneracies")
-    refolded = system.fold_degenerate_draws(idata, model)
-    if refolded:
-        # The regenerated deterministics come back in INTERNAL units --
-        # PyMC recomputes them from the model graph, which knows nothing
-        # about the conversion already applied to the rest of the
-        # posterior -- so put just those back in the user's units.
-        _convert_posterior_to_user_units(
-            idata, system.get_parameter_lookup(), only=refolded
-        )
+    fold_degeneracies(system, model, idata)
 
     # Branch-marginalized parameterizations (System.register_branch_
     # alternative; today V_c/V_e): every Deterministic in the trace was
@@ -1798,6 +1790,26 @@ def _wrap_up(
     )
     for comp in system.active_components.values():
         comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
+
+    # The one-page system figure (outputs/summary_plot.py) at the median
+    # draw of the posterior the tables above were built from -- `idata` is
+    # already trimmed, mode-labelled and distributed onto the Parameters --
+    # with the same `draws` overlaid as the component PDFs above.  A fit
+    # with nothing it draws (no transit, RV, SED or evolutionary model)
+    # gets none: write_summary_plot says so at INFO and returns.  Like every
+    # post-save stage it raises on any other failure, and a
+    # `recompute_trace: false` rerun (or `exozippy-summary <config>`)
+    # redraws it from the saved trace.
+    wrapup.stage("one-page summary figure")
+    from .outputs.summary_plot import write_summary_plot
+
+    write_summary_plot(
+        system,
+        idata,
+        f"{prefix}_mcmc_summary.pdf",
+        title=(config.get("run") or {}).get("name"),
+        draws=draws,
+    )
 
     # Multimodal posteriors: re-emit the same corner + component plots once
     # per mode, restricted to that mode's draws (interim solution; a
@@ -3507,6 +3519,25 @@ def _sanitize_netcdf_attrs(idata):
                 # (_save_sampled_trace), where nothing may raise, and a
                 # sampler's metadata dict may hold a value json cannot encode.
                 ds.attrs[k] = json.dumps(v, default=str)
+
+
+def fold_degeneracies(system, model, idata):
+    """Collapse the declared label degeneracies of a user-unit posterior,
+    in place (``System.fold_degenerate_draws``), keeping it in user units.
+
+    The wrap-up's fold, shared with ``exozippy-summary``: the fold is not
+    written to the trace on disk, so a reader that rebuilds the reported
+    posterior from that trace must apply it too, and the same way.
+    """
+    refolded = system.fold_degenerate_draws(idata, model)
+    if refolded:
+        # The regenerated deterministics come back in INTERNAL units --
+        # PyMC recomputes them from the model graph, which knows nothing
+        # about the conversion already applied to the rest of the
+        # posterior -- so put just those back in the user's units.
+        _convert_posterior_to_user_units(
+            idata, system.get_parameter_lookup(), only=refolded
+        )
 
 
 def _convert_posterior_to_user_units(idata, param_lookup, only=None):

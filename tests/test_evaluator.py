@@ -139,6 +139,19 @@ def _phased_id(ev):
     return [s.id for s in ev.specs if ".phased" in s.id][0]
 
 
+def _n_season_gaps(system):
+    """The NaN breaks an RV-against-time model curve carries: one per gap
+    between observing seasons (RVInstrument._unphased_grid)."""
+    rv = system.rvinstrument
+    return int(np.sum(np.diff(np.sort(rv.time)) > rv._PLOT_GAP_DAYS))
+
+
+def _assert_finite_but_season_breaks(y, n_breaks):
+    y = np.asarray(y, dtype=float)
+    assert y.size >= 1
+    assert int(np.sum(~np.isfinite(y))) == n_breaks
+
+
 def _period_and_logP(system, model, raw):
     """(period in days, logP in user units) at a raw point."""
     o = system.orbit
@@ -161,7 +174,9 @@ def test_eval_plots_returns_finite_model_traces(rvonly_evaluator):
     Given a compiled RV-only evaluator,
     When eval_plots is called at the base point,
     Then at least one plot carries model traces, and every emitted trace's x
-    and y arrays are finite and non-empty -- including the phased plot, whose
+    and y arrays are non-empty and finite -- but for the NaN that breaks the
+    RV-against-time model curve between observing seasons -- including the
+    phased plot, whose
     node output is sorted-by-phase and column-selected from a multi-orbit
     matrix and so cannot be recovered by an affine fit of the raw pytensor
     output (see the module docstring); eval_plots must recompute it exactly
@@ -174,12 +189,18 @@ def test_eval_plots_returns_finite_model_traces(rvonly_evaluator):
     assert len(out) >= 1
     assert any(len(traces) >= 1 for traces in out.values())
     assert _phased_id(ev) in out
+    uid = _unphased_id(ev)
     for plot_id, traces in out.items():
         for name, xy in traces.items():
-            for axis in ("x", "y"):
-                arr = np.atleast_1d(np.asarray(xy[axis]))
-                assert arr.size >= 1
-                assert np.all(np.isfinite(arr))
+            x = np.atleast_1d(np.asarray(xy["x"], dtype=float))
+            assert x.size >= 1
+            assert np.all(np.isfinite(x))
+            breaks = (
+                _n_season_gaps(system)
+                if plot_id == uid and name == "model"
+                else 0
+            )
+            _assert_finite_but_season_breaks(np.atleast_1d(xy["y"]), breaks)
 
 
 @pytest.mark.timeout(900)
@@ -188,9 +209,11 @@ def test_period_shift_changes_and_restores_rv_curves(rvonly_evaluator):
     Given a compiled RV-only evaluator and its base RV model curves,
     When the planet period is moved +1% (via its sampled logP) and then
         restored,
-    Then BOTH the unphased and the phased RV model curves change (finite,
-        different) under the shift and are reproduced exactly once the value
-        is restored. The phased curve is the regression case for the
+    Then BOTH the unphased and the phased RV model curves change (finite but
+        for the unphased curve's season breaks, and different -- the unphased
+        grid's length follows the period, so a different length is a
+        change too) under the shift and are reproduced exactly once the
+        value is restored. The phased curve is the regression case for the
         plot_data-based redesign (see module docstring).
     """
     system, model, ev, base_raw, _ = rvonly_evaluator
@@ -198,7 +221,7 @@ def test_period_shift_changes_and_restores_rv_curves(rvonly_evaluator):
     pid = _phased_id(ev)
 
     base = ev.eval_plots(base_raw)
-    y0 = np.asarray(base[uid]["model"]["y"])
+    y0 = np.asarray(base[uid]["model"]["y"], dtype=float)
     py0 = np.asarray(base[pid]["model"]["y"])
 
     period0, logP0 = _period_and_logP(system, model, base_raw)
@@ -207,19 +230,20 @@ def test_period_shift_changes_and_restores_rv_curves(rvonly_evaluator):
     )
     period1, _ = _period_and_logP(system, model, shifted_raw)
     shifted = ev.eval_plots(shifted_raw)
-    y1 = np.asarray(shifted[uid]["model"]["y"])
+    y1 = np.asarray(shifted[uid]["model"]["y"], dtype=float)
     py1 = np.asarray(shifted[pid]["model"]["y"])
 
     restored_raw = ev.set_value("orbit.b.logP", logP0, shifted_raw)
     restored = ev.eval_plots(restored_raw)
-    y2 = np.asarray(restored[uid]["model"]["y"])
+    y2 = np.asarray(restored[uid]["model"]["y"], dtype=float)
     py2 = np.asarray(restored[pid]["model"]["y"])
 
     # the period actually moved by ~1%
     assert period1 == pytest.approx(period0 * 1.01, rel=1e-6)
-    # both curves changed and stayed finite
-    assert np.all(np.isfinite(y1)) and np.all(np.isfinite(py1))
-    assert not np.allclose(y0, y1)
+    # both curves changed and stayed finite (but for the season breaks)
+    _assert_finite_but_season_breaks(y1, _n_season_gaps(system))
+    _assert_finite_but_season_breaks(py1, 0)
+    assert y0.shape != y1.shape or not np.allclose(y0, y1, equal_nan=True)
     assert not np.allclose(py0, py1)
     # restoring reproduces the original curves
     np.testing.assert_allclose(y2, y0, rtol=0, atol=1e-9)

@@ -2236,9 +2236,14 @@ class SED(Component):
         id_color, id_marker, _id_line = self._identity_styles(plot_obj)
 
         traces = []
+        # Each trace's star or star combination, which its color/marker
+        # follows: a renderer pairs a star's spectrum with its photometry by
+        # this, never by parsing the trace names.
+        identity = {}
         # per-star model spectra: lambda * F_lambda at Earth, from the shared helper
         for nstar in range(plot_obj.nstars):
             name = plot_obj.star_names[nstar]
+            identity[f"Star {name}"] = name
             traces.append(
                 Trace(
                     name=f"Star {name}",
@@ -2251,6 +2256,7 @@ class SED(Component):
                 )
             )
         if plot_obj.nstars > 1:
+            identity["Total"] = "Total"
             traces.append(
                 Trace(
                     name="Total",
@@ -2267,6 +2273,7 @@ class SED(Component):
         # any other multi-star combination the data measure (e.g. "B+C"
         # from an "A-(B+C)" differential row), matching the PDF's curves
         for label, combo_idx in self._sub_combos(plot_obj):
+            identity[label] = label
             traces.append(
                 Trace(
                     name=label,
@@ -2292,8 +2299,22 @@ class SED(Component):
         y_lim = _log10(plot_obj.f_limits_from_err * plot_obj.wave_filter)
         yerr = np.vstack([log_yobs - y_lim[0], y_lim[1] - log_yobs])
         point_labels = np.asarray(plot_obj.point_labels)
+
+        # The O-C of every plotted point, in the chart's own unit (dex of
+        # lambda*F_lambda): log10(observed) - log10(model) for that point's
+        # star combination.  Each point's flux is its filter row's magnitude
+        # through the zero point -- a differential row's side anchored on the
+        # model flux of the OTHER side (_calc_obs_flux_from_obs_mag) -- so the
+        # flux ratio is set by the row's magnitude residual alone:
+        # -0.4 * side * (m_obs - m_pred), with m_pred the row's combined
+        # (blended or differential) prediction at this point.
+        row_oc = plot_obj.mag_obs - plot_obj.combined_pred_draws[0]
+        point_oc = -0.4 * plot_obj.point_side * row_oc[plot_obj.point_row]
+        residual_traces = []
         for combo in plot_obj.unique_combos:
             mask = point_labels == combo
+            style = {"color": id_color[combo], "marker": id_marker[combo]}
+            identity[combo] = combo
             traces.append(
                 Trace(
                     name=combo,
@@ -2303,10 +2324,21 @@ class SED(Component):
                     y=log_yobs[mask],
                     yerr=yerr[:, mask],
                     xerr=xerr_obs[:, mask],
-                    style={
-                        "color": id_color[combo],
-                        "marker": id_marker[combo],
-                    },
+                    style=style,
+                )
+            )
+            # Same name, points and error bars as the data trace above, so a
+            # renderer can pair the two.
+            residual_traces.append(
+                Trace(
+                    name=combo,
+                    role="residual",
+                    kind="scatter",
+                    x=wave_obs[mask],
+                    y=point_oc[mask],
+                    yerr=yerr[:, mask],
+                    xerr=xerr_obs[:, mask],
+                    style=dict(style),
                 )
             )
 
@@ -2358,6 +2390,8 @@ class SED(Component):
                             else "."
                         )
                     ),
+                    "residuals": residual_traces,
+                    "identity": identity,
                 },
             )
         ]

@@ -223,7 +223,8 @@ def test_rvinstrument_model_trace_matches_shared_helper(rvonly_built):
     Given the built RV-only system,
     When the unphased model trace from plot_data is compared to the arrays
     the shared _eval_unphased_model helper feeds the legacy plot() path,
-    Then the y-values are finite and identical.
+    Then the y-values are identical, and finite but for the one NaN that
+      breaks the curve at each gap between observing seasons.
     """
     system, model, point = rvonly_built
     rv = system.rvinstrument
@@ -233,8 +234,114 @@ def test_rvinstrument_model_trace_matches_shared_helper(rvonly_built):
     model_trace = [t for t in unphased.traces if t.role == "model"][0]
 
     _, y_expected = rv._eval_unphased_model(system, point)
-    assert np.all(np.isfinite(model_trace.y))
+    n_gaps = int(np.sum(np.diff(np.sort(rv.time)) > rv._PLOT_GAP_DAYS))
+    assert np.sum(~np.isfinite(model_trace.y)) == n_gaps
     np.testing.assert_allclose(model_trace.y, y_expected)
+
+
+def _bare_rv():
+    from exozippy.components.rvinstrument.rvinstrument import RVInstrument
+
+    return object.__new__(RVInstrument)
+
+
+def test_unphased_rv_grid_samples_each_season_densely():
+    """
+    Given RVs in two 100-day seasons 900 days apart and a 3-day planet,
+    When the unphased model grid is laid out,
+    Then it covers each season from its first to its last observation,
+      reaching half of _PLOT_GAP_DAYS into the gap between them but not
+      before the first or past the last observation, at least
+      _PLOT_SAMPLES_PER_ORBIT points per period in each, and the second
+      season starts at the returned break.  One linspace over the 1100 days
+      gave ~5 points per orbit.
+    """
+    rv = _bare_rv()
+    times = np.r_[np.linspace(0.0, 100.0, 40), np.linspace(1000.0, 1100.0, 40)]
+    half = 0.5 * rv._PLOT_GAP_DAYS
+
+    t, breaks = rv._unphased_grid(times, 3.0)
+
+    first, second = t[: breaks[0]], t[breaks[0] :]
+    assert (first[0], first[-1]) == (0.0, 100.0 + half)
+    assert (second[0], second[-1]) == (1000.0 - half, 1100.0)
+    spacing = 3.0 / rv._PLOT_SAMPLES_PER_ORBIT
+    assert np.all(np.diff(first) <= spacing)
+    assert np.all(np.diff(second) <= spacing)
+    assert np.all(np.diff(t) > 0)
+
+
+def test_a_one_observation_season_still_has_a_curve():
+    """
+    Given a season of a single observation between two others,
+    When the unphased model grid is laid out,
+    Then that season's grid spans half a gap threshold on each side of the
+      observation, not one repeated time with no curve to draw.
+    """
+    rv = _bare_rv()
+    times = np.r_[
+        np.linspace(0.0, 10.0, 5), 500.0, np.linspace(900.0, 910.0, 5)
+    ]
+    half = 0.5 * rv._PLOT_GAP_DAYS
+
+    t, breaks = rv._unphased_grid(times, 3.0)
+
+    lone = t[breaks[0] : breaks[1]]
+    assert (lone[0], lone[-1]) == (500.0 - half, 500.0 + half)
+    assert lone.size > rv._PLOT_SAMPLES_PER_ORBIT
+
+
+def test_unphased_rv_grid_is_capped_and_never_sparser_than_before():
+    """
+    Given one continuous season,
+    When the grid is laid out for a period too short to sample in budget,
+      and for no Keplerian period at all (Taylor orbits only),
+    Then the first holds _PLOT_GRID_MAX points at most, the second the
+      _PLOT_GRID_N it always had, and neither has a break.
+    """
+    rv = _bare_rv()
+    times = np.linspace(0.0, 2000.0, 300)
+
+    capped, b1 = rv._unphased_grid(times, 0.01)
+    plain, b2 = rv._unphased_grid(times, None)
+
+    assert capped.size <= rv._PLOT_GRID_MAX
+    assert plain.size == rv._PLOT_GRID_N
+    assert b1.size == b2.size == 0
+
+
+def test_with_gaps_breaks_the_curve_between_seasons():
+    """
+    Given a grid of two seasons and its break index,
+    When the curve is given its gaps,
+    Then one NaN point sits between the seasons and nothing else changes.
+    """
+    rv = _bare_rv()
+    t = np.array([0.0, 1.0, 10.0, 11.0])
+    y = np.array([1.0, 2.0, 3.0, 4.0])
+
+    t_out, y_out = rv._with_gaps(t, y, np.array([2]))
+
+    np.testing.assert_array_equal(t_out, [0.0, 1.0, 5.5, 10.0, 11.0])
+    np.testing.assert_array_equal(y_out, [1.0, 2.0, np.nan, 3.0, 4.0])
+
+
+def test_unphased_rv_curve_is_the_likelihood_model_on_its_grid(rvonly_built):
+    """
+    Given the built RV-only system,
+    When the unphased model curve is evaluated through the chunked layout,
+    Then at every grid time it equals the reference instrument's model
+      there as _rv_at_times evaluates it -- the chunks stitch back exactly.
+    """
+    system, model, point = rvonly_built
+    rv = system.rvinstrument
+    shared = rv._unphased_shared(system, point)
+
+    expected, _ = rv._rv_at_times(
+        shared["param_values"], rv._rv_layout[0], shared["t"][0]
+    )
+
+    np.testing.assert_allclose(shared["full"][0], expected, rtol=1e-12)
 
 
 def test_rvinstrument_param_deps_are_populated(rvonly_built):
@@ -951,3 +1058,152 @@ def test_point_to_plot_params_names_a_misshapen_input():
             point,
             SimpleNamespace(plot_params=[full], plot_branch_labels={"a.full"}),
         )
+
+
+# ---------------------------------------------------------------------------
+# meta["residuals"]: the O-C a component declares on its charts (consumed by
+# the system summary figure, outputs/summary_plot.py)
+# ---------------------------------------------------------------------------
+
+
+def _residual_traces(spec):
+    return {t.name: t for t in spec.meta["residuals"]}
+
+
+def test_rv_residual_is_data_minus_the_likelihood_model(rvonly_built):
+    """
+    Given the built RV-only system at its start point,
+    When the unphased RV chart's O-C is subtracted from its data trace,
+    Then what is left is the likelihood's model at each observed time --
+      the compiled RV model evaluated there through the separate
+      _rv_at_times path -- so the O-C is data minus model, not data minus
+      an interpolated curve.
+    """
+    system, model, point = rvonly_built
+    rv = system.rvinstrument
+    unphased = [
+        s for s in rv.plot_data(system, point) if not s.meta["phase_folded"]
+    ][0]
+    residuals = _residual_traces(unphased)
+    params = rv._point_to_plot_params(point, system)
+
+    for data in (t for t in unphased.traces if t.role == "data"):
+        oc = residuals[data.name]
+        np.testing.assert_array_equal(oc.x, data.x)
+        model_at_obs, _ = rv._rv_at_times(
+            params, rv.names.index(data.name), data.x
+        )
+        np.testing.assert_allclose(
+            np.asarray(data.y) - np.asarray(oc.y),
+            model_at_obs * rv._rv_factor(),
+            rtol=1e-9,
+            atol=1e-9,
+        )
+        np.testing.assert_allclose(oc.yerr, data.yerr)
+
+
+def test_rv_residuals_agree_across_panels(rvonly_built):
+    """
+    Given the built RV-only system,
+    When the O-C of the unphased chart and of each phased chart are compared,
+    Then they are the same numbers (only x differs, the time vs that orbit's
+      phase, which matches the phased data trace's x), and on a phased panel
+      they equal the data minus the plotted orbit curve to the curve's
+      interpolation accuracy.
+    """
+    system, model, point = rvonly_built
+    specs = system.rvinstrument.plot_data(system, point)
+    unphased = [s for s in specs if not s.meta["phase_folded"]][0]
+    phased = [s for s in specs if s.meta["phase_folded"]]
+    assert phased
+
+    reference = _residual_traces(unphased)
+    for spec in phased:
+        curve = [t for t in spec.traces if t.role == "model"][0]
+        for data in (t for t in spec.traces if t.role == "data"):
+            oc = _residual_traces(spec)[data.name]
+            np.testing.assert_array_equal(oc.y, reference[data.name].y)
+            np.testing.assert_array_equal(oc.x, data.x)
+            on_curve = np.interp(data.x, curve.x, curve.y, period=1.0)
+            np.testing.assert_allclose(
+                np.asarray(data.y) - on_curve, oc.y, atol=1e-2
+            )
+
+
+def test_rv_charts_carry_no_residuals_without_a_point(rvonly_prepared):
+    """
+    Given a prepared, unbuilt RV-only system (data-only regime),
+    When plot_data runs without a point,
+    Then no chart declares an O-C: there is no model to subtract.
+    """
+    system = rvonly_prepared
+    for spec in system.rvinstrument.plot_data(system, point=None):
+        assert "residuals" not in spec.meta
+
+
+def test_sed_residual_is_log_data_minus_log_model_per_point(sed_built):
+    """
+    Given the three-star kelt4 SED build at its start point,
+    When each plotted point's O-C (in the chart's own unit, dex of
+      lambda*F_lambda) is subtracted from its data point,
+    Then what is left is log10 of the MODEL flux of that point's stars in
+      that filter -- built here from the per-star predicted magnitudes and
+      the filter's zero point, not from the combined prediction the
+      component uses -- and each residual carries its point's error bars.
+    """
+    system, model, point = sed_built
+    sed = system.sed
+    spec = [s for s in sed.plot_data(system, point) if s.id == "sed.sed"][0]
+    residuals = _residual_traces(spec)
+    data = {t.name: t for t in spec.traces if t.role == "data"}
+    _assert_json_roundtrip([spec])
+
+    plot_obj = sed._make_plot_obj(system, [point])
+    m_star = np.asarray(
+        sed._compiled_mag_predictors(*sed._point_to_plot_params(point, system))
+    )  # (nstars, nfilters)
+    labels = np.asarray(plot_obj.point_labels)
+    assert set(residuals) == set(data) == set(labels)
+    for combo in plot_obj.unique_combos:
+        points = np.flatnonzero(labels == combo)
+        model_log = []
+        for p in points:
+            row, side = plot_obj.point_row[p], plot_obj.point_side[p]
+            stars = plot_obj.blend_matrix[row] == side
+            zp = plot_obj.filter_params[plot_obj.filters[row]]["zp"]
+            flux = zp * np.sum(10 ** (-0.4 * m_star[stars, row]))
+            model_log.append(np.log10(flux * plot_obj.wave_filter[p]))
+        oc, obs = residuals[combo], data[combo]
+        np.testing.assert_array_equal(oc.x, obs.x)
+        np.testing.assert_allclose(
+            np.asarray(obs.y) - np.asarray(oc.y), model_log, rtol=1e-9
+        )
+        np.testing.assert_array_equal(oc.yerr, obs.yerr)
+
+
+def test_sed_chart_declares_every_traces_star(sed_built):
+    """
+    Given the three-star kelt4 SED build at its start point,
+    When its model-mode chart is built,
+    Then meta["identity"] names the star (or star combination) of every
+      trace and every residual, each spectrum pointing at a combination the
+      photometry also carries -- what a renderer pairs colors by, instead of
+      parsing trace names.
+    """
+    system, model, point = sed_built
+    spec = [
+        s for s in system.sed.plot_data(system, point) if s.id == "sed.sed"
+    ][0]
+    identity = spec.meta["identity"]
+
+    names = {t.name for t in spec.traces} | set(_residual_traces(spec))
+    assert names == set(identity)
+    data = {t.name for t in spec.traces if t.role == "data"}
+    assert all(identity[name] == name for name in data)
+    stars = [
+        identity[t.name]
+        for t in spec.traces
+        if t.role == "model" and t.name.startswith("Star ")
+    ]
+    assert stars == [n for n in system.star.names if n in stars]
+    _assert_json_roundtrip([spec])

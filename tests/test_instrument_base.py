@@ -571,6 +571,31 @@ def test_plot_styles_read_user_overrides():
     assert inst._data_trace_style(2) == {"series_index": 2}
 
 
+def test_display_label_is_the_configured_label_else_the_name():
+    """
+    Given one file with a `label:` and one without,
+    When styles are loaded,
+    Then display_label returns the label where one is configured and the
+      instrument's name otherwise, and the schema entry is option-shaped.
+    """
+    inst = _make(
+        [
+            {"name": "MuSCAT2_i", "file": "a.dat", "label": "MuSCAT2 ($i'$)"},
+            {"name": "TESS_S43", "file": "b.dat"},
+        ]
+    )
+
+    assert inst.plot_label == ["MuSCAT2 ($i'$)", None]
+    assert inst.display_label(0) == "MuSCAT2 ($i'$)"
+    assert inst.display_label(1) == inst.names[1]
+    entry = Instrument._label_config_schema()
+    assert (entry["key"], entry["kind"], entry["required"]) == (
+        "label",
+        "option",
+        False,
+    )
+
+
 def test_plot_style_schema_entry_shape():
     """
     Given the shared plot config-schema entry,

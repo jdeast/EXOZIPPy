@@ -198,6 +198,7 @@ class Transit(Instrument):
             cls._columns_config_schema(("time", "flux", "err")),
             *cls._time_config_schema(),
             cls._plot_style_config_schema(),
+            cls._label_config_schema(),
             cls._gp_config_schema(),
             cls._likelihood_config_schema(),
             {
@@ -241,6 +242,10 @@ class Transit(Instrument):
         # made-up exposure time.
         self.exptime_min = [1.0] * self.n_elements
         self.ninterp = [1] * self.n_elements
+        # Whether exptime_min is the file's own exposure time: stated in
+        # the config AND accepted.  False for the inert 1-minute default,
+        # whether the key was absent or rejected below.
+        self.exptime_stated = [False] * self.n_elements
         for i, c in enumerate(self.config):
             # A non-numeric value is a hard error (unlike the RANGE checks
             # below, which warn and fall back): `exptime: "abc"` is a typo
@@ -272,6 +277,8 @@ class Transit(Instrument):
                     f"exptime=1 (no smearing)."
                 )
                 exptime, ninterp = 1.0, 1
+            else:
+                self.exptime_stated[i] = "exptime" in c
             self.exptime_min[i] = exptime
             self.ninterp[i] = ninterp
 

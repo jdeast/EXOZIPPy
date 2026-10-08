@@ -1993,3 +1993,70 @@ def test_the_teff_axis_ignores_track_rows_the_logg_window_clips_away(
     assert 3000.0 in set(np.atleast_1d(spec.traces[0].x).tolist())
     assert lo > 3000.0
     assert spec.y_range == list(KIEL_LOGG_WINDOW)
+
+
+def test_posterior_kiel_samples_are_each_draws_fit_and_mist_values(
+    model_root,
+):
+    """
+    Given a posterior of five draws in which the star's Teff varies,
+    When posterior_kiel_samples reads it, and again with max_draws=3,
+    Then the fit samples are exactly those draws' Teff, the MIST samples are
+      the compiled Kiel node's prediction at the same draws, thinning keeps
+      the first, middle and last draws, and before any posterior it raises
+      naming the component.
+    """
+    # Arrange -- DataArrays with the sample dimension last, the layout
+    # System.distribute_posterior attaches.
+    import xarray as xr
+
+    system, comp = _kiel_system(model_root)
+    with pytest.raises(RuntimeError, match="no posterior"):
+        comp.posterior_kiel_samples(system)
+    for param in system.plot_params:
+        user = np.atleast_1d(param.from_internal(param.initval)).astype(float)
+        draws = np.repeat(user[..., None], 5, axis=-1)
+        if param is system.star.teff:
+            draws = draws * np.linspace(0.98, 1.02, 5)
+        param.posterior = xr.DataArray(draws, dims=("element", "sample"))
+    teff = system.star.teff
+
+    # Act
+    samples = comp.posterior_kiel_samples(system)
+    thinned = comp.posterior_kiel_samples(system, max_draws=3)
+
+    # Assert
+    fit_teff, fit_logg = samples["A"]["fit"]
+    np.testing.assert_allclose(fit_teff, np.ravel(teff.posterior.values))
+    assert np.all(np.isfinite(fit_logg))
+    compiled = MISTPlot(system, [])._get_posterior_compiled_values()
+    col = MISTPlot.KIEL_INDEX
+    np.testing.assert_allclose(
+        samples["A"]["mist"][0], [v[0, col["teff_mist"]] for v in compiled]
+    )
+    np.testing.assert_allclose(thinned["A"]["fit"][0], fit_teff[[0, 2, 4]])
+
+
+def test_the_kiel_chart_declares_its_tracks_eeps_ages_and_main_sequence(built):
+    """
+    Given the built one-star system,
+    When its Kiel chart is drawn,
+    Then meta["track"] carries an EEP and an age (Gyr) for every point of the
+      drawn track, ages rising with EEP, and the main sequence's bounding
+      EEPs (MIST's ZAMS and TAMS) -- what a renderer frames the main
+      sequence with -- and meta["star"] names the star.
+    """
+    # Arrange
+    system, _model = built
+
+    # Act
+    spec = _kiel_spec(system)
+
+    # Assert
+    track = spec.meta["track"]
+    (curve,) = [t for t in spec.traces if t.role == "model"]
+    assert len(track["eep"]) == len(track["age"]) == len(curve.x) > 0
+    assert np.all(np.diff(track["eep"]) > 0)
+    assert np.all(np.diff(track["age"]) >= 0)
+    assert track["main_sequence_eeps"] == [202.0, 454.0]
+    assert spec.meta["star"] == "A"

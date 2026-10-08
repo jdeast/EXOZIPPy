@@ -395,6 +395,18 @@ def test_the_convergence_summary_announces_itself():
     assert any("convergence summary" in label for label in labels), labels
 
 
+def test_the_summary_figure_announces_itself():
+    """
+    Given the wrap-up (_wrap_up),
+    When its wrapup.stage labels are read out of the source,
+    Then the one-page summary figure has one, like every neighbouring stage
+      -- the label a failure there is reported against.
+    """
+    labels = _wrapup_stage_labels("_wrap_up")
+
+    assert any("summary figure" in label for label in labels), labels
+
+
 def test_an_interrupt_during_wrapup_says_what_survived(caplog, monkeypatch):
     """
     Given a fit interrupted during WRAP-UP rather than during sampling,
