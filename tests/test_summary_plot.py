@@ -135,7 +135,14 @@ def _trace_with_stale_modes():
 
 @pytest.fixture
 def no_trim(monkeypatch):
-    """analyze_idata as the identity, so the test sees what it hands on."""
+    """analyze_idata as the identity, so the test sees what it hands on.
+
+    Imports exozippy.run first: reported_posterior imports it, and a FIRST
+    import while a test has modes.identify_modes patched would bind the
+    fake into report_pipeline (`from .modes import identify_modes`) for
+    every later test in the process -- the kelt4 fit's wrap-up included.
+    """
+    import exozippy.run  # noqa: F401
     from exozippy.samplers import convergence
 
     monkeypatch.setattr(
@@ -1230,7 +1237,17 @@ def _kelt4_config():
             "cores": 1,
             "measure_scales": False,
             "recompute_trace": True,
+            # Reproducible on one platform (not across them: the build is
+            # platform-dependent at ~1e-9).
+            "seed": 418,
         },
+        # Four draws after five tuning steps are not a converged posterior,
+        # and the mode pass's robust-z filter (median and MAD of 4 draws)
+        # flags one of them as "raw-z" invalid on some seeds -- 25%, over
+        # the 1% default, which fails the fit's wrap-up (seen on macOS CI).
+        # These tests are about the figure, not the sampler, so tolerate
+        # it; a fit where most draws are invalid still fails.
+        "modes": {"max_invalid_frac": 0.5},
         "modeling": {"compile": False},
     }
 
