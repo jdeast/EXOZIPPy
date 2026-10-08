@@ -156,8 +156,8 @@ def test_microlensing_orbital_motion_measures_the_inclination(which):
 
 
 def test_a_pinned_inclination_keeps_the_linear_mass():
-    """`sigma: 0` on cos i (examples/hd80606 pins its transit inclination)
-    states the inclination outright, so m sin i coordinates buy nothing."""
+    """`sigma: 0` on cos i states the inclination outright, so m sin i
+    coordinates buy nothing."""
     orbit = _FakeOrbit(pinned={0: ["cosi"]})
     system = _FakeSystem(rvinstrument=_FakeRV(), orbit=orbit)
     assert inclination_constrained_orbits(system, orbit) == {0}
@@ -600,10 +600,17 @@ def test_fitmsini_and_fitvcve_are_independent(monkeypatch):
     "example, cfg, mode",
     [
         ("kelt4", "kelt4_rvonly.yaml", "msini"),
-        # RV-only, but its params file pins cos i at the transit value.
+        ("hd80606", "hd80606_rvonly.yaml", "msini"),
+        # The same RVs plus the TESS transit, which measures the inclination.
         ("hd80606", "hd80606.yaml", "linear"),
     ],
 )
 def test_the_shipped_rv_only_examples(example, cfg, mode, monkeypatch):
-    system = _example(example, cfg, monkeypatch)
+    def edit(config):
+        # The mass coordinate is decided by what measures the orbit, never by
+        # the star's evolutionary model, and the ~128 MB MIST grid is not
+        # shipped (CI never downloads it), so the hd80606 configs drop it.
+        config.pop("evolutionarymodel", None)
+
+    system = _example(example, cfg, monkeypatch, edit)
     assert system.planet.mass_parameterizations == [mode]

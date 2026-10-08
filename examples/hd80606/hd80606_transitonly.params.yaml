@@ -1,6 +1,6 @@
-# HD 80606 b, shared by hd80606.yaml and hd80606_rvonly.yaml
-# (hd80606_transitonly.params.yaml adds a period prior).  Start values are
-# published: the star from Rosenthal et al. (2021), the planet and orbit from
+# HD 80606 b, for hd80606_transitonly.yaml: hd80606.params.yaml plus the
+# published period as a prior, which a single transit cannot measure.  Start
+# values: the star from Rosenthal et al. (2021), the planet and orbit from
 # Pearson et al. (2022).
 
 star.A.feh:
@@ -32,6 +32,9 @@ star.A.av:
 
 orbit.b.period:
   initval: 111.436765
+  mu: 111.436765
+  sigma: 0.000074
+  citation: Pearson:2022
 
 orbit.b.tc:
   initval: 2458888.07466

@@ -1,0 +1,53 @@
+# HD 80606 b from the TESS transit alone: hd80606.yaml without the RVs.
+# The transit-only defaults turn on by themselves: the orbit samples V_c/V_e
+# and the transit chord (fitvcve, fitchord; Eastman 2024), and the planet
+# samples log_q with the Chen & Kipping (2017) mass-radius relation supplying
+# the mass.  One transit of an e ~ 0.93 orbit, with the star from MIST + SED,
+# is the hardest case that parameterization is meant for.  A single transit
+# cannot measure the period, so the params file puts the published one on it
+# as a prior; with the period and the stellar density known, the duration
+# measures V_c/V_e (the photo-eccentric effect).  cos i is not pinned.
+
+run:
+  name: "hd80606_transitonly"
+
+prefix: "fitresults/HD80606_transitonly"
+
+star:
+  - name: "A"
+
+evolutionarymodel:
+  - star: "A"
+
+sed:
+  file: "hd80606.sed.yaml"
+
+planet:
+  - name: "b"
+
+orbit:
+  - name: "b"
+    primary: ["A"]
+    companion: ["b"]
+
+parameter_file: "hd80606_transitonly.params.yaml"
+
+transit:
+  - name: "TESS-S21"
+    file: "n20200213.TESS.TESS.HD80606.S21.0120.SPOC.dat"
+    band: "TESS"
+    exptime: 2.0
+
+band:
+  - name: "TESS"
+    filter: "TESS"
+
+sampler:
+  method: numpyro
+  tune: 1000
+  draws: 1000
+  chains: 4
+  cores: 4
+  target_accept: 0.95
+  recompute_trace: True
+  profile: False

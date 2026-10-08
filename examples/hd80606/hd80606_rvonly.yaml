@@ -1,0 +1,52 @@
+# HD 80606 b from the radial velocities alone: hd80606.yaml without the TESS
+# transit.  Nothing here measures the inclination, so the planet samples
+# (m sin i, cos i) by default (fitmsini) and the mass is reported through the
+# isotropic prior on cos i.  cos i is not pinned.
+
+run:
+  name: "hd80606_rvonly"
+
+prefix: "fitresults/HD80606_rvonly"
+
+star:
+  - name: "A"
+
+evolutionarymodel:
+  - star: "A"
+
+sed:
+  file: "hd80606.sed.yaml"
+
+planet:
+  - name: "b"
+
+orbit:
+  - name: "b"
+    primary: ["A"]
+    companion: ["b"]
+
+parameter_file: "hd80606.params.yaml"
+
+rvinstrument:
+  - name: "ELODIE-2001"
+    file: "HD80606b.ELODIE-2001.rv"
+  - name: "ELODIE-2009"
+    file: "HD80606b.ELODIE-2009.rv"
+  - name: "SOPHIE"
+    file: "HD80606b.SOPHIE.rv"
+    mask: "HD80606b.SOPHIE.mask"
+  - name: "HIRES-pre"
+    file: "HD80606b.HIRES-pre.rv"
+  - name: "HIRES-post"
+    file: "HD80606b.HIRES-post.rv"
+    mask: "HD80606b.HIRES-post.mask"
+
+sampler:
+  method: numpyro
+  tune: 1000
+  draws: 1000
+  chains: 4
+  cores: 4
+  target_accept: 0.95
+  recompute_trace: True
+  profile: False

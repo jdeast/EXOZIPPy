@@ -119,9 +119,8 @@ def inclination_constrained_orbits(system, orbit):
       the orbit's sky geometry per epoch;
     * **the user**: `sigma: 0` on the orbit's `cosi` or `inc` states the
       inclination outright (`Orbit._user_pinned`, the pin `fitchord`'s
-      default already defers to).  `examples/hd80606` pins its published
-      transit inclination this way; sampling m sin i there would only
-      rescale the mass by a constant.
+      default already defers to).  Sampling m sin i under such a pin would
+      only rescale the mass by a constant.
 
     Returns a set of orbit indices.
     """
