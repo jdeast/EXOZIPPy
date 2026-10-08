@@ -447,9 +447,9 @@ def calc_ps(ar, p, ecc, esinw):
 #
 # is the time-averaged incident flux over an eccentric orbit: by Kepler's
 # second law (r^2 dnu/dt = 2 pi a b / P) the time average of (a/r)^2 is
-# exactly (1 - e^2)^(-1/2), so the average flux RISES with e.  Do not
-# "restore" the 1/(1 + e^2/2)^2 that EXOFASTv2's derivepars.pro carried
-# until 2026-10: that is the flux at the time-averaged separation
+# exactly (1 - e^2)^(-1/2) (Williams & Pollard 2002, IJAsB 1, 61), so
+# the average flux RISES with e.  Do not "restore" the 1/(1 + e^2/2)^2
+# that EXOFASTv2's derivepars.pro carried until 2026-10: that is the flux at the time-averaged separation
 # a (1 + e^2/2), which falls with e, is wrong already at O(e^2) and is
 # low by 1.46x at e = 0.5 and 5.2x at e = 0.92.  EXOFASTv2 reports it in
 # 10^9 erg s-1 cm-2; this one reports it in units of Earth's insolation
