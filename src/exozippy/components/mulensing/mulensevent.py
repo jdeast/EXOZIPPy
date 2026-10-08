@@ -12,7 +12,7 @@ This component also owns everything event-scoped that is not a parameter:
 the magnification dispatcher (`get_magnification`/`get_magnification_op`,
 one call per source trajectory over the shared lens bodies), the event-level
 config keys (finite_source, t0_par, backend, mag_method, use_op, the fit*
-coordinate flags, peak_find, source_orbital_motion), the event potentials
+coordinate flags, peak_find, source_orbit), the event potentials
 (event rate, singularity guards, source-behind-lens, the fitpirel
 Jacobian), the seeding hints, and the sampler-compatibility declaration.
 """
@@ -24,6 +24,7 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
+from exozippy.components.orbit.bodies import orbit_types
 from exozippy.config import (
     PRECEDENCE_DERIVED_DATA,
     PRECEDENCE_DERIVED_MIXED,
@@ -162,64 +163,63 @@ class MulensEvent(Component):
                 f"'mulensmodel', got '{self.backend}'."
             )
 
-        # Source orbital motion -- xallarap (C25): keys on this block; the
-        # trajectory shift is applied by the magnification dispatcher below.
-        som = ev.get("source_orbital_motion")
-        self.source_orbital_motion = [som]
+        # Source orbital motion -- xallarap (C25): `source_orbit:` on this
+        # block names the orbit the luminous source moves on; the trajectory
+        # shift is applied by the magnification dispatcher below.  The
+        # orbit's `type:` is what says HOW it moves, so the separate
+        # `source_orbital_motion:` key that used to repeat it is gone.
+        # (A leftover `source_orbital_motion:` key is refused by the shared
+        # key check, bodies.REMOVED_KEYS, with the migration message.)
         self.source_orbit_ref = [ev.get("source_orbit")]
         self.xal_orbit_idx = None
-        if som is not None:
-            if som == "linear":
-                raise NotImplementedError(
-                    "source_orbital_motion: linear is deliberately not "
-                    "offered: a linear source drift is exactly degenerate "
-                    "with (t_E, t_0, u_0, alpha) in the light curve alone "
-                    "(conventions.md C25).  Use "
-                    "'keplerian', or wait for the per-star proper-motion "
-                    "predicate that would make a linear mode meaningful."
-                )
-            if som != "keplerian":
-                raise ValueError(
-                    f"mulensevent.source_orbital_motion must be 'keplerian' "
-                    f"(or absent for a static source), got '{som}'."
-                )
-            if self.source_orbit_ref[0] is None:
-                raise ValueError(
-                    "mulensevent.source_orbital_motion: keplerian requires "
-                    "`source_orbit: <orbit instance name>` on the "
-                    "mulensevent block, naming the orbit of the luminous "
-                    "source about its (dark or faint) companion."
-                )
-            if self.n_sources > 1:
-                raise NotImplementedError(
-                    "source_orbital_motion currently supports a single "
-                    "luminous source; the linked binary-source case (both "
-                    "sources on one orbit, opposite offsets scaled by the "
-                    "mass ratio) is the next step of review 8.6.9."
-                )
+        som = None
+        if self.source_orbit_ref[0] is not None:
             self.xal_orbit_idx = resolve_orbit_ref(
                 config_manager, self.source_orbit_ref[0], self.prefix
             )
+            types = orbit_types(sys_cfg)
+            som = (
+                types[self.xal_orbit_idx]
+                if self.xal_orbit_idx < len(types)
+                else "keplerian"
+            )
+            if som != "keplerian":
+                raise NotImplementedError(
+                    f"mulensevent.source_orbit names a type: {som} orbit.  "
+                    "Linear (or quadratic) xallarap is deliberately not "
+                    "offered: a low-order source drift is exactly "
+                    "degenerate with (t_E, t_0, u_0, alpha) in the light "
+                    "curve alone (conventions.md C25).  Use a keplerian "
+                    "source orbit, or wait for the per-star proper-motion "
+                    "predicate that would make a linear mode meaningful."
+                )
+            if self.n_sources > 1:
+                raise NotImplementedError(
+                    "xallarap currently supports a single luminous source; "
+                    "the linked binary-source case (both sources on one "
+                    "orbit, opposite offsets scaled by the mass ratio) is "
+                    "the next step of review 8.6.9."
+                )
             # The lens binary and the source binary are different systems,
-            # so the companion's `orbit:` (keplerian lens motion, on the
-            # lens component's entries) and this block's `source_orbit:`
-            # must not name the same orbit.  Resolved from the raw lens
-            # block: component construction order is the user's config key
-            # order, so the Lens instance may not exist yet.
-            lens_kep_refs = {
+            # so a lens companion's `orbit:` and this block's
+            # `source_orbit:` must not name the same orbit.  Resolved from
+            # the raw lens block: component construction order is the
+            # user's config key order, so the Lens instance may not exist
+            # yet.
+            lens_refs = {
                 resolve_orbit_ref(config_manager, e["orbit"], f"lens.{i}")
                 for i, e in enumerate(sys_cfg.get("lens") or [])
-                if isinstance(e, dict)
-                and e.get("orbital_motion") == "keplerian"
-                and e.get("orbit") is not None
+                if isinstance(e, dict) and e.get("orbit") is not None
             }
-            if self.xal_orbit_idx in lens_kep_refs:
+            if self.xal_orbit_idx in lens_refs:
                 raise ValueError(
                     f"[{self.prefix}] the lens companion's (`orbit:`) and "
                     f"the event's (`source_orbit:`) references name the "
                     "SAME orbit; the lens binary and the source binary are "
                     "different systems."
                 )
+        # Compat view: "keplerian" when the source moves, else None.
+        self.source_orbital_motion = [som]
 
     def _resolve_t0_par(self, event_config, config_manager):
         """t0_par from the mulensevent block, the source.0.t_0 seed, or the
@@ -352,32 +352,22 @@ class MulensEvent(Component):
                 ),
             },
             {
-                "key": "source_orbital_motion",
-                "kind": "option",
-                "accepts": ["keplerian"],
-                "required": False,
-                "doc": (
-                    "Source orbital motion -- xallarap (conventions.md "
-                    "C25; review 8.6.9). The luminous source's own "
-                    "barycentric sky offset, driven by the orbit named in "
-                    "'source_orbit:', enters the trajectory at exactly "
-                    "the parallax slot, anchored at t0_par, with NO new "
-                    "sampled parameters. 'linear' is deliberately not "
-                    "offered: a linear source drift is exactly degenerate "
-                    "with (t_E, t_0, u_0, alpha) in the light curve "
-                    "alone. Single luminous source for now."
-                ),
-            },
-            {
                 "key": "source_orbit",
                 "kind": "option",
                 "accepts": None,
                 "required": False,
                 "doc": (
-                    "source_orbital_motion: keplerian only -- the orbit "
-                    "instance (name or index) of the luminous source "
-                    "about its (dark or faint) companion. Must differ "
-                    "from the lens companion's 'orbit:' (the lens binary)."
+                    "Source orbital motion -- xallarap (conventions.md "
+                    "C25; review 8.6.9): the orbit instance (name or index) "
+                    "of the luminous source about its (dark or faint) "
+                    "companion.  Its barycentric sky offset enters the "
+                    "trajectory at exactly the parallax slot, anchored at "
+                    "t0_par, with NO new sampled parameters.  The orbit "
+                    "must be type: keplerian -- a linear source drift is "
+                    "exactly degenerate with (t_E, t_0, u_0, alpha) in the "
+                    "light curve alone.  Must differ from the lens "
+                    "companion's 'orbit:' (the lens binary).  Single "
+                    "luminous source for now."
                 ),
             },
             {
@@ -1225,10 +1215,13 @@ class MulensEvent(Component):
             return None
         dt_yr = (times - self.t0_par[0]) / DAYS_PER_YEAR
         if om == "linear":
-            s_t = lens.s.value[1] + lens.ds_dt.value[1] * dt_yr
+            # The rates are the companion's type: linear ORBIT's (anchored
+            # at t0_par, which is that orbit's epoch -- Orbit._taylor_epochs).
+            o = lens.motion_orbit_idx
+            s_t = lens.s.value[1] + system.orbit.ds_dt.value[o] * dt_yr
             alpha_t_deg = (
                 self._alpha_deg(system, 0)
-                + lens.dalpha_dt.value[1] * _RAD_TO_DEG * dt_yr
+                + system.orbit.dalpha_dt.value[o] * _RAD_TO_DEG * dt_yr
             )
             return s_t, alpha_t_deg
         # keplerian: the same physics function the reported s/alpha use
@@ -1838,7 +1831,7 @@ class MulensEvent(Component):
         source_series = self._source_offset_series(times, system)
         if source_series is not None and self.backend == "mulensmodel":
             raise NotImplementedError(
-                "source_orbital_motion requires backend: vbm_direct (the "
+                "xallarap (source_orbit) requires backend: vbm_direct (the "
                 "point-source single-lens case takes the symbolic path "
                 "and needs neither).  MulensModel's native xi_* xallarap "
                 "is not wired as a backend -- unnecessary: C25's machinery "
@@ -1906,7 +1899,8 @@ class MulensEvent(Component):
         elif n_lenses == 2:
             if lens.orbital_motion[0] == "keplerian":
                 raise NotImplementedError(
-                    "orbital_motion: keplerian requires backend: vbm_direct."
+                    "a lens companion on a keplerian orbit requires backend: "
+                    "vbm_direct."
                     "  MulensModel's own keplerian lens motion contradicts "
                     "its linear mode by a sign and is not a usable reference"
                     " (conventions.md section 6, measured 2026-08-27)."
@@ -1925,11 +1919,12 @@ class MulensEvent(Component):
             if geometry_series is not None:
                 # MulensModel's LINEAR branch is definitional in the same
                 # (ds_dt, dalpha_dt) and takes deg/yr; the rates are the
-                # companion's lens vector elements (element 1).
+                # companion's type: linear orbit's.
+                o = lens.motion_orbit_idx
                 param_list.extend(
                     [
-                        lens.ds_dt.value[1],
-                        lens.dalpha_dt.value[1] * _RAD_TO_DEG,
+                        system.orbit.ds_dt.value[o],
+                        system.orbit.dalpha_dt.value[o] * _RAD_TO_DEG,
                     ]
                 )
             if effective_bandpass is not None:
@@ -1945,7 +1940,7 @@ class MulensEvent(Component):
         else:
             if source_series is not None:
                 raise NotImplementedError(
-                    "source_orbital_motion with a FORCED MulensModel "
+                    "xallarap (source_orbit) with a FORCED MulensModel "
                     "single-lens Op (use_op: true) is not wired; drop "
                     "use_op (the symbolic path carries xallarap) or use "
                     "finite_source with backend: vbm_direct."

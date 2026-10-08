@@ -411,12 +411,15 @@ class RVInstrument(Instrument):
         """
         orbits = system.orbit
         members = orbits.star_membership(star_idx)
-        if not members:
+        if not members and not orbits.taylor_membership(star_idx):
             raise ValueError(
                 f"[{self.prefix}] star {star_idx} is not a body of any "
                 f"orbit; no RV model can be built. Add it to an orbit's "
                 f"primary/companion group."
             )
+        if not members:
+            # Only Taylor orbits move this star: no Keplerian term at all.
+            return None, np.zeros(0, dtype=int)
         if not hasattr(orbits, "K"):
             raise ValueError(
                 f"[{self.prefix}] the orbit component has no K parameter "
@@ -480,10 +483,34 @@ class RVInstrument(Instrument):
         """
         orbits = system.orbit
         K_vec, omap = self._orbit_rv_terms(system, self.star_ndx[0])
-        self._plot_orbit_map = omap
+        # Taylor orbits (type: linear | quadratic) the observed star is the
+        # PRIMARY of -- Orbit._taylor_consumers refused the companion side
+        # at stage 3.  Each is one more column, after the Keplerian ones.
+        taylor = [o for o, _ in orbits.taylor_membership(self.star_ndx[0])]
+        self._plot_orbit_map = np.concatenate(
+            [omap, np.asarray(taylor, dtype=int)]
+        ).astype(int)
 
         # sum the contribution from every orbit containing the observed star
-        kep = orbits.get_radial_velocity(t, K_vec, omap)  # (N, n_member)
+        columns = []
+        if omap.size:
+            columns.append(
+                orbits.get_radial_velocity(t, K_vec, omap)  # (N, n_member)
+            )
+        if taylor:
+            columns.append(
+                pt.stack(
+                    [orbits.taylor_radial_velocity(t, o) for o in taylor],
+                    axis=1,
+                )
+            )
+        # One block (the common case, and the only one before Taylor orbits)
+        # is used as it is, so a Keplerian-only graph is unchanged.
+        kep = (
+            columns[0]
+            if len(columns) == 1
+            else pt.concatenate(columns, axis=1)
+        )
         rv_model = pt.sum(kep, axis=1)
         if offset is not None:
             rv_model = offset + rv_model
@@ -617,6 +644,28 @@ class RVInstrument(Instrument):
             key=f"{self.prefix}.rv_model",
             rank=20,
         )
+        taylor_types = sorted(
+            {
+                system.orbit.types[o]
+                for o, _ in system.orbit.taylor_membership(self.star_ndx[0])
+            }
+        )
+        if taylor_types:
+            # The orbit too long to resolve, as the Taylor expansion of the
+            # star's reflex velocity about the orbit's reference epoch.
+            quad = "quadratic" in taylor_types
+            get_collector(system).add(
+                "An additional companion on an orbit too long for the data "
+                "to resolve was modeled as a "
+                + ("quadratic" if quad else "linear")
+                + r" trend in the stellar velocity, $\dot{\gamma}\,(t - "
+                r"t_{\rm ref})"
+                + (r" + \ddot{\gamma}\,(t - t_{\rm ref})^2/2" if quad else "")
+                + r"$, about a reference epoch $t_{\rm ref}$.",
+                section="orbits",
+                key=f"{self.prefix}.rv_trend",
+                rank=21,
+            )
         get_collector(system).add_software("exoplanet-core")
 
     # Points per block on a plotted model grid; one size for the unphased
@@ -1143,6 +1192,11 @@ class RVInstrument(Instrument):
             # Once per (instrument, point), not once per orbit (6.5.1).
             shared = self._phased_shared(system, point)
             for col, o_idx in enumerate(omap):
+                if system.orbit.is_taylor[o_idx]:
+                    # No period to fold on: a Taylor orbit's trend is drawn
+                    # in the unphased chart and removed from every phased
+                    # one as an "other orbit" (its column is in the matrix).
+                    continue
                 prep = self._phased_arrays(
                     system, point, col, o_idx, shared=shared
                 )

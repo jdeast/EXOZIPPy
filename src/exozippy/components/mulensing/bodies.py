@@ -44,11 +44,10 @@ EVENT_KEYS = frozenset(
         "fitmurel",
         "fitpirel",
         "fitthetae",
-        "source_orbital_motion",
         "source_orbit",
     }
 )
-LENS_ENTRY_KEYS = frozenset({"body", "name", "orbital_motion", "orbit"})
+LENS_ENTRY_KEYS = frozenset({"body", "name", "orbit"})
 SOURCE_ENTRY_KEYS = frozenset(
     {"body", "name", "fitu0te", "star_constrains_rho"}
 )
@@ -61,10 +60,9 @@ for _k in EVENT_KEYS - {"name"}:
     _KEY_HOME[_k] = "the 'mulensevent:' block"
 for _k in ("fitu0te", "star_constrains_rho"):
     _KEY_HOME[_k] = "the 'source:' entry of the source body it applies to"
-for _k in ("orbital_motion", "orbit"):
-    _KEY_HOME[_k] = (
-        "the 'lens:' entry of the companion whose geometry it moves"
-    )
+_KEY_HOME["orbit"] = (
+    "the 'lens:' entry of the companion whose geometry it moves"
+)
 for _k in ("lens_ndx", "source_ndx", "lenses", "sources"):
     _KEY_HOME[_k] = (
         "nowhere -- it is a pre-v0.1.0 spelling: the lens block was split "
@@ -94,9 +92,30 @@ _MMEXOFAST_REMOVED = (
     "examples/DC2018/convert_mmexofast_json.py does that conversion for an "
     "existing config and JSON."
 )
+# The orbit types unified lens, source and RV motion (review 8.8.14, JDE
+# 2026-10-07): HOW a body moves is the `type:` of the orbit it moves on, so
+# the per-component keys that restated it -- and could disagree with the
+# orbit -- are gone.
+_ORBITAL_MOTION_REMOVED = (
+    "'orbital_motion:' was removed: a lens companion's motion is set by the "
+    "orbit it moves on.  Put 'orbit: <orbit name>' on the COMPANION's lens "
+    "entry and give that orbit block 'type: keplerian' (the default) or "
+    "'type: linear', with 'primary:' the lens primary's body and "
+    "'companion:' the companion's.  The linear rates are now "
+    "orbit.<name>.ds_dt and orbit.<name>.dalpha_dt in the params file "
+    "(they were lens.<name>.ds_dt / .dalpha_dt)."
+)
+_SOURCE_ORBITAL_MOTION_REMOVED = (
+    "'source_orbital_motion:' was removed: the source's motion is set by "
+    "the orbit it moves on.  Keep 'source_orbit: <orbit name>' on the "
+    "mulensevent block and delete this key; that orbit must be "
+    "'type: keplerian' (the default)."
+)
 REMOVED_KEYS = {
     "mmexofast": _MMEXOFAST_REMOVED,
     "mmexofast_options": _MMEXOFAST_REMOVED,
+    "orbital_motion": _ORBITAL_MOTION_REMOVED,
+    "source_orbital_motion": _SOURCE_ORBITAL_MOTION_REMOVED,
 }
 
 
@@ -218,7 +237,7 @@ def body_entries(block, comp_key, system_config):
                 f"    - body: star.Lens\n"
                 f"Event-level options (finite_source, t0_par, backend, "
                 f"mag_method, use_op, peak_find, fit* flags, "
-                f"source_orbital_motion) live on the `mulensevent:` block."
+                f"source_orbit) live on the `mulensevent:` block."
                 f"{hint}"
             )
         reject_unknown_keys(entry, allowed, where)

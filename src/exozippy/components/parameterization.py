@@ -105,6 +105,56 @@ def _entry_as_dict(entry, options=None, overrides=None):
     return out
 
 
+def restrict_active(entry, active, n_elements):
+    """``entry`` with every element outside ``active`` made INACTIVE.
+
+    For a component whose instances differ in KIND, not just in coordinate
+    choice: an orbit of `type: linear` has no period, eccentricity or mass at
+    all, so every Keplerian entry -- sampled, derived or reported, however a
+    mode table already split it -- must leave that element out.  ``active``
+    is ANDed into the entry's own ``mask``, and each expression selector
+    (``expr_key`` / ``output_expr_key``) is narrowed to the surviving
+    elements, because an element that is both masked out and derived is a
+    contradiction the interpreter refuses.  A whole-vector ``expr_key``
+    string becomes a selector for the same reason.
+
+    Returns ``entry`` unchanged (the same object) when ``active`` covers
+    every element, so a system with one kind of instance builds exactly the
+    graph it always did.  ``inactive_value`` is left to the caller: the
+    default -- the element's resolved initval -- is a finite bookkeeping
+    number, which is all an element nothing reads needs.
+    """
+    active = _selected_mask(active, n_elements)
+    if bool(np.all(active)):
+        return entry
+    parsed = interpret_manifest_entry(entry)
+    out = dict(parsed.options)
+    mask = active.copy()
+    if "mask" in out:
+        mask &= _selected_mask(out["mask"], n_elements)
+    out["mask"] = mask
+
+    def narrowed(key, selectors):
+        if selectors:
+            sel = {
+                k: _selected_mask(v, n_elements) & mask
+                for k, v in selectors.items()
+            }
+        else:
+            sel = {key: mask.copy()}
+        return {k: v for k, v in sel.items() if v.any()}
+
+    if parsed.expr_key is not None or parsed.expr_selectors:
+        sel = narrowed(parsed.expr_key, parsed.expr_selectors)
+        if sel:
+            out["expr_key"] = sel
+    if parsed.output_expr_key is not None or parsed.output_expr_selectors:
+        sel = narrowed(parsed.output_expr_key, parsed.output_expr_selectors)
+        if sel:
+            out["output_expr_key"] = sel
+    return out
+
+
 def mode_manifest(modes, table, n_elements=None, options=None, where=""):
     """Manifest entries for a per-instance parameterization choice.
 

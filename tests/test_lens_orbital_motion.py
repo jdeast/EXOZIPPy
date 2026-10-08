@@ -18,7 +18,8 @@ What is pinned here, and why each pin is the one that matters:
     a sign for dalpha_dt is only meaningful jointly with sign(u_0).
   - The t0_par anchor: at t = t0_par the moving geometry IS (s_0, alpha_0),
     so the magnification there matches the static model exactly.
-  - System level: `orbital_motion: linear` declares ds_dt/dalpha_dt/beta,
+  - System level: a lens companion on a `type: linear` orbit gets the
+    orbit's ds_dt/dalpha_dt and the lens's beta,
     beta evaluates to the A19 formula, and the model builds with a finite
     logp.  Also the mulensmodel backend passes the rates through natively.
 
@@ -352,7 +353,7 @@ def _write_binary_lc(path, n=120):
     return str(path)
 
 
-def _om_system(tmp_path, orbital_motion="linear", backend="vbm_direct"):
+def _om_system(tmp_path, backend="vbm_direct"):
     from exozippy.system import System
 
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -369,8 +370,17 @@ def _om_system(tmp_path, orbital_motion="linear", backend="vbm_direct"):
         ],
         "lens": [
             {"body": "star.L1"},
-            # Orbital motion is the COMPANION's geometry (design 1.4).
-            {"body": "star.L2", "orbital_motion": orbital_motion},
+            # Orbital motion is the COMPANION's geometry (design 1.4), and
+            # the orbit it moves on says how: a `type: linear` orbit's rates.
+            {"body": "star.L2", "orbit": "L"},
+        ],
+        "orbit": [
+            {
+                "name": "L",
+                "type": "linear",
+                "primary": ["L1"],
+                "companion": ["L2"],
+            }
         ],
         "source": [{"body": "star.Source"}],
         "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],
@@ -385,8 +395,8 @@ def _om_system(tmp_path, orbital_motion="linear", backend="vbm_direct"):
         "lens.L2.q": {"initval": _MAP["q"]},
         "mulensevent.pi_E_N": {"initval": _MAP["pi_E_N"]},
         "mulensevent.pi_E_E": {"initval": _MAP["pi_E_E"]},
-        "lens.L2.ds_dt": {"initval": _MAP["ds_dt"]},
-        "lens.L2.dalpha_dt": {"initval": _MAP["dalpha_dt"]},
+        "orbit.L.ds_dt": {"initval": _MAP["ds_dt"]},
+        "orbit.L.dalpha_dt": {"initval": _MAP["dalpha_dt"]},
         "star.L1.mass": {"initval": 0.84},
         "star.L1.distance": {"initval": 1100.0},
         "star.Source.distance": {"initval": 8000.0},
@@ -410,19 +420,27 @@ def linear_om_system(tmp_path_factory):
 
 def test_linear_mode_declares_rates_and_beta(linear_om_system):
     """
-    Given: a lens block with orbital_motion: linear,
+    Given: a lens companion on a `type: linear` orbit,
     When: parameters register,
-    Then: ds_dt, dalpha_dt and beta are in the manifest, and the user's
+    Then: ds_dt and dalpha_dt are the ORBIT's, beta is the lens's, the
+      linear orbit has no Keplerian element left to sample, and the user's
       deg/yr dalpha_dt seed lands as rad/yr internally.
     """
-    system, _ = linear_om_system
-    lens = system.lens
-    for name in ("ds_dt", "dalpha_dt", "beta"):
-        assert name in lens.manifest, f"{name} missing from manifest"
-    # user unit deg/yr -> internal rad/yr; element 1 is the companion
-    # (element 0 is the masked primary, pinned at 0).
-    got = float(np.atleast_1d(lens.dalpha_dt.initval)[1])
+    system, model = linear_om_system
+    for name in ("ds_dt", "dalpha_dt"):
+        assert name in system.orbit.manifest, f"orbit.{name} missing"
+        assert name not in system.lens.manifest
+    assert "beta" in system.lens.manifest
+    # The orbit's only element is the Taylor one: nothing Keplerian samples.
+    orbit_rvs = sorted(
+        v.name for v in model.free_RVs if v.name.startswith("orbit.")
+    )
+    assert orbit_rvs == ["orbit.dalpha_dt_raw", "orbit.ds_dt_raw"]
+    # user unit deg/yr -> internal rad/yr
+    got = float(np.atleast_1d(system.orbit.dalpha_dt.initval)[0])
     np.testing.assert_allclose(got, np.radians(_MAP["dalpha_dt"]), rtol=1e-12)
+    # A lens orbit is anchored at t0_par (C24), whatever else reads it.
+    assert system.orbit.taylor_epoch[0] == _T0_PAR
 
 
 def test_beta_is_the_a19_ratio_and_logp_is_finite(linear_om_system):
@@ -450,8 +468,8 @@ def test_beta_is_the_a19_ratio_and_logp_is_finite(linear_om_system):
                 system.mulensevent.pi_rel.value,
                 system.mulensevent.theta_E.value,
                 system.lens.s.value,
-                system.lens.ds_dt.value,
-                system.lens.dalpha_dt.value,
+                system.orbit.ds_dt.value,
+                system.orbit.dalpha_dt.value,
                 system.star.distance.value,
             ],
             on_unused_input="ignore",
@@ -464,11 +482,11 @@ def test_beta_is_the_a19_ratio_and_logp_is_finite(linear_om_system):
 
     pi_rel = float(np.atleast_1d(pi_rel)[0])
     theta_E = float(np.atleast_1d(theta_E)[0])
-    # Companion geometry lives on element 1; element 0 is the masked
-    # primary (s = 1, rates = 0, beta = 0).
+    # Companion geometry lives on lens element 1; element 0 is the masked
+    # primary (s = 1, beta = 0).  The rates are orbit L's, its element 0.
     s0 = float(np.atleast_1d(s0)[1])
-    ds_dt = float(np.atleast_1d(ds_dt)[1])
-    dalpha_dt = float(np.atleast_1d(dalpha_dt)[1])
+    ds_dt = float(np.atleast_1d(ds_dt)[0])
+    dalpha_dt = float(np.atleast_1d(dalpha_dt)[0])
     d_s = float(np.atleast_1d(dist)[system.mulensevent.source_map[0]])
     pi_E = pi_rel / theta_E
     gamma_sq = (ds_dt / s0) ** 2 + dalpha_dt**2
@@ -486,7 +504,7 @@ def test_beta_is_the_a19_ratio_and_logp_is_finite(linear_om_system):
 
 def test_mulensmodel_backend_gets_native_rates(tmp_path):
     """
-    Given: orbital_motion: linear with backend: mulensmodel,
+    Given: a linear lens orbit with backend: mulensmodel,
     When: the system builds,
     Then: logp is finite (the native ds_dt/dalpha_dt/t_0_kep pass-through
       path constructs a valid MulensModel).
@@ -499,7 +517,7 @@ def test_mulensmodel_backend_gets_native_rates(tmp_path):
 
 def test_orbital_motion_requires_a_companion():
     """
-    Given: a single-lens block asking for orbital_motion,
+    Given: a single-lens block whose (primary) entry names an orbit,
     When: the Lens component is constructed,
     Then: it raises naming the problem (no s or alpha to move).
     """
@@ -512,13 +530,67 @@ def test_orbital_motion_requires_a_companion():
         "mulensevent": [{}],
         "source": [{"body": "star.Source"}],
     }
-    # Post-split the mistake spells itself as orbital_motion on the ONLY
-    # (hence primary) lens entry, and the refusal names the primary.
-    with pytest.raises(ValueError, match="primary|companion"):
+    # The mistake spells itself as `orbit:` on the ONLY (hence primary)
+    # lens entry, and the refusal names the primary.
+    with pytest.raises(ValueError, match="primary"):
+        Lens([{"body": "star.L1", "orbit": "L"}], cm)
+
+
+@pytest.mark.parametrize("motion", ["linear", "keplerian"])
+def test_the_removed_orbital_motion_key_names_its_replacement(motion):
+    """
+    Given: a lens companion entry still carrying `orbital_motion:` (removed
+      when the orbit's `type:` took over),
+    When: the Lens component is constructed,
+    Then: it raises with the migration -- `orbit:` on the companion, the
+      orbit's `type:`, and where the linear rates live now.
+    """
+    from exozippy.components.mulensing.lens import Lens
+    from exozippy.config import ConfigManager
+
+    cm = ConfigManager({})
+    cm.system_config = {
+        "star": [{"name": "L1"}, {"name": "L2"}, {"name": "Source"}],
+        "mulensevent": [{}],
+        "source": [{"body": "star.Source"}],
+    }
+    with pytest.raises(ValueError, match="orbit.<name>.ds_dt") as exc:
         Lens(
-            [{"body": "star.L1", "orbital_motion": "linear"}],
+            [
+                {"body": "star.L1"},
+                {"body": "star.L2", "orbital_motion": motion},
+            ],
             cm,
         )
+    assert "type: linear" in str(exc.value).replace("'", "")
+
+
+def test_a_quadratic_lens_orbit_is_refused():
+    """
+    Given: a lens companion on a `type: quadratic` orbit,
+    When: the Lens component is constructed,
+    Then: it raises NotImplementedError -- the magnification backends take
+      first derivatives only.
+    """
+    from exozippy.components.mulensing.lens import Lens
+    from exozippy.config import ConfigManager
+
+    cm = ConfigManager({})
+    cm.system_config = {
+        "star": [{"name": "L1"}, {"name": "L2"}, {"name": "Source"}],
+        "mulensevent": [{}],
+        "source": [{"body": "star.Source"}],
+        "orbit": [
+            {
+                "name": "L",
+                "type": "quadratic",
+                "primary": ["L1"],
+                "companion": ["L2"],
+            }
+        ],
+    }
+    with pytest.raises(NotImplementedError, match="first derivatives"):
+        Lens([{"body": "star.L1"}, {"body": "star.L2", "orbit": "L"}], cm)
 
 
 def test_mulensmodel_backend_applies_finite_source_at_stellar_q():

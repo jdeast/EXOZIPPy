@@ -21,6 +21,7 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
+from exozippy.components.orbit.bodies import orbit_types
 from exozippy.components.parameterization import mode_manifest
 from exozippy.config import PRECEDENCE_DEFAULT, user_entry
 from exozippy.outputs.prose import get_collector
@@ -44,7 +45,8 @@ class Lens(Component):
         lens:
           - body: star.Lens          # primary; entry 0 is ALWAYS the primary
           - body: planet.b           # companion (planet or star), may carry
-            orbital_motion: linear   #   its own orbital-motion keys
+            orbit: LB                #   its own `orbit:` (the orbit's
+                                     #   type sets the motion)
 
     Any number of lens bodies: the default ``backend: vbm_direct`` is
     N-body (VBMicrolensing MultiMag2); only ``backend: mulensmodel`` caps
@@ -105,7 +107,7 @@ class Lens(Component):
                 "lens: the config must also declare a 'mulensevent:' block "
                 "carrying the event options (finite_source, t0_par, "
                 "backend, mag_method, use_op, peak_find, fit* flags, "
-                "source_orbital_motion).  Pre-v0.1.0 configs put those on "
+                "source_orbit).  Pre-v0.1.0 configs put those on "
                 "the lens block; the lens block is now one entry per lens "
                 "BODY (body: star.<name>)."
             )
@@ -125,23 +127,42 @@ class Lens(Component):
         self._primary_source_ndx = int(src_bodies[0][1])
         n_sources = len(src_bodies)
 
-        # Lens orbital motion (C24): per-COMPANION keys now.  Declaring
-        # orbital_motion on the primary's entry is a config error (a point
-        # primary has no s or alpha to move).
-        if isinstance(self.config[0], dict) and self.config[0].get(
-            "orbital_motion"
-        ):
+        # Lens orbital motion (C24) is a property of the ORBIT a companion
+        # moves on: its `orbit:` key names an orbit block, and that orbit's
+        # `type:` decides the mode -- keplerian derives s(t)/alpha(t) from
+        # its elements, linear supplies the rates ds_dt/dalpha_dt.  The
+        # per-lens `orbital_motion:` key that used to say this separately
+        # (and could disagree with the orbit) is gone.
+        # (A leftover `orbital_motion:` key is refused by the shared key
+        # check, bodies.REMOVED_KEYS, with the migration message.)
+        if isinstance(self.config[0], dict) and self.config[0].get("orbit"):
             raise ValueError(
-                "lens.0 (the primary) carries 'orbital_motion:', but "
-                "orbital motion is a property of a COMPANION's geometry "
-                "(s, alpha); put the key on the companion's entry."
+                "lens.0 (the primary) carries 'orbit:', but orbital motion "
+                "is a property of a COMPANION's geometry (s, alpha); put "
+                "the key on the companion's entry."
             )
-        self._companion_om = [
-            (c or {}).get("orbital_motion") for c in self.config[1:]
-        ]
         self._companion_orbit_ref = [
             (c or {}).get("orbit") for c in self.config[1:]
         ]
+        types = orbit_types(sys_cfg)
+        self._companion_om = []
+        self._companion_orbit_idx = []
+        for j, ref in enumerate(self._companion_orbit_ref):
+            if ref is None:
+                self._companion_om.append(None)
+                self._companion_orbit_idx.append(None)
+                continue
+            o = resolve_orbit_ref(config_manager, ref, f"lens.{j + 1}")
+            t = types[o] if o < len(types) else "keplerian"
+            if t not in ("keplerian", "linear"):
+                raise NotImplementedError(
+                    f"lens.{j + 1}: orbit {ref!r} is type: {t}; a lens "
+                    f"companion moves on a keplerian or a linear orbit "
+                    f"(the magnification backends take first derivatives "
+                    f"only, conventions.md C24)."
+                )
+            self._companion_om.append(t)
+            self._companion_orbit_idx.append(o)
         om_set = [(j, om) for j, om in enumerate(self._companion_om) if om]
         om = om_set[0][1] if om_set else None
         # Event-level compat view (the dispatcher and orbit.py read these).
@@ -150,36 +171,29 @@ class Lens(Component):
             self._companion_orbit_ref[om_set[0][0]] if om_set else None
         ]
         if om is not None:
-            if om not in ("linear", "keplerian"):
-                raise ValueError(
-                    f"lens orbital_motion must be 'linear' or 'keplerian' "
-                    f"(or absent for a static geometry), got '{om}'."
-                )
             if len(om_set) > 1 or self.n_companions > 1:
                 raise NotImplementedError(
-                    "lens orbital_motion currently supports exactly one "
+                    "lens orbital motion currently supports exactly one "
                     "companion (the engine's companion relations are "
                     "binary-only; mulensing.md '3+ lens bodies')."
                 )
-            if om == "keplerian" and self.orbit_ref[0] is None:
-                raise ValueError(
-                    "lens orbital_motion: keplerian requires `orbit: "
-                    "<orbit instance name>` on the companion's entry, "
-                    "naming the orbit that moves the lens bodies (the same "
-                    "vocabulary astrometryinstrument's rel mode uses)."
-                )
             if om == "keplerian" and n_sources > 1:
                 raise NotImplementedError(
-                    "lens orbital_motion: keplerian currently supports a "
-                    "single source (theta_E's per-source normalization "
-                    "would give each source its own Einstein-unit s(t))."
+                    "lens orbital motion on a keplerian orbit currently "
+                    "supports a single source (theta_E's per-source "
+                    "normalization would give each source its own "
+                    "Einstein-unit s(t))."
                 )
 
-        self.kep_orbit_idx = None
-        if om == "keplerian":
-            self.kep_orbit_idx = resolve_orbit_ref(
-                config_manager, self.orbit_ref[0], self.prefix
-            )
+        # The orbit the moving companion is on, of either type (Orbit reads
+        # this to decide what the orbit owes the lens), and -- kept apart --
+        # the keplerian one whose elements derive s/alpha.
+        self.motion_orbit_idx = (
+            self._companion_orbit_idx[om_set[0][0]] if om_set else None
+        )
+        self.kep_orbit_idx = (
+            self.motion_orbit_idx if om == "keplerian" else None
+        )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -243,35 +257,23 @@ class Lens(Component):
                 ),
             },
             {
-                "key": "orbital_motion",
-                "kind": "option",
-                "accepts": ["linear", "keplerian"],
-                "required": False,
-                "doc": (
-                    "Time-dependent geometry of THIS companion "
-                    "(conventions.md C24; review 8.6.8). Absent = static "
-                    "s/alpha, the default. 'linear' samples rates ds_dt "
-                    "[Einstein radii/yr] and dalpha_dt [deg/yr user, "
-                    "rad/yr internal], anchored at t0_par, with a soft "
-                    "beta < 1 bound-orbit potential (Skowron+2011 A19). "
-                    "'keplerian' drives s(t)/alpha(t) from the orbit "
-                    "component named by 'orbit:' with NO new free "
-                    "parameters. Not valid on the primary's entry; exactly "
-                    "one companion for now."
-                ),
-            },
-            {
                 "key": "orbit",
                 "kind": "option",
                 "accepts": None,
                 "required": False,
                 "doc": (
-                    "orbital_motion: keplerian only -- the orbit instance "
-                    "(name or index) whose Keplerian elements move the "
-                    "lens bodies, mirroring astrometryinstrument's rel-"
-                    "mode vocabulary. The orbit's bodies should be the "
-                    "lens bodies, so the RV mass function and the lens "
-                    "geometry share one mass chain."
+                    "The orbit instance (name or index) THIS companion moves "
+                    "on, mirroring astrometryinstrument's rel-mode "
+                    "vocabulary; absent = a static s/alpha.  The orbit's "
+                    "type decides the motion (conventions.md C24): "
+                    "'keplerian' drives s(t)/alpha(t) from its elements with "
+                    "NO new free parameters; 'linear' expands about t0_par "
+                    "with the orbit's rates ds_dt [Einstein radii/yr] and "
+                    "dalpha_dt [deg/yr user, rad/yr internal], under a soft "
+                    "beta < 1 bound-orbit potential (Skowron+2011 A19).  The "
+                    "orbit's bodies should be the lens bodies, so its masses "
+                    "and the lens geometry share one mass chain.  Not valid "
+                    "on the primary's entry; exactly one companion for now."
                 ),
             },
         ]
@@ -285,7 +287,7 @@ class Lens(Component):
 
         All FULL-LENGTH (one entry per LENS ELEMENT: `event_map`,
         `primary_lens_map`, `primary_source_map`, `companion_body_map`,
-        `lens_kep_orbit_map`), so the per-element expression machinery can
+        `lens_kep_orbit_map`, `lens_motion_orbit_map`), so the per-element expression machinery can
         PROVE alignment and slice them to the active (companion) elements
         -- a length-1 map under a masked vector fails the aligned check by
         design (component.py).  Entry 0 of each is a filler that the
@@ -343,6 +345,10 @@ class Lens(Component):
             self.companion_type_code = type_code
         if self.kep_orbit_idx is not None:
             self.lens_kep_orbit_map = np.full(n, self.kep_orbit_idx, dtype=int)
+        if self.motion_orbit_idx is not None:
+            self.lens_motion_orbit_map = np.full(
+                n, self.motion_orbit_idx, dtype=int
+            )
 
     def register_parameters(self, system):
         """Stage 3: the per-body manifest (masked primary)."""
@@ -461,15 +467,14 @@ class Lens(Component):
             table = {
                 "primary": {},
                 "companion": dict(static_geom),
-                # Linear lens orbital motion (C24): rates anchored at
-                # t0_par (the parallax anchor -- one epoch is what makes
-                # the two effects composable), plus the derived beta
-                # (Skowron A19), softly bounded below 1 in
-                # build_likelihood.
+                # Linear lens orbital motion (C24): the companion's orbit is
+                # type: linear, whose rates ds_dt/dalpha_dt (orbit
+                # parameters, anchored at t0_par -- the parallax anchor, one
+                # epoch is what makes the two effects composable) move the
+                # static geometry here; the derived beta (Skowron A19) is
+                # softly bounded below 1 in build_likelihood.
                 "companion_linear": {
                     **static_geom,
-                    "ds_dt": None,
-                    "dalpha_dt": None,
                     "beta": "default",
                 },
                 # keplerian mode (C24): NO sampled geometry coordinates at
@@ -493,8 +498,6 @@ class Lens(Component):
                 "xalpha": {"inactive_value": 1.0},
                 "yalpha": {"inactive_value": 0.0},
                 "alpha": {"inactive_value": 0.0},
-                "ds_dt": {"inactive_value": 0.0},
-                "dalpha_dt": {"inactive_value": 0.0},
                 "beta": {"inactive_value": 0.0},
             }
             self.manifest = mode_manifest(

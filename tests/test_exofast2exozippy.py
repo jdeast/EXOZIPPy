@@ -10,7 +10,10 @@ reads the emitted YAML back:
   - EXOFASTv2's numbering: transit files in sorted-filename order, bands by
     SORTED unique name, an unsuffixed prior as instance 0;
   - circular=, mistsedfile=, the MIST tracks, the SED floors, and an
-    absolute prefix kept out of the EXOFASTv2 fit's own directory.
+    absolute prefix kept out of the EXOFASTv2 fit's own directory;
+  - /fitslope and /fitquad as a Taylor orbit (orbit type linear/quadratic),
+    and a priors.final's section headers re-pointing priors written for a
+    different set of data files.
 """
 
 import pytest
@@ -44,8 +47,10 @@ def converted(tmp_path, monkeypatch):
     return _convert(tmp_path, monkeypatch, _DRIVER)
 
 
-def _convert(tmp_path, monkeypatch, driver):
-    """Convert ``driver`` against _DRIVER's data files and priors."""
+def _convert(
+    tmp_path, monkeypatch, driver, priors=_PRIORS, priorfile_override=None
+):
+    """Convert ``driver`` against _DRIVER's data files and ``priors``."""
     data = tmp_path / "data"
     data.mkdir()
     for name in (
@@ -57,14 +62,16 @@ def _convert(tmp_path, monkeypatch, driver):
     (data / "HIRES.rv").write_text("2458484.5 0.0 5.0\n")
     (data / "star.sed").write_text("J2M 10.0 0.02 0.02\n")
     (tmp_path / "fit.pro").write_text(driver)
-    (tmp_path / "fit.priors").write_text(_PRIORS)
+    (tmp_path / "fit.priors").write_text(priors)
     monkeypatch.setenv("E2Z_TEST_ROOT", str(tmp_path))
     monkeypatch.setattr(e2z, "WARNINGS", [])
     monkeypatch.setattr(e2z, "INFOS", [])
 
     out = tmp_path / "out"
     out.mkdir()
-    e2z.convert(tmp_path / "fit.pro", out, "t")
+    e2z.convert(
+        tmp_path / "fit.pro", out, "t", priorfile_override=priorfile_override
+    )
 
     config = yaml.safe_load((out / "t.yaml").read_text())
     params = yaml.safe_load((out / "t.params.yaml").read_text())
@@ -303,3 +310,129 @@ def test_fitspline_length_mismatch_raises(tmp_path, monkeypatch):
     """
     with pytest.raises(ValueError, match=r"fitspline=.*2 entries for 3"):
         _convert(tmp_path, monkeypatch, _driver_with("fitspline=[0,1]"))
+
+
+# ---------------------------------------------------------------------------
+# /fitslope, /fitquad -> a Taylor orbit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "flag, otype", [("/fitslope", "linear"), ("/fitquad", "quadratic")]
+)
+def test_an_rv_trend_becomes_a_taylor_orbit(
+    tmp_path, monkeypatch, flag, otype
+):
+    """
+    Given /fitslope (or /fitquad), an RVEPOCH, and slope/quad priors,
+    When the driver is converted,
+    Then a `trend` orbit of type linear (quadratic) is added with the star as
+      its primary and RVEPOCH as its epoch, the slope prior lands on
+      orbit.trend.gammadot unchanged, and the quad prior on gammaddot at
+      TWICE its value -- EXOFASTv2's QUAD is the coefficient of (t - t0)^2,
+      gammaddot the second derivative.  Nothing is warned about.
+    """
+    priors = _PRIORS + "slope -1.5\nquad 0.002 0.001\n"
+    config, params, warnings, _ = _convert(
+        tmp_path,
+        monkeypatch,
+        _driver_with(f"{flag}, rvepoch=2458500.0"),
+        priors=priors,
+    )
+    trend = config["orbit"][-1]
+    assert trend == {
+        "name": "trend",
+        "type": otype,
+        "primary": ["A"],
+        "epoch": 2458500.0,
+    }
+    assert params["orbit.trend.gammadot"] == {"initval": -1.5}
+    assert params["orbit.trend.gammaddot"] == {
+        "initval": 0.004,
+        "mu": 0.004,
+        "sigma": 0.002,
+    }
+    assert not [w for w in warnings if "slope" in w or "quad" in w]
+
+
+def test_an_rv_trend_without_rvs_is_moot(tmp_path, monkeypatch):
+    """
+    Given /fitslope but no RV files,
+    Then no trend orbit is emitted, and the note says why.
+    """
+    driver = _driver_with("/fitslope").replace("rvpath=path+'*.rv', ", "")
+    config, _, _, infos = _convert(tmp_path, monkeypatch, driver)
+    assert [o["name"] for o in config["orbit"]] == ["b"]
+    assert any("moot" in i and "fitslope" in i for i in infos)
+
+
+# ---------------------------------------------------------------------------
+# A priors.final's section headers outrank a stale _N index
+# ---------------------------------------------------------------------------
+
+# Written by a run on ONLY the TESS file and one FLWO band: its transit 0 is
+# TESS and its band 0 is TESS, while this conversion numbers the TESS file 2
+# and the TESS band 2 (Sloang, Sloanz, TESS sorted).
+_STALE_PRIORS = """\
+teff 5700 100
+# TESS
+u1_0 0.31 0.1
+# TESS UT 2020-01-01 (TESS)
+variance_0 1e-6
+# FLWO UT 2019-01-02 (z')
+f0_1 1.001
+"""
+
+
+def test_section_headers_re_point_stale_indices(tmp_path, monkeypatch):
+    """
+    Given a priors.final whose _N indices were written for another file
+      set, with EXOFASTv2's own section headers,
+    When it is converted,
+    Then each prior lands on the instance its header NAMES (the TESS band,
+      the TESS transit) -- not on whatever this conversion numbers _N --
+      and a prior whose header names a dataset this conversion lacks is
+      dropped with a warning instead of landing on an unrelated file.
+    """
+    _, params, warnings, infos = _convert(
+        tmp_path, monkeypatch, _DRIVER, priors=_STALE_PRIORS
+    )
+    assert params["band.TESS.u1"]["mu"] == 0.31
+    assert "band.Sloang.u1" not in params
+    assert "transit.TESS_UT20200101.jitter_variance" in params
+    assert not any(k.endswith(".baseline") for k in params)
+    assert any("re-pointed" in i for i in infos)
+    assert any("names no transit" in w for w in warnings)
+
+
+def test_priorfile_override_replaces_the_drivers(tmp_path, monkeypatch):
+    """
+    Given --priorfile naming another file,
+    When the driver is converted,
+    Then that file's priors are used, and the note says which file won.
+    """
+    other = tmp_path / "run.priors.final"
+    other.write_text("teff 6100 80\n")
+    _, params, _, infos = _convert(
+        tmp_path, monkeypatch, _DRIVER, priorfile_override=other
+    )
+    assert params["star.A.teff"]["mu"] == 6100
+    assert any("--priorfile" in i for i in infos)
+
+
+def test_multi_planet_conversions_point_each_planet_at_its_orbit(
+    tmp_path, monkeypatch
+):
+    """
+    Given nplanets=2,
+    Then each planet block carries its own orbit_ndx -- without it every
+      planet would read orbit 0's geometry.
+    """
+    driver = _DRIVER.replace("nplanets=1", "nplanets=2").replace(
+        "circular=[1]", "circular=[1,0]"
+    )
+    config, _, _, _ = _convert(tmp_path, monkeypatch, driver)
+    assert config["planet"] == [
+        {"name": "b", "orbit_ndx": 0},
+        {"name": "c", "orbit_ndx": 1},
+    ]

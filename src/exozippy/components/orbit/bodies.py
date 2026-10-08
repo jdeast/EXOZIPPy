@@ -25,6 +25,29 @@ symbolic_physics module can share the same parser for the relaxation-engine
 custom solver.
 """
 
+# Orbit `type:` values whose orbit is a low-order Taylor expansion about a
+# reference epoch rather than a Keplerian (see orbit.md "Taylor orbits").
+TAYLOR_TYPES = ("linear", "quadratic")
+
+
+def orbit_types(system_config):
+    """Each orbit block's `type:` (default "keplerian"), in block order.
+
+    Read off the raw config so a component built BEFORE the orbit (the lens
+    resolves its companion's `orbit:` at construction) asks the same
+    question the Orbit itself answers.  Validation of the value is the
+    Orbit's (`Orbit._parse_types`); this only reads it.
+    """
+    section = (system_config or {}).get("orbit") or []
+    if not isinstance(section, list):
+        section = [section]
+    return [
+        (c or {}).get("type", "keplerian")
+        if isinstance(c, dict)
+        else "keplerian"
+        for c in section
+    ]
+
 
 def component_instance_names(system_config, comp_key):
     """Instance names of a component section, mirroring Component.names."""
@@ -119,7 +142,30 @@ def parse_orbit_bodies(orbit_cfgs, system_config):
 
         prim_cfg = cfg.get("primary")
         comp_cfg = cfg.get("companion")
-        if prim_cfg is None and comp_cfg is None:
+        taylor = cfg.get("type", "keplerian") in TAYLOR_TYPES
+        if taylor:
+            # A Taylor orbit is a companion too long-period to resolve, and
+            # usually one nothing else in the model names: its companion
+            # group may be EMPTY (an unseen body), so the implicit planet
+            # pairing below -- which would invent `planet.<i>` -- must not
+            # run.  The primary group is the one that accelerates, and has
+            # to be said.
+            if prim_cfg is None:
+                raise ValueError(
+                    f"{ctx}a type: {cfg.get('type')} orbit needs an explicit "
+                    f"'primary:' group (the bodies whose motion the Taylor "
+                    f"terms describe); its 'companion:' may be omitted for "
+                    f"an unseen companion."
+                )
+            prim_b = [
+                parse_body_ref(r, star_names, planet_names, ctx)
+                for r in _as_list(prim_cfg)
+            ]
+            comp_b = [
+                parse_body_ref(r, star_names, planet_names, ctx)
+                for r in _as_list(comp_cfg if comp_cfg is not None else [])
+            ]
+        elif prim_cfg is None and comp_cfg is None:
             # Legacy implicit topology: companion = planets pointing here,
             # primary = their host stars.
             comp_b = [
@@ -153,7 +199,7 @@ def parse_orbit_bodies(orbit_cfgs, system_config):
                 for r in _as_list(comp_cfg)
             ]
 
-        if not prim_b or not comp_b:
+        if not prim_b or (not comp_b and not taylor):
             raise ValueError(
                 f"{ctx}primary and companion groups must each "
                 f"contain at least one body."

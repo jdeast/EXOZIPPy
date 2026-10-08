@@ -82,7 +82,6 @@ def _xal_system(tmp_path, finite_source=False, binary_lens=False):
         "mulensevent": [
             {
                 "finite_source": finite_source,
-                "source_orbital_motion": "keplerian",
                 "source_orbit": "S",
                 "t0_par": _T0_PAR,
             }
@@ -366,26 +365,27 @@ def test_config_validation():
         return cm
 
     single = [{"body": "star.L1"}]
+    linear_s = [
+        {
+            "name": "S",
+            "type": "linear",
+            "primary": ["Source"],
+            "companion": ["SComp"],
+        }
+    ]
+    # A linear source orbit is the degenerate drift C25 refuses.
     with pytest.raises(NotImplementedError, match="degenerate"):
-        MulensEvent([{"source_orbital_motion": "linear"}], _cm(single))
+        MulensEvent([{"source_orbit": "S"}], _cm(single, orbits=linear_s))
+    # The removed key names its replacement.
     with pytest.raises(ValueError, match="source_orbit"):
         MulensEvent([{"source_orbital_motion": "keplerian"}], _cm(single))
     with pytest.raises(ValueError, match="SAME orbit"):
         MulensEvent(
-            [
-                {
-                    "source_orbital_motion": "keplerian",
-                    "source_orbit": "S",
-                }
-            ],
+            [{"source_orbit": "S"}],
             _cm(
                 [
                     {"body": "star.L1"},
-                    {
-                        "body": "star.L2",
-                        "orbital_motion": "keplerian",
-                        "orbit": "S",
-                    },
+                    {"body": "star.L2", "orbit": "S"},
                 ],
                 orbits=[
                     {

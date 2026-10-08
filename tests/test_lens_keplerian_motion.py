@@ -70,7 +70,9 @@ def _kep_system(tmp_path, cosi=0.5):
         "lens": [
             {"body": "star.L1"},
             # Orbital motion is the COMPANION's geometry (design 1.4).
-            {"body": "star.L2", "orbital_motion": "keplerian", "orbit": "L"},
+            # Orbit L is keplerian (the default type), so its elements
+            # derive the geometry.
+            {"body": "star.L2", "orbit": "L"},
         ],
         "source": [{"body": "star.Source"}],
         "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],
@@ -262,10 +264,11 @@ def test_no_new_free_parameters_and_reported_geometry(kep_system):
 
 def test_keplerian_config_validation():
     """
-    Given: keplerian without an orbit reference, an unknown orbit name, or
-      the key on the primary's entry,
-    Then: construction raises naming the problem (the keys live on the
-      COMPANION's lens entry post-split, design 1.4).
+    Given: an unknown orbit name, or `orbit:` on the primary's entry,
+    Then: construction raises naming the problem (the key lives on the
+      COMPANION's lens entry post-split, design 1.4).  A companion with no
+      `orbit:` is simply static -- the orbit's type, not a lens key, says
+      whether and how it moves.
     """
     from exozippy.components.mulensing.lens import Lens
     from exozippy.config import ConfigManager
@@ -281,24 +284,11 @@ def test_keplerian_config_validation():
             cm.system_config["orbit"] = orbits
         return cm
 
-    with pytest.raises(ValueError, match="orbit"):
-        Lens(
-            [
-                {"body": "star.L1"},
-                {"body": "star.L2", "orbital_motion": "keplerian"},
-            ],
-            _cm(),
-        )
-
     with pytest.raises(ValueError, match="unknown orbit"):
         Lens(
             [
                 {"body": "star.L1"},
-                {
-                    "body": "star.L2",
-                    "orbital_motion": "keplerian",
-                    "orbit": "nope",
-                },
+                {"body": "star.L2", "orbit": "nope"},
             ],
             _cm(orbits=[{"name": "L"}]),
         )
@@ -306,11 +296,7 @@ def test_keplerian_config_validation():
     with pytest.raises(ValueError, match="primary"):
         Lens(
             [
-                {
-                    "body": "star.L1",
-                    "orbital_motion": "keplerian",
-                    "orbit": "L",
-                },
+                {"body": "star.L1", "orbit": "L"},
                 {"body": "star.L2"},
             ],
             _cm(orbits=[{"name": "L"}]),

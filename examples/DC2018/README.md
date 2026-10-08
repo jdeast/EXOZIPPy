@@ -91,7 +91,7 @@ ground. Event **131** stays with a different flag: its static truth fits at
 chi2/N = 1.12 and motion does not help, so something else is in that curve.
 
 These events come back when the orbital-motion rung exists (the model does:
-`orbital_motion: linear` / `keplerian` on the lens block, conventions.md
+a `type: linear` / `keplerian` orbit named by the lens companion's `orbit:`, conventions.md
 C24). Architecture selection -- orbital motion, binary-star lenses, binary
 sources, the challenge's CV and free-floating-planet classes -- is the
 roadmap item after static 2L1S works.

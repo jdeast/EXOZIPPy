@@ -24,8 +24,8 @@ logger_level: INFO
 #
 # The two halves of the fit are FULLY coupled: the companion's q is derived
 # from star.L2.mass / star.L1.mass, the orbit derives m_total / a / K from
-# the same two mass nodes, and -- with orbital_motion: keplerian on the
-# companion's lens entry -- the SAME orbit drives the geometry s(t)/alpha(t) in the
+# the same two mass nodes, and -- with the lens companion's `orbit: L`, a
+# keplerian orbit -- the SAME orbit drives the geometry s(t)/alpha(t) in the
 # magnification with no new free parameters (conventions.md C24; review
 # 8.6.8 5b).  That is Skowron+2011's proposed over-constraint test: the RVs
 # pin P/tp/e/omega_*/K, the light curve pins the geometry, and bigomega and
@@ -45,7 +45,6 @@ lens:
     # Orbital motion is the COMPANION's geometry, so its keys live on the
     # companion's entry, never the primary's.
   - body: star.L2
-    orbital_motion: keplerian
     orbit: "L"
 
 source:
@@ -67,7 +66,8 @@ orbit:
   - name: "L"
     primary:   ["L1"]          # the RV star
     companion: ["L2"]
-    # No i180 hand-holding anymore: with orbital_motion: keplerian the lens
+    # No i180 hand-holding anymore: with the companion on this keplerian
+    # orbit the lens
     # geometry consumes this orbit, the sky rotation sense of the binary
     # axis measures sign(cos i), and the orbit component itself widens
     # cos i to [-1, 1] and samples bigomega (Orbit._lens_keplerian_orbits).

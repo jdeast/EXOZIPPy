@@ -387,7 +387,7 @@ def key_alpha_to_exozippy(alpha_key, phase, inc):
     motion light curve, which constrains only the trajectory angle to the
     instantaneous binary axis (our alpha, = MulensModel's = MMEXOFAST's);
     the phase/inc term is invisible to such a fit, and is (weakly)
-    constrained only under `orbital_motion: keplerian`, where alpha(t) is
+    constrained only on a keplerian lens orbit, where alpha(t) is
     derived from the orbit.  The > 1 deg short-period residuals are that
     axis rotating during the event: a static fit's alpha sits at an
     effective mean axis, while the key quotes the phase at a reference
