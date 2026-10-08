@@ -1894,6 +1894,19 @@ class Orbit(Component):
                         coeff, np.zeros(self.n_elements, dtype=bool)
                     )[o] = True
         out = {}
+        if "gammadot" in masks:
+            # What an RV slope implies about the unseen companion: a reported
+            # lower bound on M_c / r^2, on exactly the orbits with a slope.
+            mask = masks["gammadot"]
+            out["mc_over_r2_min"] = (
+                "default"
+                if mask.all()
+                else {
+                    "expr_key": {"default": mask.copy()},
+                    "mask": mask.copy(),
+                    "inactive_value": 0.0,
+                }
+            )
         for coeff in ("gammadot", "gammaddot", "ds_dt", "dalpha_dt"):
             if coeff not in masks:
                 continue

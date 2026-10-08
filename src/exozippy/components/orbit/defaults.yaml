@@ -691,3 +691,17 @@ orbit:
     latex: "\\dot{\\alpha}"
     description: "Trajectory angle rate of change"
     debug_print: true
+  mc_over_r2_min:
+    # LOWER bound on M_companion / r^2 implied by an RV slope:
+    # |gammadot| = G M_c cos(theta) / r^2 <= G M_c / r^2 (physics.
+    # calc_mc_over_r2_min).  Reported on every RV-read Taylor orbit, never a
+    # potential (review 8.8.14: "report them; a potential on a consequence
+    # double-counts").  1 M_J at 1 AU is 0.489 m/s/day.
+    unit: "jupiterMass/AU2"
+    internal_unit: "jupiterMass/AU2"
+    latex: "(M_c/r^2)_{\\rm min}"
+    description: "Companion mass/separation$^2$ lower bound"
+    expressions:
+      default:
+        func_name: "calc_mc_over_r2_min"
+        deps: [ "gammadot" ]

@@ -116,6 +116,31 @@ def test_the_trend_is_the_taylor_series_about_the_epoch(tmp_path, otype):
     assert list(rvi._plot_orbit_map) == [0]
 
 
+def test_a_slope_reports_its_companion_mass_over_r2_bound(tmp_path):
+    """
+    Given an RV-read linear Taylor orbit with a seeded slope,
+    When the model is built,
+    Then orbit.<trend>.mc_over_r2_min is |gammadot| / G in M_J/AU^2 --
+      1 M_J at 1 AU pulls a star at 0.489 m/s/day -- reported as a derived
+      bound and entering no potential.
+    """
+    rv = _write_rv(tmp_path / "t.rv")
+    orbit = {"name": "trend", "type": "linear", "primary": ["A"]}
+    system, model = _system(
+        _config(rv, [orbit]), {"orbit.trend.gammadot": {"initval": -0.8}}
+    )
+    orb = system.orbit
+    got = orb.mc_over_r2_min.from_internal(
+        _at_start(system, model, orb.mc_over_r2_min.value)
+    )
+    np.testing.assert_allclose(
+        np.atleast_1d(got)[0], 0.8 / 0.48909515328448067, rtol=1e-6
+    )
+    assert not any("mc_over_r2_min" in p.name for p in model.potentials), (
+        "a bound is reported, never a potential"
+    )
+
+
 def test_a_trend_beside_a_planet_adds_to_the_keplerian(tmp_path):
     """
     Given a planet's Keplerian orbit and a linear Taylor orbit on one star,
@@ -228,6 +253,9 @@ def test_the_keplerian_elements_are_inactive_on_a_taylor_orbit(tmp_path):
         assert not par.element_is_active(1), name
     assert not orbit.gammadot.element_is_active(0)
     assert orbit.gammadot.element_is_active(1)
+    # The slope's bound lives where the slope does.
+    assert not orbit.mc_over_r2_min.element_is_active(0)
+    assert orbit.mc_over_r2_min.element_is_active(1)
 
 
 def test_restrict_active_leaves_an_all_active_entry_untouched():

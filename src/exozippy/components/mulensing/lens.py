@@ -476,6 +476,9 @@ class Lens(Component):
                 "companion_linear": {
                     **static_geom,
                     "beta": "default",
+                    # What the linear orbit implies about the period (8.8.14):
+                    # a reported lower bound, checked post-fit.
+                    "period_min": "default",
                 },
                 # keplerian mode (C24): NO sampled geometry coordinates at
                 # all -- s and alpha are DERIVED from the referenced orbit
@@ -499,6 +502,7 @@ class Lens(Component):
                 "yalpha": {"inactive_value": 0.0},
                 "alpha": {"inactive_value": 0.0},
                 "beta": {"inactive_value": 0.0},
+                "period_min": {"inactive_value": 0.0},
             }
             self.manifest = mode_manifest(
                 modes, table, options=options, where=self.prefix

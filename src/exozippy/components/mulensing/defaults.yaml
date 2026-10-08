@@ -457,6 +457,23 @@ lens:
                 "orbit.ds_dt[lens_motion_orbit_map]",
                 "orbit.dalpha_dt[lens_motion_orbit_map]",
                 "star.distance[primary_source_map]" ]
+  period_min:
+    # LOWER bound on the lens binary's period from its projected separation:
+    # r_sky <= a(1 + e) < 2a, so P > sqrt((r_sky/2)^3 / M_total)
+    # (physics.calc_period_min).  Reported on a companion moving on a
+    # `type: linear` orbit, where no period is fitted; never a potential
+    # (review 8.8.14).  Reported only, no truncation warning: see
+    # physics.calc_period_min for why.
+    unit: "d"
+    internal_unit: "d"
+    latex: "P_{\\rm min}"
+    description: "Orbital period lower bound"
+    expressions:
+      default:
+        func_name: "calc_period_min"
+        deps: [ "mulensevent.pi_rel[event_map]",
+                "mulensevent.theta_E[event_map]", "s",
+                "star.distance[primary_source_map]" ]
   # log10 of the projected separation is the SAMPLED coordinate (s below is
   # derived as 10**log_s).  Sampling in log_s makes the close/wide
   # degeneracy an exact reflection log_s -> -log_s with |J| = 1, which the
