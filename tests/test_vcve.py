@@ -525,6 +525,89 @@ def test_a_branch_that_cannot_compose_with_another_raises():
             system.register_branch_alternative("bad", {d: pt.zeros(2)})
 
 
+def test_a_replaced_node_no_term_reads_is_the_identity():
+    """
+    Given a branch replacing two nodes, one of which no logp term reads,
+    When the mixture is added,
+    Then it builds, and the logp is the marginalization over the node that
+      IS read -- the unread one changes nothing.
+
+    That is a prior-only V_c/V_e orbit (review 2.8.15): it replaces its
+    clipped `ecc`, which only a likelihood reads, alongside nodes its own
+    prior potentials read.  graph_replace refuses an unused key, so this was
+    unbuildable ("Some replacements were not used: {orbit.ecc: ...}").
+    """
+    import scipy.stats as st
+
+    system = System.__new__(System)
+    system._branch_alternatives = []
+
+    with pm.Model() as model:
+        x = pm.Normal("x")
+        read = pm.Deterministic("read", x * 2.0)
+        unread = pm.Deterministic("unread", x * 3.0)
+        pm.Potential("prior_on_read", -0.5 * pt.sqr(read))
+        system.register_branch_alternative(
+            "toy", {read: read + 1.0, unread: unread - 4.0}
+        )
+        assert system._add_branch_mixtures(model) == 2
+
+    got = float(np.asarray(model.compile_logp()({"x": 0.5})))
+    expected = st.norm.logpdf(0.5) + np.logaddexp(
+        -0.5 * 1.0**2 + np.log(0.5), -0.5 * 2.0**2 + np.log(0.5)
+    )
+    assert got == pytest.approx(expected, rel=1e-12)
+
+
+def test_a_branch_no_term_reads_at_all_raises():
+    """
+    Given a branch NONE of whose replaced nodes any logp term reads,
+    When the mixture is added,
+    Then it raises naming the branch.
+
+    Dropping an unread node is the identity, so a branch with nothing left
+    would add combinations identical to their complements -- a silent no-op
+    hiding a component that declared its branch against the wrong nodes.
+    """
+    system = System.__new__(System)
+    system._branch_alternatives = []
+
+    with pm.Model() as model:
+        x = pm.Normal("x")
+        unread = pm.Deterministic("unread", x * 3.0)
+        pm.Potential("prior_on_x", -0.5 * pt.sqr(x))
+        system.register_branch_alternative("dangling", {unread: unread + 1.0})
+        with pytest.raises(ValueError, match="'dangling'.*cannot change"):
+            system._add_branch_mixtures(model)
+
+
+def test_a_replaced_node_from_another_model_raises():
+    """
+    Given a branch replacing a node built in a DIFFERENT model (a stale node
+      from a previous build, 3.14.12) beside one this model reads,
+    When the mixture is added,
+    Then it raises naming the node, rather than dropping it as unread.
+
+    An unread node of THIS model is legal (the test above); one that does not
+    descend from this model's free variables is a bookkeeping bug whose
+    substitution would silently reach nothing.
+    """
+    with pm.Model():
+        stale = pm.Deterministic("stale", pm.Normal("old") * 1.0)
+
+    system = System.__new__(System)
+    system._branch_alternatives = []
+    with pm.Model() as model:
+        x = pm.Normal("x")
+        read = pm.Deterministic("read", x * 2.0)
+        pm.Potential("prior_on_read", -0.5 * pt.sqr(read))
+        system.register_branch_alternative(
+            "mixed", {read: read + 1.0, stale: stale + 1.0}
+        )
+        with pytest.raises(ValueError, match="'stale'.*free variable"):
+            system._add_branch_mixtures(model)
+
+
 # ---------------------------------------------------------------------------
 # 4. End to end
 # ---------------------------------------------------------------------------
@@ -966,6 +1049,130 @@ def test_the_implied_prior_over_the_whole_plane_is_flat_in_e_and_omega(
     )
     w_hist /= w_hist.mean()
     assert np.abs(w_hist - 1.0).max() < 0.02, np.round(w_hist, 4)
+
+
+@pytest.fixture(scope="module")
+def vcve_prior_only_fit():
+    """A V_c/V_e orbit with NO data: star, planet, orbit, nothing observed."""
+    config = {
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "b"}],
+        "orbit": [{"name": "b", "fitvcve": True, "fitchord": False}],
+    }
+    params = {
+        "star.A.logmass": {"initval": 0.0, "sigma": 0},
+        "star.A.radius": {"initval": 1.0, "sigma": 0},
+        "orbit.b.logP": {"initval": 0.5},
+    }
+    system = System(config, user_params=params)
+    system.prepare()
+    model = system.build_model()
+    return system, model
+
+
+def test_a_prior_only_vcve_orbit_builds_and_marginalizes_its_prior(
+    vcve_prior_only_fit,
+):
+    """
+    Given a fitvcve orbit with no data,
+    When the model is built,
+    Then it builds, and its branch mixture is exactly the two-root
+      marginalization of the V_c/V_e prior terms, at the start and away from it.
+
+    Review 2.8.15: this raised "Some replacements were not used:
+    {orbit.ecc: ...}", because only a likelihood reads the clipped `ecc` the
+    branch replaces.  There is no reason for a prior-only orbit to be
+    unbuildable -- sampling one is how the implied prior is checked.
+    """
+    from pytensor.graph.replace import graph_replace
+
+    system, model = vcve_prior_only_fit
+    (mixture,) = [p for p in model.potentials if p.name == "branch_mixture"]
+    names = {
+        "orbit.vcve_jacobian",
+        "orbit.vcve_root_exists",
+        "orbit.vcve_real_root",
+        "orbit.e_collision_bound",
+    }
+    lp_hi = pt.add(*[pt.sum(p) for p in model.potentials if p.name in names])
+    (branch,) = system._branch_alternatives
+    replacements = {
+        k: v
+        for k, v in branch["replacements"].items()
+        if k is not system.orbit.ecc.value
+    }
+    lp_lo = graph_replace(lp_hi, replacements)
+    outs = model.replace_rvs_by_values([mixture, lp_hi, lp_lo])
+    compiled = pytensor.function(
+        model.value_vars, outs, on_unused_input="ignore"
+    )
+
+    def fn(point):
+        return compiled(*[point[v.name] for v in model.value_vars])
+
+    start = system.get_raw_start(model)
+    moved = ("orbit.vcve", "orbit.xomega", "orbit.yomega")
+    rng = np.random.default_rng(3)
+    for k in range(4):
+        point = dict(start)
+        for name in point:
+            if k and name.startswith(moved):
+                step = rng.normal(0.0, 0.5, np.shape(point[name]))
+                point[name] = point[name] + step
+        got, hi, lo = (float(np.asarray(v)) for v in fn(point))
+        expected = np.logaddexp(hi + np.log(0.5), lo + np.log(0.5)) - hi
+        assert np.isfinite(got)
+        assert got == pytest.approx(expected, rel=1e-12, abs=1e-12)
+
+
+def test_a_prior_only_vcve_orbit_implies_the_flat_prior(vcve_prior_only_fit):
+    """
+    Given a fitvcve orbit with no data,
+    When its prior terms, mixed over both roots, are integrated over the
+      (V_c/V_e, omega) plane,
+    Then the implied prior is flat in e and uniform in omega -- the same
+      fitvcve prior the data-bearing model carries (the test above it).
+    """
+    system, model = vcve_prior_only_fit
+    f = _compiled_vcve_prior(system, model)
+    omega, ecc, mass, region = _implied_prior_over_the_plane(f, vmax=141.5)
+    total = mass.sum()
+    assert mass[ecc <= 0.0].sum() / total < 0.005
+    assert mass[region == 0].sum() / total > 0.97
+
+    e_hist, _ = np.histogram(ecc, np.linspace(0.0, 0.5, 11), weights=mass)
+    e_hist /= e_hist.mean()
+    assert np.abs(e_hist - 1.0).max() < 0.02, np.round(e_hist, 4)
+    w_hist, _ = np.histogram(
+        omega, np.linspace(-np.pi, np.pi, 37), weights=mass
+    )
+    w_hist /= w_hist.mean()
+    assert np.abs(w_hist - 1.0).max() < 0.02, np.round(w_hist, 4)
+
+
+def test_a_data_bearing_vcve_orbit_substitutes_every_declared_node(
+    vcve_transit_fit,
+):
+    """
+    Given a fitvcve orbit WITH data,
+    When the mixture's term sum is inspected,
+    Then every node the branch replaces is read by it -- so the 2.8.15 filter
+      (drop only unread nodes) passes the declared replacements unchanged,
+      and the data-bearing mixture is the graph it was before.
+    """
+    from pytensor.graph.traversal import ancestors
+
+    system, model, _start = vcve_transit_fit
+    terms = [
+        pm.logp(rv, model.rvs_to_values[rv]).sum() for rv in model.observed_RVs
+    ]
+    terms += [
+        pt.sum(p) for p in model.potentials if p.name != "branch_mixture"
+    ]
+    present = set(ancestors([pt.add(*terms)]))
+    (branch,) = system._branch_alternatives
+    assert system.orbit.ecc.value in branch["replacements"]
+    assert all(key in present for key in branch["replacements"])
 
 
 @pytest.mark.parametrize(
